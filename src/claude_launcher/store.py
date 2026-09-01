@@ -208,6 +208,12 @@ DAEMON_DEFAULTS = {
     "port": 8378,
     "idle_threshold": 2.0,
     "scrollback_lines": 5000,
+    # Active terminal viewers get normal process priority and unpaced screen
+    # rendering. Sessions without a focused viewer use below-normal Windows
+    # process priority and render one screen slice per this interval.
+    # These settings are read when the daemon starts.
+    "focused_session_scheduling": True,
+    "background_render_delay": 0.05,
     "restore": True,
     # How long an agent-requested daemon restart may wait on the web UI's
     # approval before it counts as approved and goes out (see

@@ -25,7 +25,7 @@ from datetime import datetime, timezone
 from typing import Callable, Dict, List, Optional, Set, Tuple
 
 from .. import harnesses as harness_registry
-from . import compacting, keys as keys_mod
+from . import compacting, keys as keys_mod, process_priority
 from . import paths, pty_backend
 from .harness import CLAUDE_HARNESS, SessionDef
 from .idle import IdleTracker
@@ -331,6 +331,8 @@ class Session:
         last_visited_at: Optional[str] = None,
         last_input_at: Optional[str] = None,
         delivery_hold: bool = False,
+        focused_session_scheduling: bool = True,
+        background_render_delay: float = 0.05,
     ) -> None:
         self.sdef = sdef
         self.argv: List[str] = []
@@ -338,7 +340,14 @@ class Session:
         self.pid: Optional[int] = None
         self.idle_threshold = idle_threshold
         self.screen = ScreenState(sdef.cols, sdef.rows, history=scrollback)
-        self._feeder = ScreenFeeder(self.screen)
+        self._focused_subscribers: Set[object] = set()
+        self._focused_session_scheduling = focused_session_scheduling
+        self._cpu_background: Optional[bool] = None
+        self._feeder = ScreenFeeder(
+            self.screen,
+            foreground=self.is_focused,
+            background_delay=background_render_delay,
+        )
         self.tracker = IdleTracker()
         #: Compaction-notice scanner (see :mod:`compacting`): fed every pty
         #: chunk in :meth:`_on_output`, read by the dashboard row as the
@@ -458,6 +467,7 @@ class Session:
             argv, env=env, cwd=cwd, cols=self.sdef.cols, rows=self.sdef.rows
         )
         self.pid = self.pty.pid
+        self._apply_cpu_priority()
 
         # A dedicated *daemon* thread, NOT the loop's default executor: at
         # daemon exit asyncio joins executor threads, and a reader stuck in a
@@ -1330,10 +1340,49 @@ class Session:
     def subscribe(self) -> asyncio.Queue:
         q: asyncio.Queue = asyncio.Queue(maxsize=1024)
         self._subscribers.add(q)
+        # Non-web clients have no focus control frame. Treat a freshly
+        # attached terminal as focused until its client says otherwise.
+        self.set_viewer_focused(q, True)
         return q
 
     def unsubscribe(self, q: asyncio.Queue) -> None:
         self._subscribers.discard(q)
+        self.set_viewer_focused(q, False)
+
+    def is_focused(self) -> bool:
+        """Whether at least one terminal viewer is actively using this session."""
+        return bool(self._focused_subscribers)
+
+    def set_viewer_focused(self, viewer: object, focused: bool) -> None:
+        """Apply one viewer's focus state to rendering and child scheduling."""
+        before = self.is_focused()
+        if focused:
+            self._focused_subscribers.add(viewer)
+        else:
+            self._focused_subscribers.discard(viewer)
+        if self.is_focused() != before:
+            self._feeder.wake()
+            self._apply_cpu_priority()
+
+    def _apply_cpu_priority(self) -> None:
+        """Best-effort priority transition for the direct PTY child.
+
+        Windows children inherit their creator's priority class. The daemon
+        remains at normal priority and can therefore continue serving every
+        session while background harnesses yield CPU time.
+        """
+        if not self._focused_session_scheduling or self.pid is None:
+            return
+        background = not self.is_focused()
+        if background == self._cpu_background:
+            return
+        changed = (
+            process_priority.set_background(self.pid)
+            if background
+            else process_priority.set_foreground(self.pid)
+        )
+        if changed:
+            self._cpu_background = background
 
     def note_visit(self) -> None:
         """Record that a person is (or just was) looking at this session.
@@ -1396,6 +1445,7 @@ class Session:
                 dead.append(q)  # slow consumer: drop it, it can reattach
         for q in dead:
             self._subscribers.discard(q)
+            self.set_viewer_focused(q, False)
 
     # ------------------------------------------------------------------ #
     # views
@@ -1600,6 +1650,9 @@ class DeadSession:
         return asyncio.Queue(maxsize=1)  # nothing will ever be published to it
 
     def unsubscribe(self, q: asyncio.Queue) -> None:
+        return None
+
+    def set_viewer_focused(self, viewer: object, focused: bool) -> None:
         return None
 
     def note_visit(self) -> None:

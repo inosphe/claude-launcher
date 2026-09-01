@@ -81,6 +81,8 @@ async def _serve(host: str, port: int, cfg: dict, bound: Optional[dict] = None) 
         idle_threshold=float(cfg["idle_threshold"]),
         scrollback=int(cfg["scrollback_lines"]),
         restore_default=bool(cfg["restore"]),
+        focused_session_scheduling=bool(cfg["focused_session_scheduling"]),
+        background_render_delay=float(cfg["background_render_delay"]),
     )
     failed = manager.restore_all()
     for name in failed:
