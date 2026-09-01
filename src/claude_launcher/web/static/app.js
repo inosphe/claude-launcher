@@ -5235,8 +5235,8 @@ function refreshTermInput() {
 }
 
 /* Prompt presets are daemon-local operator shortcuts. They deliberately
-   insert at the caret instead of submitting: the footer remains the one place
-   where a person reviews and sends text to the selected session. */
+   insert at the caret and submit through the footer's normal send path, so a
+   preset delivers the text and its Enter in the same request. */
 function renderTermPresetButtons() {
   const box = $("term-preset-buttons");
   if (!box) return;
@@ -5250,14 +5250,14 @@ function renderTermPresetButtons() {
     const button = el("button", "term-btn term-preset-button", row.name);
     button.type = "button";
     button.title = row.text;
-    button.addEventListener("click", () => insertPromptPreset(row.text));
+    button.addEventListener("click", () => sendPromptPreset(row.text));
     box.appendChild(button);
   }
 }
 
 function insertPromptPreset(text) {
   const field = $("term-input-field");
-  if (!field || field.disabled) return;
+  if (!field || field.disabled) return false;
   const start = Number.isInteger(field.selectionStart) ? field.selectionStart : field.value.length;
   const end = Number.isInteger(field.selectionEnd) ? field.selectionEnd : start;
   const before = field.value.slice(0, start);
@@ -5266,6 +5266,14 @@ function insertPromptPreset(text) {
   const cursor = start + text.length;
   if (field.setSelectionRange) field.setSelectionRange(cursor, cursor);
   field.focus();
+  return true;
+}
+
+function sendPromptPreset(text) {
+  if (!insertPromptPreset(text)) return false;
+  return sendKeyLine(
+    $("term-input-field"), $("term-input-send"), $("term-input-note")
+  );
 }
 
 function onTermInputSubmit(ev) {
