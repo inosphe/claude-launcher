@@ -43,8 +43,9 @@ nothing else stores these settings, so there is no separate "export" step.
 
 from __future__ import annotations
 
+import copy
 from pathlib import Path
-from typing import Callable, Dict, List, Optional
+from typing import Callable, Dict, List, Optional, Tuple
 import uuid
 
 import yaml
@@ -52,6 +53,16 @@ import yaml
 from . import atomic, config
 
 VERSION = 1
+
+#: libyaml's parser when the wheel ships it — an order of magnitude faster than
+#: the pure-Python scanner on this file — and the pure one otherwise. Both are
+#: the *safe* loader: no tags, no object construction.
+_LOADER = getattr(yaml, "CSafeLoader", yaml.SafeLoader)
+
+#: The last document parsed, beside the exact text it was parsed from. See
+#: :func:`load` — the text is compared, not the mtime, so no filesystem's
+#: timestamp granularity can serve a stale document.
+_parsed: Optional[Tuple[str, dict]] = None
 
 
 class StoreError(Exception):
@@ -66,26 +77,41 @@ def path() -> Path:
 def load() -> dict:
     """Return the live config document (an empty default if the file is absent).
 
-    Reads fresh each call — the file is small and the CLI is short-lived, so this
-    keeps every command seeing the current state without a cache to invalidate.
+    Reads the file fresh on every call, so every command and every daemon
+    poll sees the current state. What it does not do twice is *parse* it:
+    the text is compared with the last one parsed and the document is copied
+    out of that parse when they match. The parse was the cost -- 27ms of
+    pure-Python YAML for this file, and the daemon's profile/lineage code
+    calls this eighty-odd times to answer one spawn-capabilities request (a
+    second of the session page's five-second poll, measured). The copy keeps
+    callers free to mutate what they are handed (``update`` does).
 
     A *missing* file is fine (a fresh install). A file that is present but
     unparseable raises :class:`StoreError` rather than being silently treated as
     empty — this is now the only state file, so a transient parse error must not
     let the next write clobber it.
     """
+    global _parsed
     p = path()
     if not p.is_file():
         return {"version": VERSION}
     try:
-        data = yaml.safe_load(p.read_text(encoding="utf-8"))
-    except (OSError, yaml.YAMLError) as exc:
+        text = p.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise StoreError(f"cannot read config file {p}: {exc}") from exc
+    hit = _parsed
+    if hit is not None and hit[0] == text:
+        return copy.deepcopy(hit[1])
+    try:
+        data = yaml.load(text, Loader=_LOADER)
+    except yaml.YAMLError as exc:
         raise StoreError(f"cannot read config file {p}: {exc}") from exc
     if data is None:
         data = {}
     if not isinstance(data, dict):
         raise StoreError(f"config file {p} must be a mapping at the top level")
     data.setdefault("version", VERSION)
+    _parsed = (text, copy.deepcopy(data))
     return data
 
 
