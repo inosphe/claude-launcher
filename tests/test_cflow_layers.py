@@ -133,17 +133,18 @@ def test_the_packaged_workflows_are_valid_and_current():
         assert not wf.deprecations, f"{name} teaches a deprecated form"
 
 
-def test_the_worker_workflow_keeps_its_isolation_rules():
-    """``improv-worker``'s intake must carry the two isolation rules.
+def test_the_worker_workflow_keeps_its_branch_setup_isolation_rules():
+    """``improv-worker`` creates a fresh branch after task overview.
 
-    A worker spawned without a worktree lands in its parent's checkout, and
-    the intake step is the one place it is told to notice that and move: a
-    new feature gets a new branch, and a shared checkout gets a new worktree,
-    with the determination procedure spelled out. A later rewording that
-    drops these anchors would silently un-teach the rule, so pin them here.
+    ``intake`` establishes the goal and supplies the branch summary. Every
+    path that can start implementation then passes through ``branch-setup``;
+    it names the fresh branch and isolates a shared checkout in a worktree.
     """
     bundled = dict(state_mod.bundled_workflows())
-    intake = model.load(bundled["improv-worker"]).steps["intake"]
+    worker = model.load(bundled["improv-worker"])
+    intake = worker.steps["intake"]
+    branch_setup = worker.steps["branch-setup"]
+    assert "브랜치 요지" in intake.instructions
     for anchor in (
         "새 피처 브랜치",                      # new feature -> new branch
         "새 워크트리",                         # shared checkout -> new worktree
@@ -151,8 +152,12 @@ def test_the_worker_workflow_keeps_its_isolation_rules():
         "--git-common-dir",                    # fallback when parent cwd is unknown
         "$CLAUNCH_SESSION",                    # how a worker names itself
     ):
-        assert anchor in intake.instructions, f"intake lost its {anchor!r} rule"
-    assert "작업 위치" in intake.done_when
+        assert anchor in branch_setup.instructions, f"branch-setup lost its {anchor!r} rule"
+    assert branch_setup.next == "work"
+    assert worker.steps["issue-check"].select.options["claimed"].next == "branch-setup"
+    assert worker.steps["issue-check"].select.options["no-issue-by-request"].next == "branch-setup"
+    assert worker.steps["issue-decision"].select.options["none"].next == "branch-setup"
+    assert worker.steps["issue-claim"].next == "branch-setup"
 
 
 def test_the_improv_workflows_carry_no_repo_specific_verify():

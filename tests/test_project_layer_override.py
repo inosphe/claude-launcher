@@ -516,20 +516,20 @@ def test_the_prose_forbids_the_suite_too_so_the_next_editor_reads_it():
 # The naming rule an agent reads: a worker prefixes its own worktree/branch
 # names with its session. The wizard path already does (``default_name``
 # falls back to $CLAUNCH_SESSION), so the convention is prompting — it has to
-# live where an agent learns it when it names a checkout itself: the intake
+# live where an agent learns it when it names a checkout itself: branch-setup
 # of the worker workflow. A bare name like ``worktree-session-click-cache``
 # minted inside a fleet of sessions is the accident these pin.
 # --------------------------------------------------------------------------- #
-def test_worker_override_intake_insists_on_session_prefixed_names():
+def test_worker_override_branch_setup_insists_on_session_prefixed_names():
     """The override this repo runs tells a worker to prefix its own names."""
-    text = model.load(OVERRIDES / "improv-worker.yaml").steps["intake"].instructions
+    text = model.load(OVERRIDES / "improv-worker.yaml").steps["branch-setup"].instructions
     assert "$CLAUNCH_SESSION" in text    # the prefix source is named
     assert "<세션>-<요지>" in text         # and its shape is spelled out
 
 
-def test_bundled_worker_workflow_intake_insists_on_session_prefixed_names():
+def test_bundled_worker_workflow_branch_setup_insists_on_session_prefixed_names():
     """A repo with no project override runs the bundled copy — same rule."""
     bundled = dict(state_mod.bundled_workflows())["improv-worker"]
-    text = model.load(bundled).steps["intake"].instructions
+    text = model.load(bundled).steps["branch-setup"].instructions
     assert "$CLAUNCH_SESSION" in text
     assert "<세션>-<요지>" in text
