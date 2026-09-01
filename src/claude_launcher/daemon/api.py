@@ -63,8 +63,47 @@ COOKIE_NAME = "claunch_session"
 _STATIC_DIR = Path(__file__).resolve().parent.parent / "web" / "static"
 
 
+#: Bodies at least this long are gzip-compressed when the client accepts it.
+#: Below it the deflate costs more than the bytes it saves on a local socket.
+JSON_GZIP_MIN = 16 * 1024
+
+
+def _dumps(payload) -> str:
+    """``json.dumps`` for the wire: UTF-8 text rather than ``\\uXXXX`` escapes.
+
+    The default escapes every non-ASCII character as six bytes, and a session
+    list whose tasks are written in Korean was a fifth larger for it -- on a
+    two-second poll. A payload that cannot be encoded (a lone surrogate off a
+    filename) is sent escaped instead of costing the caller the response.
+    """
+    text = json.dumps(payload, ensure_ascii=False)
+    try:
+        text.encode("utf-8")
+    except UnicodeEncodeError:
+        text = json.dumps(payload)
+    return text
+
+
+def json_response(payload, *, status: int = 200, headers=None) -> web.Response:
+    """The JSON reply every handler sends: compact on the wire, cheap on the loop.
+
+    Compression only when the body is worth it and the client asked for it
+    (``enable_compression`` without ``force`` reads Accept-Encoding when the
+    response starts). aiohttp deflates anything past its sync chunk size in
+    its zlib executor, so a megabyte of session list is squeezed off the loop
+    that pumps every terminal, not on it.
+    """
+    text = _dumps(payload)
+    resp = web.Response(
+        text=text, status=status, headers=headers, content_type="application/json",
+    )
+    if len(text) >= JSON_GZIP_MIN:
+        resp.enable_compression()
+    return resp
+
+
 def json_error(status: int, message: str) -> web.Response:
-    return web.json_response({"error": message}, status=status)
+    return json_response({"error": message}, status=status)
 
 
 def _token_eq(supplied: str, expected: str) -> bool:
@@ -108,7 +147,7 @@ async def error_middleware(request: web.Request, handler):
         # reading prose, and the entries let a dashboard mark the rows.
         # Ahead of the MeshError arm below, which would otherwise swallow it
         # (MeshBusy is a MeshError) and report a retryable condition as 400.
-        resp = web.json_response(
+        resp = json_response(
             {
                 "error": str(exc),
                 "deferred": exc.entries,
@@ -524,7 +563,7 @@ async def h_health(request: web.Request) -> web.Response:
     # a browser whose cookie died in the restart still needs to be able to tell
     # "not back yet" from "back, and I must log in again". started_at rides
     # along so the restart notice can say when the new daemon came up.
-    return web.json_response(
+    return json_response(
         {
             "status": "ok",
             "version": __version__,
@@ -541,7 +580,7 @@ async def h_auth_session(request: web.Request) -> web.Response:
         return json_error(401, "bad token")
     session_id = secrets.token_urlsafe(32)
     request.app["cookie_sessions"].add(session_id)
-    resp = web.json_response({"ok": True})
+    resp = json_response({"ok": True})
     resp.set_cookie(
         COOKIE_NAME, session_id, httponly=True, samesite="Strict", path="/"
     )
@@ -555,7 +594,7 @@ async def h_window_status(request: web.Request) -> web.Response:
     comes from the arbiter, so it has no blind spot and no staleness, and it
     reaches sessions that no mesh message would (board claunch-fnhu).
     """
-    return web.json_response(request.app["window"].status())
+    return json_response(request.app["window"].status())
 
 
 async def h_window_acquire(request: web.Request) -> web.Response:
@@ -570,8 +609,8 @@ async def h_window_acquire(request: web.Request) -> web.Response:
         wait=float(body.get("wait") or 0),
     )
     if result.get("error"):
-        return web.json_response(result, status=400)
-    return web.json_response(result)
+        return json_response(result, status=400)
+    return json_response(result)
 
 
 async def h_window_release(request: web.Request) -> web.Response:
@@ -583,11 +622,11 @@ async def h_window_release(request: web.Request) -> web.Response:
     grant_id = body.get("grant_id")
     if grant_id:
         ok = window.release(str(grant_id))
-        return web.json_response({"released": 1 if ok else 0})
+        return json_response({"released": 1 if ok else 0})
     session = body.get("session")
     if session:
-        return web.json_response({"released": window.release_session(str(session))})
-    return web.json_response(
+        return json_response({"released": window.release_session(str(session))})
+    return json_response(
         {"released": 0, "error": "release wants a grant_id or a session"},
         status=400,
     )
@@ -599,11 +638,11 @@ async def h_window_cancel(request: web.Request) -> web.Response:
     window = request.app["window"]
     grant_id = body.get("grant_id")
     if grant_id:
-        return web.json_response({"cancelled": 1 if window.cancel(str(grant_id)) else 0})
+        return json_response({"cancelled": 1 if window.cancel(str(grant_id)) else 0})
     session = body.get("session")
     if session:
-        return web.json_response({"cancelled": window.cancel_session(str(session))})
-    return web.json_response(
+        return json_response({"cancelled": window.cancel_session(str(session))})
+    return json_response(
         {"cancelled": 0, "error": "cancel wants a grant_id or a session"},
         status=400,
     )
@@ -612,7 +651,7 @@ async def h_window_cancel(request: web.Request) -> web.Response:
 async def h_daemon_info(request: web.Request) -> web.Response:
     manager: SessionManager = request.app["manager"]
     sessions = manager.list()
-    return web.json_response(
+    return json_response(
         {
             "version": __version__,
             "boot_id": request.app["boot_id"],
@@ -629,7 +668,7 @@ async def h_daemon_info(request: web.Request) -> web.Response:
 async def h_daemon_shutdown(request: web.Request) -> web.Response:
     loop = asyncio.get_running_loop()
     loop.call_later(0.1, request.app["shutdown_event"].set)
-    return web.json_response({"ok": True})
+    return json_response({"ok": True})
 
 
 async def h_daemon_restart(request: web.Request) -> web.Response:
@@ -651,14 +690,14 @@ async def h_daemon_restart(request: web.Request) -> web.Response:
     restart_notice.record_request(via="api")
     loop = asyncio.get_running_loop()
     loop.call_later(0.1, request.app["shutdown_event"].set)
-    return web.json_response({"ok": True, "restarting": True})
+    return json_response({"ok": True, "restarting": True})
 
 
 async def h_restart_request_get(request: web.Request) -> web.Response:
     """The gate's current state: the pending request, the last settled one,
     or nothing. Polled by the web UI's notification card and by the asking
     CLI, whose two readers are exactly the two parties of the gate."""
-    return web.json_response({"request": request.app["restart_gate"].get()})
+    return json_response({"request": request.app["restart_gate"].get()})
 
 
 async def h_restart_request_submit(request: web.Request) -> web.Response:
@@ -675,7 +714,7 @@ async def h_restart_request_submit(request: web.Request) -> web.Response:
     if not session:
         return json_error(400, "session is required")
     record = request.app["restart_gate"].submit(session=session)
-    return web.json_response({"ok": True, "request": record})
+    return json_response({"ok": True, "request": record})
 
 
 async def h_restart_request_approve(request: web.Request) -> web.Response:
@@ -686,7 +725,7 @@ async def h_restart_request_approve(request: web.Request) -> web.Response:
     record = request.app["restart_gate"].approve(decided_by="web")
     if record is None:
         return json_error(409, "no pending restart request")
-    return web.json_response({"ok": True, "restarting": True, "request": record})
+    return json_response({"ok": True, "restarting": True, "request": record})
 
 
 async def h_restart_request_reject(request: web.Request) -> web.Response:
@@ -696,7 +735,7 @@ async def h_restart_request_reject(request: web.Request) -> web.Response:
     record = request.app["restart_gate"].reject(decided_by="web")
     if record is None:
         return json_error(409, "no pending restart request")
-    return web.json_response({"ok": True, "rejected": True, "request": record})
+    return json_response({"ok": True, "rejected": True, "request": record})
 
 
 async def h_profiles(request: web.Request) -> web.Response:
@@ -820,7 +859,7 @@ async def h_profiles(request: web.Request) -> web.Response:
                     "explicit": True,
                 }
             )
-    return web.json_response(
+    return json_response(
         {
             # Bare names remain for credential/profile-management clients.
             "profiles": [p.name for p in profiles],
@@ -851,7 +890,7 @@ async def h_usage(request: web.Request) -> web.Response:
         credentials.CredentialsError,
     ) as exc:
         return json_error(400, str(exc))
-    return web.json_response(
+    return json_response(
         {
             "profile": selected.selector,
             "source": report.source,
@@ -902,7 +941,7 @@ async def h_borrow_options(request: web.Request) -> web.Response:
                 else f"{lender.name} — {report['message']}"
             )
             options.append(report)
-    return web.json_response(
+    return json_response(
         {
             "profile": runtime.selector,
             "harness": harness_name,
@@ -920,7 +959,7 @@ async def h_harnesses(request: web.Request) -> web.Response:
     claunch does not know about. Session forms do not use this as a selector;
     they project the harness already configured on their selected profile.
     """
-    return web.json_response(
+    return json_response(
         {
             "harnesses": [
                 harness_registry.registry()[name].to_dict()
@@ -932,7 +971,7 @@ async def h_harnesses(request: web.Request) -> web.Response:
 
 async def h_workspaces(request: web.Request) -> web.Response:
     """The directories a session may be spawned in, for the pickers."""
-    return web.json_response(
+    return json_response(
         {"workspaces": [w.to_dict() for w in workspaces.list_all()]}
     )
 
@@ -949,7 +988,11 @@ async def h_git(request: web.Request) -> web.Response:
     branches from one reading and worktrees from another.
     """
     cwd = cflow_state.resolve_cwd(request.query.get("cwd") or None)
-    return web.json_response({"cwd": cwd, **worktree_mod.info(cwd)})
+    # Three git processes. Off the loop, because read inline they held every
+    # terminal's output for the half-second a spawn form took to open (measured
+    # at 450-800ms of loop stall per call on a busy checkout).
+    info = await asyncio.to_thread(worktree_mod.info, cwd)
+    return json_response({"cwd": cwd, **info})
 
 
 async def h_workspace_add(request: web.Request) -> web.Response:
@@ -974,7 +1017,7 @@ async def h_workspace_add(request: web.Request) -> web.Response:
         )
     except workspaces.WorkspaceError as exc:
         return json_error(400, str(exc))
-    return web.json_response({"workspace": workspace.to_dict()}, status=201)
+    return json_response({"workspace": workspace.to_dict()}, status=201)
 
 
 async def h_workspace_remove(request: web.Request) -> web.Response:
@@ -988,7 +1031,7 @@ async def h_workspace_remove(request: web.Request) -> web.Response:
         removed = workspaces.remove(request.match_info["name"])
     except workspaces.WorkspaceError as exc:
         return json_error(404, str(exc))
-    return web.json_response({"workspace": removed.to_dict()})
+    return json_response({"workspace": removed.to_dict()})
 
 
 def _faq_body(body: dict) -> dict:
@@ -1008,7 +1051,7 @@ def _faq_body(body: dict) -> dict:
 
 async def h_briefing_faq(request: web.Request) -> web.Response:
     try:
-        return web.json_response({"faq": briefing.faq_entries()})
+        return json_response({"faq": briefing.faq_entries()})
     except briefing.FaqError as exc:
         return json_error(500, str(exc))
 
@@ -1022,7 +1065,7 @@ async def h_briefing_faq_add(request: web.Request) -> web.Response:
         rows = briefing.faq_entries()
         rows.append(row)
         saved = briefing.set_faq_entries(rows)
-        return web.json_response({"faq": saved, "entry": saved[-1]}, status=201)
+        return json_response({"faq": saved, "entry": saved[-1]}, status=201)
     except briefing.FaqError as exc:
         return json_error(500, str(exc))
 
@@ -1040,7 +1083,7 @@ async def h_briefing_faq_update(request: web.Request) -> web.Response:
                 incoming["id"] = faq_id
                 rows[index] = incoming
                 saved = briefing.set_faq_entries(rows)
-                return web.json_response({"faq": saved, "entry": incoming})
+                return json_response({"faq": saved, "entry": incoming})
         return json_error(404, f"no FAQ named {faq_id!r}")
     except briefing.FaqError as exc:
         return json_error(500, str(exc))
@@ -1054,7 +1097,7 @@ async def h_briefing_faq_remove(request: web.Request) -> web.Response:
         if len(kept) == len(rows):
             return json_error(404, f"no FAQ named {faq_id!r}")
         saved = briefing.set_faq_entries(kept)
-        return web.json_response({"faq": saved, "removed": faq_id})
+        return json_response({"faq": saved, "removed": faq_id})
     except briefing.FaqError as exc:
         return json_error(500, str(exc))
 
@@ -1076,7 +1119,7 @@ def _prompt_preset_body(body: dict) -> dict:
 
 async def h_prompt_presets(request: web.Request) -> web.Response:
     try:
-        return web.json_response({"presets": prompt_presets.entries()})
+        return json_response({"presets": prompt_presets.entries()})
     except prompt_presets.PromptPresetError as exc:
         return json_error(500, str(exc))
 
@@ -1090,7 +1133,7 @@ async def h_prompt_presets_add(request: web.Request) -> web.Response:
         rows = prompt_presets.entries()
         rows.append(row)
         saved = prompt_presets.set_entries(rows)
-        return web.json_response({"presets": saved, "preset": saved[-1]}, status=201)
+        return json_response({"presets": saved, "preset": saved[-1]}, status=201)
     except prompt_presets.PromptPresetError as exc:
         return json_error(500, str(exc))
 
@@ -1108,7 +1151,7 @@ async def h_prompt_presets_update(request: web.Request) -> web.Response:
                 incoming["id"] = preset_id
                 rows[index] = incoming
                 saved = prompt_presets.set_entries(rows)
-                return web.json_response({"presets": saved, "preset": incoming})
+                return json_response({"presets": saved, "preset": incoming})
         return json_error(404, f"no prompt preset named {preset_id!r}")
     except prompt_presets.PromptPresetError as exc:
         return json_error(500, str(exc))
@@ -1122,7 +1165,7 @@ async def h_prompt_presets_remove(request: web.Request) -> web.Response:
         if len(kept) == len(rows):
             return json_error(404, f"no prompt preset named {preset_id!r}")
         saved = prompt_presets.set_entries(kept)
-        return web.json_response({"presets": saved, "removed": preset_id})
+        return json_response({"presets": saved, "removed": preset_id})
     except prompt_presets.PromptPresetError as exc:
         return json_error(500, str(exc))
 
@@ -1148,7 +1191,7 @@ def _status_check_body(body: dict) -> dict:
 
 async def h_status_checks(request: web.Request) -> web.Response:
     try:
-        return web.json_response({"checks": status_checks.entries()})
+        return json_response({"checks": status_checks.entries()})
     except status_checks.StatusCheckError as exc:
         return json_error(500, str(exc))
 
@@ -1159,7 +1202,7 @@ async def h_status_checks_add(request: web.Request) -> web.Response:
         rows = status_checks.entries()
         rows.append(row)
         saved = status_checks.set_entries(rows)
-        return web.json_response({"checks": saved, "check": saved[-1]}, status=201)
+        return json_response({"checks": saved, "check": saved[-1]}, status=201)
     except ValueError as exc:
         return json_error(400, str(exc))
     except status_checks.StatusCheckError as exc:
@@ -1176,7 +1219,7 @@ async def h_status_checks_update(request: web.Request) -> web.Response:
                 incoming["id"] = check_id
                 rows[index] = incoming
                 saved = status_checks.set_entries(rows)
-                return web.json_response({"checks": saved, "check": incoming})
+                return json_response({"checks": saved, "check": incoming})
         return json_error(404, f"no status check named {check_id!r}")
     except ValueError as exc:
         return json_error(400, str(exc))
@@ -1191,7 +1234,7 @@ async def h_status_checks_remove(request: web.Request) -> web.Response:
         kept = [row for row in rows if row.get("id") != check_id]
         if len(kept) == len(rows):
             return json_error(404, f"no status check named {check_id!r}")
-        return web.json_response({"checks": status_checks.set_entries(kept), "removed": check_id})
+        return json_response({"checks": status_checks.set_entries(kept), "removed": check_id})
     except status_checks.StatusCheckError as exc:
         return json_error(500, str(exc))
 
@@ -1204,7 +1247,7 @@ async def h_roles(request: web.Request) -> web.Response:
     common opening briefing before creation.
     """
     roleset = mesh_roles.resolve()
-    return web.json_response(
+    return json_response(
         {
             "roles": [
                 {
@@ -1581,7 +1624,7 @@ async def h_cflow_runs(request: web.Request) -> web.Response:
         return runs
 
     runs = await asyncio.to_thread(build_entries)
-    return web.json_response({"runs": runs})
+    return json_response({"runs": runs})
 
 
 def _cflow_entry(
@@ -1801,7 +1844,7 @@ async def h_cflow_run_detail(request: web.Request) -> web.Response:
     sessions = _scope_sessions(manager, cwd, scope)
     payload = cflow_engine.status(cwd, scope=scope)
     if payload.get("status") == "idle":
-        return web.json_response(
+        return json_response(
             {
                 "cwd": cwd,
                 "scope": scope,
@@ -1833,7 +1876,7 @@ async def h_cflow_run_detail(request: web.Request) -> web.Response:
         for e in journal
         if e.get("event") == "step_report"
     ]
-    return web.json_response(
+    return json_response(
         {
             "cwd": cwd,
             "scope": scope,
@@ -1994,7 +2037,7 @@ async def h_cflow_workflows(request: web.Request) -> web.Response:
     # "(daemon cwd)" asks about the workflows it would really see.
     raw = request.query.get("cwd")
     cwd = cflow_state.resolve_cwd(raw)
-    return web.json_response({"workflows": _startable_workflows(cwd)})
+    return json_response({"workflows": _startable_workflows(cwd)})
 
 
 async def h_cflow_request(request: web.Request) -> web.Response:
@@ -2020,7 +2063,7 @@ async def h_cflow_request(request: web.Request) -> web.Response:
     payload["nudge_scheduled_sessions"] = _schedule_cflow_nudges(
         request.app, cwd, scope, cflow_engine.nudge_for_request(name), force=True
     )
-    return web.json_response(payload)
+    return json_response(payload)
 
 
 async def h_cflow_request_cancel(request: web.Request) -> web.Response:
@@ -2030,7 +2073,7 @@ async def h_cflow_request_cancel(request: web.Request) -> web.Response:
         return err
     cwd, scope, _ = resolved
     payload = cflow_engine.cancel_request(by="web", cwd=cwd, scope=scope)
-    return web.json_response(payload)
+    return json_response(payload)
 
 
 async def h_cflow_start(request: web.Request) -> web.Response:
@@ -2056,7 +2099,7 @@ async def h_cflow_start(request: web.Request) -> web.Response:
     payload["nudge_scheduled_sessions"] = _schedule_cflow_nudges(
         request.app, cwd, scope, cflow_engine.NUDGE_STARTED, force=True
     )
-    return web.json_response(payload)
+    return json_response(payload)
 
 
 async def h_cflow_skip(request: web.Request) -> web.Response:
@@ -2103,7 +2146,7 @@ async def h_cflow_skip(request: web.Request) -> web.Response:
     payload["nudge_scheduled_sessions"] = _schedule_cflow_nudges(
         request.app, cwd, scope, cflow_engine.nudge_for_request(name), force=True
     )
-    return web.json_response(payload)
+    return json_response(payload)
 
 
 async def h_cflow_archive(request: web.Request) -> web.Response:
@@ -2117,7 +2160,7 @@ async def h_cflow_archive(request: web.Request) -> web.Response:
     payload["nudge_scheduled_sessions"] = _schedule_cflow_nudges(
         request.app, cwd, scope, cflow_engine.NUDGE_ARCHIVED, force=True
     )
-    return web.json_response(payload)
+    return json_response(payload)
 
 
 async def h_cflow_approve(request: web.Request) -> web.Response:
@@ -2134,7 +2177,7 @@ async def h_cflow_approve(request: web.Request) -> web.Response:
         payload["nudged_sessions"] = await _nudge_sessions(
             request.app["manager"], cwd, scope, cflow_engine.NUDGE_APPROVED
         )
-    return web.json_response(payload)
+    return json_response(payload)
 
 
 async def h_cflow_select(request: web.Request) -> web.Response:
@@ -2152,7 +2195,7 @@ async def h_cflow_select(request: web.Request) -> web.Response:
         payload["nudged_sessions"] = await _nudge_sessions(
             request.app["manager"], cwd, scope, cflow_engine.NUDGE_SELECTED
         )
-    return web.json_response(payload)
+    return json_response(payload)
 
 
 async def h_cflow_nudge(request: web.Request) -> web.Response:
@@ -2165,7 +2208,7 @@ async def h_cflow_nudge(request: web.Request) -> web.Response:
     nudged = await _nudge_sessions(
         request.app["manager"], cwd, scope, cflow_engine.NUDGE_CONTINUE
     )
-    return web.json_response({"ok": True, "nudged_sessions": nudged})
+    return json_response({"ok": True, "nudged_sessions": nudged})
 
 
 async def h_cflow_goto(request: web.Request) -> web.Response:
@@ -2183,7 +2226,7 @@ async def h_cflow_goto(request: web.Request) -> web.Response:
     payload["nudged_sessions"] = await _nudge_sessions(
         request.app["manager"], cwd, scope, cflow_engine.nudge_for_state(step)
     )
-    return web.json_response(payload)
+    return json_response(payload)
 
 
 async def h_cflow_goto_resolve(request: web.Request) -> web.Response:
@@ -2215,7 +2258,7 @@ async def h_cflow_goto_resolve(request: web.Request) -> web.Response:
         if decision == "deny"
         else cflow_engine.nudge_for_state(str(asked)),
     )
-    return web.json_response(payload)
+    return json_response(payload)
 
 
 async def h_goto_request_submit(request: web.Request) -> web.Response:
@@ -2238,13 +2281,13 @@ async def h_goto_request_submit(request: web.Request) -> web.Response:
         step=str(body.get("step") or ""),
         reason=str(body.get("reason") or ""),
     )
-    return web.json_response({"ok": True, "request": record})
+    return json_response({"ok": True, "request": record})
 
 
 async def h_goto_requests_list(request: web.Request) -> web.Response:
     """Every live request, then the recently settled ones — the web UI's
     notification cards and a leader checking on its own ask read here."""
-    return web.json_response({"requests": request.app["goto_gate"].list()})
+    return json_response({"requests": request.app["goto_gate"].list()})
 
 
 async def h_goto_request_approve(request: web.Request) -> web.Response:
@@ -2256,7 +2299,7 @@ async def h_goto_request_approve(request: web.Request) -> web.Response:
     )
     if record is None:
         return json_error(409, "no pending goto request with that id")
-    return web.json_response({"ok": True, "request": record})
+    return json_response({"ok": True, "request": record})
 
 
 async def h_goto_request_deny(request: web.Request) -> web.Response:
@@ -2271,7 +2314,7 @@ async def h_goto_request_deny(request: web.Request) -> web.Response:
     )
     if record is None:
         return json_error(409, "no pending goto request with that id")
-    return web.json_response({"ok": True, "denied": True, "request": record})
+    return json_response({"ok": True, "denied": True, "request": record})
 
 
 async def h_goto_request_withdraw(request: web.Request) -> web.Response:
@@ -2285,7 +2328,7 @@ async def h_goto_request_withdraw(request: web.Request) -> web.Response:
     record = request.app["goto_gate"].withdraw(request.match_info["rid"], actor=actor)
     if record is None:
         return json_error(409, "no pending goto request with that id")
-    return web.json_response({"ok": True, "withdrawn": True, "request": record})
+    return json_response({"ok": True, "withdrawn": True, "request": record})
 
 
 def _reminder_defaults() -> dict:
@@ -2301,7 +2344,7 @@ def _reminder_defaults() -> dict:
 
 async def h_cflow_reminder_defaults(request: web.Request) -> web.Response:
     try:
-        return web.json_response({"defaults": _reminder_defaults()})
+        return json_response({"defaults": _reminder_defaults()})
     except store.StoreError as exc:
         return json_error(500, str(exc))
 
@@ -2331,7 +2374,7 @@ async def h_cflow_reminder_defaults_set(request: web.Request) -> web.Response:
             store.set_daemon_field("cflow_reminder", bool(body["enabled"]))
         if interval is not None:
             store.set_daemon_field("cflow_reminder_interval", interval)
-        return web.json_response({"defaults": _reminder_defaults()})
+        return json_response({"defaults": _reminder_defaults()})
     except store.StoreError as exc:
         return json_error(500, str(exc))
 
@@ -2351,7 +2394,7 @@ def _ping_defaults() -> dict:
 
 async def h_cflow_ping_defaults(request: web.Request) -> web.Response:
     try:
-        return web.json_response({"defaults": _ping_defaults()})
+        return json_response({"defaults": _ping_defaults()})
     except store.StoreError as exc:
         return json_error(500, str(exc))
 
@@ -2393,7 +2436,7 @@ async def h_cflow_ping_defaults_set(request: web.Request) -> web.Response:
             # Empty clears it back to the packaged default rather than
             # pinging with a frame and no words in it.
             store.set_daemon_field("cflow_ping_message", message or None)
-        return web.json_response({"defaults": _ping_defaults()})
+        return json_response({"defaults": _ping_defaults()})
     except store.StoreError as exc:
         return json_error(500, str(exc))
 
@@ -2402,7 +2445,7 @@ async def h_quickjob_get(request: web.Request) -> web.Response:
     """The quick-job defaults — what the dashboard's leader form is prefilled
     with. Read live from the config file, like every launcher setting."""
     try:
-        return web.json_response({"quick_job": quickjob.load()})
+        return json_response({"quick_job": quickjob.load()})
     except store.StoreError as exc:
         return json_error(500, str(exc))
 
@@ -2416,7 +2459,7 @@ async def h_quickjob_set(request: web.Request) -> web.Response:
     """
     body = await _json_body(request)
     try:
-        return web.json_response({"quick_job": quickjob.save(body)})
+        return json_response({"quick_job": quickjob.save(body)})
     except (ValueError, TypeError) as exc:
         return json_error(400, str(exc))
     except store.StoreError as exc:
@@ -2458,7 +2501,7 @@ async def h_cflow_reminder_run_set(request: web.Request) -> web.Response:
         payload["defaults"] = _reminder_defaults()
     except store.StoreError:
         pass  # the override was set; broken config only hides the defaults
-    return web.json_response(payload)
+    return json_response(payload)
 
 
 async def h_cflow_reminder_skip(request: web.Request) -> web.Response:
@@ -2485,7 +2528,7 @@ async def h_cflow_reminder_skip(request: web.Request) -> web.Response:
         # Reported rather than answered `skipped: false`, because the two are
         # different facts and only this one is worth acting on.
         return json_error(503, "this daemon runs no cflow reminder clock")
-    return web.json_response(
+    return json_response(
         {"cwd": cwd, "scope": scope, "skipped": bool(clock.skip(cwd, scope))}
     )
 
@@ -2500,8 +2543,13 @@ def _mesh_mgr(request: web.Request) -> MeshManager:
 async def h_mesh_list(request: web.Request) -> web.Response:
     mm = _mesh_mgr(request)
     rail_view = request.query.get("view") == "rail"
-    return web.json_response(
+    return json_response(
         {
+            # The rail view is what the sidebar polls: names, local members
+            # and counts. The member graph (every pair of every member, with
+            # its state) was 480KB of the 525KB full answer on a nine-mesh
+            # daemon, and only the mesh page and the flow view draw it -- they
+            # fetch /api/mesh/<name>, which still carries it.
             "meshes": [
                 mm.mesh_rail_info(m) if rail_view else mm.mesh_info(m)
                 for m in mm.list()
@@ -2515,7 +2563,7 @@ async def h_mesh_list(request: web.Request) -> web.Response:
 async def h_mesh_create(request: web.Request) -> web.Response:
     body = await _json_body(request)
     mesh = _mesh_mgr(request).create(str(body.get("name") or ""))
-    return web.json_response(_mesh_mgr(request).mesh_info(mesh), status=201)
+    return json_response(_mesh_mgr(request).mesh_info(mesh), status=201)
 
 
 async def h_mesh_get(request: web.Request) -> web.Response:
@@ -2524,7 +2572,7 @@ async def h_mesh_get(request: web.Request) -> web.Response:
     # `?session=` asks "which member am I?" — answered as `you`. Optional, so
     # the dashboard poll (which is nobody's session) is unchanged.
     session = str(request.query.get("session") or "")
-    return web.json_response(
+    return json_response(
         {**mm.mesh_info(mesh, session=session),
          "relay": request.app["relay_state"]()}
     )
@@ -2532,7 +2580,7 @@ async def h_mesh_get(request: web.Request) -> web.Response:
 
 async def h_mesh_delete(request: web.Request) -> web.Response:
     _mesh_mgr(request).delete(request.match_info["mesh"])
-    return web.json_response({"ok": True})
+    return json_response({"ok": True})
 
 
 async def h_mesh_join(request: web.Request) -> web.Response:
@@ -2548,15 +2596,15 @@ async def h_mesh_join(request: web.Request) -> web.Response:
         code=str(body.get("code") or "") or None,
     )
     if isinstance(result, dict):  # codeless remote join: pended for approval
-        return web.json_response(result, status=202)
-    return web.json_response(result.to_dict(), status=201)
+        return json_response(result, status=202)
+    return json_response(result.to_dict(), status=201)
 
 
 async def h_mesh_leave(request: web.Request) -> web.Response:
     member = await _mesh_mgr(request).leave(
         request.match_info["mesh"], request.match_info["handle"]
     )
-    return web.json_response({"ok": True, "handle": member.handle})
+    return json_response({"ok": True, "handle": member.handle})
 
 
 async def h_mesh_send(request: web.Request) -> web.Response:
@@ -2583,7 +2631,7 @@ async def h_mesh_send(request: web.Request) -> web.Response:
         sections=sections if isinstance(sections, dict) else None,
         ref=ref if isinstance(ref, dict) else None,
     )
-    return web.json_response({**result, "relay": request.app["relay_state"]()})
+    return json_response({**result, "relay": request.app["relay_state"]()})
 
 
 async def h_mesh_history(request: web.Request) -> web.Response:
@@ -2607,13 +2655,13 @@ async def h_mesh_history(request: web.Request) -> web.Response:
         offset=offset,
         message_filter=message_filter,
     )
-    return web.json_response(page)
+    return json_response(page)
 
 
 async def h_mesh_owed(request: web.Request) -> web.Response:
     """Who has been asked something and answered nothing — per message."""
     mm = _mesh_mgr(request)
-    return web.json_response(mm.owed_report(mm.get(request.match_info["mesh"])))
+    return json_response(mm.owed_report(mm.get(request.match_info["mesh"])))
 
 
 async def h_mesh_flows(request: web.Request) -> web.Response:
@@ -2694,7 +2742,7 @@ async def h_mesh_flows(request: web.Request) -> web.Response:
                 # card: status, step and blockage all still read.
                 flows[handle]["graph_error"] = str(exc)
                 flows[handle].pop("key", None)
-    return web.json_response(
+    return json_response(
         {"mesh": mesh.name, "flows": flows, "workflows": workflows}
     )
 
@@ -2711,7 +2759,7 @@ async def h_mesh_nudge(request: web.Request) -> web.Response:
         request.match_info["handle"],
         str(note or ""),
     )
-    return web.json_response(result)
+    return json_response(result)
 
 
 async def h_mesh_owed_dismiss(request: web.Request) -> web.Response:
@@ -2723,23 +2771,23 @@ async def h_mesh_owed_dismiss(request: web.Request) -> web.Response:
         request.match_info["handle"],
         [mid] if mid else None,
     )
-    return web.json_response(result)
+    return json_response(result)
 
 
 async def h_mesh_policy_get(request: web.Request) -> web.Response:
     mm = _mesh_mgr(request)
     mesh = mm.get(request.match_info["mesh"])
-    return web.json_response({"policy": mesh.policy})
+    return json_response({"policy": mesh.policy})
 
 
 async def h_mesh_policy_set(request: web.Request) -> web.Response:
     body = await _json_body(request)
     policy = _mesh_mgr(request).set_policy(request.match_info["mesh"], body)
-    return web.json_response({"policy": policy})
+    return json_response({"policy": policy})
 
 
 async def h_mesh_roles_get(request: web.Request) -> web.Response:
-    return web.json_response(
+    return json_response(
         _mesh_mgr(request).roles_view(request.match_info["mesh"])
     )
 
@@ -2763,16 +2811,16 @@ async def h_mesh_roles_set(request: web.Request) -> web.Response:
     else:
         return json_error(400, "send {'yaml': ...} or {'roles': ...}")
     result = await _mesh_mgr(request).set_roles(request.match_info["mesh"], doc)
-    return web.json_response(result)
+    return json_response(result)
 
 
 async def h_mesh_invite(request: web.Request) -> web.Response:
     result = _mesh_mgr(request).invite(request.match_info["mesh"])
-    return web.json_response({**result, "relay": request.app["relay_state"]()})
+    return json_response({**result, "relay": request.app["relay_state"]()})
 
 
 async def h_mesh_invites_list(request: web.Request) -> web.Response:
-    return web.json_response(
+    return json_response(
         {"invites": _mesh_mgr(request).invite_list(request.match_info["mesh"])}
     )
 
@@ -2781,21 +2829,21 @@ async def h_mesh_invite_revoke(request: web.Request) -> web.Response:
     revoked = _mesh_mgr(request).invite_revoke(
         request.match_info["mesh"], request.match_info["prefix"]
     )
-    return web.json_response({"revoked": revoked})
+    return json_response({"revoked": revoked})
 
 
 async def h_mesh_request_approve(request: web.Request) -> web.Response:
     result = await _mesh_mgr(request).approve_request(
         request.match_info["mesh"], request.match_info["rid"]
     )
-    return web.json_response(result)
+    return json_response(result)
 
 
 async def h_mesh_request_deny(request: web.Request) -> web.Response:
     result = await _mesh_mgr(request).deny_request(
         request.match_info["mesh"], request.match_info["rid"]
     )
-    return web.json_response(result)
+    return json_response(result)
 
 
 async def h_mesh_invitation(request: web.Request) -> web.Response:
@@ -2811,7 +2859,7 @@ async def h_mesh_invitation(request: web.Request) -> web.Response:
         handle=str(body.get("handle") or ""),
         role=str(body.get("role") or ""),
     )
-    return web.json_response({"member": member}, status=201)
+    return json_response({"member": member}, status=201)
 
 
 async def h_relay_peers(request: web.Request) -> web.Response:
@@ -2824,7 +2872,7 @@ async def h_relay_peers(request: web.Request) -> web.Response:
         names = await mm.peer_lister()
     except Exception as exc:  # noqa: BLE001 — surface PeerError as 400
         return json_error(400, str(exc))
-    return web.json_response(
+    return json_response(
         {"peers": sorted(names), "relay": request.app["relay_state"]()}
     )
 
@@ -2835,21 +2883,21 @@ async def h_relay_peer_sessions(request: web.Request) -> web.Response:
         return json_error(400, "relay uplink is not running")
     machine = request.match_info["machine"]
     payload = await mm.peer_transport(machine, "/peer/sessions", {})
-    return web.json_response(
+    return json_response(
         {"machine": machine, "sessions": payload.get("sessions", [])}
     )
 
 
 async def h_mesh_outgoing_cancel(request: web.Request) -> web.Response:
     result = _mesh_mgr(request).cancel_request(request.match_info["rid"])
-    return web.json_response(result)
+    return json_response(result)
 
 
 async def h_mesh_guest_revoke(request: web.Request) -> web.Response:
     result = await _mesh_mgr(request).revoke_guest(
         request.match_info["mesh"], request.match_info["machine"]
     )
-    return web.json_response(result)
+    return json_response(result)
 
 
 async def h_mesh_peers_reorder(request: web.Request) -> web.Response:
@@ -2863,7 +2911,7 @@ async def h_mesh_peers_reorder(request: web.Request) -> web.Response:
         [str(m) for m in order],
         force=bool(body.get("force")),
     )
-    return web.json_response(result)
+    return json_response(result)
 
 
 async def h_mesh_link_set(request: web.Request) -> web.Response:
@@ -2877,7 +2925,7 @@ async def h_mesh_link_set(request: web.Request) -> web.Response:
         request.match_info["b"],
         enabled=bool(body.get("enabled")),
     )
-    return web.json_response(result)
+    return json_response(result)
 
 
 async def h_mesh_member_link_set(request: web.Request) -> web.Response:
@@ -2899,7 +2947,7 @@ async def h_mesh_member_link_set(request: web.Request) -> web.Response:
         enabled=bool(body.get("enabled")),
         actor=str(body.get("actor") or ""),
     )
-    return web.json_response(result)
+    return json_response(result)
 
 
 async def h_mesh_wire_requests(request: web.Request) -> web.Response:
@@ -2913,7 +2961,7 @@ async def h_mesh_wire_requests(request: web.Request) -> web.Response:
     rows = _mesh_mgr(request).wire_request_rows(
         request.match_info["mesh"], state=request.query.get("state") or ""
     )
-    return web.json_response({"requests": rows})
+    return json_response({"requests": rows})
 
 
 async def h_mesh_wire_decline(request: web.Request) -> web.Response:
@@ -2926,7 +2974,7 @@ async def h_mesh_wire_decline(request: web.Request) -> web.Response:
         actor=str(body.get("actor") or ""),
         reason=str(body.get("reason") or ""),
     )
-    return web.json_response(result)
+    return json_response(result)
 
 
 async def h_mesh_rewire(request: web.Request) -> web.Response:
@@ -2954,7 +3002,7 @@ async def h_mesh_rewire(request: web.Request) -> web.Response:
     opened = await _mesh_mgr(request).rewire_members(
         request.match_info["mesh"], actor=str(body.get("actor") or "")
     )
-    return web.json_response({"opened": opened})
+    return json_response({"opened": opened})
 
 
 async def h_peer_member_link(request: web.Request) -> web.Response:
@@ -2970,7 +3018,7 @@ async def h_peer_member_link(request: web.Request) -> web.Response:
         str(body.get("b") or ""),
         bool(body.get("enabled")),
     )
-    return web.json_response(result)
+    return json_response(result)
 
 
 async def h_peer_join_request(request: web.Request) -> web.Response:
@@ -2984,7 +3032,7 @@ async def h_peer_join_request(request: web.Request) -> web.Response:
         str(body.get("reply_token") or ""),
         str(body.get("code") or ""),
     )
-    return web.json_response(result)
+    return json_response(result)
 
 
 async def h_peer_grant(request: web.Request) -> web.Response:
@@ -2998,7 +3046,7 @@ async def h_peer_grant(request: web.Request) -> web.Response:
         bool(body.get("denied")),
         grant if isinstance(grant, dict) else None,
     )
-    return web.json_response(result)
+    return json_response(result)
 
 
 async def h_peer_mesh_invite(request: web.Request) -> web.Response:
@@ -3011,12 +3059,12 @@ async def h_peer_mesh_invite(request: web.Request) -> web.Response:
         str(body.get("role") or ""),
         str(body.get("code") or ""),
     )
-    return web.json_response(result)
+    return json_response(result)
 
 
 async def h_peer_sessions(request: web.Request) -> web.Response:
     manager: SessionManager = request.app["manager"]
-    return web.json_response(
+    return json_response(
         {
             "sessions": [
                 {"name": s.sdef.name, "status": s.status()}
@@ -3034,7 +3082,7 @@ async def h_peer_unlink(request: web.Request) -> web.Response:
         str(body.get("machine") or ""),
         str(body.get("token") or ""),
     )
-    return web.json_response(result)
+    return json_response(result)
 
 
 async def h_peer_join(request: web.Request) -> web.Response:
@@ -3048,7 +3096,7 @@ async def h_peer_join(request: web.Request) -> web.Response:
         str(body.get("role") or ""),
         str(body.get("parent") or ""),
     )
-    return web.json_response(result)
+    return json_response(result)
 
 
 async def h_peer_leave(request: web.Request) -> web.Response:
@@ -3059,7 +3107,7 @@ async def h_peer_leave(request: web.Request) -> web.Response:
         str(body.get("token") or ""),
         str(body.get("handle") or ""),
     )
-    return web.json_response(result)
+    return json_response(result)
 
 
 async def h_peer_link(request: web.Request) -> web.Response:
@@ -3075,7 +3123,7 @@ async def h_peer_link(request: web.Request) -> web.Response:
         str(body.get("b") or ""),
         bool(body.get("enabled")),
     )
-    return web.json_response(result)
+    return json_response(result)
 
 
 async def h_peer_roles(request: web.Request) -> web.Response:
@@ -3087,7 +3135,7 @@ async def h_peer_roles(request: web.Request) -> web.Response:
         str(body.get("token") or ""),
         body.get("roles"),
     )
-    return web.json_response(result)
+    return json_response(result)
 
 
 async def h_peer_send(request: web.Request) -> web.Response:
@@ -3099,7 +3147,7 @@ async def h_peer_send(request: web.Request) -> web.Response:
         str(body.get("token") or ""),
         message if isinstance(message, dict) else {},
     )
-    return web.json_response(result)
+    return json_response(result)
 
 
 async def h_peer_sync(request: web.Request) -> web.Response:
@@ -3136,7 +3184,7 @@ async def h_peer_sync(request: web.Request) -> web.Response:
             if isinstance(body.get("lineage"), dict) else None
         ),
     )
-    return web.json_response(result)
+    return json_response(result)
 
 
 async def h_peer_deliver(request: web.Request) -> web.Response:
@@ -3149,7 +3197,7 @@ async def h_peer_deliver(request: web.Request) -> web.Response:
         str(body.get("token") or ""),
         message if isinstance(message, dict) else {},
     )
-    return web.json_response(result)
+    return json_response(result)
 
 
 async def h_sessions_list(request: web.Request) -> web.Response:
@@ -3173,7 +3221,7 @@ async def h_sessions_list(request: web.Request) -> web.Response:
     # Whether the briefing summariser is usable rides the list the UI already
     # polls, so the rail can disable the briefing toggles (and say why) up
     # front instead of every click discovering the 400 for itself.
-    attached = []
+    sessions = []
     for s in manager.list():
         archived = bool(getattr(s, "archived_at", None))
         if list_state == "active" and s.exited:
@@ -3184,27 +3232,43 @@ async def h_sessions_list(request: web.Request) -> web.Response:
             continue
         if list_state == "archived" and not archived:
             continue
-        info = ctxsize.attach(s)
+        sessions.append(s)
+    winddowns = request.app["beads"].winddowns
+
+    def collect() -> list:
+        # The per-session assembly, in a worker: ``attach`` re-reads a
+        # transcript tail whenever its file grew, and ten busy sessions grow
+        # theirs continuously, so this loop was 30-150ms of the event loop
+        # per poll -- time no terminal socket could be served in.
+        out = []
+        for s in sessions:
+            info = ctxsize.attach(s)
+            # The cached briefing's one-liner, when it exists — rides the list
+            # the UI already polls so a row can show it without an open card or
+            # an LLM call, and so a browser refresh repaints it from the
+            # daemon's session state instead of regenerating.
+            d = briefing.digest(info.get("name") or "")
+            if d:
+                info["briefing"] = d
+            # A kill that is still a wind-down (see beads.Board): the row says
+            # so and its kill button turns into "stop now".
+            wd = winddowns.get(info.get("name") or "")
+            if wd:
+                info["winddown"] = wd
+            if reminder_service is not None:
+                info["session_reminder"] = reminder_service.status(
+                    info.get("name") or "", cfg=reminder_cfg, session=s,
+                )
+            out.append(info)
+        return out
+
+    attached = await asyncio.to_thread(collect)
+    for s, info in zip(sessions, attached):
         # Which git branch the session's checkout is on — one fact that tells
-        # two sessions in the same worktree apart without opening either.
+        # two sessions in the same worktree apart without opening either. On
+        # the loop, because a miss schedules its git read on the loop (see
+        # _read_branch_later); the hit itself is one stat and a dict lookup.
         info["branch"] = _branch_of(_session_cwd(s))
-        # The cached briefing's one-liner, when it exists — rides the list the
-        # UI already polls so a row can show it without an open card or an LLM
-        # call, and so a browser refresh repaints it from the daemon's session
-        # state instead of regenerating.
-        d = briefing.digest(info.get("name") or "")
-        if d:
-            info["briefing"] = d
-        # A kill that is still a wind-down (see beads.Board): the row says so
-        # and its kill button turns into "stop now".
-        wd = request.app["beads"].winddowns.get(info.get("name") or "")
-        if wd:
-            info["winddown"] = wd
-        if reminder_service is not None:
-            info["session_reminder"] = reminder_service.status(
-                info.get("name") or "", cfg=reminder_cfg, session=s,
-            )
-        attached.append(info)
     # A config file that cannot be read must not cost the caller the session
     # list: this poll is the rail's lifeline (it carries every row, and the
     # client rebuilds the whole list off it), while the llm flag is one
@@ -3240,7 +3304,7 @@ async def h_sessions_list(request: web.Request) -> web.Response:
             {key: value for key, value in info.items() if key in rail_fields}
             for info in attached
         ]
-    return web.json_response({"sessions": attached, "llm_configured": llm_ok})
+    return json_response({"sessions": attached, "llm_configured": llm_ok})
 
 
 async def h_sessions_create(request: web.Request) -> web.Response:
@@ -3309,7 +3373,7 @@ async def h_sessions_create(request: web.Request) -> web.Response:
         result = await _onboard_and_launch(request, session, body)
     except onboard.OnboardError as exc:
         return json_error(400, str(exc))
-    return web.json_response({**session.info(), **result}, status=201)
+    return json_response({**session.info(), **result}, status=201)
 
 
 async def _onboard_and_launch(
@@ -3480,21 +3544,27 @@ async def h_session_children(request: web.Request) -> web.Response:
     manager: SessionManager = request.app["manager"]
     name = request.match_info["name"]
     manager.get(name)  # 404 for an unknown parent, before reporting on it
-    children = []
-    for child in manager.children(name):
-        sess = manager.get(child)
-        entry = {
-            "name": child,
-            "status": sess.status(),
-            "children": manager.children(child),
-        }
-        run = cflow_clock.run_summary(child, sess.sdef.cwd or "")
-        if run:
-            entry["cflow"] = run
-        children.append(entry)
-    parent_cwd = manager.get(name).sdef.cwd or ""
-    return web.json_response(
-        {
+
+    def describe() -> dict:
+        # In a worker: every child's run state, the parent's own run and
+        # workflow snapshot, the declared workflows and the spawn policy are
+        # all files (YAML and JSON, parsed each time). The session page polls
+        # this every five seconds, and read inline it was 500-600ms of event
+        # loop per call -- half a second in which no terminal was served.
+        children = []
+        for child in manager.children(name):
+            sess = manager.get(child)
+            entry = {
+                "name": child,
+                "status": sess.status(),
+                "children": manager.children(child),
+            }
+            run = cflow_clock.run_summary(child, sess.sdef.cwd or "")
+            if run:
+                entry["cflow"] = run
+            children.append(entry)
+        parent_cwd = manager.get(name).sdef.cwd or ""
+        return {
             "session": name,
             "parent": manager.get(name).sdef.parent,
             "children": children,
@@ -3508,7 +3578,8 @@ async def h_session_children(request: web.Request) -> web.Response:
             ),
             **manager.spawn_capabilities(name),
         }
-    )
+
+    return json_response(await asyncio.to_thread(describe))
 
 
 async def h_session_spawn(request: web.Request) -> web.Response:
@@ -3562,7 +3633,7 @@ async def h_session_spawn(request: web.Request) -> web.Response:
     # client eyeballing the response, as a field that never says anything.
     if warnings:
         body_out["warnings"] = warnings
-    return web.json_response(body_out, status=201)
+    return json_response(body_out, status=201)
 
 
 async def h_session_reparent(request: web.Request) -> web.Response:
@@ -3600,7 +3671,7 @@ async def h_session_reparent(request: web.Request) -> web.Response:
         return json_error(400, msg)
     mm = request.app.get("mesh")
     result["connected"] = await mm.link_lineage(child, parent) if mm else []
-    return web.json_response(result)
+    return json_response(result)
 
 
 async def h_sessions_clear(request: web.Request) -> web.Response:
@@ -3657,7 +3728,7 @@ async def h_sessions_clear(request: web.Request) -> web.Response:
         if held:
             kept.append({"name": name, "meshes": held})
     removed = manager.clear(logs=logs, keep=[k["name"] for k in kept])
-    return web.json_response(
+    return json_response(
         {"removed": removed, "kept": kept, "logs": logs, "stopped": stopped}
     )
 
@@ -3694,7 +3765,7 @@ async def h_sessions_kill_all(request: web.Request) -> web.Response:
             failed.append({"name": name, "error": str(exc)})
         else:
             killed.append(name)
-    return web.json_response(
+    return json_response(
         {"killed": killed, "winding_down": winding, "failed": failed}
     )
 
@@ -3731,7 +3802,7 @@ async def h_sessions_respawn_all(request: web.Request) -> web.Response:
             failed.append({"name": name, "error": str(exc)})
         else:
             respawned.append(name)
-    return web.json_response({"respawned": respawned, "failed": failed})
+    return json_response({"respawned": respawned, "failed": failed})
 
 
 async def h_sessions_archive_all(request: web.Request) -> web.Response:
@@ -3749,7 +3820,7 @@ async def h_sessions_archive_all(request: web.Request) -> web.Response:
             failed.append({"name": name, "error": str(exc)})
         else:
             archived.append(name)
-    return web.json_response({"archived": archived, "failed": failed})
+    return json_response({"archived": archived, "failed": failed})
 
 
 def _session(request: web.Request):
@@ -3758,7 +3829,7 @@ def _session(request: web.Request):
 
 
 async def h_session_get(request: web.Request) -> web.Response:
-    return web.json_response(_session(request).info())
+    return json_response(_session(request).info())
 
 
 def _session_reminder_service(request: web.Request):
@@ -3776,7 +3847,7 @@ async def h_session_reminder(request: web.Request) -> web.Response:
     service, err = _session_reminder_service(request)
     if err:
         return err
-    return web.json_response(service.status(session.sdef.name))
+    return json_response(service.status(session.sdef.name))
 
 
 async def h_session_reminder_set(request: web.Request) -> web.Response:
@@ -3793,7 +3864,7 @@ async def h_session_reminder_set(request: web.Request) -> web.Response:
     if err:
         return err
     paused = service.set_paused(session.sdef.name, body["paused"])
-    return web.json_response({**service.status(session.sdef.name), "paused": paused})
+    return json_response({**service.status(session.sdef.name), "paused": paused})
 
 
 async def h_session_reminder_skip(request: web.Request) -> web.Response:
@@ -3805,7 +3876,7 @@ async def h_session_reminder_skip(request: web.Request) -> web.Response:
     if err:
         return err
     sources = service.skip_session(session.sdef.name)
-    return web.json_response(
+    return json_response(
         {
             **service.status(session.sdef.name),
             "skipped": bool(sources),
@@ -3827,50 +3898,66 @@ async def h_session_meta(request: web.Request) -> web.Response:
     """
     manager: SessionManager = request.app["manager"]
     session = manager.get(request.match_info["name"])
-    info = ctxsize.attach(session)
-    # Same branch the rail row carries, so the detail panel's head and the
-    # Details list need no second guess.
-    info["branch"] = _branch_of(_session_cwd(session))
-    name = info["name"]
     cwd = _session_cwd(session)
 
-    harness = harness_registry.registry().get(info.get("harness") or "")
-    borrowed_auth = None
-    if info.get("borrow") and info.get("profile"):
-        runtime_profile = profile_mod.resolve_selector(info["profile"])
-        borrowed_auth = borrowing.validate(
-            runtime_profile, info["borrow"], entry=harness
-        ).to_dict()
-    # Containment, not equality: a session launched with `--worktree` sits in
-    # `<repo>/.claude/worktrees/<name>`, which is the workspace the user
-    # vouched for with another branch checked out -- not a directory nobody
-    # approved. Matching only the exact path reported those as workspace-less,
-    # which is the one thing the registry exists to make impossible.
-    workspace = workspaces.owning(cwd) if cwd else None
-    within = workspaces.subpath(workspace, cwd) if workspace else ""
-    role = None
-    if info.get("role"):
-        roleset = mesh_roles.resolve()
-        entry = roleset.roles.get(info["role"])
-        if entry:
-            role = {"name": entry.name, "stance": entry.stance}
+    def describe() -> dict:
+        # In a worker, like the children view: the transcript tail, the
+        # profile and credential check, the run state (journal included) and
+        # the workflow files are all reads, and the detail panel polls this
+        # every two seconds. Inline it was 80ms of loop per poll, at p90.
+        info = ctxsize.attach(session)
+        harness = harness_registry.registry().get(info.get("harness") or "")
+        borrowed_auth = None
+        if info.get("borrow") and info.get("profile"):
+            runtime_profile = profile_mod.resolve_selector(info["profile"])
+            borrowed_auth = borrowing.validate(
+                runtime_profile, info["borrow"], entry=harness
+            ).to_dict()
+        # Containment, not equality: a session launched with `--worktree`
+        # sits in `<repo>/.claude/worktrees/<name>`, which is the workspace
+        # the user vouched for with another branch checked out -- not a
+        # directory nobody approved. Matching only the exact path reported
+        # those as workspace-less, which is the one thing the registry exists
+        # to make impossible.
+        workspace = workspaces.owning(cwd) if cwd else None
+        within = workspaces.subpath(workspace, cwd) if workspace else ""
+        role = None
+        if info.get("role"):
+            roleset = mesh_roles.resolve()
+            entry = roleset.roles.get(info["role"])
+            if entry:
+                role = {"name": entry.name, "stance": entry.stance}
+        out = {
+            "session": info,
+            "harness": harness.to_dict() if harness else None,
+            # A live, secret-free validation rather than a creation-time
+            # snapshot: deleting/expiring the lender's credential must turn
+            # the detail rail red on its next poll, without restarting or
+            # exposing the value.
+            "borrowed_auth": borrowed_auth,
+            "workspace": workspace.to_dict() if workspace else None,
+            # Empty when the session is at the workspace root, which is the
+            # usual case; the worktree's own directory name when it is not.
+            "workspace_subpath": within,
+            "role": role,
+            "cflow": None,
+            "workflows": [],
+        }
+        if cwd:
+            out["cflow"] = _cflow_entry(manager, cwd, info["name"])
+            out["workflows"] = _startable_workflows(cwd)
+        return out
 
-    body = {
-        "session": info,
-        "harness": harness.to_dict() if harness else None,
-        # A live, secret-free validation rather than a creation-time snapshot:
-        # deleting/expiring the lender's credential must turn the detail rail
-        # red on its next poll, without restarting or exposing the value.
-        "borrowed_auth": borrowed_auth,
-        "workspace": workspace.to_dict() if workspace else None,
-        # Empty when the session is at the workspace root, which is the usual
-        # case; the worktree's own directory name when it is not.
-        "workspace_subpath": within,
-        "role": role,
+    body = await asyncio.to_thread(describe)
+    info = body["session"]
+    # Same branch the rail row carries, so the detail panel's head and the
+    # Details list need no second guess. On the loop: a miss schedules its
+    # git read there (see _read_branch_later).
+    info["branch"] = _branch_of(cwd)
+    name = info["name"]
+    body.update({
         "meshes": request.app["mesh"].meshes_for_session(name),
         "queued": _session_queued(request, session),
-        "cflow": None,
-        "workflows": [],
         # The board's slice for this session: the issue it is for and every
         # issue that names it (see beads.match). Keyed by repository, not by
         # session — one board per repo, reached from any worktree.
@@ -3890,17 +3977,15 @@ async def h_session_meta(request: web.Request) -> web.Response:
         # draws nothing for ``None`` and says so for ``[]``, and those are the
         # two different facts.
         "commits": None,
-    }
+    })
     if cwd:
-        body["cflow"] = _cflow_entry(manager, cwd, name)
-        body["workflows"] = _startable_workflows(cwd)
         # In a thread: this is a git walk over every ref, and the detail
         # panel polls. A pathological repository must cost this response,
         # never the whole daemon's loop.
         body["commits"] = session_commits.summary(
             await asyncio.to_thread(session_commits.for_session, cwd, name)
         )
-    return web.json_response(body)
+    return json_response(body)
 
 
 def _session_queued(request: web.Request, session) -> dict:
@@ -4002,7 +4087,7 @@ async def h_session_queued(request: web.Request) -> web.Response:
     the operator staring at a quiet terminal wondering where their message
     went — most often: it is held because their own focus keeps the keyboard
     busy. The same payload rides inside ``/meta`` for the detail panel."""
-    return web.json_response(_session_queued(request, _session(request)))
+    return json_response(_session_queued(request, _session(request)))
 
 
 async def h_session_queued_flush(request: web.Request) -> web.Response:
@@ -4027,7 +4112,7 @@ async def h_session_queued_flush(request: web.Request) -> web.Response:
     """
     session = _session(request)
     result = await _mesh_mgr(request).flush_session(session.sdef.name)
-    return web.json_response(
+    return json_response(
         {**result, "queued": _session_queued(request, session)}
     )
 
@@ -4069,7 +4154,7 @@ async def h_session_hold(request: web.Request) -> web.Response:
         not session.delivery_held() if want is None else bool(want)
     )
     manager.persist()
-    return web.json_response(
+    return json_response(
         {"hold": held, "queued": _session_queued(request, session)}
     )
 
@@ -4152,11 +4237,11 @@ async def h_session_kill(request: web.Request) -> web.Response:
     force = request.query.get("force") in ("1", "true")
     session = manager.get(name)  # ManagerError -> 400, as it always did
     if session.exited:
-        return web.json_response({**session.info(), "already_exited": True})
+        return json_response({**session.info(), "already_exited": True})
     if await _winding_down(request, session, force=force):
-        return web.json_response({**session.info(), "winding_down": True})
+        return json_response({**session.info(), "winding_down": True})
     session = manager.kill(name, force=force)
-    return web.json_response(session.info())
+    return json_response(session.info())
 
 
 async def h_session_delete(request: web.Request) -> web.Response:
@@ -4227,14 +4312,14 @@ async def h_session_delete(request: web.Request) -> web.Response:
             for child in touched:
                 opened.extend(await mm.link_lineage(child, above))
         body["connected"] = opened
-    return web.json_response(body)
+    return json_response(body)
 
 
 async def h_session_archive(request: web.Request) -> web.Response:
     """Retain an exited record in the archive so it remains inspectable."""
     manager: SessionManager = request.app["manager"]
     session = manager.archive(request.match_info["name"])
-    return web.json_response(session.info())
+    return json_response(session.info())
 
 
 async def h_session_keep_alive(request: web.Request) -> web.Response:
@@ -4251,7 +4336,7 @@ async def h_session_keep_alive(request: web.Request) -> web.Response:
     name = request.match_info["name"]
     on = request.query.get("off") not in ("1", "true")
     session = manager.set_keep_alive(name, on)
-    return web.json_response({**session.info(), "keep_alive": bool(on)})
+    return json_response({**session.info(), "keep_alive": bool(on)})
 
 
 async def _winding_down(request: web.Request, session, *, force: bool) -> bool:
@@ -4321,18 +4406,18 @@ async def h_session_child_kill(request: web.Request) -> web.Response:
         # Already done, so the answer is the same one the first call gave.
         # Reported rather than silent: an agent that asks twice deserves to
         # know the second ask changed nothing, or it will keep asking.
-        return web.json_response({**target.info(), "already_exited": True})
+        return json_response({**target.info(), "already_exited": True})
     force = request.query.get("force") in ("1", "true")
     if await _winding_down(request, target, force=force):
-        return web.json_response({**target.info(), "winding_down": True})
+        return json_response({**target.info(), "winding_down": True})
     session = manager.kill(child, force=force)
-    return web.json_response(session.info())
+    return json_response(session.info())
 
 
 async def h_session_respawn(request: web.Request) -> web.Response:
     manager: SessionManager = request.app["manager"]
     session = manager.respawn(request.match_info["name"])
-    return web.json_response(session.info())
+    return json_response(session.info())
 
 
 async def h_session_migrate(request: web.Request) -> web.Response:
@@ -4407,7 +4492,7 @@ async def h_session_migrate(request: web.Request) -> web.Response:
             )
         except (ManagerError, HarnessError, ProfileError) as exc:
             children.append({"name": child, "ok": False, "error": str(exc)})
-    return web.json_response(
+    return json_response(
         {
             **migrated.info(),
             "transcript_moved": carried,
@@ -4459,7 +4544,7 @@ async def h_session_reborrow(request: web.Request) -> web.Response:
     session = await manager.reborrow(
         request.match_info["name"], borrow, null_token=null_token
     )
-    return web.json_response(session.info())
+    return json_response(session.info())
 
 
 async def h_session_skip_permissions(request: web.Request) -> web.Response:
@@ -4483,7 +4568,7 @@ async def h_session_skip_permissions(request: web.Request) -> web.Response:
             400, "pass 'skip': true to stop asking, false to ask again"
         )
     session = await manager.skip_permissions(request.match_info["name"], skip)
-    return web.json_response(session.info())
+    return json_response(session.info())
 
 
 async def h_session_keys(request: web.Request) -> web.Response:
@@ -4505,7 +4590,7 @@ async def h_session_keys(request: web.Request) -> web.Response:
                 f"right now — nothing was pasted. Retry in a moment.",
             )
         data = await session.paste(paste, enter=bool(body.get("enter")))
-        return web.json_response({"ok": True, "bytes": len(data)})
+        return json_response({"ok": True, "bytes": len(data)})
     keys = body.get("keys")
     if not isinstance(keys, list) or not all(isinstance(k, str) for k in keys):
         return json_error(400, "'keys' must be a list of strings")
@@ -4521,7 +4606,7 @@ async def h_session_keys(request: web.Request) -> web.Response:
             return json_error(400, "'input_id' requires [text, 'Enter'] keys")
         prior = session_input.latest(session.sdef.name, request_id)
         if prior and prior.get("status") == "sent":
-            return web.json_response({"ok": True, "bytes": 0, "duplicate": True})
+            return json_response({"ok": True, "bytes": 0, "duplicate": True})
         session_input.write(session.sdef.name, "input_accepted",
                             request_id=request_id, text=audit_text,
                             status="accepted", pid=session.pid)
@@ -4539,7 +4624,7 @@ async def h_session_keys(request: web.Request) -> web.Response:
         session_input.write(session.sdef.name, "input_sent",
                             request_id=request_id, text=audit_text,
                             status="sent", pid=session.pid)
-    return web.json_response({"ok": True, "bytes": len(data)})
+    return json_response({"ok": True, "bytes": len(data)})
 
 
 async def h_session_input_journal(request: web.Request) -> web.Response:
@@ -4549,7 +4634,7 @@ async def h_session_input_journal(request: web.Request) -> web.Response:
         limit = int(request.query.get("limit", "50"))
     except ValueError:
         return json_error(400, "'limit' must be an integer")
-    return web.json_response({
+    return json_response({
         "session": session.sdef.name,
         "entries": session_input.read(session.sdef.name, limit=limit),
     })
@@ -4565,7 +4650,7 @@ async def h_session_deliver(request: web.Request) -> web.Response:
     if not isinstance(text, str) or not text:
         return json_error(400, "'text' must be a non-empty string")
     delivered = await session.deliver(text)
-    return web.json_response({"ok": True, "delivered": delivered})
+    return json_response({"ok": True, "delivered": delivered})
 
 
 async def h_session_rebrief(request: web.Request) -> web.Response:
@@ -4589,7 +4674,7 @@ async def h_session_rebrief(request: web.Request) -> web.Response:
     ident = (request.query.get("id") or "").strip()
     if request.method == "GET" and ident:
         manager.get(name)  # unknown session refused here, as compose does
-        return web.json_response(
+        return json_response(
             {
                 "session": name,
                 **rebrief.recall(
@@ -4599,11 +4684,11 @@ async def h_session_rebrief(request: web.Request) -> web.Response:
         )
     block = rebrief.compose(name, manager=manager, mesh_mgr=_mesh_mgr(request))
     if request.method == "GET":
-        return web.json_response({"session": name, "block": block})
+        return json_response({"session": name, "block": block})
     if not block:
-        return web.json_response({"ok": True, "delivered": False, "empty": True})
+        return json_response({"ok": True, "delivered": False, "empty": True})
     delivered = await manager.get(name).deliver(block)
-    return web.json_response({"ok": True, "delivered": delivered, "empty": False})
+    return json_response({"ok": True, "delivered": delivered, "empty": False})
 
 
 async def h_session_briefing(request: web.Request) -> web.Response:
@@ -4628,7 +4713,7 @@ async def h_session_briefing(request: web.Request) -> web.Response:
         payload = await briefing.compose(session, cfg, refresh=refresh)
     except briefing.BriefingError as exc:
         return json_error(502, str(exc))
-    return web.json_response(payload)
+    return json_response(payload)
 
 
 async def h_session_status_checks(request: web.Request) -> web.Response:
@@ -4637,7 +4722,7 @@ async def h_session_status_checks(request: web.Request) -> web.Response:
     name = request.match_info["name"]
     try:
         manager.get(name)
-        return web.json_response({
+        return json_response({
             "session": name,
             "checks": status_checks.session_entries(name, enabled_only=True),
         })
@@ -4657,7 +4742,7 @@ async def h_session_status_checks_report(request: web.Request) -> web.Response:
         answers = body.get("answers")
         if not isinstance(answers, list):
             return json_error(400, "'answers' must be an array")
-        return web.json_response({
+        return json_response({
             "session": name,
             "checks": status_checks.report(name, answers),
         })
@@ -4684,7 +4769,7 @@ async def h_session_status_checks_refresh(request: web.Request) -> web.Response:
     except status_checks.StatusCheckError as exc:
         return json_error(500, str(exc))
     if not checks:
-        return web.json_response({"session": name, "delivered": False, "checks": []})
+        return json_response({"session": name, "delivered": False, "checks": []})
     delivered = await session.deliver(
         "[claunch status-check refresh]\n"
         "Read the current user-configured Y/N checks with MCP tool `status_checks`. "
@@ -4692,7 +4777,7 @@ async def h_session_status_checks_refresh(request: web.Request) -> web.Response:
         "with every enabled ID and a yes/no answer. The list is editable; do not use "
         "IDs remembered from an earlier request."
     )
-    return web.json_response({"session": name, "delivered": delivered, "checks": checks})
+    return json_response({"session": name, "delivered": delivered, "checks": checks})
 
 
 async def h_session_capture(request: web.Request) -> web.Response:
@@ -4711,7 +4796,7 @@ async def h_session_capture(request: web.Request) -> web.Response:
             lines.pop()
     if request.query.get("format") == "json":
         x, y = session.screen.cursor()
-        return web.json_response(
+        return json_response(
             {"lines": lines, "cursor": {"x": x, "y": y}, "status": session.status()}
         )
     text = "\n".join(lines)
@@ -4750,7 +4835,7 @@ async def h_session_transcript(request: web.Request) -> web.Response:
         before=before,
         limit=limit,
     )
-    return web.json_response(page)
+    return json_response(page)
 
 
 async def h_session_wait(request: web.Request) -> web.Response:
@@ -4766,8 +4851,8 @@ async def h_session_wait(request: web.Request) -> web.Response:
     try:
         final = await session.wait_for(state, timeout=timeout, threshold=threshold)
     except asyncio.TimeoutError:
-        return web.json_response({"timeout": True, "status": session.status()}, status=408)
-    return web.json_response({**session.info(), "timeout": False, "status": final})
+        return json_response({"timeout": True, "status": session.status()}, status=408)
+    return json_response({**session.info(), "timeout": False, "status": final})
 
 
 async def h_session_resize(request: web.Request) -> web.Response:
@@ -4778,7 +4863,7 @@ async def h_session_resize(request: web.Request) -> web.Response:
     except (KeyError, ValueError, TypeError):
         return json_error(400, "'cols' and 'rows' must be integers")
     session.resize(cols, rows)
-    return web.json_response({"ok": True})
+    return json_response({"ok": True})
 
 
 async def h_index(request: web.Request) -> web.Response:
@@ -4802,7 +4887,7 @@ async def h_beads_fleet(request: web.Request) -> web.Response:
     if cwd:
         extra.insert(0, cwd)
     view = await request.app["beads"].fleet_view(list(manager.list()), extra)
-    return web.json_response(view)
+    return json_response(view)
 
 
 async def h_beads_stream(request: web.Request) -> web.Response:
@@ -4829,7 +4914,7 @@ async def h_beads_stream(request: web.Request) -> web.Response:
     view = await request.app["beads"].stream_view(
         list(manager.list()), extra, offset=offset, limit=limit, priority=priority,
     )
-    return web.json_response(view)
+    return json_response(view)
 
 
 async def h_beads_queues(request: web.Request) -> web.Response:
@@ -4847,7 +4932,7 @@ async def h_beads_queues(request: web.Request) -> web.Response:
     view = await request.app["beads"].queues_view(
         list(manager.list()), extra, cflow_for=cflow_clock.run_summary,
     )
-    return web.json_response(view)
+    return json_response(view)
 
 
 async def h_beads_assign(request: web.Request) -> web.Response:
@@ -4880,7 +4965,7 @@ async def h_beads_assign(request: web.Request) -> web.Response:
         return json_error(409, str(exc))
     except BeadsError as exc:
         return json_error(404 if "no issue" in str(exc) else 500, str(exc))
-    return web.json_response({"root": str(root), **moved})
+    return json_response({"root": str(root), **moved})
 
 
 async def h_beads_candidates(request: web.Request) -> web.Response:
@@ -4907,7 +4992,7 @@ async def h_beads_candidates(request: web.Request) -> web.Response:
         except ManagerError:
             return json_error(404, f"no session named {parent!r}")
     view = await request.app["beads"].candidates(cwd or os.getcwd(), manager)
-    return web.json_response(view)
+    return json_response(view)
 
 
 async def h_beads_issue(request: web.Request) -> web.Response:
@@ -4932,7 +5017,7 @@ async def h_beads_issue(request: web.Request) -> web.Response:
         issue = await board.show(root, issue_id)
     except BeadsError as exc:
         return json_error(404, str(exc))
-    return web.json_response({
+    return json_response({
         "root": str(root),
         "issue": issue,
         "reports": reports_mod.for_issue(issue_id),
@@ -4943,7 +5028,7 @@ async def h_session_beads(request: web.Request) -> web.Response:
     """A session's slice of its board — the same object the meta call carries."""
     manager: SessionManager = request.app["manager"]
     session = manager.get(request.match_info["name"])
-    return web.json_response(await request.app["beads"].session_view(session))
+    return json_response(await request.app["beads"].session_view(session))
 
 
 async def h_session_beads_create(request: web.Request) -> web.Response:
@@ -4962,7 +5047,7 @@ async def h_session_beads_create(request: web.Request) -> web.Response:
     )
     beads_mod.link_issue(session, made["issue"])
     manager.persist()
-    return web.json_response(
+    return json_response(
         {**made, "beads": await request.app["beads"].session_view(session)},
         status=201,
     )
@@ -4982,7 +5067,7 @@ async def h_session_reports(request: web.Request) -> web.Response:
         reports_mod.check_session(name)
     except reports_mod.ReportError as exc:
         return json_error(400, str(exc))
-    return web.json_response({"session": name, "reports": reports_mod.listing(name)})
+    return json_response({"session": name, "reports": reports_mod.listing(name)})
 
 
 async def h_reports_index(request: web.Request) -> web.Response:
@@ -5006,7 +5091,7 @@ async def h_reports_index(request: web.Request) -> web.Response:
         {**row, "session_status": known.get(row["session"])}
         for row in reports_mod.index()
     ]
-    return web.json_response({"reports": rows})
+    return json_response({"reports": rows})
 
 
 async def h_session_report_file(request: web.Request) -> web.StreamResponse:

@@ -665,9 +665,21 @@ async function refreshSessions(options) {
   // signature so an unchanged fleet keeps its nodes, focus and listeners.
   const groupOrder = typeof sessionGroupOrder === "undefined"
     ? (sessionGroupByMesh ? ["mesh"] : []) : sessionGroupOrder;
+  // The who-was-here stamps are left out with them: they move whenever a
+  // running session paints, which on a working machine is most polls, and a
+  // change to any one of them tore the whole rail down -- two hundred rows,
+  // their listeners and their gauges -- to redraw one seen line. Those lines
+  // are refreshed in place instead (refreshRailSeen, below the row loop).
+  // `last_output_at` is a detail-panel fact no row draws, and `viewers` only
+  // feeds the seen line's "now".
   const signature = JSON.stringify(
     [briefingLLM, sessionsCache, groupOrder, meshCache],
-    (key, value) => key === "due_in" || key === "fired_ago" ? undefined : value,
+    (key, value) => (
+      key === "due_in" || key === "fired_ago" ||
+      key === "last_visited_at" || key === "last_input_at" ||
+      key === "last_activity_at" || key === "last_output_at" ||
+      key === "viewers"
+    ) ? undefined : value,
   );
   // See the hold above: a press in flight keeps the rows it started on, and
   // the redraw it postpones is owed back the moment the press ends.
@@ -920,6 +932,13 @@ async function refreshSessions(options) {
   }
   if (rebuild && nestedGroupContainers && typeof syncSessionGroupStickyOffsets === "function") {
     syncSessionGroupStickyOffsets(list);
+  }
+  // The rows this poll kept still get their seen line moved on (see the
+  // signature above for why the stamps are not a reason to rebuild). Not
+  // while a press is in flight: swapping the node under the pointer is the
+  // lost click the hold exists to prevent, and the redraw it owes covers it.
+  if (!rebuild && !railHeld() && typeof refreshRailSeen === "function") {
+    refreshRailSeen(list);
   }
   refreshResumeChoices();  // the spawn form offers these same conversations
   refreshParentChoices();  // ...and the same sessions, as parents to spawn from
@@ -2436,6 +2455,28 @@ function railSeenLine(s) {
     "Red is an hour without the reader or without the agent, or half an " +
     "hour since anyone typed.";
   return line;
+}
+
+/* The seen line again, redrawn on the rows a poll kept.
+
+   The stamps it reads are the one part of a row that changes on most polls
+   (a running session's screen moves, somebody looks in), and they are drawn
+   as ages -- so the line is stale a second after it is painted whether or
+   not the poll brought a new value. Rebuilding the rail for that was the
+   single largest piece of main-thread work the two-second tick did; this
+   swaps one span per row and leaves everything else (listeners, the open
+   briefing cards, the focus) where it was. The seen line carries no
+   listener of its own, so the swap loses nothing. */
+function refreshRailSeen(list) {
+  if (!list || typeof list.querySelectorAll !== "function") return;
+  const byName = new Map((sessionsCache || []).map((s) => [s.name, s]));
+  for (const li of list.querySelectorAll("li[data-name]")) {
+    const s = byName.get(li.dataset.name);
+    const old = typeof li.querySelector === "function"
+      ? li.querySelector(".rail-seen") : null;
+    if (!s || !old || typeof old.replaceWith !== "function") continue;
+    old.replaceWith(railSeenLine(s));
+  }
 }
 
 /* ------------------------------------------------------------------ */
@@ -20861,15 +20902,27 @@ async function boot() {
 const DASHBOARD_POLL_MS = 5000;
 let polling = false;
 
+/* A tab nobody is looking at asks a third as often. The nine requests below
+   are answered by the same event loop that pumps every terminal, and a
+   dashboard left open behind the one being used was paying that cost at
+   full rate for nobody; the browser's own throttling of a hidden tab's
+   timers only starts minutes in. Coming back polls at once (below), so the
+   first thing a returning reader sees is current. */
+const HIDDEN_POLL_MS = 3 * DASHBOARD_POLL_MS;
+let hiddenPolledAt = 0;
+
 async function pollTick() {
   // While the token prompt is up there is nobody to poll for, and every
   // request would only raise it again under the fingers typing into it.
   if (authOpen()) return;
+  const hidden = typeof document !== "undefined" && document.hidden === true;
+  if (hidden && Date.now() - hiddenPolledAt < HIDDEN_POLL_MS) return;
   // A tick that is still waiting on a dead host must not have another stacked
   // on top of it every two seconds: connect attempts to a machine that has
   // gone away hang for a good while, and that is exactly when this runs.
   if (polling) return;
   polling = true;
+  if (hidden) hiddenPolledAt = Date.now();
   try { await pollOnce(); } finally { polling = false; }
 }
 
@@ -20937,6 +20990,10 @@ async function pollOnce() {
 }
 
 pollTimer = setInterval(pollTick, DASHBOARD_POLL_MS);
+// Back in view: poll now rather than at the hidden rate's next slot.
+document.addEventListener("visibilitychange", () => {
+  if (!document.hidden) { hiddenPolledAt = 0; pollTick(); }
+});
 
 /* What the rail hold listens to (its state and functions live beside
    refreshSessions, which consults them). pointerdown covers mouse, pen and
