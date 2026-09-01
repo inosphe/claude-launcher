@@ -125,11 +125,16 @@ const refitSoon = () => { refits += 1; };
 new Function(
   "exports", "$", "document", "api", "ctxChip", "refitSoon",
   [slice("el"), slice("fmtAge"), slice("briefingStateClass"),
+   slice("sessionStatusChecks"), slice("statusCheckText"), slice("appendStatusChecks"),
    slice("fetchBriefing"), slice("toggleBriefing"),
    slice("renderBriefingCard"), slice("applyBriefingTop"),
    slice("applyBriefingCards"), slice("sessBriefSection")].join("\n") + `
 const briefingOpen = new Set();
 const briefingCache = new Map();
+// renderBriefingCard appends the agent-reported status checks under the
+// summary (briefcard_check's subject); with no session rows here it appends
+// nothing, which is all this harness needs from it.
+const sessionsCache = [];
 let briefingLLM = true;
 let currentName = null;
 // The header button's click lives in app.js's top-level wiring, not in any
