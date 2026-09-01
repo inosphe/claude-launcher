@@ -28,6 +28,9 @@ class _Session:
     async def write_bytes(self, data):
         self.writes.append(data)
 
+    def set_viewer_focused(self, viewer, focused):
+        self.focus = (viewer, focused)
+
 
 class _WS:
     def __init__(self):
@@ -76,4 +79,18 @@ def test_a_composing_mark_opens_the_draft_the_wire_cannot_show():
 def test_other_controls_do_not_mark_the_keyboard():
     s = _Session()
     _control(s, {"type": "ping"})
+    assert s.marks == 0
+
+
+def test_focus_control_marks_only_its_viewer():
+    s = _Session()
+    marker = object()
+    ws = _WS()
+    asyncio.run(
+        ws_mod._handle_control(
+            ws, s, json.dumps({"type": "focus", "focused": False}),
+            ws_mod.ViewerState(focus_token=marker),
+        )
+    )
+    assert s.focus == (marker, False)
     assert s.marks == 0

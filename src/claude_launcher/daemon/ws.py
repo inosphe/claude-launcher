@@ -25,7 +25,8 @@ nothing gets what it always got.
   viewer may have resized the session meanwhile),
   ``{"type":"scroll","lines":N}`` (view history held by the daemon: N>0 moves
   further back, N<0 back toward live, anything past the bounds clamps —
-  ``-999999`` snaps to live), and ``{"type":"ping"}``.
+  ``-999999`` snaps to live), ``{"type":"focus","focused":bool}`` (whether
+  this retained viewer is currently on screen), and ``{"type":"ping"}``.
   server: ``{"type":"state","status":...}``, ``{"type":"exit","code":...}``,
   ``{"type":"resize","cols":..,"rows":..}``, ``{"type":"buffer","alt":..}``
   (the program entered or left the alternate screen — the client learns the
@@ -87,6 +88,7 @@ import asyncio
 import dataclasses
 import json
 import logging
+from typing import Optional
 
 from aiohttp import WSMsgType, web
 
@@ -105,6 +107,7 @@ class ViewerState:
     """
 
     offset: int = 0
+    focus_token: Optional[object] = None
 
 
 def _wants_scrollback(request: web.Request) -> bool:
@@ -166,7 +169,7 @@ async def terminal_ws(request: web.Request) -> web.WebSocketResponse:
     # is where a visit is, and the rail's "last looked in" line is stamped on
     # the socket's two edges rather than on a timer.
     session.note_visit()
-    state = ViewerState()
+    state = ViewerState(focus_token=queue)
     try:
         await ws.send_str(
             json.dumps(
@@ -282,6 +285,7 @@ async def terminal_ws(request: web.Request) -> web.WebSocketResponse:
         _viewer_left(ws, "terminal")
     finally:
         request.app["websockets"].discard(ws)
+        session.set_viewer_focused(queue, False)
         session.unsubscribe(queue)
         # ...and the visit ended now, not when it started. A tab open all
         # afternoon would otherwise report this morning.
@@ -523,3 +527,11 @@ async def _handle_control(
         session.note_human_input(
             at_terminal=True, composing=bool(msg.get("draft"))
         )
+    elif kind == "focus":
+        # Parked web terminals retain their sockets to preserve their local
+        # state. Attachment alone therefore does not say which terminal is
+        # currently visible to a person.
+        if state.focus_token is not None:
+            session.set_viewer_focused(
+                state.focus_token, bool(msg.get("focused"))
+            )

@@ -23,7 +23,7 @@ from __future__ import annotations
 import asyncio
 import re
 from collections import deque
-from typing import Deque, List, Optional, Set, Tuple
+from typing import Callable, Deque, List, Optional, Set, Tuple
 
 import pyte
 
@@ -561,13 +561,23 @@ class ScreenFeeder:
     that need it exactly (capture, attach repaint) wait for it to catch up.
     """
 
-    def __init__(self, screen: ScreenState, *, slice_size: int = SLICE) -> None:
+    def __init__(
+        self,
+        screen: ScreenState,
+        *,
+        slice_size: int = SLICE,
+        foreground: Optional[Callable[[], bool]] = None,
+        background_delay: float = 0.0,
+    ) -> None:
         self.screen = screen
         self._slice = max(1, slice_size)
+        self._foreground = foreground or (lambda: True)
+        self._background_delay = max(0.0, background_delay)
         self._pending: Deque[bytes] = deque()
         self._pump: Optional[asyncio.Task] = None
         self._idle = asyncio.Event()
         self._idle.set()
+        self._pace_changed = asyncio.Event()
 
     @property
     def pending_bytes(self) -> int:
@@ -604,7 +614,22 @@ class ScreenFeeder:
                     self.screen.feed_render(head[: self._slice])
                 # The whole point: hand the loop back between slices, so an
                 # accept or a delivery queued behind us gets its turn.
-                await asyncio.sleep(0)
+                if not self._background_delay:
+                    await asyncio.sleep(0)
+                else:
+                    # Clear first, then recheck focus. A focus notification
+                    # that landed between the previous check and this point
+                    # must not be erased before we decide to sleep.
+                    self._pace_changed.clear()
+                    if self._foreground():
+                        await asyncio.sleep(0)
+                    else:
+                        try:
+                            await asyncio.wait_for(
+                                self._pace_changed.wait(), self._background_delay
+                            )
+                        except asyncio.TimeoutError:
+                            pass
         finally:
             if not self._pending:
                 self._idle.set()
@@ -612,6 +637,10 @@ class ScreenFeeder:
     async def drained(self) -> None:
         """Wait until everything submitted so far has been rendered."""
         await self._idle.wait()
+
+    def wake(self) -> None:
+        """Reconsider background pacing after a session focus change."""
+        self._pace_changed.set()
 
     def drain_now(self) -> None:
         """Render everything pending, synchronously.

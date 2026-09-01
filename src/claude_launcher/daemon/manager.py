@@ -53,10 +53,20 @@ class SessionManager:
     #: than repeated once per ``get()`` call.
     _CODEX_CLAIM_RETRY_INTERVAL = 1.0
 
-    def __init__(self, *, idle_threshold: float, scrollback: int, restore_default: bool) -> None:
+    def __init__(
+        self,
+        *,
+        idle_threshold: float,
+        scrollback: int,
+        restore_default: bool,
+        focused_session_scheduling: bool = True,
+        background_render_delay: float = 0.05,
+    ) -> None:
         self.idle_threshold = idle_threshold
         self.scrollback = scrollback
         self.restore_default = restore_default
+        self.focused_session_scheduling = focused_session_scheduling
+        self.background_render_delay = background_render_delay
         self._sessions: Dict[str, AnySession] = {}
         #: Names :meth:`restore_all` relaunched that the previous daemon
         #: recorded as *working* — the audience for the resume nudge
@@ -154,6 +164,8 @@ class SessionManager:
             last_visited_at=last_visited_at,
             last_input_at=last_input_at,
             delivery_hold=delivery_hold,
+            focused_session_scheduling=self.focused_session_scheduling,
+            background_render_delay=self.background_render_delay,
         )
         session.on_exit = self._session_exited
         session.on_command_submitted = self._session_command_submitted

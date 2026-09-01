@@ -4926,6 +4926,19 @@ function setLink(state) {
   syncLinkChip();
 }
 
+/* Kept terminals retain their sockets while hidden. Tell the daemon which
+   socket is actually visible so cached sessions can be paced in background. */
+function setTerminalFocus(focused) {
+  if (!ws || ws.readyState !== WebSocket.OPEN) return;
+  ws.send(JSON.stringify({ type: "focus", focused: !!focused }));
+}
+
+function syncTerminalFocus() {
+  setTerminalFocus(
+    document.hasFocus() && !document.hidden && terminalOnScreen()
+  );
+}
+
 /* The header (and its mirror on a phone) say what the socket is doing, because
    the status badge beside them cannot: that one reports the *session*, which
    goes on running perfectly well while this browser cannot see it. A tab that
@@ -4991,6 +5004,7 @@ function openSocket(name) {
     if (ticket !== linkTicket) return;
     linkTry = 0;   // this outage is over; the next one starts with a full budget
     setLink("live");
+    syncTerminalFocus();
   };
 
   sock.onmessage = (ev) => {
@@ -6173,6 +6187,7 @@ function suspendActive() {
     scroll: scrollOffset, exited: sessionEnded,
   };
   if (ws) {
+    setTerminalFocus(false);
     ws.onopen = null;
     ws.onclose = null;
     ws.onmessage = (ev) => shimFrame(b, ev);
@@ -6342,6 +6357,7 @@ function restoreTerminal(b) {
     wireActive(b);
     linkName = b.name;          // resetLive cleared it; a live socket's retries need it
     setLink("live");
+    syncTerminalFocus();
   } else if (!sessionEnded) {
     openSocket(b.name);
   } else {
@@ -6669,7 +6685,10 @@ function resyncTerminal() {
   ws.send(JSON.stringify({ type: "repaint" }));
 }
 window.addEventListener("focus", resyncTerminal);
+window.addEventListener("focus", syncTerminalFocus);
+window.addEventListener("blur", syncTerminalFocus);
 document.addEventListener("visibilitychange", () => {
+  syncTerminalFocus();
   if (!document.hidden) resyncTerminal();
 });
 
@@ -7365,6 +7384,7 @@ function showView(name) {
   if (name !== "session" && MOBILE_MQ.matches) dropDetail();
   syncLayout();          // rail mode, nav highlight, and the bars' titles
   if (showTerm) refitSoon(60);
+  syncTerminalFocus();
 }
 
 function stopWfPoll() {
