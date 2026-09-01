@@ -883,6 +883,14 @@ steps:
         - id: deployed
           describe: 라이브 데몬이 master의 이번 머지 이후에 재기동됐다
           check: 'uv run --no-sync python tools/deploy_check.py --branch master'
+    # 대상은 cflow daemon으로 고정하지 않는다. RestartClock은 이 런의 CWD에서
+    # 아래 프로젝트 스크립트 하나를 실행할 뿐이며, 다른 프로젝트는 같은
+    # 상대 경로에 자기 서비스의 재기동 스크립트를 둔다. Windows와 WSL Linux는
+    # 셸·프로세스 모델이 달라 명령을 따로 선언한다.
+    restart:
+      windows: 'powershell -NoProfile -ExecutionPolicy Bypass -File tools/restart_live.ps1'
+      linux: 'bash tools/restart_live.sh'
+      timeout: 120
     title: 라이브 서버 반영
     ask:
       # 기동 중인 사용자 화면을 건드리는 일 — 머지와 별개로 반영도 리더

@@ -1607,6 +1607,26 @@ def _checklist_payload(state: dict, step: Step) -> dict:
     }
 
 
+def _restart_payload(state: dict, step: Step) -> Optional[dict]:
+    """The current visit's external-restart receipt, if it declares one."""
+    if step.restart is None:
+        return None
+    visit = _visits(state, step.id)
+    record = state.get("restart")
+    if not isinstance(record, dict) or record.get("step") != step.id or record.get("visit") != visit:
+        record = {}
+    return {
+        "windows": bool(step.restart.windows),
+        "linux": bool(step.restart.linux),
+        "timeout": step.restart.timeout,
+        "status": record.get("status", "pending"),
+        "requested_at": record.get("requested_at"),
+        "completed_at": record.get("completed_at"),
+        "exit_code": record.get("exit_code"),
+        "output": record.get("output"),
+    }
+
+
 def _payload(workflow: Workflow, state: dict, cwd: Optional[str], *, mutate: bool) -> dict:
     """Describe the current position, with the content id every reader needs.
 
@@ -1638,6 +1658,9 @@ def _position_payload(
         "title": step.title or step.id,
         "visit": visit,
     }
+    restart = _restart_payload(state, step)
+    if restart is not None:
+        base["restart"] = restart
     awaited = _awaits_payload(step)
     if awaited:
         # On `base`, so it rides every payload this position can produce. The
@@ -3302,6 +3325,79 @@ def fire_timer(*, cwd: Optional[str] = None) -> Optional[dict]:
         "moved_to": step.timer.then,
         "opens_at": armed.get("opens_at"),
     }
+
+
+@_locked_op
+def claim_restart(*, platform: str, boot_id: str, cwd: Optional[str] = None) -> Optional[dict]:
+    """Claim this checklist visit's external restart exactly once.
+
+    The caller executes the returned command outside the run lock.  A record
+    from another daemon boot is deliberately not re-run: a restart command
+    may itself have restarted the cflow daemon, so repeating it is unsafe.
+    """
+    if not state_mod.has_run(cwd):
+        return None
+    workflow, state = _load(cwd)
+    if state.get("status") in ("done", "aborted") or not state.get("current"):
+        return None
+    # Mutating status settles an `ask: {otherwise: self}` before this action.
+    payload = _payload(workflow, state, cwd, mutate=True)
+    if payload.get("status") != "waiting_checklist":
+        return None
+    step = workflow.step(state["current"])
+    if step.restart is None:
+        return None
+    visit = _visits(state, step.id)
+    previous = state.get("restart")
+    if isinstance(previous, dict) and previous.get("step") == step.id and previous.get("visit") == visit:
+        if previous.get("status") == "running" and previous.get("boot_id") != boot_id:
+            previous["status"] = "interrupted"
+            previous["completed_at"] = state_mod.utcnow()
+            state_mod.save_state(state, cwd)
+            state_mod.journal("restart_interrupted", {"run": state["run_id"], "step": step.id,
+                              "visit": visit, "boot_id": previous.get("boot_id")}, cwd)
+            return {"kind": "interrupted", "run": state["run_id"], "workflow": state["workflow"],
+                    "step": step.id, "visit": visit}
+        return None
+    command = step.restart.command_for(platform)
+    if not command:
+        record = {"step": step.id, "visit": visit, "status": "unsupported",
+                  "requested_at": state_mod.utcnow(), "boot_id": boot_id}
+        state["restart"] = record
+        state_mod.save_state(state, cwd)
+        state_mod.journal("restart_unsupported", {"run": state["run_id"], "step": step.id,
+                          "visit": visit, "platform": platform}, cwd)
+        return {"kind": "unsupported", "run": state["run_id"], "workflow": state["workflow"],
+                "step": step.id, "visit": visit, "platform": platform}
+    record = {"step": step.id, "visit": visit, "status": "running", "command": command,
+              "requested_at": state_mod.utcnow(), "boot_id": boot_id}
+    state["restart"] = record
+    state_mod.save_state(state, cwd)
+    state_mod.journal("restart_requested", {"run": state["run_id"], "step": step.id,
+                      "visit": visit, "platform": platform, "command": command}, cwd)
+    return {"kind": "run", "run": state["run_id"], "workflow": state["workflow"],
+            "step": step.id, "visit": visit, "command": command, "timeout": step.restart.timeout}
+
+
+@_locked_op
+def complete_restart(*, step_id: str, visit: int, exit_code: Optional[int], output: str,
+                     cwd: Optional[str] = None) -> Optional[dict]:
+    """Persist one external restart result for the claimed visit."""
+    if not state_mod.has_run(cwd):
+        return None
+    workflow, state = _load(cwd)
+    record = state.get("restart")
+    if (not isinstance(record, dict) or record.get("step") != step_id
+            or record.get("visit") != visit or record.get("status") != "running"):
+        return None
+    record.update({"status": "succeeded" if exit_code == 0 else "failed",
+                   "exit_code": exit_code, "output": output[-4000:],
+                   "completed_at": state_mod.utcnow()})
+    state_mod.save_state(state, cwd)
+    state_mod.journal("restart_completed", {"run": state["run_id"], "step": step_id,
+                      "visit": visit, "exit_code": exit_code, "output": output[-4000:]}, cwd)
+    return {"run": state["run_id"], "workflow": state["workflow"], "step": step_id,
+            "visit": visit, "exit_code": exit_code, "output": output[-4000:]}
 
 
 @_scoped_op

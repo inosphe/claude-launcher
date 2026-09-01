@@ -464,6 +464,23 @@ class Verify:
 
 
 @dataclass(frozen=True)
+class Restart:
+    """A project-local external restart command selected by host platform."""
+
+    windows: Optional[str] = None
+    linux: Optional[str] = None
+    timeout: float = 120.0
+
+    def command_for(self, system: str) -> Optional[str]:
+        system = (system or "").lower()
+        if system.startswith("win"):
+            return self.windows
+        if system in ("linux", "wsl"):
+            return self.linux
+        return None
+
+
+@dataclass(frozen=True)
 class Awaits:
     """What a step is waiting for, in a form the daemon can re-measure.
 
@@ -751,6 +768,9 @@ class Step:
     #: filed, and the DAEMON performs that move. While the run sits here it
     #: reports ``waiting_checklist``. See :class:`Checklist`.
     checklist: Optional[Checklist] = None
+    #: A project-local external service restart, executed by the daemon from
+    #: the run's CWD after its entry gate has opened.
+    restart: Optional[Restart] = None
     select: Optional[Select] = None
     #: Ending the run HERE hands the slot to another workflow instead of
     #: going quiet: the engine files a start request for it. Only meaningful
@@ -1352,6 +1372,7 @@ def _parse_step(step_id: str, raw) -> Step:
     awaits = _parse_awaits(raw.get("awaits"), step_id)
     timer = _parse_timer(raw.get("timer"), step_id)
     checklist = _parse_checklist(raw.get("checklist"), step_id)
+    restart = _parse_restart(raw.get("restart"), step_id)
     select = _parse_select(raw.get("select"), step_id)
     escalate = _parse_escalate(raw.get("escalate"), step_id)
     if checklist is not None:
@@ -1394,6 +1415,11 @@ def _parse_step(step_id: str, raw) -> Step:
         raise WorkflowError(
             f"step {step_id!r}: a select step routes via its options; "
             f"'timer' is not allowed on one"
+        )
+    if restart is not None and checklist is None:
+        raise WorkflowError(
+            f"step {step_id!r}: 'restart' requires a 'checklist' — the "
+            "restart command must be followed by a daemon-checked outcome"
         )
     if timer is not None and awaits is not None:
         raise WorkflowError(
@@ -1449,6 +1475,7 @@ def _parse_step(step_id: str, raw) -> Step:
         awaits=awaits,
         timer=timer,
         checklist=checklist,
+        restart=restart,
         select=select,
         escalate=escalate,
         next=_parse_next(raw.get("next"), step_id),
@@ -1466,6 +1493,43 @@ def _parse_step(step_id: str, raw) -> Step:
             f"ends the run, or give this one a terminating edge"
         )
     return step
+
+
+def _parse_restart(raw, step_id: str) -> Optional[Restart]:
+    """Parse CWD-local restart commands without assuming a daemon target."""
+    if raw in (None, False):
+        return None
+    if not isinstance(raw, dict):
+        raise WorkflowError(
+            f"step {step_id!r}: 'restart' must map platform names to commands"
+        )
+    unknown = sorted(set(raw) - {"windows", "linux", "timeout"})
+    if unknown:
+        raise WorkflowError(
+            f"step {step_id!r}: 'restart' has unknown key(s): {', '.join(unknown)}"
+        )
+    windows, linux = raw.get("windows"), raw.get("linux")
+    if not windows and not linux:
+        raise WorkflowError(
+            f"step {step_id!r}: 'restart' needs a 'windows' or 'linux' command"
+        )
+    if windows is not None and not isinstance(windows, str):
+        raise WorkflowError(f"step {step_id!r}: 'restart.windows' must be a string")
+    if linux is not None and not isinstance(linux, str):
+        raise WorkflowError(f"step {step_id!r}: 'restart.linux' must be a string")
+    try:
+        timeout = float(raw.get("timeout", 120.0))
+    except (TypeError, ValueError):
+        raise WorkflowError(f"step {step_id!r}: 'restart.timeout' must be a number")
+    if timeout <= 0 or timeout > 900:
+        raise WorkflowError(
+            f"step {step_id!r}: 'restart.timeout' must be greater than 0 and at most 900"
+        )
+    return Restart(
+        windows=windows.strip() if windows else None,
+        linux=linux.strip() if linux else None,
+        timeout=timeout,
+    )
 
 
 def _parse_escalate(raw, step_id: str) -> Optional["Escalate"]:

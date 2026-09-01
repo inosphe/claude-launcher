@@ -47,6 +47,8 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import platform as platform_mod
+import subprocess
 import time
 from typing import Dict, List, Optional, Set, Tuple
 
@@ -1462,6 +1464,116 @@ def checklist_block(result: dict) -> str:
         ]
     )
     return "\n".join(lines)
+
+
+class RestartClock:
+    """Run a checklist step's project-local restart command once per visit.
+
+    Commands run from the driving session's CWD and are selected by the
+    workflow's platform mapping.  This clock never treats the cflow daemon as
+    the target service; a project script owns that decision.
+    """
+
+    def __init__(self, manager, *, boot_id: str, poll: float = 5.0) -> None:
+        self.manager = manager
+        self.boot_id = boot_id
+        self.poll = poll
+        self._task: Optional[asyncio.Task] = None
+
+    def start(self) -> None:
+        if self._task is None:
+            self._task = asyncio.get_running_loop().create_task(self._run())
+
+    async def shutdown(self) -> None:
+        task, self._task = self._task, None
+        if task is not None:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await task
+
+    async def _run(self) -> None:
+        while True:
+            try:
+                await asyncio.sleep(self.poll)
+                actions = await asyncio.to_thread(self.scan)
+                for cwd, scope, action in actions:
+                    await self._deliver(cwd, scope, restart_started_block(action))
+                    if action["kind"] != "run":
+                        continue
+                    result = await asyncio.to_thread(self._execute, cwd, action)
+                    recorded = await asyncio.to_thread(
+                        cflow_engine.complete_restart,
+                        cwd=cwd, scope=scope, step_id=action["step"],
+                        visit=action["visit"], exit_code=result["exit_code"],
+                        output=result["output"],
+                    )
+                    if recorded:
+                        await self._deliver(cwd, scope, restart_finished_block(recorded))
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                log.exception("cflow restart clock tick failed")
+
+    def scan(self) -> List[Tuple[str, str, dict]]:
+        actions: List[Tuple[str, str, dict]] = []
+        system = platform_mod.system()
+        for cwd, scope in cflow_state.known_runs():
+            try:
+                action = cflow_engine.claim_restart(
+                    cwd=cwd, scope=scope, platform=system, boot_id=self.boot_id
+                )
+            except Exception as exc:
+                log.debug("cflow restart scan skipped %s/%s: %s", cwd, scope, exc)
+                continue
+            if action:
+                actions.append((cwd, scope, action))
+        return actions
+
+    @staticmethod
+    def _execute(cwd: str, action: dict) -> dict:
+        try:
+            done = subprocess.run(
+                action["command"], cwd=cwd, shell=True, text=True,
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                timeout=float(action["timeout"]), check=False,
+            )
+            return {"exit_code": done.returncode, "output": done.stdout or ""}
+        except subprocess.TimeoutExpired as exc:
+            output = exc.stdout or ""
+            if isinstance(output, bytes):
+                output = output.decode(errors="replace")
+            return {"exit_code": None, "output": str(output) + "\nrestart command timed out"}
+        except OSError as exc:
+            return {"exit_code": None, "output": f"could not run restart command: {exc}"}
+
+    async def _deliver(self, cwd: str, scope: str, block: str) -> None:
+        session = session_for(self.manager, cwd, scope)
+        if session is None:
+            return
+        try:
+            await session.deliver(block)
+        except Exception:
+            log.exception("cflow restart notice delivery to %r failed", scope)
+
+
+def restart_started_block(action: dict) -> str:
+    if action["kind"] == "run":
+        detail = "the project-local restart command is being executed from this session's CWD"
+    elif action["kind"] == "interrupted":
+        detail = "the prior boot stopped while the restart command was running; it will not be run twice"
+    else:
+        detail = f"no restart command is declared for platform {action.get('platform')!r}"
+    return "\n".join(["---", "# claunch cflow: restart -- machine-generated, not typed by the user",
+                      f"workflow: {action.get('workflow')}", f"step: {action.get('step')!r}",
+                      f"event: {detail}",
+                      "protocol: read cflow status after this message; the checklist remains the deployment gate.", "---"])
+
+
+def restart_finished_block(result: dict) -> str:
+    return "\n".join(["---", "# claunch cflow: restart result -- machine-generated, not typed by the user",
+                      f"workflow: {result.get('workflow')}", f"step: {result.get('step')!r}",
+                      f"exit code: {result.get('exit_code')}",
+                      "protocol: the restart result is journaled; the checklist decides whether deployment can advance.", "---"])
 
 
 class RoundStartClock:
