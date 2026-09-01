@@ -103,16 +103,24 @@ option:disabled { color: #6b7280; }
 }
 .session-group-toggle input { margin: 0; accent-color: #58a6ff; }
 #session-list { list-style: none; overflow-y: auto; flex: 1; }
+#session-list .session-group {
+  display: block; padding: 0; border: 0; background: transparent; list-style: none;
+}
+#session-list .session-group:hover { background: transparent; }
+#session-list .session-group-body { margin: 0; padding: 0; list-style: none; }
 #session-list .session-group-heading {
   padding: 6px 10px; color: #a5b4c3; background: #161b22;
   border-bottom: 1px solid #2a2e36; font-size: 11px; font-weight: 600;
   letter-spacing: .02em; text-transform: none; cursor: default; display: block;
+  position: sticky; top: var(--session-group-sticky-top, 0px); z-index: 2;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 #session-list .session-group-heading.session-group-level-1 {
   padding-left: 20px; color: #8b949e; background: #131820;
-  font-size: 10px;
+  font-size: 10px; z-index: 1;
 }
 #session-list > li.session-filtered { display: none; }
+#session-list li[data-name].session-filtered { display: none; }
 /* The gap and the right padding are tight on purpose: this row carries a
    name, a role, the rooms it is in, its profile and two buttons inside about
    260px, and every pixel spent between them is a pixel the mesh pill loses

@@ -515,6 +515,34 @@ function sessionGroupRows(entries, groups, level = 0) {
   return out;
 }
 
+/* Sticky headings need the height of every outer heading as their offset.
+   The heading styles intentionally differ by level, so a fixed multiplier
+   would overlap when the type scale or padding changes. */
+function sessionGroupStickyTops(headings) {
+  const heights = [];
+  for (const heading of headings) {
+    const level = Number(heading.dataset.groupLevel || 0);
+    if (heights[level] !== undefined) continue;
+    const rect = typeof heading.getBoundingClientRect === "function"
+      ? heading.getBoundingClientRect() : null;
+    heights[level] = rect && rect.height || heading.offsetHeight || 0;
+  }
+  return headings.map((heading) => {
+    const level = Number(heading.dataset.groupLevel || 0);
+    let top = 0;
+    for (let outer = 0; outer < level; outer++) top += heights[outer] || 0;
+    return top;
+  });
+}
+
+function syncSessionGroupStickyOffsets(list) {
+  const headings = [...list.querySelectorAll(".session-group-heading")];
+  const tops = sessionGroupStickyTops(headings);
+  for (let i = 0; i < headings.length; i++) {
+    headings[i].style.setProperty("--session-group-sticky-top", `${tops[i]}px`);
+  }
+}
+
 function setSessionGroup(group, enabled, remember = true) {
   if (!SESSION_GROUPS.includes(group)) return;
   sessionGroupOrder = sessionGroupOrder.filter((item) => item !== group);
@@ -652,15 +680,42 @@ async function refreshSessions() {
           ({ type: "session", session, depth })),
       ]);
     })() : entries.map(([session, depth]) => ({ type: "session", session, depth }));
+  // The narrow embedded web harnesses model only a flat list.  Browsers
+  // expose Document#createDocumentFragment, which lets the shipped rail use
+  // group containers while those reduced consumers retain their old shape.
+  const nestedGroupContainers = typeof document.createDocumentFragment === "function";
+  const groupBodies = [];
   for (const row of rows) {
     if (row.type === "group") {
-      const heading = document.createElement("li");
+      // A heading's containing block is its own group.  Native sticky then
+      // releases it at that group's bottom instead of leaving an old nested
+      // heading visible underneath the next outer group.
+      if (!nestedGroupContainers) {
+        const heading = document.createElement("li");
+        heading.className = `session-group-heading session-group-level-${row.level}`;
+        const label = row.group === "workspace"
+          ? sessionWorkspaceLabel(row.value) : row.value;
+        heading.textContent = `${row.group} · ${label}`;
+        heading.title = `${row.group} group ${row.value}`;
+        list.appendChild(heading);
+        continue;
+      }
+      const parent = groupBodies[row.level] || list;
+      const group = document.createElement("li");
+      group.className = `session-group session-group-level-${row.level}`;
+      const heading = document.createElement("div");
       heading.className = `session-group-heading session-group-level-${row.level}`;
+      heading.dataset.groupLevel = String(row.level);
       const label = row.group === "workspace"
         ? sessionWorkspaceLabel(row.value) : row.value;
       heading.textContent = `${row.group} · ${label}`;
       heading.title = `${row.group} group ${row.value}`;
-      list.appendChild(heading);
+      const body = document.createElement("ul");
+      body.className = "session-group-body";
+      group.append(heading, body);
+      parent.appendChild(group);
+      groupBodies.length = row.level;
+      groupBodies[row.level] = body;
       continue;
     }
     const { session: s, depth } = row;
@@ -833,7 +888,12 @@ async function refreshSessions() {
     });
     // The briefing's one-line and the collapsed ⟳, always on the row.
     decorateBriefingRow(li, s);
-    list.appendChild(li);
+    const parent = nestedGroupContainers
+      ? (groupBodies[groupBodies.length - 1] || list) : list;
+    parent.appendChild(li);
+  }
+  if (rebuild && nestedGroupContainers && typeof syncSessionGroupStickyOffsets === "function") {
+    syncSessionGroupStickyOffsets(list);
   }
   refreshResumeChoices();  // the spawn form offers these same conversations
   refreshParentChoices();  // ...and the same sessions, as parents to spawn from
