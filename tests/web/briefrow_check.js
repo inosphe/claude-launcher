@@ -106,6 +106,7 @@ const noChip = () => null;
 new Function(
   "exports", "$", "document", "api", "ctxChip",
   [slice("el"), slice("fmtAge"), slice("briefingStateClass"),
+   slice("statusCheckText"),
    slice("fetchBriefing"), slice("refreshBriefingRow"),
    slice("toggleBriefing"), slice("renderBriefingCard"),
    slice("applyBriefingTop"), slice("applyBriefingCards"),
@@ -149,6 +150,20 @@ const click = (n) => n.listeners.click({ stopPropagation() {} });
   const s3 = row("s3");
   ctx.decorate(s3, { name: "s3" });
   check("neither digest nor task recorded: no one-line at all", oneLine(s3), null);
+
+  const sChecks = row("schecks");
+  ctx.decorate(sChecks, { name: "schecks", status_checks: [
+    { question: "Tests passed?", answer: "yes", reported_at: "2026-09-01T00:00:00+00:00" },
+    { question: "Merged?" },
+  ] });
+  const checkChips = sChecks.querySelector(".rail-status-checks").children;
+  check("reported and unreported status checks are compact chips",
+        [checkChips[0].textContent, checkChips[0].className,
+         checkChips[1].textContent, checkChips[1].className],
+        ["✓ Tests passed?", "rail-status-check check-yes",
+         "? Merged?", "rail-status-check check-unknown"]);
+  check("status checks carry an independent agent refresh control",
+        sChecks.querySelector(".sess-status-check-rowref").textContent, "✓⟳");
 
   /* The row carries the WHOLE digest, however long — the stylesheet wraps
      it (raillayout_check pins that) and nothing here may shorten it first.

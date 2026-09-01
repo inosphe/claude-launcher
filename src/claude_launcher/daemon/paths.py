@@ -116,6 +116,11 @@ def prompt_presets_json() -> Path:
     return daemon_dir() / "prompt-presets.json"
 
 
+def status_checks_json() -> Path:
+    """User-defined Y/N status checks and per-session agent reports."""
+    return daemon_dir() / "status-checks.json"
+
+
 def session_dir(name: str) -> Path:
     """Per-session directory holding its raw output log and metadata."""
     return daemon_dir() / "sessions" / name

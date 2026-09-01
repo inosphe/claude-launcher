@@ -2217,6 +2217,51 @@ function briefingStateClass(state) {
     ? state : "other";
 }
 
+function sessionStatusChecks(name) {
+  const session = sessionsCache.find((row) => row.name === name);
+  return (session && Array.isArray(session.status_checks)) ? session.status_checks : [];
+}
+
+function statusCheckText(check) {
+  return check.answer === "yes" ? "yes" : check.answer === "no" ? "no" : "unknown";
+}
+
+function appendStatusChecks(card, name) {
+  const checks = sessionStatusChecks(name);
+  if (!checks.length) return;
+  const heading = el("div", "sess-brief-check-heading", "status checks");
+  card.appendChild(heading);
+  for (const check of checks) {
+    const row = el("div", "sess-brief-row sess-brief-check");
+    const answer = el("span", `sess-brief-v check-${statusCheckText(check)}`, statusCheckText(check));
+    if (check.reported_at) {
+      const at = new Date(check.reported_at);
+      if (!isNaN(at)) answer.title = `agent reported ${at.toLocaleString()}`;
+    }
+    row.append(el("span", "sess-brief-k", String(check.question)), answer);
+    card.appendChild(row);
+  }
+}
+
+async function requestStatusChecksRefresh(name, button) {
+  if (button) button.disabled = true;
+  try {
+    const resp = await api(`/api/sessions/${encodeURIComponent(name)}/status-checks/refresh`, {
+      method: "POST",
+    });
+    const body = await resp.json().catch(() => ({}));
+    if (!resp.ok) throw new Error(body.error || `HTTP ${resp.status}`);
+    if (button) button.title = body.delivered
+      ? "request delivered; waiting for the agent report"
+      : "no enabled status checks";
+    await refreshSessions();
+  } catch (err) {
+    if (button) button.title = `status-check refresh failed: ${String(err)}`;
+  } finally {
+    if (button) button.disabled = false;
+  }
+}
+
 async function fetchBriefing(name, refresh) {
   // A refresh keeps the old text on screen, dimmed, instead of blanking the
   // card for however long the summariser takes.
@@ -2292,6 +2337,14 @@ function renderBriefingCard(name, entry) {
     fetchBriefing(name, true);
   });
   head.appendChild(refresh);
+  const checksRefresh = el("button", "sess-brief-check-refresh", "checks ⟳");
+  checksRefresh.type = "button";
+  checksRefresh.title = "ask the agent to report current status checks";
+  checksRefresh.addEventListener("click", (e) => {
+    e.stopPropagation();
+    requestStatusChecksRefresh(name, checksRefresh);
+  });
+  head.appendChild(checksRefresh);
   card.appendChild(head);
 
   if (loading && !data) {
@@ -2338,6 +2391,7 @@ function renderBriefingCard(name, entry) {
   } else {
     card.appendChild(el("div", "sess-brief-note", "empty briefing"));
   }
+  appendStatusChecks(card, name);
   return card;
 }
 
@@ -2449,6 +2503,35 @@ function decorateBriefingRow(li, s) {
     oline.textContent = one;
   } else if (oline) {
     oline.remove();
+  }
+  let checks = li.querySelector(".rail-status-checks");
+  const reported = Array.isArray(s.status_checks) ? s.status_checks : [];
+  if (reported.length) {
+    if (!checks) {
+      checks = el("div", "rail-status-checks");
+      li.appendChild(checks);
+    }
+    checks.innerHTML = "";
+    for (const check of reported) {
+      const answer = statusCheckText(check);
+      const chip = el("span", `rail-status-check check-${answer}`, `${answer === "yes" ? "✓" : answer === "no" ? "✕" : "?"} ${check.question}`);
+      chip.title = `${check.question}: ${answer}${check.reported_at ? ` (agent: ${check.reported_at})` : ""}`;
+      checks.appendChild(chip);
+    }
+    let statusRefresh = li.querySelector(".sess-status-check-rowref");
+    if (!statusRefresh) {
+      statusRefresh = el("button", "sess-status-check-rowref", "✓⟳");
+      statusRefresh.type = "button";
+      statusRefresh.addEventListener("click", (e) => {
+        e.stopPropagation();
+        requestStatusChecksRefresh(s.name, statusRefresh);
+      });
+      li.appendChild(statusRefresh);
+    }
+    statusRefresh.title = "ask the agent to report current status checks";
+  } else if (checks) {
+    checks.remove();
+    li.querySelector(".sess-status-check-rowref")?.remove();
   }
   let refresh = li.querySelector(".sess-brief-rowref");
   if (!refresh) {
@@ -8575,6 +8658,10 @@ let promptPresetCache = [];
 let promptPresetError = "";
 let promptPresetDraft = { name: "", text: "" };
 let promptPresetEdit = null;
+let statusCheckCache = [];
+let statusCheckError = "";
+let statusCheckDraft = { question: "" };
+let statusCheckEdit = null;
 
 function openWorkspaces() {
   wsOpen = true;
@@ -8587,6 +8674,7 @@ function openSettings() {
   openWorkspaces();
   refreshFaq();
   refreshPromptPresets();
+  refreshStatusChecks();
 }
 
 function closeWorkspaces() {
@@ -9919,6 +10007,8 @@ function renderWorkspaces() {
 
   view.appendChild(promptPresetCard());
 
+  view.appendChild(statusCheckCard());
+
   const list = el("div", "ws-list");
   list.appendChild(el("h3", null, `Registered (${workspacesCache.length})`));
   if (!workspacesCache.length) {
@@ -9971,6 +10061,101 @@ async function refreshPromptPresets() {
     renderTermPresetButtons();
     if (wsOpen) renderWorkspaces();
   }
+}
+
+async function refreshStatusChecks() {
+  try {
+    const resp = await api("/api/status-checks");
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
+    statusCheckCache = data.checks || [];
+    statusCheckError = "";
+    if (wsOpen) renderWorkspaces();
+  } catch (err) {
+    statusCheckError = String(err);
+    if (wsOpen) renderWorkspaces();
+  }
+}
+
+function statusCheckCard() {
+  const card = el("section", "status-check-settings");
+  card.appendChild(el("h3", null, "Status checks"));
+  card.appendChild(el(
+    "p", "wf-note",
+    "Y/N questions that agents report directly through MCP. Values remain per session."
+  ));
+  const form = el("form", "status-check-add");
+  const q = document.createElement("input");
+  q.placeholder = "Question, for example: Tests passed?";
+  q.value = statusCheckDraft.question;
+  q.addEventListener("input", () => { statusCheckDraft.question = q.value; });
+  const add = el("button", "wf-btn approve", "Add check");
+  form.append(q, add);
+  form.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    try {
+      const resp = await api("/api/status-checks", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(statusCheckDraft),
+      });
+      const data = await resp.json().catch(() => ({}));
+      if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
+      statusCheckCache = data.checks || [];
+      statusCheckDraft = { question: "" };
+      statusCheckError = "";
+    } catch (err) { statusCheckError = String(err); }
+    renderWorkspaces();
+  });
+  card.appendChild(form);
+  if (statusCheckError) card.appendChild(el("p", "error", statusCheckError));
+  const list = el("div", "status-check-list");
+  for (const row of statusCheckCache) {
+    const item = el("div", "status-check-row");
+    if (statusCheckEdit === row.id) {
+      const eq = document.createElement("input"); eq.value = row.question;
+      const save = el("button", "wf-btn approve", "Save"); save.type = "button";
+      save.addEventListener("click", () => statusCheckSave(row, { question: eq.value }));
+      const cancel = el("button", "wf-btn clear", "Cancel"); cancel.type = "button";
+      cancel.addEventListener("click", () => { statusCheckEdit = null; renderWorkspaces(); });
+      item.append(eq, save, cancel); list.appendChild(item); continue;
+    }
+    item.appendChild(el("div", "status-check-text", row.question));
+    const edit = el("button", "wf-btn clear", "Edit"); edit.type = "button";
+    edit.addEventListener("click", () => { statusCheckEdit = row.id; renderWorkspaces(); });
+    const toggle = el("button", "wf-btn clear", row.enabled === false ? "Enable" : "Disable");
+    toggle.type = "button";
+    toggle.addEventListener("click", () => statusCheckSave(row, { enabled: row.enabled === false }));
+    const remove = el("button", "wf-btn danger", "Delete"); remove.type = "button";
+    remove.addEventListener("click", () => statusCheckRemove(row));
+    item.append(edit, toggle, remove); list.appendChild(item);
+  }
+  if (!statusCheckCache.length) list.appendChild(el("p", "wf-note", "No status checks registered."));
+  card.appendChild(list);
+  return card;
+}
+
+async function statusCheckSave(row, changes) {
+  try {
+    const resp = await api(`/api/status-checks/${encodeURIComponent(row.id)}`, {
+      method: "PUT", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ...row, ...changes }),
+    });
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
+    statusCheckCache = data.checks || []; statusCheckEdit = null; statusCheckError = "";
+  } catch (err) { statusCheckError = String(err); }
+  renderWorkspaces();
+}
+
+async function statusCheckRemove(row) {
+  if (!confirm(`Delete status check '${row.question}'?`)) return;
+  try {
+    const resp = await api(`/api/status-checks/${encodeURIComponent(row.id)}`, { method: "DELETE" });
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
+    statusCheckCache = data.checks || []; statusCheckEdit = null; statusCheckError = "";
+  } catch (err) { statusCheckError = String(err); }
+  renderWorkspaces();
 }
 
 function faqCard() {
