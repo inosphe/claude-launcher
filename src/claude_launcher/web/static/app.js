@@ -391,7 +391,7 @@ function forgetDeadSessions() {
 /* The rail holds still while a pointer is down on it.
 
    Every poll rebuilds the whole list from scratch (`list.innerHTML` below,
-   driven by setInterval(pollTick, 2000)). A press is not an instant, though:
+   driven by a five-second dashboard poll). A press is not an instant, though:
    pointerdown, then pointerup, and only then the click the handler is
    waiting for. A rebuild landing between the first two takes the node the
    press started on out of the document, and the browser is then left with no
@@ -585,11 +585,21 @@ function setSessionFilter(filter, remember = true) {
   sessionFilter = filter;
   if (remember) localStorage.setItem(SESSION_FILTER_KEY, filter);
   syncSessionFilters(sessionsCache);
+  // Inactive records are not part of the recurring rail poll. Selecting one
+  // of their filters is an explicit request for one fresh snapshot.
+  const state = filter === "archived" ? "archived"
+    : filter === "killed" ? "killed"
+    : filter === "current" ? "current" : "active";
+  refreshSessions({ state });
 }
 
 function syncSessionFilters(sessions) {
   const list = $("session-list");
   if (!list) return;
+  const archivedRefresh = $("refresh-archived");
+  if (archivedRefresh) {
+    archivedRefresh.classList.toggle("hidden", sessionFilter !== "archived");
+  }
   const counts = sessionFilterCounts(sessions);
   const labels = {
     current: "Current", running: "Running", killed: "Killed", archived: "Archived",
@@ -613,10 +623,17 @@ function syncSessionFilters(sessions) {
   if (typeof syncBulkActions === "function") syncBulkActions(sessions || [], sessionFilter);
 }
 
-async function refreshSessions() {
+async function refreshSessions(options) {
+  const state = (options && options.state) || "active";
+  const matchesPollState = (session) => {
+    if (state === "all") return true;
+    if (state === "active") return session.status !== "exited";
+    if (state === "current") return !session.archived_at;
+    return sessionCategory(session) === state;
+  };
   let data;
   try {
-    const resp = await api("/api/sessions");
+    const resp = await api(`/api/sessions?view=rail&state=${encodeURIComponent(state)}`);
     // An error response carries a JSON body of its own, so `resp.json()`
     // succeeds and `data.sessions` is simply absent -- which used to read as
     // "this daemon has no sessions" and empty the rail, drop every parked
@@ -627,7 +644,16 @@ async function refreshSessions() {
   } catch {
     return;
   }
-  sessionsCache = data.sessions || [];
+  const incoming = data.sessions || [];
+  const incomingNames = new Set(incoming.map((s) => s.name));
+  // A background request carries active sessions only. Keep any inactive
+  // records the operator explicitly inspected, while replacing the category
+  // this request owns and any record that has just returned as active.
+  sessionsCache = [
+    ...incoming,
+    ...sessionsCache.filter((s) =>
+      !incomingNames.has(s.name) && !matchesPollState(s)),
+  ];
   // Reduced embedded consumers execute this poll in isolation.  Keep that
   // contract while the full page reconciles the kill controls here.
   if (typeof reconcileKillUiState === "function") reconcileKillUiState(sessionsCache);
@@ -4937,7 +4963,7 @@ async function killCurrentSession() {
   } finally {
     if (killUiState.get(name) === "requesting") killUiState.delete(name);
     syncSessionKillControls(name);
-    await refreshSessions();
+    await refreshSessions({ state: "current" });
   }
 }
 
@@ -4957,7 +4983,7 @@ async function archiveExitedSession(name) {
   if (at >= 0) sessionsCache[at] = { ...sessionsCache[at], ...info };
   // Archive changes the rail classification while the selected filter,
   // final screen, detail pane and URL remain unchanged.
-  await refreshSessions();
+  await refreshSessions({ state: "current" });
   setStatusBadge("exited");
   return true;
 }
@@ -4984,7 +5010,7 @@ $("stop-all").addEventListener("click", async () => {
   await bulkAction($("stop-all"), "/api/sessions/kill", { method: "POST" }, "stop");
   // The open terminal's own socket sees its child go before the next poll
   // does, so there is nothing to reattach here — only the rail to redraw.
-  refreshSessions();
+  refreshSessions({ state: "current" });
 });
 
 /* Bring everything back. Each respawn replaces its session's child, so the one
@@ -5008,7 +5034,7 @@ $("resume-all").addEventListener("click", async () => {
   );
   const back = (result && result.respawned) || [];
   detach();
-  await refreshSessions();
+  await refreshSessions({ state: "current" });
   if (currentName && back.includes(currentName)) attach(currentName);
 });
 
@@ -5021,7 +5047,7 @@ $("archive-exited").addEventListener("click", async () => {
     $("archive-exited"), "/api/sessions/archive",
     { method: "POST" }, "archive"
   );
-  await refreshSessions();
+  await refreshSessions({ state: "current" });
 });
 
 for (const filter of SESSION_FILTERS) {
@@ -5052,7 +5078,11 @@ $("refresh-all").addEventListener("click", async () => {
   btn.classList.add("spinning");
   try {
     await Promise.all([
-      refreshSessions(),
+      refreshSessions({
+        state: sessionFilter === "archived" ? "archived"
+          : sessionFilter === "killed" ? "killed"
+          : sessionFilter === "current" ? "current" : "active",
+      }),
       refreshMeshList(),
       refreshCflow(),
       refreshWorkspaces(),
@@ -5065,6 +5095,19 @@ $("refresh-all").addEventListener("click", async () => {
       // floor the button just flickers and reads as "nothing happened".
       new Promise((done) => setTimeout(done, 400)),
     ]);
+  } finally {
+    btn.disabled = false;
+    btn.classList.remove("spinning");
+  }
+});
+
+$("refresh-archived")?.addEventListener("click", async () => {
+  const btn = $("refresh-archived");
+  if (!btn || btn.disabled) return;
+  btn.disabled = true;
+  btn.classList.add("spinning");
+  try {
+    await refreshSessions({ state: "archived" });
   } finally {
     btn.disabled = false;
     btn.classList.remove("spinning");
@@ -7715,7 +7758,7 @@ async function openWorkflow(cwd, scope) {
   showView("wf");
   $("wf-view").innerHTML = "<p class='wf-note'>loading…</p>";
   await refreshWf();
-  wfPollTimer = setInterval(refreshWf, 2000);
+  wfPollTimer = setInterval(refreshWf, 5000);
 }
 
 async function refreshWf() {
@@ -7795,7 +7838,7 @@ function openSplit(name) {
   splitFor = name;
   $("term-wf").innerHTML = "<p class='wf-note'>loading…</p>";
   refreshSplit();
-  splitPollTimer = setInterval(refreshSplit, 2000);
+  splitPollTimer = setInterval(refreshSplit, 5000);
 }
 
 function closeSplit() {
@@ -8780,7 +8823,7 @@ function renderHome() {
   grid.appendChild(homeCard(
     "Mesh", "#/mesh",
     meshCache.length
-      ? meshCache.map((m) => `${m.name} (${m.members.length})`).join(" · ")
+      ? meshCache.map((m) => `${m.name} (${m.member_count ?? m.members.length})`).join(" · ")
       : "no meshes yet"
   ));
 
@@ -10064,7 +10107,7 @@ function openWindowPage() {
   showView("window");
   renderWindow();
   refreshWindow();
-  if (!windowTimer) windowTimer = setInterval(refreshWindow, 2000);
+  if (!windowTimer) windowTimer = setInterval(refreshWindow, 5000);
 }
 
 function stopWindowPoll() {
@@ -13081,7 +13124,7 @@ function repointDetail(name) {
   $("sess-view").innerHTML = "<p class='wf-note'>loading…</p>";
   markDetailRow();
   refreshSession();
-  sessPollTimer = setInterval(refreshSession, 2000);
+  sessPollTimer = setInterval(refreshSession, 5000);
 }
 
 function closeDetail() {
@@ -14344,7 +14387,7 @@ function sessRunFoldFor(flow, unfold) {
     stopSessRun();
     if (!fold.open) return;
     refreshSessRun();
-    sessRunTimer = setInterval(refreshSessRun, 2000);
+    sessRunTimer = setInterval(refreshSessRun, 5000);
   });
   sessRunFold = fold;
   // On creation only, so shutting it stays shut across the panel's rebuilds:
@@ -16681,7 +16724,7 @@ function renderRelayBadge(relay) {
 async function refreshMeshList() {
   let data;
   try {
-    const resp = await api("/api/mesh");
+    const resp = await api("/api/mesh?view=rail");
     data = await resp.json();
   } catch {
     return;
@@ -16711,7 +16754,8 @@ async function refreshMeshList() {
     // a mirror is somebody else's mesh: say so before the counts, since what
     // you can do here (no invites, no policy edits) depends on it
     if (m.primary) li.appendChild(el("span", "mesh-tag", `mirror · ${m.primary}`));
-    const inbound = (m.requests || []).length;
+    const inbound = Array.isArray(m.requests)
+      ? m.requests.length : Number(m.requests || 0);
     if (inbound) {
       const req = el("span", "mesh-tag", `${inbound} join req`);
       req.style.background = "#0d2818";
@@ -16721,7 +16765,7 @@ async function refreshMeshList() {
     }
     li.appendChild(el(
       "span", "meta",
-      `${m.members.length} member${m.members.length === 1 ? "" : "s"} · ${m.messages} msg`
+      `${m.member_count ?? m.members.length} member${(m.member_count ?? m.members.length) === 1 ? "" : "s"} · ${m.messages} msg`
     ));
     li.addEventListener("click", () => {
       location.hash = "#/mesh/" + encodeURIComponent(m.name);
@@ -16874,7 +16918,7 @@ async function openMesh(name) {
   showView("mesh");
   $("mesh-view").innerHTML = "<p class='wf-note'>loading…</p>";
   await refreshMeshView();
-  meshPollTimer = setInterval(refreshMeshView, 2000);
+  meshPollTimer = setInterval(refreshMeshView, 5000);
 }
 
 /* `force` redraws even while a field has focus: picking from the wizard's
@@ -19597,7 +19641,7 @@ async function openFlowTopology(name) {
   showView("flow");
   $("flow-view").innerHTML = "<p class='wf-note'>loading…</p>";
   await refreshFlowView();
-  flowPollTimer = setInterval(refreshFlowView, 2000);
+  flowPollTimer = setInterval(refreshFlowView, 5000);
 }
 
 async function refreshFlowView() {
@@ -20751,6 +20795,7 @@ async function boot() {
   if (!booted) { booted = true; route(); }
 }
 
+const DASHBOARD_POLL_MS = 5000;
 let polling = false;
 
 async function pollTick() {
@@ -20828,7 +20873,7 @@ async function pollOnce() {
   await Promise.all(refreshes);
 }
 
-pollTimer = setInterval(pollTick, 2000);
+pollTimer = setInterval(pollTick, DASHBOARD_POLL_MS);
 
 /* What the rail hold listens to (its state and functions live beside
    refreshSessions, which consults them). pointerdown covers mouse, pen and
