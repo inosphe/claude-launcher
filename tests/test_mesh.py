@@ -641,7 +641,10 @@ def test_mesh_api(home, tmp_path):
             resp = await client.post("/api/mesh", json={"name": "web"}, headers=bearer)
             assert resp.status == 409
 
-            mgr.create(SessionDef(name="w1", harness="py", cwd=str(tmp_path)))
+            mgr.create(SessionDef(
+                name="w1", harness="py", cwd=str(tmp_path),
+                task="a task only the detail panel needs", env={"EXAMPLE": "value"},
+            ))
             resp = await client.post(
                 "/api/mesh/web/members",
                 json={"session": "w1", "handle": "worker_a"},
@@ -650,6 +653,25 @@ def test_mesh_api(home, tmp_path):
             assert resp.status == 201
             member = await resp.json()
             assert member["role"] == "worker"
+
+            resp = await client.get("/api/mesh?view=rail", headers=bearer)
+            rail_mesh = (await resp.json())["meshes"]
+            assert rail_mesh == [{
+                "name": "web", "primary": None,
+                "members": [{
+                    "handle": "worker_a", "session": "w1", "role": "worker",
+                    "local": True,
+                }],
+                "member_count": 1, "messages": 0, "requests": 0,
+            }]
+
+            resp = await client.get(
+                "/api/sessions?view=rail&state=active", headers=bearer
+            )
+            rail_session = (await resp.json())["sessions"][0]
+            assert rail_session["name"] == "w1"
+            assert "task" not in rail_session
+            assert "env" not in rail_session
 
             # sending: external human sender, broadcast
             resp = await client.post(

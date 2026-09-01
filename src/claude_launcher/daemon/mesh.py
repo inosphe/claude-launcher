@@ -5739,6 +5739,32 @@ class MeshManager:
             if h in mesh.members and p in mesh.members
         }
 
+    def mesh_rail_info(self, mesh: Mesh) -> dict:
+        """The dashboard rail's compact mesh summary.
+
+        The rail needs local session memberships to label its rows and a few
+        counts for the sidebar. Topology, peer state, and member-link tables
+        are served by the selected mesh's detail request.
+        """
+        members = [
+            {
+                "handle": member.handle,
+                "session": member.session,
+                "role": member.role,
+                "local": True,
+            }
+            for _handle, member in sorted(mesh.members.items())
+            if self._is_local(mesh, member)
+        ]
+        return {
+            "name": mesh.name,
+            "primary": mesh.primary or None,
+            "members": members,
+            "member_count": len(mesh.members),
+            "messages": len(mesh.messages),
+            "requests": len(mesh.pending_requests) if not mesh.primary else 0,
+        }
+
     def mesh_info(self, mesh: Mesh, *, session: str = "") -> dict:
         members = []
         lineage = self._local_lineage(mesh)

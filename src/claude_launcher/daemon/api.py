@@ -2493,9 +2493,13 @@ def _mesh_mgr(request: web.Request) -> MeshManager:
 
 async def h_mesh_list(request: web.Request) -> web.Response:
     mm = _mesh_mgr(request)
+    rail_view = request.query.get("view") == "rail"
     return web.json_response(
         {
-            "meshes": [mm.mesh_info(m) for m in mm.list()],
+            "meshes": [
+                mm.mesh_rail_info(m) if rail_view else mm.mesh_info(m)
+                for m in mm.list()
+            ],
             "outgoing": mm.outgoing_list(),
             "relay": request.app["relay_state"](),
         }
@@ -3144,6 +3148,10 @@ async def h_peer_deliver(request: web.Request) -> web.Response:
 
 async def h_sessions_list(request: web.Request) -> web.Response:
     manager: SessionManager = request.app["manager"]
+    rail_view = request.query.get("view") == "rail"
+    list_state = request.query.get("state") or "all"
+    if list_state not in {"all", "active", "current", "killed", "archived"}:
+        return json_error(400, f"invalid session list state: {list_state!r}")
     reminder_service = request.app.get("session_reminder")
     reminder_cfg = None
     if reminder_service is not None:
@@ -3161,6 +3169,15 @@ async def h_sessions_list(request: web.Request) -> web.Response:
     # front instead of every click discovering the 400 for itself.
     attached = []
     for s in manager.list():
+        archived = bool(getattr(s, "archived_at", None))
+        if list_state == "active" and s.exited:
+            continue
+        if list_state == "current" and archived:
+            continue
+        if list_state == "killed" and (not s.exited or archived):
+            continue
+        if list_state == "archived" and not archived:
+            continue
         info = ctxsize.attach(s)
         # Which git branch the session's checkout is on — one fact that tells
         # two sessions in the same worktree apart without opening either.
@@ -3200,6 +3217,23 @@ async def h_sessions_list(request: web.Request) -> web.Response:
         checks = check_digests.get(info.get("name") or "")
         if checks:
             info["status_checks"] = checks
+    if rail_view:
+        # The dashboard reads this resource repeatedly. The detail panel has
+        # its own /meta request, so an opening task and environment do not
+        # belong in every rail response.
+        rail_fields = {
+            "name", "harness", "profile", "cwd", "args", "model", "effort",
+            "restore", "conversation_id", "role", "parent", "borrow",
+            "null_token", "issue", "keep_alive", "reminder_paused", "status",
+            "pid", "exit_code", "created_at", "last_output_at",
+            "last_visited_at", "last_input_at", "last_activity_at", "viewers",
+            "exited_at", "archived_at", "delivery_hold", "compacting", "context",
+            "branch", "briefing", "winddown", "session_reminder", "status_checks",
+        }
+        attached = [
+            {key: value for key, value in info.items() if key in rail_fields}
+            for info in attached
+        ]
     return web.json_response({"sessions": attached, "llm_configured": llm_ok})
 
 

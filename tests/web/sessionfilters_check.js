@@ -132,6 +132,9 @@ check("group priority follows checkbox activation order",
 check("the shipped page contains all four state controls",
       ["current", "running", "killed", "archived"].every((name) =>
         html.includes(`id="session-filter-${name}"`)), true);
+check("archived sessions have a dedicated one-shot refresh control",
+      html.includes('id="refresh-archived"') &&
+      src.includes('refreshSessions({ state: "archived" })'), true);
 check("filtered rows leave the layout",
       /#session-list\s*>\s*li\.session-filtered\s*\{[^}]*display:\s*none/.test(css), true);
 check("the shipped page contains the mesh grouping checkbox",

@@ -183,12 +183,12 @@ const TWO = [
   served = { sessions: TWO, llm_configured: true };
 
   /* ---- an unchanged ordinary poll preserves the rows ------------------ */
-  await ctx.refresh();
+  await ctx.refresh({ state: "current" });
   check("a poll draws the rows", names(), ["s1", "s2"]);
   const first = [...rows()];
   check("...each carrying the row's own glyph",
         rows().map((li) => !!glyph(li)), [true, true]);
-  await ctx.refresh();
+  await ctx.refresh({ state: "current" });
   check("an unchanged unheld poll keeps every row object",
         rows().map((li, i) => li === first[i]), [true, true]);
 
@@ -203,7 +203,7 @@ const TWO = [
     sessions: [...TWO, { name: "s3", status: "busy", harness: "claude", cwd: "" }],
     llm_configured: true,
   };
-  await ctx.refresh();
+  await ctx.refresh({ state: "current" });
   check("a poll mid-press leaves the rows exactly where they were",
         rows().map((li, i) => li === before[i]), [true, true]);
   check("...the very node under the finger included",
@@ -231,7 +231,7 @@ const TWO = [
   ctx.expire();
   check("an expired hold is no hold", ctx.held(), false);
   served = { sessions: [TWO[0]], llm_configured: true };
-  await ctx.refresh();
+  await ctx.refresh({ state: "current" });
   check("...so the next poll draws normally again", names(), ["s1"]);
 
   /* ---- a failed poll leaves the page as it was ------------------------ */
@@ -239,7 +239,7 @@ const TWO = [
   const cached = ctx.cache().map((s) => s.name);
   ok = false;
   served = { error: "no" };
-  await ctx.refresh();
+  await ctx.refresh({ state: "current" });
   check("an error response is not 'this daemon has no sessions'",
         rows().map((li, i) => li === kept[i]), [true]);
   check("...and the cache forgetDeadSessions judges by is untouched",
