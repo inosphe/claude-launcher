@@ -6620,7 +6620,13 @@ function park(b) {
   if (b.term && b.term.element) b.term.element.style.display = "none";
 }
 function unpark(b) {
-  if (b.term && b.term.element) b.term.element.style.display = "";
+  if (!b.term || !b.term.element) return;
+  b.term.element.style.display = "";
+  // xterm accepts output while its element is hidden, but its renderer may
+  // regard those rows as already painted. A fit whose dimensions do not
+  // change then has nothing to redraw. Refresh the retained buffer as it is
+  // made visible so a session switch does not wait for the next TUI repaint.
+  if (b.term.rows > 0) b.term.refresh(0, b.term.rows - 1);
 }
 
 /* Park the active terminal. The socket's handlers are swapped for the shim

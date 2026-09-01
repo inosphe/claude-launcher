@@ -107,6 +107,7 @@ function build() {
     this.rows = 24;
     this.disposed = false;
     this.writes = [];
+    this.refreshes = [];
     this.sizes = [];
     this.element = node();
     termInstances.push(this);
@@ -124,6 +125,9 @@ function build() {
     this.element.parentNode = null;
   };
   FakeTerminal.prototype.write = function (d) { this.writes.push(d); };
+  FakeTerminal.prototype.refresh = function (start, end) {
+    this.refreshes.push([start, end]);
+  };
   FakeTerminal.prototype.resize = function (c, r) { this.sizes.push([c, r]); this.cols = c; this.rows = r; };
   const FitAddonStub = { FitAddon: function () { this.fit = () => {}; } };
 
@@ -268,6 +272,9 @@ return {
         [w.api.current, w.api.term === aTerm, w.api.ws === aSock]);
   check("its element is shown again", aTerm.element.style.display === "",
         aTerm.element.style.display);
+  check("and its retained buffer is redrawn after being shown",
+        JSON.stringify(aTerm.refreshes) === JSON.stringify([[0, 23]]),
+        aTerm.refreshes);
   check("it is out of the cache", !w.api.keep().includes("a"), w.api.keep());
   check("the session we left is parked in its turn",
         w.api.keep().includes("b"), w.api.keep());
