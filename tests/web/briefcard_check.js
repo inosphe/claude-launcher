@@ -98,11 +98,13 @@ const noChip = () => null;
 new Function(
   "exports", "$", "document", "api", "ctxChip",
   [slice("el"), slice("fmtAge"), slice("briefingStateClass"),
+   slice("sessionStatusChecks"), slice("statusCheckText"), slice("appendStatusChecks"),
    slice("fetchBriefing"), slice("toggleBriefing"),
    slice("renderBriefingCard"), slice("applyBriefingTop"),
    slice("applyBriefingCards"), slice("syncRowRefresh")].join("\n") + `
 const briefingOpen = new Set();
 const briefingCache = new Map();
+const sessionsCache = [];
 let briefingLLM = true;
 exports.apply = applyBriefingCards;
 exports.setLLM = (v) => { briefingLLM = v; };

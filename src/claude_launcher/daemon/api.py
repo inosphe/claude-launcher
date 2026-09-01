@@ -36,7 +36,10 @@ from .. import session_commits
 from .. import spawn as spawn_mod, store, workspaces
 from .. import worktree as worktree_mod
 from . import beads as beads_mod
-from . import briefing, cflow_clock, clipty, ctxsize, onboard, prompt_presets, rebrief, session_input
+from . import (
+    briefing, cflow_clock, clipty, ctxsize, onboard, prompt_presets, rebrief,
+    session_input, status_checks,
+)
 from . import transcript_view
 from . import window as window_mod
 from ..cli_beads import BeadsError
@@ -286,6 +289,10 @@ def build_app(
     r.add_post("/api/prompt-presets", h_prompt_presets_add)
     r.add_put("/api/prompt-presets/{preset_id}", h_prompt_presets_update)
     r.add_delete("/api/prompt-presets/{preset_id}", h_prompt_presets_remove)
+    r.add_get("/api/status-checks", h_status_checks)
+    r.add_post("/api/status-checks", h_status_checks_add)
+    r.add_put("/api/status-checks/{check_id}", h_status_checks_update)
+    r.add_delete("/api/status-checks/{check_id}", h_status_checks_remove)
     r.add_get("/api/harnesses", h_harnesses)
     r.add_get("/api/cflow", h_cflow_runs)
     r.add_get("/api/cflow/run", h_cflow_run_detail)
@@ -393,6 +400,9 @@ def build_app(
     r.add_get("/api/sessions/{name}", h_session_get)
     r.add_get("/api/sessions/{name}/meta", h_session_meta)
     r.add_get("/api/sessions/{name}/input-journal", h_session_input_journal)
+    r.add_get("/api/sessions/{name}/status-checks", h_session_status_checks)
+    r.add_post("/api/sessions/{name}/status-checks/reports", h_session_status_checks_report)
+    r.add_post("/api/sessions/{name}/status-checks/refresh", h_session_status_checks_refresh)
     r.add_get("/api/sessions/{name}/briefing", h_session_briefing)
     r.add_get("/api/sessions/{name}/queued", h_session_queued)
     r.add_post("/api/sessions/{name}/queued/flush", h_session_queued_flush)
@@ -1113,6 +1123,69 @@ async def h_prompt_presets_remove(request: web.Request) -> web.Response:
         saved = prompt_presets.set_entries(kept)
         return web.json_response({"presets": saved, "removed": preset_id})
     except prompt_presets.PromptPresetError as exc:
+        return json_error(500, str(exc))
+
+
+def _status_check_body(body: dict) -> dict:
+    question = str(body.get("question") or "").strip()
+    if not question:
+        raise ValueError("a status check needs a question")
+    if len(question) > 1000:
+        raise ValueError("a status-check question is too long")
+    return {
+        "id": str(body.get("id") or ""),
+        "question": question,
+        "enabled": body.get("enabled", True) is not False,
+    }
+
+
+async def h_status_checks(request: web.Request) -> web.Response:
+    try:
+        return web.json_response({"checks": status_checks.entries()})
+    except status_checks.StatusCheckError as exc:
+        return json_error(500, str(exc))
+
+
+async def h_status_checks_add(request: web.Request) -> web.Response:
+    try:
+        row = _status_check_body(await _json_body(request))
+        rows = status_checks.entries()
+        rows.append(row)
+        saved = status_checks.set_entries(rows)
+        return web.json_response({"checks": saved, "check": saved[-1]}, status=201)
+    except ValueError as exc:
+        return json_error(400, str(exc))
+    except status_checks.StatusCheckError as exc:
+        return json_error(500, str(exc))
+
+
+async def h_status_checks_update(request: web.Request) -> web.Response:
+    check_id = request.match_info["check_id"]
+    try:
+        incoming = _status_check_body(await _json_body(request))
+        rows = status_checks.entries()
+        for index, row in enumerate(rows):
+            if row.get("id") == check_id:
+                incoming["id"] = check_id
+                rows[index] = incoming
+                saved = status_checks.set_entries(rows)
+                return web.json_response({"checks": saved, "check": incoming})
+        return json_error(404, f"no status check named {check_id!r}")
+    except ValueError as exc:
+        return json_error(400, str(exc))
+    except status_checks.StatusCheckError as exc:
+        return json_error(500, str(exc))
+
+
+async def h_status_checks_remove(request: web.Request) -> web.Response:
+    check_id = request.match_info["check_id"]
+    try:
+        rows = status_checks.entries()
+        kept = [row for row in rows if row.get("id") != check_id]
+        if len(kept) == len(rows):
+            return json_error(404, f"no status check named {check_id!r}")
+        return web.json_response({"checks": status_checks.set_entries(kept), "removed": check_id})
+    except status_checks.StatusCheckError as exc:
         return json_error(500, str(exc))
 
 
@@ -3111,6 +3184,14 @@ async def h_sessions_list(request: web.Request) -> web.Response:
         llm_ok = briefing.llm_configured(briefing.llm_config())
     except store.StoreError:
         llm_ok = False
+    try:
+        check_digests = status_checks.digests([info.get("name") or "" for info in attached])
+    except status_checks.StatusCheckError:
+        check_digests = {}
+    for info in attached:
+        checks = check_digests.get(info.get("name") or "")
+        if checks:
+            info["status_checks"] = checks
     return web.json_response({"sessions": attached, "llm_configured": llm_ok})
 
 
@@ -4500,6 +4581,70 @@ async def h_session_briefing(request: web.Request) -> web.Response:
     except briefing.BriefingError as exc:
         return json_error(502, str(exc))
     return web.json_response(payload)
+
+
+async def h_session_status_checks(request: web.Request) -> web.Response:
+    """Enabled Y/N checks and the latest direct report for one session."""
+    manager: SessionManager = request.app["manager"]
+    name = request.match_info["name"]
+    try:
+        manager.get(name)
+        return web.json_response({
+            "session": name,
+            "checks": status_checks.session_entries(name, enabled_only=True),
+        })
+    except ManagerError:
+        return json_error(404, f"no session named {name!r}")
+    except status_checks.StatusCheckError as exc:
+        return json_error(500, str(exc))
+
+
+async def h_session_status_checks_report(request: web.Request) -> web.Response:
+    """Accept the current managed session's direct MCP report."""
+    manager: SessionManager = request.app["manager"]
+    name = request.match_info["name"]
+    try:
+        manager.get(name)
+        body = await _json_body(request)
+        answers = body.get("answers")
+        if not isinstance(answers, list):
+            return json_error(400, "'answers' must be an array")
+        return web.json_response({
+            "session": name,
+            "checks": status_checks.report(name, answers),
+        })
+    except ManagerError:
+        return json_error(404, f"no session named {name!r}")
+    except ValueError as exc:
+        return json_error(400, str(exc))
+    except status_checks.StatusCheckError as exc:
+        return json_error(500, str(exc))
+
+
+async def h_session_status_checks_refresh(request: web.Request) -> web.Response:
+    """Ask an active agent to read current checks and report fresh values."""
+    manager: SessionManager = request.app["manager"]
+    name = request.match_info["name"]
+    try:
+        session = manager.get(name)
+    except ManagerError:
+        return json_error(404, f"no session named {name!r}")
+    if session.exited:
+        return json_error(409, f"session {name!r} has exited")
+    try:
+        checks = status_checks.session_entries(name, enabled_only=True)
+    except status_checks.StatusCheckError as exc:
+        return json_error(500, str(exc))
+    if not checks:
+        return web.json_response({"session": name, "delivered": False, "checks": []})
+    delivered = await session.deliver(
+        "[claunch status-check refresh]\n"
+        "Read the current user-configured Y/N checks with MCP tool `status_checks`. "
+        "Verify their current values from your work, then call `report_status_checks` "
+        "with every enabled ID and a yes/no answer. The list is editable; do not use "
+        "IDs remembered from an earlier request."
+    )
+    return web.json_response({"session": name, "delivered": delivered, "checks": checks})
 
 
 async def h_session_capture(request: web.Request) -> web.Response:

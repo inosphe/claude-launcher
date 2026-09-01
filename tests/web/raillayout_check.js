@@ -324,7 +324,7 @@ ctx.setMeshes([
   }
   const decl = (sel, prop) => (rules.get(sel) || {})[prop];
 
-  /* A full-width child is a line break. Only the eight deliberate ones may
+  /* A full-width child is a line break. Only the nine deliberate ones may
      be, and each must sort after the toggle — a breaker at the default
      order 0 ends the line before the toggle can land on it, which is the
      bug. (.rail-cwd, .rail-brief, .rail-ctx-line and .rail-seen are the
@@ -336,13 +336,14 @@ ctx.setMeshes([
     "#session-list .rail-cwd", "#session-list .rail-beads",
     "#session-list .rail-brief", "#session-list .rail-ctx-line",
     "#session-list .rail-seen", "#session-list .rail-quiet",
+    "#session-list .rail-status-checks",
     "#session-list .sess-cflow", "#session-list .sess-brief",
   ];
   const fullWidth = [...rules].filter(([sel, d]) =>
     sel.startsWith("#session-list") &&
     (d["flex-basis"] === "100%" || /(^|\s)100%$/.test(d.flex || ""))
   ).map(([sel]) => sel);
-  check("only the directory line, the beads line, the one-line, the context line, the attention line, the quiet line, the cflow line and the briefing card break the row",
+  check("only the directory line, the beads line, the one-line, the context line, the attention line, the quiet line, the status-check line, the cflow line and the briefing card break the row",
         fullWidth.sort(), [...BREAKERS].sort());
 
   /* The one-line summary is the exception to this rail's ellipsis habit: it
