@@ -37,10 +37,10 @@ const code = [
 const ctx = {};
 new Function(
   "exports",
-  code + "\nObject.assign(exports, {wfDiagramSvg, wfStepOrder, wfdTextW, wfdFit, flowMetrics," +
+  code + "\nObject.assign(exports, {wfDiagramSvg, wfStepOrder, wfTreeLayout, wfdTextW, wfdFit, flowMetrics," +
   " flowOrder, flowTrack, flowNeedsHuman, flowState});"
 )(ctx);
-const { wfDiagramSvg, wfStepOrder, wfdTextW, wfdFit, flowMetrics,
+const { wfDiagramSvg, wfStepOrder, wfTreeLayout, wfdTextW, wfdFit, flowMetrics,
         flowOrder, flowTrack, flowNeedsHuman, flowState } = ctx;
 
 let failures = 0;
@@ -63,6 +63,44 @@ const WF = {
     { id: "ship" },
   ],
 };
+
+/* A fork occupies sibling columns.  The join is still one node: its first
+   forward arrival is the tree parent and the other arrival is a dashed
+   reference edge, rather than a second copy of `join`. */
+{
+  const fork = {
+    name: "fork", start: "root",
+    steps: [
+      { id: "root", select: { options: [
+        { name: "left", next: "left" }, { name: "right", next: "right" },
+      ] } },
+      { id: "left", next: "join" }, { id: "right", next: "join" },
+      { id: "join" },
+    ],
+  };
+  const svg = wfDiagramSvg(fork, {}, null);
+  const nodeX = (id) => {
+    const m = svg.match(new RegExp(
+      `data-step="${id}"[^>]*><rect x="([\\d.]+)" y="([\\d.]+)"`));
+    return m ? { x: +m[1], y: +m[2] } : null;
+  };
+  const root = nodeX("root"), left = nodeX("left"), right = nodeX("right");
+  check("fork children occupy separate sibling columns",
+        !!root && !!left && !!right && left.x < root.x && root.x < right.x,
+        { root, left, right });
+  check("a joined step is rendered once",
+        (svg.match(/data-step="join"/g) || []).length === 1, svg);
+  check("the second arrival to a join is a reference edge",
+        svg.includes('class="wfd-edge ref"') && svg.includes('data-ref="right&gt;join"'),
+        svg);
+  const routes = [
+    { from: "root", to: "left" }, { from: "root", to: "right" },
+    { from: "left", to: "join" }, { from: "right", to: "join" },
+  ];
+  const layout = wfTreeLayout(wfStepOrder(fork), routes, fork.start);
+  check("the first forward arrival is the join's tree parent",
+        layout.parent.get("join") === "left", [...layout.parent]);
+}
 
 /* --- the claim that makes the strip readable -------------------------- */
 {

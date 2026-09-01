@@ -12220,9 +12220,9 @@ function wfReports(data, ui) {
   return box;
 }
 
-/* SVG graph: layered rows from start (wfStepOrder), forward edges on the
-   right rail, back edges (the cycle arcs) on the left rail, select options
-   as edge labels. */
+/* SVG graph: a parent-child tree from the workflow start.  Routes that join
+   an existing node or retry an earlier one stay as dashed reference edges;
+   select options remain edge labels. */
 function escXml(s) {
   return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;")
     .replace(/>/g, "&gt;").replace(/"/g, "&quot;");
@@ -12322,6 +12322,57 @@ function wfStepOrder(wf) {
     (final(a) - final(b)) || (pos.get(a) - pos.get(b)));
 }
 
+/* One forward route into a step is its place in the tree.  Every additional
+   route still exists in the workflow, but drawing it as another copy of the
+   step would make a merge look like two separate pieces of work.  The first
+   forward arrival in declaration order is therefore the parent; joins and
+   retries remain edges to that single node. */
+function wfTreeLayout(order, routes, start) {
+  const index = new Map(order.map((id, i) => [id, i]));
+  const parent = new Map();
+  const children = new Map(order.map((id) => [id, []]));
+  for (const route of routes) {
+    if (!index.has(route.from) || !index.has(route.to) || route.to === start) continue;
+    if (index.get(route.from) >= index.get(route.to) || parent.has(route.to)) continue;
+    parent.set(route.to, route.from);
+    children.get(route.from).push(route.to);
+  }
+
+  const roots = order.filter((id) => !parent.has(id));
+  const pos = new Map();
+  let leaf = 0;
+  const place = (id, depth) => {
+    const kids = children.get(id) || [];
+    const childXs = kids.map((kid) => place(kid, depth + 1));
+    const x = childXs.length
+      ? (childXs[0] + childXs[childXs.length - 1]) / 2
+      : leaf++;
+    pos.set(id, { x, depth });
+    return x;
+  };
+  for (const root of roots) place(root, 0);
+
+  /* A tree parent fixes only the horizontal relationship.  A join may have
+     another forward predecessor in a different branch, so deepen nodes until
+     every non-retry route still points downward. */
+  const depth = new Map([...pos].map(([id, p]) => [id, p.depth]));
+  for (let pass = 0; pass < order.length; pass++) {
+    let moved = false;
+    for (const route of routes) {
+      if (!index.has(route.from) || !index.has(route.to)
+          || index.get(route.from) >= index.get(route.to)) continue;
+      const want = depth.get(route.from) + 1;
+      if (depth.get(route.to) < want) {
+        depth.set(route.to, want);
+        moved = true;
+      }
+    }
+    if (!moved) break;
+  }
+  for (const [id, p] of pos) p.depth = depth.get(id);
+  return { parent, pos, leaves: Math.max(leaf, 1) };
+}
+
 /* A cadence in the largest unit that still reads whole: 300 -> "5m",
    90 -> "90s", 5400 -> "1.5h". The diagram has about ten pixels of type to
    say it in, so "300 seconds" is not an option and neither is "00:05:00". */
@@ -12390,20 +12441,17 @@ function wfDiagramSvg(wf, run, selected) {
     return out;
   };
 
-  // Shared with the timing diagram under this graph: the two pictures have
-  // to put a step on the same row, or the lane is one the reader must hunt
-  // for rather than glance down to.
+  // The timing diagram uses this stable order for its lanes.  The SVG below
+  // uses the same order only to choose a canonical parent for each node;
+  // its horizontal positions come from the resulting tree.
   const order = wfStepOrder(wf);
-
-  const rows = {};
-  order.forEach((id, i) => { rows[id] = i; });
 
   const edges = [];
   let hasEnd = false;
   for (const s of steps) {
     outsOf(s).forEach(([t, label, opt], i) => {
       const pace = (opt && opt.interval) || null;
-      if (t) edges.push({ from: s.id, to: t, label, i, pace });
+      if (t && byId[t]) edges.push({ from: s.id, to: t, label, i, pace });
       else { hasEnd = true; edges.push({ from: s.id, to: "end", label, i, pace }); }
     });
   }
@@ -12417,13 +12465,6 @@ function wfDiagramSvg(wf, run, selected) {
     ? { step: run.step_id, option: run.option }
     : null;
   const isHeld = (e) => !!held && held.step === e.from && held.option === e.label;
-
-  const NW = 210, NH = 44, ROWH = 82, W = 480;
-  const NX = (W - NW) / 2;
-  const endRow = order.length;
-  const H = (endRow + (hasEnd ? 1 : 0)) * ROWH + 10;
-  const rowOf = (id) => (id === "end" ? endRow : rows[id]);
-  const yTop = (id) => 8 + rowOf(id) * ROWH;
 
   /* Two options that leave the same step for the same step are ONE route on
      the page. Drawing one arc per option drew that route twice, and both
@@ -12447,46 +12488,22 @@ function wfDiagramSvg(wf, run, selected) {
     r.opts.push(e);
   }
 
-  /* Gutter columns by row span, not by option index. The index is a number
-     about one step's menu; whether two arcs collide is a fact about the rows
-     they cross. improv-worker had both of its left-rail arcs on index 1 —
-     `changes` (rows 1..7) and the loop back to rebase (rows 6..9) — so they
-     ran down the same column and crossed. Shortest span first, so a long arc
-     nests outside a short one instead of cutting through it; arcs that share
-     no row reuse a column and the drawing stays as narrow as it was. */
-  const laneOf = new Map();
-  const lanes = (rs) => {
-    const taken = [];
-    for (const r of rs.slice().sort((a, b) => {
-      const sa = Math.abs(rowOf(a.to) - rowOf(a.from));
-      const sb = Math.abs(rowOf(b.to) - rowOf(b.from));
-      return (sa - sb) || (rowOf(a.from) - rowOf(b.from));
-    })) {
-      const lo = Math.min(rowOf(r.from), rowOf(r.to));
-      const hi = Math.max(rowOf(r.from), rowOf(r.to));
-      let lane = 0;
-      while (taken[lane] && taken[lane].some(([a, b]) => lo <= b && a <= hi)) lane++;
-      (taken[lane] = taken[lane] || []).push([lo, hi]);
-      laneOf.set(r, lane);
-    }
+  /* The canonical incoming route makes a node a child exactly once.  Every
+     other route is a reference: it points at the existing node rather than
+     creating a second copy at the branch that happened to reach it. */
+  const tree = wfTreeLayout(order, routes, wf.start);
+  const NW = 210, NH = 44, COLW = 254, ROWH = 92;
+  const W = Math.max(480, NW + 48 + (tree.leaves - 1) * COLW);
+  const maxDepth = Math.max(0, ...[...tree.pos.values()].map((p) => p.depth));
+  const endDepth = maxDepth + 1;
+  const H = (endDepth + (hasEnd ? 1 : 0)) * ROWH + 18;
+  const pointOf = (id) => {
+    if (id === "end") return { x: W / 2, y: 8 + endDepth * ROWH };
+    const p = tree.pos.get(id);
+    return { x: NW / 2 + 24 + p.x * COLW, y: 8 + p.depth * ROWH };
   };
-  lanes(routes.filter((r) => rowOf(r.to) > rowOf(r.from) + 1));   // right rail
-  lanes(routes.filter((r) => rowOf(r.to) <= rowOf(r.from)));      // left rail
-
-  /* The centre column fans the same way, and for the same reason: a step's
-     one straight way out belongs on the centre line. Counting the option's
-     place in the MENU pushed it off — improv-worker's `landing` sends its
-     first option down the right rail and its second straight down, so the
-     only straight arrow it draws was offset as though it had a twin. Count
-     the straight ways out instead. */
-  const fanOf = new Map();
-  const straight = new Map();
-  for (const r of routes) {
-    if (rowOf(r.to) !== rowOf(r.from) + 1) continue;
-    const n = straight.get(r.from) || 0;
-    fanOf.set(r, n);
-    straight.set(r.from, n + 1);
-  }
+  const nodeX = (id) => pointOf(id).x - NW / 2;
+  const isTreeRoute = (r) => r.to !== "end" && tree.parent.get(r.to) === r.from;
 
   /* Where paths come back together, and where they split. A fork is already
      visible — the arcs leave the box in front of the reader — but a MERGE is
@@ -12506,8 +12523,11 @@ function wfDiagramSvg(wf, run, selected) {
      back to rebase. Three choices, two outcomes. */
   const mergeIn = new Map();
   const forkOut = new Map();
+  const orderIndex = new Map(order.map((id, i) => [id, i]));
   for (const r of routes) {
-    if (rowOf(r.to) > rowOf(r.from)) mergeIn.set(r.to, (mergeIn.get(r.to) || 0) + 1);
+    if (orderIndex.get(r.to) > orderIndex.get(r.from)) {
+      mergeIn.set(r.to, (mergeIn.get(r.to) || 0) + 1);
+    }
     forkOut.set(r.from, (forkOut.get(r.from) || 0) + 1);
   }
   const isMerge = (id) => (mergeIn.get(id) || 0) > 1;
@@ -12550,39 +12570,44 @@ function wfDiagramSvg(wf, run, selected) {
     return out;
   };
 
+  let reference = 0;
   for (const e of routes) {
-    const r1 = rowOf(e.from), r2 = rowOf(e.to);
-    const lane = laneOf.get(e) || 0;
+    const from = pointOf(e.from), to = pointOf(e.to);
+    const treeRoute = isTreeRoute(e);
     let d, lx, ly, anchor = "start";
-    if (r2 === r1 + 1) {
-      const f = fanOf.get(e) || 0;
-      const x = W / 2 + (f ? (f % 2 ? -1 : 1) * 18 * Math.ceil(f / 2) : 0);
-      const y1 = yTop(e.from) + NH, y2 = yTop(e.to) - 2;
-      d = `M ${x} ${y1} L ${x} ${y2}`;
-      lx = x + 7; ly = (y1 + y2) / 2 + 4;
-    } else if (r2 > r1) {
-      const y1 = yTop(e.from) + NH / 2, y2 = yTop(e.to) + 8;
-      const b = NX + NW + 30 + 16 * lane;
-      d = `M ${NX + NW} ${y1} C ${b} ${y1}, ${b} ${y2}, ${NX + NW + 2} ${y2}`;
-      lx = NX + NW + 8; ly = y1 - 8;
+    if (treeRoute) {
+      const y1 = from.y + NH, y2 = to.y - 2;
+      const mid = (y1 + y2) / 2;
+      d = `M ${from.x} ${y1} C ${from.x} ${mid}, ${to.x} ${mid}, ${to.x} ${y2}`;
+      lx = (from.x + to.x) / 2 + 7;
+      ly = mid + 4;
     } else {
-      const y1 = yTop(e.from) + NH / 2, y2 = yTop(e.to) + NH / 2;
-      const b = NX - 30 - 16 * lane;
-      d = `M ${NX} ${y1} C ${b} ${y1}, ${b} ${y2}, ${NX - 2} ${y2}`;
-      // At the end the arc LEAVES from, not at its middle: the middle of a
-      // long arc is beside rows that have nothing to do with the branch, and
-      // two arcs of different length can share a middle. The step a branch
-      // departs from is unique to it.
-      lx = NX - 8; ly = y1 - 8; anchor = "end";
+      const n = reference++;
+      const right = to.x >= from.x;
+      const y1 = from.y + NH / 2;
+      const y2 = e.to === "end" ? to.y + 15 : to.y + NH / 2;
+      const x1 = from.x + (right ? NW / 2 : -NW / 2);
+      const x2 = to.x + (right ? -NW / 2 + 2 : NW / 2 - 2);
+      const bend = (right ? Math.max(x1, x2) + 34 : Math.min(x1, x2) - 34)
+        + (right ? 1 : -1) * 16 * n;
+      d = `M ${x1} ${y1} C ${bend} ${y1}, ${bend} ${y2}, ${x2} ${y2}`;
+      lx = x1 + (right ? 8 : -8);
+      ly = y1 - 8;
+      anchor = right ? "start" : "end";
     }
     const hold = e.opts.some(isHeld);
     const pace = e.opts.some((o) => o.pace);
     // Dashed for as long as the pacing exists, not only while it bites: that
     // this branch runs at most once per interval is a fact about the
     // workflow, and a reader planning a run needs it before anything is held.
-    const ecls = `wfd-edge${pace ? " paced" : ""}${hold ? " held" : ""}`;
-    const head = isMerge(e.to) && rowOf(e.to) > rowOf(e.from) ? "arrow-merge" : "arrow";
-    parts.push(`<path class="${ecls}" d="${d}" marker-end="url(#${head})"/>`);
+    const ecls = `wfd-edge${pace ? " paced" : ""}${hold ? " held" : ""}` +
+      `${treeRoute ? "" : " ref"}`;
+    const head = isMerge(e.to) && orderIndex.get(e.to) > orderIndex.get(e.from)
+      ? "arrow-merge" : "arrow";
+    parts.push(
+      `<path class="${ecls}" d="${d}" marker-end="url(#${head})" ` +
+      `data-ref="${treeRoute ? "" : escXml(`${e.from}>${e.to}`)}"/>`
+    );
     for (const o of e.opts) {
       if (o.label) {
         parts.push(
@@ -12608,7 +12633,8 @@ function wfDiagramSvg(wf, run, selected) {
   const visits = (run && run.visits) || {};
   for (const id of order) {
     const s = byId[id];
-    const y = yTop(id);
+    const point = pointOf(id);
+    const x = nodeX(id), y = point.y;
     const cls = ["wfd-node"];
     const active = run && run.step_id === id
       && run.status !== "done" && run.status !== "aborted";
@@ -12655,9 +12681,9 @@ function wfDiagramSvg(wf, run, selected) {
     // First child, where SVG says a <title> belongs: it is the group's
     // tooltip, and what the cut title dropped is only reachable here.
     if (shown !== title) parts.push(`<title>${escXml(title)}</title>`);
-    parts.push(`<rect x="${NX}" y="${y}" width="${NW}" height="${NH}" rx="8"/>`);
+    parts.push(`<rect x="${x}" y="${y}" width="${NW}" height="${NH}" rx="8"/>`);
     parts.push(
-      `<text class="wfd-title" x="${NX + 12}" y="${y + (flags.length ? 19 : 27)}">` +
+      `<text class="wfd-title" x="${x + 12}" y="${y + (flags.length ? 19 : 27)}">` +
       `${escXml(shown)}</text>`
     );
     if (flags.length) {
@@ -12672,25 +12698,26 @@ function wfDiagramSvg(wf, run, selected) {
       const flagStr = flags.join(" · ");
       const shownFlags = wfdFit(flagStr, 10, NW - 24);
       parts.push(
-        `<text class="wfd-flags" x="${NX + 12}" y="${y + 35}">` +
+        `<text class="wfd-flags" x="${x + 12}" y="${y + 35}">` +
         (shownFlags === flagStr ? "" : `<title>${escXml(flagStr)}</title>`) +
         `${escXml(shownFlags)}</text>`
       );
     }
     if (visits[id] > 1) {
       parts.push(
-        `<text class="wfd-visits" x="${NX + NW - 12}" y="${y + 19}" text-anchor="end">` +
+        `<text class="wfd-visits" x="${x + NW - 12}" y="${y + 19}" text-anchor="end">` +
         `×${visits[id]}</text>`
       );
     }
     parts.push("</g>");
   }
   if (hasEnd) {
-    const y = yTop("end");
+    const end = pointOf("end");
+    const y = end.y;
     const endCls = selected === "end" ? "wfd-node end selected" : "wfd-node end";
     parts.push(
-      `<g class="${endCls}" data-step="end"><rect x="${(W - 90) / 2}" y="${y}" width="90" height="30" rx="15"/>` +
-      `<text class="wfd-title" x="${W / 2}" y="${y + 20}" text-anchor="middle">end</text></g>`
+      `<g class="${endCls}" data-step="end"><rect x="${end.x - 45}" y="${y}" width="90" height="30" rx="15"/>` +
+      `<text class="wfd-title" x="${end.x}" y="${y + 20}" text-anchor="middle">end</text></g>`
     );
   }
   parts.push("</svg>");

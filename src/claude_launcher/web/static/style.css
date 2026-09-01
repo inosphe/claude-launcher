@@ -2075,6 +2075,9 @@ a.wf-btn { display: inline-block; text-decoration: none; line-height: 1.5; }
 .wfd-flags { fill: #7d8590; font-size: 10px; }
 .wfd-visits { fill: #d29922; font-size: 11px; }
 .wfd-edge { fill: none; stroke: #4d5566; stroke-width: 1.5; }
+/* A non-tree route reaches a node that is already drawn elsewhere.  The dash
+   distinguishes merges and retries from the parent-to-child tree edges. */
+.wfd-edge.ref { stroke: #697586; stroke-dasharray: 4 4; }
 /* Paced: this branch is passable at most once per its interval. Dashed for as
    long as the pacing is declared, not only while it bites. */
 .wfd-edge.paced { stroke-dasharray: 5 4; }
