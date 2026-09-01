@@ -573,8 +573,8 @@ check("the health probe is the unauthenticated one",
       /fetch\(url\("\/api\/health"\)/.test(src));
 check("and the poll outlives boot(), so a page opened against a dead daemon " +
       "still comes to life",
-      src.indexOf("pollTimer = setInterval(pollTick, 2000);") > 0
-      && src.indexOf("pollTimer = setInterval(pollTick, 2000);")
+      src.indexOf("pollTimer = setInterval(pollTick, DASHBOARD_POLL_MS);") > 0
+      && src.indexOf("pollTimer = setInterval(pollTick, DASHBOARD_POLL_MS);")
          > src.indexOf("async function pollTick("));
 
 /* The checks run in async blocks, so the tally is only complete once the

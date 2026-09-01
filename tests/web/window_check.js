@@ -151,8 +151,8 @@ const snapshot = {
   await new Promise((resolve) => setImmediate(resolve));
   check("opening shows the page", shown.at(-1) === "window", shown);
   check("opening reads the arbiter endpoint", fetched.includes("/api/window"), fetched);
-  check("the active page polls every two seconds",
-        timers.length === 1 && timers[0].ms === 2000, timers.map((t) => t.ms));
+  check("the active page polls every five seconds",
+        timers.length === 1 && timers[0].ms === 5000, timers.map((t) => t.ms));
 
   check("one row is drawn for every holder and waiter",
         withClass("window-row").length === 4, withClass("window-row").length);

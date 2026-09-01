@@ -474,7 +474,7 @@ function answer(pathname) {
       goal: BRIEF_TAG, now: "n", progress: "p", state: "working",
     };
   }
-  if (pathname.endsWith("/api/sessions")) {
+  if (pathname.includes("/api/sessions?view=rail")) {
     return { sessions: SESSIONS.map(sessionPayload), llm_configured: LLM_ON };
   }
   if (pathname.endsWith("/api/daemon")) {

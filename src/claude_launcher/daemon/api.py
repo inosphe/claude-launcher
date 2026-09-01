@@ -1171,13 +1171,19 @@ async def h_prompt_presets_remove(request: web.Request) -> web.Response:
 
 
 def _status_check_body(body: dict) -> dict:
+    name = str(body.get("name") or "").strip()
     question = str(body.get("question") or "").strip()
+    if not name:
+        raise ValueError("a status check needs a name")
     if not question:
         raise ValueError("a status check needs a question")
+    if len(name) > 120:
+        raise ValueError("a status-check name is too long")
     if len(question) > 1000:
         raise ValueError("a status-check question is too long")
     return {
         "id": str(body.get("id") or ""),
+        "name": name,
         "question": question,
         "enabled": body.get("enabled", True) is not False,
     }
@@ -2536,14 +2542,18 @@ def _mesh_mgr(request: web.Request) -> MeshManager:
 
 async def h_mesh_list(request: web.Request) -> web.Response:
     mm = _mesh_mgr(request)
+    rail_view = request.query.get("view") == "rail"
     return json_response(
         {
-            # Without the member graph: the sidebar and the session rail read
-            # names, members and roles off this two-second poll, and the graph
-            # (every pair of every member, with its state) was 480KB of the
-            # 525KB answer on a nine-mesh daemon. The mesh page and the flow
-            # view fetch /api/mesh/<name>, which still carries it.
-            "meshes": [mm.mesh_info(m, links=False) for m in mm.list()],
+            # The rail view is what the sidebar polls: names, local members
+            # and counts. The member graph (every pair of every member, with
+            # its state) was 480KB of the 525KB full answer on a nine-mesh
+            # daemon, and only the mesh page and the flow view draw it -- they
+            # fetch /api/mesh/<name>, which still carries it.
+            "meshes": [
+                mm.mesh_rail_info(m) if rail_view else mm.mesh_info(m)
+                for m in mm.list()
+            ],
             "outgoing": mm.outgoing_list(),
             "relay": request.app["relay_state"](),
         }
@@ -3192,6 +3202,10 @@ async def h_peer_deliver(request: web.Request) -> web.Response:
 
 async def h_sessions_list(request: web.Request) -> web.Response:
     manager: SessionManager = request.app["manager"]
+    rail_view = request.query.get("view") == "rail"
+    list_state = request.query.get("state") or "all"
+    if list_state not in {"all", "active", "current", "killed", "archived"}:
+        return json_error(400, f"invalid session list state: {list_state!r}")
     reminder_service = request.app.get("session_reminder")
     reminder_cfg = None
     if reminder_service is not None:
@@ -3207,14 +3221,25 @@ async def h_sessions_list(request: web.Request) -> web.Response:
     # Whether the briefing summariser is usable rides the list the UI already
     # polls, so the rail can disable the briefing toggles (and say why) up
     # front instead of every click discovering the 400 for itself.
-    sessions = manager.list()
+    sessions = []
+    for s in manager.list():
+        archived = bool(getattr(s, "archived_at", None))
+        if list_state == "active" and s.exited:
+            continue
+        if list_state == "current" and archived:
+            continue
+        if list_state == "killed" and (not s.exited or archived):
+            continue
+        if list_state == "archived" and not archived:
+            continue
+        sessions.append(s)
     winddowns = request.app["beads"].winddowns
 
     def collect() -> list:
         # The per-session assembly, in a worker: ``attach`` re-reads a
         # transcript tail whenever its file grew, and ten busy sessions grow
         # theirs continuously, so this loop was 30-150ms of the event loop
-        # every two seconds -- time no terminal socket could be served in.
+        # per poll -- time no terminal socket could be served in.
         out = []
         for s in sessions:
             info = ctxsize.attach(s)
@@ -3262,6 +3287,23 @@ async def h_sessions_list(request: web.Request) -> web.Response:
         checks = check_digests.get(info.get("name") or "")
         if checks:
             info["status_checks"] = checks
+    if rail_view:
+        # The dashboard reads this resource repeatedly. The detail panel has
+        # its own /meta request, so an opening task and environment do not
+        # belong in every rail response.
+        rail_fields = {
+            "name", "harness", "profile", "cwd", "args", "model", "effort",
+            "restore", "conversation_id", "role", "parent", "borrow",
+            "null_token", "issue", "keep_alive", "reminder_paused", "status",
+            "pid", "exit_code", "created_at", "last_output_at",
+            "last_visited_at", "last_input_at", "last_activity_at", "viewers",
+            "exited_at", "archived_at", "delivery_hold", "compacting", "context",
+            "branch", "briefing", "winddown", "session_reminder", "status_checks",
+        }
+        attached = [
+            {key: value for key, value in info.items() if key in rail_fields}
+            for info in attached
+        ]
     return json_response({"sessions": attached, "llm_configured": llm_ok})
 
 

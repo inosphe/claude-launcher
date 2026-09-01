@@ -106,17 +106,23 @@ const noChip = () => null;
 new Function(
   "exports", "$", "document", "api", "ctxChip",
   [slice("el"), slice("fmtAge"), slice("briefingStateClass"),
-   slice("statusCheckText"),
+   slice("sessionStatusChecks"), slice("statusCheckText"), slice("statusCheckIcon"),
+   slice("statusCheckName"), slice("statusCheckRefreshState"),
+   slice("paintStatusCheckRefresh"), slice("requestStatusChecksRefresh"),
    slice("fetchBriefing"), slice("refreshBriefingRow"),
    slice("toggleBriefing"), slice("renderBriefingCard"),
    slice("applyBriefingTop"), slice("applyBriefingCards"),
    slice("decorateBriefingRow"), slice("syncRowRefresh")].join("\n") + `
 const briefingOpen = new Set();
 const briefingCache = new Map();
+const sessionsCache = [];
+const statusCheckRefreshes = new Map();
+const refreshSessions = async () => {};
 let briefingLLM = true;
 exports.decorate = decorateBriefingRow;
 exports.setLLM = (v) => { briefingLLM = v; };
 exports.openSet = briefingOpen;
+exports.statusSessions = sessionsCache;
 `)(ctx, (id) => (id === "session-list" ? list : null),
    { createElement: mkel }, api, noChip);
 
@@ -153,17 +159,40 @@ const click = (n) => n.listeners.click({ stopPropagation() {} });
 
   const sChecks = row("schecks");
   ctx.decorate(sChecks, { name: "schecks", status_checks: [
-    { question: "Tests passed?", answer: "yes", reported_at: "2026-09-01T00:00:00+00:00" },
-    { question: "Merged?" },
+    { id: "tests", name: "Tests", question: "Tests passed?", answer: "yes", reported_at: "2026-09-01T00:00:00+00:00" },
+    { id: "merged", name: "Merged", question: "Merged?" },
   ] });
   const checkChips = sChecks.querySelector(".rail-status-checks").children;
   check("reported and unreported status checks are compact chips",
         [checkChips[0].textContent, checkChips[0].className,
          checkChips[1].textContent, checkChips[1].className],
-        ["✓ Tests passed?", "rail-status-check check-yes",
-         "? Merged?", "rail-status-check check-unknown"]);
+        ["✓ Tests", "rail-status-check check-yes",
+         "• Merged", "rail-status-check check-unknown"]);
+  check("a status-check chip keeps the agent question on hover",
+        checkChips[0].title, "Tests passed?");
   check("status checks carry an independent agent refresh control",
-        sChecks.querySelector(".sess-status-check-rowref").textContent, "✓⟳");
+        sChecks.querySelector(".sess-status-check-rowref").textContent, "checks ⟳");
+  ctx.statusSessions.push({ name: "schecks", status_checks: [
+    { id: "tests", name: "Tests", question: "Tests passed?", answer: "yes", reported_at: "2026-09-01T00:00:00+00:00" },
+    { id: "merged", name: "Merged", question: "Merged?" },
+  ] });
+  answer = { status: 200, body: { delivered: true, checks: [] } };
+  const statusRefresh = sChecks.querySelector(".sess-status-check-rowref");
+  click(statusRefresh);
+  check("a status-check refresh immediately spins and names the pending request",
+        [statusRefresh.className, statusRefresh.textContent, statusRefresh.disabled],
+        ["sess-status-check-rowref requesting", "checking…", true]);
+  await flush();
+  check("delivery leaves a visible waiting state until the agent reports",
+        [statusRefresh.className, statusRefresh.textContent, statusRefresh.disabled],
+        ["sess-status-check-rowref waiting", "checks · waiting", false]);
+  ctx.statusSessions[0].status_checks[0].reported_at = "2026-09-01T00:01:00+00:00";
+  ctx.statusSessions[0].status_checks[1].reported_at = "2026-09-01T00:01:00+00:00";
+  ctx.decorate(sChecks, ctx.statusSessions[0]);
+  check("a later report turns the refresh into a completed state",
+        [statusRefresh.className, statusRefresh.textContent],
+        ["sess-status-check-rowref updated", "checks ✓"]);
+  calls.length = 0;
 
   /* The row carries the WHOLE digest, however long — the stylesheet wraps
      it (raillayout_check pins that) and nothing here may shorten it first.

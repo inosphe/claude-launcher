@@ -1,7 +1,7 @@
-"""What the dashboard's two-second polls put on the wire.
+"""What the dashboard's recurring polls put on the wire.
 
 The rail and the sidebar are fed by ``/api/sessions`` and ``/api/mesh``
-every two seconds, from every open tab. Measured on a working daemon (193
+every few seconds, from every open tab. Measured on a working daemon (193
 sessions, nine meshes) the pair was 1.3MB per tick: a fifth of the session
 list was ``\\uXXXX`` escapes of Korean task text, and 480KB of the mesh
 list was the pairwise member graph that only the per-mesh views draw. These
@@ -105,10 +105,10 @@ def test_large_bodies_are_gzipped_when_asked_and_small_ones_are_not(home, tmp_pa
 
 
 def test_the_mesh_list_leaves_the_member_graph_to_the_mesh_view(home, tmp_path):
-    """``/api/mesh`` (the sidebar's poll) carries no ``member_links``;
-    ``/api/mesh/<name>`` (what the mesh page and the flow view fetch) still
-    does, so the diagram that draws the graph has it and the rail that never
-    did stops paying for it."""
+    """``/api/mesh?view=rail`` (the sidebar's poll) carries no
+    ``member_links``; ``/api/mesh/<name>`` (what the mesh page and the flow
+    view fetch) still does, so the diagram that draws the graph has it and
+    the rail that never did stops paying for it."""
 
     _register_py_harness()
 
@@ -121,9 +121,11 @@ def test_the_mesh_list_leaves_the_member_graph_to_the_mesh_view(home, tmp_path):
             for name in ("lead", "dev"):
                 mgr.create(SessionDef(name=name, harness="py", cwd=str(tmp_path)))
                 await mm.join("team", name)
-            listed = await (await client.get("/api/mesh", headers=BEARER)).json()
+            listed = await (
+                await client.get("/api/mesh?view=rail", headers=BEARER)
+            ).json()
             (entry,) = [m for m in listed["meshes"] if m["name"] == "team"]
-            assert entry["member_links"] is None
+            assert "member_links" not in entry
             assert {m["handle"] for m in entry["members"]} == {"lead", "dev"}
             one = await (await client.get("/api/mesh/team", headers=BEARER)).json()
             pairs = {frozenset((e["a"], e["b"])) for e in one["member_links"]}

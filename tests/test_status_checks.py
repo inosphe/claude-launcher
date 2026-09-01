@@ -35,8 +35,8 @@ def _register_py_harness() -> None:
 
 def test_status_check_storage_keeps_reports_per_session(home):
     rows = status_checks.set_entries([
-        {"question": "Tests passed?"},
-        {"question": "Merged?", "enabled": False},
+        {"name": "Tests", "question": "Tests passed?"},
+        {"name": "Merged", "question": "Merged?", "enabled": False},
     ])
     assert len(rows) == 2 and rows[0]["enabled"] is True
 
@@ -44,9 +44,15 @@ def test_status_check_storage_keeps_reports_per_session(home):
     assert reported[0]["report"]["answer"] == "yes"
     assert reported[0]["report"]["source"] == "agent"
     assert status_checks.session_entries("s2", enabled_only=True) == [
-        {"id": rows[0]["id"], "question": "Tests passed?", "enabled": True}
+        {"id": rows[0]["id"], "name": "Tests", "question": "Tests passed?", "enabled": True}
     ]
     assert status_checks.digests(["s1"])["s1"][0]["answer"] == "yes"
+
+
+def test_status_checks_upgrade_sentence_only_entries_to_named_entries(home):
+    rows = status_checks.set_entries([{"question": "Tests passed?"}])
+
+    assert rows[0]["name"] == "Tests passed?"
 
 
 def test_status_checks_api_reports_and_force_refresh(home, tmp_path):
@@ -58,13 +64,13 @@ def test_status_checks_api_reports_and_force_refresh(home, tmp_path):
         try:
             mgr.create(SessionDef(name="s1", harness="py", cwd=str(tmp_path)))
             created = await client.post(
-                "/api/status-checks", json={"question": "Tests passed?"}, headers=BEARER
+                "/api/status-checks", json={"name": "Tests", "question": "Tests passed?"}, headers=BEARER
             )
             assert created.status == 201
             check = (await created.json())["check"]
 
             got = await client.get("/api/sessions/s1/status-checks", headers=BEARER)
-            assert (await got.json())["checks"][0]["question"] == "Tests passed?"
+            assert (await got.json())["checks"][0]["name"] == "Tests"
             report = await client.post(
                 "/api/sessions/s1/status-checks/reports",
                 json={"answers": [{"id": check["id"], "answer": "no"}]}, headers=BEARER,

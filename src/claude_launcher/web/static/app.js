@@ -391,7 +391,7 @@ function forgetDeadSessions() {
 /* The rail holds still while a pointer is down on it.
 
    Every poll rebuilds the whole list from scratch (`list.innerHTML` below,
-   driven by setInterval(pollTick, 2000)). A press is not an instant, though:
+   driven by a five-second dashboard poll). A press is not an instant, though:
    pointerdown, then pointerup, and only then the click the handler is
    waiting for. A rebuild landing between the first two takes the node the
    press started on out of the document, and the browser is then left with no
@@ -585,11 +585,21 @@ function setSessionFilter(filter, remember = true) {
   sessionFilter = filter;
   if (remember) localStorage.setItem(SESSION_FILTER_KEY, filter);
   syncSessionFilters(sessionsCache);
+  // Inactive records are not part of the recurring rail poll. Selecting one
+  // of their filters is an explicit request for one fresh snapshot.
+  const state = filter === "archived" ? "archived"
+    : filter === "killed" ? "killed"
+    : filter === "current" ? "current" : "active";
+  refreshSessions({ state });
 }
 
 function syncSessionFilters(sessions) {
   const list = $("session-list");
   if (!list) return;
+  const archivedRefresh = $("refresh-archived");
+  if (archivedRefresh) {
+    archivedRefresh.classList.toggle("hidden", sessionFilter !== "archived");
+  }
   const counts = sessionFilterCounts(sessions);
   const labels = {
     current: "Current", running: "Running", killed: "Killed", archived: "Archived",
@@ -613,10 +623,17 @@ function syncSessionFilters(sessions) {
   if (typeof syncBulkActions === "function") syncBulkActions(sessions || [], sessionFilter);
 }
 
-async function refreshSessions() {
+async function refreshSessions(options) {
+  const state = (options && options.state) || "active";
+  const matchesPollState = (session) => {
+    if (state === "all") return true;
+    if (state === "active") return session.status !== "exited";
+    if (state === "current") return !session.archived_at;
+    return sessionCategory(session) === state;
+  };
   let data;
   try {
-    const resp = await api("/api/sessions");
+    const resp = await api(`/api/sessions?view=rail&state=${encodeURIComponent(state)}`);
     // An error response carries a JSON body of its own, so `resp.json()`
     // succeeds and `data.sessions` is simply absent -- which used to read as
     // "this daemon has no sessions" and empty the rail, drop every parked
@@ -627,7 +644,16 @@ async function refreshSessions() {
   } catch {
     return;
   }
-  sessionsCache = data.sessions || [];
+  const incoming = data.sessions || [];
+  const incomingNames = new Set(incoming.map((s) => s.name));
+  // A background request carries active sessions only. Keep any inactive
+  // records the operator explicitly inspected, while replacing the category
+  // this request owns and any record that has just returned as active.
+  sessionsCache = [
+    ...incoming,
+    ...sessionsCache.filter((s) =>
+      !incomingNames.has(s.name) && !matchesPollState(s)),
+  ];
   // Reduced embedded consumers execute this poll in isolation.  Keep that
   // contract while the full page reconciles the kill controls here.
   if (typeof reconcileKillUiState === "function") reconcileKillUiState(sessionsCache);
@@ -2489,6 +2515,51 @@ function statusCheckText(check) {
   return check.answer === "yes" ? "yes" : check.answer === "no" ? "no" : "unknown";
 }
 
+function statusCheckIcon(check) {
+  return check.answer === "yes" ? "✓" : check.answer === "no" ? "×" : "•";
+}
+
+function statusCheckName(check) {
+  return String(check.name || check.question || "status check");
+}
+
+function statusCheckRefreshState(name) {
+  const state = statusCheckRefreshes.get(name);
+  if (!state || state.phase !== "waiting") return state?.phase || "";
+  const checks = sessionStatusChecks(name);
+  if (checks.length && checks.every((check) =>
+    check.reported_at && state.reports[check.id] !== check.reported_at
+  )) {
+    state.phase = "updated";
+  }
+  return state.phase;
+}
+
+function paintStatusCheckRefresh(button, name, baseClass) {
+  const state = statusCheckRefreshState(name);
+  button.className = `${baseClass}${state ? ` ${state}` : ""}`;
+  button.disabled = state === "requesting";
+  if (state === "requesting") {
+    button.textContent = "checking…";
+    button.title = "requesting current status checks";
+  } else if (state === "waiting") {
+    button.textContent = "checks · waiting";
+    button.title = "request delivered; waiting for the agent report";
+  } else if (state === "updated") {
+    button.textContent = "checks ✓";
+    button.title = "the agent reported updated status checks";
+  } else if (state === "unavailable") {
+    button.textContent = "checks";
+    button.title = "no enabled status checks";
+  } else if (state === "failed") {
+    button.textContent = "checks !";
+    button.title = "status-check refresh failed — click to retry";
+  } else {
+    button.textContent = "checks ⟳";
+    button.title = "ask the agent to report current status checks";
+  }
+}
+
 function appendStatusChecks(card, name) {
   const checks = sessionStatusChecks(name);
   if (!checks.length) return;
@@ -2496,33 +2567,34 @@ function appendStatusChecks(card, name) {
   card.appendChild(heading);
   for (const check of checks) {
     const row = el("div", "sess-brief-row sess-brief-check");
-    const answer = el("span", `sess-brief-v check-${statusCheckText(check)}`, statusCheckText(check));
-    if (check.reported_at) {
-      const at = new Date(check.reported_at);
-      if (!isNaN(at)) answer.title = `agent reported ${at.toLocaleString()}`;
-    }
-    row.append(el("span", "sess-brief-k", String(check.question)), answer);
+    const answer = el("span", `status-check-icon check-${statusCheckText(check)}`,
+      statusCheckIcon(check));
+    answer.title = String(check.question || "");
+    answer.ariaLabel = `${statusCheckName(check)}: ${statusCheckText(check)}`;
+    row.append(answer, el("span", "sess-brief-v", statusCheckName(check)));
     card.appendChild(row);
   }
 }
 
 async function requestStatusChecksRefresh(name, button) {
-  if (button) button.disabled = true;
+  const reports = Object.fromEntries(sessionStatusChecks(name).map((check) =>
+    [check.id, check.reported_at || ""]
+  ));
+  statusCheckRefreshes.set(name, { phase: "requesting", reports });
+  if (button) paintStatusCheckRefresh(button, name, button.dataset.statusCheckBase);
   try {
     const resp = await api(`/api/sessions/${encodeURIComponent(name)}/status-checks/refresh`, {
       method: "POST",
     });
     const body = await resp.json().catch(() => ({}));
     if (!resp.ok) throw new Error(body.error || `HTTP ${resp.status}`);
-    if (button) button.title = body.delivered
-      ? "request delivered; waiting for the agent report"
-      : "no enabled status checks";
+    statusCheckRefreshes.get(name).phase = body.delivered ? "waiting" : "unavailable";
     await refreshSessions();
   } catch (err) {
-    if (button) button.title = `status-check refresh failed: ${String(err)}`;
-  } finally {
-    if (button) button.disabled = false;
+    statusCheckRefreshes.get(name).phase = "failed";
+    if (button) button.title = `status-check refresh failed: ${String(err)} — click to retry`;
   }
+  if (button) paintStatusCheckRefresh(button, name, button.dataset.statusCheckBase);
 }
 
 async function fetchBriefing(name, refresh) {
@@ -2600,14 +2672,17 @@ function renderBriefingCard(name, entry) {
     fetchBriefing(name, true);
   });
   head.appendChild(refresh);
-  const checksRefresh = el("button", "sess-brief-check-refresh", "checks ⟳");
-  checksRefresh.type = "button";
-  checksRefresh.title = "ask the agent to report current status checks";
-  checksRefresh.addEventListener("click", (e) => {
-    e.stopPropagation();
-    requestStatusChecksRefresh(name, checksRefresh);
-  });
-  head.appendChild(checksRefresh);
+  if (sessionStatusChecks(name).length) {
+    const checksRefresh = el("button", "sess-brief-check-refresh");
+    checksRefresh.type = "button";
+    checksRefresh.dataset.statusCheckBase = "sess-brief-check-refresh";
+    paintStatusCheckRefresh(checksRefresh, name, checksRefresh.dataset.statusCheckBase);
+    checksRefresh.addEventListener("click", (e) => {
+      e.stopPropagation();
+      requestStatusChecksRefresh(name, checksRefresh);
+    });
+    head.appendChild(checksRefresh);
+  }
   card.appendChild(head);
 
   if (loading && !data) {
@@ -2777,21 +2852,24 @@ function decorateBriefingRow(li, s) {
     checks.innerHTML = "";
     for (const check of reported) {
       const answer = statusCheckText(check);
-      const chip = el("span", `rail-status-check check-${answer}`, `${answer === "yes" ? "✓" : answer === "no" ? "✕" : "?"} ${check.question}`);
-      chip.title = `${check.question}: ${answer}${check.reported_at ? ` (agent: ${check.reported_at})` : ""}`;
+      const chip = el("span", `rail-status-check check-${answer}`,
+        `${statusCheckIcon(check)} ${statusCheckName(check)}`);
+      chip.title = String(check.question || "");
+      chip.ariaLabel = `${statusCheckName(check)}: ${answer}`;
       checks.appendChild(chip);
     }
     let statusRefresh = li.querySelector(".sess-status-check-rowref");
     if (!statusRefresh) {
-      statusRefresh = el("button", "sess-status-check-rowref", "✓⟳");
+      statusRefresh = el("button", "sess-status-check-rowref");
       statusRefresh.type = "button";
+      statusRefresh.dataset.statusCheckBase = "sess-status-check-rowref";
       statusRefresh.addEventListener("click", (e) => {
         e.stopPropagation();
         requestStatusChecksRefresh(s.name, statusRefresh);
       });
       li.appendChild(statusRefresh);
     }
-    statusRefresh.title = "ask the agent to report current status checks";
+    paintStatusCheckRefresh(statusRefresh, s.name, statusRefresh.dataset.statusCheckBase);
   } else if (checks) {
     checks.remove();
     li.querySelector(".sess-status-check-rowref")?.remove();
@@ -4978,7 +5056,7 @@ async function killCurrentSession() {
   } finally {
     if (killUiState.get(name) === "requesting") killUiState.delete(name);
     syncSessionKillControls(name);
-    await refreshSessions();
+    await refreshSessions({ state: "current" });
   }
 }
 
@@ -4998,7 +5076,7 @@ async function archiveExitedSession(name) {
   if (at >= 0) sessionsCache[at] = { ...sessionsCache[at], ...info };
   // Archive changes the rail classification while the selected filter,
   // final screen, detail pane and URL remain unchanged.
-  await refreshSessions();
+  await refreshSessions({ state: "current" });
   setStatusBadge("exited");
   return true;
 }
@@ -5025,7 +5103,7 @@ $("stop-all").addEventListener("click", async () => {
   await bulkAction($("stop-all"), "/api/sessions/kill", { method: "POST" }, "stop");
   // The open terminal's own socket sees its child go before the next poll
   // does, so there is nothing to reattach here — only the rail to redraw.
-  refreshSessions();
+  refreshSessions({ state: "current" });
 });
 
 /* Bring everything back. Each respawn replaces its session's child, so the one
@@ -5049,7 +5127,7 @@ $("resume-all").addEventListener("click", async () => {
   );
   const back = (result && result.respawned) || [];
   detach();
-  await refreshSessions();
+  await refreshSessions({ state: "current" });
   if (currentName && back.includes(currentName)) attach(currentName);
 });
 
@@ -5062,7 +5140,7 @@ $("archive-exited").addEventListener("click", async () => {
     $("archive-exited"), "/api/sessions/archive",
     { method: "POST" }, "archive"
   );
-  await refreshSessions();
+  await refreshSessions({ state: "current" });
 });
 
 for (const filter of SESSION_FILTERS) {
@@ -5093,7 +5171,11 @@ $("refresh-all").addEventListener("click", async () => {
   btn.classList.add("spinning");
   try {
     await Promise.all([
-      refreshSessions(),
+      refreshSessions({
+        state: sessionFilter === "archived" ? "archived"
+          : sessionFilter === "killed" ? "killed"
+          : sessionFilter === "current" ? "current" : "active",
+      }),
       refreshMeshList(),
       refreshCflow(),
       refreshWorkspaces(),
@@ -5106,6 +5188,19 @@ $("refresh-all").addEventListener("click", async () => {
       // floor the button just flickers and reads as "nothing happened".
       new Promise((done) => setTimeout(done, 400)),
     ]);
+  } finally {
+    btn.disabled = false;
+    btn.classList.remove("spinning");
+  }
+});
+
+$("refresh-archived")?.addEventListener("click", async () => {
+  const btn = $("refresh-archived");
+  if (!btn || btn.disabled) return;
+  btn.disabled = true;
+  btn.classList.add("spinning");
+  try {
+    await refreshSessions({ state: "archived" });
   } finally {
     btn.disabled = false;
     btn.classList.remove("spinning");
@@ -7756,7 +7851,7 @@ async function openWorkflow(cwd, scope) {
   showView("wf");
   $("wf-view").innerHTML = "<p class='wf-note'>loading…</p>";
   await refreshWf();
-  wfPollTimer = setInterval(refreshWf, 2000);
+  wfPollTimer = setInterval(refreshWf, 5000);
 }
 
 async function refreshWf() {
@@ -7836,7 +7931,7 @@ function openSplit(name) {
   splitFor = name;
   $("term-wf").innerHTML = "<p class='wf-note'>loading…</p>";
   refreshSplit();
-  splitPollTimer = setInterval(refreshSplit, 2000);
+  splitPollTimer = setInterval(refreshSplit, 5000);
 }
 
 function closeSplit() {
@@ -8821,7 +8916,7 @@ function renderHome() {
   grid.appendChild(homeCard(
     "Mesh", "#/mesh",
     meshCache.length
-      ? meshCache.map((m) => `${m.name} (${m.members.length})`).join(" · ")
+      ? meshCache.map((m) => `${m.name} (${m.member_count ?? m.members.length})`).join(" · ")
       : "no meshes yet"
   ));
 
@@ -8952,8 +9047,12 @@ let promptPresetDraft = { name: "", text: "" };
 let promptPresetEdit = null;
 let statusCheckCache = [];
 let statusCheckError = "";
-let statusCheckDraft = { question: "" };
+let statusCheckDraft = { name: "", question: "" };
 let statusCheckEdit = null;
+// A delivery is immediate, but the agent reports on a later MCP turn.  Keep
+// that interval visible across session-list polls instead of making it look
+// like an unresponsive click.
+const statusCheckRefreshes = new Map();
 
 function openWorkspaces() {
   wsOpen = true;
@@ -10105,7 +10204,7 @@ function openWindowPage() {
   showView("window");
   renderWindow();
   refreshWindow();
-  if (!windowTimer) windowTimer = setInterval(refreshWindow, 2000);
+  if (!windowTimer) windowTimer = setInterval(refreshWindow, 5000);
 }
 
 function stopWindowPoll() {
@@ -10647,15 +10746,19 @@ function statusCheckCard() {
   card.appendChild(el("h3", null, "Status checks"));
   card.appendChild(el(
     "p", "wf-note",
-    "Y/N questions that agents report directly through MCP. Values remain per session."
+    "Named Y/N checks that agents report directly through MCP. Values remain per session."
   ));
   const form = el("form", "status-check-add");
+  const name = document.createElement("input");
+  name.placeholder = "Name, for example: Tests";
+  name.value = statusCheckDraft.name;
+  name.addEventListener("input", () => { statusCheckDraft.name = name.value; });
   const q = document.createElement("input");
-  q.placeholder = "Question, for example: Tests passed?";
+  q.placeholder = "Question for the agent, for example: Did the tests pass?";
   q.value = statusCheckDraft.question;
   q.addEventListener("input", () => { statusCheckDraft.question = q.value; });
   const add = el("button", "wf-btn approve", "Add check");
-  form.append(q, add);
+  form.append(name, q, add);
   form.addEventListener("submit", async (e) => {
     e.preventDefault();
     try {
@@ -10666,7 +10769,7 @@ function statusCheckCard() {
       const data = await resp.json().catch(() => ({}));
       if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
       statusCheckCache = data.checks || [];
-      statusCheckDraft = { question: "" };
+      statusCheckDraft = { name: "", question: "" };
       statusCheckError = "";
     } catch (err) { statusCheckError = String(err); }
     renderWorkspaces();
@@ -10677,14 +10780,17 @@ function statusCheckCard() {
   for (const row of statusCheckCache) {
     const item = el("div", "status-check-row");
     if (statusCheckEdit === row.id) {
+      const en = document.createElement("input"); en.value = statusCheckName(row);
       const eq = document.createElement("input"); eq.value = row.question;
       const save = el("button", "wf-btn approve", "Save"); save.type = "button";
-      save.addEventListener("click", () => statusCheckSave(row, { question: eq.value }));
+      save.addEventListener("click", () => statusCheckSave(row, { name: en.value, question: eq.value }));
       const cancel = el("button", "wf-btn clear", "Cancel"); cancel.type = "button";
       cancel.addEventListener("click", () => { statusCheckEdit = null; renderWorkspaces(); });
-      item.append(eq, save, cancel); list.appendChild(item); continue;
+      item.append(en, eq, save, cancel); list.appendChild(item); continue;
     }
-    item.appendChild(el("div", "status-check-text", row.question));
+    const text = el("div", "status-check-text", statusCheckName(row));
+    text.title = String(row.question || "");
+    item.appendChild(text);
     const edit = el("button", "wf-btn clear", "Edit"); edit.type = "button";
     edit.addEventListener("click", () => { statusCheckEdit = row.id; renderWorkspaces(); });
     const toggle = el("button", "wf-btn clear", row.enabled === false ? "Enable" : "Disable");
@@ -13122,7 +13228,7 @@ function repointDetail(name) {
   $("sess-view").innerHTML = "<p class='wf-note'>loading…</p>";
   markDetailRow();
   refreshSession();
-  sessPollTimer = setInterval(refreshSession, 2000);
+  sessPollTimer = setInterval(refreshSession, 5000);
 }
 
 function closeDetail() {
@@ -14385,7 +14491,7 @@ function sessRunFoldFor(flow, unfold) {
     stopSessRun();
     if (!fold.open) return;
     refreshSessRun();
-    sessRunTimer = setInterval(refreshSessRun, 2000);
+    sessRunTimer = setInterval(refreshSessRun, 5000);
   });
   sessRunFold = fold;
   // On creation only, so shutting it stays shut across the panel's rebuilds:
@@ -16722,7 +16828,7 @@ function renderRelayBadge(relay) {
 async function refreshMeshList() {
   let data;
   try {
-    const resp = await api("/api/mesh");
+    const resp = await api("/api/mesh?view=rail");
     data = await resp.json();
   } catch {
     return;
@@ -16752,7 +16858,8 @@ async function refreshMeshList() {
     // a mirror is somebody else's mesh: say so before the counts, since what
     // you can do here (no invites, no policy edits) depends on it
     if (m.primary) li.appendChild(el("span", "mesh-tag", `mirror · ${m.primary}`));
-    const inbound = (m.requests || []).length;
+    const inbound = Array.isArray(m.requests)
+      ? m.requests.length : Number(m.requests || 0);
     if (inbound) {
       const req = el("span", "mesh-tag", `${inbound} join req`);
       req.style.background = "#0d2818";
@@ -16762,7 +16869,7 @@ async function refreshMeshList() {
     }
     li.appendChild(el(
       "span", "meta",
-      `${m.members.length} member${m.members.length === 1 ? "" : "s"} · ${m.messages} msg`
+      `${m.member_count ?? m.members.length} member${(m.member_count ?? m.members.length) === 1 ? "" : "s"} · ${m.messages} msg`
     ));
     li.addEventListener("click", () => {
       location.hash = "#/mesh/" + encodeURIComponent(m.name);
@@ -16915,7 +17022,7 @@ async function openMesh(name) {
   showView("mesh");
   $("mesh-view").innerHTML = "<p class='wf-note'>loading…</p>";
   await refreshMeshView();
-  meshPollTimer = setInterval(refreshMeshView, 2000);
+  meshPollTimer = setInterval(refreshMeshView, 5000);
 }
 
 /* `force` redraws even while a field has focus: picking from the wizard's
@@ -19638,7 +19745,7 @@ async function openFlowTopology(name) {
   showView("flow");
   $("flow-view").innerHTML = "<p class='wf-note'>loading…</p>";
   await refreshFlowView();
-  flowPollTimer = setInterval(refreshFlowView, 2000);
+  flowPollTimer = setInterval(refreshFlowView, 5000);
 }
 
 async function refreshFlowView() {
@@ -20792,15 +20899,16 @@ async function boot() {
   if (!booted) { booted = true; route(); }
 }
 
+const DASHBOARD_POLL_MS = 5000;
 let polling = false;
 
-/* A tab nobody is looking at asks a fifth as often. The nine requests below
+/* A tab nobody is looking at asks a third as often. The nine requests below
    are answered by the same event loop that pumps every terminal, and a
    dashboard left open behind the one being used was paying that cost at
    full rate for nobody; the browser's own throttling of a hidden tab's
    timers only starts minutes in. Coming back polls at once (below), so the
    first thing a returning reader sees is current. */
-const HIDDEN_POLL_MS = 10000;
+const HIDDEN_POLL_MS = 3 * DASHBOARD_POLL_MS;
 let hiddenPolledAt = 0;
 
 async function pollTick() {
@@ -20881,7 +20989,7 @@ async function pollOnce() {
   await Promise.all(refreshes);
 }
 
-pollTimer = setInterval(pollTick, 2000);
+pollTimer = setInterval(pollTick, DASHBOARD_POLL_MS);
 // Back in view: poll now rather than at the hidden rate's next slot.
 document.addEventListener("visibilitychange", () => {
   if (!document.hidden) { hiddenPolledAt = 0; pollTick(); }

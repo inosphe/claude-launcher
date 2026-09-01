@@ -5739,13 +5739,33 @@ class MeshManager:
             if h in mesh.members and p in mesh.members
         }
 
-    def mesh_info(self, mesh: Mesh, *, session: str = "", links: bool = True) -> dict:
-        """The mesh as a dashboard sees it.
+    def mesh_rail_info(self, mesh: Mesh) -> dict:
+        """The dashboard rail's compact mesh summary.
 
-        ``links=False`` leaves ``member_links`` out — the pairwise member
-        graph is quadratic in members and only the per-mesh views draw it;
-        the list poll that feeds the sidebar does not.
+        The rail needs local session memberships to label its rows and a few
+        counts for the sidebar. Topology, peer state, and member-link tables
+        are served by the selected mesh's detail request.
         """
+        members = [
+            {
+                "handle": member.handle,
+                "session": member.session,
+                "role": member.role,
+                "local": True,
+            }
+            for _handle, member in sorted(mesh.members.items())
+            if self._is_local(mesh, member)
+        ]
+        return {
+            "name": mesh.name,
+            "primary": mesh.primary or None,
+            "members": members,
+            "member_count": len(mesh.members),
+            "messages": len(mesh.messages),
+            "requests": len(mesh.pending_requests) if not mesh.primary else 0,
+        }
+
+    def mesh_info(self, mesh: Mesh, *, session: str = "") -> dict:
         members = []
         lineage = self._local_lineage(mesh)
         for handle in sorted(mesh.members):
@@ -5859,7 +5879,7 @@ class MeshManager:
             # The member graph, one layer up from `links`: who may message
             # whom. Every pair is listed with its state — see
             # Mesh.member_edge_table on why the cut set alone is not enough.
-            "member_links": mesh.member_edge_table() if links else None,
+            "member_links": mesh.member_edge_table(),
             "requests": requests,
             "policy": mesh.policy,
             # A summary only — the stance prose is fetched on demand from

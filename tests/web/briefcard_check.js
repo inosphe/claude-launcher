@@ -98,16 +98,20 @@ const noChip = () => null;
 new Function(
   "exports", "$", "document", "api", "ctxChip",
   [slice("el"), slice("fmtAge"), slice("briefingStateClass"),
-   slice("sessionStatusChecks"), slice("statusCheckText"), slice("appendStatusChecks"),
+   slice("sessionStatusChecks"), slice("statusCheckText"), slice("statusCheckIcon"),
+   slice("statusCheckName"), slice("statusCheckRefreshState"),
+   slice("paintStatusCheckRefresh"), slice("appendStatusChecks"),
    slice("fetchBriefing"), slice("toggleBriefing"),
    slice("renderBriefingCard"), slice("applyBriefingTop"),
    slice("applyBriefingCards"), slice("syncRowRefresh")].join("\n") + `
 const briefingOpen = new Set();
 const briefingCache = new Map();
 const sessionsCache = [];
+const statusCheckRefreshes = new Map();
 let briefingLLM = true;
 exports.apply = applyBriefingCards;
 exports.setLLM = (v) => { briefingLLM = v; };
+exports.statusSessions = sessionsCache;
 `)(ctx, (id) => (id === "session-list" ? list : null),
    { createElement: mkel }, api, noChip);
 
@@ -135,6 +139,9 @@ const kv = (li) => {
 
 (async () => {
   const rows = { s1: row("s1"), s2: row("s2") };
+  ctx.statusSessions.push({ name: "s1", status_checks: [
+    { id: "tests", name: "Tests", question: "Did the targeted tests pass?", answer: "yes" },
+  ] });
 
   /* Every row grows a closed toggle; nobody grows a card unasked. */
   ctx.apply();
@@ -167,6 +174,11 @@ const kv = (li) => {
         ["working", "sess-brief-state st-working"]);
   check("the answer's age is said in words",
         card(rows.s1).querySelector(".sess-brief-age").textContent, "1m ago");
+  const statusIcon = card(rows.s1).querySelector(".status-check-icon");
+  check("a briefing status check shows its named icon and keeps its sentence on hover",
+        [statusIcon.textContent, statusIcon.className, statusIcon.title,
+         statusIcon.parent.children[1].textContent],
+        ["✓", "status-check-icon check-yes", "Did the targeted tests pass?", "Tests"]);
   check("the toggle now reads open", toggle(rows.s1).textContent, "▾");
   check("the neighbour is untouched", card(rows.s2), null);
 

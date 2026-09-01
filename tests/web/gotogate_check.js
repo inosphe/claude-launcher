@@ -100,7 +100,7 @@ function build() {
   };
 
   const code = slice("/* notices — the page's own voice",
-                     "pollTimer = setInterval(pollTick, 2000);");
+                     "pollTimer = setInterval(pollTick, DASHBOARD_POLL_MS);");
   const api = new Function(
     "$", "el", "setTimeout", "clearTimeout", "Date", "api",
     code + "\nreturn { refreshGotoGate," +
