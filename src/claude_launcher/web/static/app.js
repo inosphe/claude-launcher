@@ -738,7 +738,7 @@ async function refreshSessions(options) {
         list.appendChild(heading);
         continue;
       }
-      const parent = groupBodies[row.level] || list;
+      const parent = groupBodies[row.level - 1] || list;
       const group = document.createElement("li");
       group.className = `session-group session-group-level-${row.level}`;
       const heading = document.createElement("div");

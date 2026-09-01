@@ -44,6 +44,8 @@ check("a later outer group restarts the sticky stack",
 check("group headings are contained by nested group elements",
       /#session-list \.session-group\s*\{[^}]*display:\s*block/.test(css) &&
       /#session-list \.session-group-body\s*\{[^}]*list-style:\s*none/.test(css), true);
+check("nested groups append to the previous level body",
+      /const parent = groupBodies\[row\.level - 1\] \|\| list;/.test(src), true);
 check("group headings use the computed sticky offset",
       /#session-list \.session-group-heading\s*\{[^}]*position:\s*sticky[^}]*top:\s*var\(--session-group-sticky-top/.test(css), true);
 
