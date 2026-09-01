@@ -443,7 +443,8 @@ async function main() {
     // slices by function name rather than by span.
     // wfdTextW/wfdFit cut a step title to its box; wfDiagramSvg calls them on
     // every node, so a slice without them crashes rather than draws.
-    slice("escXml") + slice("wfStepOrder") + slice("wfdTextW") + slice("wfdFit")
+    slice("escXml") + slice("wfStepOrder") + slice("wfTreeLayout")
+    + slice("wfdTextW") + slice("wfdFit")
     + slice("wfDiagramSvg")
     + "Object.assign(exports, { wfDiagramSvg });")(diaCtx);
   const svg = diaCtx.wfDiagramSvg(
