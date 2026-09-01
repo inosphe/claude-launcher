@@ -1,3 +1,10 @@
-xterm 5.5.0 (lib/xterm.min.js, css/xterm.min.css)
-addon-fit 0.10.0 (lib/addon-fit.min.js)
+xterm 6.0.0 (lib/xterm.min.js, css/xterm.css)
+addon-fit 0.11.0 (lib/addon-fit.js)
 source: cdn.jsdelivr.net
+
+Held at 6.0.0 rather than 5.5.0 because of the IME fix in 52e8a75e: 5.5.0's
+CompositionHelper records the end of the composed text only from the timer
+compositionupdate schedules, so a typist fast enough to commit the next
+syllable before that timer runs loses the syllable in between. Korean commits
+a syllable every two or three keystrokes, so the loss is continuous rather
+than occasional. tests/web/composition_check.js pins it.
