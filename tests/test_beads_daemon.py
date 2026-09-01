@@ -1482,3 +1482,242 @@ def test_a_rebriefing_restates_the_issue(home, tmp_path):
     assert "claunch beads show claunch-2a3 --json" in text
     assert rebrief._task_section("", issue=None) == ""
     assert "issue: x-1" in rebrief._task_section("", issue="x-1")
+
+
+# --------------------------------------------------------------------------- #
+# queues: a session's issues in the order it takes them, and the one write
+# --------------------------------------------------------------------------- #
+def test_a_queue_is_the_boards_own_reading_in_the_workers_order():
+    """The queue is never stored: it is ``assignee == name`` over the active
+    statuses, most urgent first and then oldest first — the exact listing the
+    worker's ``queue-next`` step runs, so the page and the worker read one
+    queue. Closed work and other sessions' work are not in it; ``blocked``
+    rides along for the page's own column."""
+    rows = [
+        {"id": "late", "assignee": "s1", "status": "open", "priority": 2,
+         "created_at": "2026-01-02T00:00:00Z"},
+        {"id": "early", "assignee": "s1", "status": "in_ready", "priority": 2,
+         "created_at": "2026-01-01T00:00:00Z"},
+        {"id": "urgent", "assignee": "s1", "status": "open", "priority": 0,
+         "created_at": "2026-01-03T00:00:00Z"},
+        {"id": "now", "assignee": "s1", "status": "in_progress", "priority": 1},
+        {"id": "stuck", "assignee": "s1", "status": "blocked", "priority": 3},
+        {"id": "done", "assignee": "s1", "status": "closed", "priority": 0},
+        {"id": "theirs", "assignee": "s2", "status": "open", "priority": 0},
+        {"id": "free", "status": "open", "priority": 0},
+    ]
+    queue = beads_mod.queue_of(rows, "s1")
+    assert [i["id"] for i in queue] == ["urgent", "now", "early", "late", "stuck"]
+    assert beads_mod.queue_summary(queue) == {
+        "total": 5, "waiting": 3, "working": 1, "review": 0, "blocked": 1,
+        "next": "urgent",
+    }
+    assert beads_mod.queue_summary([]) == {
+        "total": 0, "waiting": 0, "working": 0, "review": 0, "blocked": 0,
+        "next": None,
+    }
+    # a priority the board could not parse sorts last, not first
+    odd = beads_mod.queue_of(
+        [{"id": "x", "assignee": "s1", "status": "open", "priority": "?"},
+         {"id": "y", "assignee": "s1", "status": "open", "priority": 4}], "s1")
+    assert [i["id"] for i in odd] == ["y", "x"]
+
+
+def test_the_assignment_comment_names_both_ends_of_the_move():
+    assert beads_mod.assign_note("a", "s2", "s1") == "QUEUED by dashboard: assigned to s2 (was s1)"
+    assert beads_mod.assign_note("a", "s2", "") == "QUEUED by dashboard: assigned to s2"
+    assert beads_mod.assign_note("a", "", "s1") == "UNQUEUED by dashboard: taken off s1"
+
+
+def test_the_queues_view_draws_a_lane_per_session_and_the_pool(repo):
+    """Sessions first in the daemon's order, then assignees the daemon does
+    not know (a card must have a row to be dragged back from); an exited
+    session with nothing left draws no lane, one still holding issues does;
+    the pool is what nobody has, in queue order."""
+    br = FakeBr()
+    br.add(id="a", title="s1 now", assignee="s1", status="in_progress", priority=1)
+    br.add(id="b", title="s1 next", assignee="s1", status="open", priority=2)
+    br.add(id="c", title="left behind", assignee="gone", status="open")
+    br.add(id="d", title="a human holds it", assignee="lead", status="in_review")
+    br.add(id="e", title="pool, urgent", status="open", priority=0)
+    br.add(id="f", title="pool", status="in_ready", priority=3)
+    br.add(id="g", title="closed", assignee="s1", status="closed")
+    board = _board(br, repo)
+
+    def boom(name, cwd):
+        raise OSError("no run")
+
+    async def run():
+        s1 = _Sess(_sdef("s1", repo, issue="a"), status="busy")
+        s2 = _Sess(_sdef("s2", repo))
+        gone = _Sess(_sdef("gone", repo), status="exited")
+        quiet = _Sess(_sdef("quiet", repo), status="exited")
+        steps = {"s1": {"workflow": "improv-worker", "step": "work"}}
+        view = await board.queues_view(
+            [s1, s2, gone, quiet], extra_roots=[str(repo)],
+            cflow_for=lambda name, cwd: steps.get(name),
+        )
+        assert view["statuses"] == list(beads_mod.ACTIVE_STATUSES)
+        assert len(view["boards"]) == 1
+        b = view["boards"][0]
+        lanes = {l["session"]: l for l in b["lanes"]}
+        assert [l["session"] for l in b["lanes"]] == ["s1", "s2", "gone", "lead"]
+        assert [i["id"] for i in lanes["s1"]["issues"]] == ["a", "b"]
+        assert lanes["s1"]["summary"]["next"] == "b"
+        assert lanes["s1"]["status"] == "busy" and lanes["s1"]["issue"] == "a"
+        assert lanes["s1"]["cflow"] == {"workflow": "improv-worker", "step": "work"}
+        assert lanes["s2"]["issues"] == [] and lanes["s2"]["known"] is True
+        assert lanes["gone"]["status"] == "exited"
+        assert [i["id"] for i in lanes["gone"]["issues"]] == ["c"]
+        assert lanes["lead"]["known"] is False and lanes["lead"]["status"] is None
+        assert lanes["lead"]["cflow"] is None
+        assert [i["id"] for i in b["unassigned"]] == ["e", "f"]
+        # the cflow reader failing costs the lane its step, not the page
+        broken = await board.queues_view([s1], cflow_for=boom)
+        assert broken["boards"][0]["lanes"][0]["cflow"] is None
+
+    asyncio.run(run())
+
+
+class _Fleet:
+    """A manager as ``adoption`` reads it: which names are running here."""
+
+    def __init__(self, **states):
+        self.states = states
+
+    def get(self, name):
+        if name not in self.states:
+            raise KeyError(name)
+        return _Sess(_sdef(name, Path(".")), status=self.states[name])
+
+
+def test_assign_is_one_update_and_one_comment_and_never_a_status(repo):
+    br = FakeBr()
+    br.add(id="a", title="free", status="in_ready", priority=1)
+    br.add(id="b", title="queued on s1", assignee="s1", status="open")
+    board = _board(br, repo)
+
+    async def run():
+        moved = await board.assign(repo, "a", "s1", manager=_Fleet(s1="idle"))
+        assert moved == {"issue": "a", "assignee": "s1", "was": "", "changed": True}
+        assert br.issues["a"]["assignee"] == "s1"
+        assert br.issues["a"]["status"] == "in_ready"      # untouched
+        update, comment = br.calls[-2], br.calls[-1]
+        assert update[3:5] == ["--actor", beads_mod.DASHBOARD_ACTOR]
+        assert update[5:9] == ["update", "a", "--assignee", "s1"]
+        assert "--status" not in update
+        assert comment[5:8] == ["comments", "add", "a"]
+        assert br.comments["a"][-1]["text"] == "QUEUED by dashboard: assigned to s1"
+
+        # off the queue: an empty assignee, which br reads as "clear"
+        moved = await board.assign(repo, "b", None, manager=_Fleet(s1="idle"))
+        assert moved["changed"] is True and moved["was"] == "s1"
+        assert br.issues["b"]["assignee"] == ""
+        assert br.calls[-2][5:9] == ["update", "b", "--assignee", ""]
+        assert br.comments["b"][-1]["text"] == "UNQUEUED by dashboard: taken off s1"
+
+        # already there: nothing is written
+        n = len(br.calls)
+        moved = await board.assign(repo, "a", "s1", manager=_Fleet(s1="idle"))
+        assert moved["changed"] is False
+        assert len(br.calls) == n + 1          # the one listing read
+        assert "--actor" not in br.calls[-1]   # ...and it was a read
+
+        with pytest.raises(beads_mod.cli_beads.BeadsError, match="no issue"):
+            await board.assign(repo, "nope", "s1", manager=_Fleet())
+
+    asyncio.run(run())
+
+
+def test_assign_refuses_to_move_work_off_a_running_session_unless_forced(repo):
+    """The creation-time ownership rule, applied to the drag: an issue that
+    is ``in_progress`` under a session that is still running has a branch
+    with that work on it. A dead holder, or one that is only queued (not
+    in_progress), is moved freely; ``force`` moves it regardless."""
+    br = FakeBr()
+    br.add(id="w", title="being worked", assignee="s1", status="in_progress")
+    br.add(id="q", title="only queued", assignee="s1", status="open")
+    br.add(id="o", title="orphan", assignee="dead", status="in_progress")
+    board = _board(br, repo)
+
+    async def run():
+        fleet = _Fleet(s1="busy", dead="exited")
+        with pytest.raises(beads_mod.AssignRefused, match="in_progress under s1"):
+            await board.assign(repo, "w", "s2", manager=fleet)
+        assert br.issues["w"]["assignee"] == "s1" and not br.comments.get("w")
+        assert (await board.assign(repo, "q", "s2", manager=fleet))["changed"] is True
+        assert (await board.assign(repo, "o", "s2", manager=fleet))["changed"] is True
+        assert (await board.assign(repo, "w", "s2", manager=fleet, force=True))["changed"] is True
+        assert br.issues["w"]["assignee"] == "s2"
+        assert br.issues["w"]["status"] == "in_progress"   # still not this write to make
+
+    asyncio.run(run())
+
+
+def test_the_queues_route_and_the_assign_route(home, tmp_path, repo):
+    _register_py_harness()
+    br = FakeBr()
+    br.add(id="free", title="unassigned", status="in_ready", priority=1)
+    board = _board(br, repo)
+
+    async def run():
+        mgr = SessionManager(idle_threshold=0.5, scrollback=200, restore_default=True)
+        mm = MeshManager(mgr, root=tmp_path / "mesh")
+        client = await _serve(mgr, mm, board)
+        try:
+            resp = await client.post(
+                "/api/sessions",
+                json={"name": "w1", "profile": "py", "cwd": str(repo), "task": "work"},
+                headers=BEARER,
+            )
+            assert resp.status == 201, await resp.text()
+            resp = await client.get("/api/beads/queues", headers=BEARER)
+            view = await resp.json()
+            assert resp.status == 200, view
+            lanes = {l["session"]: l for l in view["boards"][0]["lanes"]}
+            assert [i["id"] for i in lanes["w1"]["issues"]] == ["t-1"]
+            assert lanes["w1"]["known"] is True
+            assert [i["id"] for i in view["boards"][0]["unassigned"]] == ["free"]
+
+            # the drag: the pool's issue onto w1's row
+            resp = await client.post(
+                "/api/beads/free/assign",
+                json={"session": "w1", "cwd": str(repo)}, headers=BEARER,
+            )
+            doc = await resp.json()
+            assert resp.status == 200, doc
+            assert doc["assignee"] == "w1" and doc["was"] == "" and doc["root"] == str(repo)
+            assert br.issues["free"]["assignee"] == "w1"
+            assert br.issues["free"]["status"] == "in_ready"
+
+            # the refusal: w1 is running and has taken t-1 up
+            br.issues["t-1"]["status"] = "in_progress"
+            resp = await client.post(
+                "/api/beads/t-1/assign",
+                json={"session": None, "cwd": str(repo)}, headers=BEARER,
+            )
+            assert resp.status == 409, await resp.text()
+            assert "in_progress under w1" in (await resp.json())["error"]
+            assert br.issues["t-1"]["assignee"] == "w1"
+            resp = await client.post(
+                "/api/beads/t-1/assign",
+                json={"session": None, "cwd": str(repo), "force": True}, headers=BEARER,
+            )
+            assert resp.status == 200, await resp.text()
+            assert br.issues["t-1"]["assignee"] == ""
+
+            resp = await client.post(
+                "/api/beads/nope/assign", json={"session": "w1", "cwd": str(repo)},
+                headers=BEARER,
+            )
+            assert resp.status == 404
+            resp = await client.post(
+                "/api/beads/free/assign", json={"session": 3, "cwd": str(repo)},
+                headers=BEARER,
+            )
+            assert resp.status == 400
+            await mgr.shutdown_all()
+        finally:
+            await client.close()
+
+    asyncio.run(run())

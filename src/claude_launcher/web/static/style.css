@@ -466,6 +466,43 @@ option:disabled { color: #6b7280; }
 }
 /* no directory of its own: the daemon's, said in words and set apart */
 #session-list .rail-cwd.unknown { color: #6e7681; font-style: italic; font-family: inherit; }
+/* What the board assigns to this session, under the cwd line: one pill per
+   queued issue in the worker's order, tinted by status; the one it takes
+   next is outlined. Drawn only when there is a queue. */
+#session-list .rail-beads {
+  flex-basis: 100%; order: 2; min-width: 0; padding-left: 16px;
+  margin-top: 2px; display: flex; gap: 4px; flex-wrap: wrap; align-items: center;
+}
+#session-list .rail-bead {
+  font-size: 10.5px; padding: 0 6px; border-radius: 9px; line-height: 15px;
+  font-family: SFMono-Regular, Consolas, monospace; text-decoration: none;
+  background: #191d24; color: #8b949e; border: 1px solid #2a2e36;
+  white-space: nowrap; cursor: pointer;
+}
+#session-list .rail-bead.open { color: #79c0ff; }
+#session-list .rail-bead.in_ready { color: #56d364; }
+#session-list .rail-bead.in_progress { color: #d29922; background: #2b2113; border-color: #4d3800; }
+#session-list .rail-bead.in_review { color: #d2a8ff; }
+#session-list .rail-bead.blocked { color: #ff7b72; }
+#session-list .rail-bead.next { border-color: #3d5a86; }
+#session-list .rail-bead:hover { border-color: #58a6ff; color: #e6edf3; }
+#session-list .rail-bead-more { cursor: default; }
+/* the hover card: fixed beside the pill, over everything */
+.rail-bead-pop {
+  position: fixed; z-index: 60; width: 320px; max-width: calc(100vw - 16px);
+  padding: 10px 12px; background: #161b22; border: 1px solid #30363d;
+  border-radius: 8px; box-shadow: 0 8px 24px rgba(0, 0, 0, .5);
+  font-size: 12px; color: #c9d1d9; pointer-events: none;
+}
+.rail-bead-pop-head { display: flex; align-items: center; gap: 6px; margin-bottom: 4px; }
+.rail-bead-pop-title { color: #e6edf3; font-size: 13px; line-height: 1.35; overflow-wrap: anywhere; }
+.rail-bead-pop-bits { color: #7d8590; font-size: 11px; margin: 4px 0 6px; overflow-wrap: anywhere; }
+.rail-bead-pop-desc {
+  margin: 0; font-family: inherit; font-size: 11.5px; line-height: 1.45;
+  color: #b1bac4; white-space: pre-wrap; overflow-wrap: anywhere;
+  max-height: 9em; overflow: hidden;
+}
+.rail-bead-pop-foot { color: #6e7681; font-size: 10.5px; margin-top: 6px; }
 /* Who has been near this session, the third full-width line (order 2 again,
    appended after the gauge so it lands under it): three key/value pairs —
    last looked at, last typed into, last moved on its own.
@@ -1603,6 +1640,53 @@ body.term-split #terminal { flex: var(--split-term, 0.6) 1 0; min-height: 80px; 
 
 /* the tree reading: the same cards, one column, nested across every status */
 .beads-tree { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+
+/* the Queues tab: rows are sessions, columns are statuses, cards move between
+   rows by drag. The grid's column template is set inline from the status
+   count the daemon answers with, so a status added there needs no CSS. */
+.beads-queues {
+  display: grid; gap: 4px; align-items: stretch; min-width: 0;
+  overflow-x: auto; padding-bottom: 6px;
+}
+.beads-q-corner, .beads-q-col {
+  font-size: 11px; text-transform: uppercase; letter-spacing: .04em;
+  color: #8b949e; padding: 4px 8px; border-bottom: 1px solid #2a2e36;
+  position: sticky; top: 0; background: #0d1117;
+}
+.beads-q-col.open { color: #79c0ff; }
+.beads-q-col.in_ready { color: #56d364; }
+.beads-q-col.in_progress { color: #d29922; }
+.beads-q-col.in_review { color: #d2a8ff; }
+.beads-q-col.blocked { color: #ff7b72; }
+.beads-q-head {
+  display: flex; flex-direction: column; gap: 4px; padding: 8px 10px;
+  background: #161b22; border: 1px solid #2a2e36; border-radius: 6px;
+  min-width: 0; font-size: 12px;
+}
+.beads-q-head.pool { background: #14171c; border-style: dashed; }
+.beads-q-name {
+  color: #e6edf3; font-family: ui-monospace, monospace; font-size: 13px;
+  text-decoration: none; overflow-wrap: anywhere;
+}
+a.beads-q-name:hover { color: #79c0ff; text-decoration: underline; }
+.beads-q-state { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+.beads-q-step { color: #8b949e; font-size: 11px; overflow-wrap: anywhere; }
+.beads-q-sum { color: #7d8590; font-size: 11px; font-variant-numeric: tabular-nums; }
+.beads-q-primary { color: #6e7681; font-size: 11px; font-family: ui-monospace, monospace; }
+.beads-q-cell {
+  display: flex; flex-direction: column; gap: 6px; padding: 6px;
+  background: #11151b; border: 1px solid #1f242c; border-radius: 6px;
+  min-height: 44px; min-width: 0; transition: background .1s, border-color .1s;
+}
+.beads-q-cell.over { background: #172947; border-color: #3d5a86; }
+.beads-q-card { cursor: grab; }
+.beads-q-card.dragging { opacity: .45; cursor: grabbing; }
+.beads-q-card.next { border-color: #3d5a86; }
+.beads-q-next {
+  align-self: flex-start; font-size: 10px; padding: 1px 6px; border-radius: 9px;
+  background: #172947; color: #79c0ff; text-transform: uppercase; letter-spacing: .04em;
+}
+.beads-q-note { margin: 2px 0 0; font-size: 11px; }
 
 .beads-card {
   background: #1b1e24; border: 1px solid #2a2e36; border-left-width: 3px;

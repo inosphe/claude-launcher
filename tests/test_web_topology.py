@@ -315,6 +315,8 @@ WEB = Path(__file__).resolve().parent / "web"
         "pollselect_check.js",
         "beads_check.js",
         "beadskanban_check.js",
+        "queues_check.js",
+        "railbeads_check.js",
         "wfdpace_check.js",
         "wfdtimer_check.js",
         "wftime_check.js",

@@ -437,7 +437,11 @@ def build_app(
     # in registration order and "candidates" is a perfectly good issue id as
     # far as that pattern is concerned.
     r.add_get("/api/beads/candidates", h_beads_candidates)
+    # Before "/api/beads/{id}": a literal segment registered after the
+    # pattern would be read as an issue called "queues".
+    r.add_get("/api/beads/queues", h_beads_queues)
     r.add_get("/api/beads/{id}", h_beads_issue)
+    r.add_post("/api/beads/{id}/assign", h_beads_assign)
     r.add_get("/api/sessions/{name}/beads", h_session_beads)
     r.add_post("/api/sessions/{name}/beads", h_session_beads_create)
     # A session's round reports: the index, and the page itself. The index is
@@ -4606,6 +4610,57 @@ async def h_beads_fleet(request: web.Request) -> web.Response:
         extra.insert(0, cwd)
     view = await request.app["beads"].fleet_view(list(manager.list()), extra)
     return web.json_response(view)
+
+
+async def h_beads_queues(request: web.Request) -> web.Response:
+    """Every board's queues, one lane per session — the Beads page's Queues
+    tab. Same boards as :func:`h_beads_fleet` (the sessions' directories and
+    the daemon's own, or ``?cwd=``); each lane carries the session's issues in
+    the order its worker takes them, its status, and the cflow step it is on,
+    so the operator sees who is doing what next without opening a terminal.
+    """
+    manager: SessionManager = request.app["manager"]
+    extra = [os.getcwd()]
+    cwd = request.query.get("cwd")
+    if cwd:
+        extra.insert(0, cwd)
+    view = await request.app["beads"].queues_view(
+        list(manager.list()), extra, cflow_for=cflow_clock.run_summary,
+    )
+    return web.json_response(view)
+
+
+async def h_beads_assign(request: web.Request) -> web.Response:
+    """Move an issue onto a session's queue — the Queues tab's drag.
+
+    Body: ``session`` (a name, or ``null``/``""`` for the unassigned pool),
+    ``cwd`` (which board; the daemon's by default), ``force`` (move it even
+    off a running session that is mid-round). The daemon writes exactly what
+    a leader would type — ``br update <id> --assignee <session>`` and a
+    ``QUEUED``/``UNQUEUED`` comment — and never a status: see
+    :meth:`daemon.beads.Board.assign`. 404 for an issue the board does not
+    have, 409 for the one refusal (in_progress under a running session).
+    """
+    manager: SessionManager = request.app["manager"]
+    board = request.app["beads"]
+    body = await _json_body(request)
+    cwd = str(body.get("cwd") or request.query.get("cwd") or os.getcwd())
+    root = await board.root_for(cwd)
+    if not board.has_board(root):
+        return json_error(404, f"no board for {cwd}")
+    session = body.get("session")
+    if session is not None and not isinstance(session, str):
+        return json_error(400, "'session' must be a session name or null")
+    try:
+        moved = await board.assign(
+            root, request.match_info["id"], session,
+            manager=manager, force=bool(body.get("force")),
+        )
+    except beads_mod.AssignRefused as exc:
+        return json_error(409, str(exc))
+    except BeadsError as exc:
+        return json_error(404 if "no issue" in str(exc) else 500, str(exc))
+    return web.json_response({"root": str(root), **moved})
 
 
 async def h_beads_candidates(request: web.Request) -> web.Response:

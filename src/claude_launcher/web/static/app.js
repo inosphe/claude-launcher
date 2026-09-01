@@ -837,6 +837,8 @@ async function refreshSessions() {
   }
   refreshResumeChoices();  // the spawn form offers these same conversations
   refreshParentChoices();  // ...and the same sessions, as parents to spawn from
+  // the queues, on a slower clock than this poll (guarded for the same reason)
+  if (typeof refreshRailBeads === "function") refreshRailBeads();
   if (rebuild && currentPage === "home") renderHome();
   if (rebuild) syncBulkActions(sessionsCache);
   // Some embedded consumers reuse refreshSessions with a reduced rail DOM;
@@ -878,6 +880,9 @@ async function refreshSessions() {
   if (typeof renderTermTimer === "function") renderTermTimer();
   if (rebuild) {
     applyCflowBadges();
+    // Guarded like the other optional painters: the isolated rail harnesses
+    // slice refreshSessions without the beads line.
+    if (typeof applyRailBeads === "function") applyRailBeads();
     applyRailQuiet();
     applyBriefingCards();
     // A rebuild throws away the class the goto press wrote onto its row; this
@@ -2057,6 +2062,163 @@ function cwdLine(s, cls) {
    context gauge. */
 function railCwdLine(s) {
   return cwdLine(s, "rail-cwd");
+}
+
+/* ------------------------------------------------------------------ */
+/* what the board assigns to this session: the rail row's beads line   */
+/* ------------------------------------------------------------------ */
+/* One pill per issue on the session's queue, in the order the worker takes
+   them (daemon/beads.queue_of), tinted by status. The queues ride
+   /api/beads/queues on their own clock rather than the session poll: the
+   board is a `br` fork per board and the session list is polled every two
+   seconds, so the two are kept apart and this line is painted over the
+   rows that exist whenever either lands (the same late-attach the briefing
+   line uses). Nothing is drawn for a session with no queue -- an empty line
+   would spend rail height saying nothing.
+
+   The pill is a label, not the record: hovering opens a small card with the
+   issue's title, status, priority and the head of its description, and a
+   click goes to the issue on the Beads page. Both read off the queues
+   payload, which carries the listing's rows in full -- no second fetch. */
+let railBeads = new Map();   // session name -> lane (issues, summary)
+let railBeadsAt = 0;         // when the queues were last asked for
+let railBeadsBusy = false;
+const RAIL_BEADS_EVERY = 5000;
+const RAIL_BEADS_MAX = 4;    // pills on a row before "+n"
+
+async function refreshRailBeads() {
+  const now = Date.now();
+  if (railBeadsBusy || now - railBeadsAt < RAIL_BEADS_EVERY) return;
+  railBeadsBusy = true;
+  try {
+    const resp = await api("/api/beads/queues");
+    if (resp.status === 404) { railBeadsAt = now + 60000; return; }  // older daemon: stop asking for a while
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) return;
+    railBeads = railBeadsIndex(data);
+    railBeadsAt = Date.now();
+    applyRailBeads();
+  } catch { /* auth overlay is up, or the daemon is away */ }
+  finally { railBeadsBusy = false; }
+}
+
+/* session -> lane, over every board; a name on two boards keeps both queues
+   (concatenated), which is the honest reading of a session that somehow
+   holds work in two repositories. */
+function railBeadsIndex(data) {
+  const out = new Map();
+  for (const b of (data && data.boards) || []) {
+    for (const lane of b.lanes || []) {
+      if (!lane.session || !lane.known) continue;
+      const cur = out.get(lane.session);
+      if (cur) cur.issues = cur.issues.concat(lane.issues || []);
+      else out.set(lane.session, { issues: [...(lane.issues || [])], summary: lane.summary || {}, root: b.root });
+    }
+  }
+  return out;
+}
+
+function applyRailBeads() {
+  const list = $("session-list");
+  if (!list || typeof list.querySelectorAll !== "function") return;
+  for (const li of list.querySelectorAll("li[data-name]")) {
+    const lane = railBeads.get(li.dataset.name);
+    let line = li.querySelector(".rail-beads");
+    if (!lane || !lane.issues.length) {
+      if (line) line.remove();
+      continue;
+    }
+    const fresh = railBeadsLine(li.dataset.name, lane);
+    if (line) line.replaceWith(fresh);
+    else {
+      // under the cwd line, above the gauge and the seen line, so the row's
+      // "where · what · how full · who" order holds from row to row
+      const cwd = li.querySelector(".rail-cwd");
+      if (cwd && cwd.nextSibling) li.insertBefore(fresh, cwd.nextSibling);
+      else li.appendChild(fresh);
+    }
+  }
+}
+
+function railBeadsLine(name, lane) {
+  const line = el("div", "rail-beads");
+  const issues = lane.issues || [];
+  const next = lane.summary && lane.summary.next;
+  const shown = issues.slice(0, RAIL_BEADS_MAX);
+  for (const i of shown) {
+    const pill = el("a", `rail-bead ${i.status || ""}`, i.id || "?");
+    pill.href = "#/beads/" + encodeURIComponent(i.id || "");
+    pill.title = `${i.id} [${i.status || "?"}] ${i.title || ""}`.trim();
+    if (i.id && i.id === next) pill.classList.add("next");
+    pill.addEventListener("click", (e) => e.stopPropagation());   // the row attaches; the pill navigates
+    pill.addEventListener("mouseenter", () => showBeadPop(pill, i, name));
+    pill.addEventListener("mouseleave", hideBeadPop);
+    line.appendChild(pill);
+  }
+  if (issues.length > shown.length) {
+    const more = el("span", "rail-bead rail-bead-more", `+${issues.length - shown.length}`);
+    more.title = issues.slice(shown.length).map((i) => `${i.id} [${i.status}]`).join("\n");
+    line.appendChild(more);
+  }
+  return line;
+}
+
+/* The hover card: one element for the whole rail, filled per pill. Fixed
+   beside the pill, clamped to the viewport; the description is cut to its
+   first lines because the card is a glance, and the click is the rest. */
+let beadPop = null;
+function showBeadPop(pill, issue, session) {
+  if (!beadPop) {
+    beadPop = el("div", "rail-bead-pop hidden");
+    document.body.appendChild(beadPop);
+  }
+  beadPop.innerHTML = "";
+  const head = el("div", "rail-bead-pop-head");
+  head.appendChild(el("span", "beads-id", issue.id || "?"));
+  head.appendChild(el("span", `badge beads-status ${issue.status || ""}`, issue.status || "?"));
+  if (issue.priority !== undefined && issue.priority !== null) {
+    head.appendChild(el("span", `beads-pri p${issue.priority}`, `P${issue.priority}`));
+  }
+  beadPop.appendChild(head);
+  beadPop.appendChild(el("div", "rail-bead-pop-title", issue.title || "(untitled)"));
+  const facts = [];
+  if (issue.issue_type && issue.issue_type !== "task") facts.push(issue.issue_type);
+  facts.push(issue.assignee === session ? `assigned to ${session}` : `assignee ${issue.assignee || "nobody"}`);
+  for (const l of issue.labels || []) facts.push("#" + l);
+  beadPop.appendChild(el("div", "rail-bead-pop-bits", facts.join("  ·  ")));
+  const desc = beadPopExcerpt(issue.description || "");
+  if (desc) beadPop.appendChild(el("pre", "rail-bead-pop-desc", desc));
+  beadPop.appendChild(el("div", "rail-bead-pop-foot", "click the pill to open the issue"));
+  beadPop.classList.remove("hidden");
+  if (typeof pill.getBoundingClientRect === "function" && typeof window !== "undefined") {
+    const r = pill.getBoundingClientRect();
+    const w = 320, h = beadPop.offsetHeight || 200;
+    let left = r.right + 8, top = r.top;
+    if (left + w > window.innerWidth - 8) left = Math.max(8, r.left - w - 8);
+    if (top + h > window.innerHeight - 8) top = Math.max(8, window.innerHeight - h - 8);
+    beadPop.style.left = `${left}px`;
+    beadPop.style.top = `${top}px`;
+  }
+}
+
+function hideBeadPop() {
+  if (beadPop) beadPop.classList.add("hidden");
+}
+
+/* The first lines of a description that say something -- the workflows'
+   "## 목표" body, mostly -- cut at six lines or 400 characters, with an
+   ellipsis line when there was more. */
+function beadPopExcerpt(text) {
+  const lines = String(text || "").split("\n").map((l) => l.trimEnd())
+    .filter((l) => l.trim() && !/^#{1,6}\s/.test(l));
+  const out = [];
+  let n = 0;
+  for (const l of lines) {
+    if (out.length >= 6 || n + l.length > 400) { out.push("…"); break; }
+    out.push(l);
+    n += l.length;
+  }
+  return out.join("\n");
 }
 
 /* ------------------------------------------------------------------ */
@@ -7212,7 +7374,8 @@ function mobileTitle() {
     case "flows": return "workflows";
     case "window": return "measurement window";
     case "settings": return "settings";
-    case "beads": return beadsSection === "reports" ? "reports" : "beads";
+    case "beads": return beadsSection === "reports" ? "reports"
+      : beadsSection === "queues" ? "queues" : "beads";
     case "mesh": return `mesh · ${meshName}`;
     case "flow": return `flows · ${flowMesh}`;
     // The session first, for the reason the head carries it (wfOwnerChip):
@@ -7763,8 +7926,8 @@ function parseHash(h) {
   // #/beads is the board; #/beads/reports its reports reading; and
   // #/beads/<id> the board with one issue opened. Keep #/reports as a
   // bookmark-compatible spelling of the merged page's Reports tab.
-  if (parts[0] === "beads") return parts[1] === "reports"
-    ? { page: "beads", section: "reports" }
+  if (parts[0] === "beads") return parts[1] === "reports" || parts[1] === "queues"
+    ? { page: "beads", section: parts[1] }
     : { page: "beads", id: parts[1] || "" };
   if (parts[0] === "reports") return { page: "beads", section: "reports" };
   if (parts[0] === "settings" || parts[0] === "workspaces") return { page: "settings" };
@@ -8636,13 +8799,17 @@ let beadsFilter = "active";  // status filter: active | <status> | all
 let beadsSession = "";     // session filter: "" = everybody
 let beadsPri = null;       // priority filter: null = every priority
 let beadsLayout = "board"; // "board" = status lanes, "tree" = the forest
-let beadsSection = "board"; // board | reports
+let beadsSection = "board"; // board | queues | reports
+let beadsQueues = null;    // the last /api/beads/queues payload
+let beadsQueuesError = "";
+let beadsDragging = "";    // the issue id a Queues card drag is carrying
 
 const BEADS_STATUSES = ["open", "in_ready", "in_progress", "in_review", "blocked", "closed"];
 const BEADS_ACTIVE = new Set(["open", "in_ready", "in_progress", "in_review", "blocked"]);
 
 function openBeads(id, section) {
-  beadsSection = section === "reports" ? "reports" : "board";
+  beadsSection = section === "reports" ? "reports"
+    : section === "queues" ? "queues" : "board";
   const focus = id || "";
   if (focus !== beadsFocus) beadsDetail = null;
   beadsFocus = focus;
@@ -8666,6 +8833,7 @@ function stopBeadsPoll() {
 
 async function refreshBeads() {
   if (!beadsOpen) return;
+  if (beadsSection === "queues") { await refreshQueues(); return; }
   // The focused issue's own fetch goes out *with* the listing, not after it.
   // The two answer different questions and the detail is the small one, but
   // it was queued behind three quarters of a megabyte of board it does not
@@ -9202,6 +9370,10 @@ function renderBeads() {
     renderReports(view, false);
     return;
   }
+  if (beadsSection === "queues") {
+    renderQueues(view);
+    return;
+  }
   view.appendChild(el("p", "wf-note",
     "The repository board (beads), by session: each issue carries the " +
     "sessions the daemon ties it to — the recorded link, assignee, " +
@@ -9233,6 +9405,7 @@ function beadsPageTabs() {
   const tabs = el("div", "seq-tabs beads-page-tabs");
   for (const [section, label, href] of [
     ["board", "Board", "#/beads"],
+    ["queues", "Queues", "#/beads/queues"],
     ["reports", "Reports", "#/beads/reports"],
   ]) {
     const tab = el("a", "seq-tab" + (beadsSection === section ? " on" : ""), label);
@@ -9240,6 +9413,209 @@ function beadsPageTabs() {
     tabs.appendChild(tab);
   }
   return tabs;
+}
+
+/* ------------------------------------------------------------------ */
+/* the Queues tab: every session's queue as a swimlane                  */
+/* ------------------------------------------------------------------ */
+/* A session's queue is the board's own reading -- the active issues assigned
+   to it, in the order its worker takes them (daemon/beads.queue_of) -- and
+   nothing is stored beside the session for this page to draw. Rows are
+   sessions (and an "unassigned" pool), columns are statuses, and a card
+   dragged to another row is ONE write: `br update <id> --assignee <session>`
+   plus a QUEUED/UNQUEUED comment, done by the daemon on the operator's
+   behalf. The status column a card sits in is never something this page
+   moves -- taking work up, asking for a landing and closing stay the
+   assignee's, which is what the workflows' shared rule says. */
+async function refreshQueues() {
+  try {
+    const resp = await api("/api/beads/queues");
+    if (resp.status === 404) {
+      beadsQueuesError = "this daemon predates the Queues tab — 'claunch " +
+        "daemon restart' to pick up this version";
+    } else {
+      const data = await resp.json().catch(() => ({}));
+      if (!resp.ok) beadsQueuesError = data.error || `HTTP ${resp.status}`;
+      else { beadsQueues = data; beadsQueuesError = data.error || ""; }
+    }
+  } catch { return; }   // auth overlay is up, or the daemon is away
+  if (beadsOpen && beadsSection === "queues") renderBeads();
+}
+
+function renderQueues(view) {
+  view.appendChild(el("p", "wf-note",
+    "Each row is a session's queue — the active issues the board assigns to " +
+    "it, in the order its worker takes them (priority, then age); the last " +
+    "row is the unassigned pool. Drag a card to another row to assign it: the " +
+    "daemon writes `br update <id> --assignee <session>` and a QUEUED / " +
+    "UNQUEUED comment, and nothing else — the column (status) is the " +
+    "assignee's to move. A worker lands its whole queue as one batch."));
+  if (beadsQueuesError) view.appendChild(el("p", "wf-warning", beadsQueuesError));
+  if (!beadsQueues) {
+    if (!beadsQueuesError) view.appendChild(el("p", "wf-note", "loading…"));
+    return;
+  }
+  const boards = beadsQueues.boards || [];
+  if (!boards.length) {
+    view.appendChild(el("p", "wf-note",
+      "no board: none of the sessions' directories is a repository with a " +
+      ".beads/ — 'claunch beads init --prefix <name>' at its root starts one"));
+  }
+  const statuses = beadsQueues.statuses || BEADS_STATUSES.filter((s) => BEADS_ACTIVE.has(s));
+  for (const b of boards) view.appendChild(beadsQueuesBoard(b, statuses));
+}
+
+function beadsQueuesBoard(board, statuses) {
+  const sec = el("div", "beads-board beads-queues-board");
+  const head = el("div", "beads-board-head");
+  head.appendChild(el("h3", null, board.root || "?"));
+  const lanes = board.lanes || [];
+  head.appendChild(el("span", "wf-note",
+    lanes.length ? `${lanes.length} queue${lanes.length === 1 ? "" : "s"} · ` +
+      `${(board.unassigned || []).length} unassigned` : "no queue here"));
+  sec.appendChild(head);
+  if (board.error) {
+    sec.appendChild(el("p", "wf-warning", board.error));
+    return sec;
+  }
+  const grid = el("div", "beads-queues");
+  grid.style.gridTemplateColumns = `200px repeat(${statuses.length}, minmax(170px, 1fr))`;
+  grid.appendChild(el("div", "beads-q-corner", "session"));
+  for (const s of statuses) {
+    grid.appendChild(el("div", `beads-q-col ${s}`, s));
+  }
+  for (const lane of lanes) beadsQueueLane(grid, lane, board.root, statuses);
+  beadsQueueLane(grid, {
+    session: "", pool: true, issues: board.unassigned || [],
+    summary: { waiting: (board.unassigned || []).length },
+  }, board.root, statuses);
+  sec.appendChild(grid);
+  return sec;
+}
+
+/* One row: the head cell, then a drop cell per status. The head says what a
+   reader wants before opening the terminal -- the session's state, the cflow
+   step it is on, and the queue in numbers (waiting · working · landing). */
+function beadsQueueLane(grid, lane, root, statuses) {
+  const name = lane.session || "";
+  const head = el("div", "beads-q-head" + (lane.pool ? " pool" : ""));
+  if (lane.pool) {
+    head.appendChild(el("span", "beads-q-name", "unassigned"));
+    head.appendChild(el("span", "beads-q-sum",
+      `${lane.issues.length} waiting for a queue`));
+  } else {
+    const link = el("a", "beads-q-name", name);
+    link.href = "#/s/" + encodeURIComponent(name);
+    head.appendChild(link);
+    const state = el("div", "beads-q-state");
+    if (lane.known) {
+      state.appendChild(el("span", `beads-sess ${lane.status || ""}`, lane.status || "?"));
+    } else {
+      state.appendChild(el("span", "beads-sess", "not a session here"));
+    }
+    if (lane.cflow) {
+      state.appendChild(el("span", "beads-q-step",
+        `${lane.cflow.workflow || "run"}${lane.cflow.step ? " · " + lane.cflow.step : ""}`));
+    }
+    head.appendChild(state);
+    head.appendChild(el("span", "beads-q-sum", beadsQueueSummaryText(lane.summary || {})));
+    if (lane.issue) {
+      head.appendChild(el("span", "beads-q-primary", "primary " + lane.issue));
+    }
+  }
+  grid.appendChild(head);
+  const byStatus = new Map(statuses.map((s) => [s, []]));
+  for (const i of lane.issues || []) {
+    if (byStatus.has(i.status)) byStatus.get(i.status).push(i);
+  }
+  for (const s of statuses) {
+    grid.appendChild(beadsQueueCell(s, byStatus.get(s), lane, root));
+  }
+}
+
+function beadsQueueSummaryText(sum) {
+  const bits = [`${sum.waiting || 0} waiting`, `${sum.working || 0} working`];
+  if (sum.review) bits.push(`${sum.review} landing`);
+  if (sum.blocked) bits.push(`${sum.blocked} blocked`);
+  return bits.join(" · ");
+}
+
+/* A drop target. Dropping on a cell assigns to the ROW; the column the cell
+   is in is only where the card lands visually once the board answers, since
+   the status is the assignee's and not this page's to write. */
+function beadsQueueCell(status, issues, lane, root) {
+  const cell = el("div", `beads-q-cell ${status}`);
+  cell.dataset.session = lane.session || "";
+  for (const i of issues || []) cell.appendChild(beadsQueueCard(i, lane));
+  cell.addEventListener("dragover", (ev) => {
+    if (!beadsDragging) return;
+    ev.preventDefault();
+    cell.classList.add("over");
+  });
+  cell.addEventListener("dragleave", () => cell.classList.remove("over"));
+  cell.addEventListener("drop", (ev) => {
+    ev.preventDefault();
+    cell.classList.remove("over");
+    const id = beadsDragging || (ev.dataTransfer && ev.dataTransfer.getData("text/plain")) || "";
+    beadsDragging = "";
+    if (!id) return;
+    beadsAssign(root, id, lane.pool ? null : lane.session, cell);
+  });
+  return cell;
+}
+
+/* The same card the Board tab draws (beadsCard), made draggable. The card's
+   row shape is the flat one -- a queue is a list, and nesting a family across
+   a session's row would say something the row does not mean. */
+function beadsQueueCard(issue, lane) {
+  const card = beadsCard({ issue, indent: 0, parent: "", parentHere: false, kids: 0 });
+  card.classList.add("beads-q-card");
+  card.draggable = true;
+  card.dataset.issue = issue.id || "";
+  card.title = lane.pool
+    ? "drag onto a session's row to assign it"
+    : `drag to another row to reassign, or to the unassigned row to take it off ${lane.session}`;
+  if (lane.summary && lane.summary.next === issue.id) {
+    card.classList.add("next");
+    card.appendChild(el("span", "beads-q-next", "next up"));
+  }
+  card.addEventListener("dragstart", (ev) => {
+    beadsDragging = issue.id || "";
+    if (ev.dataTransfer) {
+      ev.dataTransfer.setData("text/plain", beadsDragging);
+      ev.dataTransfer.effectAllowed = "move";
+    }
+    card.classList.add("dragging");
+  });
+  card.addEventListener("dragend", () => {
+    beadsDragging = "";
+    card.classList.remove("dragging");
+  });
+  return card;
+}
+
+/* The one write. 409 is the daemon refusing to move an in_progress issue off
+   a running session; the page says so where the drop happened and offers
+   nothing further -- the operator settles it on the board or forces it there. */
+async function beadsAssign(root, id, session, cell) {
+  const note = el("p", "wf-warning beads-q-note", "");
+  try {
+    const resp = await api(`/api/beads/${encodeURIComponent(id)}/assign`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ session: session || null, cwd: root || undefined }),
+    });
+    const doc = await resp.json().catch(() => ({}));
+    if (!resp.ok) {
+      note.textContent = doc.error || `HTTP ${resp.status}`;
+      if (cell) cell.appendChild(note);
+      return false;
+    }
+    await refreshQueues();
+    return true;
+  } catch {
+    return false;   // auth overlay is up
+  }
 }
 
 /* ---- the rail's block: one session's slice of its board ---- */
