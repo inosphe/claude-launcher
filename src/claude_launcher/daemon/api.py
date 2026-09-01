@@ -1128,13 +1128,19 @@ async def h_prompt_presets_remove(request: web.Request) -> web.Response:
 
 
 def _status_check_body(body: dict) -> dict:
+    name = str(body.get("name") or "").strip()
     question = str(body.get("question") or "").strip()
+    if not name:
+        raise ValueError("a status check needs a name")
     if not question:
         raise ValueError("a status check needs a question")
+    if len(name) > 120:
+        raise ValueError("a status-check name is too long")
     if len(question) > 1000:
         raise ValueError("a status-check question is too long")
     return {
         "id": str(body.get("id") or ""),
+        "name": name,
         "question": question,
         "enabled": body.get("enabled", True) is not False,
     }

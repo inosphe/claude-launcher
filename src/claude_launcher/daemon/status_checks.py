@@ -26,10 +26,14 @@ def _clean_presets(rows) -> List[dict]:
     for row in rows:
         if not isinstance(row, dict):
             continue
+        # Older files stored only ``question``.  Keep them useful after the
+        # label was introduced by using that sentence as their visible name.
         question = str(row.get("question") or "").strip()
-        if question:
+        name = str(row.get("name") or question).strip()
+        if name and question:
             clean.append({
                 "id": str(row.get("id") or uuid.uuid4()),
+                "name": name,
                 "question": question,
                 "enabled": row.get("enabled", True) is not False,
             })
@@ -145,6 +149,7 @@ def digests(sessions: List[str]) -> dict:
         session: [
             {
                 "id": preset["id"],
+                "name": preset["name"],
                 "question": preset["question"],
                 **data["reports"].get(session, {}).get(preset["id"], {}),
             }
