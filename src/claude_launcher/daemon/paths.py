@@ -111,6 +111,11 @@ def briefing_faq_json() -> Path:
     return daemon_dir() / "briefing-faq.json"
 
 
+def prompt_presets_json() -> Path:
+    """User-defined session-footer prompt presets for this daemon instance."""
+    return daemon_dir() / "prompt-presets.json"
+
+
 def session_dir(name: str) -> Path:
     """Per-session directory holding its raw output log and metadata."""
     return daemon_dir() / "sessions" / name

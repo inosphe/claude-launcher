@@ -36,7 +36,7 @@ from .. import session_commits
 from .. import spawn as spawn_mod, store, workspaces
 from .. import worktree as worktree_mod
 from . import beads as beads_mod
-from . import briefing, cflow_clock, clipty, ctxsize, onboard, rebrief, session_input
+from . import briefing, cflow_clock, clipty, ctxsize, onboard, prompt_presets, rebrief, session_input
 from . import transcript_view
 from . import window as window_mod
 from ..cli_beads import BeadsError
@@ -282,6 +282,10 @@ def build_app(
     r.add_post("/api/briefing/faq", h_briefing_faq_add)
     r.add_put("/api/briefing/faq/{faq_id}", h_briefing_faq_update)
     r.add_delete("/api/briefing/faq/{faq_id}", h_briefing_faq_remove)
+    r.add_get("/api/prompt-presets", h_prompt_presets)
+    r.add_post("/api/prompt-presets", h_prompt_presets_add)
+    r.add_put("/api/prompt-presets/{preset_id}", h_prompt_presets_update)
+    r.add_delete("/api/prompt-presets/{preset_id}", h_prompt_presets_remove)
     r.add_get("/api/harnesses", h_harnesses)
     r.add_get("/api/cflow", h_cflow_runs)
     r.add_get("/api/cflow/run", h_cflow_run_detail)
@@ -1037,6 +1041,74 @@ async def h_briefing_faq_remove(request: web.Request) -> web.Response:
         saved = briefing.set_faq_entries(kept)
         return web.json_response({"faq": saved, "removed": faq_id})
     except briefing.FaqError as exc:
+        return json_error(500, str(exc))
+
+
+def _prompt_preset_body(body: dict) -> dict:
+    name = str(body.get("name") or "").strip()
+    text = str(body.get("text") or "").strip()
+    if not name or not text:
+        raise ValueError("a prompt preset needs a name and message")
+    if len(name) > 1000 or len(text) > 10000:
+        raise ValueError("prompt preset name or message is too long")
+    return {
+        "id": str(body.get("id") or ""),
+        "name": name,
+        "text": text,
+        "enabled": body.get("enabled", True) is not False,
+    }
+
+
+async def h_prompt_presets(request: web.Request) -> web.Response:
+    try:
+        return web.json_response({"presets": prompt_presets.entries()})
+    except prompt_presets.PromptPresetError as exc:
+        return json_error(500, str(exc))
+
+
+async def h_prompt_presets_add(request: web.Request) -> web.Response:
+    try:
+        row = _prompt_preset_body(await _json_body(request))
+    except ValueError as exc:
+        return json_error(400, str(exc))
+    try:
+        rows = prompt_presets.entries()
+        rows.append(row)
+        saved = prompt_presets.set_entries(rows)
+        return web.json_response({"presets": saved, "preset": saved[-1]}, status=201)
+    except prompt_presets.PromptPresetError as exc:
+        return json_error(500, str(exc))
+
+
+async def h_prompt_presets_update(request: web.Request) -> web.Response:
+    preset_id = request.match_info["preset_id"]
+    try:
+        incoming = _prompt_preset_body(await _json_body(request))
+    except ValueError as exc:
+        return json_error(400, str(exc))
+    try:
+        rows = prompt_presets.entries()
+        for index, row in enumerate(rows):
+            if row.get("id") == preset_id:
+                incoming["id"] = preset_id
+                rows[index] = incoming
+                saved = prompt_presets.set_entries(rows)
+                return web.json_response({"presets": saved, "preset": incoming})
+        return json_error(404, f"no prompt preset named {preset_id!r}")
+    except prompt_presets.PromptPresetError as exc:
+        return json_error(500, str(exc))
+
+
+async def h_prompt_presets_remove(request: web.Request) -> web.Response:
+    preset_id = request.match_info["preset_id"]
+    try:
+        rows = prompt_presets.entries()
+        kept = [row for row in rows if row.get("id") != preset_id]
+        if len(kept) == len(rows):
+            return json_error(404, f"no prompt preset named {preset_id!r}")
+        saved = prompt_presets.set_entries(kept)
+        return web.json_response({"presets": saved, "removed": preset_id})
+    except prompt_presets.PromptPresetError as exc:
         return json_error(500, str(exc))
 
 

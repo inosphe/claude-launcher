@@ -277,6 +277,7 @@ WEB = Path(__file__).resolve().parent / "web"
         "queued_check.js",
         "window_check.js",
         "sendinput_check.js",
+        "promptpresets_check.js",
         "holdchip_check.js",
         "backpressure_check.js",
         "seq_check.js",

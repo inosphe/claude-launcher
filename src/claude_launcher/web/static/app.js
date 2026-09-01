@@ -5234,6 +5234,40 @@ function refreshTermInput() {
   }
 }
 
+/* Prompt presets are daemon-local operator shortcuts. They deliberately
+   insert at the caret instead of submitting: the footer remains the one place
+   where a person reviews and sends text to the selected session. */
+function renderTermPresetButtons() {
+  const box = $("term-preset-buttons");
+  if (!box) return;
+  box.innerHTML = "";
+  const rows = (typeof promptPresetCache === "undefined" ? [] : promptPresetCache)
+    .filter((row) => row.enabled !== false);
+  const visible = !!currentName && !sessionEnded && rows.length > 0;
+  box.classList.toggle("hidden", !visible);
+  if (!visible) return;
+  for (const row of rows) {
+    const button = el("button", "term-btn term-preset-button", row.name);
+    button.type = "button";
+    button.title = row.text;
+    button.addEventListener("click", () => insertPromptPreset(row.text));
+    box.appendChild(button);
+  }
+}
+
+function insertPromptPreset(text) {
+  const field = $("term-input-field");
+  if (!field || field.disabled) return;
+  const start = Number.isInteger(field.selectionStart) ? field.selectionStart : field.value.length;
+  const end = Number.isInteger(field.selectionEnd) ? field.selectionEnd : start;
+  const before = field.value.slice(0, start);
+  const after = field.value.slice(end);
+  field.value = before + text + after;
+  const cursor = start + text.length;
+  if (field.setSelectionRange) field.setSelectionRange(cursor, cursor);
+  field.focus();
+}
+
 function onTermInputSubmit(ev) {
   ev.preventDefault();
   sendKeyLine($("term-input-field"), $("term-input-send"), $("term-input-note"));
@@ -6571,6 +6605,7 @@ function attach(name) {
   // function without the input's element in their stub DOM.
   const termInputField = $("term-input-field");
   if (termInputField) termInputField.value = "";
+  if (typeof refreshPromptPresets === "function") refreshPromptPresets();
   // The common hop: this session has been up before, so bring its parked
   // terminal back instead of building a new one — no socket, no repaint.
   if (name !== currentName) {
@@ -7313,6 +7348,7 @@ function showView(name) {
   // know about it.
   if ($("term-input"))
     $("term-input").classList.toggle("hidden", !(showTerm && currentName));
+  renderTermPresetButtons();
   // The transcript is its own page now (VIEWS below hides and shows it like
   // any other), so nothing here has to reach for it. The terminal button that
   // walks to it lives in the header, which the line above already handles.
@@ -8535,6 +8571,10 @@ let faqCache = [];
 let faqError = "";
 let faqDraft = { question: "", answer: "" };
 let faqEdit = null;
+let promptPresetCache = [];
+let promptPresetError = "";
+let promptPresetDraft = { name: "", text: "" };
+let promptPresetEdit = null;
 
 function openWorkspaces() {
   wsOpen = true;
@@ -8546,6 +8586,7 @@ function openWorkspaces() {
 function openSettings() {
   openWorkspaces();
   refreshFaq();
+  refreshPromptPresets();
 }
 
 function closeWorkspaces() {
@@ -9876,6 +9917,8 @@ function renderWorkspaces() {
 
   view.appendChild(faqCard());
 
+  view.appendChild(promptPresetCard());
+
   const list = el("div", "ws-list");
   list.appendChild(el("h3", null, `Registered (${workspacesCache.length})`));
   if (!workspacesCache.length) {
@@ -9910,6 +9953,22 @@ async function refreshFaq() {
     if (wsOpen) renderWorkspaces();
   } catch (err) {
     faqError = String(err);
+    if (wsOpen) renderWorkspaces();
+  }
+}
+
+async function refreshPromptPresets() {
+  try {
+    const resp = await api("/api/prompt-presets");
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
+    promptPresetCache = data.presets || [];
+    promptPresetError = "";
+    renderTermPresetButtons();
+    if (wsOpen) renderWorkspaces();
+  } catch (err) {
+    promptPresetError = String(err);
+    renderTermPresetButtons();
     if (wsOpen) renderWorkspaces();
   }
 }
@@ -9993,6 +10052,110 @@ async function faqRemove(row) {
     if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
     faqCache = data.faq || []; renderWorkspaces();
   } catch (err) { faqError = String(err); renderWorkspaces(); }
+}
+
+function promptPresetCard() {
+  const card = el("section", "prompt-preset-settings");
+  card.appendChild(el("h3", null, "Prompt message presets"));
+  card.appendChild(el(
+    "p", "wf-note",
+    "Create messages that can be inserted into the selected session's footer input."
+  ));
+  const form = el("form", "prompt-preset-add");
+  const name = document.createElement("input");
+  name.placeholder = "Button label"; name.value = promptPresetDraft.name;
+  name.addEventListener("input", () => { promptPresetDraft.name = name.value; });
+  const text = document.createElement("textarea");
+  text.placeholder = "Message to insert"; text.rows = 3; text.value = promptPresetDraft.text;
+  text.addEventListener("input", () => { promptPresetDraft.text = text.value; });
+  const submit = el("button", "wf-btn approve", "Add preset"); submit.type = "submit";
+  form.append(name, text, submit);
+  form.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    try {
+      const resp = await api("/api/prompt-presets", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(promptPresetDraft),
+      });
+      const data = await resp.json().catch(() => ({}));
+      if (!resp.ok) {
+        promptPresetError = data.error || `HTTP ${resp.status}`;
+        renderWorkspaces();
+        return;
+      }
+      promptPresetDraft = { name: "", text: "" };
+      promptPresetCache = data.presets || [];
+      promptPresetError = "";
+      renderTermPresetButtons();
+      renderWorkspaces();
+    } catch (err) { promptPresetError = String(err); renderWorkspaces(); }
+  });
+  card.appendChild(form);
+  if (promptPresetError) card.appendChild(el("p", "error", promptPresetError));
+  const list = el("div", "prompt-preset-list");
+  for (const row of promptPresetCache) {
+    const item = el("div", "prompt-preset-row");
+    const content = el("div", "prompt-preset-text");
+    if (promptPresetEdit === row.id) {
+      const ename = document.createElement("input");
+      ename.value = row.name; ename.className = "prompt-preset-edit-name";
+      const etext = document.createElement("textarea");
+      etext.value = row.text; etext.rows = 3; etext.className = "prompt-preset-edit-text";
+      content.append(ename, etext);
+      const save = el("button", "wf-btn approve", "Save"); save.type = "button";
+      save.addEventListener("click", () => promptPresetSave(row, {
+        name: ename.value, text: etext.value,
+      }));
+      const cancel = el("button", "wf-btn clear", "Cancel"); cancel.type = "button";
+      cancel.addEventListener("click", () => { promptPresetEdit = null; renderWorkspaces(); });
+      item.append(content, save, cancel); list.appendChild(item); continue;
+    }
+    content.append(el("strong", null, row.name), el("p", null, row.text));
+    item.appendChild(content);
+    const edit = el("button", "wf-btn clear", "Edit");
+    edit.type = "button";
+    edit.addEventListener("click", () => { promptPresetEdit = row.id; renderWorkspaces(); });
+    const toggle = el("button", "wf-btn clear", row.enabled === false ? "Enable" : "Disable");
+    toggle.type = "button";
+    toggle.addEventListener("click", () => promptPresetSave(row, { enabled: row.enabled === false }));
+    const remove = el("button", "wf-btn clear", "Delete");
+    remove.type = "button";
+    remove.addEventListener("click", () => promptPresetRemove(row));
+    item.append(edit, toggle, remove); list.appendChild(item);
+  }
+  if (!promptPresetCache.length) list.appendChild(el("p", "wf-note", "No prompt presets registered."));
+  card.appendChild(list);
+  return card;
+}
+
+async function promptPresetSave(row, changes) {
+  try {
+    const resp = await api(`/api/prompt-presets/${encodeURIComponent(row.id)}`, {
+      method: "PUT", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ...row, ...changes }),
+    });
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
+    promptPresetCache = data.presets || [];
+    promptPresetEdit = null;
+    promptPresetError = "";
+    renderTermPresetButtons();
+    renderWorkspaces();
+  } catch (err) { promptPresetError = String(err); renderWorkspaces(); }
+}
+
+async function promptPresetRemove(row) {
+  if (!confirm(`Delete prompt preset '${row.name}'?`)) return;
+  try {
+    const resp = await api(`/api/prompt-presets/${encodeURIComponent(row.id)}`, { method: "DELETE" });
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
+    promptPresetCache = data.presets || [];
+    promptPresetEdit = null;
+    promptPresetError = "";
+    renderTermPresetButtons();
+    renderWorkspaces();
+  } catch (err) { promptPresetError = String(err); renderWorkspaces(); }
 }
 
 function wsAddCard() {
