@@ -8159,6 +8159,88 @@ $("detail-split").addEventListener("dblclick", () => {
 });
 
 /* ------------------------------------------------------------------ */
+/* the run page's column split: the diagram against the reports beside */
+/* it (.wf-diagram / .wf-side), dragged like the bars above             */
+/* ------------------------------------------------------------------ */
+/* Unlike the rail and the detail, .wf-cols is rebuilt from scratch by
+   renderWfInto on every poll — which would cut a drag short the instant the
+   bar's own node is replaced under the pointer. So wfColDragHost, not a
+   captured DOM node, is what a drag actually holds: renderWfInto skips its
+   rebuild for as long as it names the pane being dragged (see there), which
+   keeps the dia/side nodes wfSplitBar closed over alive and attached for the
+   whole gesture. Two homes (page/split) remember their own width — the
+   split pane's column starts out far narrower than the full page's. */
+const WF_DIA_W_DEFAULT = 380;   // what the stylesheet ships
+const WF_DIA_W_MIN = 260;       // narrower and a real diagram's labels clip
+// the ceiling moves with the window: the reports column keeps at least
+// ~400px so a maxed-out drag does not squeeze it to nothing
+const wfDiaWMax = () => Math.max(WF_DIA_W_MIN, window.innerWidth - 420);
+const wfDiaWKey = (host) => `claunch_wfdiaw:${host}:${BASE}`;
+
+function clampWfDiaW(px) {
+  if (!Number.isFinite(px)) return WF_DIA_W_DEFAULT;
+  return Math.min(wfDiaWMax(), Math.max(WF_DIA_W_MIN, Math.round(px)));
+}
+
+// null = never dragged in this host: leave the stylesheet's elastic default
+// (both columns grow together, capped at 640px) rather than pin one to a
+// guessed width.
+function loadWfDiaW(host) {
+  const raw = localStorage.getItem(wfDiaWKey(host));
+  return raw === null ? null : clampWfDiaW(Number(raw));
+}
+
+function setWfColW(dia, side, px) {
+  if (px === null) {
+    dia.style.flex = "";
+    dia.style.maxWidth = "";
+    side.style.flex = "";
+    return;
+  }
+  dia.style.flex = `0 0 ${px}px`;
+  // the stylesheet's own 640px ceiling exists only for the elastic default
+  // above; a reader who took the bar in hand gets to go past it.
+  dia.style.maxWidth = `${px}px`;
+  side.style.flex = "1 1 0";
+}
+
+let wfColDragHost = null;   // "page" | "split", non-null only mid-drag
+
+function wfSplitBar(host, dia, side) {
+  const bar = el("div", "wf-split");
+  bar.title = "drag to resize the diagram · double-click to reset";
+  const onMove = (e) => {
+    setWfColW(dia, side, clampWfDiaW(e.clientX - dia.getBoundingClientRect().left));
+  };
+  const onUp = () => {
+    document.removeEventListener("pointermove", onMove);
+    document.removeEventListener("pointerup", onUp);
+    document.removeEventListener("pointercancel", onUp);
+    bar.classList.remove("dragging");
+    wfColDragHost = null;
+    const m = /^0 0 (\d+)px$/.exec(dia.style.flex || "");
+    if (m) localStorage.setItem(wfDiaWKey(host), m[1]);
+    // renderWfInto skipped every poll's rebuild while this bar held it (see
+    // there) — replay the latest data now instead of waiting for the next one
+    if (host === "split") { if (splitLastData) renderSplit(splitLastData); }
+    else if (wfLastData) renderWf(wfLastData);
+  };
+  bar.addEventListener("pointerdown", (e) => {
+    e.preventDefault();   // a drag must not start selecting the diagram/text
+    wfColDragHost = host;
+    bar.classList.add("dragging");
+    document.addEventListener("pointermove", onMove);
+    document.addEventListener("pointerup", onUp);
+    document.addEventListener("pointercancel", onUp);
+  });
+  bar.addEventListener("dblclick", () => {
+    localStorage.removeItem(wfDiaWKey(host));
+    setWfColW(dia, side, null);
+  });
+  return bar;
+}
+
+/* ------------------------------------------------------------------ */
 /* router: hash -> page. Knows nothing about screen width.             */
 /* ------------------------------------------------------------------ */
 /*   #/                  home — the dashboard, and the rail itself on a phone
@@ -11243,6 +11325,11 @@ function renderWfInto(view, data, ui) {
     if (!view.querySelector(".wf-start")) renderWfIdle(view, data, ui);
     return;
   }
+  // A hand is on this pane's .wf-split bar right now: skip the rebuild
+  // rather than pull the dia/side nodes it is dragging out from under it.
+  // wfSplitBar replays the data this poll would have shown once the drag
+  // ends, so nothing here is lost — only its arrival on screen is delayed.
+  if (wfColDragHost === ui.host) return;
   // The rebuild below wipes every scroller's place in the DOM; take theirs
   // now and give it back once the fresh tree is in (the idle path above is
   // exempt — the picker is built once and then left alone).
@@ -11385,6 +11472,12 @@ function renderWfInto(view, data, ui) {
   dia.appendChild(forceBtn);
 
   side.appendChild(wfReports(data, ui));
+  // No split bar on a phone: .wf-cols there is one column per row (see the
+  // 820px breakpoint), and a column has nothing to drag against.
+  if (!MOBILE_MQ.matches) {
+    cols.appendChild(wfSplitBar(ui.host, dia, side));
+    setWfColW(dia, side, loadWfDiaW(ui.host));
+  }
   cols.appendChild(side);
   view.appendChild(cols);
 

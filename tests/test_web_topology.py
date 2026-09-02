@@ -322,6 +322,7 @@ WEB = Path(__file__).resolve().parent / "web"
         "wfdpace_check.js",
         "wfdtimer_check.js",
         "wftime_check.js",
+        "wfsplit_check.js",
         "askdoor_check.js",
         "railtimer_check.js",
         "termtimer_check.js",
