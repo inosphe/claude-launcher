@@ -36,10 +36,10 @@ const capLine = src.match(/^const RAIL_MESH_TAGS = .+$/m);
 if (!capLine) throw new Error("cannot locate RAIL_MESH_TAGS in app.js");
 const domLine = src.match(/^const CTX_DOMAIN = .+$/m);
 if (!domLine) throw new Error("cannot locate CTX_DOMAIN in app.js");
-const coldLine = src.match(/^const SEEN_COLD = .+$/m);
-if (!coldLine) throw new Error("cannot locate SEEN_COLD in app.js");
-const staleLine = src.match(/^const TYPED_STALE = .+$/m);
-if (!staleLine) throw new Error("cannot locate TYPED_STALE in app.js");
+const coldLine = src.match(/^const RAIL_STALE_DEFAULT = .+$/m);
+if (!coldLine) throw new Error("cannot locate RAIL_STALE_DEFAULT in app.js");
+const staleLine = src.match(/^const railStale = .+$/m);
+if (!staleLine) throw new Error("cannot locate railStale in app.js");
 
 /* ---- stub DOM: nested nodes, because the note may be hung on a child ---- */
 function node(tag) {
