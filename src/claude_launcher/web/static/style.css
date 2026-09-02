@@ -81,10 +81,8 @@ option:disabled { color: #6b7280; }
 }
 #refresh-archived { margin-left: 0; font-size: 11px; }
 #refresh-all:hover, #refresh-archived:hover { color: #58a6ff; }
-#refresh-all.spinning, #refresh-archived.spinning {
-  color: #9ecbff; background: #10203a; border-radius: 4px;
-  box-shadow: inset 0 0 0 1px #1f6feb;
-}
+#refresh-all.spinning, #refresh-archived.spinning { color: #58a6ff; animation: spin 0.7s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
 
 .session-filters {
   flex: none; display: grid; grid-template-columns: 1fr 1fr; gap: 1px;
@@ -365,6 +363,17 @@ option:disabled { color: #6b7280; }
   color: #9ecbff; background: #10203a; border-radius: 4px;
   box-shadow: inset 0 0 0 1px #1f6feb; cursor: wait;
 }
+/* Text ("checking…") sits in the button itself, so spinning the whole
+   element would spin the words with it — the rotation lives on a prefixed
+   icon instead, and the label stays put. */
+.sess-status-check-rowref.requesting::before, .sess-brief-check-refresh.requesting::before {
+  content: "⟳"; display: inline-block; margin-right: 3px;
+  animation: check-spin 0.7s linear infinite;
+}
+@keyframes check-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) {
+  .sess-status-check-rowref.requesting::before, .sess-brief-check-refresh.requesting::before { animation: none; }
+}
 .sess-status-check-rowref.waiting, .sess-brief-check-refresh.waiting { color: #d29922; }
 .sess-status-check-rowref.updated, .sess-brief-check-refresh.updated { color: #3fb950; }
 .sess-status-check-rowref.failed, .sess-brief-check-refresh.failed { color: #f85149; }
@@ -592,10 +601,7 @@ option:disabled { color: #6b7280; }
   margin-top: 8px; color: #7d8590; font-size: 10px; text-transform: uppercase;
   letter-spacing: 0.04em;
 }
-.sess-brief-refresh.spinning {
-  color: #9ecbff; background: #10203a; border-radius: 4px;
-  box-shadow: inset 0 0 0 1px #1f6feb; cursor: default;
-}
+.sess-brief-refresh.spinning { color: #58a6ff; animation: spin 0.7s linear infinite; cursor: default; }
 .sess-brief-row { display: flex; gap: 8px; margin: 3px 0; }
 .sess-brief-k {
   flex: none; width: 52px; color: #7d8590; font-size: 10px;
