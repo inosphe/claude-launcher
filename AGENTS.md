@@ -39,14 +39,21 @@
   이미 그 세션 것이거나 붙잡던 세션이 종료됐으면 assignee로 지정(take), 살아 있는
   세션이 붙잡고 있으면 assignee를 손대지 않고 참가만 시킨다(join: JOINED 코멘트
   + 오프닝에 "너는 assignee가 아니다" + 공유 메시가 있으면 보유 세션에 fyi).
-  `--no-issue`(웹 폼의 No issue, 바디 `beads: false`)면 아무것도 만들지 않는다.
+  무이슈 답은 둘로 갈린다 — 둘 다 아무것도 만들지 않지만 오프닝에 남기는 안내가
+  다르다: `--no-issue`(웹 폼의 "No issue — wait for my instructions", 바디
+  `beads: false` 또는 `"none"`)면 보드를 뒤지지 말라고 오프닝에 적고(NONE_WAIT),
+  `--no-issue-auto`(웹 폼의 "No issue — it picks its own off the board", 바디
+  `beads: "none-auto"`)면 보드에서 스스로 골라 잡으라고 적는다(NONE_AUTO). 두 답
+  모두 오프닝 task에 `no issue:`로 시작하는 줄이 붙는다(`daemon/beads.compose_none_note`,
+  `daemon/api.py`) — 그 줄이 없다는 것은 무이슈 지시였다는 뜻이 아니라 이슈가 서지
+  못했다는 뜻이다.
   새로 만드는 쪽에서는 그 이슈의 본문을 오프닝 태스크와 따로 쓸 수 있다
   (`--issue-text`/바디 `issue_text`, 위저드의 Issue text 행, 웹 폼의 같은 이름
   textarea, MCP spawn의 `issue_text`) — 첫 줄이 제목, 전체가 목표가 되고 세션은
   오프닝에서 "그 기록을 가서 읽어라"는 안내를 받는다; 비우면 지금까지대로 태스크에서
-  민팅한다. 세 답은 서로 배타적이라 `issue_text`가 `issue`/`beads:false`/태스크 안의
-  `issue: <id>`와 함께 오면 400으로 거절한다(`beads.check_request`) — 조용히 하나를
-  버리지 않는다.
+  민팅한다. 세 답은 서로 배타적이라 `issue_text`가 `issue`/`beads:false`/
+  `beads:"none-auto"`/태스크 안의 `issue: <id>`와 함께 오면 400으로 거절한다
+  (`beads.check_request`) — 조용히 하나를 버리지 않는다.
   생성 폼이 채우는 후보 목록은 `GET /api/beads/candidates`이고, 각 줄이 그
   판정(take인가 join인가, 누가 붙잡고 있는가)을 미리 싣는다. (2) kill:
   활성 이슈를 쥔 세션은 바로 죽이지 않고 정리 요청 블록을 타이핑한 뒤 그 턴이
