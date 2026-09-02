@@ -202,7 +202,7 @@ new Function(
      and setSessions drives, so the harness stays on the production rule
      instead of a copy that can drift away from it. */
   + slice("connectCandidate")
-  + slice("buildSpawnForm")
+  + slice("spawnGroup") + slice("buildSpawnForm")
   + slice("spawnModalKey") + slice("spawnModalClose")
   + slice("refreshSpawnBorrowOptions") + slice("openSpawnModal")
   + slice("spawnModalLoad") + slice("refreshSpawnConnect") + slice("spawnModalGo")
@@ -954,6 +954,56 @@ async function main() {
     /^\d{8}-\d{6}$/.test(bui.stamp), bui.stamp);
   check("the parent line names the opener",
     texts(built.box).includes("child of lead1"));
+
+  /* ---- the groups: five decisions, in reading order ----------------------
+     The form is fenced into numbered fieldsets so a row is read as part of
+     a decision rather than as the next item in a 21-row list. The rows are
+     the same objects -- the gates and the payload address `ui.*` and never
+     the fence -- so what is pinned here is the fence itself: which groups
+     exist, in what order, and which row stands inside which. A row that
+     drifted out of its group would still pass every gate check above and
+     only this would see it. */
+  const groups = built.box.kids.filter(
+    (k) => k.tag === "fieldset" && k.classes.has("sess-spawn-group"));
+  check("the form is fenced into five groups", groups.length === 5, groups.length);
+  const legendOf = (g) => {
+    const legend = g.kids.find((k) => k.tag === "legend");
+    return legend ? walk(legend).map((k) => k.text).join(" ") : "";
+  };
+  check("...numbered and read in order: identity, assignment, mesh, runtime, location",
+    JSON.stringify(groups.map(legendOf)) === JSON.stringify([
+      "1 Identity", "2 Assignment", "3 Mesh", "4 Runtime", "5 Location"]),
+    groups.map(legendOf));
+  check("every group opens with a one-line gloss under its legend",
+    groups.every((g) => g.kids.some((k) => k.tag === "p" &&
+      k.classes.has("sess-spawn-group-blurb") && k.text)),
+    groups.map((g) => g.kids.map((k) => k.tag)));
+  check("the ui bag names the groups by decision",
+    bui.groups && groups[0] === bui.groups.identity && groups[1] === bui.groups.task &&
+      groups[2] === bui.groups.mesh && groups[3] === bui.groups.runtime &&
+      groups[4] === bui.groups.place,
+    bui.groups && Object.keys(bui.groups));
+  const groupHolding = (ctrl) => groups.findIndex((g) => walk(g).includes(ctrl));
+  const placed = {
+    name: 0, role: 0,
+    task: 1, issueText: 1, issueFilter: 1, issuePick: 1, workflow: 1, context: 1,
+    mesh: 2, handle: 2, connectRow: 2,
+    profile: 3, harness: 3, model: 3, effort: 3, borrow: 3, nullTok: 3, args: 3,
+    codexPanel: 3,
+    workspace: 4, wtName: 4, wtPick: 4, update: 4, rebase: 4, fork: 4,
+  };
+  for (const [k, g] of Object.entries(placed)) {
+    check(`${k} stands in group ${g + 1}`, groupHolding(bui[k]) === g,
+      [k, groupHolding(bui[k])]);
+  }
+  check("the two radio rows stand with their decisions",
+    groupHolding(bui.beads.el) === 1 && groupHolding(bui.wtMode.el) === 4,
+    [groupHolding(bui.beads.el), groupHolding(bui.wtMode.el)]);
+  check("no row is left outside a group",
+    built.box.kids.every((k) => k.tag === "fieldset" || k.tag === "p"),
+    built.box.kids.map((k) => `${k.tag}.${k.className}`));
+  check("the task is asked before the board record it becomes",
+    walk(groups[1]).indexOf(bui.task) < walk(groups[1]).indexOf(bui.beads.el));
 
   /* ---- the fork lock, on the form the operator is actually handed --------
      The gate checks above drive a stub bag whose forkNote the harness itself

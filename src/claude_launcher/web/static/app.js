@@ -15633,6 +15633,27 @@ function connectCandidate(member) {
   return !session || (session.status !== "exited" && !session.archived_at);
 }
 
+/* ---- a group: one decision, several rows ------------------------------
+   Twenty-one rows in one column read as a list to be filled in top to
+   bottom, with nothing on the face of the form to say that Name and
+   Worktree are different KINDS of question. A group fences one decision
+   behind a numbered legend and a one-line gloss: the number says the
+   groups are read in order -- a workflow, not a pile -- and the gloss says
+   what the rows under it decide, so a reader who wants only the task can
+   skip Runtime as a block instead of row by row. The caller appends the
+   rows; the group owns no control, and the gates and the payload address
+   `ui.*` and never the fence. */
+function spawnGroup(step, title, blurb) {
+  const g = document.createElement("fieldset");
+  g.className = "sess-spawn-group";
+  const legend = el("legend", null);
+  legend.append(el("span", "sess-spawn-step", String(step)),
+                el("span", "sess-spawn-group-title", title));
+  g.appendChild(legend);
+  if (blurb) g.appendChild(el("p", "sess-spawn-group-blurb", blurb));
+  return g;
+}
+
 function buildSpawnForm(parentName, seed) {
   seed = seed || {};
   const rec = spawnRecall();
@@ -15660,33 +15681,35 @@ function buildSpawnForm(parentName, seed) {
   };
   ui.noteShow = noteShow;
 
+  /* ---- five decisions, in the order the child meets them ---------------
+     Who it is; what it is for; who it may talk to; how it runs; where it
+     works. The rows are the same objects they were in the flat list -- the
+     gates fold them and the payload reads them by `ui.*` -- only the fence
+     around each decision is new. */
+  const gIdentity = spawnGroup(1, "Identity", "who the child is");
+  const gTask = spawnGroup(2, "Assignment",
+    "what it is for, and where that is written down");
+  const gMesh = spawnGroup(3, "Mesh", "who it can talk to");
+  const gRuntime = spawnGroup(4, "Runtime",
+    "how it runs — profile, harness, credentials, flags");
+  const gPlace = spawnGroup(5, "Location", "where it works");
+  ui.groups = { identity: gIdentity, task: gTask, mesh: gMesh,
+                runtime: gRuntime, place: gPlace };
+  box.append(gIdentity, gTask, gMesh, gRuntime, gPlace);
+
   ui.name = document.createElement("input");
   ui.name.placeholder = "child name (blank = auto)";
-  box.appendChild(spawnRow("Name", ui.name, null));
+  gIdentity.appendChild(spawnRow("Name", ui.name, null));
 
   ui.role = document.createElement("select");
-  box.appendChild(spawnRow("Role", ui.role, null));
+  gIdentity.appendChild(spawnRow("Role", ui.role, null));
 
-  /* start it working, in the order the child experiences them */
-  ui.workflow = document.createElement("select");
-  box.appendChild(spawnRow("Workflow", ui.workflow, null));
-  ui.contextRow = spawnRow("Context", (ui.context = document.createElement("input")), null);
-  ui.contextRow.hidden = true;
-  box.appendChild(ui.contextRow);
-
-  ui.mesh = document.createElement("select");
-  box.appendChild(spawnRow("Mesh", ui.mesh, (ui.meshNote = el("span", "sess-spawn-note"))));
-  ui.handleRow = spawnRow("Handle", (ui.handle = document.createElement("input")), null);
-  ui.handleRow.hidden = true;
-  box.appendChild(ui.handleRow);
-  ui.connectRow = el("div", "sess-spawn-row sess-spawn-connect");
-  box.appendChild(ui.connectRow);
-  ui.connect = () => spawnConnectNow(ui, ui._connectChecked || []);
-
+  /* what the child is for: the task it opens with, the board record that
+     task becomes, and the run it drives once it has read both */
   ui.task = document.createElement("textarea");
   ui.task.rows = 3;
   ui.task.placeholder = "opened with this once it has booted — what it is for";
-  box.appendChild(spawnRow("Opening task", ui.task, null));
+  gTask.appendChild(spawnRow("Opening task", ui.task, null));
 
   /* The board row, after the opening task because it is still the fallback
      two of its three shapes are read off: "new" mints from the box below
@@ -15703,14 +15726,14 @@ function buildSpawnForm(parentName, seed) {
     ["none", "no issue", "the child starts without a board record"],
   ]);
   ui.beads.value = "new";
-  box.appendChild(spawnRow("Board issue", ui.beads.el, null));
+  gTask.appendChild(spawnRow("Board issue", ui.beads.el, null));
   ui.issueText = document.createElement("textarea");
   ui.issueText.rows = 3;
   ui.issueText.placeholder =
     "what the issue says — first line is its title; empty uses the opening task";
   ui.issueTextRow = spawnSubRow("Issue text", ui.issueText, null);
   ui.issueTextRow.hidden = true;
-  box.appendChild(ui.issueTextRow);
+  gTask.appendChild(ui.issueTextRow);
   /* The search box above the picker, folded shut with it: a board of
      hundreds of open issues is not navigable through a bare popup, and
      the box's value narrows the SAME list — it is not a second question,
@@ -15721,42 +15744,62 @@ function buildSpawnForm(parentName, seed) {
   ui.issueFilter.placeholder = "filter the board — id, title or assignee";
   ui.issueFilterRow = spawnSubRow("Find", ui.issueFilter, null);
   ui.issueFilterRow.hidden = true;
-  box.appendChild(ui.issueFilterRow);
+  gTask.appendChild(ui.issueFilterRow);
   ui.issuePick = document.createElement("select");
   ui.issueHint = el("span", "sess-spawn-note");
   ui.issueRow = spawnSubRow("Issue", ui.issuePick, ui.issueHint);
   ui.issueRow.hidden = true;
-  box.appendChild(ui.issueRow);
+  gTask.appendChild(ui.issueRow);
   ui._issues = [];
   ui._issuesFor = null;
-  ui._issuesError = "";
   ui._issuesRead = false;
+  ui._issuesError = "";
+
+  /* the run: ranked by the role picked above, preset from the parent's
+     own pair (refillSpawnWorkflows), and the context that run is opened
+     with -- folded until a workflow is named */
+  ui.workflow = document.createElement("select");
+  gTask.appendChild(spawnRow("Workflow", ui.workflow, null));
+  ui.contextRow = spawnRow("Context", (ui.context = document.createElement("input")), null);
+  ui.contextRow.hidden = true;
+  gTask.appendChild(ui.contextRow);
+
+  /* who it may talk to: the mesh it lands in, its handle there, and the
+     peers beyond its parent it is wired to */
+  ui.mesh = document.createElement("select");
+  gMesh.appendChild(spawnRow("Mesh", ui.mesh, (ui.meshNote = el("span", "sess-spawn-note"))));
+  ui.handleRow = spawnRow("Handle", (ui.handle = document.createElement("input")), null);
+  ui.handleRow.hidden = true;
+  gMesh.appendChild(ui.handleRow);
+  ui.connectRow = el("div", "sess-spawn-row sess-spawn-connect");
+  gMesh.appendChild(ui.connectRow);
+  ui.connect = () => spawnConnectNow(ui, ui._connectChecked || []);
 
   /* the inherited rows: what a child may be told to differ on */
   ui.profile = document.createElement("select");
-  box.appendChild(spawnRow("Profile", ui.profile, (ui.profileNote = el("span", "sess-spawn-note"))));
+  gRuntime.appendChild(spawnRow("Profile", ui.profile, (ui.profileNote = el("span", "sess-spawn-note"))));
   ui.harness = document.createElement("select");
-  box.appendChild(spawnRow("Harness", ui.harness, (ui.harnessNote = el("span", "sess-spawn-note"))));
+  gRuntime.appendChild(spawnRow("Harness", ui.harness, (ui.harnessNote = el("span", "sess-spawn-note"))));
   ui.model = document.createElement("select");
   ui.modelRow = spawnRow(
     "Model", ui.model, (ui.modelNote = el("span", "sess-spawn-note"))
   );
   ui.modelRow.hidden = true;
-  box.appendChild(ui.modelRow);
+  gRuntime.appendChild(ui.modelRow);
   ui.effort = document.createElement("select");
   ui.effortRow = spawnRow("Reasoning effort", ui.effort, null);
   ui.effortRow.hidden = true;
-  box.appendChild(ui.effortRow);
+  gRuntime.appendChild(ui.effortRow);
   ui.borrow = document.createElement("select");
-  box.appendChild(spawnRow("Borrow", ui.borrow, (ui.borrowNote = el("span", "sess-spawn-note"))));
+  gRuntime.appendChild(spawnRow("Borrow", ui.borrow, (ui.borrowNote = el("span", "sess-spawn-note"))));
   ui.nullTok = null; ui.nullNote = null;
   const nullRow = spawnCheckRow("run with no token (--null — log in inside)", null);
   ui.nullTok = nullRow.querySelector("input");
   ui.nullNote = nullRow.querySelector(".sess-spawn-note");
-  box.appendChild(nullRow);
+  gRuntime.appendChild(nullRow);
   ui.args = document.createElement("input");
   ui.args.placeholder = "extra harness flags";
-  box.appendChild(spawnRow("Args", ui.args, (ui.argsNote = el("span", "sess-spawn-note"))));
+  gRuntime.appendChild(spawnRow("Args", ui.args, (ui.argsNote = el("span", "sess-spawn-note"))));
 
   /* Codex has a named runtime panel rather than generic permission rows.
      Other harnesses do not acquire Codex labels merely because their
@@ -15777,10 +15820,12 @@ function buildSpawnForm(parentName, seed) {
   ui.codexSandboxNote = sandboxRow.querySelector(".sess-spawn-note");
   ui.codexState = el("p", "sess-spawn-harness-state");
   ui.codexPanel.append(yoloRow, sandboxRow, ui.codexState);
-  box.appendChild(ui.codexPanel);
+  gRuntime.appendChild(ui.codexPanel);
 
+  /* where it works: the directory, the checkout cut inside it, and -- last,
+     because both of those can take it away -- the conversation it opens on */
   ui.workspace = document.createElement("select");
-  box.appendChild(spawnRow("Directory", ui.workspace, (ui.workspaceNote = el("span", "sess-spawn-note"))));
+  gPlace.appendChild(spawnRow("Directory", ui.workspace, (ui.workspaceNote = el("span", "sess-spawn-note"))));
 
   /* worktree: the daemon cuts it from the parent's repository.
      Three modes on the face of the form, each with its own sub-rows folded
@@ -15810,7 +15855,7 @@ function buildSpawnForm(parentName, seed) {
   ui.rebase.placeholder = "branch to fold this reused checkout onto";
   ui.rebaseRow = spawnSubRow("Rebase onto", ui.rebase, null);
   ui.rebaseRow.hidden = true;
-  box.append(ui.wtRow, ui.wtNameRow, ui.wtPickRow, updRow, ui.rebaseRow);
+  gPlace.append(ui.wtRow, ui.wtNameRow, ui.wtPickRow, updRow, ui.rebaseRow);
 
   ui.fork = null; ui.forkNote = null;
   // A note is asked for here because this box is greyed more often than it is
@@ -15822,7 +15867,7 @@ function buildSpawnForm(parentName, seed) {
   const forkRow = spawnCheckRow("start from a copy of the parent's conversation", true);
   ui.fork = forkRow.querySelector("input");
   ui.forkNote = forkRow.querySelector(".sess-spawn-note");
-  box.appendChild(forkRow);
+  gPlace.appendChild(forkRow);
 
   /* ---- the child cap: laid out at the press, not inside the form -------
      The cap is not a property of the child being described — it is a gate on
