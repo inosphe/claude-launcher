@@ -325,21 +325,31 @@
              rows are the folded ones below, which is why the fold's summary
              line reports where they came from rather than what the form
              happens to be holding. -->
-        <label>Parent <select name="parent"></select></label>
-        <label class="check hidden" id="new-fork-row">
-          <input type="checkbox" name="fork_parent">
-          <span><code>--fork-session</code> (start the child from a copy of
-            the parent's conversation, leaving the parent's own untouched)</span>
-        </label>
-        <p id="parent-hint" class="hidden"></p>
-        <!-- The child cap is soft: a parent standing at its limit is offered
-             the crossing instead of a refusal, and only while the daemon
-             reports it reached (syncSpawnOverRow writes the count). -->
-        <label class="check hidden" id="new-over-row">
-          <input type="checkbox" name="over_limit">
-          <span id="new-over-text"></span>
-        </label>
-        <label>Name <input name="name" placeholder="(auto)"></label>
+        <!-- WHO this session is, fenced like the spawn modal's own first
+             group (buildSpawnForm's "Identity") — the rows a reader meets
+             before anything else here can grey them. Naming a parent is
+             the one answer on this form that changes what every later row
+             means, so it opens the form rather than sitting among rows it
+             outranks. -->
+        <fieldset id="new-identity">
+          <legend><span class="sess-spawn-step">1</span> Identity</legend>
+          <p class="sess-spawn-group-blurb">who this session is</p>
+          <label>Parent <select name="parent"></select></label>
+          <label class="check hidden" id="new-fork-row">
+            <input type="checkbox" name="fork_parent">
+            <span><code>--fork-session</code> (start the child from a copy of
+              the parent's conversation, leaving the parent's own untouched)</span>
+          </label>
+          <p id="parent-hint" class="hidden"></p>
+          <!-- The child cap is soft: a parent standing at its limit is offered
+               the crossing instead of a refusal, and only while the daemon
+               reports it reached (syncSpawnOverRow writes the count). -->
+          <label class="check hidden" id="new-over-row">
+            <input type="checkbox" name="over_limit">
+            <span id="new-over-text"></span>
+          </label>
+          <label>Name <input name="name" placeholder="(auto)"></label>
+        </fieldset>
 
         <!-- WHO it runs as, on the face of the form rather than in the fold
              below. The profile is not a machine detail: it decides whose
@@ -355,7 +365,8 @@
              those axes so each profile appears once and Harness follows the
              selected profile's policy-filtered choices. -->
         <fieldset id="new-runs-on">
-          <legend>Runs as</legend>
+          <legend><span class="sess-spawn-step">2</span> Runs as</legend>
+          <p class="sess-spawn-group-blurb">whose credentials it runs on</p>
           <label>Profile <select name="profile"></select></label>
           <label>Harness <select name="harness"></select></label>
           <label id="new-model-row" class="hidden">
@@ -377,7 +388,8 @@
              afterwards leaves an agent sitting at a prompt not knowing
              which mesh it is in or which run it drives. -->
         <fieldset id="new-onboard">
-          <legend>Start it working</legend>
+          <legend><span class="sess-spawn-step">3</span> Start it working</legend>
+          <p class="sess-spawn-group-blurb">what it joins, and what it drives</p>
           <label>Mesh <select name="mesh"></select></label>
           <label id="new-handle-row" class="hidden">
             Handle <input name="handle" placeholder="(session name)">
@@ -403,7 +415,8 @@
              since a line naming a row the reader can see is at best noise
              and at worst a contradiction. -->
         <details id="new-runtime">
-          <summary>How it runs <span id="new-runtime-sum"></span></summary>
+          <summary><span class="sess-spawn-step">4</span> How it runs
+            <span id="new-runtime-sum"></span></summary>
           <div id="new-runtime-body">
             <label>Borrow <select name="borrow"></select></label>
             <label class="check">
@@ -451,7 +464,8 @@
         </details>
 
         <fieldset id="new-worktree" class="new-worktree">
-          <legend>Worktree</legend>
+          <legend><span class="sess-spawn-step">5</span> Worktree</legend>
+          <p class="sess-spawn-group-blurb">the checkout this session works in</p>
           <label class="check"><input type="radio" name="worktree_mode" value="" checked>
             <span>no worktree — use the selected directory</span></label>
           <label class="check"><input type="radio" name="worktree_mode" value="new">
@@ -470,7 +484,8 @@
         <!-- The first thing it is told, last thing on the form: it is the
              only row whose right answer depends on every row above it. -->
         <fieldset id="new-task">
-          <legend>Opening task</legend>
+          <legend><span class="sess-spawn-step">6</span> Opening task</legend>
+          <p class="sess-spawn-group-blurb">what it is told once it boots</p>
           <textarea name="task" rows="3"
             placeholder="typed in once it has booted — what it is for"></textarea>
         </fieldset>
@@ -497,7 +512,8 @@
              infer which was meant, and a session told "no issue" would go
              to the board and look for one. -->
         <fieldset id="new-beads">
-          <legend>Board issue</legend>
+          <legend><span class="sess-spawn-step">7</span> Board issue</legend>
+          <p class="sess-spawn-group-blurb">where that job is written down</p>
           <label class="check">
             <input type="radio" name="beads" value="new" checked>
             <span>New issue</span>

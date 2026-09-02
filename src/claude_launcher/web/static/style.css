@@ -783,6 +783,24 @@ a.cflow-scope:hover { background: #1d3559; text-decoration: underline; }
 
 #new-session { padding: 0; max-width: 520px; }
 #new-session label { display: block; font-size: 12px; color: #9da5b0; margin-bottom: 6px; }
+/* WHO this session is — the first fence on the form, styled like the ones
+   below it. The step badge and blurb reuse the spawn modal's own classes
+   (.sess-spawn-step, .sess-spawn-group-blurb — see buildSpawnForm/spawnGroup
+   in app.js) so a numbered card reads the same way in both places. */
+#new-identity {
+  margin: 0 0 4px; padding: 10px 12px 4px;
+  border: 1px solid #2a2e36; border-radius: 6px;
+}
+#new-identity legend {
+  padding: 0 6px; font-size: 11px; text-transform: uppercase; color: #7d8590;
+}
+/* The step badge sits inline in six legends and a fold's summary; one rule
+   aligns it against the label text everywhere it appears on this form. */
+#new-identity legend, #new-runs-on legend, #new-onboard legend,
+#new-worktree legend, #new-task legend, #new-beads legend,
+#new-runtime > summary {
+  display: flex; align-items: center; gap: 7px; flex-wrap: wrap;
+}
 #new-session input, #new-session select {
   width: 100%; margin-top: 2px; padding: 5px 8px; font-size: 13px;
   background: #14161a; color: #d8dbe0; border: 1px solid #30363d; border-radius: 4px;

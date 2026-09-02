@@ -90,6 +90,22 @@ function ids(text) {
 }
 
 const runsOn = block('<fieldset id="new-runs-on">', "</fieldset>", form.start);
+const identity = block('<fieldset id="new-identity">', "</fieldset>", form.start);
+
+/* The numbered-card treatment the spawn modal introduced (fdf353f8, "fence
+   the spawn form into five decision groups") extended to this form: the
+   rows that used to sit above every fieldset (who this session is) now get
+   one of their own, and every existing fieldset (plus the runtime fold's
+   summary, which has no <legend>) carries the same step badge so the whole
+   form reads as one numbered sequence, not six fenced blocks and four
+   orphan rows. */
+check("Identity fences exactly who the session is",
+      named(identity.text), ["parent", "fork_parent", "over_limit", "name"]);
+check("Identity opens the form, ahead of every other fence",
+      identity.start < runsOn.start, true);
+check("the decision blocks are numbered in reading order",
+      [...form.text.matchAll(/class="sess-spawn-step">(\d+)</g)].map((m) => m[1]),
+      ["1", "2", "3", "4", "5", "6", "7"]);
 
 /* The reading order: who it is, whose credentials it holds, what it joins,
    how it runs (folded), what it is told first. */
