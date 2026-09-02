@@ -295,7 +295,11 @@ def build_app(
     # so it is taken back at shutdown rather than left for the next app.
     rag_service: rag_mod.RagService = app["rag"]
     board.write_hooks.append(rag_service.on_board_write)
-    manager.change_hooks.append(rag_service.on_sessions_changed)
+    # Tests hand in registries that carry only exit_hooks; the fleet corpus
+    # then follows endings alone, which is all such a registry has.
+    change_hooks = getattr(manager, "change_hooks", None)
+    if change_hooks is not None:
+        change_hooks.append(rag_service.on_sessions_changed)
     manager.exit_hooks.append(rag_service.on_sessions_changed)
     briefing.persist_hooks.append(rag_service.on_sessions_changed)
     app.on_startup.append(_start_rag)
