@@ -120,6 +120,46 @@ def test_user_approval_opens_the_ending(worker_run):
     assert payload["status"] == "step" and payload["step_id"] == "end-gate"
 
 
+def test_queue_recheck_loops_the_run_back_to_intake(worker_run):
+    """``queue-recheck``'s ``next-round`` is a second round of the SAME run.
+
+    The engine is what makes a loop a loop: intake comes back as visit 2
+    (the per-step counter that ``max_visits`` guards), on the same run id,
+    with no gate between wrapup and the new round. A worker that read
+    "loop back to intake" as "start a new run" would leave this run parked
+    at queue-recheck forever -- the daemon sees neither done nor progress.
+    """
+    before = engine.status()["run"]
+    payload = _at("queue-recheck")
+    assert payload["status"] == "select"
+    assert {o["name"] for o in payload["options"]} == {"next-round", "done"}
+    with pytest.raises(CflowError, match="requires a reason"):
+        engine.select("next-round")
+    payload = engine.select("next-round", "queue: claunch-x1 open, assignable")
+    assert payload["status"] == "step"
+    assert payload["step_id"] == "intake"
+    assert payload["visit"] == 2
+    assert payload["run"] == before
+
+
+def test_queue_recheck_done_reaches_the_user_gate(worker_run):
+    """``done`` is the only road to ``end-gate`` -- and it is still a gate.
+
+    Draining the queue does not end the session by itself: the step after
+    ``done`` is the ask the user answers, withheld until they do.
+    """
+    _at("queue-recheck")
+    payload = engine.select("done", "queue empty: claunch beads list returned 0 rows")
+    assert payload["step_id"] == "end-gate"
+    # arriving by a selection opens the ask at once: put to nobody but a
+    # user, with no deadline, and the step's work withheld
+    assert payload["status"] == "waiting_approval"
+    assert payload["reason"] == "ask"
+    assert payload["ask"]["asked"] == []
+    assert payload["ask"]["deadline"] is None
+    assert "instructions" not in payload
+
+
 def _run_with_verify(proj, monkeypatch, replacement):
     """Start a run whose ``end-hold`` carries ``replacement`` as its verify.
 

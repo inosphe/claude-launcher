@@ -494,6 +494,10 @@ def test_the_shared_block_defines_the_queue_and_the_batch():
     assert "`batch: <id,...>`" in flat
     assert "assignee가 이슈마다 `merged <해시>`로 한다" in flat
     assert "UNQUEUED: <세션> landed without it" in flat
+    # leftover rows are re-read by queue-recheck before any return to pool,
+    # and the worker may not fill its own queue
+    assert "워커의 queue-recheck가 다시 읽는다" in flat
+    assert "워커가 자기 후속 이슈를 스스로 배정해 큐를 채우는 것은 금지다" in flat
 
 
 @pytest.mark.parametrize("layer", ["bundled", "project"])
@@ -535,8 +539,10 @@ def test_the_worker_loops_over_its_queue_before_it_lands(layer):
 @pytest.mark.parametrize("layer", ["bundled", "project"])
 def test_the_worker_lands_a_batch_once_and_settles_every_issue(layer):
     """One nudge per batch, every issue to in_review, a COMMIT comment on the
-    issue the commit belongs to, and at wrapup a close per landed issue and a
-    return-to-pool for what was queued but never taken up."""
+    issue the commit belongs to, at wrapup a close per landed issue, and the
+    return-to-pool for what was queued but never taken up lives one step
+    later, in ``queue-recheck`` -- wrapup no longer touches those rows,
+    because the next step may turn them into the next round."""
     path = (
         _bundled("improv-worker") if layer == "bundled"
         else PROJECT_OVERRIDES / "improv-worker.yaml"
@@ -556,9 +562,63 @@ def test_the_worker_lands_a_batch_once_and_settles_every_issue(layer):
     assert "배치 회차면 실린 이슈마다 본다" in landing   # a brake on any issue escalates
     wrapup = " ".join(wf.steps["wrapup"].instructions.split())
     assert "배치 회차면 **실린 이슈마다** 같은 사유로 닫는다" in wrapup
-    assert '--assignee ""' in wrapup
-    assert "UNQUEUED: $CLAUNCH_SESSION landed without it" in wrapup
+    assert "여기서 손대지 않는다 — 상태도 assignee도 그대로다" in wrapup
+    assert "UNQUEUED: $CLAUNCH_SESSION landed without it" not in wrapup
     assert "배치 회차면 주 이슈 id 하나로 한 장" in wrapup   # one report per landing
+    recheck = " ".join((wf.steps["queue-recheck"].select.prompt or "").split())
+    assert '--assignee ""' in recheck
+    assert "UNQUEUED: $CLAUNCH_SESSION landed without it" in recheck
+
+
+@pytest.mark.parametrize("layer", ["bundled", "project"])
+def test_the_worker_rechecks_its_queue_after_landing_and_loops(layer):
+    """wrapup -> queue-recheck -> (intake ... | end-gate).
+
+    A round used to be a session: landing drained the queue back to the pool
+    and the session ended, so a second assignment meant a second spawn. Now
+    the step after wrapup re-reads the board (the same queue command every
+    role uses); an assignable row loops the run back to ``intake`` (a new
+    round, new branch, new landing -- the run's visit counter is the loop
+    guard), and only when nothing is assignable does the run reach
+    ``end-gate`` -- and only then are the leftover rows unqueued. The queue
+    is filled by the leader/operator alone: the worker never self-assigns
+    its own handoff issues to manufacture a next round (claunch-qac7, Q1=A).
+    """
+    path = (
+        _bundled("improv-worker") if layer == "bundled"
+        else PROJECT_OVERRIDES / "improv-worker.yaml"
+    )
+    wf = model.load(path)
+    assert wf.start == "intake"
+    assert wf.steps["wrapup"].next == "queue-recheck"
+    gate = wf.steps["queue-recheck"]
+    assert gate.select is not None and gate.select.chooser == "agent"
+    assert gate.select.require_reason is True
+    assert {k: o.next for k, o in gate.select.options.items()} == {
+        "next-round": "intake", "done": "end-gate",
+    }
+    prompt = " ".join(gate.select.prompt.split())
+    assert "--assignee $CLAUNCH_SESSION --status open --status in_ready --status in_progress --limit 0 --json" in prompt
+    assert "답을 기다리지 않는다 — 보드가 답이다" in prompt   # the board, not the ask, decides
+    assert "모호하면 done이다" in prompt                       # the tie-break
+    assert "자기 배정으로 큐를 채우지 않는다" in prompt          # Q1=A
+    # end-gate is reached only through queue-recheck's `done`
+    assert not any(
+        s.next == "end-gate" for s in wf.steps.values() if s.next
+    )
+    # intake knows a revisit: the primary issue is the head of the queue
+    intake = " ".join(wf.steps["intake"].instructions.split())
+    assert "재방문 회차(queue-recheck가 next-round로 보낸 것" in intake
+    assert "주 이슈는 큐의 첫 일감(priority 오름차순 → created_at)" in intake
+    # wrapup narrows self-registered follow-ups and forbids self-assignment
+    wrapup = " ".join(wf.steps["wrapup"].instructions.split())
+    assert "협소하게 해석한다" in wrapup
+    assert "자기 배정(`--assignee $CLAUNCH_SESSION`)은 하지 않는다" in wrapup
+    assert "이 세션의 다음 회차로 배정할지(assign" in wrapup
+    # queue-next hands drained rows forward instead of to wrapup
+    qn = " ".join(wf.steps["queue-next"].select.prompt.split())
+    assert "착지 뒤 queue-recheck가 다시 읽는다" in qn
+    assert "wrapup이 풀에 되돌린다" not in qn
 
 
 @pytest.mark.parametrize("layer", ["bundled", "project"])

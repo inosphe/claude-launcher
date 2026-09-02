@@ -418,14 +418,33 @@ def test_the_worker_end_is_gated_by_a_user_without_a_timeout():
     this gate the worker took that decision alone and its peers found out by
     sending into a closed terminal. Both layers carry it, or the same name
     runs two policies.
+
+    ``queue-recheck`` sits between wrapup and the gate: it loops the run back
+    to ``intake`` while the board still holds assigned work, and its ``done``
+    branch is the only road into ``end-gate``. The gate therefore still
+    stands between every ending and the kill -- a loop is not an ending.
     """
     for label, wf in (
         ("bundled", _bundled("improv-worker")),
         ("project", model.load(PROJECT_OVERRIDES / "improv-worker.yaml")),
     ):
-        assert wf.steps["wrapup"].next == "end-gate", (
-            f"{label}: wrapup still runs straight into end, which is the kill"
+        assert wf.steps["wrapup"].next == "queue-recheck", (
+            f"{label}: wrapup must re-read the queue before the ending"
         )
+        recheck = wf.steps["queue-recheck"].select
+        assert recheck is not None and recheck.options["done"].next == "end-gate", (
+            f"{label}: queue-recheck's done branch must reach the user gate"
+        )
+        assert recheck.options["next-round"].next == "intake", (
+            f"{label}: queue-recheck's loop must start a new round at intake"
+        )
+        # No step other than the gate and its hold reaches END: every ending
+        # passes the user's approval.
+        enders = sorted(
+            sid for sid, step in wf.steps.items()
+            if step.successors() == [] and sid not in ("end-gate", "end-hold")
+        )
+        assert enders == [], f"{label}: {enders} reach END around the user gate"
         gate = wf.steps["end-gate"].ask
         assert gate is not None, f"{label}: end-gate carries no ask"
         assert gate.delegate.candidates == [], (

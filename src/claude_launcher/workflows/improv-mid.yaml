@@ -192,8 +192,12 @@ steps:
       `issue: <id>`)의 마커 뒤에 `batch: <id,...>`가 붙으며 증거 묶음은 그 주
       이슈 코멘트 하나에 있다. 리더는 같은 tip의 행들을 후보 하나로 심사해
       한 번 머지하고, 닫는 것은 assignee가 이슈마다 `merged <해시>`로 한다.
-      착수하지 않은 큐 일감은 회차 마감 때 `update <id> --assignee ""`와
-      `UNQUEUED: <세션> landed without it` 코멘트로 풀에 되돌린다.
+      착수하지 않은 큐 일감은 회차 마감 뒤 워커의 queue-recheck가 다시
+      읽는다 — 착수할 수 있으면 같은 런 안에서 다음 회차의 주 이슈가 되고
+      (intake로 루프), 착수할 수 없는 것(blocked·다른 저장소 영역)만
+      `update <id> --assignee ""`와 `UNQUEUED: <세션> landed without it`
+      코멘트로 풀에 되돌린다. 워커가 자기 후속 이슈를 스스로 배정해 큐를
+      채우는 것은 금지다 — 배정은 위 문장대로 리더·운영자의 것이다.
       br가 실패하면(잠금·바이너리 없음) --lock-timeout 5000으로 한 번 더,
       그래도 안 되면 mesh fyi 첫 줄에 `NO-BEAD:` + 위 규격 그대로 — 리더가
       다음 관제 대기에서 대신 만들고 id를 답한다. 이슈 없이 착수하는
