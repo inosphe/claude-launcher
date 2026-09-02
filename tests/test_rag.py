@@ -297,6 +297,25 @@ def test_client_sends_the_openai_and_cohere_shapes():
     asyncio.run(run())
 
 
+def test_session_verifies_via_the_os_trust_store_unless_disabled():
+    """``verify_tls`` true (the default) hands the connector the OS-backed
+    context when ``truststore`` is installed — the fix for a corporate
+    TLS-inspection root that OpenSSL's own chain validation rejects but the
+    OS already trusts (claunch-go5a). ``verify_tls: false`` still turns
+    verification off outright, unaffected by that context's availability."""
+    async def run():
+        cfg = dict(store.RAG_DEFAULTS, base_url="https://x", api_key="k", embedding_model="m")
+        async with rag.RagClient(cfg)._session() as verified:
+            if rag._OS_TRUST_CONTEXT is not None:
+                assert verified.connector._ssl is rag._OS_TRUST_CONTEXT
+            else:
+                assert verified.connector._ssl is True
+        async with rag.RagClient(dict(cfg, verify_tls=False))._session() as unverified:
+            assert unverified.connector._ssl is False
+
+    asyncio.run(run())
+
+
 # --------------------------------------------------------------------------- #
 # the service
 # --------------------------------------------------------------------------- #

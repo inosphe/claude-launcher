@@ -51,6 +51,23 @@ import aiohttp
 from .. import atomic, store
 from . import paths
 
+try:
+    import ssl as _ssl
+    import truststore as _truststore
+except ImportError:  # Python < 3.10, or truststore not installed
+    _truststore = None
+
+#: An SSL context that verifies against the OS's own trust store (Windows
+#: SChannel, macOS Security framework, OpenSSL's default store on Linux)
+#: instead of OpenSSL's own chain validation. A corporate TLS-inspection
+#: root already trusted by the OS can still fail OpenSSL's stricter X.509
+#: checks (observed: "Basic Constraints of CA cert not marked critical") even
+#: after ``ssl.create_default_context()`` loads that same root from the OS
+#: store — loading the cert is not the same as using the OS's own validator.
+#: ``None`` when ``truststore`` is unavailable, in which case callers fall
+#: back to aiohttp's default (``ssl.create_default_context()``).
+_OS_TRUST_CONTEXT = _truststore.SSLContext(_ssl.PROTOCOL_TLS_CLIENT) if _truststore else None
+
 #: Text handed to the embedder per chunk, in characters. About 1000-1500
 #: tokens of mixed Korean and English, well under the endpoint's 40960-token
 #: window; small enough that a 30 KB issue is eight chunks, not one vector
@@ -118,6 +135,14 @@ class RagClient:
     it (the measured endpoint answers exactly those two; ``/reranking`` is a
     404 there). ``verify_tls`` false hands aiohttp ``ssl=False`` — the
     endpoint this was built against serves a chain Python refuses.
+
+    When ``verify_tls`` is true (the default) and ``truststore`` is
+    installed, verification runs through :data:`_OS_TRUST_CONTEXT` — the
+    OS's own certificate validator — rather than OpenSSL's, so a corporate
+    TLS-inspection root the OS already trusts (but OpenSSL's stricter X.509
+    checks reject) still verifies. Without ``truststore`` this falls back to
+    aiohttp's own default (``ssl.create_default_context()``), unchanged from
+    before.
     """
 
     def __init__(self, cfg: dict) -> None:
@@ -132,7 +157,12 @@ class RagClient:
             "Content-Type": "application/json",
             "Authorization": f"Bearer {self.cfg.get('api_key', '')}",
         }
-        connector = aiohttp.TCPConnector(ssl=False) if self.cfg.get("verify_tls") is False else None
+        if self.cfg.get("verify_tls") is False:
+            connector = aiohttp.TCPConnector(ssl=False)
+        elif _OS_TRUST_CONTEXT is not None:
+            connector = aiohttp.TCPConnector(ssl=_OS_TRUST_CONTEXT)
+        else:
+            connector = None
         return aiohttp.ClientSession(
             headers=headers,
             connector=connector,
