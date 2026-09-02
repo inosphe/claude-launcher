@@ -93,6 +93,13 @@ function pendingBanner() { return null; }
 function renderWfIdle(view) { view.appendChild(el("div", "wf-start")); }
 function cflowAction() {}
 function confirm() { return true; }
+// The diagram/reports drag split (s469) — another thing this file is not
+// testing, stubbed to its shape so renderWfInto's references resolve.
+let wfColDragHost = null;
+const MOBILE_MQ = { matches: false };
+function wfSplitBar() { return el("div", "wf-split"); }
+function loadWfDiaW() { return null; }
+function setWfColW() {}
 `;
 
 const ctx = {};

@@ -2023,6 +2023,28 @@ a.wf-btn { display: inline-block; text-decoration: none; line-height: 1.5; }
 .wf-diagram { flex: 1 1 380px; min-width: 300px; max-width: 640px; }
 .wf-side { flex: 1.3 1 340px; min-width: 300px; max-width: 760px; }
 
+/* The bar between them, once a reader drags it: the same contract as
+   #rail-split/#detail-split/#term-split (live while the hand moves, written
+   down at release, reset on double-click), except this one is rebuilt by
+   renderWfInto on every poll rather than shipped once in the page — see
+   wfSplitBar() in app.js for how the drag survives that rebuild, and why a
+   drag also lifts .wf-diagram's max-width above: the diagram's own natural
+   size is often wider than the 640px ceiling above lets it show, so the
+   ceiling has to move before dragging can make the picture any bigger. Two
+   homes (the full run page and the terminal's split pane) remember their
+   own width, since the pane's column starts out far narrower than the
+   page's. Not offered on a phone: .wf-cols there is one column per row, and
+   a column has nothing to split against. */
+.wf-split {
+  flex: none; width: 8px; cursor: col-resize; touch-action: none;
+  align-self: stretch;
+  display: flex; align-items: center; justify-content: center;
+}
+.wf-split::after {
+  content: ""; width: 2px; height: 44px; border-radius: 2px; background: #4d5566;
+}
+.wf-split:hover::after, .wf-split.dragging::after { background: #58a6ff; }
+
 /* With a run on screen (renderWfInto sets the class) the view stops
    scrolling as a whole: the head and the button bar hold still, and the
    picture and the text each own the scroll under them — the two halves of
