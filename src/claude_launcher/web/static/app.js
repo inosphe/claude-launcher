@@ -446,6 +446,86 @@ function railMetaText(s) {
   return [identity, state].filter(Boolean).join(" · ");
 }
 
+/* ---- rail search ------------------------------------------------------ */
+/* Whether the daemon offers semantic search (the rag: block is filled in).
+   Read off the session poll, like briefingLLM: one flag, no extra call. */
+let ragConfigured = false;
+/* The rail's search box. Typing narrows the rail by substring at once
+   (name, identity, issue, branch, task, briefing one-liner); Enter asks the
+   daemon to rank the fleet by meaning and the rail then shows only the
+   sessions the answer named, best first in `hits`. `hits` null = substring
+   mode; a Map name -> score = semantic mode. */
+let sessionSearch = { q: "", hits: null, pending: false, error: "", index: null };
+
+function sessionSearchText(s) {
+  return [
+    s.name, s.identity, s.role, s.issue, s.branch, s.task,
+    s.briefing && s.briefing.one_line,
+  ].filter(Boolean).join(" ").toLowerCase();
+}
+
+function sessionMatchesSearch(s, search = sessionSearch) {
+  const q = String(search.q || "").trim().toLowerCase();
+  if (!q) return true;
+  if (search.hits) return search.hits.has(s.name);
+  const hay = sessionSearchText(s);
+  return q.split(/\s+/).filter(Boolean).every((t) => hay.includes(t));
+}
+
+function sessionSearchNote(search = sessionSearch, sessions = sessionsCache) {
+  if (!search.q) return "";
+  if (search.pending) return "searching by meaning…";
+  if (search.error) return `search failed: ${search.error}`;
+  const shown = (sessions || []).filter((s) => sessionMatchesSearch(s, search)).length;
+  if (!search.hits) {
+    return `${shown} of ${(sessions || []).length} match — Enter searches by meaning`;
+  }
+  const idx = search.index || {};
+  const cover = idx.total ? ` · ${idx.indexed}/${idx.total} indexed` : "";
+  return `${shown} of ${(sessions || []).length} by meaning${cover} — Esc clears`;
+}
+
+function syncSessionSearchNote() {
+  const note = $("session-search-note");
+  if (!note) return;
+  note.textContent = sessionSearchNote();
+  note.classList.toggle("hidden", !sessionSearch.q);
+}
+
+function setSessionSearch(q) {
+  sessionSearch = { q: String(q || ""), hits: null, pending: false, error: "", index: null };
+  syncSessionSearchNote();
+  syncSessionFilters(sessionsCache);
+}
+
+async function runSessionSearch(q) {
+  q = String(q || "").trim();
+  if (!q) { setSessionSearch(""); return; }
+  if (!ragConfigured) {
+    sessionSearch = { q, hits: null, pending: false, index: null,
+                      error: "semantic search needs the rag: block in ~/.claunch.yaml" };
+    syncSessionSearchNote();
+    return;
+  }
+  sessionSearch = { q, hits: null, pending: true, error: "", index: null };
+  syncSessionSearchNote();
+  let next;
+  try {
+    const resp = await api(`/api/search?kind=sessions&q=${encodeURIComponent(q)}&limit=50`);
+    const data = await resp.json().catch(() => ({}));
+    next = resp.ok
+      ? { q, pending: false, error: "", index: data.index || null,
+          hits: new Map((data.results || []).map((r) => [r.id, r.rerank_score ?? r.score])) }
+      : { q, hits: null, pending: false, index: null, error: data.error || `HTTP ${resp.status}` };
+  } catch (err) {
+    next = { q, hits: null, pending: false, index: null, error: String(err) };
+  }
+  if (sessionSearch.q !== q) return;  // the box moved on while we waited
+  sessionSearch = next;
+  syncSessionSearchNote();
+  syncSessionFilters(sessionsCache);
+}
+
 /* One mutually exclusive state filter for the rail. "Current" is the normal
    working set (running plus killed, excluding archived records); the other
    three modes answer the state-specific questions directly. The browser
@@ -616,10 +696,13 @@ function syncSessionFilters(sessions) {
     );
     button.setAttribute("aria-pressed", filter === sessionFilter ? "true" : "false");
   }
+  const searching = typeof sessionMatchesSearch === "function";
   for (const row of list.querySelectorAll("li[data-name]")) {
     const session = (sessions || []).find((s) => s.name === row.dataset.name);
-    row.classList.toggle("session-filtered", !session || !sessionMatchesFilter(session));
+    row.classList.toggle("session-filtered", !session || !sessionMatchesFilter(session)
+      || (searching && !sessionMatchesSearch(session)));
   }
+  if (typeof syncSessionSearchNote === "function") syncSessionSearchNote();
   if (typeof syncBulkActions === "function") syncBulkActions(sessions || [], sessionFilter);
 }
 
@@ -658,6 +741,7 @@ async function refreshSessions(options) {
   // contract while the full page reconciles the kill controls here.
   if (typeof reconcileKillUiState === "function") reconcileKillUiState(sessionsCache);
   briefingLLM = data.llm_configured !== false;
+  ragConfigured = data.rag_configured === true;
   forgetDeadSessions();
   const list = $("session-list");
   // Role countdown values change on every response, while the rail rows do
@@ -8596,21 +8680,81 @@ function issueSearchMatches(q, issue) {
 /* What the search box is asking right now. Not part of the request: it
    only narrows what the picker offers. */
 let issueFilter = "";
+/* The daemon's answer to the same box asked by meaning (Enter): the query
+   it was for, the candidate ids in rank order, and their scores. Dropped
+   the moment the box's text changes, so a stale ranking never reorders a
+   different question. */
+let issueSemantic = null;
+
+/* The picker's rows for a query: the semantic ranking first (only ids the
+   board offered — a hit the candidates list does not carry cannot be
+   picked), then the substring matches the ranking did not already name.
+   With no ranking for this exact query, the substring filter alone. */
+function issueSemanticOrder(list, q, semantic) {
+  const substring = list.filter((i) => issueSearchMatches(q, i));
+  if (!semantic || semantic.q !== q || !Array.isArray(semantic.order)) {
+    return { shown: substring, semantic: false, scores: null };
+  }
+  const rank = new Map(semantic.order.map((id, n) => [id, n]));
+  const hit = list.filter((i) => rank.has(i.id))
+    .sort((a, b) => rank.get(a.id) - rank.get(b.id));
+  const seen = new Set(hit.map((i) => i.id));
+  return {
+    shown: [...hit, ...substring.filter((i) => !seen.has(i.id))],
+    semantic: true,
+    scores: semantic.scores || null,
+  };
+}
+
+function issuePickerLead(q, shown, total, semantic) {
+  if (!q) return "(pick an issue)";
+  if (!shown.length) return `(no issue matches "${q}")`;
+  return `(${shown.length} of ${total} match${semantic ? ", by meaning" : ""})`;
+}
+
+async function runIssueSemantic(q) {
+  q = String(q || "").trim();
+  if (!q) return;
+  const cwd = newSessionCwd();
+  const parent = spawnParent();
+  const where = parent ? `parent=${encodeURIComponent(parent.name)}`
+                       : `cwd=${encodeURIComponent(cwd)}`;
+  let next;
+  try {
+    const resp = await api(`/api/search?kind=beads&q=${encodeURIComponent(q)}&limit=30&${where}`);
+    const data = await resp.json().catch(() => ({}));
+    next = resp.ok
+      ? { q, order: (data.results || []).map((r) => r.id),
+          scores: Object.fromEntries((data.results || []).map((r) => [r.id, r.rerank_score ?? r.score])) }
+      : { q, order: null, error: data.error || `HTTP ${resp.status}` };
+  } catch (err) {
+    next = { q, order: null, error: String(err) };
+  }
+  if ((issueFilter || "").trim() !== q) return;
+  issueSemantic = next;
+  renderIssueOptions();
+}
 
 function renderIssueOptions() {
   const sel = $("new-session").issue;
   const q = (issueFilter || "").trim();
   const kept = sel.value;
   sel.innerHTML = "";
-  const shown = q ? issuesCache.filter((i) => issueSearchMatches(q, i))
-                  : issuesCache;
+  const order = q && typeof issueSemanticOrder === "function"
+    ? issueSemanticOrder(issuesCache, q,
+        typeof issueSemantic === "undefined" ? null : issueSemantic)
+    : null;
+  const shown = !q ? issuesCache
+    : order ? order.shown : issuesCache.filter((i) => issueSearchMatches(q, i));
   // The lead row changes with the search, so the open popup says how many
   // of the board's issues the filter left — and that a dead end is one.
   sel.appendChild(new Option(
-    !q ? "(pick an issue)"
-       : shown.length
-         ? `(${shown.length} of ${issuesCache.length} match)`
-         : `(no issue matches "${q}")`,
+    typeof issuePickerLead === "function"
+      ? issuePickerLead(q, shown, issuesCache.length, order && order.semantic)
+      : !q ? "(pick an issue)"
+        : shown.length
+          ? `(${shown.length} of ${issuesCache.length} match)`
+          : `(no issue matches "${q}")`,
     ""));
   for (const i of shown) {
     const held = i.held_by ? ` — held by ${i.held_by}, would JOIN` : "";
@@ -8642,7 +8786,23 @@ const issueSearch = $("new-session").issue_filter;
 if (issueSearch) {
   issueSearch.addEventListener("input", () => {
     issueFilter = issueSearch.value;
+    issueSemantic = null;
     renderIssueOptions();
+  });
+  // Enter asks the board by meaning; the substring narrowing stays as typed.
+  issueSearch.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") { e.preventDefault(); runIssueSemantic(issueSearch.value); }
+  });
+}
+
+/* The rail's search box (index.html #session-search): substring on input,
+   meaning on Enter, Esc clears. Absent on a page holding older markup. */
+const sessionSearchBox = $("session-search");
+if (sessionSearchBox) {
+  sessionSearchBox.addEventListener("input", () => setSessionSearch(sessionSearchBox.value));
+  sessionSearchBox.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") { e.preventDefault(); runSessionSearch(sessionSearchBox.value); }
+    if (e.key === "Escape") { sessionSearchBox.value = ""; setSessionSearch(""); }
   });
 }
 
@@ -9176,6 +9336,9 @@ let promptPresetEdit = null;
 let statusCheckCache = [];
 let statusCheckError = "";
 let statusCheckDraft = { name: "", question: "" };
+/* The semantic-search feature's state (/api/rag/status), for its card. */
+let ragStatus = null;
+let ragError = "";
 let statusCheckEdit = null;
 // A delivery is immediate, but the agent reports on a later MCP turn.  Keep
 // that interval visible across session-list polls instead of making it look
@@ -9194,6 +9357,101 @@ function openSettings() {
   refreshFaq();
   refreshPromptPresets();
   refreshStatusChecks();
+  refreshRagStatus();
+}
+
+async function refreshRagStatus() {
+  try {
+    const resp = await api("/api/rag/status");
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
+    ragStatus = data;
+    ragError = "";
+  } catch (err) {
+    ragError = String(err);
+  }
+  if (wsOpen) renderWorkspaces();
+}
+
+async function ragReindex(row, force) {
+  try {
+    const body = { kind: row.kind, force: !!force };
+    if (row.root) body.cwd = row.root;
+    const resp = await api("/api/rag/reindex", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
+    ragError = "";
+  } catch (err) {
+    ragError = String(err);
+  }
+  setTimeout(refreshRagStatus, 1500);
+}
+
+function ragIndexLine(row) {
+  const parts = [`${row.documents} document${row.documents === 1 ? "" : "s"}`];
+  if (row.total) parts.push(`${row.indexed}/${row.total} current`);
+  if (row.pending) parts.push(`${row.pending} pending`);
+  parts.push(row.syncing ? "syncing" : "idle");
+  if (row.updated_at) parts.push(`updated ${String(row.updated_at).replace("T", " ").slice(0, 19)}`);
+  return parts.join(" · ");
+}
+
+function ragCard() {
+  const card = el("div", "ws-add rag-card");
+  card.appendChild(el("h3", null, "Semantic search (RAG)"));
+  card.appendChild(el("p", "wf-note",
+    "The search boxes on the rail, the Beads page and the issue pickers ask " +
+    "an embedding endpoint to rank the board and the fleet by meaning. " +
+    "Configured in the rag: block of ~/.claunch.yaml; the index lives under " +
+    "the daemon directory and follows the board on its own."));
+  if (ragError) card.appendChild(el("p", "error", ragError));
+  const st = ragStatus;
+  if (!st) {
+    card.appendChild(el("p", "wf-note", "reading…"));
+    return card;
+  }
+  if (!st.configured) {
+    card.appendChild(el("p", "wf-warning", "Off — the rag: block is not filled in."));
+    card.appendChild(el("pre", "rag-yaml",
+      "rag:\n  base_url: https://host/v1\n  api_key: <key>        # or CLAUNCH_RAG_API_KEY\n" +
+      "  embedding_model: <model id>\n  rerank_model: <model id>   # optional\n" +
+      "  verify_tls: true           # false for a self-signed chain"));
+    return card;
+  }
+  const facts = [
+    `endpoint ${st.host || "?"}`,
+    `embed ${st.embedding_model}`,
+    `rerank ${st.rerank_model || "(none — vector order only)"}`,
+    st.verify_tls ? "tls verified" : "tls NOT verified",
+    st.dimensions ? `${st.dimensions} dims` : "model dims",
+  ];
+  card.appendChild(el("p", "beads-bits", facts.join("  ·  ")));
+  const list = el("div", "rag-index-list");
+  for (const row of st.indexes || []) {
+    const item = el("div", "rag-index-row");
+    const text = el("div", "rag-index-text");
+    text.appendChild(el("strong", null, row.kind === "sessions" ? "sessions" : `board ${row.root || ""}`.trim()));
+    text.appendChild(el("span", "beads-bits", ragIndexLine(row)));
+    if (row.error) text.appendChild(el("span", "error", row.error));
+    item.appendChild(text);
+    const sync = el("button", "wf-btn clear", "Sync"); sync.type = "button";
+    sync.title = "embed what changed since the last sync";
+    sync.addEventListener("click", () => ragReindex(row, false));
+    const force = el("button", "wf-btn clear", "Rebuild"); force.type = "button";
+    force.title = "re-embed every document";
+    force.addEventListener("click", () => ragReindex(row, true));
+    item.append(sync, force);
+    list.appendChild(item);
+  }
+  if (!(st.indexes || []).length) {
+    list.appendChild(el("p", "wf-note",
+      "No index loaded yet — the first search builds one, or `claunch rag reindex`."));
+  }
+  card.appendChild(list);
+  return card;
 }
 
 function closeWorkspaces() {
@@ -9230,6 +9488,14 @@ let beadsSection = "board"; // board | queues | reports
 let beadsQueues = null;    // the last /api/beads/queues payload
 let beadsQueuesError = "";
 let beadsDragging = "";    // the issue id a Queues card drag is carrying
+/* The board searched by meaning (the box in the filter bar, Enter). While a
+   query stands, the lanes give way to its ranked rows; Esc or the clear
+   button brings the lanes back. One request per board root the page shows,
+   merged best-first. */
+let beadsSearch = { q: "", results: null, pending: false, error: "", index: null, reranked: false };
+/* The focused issue's nearest neighbours (/api/beads/<id>/related), drawn
+   in the detail pane as the dedup question answered by the index. */
+let beadsRelated = null;   // { id, results, error }
 
 /* What the Queues grid has been unfolded to show. Kept outside the tree
    because the 15s poll rebuilds every node in it: a group opened under the
@@ -9359,6 +9625,7 @@ async function loadBeadsPage(opts = {}) {
     beadsNextOffset = data.next_offset === null || data.next_offset === undefined
       ? offset : data.next_offset;
     await refreshBeadsDetail();
+    refreshBeadsRelated();
   } catch { return; }   // auth overlay is up, or the daemon is away
   finally {
     beadsLoading = false;
@@ -9502,6 +9769,7 @@ function beadsFilterBar() {
   }
   sel.addEventListener("change", () => { beadsSession = sel.value; renderBeads(); });
   bar.appendChild(sel);
+  bar.appendChild(beadsSearchBox());
   /* Two readings of the same board, because a family does not fit in a
      column: the lanes say what state everything is in, and the tree says
      what hangs off what across every state at once. */
@@ -9517,6 +9785,185 @@ function beadsFilterBar() {
   }
   bar.appendChild(lay);
   return bar;
+}
+
+/* ---- search by meaning ------------------------------------------------ */
+function beadsSearchBox() {
+  const box = document.createElement("input");
+  box.type = "search";
+  box.className = "beads-search";
+  box.autocomplete = "off";
+  box.value = beadsSearch.q;
+  box.placeholder = ragConfigured
+    ? "search the board by meaning — Enter"
+    : "search needs the rag: block in ~/.claunch.yaml";
+  box.title = "Enter ranks every issue of the board by meaning (and by id/title); Esc clears";
+  box.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") { e.preventDefault(); box.blur(); runBeadsSearch(box.value); }
+    if (e.key === "Escape") { box.value = ""; box.blur(); clearBeadsSearch(); }
+  });
+  return box;
+}
+
+function clearBeadsSearch() {
+  beadsSearch = { q: "", results: null, pending: false, error: "", index: null, reranked: false };
+  renderBeads();
+}
+
+function beadsSearchRoots() {
+  const roots = ((beadsCache && beadsCache.boards) || []).map((b) => b.root).filter(Boolean);
+  return roots.length ? roots : [""];
+}
+
+async function runBeadsSearch(q) {
+  q = String(q || "").trim();
+  if (!q) { clearBeadsSearch(); return; }
+  if (!ragConfigured) {
+    beadsSearch = { q, results: null, pending: false, index: null, reranked: false,
+                    error: "semantic search needs the rag: block in ~/.claunch.yaml" };
+    renderBeads();
+    return;
+  }
+  beadsSearch = { q, results: null, pending: true, error: "", index: null, reranked: false };
+  renderBeads();
+  const roots = beadsSearchRoots();
+  const answers = await Promise.all(roots.map(async (root) => {
+    const where = root ? `&cwd=${encodeURIComponent(root)}` : "";
+    try {
+      const resp = await api(`/api/search?kind=beads&q=${encodeURIComponent(q)}&limit=30${where}`);
+      const data = await resp.json().catch(() => ({}));
+      return resp.ok ? { root, data } : { root, error: data.error || `HTTP ${resp.status}` };
+    } catch (err) {
+      return { root, error: String(err) };
+    }
+  }));
+  if (beadsSearch.q !== q) return;
+  beadsSearch = beadsMergeSearch(q, answers);
+  renderBeads();
+}
+
+/* Several boards, one list: rows carry their root, sort by the score the
+   daemon ranked them on (the reranker's when it ran), and the coverage
+   line sums the indexes. An error on one board is reported, not fatal. */
+function beadsMergeSearch(q, answers) {
+  const results = [];
+  const errors = [];
+  let index = null;
+  let reranked = false;
+  for (const a of answers) {
+    if (a.error) { errors.push(a.root ? `${a.root}: ${a.error}` : a.error); continue; }
+    const d = a.data || {};
+    for (const r of d.results || []) results.push({ ...r, root: a.root || d.root || "" });
+    if (d.reranked) reranked = true;
+    const idx = d.index || {};
+    index = index
+      ? { total: index.total + (idx.total || 0), indexed: index.indexed + (idx.indexed || 0),
+          syncing: index.syncing || !!idx.syncing }
+      : { total: idx.total || 0, indexed: idx.indexed || 0, syncing: !!idx.syncing };
+  }
+  const scoreOf = (r) => (r.rerank_score ?? r.score ?? 0);
+  results.sort((x, y) => scoreOf(y) - scoreOf(x));
+  return { q, results, pending: false, error: errors.join("; "), index, reranked };
+}
+
+function ragScoreChip(row) {
+  const score = row.rerank_score ?? row.score;
+  const chip = el("span", "rag-score" + (row.lexical ? " lex" : ""),
+    typeof score === "number" ? score.toFixed(2) : "?");
+  chip.title = row.rerank_score !== undefined
+    ? `reranker ${row.rerank_score} · vector ${row.score}` : `vector ${row.score}`;
+  if (row.lexical) chip.title += " · id/title contains the query";
+  return chip;
+}
+
+function ragCoverageLine(index, reranked) {
+  if (!index) return "";
+  let line = `${index.indexed}/${index.total} indexed`;
+  if (index.syncing) line += " (sync in progress — search again later for the rest)";
+  if (reranked) line += " · reranked";
+  return line;
+}
+
+function beadsSearchSection() {
+  const box = el("div", "beads-search-results");
+  const head = el("div", "rag-head");
+  const s = beadsSearch;
+  const n = s.results ? s.results.length : 0;
+  head.appendChild(el("span", "rag-head-text",
+    s.pending ? `searching “${s.q}”…`
+      : s.results ? `${n} result${n === 1 ? "" : "s"} for “${s.q}”` : `“${s.q}”`));
+  const cover = ragCoverageLine(s.index, s.reranked);
+  if (cover) head.appendChild(el("span", "beads-bits", cover));
+  const clear = el("button", "wf-btn clear", "clear");
+  clear.type = "button";
+  clear.addEventListener("click", clearBeadsSearch);
+  head.appendChild(clear);
+  box.appendChild(head);
+  if (s.error) box.appendChild(el("p", "wf-warning", s.error));
+  if (!s.results) return box;
+  if (!n) {
+    box.appendChild(el("p", "wf-note", "nothing ranked for that — the index may still be filling"));
+    return box;
+  }
+  const list = el("div", "rag-results");
+  for (const r of s.results) {
+    const hit = el("div", "rag-hit");
+    const line = el("div", "rag-hit-line");
+    line.appendChild(ragScoreChip(r));
+    line.appendChild(beadsIssueRow(r, { compact: true }));
+    hit.appendChild(line);
+    if (r.excerpt) hit.appendChild(el("div", "beads-bits rag-excerpt", r.excerpt));
+    list.appendChild(hit);
+  }
+  box.appendChild(list);
+  return box;
+}
+
+async function refreshBeadsRelated() {
+  const wanted = beadsFocus;
+  if (!wanted || !ragConfigured) return;
+  if (beadsRelated && beadsRelated.id === wanted && !beadsRelated.error) return;
+  const root = beadsRootOf(wanted);
+  const q = root ? `?cwd=${encodeURIComponent(root)}&limit=8` : "?limit=8";
+  try {
+    const resp = await api(`/api/beads/${encodeURIComponent(wanted)}/related${q}`);
+    const data = await resp.json().catch(() => ({}));
+    if (beadsFocus !== wanted) return;
+    beadsRelated = resp.ok
+      ? { id: wanted, results: data.results || [], index: data.index || null, error: "" }
+      : { id: wanted, results: [], index: null, error: data.error || `HTTP ${resp.status}` };
+  } catch (err) {
+    if (beadsFocus === wanted) beadsRelated = { id: wanted, results: [], index: null, error: String(err) };
+  }
+  if (beadsFocus === wanted) renderBeads();
+}
+
+function beadsRelatedBlock(id) {
+  if (typeof ragConfigured === "undefined" || !ragConfigured) return null;
+  const box = el("div", "beads-related");
+  box.appendChild(el("h4", null, "Related by meaning"));
+  const near = typeof beadsRelated === "undefined" ? null : beadsRelated;
+  if (!near || near.id !== id) {
+    box.appendChild(el("p", "wf-note", "finding the nearest issues…"));
+    return box;
+  }
+  if (near.error) {
+    box.appendChild(el("p", "wf-warning", near.error));
+    return box;
+  }
+  if (!near.results.length) {
+    box.appendChild(el("p", "wf-note", "no neighbours yet — the index may still be filling"));
+    return box;
+  }
+  const list = el("div", "rag-results");
+  for (const r of near.results) {
+    const line = el("div", "rag-hit-line");
+    line.appendChild(ragScoreChip(r));
+    line.appendChild(beadsIssueRow(r, { compact: true }));
+    list.appendChild(line);
+  }
+  box.appendChild(list);
+  return box;
 }
 
 /* ---- the hierarchy ---------------------------------------------------- */
@@ -9816,6 +10263,10 @@ function beadsDetailPane() {
   pane.appendChild(meta);
   const rel = beadsRelationBlock(i.id || beadsFocus);
   if (rel) pane.appendChild(rel);
+  if (typeof beadsRelatedBlock === "function") {
+    const near = beadsRelatedBlock(i.id || beadsFocus);
+    if (near) pane.appendChild(near);
+  }
   // The third section of this pane, and the last one still drawn without a
   // heading. Reports and Comments both announce themselves; the issue's own
   // text just began, so a reader scrolling in landed in the middle of prose
@@ -9879,6 +10330,13 @@ function renderBeads() {
   }
   const body = el("div", "beads-body" + (beadsFocus ? " split" : ""));
   const list = el("div", "beads-list");
+  if (beadsSearch.q) {
+    list.appendChild(beadsSearchSection());
+    body.appendChild(list);
+    if (beadsFocus) body.appendChild(beadsDetailPane());
+    view.appendChild(body);
+    return;
+  }
   const canvas = el("div", "beads-canvas");
   canvas.id = "beads-canvas";
   canvas.addEventListener("scroll", onBeadsCanvasScroll);
@@ -11019,6 +11477,8 @@ function renderWorkspaces() {
   view.appendChild(promptPresetCard());
 
   view.appendChild(statusCheckCard());
+
+  view.appendChild(ragCard());
 
   const list = el("div", "ws-list");
   list.appendChild(el("h3", null, `Registered (${workspacesCache.length})`));
@@ -16713,7 +17173,35 @@ async function spawnModalLoad(st) {
   ui.issuePick.addEventListener("change", () => syncSpawnBeads(ui));
   /* The search box re-narrows the picker on every keystroke; it answers to
      the same list the picker reads, so it needs no fetch of its own. */
-  ui.issueFilter.addEventListener("input", () => fillSpawnIssueOptions(ui));
+  ui.issueFilter.addEventListener("input", () => {
+    ui._semantic = null;
+    fillSpawnIssueOptions(ui);
+  });
+  ui.issueFilter.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") { e.preventDefault(); runSpawnIssueSemantic(st); }
+  });
+}
+
+/* Enter in the modal's search box: the same board the candidates came from
+   (`ui._issueWhere`, set by refreshSpawnBeads), asked by meaning. */
+async function runSpawnIssueSemantic(st) {
+  const ui = st.ui;
+  const q = ((ui.issueFilter && ui.issueFilter.value) || "").trim();
+  if (!q || !ui._issueWhere) return;
+  let next;
+  try {
+    const resp = await api(`/api/search?kind=beads&q=${encodeURIComponent(q)}&limit=30&${ui._issueWhere}`);
+    const data = await resp.json().catch(() => ({}));
+    next = resp.ok
+      ? { q, order: (data.results || []).map((r) => r.id),
+          scores: Object.fromEntries((data.results || []).map((r) => [r.id, r.rerank_score ?? r.score])) }
+      : { q, order: null, error: data.error || `HTTP ${resp.status}` };
+  } catch (err) {
+    next = { q, order: null, error: String(err) };
+  }
+  if (((ui.issueFilter && ui.issueFilter.value) || "").trim() !== q) return;
+  ui._semantic = next;
+  fillSpawnIssueOptions(ui);
 }
 
 /* The issues the "existing" answer offers, fetched from the daemon's own
@@ -16741,6 +17229,7 @@ async function refreshSpawnBeads(st) {
     const q = wsp && wsp.path
       ? `cwd=${encodeURIComponent(wsp.path)}`
       : `parent=${encodeURIComponent(st.parent)}`;
+    ui._issueWhere = q;
     const resp = await api(`/api/beads/candidates?${q}`);
     const doc = resp.ok ? await resp.json() : {};
     ui._issues = doc.issues || [];
@@ -16765,7 +17254,9 @@ function fillSpawnIssueOptions(ui) {
   const kept = ui.issuePick.value;
   const q = ((ui.issueFilter && ui.issueFilter.value) || "").trim();
   const all = ui._issues || [];
-  const shown = q ? all.filter((i) => issueSearchMatches(q, i)) : all;
+  const order = q && typeof issueSemanticOrder === "function"
+    ? issueSemanticOrder(all, q, ui._semantic || null) : null;
+  const shown = !q ? all : order ? order.shown : all.filter((i) => issueSearchMatches(q, i));
   fillSpawnSelect(
     ui.issuePick,
     shown.map((i) => {
@@ -16775,10 +17266,12 @@ function fillSpawnIssueOptions(ui) {
         `${i.id}  ${i.title || ""}`.trim() + ` [${i.status}]${held}`,
       ];
     }),
-    !q ? "(pick an issue)"
-       : shown.length
-         ? `(${shown.length} of ${all.length} match)`
-         : `(no issue matches "${q}")`,
+    typeof issuePickerLead === "function"
+      ? issuePickerLead(q, shown, all.length, order && order.semantic)
+      : !q ? "(pick an issue)"
+        : shown.length
+          ? `(${shown.length} of ${all.length} match)`
+          : `(no issue matches "${q}")`,
     kept && shown.some((i) => i.id === kept) ? kept : ""
   );
 }

@@ -525,6 +525,7 @@ class RagService:
         self._briefing_for = briefing_for or _cached_briefing
         self._indexes: Dict[str, VectorIndex] = {}
         self._progress: Dict[str, Progress] = {}
+        self._roots: Dict[str, Optional[Path]] = {}
 
     # -- config --------------------------------------------------------- #
     def config(self) -> dict:
@@ -556,6 +557,7 @@ class RagService:
             index = VectorIndex(base / f"{key}.json", model=model, dims=dims)
             index.load()
             self._indexes[key] = index
+        self._roots[key] = root
         return index
 
     def _progress_of(self, key: str) -> Progress:
@@ -814,6 +816,7 @@ class RagService:
             row = {
                 "key": key,
                 "kind": "sessions" if key == "sessions" else "beads",
+                "root": str(self._roots.get(key)) if self._roots.get(key) else None,
                 "documents": len(index.entries),
                 "dims": index.dims,
                 "updated_at": index.updated_at,

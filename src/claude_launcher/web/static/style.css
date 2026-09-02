@@ -1647,6 +1647,43 @@ body.term-split #terminal { flex: var(--split-term, 0.6) 1 0; min-height: 80px; 
   color: #e6edf3; border: 1px solid #30363d; border-radius: 6px; font-size: 13px;
 }
 .beads-filters { align-items: center; margin-bottom: 12px; }
+/* ---- semantic search --------------------------------------------------- */
+.session-search-row { padding: 6px 8px 0; display: flex; flex-direction: column; gap: 3px; }
+#session-search {
+  width: 100%; box-sizing: border-box; padding: 5px 8px; font-size: 12px;
+  background: #0d1117; color: #e6edf3; border: 1px solid #30363d; border-radius: 6px;
+}
+.session-search-note { font-size: 11px; color: #7d8590; }
+.beads-search {
+  flex: 1 1 220px; min-width: 160px; padding: 4px 8px; font-size: 12px;
+  background: #0d1117; color: #e6edf3; border: 1px solid #30363d; border-radius: 6px;
+}
+.beads-search-results { min-width: 0; }
+.rag-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 8px; }
+.rag-head-text { color: #c9d1d9; font-size: 13px; }
+.rag-head .wf-btn { margin-left: auto; }
+.rag-results { display: flex; flex-direction: column; gap: 6px; }
+.rag-hit {
+  display: flex; flex-direction: column; gap: 2px; padding: 6px 8px;
+  border: 1px solid #2a2e36; border-radius: 6px; background: #1b1e24;
+}
+.rag-hit-line { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.rag-hit-line .beads-row { flex: 1; min-width: 0; }
+.rag-excerpt { padding-left: 2px; }
+.rag-score {
+  flex: none; font-family: ui-monospace, monospace; font-size: 11px; font-variant-numeric: tabular-nums;
+  color: #cfe2ff; background: #172947; border: 1px solid #3d5a86; border-radius: 4px; padding: 1px 5px;
+}
+.rag-score.lex { color: #d29922; border-color: #d29922; background: transparent; }
+.beads-related { margin-top: 10px; }
+.rag-yaml {
+  font-family: ui-monospace, monospace; font-size: 12px; color: #c9d1d9;
+  background: #0d1117; border: 1px solid #30363d; border-radius: 6px; padding: 8px 10px;
+  white-space: pre; overflow-x: auto;
+}
+.rag-index-list { display: flex; flex-direction: column; gap: 6px; margin-top: 8px; }
+.rag-index-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.rag-index-text { display: flex; flex-direction: column; gap: 2px; flex: 1 1 260px; min-width: 0; }
 .beads-page-tabs { margin-bottom: 12px; }
 .beads-session-pick {
   margin-left: auto; padding: 4px 8px; background: #0d1117; color: #e6edf3;
@@ -3157,6 +3194,7 @@ a.wf-btn { display: inline-block; text-decoration: none; line-height: 1.5; }
   /* iOS zooms the page on any input below 16px, and a zoomed page scrolls */
   #new-session input, #new-session select,
   #new-mesh input, #new-mesh select, .auth-box input,
+  #session-search, .beads-search,
   #term-input-field { font-size: 16px; }
   #new-session label { font-size: 13px; margin-bottom: 10px; }
   #new-session button, #new-mesh button { padding: 10px 16px; font-size: 15px; }
