@@ -33,6 +33,13 @@ Schema::
       settings: {<settings.json key>: <value>, ...}
     briefing:                  # legacy FAQ source; imported by the daemon
       faq: [{id: <id>, question: <text>, answer: <optional reference>, enabled: true}, ...]
+    rag:                        # semantic search over the board and the fleet; see daemon/rag.py
+      base_url: https://host/v1  # OpenAI-compatible base: /embeddings and /rerank hang off it
+      api_key: <key>            # empty = the feature is off (or CLAUNCH_RAG_API_KEY)
+      embedding_model: <model id>
+      rerank_model: <model id>  # optional; empty = vector ranking only
+      verify_tls: true          # false for a self-signed or mis-chained certificate
+      dimensions: 0             # 0 = the model's own width; a smaller value truncates (Matryoshka)
     workspaces:                 # machine-local; see :mod:`workspaces`
       <name>: <absolute path>
 
@@ -457,6 +464,69 @@ def set_briefing_faq(rows: List[dict]) -> List[dict]:
 
     update(_mutate)
     return clean
+
+
+# --------------------------------------------------------------------------- #
+# rag — the embedding/reranker endpoint behind semantic search
+# --------------------------------------------------------------------------- #
+#: Defaults for the top-level ``rag`` block. ``dimensions`` 0 keeps the model's
+#: own width; ``batch`` is how many texts one embeddings call carries (the
+#: endpoint measured at ~1000 tokens/s, so a batch of 16 board issues is a
+#: 10-15 s request); ``candidates`` is how many vector hits feed the reranker
+#: and ``rerank_top`` how many of those it is asked to score (about 0.2-0.35 s
+#: per document on the measured endpoint, so this bounds a search's latency).
+RAG_DEFAULTS = {
+    "base_url": "",
+    "api_key": "",
+    "embedding_model": "",
+    "rerank_model": "",
+    "verify_tls": True,
+    "dimensions": 0,
+    "timeout": 120.0,
+    "batch": 16,
+    "candidates": 40,
+    "rerank_top": 12,
+}
+
+
+def rag_config(doc: Optional[dict] = None) -> dict:
+    """The effective ``rag`` settings (missing keys filled with defaults).
+
+    Shape-tolerant like :func:`daemon_config`: the file is hand-edited, so a
+    missing or malformed block is the disabled default, not an error. The
+    api key may come from ``CLAUNCH_RAG_API_KEY`` instead of the file, the
+    same arrangement the relay token has, so a synced config need not carry
+    it. It never leaves this dict except as an ``Authorization`` header.
+    """
+    import os
+
+    doc = load() if doc is None else doc
+    block = doc.get("rag")
+    if not isinstance(block, dict):
+        block = {}
+    out = dict(RAG_DEFAULTS)
+    for key in ("base_url", "api_key", "embedding_model", "rerank_model"):
+        out[key] = str(block.get(key) or "").strip()
+    env_key = os.environ.get("CLAUNCH_RAG_API_KEY")
+    if env_key:
+        out["api_key"] = env_key.strip()
+    out["verify_tls"] = block.get("verify_tls", True) is not False
+    for key in ("dimensions", "batch", "candidates", "rerank_top"):
+        try:
+            value = int(block.get(key) if block.get(key) is not None else RAG_DEFAULTS[key])
+        except (TypeError, ValueError):
+            value = RAG_DEFAULTS[key]
+        out[key] = max(0, value) if key == "dimensions" else max(1, value)
+    try:
+        out["timeout"] = float(block.get("timeout") or RAG_DEFAULTS["timeout"])
+    except (TypeError, ValueError):
+        out["timeout"] = RAG_DEFAULTS["timeout"]
+    return out
+
+
+def rag_configured(cfg: dict) -> bool:
+    """Whether search is on: base_url, embedding_model and api_key all present."""
+    return bool(cfg.get("base_url") and cfg.get("embedding_model") and cfg.get("api_key"))
 
 
 def harnesses(doc: Optional[dict] = None) -> Dict[str, dict]:

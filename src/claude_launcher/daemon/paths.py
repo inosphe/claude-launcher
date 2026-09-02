@@ -111,6 +111,13 @@ def briefing_faq_json() -> Path:
     return daemon_dir() / "briefing-faq.json"
 
 
+def rag_dir() -> Path:
+    """Vector indexes behind semantic search (daemon/rag.py): one file per
+    corpus, machine-local derived data that a reindex rebuilds from the
+    board and the session registry."""
+    return daemon_dir() / "rag"
+
+
 def prompt_presets_json() -> Path:
     """User-defined session-footer prompt presets for this daemon instance."""
     return daemon_dir() / "prompt-presets.json"
