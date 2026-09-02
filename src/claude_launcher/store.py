@@ -475,6 +475,9 @@ def set_briefing_faq(rows: List[dict]) -> List[dict]:
 #: 10-15 s request); ``candidates`` is how many vector hits feed the reranker
 #: and ``rerank_top`` how many of those it is asked to score (about 0.2-0.35 s
 #: per document on the measured endpoint, so this bounds a search's latency).
+#: ``watch_interval`` is how often (seconds) the daemon stats each known
+#: board's ``.beads/beads.db`` / ``issues.jsonl`` for a write it did not make
+#: itself (``claunch beads …`` runs ``br`` directly); 0 turns that watcher off.
 RAG_DEFAULTS = {
     "base_url": "",
     "api_key": "",
@@ -486,6 +489,7 @@ RAG_DEFAULTS = {
     "batch": 16,
     "candidates": 40,
     "rerank_top": 12,
+    "watch_interval": 30.0,
 }
 
 
@@ -521,6 +525,15 @@ def rag_config(doc: Optional[dict] = None) -> dict:
         out["timeout"] = float(block.get("timeout") or RAG_DEFAULTS["timeout"])
     except (TypeError, ValueError):
         out["timeout"] = RAG_DEFAULTS["timeout"]
+    # 0 is a real answer here (watcher off), so only a missing or malformed
+    # value falls back to the default.
+    try:
+        raw = block.get("watch_interval")
+        out["watch_interval"] = max(
+            0.0, float(RAG_DEFAULTS["watch_interval"] if raw is None else raw)
+        )
+    except (TypeError, ValueError):
+        out["watch_interval"] = RAG_DEFAULTS["watch_interval"]
     return out
 
 

@@ -23,14 +23,17 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import re
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, List, NamedTuple, Optional, Tuple
+from typing import Callable, Dict, List, NamedTuple, Optional, Tuple
 
 import aiohttp
+
+log = logging.getLogger("claunch.daemon.briefing")
 
 from .. import atomic, harnesses as harness_registry
 from .. import profile as profile_mod, store, transcripts
@@ -635,6 +638,14 @@ def _tupleize(value):
     return value
 
 
+#: Called, with nothing, after the cache is written — a fresh briefing is
+#: part of a session's text in the search index's fleet corpus
+#: (:meth:`daemon.rag.RagService.enqueue`), so the index follows it from
+#: here. Module-level because the cache is; the daemon registers on build
+#: and removes on shutdown.
+persist_hooks: List[Callable[[], None]] = []
+
+
 def _persist_cache() -> None:
     path = paths.briefings_json()
     data = {
@@ -648,6 +659,11 @@ def _persist_cache() -> None:
             atomic.replace(tmp, path)
     except OSError:
         pass
+    for hook in list(persist_hooks):
+        try:
+            hook()
+        except Exception:
+            log.exception("briefing: persist hook %r failed", hook)
 
 
 def _jsonable(value):

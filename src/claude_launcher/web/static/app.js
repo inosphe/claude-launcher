@@ -9399,6 +9399,18 @@ function ragIndexLine(row) {
   return parts.join(" · ");
 }
 
+/* The index queue in one line: how much is waiting, when the consumer last
+   ran, how often the board files are checked for a CLI write. */
+function ragQueueLine(q) {
+  const parts = [`queue ${q.depth || 0} waiting`];
+  if (q.pending && q.pending.length) parts.push(`pending ${q.pending.join(", ")}`);
+  parts.push(q.last_consumed_at
+    ? `last sync ${String(q.last_consumed_at).replace("T", " ").slice(0, 19)}`
+    : "no sync yet");
+  parts.push(q.watch_interval > 0 ? `board files checked every ${q.watch_interval}s` : "board watcher off");
+  return parts.join(" · ");
+}
+
 function ragCard() {
   const card = el("div", "ws-add rag-card");
   card.appendChild(el("h3", null, "Semantic search (RAG)"));
@@ -9429,6 +9441,7 @@ function ragCard() {
     st.dimensions ? `${st.dimensions} dims` : "model dims",
   ];
   card.appendChild(el("p", "beads-bits", facts.join("  ·  ")));
+  if (st.queue) card.appendChild(el("p", "beads-bits rag-queue-line", ragQueueLine(st.queue)));
   const list = el("div", "rag-index-list");
   for (const row of st.indexes || []) {
     const item = el("div", "rag-index-row");

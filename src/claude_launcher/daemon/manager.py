@@ -88,6 +88,12 @@ class SessionManager:
         #: the endings a daemon shutdown causes, which are not endings at
         #: all — those sessions come back with the next daemon.
         self.exit_hooks: List[Callable[[Session], None]] = []
+        #: Called, with nothing, after every :meth:`persist` — the one funnel
+        #: every registry change goes through (a session created, exited,
+        #: re-parented, re-labelled). The search index's fleet corpus follows
+        #: the registry from here (:meth:`daemon.rag.RagService.enqueue`);
+        #: not called while the daemon is shutting down.
+        self.change_hooks: List[Callable[[], None]] = []
         self.shutting_down = False
         #: Records :meth:`restore_all` retired because they did not come back
         #: at a restart — the ``--no-restore`` sessions that were running when
@@ -1292,6 +1298,13 @@ class SessionManager:
             path.write_text(json.dumps(entries, indent=2), encoding="utf-8")
         except OSError:
             pass
+        if self.shutting_down:
+            return
+        for hook in list(self.change_hooks):
+            try:
+                hook()
+            except Exception:  # one hook must not silence the next
+                log.exception("change hook %r failed", hook)
 
     def restore_all(self) -> List[str]:
         """Bring back everything the previous daemon knew about.
