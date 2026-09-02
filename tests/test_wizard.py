@@ -703,10 +703,10 @@ def test_a_workflow_a_person_picked_survives_a_role_change():
     assert wiz.value("workflow") == "other"  # a human's answer, kept
 
 
-def test_a_default_the_filter_refuses_is_never_volunteered():
+def test_a_default_the_filter_refuses_is_never_offered():
     """The form takes its sources' word rather than re-parsing: whatever
     served the list, a workflow whose filter_roles turns the picked role away
-    is never auto-selected — only offered, at the bottom of the picker."""
+    is left off the picker entirely, not merely un-auto-picked."""
     sources = FakeSources(workflows={"/srv/api": [
         {"name": "trap", "default_role": "worker", "priority": 9,
          "filter_roles": {"type": "whitelist", "roles": ["leader"]}},
@@ -717,8 +717,7 @@ def test_a_default_the_filter_refuses_is_never_volunteered():
     pick(wiz, "role", "worker")
     assert wiz.value("workflow") == "safe"
     options = wiz.field("workflow").options
-    assert options[-1].value == "trap"       # sunk, but still pickable
-    assert "turns 'worker' away" in options[-1].detail
+    assert [o.value for o in options] == ["", "safe"]   # "trap" is not offered
 
 
 def test_the_form_asks_rolefilter_rather_than_guessing_the_rule():
@@ -771,7 +770,8 @@ def test_an_unreadable_filter_is_not_volunteered_on():
     )
     assert wizard._workflow_admits(spelled, "worker") is True
 
-    # and a sunk workflow is still offered, never auto-picked
+    # and a workflow with such a filter is left off the row, not merely
+    # un-auto-picked
     sources = FakeSources(workflows={"/srv/api": [
         {"name": "unreadable", "default_role": "worker", "priority": 9,
          "filter_roles": {"type": "bogus", "roles": ["worker"]}},
@@ -780,7 +780,7 @@ def test_an_unreadable_filter_is_not_volunteered_on():
     pick(wiz, "cwd", "api")
     pick(wiz, "role", "worker")
     assert wiz.value("workflow") == ""
-    assert [o.value for o in wiz.field("workflow").options] == ["", "unreadable"]
+    assert [o.value for o in wiz.field("workflow").options] == [""]
 
 
 def test_a_filter_only_speaks_once_a_role_is_picked():

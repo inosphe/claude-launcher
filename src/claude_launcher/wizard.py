@@ -973,11 +973,11 @@ def _workflow_entry(raw) -> dict:
 def _workflow_admits(entry: dict, role: str) -> bool:
     """Would this workflow's ``filter_roles`` let ``role`` drive it?
 
-    True with no filter or no role picked. The filter is enforced at start
-    against a mesh identity this form cannot fully predict (a session that
-    joins no mesh is admitted whatever the filter says), so the form only
-    refuses to *volunteer* a workflow the filter would turn away -- it never
-    stops a person picking one.
+    True with no filter or no role picked -- a role requires a mesh
+    membership (see the form's ``role`` validation), so once a role is
+    picked the daemon enforces this same filter against that mesh identity
+    at start. :func:`_workflow_options` uses this to leave a refused
+    workflow off the row entirely rather than merely rank it last.
 
     Whether a filter admits a role is :class:`RoleFilter`'s rule, not this
     form's: the same words decided here and at start time must not be able to
@@ -1004,14 +1004,12 @@ def _workflow_admits(entry: dict, role: str) -> bool:
 
 
 def _workflow_rank(entry: dict, role: str) -> tuple:
-    """Sort key: the picked role's own candidates first, then the rest, the
-    ones its filter refuses last -- each band by descending priority. The
-    arrow keys walk the same ranking the auto-pick used."""
-    band = 1
-    if role and entry["default_role"] == role and _workflow_admits(entry, role):
-        band = 0
-    elif not _workflow_admits(entry, role):
-        band = 2
+    """Sort key: the picked role's own candidates first, then the rest --
+    each band by descending priority. Only called on entries the role's
+    filter already admits (see :func:`_workflow_options`), so there is no
+    third, refused band here. The arrow keys walk the same ranking the
+    auto-pick used."""
+    band = 0 if role and entry["default_role"] == role else 1
     return (band, -entry["priority"], entry["name"])
 
 
@@ -1038,15 +1036,21 @@ def _one_line(text: str, cols: int = WORKFLOW_DESC_COLS) -> str:
 
 
 def _workflow_options(entries: List[dict], role: str) -> List[Option]:
+    """Rows for the Workflow picker: only what ``role`` may drive.
+
+    A workflow ``role``'s ``filter_roles`` refuses is left out entirely --
+    picking a role also picks from what that role may actually run, the
+    same rule :func:`sync_workflows` applies to the dashboard's Workflow
+    row. Empty ``role`` admits everything (see :func:`_workflow_admits`).
+    """
     out = []
-    for e in sorted(entries, key=lambda e: _workflow_rank(e, role)):
+    admitted = [e for e in entries if _workflow_admits(e, role)]
+    for e in sorted(admitted, key=lambda e: _workflow_rank(e, role)):
         detail = []
         if e["default_role"]:
             detail.append(f"default for {e['default_role']}")
         if e["priority"]:
             detail.append(f"priority {e['priority']}")
-        if role and not _workflow_admits(e, role):
-            detail.append(f"filter_roles turns {role!r} away")
         line = ", ".join(detail)
         # What the workflow DOES, last. The facts before it are short and
         # bounded and one of them is a warning, while a description has no

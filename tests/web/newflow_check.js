@@ -9,11 +9,12 @@
    could be neither ranked nor auto-picked, and a leader creating a worker
    had to know by heart which workflow that worker runs.
 
-   Driven here: the ranking (the role's own defaults first, refused filters
-   last), the auto-pick following the role, a pick made by hand surviving
-   every later role change — "(none)" included — and the directory the list
-   is fetched for, which for a child is where the CHILD will stand, not what
-   the greyed Directory row happens to show. */
+   Driven here: the filtering (only what the role's filter_roles admits) and
+   ranking (the role's own defaults first) of the row, the auto-pick
+   following the role, a pick made by hand surviving every later role change
+   — "(none)" included — and the directory the list is fetched for, which
+   for a child is where the CHILD will stand, not what the greyed Directory
+   row happens to show. */
 const fs = require("fs");
 const path = require("path");
 const src = fs.readFileSync(
@@ -138,22 +139,22 @@ async function main() {
         [listed(), form.workflow.value], [["", "solo"], ""]);
 
   /* The real directory, and a role. The role's own defaults come first, the
-     highest priority among them is the one taken, and the workflows its
-     filter turns away sort last — the CLI wizard's ranking exactly. */
+     highest priority among them is the one taken, and a workflow its filter
+     refuses is off the row entirely — only what the role may drive is
+     offered, the CLI wizard's rule exactly. */
   form.cwd.value = "F:/repo";
   await ctx.refresh();
   check("...still nothing without a role", form.workflow.value, "");
   form.role.value = "worker";
   ctx.sync();
-  check("the role's own candidates rank first, its refusals last",
-        listed(), ["", "hotfix", "improv-worker", "chores", "improv-leader"]);
+  check("the role's own candidates rank first, its filter-refused ones are gone",
+        listed(), ["", "hotfix", "improv-worker", "chores"]);
   check("picking a role picks its highest-priority workflow",
         form.workflow.value, "hotfix");
   check("the reason is on the option itself",
         form.workflow.options[1].label, "hotfix — default for worker, priority 5");
-  check("...and one the filter turns away says so",
-        form.workflow.options[4].label,
-        "improv-leader — default for leader, filter_roles turns 'worker' away");
+  check("a workflow the role's filter refuses is not offered at all",
+        listed().includes("improv-leader"), false);
   check("choosing a workflow opens the context row",
         box_["new-context-row"].classList.contains("hidden"), false);
 
@@ -163,8 +164,10 @@ async function main() {
   ctx.sync();
   check("switching role re-homes the workflow the role had picked",
         form.workflow.value, "improv-leader");
-  check("and re-ranks the list for the new role",
-        listed(), ["", "improv-leader", "hotfix", "chores", "improv-worker"]);
+  check("...and re-filters the list for the new role",
+        listed(), ["", "improv-leader", "hotfix", "chores"]);
+  check("the role that lost admission is gone from this list too",
+        listed().includes("improv-worker"), false);
 
   /* A pick made by hand is the operator's, and outlives every later role
      change — the wizard's rule. */

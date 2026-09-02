@@ -337,10 +337,12 @@ async function main() {
   check("the role's own default ranks first",
     ranked.options[0].name === "improv-worker", ranked.options[0]);
   check("...and is the auto-pick", ranked.auto === "improv-worker");
-  check("a refused workflow is volunteered last",
-    ranked.options[ranked.options.length - 1].name === "secret");
-  check("ranking marks the refusal in the option detail",
-    ranked.options.some((o) => /filter_roles turns 'worker' away/.test(o.detail)), ranked.options);
+  check("a refused workflow is left off the row entirely",
+    !ranked.options.some((o) => o.name === "secret"), ranked.options);
+  check("with no role picked, a refused workflow is offered again",
+    ctx.spawnRankWorkflows([
+      { name: "secret", default_role: "", priority: 9, filter_roles: { type: "blacklist", roles: ["worker"] } },
+    ], "").options.some((o) => o.name === "secret"));
 
   /* The form splits qualified selectors without changing the API contract. */
   const normalized = ctx.normalizeSpawnProfileOptions([
