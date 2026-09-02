@@ -921,6 +921,21 @@ a.cflow-scope:hover { background: #1d3559; text-decoration: underline; }
   margin-top: 6px; padding: 6px 14px; font-size: 13px; cursor: pointer;
   background: #238636; color: #fff; border: none; border-radius: 4px;
 }
+/* A session start can include creating a worktree and launching a harness,
+   so it does not always answer within one paint. The pressed button keeps
+   the action visible while the status line names the interval explicitly. */
+.submit-status {
+  margin-top: 7px; color: #9ecbff; font-size: 12px; line-height: 1.4;
+}
+.action-pending::before {
+  content: ""; display: inline-block; width: .72em; height: .72em;
+  margin-right: .45em; border: 2px solid currentColor; border-right-color: transparent;
+  border-radius: 50%; vertical-align: -.08em; animation: action-spin .7s linear infinite;
+}
+@keyframes action-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) {
+  .action-pending::before { animation: none; border-right-color: currentColor; }
+}
 
 /* ---- the terminal header's three buttons ----
    One shape for all of them — same height, same radius, same weight — so the

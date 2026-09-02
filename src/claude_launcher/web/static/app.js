@@ -4830,8 +4830,34 @@ $("new-session").harness.addEventListener("change", () => {
 });
 $("new-session").null_token.addEventListener("change", syncForkAvailability);
 
+/* Both ways of starting a session can spend a few seconds in the daemon
+   while it prepares a checkout and starts the harness. Keep the control's
+   original wording so a refused request restores the form exactly as it was. */
+function setActionPending(button, pending, label) {
+  if (!button) return;
+  if (button._idleLabel === undefined) button._idleLabel = button.textContent;
+  button.disabled = pending;
+  button.classList[pending ? "add" : "remove"]("action-pending");
+  button.setAttribute("aria-busy", pending ? "true" : "false");
+  button.textContent = pending ? label : button._idleLabel;
+}
+
+function setCreatePending(f, pending, parent) {
+  setActionPending(
+    f.querySelector("button[type=submit]"), pending,
+    parent ? "Spawning…" : "Creating…"
+  );
+  const status = $("create-status");
+  status.textContent = pending
+    ? (parent ? "Starting child session…" : "Creating session…")
+    : "";
+  status.classList.toggle("hidden", !pending);
+}
+
+let createBusy = false;
 $("new-session").addEventListener("submit", async (e) => {
   e.preventDefault();
+  if (createBusy) return;
   const f = e.target;
   const parent = spawnParent();
   // A child is built from its parent's definition, so only the fields that
@@ -4906,41 +4932,51 @@ $("new-session").addEventListener("submit", async (e) => {
     body.resume = f.resume.value === PICKER ? "" : f.resume.value;
     body.fork_session = f.fork.checked;
   }
-  const resp = await api(
-    parent
-      ? `/api/sessions/${encodeURIComponent(parent.name)}/children`
-      : "/api/sessions",
-    {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-    }
-  );
   const err = $("create-error");
-  if (!resp.ok) {
-    const doc = await resp.json().catch(() => ({}));
-    err.textContent = doc.error || `HTTP ${resp.status}`;
-    err.classList.remove("hidden");
-    return;
-  }
+  createBusy = true;
+  setCreatePending(f, true, parent);
   err.classList.add("hidden");
-  f.name.value = "";
-  // A resume choice is spent: leaving it selected would point the next
-  // Create at the same conversation and quietly open it twice. The role is
-  // left alone — spawning a second worker is a normal thing to want.
-  f.resume.value = "";
-  // The opening task named this session's job, so it is spent too — the
-  // mesh and workflow pickers are not, since a second worker on the same
-  // team is the normal next thing to want.
-  f.task.value = "";
-  f.context.value = "";
-  syncForkAvailability();
-  const info = await resp.json();
-  // The spawn endpoint wraps the child (it also reports the parent and what
-  // the onboarding did); the create one answers with the session itself.
-  const made = info.session || info;
-  await refreshSessions();
-  location.hash = "#/s/" + encodeURIComponent(made.name);
+  try {
+    const resp = await api(
+      parent
+        ? `/api/sessions/${encodeURIComponent(parent.name)}/children`
+        : "/api/sessions",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      }
+    );
+    if (!resp.ok) {
+      const doc = await resp.json().catch(() => ({}));
+      err.textContent = doc.error || `HTTP ${resp.status}`;
+      err.classList.remove("hidden");
+      return;
+    }
+    f.name.value = "";
+    // A resume choice is spent: leaving it selected would point the next
+    // Create at the same conversation and quietly open it twice. The role is
+    // left alone — spawning a second worker is a normal thing to want.
+    f.resume.value = "";
+    // The opening task named this session's job, so it is spent too — the
+    // mesh and workflow pickers are not, since a second worker on the same
+    // team is the normal next thing to want.
+    f.task.value = "";
+    f.context.value = "";
+    syncForkAvailability();
+    const info = await resp.json();
+    // The spawn endpoint wraps the child (it also reports the parent and what
+    // the onboarding did); the create one answers with the session itself.
+    const made = info.session || info;
+    await refreshSessions();
+    location.hash = "#/s/" + encodeURIComponent(made.name);
+  } catch (e) {
+    err.textContent = `Could not reach the daemon: ${e.message || e}`;
+    err.classList.remove("hidden");
+  } finally {
+    createBusy = false;
+    setCreatePending(f, false, parent);
+  }
 });
 
 $("term-details").addEventListener("click", () => openDetail(currentName));
@@ -15898,10 +15934,13 @@ function spawnSizeRemember(box) {
 /* ---- open / load / go / close ---------------------------------------- */
 let spawnModal = null;
 
-function spawnModalKey(e) { if (e.key === "Escape") spawnModalClose(); }
+function spawnModalKey(e) {
+  if (e.key === "Escape" && !(spawnModal && spawnModal.busy)) spawnModalClose();
+}
 
 function spawnModalClose() {
   if (!spawnModal) return;
+  if (spawnModal.busy) return;
   spawnModal = null;
   const overlay = $("modal-overlay");
   // Before the class goes: the size is read off the box while the spawn rules
@@ -15983,7 +16022,7 @@ async function openSpawnModal(parentName, opts = {}) {
   // stays folded until syncSpawnGates finds a soft block to open it for.
   actions.append(ui.capGate, cancel, spawnBtn);
   const st = { ui, parent: parentName, seed: opts.seed || null,
-               spawnBtn, noteShow, busy: false };
+               spawnBtn, cancelBtn: cancel, noteShow, busy: false };
   cancel.addEventListener("click", spawnModalClose);
   spawnBtn.addEventListener("click", () => spawnModalGo(st));
   overlay.onclick = (e) => { if (e.target === overlay) spawnModalClose(); };
@@ -16386,14 +16425,16 @@ async function spawnModalGo(st) {
   const ui = st.ui;
   const body = spawnPayload(ui);
   st.busy = true;
-  st.spawnBtn.disabled = true;
-  st.noteShow("spawning…");
+  setActionPending(st.spawnBtn, true, "Spawning…");
+  st.cancelBtn.disabled = true;
+  st.noteShow("Starting child session…", "wf-note submit-status");
   const res = await postSpawn(st.parent, body);
   st.busy = false;
   if (spawnModal !== st) return;
   if (!res.ok) {
     st.noteShow(res.error, "wf-warning");
-    st.spawnBtn.disabled = false;
+    st.cancelBtn.disabled = false;
+    setActionPending(st.spawnBtn, false);
     return;
   }
   saveSpawnRecall({

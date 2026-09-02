@@ -251,6 +251,15 @@ check("standalone Codex Create serializes its specialised checkboxes",
 check("standalone Claude Create retains its own permission checkbox",
       /harnessName === "claude"/.test(submit) &&
         /f\.skip_permissions\.checked/.test(submit), true);
+check("Create marks the request as pending before posting",
+      /createBusy = true/.test(submit) && /setCreatePending\(f, true, parent\)/.test(submit),
+      true);
+check("Create restores the control after a response or request failure",
+      /finally\s*\{[\s\S]*createBusy = false;[\s\S]*setCreatePending\(f, false, parent\)/.test(submit),
+      true);
+check("the create form provides an announced pending status",
+      /id="create-status"/.test(html) && /role="status"/.test(html) &&
+        /aria-live="polite"/.test(html), true);
 
 /* The board's own rule, read out of the submit handler: "new" is the absence
    of both keys. A request that says nothing gets an issue minted from its
