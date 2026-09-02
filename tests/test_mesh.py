@@ -1815,6 +1815,61 @@ def test_mesh_mcp_tools(home, monkeypatch):
     assert "'session' is required" in resp["result"]["content"][0]["text"]
 
 
+def test_members_tool_response_is_linear_without_the_pair_table(monkeypatch):
+    """The MCP ``members`` tool must not ship the daemon's O(n²) pair table.
+
+    A roster heavy with exited members is exactly where that table blows up —
+    141 of 146 members exited made ``member_links`` 10,585 pairs / 570KB of a
+    603KB reply (the 54k-line regression this pins). Reachability is already
+    computed for the caller; the pair table is the web diagram's, and the MCP
+    contract (handle, role, machine, reachability, pending) never listed it.
+    """
+    from claude_launcher import mesh_mcp
+
+    def payload_size(n: int) -> int:
+        members = [
+            {"handle": f"w{i}", "session": f"s{i}"} for i in range(n)
+        ]
+        pair_table = [
+            {"a": members[i]["handle"], "b": members[j]["handle"],
+             "enabled": True}
+            for i in range(n)
+            for j in range(i + 1, n)
+        ]
+        assert len(pair_table) == n * (n - 1) // 2
+
+        class FakeClient:
+            def get(self, path, **kw):
+                assert path == "/api/mesh/dev"
+                return {
+                    "members": members,
+                    "member_links": pair_table,
+                    "peers": [],
+                    "relay": {"configured": False},
+                }
+
+        _stub_connect(monkeypatch, mesh_mcp.daemon_client, FakeClient)
+        resp = mesh_mcp._handle(
+            {
+                "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                "params": {"name": "members", "arguments": {"mesh": "dev"}},
+            }
+        )
+        assert resp["result"]["isError"] is False
+        payload = json.loads(resp["result"]["content"][0]["text"])
+        assert "member_links" not in payload
+        assert len(payload["members"]) == n
+        return len(json.dumps(payload))
+
+    size_10 = payload_size(10)
+    size_20 = payload_size(20)
+    # Doubling the roster must not quadruple the reply: with the pair table
+    # (O(n²)) shipped the 20-member reply is ~4x the 10-member one; without
+    # it the reply scales with the roster itself (~2x). A bound of 3x keeps a
+    # comfortable margin on either side and still catches reintroducing it.
+    assert size_20 < 3.0 * size_10, f"{size_10} -> {size_20} looks quadratic"
+
+
 def test_every_offered_spawn_field_is_forwarded():
     """A field the schema offers but the forwarder drops is a silent no-op
     the caller reads as 'the daemon ignored me' — the two lists must not
