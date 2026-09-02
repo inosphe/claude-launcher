@@ -36,7 +36,7 @@ function sliceStmt(decl) {
 /* ---- stub DOM ---------------------------------------------------------- */
 function node(tag) {
   const n = {
-    tag, kids: [], text: "", classes: new Set(), handlers: {}, dataset: {},
+    tag, kids: [], text: "", classes: new Set(), handlers: {}, dataset: {}, attributes: {},
     value: undefined, checked: false, disabled: false, placeholder: "", rows: 0,
     title: "", onclick: null, isConnected: true, _checked: [],
     classList: {
@@ -47,6 +47,7 @@ function node(tag) {
     appendChild(c) { this.kids.push(c); return c; },
     append(...cs) { cs.forEach((c) => this.appendChild(c)); },
     addEventListener(k, fn) { (this.handlers[k] ||= []).push(fn); },
+    setAttribute(k, v) { this.attributes[k] = String(v); },
     fire(k, ev) { return Promise.all((this.handlers[k] || []).map((fn) => fn(ev))); },
     get textContent() { return this.text; },
     set textContent(v) { this.text = String(v); },
@@ -202,7 +203,7 @@ new Function(
      and setSessions drives, so the harness stays on the production rule
      instead of a copy that can drift away from it. */
   + slice("connectCandidate")
-  + slice("spawnGroup") + slice("buildSpawnForm")
+  + slice("spawnGroup") + slice("setActionPending") + slice("buildSpawnForm")
   + slice("spawnModalKey") + slice("spawnModalClose")
   + slice("refreshSpawnBorrowOptions") + slice("openSpawnModal")
   + slice("spawnModalLoad") + slice("refreshSpawnConnect") + slice("spawnModalGo")
@@ -1440,6 +1441,11 @@ async function main() {
     ctx.isOpen() === true &&
       texts(modalEls["modal-body"]).includes("spawn.depth: too deep"),
     texts(modalEls["modal-body"]).slice(-160));
+  check("a refused spawn restores its actionable label",
+    spawnRefused.text === "Spawn worker" && spawnRefused.disabled === false &&
+      spawnRefused.classes.has("action-pending") === false,
+    { text: spawnRefused.text, disabled: spawnRefused.disabled,
+      classes: [...spawnRefused.classes] });
   ctx.spawnModalClose();
   ctx.resetGo();
   routes["POST /api/sessions/lead1/children"] = { status: 201, doc: {
