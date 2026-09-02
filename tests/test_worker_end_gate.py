@@ -1,7 +1,7 @@
 """Both ways out of the worker's ending, driven through the engine.
 
-``improv-worker`` now puts its own ending to the session above it: ``end-gate``
-asks, an approval falls through to ``end``, and a refusal routes to
+``improv-worker`` now puts its own ending to the user: ``end-gate`` asks,
+an approval falls through to ``end``, and a refusal routes to
 ``end-hold``. Ending is not a formality here — the daemon reaps a finished
 one-shot run's session on sight of ``done`` — so each path needs something
 that enforces it, and the two are enforced by different machinery:
@@ -61,9 +61,8 @@ PASSING_VERIFY = "verify: 'git --version'"
 def worker_run(home, tmp_path, monkeypatch):
     """This repository's worker workflow, in a throwaway project.
 
-    A parent worker stands above the driver, because that is the first
-    candidate ``end-gate`` names and an ask only opens when somebody can be
-    asked. The formation with nobody above it is a case of its own below.
+    A parent worker stands above the driver to prove that the ending gate
+    ignores session roles and waits for a user.
     """
     proj = tmp_path / "proj"
     wf = proj / ".claunch" / "workflows"
@@ -82,7 +81,7 @@ def _at(step_id):
     return engine.status()
 
 
-def test_the_ending_holds_for_the_session_above_it(worker_run):
+def test_the_ending_holds_for_user_approval(worker_run):
     """The approval path's enforcement is the engine, not the agent's restraint.
 
     While the ask is open the run reports ``waiting_answer`` and the step's
@@ -91,50 +90,24 @@ def test_the_ending_holds_for_the_session_above_it(worker_run):
     ``end``, which is the kill.
     """
     payload = _at("end-gate")
-    assert payload["status"] == "waiting_answer"
-    assert payload["reason"] == "approval"
+    assert payload["status"] == "waiting_approval"
+    assert payload["reason"] == "ask"
+    assert payload["ask"]["asked"] == []
+    assert payload["ask"]["deadline"] is None
     assert "instructions" not in payload
 
-    assert engine.next_step()["status"] == "waiting_answer"
+    assert engine.next_step()["status"] == "waiting_approval"
     with pytest.raises(CflowError, match="not been delivered"):
         engine.report("the ending is fine, surely")
 
 
-def test_an_answer_opens_the_ending_and_a_refusal_routes_to_the_hold(worker_run):
-    """Approved, the run may finish; refused, it lands on ``end-hold``."""
+def test_user_approval_opens_the_ending(worker_run):
+    """Only a user's approval can open the ending."""
     _at("end-gate")
     ask_id = engine.next_step()["ask"]["id"]
-    engine.answer(ask_id, "approve", by_session="boss")
-    payload = engine.next_step()
-    assert payload["status"] == "step" and payload["step_id"] == "end-gate"
-
-    # ...and the other way out of the same step.
-    _at("end-gate")
-    ask_id = engine.next_step()["ask"]["id"]
-    engine.answer(ask_id, "decline", "자식을 아직 거두지 않았다", by_session="boss")
-    assert engine.status()["step_id"] == "end-hold", (
-        "a refused ending fell through to the ending it refused"
-    )
-    assert "ask_declined" in [e["event"] for e in state_mod.read_journal()]
-
-
-def test_with_nobody_above_it_the_gate_passes_itself(home, tmp_path, monkeypatch):
-    """Stated because it is the limit of the sentence above, not a bug.
-
-    ``otherwise: self`` is deliberate: a solo formation has no ancestor, and a
-    gate that parked there would hold the slot this gate exists to return. So
-    the hold is real only where somebody can answer, and this pins that the
-    unanswerable case moves rather than sticking.
-    """
-    proj = tmp_path / "solo"
-    wf = proj / ".claunch" / "workflows"
-    wf.mkdir(parents=True)
-    shutil.copy(WORKER, wf / "improv-worker.yaml")
-    monkeypatch.chdir(proj)
-    monkeypatch.delenv(state_mod.SESSION_ENV, raising=False)
-    engine.start("improv-worker")
-
-    assert _at("end-gate")["status"] == "waiting_answer"
+    with pytest.raises(CflowError, match="was not asked this"):
+        engine.answer(ask_id, "approve", by_session="boss")
+    engine.approve(by="user")
     payload = engine.next_step()
     assert payload["status"] == "step" and payload["step_id"] == "end-gate"
 

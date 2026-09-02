@@ -403,8 +403,8 @@ def test_a_worker_round_is_not_done_until_the_merge_is_confirmed():
         assert wf.steps["landing-review"].select.options["hold"].next == "wrapup"
 
 
-def test_the_worker_end_is_gated_by_the_session_above_it():
-    """Ending a worker session passes an ``end-gate`` its overseer answers.
+def test_the_worker_end_is_gated_by_a_user_without_a_timeout():
+    """Ending a worker session waits for the user's explicit approval.
 
     The daemon reaps a finished one-shot run's session on sight of ``done``
     (``daemon/cflow_clock.py`` kill-on-end), so ``done`` IS the kill. Before
@@ -421,21 +421,15 @@ def test_the_worker_end_is_gated_by_the_session_above_it():
         )
         gate = wf.steps["end-gate"].ask
         assert gate is not None, f"{label}: end-gate carries no ask"
-        roles = [c.role for c in gate.delegate.candidates]
-        assert roles == ["worker", "leader"], (
-            f"{label}: the ending must be put to the session above this one — "
-            f"parent (a mid worker) first, then the leader; got {roles}"
+        assert gate.delegate.candidates == [], (
+            f"{label}: no session role may approve the user's ending decision"
         )
-        assert all(c.scope == "ancestor" for c in gate.delegate.candidates), (
-            f"{label}: a peer worker must not be able to end this session"
+        assert gate.delegate.otherwise == model.OTHERWISE_HUMAN, (
+            f"{label}: the ending must wait for a user"
         )
-        # A solo formation has nobody above it. Holding for a human there
-        # would leave one unanswered gate per worker, and an unanswered gate
-        # holds the slot this gate exists to return.
-        assert gate.delegate.otherwise == model.OTHERWISE_SELF, (
-            f"{label}: with no ancestor the run must pass itself, not park"
+        assert gate.delegate.timeout is None, (
+            f"{label}: the user approval gate must not expire"
         )
-        assert gate.delegate.timeout, f"{label}: the gate must not be open forever"
         # A refusal has somewhere to go: the session stays up under
         # keep-alive rather than the run ending anyway.
         assert gate.on_decline == "end-hold", (
