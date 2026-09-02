@@ -8427,9 +8427,9 @@ function syncOnboardPickers() {
   // selected refreshRoles replaces these options with that mesh's authority.
   form.role.disabled = false;
 
-  // Ranked by the picked role, exactly as the CLI wizard's Workflow row and
-  // the spawn modal's rank it: the role's own defaults first, then the rest,
-  // the ones its filter_roles refuses last.
+  // Filtered and ranked by the picked role, exactly as the CLI wizard's
+  // Workflow row and the spawn modal do: only workflows the role's
+  // filter_roles admits, the role's own defaults first, then the rest.
   const wf = form.workflow;
   const { options, auto } = spawnRankWorkflows(workflowsCache, form.role.value);
   // Choosing a role chooses its workflow — but only over a row nobody has
@@ -15333,9 +15333,9 @@ function spawnWorkflowEntry(raw) {
 }
 
 /* Would this workflow's filter_roles let `role` drive it? True with no
-   filter or no role. The filter is enforced at start by the daemon; this
-   only decides what the form volunteers, exactly like the CLI wizard —
-   including refusing to volunteer on a `type` outside the vocabulary. */
+   filter or no role. The daemon enforces the same rule at start; this
+   decides what the form offers to pick from, exactly like the CLI wizard —
+   including refusing an entry whose `type` is outside the vocabulary. */
 function spawnWorkflowAdmits(entry, role) {
   const f = entry.filter_roles;
   if (!f || typeof f !== "object" || !role) return true;
@@ -15347,17 +15347,18 @@ function spawnWorkflowAdmits(entry, role) {
 }
 
 /* The wizard's workflow ranking: the picked role's own candidates first,
-   then the rest, the ones its filter refuses last — each band by descending
-   priority. Returns the ordered options and the auto-pick (the role's
-   highest-priority default), for the caller to apply over a value only the
-   auto-pick itself set last time. */
+   then the rest — each band by descending priority. An entry the role's
+   filter_roles refuses is left out of the row entirely (not merely ranked
+   last) so picking a role also picks from what that role may actually run;
+   empty role admits everything, matching spawnWorkflowAdmits. Returns the
+   ordered options and the auto-pick (the role's highest-priority default),
+   for the caller to apply over a value only the auto-pick itself set last
+   time. */
 function spawnRankWorkflows(raws, role) {
   role = String(role || "").trim().toLowerCase();
-  const entries = (raws || []).map(spawnWorkflowEntry).filter((e) => e.name);
-  const band = (e) => {
-    if (role && e.default_role === role && spawnWorkflowAdmits(e, role)) return 0;
-    return spawnWorkflowAdmits(e, role) ? 1 : 2;
-  };
+  const entries = (raws || []).map(spawnWorkflowEntry).filter((e) => e.name)
+    .filter((e) => spawnWorkflowAdmits(e, role));
+  const band = (e) => (role && e.default_role === role) ? 0 : 1;
   entries.sort((a, b) =>
     band(a) - band(b) || b.priority - a.priority ||
     (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
@@ -15365,9 +15366,6 @@ function spawnRankWorkflows(raws, role) {
     const d = [];
     if (e.default_role) d.push(`default for ${e.default_role}`);
     if (e.priority) d.push(`priority ${e.priority}`);
-    if (role && !spawnWorkflowAdmits(e, role)) {
-      d.push(`filter_roles turns '${role}' away`);
-    }
     return { name: e.name, detail: d.join(", ") };
   });
   const auto = entries.find((e) => band(e) === 0);
@@ -15954,12 +15952,13 @@ function fillSpawnSelect(sel, pairs, noneLabel, want) {
   return sel;
 }
 
-/* The workflow picker, ranked by the picked role the way the CLI wizard
-   ranks it: the role's own defaults first, then the rest, the ones its filter
-   refuses last. The current selection is carried over UNLESS it was the
-   auto-pick — then it follows the pair, so a role switch re-ranks the list
-   without trampling a pick the operator made. `last` is the auto value the
-   caller last applied; it is returned so the caller can remember it.
+/* The workflow picker, filtered and ranked by the picked role the way the
+   CLI wizard does it: only workflows the role's filter_roles admits, the
+   role's own defaults first, then the rest. The current selection is
+   carried over UNLESS it was the auto-pick — then it follows the pair, so a
+   role switch re-filters the list without trampling a pick the operator
+   made. `last` is the auto value the caller last applied; it is returned so
+   the caller can remember it.
 
    What is auto-picked is NOT the role's default, though: this form makes a
    CHILD, and a child's run comes from the pair its parent's own run declares
