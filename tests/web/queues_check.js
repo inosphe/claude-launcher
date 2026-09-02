@@ -6,18 +6,29 @@
    columns are statuses, and a card dragged to another row is ONE write, the
    assignment; the column is the assignee's to move and this page never does.
 
-   Five things must hold, and they are what this file checks:
+   Eight things must hold, and they are what this file checks:
 
    1. the page has the third tab, between Board and Reports, on its own
       route;
-   2. a board draws one row per lane the daemon answers with, in the daemon's
-      order, and the unassigned pool last; the head of a row says the
-      session's state, its cflow step, and the queue in numbers;
+   2. a board draws one row per lane the daemon answers with, and the
+      unassigned pool last; the head of a row says the session's state, its
+      cflow step, and the queue in numbers;
    3. a card lands in the cell of its status, is the same card the Board tab
       draws, is draggable, and the one the worker takes next says so;
    4. a drop on a cell assigns the dragged issue to that ROW -- a session's
       name, or null for the pool -- and never sends a status;
-   5. a refused assignment (409) is said where the drop happened.
+   5. a refused assignment (409) is said where the drop happened;
+   6. rows come busiest first, not in the daemon's creation order, and a
+      session the daemon has seen EXIT is folded out of that ordering into
+      a group of its own -- with the head still counting what the fold
+      hides;
+   7. an unassigned pool bigger than the cap is one folded cell that is
+      still a drop target, and a cell opened past the cap offers the rest
+      behind a button rather than drawing three hundred cards;
+   8. the stylesheet lays a cell's cards out as a wrapping row -- the case
+      of two or more issues in one status, which stacked one per line makes
+      the row as tall as its fullest cell and (align-items: stretch) charges
+      that height to every other cell in the row.
 
    Slice the real functions out of app.js and drive them against a stub
    DOM. */
@@ -87,6 +98,10 @@ let beadsQueues = null;
 let beadsQueuesError = "";
 let beadsDragging = "";
 let beadsOpen = true;
+const beadsQSpentOpen = new Set();
+const beadsQPoolOpen = new Set();
+const beadsQCellOpen = new Set();
+const BEADS_Q_CELL_CAP = 24;
 function setSection(s) { beadsSection = s; }
 function setQueues(q) { beadsQueues = q; }
 function setError(e) { beadsQueuesError = e; }
@@ -111,6 +126,7 @@ new Function(
   + slice("beadsSortIssues") + slice("beadsPriBadge") + slice("beadsCard")
   + slice("beadsPageTabs")
   + slice("renderQueues") + slice("beadsQueuesBoard") + slice("beadsQueueLane")
+  + slice("beadsLaneSpent") + slice("beadsQueueOrder") + slice("beadsQFoldBar")
   + slice("beadsQueueSummaryText") + slice("beadsQueueCell") + slice("beadsQueueCard")
   + slice("beadsAssign") + slice("refreshQueues")
   + `
@@ -118,6 +134,8 @@ Object.assign(exports, {
   tabs: beadsPageTabs, render: renderQueues, board: beadsQueuesBoard,
   setSection, setQueues, setError, setAnswer, calls,
   refreshed: () => refreshed,
+  spentOpen: beadsQSpentOpen, poolOpen: beadsQPoolOpen,
+  cellOpen: beadsQCellOpen, CAP: BEADS_Q_CELL_CAP,
 });`)(ctx, document, el);
 
 let failures = 0;
@@ -187,7 +205,8 @@ check("the pool row counts what waits for a queue",
       [heads[2].classes.has("pool"), heads[2].find("beads-q-sum")[0].text],
       [true, "1 waiting for a queue"]);
 check("the board head counts queues and the pool",
-      sec.find("beads-board-head")[0].find("wf-note")[0].text, "2 queues · 1 unassigned");
+      sec.find("beads-board-head")[0].find("wf-note")[0].text,
+      "2 live queues · 1 unassigned");
 
 /* ---- 3. cards ----------------------------------------------------------- */
 const cells = sec.find("beads-q-cell");
@@ -275,6 +294,137 @@ async function drop(card, cell) {
   ctx.render(view3);
   check("no board is said, not hidden",
         view3.find("wf-note").some((n) => n.text.startsWith("no board")), true);
+
+  /* ---- 6. the order of the rows, and the ended ones ---------------------
+     The daemon answers in ITS session order, which is creation order. On a
+     machine that has run sessions for a fortnight that puts the oldest
+     exited ones at the top and the running one at the bottom -- measured on
+     this repository's own board: 29 lanes, 23 of them holding one issue,
+     most of those sessions exited, and 4 issues in flight among the lot. */
+  const lane = (session, o = {}) => ({
+    session, known: o.known !== false, status: o.status || "idle",
+    issue: null, cflow: null,
+    issues: (o.issues || []).map((id) => ({
+      id, title: id, status: o.st || "open", priority: 2, assignee: session,
+    })),
+    summary: {
+      total: (o.issues || []).length,
+      waiting: o.working ? 0 : (o.issues || []).length,
+      working: o.working || 0, review: o.review || 0, blocked: 0, next: null,
+    },
+  });
+  const BUSY = {
+    root: "/many", error: null,
+    lanes: [
+      lane("s01", { status: "exited", issues: ["x1"] }),
+      lane("s02", { status: "exited", issues: ["x2"] }),
+      lane("s03", {}),
+      lane("s04", { issues: ["w1", "w2"] }),
+      lane("s05", { issues: ["p1"], st: "in_progress", working: 1 }),
+      lane("human", { known: false, status: null, issues: ["h1"] }),
+    ],
+    unassigned: [],
+  };
+  const rowNames = (s) =>
+    s.find("beads-q-head").map((h) => h.find("beads-q-name")[0].text);
+  ctx.spentOpen.clear(); ctx.poolOpen.clear(); ctx.cellOpen.clear();
+  let busy = ctx.board(BUSY, STATUSES);
+  check("in flight first, then queues with work waiting (fullest first), "
+        + "then idle — and no ended session among them",
+        rowNames(busy), ["s05", "s04", "human", "s03", "unassigned"]);
+  check("an assignee the daemon does not know is never folded away as ended "
+        + "— nothing here says that queue is over",
+        rowNames(busy).includes("human"), true);
+  check("the head counts what the fold hides, so the number a reader opens "
+        + "it on is not the number it hid",
+        busy.find("beads-board-head")[0].find("wf-note")[0].text,
+        "4 live queues · 2 ended · 0 unassigned");
+  const fold = busy.find("beads-q-fold");
+  check("one toggle stands where the ended rows would stand, saying how "
+        + "many and how much they hold",
+        [fold.length, fold[0].children[0].text],
+        [1, "▸ 2 ended sessions, holding 2 issues"]);
+  fold[0].children[0].fire("click");
+  busy = ctx.board(BUSY, STATUSES);
+  check("opened, the ended rows are drawn after the live ones and before "
+        + "the pool",
+        rowNames(busy),
+        ["s05", "s04", "human", "s03", "s01", "s02", "unassigned"]);
+  check("and their heads are marked as ended",
+        busy.find("beads-q-head").filter((h) => h.classes.has("spent")).length, 2);
+  check("the toggle now folds them back", busy.find("beads-q-fold")[0]
+        .children[0].text, "▾ 2 ended sessions, holding 2 issues");
+
+  /* ---- 7. a pool too tall to draw ------------------------------------- */
+  const POOL = {
+    root: "/pool", error: null, lanes: [lane("s1", { issues: ["a"] })],
+    unassigned: Array.from({ length: 30 }, (_, i) => ({
+      id: "u" + i, title: "u" + i, status: "open", priority: 2,
+    })),
+  };
+  ctx.spentOpen.clear(); ctx.poolOpen.clear(); ctx.cellOpen.clear();
+  let pooled = ctx.board(POOL, STATUSES);
+  const poolCells = pooled.find("beads-q-cell").filter((c) => !c.dataset.session);
+  check("a pool past the cap is one cell across the row, not five",
+        [poolCells.length, poolCells[0].classes.has("folded"),
+         poolCells[0].style.gridColumn, poolCells[0].find("beads-card").length],
+        [1, true, "span 5", 0]);
+  check("and it says how many it is not drawing",
+        poolCells[0].children[0].text, "▸ 30 unassigned issues — open the pool");
+  ctx.calls.length = 0;
+  ctx.setAnswer({ ok: true, status: 200, body: { changed: true } });
+  const liveCard = pooled.find("beads-q-card")[0];
+  await drop(liveCard, poolCells[0]);
+  check("the folded pool is still a drop target, so taking an issue off a "
+        + "queue never needs the fold opened first",
+        ctx.calls.filter((c) => c.opts).map((c) => [c.path, JSON.parse(c.opts.body)]),
+        [["/api/beads/a/assign", { session: null, cwd: "/pool" }]]);
+  ctx.calls.length = 0;
+  poolCells[0].children[0].fire("click");
+  pooled = ctx.board(POOL, STATUSES);
+  const opened = pooled.find("beads-q-cell").filter(
+    (c) => !c.dataset.session && c.classes.has("open"))[0];
+  check("opened, the pool is a normal row again — but capped, because one "
+        + "tall cell sets the height of every other cell in its row",
+        [opened.find("beads-card").length, opened.find("beads-q-more")[0].text],
+        [ctx.CAP, "+6 more"]);
+  opened.find("beads-q-more")[0].fire("click");
+  pooled = ctx.board(POOL, STATUSES);
+  const whole = pooled.find("beads-q-cell").filter(
+    (c) => !c.dataset.session && c.classes.has("open"))[0];
+  check("and the button hands over the rest of that one cell",
+        [whole.find("beads-card").length, whole.find("beads-q-more").length],
+        [30, 0]);
+  ctx.spentOpen.clear(); ctx.poolOpen.clear(); ctx.cellOpen.clear();
+
+  /* ---- 8. two in one status wrap, they do not stack ---------------------
+     The layout half of the same defect. A cell is a column of cards in CSS,
+     so a status holding two issues makes its cell twice as tall -- and the
+     grid is `align-items: stretch`, so the four other cells in that row are
+     charged the same height with nothing in them. */
+  const css = fs.readFileSync(
+    path.join(__dirname, "..", "..", "src", "claude_launcher", "web", "static",
+              "style.css"),
+    "utf8"
+  );
+  const rule = (sel) => {
+    const at = css.indexOf(sel + " {");
+    return at < 0 ? "" : css.slice(at, css.indexOf("}", at));
+  };
+  check("a cell lays its cards out as a wrapping row",
+        /flex-flow:\s*row wrap/.test(rule(".beads-q-cell")), true);
+  check("with a basis for the wrap to happen on, so a narrow column takes "
+        + "one card a line and a wide one takes two",
+        /flex:\s*1 1 \d+px/.test(rule(".beads-q-card")), true);
+  check("cards pack to the top rather than spreading down the cell",
+        /align-content:\s*flex-start/.test(rule(".beads-q-cell")), true);
+  check("the fold row spans every column",
+        /grid-column:\s*1 \/ -1/.test(rule(".beads-q-fold")), true);
+  check("a refusal and a '+n more' each take a line of their own, whatever "
+        + "the cards beside them did",
+        [/flex:\s*1 1 100%/.test(rule(".beads-q-note")),
+         /flex:\s*1 1 100%/.test(rule(".beads-q-more"))],
+        [true, true]);
 
   if (failures) process.exit(1);
   console.log("queues_check ok");

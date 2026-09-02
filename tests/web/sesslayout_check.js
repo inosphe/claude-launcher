@@ -1,5 +1,5 @@
-/* The per-session layout: which panel the right rail shows (Details or
-   Workflow, the radio), whether the run page is halved into the terminal's
+/* The per-session layout: which panel the right rail shows (Details,
+   Workflow or Beads, the radio), whether the run page is halved into the terminal's
    column (the ⬒ toggle and the bar), and where the bar was left. All of it
    remembered per SESSION in one localStorage key, so walking between
    terminals never resets a choice — and all of it derived, never toggled:
@@ -250,12 +250,18 @@ check("the key carries the base path",
   const w = build({});
   const bar = w.ctx.sessRailTabs("s15");
   const tabs = walk(bar).filter((k) => k.classes.has("seq-tab"));
-  check("two tabs, Details and Workflow",
-        tabs.length === 2 && tabs[0].text === "Details"
-        && tabs[1].text === "Workflow", tabs.map((t) => t.text));
+  // Three panels, because the two registries a round is recorded in are the
+  // cflow run and the repository board — the board's half used to be a
+  // section at the bottom of Details, drawn as a list, under whatever else
+  // that column happened to be carrying.
+  check("three tabs: Details, Workflow, Beads",
+        tabs.length === 3 && tabs[0].text === "Details"
+        && tabs[1].text === "Workflow" && tabs[2].text === "Beads",
+        tabs.map((t) => t.text));
   check("the current panel is lit and dead",
         tabs[0].classes.has("on") && !tabs[0].handlers.click
-        && !tabs[1].classes.has("on") && !!tabs[1].handlers.click);
+        && !tabs[1].classes.has("on") && !!tabs[1].handlers.click
+        && !tabs[2].classes.has("on") && !!tabs[2].handlers.click);
   tabs[1].fire("click");
   check("picking the other writes the choice down",
         w.ctx.sessLayoutFor("s15").rail === "wf");
@@ -265,6 +271,14 @@ check("the key carries the base path",
   const tabs2 = walk(bar2).filter((k) => k.classes.has("seq-tab"));
   check("the rebuild lights the new panel",
         tabs2[1].classes.has("on") && !tabs2[0].classes.has("on"));
+  tabs2[2].fire("click");
+  check("the board's panel is a choice like the other two, and is kept",
+        w.ctx.sessLayoutFor("s15").rail === "beads",
+        w.ctx.sessLayoutFor("s15").rail);
+  const bar3 = w.ctx.sessRailTabs("s15");
+  const tabs3 = walk(bar3).filter((k) => k.classes.has("seq-tab"));
+  check("only it is lit",
+        tabs3.map((t) => t.classes.has("on")).join(), "false,false,true");
 }
 
 /* --- the markup the code reaches for ------------------------------------- */

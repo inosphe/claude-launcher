@@ -1592,6 +1592,40 @@ body.term-split #terminal { flex: var(--split-term, 0.6) 1 0; min-height: 80px; 
   color: #7d8590; font-size: 11px; margin-left: auto;
   font-variant-numeric: tabular-nums;
 }
+/* the rail's Beads panel: this session's slice of the board as lanes, at the
+   level the cflow run sits at. The panel owns a column rather than a section
+   of one, so the lanes get real width; when there are more statuses than the
+   column can hold they scroll sideways rather than squeezing every card to
+   an unreadable strip. */
+.sess-beads-lanes {
+  display: grid; gap: 6px; align-items: start;
+  overflow-x: auto; padding-bottom: 6px; margin: 4px 0 4px;
+}
+.sess-beads-lane {
+  background: #11151b; border: 1px solid #1f242c; border-radius: 6px;
+  min-width: 0; display: flex; flex-direction: column;
+}
+.sess-beads-lane-head {
+  display: flex; justify-content: space-between; gap: 6px; padding: 5px 8px;
+  border-bottom: 1px solid #2a2e36; font-size: 11px;
+  text-transform: uppercase; letter-spacing: .04em; color: #8b949e;
+}
+/* the same five colours the Queues columns and the Board lanes use, so a
+   status reads the same wherever the dashboard draws it */
+.sess-beads-lane.open .sess-beads-lane-name { color: #79c0ff; }
+.sess-beads-lane.in_ready .sess-beads-lane-name { color: #56d364; }
+.sess-beads-lane.in_progress .sess-beads-lane-name { color: #d29922; }
+.sess-beads-lane.in_review .sess-beads-lane-name { color: #d2a8ff; }
+.sess-beads-lane.blocked .sess-beads-lane-name { color: #ff7b72; }
+.sess-beads-lane-n { color: #7d8590; font-variant-numeric: tabular-nums; }
+.sess-beads-lane-body {
+  padding: 6px; display: flex; flex-direction: column; gap: 6px; min-width: 0;
+}
+.sess-beads-kanban .beads-card.primary { border-color: #3d5a86; }
+.sess-beads-primary {
+  align-self: flex-start; font-size: 10px; padding: 1px 6px; border-radius: 9px;
+  background: #172947; color: #79c0ff; text-transform: uppercase; letter-spacing: .04em;
+}
 .sess-beads-create { display: flex; gap: 8px; align-items: center; margin-top: 8px; flex-wrap: wrap; }
 .sess-beads-create input {
   flex: 1 1 200px; min-width: 0; padding: 6px 8px; background: #0d1117;
@@ -1726,6 +1760,9 @@ body.term-split #terminal { flex: var(--split-term, 0.6) 1 0; min-height: 80px; 
   min-width: 0; font-size: 12px;
 }
 .beads-q-head.pool { background: #14171c; border-style: dashed; }
+/* a queue nobody is working any more: drawn, but not competing with the ones
+   that are. Only reachable behind the ended-sessions fold. */
+.beads-q-head.spent { opacity: .7; }
 .beads-q-name {
   color: #e6edf3; font-family: ui-monospace, monospace; font-size: 13px;
   text-decoration: none; overflow-wrap: anywhere;
@@ -1735,20 +1772,36 @@ a.beads-q-name:hover { color: #79c0ff; text-decoration: underline; }
 .beads-q-step { color: #8b949e; font-size: 11px; overflow-wrap: anywhere; }
 .beads-q-sum { color: #7d8590; font-size: 11px; font-variant-numeric: tabular-nums; }
 .beads-q-primary { color: #6e7681; font-size: 11px; font-family: ui-monospace, monospace; }
+/* Cards lay out as a WRAPPING ROW, not as a single column. Two or more
+   issues in one status is the ordinary case, and stacking them one per line
+   makes the row as tall as its fullest cell -- which `align-items: stretch`
+   above then charges to the four other cells in that row, empty ones
+   included. The basis does the wrapping: at the column's 170px minimum only
+   one card fits a line, and a wider column takes two or three. */
 .beads-q-cell {
-  display: flex; flex-direction: column; gap: 6px; padding: 6px;
+  display: flex; flex-flow: row wrap; align-content: flex-start;
+  gap: 6px; padding: 6px;
   background: #11151b; border: 1px solid #1f242c; border-radius: 6px;
   min-height: 44px; min-width: 0; transition: background .1s, border-color .1s;
 }
 .beads-q-cell.over { background: #172947; border-color: #3d5a86; }
-.beads-q-card { cursor: grab; }
+/* the folded pool: one cell across the row, and still a drop target */
+.beads-q-cell.folded { align-items: center; justify-content: flex-start; }
+.beads-q-card { cursor: grab; flex: 1 1 150px; min-width: 0; max-width: 100%; }
 .beads-q-card.dragging { opacity: .45; cursor: grabbing; }
 .beads-q-card.next { border-color: #3d5a86; }
 .beads-q-next {
   align-self: flex-start; font-size: 10px; padding: 1px 6px; border-radius: 9px;
   background: #172947; color: #79c0ff; text-transform: uppercase; letter-spacing: .04em;
 }
-.beads-q-note { margin: 2px 0 0; font-size: 11px; }
+/* both take a line of their own, whatever the cards beside them did */
+.beads-q-note { margin: 2px 0 0; font-size: 11px; flex: 1 1 100%; }
+.beads-q-more { flex: 1 1 100%; font-size: 11px; }
+
+/* the fold rows: a group of queues the grid is not drawing, and its toggle.
+   Spans every column, because it is about the rows and not about a status. */
+.beads-q-fold { grid-column: 1 / -1; display: flex; padding: 2px 0 4px; }
+.beads-q-fold .wf-btn { font-size: 11px; }
 
 .beads-card {
   background: #1b1e24; border: 1px solid #2a2e36; border-left-width: 3px;
