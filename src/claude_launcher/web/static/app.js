@@ -15991,14 +15991,20 @@ function spawnConnectNow(ui, handles) {
   );
 }
 
-/* A local mesh member must also be a live, unarchived session before it can
-   be offered to a new child. Remote members have no local session record, so
-   their owning daemon remains the authority for their lifecycle. */
+/* A local mesh member must also be a currently RUNNING session (the rail's
+   own "running" category, sessionCategory) before it can be offered to a new
+   child. A local member whose session record is not in sessionsCache is not
+   an unknown to be assumed alive -- the background poll only carries active
+   sessions by default (refreshSessions' "active" state), so a session that
+   exited before ever being fetched into the cache never gets one, and that
+   absence must read as "not running", not as a pass. Remote members have no
+   local session record at all, so their owning daemon remains the authority
+   for their lifecycle and they are offered regardless. */
 function connectCandidate(member) {
   if (!member || !member.handle) return false;
   if (member.local === false) return true;
   const session = sessionsCache.find((s) => s.name === member.session);
-  return !session || (session.status !== "exited" && !session.archived_at);
+  return !!session && sessionCategory(session) === "running";
 }
 
 /* ---- a group: one decision, several rows ------------------------------

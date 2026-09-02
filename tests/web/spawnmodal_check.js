@@ -201,8 +201,11 @@ new Function(
      spawnConnectNow sees it. The real one is taken rather than stubbed:
      it reads only sessionsCache, which the stubs above already declare
      and setSessions drives, so the harness stays on the production rule
-     instead of a copy that can drift away from it. */
-  + slice("connectCandidate")
+     instead of a copy that can drift away from it. connectCandidate now
+     reads a session's category through sessionCategory (the same rule the
+     rail's own running/killed/archived filter uses), so that comes along
+     too rather than a copy of its exited/archived-at logic. */
+  + slice("sessionCategory") + slice("connectCandidate")
   + slice("spawnGroup") + slice("setActionPending") + slice("buildSpawnForm")
   + slice("spawnModalKey") + slice("spawnModalClose")
   + slice("refreshSpawnBorrowOptions") + slice("openSpawnModal")
@@ -1161,8 +1164,20 @@ async function main() {
 
   /* ---- the route: the quick job opening lands in the same modal ---------- */
   Object.keys(store).forEach((k) => delete store[k]);
+  // w2 is a running local session -- offered. w3 is a local session that has
+  // exited -- excluded, the case claunch-z9cv already covered. w4 is a local
+  // member whose session is not in sessionsCache at all -- the poll only
+  // carries "active" sessions by default, so a session that exited before
+  // ever being fetched leaves no record; that absence must exclude it too,
+  // not default to "assume running" (the bug claunch-ade6 fixed). w5 is a
+  // remote member -- no local record exists for it, so it stays offered
+  // regardless; its owning daemon is the authority for its lifecycle.
   const m0Members = { members: [{ handle: "lead1", role: "leader" },
-                                { handle: "w2", role: "worker" }] };
+                                { handle: "w2", role: "worker", session: "w2" },
+                                { handle: "w3", role: "worker", session: "w3" },
+                                { handle: "w4", role: "worker", session: "w4" },
+                                { handle: "w5", role: "worker", session: "w5",
+                                  local: false }] };
   routes = {
     "GET /api/sessions/lead1/meta": { doc: {
       session: { name: "lead1", cwd: "C:/repo", profile: "p1", harness: "claude" },
@@ -1224,7 +1239,14 @@ async function main() {
       session: { name: "job-1" }, mesh: { ok: true, mesh: "m0" },
     } },
   };
-  ctx.setSessions([{ name: "lead1", cwd: "C:/repo", harness: "claude", status: "idle" }]);
+  // w4 is deliberately absent -- it stands for a session the background
+  // poll never fetched (it only carries "active" ones by default), which is
+  // exactly the case the missing-record fallback used to mistake for running.
+  ctx.setSessions([
+    { name: "lead1", cwd: "C:/repo", harness: "claude", status: "idle" },
+    { name: "w2", cwd: "C:/repo", harness: "claude", status: "idle" },
+    { name: "w3", cwd: "C:/repo", harness: "claude", status: "exited" },
+  ]);
   sent = [];
   await ctx.openSpawnModal("lead1", { seed: {
     quick: true, role: "worker", workflow: "improv-worker", worktree: true,
@@ -1340,9 +1362,16 @@ async function main() {
   await settle();
   const connRow = walk(modalEls["modal-body"])
     .find((k) => k.classes && k.classes.has("sess-spawn-connect"));
-  check("the connect row offers the other member only",
-    connRow && tags(connRow, "input").length === 1 &&
-      texts(connRow).includes("w2") && !texts(connRow).includes("lead1"),
+  // w2 (running) and w5 (remote, no local record to judge) are offered.
+  // lead1 is the parent (excluded by spawnConnectNow); w3 (exited) and w4
+  // (no session record in sessionsCache at all) are excluded by
+  // connectCandidate -- w4 is the fix this test guards: a missing record
+  // used to default to "offer it" and must now default to "leave it out".
+  check("the connect row offers only the running and remote members",
+    connRow && tags(connRow, "input").length === 2 &&
+      texts(connRow).includes("w2") && texts(connRow).includes("w5") &&
+      !texts(connRow).includes("lead1") && !texts(connRow).includes("w3") &&
+      !texts(connRow).includes("w4"),
     connRow && texts(connRow));
 
   // Tick the offered peer, so the payload below proves that inheriting the
