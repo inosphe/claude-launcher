@@ -76,6 +76,20 @@ class StoreError(Exception):
     """Raised for an unreadable or malformed config file."""
 
 
+class TransientStoreError(StoreError):
+    """:func:`save` could not land: a Windows sharing conflict outlasted the
+    retry budget in :mod:`atomic` (``winerror`` 5 or 32 -- see its docstring).
+
+    Not a broken config: the previous document on disk is untouched
+    (``atomic.replace`` never got past the rename), and measurement on this
+    machine (150+ concurrent sessions, board ``claunch-qd9q``) found the
+    conflict is not one holder that lets go -- retrying inside the same
+    process call did not clear it even after 20s/200 attempts. So this is
+    the caller's cue to stop retrying *here* and let the next command try
+    again, not to wait longer or treat the run as broken.
+    """
+
+
 def path() -> Path:
     """The config file backing the store (``~/.claunch.yaml`` by default)."""
     return config.sync_file()
@@ -140,6 +154,15 @@ def save(doc: dict) -> None:
     the whole old document or the whole new one -- never a state between them.
     The temporary carries this process's pid so two writers cannot land on the
     same scratch name, and it is cleaned up if the rename never happens.
+
+    A Windows sharing conflict that outlasts :mod:`atomic`'s retry budget
+    raises :class:`TransientStoreError` (a :class:`StoreError`, chained to
+    the original ``OSError``) rather than letting that ``OSError`` escape --
+    ``cli.main`` already knows to report any ``StoreError`` as ``error: ...``
+    and exit 1 instead of an unhandled traceback, and this one is worded so
+    the caller reads it as "run the command again", not "something is
+    broken". Every other failure (a read-only file, a wrong ACL) is still
+    raised as the bare ``OSError`` it always was.
     """
     doc.setdefault("version", VERSION)
     p = path()
@@ -149,7 +172,16 @@ def save(doc: dict) -> None:
     )
     with atomic.scratch(p) as tmp:
         tmp.write_text(text, encoding="utf-8")
-        atomic.replace(tmp, p)
+        try:
+            atomic.replace(tmp, p)
+        except OSError as exc:
+            if getattr(exc, "winerror", None) not in atomic.TRANSIENT:
+                raise
+            raise TransientStoreError(
+                f"config file {p} is temporarily locked by another process "
+                f"and could not be updated ({exc}); this is not a broken "
+                "config -- run the command again"
+            ) from exc
 
 
 def update(mutator: Callable[[dict], None]) -> dict:

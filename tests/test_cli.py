@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from claude_launcher import (
+    bootstrap,
     cli,
     config,
     credentials,
@@ -637,3 +638,28 @@ def test_the_child_cap_answer_reaches_the_payload(home, monkeypatch, capsys):
     out = capsys.readouterr().out
     assert "warning: at the cap" in out
     assert out.index("warning: at the cap") < out.index("spawned w9")
+
+
+def test_a_transient_store_error_from_bootstrap_is_reported_not_a_traceback(
+    home, capsys, monkeypatch
+):
+    """Every command runs ``bootstrap.run()`` before its own work (board
+    claunch-qd9q). A bare ``OSError`` there used to reach nobody's ``except``
+    and crash with a raw traceback -- exactly what made a transient Windows
+    sharing conflict look like the run's own work was broken. Wrapped as
+    ``store.TransientStoreError`` (a ``StoreError``), it now lands in the
+    ``error: ...`` / exit 1 path every other store failure already uses."""
+
+    def boom():
+        raise store.TransientStoreError(
+            "config file locked by another process; run the command again"
+        )
+
+    monkeypatch.setattr(bootstrap, "run", boom)
+
+    code = run("providers")
+
+    assert code == 1
+    err = capsys.readouterr().err
+    assert "error:" in err
+    assert "run the command again" in err

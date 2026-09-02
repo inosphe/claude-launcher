@@ -164,6 +164,52 @@ def test_a_save_that_cannot_land_keeps_the_old_document_and_cleans_up(
     assert not list(config_file.parent.glob(f"{config_file.name}.*.tmp"))
 
 
+# --------------------------------------------------------------------------- #
+# a transient Windows sharing conflict that outlasts atomic's retry budget
+# --------------------------------------------------------------------------- #
+def _perm(winerror: int) -> OSError:
+    """The exception ``os.replace`` raises when a holder blocks the delete."""
+    return OSError(13, "Access is denied", None, winerror)
+
+
+def test_save_wraps_an_unrelenting_sharing_conflict(config_file, monkeypatch):
+    """A holder that never lets go raises TransientStoreError, not the bare
+    OSError -- worded as "try again", not "broken" -- and the previous
+    document survives untouched (the rename never got past the conflict)."""
+    store.save({"llm": {"endpoint": "e1"}})
+
+    def denied(a, b):
+        raise _perm(5)
+
+    monkeypatch.setattr(atomic.os, "replace", denied)
+    monkeypatch.setattr(atomic, "BACKOFF", (0.0, 0.0, 0.0))
+
+    with pytest.raises(store.TransientStoreError) as caught:
+        store.save({"llm": {"endpoint": "e2"}})
+
+    assert isinstance(caught.value, store.StoreError)
+    assert "run the command again" in str(caught.value)
+    assert store.load()["llm"]["endpoint"] == "e1"
+    assert not list(config_file.parent.glob(f"{config_file.name}.*.tmp"))
+
+
+def test_save_does_not_wrap_a_non_transient_os_error(config_file, monkeypatch):
+    """A wrong ACL (or any winerror atomic does not retry) is a real answer,
+    not a transient conflict -- it must reach the caller as the bare
+    OSError it always was, not get relabeled as "try again"."""
+    store.save({"llm": {"endpoint": "e1"}})
+
+    def denied(a, b):
+        raise _perm(19)  # ERROR_WRITE_PROTECT -- not in atomic.TRANSIENT
+
+    monkeypatch.setattr(atomic.os, "replace", denied)
+
+    with pytest.raises(OSError) as caught:
+        store.save({"llm": {"endpoint": "e2"}})
+
+    assert not isinstance(caught.value, store.StoreError)
+
+
 def test_load_parses_once_per_text_and_hands_out_copies(config_file):
     """The parse is skipped while the file's text is unchanged, and it is the
     TEXT that decides -- a rewrite of the same size lands within the same
