@@ -13395,17 +13395,33 @@ function wfDiagramSvg(wf, run, selected) {
       ly = mid + 4;
     } else {
       const n = reference++;
+      // A loop-back route (its target precedes the source in the
+      // topological order — an `on_decline` returning to an earlier step)
+      // can leave the same source as a plain forward route to `end`
+      // (wrapup: end vs. decline -> standby; delegated-dev's ship: end vs.
+      // decline -> impl). Anchoring both at the same side/height, like the
+      // general case below, made them overlap for most of their length and
+      // the loop's label read as belonging to the longer, more visible
+      // forward arc. A loop-back instead exits the TOP of its box and
+      // re-enters the target's BOTTOM — an anchor no side-exit route ever
+      // shares — while still bending through the same `n`-numbered rail as
+      // every other reference route below, so two loops that cross the
+      // same rows still land in separate columns (improv-worker has two:
+      // `peer-review`'s rework back to `work`, `await-landing`'s back to
+      // `rebase`) instead of the fixed top/bottom anchor drawing them on
+      // top of each other.
+      const loop = e.to !== "end" && orderIndex.get(e.to) < orderIndex.get(e.from);
       const right = to.x >= from.x;
-      const y1 = from.y + NH / 2;
-      const y2 = e.to === "end" ? to.y + 15 : to.y + NH / 2;
-      const x1 = from.x + (right ? NW / 2 : -NW / 2);
-      const x2 = to.x + (right ? -NW / 2 + 2 : NW / 2 - 2);
+      const y1 = loop ? from.y - 2 : from.y + NH / 2;
+      const y2 = loop ? to.y + NH + 2 : (e.to === "end" ? to.y + 15 : to.y + NH / 2);
+      const x1 = loop ? from.x : from.x + (right ? NW / 2 : -NW / 2);
+      const x2 = loop ? to.x : to.x + (right ? -NW / 2 + 2 : NW / 2 - 2);
       const bend = (right ? Math.max(x1, x2) + 34 : Math.min(x1, x2) - 34)
         + (right ? 1 : -1) * 16 * n;
       d = `M ${x1} ${y1} C ${bend} ${y1}, ${bend} ${y2}, ${x2} ${y2}`;
-      lx = x1 + (right ? 8 : -8);
+      lx = loop ? x1 : x1 + (right ? 8 : -8);
       ly = y1 - 8;
-      anchor = right ? "start" : "end";
+      anchor = loop ? "middle" : (right ? "start" : "end");
     }
     const hold = e.opts.some(isHeld);
     const pace = e.opts.some((o) => o.pace);
