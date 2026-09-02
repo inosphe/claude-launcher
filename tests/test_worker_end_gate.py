@@ -84,12 +84,20 @@ def _at(step_id):
 def test_the_ending_holds_for_user_approval(worker_run):
     """The approval path's enforcement is the engine, not the agent's restraint.
 
-    While the ask is open the run reports ``waiting_answer`` and the step's
-    instructions are withheld, and a report is refused — so an agent that
-    calls ``next`` at ``end-gate`` gets the same wall rather than reaching
-    ``end``, which is the kill.
+    A read-only look at the step before anyone opened the ask describes it
+    honestly (``waiting_answer`` / ``approval``, not yet put to anyone). The
+    agent's ``next`` opens it, and with no session candidates it falls to a
+    human at once: ``waiting_approval`` with nobody asked and no deadline. The
+    step's instructions are withheld and a report is refused — so an agent
+    that calls ``next`` at ``end-gate`` gets the same wall rather than
+    reaching ``end``, which is the kill.
     """
     payload = _at("end-gate")
+    assert payload["status"] == "waiting_answer"
+    assert payload["reason"] == "approval"
+    assert "instructions" not in payload
+
+    payload = engine.next_step()
     assert payload["status"] == "waiting_approval"
     assert payload["reason"] == "ask"
     assert payload["ask"]["asked"] == []

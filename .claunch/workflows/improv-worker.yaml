@@ -1962,6 +1962,9 @@ steps:
     # 작업 산출물의 보존 기간에 관한 사용자 결정이므로 상위 세션이나 워커가
     # 대신 승인하지 않는다. timeout도 두지 않는다. 사용자가 승인할 때까지
     # done에 도달하지 않으므로 데몬의 종료 절차도 시작되지 않는다.
+    # on_decline: end-hold는 사람 게이트에 거절 입력이 없어 decline으로는
+    # 도달하지 않는다(engine.approve만 있다) — 사람이 `claunch cflow goto
+    # end-hold`로 보내는 경로이고, 그 절차는 end-hold가 적는다.
     ask:
       prompt: |
         이 워커의 회차가 끝났다(정리·최종 보고·HTML 회차 보고서까지).
@@ -1971,9 +1974,11 @@ steps:
         허가하면: pane이 닫히고 슬롯이 반환된다. 브랜치와 beads 이슈는
         세션과 무관하게 남아 상위 세션이 그대로 통합할 수 있고, 다시 사람
         손이 필요하면 `claunch respawn <세션>`이 있다.
-        보류하면: 승인 게이트는 열린 상태로 유지된다. 세션을 유지할 사유가
-        확정되면 `claunch keep-alive <세션>`으로 종료 보류 경로를 선택할 수
-        있다.
+        보류하면: 승인 게이트는 열린 상태로 유지되고 세션은 살아 있다.
+        사람 게이트에는 거절 입력이 없으므로(`claunch cflow approve`뿐)
+        `on_decline`은 사람의 `claunch cflow goto end-hold`로만 닿는다 —
+        세션을 의도적으로 살려 둘 사유가 확정되면 그 명령으로 종료 보류
+        경로(keep-alive)를 선택한다.
 
         판단 근거: `claunch cflow journal -t <세션>`, `claunch beads show <이슈> --json`.
       on_decline: end-hold
@@ -1993,14 +1998,16 @@ steps:
     next: end
 
   end-hold:
-    title: 종료 보류 (허가 거절)
+    title: 종료 보류 (사용자 보류)
     instructions: |
-      사용자가 종료를 보류했다. 이 세션은 살아 있어야 하므로 먼저
+      사용자가 종료를 보류했다(`claunch cflow goto end-hold`). 이 세션은
+      살아 있어야 하므로 먼저
       `claunch keep-alive $CLAUNCH_SESSION`을 실행해 플래그를 세운다 — 이
       플래그가 없으면 런이 done이 되는 즉시 데몬이 세션을 끝낸다(플래그는
       킬만 막고 종결 기록은 그대로 남는다).
-      그다음 거절 사유를 읽는다 — 응답자가 적은 말 그대로 저널에 있다
-      (`claunch cflow journal -n 5`). 사유가 추가 작업이면 그것은 이 회차의
+      그다음 보류 사유를 읽는다 — goto 기록과 사람의 말이 저널에 있다
+      (`claunch cflow journal -n 5`); 없으면 터미널 사용자에게 묻는다.
+      사유가 추가 작업이면 그것은 이 회차의
       범위 밖이다: 이슈로 남기고(`claunch beads create "<제목>" --priority 3
       --labels handoff --description "<규격>"`) 그 id를 보고에 적는다.
       상위에게는 fyi 한 줄로 이 세션이 keep-alive로 살아 있다는 사실과 그
@@ -2010,7 +2017,7 @@ steps:
       기다린다. 플래그를 내리는 것은 사람 또는 상위의 지시다:
       `claunch keep-alive $CLAUNCH_SESSION off`.
     done_when: |
-      keep-alive 플래그가 세워졌고(명령의 출력을 보고에 붙인다), 거절 사유와
+      keep-alive 플래그가 세워졌고(명령의 출력을 보고에 붙인다), 보류 사유와
       그에 따라 만든 handoff 이슈 id(있다면), 상위에 보낸 fyi의 메시지 id가
       보고에 있다.
     # 이 스텝의 판정이 done_when 하나로 서 있었다 — 「keep-alive 플래그가
