@@ -177,7 +177,13 @@ green "now" that means somebody has the terminal open this second (no stamp
 taken in the past can say that), and the dash that means no reading, drawn on
 every row whether or not it has one so the three columns stay where the eye
 left them. It also holds the red stale state on each reading at its own
-threshold: one hour for ``seen`` and ``moved``, half an hour for ``typed``.
+threshold: one hour for ``seen``, half an hour for ``typed``, five minutes
+for ``moved`` — moved is the earliest because it is the reading an operator
+most needs to catch, a session that went quiet mid-task. All three are kept
+in a ``railStale`` object rather than fixed constants, editable from a
+Settings card and remembered per browser, so the same checks parametrize on
+whatever thresholds ``railStale`` currently holds instead of a literal hour
+or half hour.
 
 ``railtimer_check`` on the nudge countdown's shared vocabulary — the clock
 for the daemon's automatic nudge, which is the one thing on this dashboard

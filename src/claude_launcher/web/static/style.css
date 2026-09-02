@@ -2976,6 +2976,16 @@ a.wf-btn { display: inline-block; text-decoration: none; line-height: 1.5; }
 .status-check-settings { margin: 14px 0; padding: 12px 16px; background: #1b1e24;
   border: 1px solid #30363d; border-radius: 6px; }
 .status-check-settings h3 { font-size: 12px; text-transform: uppercase; color: #7d8590; margin-bottom: 10px; }
+.rail-stale-settings { margin: 14px 0; padding: 12px 16px; background: #1b1e24;
+  border: 1px solid #30363d; border-radius: 6px; max-width: 760px; }
+.rail-stale-settings h3 { font-size: 12px; text-transform: uppercase; color: #7d8590; margin-bottom: 10px; }
+.rail-stale-row { display: flex; align-items: center; gap: 8px; padding: 6px 0;
+  border-top: 1px solid #2a2e36; }
+.rail-stale-row:first-of-type { border-top: none; }
+.rail-stale-label { flex: none; width: 60px; color: #e6edf3; }
+.rail-stale-row input[type="number"] { width: 70px; flex: none; }
+.rail-stale-unit { flex: none; color: #7d8590; }
+.rail-stale-row .wf-btn { flex: none; margin-left: auto; }
 .status-check-add { display: flex; flex-direction: column; gap: 8px; }
 .status-check-add input { width: 100%; box-sizing: border-box; }
 .status-check-add .wf-btn { align-self: flex-start; }

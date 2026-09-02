@@ -147,7 +147,7 @@ const ctx = {};
 new Function(
   "exports", "document", "el", "api", "list", "meshCache", "sessionGroupByMesh",
   stubs + constLine("RAIL_MESH_TAGS") + constLine("CTX_DOMAIN")
-  + constLine("SEEN_COLD") + constLine("TYPED_STALE")
+  + constLine("RAIL_STALE_DEFAULT") + constLine("railStale")
   + slice("byLineage") + slice("sessionMeshGroup") + slice("sessMeshes") + slice("railMeshTags") + slice("sessHandles") + slice("handleTag")
   + slice("fmtAge") + slice("ctxShort") + slice("ctxAgeOf")
   + slice("ctxKnowable") + slice("ctxSentence") + slice("ctxBreakdown")
@@ -162,8 +162,9 @@ Object.assign(exports, {
   refresh: refreshSessions,
   ago: seenAgo,
   line: railSeenLine,
-  SEEN_STALE: SEEN_COLD,
-  STALE: TYPED_STALE,
+  SEEN_STALE: railStale.seen,
+  STALE: railStale.typed,
+  MOVED_STALE: railStale.moved,
 });`)(ctx, document, el, api, list, [], true);
 
 let failures = 0;
@@ -276,25 +277,32 @@ check("viewers do not make the session look busy",
       pairs({ viewers: 3, last_activity_at: ago(4000) }).moved, "1h06m");
 
 /* ------------------------------------------------------------------ */
-/* stale thresholds: one hour for seen/moved, half an hour for typed  */
+/* stale thresholds: one hour for seen, half an hour for typed, five   */
+/* minutes for moved — moved is the earliest of the three because it   */
+/* is the reading an operator most needs to catch (see railStale's own */
+/* comment in app.js): a session that went quiet mid-task.             */
 /* ------------------------------------------------------------------ */
 check("fresh readings are drawn plainly",
       [classOf({ last_visited_at: ago(60) }, "seen"),
        classOf({ last_activity_at: ago(60) }, "moved")],
       ["rail-seen-val", "rail-seen-val"]);
-check("seen and moved stay plain right up to the hour",
-      [classOf({ last_visited_at: ago(ctx.SEEN_STALE - 60) }, "seen"),
-       classOf({ last_activity_at: ago(ctx.SEEN_STALE - 60) }, "moved")],
-      ["rail-seen-val", "rail-seen-val"]);
-check("...and are emphasized past the hour",
-      [classOf({ last_visited_at: ago(ctx.SEEN_STALE + 60) }, "seen"),
-       classOf({ last_activity_at: ago(ctx.SEEN_STALE + 60) }, "moved")],
-      ["rail-seen-val stale", "rail-seen-val stale"]);
+check("seen stays plain right up to the hour",
+      classOf({ last_visited_at: ago(ctx.SEEN_STALE - 60) }, "seen"),
+      "rail-seen-val");
+check("...and is emphasized past the hour",
+      classOf({ last_visited_at: ago(ctx.SEEN_STALE + 60) }, "seen"),
+      "rail-seen-val stale");
+check("moved stays plain right up to its five minutes",
+      classOf({ last_activity_at: ago(ctx.MOVED_STALE - 60) }, "moved"),
+      "rail-seen-val");
+check("...and is emphasized past it",
+      classOf({ last_activity_at: ago(ctx.MOVED_STALE + 60) }, "moved"),
+      "rail-seen-val stale");
 
 /* Half an hour since a person typed is drawn as an error state rather than
    as an age: the session somebody handed a task to and then walked away from
-   is legible well before the hour at which the other two readings become
-   interesting, and it is the row the whole line is scanned for.
+   is legible well before the hour at which seen becomes interesting, and it
+   is the row the whole line is scanned for.
 
    The threshold is checked on both sides, because a step that fires early is
    the same defect as one that never fires: a rail where most rows are red
@@ -308,12 +316,13 @@ check("...and past it, it is an error state",
 check("...and remains emphasized past the hour",
       classOf({ last_input_at: ago(ctx.SEEN_STALE * 5) }, "typed"),
       "rail-seen-val stale");
-/* The three readings retain their own thresholds. Seen and moved do not turn
-   red at typed's earlier half-hour boundary. */
-check("seen and moved retain their one-hour threshold",
-      [classOf({ last_visited_at: ago(ctx.STALE + 60) }, "seen"),
-       classOf({ last_activity_at: ago(ctx.STALE + 60) }, "moved")],
-      ["rail-seen-val", "rail-seen-val"]);
+/* Seen retains its own, later threshold: it does not turn red at typed's
+   earlier half-hour boundary. (Moved is not part of this comparison — its
+   own threshold is shorter than typed's, so it would already be stale by
+   this point, which is checked above rather than here.) */
+check("seen retains its own, later threshold",
+      classOf({ last_visited_at: ago(ctx.STALE + 60) }, "seen"),
+      "rail-seen-val");
 /* Absence is not a stale timer. */
 check("a missing reading is not an error, it is a dash",
       [classOf({}, "seen"), classOf({}, "typed"), classOf({}, "moved")],
@@ -343,11 +352,11 @@ check("a red value says on hover what tripped it",
       /over 30m since anyone typed here/.test(
         titleOf({ last_input_at: ago(ctx.STALE + 60) }, "typed")),
       true);
-check("stale seen and moved values explain their own thresholds",
+check("stale seen and moved values explain their own, different thresholds",
       [/over 60m since anyone looked here/.test(
          titleOf({ last_visited_at: ago(ctx.SEEN_STALE + 60) }, "seen")),
-       /over 60m since the screen moved for real/.test(
-         titleOf({ last_activity_at: ago(ctx.SEEN_STALE + 60) }, "moved"))],
+       /over 5m since the screen moved for real/.test(
+         titleOf({ last_activity_at: ago(ctx.MOVED_STALE + 60) }, "moved"))],
       [true, true]);
 check("...and a value that has not tripped does not carry the note",
       /since anyone typed here/.test(

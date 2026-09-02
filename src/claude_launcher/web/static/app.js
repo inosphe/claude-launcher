@@ -2449,18 +2449,58 @@ function seenAgo(iso) {
   return { secs, text: fmtAge(secs) };
 }
 
-/* How stale each reading has to be before the row says so in red. Seen and
-   moved retain their one-hour threshold; typed becomes relevant earlier,
-   after half an hour. All three use one visual state once their own threshold
-   is crossed, so an old value is identifiable without reading each number. */
-const SEEN_COLD = 3600;  // an hour without the reader, or without the agent
+/* How stale each reading has to be before the row says so in red, in
+   seconds. Seen keeps an hour, typed keeps half an hour, and moved — the
+   reading an operator most needs to catch, a session that went quiet
+   mid-task — is five minutes: an hour of silence from a session that
+   should be working is far too long to sit unmarked. All three use one
+   visual state once their own threshold is crossed, so an old value is
+   identifiable without reading each number.
 
-/* Half an hour since a person last typed here is drawn red: the
-   row an operator scans this rail for is the session they handed something
-   to and then walked away from, and that one is legible at half an hour —
-   well before the hour at which "nobody has looked" and "nothing has moved"
-   become worth a colour. */
-const TYPED_STALE = 1800;
+   Kept in a mutable object rather than three consts because Settings (the
+   card below) can change any of the three at runtime, and every reader of
+   a threshold — railSeenLine's three seenPair calls and its own title —
+   has to see that change on its very next draw. */
+const RAIL_STALE_DEFAULT = { seen: 3600, typed: 1800, moved: 300 };
+const railStale = Object.assign({}, RAIL_STALE_DEFAULT);
+
+/* Remembered per browser rather than sent to the daemon, same as the font
+   size and rail width above (FONT_KEY, RAIL_W_KEY): this answers a
+   question about the reader's own scanning habit, not about the fleet, and
+   several daemons behind one relay share the storage it lives in. */
+const RAIL_STALE_KEYS = {
+  seen: `claunch_rail_seen_stale:${BASE}`,
+  typed: `claunch_rail_typed_stale:${BASE}`,
+  moved: `claunch_rail_moved_stale:${BASE}`,
+};
+const RAIL_STALE_MIN = 60;     // below a minute the number would churn every poll
+const RAIL_STALE_MAX = 86400;  // beyond a day "stale" stops meaning anything
+
+function clampRailStale(secs) {
+  if (!Number.isFinite(secs)) return null;
+  return Math.min(RAIL_STALE_MAX, Math.max(RAIL_STALE_MIN, Math.round(secs)));
+}
+
+for (const kind of Object.keys(RAIL_STALE_DEFAULT)) {
+  const saved = clampRailStale(Number(localStorage.getItem(RAIL_STALE_KEYS[kind])));
+  if (saved) railStale[kind] = saved;
+}
+
+/* Applied from the Settings card below (railStaleCard). Redraws the rail's
+   seen lines right away with refreshRailSeen — the same swap a
+   session-list poll does — so a changed threshold is visible without
+   waiting for the next poll. */
+function setRailStale(kind, secs) {
+  railStale[kind] = clampRailStale(secs) || RAIL_STALE_DEFAULT[kind];
+  localStorage.setItem(RAIL_STALE_KEYS[kind], String(railStale[kind]));
+  refreshRailSeen($("session-list"));
+}
+
+function resetRailStale(kind) {
+  railStale[kind] = RAIL_STALE_DEFAULT[kind];
+  localStorage.removeItem(RAIL_STALE_KEYS[kind]);
+  refreshRailSeen($("session-list"));
+}
 
 function seenPair(label, iso, title, opts) {
   const pair = el("span", "rail-seen-pair");
@@ -2513,7 +2553,7 @@ function railSeenLine(s) {
     seenPair("seen", s && s.last_visited_at,
              "when a person last had this session open — the web terminal " +
              "or `claunch attach`",
-             { live: watching, staleAfter: SEEN_COLD }),
+             { live: watching, staleAfter: railStale.seen }),
     // Typed into. A human at a keyboard only: `claunch send-keys` and mesh
     // deliveries type into this session too, and counting those would answer
     // "when was this session last written to", which is a different question
@@ -2521,14 +2561,14 @@ function railSeenLine(s) {
     seenPair("typed", s && s.last_input_at,
              "when a person last typed here — deliveries and `send-keys` " +
              "do not count",
-             { staleAfter: TYPED_STALE }),
+             { staleAfter: railStale.typed }),
     // Moved. Not raw output: claude animates a spinner and a clock while it
     // waits for you, so bytes never stop arriving; this is the last time a
     // row that is NOT an animation changed.
     seenPair("moved", s && s.last_activity_at,
              "when the screen last changed for real — spinners and the " +
              "elapsed-time counter do not count",
-             { staleAfter: SEEN_COLD })
+             { staleAfter: railStale.moved })
   );
   line.title =
     "who has been here: last looked at / last typed into / last moved on " +
@@ -2536,8 +2576,9 @@ function railSeenLine(s) {
     "A dash means no reading: nobody has visited or typed since this " +
     "session started, and 'moved' is read off the running screen, so a " +
     "daemon restart leaves it blank until the session paints again.\n" +
-    "Red is an hour without the reader or without the agent, or half an " +
-    "hour since anyone typed.";
+    `Red is ${fmtAge(railStale.seen)} without the reader, ` +
+    `${fmtAge(railStale.moved)} without the agent, or ` +
+    `${fmtAge(railStale.typed)} since anyone typed — set in Settings.`;
   return line;
 }
 
@@ -11470,6 +11511,8 @@ function renderWorkspaces() {
     "send a session it spawns, unless spawn.allow_workspace is turned off."
   ));
 
+  view.appendChild(railStaleCard());
+
   view.appendChild(wsAddCard());
 
   view.appendChild(faqCard());
@@ -11546,6 +11589,48 @@ async function refreshStatusChecks() {
     statusCheckError = String(err);
     if (wsOpen) renderWorkspaces();
   }
+}
+
+const RAIL_STALE_LABELS = { seen: "Seen", typed: "Typed", moved: "Moved" };
+
+/* Minutes in the box, seconds in railStale — the rail's own unit is seconds
+   (it is compared against Date.now() gaps), but nobody sets a threshold to
+   the second, so the card converts at its two edges and nowhere else. */
+function railStaleCard() {
+  const card = el("section", "rail-stale-settings");
+  card.appendChild(el("h3", null, "Rail attention thresholds"));
+  card.appendChild(el(
+    "p", "wf-note",
+    "How long since seen / typed / moved before a session row's rail line " +
+    "(above) turns red. In minutes, remembered in this browser — not sent " +
+    "to the daemon, so each reader can set their own."
+  ));
+  for (const kind of ["seen", "typed", "moved"]) {
+    const row = el("div", "rail-stale-row");
+    row.appendChild(el("span", "rail-stale-label", RAIL_STALE_LABELS[kind]));
+    const input = document.createElement("input");
+    input.type = "number";
+    input.min = String(Math.ceil(RAIL_STALE_MIN / 60));
+    input.max = String(Math.floor(RAIL_STALE_MAX / 60));
+    input.step = "1";
+    input.value = String(Math.round(railStale[kind] / 60));
+    input.addEventListener("change", () => {
+      setRailStale(kind, Number(input.value) * 60);
+      input.value = String(Math.round(railStale[kind] / 60));
+    });
+    row.appendChild(input);
+    row.appendChild(el("span", "rail-stale-unit", "min"));
+    const reset = el("button", "wf-btn clear", "Reset");
+    reset.type = "button";
+    reset.title = `back to the default, ${Math.round(RAIL_STALE_DEFAULT[kind] / 60)} min`;
+    reset.addEventListener("click", () => {
+      resetRailStale(kind);
+      input.value = String(Math.round(railStale[kind] / 60));
+    });
+    row.appendChild(reset);
+    card.appendChild(row);
+  }
+  return card;
 }
 
 function statusCheckCard() {
