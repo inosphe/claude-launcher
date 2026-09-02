@@ -154,8 +154,15 @@ def test_the_worker_workflow_keeps_its_branch_setup_isolation_rules():
     ):
         assert anchor in branch_setup.instructions, f"branch-setup lost its {anchor!r} rule"
     assert branch_setup.next == "work"
-    assert worker.steps["issue-check"].select.options["claimed"].next == "branch-setup"
-    assert worker.steps["issue-check"].select.options["no-issue-by-request"].next == "branch-setup"
+    options = worker.steps["issue-check"].select.options
+    assert options["claimed"].next == "branch-setup"
+    # Both halves of the "no issue" answer still reach branch-setup: the one
+    # that works the opening task goes straight there, and the one that picks
+    # its own issue off the board passes through issue-auto first. Neither may
+    # start implementing without a branch of its own.
+    assert options["no-issue-wait"].next == "branch-setup"
+    assert options["no-issue-auto"].next == "issue-auto"
+    assert worker.steps["issue-auto"].next == "branch-setup"
     assert worker.steps["issue-decision"].select.options["none"].next == "branch-setup"
     assert worker.steps["issue-claim"].next == "branch-setup"
 

@@ -658,21 +658,27 @@ class DaemonSources(Sources):
 # --------------------------------------------------------------------------- #
 # the worktree rows, which both forms ask exactly the same way
 # --------------------------------------------------------------------------- #
-#: The three answers the board question has, in the order they are offered:
+#: The four answers the board question has, in the order they are offered:
 #: mint one from the task (the default, and what every release before this
-#: did), pick one that already exists, or none at all.
+#: did), pick one that already exists, or none at all -- and "none at all"
+#: is two answers, because it leaves the session without a goal and the two
+#: shapes say opposite things about what it should then do. BEADS_NONE keeps
+#: its old spelling on the wire so a preset or a script that already says
+#: "none" keeps meaning what it meant.
 BEADS_NEW = "new"
 BEADS_PICK = "existing"
 BEADS_NONE = "none"
+BEADS_NONE_AUTO = "none-auto"
 
 
 def issue_fields(
-    preset: str = "", *, none: bool = False, text: str = "", section: str = ""
+    preset: str = "", *, none: bool = False, none_auto: bool = False,
+    text: str = "", section: str = "",
 ) -> List[Field]:
     """The board rows, asked identically by ``new-session`` and ``spawn``.
 
-    Three rows rather than one picker with three kinds of entry in it: the
-    *mode* is a closed question with three answers and belongs on its own
+    Three rows rather than one picker with four kinds of entry in it: the
+    *mode* is a closed question with four answers and belongs on its own
     line, and each of the two rows under it is a question only under one of
     those answers. :func:`sync_issues` fills them and hides each under the
     answers it does not belong to.
@@ -684,19 +690,31 @@ def issue_fields(
     board rather than in a terminal's scrollback. Left empty it changes
     nothing -- the issue is minted from the task, as it always was.
     """
+    # The two "no issue" rows say what PICKING one would do rather than just
+    # naming the absence. They are the same absence on the board and opposite
+    # instructions to the session, and the session cannot tell them apart by
+    # looking: one answer covering both is what left it inferring, and
+    # inferring is how a session told "no issue" went looking for one.
     mode = ChoiceField(
         key="beads", label="Board", section=section,
         hint="the issue this session works: a new one, one that already "
-             "exists, or none",
+             "exists, or none -- and if none, whether it goes and finds its "
+             "own work or waits for you",
         options=[
             Option("new issue", BEADS_NEW),
             Option("an existing issue", BEADS_PICK),
-            Option("no issue", BEADS_NONE),
+            Option("no issue -- wait for my instructions", BEADS_NONE),
+            Option("no issue -- it picks its own off the board", BEADS_NONE_AUTO),
         ],
     )
     # A flag given alongside --wizard pre-fills its field, the same way every
     # other row on these forms is pre-filled.
-    mode.select(BEADS_NONE if none else BEADS_PICK if preset else BEADS_NEW)
+    mode.select(
+        BEADS_NONE_AUTO if none_auto
+        else BEADS_NONE if none
+        else BEADS_PICK if preset
+        else BEADS_NEW
+    )
     issue_text = TextField(
         key="issue_text", label="Issue text",
         placeholder="(empty: the opening task is used)",
@@ -764,19 +782,22 @@ def sync_issues(form: "Form", cwd: str, *, parent: str = "") -> None:
 
 
 def issue_answers(form: "Form") -> "tuple":
-    """``(issue, no_issue, issue_text)`` — the three flags the commands take.
+    """``(issue, no_issue, no_issue_auto, issue_text)`` — the flags the
+    commands take.
 
-    Only ever one of them at a time: the mode row decides which, and the two
+    Only ever one of them at a time: the mode row decides which, and the ones
     that do not belong to it come back empty. The form is the one place that
-    holds all three at once (a hidden row keeps its value), so it is also the
-    place that has to drop the ones the answer does not mean.
+    holds all of them at once (a hidden row keeps its value), so it is also
+    the place that has to drop the ones the answer does not mean.
     """
     mode = form.value("beads")
     if mode == BEADS_NONE:
-        return None, True, None
+        return None, True, False, None
+    if mode == BEADS_NONE_AUTO:
+        return None, False, True, None
     if mode == BEADS_PICK:
-        return (form.value("issue") or None), False, None
-    return None, False, (form.value("issue_text") or None)
+        return (form.value("issue") or None), False, False, None
+    return None, False, False, (form.value("issue_text") or None)
 
 
 def worktree_fields(auto_detail: str, section: str = "") -> List[Field]:
@@ -1910,6 +1931,7 @@ class Wizard(Form):
             # what this session is for.
             *issue_fields(
                 get("issue") or "", none=bool(get("no_issue")),
+                none_auto=bool(get("no_issue_auto")),
                 text=get("issue_text") or "",
             ),
             restore, attach,
@@ -2171,7 +2193,9 @@ class Wizard(Form):
         args.workflow = self.value("workflow") or None
         args.context = (self.value("context") or None) if args.workflow else None
         args.task = self.value("task") or None
-        args.issue, args.no_issue, args.issue_text = issue_answers(self)
+        (
+            args.issue, args.no_issue, args.no_issue_auto, args.issue_text
+        ) = issue_answers(self)
         args.restore = self.value("restore")
         args.attach = bool(self.value("attach"))
         return args
@@ -2224,9 +2248,14 @@ def _issue_summary(form: "Form") -> str:
     session's own opening block, and whether a new issue was written here or
     read off the task, which is the half that decides where to go looking for
     what this session was actually asked to do."""
-    issue, none, text = issue_answers(form)
+    issue, none, none_auto, text = issue_answers(form)
+    if none_auto:
+        # Which of the two it was, because they are the same on the board and
+        # opposite in the session: a line reading only "no issue" would hide
+        # the half that decides what the session does next.
+        return "no issue, picks its own"
     if none:
-        return "no issue"
+        return "no issue, waits for instructions"
     if not issue:
         return "new issue, written here" if text else "new issue from the task"
     row = next(
@@ -2596,6 +2625,7 @@ class SpawnWizard(Form):
             # is a spawn onto another repository's board.
             *issue_fields(
                 get("issue") or "", none=bool(get("no_issue")),
+                none_auto=bool(get("no_issue_auto")),
                 text=get("issue_text") or "",
             ), attach,
             ActionField(key="create", label="Spawn child"),
@@ -3208,7 +3238,9 @@ class SpawnWizard(Form):
         args.workflow = picked or (self.NO_WORKFLOW if paired else None)
         args.context = (self.value("context") or None) if picked else None
         args.task = self.value("task") or None
-        args.issue, args.no_issue, args.issue_text = issue_answers(self)
+        (
+            args.issue, args.no_issue, args.no_issue_auto, args.issue_text
+        ) = issue_answers(self)
         args.attach = bool(self.value("attach"))
         return args
 

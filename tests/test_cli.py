@@ -504,17 +504,24 @@ def test_set_provider_clear_with_value_errors(home, capsys):
 
 def test_the_board_answers_are_mutually_exclusive_on_both_creation_commands():
     """One session, one board answer. ``--issue-text`` writes a new issue,
-    ``--issue`` adopts one that exists, ``--no-issue`` asks for none — sent in
-    pairs the daemon would have to guess, and the guess it makes today drops
-    the written text without a word. argparse refuses the pair first, so the
-    CLI and the API agree about what a request may mean."""
+    ``--issue`` adopts one that exists, ``--no-issue`` and ``--no-issue-auto``
+    ask for none — sent in pairs the daemon would have to guess, and the guess
+    it makes today drops the written text without a word. argparse refuses the
+    pair first, so the CLI and the API agree about what a request may mean.
+
+    The two no-issue flags are in the group with the rest for a reason of
+    their own: they leave the board identically empty and tell the session
+    opposite things about that emptiness, so a request carrying both is not a
+    preference to resolve either.
+    """
     import itertools
 
     import pytest
 
     parser = cli.build_parser()
     answers = (
-        ["--issue", "cl-1"], ["--no-issue"], ["--issue-text", "the spec"],
+        ["--issue", "cl-1"], ["--no-issue"], ["--no-issue-auto"],
+        ["--issue-text", "the spec"],
     )
     for cmd in (["new-session"], ["spawn"]):
         for one, two in itertools.combinations(answers, 2):
@@ -527,6 +534,60 @@ def test_the_board_answers_are_mutually_exclusive_on_both_creation_commands():
     args = parser.parse_args(["new-session", "--issue-text", "the spec"])
     assert args.issue_text == "the spec"
     assert args.issue is None and args.no_issue is False
+    assert args.no_issue_auto is False
+
+
+def test_the_two_no_issue_answers_travel_as_two_values_of_one_key(
+    home, monkeypatch, capsys,
+):
+    """The board switch is one key, ``beads``, and the answers are its values.
+
+    ``False`` is the older spelling and has to keep meaning what it meant, or
+    a script written before the answer was split would silently change what
+    the session it creates is told to do. The auto answer is a string, which
+    the payload's truthiness filter would keep on its own -- it is pinned
+    here anyway, because "the filter happens to keep it" is not a contract.
+    """
+    from claude_launcher import daemon_client
+
+    posts = []
+
+    class FakeClient:
+        base_url = "http://127.0.0.1:0"
+
+        def get(self, path):
+            return {}
+
+        def post(self, path, payload):
+            posts.append((path, payload))
+            # the shape both commands print from: spawn reads the nested
+            # session, new-session the flat record
+            return {
+                "session": {"name": "w9"},
+                "name": "w9", "harness": "claude", "pid": 1,
+            }
+
+    monkeypatch.setattr(daemon_client, "ensure_running", lambda: FakeClient())
+    monkeypatch.setenv("CLAUNCH_SESSION", "lead")
+
+    def body(cmd, *flags):
+        posts.clear()
+        run(cmd, "--task", "go", *flags)
+        assert posts, (cmd, flags)
+        return posts[-1][1]
+
+    assert "beads" not in body("spawn")                 # did not say: mint one
+    assert body("spawn", "--no-issue")["beads"] is False
+    assert body("spawn", "--no-issue-auto")["beads"] == "none-auto"
+
+    # the human's command builds its own body, so it is pinned separately --
+    # the two have drifted before. It refuses to run from inside a managed
+    # session, which is why the variable goes away first.
+    monkeypatch.delenv("CLAUNCH_SESSION")
+    new = ("new-session", "--profile", "work")
+    assert "beads" not in body(*new)
+    assert body(*new, "--no-issue")["beads"] is False
+    assert body(*new, "--no-issue-auto")["beads"] == "none-auto"
 
 
 def test_the_child_cap_flags_are_three_valued(home):

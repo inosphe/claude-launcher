@@ -203,8 +203,12 @@ def _cmd_new_session(args: argparse.Namespace) -> int:
         if value:
             body[key] = value
     # Only sent when it is the answer: a missing key means "mint one", which
-    # is what every caller that has never heard of this flag wants.
-    if getattr(args, "no_issue", False):
+    # is what every caller that has never heard of these flags wants. False is
+    # the older spelling of "no issue, and do not go looking" and stays that,
+    # so a script written before the answer was split keeps its meaning.
+    if getattr(args, "no_issue_auto", False):
+        body["beads"] = "none-auto"
+    elif getattr(args, "no_issue", False):
         body["beads"] = False
     if args.connect:
         body["connect"] = args.connect
@@ -506,8 +510,12 @@ def _cmd_spawn(args: argparse.Namespace) -> int:
     }
     # `beads: False` is a falsey answer, and the comprehension above keeps
     # only truthy values — it has to be set after, or "no issue" would read
-    # as "you did not say".
-    if getattr(args, "no_issue", False):
+    # as "you did not say". Its auto twin is a string and would survive the
+    # comprehension, but it is settled here with it so the two answers to one
+    # question are read in one place.
+    if getattr(args, "no_issue_auto", False):
+        payload["beads"] = "none-auto"
+    elif getattr(args, "no_issue", False):
         payload["beads"] = False
     # Same shape, same reason as `beads` above: `over_limit: False` is the
     # answer --within-limit gives, and the comprehension keeps only truthy
@@ -1827,8 +1835,10 @@ def _cmd_reparent(args: argparse.Namespace) -> int:
 # parser wiring
 # --------------------------------------------------------------------------- #
 #: The board answer, worded once because ``new-session`` and ``spawn`` ask it
-#: the same way. Three shapes: say nothing and the daemon mints an issue from
-#: the task, name one and it is adopted, ``--no-issue`` and there is none.
+#: the same way. Four shapes: say nothing and the daemon mints an issue from
+#: the task, name one and it is adopted, and two ways of having none --
+#: ``--no-issue``, which also says not to go looking for one, and
+#: ``--no-issue-auto``, which says the opposite.
 ISSUE_HELP = (
     "put this session on an EXISTING board issue instead of minting one from "
     "the task. What that means is the daemon's call, not the flag's: an issue "
@@ -1837,8 +1847,16 @@ ISSUE_HELP = (
     "they can settle it"
 )
 NOISSUE_HELP = (
-    "no board issue at all -- neither minted nor adopted (without this, a "
-    "session created with --task gets one minted for it)"
+    "no board issue at all -- neither minted nor adopted -- and the session "
+    "is told not to go looking for one either: its goal is --task, and with "
+    "no --task it waits for the user to type one (without this flag, a "
+    "session created with --task gets an issue minted for it)"
+)
+NOISSUE_AUTO_HELP = (
+    "no board issue is minted or adopted for the session, but the session is "
+    "told to pick its own off the board and assign itself -- the other half "
+    "of --no-issue, split out because one flag meant both and the session "
+    "was left guessing which"
 )
 ISSUETEXT_HELP = (
     "what the minted issue SAYS, written here instead of being read off "
@@ -1956,14 +1974,22 @@ def register(sub) -> None:
     p_new.add_argument(
         "--task", help="opening instruction typed in once it has booted"
     )
-    # The board answer, in the three shapes it has: say nothing and the daemon
+    # The board answer, in the four shapes it has: say nothing and the daemon
     # mints an issue from --task, name one and it is adopted, --no-issue and
-    # there is none. Mutually exclusive because "this issue, and also none" is
-    # not a question the daemon could answer.
+    # there is none, --no-issue-auto and there is none but the session goes
+    # and takes one itself. Mutually exclusive because "this issue, and also
+    # none" is not a question the daemon could answer -- and the last two are
+    # in the group for the same reason: they are contradictory instructions
+    # about the same absence, which is what made one flag covering both a
+    # thing the session had to guess at.
     n_issue = p_new.add_mutually_exclusive_group()
     n_issue.add_argument("--issue", metavar="ID", help=ISSUE_HELP)
     n_issue.add_argument(
         "--no-issue", action="store_true", dest="no_issue", help=NOISSUE_HELP,
+    )
+    n_issue.add_argument(
+        "--no-issue-auto", action="store_true", dest="no_issue_auto",
+        help=NOISSUE_AUTO_HELP,
     )
     # In the same group as the other two: the text only has meaning under the
     # answer that mints, so "this text, and also that existing issue" and
@@ -2056,6 +2082,10 @@ def register(sub) -> None:
     s_issue.add_argument("--issue", metavar="ID", help=ISSUE_HELP)
     s_issue.add_argument(
         "--no-issue", action="store_true", dest="no_issue", help=NOISSUE_HELP,
+    )
+    s_issue.add_argument(
+        "--no-issue-auto", action="store_true", dest="no_issue_auto",
+        help=NOISSUE_AUTO_HELP,
     )
     s_issue.add_argument(
         "--issue-text", metavar="TEXT", dest="issue_text", help=ISSUETEXT_HELP,

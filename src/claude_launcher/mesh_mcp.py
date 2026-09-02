@@ -229,8 +229,22 @@ TOOLS = [
                     "type": "boolean",
                     "description": (
                         "give the child no board issue at all — neither "
-                        "minted nor adopted. Without this a child with a task "
-                        "gets one minted for it"
+                        "minted nor adopted — AND tell it not to go looking "
+                        "for one: its goal is the task you give it, and with "
+                        "no task it waits for its user. Without this a child "
+                        "with a task gets one minted for it"
+                    ),
+                },
+                "no_issue_auto": {
+                    "type": "boolean",
+                    "description": (
+                        "the other half of 'no_issue': mint and adopt "
+                        "nothing, but tell the child to go to the board, "
+                        "pick the open issue that fits and assign itself. "
+                        "Use it for a child you are sending to work a queue "
+                        "rather than a task you wrote. One switch used to "
+                        "mean both of these and the child had to guess which "
+                        "you meant"
                     ),
                 },
                 "fork": {
@@ -666,11 +680,17 @@ _SPAWN_KEYS = (
 )
 
 
-#: Offered fields that reach the API under another name. The one case: the
-#: API's board switch is ``beads: false``, which as a *falsey* value cannot
-#: ride in the comprehension below — it would be dropped as if the caller had
-#: never said it — and reads better to an agent as ``no_issue: true``.
-_SPAWN_RENAMED = {"no_issue": ("beads", False)}
+#: Offered fields that reach the API under another name. The case they share:
+#: the API's board switch is one key, ``beads``, and the two "no issue"
+#: answers are two values of it — ``False`` cannot ride in the comprehension
+#: below at all (a falsey value is dropped as if the caller had never said
+#: it), and both read better to an agent as switches of their own. Applied in
+#: order, so a caller that sets both gets the auto answer: it is the one that
+#: says what the child should DO, and the one it would have had to ask about.
+_SPAWN_RENAMED = {
+    "no_issue": ("beads", False),
+    "no_issue_auto": ("beads", "none-auto"),
+}
 
 
 def _spawn(args: dict) -> dict:

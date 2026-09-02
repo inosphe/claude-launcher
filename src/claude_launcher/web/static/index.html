@@ -479,7 +479,14 @@
              An issue a running session holds is joined, not taken, and the
              assignment stays where it is — which is the half a reader cannot
              infer and would otherwise learn from the new session's own
-             opening block, well after deciding. -->
+             opening block, well after deciding.
+
+             "No issue" is two rows for that same reason. Both leave the
+             board untouched, so the difference is invisible there: it is
+             what the session is TOLD about the absence, and the two say
+             opposite things. One answer covering both left the session to
+             infer which was meant, and a session told "no issue" would go
+             to the board and look for one. -->
         <fieldset id="new-beads">
           <legend>Board issue</legend>
           <label class="check">
@@ -492,7 +499,11 @@
           </label>
           <label class="check">
             <input type="radio" name="beads" value="none">
-            <span>No issue</span>
+            <span>No issue — wait for my instructions</span>
+          </label>
+          <label class="check">
+            <input type="radio" name="beads" value="none-auto">
+            <span>No issue — it picks its own off the board</span>
           </label>
           <!-- Under the first answer, and a textarea rather than an input:
                what an issue says is a specification, not a name. It is here

@@ -4890,9 +4890,13 @@ $("new-session").addEventListener("submit", async (e) => {
   if (f.task.value.trim()) body.task = f.task.value.trim();
   // The board answer. "new" is the absence of both keys — a request that says
   // nothing gets an issue minted from the task, which is what every client
-  // that has never heard of this field still wants.
+  // that has never heard of this field still wants. The two "no issue" rows
+  // are one key with two values: `false` is the older spelling and keeps
+  // meaning "no issue, and do not go looking", "none-auto" is the opposite
+  // instruction about the same empty board.
   const beads = f.beads.value;
   if (beads === "none") body.beads = false;
+  else if (beads === "none-auto") body.beads = "none-auto";
   else if (beads === "existing" && f.issue.value) body.issue = f.issue.value;
   // Only under the answer it belongs to: the box keeps its text while the
   // radios are being tried out, and sending it alongside "existing" or
@@ -15426,6 +15430,7 @@ function spawnPayload(ui) {
   if (ui.beads) {
     const mode = ui.beads.value || "new";
     if (mode === "none") body.beads = false;
+    else if (mode === "none-auto") body.beads = "none-auto";
     else if (mode === "existing" && ui.issuePick.value) {
       body.issue = ui.issuePick.value;
     } else if (mode === "new" && (ui.issueText.value || "").trim()) {
@@ -15712,7 +15717,7 @@ function buildSpawnForm(parentName, seed) {
   gTask.appendChild(spawnRow("Opening task", ui.task, null));
 
   /* The board row, after the opening task because it is still the fallback
-     two of its three shapes are read off: "new" mints from the box below
+     two of its four shapes are read off: "new" mints from the box below
      when that is filled and from the task when it is not, so an empty pair
      has nothing to mint from. The third — an issue that already exists —
      is a picker rather than a text box for the same reason every other row
@@ -15723,7 +15728,10 @@ function buildSpawnForm(parentName, seed) {
   ui.beads = spawnRadioGroup("spawn-beads", [
     ["new", "new issue", "minted from the task or the box below"],
     ["existing", "an existing issue", "assigned, or joined while its holder is running"],
-    ["none", "no issue", "the child starts without a board record"],
+    ["none", "no issue — waits for instructions",
+     "no board record, and the child is told not to go looking for one"],
+    ["none-auto", "no issue — picks its own",
+     "no board record, and the child is told to take an open issue itself"],
   ]);
   ui.beads.value = "new";
   gTask.appendChild(spawnRow("Board issue", ui.beads.el, null));

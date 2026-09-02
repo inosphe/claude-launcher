@@ -260,7 +260,8 @@ const wtGroup = (value = "", off = false) => {
 let beadsGroupN = 0;
 const beadsGroup = (value = "new") => {
   const g = ctx.spawnRadioGroup(`bd${beadsGroupN++}`, [
-    ["new", "new issue"], ["existing", "an existing issue"], ["none", "no issue"],
+    ["new", "new issue"], ["existing", "an existing issue"],
+    ["none", "no issue — waits"], ["none-auto", "no issue — picks its own"],
   ]);
   g.value = value;
   return g;
@@ -526,6 +527,12 @@ async function main() {
   const bdNone = uiStub({ beads: beadsGroup("none") });
   check("'none' travels as an explicit refusal",
     ctx.spawnPayload(bdNone).beads === false, ctx.spawnPayload(bdNone));
+  /* The other half of that refusal: the same empty board, the opposite
+     instruction to the child, and a value of the same key so a request can
+     never carry both. */
+  const bdAuto = uiStub({ beads: beadsGroup("none-auto") });
+  check("'none-auto' travels as the other no-issue answer",
+    ctx.spawnPayload(bdAuto).beads === "none-auto", ctx.spawnPayload(bdAuto));
   const bdUnpicked = uiStub({ beads: beadsGroup("existing") });
   check("'existing' with nothing picked sends nothing",
     ctx.spawnPayload(bdUnpicked).issue === undefined, ctx.spawnPayload(bdUnpicked));
@@ -544,6 +551,11 @@ async function main() {
   sg.beads.value = "none";
   ctx.syncSpawnBeads(sg);
   check("'none' folds both",
+    sg.issueTextRow.hidden === true && sg.issueRow.hidden === true &&
+    sg.issueFilterRow.hidden === true);
+  sg.beads.value = "none-auto";
+  ctx.syncSpawnBeads(sg);
+  check("...and so does its auto twin",
     sg.issueTextRow.hidden === true && sg.issueRow.hidden === true &&
     sg.issueFilterRow.hidden === true);
   sg.issueText.value = "the spec";
@@ -1746,6 +1758,27 @@ async function main() {
     nonePost && nonePost.body.beads === false &&
       nonePost.body.issue === undefined && nonePost.body.issue_text === undefined,
     nonePost && nonePost.body);
+
+  await ctx.openSpawnModal("lead1", {});
+  await settle();
+  await settle();
+  const bui5 = ctx.spawnUi();
+  check("the modal offers both halves of the no-issue answer",
+    bui5.beads.inputs["none"] !== undefined &&
+      bui5.beads.inputs["none-auto"] !== undefined,
+    Object.keys(bui5.beads.inputs));
+  bui5.beads.inputs["none-auto"].checked = true;
+  await bui5.beads.inputs["none-auto"].fire("change");
+  const actsNoneAuto = buttons(modalEls["modal-actions"]);
+  const spawnNoneAuto = actsNoneAuto.find((b) => b.text.startsWith("Spawn"));
+  sent = [];
+  await spawnNoneAuto.fire("click");
+  await settle();
+  const autoPost = sent.find((s) => s.method === "POST");
+  check("...and the auto half travels under the same key",
+    autoPost && autoPost.body.beads === "none-auto" &&
+      autoPost.body.issue === undefined && autoPost.body.issue_text === undefined,
+    autoPost && autoPost.body);
 
   /* A workspace the operator aimed the child at moves the board question
      with it — the bear-trap of asking the parent's board in a modal set to
