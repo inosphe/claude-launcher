@@ -6474,7 +6474,7 @@ function loadSessLayouts() {
 function sessLayoutFor(name) {
   const raw = (name && loadSessLayouts()[name]) || {};
   return {
-    rail: raw.rail === "wf" ? "wf" : "detail",
+    rail: raw.rail === "wf" || raw.rail === "beads" ? raw.rail : "detail",
     split: !!raw.split,
     ratio: clampSplitRatio(Number(raw.ratio)),
   };
@@ -9109,6 +9109,20 @@ let beadsQueues = null;    // the last /api/beads/queues payload
 let beadsQueuesError = "";
 let beadsDragging = "";    // the issue id a Queues card drag is carrying
 
+/* What the Queues grid has been unfolded to show. Kept outside the tree
+   because the 15s poll rebuilds every node in it: a group opened under the
+   reader's hand would fold shut again at the next tick. Keyed by board root,
+   and by `<root>|<session>|<status>` for one cell. */
+const beadsQSpentOpen = new Set();   // roots whose ended-session group is drawn
+const beadsQPoolOpen = new Set();    // roots whose unassigned pool is drawn
+const beadsQCellOpen = new Set();    // cells drawn past BEADS_Q_CELL_CAP
+
+/* How many cards a cell draws before it offers the rest behind a button.
+   Not a nicety: on this machine's own board the unassigned pool holds 327,
+   and the grid is `align-items: stretch`, so one cell that tall sets the
+   height of every other cell in its row -- four empty columns included. */
+const BEADS_Q_CELL_CAP = 24;
+
 const BEADS_STATUSES = ["open", "in_ready", "in_progress", "in_review", "blocked", "closed"];
 const BEADS_ACTIVE = new Set(["open", "in_ready", "in_progress", "in_review", "blocked"]);
 const BEADS_STREAM_PAGE = 48;
@@ -9812,6 +9826,13 @@ function renderQueues(view) {
     "daemon writes `br update <id> --assignee <session>` and a QUEUED / " +
     "UNQUEUED comment, and nothing else — the column (status) is the " +
     "assignee's to move. A worker lands its whole queue as one batch."));
+  view.appendChild(el("p", "wf-note",
+    "Rows come busiest first: the queues with something in flight " +
+    "(in_progress, in_review), then the ones with work waiting, then the " +
+    "idle. Sessions that have ended are folded away, and so is an " +
+    "unassigned pool of more than " + BEADS_Q_CELL_CAP + " — both are still " +
+    "drop targets while folded, so taking an issue off a queue never needs " +
+    "the fold opened first."));
   if (beadsQueuesError) view.appendChild(el("p", "wf-warning", beadsQueuesError));
   if (!beadsQueues) {
     if (!beadsQueuesError) view.appendChild(el("p", "wf-note", "loading…"));
@@ -9829,12 +9850,22 @@ function renderQueues(view) {
 
 function beadsQueuesBoard(board, statuses) {
   const sec = el("div", "beads-board beads-queues-board");
+  const root = board.root || "?";
   const head = el("div", "beads-board-head");
   head.appendChild(el("h3", null, board.root || "?"));
   const lanes = board.lanes || [];
+  const pool = board.unassigned || [];
+  const live = lanes.filter((l) => !beadsLaneSpent(l)).sort(beadsQueueOrder);
+  const spent = lanes.filter(beadsLaneSpent).sort(beadsQueueOrder);
+  // The head counts the folds too. "23 queues" over a grid drawing six rows
+  // would be the page lying about what it left out, and the number a reader
+  // uses to decide whether to open a fold is exactly the one it hides.
   head.appendChild(el("span", "wf-note",
-    lanes.length ? `${lanes.length} queue${lanes.length === 1 ? "" : "s"} · ` +
-      `${(board.unassigned || []).length} unassigned` : "no queue here"));
+    lanes.length
+      ? `${live.length} live queue${live.length === 1 ? "" : "s"}` +
+        (spent.length ? ` · ${spent.length} ended` : "") +
+        ` · ${pool.length} unassigned`
+      : "no queue here"));
   sec.appendChild(head);
   if (board.error) {
     sec.appendChild(el("p", "wf-warning", board.error));
@@ -9846,21 +9877,85 @@ function beadsQueuesBoard(board, statuses) {
   for (const s of statuses) {
     grid.appendChild(el("div", `beads-q-col ${s}`, s));
   }
-  for (const lane of lanes) beadsQueueLane(grid, lane, board.root, statuses);
+  for (const lane of live) beadsQueueLane(grid, lane, root, statuses);
+  // The ended sessions, behind one toggle. They are not noise -- what a
+  // session left behind is exactly what an operator drags onto a live row --
+  // but scrolling past 22 of them to reach the running one is how the page
+  // stopped being read.
+  if (spent.length) {
+    const open = beadsQSpentOpen.has(root);
+    const held = spent.reduce((n, l) => n + (l.issues || []).length, 0);
+    grid.appendChild(beadsQFoldBar(
+      open,
+      `${spent.length} ended session${spent.length === 1 ? "" : "s"}, ` +
+        `holding ${held} issue${held === 1 ? "" : "s"}`,
+      () => {
+        if (open) beadsQSpentOpen.delete(root);
+        else beadsQSpentOpen.add(root);
+        renderBeads();
+      }
+    ));
+    if (open) for (const lane of spent) beadsQueueLane(grid, lane, root, statuses);
+  }
   beadsQueueLane(grid, {
-    session: "", pool: true, issues: board.unassigned || [],
-    summary: { waiting: (board.unassigned || []).length },
-  }, board.root, statuses);
+    session: "", pool: true, issues: pool,
+    summary: { waiting: pool.length },
+  }, root, statuses, {
+    folded: pool.length > BEADS_Q_CELL_CAP && !beadsQPoolOpen.has(root),
+  });
   sec.appendChild(grid);
   return sec;
+}
+
+/* A lane nobody is working: a session the daemon knows and has seen exit.
+   Its issues still matter -- they are what it left behind -- so the row is
+   drawn, just not among the ones that are moving. An assignee the daemon
+   does NOT know (a person, a session on another machine) is not spent:
+   nothing here says that queue is over, and folding it away would be a
+   claim the page cannot make. */
+function beadsLaneSpent(lane) {
+  return !!lane.known && lane.status === "exited";
+}
+
+/* Rows in the order a reader wants them: queues with work in flight, then
+   queues with something waiting, then idle ones; inside a group the fullest
+   first, then by name. The daemon answers in ITS session order, which is
+   creation order -- on a long-lived machine that puts the oldest sessions at
+   the top of the page and the one you opened it for at the bottom. */
+function beadsQueueOrder(a, b) {
+  const rank = (l) => {
+    const s = l.summary || {};
+    if ((s.working || 0) + (s.review || 0) > 0) return 0;
+    if ((l.issues || []).length) return 1;
+    return 2;
+  };
+  const ra = rank(a);
+  const rb = rank(b);
+  if (ra !== rb) return ra - rb;
+  const n = (l) => (l.issues || []).length;
+  if (n(a) !== n(b)) return n(b) - n(a);
+  return String(a.session || "").localeCompare(String(b.session || ""));
+}
+
+/* The toggle for a folded group of rows. A grid child spanning every column,
+   not a control above or beside the grid: it stands where the rows it hides
+   would stand, which is the only place that says where they go. */
+function beadsQFoldBar(open, label, onToggle) {
+  const bar = el("div", "beads-q-fold" + (open ? " open" : ""));
+  const btn = el("button", "wf-btn option", `${open ? "▾" : "▸"} ${label}`);
+  btn.title = open ? "fold these rows away again" : "draw these rows too";
+  btn.addEventListener("click", onToggle);
+  bar.appendChild(btn);
+  return bar;
 }
 
 /* One row: the head cell, then a drop cell per status. The head says what a
    reader wants before opening the terminal -- the session's state, the cflow
    step it is on, and the queue in numbers (waiting · working · landing). */
-function beadsQueueLane(grid, lane, root, statuses) {
+function beadsQueueLane(grid, lane, root, statuses, opts = {}) {
   const name = lane.session || "";
-  const head = el("div", "beads-q-head" + (lane.pool ? " pool" : ""));
+  const head = el("div", "beads-q-head" + (lane.pool ? " pool" : "") +
+                (beadsLaneSpent(lane) ? " spent" : ""));
   if (lane.pool) {
     head.appendChild(el("span", "beads-q-name", "unassigned"));
     head.appendChild(el("span", "beads-q-sum",
@@ -9886,6 +9981,15 @@ function beadsQueueLane(grid, lane, root, statuses) {
     }
   }
   grid.appendChild(head);
+  // A folded row is one cell across every column instead of five. Still a
+  // drop target, so taking an issue off a session's queue does not first
+  // need the reader to open a pool of three hundred cards.
+  if (opts.folded) {
+    const cell = beadsQueueCell("", lane.issues || [], lane, root, { fold: true });
+    cell.style.gridColumn = `span ${statuses.length}`;
+    grid.appendChild(cell);
+    return;
+  }
   const byStatus = new Map(statuses.map((s) => [s, []]));
   for (const i of lane.issues || []) {
     if (byStatus.has(i.status)) byStatus.get(i.status).push(i);
@@ -9905,10 +10009,35 @@ function beadsQueueSummaryText(sum) {
 /* A drop target. Dropping on a cell assigns to the ROW; the column the cell
    is in is only where the card lands visually once the board answers, since
    the status is the assignee's and not this page's to write. */
-function beadsQueueCell(status, issues, lane, root) {
-  const cell = el("div", `beads-q-cell ${status}`);
+function beadsQueueCell(status, issues, lane, root, opts = {}) {
+  const cell = el("div", `beads-q-cell ${opts.fold ? "folded" : status}`);
   cell.dataset.session = lane.session || "";
-  for (const i of issues || []) cell.appendChild(beadsQueueCard(i, lane));
+  const list = issues || [];
+  if (opts.fold) {
+    const btn = el("button", "wf-btn option",
+      `▸ ${list.length} unassigned issue${list.length === 1 ? "" : "s"} — open the pool`);
+    btn.title = "folded because a cell this tall sets the height of every " +
+                "other cell in its row; drop a card here to unassign it " +
+                "without opening it";
+    btn.addEventListener("click", () => { beadsQPoolOpen.add(root); renderBeads(); });
+    cell.appendChild(btn);
+  } else {
+    // Even an opened pool is capped: `align-items: stretch` charges one tall
+    // cell to its whole row, so the cap is what keeps a row's height a
+    // function of the row rather than of its worst cell.
+    const key = `${root}|${lane.session || ""}|${status}`;
+    const capped = list.length > BEADS_Q_CELL_CAP && !beadsQCellOpen.has(key);
+    for (const i of capped ? list.slice(0, BEADS_Q_CELL_CAP) : list) {
+      cell.appendChild(beadsQueueCard(i, lane));
+    }
+    if (capped) {
+      const more = el("button", "wf-btn option beads-q-more",
+        `+${list.length - BEADS_Q_CELL_CAP} more`);
+      more.title = "the rest of this cell, at its full height";
+      more.addEventListener("click", () => { beadsQCellOpen.add(key); renderBeads(); });
+      cell.appendChild(more);
+    }
+  }
   cell.addEventListener("dragover", (ev) => {
     if (!beadsDragging) return;
     ev.preventDefault();
@@ -10021,6 +10150,96 @@ function sessBeads(data) {
   });
   box.appendChild(open);
   return box;
+}
+
+/* ---- the rail's Beads panel: the same slice, given the whole column ----
+
+   The radio's third panel, beside Details and Workflow. `sessBeads` above
+   answers "what names this session" and answers it as a list, which is the
+   right shape for a section at the bottom of a column of other sections. It
+   is the wrong shape for the question a board is actually read with -- where
+   is all of it up to -- because a list has no place to put a status except
+   inside each row, so the reader tallies the statuses themselves.
+
+   So this panel draws the same issues as lanes, with the Board tab's own
+   card, at the level the cflow run sits at. Both are what one round of work
+   left in a registry; one of them was drawn as a page and the other as a
+   footnote.
+
+   Lanes are the five active statuses, plus `closed` only when something here
+   IS closed -- a dead column on every session would cost the live ones a
+   sixth of a narrow column for nothing. */
+function sessBeadsPanel(data) {
+  const s = data.session || {};
+  const b = data.beads || {};
+  const issues = b.issues || [];
+  const box = el("div", "sess-beads sess-beads-kanban");
+  box.appendChild(el("h3", null, `Beads (${issues.length})`));
+  box.appendChild(el("p", "wf-note",
+    "Every issue on the repository board that names this session — the " +
+    "recorded link, its assignee, its creator, or an `issue: <id>` in the " +
+    "opening task — in a lane per status. Writes are the session's own " +
+    "(`claunch beads …`): this panel reads the board, it does not move it."));
+  if (b.winddown) {
+    box.appendChild(el("p", "wf-warning",
+      `winding down since ${String(b.winddown.since || "").replace("T", " ").slice(0, 19)} — ` +
+      `asked to settle ${(b.winddown.issues || []).join(", ")}; terminated once ` +
+      `idle or after ${Math.round(b.winddown.grace || 0)}s. Kill again to stop now.`));
+  }
+  if (b.error) {
+    box.appendChild(el("p", "wf-note", b.error));
+    return box;
+  }
+  if (!issues.length) {
+    box.appendChild(el("p", "wf-note", "no issue on the board names this session"));
+  } else {
+    const lanes = BEADS_STATUSES.filter(
+      (st) => BEADS_ACTIVE.has(st) || issues.some((i) => i.status === st));
+    const grid = el("div", "sess-beads-lanes");
+    grid.style.gridTemplateColumns = `repeat(${lanes.length}, minmax(150px, 1fr))`;
+    for (const st of lanes) grid.appendChild(sessBeadsLane(st, issues, b.issue));
+    box.appendChild(grid);
+  }
+  if (!b.issue && s.name && s.status !== "exited") {
+    box.appendChild(sessBeadsCreate(s.name));
+  }
+  const open = el("button", "wf-btn option", "Open board");
+  open.title = "the Beads page, filtered to this session";
+  open.addEventListener("click", () => {
+    beadsSession = s.name || "";
+    go("#/beads");
+  });
+  box.appendChild(open);
+  return box;
+}
+
+/* One lane. Empty is drawn, not skipped: a status with nothing in it is the
+   answer to "has anything landed yet", and a lane that appears only once it
+   has a card would make the panel's shape shift under the reader. */
+function sessBeadsLane(status, issues, primary) {
+  const lane = el("div", `sess-beads-lane ${status}`);
+  const mine = issues.filter((i) => i.status === status);
+  const head = el("div", "sess-beads-lane-head");
+  head.appendChild(el("span", "sess-beads-lane-name", status));
+  head.appendChild(el("span", "sess-beads-lane-n", String(mine.length)));
+  lane.appendChild(head);
+  const body = el("div", "sess-beads-lane-body");
+  for (const issue of mine) {
+    const card = beadsCard({
+      issue, indent: 0, parent: "", parentHere: false, kids: 0,
+    });
+    // The issue this session was opened FOR, marked. Every other card here
+    // merely names the session (it created it, or the task mentions it), and
+    // that difference is most of why the panel gets opened.
+    if (issue.id && issue.id === primary) {
+      card.classList.add("primary");
+      card.appendChild(el("span", "sess-beads-primary", "primary"));
+    }
+    body.appendChild(card);
+  }
+  if (!mine.length) body.appendChild(el("p", "beads-lane-empty", "—"));
+  lane.appendChild(body);
+  return lane;
 }
 
 /* The HTML pages a round left behind, newest first. The daemon indexes them
@@ -13384,18 +13603,25 @@ function sessHead(s) {
 
 /* The radio under the head: which panel this column is. `Details` is the
    session's facts and the ways to speak to it; `Workflow` is its run, given
-   the whole column instead of a section at the bottom of one. A pair of
-   buttons where one is always dead, like the trace page's mesh tabs — the
-   lit one not being wired is what makes the pair read as a radio. The choice
-   is the session's, remembered with its layout (sessLayoutFor). */
+   the whole column instead of a section at the bottom of one; `Beads` is its
+   slice of the repository board, at the same level as the run for the same
+   reason — the two registries a session's round is recorded in are the run
+   and the board, and reading one of them squeezed into a section under the
+   other is what made the board's half unreadable. Buttons where the lit one
+   is dead, like the trace page's mesh tabs — that is what makes them read as
+   a radio. The choice is the session's, remembered with its layout
+   (sessLayoutFor). */
 function sessRailTabs(name) {
   const bar = el("div", "seq-tabs sess-tabs");
   const cur = sessLayoutFor(name).rail;
-  for (const [id, label] of [["detail", "Details"], ["wf", "Workflow"]]) {
+  for (const [id, label] of [["detail", "Details"], ["wf", "Workflow"],
+                             ["beads", "Beads"]]) {
     const on = cur === id;
     const tab = el("button", "seq-tab" + (on ? " on" : ""), label);
     tab.title = id === "wf"
       ? "this session's workflow run, at full height"
+      : id === "beads"
+      ? "this session's issues on the board, as a kanban, at full height"
       : "what this session is: metadata, messages, meshes";
     if (!on) {
       tab.addEventListener("click", () => {
@@ -13504,6 +13730,14 @@ function renderSession(data) {
   // down with it, or it keeps asking about a run nobody is reading.
   stopSessRun();
   sessRunFold = null;
+
+  // The board's panel, the run's peer. Below the run's early return so it
+  // inherits the same teardown: whichever of the two is not on screen, the
+  // run's poll is off.
+  if (sessLayoutFor(name).rail === "beads") {
+    view.appendChild(sessBeadsPanel(data));
+    return;
+  }
 
   const dl = el("dl", "sess-meta");
   metaRow(
