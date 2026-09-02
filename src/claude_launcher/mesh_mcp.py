@@ -629,7 +629,6 @@ def call_tool(name: str, args: dict) -> dict:
             "you": me,
             "reachable": reachable if me else None,
             "members": info.get("members", []),
-            "member_links": links,
             "peers": info.get("peers", []),
             "relay": _relay_summary(info.get("relay")),
         }
