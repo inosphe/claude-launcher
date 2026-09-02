@@ -82,10 +82,16 @@ steps:
         --external-ref <run id>` — 이 전이가 회차의 시작이고, id는 intake
         fyi에 함께 실린다. 전이하는 것은 주 이슈 하나다 — 큐의 나머지는
         아래 큐 항목이 다룬다.
-        어느 경로에도 해당하지 않아 이슈가 서지 않았으면(생성 요청이
-        `--no-issue`였다, 또는 id 없는 브리핑이고 터미널 직접 지시도
-        아니다) 여기서 지어내지 않는다 — 그 사실과 사유만 보고에 적고,
-        판정과 처리는 다음 단계(일감 확인)가 맡는다.
+        어느 경로에도 해당하지 않아 이슈가 서지 않았으면 여기서
+        지어내지 않는다 — 그 사실과 사유만 보고에 적고, 판정과 처리는
+        다음 단계(일감 확인)가 맡는다. 사유는 추측이 아니라
+        오프닝에서 읽는다: 생성 요청이 무이슈였으면 오프닝에 `no issue:`로
+        시작하는 줄이 있고, 그 줄이 두 답 중 어느 쪽인지까지 말한다
+        — 「wait for instructions」(보드를 뒤지지 말고 오프닝 태스크가
+        목표다, 태스크도 없으면 사용자의 지시를 기다린다) 또는
+        「assign yourself」(보드에서 스스로 골라 잡는 것이 이 세션의
+        일이다). 그 줄이 아예 없으면 무이슈 지시가 아니라 이슈가 서지
+        못한 것이다.
         후속 구현 이슈(assignee 없이 만들어진 것 — wrapup의 인수인계 규칙)도
         이 읽기 규칙이 그대로 목표 경로다: 규격의 출처(원회차 id와 HOLD/마감
         코멘트)가 연결이다.
@@ -232,11 +238,15 @@ steps:
   issue-check:
     title: 일감 확인 (이 회차는 어느 이슈의 것인가)
     select:
-      # 이 문이 chooser: agent인 이유 — 셋 다 보드와 생성 기록에서 읽을 수
+      # 이 문이 chooser: agent인 이유 — 넷 다 보드와 생성 기록에서 읽을 수
       # 있는 사실이고, 게으름의 경로가 없다: 일이 적은 쪽(claimed·바로
       # work)은 이슈가 실제로 서 있어야 성립하고(commit 단계부터 코멘트가
       # 전부 그 id를 요구하므로 거짓 claimed는 바로 다음 스텝에서 막힌다),
       # 일이 많은 쪽(unclaimed)만이 탐색과 사용자 대기로 이어진다.
+      # 무이슈 답이 둘로 갈린 이유 — 보드에는 둘 다 「아무것도 없다」로
+      # 똑같이 보이고, 차이는 세션이 그 없음을 어떻게 다뤄야 하는가에만
+      # 있다. 한 답이 둘을 겸했을 때 세션은 그것을 추론해야 했고, 무이슈로
+      # 만들어진 세션이 보드에서 일감을 찾아 나선 것이 그 추론이다.
       chooser: agent
       require_reason: true
       prompt: |
@@ -245,22 +255,67 @@ steps:
         `claunch beads list --status in_progress --json`에 자기 세션
         ($CLAUNCH_SESSION)이 assignee인 이슈가 있는가(intake의 전이가
         실제로 보드에 쓰였는가), 없다면 오프닝에 join 안내(「너는
-        assignee가 아니다」)와 이슈 id가 있는가, 그것도 없다면 생성
-        요청이 명시적으로 이슈를 거절했는가(`--no-issue`, 웹 폼의
-        No issue, 바디 `beads: false` — 오프닝·생성 브리핑에 적혀 있다).
-        무엇을 확인해 무엇이 나왔는지 reason에 적는다.
+        assignee가 아니다」)와 이슈 id가 있는가, 그것도 없다면 오프닝에
+        `no issue:`로 시작하는 줄이 있는가.
+        그 줄이 있으면 생성 요청이 명시적으로 무이슈를 답한 것이고, 줄
+        자체가 두 답 중 어느 쪽인지 말한다: 「wait for instructions」
+        (`--no-issue`, 웹 폼의 「No issue — wait for my instructions」,
+        바디 `beads: false`)이면 no-issue-wait, 「assign yourself」
+        (`--no-issue-auto`, 웹 폼의 「No issue — it picks its own off the
+        board」, 바디 `beads: "none-auto"`)이면 no-issue-auto다.
+        무엇을 확인해 무엇이 나왔는지 reason에 적는다 — 그 줄을 봤으면
+        어느 문구였는지 그대로 옮긴다.
         판정이 모호하면 unclaimed를 고른다 — 탐색과 사용자 확정이 한 번
         더 도는 쪽이, 이슈 없는 회차가 조용히 지나가는 쪽보다 싸다.
+        특히 `no issue:` 줄이 보이지 않으면 무이슈 지시로 읽지 않는다:
+        그 줄이 없다는 것은 요청이 무이슈였다는 뜻이 아니라 이슈가 서지
+        못했다는 뜻이고, 둘은 다른 사건이다.
       options:
         claimed:
-          description: 이슈가 서 있다 — intake의 전이(assignee)거나 join 참가. 브랜치 준비으로 간다
+          description: 이슈가 서 있다 — intake의 전이(assignee)거나 join 참가. 브랜치 준비로 간다
           next: branch-setup
-        no-issue-by-request:
-          description: 생성 요청이 명시적으로 이슈를 거절했다(--no-issue) — 그 지시가 이미 사용자의 동의이므로 브랜치 준비으로 간다
+        no-issue-wait:
+          description: 오프닝의 `no issue:` 줄이 「wait for instructions」다 — 보드를 뒤지지 않는다. 오프닝 태스크가 목표이고, 태스크도 없으면 사용자가 지시를 줄 때까지 기다린다
           next: branch-setup
+        no-issue-auto:
+          description: 오프닝의 `no issue:` 줄이 「assign yourself」다 — 보드에서 스스로 일감을 골라 잡는 것이 이 세션의 일이다. 사용자 확정은 생성 시점에 이미 받았다
+          next: issue-auto
         unclaimed:
-          description: 이슈가 없는데 무이슈 지시도 없다 — 보드에서 연관 일감을 탐색하고 사용자 확정을 받는다
+          description: 이슈도 없고 오프닝에 `no issue:` 줄도 없다 — 보드에서 연관 일감을 탐색하고 사용자 확정을 받는다
           next: issue-search
+
+  issue-auto:
+    title: 보드에서 스스로 일감 잡기 (무이슈 auto)
+    instructions: |
+      오프닝이 「no issue — assign yourself」라고 말한다: 배정된 이슈는
+      없고, 보드에서 스스로 골라 잡는 것이 이 세션이 만들어진 이유다.
+      그래서 이 갈래에는 사용자 확정(issue-decision)이 없다 — 그 확정은
+      무이슈 답이 아예 없는 세션의 것이고, 여기서는 사용자가 생성 시점에
+      이미 답했다. 같은 이유로 새 이슈를 민팅하지도 않는다: 사용자가
+      요청한 것은 「보드에 있는 것을 잡아라」이지 「일감을 하나 만들어라」가
+      아니다.
+      후보는 `claunch beads list --status open --limit 0 --json`과
+      `claunch beads list --status in_ready --limit 0 --json`으로 읽고,
+      공통 규칙의 「open 풀 판정 기준」으로 살아 있는 일감과 정리 대상을
+      가른 뒤 하나를 고른다. 순서는 priority 오름차순 → created_at.
+      고른 이슈는 여기서 바로 잡는다 — 판정은 데몬 adoption과 같은
+      규칙이다: assignee가 비었거나 그 세션이 종료됐으면 `claunch beads
+      update <id> --assignee $CLAUNCH_SESSION`으로 잡고 이어서 `claunch
+      beads update <id> --status in_progress --external-ref <run id>`,
+      살아 있는 세션이 붙잡고 있으면 assignee와 상태를 손대지 않고
+      `claunch beads comments add <id> "JOINED: $CLAUNCH_SESSION — <이번
+      목표 요지>"`로 참가만 한다.
+      고를 것이 없으면 지어내지 않는다: 「후보 없음」과 그 근거를 보고에
+      적고 이슈 없이 오프닝 태스크만 가지고 진행한다.
+      메시에 속해 있으면 무엇을 잡았는지 이슈 id와 함께 리더에게 fyi로
+      남긴다 — 리더가 배정하지 않은 이슈를 이 세션이 가져간 것이므로,
+      그 사실이 리더에게 닿지 않으면 같은 이슈가 두 번 배정된다.
+    done_when: |
+      고른 이슈 id 하나와 그 판정 근거(상태·assignee·그 세션의 생존
+      여부·take인가 join인가), 잡기 명령의 결과(take면 in_progress 전이,
+      join이면 JOINED 코멘트), 그리고 고르지 않은 상위 후보와 그 사유가
+      보고에 있다. 고를 것이 없었으면 「후보 없음」과 그 근거가 있다.
+    next: branch-setup
 
   issue-search:
     title: 연관 일감 탐색 (보드 기록에서)

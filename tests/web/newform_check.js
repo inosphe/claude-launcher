@@ -109,9 +109,9 @@ check("the form's controls read in the new order", named(form.text), [
   "worktree_existing", "worktree_rebase",
   // what it is told first
   "task",
-  // where that job is written down — three radios sharing one name, then
+  // where that job is written down — four radios sharing one name, then
   // the rows each of which only one of them opens
-  "beads", "beads", "beads", "issue_text", "issue_filter", "issue",
+  "beads", "beads", "beads", "beads", "issue_text", "issue_filter", "issue",
 ]);
 
 check("the arrangement is asked before the machinery",
@@ -143,14 +143,24 @@ check("the board question comes after the task it is read off",
 check("...and is not inside the fold either",
       named(fold.text).includes("beads"), false);
 
-/* The three answers, and the one that opens the picker. A radio group that
+/* The four answers, and the one that opens the picker. A radio group that
    lost its default would submit nothing at all — and the absent answer is
    the one that mints an issue, so the form would silently stop doing what it
-   did before this row existed. */
+   did before this row existed.
+
+   Two of the four are "no issue". They leave the board in the same state, so
+   nothing downstream can tell them apart: the difference is what the session
+   is TOLD, and one row covering both left it inferring which was meant. The
+   labels are pinned for that reason — two rows both reading "No issue" are
+   two rows a reader cannot choose between. */
 const beadsBox = block('<fieldset id="new-beads">', "</fieldset>", form.start);
-check("the board question offers exactly three answers",
-      [...beadsBox.text.matchAll(/name="beads" value="(\w+)"/g)].map((m) => m[1]),
-      ["new", "existing", "none"]);
+check("the board question offers exactly four answers",
+      [...beadsBox.text.matchAll(/name="beads" value="([\w-]+)"/g)].map((m) => m[1]),
+      ["new", "existing", "none", "none-auto"]);
+check("...and the two no-issue rows say which is which",
+      [/No issue — wait for my instructions/.test(beadsBox.text),
+       /No issue — it picks its own off the board/.test(beadsBox.text)],
+      [true, true]);
 check("the answer that mints is the one that is checked",
       /value="new" checked/.test(beadsBox.text), true);
 check("the issue picker is hidden until it is the answer",
@@ -256,11 +266,12 @@ check("standalone Claude Create retains its own permission checkbox",
    of both keys. A request that says nothing gets an issue minted from its
    task, which is what every client written before this row still sends — so
    the default answer must produce exactly that request. */
-check("only 'none' and 'existing' put a board key on the request",
+check("only the three non-default answers put a board key on the request",
       [/body\.beads = false/.test(submit),
+       /body\.beads = "none-auto"/.test(submit),
        /body\.issue = f\.issue\.value/.test(submit),
        /body\.beads = true/.test(submit)],
-      [true, true, false]);
+      [true, true, true, false]);
 
 /* ...and the text rides only under "new". Sent beside "existing" or "none"
    it is a contradiction the daemon refuses outright (beads.check_request),
@@ -375,6 +386,14 @@ check("the issue text is sent only under the answer that mints",
   check("...and under 'no issue' too",
         [textBox.classList.has("hidden"), rowBox.classList.has("hidden")],
         [true, true]);
+  /* Its twin answers the same question about the board and the opposite one
+     about the session, so it folds the same two rows. */
+  bf.beads.value = "none-auto";
+  bctx.sync();
+  check("...and under the auto half of it, which folds the same two rows",
+        [textBox.classList.has("hidden"), rowBox.classList.has("hidden"),
+         bf.issue_text.value],
+        [true, true, "make the rail answer"]);
   bf.beads.value = "existing";
 
   bf.issue.value = "cl-2";

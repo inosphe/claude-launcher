@@ -102,6 +102,25 @@ TAKE = "assigned"
 JOIN = "joined"
 MINTED = "created"
 
+#: The two "no issue" answers the creation forms offer. Both mean the same
+#: thing to this module -- nothing is minted, nothing is adopted, nothing is
+#: assigned -- and they differ only in what the session is TOLD about it,
+#: which is the half a session cannot work out for itself. ``NONE_WAIT`` says
+#: the goal is the opening task and there is nothing on the board to go
+#: looking for; ``NONE_AUTO`` says the opposite, that picking its own work off
+#: the board is what this session was created to do and needs no further
+#: permission. One answer was ambiguous between the two and the ambiguity was
+#: settled by the session guessing, which is how sessions created with "no
+#: issue" ended up searching the board for one.
+NONE_WAIT = "none-wait"
+NONE_AUTO = "none-auto"
+
+#: What the wire accepts for :data:`NONE_WAIT`. ``False`` is the spelling
+#: every caller that predates the split sends (``--no-issue``, the forms'
+#: ``body.beads = false``) and ``"none"`` is the creation forms' own radio
+#: value, so nothing that already works has to be retyped.
+_NONE_ALIASES = {"none", "none-wait", "false", "no", "wait"}
+
 #: The sender a daemon-originated ownership notice speaks as on the mesh --
 #: not a member, so it is never mistaken for a peer asking for something.
 BOARD_SENDER = "beads"
@@ -338,6 +357,71 @@ def compose_description(
     )
 
 
+def none_mode(body: dict) -> Optional[str]:
+    """Which "no issue" answer a creation request carries, or ``None``.
+
+    Pure and body-only, and the single place the wire spelling is read: every
+    other caller asks this rather than comparing ``body["beads"]`` itself, so
+    a request that says "no issue" can never mean one thing to the code that
+    skips minting and another to the code that writes the opening block --
+    which is the shape the session-guesses-its-own-goal failure had.
+
+    ``False`` and ``"none"`` are :data:`NONE_WAIT`, unchanged from before the
+    answer was split in two. Anything else, including ``True`` and a missing
+    key, is not a "no issue" answer at all.
+    """
+    value = body.get("beads")
+    if value is False:
+        return NONE_WAIT
+    if isinstance(value, str):
+        key = value.strip().lower()
+        if key in _NONE_ALIASES:
+            return NONE_WAIT
+        if key == NONE_AUTO:
+            return NONE_AUTO
+    return None
+
+
+def compose_none_note(mode: str, *, session: str = "") -> str:
+    """The block appended to the opening task when the answer was "no issue".
+
+    Nothing used to be appended here, because there was no issue to name --
+    and that silence was itself the bug. A session that is told nothing about
+    the board cannot tell "the operator declined an issue" from "the mint
+    failed" or from "the briefing lost it", so a workflow that asks it to
+    check which of those happened (improv-worker's ``issue-check``) has no
+    record to check and falls through to the branch that searches the board.
+    An answer the operator gave has to reach the session that it is about.
+
+    The two modes say opposite things about the same absence, so each spells
+    out the action it forbids as well as the one it allows -- a session told
+    only "no issue was created" would still be free to conclude that finding
+    one is helpful.
+    """
+    who = session or "$CLAUNCH_SESSION"
+    if mode == NONE_AUTO:
+        return (
+            "no issue: this session was created with the board answer "
+            "\"no issue -- assign yourself\". Nothing was minted for you and "
+            "nothing is assigned to you, and that is deliberate: picking your "
+            "own work off the board is what you are here for. Read the board "
+            "(`claunch beads list --status open --json`), take the issue that "
+            "fits (`claunch beads update <id> --assignee " + who + " "
+            "--status in_progress`), and say in your first report which one "
+            "you took and why. You do NOT need anyone to confirm that choice. "
+            "If nothing on the board fits, say so rather than minting an "
+            "issue for work nobody asked for."
+        )
+    return (
+        "no issue: this session was created with the board answer "
+        "\"no issue -- wait for instructions\". Nothing was minted for you and "
+        "nothing is assigned to you, and that is deliberate. Do NOT search the "
+        "board for work to adopt and do not mint an issue for yourself. Your "
+        "goal is the opening task above; if there is none, stay where you are "
+        "and wait for the user to type one."
+    )
+
+
 class BoardRequestError(ValueError):
     """A creation request whose board answer contradicts itself."""
 
@@ -348,7 +432,8 @@ def check_request(body: dict) -> None:
     The board question has exactly one answer per session, and each of the
     three ways of giving it is a different key: ``issue_text`` writes a new
     one, ``issue`` (or an ``issue: <id>`` inside the task or context) adopts
-    one that exists, ``beads: false`` asks for none. Sent together they are
+    one that exists, a "no issue" answer (:func:`none_mode` -- ``beads:
+    false`` or ``beads: "none-auto"``) asks for none. Sent together they are
     not a preference to resolve — :meth:`Board.ensure_issue` would take the
     adopt branch and the written text would vanish without a word, which is
     the failure shape this whole area was built to remove. So the request is
@@ -371,10 +456,12 @@ def check_request(body: dict) -> None:
             "the issue you named, or drop 'issue' to have one written from "
             "that text"
         )
-    if body.get("beads") is False:
+    none = none_mode(body)
+    if none:
         raise BoardRequestError(
-            "'issue_text' writes a new issue and 'beads: false' asks for "
-            "none — a request cannot mean both. Send one"
+            f"'issue_text' writes a new issue and the board answer "
+            f"'beads: {none}' asks for none — a request cannot mean both. "
+            "Send one"
         )
     refs = issue_refs(body.get("task"), body.get("context"))
     if refs:
@@ -1219,8 +1306,9 @@ class Board:
         """Give a new session its issue: adopt the one the request names, or
         mint one from its task. ``None`` when there is nothing to do -- no task
         and no reference, no board, ``br`` missing, or the feature is off
-        (``beads_auto_issue``, or ``beads: false`` on the request, which is the
-        "no issue at all" answer the creation forms offer).
+        (``beads_auto_issue``, or a "no issue" answer on the request --
+        :func:`none_mode` -- which is what the creation forms send for both
+        shapes of "no issue at all").
 
         Adopting goes through :func:`adoption`, so which of the two things it
         means is decided from the board rather than assumed: an unheld issue
@@ -1244,7 +1332,7 @@ class Board:
         :data:`JOIN` (``from_issue_text`` only on a mint).
         """
         cfg = store.daemon_config()
-        if not cfg.get("beads_auto_issue", True) or body.get("beads") is False:
+        if not cfg.get("beads_auto_issue", True) or none_mode(body):
             return None
         sdef = session.sdef
         task = str(body.get("task") or sdef.task or "")

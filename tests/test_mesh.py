@@ -1906,6 +1906,17 @@ def test_the_board_answer_reaches_the_api_in_its_own_spelling(monkeypatch):
     mesh_mcp._spawn({"task": "go", "no_issue": True})
     assert sent["body"]["beads"] is False and "issue" not in sent["body"]
 
+    # the other half of that answer: the same empty board, and the opposite
+    # instruction to the child. It travels as a value of the same key, so a
+    # spawn can never carry both instructions at once.
+    mesh_mcp._spawn({"task": "go", "no_issue_auto": True})
+    assert sent["body"]["beads"] == "none-auto" and "issue" not in sent["body"]
+
+    # a caller that sets both gets the auto answer, not a coin toss: it is
+    # the one that says what the child should DO
+    mesh_mcp._spawn({"task": "go", "no_issue": True, "no_issue_auto": True})
+    assert sent["body"]["beads"] == "none-auto"
+
     # saying nothing must send nothing: the daemon reads that as "mint one"
     mesh_mcp._spawn({"task": "go"})
     assert "beads" not in sent["body"] and "issue" not in sent["body"]

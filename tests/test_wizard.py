@@ -2345,13 +2345,20 @@ def test_natural_sort_key(names, expected):
 # --------------------------------------------------------------------------- #
 # the board rows
 # --------------------------------------------------------------------------- #
-def test_the_board_question_has_three_answers_and_only_one_opens_the_picker():
+def test_the_board_question_has_four_answers_and_only_one_opens_the_picker():
     wiz = form()
     mode = wiz.field("beads")
     assert isinstance(mode, wizard.ChoiceField)
     assert [o.value for o in mode.options] == [
-        wizard.BEADS_NEW, wizard.BEADS_PICK, wizard.BEADS_NONE,
+        wizard.BEADS_NEW, wizard.BEADS_PICK,
+        wizard.BEADS_NONE, wizard.BEADS_NONE_AUTO,
     ]
+    # The two no-issue rows say what picking one would DO. They leave the
+    # board in the same state, so a row reading "no issue" twice would be
+    # two rows a reader cannot choose between.
+    labels = {o.value: o.label for o in mode.options}
+    assert "wait" in labels[wizard.BEADS_NONE]
+    assert "picks its own" in labels[wizard.BEADS_NONE_AUTO]
     # minting from the task is what every release before this did, so it is
     # what a form nobody touched still answers
     assert mode.value == wizard.BEADS_NEW
@@ -2359,8 +2366,11 @@ def test_the_board_question_has_three_answers_and_only_one_opens_the_picker():
 
     pick(wiz, "beads", "an existing issue")
     assert not wiz.field("issue").hidden
-    pick(wiz, "beads", "no issue")
+    pick(wiz, "beads", "no issue -- wait")
     assert wiz.field("issue").hidden
+    pick(wiz, "beads", "an existing issue")
+    pick(wiz, "beads", "no issue -- it picks")
+    assert wiz.field("issue").hidden and wiz.field("issue_text").hidden
 
 
 def test_the_issue_text_row_belongs_to_the_answer_that_mints():
@@ -2427,17 +2437,31 @@ def test_the_issue_picker_says_which_rows_would_only_be_joined():
     assert "JOIN, not assign" in rows["cl-2"].detail
 
 
-def test_the_three_answers_travel_as_the_flags_the_command_takes():
+def test_the_four_answers_travel_as_the_flags_the_command_takes():
     wiz = form()
     args = argparse.Namespace()
     wiz.apply(args)
-    assert args.issue is None and args.no_issue is False  # mint one
+    # mint one
+    assert args.issue is None
+    assert args.no_issue is False and args.no_issue_auto is False
 
     wiz = form()
-    pick(wiz, "beads", "no issue")
+    pick(wiz, "beads", "no issue -- wait")
     args = argparse.Namespace()
     wiz.apply(args)
-    assert args.issue is None and args.no_issue is True
+    assert args.issue is None
+    assert args.no_issue is True and args.no_issue_auto is False
+    assert "waits for instructions" in wiz.summary()
+
+    # the other half of "no issue": the same empty board, the opposite
+    # instruction, and its own flag rather than a shade of the first
+    wiz = form()
+    pick(wiz, "beads", "no issue -- it picks")
+    args = argparse.Namespace()
+    wiz.apply(args)
+    assert args.issue is None
+    assert args.no_issue is False and args.no_issue_auto is True
+    assert "picks its own" in wiz.summary()
 
     wiz = form()
     pick(wiz, "beads", "an existing issue")
@@ -2468,6 +2492,15 @@ def test_flags_typed_alongside_the_wizard_prefill_the_board_rows():
     args = argparse.Namespace()
     wiz.apply(args)
     assert args.no_issue is True
+
+    wiz = wizard.Wizard(
+        FakeSources(), cwd="/work/repo",
+        defaults=argparse.Namespace(issue=None, no_issue_auto=True),
+    )
+    assert wiz.value("beads") == wizard.BEADS_NONE_AUTO
+    args = argparse.Namespace()
+    wiz.apply(args)
+    assert args.no_issue_auto is True and args.no_issue is False
 
 
 def test_an_id_this_board_does_not_have_is_kept_and_marked_rather_than_dropped():

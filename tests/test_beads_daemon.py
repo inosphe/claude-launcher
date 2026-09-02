@@ -453,13 +453,52 @@ def test_beads_false_is_the_no_issue_answer(repo):
     board = _board(br, repo)
 
     async def run():
-        assert await board.ensure_issue(
-            _Sess(_sdef("w1", repo)),
-            body={"task": "go", "issue": "claunch-9", "beads": False}, parent=None,
-        ) is None
-        assert br.calls == []
+        for answer in (False, "none", "none-auto"):
+            br.calls.clear()
+            assert await board.ensure_issue(
+                _Sess(_sdef("w1", repo)),
+                body={"task": "go", "issue": "claunch-9", "beads": answer},
+                parent=None,
+            ) is None, answer
+            assert br.calls == [], answer
 
     asyncio.run(run())
+
+
+def test_the_two_no_issue_answers_are_read_from_one_key():
+    """Both leave the board untouched, so nothing downstream of the mint can
+    tell them apart -- and they are opposite instructions to the session.
+    Reading them in one place is what keeps the code that skips the mint and
+    the code that writes the opening block from disagreeing about what the
+    operator said.
+    """
+    mode = beads_mod.none_mode
+    assert mode({"beads": False}) == beads_mod.NONE_WAIT
+    assert mode({"beads": "none"}) == beads_mod.NONE_WAIT   # the form's value
+    assert mode({"beads": "none-auto"}) == beads_mod.NONE_AUTO
+    assert mode({"beads": " None-Auto "}) == beads_mod.NONE_AUTO
+    # not a no-issue answer at all
+    assert mode({}) is None
+    assert mode({"beads": True}) is None
+    assert mode({"task": "go", "issue": "x-1"}) is None
+
+
+def test_each_no_issue_note_forbids_what_the_other_one_asks_for():
+    """A block saying only "no issue was created" leaves the session free to
+    decide that finding one is helpful, which is the behaviour this splits."""
+    wait = beads_mod.compose_none_note(beads_mod.NONE_WAIT)
+    auto = beads_mod.compose_none_note(beads_mod.NONE_AUTO, session="w1")
+    assert wait.startswith("no issue:") and auto.startswith("no issue:")
+
+    assert "wait for instructions" in wait
+    assert "Do NOT search the board" in wait
+    assert "wait for the user to type one" in wait
+
+    assert "assign yourself" in auto
+    assert "claunch beads update <id> --assignee w1" in auto
+    assert "do NOT need anyone to confirm" in auto
+    # and it does not turn "take one off the board" into "write a new one"
+    assert "rather than minting an issue" in auto
 
 
 def test_issue_text_writes_the_issue_and_the_task_is_left_alone(repo):
@@ -540,6 +579,7 @@ def test_a_contradictory_board_answer_is_refused_rather_than_half_applied():
     for body, expect in (
         ({"issue_text": "spec", "issue": "x-1"}, "x-1"),
         ({"issue_text": "spec", "beads": False}, "beads"),
+        ({"issue_text": "spec", "beads": "none-auto"}, "beads"),
         ({"issue_text": "spec", "task": "do it" + chr(10) + "issue: x-9"}, "x-9"),
         ({"issue_text": "spec", "context": "issue: x-9"}, "x-9"),
     ):
@@ -1285,6 +1325,65 @@ def test_the_opening_names_the_issue_only_when_the_task_did_not(home, tmp_path, 
             )
             assert "NOT its assignee" in seen["c"]
             assert "b" in seen["c"]  # names the session that holds it
+            await mgr.shutdown_all()
+        finally:
+            onboard.arrange = real
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_the_opening_says_which_no_issue_answer_was_given(home, tmp_path, repo):
+    """The answer the operator gave has to reach the session it is about.
+
+    Nothing was appended when there was no issue, so a session could not tell
+    a deliberate "no issue" from a mint that failed -- and improv-worker's
+    ``issue-check``, which asks it to tell exactly those apart, had no record
+    to read. It fell through to the branch that searches the board, which is
+    the opposite of what one of the two answers means.
+    """
+    from claude_launcher.daemon import onboard
+
+    _register_py_harness()
+    br = FakeBr()
+    board = _board(br, repo)
+    seen = {}
+    real = onboard.arrange
+
+    async def spy(plan, **kw):
+        seen[kw["name"]] = plan.task
+        return await real(plan, **kw)
+
+    async def run():
+        mgr = SessionManager(idle_threshold=0.5, scrollback=200, restore_default=True)
+        mm = MeshManager(mgr, root=tmp_path / "mesh")
+        client = await _serve(mgr, mm, board)
+        onboard.arrange = spy
+        try:
+            await client.post(
+                "/api/sessions",
+                json={"name": "a", "profile": "py", "cwd": str(repo),
+                      "task": "just do this", "beads": False},
+                headers=BEARER,
+            )
+            await client.post(
+                "/api/sessions",
+                json={"name": "b", "profile": "py", "cwd": str(repo),
+                      "beads": "none-auto"},
+                headers=BEARER,
+            )
+            assert br.calls == []                    # neither minted anything
+
+            # the older spelling keeps its meaning, under the task it came with
+            assert seen["a"].startswith("just do this\n\nno issue:")
+            assert "wait for instructions" in seen["a"]
+            assert "Do NOT search the board" in seen["a"]
+
+            # and the auto answer arrives even with no task at all: there the
+            # block IS the instruction, and a session that never receives it
+            # does the opposite of what was asked
+            assert seen["b"].startswith("no issue:")
+            assert "assign yourself" in seen["b"]
             await mgr.shutdown_all()
         finally:
             onboard.arrange = real

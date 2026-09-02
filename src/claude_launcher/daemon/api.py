@@ -3461,6 +3461,30 @@ async def _onboard_and_launch(
                     text=written,
                 ),
             )
+    else:
+        # No issue, and until now the session was told nothing about that --
+        # so it could not tell an operator's deliberate "no issue" from a
+        # mint that failed, and improv-worker's issue-check, which asks it to
+        # tell exactly those apart, had no record to read. The answer is
+        # written into the opening instead of being left to inference, and
+        # which of the two "no issue" answers it was decides what the block
+        # says (beads.compose_none_note).
+        #
+        # NONE_WAIT is added only to a session that is getting an opening
+        # anyway: a bare interactive session created with --no-issue and
+        # nothing else asked for no instructions, and "wait for instructions"
+        # is what it would do regardless. NONE_AUTO is always added, because
+        # there the block IS the instruction -- go and take work off the
+        # board -- and a session that never receives it does the opposite of
+        # what was asked.
+        none = beads_mod.none_mode(body)
+        if none and (plan.wanted or none == beads_mod.NONE_AUTO):
+            report["beads"] = {"issue": None, "mode": none}
+            plan = replace(
+                plan,
+                task=(plan.task + "\n\n" if plan.task else "")
+                + beads_mod.compose_none_note(none, session=name),
+            )
 
     opening = ""
     if plan.wanted:

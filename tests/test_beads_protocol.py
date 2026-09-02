@@ -131,12 +131,20 @@ def test_the_worker_settles_its_issue_before_branch_setup(layer):
     ``intake`` alone used to carry the issue rules, and a session that
     arrived with no assignment (no daemon issue, no ``--no-issue`` order)
     slid into work with nothing on the board. The check phase pins the
-    three verdicts and who owns each: facts are the agent's (does an issue
-    stand? did the creation request refuse one?), while adopting somebody
-    else's record and proceeding with no record at all are a person's —
-    ``chooser: user`` records the agent's pick as a proposal only, so the
-    ``none`` option confirmed by a person IS the explicit consent the
-    round journals.
+    four verdicts and who owns each: facts are the agent's (does an issue
+    stand? which board answer did the creation request give?), while adopting
+    somebody else's record and proceeding with no record at all are a
+    person's — ``chooser: user`` records the agent's pick as a proposal
+    only, so the ``none`` option confirmed by a person IS the explicit
+    consent the round journals.
+
+    The two no-issue verdicts are the fix for the answer that used to be
+    one. Both mean "nothing is on the board for you" and they say opposite
+    things about what to do with that, so a single verdict left the session
+    inferring which was meant — and a session told "no issue" went to the
+    board looking for one. ``no-issue-wait`` goes straight to work with no
+    search; ``no-issue-auto`` goes to a branch that searches and takes,
+    with no user gate, because the person answered at creation time.
     """
     path = (
         _bundled("improv-worker") if layer == "bundled"
@@ -145,10 +153,27 @@ def test_the_worker_settles_its_issue_before_branch_setup(layer):
     wf = model.load(path)
     assert wf.steps["intake"].next == "issue-check"
     check = wf.steps["issue-check"].select
-    assert check.chooser == "agent"                  # three readable facts
+    assert check.chooser == "agent"                  # four readable facts
     assert check.options["claimed"].next == "branch-setup"
-    assert check.options["no-issue-by-request"].next == "branch-setup"
+    assert check.options["no-issue-wait"].next == "branch-setup"
+    assert check.options["no-issue-auto"].next == "issue-auto"
     assert check.options["unclaimed"].next == "issue-search"
+    # the auto branch is the one that has no user gate, so it says out loud
+    # that it takes the issue itself and how
+    auto = wf.steps["issue-auto"]
+    assert auto.next == "branch-setup", (
+        f"{layer}: the auto branch takes its own issue and then joins the "
+        "same place issue-claim does — routing it through issue-claim "
+        "instead would strand the round when the board has nothing worth "
+        "taking, and routing it past branch-setup would leave it without a "
+        "branch to work on"
+    )
+    assert "--status in_progress" in auto.instructions
+    assert "JOINED" in auto.instructions
+    assert "issue-decision" in auto.instructions, (
+        f"{layer}: the branch has to say why the user gate is skipped here, "
+        "or the next reader adds it back"
+    )
     # the search files the candidates the deciding person reads
     assert wf.steps["issue-search"].next == "issue-decision"
     assert "search" in wf.steps["issue-search"].instructions
