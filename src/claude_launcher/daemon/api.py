@@ -36,6 +36,7 @@ from .. import session_commits
 from .. import spawn as spawn_mod, store, workspaces
 from .. import worktree as worktree_mod
 from . import beads as beads_mod
+from . import rag as rag_mod
 from . import (
     briefing, cflow_clock, clipty, ctxsize, onboard, prompt_presets, rebrief,
     session_input, status_checks,
@@ -212,6 +213,7 @@ def build_app(
     relay_state=None,
     shell: "clipty.ShellPty | None" = None,
     beads: "beads_mod.Board | None" = None,
+    rag: "rag_mod.RagService | None" = None,
     window: "window_mod.WindowManager | None" = None,
     gate_timeout: float = restart_gate.GATE_TIMEOUT,
     goto_timeout: float = goto_gate.GATE_TIMEOUT,
@@ -280,6 +282,10 @@ def build_app(
     board = beads if beads is not None else beads_mod.Board()
     app["beads"] = board
     manager.exit_hooks.append(board.session_exited)
+    # Semantic search over that board and this fleet (daemon/rag.py): one
+    # service per daemon, injected for tests. Off until the rag: block is
+    # filled in; its indexes are derived data under the daemon directory.
+    app["rag"] = rag if rag is not None else rag_mod.RagService(board=board, manager=manager)
     # The measurement window: one per daemon, injected for tests. Its
     # session_exited rides the same exit funnel as the board's, for the same
     # reason: a holder that dies must release without a human noticing.
@@ -492,6 +498,12 @@ def build_app(
     r.add_get("/api/beads/stream", h_beads_stream)
     r.add_get("/api/beads/{id}", h_beads_issue)
     r.add_post("/api/beads/{id}/assign", h_beads_assign)
+    # Semantic search (daemon/rag.py): the board or the fleet ranked for a
+    # query, an issue's nearest neighbours, and the index's own state.
+    r.add_get("/api/beads/{id}/related", h_beads_related)
+    r.add_get("/api/search", h_search)
+    r.add_get("/api/rag/status", h_rag_status)
+    r.add_post("/api/rag/reindex", h_rag_reindex)
     r.add_get("/api/sessions/{name}/beads", h_session_beads)
     r.add_post("/api/sessions/{name}/beads", h_session_beads_create)
     # A session's round reports: the index, and the page itself. The index is
@@ -3279,6 +3291,10 @@ async def h_sessions_list(request: web.Request) -> web.Response:
         llm_ok = briefing.llm_configured(briefing.llm_config())
     except store.StoreError:
         llm_ok = False
+    # Same guard, same reason, for the rail's search box: whether a semantic
+    # search is on offer is one toggle, not a reason to lose the list.
+    rag_service = request.app.get("rag")
+    rag_ok = bool(rag_service is not None and rag_service.configured())
     try:
         check_digests = status_checks.digests([info.get("name") or "" for info in attached])
     except status_checks.StatusCheckError:
@@ -3304,7 +3320,9 @@ async def h_sessions_list(request: web.Request) -> web.Response:
             {key: value for key, value in info.items() if key in rail_fields}
             for info in attached
         ]
-    return json_response({"sessions": attached, "llm_configured": llm_ok})
+    return json_response({
+        "sessions": attached, "llm_configured": llm_ok, "rag_configured": rag_ok,
+    })
 
 
 async def h_sessions_create(request: web.Request) -> web.Response:
@@ -5046,6 +5064,133 @@ async def h_beads_issue(request: web.Request) -> web.Response:
         "issue": issue,
         "reports": reports_mod.for_issue(issue_id),
     })
+
+
+def _int_query(request: web.Request, key: str, default: int, lo: int, hi: int) -> Optional[int]:
+    """A bounded integer query parameter; ``None`` when it does not parse."""
+    raw = request.query.get(key)
+    if raw is None or raw == "":
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        return None
+    return value if lo <= value <= hi else None
+
+
+async def _search_root(request: web.Request, kind: str):
+    """The board a search or reindex is about, from ``?cwd=`` or ``?parent=``
+    the way the candidates picker resolves it. ``(root, error_response)``."""
+    if kind != "beads":
+        return None, None
+    manager: SessionManager = request.app["manager"]
+    cwd = request.query.get("cwd") or ""
+    parent = request.query.get("parent") or ""
+    if not cwd and parent:
+        try:
+            cwd = manager.get(parent).sdef.cwd
+        except ManagerError:
+            return None, json_error(404, f"no session named {parent!r}")
+    cwd = cwd or os.getcwd()
+    root = await request.app["rag"].resolve_root(cwd)
+    if root is None:
+        return None, json_error(404, f"no board for {cwd}")
+    return root, None
+
+
+async def h_search(request: web.Request) -> web.Response:
+    """Rank a corpus for a query: ``?q=`` (required), ``?kind=beads|sessions``
+    (default beads), ``?limit=`` (1..50, default 10), ``?rerank=0`` to skip
+    the reranker, ``?wait=`` seconds to give a running index sync (0..30,
+    default 2), and for the board ``?cwd=`` or ``?parent=`` as the
+    candidates picker takes them.
+
+    The answer carries the index's coverage (``index.indexed`` of
+    ``index.total``) beside the results: a first search of a large board
+    ranks what has been embedded so far and says so, rather than blocking
+    for the ten minutes a full index takes. 400 when the ``rag:`` block is
+    not configured or the query is empty; 502 when the endpoint fails.
+    """
+    service: rag_mod.RagService = request.app["rag"]
+    kind = (request.query.get("kind") or "beads").strip()
+    if kind not in rag_mod.KINDS:
+        return json_error(400, f"kind must be one of {', '.join(rag_mod.KINDS)}")
+    query = (request.query.get("q") or "").strip()
+    if not query:
+        return json_error(400, "q is required")
+    if not service.configured():
+        return json_error(400, "rag: block not configured (base_url, api_key, embedding_model)")
+    limit = _int_query(request, "limit", 10, 1, 50)
+    wait = _int_query(request, "wait", 2, 0, 30)
+    if limit is None or wait is None:
+        return json_error(400, "limit must be 1..50 and wait 0..30")
+    rerank = (request.query.get("rerank") or "1") not in ("0", "false", "no")
+    root, err = await _search_root(request, kind)
+    if err is not None:
+        return err
+    try:
+        view = await service.search(
+            kind, query, root=root, limit=limit, rerank=rerank, wait=float(wait),
+        )
+    except rag_mod.RagError as exc:
+        return json_error(502, str(exc))
+    return json_response(view)
+
+
+async def h_beads_related(request: web.Request) -> web.Response:
+    """The issues nearest to one, by embedding — the "is this a duplicate"
+    question asked of the index. ``?cwd=`` names the board, ``?limit=``
+    (1..30, default 8) how many neighbours."""
+    service: rag_mod.RagService = request.app["rag"]
+    if not service.configured():
+        return json_error(400, "rag: block not configured (base_url, api_key, embedding_model)")
+    limit = _int_query(request, "limit", 8, 1, 30)
+    if limit is None:
+        return json_error(400, "limit must be 1..30")
+    root, err = await _search_root(request, "beads")
+    if err is not None:
+        return err
+    try:
+        view = await service.related(root, request.match_info["id"], limit=limit)
+    except rag_mod.RagError as exc:
+        return json_error(502, str(exc))
+    return json_response(view)
+
+
+async def h_rag_status(request: web.Request) -> web.Response:
+    """The search feature's state: configured or not, which models, and each
+    loaded index's coverage. Never the api key."""
+    return json_response(request.app["rag"].status())
+
+
+async def h_rag_reindex(request: web.Request) -> web.Response:
+    """Start (or restart) an index sync. Body: ``kind`` (beads|sessions,
+    default beads), ``cwd`` for the board, ``force`` to re-embed everything.
+    Returns 202 with the sync's progress; the work continues in the daemon.
+    """
+    service: rag_mod.RagService = request.app["rag"]
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    if not isinstance(body, dict):
+        body = {}
+    kind = str(body.get("kind") or "beads").strip()
+    if kind not in rag_mod.KINDS:
+        return json_error(400, f"kind must be one of {', '.join(rag_mod.KINDS)}")
+    if not service.configured():
+        return json_error(400, "rag: block not configured (base_url, api_key, embedding_model)")
+    root = None
+    if kind == "beads":
+        cwd = str(body.get("cwd") or "") or os.getcwd()
+        root = await service.resolve_root(cwd)
+        if root is None:
+            return json_error(404, f"no board for {cwd}")
+    prog = service.ensure_sync(kind, root, force=bool(body.get("force")))
+    return json_response(
+        {"kind": kind, "root": str(root) if root else None, "index": prog.view()},
+        status=202,
+    )
 
 
 async def h_session_beads(request: web.Request) -> web.Response:

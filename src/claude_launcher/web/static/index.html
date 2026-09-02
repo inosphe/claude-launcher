@@ -86,6 +86,15 @@
       </div>
       <span id="relay-badge" class="badge hidden"></span>
     </header>
+    <!-- The rail's search: typing narrows by substring (name, task, issue,
+         branch, briefing); Enter asks the daemon to rank the fleet by
+         meaning, which needs the rag: block; Esc clears. -->
+    <div id="session-search-row" class="session-search-row">
+      <input id="session-search" type="search" autocomplete="off"
+             placeholder="filter sessions — Enter searches by meaning"
+             aria-label="Filter sessions by text; Enter searches by meaning">
+      <span id="session-search-note" class="session-search-note hidden"></span>
+    </div>
     <div id="session-filters" class="session-filters" role="group"
          aria-label="Filter sessions by state">
       <button id="session-filter-current" type="button" data-filter="current"
