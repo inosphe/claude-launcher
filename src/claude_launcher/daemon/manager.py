@@ -1355,7 +1355,19 @@ class SessionManager:
         except (OSError, ValueError):
             return []
         failed: List[str] = []
-        for entry in entries if isinstance(entries, list) else []:
+        entries = entries if isinstance(entries, list) else []
+        # Said up front: the relaunches below run before the port is bound,
+        # so this line is what the log shows for the seconds a CLI spends
+        # waiting on a daemon that has not announced itself yet.
+        relaunching = sum(
+            1 for e in entries if isinstance(e, dict) and e.get("was_running")
+        )
+        if relaunching:
+            log.info(
+                "restoring %d session(s) before listening (about a second each)",
+                relaunching,
+            )
+        for entry in entries:
             try:
                 sdef = SessionDef.from_dict(entry.get("def") or {})
             except (KeyError, ValueError, TypeError):

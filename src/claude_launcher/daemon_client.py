@@ -22,8 +22,22 @@ from typing import Optional
 
 from .daemon import paths, runtime_state
 
-#: How long auto-start waits for the daemon to come up.
+#: How long auto-start waits for the daemon to come up when it cannot see
+#: the process it spawned (a monkeypatched spawn, or one that already exited
+#: -- the lock loser of a racing double start, whose winner is the one to
+#: wait for).
 START_TIMEOUT = 15.0
+
+#: How long auto-start keeps waiting *past* START_TIMEOUT while the daemon
+#: process it spawned is demonstrably still alive and still booting. The boot
+#: cost is not fixed: every session marked for restore is relaunched, one
+#: after another, before the port is bound -- measured at about 0.9s each on
+#: this machine (ConPTY spawn, transcript check, 256KB of log replayed into
+#: pyte), so eleven sessions took 15.8s from process start to "listening"
+#: (2026-09-04) and a 15s wait reported a daemon that was 0.8s from up as
+#: one that "did not come up". A fixed number is wrong again at twice the
+#: sessions; the process being alive is the fact the wait should follow.
+START_ALIVE_TIMEOUT = 120.0
 
 #: One health probe's timeout. Every other diagnosis duration derives from
 #: this (the tests' too), so "how slow is too slow" lives in exactly one place.
@@ -226,7 +240,7 @@ def unreachable_reason(report: dict) -> str:
     )
 
 
-def spawn_daemon(env: Optional[dict] = None) -> None:
+def spawn_daemon(env: Optional[dict] = None) -> Optional[subprocess.Popen]:
     """Start the daemon as a fully detached background process.
 
     ``env`` replaces the child's whole environment; ``None`` (the default)
@@ -234,6 +248,10 @@ def spawn_daemon(env: Optional[dict] = None) -> None:
     variable pass a copy with that variable added, rather than setting it on
     ``os.environ`` here — a spawn must not leave its caller's environment
     changed behind it.
+
+    Returns the child handle so :func:`ensure_running` can tell a daemon that
+    is still booting from one that is gone. Nothing waits on it: the daemon
+    outlives every CLI that starts it.
     """
     paths.daemon_dir().mkdir(parents=True, exist_ok=True)
     log = open(paths.log_file(), "ab")
@@ -245,7 +263,7 @@ def spawn_daemon(env: Optional[dict] = None) -> None:
     else:
         kwargs["start_new_session"] = True
     try:
-        subprocess.Popen(
+        return subprocess.Popen(
             [sys.executable, "-m", "claude_launcher.daemon"],
             stdin=subprocess.DEVNULL,
             stdout=log,
@@ -259,7 +277,18 @@ def spawn_daemon(env: Optional[dict] = None) -> None:
 
 
 def ensure_running(*, auto_start: bool = True) -> DaemonClient:
-    """Connect to the daemon, auto-starting it if needed."""
+    """Connect to the daemon, auto-starting it if needed.
+
+    The wait after a spawn has two clocks. :data:`START_TIMEOUT` is the
+    fixed one, and the only one when the spawned process cannot be watched
+    or has already exited (a racing double start's loser exits 0 while the
+    winner is still coming up, so an exit is not yet a failure). While the
+    spawned process is alive and not yet serving, the wait extends to
+    :data:`START_ALIVE_TIMEOUT` instead -- a daemon relaunching its sessions
+    is not a daemon that failed to start, and the operator is told once that
+    it is being waited for rather than being handed a false "did not come
+    up" seconds before it does.
+    """
     client = connect()
     if client is not None:
         return client
@@ -267,16 +296,38 @@ def ensure_running(*, auto_start: bool = True) -> DaemonClient:
         raise DaemonClientError(
             "daemon is not running (start it with 'claunch daemon start')"
         )
-    spawn_daemon()
-    deadline = time.monotonic() + START_TIMEOUT
-    while time.monotonic() < deadline:
+    proc = spawn_daemon()
+    started = time.monotonic()
+    deadline = started + START_TIMEOUT
+    alive_deadline = started + START_ALIVE_TIMEOUT
+    told_waiting = False
+    while True:
         client = connect()
         if client is not None:
             return client
+        now = time.monotonic()
+        alive = proc is not None and proc.poll() is None
+        if now >= deadline:
+            if not alive or now >= alive_deadline:
+                break
+            if not told_waiting:
+                told_waiting = True
+                print(
+                    f"daemon (pid {proc.pid}) is still starting after "
+                    f"{int(START_TIMEOUT)}s -- it relaunches every restorable "
+                    f"session before it listens; waiting up to "
+                    f"{int(START_ALIVE_TIMEOUT)}s in total",
+                    file=sys.stderr,
+                )
         time.sleep(0.1)
+    waited = int(time.monotonic() - started)
+    if proc is not None and proc.poll() is not None and proc.returncode != 0:
+        raise DaemonClientError(
+            f"daemon exited with code {proc.returncode} before coming up "
+            f"(see {paths.log_file()})"
+        )
     raise DaemonClientError(
-        f"daemon did not come up within {int(START_TIMEOUT)}s "
-        f"(see {paths.log_file()})"
+        f"daemon did not come up within {waited}s (see {paths.log_file()})"
     )
 
 
