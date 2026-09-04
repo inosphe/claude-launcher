@@ -84,17 +84,21 @@ def _at(step_id):
 def test_the_ending_holds_for_user_approval(worker_run):
     """The approval path's enforcement is the engine, not the agent's restraint.
 
-    A read-only look at the step before anyone opened the ask describes it
-    honestly (``waiting_answer`` / ``approval``, not yet put to anyone). The
-    agent's ``next`` opens it, and with no session candidates it falls to a
-    human at once: ``waiting_approval`` with nobody asked and no deadline. The
-    step's instructions are withheld and a report is refused — so an agent
-    that calls ``next`` at ``end-gate`` gets the same wall rather than
-    reaching ``end``, which is the kill.
+    A read-only look at the step before anyone opened the ask already reads
+    as the user's gate (``waiting_approval`` / ``ask``): the ask has no
+    candidates, so there is nobody for ``next`` to route it to, and reporting
+    it as "not yet put to anyone" made the daemon's clocks nag the driver to
+    call ``next`` for as long as the approval took (issue ``claunch-ueku``;
+    ``engine._unopened_human_gate``). The agent's ``next`` opens it for the
+    record, and it falls to a human at once: ``waiting_approval`` with nobody
+    asked and no deadline. The step's instructions are withheld and a report
+    is refused — so an agent that calls ``next`` at ``end-gate`` gets the
+    same wall rather than reaching ``end``, which is the kill.
     """
     payload = _at("end-gate")
-    assert payload["status"] == "waiting_answer"
-    assert payload["reason"] == "approval"
+    assert payload["status"] == "waiting_approval"
+    assert payload["reason"] == "ask"
+    assert "not been opened for the record yet" in payload["note"]
     assert "instructions" not in payload
 
     payload = engine.next_step()

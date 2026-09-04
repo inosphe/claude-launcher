@@ -949,6 +949,83 @@ def _settled_by_person(
         )
 
 
+def _unopened_human_gate(
+    base: dict,
+    delegate: Delegate,
+    *,
+    kind: str,
+    prompt: str,
+    options: Optional[List[dict]] = None,
+) -> Optional[dict]:
+    """A gate-shaped ask described before ``next`` has opened it, or ``None``.
+
+    An ask with no candidates under ``otherwise: human`` is the form
+    ``gate:`` deprecates into: nobody is asked, and the only answer that
+    moves the run is a person's. Opening it is still a write ``next``
+    performs — so between arriving here without ``next`` (``goto``, a
+    person confirming a select from the CLI or the dashboard) and the
+    driver's next call, the read-only ``status`` used to describe this as
+    ``waiting_answer`` that "has not been put to anyone yet".
+
+    That description was true and useless. True: the ask record did not
+    exist. Useless: the daemon's clocks read that shape as *a delegated
+    decision the driver still has to route* (:func:`daemon.cflow_clock
+    ._ask_reached_nobody`) and typed "call 'next'" at a busy driver every
+    reminder interval, while ``next`` could only ever open the same gate in
+    front of the same person. A driver that answered by reading ``status``
+    and waiting for the approval was nagged for as long as the approval took
+    (issue ``claunch-ueku``, the improv-worker ``end-gate``). So this shape
+    is reported as the gate it is — the same payload the opened ask produces
+    once it has fallen to a human — and every clock stays out of it, exactly
+    as they stay out of ``gate:``.
+
+    The two shapes that DO need the driver keep their old reading: a
+    candidate list (``next`` is what routes it) and ``otherwise: self``
+    (``next`` is what journals the decision unmade and hands out the step).
+    """
+    if delegate.candidates or delegate.otherwise != model.OTHERWISE_HUMAN:
+        return None
+    note = (
+        "this decision has not been opened for the record yet -- the "
+        "driver's 'next' does that, and it changes nothing about who "
+        "answers: nobody is delegated to, so it is a person's from the start"
+    )
+    if kind == "branch":
+        return {
+            **base,
+            "status": "waiting_selection",
+            "prompt": prompt,
+            "options": list(options or []),
+            "how_to_unblock": (
+                f"a human must choose with 'claunch cflow select <option>' "
+                f"(inside a chat session: '! claunch cflow select <option>'"
+                f"{_t_hint()}) or an option button on the daemon web "
+                f"dashboard. "
+                + _asking_well(
+                    "Name the decision in one line, then say which option "
+                    "you recommend."
+                )
+            ),
+            "note": note,
+        }
+    return {
+        **base,
+        "status": "waiting_approval",
+        "reason": "ask",
+        "gate": prompt,
+        "how_to_unblock": (
+            f"a human must approve: 'claunch cflow approve' (inside a chat "
+            f"session: '! claunch cflow approve'{_t_hint()}) or the Approve "
+            f"button on the daemon web dashboard; the agent cannot approve. "
+            + _asking_well(
+                "Say plainly what you are asking them to approve, and show "
+                "the work it would be approved on."
+            )
+        ),
+        "note": note,
+    }
+
+
 def _ask_payload(base: dict, ask: dict) -> dict:
     """How an open ask is described to whoever reads the run.
 
@@ -1761,7 +1838,16 @@ def _position_payload(
             if not mutate:
                 # A read-only look between arriving here and the agent's next
                 # call. Describe the position honestly rather than opening a
-                # question as a side effect of somebody watching.
+                # question as a side effect of somebody watching. Honestly
+                # includes the gate-shaped ask: with nobody to route to it is
+                # a person's approval already, not a question awaiting its
+                # routing (see `_unopened_human_gate`).
+                gate = _unopened_human_gate(
+                    base, step.ask.delegate, kind="approval",
+                    prompt=step.ask.prompt,
+                )
+                if gate is not None:
+                    return gate
                 return {
                     **base,
                     "status": "waiting_answer",
@@ -1899,6 +1985,15 @@ def _position_payload(
             ask = _current_ask(state, step.id, visit, "branch")
             if ask is None:
                 if not mutate:
+                    # Same read-only honesty as the entry approval above: a
+                    # chooser with nobody to delegate to is the user's
+                    # selection from the start.
+                    gate = _unopened_human_gate(
+                        base, step.select.delegate, kind="branch",
+                        prompt=step.select.prompt, options=options,
+                    )
+                    if gate is not None:
+                        return gate
                     return {
                         **base,
                         "status": "waiting_answer",
