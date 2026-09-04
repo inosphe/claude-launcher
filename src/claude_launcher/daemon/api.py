@@ -10,6 +10,7 @@ browser history.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import functools
 import json
 import os
@@ -286,6 +287,23 @@ def build_app(
     # service per daemon, injected for tests. Off until the rag: block is
     # filled in; its indexes are derived data under the daemon directory.
     app["rag"] = rag if rag is not None else rag_mod.RagService(board=board, manager=manager)
+    # Its producers: every board write the daemon makes, every registry
+    # change, every briefing the cache persists. All three are no-ops until
+    # the block is configured; the watcher for the writes ``claunch beads``
+    # makes without the daemon starts with the app and stops with it, and the
+    # boot catch-up rides its first tick. The briefing hook is module-level,
+    # so it is taken back at shutdown rather than left for the next app.
+    rag_service: rag_mod.RagService = app["rag"]
+    board.write_hooks.append(rag_service.on_board_write)
+    # Tests hand in registries that carry only exit_hooks; the fleet corpus
+    # then follows endings alone, which is all such a registry has.
+    change_hooks = getattr(manager, "change_hooks", None)
+    if change_hooks is not None:
+        change_hooks.append(rag_service.on_sessions_changed)
+    manager.exit_hooks.append(rag_service.on_sessions_changed)
+    briefing.persist_hooks.append(rag_service.on_sessions_changed)
+    app.on_startup.append(_start_rag)
+    app.on_shutdown.append(_stop_rag)
     # The measurement window: one per daemon, injected for tests. Its
     # session_exited rides the same exit funnel as the board's, for the same
     # reason: a holder that dies must release without a human noticing.
@@ -539,6 +557,21 @@ async def _close_cflow_nudges(app: web.Application) -> None:
         task.cancel()
     if tasks:
         await asyncio.gather(*tasks, return_exceptions=True)
+
+
+async def _start_rag(app: web.Application) -> None:
+    """Start the search index's board watcher (its first tick is the boot
+    catch-up: every known board and the fleet are queued)."""
+    app["rag"].start()
+
+
+async def _stop_rag(app: web.Application) -> None:
+    """Cancel the watcher, the consumer and any sync in flight, and take the
+    module-level briefing hook back."""
+    service = app["rag"]
+    with contextlib.suppress(ValueError):
+        briefing.persist_hooks.remove(service.on_sessions_changed)
+    await service.shutdown()
 
 
 async def _close_cli_shell(app: web.Application) -> None:

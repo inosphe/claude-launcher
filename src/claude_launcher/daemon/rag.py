@@ -25,18 +25,32 @@ minutes and an incremental one at a second or two per changed issue, which is
 why syncing is a background task and a search reports how much of the corpus
 it covered rather than waiting for all of it.
 
+The index follows its corpora rather than waiting for a search. Producers
+call :meth:`RagService.enqueue` when something changed — the daemon's own
+board writes (``Board.br``, through its write hooks), a watcher that stats
+each known board's ``.beads`` files for the writes ``claunch beads`` makes
+without the daemon, and the session registry and briefing cache whenever they
+persist — and one consumer task drains the queue, one corpus at a time. A key
+already waiting is joined, not queued twice; a key that arrives while its own
+sync is running is queued for one more pass, so a change that landed mid-sync
+is not lost. Every pass is the same content-hash diff, so a corpus synced five
+times over embeds each changed document once.
+
 Configuration is the ``rag:`` block (``store.rag_config``). An empty api key
-means the feature is off. The key leaves this module only as the
-``Authorization`` header of the endpoint call — never in an error message,
-never in status.
+means the feature is off: every producer is a no-op and the queue stays empty
+until the block is filled in, at which point the watcher's next tick catches
+up. The key leaves this module only as the ``Authorization`` header of the
+endpoint call — never in an error message, never in status.
 """
 
 from __future__ import annotations
 
 import asyncio
 import base64
+import contextlib
 import hashlib
 import json
+import logging
 import math
 import re
 import sys
@@ -48,7 +62,7 @@ from typing import Any, Callable, Dict, Iterable, List, NamedTuple, Optional, Tu
 
 import aiohttp
 
-from .. import atomic, store
+from .. import atomic, cli_beads, store
 from . import paths
 
 try:
@@ -67,6 +81,8 @@ except ImportError:  # Python < 3.10, or truststore not installed
 #: ``None`` when ``truststore`` is unavailable, in which case callers fall
 #: back to aiohttp's default (``ssl.create_default_context()``).
 _OS_TRUST_CONTEXT = _truststore.SSLContext(_ssl.PROTOCOL_TLS_CLIENT) if _truststore else None
+
+log = logging.getLogger("claunch.daemon.rag")
 
 #: Text handed to the embedder per chunk, in characters. About 1000-1500
 #: tokens of mixed Korean and English, well under the endpoint's 40960-token
@@ -512,6 +528,9 @@ class Progress:
         self.error: Optional[str] = None
         self.started_at: Optional[str] = None
         self.finished_at: Optional[str] = None
+        #: How many sync passes ran for this corpus — the number the queue's
+        #: coalescing is measured by (five enqueues of one key is one run).
+        self.runs = 0
 
     def view(self) -> dict:
         return {
@@ -522,10 +541,33 @@ class Progress:
             "error": self.error,
             "started_at": self.started_at,
             "finished_at": self.finished_at,
+            "runs": self.runs,
         }
 
 
 KINDS = ("beads", "sessions")
+
+#: The watcher's sleep while the feature is off or ``watch_interval`` is 0:
+#: it still ticks, because a ``rag:`` block filled in later is noticed by
+#: exactly this tick, but it stats nothing until then.
+WATCH_IDLE = 30.0
+
+#: The board files whose mtime/size a CLI write moves. Both are watched:
+#: ``br`` keeps the sqlite db and, when export is on, the jsonl beside it.
+BOARD_FILES = (cli_beads.DB_NAME, cli_beads.JSONL_NAME)
+
+
+def board_stamp(root: Path) -> Tuple:
+    """``(mtime_ns, size)`` per board file under ``root`` — ``None`` for a
+    file that is not there. Equal stamps mean nothing wrote the board."""
+    out = []
+    for name in BOARD_FILES:
+        try:
+            st = (root / cli_beads.BEADS_DIR / name).stat()
+            out.append((st.st_mtime_ns, st.st_size))
+        except OSError:
+            out.append(None)
+    return tuple(out)
 
 
 class RagService:
@@ -556,6 +598,27 @@ class RagService:
         self._indexes: Dict[str, VectorIndex] = {}
         self._progress: Dict[str, Progress] = {}
         self._roots: Dict[str, Optional[Path]] = {}
+        # -- the queue (see the module docstring) --
+        #: Keys waiting for the consumer, in arrival order; ``_pending`` is
+        #: the same set with what each key names, so a second enqueue of a
+        #: waiting key joins it instead of queueing it again.
+        self._queue: "asyncio.Queue[str]" = asyncio.Queue()
+        self._pending: Dict[str, Tuple[str, Optional[Path]]] = {}
+        self._consumer: Optional[asyncio.Task] = None
+        self._watcher: Optional[asyncio.Task] = None
+        #: Board roots the watcher stats: every root a producer or a search
+        #: ever named, plus the ones the board resolved for a session.
+        self._watched: Dict[str, Path] = {}
+        self._stamps: Dict[str, Tuple] = {}
+        #: Whether the last watcher tick saw the feature configured — the edge
+        #: a later-filled ``rag:`` block is caught on.
+        self._armed = False
+        #: Set by :meth:`shutdown`; a hook that fires after it (a late board
+        #: write) must not start a consumer on a loop that is closing.
+        self._closed = False
+        self.consumed = 0
+        self.last_consumed_at: Optional[str] = None
+        self.last_consumed_key: Optional[str] = None
 
     # -- config --------------------------------------------------------- #
     def config(self) -> dict:
@@ -650,6 +713,7 @@ class RagService:
         prog.error = None
         prog.started_at = _now_iso()
         prog.finished_at = None
+        prog.runs += 1
         try:
             index = self._index(kind, root, cfg)
             docs = await self._docs(kind, root)
@@ -715,6 +779,244 @@ class RagService:
             return
         except Exception:
             return
+
+    # -- the queue: producers ------------------------------------------- #
+    def enqueue(self, kind: str, root: Optional[Path] = None) -> bool:
+        """Ask for a sync of one corpus; ``True`` when it was queued.
+
+        ``False`` means nothing happened: the feature is off (the queue must
+        not grow for a daemon nobody configured search on), no event loop is
+        running to consume it, or the same key is already waiting — the
+        request joins that one. A key whose sync is *running* is not
+        waiting, so it queues again and runs once more after the current
+        pass: a change that landed mid-sync gets its own pass.
+        """
+        if kind not in KINDS:
+            raise ValueError(f"unknown corpus {kind!r}")
+        if kind == "sessions":
+            root = None
+        elif root is None:
+            return False
+        if root is not None:
+            # Remembered even while the feature is off: the catch-up that
+            # runs when the block is filled in should cover this board too.
+            self._watched[str(root)] = root
+        if self._closed or not self.configured():
+            return False
+        key = self._key(kind, root)
+        if key in self._pending:
+            return False
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return False
+        self._pending[key] = (kind, root)
+        self._queue.put_nowait(key)
+        self._ensure_consumer()
+        return True
+
+    def on_board_write(self, root: Path) -> None:
+        """The board's write hook: the daemon just wrote ``root``'s board
+        through ``br``. Re-stamp the files first so the watcher does not
+        queue the same write a second time on its next tick."""
+        try:
+            self._stamps[str(root)] = board_stamp(root)
+        except Exception:
+            pass
+        self.enqueue("beads", root)
+
+    def on_sessions_changed(self, *_args) -> None:
+        """The registry's and the briefing cache's hook (either signature)."""
+        self.enqueue("sessions")
+
+    def watch(self, root: Optional[Path]) -> None:
+        """Have the watcher stat ``root``'s board from now on."""
+        if root is not None and self.board is not None and self.board.has_board(root):
+            self._watched[str(root)] = root
+
+    def known_roots(self) -> List[Path]:
+        """Every board root this daemon knows: the ones a session's directory
+        resolved to, the ones a search or a producer named."""
+        roots: Dict[str, Path] = dict(self._watched)
+        if self.board is not None:
+            for root in getattr(self.board, "_roots", {}).values():
+                if root is not None and self.board.has_board(root):
+                    roots.setdefault(str(root), root)
+        for key, root in self._roots.items():
+            if key != "sessions" and root is not None:
+                roots.setdefault(str(root), root)
+        return list(roots.values())
+
+    async def catch_up(self) -> int:
+        """Queue every known board and the fleet — at boot, and when the
+        ``rag:`` block turns up filled in. The number of keys queued."""
+        if not self.configured():
+            return 0
+        if self.board is not None and self.manager is not None:
+            cwds = []
+            for session in self.manager.list():
+                sdef = getattr(session, "sdef", None)
+                cwd = getattr(sdef, "cwd", None)
+                if cwd:
+                    cwds.append(str(cwd))
+            resolve = getattr(self.board, "_resolve_roots", None)
+            if resolve is not None and cwds:
+                try:
+                    await resolve(cwds)
+                except Exception:
+                    pass
+        queued = 0
+        for root in self.known_roots():
+            self._stamps.setdefault(str(root), board_stamp(root))
+            if self.enqueue("beads", root):
+                queued += 1
+        if self.enqueue("sessions"):
+            queued += 1
+        return queued
+
+    # -- the queue: consumer and watcher -------------------------------- #
+    def start(self) -> None:
+        """Start the watcher (and, at once, the boot catch-up). The consumer
+        starts itself on the first enqueue, so a service that never sees one
+        never runs a task."""
+        self._closed = False
+        if self._watcher is None:
+            self._watcher = asyncio.get_running_loop().create_task(self._watch_loop())
+
+    async def shutdown(self) -> None:
+        """Cancel the watcher, the consumer and any sync in flight. A sync
+        saves after every batch, so the next daemon resumes where this one
+        stopped."""
+        self._closed = True
+        tasks = [self._watcher, self._consumer]
+        self._watcher = self._consumer = None
+        tasks.extend(p.task for p in self._progress.values() if p.task is not None)
+        for task in tasks:
+            if task is not None and not task.done():
+                task.cancel()
+        for task in tasks:
+            if task is not None:
+                with contextlib.suppress(asyncio.CancelledError, Exception):
+                    await task
+        self._pending.clear()
+        while not self._queue.empty():
+            self._queue.get_nowait()
+
+    def _ensure_consumer(self) -> None:
+        if self._consumer is None or self._consumer.done():
+            self._consumer = asyncio.get_running_loop().create_task(self._consume_loop())
+
+    async def _consume_loop(self) -> None:
+        while True:
+            key = await self._queue.get()
+            # Out of pending BEFORE the pass runs: an enqueue that lands while
+            # this pass reads the corpus queues the key again, behind it.
+            kind, root = self._pending.pop(key, (None, None))
+            if kind is None:
+                continue
+            try:
+                await self._consume(kind, root)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                log.exception("rag: sync of %s failed", key)
+            finally:
+                self.consumed += 1
+                self.last_consumed_at = _now_iso()
+                self.last_consumed_key = key
+
+    async def _consume(self, kind: str, root: Optional[Path]) -> None:
+        prog = self._progress_of(self._key(kind, root))
+        # A pass a search started may be mid-flight; it read the corpus before
+        # this key was queued, so wait it out and run one of our own after.
+        task = prog.task
+        if task is not None and not task.done():
+            with contextlib.suppress(Exception):
+                await asyncio.shield(task)
+        if not self.configured():
+            return
+        prog = self.ensure_sync(kind, root)
+        task = prog.task
+        if task is not None:
+            with contextlib.suppress(Exception):
+                await asyncio.shield(task)
+
+    async def drain(self, budget: float = 30.0) -> None:
+        """Wait until the queue is empty and no pass is running (tests, and
+        the reindex route's callers that want a settled index)."""
+        deadline = time.monotonic() + budget
+        while time.monotonic() < deadline:
+            busy = bool(self._pending) or not self._queue.empty()
+            busy = busy or any(p.task is not None and not p.task.done() for p in self._progress.values())
+            if not busy:
+                return
+            await asyncio.sleep(0.01)
+
+    def watch_interval(self) -> float:
+        cfg = self.config()
+        try:
+            return max(0.0, float(cfg.get("watch_interval") or 0.0))
+        except (TypeError, ValueError):
+            return float(store.RAG_DEFAULTS["watch_interval"])
+
+    async def _watch_loop(self) -> None:
+        # The boot catch-up rides the watcher's first tick so a daemon that
+        # restarted fills the gap the previous one left.
+        first = True
+        while True:
+            try:
+                interval = self.watch_interval()
+                configured = self.configured()
+                if configured and (first or not self._armed):
+                    await self.catch_up()
+                self._armed = configured
+                first = False
+                if configured and interval > 0:
+                    for root in await asyncio.to_thread(self._watch_tick):
+                        self._board_moved(root)
+                    await asyncio.sleep(interval)
+                else:
+                    await asyncio.sleep(interval if interval > 0 else WATCH_IDLE)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                log.exception("rag: board watcher tick failed")
+                await asyncio.sleep(WATCH_IDLE)
+
+    def _watch_tick(self) -> List[Path]:
+        """One pass over the watched boards; the roots whose files moved.
+        Blocking on stat only — call it in a thread. A root seen for the
+        first time is stamped, not reported: the boot catch-up queued it."""
+        moved: List[Path] = []
+        for root in self.known_roots():
+            key = str(root)
+            stamp = board_stamp(root)
+            before = self._stamps.get(key)
+            self._stamps[key] = stamp
+            if before is not None and stamp != before:
+                moved.append(root)
+        return moved
+
+    def _board_moved(self, root: Path) -> None:
+        """A write the daemon did not make: its listing cache is stale too."""
+        if self.board is not None:
+            invalidate = getattr(self.board, "invalidate", None)
+            if invalidate is not None:
+                invalidate(root)
+        self.enqueue("beads", root)
+
+    def queue_view(self) -> dict:
+        return {
+            "depth": self._queue.qsize(),
+            "pending": sorted(self._pending),
+            "consumer": bool(self._consumer is not None and not self._consumer.done()),
+            "watcher": bool(self._watcher is not None and not self._watcher.done()),
+            "watch_interval": self.watch_interval(),
+            "watched": sorted(self._watched),
+            "consumed": self.consumed,
+            "last_consumed_at": self.last_consumed_at,
+            "last_consumed_key": self.last_consumed_key,
+        }
 
     # -- search --------------------------------------------------------- #
     async def search(
@@ -862,6 +1164,7 @@ class RagService:
             "verify_tls": bool(cfg.get("verify_tls", True)),
             "dimensions": int(cfg.get("dimensions") or 0),
             "indexes": indexes,
+            "queue": self.queue_view(),
         }
 
 

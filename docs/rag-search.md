@@ -36,6 +36,7 @@ rag:
   batch: 16             # texts per embeddings request
   candidates: 40        # vector hits widened before reranking
   rerank_top: 12        # of those, how many the reranker scores
+  watch_interval: 30    # seconds between checks of each board's .beads files; 0 = off
 ```
 
 The feature is on when `base_url`, `api_key` and `embedding_model` are all
@@ -86,6 +87,36 @@ write-up matches on any part.
    batch (an interrupted sync keeps what it did). One task per corpus; a
    search starts one if none is running and waits at most `?wait=` seconds
    (default 2) before answering from what is indexed.
+3a. **The queue.** The index does not wait for a search: producers call
+   `RagService.enqueue(kind, root)` when a corpus changed, and one consumer
+   task drains the queue a key at a time, running `ensure_sync` and waiting
+   for it. A key already waiting is joined (five enqueues of one board is
+   one pass); a key enqueued while its own pass is running is queued once
+   more behind it, so a change that landed mid-sync gets its own pass. A
+   pass is the same content-hash diff, so repeated passes embed nothing new
+   (idempotent). The producers:
+   - the daemon's board writes — `Board.br` calls its `write_hooks` after
+     every write that succeeded (create, update, close, comments add, dep
+     add; `create_for`, `assign`, `ensure_issue`, the exit sweep all go
+     through it), and the service re-stamps the board files there so the
+     watcher does not queue the same write again;
+   - the writes the daemon did not make — `claunch beads …` runs `br`
+     itself, so a watcher stats `<root>/.beads/beads.db` and `issues.jsonl`
+     every `watch_interval` seconds for every board the daemon knows (the
+     roots sessions' directories resolve to, plus any a search or a producer
+     named), drops the board's listing cache (`Board.invalidate`) and
+     enqueues when the mtime or size moved;
+   - the fleet — `SessionManager.change_hooks` fires after every `persist`
+     (a session created, exited, re-parented), `exit_hooks` on an ending,
+     and `briefing.persist_hooks` when a briefing is cached.
+   With the `rag:` block unfilled every producer is a no-op and the queue
+   stays empty; the watcher still ticks (every 30 s) so a block filled in
+   later is caught on its next tick, which queues every known board and the
+   fleet — the same catch-up a daemon start runs. `app.on_shutdown` cancels
+   the watcher, the consumer and any pass in flight. `GET /api/rag/status`
+   carries the queue (`depth`, `pending`, `consumer`, `watcher`,
+   `watch_interval`, `watched`, `consumed`, `last_consumed_at`,
+   `last_consumed_key`) and the settings card shows it in one line.
 4. **Search.** Embed the query once → cosine over every stored vector, best
    chunk per document → widen with lexical hits (id or title containing
    every query word — the exact-match half an embedding is weakest at) →
@@ -102,7 +133,7 @@ write-up matches on any part.
 |---|---|
 | `GET /api/search?q=&kind=beads\|sessions&cwd=\|parent=&limit=&rerank=&wait=` | ranked results + `index: {total, indexed, pending, syncing, error}` + `timing` |
 | `GET /api/beads/{id}/related?cwd=&limit=` | nearest issues |
-| `GET /api/rag/status` | configured, host, models, each loaded index's coverage and root |
+| `GET /api/rag/status` | configured, host, models, each loaded index's coverage and root, the queue (depth, pending keys, last consume, watcher interval) |
 | `POST /api/rag/reindex` `{kind, cwd, force}` | 202, starts a sync |
 | `GET /api/sessions` | now also `rag_configured` |
 
@@ -181,7 +212,12 @@ made for.
   hashes, index round-trip/diff/rank/neighbours/lexical, the client's wire
   shapes against a local aiohttp endpoint (bearer header, `dimensions`,
   batching, error text without the key), the service's incremental sync and
-  ranking, the sessions corpus, the routes' contract, the CLI's formatting.
+  ranking, the sessions corpus, the routes' contract, the CLI's formatting;
+  the queue — one key enqueued five times runs once, an enqueue mid-sync
+  runs once more, a second pass embeds nothing, the board-file watcher
+  catches a write made behind the daemon's back, `Board.br` writes reach
+  the queue and reads do not, an unconfigured block queues nothing, the
+  app's shutdown hook cancels the tasks.
 - `tests/web/ragsearch_check.js` — the rail matcher and note, the pickers'
   semantic order and lead row, the Beads result list and multi-board merge,
   the markup and the mobile font rule.

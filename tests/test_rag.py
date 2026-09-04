@@ -118,6 +118,8 @@ class FakeBr:
         args = [a for a in argv if a != "--json"]
         if "list" in args:
             return 0, json.dumps(self.issues), ""
+        if "update" in args:
+            return 0, "{}", ""
         return 1, "", "unknown"
 
 
@@ -190,6 +192,14 @@ def test_rag_config_reads_the_store():
     store.update(lambda doc: doc.update({"rag": {
         "base_url": "https://h/v1", "api_key": "k", "embedding_model": "e"}}))
     assert store.rag_config()["embedding_model"] == "e"
+
+
+def test_rag_config_watch_interval_zero_is_off_not_default():
+    assert store.rag_config({})["watch_interval"] == store.RAG_DEFAULTS["watch_interval"]
+    assert store.rag_config({"rag": {"watch_interval": 0}})["watch_interval"] == 0.0
+    assert store.rag_config({"rag": {"watch_interval": "5"}})["watch_interval"] == 5.0
+    assert store.rag_config({"rag": {"watch_interval": -3}})["watch_interval"] == 0.0
+    assert store.rag_config({"rag": {"watch_interval": "x"}})["watch_interval"] == 30.0
 
 
 # --------------------------------------------------------------------------- #
@@ -443,6 +453,306 @@ def test_sessions_corpus_reads_the_registry_and_briefing_cache(tmp_path):
             assert (tmp_path / "rag" / "sessions.json").is_file()
         finally:
             await server.close()
+
+    asyncio.run(run())
+
+
+# --------------------------------------------------------------------------- #
+# the queue: producers, one consumer, the board-file watcher
+# --------------------------------------------------------------------------- #
+def _embedded_docs(ep):
+    """Every text the endpoint was asked to embed, in order."""
+    return [t for call in ep.embed_calls for t in call["input"]]
+
+
+def test_queue_coalesces_same_key_and_sync_is_idempotent(tmp_path, repo):
+    """(a) five enqueues of one key run one sync; (c) a second sync of an
+    unchanged corpus makes no embedding call; (f) unconfigured, the queue
+    does not grow."""
+    ep = Endpoint()
+    br = FakeBr(_issues())
+
+    async def run():
+        server = await _start_endpoint(ep)
+        try:
+            cfg_box = {"cfg": dict(store.RAG_DEFAULTS)}
+            svc = rag.RagService(board=_board(br, repo), config=lambda: cfg_box["cfg"],
+                                 root_dir=tmp_path / "rag")
+            # (f) off: every producer is a no-op, nothing is queued, no task
+            assert svc.enqueue("beads", repo) is False
+            assert svc.enqueue("sessions") is False
+            svc.on_board_write(repo)
+            svc.on_sessions_changed()
+            assert svc.queue_view()["depth"] == 0 and svc.queue_view()["pending"] == []
+            assert svc._consumer is None
+            # (a) on: five enqueues before the consumer runs → one pass
+            cfg_box["cfg"] = _cfg(server)
+            results = [svc.enqueue("beads", repo) for _ in range(5)]
+            assert results == [True, False, False, False, False]
+            assert svc.queue_view()["depth"] == 1
+            await svc.drain()
+            prog = svc._progress_of(svc._key("beads", repo))
+            assert prog.runs == 1 and prog.indexed == 3 and prog.pending == 0
+            assert len(_embedded_docs(ep)) == 3
+            assert svc.queue_view()["consumed"] == 1
+            assert svc.queue_view()["last_consumed_key"] == svc._key("beads", repo)
+            assert svc.queue_view()["last_consumed_at"]
+            # (c) idempotent: another pass over the same board embeds nothing
+            svc.board._cache.clear()
+            assert svc.enqueue("beads", repo) is True
+            await svc.drain()
+            assert prog.runs == 2 and len(_embedded_docs(ep)) == 3
+            # and a search afterwards answers from the index the queue built
+            view = await svc.search("beads", "relay", root=repo, limit=1, rerank=False, wait=0)
+            assert view["results"][0]["id"] == "x-3"
+            assert len(_embedded_docs(ep)) == 4  # the query only
+        finally:
+            await svc.shutdown()
+            await server.close()
+
+    asyncio.run(run())
+
+
+def test_queue_reruns_a_key_enqueued_mid_sync(tmp_path, repo):
+    """(b) an enqueue that lands while its key's sync is running is not
+    lost: the key runs once more after the current pass."""
+    ep = Endpoint()
+    issues = _issues()
+    br = FakeBr(issues)
+
+    async def run():
+        server = await _start_endpoint(ep)
+        try:
+            cfg = _cfg(server)
+            svc = rag.RagService(board=_board(br, repo), config=lambda: cfg, root_dir=tmp_path / "rag")
+            gate = asyncio.Event()
+            reading = asyncio.Event()
+            real_docs = svc._docs
+
+            async def slow_docs(kind, root):
+                reading.set()
+                await gate.wait()
+                return await real_docs(kind, root)
+
+            svc._docs = slow_docs
+            assert svc.enqueue("beads", repo) is True
+            await asyncio.wait_for(reading.wait(), 5)
+            # mid-sync: the key is no longer pending, so it queues again
+            assert svc.queue_view()["pending"] == []
+            assert svc.enqueue("beads", repo) is True
+            assert svc.enqueue("beads", repo) is False  # joins the waiting one
+            assert svc.queue_view()["depth"] == 1
+            # the change that landed mid-sync
+            issues.append({"id": "x-4", "title": "mesh relay retry", "status": "open",
+                           "priority": 2, "labels": [], "description": "mesh", "updated_at": "z"})
+            br.issues = issues
+            svc.board._cache.clear()
+            gate.set()
+            await svc.drain()
+            prog = svc._progress_of(svc._key("beads", repo))
+            assert prog.runs == 2
+            index = svc._index("beads", repo, cfg)
+            assert "x-4" in index.entries
+            # one key never syncs twice at once: the second pass started after the first ended
+            assert svc.queue_view()["consumed"] == 2
+        finally:
+            await svc.shutdown()
+            await server.close()
+
+    asyncio.run(run())
+
+
+def test_board_write_hook_enqueues_and_restamps(tmp_path, repo):
+    """(e) a ``br`` write through Board.br reaches the queue (and a read
+    does not); the daemon's own write does not trip the watcher again."""
+    ep = Endpoint()
+    br = FakeBr(_issues())
+
+    async def run():
+        server = await _start_endpoint(ep)
+        try:
+            cfg = _cfg(server)
+            board = _board(br, repo)
+            svc = rag.RagService(board=board, config=lambda: cfg, root_dir=tmp_path / "rag")
+            board.write_hooks.append(svc.on_board_write)
+            seen = []
+            board.write_hooks.append(seen.append)
+            await board.issues(repo)  # a read
+            assert seen == [] and svc.queue_view()["depth"] == 0
+            (repo / ".beads" / "beads.db").write_bytes(b"written by br")
+            await board.br(repo, ["update", "x-1", "--status", "closed"], actor="s1")
+            assert seen == [repo]
+            assert svc.queue_view()["pending"] == [svc._key("beads", repo)]
+            # the stamp taken after the write equals the file now, so the
+            # watcher's next tick sees nothing to queue
+            assert svc._stamps[str(repo)] == rag.board_stamp(repo)
+            assert svc._watch_tick() == []
+            await svc.drain()
+            assert svc._progress_of(svc._key("beads", repo)).runs == 1
+        finally:
+            await svc.shutdown()
+            await server.close()
+
+    asyncio.run(run())
+
+
+def test_watcher_catches_a_cli_write_by_mtime(tmp_path, repo):
+    """(d) a write that bypassed the daemon (``claunch beads …``) moves
+    ``beads.db``; the watcher sees it within one interval, drops the board's
+    cache and the new issue lands in the index."""
+    import os
+    ep = Endpoint()
+    issues = _issues()
+    br = FakeBr(issues)
+
+    async def run():
+        server = await _start_endpoint(ep)
+        try:
+            cfg = _cfg(server, watch_interval=0.05)
+            board = _board(br, repo)
+            svc = rag.RagService(board=board, config=lambda: cfg, root_dir=tmp_path / "rag")
+            svc.watch(repo)
+            svc.start()
+            # the boot catch-up on the first tick indexes the board as it is
+            await asyncio.sleep(0.15)
+            await svc.drain()
+            assert svc.queue_view()["watcher"] is True
+            assert svc.queue_view()["watch_interval"] == 0.05
+            prog = svc._progress_of(svc._key("beads", repo))
+            assert prog.runs >= 1 and prog.total == 3
+            runs_before = prog.runs
+            # a CLI write: the board answers differently and the db file moved
+            await board.issues(repo)  # warm the daemon's cache with the old listing
+            issues.append({"id": "x-9", "title": "window reservation fairness", "status": "open",
+                           "priority": 2, "labels": [], "description": "window", "updated_at": "z"})
+            br.issues = issues
+            db = repo / ".beads" / "beads.db"
+            db.write_bytes(b"cli wrote")
+            os.utime(db, ns=(time.time_ns() + 2_000_000_000,) * 2)
+            started = time.monotonic()
+            for _ in range(200):
+                await asyncio.sleep(0.02)
+                index = svc._indexes.get(svc._key("beads", repo))
+                if index is not None and "x-9" in index.entries and not svc._pending:
+                    break
+            elapsed = time.monotonic() - started
+            assert "x-9" in svc._index("beads", repo, cfg).entries
+            assert elapsed < 2.0
+            assert prog.runs > runs_before and prog.total == 4
+            # only the new issue was embedded
+            assert _embedded_docs(ep)[-1].startswith("window reservation")
+        finally:
+            await svc.shutdown()
+            await server.close()
+
+    asyncio.run(run())
+
+
+def test_sessions_producers_follow_the_registry_and_briefing_cache(tmp_path):
+    """The fleet corpus is queued when the registry persists and when a
+    briefing is cached — the same hook, either signature."""
+    from claude_launcher.daemon import briefing
+    ep = Endpoint()
+
+    class Sess:
+        def __init__(self, name):
+            class Sdef:
+                pass
+            self.sdef = Sdef()
+            self.sdef.name, self.sdef.task, self.sdef.identity = name, "kanban lanes", None
+            self.sdef.role = self.sdef.issue = None
+            self.sdef.cwd = "/r"
+
+        def status(self):
+            return "idle"
+
+    class Manager:
+        def __init__(self):
+            self.sessions = [Sess("s1")]
+
+        def list(self):
+            return list(self.sessions)
+
+    async def run():
+        server = await _start_endpoint(ep)
+        try:
+            cfg = _cfg(server)
+            mgr = Manager()
+            svc = rag.RagService(manager=mgr, config=lambda: cfg, root_dir=tmp_path / "rag",
+                                 briefing_for=lambda name: None)
+            briefing.persist_hooks.append(svc.on_sessions_changed)
+            try:
+                svc.on_sessions_changed()          # the registry's change hook
+                await svc.drain()
+                assert svc._progress_of("sessions").runs == 1
+                assert "s1" in svc._index("sessions", None, cfg).entries
+                mgr.sessions.append(Sess("s2"))
+                svc.on_sessions_changed(mgr.sessions[-1])  # the exit hook's signature
+                await svc.drain()
+                assert "s2" in svc._index("sessions", None, cfg).entries
+                before = svc._progress_of("sessions").runs
+                briefing._persist_cache()          # the briefing cache's hook
+                await svc.drain()
+                assert svc._progress_of("sessions").runs == before + 1
+                assert len(_embedded_docs(ep)) == 2  # s1, s2 — the last pass embedded nothing
+            finally:
+                briefing.persist_hooks.remove(svc.on_sessions_changed)
+        finally:
+            await svc.shutdown()
+            await server.close()
+
+    asyncio.run(run())
+
+
+def test_app_wires_the_producers_and_shutdown_cancels_the_tasks(tmp_path, repo, monkeypatch):
+    """(g) build_app hangs the three producers on the board, the registry and
+    the briefing cache, starts the watcher with the app, and its shutdown
+    hook cancels the watcher and the consumer; the status route carries the
+    queue."""
+    from claude_launcher.daemon import briefing
+    ep = Endpoint()
+    br = FakeBr(_issues())
+    monkeypatch.chdir(repo)
+
+    async def run():
+        server = await _start_endpoint(ep)
+        mgr = SessionManager(idle_threshold=0.5, scrollback=200, restore_default=False)
+        board = _board(br, repo)
+        cfg = _cfg(server, watch_interval=0.05)
+        service = rag.RagService(board=board, manager=mgr, config=lambda: cfg,
+                                 root_dir=tmp_path / "rag")
+        client = await _serve(mgr, board, service)
+        try:
+            assert service.on_board_write in board.write_hooks
+            assert service.on_sessions_changed in mgr.change_hooks
+            assert service.on_sessions_changed in mgr.exit_hooks
+            assert service.on_sessions_changed in briefing.persist_hooks
+            # on_startup started the watcher; its first tick queued the fleet
+            await asyncio.sleep(0.1)
+            await service.drain()
+            assert service._watcher is not None and not service._watcher.done()
+            assert service._progress_of("sessions").runs >= 1
+            # a board write through the daemon's Board reaches the queue
+            (repo / ".beads" / "beads.db").write_bytes(b"x")
+            await board.br(repo, ["update", "x-1", "--status", "closed"], actor="s1")
+            await service.drain()
+            assert service._progress_of(service._key("beads", repo)).runs >= 1
+            resp = await client.get("/api/rag/status", headers=BEARER)
+            status = await resp.json()
+            q = status["queue"]
+            assert q["depth"] == 0 and q["pending"] == [] and q["consumer"] is True
+            assert q["watcher"] is True and q["watch_interval"] == 0.05
+            assert q["consumed"] >= 2 and q["last_consumed_at"]
+            assert str(repo) in q["watched"]
+            assert "rag-secret" not in json.dumps(status)
+            consumer, watcher = service._consumer, service._watcher
+        finally:
+            await client.close()   # runs app.on_shutdown
+            await server.close()
+        assert consumer.done() and watcher.done()
+        assert service._consumer is None and service._watcher is None
+        assert service.on_sessions_changed not in briefing.persist_hooks
+        assert service.queue_view()["consumer"] is False and service.queue_view()["watcher"] is False
 
     asyncio.run(run())
 

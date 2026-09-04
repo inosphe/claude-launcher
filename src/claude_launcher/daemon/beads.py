@@ -711,6 +711,11 @@ class Board:
         #: Sessions mid wind-down, by name: what was typed and when.
         self.winddowns: Dict[str, dict] = {}
         self._tasks: set = set()
+        #: Called with the root after every ``br`` write that succeeded —
+        #: create, update, close, comments add, dep add, all of them go
+        #: through :meth:`br`. The search index's producer hangs here
+        #: (:meth:`daemon.rag.RagService.on_board_write`).
+        self.write_hooks: List[Callable[[Path], None]] = []
 
     # ---- availability -------------------------------------------------- #
     def available(self) -> bool:
@@ -794,16 +799,12 @@ class Board:
                         f"br {' '.join(cmd[3:])[:80]} failed ({code}): {detail}"
                     )
         if args and not _reads_only(args):
-            self._cache.pop(key, None)
-            self._page_cache = {
-                page: cached for page, cached in self._page_cache.items()
-                if page[0] != key
-            }
-            self._page_deps = {
-                page: cached for page, cached in self._page_deps.items()
-                if page[0] != key
-            }
-            self._deps.pop(key, None)
+            self.invalidate(root)
+            for hook in list(self.write_hooks):
+                try:
+                    hook(root)
+                except Exception:  # a producer must not fail the write
+                    log.exception("beads: write hook %r failed for %s", hook, root)
         text = out.strip()
         if not text:
             return None
@@ -821,6 +822,23 @@ class Board:
                 return json.loads(text[start:])
             except ValueError:
                 return None
+
+    def invalidate(self, root: Path) -> None:
+        """Drop every cached reading of ``root``'s board: the listing, its
+        pages and the dependency edges taken against them. What :meth:`br`
+        does after a write, and what a write the daemon did not make
+        (``claunch beads …`` runs ``br`` itself) needs done for it."""
+        key = str(root)
+        self._cache.pop(key, None)
+        self._page_cache = {
+            page: cached for page, cached in self._page_cache.items()
+            if page[0] != key
+        }
+        self._page_deps = {
+            page: cached for page, cached in self._page_deps.items()
+            if page[0] != key
+        }
+        self._deps.pop(key, None)
 
     async def issues(self, root: Path) -> List[dict]:
         """Every issue on ``root``'s board, closed ones included — cached
