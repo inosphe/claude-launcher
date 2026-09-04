@@ -283,6 +283,28 @@ def queue_of(issues: Sequence[dict], name: str) -> List[dict]:
     return [dict(i) for i in mine]
 
 
+def created_of(issues: Sequence[dict], name: str) -> List[dict]:
+    """Session ``name``'s own follow-up work: active issues it created but
+    does not hold as assignee.
+
+    ``queue_of`` cannot show these -- they carry someone else's assignee, or
+    none at all -- and unassigned is exactly the shape a handoff issue takes
+    (see the workflows' wrapup rule for follow-up issues created without an
+    assignee). Left off the rail, a session's own follow-ups go untracked the
+    moment the session that filed them moves on or exits: the case this
+    reads (``created_by == name``, not already counted in the assigned
+    queue). Same order as ``queue_of``, for the same reason.
+    """
+    mine = [
+        i for i in issues
+        if i.get("created_by") == name
+        and i.get("assignee") != name
+        and i.get("status") in ACTIVE_STATUSES
+    ]
+    mine.sort(key=_queue_rank)
+    return [dict(i) for i in mine]
+
+
 def _queue_rank(issue: dict) -> Tuple[int, float, str]:
     try:
         pri = int(issue.get("priority") if issue.get("priority") is not None else 9)
@@ -1176,18 +1198,22 @@ class Board:
         *,
         cflow_for: Optional[Callable[[str, str], Optional[dict]]] = None,
     ) -> dict:
-        """Every board's queues -- the Queues tab: one lane per session (and
-        per assignee the daemon does not know), each carrying the issues the
-        board assigns to it in the order the worker takes them, plus the
+        """Every board's queues -- the Queues tab (and the session rail's
+        pills): one lane per session (and per assignee the daemon does not
+        know), each carrying the issues the board assigns to it in the order
+        the worker takes them (``issues``), the active issues it created but
+        does not hold as assignee (``created`` -- its own follow-ups, most at
+        risk of going untracked once it moves on or exits), plus the
         unassigned pool the operator drags from.
 
         The lanes are sessions first, in the daemon's order, then any other
         assignee an active issue names (a human, a session on another
         machine) -- a card that could not be dragged back to a lane the page
         does not draw would be stuck. An exited session with nothing assigned
-        draws no lane; one that still holds issues does, so what it left
-        behind can be moved. ``cflow_for(name, cwd)`` is the run summary a
-        lane head shows beside the session's status (``None`` for none).
+        and no follow-up of its own draws no lane; one that still holds
+        either does, so what it left behind can be seen and moved.
+        ``cflow_for(name, cwd)`` is the run summary a lane head shows beside
+        the session's status (``None`` for none).
         """
         result = {
             "available": self.available(),
@@ -1220,7 +1246,8 @@ class Board:
             for name in names + others:
                 s = by_name.get(name)
                 queue = queue_of(active, name)
-                if s is not None and s.status() == "exited" and not queue:
+                created = created_of(active, name)
+                if s is not None and s.status() == "exited" and not queue and not created:
                     continue
                 lane: dict = {
                     "session": name,
@@ -1229,6 +1256,7 @@ class Board:
                     "issue": s.sdef.issue if s is not None else None,
                     "cflow": None,
                     "issues": queue,
+                    "created": created,
                     "summary": queue_summary(queue),
                 }
                 if s is not None and cflow_for is not None:

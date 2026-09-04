@@ -518,7 +518,9 @@ option:disabled { color: #6b7280; }
 #session-list .rail-cwd.unknown { color: #6e7681; font-style: italic; font-family: inherit; }
 /* What the board assigns to this session, under the cwd line: one pill per
    queued issue in the worker's order, tinted by status; the one it takes
-   next is outlined. Drawn only when there is a queue. */
+   next is outlined. Followed by one dashed pill per active issue the
+   session created but does not hold -- its own follow-ups (see .created
+   below). Drawn only when there is a queue, a follow-up, or both. */
 #session-list .rail-beads {
   flex-basis: 100%; order: 2; min-width: 0; padding-left: 16px;
   margin-top: 2px; display: flex; gap: 4px; flex-wrap: wrap; align-items: center;
@@ -535,6 +537,9 @@ option:disabled { color: #6b7280; }
 #session-list .rail-bead.in_review { color: #d2a8ff; }
 #session-list .rail-bead.blocked { color: #ff7b72; }
 #session-list .rail-bead.next { border-color: #3d5a86; }
+/* this session's own follow-up, filed but not held -- dashed so it reads
+   apart from work the session is actually carrying */
+#session-list .rail-bead.created { border-style: dashed; }
 #session-list .rail-bead:hover { border-color: #58a6ff; color: #e6edf3; }
 #session-list .rail-bead-more { cursor: default; }
 /* the hover card: fixed beside the pill, over everything */

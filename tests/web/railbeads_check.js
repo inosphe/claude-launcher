@@ -1,19 +1,23 @@
-/* The rail row's beads line: what the board assigns to a session, as pills.
+/* The rail row's beads line: what the board assigns to a session, as pills,
+   plus what it filed on its own and does not hold (daemon/beads.created_of).
 
    The queues ride /api/beads/queues on their own clock and are painted over
-   the rows that exist, the way the briefing line is. Four things must hold:
+   the rows that exist, the way the briefing line is. Five things must hold:
 
-   1. the index is by session, known sessions only, and a name on two boards
-      keeps both queues;
+   1. the index is by session, known sessions only, a name on two boards
+      keeps both queues, and `created` concatenates the same way;
    2. a row's line draws one pill per queued issue in the worker's order,
-      tinted by status, the next one outlined, capped with a "+n" that names
-      the rest; each pill links to the issue and its click does not attach
-      the row;
+      tinted by status, the next one outlined, then one dashed pill per
+      created-but-unheld issue, capped together with a "+n" that names the
+      rest; each pill links to the issue and its click does not attach the
+      row;
    3. hovering a pill fills the one card with the issue's id, status,
-      priority, title, facts and the head of its description (headings
-      dropped, cut at six lines), and leaving hides it;
-   4. painting adds the line under the cwd line, replaces it on a repaint,
-      and removes it when the queue is gone.
+      priority, title, facts (including who created it, when that differs
+      from the assignee) and the head of its description (headings dropped,
+      cut at six lines), and leaving hides it;
+   4. painting adds the line under the cwd line whenever either list is
+      non-empty, replaces it on a repaint, and removes it when both are
+      gone.
 
    Slice the real functions out of app.js and drive them against a stub
    DOM. */
@@ -148,11 +152,13 @@ function check(what, got, want) {
 const QUEUES = {
   boards: [
     { root: "/a", lanes: [
-      { session: "s1", known: true, issues: [{ id: "a-1", status: "in_progress" }], summary: { next: null } },
+      { session: "s1", known: true, issues: [{ id: "a-1", status: "in_progress" }],
+        created: [{ id: "a-2", status: "open" }], summary: { next: null } },
       { session: "lead", known: false, issues: [{ id: "a-9", status: "open" }], summary: {} },
     ] },
     { root: "/b", lanes: [
-      { session: "s1", known: true, issues: [{ id: "b-1", status: "open" }], summary: { next: "b-1" } },
+      { session: "s1", known: true, issues: [{ id: "b-1", status: "open" }],
+        created: [{ id: "b-2", status: "open" }], summary: { next: "b-1" } },
       { session: "s2", known: true, issues: [], summary: {} },
     ] },
   ],
@@ -161,7 +167,11 @@ const idx = ctx.index(QUEUES);
 check("known sessions only", [...idx.keys()], ["s1", "s2"]);
 check("a name on two boards keeps both queues",
       idx.get("s1").issues.map((i) => i.id), ["a-1", "b-1"]);
+check("and both boards' follow-ups",
+      idx.get("s1").created.map((i) => i.id), ["a-2", "b-2"]);
 check("an empty queue is an empty lane, not a missing one", idx.get("s2").issues, []);
+check("a lane with no follow-ups gets an empty list, not a missing one",
+      idx.get("s2").created, []);
 
 /* ---- 2. the line ----------------------------------------------------------- */
 const LANE = {
@@ -190,6 +200,32 @@ let stopped = 0;
 pills[0].fire("click", { stopPropagation: () => stopped++ });
 check("a pill's click does not attach the row", stopped, 1);
 check("no queue draws no pill", ctx.line("s1", { issues: [], summary: {} }).children.length, 0);
+
+const withCreated = ctx.line("s1", {
+  issues: [{ id: "m-1", status: "open", title: "held" }],
+  created: [{ id: "m-2", status: "open", title: "filed" }],
+  summary: {},
+});
+const wcPills = withCreated.find("rail-bead").filter((p) => !p.classes.has("rail-bead-more"));
+check("assigned work first, then a follow-up, marked apart",
+      wcPills.map((p) => [p.text, p.classes.has("created")]),
+      [["m-1", false], ["m-2", true]]);
+check("a follow-up says it is unassigned to the session on hover",
+      wcPills[1].title, "m-2 [open] (created, unassigned to s1) filed");
+check("a lane with only follow-ups still draws pills",
+      ctx.line("s1", { issues: [], created: [{ id: "n-1", status: "open" }], summary: {} })
+        .find("rail-bead").map((p) => p.text),
+      ["n-1"]);
+const capLine = ctx.line("s1", {
+  issues: [{ id: "p-1", status: "open" }, { id: "p-2", status: "open" }, { id: "p-3", status: "open" }],
+  created: [{ id: "p-4", status: "open" }, { id: "p-5", status: "open" }, { id: "p-6", status: "open" }],
+  summary: {},
+});
+check("assigned and follow-up pills share one cap, assigned first",
+      capLine.find("rail-bead").filter((p) => !p.classes.has("rail-bead-more")).map((p) => p.text),
+      ["p-1", "p-2", "p-3", "p-4"]);
+check("the remainder names issues from both lists",
+      capLine.find("rail-bead-more")[0].title, "p-5 [open]\np-6 [open]");
 
 /* ---- 3. the hover card ---------------------------------------------------- */
 pills[0].fire("mouseenter");
@@ -221,6 +257,21 @@ check("a long description is cut with an ellipsis line",
 check("and so is a wide one",
       ctx.excerpt("x".repeat(300) + "\n" + "y".repeat(300)).endsWith("…"), true);
 
+const filedByOther = ctx.line("s1", { issues: [{
+  id: "z-1", status: "open", title: "filed by another", assignee: "s2", created_by: "s1",
+}], summary: {} });
+filedByOther.find("rail-bead")[0].fire("mouseenter");
+pop = ctx.pop();
+check("facts note who created it when that differs from the assignee",
+      pop.find("rail-bead-pop-bits")[0].text, "assignee s2  ·  created by s1");
+const selfCreated = ctx.line("s1", { issues: [{
+  id: "z-2", status: "open", title: "self", assignee: "s1", created_by: "s1",
+}], summary: {} });
+selfCreated.find("rail-bead")[0].fire("mouseenter");
+pop = ctx.pop();
+check("no redundant fact when the assignee created it too",
+      pop.find("rail-bead-pop-bits")[0].text, "assigned to s1");
+
 /* ---- 4. painting the rows --------------------------------------------------- */
 function row(name) {
   const li = el("li");
@@ -245,6 +296,15 @@ check("a repaint replaces the line in place and adds one where the queue appeare
       [r1.children.map((k) => [...k.classes][0]), r1.find("rail-bead").map((p) => p.text),
        r2.find("rail-beads").length],
       [["dot", "rail-cwd", "rail-beads", "rail-seen"], ["z"], 1]);
+ctx.setBeads(new Map([
+  ["s1", { issues: [], created: [{ id: "f-1", status: "open" }], summary: {} }],
+  ["s2", { issues: [], summary: {} }],
+]));
+ctx.apply();
+check("a session with only follow-ups still gets the line",
+      [r1.find("rail-beads").length, r1.find("rail-bead").map((p) => p.text)],
+      [1, ["f-1"]]);
+check("a session with neither still gets none", r2.find("rail-beads").length, 0);
 ctx.setBeads(new Map());
 ctx.apply();
 check("a queue that is gone takes its line with it",

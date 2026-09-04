@@ -1686,6 +1686,29 @@ def test_a_queue_is_the_boards_own_reading_in_the_workers_order():
     assert [i["id"] for i in odd] == ["y", "x"]
 
 
+def test_created_of_is_a_sessions_own_follow_ups_it_does_not_hold():
+    """``created_of`` reads the opposite gap from ``queue_of``: active issues
+    the session filed but does not carry as assignee -- the shape a handoff
+    follow-up takes when it is filed without one (see the workflows' wrapup
+    rule), and the exact reason it goes untracked once nothing but the board
+    remembers who filed it. Closed work, work it still holds itself, and
+    other sessions' filings are not in it."""
+    rows = [
+        {"id": "handed-off", "created_by": "s1", "status": "open", "priority": 1,
+         "created_at": "2026-01-01T00:00:00Z"},
+        {"id": "urgent-handoff", "created_by": "s1", "status": "in_ready", "priority": 0,
+         "created_at": "2026-01-02T00:00:00Z"},
+        {"id": "still-mine", "created_by": "s1", "assignee": "s1", "status": "open"},
+        {"id": "given-away", "created_by": "s1", "assignee": "s2", "status": "in_progress", "priority": 0},
+        {"id": "closed-handoff", "created_by": "s1", "status": "closed"},
+        {"id": "someone-elses", "created_by": "s2", "status": "open"},
+    ]
+    created = beads_mod.created_of(rows, "s1")
+    # priority 0 before priority 1; within priority 0, no created_at sorts as
+    # oldest (``_ts`` reads a missing timestamp as 0.0), same as ``queue_of``
+    assert [i["id"] for i in created] == ["given-away", "urgent-handoff", "handed-off"]
+
+
 def test_the_assignment_comment_names_both_ends_of_the_move():
     assert beads_mod.assign_note("a", "s2", "s1") == "QUEUED by dashboard: assigned to s2 (was s1)"
     assert beads_mod.assign_note("a", "s2", "") == "QUEUED by dashboard: assigned to s2"
@@ -1695,8 +1718,9 @@ def test_the_assignment_comment_names_both_ends_of_the_move():
 def test_the_queues_view_draws_a_lane_per_session_and_the_pool(repo):
     """Sessions first in the daemon's order, then assignees the daemon does
     not know (a card must have a row to be dragged back from); an exited
-    session with nothing left draws no lane, one still holding issues does;
-    the pool is what nobody has, in queue order."""
+    session with nothing left draws no lane, one still holding issues or its
+    own unclaimed follow-ups does; the pool is what nobody has, in queue
+    order."""
     br = FakeBr()
     br.add(id="a", title="s1 now", assignee="s1", status="in_progress", priority=1)
     br.add(id="b", title="s1 next", assignee="s1", status="open", priority=2)
@@ -1705,6 +1729,12 @@ def test_the_queues_view_draws_a_lane_per_session_and_the_pool(repo):
     br.add(id="e", title="pool, urgent", status="open", priority=0)
     br.add(id="f", title="pool", status="in_ready", priority=3)
     br.add(id="g", title="closed", assignee="s1", status="closed")
+    # s1 filed a follow-up but did not take it -- must not double up with
+    # its own queue ("a", "b" above)
+    br.add(id="h", title="s1's follow-up", created_by="s1", status="open", priority=0)
+    # quiet exited having only ever filed a follow-up, never assigned
+    # itself -- claunch-yfvf's exact case, so it must still get a lane
+    br.add(id="i", title="quiet's follow-up", created_by="quiet", status="open")
     board = _board(br, repo)
 
     def boom(name, cwd):
@@ -1724,17 +1754,28 @@ def test_the_queues_view_draws_a_lane_per_session_and_the_pool(repo):
         assert len(view["boards"]) == 1
         b = view["boards"][0]
         lanes = {l["session"]: l for l in b["lanes"]}
-        assert [l["session"] for l in b["lanes"]] == ["s1", "s2", "gone", "lead"]
+        assert [l["session"] for l in b["lanes"]] == ["s1", "s2", "gone", "quiet", "lead"]
         assert [i["id"] for i in lanes["s1"]["issues"]] == ["a", "b"]
+        assert [i["id"] for i in lanes["s1"]["created"]] == ["h"]
         assert lanes["s1"]["summary"]["next"] == "b"
         assert lanes["s1"]["status"] == "busy" and lanes["s1"]["issue"] == "a"
         assert lanes["s1"]["cflow"] == {"workflow": "improv-worker", "step": "work"}
-        assert lanes["s2"]["issues"] == [] and lanes["s2"]["known"] is True
+        assert lanes["s2"]["issues"] == [] and lanes["s2"]["created"] == [] and lanes["s2"]["known"] is True
         assert lanes["gone"]["status"] == "exited"
         assert [i["id"] for i in lanes["gone"]["issues"]] == ["c"]
+        assert lanes["gone"]["created"] == []
+        # an exited session with an unclaimed follow-up and nothing assigned
+        # still draws a lane -- the whole point of the fix
+        assert lanes["quiet"]["status"] == "exited"
+        assert lanes["quiet"]["issues"] == []
+        assert [i["id"] for i in lanes["quiet"]["created"]] == ["i"]
         assert lanes["lead"]["known"] is False and lanes["lead"]["status"] is None
         assert lanes["lead"]["cflow"] is None
-        assert [i["id"] for i in b["unassigned"]] == ["e", "f"]
+        # "h" and "i" are unassigned, so the pool -- a different question
+        # ("who could claim this") from the creator's own lane ("who filed
+        # this and has not claimed it") -- lists them too; the two are not
+        # mutually exclusive
+        assert [i["id"] for i in b["unassigned"]] == ["e", "h", "i", "f"]
         # the cflow reader failing costs the lane its step, not the page
         broken = await board.queues_view([s1], cflow_for=boom)
         assert broken["boards"][0]["lanes"][0]["cflow"] is None
