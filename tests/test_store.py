@@ -210,12 +210,17 @@ def test_save_does_not_wrap_a_non_transient_os_error(config_file, monkeypatch):
     assert not isinstance(caught.value, store.StoreError)
 
 
-def test_load_parses_once_per_text_and_hands_out_copies(config_file):
+def test_load_parses_once_per_text_and_hands_out_copies(config_file, monkeypatch):
     """The parse is skipped while the file's text is unchanged, and it is the
     TEXT that decides -- a rewrite of the same size lands within the same
     timestamp on a coarse filesystem, so a stat-keyed cache could serve the
     old document. Each call still hands back its own copy: ``update`` mutates
-    what ``load`` returns, and that must not edit the cached parse."""
+    what ``load`` returns, and that must not edit the cached parse.
+
+    The ``_DISK_TTL`` window (see test_load_disk_ttl below) exists precisely
+    to skip a same-instant re-open, so it is disabled here: this test is
+    about the *parse* cache surviving a real re-read, not about the TTL."""
+    monkeypatch.setattr(store, "_DISK_TTL", 0.0)
     store.save({"profiles": {"a": {"env": {"X": "1"}}}})
     first = store.load()
     first["profiles"]["a"]["env"]["X"] = "mutated"
@@ -227,3 +232,62 @@ def test_load_parses_once_per_text_and_hands_out_copies(config_file):
     config_file.write_text("- not a mapping\n", encoding="utf-8")
     with pytest.raises(store.StoreError):
         store.load()
+
+
+def test_load_disk_ttl_collapses_a_same_instant_burst(config_file, monkeypatch):
+    """Board claunch-snhl: a daemon request handler calling load() many times
+    to answer one poll used to reopen the file every time. Within the TTL
+    window, repeat calls must not touch the filesystem at all -- not even a
+    read that would have returned the same text."""
+    store.save({"profiles": {"a": {"env": {"X": "1"}}}})
+    calls = []
+    real_read_text = type(config_file).read_text
+
+    def counting_read_text(self, *a, **kw):
+        calls.append(1)
+        return real_read_text(self, *a, **kw)
+
+    monkeypatch.setattr(type(config_file), "read_text", counting_read_text)
+    for _ in range(5):
+        assert store.load()["profiles"]["a"]["env"] == {"X": "1"}
+    # save() above already seeded the cache, so a correct implementation may
+    # legitimately need zero further reads; what it must never do is one per
+    # call (five).
+    assert len(calls) <= 1
+
+
+def test_load_disk_ttl_expires(config_file, monkeypatch):
+    """Past the TTL window, load() re-opens the file and sees a change made
+    without going through save() (e.g. a hand edit)."""
+    store.save({"profiles": {"a": {"env": {"X": "1"}}}})
+    store.load()
+    text = config_file.read_text(encoding="utf-8")
+    config_file.write_text(text.replace("X: '1'", "X: '2'"), encoding="utf-8")
+    assert store.load()["profiles"]["a"]["env"] == {"X": "1"}  # still within TTL
+    monkeypatch.setattr(store, "_disk_read_at", store._disk_read_at - store._DISK_TTL)
+    assert store.load()["profiles"]["a"]["env"] == {"X": "2"}
+
+
+def test_save_seeds_the_cache_so_the_same_process_never_reads_its_own_write_stale(
+    config_file,
+):
+    """A caller that just wrote a value must see it back immediately, TTL
+    window or not -- save() must not make its own writer wait out the
+    window it introduced for *other* repeat callers."""
+    store.save({"profiles": {"a": {"env": {"X": "1"}}}})
+    assert store.load()["profiles"]["a"]["env"] == {"X": "1"}
+    store.save({"profiles": {"a": {"env": {"X": "2"}}}})
+    assert store.load()["profiles"]["a"]["env"] == {"X": "2"}
+
+
+def test_load_disk_ttl_ignores_a_stale_cache_from_a_different_path(
+    config_file, home, monkeypatch
+):
+    """A cache keyed only by TTL, with no path check, would serve one file's
+    document for another once ``config.sync_file()`` changes mid-process
+    (as it does between tests sharing this module's globals)."""
+    store.save({"profiles": {"a": {"env": {"X": "1"}}}})
+    store.load()
+    other = home / "other.claunch.yaml"
+    monkeypatch.setenv("CLAUDE_LAUNCHER_SYNC_FILE", str(other))
+    assert store.load() == {"version": store.VERSION}
