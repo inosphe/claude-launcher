@@ -26,8 +26,11 @@ description: >
   intake로 돌아가 다음 회차(새 목표·새 브랜치·새 착지)를 돌고, 없으면
   end-gate를 지나 세션 자체를 종료(kill)한다. 착지 하나 = 회차 하나이고,
   저널은 런 하나다 — 회차마다 visit 카운터가 오른다. 큐를 채우는 것은
-  리더·운영자의 배정뿐이고, 워커가 자기 후속 이슈를 스스로 배정해 루프를
-  잇는 것은 금지다.
+  리더·운영자의 배정과, wrapup의 생성 이슈 정산이 허용하는 좁은 self 예외
+  (공통 규칙의 다섯 조건, 회차당 2건)뿐이다. 세션이 회차 중 만든 이슈는
+  세 갈래로 간다 — 발견 즉시 자식에게 위임(work), 다음 회차에 직접(self),
+  풀(pool) — 그리고 그 전부가 누군가의 손에 있어야 세션이 끝난다
+  (settle-check → settle-wait → end-gate).
 start: intake
 
 # 이 런의 드라이버는 worker 역할 세션이다 — 리더가 실수로 워커 런을 몰지
@@ -240,7 +243,19 @@ steps:
       (intake로 루프), 착수할 수 없는 것(blocked·다른 저장소 영역)만
       `update <id> --assignee ""`와 `UNQUEUED: <세션> landed without it`
       코멘트로 풀에 되돌린다. 워커가 자기 후속 이슈를 스스로 배정해 큐를
-      채우는 것은 금지다 — 배정은 위 문장대로 리더·운영자의 것이다.
+      채우는 것은 원칙적으로 금지다 — 배정은 위 문장대로 리더·운영자의
+      것이다. 예외는 하나뿐이고 좁다(claunch-qac7 Q1: A→B, 2026-09-04
+      사용자 지시): wrapup의 생성 이슈 정산에서, (1) 원회차 이슈에
+      연결되고(`--parent` 자식이거나, 원회차가 닫힌 뒤면 규격의 출처에
+      원회차 id) (2) 같은 저장소 영역·같은 정본 규칙이고 (3) 규격이 서
+      있고 (4) P3이고 (5) 한 회차 크기인 후속에 한해, 회차당 최대 2건을
+      `--assignee $CLAUNCH_SESSION`과 `SELF-QUEUED: from <원회차 id>`
+      코멘트로 자기 큐에 넣는다. 리더는 거부권을 가진다(`update <id>
+      --assignee ""` + `UNQUEUED by leader: <이유>`). 세션이 만든 활성
+      이슈가 전부 누군가의 손(살아 있는 세션의 assignee, 또는 리더의
+      `HOLD:` 코멘트)에 있어야 세션이 끝난다 — 워커의 settle-check가
+      그것을 확인하고, 미충족이면 settle-wait가 상위의 보드 쓰기를
+      기다린다.
       br가 실패하면(잠금·바이너리 없음) --lock-timeout 5000으로 한 번 더,
       그래도 안 되면 mesh fyi 첫 줄에 `NO-BEAD:` + 위 규격 그대로 — 리더가
       다음 관제 대기에서 대신 만들고 id를 답한다. 이슈 없이 착수하는
@@ -492,13 +507,33 @@ steps:
       정본 규칙과 어긋나는 선택지가 나타나면 혼자 정하지 말고 리더에게
       물어 단일 규칙으로 기록되게 한다. 범위 밖의 결함·회귀를 발견하면
       고치지 말고 그 자리에서 이슈로 남긴다 — `claunch beads create "<제목>"
-      --type bug --priority 3 --labels found --description "<규격>"`(assignee
-      없음) — 그리고 자기 일을 계속한다; 발견한 세션이 만드는 자다. 보고에는
-      바꾼 파일과 접근 방식 요지, 발견 이슈 id를 남긴다.
+      --type bug --priority 3 --labels found --parent <이 회차 이슈 id>
+      --description "<규격>"`(assignee 없음) — 그리고 자기 일을 계속한다;
+      발견한 세션이 만드는 자다.
+
+      ── 발견 즉시 가르는 것 하나: 위임(child) ──
+      만든 이슈가 다음 넷을 전부 만족하면 지금 자식 세션에 넘긴다 — spawn
+      `--issue <id>`(데몬이 자식을 assignee로 쓴다; 스폰은 공통 규칙이
+      허용하는 배정 경로다): (1) 이 회차 브랜치와 파일·영역이 겹치지
+      않는다, (2) 규격이 지금 서 있다, (3) 이 세션의 컨텍스트가 필요 없다,
+      (4) 부모 회차의 착지 전에 끝나는 크기다 — 그리고 `children`이 남은
+      슬롯을 답한다. 넷 중 하나라도 아니면 여기서 넘기지 않는다: wrapup의
+      생성 이슈 정산이 self/spawn/pool로 가른다. 위임을 일찍 정하는 이유는
+      병렬 시간이고, 직접 처리를 늦게 정하는 이유는 그것이 다음 회차의
+      일이기 때문이다.
+      자식의 태스크에 반드시 적는 세 줄: **기준 브랜치 = 내 브랜치 @
+      <tip>, 통합 대상 = 그 브랜치(master 아님 — 내 commit 스텝이 --no-ff로
+      모은다), 완료 보고·착지 요청 수신자 = 나**. intake의 스택 절은 중간
+      워커(improv-mid)를 부모로 상정해 쓰여 있어, 일반 워커의 자식은 이 세
+      줄이 없으면 master를 대상으로 읽는다. 스폰은 `worktree: <내 세션>-
+      <요지>`와 `rebase_onto: <내 브랜치>`로 내 브랜치 위에 자른다.
+      보고에는 바꾼 파일과 접근 방식 요지, 발견 이슈 id, 위임한 자식
+      (세션·이슈 id)을 남긴다.
     done_when: |
       intake에서 정한 범위의 구현이 피처 브랜치 커밋으로 존재하고(범위 밖
       파일은 건드리지 않았다), 바꾼 파일 목록과 접근 방식 요지, 범위 밖
-      발견이 있었다면 그 이슈 id가 보고에 있다.
+      발견이 있었다면 그 이슈 id, 위임한 자식이 있으면 그 세션·이슈 id가
+      보고에 있다.
     next: test-decision
 
   test-decision:
@@ -1009,7 +1044,12 @@ steps:
       하나, fast-forward로 뭉개지 않아 브랜치 이력이 트리 구조로 남게
       한다(자식이 손자 브랜치를 같은 방식으로 모았으면 그 트리가 통째로
       실린다). 아직 작업 중인 자식 브랜치는 모으지 않고 그 사실을 보고에
-      남긴다. 단, 리더가 mesh-delegate로 세운 전담 중간 워커는 이
+      남긴다 — 그리고 그 자식이 고아가 되지 않게 착지 요청 전에 리더에게
+      adopt(reparent) ask를 보낸다: 내가 착지·종료하면 자식의 통합
+      대상(내 브랜치)은 동결·은퇴 상태가 되고, reparent는 리더의 스킬
+      (mesh-retopology)이라 워커는 요청만 할 수 있다. 그 자식의 세션·이슈
+      id는 증거 묶음의 심사 한계에 적는다(settle-check가 같은 것을 다시
+      본다). 단, 리더가 mesh-delegate로 세운 전담 중간 워커는 이
       워크플로가 아니라 improv-mid로 돌며 자식 착지는 거기 스택 착지
       절차(순서·restack 공지 포함)가 맡는다 — 여기 규칙은 한 회차 안에서
       스스로 자식을 둔 워커의 것이다.
@@ -1827,15 +1867,17 @@ steps:
         협소하게 해석한다: 이 회차의 범위에서 직접 미룬 일과 작업 중
         알아낸 결함만 만든다. 떠오른 개선 아이디어(P4)는 만들지 않고
         보고서의 「아는 구멍」에 한 줄로 남긴다. 자기 배정(`--assignee
-        $CLAUNCH_SESSION`)은 하지 않는다 — 배정은 리더·운영자의 것이고,
-        스스로 배정한 후속으로 queue-recheck를 next-round로 만드는 것은
-        금지다.
+        $CLAUNCH_SESSION`)을 여기서 바로 치지 않는다 — 배정은 원칙적으로
+        리더·운영자의 것이고, 스스로 배정한 후속으로 queue-recheck를
+        next-round로 만드는 것은 금지다. 예외는 아래 「생성 이슈 정산」
+        절의 self뿐이고, 거기서도 제안만 하며 확정은 상위가 한다.
         메시 메시지에만 남긴 인수인계는 다음 회차에 없다.
 
-        후속 구현 이슈(assignee 없이 만들어진 것)의 해소 경로:
-        - 배정 — take는 스폰/리더 배정뿐이다. beads 공통 규칙의 상태 전이
-          주인이 그대로 적용된다(open→in_progress는 배정받은 워커의
-          intake 시작).
+        후속 구현 이슈(assignee 없이 만들어진 것, 또는 아래 self로 자기
+        배정한 것)의 해소 경로:
+        - 배정 — take는 스폰/리더 배정, 또는 아래 self 예외뿐이다. beads
+          공통 규칙의 상태 전이 주인이 그대로 적용된다(open→in_progress는
+          배정받은 워커의 intake 시작).
         - 닫기 — 이 후속 이슈를 만든 회차 세션은 닫지 않는다. 닫는 것은
           배정받은 세션이고, 자기 회차의 landed가 git으로 증명한 머지
           커밋 해시로 닫는다(중간 워커가 자기 --parent 자식을 닫는 규칙과
@@ -1845,14 +1887,44 @@ steps:
           이슈 id와 그 HOLD/마감 코멘트를 남긴다.
         - 연결 — 원회차가 이미 닫힌 뒤에 만들어지면(닫힌 이슈에는 후속이
           붙지 않는다) 규격의 출처가 유일한 연결이다.
-        후속 이슈를 만들었다면 마감 알림은 ask로 보낸다 — '이 후속들을
-        이 세션의 다음 회차로 배정할지(assign — 상위가 `claunch beads update
-        <id> --assignee $CLAUNCH_SESSION`을 친다) / 풀에 둘지(hold)'를
-        상위에게 묻는다. 상위가 배정하면 queue-recheck가 보드에서 그것을
-        읽어 다음 회차로 돈다 — 그래서 이 ask는 HTML 회차 보고서를 쓰기
-        전에 보낸다(상위가 답할 시간이 그 사이에 생긴다). 답은 그 후속
-        이슈의 코멘트로 남고, 이 회차의 진행을 막지 않는다 —
-        queue-recheck는 답을 기다리지 않고 보드를 읽는다.
+
+        ── 생성 이슈 정산 — self/spawn/pool 세 갈래로 제안 ──
+        `br`에는 생성자로 거르는 옵션이 없다(`--assignee`뿐, `list
+        --help` 확인됨) — 그래서 정본이 읽기 명령 하나를 못박는다.
+        이 회차에서 만든 활성 이슈(work의 `found`, 여기서 만드는
+        `handoff`)를 정확히 이 명령으로 모은다 — 매 회차 즉석 스크립트를
+        새로 짜지 않는다:
+        `claunch beads list --status open --status in_ready --limit 0
+        --json | uv run --no-sync python -c "import json,os,sys; d =
+        json.load(sys.stdin)['issues']; print(json.dumps([i for i in d if
+        i.get('created_by') == os.environ['CLAUNCH_SESSION']],
+        ensure_ascii=False))"`
+        (settle-check가 세션 종료 전에 같은 명령으로 다시 읽는다 — 두
+        자리가 같은 것을 읽어야 정산의 「됐다」가 갈리지 않는다.)
+        항목마다 제안을 정한다 — 후속 구현 이슈를 만들었을 때만이 아니라
+        위 명령이 하나라도 돌려주면 이 절을 밟는다:
+        - **self** — 위 공통 블록의 좁은 예외 다섯 조건(원회차 연결·같은
+          영역·규격·P3·한 회차 크기)을 전부 만족하고 회차당 상한(2건)
+          안이면 self로 제안한다. 이 자리에서 배정을 미리 치지 않는다 —
+          제안만 하고 확정은 아래 ask에서 상위가 한다.
+        - **spawn** — work 스텝의 위임 조건을 이미 놓쳤지만(그때는 규격이
+          안 서 있었다 등) 지금은 자식에게 넘길 수 있는 것.
+        - **pool** — 위 둘에 해당하지 않는 것. 기본값이다.
+        마감 알림은 ask 하나로 보낸다 — 항목마다 (id, 제안 갈래, 한 줄
+        근거)를 실어 상위에게 확정을 묻는다: self는 상위가 `claunch beads
+        update <id> --assignee $CLAUNCH_SESSION`으로 확정하거나 `update
+        <id> --assignee "" `+ `UNQUEUED by leader: <이유>`로 거부한다,
+        spawn은 상위가 자식에게 `--issue <id>`로 넘기거나 미룬다, pool은
+        상위가 `HOLD: <이유>` 코멘트를 남기거나 다른 세션에 배정한다.
+        상위가 self를 확정하면 queue-recheck가 보드에서 그것을 읽어 다음
+        회차로 돈다 — 그래서 이 ask는 HTML 회차 보고서를 쓰기 전에
+        보낸다(상위가 답할 시간이 그 사이에 생긴다). 답은 그 후속 이슈의
+        코멘트로 남고, 이 회차의 진행을 막지 않는다 — queue-recheck는
+        답을 기다리지 않고 보드를 읽는다(next-round의 self 판정은
+        `--assignee`가 실제로 이 세션인지로 가른다). **세션 종료 전에
+        모두가 정산됐는지는 뒤의 settle-check가 기계로 다시 확인한다** —
+        이 ask에 상위가 아직 답하지 않았어도 여기서는 진행을 막지 않고,
+        막는 자리는 settle-check/settle-wait다.
         워커가 하지 않는 것 둘: `beads sync`(리더가 통합 뒤에 한 번),
         `.beads/`를 커밋하는 것(리더가 master에서만). 네 close는 DB에만
         쓰이고 그것을 저장소에 싣는 것은 리더의 자리다 — 그래서 워커
@@ -2067,13 +2139,14 @@ steps:
     # 번 더 읽고, 배정이 남아 있으면 같은 런 안에서 intake로 돌아간다.
     # chooser: agent인 이유 — 판정 재료가 전부 보드에 있다(큐 명령 한 번).
     # 루프 쪽(next-round)은 이슈가 실제로 서 있어야 성립하고 intake의
-    # in_progress 전이가 그것을 다시 확인하며, 종료 쪽(done)은 end-gate의
-    # 승인이 뒤에 있다. 게으름의 경로가 없다. 무한 루프의 백스톱은 엔진의
-    # max_visits(intake 방문 수)다.
+    # in_progress 전이가 그것을 다시 확인하며, 종료 쪽(done)은
+    # settle-check를 거쳐 end-gate의 승인이 뒤에 있다. 게으름의 경로가
+    # 없다. 무한 루프의 백스톱은 엔진의 max_visits(intake 방문 수)다.
     # 배정은 여기서 쓰지 않는다 — 워커가 자기 후속 이슈를 스스로 배정해
-    # 루프를 잇는 것은 금지다(claunch-qac7, Q1=A: 배정은 리더·운영자의
-    # 것이라야 scope·우선순위의 개입 지점이 산다). 큐를 채우는 것은
-    # 리더·운영자다.
+    # 루프를 잇는 것은 원칙적으로 금지다(claunch-qac7, Q1: A→B — 배정은
+    # 리더·운영자의 것이라야 scope·우선순위의 개입 지점이 산다). 큐를
+    # 채우는 것은 리더·운영자이거나, wrapup 정산에서 좁게 확정된 self
+    # 예외뿐이다.
     select:
       chooser: agent
       require_reason: true
@@ -2096,9 +2169,10 @@ steps:
           "UNQUEUED: $CLAUNCH_SESSION landed without it"`. 세션이 끝난 뒤
           배정만 남은 이슈는 다음 세션이 잡기 전까지 아무도 붙잡지 않은 채
           배정된 것으로 보인다.
-        자기 배정으로 큐를 채우지 않는다 — wrapup에서 만든 후속 이슈를
-        `--assignee $CLAUNCH_SESSION`으로 돌려 next-round를 만드는 것은
-        금지다. 배정은 리더·운영자의 것이다.
+        여기서 스스로 자기 배정을 치지 않는다 — 이 목록에 자기 배정
+        이슈가 있다면 그것은 wrapup 정산에서 상위가 이미 self로 확정한
+        것뿐이다(공통 규칙의 좁은 예외, claunch-qac7 Q1: A→B). 이 스텝은
+        읽기만 한다.
         모호하면 done이다 — 세션 하나가 더 뜨는 쪽이, 규격 없는 일감에
         회차 하나가 도는 쪽보다 싸다.
       options:
@@ -2106,8 +2180,75 @@ steps:
           description: 배정 큐가 남았다 — 같은 런 안에서 intake로 돌아가 다음 회차(새 목표·새 브랜치·새 착지)를 시작한다
           next: intake
         done:
-          description: 큐가 비었거나 남은 것이 전부 착수 불가다(풀에 되돌렸다) — 세션 종료 승인으로 간다
+          description: 큐가 비었거나 남은 것이 전부 착수 불가다(풀에 되돌렸다) — 생성 이슈 정산 확인으로 간다
+          next: settle-check
+
+  settle-check:
+    title: 생성 이슈 정산 확인 (세션 종료 전 게이트)
+    # queue-recheck의 done과 end-gate 사이. 배정 큐가 비었다는 것과 이
+    # 세션이 만든 이슈가 전부 누군가의 손에 있다는 것은 다른 사실이다 —
+    # wrapup에서 self/spawn/pool로 제안해도 리더가 아직 안 봤거나 자식이
+    # 아직 안 끝났으면 세션이 조용히 사라질 수 있다(s478, s483이 유실된
+    # 자리, claunch-380z). 이 스텝은 그것을 기계로 확인한다.
+    select:
+      chooser: agent
+      require_reason: true
+      prompt: |
+        이 세션이 만든 활성 후속 이슈가 전부 정산됐는지 보드로 확인한다 —
+        wrapup의 정산 절과 같은 명령(`br`에 생성자 필터가 없어 못박은
+        것): `claunch beads list --status open --status in_ready --limit 0
+        --json | uv run --no-sync python -c "import json,os,sys; d =
+        json.load(sys.stdin)['issues']; print(json.dumps([i for i in d if
+        i.get('created_by') == os.environ['CLAUNCH_SESSION']],
+        ensure_ascii=False))"`. 항목마다 판정한다 —
+        정산됨: (a) assignee가 있고 그 세션이 살아 있다(`claunch sessions`
+        또는 `claunch cflow status -t <세션>`으로 exited가 아님을 확인),
+        또는 (b) `claunch beads comments <id>`에 해소되지 않은 `HOLD:`
+        마커가 있다. 그 외(assignee 없음, assignee가 종료된 세션, 마커
+        없음)는 미정산이다.
+        살아 있는 자식(`children`)이 있고 리더의 adopt(reparent)가
+        확인되지 않으면 그것도 미정산이다 — commit 단계에서 adopt ask를
+        보냈으면 그 답을 `claunch cflow asks`나 mesh 기록에서 확인한다.
+        무엇을 확인해 무엇이 나왔는지(이슈마다 판정, 자식 유무)를
+        reason에 적는다.
+        모호하면 unsettled다 — 리더에게 한 번 더 묻는 쪽이, 유실된 채
+        세션이 사라지는 쪽보다 싸다.
+      options:
+        settled:
+          description: 생성 이슈 전부 정산됐고 살아 있는 자식도 없다(또는 adopt 완료) — 세션 종료 승인으로 간다
           next: end-gate
+        unsettled:
+          description: 미정산 항목이 있다 — 상위(리더)에게 정산을 요청하고 대기한다
+          next: settle-wait
+
+  settle-wait:
+    title: 생성 이슈 정산 대기 (리더 응답)
+    # 리더가 답할 때까지 여기서 기다린다(D3, 사용자 지시 2026-09-04).
+    # end-hold는 못 쓴다 — end-hold는 사람이 `goto`로 보내는 keep-alive
+    # 경로이고 런을 done으로 마감한다(:2047대), 여기서 다시 확인으로
+    # 돌아올 수 없다. 그래서 peer-review와 같은 위임 select 구조를 쓴다:
+    # 리더가 답하면(보드에 배정·spawn·HOLD·adopt를 먼저 쓴 뒤) 기계
+    # 재확인으로 돌아가고, 리더가 타임아웃 안에 답하지 않으면 사람에게
+    # 넘어간다(otherwise: human) — 무한 대기가 아니다.
+    select:
+      chooser:
+        from:
+          - {role: leader, scope: ancestor}
+        otherwise: human
+        timeout: 1800
+      require_reason: true
+      prompt: |
+        이 워커가 만든 생성 이슈 중 미정산인 것이 있다(settle-check의
+        reason에 목록). 정산 세 갈래 중 하나로 보드에 먼저 쓴 뒤 답한다:
+        assign(`claunch beads update <id> --assignee <세션>`), spawn(자식
+        세션에 `--issue <id>`), 또는 pool로 남기려면 `claunch beads
+        comments add <id> "HOLD: <이유>"`. 살아 있는 자식이 있으면 adopt
+        (mesh-retopology)까지. 다 쓴 뒤 아래 옵션으로 답한다 — 판정은
+        기계가 다시 읽는다(settle-check), 이 답은 신호일 뿐이다.
+      options:
+        acted:
+          description: 보드에 필요한 쓰기를 마쳤다 — 기계 재확인으로 돌아간다
+          next: settle-check
 
   end-gate:
     title: 세션 종료 사용자 승인

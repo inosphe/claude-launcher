@@ -495,9 +495,12 @@ def test_the_shared_block_defines_the_queue_and_the_batch():
     assert "assignee가 이슈마다 `merged <해시>`로 한다" in flat
     assert "UNQUEUED: <세션> landed without it" in flat
     # leftover rows are re-read by queue-recheck before any return to pool,
-    # and the worker may not fill its own queue
+    # and the worker may not fill its own queue except through the narrow,
+    # leader-confirmed self exception (claunch-qac7, Q1: A -> B)
     assert "워커의 queue-recheck가 다시 읽는다" in flat
-    assert "워커가 자기 후속 이슈를 스스로 배정해 큐를 채우는 것은 금지다" in flat
+    assert "워커가 자기 후속 이슈를 스스로 배정해 큐를 채우는 것은 원칙적으로 금지다" in flat
+    assert "claunch-qac7 Q1: A→B" in flat
+    assert "회차당 최대 2건" in flat
 
 
 @pytest.mark.parametrize("layer", ["bundled", "project"])
@@ -572,7 +575,7 @@ def test_the_worker_lands_a_batch_once_and_settles_every_issue(layer):
 
 @pytest.mark.parametrize("layer", ["bundled", "project"])
 def test_the_worker_rechecks_its_queue_after_landing_and_loops(layer):
-    """wrapup -> queue-recheck -> (intake ... | end-gate).
+    """wrapup -> queue-recheck -> (intake ... | settle-check -> end-gate).
 
     A round used to be a session: landing drained the queue back to the pool
     and the session ended, so a second assignment meant a second spawn. Now
@@ -580,9 +583,11 @@ def test_the_worker_rechecks_its_queue_after_landing_and_loops(layer):
     role uses); an assignable row loops the run back to ``intake`` (a new
     round, new branch, new landing -- the run's visit counter is the loop
     guard), and only when nothing is assignable does the run reach
-    ``end-gate`` -- and only then are the leftover rows unqueued. The queue
-    is filled by the leader/operator alone: the worker never self-assigns
-    its own handoff issues to manufacture a next round (claunch-qac7, Q1=A).
+    ``settle-check`` -- and only then are the leftover rows unqueued. The
+    queue is filled by the leader/operator, or by the narrow self exception a
+    worker may only propose and a leader must confirm (claunch-qac7, Q1:
+    A -> B, 2026-09-04) -- the worker never assigns its own handoff issues
+    outright to manufacture a next round.
     """
     path = (
         _bundled("improv-worker") if layer == "bundled"
@@ -595,26 +600,40 @@ def test_the_worker_rechecks_its_queue_after_landing_and_loops(layer):
     assert gate.select is not None and gate.select.chooser == "agent"
     assert gate.select.require_reason is True
     assert {k: o.next for k, o in gate.select.options.items()} == {
-        "next-round": "intake", "done": "end-gate",
+        "next-round": "intake", "done": "settle-check",
     }
     prompt = " ".join(gate.select.prompt.split())
     assert "--assignee $CLAUNCH_SESSION --status open --status in_ready --status in_progress --limit 0 --json" in prompt
     assert "답을 기다리지 않는다 — 보드가 답이다" in prompt   # the board, not the ask, decides
     assert "모호하면 done이다" in prompt                       # the tie-break
-    assert "자기 배정으로 큐를 채우지 않는다" in prompt          # Q1=A
-    # end-gate is reached only through queue-recheck's `done`
+    assert "여기서 스스로 자기 배정을 치지 않는다" in prompt     # Q1: A -> B, read-only here
+    # end-gate is reached only through settle-check's `settled`
     assert not any(
         s.next == "end-gate" for s in wf.steps.values() if s.next
     )
+    settle = wf.steps["settle-check"]
+    assert {k: o.next for k, o in settle.select.options.items()} == {
+        "settled": "end-gate", "unsettled": "settle-wait",
+    }
+    wait = wf.steps["settle-wait"].select
+    assert wait.chooser == "delegate"
+    assert [c.role for c in wait.delegate.candidates] == ["leader"]
+    assert wait.delegate.otherwise == "human"          # D3: bounded wait, then a person
+    assert {k: o.next for k, o in wait.options.items()} == {"acted": "settle-check"}
     # intake knows a revisit: the primary issue is the head of the queue
     intake = " ".join(wf.steps["intake"].instructions.split())
     assert "재방문 회차(queue-recheck가 next-round로 보낸 것" in intake
     assert "주 이슈는 큐의 첫 일감(priority 오름차순 → created_at)" in intake
-    # wrapup narrows self-registered follow-ups and forbids self-assignment
+    # wrapup narrows self-registered follow-ups, proposes self/spawn/pool,
+    # and settle-check/settle-wait are the machine backstop before the session
+    # can end (claunch-380z: a session that only filed a follow-up must not
+    # go quiet without it being seen)
     wrapup = " ".join(wf.steps["wrapup"].instructions.split())
     assert "협소하게 해석한다" in wrapup
-    assert "자기 배정(`--assignee $CLAUNCH_SESSION`)은 하지 않는다" in wrapup
-    assert "이 세션의 다음 회차로 배정할지(assign" in wrapup
+    assert "예외는 아래 「생성 이슈 정산」 절의 self뿐" in wrapup
+    assert "── 생성 이슈 정산 — self/spawn/pool 세 갈래로 제안 ──" in wrapup
+    assert "`br`에는 생성자로 거르는 옵션이 없다" in wrapup
+    assert "settle-check가 기계로 다시 확인한다" in wrapup
     # queue-next hands drained rows forward instead of to wrapup
     qn = " ".join(wf.steps["queue-next"].select.prompt.split())
     assert "착지 뒤 queue-recheck가 다시 읽는다" in qn
