@@ -51,6 +51,7 @@ nothing else stores these settings, so there is no separate "export" step.
 from __future__ import annotations
 
 import copy
+import time
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Tuple
 import uuid
@@ -70,6 +71,20 @@ _LOADER = getattr(yaml, "CSafeLoader", yaml.SafeLoader)
 #: :func:`load` — the text is compared, not the mtime, so no filesystem's
 #: timestamp granularity can serve a stale document.
 _parsed: Optional[Tuple[str, dict]] = None
+
+#: How long :func:`load` may serve ``_parsed`` without re-opening the file, and
+#: the path/timestamp of the read that is still within that window (``None``
+#: forces a fresh read). Board ``claunch-snhl`` measured this process's own
+#: repeated opens -- not one external holder -- as a driver of the Windows
+#: os.replace conflict in :mod:`atomic`: a daemon request handler that walks
+#: profile/harness lineage calls :func:`load` many times over a few
+#: milliseconds to answer one poll, and each call reopened the file. 100ms is
+#: well under the daemon's fastest poll interval (2s, see :func:`save`) and
+#: short enough that a person watching a CLI command cannot perceive the
+#: delay -- long enough to collapse a burst like that into one open.
+_DISK_TTL = 0.1
+_disk_read_at: Optional[float] = None
+_disk_read_path: Optional[Path] = None
 
 
 class StoreError(Exception):
@@ -98,28 +113,41 @@ def path() -> Path:
 def load() -> dict:
     """Return the live config document (an empty default if the file is absent).
 
-    Reads the file fresh on every call, so every command and every daemon
-    poll sees the current state. What it does not do twice is *parse* it:
-    the text is compared with the last one parsed and the document is copied
-    out of that parse when they match. The parse was the cost -- 27ms of
-    pure-Python YAML for this file, and the daemon's profile/lineage code
-    calls this eighty-odd times to answer one spawn-capabilities request (a
-    second of the session page's five-second poll, measured). The copy keeps
-    callers free to mutate what they are handed (``update`` does).
+    Reads the file fresh on every call **outside** the ``_DISK_TTL`` window
+    described above, so every command and every daemon poll still sees state
+    at most 100ms old. Within that window a repeat call is served from
+    ``_parsed`` without touching the filesystem at all -- one process's own
+    burst of calls no longer reopens the file once per call. What a fresh
+    read does not do twice is *parse* it: the text is compared with the last
+    one parsed and the document is copied out of that parse when they match.
+    The parse was the cost -- 27ms of pure-Python YAML for this file. The
+    copy keeps callers free to mutate what they are handed (``update`` does).
 
     A *missing* file is fine (a fresh install). A file that is present but
     unparseable raises :class:`StoreError` rather than being silently treated as
     empty — this is now the only state file, so a transient parse error must not
     let the next write clobber it.
     """
-    global _parsed
+    global _parsed, _disk_read_at, _disk_read_path
     p = path()
+    now = time.monotonic()
+    if (
+        _disk_read_at is not None
+        and _disk_read_path == p
+        and now - _disk_read_at < _DISK_TTL
+    ):
+        return copy.deepcopy(_parsed[1]) if _parsed is not None else {"version": VERSION}
     if not p.is_file():
+        _parsed = None
+        _disk_read_at = now
+        _disk_read_path = p
         return {"version": VERSION}
     try:
         text = p.read_text(encoding="utf-8")
     except OSError as exc:
         raise StoreError(f"cannot read config file {p}: {exc}") from exc
+    _disk_read_at = now
+    _disk_read_path = p
     hit = _parsed
     if hit is not None and hit[0] == text:
         return copy.deepcopy(hit[1])
@@ -140,15 +168,22 @@ def save(doc: dict) -> None:
     """Persist ``doc`` as the config file (stable key order, like the old export).
 
     Written to a temporary file beside it and renamed into place, because this
-    file has concurrent readers. :func:`load` reads it fresh on every call and
-    the daemon calls it on **every** ``/api/sessions`` poll (two seconds, per
-    open browser tab, to answer whether the briefing summariser is configured
-    -- see ``daemon.api.h_sessions_list``). The plain ``write_text`` this
-    replaced truncated the file before writing it, so a reader landing inside
-    that window saw an empty or half-written document. Empty is the dangerous
+    file has concurrent readers. :func:`load` reads it fresh on every call
+    (subject to its own ``_DISK_TTL`` window) and the daemon calls it on
+    **every** ``/api/sessions`` poll (two seconds, per open browser tab, to
+    answer whether the briefing summariser is configured -- see
+    ``daemon.api.h_sessions_list``). The plain ``write_text`` this replaced
+    truncated the file before writing it, so a reader landing inside that
+    window saw an empty or half-written document. Empty is the dangerous
     one: it parses cleanly and simply has no ``llm`` block, so a configuration
     that was never wrong reported itself absent for that poll and the web UI's
     briefing controls went inert until the next one.
+
+    On success this also seeds :func:`load`'s cache with exactly the document
+    just written, so this same process's next call reads it back without
+    reopening the file *and* without waiting out the TTL window -- a caller
+    that just wrote a value must never read its own stale cache. A failed
+    write (below) leaves the cache untouched, since nothing changed on disk.
 
     ``os.replace`` is atomic on POSIX and on Windows, so a reader sees either
     the whole old document or the whole new one -- never a state between them.
@@ -164,6 +199,7 @@ def save(doc: dict) -> None:
     broken". Every other failure (a read-only file, a wrong ACL) is still
     raised as the bare ``OSError`` it always was.
     """
+    global _parsed, _disk_read_at, _disk_read_path
     doc.setdefault("version", VERSION)
     p = path()
     p.parent.mkdir(parents=True, exist_ok=True)
@@ -182,6 +218,9 @@ def save(doc: dict) -> None:
                 f"and could not be updated ({exc}); this is not a broken "
                 "config -- run the command again"
             ) from exc
+    _parsed = (text, copy.deepcopy(doc))
+    _disk_read_at = time.monotonic()
+    _disk_read_path = p
 
 
 def update(mutator: Callable[[dict], None]) -> dict:
