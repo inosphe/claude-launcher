@@ -1,6 +1,7 @@
 /* The rail's bulk bar, run against the real syncBulkActions from app.js.
 
-   Three buttons that act on the working fleet. What has to hold is that
+   Five buttons that act on the working fleet — stop, pause, resume paused,
+   resume, archive. What has to hold is that
    each one is up exactly when it would do something and carries the count of
    what that is: a bar showing "stop 3" on a rail with nothing running is a
    button that lies about the fleet, and a bar that hides `resume` while there
@@ -25,9 +26,10 @@ for (let i = src.indexOf(") {", a) + 2; i < src.length; i++) {
 }
 if (end < 0) throw new Error("unbalanced syncBulkActions");
 
-/* The stub DOM is the four buttons and nothing else — `hidden` is a class in
-   this app, so that is what the check reads. */
-const IDS = ["stop-all", "resume-all", "archive-exited"];
+/* The stub DOM is the five buttons and nothing else — `hidden` is a class in
+   this app, so that is what the check reads. In DOM order, which is the
+   order the bar reads in. */
+const IDS = ["stop-all", "pause-all", "resume-paused", "resume-all", "archive-exited"];
 const buttons = {};
 for (const id of IDS) {
   buttons[id] = {
@@ -71,9 +73,9 @@ check(
 );
 
 check(
-  "a rail with only running sessions can be stopped",
+  "a rail with only running sessions can be stopped or paused",
   bar(of("idle", "busy", "starting")),
-  ["stop 3"]
+  ["stop 3", "pause 3"]
 );
 
 check(
@@ -85,7 +87,7 @@ check(
 check(
   "a mixed rail counts each working state separately",
   bar(of("idle", "exited", "busy", "exited", "exited")),
-  ["stop 2", "resume 3", "archive 3 exited"]
+  ["stop 2", "pause 2", "resume 3", "archive 3 exited"]
 );
 
 check(
@@ -94,15 +96,34 @@ check(
     { name: "live", status: "idle" },
     { name: "old", status: "exited", archived_at: "2026-08-28T00:00:00Z" },
   ]),
-  ["stop 1"]
+  ["stop 1", "pause 1"]
 );
+
+/* A paused record is exited with the marker: it is counted by the paused
+   resume and by nothing else — not by resume, not by archive — so no button
+   on the bar can claim it twice, and "resume paused" cannot bring back a
+   session somebody killed on purpose. */
+const paused = [
+  { name: "live", status: "idle" },
+  { name: "held", status: "exited", paused_at: "2026-09-02T00:00:00Z" },
+  { name: "dead", status: "exited" },
+  { name: "gone", status: "exited", paused_at: "2026-09-02T00:00:00Z",
+    archived_at: "2026-09-02T01:00:00Z" },
+];
+check("paused records get their own resume and leave the killed counts alone",
+      bar(paused), ["stop 1", "pause 1", "resume 1 paused", "resume 1", "archive 1 exited"]);
+check("paused mode exposes only the paused resume", bar(paused, "paused"),
+      ["resume 1 paused"]);
+check("killed mode does not count the paused", bar(paused, "killed"),
+      ["resume 1", "archive 1 exited"]);
 
 const mixed = [
   { name: "live", status: "idle" },
   { name: "dead", status: "exited" },
   { name: "old", status: "exited", archived_at: "2026-08-28T00:00:00Z" },
 ];
-check("running mode exposes only its running action", bar(mixed, "running"), ["stop 1"]);
+check("running mode exposes only its running actions", bar(mixed, "running"),
+      ["stop 1", "pause 1"]);
 check("killed mode exposes only its killed actions", bar(mixed, "killed"),
       ["resume 1", "archive 1 exited"]);
 check("archived mode does not act on hidden current records", bar(mixed, "archived"), []);
@@ -129,6 +150,11 @@ check(
 check(
   "archive says the records and resume capability survive it",
   /retaining.*resume/.test(buttons["archive-exited"].title),
+  true
+);
+check(
+  "pause says it ends the program as a kill does and can be undone",
+  /kill/.test(buttons["pause-all"].title) && /resumed/.test(buttons["pause-all"].title),
   true
 );
 

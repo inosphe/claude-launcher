@@ -458,6 +458,8 @@ def build_app(
     # name: nothing else routes POST /api/sessions/<something>, and the two
     # routes that do take {name} there are a GET and a DELETE.
     r.add_post("/api/sessions/kill", h_sessions_kill_all)
+    r.add_post("/api/sessions/pause", h_sessions_pause_all)
+    r.add_post("/api/sessions/resume", h_sessions_resume_all)
     r.add_post("/api/sessions/respawn", h_sessions_respawn_all)
     r.add_post("/api/sessions/archive", h_sessions_archive_all)
     r.add_get("/api/sessions/{name}", h_session_get)
@@ -478,6 +480,7 @@ def build_app(
     r.add_post("/api/sessions/{name}/children/{child}/kill", h_session_child_kill)
     r.add_post("/api/sessions/{name}/parent", h_session_reparent)
     r.add_post("/api/sessions/{name}/kill", h_session_kill)
+    r.add_post("/api/sessions/{name}/pause", h_session_pause)
     r.add_post("/api/sessions/{name}/archive", h_session_archive)
     r.add_delete("/api/sessions/{name}", h_session_delete)
     r.add_post("/api/sessions/{name}/keep-alive", h_session_keep_alive)
@@ -3249,7 +3252,9 @@ async def h_sessions_list(request: web.Request) -> web.Response:
     manager: SessionManager = request.app["manager"]
     rail_view = request.query.get("view") == "rail"
     list_state = request.query.get("state") or "all"
-    if list_state not in {"all", "active", "current", "killed", "archived"}:
+    if list_state not in {
+        "all", "active", "current", "killed", "paused", "archived",
+    }:
         return json_error(400, f"invalid session list state: {list_state!r}")
     reminder_service = request.app.get("session_reminder")
     reminder_cfg = None
@@ -3269,11 +3274,17 @@ async def h_sessions_list(request: web.Request) -> web.Response:
     sessions = []
     for s in manager.list():
         archived = bool(getattr(s, "archived_at", None))
+        # Paused is a partition of the exited records, as the rail draws it:
+        # ``killed`` is the exited ones that were not paused, so a record is
+        # in exactly one of the two lists and the filter counts add up.
+        paused = bool(s.exited and getattr(s, "paused_at", None))
         if list_state == "active" and s.exited:
             continue
         if list_state == "current" and archived:
             continue
-        if list_state == "killed" and (not s.exited or archived):
+        if list_state == "killed" and (not s.exited or archived or paused):
+            continue
+        if list_state == "paused" and (not paused or archived):
             continue
         if list_state == "archived" and not archived:
             continue
@@ -3346,8 +3357,9 @@ async def h_sessions_list(request: web.Request) -> web.Response:
             "null_token", "issue", "keep_alive", "reminder_paused", "status",
             "pid", "exit_code", "created_at", "last_output_at",
             "last_visited_at", "last_input_at", "last_activity_at", "viewers",
-            "exited_at", "archived_at", "delivery_hold", "compacting", "context",
-            "branch", "briefing", "winddown", "session_reminder", "status_checks",
+            "exited_at", "archived_at", "paused_at", "delivery_hold", "compacting",
+            "context", "branch", "briefing", "winddown", "session_reminder",
+            "status_checks",
         }
         attached = [
             {key: value for key, value in info.items() if key in rail_fields}
@@ -3845,6 +3857,71 @@ async def h_sessions_kill_all(request: web.Request) -> web.Response:
     )
 
 
+async def h_sessions_pause_all(request: web.Request) -> web.Response:
+    """Pause every running session at once (``?force=1`` for SIGKILL).
+
+    :func:`h_sessions_kill_all` with the records marked paused, and without
+    the wind-down: a pause is the operator's emergency stop — the fleet is
+    looping, or two sessions are racing on one checkout — and typing a
+    settle-your-issues request into a session that is misbehaving is the
+    opposite of what was asked. Every record stays respawnable, and
+    :func:`h_sessions_resume_all` brings back exactly this set.
+
+    Partial results are reported rather than raised, for the reason the kill
+    above gives: ``failed`` names the sessions that would not stop.
+    """
+    manager: SessionManager = request.app["manager"]
+    force = request.query.get("force") in ("1", "true")
+    board = request.app["beads"]
+    paused: List[str] = []
+    failed: List[dict] = []
+    for session in list(manager.list()):
+        if session.exited:
+            continue
+        name = session.sdef.name
+        try:
+            # A wind-down already in flight for this session is overtaken:
+            # the pause is the second, immediate stop that the kill button
+            # turns into while one runs.
+            board.winddowns.pop(name, None)
+            manager.pause(name, force=force)
+        except Exception as exc:  # one refusal must not strand the other nine
+            failed.append({"name": name, "error": str(exc)})
+        else:
+            paused.append(name)
+    return json_response({"paused": paused, "failed": failed})
+
+
+async def h_sessions_resume_all(request: web.Request) -> web.Response:
+    """Relaunch every paused record — the undo of :func:`h_sessions_pause_all`.
+
+    Only the paused ones: a rail that also holds sessions somebody killed on
+    purpose must not get those back from a button that said *resume the
+    paused*. Each comes back through :meth:`SessionManager.respawn`, which
+    constructs a fresh Session and so clears the marker. Archived records
+    are left where they are unless ``?archived=1`` asks for them too.
+
+    In creation order, so a session is back before the ones it spawned.
+    """
+    manager: SessionManager = request.app["manager"]
+    include_archived = request.query.get("archived", "0") in ("1", "true")
+    resumed: List[str] = []
+    failed: List[dict] = []
+    for session in list(manager.list()):
+        if not session.exited or not getattr(session, "paused_at", None):
+            continue
+        if session.archived_at and not include_archived:
+            continue
+        name = session.sdef.name
+        try:
+            manager.respawn(name)
+        except Exception as exc:
+            failed.append({"name": name, "error": str(exc)})
+        else:
+            resumed.append(name)
+    return json_response({"resumed": resumed, "failed": failed})
+
+
 async def h_sessions_respawn_all(request: web.Request) -> web.Response:
     """Relaunch every exited session under its own name and definition.
 
@@ -3863,12 +3940,17 @@ async def h_sessions_respawn_all(request: web.Request) -> web.Response:
     """
     manager: SessionManager = request.app["manager"]
     include_archived = request.query.get("archived", "1") not in ("0", "false")
+    # ``?paused=0`` leaves the paused records to their own resume: the rail's
+    # "resume N" counts the killed ones and must bring back exactly those.
+    include_paused = request.query.get("paused", "1") not in ("0", "false")
     respawned: List[str] = []
     failed: List[dict] = []
     for session in list(manager.list()):
         if not session.exited:
             continue
         if session.archived_at and not include_archived:
+            continue
+        if getattr(session, "paused_at", None) and not include_paused:
             continue
         name = session.sdef.name
         try:
@@ -3881,12 +3963,19 @@ async def h_sessions_respawn_all(request: web.Request) -> web.Response:
 
 
 async def h_sessions_archive_all(request: web.Request) -> web.Response:
-    """Archive every exited record that is still in the working fleet."""
+    """Archive every exited record that is still in the working fleet.
+
+    ``?paused=0`` skips the paused records — a pause is meant to be undone,
+    and the rail's "archive N exited" counts only the killed ones.
+    """
     manager: SessionManager = request.app["manager"]
+    include_paused = request.query.get("paused", "1") not in ("0", "false")
     archived: List[str] = []
     failed: List[dict] = []
     for session in list(manager.list()):
         if not session.exited or session.archived_at:
+            continue
+        if getattr(session, "paused_at", None) and not include_paused:
             continue
         name = session.sdef.name
         try:
@@ -4316,6 +4405,34 @@ async def h_session_kill(request: web.Request) -> web.Response:
     if await _winding_down(request, session, force=force):
         return json_response({**session.info(), "winding_down": True})
     session = manager.kill(name, force=force)
+    return json_response(session.info())
+
+
+async def h_session_pause(request: web.Request) -> web.Response:
+    """Pause a running session: :func:`h_session_kill` with the record marked
+    ``paused_at``, and without the wind-down.
+
+    The process side is a kill — the program is terminated, the record
+    stays and stays respawnable, the mesh row outlives the terminal. What
+    differs is what the record says afterwards: *paused*, a temporary stop
+    the operator means to undo, which the rail files apart from the killed
+    and the bulk resume brings back as a set. No wind-down because the
+    reason to pause is a session misbehaving — looping, racing another on
+    the same checkout — and typing a settle-your-issues request into it is
+    the thing being stopped. Its board issues get the same ``SESSION ENDED``
+    sweep a kill's do; that is the daemon's exit path, unchanged.
+
+    On an exited session the reply says ``already_exited``, as the kill
+    route does; the record keeps whichever marker it has.
+    """
+    manager: SessionManager = request.app["manager"]
+    name = request.match_info["name"]
+    force = request.query.get("force") in ("1", "true")
+    session = manager.get(name)  # ManagerError -> 400, as it always did
+    if session.exited:
+        return json_response({**session.info(), "already_exited": True})
+    request.app["beads"].winddowns.pop(name, None)
+    session = manager.pause(name, force=force)
     return json_response(session.info())
 
 

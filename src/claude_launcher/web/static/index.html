@@ -64,6 +64,7 @@
               aria-label="larger text">+</button>
     </span>
     <button id="m-resume" class="m-act hidden" type="button">resume</button>
+    <button id="m-pause" class="m-act hidden" type="button">pause</button>
     <button id="m-kill" class="m-act hidden" type="button">kill</button>
     <button id="m-archive" class="m-act hidden" type="button">archive</button>
   </div>
@@ -103,6 +104,11 @@
               aria-pressed="false"></button>
       <button id="session-filter-killed" type="button" data-filter="killed"
               aria-pressed="false"></button>
+      <!-- Paused: exited records carrying the pause marker — the operator's
+           temporary stop, filed apart from the killed so the two never share
+           a count and the bulk resume below reaches exactly this set. -->
+      <button id="session-filter-paused" type="button" data-filter="paused"
+              aria-pressed="false"></button>
       <button id="session-filter-archived" type="button" data-filter="archived"
               aria-pressed="false"></button>
       <label class="session-group-toggle">
@@ -120,6 +126,11 @@
          empty on an archived-only rail rather than three inactive controls. -->
     <div id="bulk-actions">
       <button id="stop-all" class="bulk hidden" type="button"></button>
+      <!-- The daemon-wide pause and its undo: pause ends every running session
+           the way stop does and files each record as paused; resume paused
+           relaunches that set and nothing that was killed on purpose. -->
+      <button id="pause-all" class="bulk hidden" type="button"></button>
+      <button id="resume-paused" class="bulk hidden" type="button"></button>
       <button id="resume-all" class="bulk hidden" type="button"></button>
       <button id="archive-exited" class="bulk hidden" type="button"></button>
     </div>
@@ -236,6 +247,10 @@
                 title="this session's conversation — scrollable, the whole of it">transcript</button>
         <button id="term-rebrief" class="term-btn"
                 title="re-type this session's briefing (mesh, run, parent, task) into its terminal — for an agent whose context was cleared or compacted">rebrief</button>
+        <!-- Pause: kill with the record filed as paused — the temporary stop
+             for a session that is looping or racing another. No wind-down. -->
+        <button id="term-pause" class="term-btn"
+                title="pause this session: the program is terminated as kill does, and the record is filed as paused so it can be resumed on its own or with every other paused one">pause</button>
         <button id="term-kill" class="term-btn"
                 title="terminate the program running in this session">kill</button>
         <button id="term-archive" class="term-btn hidden"

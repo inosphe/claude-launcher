@@ -179,10 +179,18 @@ function byLineage(sessions, visibleSessions = sessions) {
    exited records out of the working fleet while keeping them inspectable and
    resumable. Permanent removal remains on the explicit API and CLI paths. */
 function syncBulkActions(sessions, filter = "current") {
+  // Three partitions of the working fleet, the same three the filter buttons
+  // count: running, killed (exited without the pause marker) and paused
+  // (exited with it). Each bulk verb reads one partition, so "resume 2"
+  // and "resume 1 paused" never claim the same session twice.
   const live = filter === "current" || filter === "running"
     ? sessions.filter((s) => s.status !== "exited").length : 0;
   const dead = filter === "current" || filter === "killed"
-    ? sessions.filter((s) => s.status === "exited" && !s.archived_at).length : 0;
+    ? sessions.filter((s) => s.status === "exited" && !s.archived_at
+                      && !s.paused_at).length : 0;
+  const paused = filter === "current" || filter === "paused"
+    ? sessions.filter((s) => s.status === "exited" && !s.archived_at
+                      && !!s.paused_at).length : 0;
   const set = (id, n, label, title) => {
     const btn = $(id);
     if (!btn) return;  // an older index.html served by a newer daemon
@@ -193,6 +201,12 @@ function syncBulkActions(sessions, filter = "current") {
   set("stop-all", live, `■ stop ${live}`,
       "kill the program in every running session — the records stay, so each "
       + "one can be resumed afterwards");
+  set("pause-all", live, `⏸ pause ${live}`,
+      "pause every running session — the program is terminated exactly as a "
+      + "kill does, but each record is filed as paused so the whole set can be "
+      + "resumed together");
+  set("resume-paused", paused, `▶ resume ${paused} paused`,
+      "relaunch every paused session under its own name and conversation");
   set("resume-all", dead, `▶ resume ${dead}`,
       "relaunch every unarchived exited session under its own name and conversation");
   set("archive-exited", dead, `archive ${dead} exited`,
@@ -440,9 +454,13 @@ function railMetaText(s) {
   const identity = s.borrow
     ? `${profileHarnessLabel(s.profile, s.harness)} → ${s.borrow}`
     : profileHarnessLabel(s.profile, s.harness);
+  // A paused record is an exited one by every other reading; here it says
+  // so instead of its exit code, because the code is the kill's fact and
+  // the pause is the operator's. A marker on a still-running row is a pause
+  // whose signal has not landed yet — the same window a kill has.
   const state = s.archived_at ? "archived" : s.status === "exited"
-    ? `exit ${s.exit_code ?? "?"}`
-    : s.winddown ? "winding down" : "";
+    ? (s.paused_at ? "paused" : `exit ${s.exit_code ?? "?"}`)
+    : s.paused_at ? "pausing" : s.winddown ? "winding down" : "";
   return [identity, state].filter(Boolean).join(" · ");
 }
 
@@ -534,7 +552,7 @@ async function runSessionSearch(q) {
 const SESSION_FILTER_KEY = `claunch_session_filter:${BASE}`;
 const SESSION_GROUP_KEY = `claunch_session_group:${BASE}`;
 const SESSION_GROUP_ORDER_KEY = `claunch_session_group_order:${BASE}`;
-const SESSION_FILTERS = ["current", "running", "killed", "archived"];
+const SESSION_FILTERS = ["current", "running", "killed", "paused", "archived"];
 const SESSION_GROUPS = ["mesh", "workspace"];
 let sessionFilter = localStorage.getItem(SESSION_FILTER_KEY) || "current";
 if (!SESSION_FILTERS.includes(sessionFilter)) sessionFilter = "current";
@@ -642,7 +660,8 @@ function setSessionGroupByMesh(enabled, remember = true) {
 
 function sessionCategory(s) {
   if (s && s.archived_at) return "archived";
-  return s && s.status === "exited" ? "killed" : "running";
+  if (s && s.status === "exited") return s.paused_at ? "paused" : "killed";
+  return "running";
 }
 
 function sessionMatchesFilter(s, filter = sessionFilter) {
@@ -651,7 +670,7 @@ function sessionMatchesFilter(s, filter = sessionFilter) {
 }
 
 function sessionFilterCounts(sessions) {
-  const counts = { current: 0, running: 0, killed: 0, archived: 0 };
+  const counts = { current: 0, running: 0, killed: 0, paused: 0, archived: 0 };
   for (const session of sessions || []) {
     const category = sessionCategory(session);
     counts[category]++;
@@ -669,6 +688,7 @@ function setSessionFilter(filter, remember = true) {
   // of their filters is an explicit request for one fresh snapshot.
   const state = filter === "archived" ? "archived"
     : filter === "killed" ? "killed"
+    : filter === "paused" ? "paused"
     : filter === "current" ? "current" : "active";
   refreshSessions({ state });
 }
@@ -682,7 +702,8 @@ function syncSessionFilters(sessions) {
   }
   const counts = sessionFilterCounts(sessions);
   const labels = {
-    current: "Current", running: "Running", killed: "Killed", archived: "Archived",
+    current: "Current", running: "Running", killed: "Killed", paused: "Paused",
+    archived: "Archived",
   };
   for (const filter of SESSION_FILTERS) {
     const button = $(`session-filter-${filter}`);
@@ -858,7 +879,9 @@ async function refreshSessions(options) {
       li.title = `spawned by ${s.parent}`;
     }
     const dot = document.createElement("span");
-    dot.className = `dot ${s.status}`;
+    // The status class is the socket's word; `paused` is the record's, laid
+    // over it so the rail can tell a pause from a kill at the dot.
+    dot.className = `dot ${s.status}${s.status === "exited" && s.paused_at ? " paused" : ""}`;
     const label = document.createElement("span");
     label.className = "rail-name";
     label.textContent = s.name;
@@ -936,6 +959,8 @@ async function refreshSessions(options) {
     if (s.status === "exited") {
       li.title = [li.title, s.archived_at
         ? "archived — open it to inspect or resume"
+        : s.paused_at
+        ? "paused — open it to resume; the bulk resume brings every paused one back"
         : "exited — open it to resume or archive"].filter(Boolean).join(" · ");
     }
     // How full this session's context is, on the rail row itself. The story
@@ -5227,6 +5252,42 @@ async function killCurrentSession() {
 
 $("term-kill").addEventListener("click", killCurrentSession);
 
+/* Pause: the same ending as kill, filed as a pause. No wind-down and no
+   two-step — a pause is what somebody reaches for when a session is looping
+   or racing another, and the point is that it stops now. The record stays
+   and reads `paused`; resume (the header's or the bulk one) brings it back. */
+async function pauseCurrentSession() {
+  if (!currentName) return;
+  const name = currentName;
+  const btn = $("term-pause");
+  if (btn) btn.disabled = true;
+  try {
+    const resp = await api(
+      `/api/sessions/${encodeURIComponent(name)}/pause`, { method: "POST" }
+    );
+    const info = await resp.json().catch(() => ({}));
+    if (!resp.ok) {
+      await modalInfo(`Could not pause '${name}'`,
+                      info.error || `HTTP ${resp.status}`);
+      return;
+    }
+    const at = sessionsCache.findIndex((s) => s.name === name);
+    if (at >= 0) {
+      sessionsCache[at] = { ...sessionsCache[at], ...info, winddown: undefined };
+    }
+    killUiState.delete(name);
+  } catch (err) {
+    await modalInfo(`Could not pause '${name}'`,
+                    err && err.message ? err.message : "request failed");
+  } finally {
+    if (btn) btn.disabled = false;
+    syncSessionKillControls(name);
+    await refreshSessions({ state: "current" });
+  }
+}
+
+if ($("term-pause")) $("term-pause").addEventListener("click", pauseCurrentSession);
+
 async function archiveExitedSession(name) {
   const resp = await api(
     `/api/sessions/${encodeURIComponent(name)}/archive`, { method: "POST" }
@@ -5277,7 +5338,8 @@ $("stop-all").addEventListener("click", async () => {
    the child it was bound to. */
 $("resume-all").addEventListener("click", async () => {
   const dead = sessionsCache
-    .filter((s) => s.status === "exited" && !s.archived_at).map((s) => s.name);
+    .filter((s) => s.status === "exited" && !s.archived_at && !s.paused_at)
+    .map((s) => s.name);
   if (!dead.length) return;
   if (!(await modalConfirm(
     `Resume ${dead.length} exited session(s)?`,
@@ -5287,7 +5349,7 @@ $("resume-all").addEventListener("click", async () => {
     "Resume", false
   ))) return;
   const result = await bulkAction(
-    $("resume-all"), "/api/sessions/respawn?archived=0",
+    $("resume-all"), "/api/sessions/respawn?archived=0&paused=0",
     { method: "POST" }, "resume"
   );
   const back = (result && result.respawned) || [];
@@ -5296,13 +5358,55 @@ $("resume-all").addEventListener("click", async () => {
   if (currentName && back.includes(currentName)) attach(currentName);
 });
 
+/* Pause everything that runs. The daemon-wide emergency stop: every running
+   session is ended the way stop ends it, and every record is filed as paused
+   so the button below brings back exactly this set and nothing that was
+   killed on purpose. */
+if ($("pause-all")) $("pause-all").addEventListener("click", async () => {
+  const live = sessionsCache
+    .filter((s) => s.status !== "exited").map((s) => s.name);
+  if (!live.length) return;
+  if (!(await modalConfirm(
+    `Pause ${live.length} running session(s)?`,
+    `${live.join(", ")}\n\n` +
+    `The program in each one is terminated, as stop does, and the record is ` +
+    `filed as paused. "Resume paused" brings all of them back together.`,
+    "Pause", false
+  ))) return;
+  await bulkAction($("pause-all"), "/api/sessions/pause", { method: "POST" }, "pause");
+  refreshSessions({ state: "current" });
+});
+
+/* And bring the paused ones back — only those. Same reattach dance as
+   resume-all: the tab's socket died with the child it was bound to. */
+if ($("resume-paused")) $("resume-paused").addEventListener("click", async () => {
+  const paused = sessionsCache
+    .filter((s) => s.status === "exited" && !s.archived_at && !!s.paused_at)
+    .map((s) => s.name);
+  if (!paused.length) return;
+  if (!(await modalConfirm(
+    `Resume ${paused.length} paused session(s)?`,
+    `${paused.join(", ")}\n\n` +
+    `Each comes back under its own name — the claude harness with --resume of ` +
+    `the conversation it was pinned to.`,
+    "Resume", false
+  ))) return;
+  const result = await bulkAction(
+    $("resume-paused"), "/api/sessions/resume", { method: "POST" }, "resume paused"
+  );
+  const back = (result && result.resumed) || [];
+  detach();
+  await refreshSessions({ state: "current" });
+  if (currentName && back.includes(currentName)) attach(currentName);
+});
+
 $("archive-exited").addEventListener("click", async () => {
   const dead = sessionsCache
-    .filter((s) => s.status === "exited" && !s.archived_at)
+    .filter((s) => s.status === "exited" && !s.archived_at && !s.paused_at)
     .map((s) => s.name);
   if (!dead.length) return;
   await bulkAction(
-    $("archive-exited"), "/api/sessions/archive",
+    $("archive-exited"), "/api/sessions/archive?paused=0",
     { method: "POST" }, "archive"
   );
   await refreshSessions({ state: "current" });
@@ -5339,6 +5443,7 @@ $("refresh-all").addEventListener("click", async () => {
       refreshSessions({
         state: sessionFilter === "archived" ? "archived"
           : sessionFilter === "killed" ? "killed"
+          : sessionFilter === "paused" ? "paused"
           : sessionFilter === "current" ? "current" : "active",
       }),
       refreshMeshList(),
@@ -5451,18 +5556,23 @@ $("term-rebrief").addEventListener("click", async () => {
 /* ------------------------------------------------------------------ */
 function setStatusBadge(status) {
   const badge = $("term-status");
-  badge.textContent = status;
-  badge.className = `badge ${status}`;
   // An exited session is revivable and archivable. An archived record keeps
   // resume while archive itself disappears because the transition is done.
   const exited = status === "exited";
-  const archived = !!(sessionsCache.find((s) =>
-    s.name === currentName) || {}).archived_at;
+  const record = sessionsCache.find((s) => s.name === currentName) || {};
+  const archived = !!record.archived_at;
+  // The badge says `paused` for a paused record: the socket's word is still
+  // `exited` (and every control below reads that), but the header is where
+  // a person looks to see what became of the session, and "paused" is it.
+  const paused = exited && !!record.paused_at;
+  badge.textContent = paused ? "paused" : status;
+  badge.className = `badge ${status}${paused ? " paused" : ""}`;
   $("term-resume").classList.toggle("hidden", !exited);
   // Rebrief types into a live terminal; on an exited one there is nobody to
   // read it, so the button yields its spot to resume.
   $("term-rebrief").classList.toggle("hidden", exited);
   $("term-kill").classList.toggle("hidden", exited);
+  if ($("term-pause")) $("term-pause").classList.toggle("hidden", exited);
   $("term-archive").classList.toggle("hidden", !exited || archived);
   syncSessionKillControls();
   // Every attach path passes through here (freshAttach and restoreTerminal
@@ -7857,17 +7967,25 @@ function syncMobileBars() {
 
   $("m-title").textContent = mobileTitle();
   const dot = $("m-dot");
-  dot.className = `dot ${status}`;
+  // The header badge reads `paused` for a paused record while the status
+  // underneath is `exited`; the mobile bar mirrors the word and keeps the
+  // status for its controls.
+  const paused = status === "paused";
+  if (paused) status = "exited";
+  dot.className = `dot ${status}${paused ? " paused" : ""}`;
   dot.classList.toggle("hidden", !has);
   const badge = $("m-status");
-  badge.textContent = status;
-  badge.className = `badge ${status}`;
+  badge.textContent = paused ? "paused" : status;
+  badge.className = `badge ${status}${paused ? " paused" : ""}`;
   badge.classList.toggle("hidden", !has);
   // Mirrors of the hidden header's buttons — see the click handlers below.
   $("m-resume").classList.toggle("hidden", status !== "exited");
   // Nothing to size without a terminal under the bar.
   $("m-zoom").classList.toggle("hidden", !has);
   $("m-kill").classList.toggle("hidden", !has || status === "exited");
+  if ($("m-pause")) {
+    $("m-pause").classList.toggle("hidden", !has || status === "exited");
+  }
   $("m-archive").classList.toggle(
     "hidden", !has || status !== "exited" || !!(sess && sess.archived_at));
   syncSessionKillControls();
@@ -7890,6 +8008,9 @@ $("m-menu").addEventListener("click", () => { location.hash = "#/"; });
 // The header's controls are the real ones; these mirrors keep archive and
 // resume behaviour in one place.
 $("m-kill").addEventListener("click", () => $("term-kill").click());
+if ($("m-pause")) {
+  $("m-pause").addEventListener("click", () => $("term-pause").click());
+}
 $("m-archive").addEventListener("click", () => $("term-archive").click());
 $("m-resume").addEventListener("click", () => $("term-resume").click());
 
@@ -14528,6 +14649,9 @@ function renderSession(data) {
   metaRow(dl, "last output", (s.last_output_at || "").replace("T", " "));
   if (s.status === "exited") {
     metaRow(dl, "exited", `${(s.exited_at || "").replace("T", " ")} (code ${s.exit_code ?? "?"})`);
+  }
+  if (s.paused_at) {
+    metaRow(dl, "paused", (s.paused_at || "").replace("T", " "));
   }
   view.appendChild(dl);
 

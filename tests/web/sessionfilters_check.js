@@ -1,6 +1,7 @@
 /* The rail's state filter: current working records, running sessions, killed
-   records and archived records. Exercise the shipped helper and DOM state so
-   a label can never claim one partition while the rows show another. */
+   records, paused records and archived records. Exercise the shipped helper
+   and DOM state so a label can never claim one partition while the rows show
+   another. */
 const fs = require("fs");
 const path = require("path");
 
@@ -27,6 +28,7 @@ function classes(initial = []) {
 const sessions = [
   { name: "run", status: "busy" },
   { name: "dead", status: "exited" },
+  { name: "held", status: "exited", paused_at: "2026-09-02T00:00:00Z" },
   { name: "old", status: "exited", archived_at: "2026-08-28T00:00:00Z" },
 ];
 const rows = sessions.map((session) => {
@@ -35,7 +37,7 @@ const rows = sessions.map((session) => {
 });
 const list = { querySelectorAll: () => rows };
 const buttons = {};
-for (const filter of ["current", "running", "killed", "archived"]) {
+for (const filter of ["current", "running", "killed", "paused", "archived"]) {
   buttons[filter] = {
     textContent: "", children: [], attrs: {},
     append(...children) { this.children.push(...children); },
@@ -81,31 +83,38 @@ function check(what, got, want) {
   }
 }
 
-check("the three lifecycle categories are disjoint",
-      sessions.map(ctx.category), ["running", "killed", "archived"]);
-check("current combines running and killed",
-      sessions.map((s) => ctx.matches(s, "current")), [true, true, false]);
+check("the four lifecycle categories are disjoint",
+      sessions.map(ctx.category), ["running", "killed", "paused", "archived"]);
+check("current combines running, killed and paused",
+      sessions.map((s) => ctx.matches(s, "current")), [true, true, true, false]);
 check("every count describes its exact partition", ctx.counts(sessions),
-      { current: 2, running: 1, killed: 1, archived: 1 });
+      { current: 3, running: 1, killed: 1, paused: 1, archived: 1 });
 
 ctx.sync(sessions);
 check("the remembered killed filter is selected",
       Object.values(buttons).map((b) => b.attrs["aria-pressed"]),
-      ["false", "false", "true", "false"]);
-check("killed shows only killed rows",
-      rows.map((row) => row.classes.has("session-filtered")), [true, false, true]);
+      ["false", "false", "true", "false", "false"]);
+check("killed shows only killed rows — a paused record is not one",
+      rows.map((row) => row.classes.has("session-filtered")), [true, false, true, true]);
 check("counts are rendered beside every label",
-      Object.values(buttons).map((b) => b.children[1].textContent), ["2", "1", "1", "1"]);
+      Object.values(buttons).map((b) => b.children[1].textContent),
+      ["3", "1", "1", "1", "1"]);
+
+ctx.set("paused");
+check("paused shows only paused rows",
+      rows.map((row) => row.classes.has("session-filtered")), [true, true, false, true]);
+check("the paused filter asks the daemon for the paused partition",
+      src.includes(': filter === "paused" ? "paused"'), true);
 
 ctx.set("archived");
 check("archived shows only archived rows",
-      rows.map((row) => row.classes.has("session-filtered")), [true, true, false]);
+      rows.map((row) => row.classes.has("session-filtered")), [true, true, true, false]);
 check("a filter selection is remembered",
       writes.at(-1), ["claunch_session_filter:/t/local/", "archived"]);
 
 ctx.set("current");
 check("current restores the working fleet",
-      rows.map((row) => row.classes.has("session-filtered")), [false, false, true]);
+      rows.map((row) => row.classes.has("session-filtered")), [false, false, false, true]);
 
 const grouped = ctx.groupRows([
   [{ name: "alpha", cwd: "F:/works/repo/.claude/worktrees/a" }, 0],
@@ -129,8 +138,8 @@ check("group priority follows checkbox activation order",
         ["claunch_session_group:/t/local/", "true"],
       ]);
 
-check("the shipped page contains all four state controls",
-      ["current", "running", "killed", "archived"].every((name) =>
+check("the shipped page contains all five state controls",
+      ["current", "running", "killed", "paused", "archived"].every((name) =>
         html.includes(`id="session-filter-${name}"`)), true);
 check("archived sessions have a dedicated one-shot refresh control",
       html.includes('id="refresh-archived"') &&

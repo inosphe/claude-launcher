@@ -389,6 +389,14 @@ class Session:
         # always starts outside the archive; respawn therefore clears it by
         # constructing a new Session from the retained definition.
         self.archived_at: Optional[str] = None
+        #: The other lifecycle marker: set by :meth:`pause` just before the
+        #: child is terminated, so the record this session leaves reads as
+        #: *paused* rather than killed. The process side is identical to a
+        #: kill (the program is gone; the record stays respawnable) — the
+        #: marker exists for the reader, and for the bulk resume that brings
+        #: back exactly the ones that were paused. Cleared the same way
+        #: ``archived_at`` is: respawn constructs a fresh Session.
+        self.paused_at: Optional[str] = None
         self.exited = False
         self._started_mono = time.monotonic()
         self._subscribers: Set[asyncio.Queue] = set()
@@ -1320,6 +1328,21 @@ class Session:
             return
         self.pty.terminate(force=force)
 
+    def pause(self, *, force: bool = False) -> None:
+        """Kill, and mark the record as paused rather than killed.
+
+        The marker is written *before* the signal: the exit that follows is
+        asynchronous (the reader task sees EOF and calls :meth:`_finish`),
+        and a marker written after it could race a viewer reading the fresh
+        exited record as a kill. A session that ignores the signal keeps
+        running with the marker set, which the rail draws as "pausing" — the
+        same window a plain kill has, made visible.
+        """
+        if self.exited or self.pty is None:
+            return
+        self.paused_at = _utcnow()
+        self.kill(force=force)
+
     async def shutdown(self, grace: float = 5.0) -> None:
         """Terminate the child and wait briefly; force-kill stragglers."""
         if self.exited or self.pty is None:
@@ -1470,6 +1493,7 @@ class Session:
             "viewers": self.viewers(),
             "exited_at": self.exited_at,
             "archived_at": self.archived_at,
+            "paused_at": self.paused_at,
             # A person's standing "type nothing in here" (:meth:`delivery_held`).
             # On the list poll rather than only on the per-session queued
             # endpoint, because the rail draws one row per session and the
@@ -1527,6 +1551,7 @@ class DeadSession:
         last_input_at: Optional[str] = None,
         exited_at: Optional[str] = None,
         archived_at: Optional[str] = None,
+        paused_at: Optional[str] = None,
         scrollback: int = 5000,
         idle_threshold: float = 2.0,
     ) -> None:
@@ -1542,6 +1567,7 @@ class DeadSession:
         self.last_input_at = last_input_at
         self.exited_at = exited_at
         self.archived_at = archived_at
+        self.paused_at = paused_at
         self.idle_threshold = idle_threshold
         self._scrollback = scrollback
         self._screen: Optional[ScreenState] = None
@@ -1681,5 +1707,6 @@ class DeadSession:
             "viewers": self.viewers(),
             "exited_at": self.exited_at,
             "archived_at": self.archived_at,
+            "paused_at": self.paused_at,
             "delivery_hold": self.delivery_held(),  # always False; see above
         }
