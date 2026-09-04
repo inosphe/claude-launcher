@@ -265,6 +265,62 @@ def test_sweep_plan_returns_in_progress_to_open_and_closes_untouched_placeholder
     assert not any("q" in step for step in plan)
 
 
+def test_sweep_plan_marks_orphaned_followups_and_releases_self_queued_ones():
+    """A session's exit also settles the follow-ups IT filed, not just what it
+    was assigned: one nobody picked up gets a marker the leader's 3-day sweep
+    can key on, one it queued to itself is let go so it does not sit
+    invisibly stuck to a name that cannot answer."""
+    mine = [
+        {"id": "orphan-open", "status": "open", "created_by": "s1"},
+        {"id": "orphan-ready", "status": "in_ready", "created_by": "s1"},
+        {"id": "self-open", "status": "open", "assignee": "s1",
+         "created_by": "s1", "labels": ["found"]},
+        {"id": "self-ready", "status": "in_ready", "assignee": "s1",
+         "created_by": "s1"},
+        # untouched: someone else's follow-up, and one already past triage
+        {"id": "others", "status": "open", "created_by": "lead"},
+        {"id": "in-review", "status": "in_review", "assignee": "s1",
+         "created_by": "s1"},
+    ]
+    plan = beads_mod.sweep_plan(mine, "s1", exit_code=1)
+    assert plan == [
+        ["comments", "add", "orphan-open",
+         "SESSION ENDED: creator s1 exited (code 1); follow-up left "
+         "unassigned (ORPHANED FOLLOW-UP)"],
+        ["comments", "add", "orphan-ready",
+         "SESSION ENDED: creator s1 exited (code 1); follow-up left "
+         "unassigned (ORPHANED FOLLOW-UP)"],
+        ["comments", "add", "self-open",
+         "SESSION ENDED: creator s1 exited (code 1); self-queued follow-up "
+         "released to the pool (SELF-QUEUE RELEASED)"],
+        ["update", "self-open", "--assignee", ""],
+        ["comments", "add", "self-ready",
+         "SESSION ENDED: creator s1 exited (code 1); self-queued follow-up "
+         "released to the pool (SELF-QUEUE RELEASED)"],
+        ["update", "self-ready", "--assignee", ""],
+    ]
+
+
+def test_self_queued_release_does_not_conflict_with_the_placeholder_close():
+    """The two branches are told apart by the ``session`` label alone -- both
+    are ``open``, self-assigned, and created by the exited session."""
+    mine = [
+        {"id": "placeholder", "status": "open", "assignee": "s1",
+         "created_by": "s1", "labels": ["session", "user"]},
+        {"id": "self-queued", "status": "open", "assignee": "s1",
+         "created_by": "s1", "labels": ["found"]},
+    ]
+    plan = beads_mod.sweep_plan(mine, "s1", exit_code=0)
+    assert plan == [
+        ["close", "placeholder", "--reason",
+         "session s1 ended (code 0) before taking this up"],
+        ["comments", "add", "self-queued",
+         "SESSION ENDED: creator s1 exited (code 0); self-queued follow-up "
+         "released to the pool (SELF-QUEUE RELEASED)"],
+        ["update", "self-queued", "--assignee", ""],
+    ]
+
+
 def test_a_joiners_exit_does_not_return_the_holders_issue_to_open():
     """The sweep acts on what a session was ASSIGNED, and a joiner never was.
 
