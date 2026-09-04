@@ -155,6 +155,10 @@ option:disabled { color: #6b7280; }
 .dot.busy { background: #d29922; }
 .dot.starting { background: #58a6ff; }
 .dot.exited { background: #6e7681; }
+/* A paused record: exited underneath, but the operator's temporary stop —
+   drawn in the reminder-pause blue rather than the grey of a kill, so the
+   rail tells the two apart at the dot. */
+.dot.exited.paused { background: #58a6ff; }
 #session-list .meta { color: #7d8590; font-size: 11px; margin-left: auto; flex: none;
   max-width: 42%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 /* The meta line grew: an exited row's identity now stays on the line instead
@@ -643,6 +647,7 @@ option:disabled { color: #6b7280; }
 .bulk:hover { background: #22262d; color: #e6edf3; }
 .bulk:disabled { opacity: 0.5; cursor: default; }
 #stop-all:hover { color: #d29922; }
+#pause-all:hover { color: #58a6ff; }
 #resume-all:hover { color: #3fb950; }
 /* The two that make a session unresumable read as what they are. */
 #archive-exited:hover { color: #58a6ff; }
@@ -1068,6 +1073,7 @@ a.cflow-scope:hover { background: #1d3559; text-decoration: underline; }
 .badge.idle { background: #1f4428; color: #3fb950; }
 .badge.busy { background: #4d3800; color: #d29922; }
 .badge.exited { background: #30363d; color: #8b949e; }
+.badge.exited.paused { background: #172947; color: #58a6ff; }
 /* The link chip: what this browser's socket is doing, as against the badge
    before it, which is what the session is doing. Filled rather than outlined
    like its neighbours because it is only ever up when something is wrong —
@@ -3206,7 +3212,7 @@ a.wf-btn { display: inline-block; text-decoration: none; line-height: 1.5; }
   #sidebar header { padding: 10px 14px; }
   /* thumb-sized, like every other tap target on the rail */
   #refresh-all { font-size: 17px; padding: 6px 10px; }
-  .session-filters { grid-template-columns: repeat(4, minmax(0, 1fr)); padding: 7px; }
+  .session-filters { grid-template-columns: repeat(5, minmax(0, 1fr)); padding: 7px; }
   .session-filters button { padding: 9px 7px; font-size: 12px; text-align: center; }
   .session-filter-count { float: none; margin-left: 3px; }
   /* The rail is the whole screen here, so the list takes what it needs and

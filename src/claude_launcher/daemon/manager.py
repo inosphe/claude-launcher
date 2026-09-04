@@ -821,6 +821,23 @@ class SessionManager:
             self.persist()
         return session
 
+    def pause(self, name: str, *, force: bool = False) -> AnySession:
+        """Pause a running session: the same ending as :meth:`kill`, with the
+        record marked ``paused_at`` so it reads as a pause rather than a kill.
+
+        A pause is the operator's temporary stop — a session looping, or two
+        of them racing — and the whole of its difference from a kill is in
+        the record: the process is terminated the same way, the record stays
+        respawnable the same way, and :meth:`respawn` clears the marker by
+        constructing a fresh Session. Idempotent like ``kill``: a session
+        that has already exited is left as it is, killed or paused.
+        """
+        session = self.get(name)
+        if not session.exited:
+            session.pause(force=force)
+            self.persist()
+        return session
+
     def escalate_children(self, name: str) -> List[str]:
         """Move ``name``'s direct children up to ``name``'s own parent.
 
@@ -1283,6 +1300,10 @@ class SessionManager:
                     # view owns it. Kept outside SessionDef because it is
                     # lifecycle state, not a launch option.
                     "archived_at": session.archived_at,
+                    # The pause marker, kept for the same reason: a paused
+                    # record that came back from a restart as a plain kill
+                    # would drop out of the bulk resume it was paused for.
+                    "paused_at": getattr(session, "paused_at", None),
                     # A person's standing "type nothing in here". Written
                     # here so it survives the restart that has nothing to do
                     # with them; an exited record always reports False (see
@@ -1382,6 +1403,7 @@ class SessionManager:
             last_input_at=entry.get("last_input_at"),
             exited_at=entry.get("exited_at"),
             archived_at=entry.get("archived_at"),
+            paused_at=entry.get("paused_at"),
             scrollback=self.scrollback,
             idle_threshold=self.idle_threshold,
         )
