@@ -421,8 +421,12 @@ def test_the_worker_end_is_gated_by_a_user_without_a_timeout():
 
     ``queue-recheck`` sits between wrapup and the gate: it loops the run back
     to ``intake`` while the board still holds assigned work, and its ``done``
-    branch is the only road into ``end-gate``. The gate therefore still
-    stands between every ending and the kill -- a loop is not an ending.
+    branch leads to ``settle-check`` -- a machine confirmation that every
+    issue this session created is in somebody's hands (a live assignee or a
+    leader's ``HOLD:``) before ``end-gate`` is reached at all (claunch-380z:
+    the queue being empty is not the same fact as the session's own filings
+    being seen). The gate therefore still stands between every ending and the
+    kill -- a loop is not an ending, and neither is an unsettled filing.
     """
     for label, wf in (
         ("bundled", _bundled("improv-worker")),
@@ -432,11 +436,25 @@ def test_the_worker_end_is_gated_by_a_user_without_a_timeout():
             f"{label}: wrapup must re-read the queue before the ending"
         )
         recheck = wf.steps["queue-recheck"].select
-        assert recheck is not None and recheck.options["done"].next == "end-gate", (
-            f"{label}: queue-recheck's done branch must reach the user gate"
+        assert recheck is not None and recheck.options["done"].next == "settle-check", (
+            f"{label}: queue-recheck's done branch must reach the settlement check"
         )
         assert recheck.options["next-round"].next == "intake", (
             f"{label}: queue-recheck's loop must start a new round at intake"
+        )
+        settle = wf.steps["settle-check"].select
+        assert settle is not None and settle.options["settled"].next == "end-gate", (
+            f"{label}: settle-check's settled branch must reach the user gate"
+        )
+        assert settle.options["unsettled"].next == "settle-wait", (
+            f"{label}: an unsettled filing must wait on the leader, not skip to the gate"
+        )
+        wait = wf.steps["settle-wait"].select
+        assert wait.options["acted"].next == "settle-check", (
+            f"{label}: settle-wait must loop back to the mechanical check, not trust the leader's word"
+        )
+        assert wait.delegate.otherwise == model.OTHERWISE_HUMAN, (
+            f"{label}: settle-wait must fall through to a person when the leader times out"
         )
         # No step other than the gate and its hold reaches END: every ending
         # passes the user's approval.
