@@ -119,6 +119,14 @@ class _WinPty(PtyHandle):
         except Exception as exc:
             raise PtyError(f"could not spawn {argv[0]!r}: {exc}") from exc
         self.pid = self._pty.pid
+        # The Unix backend ends the child's whole process group; on Windows
+        # the equivalent is a kill-on-close job. pywinpty's terminate only
+        # ever reaches the one pid it spawned, and the MCP server, the bash
+        # tool's children and any background script the harness left running
+        # would otherwise survive the session that started them.
+        from . import win_job
+
+        self._job = win_job.ProcessJob.for_pid(self.pid)
 
     def read(self) -> bytes:
         try:
@@ -147,16 +155,26 @@ class _WinPty(PtyHandle):
         return getattr(self._pty, "exitstatus", None)
 
     def terminate(self, force: bool = False) -> None:
+        # The gentle path keeps going through pywinpty (a console interrupt
+        # the harness may handle); the forced one ends the tree as a unit so
+        # that nothing under the child gets to outlive it.
         try:
             self._pty.terminate(force=force)
         except Exception:
             pass
+        if force and self._job is not None:
+            self._job.terminate()
 
     def close(self) -> None:
         try:
             self._pty.close()
         except Exception:
             pass
+        # Closing the last job handle is the kill for whatever the child
+        # left behind -- the case where it exited on its own and _finish is
+        # tidying up after it.
+        if self._job is not None:
+            self._job.close()
 
 
 class _UnixPty(PtyHandle):
