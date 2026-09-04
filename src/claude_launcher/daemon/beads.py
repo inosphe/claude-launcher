@@ -655,37 +655,72 @@ def sweep_plan(
 ) -> List[List[str]]:
     """The ``br`` writes an exit calls for — pure, so a test can read them.
 
-    Only what the session was *assigned* is touched: ``in_progress`` goes
-    back to ``open`` with a comment naming the exit (the leader's own orphan
-    rule, done at the moment it becomes true instead of at the next board
-    check); the daemon's own placeholder, still ``open`` and never taken up,
-    is closed. ``in_ready`` keeps its completed triage, while ``in_review``
-    and ``blocked`` are somebody else's turn; all three are left as they are.
+    What the session was *assigned* is touched as before: ``in_progress``
+    goes back to ``open`` with a comment naming the exit (the leader's own
+    orphan rule, done at the moment it becomes true instead of at the next
+    board check); the daemon's own placeholder, still ``open`` and never
+    taken up, is closed. ``in_ready`` keeps its completed triage, while
+    ``in_review`` and ``blocked`` are somebody else's turn; all three are
+    left as they are.
+
+    Two more shapes are the session's own *follow-up* issues rather than its
+    assignment — things it filed for later and that later never came,
+    because it exited first. Both are ``created_by == name`` and still
+    ``open``/``in_ready``: one nobody ever picked up (no assignee) gets a
+    comment marking it an orphaned follow-up, so the leader's own 3-day
+    sweep can find it; one it queued to itself (``assignee == name``, and
+    not the daemon's own placeholder — that one already closed above and is
+    told apart by the ``session`` label) is released back to the pool, its
+    assignee cleared, with a comment of the same kind.
     """
     plan: List[List[str]] = []
     code = "unknown" if exit_code is None else str(exit_code)
     for i in issues:
-        if i.get("assignee") != name:
-            continue
         iid = str(i.get("id") or "")
         if not iid:
             continue
         status = i.get("status")
-        if status == "in_progress":
-            plan.append(
-                ["comments", "add", iid,
-                 f"SESSION ENDED: {name} exited (code {code}); returned to open "
-                 f"by the claunch daemon — reassign or resume"]
-            )
-            plan.append(["update", iid, "--status", "open"])
+        assignee = i.get("assignee")
+        created_by = i.get("created_by")
+        labels = i.get("labels") or []
+        if assignee == name:
+            if status == "in_progress":
+                plan.append(
+                    ["comments", "add", iid,
+                     f"SESSION ENDED: {name} exited (code {code}); returned to open "
+                     f"by the claunch daemon — reassign or resume"]
+                )
+                plan.append(["update", iid, "--status", "open"])
+            elif (
+                status == "open"
+                and SESSION_LABEL in labels
+                and created_by == name
+            ):
+                plan.append(
+                    ["close", iid, "--reason",
+                     f"session {name} ended (code {code}) before taking this up"]
+                )
+            elif (
+                status in ("open", "in_ready")
+                and created_by == name
+                and SESSION_LABEL not in labels
+            ):
+                plan.append(
+                    ["comments", "add", iid,
+                     f"SESSION ENDED: creator {name} exited (code {code}); "
+                     f"self-queued follow-up released to the pool "
+                     f"(SELF-QUEUE RELEASED)"]
+                )
+                plan.append(["update", iid, "--assignee", ""])
         elif (
-            status == "open"
-            and SESSION_LABEL in (i.get("labels") or [])
-            and i.get("created_by") == name
+            not assignee
+            and created_by == name
+            and status in ("open", "in_ready")
         ):
             plan.append(
-                ["close", iid, "--reason",
-                 f"session {name} ended (code {code}) before taking this up"]
+                ["comments", "add", iid,
+                 f"SESSION ENDED: creator {name} exited (code {code}); "
+                 f"follow-up left unassigned (ORPHANED FOLLOW-UP)"]
             )
     return plan
 
