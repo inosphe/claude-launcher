@@ -2279,22 +2279,27 @@ function railCwdLine(s) {
 }
 
 /* ------------------------------------------------------------------ */
-/* what the board assigns to this session: the rail row's beads line   */
+/* what the board assigns to this session, plus what it filed on its   */
+/* own: the rail row's beads line                                      */
 /* ------------------------------------------------------------------ */
 /* One pill per issue on the session's queue, in the order the worker takes
-   them (daemon/beads.queue_of), tinted by status. The queues ride
-   /api/beads/queues on their own clock rather than the session poll: the
-   board is a `br` fork per board and the session list is polled every two
-   seconds, so the two are kept apart and this line is painted over the
-   rows that exist whenever either lands (the same late-attach the briefing
-   line uses). Nothing is drawn for a session with no queue -- an empty line
-   would spend rail height saying nothing.
+   them (daemon/beads.queue_of), tinted by status, followed by one pill per
+   active issue the session created but does not hold as assignee
+   (daemon/beads.created_of, dashed) -- its own follow-ups, which a handoff
+   loses track of first once nothing shows them anywhere but the board (see
+   claunch-yfvf: sessions that only file a follow-up and never see it again).
+   The queues ride /api/beads/queues on their own clock rather than the
+   session poll: the board is a `br` fork per board and the session list is
+   polled every two seconds, so the two are kept apart and this line is
+   painted over the rows that exist whenever either lands (the same
+   late-attach the briefing line uses). Nothing is drawn for a session with
+   neither -- an empty line would spend rail height saying nothing.
 
    The pill is a label, not the record: hovering opens a small card with the
    issue's title, status, priority and the head of its description, and a
    click goes to the issue on the Beads page. Both read off the queues
    payload, which carries the listing's rows in full -- no second fetch. */
-let railBeads = new Map();   // session name -> lane (issues, summary)
+let railBeads = new Map();   // session name -> lane (issues, created, summary)
 let railBeadsAt = 0;         // when the queues were last asked for
 let railBeadsBusy = false;
 const RAIL_BEADS_EVERY = 5000;
@@ -2318,15 +2323,26 @@ async function refreshRailBeads() {
 
 /* session -> lane, over every board; a name on two boards keeps both queues
    (concatenated), which is the honest reading of a session that somehow
-   holds work in two repositories. */
+   holds work in two repositories. `created` rides beside `issues` -- the
+   session's own follow-ups it did not (or no longer) hold as assignee, the
+   ones a handoff loses track of first (see `beads.created_of`). */
 function railBeadsIndex(data) {
   const out = new Map();
   for (const b of (data && data.boards) || []) {
     for (const lane of b.lanes || []) {
       if (!lane.session || !lane.known) continue;
       const cur = out.get(lane.session);
-      if (cur) cur.issues = cur.issues.concat(lane.issues || []);
-      else out.set(lane.session, { issues: [...(lane.issues || [])], summary: lane.summary || {}, root: b.root });
+      if (cur) {
+        cur.issues = cur.issues.concat(lane.issues || []);
+        cur.created = cur.created.concat(lane.created || []);
+      } else {
+        out.set(lane.session, {
+          issues: [...(lane.issues || [])],
+          created: [...(lane.created || [])],
+          summary: lane.summary || {},
+          root: b.root,
+        });
+      }
     }
   }
   return out;
@@ -2338,7 +2354,7 @@ function applyRailBeads() {
   for (const li of list.querySelectorAll("li[data-name]")) {
     const lane = railBeads.get(li.dataset.name);
     let line = li.querySelector(".rail-beads");
-    if (!lane || !lane.issues.length) {
+    if (!lane || (!(lane.issues || []).length && !(lane.created || []).length)) {
       if (line) line.remove();
       continue;
     }
@@ -2356,22 +2372,29 @@ function applyRailBeads() {
 
 function railBeadsLine(name, lane) {
   const line = el("div", "rail-beads");
-  const issues = lane.issues || [];
   const next = lane.summary && lane.summary.next;
-  const shown = issues.slice(0, RAIL_BEADS_MAX);
-  for (const i of shown) {
-    const pill = el("a", `rail-bead ${i.status || ""}`, i.id || "?");
+  // assigned work first (the queue order the worker itself takes it in),
+  // then this session's own follow-ups -- issues it created but does not
+  // hold, the ones a handoff loses track of first if the rail never shows
+  // them (see `beads.created_of`). Marked with a `created` class rather than
+  // folded in unlabeled, since "I own this" and "I filed this for someone"
+  // are different facts a reader needs told apart.
+  const all = (lane.issues || []).map((i) => ({ i, created: false }))
+    .concat((lane.created || []).map((i) => ({ i, created: true })));
+  const shown = all.slice(0, RAIL_BEADS_MAX);
+  for (const { i, created } of shown) {
+    const pill = el("a", `rail-bead ${i.status || ""}${created ? " created" : ""}`, i.id || "?");
     pill.href = "#/beads/" + encodeURIComponent(i.id || "");
-    pill.title = `${i.id} [${i.status || "?"}] ${i.title || ""}`.trim();
-    if (i.id && i.id === next) pill.classList.add("next");
+    pill.title = `${i.id} [${i.status || "?"}]${created ? " (created, unassigned to " + name + ")" : ""} ${i.title || ""}`.trim();
+    if (!created && i.id && i.id === next) pill.classList.add("next");
     pill.addEventListener("click", (e) => e.stopPropagation());   // the row attaches; the pill navigates
     pill.addEventListener("mouseenter", () => showBeadPop(pill, i, name));
     pill.addEventListener("mouseleave", hideBeadPop);
     line.appendChild(pill);
   }
-  if (issues.length > shown.length) {
-    const more = el("span", "rail-bead rail-bead-more", `+${issues.length - shown.length}`);
-    more.title = issues.slice(shown.length).map((i) => `${i.id} [${i.status}]`).join("\n");
+  if (all.length > shown.length) {
+    const more = el("span", "rail-bead rail-bead-more", `+${all.length - shown.length}`);
+    more.title = all.slice(shown.length).map(({ i }) => `${i.id} [${i.status}]`).join("\n");
     line.appendChild(more);
   }
   return line;
@@ -2398,6 +2421,7 @@ function showBeadPop(pill, issue, session) {
   const facts = [];
   if (issue.issue_type && issue.issue_type !== "task") facts.push(issue.issue_type);
   facts.push(issue.assignee === session ? `assigned to ${session}` : `assignee ${issue.assignee || "nobody"}`);
+  if (issue.created_by && issue.created_by !== issue.assignee) facts.push(`created by ${issue.created_by}`);
   for (const l of issue.labels || []) facts.push("#" + l);
   beadPop.appendChild(el("div", "rail-bead-pop-bits", facts.join("  ·  ")));
   const desc = beadPopExcerpt(issue.description || "");
