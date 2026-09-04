@@ -2650,6 +2650,10 @@ function refreshRailSeen(list) {
       ? li.querySelector(".rail-seen") : null;
     if (!s || !old || typeof old.replaceWith !== "function") continue;
     old.replaceWith(railSeenLine(s));
+    // Status-check chips carry a "reported N ago" age (see decorateBriefingRow)
+    // that is just as time-based as the seen line above, so it needs the same
+    // tick even though the report itself did not change.
+    decorateBriefingRow(li, s);
   }
 }
 
@@ -3026,9 +3030,12 @@ function decorateBriefingRow(li, s) {
     checks.innerHTML = "";
     for (const check of reported) {
       const answer = statusCheckText(check);
+      const age = check.reported_at ? seenAgo(check.reported_at) : null;
       const chip = el("span", `rail-status-check check-${answer}`,
-        `${statusCheckIcon(check)} ${statusCheckName(check)}`);
-      chip.title = String(check.question || "");
+        `${statusCheckIcon(check)} ${statusCheckName(check)}` + (age ? ` · ${age.text}` : ""));
+      chip.title = age
+        ? `${String(check.question || "")}\nreported ${new Date(Date.parse(check.reported_at)).toLocaleString()}`
+        : String(check.question || "");
       chip.ariaLabel = `${statusCheckName(check)}: ${answer}`;
       checks.appendChild(chip);
     }

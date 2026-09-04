@@ -350,7 +350,7 @@ option:disabled { color: #6b7280; }
   padding: 2px 0 0 16px;
 }
 .rail-status-check {
-  max-width: 150px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  max-width: 190px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   padding: 1px 6px; border: 1px solid #30363d; border-radius: 8px; font-size: 10px; line-height: 16px;
   background: #191d24; color: #c9d1d9;
 }

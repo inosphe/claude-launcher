@@ -105,7 +105,7 @@ const ctx = {};
 const noChip = () => null;
 new Function(
   "exports", "$", "document", "api", "ctxChip",
-  [slice("el"), slice("fmtAge"), slice("briefingStateClass"),
+  [slice("el"), slice("fmtAge"), slice("seenAgo"), slice("briefingStateClass"),
    slice("sessionStatusChecks"), slice("statusCheckText"), slice("statusCheckIcon"),
    slice("statusCheckName"), slice("statusCheckRefreshState"),
    slice("paintStatusCheckRefresh"), slice("requestStatusChecksRefresh"),
@@ -138,6 +138,7 @@ function check(what, got, want) {
 const oneLine = (li) => li.querySelector(".rail-brief");
 const refresh = (li) => li.querySelector(".sess-brief-rowref");
 const click = (n) => n.listeners.click({ stopPropagation() {} });
+const ago = (secs) => new Date(Date.now() - secs * 1000).toISOString();
 
 (async () => {
   /* A digest one-line goes on the row, folded; the recorded opening task is
@@ -158,18 +159,24 @@ const click = (n) => n.listeners.click({ stopPropagation() {} });
   check("neither digest nor task recorded: no one-line at all", oneLine(s3), null);
 
   const sChecks = row("schecks");
+  const testsReportedAt = ago(300);
   ctx.decorate(sChecks, { name: "schecks", status_checks: [
-    { id: "tests", name: "Tests", question: "Tests passed?", answer: "yes", reported_at: "2026-09-01T00:00:00+00:00" },
+    { id: "tests", name: "Tests", question: "Tests passed?", answer: "yes", reported_at: testsReportedAt },
     { id: "merged", name: "Merged", question: "Merged?" },
   ] });
   const checkChips = sChecks.querySelector(".rail-status-checks").children;
-  check("reported and unreported status checks are compact chips",
+  check("reported and unreported status checks are compact chips, the " +
+        "reported one carrying how long ago that was",
         [checkChips[0].textContent, checkChips[0].className,
          checkChips[1].textContent, checkChips[1].className],
-        ["✓ Tests", "rail-status-check check-yes",
+        ["✓ Tests · 5m", "rail-status-check check-yes",
          "• Merged", "rail-status-check check-unknown"]);
-  check("a status-check chip keeps the agent question on hover",
-        checkChips[0].title, "Tests passed?");
+  check("a status-check chip keeps the agent question and the report's " +
+        "absolute time on hover",
+        checkChips[0].title,
+        `Tests passed?\nreported ${new Date(Date.parse(testsReportedAt)).toLocaleString()}`);
+  check("an unreported check has no age to show, so its hover stays the question alone",
+        checkChips[1].title, "Merged?");
   check("status checks carry an independent agent refresh control",
         sChecks.querySelector(".sess-status-check-rowref").textContent, "checks ⟳");
   ctx.statusSessions.push({ name: "schecks", status_checks: [
