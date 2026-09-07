@@ -1059,7 +1059,15 @@ async function refreshSessions(options) {
   // Some embedded consumers reuse refreshSessions with a reduced rail DOM;
   // the shipped page has the control, while those consumers keep the list
   // behaviour they had before this optional view was added.
-  if (rebuild && typeof syncSessionFilters === "function") {
+  //
+  // Gated on `changed`, not `rebuild`: the counts must follow the fleet even
+  // while a rail press holds the row rebuild back, so the bar cannot be left
+  // reading a set that the daemon has since changed under it. `changed` alone
+  // keeps an idle poll from re-appending the same five labels every tick (it
+  // recreates their nodes, which the leak sweep counts). The labels' first
+  // paint no longer waits on this at all — index.html seeds them — so the
+  // blank strip a daemon reset used to open is closed before this runs.
+  if (changed && typeof syncSessionFilters === "function") {
     syncSessionFilters(sessionsCache);
   }
 
