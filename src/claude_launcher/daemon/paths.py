@@ -97,8 +97,22 @@ def log_file() -> Path:
 
 
 def sessions_json() -> Path:
-    """Persisted session *definitions* (for listing and restore-on-restart)."""
+    """Legacy JSON registry of session definitions.
+
+    Superseded by :func:`sessions_db`; kept only so a daemon that predates the
+    database can hand its records over on first start (see
+    :meth:`db.SessionStore.migrate_from_json`). Nothing writes it any more.
+    """
     return daemon_dir() / "sessions.json"
+
+
+def sessions_db() -> Path:
+    """SQLite registry of session definitions (for listing and restore).
+
+    The durable replacement for :func:`sessions_json`: one row per session,
+    each write a transaction, so a torn or empty file can no longer take the
+    whole fleet with it (see :mod:`claude_launcher.daemon.db`)."""
+    return daemon_dir() / "sessions.db"
 
 
 def briefings_json() -> Path:

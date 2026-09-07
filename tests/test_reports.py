@@ -29,7 +29,7 @@ import yaml
 
 from claude_launcher import cli, reports
 from claude_launcher.cli_beads import BeadsError
-from claude_launcher.daemon import paths
+from claude_launcher.daemon import db, paths
 
 PAGE = (
     "<!doctype html><html><head><title>round</title></head><body>"
@@ -262,7 +262,7 @@ def test_the_issue_lookup_does_not_ask_the_session_registry(home):
     that most need finding."""
     write(reports.dir_for("s-long-gone", create=True) / "20260826T090000Z-i-1.html")
     # Nothing anywhere knows this session: no record, no directory of its own.
-    assert not paths.sessions_json().exists()
+    assert "s-long-gone" not in {e["def"]["name"] for e in db.open_default().load_all()}
     assert not paths.session_dir("s-long-gone").exists()
     assert [r["session"] for r in reports.for_issue("i-1")] == ["s-long-gone"]
     assert reports.sessions_with_reports() == ["s-long-gone"]
@@ -313,7 +313,7 @@ def test_the_index_does_not_ask_the_session_registry(home):
     a report, the ones still in the registry are the minority; a listing that
     asked would be hiding the majority of its own subject."""
     write(reports.dir_for("s-long-gone", create=True) / "20260826T090000Z-i-1.html")
-    assert not paths.sessions_json().exists()
+    assert "s-long-gone" not in {e["def"]["name"] for e in db.open_default().load_all()}
     assert not paths.session_dir("s-long-gone").exists()
     assert [r["session"] for r in reports.index()] == ["s-long-gone"]
 

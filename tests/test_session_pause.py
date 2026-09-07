@@ -13,7 +13,7 @@ import json
 
 from aiohttp.test_utils import TestClient, TestServer
 
-from claude_launcher.daemon import paths
+from claude_launcher.daemon import db, paths
 from claude_launcher.daemon.api import build_app
 from claude_launcher.daemon.harness import SessionDef
 from claude_launcher.daemon.session import DeadSession
@@ -58,7 +58,7 @@ def test_pause_ends_the_program_and_files_the_record_as_paused(home, tmp_path):
 
         # The marker is part of the persisted record, so a daemon restart
         # brings the session back as paused rather than as a plain kill.
-        saved = json.loads(paths.sessions_json().read_text(encoding="utf-8"))
+        saved = db.open_default().load_all()
         assert [e["def"]["name"] for e in saved] == ["p1"]
         assert saved[0]["paused_at"] == first
 

@@ -97,7 +97,7 @@ const api = async () => ({ ok, json: async () => served });
 const stubs = `
 function sessionMatchesFilter() { return true; }
 let sessionsCache = [], currentName = null, currentPage = "home";
-let attachedPid = null, linkState = "down", sessName = null, briefingLLM = true;
+let attachedPid = null, linkState = "down", sessName = null, briefingLLM = true, snapshotName = null;
 function forgetDeadSessions() {}
 function refreshResumeChoices() {}
 function refreshParentChoices() {}

@@ -26,7 +26,7 @@ import pytest
 
 from claude_launcher import lineage, profile, store
 from claude_launcher.daemon import beads as beads_mod
-from claude_launcher.daemon import paths
+from claude_launcher.daemon import db, paths
 from claude_launcher.daemon.api import build_app
 from claude_launcher.daemon.harness import SessionDef
 from claude_launcher.daemon.manager import SessionManager
@@ -1223,7 +1223,7 @@ def test_issue_text_files_the_spec_and_sends_the_session_to_read_it(
             # must retain the issue id and opening task without duplicating
             # the specification outside the board.
             mgr.persist()
-            saved = paths.sessions_json().read_text(encoding="utf-8")
+            saved = json.dumps(db.open_default().load_all())
             assert "Rail must answer the board" not in saved
             assert "every row, one call" not in saved
             assert "Wire the picker" not in saved

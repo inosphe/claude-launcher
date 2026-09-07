@@ -103,7 +103,7 @@ const api = async () => ({ ok: true, json: async () => served });
 const stubs = `
 function sessionMatchesFilter() { return true; }
 let sessionsCache = [], currentName = null, currentPage = "home";
-let attachedPid = null, linkState = "down", sessName = null;
+let attachedPid = null, linkState = "down", sessName = null, snapshotName = null;
 function railHeld() { return false; }
 let railRedrawPending = false;
 function forgetDeadSessions() {}

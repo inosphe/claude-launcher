@@ -20,7 +20,7 @@ import pytest
 
 from claude_launcher import store
 from claude_launcher.cflow import responders
-from claude_launcher.daemon import paths
+from claude_launcher.daemon import db, paths
 from claude_launcher.daemon.api import build_app
 from claude_launcher.daemon.harness import SessionDef
 from claude_launcher.daemon.manager import ManagerError, SessionManager
@@ -86,7 +86,7 @@ def test_a_move_takes_the_subtree_along_and_is_persisted(home):
     assert mgr.descendants("w2") == ["w1", "w1a"]
     assert mgr.depth("w1a") == 3  # one deeper than before, with its parent
     # the daemon's next restart reads the same tree
-    saved = json.loads(paths.sessions_json().read_text(encoding="utf-8"))
+    saved = db.open_default().load_all()
     assert {e["def"]["name"]: e["def"]["parent"] for e in saved}["w1"] == "w2"
 
 

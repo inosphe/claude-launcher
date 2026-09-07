@@ -9,6 +9,7 @@ let term = null;
 let fitAddon = null;
 let sessionsCache = [];
 let attachedPid = null;           // pid of the incarnation this socket is bound to
+let snapshotName = null;          // the ended session drawn as a static snapshot (no xterm, no socket)
 let applyingRemoteResize = false; // guards against echoing a server-driven resize
 let fitTimer = null;              // debounces viewport-driven fit() calls
 let altScreen = false;      // the program is drawing the alternate screen
@@ -684,12 +685,11 @@ function setSessionFilter(filter, remember = true) {
   sessionFilter = filter;
   if (remember) localStorage.setItem(SESSION_FILTER_KEY, filter);
   syncSessionFilters(sessionsCache);
-  // Inactive records are not part of the recurring rail poll. Selecting one
-  // of their filters is an explicit request for one fresh snapshot.
+  // Archived records are not part of the recurring rail poll. Selecting a
+  // filter is an explicit request for one fresh snapshot of its category.
   const state = filter === "archived" ? "archived"
     : filter === "killed" ? "killed"
-    : filter === "paused" ? "paused"
-    : filter === "current" ? "current" : "active";
+    : filter === "paused" ? "paused" : "current";
   refreshSessions({ state });
 }
 
@@ -728,7 +728,15 @@ function syncSessionFilters(sessions) {
 }
 
 async function refreshSessions(options) {
-  const state = (options && options.state) || "active";
+  // The recurring poll asks for every unarchived record, not the running
+  // ones alone. The rail's "current" view is running plus killed plus paused,
+  // and the filter bar counts all three -- an active-only poll left those
+  // counts at 0 until a filter button was pressed, dropped a session from
+  // the rail the moment it exited (its cached row matched the poll's state
+  // and was not in the answer), and made a reload on a paused session's URL
+  // build a live xterm over a record the cache had never seen. Archived
+  // records stay on demand: they are the one set that grows without bound.
+  const state = (options && options.state) || "current";
   const matchesPollState = (session) => {
     if (state === "all") return true;
     if (state === "active") return session.status !== "exited";
@@ -750,9 +758,10 @@ async function refreshSessions(options) {
   }
   const incoming = data.sessions || [];
   const incomingNames = new Set(incoming.map((s) => s.name));
-  // A background request carries active sessions only. Keep any inactive
-  // records the operator explicitly inspected, while replacing the category
-  // this request owns and any record that has just returned as active.
+  // A request answers for one category of records. Keep every cached record
+  // outside that category (the archived ones an operator explicitly opened,
+  // while the poll runs on "current"), while replacing the category this
+  // request owns and any record that has just returned inside it.
   sessionsCache = [
     ...incoming,
     ...sessionsCache.filter((s) =>
@@ -1058,12 +1067,30 @@ async function refreshSessions(options) {
   // Some embedded consumers reuse refreshSessions with a reduced rail DOM;
   // the shipped page has the control, while those consumers keep the list
   // behaviour they had before this optional view was added.
-  if (rebuild && typeof syncSessionFilters === "function") {
+  //
+  // Gated on `changed`, not `rebuild`: the counts must follow the fleet even
+  // while a rail press holds the row rebuild back, so the bar cannot be left
+  // reading a set that the daemon has since changed under it. `changed` alone
+  // keeps an idle poll from re-appending the same five labels every tick (it
+  // recreates their nodes, which the leak sweep counts). The labels' first
+  // paint no longer waits on this at all — index.html seeds them — so the
+  // blank strip a daemon reset used to open is closed before this runs.
+  if (changed && typeof syncSessionFilters === "function") {
     syncSessionFilters(sessionsCache);
   }
 
   const cur = currentName && sessionsCache.find((s) => s.name === currentName);
-  if (cur && attachedPid && cur.pid !== attachedPid && linkState === "live") {
+  if (snapshotName && snapshotName === currentName && cur && cur.status !== "exited") {
+    // The snapshot's session came back (its own resume, or another tab's): it
+    // has a live PTY again, so replace the static last screen with a live
+    // terminal. Only while the terminal is the visible view, like the pid
+    // follow below — a resume must not yank the reader off another page. This
+    // has to run before the badge branch, or the header would flip to a live
+    // look over a screen that is still a frozen snapshot.
+    if (terminalOnScreen()) attach(currentName);
+  } else if (cur && attachedPid && cur.pid !== attachedPid &&
+             (linkState === "live" ||
+              (sessionEnded && cur.status !== "exited"))) {
     // Someone else (a `claunch respawn`, another tab) resumed this session:
     // our socket is bound to the replaced, now-dead child, so follow the new
     // one instead of showing its frozen last screen. Only while the terminal
@@ -1071,10 +1098,13 @@ async function refreshSessions(options) {
     // workflow page, or out of the mobile menu (it stays pending until they
     // come back, since the stale pid keeps failing this test).
     //
-    // Only from a live link, too. This used to be the *only* way a dropped
-    // socket ever came back, which it was bad at; now the link repairs itself
-    // and this is once more about the child being replaced under a working
-    // socket — a question a broken one has no opinion on.
+    // From a live link, or from a terminal whose program ended under this
+    // socket (an `exit` frame: sessionEnded, link idle) and whose record now
+    // carries a new pid and a non-exited status. The second case is the
+    // common resume: the tab watched the session die, someone relaunched it
+    // elsewhere, and the badge and the rail row went back to running while
+    // the xterm stayed on the dead child's last screen. A merely *dropped*
+    // socket is neither case; the link repairs that itself.
     if (terminalOnScreen()) attach(currentName);
   } else if (cur && linkState !== "live") {
     // Otherwise an open socket stays authoritative: it sees this session's
@@ -5384,9 +5414,12 @@ $("resume-all").addEventListener("click", async () => {
     { method: "POST" }, "resume"
   );
   const back = (result && result.respawned) || [];
-  detach();
+  // Only a terminal whose own session came back is torn down and rebuilt;
+  // one watching a session this bulk did not touch keeps its screen.
+  const watched = !!currentName && back.includes(currentName);
+  if (watched) detach();
   await refreshSessions({ state: "current" });
-  if (currentName && back.includes(currentName)) attach(currentName);
+  if (watched) attach(currentName);
 });
 
 /* Pause everything that runs. The daemon-wide emergency stop: every running
@@ -5426,9 +5459,12 @@ if ($("resume-paused")) $("resume-paused").addEventListener("click", async () =>
     $("resume-paused"), "/api/sessions/resume", { method: "POST" }, "resume paused"
   );
   const back = (result && result.resumed) || [];
-  detach();
+  // Only a terminal whose own session came back is torn down and rebuilt;
+  // one watching a session this bulk did not touch keeps its screen.
+  const watched = !!currentName && back.includes(currentName);
+  if (watched) detach();
   await refreshSessions({ state: "current" });
-  if (currentName && back.includes(currentName)) attach(currentName);
+  if (watched) attach(currentName);
 });
 
 $("archive-exited").addEventListener("click", async () => {
@@ -5474,8 +5510,7 @@ $("refresh-all").addEventListener("click", async () => {
       refreshSessions({
         state: sessionFilter === "archived" ? "archived"
           : sessionFilter === "killed" ? "killed"
-          : sessionFilter === "paused" ? "paused"
-          : sessionFilter === "current" ? "current" : "active",
+          : sessionFilter === "paused" ? "paused" : "current",
       }),
       refreshMeshList(),
       refreshCflow(),
@@ -6243,6 +6278,7 @@ function detach() {
   // A full tear-down supersedes whatever parked copy of this session exists —
   // the stale child the respawn-follow path leaves behind is exactly that.
   if (currentName) keptTerms.delete(currentName);
+  removeSnapshot();
   closeLink();
   // The wheel handler and its debounce belong to the terminal being torn down.
   if (wheelTimer) { clearTimeout(wheelTimer); wheelTimer = null; }
@@ -7092,6 +7128,7 @@ function wireActive(b) {
    socket still open is re-wired to the live machine; one that died while
    parked connects fresh, paying the old reconnect cost exactly once. */
 function restoreTerminal(b) {
+  removeSnapshot();
   keptTerms.delete(b.name);
   currentName = b.name;
   term = b.term;
@@ -7308,7 +7345,79 @@ function cliRefit(delay = 60) {
 /* Build a new terminal for a session that has not been up before (or whose
    parked copy was evicted). This is the pre-cache attach() body — the cost a
    session switch used to always pay. */
+/* Draw an ended session's last screen without a live terminal. See attach()
+   for why: a dead session's final frame is the one an xterm is slowest to
+   paint (it measures every distinct glyph of the seeded screen synchronously,
+   a forced layout per glyph), and there is nothing live to justify the cost —
+   no socket, no wheel to the daemon, no keystrokes to send. The header
+   (resume/archive) and the detail rail work exactly as they do for a live
+   terminal, because those read the record, not the socket. */
+async function snapshotAttach(name) {
+  removeSnapshot();
+  currentName = name;
+  snapshotName = name;
+  // No live machine behind a snapshot: the send-keys box closes on this, the
+  // link chip stays idle, and the wheel is the browser's own over the <pre>.
+  term = null;
+  ws = null;
+  fitAddon = null;
+  attachedPid = null;
+  attachedBoot = null;
+  altScreen = false;
+  mouseTracking = false;
+  scrollOffset = 0;
+  linkName = null;
+  linkQueue = [];
+  sessionEnded = true;
+  setLink("idle");
+
+  // Same header seeding a fresh attach does, so the previous session's
+  // controls never linger on this one.
+  showView("terminal");
+  $("term-title").textContent = name;
+  renderTermHandle();
+  setStatusBadge((sessionsCache.find((s) => s.name === name) || {}).status || "exited");
+  document.querySelectorAll("#session-list li").forEach((li) =>
+    li.classList.toggle("active", li.dataset.name === name)
+  );
+  markDetailRow();
+  refreshTermInput();
+  updateScrollChip();
+
+  const pre = document.createElement("pre");
+  pre.className = "term-snapshot";
+  pre.textContent = "loading…";
+  $("terminal").appendChild(pre);
+
+  let lines;
+  try {
+    const resp = await api(
+      `/api/sessions/${encodeURIComponent(name)}/capture?format=json`
+    );
+    const doc = await resp.json().catch(() => ({}));
+    lines = resp.ok && Array.isArray(doc.lines) ? doc.lines : null;
+  } catch {
+    return;   // auth overlay is up; a later navigation re-fetches
+  }
+  // The reader may have walked off this snapshot while the capture was in
+  // flight — a snapshot rebuilt for another session, or a live attach. Only
+  // write into the one still on screen.
+  if (snapshotName !== name || currentName !== name) return;
+  pre.textContent =
+    (lines || []).join("\n") || "(this session left no screen behind)";
+}
+
+/* Tear a snapshot's <pre> out — before an xterm mounts in the same box, or on
+   detach. Cheap and idempotent: a snapshot holds no socket and no xterm. */
+function removeSnapshot() {
+  snapshotName = null;
+  const host = $("terminal");
+  if (!host) return;
+  host.querySelectorAll("pre.term-snapshot").forEach((el) => el.remove());
+}
+
 function freshAttach(name) {
+  removeSnapshot();
   currentName = name;
   // showView first, and before the terminal is opened: on mobile #main is
   // display:none while the rail is up, and a terminal opened into a
@@ -7403,6 +7512,14 @@ function attach(name) {
   // follow reattaching the very session being watched does this, so the old
   // child's parked terminal does not come back in its place.
   dropKept(name);
+  // An ended session has no live PTY to talk to and nothing new to draw. Paint
+  // its last screen as a static snapshot instead of a live xterm: an xterm
+  // measures every distinct glyph of the seeded screen synchronously, which
+  // freezes the whole page for seconds on a paused claude session's final
+  // frame. A snapshot has no such cost. Resume rebuilds a live terminal
+  // through this same path, since by then the session is live again.
+  const rec = sessionsCache.find((s) => s.name === name);
+  if (rec && rec.status === "exited") { snapshotAttach(name); return; }
   freshAttach(name);
 }
 
@@ -7993,7 +8110,13 @@ function mobileTitle() {
 function syncMobileBars() {
   const has = !!currentName;
   // term-status is the socket-fed truth; the list poll trails it by seconds.
-  const status = has ? ($("term-status").textContent || "") : "";
+  // `let`, not `const`: a `paused` record reads `paused` here and is folded
+  // back to `exited` below (the badge shows the word, the controls read the
+  // state). Declared const, that fold threw "Assignment to constant variable"
+  // on every poll while a paused session was attached — and this runs inside
+  // the 2s poll (refreshSessions → setStatusBadge → here), so the throw killed
+  // the poll and froze the whole dashboard, not just this bar.
+  let status = has ? ($("term-status").textContent || "") : "";
   const sess = has ? sessionsCache.find((s) => s.name === currentName) : null;
 
   $("m-title").textContent = mobileTitle();

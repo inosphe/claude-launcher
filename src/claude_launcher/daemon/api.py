@@ -1604,10 +1604,22 @@ async def h_cflow_runs(request: web.Request) -> web.Response:
     # once more per run for its timers.  A busy machine has hundreds of run
     # slots, so that repeated sorting and delayed-Codex discovery dominated
     # the endpoint even when every run file was cached.
+    # The rail annotates a session row with its run. "Session" here reaches one
+    # step past the live ones: a *paused* record is still a session a person
+    # selects and resumes, and the rail draws it under Paused — so its run has
+    # to survive the rail filter below and bind to its name, exactly as a live
+    # one does. A killed or archived record is terminal and earns no such row.
+    def _rail_bound(session) -> bool:
+        if not session.exited:
+            return True
+        return bool(getattr(session, "paused_at", None)) and not getattr(
+            session, "archived_at", None
+        )
+
     live_sessions = {
         (_session_cwd(session), session.sdef.name): session
         for session in manager.list()
-        if not session.exited and _session_cwd(session)
+        if _rail_bound(session) and _session_cwd(session)
     }
     rail_view = request.query.get("view") == "rail"
 

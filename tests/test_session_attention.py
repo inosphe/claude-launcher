@@ -33,7 +33,7 @@ import sys
 import time
 
 from claude_launcher import lineage, profile, store
-from claude_launcher.daemon import paths
+from claude_launcher.daemon import db, paths
 from claude_launcher.daemon.harness import SessionDef
 from claude_launcher.daemon.manager import SessionManager
 from claude_launcher.daemon.session import DeadSession
@@ -260,7 +260,7 @@ def test_stamps_are_persisted_and_restored(home, tmp_path):
             visited, typed = s.last_visited_at, s.last_input_at
             mgr.persist()
 
-            entry = json.loads(paths.sessions_json().read_text(encoding="utf-8"))[0]
+            entry = db.open_default().load_all()[0]
             assert entry["last_visited_at"] == visited
             assert entry["last_input_at"] == typed
         finally:

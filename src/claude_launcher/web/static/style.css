@@ -1061,9 +1061,22 @@ a.cflow-scope:hover { background: #1d3559; text-decoration: underline; }
 
 #main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
 #term-header {
-  padding: 8px 14px; display: flex; align-items: center; gap: 10px;
+  /* The right padding reserves the lane #term-details floats in (absolute,
+     right: 14px), so no flowing control can slide under it however tight the
+     row gets — the overlap the header used to draw when the column narrowed. */
+  padding: 8px 96px 8px 14px;
+  display: flex; flex-wrap: wrap; align-items: center; gap: 8px 10px;
   background: #1b1e24; border-bottom: 1px solid #2a2e36; font-size: 13px;
 }
+/* The header is a control bar, and when the column narrows — the detail rail
+   opening, a small window — its buttons wrap onto a second line rather than
+   squeezing until their labels clip. Each keeps its own width; the action
+   group dissolves into the row (display: contents) so its buttons wrap one at
+   a time, while the zoom trio stays welded as a single pill. */
+#term-header > *, .term-actions > * { flex: none; }
+.term-actions { display: contents; }
+.term-btn { white-space: nowrap; }
+#term-title { white-space: nowrap; }
 .badge {
   font-size: 11px; padding: 2px 8px; border-radius: 10px; background: #30363d;
 }
@@ -1227,6 +1240,18 @@ a.cflow-scope:hover { background: #1d3559; text-decoration: underline; }
    still hangs over the edge must clip, not become a scrollbar. */
 #terminal { flex: 1; padding: 6px; min-height: 0; overflow: hidden; }
 #terminal .xterm { height: 100%; }
+/* An ended session's last screen, drawn as plain text instead of a live xterm
+   (app.js snapshotAttach). The browser owns the wheel here — a real scrollbar
+   over a box that clips, never the whole page — so it scrolls inside itself in
+   both axes. Monochrome by design: the point of the snapshot is that it costs
+   no per-glyph measurement, which is exactly what colour reconstruction would
+   reintroduce. */
+#terminal pre.term-snapshot {
+  height: 100%; margin: 0; overflow: auto; box-sizing: border-box;
+  font-family: Cascadia Mono, Consolas, Menlo, monospace;
+  font-size: 13px; line-height: 1.2; color: #c9d1d9; background: #14161a;
+  white-space: pre; overscroll-behavior: contain;
+}
 /* The one-line native input under the terminal. Real browser input where the
    xterm composer is a terminal — an IME, a phone's soft keyboard and a pasted
    block behave here the way the browser makes them behave, and Enter hands

@@ -141,6 +141,31 @@ check("group priority follows checkbox activation order",
 check("the shipped page contains all five state controls",
       ["current", "running", "killed", "paused", "archived"].every((name) =>
         html.includes(`id="session-filter-${name}"`)), true);
+// A poll that has not landed yet — first load, or the window a daemon reset
+// opens — must not leave this bar a blank strip. The labels are seeded in the
+// HTML, so they read even before syncSessionFilters has run once.
+check("every state control carries its label before any poll",
+      [["current", "Current"], ["running", "Running"], ["killed", "Killed"],
+       ["paused", "Paused"], ["archived", "Archived"]].every(([name, label]) =>
+        new RegExp(`id="session-filter-${name}"[^>]*>${label}` +
+                   `<span class="session-filter-count">`).test(html)), true);
+// And the poll refreshes the counts whenever the fleet changed, not only when
+// the rail's rows are rebuilt: a daemon reset relaunches the same records, so
+// the row signature can be unchanged while the counts must still be redrawn,
+// and a rail press must not hold that redraw back the way it holds a rebuild.
+check("counts follow the fleet on change, not only on a rail rebuild",
+      src.includes("if (changed && typeof syncSessionFilters === \"function\")"),
+      true);
+// The recurring poll carries every unarchived record: the "current" view is
+// running plus killed plus paused, and the bar counts all three. An
+// active-only poll left killed/paused at 0 until their button was pressed
+// and dropped a session from the rail the moment it exited.
+check("the recurring poll asks for every unarchived record",
+      src.includes('const state = (options && options.state) || "current";'),
+      true);
+check("no rail poll asks for the running records alone",
+      !/refreshSessions\(\{\s*state:\s*"active"/.test(src) &&
+      !src.includes('"current" ? "current" : "active"'), true);
 check("archived sessions have a dedicated one-shot refresh control",
       html.includes('id="refresh-archived"') &&
       src.includes('refreshSessions({ state: "archived" })'), true);

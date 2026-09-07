@@ -76,6 +76,9 @@ function node() {
     appendChild(c) { n.kids.push(c); return c; },
     append(...cs) { cs.forEach((c) => n.appendChild(c)); },
     removeChild(c) { const i = n.kids.indexOf(c); if (i >= 0) n.kids.splice(i, 1); },
+    // The real removeSnapshot (sliced in) sweeps the terminal box for a
+    // snapshot <pre>; a live-session test never has one, so this is empty.
+    querySelectorAll() { return []; },
     get textContent() { return n.text; },
     set textContent(v) { n.text = String(v); },
     classList: {
@@ -165,6 +168,7 @@ let linkState = "idle", linkName = null, linkTry = 0, linkTimer = null;
 let linkTicket = 0, linkQueue = [], lastLocalKey = 0;
 let wheelTimer = null, wheelAccum = 0, applyingRemoteResize = false;
 let sessionsCache = [];
+let snapshotName = null;   // the real removeSnapshot (sliced in) assigns this
 function setLink(s) { linkState = s; __record("link", s); }
 function setStatusBadge(s) { __record("status", s); }
 function markDetailRow() { __record("detail"); }
