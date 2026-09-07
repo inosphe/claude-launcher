@@ -73,16 +73,10 @@ def _write(repo: Path, rel: str, text: str = "x = 1\n") -> None:
     path.write_text(text, encoding="utf-8")
 
 
-@pytest.fixture
-def repo(tmp_path) -> Path:
-    """A repository shaped like this one: ``src/``, ``tools/``, ``tests/``.
-
-    ``master`` carries a source module and its test, so a branch cut from it
-    can change either and the mapping has something to find.
-    """
-    repo = tmp_path / "repo"
-    repo.mkdir()
+def _build_repo(repo: Path) -> None:
     _git(repo, "init", "-q")
+    _git(repo, "config", "user.name", "t")
+    _git(repo, "config", "user.email", "t@t")
     _write(repo, "src/pkg/mesh.py")
     _write(repo, "src/pkg/lonely.py")
     _write(repo, "tools/deploy_check.py")
@@ -93,6 +87,23 @@ def repo(tmp_path) -> Path:
     _git(repo, "commit", "-q", "-m", "base")
     _git(repo, "branch", "-M", "master")
     _git(repo, "checkout", "-q", "-b", "feature")
+
+
+@pytest.fixture
+def repo(tmp_path, repo_template) -> Path:
+    """A repository shaped like this one: ``src/``, ``tools/``, ``tests/``.
+
+    ``master`` carries a source module and its test, so a branch cut from it
+    can change either and the mapping has something to find.
+
+    Copied from a template, then the index's stat cache is refreshed: the
+    copy has new inodes and ctimes, and the tests below that pin the
+    stat-cache rules (``_edit_the_stat_cache_cannot_see`` and friends) need
+    an index that agrees with the files it describes, exactly as a fresh
+    ``git init`` would leave it.
+    """
+    repo = repo_template("changed-tests", _build_repo, tmp_path / "repo")
+    _git(repo, "update-index", "-q", "--refresh")
     return repo
 
 

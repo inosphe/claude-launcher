@@ -1457,24 +1457,27 @@ def _git(*args, cwd):
     )
 
 
-def _repo(path):
-    """A one-commit repository for a parent session to be standing in."""
-    path.mkdir(parents=True, exist_ok=True)
+def _build_repo(path):
     _git("init", "-q", cwd=path)
     _git("config", "user.email", "t@example.com", cwd=path)
     _git("config", "user.name", "t", cwd=path)
     (path / "a.txt").write_text("one\n", encoding="utf-8")
     _git("add", "-A", cwd=path)
     _git("commit", "-qm", "one", cwd=path)
-    return path
 
 
-def test_a_child_runs_in_a_worktree_of_its_parents_repository(home, tmp_path):
+def _repo(repo_template, path):
+    """A one-commit repository for a parent session to be standing in."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    return repo_template("spawn-api", _build_repo, path)
+
+
+def test_a_child_runs_in_a_worktree_of_its_parents_repository(home, tmp_path, repo_template):
     """The thing a fleet needs and a shared checkout cannot give: two children
     of one parent editing the same repository without editing each other's
     files."""
     _register_py_harness()
-    repo = _repo(tmp_path / "repo")
+    repo = _repo(repo_template, tmp_path / "repo")
 
     async def run():
         mgr = _manager()
@@ -1490,6 +1493,9 @@ def test_a_child_runs_in_a_worktree_of_its_parents_repository(home, tmp_path):
             )
             assert resp.status == 201
             cwd = (await resp.json())["session"]["cwd"]
+            # the name asked for, exactly: the auto rule below is a fallback,
+            # not a rewrite, which is what makes naming an EXISTING one
+            # return to it
             assert cwd == str(repo / ".claude" / "worktrees" / "helper")
             # a real worktree on a branch of its own, not just a directory
             assert (repo / ".claude" / "worktrees" / "helper" / "a.txt").exists()
@@ -1505,11 +1511,11 @@ def test_a_child_runs_in_a_worktree_of_its_parents_repository(home, tmp_path):
     asyncio.run(run())
 
 
-def test_the_worktree_is_cut_from_the_workspace_a_child_was_sent_to(home, tmp_path):
+def test_the_worktree_is_cut_from_the_workspace_a_child_was_sent_to(home, tmp_path, repo_template):
     """'A worktree of the workspace I sent it to' has to mean what it says, so
     the checkout is cut from whatever directory the other fields settled on."""
     _register_py_harness()
-    elsewhere = _repo(tmp_path / "hq")
+    elsewhere = _repo(repo_template, tmp_path / "hq")
     workspaces.add(str(elsewhere), name="hq")
 
     async def run():
@@ -1535,9 +1541,9 @@ def test_the_worktree_is_cut_from_the_workspace_a_child_was_sent_to(home, tmp_pa
     asyncio.run(run())
 
 
-def test_the_policy_can_keep_a_child_out_of_its_own_checkout(home, tmp_path):
+def test_the_policy_can_keep_a_child_out_of_its_own_checkout(home, tmp_path, repo_template):
     _register_py_harness()
-    repo = _repo(tmp_path / "repo")
+    repo = _repo(repo_template, tmp_path / "repo")
     store.update(lambda doc: doc.update({"spawn": {"allow_worktree": False}}))
 
     async def run():
@@ -1568,12 +1574,12 @@ def test_the_policy_can_keep_a_child_out_of_its_own_checkout(home, tmp_path):
     asyncio.run(run())
 
 
-def test_by_default_a_child_may_cut_one(home, tmp_path):
+def test_by_default_a_child_may_cut_one(home, tmp_path, repo_template):
     """On by default, for the same reason allow_workspace is: the checkout is
     derived from the repository the parent is already in, not a path an agent
     named."""
     _register_py_harness()
-    repo = _repo(tmp_path / "repo")
+    repo = _repo(repo_template, tmp_path / "repo")
 
     async def run():
         mgr = _manager()
@@ -1585,6 +1591,17 @@ def test_by_default_a_child_may_cut_one(home, tmp_path):
                 await client.get("/api/sessions/lead/children", headers=BEARER)
             ).json()
             assert "worktree" in report["may_choose"]
+
+            # `false` is not the name of a worktree. It used to be read as
+            # one, and cut a checkout called `False` on a branch called `False`.
+            resp = await client.post(
+                "/api/sessions/lead/children",
+                json={"name": "w1", "worktree": False},
+                headers=BEARER,
+            )
+            assert resp.status == 201
+            assert (await resp.json())["session"]["cwd"] == str(repo)
+            assert "False" not in _git("branch", cwd=repo).stdout
             await mgr.shutdown_all()
         finally:
             await client.close()
@@ -1592,9 +1609,14 @@ def test_by_default_a_child_may_cut_one(home, tmp_path):
     asyncio.run(run())
 
 
-def test_a_reused_child_worktree_is_brought_up_to_date_first(home, tmp_path):
+def test_a_reused_child_worktree_is_brought_up_to_date_or_the_spawn_is_refused(
+    home, tmp_path, repo_template
+):
+    """A reused checkout is rebased first; when that cannot be done nothing
+    is created -- a child that woke up in a conflicted checkout would spend
+    its first turn on a mess it did not make."""
     _register_py_harness()
-    repo = _repo(tmp_path / "repo")
+    repo = _repo(repo_template, tmp_path / "repo")
 
     async def run():
         mgr = _manager()
@@ -1626,34 +1648,7 @@ def test_a_reused_child_worktree_is_brought_up_to_date_first(home, tmp_path):
             cwd = (await second.json())["session"]["cwd"]
             assert (Path(cwd) / "moved-on.txt").exists()
 
-            await mgr.shutdown_all()
-        finally:
-            await client.close()
-
-    asyncio.run(run())
-
-
-def test_a_rebase_that_cannot_be_done_refuses_the_spawn(home, tmp_path):
-    """Nothing is created: a child that woke up in a conflicted checkout would
-    spend its first turn on a mess it did not make."""
-    _register_py_harness()
-    repo = _repo(tmp_path / "repo")
-
-    async def run():
-        mgr = _manager()
-        mm = MeshManager(mgr, root=tmp_path / "mesh")
-        client = await _serve(mgr, mm)
-        try:
-            mgr.create(SessionDef(name="lead", harness="py", cwd=str(repo)))
-            base = (
-                _git("rev-parse", "--abbrev-ref", "HEAD", cwd=repo).stdout.strip()
-            )
-            resp = await client.post(
-                "/api/sessions/lead/children",
-                json={"name": "w1", "worktree": "helper"},
-                headers=BEARER,
-            )
-            assert resp.status == 201
+            # now the two sides disagree on a file: the rebase is aborted
             tree = repo / ".claude" / "worktrees" / "helper"
             (tree / "a.txt").write_text("theirs\n", encoding="utf-8")
             _git("add", "-A", cwd=tree)
@@ -1662,14 +1657,14 @@ def test_a_rebase_that_cannot_be_done_refuses_the_spawn(home, tmp_path):
             _git("add", "-A", cwd=repo)
             _git("commit", "-qm", "ours", cwd=repo)
 
-            resp = await client.post(
+            third = await client.post(
                 "/api/sessions/lead/children",
-                json={"name": "w2", "worktree": "helper", "rebase_onto": base},
+                json={"name": "w3", "worktree": "helper", "rebase_onto": base},
                 headers=BEARER,
             )
-            assert resp.status == 400
-            assert "aborted" in (await resp.json())["error"]
-            assert "w2" not in [s.sdef.name for s in mgr.list()]
+            assert third.status == 400
+            assert "aborted" in (await third.json())["error"]
+            assert "w3" not in [s.sdef.name for s in mgr.list()]
             # and the checkout is as it was left, not mid-rebase
             assert (tree / "a.txt").read_text(encoding="utf-8") == "theirs\n"
 
@@ -1919,7 +1914,7 @@ def test_children_reports_the_run_the_next_child_would_start_on(home, tmp_path):
     asyncio.run(run())
 
 
-def test_an_unnamed_child_gets_a_worktree_named_after_both_sessions(home, tmp_path):
+def test_an_unnamed_child_gets_a_worktree_named_after_both_sessions(home, tmp_path, repo_template):
     """The quick job's case, and the whole point of the naming rule.
 
     The dashboard's quick-job form types a task and nothing else -- no child
@@ -1931,7 +1926,7 @@ def test_an_unnamed_child_gets_a_worktree_named_after_both_sessions(home, tmp_pa
     session names by then, names it `<parent>-<child>-<stamp>`.
     """
     _register_py_harness()
-    repo = _repo(tmp_path / "repo")
+    repo = _repo(repo_template, tmp_path / "repo")
 
     async def run():
         mgr = _manager()
@@ -1977,55 +1972,3 @@ def test_an_unnamed_child_gets_a_worktree_named_after_both_sessions(home, tmp_pa
     asyncio.run(run())
 
 
-def test_a_named_worktree_is_still_that_name_exactly(home, tmp_path):
-    """The auto rule is the fallback, not a rewrite: a caller that names the
-    checkout gets the name it asked for, which is what makes naming an
-    EXISTING one return to it."""
-    _register_py_harness()
-    repo = _repo(tmp_path / "repo")
-
-    async def run():
-        mgr = _manager()
-        mm = MeshManager(mgr, root=tmp_path / "mesh")
-        client = await _serve(mgr, mm)
-        try:
-            mgr.create(SessionDef(name="lead", harness="py", cwd=str(repo)))
-            resp = await client.post(
-                "/api/sessions/lead/children",
-                json={"name": "w1", "worktree": "helper"},
-                headers=BEARER,
-            )
-            assert resp.status == 201
-            assert Path((await resp.json())["session"]["cwd"]).name == "helper"
-            await mgr.shutdown_all()
-        finally:
-            await client.close()
-
-    asyncio.run(run())
-
-
-def test_worktree_false_leaves_the_child_in_its_parents_checkout(home, tmp_path):
-    """`false` is not the name of a worktree. It used to be read as one, and
-    cut a checkout called `False` on a branch called `False`."""
-    _register_py_harness()
-    repo = _repo(tmp_path / "repo")
-
-    async def run():
-        mgr = _manager()
-        mm = MeshManager(mgr, root=tmp_path / "mesh")
-        client = await _serve(mgr, mm)
-        try:
-            mgr.create(SessionDef(name="lead", harness="py", cwd=str(repo)))
-            resp = await client.post(
-                "/api/sessions/lead/children",
-                json={"name": "w1", "worktree": False},
-                headers=BEARER,
-            )
-            assert resp.status == 201
-            assert (await resp.json())["session"]["cwd"] == str(repo)
-            assert "False" not in _git("branch", cwd=repo).stdout
-            await mgr.shutdown_all()
-        finally:
-            await client.close()
-
-    asyncio.run(run())

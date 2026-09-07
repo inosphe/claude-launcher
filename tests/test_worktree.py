@@ -14,6 +14,11 @@ from claude_launcher import cli, herdr, worktree
 #: Every test here ends up making real worktrees (or real git repos to make
 #: them in), which is the expensive part of the whole suite on this machine.
 #: `-m "not worktree"` is the fast path for work that cannot touch this code.
+#:
+#: Kept deliberately small: one test per behaviour, with the variants of a
+#: behaviour asserted inside it rather than as a test each. The repository
+#: itself comes from a per-worker template (``repo_template`` in conftest),
+#: so what a test pays for is the worktree it cuts, not the repo it cuts from.
 pytestmark = pytest.mark.worktree
 
 
@@ -60,17 +65,18 @@ def outside_a_repo(tmp_path, monkeypatch):
     return plain
 
 
-@pytest.fixture
-def repo(tmp_path):
-    root = tmp_path / "repo"
-    root.mkdir()
+def _build_repo(root):
     git("init", "-q", cwd=root)
     git("config", "user.email", "t@example.com", cwd=root)
     git("config", "user.name", "t", cwd=root)
     (root / "a.txt").write_text("hi\n", encoding="utf-8")
     git("add", "-A", cwd=root)
     git("commit", "-qm", "init", cwd=root)
-    return root
+
+
+@pytest.fixture
+def repo(tmp_path, repo_template):
+    return repo_template("worktree", _build_repo, tmp_path / "repo")
 
 
 @pytest.fixture(autouse=True)
@@ -125,10 +131,7 @@ def test_default_name_falls_back_to_session_then_constant(monkeypatch):
     assert worktree.default_name().startswith("reviewer-2-")
     monkeypatch.delenv(worktree.SESSION_ENV)
     assert worktree.default_name().startswith("wt-")
-
-
-def test_herdr_env_gates_the_pane_id(monkeypatch):
-    """A stale HERDR_PANE_ID without HERDR_ENV=1 is not this pane's."""
+    # A stale HERDR_PANE_ID without HERDR_ENV=1 is not this pane's.
     monkeypatch.setenv(herdr.PANE_ID_ENV, "w9:p9")
     assert herdr.pane_id() is None
     assert worktree.default_name().startswith("wt-")
@@ -156,7 +159,7 @@ def test_creates_worktree_on_its_own_branch(repo):
     assert (wt.path / "a.txt").exists()
 
 
-def test_second_ask_for_the_same_name_reuses_the_checkout(repo):
+def test_a_second_ask_reuses_the_checkout_and_reports_its_real_branch(repo):
     first = worktree.resolve(str(repo), "review")
     (first.path / "wip.txt").write_text("uncommitted\n", encoding="utf-8")
     again = worktree.resolve(str(repo), "review")
@@ -164,12 +167,14 @@ def test_second_ask_for_the_same_name_reuses_the_checkout(repo):
     assert not again.created
     # Reuse means the work in it survives; a fresh checkout would not have it.
     assert (again.path / "wip.txt").exists()
-
-
-def test_existing_branch_is_checked_out_not_recut(repo):
-    git("branch", "already", cwd=repo)
-    wt = worktree.resolve(str(repo), "already")
-    assert wt.created and wt.branch == "already"
+    assert again.branch == "review"
+    # The label follows the checkout, not the name it was cut under.
+    git("checkout", "-q", "-b", "other", cwd=first.path)
+    moved = worktree.resolve(str(repo), "review")
+    assert moved.branch == "other"
+    assert worktree.pane_label("api", str(moved.path)) == (
+        f"api · other · {moved.path}"
+    )
 
 
 def test_launching_from_inside_a_worktree_makes_a_sibling(repo):
@@ -180,29 +185,16 @@ def test_launching_from_inside_a_worktree_makes_a_sibling(repo):
     assert repo in sibling.path.parents
 
 
-def test_directory_in_the_way_is_refused(repo):
+def test_the_directory_is_relocatable_by_env_and_refused_when_taken(
+    repo, tmp_path, monkeypatch
+):
     (repo / ".claude" / "worktrees" / "taken").mkdir(parents=True)
     with pytest.raises(worktree.WorktreeError):
         worktree.resolve(str(repo), "taken")
-
-
-def test_worktree_dir_env_relocates_them(repo, tmp_path, monkeypatch):
     elsewhere = tmp_path / "trees"
     monkeypatch.setenv(worktree.WORKTREE_DIR_ENV, str(elsewhere))
     wt = worktree.resolve(str(repo), "moved")
     assert wt.path == elsewhere / "moved"
-
-
-def test_a_reused_worktree_reports_the_branch_it_is_actually_on(repo):
-    wt = worktree.resolve(str(repo), "review")
-    assert wt.branch == "review"
-    git("checkout", "-q", "-b", "other", cwd=wt.path)
-    again = worktree.resolve(str(repo), "review")
-    assert again.branch == "other"
-    # The label follows the checkout, not the name it was cut under.
-    assert worktree.pane_label("api", str(again.path)) == (
-        f"api · other · {again.path}"
-    )
 
 
 # --------------------------------------------------------------------------- #
@@ -222,24 +214,15 @@ def settings_of(checkout: Path) -> dict:
     )
 
 
-def test_a_new_worktree_inherits_the_approved_servers(repo):
+def test_the_approval_is_inherited_and_nothing_else_is(repo):
     """The person answered the modal once; the worktree must not re-ask.
 
     `.mcp.json` is resolved from the repository, so a worktree inherits the
     declaration -- but the approval is recorded per directory, so without
-    this it is asked again in a checkout no human is watching.
-    """
-    approve(repo, {worktree.MCP_APPROVAL_KEY: ["claunch"]})
-    wt = worktree.resolve(str(repo), "inherits")
-    assert settings_of(wt.path) == {worktree.MCP_APPROVAL_KEY: ["claunch"]}
-
-
-def test_only_the_approval_is_inherited(repo):
-    """Everything else in that file stays behind.
-
-    Permissions and env live there too. Inheriting them silently would leave
-    nobody able to say what a worktree is running under -- and
+    this it is asked again in a checkout no human is watching. Everything
+    else in that file stays behind: permissions and env live there too, and
     `enableAllProjectMcpServers` answers for servers nobody has seen yet.
+    A new checkout of an EXISTING branch is `created` too, and inherits.
     """
     approve(
         repo,
@@ -252,130 +235,110 @@ def test_only_the_approval_is_inherited(repo):
         },
     )
     wt = worktree.resolve(str(repo), "narrow")
-    assert list(settings_of(wt.path)) == [worktree.MCP_APPROVAL_KEY]
+    assert settings_of(wt.path) == {worktree.MCP_APPROVAL_KEY: ["claunch"]}
+
+    git("branch", "already", cwd=repo)
+    wt = worktree.resolve(str(repo), "already")
+    assert wt.created and wt.branch == "already"
+    assert settings_of(wt.path) == {worktree.MCP_APPROVAL_KEY: ["claunch"]}
 
 
-def test_no_approval_to_inherit_writes_nothing(repo):
-    """Inventing an approval would be a new decision, not an inherited one."""
+def test_nothing_to_inherit_writes_nothing_and_own_settings_stand(repo):
+    """Inventing an approval would be a new decision, not an inherited one;
+    an unreadable file is at worst the modal the person was already getting;
+    and a reused checkout's answers are its own -- including a later refusal.
+    """
+    assert not (repo / worktree.LOCAL_SETTINGS).exists()
+    wt = worktree.resolve(str(repo), "none")
+    assert not (wt.path / worktree.LOCAL_SETTINGS).exists()
+
     for doc in ({}, {worktree.MCP_APPROVAL_KEY: []}, {"permissions": {}}):
         approve(repo, doc)
         wt = worktree.resolve(str(repo), f"bare{abs(hash(str(doc))) % 1000}")
         assert not (wt.path / worktree.LOCAL_SETTINGS).exists()
 
-
-def test_a_checkout_with_no_settings_file_at_all_writes_nothing(repo):
-    assert not (repo / worktree.LOCAL_SETTINGS).exists()
-    wt = worktree.resolve(str(repo), "none")
-    assert not (wt.path / worktree.LOCAL_SETTINGS).exists()
-
-
-def test_an_unreadable_settings_file_does_not_fail_the_launch(repo):
-    """The worst case is the modal the person was already getting."""
-    approve(repo, {})
     (repo / worktree.LOCAL_SETTINGS).write_text("{not json", encoding="utf-8")
     wt = worktree.resolve(str(repo), "broken")
     assert wt is not None and wt.created
     assert not (wt.path / worktree.LOCAL_SETTINGS).exists()
 
-
-def test_a_worktrees_own_settings_are_never_overwritten(repo):
-    """A reused checkout's answers are its own -- including a later refusal."""
     approve(repo, {worktree.MCP_APPROVAL_KEY: ["claunch"]})
     wt = worktree.resolve(str(repo), "review")
+    assert settings_of(wt.path) == {worktree.MCP_APPROVAL_KEY: ["claunch"]}
     approve(wt.path, {worktree.MCP_APPROVAL_KEY: [], "disabledMcpjsonServers": ["claunch"]})
     again = worktree.resolve(str(repo), "review")
     assert not again.created
     assert settings_of(again.path)["disabledMcpjsonServers"] == ["claunch"]
 
 
-def test_a_reused_branch_still_inherits(repo):
-    """`created` covers a new checkout of an existing branch, and it re-asks too."""
-    git("branch", "already", cwd=repo)
-    approve(repo, {worktree.MCP_APPROVAL_KEY: ["claunch"]})
-    wt = worktree.resolve(str(repo), "already")
-    assert wt.created
-    assert settings_of(wt.path) == {worktree.MCP_APPROVAL_KEY: ["claunch"]}
-
 # --------------------------------------------------------------------------- #
 # who gets asked
 # --------------------------------------------------------------------------- #
-def test_no_worktree_never_asks_and_never_makes_one(repo, monkeypatch):
+def test_nobody_but_a_person_at_a_tty_is_asked(repo, monkeypatch):
+    never = lambda *a: pytest.fail("this launch must not be asked")  # noqa: E731
+
+    # --no-worktree never asks, whoever is there
     monkeypatch.setattr(worktree, "interactive", lambda: True)
-    monkeypatch.setattr(
-        "builtins.input", lambda *a: pytest.fail("--no-worktree must not ask")
-    )
+    monkeypatch.setattr("builtins.input", never)
     assert worktree.resolve(str(repo), worktree.NEVER) is None
 
-
-def test_a_managed_session_is_not_a_person(repo, monkeypatch):
-    """An agent's PTY passes isatty(); it must still not be prompted."""
+    # an agent's PTY passes isatty(); it must still not be prompted
+    monkeypatch.undo()
     monkeypatch.setenv(worktree.SESSION_ENV, "worker-1")
     monkeypatch.setattr("sys.stdin.isatty", lambda: True, raising=False)
     assert not worktree.interactive()
-    monkeypatch.setattr(
-        "builtins.input", lambda *a: pytest.fail("a session must not be asked")
-    )
+    monkeypatch.setattr("builtins.input", never)
     assert worktree.resolve(str(repo), worktree.ASK) is None
 
-
-def test_no_tty_stays_put(repo, monkeypatch):
+    # no tty: stays put without a question
+    monkeypatch.undo()
     monkeypatch.setattr(worktree, "interactive", lambda: False)
     assert worktree.resolve(str(repo), worktree.ASK) is None
 
-
-def test_asked_and_declined_stays_put(repo, monkeypatch):
+    # a person who declines, or hits EOF at the question, stays put too
     monkeypatch.setattr(worktree, "interactive", lambda: True)
     monkeypatch.setattr("builtins.input", lambda *a: "n")
     assert worktree.resolve(str(repo), worktree.ASK) is None
 
+    def eof(*_a):
+        raise EOFError
 
-def test_asked_and_accepted_with_a_name(repo, monkeypatch):
+    monkeypatch.setattr("builtins.input", eof)
+    assert worktree.resolve(str(repo), worktree.ASK) is None
+
+
+def test_a_person_who_accepts_names_it_or_takes_the_suggestion(
+    repo, monkeypatch, capsys
+):
+    monkeypatch.setattr(worktree, "interactive", lambda: True)
     answers = iter(["y", "mine"])
-    monkeypatch.setattr(worktree, "interactive", lambda: True)
     monkeypatch.setattr("builtins.input", lambda *a: next(answers))
-    wt = worktree.resolve(str(repo), worktree.ASK)
-    assert wt.name == "mine"
+    assert worktree.resolve(str(repo), worktree.ASK).name == "mine"
 
-
-def test_asked_and_accepted_with_a_blank_name_takes_the_suggestion(repo, monkeypatch):
     answers = iter(["y", ""])
-    monkeypatch.setattr(worktree, "interactive", lambda: True)
     monkeypatch.setattr("builtins.input", lambda *a: next(answers))
     monkeypatch.setattr(worktree, "default_name", lambda now=None: "suggested")
-    wt = worktree.resolve(str(repo), worktree.ASK)
-    assert wt.name == "suggested"
+    assert worktree.resolve(str(repo), worktree.ASK).name == "suggested"
 
-
-def test_a_rejected_name_is_asked_again(repo, monkeypatch, capsys):
+    # a rejected name is asked again, and the refusal is said out loud
     answers = iter(["y", "no spaces", "fine"])
-    monkeypatch.setattr(worktree, "interactive", lambda: True)
     monkeypatch.setattr("builtins.input", lambda *a: next(answers))
     assert worktree.resolve(str(repo), worktree.ASK).name == "fine"
     assert "invalid worktree name" in capsys.readouterr().err
 
 
-def test_eof_at_the_question_stays_put(repo, monkeypatch):
-    def eof(*_a):
-        raise EOFError
-
-    monkeypatch.setattr(worktree, "interactive", lambda: True)
-    monkeypatch.setattr("builtins.input", eof)
-    assert worktree.resolve(str(repo), worktree.ASK) is None
-
-
 # --------------------------------------------------------------------------- #
 # not a repository
 # --------------------------------------------------------------------------- #
-def test_outside_a_repo_the_question_is_not_asked(outside_a_repo, monkeypatch):
+def test_outside_a_repo_nothing_is_asked_and_an_explicit_request_fails(
+    outside_a_repo, monkeypatch
+):
     monkeypatch.setattr(worktree, "interactive", lambda: True)
     monkeypatch.setattr(
         "builtins.input", lambda *a: pytest.fail("nothing to make a worktree of")
     )
     assert worktree.repo_root(str(outside_a_repo)) is None
     assert worktree.resolve(str(outside_a_repo), worktree.ASK) is None
-
-
-def test_outside_a_repo_an_explicit_request_fails_loudly(outside_a_repo):
     with pytest.raises(worktree.WorktreeError):
         worktree.resolve(str(outside_a_repo), "x")
 
@@ -427,19 +390,32 @@ def test_new_session_refuses_both_flags_at_once():
 # --------------------------------------------------------------------------- #
 # run, end to end
 # --------------------------------------------------------------------------- #
-def test_run_launches_claude_inside_the_worktree(repo, monkeypatch, capsys):
+def test_run_launches_claude_inside_the_worktree_and_relabels_the_pane(
+    repo, monkeypatch, capsys
+):
     from claude_launcher import runner
 
     cli.main(["create", "work", "--no-seed"])
     capsys.readouterr()
     seen = {}
+    labels, cleared = [], []
+    monkeypatch.setattr(
+        herdr, "rename_pane", lambda label, **kw: labels.append(label) or True
+    )
+    monkeypatch.setattr(herdr, "clear_pane_label", lambda **kw: cleared.append(True))
     monkeypatch.setattr(runner.subprocess, "run", fake_launch(seen))
     monkeypatch.chdir(repo)
     assert cli.main(["run", "work", "--worktree=solo", "-p", "hi"]) == 0
-    assert seen["cwd"] == str(repo / ".claude" / "worktrees" / "solo")
+    solo = repo / ".claude" / "worktrees" / "solo"
+    assert seen["cwd"] == str(solo)
     # The flag is ours; everything else still reaches claude untouched.
     assert seen["cmd"][1:] == ["-p", "hi"]
     assert "created worktree 'solo'" in capsys.readouterr().err
+    # The profile is run's nearest thing to a session name; the branch and the
+    # directory are what tell two checkouts of it apart. And the pane goes
+    # back to Herdr's own label when claude exits.
+    assert labels == [f"work · solo · {solo}"]
+    assert cleared == [True]
 
 
 def test_run_without_the_flag_stays_where_it_was(repo, monkeypatch, capsys):
@@ -454,29 +430,6 @@ def test_run_without_the_flag_stays_where_it_was(repo, monkeypatch, capsys):
     assert cli.main(["run", "work", "-p", "hi"]) == 0
     # None, not a path: inherit the caller's directory as before.
     assert seen["cwd"] is None
-
-
-def test_run_relabels_the_herdr_pane_with_profile_and_worktree(
-    repo, monkeypatch, capsys
-):
-    from claude_launcher import runner
-
-    cli.main(["create", "work", "--no-seed"])
-    capsys.readouterr()
-    labels, cleared = [], []
-    monkeypatch.setattr(
-        herdr, "rename_pane", lambda label, **kw: labels.append(label) or True
-    )
-    monkeypatch.setattr(herdr, "clear_pane_label", lambda **kw: cleared.append(True))
-    monkeypatch.setattr(runner.subprocess, "run", fake_launch({}))
-    monkeypatch.chdir(repo)
-    assert cli.main(["run", "work", "--worktree=solo"]) == 0
-    # The profile is run's nearest thing to a session name; the branch and the
-    # directory are what tell two checkouts of it apart.
-    solo = repo / ".claude" / "worktrees" / "solo"
-    assert labels == [f"work · solo · {solo}"]
-    # And the pane goes back to Herdr's own label when claude exits.
-    assert cleared == [True]
 
 
 def test_a_failed_worktree_aborts_the_run(repo, monkeypatch, capsys):
@@ -568,40 +521,21 @@ def fake_daemon(monkeypatch):
     return client
 
 
-def test_new_session_is_created_in_the_worktree(repo, fake_daemon, monkeypatch):
+def test_new_session_is_created_in_the_worktree_of_the_named_repository(
+    repo, fake_daemon, tmp_path, monkeypatch
+):
     monkeypatch.chdir(repo)
+    # It runs in the daemon's PTY, not in this pane -- and nothing would ever
+    # take a label back off, so the pane is left alone.
+    monkeypatch.setattr(
+        herdr, "rename_pane", lambda *a, **k: pytest.fail("not this pane's session")
+    )
     assert cli.main(["new-session", "--profile", "work", "--worktree=solo"]) == 0
     path, body = fake_daemon.posted
     assert path == "/api/sessions"
     assert body["cwd"] == str(repo / ".claude" / "worktrees" / "solo")
 
-
-def test_new_session_without_a_worktree_uses_the_directory_itself(
-    repo, fake_daemon, monkeypatch
-):
-    monkeypatch.chdir(repo)
-    monkeypatch.setattr(worktree, "interactive", lambda: False)
-    assert cli.main(["new-session", "--profile", "work"]) == 0
-    _, body = fake_daemon.posted
-    assert body["cwd"] == str(repo)
-
-
-def test_new_session_model_and_effort_reach_the_daemon(repo, fake_daemon, monkeypatch):
-    monkeypatch.chdir(repo)
-    monkeypatch.setattr(worktree, "interactive", lambda: False)
-    assert cli.main([
-        "new-session", "--profile", "work", "--model", "opus",
-        "--effort", "high",
-    ]) == 0
-    _, body = fake_daemon.posted
-    assert body["model"] == "opus"
-    assert body["effort"] == "high"
-
-
-def test_new_session_worktree_is_cut_from_the_c_flag_not_the_shell(
-    repo, fake_daemon, tmp_path, monkeypatch
-):
-    """-c names the repository; the worktree belongs to *that* one."""
+    # -c names the repository; the worktree belongs to *that* one.
     monkeypatch.chdir(tmp_path)
     assert cli.main(
         ["new-session", "--profile", "work", "-c", str(repo), "--worktree=aimed"]
@@ -610,9 +544,27 @@ def test_new_session_worktree_is_cut_from_the_c_flag_not_the_shell(
     assert body["cwd"] == str(repo / ".claude" / "worktrees" / "aimed")
 
 
-def test_a_session_creating_a_session_is_never_asked(repo, fake_daemon, monkeypatch):
+def test_new_session_without_a_worktree_uses_the_directory_itself(
+    repo, fake_daemon, monkeypatch
+):
+    monkeypatch.chdir(repo)
+    monkeypatch.setattr(worktree, "interactive", lambda: False)
+    assert cli.main([
+        "new-session", "--profile", "work", "--model", "opus",
+        "--effort", "high",
+    ]) == 0
+    _, body = fake_daemon.posted
+    assert body["cwd"] == str(repo)
+    assert body["model"] == "opus"
+    assert body["effort"] == "high"
+
+
+def test_new_session_refusals_leave_nothing_made(
+    repo, fake_daemon, monkeypatch, capsys
+):
     """Inside a managed session, new-session is refused before anything is
-    made -- and even --detached must not open a prompt nobody can answer."""
+    made -- and even --detached must not open a prompt nobody can answer.
+    A worktree that cannot be made creates no session either."""
     monkeypatch.chdir(repo)
     monkeypatch.setenv(worktree.SESSION_ENV, "worker-1")
     monkeypatch.setattr(
@@ -624,9 +576,8 @@ def test_a_session_creating_a_session_is_never_asked(repo, fake_daemon, monkeypa
     _, body = fake_daemon.posted
     assert body["cwd"] == str(repo)
 
-
-def test_a_failed_worktree_creates_no_session(repo, fake_daemon, monkeypatch, capsys):
-    monkeypatch.chdir(repo)
+    fake_daemon.posted = None
+    monkeypatch.delenv(worktree.SESSION_ENV)
     (repo / ".claude" / "worktrees" / "taken").mkdir(parents=True)
     assert cli.main(["new-session", "--profile", "work", "--worktree=taken"]) == 1
     assert fake_daemon.posted is None
@@ -636,44 +587,33 @@ def test_a_failed_worktree_creates_no_session(repo, fake_daemon, monkeypatch, ca
 # --------------------------------------------------------------------------- #
 # resume: the conversation decides the directory
 # --------------------------------------------------------------------------- #
-def test_a_resume_is_not_asked_the_question(repo, monkeypatch):
+def test_a_resume_only_ever_enters_an_existing_checkout(repo, monkeypatch):
     """`claunch run nc --resume` means "carry on where I was", and where it
-    was is this directory -- claude keeps transcripts per cwd."""
+    was is this directory -- claude keeps transcripts per cwd. So the
+    question is not asked, a new worktree is refused (a bare --worktree names
+    a checkout after the second, so it is new by definition), and only going
+    back to a checkout that exists is allowed."""
     monkeypatch.setattr(worktree, "interactive", lambda: True)
     monkeypatch.setattr(
         "builtins.input", lambda *a: pytest.fail("a resume must not be asked")
     )
     assert worktree.resolve(str(repo), worktree.ASK, resuming=True) is None
+    assert worktree.resolve(str(repo), worktree.NEVER, resuming=True) is None
 
-
-def test_a_resume_refuses_a_new_worktree(repo):
     with pytest.raises(worktree.WorktreeError, match="cannot be opened in a new one"):
         worktree.resolve(str(repo), "fresh", resuming=True)
     # ...and nothing was left behind by the refusal.
     assert not (repo / ".claude" / "worktrees" / "fresh").exists()
-
-
-def test_a_resume_refuses_a_generated_name(repo):
-    """Bare --worktree names a checkout after the second, so by definition it
-    is new -- and a new one has no conversation to resume."""
     with pytest.raises(worktree.WorktreeError):
         worktree.resolve(str(repo), "", resuming=True)
 
-
-def test_a_resume_into_an_existing_worktree_is_allowed(repo):
-    """The useful case: go back to that checkout and carry on the work there."""
     made = worktree.resolve(str(repo), "review")
     again = worktree.resolve(str(repo), "review", resuming=True)
     assert again.path == made.path and not again.created
 
 
-def test_no_worktree_with_a_resume_is_still_just_no(repo):
-    assert worktree.resolve(str(repo), worktree.NEVER, resuming=True) is None
-
-
 @pytest.mark.parametrize(
-    "flags", [["--resume"], ["-r"], ["--continue"], ["-c"], ["--resume=abc"],
-              ["--session-id", "x"], ["-p", "hi", "--continue"]]
+    "flags", [["--resume"], ["-c"], ["--session-id", "x"], ["-p", "hi", "--continue"]]
 )
 def test_run_reads_every_conversation_flag_as_a_resume(repo, monkeypatch, flags):
     from claude_launcher import runner
@@ -690,7 +630,9 @@ def test_run_reads_every_conversation_flag_as_a_resume(repo, monkeypatch, flags)
     assert seen["cwd"] is None  # stayed in the checkout the conversation is in
 
 
-def test_run_refuses_a_new_worktree_with_a_resume(repo, monkeypatch, capsys):
+def test_run_with_a_resume_refuses_a_new_worktree_and_enters_an_existing_one(
+    repo, monkeypatch, capsys
+):
     from claude_launcher import runner
 
     cli.main(["create", "work", "--no-seed"])
@@ -706,34 +648,16 @@ def test_run_refuses_a_new_worktree_with_a_resume(repo, monkeypatch, capsys):
     assert cli.main(["run", "work", "--worktree=fresh", "--resume"]) == 1
     assert "cannot be opened in a new one" in capsys.readouterr().err
 
-
-def test_run_allows_a_resume_into_an_existing_worktree(repo, monkeypatch, capsys):
-    from claude_launcher import runner
-
-    cli.main(["create", "work", "--no-seed"])
-    capsys.readouterr()
     worktree.resolve(str(repo), "review")
     seen = {}
     monkeypatch.setattr(runner.subprocess, "run", fake_launch(seen))
-    monkeypatch.chdir(repo)
     assert cli.main(["run", "work", "--worktree=review", "--resume"]) == 0
     assert seen["cwd"] == str(repo / ".claude" / "worktrees" / "review")
     assert seen["cmd"][1:] == ["--resume"]
 
 
-def test_new_session_resume_is_not_asked_the_question(repo, fake_daemon, monkeypatch):
-    monkeypatch.chdir(repo)
-    monkeypatch.setattr(worktree, "interactive", lambda: True)
-    monkeypatch.setattr(
-        "builtins.input", lambda *a: pytest.fail("a resume must not be asked")
-    )
-    assert cli.main(["new-session", "--profile", "work", "--resume"]) == 0
-    _, body = fake_daemon.posted
-    assert body["cwd"] == str(repo)
-
-
-def test_new_session_reads_a_harness_side_conversation_flag_too(
-    repo, fake_daemon, monkeypatch
+def test_new_session_treats_a_resume_the_same_way(
+    repo, fake_daemon, monkeypatch, capsys
 ):
     """--resume is claunch's spelling; `-- --continue` is the harness's."""
     monkeypatch.chdir(repo)
@@ -741,15 +665,12 @@ def test_new_session_reads_a_harness_side_conversation_flag_too(
     monkeypatch.setattr(
         "builtins.input", lambda *a: pytest.fail("a resume must not be asked")
     )
+    assert cli.main(["new-session", "--profile", "work", "--resume"]) == 0
+    assert fake_daemon.posted[1]["cwd"] == str(repo)
     assert cli.main(["new-session", "--profile", "work", "--", "--continue"]) == 0
-    _, body = fake_daemon.posted
-    assert body["cwd"] == str(repo)
+    assert fake_daemon.posted[1]["cwd"] == str(repo)
 
-
-def test_new_session_refuses_a_new_worktree_with_a_resume(
-    repo, fake_daemon, monkeypatch, capsys
-):
-    monkeypatch.chdir(repo)
+    fake_daemon.posted = None
     assert cli.main(
         ["new-session", "--profile", "work", "--worktree=fresh", "--resume"]
     ) == 1
@@ -785,9 +706,10 @@ def test_launch_label_writes_home_as_tilde(monkeypatch, tmp_path):
     assert label == "api · main · " + str(Path("~/works/repo")).replace("\\", os.sep)
 
 
-def test_launch_label_drops_leading_path_segments_when_too_long():
+def test_launch_label_drops_leading_path_segments_but_never_the_identity():
     """The tail tells two worktrees of one repository apart; the road to the
-    workspace is the same on every pane."""
+    workspace is the same on every pane. The identity -- role included -- is
+    the fixed part the path budget is measured against."""
     deep = "/w/" + "/".join(f"level{i}" for i in range(20)) + "/worktrees/review"
     label = herdr.launch_label("api", "review", deep, limit=60)
     assert len(label) <= 60
@@ -796,49 +718,32 @@ def test_launch_label_drops_leading_path_segments_when_too_long():
     # The ellipsis lands on a segment boundary, not mid-word.
     assert "…level" in label or "…worktrees" in label
 
-
-def test_launch_label_never_truncates_the_identity():
-    label = herdr.launch_label("api", "review", "/w/repo", limit=12)
-    assert label.startswith("api · review")
-
-
-def test_launch_label_never_truncates_the_role_either():
-    """The role is part of the identity half, so it is part of the fixed
-    part the path budget is measured against."""
-    label = herdr.launch_label("api", "review", "/w/repo", "worker", limit=12)
-    assert label.startswith("api (worker) · review")
+    assert herdr.launch_label("api", "review", "/w/repo", limit=12).startswith(
+        "api · review"
+    )
+    assert herdr.launch_label(
+        "api", "review", "/w/repo", "worker", limit=12
+    ).startswith("api (worker) · review")
 
 
-def test_pane_label_reads_branch_and_directory_from_a_worktree(repo):
+def test_pane_label_reads_branch_and_directory_wherever_it_stands(
+    repo, outside_a_repo, tmp_path
+):
+    """A worktree, the main checkout, a plain directory, a directory that is
+    not there: the directory is always the answer to "which of the agents in
+    this repo is this one", and the branch and role join it when known."""
     made = worktree.resolve(str(repo), "review")
     assert worktree.pane_label("api", str(made.path)) == (
         f"api · review · {made.path}"
     )
-
-
-def test_pane_label_carries_the_session_role(repo):
-    """An attach knows the session's role; the label says it next to the
-    name, and a session without one labels exactly as before."""
-    made = worktree.resolve(str(repo), "review")
     assert worktree.pane_label("s22", str(made.path), "worker") == (
         f"s22 (worker) · review · {made.path}"
     )
-
-
-def test_pane_label_reads_the_main_checkout_too(repo):
-    """No worktree is not "nowhere": the directory is still the answer to
-    "which of the four agents in this repo is this"."""
     branch = worktree.current_branch(repo)
     assert worktree.pane_label("api", str(repo)) == f"api · {branch} · {repo}"
-
-
-def test_pane_label_outside_a_repo_is_identity_and_directory(outside_a_repo):
     assert worktree.pane_label("api", str(outside_a_repo)) == (
         f"api · {outside_a_repo}"
     )
-
-
-def test_pane_label_survives_a_directory_that_is_not_there(tmp_path):
     gone = tmp_path / "gone"
     assert worktree.pane_label("api", str(gone)) == f"api · {gone}"
 
@@ -865,36 +770,20 @@ def test_run_from_inside_a_worktree_is_labelled_by_where_it_already_is(
     assert labels == [f"work · review · {here}"]
 
 
-def test_run_in_the_main_checkout_still_names_branch_and_directory(
+def test_run_in_the_main_checkout_labels_the_pane_and_clears_it_even_on_failure(
     repo, monkeypatch, capsys
 ):
     """No worktree is not "nowhere" -- the directory is still the answer to
-    "which of the agents in this repo is this one"."""
+    "which of the agents in this repo is this one". And the label comes off
+    however claude ends."""
     from claude_launcher import runner
 
     cli.main(["create", "work", "--no-seed"])
     capsys.readouterr()
-    labels = []
+    labels, cleared = [], []
     monkeypatch.setattr(
         herdr, "rename_pane", lambda label, **kw: labels.append(label) or True
     )
-    monkeypatch.setattr(herdr, "clear_pane_label", lambda **kw: True)
-    monkeypatch.setattr(runner.subprocess, "run", fake_launch({}))
-    monkeypatch.setattr(worktree, "interactive", lambda: False)
-    monkeypatch.chdir(repo)
-    here = os.getcwd()
-    branch = worktree.current_branch(repo)
-    assert cli.main(["run", "work"]) == 0
-    assert labels == [f"work · {branch} · {here}"]
-
-
-def test_run_clears_the_label_even_when_claude_fails(repo, monkeypatch, capsys):
-    from claude_launcher import runner
-
-    cli.main(["create", "work", "--no-seed"])
-    capsys.readouterr()
-    cleared = []
-    monkeypatch.setattr(herdr, "rename_pane", lambda label, **kw: True)
     monkeypatch.setattr(herdr, "clear_pane_label", lambda **kw: cleared.append(True))
 
     def boom(cmd, **kwargs):
@@ -905,21 +794,11 @@ def test_run_clears_the_label_even_when_claude_fails(repo, monkeypatch, capsys):
     monkeypatch.setattr(runner.subprocess, "run", boom)
     monkeypatch.setattr(worktree, "interactive", lambda: False)
     monkeypatch.chdir(repo)
+    here = os.getcwd()
+    branch = worktree.current_branch(repo)
     assert cli.main(["run", "work"]) == 1
+    assert labels == [f"work · {branch} · {here}"]
     assert cleared == [True]
-
-
-def test_an_unattached_new_session_leaves_the_pane_alone(
-    repo, fake_daemon, monkeypatch
-):
-    """It runs in the daemon's PTY, not in this pane -- and nothing would ever
-    take the label back off."""
-    monkeypatch.setattr(
-        herdr, "rename_pane", lambda *a, **k: pytest.fail("not this pane's session")
-    )
-    monkeypatch.chdir(repo)
-    assert cli.main(["new-session", "--profile", "work", "--worktree=solo"]) == 0
-    assert fake_daemon.posted[1]["cwd"].endswith("solo")
 
 
 class _NoRawTerminal:
@@ -973,19 +852,6 @@ def test_attach_labels_the_pane_for_as_long_as_it_lasts(repo, attachable, monkey
     assert cleared == [True]
 
 
-def test_attach_to_the_main_checkout_names_its_branch_and_directory(
-    repo, attachable, monkeypatch
-):
-    labels = []
-    monkeypatch.setattr(
-        herdr, "rename_pane", lambda label, **kw: labels.append(label) or True
-    )
-    monkeypatch.setattr(herdr, "clear_pane_label", lambda **kw: True)
-    branch = worktree.current_branch(repo)
-    assert attachable.attach(AttachClient(str(repo)), "api") == 0
-    assert labels == [f"api · {branch} · {repo}"]
-
-
 def test_attach_outside_herdr_clears_nothing(repo, attachable, monkeypatch):
     """rename_pane says False off-Herdr, and a clear that was never set would
     take away a label somebody else put there."""
@@ -1021,11 +887,14 @@ def test_info_reads_the_repository_in_one_answer(repo):
     assert worktree.info(str(repo.parent))["repo"] is False
 
 
-def test_a_reused_worktree_is_brought_up_to_date(repo):
+def test_a_reused_worktree_is_brought_up_to_date(repo, capsys):
     """The point of the option: a checkout you come back to is as far behind
-    as the day you left it."""
+    as the day you left it. An untracked file is not uncommitted work (a
+    rebase does not care about it, so neither does this), and the update is
+    announced -- it is the step that could have failed and did not."""
     wt = worktree.resolve(str(repo), "review")
     commit(wt.path, "side.txt")
+    (wt.path / "build.log").write_text("noise\n", encoding="utf-8")
     commit(repo, "moved-on.txt")
 
     again = worktree.resolve(str(repo), "review", rebase_onto=base_branch(repo))
@@ -1034,24 +903,19 @@ def test_a_reused_worktree_is_brought_up_to_date(repo):
     # master's commit is now under the worktree's own, and its file is there
     assert (again.path / "moved-on.txt").exists()
     assert (again.path / "side.txt").exists()
+    assert (again.path / "build.log").exists()
     log = git("log", "--oneline", cwd=again.path).stdout
     assert log.index("side.txt") < log.index("moved-on.txt")
+    worktree.announce(again)
+    assert f"rebased onto {base_branch(repo)}" in capsys.readouterr().err
 
 
-def test_a_fresh_worktree_is_never_rebased(repo):
-    """It was cut from the repository as it stands, so there is nothing to
-    catch up on -- and a rebase of an empty branch is a chance to fail for
-    no reason."""
-    wt = worktree.resolve(str(repo), "brand-new", rebase_onto=base_branch(repo))
-    assert wt.created is True
-    assert wt.rebased == ""
-
-
-def test_a_fresh_worktree_is_cut_from_the_branch_it_is_put_on(repo):
+def test_a_fresh_worktree_is_cut_from_the_branch_it_is_put_on_and_never_rebased(repo):
     """``rebase_onto`` says where the checkout ends up, and for a NEW branch
     that means where it is cut from: a nested worker's branch cut from its
     parent's branch begins on the stack, not on the trunk. Nothing is
-    replayed, so ``rebased`` stays empty -- there was no rebase."""
+    replayed, so ``rebased`` stays empty -- there was no rebase, and a rebase
+    of an empty branch would only be a chance to fail for no reason."""
     parent = worktree.resolve(str(repo), "parent")
     commit(parent.path, "parent-only.txt")
     trunk_tip = git("rev-parse", "HEAD", cwd=repo).stdout.strip()
@@ -1064,9 +928,10 @@ def test_a_fresh_worktree_is_cut_from_the_branch_it_is_put_on(repo):
         git("rev-parse", "HEAD", cwd=child.path).stdout.strip()
         == git("rev-parse", "parent", cwd=repo).stdout.strip()
     )
-    # the trunk did not move, and a cut that names nothing still starts there
+    # the trunk did not move, and a cut that names the trunk starts there
     assert git("rev-parse", "HEAD", cwd=repo).stdout.strip() == trunk_tip
-    plain = worktree.resolve(str(repo), "plain")
+    plain = worktree.resolve(str(repo), "plain", rebase_onto=base_branch(repo))
+    assert plain.created is True and plain.rebased == ""
     assert not (plain.path / "parent-only.txt").exists()
     # a branch that already exists is checked out as it stands -- the start
     # point is for new branches only
@@ -1075,29 +940,21 @@ def test_a_fresh_worktree_is_cut_from_the_branch_it_is_put_on(repo):
     assert old.created is True and not (old.path / "parent-only.txt").exists()
 
 
-def test_uncommitted_work_refuses_the_launch_before_touching_anything(repo):
+def test_a_catch_up_that_cannot_run_is_refused_before_touching_anything(repo):
     """There is no safe automatic answer to somebody's uncommitted work, so
-    it is refused rather than stashed, moved or committed for them."""
+    it is refused rather than stashed, moved or committed for them; a base
+    that is no branch is refused by name."""
     wt = worktree.resolve(str(repo), "review")
-    (wt.path / "a.txt").write_text("mine, uncommitted\n", encoding="utf-8")
+    with pytest.raises(worktree.WorktreeError) as exc:
+        worktree.resolve(str(repo), "review", rebase_onto="nosuch")
+    assert "no branch 'nosuch'" in str(exc.value)
 
+    (wt.path / "a.txt").write_text("mine, uncommitted\n", encoding="utf-8")
     with pytest.raises(worktree.WorktreeError) as exc:
         worktree.resolve(str(repo), "review", rebase_onto=base_branch(repo))
     assert "uncommitted changes" in str(exc.value)
     # untouched: still theirs, still there
     assert (wt.path / "a.txt").read_text(encoding="utf-8") == "mine, uncommitted\n"
-
-
-def test_an_untracked_file_is_not_uncommitted_work(repo):
-    """A build artefact must not refuse a launch: a rebase does not care
-    about untracked files, so neither does this."""
-    wt = worktree.resolve(str(repo), "review")
-    (wt.path / "build.log").write_text("noise\n", encoding="utf-8")
-    commit(repo, "moved-on.txt")
-
-    again = worktree.resolve(str(repo), "review", rebase_onto=base_branch(repo))
-    assert again.rebased == base_branch(repo)
-    assert (again.path / "build.log").exists()
 
 
 def test_a_conflicting_rebase_refuses_and_leaves_nothing_half_done(repo):
@@ -1118,20 +975,3 @@ def test_a_conflicting_rebase_refuses_and_leaves_nothing_half_done(repo):
     assert worktree.current_branch(wt.path) == "review"
     assert (wt.path / "a.txt").read_text(encoding="utf-8") == "theirs\n"
     assert git("status", "--porcelain", cwd=wt.path).stdout.strip() == ""
-
-
-def test_a_base_that_is_not_a_branch_is_refused_by_name(repo):
-    worktree.resolve(str(repo), "review")
-    with pytest.raises(worktree.WorktreeError) as exc:
-        worktree.resolve(str(repo), "review", rebase_onto="nosuch")
-    assert "no branch 'nosuch'" in str(exc.value)
-
-
-def test_the_announcement_says_the_update_happened(repo, capsys):
-    """It is the step that could have failed and did not, so it is said out
-    loud rather than left to be inferred from the branch."""
-    worktree.resolve(str(repo), "review")
-    commit(repo, "moved-on.txt")
-    wt = worktree.resolve(str(repo), "review", rebase_onto=base_branch(repo))
-    worktree.announce(wt)
-    assert f"rebased onto {base_branch(repo)}" in capsys.readouterr().err

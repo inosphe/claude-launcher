@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 from pathlib import Path
 
 import pytest
@@ -91,6 +92,44 @@ def home(tmp_path, monkeypatch):
     monkeypatch.setenv("CLAUDE_LAUNCHER_SEED", str(seed))
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / ".claude-config"))
     return h
+
+
+@pytest.fixture(scope="session")
+def repo_template(tmp_path_factory):
+    """Build a git repository once per worker, then copy it per test.
+
+    ``git init`` + identity + one commit is five git processes, and on this
+    machine each is ~100ms -- so a per-test ``repo`` fixture spent ~0.6s
+    before the test began, across several hundred tests. A ``shutil``
+    copy of the same tiny tree is a few milliseconds and the result is
+    indistinguishable to git: nothing in a plain repository's ``.git`` is
+    an absolute path (linked worktrees are, so never put one in a build).
+
+    Usage, from a module's own fixture::
+
+        @pytest.fixture
+        def repo(tmp_path, repo_template):
+            return repo_template("sweep", _build, tmp_path / "repo")
+
+    ``key`` names the template (one per distinct ``build``); ``build(path)``
+    fills an existing empty directory the first time only; ``dest`` is
+    where this test's copy lands and is returned. Identity goes into the
+    template's own config so a copy can commit without ``-c`` flags.
+    """
+    root = tmp_path_factory.mktemp("repo-templates")
+    built: dict = {}
+
+    def make(key: str, build, dest: Path) -> Path:
+        src = built.get(key)
+        if src is None:
+            src = root / key
+            src.mkdir()
+            build(src)
+            built[key] = src
+        shutil.copytree(src, dest)
+        return dest
+
+    return make
 
 
 @pytest.fixture

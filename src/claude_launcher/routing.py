@@ -359,8 +359,17 @@ def _try_claim(fp: str) -> bool:
 
 
 def _find(fp: str) -> Optional[int]:
-    """The port a live shim for ``fp`` answers on, if one is up."""
+    """The port a live shim for ``fp`` answers on, if one is up.
+
+    A port nobody listens on is skipped by a bind probe before any HTTP
+    request goes out. On Windows a connect to a closed loopback port does
+    not fail fast -- it sits out ``health``'s whole timeout -- so probing
+    all ``_PORT_TRIES`` candidates over HTTP cost ~5s on every launch that
+    had no shim to find (measured: 4.9s of a 5.5s ``ensure_shim``).
+    """
     for port in candidate_ports(fp):
+        if _port_free(port):
+            continue  # nothing listens there; no request to make
         info = health(port)
         if info is not None and info.get("fingerprint") == fp:
             return port
