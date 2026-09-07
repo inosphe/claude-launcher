@@ -1465,7 +1465,16 @@ class SessionManager:
         # This ending never reaches the exit hooks (see
         # :attr:`_retired_for_sweep`), so the issue sweep it owes has to be
         # claimed at boot instead — by whoever owns the board.
-        self._retired_for_sweep.append(dead)
+        #
+        # An archived record is the exception: archiving is the operator's own
+        # "this is done, filed away", and the board sweep it owed ran when it
+        # first exited, in the daemon life that archived it. Sweeping it again
+        # here re-touches issues reconciled long ago — pure churn — and at
+        # archive scale (hundreds of records) it is a slow boot for nothing.
+        # A filed-away record is inert: it stays browsable, and the daemon
+        # stops processing it.
+        if not dead.archived_at:
+            self._retired_for_sweep.append(dead)
         return dead
 
     def take_retired_for_sweep(self) -> List[DeadSession]:
