@@ -24,6 +24,7 @@ import time
 from datetime import datetime, timezone
 from typing import Callable, Dict, List, Optional, Set, Tuple
 
+from .. import atomic
 from .. import harnesses as harness_registry
 from . import compacting, keys as keys_mod, process_priority
 from . import paths, pty_backend
@@ -658,9 +659,10 @@ class Session:
             "exit_code": self.exit_code,
         }
         try:
-            paths.session_dir(self.sdef.name).joinpath("meta.json").write_text(
-                json.dumps(meta, indent=2), encoding="utf-8"
-            )
+            path = paths.session_dir(self.sdef.name).joinpath("meta.json")
+            with atomic.scratch(path) as tmp:
+                tmp.write_text(json.dumps(meta, indent=2), encoding="utf-8")
+                atomic.replace(tmp, path)
         except OSError:
             pass
 
