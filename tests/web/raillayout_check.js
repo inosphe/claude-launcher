@@ -103,7 +103,7 @@ const stubs = `
    assertions below exist to catch. Only the filter name is stubbed. */
 let sessionFilter = "current";
 let sessionsCache = [], currentName = null, currentPage = "home";
-let attachedPid = null, linkState = "down", sessName = null;
+let attachedPid = null, linkState = "down", sessName = null, snapshotName = null;
 // refreshSessions prunes the keep-alive cache of vanished sessions; the
 // cache and its disposer are stubs here (the build owns no terminals).
 let keptTerms = new Map();

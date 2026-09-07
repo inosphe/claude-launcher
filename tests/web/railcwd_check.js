@@ -102,7 +102,7 @@ const api = async () => ({ ok: true, json: async () => served });
 const stubs = `
 function sessionMatchesFilter() { return true; }
 let sessionsCache = [], currentName = null, currentPage = "home";
-let attachedPid = null, linkState = "down", sessName = null;
+let attachedPid = null, linkState = "down", sessName = null, snapshotName = null;
 /* The rail hold's state, which refreshSessions now consults before it tears
    the rows down (app.js railHeld). Nothing here is about a press, so the
    answer is always "no press in flight" and the rebuild happens as before —

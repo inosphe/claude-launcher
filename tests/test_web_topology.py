@@ -291,6 +291,7 @@ WEB = Path(__file__).resolve().parent / "web"
         "seqrender_check.js",
         "zoom_check.js",
         "reconnect_check.js",
+        "snapshot_check.js",
         "notice_check.js",
         "restartgate_check.js",
         "termcache_check.js",

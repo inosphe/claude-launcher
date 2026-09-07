@@ -115,6 +115,7 @@ function build(opts) {
   // name; this slice is below the block that declares them, so the harness
   // provides stand-ins the sliced detach() can safely no-op against.
   const code = "let keptTerms = new Map();\nlet currentName = null;\n"
+    + "let snapshotName = null;\nfunction removeSnapshot() {}\n"
     + slice("/* ---- the link ----", "/* ---- text size ----");
   // The link slice ends before the wheel block, so the wheel machinery lives
   // outside this Function's scope: the wheel handlers are not what is being

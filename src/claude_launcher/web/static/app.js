@@ -9,6 +9,7 @@ let term = null;
 let fitAddon = null;
 let sessionsCache = [];
 let attachedPid = null;           // pid of the incarnation this socket is bound to
+let snapshotName = null;          // the ended session drawn as a static snapshot (no xterm, no socket)
 let applyingRemoteResize = false; // guards against echoing a server-driven resize
 let fitTimer = null;              // debounces viewport-driven fit() calls
 let altScreen = false;      // the program is drawing the alternate screen
@@ -1063,7 +1064,15 @@ async function refreshSessions(options) {
   }
 
   const cur = currentName && sessionsCache.find((s) => s.name === currentName);
-  if (cur && attachedPid && cur.pid !== attachedPid && linkState === "live") {
+  if (snapshotName && snapshotName === currentName && cur && cur.status !== "exited") {
+    // The snapshot's session came back (its own resume, or another tab's): it
+    // has a live PTY again, so replace the static last screen with a live
+    // terminal. Only while the terminal is the visible view, like the pid
+    // follow below — a resume must not yank the reader off another page. This
+    // has to run before the badge branch, or the header would flip to a live
+    // look over a screen that is still a frozen snapshot.
+    if (terminalOnScreen()) attach(currentName);
+  } else if (cur && attachedPid && cur.pid !== attachedPid && linkState === "live") {
     // Someone else (a `claunch respawn`, another tab) resumed this session:
     // our socket is bound to the replaced, now-dead child, so follow the new
     // one instead of showing its frozen last screen. Only while the terminal
@@ -6243,6 +6252,7 @@ function detach() {
   // A full tear-down supersedes whatever parked copy of this session exists —
   // the stale child the respawn-follow path leaves behind is exactly that.
   if (currentName) keptTerms.delete(currentName);
+  removeSnapshot();
   closeLink();
   // The wheel handler and its debounce belong to the terminal being torn down.
   if (wheelTimer) { clearTimeout(wheelTimer); wheelTimer = null; }
@@ -7092,6 +7102,7 @@ function wireActive(b) {
    socket still open is re-wired to the live machine; one that died while
    parked connects fresh, paying the old reconnect cost exactly once. */
 function restoreTerminal(b) {
+  removeSnapshot();
   keptTerms.delete(b.name);
   currentName = b.name;
   term = b.term;
@@ -7308,7 +7319,79 @@ function cliRefit(delay = 60) {
 /* Build a new terminal for a session that has not been up before (or whose
    parked copy was evicted). This is the pre-cache attach() body — the cost a
    session switch used to always pay. */
+/* Draw an ended session's last screen without a live terminal. See attach()
+   for why: a dead session's final frame is the one an xterm is slowest to
+   paint (it measures every distinct glyph of the seeded screen synchronously,
+   a forced layout per glyph), and there is nothing live to justify the cost —
+   no socket, no wheel to the daemon, no keystrokes to send. The header
+   (resume/archive) and the detail rail work exactly as they do for a live
+   terminal, because those read the record, not the socket. */
+async function snapshotAttach(name) {
+  removeSnapshot();
+  currentName = name;
+  snapshotName = name;
+  // No live machine behind a snapshot: the send-keys box closes on this, the
+  // link chip stays idle, and the wheel is the browser's own over the <pre>.
+  term = null;
+  ws = null;
+  fitAddon = null;
+  attachedPid = null;
+  attachedBoot = null;
+  altScreen = false;
+  mouseTracking = false;
+  scrollOffset = 0;
+  linkName = null;
+  linkQueue = [];
+  sessionEnded = true;
+  setLink("idle");
+
+  // Same header seeding a fresh attach does, so the previous session's
+  // controls never linger on this one.
+  showView("terminal");
+  $("term-title").textContent = name;
+  renderTermHandle();
+  setStatusBadge((sessionsCache.find((s) => s.name === name) || {}).status || "exited");
+  document.querySelectorAll("#session-list li").forEach((li) =>
+    li.classList.toggle("active", li.dataset.name === name)
+  );
+  markDetailRow();
+  refreshTermInput();
+  updateScrollChip();
+
+  const pre = document.createElement("pre");
+  pre.className = "term-snapshot";
+  pre.textContent = "loading…";
+  $("terminal").appendChild(pre);
+
+  let lines;
+  try {
+    const resp = await api(
+      `/api/sessions/${encodeURIComponent(name)}/capture?format=json`
+    );
+    const doc = await resp.json().catch(() => ({}));
+    lines = resp.ok && Array.isArray(doc.lines) ? doc.lines : null;
+  } catch {
+    return;   // auth overlay is up; a later navigation re-fetches
+  }
+  // The reader may have walked off this snapshot while the capture was in
+  // flight — a snapshot rebuilt for another session, or a live attach. Only
+  // write into the one still on screen.
+  if (snapshotName !== name || currentName !== name) return;
+  pre.textContent =
+    (lines || []).join("\n") || "(this session left no screen behind)";
+}
+
+/* Tear a snapshot's <pre> out — before an xterm mounts in the same box, or on
+   detach. Cheap and idempotent: a snapshot holds no socket and no xterm. */
+function removeSnapshot() {
+  snapshotName = null;
+  const host = $("terminal");
+  if (!host) return;
+  host.querySelectorAll("pre.term-snapshot").forEach((el) => el.remove());
+}
+
 function freshAttach(name) {
+  removeSnapshot();
   currentName = name;
   // showView first, and before the terminal is opened: on mobile #main is
   // display:none while the rail is up, and a terminal opened into a
@@ -7403,6 +7486,14 @@ function attach(name) {
   // follow reattaching the very session being watched does this, so the old
   // child's parked terminal does not come back in its place.
   dropKept(name);
+  // An ended session has no live PTY to talk to and nothing new to draw. Paint
+  // its last screen as a static snapshot instead of a live xterm: an xterm
+  // measures every distinct glyph of the seeded screen synchronously, which
+  // freezes the whole page for seconds on a paused claude session's final
+  // frame. A snapshot has no such cost. Resume rebuilds a live terminal
+  // through this same path, since by then the session is live again.
+  const rec = sessionsCache.find((s) => s.name === name);
+  if (rec && rec.status === "exited") { snapshotAttach(name); return; }
   freshAttach(name);
 }
 
@@ -7993,7 +8084,13 @@ function mobileTitle() {
 function syncMobileBars() {
   const has = !!currentName;
   // term-status is the socket-fed truth; the list poll trails it by seconds.
-  const status = has ? ($("term-status").textContent || "") : "";
+  // `let`, not `const`: a `paused` record reads `paused` here and is folded
+  // back to `exited` below (the badge shows the word, the controls read the
+  // state). Declared const, that fold threw "Assignment to constant variable"
+  // on every poll while a paused session was attached — and this runs inside
+  // the 2s poll (refreshSessions → setStatusBadge → here), so the throw killed
+  // the poll and froze the whole dashboard, not just this bar.
+  let status = has ? ($("term-status").textContent || "") : "";
   const sess = has ? sessionsCache.find((s) => s.name === currentName) : null;
 
   $("m-title").textContent = mobileTitle();

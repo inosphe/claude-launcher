@@ -95,7 +95,7 @@ const api = async () => ({ ok: true, json: async () => served });
 const stubs = `
 function sessionMatchesFilter() { return true; }
 let sessionsCache = [], currentName = null, currentPage = "home";
-let attachedPid = null, linkState = "down", sessName = null;
+let attachedPid = null, linkState = "down", sessName = null, snapshotName = null;
 let keptTerms = new Map();
 function dropKept() {}
 /* The poll's sweep of everything keyed by a session name that has gone
