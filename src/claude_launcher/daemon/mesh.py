@@ -41,7 +41,7 @@ from typing import Callable, Dict, Iterable, List, Optional, Union
 
 import yaml
 
-from .. import digests
+from .. import atomic, digests
 from . import mesh_policy, mesh_roles, paths, wire
 from .manager import ManagerError, SessionManager
 from .session import STATUS_IDLE
@@ -4669,10 +4669,13 @@ class MeshManager:
         root = self._mesh_root()
         try:
             root.mkdir(parents=True, exist_ok=True)
-            (root / "outgoing_joins.json").write_text(
-                json.dumps(list(self._outgoing.values()), indent=2),
-                encoding="utf-8",
-            )
+            path = root / "outgoing_joins.json"
+            with atomic.scratch(path) as tmp:
+                tmp.write_text(
+                    json.dumps(list(self._outgoing.values()), indent=2),
+                    encoding="utf-8",
+                )
+                atomic.replace(tmp, path)
         except OSError as exc:
             log.warning("cannot persist outgoing join requests: %s", exc)
 
@@ -6370,9 +6373,10 @@ class MeshManager:
                 **({"roles_version": mesh.roles_version}
                    if mesh.roles_version else {}),
             }
-            (d / "mesh.json").write_text(
-                json.dumps(doc, indent=2), encoding="utf-8"
-            )
+            path = d / "mesh.json"
+            with atomic.scratch(path) as tmp:
+                tmp.write_text(json.dumps(doc, indent=2), encoding="utf-8")
+                atomic.replace(tmp, path)
         except OSError as exc:
             log.warning("mesh %r: cannot persist definition: %s", mesh.name, exc)
 
@@ -6387,10 +6391,10 @@ class MeshManager:
                 doc["dismissed"] = dismissed
             if mesh.response_watches:
                 doc["response_watches"] = mesh.response_watches
-            (self._mesh_dir(mesh.name) / "cursors.json").write_text(
-                json.dumps(doc, indent=2),
-                encoding="utf-8",
-            )
+            path = self._mesh_dir(mesh.name) / "cursors.json"
+            with atomic.scratch(path) as tmp:
+                tmp.write_text(json.dumps(doc, indent=2), encoding="utf-8")
+                atomic.replace(tmp, path)
         except OSError as exc:
             log.warning("mesh %r: cannot persist cursors: %s", mesh.name, exc)
 
@@ -6398,12 +6402,16 @@ class MeshManager:
         d = self._mesh_dir(mesh.name)
         try:
             d.mkdir(parents=True, exist_ok=True)
-            (d / "outbox.jsonl").write_text(
-                "".join(
-                    json.dumps(e, ensure_ascii=False) + "\n" for e in mesh.outbox
-                ),
-                encoding="utf-8",
-            )
+            path = d / "outbox.jsonl"
+            with atomic.scratch(path) as tmp:
+                tmp.write_text(
+                    "".join(
+                        json.dumps(e, ensure_ascii=False) + "\n"
+                        for e in mesh.outbox
+                    ),
+                    encoding="utf-8",
+                )
+                atomic.replace(tmp, path)
         except OSError as exc:
             log.warning("mesh %r: cannot persist outbox: %s", mesh.name, exc)
 

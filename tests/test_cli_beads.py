@@ -27,17 +27,18 @@ def git(*args, cwd):
     )
 
 
-@pytest.fixture
-def repo(tmp_path):
-    root = tmp_path / "repo"
-    root.mkdir()
+def _build_repo(root):
     git("init", "-q", cwd=root)
     git("config", "user.email", "t@example.com", cwd=root)
     git("config", "user.name", "t", cwd=root)
     (root / "a.txt").write_text("hi\n", encoding="utf-8")
     git("add", "-A", cwd=root)
     git("commit", "-qm", "init", cwd=root)
-    return root
+
+
+@pytest.fixture
+def repo(tmp_path, repo_template):
+    return repo_template("cli-beads", _build_repo, tmp_path / "repo")
 
 
 @pytest.fixture

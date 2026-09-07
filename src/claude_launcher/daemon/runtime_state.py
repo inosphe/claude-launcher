@@ -38,7 +38,7 @@ import sys
 from pathlib import Path
 from typing import Optional
 
-from .. import __version__
+from .. import __version__, atomic
 from . import paths
 
 #: Ceiling on any single boot-time git call. A daemon that cannot start
@@ -207,7 +207,9 @@ def write_daemon_json(host: str, port: int, code: Optional[dict] = None) -> None
     }
     path = paths.daemon_json()
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(doc, indent=2), encoding="utf-8")
+    with atomic.scratch(path) as tmp:
+        tmp.write_text(json.dumps(doc, indent=2), encoding="utf-8")
+        atomic.replace(tmp, path)
     _chmod_private(path)
 
 
@@ -242,7 +244,9 @@ def rotate_token() -> str:
     token = secrets.token_urlsafe(32)
     path = paths.token_file()
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(token, encoding="utf-8")
+    with atomic.scratch(path) as tmp:
+        tmp.write_text(token, encoding="utf-8")
+        atomic.replace(tmp, path)
     _chmod_private(path)
     return token
 

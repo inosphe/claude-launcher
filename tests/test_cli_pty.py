@@ -223,12 +223,20 @@ def test_cli_exit_then_restart(home, tmp_path):
             await _swallow(ws, 1.5)
             assert shell.exited
 
-            # A viewer attaching to the dead shell is told it is dead.
+            # A viewer attaching to the dead shell is told it is dead:
+            # start_once only ever starts a shell that never existed, so an
+            # exited shell stays exited until a viewer asks for restart.
+            assert shell.start_once() is False
             ws2 = await client.ws_connect("/api/cli/ws", headers=BEARER)
             init2 = await _next_json(ws2)
             assert init2["type"] == "init" and init2["exited"] is True
             await _stream_until(ws2, b">>>")   # the ring still replays
             await ws2.close()
+            # (a brand-new daemon incarnation would start one fresh)
+            shell2 = ShellPty(argv=REPL, cwd=str(tmp_path))
+            assert shell2.start_once() is True
+            assert not shell2.exited
+            await shell2.shutdown()
 
             # The restart control brings a fresh child up under the same
             # socket, announced with a new pid.
@@ -246,36 +254,3 @@ def test_cli_exit_then_restart(home, tmp_path):
     asyncio.run(run())
 
 
-def test_cli_shell_never_auto_revives(home, tmp_path):
-    """start_once only ever starts a shell that never existed; an exited
-    shell stays exited until a viewer asks for restart."""
-
-    async def run():
-        shell = ShellPty(argv=REPL, cwd=str(tmp_path))
-        mgr = SessionManager(idle_threshold=0.5, scrollback=200, restore_default=True)
-        app = build_app(mgr, "sekrit", started_at=time.monotonic(), shell=shell)
-        client = test_utils.TestClient(test_utils.TestServer(app))
-        await client.start_server()
-        try:
-            ws = await client.ws_connect("/api/cli/ws", headers=BEARER)
-            await _next_json(ws)
-            await _stream_until(ws, b">>>")
-            await ws.send_bytes(b"exit()\r")
-            assert (await _next_json(ws))["type"] == "exit"
-            await ws.close()
-
-            # A fresh viewer after the exit: still the dead shell.
-            assert shell.start_once() is False
-            ws2 = await client.ws_connect("/api/cli/ws", headers=BEARER)
-            assert (await _next_json(ws2))["exited"] is True
-            await ws2.close()
-
-            # A brand-new daemon incarnation would start one fresh.
-            shell2 = ShellPty(argv=REPL, cwd=str(tmp_path))
-            assert shell2.start_once() is True
-            assert not shell2.exited
-            await shell2.shutdown()
-        finally:
-            await client.close()
-
-    asyncio.run(run())

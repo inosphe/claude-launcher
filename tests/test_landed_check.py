@@ -29,6 +29,8 @@ from __future__ import annotations
 
 import importlib.util
 import subprocess
+
+import pytest
 import sys
 from pathlib import Path
 
@@ -65,14 +67,17 @@ def _commit(repo: Path, name: str) -> None:
     _git(repo, "commit", "-m", name)
 
 
-def _base(tmp_path_factory, label: str) -> Path:
-    """A repo on ``master`` with one commit and a ``feature`` branch on top."""
-    repo = tmp_path_factory.mktemp(label)
+def _build_base(repo: Path) -> None:
     _git(repo, "init", "-b", "master")
     _commit(repo, "base")
     _git(repo, "checkout", "-b", "feature")
     _commit(repo, "work")
-    return repo
+
+
+@pytest.fixture
+def base(tmp_path, repo_template) -> Path:
+    """A repo on ``master`` with one commit and a ``feature`` branch on top."""
+    return repo_template("landed-base", _build_base, tmp_path / "base")
 
 
 def _run(repo: Path, *extra: str) -> int:
@@ -82,13 +87,13 @@ def _run(repo: Path, *extra: str) -> int:
 # --------------------------------------------------------------------------- #
 # not yet
 # --------------------------------------------------------------------------- #
-def test_a_frozen_branch_nobody_merged_is_not_landed(tmp_path_factory):
-    repo = _base(tmp_path_factory, "unlanded")
+def test_a_frozen_branch_nobody_merged_is_not_landed(base):
+    repo = base
     assert _run(repo) == 1
     assert _run(repo, "--target", "master") == 1
 
 
-def test_a_child_stacked_on_the_tip_is_not_a_landing(tmp_path_factory, capsys):
+def test_a_child_stacked_on_the_tip_is_not_a_landing(base, capsys):
     """The false green this gate exists to avoid.
 
     A worker under a nested worker gets children of its own stacked on its
@@ -97,7 +102,7 @@ def test_a_child_stacked_on_the_tip_is_not_a_landing(tmp_path_factory, capsys):
     froze a tip with nothing landed, and a containment test answered "landed"
     because its own child branch sat on top of it.
     """
-    repo = _base(tmp_path_factory, "stacked")
+    repo = base
     _git(repo, "checkout", "-b", "child")
     _commit(repo, "child-work")
     _git(repo, "checkout", "feature")
@@ -115,8 +120,8 @@ def test_a_child_stacked_on_the_tip_is_not_a_landing(tmp_path_factory, capsys):
 # --------------------------------------------------------------------------- #
 # landed
 # --------------------------------------------------------------------------- #
-def test_a_no_ff_merge_into_the_target_is_a_landing(tmp_path_factory):
-    repo = _base(tmp_path_factory, "landed")
+def test_a_no_ff_merge_into_the_target_is_a_landing(base):
+    repo = base
     _git(repo, "checkout", "master")
     _git(repo, "merge", "--no-ff", "feature", "-m", "merge feature")
     _git(repo, "checkout", "feature")
@@ -125,10 +130,10 @@ def test_a_no_ff_merge_into_the_target_is_a_landing(tmp_path_factory):
 
 
 def test_a_landing_is_seen_past_a_child_that_also_contains_the_tip(
-    tmp_path_factory,
+    base,
 ):
     """Both shapes at once: the real merge is found, the descendant ignored."""
-    repo = _base(tmp_path_factory, "both")
+    repo = base
     _git(repo, "checkout", "-b", "child")
     _commit(repo, "child-work")
     _git(repo, "checkout", "master")
@@ -137,9 +142,9 @@ def test_a_landing_is_seen_past_a_child_that_also_contains_the_tip(
     assert _run(repo) == 0
 
 
-def test_a_nested_worker_measures_against_its_parents_branch(tmp_path_factory):
+def test_a_nested_worker_measures_against_its_parents_branch(base):
     """A stacked worker's target is the parent branch, never master."""
-    repo = _base(tmp_path_factory, "nested")
+    repo = base
     _git(repo, "checkout", "-b", "parent-area")
     _commit(repo, "area")
     _git(repo, "checkout", "-b", "leaf")
@@ -155,8 +160,8 @@ def test_a_nested_worker_measures_against_its_parents_branch(tmp_path_factory):
 # --------------------------------------------------------------------------- #
 # cannot tell -- distinct from "not yet" on purpose
 # --------------------------------------------------------------------------- #
-def test_an_unknown_target_cannot_tell_rather_than_denying(tmp_path_factory):
-    repo = _base(tmp_path_factory, "notarget")
+def test_an_unknown_target_cannot_tell_rather_than_denying(base):
+    repo = base
     assert _run(repo, "--target", "no-such-branch") == landed_check.CANNOT_TELL
 
 
@@ -167,9 +172,9 @@ def test_a_directory_that_is_not_a_repository_cannot_tell(tmp_path):
 # --------------------------------------------------------------------------- #
 # the way the verify actually calls it
 # --------------------------------------------------------------------------- #
-def test_the_exit_status_reaches_a_shell(tmp_path_factory):
+def test_the_exit_status_reaches_a_shell(base):
     """The ``verify:`` line runs this as a script, so the status must escape."""
-    repo = _base(tmp_path_factory, "asscript")
+    repo = base
     proc = subprocess.run(
         [sys.executable, str(CHECK), "--repo", str(repo)],
         capture_output=True,

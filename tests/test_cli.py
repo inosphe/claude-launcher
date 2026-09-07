@@ -45,17 +45,6 @@ def test_install_scopes_are_mutually_exclusive(home, capsys, tmp_path, monkeypat
         run("install", "--all", "--profile", "work")
 
 
-def test_install_global_through_the_cli(home, capsys, tmp_path, monkeypatch):
-    import os
-
-    monkeypatch.chdir(tmp_path)
-    assert run("install", "--global") == 0
-    out = capsys.readouterr().out
-    assert "workflow ->" in out
-    cfg = Path(os.environ["CLAUDE_CONFIG_DIR"])
-    assert (cfg / "skills" / "cflow" / "SKILL.md").is_file()
-
-
 def test_install_all_profile_covers_every_profile_but_not_global(home, capsys, tmp_path, monkeypatch):
     import json
     import os
@@ -135,7 +124,7 @@ def test_install_all_routes_each_profile_to_its_harness_home(home, capsys):
     assert (root / "codex-work" / "codex" / "config.toml").is_file()
 
 
-@pytest.mark.parametrize("harness", ["pi", "kimi", "agent"])
+@pytest.mark.parametrize("harness", ["pi", "kimi"])  # agent = kimi's path
 def test_install_other_harnesses_use_their_native_home(home, capsys, harness):
     run("create", "work", "--no-seed", "--harness", harness)
     capsys.readouterr()
@@ -161,15 +150,6 @@ def test_install_profile_accepts_a_harness_selector(home, capsys):
     assert (config.profiles_dir() / "work" / "kimi" / "mcp.json").is_file()
 
 
-def test_install_all_is_an_alias_of_all_profile(home, capsys, tmp_path, monkeypatch):
-    monkeypatch.chdir(tmp_path)
-    run("create", "work", "--no-seed")
-    capsys.readouterr()
-    assert run("install", "--all") == 0
-    pdir = config.profiles_dir() / "work"
-    assert (pdir / "skills" / "cflow" / "SKILL.md").is_file()
-
-
 def test_install_all_profile_without_profiles_says_so(home, capsys, tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     assert run("install", "--all-profile") == 0
@@ -181,8 +161,11 @@ def test_a_project_install_hints_at_the_empty_global_layer(home, capsys, tmp_pat
     assert run("install") == 0
     assert "claunch install --global" in capsys.readouterr().out
     # once the layer is seeded, the hint goes away
-    run("install", "--global")
-    capsys.readouterr()
+    import os
+    assert run("install", "--global") == 0
+    assert "workflow ->" in capsys.readouterr().out
+    cfg = Path(os.environ["CLAUDE_CONFIG_DIR"])
+    assert (cfg / "skills" / "cflow" / "SKILL.md").is_file()
     assert run("install") == 0
     assert "claunch install --global" not in capsys.readouterr().out
 

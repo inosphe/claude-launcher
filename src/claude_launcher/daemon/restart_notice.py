@@ -58,6 +58,7 @@ import time
 from datetime import datetime, timezone
 from typing import Dict, Iterable, List, Optional
 
+from .. import atomic
 from ..harnesses import CLAUDE_HARNESS
 from . import paths
 from .session import INPUT_SETTLE, STATUS_IDLE, STATUS_STARTING
@@ -233,7 +234,9 @@ def write_ledger(doc: dict) -> None:
     path = ledger_file()
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(doc, indent=2), encoding="utf-8")
+        with atomic.scratch(path) as tmp:
+            tmp.write_text(json.dumps(doc, indent=2), encoding="utf-8")
+            atomic.replace(tmp, path)
     except OSError as exc:
         log.warning("could not write the restart ledger: %s", exc)
 

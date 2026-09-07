@@ -123,17 +123,20 @@ def _git(repo: Path, *args: str) -> str:
     return proc.stdout
 
 
-@pytest.fixture
-def repo(tmp_path) -> Path:
-    """A repository with one commit on ``master``."""
-    repo = tmp_path / "repo"
-    repo.mkdir()
+def _build_repo(repo: Path) -> None:
     _git(repo, "init", "-q")
+    _git(repo, "config", "user.name", "t")
+    _git(repo, "config", "user.email", "t@t")
     (repo / "a.txt").write_text("one\n", encoding="utf-8")
     _git(repo, "add", "-A")
     _git(repo, "commit", "-q", "-m", "first")
     _git(repo, "branch", "-M", "master")
-    return repo
+
+
+@pytest.fixture
+def repo(tmp_path, repo_template) -> Path:
+    """A repository with one commit on ``master``."""
+    return repo_template("sweep", _build_repo, tmp_path / "repo")
 
 
 @pytest.fixture

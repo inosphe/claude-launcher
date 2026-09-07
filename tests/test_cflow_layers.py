@@ -751,13 +751,31 @@ def test_the_leader_loop_is_started_by_the_daemon_not_by_the_driver(layer):
     )
 
 
-def test_a_global_install_seeds_the_global_layer(project, home):
+def test_a_global_install_seeds_the_global_layer_and_reinstalls_keep_an_edit(
+    project, home
+):
+    """One install seeds the layer; the next reports it up to date (a line,
+    not silence -- silence reads as 'did it skip the workflows?'); an edited
+    copy is kept and said so; only ``--force`` replaces it."""
     lines = install_mod.install_into_user()
     assert [line for line in lines if line.startswith("workflow ->")]
     for name, _ in state_mod.bundled_workflows():
         assert (home / "workflows" / f"{name}.yaml").is_file()
     # and they are findable from a project that declares nothing itself
     assert "feature-dev" in dict(state_mod.list_workflows())
+
+    lines = install_mod.install_into_user()
+    assert not [line for line in lines if line.startswith("workflow ->")]
+    assert any(line.startswith("workflow layer -> up to date") for line in lines)
+
+    edited = home / "workflows" / "feature-dev.yaml"
+    edited.write_text("name: mine\nsteps:\n  only:\n    instructions: x\n", "utf-8")
+    lines = install_mod.install_into_user()
+    assert edited.read_text(encoding="utf-8").startswith("name: mine")
+    assert any("kept; yours differs" in line for line in lines)
+
+    cflow_install.seed_global_workflows(force=True)
+    assert model.load(edited).name == "feature-dev"
 
 
 def test_a_project_install_stays_inside_the_project(project, home):
@@ -766,34 +784,6 @@ def test_a_project_install_stays_inside_the_project(project, home):
     lines = install_mod.install_into_project(project)
     assert not [line for line in lines if line.startswith("workflow ->")]
     assert not (home / "workflows").exists()
-
-
-def test_reinstalling_does_not_undo_an_edit(project, home):
-    install_mod.install_into_user()
-    edited = home / "workflows" / "feature-dev.yaml"
-    edited.write_text("name: mine\nsteps:\n  only:\n    instructions: x\n", "utf-8")
-
-    lines = install_mod.install_into_user()
-    assert edited.read_text(encoding="utf-8").startswith("name: mine")
-    assert any("kept; yours differs" in line for line in lines)
-
-
-def test_a_reinstall_reports_the_layer_as_up_to_date(project, home):
-    """Unchanged files get no line each, but not silence either — silence
-    reads as an omission ('did it skip the workflows?')."""
-    install_mod.install_into_user()
-    lines = install_mod.install_into_user()
-    assert not [line for line in lines if line.startswith("workflow ->")]
-    assert any(line.startswith("workflow layer -> up to date") for line in lines)
-
-
-def test_a_forced_seed_replaces_an_edit(project, home):
-    install_mod.install_into_user()
-    edited = home / "workflows" / "feature-dev.yaml"
-    edited.write_text("name: mine\nsteps:\n  only:\n    instructions: x\n", "utf-8")
-
-    cflow_install.seed_global_workflows(force=True)
-    assert model.load(edited).name == "feature-dev"
 
 
 def test_seeding_carries_workflow_sidecar_assets(project, home):

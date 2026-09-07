@@ -35,7 +35,7 @@ def git(*args, cwd) -> subprocess.CompletedProcess:
 
 
 @pytest.fixture
-def repo(tmp_path, monkeypatch):
+def repo(tmp_path, monkeypatch, repo_template):
     """A real repository, because the whole module is a git query.
 
     ``GIT_CEILING_DIRECTORIES`` is set for the same reason the ctxsize tests
@@ -44,12 +44,13 @@ def repo(tmp_path, monkeypatch):
     query against the repository under test.
     """
     monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(tmp_path))
-    r = tmp_path / "repo"
-    r.mkdir()
+    return repo_template("session-commits", _build_repo, tmp_path / "repo")
+
+
+def _build_repo(r: Path) -> None:
     git("init", "-q", "-b", "master", cwd=r)
     git("config", "user.email", "t@example.com", cwd=r)
     git("config", "user.name", "t", cwd=r)
-    return r
 
 
 def commit(repo: Path, subject: str, *, session=None, worktree=None, body="") -> str:

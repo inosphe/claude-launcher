@@ -315,117 +315,6 @@ def test_undatable_mail_is_never_forgiven_by_either_clock(home, tmp_path):
 # --------------------------------------------------------------------- #
 # the ledger
 # --------------------------------------------------------------------- #
-def test_a_debt_nobody_can_discharge_leaves_the_ledger(home, tmp_path):
-    """``owed`` closed only on the member speaking or an operator dismissing.
-
-    An exited member can do neither, so its debts were permanent: the leader
-    reading ``mesh owed`` saw obligations against sessions that no longer
-    exist, mixed in with the ones that still matter. The clock is the third
-    door, and it is the one that does not need a human.
-    """
-    _register_py_harness()
-
-    async def run():
-        mgr = _manager()
-        mm = MeshManager(mgr, settle=0.05, root=tmp_path / "mesh")
-        mm.start()
-        mm.create("team")
-        a = mgr.create(SessionDef(name="s1", harness="py", cwd=str(tmp_path)))
-        b = mgr.create(SessionDef(name="s2", harness="py", cwd=str(tmp_path)))
-        await _wait_screen(a, "READY")
-        await _wait_screen(b, "READY")
-        await mm.join("team", "s1", handle="lead")
-        await mm.join("team", "s2", handle="w1")
-        mesh = mm.get("team")
-        mm.set_policy("team", {"ack_timeout": {"owed_secs": 600.0}})
-
-        await mm.send("team", "lead", "w1", "what is your number?", type="ask")
-        deadline = time.monotonic() + 20.0
-        while time.monotonic() < deadline and mesh.pending("w1"):
-            await asyncio.sleep(0.1)
-        assert not mesh.pending("w1"), "the ask never reached the terminal"
-        assert [m["body"] for m in mesh.owed("w1")] == ["what is your number?"]
-
-        # The member goes; the question stays, with no way left to answer it.
-        await b.send_keys(["quit", "Enter"])
-        await b.wait_for("exited", timeout=10.0, threshold=0.5)
-        assert len(mesh.owed("w1")) == 1
-
-        # Aged past owed_secs it is written off — the same closure a
-        # dismissal is, arrived at by the clock instead of by hand. The
-        # member's join is moved back with it: the real ordering is join,
-        # then the question, then time passing, and a question backdated
-        # past its own recipient's arrival would be excluded by the join
-        # floor instead of by the clock under test.
-        mesh.members["w1"].joined_at = (
-            datetime.now(timezone.utc) - timedelta(seconds=1800)
-        ).isoformat(timespec="seconds")
-        for msg in mesh.owed_all("w1"):
-            msg["ts"] = (
-                datetime.now(timezone.utc) - timedelta(seconds=900)
-            ).isoformat(timespec="seconds")
-        assert mesh.owed("w1") == []
-        # owed_all is deliberately unaged: it is the window a dismissal set
-        # is pruned against, and pruning against an expiring view would
-        # forget write-offs that are still doing work.
-        assert len(mesh.owed_all("w1")) == 1
-
-        await mm.shutdown()
-        await mgr.shutdown_all()
-
-    asyncio.run(run())
-
-
-def test_the_nudger_and_the_ledger_expire_together(home, tmp_path):
-    """``Mesh.owed``'s docstring forbids the two disagreeing.
-
-    It argued the case one way — the ledger must not claim a debt the
-    heartbeat is not chasing. The timeout opens the other: once the clock
-    writes a debt off, a heartbeat still chasing it would nudge a member
-    about mail the dashboard says it does not owe. The activity report is
-    what the policy engine reads, so it is where they are held together.
-    """
-    _register_py_harness()
-
-    async def run():
-        mgr = _manager()
-        mm = MeshManager(mgr, settle=0.05, root=tmp_path / "mesh")
-        mm.start()
-        mm.create("team")
-        a = mgr.create(SessionDef(name="s1", harness="py", cwd=str(tmp_path)))
-        b = mgr.create(SessionDef(name="s2", harness="py", cwd=str(tmp_path)))
-        await _wait_screen(a, "READY")
-        await _wait_screen(b, "READY")
-        await mm.join("team", "s1", handle="lead")
-        await mm.join("team", "s2", handle="w1")
-        mesh = mm.get("team")
-        mm.set_policy("team", {"ack_timeout": {"owed_secs": 600.0}})
-
-        await mm.send("team", "lead", "w1", "answer me", type="ask")
-        deadline = time.monotonic() + 20.0
-        while time.monotonic() < deadline and mesh.pending("w1"):
-            await asyncio.sleep(0.1)
-        assert not mesh.pending("w1")
-        assert mm._activity_report(mesh)["w1"]["unanswered"] is True
-
-        mesh.members["w1"].joined_at = (
-            datetime.now(timezone.utc) - timedelta(seconds=1800)
-        ).isoformat(timespec="seconds")
-        for msg in mesh.owed_all("w1"):
-            msg["ts"] = (
-                datetime.now(timezone.utc) - timedelta(seconds=900)
-            ).isoformat(timespec="seconds")
-        report = mm._activity_report(mesh)["w1"]
-        assert mesh.owed("w1") == []
-        assert report["unanswered"] is False, "the heartbeat outlived the debt"
-        assert report["owed"] == 0
-
-        await mm.shutdown()
-        await mgr.shutdown_all()
-
-    asyncio.run(run())
-
-
 def test_a_joiner_owes_nothing_from_before_it_arrived(home, tmp_path):
     """A member's cursor jumps to the end of the log when it joins, which
     made every earlier message read as "already delivered" to it.
@@ -557,7 +446,14 @@ def test_the_heartbeat_finally_has_a_condition_under_which_it_gives_up(
                 datetime.now(timezone.utc) - timedelta(seconds=900)
             ).isoformat(timespec="seconds")
         assert mesh.owed("worker_b") == []
-
+        # owed_all is deliberately unaged: it is the window a dismissal set
+        # is pruned against, and pruning against an expiring view would
+        # forget write-offs that are still doing work.
+        assert len(mesh.owed_all("worker_b")) == 1
+        # The activity report is what the policy engine reads, so the ledger
+        # and the nudger are held together there: written off is written off.
+        report = mm._activity_report(mesh)["worker_b"]
+        assert report["unanswered"] is False and report["owed"] == 0
         fired.clear()
         mesh.activity["worker_b"]["hb_next"] = 0.0
         await mesh_policy.tick(mm, mesh)
