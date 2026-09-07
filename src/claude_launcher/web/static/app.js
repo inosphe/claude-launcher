@@ -214,9 +214,11 @@ function syncBulkActions(sessions, filter = "current") {
       "move exited sessions into the archive while retaining their records, "
       + "conversations and resume capability");
   // The bar's own border would otherwise sit above the nav as a stray rule on
-  // a rail with nothing on it.
+  // a rail with nothing on it. Every partition counts, the paused one
+  // included: in the Paused view running and killed both read 0, and a bar
+  // gated on those two alone hid the one button that view is for.
   const bar = $("bulk-actions");
-  if (bar) bar.classList.toggle("hidden", live + dead === 0);
+  if (bar) bar.classList.toggle("hidden", live + dead + paused === 0);
 }
 
 /* The stand-in for confirm()/alert() on the flows that end a session or its

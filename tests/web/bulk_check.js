@@ -41,10 +41,17 @@ for (const id of IDS) {
     },
   };
 }
+/* The bar itself, which the same function puts away when no button is up. */
+const barEl = {
+  classes: new Set(),
+  classList: {
+    toggle(cls, on) { if (on) barEl.classes.add(cls); else barEl.classes.delete(cls); },
+  },
+};
 const ctx = {};
 new Function("exports", "$", src.slice(a, end) +
              "\nexports.syncBulkActions = syncBulkActions;")(
-  ctx, (id) => buttons[id] || null
+  ctx, (id) => id === "bulk-actions" ? barEl : (buttons[id] || null)
 );
 const { syncBulkActions } = ctx;
 
@@ -114,6 +121,12 @@ check("paused records get their own resume and leave the killed counts alone",
       bar(paused), ["stop 1", "pause 1", "resume 1 paused", "resume 1", "archive 1 exited"]);
 check("paused mode exposes only the paused resume", bar(paused, "paused"),
       ["resume 1 paused"]);
+// The bar is gated on every partition, not on running plus killed: in the
+// Paused view those two are 0 by construction, and a bar hidden on their
+// sum took the paused resume button down with it.
+check("and the bar itself stays up for it", barEl.classes.has("hidden"), false);
+bar(paused, "running");
+check("the bar stays up in running mode", barEl.classes.has("hidden"), false);
 check("killed mode does not count the paused", bar(paused, "killed"),
       ["resume 1", "archive 1 exited"]);
 
@@ -133,6 +146,7 @@ check("archived mode does not act on hidden current records", bar(mixed, "archiv
    clickable and would still claim two sessions. */
 syncBulkActions(of("idle", "idle"));
 check("the bar empties when the rail does", bar([]), []);
+check("and is put away with it", barEl.classes.has("hidden"), true);
 
 /* Every button says what it does before it is pressed — these ask nothing of
    the daemon and are the only warning about which of them is destructive. */
