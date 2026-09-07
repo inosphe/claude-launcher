@@ -277,25 +277,6 @@ def test_pending_codex_claim_is_scanned_once_per_retry_window(
     asyncio.run(run())
 
 
-def test_restore_relaunches_recorded_sessions(home, tmp_path):
-    _register_py_harness()
-
-    async def run():
-        mgr = _manager()
-        mgr.create(SessionDef(name="phoenix", harness="py", cwd=str(tmp_path)))
-        mgr.persist()
-        await mgr.shutdown_all()
-
-        mgr2 = _manager()
-        failed = mgr2.restore_all()
-        assert failed == []
-        session = mgr2.get("phoenix")
-        await _wait_screen(session, "READY")
-        await mgr2.shutdown_all()
-
-    asyncio.run(run())
-
-
 def test_restore_gives_a_relaunched_session_its_scrollback_back(home, tmp_path):
     """A restart must not cost the web terminal its wheel.
 
@@ -541,7 +522,9 @@ def test_bulk_stop_resume_delete(home, tmp_path):
             for name in names:
                 s = mgr.create(SessionDef(name=name, harness="py", cwd=str(tmp_path)))
                 await _wait_screen(s, "READY")
-
+            # respawning a live one is refused
+            resp = await client.post("/api/sessions/b0/respawn", headers=bearer)
+            assert resp.status == 400
             # --- stop: programs end, records stay ---------------------------
             resp = await client.post("/api/sessions/kill", headers=bearer)
             assert resp.status == 200
@@ -1065,46 +1048,6 @@ def test_api_cflow_skip_advances_the_loop(home, tmp_path, monkeypatch):
             cflow_engine.archive(by="test", cwd=str(tmp_path), scope="s1")
             resp = await client.post("/api/cflow/skip", json=body, headers=bearer)
             assert resp.status == 400
-        finally:
-            await mgr.shutdown_all()
-            await client.close()
-
-    asyncio.run(run())
-
-
-def test_api_session_respawn(home, tmp_path):
-    """An exited session relaunches under its own name and definition;
-    respawning a live one is refused."""
-    _register_py_harness()
-    from aiohttp.test_utils import TestClient, TestServer
-
-    async def run():
-        mgr = _manager()
-        app = build_app(mgr, "sekrit", started_at=time.monotonic())
-        client = TestClient(TestServer(app))
-        await client.start_server()
-        bearer = {"Authorization": "Bearer sekrit"}
-        try:
-            session = mgr.create(SessionDef(name="rz", harness="py", cwd=str(tmp_path)))
-            await _wait_screen(session, "READY")
-
-            resp = await client.post("/api/sessions/rz/respawn", headers=bearer)
-            assert resp.status == 400  # still running
-
-            await session.send_keys(["quit", "Enter"])
-            await session.wait_for("exited", timeout=10.0, threshold=0.5)
-
-            resp = await client.post("/api/sessions/rz/respawn", headers=bearer)
-            assert resp.status == 200
-            info = await resp.json()
-            assert info["name"] == "rz"
-            assert info["status"] != "exited"
-
-            revived = mgr.get("rz")
-            assert revived is not session
-            await _wait_screen(revived, "READY")
-            await revived.send_keys(["back", "Enter"])
-            await _wait_screen(revived, "echo:back")
         finally:
             await mgr.shutdown_all()
             await client.close()

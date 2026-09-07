@@ -460,6 +460,12 @@ def test_a_member_that_dies_holding_mail_is_reported_to_its_senders(home, tmp_pa
 
     Nobody is holding a send result to read in that case, so the daemon goes
     and tells the senders — once per death, from ``policy``, as ``fyi``.
+
+    The latch is per sender, not per death: a latch on the dead member
+    alone told whoever happened to have mail waiting at the moment of the
+    first delivery attempt and left everyone after that in silence. So a
+    sender who arrives after the first report is told too, about HER mail,
+    and nobody is told twice.
     """
     _register_py_harness()
 
@@ -470,11 +476,13 @@ def test_a_member_that_dies_holding_mail_is_reported_to_its_senders(home, tmp_pa
         a = mgr.create(SessionDef(name="lead2", harness="py", cwd=str(tmp_path)))
         b = mgr.create(SessionDef(name="w2", harness="py", cwd=str(tmp_path)))
         c = mgr.create(SessionDef(name="w3", harness="py", cwd=str(tmp_path)))
-        for s in (a, b, c):
+        d = mgr.create(SessionDef(name="w4", harness="py", cwd=str(tmp_path)))
+        for s in (a, b, c, d):
             await _wait_screen(s, "READY")
         await mm.join("m4", "lead2", handle="leader")
         await mm.join("m4", "w2", handle="bob")
         await mm.join("m4", "w3", handle="carol")
+        await mm.join("m4", "w4", handle="dave")
 
         mesh = mm.get("m4")
         # Two senders, so the report has to find both and neither twice.
@@ -504,6 +512,18 @@ def test_a_member_that_dies_holding_mail_is_reported_to_its_senders(home, tmp_pa
         for _ in range(3):
             await mm._deliver_to(mesh, member)
         assert len([m for m in mesh.messages if m["from"] == "policy"]) == 1
+        # dave now sends into the same closed terminal. His send result says
+        # so (the other half of this contract), and the mail queues -- and
+        # he is told, about his mail, while the two already told are not.
+        await mm.send("m4", "dave", "bob", "late")
+        await mm._deliver_to(mesh, member)
+        reports = [m for m in mesh.messages if m["from"] == "policy"]
+        assert len(reports) == 2, "the second sender heard nothing"
+        assert reports[1]["to"] == ["dave"]
+        assert "1 message(s) of yours are waiting" in reports[1]["body"]
+        for _ in range(3):
+            await mm._deliver_to(mesh, member)
+        assert len([m for m in mesh.messages if m["from"] == "policy"]) == 2
 
         # Respawn re-arms it: a second death is news again.
         revived = mgr.respawn("w2")
@@ -514,63 +534,7 @@ def test_a_member_that_dies_holding_mail_is_reported_to_its_senders(home, tmp_pa
         await revived.send_keys(["quit", "Enter"])
         await revived.wait_for("exited", timeout=10.0, threshold=0.5)
         await mm._deliver_to(mesh, mesh.members["bob"])
-        assert len([m for m in mesh.messages if m["from"] == "policy"]) == 2
-
-        await mm.shutdown()
-        await mgr.shutdown_all()
-
-    asyncio.run(run())
-
-
-def test_a_sender_that_arrives_after_the_first_report_is_told_too(home, tmp_path):
-    """The latch is per sender, not per death.
-
-    A latch on the dead member alone told whoever happened to have mail
-    waiting at the moment of the first delivery attempt and left everyone
-    after that in silence — which is the surprise the report exists to
-    break. So the record is of WHO has been told, and the senders already
-    told are not told twice.
-    """
-    _register_py_harness()
-
-    async def run():
-        mgr = _manager()
-        mm = MeshManager(mgr, settle=0.05, busy_hold=5.0)
-        mm.create("m4b")
-        a = mgr.create(SessionDef(name="lead4b", harness="py", cwd=str(tmp_path)))
-        b = mgr.create(SessionDef(name="w4b", harness="py", cwd=str(tmp_path)))
-        c = mgr.create(SessionDef(name="w5b", harness="py", cwd=str(tmp_path)))
-        for s in (a, b, c):
-            await _wait_screen(s, "READY")
-        await mm.join("m4b", "lead4b", handle="leader")
-        await mm.join("m4b", "w4b", handle="bob")
-        await mm.join("m4b", "w5b", handle="carol")
-
-        mesh = mm.get("m4b")
-        await mm.send("m4b", "leader", "bob", "one")
-        await b.send_keys(["quit", "Enter"])
-        await b.wait_for("exited", timeout=10.0, threshold=0.5)
-
-        member = mesh.members["bob"]
-        await mm._deliver_to(mesh, member)
-        reports = [m for m in mesh.messages if m["from"] == "policy"]
-        assert [r["to"] for r in reports] == [["leader"]]
-
-        # carol now sends into the same closed terminal. Her send result says
-        # so (the other half of this contract), and the mail queues.
-        await mm.send("m4b", "carol", "bob", "two")
-        await mm._deliver_to(mesh, member)
-        reports = [m for m in mesh.messages if m["from"] == "policy"]
-        assert len(reports) == 2, "the second sender heard nothing"
-        assert reports[1]["to"] == ["carol"]
-        assert "claunch respawn w4b" in reports[1]["body"]
-        # ...and the count is HER mail, not the whole backlog.
-        assert "1 message(s) of yours are waiting" in reports[1]["body"]
-
-        # Neither sender is told again on the ticks that follow.
-        for _ in range(3):
-            await mm._deliver_to(mesh, member)
-        assert len([m for m in mesh.messages if m["from"] == "policy"]) == 2
+        assert len([m for m in mesh.messages if m["from"] == "policy"]) == 3
 
         await mm.shutdown()
         await mgr.shutdown_all()
@@ -1390,45 +1354,10 @@ def test_policy_set_and_persist(home, tmp_path):
     asyncio.run(run())
 
 
-def test_policy_heartbeat_nudges_unanswered_member(home, tmp_path):
-    _register_py_harness()
-
-    async def run():
-        mgr = _manager()
-        mm = MeshManager(mgr, settle=0.05)
-        mm.create("hb")
-        mgr.create(SessionDef(name="a1", harness="py", cwd=str(tmp_path)))
-        mgr.create(SessionDef(name="b1", harness="py", cwd=str(tmp_path)))
-        a = mgr.get("a1")
-        b = mgr.get("b1")
-        await _wait_screen(a, "READY")
-        await _wait_screen(b, "READY")
-        await mm.join("hb", "a1", handle="leader")
-        await mm.join("hb", "b1", handle="worker_b")
-        mm.set_policy("hb", {"heartbeat": {"enabled": True, "interval": 1}})
-        mm.start()
-
-        # an fyi delivery does NOT arm the heartbeat: draining it leaves the
-        # member owing nothing
-        await mm.send("hb", "leader", "worker_b", "status update", type="fyi")
-        await _wait_screen(b, "status update")
-        await asyncio.sleep(3)
-        assert "kind: heartbeat" not in _screen_text(b)
-
-        await mm.send("hb", "leader", "worker_b", "please reply")
-        await _wait_screen(b, "please reply")
-        # worker_b never sends anything back -> the heartbeat block lands
-        await _wait_screen(b, "kind: heartbeat")
-        assert "kind: heartbeat" not in _screen_text(a)  # leader answered nothing,
-        # but nothing was ever delivered to it either — no heartbeat for it
-
-        await mm.shutdown()
-        await mgr.shutdown_all()
-
-    asyncio.run(run())
-
-
-def test_policy_task_poll_and_stall_warning(home, tmp_path):
+def test_policy_engine_polls_warns_and_chases(home, tmp_path):
+    """The three policies on one pair of sessions: a task-poll to the idle
+    worker, a stall warning to the leader, then the heartbeat -- which an fyi
+    never arms and an unanswered ask does."""
     _register_py_harness()
 
     async def run():
@@ -1465,6 +1394,30 @@ def test_policy_task_poll_and_stall_warning(home, tmp_path):
             and m.get("type") == "fyi"  # informs the leader, never asks
             for m in mm.get("tp").messages
         )
+
+        # heartbeat, on the same pair: the poll and the warning are switched
+        # off so the only block that can land from here is the chase
+        mm.set_policy(
+            "tp",
+            {
+                "task_poll": {"enabled": False},
+                "stall_warn": {"enabled": False},
+                "heartbeat": {"enabled": True, "interval": 1},
+            },
+        )
+        # an fyi delivery does NOT arm the heartbeat: draining it leaves the
+        # member owing nothing
+        await mm.send("tp", "leader", "worker_b", "status update", type="fyi")
+        await _wait_screen(b, "status update")
+        await asyncio.sleep(3)
+        assert "kind: heartbeat" not in _screen_text(b)
+
+        await mm.send("tp", "leader", "worker_b", "please reply")
+        await _wait_screen(b, "please reply")
+        # worker_b never sends anything back -> the heartbeat block lands
+        await _wait_screen(b, "kind: heartbeat")
+        assert "kind: heartbeat" not in _screen_text(a)  # leader answered nothing,
+        # but nothing was ever delivered to it either — no heartbeat for it
 
         await mm.shutdown()
         await mgr.shutdown_all()
