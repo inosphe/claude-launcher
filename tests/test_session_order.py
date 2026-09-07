@@ -19,7 +19,7 @@ import json
 import sys
 
 from claude_launcher import lineage, profile, store
-from claude_launcher.daemon import paths
+from claude_launcher.daemon import db, paths
 from claude_launcher.daemon.harness import SessionDef
 from claude_launcher.daemon.manager import SessionManager
 
@@ -141,9 +141,9 @@ def test_live_children_still_excludes_the_exited(home):
 # the stamp survives every relaunch that keeps the name
 # --------------------------------------------------------------------------- #
 def _write_sessions_json(entries: list) -> None:
-    path = paths.sessions_json()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(entries), encoding="utf-8")
+    # Seed the durable registry directly (was a sessions.json write before
+    # the store moved to SQLite); allow_empty lets an empty list clear it.
+    db.open_default().save(entries, prune=True, allow_empty=True)
 
 
 def test_a_restored_session_keeps_its_original_creation_time(home):
@@ -165,7 +165,7 @@ def test_a_restored_session_keeps_its_original_creation_time(home):
         assert mgr.restore_all() == []
         assert mgr.get("s5").created_at == made
         # and it is written back out, so the next restart reads the same thing
-        entries = json.loads(paths.sessions_json().read_text(encoding="utf-8"))
+        entries = db.open_default().load_all()
         assert entries[0]["created_at"] == made
 
     asyncio.run(run())

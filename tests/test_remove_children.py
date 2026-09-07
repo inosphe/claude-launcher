@@ -20,7 +20,7 @@ import time
 import pytest
 
 from claude_launcher import store
-from claude_launcher.daemon import paths
+from claude_launcher.daemon import db, paths
 from claude_launcher.daemon.api import build_app
 from claude_launcher.daemon.harness import SessionDef
 from claude_launcher.daemon.manager import ManagerError, SessionManager
@@ -79,7 +79,7 @@ def test_removing_a_middle_record_promotes_its_children(home):
     assert mgr.depth("kid") == 1
     assert mgr.commands("lead", "kid")        # the grandparent still commands it
     # the daemon's next restart reads the promoted edge, not the dangling one
-    saved = json.loads(paths.sessions_json().read_text(encoding="utf-8"))
+    saved = db.open_default().load_all()
     assert {e["def"]["name"]: e["def"]["parent"] for e in saved}["kid"] == "lead"
 
 
@@ -109,7 +109,7 @@ def test_cascade_drops_the_whole_subtree(home):
     assert session.sdef.name == "mid"
     assert sorted(dropped) == ["kid", "kid2"]
     assert sorted(mgr._sessions) == ["lead", "solo"]
-    saved = json.loads(paths.sessions_json().read_text(encoding="utf-8"))
+    saved = db.open_default().load_all()
     assert sorted(e["def"]["name"] for e in saved) == ["lead", "solo"]
 
 

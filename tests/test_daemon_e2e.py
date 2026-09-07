@@ -17,7 +17,7 @@ from types import SimpleNamespace
 import pytest
 
 from claude_launcher import credentials, lineage, profile, store
-from claude_launcher.daemon import codex_sessions, manager as manager_mod, paths
+from claude_launcher.daemon import codex_sessions, db, manager as manager_mod, paths
 from claude_launcher.daemon.api import build_app
 from claude_launcher.daemon.harness import SessionDef
 from claude_launcher.daemon.manager import ManagerError, SessionManager
@@ -118,7 +118,7 @@ def test_sessions_json_persistence(home, tmp_path):
     async def run():
         mgr = _manager()
         mgr.create(SessionDef(name="keep", harness="py", cwd=str(tmp_path)))
-        entries = json.loads(paths.sessions_json().read_text(encoding="utf-8"))
+        entries = db.open_default().load_all()
         assert entries[0]["def"]["name"] == "keep"
         assert entries[0]["was_running"] is True
         await mgr.shutdown_all()
@@ -147,7 +147,7 @@ def test_codex_conversation_id_is_claimed_and_persisted(
             name="cx", profile="codex", cwd=str(tmp_path)
         ))
         assert session.sdef.conversation_id == "codex-thread-1"
-        entries = json.loads(paths.sessions_json().read_text(encoding="utf-8"))
+        entries = db.open_default().load_all()
         assert entries[0]["def"]["conversation_id"] == "codex-thread-1"
         await mgr.shutdown_all()
 
@@ -183,7 +183,7 @@ def test_codex_conversation_id_is_retried_after_a_slow_rollout(
         # makes it available to the context reader in that same response.
         assert mgr.list()[0].sdef.conversation_id == "codex-thread-late"
         assert attempts == [2.0, 0]
-        entries = json.loads(paths.sessions_json().read_text(encoding="utf-8"))
+        entries = db.open_default().load_all()
         assert entries[0]["def"]["conversation_id"] == "codex-thread-late"
 
         # Once claimed, later polls do not scan for this session again.
@@ -231,7 +231,7 @@ def test_codex_new_replaces_and_persists_the_conversation_id(
         await mgr.shutdown_all()
 
         assert session.sdef.conversation_id == "codex-thread-2"
-        entries = json.loads(paths.sessions_json().read_text(encoding="utf-8"))
+        entries = db.open_default().load_all()
         assert entries[0]["def"]["conversation_id"] == "codex-thread-2"
         assert seen == [
             ({"older"}, 2.0),

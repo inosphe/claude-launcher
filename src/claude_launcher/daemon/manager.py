@@ -21,6 +21,7 @@ import logging
 import os
 import re
 import shutil
+import sqlite3
 import time
 from dataclasses import replace
 from datetime import datetime, timezone
@@ -30,7 +31,7 @@ from typing import Callable, Dict, Iterable, List, Optional, Set, Tuple, Union
 from .. import borrowing, harnesses as harness_registry, profile as profile_mod
 from .. import spawn as spawn_mod
 from .. import transcripts
-from . import codex_sessions, harness as harness_mod
+from . import codex_sessions, db, harness as harness_mod
 from . import paths
 from .harness import SessionDef
 from .session import STATUS_BUSY, DeadSession, Session
@@ -68,6 +69,25 @@ class SessionManager:
         self.focused_session_scheduling = focused_session_scheduling
         self.background_render_delay = background_render_delay
         self._sessions: Dict[str, AnySession] = {}
+        #: The durable session registry (:mod:`claude_launcher.daemon.db`). One
+        #: row per session; :meth:`persist` writes it, :meth:`restore_all` reads
+        #: it. A daemon that predates the database hands its ``sessions.json``
+        #: over here, once.
+        self._store = db.SessionStore(paths.sessions_db())
+        imported = self._store.migrate_from_json(paths.sessions_json())
+        if imported:
+            log.info(
+                "migrated %d session record(s) from sessions.json into "
+                "sessions.db", imported,
+            )
+        #: True only while :meth:`restore_all` is still filling the set. The
+        #: per-session persists it triggers must upsert without pruning, or the
+        #: first one would delete every record not loaded yet.
+        self._loading = False
+        #: Set by :meth:`clear` and :meth:`remove` for the one persist that
+        #: follows, so a *deliberate* empty write is allowed to prune the store
+        #: to empty — the one case the empty-snapshot guard must let through.
+        self._allow_empty_persist = False
         #: Names :meth:`restore_all` relaunched that the previous daemon
         #: recorded as *working* — the audience for the resume nudge
         #: (:mod:`claude_launcher.daemon.resume`). Written once per process,
@@ -923,6 +943,9 @@ class SessionManager:
         else:
             touched = self.escalate_children(name)
         del self._sessions[name]
+        # Removing the last record leaves the set empty on purpose, so let this
+        # one persist prune the store to empty past the empty-snapshot guard.
+        self._allow_empty_persist = True
         self.persist()
         return session, touched
 
@@ -975,6 +998,10 @@ class SessionManager:
             del self._sessions[name]
             if logs:
                 shutil.rmtree(paths.session_dir(name), ignore_errors=True)
+        # A clear that drops every exited record legitimately empties the set;
+        # let this persist prune the store to empty past the empty-snapshot
+        # guard, which otherwise keeps an unasked-for empty write from erasing.
+        self._allow_empty_persist = True
         self.persist()
         return names
 
@@ -1313,12 +1340,21 @@ class SessionManager:
                     "delivery_hold": session.delivery_held(),
                 }
             )
-        path = paths.sessions_json()
         try:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(json.dumps(entries, indent=2), encoding="utf-8")
-        except OSError:
-            pass
+            # Prune only in steady state: while a restore is still filling the
+            # set, deleting the records not loaded yet would be the very clobber
+            # this store exists to prevent. `allow_empty` lets clear/remove
+            # empty it on purpose; every other empty write is refused by the
+            # store's own guard.
+            self._store.save(
+                entries,
+                prune=not self._loading,
+                allow_empty=self._allow_empty_persist,
+            )
+        except sqlite3.Error:
+            log.exception("failed to persist the session registry")
+        finally:
+            self._allow_empty_persist = False
         if self.shutting_down:
             return
         for hook in list(self.change_hooks):
@@ -1347,59 +1383,65 @@ class SessionManager:
         and no opening task, which a restore does not replay — so "carry on"
         is not what they need and not what they are sent.
         """
-        path = paths.sessions_json()
-        if not path.is_file():
-            return []
         try:
-            entries = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
+            entries = self._store.load_all()
+        except sqlite3.Error:
+            log.exception("failed to read the session registry")
             return []
         failed: List[str] = []
-        entries = entries if isinstance(entries, list) else []
-        # Said up front: the relaunches below run before the port is bound,
-        # so this line is what the log shows for the seconds a CLI spends
-        # waiting on a daemon that has not announced itself yet.
-        relaunching = sum(
-            1 for e in entries if isinstance(e, dict) and e.get("was_running")
-        )
-        if relaunching:
-            log.info(
-                "restoring %d session(s) before listening (about a second each)",
-                relaunching,
+        # While the set is being filled, each create/retire below persists a
+        # partial fleet; pruning on those writes would delete the records not
+        # loaded yet. Hold the flag for the whole loop, drop it before the one
+        # steady-state persist that reconciles at the end.
+        self._loading = True
+        try:
+            # Said up front: the relaunches below run before the port is bound,
+            # so this line is what the log shows for the seconds a CLI spends
+            # waiting on a daemon that has not announced itself yet.
+            relaunching = sum(
+                1 for e in entries if isinstance(e, dict) and e.get("was_running")
             )
-        for entry in entries:
-            try:
-                sdef = SessionDef.from_dict(entry.get("def") or {})
-            except (KeyError, ValueError, TypeError):
-                continue
-            if sdef.name in self._sessions:
-                continue  # a duplicated record must not clobber a live session
-            if sdef.restore and entry.get("was_running"):
-                # Asked before the relaunch, not after: the answer is about
-                # the transcript the *previous* daemon left behind, and the
-                # session we are about to start writes one of its own.
-                blank = harness_mod.restores_blank(sdef)
+            if relaunching:
+                log.info(
+                    "restoring %d session(s) before listening "
+                    "(about a second each)",
+                    relaunching,
+                )
+            for entry in entries:
                 try:
-                    # Its own creation time, not this restart's: the listings
-                    # are ordered by it, and a restart that restamped every
-                    # relaunched session would flatten the whole fleet into
-                    # one moment and lose the order for good.
-                    self.create(
-                        sdef,
-                        restoring=True,
-                        created_at=entry.get("created_at"),
-                        last_visited_at=entry.get("last_visited_at"),
-                        last_input_at=entry.get("last_input_at"),
-                        delivery_hold=bool(entry.get("delivery_hold")),
-                    )
-                    if entry.get("was_busy"):
-                        self.resumed_busy.append(sdef.name)
-                    if blank:
-                        self.resumed_blank.append(sdef.name)
+                    sdef = SessionDef.from_dict(entry.get("def") or {})
+                except (KeyError, ValueError, TypeError):
                     continue
-                except Exception:
-                    failed.append(sdef.name)
-            self._retire(sdef, entry)
+                if sdef.name in self._sessions:
+                    continue  # a duplicated record must not clobber a live one
+                if sdef.restore and entry.get("was_running"):
+                    # Asked before the relaunch, not after: the answer is about
+                    # the transcript the *previous* daemon left behind, and the
+                    # session we are about to start writes one of its own.
+                    blank = harness_mod.restores_blank(sdef)
+                    try:
+                        # Its own creation time, not this restart's: the
+                        # listings are ordered by it, and a restart that
+                        # restamped every relaunched session would flatten the
+                        # whole fleet into one moment and lose the order.
+                        self.create(
+                            sdef,
+                            restoring=True,
+                            created_at=entry.get("created_at"),
+                            last_visited_at=entry.get("last_visited_at"),
+                            last_input_at=entry.get("last_input_at"),
+                            delivery_hold=bool(entry.get("delivery_hold")),
+                        )
+                        if entry.get("was_busy"):
+                            self.resumed_busy.append(sdef.name)
+                        if blank:
+                            self.resumed_blank.append(sdef.name)
+                        continue
+                    except Exception:
+                        failed.append(sdef.name)
+                self._retire(sdef, entry)
+        finally:
+            self._loading = False
         self.persist()
         return failed
 

@@ -9,7 +9,7 @@ from types import SimpleNamespace
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
 
-from claude_launcher.daemon import paths
+from claude_launcher.daemon import db, paths
 from claude_launcher.daemon.api import build_app
 from claude_launcher.daemon.harness import SessionDef
 from claude_launcher.daemon.manager import ManagerError, SessionManager
@@ -42,7 +42,7 @@ def test_archive_retains_the_record_across_restart_and_respawn_clears_it(
     first = archived.archived_at
     assert mgr.archive("old").archived_at == first  # idempotent
 
-    saved = json.loads(paths.sessions_json().read_text(encoding="utf-8"))
+    saved = db.open_default().load_all()
     assert saved[0]["archived_at"] == first
     assert saved[0]["def"]["name"] == "old"
 

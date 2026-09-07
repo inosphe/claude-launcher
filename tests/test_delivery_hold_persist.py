@@ -33,7 +33,7 @@ import pytest
 from claude_launcher import lineage, profile, store
 from claude_launcher.cflow import engine as cflow_engine
 from claude_launcher.cflow import state as cflow_state
-from claude_launcher.daemon import paths
+from claude_launcher.daemon import db, paths
 from claude_launcher.daemon.api import build_app
 from claude_launcher.daemon.harness import SessionDef
 from claude_launcher.daemon.manager import SessionManager
@@ -74,7 +74,7 @@ async def _serve(mgr, mm):
 
 
 def _record(name: str) -> dict:
-    entries = json.loads(paths.sessions_json().read_text(encoding="utf-8"))
+    entries = db.open_default().load_all()
     return next(e for e in entries if e["def"]["name"] == name)
 
 

@@ -22,7 +22,7 @@ import pytest
 
 from claude_launcher import store
 from claude_launcher.cflow import engine as cflow_engine
-from claude_launcher.daemon import paths, resume
+from claude_launcher.daemon import db, paths, resume
 from claude_launcher.daemon.harness import SessionDef
 from claude_launcher.daemon.manager import SessionManager
 
@@ -206,7 +206,7 @@ def test_persist_records_which_sessions_were_working(home, tmp_path):
 
     entries = {
         e["def"]["name"]: e
-        for e in json.loads(paths.sessions_json().read_text(encoding="utf-8"))
+        for e in db.open_default().load_all()
     }
     assert entries["mid-turn"]["was_busy"] is True
     assert entries["finished"]["was_busy"] is False
@@ -217,9 +217,9 @@ def test_persist_records_which_sessions_were_working(home, tmp_path):
 
 
 def _write_sessions_json(entries: list) -> None:
-    path = paths.sessions_json()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(entries), encoding="utf-8")
+    # Seed the durable registry directly (was a sessions.json write before
+    # the store moved to SQLite); allow_empty lets an empty list clear it.
+    db.open_default().save(entries, prune=True, allow_empty=True)
 
 
 def _entry(name: str, *, cwd: str, running: bool = True, busy: bool = False,
@@ -500,7 +500,7 @@ def test_a_restarted_daemon_nudges_the_session_that_was_working(home, tmp_path):
             }
         ]
         await mgr.shutdown_all()
-        paths.sessions_json().write_text(json.dumps(entries), encoding="utf-8")
+        db.open_default().save(entries, prune=True, allow_empty=True)
 
         mgr2 = SessionManager(idle_threshold=0.5, scrollback=200, restore_default=True)
         assert mgr2.restore_all() == []
