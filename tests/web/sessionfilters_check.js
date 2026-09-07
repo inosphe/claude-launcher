@@ -156,6 +156,16 @@ check("every state control carries its label before any poll",
 check("counts follow the fleet on change, not only on a rail rebuild",
       src.includes("if (changed && typeof syncSessionFilters === \"function\")"),
       true);
+// The recurring poll carries every unarchived record: the "current" view is
+// running plus killed plus paused, and the bar counts all three. An
+// active-only poll left killed/paused at 0 until their button was pressed
+// and dropped a session from the rail the moment it exited.
+check("the recurring poll asks for every unarchived record",
+      src.includes('const state = (options && options.state) || "current";'),
+      true);
+check("no rail poll asks for the running records alone",
+      !/refreshSessions\(\{\s*state:\s*"active"/.test(src) &&
+      !src.includes('"current" ? "current" : "active"'), true);
 check("archived sessions have a dedicated one-shot refresh control",
       html.includes('id="refresh-archived"') &&
       src.includes('refreshSessions({ state: "archived" })'), true);

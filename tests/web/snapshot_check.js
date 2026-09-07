@@ -79,6 +79,19 @@ check("and only while the terminal is the visible view",
       /snapshotName === currentName[\s\S]{0,700}if \(terminalOnScreen\(\)\) attach\(currentName\);/
         .test(src));
 
+/* ---- a terminal that watched its session die follows the relaunch -----
+   The socket's `exit` frame leaves the link idle and the xterm on the dead
+   child's last screen. A resume from elsewhere (the CLI, another tab, the
+   bulk button) then changes the record's pid and status under it; the poll
+   has to reattach from that state too, not only from a live link. */
+{
+  const follow = slice("} else if (cur && attachedPid && cur.pid !== attachedPid",
+                       "if (terminalOnScreen()) attach(currentName);");
+  check("the pid follow accepts a terminal whose program ended under the socket",
+        /sessionEnded\s*&&\s*cur\.status\s*!==\s*"exited"/.test(follow));
+  check("and still accepts a live link", /linkState\s*===\s*"live"/.test(follow));
+}
+
 /* ---- removeSnapshot's real DOM surgery, run against a stub ------------ */
 {
   function makeEl(cls) {

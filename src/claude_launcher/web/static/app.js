@@ -685,12 +685,11 @@ function setSessionFilter(filter, remember = true) {
   sessionFilter = filter;
   if (remember) localStorage.setItem(SESSION_FILTER_KEY, filter);
   syncSessionFilters(sessionsCache);
-  // Inactive records are not part of the recurring rail poll. Selecting one
-  // of their filters is an explicit request for one fresh snapshot.
+  // Archived records are not part of the recurring rail poll. Selecting a
+  // filter is an explicit request for one fresh snapshot of its category.
   const state = filter === "archived" ? "archived"
     : filter === "killed" ? "killed"
-    : filter === "paused" ? "paused"
-    : filter === "current" ? "current" : "active";
+    : filter === "paused" ? "paused" : "current";
   refreshSessions({ state });
 }
 
@@ -729,7 +728,15 @@ function syncSessionFilters(sessions) {
 }
 
 async function refreshSessions(options) {
-  const state = (options && options.state) || "active";
+  // The recurring poll asks for every unarchived record, not the running
+  // ones alone. The rail's "current" view is running plus killed plus paused,
+  // and the filter bar counts all three -- an active-only poll left those
+  // counts at 0 until a filter button was pressed, dropped a session from
+  // the rail the moment it exited (its cached row matched the poll's state
+  // and was not in the answer), and made a reload on a paused session's URL
+  // build a live xterm over a record the cache had never seen. Archived
+  // records stay on demand: they are the one set that grows without bound.
+  const state = (options && options.state) || "current";
   const matchesPollState = (session) => {
     if (state === "all") return true;
     if (state === "active") return session.status !== "exited";
@@ -751,9 +758,10 @@ async function refreshSessions(options) {
   }
   const incoming = data.sessions || [];
   const incomingNames = new Set(incoming.map((s) => s.name));
-  // A background request carries active sessions only. Keep any inactive
-  // records the operator explicitly inspected, while replacing the category
-  // this request owns and any record that has just returned as active.
+  // A request answers for one category of records. Keep every cached record
+  // outside that category (the archived ones an operator explicitly opened,
+  // while the poll runs on "current"), while replacing the category this
+  // request owns and any record that has just returned inside it.
   sessionsCache = [
     ...incoming,
     ...sessionsCache.filter((s) =>
@@ -1080,7 +1088,9 @@ async function refreshSessions(options) {
     // has to run before the badge branch, or the header would flip to a live
     // look over a screen that is still a frozen snapshot.
     if (terminalOnScreen()) attach(currentName);
-  } else if (cur && attachedPid && cur.pid !== attachedPid && linkState === "live") {
+  } else if (cur && attachedPid && cur.pid !== attachedPid &&
+             (linkState === "live" ||
+              (sessionEnded && cur.status !== "exited"))) {
     // Someone else (a `claunch respawn`, another tab) resumed this session:
     // our socket is bound to the replaced, now-dead child, so follow the new
     // one instead of showing its frozen last screen. Only while the terminal
@@ -1088,10 +1098,13 @@ async function refreshSessions(options) {
     // workflow page, or out of the mobile menu (it stays pending until they
     // come back, since the stale pid keeps failing this test).
     //
-    // Only from a live link, too. This used to be the *only* way a dropped
-    // socket ever came back, which it was bad at; now the link repairs itself
-    // and this is once more about the child being replaced under a working
-    // socket — a question a broken one has no opinion on.
+    // From a live link, or from a terminal whose program ended under this
+    // socket (an `exit` frame: sessionEnded, link idle) and whose record now
+    // carries a new pid and a non-exited status. The second case is the
+    // common resume: the tab watched the session die, someone relaunched it
+    // elsewhere, and the badge and the rail row went back to running while
+    // the xterm stayed on the dead child's last screen. A merely *dropped*
+    // socket is neither case; the link repairs that itself.
     if (terminalOnScreen()) attach(currentName);
   } else if (cur && linkState !== "live") {
     // Otherwise an open socket stays authoritative: it sees this session's
@@ -5401,9 +5414,12 @@ $("resume-all").addEventListener("click", async () => {
     { method: "POST" }, "resume"
   );
   const back = (result && result.respawned) || [];
-  detach();
+  // Only a terminal whose own session came back is torn down and rebuilt;
+  // one watching a session this bulk did not touch keeps its screen.
+  const watched = !!currentName && back.includes(currentName);
+  if (watched) detach();
   await refreshSessions({ state: "current" });
-  if (currentName && back.includes(currentName)) attach(currentName);
+  if (watched) attach(currentName);
 });
 
 /* Pause everything that runs. The daemon-wide emergency stop: every running
@@ -5443,9 +5459,12 @@ if ($("resume-paused")) $("resume-paused").addEventListener("click", async () =>
     $("resume-paused"), "/api/sessions/resume", { method: "POST" }, "resume paused"
   );
   const back = (result && result.resumed) || [];
-  detach();
+  // Only a terminal whose own session came back is torn down and rebuilt;
+  // one watching a session this bulk did not touch keeps its screen.
+  const watched = !!currentName && back.includes(currentName);
+  if (watched) detach();
   await refreshSessions({ state: "current" });
-  if (currentName && back.includes(currentName)) attach(currentName);
+  if (watched) attach(currentName);
 });
 
 $("archive-exited").addEventListener("click", async () => {
@@ -5491,8 +5510,7 @@ $("refresh-all").addEventListener("click", async () => {
       refreshSessions({
         state: sessionFilter === "archived" ? "archived"
           : sessionFilter === "killed" ? "killed"
-          : sessionFilter === "paused" ? "paused"
-          : sessionFilter === "current" ? "current" : "active",
+          : sessionFilter === "paused" ? "paused" : "current",
       }),
       refreshMeshList(),
       refreshCflow(),
