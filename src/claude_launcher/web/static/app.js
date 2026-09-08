@@ -22390,4 +22390,15 @@ document.addEventListener("pointercancel", releaseRail, true);
 // header chip exists to tell apart.
 termTimerTicker = setInterval(() => { paintTermTimer(); }, 1000);
 
+/* `?embed=1` — the terminal alone, for another page's side panel (issue-gen's
+   board embeds `#/s/<name>` in an iframe). A display mode, nothing more: the
+   rail, the phone bars and the detail column are hidden by style.css under
+   `body.embed`, and routing, auth and the socket are untouched — the parent
+   page drives which session is shown by rewriting the hash. Read once at
+   load: the query string survives every hash navigation, so it needs no
+   re-check. */
+if (typeof location !== "undefined" && new URLSearchParams(location.search).has("embed")) {
+  document.body.classList.add("embed");
+}
+
 boot();

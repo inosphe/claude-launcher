@@ -3176,6 +3176,17 @@ a.wf-btn { display: inline-block; text-decoration: none; line-height: 1.5; }
    shows them. */
 #mobile-top, #mobile-bottom { display: none; }
 
+/* Embedded (`?embed=1`, set on <body> by app.js): another page's side panel
+   holds this UI in an iframe and wants the terminal only. Everything that is
+   navigation or a second column goes; #main takes the whole frame. The phone
+   breakpoint below still applies inside a narrow iframe — that is fine, since
+   the elements it promotes to modes are the ones hidden here. */
+body.embed #sidebar, body.embed #rail-split, body.embed #mobile-top,
+body.embed #mobile-bottom, body.embed #detail-split, body.embed #sess-view {
+  display: none !important;
+}
+body.embed #main { width: 100%; }
+
 @media (max-width: 820px) {
   /* --app-h is the *visual* viewport: an on-screen keyboard shrinks that
      but not 100dvh, and the terminal has to fit what's left or type into

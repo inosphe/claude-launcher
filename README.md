@@ -2589,6 +2589,13 @@ from the run page, alongside who spawned it, who it may message and a link to
 the run. Members with no run say so rather than showing an empty track, and
 members on another daemon say that their state lives over there.
 
+**Embedding a terminal.** `/?embed=1#/s/<name>` shows that session's terminal
+alone — the rail, the phone bars and the detail column are hidden — for another
+page to hold in an iframe (issue-gen's board does this for its agent panel).
+It is a display mode only: auth, routing and the socket are unchanged, and the
+parent page picks the session by rewriting the hash. The login cookie is
+per host name, so open both pages under the same name.
+
 - **Auth is mandatory** (even on loopback): the CLI reads the token from
   `~/.claude-launcher/daemon/token` automatically; the browser asks once for
   `claunch daemon token` and stores an HttpOnly cookie. API clients send
