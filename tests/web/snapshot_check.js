@@ -62,6 +62,31 @@ check("it fetches the session's last screen as json",
 check("a capture that lands after the reader walked away is dropped",
       snap.includes("if (snapshotName !== name || currentName !== name) return;"));
 
+/* ---- a snapshot with no last screen falls back to a readable note ----- */
+check("a failed capture no longer bails without painting the box",
+      !/catch\s*\{\s*return;\s*\/\/ auth overlay is up/.test(snap));
+check("snapshotAttach paints a fallback note when there is no screen",
+      /term-snapshot-note/.test(snap) &&
+        /snapshotFallbackText\(name, reached\)/.test(snap));
+{
+  const fb = slice("function snapshotFallbackText(name, reached) {",
+                   "/* Tear a snapshot");
+  function run(name, reached, cache) {
+    const sessionsCache = cache;   // fb reads this from scope
+    return eval(`(${fb})(name, reached)`);
+  }
+  check("an unreachable capture says so, not a bare 'loading…'",
+        /could not load/i.test(run("s1", false, [])));
+  check("a paused session names its state and offers resume",
+        /paused/i.test(run("s1", true, [{ name: "s1", paused_at: "t" }])) &&
+          /resume/i.test(run("s1", true, [{ name: "s1", paused_at: "t" }])));
+  check("an archived session names its state",
+        /archived/i.test(run("s1", true, [{ name: "s1", archived_at: "t" }])));
+  check("a screenless session points to resume and the transcript",
+        /left no screen/i.test(run("s1", true, [{ name: "s1" }])) &&
+          /transcript/i.test(run("s1", true, [{ name: "s1" }])));
+}
+
 /* ---- every path that mounts an xterm first clears the snapshot -------- */
 for (const fn of ["function freshAttach(name) {",
                   "function restoreTerminal(b) {",

@@ -7391,22 +7391,55 @@ async function snapshotAttach(name) {
   pre.textContent = "loading…";
   $("terminal").appendChild(pre);
 
-  let lines;
+  let lines = null;
+  let reached = false;   // did the daemon actually answer the capture?
   try {
     const resp = await api(
       `/api/sessions/${encodeURIComponent(name)}/capture?format=json`
     );
+    reached = true;
     const doc = await resp.json().catch(() => ({}));
     lines = resp.ok && Array.isArray(doc.lines) ? doc.lines : null;
   } catch {
-    return;   // auth overlay is up; a later navigation re-fetches
+    // The daemon did not answer — the auth overlay is up, it blinked, or the
+    // capture ran slow under load. An ended session has no socket to drive a
+    // retry, so this one-shot is the only paint the box gets until the reader
+    // navigates back: leave a readable note here rather than "loading…" for
+    // good.
+    reached = false;
   }
   // The reader may have walked off this snapshot while the capture was in
   // flight — a snapshot rebuilt for another session, or a live attach. Only
   // write into the one still on screen.
   if (snapshotName !== name || currentName !== name) return;
-  pre.textContent =
-    (lines || []).join("\n") || "(this session left no screen behind)";
+  const screen = (lines || []).join("\n").replace(/\s+$/, "");
+  if (screen) {
+    pre.textContent = screen;
+  } else {
+    // No last screen to paint — say why, and how to see more, instead of an
+    // indefinite "loading…" or a blank box.
+    pre.classList.add("term-snapshot-note");
+    pre.textContent = snapshotFallbackText(name, reached);
+  }
+}
+
+/* What a snapshot box shows when there is no last screen to paint: a capture
+   the daemon could not return, or an ended session that left nothing behind.
+   Names the session's state and the two ways to see more — resume rebuilds a
+   live terminal; the header's transcript button reads the recorded
+   conversation. */
+function snapshotFallbackText(name, reached) {
+  const rec = sessionsCache.find((s) => s.name === name) || {};
+  const how = " Resume it to rebuild a live terminal, or open its transcript " +
+    "to read the recorded conversation.";
+  if (!reached) {
+    return "Could not load this session's last screen — the daemon may be " +
+      "busy or briefly unreachable, and it does not retry on its own here." +
+      how;
+  }
+  if (rec.paused_at) return `Session ${name} is paused — its terminal is not live.` + how;
+  if (rec.archived_at) return `Session ${name} is archived — its terminal is not live.` + how;
+  return "This session left no screen behind." + how;
 }
 
 /* Tear a snapshot's <pre> out — before an xterm mounts in the same box, or on

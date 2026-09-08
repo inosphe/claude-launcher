@@ -61,6 +61,23 @@ def test_archive_retains_the_record_across_restart_and_respawn_clears_it(
     assert live.archived_at is None
 
 
+def test_archived_records_are_not_swept_at_boot(home):
+    # A restart retires every exited record it does not relaunch and owes each
+    # one a board sweep — the release of any issue still claiming a dead
+    # session as its worker. An archived record is exempt: it was filed away
+    # by the operator and swept when it first exited, so re-sweeping it on
+    # every boot is churn (and, at archive scale, a slow boot for nothing).
+    mgr = manager()
+    add_dead(mgr, "killed")                                   # plain exited
+    add_dead(mgr, "filed", archived_at="2026-08-27T00:00:00+00:00")
+    mgr.persist()
+
+    restarted = manager()
+    assert restarted.restore_all() == []
+    swept = {d.sdef.name for d in restarted.take_retired_for_sweep()}
+    assert swept == {"killed"}
+
+
 def test_archive_refuses_a_running_session(home):
     mgr = manager()
     mgr._sessions["live"] = SimpleNamespace(

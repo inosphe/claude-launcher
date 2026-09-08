@@ -1252,6 +1252,15 @@ a.cflow-scope:hover { background: #1d3559; text-decoration: underline; }
   font-size: 13px; line-height: 1.2; color: #c9d1d9; background: #14161a;
   white-space: pre; overscroll-behavior: contain;
 }
+/* The note the snapshot falls back to when there is no last screen to paint
+   (a paused/archived session, or a capture the daemon could not return): a
+   sentence, not terminal output, so it wraps and sits centred and muted
+   rather than as a single unwrapped glyph run at the top-left. */
+#terminal pre.term-snapshot.term-snapshot-note {
+  white-space: pre-wrap; display: flex; align-items: center;
+  justify-content: center; text-align: center; padding: 24px;
+  color: #8b949e; line-height: 1.5; font-size: 13px;
+}
 /* The one-line native input under the terminal. Real browser input where the
    xterm composer is a terminal — an IME, a phone's soft keyboard and a pasted
    block behave here the way the browser makes them behave, and Enter hands

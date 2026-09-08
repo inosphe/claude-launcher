@@ -1625,13 +1625,21 @@ def test_a_restart_sweeps_what_retiring_leaves_behind(home, tmp_path, repo):
     asyncio.run(run())
 
 
-def test_an_archived_record_gets_the_boot_sweep_too(home, tmp_path, repo):
-    """Archive keeps a record, and the boot sweep keeps the record honest.
+def test_an_archived_record_is_left_inert_at_boot(home, tmp_path, repo):
+    """Archive files a record away, and the boot sweep leaves it alone.
 
-    An archived record may still hold an in_progress issue a pre-fix daemon
-    left behind. Archive is only reachable while a daemon is up, so that
-    hole closes at the next boot's retire sweep — restore_all retires an
-    archived entry like any other (the archive flag rides along).
+    A restart retires every exited record it does not relaunch and sweeps the
+    board for each — releasing any issue still claiming a dead session as its
+    worker. An archived record is the exception: archiving is the operator's
+    "this is done, filed away", and its board sweep ran when it first exited.
+    Re-sweeping it on every boot re-reads the board once per record, and at
+    archive scale (hundreds of records) that is a slow boot for nothing, so a
+    filed-away record is inert here: browsable, and no longer processed.
+
+    The trade is that an issue an archived record still holds in_progress — a
+    pre-fix daemon that never swept it on exit, then it was archived — is not
+    auto-released at boot any more. A live session's normal exit still sweeps,
+    so only the archive-then-never-swept edge is affected.
     """
     _register_py_harness()
     br = FakeBr()
@@ -1649,16 +1657,16 @@ def test_an_archived_record_gets_the_boot_sweep_too(home, tmp_path, repo):
         fresh.restore_all()
         assert fresh.get("w1").exited
         assert fresh.get("w1").archived_at  # the archive flag rode along
+        # The archived record is not queued for the boot sweep.
+        assert "w1" not in {d.sdef.name for d in fresh._retired_for_sweep}
         mm = MeshManager(fresh, root=tmp_path / "mesh")
         client = await _serve(fresh, mm, board)
         try:
-            await _wait_for(
-                lambda: br.issues["w"]["status"] == "open", "the archived sweep"
-            )
-            assert any(
-                "SESSION ENDED" in " ".join(c) and "comments" in c
-                for c in br.calls
-            )
+            # Let any wrongly scheduled sweep task run, then assert the archived
+            # record's issue was left exactly as it was — untouched, uncommented.
+            await asyncio.sleep(0.2)
+            assert br.issues["w"]["status"] == "in_progress"
+            assert not any("SESSION ENDED" in " ".join(c) for c in br.calls)
         finally:
             await client.close()
 
