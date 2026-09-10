@@ -34,9 +34,14 @@ class _FakeTime:
 
     def __init__(self) -> None:
         self.sleeps: list[float] = []
+        self.now = 1000.0
 
     def sleep(self, seconds: float) -> None:
         self.sleeps.append(seconds)
+        self.now += seconds
+
+    def monotonic(self) -> float:
+        return self.now
 
 
 def _still_draining(monkeypatch) -> _FakeTime:
@@ -75,12 +80,14 @@ def test_restart_retries_until_the_predecessor_finally_lets_go(home, monkeypatch
     ]
 
 
-def test_restart_fails_clearly_once_every_attempt_is_exhausted(home, monkeypatch):
-    """A predecessor that never releases the lock exhausts every retry, and
-    the failure names the attempt count and the last thing that went wrong
-    — the only place left to say so, since no daemon survives to carry a
-    restart notice."""
-    _still_draining(monkeypatch)
+def test_restart_fails_clearly_once_the_lock_budget_is_exhausted(home, monkeypatch):
+    """A predecessor that never releases the lock exhausts the whole time
+    budget (not a small fixed number of attempts -- four of them lost to an
+    18-session serial drain on 2026-09-10), and the failure names the
+    attempt count, the elapsed time and the last thing that went wrong — the
+    only place left to say so, since no daemon survives to carry a restart
+    notice."""
+    fake_time = _still_draining(monkeypatch)
 
     def always_fails():
         raise daemon_client.DaemonClientError(
@@ -92,8 +99,12 @@ def test_restart_fails_clearly_once_every_attempt_is_exhausted(home, monkeypatch
     with pytest.raises(daemon_client.DaemonClientError) as excinfo:
         daemon_client.restart()
     message = str(excinfo.value)
-    assert f"{daemon_client.RESTART_SPAWN_ATTEMPTS} attempt" in message
+    assert "attempt(s) over" in message
     assert "did not come up" in message  # the underlying failure is carried through
+    # it kept trying until the budget ran out, with the backoff capped
+    assert sum(fake_time.sleeps) >= daemon_client.RESTART_LOCK_BUDGET
+    assert max(fake_time.sleeps) == daemon_client.RESTART_BACKOFF_CAP
+    assert len(fake_time.sleeps) > 4
 
 
 def test_restart_stops_early_once_the_lock_frees_but_spawning_still_fails(

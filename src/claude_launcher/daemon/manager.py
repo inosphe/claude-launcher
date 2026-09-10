@@ -1290,8 +1290,23 @@ class SessionManager:
         if pending:
             await asyncio.gather(*pending, return_exceptions=True)
         self.persist()  # record which sessions were alive, for restore
-        for session in list(self._sessions.values()):
-            await session.shutdown()
+        # Concurrently, not one after another: each shutdown waits up to its
+        # grace window for the child to go, so a serial loop over N live
+        # sessions held the singleton lock for about N x grace seconds. With
+        # 18 sessions that was 90s+ -- longer than a restarting successor's
+        # whole retry budget, which lost the lock race and left no daemon
+        # running (claunch-a5l9, 2026-09-10 17:31). Together, the drain is
+        # bounded by one grace window whatever the session count.
+        live = [s for s in self._sessions.values() if not s.exited]
+        started = time.monotonic()
+        await asyncio.gather(
+            *(session.shutdown() for session in live), return_exceptions=True
+        )
+        log.info(
+            "shut down %d live session(s) in %.1fs",
+            len(live),
+            time.monotonic() - started,
+        )
 
     # ------------------------------------------------------------------ #
     # persistence / restore

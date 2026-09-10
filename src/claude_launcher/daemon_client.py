@@ -353,9 +353,14 @@ def stop(*, timeout: float = 10.0) -> bool:
     return True  # request accepted; daemon is still draining sessions
 
 
-#: How many successor-spawn attempts :func:`restart` makes while the
-#: predecessor's lock is still held before giving up.
-RESTART_SPAWN_ATTEMPTS = 4
+#: How long :func:`restart` keeps re-spawning the successor while the
+#: predecessor's lock is still held, measured from the first spawn attempt.
+#: A count of attempts was the previous shape (4, ~86s including the
+#: successors' own grace windows) and it lost to a predecessor draining 18
+#: sessions serially (claunch-a5l9, 2026-09-10 17:31). The drain is
+#: concurrent now (``Manager.shutdown_all``), so this is headroom, not the
+#: expected wait.
+RESTART_LOCK_BUDGET = 300.0
 
 #: Backoff between spawn attempts: doubles each retry, capped below.
 RESTART_BACKOFF_START = 2.0
@@ -380,30 +385,34 @@ def restart(*, stop_timeout: float = 10.0) -> DaemonClient:
     something other than an answering daemon still holds the lock.
 
     Raises :class:`DaemonClientError` naming every attempt once
-    :data:`RESTART_SPAWN_ATTEMPTS` is exhausted. The caller (the CLI's
-    restart command) is the last thing standing at that point — there is no
-    daemon left to carry a failure through the ordinary restart-notice
-    channel — so this is the one place the failure can still be made clear.
+    :data:`RESTART_LOCK_BUDGET` seconds have passed with the lock still
+    held. The caller (the CLI's restart command) is the last thing standing
+    at that point — there is no daemon left to carry a failure through the
+    ordinary restart-notice channel — so this is the one place the failure
+    can still be made clear.
     """
     stop(timeout=stop_timeout)
     delay = RESTART_BACKOFF_START
     last_exc: Optional[DaemonClientError] = None
     attempt = 0
-    for attempt in range(1, RESTART_SPAWN_ATTEMPTS + 1):
+    started = time.monotonic()
+    while True:
+        attempt += 1
         try:
             return ensure_running()
         except DaemonClientError as exc:
             last_exc = exc
-            if attempt == RESTART_SPAWN_ATTEMPTS:
-                break
             if runtime_state.lock_is_free():
                 # Not a lock race: the lock let go and a fresh spawn still
                 # failed for some other reason. More waiting will not help.
                 break
+            if time.monotonic() - started >= RESTART_LOCK_BUDGET:
+                break
             time.sleep(min(delay, RESTART_BACKOFF_CAP))
             delay *= 2
     raise DaemonClientError(
-        f"daemon restart failed after {attempt} attempt(s): {last_exc} -- "
+        f"daemon restart failed after {attempt} attempt(s) over "
+        f"{time.monotonic() - started:.0f}s: {last_exc} -- "
         f"the predecessor may still be draining sessions (see "
         f"{paths.log_file()}); re-run 'claunch daemon restart' once "
         "'claunch daemon status' reports it gone"
