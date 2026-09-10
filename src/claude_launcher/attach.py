@@ -109,12 +109,13 @@ def _read_stdin() -> bytes:
 
 
 def _read_stdin_windows() -> bytes:
-    # With ENABLE_VIRTUAL_TERMINAL_INPUT, the console exposes a UTF-8 byte
-    # stream. ReadFile keeps that stream intact. ReadConsoleW first converts
-    # the stream to UTF-16 and can split/drop IME commits when input arrives
-    # quickly (especially CJK); it also makes VT bytes pass through a second
-    # encoding boundary. Reading bytes is safe here because the PTY bridge is
-    # bytes-based and its consumer already handles UTF-8 incrementally.
+    # ReadFile (not ReadConsoleW) so rapid IME commits are not split/dropped
+    # by the console's UTF-16 conversion, and VT sequences (arrows, function
+    # keys under ENABLE_VIRTUAL_TERMINAL_INPUT) arrive in the same stream.
+    # ReadFile encodes the input in the console *input code page*
+    # (GetConsoleCP) — 949 on a Korean Windows, 65001 only when the user set
+    # it — so the bytes are transcoded to UTF-8 before they reach the PTY,
+    # which speaks UTF-8. VT sequences are ASCII and survive both encodings.
     import ctypes
 
     k32 = ctypes.windll.kernel32
@@ -124,11 +125,76 @@ def _read_stdin_windows() -> bytes:
     ok = k32.ReadFile(handle, buf, _STDIN_CHUNK, ctypes.byref(n), None)
     if not ok or n.value == 0:
         return b""
-    return buf.raw[: n.value]
+    return _console_input_to_utf8(buf.raw[: n.value], k32.GetConsoleCP())
+
+
+_CP_UTF8 = 65001
+#: (code page, incremental decoder) — kept across reads so a multi-byte
+#: character split over two ReadFile chunks still decodes as one.
+_console_decoder: Optional[Tuple[int, codecs.IncrementalDecoder]] = None
+
+
+def _console_input_to_utf8(data: bytes, codepage: int) -> bytes:
+    """Transcode console input bytes from ``codepage`` to UTF-8.
+
+    UTF-8 consoles pass through untouched; an unknown code page is passed
+    through too (better a wrong byte than a dropped key).
+    """
+    global _console_decoder
+    if codepage == _CP_UTF8:
+        return data
+    if _console_decoder is None or _console_decoder[0] != codepage:
+        try:
+            decoder = codecs.getincrementaldecoder(f"cp{codepage}")("replace")
+        except LookupError:
+            return data
+        _console_decoder = (codepage, decoder)
+    return _console_decoder[1].decode(data).encode("utf-8")
+
+
+#: Windows 10 1903 — the first conhost where ReadFile under code page 65001
+#: returns non-ASCII input instead of zero bytes (which the bridge would read
+#: as EOF and turn into a detach). Older consoles keep their code page and
+#: rely on the transcode in ``_console_input_to_utf8`` alone.
+_UTF8_CONSOLE_MIN_BUILD = 18362
+
+
+def _utf8_console_input_supported() -> bool:
+    try:
+        return sys.getwindowsversion().build >= _UTF8_CONSOLE_MIN_BUILD
+    except AttributeError:
+        return False
+
+
+def codepage_note(codepage: Optional[int], switched: bool) -> Optional[str]:
+    """One line for after detach when the console input code page was not
+    UTF-8 — what the bridge did about it, and how to make it permanent."""
+    if not codepage or codepage == _CP_UTF8:
+        return None
+    action = (
+        "switched it to UTF-8 (65001) for the attach and restored it"
+        if switched
+        else "transcoded keystrokes to UTF-8 for the attach; characters "
+        "outside that code page arrive as '?'"
+    )
+    return (
+        f"[claunch] console input code page was {codepage}, not UTF-8: "
+        f"{action}. To make it permanent: chcp 65001, or Windows' "
+        "\"Beta: Use Unicode UTF-8 for worldwide language support\"."
+    )
 
 
 class _RawTerminal:
-    """Raw local terminal for the duration of an attach; restores on exit."""
+    """Raw local terminal for the duration of an attach; restores on exit.
+
+    ``original_codepage`` is the console input code page found on entry
+    (None outside Windows); ``codepage_switched`` says whether it was moved
+    to UTF-8 for the attach so characters outside the native code page
+    (emoji, for one) survive ReadFile instead of arriving as ``?``.
+    """
+
+    original_codepage: Optional[int] = None
+    codepage_switched: bool = False
 
     def __enter__(self) -> "_RawTerminal":
         if sys.platform == "win32":
@@ -160,6 +226,13 @@ class _RawTerminal:
             # would otherwise freeze output mid-attach).
             mode |= EXTENDED_FLAGS | VT_INPUT
             self._k32.SetConsoleMode(self._hin, mode)
+        self.original_codepage = self._k32.GetConsoleCP() or None
+        if (
+            self.original_codepage
+            and self.original_codepage != _CP_UTF8
+            and _utf8_console_input_supported()
+        ):
+            self.codepage_switched = bool(self._k32.SetConsoleCP(_CP_UTF8))
         if self._old_out is not None:
             PROCESSED_OUT, VT_OUT, NO_AUTO_RETURN = 0x1, 0x4, 0x8
             # The PTY stream carries its own \r\n (ConPTY render / ONLCR), so
@@ -177,6 +250,8 @@ class _RawTerminal:
         return mode.value
 
     def _exit_windows(self) -> None:
+        if self.codepage_switched:
+            self._k32.SetConsoleCP(self.original_codepage)
         if self._old_in is not None:
             self._k32.SetConsoleMode(self._hin, self._old_in)
         if self._old_out is not None:
@@ -356,7 +431,8 @@ def attach(client, name: str) -> int:
     )
 
     outcome = {"reason": "closed"}
-    with _RawTerminal():
+    term = _RawTerminal()
+    with term:
         _write_text(FOCUS_ON)
         try:
             outcome = asyncio.run(_attach_async(client.base_url, client.token, name))
@@ -370,6 +446,17 @@ def attach(client, name: str) -> int:
         herdr.clear_pane_label()
     if agent_reported:
         herdr.release_agent(herdr.MIRROR_AGENT_LABEL)
+
+    # Only now is the local terminal cooked again and a line of ours stays
+    # readable — everything printed before raw mode is repainted over by the
+    # session within a frame, so this is where a console-encoding note lands.
+    note = codepage_note(
+        getattr(term, "original_codepage", None),
+        getattr(term, "codepage_switched", False),
+    )
+    if note:
+        print(file=sys.stderr)
+        print(note, file=sys.stderr)
 
     reason = outcome.get("reason")
     if reason == "exit":

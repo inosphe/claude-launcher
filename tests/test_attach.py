@@ -61,6 +61,9 @@ def test_windows_stdin_reads_vt_utf8_bytes_without_unicode_roundtrip(monkeypatch
             assert value == -10
             return object()
 
+        def GetConsoleCP(self):
+            return 65001
+
         def ReadFile(self, handle, buf, size, count, overlapped):
             payload = "한글入力🙂".encode("utf-8")
             ctypes.memmove(buf, payload, len(payload))
@@ -73,6 +76,148 @@ def test_windows_stdin_reads_vt_utf8_bytes_without_unicode_roundtrip(monkeypatch
     })(), raising=False)
 
     assert attach_mod._read_stdin_windows() == "한글入力🙂".encode("utf-8")
+
+
+def test_windows_stdin_transcodes_console_code_page_to_utf8(monkeypatch):
+    """ReadFile hands back the console *input code page* (949 on a Korean
+    Windows), not UTF-8 — forwarding those bytes verbatim painted every
+    Hangul syllable as two replacement characters in the session. The bridge
+    transcodes to the PTY's UTF-8, and a syllable split across two reads
+    still comes out whole."""
+    payloads = ["웹 데몬".encode("cp949")]
+    split = "어[A".encode("cp949")
+    payloads += [split[:1], split[1:]]
+
+    class FakeKernel32:
+        def GetStdHandle(self, value):
+            return object()
+
+        def GetConsoleCP(self):
+            return 949
+
+        def ReadFile(self, handle, buf, size, count, overlapped):
+            payload = payloads.pop(0)
+            ctypes.memmove(buf, payload, len(payload))
+            count._obj.value = len(payload)
+            return 1
+
+    monkeypatch.setattr(attach_mod.sys, "platform", "win32")
+    monkeypatch.setattr(attach_mod, "_console_decoder", None)
+    monkeypatch.setattr(ctypes, "windll", type("Windll", (), {
+        "kernel32": FakeKernel32(),
+    })(), raising=False)
+
+    assert attach_mod._read_stdin_windows() == "웹 데몬".encode("utf-8")
+    first = attach_mod._read_stdin_windows()
+    second = attach_mod._read_stdin_windows()
+    assert first == b""  # the lead byte alone is held back, not mangled
+    assert second == "어[A".encode("utf-8")
+
+
+def test_console_input_unknown_code_page_passes_through(monkeypatch):
+    monkeypatch.setattr(attach_mod, "_console_decoder", None)
+    raw = bytes([0xFF, 0xFE])
+    assert attach_mod._console_input_to_utf8(raw, 424242) == raw
+
+
+def test_raw_terminal_switches_console_input_to_utf8_and_restores(monkeypatch):
+    """On a console whose input code page is not UTF-8, the attach moves it
+    to 65001 (so emoji and other out-of-code-page characters survive
+    ReadFile) and puts the original back on exit — but only on consoles new
+    enough that ReadFile under 65001 works at all."""
+    calls = []
+
+    class FakeKernel32:
+        cp = 949
+
+        def GetStdHandle(self, value):
+            return value
+
+        def GetConsoleMode(self, handle, out):
+            out._obj.value = 0x1F7
+            return 1
+
+        def SetConsoleMode(self, handle, mode):
+            return 1
+
+        def GetConsoleCP(self):
+            return self.cp
+
+        def SetConsoleCP(self, cp):
+            calls.append(cp)
+            self.cp = cp
+            return 1
+
+    k32 = FakeKernel32()
+    monkeypatch.setattr(attach_mod.sys, "platform", "win32")
+    monkeypatch.setattr(ctypes, "windll", type("Windll", (), {"kernel32": k32})(),
+                        raising=False)
+    monkeypatch.setattr(attach_mod, "_utf8_console_input_supported", lambda: True)
+
+    with attach_mod._RawTerminal() as term:
+        assert k32.cp == 65001
+        assert term.original_codepage == 949
+        assert term.codepage_switched
+    assert calls == [65001, 949]
+    assert k32.cp == 949
+
+    # Legacy conhost: the code page is left alone (transcode covers it).
+    monkeypatch.setattr(attach_mod, "_utf8_console_input_supported", lambda: False)
+    calls.clear()
+    with attach_mod._RawTerminal() as term:
+        assert not term.codepage_switched
+    assert calls == []
+
+    # Already UTF-8: nothing to switch, nothing to say.
+    k32.cp = 65001
+    monkeypatch.setattr(attach_mod, "_utf8_console_input_supported", lambda: True)
+    with attach_mod._RawTerminal() as term:
+        assert not term.codepage_switched
+    assert calls == []
+
+
+def test_codepage_note_only_when_console_was_not_utf8():
+    assert attach_mod.codepage_note(None, False) is None
+    assert attach_mod.codepage_note(65001, False) is None
+    switched = attach_mod.codepage_note(949, True)
+    assert "949" in switched and "switched" in switched and "chcp 65001" in switched
+    kept = attach_mod.codepage_note(949, False)
+    assert "transcoded" in kept and "'?'" in kept
+
+
+def test_attach_prints_codepage_note_after_detach(monkeypatch, capsys):
+    """The note lands after detach: anything printed before raw mode is
+    repainted over by the session, so it is the one readable moment."""
+    class Term:
+        original_codepage = 949
+        codepage_switched = True
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    class Client:
+        base_url = "http://h"
+        token = "t"
+
+        def get(self, path):
+            return {"status": "idle", "cwd": "", "role": ""}
+
+    monkeypatch.setattr(attach_mod.sys.stdin, "isatty", lambda: True, raising=False)
+    monkeypatch.setattr(attach_mod.sys.stdout, "isatty", lambda: True, raising=False)
+    monkeypatch.setattr(attach_mod, "_RawTerminal", Term)
+    monkeypatch.setattr(attach_mod, "_write_text", lambda text: None)
+    monkeypatch.setattr(attach_mod.herdr, "rename_pane", lambda label: False)
+
+    async def detached(*a, **k):
+        return {"reason": "detach"}
+
+    monkeypatch.setattr(attach_mod, "_attach_async", detached)
+    assert attach_mod.attach(Client(), "s1") == 0
+    err = capsys.readouterr().err
+    assert "console input code page was 949" in err
 
 
 def test_attach_bridge_roundtrip_and_detach(home, tmp_path, monkeypatch):
