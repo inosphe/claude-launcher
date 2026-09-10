@@ -674,8 +674,12 @@ def open_with(session, block: str) -> None:
     a create call that waited for it would tie its caller to another program's
     startup time. Waiting for the terminal to be able to receive it is
     :meth:`Session.deliver`'s job, not this one's.
+
+    Read off the argv the session actually started with, not off the harness's
+    declared transport: a block too long for the command line is left off it
+    (:func:`harness.carries_opening`), and a declaration alone would drop it.
     """
-    if not block or harness_mod.takes_opening_argv(session.sdef.harness):
+    if not block or harness_mod.carries_opening(session.argv, block):
         return
     asyncio.ensure_future(_deliver_until_it_lands(session, block))
 

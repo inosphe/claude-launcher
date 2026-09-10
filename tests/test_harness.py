@@ -790,6 +790,54 @@ def test_a_declared_argv_opening_strategy_gets_the_positional_prompt(home, tmp_p
     assert harness.takes_opening_argv("h") is True
 
 
+def test_an_opening_too_long_for_the_command_line_is_left_off_argv(
+    home, tmp_path, monkeypatch
+):
+    """CreateProcessW refuses a line past 32,767 UTF-16 units (measured: a
+    32,768-character task spawned nothing, ERROR_FILENAME_EXCED_RANGE). The
+    block is left off argv and open_with types it in instead."""
+    _declare_harness("h", opening_transport="argv")
+    _profile_for("custom", "h")
+    sdef = harness.normalize(
+        SessionDef(name="x", profile="custom", cwd=str(tmp_path))
+    )
+    monkeypatch.setattr(harness.sys, "platform", "win32")
+    short = "take the API"
+    # Korean is one UTF-16 unit per syllable, three bytes in UTF-8: the
+    # ceiling is in units, and a byte count would clear this block.
+    long = "가" * harness.WIN_CMDLINE_LIMIT
+
+    argv, _, _ = harness.build_command(sdef, opening=short)
+    assert harness.carries_opening(argv, short)
+
+    argv, _, _ = harness.build_command(sdef, opening=long)
+    assert argv[-1] != "--" and not argv[-1].endswith(long)
+    assert not harness.carries_opening(argv, long)
+    assert not harness.carries_opening(argv, "")
+
+
+def test_open_with_types_the_block_the_argv_did_not_carry(monkeypatch):
+    from claude_launcher.daemon import onboard
+
+    typed = []
+    monkeypatch.setattr(
+        onboard, "_deliver_until_it_lands", lambda session, block: typed.append(block)
+    )
+    monkeypatch.setattr(onboard.asyncio, "ensure_future", lambda coro: coro)
+
+    class S:
+        sdef = SessionDef(name="x", cwd=".")
+        argv: list = []
+
+    s = S()
+    s.argv = ["claude", "--", "[stamp]\nhello"]
+    onboard.open_with(s, "hello")
+    assert typed == []
+    s.argv = ["claude"]
+    onboard.open_with(s, "hello")
+    assert typed == ["hello"]
+
+
 def test_windows_codex_npm_shim_preserves_the_multiline_opening(
     home, tmp_path, monkeypatch
 ):

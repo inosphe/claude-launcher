@@ -493,9 +493,90 @@ def takes_opening_argv(harness: str) -> bool:
     as argv is read before the process ever reads a key, so it cannot be
     caught between the harness going quiet and its input actually being live.
     Harnesses declaring ``pty`` are typed into by :func:`onboard.open_with`.
+
+    Declaring it is not the same as getting it: the command line has a
+    ceiling, and an opening that would push it past that is left off the
+    argv and typed in instead. :func:`carries_opening` reads the argv that was
+    actually spawned to tell which happened.
     """
     entry = harness_registry.get(harness)
     return entry is not None and entry.opening_transport == "argv"
+
+
+#: ``CreateProcessW``'s command-line ceiling, in UTF-16 code units including
+#: the terminating NUL. One over and the spawn fails with
+#: ``ERROR_FILENAME_EXCED_RANGE`` ("파일 이름이나 확장명이 너무 깁니다") —
+#: the whole line counts, executable and flags and ``--append-system-prompt``
+#: included, so the opening's budget is what those leave. Measured on this
+#: machine 2026-09-11: a bare claude session took a 32,000-character task on
+#: argv and refused a 32,768-character one.
+WIN_CMDLINE_LIMIT = 32767
+#: Linux's ``MAX_ARG_STRLEN``: the ceiling on one argv element, in bytes.
+#: ``ARG_MAX`` (the whole line plus the environment) is megabytes and not
+#: something an opening reaches; this per-element cap is.
+UNIX_ARG_LIMIT = 131072
+#: Kept back from either ceiling. pywinpty builds the line that reaches
+#: ``CreateProcessW`` itself (its own quoting, a resolved executable path), so
+#: the measurement here is an estimate, and an estimate that errs toward
+#: typing the block in costs a few seconds; one that errs the other way costs
+#: the session.
+CMDLINE_MARGIN = 512
+
+
+def _argv_fits(argv: List[str]) -> bool:
+    """Whether the spawn layer will take ``argv`` at all."""
+    if sys.platform == "win32":
+        import subprocess  # local: the daemon's spawn goes through pty_backend
+
+        line = subprocess.list2cmdline(argv)
+        units = len(line.encode("utf-16-le")) // 2 + 1
+        return units + CMDLINE_MARGIN <= WIN_CMDLINE_LIMIT
+    return all(
+        len(arg.encode("utf-8")) + 1 + CMDLINE_MARGIN <= UNIX_ARG_LIMIT
+        for arg in argv
+    )
+
+
+def _append_opening(argv: List[str], opening: str, *, harness: str) -> None:
+    """Put ``opening`` on ``argv`` as the positional prompt — unless the line
+    would then be too long to spawn, in which case ``argv`` is left as it was
+    and the block is :func:`onboard.open_with`'s to type in.
+
+    Behind ``--`` because an opening block routinely starts with a line of
+    dashes (the mesh briefing's own fence does), and an option parser reads
+    that as a flag and refuses to start. Dated with the same stamp
+    :meth:`Session.deliver` prefixes to every typed-in message: the argv
+    handoff is the one delivery that skips deliver(), and it must not be the
+    one delivery a transcript cannot date.
+    """
+    from . import session as session_mod  # late: session imports us
+
+    candidate = argv + ["--", f"{session_mod.delivery_stamp()}\n{opening}"]
+    if _argv_fits(candidate):
+        argv[:] = candidate
+        return
+    log.info(
+        "opening block for %s (%d chars) does not fit the command line; "
+        "it will be typed in instead",
+        harness,
+        len(opening),
+    )
+
+
+def carries_opening(argv: List[str], opening: str) -> bool:
+    """Whether a spawned ``argv`` took ``opening`` as its positional prompt.
+
+    The question :func:`onboard.open_with` has to answer after the fact, from
+    the argv the session actually started with: a harness that declares the
+    argv transport still gets its block typed in when the block did not fit
+    (:func:`_append_opening`).
+    """
+    return (
+        bool(opening)
+        and len(argv) >= 2
+        and argv[-2] == "--"
+        and argv[-1].endswith("\n" + opening)
+    )
 
 
 def restores_blank(sdef: SessionDef) -> bool:
@@ -652,16 +733,9 @@ def build_command(
             argv.append(f"--model={sdef.model}")
         argv.extend(sdef.args)
         if opening and not restoring:
-            # The positional prompt — claude's first turn. Dated with the same
-            # stamp deliver() prefixes to every typed-in message: the argv
-            # handoff is the one delivery that skips deliver(), and it must
-            # not be the one delivery a transcript cannot date. Behind ``--``
-            # because an opening block routinely starts with a line of dashes
-            # (the mesh briefing's own fence does), and claude's option parser
-            # reads that as a flag and refuses to start.
-            from . import session as session_mod  # late: session imports us
-
-            argv.extend(["--", f"{session_mod.delivery_stamp()}\n{opening}"])
+            # The positional prompt — claude's first turn; see _append_opening
+            # for the stamp, the ``--`` and the length ceiling.
+            _append_opening(argv, opening, harness=sdef.harness)
     else:
         entry = harness_registry.get(sdef.harness)
         if entry is None:  # normalize() refuses these; belt and braces
@@ -719,12 +793,9 @@ def build_command(
             except runner.RunnerError as exc:
                 raise HarnessError(str(exc)) from exc
         if opening and not restoring and entry.opening_transport == "argv":
-            # Declared positional-prompt transport. Like Claude's builtin
-            # path, keep the prompt behind the option terminator: opening
-            # blocks often begin with a markdown fence made of dashes.
-            from . import session as session_mod  # late: session imports us
-
-            argv.extend(["--", f"{session_mod.delivery_stamp()}\n{opening}"])
+            # Declared positional-prompt transport, same handoff as Claude's
+            # builtin path (and the same length ceiling).
+            _append_opening(argv, opening, harness=sdef.harness)
     # The session's identity, tmux's ``$TMUX`` equivalent. Children (claude,
     # its MCP servers, `!` shells) inherit it — cflow keys its run state by
     # it, mapping each session 1:1 to its own workflow run.
