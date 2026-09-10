@@ -909,7 +909,8 @@ a.cflow-scope:hover { background: #1d3559; text-decoration: underline; }
 }
 #new-session .harness-runtime-claude legend { color: #d2a8ff; }
 #new-session #new-codex-runtime-hint,
-#new-session #new-claude-runtime-hint {
+#new-session #new-claude-runtime-hint,
+#new-session #new-pi-runtime-hint {
   margin: -1px 0 5px 22px; color: #8b949e; font-size: 11px;
   line-height: 1.4; overflow-wrap: anywhere;
 }

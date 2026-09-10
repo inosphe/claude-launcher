@@ -337,7 +337,11 @@ def validate(
         if source is None:
             provider_env = providers.provider_env(provider)
             lender_env = lineage.effective_env(lender)
-            configured = bool(lender_env.get(route) or provider_env.get(route))
+            configured = bool(
+                lender_env.get(route)
+                or provider_env.get(route)
+                or providers.auth_token(provider)
+            )
         if source is None and not configured:
             return BorrowValidation(
                 True,

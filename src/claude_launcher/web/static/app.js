@@ -4356,6 +4356,133 @@ function renderNewCodexRuntime(f, harnessName, capabilities, parent = null) {
   }
 }
 
+/* Pi's builtin tools (GET /api/harnesses → tools), one checkbox per name.
+   The rows are generated from the declaration rather than written into the
+   markup, so the panel follows whatever the harness declares — a hand-typed
+   row per tool would be a second copy of that list. Rebuilt only when the
+   declared list changes. The inputs are kept on the form under an underscore
+   key like the Codex seeding state: the form's own named access is for the
+   markup's rows, and these are not markup. */
+function ensureNewPiTools(f, capabilities) {
+  const list = $("new-pi-tools");
+  if (!list) return [];
+  const names = (capabilities.tools || []).map(String);
+  const key = names.join(" ");
+  if (f._piToolsListFor === key) return f._piToolInputs || [];
+  list.innerHTML = "";
+  f._piToolInputs = names.map((name) => {
+    const input = document.createElement("input");
+    input.type = "checkbox";
+    input.name = `pi_tool_${name}`;
+    const label = document.createElement("label");
+    label.className = "check";
+    const text = document.createElement("span");
+    const strong = document.createElement("strong");
+    strong.textContent = name;
+    text.appendChild(strong);
+    label.append(input, text);
+    list.appendChild(label);
+    return { name, input };
+  });
+  f._piToolsListFor = key;
+  // A new list is a new seeding: the ticks the old rows held are gone with
+  // the rows.
+  f._piToolsFor = null;
+  return f._piToolInputs;
+}
+
+/* Which tools a selector turns on by default: profile_details[].tools, the
+   daemon's answer with the profile-level switches already applied. A row
+   without the field (an older daemon) falls back to the declaration — every
+   tool the harness ships, which is what a profile with no switches gets. */
+function piToolsDefault(detail, capabilities) {
+  if (detail && Array.isArray(detail.tools)) return detail.tools.map(String);
+  return (capabilities.tools || []).map(String);
+}
+
+function newPiToolsChecked(f) {
+  return (f._piToolInputs || [])
+    .filter(({ input }) => input.checked).map(({ name }) => name);
+}
+
+function piToolsText(names) {
+  return names.length
+    ? `builtin tools: ${names.join(", ")}` : "no builtin tools";
+}
+
+function seedNewPiTools(f, defaults, key) {
+  const inputs = f._piToolInputs || [];
+  // The default itself is part of the key: a profile whose switches changed
+  // under the form is a different seeding, and a re-render with the same
+  // selector, harness and default is not one.
+  key = `${key}:${JSON.stringify(defaults || [])}`;
+  if (!inputs.length || f._piToolsFor === key) return;
+  const on = new Set((defaults || []).map(String));
+  for (const { name, input } of inputs) input.checked = on.has(name);
+  f._piToolsFor = key;
+  // Kept in the declaration's order, the same order the ticks are read back
+  // in, so "changed" is one string comparison.
+  f._piToolsOriginal = inputs.filter(({ name }) => on.has(name))
+    .map(({ name }) => name);
+}
+
+/* The ticks as the request's `tools`, or undefined when they still say what
+   the seeding said: an absent key is the profile default (create) or the
+   parent's choice (spawn), and sending that back as an explicit list would
+   pin a session to today's default. `[]` is a real answer — no builtin
+   tools — so it is the caller's job not to drop it as falsy. */
+function newPiToolsOverride(f) {
+  if (!(f._piToolInputs || []).length) return undefined;
+  const chosen = newPiToolsChecked(f);
+  return JSON.stringify(chosen) === JSON.stringify(f._piToolsOriginal || [])
+    ? undefined : chosen;
+}
+
+function renderNewPiRuntime(f, harnessName, capabilities, parent = null) {
+  const panel = $("new-pi-runtime");
+  if (!panel) return;
+  const pi = harnessName === "pi";
+  panel.classList.toggle("hidden", !pi);
+  if (!pi) return;
+  const inputs = ensureNewPiTools(f, capabilities);
+  const selector = newProfileSelector(f);
+  const detail = newProfileDetail(f, selector);
+  if (parent) {
+    // The child harness is its parent's: the parent's own explicit choice is
+    // what an absent key inherits, so that is the seed. Anything else — a
+    // parent that never chose, or a child on another harness — starts from
+    // the profile default, as the daemon would.
+    const inherited = harnessName === parent.harness && Array.isArray(parent.tools)
+      ? parent.tools.map(String) : null;
+    seedNewPiTools(
+      f, inherited || piToolsDefault(detail, capabilities),
+      `child:${parent.name}:${selector}:${harnessName}`
+    );
+    // Gated by spawn.allow_args, the same unlock as the Codex mode and the
+    // free Args row — and read off THAT row's disable rather than through a
+    // key of its own in SPAWN_INHERITS: these rows are generated, and the
+    // partition newform_check holds is over the markup's named controls.
+    for (const { input } of inputs) input.disabled = !!f.args.disabled;
+  } else {
+    seedNewPiTools(
+      f, piToolsDefault(detail, capabilities), `new:${selector}:${harnessName}`
+    );
+    for (const { input } of inputs) input.disabled = false;
+  }
+  const hint = $("new-pi-runtime-hint");
+  if (hint) {
+    const locked = parent && inputs.length && inputs[0].input.disabled;
+    const source = locked
+      ? (harnessName === parent.harness
+        ? ` · inherited from ${parent.name} (spawn.allow_args)`
+        : " · Pi default (spawn.allow_args to override)")
+      : "";
+    hint.textContent = (inputs.length
+      ? piToolsText(newPiToolsChecked(f))
+      : "this harness declares no builtin tools") + source;
+  }
+}
+
 function renderNewClaudeRuntime(f, harnessName, capabilities, parent = null) {
   const panel = $("new-claude-runtime");
   if (!panel || !f.skip_permissions) return;
@@ -4410,6 +4537,7 @@ function syncForkAvailability() {
   f.resume.disabled = !claude;
   renderNewClaudeRuntime(f, harnessName, capabilities, parent);
   renderNewCodexRuntime(f, harnessName, capabilities, parent);
+  renderNewPiRuntime(f, harnessName, capabilities, parent);
   // Claude and declared API-key harnesses consume the shared profile token.
   // OAuth harnesses keep auth in their own profile home. --null remains a
   // Claude-only answer and cannot coexist with a borrow.
@@ -4494,6 +4622,13 @@ function renderRuntimeSummary() {
       speaks("codex_yolo")) {
     if (f.codex_yolo && f.codex_yolo.checked) bits.push("Codex YOLO");
     if (f.codex_sandbox && f.codex_sandbox.checked) bits.push("Codex sandbox");
+  }
+  // Only once the ticks differ from what the seeding said: the default set
+  // is the profile's answer, and the fold's face names what is NOT default.
+  const piPanel = $("new-pi-runtime");
+  if (piPanel && !piPanel.classList.contains("hidden") && speaks("args")) {
+    const tools = newPiToolsOverride(f);
+    if (tools) bits.push(`Pi ${piToolsText(tools)}`);
   }
   if (parent) {
     out.textContent = bits.length
@@ -4597,6 +4732,7 @@ $("new-session").addEventListener("input", () => {
   renderNewCodexRuntime(
     f, harnessName, capabilities, spawnParent()
   );
+  renderNewPiRuntime(f, harnessName, capabilities, spawnParent());
   renderRuntimeSummary();
   renderProfileHint();
 });
@@ -4797,6 +4933,7 @@ function syncSpawnMode() {
     );
     renderNewClaudeRuntime(f, childHarness, childCapabilities, parent);
     renderNewCodexRuntime(f, childHarness, childCapabilities, parent);
+    renderNewPiRuntime(f, childHarness, childCapabilities, parent);
     if (!claude) {
       f.null_token.checked = false;
       f.null_token.disabled = true;
@@ -4983,6 +5120,18 @@ function spawnChildFields(f, body) {
   } else if (typed.length) {
     body.args = typed;
   }
+  // The tool ticks travel only when they differ from what the child would
+  // inherit anyway — the same rule as model above — and only from an OPEN
+  // panel: a locked row's ticks are the parent's, not an answer.
+  const piPanel = $("new-pi-runtime");
+  const piOpen = harnessName === "pi" && piPanel &&
+    !piPanel.classList.contains("hidden") &&
+    (f._piToolInputs || []).length && !f._piToolInputs[0].input.disabled;
+  if (piOpen) {
+    const tools = newPiToolsOverride(f);
+    // `[]` is the answer "no builtin tools" and has to travel as itself.
+    if (tools !== undefined) body.tools = tools;
+  }
   if (!f.cwd.disabled && f.cwd.value) {
     const name = spawnWorkspaceName(f.cwd.value);
     // No entry for the path (a registry edited under the form): send it as
@@ -5099,6 +5248,11 @@ $("new-session").addEventListener("submit", async (e) => {
       const permissionArgs = (capabilities.skip_permissions_args || []).map(String);
       body.args = withoutArgGroups(body.args, [permissionArgs]);
       if (f.skip_permissions.checked) body.args.push(...permissionArgs);
+    } else if (harnessName === "pi") {
+      // Absent = the profile default, so the ticks travel only once they
+      // differ from it — and `[]` (no builtin tools) travels as itself.
+      const tools = newPiToolsOverride(f);
+      if (tools !== undefined) body.tools = tools;
     }
   }
   // A child sends what the spawn policy left open, and nothing else: a value
@@ -16303,6 +16457,55 @@ function syncSpawnCodexRuntime(ui, childHarness, capabilities, may) {
   }
 }
 
+/* Pi's builtin tools, seeded the way the create form seeds them: from the
+   parent's own explicit choice when the child runs the parent's harness
+   (that is what an absent key inherits), else from the picked profile's
+   default. Gated by spawn.allow_args like the Codex mode. */
+function syncSpawnPiTools(ui, childHarness, capabilities, may) {
+  if (!ui.piPanel || !ui.piTools) return;
+  const pi = childHarness === "pi";
+  ui.piPanel.hidden = !pi;
+  if (!pi) return;
+
+  const parent = ui.parentSess || {};
+  const inheritsParent = childHarness === parent.harness;
+  const inherited = inheritsParent && Array.isArray(parent.tools)
+    ? parent.tools.map(String) : null;
+  const selector = spawnProfileSelector(ui);
+  const detail = (ui.profileDetails || {})[selector] ||
+    (ui.profileDetails || {})[baseProfileName(selector)] || null;
+  const seed = inherited || piToolsDefault(detail, capabilities);
+  // The seed is part of the key, so a parent whose choice moved under the
+  // modal reseeds and a re-gate with nothing changed does not.
+  const key = `${selector}:${childHarness}:${JSON.stringify(seed)}`;
+  if (ui._piToolsFor !== key) {
+    const on = new Set(seed);
+    for (const { name, input } of ui.piTools) input.checked = on.has(name);
+    ui._piToolsFor = key;
+    ui._piToolsOriginal = ui.piTools.filter(({ name }) => on.has(name))
+      .map(({ name }) => name);
+  }
+
+  const locked = !may.includes("args");
+  for (const { input, note } of ui.piTools) {
+    input.disabled = locked;
+    if (!note) continue;
+    note.hidden = !locked;
+    note.textContent = locked
+      ? (inheritsParent
+        ? `inherited from the parent: ${input.checked ? "enabled" : "disabled"} ` +
+          "(spawn.allow_args)"
+        : `Pi default: ${input.checked ? "enabled" : "disabled"} ` +
+          "(spawn.allow_args to override)")
+      : "";
+  }
+  if (ui.piState) {
+    ui.piState.textContent = piToolsText(
+      ui.piTools.filter(({ input }) => input.checked).map(({ name }) => name)
+    );
+  }
+}
+
 function syncSpawnModel(ui, childHarness, capabilities, may) {
   if (!ui.model) return;
   const parent = ui.parentSess || {};
@@ -16413,6 +16616,7 @@ function syncSpawnGates(ui) {
     ? harnessDetails[childHarness] : null) || {};
   syncSpawnModel(ui, childHarness, childCapabilities, may);
   syncSpawnCodexRuntime(ui, childHarness, childCapabilities, may);
+  syncSpawnPiTools(ui, childHarness, childCapabilities, may);
   lock(ui.profile, ui.profileNote, may.includes("profile") ? "" :
     "the child runs under its parent's profile (spawn.allow_profile)");
   if (ui.harness) {
@@ -16626,6 +16830,18 @@ function spawnPayload(ui) {
     }
   } else if (typedArgs.length) {
     body.args = typedArgs;
+  }
+  // The tool ticks, only from an open panel and only once they differ from
+  // the seeding — an absent key inherits, and `[]` (no builtin tools) is an
+  // answer in its own right, so it does not go through `put`.
+  const piOpen = ui.piPanel && !ui.piPanel.hidden &&
+    (ui.piTools || []).length && !ui.piTools[0].input.disabled;
+  if (piOpen) {
+    const chosen = ui.piTools.filter(({ input }) => input.checked)
+      .map(({ name }) => name);
+    if (JSON.stringify(chosen) !== JSON.stringify(ui._piToolsOriginal || [])) {
+      body.tools = chosen;
+    }
   }
   // Both travel as NAMES, never paths: the workspace is what the API
   // resolves, and the child's worktree is cut by the daemon from the
@@ -17084,6 +17300,28 @@ function buildSpawnForm(parentName, seed) {
   ui.codexState = el("p", "sess-spawn-harness-state");
   ui.codexPanel.append(yoloRow, sandboxRow, ui.codexState);
   gRuntime.appendChild(ui.codexPanel);
+
+  /* Pi's builtin tools, one row per name the harness declares (GET
+     /api/harnesses → tools, standing in harnessDetails since the page
+     loaded). Generated rather than written out, so the panel follows the
+     declaration; the gate decides which of them the child may differ on. */
+  ui.piPanel = document.createElement("fieldset");
+  ui.piPanel.className = "sess-spawn-harness sess-spawn-pi";
+  ui.piPanel.hidden = true;
+  ui.piPanel.appendChild(el("legend", null, "Pi tools"));
+  const piDetail = (typeof harnessDetails !== "undefined"
+    ? harnessDetails.pi : null) || {};
+  ui.piTools = (piDetail.tools || []).map(String).map((name) => {
+    const row = spawnCheckRow(name, true);
+    ui.piPanel.appendChild(row);
+    return {
+      name, input: row.querySelector("input"),
+      note: row.querySelector(".sess-spawn-note"),
+    };
+  });
+  ui.piState = el("p", "sess-spawn-harness-state");
+  ui.piPanel.appendChild(ui.piState);
+  gRuntime.appendChild(ui.piPanel);
 
   /* where it works: the directory, the checkout cut inside it, and -- last,
      because both of those can take it away -- the conversation it opens on */
@@ -17568,6 +17806,9 @@ async function spawnModalLoad(st) {
   ui.nullTok.addEventListener("change", () => syncSpawnGates(ui));
   ui.codexYolo.addEventListener("change", () => syncSpawnGates(ui));
   ui.codexSandbox.addEventListener("change", () => syncSpawnGates(ui));
+  for (const { input } of ui.piTools || []) {
+    input.addEventListener("change", () => syncSpawnGates(ui));
+  }
   ui.wtMode.listen(() => syncSpawnGates(ui));
   ui.wtPick.addEventListener("change", () => syncSpawnGates(ui));
   ui.update.addEventListener("change", () => syncSpawnGates(ui));

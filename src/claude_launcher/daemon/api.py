@@ -25,6 +25,7 @@ from aiohttp import web
 
 from .. import __version__, borrowing, harness_policy, harnesses as harness_registry
 from .. import (
+    pi_provider,
     credentials,
     lineage,
     profile as profile_mod,
@@ -786,6 +787,21 @@ async def h_restart_request_reject(request: web.Request) -> web.Response:
     return json_response({"ok": True, "rejected": True, "request": record})
 
 
+def _profile_default_tools(profile_obj, entry) -> Optional[list]:
+    """The builtin tools a session of this profile+harness gets by default.
+
+    ``None`` for a harness that declares none (the form shows no Tools
+    section); otherwise the enabled names, so a form can pre-check them and
+    send ``tools`` only when the person changed the set.
+    """
+    if entry is None or not entry.tools:
+        return None
+    try:
+        return list(pi_provider.enabled_tools(profile_obj, entry))
+    except pi_provider.PiProviderError:
+        return list(entry.tools)
+
+
 async def h_profiles(request: web.Request) -> web.Response:
     # One config read for the whole listing, one availability probe per
     # harness. Both used to happen inside the double loop below: fourteen
@@ -842,6 +858,7 @@ async def h_profiles(request: web.Request) -> web.Response:
                     "harness_allowed": True,
                     "harness_policy": policy_doc,
                     "explicit": False,
+                    "tools": _profile_default_tools(p, registry.get(name)),
                 }
             )
         except lineage.LineageError as exc:
@@ -905,6 +922,7 @@ async def h_profiles(request: web.Request) -> web.Response:
                     "harness_allowed": allowed,
                     "harness_policy": policy_doc,
                     "explicit": True,
+                    "tools": _profile_default_tools(p, registry.get(harness_name)),
                 }
             )
     return json_response(
@@ -3365,7 +3383,7 @@ async def h_sessions_list(request: web.Request) -> web.Response:
         # belong in every rail response.
         rail_fields = {
             "name", "harness", "profile", "cwd", "args", "model", "effort",
-            "restore", "conversation_id", "role", "parent", "borrow",
+            "tools", "restore", "conversation_id", "role", "parent", "borrow",
             "null_token", "issue", "keep_alive", "reminder_paused", "status",
             "pid", "exit_code", "created_at", "last_output_at",
             "last_visited_at", "last_input_at", "last_activity_at", "viewers",

@@ -14,12 +14,18 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, Sequence
 
-from . import lineage, providers
+from . import providers
 from .profile import Profile
 
 ADAPTER = "pi"
 PI_PROVIDER_NAME = "claunch-profile"
 EXTENSION_FILE = "pi_provider.mjs"
+#: The extension that adds claunch's own tools (``full_read``) to every Pi
+#: session, whatever provider it runs on.
+TOOLS_EXTENSION_FILE = "pi_tools.mjs"
+#: Tools the packaged extension knows; ``harness_options.pi.tools`` switches
+#: them off by name.
+BUILTIN_TOOLS = ("full_read",)
 
 ENV_PROVIDER = "CLAUNCH_PI_PROVIDER"
 ENV_BASE_URL = "CLAUNCH_PI_BASE_URL"
@@ -27,6 +33,9 @@ ENV_API = "CLAUNCH_PI_API"
 ENV_MODELS = "CLAUNCH_PI_MODELS"
 ENV_TOKEN_NAME = "CLAUNCH_PI_TOKEN_ENV"
 ENV_AUTH_HEADER = "CLAUNCH_PI_AUTH_HEADER"
+ENV_CONTEXT_WINDOW = "CLAUNCH_PI_CONTEXT_WINDOW"
+#: Comma-separated names of the builtin tools to register (unset = all).
+ENV_TOOLS = "CLAUNCH_PI_TOOLS"
 PROJECTION_ENV = frozenset(
     {
         ENV_PROVIDER,
@@ -35,19 +44,11 @@ PROJECTION_ENV = frozenset(
         ENV_MODELS,
         ENV_TOKEN_NAME,
         ENV_AUTH_HEADER,
+        ENV_CONTEXT_WINDOW,
+        ENV_TOOLS,
     }
 )
 
-_BASE_URL_KEY = "ANTHROPIC_BASE_URL"
-_MODEL_KEYS = (
-    "ANTHROPIC_MODEL",
-    "ANTHROPIC_DEFAULT_SONNET_MODEL",
-    "ANTHROPIC_DEFAULT_OPUS_MODEL",
-    "ANTHROPIC_DEFAULT_HAIKU_MODEL",
-    "ANTHROPIC_DEFAULT_FABLE_MODEL",
-    "ANTHROPIC_SMALL_FAST_MODEL",
-    "CLAUDE_CODE_SUBAGENT_MODEL",
-)
 _SELECTION_FLAGS = ("--provider", "--model", "--models")
 
 
@@ -65,77 +66,118 @@ class Projection:
     default_model: str
     token_env: str
     auth_header: bool
+    context_window: Optional[int] = None
 
 
 def extension_path() -> Path:
-    """Path to the extension shipped beside this module."""
-    path = Path(__file__).with_name(EXTENSION_FILE)
+    """Path to the provider extension shipped beside this module."""
+    return _packaged(EXTENSION_FILE, "provider")
+
+
+def tools_extension_path() -> Path:
+    """Path to the tools extension shipped beside this module."""
+    return _packaged(TOOLS_EXTENSION_FILE, "tools")
+
+
+def _packaged(filename: str, what: str) -> Path:
+    path = Path(__file__).with_name(filename)
     if not path.is_file():
-        raise PiProviderError(
-            f"the packaged Pi provider extension is missing: {path}"
-        )
+        raise PiProviderError(f"the packaged Pi {what} extension is missing: {path}")
     return path
 
 
-def resolve(profile: Profile, harness) -> Optional[Projection]:
-    """Resolve the selected claunch provider into Pi's provider vocabulary."""
+def enabled_tools(
+    profile: Profile, harness, *, override: Optional[Sequence[str]] = None
+) -> tuple[str, ...]:
+    """Builtin tools this launch registers.
+
+    A session's explicit choice (``override``) wins outright; otherwise the
+    profile's default: every builtin tool minus ``harness_options.pi.tools:
+    {name: false}``.
+    """
+    if harness.provider_adapter != ADAPTER:
+        return ()
+    if override is not None:
+        return tuple(name for name in BUILTIN_TOOLS if name in set(override))
+    return profile_default_tools(profile)
+
+
+def profile_default_tools(profile: Profile) -> tuple[str, ...]:
+    """The profile's default: all builtin tools minus the ones switched off."""
+    try:
+        declared = providers.spec_for(profile).options("pi").get("tools")
+    except providers.ProviderError as exc:
+        raise PiProviderError(str(exc)) from exc
+    switches = declared if isinstance(declared, dict) else {}
+    return tuple(
+        name for name in BUILTIN_TOOLS if switches.get(name, True) is not False
+    )
+
+
+def resolve(
+    profile: Profile, harness, *, borrow: Optional[Profile] = None
+) -> Optional[Projection]:
+    """Translate the selected provider's spec into Pi's provider vocabulary.
+
+    Pi speaks OpenAI Chat Completions, so it needs ``endpoints.openai``; the
+    model list is the spec's roles, default first; ``context_window`` is
+    handed to the extension as each model's ``contextWindow``. Nothing is
+    derived from Claude's vocabulary any more -- a provider that only says
+    where its Anthropic-compatible API is cannot launch Pi, and says so.
+    """
     if harness.provider_adapter != ADAPTER:
         return None
-    name = providers.resolve_name(profile)
+    auth_source = borrow if borrow is not None else profile
+    name = providers.resolve_name(auth_source)
     if providers.uses_anthropic_oauth(name):
         return None
-
-    backend = providers.provider_env(name)
-    # Profile env is the final layer for its selected backend, matching
-    # runner.child_env. Only the endpoint/model vocabulary is read here; auth
-    # continues to come from the profile token file through token_env.
-    profile_env = lineage.effective_env(profile)
-    for key in (_BASE_URL_KEY, *_MODEL_KEYS):
-        if key in profile_env:
-            backend[key] = profile_env[key]
-
-    anthropic_base_url = str(backend.get(_BASE_URL_KEY) or "").strip()
-    if not anthropic_base_url:
-        raise PiProviderError(
-            f"provider {name!r} cannot be used by the Pi adapter: "
-            f"{_BASE_URL_KEY} is not configured"
-        )
-
-    models = []
-    for key in _MODEL_KEYS:
-        model = str(backend.get(key) or "").strip()
-        if model and model not in models:
-            models.append(model)
-    if not models:
-        raise PiProviderError(
-            f"provider {name!r} cannot be used by the Pi adapter: "
-            "no Anthropic model is configured"
-        )
     if not harness.token_env:
         raise PiProviderError(
             f"harness {harness.name!r} has no token_env for the Pi adapter"
         )
+    try:
+        spec = providers.spec_for(
+            profile,
+            name,
+            overlay_models=(name == providers.resolve_name(profile)),
+        )
+    except providers.ProviderError as exc:
+        raise PiProviderError(str(exc)) from exc
+
+    openai_root = spec.endpoint("openai")
+    if not openai_root:
+        raise PiProviderError(
+            f"provider {name!r} cannot launch Pi: endpoints.openai is not "
+            "declared (Pi talks OpenAI Chat Completions; set "
+            f"providers.{name}.endpoints.openai to the backend's OpenAI-"
+            "compatible root)"
+        )
+    models = list(spec.model_list())
+    if not models:
+        raise PiProviderError(
+            f"provider {name!r} cannot launch Pi: no models are declared "
+            f"(set providers.{name}.models.default)"
+        )
     return Projection(
-        # The claunch provider vocabulary remains ANTHROPIC_*. Pi uses the
-        # same backend through its OpenAI Chat Completions endpoint because
-        # local Qwen-compatible Anthropic streams may complete without
-        # producing content blocks Pi can render.
-        base_url=_openai_base_url(anthropic_base_url),
+        base_url=_openai_base_url(openai_root),
         api="openai-completions",
         models=tuple(models),
-        default_model=models[0],
+        default_model=spec.model("default") or models[0],
         token_env=harness.token_env,
         # The OpenAI client derives Authorization: Bearer from this API key;
         # an explicit header would duplicate that native route.
         auth_header=False,
+        context_window=spec.context_window,
     )
 
 
-def apply_env(profile: Profile, harness, env: dict) -> None:
+def apply_env(
+    profile: Profile, harness, env: dict, *, borrow: Optional[Profile] = None
+) -> None:
     """Replace inherited adapter state with this profile's projection."""
     for key in PROJECTION_ENV:
         env.pop(key, None)
-    projection = resolve(profile, harness)
+    projection = resolve(profile, harness, borrow=borrow)
     if projection is None:
         return
     env.update(
@@ -150,21 +192,48 @@ def apply_env(profile: Profile, harness, env: dict) -> None:
             ENV_AUTH_HEADER: "1" if projection.auth_header else "0",
         }
     )
+    if projection.context_window:
+        env[ENV_CONTEXT_WINDOW] = str(projection.context_window)
 
 
-def launch_args(profile: Profile, harness, args: Sequence[str]) -> list[str]:
-    """Prepend Pi's provider extension and default model when required.
+def apply_tools_env(
+    profile: Profile, harness, env: dict, *, tools: Optional[Sequence[str]] = None
+) -> None:
+    """Tell the tools extension which builtin tools to register."""
+    env.pop(ENV_TOOLS, None)
+    if harness.provider_adapter != ADAPTER:
+        return
+    enabled = enabled_tools(profile, harness, override=tools)
+    if enabled != BUILTIN_TOOLS:
+        env[ENV_TOOLS] = ",".join(enabled)
 
-    A caller's explicit ``--provider``, ``--model`` or ``--models`` owns model
-    selection for that launch, including flags forwarded after
-    ``claunch run PROFILE:pi``. Flags after ``--`` are prompt text and do not
-    suppress the projection.
+
+def launch_args(
+    profile: Profile,
+    harness,
+    args: Sequence[str],
+    *,
+    tools: Optional[Sequence[str]] = None,
+) -> list[str]:
+    """Prepend Pi's extensions and default model when required.
+
+    The tools extension rides along on every Pi launch that has at least one
+    builtin tool enabled; the provider extension only when a custom provider
+    is projected. A caller's explicit ``--provider``, ``--model`` or
+    ``--models`` owns model selection for that launch, including flags
+    forwarded after ``claunch run PROFILE:pi``. Flags after ``--`` are prompt
+    text and do not suppress the projection.
     """
     forwarded = list(args)
+    if harness.provider_adapter != ADAPTER:
+        return forwarded
+    adapter_args: list[str] = []
+    if enabled_tools(profile, harness, override=tools):
+        adapter_args += ["--extension", str(tools_extension_path())]
     projection = resolve(profile, harness)
     if projection is None:
-        return forwarded
-    adapter_args = ["--extension", str(extension_path())]
+        return [*adapter_args, *forwarded]
+    adapter_args += ["--extension", str(extension_path())]
     if _has_explicit_selection(forwarded):
         return [*adapter_args, *forwarded]
     return [

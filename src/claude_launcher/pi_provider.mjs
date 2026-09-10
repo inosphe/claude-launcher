@@ -7,6 +7,8 @@ const baseUrl = process.env.CLAUNCH_PI_BASE_URL;
 const api = process.env.CLAUNCH_PI_API;
 const tokenEnv = process.env.CLAUNCH_PI_TOKEN_ENV;
 const rawModels = process.env.CLAUNCH_PI_MODELS;
+const rawWindow = Number.parseInt(process.env.CLAUNCH_PI_CONTEXT_WINDOW ?? "", 10);
+const contextWindow = Number.isFinite(rawWindow) && rawWindow > 0 ? rawWindow : 128000;
 
 export default function (pi) {
   if (!provider || !baseUrl || !api || !tokenEnv || !rawModels) return;
@@ -21,7 +23,7 @@ export default function (pi) {
     reasoning: false,
     input: ["text"],
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-    contextWindow: 128000,
+    contextWindow,
     maxTokens: 16384,
     compat: {
       supportsStore: false,

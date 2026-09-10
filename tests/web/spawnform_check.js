@@ -89,12 +89,28 @@ function box(id) {
 for (const id of ["parent-hint", "new-fork-row", "new-over-row", "new-over-text",
                   "new-model-row",
                   "new-claude-runtime", "new-claude-runtime-hint",
-                  "new-codex-runtime", "new-codex-runtime-hint"]) {
+                  "new-codex-runtime", "new-codex-runtime-hint",
+                  "new-pi-runtime", "new-pi-runtime-hint"]) {
   box_[id] = box(id);
 }
 box_["new-over-row"].classes.add("hidden");
 box_["new-claude-runtime"].classes.add("hidden");
 box_["new-codex-runtime"].classes.add("hidden");
+box_["new-pi-runtime"].classes.add("hidden");
+/* The Pi panel's rows are generated, not markup: the list they are built
+   into has to take them and let the rebuild empty it. */
+const piList = { kids: [], appendChild(k) { piList.kids.push(k); return k; },
+                 set innerHTML(v) { if (v === "") piList.kids.length = 0; } };
+box_["new-pi-tools"] = piList;
+/* What createElement hands back doubles as an <option> (the harness picker
+   rebuilds through it) and as the Pi panel's checkbox, label and text. */
+function elem(tag) {
+  return Object.assign(option("", ""), {
+    tag, kids: [], checked: false, type: "", name: "", className: "",
+    appendChild(k) { this.kids.push(k); return k; },
+    append(...ks) { ks.forEach((k) => this.appendChild(k)); },
+  });
+}
 
 const form = {
   parent: picker(), name: control(""),
@@ -137,6 +153,7 @@ const PROFILE_OPTIONS = [
 const HARNESS_DETAILS = {
   claude: { name: "claude", models: ["haiku", "sonnet", "opus", "fable"] },
   codex: { name: "codex", models: ["luna", "terra", "sol"] },
+  pi: { name: "pi", tools: ["full_read"] },
 };
 new Function(
   "exports", "$", "document", "Option", "sessionsCache", "syncForkAvailability",
@@ -163,6 +180,10 @@ new Function(
    slice("codexRuntimeArgs"), slice("codexRuntimeText"),
    slice("seedNewCodexRuntime"), slice("renderNewCodexRuntime"),
    slice("renderNewClaudeRuntime"),
+   slice("ensureNewPiTools"), slice("piToolsDefault"),
+   slice("newPiToolsChecked"), slice("piToolsText"),
+   slice("seedNewPiTools"), slice("newPiToolsOverride"),
+   slice("renderNewPiRuntime"),
    slice("fillSpawnSelect"), slice("profileBorrowCapability"),
    slice("spawnUnlocked"), slice("refreshSpawnPolicy"),
    slice("spawnWorkspaceName"), slice("refreshParentChoices"),
@@ -179,7 +200,7 @@ exports.setSessions = (s) => { sessionsCache = s; };
    (id) => (id === "new-session" ? form : box_[id] || null),
    // The pickers are reached the way the page reaches them, by selector.
    { querySelector: (sel) => (sel.includes("name=parent") ? form.parent : null),
-     createElement: () => option("", "") },
+     createElement: elem },
    function Option(label, value) { return option(label, value); },
    [],
    () => { forkSyncs++; },
@@ -251,6 +272,9 @@ const SESSIONS = [
   { name: "quiet", status: "busy", harness: "claude" },      // nothing pinned
   { name: "pi", status: "idle", harness: "codex", conversation_id: "c-2" },
   { name: "gone", status: "exited", harness: "claude", conversation_id: "c-3" },
+  // A Pi parent that chose its tools out loud: `tools` is on the record only
+  // when the session set it, and here it says "none".
+  { name: "pilot", status: "idle", harness: "pi", profile: "home:pi", tools: [] },
 ];
 
 async function main() {
@@ -260,7 +284,7 @@ async function main() {
      exited one is refused by the daemon, so it is not on the list. */
   ctx.refresh();
   check("only live sessions are offered as parents",
-        form.parent.options.map((o) => o.value), ["", "lead", "quiet", "pi"]);
+        form.parent.options.map((o) => o.value), ["", "lead", "quiet", "pi", "pilot"]);
   check("the first entry is a session of its own",
         form.parent.options[0].label, "(none — a session of its own)");
 
@@ -400,6 +424,8 @@ async function main() {
         [false, true, false]);
   check("the Claude layout is removed when the child is Codex",
         box_["new-claude-runtime"].classList.contains("hidden"), true);
+  check("...and the Pi tools panel stays down for Codex",
+        box_["new-pi-runtime"].classList.contains("hidden"), true);
   check("an unchanged Codex mode inherits without replacing parent args",
         ctx.fields(form, {}).args, undefined);
   form.codex_sandbox.checked = true;
@@ -421,6 +447,80 @@ async function main() {
   check("an API-key child can borrow, cannot use null, and can use role",
         [form.null_token.disabled, form.borrow.disabled, form.role.disabled],
         [true, false, false]);
+
+  /* Pi's builtin tools: one generated row per declared tool. The parent is
+     claude, so there is nothing to inherit — the ticks start from the
+     profile's default (profile_details[].tools), and the policy's args
+     unlock is what leaves them open. */
+  check("Pi gets its own tools panel, one row per declared tool",
+        [box_["new-pi-runtime"].classList.contains("hidden"),
+         piList.kids.length, form._piToolInputs.map((t) => t.input.name)],
+        [false, 1, ["pi_tool_full_read"]]);
+  check("a child on another harness than its parent starts from the profile default",
+        [form._piToolInputs[0].input.checked, form._piToolInputs[0].input.disabled],
+        [true, false]);
+  check("...which the hint reads as the Pi default, not the parent's",
+        box_["new-pi-runtime-hint"].textContent, "builtin tools: full_read");
+  check("ticks that still say the default send no tools key",
+        "tools" in ctx.fields(form, {}), false);
+  form._piToolInputs[0].input.checked = false;
+  check("unticking every tool sends the empty list, not nothing",
+        ctx.fields(form, {}).tools, []);
+  form._piToolInputs[0].input.checked = true;
+  /* The same profile, with the daemon saying its switches turn the tool off:
+     a different default is a different seeding. */
+  PROFILE_DETAILS.home.tools = [];
+  form.profile.value = "work";
+  ctx.sync();
+  form.profile.value = "home";
+  form.harness.value = "pi";  // the profile switch rebuilt the harness row
+  ctx.sync();
+  check("a profile whose switches turn a tool off seeds it unticked",
+        form._piToolInputs[0].input.checked, false);
+  form._piToolInputs[0].input.checked = true;
+  check("...and ticking it then is the answer that travels",
+        ctx.fields(form, {}).tools, ["full_read"]);
+  /* A re-sync on the same parent and profile — the two-second poll — must
+     not put the seeding back over that tick. */
+  ctx.sync();
+  check("a poll leaves the operator's tick alone",
+        form._piToolInputs[0].input.checked, true);
+  delete PROFILE_DETAILS.home.tools;
+
+  /* A Pi parent: the child runs the parent's harness, so what an absent key
+     inherits is the parent's own choice — and with no report yet the rows
+     are the parent's, greyed with the ticks showing that choice. */
+  form.parent.value = "pilot";
+  ctx.sync();
+  // A parent switch rebuilds the harness row onto the profile's default;
+  // the child that runs the parent's harness is the one on the inherit pair.
+  form.profile.value = "";
+  form.harness.value = "";
+  ctx.sync();
+  check("a Pi child of a Pi parent starts from the parent's own choice, locked",
+        [box_["new-pi-runtime"].classList.contains("hidden"),
+         form._piToolInputs[0].input.checked, form._piToolInputs[0].input.disabled],
+        [false, false, true]);
+  check("...and the hint says whose choice it is",
+        box_["new-pi-runtime-hint"].textContent,
+        "no builtin tools · inherited from pilot (spawn.allow_args)");
+  check("a locked panel sends no tools key", "tools" in ctx.fields(form, {}), false);
+  reports.pilot = { may_choose: ["args"], spawnable_harnesses: [],
+                    soft_blocked_by: [] };
+  await ctx.policy();
+  check("the args unlock hands the rows back",
+        form._piToolInputs[0].input.disabled, false);
+  check("...still saying the parent's choice, so nothing travels yet",
+        [form._piToolInputs[0].input.checked, "tools" in ctx.fields(form, {})],
+        [false, false]);
+  form._piToolInputs[0].input.checked = true;
+  check("a tick away from the parent's choice travels as the list",
+        ctx.fields(form, {}).tools, ["full_read"]);
+  form.parent.value = "lead";
+  form.profile.value = "home";
+  form.harness.value = "pi";
+  ctx.sync();
+  await ctx.policy();
   PROFILE_DETAILS.home.harness = "claude";
   PROFILE_DETAILS.home.borrow_allowed = true;
   PROFILE_DETAILS.home.borrow_mode = "provider-token";
@@ -429,6 +529,8 @@ async function main() {
   check("back on claude the rows come back",
         [form.null_token.disabled, form.borrow.disabled, form.role.disabled],
         [false, false, false]);
+  check("...and the Pi tools panel goes down with the harness",
+        box_["new-pi-runtime"].classList.contains("hidden"), true);
 
   /* The soft child cap: shown, PRE-TICKED, and only while the daemon says
      the cap is reached. The cap warns rather than refusing, so the row is

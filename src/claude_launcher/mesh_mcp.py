@@ -671,11 +671,13 @@ def _my_handle(members: list) -> str:
 #: because the offered way to move a child is ``workspace`` — a pick from
 #: the registry rather than a path spelled from memory — and the auth
 #: fields are the policy's to unlock, not the schema's to advertise.
+#: ``tools`` (a harness's builtin-tool choice, e.g. Pi's ``full_read``) is
+#: in the same honoured-not-offered group: it rides the ``args`` gate.
 _SPAWN_KEYS = (
     "name", "mesh", "handle", "role", "connect", "workflow", "context",
     "task", "issue", "issue_text", "harness", "workspace", "worktree",
     "rebase_onto", "profile", "borrow", "null_token", "cwd", "args", "env",
-    "fork",
+    "fork", "tools",
 )
 
 

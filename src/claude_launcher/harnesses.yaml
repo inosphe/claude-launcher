@@ -65,6 +65,10 @@ harnesses:
     auth: api-key
     token_env: ANTHROPIC_API_KEY
     provider_adapter: pi
+    # claunch's own tools, registered by the packaged pi_tools.mjs extension.
+    # A profile's harness_options.pi.tools switches them per profile; a
+    # session's `tools` (create/spawn forms, --tools) overrides per session.
+    tools: [full_read]
     heartbeat_args: [-p]
     description: >-
       The pi CLI agent using the packaged Anthropic API-key route and claunch

@@ -121,6 +121,10 @@ class Harness:
     models: List[str] = field(default_factory=list)
     #: Closed reasoning-effort choices exposed by session creation forms.
     efforts: List[str] = field(default_factory=list)
+    #: Builtin tools claunch itself adds to this harness (today: Pi's
+    #: ``full_read``). Session forms offer them as switches; the default per
+    #: profile is ``harness_options.<harness>.tools``.
+    tools: List[str] = field(default_factory=list)
     #: Optional templates for native model/effort selection. ``{model}`` and
     #: ``{effort}`` are replaced at launch, keeping harness syntax declarative.
     model_args: List[str] = field(default_factory=list)
@@ -279,6 +283,7 @@ class Harness:
             "args": list(self.args),
             "models": list(self.models),
             "efforts": list(self.efforts),
+            "tools": list(self.tools),
             "model_args": list(self.model_args),
             "effort_args": list(self.effort_args),
             "btw": self.btw.to_dict() if self.btw else None,
@@ -496,6 +501,7 @@ def _parse_entry(name: str, body) -> Harness:
         args=_as_list(body.get("args"), f"harness {name!r} args"),
         models=_as_list(body.get("models"), f"harness {name!r} models"),
         efforts=_as_list(body.get("efforts"), f"harness {name!r} efforts"),
+        tools=_as_list(body.get("tools"), f"harness {name!r} tools"),
         model_args=_as_list(body.get("model_args"), f"harness {name!r} model_args"),
         effort_args=_as_list(body.get("effort_args"), f"harness {name!r} effort_args"),
         btw=_btw_capability(name, body.get("btw")),

@@ -60,7 +60,10 @@ import yaml
 
 from . import atomic, config
 
-VERSION = 1
+#: Schema version this build writes. 1: providers carry a Claude ``env``;
+#: 2: providers carry the harness-neutral spec (see ``migrate_config``).
+#: Version-1 documents are still read; a newer one is refused.
+VERSION = 2
 
 #: libyaml's parser when the wheel ships it — an order of magnitude faster than
 #: the pure-Python scanner on this file — and the pure one otherwise. Both are
@@ -159,6 +162,15 @@ def load() -> dict:
         data = {}
     if not isinstance(data, dict):
         raise StoreError(f"config file {p} must be a mapping at the top level")
+    try:
+        found = int(data.get("version") or VERSION)
+    except (TypeError, ValueError):
+        found = VERSION
+    if found > VERSION:
+        raise StoreError(
+            f"config file {p} is schema version {found}; this claunch reads "
+            f"up to {VERSION} -- upgrade claunch"
+        )
     data.setdefault("version", VERSION)
     _parsed = (text, copy.deepcopy(data))
     return data
@@ -625,6 +637,13 @@ def harnesses(doc: Optional[dict] = None) -> Dict[str, dict]:
 # --------------------------------------------------------------------------- #
 # template section
 # --------------------------------------------------------------------------- #
+def template_block(doc: Optional[dict] = None) -> dict:
+    """The whole live ``template`` block (``{}`` if absent)."""
+    doc = load() if doc is None else doc
+    tmpl = doc.get("template")
+    return dict(tmpl) if isinstance(tmpl, dict) else {}
+
+
 def template_env(doc: Optional[dict] = None) -> Dict[str, str]:
     """The default env applied to new profiles (live ``template.env`` block)."""
     doc = load() if doc is None else doc

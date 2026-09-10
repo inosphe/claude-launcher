@@ -29,7 +29,7 @@ def test_ensure_file_writes_template_yaml(home):
     assert path.name == "template.yaml"
     assert path.is_file()
     data = yaml.safe_load(path.read_text(encoding="utf-8"))
-    assert data["template"]["env"] == template.DEFAULT_ENV
+    assert data["template"] == template.DEFAULT_TEMPLATE
 
 
 def test_default_document_uses_template_yaml(home):
@@ -47,5 +47,5 @@ def test_default_document_uses_template_yaml(home):
 
 def test_default_document_builtin_when_no_file(home):
     doc = template.default_document()
-    assert doc["template"]["env"] == template.DEFAULT_ENV
+    assert doc["template"] == template.DEFAULT_TEMPLATE
     assert doc["profiles"] == {}

@@ -173,8 +173,12 @@ def test_a_project_install_hints_at_the_empty_global_layer(home, capsys, tmp_pat
 def test_create_registers_and_applies_template(home, capsys):
     assert run("create", "work", "--no-seed") == 0
     assert "work" in store.profiles()
-    # Default template env was applied into the store.
-    assert "CLAUDE_CODE_AUTO_COMPACT_WINDOW" in store.profile_entry("work")["env"]
+    # The default template layer was applied into the store.
+    entry = store.profile_entry("work")
+    assert entry["auto_compact_at"] == 400000
+    assert entry["harness_options"]["claude"]["env"] == {
+        "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "0"
+    }
 
 
 def test_env_set_and_show(home, capsys):
@@ -616,6 +620,12 @@ def test_the_child_cap_answer_reaches_the_payload(home, monkeypatch, capsys):
     assert body("--within-limit")["over_limit"] is False
     assert body("--model", "terra")["model"] == "terra"
     assert body("--model", "")["model"] == ""
+    # tools: absent inherits, `none` is the empty list the truthy filter
+    # would otherwise drop, names travel as a list
+    assert "tools" not in body()
+    assert body("--tools", "none")["tools"] == []
+    assert body("--tools", "full_read")["tools"] == ["full_read"]
+    assert body("--tools", "full_read, other")["tools"] == ["full_read", "other"]
 
     # And the daemon's warning is printed, above the line it is about.
     out = capsys.readouterr().out

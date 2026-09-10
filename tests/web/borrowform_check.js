@@ -41,6 +41,7 @@ function renderRoleStance() {}
 function syncSpawnMode() {}
 function renderNewClaudeRuntime() {}
 function renderNewCodexRuntime() {}
+function renderNewPiRuntime() {}
 function renderRuntimeSummary() {}
 function renderProfileHint() {}
 function syncNewModelOptions() {}

@@ -13,6 +13,8 @@ import sys
 from dataclasses import dataclass
 from typing import Optional, Sequence
 
+import json
+
 from . import (
     borrowing,
     config,
@@ -23,6 +25,7 @@ from . import (
     pi_provider,
     providers,
     routing,
+    translators,
 )
 from .profile import Profile
 
@@ -105,6 +108,21 @@ def _profile_backend_pins_apply(profile: Profile, provider: str) -> bool:
         return True
 
 
+def _claude_profile_env(profile: Profile) -> dict:
+    """The profile chain's Claude-vocabulary overrides.
+
+    The legacy ``env`` (still the Claude harness's raw override channel) plus
+    the schema's ``harness_options.claude.env``, root ancestor first, the
+    profile itself last.
+    """
+    env = dict(lineage.effective_env(profile))
+    try:
+        env.update(providers.profile_overlay(profile).option_env("claude"))
+    except providers.ProviderError as exc:
+        raise RunnerError(str(exc)) from exc
+    return env
+
+
 def child_env(
     profile: Profile,
     *,
@@ -179,10 +197,20 @@ def child_env(
         # keeps final say over every key. An explicit --provider beats both.
         auth_source = borrow if borrow is not None else profile
         provider = provider_override or providers.resolve_name(auth_source)
-        # Provider env is a low-priority backend default: it sits above the
-        # shell but *below* the profile's own env, applied next, which can
-        # override any provider key (e.g. CLAUDE_CODE_AUTO_COMPACT_WINDOW).
-        provider_env = providers.provider_env(provider)
+        # The provider's Claude translation is a low-priority backend
+        # default: it sits above the shell but *below* the profile's own env,
+        # applied next, which can override any provider key. The profile's
+        # schema fields (models, context_window, auto_compact_at) are folded
+        # into that translation; its model pins only when the backend in
+        # play is the profile's own (see _profile_backend_pins_apply).
+        try:
+            provider_env = providers.claude_env(
+                profile,
+                provider,
+                overlay_models=_profile_backend_pins_apply(profile, provider),
+            )
+        except providers.ProviderError as exc:
+            raise RunnerError(str(exc)) from exc
         env.update(provider_env)
         if borrow is not None:
             # The lender's profile env is one more fill layer: above the
@@ -196,7 +224,7 @@ def child_env(
     # the point of an isolated profile. The exception is the backend keys when
     # this run is not on the profile's own backend: those name a backend that
     # is not the one being talked to (see the docstring).
-    profile_env = lineage.effective_env(profile)
+    profile_env = _claude_profile_env(profile)
     if with_token and not _profile_backend_pins_apply(profile, provider):
         profile_env = {
             k: v for k, v in profile_env.items() if k not in BACKEND_ENV_KEYS
@@ -269,6 +297,7 @@ def harness_child_env(
     *,
     base_env: Optional[dict] = None,
     borrow: Optional[Profile] = None,
+    tools: Optional[Sequence[str]] = None,
 ) -> dict:
     """Environment for a non-Claude profile harness.
 
@@ -297,18 +326,50 @@ def harness_child_env(
     env.update(harness.env)
     env.update(lineage.effective_env(profile))
 
-    finalize_harness_env(profile, harness, env, borrow=borrow)
+    finalize_harness_env(profile, harness, env, borrow=borrow, tools=tools)
     return env
+
+
+def harness_translation(
+    profile: Profile,
+    harness: harnesses.Harness,
+    *,
+    borrow: Optional[Profile] = None,
+) -> translators.Translation:
+    """The harness's translation of the backend this launch talks to."""
+    auth_source = borrow if borrow is not None else profile
+    try:
+        own = providers.resolve_name(profile)
+        provider = providers.resolve_name(auth_source)
+        spec = providers.spec_for(
+            profile, provider, overlay_models=(provider == own)
+        )
+    except providers.ProviderError as exc:
+        raise RunnerError(str(exc)) from exc
+    return translators.for_harness(harness.name, spec)
 
 
 def harness_launch_args(
     profile: Profile,
     harness: harnesses.Harness,
     args: Sequence[str],
+    *,
+    tools: Optional[Sequence[str]] = None,
 ) -> list[str]:
-    """Apply a declared harness's provider adapter to launch arguments."""
+    """Prepend the harness's translated launch arguments, then its adapter.
+
+    Translated arguments (Codex's ``-c`` overrides) go first so anything the
+    session passes explicitly is seen later by the harness and wins.
+    ``tools`` is a session's explicit builtin-tool choice; ``None`` takes the
+    profile's default.
+    """
+    if harness.builtin:
+        return list(args)
+    translated = harness_translation(profile, harness).args
     try:
-        return pi_provider.launch_args(profile, harness, args)
+        return pi_provider.launch_args(
+            profile, harness, [*translated, *args], tools=tools
+        )
     except pi_provider.PiProviderError as exc:
         raise RunnerError(str(exc)) from exc
 
@@ -319,6 +380,7 @@ def finalize_harness_env(
     env: dict,
     *,
     borrow: Optional[Profile] = None,
+    tools: Optional[Sequence[str]] = None,
 ) -> None:
     """Enforce profile auth/storage boundaries after all environment layers.
 
@@ -337,9 +399,7 @@ def finalize_harness_env(
     token_env = harness.token_env
     auth_source = borrow if borrow is not None else profile
     managed_token = (
-        lineage.stored_auth_token(auth_source)
-        if harness.auth == "api-key"
-        else None
+        _api_key_for(auth_source) if harness.auth == "api-key" else None
     )
     for key in list(env):
         if key.startswith(("CLAUDE_CODE_", "ANTHROPIC_")) and not (
@@ -354,6 +414,12 @@ def finalize_harness_env(
             # A Pi profile has one explicit token route. Do not let whatever
             # API keys happened to start claunch choose Pi's backend.
             env.pop(key, None)
+    translation = harness_translation(profile, harness, borrow=borrow)
+    # harness_options.<harness>.env is the declared raw channel for this
+    # harness: applied after the Claude-namespace filter above (so it is the
+    # one way to hand such a key to another harness on purpose) and before
+    # the token route, which stays authoritative.
+    env.update(translation.env)
     if managed_token:
         if not token_env:
             raise RunnerError(
@@ -363,7 +429,8 @@ def finalize_harness_env(
         env[token_env] = managed_token
     _finalize_declared_auth(harness, env)
     try:
-        pi_provider.apply_env(profile, harness, env)
+        pi_provider.apply_env(profile, harness, env, borrow=borrow)
+        pi_provider.apply_tools_env(profile, harness, env, tools=tools)
     except pi_provider.PiProviderError as exc:
         raise RunnerError(str(exc)) from exc
     if harness.home_env:
@@ -371,6 +438,48 @@ def finalize_harness_env(
         home.mkdir(parents=True, exist_ok=True)
         # Like CLAUDE_CONFIG_DIR, the storage boundary is launcher-owned.
         env[harness.home_env] = str(home)
+        _write_translated_files(home, translation)
+
+
+def _write_translated_files(home, translation: translators.Translation) -> None:
+    """Merge translated keys into files under the harness's profile home.
+
+    Only the named keys change; everything else in the file is kept, so a
+    setting the person wrote by hand survives every launch.
+    """
+    for relative, values in translation.files.items():
+        path = home / relative
+        doc: dict = {}
+        if path.is_file():
+            try:
+                loaded = json.loads(path.read_text(encoding="utf-8") or "{}")
+                doc = loaded if isinstance(loaded, dict) else {}
+            except (OSError, ValueError):
+                doc = {}
+        before = json.dumps(doc, sort_keys=True)
+        for key, value in values.items():
+            translators.set_dotted(doc, key, value)
+        if json.dumps(doc, sort_keys=True) == before:
+            continue
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(doc, indent=2) + "\n", encoding="utf-8")
+
+
+def _api_key_for(auth_source: Profile) -> Optional[str]:
+    """The one secret an API-key harness receives for ``auth_source``.
+
+    The profile's ``set-token`` secret (own or inherited) wins; without one,
+    the key written in its provider's ``env`` is used, so a provider configured
+    once for the Claude harness authenticates every other harness too. The
+    same precedence the Claude harness applies to ``ANTHROPIC_AUTH_TOKEN``.
+    """
+    stored = lineage.stored_auth_token(auth_source)
+    if stored:
+        return stored
+    try:
+        return providers.auth_token(providers.resolve_name(auth_source))
+    except providers.ProviderError as exc:
+        raise RunnerError(str(exc)) from exc
 
 
 def profile_harness(profile: Profile) -> harnesses.Harness:
@@ -388,16 +497,19 @@ def _plain_spawn(
     *,
     cwd: Optional[str] = None,
     borrow: Optional[Profile] = None,
+    tools: Optional[Sequence[str]] = None,
 ) -> int:
     cmd = [
         *harness.launch_command(),
-        *harness_launch_args(profile, harness, [*harness.args, *args]),
+        *harness_launch_args(
+            profile, harness, [*harness.args, *args], tools=tools
+        ),
     ]
     try:
         return subprocess.run(
             cmd,
             cwd=cwd,
-            env=harness_child_env(profile, harness, borrow=borrow),
+            env=harness_child_env(profile, harness, borrow=borrow, tools=tools),
         ).returncode
     except FileNotFoundError as exc:
         raise RunnerError(
@@ -492,6 +604,7 @@ def run(
     provider: Optional[str] = None,
     null_token: bool = False,
     cwd: Optional[str] = None,
+    tools: Optional[Sequence[str]] = None,
 ) -> int:
     """Launch the harness selected by the profile.
 
@@ -516,7 +629,7 @@ def run(
                 f"profile {profile.selector!r} selects {harness.name!r}"
             )
         return _plain_spawn(
-            profile, harness, list(args), cwd=cwd, borrow=borrow
+            profile, harness, list(args), cwd=cwd, borrow=borrow, tools=tools
         )
 
     auth_source = borrow if borrow is not None else profile

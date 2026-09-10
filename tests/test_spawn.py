@@ -1195,6 +1195,68 @@ def test_new_session_sends_the_qualified_profile_as_the_harness_source(
     assert reached["body"]["profile"] == "nc:pi"
 
 
+def test_new_session_carries_its_tools_choice_to_the_daemon(
+    monkeypatch, tmp_path, capsys
+):
+    """``--tools`` is read the way the daemon reads it: absent for the
+    profile default, ``[]`` for the literal ``none``, else the names. Unknown
+    names and a harness without tools are refused here, before a daemon is
+    started, the way an unknown model is."""
+    from claude_launcher import cli, daemon_client
+
+    monkeypatch.delenv("CLAUNCH_SESSION", raising=False)
+    reached = {}
+
+    class _Client:
+        base_url = "http://x"
+
+        def get(self, path):
+            return {}
+
+        def post(self, path, body=None):
+            reached["body"] = body
+            return {
+                "name": "s0", "harness": "pi", "profile": "nc:pi",
+                "tools": body.get("tools"),
+            }
+
+    monkeypatch.setattr(daemon_client, "ensure_running", lambda: _Client())
+    pi = ["new-session", "--profile", "nc:pi", "-c", str(tmp_path)]
+
+    assert cli.main(pi) == 0
+    assert "tools" not in reached["body"]
+    assert cli.main(pi + ["--tools", "full_read"]) == 0
+    assert reached["body"]["tools"] == ["full_read"]
+    assert cli.main(pi + ["--tools", "none"]) == 0
+    assert reached["body"]["tools"] == []
+    assert "ignored the tools choice" not in capsys.readouterr().err
+
+    reached.clear()
+    assert cli.main(pi + ["--tools", "nope"]) == 1
+    assert "unknown tool 'nope'" in capsys.readouterr().err
+    assert cli.main([
+        "new-session", "--profile", "nc", "-c", str(tmp_path),
+        "--tools", "full_read",
+    ]) == 1
+    assert "declares no builtin tools" in capsys.readouterr().err
+    assert reached == {}
+
+
+def test_the_refusal_translates_tools_with_its_gate(monkeypatch, capsys, tmp_path):
+    from claude_launcher import cli
+
+    workspaces.add(str(tmp_path), name="hq")
+    monkeypatch.setenv("CLAUNCH_SESSION", "s7")
+    capsys.readouterr()
+    assert cli.main([
+        "new-session", "--profile", "nc:pi", "-c", str(tmp_path),
+        "--model", "m", "--tools", "none",
+    ]) == 2
+    err = capsys.readouterr().err
+    assert "--model m --tools none" in err
+    assert "--model and --tools need spawn.allow_args" in err
+
+
 # --------------------------------------------------------------------------- #
 # naming a child's worktree
 # --------------------------------------------------------------------------- #

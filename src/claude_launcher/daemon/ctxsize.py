@@ -348,8 +348,6 @@ def compact_window_of(sdef) -> Optional[int]:
     provider) degrades to the daemon's environment: that is what the spawn's
     base env was, and a wrong extra leg must not turn into a wrong number.
     """
-    if getattr(sdef, "harness", None) != CLAUDE_HARNESS:
-        return None
     own = getattr(sdef, "env", None) or {}
     if COMPACT_WINDOW_ENV in own:
         return _window_value(own[COMPACT_WINDOW_ENV])
@@ -361,6 +359,7 @@ def compact_window_of(sdef) -> Optional[int]:
     if hit is not None and now - hit[1] < WINDOW_TTL:
         return hit[0]
     raw = os.environ.get(COMPACT_WINDOW_ENV)
+    declared = None
     try:
         prof = profile_mod.require_selector(
             str(getattr(sdef, "profile", "") or "")
@@ -368,14 +367,49 @@ def compact_window_of(sdef) -> Optional[int]:
         if not getattr(sdef, "null_token", False):
             borrow = getattr(sdef, "borrow", None)
             auth = profile_mod.require(str(borrow)) if borrow else prof
-            raw = providers.provider_env(
-                providers.resolve_name(auth)).get(COMPACT_WINDOW_ENV, raw)
+            # The spec's auto_compact_at is what every harness is launched
+            # with (Claude's env var, Codex's -c limit, Pi's reserve).
+            declared = providers.spec_for(
+                prof, providers.resolve_name(auth)
+            ).auto_compact_at
         raw = lineage.effective_env(prof).get(COMPACT_WINDOW_ENV, raw)
     except Exception:
         pass
-    value = _window_value(raw)
+    if getattr(sdef, "harness", None) != CLAUDE_HARNESS:
+        # Claude's raw variable (shell, profile env) is Claude's knob alone;
+        # another harness compacts at what the spec declared and its
+        # translator handed it (Codex's -c limit, Pi's reserve).
+        value = declared
+    else:
+        value = _window_value(raw)
+        if declared and COMPACT_WINDOW_ENV not in lineage_env_of(sdef):
+            value = declared
     _windows[key] = (value, now)
     return value
+
+
+def lineage_env_of(sdef) -> dict:
+    """The profile chain's raw env, ``{}`` when it cannot be read."""
+    try:
+        prof = profile_mod.require_selector(
+            str(getattr(sdef, "profile", "") or "")
+        )
+        return lineage.effective_env(prof)
+    except Exception:
+        return {}
+
+
+def declared_context_window(sdef) -> Optional[int]:
+    """The spec's ``context_window`` for this session's backend, if any."""
+    try:
+        prof = profile_mod.require_selector(
+            str(getattr(sdef, "profile", "") or "")
+        )
+        borrow = getattr(sdef, "borrow", None)
+        auth = profile_mod.require(str(borrow)) if borrow else prof
+        return providers.spec_for(prof, providers.resolve_name(auth)).context_window
+    except Exception:
+        return None
 
 
 def attach(session) -> dict:
@@ -396,4 +430,10 @@ def attach(session) -> dict:
         window = compact_window_of(sdef)
         if window:
             info["context"]["compact_window"] = window
+        # A harness that reports its own window (Codex) wins; otherwise the
+        # spec's declared context_window draws the ceiling.
+        if not info["context"].get("model_context_window"):
+            declared = declared_context_window(sdef)
+            if declared:
+                info["context"]["model_context_window"] = declared
     return info

@@ -777,7 +777,11 @@ def test_pi_launch_injects_extension_provider_and_default_model(
 
     assert runner.run(p, ["--verbose"]) == 0
     cmd = reached["cmd"]
-    assert cmd[cmd.index("--extension") + 1] == str(pi_provider.extension_path())
+    extensions = [cmd[i + 1] for i, a in enumerate(cmd) if a == "--extension"]
+    assert extensions == [
+        str(pi_provider.tools_extension_path()),
+        str(pi_provider.extension_path()),
+    ]
     assert cmd[cmd.index("--provider") + 1] == pi_provider.PI_PROVIDER_NAME
     assert cmd[cmd.index("--model") + 1] == "solar-main"
     assert cmd[-1] == "--verbose"

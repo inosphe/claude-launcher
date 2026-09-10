@@ -224,6 +224,23 @@ check("Codex starts in the direct-run mode",
        /name="codex_sandbox" checked/.test(codexRuntime.text)],
       [true, false]);
 
+/* Pi's panel is a frame: its rows are generated from the harness declaration
+   (one checkbox per tool, so the list cannot drift from what the daemon
+   says), which is why the markup names no control inside it — and why the
+   fold partition below is unaffected by it. */
+const piRuntime = block('<fieldset id="new-pi-runtime"', "</fieldset>", fold.start);
+check("Pi has a tools fieldset of its own, inside the fold",
+      [piRuntime.start > fold.start, piRuntime.start < fold.end,
+       /<legend>Pi tools<\/legend>/.test(piRuntime.text)],
+      [true, true, true]);
+check("...whose rows are generated, so the markup names nothing in it",
+      named(piRuntime.text), []);
+check("...and which carries the list and the hint the JS writes into",
+      ["new-pi-tools", "new-pi-runtime-hint"].map((i) => ids(piRuntime.text).includes(i)),
+      [true, true]);
+check("the Pi fieldset is hidden until Pi is selected",
+      /class="harness-runtime hidden"/.test(piRuntime.text), true);
+
 /* ---- the fold's membership IS the inheritance list ---- */
 function sliceConst(name) {
   const start = src.indexOf(`const ${name} =`);
@@ -277,6 +294,13 @@ check("standalone Codex Create serializes its specialised checkboxes",
 check("standalone Claude Create retains its own permission checkbox",
       /harnessName === "claude"/.test(submit) &&
         /f\.skip_permissions\.checked/.test(submit), true);
+/* An absent key is the profile default, so the ticks are read through the
+   override helper — the one that answers undefined while they still say
+   what the seeding said — and `[]` has to survive as itself. */
+check("standalone Pi Create sends its tool ticks only once they differ",
+      /harnessName === "pi"/.test(submit) &&
+        /newPiToolsOverride\(f\)/.test(submit) &&
+        /if \(tools !== undefined\) body\.tools = tools/.test(submit), true);
 check("Create marks the request as pending before posting",
       /createBusy = true/.test(submit) && /setCreatePending\(f, true, parent\)/.test(submit),
       true);
@@ -453,6 +477,92 @@ check("the issue text is sent only under the answer that mints",
     check(`an empty board ${read ? "that answered says so" : "mid-fetch says nothing"}`,
           box.classList.has("hidden"), hidden);
   }
+}
+
+/* ---- the Pi tools panel, against stubs ----
+   The rows are generated from harnessDetails.pi.tools and seeded from the
+   selected profile's default (profile_details[].tools). What is pinned: the
+   panel is up for pi and down for everything else, the seeding follows the
+   profile, the override is silent until a tick moves — and `[]` is an answer. */
+{
+  const piPanel = { classes: new Set(["hidden"]), classList: null };
+  piPanel.classList = {
+    contains: (c) => piPanel.classes.has(c),
+    toggle: (c, on) => (on ? piPanel.classes.add(c) : piPanel.classes.delete(c)),
+  };
+  const piList = { kids: [], appendChild(k) { piList.kids.push(k); return k; },
+                   set innerHTML(v) { if (v === "") piList.kids.length = 0; } };
+  const piHint = { textContent: "" };
+  const pf = { profile: { value: "nc" }, harness: { value: "pi" },
+               args: { disabled: false } };
+  const pdetails = { "nc:pi": { name: "nc:pi", harness: "pi", tools: ["full_read"] } };
+  const pctx = {};
+  new Function("exports", "$", "document", "spawnParent", "profileDetails",
+    "let newProfileOptions = [];\n" +
+    sliceFrom("function baseProfileName(") +
+    sliceFrom("function spawnProfileSelector(") +
+    sliceFrom("function newProfileUi(") +
+    sliceFrom("function newProfileSelector(") +
+    sliceFrom("function newProfileDetail(") +
+    sliceFrom("function ensureNewPiTools(") +
+    sliceFrom("function piToolsDefault(") +
+    sliceFrom("function newPiToolsChecked(") +
+    sliceFrom("function piToolsText(") +
+    sliceFrom("function seedNewPiTools(") +
+    sliceFrom("function newPiToolsOverride(") +
+    sliceFrom("function renderNewPiRuntime(") +
+    "\nexports.render = renderNewPiRuntime;\n" +
+    "exports.override = newPiToolsOverride;\n")(
+    pctx,
+    (id) => ({ "new-pi-runtime": piPanel, "new-pi-tools": piList,
+               "new-pi-runtime-hint": piHint }[id] || null),
+    { createElement: (tag) => ({ tag, kids: [], checked: false, disabled: false,
+                                 textContent: "",
+                                 appendChild(k) { this.kids.push(k); return k; },
+                                 append(...ks) { this.kids.push(...ks); } }) },
+    () => null, pdetails);
+  const PI = { tools: ["full_read"] };
+
+  pctx.render(pf, "claude", {}, null);
+  check("the Pi panel is down for claude", piPanel.classes.has("hidden"), true);
+  pctx.render(pf, "codex", {}, null);
+  check("...and for codex", piPanel.classes.has("hidden"), true);
+
+  pctx.render(pf, "pi", PI, null);
+  check("...and up for pi, with one generated row per declared tool",
+        [piPanel.classes.has("hidden"), piList.kids.length,
+         pf._piToolInputs.map((t) => t.input.name)],
+        [false, 1, ["pi_tool_full_read"]]);
+  check("the row starts ticked because the profile default lists it",
+        [pf._piToolInputs[0].input.checked, piHint.textContent],
+        [true, "builtin tools: full_read"]);
+  check("ticks that still say the default are no override",
+        pctx.override(pf), undefined);
+  pf._piToolInputs[0].input.checked = false;
+  pctx.render(pf, "pi", PI, null);
+  check("a re-render does not put the seeding back over the tick",
+        pf._piToolInputs[0].input.checked, false);
+  check("unticking every tool is the empty list, not nothing",
+        [pctx.override(pf), piHint.textContent], [[], "no builtin tools"]);
+
+  /* A profile whose switches turn the tool off seeds it unticked; ticking
+     it is then the override. */
+  pf.profile.value = "off";
+  pdetails["off:pi"] = { name: "off:pi", harness: "pi", tools: [] };
+  pctx.render(pf, "pi", PI, null);
+  check("a profile default that turns the tool off seeds it unticked",
+        [pf._piToolInputs[0].input.checked, pctx.override(pf)],
+        [false, undefined]);
+  pf._piToolInputs[0].input.checked = true;
+  check("...and ticking it is the list that travels",
+        pctx.override(pf), ["full_read"]);
+
+  /* No `tools` on the row at all (an older daemon): every declared tool. */
+  pf.profile.value = "old";
+  pdetails["old:pi"] = { name: "old:pi", harness: "pi" };
+  pctx.render(pf, "pi", PI, null);
+  check("a row without the field falls back to the whole declaration",
+        pf._piToolInputs[0].input.checked, true);
 }
 
 /* ---- renderRuntimeSummary ---- */

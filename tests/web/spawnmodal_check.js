@@ -157,7 +157,7 @@ let harnessDetails = {
     full_access_args: ["--sandbox", "danger-full-access"],
     full_access_off_args: ["--sandbox", "workspace-write"],
   },
-  pi: { auth: "api-key" },
+  pi: { auth: "api-key", tools: ["full_read"] },
 };
 function refreshSessions() { railRefreshed++; afterSpawn.push("rail"); }
 /* The box's remembered size is a contract of its own — spawnsize_check drives
@@ -190,6 +190,7 @@ new Function(
   + slice("fillValidatedBorrow") + slice("syncSpawnModel")
   + slice("syncSpawnGates") + slice("syncSpawnBeads")
   + slice("syncSpawnCodexRuntime")
+  + slice("piToolsDefault") + slice("piToolsText") + slice("syncSpawnPiTools")
   + slice("spawnPayload")
   + slice("spawnReport") + slice("spawnPreflightNote")
   + slice("spawnHardBlocks") + slice("postSpawn")
@@ -283,6 +284,8 @@ function uiStub(over = {}) {
     codexPanel: ctl({ hidden: true }), codexYolo: ctl({ checked: true }),
     codexSandbox: ctl(), codexYoloNote: ctl({ hidden: true }),
     codexSandboxNote: ctl({ hidden: true }), codexState: ctl(),
+    piPanel: ctl({ hidden: true }), piState: ctl(),
+    piTools: [{ name: "full_read", input: ctl(), note: ctl({ hidden: true }) }],
     profileNote: ctl(), harnessNote: ctl(), borrowNote: ctl(),
     nullNote: ctl(), forkNote: ctl(), argsNote: ctl(),
     workspace: ctl(), workspaceNote: ctl(),
@@ -701,6 +704,67 @@ async function main() {
       "--model", "parent-model",
     ]), codexChanged.args);
 
+  /* Pi's builtin tools. A Pi child of a Pi parent starts from the parent's
+     own explicit choice — that is what an absent key inherits — and with
+     args locked the rows are greyed showing it. */
+  const piLocked = uiStub({
+    report: { may_choose: [], workspaces: [] },
+    harness: ctl({ value: "pi" }),
+    parentSess: { harness: "pi", profile: "p1:pi", tools: [] },
+    profileDetails: { "p1:pi": { harness: "pi", tools: ["full_read"] } },
+  });
+  ctx.syncSpawnGates(piLocked);
+  const piTool = piLocked.piTools[0];
+  check("a Pi parent keeps its tools panel visible while inherited",
+    piLocked.piPanel.hidden === false && piTool.input.disabled === true,
+    [piLocked.piPanel.hidden, piTool.input.disabled]);
+  check("the locked panel shows the parent's own choice, not the profile default",
+    piTool.input.checked === false &&
+      /inherited from the parent: disabled \(spawn\.allow_args\)/.test(piTool.note.textContent),
+    [piTool.input.checked, piTool.note.textContent]);
+  check("...and the state line reads it out",
+    piLocked.piState.textContent === "no builtin tools", piLocked.piState.textContent);
+  check("an inherited tool choice sends no tools key",
+    !("tools" in ctx.spawnPayload(piLocked)), ctx.spawnPayload(piLocked));
+  piLocked.report.may_choose = ["args"];
+  ctx.syncSpawnGates(piLocked);
+  check("the args unlock hands the rows back, still saying the parent's choice",
+    piTool.input.disabled === false && piTool.input.checked === false &&
+      piTool.note.hidden === true && !("tools" in ctx.spawnPayload(piLocked)),
+    [piTool.input.disabled, piTool.input.checked, ctx.spawnPayload(piLocked)]);
+  piTool.input.checked = true;
+  ctx.syncSpawnGates(piLocked);
+  check("a tick away from the parent's choice travels as the list",
+    JSON.stringify(ctx.spawnPayload(piLocked).tools) === JSON.stringify(["full_read"]) &&
+      piLocked.piState.textContent === "builtin tools: full_read",
+    [ctx.spawnPayload(piLocked).tools, piLocked.piState.textContent]);
+  /* A Pi child of a claude parent: nothing to inherit, so the picked
+     profile's default (profile_details[].tools) is the seed. */
+  const piFresh = uiStub({
+    report: { may_choose: ["profile"], workspaces: [] },
+    harness: ctl({ value: "pi" }), profile: ctl({ value: "p1" }),
+    parentSess: { harness: "claude", profile: "p1:claude", tools: [] },
+    profileDetails: { "p1:pi": { harness: "pi", tools: ["full_read"] } },
+  });
+  ctx.syncSpawnGates(piFresh);
+  check("a child on another harness than its parent seeds from the profile default",
+    piFresh.piTools[0].input.checked === true &&
+      /Pi default: enabled \(spawn\.allow_args to override\)/.test(piFresh.piTools[0].note.textContent),
+    [piFresh.piTools[0].input.checked, piFresh.piTools[0].note.textContent]);
+  piFresh.report.may_choose = ["profile", "args"];
+  ctx.syncSpawnGates(piFresh);
+  piFresh.piTools[0].input.checked = false;
+  check("unticking every tool sends the empty list, not nothing",
+    JSON.stringify(ctx.spawnPayload(piFresh).tools) === "[]", ctx.spawnPayload(piFresh));
+  const piNone = uiStub({
+    report: { may_choose: ["args"], workspaces: [] },
+    harness: ctl({ value: "claude" }), parentSess: { harness: "claude" },
+  });
+  ctx.syncSpawnGates(piNone);
+  check("a claude child has no Pi tools panel",
+    piNone.piPanel.hidden === true && !("tools" in ctx.spawnPayload(piNone)),
+    [piNone.piPanel.hidden, ctx.spawnPayload(piNone)]);
+
   const g2 = uiStub({
     report: { may_choose: ["worktree", "profile", "fork"], workspaces: [] },
     harness: ctl({ value: "claude" }), parentSess: { harness: "claude" },
@@ -1007,7 +1071,7 @@ async function main() {
     task: 1, issueText: 1, issueFilter: 1, issuePick: 1, workflow: 1, context: 1,
     mesh: 2, handle: 2, connectRow: 2,
     profile: 3, harness: 3, model: 3, effort: 3, borrow: 3, nullTok: 3, args: 3,
-    codexPanel: 3,
+    codexPanel: 3, piPanel: 3,
     workspace: 4, wtName: 4, wtPick: 4, update: 4, rebase: 4, fork: 4,
   };
   for (const [k, g] of Object.entries(placed)) {
@@ -1213,7 +1277,7 @@ async function main() {
         { name: "p1:claude", harness: "claude", harness_available: true,
           borrow_allowed: true, borrow_mode: "provider-token" },
         { name: "p1:pi", harness: "pi", harness_available: true,
-          borrow_allowed: true, borrow_mode: "token" },
+          borrow_allowed: true, borrow_mode: "token", tools: ["full_read"] },
         { name: "p2", harness: "claude", harness_available: true,
           borrow_allowed: true, borrow_mode: "provider-token" },
         { name: "p2:claude", harness: "claude", harness_available: true,
@@ -1337,9 +1401,35 @@ async function main() {
     JSON.stringify(ctx.spawnPayload(codexUi).args) === JSON.stringify([
       "--sandbox", "workspace-write",
     ]), ctx.spawnPayload(codexUi).args);
+  /* The Pi panel in the built modal: one generated row per declared tool,
+     seeded from the picked profile's default, sent only once it differs. */
+  profileSel.value = "p1";
+  await profileSel.fire("change");
+  await settle();
+  harnessSel.value = "pi";
+  await harnessSel.fire("change");
+  await settle();
+  const piUi = ctx.spawnUi();
+  check("a Pi child gets the tools panel, one row per declared tool",
+    piUi && piUi.piPanel.hidden === false && piUi.codexPanel.hidden === true &&
+      texts(piUi.piPanel).includes("Pi tools") &&
+      piUi.piTools.map((t) => t.name).join(",") === "full_read",
+    piUi && [piUi.piPanel.hidden, piUi.codexPanel.hidden, texts(piUi.piPanel)]);
+  check("the row starts on the profile default, and sends nothing for it",
+    piUi && piUi.piTools[0].input.checked === true &&
+      !("tools" in ctx.spawnPayload(piUi)),
+    piUi && [piUi.piTools[0].input.checked, ctx.spawnPayload(piUi)]);
+  piUi.piTools[0].input.checked = false;
+  await piUi.piTools[0].input.fire("change");
+  check("unticking it sends the empty list, and the state line says so",
+    JSON.stringify(ctx.spawnPayload(piUi).tools) === "[]" &&
+      piUi.piState.textContent === "no builtin tools",
+    [ctx.spawnPayload(piUi).tools, piUi.piState.textContent]);
   profileSel.value = "";
   await profileSel.fire("change");
   await settle();
+  check("returning to Claude removes the Pi tools panel",
+    ctx.spawnUi().piPanel.hidden === true, ctx.spawnUi().piPanel.hidden);
   check("returning to profile inheritance also restores harness inheritance",
     harnessSel && harnessSel.value === "" && harnessSel.options[0].text ===
       "(inherit the parent's harness)",

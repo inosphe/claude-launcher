@@ -86,6 +86,11 @@ class SessionDef:
     #: selected alias to a backend-specific model id.
     model: Optional[str] = None
     effort: Optional[str] = None
+    #: Builtin tools enabled for this session, or ``None`` to take the
+    #: profile's default (``harness_options.<harness>.tools``). An empty
+    #: tuple is an explicit "none". Only harnesses that declare ``tools``
+    #: accept it.
+    tools: Optional[Tuple[str, ...]] = None
     env: Dict[str, str] = field(default_factory=dict)
     restore: bool = True
     cols: int = 120
@@ -194,6 +199,8 @@ class SessionDef:
         # field exists on disk only when it carries information.
         if self.reminder_paused:
             out["reminder_paused"] = True
+        if self.tools is not None:
+            out["tools"] = list(self.tools)
         return out
 
     @classmethod
@@ -206,6 +213,7 @@ class SessionDef:
             args=tuple(str(a) for a in data.get("args") or ()),
             model=str(data.get("model") or "").strip() or None,
             effort=str(data.get("effort") or "").strip() or None,
+            tools=_tools_field(data.get("tools")) if "tools" in data else None,
             env={str(k): str(v) for k, v in (data.get("env") or {}).items()},
             restore=bool(data.get("restore", True)),
             cols=int(data.get("cols") or 120),
@@ -223,6 +231,29 @@ class SessionDef:
             keep_alive=bool(data.get("keep_alive")),
             reminder_paused=bool(data.get("reminder_paused")),
         )
+
+
+def _tools_field(value) -> Tuple[str, ...]:
+    """``tools`` as sent by a form or the CLI: a list, or a comma string.
+
+    ``None``/``""``/``[]`` all mean "no tools" here -- the *absence* of the
+    key is what means "profile default" (see :meth:`SessionDef.from_dict`).
+    """
+    if value is None:
+        return ()
+    if isinstance(value, str):
+        if value.strip().lower() in ("", "none", "off"):
+            return ()
+        items = [part.strip() for part in value.split(",")]
+    elif isinstance(value, (list, tuple)):
+        items = [str(item).strip() for item in value]
+    else:
+        raise ValueError("tools must be a list of tool names")
+    out = []
+    for item in items:
+        if item and item not in out:
+            out.append(item)
+    return tuple(out)
 
 
 def _resume_field(raw) -> Optional[str]:
@@ -332,6 +363,17 @@ def normalize(sdef: SessionDef, *, restoring: bool = False) -> SessionDef:
             raise HarnessError(
                 f"unknown effort {sdef.effort!r} for harness {sdef.harness!r} "
                 f"(known: {', '.join(entry.efforts)})"
+            )
+    if sdef.tools is not None:
+        if not entry.tools:
+            raise HarnessError(
+                f"harness {sdef.harness!r} has no builtin tools to choose from"
+            )
+        unknown = [t for t in sdef.tools if t not in entry.tools]
+        if unknown:
+            raise HarnessError(
+                f"unknown tool {', '.join(repr(t) for t in unknown)} for harness "
+                f"{sdef.harness!r} (known: {', '.join(entry.tools)})"
             )
     if sdef.null_token and sdef.borrow:
         # Both answer the same question (whose credential) and the pair is
@@ -654,7 +696,7 @@ def build_command(
         if prof is not None:
             try:
                 runtime_args = runner.harness_launch_args(
-                    prof, entry, runtime_args
+                    prof, entry, runtime_args, tools=sdef.tools
                 )
             except runner.RunnerError as exc:
                 raise HarnessError(str(exc)) from exc
@@ -691,7 +733,7 @@ def build_command(
     if prof is not None and entry is not None:
         try:
             runner.finalize_harness_env(
-                prof, entry, env, borrow=borrow_prof
+                prof, entry, env, borrow=borrow_prof, tools=sdef.tools
             )
         except runner.RunnerError as exc:
             raise HarnessError(str(exc)) from exc

@@ -1,40 +1,47 @@
 """Named API providers, configured in the central launcher config file.
 
-A *provider* is a named bundle of environment variables — typically an
-``ANTHROPIC_BASE_URL`` plus model overrides and an auth token — that points
-Claude Code at a particular API backend (e.g. a third-party GLM endpoint).
-Providers are defined and selected in ``~/.claunch.yaml`` (the launcher's source
-of truth, see :mod:`store`), which the launcher reads live at launch:
+A *provider* names a backend: where it is, which models it serves, how much
+context they carry. It is written once, in a vocabulary no harness owns
+(:mod:`provider_spec`), and translated at launch into each harness's own
+words (:mod:`translators`)::
 
     providers:
-      fireworks-glm5p2:
-        allowed_harnesses: [claude]
-        env:
-          ANTHROPIC_BASE_URL: "https://api.fireworks.ai/inference"
-          ANTHROPIC_MODEL: "accounts/fireworks/models/glm-5p2"
-          ANTHROPIC_AUTH_TOKEN: "fw_..."
-          ...
-    provider: fireworks-glm5p2        # global default (optional)
+      deepseek:
+        api_key: "sk-..."
+        endpoints:
+          anthropic: https://api.deepseek.com/anthropic
+          openai:    https://api.deepseek.com
+        models: {default: deepseek-flash, small: deepseek-flash, large: deepseek-v4-pro}
+        context_window: 1000000
+        auto_compact_at: 900000
+        harness_options:
+          claude: {model_tag: "[1m]"}
+    provider: deepseek                # global default (optional)
     profiles:
       work:
-        provider: fireworks-glm5p2    # per-profile override (optional)
+        provider: deepseek            # per-profile override (optional)
+        models: {default: deepseek-v4-pro}
+
+The pre-schema form -- ``env:`` holding Claude's ``ANTHROPIC_*`` variables --
+is still read (reverse-translated for other harnesses, passed verbatim to
+Claude) until ``claunch migrate-config`` rewrites it.
 
 The built-in ``default`` provider is plain Anthropic (no overrides). Any other
-provider contributes its env as a *low-priority backend default*: it sits above
-the launching shell but below the profile's own ``env`` (applied last), so a
-profile key always beats a provider key — only keys a profile never sets fall
-through to the provider's value. Selecting a non-default provider also swaps
-auth: the profile's single ``set-token`` secret (own, inherited, or borrowed)
-is exported through the Claude harness's packaged ``ANTHROPIC_AUTH_TOKEN``
-route instead of injecting ``CLAUDE_CODE_OAUTH_TOKEN``.
+provider's Claude translation is a *low-priority backend default*: it sits
+above the launching shell but below the profile's own ``env`` (applied
+last), so a profile key always beats a provider key. Selecting a non-default
+provider also swaps auth: the profile's single ``set-token`` secret (own,
+inherited, or borrowed) is exported through the Claude harness's packaged
+``ANTHROPIC_AUTH_TOKEN`` route instead of injecting ``CLAUDE_CODE_OAUTH_TOKEN``.
 """
 
 from __future__ import annotations
 
 from typing import Dict, Optional, Tuple
 
-from . import lineage, profile as profile_mod, store
+from . import lineage, profile as profile_mod, provider_spec, store, translators
 from .profile import Profile
+from .provider_spec import ProviderSpec, SpecError
 
 #: The built-in no-override provider — plain Anthropic, launcher injects token.
 DEFAULT_PROVIDER = "default"
@@ -53,22 +60,113 @@ class ProviderError(Exception):
     """Raised for unknown providers or a malformed config file."""
 
 
-def registry(doc: Optional[dict] = None) -> Dict[str, Dict[str, str]]:
-    """Map of provider name -> env, from the config file plus built-in default."""
+def entries(doc: Optional[dict] = None) -> Dict[str, dict]:
+    """Raw provider entries from the config file (``{}`` for the built-ins)."""
     doc = store.load() if doc is None else doc
-    out: Dict[str, Dict[str, str]] = {
-        DEFAULT_PROVIDER: {},
-        CLAUDE_PROVIDER: {},
-    }
+    out: Dict[str, dict] = {DEFAULT_PROVIDER: {}, CLAUDE_PROVIDER: {}}
     raw = doc.get("providers")
     if isinstance(raw, dict):
-        for name, spec in raw.items():
-            env = spec.get("env") if isinstance(spec, dict) else None
-            out[str(name)] = (
-                {str(k): str(v) for k, v in env.items()}
-                if isinstance(env, dict)
-                else {}
+        for name, entry in raw.items():
+            out[str(name)] = dict(entry) if isinstance(entry, dict) else {}
+    return out
+
+
+def spec(name: str, doc: Optional[dict] = None) -> ProviderSpec:
+    """The harness-neutral description of provider ``name``."""
+    if name in (DEFAULT_PROVIDER, CLAUDE_PROVIDER):
+        return ProviderSpec()
+    reg = entries(doc)
+    if name not in reg:
+        raise ProviderError(f"unknown provider {name!r} (see 'claunch providers')")
+    try:
+        return provider_spec.from_entry(reg[name], f"providers.{name}")
+    except SpecError as exc:
+        raise ProviderError(str(exc)) from exc
+
+
+def profile_layers(
+    profile: Profile, doc: Optional[dict] = None, *, overlay_models: bool = True
+) -> list:
+    """The spec layer of each profile in the chain, root ancestor first."""
+    doc = store.load() if doc is None else doc
+    layers = []
+    for p in lineage.chain(profile, doc):
+        entry = store.profile_entry(p.name, doc)
+        try:
+            layer = provider_spec.from_entry(
+                entry, f"profiles.{p.name}", profile=True
             )
+        except SpecError as exc:
+            raise ProviderError(str(exc)) from exc
+        if not overlay_models:
+            layer = provider_spec.replace(layer, models={})
+        layers.append(layer)
+    return layers
+
+
+def profile_overlay(profile: Profile, doc: Optional[dict] = None) -> ProviderSpec:
+    """The spec fields a profile chain adds, merged root ancestor first."""
+    merged = ProviderSpec()
+    for layer in profile_layers(profile, doc):
+        merged = provider_spec.overlay(merged, layer)
+    return merged
+
+
+def spec_for(
+    profile: Profile,
+    name: Optional[str] = None,
+    doc: Optional[dict] = None,
+    *,
+    overlay_models: bool = True,
+) -> ProviderSpec:
+    """Provider spec with the profile chain's overlay applied.
+
+    ``name`` defaults to the profile's resolved provider. ``overlay_models``
+    is switched off by the runner when the backend in play is not the
+    profile's own (a borrow across providers, an explicit ``--provider``):
+    the profile's model pins describe *its* backend and must not be asked
+    of another one, while its context/compaction values still apply.
+    """
+    doc = store.load() if doc is None else doc
+    merged = spec(resolve_name(profile, doc) if name is None else name, doc)
+    for layer in profile_layers(profile, doc, overlay_models=overlay_models):
+        merged = provider_spec.overlay(merged, layer)
+    return merged
+
+
+def claude_env(
+    profile: Profile,
+    name: Optional[str] = None,
+    doc: Optional[dict] = None,
+    *,
+    overlay_models: bool = True,
+) -> Dict[str, str]:
+    """What the Claude harness receives for ``profile`` on provider ``name``.
+
+    The provider's translation, then each profile layer's additions
+    (:func:`translators.claude_layered`). On the built-in ``default``
+    provider only the profile layers contribute (compaction, model pins).
+    """
+    doc = store.load() if doc is None else doc
+    base = spec(resolve_name(profile, doc) if name is None else name, doc)
+    return translators.claude_layered(
+        base, profile_layers(profile, doc, overlay_models=overlay_models)
+    )
+
+
+def registry(doc: Optional[dict] = None) -> Dict[str, Dict[str, str]]:
+    """Map of provider name -> its Claude-vocabulary env (built-ins: ``{}``).
+
+    Kept as the shape every listing and key-collecting caller already reads;
+    the values are now the Claude translation of each provider's spec.
+    """
+    doc = store.load() if doc is None else doc
+    out: Dict[str, Dict[str, str]] = {}
+    for name in entries(doc):
+        try:
+            out[name] = translators.claude(spec(name, doc)).env
+        except ProviderError:
+            out[name] = {}
     return out
 
 
@@ -105,6 +203,17 @@ def provider_env(name: str, doc: Optional[dict] = None) -> Dict[str, str]:
     if name not in reg:
         raise ProviderError(f"unknown provider {name!r} (see 'claunch providers')")
     return dict(reg[name])
+
+
+def auth_token(name: str, doc: Optional[dict] = None) -> Optional[str]:
+    """The provider's declared ``api_key`` (or legacy ``ANTHROPIC_AUTH_TOKEN``).
+
+    This is the *fallback* below a profile's own ``set-token`` secret, so one
+    key in the config file serves every harness the provider is used with.
+    """
+    if name == DEFAULT_PROVIDER:
+        return None
+    return spec(name, doc).api_key
 
 
 def _require_known(name: str, doc: Optional[dict] = None) -> str:

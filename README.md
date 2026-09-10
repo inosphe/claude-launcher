@@ -402,16 +402,26 @@ claunch env work --apply-template                 # merge the template defaults
 
 ### Default template
 
-New profiles get a default env block from the `template` section of
-`~/.claunch.yaml`. On a brand-new install that file is created from a bootstrap
-seed, `<launcher home>/template.yaml`, whose built-in defaults are:
+New profiles get their defaults from the `template` section of
+`~/.claunch.yaml`. The template is a profile *layer*: the same fields a
+profile entry may carry (`models`, `context_window`, `auto_compact_at`,
+`harness_options`; see [API providers](#api-providers-third-party-backends)),
+copied into each new Claude profile at `create` (a field the profile already
+sets is kept, option maps merge). On a brand-new install the file is created
+from a bootstrap seed, `<launcher home>/template.yaml`, whose built-in
+defaults are:
 
 ```yaml
 template:
-  env:
-    CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: "0"
-    CLAUDE_CODE_AUTO_COMPACT_WINDOW: "400000"
+  auto_compact_at: 400000
+  harness_options:
+    claude:
+      env:
+        CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: "0"
 ```
+
+A pre-schema `template.env` block still works (it is merged into a new
+profile's raw `env`) and `claunch migrate-config` converts it.
 
 `template.yaml` only *seeds* `~/.claunch.yaml` the first time; afterwards the
 live `template` block in `~/.claunch.yaml` is authoritative (edit it directly, or
@@ -466,43 +476,94 @@ descendant when you add more later.
 
 ## API providers (third-party backends)
 
-A **provider** identifies an API service and can point a compatible harness at
-a particular API backend —
-Anthropic by default, or a third party such as a GLM endpoint — by supplying a
-bundle of environment variables (an `ANTHROPIC_BASE_URL`, model overrides and
-an auth token). Claude Code consumes that bundle directly. The packaged Pi
-harness consumes non-default providers through its declared adapter. Providers
-are defined and selected **in the config file**
-(`~/.claunch.yaml`, the launcher's [source of truth](#configuration-source-of-truth)),
-which the launcher reads live at launch. You can edit that file directly, or use
-`set-provider` (below), which just records the selection in it.
+A **provider** describes one API backend -- where it is, which models it
+serves, how much context they carry -- in a vocabulary no harness owns. At
+launch a per-harness *translator* turns that description into the harness's
+own words: Claude Code's `ANTHROPIC_*` environment, Codex's `-c key=value`
+overrides, Pi's in-process provider registration. Providers are defined and
+selected **in the config file** (`~/.claunch.yaml`, the launcher's
+[source of truth](#configuration-source-of-truth)), which the launcher reads
+live at launch. You can edit that file directly, or use `set-provider`
+(below), which just records the selection in it.
 
 ```yaml
 providers:
   claude:
     # Named Anthropic provider; policy metadata is allowed here.
     allowed_harnesses: [claude]
-  fireworks-glm5p2:
+  deepseek:
     service: custom
-    allowed_harnesses: [claude]  # optional compatibility/security boundary
-    env:
-      ANTHROPIC_BASE_URL: "https://api.fireworks.ai/inference"
-      ANTHROPIC_MODEL: "accounts/fireworks/models/glm-5p2"
-      ANTHROPIC_DEFAULT_OPUS_MODEL: "accounts/fireworks/models/glm-5p2"
-      ANTHROPIC_DEFAULT_SONNET_MODEL: "accounts/fireworks/models/glm-5p2"
-      ANTHROPIC_DEFAULT_HAIKU_MODEL: "accounts/fireworks/models/glm-5p2"
-      CLAUDE_CODE_SUBAGENT_MODEL: "accounts/fireworks/models/glm-5p2"
-      # auth is supplied from `claunch set-token work`; no secret here
-      CLAUDE_CODE_OAUTH_TOKEN: ""
+    allowed_harnesses: [claude, pi]     # optional compatibility/security boundary
+    api_key: "sk-..."                   # or leave it out: `claunch set-token` per machine
+    endpoints:                          # one URL per *protocol* the backend serves
+      anthropic: https://api.deepseek.com/anthropic
+      openai:    https://api.deepseek.com
+    models:                             # role -> the id the backend accepts, undecorated
+      default: deepseek-flash
+      small:   deepseek-flash
+      large:   deepseek-v4-pro
+      # subagent: defaults to `small`
+    context_window: 1000000
+    auto_compact_at: 900000
+    harness_options:                    # the one harness-keyed place (see below)
+      claude:
+        model_tag: "[1m]"
 
-provider: fireworks-glm5p2     # use it for every profile by default (optional)
+provider: deepseek             # use it for every profile by default (optional)
 
 profiles:
   work:
-    provider: fireworks-glm5p2  # ...or per profile (overrides the global one)
+    provider: deepseek         # ...or per profile (overrides the global one)
+    models: {default: deepseek-v4-pro}   # same field names, one layer up
+    auto_compact_at: 600000
   personal:
-    provider: default           # pin one profile back to plain Anthropic
+    provider: default          # pin one profile back to plain Anthropic
 ```
+
+A profile overlays `models`, `context_window`, `auto_compact_at` and
+`harness_options` on its provider (root ancestor first, the profile itself
+last); `api_key` and `endpoints` identify the backend and stay on the
+provider.
+
+**What each harness receives** (`claunch providers` prints the description;
+`claunch run PROFILE:HARNESS` prints a `note:` for anything the harness
+cannot carry):
+
+| spec field | claude | codex | pi |
+|---|---|---|---|
+| `api_key` | `ANTHROPIC_AUTH_TOKEN` (below the profile's `set-token`) | not translated yet | `ANTHROPIC_API_KEY` (below `set-token`) |
+| `endpoints.anthropic` | `ANTHROPIC_BASE_URL` | -- | -- |
+| `endpoints.openai` | -- | not translated yet | the registered provider's base URL (`/v1` appended) |
+| `models` | `ANTHROPIC_MODEL`, `..._DEFAULT_{SONNET,HAIKU,OPUS,FABLE}_MODEL`, `CLAUDE_CODE_SUBAGENT_MODEL` | the session's own `--model` | the registered model list, `default` launched |
+| `context_window` | appends `[1m]` to every model id when >= 1,000,000 | `-c model_context_window=N` | each registered model's `contextWindow` |
+| `auto_compact_at` | `CLAUDE_CODE_AUTO_COMPACT_WINDOW` | `-c model_auto_compact_token_limit=N` | `compaction.reserveTokens = context_window - auto_compact_at` in the profile's `pi/settings.json` |
+
+`harness_options.<harness>` is the one place keyed by harness name, for what
+no neutral field expresses. Each translator accepts its own channels and
+rejects any other key at load time:
+
+| harness | channels |
+|---|---|
+| `claude` | `env` (raw variables, applied last), `model_tag` (`"[1m]"` to force the tag, `""` to suppress it) |
+| `codex` | `env`, `config` (each key becomes `-c key=value`, strings quoted) |
+| `pi` | `env`, `settings` (dotted keys merged into the profile's `pi/settings.json`), `tools` (`{full_read: false}` switches a claunch builtin tool off) |
+
+Translated launch arguments go before the session's own, so an explicit
+`-c`/`--model` from the session still wins. The `env` channel of a harness is
+applied after the launcher's Claude-namespace filter: it is the one way to
+hand an `ANTHROPIC_*` variable to another harness on purpose.
+
+**Older files.** A provider written as a Claude `env:` bundle (schema
+version 1) is still read: Claude receives the variables verbatim, and every
+other harness reads a reverse translation of them (`endpoints.openai` is
+assumed only when the Anthropic URL has no path). `claunch migrate-config
+--dry-run` shows how such a file would be rewritten to the schema above, and
+`claunch migrate-config` does it, keeping a `~/.claunch.yaml.v1.bak`. The
+rewrite keeps the Claude outcome: any variable the translation would not
+reproduce is pinned under `harness_options.claude.env`, the empty
+`ANTHROPIC_API_KEY`/`CLAUDE_CODE_OAUTH_TOKEN` pins are dropped (the launcher
+enforces both), and a model alias the roles imply but the env never set is
+reported. `claunch providers` marks a provider still in the old form.
 
 **Selecting a provider.** The effective provider for a run is the first of:
 the profile's own `provider`, an ancestor's (inheritance, like `env`), the
@@ -521,10 +582,11 @@ backend tokens out of the config file* below) or as a plaintext
 `ANTHROPIC_AUTH_TOKEN` in the provider's `env`
 (`ANTHROPIC_API_KEY` is forced to `""` by the packaged Claude harness).
 
-The resulting precedence for a run is: shell env < provider `env` < profile `env`
-(template + inherited + own) < the projected `set-token` value < the final
-harness auth boundary. For Claude that last boundary always forces
-`ANTHROPIC_API_KEY=""`.
+The resulting precedence for a run is: shell env < the provider's Claude
+translation < each profile layer's translation (its `models`/`auto_compact_at`,
+then its raw `env` and `harness_options.claude.env`) < the projected
+`set-token` value < the final harness auth boundary. For Claude that last
+boundary always forces `ANTHROPIC_API_KEY=""`.
 
 For `PROFILE:pi` with a non-default provider, the packaged adapter registers a
 process-local Pi provider from `ANTHROPIC_BASE_URL` and the configured
@@ -564,10 +626,9 @@ header. A provider therefore needs no secret in the file:
 ```yaml
 providers:
   fireworks-glm5p2:
-    env:
-      ANTHROPIC_BASE_URL: "https://api.fireworks.ai/inference"
-      ANTHROPIC_MODEL: "accounts/fireworks/models/glm-5p2"
-      # no ANTHROPIC_AUTH_TOKEN here — supplied by set-token per machine
+    endpoints: {anthropic: "https://api.fireworks.ai/inference", openai: "https://api.fireworks.ai/inference"}
+    models: {default: "accounts/fireworks/models/glm-5p2"}
+    # no api_key here — supplied by set-token per machine
 ```
 
 ```bash
@@ -576,9 +637,9 @@ claunch set-token work fw_...  # Claude provider route -> ANTHROPIC_AUTH_TOKEN
 claunch run work
 ```
 
-A plaintext `ANTHROPIC_AUTH_TOKEN` in the yaml still works when the profile has
-no stored token (backwards compatible), but the stored token always wins when
-both exist. The trigger is the **provider selection itself** — env vars like
+A plaintext `api_key` in the yaml still works when the profile has no stored
+token, but the stored token always wins when both exist -- for every harness
+the provider is used with. The trigger is the **provider selection itself** — env vars like
 `ANTHROPIC_BASE_URL` set in a profile's `env` (or inherited from the shell)
 don't change auth handling on their own. `run` tells you when this happens:
 
@@ -805,11 +866,13 @@ this file *is* the state. It holds the profile list, each profile's `harness`,
 and provider/harness definitions:
 
 ```yaml
-version: 1
+version: 2
 template:
-  env:
-    CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: "0"
-    CLAUDE_CODE_AUTO_COMPACT_WINDOW: "400000"
+  auto_compact_at: 400000
+  harness_options:
+    claude:
+      env:
+        CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: "0"
 profiles:
   company:
     harness: claude
@@ -1941,11 +2004,42 @@ harness.
 
 Codex/Kimi/Cursor never receive the launcher token. Existing Claude-oriented
 `ANTHROPIC_*` and `CLAUDE_CODE_*` profile values remain intact for Claude, but
-are filtered from non-Claude harness environments. The Pi adapter reads only
-the selected provider's endpoint and model IDs before that filter and exports
-them under launcher-owned `CLAUNCH_PI_*` names; the stored token follows the
-declared `token_env`. This prevents changing a profile's harness from silently
-carrying a Claude backend or OAuth token into another CLI.
+are filtered from non-Claude harness environments. Each harness then receives
+the translation of the selected provider's description (see
+[API providers](#api-providers-third-party-backends)): Pi's adapter registers
+a process-local provider from `endpoints.openai`, `models` and
+`context_window` under launcher-owned `CLAUNCH_PI_*` names, Codex gets its
+`-c` overrides, and `harness_options.<harness>.env` is the declared way to
+hand such a harness a raw variable. A provider that only declares its
+Anthropic-compatible endpoint cannot launch Pi and says so before spawning.
+
+Every Pi session claunch launches also loads a packaged tools extension
+(`pi_tools.mjs`) with claunch's builtin tools, whatever provider it runs on:
+
+- `full_read` -- return a whole file with 1-based line numbers, never
+  truncated (Pi's built-in `read` caps its output). Text files only; a
+  directory, a missing file or a binary is refused with a reason, and the
+  header names the line and byte counts so the model can see what it just
+  spent.
+
+Which builtin tools a session gets is decided in two layers:
+
+- **Per profile (the default):** `harness_options.pi.tools: {full_read: false}`
+  in `~/.claunch.yaml`, or `claunch tools PROFILE --off full_read` /
+  `--on full_read`, which writes that block for you and prints the current
+  defaults.
+- **Per session (an override):** `--tools full_read,…` or `--tools none` on
+  `claunch run PROFILE:pi`, `claunch new-session` and `claunch spawn`; the
+  wizard's *Pi tools* row; and the web form's / spawn modal's *Pi tools*
+  panel, which are pre-checked from the profile default and send `tools`
+  only when you change them. A spawned child inherits its parent's choice
+  and may change it only under `spawn.allow_args`, like `model`/`effort`.
+  The choice is stored on the session record (`tools`) and survives a
+  daemon restart.
+The key an API-key harness receives is the profile's `set-token` secret;
+without one, the provider's `api_key` is used, so a provider configured once
+authenticates every harness. This prevents changing a profile's harness from
+silently carrying a Claude backend or OAuth token into another CLI.
 
 Sessions inherit the **daemon's** environment (tmux-server semantics), then the
 harness/profile safe env and the session's `--env`. Auth and home boundaries

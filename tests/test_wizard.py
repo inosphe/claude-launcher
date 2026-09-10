@@ -401,6 +401,118 @@ def test_codex_layout_is_not_inferred_from_another_harness_capabilities():
     assert wiz.field("codex_sandbox").hidden
 
 
+# --------------------------------------------------------------------------- #
+# Pi's builtin tools
+# --------------------------------------------------------------------------- #
+PI_RUNTIME = {
+    "name": "pi", "available": True, "auth": "api-key",
+    "models": ["m1"], "tools": ["full_read", "scratch"],
+}
+
+
+class PiSources(CodexSources):
+    """A daemon with a Pi profile whose switches turn one builtin tool off."""
+
+    def harnesses(self):
+        return super().harnesses() + [dict(PI_RUNTIME)]
+
+    def profile_options(self):
+        return super().profile_options() + [
+            {"value": "nc:pi", "label": "nc/pi", "harness": "pi"},
+        ]
+
+    def profile_details(self):
+        return super().profile_details() + [
+            {"name": "nc:pi", "harness": "pi", "harness_available": True,
+             "borrow_allowed": False, "tools": ["full_read"]},
+        ]
+
+
+def test_pi_gets_a_named_tools_section_and_other_harnesses_do_not():
+    wiz = form(sources=PiSources())
+    full_read = wiz.field("tool:full_read")
+    scratch = wiz.field("tool:scratch")
+    assert isinstance(full_read, wizard.CheckboxField)
+    # a claude profile is picked: no Pi rows, no Pi heading
+    assert full_read.hidden and scratch.hidden
+    assert "PI RUNTIME" not in "\n".join(wiz.render(90, 60))
+
+    pick(wiz, "profile", "nc/pi")
+    assert not full_read.hidden and not scratch.hidden
+    # the defaults are the PROFILE's: its switches keep full_read and drop
+    # scratch, and the harness list alone would have ticked both
+    assert full_read.value is True
+    assert scratch.value is False
+    screen = "\n".join(wiz.render(90, 60))
+    assert "PI RUNTIME" in screen
+    assert "full_read" in screen and "scratch" in screen
+    assert "CODEX RUNTIME" not in screen
+
+    pick(wiz, "profile", "codex/codex")
+    assert full_read.hidden and scratch.hidden
+    assert "PI RUNTIME" not in "\n".join(wiz.render(90, 60))
+
+
+def test_pi_tools_travel_only_when_they_differ_from_the_profile_default():
+    wiz = form(sources=PiSources())
+    pick(wiz, "profile", "nc/pi")
+
+    # untouched: the request carries no key, and the daemon applies the
+    # profile's own switches
+    untouched = argparse.Namespace()
+    wiz.apply(untouched)
+    assert untouched.tools is None
+
+    focus_on(wiz, "tool:scratch")
+    wiz.handle("space")
+    changed = argparse.Namespace()
+    wiz.apply(changed)
+    assert changed.tools == "full_read,scratch"
+
+    focus_on(wiz, "tool:scratch")
+    wiz.handle("space")
+    focus_on(wiz, "tool:full_read")
+    wiz.handle("space")
+    none = argparse.Namespace()
+    wiz.apply(none)
+    assert none.tools == "none"
+    assert "tools none" in wiz.summary()
+
+    # and a harness without the section sends nothing at all
+    pick(wiz, "profile", "work/claude")
+    other = argparse.Namespace()
+    wiz.apply(other)
+    assert other.tools is None
+
+
+def test_a_tools_flag_typed_beside_the_wizard_prefills_the_boxes():
+    wiz = wizard.Wizard(
+        PiSources(), cwd="/work/repo",
+        defaults=argparse.Namespace(profile="nc:pi", tools="none"),
+    )
+    assert wiz.value("tool:full_read") is False
+    assert wiz.value("tool:scratch") is False
+    answers = argparse.Namespace()
+    wiz.apply(answers)
+    assert answers.tools == "none"
+
+
+def test_an_old_daemon_without_tools_makes_no_pi_rows():
+    class OldSources(PiSources):
+        def harnesses(self):
+            return [
+                {**h, "tools": []} if h.get("name") == "pi" else h
+                for h in super().harnesses()
+            ]
+
+    wiz = form(sources=OldSources())
+    pick(wiz, "profile", "nc/pi")
+    assert "tool:full_read" not in [f.key for f in wiz.fields]
+    answers = argparse.Namespace()
+    wiz.apply(answers)
+    assert answers.tools is None
+
+
 def test_claude_keeps_its_own_permission_checkbox_layout():
     class ClaudeSources(FakeSources):
         def harnesses(self):
@@ -1550,6 +1662,96 @@ def test_spawn_codex_runtime_section_disappears_for_a_claude_parent():
     assert wiz.field("codex_yolo").hidden
     assert wiz.field("codex_sandbox").hidden
     assert "CODEX RUNTIME" not in "\n".join(wiz.render(90, 40))
+
+
+class PiSpawnSources(FakeSpawnSources, PiSources):
+    """Spawn sources with Pi metadata and a Pi parent."""
+
+    def __init__(self, *, report=None, tools=None, harness="pi"):
+        parent = {
+            "name": "lead", "status": "idle", "harness": harness,
+            "profile": "nc:pi" if harness == "pi" else "work:claude",
+            "cwd": "/work/repo",
+        }
+        if tools is not None:
+            parent["tools"] = list(tools)
+        super().__init__(report=report, sessions=[parent])
+
+
+def test_spawn_pi_tools_default_to_the_parents_own_choice():
+    sources = PiSpawnSources(
+        report={**_open_report(), "may_choose": ["args"]},
+        tools=["scratch"],
+    )
+    wiz = spawn_form(sources=sources)
+    full_read = wiz.field("tool:full_read")
+    scratch = wiz.field("tool:scratch")
+    assert full_read.selectable and scratch.selectable
+    assert "PI RUNTIME" in "\n".join(wiz.render(90, 60))
+    # the parent chose scratch alone, so that is what the child starts from
+    assert full_read.value is False and scratch.value is True
+
+    inherited = argparse.Namespace()
+    wiz.apply(inherited)
+    assert inherited.tools is None
+
+    focus_on(wiz, "tool:full_read")
+    wiz.handle("space")
+    changed = argparse.Namespace()
+    wiz.apply(changed)
+    assert changed.tools == "full_read,scratch"
+
+    focus_on(wiz, "tool:full_read")
+    wiz.handle("space")
+    focus_on(wiz, "tool:scratch")
+    wiz.handle("space")
+    cleared = argparse.Namespace()
+    wiz.apply(cleared)
+    assert cleared.tools == "none"
+
+
+def test_spawn_pi_tools_fall_back_to_the_profile_default_when_the_parent_chose_none():
+    sources = PiSpawnSources(report={**_open_report(), "may_choose": ["args"]})
+    wiz = spawn_form(sources=sources)
+    # no `tools` on the parent's record: the profile's switches stand
+    assert wiz.value("tool:full_read") is True
+    assert wiz.value("tool:scratch") is False
+    answers = argparse.Namespace()
+    wiz.apply(answers)
+    assert answers.tools is None
+
+
+def test_spawn_pi_tools_are_visible_but_locked_without_allow_args():
+    sources = PiSpawnSources(
+        report={**_open_report(), "may_choose": []}, tools=["full_read"],
+    )
+    wiz = spawn_form(sources=sources)
+    full_read = wiz.field("tool:full_read")
+    assert not full_read.hidden and not full_read.selectable
+    assert "spawn.allow_args" in full_read.disabled_note
+    assert "inherited from the parent: enabled" in full_read.disabled_note
+    answers = argparse.Namespace()
+    wiz.apply(answers)
+    assert answers.tools is None
+
+    # a value TYPED on the command line still travels, so the daemon's
+    # refusal is the loud failure it deserves
+    typed = wizard.SpawnWizard(
+        sources, cwd="/work/repo", defaults=argparse.Namespace(tools="none"),
+    )
+    assert typed.value("tool:full_read") is False
+    loud = argparse.Namespace()
+    typed.apply(loud)
+    assert loud.tools == "none"
+
+
+def test_spawn_pi_tools_section_disappears_for_a_claude_parent():
+    wiz = spawn_form(sources=PiSpawnSources(harness="claude"))
+    assert wiz.field("tool:full_read").hidden
+    assert "PI RUNTIME" not in "\n".join(wiz.render(90, 60))
+    answers = argparse.Namespace()
+    wiz.apply(answers)
+    assert answers.tools is None
 
 
 def test_spawn_borrow_picker_includes_the_runtime_profile_auth():

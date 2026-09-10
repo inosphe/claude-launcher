@@ -18,16 +18,23 @@ from typing import Dict
 
 import yaml
 
-from . import config, settings, store
+from . import config, provider_spec, settings, store
 from .profile import Profile
 
 TEMPLATE_FILENAME = "template.yaml"
 
-#: Built-in defaults used until a ``template.yaml`` is written.
-DEFAULT_ENV: Dict[str, str] = {
-    "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "0",
-    "CLAUDE_CODE_AUTO_COMPACT_WINDOW": "400000",
+#: Built-in defaults used until a ``template.yaml`` is written. The template
+#: is a profile *layer* (see :mod:`provider_spec`): the same fields a profile
+#: entry may carry, copied into every new Claude profile.
+DEFAULT_TEMPLATE: dict = {
+    "auto_compact_at": 400000,
+    "harness_options": {
+        "claude": {"env": {"CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "0"}}
+    },
 }
+
+#: Fields :func:`apply_to` copies from the template into a new profile entry.
+LAYER_FIELDS = (*provider_spec.PROFILE_SPEC_FIELDS, provider_spec.HARNESS_OPTIONS_FIELD)
 
 
 def template_path() -> Path:
@@ -46,16 +53,20 @@ def default_document() -> dict:
             data = yaml.safe_load(path.read_text(encoding="utf-8"))
             if isinstance(data, dict):
                 data.setdefault("version", store.VERSION)
-                data.setdefault("template", {"env": dict(DEFAULT_ENV)})
+                data.setdefault("template", _copy(DEFAULT_TEMPLATE))
                 data.setdefault("profiles", {})
                 return data
         except (OSError, yaml.YAMLError):
             pass
     return {
         "version": store.VERSION,
-        "template": {"env": dict(DEFAULT_ENV)},
+        "template": _copy(DEFAULT_TEMPLATE),
         "profiles": {},
     }
+
+
+def _copy(doc: dict) -> dict:
+    return yaml.safe_load(yaml.safe_dump(doc))
 
 
 def ensure_file() -> Path:
@@ -74,7 +85,7 @@ def ensure_file() -> Path:
 
 
 def env() -> Dict[str, str]:
-    """The live default env for new profiles (``template.env`` in the store)."""
+    """The live raw default env (a pre-schema ``template.env`` block, if any)."""
     return store.template_env()
 
 
@@ -83,9 +94,46 @@ def set_env(env_map: Dict[str, str]) -> None:
     store.set_template_env({str(k): str(v) for k, v in env_map.items()})
 
 
+def layer() -> dict:
+    """The template's spec-layer fields (``models``, ``auto_compact_at``, ...)."""
+    block = store.template_block()
+    return {k: block[k] for k in LAYER_FIELDS if k in block}
+
+
 def apply_to(profile: Profile) -> Dict[str, str]:
-    """Merge the template's env defaults into ``profile`` and return the result."""
+    """Copy the template into ``profile`` and return what the profile now carries.
+
+    Spec-layer fields are merged into the profile entry key by key (a field
+    the profile already sets is kept); a pre-schema ``env`` block is merged
+    into the profile's raw ``env`` as before. The returned mapping lists the
+    applied fields and env keys, for the ``create`` summary line.
+    """
+    applied: Dict[str, str] = {}
+    fields = layer()
+    if fields:
+        entry = store.profile_entry(profile.name)
+        for key, value in fields.items():
+            current = entry.get(key)
+            if isinstance(value, dict) and isinstance(current, dict):
+                merged = _merge(value, current)
+            elif current is not None and current != "":
+                continue
+            else:
+                merged = value
+            store.set_profile_field(profile.name, key, merged)
+            applied[key] = str(merged)
     template_env = env()
     if template_env:
-        return settings.set_env(profile, template_env)
-    return settings.get_env(profile)
+        applied.update(settings.set_env(profile, template_env))
+    return applied
+
+
+def _merge(defaults: dict, own: dict) -> dict:
+    """``own`` over ``defaults``, one level of nesting at a time."""
+    out = dict(defaults)
+    for key, value in own.items():
+        if isinstance(value, dict) and isinstance(out.get(key), dict):
+            out[key] = _merge(out[key], value)
+        else:
+            out[key] = value
+    return out

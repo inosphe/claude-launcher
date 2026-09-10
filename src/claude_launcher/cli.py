@@ -37,6 +37,9 @@ from . import (
     herdr,
     lineage,
     migrate as migrate_mod,
+    migrate_config,
+    pi_provider,
+    provider_spec,
     plugins as plugins_mod,
     profile,
     prompt_input,
@@ -137,7 +140,7 @@ def _cmd_create(args: argparse.Namespace) -> int:
         template.ensure_file()
         applied = template.apply_to(p)
         if applied:
-            print(f"applied template env: {', '.join(sorted(applied))}")
+            print(f"applied template: {', '.join(sorted(applied))}")
     if is_claude:
         # A new profile is one more copy of the harness-global state, so it
         # starts at whatever the shared declaration says -- otherwise it is
@@ -306,13 +309,18 @@ def _cmd_template(args: argparse.Namespace) -> int:
     path = template.template_path()
     suffix = "" if path.is_file() else "  (not created; built-in defaults used to bootstrap)"
     print(f"bootstrap template: {path}{suffix}")
+    fields = template.layer()
     env = template.env()
+    if fields:
+        print("defaults applied to new profiles:")
+        for key in sorted(fields):
+            print(f"  {key}: {fields[key]}")
     if env:
-        print("default env (applied to new profiles):")
+        print("default raw env (pre-schema; run `claunch migrate-config`):")
         for key in sorted(env):
             print(f"  {key}={env[key]}")
-    else:
-        print("default env: (none)")
+    if not fields and not env:
+        print("defaults: (none)")
     return 0
 
 
@@ -473,6 +481,7 @@ def _cmd_get_token(args: argparse.Namespace) -> int:
 def _cmd_run(args: argparse.Namespace) -> int:
     p = profile.require_selector(args.name)
     selected = lineage.effective_harness(p)
+    _announce_translation(p, selected)
     # `args` is argparse.REMAINDER, so it also captures launcher flags like
     # --borrow / --add-prompt that appear after the profile name; pull those out
     # here, then drop a leading `--` separator before forwarding the rest.
@@ -489,6 +498,12 @@ def _cmd_run(args: argparse.Namespace) -> int:
             )
         provider_name, rest = _extract_value_flag(rest, "--provider")
         add_prompt, rest = _extract_add_prompt(rest)
+    tools_choice = None
+    entry_for_tools = harnesses.get(selected)
+    if entry_for_tools is not None and entry_for_tools.tools:
+        tools_value, rest = _extract_value_flag(rest, "--tools")
+        if tools_value is not None:
+            tools_choice = parse_tools_flag(tools_value, entry_for_tools)
     passthrough = _strip_separator(rest)
     # Before --add-prompt: that one opens an editor, and answering "which
     # worktree?" after writing a system prompt is the wrong order to be asked
@@ -551,10 +566,117 @@ def _cmd_run(args: argparse.Namespace) -> int:
             provider=provider_name,
             null_token=null_token,
             cwd=str(tree.path) if tree is not None else None,
+            tools=tools_choice,
         )
     finally:
         if labelled:
             herdr.clear_pane_label()
+
+
+def parse_tools_flag(value: str, entry) -> "list[str]":
+    """``--tools a,b`` -> the names; ``--tools none`` -> ``[]``.
+
+    Validated against the harness declaration so a typo fails here rather
+    than as a tool the model never sees.
+    """
+    text = str(value or "").strip()
+    if text.lower() in ("none", "off", ""):
+        return []
+    names = []
+    for part in text.split(","):
+        name = part.strip()
+        if not name:
+            continue
+        if name not in entry.tools:
+            raise profile.ProfileError(
+                f"unknown tool {name!r} for harness {entry.name!r} "
+                f"(known: {', '.join(entry.tools)})"
+            )
+        if name not in names:
+            names.append(name)
+    return names
+
+
+def _cmd_tools(args: argparse.Namespace) -> int:
+    """Show or set a profile's default builtin tools (``harness_options``)."""
+    p = profile.require(args.name)
+    harness_name = args.harness or "pi"
+    entry = harnesses.get(harness_name)
+    if entry is None:
+        raise LineageError(f"unknown harness {harness_name!r}")
+    if not entry.tools:
+        print(f"harness {harness_name!r} declares no builtin tools")
+        return 0
+    changes = {}
+    for name in args.on or []:
+        if name not in entry.tools:
+            raise LineageError(
+                f"unknown tool {name!r} for harness {harness_name!r} "
+                f"(known: {', '.join(entry.tools)})"
+            )
+        changes[name] = True
+    for name in args.off or []:
+        if name not in entry.tools:
+            raise LineageError(
+                f"unknown tool {name!r} for harness {harness_name!r} "
+                f"(known: {', '.join(entry.tools)})"
+            )
+        changes[name] = False
+    if changes:
+        def _mutate(doc: dict) -> None:
+            entry_doc = store._writable_entry(doc, p.name)
+            options = entry_doc.get(provider_spec.HARNESS_OPTIONS_FIELD)
+            if not isinstance(options, dict):
+                options = {}
+                entry_doc[provider_spec.HARNESS_OPTIONS_FIELD] = options
+            block = options.get(harness_name)
+            if not isinstance(block, dict):
+                block = {}
+                options[harness_name] = block
+            switches = block.get("tools")
+            if not isinstance(switches, dict):
+                switches = {}
+                block["tools"] = switches
+            for name, on in changes.items():
+                if on:
+                    switches.pop(name, None)  # "on" is the default: no entry
+                else:
+                    switches[name] = False
+            if not switches:
+                block.pop("tools", None)
+            if not block:
+                options.pop(harness_name, None)
+            if not options:
+                entry_doc.pop(provider_spec.HARNESS_OPTIONS_FIELD, None)
+
+        store.update(_mutate)
+    enabled = set(pi_provider.enabled_tools(p, entry)) if harness_name == "pi" else set()
+    if harness_name != "pi":
+        spec = providers.spec_for(p)
+        switches = spec.options(harness_name).get("tools") or {}
+        enabled = {t for t in entry.tools if switches.get(t, True) is not False}
+    print(f"profile {p.name!r}, harness {harness_name!r}: default builtin tools")
+    for name in entry.tools:
+        print(f"  {name:<12} {'on' if name in enabled else 'off'}")
+    print(
+        "(a session may still choose otherwise: --tools on run/new-session/"
+        "spawn, the wizard's Pi tools row, or the web form)"
+    )
+    return 0
+
+
+def _announce_translation(p, harness_name: str) -> None:
+    """Say before launch what the harness could not carry from the spec."""
+    entry = harnesses.get(harness_name)
+    if entry is None or entry.builtin:
+        return
+    try:
+        translation = runner.harness_translation(p, entry)
+    except runner.RunnerError as exc:
+        print(f"warning: {exc}", file=sys.stderr)
+        return
+    for note in translation.notes:
+        print(f"note: {note}", file=sys.stderr)
 
 
 def _cmd_set_provider(args: argparse.Namespace) -> int:
@@ -615,6 +737,8 @@ def _cmd_providers(_args: argparse.Namespace) -> int:
         if allowed is not None:
             suffix += f"  [harnesses: {', '.join(allowed) or '(none)'}]"
         print(f"  {name}{suffix}")
+        for line in _spec_lines(name, doc):
+            print(f"      {line}")
     rows = []
     for p in profile.list_all():
         eff = providers.resolve_name(p, doc)
@@ -624,6 +748,61 @@ def _cmd_providers(_args: argparse.Namespace) -> int:
         print("profiles using a provider:")
         for n, v in rows:
             print(f"  {n:<20} {v}")
+    return 0
+
+
+def _spec_lines(name: str, doc: dict) -> list:
+    """The harness-neutral description of a provider, one fact per line."""
+    try:
+        spec = providers.spec(name, doc)
+    except providers.ProviderError:
+        return []
+    lines = []
+    if spec.legacy_env is not None:
+        lines.append("legacy env (run `claunch migrate-config`)")
+    for protocol in provider_spec.PROTOCOLS:
+        url = spec.endpoint(protocol)
+        if url:
+            lines.append(f"{protocol}: {url}")
+    if spec.models:
+        lines.append(
+            "models: "
+            + ", ".join(
+                f"{role}={spec.models[role]}"
+                for role in provider_spec.MODEL_ROLES
+                if role in spec.models
+            )
+        )
+    window = []
+    if spec.context_window:
+        window.append(f"context_window={spec.context_window}")
+    if spec.auto_compact_at:
+        window.append(f"auto_compact_at={spec.auto_compact_at}")
+    if window:
+        lines.append("  ".join(window))
+    for harness_name, block in sorted(spec.harness_options.items()):
+        shown = ", ".join(
+            f"{channel}={value}" if not isinstance(value, dict)
+            else f"{channel}: {', '.join(map(str, value))}"
+            for channel, value in block.items()
+        )
+        lines.append(f"{harness_name} options: {shown}")
+    return lines
+
+
+def _cmd_migrate_config(args: argparse.Namespace) -> int:
+    try:
+        report = migrate_config.run(dry_run=args.dry_run)
+    except migrate_config.MigrateConfigError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    verb = "would change" if args.dry_run else "changed"
+    if report.changed:
+        print(f"{verb}:")
+    for line in report.lines:
+        print(line)
+    for line in report.warnings:
+        print(f"warning: {line}", file=sys.stderr)
     return 0
 
 
@@ -1062,6 +1241,23 @@ def build_parser() -> argparse.ArgumentParser:
     p_set.add_argument("token", nargs="?", help="token value; read from stdin if omitted")
     p_set.set_defaults(func=_cmd_set_token)
 
+    p_tools = sub.add_parser(
+        "tools",
+        help="show or set a profile's default builtin tools for a harness "
+        "(pi: full_read); written to harness_options.<harness>.tools",
+    )
+    p_tools.add_argument("name", help="profile name")
+    p_tools.add_argument(
+        "--harness", default=None, help="harness whose tools to set (default: pi)"
+    )
+    p_tools.add_argument(
+        "--on", action="append", metavar="TOOL", help="enable a tool by default"
+    )
+    p_tools.add_argument(
+        "--off", action="append", metavar="TOOL", help="disable a tool by default"
+    )
+    p_tools.set_defaults(func=_cmd_tools)
+
     p_hselect = sub.add_parser(
         "set-harness", help="show, pin or clear a profile's harness"
     )
@@ -1093,7 +1289,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--provider NAME overrides the API provider for this run only; "
         "--add-prompt opens an editor to append text to the system prompt; "
         "--worktree[=NAME] / --no-worktree answer the git-worktree question "
-        "this run would otherwise ask)",
+        "this run would otherwise ask; --tools a,b|none picks the builtin "
+        "tools for a harness that declares them, e.g. PROFILE:pi)",
     )
     p_run.add_argument("name")
     p_run.add_argument(
@@ -1156,6 +1353,19 @@ def build_parser() -> argparse.ArgumentParser:
         help="show what would be removed without deleting anything",
     )
     p_prune.set_defaults(func=_cmd_prune)
+
+    p_mig_cfg = sub.add_parser(
+        "migrate-config",
+        help="rewrite ~/.claunch.yaml from provider/profile `env` to the "
+        "harness-neutral schema (api_key, endpoints, models, context_window, "
+        "auto_compact_at, harness_options); a .v1.bak copy is kept",
+    )
+    p_mig_cfg.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="report what would change without writing",
+    )
+    p_mig_cfg.set_defaults(func=_cmd_migrate_config)
 
     p_migrate = sub.add_parser(
         "migrate",

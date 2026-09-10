@@ -128,6 +128,9 @@ _GATED_FIELDS = (
     # Reasoning effort is emitted as a harness argv/config argument alongside
     # the model, so it has the same override policy and inheritance rules.
     ("effort", "allow_args"),
+    # A session's builtin-tool choice reaches the harness as launch
+    # arguments/env, like the two above.
+    ("tools", "allow_args"),
     ("env", "allow_env"),
     # Last on purpose: it is cut from whatever directory the fields above
     # settled on, so a worktree of a workspace is a worktree of that
@@ -380,6 +383,8 @@ def check(
         "borrow": parent.get("borrow") or None,
         "null_token": bool(parent.get("null_token")),
     }
+    if parent.get("tools") is not None:
+        child["tools"] = list(parent.get("tools") or [])
 
     if request.get("harness"):
         raise SpawnDenied(
@@ -410,6 +415,11 @@ def check(
         if key in ("model", "effort"):
             if key not in request or value is None:
                 continue
+        elif key == "tools":
+            # An explicit empty list is "no tools"; only an absent key
+            # inherits the parent's choice.
+            if key not in request or value is None:
+                continue
         elif value in (None, "", [], {}) or value is False:
             continue
         if not getattr(policy, gate):
@@ -425,6 +435,16 @@ def check(
             child["args"] = [str(a) for a in value]
         elif key in ("model", "effort"):
             child[key] = str(value).strip() or None
+        elif key == "tools":
+            # The same spelling the CLI takes: a list, or "a,b" / "none".
+            if isinstance(value, str):
+                text = value.strip()
+                child["tools"] = (
+                    [] if text.lower() in ("", "none", "off")
+                    else [p.strip() for p in text.split(",") if p.strip()]
+                )
+            else:
+                child["tools"] = [str(v) for v in value]
         elif key == "borrow":
             child["borrow"] = str(value)
             # An explicit borrow replaces inherited tokenlessness — unless
@@ -471,6 +491,8 @@ def check(
                 child["model"] = None
             if "effort" not in request:
                 child["effort"] = None
+            if "tools" not in request:
+                child.pop("tools", None)
             if not request.get("borrow"):
                 child["borrow"] = None
             if not request.get("null_token"):

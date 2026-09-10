@@ -1553,6 +1553,72 @@ def _argv_has_group(argv: List[str], group: Any) -> bool:
     )
 
 
+#: The harness whose builtin tools the forms offer as switches. Named, like
+#: the Codex section: the rows are Pi's and carry Pi's label, so another
+#: harness that one day declares ``tools`` gets its own section rather than
+#: this one.
+PI_HARNESS = "pi"
+
+
+def _tools_names(text: Any) -> Optional[List[str]]:
+    """``--tools`` as typed beside ``--wizard``: absent, ``[]``, or names.
+
+    The same three answers ``cli_sessions`` reads -- ``None`` for "did not
+    say", the literal ``none`` for the empty list -- so a flag pre-fills the
+    checkboxes exactly as it would have filled the request.
+    """
+    if text is None:
+        return None
+    if isinstance(text, (list, tuple)):
+        return [str(name) for name in text]
+    names = [part.strip() for part in str(text).split(",") if part.strip()]
+    if len(names) == 1 and names[0].lower() == "none":
+        return []
+    return names
+
+
+def _tool_name(field: Field) -> str:
+    """The tool a ``tool:<name>`` checkbox stands for."""
+    return field.key.partition(":")[2]
+
+
+def pi_tool_fields(sources: Sources, hint: str) -> List[CheckboxField]:
+    """One checkbox per builtin tool the Pi harness declares.
+
+    Built from the harness list the daemon publishes rather than from a
+    fixed list here, so a tool added to the package appears on the form
+    without the form learning its name. The first row opens the section;
+    all of them are shown and hidden together, so the heading always has
+    a row under it. An older daemon that publishes no ``tools`` yields no
+    rows and no section.
+    """
+    entry = next(
+        (h for h in sources.harnesses() if h.get("name") == PI_HARNESS), {}
+    )
+    fields: List[CheckboxField] = []
+    for name in entry.get("tools") or []:
+        fields.append(CheckboxField(
+            key=f"tool:{name}", label=str(name),
+            section="PI RUNTIME" if not fields else "",
+            hint=hint,
+        ))
+    return fields
+
+
+def _profile_default_tools(detail: dict, fields: List[CheckboxField]) -> List[str]:
+    """The tools a session of this profile gets when nobody says otherwise.
+
+    The daemon publishes it per selector (``profile_details[i].tools``) with
+    the profile's ``harness_options.pi.tools`` switches applied. A daemon
+    that predates the field publishes nothing, and the harness default is
+    every tool it declares.
+    """
+    declared = detail.get("tools")
+    if declared is None:
+        return [_tool_name(f) for f in fields]
+    return [str(name) for name in declared]
+
+
 def _codex_mode_groups(capabilities: dict) -> List[List[str]]:
     """The argv groups controlled by the Codex runtime panel."""
     groups = []
@@ -1702,6 +1768,9 @@ class Wizard(Form):
         self._models_for: Optional[str] = None
         self._preset_model: str = get("model") or ""
         self._preset_effort: str = get("effort") or ""
+        self._tools_for: Optional[str] = None
+        self._tools_default: List[str] = []
+        self._preset_tools: Optional[List[str]] = _tools_names(get("tools", None))
 
         profile_defs = self.sources.profile_options() or [
             {"value": p, "label": p}
@@ -1858,6 +1927,17 @@ class Wizard(Form):
             hint="launch Claude with --dangerously-skip-permissions",
             checked=bool(get("skip_permissions")),
         )
+        # Pi's builtin tools, one checkbox each, in a section of their own
+        # like Codex's. Seeded in `_sync` rather than here: the default for
+        # each is the PROFILE's (its harness_options.pi.tools switches), and
+        # which profile is picked is not known until the rows above are. Not
+        # recalled, for the same reason: the answer the form remembers would
+        # be a deviation from a profile default that may since have changed.
+        self._tool_fields = pi_tool_fields(
+            self.sources,
+            hint="a builtin tool claunch adds to Pi; the default is the "
+                 "profile's (harness_options.pi.tools)",
+        )
 
         meshes = self.sources.meshes() or []
         mesh = ChoiceField(
@@ -1929,6 +2009,7 @@ class Wizard(Form):
             name, profile, model, effort, borrow, null, directory,
             *worktree_fields(""), role,
             resume, fork, skip_permissions, codex_yolo, codex_sandbox,
+            *self._tool_fields,
             args_field, mesh, handle, connect, workflow, context, task,
             # After the task, because the default answer is read from it and
             # the other two are only worth asking once the reader has seen
@@ -2076,6 +2157,23 @@ class Wizard(Form):
         self.field("skip_permissions").hidden = not claude
         self.field("codex_yolo").hidden = not codex_runtime
         self.field("codex_sandbox").hidden = not codex_runtime
+        pi_runtime = harness_name == PI_HARNESS and bool(self._tool_fields)
+        selector = self.value("profile") or ""
+        if pi_runtime and self._tools_for != selector:
+            # Re-seeded per profile, because the default is the profile's:
+            # a box ticked under one profile is not an answer about another.
+            # A flag typed beside --wizard seeds the first Pi profile seen.
+            self._tools_for = selector
+            self._tools_default = _profile_default_tools(detail, self._tool_fields)
+            wanted = (
+                self._preset_tools if self._preset_tools is not None
+                else self._tools_default
+            )
+            self._preset_tools = None
+            for f in self._tool_fields:
+                f.select(_tool_name(f) in wanted)
+        for f in self._tool_fields:
+            f.hidden = not pi_runtime
 
         cwd = self.value("cwd") or self.cwd
         sync_worktree(self, cwd)
@@ -2190,6 +2288,14 @@ class Wizard(Form):
                 yolo=args.codex_yolo,
                 sandbox=args.codex_sandbox,
             )
+        # In --tools' own spelling, and only when the set differs from the
+        # profile's default: an absent key is what tells the daemon to apply
+        # the profile's switches, and "none" is how the empty set travels.
+        args.tools = None
+        if self._tool_fields and not self._tool_fields[0].hidden:
+            chosen = [_tool_name(f) for f in self._tool_fields if f.value]
+            if sorted(chosen) != sorted(self._tools_default):
+                args.tools = ",".join(chosen) or "none"
 
         args.mesh = self.value("mesh") or None
         args.handle = (self.value("handle") or None) if args.mesh else None
@@ -2230,6 +2336,9 @@ class Wizard(Form):
                 + ("YOLO" if self.value("codex_yolo") else "approval prompts")
                 + (" with sandbox" if self.value("codex_sandbox") else " without sandbox")
             )
+        elif self._tool_fields and not self._tool_fields[0].hidden:
+            chosen = [_tool_name(f) for f in self._tool_fields if f.value]
+            parts.append("tools " + (", ".join(chosen) or "none"))
         wt, base = worktree_answer(self)
         if wt is not worktree.NEVER:
             parts.append("worktree " + (wt or "(auto)"))
@@ -2396,6 +2505,8 @@ class SpawnWizard(Form):
         self._codex_base_args: List[str] = []
         self._model_for: Optional[tuple] = None
         self._model_original: str = ""
+        self._tools_for: Optional[tuple] = None
+        self._tools_original: List[str] = []
         # Fixed once, not per render: a name that ticked over between the
         # picker showing it and Create sending it would cut a worktree under
         # a name nobody read.
@@ -2491,6 +2602,18 @@ class SpawnWizard(Form):
             key="effort", label="Reasoning effort",
             hint="reasoning effort for the child (spawn.allow_args decides whether it may change)",
             options=[Option("(harness default)", "")],
+        )
+        # Tools follow effort's shape: a preset seeds the rows on the first
+        # Pi parent, a TYPED value travels even onto a locked row.
+        self._preset_tools: Optional[List[str]] = _tools_names(get("tools", None))
+        self._typed_tools: Optional[str] = (
+            None if d is None or wizard_recall.typed(d, "tools") is None
+            else str(wizard_recall.typed(d, "tools"))
+        )
+        self._tool_fields = pi_tool_fields(
+            self.sources,
+            hint="a builtin tool for the child (spawn.allow_args decides "
+                 "whether it may change)",
         )
         borrow = ChoiceField(
             key="borrow", label="Borrow",
@@ -2622,7 +2745,8 @@ class SpawnWizard(Form):
         return [
             parent, over_limit, name, profile, model, effort, borrow, null, fork,
             workspace,
-            *worktree_fields(""), codex_yolo, codex_sandbox, args_field,
+            *worktree_fields(""), codex_yolo, codex_sandbox,
+            *self._tool_fields, args_field,
             mesh, handle, role, connect, workflow, context, task,
             # The board rows follow the task here too, and read the CHILD's
             # directory rather than this session's -- a spawn into a workspace
@@ -2815,6 +2939,46 @@ class SpawnWizard(Form):
                     f"inherited from the parent: {state} (spawn.allow_args)"
                     if inherits_codex_mode else
                     f"Codex default: {state} (spawn.allow_args to override)"
+                )
+            else:
+                field.disabled_note = ""
+        # The Pi rows, seeded the way model is: from the parent's own choice
+        # when the child keeps its harness, from the profile's default
+        # otherwise. The parent's record carries `tools` only when it was
+        # chosen, so an absent key is the profile default too.
+        pi_runtime = child_harness == PI_HARNESS and bool(self._tool_fields)
+        inherits_tools = (
+            child_harness == parent_info.get("harness")
+            and parent_info.get("tools") is not None
+        )
+        tools_for = (
+            parent, effective_selector, child_harness,
+            tuple(parent_info.get("tools") or ()) if inherits_tools else None,
+        )
+        if pi_runtime and tools_for != self._tools_for:
+            self._tools_for = tools_for
+            inherited_tools = (
+                [str(name) for name in parent_info.get("tools") or []]
+                if inherits_tools
+                else _profile_default_tools(detail, self._tool_fields)
+            )
+            wanted_tools = (
+                self._preset_tools if self._preset_tools is not None
+                else inherited_tools
+            )
+            self._preset_tools = None
+            for field in self._tool_fields:
+                field.select(_tool_name(field) in wanted_tools)
+            self._tools_original = inherited_tools
+        for field in self._tool_fields:
+            field.hidden = not pi_runtime
+            field.disabled = pi_runtime and "args" not in may
+            if field.disabled:
+                state = "enabled" if field.value else "disabled"
+                field.disabled_note = (
+                    f"inherited from the parent: {state} (spawn.allow_args)"
+                    if inherits_tools else
+                    f"profile default: {state} (spawn.allow_args to override)"
                 )
             else:
                 field.disabled_note = ""
@@ -3173,6 +3337,18 @@ class SpawnWizard(Form):
             args.effort = self._typed_effort
         else:
             args.effort = None if selected_effort == inherited_effort else selected_effort
+        # Tools: None inherits (the parent's choice, or the profile default
+        # when the parent made none); a set that differs travels in --tools'
+        # spelling, "none" for the empty one. A locked row sends only what
+        # was TYPED, like effort.
+        args.tools = None
+        if self._tool_fields and not self._tool_fields[0].hidden:
+            if self._tool_fields[0].disabled:
+                args.tools = self._typed_tools
+            else:
+                chosen = [_tool_name(f) for f in self._tool_fields if f.value]
+                if sorted(chosen) != sorted(self._tools_original):
+                    args.tools = ",".join(chosen) or "none"
         # Read through the disable, like the other form: a borrow picked and
         # then greyed out (harness flipped, null said yes) must not travel.
         args.borrow = (

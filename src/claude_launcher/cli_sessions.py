@@ -117,6 +117,28 @@ def _cmd_new_session(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return 1
+    chosen_tools = _tools_answer(getattr(args, "tools", None))
+    if chosen_tools is not None and selected_entry is not None:
+        # The daemon refuses the same two things with a 400; refusing them
+        # here names the harness and its list before a daemon is even started,
+        # the way an unknown model is refused above.
+        if not selected_entry.tools:
+            print(
+                f"error: --tools is not supported by harness {selected!r}; "
+                "it declares no builtin tools",
+                file=sys.stderr,
+            )
+            return 1
+        unknown = [t for t in chosen_tools if t not in selected_entry.tools]
+        if unknown:
+            known = ", ".join(selected_entry.tools)
+            print(
+                f"error: unknown tool{'s' if len(unknown) > 1 else ''} "
+                f"{', '.join(repr(t) for t in unknown)} for harness "
+                f"{selected!r} (known: {known})",
+                file=sys.stderr,
+            )
+            return 1
     if args.borrow:
         try:
             lender_name, lender_harness = profile_mod.split_selector(args.borrow)
@@ -190,6 +212,11 @@ def _cmd_new_session(args: argparse.Namespace) -> int:
         body["model"] = chosen_model
     if getattr(args, "effort", None):
         body["effort"] = args.effort
+    # `is not None`, not truthiness: `[]` is the answer `--tools none` gives
+    # and has to reach the daemon, where an ABSENT key means "the profile's
+    # default".
+    if chosen_tools is not None:
+        body["tools"] = chosen_tools
     # (the daemon echoes both back; _warn_dropped_auth reads that echo)
     # Decided at creation because they are what the session is FOR: a mesh it
     # is not in and a run it does not drive have to be arranged afterwards,
@@ -234,6 +261,7 @@ def _cmd_new_session(args: argparse.Namespace) -> int:
     )
     _warn_dropped_auth(args, info)
     _warn_dropped_model(args, info)
+    _warn_dropped_tools(args, info)
     _print_onboarding(info)
     if args.attach:
         from . import attach as attach_mod
@@ -312,6 +340,37 @@ def _warn_dropped_model(args: argparse.Namespace, info: dict) -> None:
         )
 
 
+def _tools_answer(text: Optional[str]) -> Optional[list]:
+    """``--tools`` as the daemon reads it: absent, ``[]``, or a list of names.
+
+    Three answers, because the daemon reads three: an ABSENT key takes the
+    profile's default (or, on spawn, the parent's choice), an explicit
+    ``[]`` is "no builtin tools", and a list is exactly those. The literal
+    ``none`` is how the empty list is spelled on the command line -- a flag
+    that takes a value has no way to take nothing.
+    """
+    if text is None:
+        return None
+    names = [part.strip() for part in str(text).split(",") if part.strip()]
+    if len(names) == 1 and names[0].lower() == "none":
+        return []
+    return names
+
+
+def _warn_dropped_tools(args: argparse.Namespace, info: dict) -> None:
+    """Report an old daemon that created the session without its tools."""
+    wanted = _tools_answer(getattr(args, "tools", None))
+    if wanted is None:
+        return
+    if "tools" not in info or sorted(info.get("tools") or []) != sorted(wanted):
+        print(
+            "  warning: this daemon ignored the tools choice and the session "
+            "uses its profile default -- restart the daemon before relying on "
+            "--tools",
+            file=sys.stderr,
+        )
+
+
 def _use_spawn_instead(args: argparse.Namespace, parent: str) -> str:
     """The refusal ``new-session`` gives when an agent runs it.
 
@@ -370,9 +429,22 @@ def _use_spawn_instead(args: argparse.Namespace, parent: str) -> str:
         )
     if args.null_token:
         out.append("--null")
-    if getattr(args, "model", None):
-        out.append(f"--model {args.model}")
-        notes.append("--model needs spawn.allow_args")
+    # Both gated by the same key, so they share one note: two notes naming
+    # one switch would read as two things to turn on.
+    gated = []
+    for flag, value in (
+        ("--model", getattr(args, "model", None)),
+        ("--tools", getattr(args, "tools", None)),
+    ):
+        if value:
+            out.append(f"{flag} {value}")
+            gated.append(flag)
+    if gated:
+        notes.append(
+            " and ".join(gated)
+            + (" need" if len(gated) > 1 else " needs")
+            + " spawn.allow_args"
+        )
     for item in args.env or []:
         out.append(f"--env {item!r}" if " " in item else f"--env {item}")
     if args.env:
@@ -530,6 +602,11 @@ def _cmd_spawn(args: argparse.Namespace) -> int:
         payload["model"] = ""
     if getattr(args, "effort", None) == "":
         payload["effort"] = ""
+    # Same again for tools: `[]` is what `--tools none` sends, and the
+    # comprehension above would drop it. Absent means "inherit the parent's".
+    chosen_tools = _tools_answer(getattr(args, "tools", None))
+    if chosen_tools is not None:
+        payload["tools"] = chosen_tools
     try:
         result = client.post(f"/api/sessions/{parent}/children", payload)
     except daemon_client.DaemonClientError as exc:
@@ -561,6 +638,7 @@ def _cmd_spawn(args: argparse.Namespace) -> int:
         print(f"  in {child['cwd']}")
     _warn_dropped_auth(args, child)
     _warn_dropped_model(args, child)
+    _warn_dropped_tools(args, child)
     _print_onboarding(result)
     if args.attach and child.get("name"):
         from . import attach as attach_mod
@@ -1891,6 +1969,12 @@ def register(sub) -> None:
         "haiku/sonnet/opus/fable; Codex: luna/terra/sol)",
     )
     p_new.add_argument("--effort", help="reasoning effort for the selected harness")
+    p_new.add_argument(
+        "--tools", metavar="NAMES",
+        help="comma-separated builtin tools claunch adds to the harness "
+        "(Pi: full_read); omitted takes the profile's default, the literal "
+        "'none' means no builtin tools",
+    )
     auth = p_new.add_mutually_exclusive_group()
     auth.add_argument(
         "--borrow", metavar="NAME",
@@ -2104,6 +2188,12 @@ def register(sub) -> None:
         "by spawn.allow_args when changed",
     )
     p_spawn.add_argument("--effort", help="reasoning effort for the child")
+    p_spawn.add_argument(
+        "--tools", metavar="NAMES",
+        help="comma-separated builtin tools for the child (Pi: full_read); "
+        "inherited when omitted, 'none' means no builtin tools, and governed "
+        "by spawn.allow_args when changed",
+    )
     s_auth = p_spawn.add_mutually_exclusive_group()
     s_auth.add_argument(
         "--borrow", metavar="NAME",
