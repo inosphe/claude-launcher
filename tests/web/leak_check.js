@@ -549,9 +549,13 @@ const sandbox = {
   queueMicrotask,
   location: {
     protocol: "http:", host: "127.0.0.1:8787", hostname: "127.0.0.1",
-    pathname: "/", hash: "", href: "http://127.0.0.1:8787/",
+    pathname: "/", hash: "", search: "", href: "http://127.0.0.1:8787/",
     reload: () => {},
   },
+  // app.js reads `?embed=1` once at load through URLSearchParams; the other
+  // check scripts define no `location` at all, so only this sandbox — which
+  // does, to exercise attach/detach routing — has to carry the query API.
+  URLSearchParams,
   history: { replaceState: () => {}, pushState: () => {} },
   navigator: { userAgent: "node", clipboard: { writeText: async () => {} } },
   matchMedia: () => ({
