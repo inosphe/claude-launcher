@@ -93,6 +93,10 @@ class _FakeDaemon:
         self.stop_calls += 1
         return True
 
+    def restart(self, **kw):
+        self.stop(**kw)
+        return self.ensure_running()
+
     def unreachable_reason(self, report):
         return report.get("why") or "unreachable"
 

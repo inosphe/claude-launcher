@@ -81,6 +81,29 @@ def test_acquire_with_grace_waits_for_predecessor(home):
         contender.release()
 
 
+def test_acquire_with_grace_logs_when_it_gives_up(home, caplog):
+    """A losing grace window leaves a trail in daemon.log, not just an exit.
+
+    claunch-a5l9: the only evidence of the 2026-09-10 failure was one INFO
+    line at the very end (``another daemon holds the lock...``); nothing
+    said the process had been retrying for the 15s before it. This pins that
+    the give-up is logged, and clearly enough to say what happened.
+    """
+    import logging
+
+    from claude_launcher.daemon.__main__ import _acquire_with_grace
+
+    holder = runtime_state.SingletonLock()
+    assert holder.acquire() is True
+    try:
+        contender = runtime_state.SingletonLock()
+        with caplog.at_level(logging.INFO, logger="claunch.daemon"):
+            assert _acquire_with_grace(contender, timeout=0.3, poll=0.05) is False
+        assert "gave up waiting for the singleton lock" in caplog.text
+    finally:
+        holder.release()
+
+
 def test_daemon_config_defaults(home):
     cfg = store.daemon_config()
     assert cfg["host"] == "127.0.0.1"

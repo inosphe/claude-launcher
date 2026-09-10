@@ -279,15 +279,37 @@ def _acquire_with_grace(
     old process keeps holding the lock while its sessions shut down. Retry for
     a grace window instead of losing that race — while still exiting fast in
     the plain double-start case, where the lock holder is actually serving.
+
+    A losing exit here is not necessarily a failure: this window is one
+    successor's patience, and the caller that spawned it (``daemon_client``'s
+    external stop+start flow, in particular) retries the whole spawn with its
+    own backoff when the predecessor is still draining past it — see
+    :func:`claude_launcher.daemon_client.restart`. Logged at INFO regardless,
+    so a run that never comes back leaves a trail in ``daemon.log`` instead of
+    the single line an exit used to leave.
     """
     deadline = time.monotonic() + timeout
+    waited_log = False
     while True:
         if lock.acquire():
             return True
         if daemon_client.is_serving():
             return False
         if time.monotonic() >= deadline:
+            log.info(
+                "gave up waiting for the singleton lock after %.1fs — the "
+                "predecessor still has not released it",
+                timeout,
+            )
             return False
+        if not waited_log:
+            waited_log = True
+            log.info(
+                "singleton lock is held and no daemon answers health checks "
+                "— predecessor may still be draining; retrying for up to "
+                "%.1fs",
+                timeout,
+            )
         time.sleep(poll)
 
 
