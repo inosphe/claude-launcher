@@ -60,7 +60,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
 from .. import config
 from .. import journal as journal_mod
@@ -288,6 +288,58 @@ def resolve_cwd(cwd: Optional[str] = None) -> str:
 
 def cflow_dir(cwd: Optional[str] = None) -> Path:
     return Path(resolve_cwd(cwd)) / ".cflow"
+
+
+#: Where a session may WRITE a workflow for another session to run, relative
+#: to a project directory: ``<cwd>/.cflow/generated/``. A PM plans a child's
+#: procedure as a small overlay here (``extends: improv-worker`` plus the
+#: steps, checks and waits this one child needs) and names the file in the
+#: spawn. It lives under ``.cflow/`` on purpose: that directory is already
+#: machine-local run state (gitignored), so a generated procedure is never
+#: mistaken for a declared one — the project and global layers stay the only
+#: places a workflow is *declared*, and ``cflow ls`` does not list these.
+GENERATED_WORKFLOWS = Path(".cflow") / "generated"
+
+
+def generated_workflows_dir(cwd: Optional[str] = None) -> Path:
+    return cflow_dir(cwd) / "generated"
+
+
+def generated_workflow(ref: str, *, cwd: Optional[str], roots: Sequence[Optional[str]] = ()) -> Path:
+    """The generated workflow file ``ref`` names, or a :class:`WorkflowError`.
+
+    ``ref`` is a ``.yaml``/``.yml`` path — absolute, or relative to ``cwd``
+    (the directory the run will stand in). It is admitted only from the
+    generated directory of ``cwd`` or of one of ``roots`` (the spawning
+    session's directory, so a parent in the main checkout can hand a child
+    in its own worktree a file the parent wrote). Anything else — a declared
+    layer, a file elsewhere in the tree, a path that climbs out with ``..`` —
+    is refused: a spawn names a workflow by NAME for those, and a path that
+    could point anywhere would let a request run any file on the machine as
+    a procedure. The file is not parsed here; the caller loads it so a broken
+    overlay is refused before a session exists for it.
+    """
+    if not ref.endswith((".yaml", ".yml")):
+        raise model.WorkflowError(f"{ref!r} is not a workflow file path")
+    path = Path(ref).expanduser()
+    if not path.is_absolute():
+        path = Path(resolve_cwd(cwd)) / path
+    path = _same(path)
+    allowed = []
+    for base in (cwd, *roots):
+        if not base:
+            continue
+        home = _same(generated_workflows_dir(base))
+        if home not in allowed:
+            allowed.append(home)
+    if not any(path.parent == home for home in allowed):
+        raise model.WorkflowError(
+            f"{ref!r} is outside the generated workflow directory — a spawn may "
+            f"name a workflow file only from {', '.join(str(a) for a in allowed) or GENERATED_WORKFLOWS}"
+        )
+    if not path.is_file():
+        raise model.WorkflowError(f"generated workflow file not found: {path}")
+    return path
 
 
 def scope_dir(cwd: Optional[str] = None, scope: Optional[str] = None) -> Path:

@@ -415,6 +415,62 @@ if a run has been quiet for a while.
 
 ---
 
+## Recipe 6 — a procedure written for one child (PM overlays)
+
+A planning session (the packaged `pm` role, driving `improv-pm`) does not
+give a child a *task* and hope; it gives it a *procedure*. The procedure is
+an ordinary layer file — `extends:` over a declared workflow plus only what
+this one child needs — written where run state lives and named in the
+spawn:
+
+```yaml
+# .cflow/generated/pm1-claunch-x1.yaml
+# generated-by: pm1 issue=claunch-x1 at=2026-09-10T05:00:00Z
+extends: improv-worker
+start: wait-for-parser
+steps:
+  wait-for-parser:                 # this child builds on a sibling's result
+    instructions: the parser branch must have landed before you start
+    checklist:
+      prompt: has the parser landed on master?
+      then: intake
+      items:
+        - id: landed
+          describe: the parser issue is closed with a merge hash
+          check: 'claunch beads show claunch-x0 --json | python -c "import json,sys; sys.exit(0 if json.load(sys.stdin)[0][\"status\"] == \"closed\" else 1)"'
+  review:
+    verify: 'uv run --no-sync pytest tests/test_parser.py -q'
+```
+
+```text
+spawn  name=w-x1  role=worker  issue=claunch-x1  worktree=w-x1-lexer
+       workflow=F:/repo/.cflow/generated/pm1-claunch-x1.yaml
+```
+
+Three properties make this safe enough to hand to an agent:
+
+- **The path is gated.** A spawn accepts a workflow *path* only from the
+  `.cflow/generated/` directory of the child's or the spawning session's
+  directory — never a declared layer, never elsewhere in the tree. The
+  daemon composes the file before the session exists, so a broken overlay
+  is a 400 and not a terminal stuck at its first step.
+- **The run snapshots it.** Editing or deleting the file after `start`
+  changes nothing for that child. To re-plan, let the round end and start a
+  new run on a new file; a live run is only ever moved by a person
+  (`claunch cflow goto`).
+- **Dependencies are checks, not messages.** "Start after the parser lands"
+  is a `checklist` item that reads git or the board and that the daemon
+  re-measures; a promise sent over the mesh is not a contract.
+
+What an overlay should not do: rewrite a declared step's `instructions`
+(the base's rules would then differ for this one child), or remove a gate
+(`peer-review`, `landing`, `landed`, `end-gate`). Adding steps, rewiring
+`next`, and attaching `verify`, `checklist` and `done_when` is the whole of
+its authority — `claunch cflow show <path>` prints the composed graph, and
+that is the check to run before every spawn.
+
+---
+
 ## Authoring guidelines
 
 **Write instructions for a stranger.** Each step is delivered alone — the
