@@ -1392,9 +1392,7 @@ def _cmd_daemon(args: argparse.Namespace) -> int:
         # a stdout nobody will read. Only what is on disk before the stop can
         # be handed back to the asker once a daemon exists again.
         restart_notice.record_request_from_env()
-        daemon_client.stop()
-        time.sleep(0.3)
-        client = daemon_client.ensure_running()
+        client = daemon_client.restart()
         print(f"daemon restarted at {client.base_url}")
         return 0
     if action == "status":
@@ -1678,9 +1676,7 @@ def _force_replace() -> int:
         if os.environ.get("CLAUNCH_SESSION"):
             return _gated_restart()
         restart_notice.record_request_from_env(via="cli-force")
-        daemon_client.stop()
-        time.sleep(0.3)
-        client = daemon_client.ensure_running()
+        client = daemon_client.restart()
         print(f"daemon restarted at {client.base_url}")
         return 0
     if state == daemon_client.NOT_RUNNING:
