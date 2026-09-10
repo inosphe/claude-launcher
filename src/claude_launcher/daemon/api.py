@@ -3496,6 +3496,7 @@ async def _onboard_and_launch(
             cwd=cwd,
             harness=session.sdef.harness,
             parent=parent or "",
+            parent_cwd=manager.get(parent).sdef.cwd if parent else "",
         )
     except Exception:
         manager.discard(name)

@@ -23,6 +23,18 @@
 - 정본을 바꾼 머지가 master에 오르면 리더가 `claunch cflow update --force`로 전역
   레이어도 맞춘다 — 프로젝트 레이어가 없는 워크플로(예: improv-mid)는 전역 사본이
   실제로 도는 파일이다.
+- 세션이 다른 세션을 위해 **쓰는** 워크플로는 정본도 레이어도 아니다. PM 역할
+  (improv-pm)이 자식마다 만드는 절차 파일(overlay)은 `<저장소>/.cflow/generated/`
+  아래에 `<세션>-<이슈 id>.yaml`로 두고, spawn의 `workflow`에 그 **경로**를 댄다 —
+  spawn이 경로를 받는 자리는 이 디렉터리(자식 디렉터리 또는 부모 디렉터리의
+  것)뿐이고, 데몬이 세션을 만들기 전에 파일을 합성해 보고 깨졌으면 400으로
+  거절한다(`cflow/state.generated_workflow`, `daemon/onboard.preflight`). 파일은
+  `extends: improv-worker` 위에 그 자식만의 verify·checklist·스텝을 얹는 짧은
+  레이어이고, 정본 스텝의 instructions를 덮어쓰지 않는다. 런은 시작 시점에 이
+  파일을 스냅샷하므로 실행 중인 자식은 파일을 고쳐도 바뀌지 않는다 — 재계획은
+  새 파일로 새 런이다. `.cflow/`는 gitignore된 런 상태라 이 파일들은 커밋되지
+  않고, `claunch cflow ls`에도 오르지 않는다. `tests/test_cflow_pm.py`가 이
+  경계를 못박는다.
 
 ## 일감의 정본은 beads다
 

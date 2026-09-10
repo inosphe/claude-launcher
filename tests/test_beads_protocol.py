@@ -56,6 +56,7 @@ def test_the_improv_workflows_share_one_beads_rule_block():
     for path in (
         _bundled("improv-leader"),
         _bundled("improv-mid"),
+        _bundled("improv-pm"),
         PROJECT_OVERRIDES / "improv-worker.yaml",
         PROJECT_OVERRIDES / "improv-leader.yaml",
     ):

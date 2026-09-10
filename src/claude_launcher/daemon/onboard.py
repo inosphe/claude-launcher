@@ -68,6 +68,7 @@ from typing import Tuple
 
 from ..cflow import engine as cflow_engine
 from ..cflow import state as cflow_state
+from ..cflow.model import WorkflowError
 from . import harness as harness_mod, mesh_roles
 from .harness import CLAUDE_HARNESS
 from .mesh import MeshError
@@ -287,6 +288,7 @@ def preflight(
     cwd: str,
     harness: str,
     parent: str = "",
+    parent_cwd: str = "",
 ) -> Plan:
     """Check what can be checked without a session, and build its identity.
 
@@ -298,7 +300,17 @@ def preflight(
     ``parent`` names the session that asked for this one. Run
     :func:`inherit_mesh` first when there is one: by the time the identity is
     built the mesh has to be settled, because that is what decides whether the
-    child can be told how to answer its parent at all.
+    child can be told how to answer its parent at all. ``parent_cwd`` is that
+    session's directory — the second place a *generated* workflow file may
+    come from (see below).
+
+    ``workflow`` is normally a declared name. It may instead be a ``.yaml``
+    path into a generated directory (:func:`cflow_state.generated_workflow`):
+    that is how a planning session hands a child a procedure it wrote for
+    that one child. The file is composed here, before any session exists, so
+    an overlay that does not load is a 400 and not a terminal stuck at start;
+    the plan then carries the resolved absolute path, which is what the run
+    records as its source.
     """
     mesh = str(body.get("mesh") or "").strip()
     handle = str(body.get("handle") or "").strip()
@@ -358,7 +370,16 @@ def preflight(
             "'mesh' to join"
         )
 
-    if workflow:
+    if workflow and workflow.endswith((".yaml", ".yml")):
+        try:
+            path = cflow_state.generated_workflow(
+                workflow, cwd=cwd or None, roots=(parent_cwd,)
+            )
+            cflow_state.load_workflow(str(path), cwd or None)
+        except WorkflowError as exc:
+            raise OnboardError(f"generated workflow {workflow!r}: {exc}") from None
+        workflow = str(path)
+    elif workflow:
         available = [name for name, _ in cflow_state.list_workflows(cwd or None)]
         if workflow not in available:
             raise OnboardError(
