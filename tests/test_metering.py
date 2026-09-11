@@ -3,8 +3,9 @@
 The pure parts (the SSE/JSON reader, the config switches, the session header,
 the aggregation) are asserted directly. The part that earns its keep is the
 end-to-end one: a real shim in front of a throwaway upstream that streams an
-Anthropic-shaped completion, and a record with this session's name, its
-token counts and a TPS lands in the launcher home.
+Anthropic-shaped (or, for the ``pi`` harness, an OpenAI-shaped) completion,
+and a record with this session's name, its token counts and a TPS lands in
+the launcher home.
 """
 
 from __future__ import annotations
@@ -17,7 +18,19 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
 
-from claude_launcher import cli, credentials, metering, profile, routing, runner, store
+from claude_launcher import (
+    cli,
+    credentials,
+    harnesses,
+    lineage,
+    metering,
+    pi_provider,
+    profile,
+    routing,
+    runner,
+    settings,
+    store,
+)
 
 
 # --------------------------------------------------------------------------- #
@@ -43,6 +56,35 @@ STREAM = [
     {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "!"}},
     {"type": "message_delta", "delta": {"stop_reason": "end_turn"}, "usage": {"output_tokens": 40}},
     {"type": "message_stop"},
+]
+
+
+def _openai_sse(chunks):
+    out = b""
+    for ch in chunks:
+        out += b"data: " + (ch if isinstance(ch, bytes) else json.dumps(ch).encode()) + b"\n\n"
+    return out
+
+
+def _oa(**kw):
+    return {"id": "chatcmpl-1", "object": "chat.completion.chunk", "model": "deepseek-flash", **kw}
+
+
+OPENAI_STREAM = [
+    _oa(choices=[{"index": 0, "delta": {"role": "assistant", "content": ""}}]),
+    _oa(choices=[{"index": 0, "delta": {"content": "Hi"}}]),
+    _oa(choices=[{"index": 0, "delta": {"content": "!"}, "finish_reason": "stop"}]),
+    # the usage-only chunk a backend sends for stream_options.include_usage
+    _oa(
+        choices=[],
+        usage={
+            "prompt_tokens": 90,
+            "completion_tokens": 25,
+            "total_tokens": 115,
+            "prompt_tokens_details": {"cached_tokens": 64},
+        },
+    ),
+    b"[DONE]",
 ]
 
 
@@ -97,6 +139,48 @@ def test_reader_reads_a_non_streamed_json_answer():
     assert rec["model"] == "glm-5" and rec["output_tokens"] == 12
     assert rec["ttft_ms"] == rec["ttfb_ms"]
     assert rec["counted"] is True
+
+
+def test_reader_follows_an_openai_chat_completion_stream():
+    m = metering.Meter(session="s1", path="/v1/chat/completions")
+    m.headers(200, _Headers({"content-type": "text/event-stream"}))
+    m.chunk(_openai_sse(OPENAI_STREAM[:1]))  # role-only delta: no token yet
+    assert m.first_token is None
+    body = _openai_sse(OPENAI_STREAM[1:])
+    for i in range(0, len(body), 5):
+        m.chunk(body[i:i + 5])
+    rec = m.finish()
+    assert rec["model"] == "deepseek-flash"
+    assert rec["input_tokens"] == 90 and rec["cache_read"] == 64
+    assert rec["cache_write"] is None  # OpenAI has no such count
+    assert rec["output_tokens"] == 25 and rec["counted"] is True
+    assert rec["stream"] is True and rec["ttft_ms"] is not None and rec["tps"]
+
+
+def test_reader_leaves_an_openai_stream_without_usage_uncounted():
+    m = metering.Meter(session=None, path="/v1/chat/completions")
+    m.headers(200, _Headers({"content-type": "text/event-stream"}))
+    m.chunk(_openai_sse(OPENAI_STREAM[:3] + [b"[DONE]"]))  # no include_usage
+    rec = m.finish()
+    assert rec["model"] == "deepseek-flash"
+    assert rec["output_tokens"] is None and rec["counted"] is False
+    assert rec["ttft_ms"] is not None  # timing is still there
+
+
+def test_reader_reads_a_non_streamed_openai_answer():
+    m = metering.Meter(session="s2", path="/v1/chat/completions")
+    m.headers(200, _Headers({"content-type": "application/json"}))
+    doc = {
+        "object": "chat.completion",
+        "model": "glm-5",
+        "choices": [{"message": {"role": "assistant", "content": "x"}}],
+        "usage": {"prompt_tokens": 7, "completion_tokens": 12},
+    }
+    m.chunk(json.dumps(doc).encode())
+    rec = m.finish()
+    assert rec["stream"] is False
+    assert rec["model"] == "glm-5" and rec["output_tokens"] == 12 and rec["input_tokens"] == 7
+    assert rec["cache_read"] is None and rec["counted"] is True
 
 
 def test_reader_records_a_compressed_or_error_body_without_counts():
@@ -215,6 +299,53 @@ def test_a_routing_shim_that_will_not_start_still_fails_the_launch(monkeypatch, 
         routing.apply(env, "deepseek", _doc(routing={"order": ["x"]}))
 
 
+def _pi_profile(home, base="https://omlx.example/"):
+    p = profile.create("omlx")
+    store.update(
+        lambda doc: doc.setdefault("providers", {}).update(
+            {"omlx": {"env": {"ANTHROPIC_BASE_URL": base, "ANTHROPIC_MODEL": "solar-main"}}}
+        )
+    )
+    store.set_profile_field(p.name, "provider", "omlx")
+    credentials.save_token(p, "stored-omlx-token")
+    return profile.require_selector("omlx:pi")
+
+
+def test_pi_projection_goes_through_the_metering_shim_and_asks_for_stream_usage(home, monkeypatch, metering_on):
+    seen = []
+    shim_url = routing.local_url(routing.candidate_ports(routing.fingerprint("https://omlx.example/v1", {}))[0])
+    monkeypatch.setattr(routing, "ensure_shim", lambda upstream, block: seen.append((upstream, block)) or shim_url)
+    p = _pi_profile(home)
+    env = runner.harness_child_env(p, harnesses.get("pi"), base_env={})
+    # the upstream the shim fronts is the OpenAI root, /v1 included; Pi gets
+    # the shim without a trailing slash (its client appends /chat/completions)
+    assert seen == [("https://omlx.example/v1", {})]
+    assert env[pi_provider.ENV_BASE_URL] == shim_url.rstrip("/")
+    assert env[pi_provider.ENV_STREAM_USAGE] == "1"
+    assert pi_provider.ENV_HEADERS not in env  # only the daemon names a session
+    # metering off: the direct URL, and no usage request either
+    monkeypatch.setenv("CLAUNCH_METERING", "0")
+    env = runner.harness_child_env(p, harnesses.get("pi"), base_env={})
+    assert env[pi_provider.ENV_BASE_URL] == "https://omlx.example/v1"
+    assert pi_provider.ENV_STREAM_USAGE not in env
+
+
+def test_pi_session_header_is_set_and_replaced_not_duplicated():
+    env = {pi_provider.ENV_HEADERS: json.dumps({"X-Custom": "1", "x-claunch-session": "old"})}
+    pi_provider.apply_session_header(env, "s9")
+    assert json.loads(env[pi_provider.ENV_HEADERS]) == {"X-Custom": "1", "X-Claunch-Session": "s9"}
+    env = {pi_provider.ENV_HEADERS: "not json"}
+    pi_provider.apply_session_header(env, "s9")
+    assert json.loads(env[pi_provider.ENV_HEADERS]) == {"X-Claunch-Session": "s9"}
+
+
+def test_pi_extension_registers_the_headers_and_the_usage_flag():
+    extension = pi_provider.extension_path().read_text(encoding="utf-8")
+    assert 'process.env.CLAUNCH_PI_STREAM_USAGE === "1"' in extension
+    assert "process.env.CLAUNCH_PI_HEADERS" in extension
+    assert "...(headers ? { headers } : {})" in extension
+
+
 def test_merge_body_with_an_empty_spec_is_the_identity():
     raw = b'{"model":"m"}'
     assert routing.merge_body(raw, {}) is raw
@@ -286,8 +417,11 @@ class _Upstream:
                 self.send_header("content-type", "text/event-stream")
                 self.send_header("transfer-encoding", "chunked")
                 self.end_headers()
-                for ev in STREAM:
-                    chunk = _sse([ev])
+                if self.path.endswith("/chat/completions"):
+                    pieces = [_openai_sse([ch]) for ch in OPENAI_STREAM]
+                else:
+                    pieces = [_sse([ev]) for ev in STREAM]
+                for chunk in pieces:
                     self.wfile.write(b"%x\r\n%s\r\n" % (len(chunk), chunk))
                     self.wfile.flush()
                     time.sleep(0.01)
@@ -300,6 +434,11 @@ class _Upstream:
     def url(self):
         host, port = self.server.server_address[:2]
         return f"http://{host}:{port}/anthropic/"
+
+    @property
+    def openai_url(self):
+        host, port = self.server.server_address[:2]
+        return f"http://{host}:{port}/v1"
 
     def close(self):
         self.server.shutdown()
@@ -366,6 +505,38 @@ def test_a_metering_shim_records_a_streamed_completion_with_its_session(home, up
 
 
 @pytest.mark.slow_shim
+def test_a_metering_shim_records_an_openai_completion_the_way_pi_sends_it(home, upstream, shims):
+    base = pi_provider.fronted_base_url(upstream.openai_url, "omlx")
+    assert routing.is_shim_url(base) and not base.endswith("/")
+    fp = routing.fingerprint(upstream.openai_url, {})
+    req = urllib.request.Request(
+        base + "/chat/completions",
+        data=json.dumps({"model": "m", "stream": True, "stream_options": {"include_usage": True}}).encode(),
+        headers={
+            "content-type": "application/json",
+            "accept-encoding": "gzip",
+            "X-Claunch-Session": "s78",
+            "authorization": "Bearer sk-test",
+        },
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=20) as resp:
+        streamed = resp.read()
+    assert b"[DONE]" in streamed
+    seen = {k.lower(): v for k, v in upstream.requests[-1]["headers"].items()}
+    assert upstream.requests[-1]["path"] == "/v1/chat/completions"
+    assert "x-claunch-session" not in seen
+    assert seen.get("accept-encoding") == "identity"
+    assert seen.get("authorization") == "Bearer sk-test"
+    (rec,) = _wait_for_record(fp)
+    assert rec["session"] == "s78" and rec["path"] == "/chat/completions"
+    assert rec["model"] == "deepseek-flash"
+    assert rec["output_tokens"] == 25 and rec["input_tokens"] == 90 and rec["cache_read"] == 64
+    assert rec["ttft_ms"] is not None and rec["tps"] and rec["tps"] > 0
+    assert rec["upstream"] == upstream.openai_url
+
+
+@pytest.mark.slow_shim
 def test_child_env_of_an_api_key_provider_points_at_a_metering_shim(home, upstream, shims, monkeypatch):
     monkeypatch.delenv("ANTHROPIC_AUTH_TOKEN", raising=False)
 
@@ -419,3 +590,165 @@ def test_daemon_launch_carries_the_session_header_only_behind_a_shim(home, tmp_p
     _, env, _ = harness.build_command(sdef)
     assert env["ANTHROPIC_BASE_URL"] == "https://d/anthropic"
     assert "ANTHROPIC_CUSTOM_HEADERS" not in env
+
+
+def test_daemon_pi_launch_names_the_session_in_the_provider_headers(home, tmp_path, monkeypatch, metering_on):
+    import sys
+
+    from claude_launcher.daemon import harness
+    from claude_launcher.daemon.session import SessionDef
+
+    shim_url = routing.local_url(routing.candidate_ports(routing.fingerprint("https://omlx.example/v1", {}))[0])
+    monkeypatch.setattr(routing, "ensure_shim", lambda upstream, block: shim_url)
+    # a declared pi-adapter harness pointed at an executable that exists
+    store.update(
+        lambda doc: doc.setdefault("harnesses", {}).update(
+            {
+                "keyed": {
+                    "command": sys.executable,
+                    "auth": "api-key",
+                    "token_env": "KEYED_API_KEY",
+                    "home_env": "KEYED_HOME",
+                    "provider_adapter": "pi",
+                }
+            }
+        )
+    )
+    p = profile.create("work")
+    lineage.set_harness(p, "keyed")
+    credentials.save_token(p, "provider-secret")
+    store.update(
+        lambda doc: doc.setdefault("providers", {}).update(
+            {"omlx": {"env": {"ANTHROPIC_BASE_URL": "https://omlx.example/", "ANTHROPIC_MODEL": "solar-main"}}}
+        )
+    )
+    store.set_profile_field("work", "provider", "omlx")
+    sdef = harness.normalize(SessionDef(name="s43", profile="work:keyed", cwd=str(tmp_path)))
+    _, env, _ = harness.build_command(sdef)
+    assert env[pi_provider.ENV_BASE_URL] == shim_url.rstrip("/")
+    assert env[pi_provider.ENV_STREAM_USAGE] == "1"
+    assert json.loads(env[pi_provider.ENV_HEADERS]) == {"X-Claunch-Session": "s43"}
+    assert "ANTHROPIC_CUSTOM_HEADERS" not in env  # that one is Claude Code's
+
+    monkeypatch.setenv("CLAUNCH_METERING", "0")
+    _, env, _ = harness.build_command(sdef)
+    assert env[pi_provider.ENV_BASE_URL] == "https://omlx.example/v1"
+    assert pi_provider.ENV_HEADERS not in env and pi_provider.ENV_STREAM_USAGE not in env
+
+
+# --------------------------------------------------------------------------- #
+# what the web UI shows: a session's latest throughput
+# --------------------------------------------------------------------------- #
+def test_session_summary_is_the_last_call_plus_a_rolling_median(home):
+    for i in range(12):
+        metering.append("fp1", _rec(session="s1", tps=10.0 + i, ttft_ms=100 + i, output_tokens=5,
+                                     ts=f"2026-09-11T10:00:{i:02d}+0900"))
+    metering.append("fp2", _rec(session="s1", tps=99.0, ttft_ms=50, model="other", output_tokens=7,
+                                 ts="2026-09-11T10:01:00+0900"))  # newest, on another shim
+    metering.append("fp1", _rec(session="s2", tps=1.0, ts="2026-09-11T10:02:00+0900"))
+    got = metering.session_summary("s1")
+    assert got["tps"] == 99.0 and got["model"] == "other" and got["ts"] == "2026-09-11T10:01:00+0900"
+    assert got["window"] == metering.SUMMARY_WINDOW  # the last 10 of 13, across both files
+    assert got["tps_median"] == 17.5  # median of 13..21 and 99
+    assert got["counted"] is True and got["ttft_ms"] == 50
+    assert metering.session_summary("s3") is None  # never measured: absence, not zero
+    recs = metering.recent("s1", limit=3)
+    assert [r["tps"] for r in recs] == [20.0, 21.0, 99.0]
+
+
+def test_session_summary_keeps_an_uncounted_last_call_visible(home):
+    metering.append("fp1", _rec(session="s1", tps=40.0, ts="2026-09-11T10:00:00+0900"))
+    metering.append("fp1", _rec(session="s1", tps=None, counted=False, status=502, output_tokens=None,
+                                 ts="2026-09-11T10:00:01+0900"))
+    got = metering.session_summary("s1")
+    assert got["counted"] is False and got["status"] == 502 and got["tps"] is None
+    assert got["tps_median"] == 40.0  # the median is over the counted calls in the window
+
+
+def test_tail_reader_only_reads_the_end_and_rereads_on_change(home, monkeypatch):
+    monkeypatch.setattr(metering, "TAIL_BYTES", 600)
+    for i in range(20):
+        metering.append("fp1", _rec(session="s1", tps=float(i), ts=f"2026-09-11T10:00:{i:02d}+0900"))
+    path = metering.record_file("fp1")
+    recs = metering._tail_records(path)
+    assert 0 < len(recs) < 20 and recs[-1]["tps"] == 19.0  # a bounded read off the end
+    assert metering._tail_records(path) is recs  # unchanged file: the cached parse
+    metering.append("fp1", _rec(session="s1", tps=77.0, ts="2026-09-11T10:01:00+0900"))
+    assert metering._tail_records(path)[-1]["tps"] == 77.0  # it grew: re-read
+
+
+def test_attach_hangs_tps_on_a_session_record_only_when_there_is_one(home):
+    metering.append("fp1", _rec(session="s1", tps=33.0))
+    info = metering.attach({"name": "s1", "status": "busy"})
+    assert info["tps"]["tps"] == 33.0 and info["status"] == "busy"
+    assert "tps" not in metering.attach({"name": "s2"})
+    assert "tps" not in metering.attach({})
+
+
+def test_metering_api_serves_a_sessions_records_and_the_session_list_carries_them(home, tmp_path):
+    import asyncio
+    import sys
+
+    from claude_launcher.daemon.api import build_app
+    from claude_launcher.daemon.harness import SessionDef
+    from claude_launcher.daemon.manager import SessionManager
+    from claude_launcher.daemon.mesh import MeshManager
+
+    store.update(lambda doc: doc.update({
+        "harnesses": {"py": {"command": [sys.executable, "-u", "-c", "import time; time.sleep(60)"]}}
+    }))
+    metering.append("fp1", _rec(session="s1", tps=42.5, ttft_ms=800, model="deepseek-flash",
+                                 ts="2026-09-11T10:00:00+0900"), upstream="https://d/v1")
+    metering.append("fp1", _rec(session="other", tps=5.0, ts="2026-09-11T10:00:01+0900"))
+    bearer = {"Authorization": "Bearer sekrit"}
+
+    async def run():
+        from aiohttp.test_utils import TestClient, TestServer
+
+        mgr = SessionManager(idle_threshold=0.5, scrollback=200, restore_default=True)
+        client = TestClient(TestServer(build_app(
+            mgr, "sekrit", started_at=time.monotonic(), mesh=MeshManager(mgr)
+        )))
+        await client.start_server()
+        try:
+            mgr.create(SessionDef(name="s1", harness="py", cwd=str(tmp_path)))
+            one = await client.get("/api/metering?session=s1", headers=bearer)
+            assert one.status == 200
+            body = await one.json()
+            assert body["session"] == "s1" and body["summary"]["tps"] == 42.5
+            assert [r["session"] for r in body["records"]] == ["s1"]
+            assert body["records"][0]["upstream"] == "https://d/v1"
+            everything = await client.get("/api/metering?limit=1", headers=bearer)
+            body = await everything.json()
+            assert body["session"] is None and body["summary"]["requests"] == 2
+            assert len(body["records"]) == 1 and body["records"][0]["session"] == "other"
+            bad = await client.get("/api/metering?limit=x", headers=bearer)
+            assert bad.status == 400
+            rail = await client.get("/api/sessions?view=rail&state=current", headers=bearer)
+            rows = {s["name"]: s for s in (await rail.json())["sessions"]}
+            assert rows["s1"]["tps"]["tps"] == 42.5 and rows["s1"]["tps"]["model"] == "deepseek-flash"
+            detail = await client.get("/api/sessions/s1/meta", headers=bearer)
+            assert (await detail.json())["session"]["tps"]["tps"] == 42.5
+        finally:
+            await mgr.shutdown_all()
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_web_page_draws_tps_in_the_rail_the_card_the_header_and_over_the_pty():
+    from pathlib import Path
+
+    static = Path(metering.__file__).with_name("web") / "static"
+    html = (static / "index.html").read_text(encoding="utf-8")
+    js = (static / "app.js").read_text(encoding="utf-8")
+    css = (static / "style.css").read_text(encoding="utf-8")
+    assert 'id="term-tps"' in html and 'id="term-tps-overlay"' in html
+    for fn in ("tpsRailLine", "tpsChip", "renderTermTps", "tpsTooltip"):
+        assert f"function {fn}(" in js
+    assert 'typeof tpsRailLine === "function" ? tpsRailLine(s)' in js  # on every rail row
+    assert 'typeof tpsChip === "function" ? tpsChip(name)' in js  # on the open card's head
+    assert 'if (typeof renderTermTps === "function") renderTermTps();' in js  # every poll
+    for sel in ("#session-list .rail-tps-line", ".sess-brief-tps", ".badge.tps", "#term-tps-overlay"):
+        assert sel in css
+    assert "pointer-events: none" in css.split("#term-tps-overlay {", 1)[1].split("}", 1)[0]

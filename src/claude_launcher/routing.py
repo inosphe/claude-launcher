@@ -464,8 +464,8 @@ def ensure_shim(upstream: str, block: Dict) -> str:
         _claim_file(fp).unlink(missing_ok=True)
 
 
-def apply(env: dict, provider_name: str, doc: Optional[dict] = None) -> None:
-    """Point ``env``'s base URL at a shim when ``provider_name`` goes through one.
+def front(upstream: str, provider_name: str, doc: Optional[dict] = None) -> str:
+    """The base URL a harness should talk to for ``provider_name``'s ``upstream``.
 
     Two reasons send a provider through the shim, and they differ in what a
     shim that will not start means:
@@ -478,14 +478,39 @@ def apply(env: dict, provider_name: str, doc: Optional[dict] = None) -> None:
       correctness, so a shim that cannot start is reported on stderr and the
       session launches against the upstream directly.
 
+    ``upstream`` is returned unchanged when neither applies. The claude path
+    (:func:`apply`) and the Pi path (``pi_provider.apply_env``) both come
+    through here so the two harnesses share one policy and one shim per
+    upstream.
+    """
+    doc = store.load() if doc is None else doc
+    block = spec(provider_name, doc)
+    if block:
+        return ensure_shim(upstream, block)
+    if not metering.provider_enabled(provider_name, doc):
+        return upstream
+    try:
+        return ensure_shim(upstream, {})
+    except RoutingError as exc:
+        print(
+            f"claunch: metering shim for provider {provider_name!r} unavailable, "
+            f"launching against {upstream} directly (no TPS records): {exc}",
+            file=sys.stderr,
+        )
+        return upstream
+
+
+def apply(env: dict, provider_name: str, doc: Optional[dict] = None) -> None:
+    """Point ``env``'s ``ANTHROPIC_BASE_URL`` at a shim when ``provider_name``
+    goes through one (see :func:`front` for the policy).
+
     ``default``/``claude`` (the OAuth route) never come here: their env has
     no ``ANTHROPIC_BASE_URL`` from the config file, and that key is the whole
     handle this function has.
     """
     doc = store.load() if doc is None else doc
     block = spec(provider_name, doc)
-    metered = metering.provider_enabled(provider_name, doc)
-    if not block and not metered:
+    if not block and not metering.provider_enabled(provider_name, doc):
         return
     upstream = env.get("ANTHROPIC_BASE_URL")
     if not upstream:
@@ -501,17 +526,7 @@ def apply(env: dict, provider_name: str, doc: Optional[dict] = None) -> None:
     # from the config file. A guard keyed on "looks like loopback" would
     # instead skip the rewrite for a locally hosted upstream — silently
     # dropping the pin, which is the failure this whole module exists to stop.
-    if block:
-        env["ANTHROPIC_BASE_URL"] = ensure_shim(upstream, block)
-        return
-    try:
-        env["ANTHROPIC_BASE_URL"] = ensure_shim(upstream, {})
-    except RoutingError as exc:
-        print(
-            f"claunch: metering shim for provider {provider_name!r} unavailable, "
-            f"launching against {upstream} directly (no TPS records): {exc}",
-            file=sys.stderr,
-        )
+    env["ANTHROPIC_BASE_URL"] = front(upstream, provider_name, doc)
 
 
 # --------------------------------------------------------------------------- #

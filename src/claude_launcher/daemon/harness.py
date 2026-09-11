@@ -24,7 +24,7 @@ from dataclasses import dataclass, field, replace
 from typing import Dict, Iterable, List, Optional, Tuple
 
 from .. import borrowing, harnesses as harness_registry
-from .. import lineage, metering, profile as profile_mod, routing, runner
+from .. import lineage, metering, pi_provider, profile as profile_mod, routing, runner
 from .. import store, transcripts
 from .. import config as launcher_config
 from . import mesh_roles, pty_backend
@@ -967,6 +967,12 @@ def build_command(
             )
         except runner.RunnerError as exc:
             raise HarnessError(str(exc)) from exc
+    if routing.is_shim_url(env.get(pi_provider.ENV_BASE_URL)):
+        # Pi's counterpart of the ``ANTHROPIC_CUSTOM_HEADERS`` line above. It
+        # has to come after ``finalize_harness_env``, which rebuilds the
+        # whole ``CLAUNCH_PI_*`` projection (and decides whether the base URL
+        # is the shim at all).
+        pi_provider.apply_session_header(env, sdef.name)
     # Storage isolation is launcher-owned and cannot be escaped through
     # ``--env``. Claude stays at the historical root; each other supported
     # harness gets its own child directory.

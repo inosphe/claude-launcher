@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, Sequence
 
-from . import providers
+from . import providers, routing
 from .profile import Profile
 
 ADAPTER = "pi"
@@ -36,6 +36,12 @@ ENV_AUTH_HEADER = "CLAUNCH_PI_AUTH_HEADER"
 ENV_CONTEXT_WINDOW = "CLAUNCH_PI_CONTEXT_WINDOW"
 #: Comma-separated names of the builtin tools to register (unset = all).
 ENV_TOOLS = "CLAUNCH_PI_TOOLS"
+#: ``1`` when the base URL is claunch's metering shim: the extension then lets
+#: Pi ask for ``stream_options.include_usage`` so the shim sees token counts.
+ENV_STREAM_USAGE = "CLAUNCH_PI_STREAM_USAGE"
+#: JSON object of extra request headers the extension registers with the
+#: provider; the daemon puts ``X-Claunch-Session`` here (see ``metering``).
+ENV_HEADERS = "CLAUNCH_PI_HEADERS"
 PROJECTION_ENV = frozenset(
     {
         ENV_PROVIDER,
@@ -46,6 +52,8 @@ PROJECTION_ENV = frozenset(
         ENV_AUTH_HEADER,
         ENV_CONTEXT_WINDOW,
         ENV_TOOLS,
+        ENV_STREAM_USAGE,
+        ENV_HEADERS,
     }
 )
 
@@ -174,16 +182,29 @@ def resolve(
 def apply_env(
     profile: Profile, harness, env: dict, *, borrow: Optional[Profile] = None
 ) -> None:
-    """Replace inherited adapter state with this profile's projection."""
+    """Replace inherited adapter state with this profile's projection.
+
+    The base URL goes through :func:`routing.front` like Claude Code's
+    ``ANTHROPIC_BASE_URL`` does: an API-key provider is fronted by the
+    metering shim (or the routing shim when it declares a ``routing``
+    block), and the shim's loopback URL is what Pi registers. When that
+    happened, ``CLAUNCH_PI_STREAM_USAGE=1`` tells the extension to let Pi
+    request usage in the stream -- without it an OpenAI stream carries no
+    token counts and the record would say ``counted: false``.
+    """
     for key in PROJECTION_ENV:
         env.pop(key, None)
     projection = resolve(profile, harness, borrow=borrow)
     if projection is None:
         return
+    auth_source = borrow if borrow is not None else profile
+    base_url = fronted_base_url(
+        projection.base_url, providers.resolve_name(auth_source)
+    )
     env.update(
         {
             ENV_PROVIDER: PI_PROVIDER_NAME,
-            ENV_BASE_URL: projection.base_url,
+            ENV_BASE_URL: base_url,
             ENV_API: projection.api,
             ENV_MODELS: json.dumps(
                 projection.models, ensure_ascii=False, separators=(",", ":")
@@ -194,6 +215,39 @@ def apply_env(
     )
     if projection.context_window:
         env[ENV_CONTEXT_WINDOW] = str(projection.context_window)
+    if routing.is_shim_url(base_url):
+        env[ENV_STREAM_USAGE] = "1"
+
+
+def fronted_base_url(base_url: str, provider_name: str) -> str:
+    """``base_url`` swung to the shim when the provider goes through one.
+
+    The shim's URL comes back without a trailing slash: Pi hands it to the
+    OpenAI client as ``baseURL``, which appends ``/chat/completions`` itself,
+    and the shim forwards that path onto the upstream root (which already
+    ends in ``/v1``).
+    """
+    fronted = routing.front(base_url, provider_name)
+    return fronted.rstrip("/") if fronted != base_url else base_url
+
+
+def apply_session_header(env: dict, session: str) -> None:
+    """Name ``session`` in every request Pi sends through the shim.
+
+    Same purpose as ``metering.apply_session_header`` for Claude Code: the
+    shim is shared by every session on the same upstream, and the header is
+    the only way a record gets the session's name. The extension registers
+    the headers with the provider; the shim strips them before forwarding.
+    """
+    try:
+        headers = json.loads(env.get(ENV_HEADERS) or "{}")
+    except ValueError:
+        headers = {}
+    if not isinstance(headers, dict):
+        headers = {}
+    headers = {k: v for k, v in headers.items() if k.lower() != "x-claunch-session"}
+    headers["X-Claunch-Session"] = session
+    env[ENV_HEADERS] = json.dumps(headers, separators=(",", ":"))
 
 
 def apply_tools_env(

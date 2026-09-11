@@ -181,6 +181,11 @@
       <button id="term-goto" class="term-btn goto-chip" type="button"
               title="scroll the session list to this session's card">⇱ card</button>
       <span id="term-status" class="badge"></span>
+      <!-- This session's latest throughput through the metering shim
+           (tokens/s of the last answer), from the same record the rail row
+           and the card show. Hidden for a session that has none (the OAuth
+           routes never go through the shim). -->
+      <span id="term-tps" class="badge tps hidden"></span>
       <!-- When the daemon will next type into THIS session by itself, and how
            long is left of it. On a session's own header a countdown belonging
            to some other session is a confident lie, so this chip speaks for
@@ -292,7 +297,13 @@
          on top of the thing it is about. Empty and hidden except while the
          current session's briefing is open. -->
     <div id="term-brief-pane" class="hidden"></div>
-    <div id="terminal"></div>
+    <div id="terminal">
+      <!-- The same throughput as the header badge, drawn over the top-right
+           corner of the PTY so it can be read without looking away from the
+           screen. Pointer-transparent: it never takes a click or a selection
+           from the terminal under it. -->
+      <div id="term-tps-overlay" class="hidden" aria-hidden="true"></div>
+    </div>
     <!-- Split mode's bar and pane, under the terminal they halve. The pane
          renders the same material as #/wf/<scope|cwd>; both stay hidden
          unless the header's ⬒ run toggle is on for the attached session
