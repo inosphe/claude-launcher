@@ -37,13 +37,13 @@ import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable, Dict, Iterable, List, Optional, Union
+from typing import Callable, Dict, Iterable, List, Optional, Tuple, Union
 
 import yaml
 
 from .. import atomic, digests
 from . import loops, mesh_policy, mesh_roles, paths, wire
-from .manager import ManagerError, SessionManager
+from .manager import AnySession, ManagerError, SessionManager
 from .session import STATUS_IDLE
 
 log = logging.getLogger("claunch.daemon.mesh")
@@ -657,6 +657,13 @@ class Mesh:
         self.wake = asyncio.Event()
         self.last_append = 0.0  # monotonic time of the last log append
         self._first_pending: Dict[str, float] = {}  # handle -> monotonic
+        #: handle -> (len(messages), len(provisional)) at the last delivery
+        #: tick that found the member's session gone. The tick skips the
+        #: member while nothing has been appended since: a stranded backlog
+        #: never drains by itself, and rescanning the log from a dead
+        #: member's cursor every second is what a 16k-message mesh with 170
+        #: exited members spends half the daemon's CPU on (claunch-qx5c).
+        self._stranded_scan: Dict[str, Tuple[int, int]] = {}
         #: Retired primary/mirror state read off disk, held until the relay
         #: name is known so it can be folded into ``peers`` (see
         #: MeshManager._migrate_v2). None once migrated or not applicable.
@@ -6060,23 +6067,38 @@ class MeshManager:
     async def _deliver_to(
         self, mesh: Mesh, member: Member, *, force: bool = False
     ) -> None:
+        try:
+            session: Optional[AnySession] = self.manager.get(member.session)
+        except ManagerError:
+            session = None  # removed; hold the cursor, deliver on rejoin/respawn
+        gone = session is None or session.exited
+        log_shape = (len(mesh.messages), len(mesh.provisional))
+        if gone and not force and mesh._stranded_scan.get(member.handle) == log_shape:
+            return  # nothing appended since the last look at this dead member
         pending = mesh.pending(member.handle)
+        if gone:
+            if pending:
+                # Hold until respawn (same name, same cursor) — and tell
+                # whoever is waiting on this member, ONCE. Holding is right;
+                # holding in silence is what lets a sender spend its next ten
+                # turns talking to a terminal that closed an hour ago.
+                await self._report_stranded(
+                    mesh, member, pending,
+                    "missing" if session is None else "exited",
+                )
+            else:
+                mesh._first_pending.pop(member.handle, None)
+            # Stamped AFTER the report: the report is itself an append, and
+            # counting it would buy exactly one more full rescan per death.
+            mesh._stranded_scan[member.handle] = (
+                len(mesh.messages), len(mesh.provisional)
+            )
+            return
+        mesh._stranded_scan.pop(member.handle, None)
         if not pending:
             mesh._first_pending.pop(member.handle, None)
             return
-        try:
-            session = self.manager.get(member.session)
-        except ManagerError:
-            # Session removed; hold the cursor, deliver on rejoin/respawn.
-            await self._report_stranded(mesh, member, pending, "missing")
-            return
-        if session.exited:
-            # Hold until respawn (same name, same cursor) — and tell whoever
-            # is waiting on this member, ONCE. Holding is right; holding in
-            # silence is what lets a sender spend its next ten turns talking
-            # to a terminal that closed an hour ago.
-            await self._report_stranded(mesh, member, pending, "exited")
-            return
+        assert session is not None
         # Alive again: arm the report, so a second death is reported afresh
         # rather than swallowed by the first one's latch.
         mesh.activity.setdefault(

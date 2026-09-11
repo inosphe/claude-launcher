@@ -1948,3 +1948,60 @@ def test_mesh_get_answers_which_member_the_asking_session_is(home, tmp_path):
             await client.close()
 
     asyncio.run(run())
+
+
+def test_a_dead_member_is_not_rescanned_while_the_log_is_quiet(home, tmp_path):
+    """A stranded backlog never drains on its own, so the delivery tick used
+    to rescan the log from the dead member's cursor every second -- on a
+    16k-message mesh with 170 exited members that was 1.4M messages a tick
+    and half the daemon's CPU (claunch-qx5c). Now a dead member is looked
+    at once per append; a respawn or a new message brings it back."""
+    _register_py_harness()
+
+    async def run():
+        mgr = _manager()
+        mm = MeshManager(mgr, settle=0.05, busy_hold=5.0)
+        mm.create("m9")
+        a = mgr.create(SessionDef(name="lead9", harness="py", cwd=str(tmp_path)))
+        b = mgr.create(SessionDef(name="w9", harness="py", cwd=str(tmp_path)))
+        for s in (a, b):
+            await _wait_screen(s, "READY")
+        await mm.join("m9", "lead9", handle="leader")
+        await mm.join("m9", "w9", handle="bob")
+        mesh = mm.get("m9")
+        await mm.send("m9", "leader", "bob", "one")
+        await b.send_keys(["quit", "Enter"])
+        await b.wait_for("exited", timeout=10.0, threshold=0.5)
+
+        calls = []
+        real = mesh.pending
+
+        def counted(handle):
+            # Only the delivery tick's scans count: send-time congestion
+            # checks and the policy tick ask ``pending`` for their own reasons.
+            if sys._getframe(1).f_code.co_name == "_deliver_to":
+                calls.append(handle)
+            return real(handle)
+
+        mesh.pending = counted
+        member = mesh.members["bob"]
+        for _ in range(5):
+            await mm._deliver_to(mesh, member)
+        assert calls == ["bob"], "a quiet log was rescanned"
+        # An append is news: the member is looked at again, exactly once.
+        await mm.send("m9", "leader", "bob", "two")
+        for _ in range(3):
+            await mm._deliver_to(mesh, member)
+        assert calls.count("bob") == 2
+        assert len(real("bob")) == 2            # still held for the respawn
+        # A live session is never skipped: the memo clears on revival.
+        revived = mgr.respawn("w9")
+        await revived.wait_for("idle", timeout=20.0, threshold=0.5)
+        await mm._deliver_to(mesh, mesh.members["bob"], force=True)
+        await _wait_drained(mesh, "bob", timeout=20.0)
+        assert "bob" not in mesh._stranded_scan
+
+        await mm.shutdown()
+        await mgr.shutdown_all()
+
+    asyncio.run(run())
