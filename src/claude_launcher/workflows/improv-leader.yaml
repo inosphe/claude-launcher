@@ -725,7 +725,13 @@ steps:
       1. **base를 먼저 맞춘다.** `git rev-list --count <remote>/<base>..master`가
          0이 아니면 `git push <remote> master:refs/heads/<base>` — PR의 base가
          master의 push 사본이어야 GHE가 만드는 머지 커밋의 트리가 로컬
-         --no-ff 머지의 트리와 같다(프리뷰 스윕이 그 트리를 쓴다).
+         --no-ff 머지의 트리와 같다(프리뷰 스윕이 그 트리를 쓴다). 이 push는
+         리더의 자기 판단 범위다(사용자 결정, 2026-09-11) — 단 그 증거는
+         fast-forward다: `git merge-base --is-ancestor <remote>/<base> master`가
+         0일 때만 push한다. 0이 아니면 원격 base에 로컬 master에 없는 커밋이
+         있다는 뜻이고(누군가 원격에 직접 올렸다), 그것은 push로 덮을 일이
+         아니라 사용자에게 올릴 일이다 — 이 PR 후보는 이번 배치에서 빼고
+         이유를 그 이슈에 적는다. `--force`는 어느 경우에도 쓰지 않는다.
       2. **머지는 gh로, tip을 고정해서.** `gh pr merge <url> -R
          <host>/<owner>/<repo> --merge --match-head-commit <tip> --subject
          "<저장소 관례의 한 줄>"` — `--merge`가 merge commit(로컬 --no-ff와
