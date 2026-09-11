@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import sys
 import uuid
 from dataclasses import dataclass, field, replace
@@ -275,6 +276,38 @@ def _resume_field(raw) -> Optional[str]:
 #: passes any of these, the daemon must not pin or restore an id of its own.
 CONVERSATION_FLAGS = ("--continue", "-c", "--resume", "-r", "--session-id")
 
+#: pi's own conversation switches. Any of these in the extra args means the
+#: caller chose the conversation, so the daemon must not pin one of its own.
+PI_HARNESS = "pi"
+PI_CONVERSATION_FLAGS = (
+    "--continue", "-c", "--resume", "-r", "--session", "--fork",
+    "--session-dir", "--no-session",
+)
+
+
+def steers_pi_conversation(args: Iterable[str]) -> bool:
+    return any(
+        a in PI_CONVERSATION_FLAGS
+        or a.startswith(("--session=", "--fork=", "--session-dir="))
+        for a in args
+    )
+
+
+def pi_session_file(pi_home: str, cwd: str, conversation_id: str) -> str:
+    """Where a pinned pi conversation lives: pi's own per-cwd session
+    directory (``<home>/sessions/<encoded cwd>/``, encoded the way pi's
+    ``getDefaultSessionDir`` does it) and a file named by the pinned id.
+
+    Given to ``pi --session <path>`` on every launch: pi starts a fresh
+    conversation AT that path when the file is missing and reopens it when
+    it exists, which is exactly claude's ``--session-id`` / ``--resume``
+    pair in one flag. A restore therefore reopens this session's own
+    conversation and never the cwd's newest one (``--continue``), which in
+    a directory with several pi sessions belongs to somebody else.
+    """
+    safe = "--" + re.sub(r"[/\\:]", "-", re.sub(r"^[/\\]", "", cwd)) + "--"
+    return os.path.join(pi_home, "sessions", safe, f"{conversation_id}.jsonl")
+
 
 def steers_model(args: Iterable[str]) -> bool:
     """Whether free harness args already select a model.
@@ -424,6 +457,19 @@ def normalize(sdef: SessionDef, *, restoring: bool = False) -> SessionDef:
             else:
                 sdef = replace(sdef, conversation_id=str(uuid.uuid4()))
     else:
+        if (
+            sdef.harness == PI_HARNESS
+            and not restoring
+            and not sdef.conversation_id
+            and not steers_pi_conversation(sdef.args)
+        ):
+            # Same contract as claude's pin above: the id is minted once, at
+            # creation, and every relaunch reopens it (see pi_session_file).
+            # An id invented while restoring an old definition would open an
+            # empty conversation under a name that suggests otherwise.
+            sdef = replace(
+                sdef, conversation_id=sdef.resume or str(uuid.uuid4())
+            )
         if not entry.available():
             # Declared but not installed — the state 'pi' ships in. Saying so
             # here is the difference between "install pi" and a PtyError that
@@ -793,6 +839,21 @@ def build_command(
                 )
             except runner.RunnerError as exc:
                 raise HarnessError(str(exc)) from exc
+        if (
+            sdef.harness == PI_HARNESS
+            and sdef.conversation_id
+            and entry.home_env
+            and env.get(entry.home_env)
+            and not steers_pi_conversation(sdef.args)
+        ):
+            argv.extend([
+                "--session",
+                pi_session_file(
+                    env[entry.home_env],
+                    os.path.abspath(sdef.cwd or os.getcwd()),
+                    sdef.conversation_id,
+                ),
+            ])
         if opening and not restoring and entry.opening_transport == "argv":
             # Declared positional-prompt transport, same handoff as Claude's
             # builtin path (and the same length ceiling).

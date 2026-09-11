@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import sys
 
@@ -1023,3 +1024,80 @@ def test_pi_renders_only_while_attached_and_others_always():
     assert harness_registry.get("pi").background_render is False
     assert harness_registry.get("claude").background_render is True
     assert harness_registry.get("codex").background_render is True
+
+
+# --- pi: a pinned conversation file --------------------------------------------
+
+
+def _pi_profile(name: str = "pw"):
+    from claude_launcher import runner  # noqa: F401  (ensures the harness loads)
+    store.update(lambda doc: doc.setdefault("providers", {}).update({"ds": {
+        "api_key": "sk-deepseek",
+        "endpoints": {
+            "anthropic": "https://api.example.com/anthropic",
+            "openai": "https://api.example.com",
+        },
+        "models": {"default": "flash", "small": "flash", "large": "pro"},
+        "context_window": 1_000_000,
+        "auto_compact_at": 900_000,
+    }}))
+    p = profile.create(name)
+    store.set_profile_field(p.name, "provider", "ds")
+    lineage.set_harness(p, "pi")
+    credentials.save_token(p, "stored")
+    return p
+
+
+def test_pi_pins_a_conversation_file_and_reopens_it_on_restore(home, tmp_path, monkeypatch):
+    """pi had no restore path at all: a relaunch started a fresh conversation.
+    Now the definition pins an id at creation and every launch hands pi
+    ``--session <its own file>`` -- pi creates the file when missing and
+    reopens it when present, so a daemon restart or respawn continues the
+    session's own conversation, never the cwd's newest one."""
+    monkeypatch.setattr(type(harness.harness_registry.get("pi")), "available", lambda self: True)
+    p = _pi_profile()
+    sdef = harness.normalize(SessionDef(name="p1", profile=p.name, cwd=str(tmp_path)))
+    assert sdef.conversation_id
+    argv, env, _ = harness.build_command(sdef, opening="hello")
+    path = argv[argv.index("--session") + 1]
+    home_dir = env["PI_CODING_AGENT_DIR"]
+    assert path == harness.pi_session_file(home_dir, str(tmp_path), sdef.conversation_id)
+    assert path.startswith(os.path.join(home_dir, "sessions", "--"))
+    assert path.endswith(f"{sdef.conversation_id}.jsonl")
+    assert "--continue" not in argv
+    assert not any(a.endswith("hello") for a in argv)   # pi's opening is typed, not argv
+
+    restored = harness.normalize(SessionDef.from_dict(sdef.to_dict()), restoring=True)
+    argv2, _, _ = harness.build_command(restored, restoring=True)
+    assert argv2[argv2.index("--session") + 1] == path
+    assert not any(a.endswith("hello") for a in argv2)
+
+
+def test_pi_session_file_encodes_the_cwd_the_way_pi_does(tmp_path):
+    got = harness.pi_session_file("H", r"F:\works\gds6", "abc")
+    assert got == os.path.join("H", "sessions", "--F--works-gds6--", "abc.jsonl")
+    got = harness.pi_session_file("H", "/home/u/proj", "abc")
+    assert got == os.path.join("H", "sessions", "--home-u-proj--", "abc.jsonl")
+
+
+def test_pi_does_not_pin_over_the_callers_own_conversation_choice(home, tmp_path, monkeypatch):
+    monkeypatch.setattr(type(harness.harness_registry.get("pi")), "available", lambda self: True)
+    p = _pi_profile()
+    for args in (["--continue"], ["--session", "x.jsonl"], ["--no-session"]):
+        sdef = harness.normalize(SessionDef(name="p2", profile=p.name, cwd=str(tmp_path), args=args))
+        assert sdef.conversation_id is None
+        argv, _, _ = harness.build_command(sdef)
+        assert argv.count("--session") == (1 if args[0] == "--session" else 0)
+
+
+def test_pi_legacy_definition_without_an_id_restores_as_before(home, tmp_path, monkeypatch):
+    """An id invented while restoring would open an empty conversation under
+    a name that suggests otherwise, so an old record stays unpinned."""
+    monkeypatch.setattr(type(harness.harness_registry.get("pi")), "available", lambda self: True)
+    p = _pi_profile()
+    sdef = harness.normalize(
+        SessionDef(name="p3", profile=p.name, cwd=str(tmp_path)), restoring=True
+    )
+    assert sdef.conversation_id is None
+    argv, _, _ = harness.build_command(sdef, restoring=True)
+    assert "--session" not in argv
