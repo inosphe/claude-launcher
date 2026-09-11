@@ -348,6 +348,7 @@ class Session:
             self.screen,
             foreground=self.is_focused,
             background_delay=background_render_delay,
+            on_overflow=self._on_render_overflow,
         )
         self.tracker = IdleTracker()
         #: Compaction-notice scanner (see :mod:`compacting`): fed every pty
@@ -501,6 +502,29 @@ class Session:
             self._loop.call_soon_threadsafe(self._on_eof)
         except RuntimeError:
             pass  # event loop already closed (daemon teardown)
+
+    def _on_render_overflow(self, dropped: int) -> None:
+        """The render queue hit its cap and shed its oldest bytes.
+
+        Once per overflow episode (see ``ScreenFeeder.submit``). The
+        transcript on disk is complete; only the live grid skipped ahead.
+        Logged at WARNING so the outage trail names the session, and shown
+        to whoever is watching it — the person at the terminal is the one
+        who would otherwise wonder why the screen jumped.
+        """
+        log.warning(
+            "session %r writes faster than it renders: dropped %d unrendered "
+            "bytes (queue cap %d); the transcript log is unaffected",
+            self.sdef.name, dropped, self._feeder._max_pending,
+        )
+        try:
+            self.notify(
+                f"output arrives faster than it can be rendered; {dropped} "
+                "bytes skipped on screen (the log has them)",
+                ttl=30, level="warn",
+            )
+        except Exception:  # a notice must never break the output path
+            log.debug("overflow notice for %r failed", self.sdef.name, exc_info=True)
 
     def _on_output(self, chunk: bytes) -> None:
         if self.exited:

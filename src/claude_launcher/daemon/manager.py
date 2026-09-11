@@ -53,6 +53,15 @@ class SessionManager:
     #: hundreds of those reads, so retries are rate-limited per manager rather
     #: than repeated once per ``get()`` call.
     _CODEX_CLAIM_RETRY_INTERVAL = 1.0
+    #: The interval grows (doubling, up to this) while a claim keeps
+    #: failing, and the claim is abandoned after ``_CODEX_CLAIM_GIVE_UP``
+    #: seconds. A rollout that never matches — the session's cwd is not the
+    #: one Codex recorded (a workspace/cwd mismatch on restore) — otherwise
+    #: means one filesystem scan per second on the event loop for the life
+    #: of the session; on 2026-09-11 that scan, slowed to seconds each by a
+    #: bloated heap, was what kept the daemon from answering at all.
+    _CODEX_CLAIM_RETRY_MAX = 30.0
+    _CODEX_CLAIM_GIVE_UP = 600.0
 
     def __init__(
         self,
@@ -131,6 +140,9 @@ class SessionManager:
             str, Tuple[Session, Path, str, Set[str]]
         ] = {}
         self._next_codex_claim_retry = 0.0
+        self._codex_claim_interval = self._CODEX_CLAIM_RETRY_INTERVAL
+        #: ``time.monotonic()`` when each pending claim was first deferred.
+        self._codex_claim_since: Dict[str, float] = {}
         #: A Codex TUI keeps one process alive across ``/new`` while changing
         #: the rollout UUID.  Each watcher is armed from that exact terminal
         #: command, with a pre-command snapshot, so concurrent Codex sessions
@@ -344,6 +356,9 @@ class SessionManager:
                     cwd,
                     known_codex_sessions,
                 )
+                self._codex_claim_since[session.sdef.name] = time.monotonic()
+                self._codex_claim_interval = self._CODEX_CLAIM_RETRY_INTERVAL
+                self._next_codex_claim_retry = 0.0
                 log.warning(
                     "could not discover Codex conversation id for session %r; "
                     "will retry without blocking session listings",
@@ -367,25 +382,29 @@ class SessionManager:
         now = time.monotonic()
         if now < self._next_codex_claim_retry:
             return
-        self._next_codex_claim_retry = now + self._CODEX_CLAIM_RETRY_INTERVAL
+        self._next_codex_claim_retry = now + self._codex_claim_interval
 
         changed = False
+        found_any = False
         for name, pending in list(self._pending_codex_claims.items()):
             launched, codex_home, cwd, known = pending
             session = self._sessions.get(name)
             if session is not launched or session.sdef.conversation_id:
-                self._pending_codex_claims.pop(name, None)
+                self._drop_codex_claim(name)
                 continue
             conversation_id = codex_sessions.claim_new(
                 codex_home, cwd, known, timeout=0
             )
             if not conversation_id:
+                since = self._codex_claim_since.get(name, now)
+                if now - since >= self._CODEX_CLAIM_GIVE_UP:
+                    self._abandon_codex_claim(session, cwd, now - since)
                 continue
             session.sdef = replace(
                 session.sdef, conversation_id=conversation_id
             )
-            self._pending_codex_claims.pop(name, None)
-            changed = True
+            self._drop_codex_claim(name)
+            changed = found_any = True
             log.info(
                 "discovered delayed Codex conversation id for session %r",
                 name,
@@ -394,6 +413,42 @@ class SessionManager:
             self.persist()
         if not self._pending_codex_claims:
             self._next_codex_claim_retry = 0.0
+            self._codex_claim_interval = self._CODEX_CLAIM_RETRY_INTERVAL
+        elif not found_any:
+            self._codex_claim_interval = min(
+                self._codex_claim_interval * 2, self._CODEX_CLAIM_RETRY_MAX
+            )
+
+    def _drop_codex_claim(self, name: str) -> None:
+        self._pending_codex_claims.pop(name, None)
+        self._codex_claim_since.pop(name, None)
+
+    def _abandon_codex_claim(self, session: Session, cwd: str, waited: float) -> None:
+        """Stop looking for a rollout that has not appeared in the grace window.
+
+        The session keeps running; only the pin is missing, so a restore of
+        it falls back to ``--last`` for its cwd. Said where it will be seen:
+        the daemon log names the session and cwd, and the person watching
+        the session is told on screen.
+        """
+        name = session.sdef.name
+        self._drop_codex_claim(name)
+        log.warning(
+            "gave up discovering the Codex conversation id for session %r "
+            "after %.0fs: no rollout records cwd %r (a workspace/cwd "
+            "mismatch?); the session keeps running unpinned and a restore "
+            "will resume the newest conversation for that cwd",
+            name, waited, cwd,
+        )
+        try:
+            session.notify(
+                "Codex conversation id not found after "
+                f"{int(waited // 60)} min (no rollout for {cwd}); this session "
+                "is unpinned — a restore resumes the cwd's newest conversation",
+                ttl=60, level="warn",
+            )
+        except Exception:  # a notice must never break the manager
+            log.debug("codex give-up notice for %r failed", name, exc_info=True)
 
     def discard(self, name: str) -> None:
         """Drop a staged session that will never start."""
