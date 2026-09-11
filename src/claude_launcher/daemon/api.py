@@ -5005,6 +5005,15 @@ async def h_session_briefing(request: web.Request) -> web.Response:
     cards by name and must tell "gone" from "misconfigured"), 400 when the
     ``llm:`` block is absent or incomplete, 502 when the configured endpoint
     fails. ``?refresh=1`` bypasses the in-memory cache.
+
+    ``?cached=1`` is the read-only mode: the stored briefing is served as it
+    stands and nothing is composed, so no LLM call and no ``llm:`` block are
+    needed. A session with nothing composed yet answers 200 with
+    ``briefing: null`` rather than 404, which keeps 404 meaning one thing
+    here — no such session. The spawn form's connect hover reads this: it
+    fires on a mouse crossing a checkbox, and going through the composing
+    path would spend a generation per look (``compose``'s cache key carries
+    the transcript's mtime, so a live session's key has always moved).
     """
     manager: SessionManager = request.app["manager"]
     name = request.match_info["name"]
@@ -5012,6 +5021,11 @@ async def h_session_briefing(request: web.Request) -> web.Response:
         session = manager.get(name)
     except ManagerError:
         return json_error(404, f"no session named {name!r}")
+    if request.query.get("cached") in ("1", "true"):
+        stored = briefing.cached(name)
+        if stored is None:
+            return json_response({"session": name, "cached": True, "briefing": None})
+        return json_response(stored)
     cfg = briefing.llm_config()
     if not briefing.llm_configured(cfg):
         return json_error(400, "llm not configured")
