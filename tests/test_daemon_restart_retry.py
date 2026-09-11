@@ -142,3 +142,40 @@ def test_restart_succeeds_on_the_first_try_when_nothing_is_racing(home, monkeypa
 
     assert daemon_client.restart() is sentinel
     assert fake_time.sleeps == []
+
+
+# --- the predecessor that still answers ---------------------------------------
+#
+# 2026-09-11 22:18: ``stop()`` gave up after 10s while 63 sessions took 10.4s
+# to drain, daemon.json was still on disk (its unlink had lost a race with a
+# reader), and the listener was still up. ``ensure_running()`` connected to
+# that dying daemon, ``restart()`` handed it back as the successor, nothing
+# was spawned, and there was no daemon at all for 45 minutes.
+
+
+def test_restart_does_not_accept_the_predecessor_as_the_successor(home, monkeypatch):
+    fake_time = _still_draining(monkeypatch)
+    records = iter([
+        {"pid": 111},   # before stop: the predecessor
+        {"pid": 111},   # first ensure_running(): still the predecessor's record
+        {"pid": 222},   # second: the successor announced itself
+    ])
+    monkeypatch.setattr(runtime_state, "read_daemon_json", lambda: next(records))
+    clients = iter(["dying-predecessor", "successor"])
+    monkeypatch.setattr(daemon_client, "ensure_running", lambda: next(clients))
+
+    assert daemon_client.restart() == "successor"
+    assert fake_time.sleeps == [daemon_client.RESTART_BACKOFF_START]
+
+
+def test_a_daemon_that_answers_with_the_lock_free_is_the_successor(home, monkeypatch):
+    """The rejection above is keyed on the lock, so a pid that merely looks
+    familiar does not stall a restart: once the lock is free that process
+    has exited, and whatever answers now is a new daemon (a successor that
+    reused the pid, or a rival start). It is returned, not waited out."""
+    _still_draining(monkeypatch)
+    monkeypatch.setattr(runtime_state, "lock_is_free", lambda: True)
+    monkeypatch.setattr(runtime_state, "read_daemon_json", lambda: {"pid": 111})
+    monkeypatch.setattr(daemon_client, "ensure_running", lambda: "serving")
+
+    assert daemon_client.restart() == "serving"

@@ -280,3 +280,52 @@ def test_the_listener_is_reopened_after_asyncio_closes_it(monkeypatch):
             await runner.cleanup()
 
     asyncio.run(run())
+
+
+def test_health_answers_503_once_a_stop_is_requested(home):
+    """The listener outlives the shutdown request by the whole session drain;
+    a 200 in that window let the restart CLI mistake the dying daemon for
+    the successor (2026-09-11 22:18). Health says 'stopping' instead."""
+    from aiohttp.test_utils import TestClient, TestServer
+
+    async def run():
+        mgr = _manager()
+        app = build_app(mgr, "sekrit", started_at=time.monotonic())
+        client = TestClient(TestServer(app))
+        await client.start_server()
+        try:
+            resp = await client.get("/api/health")
+            assert resp.status == 200 and (await resp.json())["status"] == "ok"
+            app["shutdown_event"].set()
+            resp = await client.get("/api/health")
+            assert resp.status == 503
+            body = await resp.json()
+            assert body["status"] == "stopping" and body["boot_id"] == app["boot_id"]
+        finally:
+            await mgr.shutdown_all()
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_daemon_json_removal_retries_a_windows_share_violation(home, monkeypatch):
+    from claude_launcher.daemon import runtime_state
+    import pathlib
+
+    path = paths.daemon_json()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("{}", encoding="utf-8")
+    real_unlink = pathlib.Path.unlink
+    failures = {"left": 2}
+
+    def flaky(self, *a, **kw):
+        if self == path and failures["left"] > 0:
+            failures["left"] -= 1
+            raise PermissionError(32, "another process has the file open")
+        return real_unlink(self, *a, **kw)
+
+    monkeypatch.setattr(pathlib.Path, "unlink", flaky)
+    monkeypatch.setattr(runtime_state, "REMOVE_RETRY_DELAY", 0.0)
+    runtime_state.remove_daemon_json()
+    assert not path.exists()
+    assert failures["left"] == 0

@@ -619,13 +619,23 @@ async def h_health(request: web.Request) -> web.Response:
     # a browser whose cookie died in the restart still needs to be able to tell
     # "not back yet" from "back, and I must log in again". started_at rides
     # along so the restart notice can say when the new daemon came up.
+    #
+    # 503 once a stop/restart has been requested. The listener stays up until
+    # the very end of teardown (sessions drain first, so attached viewers
+    # see the notice), and a 200 in that window is a lie the restart flow
+    # acts on: with daemon.json still on disk (its unlink lost a race, see
+    # runtime_state.remove_daemon_json) the CLI's ``connect()`` judged the
+    # dying daemon SERVING, ``restart()`` returned it as the successor and
+    # spawned nothing -- 2026-09-11 22:18, no daemon for 45 minutes.
+    stopping = request.app["shutdown_event"].is_set()
     return json_response(
         {
-            "status": "ok",
+            "status": "stopping" if stopping else "ok",
             "version": __version__,
             "boot_id": request.app["boot_id"],
             "started_at": request.app["started_wall"],
-        }
+        },
+        status=503 if stopping else 200,
     )
 
 
