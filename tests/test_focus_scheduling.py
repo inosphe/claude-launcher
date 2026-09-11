@@ -57,3 +57,28 @@ def test_background_feeder_wakes_immediately_when_session_is_focused():
         feeder.close()
 
     asyncio.run(run())
+
+
+def test_capture_renders_the_parked_tail_of_an_attached_only_session():
+    """pi (background_render: false) parks its output while unattached;
+    capture-pane must still show it -- it is the one read that means
+    'somebody is looking' without a viewer being attached."""
+    from claude_launcher.daemon.screen import ScreenState
+
+    async def run():
+        session = object.__new__(Session)
+        session._focused_subscribers = set()
+        session.background_render = False
+        session.screen = ScreenState(40, 5)
+        session._feeder = ScreenFeeder(
+            session.screen, foreground=lambda: False, background_render=False
+        )
+        session._feeder.submit(b"parked words\r\n")
+        await asyncio.sleep(0.05)
+        assert not any("parked" in line for line in session.screen.render_screen())
+        assert any("parked words" in line for line in session.capture())
+        session._feeder.submit(b"more\r\n")
+        await session.screen_synced()
+        assert any("more" in line for line in session.screen.render_screen())
+
+    asyncio.run(run())
