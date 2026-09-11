@@ -244,7 +244,19 @@ name. Nothing in a single tick is wrong when this class of bug is present;
 what is wrong is that the same correct tick leaves something behind, five
 thousand times a day, and only a before/after count can see that.
 
-This wrapper is what makes them run with everything else.
+``checklist_check`` and ``meshmessages_check`` are here late and for a
+reason worth leaving on the record: both existed, both passed, and neither
+was in the list below, so for weeks nothing ran them. ``checklist_check``
+holds the checklist gate's card — that `false` and "could not measure" stay
+two different facts on the page, and that the card never grows an Approve
+button, since that gate is the one stop on the run page no person may
+grant. ``meshmessages_check`` holds the mesh log's tabs and pager: an
+archived conversation stays off the default view without the operator losing
+the route to older records.
+
+This wrapper is what makes them run with everything else — and
+``test_every_harness_is_registered`` is what makes the list below match the
+directory, so the next harness cannot arrive the way those two did.
 
 Skipped, not failed, where node is unavailable: node is a convenience for
 testing this project, never a requirement for using it.
@@ -261,9 +273,11 @@ import pytest
 WEB = Path(__file__).resolve().parent / "web"
 
 
-@pytest.mark.parametrize(
-    "script",
-    [
+# Every harness in tests/web is named here, and `test_every_harness_is_registered`
+# below holds that list to the directory: a file nobody listed is a file nobody
+# runs, and it stays green in the only way that means nothing. Two files sat that
+# way for weeks, both passing when run by hand (claunch-som9.1).
+CHECKS = [
         "layout_check.js",
         "render_check.js",
         "lineage_check.js",
@@ -279,6 +293,7 @@ WEB = Path(__file__).resolve().parent / "web"
         "bulk_check.js",
         "killstate_check.js",
         "owed_check.js",
+        "meshmessages_check.js",
         "panel_check.js",
         "sesssend_check.js",
         "reborrow_check.js",
@@ -345,6 +360,7 @@ WEB = Path(__file__).resolve().parent / "web"
         "wftime_check.js",
         "wfsplit_check.js",
         "askdoor_check.js",
+        "checklist_check.js",
         "railtimer_check.js",
         "termtimer_check.js",
         "mdrender_check.js",
@@ -355,8 +371,10 @@ WEB = Path(__file__).resolve().parent / "web"
         "railprofile_check.js",
         "railcompacting_check.js",
         "railkeys_check.js",
-    ],
-)
+]
+
+
+@pytest.mark.parametrize("script", CHECKS)
 def test_topology_diagram_logic(script):
     node = shutil.which("node")
     if node is None:
@@ -366,3 +384,31 @@ def test_topology_diagram_logic(script):
         capture_output=True, text=True, encoding="utf-8", timeout=60,
     )
     assert proc.returncode == 0, proc.stdout + proc.stderr
+
+
+def test_every_harness_is_registered():
+    """Every `*_check.js` in tests/web is named in CHECKS, and every name in
+    CHECKS is a file that exists.
+
+    CHECKS is what the suite runs; the directory is what the repository has.
+    Nothing kept the two in step, so a harness added without touching this file
+    simply never ran -- not skipped, not reported, absent, with the suite green
+    because nothing asked for it. Two files sat that way, `checklist_check.js`
+    and `meshmessages_check.js`; both passed when run by hand, which is what
+    makes the gap expensive rather than obvious.
+
+    The reverse direction costs one more line and is worth it: a name left in
+    CHECKS after its file is renamed or deleted fails as `cannot locate ...`,
+    and reading that as "the harness broke" sends the next person the wrong way.
+    """
+    assert len(set(CHECKS)) == len(CHECKS), "a harness is listed twice in CHECKS"
+    listed = set(CHECKS)
+    present = {path.name for path in WEB.glob("*_check.js")}
+    assert not present - listed, (
+        "harness files that nothing runs -- add them to CHECKS: "
+        + ", ".join(sorted(present - listed))
+    )
+    assert not listed - present, (
+        "CHECKS names a file that is not in tests/web: "
+        + ", ".join(sorted(listed - present))
+    )
