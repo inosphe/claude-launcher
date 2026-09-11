@@ -53,6 +53,9 @@ class SessionManager:
     #: retried from ordinary manager reads.  One dashboard request can perform
     #: hundreds of those reads, so retries are rate-limited per manager rather
     #: than repeated once per ``get()`` call.
+    #: How long the launch-time wait (off the loop) gives Codex to write
+    #: its rollout before the listing-poll retries take over.
+    _CODEX_CLAIM_LAUNCH_TIMEOUT = 2.0
     _CODEX_CLAIM_RETRY_INTERVAL = 1.0
     #: The interval grows (doubling, up to this) while a claim keeps
     #: failing, and the claim is abandoned after ``_CODEX_CLAIM_GIVE_UP``
@@ -154,6 +157,7 @@ class SessionManager:
         #: command, with a pre-command snapshot, so concurrent Codex sessions
         #: in the same cwd cannot be confused by a cwd-wide "latest" lookup.
         self._codex_switch_tasks: Dict[str, asyncio.Task] = {}
+        self._codex_launch_tasks: Dict[str, asyncio.Task] = {}
 
     # ------------------------------------------------------------------ #
     # lifecycle
@@ -349,30 +353,87 @@ class SessionManager:
             session.seed_screen_from_log()
         session.start(argv, env, cwd)
         if codex_home is not None and known_codex_sessions is not None:
-            conversation_id = codex_sessions.claim_new(
-                codex_home, cwd, known_codex_sessions
+            # The rollout appears a moment after the child starts, and the
+            # scan that waits for it (``claim_new``) polls the whole rollout
+            # directory. Waited for here, on the loop, that is the daemon —
+            # every socket, every keystroke — stopped for the wait: 2.03 s
+            # measured with 162 rollouts (claunch-wpd0). So the wait goes
+            # to a thread, and the pending entry is registered first so the
+            # listing-poll retry (:meth:`_recover_codex_claims`) covers a
+            # rollout that outlasts it.
+            self._pending_codex_claims[session.sdef.name] = (
+                session,
+                codex_home,
+                cwd,
+                known_codex_sessions,
             )
-            if conversation_id:
-                session.sdef = replace(
-                    session.sdef, conversation_id=conversation_id
+            self._codex_claim_since[session.sdef.name] = time.monotonic()
+            self._codex_claim_interval = self._CODEX_CLAIM_RETRY_INTERVAL
+            self._next_codex_claim_retry = 0.0
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                loop = None
+            if loop is not None:
+                task = loop.create_task(
+                    self._claim_codex_launch(
+                        session, codex_home, cwd, known_codex_sessions
+                    )
                 )
-            else:
-                self._pending_codex_claims[session.sdef.name] = (
-                    session,
-                    codex_home,
-                    cwd,
-                    known_codex_sessions,
-                )
-                self._codex_claim_since[session.sdef.name] = time.monotonic()
-                self._codex_claim_interval = self._CODEX_CLAIM_RETRY_INTERVAL
-                self._next_codex_claim_retry = 0.0
-                log.warning(
-                    "could not discover Codex conversation id for session %r; "
-                    "will retry without blocking session listings",
-                    session.sdef.name,
+                self._codex_launch_tasks[session.sdef.name] = task
+                task.add_done_callback(
+                    functools.partial(self._codex_launch_finished, session.sdef.name)
                 )
         self.persist()
         return session
+
+    async def _claim_codex_launch(
+        self,
+        session: Session,
+        codex_home: Path,
+        cwd: str,
+        known: Set[str],
+    ) -> None:
+        """Wait off-loop for a just-launched Codex to write its rollout."""
+        claim = functools.partial(
+            codex_sessions.claim_new,
+            codex_home,
+            cwd,
+            known,
+            timeout=self._CODEX_CLAIM_LAUNCH_TIMEOUT,
+        )
+        try:
+            conversation_id = await asyncio.get_running_loop().run_in_executor(
+                None, claim
+            )
+        except asyncio.CancelledError:
+            return
+        except Exception:
+            log.exception(
+                "could not discover Codex conversation id for session %r",
+                session.sdef.name,
+            )
+            return
+        name = session.sdef.name
+        if self._sessions.get(name) is not session:
+            return
+        if not conversation_id:
+            if name in self._pending_codex_claims:
+                log.info(
+                    "Codex conversation id for session %r not written within "
+                    "%.0fs; listing polls keep looking",
+                    name, self._CODEX_CLAIM_LAUNCH_TIMEOUT,
+                )
+            return
+        if session.sdef.conversation_id:
+            return  # a listing poll claimed it first
+        session.sdef = replace(session.sdef, conversation_id=conversation_id)
+        self._drop_codex_claim(name)
+        self.persist()
+
+    def _codex_launch_finished(self, name: str, task: asyncio.Task) -> None:
+        if self._codex_launch_tasks.get(name) is task:
+            self._codex_launch_tasks.pop(name, None)
 
     def _recover_codex_claims(self) -> None:
         """Claim rollouts that appeared after the launch-time wait expired.

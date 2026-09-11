@@ -195,16 +195,112 @@ def _viewer_left(ws: web.WebSocketResponse, where: str) -> None:
     log.debug("viewer disconnected mid-frame (%s)", where)
 
 
-async def _synced(session) -> None:
+#: How long a repaint or scroll waits for the rendered grid to catch up with
+#: the byte stream before it is answered from the grid as it stands. The
+#: wait is unbounded by nature — the feeder's queue empties only when the
+#: program pauses — and a viewer's output pump (:func:`_unfreeze`) and its
+#: sync lane both sit in it, so it is capped here: a snapshot two seconds
+#: behind a flooding session is a usable screen, and the next chunk repaints
+#: it anyway.
+SYNC_TIMEOUT = 2.0
+
+
+async def _synced(session, timeout: float = SYNC_TIMEOUT) -> None:
     """Let the rendered grid catch up before it is replayed to a viewer.
 
     A repaint is a snapshot: sent mid-render it would show a half-drawn
     screen and stay that way until the next output arrived. Dead sessions
-    have no feeder and nothing pending, hence the getattr.
+    have no feeder and nothing pending, hence the getattr. Bounded by
+    ``timeout`` (see :data:`SYNC_TIMEOUT`).
     """
     synced = getattr(session, "screen_synced", None)
-    if synced is not None:
-        await synced()
+    if synced is None:
+        return
+    try:
+        await asyncio.wait_for(synced(), timeout)
+    except asyncio.TimeoutError:
+        log.debug("render sync timed out after %.1fs; repainting as is", timeout)
+
+
+class _SyncLane:
+    """The controls that wait on the rendered grid, served off the receive loop.
+
+    ``repaint`` and ``scroll`` answer with a snapshot of the grid, so they
+    wait for the feeder to catch up (:func:`_synced`). Awaited inline in the
+    socket's receive loop, that wait held every keystroke behind it: a
+    person who switched into a Codex session mid-burst (attach sends a
+    repaint on focus-in; the web terminal a scroll before any key typed
+    while scrolled back) then typed, pressed Escape, pressed Ctrl-C — and
+    nothing reached the PTY until the burst ended, while the session-line
+    box, which goes through ``/keys`` and not this socket, kept working
+    (2026-09-11, claunch-wpd0).
+
+    So those two controls queue here and one task serves them in order,
+    and keystrokes never wait behind them. Frames waiting together are
+    coalesced: scroll deltas sum, and a repaint is subsumed by a scroll,
+    which repaints anyway. Everything else (resize, typing, focus, ping,
+    notice) is cheap and stays inline.
+    """
+
+    def __init__(self, ws, session, state: "ViewerState") -> None:
+        self._ws = ws
+        self._session = session
+        self._state = state
+        self._scroll = 0
+        self._scrolled = False
+        self._repaint = False
+        self._task: Optional[asyncio.Task] = None
+
+    @property
+    def busy(self) -> bool:
+        """Whether a control is being served (or waiting to be) right now."""
+        return self._task is not None and not self._task.done()
+
+    def submit(self, raw: str) -> bool:
+        """Take ``raw`` if it is a control this lane serves; False otherwise,
+        and the caller handles it inline."""
+        try:
+            msg = json.loads(raw)
+        except ValueError:
+            return False
+        if not isinstance(msg, dict):
+            return False
+        kind = msg.get("type")
+        if kind == "scroll":
+            try:
+                lines = int(msg["lines"])
+            except (KeyError, ValueError, TypeError):
+                return True  # malformed, and _handle_control would drop it too
+            self._scroll += lines
+            self._scrolled = True
+        elif kind == "repaint":
+            self._repaint = True
+        else:
+            return False
+        if not self.busy:
+            self._task = asyncio.get_running_loop().create_task(self._run())
+        return True
+
+    async def _run(self) -> None:
+        try:
+            while self._scrolled or self._repaint:
+                if self._scrolled:
+                    lines, self._scroll = self._scroll, 0
+                    self._scrolled = self._repaint = False
+                    raw = json.dumps({"type": "scroll", "lines": lines})
+                else:
+                    self._repaint = False
+                    raw = json.dumps({"type": "repaint"})
+                await _handle_control(self._ws, self._session, raw, self._state)
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 — the socket is going, or went
+            log.debug("sync lane stopped", exc_info=True)
+
+    def close(self) -> None:
+        if self._task is not None:
+            self._task.cancel()
+            self._task = None
 
 
 async def terminal_ws(request: web.Request) -> web.WebSocketResponse:
@@ -289,50 +385,11 @@ async def terminal_ws(request: web.Request) -> web.WebSocketResponse:
         await ws.send_bytes(session.screen.repaint_sequence(0))
 
         sender = asyncio.ensure_future(_pump_to_client(ws, queue, session, state))
+        lane = _SyncLane(ws, session, state)
         try:
-            async for msg in ws:
-                if msg.type == WSMsgType.BINARY:
-                    # A binary frame is a human at a keyboard (attach or the
-                    # web terminal); the mark parks automated deliveries so
-                    # they don't type into a message being composed. The
-                    # keystrokes go with it, because *when* they last typed
-                    # is only half the question — the other half is whether
-                    # what they typed is still sitting in the composer
-                    # unsent, and only these bytes can say (Session.
-                    # note_human_input / draft_state_from_bytes).
-                    if _is_codex_osc_color_response(session.sdef.harness, msg.data):
-                        continue
-                    session.note_human_input(at_terminal=True, data=msg.data)
-                    try:
-                        await session.write_bytes(msg.data)
-                    except SessionGone:
-                        # The child is gone — it died under this socket, or it
-                        # was already gone when the viewer arrived and the
-                        # repaint handed its terminal the program's mouse
-                        # modes back, so a mouse movement became a write. Say
-                        # which before the socket ends: a close with nothing
-                        # behind it is indistinguishable from a dropped
-                        # network, and a client that guesses "network" will
-                        # reconnect into the very same repaint and do this
-                        # again. A duplicate of the pump's own exit frame is
-                        # harmless — clients act on the first.
-                        try:
-                            await ws.send_str(
-                                json.dumps(
-                                    {
-                                        "type": "exit",
-                                        "code": getattr(session, "exit_code", None),
-                                    }
-                                )
-                            )
-                        except Exception:  # noqa: BLE001 — the socket is going anyway
-                            pass
-                        break
-                elif msg.type == WSMsgType.TEXT:
-                    await _handle_control(ws, session, msg.data, state)
-                elif msg.type in (WSMsgType.CLOSE, WSMsgType.ERROR):
-                    break
+            await _pump_from_client(ws, session, state, lane)
         finally:
+            lane.close()
             sender.cancel()
             try:
                 await sender
@@ -469,6 +526,65 @@ async def _cli_control(
     elif kind == "restart":
         shell.restart()
 
+
+async def _pump_from_client(
+    ws,
+    session: Session,
+    state: ViewerState,
+    lane: "_SyncLane",
+) -> None:
+    """The socket's receive loop: keystrokes to the PTY, controls to their
+    handlers. Returns when the socket ends.
+
+    Keystrokes (BINARY) are written here, inline, and must never wait behind
+    a control: the two controls that answer with a snapshot of the rendered
+    grid (``repaint``, ``scroll``) go to ``lane`` instead, because their wait
+    for the render to catch up (:func:`_synced`) is unbounded while the
+    program keeps writing.
+    """
+    async for msg in ws:
+        if msg.type == WSMsgType.BINARY:
+            # A binary frame is a human at a keyboard (attach or the
+            # web terminal); the mark parks automated deliveries so
+            # they don't type into a message being composed. The
+            # keystrokes go with it, because *when* they last typed
+            # is only half the question — the other half is whether
+            # what they typed is still sitting in the composer
+            # unsent, and only these bytes can say (Session.
+            # note_human_input / draft_state_from_bytes).
+            if _is_codex_osc_color_response(session.sdef.harness, msg.data):
+                continue
+            session.note_human_input(at_terminal=True, data=msg.data)
+            try:
+                await session.write_bytes(msg.data)
+            except SessionGone:
+                # The child is gone — it died under this socket, or it
+                # was already gone when the viewer arrived and the
+                # repaint handed its terminal the program's mouse
+                # modes back, so a mouse movement became a write. Say
+                # which before the socket ends: a close with nothing
+                # behind it is indistinguishable from a dropped
+                # network, and a client that guesses "network" will
+                # reconnect into the very same repaint and do this
+                # again. A duplicate of the pump's own exit frame is
+                # harmless — clients act on the first.
+                try:
+                    await ws.send_str(
+                        json.dumps(
+                            {
+                                "type": "exit",
+                                "code": getattr(session, "exit_code", None),
+                            }
+                        )
+                    )
+                except Exception:  # noqa: BLE001 — the socket is going anyway
+                    pass
+                break
+        elif msg.type == WSMsgType.TEXT:
+            if not lane.submit(msg.data):
+                await _handle_control(ws, session, msg.data, state)
+        elif msg.type in (WSMsgType.CLOSE, WSMsgType.ERROR):
+            break
 
 async def _pump_to_client(
     ws: web.WebSocketResponse,

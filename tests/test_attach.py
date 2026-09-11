@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import asyncio
 import ctypes
+import json
+import os
 import sys
 import threading
 import time
@@ -567,3 +569,26 @@ class _NoopRawTerminal:
 
     def __exit__(self, *exc):
         return False
+
+
+def test_split_focus_events_reports_both_directions():
+    assert attach_mod.split_focus_events(b"\x1b[Iabc") == (b"abc", True, False)
+    assert attach_mod.split_focus_events(b"a\x1b[Ob") == (b"ab", False, True)
+    assert attach_mod.split_focus_events(b"\x1b[O\x1b[I") == (b"", True, True)
+    assert attach_mod.split_focus_events(b"abc") == (b"abc", False, False)
+
+
+def test_focus_in_sends_resize_focus_and_repaint_focus_out_unfocuses():
+    """An attached terminal must be a *focused* viewer to the daemon (normal
+    child priority, foreground rendering) — the web terminal says so with a
+    ``focus`` frame, and so must attach (claunch-wpd0)."""
+    size = os.terminal_size((120, 40))
+    frames = [json.loads(f) for f in attach_mod.focus_control_frames(True, False, size)]
+    assert frames == [
+        {"type": "resize", "cols": 120, "rows": 40},
+        {"type": "focus", "focused": True},
+        {"type": "repaint"},
+    ]
+    frames = [json.loads(f) for f in attach_mod.focus_control_frames(False, True, size)]
+    assert frames == [{"type": "focus", "focused": False}]
+    assert attach_mod.focus_control_frames(False, False, size) == []

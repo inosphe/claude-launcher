@@ -18,7 +18,7 @@ import json
 import shutil
 import sys
 import threading
-from typing import Optional, Tuple
+from typing import List, Optional, Tuple
 
 from . import herdr, worktree
 
@@ -63,8 +63,8 @@ def split_detach(data: bytes) -> Tuple[bytes, bool]:
     return data[:idx], True
 
 
-def strip_focus_events(data: bytes) -> Tuple[bytes, bool]:
-    """Remove focus in/out reports from ``data``; True when focus-in was seen.
+def split_focus_events(data: bytes) -> Tuple[bytes, bool, bool]:
+    """Remove focus in/out reports from ``data``; says which were seen.
 
     The session's programs never enabled focus reporting themselves (the
     bridge did, locally), so the reports must not reach the PTY. Only complete
@@ -72,11 +72,42 @@ def strip_focus_events(data: bytes) -> Tuple[bytes, bool]:
     a trailing ``ESC`` would delay a real Escape keypress.
     """
     focus_in = _FOCUS_IN in data
+    focus_out = _FOCUS_OUT in data
     if focus_in:
         data = data.replace(_FOCUS_IN, b"")
     if _FOCUS_OUT in data:
         data = data.replace(_FOCUS_OUT, b"")
+    return data, focus_in, focus_out
+
+
+def strip_focus_events(data: bytes) -> Tuple[bytes, bool]:
+    """:func:`split_focus_events` without the focus-out flag."""
+    data, focus_in, _focus_out = split_focus_events(data)
     return data, focus_in
+
+
+def focus_control_frames(
+    focus_in: bool, focus_out: bool, size
+) -> List[str]:
+    """The control frames a focus change sends, in order.
+
+    ``focus`` is the frame the web terminal sends for a visible tab; without
+    it an attached terminal is a *background* viewer to the daemon — its
+    child runs below normal priority and its screen is rendered on the
+    background budget — even with a person typing into it (claunch-wpd0).
+    Focus-in also re-asserts the size (another viewer may have resized the
+    session meanwhile) and asks for a repaint.
+    """
+    frames: List[str] = []
+    if focus_in:
+        frames.append(
+            json.dumps({"type": "resize", "cols": size.columns, "rows": size.lines})
+        )
+        frames.append(json.dumps({"type": "focus", "focused": True}))
+        frames.append(json.dumps({"type": "repaint"}))
+    elif focus_out:
+        frames.append(json.dumps({"type": "focus", "focused": False}))
+    return frames
 
 
 def ws_url(base_url: str, name: str, *, overlay: bool = False) -> str:
@@ -317,17 +348,11 @@ async def _attach_async(
                 await ws.close()
                 return
             payload, detach = split_detach(data)
-            payload, focus_in = strip_focus_events(payload)
-            if focus_in:
-                # Focus regained: another viewer may have resized the session
-                # meanwhile — re-assert this terminal's size, then repaint.
-                size = shutil.get_terminal_size()
-                await ws.send_str(
-                    json.dumps(
-                        {"type": "resize", "cols": size.columns, "rows": size.lines}
-                    )
-                )
-                await ws.send_str(json.dumps({"type": "repaint"}))
+            payload, focus_in, focus_out = split_focus_events(payload)
+            for frame in focus_control_frames(
+                focus_in, focus_out, shutil.get_terminal_size()
+            ):
+                await ws.send_str(frame)
             if payload:
                 await ws.send_bytes(payload)
             if detach:
@@ -355,6 +380,11 @@ async def _attach_async(
             heartbeat=30,
             max_msg_size=0,
         ) as ws:
+            # A person is at this terminal from the first byte: say so, or the
+            # daemon treats the attach as a background viewer until the
+            # terminal's first focus-in report (which a terminal without
+            # DECSET 1004 never sends).
+            await ws.send_str(json.dumps({"type": "focus", "focused": True}))
             if notice:
                 await ws.send_str(
                     json.dumps(

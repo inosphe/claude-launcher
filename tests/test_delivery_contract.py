@@ -47,7 +47,7 @@ RAW_WRITER_ALLOWLIST = {
     ("daemon/session.py", "paste"): "implements the paste + delayed-CR rule",
     ("daemon/session.py", "send_keys"): "implements the raw keystroke path",
     ("daemon/api.py", "h_session_keys"): "raw keyboard passthrough over HTTP",
-    ("daemon/ws.py", "terminal_ws"): "raw keyboard passthrough over WebSocket",
+    ("daemon/ws.py", "_pump_from_client"): "raw keyboard passthrough over WebSocket (terminal_ws receive loop)",
     ("daemon/ws.py", "cli_ws"): "raw keystroke passthrough to the CLI tab's own shell pty",
 }
 
