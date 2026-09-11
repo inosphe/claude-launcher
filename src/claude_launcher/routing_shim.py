@@ -27,6 +27,7 @@ import argparse
 import asyncio
 import json
 import os
+import ssl
 import sys
 
 import aiohttp
@@ -34,6 +35,11 @@ from aiohttp import web
 from multidict import CIMultiDict
 
 from . import metering, routing
+
+try:
+    import truststore as _truststore
+except ImportError:  # Python < 3.10, or truststore not installed
+    _truststore = None
 
 #: Headers that describe *this* hop and must not be forwarded to the next one.
 #: ``content-length`` is here because the body length changes when the spec is
@@ -180,6 +186,21 @@ async def _shutdown(request: web.Request) -> web.Response:
     return web.json_response({"stopped": request.app["cfg"]["fingerprint"]})
 
 
+def _connector() -> "aiohttp.TCPConnector | None":
+    """Verify upstream TLS against the OS trust store when ``truststore`` is here.
+
+    Same reason as ``daemon/rag.py``: a corporate TLS-inspection root the OS
+    trusts can still fail OpenSSL's own chain checks ("Basic Constraints of CA
+    cert not marked critical" was observed on such a machine), and then every
+    request through the shim is a 502 while the harness's own Node client,
+    validating through the OS, gets through. ``None`` falls back to aiohttp's
+    default context.
+    """
+    if _truststore is None:
+        return None
+    return aiohttp.TCPConnector(ssl=_truststore.SSLContext(ssl.PROTOCOL_TLS_CLIENT))
+
+
 async def _client_session(app: web.Application):
     # No total timeout: a streamed completion legitimately runs for minutes.
     # auto_decompress off keeps the body byte-identical to what the upstream
@@ -187,6 +208,7 @@ async def _client_session(app: web.Application):
     app["session"] = aiohttp.ClientSession(
         timeout=aiohttp.ClientTimeout(total=None, connect=30, sock_read=None),
         auto_decompress=False,
+        connector=_connector(),
     )
     yield
     await app["session"].close()

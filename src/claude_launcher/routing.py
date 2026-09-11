@@ -431,6 +431,15 @@ def ensure_shim(upstream: str, block: Dict) -> str:
             f"{upstream} but none came up (stale {_claim_file(fp)}?)"
         )
     try:
+        # Look once more now that the claim is ours: a caller whose first
+        # ``_find`` ran before a peer's shim bound, and whose claim came after
+        # that peer released it, would otherwise start a second shim on the
+        # next port (observed as two live shims for one pair under four
+        # simultaneous launches).
+        port = _find(fp)
+        if port is not None:
+            _record(fp, port, upstream, block, None)
+            return local_url(port)
         start_port = _free_port(fp)
         if start_port is None:
             raise RoutingError(

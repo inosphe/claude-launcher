@@ -944,11 +944,11 @@ def _cmd_tps(args: argparse.Namespace) -> int:
                     print(line)
     if args.last:
         print(f"last {args.last}:")
-        print(f"  {'ts':<20} {'session':<8} {'model':<28} {'out':>6} {'ttft':>7} {'tps':>7} status")
+        print(f"  {'ts':<20} {'session':<12} {'model':<28} {'out':>6} {'ttft':>7} {'tps':>7} status")
         for rec in records[-args.last:]:
             print(
                 f"  {str(rec.get('ts') or '')[:19]:<20} "
-                f"{str(rec.get('session') or '-'):<8} "
+                f"{str(rec.get('session') or '-')[:12]:<12} "
                 f"{str(rec.get('model') or '-')[:28]:<28} "
                 f"{_fmt(rec.get('output_tokens')):>6} "
                 f"{_fmt(rec.get('ttft_ms'), 'ms'):>7} "
