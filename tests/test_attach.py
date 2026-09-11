@@ -85,7 +85,7 @@ def test_windows_stdin_transcodes_console_code_page_to_utf8(monkeypatch):
     transcodes to the PTY's UTF-8, and a syllable split across two reads
     still comes out whole."""
     payloads = ["웹 데몬".encode("cp949")]
-    split = "어[A".encode("cp949")
+    split = "어\x1b[A".encode("cp949")
     payloads += [split[:1], split[1:]]
 
     class FakeKernel32:
@@ -111,7 +111,7 @@ def test_windows_stdin_transcodes_console_code_page_to_utf8(monkeypatch):
     first = attach_mod._read_stdin_windows()
     second = attach_mod._read_stdin_windows()
     assert first == b""  # the lead byte alone is held back, not mangled
-    assert second == "어[A".encode("utf-8")
+    assert second == "어\x1b[A".encode("utf-8")
 
 
 def test_console_input_unknown_code_page_passes_through(monkeypatch):
@@ -286,6 +286,64 @@ def test_attach_bridge_roundtrip_and_detach(home, tmp_path, monkeypatch):
     asyncio.run(run())
 
 
+def test_attach_shows_its_console_notice_over_the_session(home, tmp_path, monkeypatch):
+    """What attach learns about the local console (its code page) is handed
+    to the daemon as a viewer-local notice and comes back drawn over row 1
+    of the mirrored screen -- the one place a line survives the session's
+    repaint. Nothing of it reaches the PTY."""
+    _register_py_harness()
+    from aiohttp.test_utils import TestClient, TestServer
+
+    chunks = []
+    drawn = threading.Event()
+
+    def fake_write(text):
+        chunks.append(text)
+        if "code page was 949" in "".join(chunks):
+            drawn.set()
+
+    reads = {"n": 0}
+
+    def fake_read():
+        reads["n"] += 1
+        if reads["n"] == 1:
+            assert drawn.wait(15), "the notice never appeared in the byte stream"
+            return b"\x1d"  # detach
+        return b""
+
+    monkeypatch.setattr(attach_mod, "_write_text", fake_write)
+    monkeypatch.setattr(attach_mod, "_read_stdin", fake_read)
+
+    async def run():
+        mgr = SessionManager(idle_threshold=0.5, scrollback=200, restore_default=True)
+        app = build_app(mgr, "sekrit", started_at=time.monotonic())
+        client = TestClient(TestServer(app))
+        await client.start_server()
+        try:
+            session = mgr.create(SessionDef(name="att4", harness="py", cwd=str(tmp_path)))
+            await _wait_screen(session, "READY")
+            base = str(client.make_url("")).rstrip("/")
+            outcome = await asyncio.wait_for(
+                attach_mod._attach_async(
+                    base, "sekrit", "att4", notice=attach_mod.codepage_note(949, True)
+                ),
+                timeout=30,
+            )
+            assert outcome["reason"] == "detach"
+            joined = "".join(chunks)
+            # Drawn on row 1 inside a cursor save/restore, in the warn style.
+            assert "\x1b7\x1b[1;1H\x1b[0;1;30;43m" in joined
+            assert "code page was 949" in joined
+            # ...and never typed into the session.
+            await session.screen_synced()
+            assert "code page" not in "\n".join(session.capture())
+        finally:
+            await mgr.shutdown_all()
+            await client.close()
+
+    asyncio.run(run())
+
+
 def test_attach_reports_session_exit(home, tmp_path, monkeypatch):
     """When the child dies while attached, the bridge surfaces the exit."""
     _register_py_harness()
@@ -427,7 +485,7 @@ def test_attach_reports_agent_to_herdr_and_releases_on_detach(
     monkeypatch.setattr(attach_mod, "herdr", FakeHerdr())
     monkeypatch.setattr(attach_mod, "_RawTerminal", _NoopRawTerminal)
 
-    async def fake_attach(base_url, token, name):
+    async def fake_attach(base_url, token, name, notice=None):
         return {"reason": "detach"}
 
     monkeypatch.setattr(attach_mod, "_attach_async", fake_attach)
@@ -486,7 +544,7 @@ def test_attach_reports_unknown_when_daemon_status_is_absent(
     monkeypatch.setattr(attach_mod, "herdr", FakeHerdr())
     monkeypatch.setattr(attach_mod, "_RawTerminal", _NoopRawTerminal)
 
-    async def fake_attach(base_url, token, name):
+    async def fake_attach(base_url, token, name, notice=None):
         return {"reason": "detach"}
 
     monkeypatch.setattr(attach_mod, "_attach_async", fake_attach)

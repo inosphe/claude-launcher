@@ -1378,6 +1378,26 @@ class Session:
         """Whether at least one terminal viewer is actively using this session."""
         return bool(self._focused_subscribers)
 
+    def notify(
+        self, text: str, *, ttl: Optional[float] = None, level: str = "info"
+    ) -> int:
+        """Show ``text`` to everyone looking at this session, for ``ttl``
+        seconds, without touching the PTY.
+
+        The daemon's door for a message meant for the *person* at a session
+        rather than the program in it: it goes out as a ``notice`` control
+        frame to every viewer (the web terminal draws it as an element, an
+        attach draws it over row 1 -- see ``daemon/notice.py``) and is never
+        typed, logged or seen by the child. Returns how many viewers were
+        subscribed to receive it -- 0 means nobody was looking, and the
+        message is gone; a caller that needs it read later delivers instead.
+        """
+        from .notice import Notice
+
+        notice = Notice.make(text, ttl=ttl, level=level)
+        self._broadcast(("notice", notice))
+        return len(self._subscribers)
+
     def set_viewer_focused(self, viewer: object, focused: bool) -> None:
         """Apply one viewer's focus state to rendering and child scheduling."""
         before = self.is_focused()
@@ -1676,6 +1696,9 @@ class DeadSession:
 
     def subscribe(self) -> asyncio.Queue:
         return asyncio.Queue(maxsize=1)  # nothing will ever be published to it
+
+    def notify(self, text: str, *, ttl=None, level: str = "info") -> int:
+        return 0  # no live viewers to show it to
 
     def unsubscribe(self, q: asyncio.Queue) -> None:
         return None

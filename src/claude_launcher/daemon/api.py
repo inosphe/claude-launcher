@@ -37,7 +37,7 @@ from .. import (
 from .. import session_commits
 from .. import spawn as spawn_mod, store, workspaces
 from .. import worktree as worktree_mod
-from . import beads as beads_mod
+from . import beads as beads_mod, notice as notice_mod
 from . import rag as rag_mod
 from . import (
     briefing, cflow_clock, clipty, ctxsize, onboard, prompt_presets, rebrief,
@@ -493,6 +493,7 @@ def build_app(
     )
     r.add_post("/api/sessions/{name}/keys", h_session_keys)
     r.add_post("/api/sessions/{name}/deliver", h_session_deliver)
+    r.add_post("/api/sessions/{name}/notice", h_session_notice)
     # One composition, two verbs: GET hands the text to whoever will read it
     # into context (the SessionStart hook, the MCP tool, the CLI); POST types
     # it into the terminal — the operator's push for a session that does not
@@ -4874,6 +4875,28 @@ async def h_session_deliver(request: web.Request) -> web.Response:
         return json_error(400, "'text' must be a non-empty string")
     delivered = await session.deliver(text)
     return json_response({"ok": True, "delivered": delivered})
+
+
+async def h_session_notice(request: web.Request) -> web.Response:
+    """Show a line to whoever is looking at this session — the out-of-process
+    door to :meth:`Session.notify`. Nothing reaches the PTY: ``/deliver`` is
+    for the agent, this is for the person watching it. Body: ``text``
+    (required), ``ttl`` seconds (optional, clamped), ``level`` (``info`` /
+    ``warn`` / ``error``). ``viewers`` in the answer is how many sockets were
+    sent it; 0 means nobody was looking and the line is gone."""
+    session = _session(request)
+    body = await _json_body(request)
+    text = body.get("text")
+    if not isinstance(text, str) or not text.strip():
+        return json_error(400, "'text' must be a non-empty string")
+    ttl = body.get("ttl")
+    if ttl is not None and not isinstance(ttl, (int, float)):
+        return json_error(400, "'ttl' must be a number of seconds")
+    level = body.get("level", "info")
+    if level not in notice_mod.LEVELS:
+        return json_error(400, "'level' must be one of " + ", ".join(notice_mod.LEVELS))
+    viewers = session.notify(text, ttl=ttl, level=level)
+    return json_response({"ok": True, "viewers": viewers})
 
 
 async def h_session_rebrief(request: web.Request) -> web.Response:

@@ -5967,6 +5967,31 @@ function openSocket(name) {
   };
 }
 
+/* A ``notice`` frame: a line the daemon wants the person at this terminal
+   to read (ws.py "Notices"). Drawn as a banner over the top of #terminal
+   rather than into xterm -- nothing of it belongs in the grid -- and taken
+   down after its ttl. A newer notice replaces the one up. */
+let termNoticeTimer = null;
+function showTermNotice(msg) {
+  const box = $("terminal");
+  if (!box) return;
+  let bar = $("term-notice");
+  if (!bar) {
+    bar = document.createElement("div");
+    bar.id = "term-notice";
+    box.appendChild(bar);
+  }
+  bar.className = "term-notice term-notice-" + (msg.level || "info");
+  bar.textContent = msg.text || "";
+  bar.hidden = false;
+  if (termNoticeTimer) clearTimeout(termNoticeTimer);
+  const ttl = Math.max(0.5, Math.min(Number(msg.ttl) || 6, 60));
+  termNoticeTimer = setTimeout(() => {
+    bar.hidden = true;
+    termNoticeTimer = null;
+  }, ttl * 1000);
+}
+
 function handleFrame(msg) {
   if (msg.type === "init") {
     // Seed the grid with the session's current size without echoing it back;
@@ -6058,6 +6083,8 @@ function handleFrame(msg) {
         ws.send(JSON.stringify({ type: "repaint" }));
       }
     }
+  } else if (msg.type === "notice") {
+    showTermNotice(msg);
   } else if (msg.type === "exit") {
     // Not a broken link: the program finished under this socket. The notice
     // belongs here rather than in endSession(), because this is the case

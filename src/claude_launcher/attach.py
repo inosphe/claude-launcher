@@ -79,13 +79,17 @@ def strip_focus_events(data: bytes) -> Tuple[bytes, bool]:
     return data, focus_in
 
 
-def ws_url(base_url: str, name: str) -> str:
+def ws_url(base_url: str, name: str, *, overlay: bool = False) -> str:
+    """The session's terminal socket; ``overlay`` asks the daemon to compose
+    notices into the byte stream (this is a real terminal, with nowhere else
+    to draw them -- see ``daemon/notice.py``)."""
     base = base_url.rstrip("/")
     if base.startswith("https://"):
         base = "wss://" + base[len("https://"):]
     elif base.startswith("http://"):
         base = "ws://" + base[len("http://"):]
-    return f"{base}/api/sessions/{name}/ws"
+    url = f"{base}/api/sessions/{name}/ws"
+    return url + "?overlay=1" if overlay else url
 
 
 # --------------------------------------------------------------------------- #
@@ -275,11 +279,18 @@ class _RawTerminal:
 # --------------------------------------------------------------------------- #
 # the bridge
 # --------------------------------------------------------------------------- #
-async def _attach_async(base_url: str, token: str, name: str) -> dict:
+async def _attach_async(
+    base_url: str, token: str, name: str, notice: Optional[str] = None
+) -> dict:
     """Bridge stdin/stdout to the session's terminal WebSocket.
 
     Returns an outcome dict: ``{"reason": "detach" | "exit" | "closed",
     "code": ...}``. The caller owns terminal modes; this only moves bytes.
+
+    ``notice`` is a line to show over the session's top row once attached
+    (the daemon draws it for this viewer alone and takes it down again):
+    what this client learned about the local terminal, which nothing printed
+    before raw mode survives -- the session repaints over it at once.
     """
     import aiohttp
 
@@ -339,11 +350,17 @@ async def _attach_async(base_url: str, token: str, name: str) -> dict:
     decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
     async with aiohttp.ClientSession() as http:
         async with http.ws_connect(
-            ws_url(base_url, name),
+            ws_url(base_url, name, overlay=True),
             headers={"Authorization": f"Bearer {token}"},
             heartbeat=30,
             max_msg_size=0,
         ) as ws:
+            if notice:
+                await ws.send_str(
+                    json.dumps(
+                        {"type": "notice", "text": notice, "ttl": 10, "level": "warn"}
+                    )
+                )
             reader = threading.Thread(
                 target=pump_stdin, name=f"attach-stdin-{name}", daemon=True
             )
@@ -434,8 +451,18 @@ def attach(client, name: str) -> int:
     term = _RawTerminal()
     with term:
         _write_text(FOCUS_ON)
+        # What the raw-mode entry found out about this console is only known
+        # now, and only this client knows it: hand it to the daemon to draw
+        # over the session for this viewer (nothing printed here would stay
+        # on screen past the session's next frame).
+        notice = codepage_note(
+            getattr(term, "original_codepage", None),
+            getattr(term, "codepage_switched", False),
+        )
         try:
-            outcome = asyncio.run(_attach_async(client.base_url, client.token, name))
+            outcome = asyncio.run(
+                _attach_async(client.base_url, client.token, name, notice=notice)
+            )
         except KeyboardInterrupt:
             outcome = {"reason": "detach"}
         except Exception as exc:  # restore the terminal before reporting

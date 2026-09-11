@@ -500,6 +500,28 @@ class ScreenState:
             parts.append("\x1b[%d;%dH" % (y + 1, x + 1))
         return "".join(parts).encode("utf-8")
 
+    def row_sequence(self, index: int, offset: int = 0) -> bytes:
+        """The bytes that put one row of the viewer's screen back as the grid
+        has it: cursor to that row, the line cleared, the row's text with its
+        attributes, attributes reset. The cursor is left on that row -- the
+        caller wraps the sequence in a save/restore (``daemon/notice.py``,
+        which uses this to take an overlay down without a full repaint).
+
+        ``offset`` selects the same window :meth:`repaint_sequence` paints, so
+        a viewer scrolled back into history gets that window's row.
+        """
+        history = self._screen.history.top
+        rows = self._screen.lines
+        hlen = len(history)
+        offset = max(0, min(offset, hlen))
+        index = max(0, min(index, rows - 1))
+        vpos = hlen - offset + index
+        if vpos < hlen:
+            row = self._row_with_attrs(history[vpos])
+        else:
+            row = self._row_with_attrs(self._screen.buffer[vpos - hlen])
+        return ("\x1b[%d;1H\x1b[2K%s\x1b[0m" % (index + 1, row)).encode("utf-8")
+
     def _row_with_attrs(self, row) -> str:
         cols = self._screen.columns
         # ``row`` is pyte's StaticDefaultDict — a mapping keyed by column, so

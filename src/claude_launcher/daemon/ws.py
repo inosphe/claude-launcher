@@ -35,10 +35,26 @@ nothing gets what it always got.
   it back — see "Who owns the wheel" below),
   ``{"type":"scrolled","offset":N}``
   (the server's clamped scroll position for this socket, sent before the
-  repaint answering a ``scroll``), ``{"type":"pong"}``, and
+  repaint answering a ``scroll``), ``{"type":"pong"}``,
+  ``{"type":"notice","id":..,"text":..,"ttl":..,"level":..}`` (a line for
+  the person at this viewer, to show over the terminal for ``ttl`` seconds —
+  see "Notices" below), and
   ``{"type":"shutdown"}`` — the daemon itself is stopping/restarting, sent
   before its sessions are terminated so a viewer can tell this apart from the
   session's program exiting on its own.
+
+Notices: the daemon (``Session.notify``, ``POST /api/sessions/{name}/notice``)
+can say something to whoever is *looking* at a session without typing into
+it. Every viewer gets the ``notice`` frame; the web terminal draws it as an
+element over its xterm. A viewer whose terminal is a real one — ``claunch
+attach`` — cannot draw elements, so it opens the socket with ``?overlay=1``
+and the daemon composes the line into the bytes it sends that socket: drawn
+over row 1 after each output chunk while the notice is up, row 1 restored
+from the rendered grid when it expires (``daemon/notice.py``, which also
+keeps the draw out of the middle of a split escape sequence). A client may
+also send ``{"type":"notice","text":..,"ttl":..,"level":..}`` itself to put
+a line up for its own viewer only — how attach shows what it learned about
+the local console, which the daemon cannot know.
 
 Who owns the wheel: a program that turns mouse tracking on (``?1000h`` and
 friends — claude does, behind the alternate screen, and leaves it on) is asking
@@ -93,6 +109,7 @@ from typing import Optional
 
 from aiohttp import WSMsgType, web
 
+from .notice import Notice, Overlay
 from .session import Session, SessionGone
 
 log = logging.getLogger("claunch.daemon.ws")
@@ -130,6 +147,22 @@ class ViewerState:
 
     offset: int = 0
     focus_token: Optional[object] = None
+    #: The notice up for this viewer (if any) and where its byte stream is;
+    #: ``overlay_bytes`` says the viewer asked for notices composed into the
+    #: stream (``?overlay=1``) rather than only the control frame.
+    overlay: Overlay = dataclasses.field(default_factory=Overlay)
+    overlay_bytes: bool = False
+    expiry: Optional["asyncio.Task[None]"] = None
+
+
+def _wants_overlay(request: web.Request) -> bool:
+    """Whether this client wants notices drawn into its byte stream.
+
+    Opt-in like the scrollback seed, and for the same reason: a browser has
+    somewhere better to put a notice than row 1 of the grid, and a client
+    that says nothing must keep getting exactly the program's bytes.
+    """
+    return request.query.get("overlay") in ("1", "true")
 
 
 def _wants_scrollback(request: web.Request) -> bool:
@@ -191,7 +224,7 @@ async def terminal_ws(request: web.Request) -> web.WebSocketResponse:
     # is where a visit is, and the rail's "last looked in" line is stamped on
     # the socket's two edges rather than on a timer.
     session.note_visit()
-    state = ViewerState(focus_token=queue)
+    state = ViewerState(focus_token=queue, overlay_bytes=_wants_overlay(request))
     try:
         await ws.send_str(
             json.dumps(
@@ -309,6 +342,8 @@ async def terminal_ws(request: web.Request) -> web.WebSocketResponse:
         _viewer_left(ws, "terminal")
     finally:
         request.app["websockets"].discard(ws)
+        if state.expiry is not None:
+            state.expiry.cancel()
         session.set_viewer_focused(queue, False)
         session.unsubscribe(queue)
         # ...and the visit ended now, not when it started. A tab open all
@@ -446,7 +481,16 @@ async def _pump_to_client(
         if kind == "data":
             if state.offset > 0:
                 continue  # frozen: the viewer reads history, not live bytes
+            if state.overlay_bytes:
+                # One frame: the chunk, then the notice redrawn over row 1
+                # (nothing when no notice is up, or the chunk ends inside a
+                # sequence the program has not finished).
+                payload = payload + state.overlay.after_output(
+                    payload, session.screen.cols
+                )
             await ws.send_bytes(payload)
+        elif kind == "notice":
+            await _show_notice(ws, session, state, payload)
         elif kind == "buffer":
             if state.offset > 0 and not payload:
                 # The TUI left the alternate screen while this viewer was
@@ -486,7 +530,54 @@ async def _unfreeze(ws: web.WebSocketResponse, session: Session, state: ViewerSt
     state.offset = 0
     await _synced(session)
     await ws.send_str(json.dumps({"type": "scrolled", "offset": 0}))
-    await ws.send_bytes(session.screen.repaint_sequence(0))
+    await ws.send_bytes(session.screen.repaint_sequence(0) + _redraw(session, state))
+
+
+def _redraw(session: Session, state: ViewerState) -> bytes:
+    """The notice drawn again, to follow a repaint that just painted over
+    it; empty for a viewer without one (or without the overlay)."""
+    if not state.overlay_bytes or state.overlay.notice is None:
+        return b""
+    return state.overlay.draw(session.screen.cols)
+
+
+async def _show_notice(
+    ws: web.WebSocketResponse, session: Session, state: ViewerState, notice: Notice
+) -> None:
+    """Put ``notice`` up for this viewer: the control frame always, the
+    row-1 draw for a viewer that asked for it, and the timer that takes it
+    down. A notice arriving while one is up replaces it and its timer."""
+    await ws.send_str(json.dumps(notice.frame()))
+    if state.overlay_bytes:
+        data = state.overlay.show(notice, session.screen.cols)
+        if data:
+            await ws.send_bytes(data)
+    else:
+        state.overlay.notice = notice
+    if state.expiry is not None:
+        state.expiry.cancel()
+    state.expiry = asyncio.ensure_future(_expire_notice(ws, session, state, notice))
+
+
+async def _expire_notice(
+    ws: web.WebSocketResponse, session: Session, state: ViewerState, notice: Notice
+) -> None:
+    await asyncio.sleep(notice.ttl)
+    if state.overlay.notice is not notice:
+        return  # replaced meanwhile; the newer one's timer owns the clear
+    if not state.overlay_bytes:
+        state.overlay.notice = None
+        return
+    try:
+        # The grid must have caught up with the bytes this viewer has seen,
+        # or row 1 would be restored to something older than what the
+        # program last drew there.
+        await _synced(session)
+        data = state.overlay.clear(session.screen.row_sequence(0, state.offset))
+        if data and not ws.closed:
+            await ws.send_bytes(data)
+    except (ConnectionResetError, RuntimeError):
+        _viewer_left(ws, "notice")
 
 
 async def _handle_control(
@@ -512,7 +603,21 @@ async def _handle_control(
         # resize would already have unfrozen it through the pump.
         await _synced(session)
         await ws.send_str(json.dumps({"type": "scrolled", "offset": state.offset}))
-        await ws.send_bytes(session.screen.repaint_sequence(state.offset))
+        await ws.send_bytes(
+            session.screen.repaint_sequence(state.offset) + _redraw(session, state)
+        )
+    elif kind == "notice":
+        # The viewer putting a line up for itself: what attach learned about
+        # the terminal it is running in, which only that client can know.
+        # Same path as a daemon notice, addressed to this socket alone.
+        text = msg.get("text")
+        if isinstance(text, str) and text.strip():
+            await _show_notice(
+                ws,
+                session,
+                state,
+                Notice.make(text, ttl=msg.get("ttl"), level=str(msg.get("level") or "info")),
+            )
     elif kind == "scroll":
         try:
             lines = int(msg["lines"])
@@ -531,7 +636,9 @@ async def _handle_control(
         # Echo the clamped result so the client's scroll state (and its
         # auto-unfreeze and affordance) matches the server's truth.
         await ws.send_str(json.dumps({"type": "scrolled", "offset": state.offset}))
-        await ws.send_bytes(session.screen.repaint_sequence(state.offset))
+        await ws.send_bytes(
+            session.screen.repaint_sequence(state.offset) + _redraw(session, state)
+        )
     elif kind == "ping":
         await ws.send_str(json.dumps({"type": "pong"}))
     elif kind == "typing":

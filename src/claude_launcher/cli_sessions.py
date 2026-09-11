@@ -1231,6 +1231,26 @@ def _cmd_send_keys(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_notice(args: argparse.Namespace) -> int:
+    text = " ".join(args.text).strip()
+    if not text:
+        print("error: no text given", file=sys.stderr)
+        return 1
+    client = daemon_client.ensure_running()
+    body = {"text": text, "level": args.level}
+    if args.ttl is not None:
+        body["ttl"] = args.ttl
+    out = client.post(f"/api/sessions/{args.session}/notice", body)
+    viewers = out.get("viewers", 0)
+    if not viewers:
+        print(
+            f"[claunch] nobody is looking at {args.session!r} -- the notice was "
+            "shown to no one (use send-keys/deliver for the agent itself)",
+            file=sys.stderr,
+        )
+    return 0
+
+
 def _cmd_capture_pane(args: argparse.Namespace) -> int:
     client = daemon_client.ensure_running()
     query = []
@@ -2289,6 +2309,27 @@ def register(sub) -> None:
     p_send.add_argument("session", nargs="?")
     p_send.add_argument("keys", nargs=argparse.REMAINDER)
     p_send.set_defaults(func=_cmd_send_keys_dispatch)
+
+    p_notice = sub.add_parser(
+        "notice",
+        help="show a line to whoever is watching a session (never typed into it)",
+        description=(
+            "Show TEXT for a few seconds to every viewer of SESSION -- over row 1 "
+            "of a 'claunch attach' terminal, as a banner on the web terminal. "
+            "Nothing reaches the program in the session; for that use send-keys "
+            "or deliver."
+        ),
+    )
+    p_notice.add_argument("session")
+    p_notice.add_argument("text", nargs=argparse.REMAINDER, help="the line to show")
+    p_notice.add_argument(
+        "--ttl", type=float, default=None, help="seconds to keep it up (default 6, max 60)"
+    )
+    p_notice.add_argument(
+        "--level", choices=("info", "warn", "error"), default="info",
+        help="colour: info (blue), warn (yellow), error (red)",
+    )
+    p_notice.set_defaults(func=_cmd_notice)
 
     p_cap = sub.add_parser(
         "capture-pane", help="print a session's current screen (or scrollback)"

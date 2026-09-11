@@ -1239,7 +1239,18 @@ a.cflow-scope:hover { background: #1d3559; text-decoration: underline; }
 /* overflow hidden is the backstop for fitView (app.js): the grid is kept
    inside the box by shrinking glyphs, and whatever a mid-adjustment frame
    still hangs over the edge must clip, not become a scrollbar. */
-#terminal { flex: 1; padding: 6px; min-height: 0; overflow: hidden; }
+#terminal { flex: 1; padding: 6px; min-height: 0; overflow: hidden; position: relative; }
+/* The daemon's notice for the person at this terminal (ws.py "Notices"):
+   a banner over the grid's top edge, never a line in it. */
+.term-notice {
+  position: absolute; top: 6px; left: 6px; right: 6px; z-index: 5;
+  padding: 4px 10px; border-radius: 4px;
+  font: 500 12px/1.5 system-ui, sans-serif; color: #fff; background: #1d4ed8;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.35);
+}
+.term-notice-warn { background: #ca8a04; color: #1c1917; }
+.term-notice-error { background: #b91c1c; }
 #terminal .xterm { height: 100%; }
 /* An ended session's last screen, drawn as plain text instead of a live xterm
    (app.js snapshotAttach). The browser owns the wheel here — a real scrollbar
