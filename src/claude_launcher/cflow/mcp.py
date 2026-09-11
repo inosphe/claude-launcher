@@ -38,7 +38,7 @@ refused rather than silently applied to a run this agent has never read.
 from __future__ import annotations
 
 import os
-from typing import Optional
+from typing import Dict, Optional
 
 from .. import mcp_rpc
 from . import engine, model, state as state_mod
@@ -357,6 +357,51 @@ TOOLS = [
     },
 ]
 
+#: Tools that address ONE run of this session and so take the optional
+#: ``run`` argument: absent (or "main") they are about the main run, exactly
+#: as before sub runs existed; a sub run's name makes the same call about
+#: that side track. The schema property is grafted here rather than typed
+#: into seven tool definitions, so the eight cannot drift apart.
+_RUN_TOOLS = ("start", "report", "next", "select", "status", "recall", "request_goto")
+
+_RUN_PROPERTY = {
+    "type": "string",
+    "description": (
+        "which of this session's runs the call is about: omit for the main "
+        "run; a sub run's name (see 'subs' in the main run's status) for a "
+        "side track started with 'start' + 'sub'"
+    ),
+}
+
+_SUB_PROPERTIES = {
+    "sub": {
+        "type": "string",
+        "description": (
+            "start this workflow as a SUB run under that name — a second "
+            "state machine beside the main run, in its own slot; the "
+            "definition must be 'kind: subflow' and a main run must be "
+            "active here. Then address it with run=<name> on every other "
+            "tool"
+        ),
+    },
+    "inputs": {
+        "type": "object",
+        "description": (
+            "values for the definition's declared 'inputs' (name -> string); "
+            "a required one missing refuses the start. Reach the run's "
+            "verify/check commands as CFLOW_IN_<NAME>"
+        ),
+    },
+}
+
+for _tool in TOOLS:
+    if _tool["name"] in _RUN_TOOLS:
+        _tool["inputSchema"].setdefault("properties", {})["run"] = dict(_RUN_PROPERTY)
+    if _tool["name"] == "start":
+        _tool["inputSchema"]["properties"].update(
+            {k: dict(v) for k, v in _SUB_PROPERTIES.items()}
+        )
+
 #: Tools that write to the run, and so must be fenced against a replacement.
 _MUTATING = ("report", "next", "select", "request_goto")
 
@@ -369,8 +414,23 @@ _FOREIGN = ("asks", "answer", "request_child_goto")
 #: next call adopts whatever is on disk.
 _seen_run: Optional[str] = None
 
+#: The same fence, one per SUB run this agent has driven, keyed by the sub
+#: run's name. Kept apart from ``_seen_run`` so a sub run replaced under the
+#: agent is noticed for that sub run only, and the main run's fence stays
+#: what every existing reader of it expects.
+_seen_subs: Dict[str, str] = {}
 
-def _check_fence(name: str) -> None:
+
+def _run_arg(name: str, args: dict) -> Optional[str]:
+    """The run a call addresses: ``start``'s ``sub`` names the run it
+    creates, every other tool's ``run`` names the one it acts on."""
+    if name == "start" and args.get("sub"):
+        return str(args["sub"]).strip() or None
+    run = str(args.get("run") or "").strip()
+    return run or None
+
+
+def _check_fence(name: str, run: Optional[str] = None) -> None:
     """Refuse a mutating call aimed at a run this agent has never read.
 
     Only a *replacement* is fenced. An emptied slot needs no guard: the engine
@@ -378,7 +438,25 @@ def _check_fence(name: str) -> None:
     is what the protocol handles.
     """
     global _seen_run
-    if name not in _MUTATING or _seen_run is None:
+    if name not in _MUTATING:
+        return
+    if run:
+        seen = _seen_subs.get(run)
+        if seen is None:
+            return
+        actual = engine.current_run_id(run=run)
+        if actual is None:
+            _seen_subs.pop(run, None)
+            return
+        if actual == seen:
+            return
+        raise engine.CflowError(
+            f"the sub run {run!r} you were driving ({seen}) is not the run in "
+            f"that slot any more ({actual} is) — it was archived and replaced "
+            f"while you worked. Nothing was applied. Call 'status' with "
+            f"run={run!r} to re-read it before doing anything else"
+        )
+    if _seen_run is None:
         return
     actual = engine.current_run_id()
     if actual is None:
@@ -476,39 +554,46 @@ def _request_child_goto(args: dict) -> dict:
 
 def call_tool(name: str, args: dict) -> dict:
     global _seen_run
-    _check_fence(name)
+    run = _run_arg(name, args)
+    _check_fence(name, run)
     if name == "start":
+        inputs = args.get("inputs")
+        if inputs is not None and not isinstance(inputs, dict):
+            raise engine.CflowError("'inputs' must be an object of name -> value")
         payload = engine.start(
             str(args.get("workflow") or ""),
             context=args.get("context") or None,
             force=bool(args.get("force")),
             mesh=args.get("mesh") or None,
+            inputs=inputs,
+            run=run,
         )
     elif name == "report":
         payload = engine.report(
-            str(args.get("summary") or ""), args.get("details") or None
+            str(args.get("summary") or ""), args.get("details") or None, run=run
         )
     elif name == "next":
-        payload = engine.next_step()
+        payload = engine.next_step(run=run)
     elif name == "select":
         payload = engine.select(
-            str(args.get("option") or ""), args.get("reason") or None, by="agent"
+            str(args.get("option") or ""), args.get("reason") or None, by="agent", run=run
         )
     elif name == "status":
-        payload = engine.status()
+        payload = engine.status(run=run)
     elif name == "request_goto":
         if bool(args.get("cancel")):
-            payload = engine.cancel_goto_request(by=_session() or "agent")
+            payload = engine.cancel_goto_request(by=_session() or "agent", run=run)
         else:
             payload = engine.request_goto(
                 str(args.get("step") or ""),
                 str(args.get("reason") or ""),
                 by=_session() or "agent",
+                run=run,
             )
     elif name == "request_child_goto":
         payload = _request_child_goto(args)
     elif name == "recall":
-        payload = engine.recall(str(args.get("id") or ""))
+        payload = engine.recall(str(args.get("id") or ""), run=run)
     elif name == "asks":
         waiting = engine.open_asks(_session())
         payload = {
@@ -537,6 +622,12 @@ def call_tool(name: str, args: dict) -> dict:
     # one that asked. Adopting that id would fence this agent's own tools
     # against a run it never drove, and the next 'report' here would be
     # refused for a replacement that never happened.
+    if run:
+        if name not in _FOREIGN and payload.get("run"):
+            _seen_subs[run] = str(payload["run"])
+        elif name == "status" and payload.get("status") == "idle":
+            _seen_subs.pop(run, None)
+        return payload
     if name not in _FOREIGN and payload.get("run"):
         _seen_run = str(payload["run"])
     elif name == "status" and payload.get("status") == "idle":

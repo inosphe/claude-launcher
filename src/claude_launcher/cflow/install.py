@@ -286,6 +286,35 @@ and a fresh one started:
   section's case — it is already an explicit request; follow the protocol
   above.
 
+## Sub runs — a side track beside the main run
+
+The run you drive by default is the session's MAIN run: every tool call
+with no `run` argument is about it, exactly as before sub runs existed. A
+**sub run** is a second run the same session drives beside it, in its own
+slot, from a definition marked `kind: subflow` — a step of the main
+workflow may declare them (they then start by themselves when the step is
+entered; see `subs` on the main run's `status`), or the step's instructions
+tell you to open one yourself: `start` with `workflow: <definition>`,
+`sub: <name>` and `inputs: {...}` (its declared inputs; a required one
+missing refuses the start). A sub run needs an active main run and at most
+three stand at once.
+
+Driving one is the same protocol with one extra argument: `status`,
+`report`, `next`, `select`, `recall` and `request_goto` take `run: <name>`
+to act on that sub run instead of the main one. Every payload of a sub run
+says so (`sub`, `parent_run`, `inputs`) — read it, because step ids and
+text ids overlap between definitions. Omit `run` and you are back on the
+main run; do not carry a sub run's step into the main run's report.
+
+The main run waits on a sub run only where its workflow says so (`awaits:
+{sub: ...}` or a checklist item running `claunch cflow sub-done`): then
+the daemon tells you when the side track finished — do not poll it. When
+the main run finishes, is aborted or is archived, its sub runs are ended
+and archived with it; `sub_ended` in the main run's journal says which.
+A position payload carrying `sub_errors` means a declared sub run could
+not be started — the main run moved anyway; start it by hand or report
+the definition problem.
+
 ## When the graph has no route
 
 Sometimes the run has to go somewhere the workflow declares no transition

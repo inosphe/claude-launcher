@@ -373,6 +373,130 @@ it does today. The same is true of a run already in flight when the workflow
 gains the field — a run reads the snapshot it started on, and an absent
 `awaits` is today's clock.
 
+## Sub runs — `kind: subflow`, `subflows:`, `awaits: {sub}`
+
+A session drives one MAIN run. A **sub run** is a second state machine the
+same session drives beside it — its own steps, gates and journal, in its own
+slot (`.cflow/runs/<session>/sub/<name>/`) — for a side track the main run
+should not have to model inline: an out-of-scope finding to file, a check
+that runs while the main work continues, a measurement with its own gates.
+Up to three stand at once. The main run never pauses for one unless you say
+so; the coupling back is explicit and one-directional (below).
+
+### The definition — a workflow file marked `kind: subflow`
+
+```yml
+# .claunch/workflows/found-issue.yaml   (or the global layer, same rules)
+name: found-issue
+kind: subflow
+inputs:
+  parent:  {required: true}       # who starts it must give this
+  summary: {default: ""}          # optional, with a default
+start: triage
+steps:
+  triage:
+    select:
+      prompt: in scope or out?  (inputs.summary is the one-line finding)
+      chooser: agent
+      options:
+        out-of-scope: {description: file it, next: file}
+        in-scope:     {description: fix it in the main run; no issue}
+  file:
+    instructions: create the issue with --parent <inputs.parent>; report its id
+    done_when: the issue exists and its id is in the report
+```
+
+It lives where any workflow lives (project layer, then global, then the
+package) and is found by NAME, so one definition serves every workflow that
+calls it — and it may be started twice under two slot names. `extends:` and
+project-layer `verify` overrides work on it exactly as on a main workflow.
+
+Two things are different, and the parser enforces both:
+
+* **`inputs:`** is only taken by a `kind: subflow` definition. Each input
+  is `{required: true}` or `{default: <text>}` (a null value means optional
+  with no default). A required one missing refuses the start; an unknown
+  name given at start is refused too, never dropped. Values reach the
+  sub run's `verify` / `check` commands as environment variables
+  `CFLOW_IN_<NAME>` (upper-cased) and reach the agent as `inputs` on every
+  payload. They are **never substituted into `instructions`** — a step's
+  text id is content-only and must stay stable — so write "inputs.parent"
+  in the prose and let the agent read the payload.
+* A sub definition **may not** carry anything that is a fact about the
+  driving SESSION's lifecycle: `recur`, `filter_roles`, `default_child_cflow`,
+  `default_role`, `escalate`, nor `subflows:` / `awaits: {sub}` of its own
+  (one level, by design). The main run already answers those; a second
+  answer is a conflict, refused at parse.
+
+### Starting one — by declaration, or by hand
+
+A step of the MAIN workflow declares the sub runs the engine starts when the
+step is **entered** (every visit that finds the slot empty or finished; a
+slot still running is left alone):
+
+```yaml
+review:
+  subflows:
+    - {name: surfaces, workflow: surface-check, with: {base: auto}}
+  awaits: {sub: surfaces, describe: the surface check has finished}
+  instructions: ...
+```
+
+`name` is the slot (a run name: letters, digits, `.` `_` `-`; not `main`),
+`workflow` the definition's name, `with` the input values as written — a
+value like `auto` is handed through untouched and means whatever the tool
+reading `CFLOW_IN_BASE` says (`changed_tests.py --base auto` is the
+precedent). A declared start that fails (definition missing, not
+`kind: subflow`, a required input absent, the ceiling of three) does **not**
+fail the move: the main run has already arrived. It is journaled as
+`sub_start_failed` and rides on the position's payload as `sub_errors` until
+the next move, so the driver sees it where it reads the step.
+
+The other door is the driving agent itself: the cflow `start` tool with
+`sub: <name>` (+ `inputs`), for a side track only the agent knows it needs
+— a finding mid-step is the typical case. Write that in the step's
+instructions when it is the intended path, as improv-worker's `work` does
+for `found-issue`. Either way a sub run needs an active main run: it is a
+side track OF one, never a run of its own.
+
+### Waiting on one — `awaits: {sub}` and `sub-done`
+
+Coupling goes one way: the main run may wait for a sub run; a sub run's
+gates never hold the main run. Two spellings, same fact:
+
+```yaml
+work:
+  instructions: do the work; open side tracks as they come up
+  awaits: {sub: all}                 # every sub run of this session finished
+  next: gate
+gate:
+  instructions: record what the side tracks found; the gate itself is measured
+  checklist:
+    prompt: nothing still running on the side?
+    then: review
+    items:
+      - id: subs
+        describe: nothing still running on the side
+        check: 'claunch cflow sub-done --all'
+```
+
+`awaits: {sub: <name>}` (or `all`) is the ordinary `awaits` with its probe
+fixed to `claunch cflow sub-done <name>` / `--all`; poll, timeout and
+describe apply as usual, and the daemon speaks once when the exit code
+changes. `sub-done NAME` exits 0 when that sub run is done, 1 while it runs
+or was aborted, 2 when no such sub run stands — the third answer is kept
+apart so a gate waiting on a run nobody started does not wait forever.
+`--all` exits 0 when nothing is still running (none, or all finished).
+
+### What the main run's end does to them
+
+Finishing, aborting or archiving the main run — and a forced restart of it —
+ends and archives its sub runs with it (`sub_ended` in the main journal,
+`aborted` with reason "main run ended" in each sub journal). Design the sub
+definition to finish on its own before the main run's wrap-up, or gate the
+wrap-up on `sub-done --all` as above; a sub run is never something the
+session has to remember to clean up.
+
 ## `ask:` gates ENTRY
 
 An `ask` withholds the step's `instructions` until it is answered, so it goes

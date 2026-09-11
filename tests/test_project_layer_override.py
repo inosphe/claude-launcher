@@ -114,7 +114,9 @@ CHECKED = {
 #: on a run standing still -- and only ``awaits`` may sit on a select step,
 #: which is the shape ``await-landing`` has.
 WATCHED = {
-    "improv-worker": ("await-landing",),
+    # `work` waits on the found-issue sub runs it opened (tools/sub_done.py,
+    # this repository's spelling of `awaits: {sub: all}`).
+    "improv-worker": ("work", "await-landing"),
     "improv-leader": (),
 }
 

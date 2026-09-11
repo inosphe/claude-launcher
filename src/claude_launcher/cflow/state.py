@@ -144,6 +144,84 @@ def pop_scope(token) -> None:
         _scope_override.reset(token)
 
 
+# --------------------------------------------------------------------------- #
+# sub runs: N slots under one scope
+# --------------------------------------------------------------------------- #
+#: Directory under a scope that holds its SUB runs: ``runs/<scope>/sub/<name>/``,
+#: each a full slot (the same :data:`RUN_FILES`, lock, journal and archive as
+#: the scope's main run). A sub run is one more state machine the SAME session
+#: drives beside its main run — a side track with its own steps and gates — so
+#: it lives *inside* the scope rather than beside it: the daemon's rule that a
+#: scope names exactly one driving session stays true, and ending the main run
+#: can cascade to what it owned.
+SUB_DIR = "sub"
+
+#: The main run's name in every place a run is addressed. Not a directory —
+#: the main run keeps living directly under ``runs/<scope>/``.
+MAIN_RUN = "main"
+
+#: A sub run name is spelled like a scope (it becomes a directory too).
+_RUN_RE = _SCOPE_RE
+
+_run_override: contextvars.ContextVar = contextvars.ContextVar(
+    "cflow_run", default=None
+)
+
+
+def valid_run_name(run: Optional[str]) -> bool:
+    """Whether ``run`` can name a sub run slot (``main`` is reserved)."""
+    return bool(
+        run and _RUN_RE.match(run) and run not in _SCOPE_RESERVED and run != MAIN_RUN
+    )
+
+
+def normalize_run(run: Optional[str]) -> Optional[str]:
+    """``None`` for the main run, else the sub run name as a path component.
+
+    Like :func:`normalize_scope` this is the one point where a name from a
+    tool argument, a CLI flag or a request body turns into a directory, so it
+    is the one point that refuses ``..`` and friends.
+    """
+    run = (run or "").strip()
+    if not run or run == MAIN_RUN:
+        return None
+    if not valid_run_name(run):
+        raise StateError(
+            f"invalid cflow sub run name {run!r}: letters, digits, '.', '_' "
+            f"or '-' ({MAIN_RUN!r} is the main run)"
+        )
+    return run
+
+
+def current_run() -> Optional[str]:
+    """The ambient sub run name, or ``None`` for the scope's main run.
+
+    Unlike the scope there is no environment half: a session's environment
+    names the session, never which of its runs a call is about. Only an
+    explicit override (a tool's ``run`` argument, the CLI's ``--run``) selects
+    a sub run; every unqualified call is about the main run, exactly as it
+    was before sub runs existed.
+    """
+    return _run_override.get() or None
+
+
+def push_run(run: Optional[str]):
+    """Set an explicit run override; returns a token for :func:`pop_run`.
+
+    ``None`` leaves the ambient run alone; :data:`MAIN_RUN` (or ``""``)
+    forces the main run even inside a sub run's call — that is how a sub
+    run's start writes its ``sub_started`` event into the main journal.
+    """
+    if run is None:
+        return None
+    return _run_override.set(normalize_run(run) or "")
+
+
+def pop_run(token) -> None:
+    if token is not None:
+        _run_override.reset(token)
+
+
 def global_workflows_dir() -> Path:
     return config.launcher_home() / "workflows"
 
@@ -186,27 +264,38 @@ def runs_registry_path() -> Path:
     return config.launcher_home() / "cflow_runs.json"
 
 
-def register_run_dir(cwd: Optional[str] = None, scope: Optional[str] = None) -> None:
-    """Record this run's (directory, scope) in the machine-local registry.
+def register_run_dir(
+    cwd: Optional[str] = None, scope: Optional[str] = None, run: Optional[str] = None
+) -> None:
+    """Record this run's (directory, scope[, sub run]) in the machine-local registry.
 
     The daemon web dashboard scans the registry, so runs are monitorable no
     matter where they were started (a managed session, a plain terminal, an
     orchestrator script). Best-effort: registry loss only affects listing.
+    A sub run is recorded with its name; the main run's entry has no ``run``
+    key, which is also the shape every pre-sub-run registry file has.
     """
     target = {
         "cwd": resolve_cwd(cwd),
         "scope": normalize_scope(scope or current_scope()),
     }
+    sub = normalize_run(run) if run is not None else current_run()
+    if sub:
+        target["run"] = sub
     entries = [e for e in _read_registry() if e != target]
     entries.append(target)
     _write_registry(entries)
 
 
-def _run_alive(cwd: str, scope: str) -> bool:
+def _run_alive(cwd: str, scope: str, run: str = "") -> bool:
     if not valid_scope(scope):
         return False  # nothing legitimate wrote it; drop it on the next read
     base = cflow_dir(cwd)
     slot = base / "runs" / scope
+    if run:
+        if not valid_run_name(run):
+            return False
+        return (slot / SUB_DIR / run / "state.json").is_file()
     # A pending start request keeps the slot listed even with no run yet —
     # that is precisely the state a human wants to watch after asking for one.
     if (slot / "state.json").is_file() or (slot / REQUEST_FILE).is_file():
@@ -215,14 +304,26 @@ def _run_alive(cwd: str, scope: str) -> bool:
     return scope == DEFAULT_SCOPE and (base / "state.json").is_file()
 
 
-def known_runs() -> List[Tuple[str, str]]:
-    """Registered ``(cwd, scope)`` pairs that still hold run state
-    (pruned on read)."""
+def _alive_entries() -> List[Dict[str, str]]:
     entries = _read_registry()
-    alive = [e for e in entries if _run_alive(e["cwd"], e["scope"])]
+    alive = [e for e in entries if _run_alive(e["cwd"], e["scope"], e.get("run", ""))]
     if alive != entries:
         _write_registry(alive)
-    return [(e["cwd"], e["scope"]) for e in alive]
+    return alive
+
+
+def known_runs() -> List[Tuple[str, str]]:
+    """Registered ``(cwd, scope)`` pairs whose MAIN slot still holds run state
+    (pruned on read). Sub runs are listed by :func:`known_sub_runs`; keeping
+    them out of here is what lets every reader keyed on ``(cwd, scope)`` —
+    the daemon's clocks, the runs list — go on reading one run per scope."""
+    return [(e["cwd"], e["scope"]) for e in _alive_entries() if not e.get("run")]
+
+
+def known_sub_runs() -> List[Tuple[str, str, str]]:
+    """Registered ``(cwd, scope, run)`` triples of sub runs still holding
+    run state (pruned on read)."""
+    return [(e["cwd"], e["scope"], e["run"]) for e in _alive_entries() if e.get("run")]
 
 
 def _read_registry() -> List[Dict[str, str]]:
@@ -237,7 +338,10 @@ def _read_registry() -> List[Dict[str, str]]:
         if isinstance(e, str):  # pre-scope registry format
             out.append({"cwd": e, "scope": DEFAULT_SCOPE})
         elif isinstance(e, dict) and e.get("cwd"):
-            out.append({"cwd": str(e["cwd"]), "scope": str(e.get("scope") or DEFAULT_SCOPE)})
+            entry = {"cwd": str(e["cwd"]), "scope": str(e.get("scope") or DEFAULT_SCOPE)}
+            if e.get("run"):
+                entry["run"] = str(e["run"])
+            out.append(entry)
     return out
 
 
@@ -342,12 +446,33 @@ def generated_workflow(ref: str, *, cwd: Optional[str], roots: Sequence[Optional
     return path
 
 
-def scope_dir(cwd: Optional[str] = None, scope: Optional[str] = None) -> Path:
+def scope_dir(
+    cwd: Optional[str] = None, scope: Optional[str] = None, run: Optional[str] = None
+) -> Path:
+    """The slot directory: ``runs/<scope>/`` for the main run, or
+    ``runs/<scope>/sub/<run>/`` for a sub run (``run`` explicit, else the
+    ambient one from :func:`push_run`). Every run file path in this module
+    goes through here, so a sub run is a full slot by construction."""
     scope = normalize_scope(scope or current_scope())
     target = cflow_dir(cwd) / "runs" / scope
     if scope == DEFAULT_SCOPE:
         _migrate_legacy(cflow_dir(cwd), target)
+    sub = normalize_run(run) if run is not None else current_run()
+    if sub:
+        target = target / SUB_DIR / sub
     return target
+
+
+def sub_runs(cwd: Optional[str] = None, scope: Optional[str] = None) -> List[str]:
+    """Names of this scope's sub runs that hold run state, sorted."""
+    base = scope_dir(cwd, scope, run=MAIN_RUN) / SUB_DIR
+    if not base.is_dir():
+        return []
+    return sorted(
+        entry.name
+        for entry in base.iterdir()
+        if valid_run_name(entry.name) and (entry / "state.json").is_file()
+    )
 
 
 def _migrate_legacy(base: Path, target: Path) -> None:
@@ -800,7 +925,8 @@ def clear_state(cwd: Optional[str] = None) -> None:
         _forget(path)
 
 
-#: Files that make up one run inside its scope directory.
+#: Files that make up one run inside its slot directory (the scope's main
+#: run, or one of its sub runs — see :data:`SUB_DIR`).
 RUN_FILES = ("state.json", "workflow.yaml", "journal.jsonl")
 
 

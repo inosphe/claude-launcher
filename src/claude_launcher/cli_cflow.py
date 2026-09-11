@@ -64,6 +64,14 @@ def _resolve_run(args: argparse.Namespace, *, required: bool = True):
     explicit = getattr(args, "session", None)
     want = str(explicit) if explicit else os.environ.get(state_mod.SESSION_ENV)
     here = Path(state_mod.resolve_cwd())
+    # --run: the command is about one of the session's SUB runs. Installed
+    # as the ambient run for the rest of this (short-lived) process rather
+    # than threaded through every engine call below — the engine's ops read
+    # the ambient run exactly as they read the ambient scope, and the slot
+    # search here stays about the scope (a sub run lives inside it).
+    sub = getattr(args, "run", None)
+    if sub:
+        state_mod.push_run(str(sub))
 
     if want:
         for cwd in (here, *here.parents):
@@ -353,6 +361,8 @@ def _cmd_status(args: argparse.Namespace) -> int:
         return 0
     shown = scope or state_mod.current_scope()
     print(f"workflow: {payload.get('workflow')}  run: {payload.get('run')}  session: {shown}")
+    if payload.get("sub"):
+        print(f"sub run:  {payload['sub']}  (of {payload.get('parent_run')})")
     print(f"status:   {status}")
     if payload.get("step_id"):
         visit = payload.get("visit")
@@ -368,6 +378,12 @@ def _cmd_status(args: argparse.Namespace) -> int:
     if revisited:
         pairs = ", ".join(f"{s}x{n}" for s, n in sorted(revisited.items()))
         print(f"loops:    {pairs}")
+    for sub in payload.get("subs") or []:
+        where = f" (step {sub.get('step_id')})" if sub.get("step_id") else ""
+        print(
+            f"sub:      {sub.get('sub')}  {sub.get('workflow')}  "
+            f"{sub.get('status')}{where}  (--run {sub.get('sub')})"
+        )
     if status == "waiting_approval":
         _print_block("gate", payload.get("gate"))
         print("unblock:  claunch cflow approve")
@@ -687,6 +703,51 @@ def _cmd_goto(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_sub_done(args: argparse.Namespace) -> int:
+    """Answer 'has sub run NAME finished?' with an exit code.
+
+    Three answers, and keeping the third apart is the point: a sub run that
+    was never started (or was already archived) is not "not done yet" — a
+    checklist waiting on it would wait forever, so it exits 2 and says so.
+    """
+    scope, cwd = _resolve_run(args, required=False)
+    if getattr(args, "all", False):
+        # Every sub run of the scope finished (or none stands): the shape a
+        # step's `awaits: {sub: all}` and a wrap-up gate ask. Aborted counts
+        # as finished here — the question is "is anything still going",
+        # and an aborted side track is not.
+        main = engine.status(cwd=cwd, scope=scope)
+        running = [
+            s for s in (main.get("subs") or [])
+            if s.get("status") not in ("done", "aborted")
+        ]
+        if running:
+            for s in running:
+                print(f"sub run {s['sub']!r}: {s.get('status')} (step {s.get('step_id')})  run: {s.get('run')}")
+            return 1
+        print(f"sub runs: none active ({len(main.get('subs') or [])} finished)")
+        return 0
+    if not args.name:
+        print("sub-done: give a sub run NAME, or --all")
+        return 2
+    try:
+        payload = engine.status(cwd=cwd, scope=scope, run=args.name)
+    except state_mod.StateError as exc:
+        print(f"sub run {args.name!r}: {exc}")
+        return 2
+    status = payload.get("status")
+    if status == "idle":
+        print(f"sub run {args.name!r}: no such sub run in this scope")
+        return 2
+    step = payload.get("step_id")
+    print(
+        f"sub run {args.name!r}: {status}"
+        + (f" (step {step})" if step else "")
+        + f"  run: {payload.get('run')}"
+    )
+    return 0 if status == "done" else 1
+
+
 def _cmd_abort(args: argparse.Namespace) -> int:
     scope, cwd = _resolve_run(args)
     payload = engine.abort(by="user", scope=scope, cwd=cwd)
@@ -959,6 +1020,12 @@ def register(sub) -> None:
             "lives (default: $CLAUNCH_SESSION, or the nearest run in or "
             "above this directory)",
         )
+        parser.add_argument(
+            "--run",
+            metavar="SUB",
+            help="act on the session's SUB run of this name instead of its "
+            "main run ('claunch cflow status' lists them under 'subs')",
+        )
         return parser
 
     q = _scoped(csub.add_parser("status", help="show the active run in this directory"))
@@ -1040,6 +1107,28 @@ def register(sub) -> None:
 
     q = _scoped(csub.add_parser("abort", help="abort the active run"))
     q.set_defaults(func=_cmd_abort)
+
+    q = csub.add_parser(
+        "sub-done",
+        help="exit 0 when the session's sub run NAME has finished (done), 1 "
+        "while it is still running or was aborted, 2 when no such sub run "
+        "stands — the check a main run's checklist item or verify uses to "
+        "wait on a side track",
+    )
+    q.add_argument("name", nargs="?", help="the sub run's name")
+    q.add_argument(
+        "--all",
+        action="store_true",
+        help="exit 0 when NO sub run of the session is still running (none, "
+        "or all finished/aborted), 1 while any is — the shape a step's "
+        "'awaits: {sub: all}' measures",
+    )
+    q.add_argument(
+        "-t",
+        "--session",
+        help="whose sub run (default: $CLAUNCH_SESSION, or the nearest run)",
+    )
+    q.set_defaults(func=_cmd_sub_done)
 
     q = _scoped(csub.add_parser(
         "archive",

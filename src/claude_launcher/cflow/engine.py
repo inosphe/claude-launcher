@@ -205,11 +205,18 @@ def _scoped_op(fn):
     """
 
     @functools.wraps(fn)
-    def wrapper(*args, scope: Optional[str] = None, **kwargs):
+    def wrapper(*args, scope: Optional[str] = None, run: Optional[str] = None, **kwargs):
+        # The run name is checked BEFORE the scope is pushed: a bad name
+        # raises, and a scope pushed above that raise would never be popped
+        # (the leak then follows every later call in this process).
+        if run is not None:
+            run = state_mod.normalize_run(run) or state_mod.MAIN_RUN
         token = state_mod.push_scope(scope)
+        run_token = state_mod.push_run(run)
         try:
             return fn(*args, **kwargs)
         finally:
+            state_mod.pop_run(run_token)
             state_mod.pop_scope(token)
 
     return wrapper
@@ -224,12 +231,19 @@ def _locked_op(fn):
     """
 
     @functools.wraps(fn)
-    def wrapper(*args, scope: Optional[str] = None, **kwargs):
+    def wrapper(*args, scope: Optional[str] = None, run: Optional[str] = None, **kwargs):
+        # The run name is checked BEFORE the scope is pushed: a bad name
+        # raises, and a scope pushed above that raise would never be popped
+        # (the leak then follows every later call in this process).
+        if run is not None:
+            run = state_mod.normalize_run(run) or state_mod.MAIN_RUN
         token = state_mod.push_scope(scope)
+        run_token = state_mod.push_run(run)
         try:
             with state_mod.run_lock(kwargs.get("cwd")):
                 return fn(*args, **kwargs)
         finally:
+            state_mod.pop_run(run_token)
             state_mod.pop_scope(token)
 
     return wrapper
@@ -250,6 +264,180 @@ def _base(state: dict) -> dict:
     if int(state.get("round") or 1) > 1:
         base["round"] = int(state["round"])
     return base
+
+
+#: How many sub runs one scope may hold at once (active or finished but not
+#: yet archived). A side track is cheap, but each one is a position the same
+#: agent has to keep in its head and a block the reminder clock will type —
+#: three is the number past which a session is running a fleet, and a fleet
+#: is what child sessions are for.
+MAX_SUBFLOWS = model.MAX_SUBFLOWS
+
+
+def _stamp_run(payload: dict, state: dict) -> dict:
+    """Say which run a payload is about, when it is not the main one.
+
+    Every door that hands the agent a position of a sub run carries ``sub``:
+    the same agent drives several runs from one terminal, and a payload that
+    did not say whose it was would be read as the main run's — the step ids
+    overlap between definitions, and a step's text id is content-only by
+    design (the same text in two runs IS the same text).
+    """
+    if state.get("sub"):
+        payload["sub"] = state["sub"]
+        if state.get("parent_run"):
+            payload["parent_run"] = state["parent_run"]
+    if state.get("inputs") is not None:
+        payload["inputs"] = dict(state["inputs"])
+    return payload
+
+
+def _in_main(fn, cwd: Optional[str]):
+    """Run ``fn(cwd)`` against the scope's MAIN slot whatever run is ambient."""
+    token = state_mod.push_run(state_mod.MAIN_RUN)
+    try:
+        return fn(cwd)
+    finally:
+        state_mod.pop_run(token)
+
+
+def _in_sub(name: str, fn, cwd: Optional[str]):
+    """Run ``fn(cwd)`` against sub run ``name``'s slot."""
+    token = state_mod.push_run(name)
+    try:
+        return fn(cwd)
+    finally:
+        state_mod.pop_run(token)
+
+
+def _main_state(cwd: Optional[str]) -> Optional[dict]:
+    def read(c):
+        return state_mod.load_state(c) if state_mod.has_run(c) else None
+    return _in_main(read, cwd)
+
+
+def _start_declared_subs(workflow: Workflow, state: dict, cwd: Optional[str]) -> None:
+    """Start the sub runs the run's current step declares (``subflows:``).
+
+    Called on every entry of a step, by ``start`` and by every move. A name
+    whose slot already holds an ACTIVE run is left alone — a revisit of the
+    step does not restart a side track that is still going — while a slot
+    that is empty or holds a finished run gets a fresh run (``start``
+    archives the finished one, as it does for the main slot).
+
+    A start that fails does not fail the move: the main run has already
+    arrived, and refusing the arrival would leave it nowhere. The failure is
+    journaled (``sub_start_failed``) and carried on the position's payload
+    as ``sub_errors`` until the next move, so the agent sees it where it
+    reads its step and can start the side track by hand or fix the
+    definition. Only a MAIN run starts sub runs: a sub run's definition
+    cannot declare any (the parser refuses it), so this is a no-op for one.
+    """
+    if state.get("sub") or not state.get("current"):
+        return
+    step = workflow.steps.get(state["current"])
+    if step is None or not step.subflows:
+        return
+    errors: List[dict] = []
+    for ref in step.subflows:
+        def go(c, _ref=ref):
+            if state_mod.has_run(c):
+                current = state_mod.load_state(c)
+                if current.get("status") not in ("done", "aborted"):
+                    return None  # still running: leave it
+            with state_mod.run_lock(c):
+                return _start_impl(_ref.workflow, inputs=dict(_ref.inputs), cwd=c)
+        try:
+            _in_sub(ref.name, go, cwd)
+        except (CflowError, model.WorkflowError, state_mod.StateError, OSError) as exc:
+            reason = str(exc)
+            errors.append({"sub": ref.name, "workflow": ref.workflow, "error": reason})
+            state_mod.journal(
+                "sub_start_failed",
+                {"run": state["run_id"], "step": state["current"], "sub": ref.name,
+                 "workflow": ref.workflow, "error": reason},
+                cwd,
+            )
+    if errors:
+        state["sub_errors"] = errors
+        state_mod.save_state(state, cwd)
+
+
+def sub_summaries(cwd: Optional[str] = None) -> List[dict]:
+    """One line per sub run of the ambient scope: name, run id, workflow,
+    status and current step. What the main run's ``status`` lists."""
+    out: List[dict] = []
+    for name in state_mod.sub_runs(cwd):
+        def read(c, _name=name):
+            st = state_mod.load_state(c)
+            return {
+                "sub": _name,
+                "run": st.get("run_id"),
+                "workflow": st.get("workflow"),
+                "status": st.get("status"),
+                "step_id": st.get("current"),
+            }
+        try:
+            out.append(_in_sub(name, read, cwd))
+        except state_mod.StateError:
+            continue
+    return out
+
+
+def _end_subs(cwd: Optional[str], *, by: str) -> List[str]:
+    """The main run ended: abort every sub run still active, and say so in
+    both journals. Returns the names that were aborted.
+
+    A sub run is a side track OF the main run — it has no session of its own
+    to keep it alive once the main run is done, and a sub run left running
+    past its parent would be a position the agent is reminded of for a run
+    that no longer exists. The abort is recorded from both sides: the sub's
+    own journal says it was ended by its parent, the main journal says which
+    sub ended.
+    """
+    ended: List[str] = []
+    for name in state_mod.sub_runs(cwd):
+        def end(c, _name=name):
+            st = state_mod.load_state(c)
+            if st.get("status") in ("done", "aborted"):
+                return False
+            st["status"] = "aborted"
+            state_mod.save_state(st, c)
+            state_mod.journal(
+                "aborted", {"run": st["run_id"], "by": by, "reason": "main run ended"}, c
+            )
+            return st["run_id"]
+        try:
+            sub_run = _in_sub(name, end, cwd)
+        except state_mod.StateError:
+            continue
+        if sub_run:
+            ended.append(name)
+            main = _main_state(cwd)
+            if main:
+                state_mod.journal(
+                    "sub_ended",
+                    {"run": main["run_id"], "sub": name, "sub_run": sub_run, "status": "aborted", "by": by},
+                    cwd,
+                )
+    return ended
+
+
+def _archive_subs(cwd: Optional[str], by: str) -> List[str]:
+    """The main run is being archived: retire every sub run with it, each into
+    its own ``sub/<name>/archive/``. Returns the archived names."""
+    archived: List[str] = []
+    for name in state_mod.sub_runs(cwd):
+        def retire(c, _name=name):
+            st = state_mod.load_state(c)
+            _archive_current(st, by, c)
+            return True
+        try:
+            if _in_sub(name, retire, cwd):
+                archived.append(name)
+        except state_mod.StateError:
+            continue
+    return archived
 
 
 def _visits(state: dict, step_id: str) -> int:
@@ -1246,13 +1434,37 @@ def _move_to(workflow: Workflow, state: dict, target: Optional[str], cwd) -> Non
         state["status"] = "done"
         state_mod.save_state(state, cwd)
         state_mod.journal("done", {"run": state["run_id"]}, cwd)
+        _note_run_end(state, cwd, status="done", by="run")
         if workflow.recur and not escalated:
             _request_next_round(workflow, state, cwd)
         return
     state["current"] = target
     state["visits"][target] = _visits(state, target) + 1
+    state.pop("sub_errors", None)  # a failure belongs to the position it happened at
     _arrive_timer(workflow, state, target, from_step, cwd)
     state_mod.save_state(state, cwd)
+    _start_declared_subs(workflow, state, cwd)
+
+
+def _note_run_end(state: dict, cwd: Optional[str], *, status: str, by: str) -> None:
+    """A run reached done/aborted: a sub run reports it into the main
+    journal; a main run ends whatever sub runs it still owns."""
+    if state.get("sub"):
+        def note(c):
+            # Inside the main slot for the WRITE as well as the read: the
+            # ambient run here is the sub run that is ending, and a journal
+            # call outside this wrapper would land in its own journal.
+            if not state_mod.has_run(c):
+                return
+            main = state_mod.load_state(c)
+            state_mod.journal(
+                "sub_ended",
+                {"run": main["run_id"], "sub": state["sub"], "sub_run": state["run_id"], "status": status, "by": by},
+                c,
+            )
+        _in_main(note, cwd)
+        return
+    _end_subs(cwd, by=by)
 
 
 def _request_next_round(workflow: Workflow, state: dict, cwd) -> None:
@@ -1564,7 +1776,7 @@ def _done_payload(state: dict, cwd: Optional[str]) -> dict:
                 "pending_start) — report this run's journal to the user, "
                 "then perform the requested start per the protocol"
             )
-    return payload
+    return _stamp_run(payload, state)
 
 
 #: Re-exported so a cflow caller need not reach past its own package for the
@@ -1757,7 +1969,14 @@ def _payload(workflow: Workflow, state: dict, cwd: Optional[str], *, mutate: boo
     digest = step_digest(payload)
     if digest:
         payload["digest"] = digest
-    return payload
+    if state.get("sub_errors"):
+        payload["sub_errors"] = list(state["sub_errors"])
+        payload["sub_errors_note"] = (
+            "this step declares sub runs and one or more could not be started "
+            "(see sub_errors). The main run moved regardless; start the side "
+            "track by hand with 'start' + 'sub', or fix the definition"
+        )
+    return _stamp_run(payload, state)
 
 
 def _position_payload(
@@ -2223,6 +2442,10 @@ def _awaits_payload(step: Step) -> Optional[dict]:
             f"being unmet"
         ),
     }
+    if step.awaits.sub:
+        # Say it in the run's own terms too: the command is how the daemon
+        # measures it, the name is what the agent is waiting for.
+        out["sub"] = step.awaits.sub
     if step.awaits.describe:
         out["describe"] = step.awaits.describe
     return out
@@ -2394,6 +2617,12 @@ def _archive_current(state: dict, by: str, cwd: Optional[str]) -> str:
         state_mod.journal(
             "aborted", {"run": state["run_id"], "by": by, "reason": "archived"}, cwd
         )
+        _note_run_end(state, cwd, status="aborted", by=by)
+    if not state.get("sub"):
+        # The main run's sub runs go with it: their slots sit inside the
+        # scope's, and a fresh main run must not find last round's side
+        # tracks still standing.
+        _archive_subs(cwd, by)
     state_mod.journal("archived", {"run": state["run_id"], "by": by}, cwd)
     return str(state_mod.archive_run(cwd))
 
@@ -2440,6 +2669,7 @@ def start(
     *,
     force: bool = False,
     mesh: Optional[str] = None,
+    inputs: Optional[dict] = None,
     cwd: Optional[str] = None,
 ) -> dict:
     """Begin a run here.
@@ -2456,8 +2686,40 @@ def start(
     :func:`auto_start_next_round`.
     """
     return _start_impl(
-        workflow_ref, context=context, force=force, mesh=mesh, cwd=cwd
+        workflow_ref, context=context, force=force, mesh=mesh, inputs=inputs, cwd=cwd
     )
+
+
+def _sub_start_checks(workflow: Workflow, sub: str, cwd: Optional[str]) -> dict:
+    """What a sub run's start must find true, and the main run it belongs to.
+
+    * A main run is active here — a sub run is a side track of it, never a
+      run of its own (a session wanting a run of its own starts a main one).
+    * The definition is marked ``kind: subflow`` — an ordinary workflow
+      carries session-lifecycle facts (recurrence, role filters, child
+      pairing) that a sub run cannot honour, and refusing at start is what
+      keeps that a parse-time contract (:func:`model._validate_subflow`).
+    * Fewer than :data:`MAX_SUBFLOWS` other sub runs stand in the scope.
+    """
+    main = _main_state(cwd)
+    if main is None or main.get("status") in ("done", "aborted"):
+        raise CflowError(
+            f"a sub run ({sub!r}) needs an active main run in this scope — "
+            f"start the main workflow first; a side track cannot stand alone"
+        )
+    if workflow.kind != model.KIND_SUBFLOW:
+        raise CflowError(
+            f"{workflow.name!r} is not a 'kind: {model.KIND_SUBFLOW}' definition "
+            f"— only one written for a sub run may be started as one"
+        )
+    others = [n for n in state_mod.sub_runs(cwd) if n != sub]
+    if len(others) >= MAX_SUBFLOWS:
+        raise CflowError(
+            f"this scope already holds {len(others)} sub run(s) "
+            f"({', '.join(others)}); the limit is {MAX_SUBFLOWS} — finish and "
+            f"archive one, or hand the work to a child session"
+        )
+    return main
 
 
 def _start_impl(
@@ -2466,6 +2728,7 @@ def _start_impl(
     *,
     force: bool = False,
     mesh: Optional[str] = None,
+    inputs: Optional[dict] = None,
     cwd: Optional[str] = None,
 ) -> dict:
     """Begin a run here, without the slot lock.
@@ -2501,6 +2764,17 @@ def _start_impl(
     composed = state_mod.compose_located(located, cwd)
     text = composed.text
     workflow = composed.workflow
+    sub = state_mod.current_run()
+    main = _sub_start_checks(workflow, sub, cwd) if sub else None
+    if workflow.kind == model.KIND_SUBFLOW:
+        resolved_inputs: Optional[Dict[str, str]] = model.resolve_inputs(workflow.inputs, inputs)
+    elif inputs:
+        raise CflowError(
+            f"{workflow.name!r} takes no inputs — only a 'kind: "
+            f"{model.KIND_SUBFLOW}' definition declares them"
+        )
+    else:
+        resolved_inputs = None
     role_filter_note = _enforce_role_filter(
         workflow, mesh=(mesh or "").strip(), cwd=cwd
     )
@@ -2551,6 +2825,8 @@ def _start_impl(
         "visits": {workflow.start: 1},
         "loop_extensions": {},
         "round": round_no,
+        **({"sub": sub, "parent_run": main["run_id"]} if sub else {}),
+        **({"inputs": resolved_inputs} if resolved_inputs is not None else {}),
     }
     # The start step is an arrival like any other: a workflow whose START is
     # a timed wait (gds-job — a run its driver has no tools to advance) must
@@ -2560,6 +2836,18 @@ def _start_impl(
     state_mod.snapshot_workflow(text, cwd)
     state_mod.save_state(state, cwd)
     state_mod.register_run_dir(cwd)
+    if sub:
+        # Both journals: the sub's own `started` (below, like any run) and the
+        # main run's `sub_started`, which is how a reader of the main journal
+        # learns a side track was opened and by which definition.
+        _in_main(
+            lambda c: state_mod.journal(
+                "sub_started",
+                {"run": main["run_id"], "sub": sub, "sub_run": state["run_id"], "workflow": workflow.name},
+                c,
+            ),
+            cwd,
+        )
     state_mod.journal(
         "started",
         {
@@ -2572,6 +2860,8 @@ def _start_impl(
             "context": context or "",
             "total_steps": workflow.step_count(),
             "warnings": workflow.warnings,
+            **({"sub": sub, "parent_run": main["run_id"]} if sub else {}),
+            **({"inputs": resolved_inputs} if resolved_inputs is not None else {}),
             **({"round": round_no} if round_no > 1 else {}),
             **({"role_filter": role_filter_note} if role_filter_note else {}),
             **({"checkout": checkout_note} if checkout_note else {}),
@@ -2595,6 +2885,7 @@ def _start_impl(
             cwd,
         )
         state_mod.clear_request(cwd)
+    _start_declared_subs(workflow, state, cwd)
     payload = _payload(workflow, state, cwd, mutate=True)
     if context:
         payload["context"] = context
@@ -2983,7 +3274,10 @@ def _next_step_impl(*, cwd: Optional[str] = None) -> dict:
     # case that needs saying — a red gate stops the run by itself, while a
     # green one from somebody else's tree is read as proof and is not.
     isolation = checkout.check(cwd=cwd)
-    result = _run_verify(step, cwd, scope=verify_scope(cwd))
+    # `inputs` only when the run has them: a sub run's values ride into the
+    # command's environment, and a main run's call stays the call it was.
+    extra = {"inputs": state["inputs"]} if state.get("inputs") else {}
+    result = _run_verify(step, cwd, scope=verify_scope(cwd), **extra)
 
     with state_mod.run_lock(cwd):
         workflow, state = _load(cwd)
@@ -3082,7 +3376,9 @@ def verify_scope(cwd: Optional[str]) -> str:
     return checkout.occupant(cwd)
 
 
-def _run_verify(step: Step, cwd: Optional[str], *, scope: str) -> Optional[dict]:
+def _run_verify(
+    step: Step, cwd: Optional[str], *, scope: str, inputs: Optional[dict] = None
+) -> Optional[dict]:
     """Run the step's verify command; None on success, failure details otherwise.
 
     ``scope`` has no default for the same reason :func:`run_probe`'s has none:
@@ -3100,7 +3396,7 @@ def _run_verify(step: Step, cwd: Optional[str], *, scope: str) -> Optional[dict]
             encoding="utf-8",
             errors="replace",
             timeout=verify.timeout,
-            env=probe_env(scope),
+            env=probe_env(scope, inputs=inputs),
         )
     except subprocess.TimeoutExpired:
         return {"exit_code": None, "output": f"timed out after {int(verify.timeout)}s"}
@@ -3113,7 +3409,7 @@ def _run_verify(step: Step, cwd: Optional[str], *, scope: str) -> Optional[dict]
     }
 
 
-def probe_env(scope: Optional[str]) -> Dict[str, str]:
+def probe_env(scope: Optional[str], *, inputs: Optional[dict] = None) -> Dict[str, str]:
     """The environment a probe subprocess runs in, given whose run it is for.
 
     A probe is launched by the daemon, and the daemon's own environment is not
@@ -3152,11 +3448,21 @@ def probe_env(scope: Optional[str]) -> Dict[str, str]:
         env[state_mod.SESSION_ENV] = who
     else:
         env.pop(state_mod.SESSION_ENV, None)
+    # A sub run's inputs ride as CFLOW_IN_<NAME>: the one channel a command
+    # can read a value from without the value being pasted into the command
+    # text (which is snapshotted, and hashed into the step's text id).
+    for name, value in (inputs or {}).items():
+        env[model.InputSpec(name=str(name)).env_name] = str(value)
     return env
 
 
 def run_probe(
-    command: str, cwd: Optional[str], timeout: float, *, scope: Optional[str]
+    command: str,
+    cwd: Optional[str],
+    timeout: float,
+    *,
+    scope: Optional[str],
+    inputs: Optional[dict] = None,
 ) -> Optional[dict]:
     """Measure a step's awaited condition once. ``None`` = could not measure.
 
@@ -3202,7 +3508,7 @@ def run_probe(
             text=True,
             encoding="utf-8",
             errors="replace",
-            env=probe_env(scope),
+            env=probe_env(scope, inputs=inputs),
             **kwargs,
         )
     except (OSError, ValueError):
@@ -3613,7 +3919,11 @@ def check_checklist(*, cwd: Optional[str] = None) -> Optional[dict]:
         # scope for the duration of the call, and that is a fact about THIS
         # function, not about probes.
         probe = run_probe(
-            item.check, cwd, checklist.timeout, scope=state_mod.current_scope()
+            item.check,
+            cwd,
+            checklist.timeout,
+            scope=state_mod.current_scope(),
+            inputs=state.get("inputs"),
         )
         measured[item.id] = {
             # `run_probe` returns None when the command could not be run at
@@ -4566,6 +4876,10 @@ def status(cwd: Optional[str] = None) -> dict:
         return payload
     workflow, state = _load(cwd)
     payload = _payload(workflow, state, cwd, mutate=False)
+    if not state.get("sub"):
+        subs = sub_summaries(cwd)
+        if subs:
+            payload["subs"] = subs
     # Said by every status, not only the graph payload: the runs list, the
     # session panel and the run page all read this, and "this run loops"
     # changes what its controls should offer (the dashboard's Reset).
@@ -4747,14 +5061,20 @@ def set_reminder(
 
 
 def current_run_id(
-    cwd: Optional[str] = None, scope: Optional[str] = None
+    cwd: Optional[str] = None, scope: Optional[str] = None, run: Optional[str] = None
 ) -> Optional[str]:
     """The run id on disk for a slot, or None when it holds no run.
 
     Read-only and cheap: the MCP server calls it before every mutating tool to
     notice that the run it has been driving was replaced underneath it.
     """
+    try:
+        if run is not None:
+            run = state_mod.normalize_run(run) or state_mod.MAIN_RUN
+    except state_mod.StateError:
+        return None
     token = state_mod.push_scope(scope)
+    run_token = state_mod.push_run(run)
     try:
         if not state_mod.has_run(cwd):
             return None
@@ -4762,6 +5082,7 @@ def current_run_id(
     except state_mod.StateError:
         return None
     finally:
+        state_mod.pop_run(run_token)
         state_mod.pop_scope(token)
 
 
@@ -4773,7 +5094,8 @@ def abort(*, by: str = "user", cwd: Optional[str] = None) -> dict:
     state["status"] = "aborted"
     state_mod.save_state(state, cwd)
     state_mod.journal("aborted", {"run": state["run_id"], "by": by}, cwd)
-    return _done_payload(state, cwd)
+    _note_run_end(state, cwd, status="aborted", by=by)
+    return _stamp_run(_done_payload(state, cwd), state)
 
 
 @_locked_op

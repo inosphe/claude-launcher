@@ -1,0 +1,98 @@
+# found-issue — 회차 도중 발견한 범위 밖 결함을 그 자리에서 이슈로 남기고,
+# 지금 자식에게 넘길지 가르는 서브 런(kind: subflow).
+#
+# 왜 서브 런인가. 이 절차는 improv-worker의 work 스텝 산문에 적혀 있었고,
+# 산문은 두 가지를 못 한다: (1) 발견이 둘이면 둘째는 첫째의 기록 위에
+# 덮여 보고에 하나만 남는다, (2) "이슈를 만들었는가·자식에게 넘겼는가"가
+# 메인 런의 스텝 위치와 섞여 저널에서 되짚을 수 없다. 서브 런은 발견마다
+# 슬롯 하나(`runs/<세션>/sub/found-<n>/`)를 갖고, 메인 런은 그 사이 자기
+# 스텝에 그대로 서 있는다. 메인 저널에는 sub_started/sub_ended 두 줄만
+# 남고 판정의 근거는 서브의 저널에 있다.
+#
+# 이 파일은 정의이지 실행이 아니다. 시작은 메인 런을 모는 에이전트가
+# MCP `start`에 `sub: found-<n>`과 `inputs: {parent: <이 회차 이슈 id>}`를
+# 주어 한다(improv-worker work 스텝이 그렇게 적는다). 메인 런의 work
+# 스텝은 `awaits: {sub: all}`로 이 서브 런들의 종료를 데몬에게 재게 하고,
+# landed 체크리스트의 subs 항목이 wrapup 전에 남은 서브 런이 없음을 못박는다.
+#
+# 서브 정의가 못 갖는 것: recur, filter_roles, default_child_cflow,
+# default_role, escalate, subflows, awaits: {sub}. 이 파일에 그것들을 더하면
+# 파서가 거절한다(model._validate_subflow) — 세션의 생애주기는 메인 런이
+# 이미 답하고 있어서 두 번째 답은 충돌만 남긴다.
+name: found-issue
+kind: subflow
+description: >-
+  회차 도중 발견한 범위 밖 결함 하나를 이슈로 남기는 서브 런. 입력
+  parent = 이 회차의 이슈 id(--parent로 걸린다), summary = 한 줄 요지(선택).
+  범위 안이면 이슈 없이 끝나고, 범위 밖이면 이슈를 만든 뒤 지금 자식에게
+  넘길지(spawn) 풀에 둘지(pool)를 가른다. 판정과 이슈 id는 이 런의 저널에
+  남는다.
+inputs:
+  parent:
+    required: true
+  summary:
+    default: ""
+start: triage
+
+steps:
+  triage:
+    title: 범위 판정
+    select:
+      prompt: |
+        발견한 것이 이 회차의 범위(intake에서 정한 것) 안인가 밖인가.
+        입력 `summary`(페이로드의 inputs.summary)가 발견의 한 줄 요지다.
+        범위 안이면 이슈를 만들지 않는다 — 그것은 메인 런에서 고칠 일이고
+        이 서브 런은 여기서 끝난다. 범위 밖이면 이슈로 남긴다: 고치지 않는다.
+        reason에 무엇을 어디서 보았는지(파일·줄·재현 명령) 적는다.
+      chooser: agent
+      require_reason: true
+      options:
+        out-of-scope:
+          description: 이 회차의 범위 밖이다 — 이슈로 남긴다
+          next: file
+        in-scope:
+          description: 이 회차의 범위 안이다 — 메인 런에서 고친다, 이슈 없음
+
+  file:
+    title: 이슈 등록
+    instructions: |
+      이슈를 만든다 — `claunch beads create "<제목>" --type bug --priority 3
+      --labels found --parent <parent> --description "<규격>"` (assignee
+      없음; parent는 페이로드의 inputs.parent다). 규격에는 재현 명령·관찰한
+      출력·기대한 동작을 적는다. 발견한 세션이 만드는 자다.
+      만들어진 이슈 id를 보고에 적는다.
+    done_when: |
+      `claunch beads show <id>`로 읽히는 이슈가 하나 있고, parent가 이 회차의
+      이슈이며, 그 id가 보고에 있다.
+    next: delegate
+
+  delegate:
+    title: 지금 넘길 것인가
+    select:
+      prompt: |
+        만든 이슈를 지금 자식 세션에 넘길지 가른다. 다음 넷을 전부 만족할
+        때만 spawn이다: (1) 이 회차 브랜치와 파일·영역이 겹치지 않는다,
+        (2) 규격이 지금 서 있다, (3) 이 세션의 컨텍스트가 필요 없다, (4)
+        부모 회차의 착지 전에 끝나는 크기다 — 그리고 `children`이 남은
+        슬롯을 답한다. 하나라도 아니면 pool이다: wrapup의 생성 이슈 정산이
+        self/spawn/pool로 가른다. reason에 넷 각각의 답을 적는다.
+      chooser: agent
+      require_reason: true
+      options:
+        spawn:
+          description: 넷 다 참 — 자식에게 넘긴다
+          next: handoff
+        pool:
+          description: 하나라도 거짓 — 풀에 둔다(assignee 없음), 정산은 wrapup에서
+
+  handoff:
+    title: 자식에게 넘기기
+    instructions: |
+      spawn `--issue <id>`로 자식을 세운다(데몬이 자식을 assignee로 쓴다).
+      자식의 태스크에 반드시 적는 세 줄: **기준 브랜치 = 내 브랜치 @
+      <tip>, 통합 대상 = 그 브랜치(master 아님), 완료 보고·착지 요청
+      수신자 = 나**. 스폰은 `worktree: <내 세션>-<요지>`와 `rebase_onto:
+      <내 브랜치>`로 내 브랜치 위에 자른다. 자식의 세션 이름과 이슈 id를
+      보고에 적는다 — 메인 런의 work 보고와 착지 묶음이 그것을 옮겨 적는다.
+    done_when: |
+      자식 세션이 떠 있고(`children`이 답한다) 그 세션·이슈 id가 보고에 있다.
