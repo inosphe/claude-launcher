@@ -42,7 +42,7 @@ from typing import Callable, Dict, Iterable, List, Optional, Union
 import yaml
 
 from .. import atomic, digests
-from . import mesh_policy, mesh_roles, paths, wire
+from . import loops, mesh_policy, mesh_roles, paths, wire
 from .manager import ManagerError, SessionManager
 from .session import STATUS_IDLE
 
@@ -2388,6 +2388,14 @@ class MeshManager:
             if deferred:
                 for entry in deferred:
                     self._record_refusal(mesh, entry["handle"], from_handle)
+                # The refused message will not exist after this call, so the
+                # one thing that must survive it -- that the sender still
+                # means to reach these members -- goes on the sender's own
+                # loop ledger, where a re-briefing can hand it back.
+                if member is not None and self._is_local(mesh, member):
+                    loops.note_refused_send(
+                        member.session, mesh.name, deferred, body
+                    )
                 open_to = [r for r in recipients
                            if r not in {e["handle"] for e in deferred}]
                 if not open_to:
@@ -2445,6 +2453,7 @@ class MeshManager:
             mesh.activity.setdefault(member.handle, {"anchor": now})[
                 "last_sent"
             ] = now
+            loops.note_delivered_send(member.session, mesh.name, recipients)
         for handle in recipients:
             rcpt = mesh.members.get(handle)
             if rcpt is not None and self._is_local(mesh, rcpt):

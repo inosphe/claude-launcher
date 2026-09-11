@@ -1050,6 +1050,25 @@ one section with a guaranteed alternative one command away, while the owed
 ledger, the open decisions and the opening task have none, and a blind
 tail-cut takes whichever section happened to be last — which is the task.
 
+**Open loops** (`daemon/loops.py`, claunch-ik8n). One section of the
+re-briefing is *stored* rather than re-derived: what the session was waiting
+on. A wait lives nowhere the daemon can see unless it is written down, and
+the case that motivated it — a leader's re-send of two board assignments,
+postponed by a full inbox and then lost to a compaction — is exactly the
+half a summary keeps or drops at random. The ledger is one JSON file per
+session (`<session dir>/loops.json`); entries carry `what`, `since`,
+`resume_when`, `then`, `refs` and a horizon (`expires_at`, six hours by
+default) past which a re-briefing marks them `STALE` instead of serving them
+as current. Three writers: the agent (MCP `loops`/`loop_add`/`loop_close`,
+CLI `claunch loops`, `/api/sessions/{s}/loops`); the mesh, which records a
+`resend` loop when `_send_core` refuses a send for a full inbox (the message
+does not exist afterwards, so the intent has no other home) and closes it on
+the next send that reaches that member; and nobody, for reply-waits — those
+are read off `response_watches` at composition time, since the watch a
+delivered ask opens and a threaded reply clears already has the loop's exact
+lifetime, and a second copy would only drift. The section is capped at ten
+lines and placed just before the opening task.
+
 **Exclusive roles.** A role may declare `exclusive: true`: at most one **live**
 holder per mesh, enforced at join on the authority (`_resolve_role`, the one
 funnel all three join paths — local, guest, establishment — resolve through).

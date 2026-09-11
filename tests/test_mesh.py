@@ -1688,6 +1688,8 @@ def test_mesh_mcp_tools(home, monkeypatch):
         "disconnect",
         # ... and answering the members who asked to be wired themselves
         "wire_requests",
+        # ... and the ledger of what this session is waiting on
+        "loops", "loop_add", "loop_close",
     ]
 
     # send requires a session identity
