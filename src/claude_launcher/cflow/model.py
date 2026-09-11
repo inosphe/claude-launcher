@@ -187,6 +187,9 @@ conditions, and the run leaves it only when every one of them is true::
         then: wrapup        # where the run goes when every item passes
         poll: 60            # seconds between the daemon's re-measurements
         timeout: 30         # per-item command timeout
+        otherwise:          # optional: where it goes when the gate has NOT
+          after: 600        #   opened this many seconds after it was
+          then: retry       #   presented (journalled `checklist_expired`)
         items:
           - id: merged
             describe: a merge commit on the target lists my tip as a parent
@@ -232,6 +235,18 @@ Two properties make the gate mean something:
   with the human-checked half of ``done_when`` missing from the journal. A
   report does not open the gate — a filed report with a red item moves
   nothing.
+
+``otherwise: {after, then}`` bounds the wait. ``after`` seconds from the
+moment the gate was first presented in this visit, a list that is still not
+all true moves the run to ``then`` instead — the daemon's move again, but
+journalled as ``checklist_expired`` (with every item's state as evidence) and
+without waiting for a report: it is the gate's "no", not the step's
+completion. The step it names is where the retry is decided — a ``select``
+whose one option re-enters the gate (a fresh visit, so a ``restart:`` on it
+runs again) and whose other gives up. Two things it is not: it is not a
+``goto`` (nothing is overridden; the workflow declared the edge), and it is
+not a second exit for the agent (``next`` is still refused). Without it the
+gate is unbounded, as before.
 
 ``poll`` and ``timeout`` carry the same floor and ceiling as ``awaits`` and
 for the same reasons: below the floor the clock hammers the condition instead
@@ -673,6 +688,22 @@ class ChecklistItem:
 
 
 @dataclass(frozen=True)
+class ChecklistOtherwise:
+    """Where a checklist sends the run when it has NOT opened in time.
+
+    ``after`` seconds from the visit's first presentation, a gate that is
+    still shut moves the run to ``then`` — a daemon move like the pass, but
+    journalled as ``checklist_expired`` and needing no report: it is the
+    gate's "no", not the step's completion. The step it names is usually one
+    that decides whether to come back and ask again (a fresh visit, so a
+    ``restart:`` declared on the gate runs again) or to give up.
+    """
+
+    after: float
+    then: str
+
+
+@dataclass(frozen=True)
 class Checklist:
     """A step's gate as a list of conditions, moved by the daemon.
 
@@ -680,6 +711,9 @@ class Checklist:
     which is the only edge out — a checklist step takes no ``next``. See the
     module docstring's "Checklist gate" section for why the agent has no exit
     of its own and why a report is still required.
+
+    :attr:`otherwise` is the one other daemon edge: a bounded wait. Without
+    it a gate that never turns green holds the run until a person's ``goto``.
     """
 
     items: Tuple[ChecklistItem, ...]
@@ -691,6 +725,8 @@ class Checklist:
     prompt: Optional[str] = None
     poll: float = DEFAULT_CHECKLIST_POLL
     timeout: float = DEFAULT_CHECKLIST_TIMEOUT
+    #: Optional expiry edge; ``None`` is today's unbounded wait.
+    otherwise: Optional[ChecklistOtherwise] = None
 
     def item(self, item_id: str) -> Optional[ChecklistItem]:
         for entry in self.items:
@@ -813,6 +849,13 @@ class Step:
             out.append(
                 None if self.checklist.then == END else self.checklist.then
             )
+            if self.checklist.otherwise is not None:
+                # The expiry is an exit too: the run really goes there, on
+                # the daemon's clock, so reachability and the loop check see
+                # it. (`timer.then` is kept off this list because a fire is a
+                # scheduled re-entry; an expiry is a departure.)
+                target = self.checklist.otherwise.then
+                out.append(None if target == END else target)
         else:
             out.append(self.next)
         if self.timer is not None:
@@ -1936,12 +1979,14 @@ def _parse_checklist(raw, step_id: str) -> Optional["Checklist"]:
             f"step {step_id!r}: 'checklist' must be a mapping "
             f"{{items, then, ...}}"
         )
-    unknown = sorted(set(raw) - {"items", "then", "prompt", "poll", "timeout"})
+    unknown = sorted(
+        set(raw) - {"items", "then", "prompt", "poll", "timeout", "otherwise"}
+    )
     if unknown:
         raise WorkflowError(
             f"step {step_id!r}: 'checklist' has unknown key(s): "
             f"{', '.join(unknown)} "
-            f"(allowed: items, then, prompt, poll, timeout)"
+            f"(allowed: items, then, prompt, poll, timeout, otherwise)"
         )
     then = str(raw.get("then") or "").strip()
     if not then:
@@ -2006,7 +2051,44 @@ def _parse_checklist(raw, step_id: str) -> Optional["Checklist"]:
         prompt=str(prompt).strip() if prompt else None,
         poll=max(poll, MIN_CHECKLIST_POLL),
         timeout=min(timeout, MAX_CHECKLIST_TIMEOUT),
+        otherwise=_parse_checklist_otherwise(raw.get("otherwise"), step_id),
     )
+
+
+def _parse_checklist_otherwise(raw, step_id: str) -> Optional[ChecklistOtherwise]:
+    """Parse ``checklist.otherwise: {after: <seconds>, then: <step>}``.
+
+    Both keys are required: an expiry with no destination is a gate that
+    just stops being one, and a destination with no deadline is a ``then``
+    spelled twice. The seconds are read the way ``timer.every`` is — a
+    positive number — because this too is a schedule the daemon keeps.
+    """
+    if raw is None:
+        return None
+    where = f"step {step_id!r}: 'checklist.otherwise'"
+    if not isinstance(raw, dict):
+        raise WorkflowError(f"{where} must be a mapping {{after: <seconds>, then: <step>}}")
+    unknown = sorted(set(raw) - {"after", "then"})
+    if unknown:
+        raise WorkflowError(
+            f"{where} has unknown key(s): {', '.join(unknown)} (allowed: after, then)"
+        )
+    after_raw = raw.get("after")
+    if isinstance(after_raw, bool) or after_raw is None:
+        raise WorkflowError(f"{where}.after must be a number of seconds")
+    try:
+        after = float(after_raw)
+    except (TypeError, ValueError):
+        raise WorkflowError(f"{where}.after must be a number of seconds") from None
+    if after <= 0:
+        raise WorkflowError(f"{where}.after must be positive, got {after_raw!r}")
+    then = str(raw.get("then") or "").strip()
+    if not then:
+        raise WorkflowError(
+            f"{where}.then is required — where the run goes when the gate has "
+            f"not opened within 'after' seconds"
+        )
+    return ChecklistOtherwise(after=after, then=then)
 
 
 def _parse_select(raw, step_id: str) -> Optional[Select]:
@@ -2098,6 +2180,20 @@ def _validate_graph(workflow: Workflow) -> None:
             raise WorkflowError(
                 f"step {step.id!r}: 'checklist.then' must be a different "
                 f"step — a gate whose only exit re-enters itself never leaves"
+            )
+        if (
+            step.checklist is not None
+            and step.checklist.otherwise is not None
+            and step.checklist.otherwise.then == step.id
+        ):
+            # Re-entering the same step would be a fresh visit and would
+            # re-run its `restart:` — which is exactly the loop the edge is
+            # for — but with nobody in between to stop it. The decision
+            # belongs in a step of its own.
+            raise WorkflowError(
+                f"step {step.id!r}: 'checklist.otherwise.then' must be a "
+                f"different step — put the retry decision in a step of its "
+                f"own so an expired gate does not re-enter itself unattended"
             )
         if step.timer is not None:
             # `timer.then` is entered only by a fire, so it is not one of the

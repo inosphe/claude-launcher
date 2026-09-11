@@ -312,7 +312,8 @@ def _cmd_checklist(args: argparse.Namespace) -> int:
         moved = engine.check_checklist(cwd=cwd, scope=scope)
         if moved and moved.get("moved_to"):
             print(
-                f"checklist passed: {moved['step']} -> {moved['moved_to']} "
+                f"checklist {'expired' if moved.get('expired') else 'passed'}: "
+                f"{moved['step']} -> {moved['moved_to']} "
                 f"({moved['passed']}/{moved['total']} items true)"
             )
     payload = engine.status(cwd=cwd, scope=scope)
@@ -511,6 +512,11 @@ def _print_checklist(checklist: dict) -> None:
     else:
         print(f"{'moves to:':<{_LABEL}}{then}, once every item is true "
               f"(the daemon measures; nobody has to advance it)")
+    otherwise = checklist.get("otherwise") or {}
+    if otherwise and not checklist.get("all_true"):
+        when = otherwise.get("expires_at") or f"{otherwise.get('after')}s after presentation"
+        print(f"{'or else:':<{_LABEL}}{otherwise.get('then')} at {when}, "
+              f"if the list is still not all true")
     print(f"{'recheck:':<{_LABEL}}claunch cflow checklist --recheck")
 
 

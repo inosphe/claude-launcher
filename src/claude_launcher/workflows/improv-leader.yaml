@@ -888,6 +888,19 @@ steps:
       prompt: 이 회차의 머지가 라이브 서버에 실제로 반영됐는가
       then: end
       poll: 30
+      # 2중 게이트의 바깥쪽 절반. 이 게이트는 원래 무기한이었다 — deployed가
+      # 참이 되지 않으면 런은 여기서 사람의 goto를 기다렸다. 2026-09-11에
+      # 그 무기한이 교착이 됐다: 데몬이 미커밋 파일을 실은 채 기동했고
+      # (deploy_check exit 3), 커밋해도 기동 스냅샷의 dirt는 재기동으로만
+      # 지워지는데, 재기동은 방문(visit)당 한 번만 실행되어 이미 지나갔다.
+      # 그래서 만료 간선이다: 600초(재기동 두 번 분량) 안에 deployed가 참이
+      # 되지 않으면 데몬이 reflect-pregate로 옮긴다. 거기서 리더가 원인을
+      # 정리한 뒤 reflect로 되돌아오면 새 visit이라 재기동이 다시 실행된다.
+      # 만료는 goto가 아니다 — 워크플로가 선언한 간선이고 저널에는
+      # checklist_expired로 남는다. 무한 루프는 max_visits가 막는다.
+      otherwise:
+        after: 600
+        then: reflect-pregate
       items:
         # tools/deploy_check.py가 daemon.json의 started_at(부팅마다
         # 기록된다)과 master tip의 커밋 시각을 견준다: 데몬이 그 머지보다
@@ -924,10 +937,22 @@ steps:
         마감된다.
       otherwise: self
     instructions: |
-      라이브 서버를 재기동하고, 기동 후 새 머지 커밋의 기능이 실제로
+      재기동은 리더가 실행하지 않는다 — 이 스텝에 진입하는 순간 데몬의
+      RestartClock이 위 restart: 스크립트(tools/restart_live.*)를 실행하고,
+      그 스크립트가 deploy_check로 「이미 서빙 중」이면 재기동을 건너뛰고
+      그 외에는 `claunch daemon restart`를 부른다. 에이전트 세션은 그
+      명령을 직접 실행할 권한이 없다(README「Who may restart or stop the
+      daemon」). 리더가 할 일은 기동 후 새 머지 커밋의 기능이 실제로
       서빙되는지 한 가지 이상 확인해 증거(확인 방법과 결과)를 보고에
-      남긴다. 이 회차는 여기서 마감된다 — recur가 다음 회차를 요청하고
-      데몬이 그것을 시작한다. 재기동으로 이 턴이 죽어도 회차는 이어진다.
+      남기는 것이다. 이 회차는 여기서 마감된다 — recur가 다음 회차를
+      요청하고 데몬이 그것을 시작한다. 재기동으로 이 턴이 죽어도 회차는
+      이어진다.
+
+      이 게이트는 600초로 유한하다. 그 안에 deployed가 참이 되지 않으면
+      데몬이 reflect-pregate로 옮기고, 거기서 원인을 정리한 뒤 되돌아오면
+      재기동이 다시 실행된다. 기다리는 동안 deployed의 출력(deploy_check의
+      판정문)을 읽어 둔다 — exit 3(체크아웃이 더러움)이면 어느 경로가
+      미커밋인지가 거기 적혀 있고, 그것이 pregate에서 할 일이다.
 
       ── 재기동을 인지하는 규율 ──
       재기동을 거는 턴과 그 결과를 읽는 턴은 같은 턴이 아니다. 데몬은
@@ -961,6 +986,51 @@ steps:
       확인한 증거(방법과 결과)가 보고에 있다. 기동한 것이 새 데몬임을
       무엇으로 판정했는지도 적혀 있다 — 재기동 통지 블록이거나, 재기동
       전후의 pid다(응답이 있었다는 사실은 판정이 아니다).
+
+  reflect-pregate:
+    # 2중 게이트의 안쪽 절반. reflect의 checklist가 600초 안에 열리지 않으면
+    # 데몬이 런을 여기로 옮긴다(checklist_expired). 여기는 결정 자리다:
+    # 원인을 정리하고 reflect로 되돌아가 재기동을 다시 실행할지, 이 회차는
+    # 반영 없이 마감할지. 되돌아가면 reflect는 새 visit이고 RestartClock이
+    # restart: 를 다시 실행한다 — 그것이 이 스텝이 존재하는 이유다(같은
+    # visit 안에서는 재기동이 한 번뿐이라 고친 뒤 다시 걸 방법이 없었다).
+    # chooser는 agent, 곧 리더 자신이다(사용자 결정, 2026-09-11): 사람이
+    # 자리에 없어도 회차가 멈추지 않는다. 무한 왕복은 max_visits(기본 25)가
+    # 끊는다.
+    title: 반영 재시도 판단
+    instructions: |
+      reflect의 deployed 게이트가 600초 안에 열리지 않아 여기로 왔다.
+      저널의 checklist_expired 항목에 마지막 판정(deploy_check의 종료 코드와
+      출력)이 있다 — 그것을 먼저 읽는다. 갈래는 종료 코드로 나뉜다.
+      · exit 1(옛 코드를 서빙 중): 재기동이 실행되지 않았거나 실패했다.
+        저널의 restart_completed/restart_interrupted와 재기동 통지 블록을
+        대조하고 retry를 고른다.
+      · exit 3(체크아웃이 더러움): 판정문에 적힌 미커밋 경로를 본다.
+        리더의 것이면 커밋하거나 치우고, 다른 세션의 것이면 그 세션에
+        커밋·정리를 요청해 응답을 받는다. 그다음 retry를 고른다 —
+        기동 스냅샷에 남은 dirt는 재기동으로만 지워지므로 정리만으로는
+        deployed가 참이 되지 않는다.
+      · exit 2(판정 불가): 판정문이 말하는 원인(daemon.json 없음, 다른
+        저장소, 알 수 없는 HEAD)을 고친 뒤 retry를 고른다.
+      원인을 이 턴에 정리할 수 없으면 close를 고른다 — 회차는 반영 없이
+      마감되고 다음 회차의 reflect가 다시 시도한다. 어느 쪽이든 reason에
+      종료 코드와 정리한 내용(또는 못 한 이유)을 적는다.
+      `claunch daemon restart`를 여기서 직접 실행하지 않는다 — retry로
+      reflect에 되돌아가면 데몬이 실행한다.
+    select:
+      prompt: |
+        reflect의 deployed 게이트가 만료됐다. 원인을 정리했으면 retry로
+        reflect에 되돌아가 재기동을 다시 실행하고, 이 턴에 정리할 수 없으면
+        close로 이 회차를 반영 없이 마감한다.
+      chooser: agent
+      require_reason: true
+      options:
+        retry:
+          description: 원인을 정리했다 — reflect로 되돌아가 재기동을 다시 실행한다(새 visit)
+          next: reflect
+        close:
+          description: 이 턴에 정리할 수 없다 — 회차를 반영 없이 마감한다(다음 회차의 reflect가 다시 시도)
+          next: end
 
   wrapup:
     title: 교대 종료

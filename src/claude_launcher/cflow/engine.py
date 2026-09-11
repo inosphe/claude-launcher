@@ -1211,6 +1211,7 @@ def _move_to(workflow: Workflow, state: dict, target: Optional[str], cwd) -> Non
     # correctness — but a stale record in the file reads as a live one to
     # anyone opening it.
     state["checklist"] = None
+    state["checklist_opened"] = None
     from_step = state.get("current")
     _settle_timers(workflow, state, target, cwd)
     if target is None:
@@ -1667,11 +1668,40 @@ def _checklist_green(items: Sequence[dict]) -> bool:
     return bool(items) and all(entry.get("ok") is True for entry in items)
 
 
+def _checklist_opened(state: dict, step: Step) -> Optional[dict]:
+    """When this visit's gate was first presented, or None if not yet.
+
+    Written at presentation (the same moment ``checklist_presented`` is
+    journalled) and keyed on (step, visit) like the measurements: an expiry
+    counts from when THIS visit started waiting, not from a previous one.
+    """
+    opened = state.get("checklist_opened") or {}
+    if (
+        opened.get("step") == step.id
+        and opened.get("visit") == _visits(state, step.id)
+        and opened.get("at")
+    ):
+        return opened
+    return None
+
+
+def _checklist_expires_at(state: dict, step: Step) -> Optional[datetime]:
+    """The instant this visit's gate expires, or None (no edge, or not open yet)."""
+    otherwise = step.checklist.otherwise
+    opened = _checklist_opened(state, step)
+    if otherwise is None or opened is None:
+        return None
+    since = _parse_at(opened.get("at"))
+    if since is None:
+        return None
+    return since + timedelta(seconds=otherwise.after)
+
+
 def _checklist_payload(state: dict, step: Step) -> dict:
     """The structured checklist a payload carries: what is true, and what is not."""
     record = _checklist_record(state, step)
     items = _checklist_items(step, record)
-    return {
+    payload = {
         "prompt": step.checklist.prompt,
         "then": step.checklist.then,
         "poll": step.checklist.poll,
@@ -1682,6 +1712,15 @@ def _checklist_payload(state: dict, step: Step) -> dict:
         "report_filed": _current_report(state, step.id) is not None,
         "checked_at": record.get("checked_at"),
     }
+    otherwise = step.checklist.otherwise
+    if otherwise is not None:
+        expires = _checklist_expires_at(state, step)
+        payload["otherwise"] = {
+            "after": otherwise.after,
+            "then": otherwise.then,
+            "expires_at": _iso(expires) if expires is not None else None,
+        }
+    return payload
 
 
 def _restart_payload(state: dict, step: Step) -> Optional[dict]:
@@ -1941,6 +1980,14 @@ def _position_payload(
                 f"step's 'report' so the move is not held up on it. Still "
                 f"false: " + "; ".join(outstanding)
             )
+            expiry = checklist.get("otherwise") or {}
+            if expiry.get("expires_at"):
+                payload["note"] += (
+                    f". This wait is bounded: if the list is still not all "
+                    f"true at {expiry['expires_at']} the daemon moves the run "
+                    f"to '{expiry['then']}' instead (journalled as "
+                    f"'checklist_expired')"
+                )
         elif not checklist["report_filed"]:
             payload["note"] = (
                 f"every checklist item is true; the move to "
@@ -1957,6 +2004,14 @@ def _position_payload(
             )
         if mutate and not state["delivered"]:
             state["delivered"] = True
+            # The expiry clock (`checklist.otherwise`) starts here, at the
+            # first presentation of this visit — the moment the run began
+            # waiting, which is also the moment a `restart:` is claimed.
+            state["checklist_opened"] = {
+                "step": step.id,
+                "visit": visit,
+                "at": _iso(_utc_now()),
+            }
             state_mod.journal(
                 "checklist_presented",
                 {
@@ -3627,6 +3682,44 @@ def check_checklist(*, cwd: Optional[str] = None) -> Optional[dict]:
                 },
                 cwd,
             )
+        if not green:
+            expires = _checklist_expires_at(state, step)
+            if expires is not None and _utc_now() >= expires:
+                # The gate's "no": the wait the workflow bounded is over and
+                # the list is still not all true. The run leaves for the
+                # declared step on the daemon's clock, with the evidence a
+                # reader would otherwise reconstruct — and without a report,
+                # because nothing was completed here.
+                otherwise = checklist.otherwise
+                target = None if otherwise.then == model.END else otherwise.then
+                state_mod.journal(
+                    "checklist_expired",
+                    {
+                        "run": state["run_id"],
+                        "step": step.id,
+                        "visit": visit,
+                        "after": otherwise.after,
+                        "then": otherwise.then,
+                        "items": [
+                            {
+                                "id": entry["id"],
+                                "describe": entry["describe"],
+                                "ok": entry["ok"],
+                                "exit_code": entry["exit_code"],
+                                "output": entry["output"],
+                                "measured_at": entry["measured_at"],
+                            }
+                            for entry in items
+                        ],
+                    },
+                    cwd,
+                )
+                _move_to(workflow, state, target, cwd)
+                result["expired"] = True
+                result["after"] = otherwise.after
+                result["moved_to"] = "end" if target is None else target
+                result["status"] = state["status"]
+                return result
         if not green or filed is None:
             state_mod.save_state(state, cwd)
             return result if changed else None

@@ -443,3 +443,182 @@ def test_the_cli_can_re_measure_without_a_daemon(proj, capsys):
     out = capsys.readouterr().out
     assert "checklist passed: landed -> wrapup" in out
     assert engine.status()["step_id"] == "wrapup"
+
+
+# --------------------------------------------------------------------------- #
+# the bounded wait: `otherwise: {after, then}`
+# --------------------------------------------------------------------------- #
+BOUNDED = FLOW.replace(
+    "      poll: 30\n",
+    "      poll: 30\n      otherwise: {after: 600, then: retry}\n",
+).replace(
+    "  wrapup:\n",
+    "  retry:\n"
+    "    instructions: decide whether to ask again\n"
+    "    select:\n"
+    "      prompt: try again?\n"
+    "      chooser: agent\n"
+    "      options:\n"
+    "        again: {description: back to the gate, next: landed}\n"
+    "        stop: {description: give up, next: end}\n"
+    "  wrapup:\n",
+)
+
+
+@pytest.fixture
+def bounded(proj):
+    (proj / ".claunch" / "workflows" / "lander.yaml").write_text(BOUNDED, encoding="utf-8")
+    return proj
+
+
+def _later(monkeypatch, seconds: float) -> None:
+    """Move the engine's clock ``seconds`` past the real now."""
+    import datetime as _dt
+
+    # From the real clock, not the possibly already-patched engine one, so
+    # successive calls set absolute offsets rather than compounding.
+    real = _dt.datetime.now(_dt.timezone.utc)
+    monkeypatch.setattr(
+        engine, "_utc_now", lambda: real + _dt.timedelta(seconds=seconds)
+    )
+
+
+def _load_text(text: str):
+    import pathlib
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as d:
+        p = pathlib.Path(d) / "w.yaml"
+        p.write_text(text, encoding="utf-8")
+        return model.load(p)
+
+
+def test_otherwise_is_parsed_and_is_an_edge():
+    wf = _load_text(BOUNDED)
+    gate = wf.steps["landed"].checklist
+    assert gate.otherwise.after == 600 and gate.otherwise.then == "retry"
+    # Reachability sees the expiry as an exit: `retry` is reachable only
+    # through it, and the parser accepted the graph.
+    assert "retry" in wf.steps["landed"].successors()
+
+
+@pytest.mark.parametrize(
+    "spelling, match",
+    [
+        ("otherwise: {after: 600}", "then is required"),
+        ("otherwise: {then: retry}", "number of seconds"),
+        ("otherwise: {after: -5, then: retry}", "positive"),
+        ("otherwise: {after: 600, then: landed}", "different step"),
+        ("otherwise: {after: 600, then: retry, poll: 1}", "unknown key"),
+        ("otherwise: 600", "must be a mapping"),
+        ("otherwise: {after: 600, then: nowhere}", "unknown step"),
+    ],
+    ids=["no-then", "no-after", "negative", "self", "extra-key", "scalar", "unknown-target"],
+)
+def test_otherwise_parse_errors(spelling, match):
+    text = BOUNDED.replace("otherwise: {after: 600, then: retry}", spelling)
+    with pytest.raises(WorkflowError, match=match):
+        _load_text(text)
+
+
+def test_the_payload_carries_the_expiry(bounded):
+    _at_landed()
+    shown = engine.status()["checklist"]["otherwise"]
+    assert shown["then"] == "retry" and shown["after"] == 600
+    assert shown["expires_at"]  # set at presentation
+    assert "checklist_expired" in engine.status()["note"]
+
+
+def test_a_shut_gate_does_not_expire_early(bounded, monkeypatch):
+    _at_landed()
+    _later(monkeypatch, 590)
+    result = engine.check_checklist()
+    assert result is None or result.get("moved_to") is None
+    assert engine.status()["step_id"] == "landed"
+    assert not _events(event="checklist_expired")
+
+
+def test_an_expired_gate_moves_the_run_without_a_report(bounded, monkeypatch):
+    """The gate's "no": no report on file, the run still leaves -- for the
+    declared step, with the item states as evidence."""
+    _at_landed()
+    _later(monkeypatch, 601)
+    result = engine.check_checklist()
+    assert result["expired"] is True and result["moved_to"] == "retry"
+    assert engine.status()["step_id"] == "retry"
+    expired = _events(event="checklist_expired", step="landed")
+    assert len(expired) == 1
+    assert expired[0]["then"] == "retry" and expired[0]["after"] == 600
+    assert {i["id"]: i["ok"] for i in expired[0]["items"]} == {
+        "merged": False, "frozen": False
+    }
+    assert not _events(event="step_completed", step="landed")
+
+
+def test_an_open_gate_waiting_on_its_report_does_not_expire(bounded, monkeypatch):
+    """All true and unreported is the gate's "yes, when you have written it
+    up" -- the expiry is for a list that is still not true."""
+    _at_landed()
+    (bounded / "merged.flag").touch()
+    (bounded / "frozen.flag").touch()
+    _later(monkeypatch, 601)
+    result = engine.check_checklist()
+    assert result.get("moved_to") is None
+    assert engine.status()["step_id"] == "landed"
+    assert not _events(event="checklist_expired")
+
+
+def test_coming_back_is_a_fresh_visit_with_a_fresh_deadline(bounded, monkeypatch):
+    _at_landed()
+    _later(monkeypatch, 601)
+    assert engine.check_checklist()["moved_to"] == "retry"
+    engine.select("again", reason="cleaned up")
+    payload = engine.status()
+    assert payload["step_id"] == "landed" and payload["status"] == "waiting_checklist"
+    # The new visit's clock started now (the patched now), so 590 more
+    # seconds do not expire it (the stored instant is whole seconds, so the
+    # margin is wider than one)...
+    _later(monkeypatch, 601 + 590)
+    assert (engine.check_checklist() or {}).get("moved_to") is None
+    # ...and 610 do.
+    _later(monkeypatch, 601 + 610)
+    assert engine.check_checklist()["moved_to"] == "retry"
+    assert len(_events(event="checklist_expired", step="landed")) == 2
+
+
+def test_the_clock_announces_an_expiry_as_the_gate_saying_no(bounded, monkeypatch):
+    cwd = str(bounded)
+    engine.start("lander", cwd=cwd, scope="w1")
+    engine.report("did the work", cwd=cwd, scope="w1")
+    engine.next_step(cwd=cwd, scope="w1")
+    session = _FakeSession("w1", cwd)
+    clock = cflow_clock.ChecklistClock(_FakeManager({"w1": session}))
+    assert clock.scan(now=1000.0) == []
+    _later(monkeypatch, 601)
+    moved = clock.scan(now=1100.0)
+    assert len(moved) == 1
+    block = moved[0][2]
+    assert "checklist expired" in block
+    assert "[ ] merged:" in block
+    assert "step 'retry'" in block
+    assert "checklist_expired" in block
+    assert engine.status(cwd, scope="w1")["step_id"] == "retry"
+
+
+def test_the_leader_bounds_its_deploy_gate_with_a_retry_step():
+    """The double gate that came out of the 2026-09-11 deadlock: reflect's
+    deploy checklist expires into reflect-pregate, whose one option is back
+    into reflect (a fresh visit, so the restart runs again) and whose other
+    ends the round."""
+    import pathlib
+
+    wf = model.load(pathlib.Path("src/claude_launcher/workflows/improv-leader.yaml"))
+    gate = wf.steps["reflect"].checklist
+    assert gate.otherwise is not None
+    assert gate.otherwise.then == "reflect-pregate"
+    assert gate.otherwise.after >= 300  # room for a restart and a restore
+    pregate = wf.steps["reflect-pregate"]
+    assert pregate.select is not None and pregate.select.chooser == "agent"
+    assert pregate.select.options["retry"].next == "reflect"
+    assert pregate.select.options["close"].next is None  # `end`
+    assert pregate.select.require_reason

@@ -1397,7 +1397,8 @@ class ChecklistClock:
                 )
                 continue
             log.info(
-                "cflow checklist passed %s/%s: %s -> %s",
+                "cflow checklist %s %s/%s: %s -> %s",
+                "expired" if result.get("expired") else "passed",
                 cwd, scope, result.get("step"), result.get("moved_to"),
             )
             moved_runs.append((cwd, scope, checklist_block(result)))
@@ -1434,36 +1435,48 @@ def checklist_block(result: dict) -> str:
         if result.get("moved_to") == "end"
         else "step " + repr(result.get("moved_to"))
     )
+    expired = bool(result.get("expired"))
     lines = [
         "---",
-        "# claunch cflow: checklist passed -- machine-generated, not typed by "
-        "the user",
+        "# claunch cflow: checklist {0} -- machine-generated, not typed by "
+        "the user".format("expired" if expired else "passed"),
         "workflow: " + str(result.get("workflow")),
         "gate: {0!r} ({1}/{2} items true)".format(
             result.get("step"), result.get("passed"), result.get("total")
         ),
     ]
+    marks = {True: "[x]", False: "[ ]", None: "[?]"}
     for entry in result.get("items") or []:
         lines.append(
-            "  [x] {0}: {1} (exit {2}, measured {3})".format(
+            "  {0} {1}: {2} (exit {3}, measured {4})".format(
+                marks.get(entry.get("ok"), "[?]") if expired else "[x]",
                 entry.get("id"),
                 entry.get("describe"),
                 entry.get("exit_code"),
                 entry.get("measured_at"),
             )
         )
-    lines.extend(
-        [
-            "position: " + position,
+    if expired:
+        protocol = (
+            "protocol: the gate did not open within {0:.0f}s of being "
+            "presented, so the workflow's 'otherwise' edge moved the run on "
+            "its own -- this is the gate's 'no', not an override, and no "
+            "report was filed for the step you left. The item states above "
+            "are journalled as 'checklist_expired'. Call the cflow 'status' "
+            "tool for the step you are now on: it is where the retry is "
+            "decided, and re-entering the gate is a fresh visit (its "
+            "'restart:' runs again).".format(float(result.get("after") or 0))
+        )
+    else:
+        protocol = (
             "protocol: every item measured true and your report was on file, "
             "so the gate opened and the run moved on its own -- nothing was "
             "decided for you and there is nothing to confirm. The per-item "
             "evidence above is journalled as 'checklist_passed'. Call the "
             "cflow 'status' tool for the step you are now on and continue per "
-            "the /cflow protocol.",
-            "---",
-        ]
-    )
+            "the /cflow protocol."
+        )
+    lines.extend(["position: " + position, protocol, "---"])
     return "\n".join(lines)
 
 
