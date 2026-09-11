@@ -238,9 +238,13 @@ ctx.setMeshes([
   const some = (n) => n || node("span");
   const head = (name) => some(row(name).querySelector(".rail-head"));
   const find = (name, cls) => some(row(name).querySelector(cls));
-  check("name, role and rooms share one container",
+  /* The keyboard chip joined that box after the name (railkeys_check owns
+     what it says and when). It is listed here because this line is a census
+     of the name line: a part that stopped being a child of the box would be
+     loose on the row, which is the wrap this whole harness exists to catch. */
+  check("name, keyboard chip, role and rooms share one container",
         head("s21").kids.map((k) => k.className),
-        ["rail-name", "mesh-role", "rail-meshes"]);
+        ["rail-name", "rail-keys hidden", "mesh-role", "rail-meshes"]);
   check("the mesh tags sit beside the role badge, not under the row",
         some(find("s21", ".rail-mesh").parent).parent?.className ?? "(loose)",
         "rail-head");
