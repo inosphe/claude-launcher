@@ -684,7 +684,16 @@ class Session:
         For the readers that must be exact rather than merely current — a
         capture, the repaint an attaching viewer gets.
         """
+        self._render_parked_tail()
         await self._feeder.drained()
+
+    def _render_parked_tail(self) -> None:
+        """An attached-only harness (``background_render: false``) parks its
+        output while nobody is looking; a capture is somebody looking. The
+        tail is bounded (BACKGROUND_PENDING_MAX), so this is one short
+        synchronous render, not the per-byte cost the flag switches off."""
+        if not self.background_render and not self.is_focused():
+            self._feeder.drain_now()
 
     def _append_log(self, chunk: bytes) -> None:
         try:
@@ -1418,6 +1427,7 @@ class Session:
         self._broadcast(("resize", (cols, rows)))
 
     def capture(self, *, history: bool = False) -> List[str]:
+        self._render_parked_tail()
         lines = self.screen.render_history() if history else self.screen.render_screen()
         return lines
 
