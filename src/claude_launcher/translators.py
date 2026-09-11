@@ -137,7 +137,14 @@ def claude_layer(ctx: ProviderSpec, layer: ProviderSpec) -> Dict[str, str]:
     the tag (``context_window`` or ``model_tag``) re-emits every role.
     """
     retag = bool(layer.context_window) or "model_tag" in layer.options("claude")
-    roles = MODEL_ROLES if retag else tuple(r for r in MODEL_ROLES if r in layer.models)
+    if retag:
+        roles = MODEL_ROLES
+    else:
+        # ``xlarge`` that nobody set follows ``large`` wherever it goes, so a
+        # layer moving ``large`` moves Fable's variable too (as one ``large``
+        # used to). ``subagent`` deliberately does not follow ``small``.
+        follow = "xlarge" if "large" in layer.models and not ctx.models.get("xlarge") else None
+        roles = tuple(r for r in MODEL_ROLES if r in layer.models or r == follow)
     env = _claude_model_vars(ctx, roles)
     if layer.auto_compact_at:
         env[CLAUDE_COMPACT_WINDOW] = str(layer.auto_compact_at)

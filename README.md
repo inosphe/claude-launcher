@@ -502,6 +502,7 @@ providers:
       default: deepseek-flash
       small:   deepseek-flash
       large:   deepseek-v4-pro
+      # xlarge:   defaults to `large` (Claude's Fable slot; `large` is Opus)
       # subagent: defaults to `small`
     context_window: 1000000
     auto_compact_at: 900000
@@ -534,7 +535,7 @@ cannot carry):
 | `api_key` | `ANTHROPIC_AUTH_TOKEN` (below the profile's `set-token`) | not translated yet | `ANTHROPIC_API_KEY` (below `set-token`) |
 | `endpoints.anthropic` | `ANTHROPIC_BASE_URL` | -- | -- |
 | `endpoints.openai` | -- | not translated yet | the registered provider's base URL (`/v1` appended) |
-| `models` | `ANTHROPIC_MODEL`, `..._DEFAULT_{SONNET,HAIKU,OPUS,FABLE}_MODEL`, `CLAUDE_CODE_SUBAGENT_MODEL` | the session's own `--model` | the registered model list, `default` launched |
+| `models` | `default` -> `ANTHROPIC_MODEL` + `..._DEFAULT_SONNET_MODEL`, `small` -> `..._DEFAULT_HAIKU_MODEL`, `large` -> `..._DEFAULT_OPUS_MODEL`, `xlarge` -> `..._DEFAULT_FABLE_MODEL`, `subagent` -> `CLAUDE_CODE_SUBAGENT_MODEL` | the session's own `--model` | the registered model list, `default` launched |
 | `context_window` | appends `[1m]` to every model id when >= 1,000,000 | `-c model_context_window=N` | each registered model's `contextWindow` |
 | `auto_compact_at` | `CLAUDE_CODE_AUTO_COMPACT_WINDOW` | `-c model_auto_compact_token_limit=N` | `compaction.reserveTokens = context_window - auto_compact_at` in the profile's `pi/settings.json` |
 

@@ -19,6 +19,7 @@ Pi's in-process provider registration.
           default: deepseek-flash
           small:   deepseek-flash
           large:   deepseek-v4-pro
+          # xlarge: the tier above large (defaults to large); subagent defaults to small
         context_window: 1000000
         auto_compact_at: 900000
         harness_options:                   # the one harness-keyed place
@@ -58,7 +59,11 @@ from typing import Dict, Iterable, Optional, Tuple
 from urllib.parse import urlsplit
 
 #: Model roles, in the order harnesses that take a flat list receive them.
-MODEL_ROLES: Tuple[str, ...] = ("default", "small", "large", "subagent")
+#: ``xlarge`` is the tier above ``large`` (Claude's Fable slot over its Opus
+#: slot); left out, it follows ``large``, as ``subagent`` follows ``small``.
+MODEL_ROLES: Tuple[str, ...] = ("default", "small", "large", "xlarge", "subagent")
+#: role -> the role it falls back to when not set.
+ROLE_FALLBACKS: Dict[str, str] = {"xlarge": "large", "subagent": "small"}
 
 #: Protocol names an ``endpoints`` map may carry.
 PROTOCOLS: Tuple[str, ...] = ("anthropic", "openai")
@@ -97,7 +102,8 @@ CLAUDE_COMPACT_WINDOW = "CLAUDE_CODE_AUTO_COMPACT_WINDOW"
 CLAUDE_MODEL_VARS: Dict[str, Tuple[str, ...]] = {
     "default": ("ANTHROPIC_MODEL", "ANTHROPIC_DEFAULT_SONNET_MODEL"),
     "small": ("ANTHROPIC_DEFAULT_HAIKU_MODEL",),
-    "large": ("ANTHROPIC_DEFAULT_OPUS_MODEL", "ANTHROPIC_DEFAULT_FABLE_MODEL"),
+    "large": ("ANTHROPIC_DEFAULT_OPUS_MODEL",),
+    "xlarge": ("ANTHROPIC_DEFAULT_FABLE_MODEL",),
     "subagent": ("CLAUDE_CODE_SUBAGENT_MODEL",),
 }
 CLAUDE_MODEL_KEYS: Tuple[str, ...] = tuple(
@@ -141,9 +147,8 @@ class ProviderSpec:
         value = str(self.models.get(role) or "").strip()
         if value:
             return value
-        if role == "subagent":
-            return self.model("small")
-        return None
+        fallback = ROLE_FALLBACKS.get(role)
+        return self.model(fallback) if fallback else None
 
     def model_list(self) -> Tuple[str, ...]:
         """Distinct model ids, default first, in role order."""
@@ -386,8 +391,10 @@ def from_legacy_env(env: Dict[str, str]) -> ProviderSpec:
     # as such; a mixed set is recorded as "no tag" and the migration pins
     # the tagged variables verbatim for Claude (its outcome check does).
     tag = tags[0] if tags and all(t == tags[0] for t in tags) else ""
-    if models.get("subagent") and models["subagent"] == models.get("small"):
-        del models["subagent"]
+    # A fallback role that merely repeats its source is the fallback at work.
+    for role, source in ROLE_FALLBACKS.items():
+        if models.get(role) and models[role] == models.get(source):
+            del models[role]
     if tag:
         options.setdefault("claude", {})["model_tag"] = tag
     api_key = env.get(CLAUDE_AUTH_TOKEN, "").strip() or None

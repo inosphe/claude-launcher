@@ -594,3 +594,54 @@ def test_run_tools_flag_and_profile_default_command(home, monkeypatch, capsys):
     assert cli_main(["tools", "work", "--on", "full_read"]) == 0
     assert "harness_options" not in store.profile_entry("work")
     assert "full_read    on" in capsys.readouterr().out
+
+
+# --- the xlarge tier (Fable) above large (Opus) ---------------------------------------
+
+
+def test_xlarge_follows_large_unless_set():
+    spec = provider_spec.from_entry({"models": {"default": "flash", "large": "pro"}}, "p")
+    assert spec.model("xlarge") == "pro"
+    assert spec.model_list() == ("flash", "pro")
+    env = translators.claude(spec).env
+    assert env["ANTHROPIC_DEFAULT_OPUS_MODEL"] == "pro"
+    assert env["ANTHROPIC_DEFAULT_FABLE_MODEL"] == "pro"
+    spec = provider_spec.from_entry(
+        {"models": {"default": "flash", "large": "pro", "xlarge": "max"}}, "p"
+    )
+    assert spec.model_list() == ("flash", "pro", "max")
+    env = translators.claude(spec).env
+    assert env["ANTHROPIC_DEFAULT_OPUS_MODEL"] == "pro"
+    assert env["ANTHROPIC_DEFAULT_FABLE_MODEL"] == "max"
+
+
+def test_legacy_env_keeps_xlarge_only_when_it_differs():
+    same = provider_spec.from_legacy_env(
+        {"ANTHROPIC_DEFAULT_OPUS_MODEL": "pro", "ANTHROPIC_DEFAULT_FABLE_MODEL": "pro"}
+    )
+    assert same.models == {"large": "pro"}
+    apart = provider_spec.from_legacy_env(
+        {"ANTHROPIC_DEFAULT_OPUS_MODEL": "pro", "ANTHROPIC_DEFAULT_FABLE_MODEL": "max"}
+    )
+    assert apart.models == {"large": "pro", "xlarge": "max"}
+    assert translators.claude(apart).env["ANTHROPIC_DEFAULT_FABLE_MODEL"] == "max"
+
+
+def test_profile_layer_moving_large_moves_fable_unless_xlarge_is_pinned(home):
+    _provider("ds", DEEPSEEK)
+    p = _profile_on("work", "ds")
+    store.set_profile_field(p.name, "models", {"large": "bigger"})
+    env = providers.claude_env(p)
+    assert env["ANTHROPIC_DEFAULT_OPUS_MODEL"] == "bigger[1m]"
+    assert env["ANTHROPIC_DEFAULT_FABLE_MODEL"] == "bigger[1m]"
+    store.set_profile_field(p.name, "models", {"large": "bigger", "xlarge": "biggest"})
+    env = providers.claude_env(p)
+    assert env["ANTHROPIC_DEFAULT_OPUS_MODEL"] == "bigger[1m]"
+    assert env["ANTHROPIC_DEFAULT_FABLE_MODEL"] == "biggest[1m]"
+    # The provider pins xlarge: a profile moving only large leaves Fable alone.
+    store.set_profile_field(p.name, "models", {"large": "bigger"})
+    doc_models = dict(DEEPSEEK["models"], xlarge="provider-max")
+    _provider("ds", dict(DEEPSEEK, models=doc_models))
+    env = providers.claude_env(p)
+    assert env["ANTHROPIC_DEFAULT_OPUS_MODEL"] == "bigger[1m]"
+    assert env["ANTHROPIC_DEFAULT_FABLE_MODEL"] == "provider-max[1m]"
