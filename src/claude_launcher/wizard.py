@@ -973,16 +973,20 @@ def _workflow_entry(raw) -> dict:
 def _workflow_admits(entry: dict, role: str) -> bool:
     """Would this workflow's ``filter_roles`` let ``role`` drive it?
 
-    True with no filter or no role picked -- a role requires a mesh
-    membership (see the form's ``role`` validation), so once a role is
-    picked the daemon enforces this same filter against that mesh identity
-    at start. :func:`_workflow_options` uses this to leave a refused
-    workflow off the row entirely rather than merely rank it last.
+    True with no filter at all -- a workflow that says nothing about who may
+    drive it admits everyone. With a filter and no role picked, the question
+    is put to the filter the same as any other role: an empty string is what
+    :class:`RoleFilter` sees, and a whitelist refuses it (nothing empty is
+    ever listed in one) while a blacklist admits it (same reason). That
+    keeps a workflow that opted into ``filter_roles: {type: whitelist,
+    roles: [worker]}`` off the row until a role it actually admits is
+    picked, instead of leaving it selectable by a form nobody has told what
+    the session is for. :func:`_workflow_options` uses this to leave a
+    refused workflow off the row entirely rather than merely rank it last.
 
     Whether a filter admits a role is :class:`RoleFilter`'s rule, not this
     form's: the same words decided here and at start time must not be able to
-    drift apart. Only the two conditions above are the form's own -- they say
-    when to ask the question, not what the answer is.
+    drift apart.
 
     A ``type`` outside the vocabulary is the exception, because there is no
     rule to defer to: the parser rejects such a file, so nothing that reached
@@ -992,7 +996,7 @@ def _workflow_admits(entry: dict, role: str) -> bool:
     An answer that cannot be trusted is not one to volunteer on.
     """
     f = entry.get("filter_roles")
-    if not isinstance(f, dict) or not role:
+    if not isinstance(f, dict):
         return True
     kind = str(f.get("type") or "").strip().lower()
     if kind not in FILTER_TYPES:
@@ -1041,7 +1045,9 @@ def _workflow_options(entries: List[dict], role: str) -> List[Option]:
     A workflow ``role``'s ``filter_roles`` refuses is left out entirely --
     picking a role also picks from what that role may actually run, the
     same rule :func:`sync_workflows` applies to the dashboard's Workflow
-    row. Empty ``role`` admits everything (see :func:`_workflow_admits`).
+    row. A workflow with no filter stays listed regardless of ``role``; one
+    with a filter is off the row until a role it admits is picked, empty
+    ``role`` included (see :func:`_workflow_admits`).
     """
     out = []
     admitted = [e for e in entries if _workflow_admits(e, role)]

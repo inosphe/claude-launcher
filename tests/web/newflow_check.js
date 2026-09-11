@@ -145,6 +145,8 @@ async function main() {
   form.cwd.value = "F:/repo";
   await ctx.refresh();
   check("...still nothing without a role", form.workflow.value, "");
+  check("a role-locked workflow is not offered with no role picked",
+        listed(), ["", "hotfix", "chores"]);
   form.role.value = "worker";
   ctx.sync();
   check("the role's own candidates rank first, its filter-refused ones are gone",

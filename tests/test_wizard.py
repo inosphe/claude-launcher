@@ -832,6 +832,27 @@ def test_a_default_the_filter_refuses_is_never_offered():
     assert [o.value for o in options] == ["", "safe"]   # "trap" is not offered
 
 
+def test_a_role_locked_workflow_is_not_offered_with_no_role_picked():
+    """``improv-worker``/``improv-leader``'s own whitelist -- one role each --
+    must keep the workflow off the row while the Role field is still blank,
+    not merely un-auto-picked: picking it with no role chosen used to start a
+    ``worker``-only run for a session that might end up with no role, or the
+    wrong one, at all."""
+    sources = FakeSources(workflows={"/srv/api": [
+        {"name": "improv-worker", "default_role": "worker", "priority": 0,
+         "filter_roles": {"type": "whitelist", "roles": ["worker"]}},
+        {"name": "improv-leader", "default_role": "leader", "priority": 0,
+         "filter_roles": {"type": "whitelist", "roles": ["leader"]}},
+        {"name": "plain"},
+    ]})
+    wiz = wizard.Wizard(sources, cwd="/work/repo")
+    pick(wiz, "cwd", "api")
+    options = [o.value for o in wiz.field("workflow").options]
+    assert "improv-worker" not in options
+    assert "improv-leader" not in options
+    assert options == ["", "plain"]
+
+
 def test_the_form_asks_rolefilter_rather_than_guessing_the_rule():
     """Who a filter admits is decided in one place, for both the form and the
     start it precedes.
@@ -895,14 +916,21 @@ def test_an_unreadable_filter_is_not_volunteered_on():
     assert [o.value for o in wiz.field("workflow").options] == [""]
 
 
-def test_a_filter_only_speaks_once_a_role_is_picked():
-    """The form's own two conditions, kept out of the model: with no filter
-    or no role chosen there is no question to put to it. ``RoleFilter``
-    itself would refuse an empty role against a whitelist."""
+def test_an_unpicked_role_is_held_to_the_filter_like_any_other():
+    """The form's own condition, kept out of the model: only "no filter at
+    all" skips the question. With a filter, no role picked is put to
+    ``RoleFilter`` the same as any other role -- an empty string, which a
+    whitelist never lists (so a whitelisted workflow like ``improv-worker``
+    stays off the row until its role is actually picked) and a blacklist
+    never excludes (so it stays offered until the excluded role is picked)."""
     entry = wizard._workflow_entry({
         "name": "w", "filter_roles": {"type": "whitelist", "roles": ["leader"]},
     })
-    assert wizard._workflow_admits(entry, "") is True      # nothing picked yet
+    assert wizard._workflow_admits(entry, "") is False  # whitelist refuses it
+    blacklisted = wizard._workflow_entry({
+        "name": "w", "filter_roles": {"type": "blacklist", "roles": ["leader"]},
+    })
+    assert wizard._workflow_admits(blacklisted, "") is True  # blacklist admits it
     assert wizard._workflow_admits({"name": "w"}, "worker") is True  # no filter
 
 
