@@ -171,3 +171,64 @@ def test_the_default_daemon_pins_nothing(home, monkeypatch):
 
     assert _drive_main(monkeypatch, daemon_main.RESTART_CODE, bound_port=45671) == [None]
     assert "CLAUNCH_DAEMON_PORT" not in os.environ
+
+
+# --------------------------------------------------------------------------- #
+# the lock is free before the loop's teardown joins the executor
+# --------------------------------------------------------------------------- #
+def test_the_lock_is_released_while_an_executor_thread_is_still_blocked(
+    home, monkeypatch
+):
+    """A worker stuck in the default executor must not keep the lock held.
+
+    The cflow RestartClock runs the project's restart command (here,
+    ``tools/restart_live.ps1`` -> ``claunch daemon restart``) in the default
+    executor. That subprocess cannot finish until a successor daemon
+    answers, and the successor cannot start while this process holds the
+    singleton lock — so releasing only after asyncio's executor join (the
+    ``asyncio.run`` teardown) is a deadlock of three parties, seen live on
+    2026-09-11 and broken only by the 300s THREAD_JOIN_TIMEOUT. ``main``
+    must release the lock, and spawn the successor, with that thread still
+    blocked.
+    """
+    import threading
+
+    from claude_launcher.daemon import runtime_state
+
+    unblock = threading.Event()
+    spawned: list = []
+
+    async def fake_serve(host, port, cfg, bound=None):
+        loop = asyncio.get_running_loop()
+        # Fire-and-forget into the default executor, exactly like a clock
+        # tick that asyncio.to_thread()'d a subprocess.run() and was then
+        # cancelled by shutdown: the future is dropped, the thread lives on.
+        loop.run_in_executor(None, unblock.wait)
+        await asyncio.sleep(0.05)
+        return daemon_main.RESTART_CODE
+
+    monkeypatch.setattr(daemon_main, "_setup_logging", lambda foreground: None)
+    monkeypatch.setattr(daemon_main, "_serve", fake_serve)
+    monkeypatch.setattr(
+        daemon_main.daemon_client, "spawn_daemon", lambda env=None: spawned.append(env)
+    )
+
+    worker = threading.Thread(target=lambda: daemon_main.main([]), daemon=True)
+    worker.start()
+    try:
+        deadline = time.monotonic() + 5.0
+        probe = runtime_state.SingletonLock()
+        while time.monotonic() < deadline:
+            if spawned and probe.acquire():
+                break
+            time.sleep(0.05)
+        else:
+            raise AssertionError(
+                "main() kept the singleton lock (or withheld the successor) "
+                "while the executor thread was blocked"
+            )
+        probe.release()
+        assert not unblock.is_set()
+    finally:
+        unblock.set()
+        worker.join(timeout=5.0)

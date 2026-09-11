@@ -49,6 +49,7 @@ import contextlib
 import logging
 import platform as platform_mod
 import subprocess
+import tempfile
 import time
 from typing import Dict, List, Optional, Set, Tuple
 
@@ -1531,18 +1532,27 @@ class RestartClock:
 
     @staticmethod
     def _execute(cwd: str, action: dict) -> dict:
+        # Output goes to a file, not a pipe. The restart command is a shell
+        # whose descendants (this repository's tools/restart_live.ps1 runs
+        # `claunch daemon restart`) inherit stdout; with a pipe, the reader
+        # thread subprocess.run() spawns on Windows cannot finish until every
+        # inheritor has exited — and a timeout only kills the shell, then
+        # calls communicate() again with no timeout at all. That thread runs
+        # in the daemon's default executor and blocked its shutdown for
+        # minutes (2026-09-11). A file has no reader thread: wait() returns
+        # the moment the shell exits, timeout or not.
         try:
-            done = subprocess.run(
-                action["command"], cwd=cwd, shell=True, text=True,
-                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                timeout=float(action["timeout"]), check=False,
-            )
-            return {"exit_code": done.returncode, "output": done.stdout or ""}
-        except subprocess.TimeoutExpired as exc:
-            output = exc.stdout or ""
-            if isinstance(output, bytes):
-                output = output.decode(errors="replace")
-            return {"exit_code": None, "output": str(output) + "\nrestart command timed out"}
+            with tempfile.TemporaryFile(mode="w+b") as out:
+                try:
+                    done = subprocess.run(
+                        action["command"], cwd=cwd, shell=True,
+                        stdout=out, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
+                        timeout=float(action["timeout"]), check=False,
+                    )
+                except subprocess.TimeoutExpired:
+                    output = _read_back(out) + "\nrestart command timed out"
+                    return {"exit_code": None, "output": output}
+                return {"exit_code": done.returncode, "output": _read_back(out)}
         except OSError as exc:
             return {"exit_code": None, "output": f"could not run restart command: {exc}"}
 
@@ -1554,6 +1564,16 @@ class RestartClock:
             await session.deliver(block)
         except Exception:
             log.exception("cflow restart notice delivery to %r failed", scope)
+
+
+def _read_back(fh) -> str:
+    """Everything a restart command wrote so far, decoded leniently."""
+    try:
+        fh.flush()
+        fh.seek(0)
+        return fh.read().decode("utf-8", errors="replace")
+    except OSError:
+        return ""
 
 
 def restart_started_block(action: dict) -> str:

@@ -408,17 +408,56 @@ def main(argv=None) -> int:
         port = int(os.environ.get("CLAUNCH_DAEMON_PORT") or 0)
         log.info("daemon instance %r (state: %s)", paths.instance(), paths.daemon_dir())
     bound: dict = {}
+    # asyncio.run() would release nothing until its close() has joined the
+    # default executor's threads — and one of those may be sitting in a
+    # subprocess.run() that cannot end until a *successor* daemon answers
+    # (the cflow RestartClock running tools/restart_live.ps1, which calls
+    # `claunch daemon restart`). Holding the singleton lock through that
+    # join is a deadlock: the successor waits for the lock, the lock waits
+    # for the executor, the executor waits for the successor (2026-09-11,
+    # broken only by asyncio's 300s THREAD_JOIN_TIMEOUT). So the loop is
+    # driven by hand: serve, release the lock, spawn the successor if one
+    # was asked for, and only then tear the loop down.
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
     try:
-        code = asyncio.run(_serve(host, port, cfg, bound))
-    except KeyboardInterrupt:
-        code = 0
+        try:
+            code = loop.run_until_complete(_serve(host, port, cfg, bound))
+        except KeyboardInterrupt:
+            code = 0
+        finally:
+            lock.release()
+        if code == RESTART_CODE:
+            log.info("spawning successor daemon")
+            daemon_client.spawn_daemon(_successor_env(bound.get("port")))
+            code = 0
     finally:
-        lock.release()
-    if code == RESTART_CODE:
-        log.info("spawning successor daemon")
-        daemon_client.spawn_daemon(_successor_env(bound.get("port")))
-        return 0
+        _close_loop(loop)
     return code
+
+
+def _close_loop(loop: asyncio.AbstractEventLoop) -> None:
+    """asyncio.run()'s teardown minus the executor join.
+
+    Pending tasks are cancelled and async generators finalised as
+    ``asyncio.run`` does. The default executor is *not* awaited: a worker
+    still blocked in a subprocess (see ``main``) would hold this process
+    for as long as that subprocess lives, and the interpreter's own exit
+    joins those threads anyway. Nothing is lost by not waiting here — the
+    lock is already free and the successor already spawned.
+    """
+    try:
+        pending = [t for t in asyncio.all_tasks(loop) if not t.done()]
+        for task in pending:
+            task.cancel()
+        if pending:
+            loop.run_until_complete(
+                asyncio.gather(*pending, return_exceptions=True)
+            )
+        loop.run_until_complete(loop.shutdown_asyncgens())
+    finally:
+        asyncio.set_event_loop(None)
+        loop.close()
 
 
 def _successor_env(actual_port: Optional[int]) -> Optional[dict]:

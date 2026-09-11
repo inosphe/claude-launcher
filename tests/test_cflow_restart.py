@@ -99,3 +99,39 @@ def test_restart_requires_a_checklist():
     text = FLOW.replace("    checklist:\n      prompt: did it deploy?\n      then: end\n      items:\n        - id: deployed\n          describe: live service has deployed\n          check: 'python -c \"raise SystemExit(1)\"'\n", "")
     with pytest.raises(WorkflowError, match="requires a 'checklist'"):
         model.parse(text)
+
+
+def test_restart_clock_returns_when_the_shell_exits_not_its_descendants(proj):
+    """A grandchild that inherited stdout must not hold ``_execute`` open.
+
+    ``tools/restart_live.ps1`` runs ``claunch daemon restart``, which
+    outlives the shell it was started from. With a stdout *pipe*,
+    ``subprocess.run`` waits for every inheritor of the write end — and on
+    a timeout kills only the shell, then waits again without one. The
+    output is captured through a file instead, so the call returns the
+    moment the shell does.
+    """
+    import os
+    import signal
+    import time
+
+    spawn = (
+        "import subprocess, sys; "
+        "p = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'], "
+        "close_fds=False); "
+        "print('grandchild', p.pid, flush=True)"
+    )
+    action = {"command": f'"{sys.executable}" -c "{spawn}"', "timeout": 10}
+    started = time.monotonic()
+    result = cflow_clock.RestartClock._execute(str(proj), action)
+    elapsed = time.monotonic() - started
+    grandchild = int(result["output"].split("grandchild", 1)[1].split()[0])
+    try:
+        assert result["exit_code"] == 0
+        assert "timed out" not in result["output"]
+        assert elapsed < 5.0, f"_execute waited {elapsed:.1f}s for the grandchild"
+    finally:
+        try:
+            os.kill(grandchild, signal.SIGTERM)
+        except OSError:
+            pass
