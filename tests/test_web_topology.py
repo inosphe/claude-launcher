@@ -99,7 +99,15 @@ to. It pins that a poll arriving mid-press leaves the rows as the SAME
 objects rather than equal ones, that the data still lands, that the skipped
 redraw is paid back after the click and not before it, that the hold expires
 on its own so a lost pointerup cannot freeze the rail, and that a failed poll
-is not read as "this daemon has no sessions" — ``newform_check`` on that same form's reading
+is not read as "this daemon has no sessions" — ``railscroll_check`` on what
+that same rebuild does to the reader's place in the rail: ``#session-list``
+is itself the scrolling element, so emptying it drops its content height to
+zero and the browser clamps the scroll position to 0 with it, which is how a
+rail scrolled halfway down ended up back at the top every time any session
+changed state. It pins that a rebuild keeps the position, that a shorter
+fleet lands at the new bottom instead of the top, that an unchanged poll and
+a held one move nothing, and that a reduced DOM with no scroll geometry
+still draws — ``newform_check`` on that same form's reading
 order — the arrangement rows (parent, mesh, role, workflow) asked before the
 machinery rows, which fold shut under them and must hold exactly what a child
 inherits, and the opening task left alone at the bottom, with the summary line
@@ -300,6 +308,7 @@ WEB = Path(__file__).resolve().parent / "web"
         "briefingtop_check.js",
         "briefrow_check.js",
         "railhold_check.js",
+        "railscroll_check.js",
         "railquiet_check.js",
         "spawnform_check.js",
         "newflow_check.js",

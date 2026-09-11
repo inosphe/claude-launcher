@@ -1076,6 +1076,17 @@ async function refreshSessions(options) {
     ? railFocusedCardName() : null;
   railRedrawPending = changed && !rebuild;
   if (rebuild) list._sessionsSignature = signature;
+  // The rail is its own scroll container (`#session-list { overflow-y: auto }`
+  // in style.css), so the teardown below empties the very element the reader
+  // is scrolled inside: the content height drops to zero, the browser clamps
+  // scrollTop to 0 with it, and re-appending the rows does not bring the
+  // position back. On a machine carrying enough sessions to need the
+  // scrollbar that reads as the rail jumping to the top on its own, at every
+  // poll that changes any session's state -- which is most polls. The
+  // position is held here and put back once the rows are in, the way the
+  // transcript pane and the beads canvas hold theirs.
+  const keptScrollTop = rebuild && typeof list.scrollTop === "number"
+    ? list.scrollTop : 0;
   if (rebuild) list.innerHTML = "";
   // Wrapped, not passed straight to filter: Array.filter calls its callback
   // with (element, index, array), and sessionMatchesFilter's second
@@ -1413,6 +1424,15 @@ async function refreshSessions(options) {
     restoreRailFocus(keyCardHeld);
   }
   if (typeof syncRailKeys === "function") syncRailKeys();
+  // Back to where the teardown found the reader. Written after the sticky
+  // offsets, which change the headings' sizes and so the scrollable height,
+  // and after the focus restore above: that one asks for `preventScroll`, so
+  // it should move nothing, but where a browser ignores the option the last
+  // write is the one that decides where the rail sits. Assigning past the
+  // content's height is not an error -- the browser clamps it -- so a poll
+  // that drops rows lands at the new bottom rather than refusing to move, and
+  // a rail too short to scroll takes the 0 it already had.
+  if (rebuild && keptScrollTop) list.scrollTop = keptScrollTop;
   // The rows this poll kept still get their seen line moved on (see the
   // signature above for why the stamps are not a reason to rebuild). Not
   // while a press is in flight: swapping the node under the pointer is the
