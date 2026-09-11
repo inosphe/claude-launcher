@@ -1614,6 +1614,16 @@ class SessionManager:
                         )
                         if entry.get("was_busy"):
                             self.resumed_busy.append(sdef.name)
+                        if not blank:
+                            # Codex's blank restore is decided by the launch
+                            # that just ran, not by the transcript the previous
+                            # daemon left, so it is read here off the live
+                            # definition -- `launch` resolves the conversation
+                            # in place (see harness.codex_restores_blank).
+                            launched = self._sessions.get(sdef.name)
+                            blank = launched is not None and (
+                                harness_mod.codex_restores_blank(launched.sdef)
+                            )
                         if blank:
                             self.resumed_blank.append(sdef.name)
                         continue

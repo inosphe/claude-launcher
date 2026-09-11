@@ -697,6 +697,27 @@ def restores_blank(sdef: SessionDef) -> bool:
     return not transcripts.exists(prof.config_dir, sdef.conversation_id, sdef.cwd)
 
 
+def codex_restores_blank(sdef: SessionDef) -> bool:
+    """Whether restoring this *codex* definition opens an empty conversation.
+
+    The counterpart of :func:`restores_blank`, and it has to be asked at a
+    different moment. Claude's answer is about the transcript the previous
+    daemon left behind, so it is read *before* the relaunch. Codex's is about
+    whether the launch managed to resolve a conversation at all -- the args it
+    names, then the newest rollout in its cwd that no other session holds
+    (:meth:`SessionManager.launch`) -- so it is only true *after* that has run.
+    Asking it too early says "blank" about a session that went on to resume
+    fine, and the blank briefing then tells it the scrollback above is not its
+    own when it is.
+
+    True means :func:`build_command` appended no conversation at all, because
+    reaching that branch means every rollout in this directory belongs to
+    somebody else. The session comes back alive and with nothing in it, so it
+    needs the same re-briefing a blank claude restore does.
+    """
+    return sdef.harness == "codex" and not sdef.conversation_id
+
+
 def build_command(
     sdef: SessionDef, *, restoring: bool = False, opening: str = ""
 ) -> Tuple[List[str], Dict[str, str], str]:
@@ -866,6 +887,33 @@ def build_command(
         if restoring:
             if sdef.harness == "codex" and sdef.conversation_id:
                 argv.extend(["resume", sdef.conversation_id])
+            elif sdef.harness == "codex":
+                # Nothing pinned, and codex's declared restore args select a
+                # conversation by *cwd* (``resume --last``; its own help says
+                # ``--all`` "disables cwd filtering"). A cwd is not an identity:
+                # six codex sessions stood in F:/works/gds6 on 2026-09-11 over a
+                # single rollout. And by the time this branch is reached, the
+                # manager has already tried every way this session could own a
+                # conversation in that directory -- the id its args name, then
+                # the newest rollout no other session holds
+                # (:meth:`SessionManager.launch`). So there is nothing left for
+                # ``--last`` to find that is this session's: it opens somebody
+                # else's, two sessions then append to one transcript, it grows
+                # into two divergent histories, and whichever the user opens
+                # later reads as the session having lost work.
+                #
+                # So come back empty -- the same trade the claude branch above
+                # makes ("a session that dies on restore is worse than one that
+                # comes back empty"), and paid for the same way:
+                # :func:`codex_restores_blank` puts this session on the resume
+                # nudge's blank list, which re-states the task an empty restore
+                # does not replay.
+                log.info(
+                    "session %r has no codex conversation of its own to reopen; "
+                    "restoring it as a new conversation rather than opening "
+                    "whichever one was written last in %s",
+                    sdef.name, sdef.cwd,
+                )
             else:
                 argv.extend(entry.restore_args)
         if prof is None:

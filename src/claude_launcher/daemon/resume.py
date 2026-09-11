@@ -47,10 +47,13 @@ One shot per daemon start. The list is fixed at restore, each name leaves it
 delivered or dropped, and when it empties (or the window expires) the task
 ends: this is a restart's opening move, not a clock.
 
-**A second audience, and a different message.** One restore branch does not
-reopen a conversation at all: a session created in the seconds before the
-restart has no transcript yet, so it is relaunched on ``--session-id`` and
-comes back empty (:func:`harness.restores_blank`). Every sentence the nudge
+**A second audience, and a different message.** Two restore branches do not
+reopen a conversation at all, for different reasons. A *claude* session created
+in the seconds before the restart has no transcript yet, so it is relaunched on
+``--session-id`` and comes back empty (:func:`harness.restores_blank`). A
+*codex* session whose directory holds no rollout of its own gets no conversation
+either, because the alternative was opening another session's
+(:func:`harness.codex_restores_blank`). Every sentence the nudge
 above says is then false — there is no conversation above, re-reading the last
 messages reaches someone else's screen or nothing, and the opening task went in
 as argv on the first spawn and is not replayed. Those sessions are carried in
@@ -233,7 +236,11 @@ class ResumeNudge:
             # who it is. A session parked on a human gate needs that as much as
             # one mid-step, and it will read the gate for itself the moment it
             # calls 'status'.
-            block = blank_block(name, briefing=await self._briefing(name))
+            block = blank_block(
+                name,
+                briefing=await self._briefing(name),
+                harness=session.sdef.harness,
+            )
         else:
             verdict = await asyncio.to_thread(gate, session.sdef.cwd or "", name)
             if verdict is None:
@@ -338,7 +345,9 @@ def nudge_block(name: str) -> str:
     )
 
 
-def blank_block(name: str, *, briefing: str = "") -> str:
+def blank_block(
+    name: str, *, briefing: str = "", harness: str = CLAUDE_HARNESS
+) -> str:
     """What a session restored into an *empty* conversation hears.
 
     :func:`nudge_block` cannot serve here. It says the conversation above is
@@ -356,16 +365,37 @@ def blank_block(name: str, *, briefing: str = "") -> str:
     ``briefing`` is :func:`rebrief.compose`'s block. Empty is allowed and
     honest: a bare session with no mesh, no run and no recorded task has
     nothing to restate, and saying so beats implying something was withheld.
+
+    ``harness`` picks which cause the block states, because two different ones
+    land here and only the consequences are shared. Claude's is timing: the
+    pinned conversation had no transcript yet (:func:`harness.restores_blank`).
+    Codex's is ownership: no rollout in the session's directory was this
+    session's own, so there was nothing it could reopen without opening
+    somebody else's (:func:`harness.codex_restores_blank`). Naming the wrong
+    one is not a cosmetic slip -- an agent told "it was created seconds before
+    the restart" about a session that had been running for an hour will go
+    looking for the contradiction instead of starting work.
     """
+    if harness == "codex":
+        cause = (
+            "what happened: the daemon restarted. No conversation in this "
+            "session's working directory was this session's own -- every "
+            "recorded one there belongs to another session -- so there was "
+            "nothing to reopen and this terminal came back empty."
+        )
+    else:
+        cause = (
+            "what happened: the daemon restarted. This session's conversation "
+            "had not been written to disk yet -- it was created within seconds "
+            "of the restart -- so there was nothing to reopen and this "
+            "terminal came back empty, on the same session id."
+        )
     lines = [
         "---",
         "# claunch: session resume (empty) -- machine-generated, not typed by "
         "the user",
         f"session: {name}",
-        "what happened: the daemon restarted. This session's conversation had "
-        "not been written to disk yet -- it was created within seconds of the "
-        "restart -- so there was nothing to reopen and this terminal came back "
-        "empty, on the same session id.",
+        cause,
         "what this costs: whatever the previous terminal had done is gone and "
         "cannot be recovered; nothing above this line is your history. Do not "
         "report that work as done, and do not re-read the scrollback for it.",
