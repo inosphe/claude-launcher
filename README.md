@@ -788,9 +788,16 @@ CLAUNCH_METERING=0 claunch run work   # this launch only (1 forces it on)
 
 Metering is observability, so it fails soft: if the shim cannot start, the
 launch prints a one-line warning and uses the upstream URL directly (a
-`routing` spec keeps the hard failure described above). Not covered yet: the
-`pi` harness (OpenAI protocol), which reaches its upstream through its own
-extension, and the web UI.
+`routing` spec keeps the hard failure described above).
+
+The `pi` harness goes through the same shim: its OpenAI base URL
+(`endpoints.openai` + `/v1`) is fronted the same way, the packaged extension
+registers `X-Claunch-Session` as a provider header for daemon-managed
+sessions, and the shim records each `/v1/chat/completions` call. An OpenAI
+stream only carries token counts when the request asks for them, so behind
+the shim claunch lets Pi send `stream_options.include_usage` (a backend that
+rejects that field can opt out with `providers.<name>.metering: false`).
+Not covered yet: the web UI.
 
 ## Migrating skills & MCP servers
 

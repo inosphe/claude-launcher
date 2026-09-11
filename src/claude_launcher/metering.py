@@ -14,6 +14,13 @@ incremental response reader the shim feeds, the record files, and the
 aggregation ``claunch tps`` prints. The shim (:mod:`routing_shim`) only calls
 into it.
 
+Two wire formats come through: Anthropic Messages (``/v1/messages``, what
+Claude Code speaks) and OpenAI Chat Completions (``/v1/chat/completions``,
+what the ``pi`` harness speaks). The reader tells them apart by the body — an
+Anthropic event has a ``type``, an OpenAI chunk an ``object`` of
+``chat.completion...`` — and writes the same record for both, so ``claunch
+tps`` does not care which harness made the call.
+
 Which session sent a request is not something a shared shim can see — one
 shim serves every session on the same upstream. The daemon therefore hands
 each session a private request header through Claude Code's
@@ -121,15 +128,31 @@ def apply_session_header(env: dict, session: str) -> None:
 # reading a response as it streams through
 # --------------------------------------------------------------------------- #
 def _usage_fields(usage: dict) -> Dict[str, Optional[int]]:
-    def _int(key: str) -> Optional[int]:
-        value = usage.get(key)
+    """The record's four counts out of either protocol's ``usage`` object.
+
+    Anthropic: ``input_tokens`` / ``cache_read_input_tokens`` /
+    ``cache_creation_input_tokens`` / ``output_tokens``. OpenAI:
+    ``prompt_tokens`` (which *includes* the cached part) /
+    ``prompt_tokens_details.cached_tokens`` / ``completion_tokens``; OpenAI
+    has no cache-write count.
+    """
+    def _int(doc: dict, key: str) -> Optional[int]:
+        value = doc.get(key)
         return int(value) if isinstance(value, (int, float)) else None
 
+    details = usage.get("prompt_tokens_details")
+    details = details if isinstance(details, dict) else {}
     return {
-        "input_tokens": _int("input_tokens"),
-        "cache_read": _int("cache_read_input_tokens"),
-        "cache_write": _int("cache_creation_input_tokens"),
-        "output_tokens": _int("output_tokens"),
+        "input_tokens": _int(usage, "input_tokens")
+        if "input_tokens" in usage
+        else _int(usage, "prompt_tokens"),
+        "cache_read": _int(usage, "cache_read_input_tokens")
+        if "cache_read_input_tokens" in usage
+        else _int(details, "cached_tokens"),
+        "cache_write": _int(usage, "cache_creation_input_tokens"),
+        "output_tokens": _int(usage, "output_tokens")
+        if "output_tokens" in usage
+        else _int(usage, "completion_tokens"),
     }
 
 
@@ -139,9 +162,13 @@ class Meter:
 
     Feed it ``chunk`` for every piece of the body the shim forwards, then
     ``finish``. Streamed (SSE) bodies are parsed event by event, so nothing is
-    held back: ``message_start`` carries the model and input-side usage,
-    the first ``content_block_delta`` marks the first token, ``message_delta``
-    carries the output count. A non-streamed JSON body is buffered and read
+    held back. Anthropic: ``message_start`` carries the model and input-side
+    usage, the first ``content_block_delta`` marks the first token,
+    ``message_delta`` carries the output count. OpenAI: every
+    ``chat.completion.chunk`` carries the model, the first one with a
+    non-empty ``delta`` marks the first token, and the last one (sent only
+    when the request asked for ``stream_options.include_usage``) carries
+    ``usage``. A non-streamed JSON body of either shape is buffered and read
     at the end.
     """
 
@@ -213,6 +240,9 @@ class Meter:
             return
         if not isinstance(doc, dict):
             return
+        if str(doc.get("object") or "").startswith("chat.completion"):
+            self._openai_chunk(doc)
+            return
         kind = doc.get("type")
         if kind == "message_start":
             message = doc.get("message")
@@ -225,6 +255,22 @@ class Meter:
             usage = doc.get("usage")
             if isinstance(usage, dict):
                 self._merge_usage(usage)
+
+    def _openai_chunk(self, doc: dict) -> None:
+        """One ``chat.completion.chunk`` (or a whole ``chat.completion``)."""
+        self._take_message(doc)
+        if self.first_token is not None:
+            return
+        choices = doc.get("choices")
+        for choice in choices if isinstance(choices, list) else []:
+            if not isinstance(choice, dict):
+                continue
+            delta = choice.get("delta")
+            if isinstance(delta, dict) and any(
+                delta.get(key) for key in ("content", "reasoning_content", "tool_calls")
+            ):
+                self.first_token = time.monotonic()
+                return
 
     # -- JSON --------------------------------------------------------------- #
     def _take_message(self, message: dict) -> None:

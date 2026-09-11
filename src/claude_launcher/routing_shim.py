@@ -4,7 +4,8 @@ Started on demand by :mod:`claude_launcher.routing` — see that module for why
 it exists and how sessions find it. This file is only the transport: forward
 everything to the upstream unchanged, except that a JSON object body gains the
 configured routing field on the way out (when a spec was given), and every
-``/v1/messages`` answer is watched on its way back so one throughput record
+completion answer (``/v1/messages`` from Claude Code, ``/v1/chat/completions``
+from the ``pi`` harness) is watched on its way back so one throughput record
 per request lands in :mod:`claude_launcher.metering`'s files. The session a
 request belongs to arrives in a private ``X-Claunch-Session`` header, which
 is stripped before the upstream sees it.
@@ -88,8 +89,14 @@ def _is_json(content_type: str) -> bool:
 
 
 def _metered_path(path: str) -> bool:
-    """Only completions carry usage; a models listing or a count is noise."""
-    return path.rstrip("/").endswith("/messages")
+    """Only completions carry usage; a models listing or a count is noise.
+
+    ``/v1/messages`` is Claude Code (Anthropic Messages), ``/v1/chat/
+    completions`` the ``pi`` harness (OpenAI Chat Completions); the meter
+    reads both shapes.
+    """
+    path = path.rstrip("/")
+    return path.endswith("/messages") or path.endswith("/chat/completions")
 
 
 async def _proxy(request: web.Request) -> web.StreamResponse:

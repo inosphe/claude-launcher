@@ -759,7 +759,7 @@ def test_pi_openai_url_translation_is_idempotent(home):
     extension = pi_provider.extension_path().read_text(encoding="utf-8")
     assert "openai-completions" not in extension
     assert "const api = process.env.CLAUNCH_PI_API" in extension
-    assert "supportsUsageInStreaming: false" in extension
+    assert "supportsUsageInStreaming: streamUsage" in extension
 
 
 def test_pi_launch_injects_extension_provider_and_default_model(
