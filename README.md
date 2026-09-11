@@ -2005,8 +2005,8 @@ rejected. A session saves the canonical selector, so
 The colon is logical only and never becomes part of a Windows path.
 
 The same creation surfaces offer a **Model** picker. Claude declares
-`haiku`, `sonnet`, `opus`, and `fable`; Codex declares `luna`, `terra`, and
-`sol`. The selected alias is saved with the session and launched as
+`haiku`, `sonnet`, `opus`, and `fable`; Codex declares `luna`, `terra`,
+`sol`, and `astra`. The selected alias is saved with the session and launched as
 `--model=<alias>`. A profile's `.claunch.yaml` `env` remains authoritative,
 so Claude aliases can continue to resolve through values such as
 `ANTHROPIC_DEFAULT_OPUS_MODEL`. Omitting Model uses the harness default. A
