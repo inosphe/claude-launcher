@@ -104,6 +104,11 @@ def test_packaged_vocabulary_resolves_the_handles_people_actually_use():
     assert rs.infer("qa3") == "reviewer"
     assert rs.infer("gatekeeper") == "specialist"
     assert rs.infer("op1") == "operator"
+    # An application's one-shot analysis session (gds6 names them job-<id>).
+    assert rs.infer("job-8d84811bbe45") == "analyst"
+    assert rs.infer("gds-analysis-3") == "analyst"
+    assert rs.get("analyst").stance and rs.get("analyst").cflow_reminder
+    assert rs.get("analyst").exclusive is False
 
     # A2: the default is free-role — no role's powers, but free to carry out
     # the task its creator gave it (asking that creator, not the leader,
@@ -139,7 +144,8 @@ def test_an_upload_replaces_roles_one_at_a_time():
             stance: build the thing
     """))
     assert sorted(rs.roles) == [
-        "free-role", "leader", "operator", "pm", "reviewer", "specialist", "worker"
+        "analyst", "free-role", "leader", "operator", "pm", "reviewer",
+        "specialist", "worker",
     ]
     assert rs.infer("hacker2") == "worker"
     assert rs.get("worker").stance == "build the thing"
@@ -149,7 +155,7 @@ def test_an_upload_replaces_roles_one_at_a_time():
 
     # B2: a tombstone deletes.
     rs = mesh_roles.resolve(_yaml("roles: {specialist: null, operator: null}"))
-    assert sorted(rs.roles) == ["free-role", "leader", "pm", "reviewer", "worker"]
+    assert sorted(rs.roles) == ["analyst", "free-role", "leader", "pm", "reviewer", "worker"]
 
     # B3: replace:true is the whole vocabulary.
     rs = mesh_roles.resolve(_yaml("""
@@ -624,8 +630,8 @@ def test_the_http_surface_uploads_reads_and_resets_the_role_set(home, tmp_path):
             assert resp.status == 200 and doc["custom"] is False
             assert doc["default"] == "free-role"
             assert [r["name"] for r in doc["roles"]] == [
-                "free-role", "leader", "operator", "pm", "reviewer",
-                "specialist", "worker"
+                "analyst", "free-role", "leader", "operator", "pm",
+                "reviewer", "specialist", "worker",
             ]
             # The roster is where the vocabulary meets reality.
             assert next(

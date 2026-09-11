@@ -2497,6 +2497,11 @@ def _start_impl(
         "loop_extensions": {},
         "round": round_no,
     }
+    # The start step is an arrival like any other: a workflow whose START is
+    # a timed wait (gds-job — a run its driver has no tools to advance) must
+    # be armed here, or the daemon has nothing to fire and the run sits at
+    # its first step forever. `_move_to` arms every later arrival.
+    _arrive_timer(workflow, state, workflow.start, None, cwd)
     state_mod.snapshot_workflow(text, cwd)
     state_mod.save_state(state, cwd)
     state_mod.register_run_dir(cwd)

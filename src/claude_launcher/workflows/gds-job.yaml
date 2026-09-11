@@ -1,0 +1,128 @@
+# gds-job — 애플리케이션이 만든 1회성 분석 세션의 런. 사람 승인 없이 끝난다.
+#
+# 누가 이 런을 도는가: gds(gds6 plane) 같은 애플리케이션이 `POST /api/sessions`
+# 로 세우는 분석 세션(job-<id>)이다. 오프닝 태스크가 곧 작업 규격이고, 결과는
+# 애플리케이션의 제출 도구(submit_<kind>)로 서버에 넘긴다. 이 세션은 부모도
+# 리더도 없고, 보드 이슈도 없고, 브랜치도 만들지 않는다 — 회차·착지·리뷰가
+# 없는 자리에 improv-worker를 붙이면 절차가 작업보다 크고, 런이 없으면 작업이
+# 끝나도 세션이 남는다(2026-09-11 기준 살아남은 job-* 세션 49개가 전부
+# 런 없는 pi 세션이었다). 이 파일은 그 사이의 자리다.
+#
+# 왜 timer인가: 이 세션이 도는 하네스(pi)에는 cflow 도구(next/report)가 없다.
+# 에이전트가 런을 옮길 수 없으니 end에 닿는 길은 데몬이 옮기는 것뿐이고,
+# 데몬이 스스로 옮기는 제어점은 timer뿐이다(checklist는 report를 요구한다).
+# 그래서 두 스텝 모두 timer다 — work가 시한(every)만큼 기다렸다가 overdue로
+# 옮기고, overdue가 마지막 제출 기회를 알린 뒤 work로 되돌리며, work의 fire
+# 예산(max)이 다하면 after: end로 런이 done이 된다. done을 본 데몬의
+# kill-on-end(cflow_kill_on_end, 기본 켜짐)가 종결 기록을 transcript에 남기고
+# 세션을 종료한다. 사람 게이트(ask)는 어디에도 없다 — 이 세션의 보존은
+# 애플리케이션의 원장(llm_jobs)이 하고, 세션 자체는 보존 대상이 아니다.
+#
+# 시한 산출(fire 예산은 then 스텝에서 되돌아올 때 이어진다 — engine의
+# timer_re_armed): work 900초 → overdue(1회 fire) → 300초 → work(fire 1 이어짐)
+# → 900초 → fire 2 > max 1 → end. 시작부터 약 35분. 애플리케이션의 작업
+# 제한(gds6 LLM_JOB_TIMEOUT_MS = 10분)보다 넉넉하고, 하루가 아니다.
+#
+# 이것은 뒷받침(backstop)이지 정확한 종료가 아니다. "제출이 받아들여진 즉시"는
+# 서버만 아는 사실이므로, 정확한 종료는 애플리케이션 서버가 job의 종결
+# 상태(done/failed/abandoned)를 저장한 뒤 그 세션을 kill하는 것이다 — 이 런은
+# 그 호출이 빠졌거나 실패했을 때 세션이 영원히 남지 않게 한다. 두 경로가
+# 겹쳐도 무해하다(kill은 멱등이고, exited 세션에는 kill-on-end가 아무것도
+# 하지 않는다).
+#
+# cflow 도구가 있는 하네스(claude)로 같은 세션을 세우면 timer를 기다릴 필요가
+# 없다 — 제출이 끝난 턴에서 한 줄 report와 next로 end에 가면 그 자리에서
+# done이다. 두 스텝의 next: end가 그 조기 종료다.
+#
+# 붙이는 법: 세션 생성 본문에 workflow: gds-job (spawn이면 --workflow gds-job).
+# 어떤 워크플로의 default_child_cflow도 이것을 가리키지 않는다 — 부모 없는
+# 세션의 런이다. 역할은 analyst(패키지 기본 역할 문서)이고, 메시에 넣어
+# 세우면 role: analyst로 그 역할의 stance를 받는다. 메시 없이 세우면 역할이
+# 없어 filter_roles는 성립하지 않고 그대로 시작된다(그 사실이 저널에 남는다).
+#
+# 패키지 워크플로는 레이어 해석 없이 단독으로 로드되어야 한다는 불변식이
+# 있어서 extends를 쓰지 않는다. verify도 없다 — 제출 결과의 검증은 서버의
+# 검증기(REJECTED/accepted)가 하고, 이 런은 그 결과를 다시 재지 않는다.
+name: gds-job
+description: >-
+  애플리케이션이 만든 1회성 분석 세션: 오프닝 태스크의 작업을 수행하고 제출
+  도구로 결과를 넘기면 끝이다. 사람 게이트가 없다 — cflow 도구가 있으면
+  제출 직후 next로 end, 없으면(pi) timer 시한(약 35분) 뒤 데몬이 end로
+  옮기며, done이 되면 kill-on-end가 세션을 종료한다. 세션 생성 본문에
+  workflow: gds-job으로 지정할 때만 붙는다.
+start: work
+
+# 이 런의 드라이버는 analyst 역할 세션이다 — 워커·리더가 실수로 이 런을 몰지
+# 못하게 막는다. 메시 밖 단독 세션(애플리케이션이 mesh 없이 세운 세션)은
+# 역할이 없어 필터가 성립하지 않으므로 그대로 시작되고, 그 사실이 저널에 남는다.
+filter_roles:
+  type: whitelist
+  roles: [analyst]
+
+# 생성 폼·위저드의 Role 행이 analyst를 고르면 이 워크플로를 자동 선택한다.
+default_role: analyst
+
+# timer fire는 방문이다: work 2회 + overdue 1회 + 시작 1회면 충분하고, 그 위는
+# 사람이 goto로 되돌린 경우뿐이다. 기본 25는 이 런에 과하다.
+max_visits: 8
+
+steps:
+  work:
+    title: 분석 작업 (시한부)
+    # 시작 스텝이 timer다. 오프닝에 실리는 이 스텝의 payload는
+    # waiting_timer이고 엔진의 note가 "End your turn"을 말하지만, 그것은
+    # 런의 상태에 대한 말이지 오프닝 태스크에 대한 말이 아니다 — 아래
+    # instructions가 그 순서를 못박는다: 작업이 먼저, 턴 종료는 그다음.
+    timer:
+      every: 900
+      max: 1
+      then: overdue
+      after: end
+    instructions: |
+      이 세션의 작업은 오프닝 태스크(애플리케이션이 세션을 세우며 준 프롬프트)
+      전부다 — 이 스텝은 그 작업의 시한을 재는 시계일 뿐이고, 새 지시를 더하지
+      않는다. 순서는 셋이다:
+      1. 오프닝 태스크의 작업을 지금 수행한다. 근거는 파일과 도구로 모으고,
+         모든 id·인용은 입력에서 복사하며, 모르는 것은 payload의 unresolved에
+         적는다(빈칸을 메우지 않는다).
+      2. 태스크가 지정한 제출 도구(submit_<kind>)로 결과를 JSON 하나로 제출한다.
+         `REJECTED: <사유>`가 오면 같은 턴에서 그 사유대로 고쳐 재제출한다 —
+         서버의 재시도 한도까지. `accepted`가 오면 작업이 끝난 것이다.
+         전송 실패는 거절이 아니다 — payload를 고치지 말고 다시 보낸다.
+      3. 제출이 끝났으면 턴을 끝낸다. 세션을 죽이는 명령(claunch
+         kill-session 등)은 실행하지 않는다 — 종료는 데몬의 몫이다:
+         애플리케이션 서버가 제출을 저장한 뒤 이 세션을 끝내거나, 그 호출이
+         없으면 이 런의 timer가 시한 뒤 end로 옮기고 kill-on-end가 세션을
+         끝낸다.
+      cflow 도구(report/next)가 있는 하네스라면 3에서 기다리지 않는다 —
+      제출 결과(accepted 또는 마지막 REJECTED 사유, 시도 횟수)를 한 줄
+      report로 남기고 next로 end에 간다. 그 자리에서 런이 done이 되고 세션이
+      종료된다. 도구가 없으면 그냥 턴을 끝낸다 — timer가 나머지를 한다.
+      태스크에 없는 일을 덧붙이지 않는다. 자식 세션을 만들지 않고, 보드
+      이슈를 만들지 않고, 브랜치를 만들지 않는다 — 이 세션에는 부모도 착지도
+      없다.
+    done_when: |
+      오프닝 태스크의 제출이 끝났다(accepted, 또는 서버 한도까지 재시도한
+      마지막 REJECTED 사유가 있다). 도구가 있어 report를 남겼다면 거기에 제출
+      결과와 시도 횟수가 있다.
+    next: end
+
+  overdue:
+    title: 시한 경고 (마지막 제출 기회)
+    # work의 timer가 시한을 넘겨 여기로 옮겼다. 이 스텝의 전달이 세션을 한
+    # 번 깨운다 — 제출을 못 끝낸 세션에는 마지막 기회이고, 이미 끝낸 세션에는
+    # 할 일이 없다. 어느 쪽이든 timer가 work로 되돌리고, work의 남은 예산이
+    # 다해 end로 간다.
+    timer:
+      every: 300
+      max: 1
+      then: work
+      after: end
+    instructions: |
+      시한이 지났다. 아직 제출하지 않았으면 지금 제출한다 — 완성하지 못한
+      부분은 unresolved에 적어서라도 서버 검증을 한 번 통과시키는 쪽이,
+      아무것도 제출하지 않은 채 세션이 끝나는 쪽보다 낫다(서버는 제출이 없는
+      job을 실패로 정리한다). 이미 제출이 끝났으면 할 일이 없다 — 턴을
+      끝낸다. 몇 분 뒤 데몬이 이 런을 닫고 세션을 종료한다.
+      cflow 도구가 있으면 한 줄 report 뒤 next로 end에 가서 바로 끝낸다.
+    next: end

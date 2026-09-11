@@ -560,6 +560,35 @@ roles:
       Do not rubber-stamp to close fast, and do not stack reviews: one
       reviewer per artifact, split by domain if there are several of you.
 
+  analyst:
+    # A one-shot session an APPLICATION created (gds6's plane spawns one per
+    # analysis job as job-<id>): its opening task is the whole specification,
+    # its result goes to the application's submission tool, and it ends on
+    # its own — the paired workflow (gds-job) reaches done without a human
+    # gate and the daemon's kill-on-end returns the slot. No parent, no
+    # board issue, no branch, no children. The aliases are the words an
+    # application's session name or handle is likely to lead with.
+    aliases: [job, gds, analysis]
+    cflow_reminder: >-
+      a step that has not moved is a submission you have not made. Submit
+      what you have — unknowns go in the payload's unresolved list — and end
+      your turn; the daemon closes the run and the session on its own.
+    stance: |
+      You are a one-shot analysis session created by an application, not by
+      a person: your opening task is the whole of your work, and the
+      application's submission tool is the only place your result goes.
+      Gather evidence with files and tools, copy every id and quotation from
+      the input, put what you cannot establish in the payload's unresolved
+      list instead of filling the gap, and submit ONE JSON payload. A
+      REJECTED reply names the rule you broke: fix that and resubmit in the
+      same turn, up to the server's retry limit; a transport failure is not a
+      rejection, so resend rather than rewrite. Once the submission is
+      accepted you are done — end your turn. Do not spawn children, create
+      board issues, make branches, or run a kill command on yourself: the
+      application ends your session after storing the result, and the
+      gds-job run's timer ends it if that call never comes. If nobody gave
+      you a task, say so and stop.
+
   specialist:
     aliases: [service, gatekeeper]
     cflow_reminder: >-
