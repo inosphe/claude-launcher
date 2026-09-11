@@ -23,7 +23,8 @@ from dataclasses import dataclass, field, replace
 from typing import Dict, Iterable, List, Optional, Tuple
 
 from .. import borrowing, harnesses as harness_registry
-from .. import lineage, profile as profile_mod, runner, store, transcripts
+from .. import lineage, metering, profile as profile_mod, routing, runner
+from .. import store, transcripts
 from .. import config as launcher_config
 from . import mesh_roles, pty_backend
 
@@ -800,6 +801,14 @@ def build_command(
     # its MCP servers, `!` shells) inherit it — cflow keys its run state by
     # it, mapping each session 1:1 to its own workflow run.
     env["CLAUNCH_SESSION"] = sdef.name
+    if sdef.harness == CLAUDE_HARNESS and routing.is_shim_url(
+        env.get("ANTHROPIC_BASE_URL")
+    ):
+        # The shim serving this provider is shared by every session on it;
+        # the header is how a record gets this session's name (see
+        # ``metering``). Only meaningful when the base URL is our shim, and
+        # only claude reads ``ANTHROPIC_CUSTOM_HEADERS``.
+        metering.apply_session_header(env, sdef.name)
     env.update(sdef.env)
     if prof is not None and entry is not None:
         try:

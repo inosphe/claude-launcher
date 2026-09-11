@@ -744,6 +744,54 @@ ends them. If it cannot start, the **launch fails** rather than falling back to
 the direct URL: silently unpinning the request is the exact failure this
 feature exists to prevent.
 
+### Throughput records for API-key providers (`claunch tps`)
+
+Sessions on the Anthropic OAuth route (a subscription profile, `provider:
+default`/`claude`) and on Codex's own login talk to their backend directly.
+Every **API-key provider** — anything with `endpoints`/`ANTHROPIC_BASE_URL` of
+its own: DeepSeek, Fireworks, OpenRouter, a Kimi key, a self-hosted gateway —
+is launched through the same loopback shim instead, whether or not it declares
+a `routing` spec, and the shim writes **one record per `/v1/messages` call**:
+when the request started, when the first byte and the first token came back,
+when it ended, the model that answered, the token counts the response carried
+(input, cache read/write, output), and the tokens per second those give —
+`tps` over the generation (from the first token to the end) and `tps_total`
+over the whole request.
+
+```bash
+claunch tps                     # totals, per model, per session, the last 10 calls
+claunch tps --session s12 -n 30 # one session's calls
+claunch tps --upstream deepseek --json
+claunch tps --clear             # drop every record file
+```
+
+Records live under `~/.claude-launcher/metering/<shim fingerprint>.jsonl`, one
+JSON object per line, so they are also easy to read with `jq`. A daemon-managed
+session is named in its records: the daemon sends `X-Claunch-Session: <name>`
+in every request through Claude Code's `ANTHROPIC_CUSTOM_HEADERS`, and the
+shim strips that header before the upstream sees it. A request the shim cannot
+count (an error answer, a compressed body it did not ask for) is still
+recorded with its timing and `counted: false`.
+
+Switch it off for one provider, for everything, or for one shell:
+
+```yaml
+metering: false                 # top level: no shim for metering-only providers
+providers:
+  fireworks:
+    metering: false             # this provider talks to its upstream directly
+```
+
+```bash
+CLAUNCH_METERING=0 claunch run work   # this launch only (1 forces it on)
+```
+
+Metering is observability, so it fails soft: if the shim cannot start, the
+launch prints a one-line warning and uses the upstream URL directly (a
+`routing` spec keeps the hard failure described above). Not covered yet: the
+`pi` harness (OpenAI protocol), which reaches its upstream through its own
+extension, and the web UI.
+
 ## Migrating skills & MCP servers
 
 Seeding copies the global `settings.json`, so the MCP servers defined there come

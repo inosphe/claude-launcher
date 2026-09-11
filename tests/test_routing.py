@@ -366,8 +366,14 @@ def test_child_env_points_claude_at_the_shim(home, upstream, shims, monkeypatch)
 
 
 def test_child_env_leaves_a_provider_without_routing_alone(home, monkeypatch):
+    """No routing block and metering switched off: the base URL is the config's.
+
+    (With metering on — the default — every API-key provider is fronted by a
+    metering shim instead; see ``test_metering``.)
+    """
     monkeypatch.delenv("ANTHROPIC_AUTH_TOKEN", raising=False)
     _write_provider()
+    store.update(lambda doc: doc.__setitem__("metering", False))
     p = profile.create("work")
     credentials.save_token(p, "sk-or-stored")
     store.set_profile_field("work", "provider", "openrouter")

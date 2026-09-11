@@ -91,6 +91,10 @@ def home(tmp_path, monkeypatch):
     monkeypatch.setenv("CLAUDE_LAUNCHER_SYNC_FILE", str(h / ".claunch.yaml"))
     monkeypatch.setenv("CLAUDE_LAUNCHER_SEED", str(seed))
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / ".claude-config"))
+    # Metering fronts every API-key provider with a real proxy process; the
+    # env-assembly tests would each start one against a made-up upstream.
+    # Off by default here — the tests of the feature set it back to "1".
+    monkeypatch.setenv("CLAUNCH_METERING", "0")
     return h
 
 

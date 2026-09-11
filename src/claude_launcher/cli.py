@@ -37,6 +37,7 @@ from . import (
     harnesses,
     herdr,
     lineage,
+    metering,
     migrate as migrate_mod,
     migrate_config,
     pi_provider,
@@ -899,6 +900,64 @@ def _cmd_routing_stop(args: argparse.Namespace) -> int:
     return 0
 
 
+def _fmt(value, unit: str = "") -> str:
+    return "-" if value is None else f"{value}{unit}"
+
+
+def _tps_summary_lines(label: str, s: dict) -> List[str]:
+    return [
+        f"  {label}",
+        f"    requests {s['requests']} (counted {s['counted']})  "
+        f"out {s['output_tokens']} tok  in {s['input_tokens']} tok  "
+        f"cache-read {s['cache_read']} tok",
+        f"    tps median {_fmt(s['tps_median'])}  mean {_fmt(s['tps_mean'])}  "
+        f"min {_fmt(s['tps_min'])}  max {_fmt(s['tps_max'])}  "
+        f"ttft median {_fmt(s['ttft_ms_median'], 'ms')}",
+    ]
+
+
+def _cmd_tps(args: argparse.Namespace) -> int:
+    """Throughput of API-key provider calls, from the shim's records."""
+    if args.clear:
+        n = metering.clear()
+        print(f"removed {n} record file(s) under {metering.records_dir()}")
+        return 0
+    records = metering.load(session=args.session, upstream=args.upstream)
+    if args.json:
+        print(json.dumps(records[-args.last:] if args.last else records, indent=2))
+        return 0
+    doc = store.load()
+    print(f"records: {metering.records_dir()}  (metering {'on' if metering.enabled(doc) else 'OFF'})")
+    if not records:
+        print("no records yet — one is written per /v1/messages call that goes "
+              "through a provider shim (API-key providers on the claude harness)")
+        return 0
+    print("total:")
+    for line in _tps_summary_lines("all", metering.summarize(records)):
+        print(line)
+    for key in ("model", "session"):
+        groups = metering.by_key(records, key)
+        if len(groups) > 1 or key == "model":
+            print(f"by {key}:")
+            for name, s in groups.items():
+                for line in _tps_summary_lines(name, s):
+                    print(line)
+    if args.last:
+        print(f"last {args.last}:")
+        print(f"  {'ts':<20} {'session':<12} {'model':<28} {'out':>6} {'ttft':>7} {'tps':>7} status")
+        for rec in records[-args.last:]:
+            print(
+                f"  {str(rec.get('ts') or '')[:19]:<20} "
+                f"{str(rec.get('session') or '-')[:12]:<12} "
+                f"{str(rec.get('model') or '-')[:28]:<28} "
+                f"{_fmt(rec.get('output_tokens')):>6} "
+                f"{_fmt(rec.get('ttft_ms'), 'ms'):>7} "
+                f"{_fmt(rec.get('tps')):>7} "
+                f"{_fmt(rec.get('status'))}"
+            )
+    return 0
+
+
 def _cmd_harnesses(_args: argparse.Namespace) -> int:
     """List the declared harnesses and whether this machine can run them."""
     reg = harnesses.registry()
@@ -1489,6 +1548,20 @@ def build_parser() -> argparse.ArgumentParser:
     p_rstop.add_argument("fingerprint", nargs="?")
     p_rstop.add_argument("--all", action="store_true", help="stop every shim")
     p_rstop.set_defaults(func=_cmd_routing_stop)
+
+    p_tps = sub.add_parser(
+        "tps",
+        help="throughput (tokens/s, time to first token) of API-key provider "
+        "calls, from the records the provider shims write",
+    )
+    p_tps.add_argument("--session", help="only requests sent by this session")
+    p_tps.add_argument("--upstream", help="only upstreams containing this text")
+    p_tps.add_argument(
+        "-n", "--last", type=int, default=10, help="list the last N requests (0: none)"
+    )
+    p_tps.add_argument("--json", action="store_true", help="dump records as JSON")
+    p_tps.add_argument("--clear", action="store_true", help="delete every record file")
+    p_tps.set_defaults(func=_cmd_tps)
 
     p_harn = sub.add_parser(
         "harnesses",
