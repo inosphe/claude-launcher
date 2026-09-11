@@ -126,6 +126,57 @@ def test_sessions_json_persistence(home, tmp_path):
     asyncio.run(run())
 
 
+async def _settled(condition, *, timeout: float = 5.0) -> None:
+    """Wait for an off-loop claim to land (see Manager._claim_codex_launch)."""
+    deadline = time.monotonic() + timeout
+    while not condition():
+        if time.monotonic() > deadline:
+            raise AssertionError("condition never became true")
+        await asyncio.sleep(0.01)
+
+
+def test_codex_launch_does_not_wait_for_the_rollout_on_the_loop(
+    home, tmp_path, monkeypatch
+):
+    """The launch-time rollout wait runs in a thread: create() returns at
+    once, and the loop keeps serving while Codex takes its time. Measured
+    before the change: 2.03 s of loop stall per Codex spawn (claunch-wpd0).
+    """
+    store.update(lambda doc: doc.update({"harnesses": {"codex": {
+        "command": [sys.executable, "-u", "-c", CHILD],
+        "home_env": "CODEX_HOME",
+        "restore_args": ["resume", "--last"],
+    }}}))
+    lineage.set_harness(profile.create("codex"), "codex")
+    monkeypatch.setattr(codex_sessions, "snapshot", lambda _home: {"old"})
+
+    def slow_claim(_home, cwd, known, *, timeout=2.0, poll=0.02):
+        if timeout == 0:
+            return None
+        time.sleep(0.5)
+        return "codex-thread-slow"
+
+    monkeypatch.setattr(codex_sessions, "claim_new", slow_claim)
+
+    async def run():
+        mgr = _manager()
+        t0 = time.monotonic()
+        session = mgr.create(SessionDef(
+            name="cx", profile="codex", cwd=str(tmp_path)
+        ))
+        assert time.monotonic() - t0 < 0.4, "create() waited on the scan"
+        # The loop is live while the thread waits.
+        ticks = 0
+        while session.sdef.conversation_id is None and ticks < 200:
+            await asyncio.sleep(0.01)
+            ticks += 1
+        assert session.sdef.conversation_id == "codex-thread-slow"
+        assert ticks >= 10, "the loop did not turn while the scan ran"
+        await mgr.shutdown_all()
+
+    asyncio.run(run())
+
+
 def test_codex_conversation_id_is_claimed_and_persisted(
     home, tmp_path, monkeypatch
 ):
@@ -138,7 +189,7 @@ def test_codex_conversation_id_is_claimed_and_persisted(
     monkeypatch.setattr(codex_sessions, "snapshot", lambda _home: {"old"})
     monkeypatch.setattr(
         codex_sessions, "claim_new",
-        lambda _home, cwd, known: "codex-thread-1",
+        lambda _home, cwd, known, *, timeout=2.0, poll=0.02: "codex-thread-1",
     )
 
     async def run():
@@ -146,6 +197,9 @@ def test_codex_conversation_id_is_claimed_and_persisted(
         session = mgr.create(SessionDef(
             name="cx", profile="codex", cwd=str(tmp_path)
         ))
+        # Claimed off the loop: create() returns before the scan does.
+        assert session.sdef.conversation_id is None
+        await _settled(lambda: session.sdef.conversation_id)
         assert session.sdef.conversation_id == "codex-thread-1"
         entries = db.open_default().load_all()
         assert entries[0]["def"]["conversation_id"] == "codex-thread-1"
@@ -179,16 +233,19 @@ def test_codex_conversation_id_is_retried_after_a_slow_rollout(
         ))
         assert session.sdef.conversation_id is None
 
-        # The dashboard's next non-blocking list poll claims the rollout and
-        # makes it available to the context reader in that same response.
-        assert mgr.list()[0].sdef.conversation_id == "codex-thread-late"
-        assert attempts == [2.0, 0]
+        # The dashboard's next non-blocking list poll scans (timeout 0) and,
+        # missing, leaves the claim pending; the launch-time wait, running
+        # off the loop, is the other scanner. Whichever scans second wins.
+        mgr.list()
+        await _settled(lambda: session.sdef.conversation_id)
+        assert session.sdef.conversation_id == "codex-thread-late"
+        assert sorted(attempts) == [0, 2.0]
         entries = db.open_default().load_all()
         assert entries[0]["def"]["conversation_id"] == "codex-thread-late"
 
         # Once claimed, later polls do not scan for this session again.
         mgr.list()
-        assert attempts == [2.0, 0]
+        assert sorted(attempts) == [0, 2.0]
         await mgr.shutdown_all()
 
     asyncio.run(run())
@@ -222,6 +279,8 @@ def test_codex_new_replaces_and_persists_the_conversation_id(
         session = mgr.create(SessionDef(
             name="cx", profile="codex", cwd=str(tmp_path)
         ))
+        # The launch-time claim lands off the loop (see _claim_codex_launch).
+        await _settled(lambda: session.sdef.conversation_id)
         assert session.sdef.conversation_id == "codex-thread-1"
 
         await session.send_keys(["/new", "Enter"])
@@ -266,12 +325,15 @@ def test_pending_codex_claim_is_scanned_once_per_retry_window(
     async def run():
         mgr = _manager()
         mgr.create(SessionDef(name="cx", profile="codex", cwd=str(tmp_path)))
-        assert attempts == [2.0]
+        # Nothing scanned on the loop at launch: the 2 s wait is a thread's.
+        assert attempts == []
         mgr.list()
         for _ in range(100):
             mgr.get("cx")
             mgr.list()
-        assert attempts == [2.0, 0]
+        assert attempts == [0]
+        await _settled(lambda: 2.0 in attempts)
+        assert sorted(attempts) == [0, 2.0]
         await mgr.shutdown_all()
 
     asyncio.run(run())
@@ -2189,6 +2251,9 @@ def test_a_codex_claim_that_never_matches_backs_off_and_is_abandoned(
     async def run():
         mgr = _manager()
         mgr.create(SessionDef(name="cx", profile="codex", cwd=str(tmp_path)))
+        # The launch wait scans from a thread; give it its turn now so its
+        # miss is recorded at t=100 like the synchronous wait it replaced.
+        await asyncio.sleep(0.05)
         session = mgr.get("cx")
         notices = []
         monkeypatch.setattr(
