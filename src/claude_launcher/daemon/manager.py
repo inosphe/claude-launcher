@@ -332,16 +332,41 @@ class SessionManager:
             entry = harness_registry.get("codex")
             if entry is not None:
                 codex_home = entry.profile_home(prof.config_dir)
+                # Three answers to "which conversation is this session's",
+                # strongest first: the args say so outright, a pre-pin
+                # definition is matched by cwd, or the rollout codex is about
+                # to write is claimed after the spawn.
+                if not session.sdef.conversation_id:
+                    named = codex_sessions.names_conversation(session.sdef.args)
+                    if named:
+                        session.sdef = replace(
+                            session.sdef, conversation_id=named
+                        )
                 if restoring and not session.sdef.conversation_id:
                     conversation_id = codex_sessions.latest(
-                        codex_home, session.sdef.cwd
+                        codex_home,
+                        session.sdef.cwd,
+                        taken=self._pinned_conversations(
+                            except_for=session.sdef.name
+                        ),
                     )
                     if conversation_id:
                         session.sdef = replace(
                             session.sdef, conversation_id=conversation_id
                         )
                 if not session.sdef.conversation_id:
-                    known_codex_sessions = codex_sessions.snapshot(codex_home)
+                    if codex_sessions.resumes_existing(session.sdef.args):
+                        # A resumed conversation writes no new session_meta
+                        # record, so a claim could only time out and then retry
+                        # forever (see codex_sessions.resumes_existing).
+                        log.info(
+                            "session %r resumes a codex conversation it does not "
+                            "name; leaving its id unpinned rather than waiting "
+                            "for a rollout codex will not write",
+                            session.sdef.name,
+                        )
+                    else:
+                        known_codex_sessions = codex_sessions.snapshot(codex_home)
         argv, env, cwd = harness_mod.build_command(
             session.sdef, restoring=restoring, opening=opening
         )
@@ -434,6 +459,23 @@ class SessionManager:
     def _codex_launch_finished(self, name: str, task: asyncio.Task) -> None:
         if self._codex_launch_tasks.get(name) is task:
             self._codex_launch_tasks.pop(name, None)
+
+    def _pinned_conversations(self, *, except_for: str = "") -> Set[str]:
+        """Every conversation id another session definition already holds.
+
+        What :func:`codex_sessions.latest` must not hand out a second time. A
+        cwd is shared by as many sessions as the user puts in one checkout, so
+        the unpinned restore's "most recent rollout in this cwd" is only this
+        session's conversation when it is the only session there; otherwise it
+        is somebody else's, and two sessions appending to one transcript is the
+        failure this excludes. Exited records count: their conversation is
+        still the one a respawn reopens.
+        """
+        return {
+            other.sdef.conversation_id
+            for name, other in self._sessions.items()
+            if name != except_for and other.sdef.conversation_id
+        }
 
     def _recover_codex_claims(self) -> None:
         """Claim rollouts that appeared after the launch-time wait expired.

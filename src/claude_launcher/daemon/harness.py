@@ -337,6 +337,39 @@ def steers_conversation(args: Iterable[str]) -> bool:
     )
 
 
+def without_restore_subcommand(args: Iterable[str], subcommand: str) -> List[str]:
+    """``args`` with a harness's conversation *subcommand* and its tail cut off.
+
+    The positional counterpart of :func:`steers_conversation`. Claude steers a
+    conversation with flags, which :data:`CONVERSATION_FLAGS` can recognise one
+    token at a time; codex steers it with a subcommand instead --
+    ``codex resume [SESSION_ID] [PROMPT]`` -- so a definition created to open an
+    existing conversation carries a bare ``resume`` in its ``args``, which no
+    flag list matches.
+
+    The restore then appends its own ``resume <id>`` after it and the command
+    line reads ``resume resume <id>``. Codex takes the first token as the
+    subcommand and the literal string ``"resume"`` as the SESSION_ID (its help:
+    "Session id (UUID) or session name. UUIDs take precedence if it parses"), so
+    it hunts for a *session named* ``resume``, finds nothing, and spends the real
+    id as the prompt. Measured on this machine 2026-09-11: four of six codex
+    definitions built that argv on restore (sessions ``s507``, ``s513``,
+    ``s514``, ``s516``), and ``s507`` is the case the user reported.
+
+    Everything after the subcommand goes with it, because it *is* the
+    subcommand's argument list: a SESSION_ID the first spawn named fills the
+    same slot the restore is about to fill, and leaving it behind moves the
+    duplication one token along instead of removing it. The restore owns which
+    conversation reopens -- that is the whole point of pinning the id.
+    """
+    args = list(args)
+    try:
+        cut = args.index(subcommand)
+    except ValueError:
+        return args
+    return args[:cut]
+
+
 def normalize(sdef: SessionDef, *, restoring: bool = False) -> SessionDef:
     """Fill defaults (cwd, pinned conversation) and validate against config."""
     cwd = os.path.abspath(sdef.cwd or os.getcwd())
@@ -813,7 +846,15 @@ def build_command(
         if not model_args and sdef.model:
             model_args = [f"--model={sdef.model}"]
         effort_args = selection_args(entry.effort_args, sdef.effort)
-        runtime_args = [*base_args, *model_args, *effort_args, *sdef.args]
+        session_args = list(sdef.args)
+        if restoring and entry.restore_args:
+            # The first spawn's own conversation subcommand, dropped so the
+            # restore below is the only thing that names a conversation. See
+            # :func:`without_restore_subcommand` for what the duplicate did.
+            session_args = without_restore_subcommand(
+                session_args, entry.restore_args[0]
+            )
+        runtime_args = [*base_args, *model_args, *effort_args, *session_args]
         if prof is not None:
             try:
                 runtime_args = runner.harness_launch_args(
