@@ -330,6 +330,11 @@ DAEMON_DEFAULTS = {
     # These settings are read when the daemon starts.
     "focused_session_scheduling": True,
     "background_render_delay": 0.05,
+    # Ceiling on the *sum* of rendering done for sessions nobody is attached
+    # to, in KiB per second (a token bucket shared by all of them). Attached
+    # sessions are not subject to it. pyte manages ~660 KiB/s on this class
+    # of machine; thirty unattended pi sessions asked for more than that.
+    "background_render_budget_kib": 256,
     "restore": True,
     # How long an agent-requested daemon restart may wait on the web UI's
     # approval before it counts as approved and goes out (see

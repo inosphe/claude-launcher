@@ -154,6 +154,13 @@ class Harness:
     #: harness's native provider/model mechanism. ``pi`` loads the packaged Pi
     #: extension and supplies its model selection on every launch.
     provider_adapter: str = ""
+    #: Whether the daemon keeps rendering this harness's screen while no
+    #: viewer is attached. ``false`` for a TUI whose unattended output is not
+    #: worth the CPU (pi prints tool results untruncated, 60–280 KiB/s per
+    #: session): the daemon then keeps only a tail and renders it when a
+    #: viewer arrives, and idle/busy is judged from output timing instead of
+    #: the grid.
+    background_render: bool = True
     #: Variables always removed before launching this harness (principally
     #: ambient API keys that would bypass an OAuth login).
     clear_env: List[str] = field(default_factory=list)
@@ -294,6 +301,7 @@ class Harness:
             "auth": self.auth,
             "token_env": self.token_env,
             "provider_adapter": self.provider_adapter,
+            "background_render": self.background_render,
             "clear_env": list(self.clear_env),
             "empty_env": list(self.empty_env),
             "login_args": list(self.login_args),
@@ -517,6 +525,7 @@ def _parse_entry(name: str, body) -> Harness:
         auth=auth,
         token_env=token_env,
         provider_adapter=provider_adapter,
+        background_render=bool(body.get("background_render", True)),
         clear_env=_env_names(body.get("clear_env"), f"harness {name!r} clear_env"),
         empty_env=_env_names(
             body.get(

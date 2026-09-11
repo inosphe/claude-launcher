@@ -30,7 +30,7 @@ from . import compacting, keys as keys_mod, process_priority
 from . import paths, pty_backend
 from .harness import CLAUDE_HARNESS, SessionDef
 from .idle import IdleTracker
-from .screen import ScreenFeeder, ScreenState
+from .screen import BACKGROUND_HISTORY, RenderBudget, ScreenFeeder, ScreenState
 
 #: Screen sampling cadence for idle detection (seconds).
 SAMPLE_INTERVAL = 0.4
@@ -344,13 +344,25 @@ class Session:
         delivery_hold: bool = False,
         focused_session_scheduling: bool = True,
         background_render_delay: float = 0.05,
+        render_budget: Optional[RenderBudget] = None,
     ) -> None:
         self.sdef = sdef
         self.argv: List[str] = []
         self.pty = None
         self.pid: Optional[int] = None
         self.idle_threshold = idle_threshold
+        self._scrollback = scrollback
         self.screen = ScreenState(sdef.cols, sdef.rows, history=scrollback)
+        # Nobody is attached to a new session: it starts on the background
+        # scrollback and grows to the configured one when a viewer focuses it.
+        self.screen.set_history_limit(min(scrollback, BACKGROUND_HISTORY))
+        entry = harness_registry.get(sdef.harness)
+        #: Harness-declared: whether the grid is kept current while nobody is
+        #: attached (see ``Harness.background_render``).
+        self.background_render = entry.background_render if entry else True
+        #: ``time.monotonic()`` of the last PTY chunk; the idle signal for a
+        #: parked (attached-only, unattended) grid, see ``_heuristic_status``.
+        self._last_output_mono = 0.0
         self._focused_subscribers: Set[object] = set()
         self._focused_session_scheduling = focused_session_scheduling
         self._cpu_background: Optional[bool] = None
@@ -359,6 +371,8 @@ class Session:
             foreground=self.is_focused,
             background_delay=background_render_delay,
             on_overflow=self._on_render_overflow,
+            budget=render_budget,
+            background_render=self.background_render,
         )
         self.tracker = IdleTracker()
         #: Compaction-notice scanner (see :mod:`compacting`): fed every pty
@@ -597,6 +611,7 @@ class Session:
             return
         self._saw_output = True
         self.last_output_at = _utcnow()
+        self._last_output_mono = time.monotonic()
         # Queued, not rendered here: pyte is CPU-bound and this runs on the
         # event loop, where a flooding session used to stall accept() (see
         # ScreenFeeder). Logging and the viewer broadcast stay inline — both
@@ -794,6 +809,14 @@ class Session:
             return STATUS_EXITED
         if not self._saw_output:
             return STATUS_STARTING
+        if not self.background_render and not self.is_focused():
+            # The grid is parked (attached-only harness, nobody attached), so
+            # its line hashes say nothing. Output timing is the signal: a
+            # program that has written nothing for ``threshold`` is settled.
+            # Animations while idle would read as busy here; that is the
+            # trade the harness declaration makes.
+            since = time.monotonic() - self._last_output_mono
+            return STATUS_IDLE if since >= threshold else STATUS_BUSY
         idle_for = self.tracker.idle_for(time.monotonic())
         if idle_for is not None and idle_for >= threshold:
             return STATUS_IDLE
@@ -1497,6 +1520,15 @@ class Session:
         else:
             self._focused_subscribers.discard(viewer)
         if self.is_focused() != before:
+            # Full scrollback while someone is looking; the short one when
+            # nobody is (see BACKGROUND_HISTORY). Order matters: raise the
+            # limit before the pump renders the parked tail into it.
+            screen = getattr(self, "screen", None)  # test doubles skip __init__
+            if screen is not None:
+                screen.set_history_limit(
+                    self._scrollback if self.is_focused()
+                    else min(self._scrollback, BACKGROUND_HISTORY)
+                )
             self._feeder.wake()
             self._apply_cpu_priority()
 

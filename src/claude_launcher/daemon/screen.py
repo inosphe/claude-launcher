@@ -24,6 +24,7 @@ import asyncio
 import re
 from collections import deque
 import logging
+import time
 from typing import Callable, Deque, List, Optional, Set, Tuple
 
 log = logging.getLogger(__name__)
@@ -314,6 +315,36 @@ class ScreenState:
         self._screen.resize(lines=rows, columns=cols)
         self._revision += 1
 
+    @property
+    def history_limit(self) -> int:
+        return self._screen.history.size
+
+    def set_history_limit(self, lines: int) -> None:
+        """Re-bound the scrollback to ``lines``, keeping its newest rows.
+
+        pyte's history is a pair of ``deque(maxlen=...)``; the limit can only
+        change by rebuilding them. Shrinking drops the oldest rows (the
+        transcript log still has them); growing keeps everything and lets
+        the history fill further from here.
+        """
+        lines = max(0, int(lines))
+        h = self._screen.history
+        if h.size == lines:
+            return
+        top = deque(list(h.top)[-lines:] if lines else (), maxlen=lines)
+        bottom = deque(list(h.bottom)[:lines] if lines else (), maxlen=lines)
+        # ``position`` counts from the bottom: ``size`` means "showing the
+        # live screen", less means scrolled up by the difference. Keep that
+        # offset (bounded by what ``bottom`` still holds) rather than the raw
+        # number -- pyte's ``before_event`` spins ``next_page()`` until
+        # ``position == size``, and with an empty ``bottom`` that never
+        # advances, so a stale ``position`` below the new size hangs the feed.
+        scrolled = min(h.size - h.position, len(bottom))
+        self._screen.history = h._replace(
+            top=top, bottom=bottom, size=lines, position=lines - scrolled
+        )
+        self._revision += 1
+
     # ------------------------------------------------------------------ #
     # capture
     # ------------------------------------------------------------------ #
@@ -582,6 +613,57 @@ PENDING_MAX = 4 * 1024 * 1024
 #: there stalled the loop for minutes when the queue was hundreds of MB.
 DRAIN_TAIL = 256 * 1024
 
+#: A session nobody is looking at keeps this much unrendered output, not
+#: :data:`PENDING_MAX`. Its grid is read on a timer (status sampling) and on
+#: demand (capture, the repaint a new viewer gets), and for those the *last*
+#: quarter-megabyte is what matters; rendering a 4 MiB backlog for a screen
+#: nobody sees is the CPU the 2026-09-11 outage ran on.
+BACKGROUND_PENDING_MAX = 256 * 1024
+
+#: Scrollback lines a background session keeps. A full 5000-line history of
+#: coloured 120-column rows is 122 MiB per session (measured); thirty such
+#: sessions were the daemon's 4 GB. Raised back to the configured
+#: ``scrollback_lines`` the moment a viewer focuses the session (what was
+#: trimmed meanwhile is in the transcript log, not in the grid).
+BACKGROUND_HISTORY = 500
+
+#: Bytes per second the *sum* of all background sessions may render.
+#: Per-session pacing (``background_render_delay``) bounds one session at
+#: ~80 KiB/s; thirty flooding sessions still add up to more than pyte can do
+#: (~660 KiB/s here). This is the daemon-wide ceiling, well under that.
+BACKGROUND_RENDER_BUDGET = 256 * 1024
+
+
+class RenderBudget:
+    """A token bucket shared by every background feeder in the daemon.
+
+    ``take(n)`` returns once ``n`` bytes of budget are available, waiting
+    out the deficit at ``rate`` bytes per second. Burst is one second of
+    rate, so a quiet daemon renders a fresh burst immediately and a busy one
+    settles at the rate. Foreground feeders never take from it.
+    """
+
+    def __init__(self, rate: float = BACKGROUND_RENDER_BUDGET) -> None:
+        self.rate = max(1.0, float(rate))
+        self._tokens = self.rate
+        self._stamp = time.monotonic()
+
+    def _refill(self) -> None:
+        now = time.monotonic()
+        self._tokens = min(self.rate, self._tokens + (now - self._stamp) * self.rate)
+        self._stamp = now
+
+    async def take(self, n: int) -> None:
+        # The balance may go negative: concurrent takers each book their
+        # debt and sleep it off, so the sum of what they render cannot exceed
+        # the rate. (Zeroing the balance instead let every taker re-spend
+        # the same refill; four feeders finished 160 KiB in 1.6 s at a
+        # 20 KiB/s budget in the first version of this test.)
+        self._refill()
+        self._tokens -= n
+        if self._tokens < 0:
+            await asyncio.sleep(-self._tokens / self.rate)
+
 
 class ScreenFeeder:
     """Renders PTY output into a :class:`ScreenState` a slice at a time.
@@ -612,12 +694,21 @@ class ScreenFeeder:
         background_delay: float = 0.0,
         max_pending: int = PENDING_MAX,
         on_overflow: Optional[Callable[[int], None]] = None,
+        budget: Optional[RenderBudget] = None,
+        background_max_pending: int = BACKGROUND_PENDING_MAX,
+        background_render: bool = True,
     ) -> None:
         self.screen = screen
         self._slice = max(1, slice_size)
         self._foreground = foreground or (lambda: True)
         self._background_delay = max(0.0, background_delay)
         self._max_pending = max(self._slice, max_pending)
+        self._bg_max_pending = max(self._slice, min(background_max_pending, self._max_pending))
+        self._budget = budget
+        #: False for a harness configured to render only while attached: in
+        #: the background the queue is kept (tail only) and nothing is fed to
+        #: pyte until a viewer focuses the session.
+        self.background_render = background_render
         self._on_overflow = on_overflow
         self._pending: Deque[bytes] = deque()
         self._pending_size = 0
@@ -676,16 +767,25 @@ class ScreenFeeder:
         self._pending.append(data)
         self._pending_size += len(data)
         self._idle.clear()
-        if self._pending_size > self._max_pending:
-            dropped = self._shed(self._max_pending)
+        foreground = self._foreground()
+        cap = self._max_pending if foreground else self._bg_max_pending
+        if self._pending_size > cap:
+            dropped = self._shed(cap)
             self.dropped_bytes += dropped
-            if not self._overflowing:
+            # Trimming a background tail is the design, not an overflow: the
+            # owner is told only when a *watched* session cannot keep up.
+            if foreground and not self._overflowing:
                 # Once per episode, not per chunk: a flooding session would
                 # otherwise raise this on every read.
                 self._overflowing = True
                 if self._on_overflow is not None:
                     self._on_overflow(dropped)
-        if self._pump is None or self._pump.done():
+        if not foreground and not self.background_render:
+            return  # tail kept; rendered when a viewer arrives (see wake)
+        self._ensure_pump()
+
+    def _ensure_pump(self) -> None:
+        if self._pending and (self._pump is None or self._pump.done()):
             self._pump = asyncio.get_event_loop().create_task(self._run())
 
     async def _run(self) -> None:
@@ -699,29 +799,39 @@ class ScreenFeeder:
                 if len(head) <= self._slice:
                     self._pending.popleft()
                     self._pending_size -= len(head)
+                    rendered = len(head)
                     self._render(head)
                 else:
                     self._pending[0] = head[self._slice :]
                     self._pending_size -= self._slice
+                    rendered = self._slice
                     self._render(head[: self._slice])
                 # The whole point: hand the loop back between slices, so an
                 # accept or a delivery queued behind us gets its turn.
+                # Clear first, then recheck focus. A focus notification
+                # that landed between the previous check and this point
+                # must not be erased before we decide to sleep.
+                self._pace_changed.clear()
+                if self._foreground():
+                    await asyncio.sleep(0)
+                    continue
+                # Background from here. A harness that renders only while
+                # attached stops now and keeps its tail for the next viewer.
+                if not self.background_render:
+                    return
+                # The daemon-wide budget first (every background session
+                # shares it), then this session's own pacing.
+                if self._budget is not None:
+                    await self._budget.take(rendered)
                 if not self._background_delay:
                     await asyncio.sleep(0)
                 else:
-                    # Clear first, then recheck focus. A focus notification
-                    # that landed between the previous check and this point
-                    # must not be erased before we decide to sleep.
-                    self._pace_changed.clear()
-                    if self._foreground():
-                        await asyncio.sleep(0)
-                    else:
-                        try:
-                            await asyncio.wait_for(
-                                self._pace_changed.wait(), self._background_delay
-                            )
-                        except asyncio.TimeoutError:
-                            pass
+                    try:
+                        await asyncio.wait_for(
+                            self._pace_changed.wait(), self._background_delay
+                        )
+                    except asyncio.TimeoutError:
+                        pass
         finally:
             if not self._pending:
                 self._pending_size = 0
@@ -733,8 +843,13 @@ class ScreenFeeder:
         await self._idle.wait()
 
     def wake(self) -> None:
-        """Reconsider background pacing after a session focus change."""
+        """Reconsider background pacing after a session focus change.
+
+        Also restarts the pump for a tail parked by an attached-only
+        harness: the viewer that just arrived is who that tail was kept for.
+        """
         self._pace_changed.set()
+        self._ensure_pump()
 
     def drain_now(self, *, tail: int = DRAIN_TAIL) -> None:
         """Render what is pending, synchronously — at most the last ``tail`` bytes.
