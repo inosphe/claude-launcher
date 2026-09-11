@@ -182,6 +182,23 @@ def test_selected_codex_model_and_effort_become_codex_config(home, tmp_path):
     assert "model_reasoning_effort=xhigh" in argv
 
 
+def test_astra_is_a_declared_codex_model(home, tmp_path):
+    """The alias added last goes through the same model_args template.
+
+    An undeclared model is refused by ``normalize`` with "unknown model", so
+    this one assertion covers both the declaration and its expansion. Nothing
+    in the codebase checks the expanded id against the vendor.
+    """
+    work = profile.create("work")
+    lineage.set_harness(work, "codex")
+    sdef = harness.normalize(
+        SessionDef(name="x", profile="work", cwd=str(tmp_path), model="astra")
+    )
+
+    argv, _, _ = harness.build_command(sdef)
+    assert "model=gpt-5.6-astra" in argv
+
+
 def test_model_must_be_declared_and_not_repeated_in_free_args(home, tmp_path):
     profile.create("work")
     with pytest.raises(HarnessError, match="unknown model"):

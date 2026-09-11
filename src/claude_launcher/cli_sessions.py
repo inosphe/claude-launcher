@@ -1982,7 +1982,7 @@ def register(sub) -> None:
     p_new.add_argument(
         "--model",
         help="model alias for the selected profile harness (Claude: "
-        "haiku/sonnet/opus/fable; Codex: luna/terra/sol)",
+        "haiku/sonnet/opus/fable; Codex: luna/terra/sol/astra)",
     )
     p_new.add_argument("--effort", help="reasoning effort for the selected harness")
     p_new.add_argument(
