@@ -3,8 +3,10 @@ change what it serves.
 
 The RestartClock runs the ``restart:`` command the moment ``reflect`` is
 entered, so the command itself has to ask whether there is anything to
-deploy. It delegates that to ``tools/deploy_check.py`` and restarts on exactly
-one of its four answers.
+deploy. It delegates that to ``tools/deploy_check.py`` and skips the restart on
+exactly one of its four answers -- "already serving" -- because every other
+answer is either fixed by a restart or not safe to skip on (see the module
+docstring for the boot-time-dirt deadlock that a skip on 3 produced).
 """
 
 from __future__ import annotations
@@ -63,7 +65,19 @@ def test_older_code_is_restarted(verdict, restarts, capsys):
     calls, run = restarts
     assert restart_live.main(["--branch", "master"], run=run) == 0
     assert calls == [["/fake/claunch", "daemon", "restart"]]
-    assert "restarting" in capsys.readouterr().out
+    got = capsys.readouterr()
+    assert "restarting" in got.err and "running:" in got.out
+
+
+def test_dry_run_decides_without_restarting(verdict, restarts, capsys):
+    """``--dry-run`` exists so the decision can be checked against a live
+    checkout without taking the daemon down (running the script bare against
+    this repository on 2026-09-11 18:12 did exactly that)."""
+    verdict(deploy_check.NOT_RESTARTED)
+    calls, run = restarts
+    assert restart_live.main(["--dry-run"], run=run) == 0
+    assert calls == []
+    assert "dry run" in capsys.readouterr().out
 
 
 def test_code_already_served_is_left_alone(verdict, restarts, capsys):
@@ -76,15 +90,15 @@ def test_code_already_served_is_left_alone(verdict, restarts, capsys):
 
 
 @pytest.mark.parametrize("code", [deploy_check.CANNOT_TELL, deploy_check.DIRTY])
-def test_verdicts_a_restart_cannot_fix_do_not_restart(verdict, restarts, capsys, code):
-    """A dirty checkout stays dirty across a restart; an unanswerable question
-    stays unanswered. Both come back as the check's own exit code so the
-    RestartClock's result block names them."""
+def test_unsure_and_dirty_answers_still_restart(verdict, restarts, capsys, code):
+    """The 2026-09-11 18:03 deadlock: deploy_check keeps answering 3 for dirt
+    the daemon *booted* with until a restart clears it, so a skip on 3 could
+    not be undone by committing. Both answers restart; the reason is said."""
     verdict(code)
     calls, run = restarts
-    assert restart_live.main([], run=run) == code
-    assert calls == []
-    assert "not restarting" in capsys.readouterr().err
+    assert restart_live.main([], run=run) == 0
+    assert calls == [["/fake/claunch", "daemon", "restart"]]
+    assert "restarting" in capsys.readouterr().err
 
 
 def test_the_check_is_asked_about_the_same_branch_and_daemon(verdict, restarts):
@@ -115,15 +129,14 @@ def test_no_claunch_on_path_is_an_error_not_a_silent_green(verdict, monkeypatch,
 
 
 def test_every_verdict_of_deploy_check_has_an_answer_here():
-    """A verdict added to deploy_check must be classified here, not fall
-    through to a restart by omission."""
+    """A verdict added to deploy_check must be classified here -- as the one
+    skip or as a named restart reason -- not fall through to a KeyError at
+    the moment the daemon runs this."""
     verdicts = {
         deploy_check.SERVING, deploy_check.NOT_RESTARTED,
         deploy_check.CANNOT_TELL, deploy_check.DIRTY,
     }
-    handled = {deploy_check.SERVING, deploy_check.NOT_RESTARTED} | set(
-        restart_live._NOT_FIXED_BY_RESTART
-    )
+    handled = {deploy_check.SERVING} | set(restart_live._RESTARTING_BECAUSE)
     assert handled == verdicts
 
 

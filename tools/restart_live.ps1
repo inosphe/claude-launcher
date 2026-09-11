@@ -6,9 +6,9 @@
 # workflow for another service replaces this file with its own restart action.
 #
 # The decision lives in tools/restart_live.py: it asks tools/deploy_check.py
-# whether the running daemon already serves the branch's code and restarts
-# only when it serves older code.  A round that merged nothing (a tip that
-# differs only in .beads/) restarts nothing.
+# whether the running daemon already serves the branch's code and skips the
+# restart only then.  A round that merged nothing (a tip that differs only in
+# .beads/) restarts nothing; every other answer restarts as before.
 
 $ErrorActionPreference = 'Stop'
 

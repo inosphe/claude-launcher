@@ -10,15 +10,26 @@ restarted the daemon, including rounds that had merged nothing (2026-09-11
 ``.beads/``). A restart takes every attached session's turn down with it, so
 one that serves nothing new is pure cost.
 
-The decision is ``tools/deploy_check.py``'s, imported rather than restated:
-it already knows the four answers, and only one of them is fixed by a
-restart::
+The decision is ``tools/deploy_check.py``'s, imported rather than restated,
+and it is a one-sided one: the restart is skipped only on the answer that
+proves it pointless, and taken on every other::
 
     0  serving the branch's code      -> nothing to do
     1  serving older code / nothing   -> restart
-    2  cannot tell                    -> do not restart; say why
-    3  the checkout is dirty          -> do not restart; a restart onto a
-                                         dirty tree serves no commit either
+    2  cannot tell                    -> restart (the old, unconditional
+                                         behaviour; a guess must not skip)
+    3  the checkout is dirty          -> restart, and say the checklist
+                                         will stay red until it is clean
+
+3 is taken, not skipped, because of a deadlock measured on 2026-09-11 18:03:
+``deploy_check`` folds the dirt the daemon *booted* with into its answer, so a
+daemon that loaded edited files keeps answering 3 after those files are
+committed -- and the only thing that clears boot-time dirt is a restart. A
+first version of this file skipped on 3, and the round could not be closed by
+committing, nor by forcing ``reflect`` again. Dirt that is still there *now*
+is a different matter: the restart goes out (it may carry new commits), but
+``deployed`` cannot turn green until somebody commits or sets that dirt aside,
+which ``deploy_check`` says in its own words.
 
 The two platform wrappers (``restart_live.ps1``, ``restart_live.sh``) call
 this file and pass its exit status through, so the RestartClock's result block
@@ -46,18 +57,20 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import deploy_check  # noqa: E402  -- tools/deploy_check.py, from the line above
 
-#: The verdicts of ``deploy_check`` that a restart does not fix, and what to
-#: tell the driver about each. Keyed by exit code so a new verdict there is
-#: an error here rather than a silent restart.
-_NOT_FIXED_BY_RESTART = {
+#: What to tell the driver on each answer that still ends in a restart.
+#: Keyed by exit code so a new verdict in ``deploy_check`` is a KeyError here
+#: (a test pins the set) rather than a silent guess.
+_RESTARTING_BECAUSE = {
+    deploy_check.NOT_RESTARTED: "restarting: the daemon serves older code than the branch tip",
     deploy_check.CANNOT_TELL: (
-        "not restarting: deploy_check cannot tell what the daemon serves, "
-        "and a restart would not answer that -- fix what it reported first"
+        "restarting: deploy_check cannot tell what the daemon serves, and a "
+        "restart is the safe side of not knowing"
     ),
     deploy_check.DIRTY: (
-        "not restarting: the served checkout is dirty, so a restarted daemon "
-        "would serve no commit's code either -- commit or set aside the "
-        "listed paths (or declare them with --allow-dirty), then run again"
+        "restarting: the served content is no commit's (dirt at boot, or "
+        "dirt now). A restart clears dirt the daemon booted with; dirt that "
+        "is still in the checkout keeps the 'deployed' check red until it is "
+        "committed or set aside"
     ),
 }
 
@@ -78,6 +91,10 @@ def main(argv: Optional[list] = None, *, run=subprocess.call) -> int:
     ap.add_argument("--branch", default="master")
     ap.add_argument("--daemon-json", type=Path, default=None)
     ap.add_argument("--allow-dirty", default=None, metavar="PATHS|sha1:HEX")
+    ap.add_argument(
+        "--dry-run", action="store_true",
+        help="say what would happen and exit 0 without restarting anything",
+    )
     args = ap.parse_args(argv)
 
     check_argv = ["--repo", str(args.repo), "--branch", args.branch]
@@ -90,19 +107,17 @@ def main(argv: Optional[list] = None, *, run=subprocess.call) -> int:
     if verdict == deploy_check.SERVING:
         print("no restart needed: the daemon already serves this code")
         return 0
-    if verdict != deploy_check.NOT_RESTARTED:
-        message = _NOT_FIXED_BY_RESTART.get(
-            verdict, f"not restarting: deploy_check answered {verdict}, which is not a restart's to fix"
-        )
-        print(message, file=sys.stderr)
-        return verdict
+    print(_RESTARTING_BECAUSE[verdict], file=sys.stderr)
+    if args.dry_run:
+        print("dry run: would run 'claunch daemon restart' now; not doing it")
+        return 0
 
     try:
         command = _restart_command()
     except LookupError as exc:
         print(f"cannot restart: {exc}", file=sys.stderr)
         return 1
-    print(f"restarting: {' '.join(command)}", flush=True)
+    print(f"running: {' '.join(command)}", flush=True)
     return int(run(command))
 
 
