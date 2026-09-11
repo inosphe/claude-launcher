@@ -34,6 +34,7 @@ from .. import transcripts
 from . import codex_sessions, db, harness as harness_mod
 from . import paths
 from .harness import SessionDef
+from .screen import BACKGROUND_RENDER_BUDGET, RenderBudget
 from .session import STATUS_BUSY, DeadSession, Session
 
 #: Either a live session or the record left behind by one that ended.
@@ -71,12 +72,17 @@ class SessionManager:
         restore_default: bool,
         focused_session_scheduling: bool = True,
         background_render_delay: float = 0.05,
+        background_render_budget: float = BACKGROUND_RENDER_BUDGET,
     ) -> None:
         self.idle_threshold = idle_threshold
         self.scrollback = scrollback
         self.restore_default = restore_default
         self.focused_session_scheduling = focused_session_scheduling
         self.background_render_delay = background_render_delay
+        #: One bucket for every background feeder in this daemon (see
+        #: ``screen.RenderBudget``): the sum of unattended rendering, not the
+        #: per-session pace, is what saturated the loop on 2026-09-11.
+        self.render_budget = RenderBudget(background_render_budget)
         self._sessions: Dict[str, AnySession] = {}
         #: The durable session registry (:mod:`claude_launcher.daemon.db`). One
         #: row per session; :meth:`persist` writes it, :meth:`restore_all` reads
@@ -204,6 +210,7 @@ class SessionManager:
             delivery_hold=delivery_hold,
             focused_session_scheduling=self.focused_session_scheduling,
             background_render_delay=self.background_render_delay,
+            render_budget=self.render_budget,
         )
         session.on_exit = self._session_exited
         session.on_command_submitted = self._session_command_submitted

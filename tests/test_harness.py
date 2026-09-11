@@ -1016,3 +1016,10 @@ def test_only_a_pinned_claude_conversation_can_restore_blank(home, tmp_path):
 
     unknown = replace(pinned, profile="no-such-profile")
     assert harness.restores_blank(unknown) is False
+
+
+def test_pi_renders_only_while_attached_and_others_always():
+    from claude_launcher import harnesses as harness_registry
+    assert harness_registry.get("pi").background_render is False
+    assert harness_registry.get("claude").background_render is True
+    assert harness_registry.get("codex").background_render is True

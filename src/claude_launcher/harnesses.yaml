@@ -65,6 +65,10 @@ harnesses:
     auth: api-key
     token_env: ANTHROPIC_API_KEY
     provider_adapter: pi
+    # pi prints tool results untruncated with truecolour (60–280 KiB/s per
+    # session, measured 2026-09-11); the daemon renders its screen only
+    # while a viewer is attached and judges idle/busy from output timing.
+    background_render: false
     # claunch's own tools, registered by the packaged pi_tools.mjs extension.
     # A profile's harness_options.pi.tools switches them per profile; a
     # session's `tools` (create/spawn forms, --tools) overrides per session.

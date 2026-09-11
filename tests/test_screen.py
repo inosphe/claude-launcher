@@ -741,3 +741,88 @@ def test_a_render_error_costs_one_slice_not_the_pump():
     assert feeder.render_errors == 1
     assert feeder.pending_bytes == 0
     assert "last" in screen.render_screen()[0]      # rendering went on after the error
+
+
+def test_background_feeders_share_one_render_budget():
+    """Thirty unattended sessions each paced to 80 KiB/s still add up to more
+    than pyte can do. The budget is the daemon-wide ceiling: with it at
+    20 KiB/s, four background feeders fed 40 KiB each take ~8 s together,
+    where per-session pacing alone would have let them finish in one."""
+    from claude_launcher.daemon.screen import RenderBudget
+    import time as _t
+
+    async def run():
+        budget = RenderBudget(20 * 1024)
+        feeders = [
+            ScreenFeeder(ScreenState(120, 30), foreground=lambda: False,
+                         background_delay=0.0, budget=budget)
+            for _ in range(4)
+        ]
+        t0 = _t.monotonic()
+        for f in feeders:
+            f.submit(b"x" * (40 * 1024))
+        await asyncio.gather(*(f.drained() for f in feeders))
+        for f in feeders:
+            f.close()
+        return _t.monotonic() - t0
+
+    elapsed = asyncio.run(run())
+    # 160 KiB at 20 KiB/s, minus the 20 KiB burst: about 7 s. Generous bounds.
+    assert 4.0 < elapsed < 12.0
+
+
+def test_a_foreground_feeder_ignores_the_budget():
+    from claude_launcher.daemon.screen import RenderBudget
+    import time as _t
+
+    async def run():
+        budget = RenderBudget(1024)                          # 1 KiB/s: tiny
+        feeder = ScreenFeeder(ScreenState(120, 30), foreground=lambda: True, budget=budget)
+        t0 = _t.monotonic()
+        feeder.submit(b"x" * (64 * 1024))
+        await feeder.drained()
+        feeder.close()
+        return _t.monotonic() - t0
+
+    assert asyncio.run(run()) < 2.0
+
+
+def test_an_attached_only_feeder_parks_its_tail_until_a_viewer_arrives():
+    """``background_render: false``: nothing is rendered unattended, only the
+    last ``background_max_pending`` bytes are kept, and ``wake()`` (a viewer
+    focusing) renders that tail."""
+    focused = {"on": False}
+
+    async def run():
+        screen = ScreenState(120, 30)
+        feeder = ScreenFeeder(screen, foreground=lambda: focused["on"],
+                              background_render=False, background_max_pending=2048)
+        feeder.submit(b"old\r\n" * 1000)                     # 5000 bytes, mostly shed
+        feeder.submit(b"\x1b[2J\x1b[Hlast words")
+        await asyncio.sleep(0.05)
+        parked = feeder.pending_bytes
+        untouched = screen.render_screen()[0]
+        focused["on"] = True
+        feeder.wake()
+        await feeder.drained()
+        feeder.close()
+        return parked, untouched, screen.render_screen()[0]
+
+    parked, untouched, after = asyncio.run(run())
+    assert 0 < parked <= 2048
+    assert untouched == ""                                   # nothing rendered unattended
+    assert "last words" in after
+
+
+def test_history_limit_can_shrink_and_grow():
+    s = ScreenState(80, 5, history=100)
+    for i in range(50):
+        s.feed_render(b"line %d\r\n" % i)
+    assert s.history_len > 20
+    s.set_history_limit(20)
+    assert s.history_limit == 20 and s.history_len == 20
+    assert s.render_history()[-1].startswith("line")          # newest rows kept
+    s.set_history_limit(100)
+    for i in range(50, 100):
+        s.feed_render(b"line %d\r\n" % i)
+    assert 20 < s.history_len <= 100
