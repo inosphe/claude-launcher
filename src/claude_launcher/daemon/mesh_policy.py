@@ -302,7 +302,7 @@ async def tick(mm, mesh) -> None:
     # says so in its vocabulary. Defaults to leader alone.
     watching = set(mesh.roleset.stall_watchers())
     watchers = sorted(
-        h for h, m in mesh.members.items() if m.role in watching
+        h for h, m in mesh.members.items() if watching.intersection(m.roles)
     )
     for handle, member in list(mesh.members.items()):
         local = mm._is_local(mesh, member)
@@ -374,15 +374,14 @@ async def tick(mm, mesh) -> None:
             st.pop("hb_backoff", None)
 
         # -- task-poll: caught up, idle, polled role ------------------------ #
-        if (
-            tp["enabled"]
-            and idle
-            and caught_up
-            and member.role in tp["roles"]
-        ):
+        # Polled if ANY role the member holds is a polled one; the body is
+        # written for the first such role, primary first, so a leader that
+        # also holds `worker` is nudged in the worker's words.
+        polled_as = next((r for r in member.roles if r in tp["roles"]), "")
+        if tp["enabled"] and idle and caught_up and polled_as:
             due = st.get("tp_next", active_at + tp["interval"])
             if now >= due:
-                body = task_poll_body(mesh, tp, member.role)
+                body = task_poll_body(mesh, tp, polled_as)
                 await dispatch(
                     mm, mesh, member, session, "task-poll", handle, body
                 )

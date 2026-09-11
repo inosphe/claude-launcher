@@ -2174,7 +2174,7 @@ class RunEventClock:
             return None
         for handle in sorted(mesh.members):
             member = mesh.members[handle]
-            if member.role != "leader" or member.session == scope:
+            if "leader" not in member.roles or member.session == scope:
                 continue
             if not self.mesh._is_local(mesh, member):
                 continue

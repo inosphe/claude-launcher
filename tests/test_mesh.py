@@ -624,6 +624,7 @@ def test_mesh_api(home, tmp_path):
                 "name": "web", "primary": None,
                 "members": [{
                     "handle": "worker_a", "session": "w1", "role": "worker",
+                    "subroles": [], "roles": ["worker"],
                     "local": True,
                 }],
                 "member_count": 1, "messages": 0, "requests": 0,

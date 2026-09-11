@@ -401,6 +401,7 @@ def build_app(
     r.add_delete("/api/mesh/{mesh}", h_mesh_delete)
     r.add_post("/api/mesh/{mesh}/members", h_mesh_join)
     r.add_delete("/api/mesh/{mesh}/members/{handle}", h_mesh_leave)
+    r.add_patch("/api/mesh/{mesh}/members/{handle}/subroles", h_mesh_member_subroles)
     r.add_post("/api/mesh/{mesh}/messages", h_mesh_send)
     r.add_get("/api/mesh/{mesh}/messages", h_mesh_history)
     r.add_get("/api/mesh/{mesh}/owed", h_mesh_owed)
@@ -2684,11 +2685,49 @@ async def h_mesh_join(request: web.Request) -> web.Response:
         session,
         handle=str(body.get("handle") or ""),
         role=str(body.get("role") or ""),
+        subroles=_subroles_in(body),
         code=str(body.get("code") or "") or None,
     )
     if isinstance(result, dict):  # codeless remote join: pended for approval
         return json_response(result, status=202)
     return json_response(result.to_dict(), status=201)
+
+
+def _subroles_in(body: dict) -> list:
+    """``subroles`` as a request body carries it: a list, or one
+    comma-separated string from a hand-typed call."""
+    raw = body.get("subroles")
+    if isinstance(raw, str):
+        raw = raw.split(",")
+    if not isinstance(raw, list):
+        return []
+    return [str(r).strip() for r in raw if str(r or "").strip()]
+
+
+async def h_mesh_member_subroles(request: web.Request) -> web.Response:
+    """Change one live member's subroles.
+
+    Body: ``{"add": [...]}`` and/or ``{"remove": [...]}``, or ``{"set":
+    [...]}`` for the whole list. The primary role is not editable here — a
+    member that changes what it is re-joins.
+    """
+    body = await _json_body(request)
+    if "role" in body:
+        return json_error(
+            400, "the primary 'role' is settled at join and not edited here — "
+            "send 'add', 'remove' or 'set' for the subroles"
+        )
+    replace = None
+    if "set" in body:
+        replace = _subroles_in({"subroles": body.get("set")})
+    member = _mesh_mgr(request).set_subroles(
+        request.match_info["mesh"],
+        request.match_info["handle"],
+        add=_subroles_in({"subroles": body.get("add")}),
+        remove=_subroles_in({"subroles": body.get("remove")}),
+        replace=replace,
+    )
+    return json_response(member.to_dict())
 
 
 async def h_mesh_leave(request: web.Request) -> web.Response:
@@ -2949,6 +2988,7 @@ async def h_mesh_invitation(request: web.Request) -> web.Response:
         session,
         handle=str(body.get("handle") or ""),
         role=str(body.get("role") or ""),
+        subroles=_subroles_in(body),
     )
     return json_response({"member": member}, status=201)
 
@@ -3122,6 +3162,7 @@ async def h_peer_join_request(request: web.Request) -> web.Response:
         str(body.get("role") or ""),
         str(body.get("reply_token") or ""),
         str(body.get("code") or ""),
+        subroles=_subroles_in(body),
     )
     return json_response(result)
 
@@ -3149,6 +3190,7 @@ async def h_peer_mesh_invite(request: web.Request) -> web.Response:
         str(body.get("handle") or ""),
         str(body.get("role") or ""),
         str(body.get("code") or ""),
+        subroles=_subroles_in(body),
     )
     return json_response(result)
 
@@ -3186,6 +3228,7 @@ async def h_peer_join(request: web.Request) -> web.Response:
         str(body.get("handle") or ""),
         str(body.get("role") or ""),
         str(body.get("parent") or ""),
+        subroles=_subroles_in(body),
     )
     return json_response(result)
 
@@ -3462,6 +3505,7 @@ async def h_sessions_create(request: web.Request) -> web.Response:
     # session definition receives no harness-specific second copy.
     definition = dict(body)
     definition.pop("role", None)
+    definition.pop("subroles", None)
     # ``issue_text`` belongs to the newly minted board record.  It is needed
     # below while beads creates that record, but must not enter the temporary
     # session-definition copy (or a future SessionDef field could retain the

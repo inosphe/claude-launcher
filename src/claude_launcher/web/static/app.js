@@ -911,7 +911,7 @@ async function refreshSessions(options) {
     // has arrived; retain the session field for legacy records and the brief
     // interval before the first mesh poll completes.
     const meshRoles = [...new Set(
-      sessMeshes(s.name).map((m) => m.role).filter(Boolean),
+      sessMeshes(s.name).map((m) => m.label).filter(Boolean),
     )];
     role.textContent = s.role || meshRoles[0] || "free-role";
     // And the name the mesh calls it by, when that is not the name above.
@@ -1150,7 +1150,15 @@ function sessMeshes(name) {
   for (const m of meshCache || []) {
     for (const mem of m.members || []) {
       if (mem.local && mem.session === name) {
-        out.push({ mesh: m.name, handle: mem.handle, role: mem.role || "" });
+        // `label` is the roster's spelling of everything the member holds
+        // (`leader+reviewer`); `role` stays the primary for callers that
+        // key on one name.
+        const held = Array.isArray(mem.roles) && mem.roles.length
+          ? mem.roles : [mem.role || ""];
+        out.push({
+          mesh: m.name, handle: mem.handle, role: mem.role || "",
+          roles: held.filter(Boolean), label: held.filter(Boolean).join("+"),
+        });
       }
     }
   }
@@ -1167,7 +1175,7 @@ function railMeshTags(name) {
   const shown = meshes.slice(0, RAIL_MESH_TAGS).map((m) => ({
     text: m.mesh,
     title: `mesh ${m.mesh} — joined as ${m.handle}` +
-           (m.role ? ` (${m.role})` : ""),
+           (m.label ? ` (${m.label})` : ""),
   }));
   const rest = meshes.slice(RAIL_MESH_TAGS);
   if (rest.length) {
@@ -1220,7 +1228,7 @@ function handleTag(name) {
     title:
       `session '${name}' answers to ` +
       hs.map((h) => `'${h.handle}' in ${h.mesh}` +
-                    (h.role ? ` (${h.role})` : "")).join(", ") +
+                    (h.label ? ` (${h.label})` : "")).join(", ") +
       " — address it by that name on the mesh",
   };
 }
@@ -16121,7 +16129,12 @@ function sessRoleNames(data) {
   const names = new Set();
   const add = (r) => { if (r) names.add(String(r).toLowerCase()); };
   add(data.role ? data.role.name : s.role);
-  for (const m of data.meshes || []) add(m.role);
+  for (const m of data.meshes || []) {
+    add(m.role);
+    // A subrole counts: a leader that also holds `reviewer` gets both
+    // roles' panels, which is what holding the role means here.
+    for (const r of m.roles || []) add(r);
+  }
   return names;
 }
 

@@ -164,6 +164,17 @@ TOOLS = [
                         "'claunch mesh roles MESH' for this mesh's vocabulary"
                     ),
                 },
+                "subroles": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": (
+                        "further roles the child also answers for besides "
+                        "'role' — a workflow's delegated decision, a "
+                        "filter_roles check and the policy engine find it "
+                        "under any of them. Its stance is still the primary "
+                        "role's"
+                    ),
+                },
                 "connect": {
                     "type": "array",
                     "items": {"type": "string"},
@@ -772,7 +783,7 @@ def _my_handle(members: list) -> str:
 #: ``tools`` (a harness's builtin-tool choice, e.g. Pi's ``full_read``) is
 #: in the same honoured-not-offered group: it rides the ``args`` gate.
 _SPAWN_KEYS = (
-    "name", "mesh", "handle", "role", "connect", "workflow", "context",
+    "name", "mesh", "handle", "role", "subroles", "connect", "workflow", "context",
     "task", "issue", "issue_text", "harness", "workspace", "worktree",
     "rebase_onto", "profile", "borrow", "null_token", "cwd", "args", "env",
     "fork", "tools",

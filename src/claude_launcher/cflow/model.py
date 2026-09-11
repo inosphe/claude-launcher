@@ -641,6 +641,23 @@ class RoleFilter:
             return held in self.roles
         return held not in self.roles
 
+    def allows_any(self, roles) -> bool:
+        """Whether a session holding ALL of ``roles`` may drive.
+
+        A whitelist admits the session when any role it holds is listed; a
+        blacklist turns it away when any role it holds is listed. Both read
+        "holds" the same way the mesh does — the primary and every subrole —
+        so a leader that took ``worker`` as a subrole may drive a
+        workers-only workflow, and a worker that took ``leader`` may not
+        drive one that bars leaders. An empty list is judged as "" (the
+        role of a session in no mesh).
+        """
+        held = [str(r or "").strip().lower() for r in (roles or ())]
+        held = [r for r in held if r] or [""]
+        if self.type == FILTER_WHITELIST:
+            return any(r in self.roles for r in held)
+        return not any(r in self.roles for r in held)
+
     def describe(self) -> str:
         """One line for `show`, a payload or an error — never parsed."""
         return f"{self.type}({', '.join(self.roles)})"

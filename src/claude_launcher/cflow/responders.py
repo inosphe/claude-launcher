@@ -74,7 +74,13 @@ class Responder:
     session: str
     #: Its mesh handle, for delivery and for anything a human reads.
     handle: str
+    #: Its primary role — what the roster prints and what its stance is.
     role: str
+    #: Every role it HOLDS, primary first, then its subroles. A candidate's
+    #: role is matched against this, so a leader that took ``reviewer`` as
+    #: a subrole answers a ``{role: reviewer}`` question. Empty reads as the
+    #: primary alone (a roster from a daemon that predates subroles).
+    roles: Tuple[str, ...] = ()
     #: Hosted by this daemon. A remote member is kept in the pool so it can be
     #: reported as skipped-because-remote rather than not found.
     local: bool = True
@@ -85,12 +91,24 @@ class Responder:
     def answerable(self) -> bool:
         return bool(self.session) and self.local and self.reachability not in GONE
 
+    @property
+    def held(self) -> Tuple[str, ...]:
+        return self.roles or (self.role,)
+
+    def holds(self, role: str) -> bool:
+        return role in self.held
+
+    def role_label(self) -> str:
+        """``leader+reviewer`` — how a skip reason names what somebody is."""
+        return "+".join(self.held)
+
     def to_dict(self) -> dict:
         return {
             "kind": "member",
             "session": self.session,
             "handle": self.handle,
             "role": self.role,
+            "roles": list(self.held),
         }
 
 
@@ -120,6 +138,10 @@ class Pool:
     #: The asking session's own mesh role, as resolved and stored at its join.
     #: Read for the workflow's ``filter_roles`` check; empty when ``me`` is.
     me_role: str = ""
+    #: Every role the asking session holds — ``me_role`` first, then its
+    #: subroles. ``filter_roles`` is held against all of them (see
+    #: :meth:`.model.RoleFilter.allows_any`). Empty reads as ``me_role`` alone.
+    me_roles: Tuple[str, ...] = ()
     #: Every member of the mesh except the asking session itself, by handle.
     members: Dict[str, Responder] = field(default_factory=dict)
     #: Handles the asking session may message (its side of the member graph).
@@ -149,7 +171,7 @@ class Pool:
         else:
             handles = [h for h in sorted(self.members) if h not in self.descendants]
         return [
-            self.members[h] for h in handles if self.members[h].role == candidate.role
+            self.members[h] for h in handles if self.members[h].holds(candidate.role)
         ]
 
     def match(
@@ -260,7 +282,7 @@ class Pool:
     def _nobody_holds(self, candidate: model.Candidate) -> str:
         if candidate.scope == model.SCOPE_ANCESTOR:
             above = [
-                f"{h} ({self.members[h].role})"
+                f"{h} ({self.members[h].role_label()})"
                 for h in self.ancestors
                 if h in self.members
             ]
@@ -270,7 +292,7 @@ class Pool:
                 f"{self.mesh!r} holds that role — found {found}"
             )
         others = [
-            f"{h} ({self.members[h].role})"
+            f"{h} ({self.members[h].role_label()})"
             for h in sorted(self.members)
             if h not in self.descendants
         ]
@@ -345,11 +367,13 @@ def _pool_from(info: dict, session: str) -> Pool:
         mesh=str(info.get("name") or ""),
         me=me,
         me_role=str((raw.get(me) or {}).get("role") or ""),
+        me_roles=_roles_of(raw.get(me) or {}),
         members={
             handle: Responder(
                 session=str(m.get("session") or ""),
                 handle=handle,
                 role=str(m.get("role") or ""),
+                roles=_roles_of(m),
                 local=bool(m.get("local")),
                 reachability=str(m.get("reachability") or ""),
             )
@@ -361,6 +385,18 @@ def _pool_from(info: dict, session: str) -> Pool:
         ancestors=_ancestors(raw, me),
         problem="",
     )
+
+
+def _roles_of(member: dict) -> Tuple[str, ...]:
+    """The roles a roster row holds: its ``roles`` list when the daemon
+    publishes one, else the primary alone (an older daemon, or none)."""
+    primary = str(member.get("role") or "")
+    listed = member.get("roles")
+    if isinstance(listed, list) and listed:
+        names = [str(r) for r in listed if str(r or "").strip()]
+        if names:
+            return tuple(dict.fromkeys(names))
+    return (primary,) if primary else ()
 
 
 def _members(info: dict) -> Dict[str, dict]:
