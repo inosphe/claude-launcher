@@ -1,12 +1,17 @@
 """Read one managed session's latest recorded context size.
 
-Claude and Codex persist the required values in different JSONL formats:
+Claude, Codex and Pi persist the required values in different JSONL formats:
 
 * Claude assistant entries split the input into fresh, cache-read, and
   cache-write token counts.  Their sum is the context sent for that turn.
 * Codex ``token_count`` events carry ``last_token_usage`` for the latest model
   request and a separate cumulative ``total_token_usage``.  The former is the
   context reading.  Codex also records ``model_context_window``.
+* Pi ``message`` entries whose ``message.role`` is ``assistant`` carry a
+  ``usage`` block of ``input``, ``cacheRead``, ``cacheWrite`` and ``output``
+  (camelCase, and ``input`` is the *uncached* part, so the three add up the
+  way Claude's do).  The file is the one claunch pins with ``--session``
+  (see ``daemon/harness.pi_session_file``); Pi records no context window.
 
 The result is normalized for the daemon API and dashboard as ``tokens``, the
 three input components, output tokens, model, and timestamp.  Codex readings
@@ -20,7 +25,8 @@ format also return ``None``.
 
 Claude sidechain entries are skipped because their usage belongs to the
 subagent conversation.  Codex subagents use separate rollout files and are
-selected by their own conversation ids.
+selected by their own conversation ids.  Pi subagents write their own session
+files under the same home, never into the parent's.
 
 Subscription quota reporting is implemented by :mod:`claude_launcher.usage`.
 """
@@ -38,7 +44,7 @@ from .. import lineage, providers
 from .. import profile as profile_mod
 from . import codex_sessions
 from .briefing import locate_transcript
-from .harness import CLAUDE_HARNESS
+from .harness import CLAUDE_HARNESS, PI_HARNESS, pi_session_file
 
 CODEX_HARNESS = "codex"
 
@@ -178,8 +184,48 @@ def codex_model_of(entry: dict) -> Optional[str]:
     return str(payload.get("model") or "").strip() or None
 
 
-def read_tail(path: Path) -> Optional[dict]:
+def pi_usage_of(entry: dict) -> Optional[dict]:
+    """Normalize one Pi session ``message`` entry, or ``None``.
+
+    Only an assistant message with a usage block whose input side is not
+    empty is a reading.  Pi writes ``input`` as the uncached portion and
+    ``cacheRead``/``cacheWrite`` beside it (``totalTokens`` is their sum plus
+    ``output``), so the context sent is the three added -- the same arithmetic
+    as Claude's, under different names.  User messages, tool results and
+    session bookkeeping (``session``, ``model_change``, ``compaction``) carry
+    no usage and are skipped.
+    """
+    if not isinstance(entry, dict) or entry.get("type") != "message":
+        return None
+    msg = entry.get("message")
+    if not isinstance(msg, dict) or msg.get("role") != "assistant":
+        return None
+    usage = msg.get("usage")
+    if not isinstance(usage, dict):
+        return None
+    fresh = _int(usage.get("input"))
+    cache_read = _int(usage.get("cacheRead"))
+    cache_write = _int(usage.get("cacheWrite"))
+    total = fresh + cache_read + cache_write
+    if not total:
+        return None
+    return {
+        "tokens": total,
+        "input": fresh,
+        "cache_read": cache_read,
+        "cache_write": cache_write,
+        "output": _int(usage.get("output")),
+        "model": str(msg.get("model") or "") or None,
+        "at": str(entry.get("timestamp") or "") or None,
+    }
+
+
+def read_tail(path: Path, usage=usage_of) -> Optional[dict]:
     """The newest context reading in ``path``, or ``None``.
+
+    ``usage`` is the per-entry normalizer -- Claude's by default, Pi's for a
+    Pi session file; both formats are one reading per line, so the same
+    reverse scan serves them.
 
     Reads from the end and widens until a reading is found or ``MAX_TAIL`` is
     spent. Giving up is the honest answer: a session whose last megabyte holds
@@ -208,12 +254,17 @@ def read_tail(path: Path) -> Optional[dict]:
                 entry = json.loads(line)
             except ValueError:
                 continue
-            reading = usage_of(entry)
+            reading = usage(entry)
             if reading is not None:
                 return reading
         if window >= size or window >= MAX_TAIL:
             return None
         window = min(window * 4, MAX_TAIL)
+
+
+def read_pi_tail(path: Path) -> Optional[dict]:
+    """The newest Pi context reading in ``path``, or ``None``."""
+    return read_tail(path, pi_usage_of)
 
 
 def read_codex_tail(path: Path) -> Optional[dict]:
@@ -264,7 +315,10 @@ def read_codex_tail(path: Path) -> Optional[dict]:
 def transcript_of(sdef) -> Optional[Path]:
     """This session's supported transcript, with path lookup caching."""
     harness = str(getattr(sdef, "harness", None) or CLAUDE_HARNESS)
-    if harness not in (CLAUDE_HARNESS, CODEX_HARNESS):
+    # The harnesses with a record this module can read. Anything else reads
+    # as "not known", never as zero. (Membership is checked at call time so a
+    # test may stand another name in for claude's.)
+    if harness not in (CLAUDE_HARNESS, CODEX_HARNESS, PI_HARNESS):
         return None
     cid = getattr(sdef, "conversation_id", None)
     if not cid:
@@ -289,12 +343,24 @@ def transcript_of(sdef) -> Optional[Path]:
     else:
         try:
             prof = profile_mod.require_selector(profile)
-            entry = harness_registry.get(CODEX_HARNESS)
-            path = (
-                codex_sessions.find(entry.profile_home(prof.config_dir), str(cid))
-                if entry is not None
-                else None
-            )
+            entry = harness_registry.get(harness)
+            if entry is None:
+                path = None
+            elif harness == CODEX_HARNESS:
+                path = codex_sessions.find(
+                    entry.profile_home(prof.config_dir), str(cid)
+                )
+            else:
+                # Pi: the file claunch itself named at launch (``--session``)
+                # under the per-profile home the runner hands pi as its
+                # PI_CODING_AGENT_DIR. No scan -- the path is a function of
+                # (home, cwd, id), so a missing file is simply no reading yet.
+                candidate = Path(pi_session_file(
+                    str(entry.profile_home(prof.config_dir)),
+                    os.path.abspath(str(getattr(sdef, "cwd", "") or os.getcwd())),
+                    str(cid),
+                ))
+                path = candidate if candidate.is_file() else None
         except Exception:
             # A deleted profile or unreadable harness registry must not make
             # the session-list endpoint fail.  The path cache retries misses.
@@ -316,11 +382,13 @@ def for_session(sdef) -> Optional[dict]:
     cached = _reads.get(key)
     if cached is not None and cached[0] == stat.st_mtime and cached[1] == stat.st_size:
         return cached[2]
-    reading = (
-        read_codex_tail(path)
-        if getattr(sdef, "harness", None) == CODEX_HARNESS
-        else read_tail(path)
-    )
+    harness = getattr(sdef, "harness", None)
+    if harness == CODEX_HARNESS:
+        reading = read_codex_tail(path)
+    elif harness == PI_HARNESS:
+        reading = read_pi_tail(path)
+    else:
+        reading = read_tail(path)
     _reads[key] = (stat.st_mtime, stat.st_size, reading)
     return reading
 

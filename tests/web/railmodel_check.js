@@ -179,7 +179,17 @@ const CODEX_READING = {
 const CODEX = { name: "codex", status: "idle", harness: "codex",
                 profile: "nc:codex", cwd: "/w", cols: 80, rows: 24,
                 context: CODEX_READING };
-const OTHER = { name: "pi", status: "idle", harness: "pi", profile: "nc",
+/* pi, as measured on a ds4-official:pi probe (2026-09-11): the model id is
+   what the provider projection named it, not a dated vendor id. */
+const PI_READING = {
+  tokens: 14148, input: 1988, cache_read: 12160, cache_write: 0,
+  output: 128, model: "deepseek-flash", at: AT,
+  compact_window: 600_000, model_context_window: 1_000_000,
+};
+const PI = { name: "pi", status: "idle", harness: "pi",
+             profile: "ds4-official:pi", cwd: "/w", cols: 80, rows: 24,
+             context: PI_READING };
+const OTHER = { name: "kimi", status: "idle", harness: "kimi", profile: "nc",
                 cwd: "/w", cols: 80, rows: 24 };
 
 /* The full id, never the short one: the panel has the width, and this is
@@ -193,6 +203,8 @@ check("a session that has not answered yet says so, and does not say a model",
       ctx.sentence(QUIET), "not known yet — no context reading recorded");
 check("a Codex rollout names its model with the reading's age",
       ctx.sentence(CODEX), "gpt-5.6-sol (as of its turn 3m ago)");
+check("a pi session file names its model with the reading's age",
+      ctx.sentence(PI), "deepseek-flash (as of its turn 3m ago)");
 check("a harness that keeps no transcript is not asked",
       ctx.sentence(OTHER), "");
 /* A reading with the model missing is a reading, not a model: it must fall
@@ -227,6 +239,9 @@ check("a harness with no transcript gets no line at all",
 check("a Codex row shows the model recorded in its rollout",
       [chipOf(CODEX).text, chipOf(CODEX).title],
       ["gpt 5.6 sol", "gpt-5.6-sol"]);
+check("a pi row shows the model recorded in its session file",
+      [chipOf(PI).text, chipOf(PI).title],
+      ["deepseek flash", "deepseek-flash"]);
 
 /* ---- the panel actually appends it ------------------------------------- */
 /* The point of driving the real renderSession: the sentence being right is
@@ -266,6 +281,11 @@ check("a Codex detail panel has the full model id",
       "gpt-5.6-sol (as of its turn 3m ago)");
 check("a Codex detail panel has its context reading",
       codex.context && codex.context.text.includes("187,281 tokens"), true);
+const pi = rowsOf(PI);
+check("a pi detail panel has the full model id and its context reading",
+      [pi.model && pi.model.text,
+       pi.context && pi.context.text.includes("14,148 tokens")],
+      ["deepseek-flash (as of its turn 3m ago)", true]);
 /* metaRow drops an empty value, so the other harness gets no row rather than
    an empty one — the same silence the gauge line keeps. */
 check("another harness gets no model row at all",

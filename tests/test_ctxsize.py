@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+import pathlib
 import sys
 import time
 
@@ -101,6 +103,37 @@ def codex_count(
             },
         }
     )
+
+
+def pi_turn(*, fresh=0, read=0, write=0, out=0, model="deepseek-flash",
+            at="2026-09-11T12:47:00.291Z", role="assistant", usage=True) -> str:
+    """One pi session ``message`` entry, in the shape pi 0.73 writes (measured
+    on a ds4-official:pi session, 2026-09-11): camelCase usage, ``input`` the
+    uncached part, ``totalTokens`` the sum plus output."""
+    msg = {
+        "role": role,
+        "content": [{"type": "text", "text": "OK"}],
+        "timestamp": 1789123620291,
+    }
+    if role == "assistant":
+        msg.update({
+            "api": "openai-completions",
+            "provider": "claunch-profile",
+            "model": model,
+            "stopReason": "stop",
+        })
+        if usage:
+            msg["usage"] = {
+                "input": fresh, "output": out,
+                "cacheRead": read, "cacheWrite": write,
+                "totalTokens": fresh + read + write + out,
+                "cost": {"input": 0, "output": 0, "cacheRead": 0,
+                         "cacheWrite": 0, "total": 0},
+            }
+    return json.dumps({
+        "type": "message", "id": "41e7e9e4", "parentId": "06cb7987",
+        "timestamp": at, "message": msg,
+    })
 
 
 def write_jsonl(tmp_path, *lines):
@@ -235,6 +268,53 @@ def test_codex_read_widens_to_find_the_model_before_large_tool_output(tmp_path):
 
 
 # --------------------------------------------------------------------------- #
+# the pi reading: the same input-side sum under camelCase names
+# --------------------------------------------------------------------------- #
+def test_pi_context_is_the_whole_input_side_however_it_was_billed():
+    """pi's ``input`` is the uncached part, so fresh + cacheRead + cacheWrite
+    is the context sent — the reading a ds4-official:pi probe gave (14,148)."""
+    got = ctxsize.pi_usage_of(json.loads(pi_turn(fresh=1_988, read=12_160, out=128)))
+    assert got["tokens"] == 14_148
+    assert (got["input"], got["cache_read"], got["cache_write"]) == (1_988, 12_160, 0)
+    assert got["output"] == 128
+    assert got["model"] == "deepseek-flash"
+    assert got["at"] == "2026-09-11T12:47:00.291Z"
+    assert "model_context_window" not in got     # pi records no window
+
+
+@pytest.mark.parametrize("entry", [
+    json.loads(pi_turn(role="user")),                       # the prompt
+    json.loads(pi_turn(usage=False)),                       # assistant, no usage
+    json.loads(pi_turn()),                                  # no input at all
+    {"type": "session", "version": 3, "id": "x", "cwd": "/w"},
+    {"type": "model_change", "provider": "claunch-profile", "modelId": "m"},
+    {"type": "thinking_level_change", "thinkingLevel": "off"},
+    {"type": "message", "message": "not a dict"},
+    # claude's shape is not pi's: the names differ and must not cross-read
+    json.loads(turn(read=9_000)),
+])
+def test_pi_entries_that_hold_no_reading(entry):
+    assert ctxsize.pi_usage_of(entry) is None
+
+
+def test_pi_tool_result_messages_are_not_readings(tmp_path):
+    """A toolResult message is role ``toolResult`` with no usage; the newest
+    assistant turn behind it is the reading."""
+    tool = json.dumps({"type": "message", "timestamp": "2026-09-11T12:47:01Z",
+                       "message": {"role": "toolResult", "toolCallId": "c1",
+                                   "content": [{"type": "text", "text": "x" * 5000}]}})
+    path = write_jsonl(tmp_path, pi_turn(fresh=100, read=6_000), tool)
+    assert ctxsize.read_pi_tail(path)["tokens"] == 6_100
+
+
+def test_pi_newest_turn_wins(tmp_path):
+    path = write_jsonl(tmp_path, pi_turn(read=5_248, fresh=6_200),
+                       pi_turn(read=11_520, fresh=659),
+                       pi_turn(read=12_160, fresh=1_988))
+    assert ctxsize.read_pi_tail(path)["tokens"] == 14_148
+
+
+# --------------------------------------------------------------------------- #
 # the file: which turn is read
 # --------------------------------------------------------------------------- #
 def test_the_newest_turn_wins(tmp_path):
@@ -344,6 +424,35 @@ def _codex_session(tmp_path, *lines):
     )
 
 
+def _pi_session(tmp_path, *lines, name="pi-context"):
+    """A pi session whose file sits where claunch pinned it at launch:
+    ``<profile>/pi/sessions/<encoded cwd>/<conversation id>.jsonl``."""
+    from claude_launcher.daemon.harness import pi_session_file
+
+    # The cwd is the drive root: it exists (staging checks that) and it is
+    # short on purpose -- the file's directory name *encodes* the whole cwd,
+    # and a tmp_path-based one puts the session file past Windows' 260-char
+    # path limit. Nothing is written into the cwd itself.
+    cwd = pathlib.Path(tmp_path.drive + os.sep)
+    prof = profile_mod.create(name)
+    entry = harnesses.get("pi")
+    assert entry is not None
+    path = pathlib.Path(pi_session_file(
+        str(entry.profile_home(prof.config_dir)), str(cwd), CID
+    ))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    head = json.dumps({"type": "session", "version": 3, "id": CID,
+                       "timestamp": "2026-09-11T12:46:00Z", "cwd": str(cwd)})
+    path.write_text("\n".join((head, *lines)) + "\n", encoding="utf-8")
+    return SessionDef(
+        name="pi1",
+        profile=f"{name}:pi",
+        harness="pi",
+        cwd=str(cwd),
+        conversation_id=CID,
+    )
+
+
 def test_a_session_is_read_through_the_path_claude_files_it_under(home, tmp_path):
     sdef = _claude_session(tmp_path, turn(read=42_000, write=1_000))
     assert ctxsize.for_session(sdef)["tokens"] == 43_000
@@ -359,10 +468,38 @@ def test_a_codex_session_is_read_through_its_profile_rollout(home, tmp_path):
     assert got["model_context_window"] == 258_400
 
 
+def test_a_pi_session_is_read_through_its_pinned_session_file(home, tmp_path):
+    sdef = _pi_session(tmp_path, pi_turn(fresh=1_988, read=12_160, out=128))
+
+    got = ctxsize.for_session(sdef)
+
+    assert got["tokens"] == 14_148
+    assert got["model"] == "deepseek-flash"
+    assert "model_context_window" not in got
+
+
+def test_a_pi_session_whose_file_is_not_there_yet_reads_as_not_known(home, tmp_path):
+    """pi creates the pinned file on its first turn; before that there is
+    nothing to read, and the miss must not be remembered past MISS_TTL."""
+    sdef = _pi_session(tmp_path, pi_turn(fresh=10, read=90))
+    other = SessionDef(name="pi2", profile=sdef.profile, harness="pi",
+                       cwd=sdef.cwd, conversation_id="0000-not-yet")
+    assert ctxsize.for_session(other) is None
+
+
+def test_a_pi_session_in_another_cwd_is_not_confused_with_this_one(home, tmp_path):
+    """The file is keyed by cwd as well as id: the same id under a different
+    directory is a different pi conversation."""
+    sdef = _pi_session(tmp_path, pi_turn(fresh=10, read=90))
+    elsewhere = SessionDef(name="pi3", profile=sdef.profile, harness="pi",
+                           cwd=str(tmp_path / "elsewhere"), conversation_id=CID)
+    assert ctxsize.for_session(elsewhere) is None
+
+
 def test_an_unsupported_harness_has_no_context_reading(home, tmp_path):
     assert (
         ctxsize.for_session(
-            SessionDef(name="s1", harness="pi", cwd=str(tmp_path), conversation_id=CID)
+            SessionDef(name="s1", harness="kimi", cwd=str(tmp_path), conversation_id=CID)
         )
         is None
     )
@@ -482,6 +619,52 @@ def test_another_harness_has_no_window(home, monkeypatch):
     assert ctxsize.compact_window_of(SessionDef(name="s", harness="codex")) is None
 
 
+def _pi_spec_profile(name="pi-context", *, window=1_000_000, compact=600_000):
+    """A pi profile on a provider that declares the two thresholds, the way
+    ds4-official does (context_window 1M, auto_compact_at 600k)."""
+    from claude_launcher import credentials, lineage, store
+
+    store.update(lambda doc: doc.setdefault("providers", {}).update({"ds": {
+        "api_key": "sk-deepseek",
+        "endpoints": {
+            "anthropic": "https://api.example.com/anthropic",
+            "openai": "https://api.example.com",
+        },
+        "models": {"default": "flash", "small": "flash", "large": "flash"},
+        "context_window": window,
+        "auto_compact_at": compact,
+    }}))
+    prof = profile_mod.require(name)
+    store.set_profile_field(prof.name, "provider", "ds")
+    lineage.set_harness(prof, "pi")
+    credentials.save_token(prof, "stored")
+    return prof
+
+
+def test_a_pi_row_draws_the_specs_compact_point_and_window(home, tmp_path, monkeypatch):
+    """pi is launched with the spec's auto_compact_at as its compaction reserve
+    (settings.json compaction.reserveTokens = context_window - auto_compact_at),
+    so the tick is the same fact as claude's; the ceiling is the spec's
+    context_window since pi records none of its own. Claude's env var is not
+    pi's knob and must not leak onto the row."""
+    monkeypatch.setenv(ctxsize.COMPACT_WINDOW_ENV, "111000")
+    sdef = _pi_session(tmp_path, pi_turn(fresh=1_988, read=12_160, out=128))
+    _pi_spec_profile()
+    info = ctxsize.attach(_Stub(sdef))
+    assert info["context"]["tokens"] == 14_148
+    assert info["context"]["compact_window"] == 600_000
+    assert info["context"]["model_context_window"] == 1_000_000
+
+
+def test_a_pi_row_without_declared_thresholds_draws_none(home, tmp_path, monkeypatch):
+    monkeypatch.setenv(ctxsize.COMPACT_WINDOW_ENV, "111000")
+    sdef = _pi_session(tmp_path, pi_turn(fresh=1_988, read=12_160))
+    info = ctxsize.attach(_Stub(sdef))
+    assert info["context"]["tokens"] == 14_148
+    assert "compact_window" not in info["context"]
+    assert "model_context_window" not in info["context"]
+
+
 def test_attach_hangs_the_window_beside_the_reading(home, tmp_path, monkeypatch):
     monkeypatch.setenv(ctxsize.COMPACT_WINDOW_ENV, "200000")
     sdef = _claude_session(tmp_path, turn(read=42_000))
@@ -592,6 +775,37 @@ def test_both_endpoints_carry_a_codex_rollout_reading(home, tmp_path):
         finally:
             await client.close()
             mgr.discard("cx1")
+
+    asyncio.run(run())
+
+
+def test_both_endpoints_carry_a_pi_session_reading(home, tmp_path):
+    from claude_launcher.daemon.manager import SessionManager
+
+    sdef = _pi_session(tmp_path, pi_turn(fresh=1_988, read=12_160, out=128))
+    _pi_spec_profile()
+
+    async def run():
+        mgr = SessionManager(idle_threshold=0.5, scrollback=200, restore_default=True)
+        mgr.stage(sdef)
+        client = await _serve(mgr)
+        try:
+            resp = await client.get("/api/sessions", headers=BEARER)
+            assert resp.status == 200
+            listed = (await resp.json())["sessions"][0]
+            assert listed["harness"] == "pi"
+            assert listed["context"]["tokens"] == 14_148
+            assert listed["context"]["model"] == "deepseek-flash"
+            assert listed["context"]["compact_window"] == 600_000
+            assert listed["context"]["model_context_window"] == 1_000_000
+
+            resp = await client.get("/api/sessions/pi1/meta", headers=BEARER)
+            assert resp.status == 200
+            meta = (await resp.json())["session"]
+            assert meta["context"] == listed["context"]
+        finally:
+            await client.close()
+            mgr.discard("pi1")
 
     asyncio.run(run())
 
