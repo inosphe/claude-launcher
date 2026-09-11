@@ -207,6 +207,15 @@ new Function(
      rail's own running/killed/archived filter uses), so that comes along
      too rather than a copy of its exited/archived-at logic. */
   + slice("sessionCategory") + slice("connectCandidate")
+  /* Each connect row is now a hover target for the peer's briefing, so the
+     row build reaches for the state-chip classifier and for the dialog's
+     own hide/drop. Only these three are evaluated while the row is built --
+     the dialog itself is opened by a mouseenter this harness never fires --
+     but `mouseleave` takes spawnBriefHide by reference, and spawnModalClose
+     calls spawnBriefDrop, so both have to be real functions here. */
+  + slice("briefingStateClass")
+  + sliceStmt("let spawnBriefCache = null")
+  + slice("spawnBriefHide") + slice("spawnBriefDrop")
   + slice("spawnGroup") + slice("setActionPending") + slice("buildSpawnForm")
   + slice("spawnModalKey") + slice("spawnModalClose")
   + slice("refreshSpawnBorrowOptions") + slice("openSpawnModal")
