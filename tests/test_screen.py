@@ -701,3 +701,43 @@ def test_drain_now_renders_only_the_tail_of_a_long_queue():
     assert feeder.pending_bytes == 0
     assert feeder.dropped_bytes > 0
     assert "last words" in screen.render_screen()[0]
+
+
+def test_shedding_cuts_on_an_escape_boundary():
+    """A cut inside ``ESC[48;2;r;g;bm`` hands pyte ``2;r;g;bB`` -- cursor_down
+    with five arguments, which raises. The survivor must start at an ESC."""
+    feeder = ScreenFeeder(ScreenState(120, 30), max_pending=10_000_000)
+    seq = b"\x1b[48;2;10;20;30mX" * 100          # 1700 bytes of sequences
+    feeder._pending.append(seq)
+    feeder._pending_size += len(seq)
+    dropped = feeder._shed(1000)
+    head = feeder._pending[0]
+    assert head.startswith(b"\x1b[")
+    assert feeder.pending_bytes == len(head) <= 1000
+    assert dropped == len(seq) - len(head)
+
+
+def test_a_render_error_costs_one_slice_not_the_pump():
+    """90 pump deaths on 2026-09-11: pyte raised on a sequence and the task
+    carrying the exception took the session's screen with it."""
+    calls = []
+
+    class Flaky(ScreenState):
+        def feed_render(self, data):
+            calls.append(data)
+            if len(calls) == 2:
+                raise TypeError("cursor_down() takes from 1 to 2 positional arguments")
+            super().feed_render(data)
+
+    async def run():
+        screen = Flaky(120, 30)
+        feeder = ScreenFeeder(screen, slice_size=8)
+        feeder.submit(b"a" * 8 + b"b" * 8 + b"\x1b[2J\x1b[Hlast")
+        await feeder.drained()
+        feeder.close()
+        return screen, feeder
+
+    screen, feeder = asyncio.run(run())
+    assert feeder.render_errors == 1
+    assert feeder.pending_bytes == 0
+    assert "last" in screen.render_screen()[0]      # rendering went on after the error

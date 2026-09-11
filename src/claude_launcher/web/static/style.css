@@ -3526,48 +3526,7 @@ body.embed #main { width: 100%; }
   display: flex; flex-wrap: wrap; gap: 4px 18px; align-items: center;
 }
 .sess-spawn-connect .sess-spawn-label { flex-basis: 100%; }
-.sess-spawn-connect label.check { grid-column: auto; gap: 5px; cursor: help; }
-/* The handle is the hover target, and a target with nothing on its face is
-   one nobody hovers: the dotted rule and the state dot are what say a dialog
-   is behind it. */
-.sess-spawn-check-name { border-bottom: 1px dotted #3d444d; }
-.sess-spawn-check-dot { font-size: 8px; line-height: 1; }
-.sess-spawn-check-dot.st-working { color: #58a6ff; }
-.sess-spawn-check-dot.st-blocked { color: #f85149; }
-.sess-spawn-check-dot.st-waiting { color: #d29922; }
-.sess-spawn-check-dot.st-idle { color: #6e7681; }
-.sess-spawn-check-dot.st-done { color: #3fb950; }
-.sess-spawn-check-dot.st-other { color: #7d8590; }
-/* No briefing has been summarised for this session, so there is no state to
-   report. Dim rather than absent: the dot still marks the row as hoverable,
-   and the dialog explains the blank. */
-.sess-spawn-check-dot.st-none { color: #333b45; }
-
-/* ---- the connect candidate's briefing dialog -------------------------- */
-/* Drawn on the body rather than inside the label: #modal-body scrolls, and a
-   box positioned within it is clipped at the form's edge. `pointer-events:
-   none` keeps it out of its own way -- a dialog that can take the pointer
-   steals the mouseleave that closes it and flickers. */
-.spawn-brief {
-  position: fixed; z-index: 40; max-width: 340px; pointer-events: none;
-  background: #161b22; border: 1px solid #30363d; border-radius: 6px;
-  padding: 8px 10px; font-size: 11.5px; line-height: 1.45; color: #9da5b0;
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
-}
-.spawn-brief-head {
-  display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap;
-}
-.spawn-brief-handle { color: #e6edf3; font-weight: 600; font-size: 12px; }
-.spawn-brief-role { color: #7d8590; }
-.spawn-brief-who { color: #6e7681; margin-top: 1px; }
-.spawn-brief-one { color: #c9d1d9; margin-top: 6px; font-weight: 600; }
-.spawn-brief-row {
-  display: grid; grid-template-columns: 56px minmax(0, 1fr);
-  gap: 8px; margin-top: 4px;
-}
-.spawn-brief-k { color: #6e7681; }
-.spawn-brief-v { color: #adbac7; overflow-wrap: anywhere; }
-.spawn-brief-age, .spawn-brief-note { color: #7d8590; margin-top: 6px; }
+.sess-spawn-connect label.check { grid-column: auto; }
 /* The rail's '+', the sibling of the details 'ⓘ' that CREATES rather than
    describes — so it wears the green of an approved action on hover. */
 #session-list .sess-plus {

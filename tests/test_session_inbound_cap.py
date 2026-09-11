@@ -62,7 +62,8 @@ def test_a_flooding_reader_logs_everything_but_posts_only_inbound_max(
                 fn(*a)
             assert s._inflight < 4096 // 2
             assert not s._inbound_overflowing
-            assert s._log_path.stat().st_size - before == 10 * 1024   # _on_output no longer logs
+            grew = s._log_path.stat().st_size - before
+            assert 10 * 1024 <= grew < 10 * 1024 + 4096   # _on_output no longer logs (child trickle aside)
             assert len(notices) >= 1 and notices[0]["level"] == "warn"
 
             # ...and the reader posts again.

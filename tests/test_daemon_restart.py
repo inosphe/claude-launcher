@@ -232,3 +232,51 @@ def test_the_lock_is_released_while_an_executor_thread_is_still_blocked(
     finally:
         unblock.set()
         worker.join(timeout=5.0)
+
+
+# --------------------------------------------------------------------------- #
+# the listening socket comes back when asyncio closes it
+# --------------------------------------------------------------------------- #
+def test_the_listener_is_reopened_after_asyncio_closes_it(monkeypatch):
+    """Windows' proactor closes the *listening* socket when one accept fails
+    (WinError 64 from a client that gave up mid-handshake). The process and
+    its sessions live on, nothing listens -- 2026-09-11 14:27. The watchdog
+    must notice and start a new site on the same port."""
+    from aiohttp import web, ClientSession
+
+    monkeypatch.setattr(daemon_main, "LISTENER_POLL", 0.05)
+
+    async def run():
+        app = web.Application()
+        app.router.add_get("/ping", lambda r: web.Response(text="pong"))
+        runner = web.AppRunner(app)
+        await runner.setup()
+        site = web.TCPSite(runner, "127.0.0.1", 0)
+        await site.start()
+        port = site._server.sockets[0].getsockname()[1]
+        box = {"site": site}
+        watchdog = asyncio.ensure_future(
+            daemon_main._listener_watchdog(box, runner, "127.0.0.1", port)
+        )
+        try:
+            site._server.close()                    # what the proactor does
+            await asyncio.sleep(0)
+            assert not daemon_main._listener_alive(site)
+            for _ in range(100):                    # up to ~5 s
+                await asyncio.sleep(0.05)
+                if box["site"] is not site and daemon_main._listener_alive(box["site"]):
+                    break
+            else:
+                raise AssertionError("watchdog did not re-open the listener")
+            async with ClientSession() as http:
+                async with http.get(f"http://127.0.0.1:{port}/ping") as resp:
+                    assert await resp.text() == "pong"
+        finally:
+            watchdog.cancel()
+            try:
+                await watchdog
+            except asyncio.CancelledError:
+                pass
+            await runner.cleanup()
+
+    asyncio.run(run())

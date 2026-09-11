@@ -345,39 +345,6 @@ def test_digest_serves_the_cached_one_line_only(home):
     assert briefing.digest("s3") is None
 
 
-def test_cached_serves_the_whole_stored_payload_without_composing(home):
-    """``cached()`` is the read for a surface that only SHOWS a briefing.
-
-    ``digest()`` gives the rail its one-line; a reader that wants goal/now/
-    progress had no way to get them without :func:`compose`, whose cache key
-    carries the transcript's mtime — so a live session's key has always moved
-    and the read would cost an LLM generation. This serves what was last
-    written, stale key included, and says nothing was written when nothing
-    was.
-    """
-    assert briefing.cached("s1") is None
-    stored = {
-        "session": "s1", "generated_at": "2026-01-01T00:00:00+00:00",
-        "cached": False, "source": {"jsonl": True, "cflow": False},
-        "briefing": {
-            "goal": "목표", "now": "진행", "state": "working",
-            "progress": "50%", "one-line-job-description": "작업",
-        },
-        "raw": None,
-    }
-    briefing._cache["s1"] = (("key",), stored)
-    got = briefing.cached("s1")
-    assert got["briefing"] == stored["briefing"]
-    assert got["generated_at"] == "2026-01-01T00:00:00+00:00"
-    # marked as a cache hit however the stored copy was marked
-    assert got["cached"] is True
-    # ...and the stored copy is not rewritten by the read
-    assert briefing._cache["s1"][1]["cached"] is False
-    # an unshaped answer is still an answer: it comes back with its raw text
-    briefing._cache["s2"] = (("key",), {"briefing": None, "raw": "prose"})
-    assert briefing.cached("s2")["raw"] == "prose"
-
-
 def test_briefing_cache_survives_daemon_restart(home):
     key = ("s1", (123, 456), "work", "busy", None, None, (("faq", "Q", "A", True),))
     result = {
@@ -976,72 +943,6 @@ def test_briefing_endpoint_unconfigured_unknown_and_raw(home, tmp_path):
                 assert body["source"] == {"jsonl": False, "cflow": False}
             finally:
                 await llm.close()
-
-            await mgr.shutdown_all()
-        finally:
-            await client.close()
-
-    asyncio.run(run())
-
-
-def test_briefing_endpoint_cached_mode_never_composes(home, tmp_path):
-    """``?cached=1`` reads the stored briefing and calls no model.
-
-    The spawn form's connect row hovers this per peer, so the three things
-    pinned here are the three that make a hover affordable and honest: it
-    answers with no ``llm:`` block configured at all (the composing path's
-    400 does not apply to a read), a session with nothing composed yet is a
-    200 carrying ``briefing: null`` rather than a 404, and 404 therefore
-    keeps meaning one thing — no session by that name.
-    """
-    _register_py_harness()
-
-    async def run():
-        mgr = SessionManager(idle_threshold=0.5, scrollback=200, restore_default=True)
-        client = await _serve(mgr)
-        try:
-            mgr.create(SessionDef(name="s1", harness="py", cwd=str(tmp_path)))
-
-            # nothing composed: a 200 that says so, and no llm: block needed
-            resp = await client.get(
-                "/api/sessions/s1/briefing?cached=1", headers=BEARER
-            )
-            assert resp.status == 200
-            assert (await resp.json()) == {
-                "session": "s1", "cached": True, "briefing": None,
-            }
-            # the composing path on the same session, same config: still 400.
-            # The two modes are told apart by the query and by nothing else.
-            resp = await client.get("/api/sessions/s1/briefing", headers=BEARER)
-            assert resp.status == 400
-
-            briefing._cache["s1"] = (
-                ("stale-key",),
-                {
-                    "session": "s1", "generated_at": "2026-01-01T00:00:00+00:00",
-                    "cached": False, "source": {"jsonl": True, "cflow": False},
-                    "briefing": {
-                        "goal": "목표", "now": "진행", "state": "working",
-                        "progress": "50%", "one-line-job-description": "작업",
-                    },
-                    "raw": None,
-                },
-            )
-            resp = await client.get(
-                "/api/sessions/s1/briefing?cached=1", headers=BEARER
-            )
-            assert resp.status == 200
-            body = await resp.json()
-            assert body["briefing"]["goal"] == "목표"
-            assert body["briefing"]["progress"] == "50%"
-            assert body["cached"] is True
-            assert body["generated_at"] == "2026-01-01T00:00:00+00:00"
-
-            # unknown session: 404 even in the read mode
-            resp = await client.get(
-                "/api/sessions/nope/briefing?cached=1", headers=BEARER
-            )
-            assert resp.status == 404
 
             await mgr.shutdown_all()
         finally:

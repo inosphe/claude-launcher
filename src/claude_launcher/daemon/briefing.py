@@ -751,28 +751,6 @@ async def compose(session, cfg: dict, *, refresh: bool = False) -> dict:
     return result
 
 
-def cached(name: str) -> Optional[dict]:
-    """The last composed payload for one session, served without composing.
-
-    :func:`compose` is the only writer, and it needs an LLM round trip
-    whenever its cache key has moved — the key carries the transcript's
-    mtime and size, which a live session moves continuously. So a reader
-    that only wants to SHOW an existing briefing (the spawn form's connect
-    hover, which fires on a mouse crossing a checkbox) cannot go through
-    :func:`compose` without paying for a generation per look.
-
-    What comes back is whatever was last written for ``name``, stale key
-    included, with ``cached`` set — ``generated_at`` says how old it is and
-    the caller decides what to do about that. ``None`` when nothing has ever
-    been composed for this session.
-    """
-    _restore_cache()
-    hit = _cache.get(name)
-    if hit is None:
-        return None
-    return {**(hit[1] or {}), "cached": True}
-
-
 def digest(name: str) -> Optional[dict]:
     """The cached one-liner (+ state) for the session list, never composed.
 
