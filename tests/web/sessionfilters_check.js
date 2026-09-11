@@ -189,7 +189,13 @@ check("mesh group headings have dedicated styling",
       /\.session-group-toggle\s*\{/.test(css) &&
       /#session-list \.session-group-heading\s*\{/.test(css), true);
 
-const killStart = src.indexOf("async function killCurrentSession(");
+/* killSession, not killCurrentSession: the button's handler is now a
+   one-line wrapper naming the attached session, and the body these
+   checks are about -- the request, and what it does to the rail
+   afterwards -- lives in the function it calls. Slicing from the
+   wrapper still found a body, still passed, and inspected the wrong
+   one. */
+const killStart = src.indexOf("async function killSession(");
 const killEnd = src.indexOf("async function archiveExitedSession(", killStart);
 const archiveStart = killEnd;
 const archiveEnd = src.indexOf('$("term-archive")', archiveStart);
