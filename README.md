@@ -2518,6 +2518,29 @@ workflow).
   each worker's and the mid's own are the user's — while landing a child on
   the mid's own branch is the mid's call, as master is the lead's.
 
+- **A worker whose landing is a pull request runs `improv-worker-remote`.**
+  It is a *layer* over `improv-worker` (`extends: improv-worker`), so the
+  round has the same shape and the same gates; what changes is the medium.
+  A `remote-setup` step after `branch-setup` reads the remote from
+  `git config claunch.pr.remote` (and the base from `claunch.pr.base`,
+  default `master`), checks `gh auth status --hostname <host>` — a private
+  GitHub Enterprise host is just a hostname to `gh` — and points the branch's
+  upstream at `<remote>/<base>`, which is how the unchanged
+  `merge_ready.py` / `landed_check.py --target @{upstream}` gates come to
+  measure against the remote. After peer review a `pr-open` step pushes the
+  reviewed tip with an explicit refspec (a bare `git push` is forbidden for
+  the round) and opens the PR with `gh pr create -R <host>/<owner>/<repo>`;
+  the landing request's marker carries `pr: <url>`, and the `landed`
+  checklist fetches before asking whether the remote base contains the tip.
+  The lead's `improv-leader` reads a `pr:` row as one more candidate in the
+  same integration table: same `merge_ready` screening, same 5-minute window,
+  same one sweep per batch — it merges it with `gh pr merge --merge
+  --match-head-commit <tip>` instead of a local `--no-ff`, fast-forwards
+  master from the remote, and pushes master back so the remote base stays the
+  push copy of master. Spawn it explicitly (`workflow: improv-worker-remote`);
+  it does not volunteer for the worker role, so the wizard keeps picking the
+  local variant by default.
+
 ### Delivery policies (heartbeat · task-poll · stall warnings · backpressure)
 
 Per-mesh policies evaluated roughly **once a second** — on the mesh's

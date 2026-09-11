@@ -760,7 +760,7 @@ def test_bundled_improv_workflows_volunteer_for_their_whitelisted_role():
     bundled = cflow_state.bundled_workflows_dir()
     entries = []
     for path in sorted(bundled.glob("improv-*.yaml")):
-        wf = model.load(path)
+        wf = cflow_state.load_bundled(path)
         flt = (
             {"type": wf.filter_roles.type, "roles": list(wf.filter_roles.roles)}
             if wf.filter_roles
@@ -2153,7 +2153,7 @@ def test_the_bundled_leader_flow_pairs_its_children_with_the_worker_flow():
     and nothing else in the bundle has to remember that."""
     bundled = cflow_state.bundled_workflows_dir()
     paired = {
-        path.stem: model.load(path).default_child_cflow
+        path.stem: cflow_state.load_bundled(path).default_child_cflow
         for path in sorted(bundled.glob("improv-*.yaml"))
     }
     assert paired["improv-leader"] == "improv-worker"

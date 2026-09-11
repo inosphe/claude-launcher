@@ -56,10 +56,22 @@ from pathlib import Path
 
 import pytest
 
-from claude_launcher.cflow import model
+from claude_launcher.cflow import model, state as state_mod
 
 ROOT = Path(__file__).resolve().parents[1]
 OVERRIDES = ROOT / ".claunch" / "workflows"
+
+
+def _load(path: Path) -> model.Workflow:
+    """A project-layer file as the workflow it composes to.
+
+    A file here may be a layer (``extends:``) over the project copy of
+    its base -- improv-worker-remote over improv-worker -- and its gates
+    are then the base's plus its own. ``model.load`` refuses such a file;
+    resolving the base the way a run in this repository would is the
+    only reading under which "every gate in the project layer" is true.
+    """
+    return model.compose(path, resolve=state_mod.base_resolver(str(ROOT))).workflow
 SRC = ROOT / "src"
 
 #: The prefix every gate command must carry. ``--no-sync`` is not decoration:
@@ -86,7 +98,7 @@ def _gates():
     """
     found = []
     for path in sorted(OVERRIDES.glob("*.yaml")):
-        wf = model.load(path)
+        wf = _load(path)
         for step_id, step in wf.steps.items():
             seen = set()
             for cmd in (
@@ -156,9 +168,23 @@ def test_the_parser_sees_every_gate_field_the_files_spell(field):
             for line in path.read_text(encoding="utf-8").splitlines()
             if line.strip().startswith(f"{field}:")
         )
-        parsed = sum(
-            1 for s in model.load(path).steps.values() if getattr(s, field) is not None
-        )
+        doc = model.read_doc(path.read_text(encoding="utf-8"), where=str(path))
+        if model.extends_ref(doc) is not None:
+            # A layer spells only what it adds; the base's fields are not
+            # in this file. So the count is taken against the layer's own
+            # steps: every field it spells must survive into the composed
+            # workflow on that step, which is the same typo check.
+            wf = _load(path)
+            parsed = sum(
+                1
+                for step_id, raw in (doc.get("steps") or {}).items()
+                if isinstance(raw, dict) and raw.get(field) is not None
+                and getattr(wf.steps[step_id], field) is not None
+            )
+        else:
+            parsed = sum(
+                1 for s in _load(path).steps.values() if getattr(s, field) is not None
+            )
         assert spelled == parsed, (
             f"{path.name}: {spelled} {field!r} line(s) in the file but {parsed} "
             "in the parsed workflow -- the parser discarded one. A gate the "

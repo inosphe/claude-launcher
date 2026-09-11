@@ -1299,3 +1299,51 @@ def test_the_five_checkout_answers_are_all_distinguishable_in_the_record(
     assert "writes 0 files" in texts["absent-empty"]
     assert "none of" in texts["absent-writes"]
     assert "not a git checkout" in texts["not-a-checkout"]
+
+
+# --------------------------------------------------------------------------- #
+# --fetch: the target is a remote base that moves on the remote
+# --------------------------------------------------------------------------- #
+def _build_remote_base(tmp_path):
+    """A worker clone with upstream ``ghe/master``, and master advanced on the
+    remote by somebody else -- what improv-worker-remote's wait probe faces."""
+    bare = tmp_path / "remote.git"
+    _git(tmp_path, "init", "--bare", "-b", "master", str(bare))
+    worker = tmp_path / "worker"
+    _git(tmp_path, "init", "-b", "master", str(worker))
+    _write(worker, "base.txt", "base\n")
+    _git(worker, "add", "base.txt")
+    _git(worker, "commit", "-q", "-m", "base")
+    _git(worker, "remote", "add", "ghe", str(bare))
+    _git(worker, "push", "-q", "ghe", "master:refs/heads/master")
+    _git(worker, "checkout", "-q", "-b", "feature")
+    _write(worker, "work.txt", "work\n")
+    _git(worker, "add", "work.txt")
+    _git(worker, "commit", "-q", "-m", "work")
+    _git(worker, "fetch", "-q", "ghe")
+    _git(worker, "branch", "-q", "--set-upstream-to=ghe/master")
+    other = tmp_path / "other"
+    _git(tmp_path, "clone", "-q", str(bare), str(other))
+    _write(other, "other.txt", "other\n")
+    _git(other, "add", "other.txt")
+    _git(other, "commit", "-q", "-m", "other")
+    _git(other, "push", "-q", "origin", "master:refs/heads/master")
+    return worker
+
+
+def test_fetch_sees_a_remote_base_that_moved(tmp_path, capsys):
+    worker = _build_remote_base(tmp_path)
+    # without a fetch the stale ghe/master still reads as aligned
+    assert _run(worker) == merge_ready.READY
+    capsys.readouterr()
+    # with it the moved baseline is what the probe reports
+    code = _run(worker, "--fetch")
+    out = capsys.readouterr().out
+    assert code == merge_ready.REMEASURE, out
+    assert "ghe/master (upstream)" in out
+
+
+def test_fetch_of_a_local_only_target_cannot_tell(repo, capsys):
+    code = _run(repo, "--branch", "clean-branch", "--target", "clean-target", "--fetch")
+    assert code == merge_ready.CANNOT_TELL
+    assert "not a remote-tracking branch" in capsys.readouterr().err

@@ -146,6 +146,39 @@ def _merged_by(repo: Path, tip: str, branch: str) -> bool:
     return False
 
 
+def _fetch_target(repo: Path, target: str) -> Tuple[Optional[str], str]:
+    """Fetch the remote that ``target`` tracks, so the answer is current.
+
+    A landing that happened as a pull request lives on the remote base and is
+    not in this repository until fetched -- a gate that asked the stale
+    remote-tracking ref would answer "not yet" forever, on a clock, in an
+    idle session. ``target`` may be spelled ``@{upstream}``; git expands it to
+    ``<remote>/<branch>`` and the remote is the prefix that names one of this
+    repository's remotes (longest first: a remote may itself contain ``/``).
+
+    Returns ``(remote, expanded name)`` on success and ``(None, why)`` when
+    there is nothing to fetch -- a local-only target is not an error of the
+    fetch but a wrong question, and the caller reports it as "cannot tell"
+    rather than quietly measuring a ref nobody refreshed.
+    """
+    full = _git(repo, "rev-parse", "--abbrev-ref", "--symbolic-full-name", target)
+    name = full.stdout.strip() if full.returncode == 0 and full.stdout.strip() else target
+    remotes = _git(repo, "remote")
+    if remotes.returncode != 0:
+        return None, f"git could not list remotes: {remotes.stderr.strip() or 'unknown error'}"
+    names = sorted((r.strip() for r in remotes.stdout.splitlines() if r.strip()), key=len, reverse=True)
+    for remote in names:
+        if name.startswith(remote + "/"):
+            proc = _git(repo, "fetch", "-q", remote)
+            if proc.returncode != 0:
+                return None, f"git fetch {remote} failed: {proc.stderr.strip() or 'unknown error'}"
+            return remote, name
+    return None, (
+        f"{target!r} ({name}) is not a remote-tracking branch of this repository "
+        f"(remotes: {', '.join(names) or 'none'}), so --fetch has nothing to fetch"
+    )
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -165,8 +198,29 @@ def main(argv: Optional[List[str]] = None) -> int:
             "Omitted: any branch but this one counts."
         ),
     )
+    parser.add_argument(
+        "--fetch",
+        action="store_true",
+        help=(
+            "fetch the remote --target tracks before asking. For a landing "
+            "that happens as a pull request on the remote base (--target "
+            "@{upstream} in improv-worker-remote): the merge commit is not in "
+            "this repository until fetched, and a static checklist command "
+            "has no other way to refresh it. Requires --target naming a "
+            "remote-tracking branch; anything else cannot tell."
+        ),
+    )
     args = parser.parse_args(argv)
     repo, how = _resolve_repo(args.repo)
+
+    if args.fetch:
+        if not args.target:
+            print("--fetch needs --target <remote-tracking branch>", file=sys.stderr)
+            return CANNOT_TELL
+        remote, why = _fetch_target(repo, args.target)
+        if remote is None:
+            print(f"cannot tell: {why}", file=sys.stderr)
+            return CANNOT_TELL
 
     tip_proc = _git(repo, "rev-parse", "HEAD")
     if tip_proc.returncode != 0:

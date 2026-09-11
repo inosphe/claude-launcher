@@ -35,6 +35,16 @@
   새 파일로 새 런이다. `.cflow/`는 gitignore된 런 상태라 이 파일들은 커밋되지
   않고, `claunch cflow ls`에도 오르지 않는다. `tests/test_cflow_pm.py`가 이
   경계를 못박는다.
+- 패키지 안에도 레이어가 하나 있다: `improv-worker-remote.yaml`은
+  `extends: improv-worker` 위에 착지 매체가 원격 PR인 자리(remote-setup·pr-open
+  스텝, landed 체크리스트 항목)만 얹은 파일이다. 정본 스텝의 instructions는
+  덮어쓰지 않는다 — 워커 정본을 고치면 그대로 물려받는다. 패키지 디렉터리는
+  검색 레이어가 아니므로 이 파일을 파싱할 때는 `cflow/state.load_bundled`
+  (옆의 패키지 파일을 base로 합성)를 쓴다 — `model.load`는 `extends`를 거절한다.
+  이 저장소의 프로젝트 레이어 사본은 같은 레이어 파일에 `awaits:` 한 블록
+  (fetch 뒤 merge_ready 프로브)만 접붙인 것이고, 합성될 때 base는 프로젝트
+  레이어의 improv-worker(verify 게이트 포함)로 풀린다.
+  `tests/test_improv_worker_remote.py`가 이 경계를 못박는다.
 
 ## 일감의 정본은 beads다
 

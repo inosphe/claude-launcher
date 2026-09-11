@@ -382,7 +382,11 @@ def test_no_gate_calls_a_binary_off_PATH():
     """
     offenders = []
     for path in sorted(OVERRIDES.glob("*.yaml")):
-        wf = model.load(path)
+        # A layer over the project copy of its base (improv-worker-remote)
+        # is read as what it composes to, the way a run here reads it.
+        wf = model.compose(
+            path, resolve=state_mod.base_resolver(str(OVERRIDES.parents[1]))
+        ).workflow
         for step_id, step in wf.steps.items():
             for command in gate_commands(step):
                 if not _runs_project_code(command):

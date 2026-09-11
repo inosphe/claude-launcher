@@ -127,7 +127,10 @@ def test_the_packaged_workflows_are_valid_and_current():
     bundled = dict(state_mod.bundled_workflows())
     assert "feature-dev" in bundled and "delegated-dev" in bundled
     for name, path in bundled.items():
-        wf = model.load(path)
+        # A shipped file may be a layer over a shipped sibling
+        # (improv-worker-remote over improv-worker); model.load refuses
+        # that by design, and the bundle is not a search layer.
+        wf = state_mod.load_bundled(path)
         assert wf.name == name
         assert wf.step_count() > 0
         assert not wf.deprecations, f"{name} teaches a deprecated form"

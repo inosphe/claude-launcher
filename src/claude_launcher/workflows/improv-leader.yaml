@@ -18,6 +18,12 @@ description: >
   요청이 늘어도 스윕은 늘지 않는다 — 그것이 창의 값이다.
   거절은 지금은 아니다일 뿐이다 — 관제 대기로 복귀할 뿐, 배치를 더 모으라는
   뜻이 아니다.
+  통합 후보는 두 매체로 온다 — 로컬 브랜치(--no-ff 머지)와 원격 pull
+  request(`gh pr merge`, merge commit; improv-worker-remote가 올린다) — 그리고
+  표·창·게이트·스윕·마감은 매체와 무관하게 하나다: 같은 in_review 표에서
+  같은 merge_ready 게이트로 심사하고, 같은 창에 모아, 배치당 스윕 한 번으로
+  닫는다. 다른 것은 머지를 실행하는 명령과, PR 편성에서 원격 base를
+  master와 같게 유지하는 push 두 줄뿐이다.
   테스트(스윕)와 머지 실행은 리더의 턴에서 일어나지 않는다 — 매번
   subagent를 spawn해 그 안에서 돌리고, 리더는 돌아온 수치·해시를 값싼
   읽기 명령으로 되확인해 심사에만 쓴다.
@@ -72,7 +78,15 @@ steps:
       - 워커 편성: 몇 세션, 어느 워크스페이스, 지금 spawn할지 필요 시 spawn할지
         (spawn에 workflow를 대지 않으면 이 워크플로의 짝인 improv-worker가
         자동으로 붙는다 — default_child_cflow. 런 없이 심부름만 시킬 자식만
-        workflow: '-'로 거절한다). 한 영역에
+        workflow: '-'로 거절한다). 착지를 원격 PR로 올리는 워커는
+        `workflow: improv-worker-remote`를 spawn에 명시한다(정본 워커의
+        레이어 — 회차 모양은 같고 착지 매체만 PR이다). 그 편성의 전제
+        셋을 첫 회차에 확인한다: 저장소 설정 `claunch.pr.remote`(PR을 여는
+        원격 이름; `claunch.pr.base`는 base 브랜치, 기본 master), 그
+        호스트에 인증된 gh CLI(`gh auth status --hostname <host>` — 사설
+        GitHub Enterprise면 그 호스트), 그리고 원격 base가 master와 같다는
+        것(`git rev-list --count <remote>/<base>..master`가 0 — 아니면 통합
+        단계의 「PR 후보」 절이 먼저 push한다). 한 영역에
         워커가 몰리면 평면으로 두지 않고 mesh-delegate 스킬로 그 영역의
         중간 워커(workflow: improv-mid — 역할은 worker, 런은 그 영역의
         스택 PR 관제)를 두고 그 밑으로 옮긴다(reparent)
@@ -352,6 +366,14 @@ steps:
         것이고 **브랜치 하나 = 후보 하나**다. 묶음은 주 이슈 코멘트에만
         있다. 행 수로 후보 수를 세지 않고, 심사·머지는 한 번이며, 닫기는
         assignee가 이슈마다 한다 — 리더가 대신 닫지 않는다.
+        **PR 행**: 마커에 `pr: <url>`이 붙은 행(`LANDING REQUEST @ <tip> pr:
+        <url>`)은 improv-worker-remote가 올린 후보다 — 브랜치는 원격에
+        push돼 있고 그 tip을 가리키는 PR이 열려 있다. 표에서의 자리·증거·
+        심사는 로컬 행과 같고, 다른 것은 머지 명령뿐이다(통합 단계의 「PR
+        후보」 절). 그 한 조각이 두 경로를 가르므로 url을 빼고 옮겨 적지
+        않는다. 표를 읽을 때 `gh pr view <url> --json state,headRefOid`로
+        PR이 OPEN이고 headRefOid가 마커의 tip과 같은지 본다 — 다르면 요청이
+        아니라 push가 덜 된 것이므로 워커에게 pr-open 재실행을 nudge한다.
         **표를 먼저 읽고 코멘트는 골라서 당긴다** — 여섯 줄을 다 펼치는 것은
         메시지로 받던 때와 같은 값을 치르는 것이다. 무엇을 당길지는 워커
         nudge의 값 한 줄(착지 델타, 미해결 한계 유무)이 정한다: 한계가
@@ -603,6 +625,18 @@ steps:
       동안 master가 그 규칙을 안 지키는 다섯째 게이트를 들여왔다. 서로 다른
       파일이라 merge-tree는 깨끗했고, 합친 트리는 빨갰다. 그래서 behind > 0
       이면 충돌이 없어도 재측정을 요구한다.
+      ── PR 후보 ──
+      마커에 `pr: <url>`이 붙은 후보는 같은 게이트를 같은 인자로 지난다 —
+      먼저 `git fetch <remote>`(원격 이름은 `git config --get
+      claunch.pr.remote`) 뒤, 브랜치가 이 저장소의 워크트리에 있으면 로컬
+      이름으로, 다른 머신의 워커면 `--branch <remote>/<브랜치>`로 부른다.
+      대상은 여전히 master다: PR의 base는 원격 base 브랜치이고 그것은
+      master의 push 사본이어야 하므로, `git rev-list --count
+      <remote>/<base>..master`를 함께 재어 0이 아니면 그 수를 보고에 적는다
+      — 통합 단계가 머지 전에 base를 push한다(워커는 base를 움직이지
+      않는다). 그리고 `gh pr view <url> --json state,headRefOid,mergeable`로
+      PR이 OPEN이고 headRefOid가 마커의 tip과 같은지 본다 — 다르면 게이트
+      결과와 무관하게 후보가 아니다(워커의 pr-open이 덜 됐다).
       두 갈래는 요구가 다르므로 마커도 다르다. 어느 쪽이든 그 브랜치는 이번
       머지에서 빼고 `claunch beads update <id> --status in_progress` 뒤에:
       - 3이면 `comments add <id> "REBASE REQUESTED: master @ <hash>"`
@@ -684,6 +718,33 @@ steps:
         자식 브랜치를 따로 머지하지 않는다. 뒤처짐·충돌로 재요청을 보낼
         때 중간 워커는 --rebase-merges로 재정렬(restack)한다 — 보통의
         rebase는 스택의 머지 커밋을 평탄화하므로, 재요청에 그 사실을 적는다
+      ── PR 후보의 머지 (같은 배치, 다른 명령) ──
+      preflight를 0으로 지난 PR 행(`pr: <url>`)은 로컬 후보와 같은 순서·같은
+      배치에 선다. 다른 것은 머지를 실행하는 명령과 그 앞뒤의 base 동기화
+      두 줄이고, 셋 다 subagent가 실행하고 리더가 되확인한다:
+      1. **base를 먼저 맞춘다.** `git rev-list --count <remote>/<base>..master`가
+         0이 아니면 `git push <remote> master:refs/heads/<base>` — PR의 base가
+         master의 push 사본이어야 GHE가 만드는 머지 커밋의 트리가 로컬
+         --no-ff 머지의 트리와 같다(프리뷰 스윕이 그 트리를 쓴다).
+      2. **머지는 gh로, tip을 고정해서.** `gh pr merge <url> -R
+         <host>/<owner>/<repo> --merge --match-head-commit <tip> --subject
+         "<저장소 관례의 한 줄>"` — `--merge`가 merge commit(로컬 --no-ff와
+         등가; squash·rebase는 워커의 착지 게이트가 tip을 못 찾는다)이고
+         `--match-head-commit`이 리뷰어가 승인한 tip과 다른 것이 올라가
+         있으면 거절한다. 원격 브랜치는 지우지 않는다.
+      3. **master를 따라 올린다.** `git fetch <remote>` 뒤 master 체크아웃에서
+         `git merge --ff-only <remote>/<base>`. 되확인은 `git log -1
+         --format=%H%n%P master` — 둘째 부모가 그 tip이어야 한다. 이 ff가
+         거절되면(그 사이 로컬 master가 움직였다) 배치를 멈추고 사유를
+         보고에 적는다 — 원격과 로컬이 갈린 master 위에 다음 후보를 얹지
+         않는다.
+      PR 후보 뒤에 로컬 후보가 남았으면 그대로 --no-ff로 잇고, **배치가
+      끝나면 한 번 더 `git push <remote> master:refs/heads/<base>`** — 로컬
+      머지가 원격 base에 실려야 다음 PR의 diff가 이 배치 이후의 것이 된다.
+      머지 통지의 fyi에는 PR url을 해시 옆에 싣는다. 이 절이 없을 때 PR
+      후보는 표에 있어도 아무도 머지하지 않았다 — 워커는 base가 자기 tip을
+      품기를 기다리고 리더는 로컬 브랜치만 봤다.
+
       ── 충돌 없음은 안전 판정이 아니다 ──
       git이 조용한 것은 텍스트가 안 겹쳤다는 뜻이지 합쳐서 돈다는 뜻이
       아니다. 한쪽이 지운 심볼을 다른 쪽이 부르거나, 한쪽이 추가한 호출을
@@ -776,7 +837,10 @@ steps:
       당겨 읽는다. 이슈는 아직 닫지 않는다 — 스윕 수치가 close 사유의
       절반이다.
     done_when: |
-      이번에 승인된 통합 대기 브랜치가 전부 --no-ff로 master에 머지되었고,
+      이번에 승인된 통합 대기 브랜치가 전부 master에 머지되었고(로컬 후보는
+      --no-ff, PR 후보는 `gh pr merge --merge --match-head-commit` 뒤 fetch·
+      ff-only — 어느 쪽이든 master의 머지 커밋이 그 tip을 둘째 부모로
+      갖는다), PR 편성이면 원격 base가 master와 같은 tip이며,
       머지 커밋 해시·diffstat이 보고에 있으며 메시 전체에 해시와 이슈 id를
       실은 fyi 한 줄이 나갔다(diffstat·내역은 코멘트에 두고 싣지 않았다).
       그 fyi에 **재정렬 요구가 실리지 않았다** — 통지의 뜻은 「이 해시로 잰
@@ -859,6 +923,10 @@ steps:
       `git commit -m "chore(beads): close <id들>"`; 이 커밋도 subagent가
       실행하고 리더가 해시를 되확인한다. `.beads/`를 커밋하는 자리는 여기
       하나다(워커 브랜치는 그 파일을 건드리지 않으므로 충돌이 없다).
+      PR 편성(`git config --get claunch.pr.remote`가 비어 있지 않다)이면 그
+      커밋 뒤 `git push <remote> master:refs/heads/<base>`까지가 이 자리다 —
+      원격 base가 master보다 뒤처진 채 회차를 닫으면 다음 PR 워커의
+      remote-setup이 그 차이를 재어 리더에게 되묻는다.
     done_when: |
       이번 배치의 머지 결과 트리(master tip)에 대한 전체 스윕 수치(N/N, 축
       = 명령 전문, 트리 해시, 시작 시각)가 보고에 있고, 그 스윕이 **spawn된
