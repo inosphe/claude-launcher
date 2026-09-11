@@ -31,6 +31,8 @@ first as *cannot tell* rather than as a verdict.
 from __future__ import annotations
 
 import json
+import logging
+import time
 import os
 import secrets
 import subprocess
@@ -40,6 +42,8 @@ from typing import Optional
 
 from .. import __version__, atomic
 from . import paths
+
+log = logging.getLogger("claunch.daemon.runtime_state")
 
 #: Ceiling on any single boot-time git call. A daemon that cannot start
 #: because ``git status`` is waiting on somebody's ``index.lock`` would be a
@@ -224,11 +228,31 @@ def read_daemon_json() -> Optional[dict]:
     return doc if isinstance(doc, dict) else None
 
 
+#: Retries for the unlink below: on Windows a file another process has open
+#: (a CLI's ``read_daemon_json`` -- ``stop()`` polls it every 100 ms) cannot
+#: be deleted, so a single attempt lost the race on 2026-09-11 22:18 and the
+#: stale record kept naming a daemon that was gone.
+REMOVE_ATTEMPTS = 20
+REMOVE_RETRY_DELAY = 0.05
+
+
 def remove_daemon_json() -> None:
-    try:
-        paths.daemon_json().unlink()
-    except OSError:
-        pass
+    path = paths.daemon_json()
+    for attempt in range(REMOVE_ATTEMPTS):
+        try:
+            path.unlink()
+            return
+        except FileNotFoundError:
+            return
+        except OSError as exc:
+            if attempt + 1 == REMOVE_ATTEMPTS:
+                log.warning(
+                    "could not remove %s after %d attempts: %s -- the record "
+                    "will name this daemon after it is gone",
+                    path, REMOVE_ATTEMPTS, exc,
+                )
+                return
+            time.sleep(REMOVE_RETRY_DELAY)
 
 
 def load_or_create_token() -> str:

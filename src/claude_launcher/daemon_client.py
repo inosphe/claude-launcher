@@ -391,6 +391,8 @@ def restart(*, stop_timeout: float = 10.0) -> DaemonClient:
     ordinary restart-notice channel — so this is the one place the failure
     can still be made clear.
     """
+    before = runtime_state.read_daemon_json() or {}
+    predecessor = int(before.get("pid") or 0)
     stop(timeout=stop_timeout)
     delay = RESTART_BACKOFF_START
     last_exc: Optional[DaemonClientError] = None
@@ -399,7 +401,26 @@ def restart(*, stop_timeout: float = 10.0) -> DaemonClient:
     while True:
         attempt += 1
         try:
-            return ensure_running()
+            client = ensure_running()
+            announced = runtime_state.read_daemon_json() or {}
+            if (
+                predecessor
+                and int(announced.get("pid") or 0) == predecessor
+                and not runtime_state.lock_is_free()
+            ):
+                # The predecessor answered, and it still holds the singleton
+                # lock -- it is draining, not serving. ``stop()`` returns
+                # True either way (it reports "request accepted", see its
+                # docstring), its record can outlive it, and its listener
+                # stays up until the very end of teardown. Handing this back
+                # as the successor spawned nothing on 2026-09-11 22:18 and
+                # left no daemon at all for 45 minutes. The lock is what
+                # tells the two apart: it is released only as that process
+                # exits, and by then nothing of its HTTP surface answers.
+                raise DaemonClientError(
+                    f"daemon (pid {predecessor}) is still shutting down"
+                )
+            return client
         except DaemonClientError as exc:
             last_exc = exc
             if runtime_state.lock_is_free():
