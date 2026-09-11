@@ -28,6 +28,7 @@ from .. import (
     pi_provider,
     credentials,
     lineage,
+    metering,
     profile as profile_mod,
     providers,
     quickjob,
@@ -339,6 +340,7 @@ def build_app(
     r.add_post("/api/daemon/restart-request/reject", h_restart_request_reject)
     r.add_get("/api/profiles", h_profiles)
     r.add_get("/api/usage", h_usage)
+    r.add_get("/api/metering", h_metering)
     r.add_get("/api/borrow-options", h_borrow_options)
     r.add_get("/api/roles", h_roles)
     r.add_get("/api/workspaces", h_workspaces)
@@ -939,6 +941,36 @@ async def h_profiles(request: web.Request) -> web.Response:
             "profile_details": items,
         }
     )
+
+
+async def h_metering(request: web.Request) -> web.Response:
+    """Throughput records from the metering shim (see ``metering``).
+
+    ``?session=<name>`` narrows to one session and adds its summary (the
+    same object the session list carries as ``tps``); ``?limit=N`` caps the
+    record count (default 20). File reads, so off the loop.
+    """
+    session = str(request.query.get("session") or "").strip() or None
+    try:
+        limit = max(0, min(500, int(request.query.get("limit") or 20)))
+    except ValueError:
+        return json_error(400, "limit must be an integer")
+
+    def read() -> dict:
+        if session:
+            records = metering.recent(session, limit=limit)
+            summary = metering.session_summary(session)
+        else:
+            records = metering.load(limit=limit)
+            summary = metering.summarize(metering.load())
+        return {
+            "session": session,
+            "enabled": metering.enabled(),
+            "summary": summary,
+            "records": records,
+        }
+
+    return json_response(await asyncio.to_thread(read))
 
 
 async def h_usage(request: web.Request) -> web.Response:
@@ -3333,6 +3365,10 @@ async def h_sessions_list(request: web.Request) -> web.Response:
         out = []
         for s in sessions:
             info = ctxsize.attach(s)
+            # The session's latest throughput through the metering shim
+            # (``tps``), read off the record file tails; absent when the
+            # session never went through a shim (the OAuth routes).
+            metering.attach(info)
             # The cached briefing's one-liner, when it exists — rides the list
             # the UI already polls so a row can show it without an open card or
             # an LLM call, and so a browser refresh repaints it from the
@@ -3393,7 +3429,7 @@ async def h_sessions_list(request: web.Request) -> web.Response:
             "last_visited_at", "last_input_at", "last_activity_at", "viewers",
             "exited_at", "archived_at", "paused_at", "delivery_hold", "compacting",
             "context", "branch", "briefing", "winddown", "session_reminder",
-            "status_checks",
+            "status_checks", "tps",
         }
         attached = [
             {key: value for key, value in info.items() if key in rail_fields}
@@ -4105,6 +4141,7 @@ async def h_session_meta(request: web.Request) -> web.Response:
         # the workflow files are all reads, and the detail panel polls this
         # every two seconds. Inline it was 80ms of loop per poll, at p90.
         info = ctxsize.attach(session)
+        metering.attach(info)
         harness = harness_registry.registry().get(info.get("harness") or "")
         borrowed_auth = None
         if info.get("borrow") and info.get("profile"):

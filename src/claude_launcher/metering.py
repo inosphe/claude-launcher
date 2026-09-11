@@ -37,6 +37,7 @@ from __future__ import annotations
 import json
 import os
 import statistics
+import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -440,3 +441,120 @@ def by_key(records: Iterable[dict], key: str) -> Dict[str, dict]:
     for rec in records:
         groups.setdefault(str(rec.get(key) or "-"), []).append(rec)
     return {name: summarize(recs) for name, recs in sorted(groups.items())}
+
+
+# --------------------------------------------------------------------------- #
+# what the web UI shows (a session's latest throughput)
+# --------------------------------------------------------------------------- #
+#: How many bytes off the end of a record file the UI reader looks at. A
+#: record is ~350 bytes, so this is the last few hundred calls per shim --
+#: plenty for "what is this session doing now", and a bounded read however
+#: long the file has grown.
+TAIL_BYTES = 256 * 1024
+
+#: The rolling window ``session_summary`` computes its median over.
+SUMMARY_WINDOW = 10
+
+#: Per-session summary key hung on the session record (see :func:`attach`).
+INFO_KEY = "tps"
+
+_tail_cache: Dict[str, tuple] = {}
+_tail_lock = threading.Lock()
+
+
+def _tail_records(path: Path) -> List[dict]:
+    """The records at the end of one file, re-read only when the file changed.
+
+    Keyed on (mtime, size): the daemon polls the session list every few
+    seconds for every session, and an unchanged file must cost a ``stat``,
+    not a parse.
+    """
+    try:
+        st = path.stat()
+    except OSError:
+        return []
+    key = (st.st_mtime_ns, st.st_size)
+    with _tail_lock:
+        hit = _tail_cache.get(str(path))
+        if hit and hit[0] == key:
+            return hit[1]
+    out: List[dict] = []
+    try:
+        with open(path, "rb") as fh:
+            if st.st_size > TAIL_BYTES:
+                fh.seek(st.st_size - TAIL_BYTES)
+                fh.readline()  # drop the partial line the seek landed in
+            data = fh.read()
+    except OSError:
+        return out
+    for raw in data.decode("utf-8", "replace").splitlines():
+        try:
+            rec = json.loads(raw)
+        except ValueError:
+            continue
+        if isinstance(rec, dict):
+            out.append(rec)
+    with _tail_lock:
+        _tail_cache[str(path)] = (key, out)
+    return out
+
+
+def recent(session: str, *, limit: int = SUMMARY_WINDOW) -> List[dict]:
+    """The last ``limit`` records ``session`` made, oldest first."""
+    out: List[dict] = []
+    try:
+        files = sorted(records_dir().glob("*.jsonl"))
+    except OSError:
+        return out
+    for path in files:
+        out.extend(r for r in _tail_records(path) if r.get("session") == session)
+    out.sort(key=lambda r: str(r.get("ts") or ""))
+    return out[-limit:] if limit else out
+
+
+def session_summary(session: str) -> Optional[dict]:
+    """What a session row shows: its latest call and a short rolling median.
+
+    ``None`` when the session has no records at all -- absence, so a reader
+    cannot draw "never measured" as a slow session. ``last`` is the newest
+    record whether or not it was counted (an error answer still says when
+    the session last called out); the medians are over the counted ones in
+    the window.
+    """
+    recs = recent(session, limit=SUMMARY_WINDOW)
+    if not recs:
+        return None
+    last = recs[-1]
+    counted = [r for r in recs if r.get("tps")]
+    tps = [float(r["tps"]) for r in counted]
+    ttft = [float(r["ttft_ms"]) for r in recs if r.get("ttft_ms") is not None]
+    return {
+        "ts": last.get("ts"),
+        "model": last.get("model"),
+        "status": last.get("status"),
+        "counted": bool(last.get("counted")),
+        "tps": last.get("tps"),
+        "ttft_ms": last.get("ttft_ms"),
+        "output_tokens": last.get("output_tokens"),
+        "input_tokens": last.get("input_tokens"),
+        "cache_read": last.get("cache_read"),
+        "window": len(recs),
+        "tps_median": round(statistics.median(tps), 2) if tps else None,
+        "ttft_ms_median": int(statistics.median(ttft)) if ttft else None,
+        "upstream": last.get("upstream"),
+    }
+
+
+def attach(info: dict) -> dict:
+    """``info`` (a session record) with a ``tps`` key when there is one to give.
+
+    The same shape of hook as ``daemon/ctxsize.attach``: the key is absent
+    rather than null when the session has no records, so the UI draws
+    nothing rather than a zero.
+    """
+    name = info.get("name")
+    if name:
+        summary = session_summary(str(name))
+        if summary:
+            info[INFO_KEY] = summary
+    return info

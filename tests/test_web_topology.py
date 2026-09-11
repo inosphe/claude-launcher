@@ -307,6 +307,7 @@ WEB = Path(__file__).resolve().parent / "web"
         "flowtrack_check.js",
         "flowrender_check.js",
         "ctxsize_check.js",
+        "tps_check.js",
         "railctx_check.js",
         "railmodel_check.js",
         "railcwd_check.js",

@@ -797,7 +797,15 @@ sessions, and the shim records each `/v1/chat/completions` call. An OpenAI
 stream only carries token counts when the request asks for them, so behind
 the shim claunch lets Pi send `stream_options.include_usage` (a backend that
 rejects that field can opt out with `providers.<name>.metering: false`).
-Not covered yet: the web UI.
+
+The web UI shows the same records: each session's rail row carries a
+throughput line (`⚡ 38.1 tok/s · ttft 715ms · 45s ago`), an open briefing
+card a chip with the same figure, and the attached session's header a badge
+with a twin overlay drawn over the top-right corner of its terminal. All of
+them read the `tps` block the daemon hangs on the session (`GET /api/sessions`
+and `/api/sessions/<name>/meta`); `GET /api/metering?session=<name>` returns
+the records behind it. A reading older than ten minutes dims, and a session
+that never went through the shim shows nothing rather than a zero.
 
 ## Migrating skills & MCP servers
 

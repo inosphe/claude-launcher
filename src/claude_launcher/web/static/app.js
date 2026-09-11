@@ -983,6 +983,12 @@ async function refreshSessions(options) {
     // it, and nothing at all where a harness keeps no transcript.
     ctxNoteOnRow(li, label, s);
     const railCtx = ctxRailLine(s);
+    // And how fast its backend answered last time, for a session that goes
+    // through the metering shim -- one more full-width line, absent for
+    // the sessions that have no such record. Guarded like the kill-state
+    // reconciler below: the node checks boot this row builder with only
+    // the helpers they stub.
+    const railTps = typeof tpsRailLine === "function" ? tpsRailLine(s) : null;
     // And where it runs — the checkout, which on this rail is usually a
     // worktree, and is the one fact that tells two sessions doing the same
     // job apart. A full-width line like the gauge below it; always drawn,
@@ -1040,6 +1046,7 @@ async function refreshSessions(options) {
     // column rather than hunting a different offset on every row.
     const railSeen = railSeenLine(s);
     li.append(dot, head, meta, railCwd, ...(railCtx ? [railCtx] : []),
+              ...(railTps ? [railTps] : []),
               railSeen, ...(plus ? [plus] : []), info);
     li.addEventListener("click", () => {
       location.hash = "#/s/" + encodeURIComponent(s.name);
@@ -1120,6 +1127,9 @@ async function refreshSessions(options) {
   // The rail rows above were rebuilt with the handles the mesh poll last
   // knew; the header beside them is repainted from the same value here.
   if (rebuild) renderTermHandle();
+  // The header badge and the PTY overlay read the same list; repaint them
+  // on every poll so a finished answer shows within one poll interval.
+  if (typeof renderTermTps === "function") renderTermTps();
   // The rows and the runs arrive on separate polls; whichever lands last
   // paints the cflow badges over the rows that exist now. The session poll
   // also carries the independent Role reminder and the session-level pause.
@@ -2244,6 +2254,131 @@ function ctxRailLine(s) {
   return line;
 }
 
+/* ------------------------------------------------------------------ */
+/* throughput (tokens per second)                                     */
+/* ------------------------------------------------------------------ */
+/* How fast a session's backend answered. The daemon reads it out of the
+   metering shim's records (see metering.py) and hangs it on the session as
+   `tps`: the last call's tokens/s and time-to-first-token, the model that
+   answered, and a short rolling median. Sessions on the OAuth routes never
+   go through the shim and carry no `tps` at all -- absence, drawn as
+   nothing, never as a slow number. */
+function tpsFmt(v) {
+  if (!Number.isFinite(v)) return "?";
+  return v >= 100 ? String(Math.round(v)) : v.toFixed(1);
+}
+
+function tpsAgeSecs(t) {
+  const ms = Date.parse(t && t.ts);
+  return Number.isFinite(ms) ? Math.max(0, Math.floor((Date.now() - ms) / 1000)) : null;
+}
+
+function ttftFmt(ms) {
+  if (!Number.isFinite(ms)) return "?";
+  return ms >= 1000 ? (ms / 1000).toFixed(1) + "s" : ms + "ms";
+}
+
+/* The one-line glance: "38.1 tok/s · ttft 0.7s". A last call that was not
+   counted (an error answer, a compressed body) shows its status instead of
+   a number, so the row still says that the session called out. */
+function tpsText(t) {
+  if (!t) return "";
+  if (!t.counted || !Number.isFinite(t.tps)) {
+    return t.status && t.status !== 200 ? `HTTP ${t.status}` : "tps ?";
+  }
+  return `${tpsFmt(t.tps)} tok/s · ttft ${ttftFmt(t.ttft_ms)}`;
+}
+
+/* The story behind the number, for the tooltip. */
+function tpsTooltip(t) {
+  if (!t) return "";
+  const lines = [];
+  const age = tpsAgeSecs(t);
+  lines.push(`last call${age !== null ? " " + fmtAge(age) + " ago" : ""}` +
+             (t.model ? ` on ${t.model}` : "") + (t.status ? ` (HTTP ${t.status})` : ""));
+  if (t.counted && Number.isFinite(t.tps)) {
+    lines.push(`${tpsFmt(t.tps)} tokens/s over the generation` +
+               (Number.isFinite(t.output_tokens) ? `, ${t.output_tokens} out` : "") +
+               (Number.isFinite(t.input_tokens) ? `, ${t.input_tokens} in` : "") +
+               (Number.isFinite(t.cache_read) && t.cache_read ? ` (${t.cache_read} cached)` : ""));
+    lines.push(`time to first token ${ttftFmt(t.ttft_ms)}`);
+  }
+  if (Number.isFinite(t.tps_median) && t.window > 1) {
+    lines.push(`median over the last ${t.window} calls: ${tpsFmt(t.tps_median)} tok/s` +
+               (Number.isFinite(t.ttft_ms_median) ? `, ttft ${ttftFmt(t.ttft_ms_median)}` : ""));
+  }
+  if (t.upstream) lines.push(`via ${t.upstream}`);
+  lines.push("measured by the claunch metering shim (claunch tps)");
+  return lines.join("\n");
+}
+
+/* Stale readings dim: a number from an hour ago says nothing about now. */
+function tpsStaleClass(t) {
+  const age = tpsAgeSecs(t);
+  return age !== null && age > 600 ? " stale" : "";
+}
+
+/* The rail row's line: a bolt, the glance, and the age -- indented like the
+   context gauge above it and a full-width line-breaker like it. */
+function tpsRailLine(s) {
+  const t = s && s.tps;
+  if (!t) return null;
+  const line = el("span", "rail-tps-line" + tpsStaleClass(t));
+  const num = el("span", "rail-tps", tpsText(t));
+  const age = tpsAgeSecs(t);
+  line.append(el("span", "rail-tps-bolt", "⚡"), num);
+  if (age !== null) line.appendChild(el("span", "rail-tps-age", fmtAge(age) + " ago"));
+  line.title = tpsTooltip(t);
+  return line;
+}
+
+/* The chip on an open card's head, beside the context chip. */
+function tpsChip(name) {
+  const s = sessionsCache.find((x) => x.name === name);
+  const t = s && s.tps;
+  if (!t) return null;
+  const chip = el("span", "sess-brief-tps" + tpsStaleClass(t), tpsText(t));
+  chip.title = tpsTooltip(t);
+  return chip;
+}
+
+/* The header badge and the PTY overlay for the attached session, repainted
+   from the list on every poll. Both go away (not to "?") for a session with
+   no record, and the overlay is only drawn while the terminal is on screen.
+   Guarded element by element: embedded consumers boot this file against a
+   partial DOM. */
+function renderTermTps() {
+  const badge = $("term-tps");
+  const overlay = $("term-tps-overlay");
+  const s = currentName ? sessionsCache.find((x) => x.name === currentName) : null;
+  const t = s && s.tps;
+  if (badge) {
+    badge.classList.toggle("hidden", !t);
+    if (t) {
+      badge.textContent = tpsText(t);
+      badge.className = "badge tps" + tpsStaleClass(t);
+      badge.title = tpsTooltip(t);
+    }
+  }
+  if (overlay) {
+    const show = !!t && terminalOnScreen();
+    overlay.classList.toggle("hidden", !show);
+    if (show) {
+      overlay.className = "term-tps-overlay" + tpsStaleClass(t);
+      overlay.replaceChildren(
+        el("span", "term-tps-big", t.counted && Number.isFinite(t.tps)
+          ? `${tpsFmt(t.tps)} tok/s` : tpsText(t)),
+        el("span", "term-tps-small",
+          [t.counted && Number.isFinite(t.tps) ? `ttft ${ttftFmt(t.ttft_ms)}` : "",
+           t.model ? modelShort(t.model) : "",
+           tpsAgeSecs(t) !== null ? fmtAge(tpsAgeSecs(t)) + " ago" : ""]
+            .filter(Boolean).join(" · "))
+      );
+      overlay.title = tpsTooltip(t);
+    }
+  }
+}
+
 /* Where a session runs: the checkout its harness was started in.
 
    A worktree is the interesting case. This launcher spawns most of its
@@ -2873,6 +3008,8 @@ function renderBriefingCard(name, entry) {
   // left to keep doing it belongs on the same line.
   const chip = ctxChip(name);
   if (chip) head.appendChild(chip);
+  const tps = typeof tpsChip === "function" ? tpsChip(name) : null;
+  if (tps) head.appendChild(tps);
   const refresh = el("button", `sess-brief-refresh${loading ? " spinning" : ""}`, "⟳");
   refresh.type = "button";
   refresh.title = "re-summarise now";

@@ -438,6 +438,14 @@ option:disabled { color: #6b7280; }
   padding: 0 5px; line-height: 16px;
 }
 .sess-brief-ctx.unknown { color: #6e7681; font-style: italic; }
+/* The last call's tokens/s on the card head, beside the context chip. */
+.sess-brief-tps {
+  flex: none; font-family: SFMono-Regular, Consolas, monospace;
+  font-size: 11px; color: #e3b341; background: #161b22;
+  border: 1px solid #21262d; border-radius: 4px;
+  padding: 0 5px; line-height: 16px;
+}
+.sess-brief-tps.stale { color: #7d8590; }
 /* The same fact on the rail row itself, as the one line each row spends on
    it: a thin gauge bar with the short count beside it, indented like the
    cflow line so it reads as belonging to the name above. A full-width
@@ -491,6 +499,24 @@ option:disabled { color: #6b7280; }
   font-size: 11px; color: #7d8590; line-height: 16px;
 }
 #session-list .rail-ctx.unknown { color: #6e7681; font-style: italic; }
+/* The throughput line under the gauge: how fast the backend answered the
+   last call, for a session that goes through the metering shim. Same
+   indent and order as the gauge line so it reads as part of the same
+   block; monospace number because it is compared across rows; a reading
+   older than ten minutes dims, since it says nothing about now. Absent
+   (not "?") where the session has no record. */
+#session-list .rail-tps-line {
+  flex-basis: 100%; order: 2; display: flex; align-items: center; gap: 6px;
+  min-width: 0; padding-left: 16px; margin-top: 1px; line-height: 16px;
+}
+#session-list .rail-tps-bolt { flex: none; font-size: 10px; color: #d29922; }
+#session-list .rail-tps {
+  flex: none; font-family: SFMono-Regular, Consolas, monospace;
+  font-size: 11px; color: #c9d1d9;
+}
+#session-list .rail-tps-age { flex: none; font-size: 11px; color: #7d8590; }
+#session-list .rail-tps-line.stale .rail-tps { color: #7d8590; }
+#session-list .rail-tps-line.stale .rail-tps-bolt { color: #6e7681; }
 /* Where the session runs, the line right under its name: a path in the
    same monospace as the count, dimmer than the name, and a full-width
    line-breaker like the gauge beneath it (order 2, and it is appended before
@@ -1092,6 +1118,12 @@ a.cflow-scope:hover { background: #1d3559; text-decoration: underline; }
 .badge.idle { background: #1f4428; color: #3fb950; }
 .badge.busy { background: #4d3800; color: #d29922; }
 .badge.exited { background: #30363d; color: #8b949e; }
+/* The attached session's last tokens/s, next to its status. */
+.badge.tps {
+  background: #2b2308; color: #e3b341;
+  font-family: SFMono-Regular, Consolas, monospace;
+}
+.badge.tps.stale { background: #1c1f24; color: #7d8590; }
 .badge.exited.paused { background: #172947; color: #58a6ff; }
 /* The link chip: what this browser's socket is doing, as against the badge
    before it, which is what the session is doing. Filled rather than outlined
@@ -1240,6 +1272,21 @@ a.cflow-scope:hover { background: #1d3559; text-decoration: underline; }
    inside the box by shrinking glyphs, and whatever a mid-adjustment frame
    still hangs over the edge must clip, not become a scrollbar. */
 #terminal { flex: 1; padding: 6px; min-height: 0; overflow: hidden; position: relative; }
+/* The throughput overlay on the PTY's top-right corner: the number big
+   enough to read from the screen, the rest small under it. It floats
+   above xterm's layers (which stack up to z-index 10 or so), takes no
+   pointer events, and stays out of the scrollbar's column. */
+#term-tps-overlay {
+  position: absolute; top: 8px; right: 22px; z-index: 20;
+  display: flex; flex-direction: column; align-items: flex-end; gap: 1px;
+  padding: 3px 8px; border-radius: 6px;
+  background: rgba(20, 22, 26, 0.78); border: 1px solid #30363d;
+  color: #e3b341; pointer-events: none; user-select: none;
+  font-family: SFMono-Regular, Consolas, monospace;
+}
+#term-tps-overlay .term-tps-big { font-size: 15px; font-weight: 600; line-height: 18px; }
+#term-tps-overlay .term-tps-small { font-size: 10px; color: #8b949e; line-height: 12px; }
+#term-tps-overlay.stale { color: #7d8590; border-color: #21262d; }
 /* The daemon's notice for the person at this terminal (ws.py "Notices"):
    a banner over the grid's top edge, never a line in it. */
 .term-notice {

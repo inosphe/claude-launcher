@@ -634,3 +634,121 @@ def test_daemon_pi_launch_names_the_session_in_the_provider_headers(home, tmp_pa
     _, env, _ = harness.build_command(sdef)
     assert env[pi_provider.ENV_BASE_URL] == "https://omlx.example/v1"
     assert pi_provider.ENV_HEADERS not in env and pi_provider.ENV_STREAM_USAGE not in env
+
+
+# --------------------------------------------------------------------------- #
+# what the web UI shows: a session's latest throughput
+# --------------------------------------------------------------------------- #
+def test_session_summary_is_the_last_call_plus_a_rolling_median(home):
+    for i in range(12):
+        metering.append("fp1", _rec(session="s1", tps=10.0 + i, ttft_ms=100 + i, output_tokens=5,
+                                     ts=f"2026-09-11T10:00:{i:02d}+0900"))
+    metering.append("fp2", _rec(session="s1", tps=99.0, ttft_ms=50, model="other", output_tokens=7,
+                                 ts="2026-09-11T10:01:00+0900"))  # newest, on another shim
+    metering.append("fp1", _rec(session="s2", tps=1.0, ts="2026-09-11T10:02:00+0900"))
+    got = metering.session_summary("s1")
+    assert got["tps"] == 99.0 and got["model"] == "other" and got["ts"] == "2026-09-11T10:01:00+0900"
+    assert got["window"] == metering.SUMMARY_WINDOW  # the last 10 of 13, across both files
+    assert got["tps_median"] == 17.5  # median of 13..21 and 99
+    assert got["counted"] is True and got["ttft_ms"] == 50
+    assert metering.session_summary("s3") is None  # never measured: absence, not zero
+    recs = metering.recent("s1", limit=3)
+    assert [r["tps"] for r in recs] == [20.0, 21.0, 99.0]
+
+
+def test_session_summary_keeps_an_uncounted_last_call_visible(home):
+    metering.append("fp1", _rec(session="s1", tps=40.0, ts="2026-09-11T10:00:00+0900"))
+    metering.append("fp1", _rec(session="s1", tps=None, counted=False, status=502, output_tokens=None,
+                                 ts="2026-09-11T10:00:01+0900"))
+    got = metering.session_summary("s1")
+    assert got["counted"] is False and got["status"] == 502 and got["tps"] is None
+    assert got["tps_median"] == 40.0  # the median is over the counted calls in the window
+
+
+def test_tail_reader_only_reads_the_end_and_rereads_on_change(home, monkeypatch):
+    monkeypatch.setattr(metering, "TAIL_BYTES", 600)
+    for i in range(20):
+        metering.append("fp1", _rec(session="s1", tps=float(i), ts=f"2026-09-11T10:00:{i:02d}+0900"))
+    path = metering.record_file("fp1")
+    recs = metering._tail_records(path)
+    assert 0 < len(recs) < 20 and recs[-1]["tps"] == 19.0  # a bounded read off the end
+    assert metering._tail_records(path) is recs  # unchanged file: the cached parse
+    metering.append("fp1", _rec(session="s1", tps=77.0, ts="2026-09-11T10:01:00+0900"))
+    assert metering._tail_records(path)[-1]["tps"] == 77.0  # it grew: re-read
+
+
+def test_attach_hangs_tps_on_a_session_record_only_when_there_is_one(home):
+    metering.append("fp1", _rec(session="s1", tps=33.0))
+    info = metering.attach({"name": "s1", "status": "busy"})
+    assert info["tps"]["tps"] == 33.0 and info["status"] == "busy"
+    assert "tps" not in metering.attach({"name": "s2"})
+    assert "tps" not in metering.attach({})
+
+
+def test_metering_api_serves_a_sessions_records_and_the_session_list_carries_them(home, tmp_path):
+    import asyncio
+    import sys
+
+    from claude_launcher.daemon.api import build_app
+    from claude_launcher.daemon.harness import SessionDef
+    from claude_launcher.daemon.manager import SessionManager
+    from claude_launcher.daemon.mesh import MeshManager
+
+    store.update(lambda doc: doc.update({
+        "harnesses": {"py": {"command": [sys.executable, "-u", "-c", "import time; time.sleep(60)"]}}
+    }))
+    metering.append("fp1", _rec(session="s1", tps=42.5, ttft_ms=800, model="deepseek-flash",
+                                 ts="2026-09-11T10:00:00+0900"), upstream="https://d/v1")
+    metering.append("fp1", _rec(session="other", tps=5.0, ts="2026-09-11T10:00:01+0900"))
+    bearer = {"Authorization": "Bearer sekrit"}
+
+    async def run():
+        from aiohttp.test_utils import TestClient, TestServer
+
+        mgr = SessionManager(idle_threshold=0.5, scrollback=200, restore_default=True)
+        client = TestClient(TestServer(build_app(
+            mgr, "sekrit", started_at=time.monotonic(), mesh=MeshManager(mgr)
+        )))
+        await client.start_server()
+        try:
+            mgr.create(SessionDef(name="s1", harness="py", cwd=str(tmp_path)))
+            one = await client.get("/api/metering?session=s1", headers=bearer)
+            assert one.status == 200
+            body = await one.json()
+            assert body["session"] == "s1" and body["summary"]["tps"] == 42.5
+            assert [r["session"] for r in body["records"]] == ["s1"]
+            assert body["records"][0]["upstream"] == "https://d/v1"
+            everything = await client.get("/api/metering?limit=1", headers=bearer)
+            body = await everything.json()
+            assert body["session"] is None and body["summary"]["requests"] == 2
+            assert len(body["records"]) == 1 and body["records"][0]["session"] == "other"
+            bad = await client.get("/api/metering?limit=x", headers=bearer)
+            assert bad.status == 400
+            rail = await client.get("/api/sessions?view=rail&state=current", headers=bearer)
+            rows = {s["name"]: s for s in (await rail.json())["sessions"]}
+            assert rows["s1"]["tps"]["tps"] == 42.5 and rows["s1"]["tps"]["model"] == "deepseek-flash"
+            detail = await client.get("/api/sessions/s1/meta", headers=bearer)
+            assert (await detail.json())["session"]["tps"]["tps"] == 42.5
+        finally:
+            await mgr.shutdown_all()
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_web_page_draws_tps_in_the_rail_the_card_the_header_and_over_the_pty():
+    from pathlib import Path
+
+    static = Path(metering.__file__).with_name("web") / "static"
+    html = (static / "index.html").read_text(encoding="utf-8")
+    js = (static / "app.js").read_text(encoding="utf-8")
+    css = (static / "style.css").read_text(encoding="utf-8")
+    assert 'id="term-tps"' in html and 'id="term-tps-overlay"' in html
+    for fn in ("tpsRailLine", "tpsChip", "renderTermTps", "tpsTooltip"):
+        assert f"function {fn}(" in js
+    assert 'typeof tpsRailLine === "function" ? tpsRailLine(s)' in js  # on every rail row
+    assert 'typeof tpsChip === "function" ? tpsChip(name)' in js  # on the open card's head
+    assert 'if (typeof renderTermTps === "function") renderTermTps();' in js  # every poll
+    for sel in ("#session-list .rail-tps-line", ".sess-brief-tps", ".badge.tps", "#term-tps-overlay"):
+        assert sel in css
+    assert "pointer-events: none" in css.split("#term-tps-overlay {", 1)[1].split("}", 1)[0]
