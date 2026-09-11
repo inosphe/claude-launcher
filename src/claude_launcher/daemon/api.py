@@ -719,6 +719,15 @@ async def h_daemon_info(request: web.Request) -> web.Response:
 
 
 async def h_daemon_shutdown(request: web.Request) -> web.Response:
+    """Stop the daemon, taking every attached terminal and session with it.
+
+    Operator only. The daemon cannot tell an operator's Bearer token from a
+    managed session's (they read the same file), and by decision it does not
+    try: the immediate path stays for the operator's own CLI and the web UI.
+    An agent session has no authority to call this (or ``restart`` below)
+    regardless -- the CLI's approval gate (``restart_gate``) is the one door
+    a session's restart goes through, and ``stop`` has none.
+    """
     loop = asyncio.get_running_loop()
     loop.call_later(0.1, request.app["shutdown_event"].set)
     return json_response({"ok": True})

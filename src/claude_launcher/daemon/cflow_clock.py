@@ -1578,7 +1578,9 @@ def _read_back(fh) -> str:
 
 def restart_started_block(action: dict) -> str:
     if action["kind"] == "run":
-        detail = "the project-local restart command is being executed from this session's CWD"
+        detail = ("the daemon is executing the step's project-local restart command from "
+                  "this session's CWD on the workflow's behalf -- do not run it yourself: "
+                  "an agent session has no authority to restart or stop the daemon")
     elif action["kind"] == "interrupted":
         detail = "the prior boot stopped while the restart command was running; it will not be run twice"
     else:

@@ -44,6 +44,17 @@ from .daemon import restart_notice
 from .daemon import runtime_state
 from .daemon_client import DaemonClientError
 
+#: How every hint in this module names the restart command. Agents read these
+#: hints as much as operators do, and a bare "run 'claunch daemon restart'"
+#: reads as an instruction to a session that has no authority to follow it:
+#: a restart takes every managed session down, so only the operator restarts
+#: (from a session the CLI turns the command into a web-UI approval request
+#: -- see _gated_restart). The hint says so in the same breath.
+RESTART_HINT = (
+    "'claunch daemon restart' -- an operator's command; an agent session "
+    "asks the operator instead"
+)
+
 
 def _print_relay_status(client) -> None:
     """Session commands surface relay connectivity constantly (to stderr, so
@@ -320,7 +331,7 @@ def _warn_dropped_auth(args: argparse.Namespace, info: dict) -> None:
         print(
             "  warning: this daemon ignored the auth choice (--borrow/--null) "
             "and the session runs on the profile's own login -- the daemon "
-            "may predate these flags ('claunch daemon restart')",
+            f"may predate these flags ({RESTART_HINT})",
             file=sys.stderr,
         )
 
@@ -627,7 +638,7 @@ def _cmd_spawn(args: argparse.Namespace) -> int:
             print(
                 f"  warning: asked for worktree {args.worktree!r} but the child "
                 f"is in {child.get('cwd')} -- this daemon may predate worktree "
-                "spawning ('claunch daemon restart')",
+                f"spawning ({RESTART_HINT})",
                 file=sys.stderr,
             )
         else:
@@ -1516,9 +1527,10 @@ def _gated_restart() -> int:
     # The waiting announcement goes to stderr, the scripted-console channel
     # (the file's own convention: stdout stays parseable).
     print(
+        f"an agent session has no authority to restart the daemon itself; "
         f"restart requested by session {session} — the web UI decides: "
-        "approve or reject it there, and an unanswered request counts as "
-        "approved after its timeout and restarts on its own",
+        "the operator approves or rejects it there, and an unanswered "
+        "request counts as approved after its timeout and restarts on its own",
         file=sys.stderr,
     )
     if deadline_at is not None:
@@ -1651,7 +1663,8 @@ def _print_wedged(report: dict, confirm: dict) -> None:
     print(
         "  recover with: claunch daemon restart --force  (ends that process "
         "tree and every live session in it; the new daemon restores only "
-        "the sessions marked for restore)",
+        "the sessions marked for restore; an operator's command -- an agent "
+        "session asks the operator instead)",
         file=sys.stderr,
     )
     print(
@@ -1776,7 +1789,7 @@ def _cmd_daemon_token(args: argparse.Namespace) -> int:
         token = runtime_state.rotate_token()
         print(token)
         print(
-            "token rotated; restart the daemon ('claunch daemon restart') so it "
+            f"token rotated; restart the daemon ({RESTART_HINT}) so it "
             "picks up the new value",
             file=sys.stderr,
         )
@@ -1820,7 +1833,7 @@ def _cmd_daemon_config(args: argparse.Namespace) -> int:
             print("(applies within one clock tick; no restart needed)",
                   file=sys.stderr)
         else:
-            print("(restart the daemon to apply: claunch daemon restart)",
+            print(f"(restart the daemon to apply: {RESTART_HINT})",
                   file=sys.stderr)
     return 0
 
@@ -1884,7 +1897,7 @@ def _cmd_daemon_relay(args: argparse.Namespace) -> int:
     else:
         print(f"{args.key} = {'(cleared)' if clear else args.value}")
     if daemon_client.connect() is not None:
-        print("(restart the daemon to apply: claunch daemon restart)", file=sys.stderr)
+        print(f"(restart the daemon to apply: {RESTART_HINT})", file=sys.stderr)
     return 0
 
 
@@ -2513,7 +2526,34 @@ def register(sub) -> None:
     p_daemon = sub.add_parser("daemon", help="manage the session daemon")
     dsub = p_daemon.add_subparsers(dest="daemon_command", required=True)
     for action in ("start", "stop", "status", "restart"):
-        p = dsub.add_parser(action, help=f"{action} the daemon")
+        if action in ("stop", "restart"):
+            # Both take every attached terminal and managed session down. The
+            # help says who may run them, because agents read --help too.
+            p = dsub.add_parser(
+                action,
+                help=f"{action} the daemon (operator command -- an agent "
+                     "session has no authority to run it itself)",
+                description=(
+                    f"{action.capitalize()} the daemon. Every attached "
+                    "terminal and every managed session goes down with it. "
+                    "This is an operator's command: an agent session has no "
+                    "authority to run it on its own, and asks the operator "
+                    "instead. "
+                    + (
+                        "Run from inside a managed session (CLAUNCH_SESSION "
+                        "set) it restarts nothing on the spot -- it files a "
+                        "request that the operator approves or rejects in "
+                        "the web UI (unanswered, it counts as approved after "
+                        "its timeout)."
+                        if action == "restart"
+                        else "It is not gated: from inside a managed session "
+                        "it stops the daemon at once, so an agent must not "
+                        "run it at all."
+                    )
+                ),
+            )
+        else:
+            p = dsub.add_parser(action, help=f"{action} the daemon")
         if action == "restart":
             p.add_argument(
                 "--all", action="store_true",

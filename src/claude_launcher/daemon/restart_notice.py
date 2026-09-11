@@ -413,9 +413,12 @@ def unsolicited_block(name: str, boot: dict, previous: Optional[dict]) -> str:
         "nothing has been driving this session since.",
         "protocol: this is a report, not a task, and restarting again will "
         "not diagnose it. If you were the one who restarted the daemon, you "
-        "did it in a way that leaves no record -- use 'claunch daemon "
-        "restart' so the next one can be traced. Otherwise carry on with the "
-        "work above.",
+        "did it in a way that leaves no record, and you had no authority to: "
+        "an agent session never restarts or stops the daemon itself. "
+        "'claunch daemon restart' is the operator's command; from inside a "
+        "session it only files a request the operator approves in the web "
+        "UI. Ask the operator when a restart is needed, and carry on with "
+        "the work above.",
         "---",
     ])
 

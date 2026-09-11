@@ -415,7 +415,8 @@ def restart(*, stop_timeout: float = 10.0) -> DaemonClient:
         f"{time.monotonic() - started:.0f}s: {last_exc} -- "
         f"the predecessor may still be draining sessions (see "
         f"{paths.log_file()}); re-run 'claunch daemon restart' once "
-        "'claunch daemon status' reports it gone"
+        "'claunch daemon status' reports it gone (an operator's command -- "
+        "an agent session asks the operator instead)"
     )
 
 

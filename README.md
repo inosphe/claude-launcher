@@ -1524,6 +1524,31 @@ claunch daemon restart --all             # restart every RUNNING instance
 is currently serving (stopped instances are skipped, not started) — the "pick
 up new code everywhere" verb after an upgrade.
 
+### Who may restart or stop the daemon
+
+`claunch daemon restart` and `claunch daemon stop` are **operator commands**.
+A restart takes every attached terminal and every managed session down with
+the daemon, so **an agent session has no authority to run either command on
+its own** — it asks the operator instead, and this holds however the agent
+comes across the command (this README, `--help`, a hint printed by another
+`claunch` command). The CLI enforces the split for `restart`: run from inside
+a managed session (`CLAUNCH_SESSION` set) it restarts nothing on the spot and
+files a **restart request** that the operator approves or rejects in the web
+UI; an unanswered request counts as approved after its timeout
+(`daemon/restart_gate.py`). `stop` is not gated, so an agent must not run it
+at all. A cflow step that declares a `restart:` script (this repository's
+`tools/restart_live.*`) is the one sanctioned path from a workflow: the
+daemon's RestartClock runs the script, not the agent's shell.
+
+The gate is enforced in the CLI, by design: an operator's shell keeps its
+immediate `claunch daemon restart`, and the daemon does not try to tell a
+human's Bearer token from a session's. That leaves ways around the gate that
+are technically open and **off-limits to an agent all the same**: running the
+command with `CLAUNCH_SESSION` unset, running `claunch daemon stop`, posting to
+`/api/daemon/shutdown` or `/api/daemon/restart` with the token, or wrapping the
+command in a script. Each of them is the operator's call, and an agent that
+needs a restart asks for one.
+
 Instances make multi-endpoint setups testable on one machine: two named
 instances are two full daemons that can join the same mesh through a relay,
 exactly like two hosts would (`tests/test_multi_daemon_mesh.py` drives that
@@ -2756,7 +2781,9 @@ REST endpoints (JSON, `Bearer` or cookie auth; `/api/health` is open):
 | GET    | `/api/health`                  | liveness + `boot_id` (unauthenticated — a client whose login died in a restart can still tell "not back yet" from "back, log in again") |
 | POST   | `/api/auth/session`            | token → HttpOnly cookie (browser login) |
 | GET    | `/api/daemon`                  | version/`boot_id`/uptime/session count |
-| POST   | `/api/daemon/shutdown`         | graceful stop |
+| POST   | `/api/daemon/shutdown`         | graceful stop — operator only; an agent session has no authority to call it (nor `/api/daemon/restart`), see *Who may restart or stop the daemon* |
+| POST   | `/api/daemon/restart`          | stop and hand the port to a fresh daemon — operator only, same rule as `shutdown` |
+| GET/POST | `/api/daemon/restart-request` | the approval gate a managed session's `claunch daemon restart` files into; `…/approve` and `…/reject` are the web UI's answers |
 | GET/POST | `/api/sessions`              | list / create (`profile` is required and owns the harness; a submitted `harness` is refused; session fields include `{name?, cwd?, args?, env?, resume?, fork_session?}`). Onboarding is optional and composed in the same call: `{mesh?, handle?, role?, connect?, workflow?, context?, task?}` — checked before anything is built, and reported per leg beside the session's own fields |
 | DELETE | `/api/sessions`                | clear all exited records (`?logs=1` deletes their logs; `?running=1` first shuts down and waits out every running session, so this drops *all* of them — `stopped` names what it ended). Records a mesh still names are kept back and reported in `kept` |
 | POST   | `/api/sessions/kill`           | stop every running session (`?force=1`). Records stay, so all of them are still respawnable; `killed`/`failed` name both halves |
