@@ -65,6 +65,11 @@ harnesses:
     auth: api-key
     token_env: ANTHROPIC_API_KEY
     provider_adapter: pi
+    # pi's TUI enables DECSET 2004 at startup; wait for it (and a quiet
+    # screen) before typing the opening task -- pasted at 'immediate' the
+    # lines after the first were lost while pi was still coming up
+    # (measured 2026-09-11: only the delivery stamp reached the model).
+    input_readiness: bracketed-paste
     # pi prints tool results untruncated with truecolour (60–280 KiB/s per
     # session, measured 2026-09-11); the daemon renders its screen only
     # while a viewer is attached and judges idle/busy from output timing.
