@@ -14438,13 +14438,30 @@ function wfDiagramSvg(wf, run, selected) {
       // top of each other.
       const loop = e.to !== "end" && orderIndex.get(e.to) < orderIndex.get(e.from);
       const right = to.x >= from.x;
+      // `end` is not a step box: it is drawn as a 90-wide pill (see its own
+      // <rect> below), so its side is 45 from the centre. Landing on the step
+      // half-width put the head 58px out in open space beside the pill.
+      const toHalf = e.to === "end" ? 45 : NW / 2;
       const y1 = loop ? from.y - 2 : from.y + NH / 2;
       const y2 = loop ? to.y + NH + 2 : (e.to === "end" ? to.y + 15 : to.y + NH / 2);
       const x1 = loop ? from.x : from.x + (right ? NW / 2 : -NW / 2);
-      const x2 = loop ? to.x : to.x + (right ? -NW / 2 + 2 : NW / 2 - 2);
+      // Arrive on the SAME side the route left by. The curve's last control
+      // point is on the rail, so the tangent at the landing runs from the
+      // rail towards x2: a head only points into the box when x2 lies
+      // between the box's centre and the rail. Landing on the far side —
+      // what this did — reversed every reference head on the page, and the
+      // two routes into `end` came out pointing away from it in opposite
+      // directions.
+      const x2 = loop ? to.x : to.x + (right ? toHalf - 2 : -toHalf + 2);
       const bend = (right ? Math.max(x1, x2) + 34 : Math.min(x1, x2) - 34)
         + (right ? 1 : -1) * 16 * n;
-      d = `M ${x1} ${y1} C ${bend} ${y1}, ${bend} ${y2}, ${x2} ${y2}`;
+      // A loop-back re-enters the BOTTOM of its target, so its head has to
+      // point UP. Its last control point therefore sits below the landing
+      // rather than on the rail, which would lay the head flat against the
+      // box's underside and point it sideways.
+      d = loop
+        ? `M ${x1} ${y1} C ${bend} ${y1}, ${x2} ${y2 + 26}, ${x2} ${y2}`
+        : `M ${x1} ${y1} C ${bend} ${y1}, ${bend} ${y2}, ${x2} ${y2}`;
       lx = loop ? x1 : x1 + (right ? 8 : -8);
       ly = y1 - 8;
       anchor = loop ? "middle" : (right ? "start" : "end");
