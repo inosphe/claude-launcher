@@ -240,6 +240,39 @@ option:disabled { color: #6b7280; }
 /* The `+N` counter is the one pill that must not be shortened: "+2" clipped
    to "+" is a lie about how many rooms are hiding behind it. */
 #session-list .rail-mesh-more { flex: none; }
+/* Where the keyboard is, on the card that answers for it. Two states, and
+   the pill is absent for every other arrangement of focus (see syncRailKeys)
+   rather than picking one of the two.
+
+   Red, and only on the card state: that is the state in which an ordinary
+   letter key ends a session, which is not something to mark in the same tone
+   as a label. The rail's other colours are spoken for -- blue says what a
+   session IS, green what the mesh calls it, grey where it belongs, amber
+   that its run wants the reader's keyboard, purple that it is compacting --
+   so a state about the reader's own keyboard would have borrowed one of
+   their meanings. Rigid like .rail-compacting, for the reason the row
+   builder gives: a two-state answer clipped to an ellipsis is worse than
+   none. */
+#session-list .rail-keys {
+  flex: none; font-size: 11px; padding: 1px 5px; border-radius: 9px;
+  white-space: nowrap;
+}
+#session-list .rail-keys.on-card {
+  background: #3d1a1a; color: #f85149; border: 1px solid #6e2c2c;
+}
+#session-list .rail-keys.on-term {
+  background: #191d24; color: #6e7681; border: 1px solid #2a2e36;
+}
+/* And the same fact on the row itself, for the reader who is looking at the
+   row and not at the pill on it. An inset ring rather than a border or an
+   outline, for the reason .goto-flash gives: the row must not move by a
+   pixel when it takes the keyboard. It replaces the browser's default
+   outline instead of removing it -- this IS the focus indicator, and the
+   rail is 260px of near-identical rows where losing it means losing the
+   card that `k` is pointed at. */
+#session-list li.sess-card:focus {
+  outline: none; box-shadow: inset 0 0 0 1px #6e2c2c;
+}
 /* The live compaction state. Purple: not the blue "what it is", not the grey
    "where it belongs" — a transient state that will be gone by the next poll,
    carrying no demand of its own. Rigid: "compacting" must not be half-shown

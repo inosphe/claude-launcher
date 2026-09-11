@@ -729,6 +729,161 @@ function syncSessionFilters(sessions) {
   if (typeof syncBulkActions === "function") syncBulkActions(sessions || [], sessionFilter);
 }
 
+/* ---- rail keyboard focus ---------------------------------------------
+
+   Clicking a card attaches its session, and from that moment two different
+   places can hold the browser's keyboard: the card itself, and the terminal,
+   where every keystroke is typed into the running program. The page said
+   nothing about which of them had it -- the card reads `active` either way,
+   because `active` is a fact about the terminal on screen and not about the
+   keyboard -- so the only way to find out was to press a key and watch where
+   it landed. On this rail the key somebody is reaching for is `k`, and the
+   answer to "where did that go" is either an ended session or a stray letter
+   in a prompt.
+
+   So the card reports it, in the two states where the answer is knowable,
+   and the shortcut is bound to the one state where it cannot be mistaken
+   for typing. */
+
+/* Which element holds the keyboard. Every helper below takes it as an
+   argument so one of them can be asked about a focus move that has not
+   landed yet (focusout, where the document still answers `body`), and
+   resolves it here when the caller does not care. `undefined` means ask the
+   document; `null` means the answer is known and it is nothing. */
+function railActiveElement(active) {
+  if (active !== undefined) return active;
+  return typeof document !== "undefined" ? document.activeElement : null;
+}
+
+/* The card that holds the keyboard right now, by session name; null when
+   something else does. Matched on the class rather than on data-name,
+   because the ⓘ and + buttons inside a row carry the row's name too and a
+   focused button is not the card. */
+function railFocusedCardName(active) {
+  const who = railActiveElement(active);
+  if (!who || !who.classList || !who.classList.contains("sess-card")) return null;
+  return (who.dataset && who.dataset.name) || null;
+}
+
+/* Is the keyboard inside the session window? Two elements mean the same
+   thing to the reader -- the hidden textarea xterm keeps inside #terminal,
+   and the footer's send-keys field -- and what they have in common is that
+   what you type goes to the session rather than to the page. */
+function railKeysInTerminal(active) {
+  if (!active) return false;
+  const field = $("term-input-field");
+  if (field && active === field) return true;
+  const box = $("terminal");
+  return !!(box && box.contains && box.contains(active));
+}
+
+/* What one card has to say about the keyboard: "card", "session", or
+   nothing. Nothing is the honest third answer and it is common -- the
+   search box, a header button and the page behind a modal are all neither
+   -- so the chip goes away rather than leaving one of two claims standing
+   while neither is true. */
+function railKeysState(name, active) {
+  if (!name) return "";
+  const who = railActiveElement(active);
+  if (railFocusedCardName(who) === name) return "card";
+  if (name === currentName && railKeysInTerminal(who)) return "term";
+  return "";
+}
+
+const RAIL_KEYS_CHIP = {
+  card: {
+    text: "⌨ card",
+    title: "the keyboard is on this card — k ends this session, Enter opens it",
+  },
+  term: {
+    text: "⌨ session",
+    title: "the keyboard is in the session window — what you type is typed "
+      + "into the session, k included",
+  },
+};
+
+/* Draw that on every card. Called from the poll (rows are rebuilt under the
+   reader), from the attaches (which row the `⌨ session` chip belongs on
+   changes with the terminal), and from the two document events that move
+   the keyboard. */
+function syncRailKeys(active) {
+  const list = $("session-list");
+  if (!list || !list.querySelectorAll) return;
+  const who = railActiveElement(active);
+  for (const li of list.querySelectorAll("li[data-name]")) {
+    const chip = li.querySelector && li.querySelector(".rail-keys");
+    if (!chip) continue;
+    const state = railKeysState(li.dataset.name, who);
+    const copy = RAIL_KEYS_CHIP[state];
+    chip.textContent = copy ? copy.text : "";
+    chip.title = copy ? copy.title : "";
+    chip.classList.toggle("on-card", state === "card");
+    chip.classList.toggle("on-term", state === "term");
+    chip.classList.toggle("hidden", !copy);
+  }
+}
+
+/* Give the keyboard back to the card that had it before the rebuild.
+   `preventScroll`: the rail is scrolled where the reader left it, and a poll
+   that arrives while they are reading must not jump it. */
+function restoreRailFocus(name) {
+  const list = $("session-list");
+  if (!name || !list || !list.querySelectorAll) return false;
+  for (const li of list.querySelectorAll("li[data-name]")) {
+    if (li.dataset.name !== name || !li.focus) continue;
+    li.focus({ preventScroll: true });
+    return true;
+  }
+  return false;
+}
+
+/* `k` on the focused card. The same request the header's kill button makes,
+   on the card's session rather than the attached one -- the wind-down step
+   included, where the first press settles the session's board issues and a
+   second one stops it now. An exited record has nothing to kill, so the
+   keystroke does nothing there rather than posting a request the route
+   would refuse. */
+function railCardKill(name) {
+  const rec = (typeof sessionsCache === "undefined" ? [] : sessionsCache || [])
+    .find((s) => s.name === name);
+  if (!rec || rec.status === "exited") return false;
+  killSession(name);
+  return true;
+}
+
+/* The card's keys, and only while the card itself holds them: a press that
+   reached the ⓘ or the + belongs to that button, and a modifier belongs to
+   the browser. Enter and Space open the session, which is what the row's
+   click does -- a row that can be focused has to be operable from the
+   keyboard too, and without them the tab stop would be a dead end. */
+function railCardKey(ev, name) {
+  if (!ev || ev.ctrlKey || ev.metaKey || ev.altKey || ev.shiftKey) return false;
+  if (ev.target !== ev.currentTarget) return false;
+  if (ev.key === "Enter" || ev.key === " " || ev.key === "Spacebar") {
+    if (ev.preventDefault) ev.preventDefault();
+    location.hash = "#/s/" + encodeURIComponent(name);
+    return true;
+  }
+  if (ev.key === "k" || ev.key === "K") {
+    if (ev.preventDefault) ev.preventDefault();
+    return railCardKill(name);
+  }
+  return false;
+}
+
+/* Bound on the document rather than per row: the rows are rebuilt by every
+   poll that changes the fleet, and a listener on each of them would go with
+   it. `focusout` fires BEFORE the new element takes focus, so it reads the
+   incoming element off the event instead of the document -- asking the
+   document there answers `body` and the chip would blink off and on again
+   for every move between two cards. */
+if (typeof document !== "undefined" && document.addEventListener) {
+  document.addEventListener("focusin", () => syncRailKeys());
+  document.addEventListener("focusout", (ev) => syncRailKeys(ev.relatedTarget || null));
+}
+
+/* ---- end rail keyboard focus ---------------------------------------- */
+
 async function refreshSessions(options) {
   // The recurring poll asks for every unarchived record, not the running
   // ones alone. The rail's "current" view is running plus killed plus paused,
@@ -801,6 +956,13 @@ async function refreshSessions(options) {
   // the redraw it postpones is owed back the moment the press ends.
   const changed = signature !== list._sessionsSignature;
   const rebuild = changed && !railHeld();
+  // A rebuild throws away the node that holds the keyboard, and the browser
+  // hands focus back to the body without saying so. Remember which card had
+  // it so the same card can take it back below: otherwise a poll landing
+  // between the click and the keypress leaves `k` pointing at nothing, while
+  // the row goes on looking selected.
+  const keyCardHeld = rebuild && typeof railFocusedCardName === "function"
+    ? railFocusedCardName() : null;
   railRedrawPending = changed && !rebuild;
   if (rebuild) list._sessionsSignature = signature;
   if (rebuild) list.innerHTML = "";
@@ -875,6 +1037,14 @@ async function refreshSessions(options) {
     const { session: s, depth } = row;
     const li = document.createElement("li");
     li.dataset.name = s.name;
+    // The row is a card the keyboard can hold. `sess-card` is what the focus
+    // helpers match on -- the ⓘ and + buttons inside carry this same
+    // data-name, so the name alone cannot tell a row from its own controls --
+    // and the tab stop is what puts `k` within reach of somebody who never
+    // touches the pointer. The row already navigates on click, the way a link
+    // does, and a link is a tab stop too.
+    li.classList.add("sess-card");
+    li.tabIndex = 0;
     if (s.name === currentName) li.classList.add("active");
     // The indent goes on the row, not on a spacer element, so the whole row
     // stays one click target and the hover/active background still spans it.
@@ -1025,13 +1195,21 @@ async function refreshSessions(options) {
     // a pill sitting loose on the row pushed the ⓘ, and then the ▸, onto
     // lines of their own. Inside a nowrap box the pills have nowhere to break
     // to and give up width instead, which is what ellipsis is for.
+    // Where the keyboard is, on the card that answers for it (syncRailKeys
+    // fills it in; empty and hidden on every row that holds neither). First
+    // among the pills and never shrunk: a reader checks it precisely when
+    // they are about to press something, and a two-state answer clipped to
+    // an ellipsis would be worse than no answer at all. It costs the other
+    // rows nothing, since at most one of them holds the keyboard.
+    const keys = document.createElement("span");
+    keys.className = "rail-keys hidden";
     const head = document.createElement("span");
     head.className = "rail-head";
     // The agreed ordering (s250 <-> s248, both boards CONFIRMED): the name's
     // alias first, then what the session is, then what it is doing right
     // now, then where it belongs — identity reads left, state after,
     // belonging last.
-    head.append(label, ...(handleBox ? [handleBox] : []),
+    head.append(label, keys, ...(handleBox ? [handleBox] : []),
                 ...(role ? [role] : []), ...(comp ? [comp] : []),
                 ...(meshBox ? [meshBox] : []));
     // Where it runs, then how full it is, then who has been near it: the two
@@ -1044,6 +1222,7 @@ async function refreshSessions(options) {
     li.addEventListener("click", () => {
       location.hash = "#/s/" + encodeURIComponent(s.name);
     });
+    li.addEventListener("keydown", (ev) => railCardKey(ev, s.name));
     // The briefing's one-line and the collapsed ⟳, always on the row.
     decorateBriefingRow(li, s);
     const parent = nestedGroupContainers
@@ -1053,6 +1232,10 @@ async function refreshSessions(options) {
   if (rebuild && nestedGroupContainers && typeof syncSessionGroupStickyOffsets === "function") {
     syncSessionGroupStickyOffsets(list);
   }
+  if (keyCardHeld && typeof restoreRailFocus === "function") {
+    restoreRailFocus(keyCardHeld);
+  }
+  if (typeof syncRailKeys === "function") syncRailKeys();
   // The rows this poll kept still get their seen line moved on (see the
   // signature above for why the stamps are not a reason to rebuild). Not
   // while a press is in flight: swapping the node under the pointer is the
@@ -5419,9 +5602,8 @@ function syncSessionKillControls(name = currentName) {
    kill posts to the kill route (which leaves an exited session alone), and
    remove is the only thing on the page that makes a session unresumable.
    The header shows exactly one of them at a time (see setStatusBadge). */
-async function killCurrentSession() {
-  if (!currentName) return;
-  const name = currentName;
+async function killSession(name) {
+  if (!name) return;
   if (killUiState.has(name)) return;
   // A live session holding board issues is wound down first (the daemon
   // types a settle-the-board block in and waits for that turn); the same
@@ -5466,6 +5648,11 @@ async function killCurrentSession() {
     await refreshSessions({ state: "current" });
   }
 }
+
+/* The attached session, which is what both header buttons act on. The rail's
+   `k` names a card instead, and that card need not be the session on screen;
+   everything else about the two paths is the same request. */
+async function killCurrentSession() { await killSession(currentName); }
 
 $("term-kill").addEventListener("click", killCurrentSession);
 
@@ -7332,6 +7519,8 @@ function restoreTerminal(b) {
   document.querySelectorAll("#session-list li").forEach((li) =>
     li.classList.toggle("active", li.dataset.name === b.name)
   );
+  // Which row the `⌨ session` chip belongs on has just changed.
+  if (typeof syncRailKeys === "function") syncRailKeys();
   markDetailRow();
   unpark(b);
   if (ws && ws.readyState === WebSocket.OPEN && !sessionEnded) {
@@ -7563,6 +7752,8 @@ async function snapshotAttach(name) {
   document.querySelectorAll("#session-list li").forEach((li) =>
     li.classList.toggle("active", li.dataset.name === name)
   );
+  // Which row the `⌨ session` chip belongs on has just changed.
+  if (typeof syncRailKeys === "function") syncRailKeys();
   markDetailRow();
   refreshTermInput();
   updateScrollChip();
@@ -7647,6 +7838,8 @@ function freshAttach(name) {
   document.querySelectorAll("#session-list li").forEach((li) =>
     li.classList.toggle("active", li.dataset.name === name)
   );
+  // Which row the `⌨ session` chip belongs on has just changed.
+  if (typeof syncRailKeys === "function") syncRailKeys();
   // The panel may already have been pointing here (opened from the rail's ⓘ
   // while another terminal was up); walking into that terminal is what makes
   // the header's `details` its close button, so it has to light now.
