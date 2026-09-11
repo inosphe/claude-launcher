@@ -1,15 +1,21 @@
-"""The loopback proxy that puts a routing spec into every JSON request body.
+"""The loopback proxy in front of an API-key provider.
 
 Started on demand by :mod:`claude_launcher.routing` — see that module for why
 it exists and how sessions find it. This file is only the transport: forward
 everything to the upstream unchanged, except that a JSON object body gains the
-configured routing field on the way out.
+configured routing field on the way out (when a spec was given), and every
+``/v1/messages`` answer is watched on its way back so one throughput record
+per request lands in :mod:`claude_launcher.metering`'s files. The session a
+request belongs to arrives in a private ``X-Claunch-Session`` header, which
+is stripped before the upstream sees it.
 
 Run directly with::
 
     python -m claude_launcher.routing_shim --upstream https://openrouter.ai/api/ \\
         --spec '{"order":["coreweave"],"allow_fallbacks":false}' --port 31500 \\
         --fingerprint abc123
+
+``--spec '{}'`` is the metering-only shim.
 
 Exit codes: ``3`` the port was taken (the caller re-probes and reuses whoever
 won it), ``2`` bad arguments.
@@ -27,7 +33,7 @@ import aiohttp
 from aiohttp import web
 from multidict import CIMultiDict
 
-from . import routing
+from . import metering, routing
 
 #: Headers that describe *this* hop and must not be forwarded to the next one.
 #: ``content-length`` is here because the body length changes when the spec is
@@ -75,6 +81,11 @@ def _is_json(content_type: str) -> bool:
     return "json" in content_type.lower()
 
 
+def _metered_path(path: str) -> bool:
+    """Only completions carry usage; a models listing or a count is noise."""
+    return path.rstrip("/").endswith("/messages")
+
+
 async def _proxy(request: web.Request) -> web.StreamResponse:
     cfg = request.app["cfg"]
     body = await request.read()
@@ -82,16 +93,30 @@ async def _proxy(request: web.Request) -> web.StreamResponse:
         request.headers.get("content-type", "")
     ):
         body = routing.merge_body(body, cfg["spec"])
+    headers = _forwarded(request.headers)
+    # The session name rides in on a private header the daemon added for us;
+    # it is ours to read and must not reach the upstream.
+    session_name = headers.popall(metering.SESSION_HEADER, [None])[-1]
+    meter = None
+    if request.method == "POST" and _metered_path(request.path):
+        meter = metering.Meter(session=session_name, path=request.path)
+        # Ask for an uncompressed body: the meter reads the usage out of the
+        # bytes going past, and a gzip'd answer would be forwarded blind.
+        headers.popall("accept-encoding", None)
+        headers["accept-encoding"] = "identity"
     session: aiohttp.ClientSession = request.app["session"]
     try:
         upstream = await session.request(
             request.method,
             _target(cfg["upstream"], request),
-            headers=_forwarded(request.headers),
+            headers=headers,
             data=body,
             allow_redirects=False,
         )
     except aiohttp.ClientError as exc:
+        if meter is not None:
+            meter.status = 502
+            _record(request.app, meter)
         return web.json_response(
             {
                 "type": "error",
@@ -104,6 +129,8 @@ async def _proxy(request: web.Request) -> web.StreamResponse:
             status=502,
         )
     async with upstream:
+        if meter is not None:
+            meter.headers(upstream.status, upstream.headers)
         # Streaming, not buffering: an SSE completion must reach the client
         # token by token, exactly as it arrives.
         response = web.StreamResponse(
@@ -112,11 +139,25 @@ async def _proxy(request: web.Request) -> web.StreamResponse:
         await response.prepare(request)
         try:
             async for chunk in upstream.content.iter_any():
+                if meter is not None:
+                    meter.chunk(chunk)
                 await response.write(chunk)
         except (aiohttp.ClientError, ConnectionResetError):
             pass  # either end hung up mid-stream; nothing left to say
+        if meter is not None:
+            _record(request.app, meter)
         await response.write_eof()
         return response
+
+
+def _record(app: web.Application, meter: "metering.Meter") -> None:
+    cfg = app["cfg"]
+    try:
+        metering.append(
+            cfg["fingerprint"], meter.finish(), upstream=cfg["upstream"]
+        )
+    except Exception as exc:  # noqa: BLE001 - a record must never break a request
+        print(f"metering record failed: {exc}", file=sys.stderr)
 
 
 async def _health(request: web.Request) -> web.Response:
@@ -200,8 +241,8 @@ def main(argv=None) -> int:
     except ValueError as exc:
         print(f"bad --spec: {exc}", file=sys.stderr)
         return 2
-    if not isinstance(spec, dict) or not spec:
-        print("--spec must be a non-empty JSON object", file=sys.stderr)
+    if not isinstance(spec, dict):
+        print("--spec must be a JSON object ({} for metering only)", file=sys.stderr)
         return 2
     app = build_app(args.upstream, spec, args.fingerprint)
     return asyncio.run(serve(app, args.port))

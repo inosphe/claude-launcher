@@ -51,7 +51,7 @@ import urllib.request
 from pathlib import Path
 from typing import Dict, List, Optional
 
-from . import config, store
+from . import config, metering, store
 
 #: Per-provider config key holding the body spec (``providers.<name>.routing``).
 SPEC_KEY = "routing"
@@ -155,7 +155,11 @@ def canonical(block: Dict) -> str:
 
 
 def fingerprint(upstream: str, block: Dict) -> str:
-    """Identity of one shim: the upstream it fronts and the spec it merges."""
+    """Identity of one shim: the upstream it fronts and the spec it merges.
+
+    An empty spec is a valid identity — the metering-only shim for that
+    upstream (see :mod:`metering`).
+    """
     return hashlib.sha256(
         f"{upstream}\n{canonical(block)}".encode("utf-8")
     ).hexdigest()[:16]
@@ -169,7 +173,7 @@ def merge_body(raw: bytes, block: Dict) -> bytes:
     body that already carries the field is left alone: an explicit choice by
     whoever built the request outranks the launcher's default.
     """
-    if not raw:
+    if not raw or not block:
         return raw
     try:
         doc = json.loads(raw.decode("utf-8"))
@@ -213,6 +217,23 @@ def candidate_ports(fp: str) -> List[int]:
 
 def local_url(port: int) -> str:
     return f"http://127.0.0.1:{port}/"
+
+
+def is_shim_url(url: Optional[str]) -> bool:
+    """Whether ``url`` is one :func:`local_url` could have produced.
+
+    A loopback URL on a port inside the shim window. Only the daemon uses it,
+    to decide whether the session header (see :mod:`metering`) has a shim to
+    read it — a user's own loopback upstream on another port is left alone.
+    """
+    if not url or not url.startswith("http://127.0.0.1:"):
+        return False
+    rest = url[len("http://127.0.0.1:"):]
+    port_text = rest.split("/", 1)[0]
+    if not port_text.isdigit():
+        return False
+    port = int(port_text)
+    return _PORT_BASE <= port < _PORT_BASE + _PORT_SPAN + _PORT_TRIES
 
 
 def health(port: int, timeout: float = 0.6) -> Optional[dict]:
@@ -435,29 +456,53 @@ def ensure_shim(upstream: str, block: Dict) -> str:
 
 
 def apply(env: dict, provider_name: str, doc: Optional[dict] = None) -> None:
-    """Point ``env``'s base URL at a shim when ``provider_name`` wants routing.
+    """Point ``env``'s base URL at a shim when ``provider_name`` goes through one.
 
-    A no-op for providers without a ``routing`` block. When one is declared the
-    shim *must* come up: falling back to the direct URL would silently drop the
-    pin, which is precisely the failure this feature exists to prevent, so a
-    shim that cannot start fails the launch instead.
+    Two reasons send a provider through the shim, and they differ in what a
+    shim that will not start means:
+
+    * a ``routing`` block — the shim *must* come up: falling back to the
+      direct URL would silently drop the pin, which is precisely the failure
+      this feature exists to prevent, so the launch fails instead;
+    * metering (:mod:`metering`, on by default for every provider that is not
+      the Anthropic OAuth route) — a record is observability, not
+      correctness, so a shim that cannot start is reported on stderr and the
+      session launches against the upstream directly.
+
+    ``default``/``claude`` (the OAuth route) never come here: their env has
+    no ``ANTHROPIC_BASE_URL`` from the config file, and that key is the whole
+    handle this function has.
     """
+    doc = store.load() if doc is None else doc
     block = spec(provider_name, doc)
-    if not block:
+    metered = metering.provider_enabled(provider_name, doc)
+    if not block and not metered:
         return
     upstream = env.get("ANTHROPIC_BASE_URL")
     if not upstream:
-        raise RoutingError(
-            f"provider {provider_name!r} declares {SPEC_KEY} but sets no "
-            "ANTHROPIC_BASE_URL to route to"
-        )
+        if block:
+            raise RoutingError(
+                f"provider {provider_name!r} declares {SPEC_KEY} but sets no "
+                "ANTHROPIC_BASE_URL to route to"
+            )
+        return  # nothing to front: the harness talks to its built-in default
     # No "is this already a shim?" guard: ``ANTHROPIC_BASE_URL`` is a backend
     # key, stripped from the inherited environment before any layer is applied
     # (see :data:`runner.BACKEND_ENV_KEYS`), so the value here always comes
     # from the config file. A guard keyed on "looks like loopback" would
     # instead skip the rewrite for a locally hosted upstream — silently
     # dropping the pin, which is the failure this whole module exists to stop.
-    env["ANTHROPIC_BASE_URL"] = ensure_shim(upstream, block)
+    if block:
+        env["ANTHROPIC_BASE_URL"] = ensure_shim(upstream, block)
+        return
+    try:
+        env["ANTHROPIC_BASE_URL"] = ensure_shim(upstream, {})
+    except RoutingError as exc:
+        print(
+            f"claunch: metering shim for provider {provider_name!r} unavailable, "
+            f"launching against {upstream} directly (no TPS records): {exc}",
+            file=sys.stderr,
+        )
 
 
 # --------------------------------------------------------------------------- #
