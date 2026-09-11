@@ -95,6 +95,21 @@ class OnboardError(Exception):
     """
 
 
+def _subroles(raw) -> Tuple[str, ...]:
+    """A request's ``subroles``: a list of names, or one comma-separated
+    string. Lower-cased here so the early checks below and the join agree."""
+    if isinstance(raw, str):
+        raw = raw.split(",")
+    if not isinstance(raw, (list, tuple)):
+        return ()
+    out = []
+    for name in raw:
+        name = str(name or "").strip().lower()
+        if name and name not in out:
+            out.append(name)
+    return tuple(out)
+
+
 @dataclass(frozen=True)
 class Plan:
     """A validated onboarding request, ready to be applied to a new session."""
@@ -102,6 +117,9 @@ class Plan:
     mesh: str = ""
     handle: str = ""
     role: str = ""
+    #: Further roles the member answers for besides ``role`` — see
+    #: ``Member.subroles``. Resolved by the join like the primary is.
+    subroles: Tuple[str, ...] = ()
     connect: Tuple[str, ...] = ()
     workflow: str = ""
     context: str = ""
@@ -315,6 +333,7 @@ def preflight(
     mesh = str(body.get("mesh") or "").strip()
     handle = str(body.get("handle") or "").strip()
     role = str(body.get("role") or "").strip()
+    subroles = _subroles(body.get("subroles"))
     workflow = str(body.get("workflow") or "").strip()
     connect = tuple(
         str(h).strip() for h in (body.get("connect") or []) if str(h).strip()
@@ -348,13 +367,22 @@ def preflight(
                     local_mesh.roleset.resolve(wanted_handle, role)
                 except mesh_roles.RoleError as exc:
                     raise OnboardError(str(exc)) from None
+            for sub in subroles:
+                # Same early refusal for a subrole the vocabulary lacks.
+                if local_mesh.roleset.canonical(sub) is None:
+                    known = ", ".join(sorted(local_mesh.roleset.roles))
+                    raise OnboardError(
+                        f"unknown subrole {sub!r} (known: {known})"
+                    )
             # An exclusive role already held live fails the CREATE, not just
             # the join: a session built anyway would come up outside its mesh,
             # and a half-arrived member is worse than a refused request. The
             # join re-checks (it is the authority), so a race between here and
             # there still cannot seat two — this is the early, legible no.
             if wanted_handle:
-                holder = mesh_mgr.exclusive_holder(local_mesh, wanted_handle, role)
+                holder = mesh_mgr.exclusive_holder(
+                    local_mesh, wanted_handle, role, subroles
+                )
                 if holder is not None:
                     raise OnboardError(
                         f"mesh {mesh!r} already has a live "
@@ -364,10 +392,10 @@ def preflight(
                         f"worker that integrates upward), or retire "
                         f"{holder.handle!r} first"
                     )
-    elif role or handle or connect:
+    elif role or handle or connect or subroles:
         raise OnboardError(
-            "'role', 'handle' and 'connect' only mean something with a "
-            "'mesh' to join"
+            "'role', 'subroles', 'handle' and 'connect' only mean something "
+            "with a 'mesh' to join"
         )
 
     if workflow and workflow.endswith((".yaml", ".yml")):
@@ -402,6 +430,7 @@ def preflight(
         mesh=mesh,
         handle=handle,
         role=role,
+        subroles=subroles,
         connect=connect,
         workflow=workflow,
         context=str(body.get("context") or ""),
@@ -613,6 +642,7 @@ async def _join(plan: Plan, name: str, *, mesh_mgr) -> dict:
         with mesh_mgr.defer_briefing(name):
             member = await mesh_mgr.join(
                 plan.mesh, name, handle=plan.handle, role=plan.role,
+                subroles=plan.subroles,
             )
     except MeshError as exc:
         return {"ok": False, "error": str(exc)}
@@ -624,6 +654,7 @@ async def _join(plan: Plan, name: str, *, mesh_mgr) -> dict:
         "mesh": plan.mesh,
         "handle": member.handle,
         "role": member.role,
+        "subroles": list(member.subroles),
     }
     mesh = mesh_mgr.get(plan.mesh)
     for peer in sorted(set(plan.connect)):

@@ -89,6 +89,9 @@ def _cmd_new_session(args: argparse.Namespace) -> int:
     if args.role and not getattr(args, "mesh", None):
         print("error: --role requires --mesh", file=sys.stderr)
         return 1
+    if getattr(args, "subroles", None) and not getattr(args, "mesh", None):
+        print("error: --subrole requires --mesh", file=sys.stderr)
+        return 1
     # Resolve from the shared config without requiring a local directory: a
     # CLI may be pointed at a named daemon instance whose reconciled storage
     # is authoritative. The daemon still performs the existence check.
@@ -215,6 +218,8 @@ def _cmd_new_session(args: argparse.Namespace) -> int:
         body["restore"] = args.restore
     if args.role:
         body["role"] = args.role
+    if getattr(args, "subroles", None):
+        body["subroles"] = list(args.subroles)
     if args.borrow:
         body["borrow"] = args.borrow
     if args.null_token:
@@ -568,6 +573,7 @@ def _cmd_spawn(args: argparse.Namespace) -> int:
             ("mesh", args.mesh),
             ("handle", args.handle),
             ("role", args.role),
+            ("subroles", getattr(args, "subroles", None)),
             ("connect", args.connect),
             ("workflow", args.workflow),
             ("context", args.context),
@@ -2055,6 +2061,11 @@ def register(sub) -> None:
         "delivered in the session opening and recovered by reminders",
     )
     p_new.add_argument(
+        "--subrole", dest="subroles", action="append", metavar="ROLE",
+        help="a further role the session also answers for (repeatable): "
+        "requires --mesh; e.g. --role leader --subrole reviewer",
+    )
+    p_new.add_argument(
         "--resume", nargs="?", const="", metavar="SESSION|UUID",
         help="open an existing conversation instead of a new one: another "
         "session's name, a conversation uuid, or bare for claude's picker",
@@ -2177,6 +2188,10 @@ def register(sub) -> None:
     )
     p_spawn.add_argument("--as", dest="handle", help="the child's mesh handle")
     p_spawn.add_argument("--role", help="the child's mesh role")
+    p_spawn.add_argument(
+        "--subrole", dest="subroles", action="append", metavar="ROLE",
+        help="a further role the child also answers for (repeatable)",
+    )
     p_spawn.add_argument(
         "--connect", action="append", metavar="HANDLE",
         help="another member the child may message (repeatable); it can "

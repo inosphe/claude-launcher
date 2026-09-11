@@ -150,7 +150,7 @@ Machine-local runtime state, next to the other daemon state:
 
 ```
 ~/.claude-launcher/daemon/mesh/<mesh>/
-  mesh.json      {name, created_at, members: {handle: {session, machine, role, joined_at}},
+  mesh.json      {name, created_at, members: {handle: {session, machine, role, subroles, joined_at}},
                   links: {machine: {token_in, token_out, created_at}},
                   invites: {token: minted_at}}
   log.jsonl      append-only message log (one line per send or peer ingest)
@@ -1089,6 +1089,26 @@ put two live holders back on the roster (the flag guards joins, not
 history); and the **default role may not be exclusive** — an upload that
 tries is refused whole, since the second unlabelled join of a mesh's life
 must not be an error nobody asked for.
+
+**Subroles.** A member has one primary `role` and may hold further
+`subroles` (`claunch mesh join --subrole reviewer`, `claunch spawn --subrole`,
+the `subroles` field of the join/spawn bodies and the MCP `spawn` tool, or
+after the fact `claunch mesh subroles MESH HANDLE --add reviewer`, which is
+`PATCH /api/mesh/{mesh}/members/{handle}/subroles`). The primary is what the
+member **is** — its stance, its briefing, the first word of its roster label
+(`leader+reviewer`); a subrole is a role it also **answers for**. Every
+lookup that asks "who holds role X" reads the whole set (`Member.roles`, the
+primary first; a roster row publishes it as `roles`): a delegated decision's
+candidates (`from: [{role: reviewer}]` finds a leader that took `reviewer`),
+a workflow's `filter_roles` (a whitelist admits a driver holding the role in
+any position, a blacklist turns one away), the policy engine's stall
+watchers and polled roles, an exclusive role's live holder, an `auto_link`
+rule, and the roles view's member counts. Subroles resolve through the same
+vocabulary at join (aliases apply, an unknown one refuses the join, an
+exclusive role is exclusive however it is held) and are stored as plain
+names like the primary — uploads do not rewrite them. The case that
+motivated it: a leader that must also be found as the reviewer a workflow
+delegates to, without a second session.
 
 **What a role drives** today: the stance and content id in the join briefing,
 `stall_watch` (who receives a stuck-member warning), `exclusive` (at most one

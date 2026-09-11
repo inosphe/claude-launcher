@@ -98,7 +98,7 @@ candidates(entry) =
       mesh members this session may reach      # connected(me, them)
     ∩ not me, not my descendant                # spawn tree
     ∩ ancestors only, if scope: ancestor       # spawn tree
-    ∩ member role == entry.role
+    ∩ entry.role in member roles               # primary role or a subrole
     ∩ session is local to this daemon and alive
 ```
 

@@ -41,6 +41,10 @@ perfectly well.
 
 **Uploads are not retroactive.** A member's role is resolved once, at join,
 and stored as a plain string; changing the vocabulary never rewrites it.
+A member may also hold *subroles* — further roles it answers for, resolved
+through the same vocabulary at join and stored beside the primary (see
+``mesh.Member.subroles``); a role lookup reads ``Member.roles``, the primary
+first, so a rule naming ``reviewer`` matches a leader that took it as one.
 A member whose role no longer exists simply matches no rule — which needs no
 code, and is the whole reason this stays simple.
 
@@ -57,7 +61,7 @@ from __future__ import annotations
 import copy
 import logging
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 import yaml
 
@@ -170,6 +174,14 @@ class LinkFacts:
     role: str
     tier: int
     root: str
+    #: Every role the member holds — its primary followed by its subroles.
+    #: Empty means "the primary alone" so a caller that predates subroles
+    #: (or a test building facts by hand) keeps reading the same answer.
+    roles: Tuple[str, ...] = ()
+
+    @property
+    def held(self) -> Tuple[str, ...]:
+        return self.roles or (self.role,)
 
 
 @dataclass(frozen=True)
@@ -180,7 +192,11 @@ class LinkPattern:
     tier: Optional[int] = None
 
     def matches(self, facts: LinkFacts) -> bool:
-        if self.role is not None and facts.role != self.role:
+        # A rule naming a role matches a member that holds it in ANY
+        # position: a leader carrying `reviewer` as a subrole is wired to the
+        # workers exactly as a plain reviewer is, which is the point of
+        # taking the subrole.
+        if self.role is not None and self.role not in facts.held:
             return False
         if self.tier is not None and facts.tier != self.tier:
             return False

@@ -108,6 +108,8 @@ def _cmd_join(args: argparse.Namespace) -> int:
         return 1
     client = daemon_client.ensure_running()
     body = {"session": session, "handle": args.handle or "", "role": args.role or ""}
+    if getattr(args, "subroles", None):
+        body["subroles"] = list(args.subroles)
     if args.code:
         body["code"] = args.code
     member = client.post(f"/api/mesh/{args.mesh}/members", body)
@@ -126,7 +128,7 @@ def _cmd_join(args: argparse.Namespace) -> int:
     local = args.mesh.split("@")[0]  # 'dev@pca' is mounted locally as 'dev'
     print(
         f"joined mesh {local!r} as {member['handle']!r} "
-        f"(role: {member['role']}, session: {member['session']})"
+        f"(role: {_role_label(member)}, session: {member['session']})"
     )
     print(
         f"send: claunch mesh send {local} '*' \"...\"  |  "
@@ -327,6 +329,8 @@ def _cmd_add(args: argparse.Namespace) -> int:
             handle = ""
     body = {"machine": machine, "session": session,
             "handle": handle or "", "role": args.role or ""}
+    if getattr(args, "subroles", None):
+        body["subroles"] = list(args.subroles)
     result = client.post(f"/api/mesh/{args.mesh}/invitations", body)
     member = result.get("member", {})
     print(
@@ -608,6 +612,53 @@ def _cmd_revoke(args: argparse.Namespace) -> int:
     return 0
 
 
+def _role_label(member: dict) -> str:
+    """``leader+reviewer`` — a member's primary role and its subroles."""
+    roles = member.get("roles")
+    if isinstance(roles, list) and roles:
+        return "+".join(str(r) for r in roles)
+    return str(member.get("role") or "")
+
+
+def _cmd_subroles(args: argparse.Namespace) -> int:
+    """Show or change a member's subroles."""
+    client = daemon_client.ensure_running()
+    handle = args.handle or _own_session(args)
+    if not handle:
+        print(
+            "error: no handle — name one, or run inside a claunch session",
+            file=sys.stderr,
+        )
+        return 1
+    if args.set is not None or args.add or args.remove:
+        body: dict = {}
+        if args.set is not None:
+            body["set"] = [s for s in args.set.split(",") if s.strip()]
+        if args.add:
+            body["add"] = list(args.add)
+        if args.remove:
+            body["remove"] = list(args.remove)
+        member = client.patch(
+            f"/api/mesh/{args.mesh}/members/{handle}/subroles", body
+        )
+    else:
+        info = client.get(f"/api/mesh/{args.mesh}")
+        member = next(
+            (m for m in info.get("members", []) if m.get("handle") == handle),
+            None,
+        )
+        if member is None:
+            print(f"error: no member {handle!r} in mesh {args.mesh!r}",
+                  file=sys.stderr)
+            return 1
+    subs = member.get("subroles") or []
+    print(
+        f"{member.get('handle')} in mesh {args.mesh!r}: role "
+        f"{member.get('role')}, subroles: {', '.join(subs) or '-'}"
+    )
+    return 0
+
+
 def _cmd_members(args: argparse.Namespace) -> int:
     client = daemon_client.ensure_running()
     info = client.get(f"/api/mesh/{args.mesh}")
@@ -627,7 +678,7 @@ def _cmd_members(args: argparse.Namespace) -> int:
         if m.get("owed"):
             flags += f" owed:{m['owed']}"
         print(
-            f"{m['handle']:<16} {m['role']:<10} {where + '/' + m['session']:<28} "
+            f"{m['handle']:<16} {_role_label(m):<10} {where + '/' + m['session']:<28} "
             f"[{m['reachability']}]{flags}"
         )
     # The open pairs are printed, not the closed ones: a join wires a member
@@ -901,6 +952,12 @@ def register(sub) -> None:
     p.add_argument("--as", dest="handle", metavar="HANDLE",
                    help="handle inside the mesh (default: the session name)")
     p.add_argument("--role", help="member role (default: inferred from the handle)")
+    p.add_argument(
+        "--subrole", dest="subroles", action="append", metavar="ROLE",
+        help="a further role this member also answers for (repeatable) — "
+             "e.g. a leader that is also a reviewer; workflows and the "
+             "policy engine find it under either name",
+    )
     p.add_argument("--session", help="session to enrol (default: $CLAUNCH_SESSION)")
     p.add_argument("--code", help="invite ticket from 'claunch mesh invite' -- "
                                   "pre-approves the join; without one the "
@@ -976,7 +1033,28 @@ def register(sub) -> None:
     p.add_argument("--as", dest="handle", metavar="HANDLE", default=None,
                    help="handle inside the mesh (default: the session name)")
     p.add_argument("--role", help="member role (default: inferred from the handle)")
+    p.add_argument(
+        "--subrole", dest="subroles", action="append", metavar="ROLE",
+        help="a further role the member also answers for (repeatable)",
+    )
     p.set_defaults(func=_cmd_add)
+
+    p = msub.add_parser(
+        "subroles",
+        help="show or change a member's subroles — the roles it answers for "
+             "besides its primary one (e.g. a leader that is also a reviewer)",
+    )
+    p.add_argument("mesh")
+    p.add_argument("handle", nargs="?",
+                   help="member handle (default: this session)")
+    p.add_argument("--add", action="append", metavar="ROLE",
+                   help="take this role as a subrole (repeatable)")
+    p.add_argument("--remove", action="append", metavar="ROLE",
+                   help="drop this subrole (repeatable)")
+    p.add_argument("--set", metavar="ROLE[,ROLE...]",
+                   help="replace the whole subrole list ('' clears it)")
+    p.add_argument("--session", help=argparse.SUPPRESS)
+    p.set_defaults(func=_cmd_subroles)
 
     p = msub.add_parser(
         "peers",

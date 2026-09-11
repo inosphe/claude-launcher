@@ -37,7 +37,7 @@ import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable, Dict, Iterable, List, Optional, Tuple, Union
+from typing import Callable, Dict, Iterable, List, Optional, Sequence, Tuple, Union
 
 import yaml
 
@@ -468,6 +468,7 @@ class Member:
         *,
         machine: str = "",
         role: str = "",
+        subroles: Optional[Sequence[str]] = None,
         joined_at: str = "",
         wired: bool = False,
     ) -> None:
@@ -475,6 +476,17 @@ class Member:
         self.session = session
         self.machine = machine  # "" = this daemon; set by federation later
         self.role = role or infer_role(handle)
+        #: Further roles this member HOLDS besides :attr:`role`, in the order
+        #: they were given. The primary role stays the one thing a member IS —
+        #: its stance, its briefing, the label the roster prints first — while
+        #: a subrole is a role it also answers for: every lookup that asks
+        #: "who holds role X" (a delegated decision's candidates, a workflow's
+        #: ``filter_roles``, the policy engine's watchers and polled roles,
+        #: an exclusive role's live holder, an auto-link rule) reads
+        #: :attr:`roles`, which is the primary followed by these. Resolved at
+        #: join through the mesh's vocabulary exactly like the primary and
+        #: stored as plain names; a role-set upload never rewrites them.
+        self.subroles: List[str] = _dedupe_roles(subroles or (), skip=self.role)
         self.joined_at = joined_at or utcnow()
         #: This member's edges were decided by its join (see
         #: ``MeshManager._wire_member``), so a pair with no recorded edge is
@@ -491,12 +503,34 @@ class Member:
     def local(self) -> bool:
         return not self.machine
 
+    @property
+    def roles(self) -> List[str]:
+        """Every role this member holds: the primary first, then its subroles.
+
+        The one list a role lookup should read. Comparing ``member.role`` alone
+        asks "what is this member", which is the right question for its stance
+        and nothing else; "does it hold role X" is ``X in member.roles``.
+        """
+        return [self.role, *self.subroles]
+
+    def holds(self, role: str) -> bool:
+        return str(role or "").strip().lower() in self.roles
+
+    def role_label(self) -> str:
+        """``leader+reviewer`` — the roster's one-word spelling of the set."""
+        return "+".join(self.roles)
+
     def to_dict(self) -> dict:
         return {
             "handle": self.handle,
             "session": self.session,
             "machine": self.machine,
             "role": self.role,
+            "subroles": list(self.subroles),
+            # Derived, and published so every reader of a roster row — the
+            # cflow pool, a mirror, the CLI — asks "holds X?" against one
+            # list instead of re-deriving it. `from_dict` ignores it.
+            "roles": self.roles,
             "joined_at": self.joined_at,
             "wired": self.wired,
         }
@@ -508,9 +542,37 @@ class Member:
             str(doc.get("session") or ""),
             machine=str(doc.get("machine") or ""),
             role=str(doc.get("role") or ""),
+            # A record written by a daemon that predates subroles carries no
+            # key, and reads as a member of its primary role alone.
+            subroles=_read_subroles(doc.get("subroles")),
             joined_at=str(doc.get("joined_at") or ""),
             wired=bool(doc.get("wired")),
         )
+
+
+def _read_subroles(raw) -> List[str]:
+    """A ``subroles`` value as it arrives in a document or a request body.
+
+    A list of names is the shape; a comma-separated string is accepted from
+    a hand-typed body. Anything else reads as no subroles rather than as an
+    error, because this runs on records that crossed a federation link from
+    a daemon whose schema this build may not know.
+    """
+    if isinstance(raw, str):
+        raw = raw.split(",")
+    if not isinstance(raw, (list, tuple)):
+        return []
+    return [str(r).strip().lower() for r in raw if str(r or "").strip()]
+
+
+def _dedupe_roles(names: Sequence[str], *, skip: str = "") -> List[str]:
+    """Order-preserving unique lower-cased names, without ``skip``."""
+    out: List[str] = []
+    for name in names:
+        name = str(name or "").strip().lower()
+        if name and name != skip and name not in out:
+            out.append(name)
+    return out
 
 
 class Mesh:
@@ -1158,6 +1220,8 @@ class MeshManager:
                             "mesh": mesh.name,
                             "handle": member.handle,
                             "role": member.role,
+                            "subroles": list(member.subroles),
+                            "roles": member.roles,
                             "joined_at": member.joined_at,
                             "members": len(mesh.members),
                         }
@@ -1698,9 +1762,15 @@ class MeshManager:
         *,
         handle: str = "",
         role: str = "",
+        subroles: Sequence[str] = (),
         code: Optional[str] = None,
     ):
         """Join a local session into a mesh — THE establishment verb.
+
+        ``subroles`` are further roles the member answers for besides
+        ``role`` (see :attr:`Member.subroles`); each is resolved through the
+        mesh's vocabulary and an unknown one refuses the join like an unknown
+        primary role does.
 
         ``name`` is a mesh name or a global address ``name@machine`` (the
         primary daemon's relay name). For a mesh already known here (owned
@@ -1727,7 +1797,7 @@ class MeshManager:
                         + f" — it cannot also join {mesh_name}@{primary}"
                     )
             return await self._join_local(
-                mesh_name, session, handle=handle, role=role
+                mesh_name, session, handle=handle, role=role, subroles=subroles
             )
         if not primary:
             raise MeshError(
@@ -1736,7 +1806,8 @@ class MeshManager:
                 f"(claunch mesh create {mesh_name})"
             )
         return await self._join_remote(
-            mesh_name, primary, invite_token, session, handle=handle, role=role
+            mesh_name, primary, invite_token, session,
+            handle=handle, role=role, subroles=subroles,
         )
 
     def _parse_addr(self, name: str, code: Optional[str]):
@@ -1780,6 +1851,7 @@ class MeshManager:
         *,
         handle: str,
         role: str,
+        subroles: Sequence[str] = (),
     ):
         """Establishment join: ask ``primary`` to admit this session.
 
@@ -1817,6 +1889,7 @@ class MeshManager:
             "session": session,
             "handle": handle,
             "role": role,
+            "subroles": list(subroles),
             "reply_token": reply_token,
         }
         if invite_token:
@@ -1838,6 +1911,7 @@ class MeshManager:
                 "session": session,
                 "handle": handle,
                 "role": role,
+                "subroles": list(subroles),
                 "requested_at": utcnow(),
             }
             self._outgoing[rid] = rec
@@ -1931,6 +2005,7 @@ class MeshManager:
         *,
         handle: str = "",
         role: str = "",
+        subroles: Sequence[str] = (),
     ) -> Member:
         """Member join into a mesh already present here (owned or mirror).
 
@@ -1965,6 +2040,7 @@ class MeshManager:
                     "session": session,
                     "handle": handle,
                     "role": role,
+                    "subroles": list(subroles),
                     # The authority wires the member, but only this daemon can
                     # see the session tree behind it — and the lineage it will
                     # eventually learn from our sync acks has not been sent
@@ -1996,7 +2072,7 @@ class MeshManager:
         # walks the session tree, and the joining session is not yet in the
         # roster to be found by it.
         parent = self.parent_handle_for(mesh, session)
-        member = Member(handle, session, role=self._resolve_role(mesh, handle, role))
+        member = self._new_member(mesh, handle, session, role, subroles)
         # Absolute from birth on a federated mesh, for the reason in
         # _absolutize_roster: that runs when a mesh federates, at a handover
         # and on migration — none of which is a join, so a member enrolled
@@ -2110,7 +2186,7 @@ class MeshManager:
         """
         reachable = mesh.neighbours(member.handle)
         others = ", ".join(
-            f"{h} ({mesh.members[h].role})" for h in reachable
+            f"{h} ({mesh.members[h].role_label()})" for h in reachable
         ) or "(nobody else yet)"
         hidden = len(mesh.members) - 1 - len(reachable)
         return (
@@ -2118,6 +2194,11 @@ class MeshManager:
             "# claunch mesh: join briefing -- machine-generated, not typed by the user\n"
             f"mesh: {mesh.name}\n"
             f"you: {member.handle} (role: {member.role})\n"
+            + (
+                f"subroles: {', '.join(member.subroles)} — you also answer "
+                "for these roles when a workflow or a peer looks one up\n"
+                if member.subroles else ""
+            ) +
             f"members: {others}\n"
             + (
                 f"note: {hidden} other member(s) exist that you are not "
@@ -2923,7 +3004,57 @@ class MeshManager:
             )
         return resolved
 
-    def exclusive_holder(self, mesh: Mesh, handle: str, role: str) -> Optional[Member]:
+    def _resolve_subroles(
+        self, mesh: Mesh, primary: str, subroles: Sequence[str]
+    ) -> List[str]:
+        """Settle the subroles to STORE next to ``primary``.
+
+        Each name goes through the same alias index the primary does, so
+        ``--subrole qa`` stores ``reviewer``; an unknown name is refused, not
+        dropped, for the reason ``RoleSet.resolve`` gives. The primary is
+        never repeated as a subrole, and an ``exclusive`` role is exclusive
+        however it is held — a second live ``leader`` is refused whether it
+        arrives as a primary or as a subrole.
+        """
+        out: List[str] = []
+        for name in _read_subroles(list(subroles)):
+            canon = mesh.roleset.canonical(name)
+            if canon is None:
+                known = ", ".join(sorted(mesh.roleset.roles))
+                raise MeshError(f"unknown subrole {name!r} (known: {known})")
+            if canon == primary or canon in out:
+                continue
+            role_def = mesh.roleset.get(canon)
+            if role_def is not None and role_def.exclusive:
+                holder = self._live_holder(mesh, canon)
+                if holder is not None:
+                    raise MeshConflict(
+                        f"role {canon!r} is exclusive in mesh {mesh.name!r} "
+                        f"and {holder.handle!r} already holds it — it cannot "
+                        f"be taken as a subrole either"
+                    )
+            out.append(canon)
+        return out
+
+    def _new_member(
+        self, mesh: Mesh, handle: str, session: str, role: str,
+        subroles: Sequence[str], *, machine: str = "",
+    ) -> Member:
+        """A member record with its role AND subroles resolved for this mesh.
+
+        The one constructor every join funnel uses, so a subrole is settled in
+        exactly the place the primary is.
+        """
+        primary = self._resolve_role(mesh, handle, role)
+        return Member(
+            handle, session, machine=machine, role=primary,
+            subroles=self._resolve_subroles(mesh, primary, subroles),
+        )
+
+    def exclusive_holder(
+        self, mesh: Mesh, handle: str, role: str,
+        subroles: Sequence[str] = (),
+    ) -> Optional[Member]:
         """The live member blocking ``(handle, role)`` from joining, or None.
 
         Public so session creation can ask the question BEFORE building
@@ -2931,15 +3062,73 @@ class MeshManager:
         its mesh is refused outright rather than half-succeeding. A role the
         vocabulary cannot resolve answers None — the join itself refuses it
         with the right message, and this check must not shadow that one.
+        ``subroles`` are checked the same way: an exclusive role held live by
+        somebody blocks a joiner that names it in either position.
         """
         try:
             resolved = mesh.roleset.resolve(handle, role)
         except mesh_roles.RoleError:
             return None
-        role_def = mesh.roleset.get(resolved)
-        if role_def is None or not role_def.exclusive:
-            return None
-        return self._live_holder(mesh, resolved)
+        wanted = [resolved] + [
+            c for c in (
+                mesh.roleset.canonical(n) for n in _read_subroles(list(subroles))
+            )
+            if c
+        ]
+        for name in wanted:
+            role_def = mesh.roleset.get(name)
+            if role_def is None or not role_def.exclusive:
+                continue
+            holder = self._live_holder(mesh, name)
+            if holder is not None:
+                return holder
+        return None
+
+    def set_subroles(
+        self, name: str, handle: str, *,
+        add: Sequence[str] = (), remove: Sequence[str] = (),
+        replace: Optional[Sequence[str]] = None,
+    ) -> Member:
+        """Change a live member's subroles — the one role edit a roster allows.
+
+        The primary role stays what the join settled: it is the member's
+        stance and identity, and a member that changes what it IS should
+        re-join. A subrole is what it additionally answers for, and that is
+        a leader's (or a person's) decision to make after the fact — the
+        case this exists for is a leader taking ``reviewer`` so a workflow's
+        ``from: [{role: reviewer}]`` finds it. ``replace`` sets the whole
+        list; otherwise ``remove`` is applied, then ``add``. Every name is
+        resolved through the vocabulary and an exclusive role is refused
+        while somebody else holds it live. Membership is the authority's, so
+        on a mirror this is refused with the daemon to ask.
+        """
+        mesh = self.get(name)
+        self._require_authority(mesh, "membership")
+        member = mesh.members.get(handle)
+        if member is None:
+            raise MeshError(f"no member {handle!r} in mesh {name!r}")
+        if replace is not None:
+            wanted = list(replace)
+        else:
+            drop = set(_read_subroles(list(remove)))
+            drop |= {
+                c for c in (mesh.roleset.canonical(n) for n in drop) if c
+            }
+            wanted = [r for r in member.subroles if r not in drop] + list(add)
+        # Resolve against a roster that no longer counts this member's own
+        # holdings, so keeping a subrole it already has is not refused as a
+        # second holder of it.
+        before = member.subroles
+        member.subroles = []
+        try:
+            resolved = self._resolve_subroles(mesh, member.role, wanted)
+        except MeshError:
+            member.subroles = before
+            raise
+        member.subroles = resolved
+        if resolved != before:
+            self._roster_changed(mesh)
+        return member
 
     def _live_holder(self, mesh: Mesh, role_name: str) -> Optional[Member]:
         """The member holding ``role_name`` whose session is still alive.
@@ -2954,7 +3143,7 @@ class MeshManager:
         holders on the roster — the flag guards joins, not history.
         """
         for member in mesh.members.values():
-            if member.role != role_name:
+            if role_name not in member.roles:
                 continue
             if not self._is_local(mesh, member):
                 return member
@@ -2993,7 +3182,7 @@ class MeshManager:
                     # only place the vocabulary meets reality, and a role
                     # nobody holds is worth seeing as such.
                     "members": sorted(
-                        h for h, m in mesh.members.items() if m.role == r.name
+                        h for h, m in mesh.members.items() if r.name in m.roles
                     ),
                 }
                 for r in (rs.roles[n] for n in sorted(rs.roles))
@@ -3001,7 +3190,10 @@ class MeshManager:
             # Roles held by a member but no longer in the vocabulary — the
             # visible face of "uploads are not retroactive".
             "orphans": sorted(
-                {m.role for m in mesh.members.values() if not rs.get(m.role)}
+                {
+                    r for m in mesh.members.values() for r in m.roles
+                    if not rs.get(r)
+                }
             ),
         }
 
@@ -3689,7 +3881,8 @@ class MeshManager:
                 seen.add(parent)
                 root, tier = parent, tier + 1
             facts[handle] = mesh_roles.LinkFacts(
-                role=member.role, tier=tier, root=root
+                role=member.role, tier=tier, root=root,
+                roles=tuple(member.roles),
             )
         return facts
 
@@ -3949,6 +4142,7 @@ class MeshManager:
         *,
         handle: str = "",
         role: str = "",
+        subroles: Sequence[str] = (),
     ) -> dict:
         """Owner-initiated enrolment: pull ``machine``'s ``session`` into the
         mesh (the CLI wizard / web "add remote member" path).
@@ -3977,6 +4171,7 @@ class MeshManager:
             "session": session,
             "handle": handle,
             "role": role,
+            "subroles": list(subroles),
         }
         ticket = None
         if machine not in mesh.links:  # first contact needs the pre-approval
@@ -4062,7 +4257,7 @@ class MeshManager:
     # -- primary-side: join requests, grants, guest lifecycle ------------ #
     def _admit_member(
         self, mesh: Mesh, machine: str, session: str, handle: str, role: str,
-        parent: str = "",
+        parent: str = "", subroles: Sequence[str] = (),
     ):
         """Admit (or reclaim) a guest member — returns (member, created).
 
@@ -4083,9 +4278,8 @@ class MeshManager:
             raise MeshConflict(
                 f"handle {handle!r} is already taken in mesh {mesh.name!r}"
             )
-        member = Member(
-            handle, session, machine=machine,
-            role=self._resolve_role(mesh, handle, role),
+        member = self._new_member(
+            mesh, handle, session, role, subroles, machine=machine
         )
         mesh.members[handle] = member
         # An establishment join carries no parent: the mesh did not exist on
@@ -4331,6 +4525,7 @@ class MeshManager:
         role: str,
         reply_token: str,
         code: str,
+        subroles: Sequence[str] = (),
     ) -> dict:
         """A remote daemon asks to enrol one of its sessions.
 
@@ -4352,7 +4547,7 @@ class MeshManager:
             if code:
                 self._redeem_invite(mesh, code)
             member, created = self._admit_member(
-                mesh, machine, session, handle, role
+                mesh, machine, session, handle, role, subroles=subroles
             )
             self._register_guest(mesh, machine, reply_token)
             if created:
@@ -4385,6 +4580,7 @@ class MeshManager:
             "session": session,
             "handle": handle,
             "role": role,
+            "subroles": list(subroles),
             "reply_token": str(reply_token),
             "requested_at": utcnow(),
         }
@@ -4419,7 +4615,8 @@ class MeshManager:
         if req is None:
             raise MeshError(f"no pending join request {rid!r} in mesh {name!r}")
         member, created = self._admit_member(
-            mesh, req["machine"], req["session"], req["handle"], req["role"]
+            mesh, req["machine"], req["session"], req["handle"], req["role"],
+            subroles=_read_subroles(req.get("subroles")),
         )
         self._register_guest(mesh, req["machine"], req["reply_token"])
         if created:
@@ -4625,6 +4822,7 @@ class MeshManager:
         handle: str,
         role: str,
         code: str,
+        subroles: Sequence[str] = (),
     ) -> dict:
         """A mesh owner on ``machine`` pushes an invitation for our ``session``.
 
@@ -4639,6 +4837,7 @@ class MeshManager:
             raise MeshError("invitation carries no origin machine")
         result = await self.join(
             f"{name}@{machine}", session, handle=handle, role=role,
+            subroles=subroles,
             code=code or None,
         )
         if isinstance(result, dict):  # pended — the inviter failed to pre-approve
@@ -4698,6 +4897,7 @@ class MeshManager:
     def peer_join_accept(
         self, name: str, machine: str, token: str,
         session: str, handle: str, role: str, parent: str = "",
+        subroles: Sequence[str] = (),
     ) -> dict:
         """A guest daemon asks to enrol one of its sessions as a member."""
         mesh = self.get(name)
@@ -4718,9 +4918,8 @@ class MeshManager:
                     f"session {session!r} on {machine!r} is already in mesh "
                     f"{name!r} as {m.handle!r}"
                 )
-        member = Member(
-            handle, session, machine=machine,
-            role=self._resolve_role(mesh, handle, role),
+        member = self._new_member(
+            mesh, handle, session, role, subroles, machine=machine
         )
         mesh.members[handle] = member
         # The guest names the parent (only it can see its own session tree);
@@ -5473,6 +5672,8 @@ class MeshManager:
             row: dict = {
                 "handle": handle,
                 "role": member.role,
+                "subroles": list(member.subroles),
+                "roles": member.roles,
                 # Blank means the authority's own member, not ours (v2).
                 "machine": member.machine or mesh.authority or "",
                 "session": member.session,
@@ -5770,6 +5971,8 @@ class MeshManager:
                 "handle": member.handle,
                 "session": member.session,
                 "role": member.role,
+                "subroles": list(member.subroles),
+                "roles": member.roles,
                 "local": True,
             }
             for _handle, member in sorted(mesh.members.items())

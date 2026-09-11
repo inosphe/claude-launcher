@@ -1035,7 +1035,7 @@ class _FakeMeshMgr:
             raise MeshError(f"no mesh named {name!r}")
         return self._Mesh()
 
-    def exclusive_holder(self, mesh, handle, role):
+    def exclusive_holder(self, mesh, handle, role, subroles=()):
         return None  # no live holder in the fake — preflight passes
 
     def list(self):

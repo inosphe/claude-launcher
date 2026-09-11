@@ -2305,8 +2305,8 @@ def escalation_check(
                 " — the escalation would proceed and record that it went "
                 "unchecked"
             )
-        elif role_filter.allows(reach.me_role):
-            entry["role_check"] = f"admits {reach.me_role!r}"
+        elif role_filter.allows_any(reach.me_roles or (reach.me_role,)):
+            entry["role_check"] = f"admits {_held_label(reach)!r}"
         else:
             entry["role_check"] = (
                 f"would be declined: {reach.me} holds role "
@@ -2398,6 +2398,11 @@ def _archive_current(state: dict, by: str, cwd: Optional[str]) -> str:
     return str(state_mod.archive_run(cwd))
 
 
+def _held_label(reach) -> str:
+    """``leader+reviewer`` — the roles a driving session holds, for a note."""
+    return "+".join(reach.me_roles or (reach.me_role,))
+
+
 def _enforce_role_filter(
     workflow: Workflow, *, mesh: str, cwd: Optional[str]
 ) -> Optional[str]:
@@ -2422,7 +2427,7 @@ def _enforce_role_filter(
             f"filter_roles {role_filter.describe()} could not be enforced: "
             f"{reach.problem or 'the driving session has no mesh identity'}"
         )
-    if role_filter.allows(reach.me_role):
+    if role_filter.allows_any(reach.me_roles or (reach.me_role,)):
         return None
     raise CflowError(
         f"workflow {workflow.name!r} declares filter_roles "

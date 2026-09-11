@@ -256,6 +256,14 @@ The join briefing names your role and points you at your
 **stance** — run `claunch mesh stance MESH`, and treat what it prints as
 binding.
 
+A member may also hold **subroles** — further roles it answers for besides
+its primary one (`claunch mesh join --subrole reviewer`, `spawn` with
+`subroles`, or later `claunch mesh subroles MESH HANDLE --add reviewer`).
+The primary role is still what sets its stance; a subrole is where a
+workflow's delegated decision (`from: [{role: reviewer}]`), a `filter_roles`
+check or the policy engine also finds it. The roster spells the set as
+`leader+reviewer`, and the join briefing lists yours on a `subroles:` line.
+
 A mesh may define its own vocabulary, so do not assume the names above:
 `claunch mesh roles MESH` lists the roles this mesh actually has, and
 `claunch mesh stance MESH` re-prints yours. Roles set stance, not
