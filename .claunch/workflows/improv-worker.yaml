@@ -511,6 +511,21 @@ steps:
       --description "<규격>"`(assignee 없음) — 그리고 자기 일을 계속한다;
       발견한 세션이 만드는 자다.
 
+      ── 발견은 서브 런으로 처리한다 ──
+      그 절차(범위 판정 → 이슈 등록 → 위임 판정)는 `found-issue` 정의의
+      서브 런으로 돈다: cflow `start` 툴에 `workflow: found-issue`,
+      `sub: found-<n>`(발견마다 번호), `inputs: {parent: <이 회차 이슈 id>,
+      summary: <한 줄 요지>}`를 주어 세운다. 그 뒤 `report`·`next`·
+      `select`에 `run: found-<n>`을 주어 그 런만 진행시키고, 이 메인 런은
+      이 스텝에 그대로 둔다 — run을 생략한 호출은 언제나 메인 런이다.
+      발견마다 슬롯 하나이고 한 세션에 동시에 셋까지다. 이 스텝의
+      awaits가 서브 런들의 종료를 데몬에게 재게 하므로, 서브 런이 끝나면
+      통지가 온다 — 직접 폴링하지 않는다(손으로 볼 때는 `claunch cflow
+      sub-done --all`, 0 = 도는 서브 런 없음). 판정·이슈 id·자식 세션은
+      서브 런의 저널에 남고, 아래 보고에는 그 id들만 옮겨 적는다. 이
+      스텝을 떠나기 전에 세운 서브 런은 전부 끝나 있어야 한다 — wrapup의
+      생성 이슈 정산이 그 판정을 읽는다.
+
       ── 발견 즉시 가르는 것 하나: 위임(child) ──
       만든 이슈가 다음 넷을 전부 만족하면 지금 자식 세션에 넘긴다 — spawn
       `--issue <id>`(데몬이 자식을 assignee로 쓴다; 스폰은 공통 규칙이
@@ -534,6 +549,17 @@ steps:
       파일은 건드리지 않았다), 바꾼 파일 목록과 접근 방식 요지, 범위 밖
       발견이 있었다면 그 이슈 id, 위임한 자식이 있으면 그 세션·이슈 id가
       보고에 있다.
+    # 이 스텝에서 세운 found-issue 서브 런이 끝나면 데몬이 알린다 — 그
+    # awaits는 프로젝트 레이어가 접붙인다(이 저장소의 게이트 규칙: 명령은
+    # 이 체크아웃의 tools/ 스크립트를 uv run으로 부른다). 다른 저장소는
+    # `awaits: {sub: all}`로 같은 것을 적는다(claunch cflow sub-done --all).
+    # 이 저장소의 그 probe. tools/sub_done.py는 `claunch cflow sub-done
+    # --all`과 같은 종료 코드를 내되 이 체크아웃에서 돈다(0 = 도는 서브 런
+    # 없음, 1 = 아직 도는 것이 있음, 2 = 판정 불가). 첫 측정은 기준선이라
+    # 울리지 않고, 서브 런이 끝나 1→0으로 바뀔 때 한 번 알린다.
+    awaits:
+      probe: 'uv run --no-sync python tools/sub_done.py --all'
+      describe: 이 회차가 세운 found-issue 서브 런이 전부 끝났다
     next: test-decision
 
   test-decision:

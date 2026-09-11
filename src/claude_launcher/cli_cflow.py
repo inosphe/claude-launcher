@@ -711,6 +711,25 @@ def _cmd_sub_done(args: argparse.Namespace) -> int:
     checklist waiting on it would wait forever, so it exits 2 and says so.
     """
     scope, cwd = _resolve_run(args, required=False)
+    if getattr(args, "all", False):
+        # Every sub run of the scope finished (or none stands): the shape a
+        # step's `awaits: {sub: all}` and a wrap-up gate ask. Aborted counts
+        # as finished here — the question is "is anything still going",
+        # and an aborted side track is not.
+        main = engine.status(cwd=cwd, scope=scope)
+        running = [
+            s for s in (main.get("subs") or [])
+            if s.get("status") not in ("done", "aborted")
+        ]
+        if running:
+            for s in running:
+                print(f"sub run {s['sub']!r}: {s.get('status')} (step {s.get('step_id')})  run: {s.get('run')}")
+            return 1
+        print(f"sub runs: none active ({len(main.get('subs') or [])} finished)")
+        return 0
+    if not args.name:
+        print("sub-done: give a sub run NAME, or --all")
+        return 2
     try:
         payload = engine.status(cwd=cwd, scope=scope, run=args.name)
     except state_mod.StateError as exc:
@@ -1096,7 +1115,14 @@ def register(sub) -> None:
         "stands — the check a main run's checklist item or verify uses to "
         "wait on a side track",
     )
-    q.add_argument("name", help="the sub run's name")
+    q.add_argument("name", nargs="?", help="the sub run's name")
+    q.add_argument(
+        "--all",
+        action="store_true",
+        help="exit 0 when NO sub run of the session is still running (none, "
+        "or all finished/aborted), 1 while any is — the shape a step's "
+        "'awaits: {sub: all}' measures",
+    )
     q.add_argument(
         "-t",
         "--session",

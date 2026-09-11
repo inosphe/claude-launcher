@@ -531,9 +531,21 @@ class Awaits:
     #: Without it the signal shows the command, which is true but rarely says
     #: what the waiting was *about*.
     describe: Optional[str] = None
+    #: ``awaits: {sub: <name>}`` — the step waits for that SUB run of the
+    #: same scope to finish; ``{sub: all}`` for every sub run. It is the
+    #: ordinary probe with its command fixed: ``claunch cflow sub-done``,
+    #: which answers with an exit code the daemon already knows how to read.
+    #: Spelled as a kind rather than written out as a command so an author
+    #: cannot get the command wrong and so the payload can say what is
+    #: awaited in the run's own terms.
+    sub: Optional[str] = None
 
     def command(self, step: "Step") -> Optional[str]:
-        """The command to actually run, resolving the reserved spelling."""
+        """The command to actually run, resolving the reserved spellings."""
+        if self.sub is not None:
+            if self.sub == SUB_ALL:
+                return "claunch cflow sub-done --all"
+            return f"claunch cflow sub-done {self.sub}"
         if self.probe is not None:
             return self.probe
         return step.verify.command if step.verify else None
@@ -814,6 +826,12 @@ class Step:
     #: on a step that can terminate, which the parser enforces. See
     #: :class:`Escalate`.
     escalate: Optional[Escalate] = None
+    #: Sub runs the engine starts when this step is ENTERED (every visit that
+    #: finds the slot empty or finished): side tracks the same session drives
+    #: beside this run, each from a ``kind: subflow`` definition. Coupling
+    #: back is ``awaits: {sub: <name>}`` or a checklist item running
+    #: ``claunch cflow sub-done <name>``. See :class:`SubflowRef`.
+    subflows: Tuple["SubflowRef", ...] = ()
     next: Optional[str] = None  # None = termination (non-select steps)
 
     @property
@@ -872,6 +890,98 @@ class Step:
 #: The one value ``kind:`` takes today.
 KIND_SUBFLOW = "subflow"
 KINDS = (KIND_SUBFLOW,)
+
+#: How many sub runs one scope may hold at once, and so how many a step may
+#: declare. Three is a ceiling on attention, not on disk: every sub run is a
+#: position the same agent has to keep in its head beside the main run's.
+MAX_SUBFLOWS = 3
+
+#: The reserved sub run name (the main run) and the reserved ``awaits.sub``
+#: word for "every sub run of this scope".
+MAIN_RUN_NAME = "main"
+SUB_ALL = "all"
+
+#: A sub run name becomes a directory (``runs/<scope>/sub/<name>/``), so it
+#: is spelled like a scope. Mirrors ``state._SCOPE_RE`` without importing the
+#: state module into the model.
+_SUB_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+
+
+def valid_sub_name(name: str) -> bool:
+    return bool(_SUB_NAME_RE.match(name)) and name not in (MAIN_RUN_NAME, SUB_ALL, "..", ".")
+
+
+@dataclass(frozen=True)
+class SubflowRef:
+    """One sub run a step declares: started by the engine when the step is
+    entered, under ``name``, from the ``kind: subflow`` definition
+    ``workflow``, with ``inputs`` as its input values.
+
+    ``workflow`` is a NAME resolved through the same layers as any other
+    workflow (project, then global, then package), so the same definition
+    can be called from several workflows and started twice under two names.
+    ``inputs`` values are strings handed through as they are written — a
+    value like ``auto`` is not interpreted here; it reaches the sub run's
+    commands as ``CFLOW_IN_<NAME>`` and means whatever the tool reading it
+    says (``changed_tests.py --base auto`` is the precedent).
+    """
+
+    name: str
+    workflow: str
+    inputs: Dict[str, str] = field(default_factory=dict)
+
+
+def _parse_subflows(raw, step_id: str) -> Tuple[SubflowRef, ...]:
+    if raw is None:
+        return ()
+    if not isinstance(raw, list):
+        raise WorkflowError(
+            f"step {step_id!r}: 'subflows' must be a list of "
+            f"{{name, workflow, with}} mappings"
+        )
+    out: List[SubflowRef] = []
+    seen: Set[str] = set()
+    for i, item in enumerate(raw):
+        where = f"step {step_id!r}: subflows[{i}]"
+        if not isinstance(item, dict):
+            raise WorkflowError(f"{where} must be a mapping {{name, workflow, with}}")
+        extra = sorted(set(item) - {"name", "workflow", "with"})
+        if extra:
+            raise WorkflowError(
+                f"{where} has unknown key(s): {', '.join(extra)} "
+                f"(allowed: name, workflow, with)"
+            )
+        name = str(item.get("name") or "").strip()
+        if not valid_sub_name(name):
+            raise WorkflowError(
+                f"{where}: 'name' must be a sub run name (letters, digits, "
+                f"'.', '_' or '-'; not {MAIN_RUN_NAME!r} or {SUB_ALL!r}), got {name!r}"
+            )
+        if name in seen:
+            raise WorkflowError(f"{where}: sub run name {name!r} is declared twice")
+        seen.add(name)
+        workflow = str(item.get("workflow") or "").strip()
+        if not workflow:
+            raise WorkflowError(f"{where}: 'workflow' names the 'kind: {KIND_SUBFLOW}' definition to start")
+        given = item.get("with")
+        inputs: Dict[str, str] = {}
+        if given is not None:
+            if not isinstance(given, dict):
+                raise WorkflowError(f"{where}: 'with' must be a mapping of input name -> value")
+            for key, value in given.items():
+                key = str(key or "").strip()
+                if not _INPUT_NAME_RE.match(key):
+                    raise WorkflowError(f"{where}: 'with' key {key!r} is not an input name")
+                if value is None or isinstance(value, (dict, list)):
+                    raise WorkflowError(f"{where}: 'with.{key}' must be a scalar")
+                inputs[key] = str(value)
+        out.append(SubflowRef(name=name, workflow=workflow, inputs=inputs))
+    if len(out) > MAX_SUBFLOWS:
+        raise WorkflowError(
+            f"step {step_id!r}: declares {len(out)} sub runs; the limit is "
+            f"{MAX_SUBFLOWS} per scope"
+        )
+    return tuple(out)
 
 #: An input name has to survive as an environment variable suffix.
 _INPUT_NAME_RE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
@@ -1006,6 +1116,20 @@ def _validate_subflow(workflow: "Workflow") -> None:
         raise WorkflowError(
             f"{where} may not 'escalate' (step(s) {', '.join(escalating)}): a "
             f"sub run's end frees its own slot only"
+        )
+    nesting = sorted(s.id for s in workflow.steps.values() if s.subflows)
+    if nesting:
+        raise WorkflowError(
+            f"{where} may not declare 'subflows' (step(s) {', '.join(nesting)}): "
+            f"a sub run has no sub runs of its own — one level, by design"
+        )
+    awaiting = sorted(
+        s.id for s in workflow.steps.values() if s.awaits is not None and s.awaits.sub
+    )
+    if awaiting:
+        raise WorkflowError(
+            f"{where} may not 'awaits: {{sub}}' (step(s) {', '.join(awaiting)}): "
+            f"only the main run waits on sub runs"
         )
 
 
@@ -1589,6 +1713,7 @@ def _parse_step(step_id: str, raw) -> Step:
     restart = _parse_restart(raw.get("restart"), step_id)
     select = _parse_select(raw.get("select"), step_id)
     escalate = _parse_escalate(raw.get("escalate"), step_id)
+    subflows = _parse_subflows(raw.get("subflows"), step_id)
     if checklist is not None:
         # Every one of these is the same refusal: a checklist step's exit is
         # its items going green, and a second way out is a way past a
@@ -1645,6 +1770,7 @@ def _parse_step(step_id: str, raw) -> Step:
     if (
         awaits is not None
         and awaits.probe is None
+        and awaits.sub is None
         and verify is None
         and select is None  # a select step gets the sharper message below
     ):
@@ -1667,7 +1793,7 @@ def _parse_step(step_id: str, raw) -> Step:
                 f"step {step_id!r}: 'done_when' is not allowed on a select "
                 f"step — its completion is the choice itself"
             )
-        if awaits is not None and awaits.probe is None:
+        if awaits is not None and awaits.probe is None and awaits.sub is None:
             raise WorkflowError(
                 f"step {step_id!r}: 'awaits: {AWAITS_VERIFY}' has nothing to "
                 f"re-measure on a select step — a select step takes no "
@@ -1692,6 +1818,7 @@ def _parse_step(step_id: str, raw) -> Step:
         restart=restart,
         select=select,
         escalate=escalate,
+        subflows=subflows,
         next=_parse_next(raw.get("next"), step_id),
     )
     if escalate is not None and None not in step.successors():
@@ -1965,15 +2092,29 @@ def _parse_awaits(raw, step_id: str) -> Optional[Awaits]:
         raise WorkflowError(
             f"step {step_id!r}: 'awaits' must be the word {AWAITS_VERIFY!r} "
             f"(re-measure this step's own verify) or a mapping "
-            f"{{probe, poll, timeout, describe}} — got {raw!r}. A command is "
-            f"written as {{probe: '<command>'}}, never as a bare string"
+            f"{{probe, poll, timeout, describe}} or {{sub, poll, timeout, "
+            f"describe}} — got {raw!r}. A command is written as "
+            f"{{probe: '<command>'}}, never as a bare string"
         )
-    unknown = sorted(set(raw) - {"probe", "poll", "timeout", "describe"})
+    unknown = sorted(set(raw) - {"probe", "sub", "poll", "timeout", "describe"})
     if unknown:
         raise WorkflowError(
             f"step {step_id!r}: 'awaits' has unknown key(s): "
-            f"{', '.join(unknown)} (allowed: probe, poll, timeout, describe)"
+            f"{', '.join(unknown)} (allowed: probe, sub, poll, timeout, describe)"
         )
+    sub = raw.get("sub")
+    if sub is not None:
+        if "probe" in raw:
+            raise WorkflowError(
+                f"step {step_id!r}: 'awaits' takes 'sub' or 'probe', not both — "
+                f"a sub run's end IS the probe"
+            )
+        sub = str(sub).strip()
+        if sub != SUB_ALL and not valid_sub_name(sub):
+            raise WorkflowError(
+                f"step {step_id!r}: 'awaits.sub' must be a sub run name or the "
+                f"word {SUB_ALL!r}, got {sub!r}"
+            )
     probe = raw.get("probe")
     if probe is None or (isinstance(probe, str) and probe.strip() == AWAITS_VERIFY):
         probe = None
@@ -2023,6 +2164,7 @@ def _parse_awaits(raw, step_id: str) -> Optional[Awaits]:
         )
     return Awaits(
         probe=probe,
+        sub=sub,
         poll=poll,
         timeout=timeout,
         describe=describe.strip() if describe else None,

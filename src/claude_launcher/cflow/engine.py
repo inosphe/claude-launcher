@@ -271,7 +271,7 @@ def _base(state: dict) -> dict:
 #: agent has to keep in its head and a block the reminder clock will type —
 #: three is the number past which a session is running a fleet, and a fleet
 #: is what child sessions are for.
-MAX_SUBFLOWS = 3
+MAX_SUBFLOWS = model.MAX_SUBFLOWS
 
 
 def _stamp_run(payload: dict, state: dict) -> dict:
@@ -314,6 +314,53 @@ def _main_state(cwd: Optional[str]) -> Optional[dict]:
     def read(c):
         return state_mod.load_state(c) if state_mod.has_run(c) else None
     return _in_main(read, cwd)
+
+
+def _start_declared_subs(workflow: Workflow, state: dict, cwd: Optional[str]) -> None:
+    """Start the sub runs the run's current step declares (``subflows:``).
+
+    Called on every entry of a step, by ``start`` and by every move. A name
+    whose slot already holds an ACTIVE run is left alone — a revisit of the
+    step does not restart a side track that is still going — while a slot
+    that is empty or holds a finished run gets a fresh run (``start``
+    archives the finished one, as it does for the main slot).
+
+    A start that fails does not fail the move: the main run has already
+    arrived, and refusing the arrival would leave it nowhere. The failure is
+    journaled (``sub_start_failed``) and carried on the position's payload
+    as ``sub_errors`` until the next move, so the agent sees it where it
+    reads its step and can start the side track by hand or fix the
+    definition. Only a MAIN run starts sub runs: a sub run's definition
+    cannot declare any (the parser refuses it), so this is a no-op for one.
+    """
+    if state.get("sub") or not state.get("current"):
+        return
+    step = workflow.steps.get(state["current"])
+    if step is None or not step.subflows:
+        return
+    errors: List[dict] = []
+    for ref in step.subflows:
+        def go(c, _ref=ref):
+            if state_mod.has_run(c):
+                current = state_mod.load_state(c)
+                if current.get("status") not in ("done", "aborted"):
+                    return None  # still running: leave it
+            with state_mod.run_lock(c):
+                return _start_impl(_ref.workflow, inputs=dict(_ref.inputs), cwd=c)
+        try:
+            _in_sub(ref.name, go, cwd)
+        except (CflowError, model.WorkflowError, state_mod.StateError, OSError) as exc:
+            reason = str(exc)
+            errors.append({"sub": ref.name, "workflow": ref.workflow, "error": reason})
+            state_mod.journal(
+                "sub_start_failed",
+                {"run": state["run_id"], "step": state["current"], "sub": ref.name,
+                 "workflow": ref.workflow, "error": reason},
+                cwd,
+            )
+    if errors:
+        state["sub_errors"] = errors
+        state_mod.save_state(state, cwd)
 
 
 def sub_summaries(cwd: Optional[str] = None) -> List[dict]:
@@ -1393,8 +1440,10 @@ def _move_to(workflow: Workflow, state: dict, target: Optional[str], cwd) -> Non
         return
     state["current"] = target
     state["visits"][target] = _visits(state, target) + 1
+    state.pop("sub_errors", None)  # a failure belongs to the position it happened at
     _arrive_timer(workflow, state, target, from_step, cwd)
     state_mod.save_state(state, cwd)
+    _start_declared_subs(workflow, state, cwd)
 
 
 def _note_run_end(state: dict, cwd: Optional[str], *, status: str, by: str) -> None:
@@ -1920,6 +1969,13 @@ def _payload(workflow: Workflow, state: dict, cwd: Optional[str], *, mutate: boo
     digest = step_digest(payload)
     if digest:
         payload["digest"] = digest
+    if state.get("sub_errors"):
+        payload["sub_errors"] = list(state["sub_errors"])
+        payload["sub_errors_note"] = (
+            "this step declares sub runs and one or more could not be started "
+            "(see sub_errors). The main run moved regardless; start the side "
+            "track by hand with 'start' + 'sub', or fix the definition"
+        )
     return _stamp_run(payload, state)
 
 
@@ -2386,6 +2442,10 @@ def _awaits_payload(step: Step) -> Optional[dict]:
             f"being unmet"
         ),
     }
+    if step.awaits.sub:
+        # Say it in the run's own terms too: the command is how the daemon
+        # measures it, the name is what the agent is waiting for.
+        out["sub"] = step.awaits.sub
     if step.awaits.describe:
         out["describe"] = step.awaits.describe
     return out
@@ -2825,6 +2885,7 @@ def _start_impl(
             cwd,
         )
         state_mod.clear_request(cwd)
+    _start_declared_subs(workflow, state, cwd)
     payload = _payload(workflow, state, cwd, mutate=True)
     if context:
         payload["context"] = context

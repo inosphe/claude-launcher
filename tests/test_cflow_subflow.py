@@ -530,3 +530,258 @@ def test_the_main_run_is_what_every_unqualified_call_is_about(proj):
     assert engine.current_run_id() == engine.status()["run"]
     assert engine.current_run_id(run="a") == engine.status(run="a")["run"]
     assert engine.current_run_id(run="nope") is None
+
+
+# --------------------------------------------------------------------------- #
+# stage 4: declared sub runs (`subflows:`), `awaits: {sub}`, the canonical
+# found-issue definition and the gate-shaped tools/sub_done.py
+# --------------------------------------------------------------------------- #
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+BUNDLED = ROOT / "src" / "claude_launcher" / "workflows"
+SUB_DONE = ROOT / "tools" / "sub_done.py"
+
+MAIN_DECLARING = """
+name: declaring
+steps:
+  prep:
+    instructions: prep
+    subflows:
+      - {name: auto-side, workflow: side, with: {base: auto}}
+    awaits: {sub: auto-side, describe: the side track finished}
+    next: work
+  work:
+    select:
+      prompt: again?
+      chooser: agent
+      options:
+        again: {description: once more, next: prep}
+        stop: {description: enough}
+    awaits: {sub: all}
+"""
+
+MAIN_BROKEN = """
+name: broken
+steps:
+  prep:
+    instructions: prep
+    subflows:
+      - {name: ok, workflow: side, with: {base: x}}
+      - {name: missing, workflow: no-such-definition}
+      - {name: not-sub, workflow: main}
+    next: done
+  done:
+    instructions: done
+"""
+
+
+def test_subflows_parse_and_awaits_sub_spells_the_probe():
+    wf = model.parse(MAIN_DECLARING, default_name="declaring")
+    ref = wf.steps["prep"].subflows[0]
+    assert (ref.name, ref.workflow, ref.inputs) == ("auto-side", "side", {"base": "auto"})
+    prep, work = wf.steps["prep"], wf.steps["work"]
+    assert prep.awaits.sub == "auto-side"
+    assert prep.awaits.command(prep) == "claunch cflow sub-done auto-side"
+    assert work.awaits.command(work) == "claunch cflow sub-done --all"
+    assert engine._awaits_payload(prep)["sub"] == "auto-side"
+
+
+@pytest.mark.parametrize(
+    "block, refused",
+    [
+        ("subflows: {name: a, workflow: side}", "must be a list"),
+        ("subflows: [{name: main, workflow: side}]", "sub run name"),
+        ("subflows: [{name: a, workflow: side}, {name: a, workflow: side}]", "declared twice"),
+        ("subflows: [{name: a, workflow: ''}]", "'workflow' names"),
+        ("subflows: [{name: a, workflow: side, with: [1]}]", "'with' must be a mapping"),
+        ("subflows: [{name: a, workflow: side, with: {Bad: 1}}]", "not an input name"),
+        ("subflows: [{name: a, workflow: side, extra: 1}]", "unknown key"),
+        (
+            "subflows: [{name: a, workflow: s}, {name: b, workflow: s}, "
+            "{name: c, workflow: s}, {name: d, workflow: s}]",
+            "limit is 3",
+        ),
+        ("awaits: {sub: a, probe: 'true'}", "'sub' or 'probe', not both"),
+        ("awaits: {sub: '../x'}", "'awaits.sub' must be a sub run name"),
+    ],
+)
+def test_subflows_and_awaits_sub_are_validated_at_parse(block, refused):
+    text = f"name: m\nsteps:\n  a:\n    instructions: x\n    {block}\n"
+    with pytest.raises(model.WorkflowError, match=refused):
+        model.parse(text, default_name="m")
+
+
+def test_awaits_sub_stands_without_a_verify_and_on_a_select_step():
+    text = """
+name: m
+steps:
+  wait:
+    select:
+      prompt: pick
+      options:
+        go: {description: go}
+    awaits: {sub: all}
+"""
+    wf = model.parse(text, default_name="m")
+    assert wf.steps["wait"].awaits.command(wf.steps["wait"]).endswith("--all")
+
+
+@pytest.mark.parametrize(
+    "block, refused",
+    [
+        ("    subflows: [{name: x, workflow: side}]", "may not declare 'subflows'"),
+        ("    awaits: {sub: all}", "may not 'awaits: {sub}'"),
+    ],
+)
+def test_a_sub_definition_is_one_level_only(block, refused):
+    text = f"name: s\nkind: subflow\nsteps:\n  a:\n    instructions: x\n{block}\n"
+    with pytest.raises(model.WorkflowError, match=refused):
+        model.parse(text, default_name="s")
+
+
+def _sub_started_events(proj):
+    return [e for e in state_mod.read_journal(str(proj), "s1") if e["event"] == "sub_started"]
+
+
+def test_entering_a_step_starts_its_declared_sub_runs_once(proj):
+    (proj / ".claunch" / "workflows" / "declaring.yaml").write_text(MAIN_DECLARING, encoding="utf-8")
+    payload = engine.start("declaring")
+    assert "sub_errors" not in payload
+    assert state_mod.sub_runs(str(proj)) == ["auto-side"]
+    side = engine.status(run="auto-side")
+    assert side["inputs"] == {"base": "auto", "paths": ""} and side["step_id"] == "derive"
+    assert [e["sub"] for e in _sub_started_events(proj)] == ["auto-side"]
+    assert payload["awaits"]["sub"] == "auto-side"
+    # a revisit while the side track still runs leaves it alone
+    engine.report("p")
+    engine.next_step()
+    engine.select("again", by="agent")  # back to prep
+    assert engine.status(run="auto-side")["run"] == side["run"]
+    assert len(_sub_started_events(proj)) == 1
+    # ...and a revisit that finds it finished starts a fresh one
+    engine.report("d", run="auto-side")
+    engine.next_step(run="auto-side")
+    engine.report("i", run="auto-side")
+    assert engine.next_step(run="auto-side")["status"] == "done"
+    engine.report("p")
+    engine.next_step()
+    engine.select("again", by="agent")
+    fresh = engine.status(run="auto-side")
+    assert fresh["status"] == "step" and fresh["run"] != side["run"]
+    assert len(_sub_started_events(proj)) == 2
+
+
+def test_a_declared_sub_run_that_cannot_start_does_not_stop_the_main_run(proj):
+    (proj / ".claunch" / "workflows" / "broken.yaml").write_text(MAIN_BROKEN, encoding="utf-8")
+    payload = engine.start("broken")
+    assert payload["step_id"] == "prep"
+    assert state_mod.sub_runs(str(proj)) == ["ok"]
+    errors = {e["sub"]: e["error"] for e in payload["sub_errors"]}
+    assert set(errors) == {"missing", "not-sub"}
+    assert "is not a 'kind: subflow' definition" in errors["not-sub"]
+    failed = [e for e in state_mod.read_journal(str(proj), "s1") if e["event"] == "sub_start_failed"]
+    assert sorted(e["sub"] for e in failed) == ["missing", "not-sub"]
+    assert "sub_errors" in engine.status()
+    # the failure belongs to the position it happened at
+    engine.report("p")
+    assert "sub_errors" not in engine.next_step()
+    assert "sub_errors" not in engine.status()
+
+
+def test_sub_done_all_answers_for_every_sub_run(proj, capsys):
+    engine.start("main")
+    assert cli_cflow._cmd_sub_done(_ns(name=None, all=True)) == 0
+    engine.start("side", inputs={"base": "x"}, run="a")
+    engine.start("side", inputs={"base": "y"}, run="b")
+    assert cli_cflow._cmd_sub_done(_ns(name=None, all=True)) == 1
+    engine.abort(run="a")
+    assert cli_cflow._cmd_sub_done(_ns(name=None, all=True)) == 1
+    engine.report("d", run="b")
+    engine.next_step(run="b")
+    engine.report("i", run="b")
+    engine.next_step(run="b")
+    assert cli_cflow._cmd_sub_done(_ns(name=None, all=True)) == 0
+    assert "2 finished" in capsys.readouterr().out
+    assert cli_cflow._cmd_sub_done(_ns(name=None)) == 2
+
+
+def _sub_done(where, *args):
+    return subprocess.run(
+        [sys.executable, str(SUB_DONE), *args],
+        cwd=str(where),
+        env={**os.environ, state_mod.SESSION_ENV: "s1"},
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    ).returncode
+
+
+def test_the_gate_script_reads_the_same_slots_as_the_cli(proj):
+    engine.start("main")
+    assert _sub_done(proj, "--all") == 0
+    assert _sub_done(proj, "a") == 2
+    engine.start("side", inputs={"base": "x"}, run="a")
+    assert _sub_done(proj, "--all") == 1
+    assert _sub_done(proj, "a") == 1
+    engine.report("d", run="a")
+    engine.next_step(run="a")
+    engine.report("i", run="a")
+    engine.next_step(run="a")
+    assert _sub_done(proj, "a") == 0
+    assert _sub_done(proj, "--all") == 0
+    # from a directory below the run's, like a worktree under the project root
+    below = proj / "deeper" / "still"
+    below.mkdir(parents=True)
+    assert _sub_done(below, "--all") == 0
+    assert _sub_done(proj, "--all", "-t", "nobody") == 0
+    assert _sub_done(proj) == 2
+
+
+def test_the_canonical_found_issue_definition_is_a_sub_definition():
+    wf = model.load(BUNDLED / "found-issue.yaml")
+    assert wf.kind == model.KIND_SUBFLOW
+    assert wf.inputs["parent"].required and wf.inputs["summary"].default == ""
+    assert wf.start == "triage" and wf.steps["triage"].is_select
+    assert None in wf.steps["triage"].successors()  # in-scope ends without an issue
+    assert wf.warnings == []
+
+
+def test_the_worker_work_step_points_at_found_issue_and_waits_on_its_sub_runs():
+    bundled = model.load(BUNDLED / "improv-worker.yaml")
+    work = bundled.steps["work"]
+    assert "found-issue" in work.instructions and "sub-done --all" in work.instructions
+    # the wait itself is this repository's probe, grafted by the project layer
+    project = model.load(ROOT / ".claunch" / "workflows" / "improv-worker.yaml")
+    probe = project.steps["work"].awaits.command(project.steps["work"])
+    assert probe == "uv run --no-sync python tools/sub_done.py --all"
+
+
+def test_a_found_issue_sub_run_walks_its_branches(proj):
+    shutil.copy(BUNDLED / "found-issue.yaml", proj / ".claunch" / "workflows" / "found-issue.yaml")
+    engine.start("main")
+    with pytest.raises(model.WorkflowError, match="required input 'parent'"):
+        engine.start("found-issue", run="found-1")
+    p = engine.start("found-issue", inputs={"parent": "claunch-xxxx", "summary": "a thing"}, run="found-1")
+    assert p["step_id"] == "triage" and p["status"] == "select"
+    done = engine.select("in-scope", "it is ours", by="agent", run="found-1")
+    assert done["status"] == "done" and done["sub"] == "found-1"
+    engine.start("found-issue", inputs={"parent": "claunch-xxxx"}, run="found-2")
+    engine.select("out-of-scope", "elsewhere", by="agent", run="found-2")
+    engine.report("filed claunch-yyyy", run="found-2")
+    p = engine.next_step(run="found-2")
+    assert p["step_id"] == "delegate"
+    assert engine.select("pool", "overlaps", by="agent", run="found-2")["status"] == "done"
+    assert engine.status()["step_id"] == "work"  # the main run never moved
+
+
+def test_both_skills_document_sub_runs():
+    from claude_launcher.cflow import authoring, install
+
+    assert "kind: subflow" in authoring.SKILL_MD and "awaits: {sub" in authoring.SKILL_MD
+    assert "sub-done" in authoring.SKILL_MD
+    assert "run: <name>" in install.SKILL_MD and "sub_errors" in install.SKILL_MD
