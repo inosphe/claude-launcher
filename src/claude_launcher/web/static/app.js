@@ -595,6 +595,49 @@ function sessionGroupValue(group, s) {
   return group === "mesh" ? sessionMeshGroup(s) : sessionWorkspaceGroup(s);
 }
 
+/* Which groups the reader has folded shut, remembered per browser.
+
+   The rail is a poll: it rebuilds its rows whenever the fleet changes, which
+   on a busy machine is most ticks. A fold kept only on the DOM node would
+   therefore last until the next poll, so the state lives here and every
+   rebuild reads it back. Stored as the list of folded keys rather than the
+   open ones, so a mesh that appears later starts open -- a group nobody has
+   touched is not a group somebody shut. */
+const SESSION_GROUP_COLLAPSE_KEY = `claunch_session_group_collapsed:${BASE}`;
+let sessionGroupCollapsed = (() => {
+  try {
+    const saved = JSON.parse(localStorage.getItem(SESSION_GROUP_COLLAPSE_KEY) || "[]");
+    if (Array.isArray(saved)) {
+      return new Set(saved.filter((key) => typeof key === "string"));
+    }
+  } catch {}
+  return new Set();
+})();
+
+/* The group's identity across rebuilds. Both halves are in it because the
+   two groupings are independent lanes: a workspace named after a mesh would
+   otherwise share its fold. */
+function sessionGroupKey(group, value) {
+  return JSON.stringify([group, value]);
+}
+
+function isSessionGroupCollapsed(group, value) {
+  return sessionGroupCollapsed.has(sessionGroupKey(group, value));
+}
+
+function setSessionGroupCollapsed(group, value, collapsed, remember = true) {
+  const key = sessionGroupKey(group, value);
+  if (collapsed) sessionGroupCollapsed.add(key);
+  else sessionGroupCollapsed.delete(key);
+  if (remember) {
+    try {
+      localStorage.setItem(SESSION_GROUP_COLLAPSE_KEY,
+                           JSON.stringify([...sessionGroupCollapsed]));
+    } catch {}
+  }
+  return collapsed;
+}
+
 /* Convert lineage-ordered rows into headings and rows. Each selected group
    occupies one level, so selection order is also nesting priority. */
 function sessionGroupRows(entries, groups, level = 0) {
@@ -636,11 +679,79 @@ function sessionGroupStickyTops(headings) {
   });
 }
 
+/* The share of the rail the outermost headings may occupy before the stack
+   stops being worth it. Every outermost heading is pinned at one end or the
+   other at all times, so the stack costs its full height at every scroll
+   position -- a machine running fifteen meshes would otherwise hand most of
+   the rail to headings and leave a slot for two sessions. */
+const SESSION_GROUP_STACK_BUDGET = 0.6;
+
+/* Where each heading sits once the outermost groups stack instead of taking
+   turns.
+
+   `sessionGroupStickyTops` above answers the nested question: a heading is
+   held by its own group and released at that group's bottom, so only the
+   group the reader is inside is named. That loses the other groups the
+   moment they scroll out of range, which is the thing this layout fixes:
+   the outermost headings pile up at the top as they pass (`top`) and wait in
+   a pile at the bottom before they arrive (`bottom`), so every mesh is
+   named no matter where the list is scrolled.
+
+   Both ends are needed for that, and they are what makes the cost fixed --
+   hence the budget. Over it, the caller is handed the nested offsets and the
+   old behaviour, which is correct, just less informative. Headings below the
+   outermost level keep a top offset only: they belong to one group, and
+   parking them at the bottom of the rail would name a group the reader is
+   not in. */
+function sessionGroupStickyLayout(headings, viewport = 0) {
+  const levels = headings.map((h) => Number(h.dataset.groupLevel || 0));
+  const heights = headings.map((h) => {
+    const rect = typeof h.getBoundingClientRect === "function"
+      ? h.getBoundingClientRect() : null;
+    return (rect && rect.height) || h.offsetHeight || 0;
+  });
+  let total = 0;
+  for (let i = 0; i < headings.length; i++) if (!levels[i]) total += heights[i];
+  if (!(viewport > 0) || total > viewport * SESSION_GROUP_STACK_BUDGET) {
+    return {
+      stacked: false,
+      offsets: sessionGroupStickyTops(headings).map((top) => ({ top, bottom: null })),
+    };
+  }
+  const offsets = [];
+  // The top offset the next nested level starts at, per level. Truncated at
+  // every heading so a group that follows a deeper one does not inherit its
+  // chain.
+  const chain = [];
+  let above = 0;   // outermost headings already passed, in pixels
+  for (let i = 0; i < headings.length; i++) {
+    const level = levels[i];
+    if (!level) {
+      offsets.push({ top: above, bottom: total - above - heights[i] });
+      chain.length = 0;
+      chain[0] = above + heights[i];
+      above += heights[i];
+      continue;
+    }
+    const top = chain[level - 1] || 0;
+    offsets.push({ top, bottom: null });
+    chain.length = level;
+    chain[level] = top + heights[i];
+  }
+  return { stacked: true, offsets };
+}
+
 function syncSessionGroupStickyOffsets(list) {
   const headings = [...list.querySelectorAll(".session-group-heading")];
-  const tops = sessionGroupStickyTops(headings);
+  const layout = sessionGroupStickyLayout(headings, list.clientHeight || 0);
+  if (list.classList && typeof list.classList.toggle === "function") {
+    list.classList.toggle("session-group-stacked", layout.stacked);
+  }
   for (let i = 0; i < headings.length; i++) {
-    headings[i].style.setProperty("--session-group-sticky-top", `${tops[i]}px`);
+    const { top, bottom } = layout.offsets[i];
+    headings[i].style.setProperty("--session-group-sticky-top", `${top}px`);
+    headings[i].style.setProperty("--session-group-sticky-bottom",
+                                  bottom === null ? "auto" : `${bottom}px`);
   }
 }
 
@@ -839,6 +950,9 @@ async function refreshSessions(options) {
   // group containers while those reduced consumers retain their old shape.
   const nestedGroupContainers = typeof document.createDocumentFragment === "function";
   const groupBodies = [];
+  // The count each open heading shows, one per level, kept alongside the
+  // bodies so a row appended at any depth raises every heading above it.
+  const groupCounts = [];
   for (const row of rows) {
     if (row.type === "group") {
       // A heading's containing block is its own group.  Native sticky then
@@ -862,14 +976,72 @@ async function refreshSessions(options) {
       heading.dataset.groupLevel = String(row.level);
       const label = row.group === "workspace"
         ? sessionWorkspaceLabel(row.value) : row.value;
-      heading.textContent = `${row.group} · ${label}`;
-      heading.title = `${row.group} group ${row.value}`;
+      // The fold marker, the name, then how many sessions are inside it. The
+      // count is what a shut group still has to say: a heading with nothing
+      // under it reads the same as one hiding thirty rows otherwise.
+      const caret = document.createElement("span");
+      caret.className = "session-group-caret";
+      const name = document.createElement("span");
+      name.className = "session-group-name";
+      name.textContent = `${row.group} · ${label}`;
+      const count = document.createElement("span");
+      count.className = "session-group-count";
+      count.textContent = "0";
+      heading.append(caret, name, count);
+      heading.title = `${row.group} group ${row.value} — click to fold it shut`;
       const body = document.createElement("ul");
       body.className = "session-group-body";
+      // A mesh heading spawns from that mesh's leader, which is what the
+      // leader row's own + does. Drawn even when it cannot: the refusal and
+      // its reason are the answer to "why is there no + here".
+      if (row.group === "mesh") {
+        const target = meshGroupSpawnTarget(row.value);
+        const plus = document.createElement("button");
+        plus.className = "session-group-plus";
+        plus.type = "button";
+        plus.textContent = "+";
+        if (target.name) {
+          plus.title = target.title;
+          plus.addEventListener("click", (e) => {
+            e.stopPropagation();   // the heading itself folds; this does not
+            openSpawnModal(target.name);
+          });
+        } else {
+          // `aria-disabled`, not the `disabled` property: a disabled control
+          // takes no pointer events, and a tooltip nobody can hover is not a
+          // reason anybody reads.
+          plus.setAttribute("aria-disabled", "true");
+          plus.classList.add("disabled");
+          plus.title = target.reason;
+          plus.addEventListener("click", (e) => e.stopPropagation());
+        }
+        heading.appendChild(plus);
+      }
+      const collapsed = isSessionGroupCollapsed(row.group, row.value);
+      const paintFold = (shut) => {
+        group.classList.toggle("collapsed", shut);
+        caret.textContent = shut ? "▸" : "▾";
+        if (typeof heading.setAttribute === "function") {
+          heading.setAttribute("aria-expanded", String(!shut));
+        }
+      };
+      paintFold(collapsed);
+      heading.addEventListener("click", () => {
+        const shut = !group.classList.contains("collapsed");
+        setSessionGroupCollapsed(row.group, row.value, shut);
+        paintFold(shut);
+        // Folding changes how many headings are in the list's flow, so the
+        // stack that keeps them all named has to be measured again.
+        if (typeof syncSessionGroupStickyOffsets === "function") {
+          syncSessionGroupStickyOffsets(list);
+        }
+      });
       group.append(heading, body);
       parent.appendChild(group);
       groupBodies.length = row.level;
       groupBodies[row.level] = body;
+      groupCounts.length = row.level;
+      groupCounts[row.level] = count;
       continue;
     }
     const { session: s, depth } = row;
@@ -1049,6 +1221,11 @@ async function refreshSessions(options) {
     const parent = nestedGroupContainers
       ? (groupBodies[groupBodies.length - 1] || list) : list;
     parent.appendChild(li);
+    for (const box of groupCounts) {
+      if (!box) continue;
+      box._sessionCount = (box._sessionCount || 0) + 1;
+      box.textContent = String(box._sessionCount);
+    }
   }
   if (rebuild && nestedGroupContainers && typeof syncSessionGroupStickyOffsets === "function") {
     syncSessionGroupStickyOffsets(list);
@@ -1155,6 +1332,58 @@ function sessMeshes(name) {
     }
   }
   return out.sort((a, b) => a.mesh.localeCompare(b.mesh));
+}
+
+/* The session a mesh's + spawns from.
+
+   A mesh heading has no session of its own, so the + has to borrow one, and
+   the room already says which: the leader is the session a new worker is
+   meant to hang off, and spawning from it is what gives the child the
+   leader's lineage, worktree base and mesh enrolment. The heading's + is
+   therefore the leader row's + under another name, and it refuses in exactly
+   the cases that one would.
+
+   Returns {name, title} when a spawn is possible and {reason} when it is
+   not; the reason is what the disabled + says on hover, so it names the
+   mesh and the session rather than saying "unavailable". */
+function meshGroupLeader(meshName) {
+  let remote = null;
+  for (const m of meshCache || []) {
+    if (m.name !== meshName) continue;
+    for (const mem of m.members || []) {
+      if ((mem.role || "") !== "leader") continue;
+      if (mem.local && mem.session) return mem;
+      // Kept only as the reason: a leader on another machine is a real
+      // leader, and "this mesh has no leader" would be the wrong answer.
+      if (!remote) remote = mem;
+    }
+  }
+  return remote;
+}
+
+function meshGroupSpawnTarget(meshName) {
+  if (!meshName || meshName === "(no mesh)") {
+    return { reason: "these sessions are in no mesh, so there is no leader to spawn from" };
+  }
+  const leader = meshGroupLeader(meshName);
+  if (!leader) {
+    return { reason: `no member of mesh ${meshName} holds the leader role, and the + spawns a child of the leader` };
+  }
+  if (!leader.local || !leader.session) {
+    return { reason: `the leader of mesh ${meshName} ('${leader.handle || leader.session || "?"}') runs on another machine, which this daemon cannot spawn from` };
+  }
+  const sess = (sessionsCache || []).find((s) => s.name === leader.session);
+  if (!sess) {
+    return { reason: `the leader of mesh ${meshName} is session '${leader.session}', which is not in the rail's current list` };
+  }
+  if (sess.status === "exited") {
+    return { reason: `the leader of mesh ${meshName}, session '${leader.session}', has exited, and an exited session cannot spawn children` };
+  }
+  return {
+    name: leader.session,
+    title: `spawn a child of '${leader.session}', the leader of mesh ${meshName}` +
+           " — the same wizard that session's row + opens",
+  };
 }
 
 /* What the row actually draws: the first few rooms, then a count for the
@@ -7762,6 +7991,13 @@ function refitSoon(delay = 150) {
 window.addEventListener("resize", () => {
   refitSoon();
   if (currentPage === "cli") cliRefit(150);
+  // The heading stack is budgeted against the rail's own height, so a window
+  // that got shorter can put the rail back on per-group headings, and a
+  // taller one can take the stack back.
+  const railList = $("session-list");
+  if (railList && typeof syncSessionGroupStickyOffsets === "function") {
+    syncSessionGroupStickyOffsets(railList);
+  }
 });
 
 /* Another viewer (e.g. `claunch attach`) may have resized the session while
