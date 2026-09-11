@@ -38,6 +38,16 @@ SAMPLE_INTERVAL = 0.4
 #: Rotate the raw output log beyond this size (a single .1 backup is kept).
 LOG_MAX_BYTES = 10 * 1024 * 1024
 
+#: The most PTY output one session may have posted to the event loop and not
+#: yet had processed there. The reader thread posts one callback per read;
+#: with fourteen pi job sessions writing ~800 KiB/s between them (2026-09-11
+#: 14:08) the loop fell behind, its ready queue reached 17,000 callbacks and
+#: 4 GB, and it never got back to accept(). Past this cap the reader thread
+#: keeps logging to disk (that write no longer happens on the loop at all)
+#: and stops posting until the loop has caught up; what is skipped is the
+#: live render and the viewer broadcast, and the person watching is told.
+INBOUND_MAX = 4 * 1024 * 1024
+
 #: How much of a session's log is replayed through pyte to rebuild its screen
 #: — for an exited record on first capture, and for a restored session getting
 #: its scrollback back (:meth:`Session.seed_screen_from_log`). Large enough for
@@ -468,6 +478,14 @@ class Session:
         session_dir.mkdir(parents=True, exist_ok=True)
         self._log_path = paths.session_log(sdef.name)
         self._log = open(self._log_path, "ab")
+        #: Bytes posted to the loop by the reader thread and not yet consumed
+        #: by :meth:`_on_output` (see :data:`INBOUND_MAX`). Shared between
+        #: the two threads, hence the lock.
+        self._inflight = 0
+        self._inflight_lock = threading.Lock()
+        self._inbound_overflowing = False
+        #: Bytes the reader thread logged but did not post (cumulative).
+        self.inbound_dropped_bytes = 0
 
     def start(self, argv: List[str], env: Dict[str, str], cwd: str) -> None:
         """Spawn the child and begin reading it. Called once, by the manager."""
@@ -498,10 +516,52 @@ class Session:
                 chunk = self.pty.read()
                 if not chunk:
                     break
-                self._loop.call_soon_threadsafe(self._on_output, chunk)
+                # The transcript is written here, on this thread, before the
+                # loop hears of the chunk: disk I/O per chunk was 90% of what
+                # the loop did per callback, and the loop is the one resource
+                # every session shares. ``self._log`` is this thread's alone
+                # until EOF (``_finish`` closes it after ``_on_eof``, which is
+                # posted below, after the last write).
+                self._append_log(chunk)
+                self._post_output(chunk)
             self._loop.call_soon_threadsafe(self._on_eof)
         except RuntimeError:
             pass  # event loop already closed (daemon teardown)
+
+    def _post_output(self, chunk: bytes) -> None:  # runs on the reader thread
+        """Hand ``chunk`` to the loop, unless the loop is already behind by
+        :data:`INBOUND_MAX` bytes of this session's output -- then it is
+        logged only, and the owner is told once per episode."""
+        with self._inflight_lock:
+            over = self._inflight >= INBOUND_MAX
+            if over:
+                self.inbound_dropped_bytes += len(chunk)
+                first = not self._inbound_overflowing
+                self._inbound_overflowing = True
+            else:
+                self._inflight += len(chunk)
+        if over:
+            if first:
+                self._loop.call_soon_threadsafe(self._on_input_overflow)
+            return
+        self._loop.call_soon_threadsafe(self._on_output, chunk)
+
+    def _on_input_overflow(self) -> None:
+        """The loop fell :data:`INBOUND_MAX` behind this session's output."""
+        log.warning(
+            "session %r writes faster than the loop takes it: output is being "
+            "logged but not rendered or broadcast until the loop catches up "
+            "(inbound cap %d)",
+            self.sdef.name, INBOUND_MAX,
+        )
+        try:
+            self.notify(
+                "output arrives faster than the daemon can take it; the screen "
+                "is skipping ahead (the log has everything)",
+                ttl=30, level="warn",
+            )
+        except Exception:  # a notice must never break the output path
+            log.debug("inbound overflow notice for %r failed", self.sdef.name, exc_info=True)
 
     def _on_render_overflow(self, dropped: int) -> None:
         """The render queue hit its cap and shed its oldest bytes.
@@ -527,6 +587,12 @@ class Session:
             log.debug("overflow notice for %r failed", self.sdef.name, exc_info=True)
 
     def _on_output(self, chunk: bytes) -> None:
+        with self._inflight_lock:
+            self._inflight = max(0, self._inflight - len(chunk))
+            # Half-way back is the hysteresis: one more post is not a new
+            # episode, but the reader must not flap on every byte either.
+            if self._inbound_overflowing and self._inflight <= INBOUND_MAX // 2:
+                self._inbound_overflowing = False
         if self.exited:
             return
         self._saw_output = True
@@ -542,7 +608,8 @@ class Session:
         # render is deferred — so alt_screen is already current right here.
         new_alt = self.screen.alt_screen
         new_mouse = self.screen.mouse_tracking
-        self._append_log(chunk)
+        # The transcript was already written by the reader thread
+        # (``_read_pump``); nothing touches ``self._log`` on the loop.
         # The compaction notice rides the same stream the log does; scanning
         # here (and nowhere shown to the user) is what lets the dashboard
         # label a compacting session without asking the screen to.
