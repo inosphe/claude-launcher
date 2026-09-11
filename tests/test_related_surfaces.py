@@ -176,13 +176,24 @@ def test_a_surface_also_in_the_change_is_marked_touched_and_the_summary_counts_b
     assert by["src/pkg/b.py"]["touched"] is True
     assert by["src/pkg/a.py"]["touched"] is True   # b's partner is a
     assert by["tests/test_a_guard.py"]["touched"] is False
-    assert rs.summary_line(found) == "related surfaces: 1 to check, 2 touched by this diff"
+    assert rs.summary_line(found) == (
+        "related surfaces: 0 to check, 2 touched by this diff, 1 naming tests (the gate runs them)"
+    )
 
 
 def test_the_reasons_are_ordered_guard_then_history_then_tests(repo):
     groups = (("grp", ("src/pkg/a.py", "src/pkg/b.py")),)
     found = _by_path(_surfaces(repo, ["src/pkg/a.py"], groups=groups))
     assert found["src/pkg/b.py"]["reasons"] == ["guard:grp", "cochange:4"]
+
+
+def test_two_changed_files_sharing_a_partner_yield_one_count_the_larger(repo):
+    _commit(repo, "bc", {"src/pkg/b.py": "x = 40\n", "src/pkg/c.py": "x = 40\n"})
+    _commit(repo, "bc 2", {"src/pkg/b.py": "x = 41\n", "src/pkg/c.py": "x = 41\n"})
+    # a<->b is 4 (base + three), c<->b is 3 (base + two): one line, the larger
+    found = _by_path(_surfaces(repo, ["src/pkg/a.py", "src/pkg/c.py"]))
+    assert found["src/pkg/b.py"]["reasons"] == ["cochange:4"]
+    assert found["src/pkg/b.py"]["for"] == ["src/pkg/a.py", "src/pkg/c.py"]
 
 
 def test_the_board_is_never_a_surface(repo):
@@ -214,8 +225,9 @@ def test_the_script_reads_the_branch_change_and_prints_the_summary_last(repo):
     assert out.returncode == 0, out.stderr
     lines = out.stdout.strip().splitlines()
     assert lines[0].startswith("changed paths (1) vs master")
-    assert lines[-1] == "related surfaces: 2 to check, 0 touched by this diff"
+    assert lines[-1] == "related surfaces: 1 to check, 0 touched by this diff, 1 naming tests (the gate runs them)"
     assert any(line.startswith("CHECK") and "src/pkg/b.py" in line for line in lines)
+    assert any(line.startswith("gate") and "tests/test_a_guard.py" in line for line in lines)
 
 
 def test_json_output_carries_the_same_facts(repo):
@@ -224,7 +236,7 @@ def test_json_output_carries_the_same_facts(repo):
     data = json.loads(out.stdout)
     assert data["changed"] == ["src/pkg/a.py"]
     assert {s["path"] for s in data["surfaces"]} == {"src/pkg/b.py", "tests/test_a_guard.py"}
-    assert data["summary"] == "related surfaces: 2 to check, 0 touched by this diff"
+    assert data["summary"] == "related surfaces: 1 to check, 0 touched by this diff, 1 naming tests (the gate runs them)"
 
 
 def test_paths_can_be_given_instead_of_asking_git(repo):

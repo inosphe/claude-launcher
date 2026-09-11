@@ -39,10 +39,13 @@ line it produces so a reader knows why a file is there:
     :func:`changed_tests.mentioning` rule the gate uses (a test that pins a
     file by string is a reader of it, and a contract change has to reach it).
 
-Each surface is then marked **touched** (also in this branch's change) or
-**check** (not). The last line is the number the review step reports:
+Each surface is then marked **touched** (also in this branch's change),
+**gate** (a naming test -- the targeted gate selects and runs it by the
+same rule, so it is listed for the record and not counted) or **check**
+(a source mirror nobody will run for you). The last line is the sentence
+the review step reports:
 
-    related surfaces: N to check, M touched by this diff
+    related surfaces: N to check, M touched by this diff, T naming tests (the gate runs them)
 
 The exit code is not a verdict: 0 means the list was produced, 2 that it
 could not be (no repository). A surface left unchecked is a sentence in the
@@ -256,7 +259,16 @@ def surfaces(
         if not (repo / path).exists():
             return  # a co-change partner that has since been deleted is not a surface
         entry = found.setdefault(path, {"path": path, "reasons": [], "for": []})
-        if reason not in entry["reasons"]:
+        kind, _, value = reason.partition(":")
+        if kind == "cochange":
+            # one count per surface: the strongest partner among the changed
+            # files, not one line per changed file
+            existing = [r for r in entry["reasons"] if r.startswith("cochange:")]
+            if existing and int(existing[0].split(":")[1]) >= int(value):
+                reason = None
+            elif existing:
+                entry["reasons"].remove(existing[0])
+        if reason is not None and reason not in entry["reasons"]:
             entry["reasons"].append(reason)
         if source not in entry["for"]:
             entry["for"].append(source)
@@ -288,10 +300,22 @@ def _reason_rank(reason: str) -> tuple:
     return ({"guard": 0, "cochange": 1, "test": 2}.get(kind, 3), reason)
 
 
+def is_naming_test(surface: dict) -> bool:
+    """A test module that names the changed file -- listed, but not counted
+    among the surfaces to check: the gate selects it by the same rule
+    (``changed_tests`` rule 3a) and runs it."""
+    return surface["reasons"] == ["test"]
+
+
 def summary_line(found: List[dict]) -> str:
-    to_check = [s for s in found if not s["touched"]]
-    touched = [s for s in found if s["touched"]]
-    return f"related surfaces: {len(to_check)} to check, {len(touched)} touched by this diff"
+    sources = [s for s in found if not is_naming_test(s)]
+    to_check = [s for s in sources if not s["touched"]]
+    touched = [s for s in sources if s["touched"]]
+    tests = [s for s in found if is_naming_test(s)]
+    return (
+        f"related surfaces: {len(to_check)} to check, {len(touched)} touched by this diff, "
+        f"{len(tests)} naming tests (the gate runs them)"
+    )
 
 
 def render(changed: List[str], found: List[dict], base_note: str) -> str:
@@ -301,7 +325,7 @@ def render(changed: List[str], found: List[dict], base_note: str) -> str:
     if not found:
         lines.append("related surfaces: none derived (no co-change partner, guard group, or naming test)")
     for s in found:
-        mark = "touched" if s["touched"] else "CHECK  "
+        mark = "touched" if s["touched"] else ("gate   " if is_naming_test(s) else "CHECK  ")
         lines.append(f"{mark}  {s['path']}  [{', '.join(s['reasons'])}]  for {', '.join(s['for'])}")
     lines.append("")
     lines.append(summary_line(found))

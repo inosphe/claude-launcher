@@ -673,7 +673,10 @@ steps:
       `uv run --no-sync python tools/related_surfaces.py --base auto`
       (git 공변경 이력 · 명시 거울 표 · 그 파일을 이름으로 부르는
       테스트, 세 출처를 합쳐 파일마다 왜 올라왔는지를 적어 준다; 마지막
-      줄이 `related surfaces: N to check, M touched by this diff`다).
+      줄이 `related surfaces: N to check, M touched by this diff, T naming
+      tests (the gate runs them)`이고 — 이름으로 부르는 테스트는 표적
+      게이트가 같은 규칙으로 골라 돌리므로 세지 않고 기록만 한다 — 그
+      N이 아래 문장의 N이다).
       보고에는 **「관련 표면 N개 중 M개 점검, 나머지는 <사유>」** 한 줄을
       적는다 — 점검했다는 것은 그 파일을 열어 이번 변경이 거기에도
       들어가야 하는지를 봤다는 뜻이고, 안 봤으면 안 봤다고 적는다. 표면
