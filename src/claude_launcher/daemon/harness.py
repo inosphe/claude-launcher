@@ -337,6 +337,39 @@ def steers_conversation(args: Iterable[str]) -> bool:
     )
 
 
+def without_restore_subcommand(args: Iterable[str], subcommand: str) -> List[str]:
+    """``args`` with a harness's conversation *subcommand* and its tail cut off.
+
+    The positional counterpart of :func:`steers_conversation`. Claude steers a
+    conversation with flags, which :data:`CONVERSATION_FLAGS` can recognise one
+    token at a time; codex steers it with a subcommand instead --
+    ``codex resume [SESSION_ID] [PROMPT]`` -- so a definition created to open an
+    existing conversation carries a bare ``resume`` in its ``args``, which no
+    flag list matches.
+
+    The restore then appends its own ``resume <id>`` after it and the command
+    line reads ``resume resume <id>``. Codex takes the first token as the
+    subcommand and the literal string ``"resume"`` as the SESSION_ID (its help:
+    "Session id (UUID) or session name. UUIDs take precedence if it parses"), so
+    it hunts for a *session named* ``resume``, finds nothing, and spends the real
+    id as the prompt. Measured on this machine 2026-09-11: four of six codex
+    definitions built that argv on restore (sessions ``s507``, ``s513``,
+    ``s514``, ``s516``), and ``s507`` is the case the user reported.
+
+    Everything after the subcommand goes with it, because it *is* the
+    subcommand's argument list: a SESSION_ID the first spawn named fills the
+    same slot the restore is about to fill, and leaving it behind moves the
+    duplication one token along instead of removing it. The restore owns which
+    conversation reopens -- that is the whole point of pinning the id.
+    """
+    args = list(args)
+    try:
+        cut = args.index(subcommand)
+    except ValueError:
+        return args
+    return args[:cut]
+
+
 def normalize(sdef: SessionDef, *, restoring: bool = False) -> SessionDef:
     """Fill defaults (cwd, pinned conversation) and validate against config."""
     cwd = os.path.abspath(sdef.cwd or os.getcwd())
@@ -664,6 +697,27 @@ def restores_blank(sdef: SessionDef) -> bool:
     return not transcripts.exists(prof.config_dir, sdef.conversation_id, sdef.cwd)
 
 
+def codex_restores_blank(sdef: SessionDef) -> bool:
+    """Whether restoring this *codex* definition opens an empty conversation.
+
+    The counterpart of :func:`restores_blank`, and it has to be asked at a
+    different moment. Claude's answer is about the transcript the previous
+    daemon left behind, so it is read *before* the relaunch. Codex's is about
+    whether the launch managed to resolve a conversation at all -- the args it
+    names, then the newest rollout in its cwd that no other session holds
+    (:meth:`SessionManager.launch`) -- so it is only true *after* that has run.
+    Asking it too early says "blank" about a session that went on to resume
+    fine, and the blank briefing then tells it the scrollback above is not its
+    own when it is.
+
+    True means :func:`build_command` appended no conversation at all, because
+    reaching that branch means every rollout in this directory belongs to
+    somebody else. The session comes back alive and with nothing in it, so it
+    needs the same re-briefing a blank claude restore does.
+    """
+    return sdef.harness == "codex" and not sdef.conversation_id
+
+
 def build_command(
     sdef: SessionDef, *, restoring: bool = False, opening: str = ""
 ) -> Tuple[List[str], Dict[str, str], str]:
@@ -813,7 +867,15 @@ def build_command(
         if not model_args and sdef.model:
             model_args = [f"--model={sdef.model}"]
         effort_args = selection_args(entry.effort_args, sdef.effort)
-        runtime_args = [*base_args, *model_args, *effort_args, *sdef.args]
+        session_args = list(sdef.args)
+        if restoring and entry.restore_args:
+            # The first spawn's own conversation subcommand, dropped so the
+            # restore below is the only thing that names a conversation. See
+            # :func:`without_restore_subcommand` for what the duplicate did.
+            session_args = without_restore_subcommand(
+                session_args, entry.restore_args[0]
+            )
+        runtime_args = [*base_args, *model_args, *effort_args, *session_args]
         if prof is not None:
             try:
                 runtime_args = runner.harness_launch_args(
@@ -825,6 +887,33 @@ def build_command(
         if restoring:
             if sdef.harness == "codex" and sdef.conversation_id:
                 argv.extend(["resume", sdef.conversation_id])
+            elif sdef.harness == "codex":
+                # Nothing pinned, and codex's declared restore args select a
+                # conversation by *cwd* (``resume --last``; its own help says
+                # ``--all`` "disables cwd filtering"). A cwd is not an identity:
+                # six codex sessions stood in F:/works/gds6 on 2026-09-11 over a
+                # single rollout. And by the time this branch is reached, the
+                # manager has already tried every way this session could own a
+                # conversation in that directory -- the id its args name, then
+                # the newest rollout no other session holds
+                # (:meth:`SessionManager.launch`). So there is nothing left for
+                # ``--last`` to find that is this session's: it opens somebody
+                # else's, two sessions then append to one transcript, it grows
+                # into two divergent histories, and whichever the user opens
+                # later reads as the session having lost work.
+                #
+                # So come back empty -- the same trade the claude branch above
+                # makes ("a session that dies on restore is worse than one that
+                # comes back empty"), and paid for the same way:
+                # :func:`codex_restores_blank` puts this session on the resume
+                # nudge's blank list, which re-states the task an empty restore
+                # does not replay.
+                log.info(
+                    "session %r has no codex conversation of its own to reopen; "
+                    "restoring it as a new conversation rather than opening "
+                    "whichever one was written last in %s",
+                    sdef.name, sdef.cwd,
+                )
             else:
                 argv.extend(entry.restore_args)
         if prof is None:

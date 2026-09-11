@@ -671,6 +671,26 @@ def test_a_briefing_that_cannot_be_composed_still_leaves_the_warning(
     assert "nothing above this line is your history" in session.delivered[0]
 
 
+def test_the_blank_block_states_the_cause_its_harness_actually_had(home):
+    """Two branches reach this message and only the consequences are shared.
+
+    Telling a codex session that it "was created within seconds of the restart"
+    is a claim it can check and find false, and an agent that finds a false
+    claim in its own briefing goes looking for the contradiction instead of
+    starting work.
+    """
+    claude_side = resume.blank_block("w1")
+    codex_side = resume.blank_block("w1", harness="codex")
+
+    assert "had not been written to disk yet" in claude_side
+    assert "within seconds of the restart" not in codex_side
+    assert "belongs to another session" in codex_side
+    # The consequences are the same for both and must not have been dropped.
+    for block in (claude_side, codex_side):
+        assert "nothing above this line is your history" in block
+        assert "came back empty" in block
+
+
 def test_blank_block_without_a_briefing_says_only_what_it_knows(home):
     block = resume.blank_block("w1")
     assert "session: w1" in block

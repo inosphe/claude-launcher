@@ -726,6 +726,154 @@ def test_codex_restore_resumes_its_pinned_conversation_id(
     assert restored[-2:] == ["resume", "thread-1"]
 
 
+def test_codex_restore_does_not_repeat_the_resume_subcommand(home, tmp_path):
+    """A session created on ``-- resume`` must not restore to ``resume resume``.
+
+    Codex reads ``resume resume <uuid>`` as subcommand + SESSION_ID "resume" +
+    PROMPT <uuid> (`codex resume --help`: "Session id (UUID) or session name"),
+    so it hunts for a session *named* resume, finds none, and spends the real id
+    as a prompt. Measured 2026-09-11 on sessions s507, s513, s514 and s516.
+    """
+    _profile_for("work", "codex")
+    _declare_harness("codex", restore_args=["resume", "--last"])
+    sdef = harness.normalize(SessionDef(
+        name="x", profile="work", cwd=str(tmp_path),
+        args=("resume",), conversation_id="thread-1",
+    ))
+
+    restored, _, _ = harness.build_command(sdef, restoring=True)
+
+    assert restored[-2:] == ["resume", "thread-1"]
+    assert restored.count("resume") == 1
+
+
+def test_codex_restore_replaces_a_conversation_the_first_spawn_named(
+    home, tmp_path
+):
+    """The pinned id wins, and the id the args named does not trail after it.
+
+    Dropping only the subcommand would leave the old SESSION_ID filling the
+    slot the restore is about to fill — the duplication moved one token along.
+    """
+    _profile_for("work", "codex")
+    _declare_harness("codex", restore_args=["resume", "--last"])
+    sdef = harness.normalize(SessionDef(
+        name="x", profile="work", cwd=str(tmp_path),
+        args=("resume", "thread-0"), conversation_id="thread-1",
+    ))
+
+    restored, _, _ = harness.build_command(sdef, restoring=True)
+
+    assert restored[-2:] == ["resume", "thread-1"]
+    assert "thread-0" not in restored
+
+
+def test_a_fresh_codex_spawn_keeps_the_resume_its_args_asked_for(home, tmp_path):
+    """Only a *restore* supplies a conversation of its own.
+
+    The first spawn's ``resume`` is the user's own instruction and passes
+    through untouched; cutting it there would turn a resume into a new session.
+    """
+    _profile_for("work", "codex")
+    _declare_harness("codex", restore_args=["resume", "--last"])
+    sdef = harness.normalize(SessionDef(
+        name="x", profile="work", cwd=str(tmp_path),
+        args=("resume", "thread-0"), conversation_id="thread-1",
+    ))
+
+    fresh, _, _ = harness.build_command(sdef)
+
+    assert fresh[-2:] == ["resume", "thread-0"]
+
+
+def test_without_restore_subcommand_leaves_other_args_alone():
+    assert harness.without_restore_subcommand(
+        ["--sandbox", "workspace-write", "resume", "thread-0"], "resume"
+    ) == ["--sandbox", "workspace-write"]
+    assert harness.without_restore_subcommand(
+        ["--sandbox", "workspace-write"], "resume"
+    ) == ["--sandbox", "workspace-write"]
+
+
+def test_an_unpinned_codex_restore_opens_a_new_conversation(home, tmp_path):
+    """``resume --last`` is cwd-relative, and a cwd is not an identity.
+
+    Reaching this branch means the manager already failed to find a rollout in
+    this directory that is this session's (args, then the newest one nobody
+    else holds), so ``--last`` can only open somebody else's. Measured
+    2026-09-11: six codex sessions stood in F:/works/gds6 over one rollout.
+
+    Supersedes ``test_an_unpinned_codex_restore_still_spells_resume_once``,
+    which pinned ``["resume", "--last"]`` as this branch's output. That
+    assertion was right about the duplication it was written for and wrong
+    about the fallback itself, which is what claunch-7z85.2 identifies: a
+    command line can be well formed and still open the wrong conversation.
+    """
+    _profile_for("work", "codex")
+    _declare_harness("codex", restore_args=["resume", "--last"])
+    sdef = harness.normalize(SessionDef(
+        name="x", profile="work", cwd=str(tmp_path), args=("resume",),
+    ))
+
+    restored, _, _ = harness.build_command(sdef, restoring=True)
+
+    assert "resume" not in restored
+    assert "--last" not in restored
+
+
+def test_a_pinned_codex_restore_still_reopens_its_own_conversation(
+    home, tmp_path
+):
+    """The guard above must not cost the sessions that do own a conversation."""
+    _profile_for("work", "codex")
+    _declare_harness("codex", restore_args=["resume", "--last"])
+    sdef = harness.normalize(SessionDef(
+        name="x", profile="work", cwd=str(tmp_path),
+        args=("resume",), conversation_id="thread-1",
+    ))
+
+    restored, _, _ = harness.build_command(sdef, restoring=True)
+
+    assert restored[-2:] == ["resume", "thread-1"]
+
+
+def test_another_harness_keeps_its_declared_restore_args(home, tmp_path):
+    """Only codex's restore args select by cwd, so only codex loses them.
+
+    A declared harness whose restore args name no directory is unaffected; the
+    guard is about what ``--last`` resolves against, not about restores.
+    """
+    _declare_harness("other", restore_args=["--continue"])
+    _profile_for("custom", "other")
+    sdef = harness.normalize(
+        SessionDef(name="x", profile="custom", cwd=str(tmp_path))
+    )
+
+    restored, _, _ = harness.build_command(sdef, restoring=True)
+
+    assert restored[-1] == "--continue"
+
+
+def test_codex_restores_blank_is_asked_of_the_resolved_definition(
+    home, tmp_path
+):
+    """True exactly when the restore will open nothing.
+
+    Asked after the launch resolved the conversation, not before: a definition
+    that gets pinned on the way up resumes fine, and calling it blank would
+    tell that session the scrollback above is not its own when it is.
+    """
+    unpinned = SessionDef(name="x", harness="codex", cwd=str(tmp_path))
+    pinned = SessionDef(
+        name="x", harness="codex", cwd=str(tmp_path), conversation_id="thread-1"
+    )
+    claude_side = SessionDef(name="x", harness="claude", cwd=str(tmp_path))
+
+    assert harness.codex_restores_blank(unpinned) is True
+    assert harness.codex_restores_blank(pinned) is False
+    assert harness.codex_restores_blank(claude_side) is False
+
+
 def test_session_env_overrides_harness_env(home, tmp_path):
     _declare_harness("h", env={"K": "harness"})
     _profile_for("custom", "h")
