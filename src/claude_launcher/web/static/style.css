@@ -109,13 +109,49 @@ option:disabled { color: #6b7280; }
 }
 #session-list .session-group:hover { background: transparent; }
 #session-list .session-group-body { margin: 0; padding: 0; list-style: none; }
+/* The stacked lane. `display: contents` takes the group's own box out of
+   layout, which hands its heading the whole list as a containing block —
+   native sticky then holds it for the length of the rail instead of
+   releasing it at its own group's bottom, so every outermost heading is on
+   screen at every scroll position (piled at the top once passed, waiting at
+   the bottom before). The nested levels keep their boxes, and with them the
+   release that stops an inner heading from sitting under the next outer
+   group. Off the stacked class the rail is exactly as it was. */
+#session-list.session-group-stacked > li.session-group.session-group-level-0 {
+  display: contents;
+}
+#session-list .session-group.collapsed > .session-group-body { display: none; }
 #session-list .session-group-heading {
   padding: 6px 10px; color: #a5b4c3; background: #161b22;
   border-bottom: 1px solid #2a2e36; font-size: 11px; font-weight: 600;
-  letter-spacing: .02em; text-transform: none; cursor: default; display: block;
-  position: sticky; top: var(--session-group-sticky-top, 0px); z-index: 2;
-  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  letter-spacing: .02em; text-transform: none; cursor: pointer;
+  display: flex; align-items: center; gap: 5px;
+  position: sticky; top: var(--session-group-sticky-top, 0px);
+  bottom: var(--session-group-sticky-bottom, auto); z-index: 2;
+  white-space: nowrap; overflow: hidden;
 }
+#session-list .session-group-heading:hover { color: #e6edf3; background: #1b222c; }
+#session-list .session-group-name {
+  flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis;
+}
+#session-list .session-group-caret {
+  flex: none; width: 9px; color: #6e7681; font-size: 9px; line-height: 1;
+}
+/* How many sessions the group holds — the one fact a shut group still owes
+   its reader. */
+#session-list .session-group-count {
+  flex: none; color: #7d8590; font-weight: 400;
+  font-variant-numeric: tabular-nums;
+}
+#session-list .session-group-plus {
+  flex: none; background: none; border: none; color: #6e7681;
+  font-size: 14px; line-height: 1; padding: 0 4px; cursor: pointer;
+}
+#session-list .session-group-plus:hover { color: #3fb950; }
+/* Refused, not removed: the button keeps its pointer events so the reason
+   on it can be read on hover, which a `disabled` control cannot offer. */
+#session-list .session-group-plus.disabled { color: #444c56; cursor: not-allowed; }
+#session-list .session-group-plus.disabled:hover { color: #444c56; }
 #session-list .session-group-heading.session-group-level-1 {
   padding-left: 20px; color: #8b949e; background: #131820;
   font-size: 10px; z-index: 1;
