@@ -332,6 +332,10 @@ async function main() {
     ctx.spawnWorkflowAdmits({ filter_roles: WL }, "leader") === false);
   check("no filter and no role admit everything",
     ctx.spawnWorkflowAdmits({}, "") === true);
+  check("a whitelist turns an unpicked role away too",
+    ctx.spawnWorkflowAdmits({ filter_roles: WL }, "") === false);
+  check("...but a blacklist still admits it",
+    ctx.spawnWorkflowAdmits({ filter_roles: { type: "blacklist", roles: ["worker"] } }, "") === true);
   check("an unknown filter type volunteers nothing",
     ctx.spawnWorkflowAdmits({ filter_roles: { type: "all", roles: ["worker"] } }, "worker") === false);
 

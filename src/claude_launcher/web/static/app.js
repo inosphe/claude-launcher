@@ -16401,16 +16401,21 @@ function spawnWorkflowEntry(raw) {
 }
 
 /* Would this workflow's filter_roles let `role` drive it? True with no
-   filter or no role. The daemon enforces the same rule at start; this
-   decides what the form offers to pick from, exactly like the CLI wizard —
-   including refusing an entry whose `type` is outside the vocabulary. */
+   filter at all -- a workflow that says nothing about who may drive it
+   admits everyone. With a filter, an unset role is just the empty string
+   put to the same rule: a whitelist never lists it, a blacklist never
+   excludes it, so a filtered workflow stays off the row until a role it
+   actually admits is picked. The daemon enforces the same rule at start;
+   this decides what the form offers to pick from, exactly like the CLI
+   wizard — including refusing an entry whose `type` is outside the
+   vocabulary. */
 function spawnWorkflowAdmits(entry, role) {
   const f = entry.filter_roles;
-  if (!f || typeof f !== "object" || !role) return true;
+  if (!f || typeof f !== "object") return true;
   const kind = String(f.type || "").trim().toLowerCase();
   if (kind !== "whitelist" && kind !== "blacklist") return false;
   const roles = (f.roles || []).map((r) => String(r).trim().toLowerCase());
-  const held = roles.includes(String(role).trim().toLowerCase());
+  const held = roles.includes(String(role || "").trim().toLowerCase());
   return kind === "whitelist" ? held : !held;
 }
 
@@ -16418,10 +16423,10 @@ function spawnWorkflowAdmits(entry, role) {
    then the rest — each band by descending priority. An entry the role's
    filter_roles refuses is left out of the row entirely (not merely ranked
    last) so picking a role also picks from what that role may actually run;
-   empty role admits everything, matching spawnWorkflowAdmits. Returns the
-   ordered options and the auto-pick (the role's highest-priority default),
-   for the caller to apply over a value only the auto-pick itself set last
-   time. */
+   a workflow with no filter stays listed regardless of role, matching
+   spawnWorkflowAdmits. Returns the ordered options and the auto-pick (the
+   role's highest-priority default), for the caller to apply over a value
+   only the auto-pick itself set last time. */
 function spawnRankWorkflows(raws, role) {
   role = String(role || "").trim().toLowerCase();
   const entries = (raws || []).map(spawnWorkflowEntry).filter((e) => e.name)
