@@ -2305,7 +2305,7 @@ def escalation_check(
                 " — the escalation would proceed and record that it went "
                 "unchecked"
             )
-        elif role_filter.allows_any(reach.me_roles or (reach.me_role,)):
+        elif role_filter.allows_any(_held_roles(reach)):
             entry["role_check"] = f"admits {_held_label(reach)!r}"
         else:
             entry["role_check"] = (
@@ -2398,9 +2398,19 @@ def _archive_current(state: dict, by: str, cwd: Optional[str]) -> str:
     return str(state_mod.archive_run(cwd))
 
 
+def _held_roles(reach) -> tuple:
+    """Every role the driving session holds — its primary and its subroles.
+
+    Read off the pool's ``me_roles``; a pool that publishes none (a roster
+    from a daemon that predates subroles, or a stand-in that only knows
+    ``me_role``) is the primary alone.
+    """
+    return tuple(getattr(reach, "me_roles", ()) or (reach.me_role,))
+
+
 def _held_label(reach) -> str:
     """``leader+reviewer`` — the roles a driving session holds, for a note."""
-    return "+".join(reach.me_roles or (reach.me_role,))
+    return "+".join(_held_roles(reach))
 
 
 def _enforce_role_filter(
@@ -2427,7 +2437,7 @@ def _enforce_role_filter(
             f"filter_roles {role_filter.describe()} could not be enforced: "
             f"{reach.problem or 'the driving session has no mesh identity'}"
         )
-    if role_filter.allows_any(reach.me_roles or (reach.me_role,)):
+    if role_filter.allows_any(_held_roles(reach)):
         return None
     raise CflowError(
         f"workflow {workflow.name!r} declares filter_roles "
