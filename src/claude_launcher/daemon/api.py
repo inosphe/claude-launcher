@@ -40,8 +40,8 @@ from .. import worktree as worktree_mod
 from . import beads as beads_mod, notice as notice_mod
 from . import rag as rag_mod
 from . import (
-    briefing, cflow_clock, clipty, ctxsize, onboard, prompt_presets, rebrief,
-    session_input, status_checks,
+    briefing, cflow_clock, clipty, ctxsize, loops, onboard, prompt_presets,
+    rebrief, session_input, status_checks,
 )
 from . import transcript_view
 from . import window as window_mod
@@ -500,6 +500,9 @@ def build_app(
     # know it needs one.
     r.add_get("/api/sessions/{name}/rebrief", h_session_rebrief)
     r.add_post("/api/sessions/{name}/rebrief", h_session_rebrief)
+    r.add_get("/api/sessions/{name}/loops", h_session_loops)
+    r.add_post("/api/sessions/{name}/loops", h_session_loop_add)
+    r.add_post("/api/sessions/{name}/loops/{loop}/close", h_session_loop_close)
     r.add_get("/api/sessions/{name}/capture", h_session_capture)
     r.add_get("/api/sessions/{name}/transcript", h_session_transcript)
     r.add_get("/api/sessions/{name}/wait", h_session_wait)
@@ -4935,6 +4938,64 @@ async def h_session_rebrief(request: web.Request) -> web.Response:
         return json_response({"ok": True, "delivered": False, "empty": True})
     delivered = await manager.get(name).deliver(block)
     return json_response({"ok": True, "delivered": delivered, "empty": False})
+
+
+async def h_session_loops(request: web.Request) -> web.Response:
+    """A session's open loops: stored entries plus the mesh's reply-waits.
+
+    ``?all=1`` includes closed entries — the ledger keeps them, so what a
+    session waited on and when it resolved stays readable after the fact.
+    """
+    manager: SessionManager = request.app["manager"]
+    name = request.match_info["name"]
+    manager.get(name)
+    payload = loops.summary(name, _mesh_mgr(request))
+    if request.query.get("all"):
+        payload["all"] = loops.all_entries(name)
+    return json_response(payload)
+
+
+async def h_session_loop_add(request: web.Request) -> web.Response:
+    manager: SessionManager = request.app["manager"]
+    name = request.match_info["name"]
+    manager.get(name)
+    body = await _json_body(request)
+    what = body.get("what")
+    if not isinstance(what, str) or not what.strip():
+        return json_error(400, "'what' is required")
+    expires_in = body.get("expires_in")
+    if expires_in is not None:
+        try:
+            expires_in = float(expires_in)
+        except (TypeError, ValueError):
+            return json_error(400, "'expires_in' must be a number of seconds")
+    refs = body.get("refs")
+    try:
+        entry = loops.add(
+            name,
+            what,
+            resume_when=str(body.get("resume_when") or ""),
+            then=str(body.get("then") or ""),
+            refs=refs if isinstance(refs, dict) else None,
+            key=str(body.get("key") or "") or None,
+            expires_in=expires_in,
+        )
+    except ValueError as exc:
+        return json_error(400, str(exc))
+    return json_response({"session": name, "loop": entry})
+
+
+async def h_session_loop_close(request: web.Request) -> web.Response:
+    manager: SessionManager = request.app["manager"]
+    name = request.match_info["name"]
+    manager.get(name)
+    body = await _json_body(request)
+    entry = loops.close(
+        name, request.match_info["loop"], note=str(body.get("note") or "")
+    )
+    if entry is None:
+        return json_error(404, f"no open loop {request.match_info['loop']!r}")
+    return json_response({"session": name, "loop": entry})
 
 
 async def h_session_briefing(request: web.Request) -> web.Response:

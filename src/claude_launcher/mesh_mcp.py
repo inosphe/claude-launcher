@@ -503,6 +503,86 @@ TOOLS = [
             "required": ["mesh"],
         },
     },
+    {
+        "name": "loops",
+        "description": (
+            "What this session is waiting on -- its open loops. Stored "
+            "entries (yours, and the mesh's own for a send it refused for a "
+            "full inbox) plus the replies you are owed on messages you sent. "
+            "A re-briefing after /compact or /clear carries the same list, "
+            "so a wait recorded here survives your context; one that lives "
+            "only in your conversation does not. STALE marks a loop past its "
+            "horizon: renew it with loop_add or end it with loop_close."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "all": {
+                    "type": "boolean",
+                    "description": "include closed entries",
+                },
+            },
+        },
+    },
+    {
+        "name": "loop_add",
+        "description": (
+            "Record something you are waiting on, so it is handed back to "
+            "you after a context loss: 'what' you wait for, 'resume_when' "
+            "the condition that ends the wait, 'then' what you will do. Use "
+            "it the moment a wait begins that a later turn must pick up -- "
+            "a peer's answer, a window that must open, a re-send a refusal "
+            "made you postpone. Same 'key' while open updates that entry "
+            "instead of adding a second."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "what": {"type": "string", "description": "what is waited on"},
+                "resume_when": {
+                    "type": "string",
+                    "description": "the condition that ends the wait",
+                },
+                "then": {
+                    "type": "string",
+                    "description": "what to do once it ends",
+                },
+                "refs": {
+                    "type": "object",
+                    "description": (
+                        "ids the wait is about: issue, message, session, mesh"
+                    ),
+                },
+                "key": {
+                    "type": "string",
+                    "description": "dedupe key: re-adding while open updates in place",
+                },
+                "expires_in": {
+                    "type": "number",
+                    "description": (
+                        "seconds until the loop counts as stale (default 6h)"
+                    ),
+                },
+            },
+            "required": ["what"],
+        },
+    },
+    {
+        "name": "loop_close",
+        "description": (
+            "End one open loop by id, with an optional 'note' on how it "
+            "resolved. Close a loop when its wait ends; a loop nobody closes "
+            "turns STALE and keeps asking to be judged."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "id": {"type": "string", "description": "the loop id"},
+                "note": {"type": "string", "description": "how it resolved"},
+            },
+            "required": ["id"],
+        },
+    },
 ]
 
 
@@ -557,6 +637,24 @@ def call_tool(name: str, args: dict) -> dict:
         return _client().get(path)
     if name == "spawn":
         return _spawn(args)
+    if name == "loops":
+        q = "?all=1" if args.get("all") else ""
+        return _client().get(f"/api/sessions/{_session()}/loops{q}")
+    if name == "loop_add":
+        payload = {
+            k: args[k]
+            for k in ("what", "resume_when", "then", "refs", "key", "expires_in")
+            if args.get(k) not in (None, "")
+        }
+        return _client().post(f"/api/sessions/{_session()}/loops", payload)
+    if name == "loop_close":
+        ident = str(args.get("id") or "").strip()
+        if not ident:
+            raise MeshMcpError("'id' is required")
+        return _client().post(
+            f"/api/sessions/{_session()}/loops/{quote(ident, safe='')}/close",
+            {"note": str(args.get("note") or "")},
+        )
     if name == "kill":
         child = str(args.get("session") or "")
         if not child:

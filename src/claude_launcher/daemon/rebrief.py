@@ -58,6 +58,7 @@ from typing import Dict, List, Optional, Tuple
 from .. import digests
 from ..cflow import engine as cflow_engine
 from ..cflow import state as cflow_state
+from . import loops
 from .mesh import MeshError
 
 log = logging.getLogger(__name__)
@@ -246,6 +247,7 @@ def compose(name: str, *, manager, mesh_mgr) -> str:
                 _cflow_section(sdef),
                 _asks_section(name),
                 _children_section(name, manager),
+                _loops_section(name, mesh_mgr),
                 _task_section(
                     sdef.task or "",
                     issue=sdef.issue,
@@ -473,6 +475,23 @@ def _children_section(name: str, manager) -> str:
         "reporting to you, and unable to see your reset. The 'children' tool "
         "lists them; chase the ones you were waiting on."
     )
+
+
+def _loops_section(name: str, mesh_mgr) -> str:
+    """What this session was waiting on when its context went.
+
+    The one section that is STORED rather than re-derived, and the reason is
+    the reason this module exists: a wait lives nowhere the daemon can see
+    unless the agent (or the mesh, for a refused send) wrote it down. Rendered
+    by :func:`loops.rebrief_section`, capped there, and placed just before
+    the task so that "what was I doing" reads right after "what was I waiting
+    for".
+    """
+    try:
+        return loops.rebrief_section(name, mesh_mgr)
+    except Exception as exc:  # noqa: BLE001 — a broken ledger must not sink the rest
+        log.warning("rebrief: loops failed for %r: %s", name, exc)
+        return ""
 
 
 def _task_section(
