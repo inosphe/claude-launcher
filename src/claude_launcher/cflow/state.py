@@ -246,6 +246,37 @@ def bundled_workflows() -> List[Tuple[str, Path]]:
     return [(p.stem, p) for p in sorted(base.glob("*.y*ml"))]
 
 
+def load_bundled(ref) -> model.Workflow:
+    """One shipped workflow, composed against its shipped siblings.
+
+    The bundle is not a search layer (see :func:`bundled_workflows_dir`), so
+    :func:`load_workflow` cannot answer for it — and :func:`model.load`
+    refuses a file that ``extends`` another. A shipped *layer*
+    (``improv-worker-remote`` over ``improv-worker``) still has to be read as
+    the workflow it composes to, by the tests that hold every shipped file to
+    the same rules and by anyone asking what the package teaches. The base of
+    a shipped layer is the shipped file of that name, next to it — nothing
+    else is meaningful at install time, when no global layer exists yet.
+
+    ``ref`` is a name or a path inside the bundle.
+    """
+    path = Path(ref) if isinstance(ref, Path) else bundled_workflows_dir() / f"{ref}.yaml"
+
+    def _sibling(base: str, from_path: Path) -> Path:
+        if base.endswith((".yaml", ".yml")):
+            candidate = from_path.parent / base
+        else:
+            candidate = from_path.parent / f"{base}.yaml"
+        if not candidate.is_file():
+            raise model.WorkflowError(
+                f"{from_path} extends {base!r}, but the bundle ships no such "
+                f"workflow next to it ({candidate})"
+            )
+        return candidate
+
+    return model.compose(path, resolve=_sibling).workflow
+
+
 def bundled_workflow_assets() -> List[Path]:
     """Non-workflow files that ship alongside the bundled workflows.
 

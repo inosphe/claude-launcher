@@ -302,3 +302,52 @@ def test_an_explicit_repo_survives_the_lookup_failing(
     monkeypatch.setattr(checkout, "own_checkout", boom)
     assert _run(wt) == 0
     assert "landed" in capsys.readouterr().out
+
+
+# --------------------------------------------------------------------------- #
+# --fetch: a landing that happened as a pull request lives on the remote
+# --------------------------------------------------------------------------- #
+def _build_pr_landing(tmp_path: Path):
+    """A worker clone whose upstream is ``<remote>/master``, and a merge of its
+    tip that exists ONLY on the remote -- the shape improv-worker-remote's
+    landed gate stands in front of."""
+    bare = tmp_path / "remote.git"
+    _git(tmp_path, "init", "--bare", "-b", "master", str(bare))
+    worker = tmp_path / "worker"
+    _git(tmp_path, "init", "-b", "master", str(worker))
+    _commit(worker, "base")
+    _git(worker, "remote", "add", "ghe", str(bare))
+    _git(worker, "push", "-q", "ghe", "master:refs/heads/master")
+    _git(worker, "checkout", "-q", "-b", "feature")
+    _commit(worker, "work")
+    _git(worker, "push", "-q", "ghe", "HEAD:refs/heads/feature")
+    _git(worker, "fetch", "-q", "ghe")
+    _git(worker, "branch", "-q", "--set-upstream-to=ghe/master")
+    # the "leader" merges the PR elsewhere: a second clone, --no-ff, pushed
+    leader = tmp_path / "leader"
+    _git(tmp_path, "clone", "-q", str(bare), str(leader))
+    _git(leader, "merge", "-q", "--no-ff", "-m", "merge feature", "origin/feature")
+    _git(leader, "push", "-q", "origin", "master:refs/heads/master")
+    return worker
+
+
+def test_a_pr_landing_is_seen_only_after_a_fetch(tmp_path, capsys):
+    worker = _build_pr_landing(tmp_path)
+    # stale remote-tracking ref: nothing here knows the merge happened
+    assert _run(worker, "--target", "@{upstream}") == 1
+    # --fetch refreshes the upstream's remote before asking, and the merge is there
+    assert _run(worker, "--fetch", "--target", "@{upstream}") == 0
+    out = capsys.readouterr().out
+    assert "landed" in out
+
+
+def test_fetch_of_a_local_only_target_cannot_tell(base, capsys):
+    """A local branch tracks no remote; refreshing it is a wrong question,
+    not a silent no-op -- the gate says so instead of measuring stale state."""
+    assert _run(base, "--fetch", "--target", "master") == landed_check.CANNOT_TELL
+    assert "not a remote-tracking branch" in capsys.readouterr().err
+
+
+def test_fetch_without_a_target_cannot_tell(base, capsys):
+    assert _run(base, "--fetch") == landed_check.CANNOT_TELL
+    assert "--target" in capsys.readouterr().err

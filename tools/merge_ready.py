@@ -266,6 +266,36 @@ def _target(repo: Path, branch: str) -> Tuple[str, str]:
     return DEFAULT_TARGET, "default"
 
 
+def _fetch_target(repo: Path, target: str) -> Tuple[Optional[str], str]:
+    """Fetch the remote that ``target`` tracks, so the verdict is current.
+
+    The PR variant of the worker (improv-worker-remote) points its upstream at
+    ``<remote>/<base>``, and that ref moves only when something fetches it.
+    This gate is also the ``awaits`` probe on the landing wait -- run on a
+    clock, in an idle session -- so without a fetch it would report "ready"
+    against a base that moved an hour ago. ``target`` may be ``@{upstream}``;
+    git expands it, and the remote is the longest remote name that prefixes
+    the expansion. Returns ``(remote, expanded)`` or ``(None, why)`` --
+    ``landed_check.py`` spells the same helper for the same reason.
+    """
+    full = _git(repo, "rev-parse", "--abbrev-ref", "--symbolic-full-name", target)
+    name = full.stdout.strip() if full.returncode == 0 and full.stdout.strip() else target
+    remotes = _git(repo, "remote")
+    if remotes.returncode != 0:
+        return None, f"git could not list remotes: {remotes.stderr.strip() or 'unknown error'}"
+    names = sorted((r.strip() for r in remotes.stdout.splitlines() if r.strip()), key=len, reverse=True)
+    for remote in names:
+        if name.startswith(remote + "/"):
+            proc = _git(repo, "fetch", "-q", remote)
+            if proc.returncode != 0:
+                return None, f"git fetch {remote} failed: {proc.stderr.strip() or 'unknown error'}"
+            return remote, name
+    return None, (
+        f"{target!r} ({name}) is not a remote-tracking branch of this repository "
+        f"(remotes: {', '.join(names) or 'none'}), so --fetch has nothing to fetch"
+    )
+
+
 def _same_branch(branch: str, target: str) -> bool:
     """Are these two names the same branch?
 
@@ -960,8 +990,26 @@ def main(argv: Optional[List[str]] = None) -> int:
             "by default: distance alone does not force a rebase."
         ),
     )
+    parser.add_argument(
+        "--fetch",
+        action="store_true",
+        help=(
+            "fetch the remote the target tracks before measuring. For a "
+            "branch whose upstream is a remote base (improv-worker-remote): "
+            "the target moves on the remote, and a probe that never fetches "
+            "keeps answering 'ready' against a base that moved. The target "
+            "must be a remote-tracking branch; anything else cannot tell."
+        ),
+    )
     args = parser.parse_args(argv)
     repo, repo_how = _resolve_repo(args.repo)
+
+    if args.fetch:
+        target_name = args.target or _target(repo, args.branch)[0]
+        remote, why = _fetch_target(repo, target_name)
+        if remote is None:
+            print(f"cannot tell: {why}", file=sys.stderr)
+            return CANNOT_TELL
 
     tip = _resolve(repo, args.branch)
     if tip is None:
