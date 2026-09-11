@@ -379,6 +379,7 @@ are as safe as ancestors — and a sibling reviewer is the common shape here.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Sequence, Set, Tuple
@@ -868,6 +869,146 @@ class Step:
         return out
 
 
+#: The one value ``kind:`` takes today.
+KIND_SUBFLOW = "subflow"
+KINDS = (KIND_SUBFLOW,)
+
+#: An input name has to survive as an environment variable suffix.
+_INPUT_NAME_RE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
+
+
+@dataclass(frozen=True)
+class InputSpec:
+    """One named value a sub definition asks its starter for."""
+
+    name: str
+    required: bool = False
+    default: Optional[str] = None
+
+    @property
+    def env_name(self) -> str:
+        return "CFLOW_IN_" + self.name.upper()
+
+
+def resolve_inputs(specs: Dict[str, InputSpec], given: Optional[dict]) -> Dict[str, str]:
+    """The inputs a run starts with: ``given`` checked against ``specs``.
+
+    Unknown names are refused rather than dropped (a misspelt input would
+    otherwise start a run that silently reads its default), a required one
+    missing is refused, and every value is a string — that is what an
+    environment variable can carry, and what a command can read back.
+    """
+    given = dict(given or {})
+    unknown = sorted(set(given) - set(specs))
+    if unknown:
+        raise WorkflowError(
+            f"unknown input(s): {', '.join(unknown)} (this definition takes: "
+            f"{', '.join(sorted(specs)) or 'none'})"
+        )
+    out: Dict[str, str] = {}
+    for name, spec in specs.items():
+        if name in given and given[name] is not None:
+            out[name] = str(given[name])
+        elif spec.default is not None:
+            out[name] = spec.default
+        elif spec.required:
+            raise WorkflowError(f"required input {name!r} was not given")
+    return out
+
+
+def _parse_inputs(raw) -> Dict[str, InputSpec]:
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict):
+        raise WorkflowError(
+            "'inputs' must be a mapping of name -> {required: bool, default: str}"
+        )
+    out: Dict[str, InputSpec] = {}
+    for key, value in raw.items():
+        name = str(key or "").strip()
+        if not _INPUT_NAME_RE.match(name):
+            raise WorkflowError(
+                f"input name {name!r} must be lower-case letters, digits or '_' "
+                f"and start with a letter (it becomes CFLOW_IN_<NAME>)"
+            )
+        if value is None:
+            out[name] = InputSpec(name=name)
+            continue
+        if not isinstance(value, dict):
+            raise WorkflowError(
+                f"input {name!r} must be a mapping like {{required: true}} or "
+                f"{{default: <text>}}, or null"
+            )
+        extra = sorted(set(value) - {"required", "default"})
+        if extra:
+            raise WorkflowError(
+                f"input {name!r} has unknown key(s): {', '.join(extra)} "
+                f"(allowed: required, default)"
+            )
+        required = value.get("required", False)
+        if not isinstance(required, bool):
+            raise WorkflowError(f"input {name!r}: 'required' must be true or false")
+        default = value.get("default")
+        if default is not None and not isinstance(default, (str, int, float, bool)):
+            raise WorkflowError(f"input {name!r}: 'default' must be a scalar")
+        if required and default is not None:
+            raise WorkflowError(
+                f"input {name!r} is both required and defaulted — a default "
+                f"means the value is never missing; keep one"
+            )
+        out[name] = InputSpec(
+            name=name,
+            required=required,
+            default=None if default is None else str(default),
+        )
+    return out
+
+
+def _parse_kind(doc: dict) -> Optional[str]:
+    raw = doc.get("kind")
+    if raw is None:
+        return None
+    kind = str(raw).strip().lower()
+    if kind not in KINDS:
+        raise WorkflowError(
+            f"'kind' must be one of {', '.join(KINDS)} (or absent for an "
+            f"ordinary workflow), got {raw!r}"
+        )
+    return kind
+
+
+def _validate_subflow(workflow: "Workflow") -> None:
+    """What a ``kind: subflow`` definition may not carry.
+
+    Each refused key is a statement about the driving SESSION's lifecycle —
+    whether it runs again, who may drive it, what its children start with,
+    where the slot goes when it ends. A sub run shares its session with a
+    main run that already answers those, so a second answer is a conflict
+    with no reading, and the file is refused at parse rather than at the
+    step where the two would disagree.
+    """
+    where = f"'kind: {KIND_SUBFLOW}' definition {workflow.name!r}"
+    if workflow.recur:
+        raise WorkflowError(f"{where} may not declare 'recur' (a sub run has no rounds)")
+    if workflow.filter_roles is not None:
+        raise WorkflowError(
+            f"{where} may not declare 'filter_roles' (the main run decides who drives)"
+        )
+    if workflow.default_child_cflow:
+        raise WorkflowError(
+            f"{where} may not declare '{CHILD_CFLOW_KEY}' (children are paired "
+            f"by the main run)"
+        )
+    if workflow.default_role:
+        raise WorkflowError(f"{where} may not declare 'default_role'")
+    escalating = sorted(s.id for s in workflow.steps.values() if s.escalate is not None)
+    if escalating:
+        raise WorkflowError(
+            f"{where} may not 'escalate' (step(s) {', '.join(escalating)}): a "
+            f"sub run's end frees its own slot only"
+        )
+
+
 @dataclass(frozen=True)
 class Workflow:
     name: str
@@ -902,6 +1043,23 @@ class Workflow:
     #: Tie-breaker between workflows volunteering for the same role, and the
     #: order pickers list them in: higher first, 0 when unstated.
     priority: int = 0
+    #: ``kind: subflow`` marks a definition written to run as a SUB run — a
+    #: second state machine the same session drives beside its main run
+    #: (``runs/<scope>/sub/<name>/``). Such a definition is shared by name
+    #: like any other workflow file, and it is what a main run's step may
+    #: call. The mark is a contract, not a directory: a sub definition may
+    #: not carry anything that is a fact about a *session's* lifecycle
+    #: (``recur``, ``filter_roles``, ``default_child_cflow``, ``escalate``),
+    #: because the session already has a main run that owns those. ``None``
+    #: is an ordinary workflow; a sub run refuses to start from one.
+    kind: Optional[str] = None
+    #: Values a sub definition takes from whoever starts it, by name (see
+    #: :class:`InputSpec`). Given as ``inputs:`` at the top of the file and
+    #: supplied at start; a required one missing refuses the start. Delivered
+    #: to the run's ``verify`` / ``check`` commands as ``CFLOW_IN_<NAME>``
+    #: environment variables and to the agent in the payload's ``inputs`` —
+    #: never substituted into instructions, whose text ids must stay stable.
+    inputs: Dict[str, "InputSpec"] = field(default_factory=dict)
     warnings: List[str] = field(default_factory=list)
     #: Superseded spellings this file still uses. Kept apart from
     #: :attr:`warnings` on purpose: a warning describes a graph that may
@@ -1083,6 +1241,13 @@ def parse_doc(doc: dict, *, default_name: str = "workflow") -> Workflow:
         if not default_role:
             raise WorkflowError("'default_role' must be a non-empty role name")
     default_child_cflow = _parse_child_cflow(doc)
+    kind = _parse_kind(doc)
+    inputs = _parse_inputs(doc.get("inputs"))
+    if inputs and kind != KIND_SUBFLOW:
+        raise WorkflowError(
+            f"'inputs' is only taken by a 'kind: {KIND_SUBFLOW}' definition — "
+            f"an ordinary workflow starts with 'context', not inputs"
+        )
     try:
         priority = int(doc.get("priority", 0))
     except (TypeError, ValueError):
@@ -1106,9 +1271,13 @@ def parse_doc(doc: dict, *, default_name: str = "workflow") -> Workflow:
         default_role=default_role,
         default_child_cflow=default_child_cflow,
         priority=priority,
+        kind=kind,
+        inputs=inputs,
         warnings=[],
     )
     _validate_graph(workflow)
+    if kind == KIND_SUBFLOW:
+        _validate_subflow(workflow)
     return Workflow(
         name=workflow.name,
         description=workflow.description,
@@ -1121,6 +1290,8 @@ def parse_doc(doc: dict, *, default_name: str = "workflow") -> Workflow:
         default_role=workflow.default_role,
         default_child_cflow=workflow.default_child_cflow,
         priority=workflow.priority,
+        kind=workflow.kind,
+        inputs=workflow.inputs,
         warnings=_graph_warnings(workflow),
         deprecations=_deprecations(workflow),
         advice=_advice(workflow),
