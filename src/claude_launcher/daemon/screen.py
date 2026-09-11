@@ -562,6 +562,23 @@ class ScreenState:
 #: that the per-slice overhead stays in the noise.
 SLICE = 4096
 
+#: The most unrendered output one session may hold. A session that writes
+#: faster than it is rendered (a background session is paced to ~80 KiB/s;
+#: the pi harness printing tool results was measured at 60–110 KiB/s) grows
+#: its queue without bound otherwise — 1.4 GB in two minutes on 2026-09-11,
+#: four such sessions taking the daemon from 340 MB to 1.8 GB. Past this,
+#: the *oldest* pending bytes are dropped: the transcript on disk already has
+#: them (the log is written before the queue), and pyte re-converges on the
+#: program's next repaint. 4 MiB is ~6 s of render — a viewer sees the grid
+#: lag a few seconds, never a daemon that stops answering.
+PENDING_MAX = 4 * 1024 * 1024
+
+#: What :meth:`ScreenFeeder.drain_now` still renders, from the end of the
+#: queue. It runs synchronously on the loop (session exit), so it is bounded
+#: like a slice is, only larger: 256 KiB is ~0.4 s. Rendering the whole queue
+#: there stalled the loop for minutes when the queue was hundreds of MB.
+DRAIN_TAIL = 256 * 1024
+
 
 class ScreenFeeder:
     """Renders PTY output into a :class:`ScreenState` a slice at a time.
@@ -590,12 +607,20 @@ class ScreenFeeder:
         slice_size: int = SLICE,
         foreground: Optional[Callable[[], bool]] = None,
         background_delay: float = 0.0,
+        max_pending: int = PENDING_MAX,
+        on_overflow: Optional[Callable[[int], None]] = None,
     ) -> None:
         self.screen = screen
         self._slice = max(1, slice_size)
         self._foreground = foreground or (lambda: True)
         self._background_delay = max(0.0, background_delay)
+        self._max_pending = max(self._slice, max_pending)
+        self._on_overflow = on_overflow
         self._pending: Deque[bytes] = deque()
+        self._pending_size = 0
+        #: Bytes dropped unrendered so far (see :data:`PENDING_MAX`).
+        self.dropped_bytes = 0
+        self._overflowing = False
         self._pump: Optional[asyncio.Task] = None
         self._idle = asyncio.Event()
         self._idle.set()
@@ -603,7 +628,28 @@ class ScreenFeeder:
 
     @property
     def pending_bytes(self) -> int:
-        return sum(len(c) for c in self._pending)
+        return self._pending_size
+
+    def _shed(self, keep: int) -> int:
+        """Drop pending bytes from the head until at most ``keep`` remain.
+
+        Whole chunks first, then the head of the survivor — the cut may land
+        inside an escape sequence, which pyte survives (it discards what it
+        cannot parse and the program's next repaint restores the grid).
+        """
+        dropped = 0
+        while self._pending and self._pending_size > keep:
+            head = self._pending[0]
+            excess = self._pending_size - keep
+            if len(head) <= excess:
+                self._pending.popleft()
+                self._pending_size -= len(head)
+                dropped += len(head)
+            else:
+                self._pending[0] = head[excess:]
+                self._pending_size -= excess
+                dropped += excess
+        return dropped
 
     def submit(self, data: bytes) -> None:
         """Queue ``data`` for rendering; returns immediately.
@@ -616,7 +662,17 @@ class ScreenFeeder:
             return
         self.screen.track_modes(data)
         self._pending.append(data)
+        self._pending_size += len(data)
         self._idle.clear()
+        if self._pending_size > self._max_pending:
+            dropped = self._shed(self._max_pending)
+            self.dropped_bytes += dropped
+            if not self._overflowing:
+                # Once per episode, not per chunk: a flooding session would
+                # otherwise raise this on every read.
+                self._overflowing = True
+                if self._on_overflow is not None:
+                    self._on_overflow(dropped)
         if self._pump is None or self._pump.done():
             self._pump = asyncio.get_event_loop().create_task(self._run())
 
@@ -630,9 +686,11 @@ class ScreenFeeder:
                 head = self._pending[0]
                 if len(head) <= self._slice:
                     self._pending.popleft()
+                    self._pending_size -= len(head)
                     self.screen.feed_render(head)
                 else:
                     self._pending[0] = head[self._slice :]
+                    self._pending_size -= self._slice
                     self.screen.feed_render(head[: self._slice])
                 # The whole point: hand the loop back between slices, so an
                 # accept or a delivery queued behind us gets its turn.
@@ -654,6 +712,8 @@ class ScreenFeeder:
                             pass
         finally:
             if not self._pending:
+                self._pending_size = 0
+                self._overflowing = False
                 self._idle.set()
 
     async def drained(self) -> None:
@@ -664,15 +724,24 @@ class ScreenFeeder:
         """Reconsider background pacing after a session focus change."""
         self._pace_changed.set()
 
-    def drain_now(self) -> None:
-        """Render everything pending, synchronously.
+    def drain_now(self, *, tail: int = DRAIN_TAIL) -> None:
+        """Render what is pending, synchronously — at most the last ``tail`` bytes.
 
         For teardown and for callers with no loop to await on (tests, the
         final capture of an exited session) -- never for the hot path, which
-        is the stall this class exists to prevent.
+        is the stall this class exists to prevent. Bounded for the same
+        reason (:data:`DRAIN_TAIL`): the last words of a session are what
+        is read afterwards, and they are at the end of the queue, not the
+        start. Everything is still in the transcript on disk.
         """
+        if tail is not None and self._pending_size > tail:
+            self.dropped_bytes += self._shed(max(0, tail))
         while self._pending:
-            self.screen.feed_render(self._pending.popleft())
+            head = self._pending.popleft()
+            self._pending_size -= len(head)
+            self.screen.feed_render(head)
+        self._pending_size = 0
+        self._overflowing = False
         self._idle.set()
 
     def close(self) -> None:
@@ -680,4 +749,6 @@ class ScreenFeeder:
             self._pump.cancel()
             self._pump = None
         self._pending.clear()
+        self._pending_size = 0
+        self._overflowing = False
         self._idle.set()

@@ -652,3 +652,52 @@ def test_the_filter_leaves_ordinary_sequences_alone():
     s = ScreenState(20, 3)
     s.feed(b"\x1b]8;id=1;file:///tmp/x\x07link\x1b]8;;\x07 after")
     assert s.render_screen()[0] == "link after"
+
+
+def test_a_flooding_session_sheds_its_oldest_unrendered_bytes():
+    """The queue is bounded. A session writing faster than it renders (a
+    background session is paced to ~80 KiB/s, the pi harness was measured at
+    60-110 KiB/s) grew the daemon by 1.4 GB in two minutes on 2026-09-11.
+    Past the cap the oldest bytes go, the newest stay, and the owner hears
+    about it once per episode, not once per chunk."""
+    overflows = []
+
+    async def run():
+        feeder = ScreenFeeder(
+            ScreenState(120, 30), slice_size=64, max_pending=1000,
+            on_overflow=overflows.append,
+        )
+        # Nothing renders until the loop gets a turn, so this is pure queueing.
+        for i in range(30):
+            feeder.submit(bytes([65 + i]) * 100)      # 'A'*100, 'B'*100, ...
+        capped = feeder.pending_bytes
+        newest_kept = feeder._pending[-1][:1]
+        oldest_kept = feeder._pending[0][:1]
+        await feeder.drained()
+        feeder.close()
+        return capped, oldest_kept, newest_kept, feeder.dropped_bytes
+
+    capped, oldest_kept, newest_kept, dropped = asyncio.run(run())
+    assert capped == 1000
+    assert newest_kept == bytes([65 + 29])            # the last chunk survived
+    assert oldest_kept != b"A"                        # the first did not
+    assert dropped == 2000
+    assert len(overflows) == 1                        # one episode, one notice
+    assert overflows[0] > 0
+
+
+def test_drain_now_renders_only_the_tail_of_a_long_queue():
+    """Session exit renders the queue synchronously on the loop. With a
+    queue of hundreds of MB that was minutes of stall (2026-09-11); the last
+    words are at the end, so only the end is rendered."""
+    screen = ScreenState(120, 30)
+    feeder = ScreenFeeder(screen, max_pending=10_000_000)
+    old = b"OLD LINE\r\n" * 5000                      # 50 KB that must not matter
+    feeder._pending.append(old)                       # bypass the pump: no loop here
+    feeder._pending_size += len(old)
+    feeder._pending.append(b"\x1b[2J\x1b[Hlast words")
+    feeder._pending_size += len(b"\x1b[2J\x1b[Hlast words")
+    feeder.drain_now(tail=1024)
+    assert feeder.pending_bytes == 0
+    assert feeder.dropped_bytes > 0
+    assert "last words" in screen.render_screen()[0]

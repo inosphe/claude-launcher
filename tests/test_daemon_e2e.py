@@ -2157,3 +2157,57 @@ def test_web_assets_must_revalidate(home, tmp_path):
             await client.close()
 
     asyncio.run(run())
+
+
+def test_a_codex_claim_that_never_matches_backs_off_and_is_abandoned(
+    home, tmp_path, monkeypatch
+):
+    """A rollout that never records this cwd (a workspace/cwd mismatch on
+    restore) must not mean one filesystem scan per second forever: on
+    2026-09-11 that scan, slowed by a bloated heap, kept the daemon from
+    answering. The interval doubles, and after the grace window the claim
+    is abandoned with a warning and an on-screen notice."""
+    store.update(lambda doc: doc.update({"harnesses": {"codex": {
+        "command": [sys.executable, "-u", "-c", CHILD],
+        "home_env": "CODEX_HOME",
+        "restore_args": ["resume", "--last"],
+    }}}))
+    lineage.set_harness(profile.create("codex"), "codex")
+    monkeypatch.setattr(codex_sessions, "snapshot", lambda _home: {"old"})
+    clock = {"now": 100.0}
+    scans = []
+
+    def missing_claim(_home, cwd, known, *, timeout=2.0, poll=0.02):
+        scans.append(clock["now"])
+        return None
+
+    monkeypatch.setattr(codex_sessions, "claim_new", missing_claim)
+    monkeypatch.setattr(
+        manager_mod, "time", SimpleNamespace(monotonic=lambda: clock["now"])
+    )
+
+    async def run():
+        mgr = _manager()
+        mgr.create(SessionDef(name="cx", profile="codex", cwd=str(tmp_path)))
+        session = mgr.get("cx")
+        notices = []
+        monkeypatch.setattr(
+            session, "notify", lambda text, **kw: notices.append((text, kw)) or 0
+        )
+        # scans so far: the launch wait, then get()'s first retry, both at t=100.
+        # Poll every 0.5 s of fake time for 15 minutes; count the scans.
+        while clock["now"] < 100.0 + 15 * 60:
+            clock["now"] += 0.5
+            mgr.get("cx")
+        gaps = [b - a for a, b in zip(scans, scans[1:])]
+        await mgr.shutdown_all()
+        return gaps, notices, mgr._pending_codex_claims
+
+    gaps, notices, pending = asyncio.run(run())
+    assert gaps[1:7] == [1.0, 2.0, 4.0, 8.0, 16.0, 30.0]   # doubling...
+    assert max(gaps) == 30.0                            # ...capped
+    assert len(gaps) < 40                               # not ~900 one-a-second scans
+    assert scans[-1] - scans[0] <= 600.0 + 30.0        # abandoned after the window
+    assert not pending
+    assert len(notices) == 1 and notices[0][1]["level"] == "warn"
+    assert "unpinned" in notices[0][0]
