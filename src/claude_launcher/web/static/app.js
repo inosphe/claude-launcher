@@ -2478,14 +2478,14 @@ function ctxAgeOf(iso) {
     : "";
 }
 
-/* Whether this session is one that *could* have a reading. Two harnesses
-   keep a record the daemon reads this out of: claude's transcript and
-   codex's rollout. On any other harness the absence is not news to report —
-   the row says nothing rather than "unknown", which would read as something
-   having gone wrong. */
+/* Whether this session is one that *could* have a reading. Three harnesses
+   keep a record the daemon reads this out of: claude's transcript, codex's
+   rollout and pi's session file. On any other harness the absence is not
+   news to report — the row says nothing rather than "unknown", which would
+   read as something having gone wrong. */
 function ctxKnowable(s) {
   const harness = (s && s.harness) || "claude";
-  return !!s && (harness === "claude" || harness === "codex");
+  return !!s && (harness === "claude" || harness === "codex" || harness === "pi");
 }
 
 /* ---- which model this session is actually answering on ---- */
@@ -2648,8 +2648,10 @@ function ctxRailLine(s) {
   const c = s && s.context;
   /* What the tick marks is whichever threshold this harness actually
      reports: claude's configured auto-compact point, or the model context
-     window codex is told on every request. They are different facts, so the
-     tick and the tooltip name the one they are drawing. */
+     window codex is told on every request. Pi is launched with the spec's
+     auto_compact_at as its compaction reserve, so its tick is the same fact
+     as claude's. They are different facts, so the tick and the tooltip name
+     the one they are drawing. */
   const compact = c && Number.isFinite(c.compact_window) && c.compact_window > 0
     ? c.compact_window : 0;
   const reported = c && Number.isFinite(c.model_context_window)
@@ -2668,8 +2670,13 @@ function ctxRailLine(s) {
   if (win) {
     const tick = el("span", "rail-ctx-tick");
     tick.style.left = ((win / CTX_DOMAIN) * 100).toFixed(1) + "%";
-    tick.title = `${winKind}: ${ctxShort(win)} tokens` +
-                 (compact ? " (CLAUDE_CODE_AUTO_COMPACT_WINDOW)" : "");
+    /* Name the knob the tick came from, per harness: claude's env var, or
+       pi's compaction reserve (settings.json compaction.reserveTokens, which
+       the launcher derives from the same auto_compact_at). */
+    const knob = !compact ? ""
+      : (s.harness === "pi") ? " (compaction.reserveTokens)"
+      : " (CLAUDE_CODE_AUTO_COMPACT_WINDOW)";
+    tick.title = `${winKind}: ${ctxShort(win)} tokens` + knob;
     bar.appendChild(tick);
   }
   const num = el("span", "rail-ctx" + (c ? "" : " unknown"),

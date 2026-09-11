@@ -82,7 +82,17 @@ const CODEX_READING = {
 };
 const CODEX = { name: "codex", harness: "codex", context: CODEX_READING };
 const CODEX_QUIET = { name: "codex-quiet", harness: "codex" };
-const OTHER = { name: "pi", harness: "pi" };
+/* A pi session file reading, as measured on a ds4-official:pi probe
+   (2026-09-11): pi records no window of its own, so both thresholds come
+   from the provider spec the launcher started it with. */
+const PI_READING = {
+  tokens: 14148, input: 1988, cache_read: 12160, cache_write: 0,
+  output: 128, model: "deepseek-flash", at: AT,
+  compact_window: 600000, model_context_window: 1000000,
+};
+const PI = { name: "pi", harness: "pi", context: PI_READING };
+const PI_QUIET = { name: "pi-quiet", harness: "pi" };
+const OTHER = { name: "kimi", harness: "kimi" };
 
 check("the count, the model, and how old the count is",
       ctx.sentence(LIVE),
@@ -94,6 +104,11 @@ check("a Codex rollout reading uses the same context sentence",
       `context ${(187281).toLocaleString()} tokens · gpt-5.6-sol · as of 3m ago`);
 check("a Codex session with no request recorded says so",
       ctx.sentence(CODEX_QUIET), "context not known yet — no reading recorded");
+check("a pi session file reading uses the same context sentence",
+      ctx.sentence(PI),
+      `context ${(14148).toLocaleString()} tokens · deepseek-flash · as of 3m ago`);
+check("a pi session that has not answered yet says so",
+      ctx.sentence(PI_QUIET), "context not known yet — no reading recorded");
 check("a harness that keeps no transcript says nothing at all",
       ctx.sentence(OTHER), "");
 check("a reading with no timestamp still dates itself honestly",
@@ -119,9 +134,14 @@ check("an unknown session's tooltip is the sentence and nothing more",
       ctx.tooltip(QUIET), "context not known yet — no reading recorded");
 check("a harness with no transcript adds nothing to its row's tooltip",
       ctx.tooltip(OTHER), "");
+const piTip = ctx.tooltip(PI);
+check("a pi tooltip names the spec's window, and still no percentage",
+      [piTip.includes("model context window 1,000,000 tokens"),
+       piTip.includes("context limit is not recorded"), /%/.test(piTip)],
+      [true, false, false]);
 
 /* ---- the chip on the briefing card's head ---- */
-ctx.setSessions([LIVE, QUIET, CODEX, CODEX_QUIET, OTHER]);
+ctx.setSessions([LIVE, QUIET, CODEX, CODEX_QUIET, PI, PI_QUIET, OTHER]);
 const lead = ctx.chip("lead");
 check("the chip is the count, short, and carries the full story on hover",
       [lead.textContent, lead.className, lead.title === tip],
@@ -131,7 +151,12 @@ check("a session with no reading gets a marked absence, not a zero",
       [quiet.textContent, quiet.className],
       ["ctx ?", "sess-brief-ctx unknown"]);
 check("and a harness that never has one gets no chip",
-      ctx.chip("pi"), null);
+      ctx.chip("kimi"), null);
+check("pi gets the same compact context chip",
+      [ctx.chip("pi").textContent, ctx.chip("pi").title === piTip],
+      ["14k ctx", true]);
+check("pi without a reading gets a marked absence",
+      ctx.chip("pi-quiet").className, "sess-brief-ctx unknown");
 check("Codex gets the same compact context chip",
       [ctx.chip("codex").textContent, ctx.chip("codex").title === codexTip],
       ["187k ctx", true]);
@@ -158,10 +183,10 @@ ctx.onRow(li, nm, QUIET);
 check("a session with no reading says so on both",
       [li.title, nm.title], [ctx.tooltip(QUIET), ctx.tooltip(QUIET)]);
 
-li = row("exited — open it to resume"); nm = row("pi");
+li = row("exited — open it to resume"); nm = row("kimi");
 ctx.onRow(li, nm, OTHER);
 check("and a harness that never has one leaves both exactly as they were",
-      [li.title, nm.title], ["exited — open it to resume", "pi"]);
+      [li.title, nm.title], ["exited — open it to resume", "kimi"]);
 
 li = row("solo");
 ctx.onRow(li, null, LIVE);

@@ -189,16 +189,26 @@ const CODEX = {
              output: 59, model: "gpt-5.6-sol", at: AT,
              model_context_window: 258_400 },
 };
-const OTHER = { name: "pi", status: "idle", harness: "pi",
+/* pi, as measured on a ds4-official:pi probe (2026-09-11): the count from
+   its session file, both thresholds from the provider spec it was launched
+   with (auto_compact_at 600k became its compaction reserve). */
+const PI = {
+  name: "pi", status: "idle", harness: "pi", profile: "ds4-official:pi",
+  parent: null,
+  context: { tokens: 14148, input: 1988, cache_read: 12160, cache_write: 0,
+             output: 128, model: "deepseek-flash", at: AT,
+             compact_window: 600_000, model_context_window: 1_000_000 },
+};
+const OTHER = { name: "kimi", status: "idle", harness: "kimi",
                 profile: "nc", parent: null };
-served = { sessions: [FULL, QUIET, CODEX, OTHER] };
+served = { sessions: [FULL, QUIET, CODEX, PI, OTHER] };
 
 (async () => {
   await ctx.refresh();
 
   const rows = list.kids.filter((r) => r.dataset.name);
   check("every session still gets a row",
-        rows.map((r) => r.dataset.name), ["full", "quiet", "codex", "pi"]);
+        rows.map((r) => r.dataset.name), ["full", "quiet", "codex", "pi", "kimi"]);
 
   const row = (name) => rows.find((r) => r.dataset.name === name);
   /* Found by what it says, not by where it sits or what it is called: this
@@ -227,8 +237,13 @@ served = { sessions: [FULL, QUIET, CODEX, OTHER] };
         [carries(row("codex"), codexNote), carries(nameEl(CODEX), codexNote)],
         [true, true]);
 
+  const piNote = ctx.tooltip(PI);
+  check("a pi row carries its session file reading",
+        [carries(row("pi"), piNote), carries(nameEl(PI), piNote)],
+        [true, true]);
+
   check("a harness that keeps no transcript is told nothing about context",
-        [row("pi").title, (nameEl(OTHER) || {}).title || ""]
+        [row("kimi").title, (nameEl(OTHER) || {}).title || ""]
           .some((t) => t.includes("context")), false);
 
   /* The count now takes one deliberate line on the row: a gauge bar beside
@@ -267,7 +282,9 @@ served = { sessions: [FULL, QUIET, CODEX, OTHER] };
   check("...with an empty track, never a zero-width fill pretending to measure",
         under("quiet", "rail-ctx-fill"), undefined);
   check("a harness that keeps no transcript grows no line",
-        lineOf("pi"), undefined);
+        lineOf("kimi"), undefined);
+  check("a pi session awaiting its first reading still gets an unknown line",
+        ctx.railLine({ harness: "pi" }).className, "rail-ctx-line unknown");
   check("a Codex session awaiting its first reading still gets an unknown line",
         ctx.railLine({ harness: "codex" }).className, "rail-ctx-line unknown");
 
@@ -284,6 +301,18 @@ served = { sessions: [FULL, QUIET, CODEX, OTHER] };
         [codexRail.title.includes("model context window at 258k"),
          codexRail.title.includes("auto-compact")],
         [true, false]);
+  /* pi's tick is the compact point (the same fact as claude's, handed to pi
+     as its compaction reserve), and the knob named on it is pi's, not
+     claude's env var. */
+  const piRail = ctx.railLine(PI);
+  const piTick = descendants(piRail).find((k) => k.classes.has("rail-ctx-tick"));
+  check("the pi tooltip names the auto-compact threshold from the spec",
+        [piRail.title.includes("auto-compact window at 600k"),
+         numText("pi")],
+        [true, "14k"]);
+  check("...and the tick names pi's own knob, not claude's env var",
+        [piTick.style.left, piTick.title],
+        ["60.0%", "auto-compact window: 600k tokens (compaction.reserveTokens)"]);
 
   /* The colour is judged against the compact window (compaction fires at the
      tick, not at 1M), the fill against the domain — two different questions
