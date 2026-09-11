@@ -17522,7 +17522,6 @@ function spawnModalClose() {
   body.innerText = "";
   $("modal-actions").innerHTML = "";
   document.removeEventListener("keydown", spawnModalKey);
-  spawnBriefDrop();
 }
 
 /* Borrow candidates depend on the effective Profile : Harness selection.
@@ -17983,190 +17982,6 @@ function fillSpawnIssueOptions(ui) {
   );
 }
 
-/* ---- what each connect candidate is actually doing --------------------
-   The connect row named handles and nothing else, so deciding who a child
-   may talk to meant already knowing what every `sN` on the mesh is for.
-   Each offered peer now carries the same summary the rail draws for it —
-   state, one-line job description, goal, now, progress — in a dialog that
-   opens while the pointer rests on the row and while the keyboard is on its
-   box.
-
-   It is READ from the briefing the daemon already stored, never composed.
-   compose()'s cache key carries the transcript's mtime, so a live session's
-   key has always moved, and a hover through the ordinary endpoint would
-   spend an LLM generation per pass of the mouse. `?cached=1` answers with
-   whatever was last written, or with `briefing: null` when nothing has
-   been.
-
-   The dialog is drawn on the body with `position: fixed` rather than inside
-   the label: #modal-body is a scroller, and anything positioned within it is
-   clipped at the form's edge. */
-let spawnBriefCache = null, spawnBriefPop = null, spawnBriefFor = "";
-
-/* One read per session per open modal, shared by however many hovers land on
-   it. A read still in flight is awaited rather than started again, so moving
-   the pointer off a row and back onto it does not open a second request. */
-function spawnBriefRead(name) {
-  if (!spawnBriefCache) spawnBriefCache = new Map();
-  const held = spawnBriefCache.get(name);
-  if (held && held.phase !== "loading") return Promise.resolve(held);
-  if (held && held.promise) return held.promise;
-  const pending = { phase: "loading" };
-  pending.promise = (async () => {
-    let entry;
-    try {
-      const resp = await api(
-        `/api/sessions/${encodeURIComponent(name)}/briefing?cached=1`
-      );
-      const body = await resp.json().catch(() => null);
-      if (resp.ok) entry = { phase: "ok", data: body || {} };
-      // 404 means one thing on the cached read: no session by that name. A
-      // session with nothing summarised yet answers 200 with a null briefing.
-      else if (resp.status === 404) entry = { phase: "gone" };
-      else entry = {
-        phase: "error", error: (body && body.error) || `HTTP ${resp.status}`,
-      };
-    } catch {
-      entry = { phase: "error", error: "request failed" };
-    }
-    spawnBriefCache.set(name, entry);
-    return entry;
-  })();
-  spawnBriefCache.set(name, pending);
-  return pending.promise;
-}
-
-function spawnBriefNode() {
-  if (spawnBriefPop) return spawnBriefPop;
-  const pop = el("div", "spawn-brief");
-  pop.setAttribute("role", "tooltip");
-  pop.hidden = true;
-  document.body.appendChild(pop);
-  spawnBriefPop = pop;
-  return pop;
-}
-
-function spawnBriefHide() {
-  spawnBriefFor = "";
-  if (spawnBriefPop) spawnBriefPop.hidden = true;
-  document.removeEventListener("scroll", spawnBriefHide, true);
-}
-
-/* The modal closing takes the dialog and the reads with it: the node lives on
-   the body, outside everything spawnModalClose empties, and the briefings are
-   a snapshot the next open should take again rather than inherit. */
-function spawnBriefDrop() {
-  spawnBriefHide();
-  if (spawnBriefPop && spawnBriefPop.remove) spawnBriefPop.remove();
-  spawnBriefPop = null;
-  spawnBriefCache = null;
-}
-
-/* Under the anchor by preference, over it when the viewport bottom is nearer
-   than the dialog is tall, and never past either side edge. */
-function spawnBriefPlace(pop, anchor) {
-  if (!anchor || typeof anchor.getBoundingClientRect !== "function") return;
-  const at = anchor.getBoundingClientRect();
-  const box = pop.getBoundingClientRect();
-  const vw = window.innerWidth || box.width + 16;
-  const vh = window.innerHeight || box.height + 16;
-  const below = at.bottom + 6;
-  const top = below + box.height <= vh - 8
-    ? below : Math.max(8, at.top - box.height - 6);
-  const left = Math.max(8, Math.min(at.left, vw - box.width - 8));
-  pop.style.left = `${Math.round(left)}px`;
-  pop.style.top = `${Math.round(top)}px`;
-}
-
-/* What the dialog says when it has no stored briefing to draw. The four cases
-   are four different things to do about it, so none of them is folded into a
-   shared "unavailable". */
-function spawnBriefNote(member, entry) {
-  if (member.local === false) {
-    return "a member of another daemon — its own machine holds its briefing";
-  }
-  if (!entry || entry.phase === "loading") return "reading…";
-  if (entry.phase === "gone") return "this daemon has no session by that name";
-  if (entry.phase === "error") return entry.error || "could not read the briefing";
-  return "no briefing summarised yet — the rail row's ▸ makes one";
-}
-
-function spawnBriefPaint(pop, member, entry) {
-  pop.innerHTML = "";
-  const sess = sessionsCache.find((s) => s.name === member.session) || null;
-  // Two sources, and the richer one wins where they overlap: the stored
-  // briefing carries goal/now/progress, while the digest riding the session
-  // poll carries the one-line and the state for free.
-  const digest = (sess && sess.briefing) || null;
-  const data = (entry && entry.phase === "ok" && entry.data) || null;
-  const brief = (data && data.briefing) || null;
-
-  const head = el("div", "spawn-brief-head");
-  head.appendChild(el("span", "spawn-brief-handle", member.handle));
-  if (member.role) head.appendChild(el("span", "spawn-brief-role", member.role));
-  const state = (brief && brief.state) || (digest && digest.state) || "";
-  if (state) {
-    head.appendChild(el(
-      "span", `sess-brief-state st-${briefingStateClass(state)}`, state
-    ));
-  }
-  pop.appendChild(head);
-
-  // Which session is behind the handle, and which machine runs it when that
-  // is not this one.
-  pop.appendChild(el("div", "spawn-brief-who", member.local === false
-    ? `${member.session || "?"} · ${member.machine || "another machine"}`
-    : (member.session || "?")));
-
-  const rows = [];
-  if (sess && sess.branch) rows.push(["branch", sess.branch]);
-  if (sess && sess.issue) rows.push(["issue", sess.issue]);
-  const one = (brief && brief["one-line-job-description"])
-    || (digest && digest.one_line) || "";
-  if (one) pop.appendChild(el("div", "spawn-brief-one", one));
-  if (brief) {
-    rows.push(["goal", brief.goal], ["now", brief.now], ["progress", brief.progress]);
-  }
-  for (const [key, value] of rows) {
-    if (!value) continue;
-    const line = el("div", "spawn-brief-row");
-    line.append(el("span", "spawn-brief-k", key),
-                el("span", "spawn-brief-v", String(value)));
-    pop.appendChild(line);
-  }
-  if (brief && data.generated_at) {
-    const secs = Math.max(
-      0, Math.floor((Date.now() - Date.parse(data.generated_at)) / 1000)
-    );
-    pop.appendChild(el("div", "spawn-brief-age", `summarised ${fmtAge(secs)} ago`));
-  } else {
-    pop.appendChild(el("div", "spawn-brief-note", spawnBriefNote(member, entry)));
-  }
-}
-
-/* Painted twice on purpose: once from what the session poll already carries,
-   so the dialog is never an empty box while the read is out, and again when
-   the stored briefing lands. The second paint is dropped when the pointer has
-   moved to another row in the meantime. */
-async function spawnBriefShow(anchor, member) {
-  if (!member || !member.handle) return;
-  const pop = spawnBriefNode();
-  spawnBriefFor = member.handle;
-  pop.hidden = false;
-  document.addEventListener("scroll", spawnBriefHide, true);
-  const held = member.session && spawnBriefCache
-    ? spawnBriefCache.get(member.session) : null;
-  spawnBriefPaint(pop, member, held || null);
-  spawnBriefPlace(pop, anchor);
-  // A remote member's briefing lives on its own daemon and this one holds no
-  // copy: there is nothing to read, and the note says so.
-  if (member.local === false || !member.session) return;
-  const entry = await spawnBriefRead(member.session);
-  if (spawnBriefFor !== member.handle) return;
-  spawnBriefPaint(pop, member, entry);
-  spawnBriefPlace(pop, anchor);
-}
-
 /* The connect row: the members of the picked mesh the child may also message.
    The parent's own handle and the child's pick are excluded — the mesh join
    wires both — and the list is opt-in, so nothing is connected it was not
@@ -18190,12 +18005,8 @@ async function refreshSpawnConnect(st) {
       .then((r) => (r.ok ? r.json() : null));
   } catch { info = null; }
   if (spawnModal !== st) return;
-  // Kept as records rather than as bare handles: the hover dialog below needs
-  // the session name behind each handle, plus its role and whether it belongs
-  // to this daemon at all.
-  const offered = (info && info.members || []).filter(connectCandidate);
-  const byHandle = new Map(offered.map((m) => [m.handle, m]));
-  const handles = spawnConnectNow(ui, offered.map((m) => m.handle));
+  const handles = spawnConnectNow(ui,
+    (info && info.members || []).filter(connectCandidate).map((m) => m.handle));
   ui.connectHandles = handles;
   if (!handles.length) return;   // the row stays hidden; the join is enough
   row.appendChild(el("span", "sess-spawn-label", "Connect"));
@@ -18209,22 +18020,7 @@ async function refreshSpawnConnect(st) {
       ui._connectChecked =
         boxes.filter((b) => b.cb.checked).map((b) => b.h);
     });
-    lab.append(cb, el("span", "sess-spawn-check-name", h));
-    const member = byHandle.get(h) || { handle: h };
-    const sess = sessionsCache.find((s) => s.name === member.session);
-    const state = (sess && sess.briefing && sess.briefing.state) || "";
-    /* The dot is two things at once: the peer's state at a glance, and the
-       mark that says there is a dialog behind this row. A hover target with
-       nothing on its face is one nobody hovers. */
-    lab.appendChild(el(
-      "span",
-      `sess-spawn-check-dot st-${state ? briefingStateClass(state) : "none"}`,
-      "●"
-    ));
-    lab.addEventListener("mouseenter", () => spawnBriefShow(lab, member));
-    lab.addEventListener("mouseleave", spawnBriefHide);
-    cb.addEventListener("focus", () => spawnBriefShow(lab, member));
-    cb.addEventListener("blur", spawnBriefHide);
+    lab.append(cb, el("span", null, h));
     row.appendChild(lab);
   }
 }

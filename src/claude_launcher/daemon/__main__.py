@@ -228,6 +228,12 @@ async def _serve(host: str, port: int, cfg: dict, bound: Optional[dict] = None) 
     # nudge reads the session as driven and stands down, which is right.
     restart_notice_task = restart_notice.RestartNotice(manager)
     restart_notice_task.start()
+    # The listening socket can die under the daemon while everything else
+    # lives on (see _listener_watchdog); this is what brings it back.
+    site_box = {"site": site}
+    listener_task = asyncio.ensure_future(
+        _listener_watchdog(site_box, runner, host, actual_port)
+    )
 
     try:
         await app["shutdown_event"].wait()
@@ -250,6 +256,11 @@ async def _serve(host: str, port: int, cfg: dict, bound: Optional[dict] = None) 
                 await uplink_task
             except (asyncio.CancelledError, Exception):
                 pass
+        listener_task.cancel()
+        try:
+            await listener_task
+        except (asyncio.CancelledError, Exception):
+            pass
         await resume_nudge.shutdown()
         # Undelivered debts stay on disk; shutdown only stops offering them.
         await restart_notice_task.shutdown()
@@ -268,6 +279,55 @@ async def _serve(host: str, port: int, cfg: dict, bound: Optional[dict] = None) 
         await manager.shutdown_all()
         await runner.cleanup()
     return RESTART_CODE if app["restart_requested"] else 0
+
+
+#: How often the watchdog looks at the listening socket.
+LISTENER_POLL = 1.0
+
+
+def _listener_alive(site) -> bool:
+    server = getattr(site, "_server", None)
+    sockets = getattr(server, "sockets", None) or ()
+    return any(s.fileno() != -1 for s in sockets)
+
+
+async def _listener_watchdog(site_box: dict, runner, host: str, port: int) -> None:
+    """Re-open the listening socket if asyncio closes it under us.
+
+    On Windows the proactor's accept loop *closes the listening socket* when
+    one accept fails with an OSError (``proactor_events._start_serving``):
+    a client that gives up mid-handshake — a CLI health probe with a 3 s
+    timeout against a busy daemon — completes AcceptEx with WinError 64, and
+    from then on nothing listens on the port while the process, its
+    sessions and its loop carry on. That was the 2026-09-11 14:27 outage:
+    ``netstat`` showed no listener, the daemon showed 3.4 GB and a working
+    loop. Seen as one asyncio error line in the log and nothing else.
+
+    So: poll the socket, and when it is gone, start a new site on the same
+    address. ``site_box`` is a one-key dict because the site object is
+    replaced, and ``_serve``'s teardown must clean up the current one.
+    """
+    while True:
+        await asyncio.sleep(LISTENER_POLL)
+        site = site_box["site"]
+        if _listener_alive(site):
+            continue
+        log.error(
+            "listening socket on %s:%s is gone (asyncio closed it after a "
+            "failed accept); re-opening", host, port,
+        )
+        try:
+            await site.stop()
+        except Exception:  # noqa: BLE001 — a dead site may refuse to stop
+            pass
+        new_site = web.TCPSite(runner, host, port, shutdown_timeout=3.0)
+        try:
+            await new_site.start()
+        except OSError as exc:
+            log.error("could not re-open %s:%s: %s (retrying)", host, port, exc)
+            continue
+        site_box["site"] = new_site
+        log.info("listening again on http://%s:%s", host, port)
 
 
 def _acquire_with_grace(

@@ -23,7 +23,10 @@ from __future__ import annotations
 import asyncio
 import re
 from collections import deque
+import logging
 from typing import Callable, Deque, List, Optional, Set, Tuple
+
+log = logging.getLogger(__name__)
 
 import pyte
 
@@ -620,6 +623,8 @@ class ScreenFeeder:
         self._pending_size = 0
         #: Bytes dropped unrendered so far (see :data:`PENDING_MAX`).
         self.dropped_bytes = 0
+        #: Slices pyte raised on and that were dropped (see :meth:`_render`).
+        self.render_errors = 0
         self._overflowing = False
         self._pump: Optional[asyncio.Task] = None
         self._idle = asyncio.Event()
@@ -633,9 +638,11 @@ class ScreenFeeder:
     def _shed(self, keep: int) -> int:
         """Drop pending bytes from the head until at most ``keep`` remain.
 
-        Whole chunks first, then the head of the survivor — the cut may land
-        inside an escape sequence, which pyte survives (it discards what it
-        cannot parse and the program's next repaint restores the grid).
+        Whole chunks first, then the head of the survivor. That second cut
+        is moved forward to the next ESC so the survivor starts on a sequence
+        boundary: a cut inside ``ESC [ 48;2;r;g;b m`` leaves ``;g;b m`` — or
+        worse, ``2;r;g;b B``, which pyte dispatches as ``cursor_down`` with
+        five arguments and raises (90 pump deaths on 2026-09-11 before this).
         """
         dropped = 0
         while self._pending and self._pending_size > keep:
@@ -646,9 +653,14 @@ class ScreenFeeder:
                 self._pending_size -= len(head)
                 dropped += len(head)
             else:
-                self._pending[0] = head[excess:]
-                self._pending_size -= excess
-                dropped += excess
+                cut = head.find(b"\x1b", excess)
+                if cut < 0:
+                    cut = len(head)  # no boundary ahead: the whole chunk goes
+                self._pending[0] = head[cut:]
+                if not self._pending[0]:
+                    self._pending.popleft()
+                self._pending_size -= cut
+                dropped += cut
         return dropped
 
     def submit(self, data: bytes) -> None:
@@ -687,11 +699,11 @@ class ScreenFeeder:
                 if len(head) <= self._slice:
                     self._pending.popleft()
                     self._pending_size -= len(head)
-                    self.screen.feed_render(head)
+                    self._render(head)
                 else:
                     self._pending[0] = head[self._slice :]
                     self._pending_size -= self._slice
-                    self.screen.feed_render(head[: self._slice])
+                    self._render(head[: self._slice])
                 # The whole point: hand the loop back between slices, so an
                 # accept or a delivery queued behind us gets its turn.
                 if not self._background_delay:
@@ -739,10 +751,27 @@ class ScreenFeeder:
         while self._pending:
             head = self._pending.popleft()
             self._pending_size -= len(head)
-            self.screen.feed_render(head)
+            self._render(head)
         self._pending_size = 0
         self._overflowing = False
         self._idle.set()
+
+    def _render(self, data: bytes) -> None:
+        """``feed_render`` that cannot kill the pump.
+
+        pyte raises on a sequence it parses but cannot dispatch (a CSI with
+        more parameters than the handler takes). One bad slice must cost
+        that slice, not the session's screen for the rest of its life —
+        which is what an exception escaping the pump task meant: the task
+        died, the queue kept filling, and the grid froze.
+        """
+        try:
+            self.screen.feed_render(data)
+        except Exception:  # noqa: BLE001 — see above
+            self.render_errors += 1
+            if self.render_errors == 1:
+                log.warning("screen render error (slice of %d bytes dropped)",
+                            len(data), exc_info=True)
 
     def close(self) -> None:
         if self._pump is not None:

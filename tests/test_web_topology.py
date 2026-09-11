@@ -107,14 +107,7 @@ that keeps the folded directory visible — ``spawnform_check`` on the create fo
 turned into a spawn — what a child may be asked once a parent is named
 (the spawn policy's answer, per parent, rather than the form's own), what
 its payload therefore carries, the soft child cap offered as a crossing,
-and when the parent's conversation is on offer to fork — ``spawnbrief_check``
-on that form's connect row, which used to be a line of bare handles: each
-offered peer now carries a state dot and a dialog holding the summary the
-rail's briefing card draws, and the checks are about where that content comes
-from and what it costs — the read is the CACHED briefing (`?cached=1`), one
-read per session however many hovers land on it, a first paint from the digest
-the session poll already carries so the dialog is never an empty box, and four
-distinct answers for the four ways there is nothing to show — ``newflow_check``
+and when the parent's conversation is on offer to fork — ``newflow_check``
 on the same form's Role and Workflow rows, where picking a role picks the
 workflow that volunteers for it and a pick made by hand outlives every
 later role change — ``pollselect_check`` on what the two-second session poll
@@ -308,7 +301,6 @@ WEB = Path(__file__).resolve().parent / "web"
         "railhold_check.js",
         "railquiet_check.js",
         "spawnform_check.js",
-        "spawnbrief_check.js",
         "newflow_check.js",
         "spawnsize_check.js",
         "selectpopup_check.js",
