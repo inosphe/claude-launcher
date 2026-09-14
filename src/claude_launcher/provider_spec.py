@@ -22,6 +22,8 @@ Pi's in-process provider registration.
           # xlarge: the tier above large (defaults to large); subagent defaults to small
         context_window: 1000000
         auto_compact_at: 900000
+        reasoning_effort: high
+        openai_reasoning_format: deepseek
         harness_options:                   # the one harness-keyed place
           claude:
             model_tag: "[1m]"              # only needed while context_window is unknown
@@ -39,10 +41,10 @@ Pi's in-process provider registration.
         auto_compact_at: 600000
         harness_options: {...}
 
-A profile overlays ``models``, ``context_window``, ``auto_compact_at`` and
-``harness_options`` on its provider (root ancestor first, the profile itself
-last).  ``api_key`` and ``endpoints`` identify the backend and stay on the
-provider.
+A profile overlays ``models``, ``context_window``, ``auto_compact_at``,
+``reasoning_effort`` and ``harness_options`` on its provider (root ancestor
+first, the profile itself last).  ``api_key``, ``endpoints`` and
+``openai_reasoning_format`` identify the backend and stay on the provider.
 
 The pre-schema form -- a provider ``env:`` of Claude-vocabulary variables --
 is still read: :func:`from_legacy_env` reverse-translates it into a spec so
@@ -68,6 +70,15 @@ ROLE_FALLBACKS: Dict[str, str] = {"xlarge": "large", "subagent": "small"}
 #: Protocol names an ``endpoints`` map may carry.
 PROTOCOLS: Tuple[str, ...] = ("anthropic", "openai")
 
+#: Cross-harness effort values accepted by the neutral spec.  These are the
+#: common values carried by Claude Code, Codex and Pi without lossy mapping.
+REASONING_EFFORTS: Tuple[str, ...] = ("low", "medium", "high")
+#: OpenAI Chat Completions reasoning encodings the Pi adapter implements.
+#: This is explicit backend metadata; it is never inferred from a URL or model
+#: name.  Additional formats can be added when their request contract is
+#: implemented and covered by a wire-level test.
+OPENAI_REASONING_FORMATS: Tuple[str, ...] = ("deepseek",)
+
 #: Which ``harness_options.<harness>`` keys each packaged translator accepts.
 HARNESS_OPTION_CHANNELS: Dict[str, Tuple[str, ...]] = {
     "claude": ("env", "model_tag"),
@@ -82,12 +93,15 @@ SPEC_FIELDS: Tuple[str, ...] = (
     "models",
     "context_window",
     "auto_compact_at",
+    "reasoning_effort",
+    "openai_reasoning_format",
 )
 #: The subset a profile entry may overlay.
 PROFILE_SPEC_FIELDS: Tuple[str, ...] = (
     "models",
     "context_window",
     "auto_compact_at",
+    "reasoning_effort",
 )
 HARNESS_OPTIONS_FIELD = "harness_options"
 
@@ -98,6 +112,7 @@ MODEL_TAG_RE = re.compile(r"(\[[^\]]*\])\s*$")
 CLAUDE_BASE_URL = "ANTHROPIC_BASE_URL"
 CLAUDE_AUTH_TOKEN = "ANTHROPIC_AUTH_TOKEN"
 CLAUDE_COMPACT_WINDOW = "CLAUDE_CODE_AUTO_COMPACT_WINDOW"
+CLAUDE_REASONING_EFFORT = "CLAUDE_CODE_EFFORT_LEVEL"
 #: role -> the Claude variables that carry it, primary first.
 CLAUDE_MODEL_VARS: Dict[str, Tuple[str, ...]] = {
     "default": ("ANTHROPIC_MODEL", "ANTHROPIC_DEFAULT_SONNET_MODEL"),
@@ -130,6 +145,8 @@ class ProviderSpec:
     models: Dict[str, str] = field(default_factory=dict)
     context_window: Optional[int] = None
     auto_compact_at: Optional[int] = None
+    reasoning_effort: Optional[str] = None
+    openai_reasoning_format: Optional[str] = None
     #: ``{harness: {channel: value}}`` -- validated against
     #: :data:`HARNESS_OPTION_CHANNELS` for packaged harnesses.
     harness_options: Dict[str, Dict[str, object]] = field(default_factory=dict)
@@ -176,6 +193,8 @@ class ProviderSpec:
             or self.models
             or self.context_window
             or self.auto_compact_at
+            or self.reasoning_effort
+            or self.openai_reasoning_format
             or self.harness_options
             or self.legacy_env
         )
@@ -198,6 +217,18 @@ def _int_or_none(value, what: str) -> Optional[int]:
     if number <= 0:
         raise SpecError(f"{what} must be positive, not {number}")
     return number
+
+
+def _enum_or_none(value, what: str, allowed: Iterable[str]) -> Optional[str]:
+    if value is None or value == "":
+        return None
+    text = str(value).strip().lower()
+    choices = tuple(allowed)
+    if text not in choices:
+        raise SpecError(
+            f"{what} must be one of {', '.join(choices)}, not {value!r}"
+        )
+    return text
 
 
 def _str_map(value, what: str, allowed: Optional[Iterable[str]] = None) -> Dict[str, str]:
@@ -290,6 +321,18 @@ def from_entry(entry: dict, what: str, *, profile: bool = False) -> ProviderSpec
         auto_compact_at=_int_or_none(
             entry.get("auto_compact_at"), f"{what}.auto_compact_at"
         ),
+        reasoning_effort=_enum_or_none(
+            entry.get("reasoning_effort"),
+            f"{what}.reasoning_effort",
+            REASONING_EFFORTS,
+        ),
+        openai_reasoning_format=_enum_or_none(
+            entry.get("openai_reasoning_format"),
+            f"{what}.openai_reasoning_format",
+            OPENAI_REASONING_FORMATS,
+        )
+        if "openai_reasoning_format" in allowed
+        else None,
         harness_options=parse_harness_options(
             entry.get(HARNESS_OPTIONS_FIELD), f"{what}.{HARNESS_OPTIONS_FIELD}"
         ),
@@ -333,6 +376,10 @@ def overlay(base: ProviderSpec, top: ProviderSpec) -> ProviderSpec:
         models={**base.models, **top.models},
         context_window=top.context_window or base.context_window,
         auto_compact_at=top.auto_compact_at or base.auto_compact_at,
+        reasoning_effort=top.reasoning_effort or base.reasoning_effort,
+        openai_reasoning_format=(
+            top.openai_reasoning_format or base.openai_reasoning_format
+        ),
         harness_options=options,
         legacy_env=top.legacy_env if top.legacy_env is not None else base.legacy_env,
     )
@@ -403,10 +450,13 @@ def from_legacy_env(env: Dict[str, str]) -> ProviderSpec:
         compact = _int_or_none(env.get(CLAUDE_COMPACT_WINDOW), CLAUDE_COMPACT_WINDOW)
     except SpecError:
         compact = None
+    effort = env.get(CLAUDE_REASONING_EFFORT, "").strip().lower()
+    reasoning_effort = effort if effort in REASONING_EFFORTS else None
     return ProviderSpec(
         api_key=api_key,
         endpoints=endpoints,
         models=models,
         auto_compact_at=compact,
+        reasoning_effort=reasoning_effort,
         harness_options=options,
     )

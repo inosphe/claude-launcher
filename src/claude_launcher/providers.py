@@ -14,6 +14,8 @@ words (:mod:`translators`)::
         models: {default: deepseek-flash, small: deepseek-flash, large: deepseek-v4-pro}
         context_window: 1000000
         auto_compact_at: 900000
+        reasoning_effort: high
+        openai_reasoning_format: deepseek
         harness_options:
           claude: {model_tag: "[1m]"}
     provider: deepseek                # global default (optional)
@@ -21,6 +23,7 @@ words (:mod:`translators`)::
       work:
         provider: deepseek            # per-profile override (optional)
         models: {default: deepseek-v4-pro}
+        reasoning_effort: high         # may override the provider default
 
 The pre-schema form -- ``env:`` holding Claude's ``ANTHROPIC_*`` variables --
 is still read (reverse-translated for other harnesses, passed verbatim to

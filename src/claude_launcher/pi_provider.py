@@ -34,6 +34,11 @@ ENV_MODELS = "CLAUNCH_PI_MODELS"
 ENV_TOKEN_NAME = "CLAUNCH_PI_TOKEN_ENV"
 ENV_AUTH_HEADER = "CLAUNCH_PI_AUTH_HEADER"
 ENV_CONTEXT_WINDOW = "CLAUNCH_PI_CONTEXT_WINDOW"
+#: Explicit cross-harness effort and the OpenAI request encoding declared by
+#: the effective provider spec.  Both are required together for a reasoning
+#: model; the adapter never infers either from the model id or endpoint.
+ENV_REASONING_EFFORT = "CLAUNCH_PI_REASONING_EFFORT"
+ENV_REASONING_FORMAT = "CLAUNCH_PI_REASONING_FORMAT"
 #: Comma-separated names of the builtin tools to register (unset = all).
 ENV_TOOLS = "CLAUNCH_PI_TOOLS"
 #: ``1`` when the base URL is claunch's metering shim: the extension then lets
@@ -51,6 +56,8 @@ PROJECTION_ENV = frozenset(
         ENV_TOKEN_NAME,
         ENV_AUTH_HEADER,
         ENV_CONTEXT_WINDOW,
+        ENV_REASONING_EFFORT,
+        ENV_REASONING_FORMAT,
         ENV_TOOLS,
         ENV_STREAM_USAGE,
         ENV_HEADERS,
@@ -75,6 +82,8 @@ class Projection:
     token_env: str
     auth_header: bool
     context_window: Optional[int] = None
+    reasoning_effort: Optional[str] = None
+    reasoning_format: Optional[str] = None
 
 
 def extension_path() -> Path:
@@ -166,6 +175,19 @@ def resolve(
             f"provider {name!r} cannot launch Pi: no models are declared "
             f"(set providers.{name}.models.default)"
         )
+    reasoning_effort = spec.reasoning_effort
+    reasoning_format = spec.openai_reasoning_format
+    if bool(reasoning_effort) != bool(reasoning_format):
+        missing = (
+            "openai_reasoning_format"
+            if reasoning_effort
+            else "reasoning_effort"
+        )
+        raise PiProviderError(
+            f"provider {name!r} cannot launch Pi with explicit reasoning: "
+            f"{missing} is not declared (reasoning_effort and "
+            "openai_reasoning_format must be set together)"
+        )
     return Projection(
         base_url=_openai_base_url(openai_root),
         api="openai-completions",
@@ -176,6 +198,8 @@ def resolve(
         # an explicit header would duplicate that native route.
         auth_header=False,
         context_window=spec.context_window,
+        reasoning_effort=reasoning_effort,
+        reasoning_format=reasoning_format,
     )
 
 
@@ -215,6 +239,9 @@ def apply_env(
     )
     if projection.context_window:
         env[ENV_CONTEXT_WINDOW] = str(projection.context_window)
+    if projection.reasoning_effort:
+        env[ENV_REASONING_EFFORT] = projection.reasoning_effort
+        env[ENV_REASONING_FORMAT] = projection.reasoning_format or ""
     if routing.is_shim_url(base_url):
         env[ENV_STREAM_USAGE] = "1"
 

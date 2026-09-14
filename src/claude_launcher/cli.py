@@ -782,6 +782,15 @@ def _spec_lines(name: str, doc: dict) -> list:
         window.append(f"auto_compact_at={spec.auto_compact_at}")
     if window:
         lines.append("  ".join(window))
+    reasoning = []
+    if spec.reasoning_effort:
+        reasoning.append(f"reasoning_effort={spec.reasoning_effort}")
+    if spec.openai_reasoning_format:
+        reasoning.append(
+            f"openai_reasoning_format={spec.openai_reasoning_format}"
+        )
+    if reasoning:
+        lines.append("  ".join(reasoning))
     for harness_name, block in sorted(spec.harness_options.items()):
         shown = ", ".join(
             f"{channel}={value}" if not isinstance(value, dict)
@@ -1418,7 +1427,8 @@ def build_parser() -> argparse.ArgumentParser:
         "migrate-config",
         help="rewrite ~/.claunch.yaml from provider/profile `env` to the "
         "harness-neutral schema (api_key, endpoints, models, context_window, "
-        "auto_compact_at, harness_options); a .v1.bak copy is kept",
+        "auto_compact_at, reasoning_effort, openai_reasoning_format, "
+        "harness_options); a .v1.bak copy is kept",
     )
     p_mig_cfg.add_argument(
         "--dry-run",

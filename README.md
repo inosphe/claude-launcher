@@ -405,7 +405,8 @@ claunch env work --apply-template                 # merge the template defaults
 New profiles get their defaults from the `template` section of
 `~/.claunch.yaml`. The template is a profile *layer*: the same fields a
 profile entry may carry (`models`, `context_window`, `auto_compact_at`,
-`harness_options`; see [API providers](#api-providers-third-party-backends)),
+`reasoning_effort`, `harness_options`; see
+[API providers](#api-providers-third-party-backends)),
 copied into each new Claude profile at `create` (a field the profile already
 sets is kept, option maps merge). On a brand-new install the file is created
 from a bootstrap seed, `<launcher home>/template.yaml`, whose built-in
@@ -506,6 +507,8 @@ providers:
       # subagent: defaults to `small`
     context_window: 1000000
     auto_compact_at: 900000
+    reasoning_effort: high             # explicit low, medium, or high
+    openai_reasoning_format: deepseek  # request encoding for the Pi adapter
     harness_options:                    # the one harness-keyed place (see below)
       claude:
         model_tag: "[1m]"
@@ -517,14 +520,15 @@ profiles:
     provider: deepseek         # ...or per profile (overrides the global one)
     models: {default: deepseek-v4-pro}   # same field names, one layer up
     auto_compact_at: 600000
+    reasoning_effort: high     # overrides the provider value when present
   personal:
     provider: default          # pin one profile back to plain Anthropic
 ```
 
-A profile overlays `models`, `context_window`, `auto_compact_at` and
-`harness_options` on its provider (root ancestor first, the profile itself
-last); `api_key` and `endpoints` identify the backend and stay on the
-provider.
+A profile overlays `models`, `context_window`, `auto_compact_at`,
+`reasoning_effort` and `harness_options` on its provider (root ancestor first,
+the profile itself last); `api_key`, `endpoints` and
+`openai_reasoning_format` identify the backend and stay on the provider.
 
 **What each harness receives** (`claunch providers` prints the description;
 `claunch run PROFILE:HARNESS` prints a `note:` for anything the harness
@@ -538,6 +542,8 @@ cannot carry):
 | `models` | `default` -> `ANTHROPIC_MODEL` + `..._DEFAULT_SONNET_MODEL`, `small` -> `..._DEFAULT_HAIKU_MODEL`, `large` -> `..._DEFAULT_OPUS_MODEL`, `xlarge` -> `..._DEFAULT_FABLE_MODEL`, `subagent` -> `CLAUDE_CODE_SUBAGENT_MODEL` | the session's own `--model` | the registered model list, `default` launched |
 | `context_window` | appends `[1m]` to every model id when >= 1,000,000 | `-c model_context_window=N` | each registered model's `contextWindow` |
 | `auto_compact_at` | `CLAUDE_CODE_AUTO_COMPACT_WINDOW` | `-c model_auto_compact_token_limit=N` | `compaction.reserveTokens = context_window - auto_compact_at` in the profile's `pi/settings.json` |
+| `reasoning_effort` | `CLAUDE_CODE_EFFORT_LEVEL` | `-c model_reasoning_effort=...` | `--thinking ...`, `defaultThinkingLevel`, and the outgoing request |
+| `openai_reasoning_format` | -- | -- | the registered model's OpenAI Chat Completions reasoning encoding |
 
 `harness_options.<harness>` is the one place keyed by harness name, for what
 no neutral field expresses. Each translator accepts its own channels and
@@ -548,6 +554,24 @@ rejects any other key at load time:
 | `claude` | `env` (raw variables, applied last), `model_tag` (`"[1m]"` to force the tag, `""` to suppress it) |
 | `codex` | `env`, `config` (each key becomes `-c key=value`, strings quoted) |
 | `pi` | `env`, `settings` (dotted keys merged into the profile's `pi/settings.json`), `tools` (`{full_read: false}` switches a claunch builtin tool off) |
+
+`reasoning_effort` accepts the common cross-harness values `low`, `medium`,
+and `high`. Claude Code receives the value through
+`CLAUDE_CODE_EFFORT_LEVEL`; Codex receives `model_reasoning_effort`; Pi
+receives both a launch-time `--thinking` argument and a persisted
+`defaultThinkingLevel`. A session argument written later on the command line
+retains precedence.
+
+Pi also requires `openai_reasoning_format` whenever `reasoning_effort` is set
+on a custom provider. The currently implemented format is `deepseek`. It
+registers the model with `reasoning: true`, enables DeepSeek-compatible
+reasoning history, and sends both `thinking: {type: enabled}` and
+`reasoning_effort: high` for a `high` request. The adapter rejects a provider
+that declares only one member of this pair, so a backend default cannot supply
+the missing value silently. Kimi and Agent have no reasoning-effort translator;
+a profile carrying `reasoning_effort` is rejected for those harnesses. Use
+`allowed_harnesses` to expose only the provider/harness combinations whose
+endpoint and authentication adapters are implemented.
 
 Translated launch arguments go before the session's own, so an explicit
 `-c`/`--model` from the session still wins. The `env` channel of a harness is

@@ -34,6 +34,11 @@ DEEPSEEK = {
     "auto_compact_at": 900_000,
 }
 
+EXPLICIT_REASONING = {
+    "reasoning_effort": "high",
+    "openai_reasoning_format": "deepseek",
+}
+
 LEGACY_ENV = {
     "ANTHROPIC_API_KEY": "",
     "ANTHROPIC_AUTH_TOKEN": "sk-legacy",
@@ -49,7 +54,11 @@ LEGACY_ENV = {
 
 @pytest.fixture(autouse=True)
 def _scrub_ambient(monkeypatch):
-    for key in ("ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_AUTO_COMPACT_WINDOW"):
+    for key in (
+        "ANTHROPIC_AUTH_TOKEN",
+        "CLAUDE_CODE_AUTO_COMPACT_WINDOW",
+        "CLAUDE_CODE_EFFORT_LEVEL",
+    ):
         monkeypatch.delenv(key, raising=False)
 
 
@@ -91,6 +100,12 @@ def test_spec_rejects_unknown_role_channel_and_bad_numbers(home):
     _provider("inverted", {"context_window": 100, "auto_compact_at": 200})
     with pytest.raises(providers.ProviderError, match="exceeds"):
         providers.spec("inverted")
+    _provider("bad-effort", {"reasoning_effort": "maximum"})
+    with pytest.raises(providers.ProviderError, match="reasoning_effort"):
+        providers.spec("bad-effort")
+    _provider("bad-format", {"openai_reasoning_format": "guessed"})
+    with pytest.raises(providers.ProviderError, match="openai_reasoning_format"):
+        providers.spec("bad-format")
 
 
 def test_profile_overlay_covers_models_window_and_options_not_endpoints(home):
@@ -98,6 +113,7 @@ def test_profile_overlay_covers_models_window_and_options_not_endpoints(home):
     p = _profile_on("work", "ds")
     store.set_profile_field(p.name, "models", {"default": "flash-pinned"})
     store.set_profile_field(p.name, "auto_compact_at", 600_000)
+    store.set_profile_field(p.name, "reasoning_effort", "high")
     store.set_profile_field(
         p.name, "harness_options", {"claude": {"env": {"EXTRA": "1"}}}
     )
@@ -106,8 +122,13 @@ def test_profile_overlay_covers_models_window_and_options_not_endpoints(home):
     assert spec.model("large") == "pro"
     assert spec.auto_compact_at == 600_000
     assert spec.context_window == 1_000_000
+    assert spec.reasoning_effort == "high"
     assert spec.option_env("claude") == {"EXTRA": "1"}
     store.set_profile_field(p.name, "endpoints", {"openai": "https://elsewhere"})
+    with pytest.raises(providers.ProviderError, match="belongs on the provider"):
+        providers.spec_for(p)
+    store.set_profile_field(p.name, "endpoints", None)
+    store.set_profile_field(p.name, "openai_reasoning_format", "deepseek")
     with pytest.raises(providers.ProviderError, match="belongs on the provider"):
         providers.spec_for(p)
 
@@ -161,6 +182,17 @@ def test_claude_translation_emits_roles_tag_and_compaction():
     assert env["CLAUDE_CODE_SUBAGENT_MODEL"] == "flash[1m]"
     assert env["CLAUDE_CODE_AUTO_COMPACT_WINDOW"] == "900000"
     assert "ANTHROPIC_API_KEY" not in env
+
+
+def test_claude_translation_emits_explicit_reasoning_effort(home):
+    _provider("ds", {**DEEPSEEK, **EXPLICIT_REASONING})
+    p = _profile_on("work", "ds")
+    env = runner.child_env(p, with_token=True, base_env={})
+    assert env[provider_spec.CLAUDE_REASONING_EFFORT] == "high"
+
+    store.set_profile_field(p.name, "reasoning_effort", "low")
+    env = runner.child_env(p, with_token=True, base_env={})
+    assert env[provider_spec.CLAUDE_REASONING_EFFORT] == "low"
 
 
 def test_claude_model_tag_declared_beats_window_and_empty_disables():
@@ -224,6 +256,14 @@ def test_codex_translation_emits_window_limit_and_config_overrides():
     assert out.notes == []
 
 
+def test_codex_translation_emits_explicit_reasoning_effort():
+    spec = provider_spec.from_entry({"reasoning_effort": "high"}, "t")
+    assert translators.codex(spec).args == [
+        "-c",
+        'model_reasoning_effort="high"',
+    ]
+
+
 def test_codex_launch_args_precede_session_args(home):
     p = profile.create("cx")
     lineage.set_harness(p, "codex")
@@ -253,6 +293,43 @@ def test_pi_registration_reads_openai_endpoint_models_and_window(home):
     # settings.json got the compaction reserve: window - compact_at
     written = json.loads((p.config_dir / "pi" / "settings.json").read_text())
     assert written["compaction"]["reserveTokens"] == 100_000
+
+
+def test_pi_reasoning_is_explicit_in_env_args_settings_and_model(home):
+    _provider("ds", {**DEEPSEEK, **EXPLICIT_REASONING})
+    p = _profile_on("work", "ds", harness="pi")
+    env = runner.harness_child_env(p, harnesses.get("pi"), base_env={})
+    assert env[pi_provider.ENV_REASONING_EFFORT] == "high"
+    assert env[pi_provider.ENV_REASONING_FORMAT] == "deepseek"
+
+    cmd = runner.harness_launch_args(p, harnesses.get("pi"), ["--continue"])
+    assert cmd[cmd.index("--thinking") + 1] == "high"
+    assert cmd.index("--thinking") < cmd.index("--continue")
+
+    written = json.loads((p.config_dir / "pi" / "settings.json").read_text())
+    assert written["defaultThinkingLevel"] == "high"
+
+
+@pytest.mark.parametrize(
+    ("entry", "missing"),
+    [
+        ({"reasoning_effort": "high"}, "openai_reasoning_format"),
+        ({"openai_reasoning_format": "deepseek"}, "reasoning_effort"),
+    ],
+)
+def test_pi_rejects_incomplete_reasoning_declaration(home, entry, missing):
+    _provider("ds", {**DEEPSEEK, **entry})
+    p = _profile_on("work", "ds", harness="pi")
+    with pytest.raises(runner.RunnerError, match=missing):
+        runner.harness_child_env(p, harnesses.get("pi"), base_env={})
+
+
+def test_harness_without_reasoning_translation_rejects_the_field(home):
+    p = profile.create("km")
+    lineage.set_harness(p, "kimi")
+    store.set_profile_field(p.name, "reasoning_effort", "high")
+    with pytest.raises(runner.RunnerError, match="cannot translate.*reasoning_effort"):
+        runner.harness_child_env(p, harnesses.get("kimi"), base_env={})
 
 
 def test_pi_refuses_a_provider_without_an_openai_endpoint(home):
@@ -296,6 +373,24 @@ def test_pi_extension_reads_the_context_window_variable():
     assert "contextWindow: 128000" not in text
 
 
+def test_pi_reasoning_extension_contract():
+    import shutil
+    import subprocess
+    from pathlib import Path
+
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("Node.js is required for the Pi extension contract")
+    result = subprocess.run(
+        [node, "--test", str(Path(__file__).with_name("pi_reasoning.test.mjs"))],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
 # --- migration -----------------------------------------------------------------------
 
 
@@ -328,6 +423,26 @@ def test_migrate_keeps_unreproducible_keys_under_claude_options(home):
     for key, value in env.items():
         if value != "":
             assert after[key] == value
+
+
+def test_migrate_lifts_claude_reasoning_effort_and_keeps_backend_format(home):
+    _provider(
+        "old",
+        {
+            "env": {**LEGACY_ENV, "CLAUDE_CODE_EFFORT_LEVEL": "high"},
+            "openai_reasoning_format": "deepseek",
+        },
+    )
+    doc, _ = migrate_config.convert(store.load())
+    entry = doc["providers"]["old"]
+    assert entry["reasoning_effort"] == "high"
+    assert entry["openai_reasoning_format"] == "deepseek"
+    assert "CLAUDE_CODE_EFFORT_LEVEL" not in (
+        entry.get("harness_options", {}).get("claude", {}).get("env", {})
+    )
+    assert translators.claude(provider_spec.from_entry(entry, "t")).env[
+        "CLAUDE_CODE_EFFORT_LEVEL"
+    ] == "high"
 
 
 def test_migrate_absorbs_round1_pi_block_and_profile_env(home):
@@ -410,13 +525,16 @@ def test_compact_window_for_another_harness_comes_from_the_spec_only(home, monke
 
 
 def test_providers_listing_shows_the_spec(home, capsys):
-    _provider("ds", DEEPSEEK)
+    _provider("ds", {**DEEPSEEK, **EXPLICIT_REASONING})
     _provider("old", {"env": LEGACY_ENV})
     assert cli_main(["providers"]) == 0
     out = capsys.readouterr().out
     assert "openai: https://api.example.com" in out
     assert "models: default=flash, small=flash, large=pro" in out
     assert "context_window=1000000  auto_compact_at=900000" in out
+    assert (
+        "reasoning_effort=high  openai_reasoning_format=deepseek" in out
+    )
     assert "legacy env (run `claunch migrate-config`)" in out
 
 

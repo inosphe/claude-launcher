@@ -16,12 +16,13 @@ that the report names:
   ``ANTHROPIC_DEFAULT_OPUS_MODEL`` but not ``..._FABLE_MODEL``) is now set
   to the same id, since ``large`` covers both.
 
-Profiles get the same treatment for their ``env``: ``CLAUDE_CODE_AUTO_COMPACT_WINDOW``
-becomes ``auto_compact_at``, model pins become ``models`` (plus a shared tag
-under ``harness_options.claude.model_tag``), and the rest moves to
-``harness_options.claude.env``.  The round-1 ``harnesses.pi`` block (base
-URL and model list declared for Pi alone) folds into ``endpoints.openai`` and
-``models``.
+Profiles get the same treatment for their ``env``:
+``CLAUDE_CODE_AUTO_COMPACT_WINDOW`` becomes ``auto_compact_at``,
+``CLAUDE_CODE_EFFORT_LEVEL`` becomes ``reasoning_effort``, model pins become
+``models`` (plus a shared tag under ``harness_options.claude.model_tag``), and
+the rest moves to ``harness_options.claude.env``.  The round-1
+``harnesses.pi`` block (base URL and model list declared for Pi alone) folds
+into ``endpoints.openai`` and ``models``.
 
 The command is idempotent: a version-2 document comes back unchanged.
 """
@@ -37,6 +38,7 @@ from . import provider_spec, store, translators
 from .provider_spec import (
     CLAUDE_COMPACT_WINDOW,
     CLAUDE_MODEL_KEYS,
+    CLAUDE_REASONING_EFFORT,
     CLAUDE_REDUNDANT_PINS,
     HARNESS_OPTIONS_FIELD,
     ProviderSpec,
@@ -86,6 +88,10 @@ def _spec_to_entry(spec: ProviderSpec) -> dict:
         out["context_window"] = spec.context_window
     if spec.auto_compact_at:
         out["auto_compact_at"] = spec.auto_compact_at
+    if spec.reasoning_effort:
+        out["reasoning_effort"] = spec.reasoning_effort
+    if spec.openai_reasoning_format:
+        out["openai_reasoning_format"] = spec.openai_reasoning_format
     if spec.harness_options:
         out[HARNESS_OPTIONS_FIELD] = {
             h: dict(block) for h, block in spec.harness_options.items() if block
@@ -229,7 +235,10 @@ def _profile_layer(entry: dict, what: str) -> ProviderSpec:
     """A converted (or being-converted) profile entry as a spec layer."""
     legacy = entry.get("env")
     legacy_env = {str(k): str(v) for k, v in legacy.items()} if isinstance(legacy, dict) else {}
-    backend_keys = set(CLAUDE_MODEL_KEYS) | {CLAUDE_COMPACT_WINDOW}
+    backend_keys = set(CLAUDE_MODEL_KEYS) | {
+        CLAUDE_COMPACT_WINDOW,
+        CLAUDE_REASONING_EFFORT,
+    }
     reverse = provider_spec.from_legacy_env(
         {k: v for k, v in legacy_env.items() if k in backend_keys}
     )
@@ -257,7 +266,10 @@ def convert_profile(
     if not (isinstance(legacy, dict) and legacy) and not has_block:
         return entry
     legacy_env = {str(k): str(v) for k, v in (legacy or {}).items()}
-    backend_keys = set(CLAUDE_MODEL_KEYS) | {CLAUDE_COMPACT_WINDOW}
+    backend_keys = set(CLAUDE_MODEL_KEYS) | {
+        CLAUDE_COMPACT_WINDOW,
+        CLAUDE_REASONING_EFFORT,
+    }
     touched = {k for k in legacy_env if k in backend_keys}
     if not touched and not has_block:
         return entry
@@ -304,7 +316,10 @@ def convert_profile(
             report.say(f"  {what}: adds {key}={after[key]!r} (implied by its role)")
     moved = sorted(k for k in touched if k not in leftover)
     if moved:
-        report.say(f"  {what}: {', '.join(moved)} -> models/auto_compact_at")
+        report.say(
+            f"  {what}: {', '.join(moved)} -> "
+            "models/auto_compact_at/reasoning_effort"
+        )
     if leftover:
         options = {h: dict(b) for h, b in own.harness_options.items()}
         claude = options.setdefault("claude", {})
@@ -334,7 +349,10 @@ def convert_template(entry: dict, report: Report) -> dict:
     legacy_env = {str(k): str(v) for k, v in entry["env"].items()}
     report.changed = True
     report.say(f"{what}:")
-    backend_keys = set(CLAUDE_MODEL_KEYS) | {CLAUDE_COMPACT_WINDOW}
+    backend_keys = set(CLAUDE_MODEL_KEYS) | {
+        CLAUDE_COMPACT_WINDOW,
+        CLAUDE_REASONING_EFFORT,
+    }
     layer = _profile_layer(entry, what)
     layer = replace(layer, harness_options={
         h: {c: v for c, v in b.items() if c != "env"} for h, b in layer.harness_options.items()
@@ -343,7 +361,10 @@ def convert_template(entry: dict, report: Report) -> dict:
     leftover = {k: v for k, v in legacy_env.items() if after.get(k) != v}
     moved = sorted(k for k in legacy_env if k in backend_keys and k not in leftover)
     if moved:
-        report.say(f"  {what}: {', '.join(moved)} -> models/auto_compact_at")
+        report.say(
+            f"  {what}: {', '.join(moved)} -> "
+            "models/auto_compact_at/reasoning_effort"
+        )
     if leftover:
         options = {h: dict(b) for h, b in layer.harness_options.items()}
         claude = options.setdefault("claude", {})

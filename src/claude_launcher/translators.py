@@ -5,20 +5,23 @@ words.  Each returns a :class:`Translation` -- environment variables, launch
 arguments, and files under the harness's profile home -- and a list of
 ``notes`` for the launcher to print when a value could not be carried.
 
-=================  ==================================  ========================
-spec field         claude                              codex / pi
-=================  ==================================  ========================
-api_key            ANTHROPIC_AUTH_TOKEN                pi: token_env (runner)
-endpoints          anthropic -> ANTHROPIC_BASE_URL     pi: openai -> extension
-models             ANTHROPIC_MODEL & friends           codex: (session --model)
-                                                       pi: extension model list
-context_window     ``[1m]`` tag when >= 1M             codex: -c model_context_window
-                                                       pi: extension contextWindow
-auto_compact_at    CLAUDE_CODE_AUTO_COMPACT_WINDOW     codex: -c model_auto_compact_token_limit
-                                                       pi: settings.json compaction.reserveTokens
-harness_options    env, model_tag                      codex: env, config (-c)
-                                                       pi: env, settings (file)
-=================  ==================================  ========================
+=======================  ==================================  ========================
+spec field               claude                              codex / pi
+=======================  ==================================  ========================
+api_key                 ANTHROPIC_AUTH_TOKEN                pi: token_env (runner)
+endpoints               anthropic -> ANTHROPIC_BASE_URL     pi: openai -> extension
+models                  ANTHROPIC_MODEL & friends           codex: (session --model)
+                                                            pi: extension model list
+context_window          ``[1m]`` tag when >= 1M             codex: -c model_context_window
+                                                            pi: extension contextWindow
+auto_compact_at         CLAUDE_CODE_AUTO_COMPACT_WINDOW     codex: -c model_auto_compact_token_limit
+                                                            pi: settings.json compaction.reserveTokens
+reasoning_effort        CLAUDE_CODE_EFFORT_LEVEL            codex: -c model_reasoning_effort
+                                                            pi: --thinking + defaultThinkingLevel
+openai_reasoning_format  --                                  -- / pi: model/request compatibility
+harness_options         env, model_tag                      codex: env, config (-c)
+                                                            pi: env, settings (file)
+=======================  ==================================  ========================
 
 Pi's provider registration itself (endpoint, models, context window) lives in
 :mod:`pi_provider`, which reads the same spec; :func:`pi` here carries the
@@ -35,6 +38,7 @@ from .provider_spec import (
     CLAUDE_BASE_URL,
     CLAUDE_COMPACT_WINDOW,
     CLAUDE_MODEL_VARS,
+    CLAUDE_REASONING_EFFORT,
     MODEL_ROLES,
     ProviderSpec,
     overlay,
@@ -69,7 +73,10 @@ def for_harness(name: str, spec: ProviderSpec) -> Translation:
     fn = _TRANSLATORS.get(name)
     if fn is not None:
         return fn(spec)
-    return Translation(env=spec.option_env(name))
+    out = Translation(env=spec.option_env(name))
+    if spec.reasoning_effort:
+        out.missing.append("reasoning_effort")
+    return out
 
 
 # --- claude -----------------------------------------------------------------
@@ -91,6 +98,8 @@ def claude(spec: ProviderSpec) -> Translation:
     if spec.legacy_env is not None:
         # Not yet migrated: the recorded variables, exactly as written.
         out.env.update(spec.legacy_env)
+        if spec.reasoning_effort:
+            out.env[CLAUDE_REASONING_EFFORT] = spec.reasoning_effort
         out.env.update(spec.option_env("claude"))
         return out
     anthropic = spec.endpoint("anthropic")
@@ -109,6 +118,8 @@ def claude(spec: ProviderSpec) -> Translation:
             out.env[key] = decorated
     if spec.auto_compact_at:
         out.env[CLAUDE_COMPACT_WINDOW] = str(spec.auto_compact_at)
+    if spec.reasoning_effort:
+        out.env[CLAUDE_REASONING_EFFORT] = spec.reasoning_effort
     out.env.update(spec.option_env("claude"))
     return out
 
@@ -148,6 +159,8 @@ def claude_layer(ctx: ProviderSpec, layer: ProviderSpec) -> Dict[str, str]:
     env = _claude_model_vars(ctx, roles)
     if layer.auto_compact_at:
         env[CLAUDE_COMPACT_WINDOW] = str(layer.auto_compact_at)
+    if layer.reasoning_effort:
+        env[CLAUDE_REASONING_EFFORT] = layer.reasoning_effort
     env.update(layer.option_env("claude"))
     return env
 
@@ -194,6 +207,11 @@ def codex(spec: ProviderSpec) -> Translation:
         out.args += ["-c", f"model_context_window={spec.context_window}"]
     if spec.auto_compact_at:
         out.args += ["-c", f"model_auto_compact_token_limit={spec.auto_compact_at}"]
+    if spec.reasoning_effort:
+        out.args += [
+            "-c",
+            f"model_reasoning_effort={toml_literal(spec.reasoning_effort)}",
+        ]
     config = spec.options("codex").get("config")
     if isinstance(config, dict):
         for key, value in config.items():
@@ -222,6 +240,12 @@ def pi(spec: ProviderSpec) -> Translation:
     """Pi's environment and ``settings.json`` keys (registration is elsewhere)."""
     out = Translation(env=spec.option_env("pi"))
     settings: Dict[str, object] = {}
+    if spec.reasoning_effort:
+        # Pi's CLI argument has higher precedence than restored session state,
+        # so resumed sessions receive the configured effort as well.  A later
+        # session argument remains the final override.
+        out.args += ["--thinking", spec.reasoning_effort]
+        settings["defaultThinkingLevel"] = spec.reasoning_effort
     reserve = pi_reserve_tokens(spec)
     if reserve is not None:
         settings["compaction.reserveTokens"] = reserve

@@ -200,9 +200,10 @@ def child_env(
         # The provider's Claude translation is a low-priority backend
         # default: it sits above the shell but *below* the profile's own env,
         # applied next, which can override any provider key. The profile's
-        # schema fields (models, context_window, auto_compact_at) are folded
-        # into that translation; its model pins only when the backend in
-        # play is the profile's own (see _profile_backend_pins_apply).
+        # schema fields (models, context_window, auto_compact_at and
+        # reasoning_effort) are folded into that translation; its model pins
+        # only when the backend in play is the profile's own (see
+        # _profile_backend_pins_apply).
         try:
             provider_env = providers.claude_env(
                 profile,
@@ -346,7 +347,13 @@ def harness_translation(
         )
     except providers.ProviderError as exc:
         raise RunnerError(str(exc)) from exc
-    return translators.for_harness(harness.name, spec)
+    translation = translators.for_harness(harness.name, spec)
+    if translation.missing:
+        raise RunnerError(
+            f"harness {harness.name!r} cannot translate configured provider "
+            f"field(s): {', '.join(translation.missing)}"
+        )
+    return translation
 
 
 def harness_launch_args(
