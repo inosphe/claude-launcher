@@ -1881,6 +1881,18 @@ body.term-split #terminal { flex: var(--split-term, 0.6) 1 0; min-height: 80px; 
 .rag-index-list { display: flex; flex-direction: column; gap: 6px; margin-top: 8px; }
 .rag-index-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .rag-index-text { display: flex; flex-direction: column; gap: 2px; flex: 1 1 260px; min-width: 0; }
+/* the GitHub CLI card: the same rows as the RAG card, coloured by verdict */
+.gh-head { display: flex; align-items: center; gap: 10px; }
+.gh-head h3 { flex: 1 1 auto; margin: 0; }
+.gh-head .wf-btn { flex: none; margin: 0; }
+.gh-summary.ok, .gh-host-row .beads-bits.ok, .gh-repo-list .beads-bits.ok { color: #3fb950; }
+.gh-summary.bad, .gh-host-row .beads-bits.bad, .gh-repo-list .beads-bits.bad { color: #f85149; }
+.gh-repo-list { margin-top: 10px; padding-top: 8px; border-top: 1px solid #22262d; }
+.gh-guide { margin-top: 10px; }
+.gh-guide h4 { font-size: 12px; color: #c6cdd5; margin: 0 0 6px; }
+.gh-guide-step { margin-bottom: 10px; }
+.gh-guide-step .wf-warning, .gh-guide-step .wf-note { margin: 0 0 4px; }
+.gh-ready { color: #3fb950; }
 .beads-page-tabs { margin-bottom: 12px; }
 .beads-session-pick {
   margin-left: auto; padding: 4px 8px; background: #0d1117; color: #e6edf3;
