@@ -50,6 +50,7 @@ const STATIC = path.join(__dirname, "..", "..", "src", "claude_launcher",
                          "web", "static");
 const html = fs.readFileSync(path.join(STATIC, "index.html"), "utf8");
 const src = fs.readFileSync(path.join(STATIC, "app.js"), "utf8");
+const css = fs.readFileSync(path.join(STATIC, "style.css"), "utf8");
 
 let failures = 0;
 function cls() {
@@ -204,6 +205,25 @@ check("the issue text is a textarea, not a one-line input",
 check("...and it is visible on arrival, under the answer it belongs to",
       /id="new-issue-text-row"(?![^>]*class="hidden")/.test(beadsBox.text),
       true);
+
+/* Every fence on this form is styled by id, one rule per fieldset, plus one
+   shared rule that aligns the step badge in each legend. A fieldset added
+   without both lands on the page unfenced — no border, and a badge sitting
+   on the baseline instead of beside the label — while every check above it
+   passes, because the markup is right and only the styling is missing. That
+   is exactly how #new-where shipped in its first draft. */
+/* The numbered decision fences only. The harness panels inside the fold are
+   fieldsets too, but they are styled by class (.harness-runtime) and carry
+   no step badge, so a badge rule is not theirs to be in. */
+const FENCES = [...form.text.matchAll(
+  /<fieldset id="(new-[\w-]+)"[^>]*>\s*(?:<!--[\s\S]*?-->\s*)?<legend><span class="sess-spawn-step"/g
+)].map((m) => m[1]);
+check("every fence on the form has a card rule of its own",
+      FENCES.filter((id) => !css.includes(`#${id} {`)), []);
+const badgeRule = css.slice(css.indexOf("#new-where legend, #new-identity legend"),
+                            css.indexOf("#new-runtime > summary {"));
+check("...and its legend is in the step-badge rule",
+      FENCES.filter((id) => !badgeRule.includes(`#${id} legend`)), []);
 
 /* The hints travel with the field they explain — a directory warning left
    behind in the fold would be pointing at a row that is no longer there. */
