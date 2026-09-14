@@ -3197,6 +3197,23 @@ a.wf-btn { display: inline-block; text-decoration: none; line-height: 1.5; }
 .status-check-settings { margin: 14px 0; padding: 12px 16px; background: #1b1e24;
   border: 1px solid #30363d; border-radius: 6px; }
 .status-check-settings h3 { font-size: 12px; text-transform: uppercase; color: #7d8590; margin-bottom: 10px; }
+/* Settings > Help: the keyboard reference. A two-column row -- the key,
+   then what it does with its condition under it -- so a reader scanning for
+   one key reads down a single column. */
+.key-help { margin: 14px 0; padding: 12px 16px; background: #1b1e24;
+  border: 1px solid #30363d; border-radius: 6px; max-width: 760px; }
+.key-help h3 { font-size: 12px; text-transform: uppercase; color: #7d8590; margin-bottom: 10px; }
+.key-help-group { font-size: 11px; text-transform: uppercase; color: #7d8590;
+  margin: 12px 0 4px; letter-spacing: 0.4px; }
+.key-help-row { display: flex; align-items: baseline; gap: 10px; padding: 6px 0;
+  border-top: 1px solid #2a2e36; }
+.key-help-group + .key-help-row { border-top: none; }
+.key-help-key { flex: none; min-width: 104px; font-family: inherit; font-size: 12px;
+  color: #e6edf3; background: #22262e; border: 1px solid #30363d; border-radius: 4px;
+  padding: 1px 6px; text-align: center; }
+.key-help-text { color: #e6edf3; }
+.key-help-when { display: block; color: #7d8590; font-size: 12px; margin-top: 2px; }
+
 .rail-stale-settings { margin: 14px 0; padding: 12px 16px; background: #1b1e24;
   border: 1px solid #30363d; border-radius: 6px; max-width: 760px; }
 .rail-stale-settings h3 { font-size: 12px; text-transform: uppercase; color: #7d8590; margin-bottom: 10px; }

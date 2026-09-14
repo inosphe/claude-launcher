@@ -127,6 +127,7 @@ const termField = node("input");
 const elements = {
   "session-list": list, "terminal": terminal, "term-input-field": termField,
   "term-kill": node("button"), "m-kill": node("button"),
+  "term-pause": node("button"), "term-archive": node("button"),
 };
 const $ = (id) => elements[id] || null;
 
@@ -137,13 +138,17 @@ let served = { sessions: [] };
 const calls = [];
 const api = async (url, options) => {
   calls.push({ url, options });
-  const kill = url.includes("/kill");
+  const verb = ["/kill", "/pause", "/archive"].find((v) => url.endsWith(v));
   return {
     ok: true, status: 200,
-    json: async () => (kill ? { status: "exited" } : served),
+    json: async () => (verb
+      ? { status: "exited", ...(verb === "/pause" ? { paused_at: "now" } : {}),
+          ...(verb === "/archive" ? { archived_at: "now" } : {}) }
+      : served),
   };
 };
 const kills = () => calls.filter((c) => c.url.includes("/kill"));
+const posted = (verb) => calls.filter((c) => c.url.endsWith(verb)).map((c) => c.url);
 const location = { hash: "" };
 
 /* Everything the row builder leans on that this harness is not about. */
@@ -173,6 +178,17 @@ function decorateBriefingRow(li, s) {}
 function terminalOnScreen() { return false; }
 function attach() {}
 function setStatusBadge() {}
+/* The three verbs the new card keys reach for, as the page's own functions
+   see them. cflowAction is the one that is stubbed rather than sliced: the
+   real one repaints two views this harness does not build, and what is
+   being checked here is only which run the key aims the approval at. */
+let cflowCache = [];
+let approvals = [];
+function cflowAction(path, body) { approvals.push({ path, body }); }
+let pinPresses = [];
+function toggleSessionPin(name) { pinPresses.push(name); }
+function refreshWf() {}
+function refreshCflow() {}
 `;
 
 const ctx = {};
@@ -190,7 +206,10 @@ new Function(
   + slice("cwdLine") + slice("railCwdLine") + slice("ctxRailLine")
   + slice("seenAgo") + slice("seenPair") + slice("railSeenLine")
   + slice("profileHarnessLabel") + slice("railMetaText")
-  + keysBlock() + slice("killSession") + slice("refreshSessions")
+  + slice("answerFellToUs") + slice("answerBranchOptions")
+  + slice("sessCflowRun")
+  + keysBlock() + slice("killSession") + slice("pauseSession")
+  + slice("archiveExitedSession") + slice("refreshSessions")
   + `
 Object.assign(exports, {
   refresh: refreshSessions,
@@ -200,8 +219,17 @@ Object.assign(exports, {
   restore: restoreRailFocus,
   key: railCardKey,
   kill: railCardKill,
+  pause: railCardPause,
+  archive: railCardArchive,
+  approve: railCardApprove,
+  bindings: RAIL_CARD_KEYS,
+  chip: RAIL_KEYS_CHIP,
   attachTo: (name) => { currentName = name; },
   setSessions: (v) => { sessionsCache = v; },
+  setCflow: (v) => { cflowCache = v; },
+  approvals: () => approvals,
+  pinPresses: () => pinPresses,
+  resetPresses: () => { approvals = []; pinPresses = []; },
 });`)(ctx, document, el, api, list, [], false, $, location);
 
 let failures = 0;
@@ -351,6 +379,117 @@ const ev = (key, over = {}) => Object.assign({
   check("...and none of that ended anything", kills().length, 0);
 
   /* ---------------------------------------------------------------- */
+  /* the other card verbs: pause, archive, approve, pin                */
+  /* ---------------------------------------------------------------- */
+  /* Each of these acts on the CARD, and each refuses on a state the route
+     would refuse anyway -- the point of checking the refusals is that a key
+     that posts and then raises a modal is worse than a key that does
+     nothing, because the reader learns nothing about which key was wrong. */
+  calls.length = 0;
+  ctx.resetPresses();
+  ctx.setSessions([
+    { name: "s1", status: "busy" },
+    { name: "s2", status: "idle" },
+    { name: "s3", status: "exited" },
+    { name: "s4", status: "exited", archived_at: "2026-09-01T00:00:00Z" },
+  ]);
+
+  check("p pauses the card's session",
+        ctx.key(ev("p", { target: row("s2") }), "s2"), true);
+  await Promise.resolve();
+  check("...by the pause route, for that card",
+        posted("/pause"), ["/api/sessions/s2/pause"]);
+  check("...and ends nothing", kills().length, 0);
+  check("an exited record has nothing to pause", ctx.pause("s3"), false);
+  check("...nor a name the rail does not know", ctx.pause("s9"), false);
+  check("...so nothing more was sent", posted("/pause").length, 1);
+
+  calls.length = 0;
+  check("e archives an exited record",
+        ctx.key(ev("e", { target: row("s3") }), "s3"), true);
+  await Promise.resolve();
+  check("...by the archive route, for that card",
+        posted("/archive"), ["/api/sessions/s3/archive"]);
+  /* Let the requests above settle before reading the cache again: each of
+     them refreshes the rail when it lands, and a refusal checked against a
+     half-updated record would pass or fail on timing. */
+  await new Promise((r) => setTimeout(r, 0));
+  calls.length = 0;
+  ctx.setSessions([
+    { name: "s1", status: "busy" },
+    { name: "s2", status: "idle" },
+    { name: "s3", status: "exited" },
+    { name: "s4", status: "exited", archived_at: "2026-09-01T00:00:00Z" },
+  ]);
+  check("a live session is not archivable", ctx.archive("s1"), false);
+  check("...and neither is one already archived", ctx.archive("s4"), false);
+  check("...so nothing was sent", posted("/archive").length, 0);
+
+  /* `a` is the one key that reads a second cache. A run stopped on an
+     approval is the reader's press; a run stopped on a CHOICE is not, and
+     picking an option for them is the failure this refusal exists for. */
+  ctx.resetPresses();
+  ctx.setCflow([
+    { scope: "s1", cwd: "/w/s1", status: "running" },
+    { scope: "s2", cwd: "/w/s2", status: "waiting_approval", sessions: ["s2"] },
+    { scope: "s3", cwd: "/w/s3", status: "waiting_selection", sessions: ["s3"],
+      options: [{ name: "go" }] },
+  ]);
+  check("a approves the card's waiting gate",
+        ctx.key(ev("a", { target: row("s2") }), "s2"), true);
+  check("...on that run, by cwd and scope", ctx.approvals(),
+        [{ path: "/api/cflow/approve", body: { cwd: "/w/s2", scope: "s2" } }]);
+  check("a run stopped on a choice is not a bare approval",
+        ctx.approve("s3"), false);
+  check("a running run has no gate to clear", ctx.approve("s1"), false);
+  check("...nor has a card with no run at all", ctx.approve("s4"), false);
+  check("...and none of those sent anything", ctx.approvals().length, 1);
+
+  /* An ask that reached nobody is the reader's to approve -- unless it
+     carries branch options, in which case it is a choice again. */
+  ctx.resetPresses();
+  ctx.setCflow([
+    { scope: "s1", cwd: "/w/s1", status: "waiting_answer", sessions: ["s1"],
+      ask: { asked: [] } },
+  ]);
+  check("an ask that reached nobody is approvable here", ctx.approve("s1"), true);
+  ctx.setCflow([
+    { scope: "s1", cwd: "/w/s1", status: "waiting_answer", sessions: ["s1"],
+      reason: "branch", options: [{ name: "go" }] },
+  ]);
+  check("...but not when it is a branch", ctx.approve("s1"), false);
+  ctx.setCflow([
+    { scope: "s1", cwd: "/w/s1", status: "waiting_answer", sessions: ["s1"],
+      ask: { asked: ["s469"] } },
+  ]);
+  check("...and not while it is genuinely with somebody else",
+        ctx.approve("s1"), false);
+  check("only the first of those was sent", ctx.approvals().length, 1);
+
+  /* Pin moved off `p` when `p` became pause. The two must not both answer
+     one key: the reader who meant to pin would end the session instead. */
+  ctx.resetPresses();
+  calls.length = 0;
+  check("f pins the card", ctx.key(ev("f", { target: row("s2") }), "s2"), true);
+  check("...that card", ctx.pinPresses(), ["s2"]);
+  await Promise.resolve();
+  check("...and sends no session verb to the daemon",
+        [posted("/kill"), posted("/pause"), posted("/archive")].map((v) => v.length),
+        [0, 0, 0]);
+
+  check("every bound key is spelt once across the table",
+        (() => {
+          const seen = ctx.bindings.flatMap((b) => b.keys);
+          return seen.length === new Set(seen).size;
+        })(), true);
+  check("the table binds exactly the documented set",
+        ctx.bindings.map((b) => b.label),
+        ["Enter / Space", "k", "p", "a", "e", "f"]);
+  check("the chip names each of them",
+        ["k", "p", "a", "e", "f"].every(
+          (k) => new RegExp(`\\b${k} `).test(ctx.chip.card.title)), true);
+
+  /* ---------------------------------------------------------------- */
   /* the poll rebuilds the rows under the reader                       */
   /* ---------------------------------------------------------------- */
   row("s2").focus();
@@ -371,6 +510,23 @@ const ev = (key, over = {}) => Object.assign({
   /* ---------------------------------------------------------------- */
   /* the stylesheet                                                    */
   /* ---------------------------------------------------------------- */
+  /* ---------------------------------------------------------------- */
+  /* Settings > Help documents the same table                          */
+  /* ---------------------------------------------------------------- */
+  /* The card is built from RAIL_CARD_KEYS rather than a retyped list, so
+     what this pins is that the section exists, is reachable from the
+     Settings renderer, and has a stylesheet to draw it. */
+  check("the help card is drawn from the binding table",
+        /function keyHelpCard\(\)[\s\S]*?RAIL_CARD_KEYS\.map/.test(src), true);
+  check("...and Settings appends it",
+        /function renderWorkspaces\(\)[\s\S]*?keyHelpCard\(\)/.test(src), true);
+  check("...under a heading that says Help",
+        /keyHelpCard[\s\S]*?"Help — keyboard shortcuts"/.test(src), true);
+  check("the help rows have a rule to draw them",
+        /\.key-help-row\s*\{[^}]*display:/s.test(css), true);
+  check("...and the key itself is set apart",
+        /\.key-help-key\s*\{[^}]*border:/s.test(css), true);
+
   check("the card state is drawn",
         /#session-list \.rail-keys\.on-card\s*\{[^}]*background:/s.test(css), true);
   check("the session state is drawn, and differently",

@@ -39,6 +39,16 @@ function constLine(name) {
   if (!m) throw new Error(`cannot locate ${name} in app.js`);
   return m[0] + "\n";
 }
+/* The rail card's key table, which railCardKey dispatches on. Sliced whole
+   rather than retyped: a binding this harness stubbed out by hand would let
+   `f` keep pinning here after the page had moved it. */
+function keyTable() {
+  const a = src.indexOf("const RAIL_CARD_KEYS = [");
+  if (a < 0) throw new Error("cannot locate RAIL_CARD_KEYS in app.js");
+  const b = src.indexOf("\n];", a);
+  if (b <= a) throw new Error("unbalanced RAIL_CARD_KEYS");
+  return src.slice(a, b + 3);
+}
 /* The pin block whole: the storage, the helpers, the toggle. */
 function pinsBlock() {
   const a = src.indexOf("const SESSION_PIN_KEY");
@@ -201,7 +211,10 @@ new Function(
   + slice("refreshSessions")
   + `
 function railCardKill() { return false; }
-` + slice("railCardKey") + `
+function railCardPause() { return false; }
+function railCardArchive() { return false; }
+function railCardApprove() { return false; }
+` + keyTable() + slice("railCardKey") + `
 Object.assign(exports, {
   refresh: refreshSessions,
   pinned: sessionPinnedNames,
@@ -300,22 +313,27 @@ const ev = (key, over = {}) => Object.assign({
   check("the pin is remembered in this browser",
         writes.at(-1), ["claunch_session_pins:/t/local/", "[\"s2\",\"s4\"]"]);
 
-  // `p` on the focused card is the same verb.
+  // `f` on the focused card is the same verb. It was `p` until `p` became
+  // pause (claunch-vxji); the two verbs must never share a key, because the
+  // reader who means one of them gets no warning before the other happens.
   const s1 = row("s1");
-  const press = ev("p", { target: s1 });
-  check("`p` on a card pins its session", ctx.key(press, "s1"), true);
+  const press = ev("f", { target: s1 });
+  check("`f` on a card pins its session", ctx.key(press, "s1"), true);
   check("the keypress is consumed", press.prevented, 1);
   await new Promise((r) => setTimeout(r, 0));
   check("the card's session joins the section", ctx.pinned(), ["s2", "s4", "s1"]);
-  check("`p` with a modifier is the browser's",
-        ctx.key(ev("p", { target: s1, ctrlKey: true }), "s1"), false);
-  check("`p` on the card's button is the button's",
-        ctx.key(ev("p", { target: s1, currentTarget: pinButton("s1") }), "s1"), false);
+  check("`f` with a modifier is the browser's",
+        ctx.key(ev("f", { target: s1, ctrlKey: true }), "s1"), false);
+  check("`f` on the card's button is the button's",
+        ctx.key(ev("f", { target: s1, currentTarget: pinButton("s1") }), "s1"), false);
+  check("`p` no longer pins -- it is pause, and this harness stubs it out",
+        ctx.key(ev("p", { target: s1 }), "s1"), false);
+  check("`p` did not move the pinned set", ctx.pinned(), ["s2", "s4", "s1"]);
 
   // Pressing again lets go, and the row goes back to its place in the tree.
-  ctx.key(ev("p", { target: row("s1") }), "s1");
+  ctx.key(ev("f", { target: row("s1") }), "s1");
   await new Promise((r) => setTimeout(r, 0));
-  check("`p` on a pinned card unpins it", ctx.pinned(), ["s2", "s4"]);
+  check("`f` on a pinned card unpins it", ctx.pinned(), ["s2", "s4"]);
   check("the unpinned row returns to the tree with its child under it",
         names(), ["s2", "s4", "s1", "s3"]);
   check("s3 stays a root while its own parent s2 is still pinned",
