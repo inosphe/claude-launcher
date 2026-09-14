@@ -231,6 +231,25 @@ check("a local leader wins over one on another machine",
             [{ name: "s469", status: "idle" }]).leader("mesh-0826").session,
       "s469");
 
+// The roster never forgets a leader: after a hand-over the exited one still
+// sits first in roster order, and the + used to refuse on it while the live
+// leader sat one row down (mesh-0826 with s127 exited, s469 idle).
+const exitedFirst = { ...leaderMember, session: "s127", handle: "s127" };
+check("a live leader is chosen over an exited one that precedes it",
+      spawn(room([exitedFirst, leaderMember]),
+            [{ name: "s127", status: "exited" }, { name: "s469", status: "idle" }])
+        .target("mesh-0826").name,
+      "s469");
+check("a live leader is chosen over one the rail no longer lists",
+      spawn(room([exitedFirst, leaderMember]),
+            [{ name: "s469", status: "idle" }]).target("mesh-0826").name,
+      "s469");
+const bothDead = spawn(room([exitedFirst, leaderMember]),
+                       [{ name: "s127", status: "exited" }, { name: "s469", status: "exited" }])
+  .target("mesh-0826");
+check("with no live leader the refusal still names a leader",
+      [bothDead.name, /exited/.test(bothDead.reason || "")], [undefined, true]);
+
 /* ---------------------------------------------------------------- */
 /* what the page has to be wearing for any of it to show            */
 /* ---------------------------------------------------------------- */
