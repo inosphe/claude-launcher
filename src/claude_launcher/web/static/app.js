@@ -1928,18 +1928,31 @@ function sessMeshes(name) {
    not; the reason is what the disabled + says on hover, so it names the
    mesh and the session rather than saying "unavailable". */
 function meshGroupLeader(meshName) {
+  // A roster keeps every leader it ever had: a dead holder is never
+  // rewritten out (successions add, they do not erase), so after two
+  // hand-overs the first local leader in roster order is an exited session
+  // and the + refused to spawn from mesh-0826 while its live leader sat one
+  // row down. Same rule the daemon's own succession check applies: a local
+  // holder counts only while its session is alive, a remote one always.
+  let stale = null;
   let remote = null;
   for (const m of meshCache || []) {
     if (m.name !== meshName) continue;
     for (const mem of m.members || []) {
       if ((mem.role || "") !== "leader") continue;
-      if (mem.local && mem.session) return mem;
-      // Kept only as the reason: a leader on another machine is a real
-      // leader, and "this mesh has no leader" would be the wrong answer.
-      if (!remote) remote = mem;
+      if (!mem.local || !mem.session) {
+        // Kept only as the reason: a leader on another machine is a real
+        // leader, and "this mesh has no leader" would be the wrong answer.
+        if (!remote) remote = mem;
+        continue;
+      }
+      const sess = (sessionsCache || []).find((s) => s.name === mem.session);
+      if (sess && sess.status !== "exited") return mem;
+      // Exited or not on the rail: only the reason when no live one exists.
+      if (!stale) stale = mem;
     }
   }
-  return remote;
+  return stale || remote;
 }
 
 function meshGroupSpawnTarget(meshName) {
