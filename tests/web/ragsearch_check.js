@@ -94,6 +94,8 @@ const fleet = [
 const sub = (q) => ({ q, hits: null, pending: false, error: "", index: null });
 check("an empty box passes every session",
       fleet.map((s) => rail.matches(s, sub(""))), [true, true, true]);
+check("substring reads the session name",
+      fleet.map((s) => rail.matches(s, sub("s2"))), [false, true, false]);
 check("substring reads the task", fleet.map((s) => rail.matches(s, sub("kanban"))), [false, true, false]);
 check("...the issue id", fleet.map((s) => rail.matches(s, sub("cl-1"))), [true, false, false]);
 check("...the branch and the briefing, case-insensitively",
