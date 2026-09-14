@@ -5381,18 +5381,19 @@ function syncForkAvailability() {
 /* What the folded "How it runs" rows currently say, written onto the fold's
    own summary line.
 
-   A fold that hides the directory would be a trap: an agent started in the
-   wrong checkout does not complain, it quietly works on the wrong tree, and
-   the user finds out from a commit. So the values ride on the face of the
-   fold — the directory always, the rest only when they are set to something
-   other than their default, because a summary that lists every row is the
-   fold nobody opens AND the line nobody reads.
+   A value rides on this line only when it is set to something other than
+   its default, because a summary that lists every row is the fold nobody
+   opens AND the line nobody reads. Often there is nothing to say, and then
+   the line is empty.
 
-   It does NOT name the promoted row (RUNTIME_PROMOTED — the qualified profile
-   selector, including its harness). It is on the face of the form now, so
-   a copy here would be noise at best and, since the two are written by
-   different code paths, a contradiction at worst. The rule is the same one
-   the fold's face has always followed: say what the reader cannot see.
+   It does NOT name a promoted row (RUNTIME_PROMOTED — the qualified profile
+   selector including its harness, and the directory). Those are on the face
+   of the form now, so a copy here would be noise at best and, since the two
+   are written by different code paths, a contradiction at worst. The rule is
+   the same one the fold's face has always followed: say what the reader
+   cannot see. The directory used to be the exception that rode here always,
+   which was a way to NOTICE a wrong checkout; it is a row of its own now, at
+   the top of the form, which is a way to choose the right one.
 
    On a child only the rows the spawn policy left OPEN may speak for
    themselves. A greyed row still holds whatever the form was last showing,
@@ -5408,17 +5409,6 @@ function renderRuntimeSummary() {
   const parent = spawnParent();
   const speaks = (key) => !parent || !!(f[key] && !f[key].disabled);
   const bits = [];
-  if (speaks("cwd")) {
-    // The option's label is "name — path"; the name is what the user
-    // registered the directory as, and the path is what the fold shows.
-    // In child mode the first entry says "(inherit the parent's directory)",
-    // which is the honest answer until a workspace is picked.
-    // With no options yet — the workspace list has not arrived, or its
-    // fetch failed — the row itself does not know where it would go, so the
-    // line says nothing rather than naming a directory it made up.
-    const dir = f.cwd.options[f.cwd.selectedIndex];
-    if (dir) bits.push(dir.text.split(" — ")[0]);
-  }
   if (speaks("borrow") && f.borrow.value) bits.push(`borrow ${f.borrow.value}`);
   if (speaks("null_token") && f.null_token.checked) bits.push("--null");
   if (speaks("resume") && f.resume.value) {
@@ -5571,9 +5561,10 @@ const SPAWN_INHERITS = ["profile", "harness", "model", "effort", "borrow", "null
    inherited — the spawn policy governs them exactly as before, and
    spawnChildFields still reads them through their disables — but they are
    asked on the face of the form, because what they decide is WHOSE
-   credentials the session runs on rather than merely how it runs. A pair
-   picked wrong is not caught by anything downstream: the session boots, on
-   the wrong token, and reports nothing.
+   credentials the session runs on and WHICH checkout it acts on, rather
+   than merely how it runs. Either picked wrong is not caught by anything
+   downstream: the session boots, on the wrong token or in the wrong tree,
+   and reports nothing.
 
    Everything that reasons about "what the fold hides" subtracts this list —
    the summary line does not repeat a visible row (renderRuntimeSummary) and
@@ -5581,7 +5572,7 @@ const SPAWN_INHERITS = ["profile", "harness", "model", "effort", "borrow", "null
    held to the same partition by tests/web/newform_check.js: the fold's rows
    plus these must be exactly SPAWN_INHERITS, so promoting a row means moving
    it, never copying it. */
-const RUNTIME_PROMOTED = ["profile", "harness", "model", "effort"];
+const RUNTIME_PROMOTED = ["profile", "harness", "model", "effort", "cwd"];
 
 /* The picked parent's spawn capabilities, and which parent they are about:
    one report per parent, kept until the pick moves. */
@@ -18365,20 +18356,26 @@ function buildSpawnForm(parentName, seed) {
   ui.noteShow = noteShow;
 
   /* ---- five decisions, in the order the child meets them ---------------
-     Who it is; what it is for; who it may talk to; how it runs; where it
-     works. The rows are the same objects they were in the flat list -- the
+     Where it works; who it is; what it is for; who it may talk to; how it
+     runs. The rows are the same objects they were in the flat list -- the
      gates fold them and the payload reads them by `ui.*` -- only the fence
-     around each decision is new. */
-  const gIdentity = spawnGroup(1, "Identity", "who the child is");
-  const gTask = spawnGroup(2, "Assignment",
+     around each decision is new.
+
+     Location opens the form rather than closing it. The directory decides
+     which checkout every later row acts on, and a child created in the
+     wrong tree does not refuse: it works, and the mistake arrives as a
+     commit on somebody else's branch. Read last, it was the decision most
+     likely to be left at whatever the previous spawn had used. */
+  const gPlace = spawnGroup(1, "Location", "where it works");
+  const gIdentity = spawnGroup(2, "Identity", "who the child is");
+  const gTask = spawnGroup(3, "Assignment",
     "what it is for, and where that is written down");
-  const gMesh = spawnGroup(3, "Mesh", "who it can talk to");
-  const gRuntime = spawnGroup(4, "Runtime",
+  const gMesh = spawnGroup(4, "Mesh", "who it can talk to");
+  const gRuntime = spawnGroup(5, "Runtime",
     "how it runs — profile, harness, credentials, flags");
-  const gPlace = spawnGroup(5, "Location", "where it works");
-  ui.groups = { identity: gIdentity, task: gTask, mesh: gMesh,
-                runtime: gRuntime, place: gPlace };
-  box.append(gIdentity, gTask, gMesh, gRuntime, gPlace);
+  ui.groups = { place: gPlace, identity: gIdentity, task: gTask, mesh: gMesh,
+                runtime: gRuntime };
+  box.append(gPlace, gIdentity, gTask, gMesh, gRuntime);
 
   ui.name = document.createElement("input");
   ui.name.placeholder = "child name (blank = auto)";
@@ -18530,8 +18527,10 @@ function buildSpawnForm(parentName, seed) {
   ui.piPanel.appendChild(ui.piState);
   gRuntime.appendChild(ui.piPanel);
 
-  /* where it works: the directory, the checkout cut inside it, and -- last,
-     because both of those can take it away -- the conversation it opens on */
+  /* where it works: the directory, the checkout cut inside it, and -- last
+     within this group, because both of those can take it away -- the
+     conversation it opens on. The group is built here, after the rows above
+     it in the DOM, because `gPlace` was appended to the box first. */
   ui.workspace = document.createElement("select");
   gPlace.appendChild(spawnRow("Directory", ui.workspace, (ui.workspaceNote = el("span", "sess-spawn-note"))));
 
