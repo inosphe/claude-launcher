@@ -98,6 +98,9 @@ function sessRailTabs() { return el("div", "sess-rail-tabs"); }
 function sessWorkflow() { return el("div", "sess-wf"); }
 function sessBriefSection() { return el("div", "sess-brief"); }
 function sessSend() { return el("div", "sess-send"); }
+/* The Meshes section's enrol row — meshjoin_check's subject; here it is only
+   a call that has to resolve. */
+function sessMeshJoin() { return el("div", "sess-mesh-join"); }
 function sessQueued() { return null; }
 function sessBackpressure() { return null; }
 function sessReborrow() { return el("div", "sess-reborrow"); }

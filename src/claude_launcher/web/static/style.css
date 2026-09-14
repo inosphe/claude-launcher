@@ -1643,6 +1643,22 @@ body.term-split #terminal { flex: var(--split-term, 0.6) 1 0; min-height: 80px; 
 .sess-send .wf-note, .sess-send .wf-warning {
   margin-top: 8px; overflow-wrap: anywhere;
 }
+/* put this session into another mesh, from the same section that lists the
+   ones it is already in — the mesh page's enrol form with the session answered */
+.sess-mesh-join { margin-top: 10px; }
+.sess-mesh-join-row {
+  display: flex; gap: 8px; margin-bottom: 8px; flex-wrap: wrap;
+}
+.sess-mesh-join select, .sess-mesh-join input {
+  background: #14161a; color: #c6cdd5; border: 1px solid #2a2e36;
+  border-radius: 5px; padding: 6px 9px; font-size: 13px;
+}
+.sess-mesh-join select { flex: 1 1 auto; min-width: 0; }
+.sess-mesh-join input { flex: 1 1 160px; min-width: 0; }
+.sess-mesh-join .wf-btn { margin-right: 0; }
+.sess-mesh-join .wf-note, .sess-mesh-join .wf-warning {
+  margin-top: 8px; overflow-wrap: anywhere;
+}
 /* move this session to another checkout: the migrate picker; and restart it
    on another token: the borrow picker — same field skin either way */
 .sess-migrate select, .sess-migrate input:not([type="checkbox"]),
@@ -2198,6 +2214,8 @@ a.beads-q-name:hover { color: #79c0ff; text-decoration: underline; }
 /* a rail column has no room for two controls side by side */
 .docked .sess-send-row { flex-wrap: wrap; }
 .docked .sess-send-row select { flex: 1 1 100%; }
+.docked .sess-mesh-join-row select,
+.docked .sess-mesh-join-row input { flex: 1 1 100%; }
 .docked .wf-start, .docked .wf-pending { padding: 10px 12px; max-width: none; }
 .docked .wf-start-select, .docked .wf-start-context {
   flex: 1 1 100%; max-width: 100%; min-width: 0;
