@@ -79,9 +79,8 @@ def test_the_bundled_gds_job_is_two_timers_with_no_human_gate():
     assert work.timer.max == 1 and overdue.timer.max == 1
     # the round trip's visits fit the budget with room for a human goto
     assert wf.max_visits >= 2 * (work.timer.max + 1) + overdue.timer.max + 1
-    # the deadline is minutes, not hours: an application's own job timeout
-    # is 10 minutes and a session left for a day is the incident this fixes
-    assert 600 <= work.timer.every <= 1800 and overdue.timer.every <= 900
+    # Large document sets get one hour before a progress notice, then 75 minutes more.
+    assert work.timer.every == 3600 and overdue.timer.every == 900
 
 
 # --------------------------------------------------------------------------- #
@@ -126,8 +125,8 @@ def test_timer_fires_alone_carry_a_toolless_session_to_done(proj, clock):
     assert "timer_budget_spent" in events
     assert "timer_re_armed" in events
     assert "gate_approved" not in events      # nobody was asked anything
-    # the whole wait is the documented deadline: minutes, not hours
-    assert 2 * work_every + overdue_every <= 3600
+    # The progress notice does not end the run; the full budget is 135 minutes.
+    assert 2 * work_every + overdue_every == 8100
 
 
 # --------------------------------------------------------------------------- #

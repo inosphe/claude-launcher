@@ -19,9 +19,10 @@
 # 애플리케이션의 원장(llm_jobs)이 하고, 세션 자체는 보존 대상이 아니다.
 #
 # 시한 산출(fire 예산은 then 스텝에서 되돌아올 때 이어진다 — engine의
-# timer_re_armed): work 900초 → overdue(1회 fire) → 300초 → work(fire 1 이어짐)
-# → 900초 → fire 2 > max 1 → end. 시작부터 약 35분. 애플리케이션의 작업
-# 제한(gds6 LLM_JOB_TIMEOUT_MS = 10분)보다 넉넉하고, 하루가 아니다.
+# timer_re_armed): work 3600초 → overdue(1회 fire) → 900초 → work(fire 1 이어짐)
+# → 3600초 → fire 2 > max 1 → end. 시작부터 약 2시간 15분.
+# 여러 문서의 전체 맥락을 읽고 큰 결과를 생성하는 분석을 위해 여유를 둔다.
+# 애플리케이션의 idle 무활동 제한과 이 런의 전체 시간 제한은 각각 적용된다.
 #
 # 이것은 뒷받침(backstop)이지 정확한 종료가 아니다. "제출이 받아들여진 즉시"는
 # 서버만 아는 사실이므로, 정확한 종료는 애플리케이션 서버가 job의 종결
@@ -47,7 +48,7 @@ name: gds-job
 description: >-
   애플리케이션이 만든 1회성 분석 세션: 오프닝 태스크의 작업을 수행하고 제출
   도구로 결과를 넘기면 끝이다. 사람 게이트가 없다 — cflow 도구가 있으면
-  제출 직후 next로 end, 없으면(pi) timer 시한(약 35분) 뒤 데몬이 end로
+  제출 직후 next로 end, 없으면(pi) timer 시한(약 2시간 15분) 뒤 데몬이 end로
   옮기며, done이 되면 kill-on-end가 세션을 종료한다. 세션 생성 본문에
   workflow: gds-job으로 지정할 때만 붙는다.
 start: work
@@ -74,7 +75,7 @@ steps:
     # 런의 상태에 대한 말이지 오프닝 태스크에 대한 말이 아니다 — 아래
     # instructions가 그 순서를 못박는다: 작업이 먼저, 턴 종료는 그다음.
     timer:
-      every: 900
+      every: 3600
       max: 1
       then: overdue
       after: end
@@ -108,21 +109,18 @@ steps:
     next: end
 
   overdue:
-    title: 시한 경고 (마지막 제출 기회)
-    # work의 timer가 시한을 넘겨 여기로 옮겼다. 이 스텝의 전달이 세션을 한
-    # 번 깨운다 — 제출을 못 끝낸 세션에는 마지막 기회이고, 이미 끝낸 세션에는
-    # 할 일이 없다. 어느 쪽이든 timer가 work로 되돌리고, work의 남은 예산이
-    # 다해 end로 간다.
+    title: 분석 진행 안내 (60분 경과)
+    # 60분 뒤 한 번 알리고, 15분 뒤 work로 돌아간다. work에 남은
+    # 60분을 더 사용한 뒤 end에 도달한다. 이 안내는 종료 통보가 아니다.
     timer:
-      every: 300
+      every: 900
       max: 1
       then: work
       after: end
     instructions: |
-      시한이 지났다. 아직 제출하지 않았으면 지금 제출한다 — 완성하지 못한
-      부분은 unresolved에 적어서라도 서버 검증을 한 번 통과시키는 쪽이,
-      아무것도 제출하지 않은 채 세션이 끝나는 쪽보다 낫다(서버는 제출이 없는
-      job을 실패로 정리한다). 이미 제출이 끝났으면 할 일이 없다 — 턴을
-      끝낸다. 몇 분 뒤 데몬이 이 런을 닫고 세션을 종료한다.
-      cflow 도구가 있으면 한 줄 report 뒤 next로 end에 가서 바로 끝낸다.
+      분석 시작 후 약 60분이 경과했다. 전체 제한까지 약 75분 남아 있으므로
+      진행 중인 입력 읽기와 분석을 계속한다. 이 안내 때문에 불완전한 결과를
+      서둘러 제출하지 않는다. 자료에 없는 사실은 계속 unresolved로 구분한다.
+      제출이 accepted되었거나 이번 실행의 제출 한도에 도달했다면 턴을 끝낸다.
+      cflow 도구가 있고 제출이 끝났으면 한 줄 report 뒤 next로 end에 간다.
     next: end
