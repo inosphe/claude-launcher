@@ -16023,6 +16023,16 @@ function sessHead(s) {
   spawn.addEventListener("click", () => openSpawnModal(s.name));
   head.appendChild(spawn);
 
+  // The PR wizard: push what this session's directory holds under a new
+  // branch and open the pull request, without touching its checkout. An
+  // exited session still has a directory, so the button stays live; a
+  // session with no directory of its own has nothing to push and the
+  // daemon says so in the modal.
+  const pr = el("button", "wf-btn", "Open PR");
+  pr.title = "push this session's directory as a new branch and open a pull request";
+  pr.addEventListener("click", () => openPrModal(s.name));
+  head.appendChild(pr);
+
   // Through the router, so the terminal it opens is the one the URL names —
   // and via go(), because on a phone this panel is laid over the very route
   // that terminal lives at, where assigning the same hash would do nothing.
@@ -19478,6 +19488,293 @@ async function spawnModalGo(st) {
   // refresh above stands and only the hop is skipped.
   const made = (res.doc && res.doc.session) || res.doc || {};
   if (made.name) go("#/s/" + encodeURIComponent(made.name));
+}
+
+/* ---- the PR wizard: a branch and a pull request from a session's directory ----
+   The detail head's "Open PR" button. The daemon pushes what the session's
+   directory holds under a NEW branch name and opens the pull request with
+   gh (prflow.py) — and never touches the session's checkout: no branch is
+   switched, nothing is committed on the one it is working on. The form is
+   the spawn modal's shape (its rows, its overlay class) because it is the
+   same kind of thing: a dialog aimed at one session, answered by the
+   daemon's own reading of that session's directory.
+
+   Two switches are about the session rather than the push. `report` types
+   the outcome into its terminal (checkbox 1); `monitor` asks for a child
+   session that watches the PR and reports back (checkbox 2), which only
+   makes sense when the session is being told at all — so it is gated on
+   the first, and greyed until the daemon offers it (`ui.monitorAvailable`,
+   false until the monitor workflow lands). */
+let prModal = null;
+
+function prCheck(row) { return row.querySelector("input"); }
+
+function buildPrForm(sessionName) {
+  const box = el("div", "sess-spawn sess-pr");
+  const ui = { box, sessionName, preview: null, monitorAvailable: false };
+
+  const note = el("div", "wf-note sess-spawn-status");
+  note.hidden = true;
+  const noteShow = (text, cls) => {
+    note.textContent = text || "";
+    note.className = cls || "wf-note sess-spawn-status";
+    note.hidden = !text;
+  };
+  box.appendChild(note);
+
+  // ── 1. what will be pushed ──
+  const gWhat = spawnGroup(1, "What",
+    "The daemon reads the session's directory. Nothing here changes it.");
+  ui.facts = el("div", "sess-pr-facts", "reading the directory…");
+  gWhat.appendChild(ui.facts);
+  ui.uncommittedRow = spawnCheckRow("include uncommitted changes",
+    "a snapshot commit is built on top of HEAD, on no local branch");
+  ui.uncommitted = prCheck(ui.uncommittedRow);
+  ui.uncommitted.checked = true;
+  gWhat.appendChild(ui.uncommittedRow);
+  box.appendChild(gWhat);
+
+  // ── 2. where ──
+  const gWhere = spawnGroup(2, "Where");
+  ui.remote = document.createElement("select");
+  gWhere.appendChild(spawnRow("remote", ui.remote));
+  ui.base = document.createElement("input");
+  ui.base.type = "text";
+  gWhere.appendChild(spawnRow("base", ui.base,
+    "the branch the pull request targets (git config claunch.pr.base, else master)"));
+  ui.branch = document.createElement("input");
+  ui.branch.type = "text";
+  gWhere.appendChild(spawnRow("branch", ui.branch,
+    "created on the remote only — the session's checkout keeps its own branch"));
+  ui.forceRow = spawnCheckRow("update an existing remote branch (force-with-lease)",
+    "off: a branch that already exists on the remote refuses the push");
+  ui.force = prCheck(ui.forceRow);
+  gWhere.appendChild(ui.forceRow);
+  box.appendChild(gWhere);
+
+  // ── 3. the pull request ──
+  const gPr = spawnGroup(3, "Pull request");
+  ui.title = document.createElement("input");
+  ui.title.type = "text";
+  gPr.appendChild(spawnRow("title", ui.title));
+  ui.body = document.createElement("textarea");
+  ui.body.rows = 4;
+  gPr.appendChild(spawnRow("body", ui.body, "markdown; blank for the daemon's one-line default"));
+  ui.draftRow = spawnCheckRow("open as a draft");
+  ui.draft = prCheck(ui.draftRow);
+  gPr.appendChild(ui.draftRow);
+  box.appendChild(gPr);
+
+  // ── 4. telling the session ──
+  const gTell = spawnGroup(4, "Tell the session");
+  ui.reportRow = spawnCheckRow("report the branch and PR into this session's terminal",
+    "one machine-generated block, fyi — the agent is told its checkout was not touched");
+  ui.report = prCheck(ui.reportRow);
+  ui.report.checked = true;
+  gTell.appendChild(ui.reportRow);
+  ui.monitorRow = spawnCheckRow("spawn a child session that watches the PR and reports back",
+    "needs the report above; the monitor workflow is not available yet");
+  ui.monitor = prCheck(ui.monitorRow);
+  gTell.appendChild(ui.monitorRow);
+  box.appendChild(gTell);
+
+  ui.report.addEventListener("change", () => syncPrGates(ui));
+  ui.monitor.addEventListener("change", () => syncPrGates(ui));
+  syncPrGates(ui);
+  return { box, ui, noteShow };
+}
+
+/* The rules the controls obey, re-applied on every change and after the
+   preview lands:
+   - the monitor checkbox is usable only while the report one is on AND the
+     daemon offers a monitor; a tick standing on a greyed box is dropped, so
+     the payload never asks for what the form said it could not have;
+   - the uncommitted checkbox is meaningless on a clean directory and greys. */
+function syncPrGates(ui) {
+  const canMonitor = !!(ui.report.checked && ui.monitorAvailable);
+  ui.monitor.disabled = !canMonitor;
+  if (!canMonitor) ui.monitor.checked = false;
+  const pv = ui.preview;
+  if (pv) {
+    const dirty = (pv.dirty && (pv.dirty.tracked + pv.dirty.untracked)) || 0;
+    ui.uncommitted.disabled = !dirty;
+    if (!dirty) ui.uncommitted.checked = false;
+  }
+}
+
+function prPayload(ui) {
+  const read = (c) => (c && !c.disabled ? c : null);
+  const chk = (c) => !!(read(c) && c.checked);
+  return {
+    remote: ui.remote.value || "",
+    base: (ui.base.value || "").trim(),
+    branch: (ui.branch.value || "").trim(),
+    title: (ui.title.value || "").trim(),
+    body: ui.body.value || "",
+    draft: chk(ui.draft),
+    include_uncommitted: chk(ui.uncommitted),
+    force: chk(ui.force),
+    report: chk(ui.report),
+    monitor: chk(ui.monitor),
+  };
+}
+
+/* The preview, painted: the facts line and every default the form did not
+   have until the daemon read the directory. A blocker (not a repository, no
+   gh, not signed in) is the daemon's own sentence, and it keeps the button
+   dead — the press would only fail on the same line. */
+function prApplyPreview(ui, pv) {
+  ui.preview = pv || null;
+  if (!pv) {
+    ui.facts.textContent = "could not read the session's directory";
+    return false;
+  }
+  const dirty = (pv.dirty && (pv.dirty.tracked + pv.dirty.untracked)) || 0;
+  const parts = [];
+  if (pv.repo) {
+    parts.push(`checkout on ${pv.branch || "?"} @ ${pv.head_short || "?"}` +
+      (pv.head_subject ? ` — ${pv.head_subject}` : ""));
+    parts.push(dirty
+      ? `${pv.dirty.tracked} modified, ${pv.dirty.untracked} untracked (uncommitted)`
+      : "working tree clean");
+    if (pv.worktree) parts.push(`worktree ${pv.worktree}`);
+  }
+  ui.facts.textContent = parts.join(" · ") || "not a git repository";
+  fillSpawnSelect(ui.remote,
+    (pv.remotes || []).map((r) => [r.remote,
+      r.host ? `${r.remote} → ${r.host}/${r.slug || "?"}` : `${r.remote} (no GitHub host)`]),
+    null, pv.remote || "");
+  if (!ui.base.value) ui.base.value = pv.base || "master";
+  if (!ui.branch.value) ui.branch.value = pv.branch_default || "";
+  if (!ui.title.value && pv.head_subject) {
+    ui.title.value = `${ui.sessionName}: ${pv.head_subject}`;
+  }
+  syncPrGates(ui);
+  return !(pv.blockers && pv.blockers.length);
+}
+
+function prModalKey(e) {
+  if (e.key === "Escape" && !(prModal && prModal.busy)) prModalClose();
+}
+
+function prModalClose() {
+  if (!prModal) return;
+  if (prModal.busy) return;
+  prModal = null;
+  const overlay = $("modal-overlay");
+  overlay.classList.add("hidden");
+  overlay.classList.remove("spawn-open");
+  $("modal-body").innerText = "";
+  $("modal-actions").innerHTML = "";
+  document.removeEventListener("keydown", prModalKey);
+}
+
+async function openPrModal(sessionName) {
+  if (!sessionName) return;
+  const { box, ui, noteShow } = buildPrForm(sessionName);
+  const overlay = $("modal-overlay");
+  $("modal-title").textContent = `Open a pull request from ${sessionName}`;
+  const body = $("modal-body");
+  body.innerText = "";
+  body.appendChild(box);
+  const actions = $("modal-actions");
+  actions.innerHTML = "";
+  const goBtn = el("button", "wf-btn approve", "Push & open PR");
+  const cancel = el("button", "wf-btn option", "Cancel");
+  goBtn.disabled = true;
+  actions.append(cancel, goBtn);
+  const st = { ui, session: sessionName, goBtn, cancelBtn: cancel, noteShow, busy: false };
+  cancel.addEventListener("click", prModalClose);
+  goBtn.addEventListener("click", () => prModalGo(st));
+  overlay.onclick = (e) => { if (e.target === overlay) prModalClose(); };
+  document.addEventListener("keydown", prModalKey);
+  overlay.classList.remove("hidden");
+  overlay.classList.add("spawn-open");
+  prModal = st;
+  await prModalLoad(st);
+}
+
+async function prModalLoad(st) {
+  const pv = await api(`/api/sessions/${encodeURIComponent(st.session)}/pr/preview`)
+    .then((r) => (r.ok ? r.json() : null)).catch(() => null);
+  if (prModal !== st) return;
+  const ready = prApplyPreview(st.ui, pv);
+  if (!pv) {
+    st.noteShow("could not load the preview — is the session still here?", "wf-warning");
+  } else if (!ready) {
+    st.noteShow(pv.blockers.join(" · "), "wf-warning");
+  } else {
+    st.noteShow("");
+  }
+  st.goBtn.disabled = !ready;
+}
+
+/* The answer, in place of the form: the step list the daemon kept (a push
+   that went through before gh refused is a green row above a red one), and
+   the PR link when there is one. The form is gone because the thing it was
+   for has happened; a second PR is a second press of the head's button. */
+function prResultView(res) {
+  const wrap = el("div", "sess-pr-result");
+  const steps = el("ul", "sess-pr-steps");
+  for (const s of (res.steps || [])) {
+    const li = el("li", s.ok ? "ok" : "failed", `${s.ok ? "✓" : "✗"} ${s.id}: ${s.detail || ""}`);
+    steps.appendChild(li);
+  }
+  wrap.appendChild(steps);
+  if (res.ok && res.pr && res.pr.url) {
+    const a = el("a", "sess-pr-link", res.pr.url);
+    a.href = res.pr.url;
+    a.target = "_blank";
+    a.rel = "noopener";
+    wrap.appendChild(a);
+  }
+  if (res.ok) {
+    wrap.appendChild(el("p", "sess-pr-note",
+      `${res.remote}/${res.branch} @ ${(res.tip || "").slice(0, 8)} — the session's checkout was not changed.`));
+  } else {
+    wrap.appendChild(el("p", "wf-warning", `failed at ${res.failed}: ${res.error || ""}`));
+  }
+  if (res.delivered === true) wrap.appendChild(el("p", "sess-pr-note", "reported into the session's terminal."));
+  else if (res.delivered === false) wrap.appendChild(el("p", "sess-pr-note", "the report could not be typed into the session (it is not taking input right now)."));
+  for (const w of (res.warnings || [])) wrap.appendChild(el("p", "sess-pr-note", w));
+  return wrap;
+}
+
+async function prModalGo(st) {
+  if (st.busy) return;
+  const body = prPayload(st.ui);
+  st.busy = true;
+  setActionPending(st.goBtn, true, "Pushing…");
+  st.cancelBtn.disabled = true;
+  st.noteShow("Pushing the branch and opening the pull request…", "wf-note submit-status");
+  let res = null, error = "";
+  try {
+    const resp = await api(`/api/sessions/${encodeURIComponent(st.session)}/pr`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    res = await resp.json().catch(() => null);
+    if (!resp.ok) error = (res && res.error) || `HTTP ${resp.status}`;
+  } catch (e) {
+    error = String(e && e.message || e);
+  }
+  st.busy = false;
+  if (prModal !== st) return;
+  st.cancelBtn.disabled = false;
+  if (error || !res) {
+    st.noteShow(error || "no answer from the daemon", "wf-warning");
+    setActionPending(st.goBtn, false);
+    return;
+  }
+  st.result = res;
+  const modalBody = $("modal-body");
+  modalBody.innerText = "";
+  modalBody.appendChild(prResultView(res));
+  const actions = $("modal-actions");
+  actions.innerHTML = "";
+  const close = el("button", "wf-btn approve", "Close");
+  close.addEventListener("click", prModalClose);
+  actions.append(close);
 }
 
 /* ---- quick job: one form, one worker ----

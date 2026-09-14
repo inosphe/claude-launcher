@@ -36,7 +36,7 @@ from .. import (
     usage,
 )
 from .. import session_commits
-from .. import ghcli, spawn as spawn_mod, store, workspaces
+from .. import ghcli, prflow, spawn as spawn_mod, store, workspaces
 from .. import worktree as worktree_mod
 from . import beads as beads_mod, notice as notice_mod
 from . import rag as rag_mod
@@ -506,6 +506,11 @@ def build_app(
     )
     r.add_post("/api/sessions/{name}/keys", h_session_keys)
     r.add_post("/api/sessions/{name}/deliver", h_session_deliver)
+    # The PR wizard (prflow.py): what the session's directory would push,
+    # and the push itself. GET is the preview the form opens on, POST does
+    # it. Neither touches the session's checkout.
+    r.add_get("/api/sessions/{name}/pr/preview", h_session_pr_preview)
+    r.add_post("/api/sessions/{name}/pr", h_session_pr)
     r.add_post("/api/sessions/{name}/notice", h_session_notice)
     # One composition, two verbs: GET hands the text to whoever will read it
     # into context (the SessionStart hook, the MCP tool, the CLI); POST types
@@ -5108,6 +5113,56 @@ async def h_session_deliver(request: web.Request) -> web.Response:
         return json_error(400, "'text' must be a non-empty string")
     delivered = await session.deliver(text)
     return json_response({"ok": True, "delivered": delivered})
+
+
+async def h_session_pr_preview(request: web.Request) -> web.Response:
+    """What the PR wizard shows before it asks anything: the session's
+    directory as git sees it (checkout branch, HEAD, uncommitted counts,
+    remotes) and whether ``gh`` can open a pull request there. Off the loop:
+    a handful of git processes and a ``gh auth status`` per host."""
+    session = _session(request)
+    cwd = _session_cwd(session)
+    if not cwd:
+        return json_error(400, "this session runs in no directory of its own")
+    doc = await asyncio.to_thread(prflow.preview, cwd, session=session.sdef.name)
+    return json_response(doc)
+
+
+async def h_session_pr(request: web.Request) -> web.Response:
+    """Push what the session's directory holds under a new branch name and
+    open the pull request -- the wizard's confirm button.
+
+    Body: the form (``remote``, ``base``, ``branch``, ``title``, ``body``,
+    ``draft``, ``include_uncommitted``, ``force``) plus two switches that are
+    about the *session* rather than the push: ``report`` types the outcome
+    into its terminal (:func:`prflow.report_block` through
+    :meth:`Session.deliver`), and ``monitor`` asks for a child session to
+    watch the PR -- not available yet, so it is answered with a warning and
+    nothing is spawned. The push result is the body whatever happened:
+    ``ok`` false with ``failed``/``error`` is a step that was refused, not a
+    request that was malformed, so it is a 200 with a step list rather than
+    an error the form would have to parse out of a message.
+    """
+    session = _session(request)
+    cwd = _session_cwd(session)
+    if not cwd:
+        return json_error(400, "this session runs in no directory of its own")
+    body = await _json_body(request)
+    name = session.sdef.name
+    result = await asyncio.to_thread(prflow.run, cwd, body, session=name)
+    warnings: list = []
+    if body.get("monitor"):
+        warnings.append(
+            "monitor: a PR-monitor child session is not available yet -- "
+            "nothing was spawned"
+        )
+    delivered = None
+    if body.get("report"):
+        if session.exited:
+            warnings.append("report: the session has exited; nothing was delivered")
+        else:
+            delivered = await session.deliver(prflow.report_block(result))
+    return json_response({**result, "delivered": delivered, "warnings": warnings})
 
 
 async def h_session_notice(request: web.Request) -> web.Response:
