@@ -583,3 +583,18 @@ def test_git_status_across_link(home, tmp_path):
         await mgr.shutdown_all()
 
     asyncio.run(run())
+
+
+# --------------------------------------------------------------------------- #
+# E. the member protocol names the tools (the mesh skill is the mirror)
+# --------------------------------------------------------------------------- #
+def test_mesh_skill_teaches_peer_ops():
+    from claude_launcher import mesh_install, mesh_mcp
+
+    md = mesh_install.SKILL_MD
+    tool_names = {t["name"] for t in mesh_mcp.TOOLS}
+    for name in ("peer_file", "peer_git", "lease"):
+        assert name in tool_names
+        assert f"`{name}" in md, f"the mesh skill never mentions {name}"
+    assert "claunch mesh lease" in md
+    assert "claunch mesh ops" in md
