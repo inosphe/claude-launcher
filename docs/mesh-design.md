@@ -1811,3 +1811,90 @@ on another daemon cannot do that, so a remote match is skipped *as remote* —
 a different problem, with a different fix, from "nobody holds that role". The
 federation carries messages, not run state, and this phase did not change
 that.
+
+## Peer operations: reading a member's checkout, coordinating on keys (phase 12 — implemented)
+
+Messages reach a member on another machine; nothing else did. A reviewer on
+`pcB` asked to look at a worker's diff on `pcA` had two choices — ask the
+worker to paste it (paid out of both contexts, and stale by the time it is
+read) or be told the diff was on the board (which the other machine cannot
+reach). And two workers editing the same file on two machines had no lock in
+common: the filesystem is not shared, and the board is not either.
+
+Phase 12 adds three operations that ride the peer links the mesh already has
+(`/peer/*` over the relay bridge, one `token_in` per edge — see *Ranked peer
+graph*). Nothing new is trusted: the link token authenticates the daemon, and
+each handler scopes the call to the mesh the link belongs to.
+
+**Aligned decisions.**
+
+1. *Read-only, and typed.* `file` reads one file; `git` runs one of five
+   whitelisted queries (`status`, `diff`, `log`, `show`, `branch`) whose
+   arguments are named fields, never a free option string. There is no
+   remote write of any kind — a member changes another machine's tree by
+   asking the member who sits there.
+2. *The session's cwd is the sandbox.* A path is resolved (symlinks
+   followed) and must lie under the target session's working directory —
+   `../`, an absolute path elsewhere, a link that points out: refused before
+   a byte is read. A peer can only name sessions that are members of *that
+   mesh* on the answering daemon (`member_for_session`), so a link into one
+   mesh does not read the checkouts of another.
+3. *The member graph is the ACL.* A member may read the checkout of a member
+   it is *connected* to (`Mesh.connected`), which is the same rule as for a
+   message. A lead that keeps two workers apart so their work stays
+   independent did not mean for one to read the other's tree, and the mesh
+   should not have two different answers to "may A reach B".
+4. *Leases are granted by the authority.* A lock two daemons could each grant
+   is no lock, so `peers[0]` — the daemon that already sequences every
+   message — keeps the registry. A peer forwards `acquire`/`renew`/`release`
+   /`list` up its link like a send; the authority answers locally. The
+   registry is `key -> {holder, note, acquired_at, expires_at}`, persisted in
+   `leases.json` beside the roster so a restart does not silently free every
+   key mid-edit.
+5. *Every lease expires.* Default 15 minutes, cap 4 hours, renewable. The
+   holder may have been killed mid-edit, and a key held forever by a dead
+   session is the deadlock the primitive exists to prevent. A departed
+   member's leases go with it (`_drop_leases` on leave/kick), for the same
+   reason a rejoining handle does not inherit its predecessor's cut edges.
+6. *A refusal is an answer, not an error.* `acquire` on a key somebody else
+   holds returns `ok: false` with `held_by`, the note they left, and the
+   deadline — the caller's next move is to wait, message them, or pick
+   another key, and all three need that information. Only the holder may
+   release; anyone may take an expired key.
+7. *Keys are conventions, not schema.* `path:<repo-relative>`,
+   `issue:<id>`, `branch:<name>` are what the tools' descriptions suggest;
+   the registry compares strings. A mesh that wants a different vocabulary
+   writes it into a `doc` issue, as with every other shared rule.
+
+**Surface.**
+
+| layer | file | git | lease |
+|---|---|---|---|
+| peer (link-token auth) | `POST /peer/ops/file` | `POST /peer/ops/git` | `POST /peer/ops/lease` (authority only) |
+| local API (`actor` = calling session) | `POST /api/mesh/{m}/ops/file` | `POST /api/mesh/{m}/ops/git` | `GET`/`POST /api/mesh/{m}/leases` |
+| MCP (`claunch-mesh`) | `peer_file` | `peer_git` | `lease` |
+| CLI | `claunch mesh ops file M HANDLE PATH` | `claunch mesh ops git M HANDLE OP …` | `claunch mesh lease M acquire\|renew\|release\|ls KEY` |
+
+`MeshManager.ops_file` / `ops_git` resolve the caller by session, the target
+by handle, check the graph, and either read locally (`mesh_ops.read_file` /
+`git_query`, off the loop) or `_peer_call` the target's machine.
+`MeshManager.lease` applies locally on the authority and forwards from a
+mirror with `_peer_call_primary`. The pure parts — the sandbox, the git
+whitelist, the registry — live in `daemon/mesh_ops.py` with no mesh in them,
+and that is where the tests start (`tests/test_mesh_ops.py`).
+
+**What a reply carries.** `file`: the cwd-relative path, `size`, `content`
+(cut at `max_bytes`, default 64 KiB, hard cap 1 MiB), `truncated`, and the
+`sha256` of the *whole* file even when the content was cut — so "same file"
+and "same prefix" stay distinguishable — plus `encoding` (`utf-8`, or
+`base64` for bytes that are not text). `git`: the `argv` that ran, `rc`,
+`output`, `truncated`; a non-zero `rc` is git's own message in `output`, not
+an exception, because an unknown ref *is* the answer the caller wanted.
+
+**What is deliberately out.** Remote writes. Reading another machine's
+board (the board is a repository file; a `doc` issue is still the way to
+share a rule, and a member on the other machine still gets the bundle by
+message — see the worker stance). Multi-hop: a member reads the checkouts of
+members it is linked to, on daemons its daemon is linked to, and nothing
+routes further. A web view of leases — the CLI `ls` and the MCP `lease
+list` are the readers for now.

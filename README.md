@@ -2260,6 +2260,12 @@ claunch mesh add dev              # owner-side wizard: pick a relay daemon ->
                                   #   pick its session -> enrolled, no codes
 claunch mesh peers                # the other daemons registered on the relay
 claunch mesh peers dev            # ...or this mesh's daemons in RANK order
+claunch mesh ops file dev worker_1 src/app.py      # read a member's file, here or
+claunch mesh ops git dev worker_1 status           #   over the relay (read-only:
+claunch mesh ops git dev worker_1 diff --base master --stat   # status/diff/log/show/branch)
+claunch mesh lease dev acquire path:src/app.py --note "refactor"  # one holder at a
+claunch mesh lease dev ls                          #   time, mesh-wide; exit 2 = held
+claunch mesh lease dev release path:src/app.py
 claunch mesh rank dev laptop 0    # move a peer; position 0 hands it authority
 claunch mesh cut dev laptop pc-b  # drop one direct link (falls back to rank 0)
 claunch spawn --mesh dev --as worker_2 --role worker --task "take the API"

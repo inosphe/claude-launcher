@@ -866,6 +866,143 @@ def _cmd_history(args: argparse.Namespace) -> int:
     return 0
 
 
+def _need_session(args: argparse.Namespace) -> Optional[str]:
+    session = _own_session(args)
+    if not session:
+        print("error: no session -- pass --session, or run inside a claunch "
+              "session (where $CLAUNCH_SESSION is set)", file=sys.stderr)
+    return session
+
+
+def _cmd_ops_file(args: argparse.Namespace) -> int:
+    session = _need_session(args)
+    if not session:
+        return 1
+    client = daemon_client.ensure_running()
+    payload = {"actor": session, "member": args.member, "path": args.path}
+    if args.max_bytes:
+        payload["max_bytes"] = args.max_bytes
+    result = client.post(f"/api/mesh/{args.mesh}/ops/file", payload)
+    if args.json:
+        import json
+
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return 0
+    print(
+        f"# {result.get('member')}@{result.get('machine') or 'local'}:"
+        f"{result.get('path')}  {result.get('size')} bytes  "
+        f"sha256 {str(result.get('sha256'))[:12]}"
+        f"{'  (truncated)' if result.get('truncated') else ''}"
+        f"{'  [base64]' if result.get('encoding') == 'base64' else ''}",
+        file=sys.stderr,
+    )
+    sys.stdout.write(str(result.get("content") or ""))
+    return 0
+
+
+def _cmd_ops_git(args: argparse.Namespace) -> int:
+    session = _need_session(args)
+    if not session:
+        return 1
+    client = daemon_client.ensure_running()
+    gargs = {}
+    if args.base:
+        gargs["base"] = args.base
+    if args.head:
+        gargs["head"] = args.head
+    if args.ref:
+        gargs["ref"] = args.ref
+    if args.range:
+        gargs["range"] = args.range
+    if args.n:
+        gargs["n"] = args.n
+    if args.stat:
+        gargs["stat"] = True
+    if args.cached:
+        gargs["cached"] = True
+    if args.paths:
+        gargs["paths"] = list(args.paths)
+    result = client.post(
+        f"/api/mesh/{args.mesh}/ops/git",
+        {"actor": session, "member": args.member, "op": args.op, "args": gargs},
+    )
+    if args.json:
+        import json
+
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return 0
+    print(
+        f"# {result.get('member')}@{result.get('machine') or 'local'}: "
+        f"git {' '.join(result.get('argv') or [])}  rc={result.get('rc')}"
+        f"{'  (truncated)' if result.get('truncated') else ''}",
+        file=sys.stderr,
+    )
+    sys.stdout.write(str(result.get("output") or ""))
+    return 0 if result.get("rc") == 0 else 1
+
+
+def _cmd_lease(args: argparse.Namespace) -> int:
+    session = _need_session(args)
+    if not session:
+        return 1
+    client = daemon_client.ensure_running()
+    op = args.op
+    if op in ("ls", "list"):
+        q = f"?session={quote(session)}"
+        if args.key:
+            q += f"&holder={quote(args.key)}"
+        result = client.get(f"/api/mesh/{args.mesh}/leases{q}")
+        if args.json:
+            import json
+
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+            return 0
+        leases = result.get("leases") or []
+        if not leases:
+            print("no live leases")
+            return 0
+        import time
+
+        now = time.time()
+        for lease in leases:
+            left = int(float(lease.get("expires_at") or 0) - now)
+            note = f"  {lease['note']}" if lease.get("note") else ""
+            print(f"{lease['key']:<40} {lease['holder']:<12} "
+                  f"{_fmt_age(max(left, 0))} left{note}")
+        return 0
+    if not args.key:
+        print("error: KEY is required", file=sys.stderr)
+        return 1
+    payload = {"actor": session, "op": op, "key": args.key}
+    if args.ttl:
+        payload["ttl"] = args.ttl
+    if args.note:
+        payload["note"] = args.note
+    result = client.post(f"/api/mesh/{args.mesh}/leases", payload)
+    if args.json:
+        import json
+
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return 0 if result.get("ok") else 2
+    if result.get("ok"):
+        lease = result.get("lease")
+        if lease:
+            import time
+
+            left = int(float(lease.get("expires_at") or 0) - time.time())
+            print(f"{op}: {lease['key']} held by {lease['holder']} "
+                  f"for {_fmt_age(max(left, 0))}")
+        else:
+            print(f"{op}: {args.key} "
+                  f"{'released' if result.get('released') else result.get('reason', 'ok')}")
+        return 0
+    lease = result.get("lease") or {}
+    print(f"{op}: {args.key} is HELD by {result.get('held_by')}"
+          f"{' -- ' + lease['note'] if lease.get('note') else ''} "
+          f"(until {lease.get('expires_at')})", file=sys.stderr)
+    return 2
+
+
 def _fmt_age(secs) -> str:
     if secs is None:
         return "?"
@@ -1212,6 +1349,59 @@ def register(sub) -> None:
     p.add_argument("mesh")
     p.add_argument("-n", type=int, default=50, help="how many (default 50)")
     p.set_defaults(func=_cmd_history)
+
+    p_ops = msub.add_parser(
+        "ops",
+        help="read another member's checkout (file / git), here or over the relay",
+    )
+    osub = p_ops.add_subparsers(dest="ops_cmd", required=True)
+    p = osub.add_parser("file", help="print one file from a member's working directory")
+    p.add_argument("mesh")
+    p.add_argument("member", help="handle whose checkout to read")
+    p.add_argument("path", help="path relative to that session's working directory")
+    p.add_argument("--max-bytes", type=int, default=0,
+                   help="cut after this many bytes (default 65536)")
+    p.add_argument("--json", action="store_true", help="print the raw reply")
+    p.add_argument("--session", help="who is asking (default: $CLAUNCH_SESSION)")
+    p.set_defaults(func=_cmd_ops_file)
+    p = osub.add_parser(
+        "git", help="read-only git query in a member's checkout",
+        description="ops: status | diff [--base R [--head R]] [--stat] [--cached] "
+                    "| log [-n N] [--range R] | show --ref R [--stat] | branch",
+    )
+    p.add_argument("mesh")
+    p.add_argument("member", help="handle whose checkout to query")
+    p.add_argument("op", choices=["status", "diff", "log", "show", "branch"])
+    p.add_argument("paths", nargs="*", help="limit to these paths")
+    p.add_argument("--base")
+    p.add_argument("--head")
+    p.add_argument("--ref")
+    p.add_argument("--range")
+    p.add_argument("-n", type=int, default=0)
+    p.add_argument("--stat", action="store_true")
+    p.add_argument("--cached", action="store_true")
+    p.add_argument("--json", action="store_true", help="print the raw reply")
+    p.add_argument("--session", help="who is asking (default: $CLAUNCH_SESSION)")
+    p.set_defaults(func=_cmd_ops_git)
+
+    p = msub.add_parser(
+        "lease",
+        help="hold a named lease across machines (acquire/renew/release/ls)",
+        description="A lease is a coordination key the mesh's authority grants "
+                    "to one holder at a time. Exit 2 when the key is held by "
+                    "somebody else.",
+    )
+    p.add_argument("mesh")
+    p.add_argument("op", choices=["acquire", "renew", "release", "ls", "list"])
+    p.add_argument("key", nargs="?", default="",
+                   help="lease key, e.g. path:src/x.py or issue:claunch-abcd "
+                        "(for ls: optional holder filter)")
+    p.add_argument("--ttl", type=float, default=0,
+                   help="seconds until expiry unless renewed (default 900)")
+    p.add_argument("--note", default="", help="what you are doing under it")
+    p.add_argument("--json", action="store_true", help="print the raw reply")
+    p.add_argument("--session", help="who is asking (default: $CLAUNCH_SESSION)")
+    p.set_defaults(func=_cmd_lease)
 
     p = msub.add_parser(
         "mcp", help="run the stdio MCP server (send/members/history tools)"

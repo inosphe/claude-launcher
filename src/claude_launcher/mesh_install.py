@@ -133,7 +133,38 @@ makes a message the wrong home for anything that gets read back later.
   and are never read back. Send them, and keep them short.
 - **The split needs a shared board.** A member on another machine (`members`
   shows `machine/session`) cannot reach yours. Send that peer the bundle
-  itself.
+  itself — but not the files: what it needs to *see* it can read for
+  itself with `peer_file` / `peer_git` (below), so a bundle names paths and
+  hashes, not contents.
+
+### Reading a peer's checkout, and not colliding in it
+
+Three read-side tools reach a member's working directory wherever its
+daemon is — on this machine or over the relay — and they go through the
+same member graph as a message: you can read from a member you are
+connected to, and only from those.
+
+- `peer_file {mesh, member, path}` — one file from that session's checkout
+  (path confined to it; content cut at `max_bytes`, with `truncated` and
+  the whole file's `sha256` so "same file" and "same prefix" stay apart).
+- `peer_git {mesh, member, op, args}` — `status`, `diff`, `log`, `show` or
+  `branch` there, read-only, with typed arguments (`diff {base, head,
+  paths, stat}`, `log {n, range}`, `show {ref}`); a bad ref comes back as
+  git's own message with a non-zero `rc`, not as an error.
+- `lease {mesh, op, key, ttl, note}` — the coordination primitive for two
+  members that would otherwise edit the same thing on two machines. The
+  mesh's authority daemon grants a `key` to one holder at a time; `acquire`
+  on a held key answers `ok: false` with `held_by`, their `note` and the
+  deadline, which is your cue to wait, message them, or pick another key.
+  Keys are plain strings by convention — `path:<repo-relative file>`,
+  `issue:<id>`, `branch:<name>`. A lease expires on its own (15 min by
+  default, 4 h at most): `renew` while you work, `release` when done, and
+  never rely on one you have not renewed. `list` shows who holds what.
+
+CLI equivalents: `claunch mesh ops file|git MESH HANDLE ...` and
+`claunch mesh lease MESH acquire|renew|release|ls KEY`. None of these write
+anything on the other machine — a change there is still a message to the
+member who sits there.
 
 Never write a record to the board and then send the same content as prose:
 you have paid for it twice and only one copy survives the round. In one

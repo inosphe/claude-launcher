@@ -115,6 +115,105 @@ TOOLS = [
         },
     },
     {
+        "name": "peer_file",
+        "description": (
+            "Read one file from another member's working directory — on this "
+            "machine or, over the relay, on theirs. The path is confined to "
+            "that session's checkout; the reply carries the content (cut at "
+            "max_bytes, default 64K), its size, whether it was truncated, and "
+            "the sha256 of the WHOLE file. Read-only. You must be connected "
+            "to that member in the mesh (see 'members' -> reachable)."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "mesh": {"type": "string", "description": "mesh name"},
+                "member": {"type": "string", "description": "handle whose checkout to read"},
+                "path": {
+                    "type": "string",
+                    "description": "file path, relative to that session's working directory",
+                },
+                "max_bytes": {
+                    "type": "number",
+                    "description": "cut the content after this many bytes (default 65536, max 1048576)",
+                },
+            },
+            "required": ["mesh", "member", "path"],
+        },
+    },
+    {
+        "name": "peer_git",
+        "description": (
+            "One read-only git query in another member's checkout — on this "
+            "machine or over the relay. op is one of status (porcelain, with "
+            "branch line), diff (args: base, head, paths, stat, cached), log "
+            "(args: n, range, paths — one line per commit: hash, author, "
+            "date, subject), show (args: ref, stat), branch (list with HEAD "
+            "marker and tip hash). Arguments are typed fields; there is no "
+            "free option string and nothing that writes. A non-zero rc "
+            "returns git's own message in output rather than failing."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "mesh": {"type": "string", "description": "mesh name"},
+                "member": {"type": "string", "description": "handle whose checkout to query"},
+                "op": {
+                    "type": "string",
+                    "description": "status | diff | log | show | branch",
+                },
+                "args": {
+                    "type": "object",
+                    "description": (
+                        "typed arguments for op: diff {base, head, paths[], stat, "
+                        "cached}; log {n, range, paths[]}; show {ref, stat}; "
+                        "status {paths[]}; branch takes none"
+                    ),
+                },
+            },
+            "required": ["mesh", "member", "op"],
+        },
+    },
+    {
+        "name": "lease",
+        "description": (
+            "Coordinate with members on other machines before touching a "
+            "shared thing: acquire a named lease (key) for a TTL, renew it "
+            "while you work, release it when done, or list who holds what. "
+            "The mesh's authority daemon is the single grantor, so two "
+            "members cannot both hold a key. acquire on a key somebody else "
+            "holds is NOT an error: the reply has ok:false and held_by — "
+            "wait, message them, or pick another key. Keys are plain strings "
+            "by convention: 'path:<repo-relative file>', 'issue:<id>', "
+            "'branch:<name>'. A lease expires on its own (default 15 min, "
+            "max 4 h) so a dead holder never blocks the mesh; renew before "
+            "it does. The holder is always you (your handle in the mesh)."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "mesh": {"type": "string", "description": "mesh name"},
+                "op": {
+                    "type": "string",
+                    "description": "acquire (default) | renew | release | list",
+                },
+                "key": {
+                    "type": "string",
+                    "description": "the lease key (for list: optional holder filter)",
+                },
+                "ttl": {
+                    "type": "number",
+                    "description": "seconds until the lease expires unless renewed (default 900)",
+                },
+                "note": {
+                    "type": "string",
+                    "description": "what you are doing under it (shown to whoever is refused)",
+                },
+            },
+            "required": ["mesh"],
+        },
+    },
+    {
         "name": "spawn",
         "description": (
             "Create a CHILD agent session on this daemon. THE way to make a "
@@ -758,6 +857,37 @@ def call_tool(name: str, args: dict) -> dict:
     if name == "history":
         limit = int(args.get("limit") or 50)
         return _client().get(f"/api/mesh/{mesh}/messages?limit={limit}")
+    if name == "peer_file":
+        member = str(args.get("member") or "")
+        path = str(args.get("path") or "")
+        if not member or not path:
+            raise MeshMcpError("'member' and 'path' are both required")
+        payload = {"actor": _session(), "member": member, "path": path}
+        if args.get("max_bytes"):
+            payload["max_bytes"] = int(args["max_bytes"])
+        return _client().post(f"/api/mesh/{mesh}/ops/file", payload)
+    if name == "peer_git":
+        member = str(args.get("member") or "")
+        op = str(args.get("op") or "")
+        if not member or not op:
+            raise MeshMcpError("'member' and 'op' are both required")
+        gargs = args.get("args")
+        return _client().post(
+            f"/api/mesh/{mesh}/ops/git",
+            {"actor": _session(), "member": member, "op": op,
+             "args": gargs if isinstance(gargs, dict) else {}},
+        )
+    if name == "lease":
+        op = str(args.get("op") or "acquire")
+        key = str(args.get("key") or "")
+        if op != "list" and not key:
+            raise MeshMcpError("'key' is required")
+        payload = {"actor": _session(), "op": op, "key": key}
+        if args.get("ttl"):
+            payload["ttl"] = float(args["ttl"])
+        if args.get("note"):
+            payload["note"] = str(args["note"])
+        return _client().post(f"/api/mesh/{mesh}/leases", payload)
     raise MeshMcpError(f"unknown tool {name!r}")
 
 
