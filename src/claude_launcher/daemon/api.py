@@ -432,6 +432,13 @@ def build_app(
     r.add_get("/api/mesh/{mesh}/roles", h_mesh_roles_get)
     r.add_put("/api/mesh/{mesh}/roles", h_mesh_roles_set)
     r.add_post("/api/mesh/{mesh}/invitations", h_mesh_invitation)
+    # Peer operations: read another member's checkout, coordinate on keys
+    # (docs/mesh-design.md "Peer operations"). The caller names itself by
+    # session; the target by handle; the member graph is the ACL.
+    r.add_post("/api/mesh/{mesh}/ops/file", h_mesh_ops_file)
+    r.add_post("/api/mesh/{mesh}/ops/git", h_mesh_ops_git)
+    r.add_get("/api/mesh/{mesh}/leases", h_mesh_leases_list)
+    r.add_post("/api/mesh/{mesh}/leases", h_mesh_lease)
     r.add_get("/api/relay/peers", h_relay_peers)
     r.add_get("/api/relay/peers/{machine}/sessions", h_relay_peer_sessions)
     # Peer federation endpoints. Deliberately outside /api/: the auth
@@ -455,6 +462,9 @@ def build_app(
     r.add_post("/peer/mesh/send", h_peer_send)
     r.add_post("/peer/mesh/sync", h_peer_sync)
     r.add_post("/peer/mesh/deliver", h_peer_deliver)
+    r.add_post("/peer/ops/file", h_peer_ops_file)
+    r.add_post("/peer/ops/git", h_peer_ops_git)
+    r.add_post("/peer/ops/lease", h_peer_ops_lease)
     r.add_get("/api/sessions", h_sessions_list)
     r.add_post("/api/sessions", h_sessions_create)
     r.add_delete("/api/sessions", h_sessions_clear)
@@ -3376,6 +3386,122 @@ async def h_peer_deliver(request: web.Request) -> web.Response:
         str(body.get("machine") or ""),
         str(body.get("token") or ""),
         message if isinstance(message, dict) else {},
+    )
+    return json_response(result)
+
+
+def _ops_actor(body: dict, request: web.Request) -> str:
+    """The calling session: body ``actor``, else ``?session=``."""
+    return str(body.get("actor") or request.query.get("session") or "")
+
+
+async def h_mesh_ops_file(request: web.Request) -> web.Response:
+    body = await _json_body(request)
+    actor = _ops_actor(body, request)
+    handle = str(body.get("member") or "")
+    path = str(body.get("path") or "")
+    if not actor:
+        return json_error(400, "'actor' required (the calling session)")
+    if not handle:
+        return json_error(400, "'member' required (whose checkout to read)")
+    if not path:
+        return json_error(400, "'path' required")
+    max_bytes = body.get("max_bytes")
+    try:
+        max_bytes = int(max_bytes) if max_bytes not in (None, "") else None
+    except (TypeError, ValueError):
+        return json_error(400, "'max_bytes' must be an integer")
+    result = await _mesh_mgr(request).ops_file(
+        request.match_info["mesh"], actor, handle, path, max_bytes=max_bytes
+    )
+    return json_response(result)
+
+
+async def h_mesh_ops_git(request: web.Request) -> web.Response:
+    body = await _json_body(request)
+    actor = _ops_actor(body, request)
+    handle = str(body.get("member") or "")
+    op = str(body.get("op") or "")
+    args = body.get("args")
+    if not actor:
+        return json_error(400, "'actor' required (the calling session)")
+    if not handle:
+        return json_error(400, "'member' required (whose checkout to query)")
+    if not op:
+        return json_error(400, "'op' required (status, diff, log, show, branch)")
+    if args is not None and not isinstance(args, dict):
+        return json_error(400, "'args' must be an object")
+    result = await _mesh_mgr(request).ops_git(
+        request.match_info["mesh"], actor, handle, op, args or {}
+    )
+    return json_response(result)
+
+
+async def h_mesh_leases_list(request: web.Request) -> web.Response:
+    actor = str(request.query.get("session") or "")
+    if not actor:
+        return json_error(400, "'session' required (the calling session)")
+    result = await _mesh_mgr(request).lease(
+        request.match_info["mesh"], actor, "list",
+        str(request.query.get("holder") or ""),
+    )
+    return json_response(result)
+
+
+async def h_mesh_lease(request: web.Request) -> web.Response:
+    body = await _json_body(request)
+    actor = _ops_actor(body, request)
+    op = str(body.get("op") or "acquire")
+    key = str(body.get("key") or "")
+    if not actor:
+        return json_error(400, "'actor' required (the calling session)")
+    if op != "list" and not key:
+        return json_error(400, "'key' required")
+    result = await _mesh_mgr(request).lease(
+        request.match_info["mesh"], actor, op, key,
+        ttl=body.get("ttl"), note=str(body.get("note") or ""),
+    )
+    return json_response(result)
+
+
+async def h_peer_ops_file(request: web.Request) -> web.Response:
+    body = await _json_body(request)
+    result = _mesh_mgr(request).peer_ops_file_accept(
+        str(body.get("mesh") or ""),
+        str(body.get("machine") or ""),
+        str(body.get("token") or ""),
+        str(body.get("session") or ""),
+        str(body.get("path") or ""),
+        body.get("max_bytes"),
+    )
+    return json_response(result)
+
+
+async def h_peer_ops_git(request: web.Request) -> web.Response:
+    body = await _json_body(request)
+    args = body.get("args")
+    result = _mesh_mgr(request).peer_ops_git_accept(
+        str(body.get("mesh") or ""),
+        str(body.get("machine") or ""),
+        str(body.get("token") or ""),
+        str(body.get("session") or ""),
+        str(body.get("op") or ""),
+        args if isinstance(args, dict) else {},
+    )
+    return json_response(result)
+
+
+async def h_peer_ops_lease(request: web.Request) -> web.Response:
+    body = await _json_body(request)
+    result = _mesh_mgr(request).peer_lease_accept(
+        str(body.get("mesh") or ""),
+        str(body.get("machine") or ""),
+        str(body.get("token") or ""),
+        str(body.get("op") or ""),
+        str(body.get("key") or ""),
+        str(body.get("holder") or ""),
+        body.get("ttl"),
+        str(body.get("note") or ""),
     )
     return json_response(result)
 

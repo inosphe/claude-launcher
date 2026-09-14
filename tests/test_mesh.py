@@ -1683,6 +1683,8 @@ def test_mesh_mcp_tools(home, monkeypatch):
     assert [t["name"] for t in tools["result"]["tools"]] == [
         # talking ...
         "send", "members", "history",
+        # ... reading a peer's checkout and coordinating on shared keys
+        "peer_file", "peer_git", "lease",
         # ... building the team that does it: made, counted, re-oriented,
         # ended, re-drawn, wired
         "spawn", "children", "rebrief", "kill", "reparent", "connect",

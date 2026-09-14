@@ -42,7 +42,7 @@ from typing import Callable, Dict, Iterable, List, Optional, Sequence, Tuple, Un
 import yaml
 
 from .. import atomic, digests
-from . import loops, mesh_policy, mesh_roles, paths, wire
+from . import loops, mesh_ops, mesh_policy, mesh_roles, paths, wire
 from .manager import AnySession, ManagerError, SessionManager
 from .session import STATUS_IDLE
 
@@ -636,6 +636,13 @@ class Mesh:
         #: that will never be decided, which is the outcome this whole path
         #: exists to prevent.
         self.wire_requests: Dict[str, "wire.WireRequest"] = {}
+        #: Authority side: the coordination leases members hold on shared
+        #: keys (a file path, an issue id) — see :mod:`mesh_ops`. Kept by
+        #: ``peers[0]`` only, because a lock two daemons could each grant is
+        #: no lock; a peer forwards acquire/release up the link exactly like
+        #: a send. Persisted in ``leases.json`` so a restart of the authority
+        #: does not silently free every key mid-edit.
+        self.leases = mesh_ops.LeaseRegistry()
         #: Bumped on every authority handover; messages carry it alongside
         #: ``seq`` so a forced takeover cannot silently interleave with the
         #: old authority's late traffic.
@@ -2294,9 +2301,20 @@ class MeshManager:
         else:
             mesh.remote_activity.pop(handle, None)
             mesh.remote_lineage.pop(handle, None)
+            self._drop_leases(mesh, handle)
             self._persist_cursors(mesh)
             self._roster_changed(mesh)
         return member
+
+    def _drop_leases(self, mesh: Mesh, handle: str) -> None:
+        """Authority side: a departed member's leases go with it.
+
+        A key held by a handle nobody wears any more would sit until its
+        TTL ran out, and a rejoining session wearing the same handle would
+        inherit a lock it never took.
+        """
+        if mesh.leases.release_all(handle):
+            self._persist_leases(mesh)
 
     def _roster_changed(self, mesh: Mesh) -> None:
         """Authority-side roster bump: persist and fan out to peers soon."""
@@ -4950,6 +4968,7 @@ class MeshManager:
         mesh.members.pop(handle, None)
         mesh.remote_activity.pop(handle, None)
         mesh.remote_lineage.pop(handle, None)
+        self._drop_leases(mesh, handle)
         self._roster_changed(mesh)
         return member.to_dict()
 
@@ -4993,6 +5012,194 @@ class MeshManager:
         )
         self._flush_guests_soon(mesh)
         return result
+
+    # -- peer operations: read a member's checkout, coordinate on keys --- #
+    def _ops_actor(self, mesh: Mesh, actor: str) -> Member:
+        """The member the calling session is — the identity every op needs."""
+        member = self.member_for_session(mesh, actor)
+        if member is None:
+            raise MeshError(
+                f"session {actor!r} is not a member of mesh {mesh.name!r}"
+            )
+        return member
+
+    def _ops_target(self, mesh: Mesh, actor: Member, handle: str) -> Member:
+        """The member whose checkout is being read, after the graph check.
+
+        The member graph is the ACL for messages, and it is the ACL here for
+        the same reason: a lead that keeps two workers apart so their work
+        stays independent did not mean for one to read the other's tree.
+        """
+        target = mesh.members.get(handle)
+        if target is None:
+            raise MeshError(f"no member {handle!r} in mesh {mesh.name!r}")
+        if not mesh.connected(actor.handle, target.handle):
+            raise MeshError(
+                f"{actor.handle!r} is not connected to {target.handle!r} — "
+                f"the member graph decides who may read whose checkout"
+            )
+        return target
+
+    def _session_cwd(self, session: str) -> str:
+        try:
+            sess = self.manager.get(session)
+        except ManagerError:
+            raise MeshError(f"session {session!r} is not running here") from None
+        return str(getattr(sess.sdef, "cwd", "") or "")
+
+    async def ops_file(
+        self, name: str, actor: str, handle: str, path: str,
+        *, max_bytes: Optional[int] = None,
+    ) -> dict:
+        """Read ``path`` from inside member ``handle``'s working directory."""
+        mesh = self.get(name)
+        me = self._ops_actor(mesh, actor)
+        target = self._ops_target(mesh, me, handle)
+        if self._is_local(mesh, target):
+            cwd = self._session_cwd(target.session)
+            try:
+                result = await asyncio.to_thread(
+                    mesh_ops.read_file, cwd, path, max_bytes=max_bytes
+                )
+            except mesh_ops.OpsError as exc:
+                raise MeshError(str(exc)) from None
+            return {"member": target.handle, "machine": self.machine, **result}
+        payload = await self._peer_call(
+            mesh, target.machine, "/peer/ops/file",
+            {"session": target.session, "actor": me.handle,
+             "path": path, "max_bytes": max_bytes},
+        )
+        return {"member": target.handle, "machine": target.machine, **payload}
+
+    async def ops_git(
+        self, name: str, actor: str, handle: str, op: str,
+        args: Optional[dict] = None,
+    ) -> dict:
+        """Run one whitelisted read-only git query in ``handle``'s checkout."""
+        mesh = self.get(name)
+        me = self._ops_actor(mesh, actor)
+        target = self._ops_target(mesh, me, handle)
+        if self._is_local(mesh, target):
+            cwd = self._session_cwd(target.session)
+            try:
+                result = await asyncio.to_thread(mesh_ops.git_query, cwd, op, args)
+            except mesh_ops.OpsError as exc:
+                raise MeshError(str(exc)) from None
+            return {"member": target.handle, "machine": self.machine, **result}
+        payload = await self._peer_call(
+            mesh, target.machine, "/peer/ops/git",
+            {"session": target.session, "actor": me.handle,
+             "op": op, "args": args or {}},
+        )
+        return {"member": target.handle, "machine": target.machine, **payload}
+
+    def _lease_apply(
+        self, mesh: Mesh, op: str, key: str, holder: str, ttl, note: str,
+    ) -> dict:
+        """Authority side: one lease operation, persisted."""
+        reg = mesh.leases
+        try:
+            if op == "acquire":
+                lease = reg.acquire(key, holder, ttl=ttl, note=note)
+                result = {"ok": True, "lease": lease}
+            elif op == "renew":
+                lease = reg.renew(key, holder, ttl=ttl)
+                result = {"ok": True, "lease": lease}
+            elif op == "release":
+                result = {"ok": True, **reg.release(key, holder)}
+            elif op == "list":
+                return {"ok": True, "leases": reg.list(holder=key)}
+            else:
+                raise MeshError(
+                    f"unknown lease op {op!r} (acquire, renew, release, list)"
+                )
+        except mesh_ops.LeaseHeld as exc:
+            # Not an error to the caller: the answer IS the holder.
+            return {"ok": False, "held_by": exc.lease["holder"],
+                    "lease": exc.lease, "error": str(exc)}
+        except mesh_ops.OpsError as exc:
+            raise MeshError(str(exc)) from None
+        reg.prune()
+        self._persist_leases(mesh)
+        return result
+
+    async def lease(
+        self, name: str, actor: str, op: str, key: str = "",
+        *, ttl=None, note: str = "",
+    ) -> dict:
+        """acquire / renew / release / list a coordination lease as ``actor``.
+
+        The holder is always the calling member's handle — a session cannot
+        take or drop a key in somebody else's name. ``list`` takes ``key``
+        as an optional holder filter. On a mirror the call is forwarded to
+        the authority, which is the only daemon that may answer it.
+        """
+        mesh = self.get(name)
+        me = self._ops_actor(mesh, actor)
+        if mesh.primary:
+            payload = await self._peer_call_primary(
+                mesh, "/peer/ops/lease",
+                {"op": op, "key": key, "holder": me.handle,
+                 "ttl": ttl, "note": note},
+            )
+            return {"holder": me.handle, "authority": mesh.authority, **payload}
+        return {
+            "holder": me.handle, "authority": mesh.authority,
+            **self._lease_apply(mesh, op, key, me.handle, ttl, note),
+        }
+
+    def _peer_ops_session(self, mesh: Mesh, session: str) -> str:
+        """cwd of ``session`` if it wears a member of ``mesh`` on this daemon.
+
+        A peer may only read the checkouts of sessions that are in the mesh
+        the link belongs to — the link token authenticates the DAEMON, and
+        this is what scopes it to the mesh's own members.
+        """
+        member = self.member_for_session(mesh, session)
+        if member is None:
+            raise MeshError(
+                f"session {session!r} is not a member of mesh {mesh.name!r} here"
+            )
+        return self._session_cwd(session)
+
+    def peer_ops_file_accept(
+        self, name: str, machine: str, token: str, session: str, path: str,
+        max_bytes=None,
+    ) -> dict:
+        mesh = self.get(name)
+        self._check_link_token(mesh, machine, token)
+        cwd = self._peer_ops_session(mesh, session)
+        try:
+            return mesh_ops.read_file(cwd, path, max_bytes=max_bytes)
+        except mesh_ops.OpsError as exc:
+            raise MeshError(str(exc)) from None
+
+    def peer_ops_git_accept(
+        self, name: str, machine: str, token: str, session: str, op: str,
+        args: Optional[dict] = None,
+    ) -> dict:
+        mesh = self.get(name)
+        self._check_link_token(mesh, machine, token)
+        cwd = self._peer_ops_session(mesh, session)
+        try:
+            return mesh_ops.git_query(cwd, op, args)
+        except mesh_ops.OpsError as exc:
+            raise MeshError(str(exc)) from None
+
+    def peer_lease_accept(
+        self, name: str, machine: str, token: str, op: str, key: str,
+        holder: str, ttl=None, note: str = "",
+    ) -> dict:
+        """A peer forwards one of its members' lease operations to us."""
+        mesh = self.get(name)
+        self._require_authority(mesh, "leasing")
+        self._check_link_token(mesh, machine, token)
+        member = mesh.members.get(holder)
+        if member is None or member.machine != machine:
+            raise MeshError(
+                f"{holder!r} is not a member from daemon {machine!r}"
+            )
+        return self._lease_apply(mesh, op, key, holder, ttl, note)
 
     # -- peer-side handlers --------------------------------------------- #
     def _ingest_message(self, m: dict, origin: str) -> Optional[dict]:
@@ -6480,6 +6687,14 @@ class MeshManager:
             str(k): bool(v) for k, v in (doc.get("member_edges") or {}).items()
         }
         mesh.wire_requests = wire.load(doc.get("wire_requests"))
+        leases_path = d / "leases.json"
+        if leases_path.is_file():
+            try:
+                mesh.leases = mesh_ops.LeaseRegistry.from_dict(
+                    json.loads(leases_path.read_text(encoding="utf-8"))
+                )
+            except (OSError, ValueError):
+                mesh.leases = mesh_ops.LeaseRegistry()
         try:
             mesh.authority_epoch = int(doc.get("authority_epoch") or 0)
         except (TypeError, ValueError):
@@ -6631,6 +6846,20 @@ class MeshManager:
                 atomic.replace(tmp, path)
         except OSError as exc:
             log.warning("mesh %r: cannot persist cursors: %s", mesh.name, exc)
+
+    def _persist_leases(self, mesh: Mesh) -> None:
+        d = self._mesh_dir(mesh.name)
+        try:
+            d.mkdir(parents=True, exist_ok=True)
+            path = d / "leases.json"
+            with atomic.scratch(path) as tmp:
+                tmp.write_text(
+                    json.dumps(mesh.leases.to_dict(), indent=2, ensure_ascii=False),
+                    encoding="utf-8",
+                )
+                atomic.replace(tmp, path)
+        except OSError as exc:
+            log.warning("mesh %r: cannot persist leases: %s", mesh.name, exc)
 
     def _persist_outbox(self, mesh: Mesh) -> None:
         d = self._mesh_dir(mesh.name)
