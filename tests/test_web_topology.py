@@ -375,6 +375,7 @@ CHECKS = [
         "railprofile_check.js",
         "railcompacting_check.js",
         "railkeys_check.js",
+        "sessionpins_check.js",
 ]
 
 

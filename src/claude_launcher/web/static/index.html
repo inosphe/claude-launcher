@@ -180,6 +180,14 @@
            to the card that stands for it. Owned by gotoSessionCard(). -->
       <button id="term-goto" class="term-btn goto-chip" type="button"
               title="scroll the session list to this session's card">⇱ card</button>
+      <!-- Pin this session to the top of the session list. A toggle: lit
+           (aria-pressed) while the session is pinned. The same verb as the
+           row's 📌 and `p` on a focused card, placed here because the
+           header is where the reader is when they decide a session is one
+           they will keep coming back to. Owned by toggleSessionPin(). -->
+      <button id="term-pin" class="term-btn pin-chip" type="button"
+              aria-pressed="false"
+              title="pin this session to the top of the session list">📌</button>
       <span id="term-status" class="badge"></span>
       <!-- This session's latest throughput through the metering shim
            (tokens/s of the last answer), from the same record the rail row
