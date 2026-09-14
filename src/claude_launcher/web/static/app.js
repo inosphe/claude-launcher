@@ -15372,6 +15372,7 @@ let sessName = null;      // the session whose detail is open (null = closed)
 let sessPollTimer = null;
 let sessStartBox = null;  // reused across polls: it holds the user's typing
 let sessSendBox = null;   // and so does the message box — same reason
+let sessJoinBox = null;   // and the mesh-join row, which holds a typed handle
 let sessMigrateBox = null; // and the migrate picker — same reason again
 let sessReborrowBox = null; // and the borrow picker — same reason again
 let sessPermsBox = null;    // and the permissions toggle — same reason again
@@ -15390,6 +15391,7 @@ function dropDetail() {
   sessName = null;
   sessStartBox = null;
   sessSendBox = null;
+  sessJoinBox = null;
   sessMigrateBox = null;
   sessReborrowBox = null;
   sessPermsBox = null;
@@ -15425,6 +15427,7 @@ function repointDetail(name) {
   sessName = name;
   sessStartBox = null;
   sessSendBox = null;
+  sessJoinBox = null;
   sessMigrateBox = null;
   sessReborrowBox = null;
   sessPermsBox = null;
@@ -15839,6 +15842,11 @@ function renderSession(data) {
     );
     meshBox.appendChild(trace);
   }
+  // The chips above are read; this is the one write the section offers —
+  // putting this session into another mesh without leaving the panel that
+  // names it. Under the chips because it answers what the list cannot: a
+  // membership that does not exist yet.
+  meshBox.appendChild(sessMeshJoin(data));
   view.appendChild(meshBox);
 
   // Its work, as the board records it: the issue it was created for and
@@ -15860,6 +15868,172 @@ function renderSession(data) {
   view.appendChild(sessReborrow(data));
   view.appendChild(sessPerms(data));
   view.appendChild(sessMigrate(data));
+}
+
+/* Enrol THIS session in a mesh, from the panel that names it.
+
+   The memberships above are a list of rooms; joining one used to mean
+   leaving for the mesh page and picking the session back out of a dropdown
+   of every live session on the machine. The write is the same one
+   (`POST /api/mesh/<name>/members` — the enrol form there posts it too), but
+   the session is already decided here, so only the room, the handle and the
+   role are left to answer.
+
+   Which roles are offered comes from the mesh that is selected, not from the
+   packaged vocabulary: a mesh may carry its own role set, and joining as a
+   word that mesh does not know is refused by the daemon. The fetch is per
+   mesh and re-run when the pick changes. Until it answers, the select shows
+   one placeholder word and the join posts no role at all — the daemon then
+   applies that mesh's own default, which is the right answer where the page
+   does not have one.
+
+   Like the message box above it, the row survives the 5s poll unless the
+   memberships or the candidate rooms actually change — a repaint must not
+   take a half-typed handle away. */
+function sessMeshJoin(data) {
+  const s = data.session || {};
+  const name = s.name || "";
+  const joined = new Set((data.meshes || []).map((m) => m.mesh));
+  const box = el("div", "sess-mesh-join");
+
+  if (s.status === "exited") {
+    // An exited session cannot be spoken to, so a membership for it would be
+    // a name on a roster and nothing else.
+    box.appendChild(el(
+      "p", "wf-note",
+      "this session has exited — it can no longer be enrolled in a mesh"
+    ));
+    sessJoinBox = null;
+    return box;
+  }
+  const candidates = (meshCache || [])
+    .map((m) => (m && m.name) || "")
+    .filter((n) => n && !joined.has(n));
+  if (!candidates.length) {
+    box.appendChild(el(
+      "p", "wf-note",
+      joined.size
+        ? "no other mesh on this daemon to join — it is already in every one"
+        : "no mesh exists on this daemon yet — create one from the sidebar"
+    ));
+    sessJoinBox = null;
+    return box;
+  }
+
+  const key = `${name}|${candidates.join(",")}`;
+  if (sessJoinBox && sessJoinBox.dataset.slot === key) {
+    box.appendChild(sessJoinBox);   // appending moves the live node here
+    return box;
+  }
+  sessJoinBox = el("div", "sess-mesh-join-form");
+  sessJoinBox.dataset.slot = key;
+  box.appendChild(sessJoinBox);
+
+  const row = el("div", "sess-mesh-join-row");
+  const mesh = document.createElement("select");
+  mesh.className = "sess-mesh-pick";
+  for (const n of candidates) {
+    const opt = document.createElement("option");
+    opt.value = n;
+    opt.textContent = n;
+    mesh.appendChild(opt);
+  }
+  const handle = document.createElement("input");
+  handle.className = "sess-mesh-handle";
+  handle.placeholder = `handle (default: ${name})`;
+  handle.title =
+    "the name this mesh addresses the session by — free to differ from the " +
+    "session name, and what its peers type when they write to it";
+  const role = document.createElement("select");
+  role.className = "sess-mesh-role-pick";
+  role.title = "the role it joins as — this mesh's vocabulary, not the CLI's";
+  row.append(mesh, handle, role);
+
+  const status = el("p", "wf-note hidden");
+  const btn = el("button", "wf-btn approve", "Join mesh");
+  // One class, not both: .wf-note is declared after .wf-warning and would
+  // take the amber back off a line that is there to warn.
+  const say = (msg, cls) => {
+    status.className = cls || "wf-note";
+    status.textContent = msg;
+  };
+
+  // The offered roles belong to the selected mesh. A slower answer for a mesh
+  // the reader has already moved off is dropped rather than painted.
+  let rolesFor = "";
+  const loadRoles = async () => {
+    const want = mesh.value;
+    rolesFor = "";
+    role.innerHTML = "";
+    const fill = (names, def) => {
+      for (const n of names) {
+        const opt = document.createElement("option");
+        opt.value = n;
+        opt.textContent = n;
+        if (n === def) opt.selected = true;
+        role.appendChild(opt);
+      }
+    };
+    fill(["worker"], "worker");
+    let doc = null;
+    try {
+      const resp = await api(`/api/mesh/${encodeURIComponent(want)}/roles`);
+      doc = resp.ok ? await resp.json().catch(() => null) : null;
+    } catch { doc = null; }
+    if (mesh.value !== want) return;   // the pick moved while we asked
+    const names = ((doc && doc.roles) || []).map((r) => r && r.name)
+      .filter(Boolean);
+    if (!names.length) return;         // keep the fallback rather than empty
+    role.innerHTML = "";
+    fill(names, (doc && doc.default) || names[0]);
+    rolesFor = want;
+  };
+  loadRoles();
+  mesh.addEventListener("change", loadRoles);
+
+  btn.addEventListener("click", async () => {
+    if (btn.disabled) return;
+    const target = mesh.value;
+    btn.disabled = true;
+    say("joining…");
+    let resp;
+    let doc = {};
+    try {
+      resp = await api(`/api/mesh/${encodeURIComponent(target)}/members`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          session: name,
+          handle: handle.value.trim(),
+          // Only send a role the mesh itself named. The fallback word is a
+          // placeholder for an unanswered fetch, and posting it would join
+          // under a role this mesh may not carry.
+          role: rolesFor === target ? role.value : "",
+        }),
+      });
+      doc = await resp.json().catch(() => ({}));
+    } catch {
+      btn.disabled = false;
+      say("could not reach the daemon — nothing was joined", "wf-warning");
+      return;
+    }
+    btn.disabled = false;
+    if (!resp.ok) {
+      say(doc.error || `HTTP ${resp.status}`, "wf-warning");
+      return;
+    }
+    handle.value = "";
+    // 202 is a remote mesh that pended the request for its owner to approve:
+    // nothing is a membership yet, and the chips above will not show one.
+    say(resp.status === 202
+      ? `asked ${target} to admit this session — the mesh's owner approves it`
+      : `joined ${target} as '${doc.handle || name}'`);
+    refreshMeshList();
+    refreshSession();
+  });
+
+  sessJoinBox.append(row, btn, status);
+  return box;
 }
 
 /* Durable history for the native session-line control.  This is separate

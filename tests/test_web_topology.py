@@ -29,7 +29,10 @@ the Unanswered box and the requests its nudge/dismiss buttons send,
 ``panel_check`` on where the session detail docks (the rail beside the
 terminal, or the page slot on a phone) and what closing it leaves behind,
 ``sesssend_check`` on the message that panel can put into the mesh — whose
-handle it lands on and what it does with a refusal — ``sessrun_check`` on the
+handle it lands on and what it does with a refusal — ``meshjoin_check`` on the
+other write that section carries: enrolling the session in a mesh it is not
+yet in — which rooms are offered, where the role list comes from, and a
+remote mesh's pended request, which is not a membership — ``sessrun_check`` on the
 run it can fold open in place of a trip to the run page, ``wfstart_check`` on
 the workflow picker's option line — clipped so a paragraph-length description
 cannot drag the native popup past the viewport edge — ``sesslayout_check``
@@ -296,6 +299,7 @@ CHECKS = [
         "meshmessages_check.js",
         "panel_check.js",
         "sesssend_check.js",
+        "meshjoin_check.js",
         "reborrow_check.js",
         "borrowform_check.js",
         "sessrun_check.js",
