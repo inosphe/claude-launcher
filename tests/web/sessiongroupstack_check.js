@@ -232,6 +232,52 @@ check("a local leader wins over one on another machine",
       "s469");
 
 /* ---------------------------------------------------------------- */
+/* the create button beside the +                                   */
+/* ---------------------------------------------------------------- */
+
+/* The + hangs a child off the leader; this one opens the plain create form
+   with the mesh already picked, which is the only way to put a session in a
+   room without giving it the leader's lineage. It needs no leader, so the
+   only refusal it has is the catch-all group, and the route has to carry the
+   mesh for the picker to arrive on it. */
+
+const hash = {};
+new Function("exports", slice("function parseHash(", "function route()") +
+  "\nexports.parse = parseHash;")(hash);
+
+check("#/new still opens the create form with no mesh asked for",
+      hash.parse("#/new"), { page: "new", mesh: "" });
+check("#/new/<mesh> names the mesh the form should arrive with",
+      hash.parse("#/new/mesh-0826"), { page: "new", mesh: "mesh-0826" });
+check("a mesh name with a URL-unsafe character survives the round trip",
+      hash.parse(`#/new/${encodeURIComponent("mesh a/b")}`),
+      { page: "new", mesh: "mesh a/b" });
+
+check("the heading's create button links to that route rather than spawning",
+      /go\(`#\/new\/\$\{encodeURIComponent\(row\.value\)\}`\)/.test(src), true);
+check("the catch-all group's create button is refused with a reason",
+      /const joinable = row\.value && row\.value !== "\(no mesh\)"/.test(src) &&
+      /add\.setAttribute\("aria-disabled", "true"\)/.test(src), true);
+check("the refused create button keeps its pointer events, like the +",
+      /#session-list \.session-group-new\.disabled\s*\{/.test(css) &&
+      !/add\.disabled = true/.test(src), true);
+check("the create button is drawn and styled",
+      /add\.className = "session-group-new"/.test(src) &&
+      /#session-list \.session-group-new\s*\{/.test(css), true);
+check("the route opens the form through the mesh-aware opener",
+      /case "new": showView\("new"\); openNewSession\(r\.mesh\);/.test(src), true);
+check("a preset mesh is only applied once the picker has an option for it",
+      /if \(pendingNewMesh && \[\.\.\.mesh\.options\]\.some\(\(o\) => o\.value === pendingNewMesh\)\)/
+        .test(src) && /pendingNewMesh = "";/.test(src), true);
+check("a cold tab fetches the mesh list before presetting",
+      /if \(!\(meshCache \|\| \[\]\)\.some\(\(m\) => m\.name === pendingNewMesh\)\) \{\s*await refreshMeshList\(\);/
+        .test(src), true);
+check("picking the mesh for the operator also re-authorises the role list",
+      /await refreshRoles\(form\.mesh\.value\);/
+        .test(slice("async function openNewSession(",
+                    "/* The create form's mesh")), true);
+
+/* ---------------------------------------------------------------- */
 /* what the page has to be wearing for any of it to show            */
 /* ---------------------------------------------------------------- */
 

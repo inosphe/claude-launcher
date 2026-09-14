@@ -1452,6 +1452,34 @@ async function refreshSessions(options) {
       // leader row's own + does. Drawn even when it cannot: the refusal and
       // its reason are the answer to "why is there no + here".
       if (row.group === "mesh") {
+        // The plain create form, arriving with this mesh already picked. It
+        // is the other half of the question the + answers: the + hangs a
+        // child off the leader and inherits its lineage, worktree base and
+        // enrolment, which is wrong for a session that is only meant to join
+        // the room. This one has no parent to borrow from, so it needs no
+        // leader and is refused only where there is no mesh to join.
+        const joinable = row.value && row.value !== "(no mesh)";
+        const add = document.createElement("button");
+        add.className = "session-group-new";
+        add.type = "button";
+        add.textContent = "⊕";
+        if (joinable) {
+          add.title = `create a new session in mesh ${row.value}` +
+                      " — the Create page with this mesh already picked";
+          add.addEventListener("click", (e) => {
+            e.stopPropagation();   // the heading itself folds; this does not
+            go(`#/new/${encodeURIComponent(row.value)}`);
+          });
+        } else {
+          // Refused the same way the + is: `aria-disabled` keeps the pointer
+          // events a `disabled` control drops, and the reason is the answer
+          // to "why is this one grey".
+          add.setAttribute("aria-disabled", "true");
+          add.classList.add("disabled");
+          add.title = "these sessions are in no mesh, so there is no room to create one in";
+          add.addEventListener("click", (e) => e.stopPropagation());
+        }
+        heading.appendChild(add);
         const target = meshGroupSpawnTarget(row.value);
         const plus = document.createElement("button");
         plus.className = "session-group-plus";
@@ -9895,7 +9923,11 @@ function parseHash(h) {
       ? { page: "flow", name: parts[1] }
       : { page: "mesh", name: parts[1] };
   }
-  if (parts[0] === "new") return { page: "new" };
+  // #/new is the create form; one more segment is the mesh it should arrive
+  // with already picked (the rail's mesh heading links here).
+  if (parts[0] === "new") {
+    return { page: "new", mesh: parts[1] ? decodeURIComponent(parts[1]) : "" };
+  }
   if (parts[0] === "flows") return { page: "flows" };
   if (parts[0] === "window") return { page: "window" };
   // One page, one shell: nothing else about the CLI tab is addressable, so
@@ -9952,7 +9984,7 @@ function route() {
     case "mesh": openMesh(r.name); break;
     case "flow": openFlowTopology(r.name); break;
     case "meshes": showView("meshes"); refreshMeshList(); break;
-    case "new": showView("new"); refreshWorkflowChoices(); break;
+    case "new": showView("new"); openNewSession(r.mesh); break;
     case "flows": showView("flows"); refreshCflow(); break;
     case "window": openWindowPage(); break;
     case "cli": openCli(); break;
@@ -9972,6 +10004,31 @@ function go(hash) {
   else location.hash = hash;
 }
 
+/* The mesh a "#/new/<mesh>" link asked the create form to arrive with, held
+   until the picker has an option for it. Empty once it has been applied, or
+   when the route named no mesh. */
+let pendingNewMesh = "";
+
+/* The create page, opened with a mesh already chosen when the link named one.
+   The picker is filled from the same poll the rail's mesh list comes from, so
+   a link followed in a cold tab can arrive before that answer does — hence
+   the fetch here rather than a bare assignment. Choosing a mesh also changes
+   which roles may be picked, exactly as it does when the operator picks one
+   by hand, so the same refresh runs. */
+async function openNewSession(mesh) {
+  pendingNewMesh = mesh || "";
+  if (pendingNewMesh) {
+    if (!(meshCache || []).some((m) => m.name === pendingNewMesh)) {
+      await refreshMeshList();
+    }
+    syncOnboardPickers();
+    const form = $("new-session");
+    if (form.mesh.value) await refreshRoles(form.mesh.value);
+  }
+  syncOnboardPickers();
+  refreshWorkflowChoices();
+}
+
 /* The create form's mesh and workflow pickers. Both are lists the daemon
    already publishes, so neither is a text box: a mesh that does not exist or
    a workflow that is not declared here would be refused at create time, and
@@ -9984,6 +10041,15 @@ function syncOnboardPickers() {
   mesh.appendChild(new Option("(none)", ""));
   for (const m of meshCache) mesh.appendChild(new Option(m.name, m.name));
   mesh.value = [...mesh.options].some((o) => o.value === keptMesh) ? keptMesh : "";
+  // A #/new/<mesh> link's answer, applied on the first fill that actually
+  // carries that mesh. Assigning a value a select has no option for is
+  // silently dropped, so the request is held rather than spent against a
+  // list that has not arrived; it is cleared once it lands, so the operator
+  // changing the row afterwards is not overruled on the next sync.
+  if (pendingNewMesh && [...mesh.options].some((o) => o.value === pendingNewMesh)) {
+    mesh.value = pendingNewMesh;
+    pendingNewMesh = "";
+  }
   $("new-handle-row").classList.toggle("hidden", !mesh.value);
   // Before a mesh is picked the packaged vocabulary is a useful preview.
   // Submission still requires a mesh for a non-empty role; once one is

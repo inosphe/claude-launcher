@@ -152,6 +152,16 @@ option:disabled { color: #6b7280; }
    on it can be read on hover, which a `disabled` control cannot offer. */
 #session-list .session-group-plus.disabled { color: #444c56; cursor: not-allowed; }
 #session-list .session-group-plus.disabled:hover { color: #444c56; }
+/* The create button beside the +. Same size and same refusal behaviour; the
+   hover colour differs because the two do different things, and a row where
+   both light the same green invites the wrong one to be clicked. */
+#session-list .session-group-new {
+  flex: none; background: none; border: none; color: #6e7681;
+  font-size: 13px; line-height: 1; padding: 0 2px; cursor: pointer;
+}
+#session-list .session-group-new:hover { color: #58a6ff; }
+#session-list .session-group-new.disabled { color: #444c56; cursor: not-allowed; }
+#session-list .session-group-new.disabled:hover { color: #444c56; }
 #session-list .session-group-heading.session-group-level-1 {
   padding-left: 20px; color: #8b949e; background: #131820;
   font-size: 10px; z-index: 1;
