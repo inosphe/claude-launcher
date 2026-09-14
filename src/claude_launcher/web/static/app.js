@@ -1037,7 +1037,8 @@ function railKeysState(name, active) {
 const RAIL_KEYS_CHIP = {
   card: {
     text: "⌨ card",
-    title: "the keyboard is on this card — k ends this session, p pins it, Enter opens it",
+    title: "the keyboard is on this card — k ends this session, p pauses it, "
+      + "a approves its waiting gate, e archives it, f pins it, Enter opens it",
   },
   term: {
     text: "⌨ session",
@@ -1088,12 +1089,125 @@ function restoreRailFocus(name) {
    keystroke does nothing there rather than posting a request the route
    would refuse. */
 function railCardKill(name) {
-  const rec = (typeof sessionsCache === "undefined" ? [] : sessionsCache || [])
-    .find((s) => s.name === name);
+  const rec = railCardRecord(name);
   if (!rec || rec.status === "exited") return false;
   killSession(name);
   return true;
 }
+
+/* The card's own record. Every shortcut below reads the session's state
+   before it posts anything: a key that fires a request the route would
+   refuse spends a round trip to raise a modal the reader did not ask for,
+   and the honest answer to `e` on a running session is that the key does
+   nothing there. */
+function railCardRecord(name) {
+  return (typeof sessionsCache === "undefined" ? [] : sessionsCache || [])
+    .find((s) => s.name === name) || null;
+}
+
+/* `p` on the focused card. The same request the header's pause button makes.
+   Pause ends the process and files the record as paused, so an already
+   exited record (killed or paused alike) has nothing to pause. */
+function railCardPause(name) {
+  const rec = railCardRecord(name);
+  if (!rec || rec.status === "exited") return false;
+  pauseSession(name);
+  return true;
+}
+
+/* `e` on the focused card. Archiving takes an ended record out of the rail's
+   "current" view and keeps it inspectable; the route answers for exited
+   records only, and a record already archived has nowhere further to go. */
+function railCardArchive(name) {
+  const rec = railCardRecord(name);
+  if (!rec || rec.status !== "exited" || rec.archived_at) return false;
+  archiveExitedSession(name);
+  return true;
+}
+
+/* `a` on the focused card: clear the cflow gate the card's run is stopped
+   on, the same press the run page's "Approve gate" button makes. Only the
+   two states a bare approval actually answers — `waiting_approval`, and a
+   `waiting_answer` that reached nobody and carries no branch options. A
+   selection (`waiting_selection`, or an ask that fell to us with options)
+   needs a named option, and there is no honest default for one, so the key
+   does nothing there rather than picking for the reader. */
+function railCardApproveTarget(name) {
+  if (typeof sessCflowRun !== "function") return null;
+  const r = sessCflowRun(name);
+  if (!r) return null;
+  if (r.status === "waiting_approval") return r;
+  if (typeof answerFellToUs === "function" && answerFellToUs(r) &&
+      typeof answerBranchOptions === "function" &&
+      answerBranchOptions(r) === null) return r;
+  return null;
+}
+
+function railCardApprove(name) {
+  const r = railCardApproveTarget(name);
+  if (!r) return false;
+  cflowAction("/api/cflow/approve", { cwd: r.cwd, scope: r.scope });
+  return true;
+}
+
+/* One table, read by both the handler below and the Settings help card, so
+   the page cannot document a key it does not bind. `act` returning false
+   means the card's state denies that verb. */
+const RAIL_CARD_KEYS = [
+  {
+    keys: ["Enter", " ", "Spacebar"],
+    label: "Enter / Space",
+    what: "open the session",
+    when: "any card",
+    act: (name) => {
+      location.hash = "#/s/" + encodeURIComponent(name);
+      return true;
+    },
+  },
+  {
+    keys: ["k"],
+    label: "k",
+    what: "kill the session",
+    when: "a session that has not exited — the first press winds the board "
+      + "down, a second one stops it now",
+    act: (name) => railCardKill(name),
+  },
+  {
+    keys: ["p"],
+    label: "p",
+    what: "pause the session",
+    when: "a session that has not exited — the record stays and resume "
+      + "brings it back",
+    act: (name) => railCardPause(name),
+  },
+  {
+    keys: ["a"],
+    label: "a",
+    what: "approve the run's waiting gate",
+    when: "a card whose cflow run is stopped on an approval; a run waiting "
+      + "on a choice needs a named option and is left alone",
+    act: (name) => railCardApprove(name),
+  },
+  {
+    keys: ["e"],
+    label: "e",
+    what: "archive the record",
+    when: "an exited session that is not already archived",
+    act: (name) => railCardArchive(name),
+  },
+  {
+    keys: ["f"],
+    label: "f",
+    what: "pin or unpin the card",
+    when: "any card, exited ones included — the reader may be waiting for "
+      + "one to come back",
+    act: (name) => {
+      if (typeof toggleSessionPin !== "function") return false;
+      toggleSessionPin(name);
+      return true;
+    },
+  },
+];
 
 /* The card's keys, and only while the card itself holds them: a press that
    reached the ⓘ or the + belongs to that button, and a modifier belongs to
@@ -1103,25 +1217,14 @@ function railCardKill(name) {
 function railCardKey(ev, name) {
   if (!ev || ev.ctrlKey || ev.metaKey || ev.altKey || ev.shiftKey) return false;
   if (ev.target !== ev.currentTarget) return false;
-  if (ev.key === "Enter" || ev.key === " " || ev.key === "Spacebar") {
-    if (ev.preventDefault) ev.preventDefault();
-    location.hash = "#/s/" + encodeURIComponent(name);
-    return true;
-  }
-  if (ev.key === "k" || ev.key === "K") {
-    if (ev.preventDefault) ev.preventDefault();
-    return railCardKill(name);
-  }
-  // `p` pins the card's session (or lets it go). An exited record can be
-  // pinned -- the reader may be waiting for it to come back -- so unlike
-  // `k` this has no state it refuses on.
-  if (ev.key === "p" || ev.key === "P") {
-    if (ev.preventDefault) ev.preventDefault();
-    if (typeof toggleSessionPin !== "function") return false;
-    toggleSessionPin(name);
-    return true;
-  }
-  return false;
+  // Upper case reaches here only through caps lock -- a shifted press was
+  // returned above -- and the reader meant the same verb either way.
+  const raw = String(ev.key || "");
+  const pressed = raw.length === 1 ? raw.toLowerCase() : raw;
+  const binding = RAIL_CARD_KEYS.find((b) => b.keys.includes(pressed));
+  if (!binding) return false;
+  if (ev.preventDefault) ev.preventDefault();
+  return binding.act(name);
 }
 
 /* Bound on the document rather than per row: the rows are rebuilt by every
@@ -6299,10 +6402,12 @@ if ($("term-pin")) {
    two-step — a pause is what somebody reaches for when a session is looping
    or racing another, and the point is that it stops now. The record stays
    and reads `paused`; resume (the header's or the bulk one) brings it back. */
-async function pauseCurrentSession() {
-  if (!currentName) return;
-  const name = currentName;
-  const btn = $("term-pause");
+async function pauseSession(name) {
+  if (!name) return;
+  // The header button belongs to the attached session, so it is disabled
+  // only while that is the one being paused; the rail's `p` names a card
+  // instead, and that card need not be the session on screen.
+  const btn = name === currentName ? $("term-pause") : null;
   if (btn) btn.disabled = true;
   try {
     const resp = await api(
@@ -6328,6 +6433,8 @@ async function pauseCurrentSession() {
     await refreshSessions({ state: "current" });
   }
 }
+
+async function pauseCurrentSession() { await pauseSession(currentName); }
 
 if ($("term-pause")) $("term-pause").addEventListener("click", pauseCurrentSession);
 
@@ -12992,6 +13099,8 @@ function renderWorkspaces() {
     "send a session it spawns, unless spawn.allow_workspace is turned off."
   ));
 
+  view.appendChild(keyHelpCard());
+
   view.appendChild(railStaleCard());
 
   view.appendChild(wsAddCard());
@@ -13079,6 +13188,56 @@ const RAIL_STALE_LABELS = { seen: "Seen", typed: "Typed", moved: "Moved" };
 /* Minutes in the box, seconds in railStale — the rail's own unit is seconds
    (it is compared against Date.now() gaps), but nobody sets a threshold to
    the second, so the card converts at its two edges and nowhere else. */
+/* The keys the page binds that are not on a button anywhere: the rail card's
+   verbs and the two that move between them. Nothing here is rebindable, so
+   the section is a reference and not a form.
+
+   The rail rows are drawn from RAIL_CARD_KEYS itself rather than retyped, so
+   a binding that is added, dropped or moved cannot leave this table
+   describing the page as it used to be. */
+const KEY_HELP_EXTRA = [
+  {
+    label: "Tab / Shift+Tab",
+    what: "move between rail cards",
+    when: "the keyboard is on the rail — the ⌨ card chip says which row has it",
+  },
+  {
+    label: "Escape",
+    what: "close the open dialog",
+    when: "a spawn form or a confirmation is up",
+  },
+];
+
+function keyHelpCard() {
+  const card = el("section", "key-help");
+  card.appendChild(el("h3", null, "Help — keyboard shortcuts"));
+  card.appendChild(el(
+    "p", "wf-note",
+    "Rail card keys act on the card the keyboard is on, which need not be " +
+    "the session on screen: focus a row with Tab or a click, then press. " +
+    "A key whose condition the card does not meet does nothing. " +
+    "Shortcuts are fixed and cannot be rebound."
+  ));
+  const groups = [
+    ["On a focused rail card", RAIL_CARD_KEYS.map((b) => ({
+      label: b.label, what: b.what, when: b.when,
+    }))],
+    ["Elsewhere on the page", KEY_HELP_EXTRA],
+  ];
+  for (const [heading, rows] of groups) {
+    card.appendChild(el("h4", "key-help-group", heading));
+    for (const r of rows) {
+      const row = el("div", "key-help-row");
+      row.appendChild(el("kbd", "key-help-key", r.label));
+      const text = el("span", "key-help-text", r.what);
+      text.appendChild(el("span", "key-help-when", r.when));
+      row.appendChild(text);
+      card.appendChild(row);
+    }
+  }
+  return card;
+}
+
 function railStaleCard() {
   const card = el("section", "rail-stale-settings");
   card.appendChild(el("h3", null, "Rail attention thresholds"));
