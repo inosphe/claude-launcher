@@ -1356,3 +1356,35 @@ def test_the_written_issue_travels_from_both_creation_commands(monkeypatch, tmp_
     # left off, it is not sent at all
     assert cli.main(["spawn", "--as", "kid2", "--task", "go"]) == 0
     assert "issue_text" not in reached["body"]
+
+
+# --------------------------------------------------------------------------- #
+# the daemon's own exemption from the count limits
+# --------------------------------------------------------------------------- #
+def test_exempt_depth_lifts_both_count_limits_for_one_request():
+    """The PR wizard's monitor child: a watcher at the bottom of a full
+    tree is not the runaway nesting the limits exist for, so the daemon may
+    say so -- for that one request, and only as a keyword of its own."""
+    policy = _policy(max_depth=2, max_children=1)
+    warnings: list = []
+    child = spawn.check(
+        policy, {}, parent=PARENT, depth=2, children=1,
+        warnings=warnings, exempt_depth=True,
+    )
+    assert child["harness"] == "py"      # inherited as any child would be
+    assert warnings == []                # and not even the soft cap speaks
+
+
+def test_exempt_depth_is_never_read_from_the_request():
+    """A request body carrying ``exempt_depth`` is a client trying to talk
+    its way past the tree limits; the key is ignored like any unknown one."""
+    policy = _policy(max_depth=2)
+    with pytest.raises(spawn.SpawnDenied) as exc:
+        spawn.check(policy, {"exempt_depth": True}, parent=PARENT, depth=2, children=0)
+    assert "max_depth" in str(exc.value)
+
+
+def test_exempt_depth_does_not_switch_spawning_back_on():
+    policy = _policy(enabled=False)
+    with pytest.raises(spawn.SpawnDenied, match="switched off"):
+        spawn.check(policy, {}, parent=PARENT, depth=0, children=0, exempt_depth=True)
