@@ -10,8 +10,10 @@ logs recovers zero rows, because successive grids share no prefix or suffix to
 exploit. The content simply is not in the pipe.
 
 It is on disk, though, in the form each harness keeps: Claude's conversation
-jsonl under ``<config>/projects/<slug>/<id>.jsonl`` or Codex's rollout jsonl
-under its profile home. These files are append-only, hold the whole
+jsonl under ``<config>/projects/<slug>/<id>.jsonl``, Codex's rollout jsonl
+under its profile home, or pi's session jsonl at the path claunch itself named
+at launch (``type: message`` records whose ``message.role`` is ``user``,
+``assistant`` or ``toolResult``). These files are append-only, hold the whole
 conversation rather than the last screenful, survive every daemon
 restart, and are already located for other features (:mod:`briefing`,
 :mod:`ctxsize`). This module turns it into pages a browser can scroll natively
@@ -32,19 +34,27 @@ from __future__ import annotations
 
 import json
 import logging
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from .. import atomic
-from . import paths
+from . import ctxsize, paths
 from .briefing import locate_transcript
+from .harness import PI_HARNESS
 
 log = logging.getLogger(__name__)
 
 #: Record types that carry conversation. The rest of the jsonl is harness
 #: bookkeeping — mode flips, titles, queue operations, usage snapshots — which
-#: is noise to a reader and would triple the page for nothing.
-CONTENT_TYPES = ("user", "assistant", "response_item")
+#: is noise to a reader and would triple the page for nothing. ``message`` is
+#: pi's one content type (its ``session``/``model_change`` records carry no
+#: conversation); claude never writes a top-level ``message`` type, so the
+#: kind alone tells the two apart.
+CONTENT_TYPES = ("user", "assistant", "response_item", "message")
+#: The pi roles a reader is shown. ``toolResult`` is a record of its own in
+#: pi's file (claude folds the same thing into a user-role record).
+PI_ROLES = frozenset({"user", "assistant", "toolResult"})
 CODEX_CONTENT_TYPES = frozenset(
     {
         "message",
@@ -160,6 +170,10 @@ def _peek_type(raw: bytes) -> str:
     if not isinstance(doc, dict):
         return ""
     kind = doc.get("type") or ""
+    if kind == "message":
+        msg = doc.get("message")
+        role = msg.get("role") if isinstance(msg, dict) else None
+        return kind if role in PI_ROLES else ""
     if kind != "response_item":
         return kind
     payload = doc.get("payload")
@@ -243,6 +257,8 @@ def _project(raw: bytes, seq: int) -> Optional[Dict[str, Any]]:
         return None
     if doc.get("type") == "response_item":
         return _project_codex(doc, seq)
+    if doc.get("type") == "message":
+        return _project_pi(doc, seq)
     msg = doc.get("message")
     content = msg.get("content") if isinstance(msg, dict) else None
     blocks = _blocks(content)
@@ -304,6 +320,101 @@ def _project_codex(doc: dict, seq: int) -> Optional[Dict[str, Any]]:
     }
 
 
+def _pi_timestamp(value: Any) -> str:
+    """Pi stamps records with epoch milliseconds; the page carries ISO-8601
+    like the other harnesses, so the pane formats every record the same way."""
+    try:
+        ms = int(value)
+    except (TypeError, ValueError):
+        return str(value or "")
+    try:
+        when = datetime.fromtimestamp(ms / 1000, tz=timezone.utc)
+    except (OverflowError, OSError, ValueError):
+        return ""
+    return when.isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+
+def _project_pi(doc: dict, seq: int) -> Optional[Dict[str, Any]]:
+    """Project one pi ``message`` record into the shared UI shape.
+
+    Pi's file is the API's shape with its own spelling: a tool call is a
+    ``toolCall`` block (``arguments`` already an object), and a tool's output
+    is a record of its own with ``role: toolResult``. The page shows the
+    output as a user-role record holding one ``tool_result`` block — the
+    shape claude writes for the same event, which the pane already reads
+    with the assistant's exchange rather than as the user talking.
+    """
+    msg = doc.get("message")
+    if not isinstance(msg, dict):
+        return None
+    role = str(msg.get("role") or "")
+    if role not in PI_ROLES:
+        return None
+    content = msg.get("content")
+    blocks: List[Dict[str, Any]] = []
+    if role == "toolResult":
+        body = content
+        if isinstance(body, list):
+            body = "\n".join(
+                str(b.get("text") or "")
+                for b in body
+                if isinstance(b, dict) and b.get("type") == "text"
+            )
+        blocks.append({
+            "type": "tool_result",
+            "id": str(msg.get("toolCallId") or ""),
+            "error": bool(msg.get("isError")),
+            **_clip("" if body is None else str(body)),
+        })
+        role = "user"
+    elif isinstance(content, str):
+        if content.strip():
+            blocks.append({"type": "text", "text": content})
+    elif isinstance(content, list):
+        for block in content:
+            if not isinstance(block, dict):
+                continue
+            kind = block.get("type")
+            if kind == "text":
+                text = str(block.get("text") or "")
+                if text.strip():
+                    blocks.append({"type": "text", "text": text})
+            elif kind == "thinking":
+                text = str(block.get("thinking") or "")
+                if text.strip():
+                    blocks.append({"type": "thinking", "text": text})
+            elif kind == "toolCall":
+                blocks.append({
+                    "type": "tool_use",
+                    "name": str(block.get("name") or "?"),
+                    "id": str(block.get("id") or ""),
+                    **_clip(json.dumps(block.get("arguments"),
+                                       ensure_ascii=False, default=str)),
+                })
+    if not blocks:
+        return None
+    return {
+        "seq": seq,
+        "role": role,
+        "ts": _pi_timestamp(doc.get("timestamp")),
+        "sidechain": False,
+        "blocks": blocks,
+    }
+
+
+def _source_of(sdef) -> Optional[Path]:
+    """The file this session's conversation is in, or ``None``.
+
+    Pi's file is not found by scanning: claunch named it at launch, and
+    :func:`ctxsize.transcript_of` already computes that path (and caches the
+    lookup) for the context gauge. Every other harness goes through the
+    briefing's locator, as before.
+    """
+    if getattr(sdef, "harness", None) == PI_HARNESS:
+        return ctxsize.transcript_of(sdef)
+    return locate_transcript(sdef)
+
+
 # --------------------------------------------------------------------------- #
 # paging
 # --------------------------------------------------------------------------- #
@@ -322,7 +433,7 @@ def page(
     anything, so the scroller knows when to stop asking.
     """
     limit = max(1, min(int(limit or PAGE_DEFAULT), PAGE_MAX))
-    source = locate_transcript(sdef)
+    source = _source_of(sdef)
     if source is None:
         return {"records": [], "has_more": False, "total": 0, "source": None}
 

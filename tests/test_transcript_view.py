@@ -294,3 +294,149 @@ def test_a_corrupt_line_costs_only_itself(transcript):
     ])
     texts = [r["blocks"][0]["text"] for r in tv.page("s1", FakeDef())["records"]]
     assert texts == ["before", "after"]
+
+
+# --------------------------------------------------------------------------- #
+# pi
+# --------------------------------------------------------------------------- #
+#: 2026-09-11T12:46:55.993Z, as pi stamps it: epoch milliseconds.
+PI_MS = 1789130815993
+
+
+def _pi(role, content, **msg):
+    """One pi session record — ``type: message`` around an API-shaped body."""
+    doc = {
+        "type": "message",
+        "id": "r1",
+        "parentId": None,
+        "timestamp": PI_MS,
+        "message": {"role": role, "content": content, "timestamp": PI_MS, **msg},
+    }
+    return json.dumps(doc, ensure_ascii=False) + "\n"
+
+
+def _pi_noise(kind):
+    return json.dumps({"type": kind, "id": "x", "timestamp": PI_MS}) + "\n"
+
+
+class PiDef(FakeDef):
+    harness = "pi"
+
+
+@pytest.fixture
+def pi_transcript(tmp_path, monkeypatch):
+    """A jsonl in pi's shape, reached the way a pi session's is: through the
+    context gauge's locator, never the briefing's scan."""
+    src = tmp_path / "pi.jsonl"
+    sessions = tmp_path / "sessions"
+
+    def no_scan(sdef):  # pragma: no cover - a hit here is the failure
+        raise AssertionError("a pi session is not located by scanning")
+
+    monkeypatch.setattr(tv, "locate_transcript", no_scan)
+    monkeypatch.setattr(tv.ctxsize, "transcript_of", lambda sdef: src)
+    monkeypatch.setattr(tv.paths, "session_dir", lambda name: sessions / name)
+    return src
+
+
+def test_pi_conversation_pages_in_order_and_drops_its_bookkeeping(pi_transcript):
+    """The probe's file (claunch-e7ow): session/model/thinking-level records
+    first, then user, assistant (text + toolCall), toolResult, assistant."""
+    _write(pi_transcript, [
+        _pi_noise("session"),
+        _pi_noise("model_change"),
+        _pi_noise("thinking_level_change"),
+        _pi("user", [{"type": "text", "text": "list the files"}]),
+        _pi("assistant", [
+            {"type": "text", "text": "OK"},
+            {"type": "toolCall", "id": "call_00", "name": "bash",
+             "arguments": {"command": "ls -la"}},
+        ], model="deepseek-flash"),
+        _pi("toolResult", [{"type": "text", "text": "total 232"}],
+            toolCallId="call_00", toolName="bash", isError=False),
+        _pi("assistant", [
+            {"type": "thinking", "thinking": "done", "thinkingSignature": "s"},
+            {"type": "text", "text": "two files"},
+        ]),
+    ])
+    page = tv.page("p1", PiDef())
+    assert page["total"] == 4, "the three bookkeeping records stayed out"
+    assert [r["role"] for r in page["records"]] == [
+        "user", "assistant", "user", "assistant",
+    ]
+    user, asst, result, last = page["records"]
+    assert user["blocks"] == [{"type": "text", "text": "list the files"}]
+    assert [b["type"] for b in asst["blocks"]] == ["text", "tool_use"]
+    assert asst["blocks"][1]["name"] == "bash"
+    assert asst["blocks"][1]["id"] == "call_00"
+    assert json.loads(asst["blocks"][1]["text"]) == {"command": "ls -la"}
+    # The tool's output is a record of its own in pi's file; the page hands it
+    # over in the shape claude writes for the same event — a user-role record
+    # of tool_result blocks — which the pane reads with the assistant.
+    assert result["blocks"] == [{
+        "type": "tool_result", "id": "call_00", "error": False,
+        "text": "total 232", "clipped": False,
+    }]
+    assert [b["type"] for b in last["blocks"]] == ["thinking", "text"]
+    assert last["sidechain"] is False
+
+
+def test_pi_timestamps_arrive_as_iso_like_every_other_harness(pi_transcript):
+    """Pi stamps epoch milliseconds; the pane's clock parses ISO-8601."""
+    _write(pi_transcript, [_pi("user", [{"type": "text", "text": "hi"}])])
+    rec = tv.page("p1", PiDef())["records"][0]
+    assert rec["ts"] == "2026-09-11T12:46:55.993Z"
+    assert tv._pi_timestamp("not-a-number") == "not-a-number"
+    assert tv._pi_timestamp(None) == ""
+
+
+def test_pi_tool_output_is_clipped_and_keeps_its_error_flag(pi_transcript):
+    big = "o" * (tv.TOOL_CLIP + 500)
+    _write(pi_transcript, [
+        _pi("toolResult", [{"type": "text", "text": big},
+                           {"type": "image", "data": "..."}],
+            toolCallId="call_07", toolName="read", isError=True),
+    ])
+    block = tv.page("p1", PiDef())["records"][0]["blocks"][0]
+    assert block["type"] == "tool_result"
+    assert block["error"] is True
+    assert block["clipped"] is True and block["full"] == len(big)
+    assert len(block["text"]) == tv.TOOL_CLIP
+
+
+def test_a_pi_record_with_nothing_readable_is_not_a_record(pi_transcript):
+    """A role the reader is not shown, or a body that is all whitespace."""
+    _write(pi_transcript, [
+        _pi("system", [{"type": "text", "text": "hidden"}]),
+        _pi("assistant", [{"type": "thinking", "thinking": "   "}]),
+        _pi("user", "   "),
+        _pi("user", "kept"),
+    ])
+    page = tv.page("p1", PiDef())
+    assert page["total"] == 3, "the index keeps the roles it shows"
+    assert [r["blocks"][0]["text"] for r in page["records"]] == ["kept"]
+
+
+def test_a_pi_session_without_a_file_yet_is_an_empty_page(pi_transcript, monkeypatch):
+    """The path is a function of (home, cwd, id); before pi's first write it
+    simply is not there, and the pane must not fail."""
+    monkeypatch.setattr(tv.ctxsize, "transcript_of", lambda sdef: None)
+    assert tv.page("p1", PiDef()) == {
+        "records": [], "has_more": False, "total": 0, "source": None,
+    }
+
+
+def test_a_claude_record_mentioning_a_pi_message_type_is_still_claude(transcript):
+    """``"type":"message"`` inside a tool result's body must not turn a claude
+    user record into a pi projection — the parsed top-level type decides."""
+    _write(transcript, [
+        _rec("user", [{
+            "type": "tool_result", "tool_use_id": "t1",
+            "content": 'a pi file line: {"type":"message","message":{"role":"user"}}',
+        }]),
+        _rec("assistant", [{"type": "text", "text": "seen"}]),
+    ])
+    page = tv.page("s1", FakeDef())
+    assert [r["role"] for r in page["records"]] == ["user", "assistant"]
+    assert page["records"][0]["blocks"][0]["type"] == "tool_result"
+    assert page["records"][0]["blocks"][0]["id"] == "t1"
