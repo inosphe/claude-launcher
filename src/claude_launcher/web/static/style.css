@@ -3911,3 +3911,14 @@ a.window-owner:hover { color: #79c0ff; text-decoration: underline; }
   .reports-open { flex: 1 1 100%; }
   .reports-order, .reports-board { margin-left: 0; }
 }
+
+/* ---- the PR wizard (detail head "Open PR"): the spawn modal's rows, plus
+   the facts line and the result view that replaces the form. ---- */
+.sess-pr-facts { color: #c9d1d9; font-size: 12.5px; margin: 2px 0 8px; line-height: 1.4; }
+.sess-pr-result { font-size: 13px; }
+.sess-pr-steps { list-style: none; padding: 0; margin: 0 0 10px; }
+.sess-pr-steps li { padding: 3px 0; font-family: var(--mono, monospace); font-size: 12px; }
+.sess-pr-steps li.ok { color: #3fb950; }
+.sess-pr-steps li.failed { color: #f85149; }
+.sess-pr-link { display: inline-block; margin: 4px 0 8px; color: #58a6ff; word-break: break-all; }
+.sess-pr-note { color: #7d8590; font-size: 12px; margin: 4px 0; }
