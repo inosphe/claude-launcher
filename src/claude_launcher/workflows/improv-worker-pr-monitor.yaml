@@ -1,0 +1,206 @@
+# improv-worker-pr-monitor — PR 하나를 지켜보고 부모 세션에 보고하는 자식 런.
+#
+# 누가 이 런을 도는가: 세션 상세 패널의 「Open PR」 위저드(daemon/api.py의
+# h_session_pr, 엔진 prflow.py)가 두 번째 체크박스(monitor)로 세우는 자식
+# 세션이다. 위저드는 부모 세션의 디렉터리를 새 원격 브랜치로 push하고 PR을
+# 열었을 뿐 부모의 checkout은 건드리지 않았다 — 그 PR이 그 뒤 어떻게 되는지
+# (검사·리뷰·mergeable·상태의 변화, 충돌, 머지)를 부모 대신 지켜보고 부모에게
+# 알리는 것이 이 런의 전부다.
+#
+# 보고 전용(report-only)이다. 이 런은 브랜치를 고치지 않고, 리베이스하지
+# 않고, PR을 머지하거나 닫지 않고, 어떤 git 쓰기도 하지 않는다 — 부모와 같은
+# 디렉터리에서 돌기 때문에 checkout을 바꾸는 명령 하나가 부모의 작업 트리를
+# 바꾼다. 읽기는 `gh pr view`(그리고 필요하면 `git log`·`git fetch`가 아닌
+# `gh api`) 뿐이다. 충돌(mergeable == CONFLICTING)이 나면 푸는 것은 부모의
+# 몫이고, 이 런은 그 사실을 부모에게 ask로 올린다.
+#
+# 다른 워크플로와의 관계:
+#   · 부모가 improv-worker / improv-worker-remote / improv-leader 런을 돌고
+#     있어도 이 런의 fyi는 정보이고, 부모 런의 게이트(await-landing·landed·
+#     통합 큐)는 그대로 돈다. 리더의 통합 큐는 `LANDING REQUEST … pr:` 행만
+#     읽으므로 이 런은 그 마커를 쓰지 않는다 — 위저드로 연 PR을 리더 큐에
+#     올리는 것은 별도 옵션(후속)이다.
+#   · 어떤 워크플로의 default_child_cflow도 이것을 가리키지 않고, 위저드의
+#     role=worker 자동 선택도 정본 improv-worker의 것이다(default_role 없음).
+#     spawn의 workflow: improv-worker-pr-monitor 로만 붙는다.
+#   · 사실은 런의 context(JSON)로 받는다: 패키지 워크플로의 `inputs:`는
+#     kind: subflow 정의에만 허용되므로(cflow/model.py) 위저드가 세우는 이
+#     단독 런은 context 한 줄에 pr_url · branch · tip · remote · repo · base ·
+#     parent · issue 를 싣는다. 위저드가 항상 채우므로 사람이 손으로 세울 때만
+#     같은 모양의 JSON을 context에 적는다.
+#
+# 왜 timer인가: 데몬이 스스로 런을 옮기는 제어점이 timer라서, 세션이 한
+# 턴도 쓰지 않고 기다렸다가 fire마다 check로 돌아온다. every 300초 × max 576
+# fire ≈ 48시간 — 그 예산이 다하면 after: wrapup 으로 닫는다. landed는
+# checklist가 아니라 에이전트 스텝이다: checklist 항목의 명령은 context를 볼
+# 수 없어 PR url을 알 길이 없고(이 저장소의 tools/ 스크립트에 기대는 것은
+# 모든 저장소에 배포되는 패키지 워크플로가 할 수 없다), `gh pr view`로 읽은
+# state == MERGED 와 mergeCommit.oid 를 보고에 남기는 것이 그 자리를 대신한다.
+#
+# 패키지 워크플로는 레이어 해석 없이 단독으로 로드되어야 한다는 불변식이
+# 있어서 extends를 쓰지 않는다. verify도 없다 — 이 런은 아무것도 만들지 않으므로
+# 잴 것도 없다. 종료는 errand와 같다: end에 닿아 done이 되면 데몬의
+# kill-on-end(cflow_kill_on_end, 기본 켜짐)가 세션을 종료한다. **세션을 죽이는
+# 명령은 이 런이 실행하지 않는다.**
+name: improv-worker-pr-monitor
+description: >-
+  PR 위저드가 세우는 자식 런: context에 실린 PR 하나를 gh로 지켜보며
+  검사·리뷰·mergeable·상태의 변화만 부모 세션에 fyi로 알리고, 충돌이면
+  부모에게 ask로 올리며(브랜치는 손대지 않는다), 머지되면 이슈에 코멘트를
+  남기고 부모에게 최종 보고한 뒤 끝난다. 보고 전용 — git 쓰기·머지·닫기를
+  하지 않는다. spawn에서 workflow: improv-worker-pr-monitor 로 지정할 때만
+  붙는다.
+start: intake
+
+# timer fire 하나가 방문 하나다: watch·check 각각 fire 수(576)만큼 방문하므로
+# 그 위로 둔다. 기본 25는 이 런에 맞지 않는다.
+max_visits: 640
+
+steps:
+  intake:
+    title: 감시 대상 확정 (PR 하나)
+    instructions: |
+      이 런의 context는 JSON 한 줄이다: `pr_url`, `branch`(원격 브랜치 이름),
+      `tip`(push된 커밋), `remote`, `repo`(host/owner/name), `base`,
+      `parent`(보고 수신 세션), `issue`(있으면 보드 이슈 id). status 툴의
+      `context`에서 읽는다 — 기억이나 오프닝 태스크의 요약이 아니라 그 JSON이
+      정본이다. 비어 있거나 `pr_url`이 없으면 그 사실을 보고하고 next로
+      wrapup까지 가서 끝낸다(지켜볼 것이 없는 런은 도는 것이 손해다).
+
+      확정하는 것은 셋이다:
+      1. PR이 실제로 있다 — `gh pr view <pr_url> --json
+         number,state,isDraft,mergeable,reviewDecision,headRefOid,statusCheckRollup,url`
+         (사설 호스트면 `-R <repo>`를 붙인다; gh는 GH_ENTERPRISE_TOKEN 또는
+         `gh auth login --hostname`으로 이미 인증되어 있어야 하고, 이 세션은
+         대화형 로그인을 할 수 없다 — 안 되면 그 사실을 부모에게 fyi로
+         보내고 wrapup으로 간다).
+      2. headRefOid가 context의 `tip`과 같다 — 다르면 누가 브랜치를 더
+         밀었다는 뜻이고, 그것도 보고 대상이다(고치지 않는다).
+      3. 기준선을 세션 스크래치 파일에 적는다(CLAUDE.md의 규칙대로
+         세션별 경로에 — 저장소 트리 안이나 `/tmp/<고정이름>`이 아니다):
+         state · isDraft · mergeable · reviewDecision · headRefOid ·
+         statusCheckRollup의 (name, conclusion) 목록. 다음 check가 이 값과
+         비교해 델타만 보낸다.
+
+      부모에게 fyi 한 통을 보낸다(메시에 속해 있을 때: `claunch mesh send
+      <mesh> <parent> --type fyi "..."`; 메시가 없으면 `claunch send
+      <parent> "..."`): 네 줄 안에 PR url·번호·state·mergeable·검사 요약과
+      「이 런은 보고 전용이고 브랜치를 손대지 않는다」 한 줄. 메시지 id를
+      보고에 남긴다.
+
+      **이 디렉터리는 부모의 작업 트리다.** checkout·branch·rebase·stash·
+      commit·push — git 쓰기는 어떤 것도 하지 않는다. 이 런의 쓰기는
+      스크래치 파일과 보드 코멘트뿐이다.
+    done_when: |
+      context의 PR이 gh로 확인되었고(번호·state·headRefOid), tip 일치 여부와
+      기준선 값이 보고에 있으며, 부모에게 보낸 fyi의 메시지 id가 보고에
+      있다. PR이 없거나 gh가 닿지 않으면 그 사실이 보고에 있다.
+    next: watch
+
+  watch:
+    title: 감시 대기 (데몬이 timer로 되돌린다)
+    # 데몬이 every초마다 then(check)으로 옮기고, max번 뒤에는 after(wrapup)로
+    # 닫는다. 이 스텝에 들어온 에이전트가 할 일은 턴을 끝내는 것뿐이다.
+    timer:
+      every: 300
+      max: 576
+      then: check
+      after: wrapup
+    instructions: |
+      기다린다. 데몬이 timer로 이 런을 check로 옮기며, 그때 다시 들어온다.
+      손으로 폴링하지 않고 턴을 끝낸다. 부모가 그 사이에 메시지로 무엇을
+      묻거나(예: 「지금 상태는?」) 감시를 그만두라고 하면 그 답만 보내고
+      다시 턴을 끝낸다 — 그만두라는 지시면 한 줄 report 뒤 next로 wrapup까지
+      간다.
+    next: wrapup
+
+  check:
+    title: 상태 판정 (델타만 보낸다)
+    select:
+      prompt: |
+        `gh pr view <pr_url> --json
+        number,state,isDraft,mergeable,mergeStateStatus,reviewDecision,headRefOid,mergeCommit,statusCheckRollup,url`
+        을 다시 읽고 스크래치의 기준선과 비교한다. 바뀐 축만 부모에게 fyi
+        한 통으로 보낸다(네 줄 안: PR 번호, 바뀐 축과 새 값, headRefOid가
+        움직였으면 그 사실). 바뀐 것이 없으면 아무것도 보내지 않는다 —
+        조용한 fire는 부모의 컨텍스트를 쓰지 않는 것이 값이다. 기준선을
+        새 값으로 갱신하고, 무엇을 읽어 무엇이 바뀌었는지를 reason에
+        적는다. 그 뒤 state로 가른다:
+        · MERGED → merged
+        · CLOSED(머지 없이 닫힘) → closed
+        · OPEN이고 mergeable == CONFLICTING → conflict
+        · 그 밖(OPEN) → keep-watching
+        gh가 실패하면(네트워크·인증) keep-watching이다 — 실패 횟수를
+        스크래치에 세고, 연속 6회(30분)면 부모에게 fyi로 알린 뒤 계속
+        기다린다.
+      chooser: agent
+      options:
+        keep-watching:
+          description: PR이 아직 OPEN이고 충돌이 아니다 — watch로 돌아가 다음 fire를 기다린다
+          next: watch
+        conflict:
+          description: mergeable이 CONFLICTING이다 — 부모에게 ask로 올린다(푸는 것은 부모 몫)
+          next: conflict
+        merged:
+          description: state가 MERGED다 — 머지 커밋을 확인하러 간다
+          next: landed
+        closed:
+          description: 머지 없이 CLOSED됐다 — 정리하고 끝낸다
+          next: wrapup
+
+  conflict:
+    title: 충돌 통지 (부모에게 ask — 브랜치는 손대지 않는다)
+    instructions: |
+      PR이 base와 충돌한다(mergeable == CONFLICTING). 이 런은 브랜치를
+      리베이스하거나 고치지 않는다 — 이 디렉터리는 부모의 작업 트리이고,
+      충돌을 푸는 것은 부모(또는 부모가 시키는 세션)의 일이다.
+
+      부모에게 ask 한 통을 보낸다(메시 안: `claunch mesh send <mesh> <parent>
+      --type ask "..."`; 메시 밖이면 `claunch send`): PR url·번호, base, headRefOid,
+      「CONFLICTING — 리베이스/재push는 부모 몫, 이 런은 계속 지켜본다」,
+      그리고 물음 하나 — 계속 지켜볼 것인가(같은 PR에 새 tip이 push되면
+      그것을 따라간다), 아니면 감시를 끝낼 것인가. 답을 기다리며 턴을
+      막지 않는다: 메시지 id를 보고에 남기고 next로 watch로 돌아간다. 답이
+      「끝내라」로 오면 watch에서 그 지시를 받아 wrapup으로 간다. 같은
+      충돌을 두 번 묻지 않는다 — 스크래치에 「conflict asked @ <headRefOid>」
+      를 적고, headRefOid가 바뀌어 다시 CONFLICTING이 될 때만 다시 묻는다.
+    done_when: |
+      부모에게 보낸 ask의 메시지 id와 그때의 headRefOid가 보고에 있고,
+      스크래치에 같은 표시가 있다. 브랜치는 건드리지 않았다.
+    next: watch
+
+  landed:
+    title: 착지 확인 (state == MERGED)
+    instructions: |
+      `gh pr view <pr_url> --json state,mergeCommit,mergedAt,mergedBy,url`로
+      state가 MERGED인 것과 mergeCommit.oid를 읽는다. 그 해시가 착지의
+      증거다 — 로컬 저장소에서 fetch해 확인하지 않는다(이 디렉터리는
+      부모의 것이고, fetch는 부모의 원격 추적 참조를 움직인다). state가
+      MERGED가 아니면(잘못 가른 것이다) 그 사실을 보고하고 next로 wrapup으로
+      간다 — wrapup이 상태 그대로를 부모에게 전한다.
+    done_when: |
+      state == MERGED 와 mergeCommit.oid(그리고 mergedAt·mergedBy가 있으면
+      그것)가 보고에 있다.
+    next: wrapup
+
+  wrapup:
+    title: 최종 보고 (이슈 코멘트 + 부모)
+    instructions: |
+      마지막으로 읽은 PR 상태를 기준으로 정리한다. 둘을 남긴다:
+      1. 보드(context에 `issue`가 있고 보드에 닿을 때): `claunch beads
+         comments add <issue> --message "PR MONITOR: <state> pr: <url>
+         tip: <headRefOid>[ merge: <mergeCommit.oid>] (monitor <세션>)"`.
+         한 줄이다 — 증거는 (축, 값)이고 산문이 아니다. LANDING REQUEST
+         마커나 in_review 전이는 쓰지 않는다: 그것은 부모 런의 것이다.
+         이슈가 없으면 이 항목은 건너뛰고 그 사실을 보고에 적는다.
+      2. 부모에게 fyi 한 통: PR 번호·최종 state·(머지면) 머지 해시·
+         (닫힘이면) 닫힘·(timer 예산 소진이면) 「48시간 예산 소진, 마지막
+         state」 — 네 줄 안. 메시지 id를 보고에 남긴다.
+      그 뒤 같은 턴에서 next로 end까지 간다 — 런이 done이 되면 데몬이 이
+      세션을 종료한다(kill-on-end). **세션을 죽이는 명령은 실행하지
+      않는다.** 부모가 이 세션을 살려 두라고 명시적으로 말했을 때만
+      `claunch keep-alive $CLAUNCH_SESSION`을 세운다.
+    done_when: |
+      최종 state와 (있다면) 머지 해시, 이슈 코멘트를 남겼는지(또는 이슈가
+      없었는지), 부모에게 보낸 fyi의 메시지 id가 보고에 있다.
+    next: end

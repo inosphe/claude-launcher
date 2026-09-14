@@ -152,6 +152,7 @@ const PREVIEW = {
   ],
   remote: "origin", base: "develop", branch_default: "s1-pr-20260914-2041",
   gh: { installed: true }, auth: {}, blockers: [],
+  monitor_workflow: "improv-worker-pr-monitor", monitor_available: true,
 };
 
 async function main() {
@@ -193,6 +194,11 @@ async function main() {
   /* ---- the preview lands: defaults, facts, and the clean-tree rule ---- */
   const ready = ctx.prApplyPreview(ui, PREVIEW);
   check("a preview without blockers is ready", ready === true);
+  check("the preview offers the monitor", ui.monitorAvailable === true && ui.monitor.disabled === false);
+  const noMon = ctx.buildPrForm("s1").ui;
+  ctx.prApplyPreview(noMon, { ...PREVIEW, monitor_available: false });
+  check("...and withholds it where the workflow is not declared",
+    noMon.monitorAvailable === false && noMon.monitor.disabled === true && noMon.monitorRow.title.includes("cflow update"));
   check("the branch default is the daemon's", ui.branch.value === "s1-pr-20260914-2041");
   check("the base default is the daemon's", ui.base.value === "develop");
   check("the title is session-first", ui.title.value === "s1: fix the thing");
@@ -227,22 +233,25 @@ async function main() {
     steps: [{ id: "inspect", ok: true, detail: "x" }, { id: "snapshot", ok: true, detail: "y" },
             { id: "push", ok: true, detail: "z" }, { id: "pr", ok: true, detail: "opened u" }],
     pr: { url: "https://ghe.example.com/team/proj/pull/7", number: 7 },
-    delivered: true, warnings: ["monitor: not yet"],
+    monitor: { session: "s9", workflow: "improv-worker-pr-monitor", run_started: true },
+    delivered: true, warnings: ["note: a warning"],
   } };
   const st = ctx.state();
   st.ui.branch.value = "s1-pr-custom";
+  st.ui.monitor.checked = true;
   sent = [];
   await goBtn.fire("click");
   await settle();
   const post = sent.find((x) => x.method === "POST");
   check("the press posts to the session's pr route", post && post.path === "/api/sessions/s1/pr", sent);
   check("...with the form as typed", post && post.body.branch === "s1-pr-custom" && post.body.remote === "origin"
-    && post.body.report === true && post.body.monitor === false, post && post.body);
+    && post.body.report === true && post.body.monitor === true, post && post.body);
   const bodyText = texts(modalEls["modal-body"]);
   check("the form gave way to the step list", bodyText.includes("✓ push: z") && bodyText.includes("✓ pr: opened u"), bodyText);
   check("...with the PR link", walk(modalEls["modal-body"]).some((k) => k.tag === "a" && k.href.endsWith("/pull/7")));
   check("...the delivery", bodyText.includes("reported into the session's terminal"));
-  check("...and the daemon's warnings", bodyText.includes("monitor: not yet"));
+  check("...the monitor child by name", bodyText.includes("child session s9 watches the PR"));
+  check("...and the daemon's warnings", bodyText.includes("note: a warning"));
   acts = buttons(modalEls["modal-actions"]);
   check("only Close remains", acts.length === 1 && acts[0].text === "Close", acts.map((b) => b.text));
   await acts[0].fire("click");

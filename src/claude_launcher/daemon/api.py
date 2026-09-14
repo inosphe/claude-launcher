@@ -5125,7 +5125,121 @@ async def h_session_pr_preview(request: web.Request) -> web.Response:
     if not cwd:
         return json_error(400, "this session runs in no directory of its own")
     doc = await asyncio.to_thread(prflow.preview, cwd, session=session.sdef.name)
+    doc["monitor_workflow"] = PR_MONITOR_WORKFLOW
+    doc["monitor_available"] = await asyncio.to_thread(_pr_monitor_declared, cwd)
     return json_response(doc)
+
+
+#: The bundled workflow the wizard's second checkbox spawns a child on. The
+#: bundle is not a search layer (see ``cflow.state.bundled_workflows_dir``),
+#: so the name has to be *declared* where the session works -- the global
+#: layer ``claunch cflow update`` fills, or the project layer -- before a
+#: child can be started on it; the preview says which it is.
+PR_MONITOR_WORKFLOW = "improv-worker-pr-monitor"
+
+
+def _pr_monitor_declared(cwd: str) -> bool:
+    """Whether :data:`PR_MONITOR_WORKFLOW` resolves for a session in ``cwd``."""
+    try:
+        return any(n == PR_MONITOR_WORKFLOW for n, _ in cflow_state.list_workflows(cwd))
+    except Exception:  # an unreadable layer is "not offered", not a 500
+        return False
+
+
+async def _spawn_pr_monitor(
+    request: web.Request, session, result: dict, warnings: list
+) -> Optional[dict]:
+    """The wizard's second checkbox: a child of ``session`` that watches the
+    PR just opened and reports back.
+
+    Only after a push that produced a PR -- a monitor with nothing to watch
+    is a session that starts and ends. The child is spawned through the same
+    two halves as ``POST /children`` (:meth:`SessionManager.stage_child`,
+    :func:`_onboard_and_launch`) so it inherits the parent's harness,
+    profile, directory and mesh like any other child; what differs is the
+    daemon's own say-so on the way in:
+
+    * ``exempt_depth=True`` -- the tree's count limits do not apply. A
+      worker three levels down that opens a PR still gets it watched; the
+      watcher is not the fan-out the limits exist for. The keyword never
+      comes from a request body (see :func:`spawn.check`).
+    * no board issue (``beads: false``): the monitor works nobody's issue,
+      and the wizard's own PR is not a round on the board. The parent's
+      issue id rides in the run context for the final comment instead.
+    * the facts go in as the run's ``context`` (JSON): the monitor workflow
+      is a standalone run, and a standalone run starts with context, not
+      inputs (:mod:`cflow.model`).
+
+    A refusal (policy off, workflow not declared, harness failure) is a
+    warning on the wizard's answer rather than a failed request: the push
+    and the PR have already happened, and the body says so.
+    """
+    manager: SessionManager = request.app["manager"]
+    parent = session.sdef.name
+    pr = result.get("pr") or {}
+    if not (result.get("ok") and pr.get("url")):
+        warnings.append("monitor: no pull request was opened -- nothing to watch, nothing spawned")
+        return None
+    if not _pr_monitor_declared(session.sdef.cwd):
+        warnings.append(
+            f"monitor: workflow {PR_MONITOR_WORKFLOW!r} is not declared for "
+            f"{session.sdef.cwd} (run 'claunch cflow update' to install the "
+            "bundled copy) -- nothing spawned"
+        )
+        return None
+    facts = {
+        "pr_url": pr.get("url", ""),
+        "pr_number": pr.get("number"),
+        "branch": result.get("branch", ""),
+        "tip": result.get("tip", ""),
+        "remote": result.get("remote", ""),
+        "repo": result.get("repo", ""),
+        "base": result.get("base", ""),
+        "parent": parent,
+        "issue": session.sdef.issue or "",
+    }
+    body = {
+        "workflow": PR_MONITOR_WORKFLOW,
+        "role": "worker",
+        "beads": False,
+        "context": json.dumps(facts, ensure_ascii=False),
+        "task": (
+            f"Watch pull request {facts['pr_url']} (branch "
+            f"{facts['remote']}/{facts['branch']} @ {facts['tip'][:8]}) and report "
+            f"to {parent}. Report-only: never rebase, push, merge or touch this "
+            "directory's checkout -- it is the parent's working tree. The facts "
+            "are the run's context (JSON); the workflow says what to do with them."
+        ),
+    }
+    try:
+        child = manager.stage_child(parent, body, warnings=warnings, exempt_depth=True)
+    except spawn_mod.SpawnDenied as exc:
+        warnings.append(f"monitor: spawn refused -- {exc}")
+        return None
+    except (ManagerError, HarnessError, ValueError, TypeError) as exc:
+        warnings.append(f"monitor: could not stage a child -- {exc}")
+        return None
+    try:
+        arranged = await _onboard_and_launch(request, child, body, parent=parent)
+    except (onboard.OnboardError, HarnessError, ValueError, TypeError) as exc:
+        warnings.append(f"monitor: the child could not be started -- {exc}")
+        return None
+    # ``_onboard_and_launch`` reports each leg beside the session: the run
+    # leg is ``workflow`` -- ``{ok, workflow, scope, step}`` when it started,
+    # ``{ok: False, error}`` when the engine refused. A child that exists
+    # but runs nothing is still a child, so that is a warning, not a None.
+    leg = arranged.get("workflow") if isinstance(arranged, dict) else None
+    started = bool(isinstance(leg, dict) and leg.get("ok"))
+    if not started:
+        warnings.append(
+            f"monitor: child {child.sdef.name} was started but its run was not -- "
+            f"{(leg or {}).get('error') if isinstance(leg, dict) else 'no run leg reported'}"
+        )
+    return {
+        "session": child.sdef.name,
+        "workflow": PR_MONITOR_WORKFLOW,
+        "run_started": started,
+    }
 
 
 async def h_session_pr(request: web.Request) -> web.Response:
@@ -5136,12 +5250,17 @@ async def h_session_pr(request: web.Request) -> web.Response:
     ``draft``, ``include_uncommitted``, ``force``) plus two switches that are
     about the *session* rather than the push: ``report`` types the outcome
     into its terminal (:func:`prflow.report_block` through
-    :meth:`Session.deliver`), and ``monitor`` asks for a child session to
-    watch the PR -- not available yet, so it is answered with a warning and
-    nothing is spawned. The push result is the body whatever happened:
-    ``ok`` false with ``failed``/``error`` is a step that was refused, not a
-    request that was malformed, so it is a 200 with a step list rather than
-    an error the form would have to parse out of a message.
+    :meth:`Session.deliver`), and ``monitor`` spawns a child session on
+    :data:`PR_MONITOR_WORKFLOW` that watches the PR and reports back
+    (:func:`_spawn_pr_monitor`). ``monitor`` is gated on ``report`` -- a
+    watcher for a session that was not even told about the PR makes no
+    sense, and the form greys it the same way -- and on a PR actually
+    having been opened. The monitor is spawned *before* the report is
+    typed, so the block names the child. The push result is the body
+    whatever happened: ``ok`` false with ``failed``/``error`` is a step
+    that was refused, not a request that was malformed, so it is a 200 with
+    a step list rather than an error the form would have to parse out of a
+    message.
     """
     session = _session(request)
     cwd = _session_cwd(session)
@@ -5151,11 +5270,16 @@ async def h_session_pr(request: web.Request) -> web.Response:
     name = session.sdef.name
     result = await asyncio.to_thread(prflow.run, cwd, body, session=name)
     warnings: list = []
+    monitor = None
     if body.get("monitor"):
-        warnings.append(
-            "monitor: a PR-monitor child session is not available yet -- "
-            "nothing was spawned"
-        )
+        if not body.get("report"):
+            warnings.append("monitor: needs the report checkbox -- nothing spawned")
+        elif session.exited:
+            warnings.append("monitor: the session has exited; nothing spawned")
+        else:
+            monitor = await _spawn_pr_monitor(request, session, result, warnings)
+    if monitor:
+        result["monitor"] = monitor
     delivered = None
     if body.get("report"):
         if session.exited:

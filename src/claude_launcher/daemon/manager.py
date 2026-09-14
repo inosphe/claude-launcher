@@ -669,8 +669,14 @@ class SessionManager:
         *,
         identity: str = "",
         warnings: Optional[List[str]] = None,
+        exempt_depth: bool = False,
     ) -> Session:
         """Register a child of ``parent`` under the spawn policy, unstarted.
+
+        ``exempt_depth`` is handed to :func:`claude_launcher.spawn.check` as
+        the keyword of the same name -- the daemon's own say-so that this one
+        child is not counted against ``max_depth``/``max_children``. Never
+        read from ``request``; see the policy function for why.
 
         ``warnings`` is passed straight down to
         :func:`claude_launcher.spawn.check`, which appends to it what the
@@ -709,6 +715,7 @@ class SessionManager:
             depth=self.depth(parent),
             children=len(self.live_children(parent)),
             warnings=warnings,
+            exempt_depth=exempt_depth,
         )
         # Settled here rather than left to :meth:`stage`, because the child's
         # worktree is named after the child (``<parent>-<child>-<stamp>``) and

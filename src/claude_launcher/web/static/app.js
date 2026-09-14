@@ -19504,7 +19504,8 @@ async function spawnModalGo(st) {
    session that watches the PR and reports back (checkbox 2), which only
    makes sense when the session is being told at all — so it is gated on
    the first, and greyed until the daemon offers it (`ui.monitorAvailable`,
-   false until the monitor workflow lands). */
+   set from the preview's `monitor_available`: the monitor workflow has to
+   be declared where the session works before a child can run it). */
 let prModal = null;
 
 function prCheck(row) { return row.querySelector("input"); }
@@ -19573,7 +19574,7 @@ function buildPrForm(sessionName) {
   ui.report.checked = true;
   gTell.appendChild(ui.reportRow);
   ui.monitorRow = spawnCheckRow("spawn a child session that watches the PR and reports back",
-    "needs the report above; the monitor workflow is not available yet");
+    "needs the report above; a child on the improv-worker-pr-monitor workflow, report-only");
   ui.monitor = prCheck(ui.monitorRow);
   gTell.appendChild(ui.monitorRow);
   box.appendChild(gTell);
@@ -19640,6 +19641,10 @@ function prApplyPreview(ui, pv) {
     if (pv.worktree) parts.push(`worktree ${pv.worktree}`);
   }
   ui.facts.textContent = parts.join(" · ") || "not a git repository";
+  ui.monitorAvailable = !!pv.monitor_available;
+  if (!ui.monitorAvailable) {
+    ui.monitorRow.title = `the ${pv.monitor_workflow || "PR-monitor"} workflow is not declared for this directory (claunch cflow update)`;
+  }
   fillSpawnSelect(ui.remote,
     (pv.remotes || []).map((r) => [r.remote,
       r.host ? `${r.remote} → ${r.host}/${r.slug || "?"}` : `${r.remote} (no GitHub host)`]),
@@ -19733,6 +19738,11 @@ function prResultView(res) {
       `${res.remote}/${res.branch} @ ${(res.tip || "").slice(0, 8)} — the session's checkout was not changed.`));
   } else {
     wrap.appendChild(el("p", "wf-warning", `failed at ${res.failed}: ${res.error || ""}`));
+  }
+  if (res.monitor && res.monitor.session) {
+    wrap.appendChild(el("p", "sess-pr-note",
+      `monitor: child session ${res.monitor.session} watches the PR and reports to this session` +
+      (res.monitor.run_started === false ? " (its run did not start — see the warnings)" : "") + "."));
   }
   if (res.delivered === true) wrap.appendChild(el("p", "sess-pr-note", "reported into the session's terminal."));
   else if (res.delivered === false) wrap.appendChild(el("p", "sess-pr-note", "the report could not be typed into the session (it is not taking input right now)."));

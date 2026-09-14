@@ -305,6 +305,7 @@ def check(
     depth: int,
     children: int,
     warnings: Optional[List[str]] = None,
+    exempt_depth: bool = False,
 ) -> dict:
     """Validate a spawn request and return the child's inherited overrides.
 
@@ -328,6 +329,19 @@ def check(
     only asks "was this permitted" — should not have to unpack a tuple to find
     out. Passing nothing discards the warnings; it never changes the verdict.
 
+    ``exempt_depth`` lifts the two *count* limits -- ``max_depth`` and
+    ``max_children`` -- for this one request. It is a keyword the daemon's own
+    code passes, never a field of the request: the request dict is what an
+    agent or a form sent, and a key in it named ``exempt_depth`` is ignored
+    here exactly like any other unknown key, so no client can talk its way
+    past the tree limits. The one caller today is the PR wizard's monitor
+    child (``daemon/api.h_session_pr``): a session that only watches a pull
+    request and reports back is not the runaway nesting the depth limit
+    exists to stop, and refusing it would leave a worker at the bottom of
+    its tree unable to have its own PR watched. ``enabled: false`` still
+    refuses -- the exemption is about counts, not about whether spawning is
+    on at all.
+
     Raises :class:`SpawnDenied` with a message written for the agent that will
     read it: what was refused, and which config key would allow it.
     """
@@ -336,13 +350,13 @@ def check(
             "spawning is switched off on this daemon "
             "(set 'spawn.enabled: true' in ~/.claunch.yaml)"
         )
-    if depth >= policy.max_depth:
+    if depth >= policy.max_depth and not exempt_depth:
         raise SpawnDenied(
             f"this session is already {depth} level(s) deep and the limit is "
             f"{policy.max_depth} (spawn.max_depth) — give the work to an "
             "existing session instead of nesting further"
         )
-    if children >= policy.max_children:
+    if children >= policy.max_children and not exempt_depth:
         # A SOFT cap: it interrupts a fan-out loop, it does not forbid a child
         # somebody wanted on purpose. So the default is to cross it and SAY
         # so; only a request that asked for the strict reading outright is

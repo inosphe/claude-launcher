@@ -553,6 +553,10 @@ def report_block(result: dict) -> str:
         draft = ", draft" if pr.get("isDraft") else ""
         lines.append(f"pr: {pr.get('url', '')} ({num}{state}{draft})")
         lines.append("status: ok")
+        mon = result.get("monitor") or {}
+        if mon.get("session"):
+            lines.append(f"monitor: child session {mon['session']} watches this PR "
+                         f"({mon.get('workflow', '')}) and will report to you -- fyi only")
     else:
         lines.append(f"status: failed at step '{result.get('failed', '?')}' -- {result.get('error', '')}")
         did = [s["id"] for s in result.get("steps", []) if s.get("ok")]

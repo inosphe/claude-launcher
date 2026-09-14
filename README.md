@@ -2747,12 +2747,24 @@ changes* is on the `<sha>` is a commit built through a scratch index on top
 of HEAD, on no local branch. Two checkboxes are about the session rather
 than the push: **report** types one machine-generated block (branch, tip,
 PR url, and the line that its checkout was not changed) into the session's
-terminal, and **monitor** -- greyed until the PR-monitor workflow lands --
-will spawn a child session that watches the PR and reports back. The wizard
-shows the daemon's step list (inspect, snapshot, push, pr) whatever
-happened, so a push that went through before `gh` refused is a green row
-above a red one. Routes: `GET /api/sessions/{name}/pr/preview`,
-`POST /api/sessions/{name}/pr` (engine: `prflow.py`).
+terminal, and **monitor** (only under a ticked report) spawns a child
+session on the bundled `improv-worker-pr-monitor` workflow that watches the
+PR with `gh pr view` and reports back to the session: deltas in checks,
+review, mergeable state and head as fyi, a conflict as an ask (rebasing is
+the parent's job -- the monitor never touches the branch or the
+directory's checkout), and the merge as a final fyi plus a one-line
+`PR MONITOR:` comment on the session's issue. It is report-only and ends on
+its own (timer budget 48h, then `kill-on-end`). The child is spawned by the
+daemon with the tree's depth and child-count limits lifted for that one
+request -- a keyword the daemon passes itself, never a request field -- so
+a worker at the bottom of its tree can still have its PR watched. The
+checkbox is greyed until the workflow is *declared* where the session
+works (the bundle is not a search layer: `claunch cflow update` installs
+it into the global layer). The wizard shows the daemon's step list
+(inspect, snapshot, push, pr) whatever happened, so a push that went
+through before `gh` refused is a green row above a red one. Routes:
+`GET /api/sessions/{name}/pr/preview`, `POST /api/sessions/{name}/pr`
+(engine: `prflow.py`).
 
 A **Start it working** box carries what the session is *for*: a mesh picker
 (with a handle field once one is chosen), a workflow picker over the runs
@@ -2917,8 +2929,8 @@ REST endpoints (JSON, `Bearer` or cookie auth; `/api/health` is open):
 | POST   | `/api/sessions/{name}/skip-permissions` | restart with permission prompts toggled: `{skip: true|false}` adds/removes `--dangerously-skip-permissions` in the definition's args and relaunches |
 | POST   | `/api/sessions/{name}/keys`    | raw keyboard: `{keys: [...], literal}` — send-keys; or `{paste, enter}` — one bracketed paste (multiline-safe). Text (and any paste) waits out a human typing at that terminal (`CLAUNCH_TYPING_GUARD` quiet, bounded by `CLAUNCH_TYPING_HOLD_TIMEOUT`); bare keys go through at once |
 | POST   | `/api/sessions/{name}/deliver` | `{text}` — hand the agent a message (paste + separately-written Enter). What every automated sender uses; `/keys` is for a human at a keyboard |
-| GET    | `/api/sessions/{name}/pr/preview` | the PR wizard's preview of the session's directory: checkout branch, HEAD, uncommitted counts, remotes (with `claunch.pr.remote` / `claunch.pr.base` honoured), `gh` install + per-host auth, and `blockers` -- what would stop the push |
-| POST   | `/api/sessions/{name}/pr` | push what the session's directory holds under a NEW branch and open the pull request with `gh` -- never touching its checkout. Body `{remote, base, branch, title, body, draft, include_uncommitted, force, report, monitor}`; `report` types the outcome into the session's terminal; `monitor` is answered with a warning until the PR-monitor workflow exists. Always 200 with `ok` and a `steps` list (`failed`/`error` name a refused step) |
+| GET    | `/api/sessions/{name}/pr/preview` | the PR wizard's preview of the session's directory: checkout branch, HEAD, uncommitted counts, remotes (with `claunch.pr.remote` / `claunch.pr.base` honoured), `gh` install + per-host auth, `blockers` -- what would stop the push -- and `monitor_available` (whether `improv-worker-pr-monitor` is declared for that directory) |
+| POST   | `/api/sessions/{name}/pr` | push what the session's directory holds under a NEW branch and open the pull request with `gh` -- never touching its checkout. Body `{remote, base, branch, title, body, draft, include_uncommitted, force, report, monitor}`; `report` types the outcome into the session's terminal; `monitor` (needs `report`, and an opened PR) spawns a report-only child on `improv-worker-pr-monitor` with the depth/child caps lifted, answered as `monitor: {session, workflow, run_started}` or a `monitor:` warning. Always 200 with `ok` and a `steps` list (`failed`/`error` name a refused step) |
 | GET    | `/api/sessions/{name}/capture` | `?history=1&format=json&trim=0` |
 | GET    | `/api/sessions/{name}/wait`    | long-poll `?state=idle\|exited&timeout=&threshold=` |
 | POST   | `/api/sessions/{name}/resize`  | `{cols, rows}` |
