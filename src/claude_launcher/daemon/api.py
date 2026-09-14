@@ -36,7 +36,7 @@ from .. import (
     usage,
 )
 from .. import session_commits
-from .. import spawn as spawn_mod, store, workspaces
+from .. import ghcli, spawn as spawn_mod, store, workspaces
 from .. import worktree as worktree_mod
 from . import beads as beads_mod, notice as notice_mod
 from . import rag as rag_mod
@@ -533,6 +533,10 @@ def build_app(
     r.add_get("/api/search", h_search)
     r.add_get("/api/rag/status", h_rag_status)
     r.add_post("/api/rag/reindex", h_rag_reindex)
+    # The GitHub CLI as the daemon sees it (ghcli.py): installed, signed in
+    # to each host the registered repositories push to, and what to run when
+    # not -- the Settings card behind improv-worker-remote's remote-setup.
+    r.add_get("/api/tools/gh", h_gh_status)
     r.add_get("/api/sessions/{name}/beads", h_session_beads)
     r.add_post("/api/sessions/{name}/beads", h_session_beads_create)
     # A session's round reports: the index, and the page itself. The index is
@@ -5526,6 +5530,19 @@ async def h_rag_status(request: web.Request) -> web.Response:
     """The search feature's state: configured or not, which models, and each
     loaded index's coverage. Never the api key."""
     return json_response(request.app["rag"].status())
+
+
+async def h_gh_status(request: web.Request) -> web.Response:
+    """Whether ``gh`` is installed and signed in, per host, with the guide.
+
+    Read-only, and off the loop: it forks git per registered repository and
+    ``gh auth status`` per host, and the latter talks to the host. Nothing
+    here is cached -- the card has a Re-check button precisely so the user
+    can install, log in, and see the answer change.
+    """
+    return json_response(
+        await asyncio.to_thread(lambda: ghcli.status(ghcli.daemon_repositories()))
+    )
 
 
 async def h_rag_reindex(request: web.Request) -> web.Response:

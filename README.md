@@ -2716,6 +2716,21 @@ itself is never touched, and sessions already in it keep running. The list
 refreshes in place, so a `claunch workspace add` in a terminal shows up here
 too, and `(daemon cwd)` is always available in the picker.
 
+The same Settings page carries a **GitHub CLI (gh)** card, the machine side
+of the [PR-landing worker](#workflows-cflow): whether `gh` resolves on the
+*daemon's* PATH (a spawned worker inherits that environment, not the
+browser's), the `gh auth status` verdict for every GitHub host the
+registered repositories push to, and whether each repository names its
+pull-request remote in `git config claunch.pr.remote`. Hosts are never
+guessed from `origin`: a repository with the key unset lists every remote
+and says the choice is still yours. Whatever is missing becomes a **What to
+run** list — the platform's install command, `gh auth login --hostname
+<host>` (or `GH_ENTERPRISE_TOKEN` in the daemon's environment for an
+unattended daemon), the `git config` line — because a worker that reaches
+`remote-setup` without them can only stop and ask. The card is read-only
+and never shows a token; **Re-check** asks the daemon again after you have
+acted. The JSON behind it is `GET /api/tools/gh`.
+
 A **Start it working** box carries what the session is *for*: a mesh picker
 (with a handle field once one is chosen), a workflow picker over the runs
 declared in the chosen directory, and an opening task — all applied in the

@@ -10472,6 +10472,10 @@ let statusCheckDraft = { name: "", question: "" };
 /* The semantic-search feature's state (/api/rag/status), for its card. */
 let ragStatus = null;
 let ragError = "";
+/* The GitHub CLI's state (/api/tools/gh), for its card. */
+let ghStatus = null;
+let ghError = "";
+let ghChecking = false;
 let statusCheckEdit = null;
 // A delivery is immediate, but the agent reports on a later MCP turn.  Keep
 // that interval visible across session-list polls instead of making it look
@@ -10491,6 +10495,7 @@ function openSettings() {
   refreshPromptPresets();
   refreshStatusChecks();
   refreshRagStatus();
+  refreshGhStatus();
 }
 
 async function refreshRagStatus() {
@@ -10504,6 +10509,138 @@ async function refreshRagStatus() {
     ragError = String(err);
   }
   if (wsOpen) renderWorkspaces();
+}
+
+async function refreshGhStatus() {
+  ghChecking = true;
+  if (wsOpen) renderWorkspaces();
+  try {
+    const resp = await api("/api/tools/gh");
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
+    ghStatus = data;
+    ghError = "";
+  } catch (err) {
+    ghError = String(err);
+  }
+  ghChecking = false;
+  if (wsOpen) renderWorkspaces();
+}
+
+/* The GitHub CLI as the daemon sees it: installed on ITS path (a spawned
+   worker inherits that environment, not the browser's), signed in to each
+   host the registered repositories push to, and the commands the user runs
+   for whatever is missing. This is improv-worker-remote's remote-setup step
+   asked ahead of time -- a worker that finds gh missing can only stop and
+   ask, and this card is where that question is answered once. */
+function ghCard() {
+  const card = el("div", "ws-add gh-card");
+  const head = el("div", "gh-head");
+  head.appendChild(el("h3", null, "GitHub CLI (gh)"));
+  const again = el("button", "wf-btn clear", ghChecking ? "Checking…" : "Re-check");
+  again.type = "button";
+  again.disabled = ghChecking;
+  again.title = "ask the daemon again — after an install, a login, or a git config";
+  again.addEventListener("click", () => refreshGhStatus());
+  head.appendChild(again);
+  card.appendChild(head);
+  card.appendChild(el("p", "wf-note",
+    "What a worker landing through a pull request (improv-worker-remote) " +
+    "needs on this machine: gh on the daemon's PATH, a login on each " +
+    "GitHub host the registered repositories push to, and " +
+    "claunch.pr.remote naming which remote that is. Read-only — the " +
+    "commands below are yours to run."));
+  if (ghError) card.appendChild(el("p", "error", ghError));
+  const st = ghStatus;
+  if (!st) {
+    card.appendChild(el("p", "wf-note", "reading…"));
+    return card;
+  }
+  const cli = st.client || {};
+  const facts = [];
+  if (cli.installed) {
+    facts.push(`gh ${cli.version || "?"}`);
+    if (cli.path) facts.push(cli.path);
+    if (cli.error) facts.push(`(${cli.error})`);
+  } else {
+    facts.push("gh NOT installed (on the daemon's PATH)");
+  }
+  facts.push(st.token_env ? "token in daemon env" : "no GH_ENTERPRISE_TOKEN / GH_TOKEN in daemon env");
+  const summary = el("p", "beads-bits gh-summary", facts.join("  ·  "));
+  summary.classList.add(cli.installed ? "ok" : "bad");
+  card.appendChild(summary);
+
+  const hosts = st.hosts || [];
+  const list = el("div", "rag-index-list");
+  for (const h of hosts) {
+    const row = el("div", "rag-index-row gh-host-row");
+    const text = el("div", "rag-index-text");
+    text.appendChild(el("strong", null, h.host));
+    const bits = [];
+    bits.push(h.authenticated
+      ? `signed in${h.account ? ` as ${h.account}` : ""}`
+      : `not signed in${h.detail ? ` — ${h.detail}` : ""}`);
+    if (h.repositories && h.repositories.length) bits.push(`used by ${h.repositories.join(", ")}`);
+    const b = el("span", "beads-bits", bits.join("  ·  "));
+    b.classList.add(h.authenticated ? "ok" : "bad");
+    text.appendChild(b);
+    row.appendChild(text);
+    list.appendChild(row);
+  }
+  if (!hosts.length) {
+    list.appendChild(el("p", "wf-note",
+      "No GitHub host to sign in to: none of the registered repositories " +
+      "(nor the daemon's own directory) has a remote on one."));
+  }
+  card.appendChild(list);
+
+  const repos = st.repositories || [];
+  if (repos.length) {
+    const rl = el("div", "rag-index-list gh-repo-list");
+    for (const r of repos) {
+      const row = el("div", "rag-index-row");
+      const text = el("div", "rag-index-text");
+      text.appendChild(el("strong", null, r.name));
+      for (const rem of r.remotes || []) {
+        const s = el("span", "beads-bits");
+        if (rem.error) {
+          s.textContent = rem.error;
+          s.classList.add("bad");
+        } else {
+          s.textContent = `${rem.remote} → ${rem.host}/${rem.slug || "?"}` +
+            (rem.configured ? `  ·  claunch.pr.remote, base ${rem.base}` : "  ·  claunch.pr.remote unset");
+          if (rem.configured) s.classList.add("ok");
+        }
+        text.appendChild(s);
+      }
+      row.appendChild(text);
+      rl.appendChild(row);
+    }
+    card.appendChild(rl);
+  }
+
+  const guide = st.guide || [];
+  if (st.ready) {
+    card.appendChild(el("p", "wf-note gh-ready",
+      "Ready: gh is installed, every host above is signed in, and each " +
+      "repository names its pull-request remote."));
+  } else if (guide.length) {
+    const g = el("div", "gh-guide");
+    g.appendChild(el("h4", null, "What to run"));
+    for (const step of guide) {
+      const item = el("div", "gh-guide-step");
+      item.appendChild(el("p", "wf-warning", step.why));
+      item.appendChild(el("pre", "rag-yaml", step.run));
+      if (step.note) item.appendChild(el("p", "wf-note", step.note));
+      g.appendChild(item);
+    }
+    card.appendChild(g);
+  } else {
+    card.appendChild(el("p", "wf-note",
+      "Nothing to run yet, but nothing to land to either: register a " +
+      "workspace whose repository has a GitHub remote."));
+  }
+  return card;
 }
 
 async function ragReindex(row, force) {
@@ -12627,6 +12764,8 @@ function renderWorkspaces() {
   view.appendChild(statusCheckCard());
 
   view.appendChild(ragCard());
+
+  view.appendChild(ghCard());
 
   const list = el("div", "ws-list");
   list.appendChild(el("h3", null, `Registered (${workspacesCache.length})`));
