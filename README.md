@@ -573,6 +573,27 @@ a profile carrying `reasoning_effort` is rejected for those harnesses. Use
 `allowed_harnesses` to expose only the provider/harness combinations whose
 endpoint and authentication adapters are implemented.
 
+Pi's custom provider defaults to an output limit of 16,384 tokens. Set an
+explicit budget per provider or profile through its Pi environment channel:
+
+```yaml
+profiles:
+  ds4-official:
+    context_window: 1000000
+    reasoning_effort: high
+    harness_options:
+      pi:
+        env:
+          CLAUNCH_PI_MAX_TOKENS: "384000"
+```
+
+This sets both the registered model's `maxTokens` and the outgoing OpenAI
+`max_tokens` field. Pi otherwise caps its default request at 32,000 even if
+the model declares a larger limit. The value must be a positive integer
+within the context window and the backend's supported output limit. It is
+an upper bound per response. Start a new Pi session after changing the profile;
+an existing process retains its launch environment.
+
 Translated launch arguments go before the session's own, so an explicit
 `-c`/`--model` from the session still wins. The `env` channel of a harness is
 applied after the launcher's Claude-namespace filter: it is the one way to
@@ -614,18 +635,18 @@ then its raw `env` and `harness_options.claude.env`) < the projected
 boundary always forces `ANTHROPIC_API_KEY=""`.
 
 For `PROFILE:pi` with a non-default provider, the packaged adapter registers a
-process-local Pi provider from `ANTHROPIC_BASE_URL` and the configured
-`ANTHROPIC_MODEL`/default-model IDs. It selects `ANTHROPIC_MODEL` first and
-passes the stored profile token through Pi's declared `ANTHROPIC_API_KEY`
-route. The adapter translates the endpoint to `<ANTHROPIC_BASE_URL>/v1` and
-uses OpenAI Chat Completions with Bearer authentication; the Claude harness
-continues to use the same provider through its Anthropic-compatible endpoint.
+process-local Pi provider from `endpoints.openai` and the configured `models`
+roles. It selects `models.default` first and passes the stored profile token
+through Pi's declared `ANTHROPIC_API_KEY` route. The adapter appends `/v1` to
+the OpenAI endpoint and uses OpenAI Chat Completions with Bearer authentication;
+the Claude harness continues to use the same provider through
+`endpoints.anthropic`.
 The registration is loaded from a packaged Pi extension for each launch,
 including managed-session restores and `validate`; it does not edit Pi's
 `models.json`. Explicit Pi
 `--provider`, `--model` or `--models` arguments retain model-selection
 precedence. A non-default provider selected for Pi therefore needs both
-`ANTHROPIC_BASE_URL` and at least one Anthropic model ID.
+`endpoints.openai` and at least `models.default`.
 
 A provider may declare `allowed_harnesses`. When present, selecting that
 provider is only valid for the listed harnesses; `set-provider` refuses an

@@ -373,6 +373,42 @@ def test_pi_extension_reads_the_context_window_variable():
     assert "contextWindow: 128000" not in text
 
 
+def test_pi_output_budget_is_profile_scoped_and_clears_inherited_values(home):
+    _provider("ds", DEEPSEEK)
+    p = _profile_on("work", "ds", harness="pi")
+    store.set_profile_field(p.name, "harness_options", {"pi": {"env": {"CLAUNCH_PI_MAX_TOKENS": "384000"}}})
+    env = runner.harness_child_env(p, harnesses.get("pi"), base_env={pi_provider.ENV_MAX_TOKENS: "123"})
+    assert env[pi_provider.ENV_MAX_TOKENS] == "384000"
+    assert env[pi_provider.ENV_CONTEXT_WINDOW] == "1000000"
+    other = _profile_on("other", "ds", harness="pi")
+    other_env = runner.harness_child_env(other, harnesses.get("pi"), base_env=env)
+    assert pi_provider.ENV_MAX_TOKENS not in other_env
+
+
+@pytest.mark.parametrize("value", ["0", "-1", "1.5", "384000garbage", "1000001"])
+def test_pi_rejects_invalid_output_budget(home, value):
+    _provider("ds", DEEPSEEK)
+    p = _profile_on("work", "ds", harness="pi")
+    store.set_profile_field(p.name, "harness_options", {"pi": {"env": {"CLAUNCH_PI_MAX_TOKENS": value}}})
+    with pytest.raises(runner.RunnerError, match="CLAUNCH_PI_MAX_TOKENS"):
+        runner.harness_child_env(p, harnesses.get("pi"), base_env={})
+
+
+def test_pi_output_budget_extension_contract():
+    import shutil
+    import subprocess
+    from pathlib import Path
+
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("Node.js is required for the Pi extension contract")
+    result = subprocess.run(
+        [node, "--test", str(Path(__file__).with_name("pi_output_tokens.test.mjs"))],
+        capture_output=True, text=True, encoding="utf-8", timeout=30,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
 def test_pi_reasoning_extension_contract():
     import shutil
     import subprocess

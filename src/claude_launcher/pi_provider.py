@@ -34,6 +34,8 @@ ENV_MODELS = "CLAUNCH_PI_MODELS"
 ENV_TOKEN_NAME = "CLAUNCH_PI_TOKEN_ENV"
 ENV_AUTH_HEADER = "CLAUNCH_PI_AUTH_HEADER"
 ENV_CONTEXT_WINDOW = "CLAUNCH_PI_CONTEXT_WINDOW"
+#: Explicit output budget, declared through harness_options.pi.env.
+ENV_MAX_TOKENS = "CLAUNCH_PI_MAX_TOKENS"
 #: Explicit cross-harness effort and the OpenAI request encoding declared by
 #: the effective provider spec.  Both are required together for a reasoning
 #: model; the adapter never infers either from the model id or endpoint.
@@ -56,6 +58,7 @@ PROJECTION_ENV = frozenset(
         ENV_TOKEN_NAME,
         ENV_AUTH_HEADER,
         ENV_CONTEXT_WINDOW,
+        ENV_MAX_TOKENS,
         ENV_REASONING_EFFORT,
         ENV_REASONING_FORMAT,
         ENV_TOOLS,
@@ -82,6 +85,7 @@ class Projection:
     token_env: str
     auth_header: bool
     context_window: Optional[int] = None
+    max_tokens: Optional[int] = None
     reasoning_effort: Optional[str] = None
     reasoning_format: Optional[str] = None
 
@@ -188,6 +192,14 @@ def resolve(
             f"{missing} is not declared (reasoning_effort and "
             "openai_reasoning_format must be set together)"
         )
+    max_tokens = None
+    raw_max = spec.option_env("pi").get(ENV_MAX_TOKENS)
+    if raw_max is not None:
+        if not raw_max.isascii() or not raw_max.isdecimal() or int(raw_max) <= 0:
+            raise PiProviderError(f"{ENV_MAX_TOKENS} must be a positive integer")
+        max_tokens = int(raw_max)
+        if max_tokens > (spec.context_window or 128000):
+            raise PiProviderError(f"{ENV_MAX_TOKENS} cannot exceed context_window")
     return Projection(
         base_url=_openai_base_url(openai_root),
         api="openai-completions",
@@ -198,6 +210,7 @@ def resolve(
         # an explicit header would duplicate that native route.
         auth_header=False,
         context_window=spec.context_window,
+        max_tokens=max_tokens,
         reasoning_effort=reasoning_effort,
         reasoning_format=reasoning_format,
     )
@@ -239,6 +252,8 @@ def apply_env(
     )
     if projection.context_window:
         env[ENV_CONTEXT_WINDOW] = str(projection.context_window)
+    if projection.max_tokens:
+        env[ENV_MAX_TOKENS] = str(projection.max_tokens)
     if projection.reasoning_effort:
         env[ENV_REASONING_EFFORT] = projection.reasoning_effort
         env[ENV_REASONING_FORMAT] = projection.reasoning_format or ""

@@ -9,6 +9,8 @@ const tokenEnv = process.env.CLAUNCH_PI_TOKEN_ENV;
 const rawModels = process.env.CLAUNCH_PI_MODELS;
 const rawWindow = Number.parseInt(process.env.CLAUNCH_PI_CONTEXT_WINDOW ?? "", 10);
 const contextWindow = Number.isFinite(rawWindow) && rawWindow > 0 ? rawWindow : 128000;
+const rawMaxTokens = process.env.CLAUNCH_PI_MAX_TOKENS;
+const maxTokens = rawMaxTokens === undefined ? 16384 : Number(rawMaxTokens);
 const reasoningEffort = process.env.CLAUNCH_PI_REASONING_EFFORT;
 const reasoningFormat = process.env.CLAUNCH_PI_REASONING_FORMAT;
 const reasoningEnabled = reasoningEffort !== undefined && reasoningFormat !== undefined;
@@ -34,6 +36,9 @@ function parseHeaders(raw) {
 
 export default function (pi) {
   if (!provider || !baseUrl || !api || !tokenEnv || !rawModels) return;
+  if (rawMaxTokens !== undefined && (!/^[0-9]+$/.test(rawMaxTokens) || !Number.isSafeInteger(maxTokens) || maxTokens <= 0 || maxTokens > contextWindow)) {
+    throw new Error("CLAUNCH_PI_MAX_TOKENS must be a positive integer no greater than contextWindow");
+  }
   if ((reasoningEffort === undefined) !== (reasoningFormat === undefined)) {
     throw new Error("CLAUNCH_PI_REASONING_EFFORT and CLAUNCH_PI_REASONING_FORMAT must be set together");
   }
@@ -58,7 +63,7 @@ export default function (pi) {
     input: ["text"],
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     contextWindow,
-    maxTokens: 16384,
+    maxTokens,
     compat: {
       supportsStore: false,
       supportsDeveloperRole: false,
@@ -82,7 +87,7 @@ export default function (pi) {
     models,
   });
 
-  if (reasoningEnabled) {
+  if (rawMaxTokens !== undefined || reasoningEnabled) {
     // Set declared request controls at the final provider boundary. Pi's
     // native DeepSeek encoder normally supplies both reasoning fields; the
     // fallback below covers versions that only consume the model metadata.
@@ -93,6 +98,10 @@ export default function (pi) {
       if (!payload || typeof payload !== "object" || Array.isArray(payload) || !ids.includes(payload.model)) return;
       let next = payload;
       let changed = false;
+      if (rawMaxTokens !== undefined) {
+        next = { ...next, max_tokens: maxTokens };
+        changed = true;
+      }
       if (reasoningFormat === "deepseek") {
         if (!Object.hasOwn(next, "thinking")) {
           next = {
