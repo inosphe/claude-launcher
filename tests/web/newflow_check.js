@@ -105,6 +105,8 @@ const ctx = {};
 new Function(
   "exports", "$", "Option", "api", "meshCache", "sessionsCache",
   [sliceLet("workflowsCache"), sliceLet("workflowsFor"), sliceLet("newWfPicked"),
+   // the mesh a "#/new/<mesh>" link asks for; syncOnboardPickers reads it
+   sliceLet("pendingNewMesh"),
    slice("spawnWorkflowEntry"), slice("spawnWorkflowAdmits"),
    slice("spawnRankWorkflows"), slice("spawnParent"), slice("newSessionCwd"),
    slice("refreshWorkflowChoices"), slice("syncOnboardPickers")].join("\n") + `
