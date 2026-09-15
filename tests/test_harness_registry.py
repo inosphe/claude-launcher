@@ -69,6 +69,17 @@ def test_packaged_set_declares_supported_harnesses(home):
     assert harnesses.names()[0] == "claude"
 
 
+@pytest.mark.parametrize("aliases", [[], None, {"astra": ""}, {"astra": 6}, {1: "model"}])
+def test_model_aliases_reject_invalid_mappings(home, aliases):
+    with pytest.raises(HarnessConfigError, match="model_aliases must map"):
+        harnesses.parse({"harnesses": {"x": {"command": "x", "model_aliases": aliases}}})
+
+
+def test_model_aliases_are_serialized(home):
+    entry = harnesses.registry()["codex"]
+    assert entry.to_dict()["model_aliases"]["astra"] == "gpt-6-astra"
+
+
 def test_provider_adapter_is_validated_with_its_auth_contract(home):
     with pytest.raises(HarnessConfigError, match="provider_adapter must be pi"):
         harnesses.parse(

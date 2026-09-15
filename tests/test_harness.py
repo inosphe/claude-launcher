@@ -233,21 +233,22 @@ def test_selected_pi_effort_overrides_provider_default(
         )
 
 
-def test_astra_is_a_declared_codex_model(home, tmp_path):
-    """The alias added last goes through the same model_args template.
-
-    An undeclared model is refused by ``normalize`` with "unknown model", so
-    this one assertion covers both the declaration and its expansion. Nothing
-    in the codebase checks the expanded id against the vendor.
-    """
+@pytest.mark.parametrize("model, model_id", [
+    ("luna", "gpt-5.6-luna"),
+    ("terra", "gpt-5.6-terra"),
+    ("sol", "gpt-5.6-sol"),
+    ("astra", "gpt-6-astra"),
+])
+def test_declared_codex_model_ids(home, tmp_path, model, model_id):
+    """Model aliases may refer to different backend model generations."""
     work = profile.create("work")
     lineage.set_harness(work, "codex")
     sdef = harness.normalize(
-        SessionDef(name="x", profile="work", cwd=str(tmp_path), model="astra")
+        SessionDef(name="x", profile="work", cwd=str(tmp_path), model=model)
     )
 
     argv, _, _ = harness.build_command(sdef)
-    assert "model=gpt-5.6-astra" in argv
+    assert f"model={model_id}" in argv
 
 
 def test_model_must_be_declared_and_not_repeated_in_free_args(home, tmp_path):
@@ -707,6 +708,22 @@ def test_a_null_session_launches_with_no_token_at_all(home, tmp_path, monkeypatc
     )
     _, env, _ = harness.build_command(sdef)
     assert "CLAUDE_CODE_OAUTH_TOKEN" not in env
+
+
+@pytest.mark.parametrize("template", [[], ["-m", "{model}"]])
+@pytest.mark.parametrize("model, expected", [("small", "backend-v2"), ("large", "large")])
+def test_custom_model_aliases_and_unmapped_choices(home, tmp_path, template, model, expected):
+    _declare_harness(
+        "custom", models=["small", "large"],
+        model_aliases={"small": "backend-v2"}, model_args=template,
+    )
+    _profile_for("work", "custom")
+    sdef = harness.normalize(
+        SessionDef(name="x", profile="work", cwd=str(tmp_path), model=model)
+    )
+    argv, _, _ = harness.build_command(sdef)
+    assert (expected if template else f"--model={expected}") in argv
+    assert sdef.model == model
 
 
 def test_generic_harness_from_config(home, tmp_path):

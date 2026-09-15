@@ -858,14 +858,16 @@ def build_command(
             arg for arg in entry.args
             if not (manages_mode and arg in entry.mode_conflict_args)
         ]
+        model_id = entry.model_aliases.get(sdef.model, sdef.model) or ""
+
         def selection_args(template, value):
             if not value:
                 return []
-            return [str(arg).replace("{model}", str(sdef.model or ""))
+            return [str(arg).replace("{model}", model_id)
                     .replace("{effort}", str(sdef.effort or "")) for arg in template]
         model_args = selection_args(entry.model_args, sdef.model)
         if not model_args and sdef.model:
-            model_args = [f"--model={sdef.model}"]
+            model_args = [f"--model={model_id}"]
         effort_args = selection_args(entry.effort_args, sdef.effort)
         session_args = list(sdef.args)
         if restoring and entry.restore_args:
