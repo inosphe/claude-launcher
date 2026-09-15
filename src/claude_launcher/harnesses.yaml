@@ -65,6 +65,8 @@ harnesses:
     auth: api-key
     token_env: ANTHROPIC_API_KEY
     provider_adapter: pi
+    efforts: [low, medium, high]
+    effort_args: [--thinking, "{effort}"]
     # pi's TUI enables DECSET 2004 at startup; wait for it (and a quiet
     # screen) before typing the opening task -- pasted at 'immediate' the
     # lines after the first were lost while pi was still coming up

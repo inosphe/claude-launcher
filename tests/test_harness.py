@@ -183,6 +183,56 @@ def test_selected_codex_model_and_effort_become_codex_config(home, tmp_path):
     assert "model_reasoning_effort=xhigh" in argv
 
 
+def test_selected_pi_effort_overrides_provider_default(
+    home, tmp_path, monkeypatch
+):
+    original_which = harness.harness_registry.shutil.which
+    monkeypatch.setattr(
+        harness.harness_registry.shutil,
+        "which",
+        lambda program: sys.executable if program == "pi" else original_which(program),
+    )
+    work = profile.create("work")
+    lineage.set_harness(work, "pi")
+    store.update(
+        lambda doc: doc.setdefault("providers", {}).update(
+            {
+                "ds": {
+                    "api_key": "test-key",
+                    "endpoints": {
+                        "anthropic": "https://example.invalid/anthropic",
+                        "openai": "https://example.invalid",
+                    },
+                    "models": {"default": "deepseek-flash"},
+                    "reasoning_effort": "high",
+                    "openai_reasoning_format": "deepseek",
+                }
+            }
+        )
+    )
+    store.set_profile_field(work.name, "provider", "ds")
+
+    sdef = harness.normalize(
+        SessionDef(
+            name="x", profile="work:pi", cwd=str(tmp_path), effort="low"
+        )
+    )
+    argv, _, _ = harness.build_command(sdef)
+    thinking_levels = [
+        argv[index + 1]
+        for index, arg in enumerate(argv[:-1])
+        if arg == "--thinking"
+    ]
+
+    assert thinking_levels == ["high", "low"]
+    with pytest.raises(HarnessError, match="unknown effort 'xhigh'.*low, medium, high"):
+        harness.normalize(
+            SessionDef(
+                name="bad", profile="work:pi", cwd=str(tmp_path), effort="xhigh"
+            )
+        )
+
+
 def test_astra_is_a_declared_codex_model(home, tmp_path):
     """The alias added last goes through the same model_args template.
 
