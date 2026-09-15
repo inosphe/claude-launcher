@@ -17,8 +17,8 @@
      a list, not a set.
    - What the fold contains. The rows a child inherits (SPAWN_INHERITS,
      sliced from app.js) are split in two: the ones on the face of the form
-     (RUNTIME_PROMOTED — the qualified profile selector) and the ones
-     still folded away. The fold must hold EXACTLY the remainder. Too much
+     (RUNTIME_PROMOTED — the qualified profile selector and the directory)
+     and the ones still folded away. The fold must hold EXACTLY the remainder. Too much
      and its summary speaks for a row that does not in fact travel; too
      little and a row went missing in the move. A row that appears in both
      halves was copied rather than promoted, and the two copies drift.
@@ -50,6 +50,7 @@ const STATIC = path.join(__dirname, "..", "..", "src", "claude_launcher",
                          "web", "static");
 const html = fs.readFileSync(path.join(STATIC, "index.html"), "utf8");
 const src = fs.readFileSync(path.join(STATIC, "app.js"), "utf8");
+const css = fs.readFileSync(path.join(STATIC, "style.css"), "utf8");
 
 let failures = 0;
 function cls() {
@@ -91,6 +92,7 @@ function ids(text) {
 
 const runsOn = block('<fieldset id="new-runs-on">', "</fieldset>", form.start);
 const identity = block('<fieldset id="new-identity">', "</fieldset>", form.start);
+const where = block('<fieldset id="new-where">', "</fieldset>", form.start);
 
 /* The numbered-card treatment the spawn modal introduced (fdf353f8, "fence
    the spawn form into five decision groups") extended to this form: the
@@ -101,15 +103,28 @@ const identity = block('<fieldset id="new-identity">', "</fieldset>", form.start
    orphan rows. */
 check("Identity fences exactly who the session is",
       named(identity.text), ["parent", "fork_parent", "over_limit", "name"]);
-check("Identity opens the form, ahead of every other fence",
-      identity.start < runsOn.start, true);
+/* The directory opens the form. It decides which checkout every later row
+   acts on, and it is the one answer nothing downstream catches: a session
+   created in the wrong tree does not refuse, it works. It spent releases
+   inside the "How it runs" fold with its value echoed on the fold's summary
+   line, which is a place to notice a directory rather than a place to
+   choose one. */
+check("the directory is fenced on its own and asks exactly one thing",
+      named(where.text), ["cwd"]);
+check("Where it works opens the form, ahead of every other fence",
+      [where.start < identity.start, identity.start < runsOn.start],
+      [true, true]);
+check("...and it is not in the fold any more",
+      named(fold.text).includes("cwd"), false);
 check("the decision blocks are numbered in reading order",
       [...form.text.matchAll(/class="sess-spawn-step">(\d+)</g)].map((m) => m[1]),
-      ["1", "2", "3", "4", "5", "6", "7"]);
+      ["1", "2", "3", "4", "5", "6", "7", "8"]);
 
-/* The reading order: who it is, whose credentials it holds, what it joins,
-   how it runs (folded), what it is told first. */
+/* The reading order: where it works, who it is, whose credentials it holds,
+   what it joins, how it runs (folded), what it is told first. */
 check("the form's controls read in the new order", named(form.text), [
+  // where it works
+  "cwd",
   // who it is
   "parent", "fork_parent", "over_limit", "name",
   // whose credentials it holds — promoted out of the fold
@@ -117,7 +132,7 @@ check("the form's controls read in the new order", named(form.text), [
   // what it joins, and what it drives
   "mesh", "handle", "role", "workflow", "context",
   // how it runs — folded
-  "borrow", "null_token", "cwd", "resume", "fork", "skip_permissions",
+  "borrow", "null_token", "resume", "fork", "skip_permissions",
   "codex_yolo", "codex_sandbox", "args",
   // worktree selection is a create-only checkout choice, after the runtime
   // fold so it is not mistaken for an inherited spawn row
@@ -191,10 +206,30 @@ check("...and it is visible on arrival, under the answer it belongs to",
       /id="new-issue-text-row"(?![^>]*class="hidden")/.test(beadsBox.text),
       true);
 
+/* Every fence on this form is styled by id, one rule per fieldset, plus one
+   shared rule that aligns the step badge in each legend. A fieldset added
+   without both lands on the page unfenced — no border, and a badge sitting
+   on the baseline instead of beside the label — while every check above it
+   passes, because the markup is right and only the styling is missing. That
+   is exactly how #new-where shipped in its first draft. */
+/* The numbered decision fences only. The harness panels inside the fold are
+   fieldsets too, but they are styled by class (.harness-runtime) and carry
+   no step badge, so a badge rule is not theirs to be in. */
+const FENCES = [...form.text.matchAll(
+  /<fieldset id="(new-[\w-]+)"[^>]*>\s*(?:<!--[\s\S]*?-->\s*)?<legend><span class="sess-spawn-step"/g
+)].map((m) => m[1]);
+check("every fence on the form has a card rule of its own",
+      FENCES.filter((id) => !css.includes(`#${id} {`)), []);
+const badgeRule = css.slice(css.indexOf("#new-where legend, #new-identity legend"),
+                            css.indexOf("#new-runtime > summary {"));
+check("...and its legend is in the step-badge rule",
+      FENCES.filter((id) => !badgeRule.includes(`#${id} legend`)), []);
+
 /* The hints travel with the field they explain — a directory warning left
-   above the fold would be pointing at a row that is not on screen. */
-check("cwd's hint is inside the fold with cwd",
-      ids(fold.text).includes("cwd-hint"), true);
+   behind in the fold would be pointing at a row that is no longer there. */
+check("cwd's hint travels with the promoted directory row",
+      [ids(where.text).includes("cwd-hint"), ids(fold.text).includes("cwd-hint")],
+      [true, false]);
 check("the role stance and the parent hint are not",
       ["role-stance", "parent-hint"].map((i) => ids(fold.text).includes(i)),
       [false, false]);
@@ -260,8 +295,13 @@ check("nothing promoted is still in the fold",
       PROMOTED.filter((k) => named(fold.text).includes(k)), []);
 check("...and everything promoted is genuinely inherited",
       PROMOTED.filter((k) => !INHERITS.includes(k)), []);
+/* Promotion took the rows to two fences, not one: the credential pair (and
+   what qualifies it) to "Runs as", the directory to "Where it works" at the
+   top of the form. Between them they must account for the whole list, or a
+   name was added to RUNTIME_PROMOTED without the markup moving. */
 check("the promoted rows are the ones the markup hoisted",
-      PROMOTED.slice().sort(), named(runsOn.text).slice().sort());
+      PROMOTED.slice().sort(),
+      [...named(runsOn.text), ...named(where.text)].sort());
 
 /* ---- every field Create reads is still on the form ---- */
 function sliceFrom(marker) {
@@ -584,42 +624,33 @@ new Function("exports", "$", "spawnParent", "PICKER",
   () => parentSession,
   "@picker");
 
-/* Before the workspace list arrives the directory row holds nothing, and a
-   line that filled the gap with "(daemon cwd)" would be naming a directory
-   the form has not in fact settled on. With the profile promoted out there
-   is then nothing folded to report at all, and a bare "—" is a label
-   pointing at nothing. */
-f.cwd.options = [];
-f.cwd.selectedIndex = -1;
+/* On arrival every folded row is at its default, so there is nothing the
+   reader cannot already see, and the line says nothing. A bare "—" here
+   would be a label pointing at nothing. */
 ctx.render();
-check("an unfilled directory row is left unsaid, not guessed at",
+check("a form at its defaults leaves the line empty",
       sumBox.textContent, "");
 
-f.cwd.options = [{ text: "(daemon cwd)" }];
-f.cwd.selectedIndex = 0;
-ctx.render();
-check("the default says what it would create",
-      sumBox.textContent, "— (daemon cwd)");
-
-/* The promoted rows have labelled controls of their own now. Repeating them
+/* The promoted rows have labelled controls of their own now — the profile
+   pair in "Runs as", the directory at the top of the form. Repeating either
    here would put the same value on screen twice, written by two different
-   code paths — which is how the two come to disagree. */
+   code paths, which is how the two come to disagree. */
 f.profile.value = "nc";
 f.cwd.options = [{ text: "(daemon cwd)" },
                  { text: "launcher — F:/works/claude-launcher" }];
 f.cwd.selectedIndex = 1;
 ctx.render();
-check("the promoted qualified profile is not repeated on the fold's face",
-      sumBox.textContent, "— launcher");
+check("neither promoted row is repeated on the fold's face",
+      sumBox.textContent, "");
 
 f.borrow.value = "work";
 f.null_token.checked = true;
 f.args.value = "--verbose";
 f.resume.value = "@picker";
 ctx.render();
-check("the rest is named only once it is set",
+check("the folded rows are named once they are set",
       sumBox.textContent,
-      "— launcher · borrow work · --null · resume (picker) · +args");
+      "— borrow work · --null · resume (picker) · +args");
 
 f.resume.value = "lead";
 ctx.render();
@@ -635,14 +666,15 @@ ctx.render();
 check("a fully locked child names its parent and nothing else",
       sumBox.textContent, "— inherited from lead");
 
-/* A child whose policy hands two rows back. Those two speak; the rest stay
-   the parent's and stay unnamed — which rows are shut is the parent hint's
-   job, above the fold. */
+/* A child whose policy hands three rows back, two of them promoted. Only
+   the folded one speaks: a promoted row is on the face of the form with a
+   label of its own, and which rows are shut is the parent hint's job. */
 f.profile.disabled = false;
 f.cwd.disabled = false;
+f.borrow.disabled = false;
 ctx.render();
 check("only the open FOLDED rows speak for a child",
-      sumBox.textContent, "— lead's setup · launcher");
+      sumBox.textContent, "— lead's setup · borrow work");
 
 /* Back to a session of its own: every row speaks again, disables and all —
    the create form's own greying (a non-claude harness) is not the policy's. */
@@ -650,7 +682,7 @@ parentSession = null;
 ctx.render();
 check("with no parent every folded row speaks again",
       sumBox.textContent,
-      "— launcher · borrow work · --null · resume lead · +args");
+      "— borrow work · --null · resume lead · +args");
 
 /* Served against a page that predates the fold (a daemon serving older
    assets), the summary has nowhere to go — and must not take the form

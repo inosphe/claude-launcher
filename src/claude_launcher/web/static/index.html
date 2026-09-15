@@ -352,10 +352,12 @@
              join one afterwards without a restart. Whose credentials it runs
              on — the profile, and the harness that follows from it — is the
              other row with that property, so it sits with them rather than
-             in the fold. What is left below (login overrides, directory,
-             resume, args) is machine detail that is right by default nearly
-             every time, so it folds away — reachable, editable, but not in
-             the way. The opening task closes the form on its own, under
+             in the fold. The directory is the third and now opens the form,
+             above all of them: it decides which checkout the session acts
+             on, and getting it wrong is not reported by anything downstream.
+             What is left below (login overrides, resume, args) is machine
+             detail that is right by default nearly every time, so it folds
+             away — reachable, editable, but not in the way. The opening task closes the form on its own, under
              everything that shapes who receives it. -->
         <!-- Naming a parent turns this form into `claunch spawn`: the child
              inherits what decides how it runs, and which of those rows it may
@@ -364,6 +366,26 @@
              rows are the folded ones below, which is why the fold's summary
              line reports where they came from rather than what the form
              happens to be holding. -->
+        <!-- WHERE it works, first and unfolded. The directory decides which
+             checkout every later row acts on, and it is the one answer that
+             fails silently when it is wrong: a session created in the wrong
+             tree does not refuse, it works, and the mistake surfaces as a
+             commit on somebody else's branch. It sat in the "How it runs"
+             fold with a value echoed on the fold's summary line, which is a
+             place to notice a directory rather than a place to choose one.
+             Promoted for the same reason profile and harness were
+             (RUNTIME_PROMOTED): a row nothing downstream catches is asked on
+             the face of the form. -->
+        <fieldset id="new-where">
+          <legend><span class="sess-spawn-step">1</span> Where it works</legend>
+          <p class="sess-spawn-group-blurb">the directory this session is created in</p>
+          <label class="with-link">
+            <span>Directory <a href="#/workspaces">manage</a></span>
+            <select name="cwd"></select>
+          </label>
+          <p id="cwd-hint" class="hidden"></p>
+        </fieldset>
+
         <!-- WHO this session is, fenced like the spawn modal's own first
              group (buildSpawnForm's "Identity") — the rows a reader meets
              before anything else here can grey them. Naming a parent is
@@ -371,7 +393,7 @@
              means, so it opens the form rather than sitting among rows it
              outranks. -->
         <fieldset id="new-identity">
-          <legend><span class="sess-spawn-step">1</span> Identity</legend>
+          <legend><span class="sess-spawn-step">2</span> Identity</legend>
           <p class="sess-spawn-group-blurb">who this session is</p>
           <label>Parent <select name="parent"></select></label>
           <label class="check hidden" id="new-fork-row">
@@ -404,7 +426,7 @@
              those axes so each profile appears once and Harness follows the
              selected profile's policy-filtered choices. -->
         <fieldset id="new-runs-on">
-          <legend><span class="sess-spawn-step">2</span> Runs as</legend>
+          <legend><span class="sess-spawn-step">3</span> Runs as</legend>
           <p class="sess-spawn-group-blurb">whose credentials it runs on</p>
           <label>Profile <select name="profile"></select></label>
           <label>Harness <select name="harness"></select></label>
@@ -427,7 +449,7 @@
              afterwards leaves an agent sitting at a prompt not knowing
              which mesh it is in or which run it drives. -->
         <fieldset id="new-onboard">
-          <legend><span class="sess-spawn-step">3</span> Start it working</legend>
+          <legend><span class="sess-spawn-step">4</span> Start it working</legend>
           <p class="sess-spawn-group-blurb">what it joins, and what it drives</p>
           <label>Mesh <select name="mesh"></select></label>
           <label id="new-handle-row" class="hidden">
@@ -443,18 +465,17 @@
 
         <!-- HOW it runs, folded shut. Every row here has a default that is
              right unless the user says otherwise, so the fold is closed on
-             arrival — but the values still ride on the summary line
-             (renderRuntimeSummary), because the directory a session is
-             created in is not a thing anyone should have to open a fold to
-             find out: an agent started in the wrong checkout does not report
-             the mistake, it just works on the wrong tree. Profile and
-             Harness once sat here for the same reason and were promoted
-             out (RUNTIME_PROMOTED) when the summary line proved too thin a
-             place to check a credential; the summary no longer repeats them,
+             arrival, and the values that are NOT default still ride on the
+             summary line (renderRuntimeSummary). Profile, Harness and the
+             Directory were all promoted out of it (RUNTIME_PROMOTED): a
+             summary line is a place to notice a value, and each of those
+             three needed a place to choose one, because nothing downstream
+             catches a session booted on the wrong credentials or in the
+             wrong checkout. The summary no longer repeats a promoted row,
              since a line naming a row the reader can see is at best noise
              and at worst a contradiction. -->
         <details id="new-runtime">
-          <summary><span class="sess-spawn-step">4</span> How it runs
+          <summary><span class="sess-spawn-step">5</span> How it runs
             <span id="new-runtime-sum"></span></summary>
           <div id="new-runtime-body">
             <label>Borrow <select name="borrow"></select></label>
@@ -462,11 +483,6 @@
               <input type="checkbox" name="null_token">
               <span><code>--null</code> (no OAuth token — log in with /login inside)</span>
             </label>
-            <label class="with-link">
-              <span>Directory <a href="#/workspaces">manage</a></span>
-              <select name="cwd"></select>
-            </label>
-            <p id="cwd-hint" class="hidden"></p>
             <label>Resume <select name="resume"></select></label>
             <label class="check">
               <input type="checkbox" name="fork" disabled>
@@ -511,7 +527,7 @@
         </details>
 
         <fieldset id="new-worktree" class="new-worktree">
-          <legend><span class="sess-spawn-step">5</span> Worktree</legend>
+          <legend><span class="sess-spawn-step">6</span> Worktree</legend>
           <p class="sess-spawn-group-blurb">the checkout this session works in</p>
           <label class="check"><input type="radio" name="worktree_mode" value="" checked>
             <span>no worktree — use the selected directory</span></label>
@@ -531,7 +547,7 @@
         <!-- The first thing it is told, last thing on the form: it is the
              only row whose right answer depends on every row above it. -->
         <fieldset id="new-task">
-          <legend><span class="sess-spawn-step">6</span> Opening task</legend>
+          <legend><span class="sess-spawn-step">7</span> Opening task</legend>
           <p class="sess-spawn-group-blurb">what it is told once it boots</p>
           <textarea name="task" rows="3"
             placeholder="typed in once it has booted — what it is for"></textarea>
@@ -559,7 +575,7 @@
              infer which was meant, and a session told "no issue" would go
              to the board and look for one. -->
         <fieldset id="new-beads">
-          <legend><span class="sess-spawn-step">7</span> Board issue</legend>
+          <legend><span class="sess-spawn-step">8</span> Board issue</legend>
           <p class="sess-spawn-group-blurb">where that job is written down</p>
           <label class="check">
             <input type="radio" name="beads" value="new" checked>
