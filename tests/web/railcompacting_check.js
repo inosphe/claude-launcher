@@ -137,7 +137,10 @@ new Function(
   + slice("profileHarnessLabel") + slice("railMetaText") + slice("refreshSessions")
   + `
 Object.assign(exports, { refresh: refreshSessions });`
-)(ctx, document, el, api, list, meshCache, true);
+)(ctx, document, el, api, list, meshCache, false);
+/* Mesh grouping off: this harness pins where the compacting pill sits
+   relative to the rooms, and a grouped row drops the pill for its own
+   heading's mesh, which can leave no rooms to sit before. */
 
 let failures = 0;
 function check(what, got, want) {
