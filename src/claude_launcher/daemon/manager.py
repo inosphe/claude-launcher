@@ -23,7 +23,7 @@ import re
 import shutil
 import sqlite3
 import time
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Dict, Iterable, List, Optional, Set, Tuple, Union
@@ -31,7 +31,7 @@ from typing import Callable, Dict, Iterable, List, Optional, Set, Tuple, Union
 from .. import borrowing, harnesses as harness_registry, profile as profile_mod
 from .. import spawn as spawn_mod
 from .. import transcripts
-from . import codex_sessions, ctxsize, db, harness as harness_mod
+from . import codex_sessions, ctxsize, db, harness as harness_mod, pi_sessions
 from . import paths, session_events
 from .harness import SessionDef
 from .screen import BACKGROUND_RENDER_BUDGET, RenderBudget
@@ -46,6 +46,26 @@ log = logging.getLogger(__name__)
 
 class ManagerError(Exception):
     """Raised for bad session names, duplicates, or unknown sessions."""
+
+
+@dataclass
+class _PendingClaim:
+    """A conversation the daemon is still waiting for a harness to name.
+
+    ``claim(timeout)`` scans for it and returns the id or ``None``;
+    ``previous`` is the pinned id it will replace (``None`` when the launch
+    pinned nothing yet), and the claim is dropped the moment the pin moves
+    some other way. ``since`` and ``give_up`` bound the wait; ``what`` and
+    ``cwd`` are for the log line when it is abandoned.
+    """
+
+    session: Session
+    claim: Callable[[float], Optional[str]]
+    previous: Optional[str]
+    since: float
+    give_up: float
+    what: str
+    cwd: str
 
 
 class SessionManager:
@@ -66,6 +86,15 @@ class SessionManager:
     #: bloated heap, was what kept the daemon from answering at all.
     _CODEX_CLAIM_RETRY_MAX = 30.0
     _CODEX_CLAIM_GIVE_UP = 600.0
+    #: How long the off-loop wait after a codex ``/new`` lasts before the
+    #: claim is left to the listing polls. Codex writes the rollout at the
+    #: command, so this usually settles it; it is a head start, not a limit.
+    _CODEX_SWITCH_WAIT = 3.0
+    #: How long a pi ``/new`` claim stays pending. pi writes the file with
+    #: the first assistant answer after the command, and a session can sit
+    #: unanswered for a long time; the scan behind it is one directory
+    #: listing plus the first line of each new file, so waiting is cheap.
+    _PI_SWITCH_GIVE_UP = 6 * 3600.0
 
     def __init__(
         self,
@@ -142,23 +171,28 @@ class SessionManager:
         #: does not even exist yet. The board sweep their ending calls for is
         #: owed at boot, and :meth:`take_retired_for_sweep` is who collects it.
         self._retired_for_sweep: List[DeadSession] = []
-        # Codex can create its rollout well after the initial discovery wait
-        # expires.  Keep the launch snapshot so ordinary dashboard polling can
-        # claim that exact rollout later without blocking session creation or
-        # falling back to whichever conversation happens to be newest.
-        self._pending_codex_claims: Dict[
-            str, Tuple[Session, Path, str, Set[str]]
-        ] = {}
-        self._next_codex_claim_retry = 0.0
-        self._codex_claim_interval = self._CODEX_CLAIM_RETRY_INTERVAL
-        #: ``time.monotonic()`` when each pending claim was first deferred.
-        self._codex_claim_since: Dict[str, float] = {}
-        #: A Codex TUI keeps one process alive across ``/new`` while changing
-        #: the rollout UUID.  Each watcher is armed from that exact terminal
-        #: command, with a pre-command snapshot, so concurrent Codex sessions
-        #: in the same cwd cannot be confused by a cwd-wide "latest" lookup.
+        # A harness can write the file that names its conversation well after
+        # the moment claunch would like to know it: codex writes its rollout
+        # after the launch wait expires, pi writes the file ``/new`` creates
+        # only with the first assistant answer. Every such claim is kept here
+        # with the snapshot it was armed from, so ordinary dashboard polling
+        # can settle it later (:meth:`_recover_claims`) without blocking the
+        # session or falling back to whichever conversation is newest.
+        self._pending_claims: Dict[str, _PendingClaim] = {}
+        self._next_claim_retry = 0.0
+        self._claim_interval = self._CODEX_CLAIM_RETRY_INTERVAL
+        #: A TUI keeps one process alive across ``/new`` while changing the
+        #: conversation underneath it (codex its rollout UUID, pi its session
+        #: file). Each watcher is armed from that exact terminal command, with
+        #: a pre-command snapshot, so concurrent sessions in the same cwd
+        #: cannot be confused by a cwd-wide "latest" lookup.
         self._codex_switch_tasks: Dict[str, asyncio.Task] = {}
         self._codex_launch_tasks: Dict[str, asyncio.Task] = {}
+
+    @property
+    def _pending_codex_claims(self) -> Dict[str, "_PendingClaim"]:
+        """The pending claims, under the name the codex-only version had."""
+        return self._pending_claims
 
     # ------------------------------------------------------------------ #
     # lifecycle
@@ -223,12 +257,43 @@ class SessionManager:
         return session
 
     def _session_command_submitted(self, session: Session, command: str) -> None:
-        """Track the replacement rollout created by Codex ``/new``."""
+        """Follow the conversation a TUI's ``/new`` replaces underneath it.
+
+        Codex keeps one process alive across ``/new`` while changing the
+        rollout UUID; pi does the same while changing its session file. Both
+        leave the definition's pinned conversation pointing at the one the
+        session just left, so a restore would reopen that one and the
+        transcript page would read it. The watcher is armed from the exact
+        command, with a snapshot taken before it reaches the child, so
+        concurrent sessions in one cwd cannot be confused by a cwd-wide
+        "latest" lookup. Other submitted lines are ignored here.
+        """
         words = command.split()
-        if not words or words[0] != "/new" or session.sdef.harness != "codex":
+        if not words or words[0] != "/new":
             return
         if self._sessions.get(session.sdef.name) is not session:
             return
+        if session.sdef.harness == "codex":
+            self._watch_codex_new(session)
+        elif session.sdef.harness == harness_mod.PI_HARNESS:
+            self._watch_pi_new(session)
+
+    def _watch_codex_new(self, session: Session) -> None:
+        """Arm the claim for the rollout codex is about to write for ``/new``.
+
+        The claim is a *pending* one (:meth:`_arm_claim`), retried by the
+        listing polls, and only additionally waited for a few seconds off the
+        loop. The one-shot wait this replaced gave up after three seconds and
+        left the pin on the superseded rollout: measured on this machine
+        2026-09-14, session ``s536`` ran ``/new`` at 09:46:39Z, codex wrote
+        rollout ``01a09f4f`` for that cwd the same second, and the daemon
+        logged "could not discover Codex /new conversation id" at 09:46:42 --
+        after which every restore reopened the conversation from before the
+        command. Why the scan inside the window missed a file that a scan
+        today finds is not known; what is known is that a claim with no
+        second chance is the wrong shape for a file another process writes.
+        """
+        name = session.sdef.name
         try:
             prof = profile_mod.require_selector(session.sdef.profile or "")
             entry = harness_registry.get("codex")
@@ -239,25 +304,75 @@ class SessionManager:
         except Exception:
             log.exception(
                 "could not snapshot Codex rollouts before /new in session %r",
-                session.sdef.name,
+                name,
             )
             return
-
-        previous = self._codex_switch_tasks.pop(session.sdef.name, None)
+        cwd = session.sdef.cwd
+        self._arm_claim(
+            session,
+            what="codex /new",
+            cwd=cwd,
+            claim=lambda timeout: codex_sessions.claim_new(
+                codex_home, cwd, known, timeout=timeout
+            ),
+            previous=session.sdef.conversation_id,
+            give_up=self._CODEX_CLAIM_GIVE_UP,
+        )
+        previous = self._codex_switch_tasks.pop(name, None)
         if previous is not None:
             previous.cancel()
         task = asyncio.create_task(
-            self._claim_codex_switch(
-                session,
-                codex_home,
-                session.sdef.cwd,
-                known,
-                session.sdef.conversation_id,
-            )
+            self._claim_in_thread(session, timeout=self._CODEX_SWITCH_WAIT)
         )
-        self._codex_switch_tasks[session.sdef.name] = task
-        task.add_done_callback(
-            functools.partial(self._codex_switch_finished, session.sdef.name)
+        self._codex_switch_tasks[name] = task
+        task.add_done_callback(functools.partial(self._codex_switch_finished, name))
+
+    def _watch_pi_new(self, session: Session) -> None:
+        """Arm the claim for the session file pi creates for ``/new``.
+
+        pi names that file itself (``<timestamp>_<id>.jsonl``, beside the one
+        claunch pinned at launch) and writes it only with the first assistant
+        answer, which may be minutes away -- so there is no short wait here at
+        all, only the pending claim the listing polls retry. The header pi
+        stamps into that file carries the moment of the command, and the
+        claim uses it to tell this session's ``/new`` from another session's
+        in the same directory (see :mod:`pi_sessions`). The pinned id becomes
+        the new file's stem, which is exactly what :func:`harness.pi_session_file`
+        turns back into the path a restore reopens.
+        """
+        name = session.sdef.name
+        if not session.sdef.conversation_id:
+            return  # nothing pinned to follow from (a pre-pin definition)
+        if harness_mod.steers_pi_conversation(session.sdef.args):
+            return  # the caller chose the conversation; it is not ours to move
+        cwd = os.path.abspath(session.sdef.cwd or os.getcwd())
+        try:
+            prof = profile_mod.require_selector(session.sdef.profile or "")
+            entry = harness_registry.get(harness_mod.PI_HARNESS)
+            if entry is None:
+                return
+            session_dir = Path(harness_mod.pi_session_file(
+                str(entry.profile_home(prof.config_dir)),
+                cwd,
+                session.sdef.conversation_id,
+            )).parent
+            known = pi_sessions.snapshot(session_dir)
+        except Exception:
+            log.exception(
+                "could not snapshot pi session files before /new in session %r",
+                name,
+            )
+            return
+        since = time.time()
+        self._arm_claim(
+            session,
+            what="pi /new",
+            cwd=cwd,
+            claim=lambda timeout: pi_sessions.claim_new(
+                session_dir, cwd, known, since=since, timeout=timeout
+            ),
+            previous=session.sdef.conversation_id,
+            give_up=self._PI_SWITCH_GIVE_UP,
         )
 
     def _codex_switch_finished(self, name: str, task: asyncio.Task) -> None:
@@ -265,49 +380,101 @@ class SessionManager:
         if self._codex_switch_tasks.get(name) is task:
             self._codex_switch_tasks.pop(name, None)
 
-    async def _claim_codex_switch(
+    def _arm_claim(
         self,
         session: Session,
-        codex_home: Path,
+        *,
+        what: str,
         cwd: str,
-        known: Set[str],
-        previous_id: Optional[str],
+        claim: Callable[[float], Optional[str]],
+        previous: Optional[str],
+        give_up: float,
     ) -> None:
-        """Wait off-loop for ``/new`` to write its rollout, then persist it."""
-        try:
-            claim = functools.partial(
-                codex_sessions.claim_new,
-                codex_home,
-                cwd,
-                known,
-                timeout=3.0,
-            )
-            conversation_id = await asyncio.get_running_loop().run_in_executor(
-                None, claim
-            )
-        except asyncio.CancelledError:
-            return
-        except Exception:
-            log.exception(
-                "could not discover Codex /new conversation id for session %r",
-                session.sdef.name,
-            )
-            return
-        if not conversation_id:
-            log.warning(
-                "could not discover Codex /new conversation id for session %r",
-                session.sdef.name,
-            )
-            return
-        current = self._sessions.get(session.sdef.name)
-        if current is not session or session.sdef.conversation_id != previous_id:
-            return
+        """Register a conversation claim for the listing polls to settle.
+
+        ``claim(timeout)`` scans for the conversation and returns its id or
+        ``None``; ``previous`` is the id it replaces (``None`` for a launch
+        that pinned nothing yet). A newer claim for the same session replaces
+        an older one: the pin it would have set is already superseded.
+        """
+        self._pending_claims[session.sdef.name] = _PendingClaim(
+            session=session,
+            claim=claim,
+            previous=previous,
+            since=time.monotonic(),
+            give_up=give_up,
+            what=what,
+            cwd=cwd,
+        )
+        self._claim_interval = self._CODEX_CLAIM_RETRY_INTERVAL
+        self._next_claim_retry = 0.0
+
+    def _settle_claim(self, name: str, conversation_id: str) -> bool:
+        """Apply a found conversation id to its pending claim, if still due."""
+        pending = self._pending_claims.get(name)
+        if pending is None:
+            return False
+        session = self._sessions.get(name)
+        if session is not pending.session:
+            self._drop_claim(name)
+            return False
+        if session.sdef.conversation_id != pending.previous:
+            # Something else moved the pin while this claim waited (a newer
+            # /new re-armed it, a hook re-pinned it): this answer is stale.
+            self._drop_claim(name)
+            return False
         session.sdef = replace(session.sdef, conversation_id=conversation_id)
+        self._drop_claim(name)
         self.persist()
         log.info(
-            "updated Codex conversation id after /new in session %r",
-            session.sdef.name,
+            "%s: conversation id for session %r is now %s (was %s)",
+            pending.what, name, conversation_id, pending.previous,
         )
+        return True
+
+    def repin_conversation(
+        self, name: str, conversation_id: str, *, source: str = ""
+    ) -> Dict[str, object]:
+        """Move a session's pinned conversation to the one the harness reports.
+
+        The claude path: its SessionStart hook (``claunch rebrief``, armed on
+        ``compact`` and ``clear``) is handed the session id claude is now on,
+        and ``/clear`` mints a new one -- measured on this machine 2026-09-15:
+        a session pinned at ``5867d547`` fired the hook with ``source: clear``
+        and ``session_id: d545fc0c``, and its transcript moved to
+        ``d545fc0c.jsonl``. Until the hook reported it, the definition kept
+        the old id, so a restore reopened the conversation from before the
+        ``/clear`` and the transcript page read it. ``/compact`` keeps the id
+        (1822 records of one compacted transcript carry one ``sessionId``),
+        and reporting the same id changes nothing.
+
+        Returns what happened; raises :class:`ManagerError` for an unknown
+        session or an empty id.
+        """
+        session = self.get(name)
+        conversation_id = str(conversation_id or "").strip()
+        if not conversation_id:
+            raise ManagerError("conversation id is empty")
+        previous = session.sdef.conversation_id
+        if previous == conversation_id:
+            return {
+                "changed": False,
+                "conversation_id": conversation_id,
+                "previous": previous,
+            }
+        session.sdef = replace(session.sdef, conversation_id=conversation_id)
+        # A pending claim was about the conversation this session just left.
+        self._drop_claim(name)
+        self.persist()
+        log.info(
+            "session %r moved to conversation %s (was %s; reported by %s)",
+            name, conversation_id, previous, source or "harness",
+        )
+        return {
+            "changed": True,
+            "conversation_id": conversation_id,
+            "previous": previous,
+        }
 
     def _session_exited(self, session: Session) -> None:
         """Fan a session's exit out to :attr:`exit_hooks` — unless the daemon
@@ -390,25 +557,27 @@ class SessionManager:
             # every socket, every keystroke — stopped for the wait: 2.03 s
             # measured with 162 rollouts (claunch-wpd0). So the wait goes
             # to a thread, and the pending entry is registered first so the
-            # listing-poll retry (:meth:`_recover_codex_claims`) covers a
+            # listing-poll retry (:meth:`_recover_claims`) covers a
             # rollout that outlasts it.
-            self._pending_codex_claims[session.sdef.name] = (
+            known = known_codex_sessions
+            self._arm_claim(
                 session,
-                codex_home,
-                cwd,
-                known_codex_sessions,
+                what="codex launch",
+                cwd=cwd,
+                claim=lambda timeout: codex_sessions.claim_new(
+                    codex_home, cwd, known, timeout=timeout
+                ),
+                previous=None,
+                give_up=self._CODEX_CLAIM_GIVE_UP,
             )
-            self._codex_claim_since[session.sdef.name] = time.monotonic()
-            self._codex_claim_interval = self._CODEX_CLAIM_RETRY_INTERVAL
-            self._next_codex_claim_retry = 0.0
             try:
                 loop = asyncio.get_running_loop()
             except RuntimeError:
                 loop = None
             if loop is not None:
                 task = loop.create_task(
-                    self._claim_codex_launch(
-                        session, codex_home, cwd, known_codex_sessions
+                    self._claim_in_thread(
+                        session, timeout=self._CODEX_CLAIM_LAUNCH_TIMEOUT
                     )
                 )
                 self._codex_launch_tasks[session.sdef.name] = task
@@ -418,21 +587,20 @@ class SessionManager:
         self.persist()
         return session
 
-    async def _claim_codex_launch(
-        self,
-        session: Session,
-        codex_home: Path,
-        cwd: str,
-        known: Set[str],
-    ) -> None:
-        """Wait off-loop for a just-launched Codex to write its rollout."""
-        claim = functools.partial(
-            codex_sessions.claim_new,
-            codex_home,
-            cwd,
-            known,
-            timeout=self._CODEX_CLAIM_LAUNCH_TIMEOUT,
-        )
+    async def _claim_in_thread(self, session: Session, *, timeout: float) -> None:
+        """Wait off-loop, up to ``timeout``, for a pending claim to settle.
+
+        The scan polls a whole rollout directory; waited for on the loop,
+        that is the daemon -- every socket, every keystroke -- stopped for
+        the wait (2.03 s measured with 162 rollouts, claunch-wpd0). A miss
+        here is not a failure: the claim stays pending and the listing polls
+        keep looking (:meth:`_recover_claims`).
+        """
+        name = session.sdef.name
+        pending = self._pending_claims.get(name)
+        if pending is None or pending.session is not session:
+            return
+        claim = functools.partial(pending.claim, timeout)
         try:
             conversation_id = await asyncio.get_running_loop().run_in_executor(
                 None, claim
@@ -441,26 +609,21 @@ class SessionManager:
             return
         except Exception:
             log.exception(
-                "could not discover Codex conversation id for session %r",
-                session.sdef.name,
+                "could not discover the %s conversation id for session %r",
+                pending.what, name,
             )
             return
-        name = session.sdef.name
         if self._sessions.get(name) is not session:
             return
         if not conversation_id:
-            if name in self._pending_codex_claims:
+            if self._pending_claims.get(name) is pending:
                 log.info(
-                    "Codex conversation id for session %r not written within "
+                    "%s conversation id for session %r not written within "
                     "%.0fs; listing polls keep looking",
-                    name, self._CODEX_CLAIM_LAUNCH_TIMEOUT,
+                    pending.what, name, timeout,
                 )
             return
-        if session.sdef.conversation_id:
-            return  # a listing poll claimed it first
-        session.sdef = replace(session.sdef, conversation_id=conversation_id)
-        self._drop_codex_claim(name)
-        self.persist()
+        self._settle_claim(name, conversation_id)
 
     def _codex_launch_finished(self, name: str, task: asyncio.Task) -> None:
         if self._codex_launch_tasks.get(name) is task:
@@ -483,88 +646,109 @@ class SessionManager:
             if name != except_for and other.sdef.conversation_id
         }
 
-    def _recover_codex_claims(self) -> None:
-        """Claim rollouts that appeared after the launch-time wait expired.
+    def _recover_claims(self) -> None:
+        """Settle claims whose file appeared after their launch-time wait.
 
         Session-list and metadata requests already poll the manager, so they
         are a reliable retry point.  Every retry is a single filesystem scan
-        (``timeout=0``); a slow Codex startup therefore does not delay the API.
-        The original pre-launch snapshot remains the ownership boundary, and
-        the session object identity prevents a stale claim from attaching to
-        a later process that reused the same name.
+        (``timeout=0``); a slow harness therefore does not delay the API.
+        The pre-command snapshot remains the ownership boundary, and the
+        session object identity prevents a stale claim from attaching to a
+        later process that reused the same name.
         """
-        if not self._pending_codex_claims:
+        if not self._pending_claims:
             return
         now = time.monotonic()
-        if now < self._next_codex_claim_retry:
+        if now < self._next_claim_retry:
             return
-        self._next_codex_claim_retry = now + self._codex_claim_interval
+        self._next_claim_retry = now + self._claim_interval
 
         changed = False
         found_any = False
-        for name, pending in list(self._pending_codex_claims.items()):
-            launched, codex_home, cwd, known = pending
+        for name, pending in list(self._pending_claims.items()):
             session = self._sessions.get(name)
-            if session is not launched or session.sdef.conversation_id:
-                self._drop_codex_claim(name)
+            if (
+                session is not pending.session
+                or session.sdef.conversation_id != pending.previous
+            ):
+                self._drop_claim(name)
                 continue
-            conversation_id = codex_sessions.claim_new(
-                codex_home, cwd, known, timeout=0
-            )
+            try:
+                conversation_id = pending.claim(0)
+            except Exception:
+                log.exception(
+                    "%s conversation scan failed for session %r", pending.what, name
+                )
+                conversation_id = None
             if not conversation_id:
-                since = self._codex_claim_since.get(name, now)
-                if now - since >= self._CODEX_CLAIM_GIVE_UP:
-                    self._abandon_codex_claim(session, cwd, now - since)
+                if now - pending.since >= pending.give_up:
+                    self._abandon_claim(pending, now - pending.since)
                 continue
             session.sdef = replace(
                 session.sdef, conversation_id=conversation_id
             )
-            self._drop_codex_claim(name)
+            self._drop_claim(name)
             changed = found_any = True
             log.info(
-                "discovered delayed Codex conversation id for session %r",
-                name,
+                "discovered delayed %s conversation id for session %r: %s",
+                pending.what, name, conversation_id,
             )
         if changed:
             self.persist()
-        if not self._pending_codex_claims:
-            self._next_codex_claim_retry = 0.0
-            self._codex_claim_interval = self._CODEX_CLAIM_RETRY_INTERVAL
+        if not self._pending_claims:
+            self._next_claim_retry = 0.0
+            self._claim_interval = self._CODEX_CLAIM_RETRY_INTERVAL
         elif not found_any:
-            self._codex_claim_interval = min(
-                self._codex_claim_interval * 2, self._CODEX_CLAIM_RETRY_MAX
+            self._claim_interval = min(
+                self._claim_interval * 2, self._CODEX_CLAIM_RETRY_MAX
             )
 
-    def _drop_codex_claim(self, name: str) -> None:
-        self._pending_codex_claims.pop(name, None)
-        self._codex_claim_since.pop(name, None)
+    def _drop_claim(self, name: str) -> None:
+        self._pending_claims.pop(name, None)
 
-    def _abandon_codex_claim(self, session: Session, cwd: str, waited: float) -> None:
-        """Stop looking for a rollout that has not appeared in the grace window.
+    def _abandon_claim(self, pending: "_PendingClaim", waited: float) -> None:
+        """Stop looking for a conversation file that has not appeared in the
+        grace window.
 
-        The session keeps running; only the pin is missing, so a restore of
-        it falls back to ``--last`` for its cwd. Said where it will be seen:
-        the daemon log names the session and cwd, and the person watching
-        the session is told on screen.
+        The session keeps running; only the pin is wrong or missing. For a
+        launch claim (nothing pinned yet) a restore falls back to ``--last``
+        for its cwd; for a ``/new`` claim the pin stays on the conversation
+        the session left, and a restore reopens that one. Said where it will
+        be seen: the daemon log names the session and cwd, and the person
+        watching the session is told on screen.
         """
+        session = pending.session
         name = session.sdef.name
-        self._drop_codex_claim(name)
-        log.warning(
-            "gave up discovering the Codex conversation id for session %r "
-            "after %.0fs: no rollout records cwd %r (a workspace/cwd "
-            "mismatch?); the session keeps running unpinned and a restore "
-            "will resume the newest conversation for that cwd",
-            name, waited, cwd,
-        )
-        try:
-            session.notify(
-                "Codex conversation id not found after "
-                f"{int(waited // 60)} min (no rollout for {cwd}); this session "
-                "is unpinned — a restore resumes the cwd's newest conversation",
-                ttl=60, level="warn",
+        self._drop_claim(name)
+        if pending.previous is None:
+            log.warning(
+                "gave up discovering the Codex conversation id for session %r "
+                "after %.0fs: no rollout records cwd %r (a workspace/cwd "
+                "mismatch?); the session keeps running unpinned and a restore "
+                "will resume the newest conversation for that cwd",
+                name, waited, pending.cwd,
             )
+            text = (
+                "Codex conversation id not found after "
+                f"{int(waited // 60)} min (no rollout for {pending.cwd}); this "
+                "session is unpinned — a restore resumes the cwd's newest "
+                "conversation"
+            )
+        else:
+            log.warning(
+                "gave up discovering the %s conversation for session %r after "
+                "%.0fs; the pin stays on %s, the conversation it left, and a "
+                "restore reopens that one",
+                pending.what, name, waited, pending.previous,
+            )
+            text = (
+                f"the conversation {pending.what} created was not found after "
+                f"{int(waited // 60)} min; a restore reopens the previous one"
+            )
+        try:
+            session.notify(text, ttl=60, level="warn")
         except Exception:  # a notice must never break the manager
-            log.debug("codex give-up notice for %r failed", name, exc_info=True)
+            log.debug("claim give-up notice for %r failed", name, exc_info=True)
 
     def discard(self, name: str) -> None:
         """Drop a staged session that will never start."""
@@ -800,7 +984,7 @@ class SessionManager:
         return f"s{i}"
 
     def get(self, name: str) -> AnySession:
-        self._recover_codex_claims()
+        self._recover_claims()
         try:
             return self._sessions[name]
         except KeyError:
@@ -827,7 +1011,7 @@ class SessionManager:
 
     def list(self) -> List[AnySession]:
         """Every session, live or exited, oldest first (see :meth:`_by_creation`)."""
-        self._recover_codex_claims()
+        self._recover_claims()
         return [session for _, session in self._by_creation()]
 
     # ------------------------------------------------------------------ #
@@ -1533,6 +1717,11 @@ class SessionManager:
         pending = list(self._codex_switch_tasks.values())
         if pending:
             await asyncio.gather(*pending, return_exceptions=True)
+        # ...and a claim the listing polls have not been asked about since the
+        # file appeared (a pi /new answered while nobody had the dashboard
+        # open) gets one last scan, so the restore reopens the right one.
+        self._next_claim_retry = 0.0
+        self._recover_claims()
         self.persist()  # record which sessions were alive, for restore
         # Concurrently, not one after another: each shutdown waits up to its
         # grace window for the child to go, so a serial loop over N live
