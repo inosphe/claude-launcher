@@ -777,6 +777,32 @@ def test_an_explicit_yolo_mode_replaces_the_same_harness_default_once(
     assert argv.count(flag) == 1
 
 
+def test_pi_restore_reopens_the_repinned_session_file(home, tmp_path):
+    """After ``/new``, the pinned id is the new file's stem, and the restore
+    passes exactly that file to ``--session``.
+
+    pi names its post-/new file itself (``<timestamp>_<id>.jsonl``), so the
+    id claunch pins after the switch is that stem; ``pi_session_file`` turns
+    it back into the path pi reopens. A restore must not point at the
+    pre-/new ``<old-id>.jsonl`` — that file still exists and pi would open
+    the conversation the session left.
+    """
+    _profile_for("work", "pi")
+    _declare_harness("pi", home_env="PI_CODING_AGENT_DIR",
+                     restore_args=["--continue"])
+    sdef = harness.normalize(SessionDef(
+        name="x", profile="work", cwd=str(tmp_path), harness="pi",
+        conversation_id="2026-09-15T01-00-00-000Z_newid",
+    ))
+
+    argv, env, _ = harness.build_command(sdef, restoring=True)
+
+    i = argv.index("--session")
+    path = argv[i + 1]
+    assert path.endswith("2026-09-15T01-00-00-000Z_newid.jsonl")
+    assert "_newid" in path and "old" not in path
+
+
 def test_codex_restore_resumes_its_pinned_conversation_id(
     home, tmp_path
 ):

@@ -21,6 +21,7 @@ that knows whose shell it is running in (see :func:`_use_spawn_instead`).
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
 import time
@@ -786,6 +787,55 @@ def _rebrief_unavailable(name: str, exc: Exception, ident: str = "") -> str:
     )
 
 
+def _report_hook_conversation(client, name: str) -> None:
+    """Hand the daemon the session id the harness's hook payload carries.
+
+    claude runs this command as its SessionStart hook on ``compact`` and
+    ``clear`` (:data:`harness.REBRIEF_HOOK_SETTINGS`) and pipes the hook
+    payload to stdin — measured 2026-09-15: ``{"session_id", "transcript_path",
+    "cwd", "hook_event_name": "SessionStart", "source": "startup|compact|
+    clear|resume"}``. ``/clear`` mints a NEW session id and continues in a new
+    transcript file; until the daemon hears that id, its definition keeps the
+    pre-clear one, and a restore would reopen (and the transcript page would
+    read) the conversation the session just left. This is the report that
+    closes that gap; the daemon no-ops when the id is the one already pinned.
+
+    Never fatal: the hook fires once, at the moment the context was lost, and
+    its real job is the briefing on stdout. A payload that cannot be parsed
+    or posted costs the pin only, and the next hook firing posts again.
+    """
+    if sys.stdin is None or sys.stdin.isatty():
+        return  # a human at a terminal: nothing piped, and no hook payload
+    try:
+        raw = sys.stdin.read()
+    except OSError:
+        return
+    if not raw.strip():
+        return
+    try:
+        payload = json.loads(raw)
+    except ValueError:
+        return
+    if not isinstance(payload, dict):
+        return
+    if payload.get("hook_event_name") != "SessionStart":
+        return
+    conversation_id = str(payload.get("session_id") or "").strip()
+    if not conversation_id:
+        return
+    try:
+        client.post(
+            f"/api/sessions/{name}/conversation",
+            {
+                "conversation_id": conversation_id,
+                "source": str(payload.get("source") or ""),
+                "transcript_path": str(payload.get("transcript_path") or ""),
+            },
+        )
+    except DaemonClientError:
+        pass
+
+
 def _cmd_rebrief(args: argparse.Namespace) -> int:
     """Print a session's re-briefing — the SessionStart hook's whole job.
 
@@ -816,6 +866,11 @@ def _cmd_rebrief(args: argparse.Namespace) -> int:
     ident = (getattr(args, "id", "") or "").strip()
     try:
         client = daemon_client.ensure_running()
+        # First duty of the hook form: tell the daemon which conversation
+        # this session is actually on (a /clear minted a new id). Before the
+        # briefing fetch, so a daemon that goes down mid-hook loses nothing
+        # but the pin, which the next hook firing restores.
+        _report_hook_conversation(client, name)
         if ident:
             # One addressed block instead of the whole briefing. Printed as
             # plain text on stdout like the block is, because the caller is an
