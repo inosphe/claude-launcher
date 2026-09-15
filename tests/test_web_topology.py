@@ -377,6 +377,7 @@ CHECKS = [
         "railkeys_check.js",
         "sessionpins_check.js",
         "prwizard_check.js",
+        "railmeshgroup_check.js",
 ]
 
 

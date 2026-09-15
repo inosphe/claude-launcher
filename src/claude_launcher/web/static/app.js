@@ -768,9 +768,9 @@ function toggleSessionPin(name) {
 
 /* Convert lineage-ordered rows into headings and rows. Each selected group
    occupies one level, so selection order is also nesting priority. */
-function sessionGroupRows(entries, groups, level = 0) {
+function sessionGroupRows(entries, groups, level = 0, meshGroup = null) {
   if (level >= groups.length) return entries.map(([session, depth]) =>
-    ({ type: "session", session, depth }));
+    ({ type: "session", session, depth, meshGroup }));
   const group = groups[level];
   const buckets = new Map();
   for (const entry of entries) {
@@ -782,7 +782,13 @@ function sessionGroupRows(entries, groups, level = 0) {
   for (const value of [...buckets.keys()].sort((a, b) =>
     a.localeCompare(b, undefined, { sensitivity: "base" }))) {
     out.push({ type: "group", group, value, level });
-    out.push(...sessionGroupRows(buckets.get(value), groups, level + 1));
+    // Which mesh heading a row ends up under, carried to the row itself. A
+    // session can be in several meshes but lands in exactly one of these
+    // buckets, so the row has to know which one so it can say the others.
+    // `(no mesh)` is a bucket of sessions that joined nothing, not a mesh,
+    // and nothing is suppressed under it.
+    const under = group === "mesh" && value !== "(no mesh)" ? value : meshGroup;
+    out.push(...sessionGroupRows(buckets.get(value), groups, level + 1, under));
   }
   return out;
 }
@@ -1395,7 +1401,8 @@ async function refreshSessions(options) {
         a.localeCompare(b, undefined, { sensitivity: "base" })).flatMap((value) => [
         { type: "group", group: "mesh", value, level: 0 },
         ...buckets.get(value).map(([session, depth]) =>
-          ({ type: "session", session, depth })),
+          ({ type: "session", session, depth,
+             meshGroup: value === "(no mesh)" ? null : value })),
       ]);
     })() : entries.map(([session, depth]) => ({ type: "session", session, depth }));
   // The pinned section ahead of everything, closed by an `ungroup` marker so
@@ -1640,10 +1647,15 @@ async function refreshSessions(options) {
     // it in SessionDef. Use that authoritative membership when the mesh poll
     // has arrived; retain the session field for legacy records and the brief
     // interval before the first mesh poll completes.
-    const meshRoles = [...new Set(
-      sessMeshes(s.name).map((m) => m.label).filter(Boolean),
-    )];
-    role.textContent = s.role || meshRoles[0] || "free-role";
+    // A session can hold a different role in each mesh it joined. Under a
+    // mesh heading, the role that belongs beside the name is the one it holds
+    // in THAT mesh; elsewhere the first membership stands, as before.
+    const memberships = sessMeshes(s.name);
+    const underRole = row.meshGroup
+      ? memberships.find((m) => m.mesh === row.meshGroup) : null;
+    const meshRoles = [...new Set(memberships.map((m) => m.label).filter(Boolean))];
+    role.textContent = s.role || (underRole && underRole.label)
+      || meshRoles[0] || "free-role";
     // And the name the mesh calls it by, when that is not the name above.
     // First of the qualifiers, before the role, because it is another way of
     // saying WHO this row is — the role and the rooms are both properties of
@@ -1674,7 +1686,7 @@ async function refreshSessions(options) {
     // it belongs", and only the first of those is a property of the session
     // itself. Drawn on the same terms as the role tag — a session in no mesh
     // gets nothing rather than an empty pill.
-    const tags = railMeshTags(s.name);
+    const tags = railMeshTags(s.name, row.meshGroup || null);
     let meshBox = null;
     if (tags.length) {
       meshBox = document.createElement("span");
@@ -2024,11 +2036,19 @@ function meshGroupSpawnTarget(meshName) {
 
 /* What the row actually draws: the first few rooms, then a count for the
    rest. A session is normally in one mesh, but nothing stops it joining
-   several, and five pills would push the name it belongs to off the row. */
+   several, and five pills would push the name it belongs to off the row.
+
+   `under` is the mesh heading the row sits below when the rail is grouped by
+   mesh, and that membership is dropped from the pills. The grouping picks one
+   mesh per session (the alphabetically first, sessionMeshGroup), so without
+   this the row spends one of its two slots repeating the heading directly
+   above it while the memberships the grouping could not show fall into the
+   `+N` count. Dropping it spends both slots on the rooms the heading does not
+   already name. Ungrouped rows pass nothing and keep every pill. */
 const RAIL_MESH_TAGS = 2;
 
-function railMeshTags(name) {
-  const meshes = sessMeshes(name);
+function railMeshTags(name, under = null) {
+  const meshes = sessMeshes(name).filter((m) => m.mesh !== under);
   const shown = meshes.slice(0, RAIL_MESH_TAGS).map((m) => ({
     text: m.mesh,
     title: `mesh ${m.mesh} — joined as ${m.handle}` +

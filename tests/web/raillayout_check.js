@@ -182,7 +182,12 @@ new Function(
 Object.assign(exports, {
   refresh: refreshSessions,
   setMeshes: (ms) => { meshCache = ms; },
-});`)(ctx, document, el, api, list, [], true);
+});`)(ctx, document, el, api, list, [], false);
+/* The last argument is the mesh grouping, and it is OFF here on purpose.
+   This harness is a census of the name line, and under a mesh heading the
+   row drops the pill for the heading's own mesh (railMeshTags' `under`), so
+   leaving the grouping on would have the census counting a row whose rooms
+   were deliberately thinned. The grouped row is railmeshgroup_check's. */
 
 /* ---- the rail, built by the real code ---------------------------------- */
 const member = (session) => ({ session, handle: session, role: "worker",
@@ -205,8 +210,10 @@ ctx.setMeshes([
   await ctx.refresh();
 
   const rows = list.kids.filter((r) => r.dataset.name);
+  // Plain lineage order, now that this harness runs ungrouped: each parent
+  // followed by its children, then the roots that have none.
   check("every session gets a row", rows.map((r) => r.dataset.name),
-        ["loner", "s21", "s20", "s25", "mesh-reviewer"]);
+        ["s20", "s21", "s25", "loner", "mesh-reviewer"]);
 
   const row = (name) => rows.find((r) => r.dataset.name === name);
   const kidClasses = (r) => r.kids.map((k) => k.className);
