@@ -29,7 +29,12 @@ harnesses:
     command: codex
     models: [luna, terra, sol, astra]
     efforts: [none, low, medium, high, xhigh, max]
-    model_args: [-c, "model=gpt-5.6-{model}"]
+    model_aliases:
+      luna: gpt-5.6-luna
+      terra: gpt-5.6-terra
+      sol: gpt-5.6-sol
+      astra: gpt-6-astra
+    model_args: [-c, "model={model}"]
     effort_args: [-c, "model_reasoning_effort={effort}"]
     btw:
       command: /btw

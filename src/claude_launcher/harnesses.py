@@ -128,6 +128,8 @@ class Harness:
     #: Optional templates for native model/effort selection. ``{model}`` and
     #: ``{effort}`` are replaced at launch, keeping harness syntax declarative.
     model_args: List[str] = field(default_factory=list)
+    #: Optional model choice -> backend ID mapping, applied before templating.
+    model_aliases: Dict[str, str] = field(default_factory=dict)
     effort_args: List[str] = field(default_factory=list)
     #: Harness-native ``/btw`` capability and its interaction limits. None
     #: means claunch has no declaration for a side-conversation command.
@@ -292,6 +294,7 @@ class Harness:
             "efforts": list(self.efforts),
             "tools": list(self.tools),
             "model_args": list(self.model_args),
+            "model_aliases": dict(self.model_aliases),
             "effort_args": list(self.effort_args),
             "btw": self.btw.to_dict() if self.btw else None,
             "restore_args": list(self.restore_args),
@@ -503,6 +506,15 @@ def _parse_entry(name: str, body) -> Harness:
             raise HarnessConfigError(
                 f"harness {name!r} paste_enter_delay must be non-negative"
             )
+    model_aliases = body.get("model_aliases", {})
+    if not isinstance(model_aliases, dict) or any(
+        not isinstance(k, str) or not k.strip()
+        or not isinstance(v, str) or not v.strip()
+        for k, v in model_aliases.items()
+    ):
+        raise HarnessConfigError(
+            f"harness {name!r} model_aliases must map model choices to non-empty strings"
+        )
     return Harness(
         name=name,
         command=command,
@@ -511,6 +523,7 @@ def _parse_entry(name: str, body) -> Harness:
         efforts=_as_list(body.get("efforts"), f"harness {name!r} efforts"),
         tools=_as_list(body.get("tools"), f"harness {name!r} tools"),
         model_args=_as_list(body.get("model_args"), f"harness {name!r} model_args"),
+        model_aliases=dict(model_aliases),
         effort_args=_as_list(body.get("effort_args"), f"harness {name!r} effort_args"),
         btw=_btw_capability(name, body.get("btw")),
         restore_args=_as_list(
