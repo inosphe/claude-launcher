@@ -184,12 +184,12 @@ function syncBulkActions(sessions, filter = "current") {
   // count: running, killed (exited without the pause marker) and paused
   // (exited with it). Each bulk verb reads one partition, so "resume 2"
   // and "resume 1 paused" never claim the same session twice.
-  const live = filter === "current" || filter === "running"
+  const live = filter === "current" || filter === "running" || filter === "running-paused"
     ? sessions.filter((s) => s.status !== "exited").length : 0;
   const dead = filter === "current" || filter === "killed"
     ? sessions.filter((s) => s.status === "exited" && !s.archived_at
                       && !s.paused_at).length : 0;
-  const paused = filter === "current" || filter === "paused"
+  const paused = filter === "current" || filter === "paused" || filter === "running-paused"
     ? sessions.filter((s) => s.status === "exited" && !s.archived_at
                       && !!s.paused_at).length : 0;
   const set = (id, n, label, title) => {
@@ -555,7 +555,7 @@ async function runSessionSearch(q) {
 const SESSION_FILTER_KEY = `claunch_session_filter:${BASE}`;
 const SESSION_GROUP_KEY = `claunch_session_group:${BASE}`;
 const SESSION_GROUP_ORDER_KEY = `claunch_session_group_order:${BASE}`;
-const SESSION_FILTERS = ["current", "running", "killed", "paused", "archived"];
+const SESSION_FILTERS = ["current", "running-paused", "running", "killed", "paused", "archived"];
 const SESSION_GROUPS = ["mesh", "workspace"];
 let sessionFilter = localStorage.getItem(SESSION_FILTER_KEY) || "current";
 if (!SESSION_FILTERS.includes(sessionFilter)) sessionFilter = "current";
@@ -933,14 +933,16 @@ function sessionCategory(s) {
 
 function sessionMatchesFilter(s, filter = sessionFilter) {
   const category = sessionCategory(s);
+  if (filter === "running-paused") return category === "running" || category === "paused";
   return filter === "current" ? category !== "archived" : category === filter;
 }
 
 function sessionFilterCounts(sessions) {
-  const counts = { current: 0, running: 0, killed: 0, paused: 0, archived: 0 };
+  const counts = { current: 0, "running-paused": 0, running: 0, killed: 0, paused: 0, archived: 0 };
   for (const session of sessions || []) {
     const category = sessionCategory(session);
     counts[category]++;
+    if (category === "running" || category === "paused") counts["running-paused"]++;
     if (category !== "archived") counts.current++;
   }
   return counts;
@@ -968,6 +970,7 @@ function syncSessionFilters(sessions) {
   }
   const counts = sessionFilterCounts(sessions);
   const labels = {
+    "running-paused": "Running || Paused",
     current: "Current", running: "Running", killed: "Killed", paused: "Paused",
     archived: "Archived",
   };
