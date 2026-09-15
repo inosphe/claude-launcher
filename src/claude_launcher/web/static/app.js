@@ -883,6 +883,25 @@ function syncSessionGroupStickyOffsets(list) {
   }
 }
 
+/* Where the rail has to be scrolled for a group's first session to sit
+   directly under that group's own heading.
+
+   `scrollIntoView` would put the row at the top of the rail, which is where
+   the pinned headings already are: the row would land underneath them and
+   the reader would see the stack rather than the session they asked for.
+   The headings above the target occupy exactly its own
+   `--session-group-sticky-top` pixels once it reaches the stack, so that
+   offset plus the heading's own height is the first free pixel below it. */
+function sessionGroupJumpOffset(list, heading, row) {
+  const listRect = list.getBoundingClientRect();
+  const rowRect = row.getBoundingClientRect();
+  const headRect = heading.getBoundingClientRect();
+  const raw = (heading.style && typeof heading.style.getPropertyValue === "function")
+    ? heading.style.getPropertyValue("--session-group-sticky-top") : "";
+  const stickyTop = parseFloat(raw) || 0;
+  return (rowRect.top || 0) - (listRect.top || 0) - stickyTop - (headRect.height || 0);
+}
+
 function setSessionGroup(group, enabled, remember = true) {
   if (!SESSION_GROUPS.includes(group)) return;
   sessionGroupOrder = sessionGroupOrder.filter((item) => item !== group);
@@ -1448,6 +1467,29 @@ async function refreshSessions(options) {
         : `${row.group} group ${row.value} — click to fold it shut`;
       const body = document.createElement("ul");
       body.className = "session-group-body";
+      // Jump to the group's first session. Every grouping gets one: a
+      // heading pinned at the bottom of the stack names a group whose rows
+      // are an unknown distance further down, and this is how the reader
+      // gets to them without scrolling past the groups in between.
+      const jump = document.createElement("button");
+      jump.className = "session-group-jump";
+      jump.type = "button";
+      jump.textContent = "↓";
+      jump.title = `jump to the first session in ${row.group} ${row.value}`;
+      jump.addEventListener("click", (e) => {
+        e.stopPropagation();   // the heading itself folds; this does not
+        const first = body.querySelector("li[data-name]");
+        if (!first) return;
+        // A shut group has nothing on screen to scroll to, so opening it is
+        // part of the jump rather than a second thing to ask of the reader.
+        if (group.classList.contains("collapsed")) {
+          setSessionGroupCollapsed(row.group, row.value, false);
+          paintFold(false);
+          syncSessionGroupStickyOffsets(list);
+        }
+        list.scrollTop += sessionGroupJumpOffset(list, heading, first);
+      });
+      heading.appendChild(jump);
       // A mesh heading spawns from that mesh's leader, which is what the
       // leader row's own + does. Drawn even when it cannot: the refusal and
       // its reason are the answer to "why is there no + here".

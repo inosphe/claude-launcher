@@ -143,6 +143,11 @@ option:disabled { color: #6b7280; }
   flex: none; color: #7d8590; font-weight: 400;
   font-variant-numeric: tabular-nums;
 }
+#session-list .session-group-jump {
+  flex: none; background: none; border: none; color: #6e7681;
+  font-size: 11px; line-height: 1; padding: 0 3px; cursor: pointer;
+}
+#session-list .session-group-jump:hover { color: #e6edf3; }
 #session-list .session-group-plus {
   flex: none; background: none; border: none; color: #6e7681;
   font-size: 14px; line-height: 1; padding: 0 4px; cursor: pointer;

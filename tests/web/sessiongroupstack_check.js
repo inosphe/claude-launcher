@@ -49,6 +49,7 @@ new Function("exports", slice("function sessionGroupStickyTops(",
                               "function setSessionGroup(") +
   "\nexports.layout = sessionGroupStickyLayout;" +
   "\nexports.sync = syncSessionGroupStickyOffsets;" +
+  "\nexports.jumpOffset = sessionGroupJumpOffset;" +
   "\nexports.budget = SESSION_GROUP_STACK_BUDGET;")(sticky);
 
 function heading(level, height) {
@@ -116,6 +117,36 @@ sticky.sync({
 check("the fallback clears the bottom offset instead of pinning to it",
       [overFlips, overBudget.map((h) => h.props["--session-group-sticky-bottom"])],
       [[["session-group-stacked", false]], ["auto", "auto"]]);
+
+/* ---------------------------------------------------------------- */
+/* the jump to a group's first session                              */
+/* ---------------------------------------------------------------- */
+
+/* The row has to land under the group's own heading rather than at the
+   rail's top, which is where the pinned stack already sits: a row scrolled
+   to the top would be behind the headings the stack keeps there. */
+const rect = (top, height) => ({ getBoundingClientRect: () => ({ top, height }) });
+function pinned(top, height, stickyTop) {
+  const h = rect(top, height);
+  h.style = { getPropertyValue: () => `${stickyTop}px` };
+  return h;
+}
+
+check("the row is scrolled to the first pixel below its own heading",
+      sticky.jumpOffset(rect(100, 500), pinned(127, 27, 27), rect(600, 24)),
+      600 - 100 - 27 - 27);
+
+check("a row already in place needs no scroll",
+      sticky.jumpOffset(rect(0, 500), pinned(54, 27, 54), rect(81, 24)), 0);
+
+check("a row above the heading scrolls the rail back up",
+      sticky.jumpOffset(rect(100, 500), pinned(100, 27, 0), rect(120, 24)) < 0,
+      true);
+
+const unset = rect(27, 27);
+unset.style = { getPropertyValue: () => "" };
+check("a heading with no stack offset yet counts only its own height",
+      sticky.jumpOffset(rect(0, 500), unset, rect(200, 24)), 200 - 27);
 
 /* ---------------------------------------------------------------- */
 /* the fold each group remembers                                    */
@@ -321,6 +352,20 @@ check("a fold re-measures the stack it just changed",
       /paintFold\(shut\);/.test(src), true);
 check("the rail re-measures the stack when the window height changes",
       /syncSessionGroupStickyOffsets\(railList\)/.test(src), true);
+
+check("the jump reads the group's first session out of the group's own body",
+      /const first = body\.querySelector\("li\[data-name\]"\);/.test(src), true);
+check("the jump opens a shut group rather than scrolling to hidden rows",
+      /if \(group\.classList\.contains\("collapsed"\)\) \{[\s\S]{0,240}?paintFold\(false\);/
+        .test(src), true);
+check("the jump moves the rail by the measured offset",
+      /list\.scrollTop \+= sessionGroupJumpOffset\(list, heading, first\);/.test(src),
+      true);
+check("every grouping gets a jump, not only mesh",
+      src.indexOf("heading.appendChild(jump);") <
+      src.indexOf("meshGroupSpawnTarget(row.value)"), true);
+check("the jump is styled as a heading control",
+      /#session-list \.session-group-jump\s*\{/.test(css), true);
 
 if (failures) process.exit(1);
 console.log("sessiongroupstack_check: ok");
