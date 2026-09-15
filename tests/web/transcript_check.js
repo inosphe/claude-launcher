@@ -133,6 +133,7 @@ function build() {
   async function api(p) {
     calls.push(p);
     const a = answers.shift() || { status: 200, body: { records: [], has_more: false } };
+    if (a.wait) await a.wait;
     return { ok: a.status === 200, status: a.status, json: async () => a.body };
   }
 
@@ -153,11 +154,13 @@ function build() {
 let shown = null;
 function showView(v) { shown = v; }
 const TRANSCRIPT_PAGE = 40;
+${src.match(/const TRANSCRIPT_FOLLOW_MAX = \d+;/)[0]}
 const TRANSCRIPT_NEAR_TOP = 400;
 const TRANSCRIPT_NEAR_END = 40;
 const TRANSCRIPT_POLL_MS = 4000;
 let transcriptName = null, transcriptCursor = null, transcriptSeen = -1;
 let transcriptMore = false, transcriptBusy = false, transcriptTimer = null;
+let transcriptGeneration = 0;
 ` + code + `
 exports.open = openTranscript;
 exports.close = closeTranscript;
@@ -315,6 +318,7 @@ const texts = (pane) => pane.children
         + " into a stale page",
         w.api.isOpen === false && w.api.name === null);
   check("and the follow-forward stopped with it", w.api.polling === false);
+  check("leaving releases the conversation DOM", w.pane.children.length === 0);
 
   // Back again: a fresh read, not a resumed one.
   w.script([{ status: 200, body: { records: recs(0, 12), has_more: false, cursor: 0, total: 12 } }]);
@@ -451,6 +455,71 @@ const texts = (pane) => pane.children
   check("prose wraps rather than growing a sideways scrollbar",
         /\.log-text\s*\{[^}]*white-space:\s*pre-wrap/.test(css));
 }
+
+(async () => {
+  const world = build();
+  world.script([{ status: 200, body: { records: recs(0, 40), cursor: 0, has_more: false } }]);
+  world.api.open("long-running");
+  await flush();
+  for (let page = 1; page <= 100; page += 1) {
+    world.script([{ status: 200, body: {
+      records: recs(page * 40, (page + 1) * 40), cursor: page * 40, has_more: true,
+    } }]);
+    world.api.poll();
+    await flush();
+  }
+  check("following 4040 records retains only the latest 200", texts(world.pane).length === 200);
+  check("the retained tail stays current", texts(world.pane).at(-1) === "4039");
+  check("evicted history remains pageable", world.api.cursor === 3840 && world.api.more);
+  world.pane.scrollTop = 100;
+  const height = world.pane.scrollHeight;
+  world.script([{ status: 200, body: { records: recs(3800, 3840), cursor: 3800, has_more: true } }]);
+  world.api.scroll();
+  await flush();
+  check("scrolling back reloads the evicted page", world.calls.at(-1).includes("before=3840")
+        && texts(world.pane)[0] === "3800" && texts(world.pane).length === 240);
+  check("loading older history preserves the scroll position",
+        world.pane.scrollTop === 100 + world.pane.scrollHeight - height);
+  world.api.close();
+  check("closing a long conversation releases all records", world.pane.children.length === 0);
+})();
+
+(async () => {
+  const world = build();
+  let finishOld, finishNew;
+  const oldWait = new Promise((resolve) => { finishOld = resolve; });
+  const newWait = new Promise((resolve) => { finishNew = resolve; });
+  world.script([
+    { status: 200, wait: oldWait, body: { records: recs(0, 40), cursor: 0 } },
+    { status: 200, wait: newWait, body: { records: recs(100, 140), cursor: 100 } },
+  ]);
+  world.api.open("reopened");
+  world.api.close();
+  world.api.open("reopened");
+  finishOld();
+  await flush();
+  check("an earlier visit cannot repopulate the reopened pane", texts(world.pane).length === 0);
+  world.api.poll();
+  check("a stale completion cannot unlock the current request", world.calls.length === 2);
+  finishNew();
+  await flush();
+  check("the reopened pane uses only its own response", texts(world.pane)[0] === "100"
+        && texts(world.pane).length === 40);
+
+  let finishSwitch;
+  const switchWait = new Promise((resolve) => { finishSwitch = resolve; });
+  world.script([
+    { status: 200, wait: switchWait, body: { records: recs(140, 180), cursor: 140 } },
+    { status: 200, body: { records: recs(0, 5), cursor: 0 } },
+  ]);
+  world.api.poll();
+  world.api.open("another");
+  await flush();
+  check("switching sessions starts its own fetch immediately", texts(world.pane).length === 5);
+  finishSwitch();
+  await flush();
+  check("a previous session response cannot add records", texts(world.pane).length === 5);
+})();
 
 process.on("exit", (code) => {
   if (failures) { console.log(`${failures} check(s) failed`); process.exitCode = 1; }

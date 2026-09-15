@@ -8876,6 +8876,7 @@ document.addEventListener("visibilitychange", () => {
    daemon time. Older pages are fetched as the reader nears the top; while
    they sit at the bottom the poll follows the session forward. */
 const TRANSCRIPT_PAGE = 40;
+const TRANSCRIPT_FOLLOW_MAX = 200;
 const TRANSCRIPT_NEAR_TOP = 400;   // px from the top that triggers an older page
 const TRANSCRIPT_NEAR_END = 40;    // px from the bottom that still counts as "live"
 let transcriptName = null;         // the session whose conversation this page is
@@ -8883,6 +8884,7 @@ let transcriptCursor = null;       // oldest seq loaded; the next page ends here
 let transcriptSeen = -1;           // newest seq loaded, for the follow-forward
 let transcriptMore = false;        // is there anything above what is loaded
 let transcriptBusy = false;        // one fetch at a time, or a flick sends ten
+let transcriptGeneration = 0;
 
 /* Open the page for a session — the route's entry point. Re-entering the one
    already on screen is a no-op rather than a reload: coming back from the
@@ -8894,6 +8896,8 @@ function openTranscript(name) {
   const back = $("log-back");
   if (back) back.href = `#/s/${encodeURIComponent(name)}`;
   if (transcriptName === name) return;
+  transcriptGeneration += 1;
+  transcriptBusy = false;
   transcriptName = name;
   transcriptCursor = null;
   transcriptSeen = -1;
@@ -8917,8 +8921,11 @@ function openTranscript(name) {
    should land at the bottom rather than at a cursor into a stale page. */
 function closeTranscript() {
   stopTranscriptPoll();
+  transcriptGeneration += 1;
   transcriptName = null;
   transcriptBusy = false;
+  const pane = $("term-log-pane");
+  if (pane) pane.innerHTML = "";
 }
 
 function transcriptIsOpen() {
@@ -8949,6 +8956,7 @@ function transcriptAtEnd(pane) {
 async function loadTranscriptPage(opts) {
   const older = !!(opts && opts.older);
   const name = transcriptName;
+  const generation = transcriptGeneration;
   if (!name || transcriptBusy) return;
   transcriptBusy = true;
   const pane = $("term-log-pane");
@@ -8963,10 +8971,10 @@ async function loadTranscriptPage(opts) {
     const data = await res.json();
     // The reader may have closed it, or walked to another session, while this
     // was in flight; its answer is not theirs any more.
-    if (transcriptName !== name) return;
+    if (transcriptGeneration !== generation) return;
     renderTranscriptPage(data, older);
   } catch (err) {
-    if (transcriptName !== name) return;
+    if (transcriptGeneration !== generation) return;
     const box = $("term-log-pane");
     if (box && !box.querySelector(".log-rec")) {
       box.innerHTML = "";
@@ -8974,7 +8982,7 @@ async function loadTranscriptPage(opts) {
                          `could not read the conversation — ${err.message}`));
     }
   } finally {
-    transcriptBusy = false;
+    if (transcriptGeneration === generation) transcriptBusy = false;
   }
 }
 
@@ -9025,7 +9033,17 @@ function renderTranscriptPage(data, older) {
     // Only if they were already at the bottom. A reader who has scrolled up
     // to read something is not asking to be dragged back down every time the
     // session says another word.
-    if (follow) pane.scrollTop = pane.scrollHeight;
+    if (follow) {
+      const retained = Array.from(pane.children).filter((node) =>
+        node.classList.contains("log-rec"));
+      const excess = retained.length - TRANSCRIPT_FOLLOW_MAX;
+      if (excess > 0) {
+        for (const node of retained.slice(0, excess)) node.remove();
+        transcriptCursor = Number(retained[excess].dataset.seq);
+        transcriptMore = true;
+      }
+      pane.scrollTop = pane.scrollHeight;
+    }
   }
 }
 
