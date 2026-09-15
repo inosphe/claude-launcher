@@ -37,7 +37,7 @@ const rows = sessions.map((session) => {
 });
 const list = { querySelectorAll: () => rows };
 const buttons = {};
-for (const filter of ["current", "running", "killed", "paused", "archived"]) {
+for (const filter of ["current", "running-paused", "running", "killed", "paused", "archived"]) {
   buttons[filter] = {
     textContent: "", children: [], attrs: {},
     append(...children) { this.children.push(...children); },
@@ -88,17 +88,27 @@ check("the four lifecycle categories are disjoint",
 check("current combines running, killed and paused",
       sessions.map((s) => ctx.matches(s, "current")), [true, true, true, false]);
 check("every count describes its exact partition", ctx.counts(sessions),
-      { current: 3, running: 1, killed: 1, paused: 1, archived: 1 });
+      { current: 3, "running-paused": 2, running: 1, killed: 1, paused: 1, archived: 1 });
 
 ctx.sync(sessions);
 check("the remembered killed filter is selected",
       Object.values(buttons).map((b) => b.attrs["aria-pressed"]),
-      ["false", "false", "true", "false", "false"]);
+      ["false", "false", "false", "true", "false", "false"]);
 check("killed shows only killed rows — a paused record is not one",
       rows.map((row) => row.classes.has("session-filtered")), [true, false, true, true]);
 check("counts are rendered beside every label",
       Object.values(buttons).map((b) => b.children[1].textContent),
-      ["3", "1", "1", "1", "1"]);
+      ["3", "2", "1", "1", "1", "1"]);
+
+ctx.set("running-paused");
+check("combined mode shows running and paused rows",
+      rows.map((row) => row.classes.has("session-filtered")), [false, true, false, true]);
+check("combined mode is remembered", writes.at(-1),
+      ["claunch_session_filter:/t/local/", "running-paused"]);
+check("combined mode has its own selected control",
+      buttons["running-paused"].attrs["aria-pressed"], "true");
+check("combined mode has a label before polling",
+      html.includes('aria-pressed="false">Running || Paused<span'), true);
 
 ctx.set("paused");
 check("paused shows only paused rows",
@@ -138,8 +148,8 @@ check("group priority follows checkbox activation order",
         ["claunch_session_group:/t/local/", "true"],
       ]);
 
-check("the shipped page contains all five state controls",
-      ["current", "running", "killed", "paused", "archived"].every((name) =>
+check("the shipped page contains all six state controls",
+      ["current", "running-paused", "running", "killed", "paused", "archived"].every((name) =>
         html.includes(`id="session-filter-${name}"`)), true);
 // A poll that has not landed yet — first load, or the window a daemon reset
 // opens — must not leave this bar a blank strip. The labels are seeded in the

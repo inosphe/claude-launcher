@@ -119,6 +119,8 @@ const paused = [
 ];
 check("paused records get their own resume and leave the killed counts alone",
       bar(paused), ["stop 1", "pause 1", "resume 1 paused", "resume 1", "archive 1 exited"]);
+check("combined mode offers running actions and paused resume",
+      bar(paused, "running-paused"), ["stop 1", "pause 1", "resume 1 paused"]);
 check("paused mode exposes only the paused resume", bar(paused, "paused"),
       ["resume 1 paused"]);
 // The bar is gated on every partition, not on running plus killed: in the
