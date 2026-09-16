@@ -1,34 +1,3 @@
 <!doctype html>
-<html lang="ko">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>claunch · 관찰 대시보드</title>
-<link rel="stylesheet" href="observer.css">
-<script src="observer.js" defer></script>
-</head>
-<body>
-<header><a href="../">claunch</a><h1>관찰 대시보드</h1><button id="monitor">관찰 시작</button></header>
-<main>
-<p id="notice" role="status" aria-live="polite"></p>
-<form id="login" hidden><label>데몬 API 토큰 <input id="token" type="password" autocomplete="off"></label><button>로그인</button></form>
-<div class="filters">
-<label>보기 <select id="scope"><option value="global">전체</option><option value="mesh">메시</option><option value="session">세션</option></select></label>
-<label id="selection-label" hidden>대상 <select id="selection"></select></label>
-<label><input id="actions-only" type="checkbox"> 조치 필요만</label>
-<label><input id="ended" type="checkbox"> 종료된 세션 포함</label>
-</div>
-<p id="counts"></p>
-<p class="hint">중요 결과와 사용자 요청을 표시합니다. 요약은 AI의 해석이며 각 이벤트에서 근거를 확인할 수 있습니다.</p>
-<section id="cards" aria-label="세션 결과"></section>
-</main>
-<footer id="composer">
-<label for="target">입력 대상 세션</label><select id="target"><option value="">세션 선택</option></select>
-<button id="interrupt" disabled>현재 응답 중단 (Esc)</button>
-<label for="prompt" class="sr-only">세션에 보낼 지시</label>
-<textarea id="prompt" rows="3" placeholder="선택한 세션에 보낼 지시를 입력하십시오."></textarea>
-<button id="send" disabled>전송</button>
-<p id="input-status" role="status">중단은 Esc 키를 전송합니다. 실제 중단 상태를 확인한 후 새 지시를 보내십시오.</p>
-</footer>
-</body>
-</html>
+<html lang="ko"><head><meta charset="utf-8"><meta http-equiv="refresh" content="0;url=../#/observer"><title>Observer</title></head>
+<body><a href="../#/observer">관찰 대시보드 열기</a></body></html>
