@@ -1126,7 +1126,8 @@ const RAIL_KEYS_CHIP = {
   card: {
     text: "⌨ card",
     title: "the keyboard is on this card — k ends this session, p pauses it, "
-      + "a approves its waiting gate, e archives it, f pins it, Enter opens it",
+      + "a approves its waiting gate, e archives it, q quick-forks it, "
+      + "f pins it, Enter opens it",
   },
   term: {
     text: "⌨ session",
@@ -1282,6 +1283,14 @@ const RAIL_CARD_KEYS = [
     what: "archive the record",
     when: "an exited session that is not already archived",
     act: (name) => railCardArchive(name),
+  },
+  {
+    keys: ["q"],
+    label: "q",
+    what: "quick-fork the session",
+    when: "a live claude session with a conversation to copy — the copy "
+      + "opens, marked 'forked from here'",
+    act: (name) => railCardQuickFork(name),
   },
   {
     keys: ["f"],
@@ -6825,6 +6834,190 @@ $("term-rebrief").addEventListener("click", async () => {
 /* ------------------------------------------------------------------ */
 /* terminal attachment                                                */
 /* ------------------------------------------------------------------ */
+/* ---- quick-fork and handoff (daemon/handoff.py) --------------------------
+
+   quick-fork copies a session's conversation into a child marked "forked
+   from here"; merge is the copy's way back — the daemon asks the copy for a
+   wrap-up, types it into the origin, and ends the copy. A handoff is the
+   same relay between two sessions with no relation, which is why it needs a
+   picker and lives in the detail panel while fork/merge are one press in
+   the header. Both halves of the way back are one route: without text it is
+   the operator's request (typed into the source, pending on its row), with
+   text it is the agent's completion. The header only ever sends the request;
+   the completion is the agent's, from inside its own terminal. */
+
+/* Whether the fork/merge buttons apply to a record: fork on a live claude
+   session with a conversation to copy, merge on a live quick-fork. The
+   daemon is the authority (it refuses a fork with no transcript on disk),
+   this only keeps the button off records it would refuse outright. */
+function forkControlState(session) {
+  const s = session || {};
+  const live = !!s.name && s.status !== "exited";
+  const claude = String(s.harness || "").startsWith("claude");
+  return {
+    fork: live && claude && !!s.conversation_id && !s.quick_fork_of,
+    merge: live && !!s.quick_fork_of,
+  };
+}
+
+/* The merge/hand-off button's face while a request is pending: the daemon
+   typed the ask in and is waiting for the agent to hand its text in. A
+   second press is "stop now" — the plain kill, which clears the request. */
+function handoffControlState(session) {
+  const s = session || {};
+  if (s.handoff) {
+    const merge = s.handoff.kind === "merge";
+    return {
+      label: merge ? "merging…" : "handing off…", pending: true,
+      title: (merge ? "the copy was asked for its wrap-up; it goes to "
+                    : "this session was asked for a handoff; it goes to ")
+        + `'${s.handoff.target}' and the session ends then — press again to stop it now`,
+    };
+  }
+  return {
+    label: "↩ merge", pending: false,
+    title: "merge: ask this copy to write a wrap-up of everything since the fork; "
+      + "it goes to the origin and the copy ends",
+  };
+}
+
+async function quickForkSession(name, task) {
+  if (!name) return null;
+  const body = {};
+  if (task) body.task = task;
+  let resp;
+  try {
+    resp = await api(`/api/sessions/${encodeURIComponent(name)}/quick-fork`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+  } catch (err) {
+    await modalInfo(`Could not quick-fork '${name}'`,
+                    err && err.message ? err.message : "request failed");
+    return null;
+  }
+  const info = await resp.json().catch(() => ({}));
+  if (!resp.ok) {
+    await modalInfo(`Could not quick-fork '${name}'`,
+                    info.error || `HTTP ${resp.status}`);
+    return null;
+  }
+  await refreshSessions({ state: "current" });
+  // Straight to the copy: a quick-fork is made to be worked in, and the
+  // origin's terminal is where the reader already was.
+  const child = (info.session || {}).name;
+  if (child) location.hash = "#/s/" + encodeURIComponent(child);
+  return info;
+}
+
+/* The operator's press: ask the source for its wrap-up (merge) or its
+   handoff (to `to`). A press on a session already asked is "stop now". */
+async function requestHandoff(name, to, kind) {
+  if (!name) return null;
+  const rec = sessionsCache.find((s) => s.name === name) || {};
+  if (rec.handoff) {
+    // second press: end it without the report, the plain way
+    return killSession(name);
+  }
+  const body = {};
+  if (to) body.to = to;
+  if (kind) body.kind = kind;
+  let resp;
+  try {
+    resp = await api(`/api/sessions/${encodeURIComponent(name)}/handoff`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+  } catch (err) {
+    await modalInfo(`Could not ask '${name}'`,
+                    err && err.message ? err.message : "request failed");
+    return null;
+  }
+  const info = await resp.json().catch(() => ({}));
+  if (!resp.ok) {
+    await modalInfo(`Could not ask '${name}'`, info.error || `HTTP ${resp.status}`);
+    return null;
+  }
+  const at = sessionsCache.findIndex((s) => s.name === name);
+  if (at >= 0) {
+    sessionsCache[at] = {
+      ...sessionsCache[at],
+      handoff: { kind: info.kind, target: info.target, requested_at: info.requested_at },
+    };
+  }
+  syncSessionHandoffControls(name);
+  await refreshSessions({ state: "current" });
+  return info;
+}
+
+async function cancelHandoff(name) {
+  if (!name) return false;
+  let resp;
+  try {
+    resp = await api(`/api/sessions/${encodeURIComponent(name)}/handoff`, { method: "DELETE" });
+  } catch (err) {
+    await modalInfo(`Could not withdraw the request on '${name}'`,
+                    err && err.message ? err.message : "request failed");
+    return false;
+  }
+  const info = await resp.json().catch(() => ({}));
+  if (!resp.ok) {
+    await modalInfo(`Could not withdraw the request on '${name}'`,
+                    info.error || `HTTP ${resp.status}`);
+    return false;
+  }
+  const at = sessionsCache.findIndex((s) => s.name === name);
+  if (at >= 0) {
+    const next = { ...sessionsCache[at] };
+    delete next.handoff;
+    sessionsCache[at] = next;
+  }
+  syncSessionHandoffControls(name);
+  await refreshSessions({ state: "current" });
+  return true;
+}
+
+/* The header's two buttons follow the attached session: which of them is
+   on screen (forkControlState) and what the merge one says (the pending
+   face). Guarded like term-pin: the harnesses that slice this region build
+   a header without them. */
+function syncSessionHandoffControls(name = currentName) {
+  if (!name || name !== currentName) return;
+  const session = sessionsCache.find((s) => s.name === name);
+  const which = forkControlState(session);
+  const fork = $("term-fork");
+  const merge = $("term-merge");
+  if (fork) fork.classList.toggle("hidden", !which.fork);
+  if (merge) {
+    merge.classList.toggle("hidden", !which.merge);
+    const state = handoffControlState(session);
+    merge.textContent = state.label;
+    merge.title = state.title;
+    merge.classList.toggle("kill-winddown", state.pending);
+  }
+}
+
+if ($("term-fork")) {
+  $("term-fork").addEventListener("click", () => {
+    if (currentName) quickForkSession(currentName);
+  });
+}
+if ($("term-merge")) {
+  $("term-merge").addEventListener("click", () => {
+    if (currentName) requestHandoff(currentName, "", "merge");
+  });
+}
+
+/* `q` on a rail card: the header's fork button on the card's session. */
+function railCardQuickFork(name) {
+  const rec = railCardRecord(name);
+  if (!rec || !forkControlState(rec).fork) return false;
+  quickForkSession(name);
+  return true;
+}
+
+/* ---- end quick-fork and handoff ------------------------------------- */
+
 function setStatusBadge(status) {
   const badge = $("term-status");
   // An exited session is revivable and archivable. An archived record keeps
@@ -6847,6 +7040,7 @@ function setStatusBadge(status) {
   $("term-archive").classList.toggle("hidden", !exited || archived);
   if (typeof syncSessionPinUi === "function") syncSessionPinUi();
   syncSessionKillControls();
+  if (typeof syncSessionHandoffControls === "function") syncSessionHandoffControls();
   // Every attach path passes through here (freshAttach and restoreTerminal
   // both seed the header with it), so this is where the countdown is told
   // which session it is now about — a whole second of the last session's
@@ -16290,6 +16484,13 @@ function renderSession(data) {
   // below it reads: an inherited mesh and a scoped run are the parent's
   // arrangement, not choices this session made.
   metaRow(dl, "spawned by", s.parent, "the session that created this one");
+  // A quick-fork is a child with one more fact: whose conversation it is a
+  // copy of, which is also where its merge goes.
+  metaRow(
+    dl, "quick-fork of", s.quick_fork_of,
+    "this session is a copy of that session's conversation, marked 'forked " +
+    "from here'; merge sends its wrap-up back there"
+  );
   metaRow(
     dl, "role", data.role ? data.role.name : (s.role || "free-role"),
     data.role ? data.role.stance : ""
@@ -16380,6 +16581,7 @@ function renderSession(data) {
 
   // Above the memberships, because it is what they are FOR: the list says
   // which rooms this session can be spoken to in, this says something in one.
+  view.appendChild(sessHandoff(data));
   view.appendChild(sessSend(data));
 
   // And directly under the send box, what became of messages like it: the
@@ -17117,6 +17319,103 @@ function sessMigrate(data) {
 
    A message is carried BY a mesh, so a session in none has nothing to send
    through — hence the note rather than a dead form. */
+/* Hand off: this session's work to another session, then this one ends.
+   The picker is why it is here and not in the header — a handoff needs a
+   target chosen, and the header has room for one verb. A quick-fork gets its
+   merge here too (the same request the header button makes), beside the
+   general one. While a request is pending the box says so and offers to
+   withdraw it; the completion is the agent's, and this box never fakes it. */
+function sessHandoff(data) {
+  const s = data.session || {};
+  const box = el("div", "sess-send sess-handoff");
+  box.appendChild(el("h3", null, "Hand off"));
+  if (s.status === "exited") {
+    box.appendChild(el("p", "wf-note", "an exited session has nothing left to hand off"));
+    return box;
+  }
+  const pending = data.handoff || s.handoff;
+  if (pending) {
+    const merge = pending.kind === "merge";
+    box.appendChild(el(
+      "p", "wf-note",
+      (merge ? "merge requested: this copy was asked to write a wrap-up of "
+             : "handoff requested: this session was asked to write a handoff ") +
+      `for '${pending.target}'` +
+      (pending.requested_at ? ` at ${pending.requested_at}` : "") +
+      ". When it hands the text in, the daemon types it into that session " +
+      "and ends this one."
+    ));
+    const row = el("div", "sess-send-row");
+    const cancel = el("button", "wf-btn option", "Withdraw");
+    cancel.title = "drop the request; this session carries on";
+    cancel.addEventListener("click", async () => {
+      cancel.disabled = true;
+      await cancelHandoff(s.name);
+      refreshSession();
+    });
+    const stop = el("button", "wf-btn", "Stop now");
+    stop.title = "end this session without the report (the plain kill)";
+    stop.addEventListener("click", async () => {
+      stop.disabled = true;
+      await killSession(s.name);
+      refreshSession();
+    });
+    row.append(cancel, stop);
+    box.appendChild(row);
+    return box;
+  }
+  if (s.quick_fork_of) {
+    const row = el("div", "sess-send-row");
+    const merge = el("button", "wf-btn approve", `Merge back to ${s.quick_fork_of}`);
+    merge.title = "ask this copy for a wrap-up of everything since the fork; " +
+      "it goes to the origin and the copy ends";
+    merge.addEventListener("click", async () => {
+      merge.disabled = true;
+      await requestHandoff(s.name, "", "merge");
+      refreshSession();
+    });
+    row.appendChild(merge);
+    box.appendChild(row);
+  }
+  const others = (sessionsCache || [])
+    .filter((r) => r.name && r.name !== s.name && r.status !== "exited")
+    .map((r) => r.name).sort();
+  if (!others.length) {
+    box.appendChild(el("p", "wf-note", "no other live session to hand off to"));
+    return box;
+  }
+  const row = el("div", "sess-send-row");
+  const pick = document.createElement("select");
+  pick.title = "the session that carries this work on";
+  const blank = document.createElement("option");
+  blank.value = ""; blank.textContent = "hand off to…";
+  pick.appendChild(blank);
+  for (const name of others) {
+    const opt = document.createElement("option");
+    opt.value = name; opt.textContent = name;
+    pick.appendChild(opt);
+  }
+  const go = el("button", "wf-btn", "Hand off & end");
+  go.disabled = true;
+  go.title = "ask this session to write a handoff for the picked session; " +
+    "the daemon types it in there and ends this one";
+  pick.addEventListener("change", () => { go.disabled = !pick.value; });
+  go.addEventListener("click", async () => {
+    if (!pick.value) return;
+    go.disabled = true;
+    await requestHandoff(s.name, pick.value, "handoff");
+    refreshSession();
+  });
+  row.append(pick, go);
+  box.appendChild(row);
+  box.appendChild(el(
+    "p", "wf-note",
+    "the session is asked to write what is done, what is left and where it " +
+    "is; nothing is ended until it hands that in"
+  ));
+  return box;
+}
+
 function sessSend(data) {
   const box = el("div", "sess-send");
   box.appendChild(el("h3", null, "Send message"));

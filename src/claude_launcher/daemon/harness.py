@@ -171,6 +171,14 @@ class SessionDef:
     #: Persisted with the definition so a daemon restart or respawn does not
     #: silently undo a pause made from the terminal header.
     reminder_paused: bool = False
+    #: The session this one is a quick-fork of, by name (see
+    #: :mod:`claude_launcher.daemon.handoff`). Written only by the quick-fork
+    #: route, never by a plain spawn: it is what makes ``merge`` available on
+    #: this session — the wrap-up goes back to that one — and the marker block
+    #: at the top of the copied conversation names the same session. Kept as
+    #: a name for the same reason ``parent`` is: the origin may exit first,
+    #: and the record still has to say where this copy came from.
+    quick_fork_of: Optional[str] = None
 
     def to_dict(self) -> dict:
         out = {
@@ -203,6 +211,8 @@ class SessionDef:
             out["reminder_paused"] = True
         if self.tools is not None:
             out["tools"] = list(self.tools)
+        if self.quick_fork_of:
+            out["quick_fork_of"] = self.quick_fork_of
         return out
 
     @classmethod
@@ -232,6 +242,7 @@ class SessionDef:
             issue=str(data.get("issue") or "").strip() or None,
             keep_alive=bool(data.get("keep_alive")),
             reminder_paused=bool(data.get("reminder_paused")),
+            quick_fork_of=str(data.get("quick_fork_of") or "").strip() or None,
         )
 
 

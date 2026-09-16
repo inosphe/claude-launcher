@@ -426,6 +426,12 @@ DAEMON_DEFAULTS = {
     "beads_auto_issue": True,
     "beads_winddown": True,
     "beads_winddown_grace": 120.0,
+    # A merge/handoff completion (daemon/handoff.py) waits this long for the
+    # target to take the report before it gives up and KEEPS the source —
+    # the target's keyboard may be busy, and the report is the only thing of
+    # the source that survives, so a timeout is "try again", never "end it
+    # anyway". 0 waits without limit.
+    "handoff_deliver_timeout": 120.0,
 }
 
 

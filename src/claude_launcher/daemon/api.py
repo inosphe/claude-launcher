@@ -38,7 +38,7 @@ from .. import (
 from .. import session_commits
 from .. import ghcli, prflow, spawn as spawn_mod, store, workspaces
 from .. import worktree as worktree_mod
-from . import beads as beads_mod, notice as notice_mod
+from . import beads as beads_mod, handoff as handoff_mod, notice as notice_mod
 from . import rag as rag_mod
 from . import (
     briefing, cflow_clock, clipty, ctxsize, loops, onboard, prompt_presets,
@@ -285,6 +285,11 @@ def build_app(
     board = beads if beads is not None else beads_mod.Board()
     app["beads"] = board
     manager.exit_hooks.append(board.session_exited)
+    # Pending merge/handoff requests (daemon/handoff.py): one per daemon, and
+    # runtime-only like the board's wind-downs. An exit of any kind makes a
+    # pending request on that session moot, so it rides the same hook.
+    app["handoff"] = handoff_mod.Handoffs()
+    manager.exit_hooks.append(lambda s: app["handoff"].forget(s.sdef.name))
     # Semantic search over that board and this fleet (daemon/rag.py): one
     # service per daemon, injected for tests. Off until the rag: block is
     # filled in; its indexes are derived data under the daemon directory.
@@ -494,6 +499,12 @@ def build_app(
     r.add_post("/api/sessions/{name}/children/{child}/kill", h_session_child_kill)
     r.add_post("/api/sessions/{name}/parent", h_session_reparent)
     r.add_post("/api/sessions/{name}/kill", h_session_kill)
+    # A copy of this session's conversation to work in, and the way back
+    # (daemon/handoff.py). The merge and the general handoff share a route:
+    # what differs is who the target may be, not what happens after.
+    r.add_post("/api/sessions/{name}/quick-fork", h_session_quick_fork)
+    r.add_post("/api/sessions/{name}/handoff", h_session_handoff)
+    r.add_delete("/api/sessions/{name}/handoff", h_session_handoff_cancel)
     r.add_post("/api/sessions/{name}/pause", h_session_pause)
     r.add_post("/api/sessions/{name}/archive", h_session_archive)
     r.add_delete("/api/sessions/{name}", h_session_delete)
@@ -3553,6 +3564,7 @@ async def h_sessions_list(request: web.Request) -> web.Response:
             continue
         sessions.append(s)
     winddowns = request.app["beads"].winddowns
+    handoffs = request.app["handoff"].pending
 
     def collect() -> list:
         # The per-session assembly, in a worker: ``attach`` re-reads a
@@ -3578,6 +3590,12 @@ async def h_sessions_list(request: web.Request) -> web.Response:
             wd = winddowns.get(info.get("name") or "")
             if wd:
                 info["winddown"] = wd
+            # A merge/handoff the operator asked for and the agent has not
+            # handed in yet: the row says `merging…` and the button turns
+            # into "stop now" (daemon/handoff.py).
+            ho = handoffs.get(info.get("name") or "")
+            if ho:
+                info["handoff"] = ho
             if reminder_service is not None:
                 info["session_reminder"] = reminder_service.status(
                     info.get("name") or "", cfg=reminder_cfg, session=s,
@@ -4411,6 +4429,9 @@ async def h_session_meta(request: web.Request) -> web.Response:
         # draws nothing for ``None`` and says so for ``[]``, and those are the
         # two different facts.
         "commits": None,
+        # The pending merge/handoff on this session, if any — the detail
+        # panel's Hand off box reads it to show the request and its cancel.
+        "handoff": request.app["handoff"].state(name),
     })
     if cwd:
         # In a thread: this is a git walk over every ref, and the detail
@@ -4808,6 +4829,10 @@ async def _winding_down(request: web.Request, session, *, force: bool) -> bool:
     wants it gone now) and by ``?winddown=0`` (the same, without SIGKILL);
     a second kill of a session already winding down goes straight through,
     which is what the button turns into while one is running."""
+    # Any kill, wind-down or not, ends a pending merge/handoff request: the
+    # operator pressed past it, and a row that kept saying `merging…` on a
+    # session being terminated would be describing a request nobody holds.
+    request.app["handoff"].forget(session.sdef.name)
     if force or request.query.get("winddown") in ("0", "false"):
         board = request.app["beads"]
         board.winddowns.pop(session.sdef.name, None)
@@ -4816,6 +4841,127 @@ async def _winding_down(request: web.Request, session, *, force: bool) -> bool:
         request.app["beads"].winddowns.pop(session.sdef.name, None)
         return False
     return await request.app["beads"].begin_winddown(session, request.app["manager"])
+
+
+async def h_session_quick_fork(request: web.Request) -> web.Response:
+    """Copy this session's conversation into a child and mark where the copy
+    begins — the one-press fork (see :mod:`daemon.handoff`).
+
+    Built on the spawn route's own pieces rather than beside them: the child
+    is staged with ``fork: true`` (claude's ``--resume --fork-session`` of
+    the parent's pinned conversation), so it is a child of this session and
+    restores like one. What this route adds is the marker block as the
+    child's opening — the line the merge later refers back to — and the
+    record (``quick_fork_of``) that makes merge available on the copy.
+
+    The copy joins no mesh and drives no run unless the body says otherwise:
+    it is a scratch branch of ONE session's conversation, and a copy that
+    inherited the parent's mesh handle would be a second agent answering for
+    the same conversation. Nor does it mint a board issue from the marker
+    text (``beads: false``) — the work it does is the origin's.
+    """
+    manager: SessionManager = request.app["manager"]
+    parent = request.match_info["name"]
+    body = await _json_body(request)
+    try:
+        origin = manager.get(parent)
+    except ManagerError as exc:
+        return json_error(404, str(exc))
+    if origin.exited:
+        return json_error(400, f"session {parent!r} has exited — an exited session cannot be quick-forked")
+    if not spawn_mod.can_fork(origin.sdef.to_dict()):
+        return json_error(
+            400,
+            f"session {parent!r} has no conversation to copy: quick-fork needs "
+            "a claude session whose conversation is on disk (its first turn "
+            "has landed)",
+        )
+    name = str(body.get("name") or "").strip() or handoff_mod.fork_name(
+        parent, {s.sdef.name for s in manager.list()}
+    )
+    marker = handoff_mod.new_marker()
+    forked_at = handoff_mod._utcnow()
+    opening = handoff_mod.compose_marker(
+        origin=parent, fork=name, marker=marker, forked_at=forked_at,
+    )
+    task = str(body.get("task") or "").strip()
+    if task:
+        opening = opening + "\n\n" + task
+    spawn_body = {
+        "name": name,
+        "fork": True,
+        "quick_fork_of": parent,
+        "task": opening,
+        "mesh": str(body.get("mesh") or onboard.NO_MESH),
+        "workflow": str(body.get("workflow") or onboard.NO_WORKFLOW),
+        "beads": False,
+    }
+    warnings: list = []
+    try:
+        session = manager.stage_child(parent, spawn_body, warnings=warnings)
+    except spawn_mod.SpawnDenied as exc:
+        return json_error(403, str(exc))
+    except (HarnessError, ValueError, TypeError) as exc:
+        return json_error(400, f"bad quick-fork request: {exc}")
+    except ManagerError as exc:
+        return json_error(409 if "already exists" in str(exc) else 400, str(exc))
+    try:
+        result = await _onboard_and_launch(request, session, spawn_body, parent=parent)
+    except onboard.OnboardError as exc:
+        return json_error(400, str(exc))
+    except (HarnessError, ValueError, TypeError) as exc:
+        return json_error(400, f"bad quick-fork request: {exc}")
+    out = {
+        "session": session.info(), "origin": parent, "marker": marker,
+        "forked_at": forked_at, **result,
+    }
+    if warnings:
+        out["warnings"] = warnings
+    return json_response(out, status=201)
+
+
+async def h_session_handoff(request: web.Request) -> web.Response:
+    """Request a merge/handoff from this session, or complete one.
+
+    With ``text`` in the body this is the completion — the agent handing in
+    its wrap-up (the MCP ``handoff`` tool and the two CLI verbs post here
+    from inside the session): the report is delivered to the target and then
+    the session is ended, in that order. Without ``text`` it is the
+    operator's request: the instruction block is typed into the session and
+    the request is recorded as pending (the row's ``handoff`` field).
+
+    ``to`` names the target for a handoff; a quick-fork's merge needs none
+    (it goes back to the origin) and refuses any other. ``kind`` may force
+    ``handoff`` on a quick-fork that wants to report elsewhere.
+    """
+    manager: SessionManager = request.app["manager"]
+    name = request.match_info["name"]
+    body = await _json_body(request)
+    to = str(body.get("to") or "").strip()
+    kind = str(body.get("kind") or "").strip()
+    text = body.get("text")
+    handoffs: handoff_mod.Handoffs = request.app["handoff"]
+    try:
+        if text is not None and str(text).strip():
+            result = await handoffs.complete(manager, name, text=str(text), to=to, kind=kind)
+            return json_response({"completed": True, **result})
+        result = await handoffs.request(manager, name, to=to, kind=kind)
+        return json_response({"requested": True, "source": name, **result})
+    except handoff_mod.HandoffError as exc:
+        msg = str(exc)
+        return json_error(404 if "no session named" in msg else 400, msg)
+
+
+async def h_session_handoff_cancel(request: web.Request) -> web.Response:
+    """Withdraw a pending merge/handoff request: the row stops saying
+    ``merging…`` and the session is told to carry on."""
+    manager: SessionManager = request.app["manager"]
+    name = request.match_info["name"]
+    try:
+        result = await request.app["handoff"].cancel(manager, name)
+    except handoff_mod.HandoffError as exc:
+        return json_error(404, str(exc))
+    return json_response({"source": name, **result})
 
 
 async def h_session_child_kill(request: web.Request) -> web.Response:

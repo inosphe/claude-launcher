@@ -267,6 +267,15 @@
                 title="this session's conversation — scrollable, the whole of it">transcript</button>
         <button id="term-rebrief" class="term-btn"
                 title="re-type this session's briefing (mesh, run, parent, task) into its terminal — for an agent whose context was cleared or compacted">rebrief</button>
+        <!-- quick-fork: a copy of this session's conversation, as a child,
+             marked "forked from here"; merge is the copy's way back (the
+             wrap-up typed into the origin, then the copy ends). Only one of
+             the two is on screen: fork on a session with a conversation,
+             merge on a session that is a quick-fork. -->
+        <button id="term-fork" class="term-btn hidden" type="button"
+                title="quick-fork: start a copy of this session's conversation as a child, marked 'forked from here'">⑂ fork</button>
+        <button id="term-merge" class="term-btn hidden" type="button"
+                title="merge: ask this copy to write a wrap-up of everything since the fork; it goes to the origin and the copy ends">↩ merge</button>
         <!-- Pause: kill with the record filed as paused — the temporary stop
              for a session that is looping or racing another. No wind-down. -->
         <button id="term-pause" class="term-btn"

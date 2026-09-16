@@ -98,6 +98,8 @@ function sessRailTabs() { return el("div", "sess-rail-tabs"); }
 function sessWorkflow() { return el("div", "sess-wf"); }
 function sessBriefSection() { return el("div", "sess-brief"); }
 function sessSend() { return el("div", "sess-send"); }
+/* The Hand off box — handoff_check's subject; here it only has to resolve. */
+function sessHandoff() { return el("div", "sess-send sess-handoff"); }
 /* The Meshes section's enrol row — meshjoin_check's subject; here it is only
    a call that has to resolve. */
 function sessMeshJoin() { return el("div", "sess-mesh-join"); }

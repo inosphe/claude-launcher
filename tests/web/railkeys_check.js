@@ -484,9 +484,9 @@ const ev = (key, over = {}) => Object.assign({
         })(), true);
   check("the table binds exactly the documented set",
         ctx.bindings.map((b) => b.label),
-        ["Enter / Space", "k", "p", "a", "e", "f"]);
+        ["Enter / Space", "k", "p", "a", "e", "q", "f"]);
   check("the chip names each of them",
-        ["k", "p", "a", "e", "f"].every(
+        ["k", "p", "a", "e", "q", "f"].every(
           (k) => new RegExp(`\\b${k} `).test(ctx.chip.card.title)), true);
 
   /* ---------------------------------------------------------------- */
