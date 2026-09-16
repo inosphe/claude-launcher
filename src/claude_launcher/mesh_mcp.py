@@ -501,6 +501,41 @@ TOOLS = [
         },
     },
     {
+        "name": "handoff",
+        "description": (
+            "Hand what THIS session did to another session, then end this "
+            "session — the way back from a quick-fork, and the way out of "
+            "any session whose work someone else should carry on. 'text' is "
+            "the report, in your words: what changed, files and commits, "
+            "decisions taken, what is still open, and (for a handoff) where "
+            "it all is and how to pick it up. The daemon types it into the "
+            "target as a fenced block and only THEN ends this session, so a "
+            "delivery that fails keeps you alive and says so — call again "
+            "or pick another target. A quick-fork (your opening carries a "
+            "'--- forked from here ---' marker naming the origin) needs no "
+            "'to': the wrap-up goes back to the origin. Any other session "
+            "names its target with 'to'. Do not call this before the work is "
+            "done: the text is the only thing of this session that survives."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "text": {
+                    "type": "string",
+                    "description": "the wrap-up or handoff, as markdown",
+                },
+                "to": {
+                    "type": "string",
+                    "description": (
+                        "the session to hand off to (its session name). "
+                        "Omit in a quick-fork: the merge goes to the origin"
+                    ),
+                },
+            },
+            "required": ["text"],
+        },
+    },
+    {
         "name": "reparent",
         "description": (
             "Move a session you spawned (or a descendant of one) — with its "
@@ -773,6 +808,14 @@ def call_tool(name: str, args: dict) -> dict:
         return _client().post(
             f"/api/sessions/{_session()}/children/{child}/kill{q}"
         )
+    if name == "handoff":
+        text = str(args.get("text") or "")
+        if not text.strip():
+            raise MeshMcpError("'text' is required: the wrap-up or handoff to deliver")
+        body = {"text": text}
+        if args.get("to"):
+            body["to"] = str(args["to"])
+        return _client().post(f"/api/sessions/{_session()}/handoff", body)
     if name == "reparent":
         child = str(args.get("session") or "")
         parent = str(args.get("parent") or "")

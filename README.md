@@ -1550,6 +1550,9 @@ and a form painted into its PTY would hang the session it was creating.
 | `capture-pane S`      | Print the current rendered screen (`--history` for scrolled-off lines, `--json` for lines + cursor + status). |
 | `wait-for S`          | Block until `--idle` (default) or `--exited`; `--timeout SECS`, `--idle-threshold SECS`. Exits 1 on timeout. |
 | `rebrief [--session S]` | Print the session's briefing re-derived from current daemon state: mesh memberships and roster, replies it owes, the cflow run it drives, parent/children, and its recorded opening `--task`. Managed claude sessions run it **automatically** — a `SessionStart` hook injected at spawn fires it after `/compact` and `/clear`, and claude reads the output back into context — so an agent's lost context is restored without the agent having to remember to ask. Defaults to `$CLAUNCH_SESSION`; also a **rebrief** button in the web UI, which types the same block into the session's terminal. |
+| `quick-fork [S] [--as NAME] [--task T] [-a]` | Start a **copy** of `S`'s conversation as a child of it, marked `--- forked from here ---` (see [quick-fork and merge](#quick-fork-and-merge--a-scratch-copy-that-reports-back)). `S` defaults to `$CLAUNCH_SESSION`. |
+| `quick-fork merge [TEXT] [-f FILE] [-t COPY]` | The way back from a copy: with text (or `-f`), from inside the copy, the wrap-up is typed into the origin and the copy ends; without text (`-t COPY` from outside) the copy is asked to write one. |
+| `handoff --to C [TEXT] [-f FILE] [-t D]` | Hand `D`'s work to `C` and end `D` — with text it happens now, without it `D` is asked to write one; `--cancel` withdraws a pending request. Detail-panel-only in the web UI, because it needs the target picked. |
 | `kill-session S`      | Terminate a running session (`--force` skips graceful terminate). Idempotent: an already-exited session is left alone — dropping a record is a different verb, below. |
 | `reparent S PARENT`   | Move a session — with everything spawned under it — under another parent. The operator's form of the agents' `reparent` MCP tool, which is scoped to the caller's own subtree; this one is not. Refused for a cycle, an exited parent, or a move that would push any session past `spawn.max_depth`. Opens the session's edge to its new parent in every mesh the two share. |
 | `clear-sessions` (`clear`) | Drop the records of **all** exited sessions at once — running ones are untouched. They are kept indefinitely otherwise (a restart never discards them), so this is the explicit cleanup; `--logs` also deletes their output logs, freeing their auto-generated names. |
@@ -1881,6 +1884,61 @@ Resuming *without* a fork means the two sessions share one conversation, which
 is the point when you are picking up an exited session's work elsewhere — and
 a footgun if the source is still running. The web picker shows each session's
 status next to its name for exactly that reason.
+
+### quick-fork and merge — a scratch copy that reports back
+
+The fork above is a creation-time choice with a form around it. **quick-fork**
+is the one-press version, and it comes with its way back:
+
+```bash
+claunch quick-fork A                    # start A-qf1: a copy of A's conversation
+claunch quick-fork A --task "try the other approach" -a
+claunch quick-fork merge -f wrap.md     # from inside the copy: hand the wrap-up in
+```
+
+The copy is a **child** of `A` (spawned with `fork`, so it restores and
+respawns like any child) whose conversation is `A`'s up to this moment, with
+one block on top — *`--- forked from here ---`*, naming the origin, the copy
+and a marker id. Everything above the marker is `A`'s; everything below is
+the copy's. It joins no mesh, drives no run and mints no board issue: it is a
+branch of one session's conversation, and the work it does is the origin's.
+The web UI has it as the terminal header's **⑂ fork** button (and `q` on a
+rail card), which opens the copy.
+
+**merge** is only offered on a session that *is* a quick-fork (its record
+carries `quick_fork_of`), and it goes back to that one session. It has two
+halves. The operator's press — the header's **↩ merge**, or `claunch
+quick-fork merge -t A-qf1` — types a request into the copy: write a wrap-up
+of everything since the marker and hand it in. The row reads `merging…` until
+it does, and a second press is the plain kill. The agent's completion — the
+MCP `handoff` tool with `text`, or `claunch quick-fork merge -f FILE` from
+inside — is what actually moves: the daemon types the wrap-up into `A` as a
+fenced block (*merged from A-qf1*, marker and fork time on it) and **then**
+ends the copy. In that order, always: a delivery that fails or times out
+(`daemon.handoff_deliver_timeout`, 120 s — the origin's keyboard may be busy)
+keeps the copy alive and says so, because the wrap-up is the only thing of
+the copy that survives. Nothing reads the transcript; the agent writes the
+wrap-up, since it is the one that knows what since-the-marker meant.
+
+### handoff — the same relay between any two sessions
+
+Take the fork away and what is left is a session handing its work to another
+and ending: **handoff**. `D` writes what is done, what is left and where it
+is; the daemon types it into `C` (*handoff from D*) and ends `D`. Any live
+session can be the target, which is why it needs a picker and lives only in
+the session's **detail panel** (the *Hand off* box, with a select of the
+other live sessions), not in the header.
+
+```bash
+claunch handoff -t D --to C             # the operator's request: D is asked to write one
+claunch handoff --to C -f handoff.md    # from inside D: hand it in, D ends
+claunch handoff --cancel                # withdraw a pending request
+```
+
+Same two halves, same order, same route (`POST /api/sessions/{name}/handoff`
+without `text` requests, with `text` completes; `DELETE` withdraws), same
+rule that a kill clears a pending request. A quick-fork may hand off to a
+third session too (`to` names it); only *merge* is fixed to the origin.
 
 ### Created with a job (mesh · workflow · opening task)
 
@@ -2924,6 +2982,8 @@ REST endpoints (JSON, `Bearer` or cookie auth; `/api/health` is open):
 | GET/DELETE | `/api/sessions/{name}`     | info / kill (`?force=1`) |
 | GET    | `/api/sessions/{name}/meta`    | everything known *about* one session: definition, workspace, harness, role stance, mesh memberships, its cflow slot and the workflows startable in it; borrowed sessions also include a secret-free live `borrowed_auth` validation |
 | POST   | `/api/sessions/{name}/respawn` | relaunch an exited session (claude resumes its conversation) |
+| POST   | `/api/sessions/{name}/quick-fork` | copy this session's conversation into a child marked `--- forked from here ---` (`{name?, task?, mesh?, workflow?}`; joins no mesh and drives no run unless named); 201 with the child, `origin`, `marker`, `forked_at` |
+| POST/DELETE | `/api/sessions/{name}/handoff` | POST without `text`: ask this session for its wrap-up (`kind: merge`, quick-forks only, back to the origin) or handoff (`to`), recorded as pending on its row; POST with `text`: the completion — delivered to the target as a fenced block, then this session ends, in that order. DELETE withdraws a pending request |
 | POST   | `/api/sessions/{name}/migrate` | move to another checkout: exactly one of `{worktree: NAME-or-""}` / `{cwd: DIR}`; `{children: true}` moves the descendants standing in the same directory. The claude transcript is carried to the new directory's slug |
 | POST   | `/api/sessions/{name}/reborrow` | restart on another answer to "whose token": `{borrow: NAME-or-null, null_token?}` — picking one clears the others; the session is relaunched with the definition's auth swapped, the directory untouched |
 | POST   | `/api/sessions/{name}/skip-permissions` | restart with permission prompts toggled: `{skip: true|false}` adds/removes `--dangerously-skip-permissions` in the definition's args and relaunches |

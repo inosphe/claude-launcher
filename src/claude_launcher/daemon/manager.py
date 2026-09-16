@@ -756,6 +756,14 @@ class SessionManager:
                     # otherwise settled at onboarding from the task text or
                     # minted there (see daemon.beads.Board.ensure_issue).
                     "issue": str(request.get("issue") or ""),
+                    # Only a quick-fork carries this, and only with the copy
+                    # it names: the field is what unlocks 'merge' back to the
+                    # origin, so a child that did not copy that conversation
+                    # must not be able to claim it (see daemon.handoff).
+                    "quick_fork_of": (
+                        str(request.get("quick_fork_of") or "")
+                        if request.get("fork") else ""
+                    ),
                 }
             )
         )

@@ -1334,6 +1334,118 @@ def _cmd_kill_session(args: argparse.Namespace) -> int:
     return 0
 
 
+def _read_text_arg(args: argparse.Namespace) -> str:
+    """The wrap-up/handoff text: positional, or ``-f FILE`` (``-`` = stdin).
+    A long report is written to a file first — a shell argument is the
+    wrong place for four paragraphs — so the file spelling is the usual one."""
+    path = getattr(args, "file", None)
+    if path:
+        if path == "-":
+            return sys.stdin.read()
+        with open(path, encoding="utf-8") as fh:
+            return fh.read()
+    return str(getattr(args, "text", None) or "")
+
+
+def _cmd_quick_fork(args: argparse.Namespace) -> int:
+    """``claunch quick-fork [SESSION]`` copies a session's conversation into a
+    child with a marker on top; ``claunch quick-fork merge [TEXT|-f FILE]``
+    is the way back, run from inside the copy (or ``-t COPY`` from outside):
+    with text it hands the wrap-up in and the copy ends, without text it
+    asks the copy to write one (the operator's press)."""
+    client = daemon_client.ensure_running()
+    if args.session == "merge":
+        target = getattr(args, "session_t", None) or os.environ.get("CLAUNCH_SESSION")
+        if not target:
+            print(
+                "error: which quick-fork? run this inside it, or name it: "
+                "claunch quick-fork merge -t <copy> [-f FILE]",
+                file=sys.stderr,
+            )
+            return 1
+        text = _read_text_arg(args)
+        body = {"kind": "merge"}
+        if text.strip():
+            body["text"] = text
+        info = client.post(f"/api/sessions/{target}/handoff", body)
+        if info.get("completed"):
+            print(
+                f"merged: the wrap-up was typed into {info['target']!r}"
+                + (f"; session {target!r} ended" if info.get("ended") else
+                   f"; session {target!r} could NOT be ended — kill it yourself")
+            )
+        else:
+            print(
+                f"merge requested: session {target!r} was asked to write its "
+                f"wrap-up and hand it in; it goes to {info['target']!r} and the "
+                "session ends then. 'claunch kill-session' stops it without one."
+            )
+        return 0
+    origin = getattr(args, "session_t", None) or args.session or os.environ.get("CLAUNCH_SESSION")
+    if not origin:
+        print("error: no session given (claunch quick-fork <session>)", file=sys.stderr)
+        return 1
+    body: dict = {}
+    if getattr(args, "as_name", None):
+        body["name"] = args.as_name
+    if getattr(args, "task", None):
+        body["task"] = args.task
+    info = client.post(f"/api/sessions/{origin}/quick-fork", body)
+    child = info["session"]
+    print(
+        f"quick-fork {child['name']!r} of {origin!r} started (pid {child.get('pid')}, "
+        f"marker {info.get('marker')}) — a copy of its conversation from here. "
+        f"From inside it, when the work is done: claunch quick-fork merge -f <wrap-up file>"
+    )
+    for w in info.get("warnings") or []:
+        print(f"warning: {w}")
+    if getattr(args, "attach", False):
+        from . import attach as attach_mod
+
+        return attach_mod.attach(client, child["name"])
+    return 0
+
+
+def _cmd_handoff(args: argparse.Namespace) -> int:
+    """``claunch handoff --to C [TEXT|-f FILE]`` from inside D (or ``-t D``):
+    with text, the handoff is typed into C and D ends; without, D is asked
+    to write one. ``--cancel`` withdraws a pending request."""
+    client = daemon_client.ensure_running()
+    source = getattr(args, "session_t", None) or os.environ.get("CLAUNCH_SESSION")
+    if not source:
+        print(
+            "error: which session hands off? run this inside it, or name it "
+            "with -t <session>",
+            file=sys.stderr,
+        )
+        return 1
+    if getattr(args, "cancel", False):
+        info = client.delete(f"/api/sessions/{source}/handoff")
+        print(f"withdrawn: the {info.get('kind')} request on {source!r} (to {info.get('target')!r})")
+        return 0
+    if not args.to:
+        print("error: --to <session> is required", file=sys.stderr)
+        return 1
+    text = _read_text_arg(args)
+    body = {"to": args.to, "kind": "handoff"}
+    if text.strip():
+        body["text"] = text
+    info = client.post(f"/api/sessions/{source}/handoff", body)
+    if info.get("completed"):
+        print(
+            f"handed off: the handoff was typed into {info['target']!r}"
+            + (f"; session {source!r} ended" if info.get("ended") else
+               f"; session {source!r} could NOT be ended — kill it yourself")
+        )
+    else:
+        print(
+            f"handoff requested: session {source!r} was asked to write a handoff "
+            f"for {info['target']!r} and hand it in; it ends then. "
+            "'claunch handoff --cancel' withdraws, 'claunch kill-session' stops it without one."
+        )
+    return 0
+
+
 def _cmd_keep_alive(args: argparse.Namespace) -> int:
     """Set (or clear) a session's keep-alive flag.
 
@@ -2506,6 +2618,42 @@ def register(sub) -> None:
     p_kill.add_argument("session", nargs="?")
     p_kill.add_argument("--force", action="store_true", help="skip graceful terminate")
     p_kill.set_defaults(func=_cmd_kill_session_dispatch)
+
+    p_qf = sub.add_parser(
+        "quick-fork",
+        help="copy a session's conversation into a child marked 'forked from "
+             "here'; 'quick-fork merge' (from inside the copy) hands the "
+             "wrap-up back to the origin and ends the copy",
+    )
+    p_qf.add_argument("-t", dest="session_t", help=argparse.SUPPRESS)
+    p_qf.add_argument(
+        "session", nargs="?",
+        help="the session to copy (default: $CLAUNCH_SESSION) — or the word "
+             "'merge' to hand a copy's wrap-up back",
+    )
+    p_qf.add_argument(
+        "text", nargs="?",
+        help="with 'merge': the wrap-up text (or -f FILE); without text the "
+             "copy is asked to write one",
+    )
+    p_qf.add_argument("-f", "--file", help="with 'merge': read the wrap-up from FILE ('-' = stdin)")
+    p_qf.add_argument("--as", dest="as_name", help="name for the copy (default: <origin>-qf<n>)")
+    p_qf.add_argument("--task", help="what the copy should do, typed under the marker")
+    p_qf.add_argument("-a", "--attach", action="store_true", help="attach to the copy once started")
+    p_qf.set_defaults(func=_cmd_quick_fork)
+
+    p_ho = sub.add_parser(
+        "handoff",
+        help="hand this session's work to another session and end this one: "
+             "with text (or -f FILE) the handoff is typed into --to and this "
+             "session ends; without, this session is asked to write one",
+    )
+    p_ho.add_argument("-t", dest="session_t", help="the session handing off (default: $CLAUNCH_SESSION)")
+    p_ho.add_argument("--to", help="the session that receives the handoff")
+    p_ho.add_argument("text", nargs="?", help="the handoff text (or -f FILE)")
+    p_ho.add_argument("-f", "--file", help="read the handoff from FILE ('-' = stdin)")
+    p_ho.add_argument("--cancel", action="store_true", help="withdraw a pending handoff/merge request")
+    p_ho.set_defaults(func=_cmd_handoff)
 
     p_keep = sub.add_parser(
         "keep-alive",

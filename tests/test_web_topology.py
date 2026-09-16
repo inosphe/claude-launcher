@@ -295,6 +295,7 @@ CHECKS = [
         "detailsplit_check.js",
         "bulk_check.js",
         "killstate_check.js",
+        "handoff_check.js",
         "owed_check.js",
         "meshmessages_check.js",
         "panel_check.js",

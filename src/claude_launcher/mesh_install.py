@@ -240,6 +240,19 @@ yours to do, but clearing and respawning are the user's (`claunch
 clear-sessions`, `claunch respawn`), and a session your mesh still lists
 cannot be cleared until it leaves the roster.
 
+**`handoff` ends YOURSELF, after handing the work on.** The one way a
+session may end itself: MCP `handoff` with `text` (your wrap-up — what
+changed, files and commits, decisions, what is open) and, unless you are a
+quick-fork, `to` (the session that carries on). The daemon types the text
+into that session as a fenced block and only then ends yours, so a delivery
+that fails keeps you alive and says so. A quick-fork (your opening carries a
+`--- forked from here ---` marker naming its origin) leaves `to` out: the
+wrap-up goes back to the origin. An operator can ask for it from the
+dashboard (the copy's **merge** button, or the detail panel's **Hand off**
+box) — the request is typed into your terminal, and answering it is this
+same call. Do not call it before the work is done: the text is the only
+thing of the session that survives.
+
 **Your children start connected to YOU and to nobody else** (unless the mesh
 declares extra wiring — some meshes connect, say, every worker to a reviewer).
 That is the point: you decide who they may talk to. Each is told that you are

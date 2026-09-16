@@ -1153,6 +1153,11 @@ a.cflow-scope:hover { background: #1d3559; text-decoration: underline; }
   border-color: #8b2e2e !important;
 }
 .kill-pending { opacity: 0.65; cursor: wait !important; }
+/* the header's fork/merge pair: the same chip as kill, one of the two on
+   screen at a time; a pending merge wears the wind-down red above */
+#term-fork, #term-merge { white-space: nowrap; }
+.sess-handoff .sess-send-row { align-items: center; flex-wrap: wrap; }
+.sess-handoff select { flex: 1 1 160px; }
 .kill-pending:hover { background: none; }
 
 /* ---- text size ----
