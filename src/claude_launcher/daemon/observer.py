@@ -117,17 +117,22 @@ class Observer:
         except (OSError, ValueError, AttributeError):
             self.data = {"enabled": False}
         self.data["sessions"] = {}
-        for session in manager.list():
-            name = session.sdef.name
+        self.loaded = set()
+        self.task = None
+        self.error = None
+        self.wake = asyncio.Event()
+
+    def load_session(self, name):
+        # Route construction must not enumerate sessions or load their files.
+        if name not in self.loaded and name not in self.data["sessions"]:
+            self.loaded.add(name)
             try:
                 row = json.loads(self.session_path(name).read_text(encoding="utf-8"))
                 if isinstance(row, dict):
                     self.data["sessions"][name] = row
             except (OSError, ValueError):
                 pass
-        self.task = None
-        self.error = None
-        self.wake = asyncio.Event()
+        return self.data["sessions"].get(name, {})
 
     def session_path(self, name):
         return self.path.parent / "observer" / (hashlib.sha256(name.encode()).hexdigest() + ".json")
@@ -163,6 +168,7 @@ class Observer:
                     for session in list(self.manager.list()):
                         if not self.data.get("enabled"):
                             break
+                        self.load_session(session.sdef.name)
                         if session.exited and session.sdef.name not in self.data["sessions"]:
                             continue
                         try:
@@ -206,7 +212,7 @@ class Observer:
 
     async def observe(self, session, cfg):
         name = session.sdef.name
-        old = self.data["sessions"].get(name, {})
+        old = self.load_session(name)
         identity, cursor, state, rows, reset = await asyncio.to_thread(self.evidence, session, old)
         if not rows:
             if cursor != old.get("cursor"):
@@ -259,7 +265,7 @@ class Observer:
         result = []
         for session in self.manager.list():
             name = session.sdef.name
-            row = self.data["sessions"].get(name, {})
+            row = self.load_session(name)
             info = session.info()
             result.append({"name": name, "status": info.get("status"), "running": not session.exited,
                            "harness": getattr(session.sdef, "harness", None),
