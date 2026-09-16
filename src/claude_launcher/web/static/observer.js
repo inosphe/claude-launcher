@@ -1,22 +1,14 @@
+/* Observer uses the main app router, authentication and viewport. */
+window.ObserverPage = (() => {
 "use strict";
-const $ = id => document.getElementById(id);
-const BASE = new URL("../", location.href).pathname;
-const TOKEN_KEY = `claunch_token:${BASE}`;
+const $ = id => document.getElementById("observer-" + id);
 let snapshot = {sessions: [], enabled: false}, pending = false, loading = false, lastSnapshot = "";
 const drafts = new Map();
 let draftTarget = "";
 const node = (tag, text, cls) => { const e = document.createElement(tag); e.textContent = text; if(cls)e.className=cls; return e; };
-async function api(path, body) {
+async function request(path, body) {
   const options = body === undefined ? {} : {method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)};
-  let response = await fetch(BASE + path, {credentials:"same-origin",...options});
-  if(response.status === 401) {
-    const token = localStorage.getItem(TOKEN_KEY);
-    if(token) {
-      const login = await fetch(BASE+"api/auth/session", {method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({token})});
-      if(login.ok) response = await fetch(BASE+path,{credentials:"same-origin",...options});
-    }
-  }
-  if(response.status===401) { $("login").hidden=false; throw Error("로그인이 필요합니다."); }
+  const response = await api(path, options);
   const data = await response.json();
   if(!response.ok) throw Error(data.error || `HTTP ${response.status}`);
   return data;
@@ -53,8 +45,13 @@ function render() {
   visible.sort((a,b)=>attention(b).length-attention(a).length);
   for(const s of visible) {
     if($("actions-only").checked&&!attention(s).length) continue;
-    const card=node("article","","card");
+    const card=node("article","","observer-card");
     const title=node("h2",s.name+" "); title.append(node("span",s.status||"unknown","state")); card.append(title);
+    const links=node("nav", "", "observer-links");
+    for (const [label, href] of [["관찰 결과", "#/observer/session/"], ["터미널", "#/s/"], ["트랜스크립트", "#/log/"]]) {
+      const link=node("a",label); link.href=href+encodeURIComponent(s.name); links.append(link);
+    }
+    card.append(links);
     card.append(node("div",s.meshes.join(" · ")||"메시 없음","meta"));
     card.append(node("p",s.summary||"아직 관찰 결과가 없습니다."));
     if(s.error)card.append(node("p",s.error));
@@ -68,9 +65,9 @@ function render() {
       item.append(node("small",`${e.kind} · ${new Date(e.at).toLocaleString()}${e.acknowledged?" · 확인됨":""}`),node("div",e.text));
       const detail=document.createElement("details"), evidence=node("pre","불러오는 중…");
       detail.append(node("summary",`근거 · ${e.source}`),evidence);
-      detail.ontoggle=async()=>{if(!detail.open||detail.dataset.loaded)return;try{const data=await api(`api/observer/${encodeURIComponent(s.name)}/events/${encodeURIComponent(e.id)}`);evidence.textContent=JSON.stringify(data,null,2);detail.dataset.loaded="1";}catch(err){evidence.textContent=err.message;}};
+      detail.ontoggle=async()=>{if(!detail.open||detail.dataset.loaded)return;try{const data=await request(`api/observer/${encodeURIComponent(s.name)}/events/${encodeURIComponent(e.id)}`);evidence.textContent=JSON.stringify(data,null,2);detail.dataset.loaded="1";}catch(err){evidence.textContent=err.message;}};
       item.append(detail);
-      if(e.needs_action&&!e.acknowledged) {const b=node("button","확인 표시"); b.onclick=async()=>{try{await api(`api/observer/${encodeURIComponent(s.name)}/acknowledge`,{id:e.id});await refresh();}catch(err){$("notice").textContent=err.message;}};item.append(b);}
+      if(e.needs_action&&!e.acknowledged) {const b=node("button","확인 표시"); b.onclick=async()=>{try{await request(`api/observer/${encodeURIComponent(s.name)}/acknowledge`,{id:e.id});await refresh();}catch(err){$("notice").textContent=err.message;}};item.append(b);}
       card.append(item);
     }
     const more=document.createElement("details");more.append(node("summary","관찰 API 사용량"),node("pre",JSON.stringify({usage:s.usage,context_rotations:s.rotations},null,2)));card.append(more);
@@ -84,27 +81,51 @@ function selections() {
   const scope=$("scope").value;
   $("selection-label").hidden=scope==="global";
   options($("selection"),scope==="mesh"?[...new Set(snapshot.sessions.flatMap(s=>s.meshes))].sort():snapshot.sessions.map(s=>s.name));
+  if(scope===routeScope && routeName) $("selection").value=routeName;
 }
 async function refresh() {
   if(loading)return;loading=true;
-  try {const data=await api("api/observer");const signature=JSON.stringify(data);if(signature!==lastSnapshot){snapshot=data;lastSnapshot=signature;selections();options($("target"),snapshot.sessions.filter(s=>s.running).map(s=>s.name),"세션 선택");render();}}
+  try {const data=await request("api/observer");const signature=JSON.stringify(data);if(signature!==lastSnapshot){snapshot=data;lastSnapshot=signature;selections();options($("target"),snapshot.sessions.filter(s=>s.running).map(s=>s.name),"세션 선택");render();}}
   catch(err){$("notice").textContent=err.message;}finally{loading=false;}
 }
-$("scope").onchange=()=>{selections();render();};
-$("selection").onchange=render;$("actions-only").onchange=render;$("ended").onchange=render;
+function navigate() {
+  const scope=$("scope").value, name=$("selection").value;
+  go(scope === "global" ? "#/observer" : `#/observer/${scope}/${encodeURIComponent(name)}`);
+}
+$("scope").onchange=()=>{selections();navigate();};
+$("selection").onchange=navigate;$("actions-only").onchange=render;$("ended").onchange=render;
 $("target").onchange=()=>chooseTarget($("target").value);$("prompt").oninput=controls;
-$("monitor").onclick=async()=>{try{await api("api/observer/settings",{enabled:!snapshot.enabled});await refresh();}catch(err){$("notice").textContent=err.message;}};
+$("monitor").onclick=async()=>{try{await request("api/observer/settings",{enabled:!snapshot.enabled});await refresh();}catch(err){$("notice").textContent=err.message;}};
 async function send(interrupt) {
   const target=$("target").value, text=$("prompt").value;
   if(pending||!target||(!interrupt&&!text.trim()))return;
   pending=true;controls();
   try {
     const inputId = typeof crypto.randomUUID === "function" ? crypto.randomUUID() : `observer-${Date.now()}-${Array.from(crypto.getRandomValues(new Uint32Array(3))).join("-")}`;
-    await api(`api/sessions/${encodeURIComponent(target)}/keys`, interrupt?{keys:["Escape"]}:{keys:[text,"Enter"],input_id:inputId});
+    await request(`api/sessions/${encodeURIComponent(target)}/keys`, interrupt?{keys:["Escape"]}:{keys:[text,"Enter"],input_id:inputId});
     $("input-status").textContent=interrupt?`${target}: Esc 전송됨. 실제 상태를 확인하십시오.`:`${target}: 지시 전송됨`;
     if(!interrupt&&$("target").value===target&&$("prompt").value===text){$("prompt").value="";drafts.delete(target);}
   }catch(err){$("input-status").textContent=err.message;}finally{pending=false;controls();}
 }
 $("send").onclick=()=>send(false);$("interrupt").onclick=()=>send(true);
-$("login").onsubmit=async e=>{e.preventDefault();try{const token=$("token").value;await api("api/auth/session",{token});localStorage.setItem(TOKEN_KEY,token);$("token").value="";$("login").hidden=true;await refresh();}catch(err){$("notice").textContent=err.message;}};
-refresh();setInterval(()=>{if(!document.hidden)refresh();},10000);
+let poll = null, routeScope = "global", routeName = "", generation = 0;
+function stop() { clearInterval(poll); poll=null; generation++; }
+async function open(scope = "global", name = "") {
+  stop();
+  const ticket=generation;
+  routeScope=scope; routeName=name;
+  $("scope").value=scope;
+  await refresh();
+  if(ticket!==generation)return;
+  selections();
+  if(name) $("selection").value=name;
+  if(scope === "session") {
+    const session=snapshot.sessions.find(s=>s.name===name);
+    if(session&&!session.running) $("ended").checked=true;
+    chooseTarget(session?.running ? name : "");
+  }
+  render();
+  poll=setInterval(()=>{if(!document.hidden)refresh();},10000);
+}
+return {open, stop};
+})();

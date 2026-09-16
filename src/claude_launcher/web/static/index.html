@@ -6,6 +6,7 @@
 <title>claunch sessions</title>
 <link rel="stylesheet" href="static/vendor/xterm.css">
 <link rel="stylesheet" href="static/style.css">
+<link rel="stylesheet" href="static/observer.css">
 </head>
 <body>
 <div id="auth-overlay" class="hidden">
@@ -142,7 +143,7 @@
       <button id="archive-exited" class="bulk hidden" type="button"></button>
     </div>
     <nav id="rail-nav">
-      <a href="static/observer.html"><span>◎</span>Observer</a>
+      <a href="#/observer" data-page="observer"><span>◎</span>Observer</a>
       <a href="#/" data-page="home"><span>⌂</span>Home</a>
       <a href="#/new" data-page="new"><span>+</span>New</a>
       <a href="#/mesh" data-page="meshes"><span>◉</span>Mesh</a>
@@ -160,6 +161,29 @@
   <div id="rail-split"></div>
 
   <main id="main">
+    <section id="observer-view" class="hidden">
+      <header class="wf-head"><h1>관찰 대시보드</h1><button id="observer-monitor">관찰 시작</button></header>
+      <div class="observer-content">
+      <p id="observer-notice" role="status" aria-live="polite"></p>
+      <div class="filters">
+      <label>보기 <select id="observer-scope"><option value="global">전체</option><option value="mesh">메시</option><option value="session">세션</option></select></label>
+      <label id="observer-selection-label" hidden>대상 <select id="observer-selection"></select></label>
+      <label><input id="observer-actions-only" type="checkbox"> 조치 필요만</label>
+      <label><input id="observer-ended" type="checkbox"> 종료된 세션 포함</label>
+      </div>
+      <p id="observer-counts"></p>
+      <p class="hint">중요 결과와 사용자 요청을 표시합니다. 요약은 AI의 해석이며 각 이벤트에서 근거를 확인할 수 있습니다.</p>
+      <section id="observer-cards" aria-label="세션 결과"></section>
+      </div>
+      <footer id="observer-composer">
+      <label for="observer-target">입력 대상 세션</label><select id="observer-target"><option value="">세션 선택</option></select>
+      <button id="observer-interrupt" disabled>현재 응답 중단 (Esc)</button>
+      <label for="observer-prompt" class="sr-only">세션에 보낼 지시</label>
+      <textarea id="observer-prompt" rows="3" placeholder="선택한 세션에 보낼 지시를 입력하십시오."></textarea>
+      <button id="observer-send" disabled>전송</button>
+      <p id="observer-input-status" role="status">중단은 Esc 키를 전송합니다. 실제 중단 상태를 확인한 후 새 지시를 보내십시오.</p>
+      </footer>
+    </section>
     <!-- The terminal is never rebuilt by navigation: it holds a live PTY
          socket and 5000 lines of scrollback, so pages are laid over it. -->
     <div id="term-header" class="hidden">
@@ -264,6 +288,7 @@
              reaches any scrollback and the record lives only in claude's own
              jsonl. This reads that, paged, in an ordinary scroller — with a
              scrollbar, momentum, PgUp and find-in-page behind it. -->
+        <button id="term-observer" class="term-btn" type="button">observer</button>
         <button id="term-log" class="term-btn" type="button" aria-pressed="false"
                 title="this session's conversation — scrollable, the whole of it">transcript</button>
         <button id="term-rebrief" class="term-btn"
@@ -745,6 +770,7 @@
 
 <script src="static/vendor/xterm.js"></script>
 <script src="static/vendor/addon-fit.js"></script>
+<script src="static/observer.js"></script>
 <script src="static/app.js"></script>
 </body>
 </html>

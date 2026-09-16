@@ -6818,6 +6818,10 @@ $("term-brief").addEventListener("click", () => {
    reading of a session deserves the same standing as the other three. The
    terminal is not torn down by the trip; it is parked like any navigation,
    socket and all, and the back button brings it straight back. */
+$("term-observer").addEventListener("click", () => {
+  if (currentName) go("#/observer/session/" + encodeURIComponent(currentName));
+});
+
 $("term-log").addEventListener("click", () => {
   if (currentName) location.hash = `#/log/${encodeURIComponent(currentName)}`;
 });
@@ -9596,6 +9600,7 @@ function gotoSessionCard() {
 function mobileTitle() {
   switch (currentPage) {
     case "home": return "claunch";
+    case "observer": return "관찰 대시보드";
     case "new": return "new session";
     case "meshes": return "mesh";
     case "flows": return "workflows";
@@ -9736,6 +9741,7 @@ let wfLastData = null;     // last payload, for instant re-render on selection
    at all — it is the right-hand rail, and syncDetailPanel owns it. */
 const VIEWS = {
   home: "home-view",
+  observer: "observer-view",
   new: "new-view",
   meshes: "meshes-view",
   flows: "flows-view",
@@ -10248,6 +10254,11 @@ function parseHash(h) {
   if (parts[0] === "new") {
     return { page: "new", mesh: parts[1] ? decodeURIComponent(parts[1]) : "" };
   }
+  if (parts[0] === "observer") return {
+    page: "observer",
+    scope: ["session", "mesh"].includes(parts[1]) ? parts[1] : "global",
+    name: parts[2] || "",
+  };
   if (parts[0] === "flows") return { page: "flows" };
   if (parts[0] === "window") return { page: "window" };
   // One page, one shell: nothing else about the CLI tab is addressable, so
@@ -10268,6 +10279,7 @@ function route() {
   const r = parseHash(location.hash);
   // Leaving a page stops what it was polling. Done centrally so a page's
   // open function never has to know which other pages exist.
+  if (r.page !== "observer") window.ObserverPage?.stop();
   if (r.page !== "wf") stopWfPoll();
   if (r.page !== "msg") stopMsgPoll();
   if (r.page !== "mesh") stopMeshPoll();
@@ -10298,6 +10310,7 @@ function route() {
       // whose home there is the page slot the terminal just took.
       if (sessName && sessName !== r.name) repointDetail(r.name);
       break;
+    case "observer": showView("observer"); window.ObserverPage.open(r.scope, r.name); break;
     case "wf": openWorkflow(r.cwd, r.scope); break;
     case "log": openTranscript(r.name); break;
     case "msg": openTrace(r.name, r.mesh); break;
@@ -22040,6 +22053,9 @@ function renderMesh(info, history, force, owed, historyPage) {
   flowLink.href = "#/mesh/" + encodeURIComponent(info.name) + "/flows";
   flowLink.title = "the same topology, with every agent's workflow inside it";
   head.appendChild(flowLink);
+  const observerLink = el("a", "wf-btn option", "observer");
+  observerLink.href = "#/observer/mesh/" + encodeURIComponent(info.name);
+  head.appendChild(observerLink);
   const rm = el("button", "wf-btn archive", "Remove mesh");
   rm.addEventListener("click", async () => {
     if (!confirm(`Remove mesh '${info.name}'? Its history is retired on disk.`)) return;
