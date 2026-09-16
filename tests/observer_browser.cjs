@@ -108,6 +108,15 @@ const server = http.createServer((req, res) => {
     await page.goto(`http://127.0.0.1:${server.address().port}/static/observer.html`);
     await page.waitForURL("**/#/observer");
     await page.waitForSelector(".observer-card");
+    await page.route("**/api/observer", async route => {
+      await new Promise(resolve=>setTimeout(resolve,200));
+      await route.continue();
+    });
+    await page.reload();
+    await page.waitForFunction(() => document.body.dataset.page === "observer");
+    await page.evaluate(() => {location.hash="#/observer/session/s1";});
+    await page.waitForFunction(() => document.getElementById("observer-target").value === "s1");
+    assert.equal(await page.locator(".observer-card").count(), 1);
     assert.deepEqual(errors, []);
     console.log("PASS: mobile layout, scope/action filters, evidence, Escape, target input, per-session drafts, shared auth, deep links, polling lifecycle, legacy redirect");
   } finally { await browser.close(); server.close(); server.closeAllConnections(); }

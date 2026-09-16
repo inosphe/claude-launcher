@@ -2,7 +2,7 @@
 window.ObserverPage = (() => {
 "use strict";
 const $ = id => document.getElementById("observer-" + id);
-let snapshot = {sessions: [], enabled: false}, pending = false, loading = false, lastSnapshot = "";
+let snapshot = {sessions: [], enabled: false}, pending = false, refreshTask = null, lastSnapshot = "";
 const drafts = new Map();
 let draftTarget = "";
 const node = (tag, text, cls) => { const e = document.createElement(tag); e.textContent = text; if(cls)e.className=cls; return e; };
@@ -83,10 +83,23 @@ function selections() {
   options($("selection"),scope==="mesh"?[...new Set(snapshot.sessions.flatMap(s=>s.meshes))].sort():snapshot.sessions.map(s=>s.name));
   if(scope===routeScope && routeName) $("selection").value=routeName;
 }
-async function refresh() {
-  if(loading)return;loading=true;
-  try {const data=await request("api/observer");const signature=JSON.stringify(data);if(signature!==lastSnapshot){snapshot=data;lastSnapshot=signature;selections();options($("target"),snapshot.sessions.filter(s=>s.running).map(s=>s.name),"세션 선택");render();}}
-  catch(err){$("notice").textContent=err.message;}finally{loading=false;}
+function refresh() {
+  // Route changes share a pending request so direct-link target selection
+  // always runs after that response, including on a slow first load.
+  if(refreshTask)return refreshTask;
+  refreshTask=(async()=>{
+    try {
+      const data=await request("api/observer"), signature=JSON.stringify(data);
+      if(signature!==lastSnapshot) {
+        snapshot=data; lastSnapshot=signature;
+        selections();
+        options($("target"),snapshot.sessions.filter(s=>s.running).map(s=>s.name),"세션 선택");
+        render();
+      }
+    } catch(err) { $("notice").textContent=err.message; }
+    finally { refreshTask=null; }
+  })();
+  return refreshTask;
 }
 function navigate() {
   const scope=$("scope").value, name=$("selection").value;
