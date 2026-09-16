@@ -35,7 +35,7 @@ const rows = sessions.map((session) => {
   const state = classes();
   return { dataset: { name: session.name }, classList: state.api, classes: state.values };
 });
-const list = { querySelectorAll: () => rows };
+const list = { querySelectorAll: (selector) => selector === "li[data-name]" ? rows : [] };
 const buttons = {};
 for (const filter of ["current", "running-paused", "running", "killed", "paused", "archived"]) {
   buttons[filter] = {

@@ -1021,6 +1021,20 @@ function setSessionFilter(filter, remember = true) {
   refreshSessions({ state });
 }
 
+function syncSessionGroupSearch(list) {
+  const active = typeof sessionSearch !== "undefined" && !!String(sessionSearch.q || "").trim();
+  let changed = false;
+  for (const group of list.querySelectorAll(".session-group")) {
+    const match = active && !!group.querySelector("li[data-name]:not(.session-filtered)");
+    const shut = !match && isSessionGroupCollapsed(group.dataset.group, group.dataset.value);
+    changed = changed || group.classList.contains("collapsed") !== shut;
+    group.classList.toggle("collapsed", shut);
+    group.querySelector(".session-group-caret").textContent = shut ? "▸" : "▾";
+    group.querySelector(".session-group-heading").setAttribute("aria-expanded", String(!shut));
+  }
+  if (changed) syncSessionGroupStickyOffsets(list);
+}
+
 function syncSessionFilters(sessions) {
   const list = $("session-list");
   if (!list) return;
@@ -1057,6 +1071,9 @@ function syncSessionFilters(sessions) {
       || (!pinned && !sessionMatchesFilter(session))
       || (searching && !sessionMatchesSearch(session)));
   }
+  // Search can change without rebuilding the rail. Open every ancestor of
+  // a visible match while preserving the reader's stored fold preferences.
+  if (typeof syncSessionGroupSearch === "function") syncSessionGroupSearch(list);
   if (typeof syncSessionSearchNote === "function") syncSessionSearchNote();
   if (typeof syncBulkActions === "function") syncBulkActions(sessions || [], sessionFilter);
 }
@@ -1508,6 +1525,8 @@ async function refreshSessions(options) {
       const parent = groupBodies[row.level - 1] || list;
       const group = document.createElement("li");
       group.className = `session-group session-group-level-${row.level}`;
+      group.dataset.group = row.group;
+      group.dataset.value = row.value;
       const heading = document.createElement("div");
       heading.className = `session-group-heading session-group-level-${row.level}`;
       heading.dataset.groupLevel = String(row.level);
@@ -1618,6 +1637,7 @@ async function refreshSessions(options) {
         const shut = !group.classList.contains("collapsed");
         setSessionGroupCollapsed(row.group, row.value, shut);
         paintFold(shut);
+        syncSessionGroupSearch(list);
         // Folding changes how many headings are in the list's flow, so the
         // stack that keeps them all named has to be measured again.
         if (typeof syncSessionGroupStickyOffsets === "function") {
