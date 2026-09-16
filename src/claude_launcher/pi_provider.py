@@ -23,6 +23,7 @@ EXTENSION_FILE = "pi_provider.mjs"
 #: The extension that adds claunch's own tools (``full_read``) to every Pi
 #: session, whatever provider it runs on.
 TOOLS_EXTENSION_FILE = "pi_tools.mjs"
+ACTIVITY_EXTENSION_FILE = "pi_activity.mjs"
 #: Tools the packaged extension knows; ``harness_options.pi.tools`` switches
 #: them off by name.
 BUILTIN_TOOLS = ("full_read",)
@@ -98,6 +99,11 @@ def extension_path() -> Path:
 def tools_extension_path() -> Path:
     """Path to the tools extension shipped beside this module."""
     return _packaged(TOOLS_EXTENSION_FILE, "tools")
+
+
+def activity_extension_path() -> Path:
+    """Path to the managed turn-activity extension."""
+    return _packaged(ACTIVITY_EXTENSION_FILE, "activity")
 
 
 def _packaged(filename: str, what: str) -> Path:
@@ -313,7 +319,8 @@ def launch_args(
 ) -> list[str]:
     """Prepend Pi's extensions and default model when required.
 
-    The tools extension rides along on every Pi launch that has at least one
+    The activity extension reports managed interactive turn lifecycle even
+    with tools disabled. The tools extension rides along on launches with a
     builtin tool enabled; the provider extension only when a custom provider
     is projected. A caller's explicit ``--provider``, ``--model`` or
     ``--models`` owns model selection for that launch, including flags
@@ -323,7 +330,7 @@ def launch_args(
     forwarded = list(args)
     if harness.provider_adapter != ADAPTER:
         return forwarded
-    adapter_args: list[str] = []
+    adapter_args: list[str] = ["--extension", str(activity_extension_path())]
     if enabled_tools(profile, harness, override=tools):
         adapter_args += ["--extension", str(tools_extension_path())]
     projection = resolve(profile, harness)

@@ -30,6 +30,7 @@ from . import compacting, keys as keys_mod, process_priority
 from . import paths, pty_backend
 from .harness import CLAUDE_HARNESS, SessionDef
 from .idle import IdleTracker
+from .activity import Detector as ActivityDetector
 from .screen import BACKGROUND_HISTORY, RenderBudget, ScreenFeeder, ScreenState
 
 #: Screen sampling cadence for idle detection (seconds).
@@ -287,14 +288,10 @@ STATUS_EXITED = "exited"
 #: to the old heuristic behaviour, never to a false "busy".
 _CLAUDE_TURN_MARKER = "esc to interrupt"
 
-#: Seconds a row carrying the in-turn marker (or the animated spinner/counter
-#: rows around it) may stay unchanged before the marker is distrusted. A live
-#: turn repaints that region constantly — the spinner spins, the elapsed time
-#: ticks — so a marker row frozen past this is a crashed or dead TUI's fossil,
-#: not a turn. Generous, since a genuine turn's animation is far more frequent;
-#: the cost of being too small is a slow turn flickering to idle, the cost of
-#: too large is a stale dot persisting. Made an env var so it can be tuned
-#: against a real frozen claude without a rebuild.
+#: Maximum age of a live activity signal or the Claude footer's spinner.
+#: Native titles animate throughout a turn; Pi emits a heartbeat every 5s.
+#: Expiry prevents a frozen process from retaining a busy status indefinitely.
+#: The environment override also applies to the existing footer fallback.
 TURN_MARKER_FRESH_FOR = float(
     os.environ.get("CLAUNCH_TURN_MARKER_FRESH_FOR") or 15.0
 )
@@ -379,6 +376,7 @@ class Session:
         #: chunk in :meth:`_on_output`, read by the dashboard row as the
         #: session's ``compacting`` flag.
         self._compacting = compacting.Detector(sdef.harness)
+        self._activity = ActivityDetector(sdef.harness)
         #: When this session was *first* made, not when this object was.
         #: A relaunch that keeps the name — a daemon restart's restore, a
         #: respawn, a redefine — is the same session continuing, and the
@@ -629,6 +627,7 @@ class Session:
         # here (and nowhere shown to the user) is what lets the dashboard
         # label a compacting session without asking the screen to.
         self._compacting.feed(chunk)
+        self._activity.feed(chunk)
         self._broadcast(("data", chunk))
         if new_alt != prev_alt:
             # The program entered or left the alternate screen. Queued after
@@ -891,9 +890,12 @@ class Session:
 
     def _compute_status(self, threshold: float) -> str:
         heur = self._heuristic_status(threshold)
-        if heur == STATUS_IDLE and self._claude_turn_in_flight():
+        if heur == STATUS_IDLE and self._turn_in_flight():
             return STATUS_BUSY
         return heur
+
+    def _turn_in_flight(self) -> bool:
+        return self._activity.busy(TURN_MARKER_FRESH_FOR) or self._claude_turn_in_flight()
 
     # ------------------------------------------------------------------ #
     # commands
@@ -904,12 +906,14 @@ class Session:
     def idle_since(self) -> Optional[float]:
         """Seconds the session has been idle (None when not idle).
 
-        Agrees with :meth:`status`: a mid-turn session (footer marker present)
-        is not idle even though the transient heuristic has been quiet for a
-        while, so it reports None — one answer for both callers.
+        Agrees with :meth:`status`: fresh harness activity or a live footer
+        marker prevents an idle duration even when screen content is quiet.
+        A parked screen uses output timing, just like the status heuristic.
         """
-        if self.exited or self._claude_turn_in_flight():
+        if self.status() != STATUS_IDLE:
             return None
+        if not self.background_render and not self.is_focused():
+            return max(0.0, time.monotonic() - self._last_output_mono)
         idle_for = self.tracker.idle_for(time.monotonic())
         if idle_for is None or idle_for < self.idle_threshold:
             return None
