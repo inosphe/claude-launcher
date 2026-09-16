@@ -10279,7 +10279,7 @@ function route() {
   const r = parseHash(location.hash);
   // Leaving a page stops what it was polling. Done centrally so a page's
   // open function never has to know which other pages exist.
-  if (r.page !== "observer") window.ObserverPage?.stop();
+  if (r.page !== "observer") globalThis.ObserverPage?.stop();
   if (r.page !== "wf") stopWfPoll();
   if (r.page !== "msg") stopMsgPoll();
   if (r.page !== "mesh") stopMeshPoll();
@@ -10310,7 +10310,7 @@ function route() {
       // whose home there is the page slot the terminal just took.
       if (sessName && sessName !== r.name) repointDetail(r.name);
       break;
-    case "observer": showView("observer"); window.ObserverPage.open(r.scope, r.name); break;
+    case "observer": showView("observer"); globalThis.ObserverPage.open(r.scope, r.name); break;
     case "wf": openWorkflow(r.cwd, r.scope); break;
     case "log": openTranscript(r.name); break;
     case "msg": openTrace(r.name, r.mesh); break;

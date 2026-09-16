@@ -1,5 +1,5 @@
 /* Observer uses the main app router, authentication and viewport. */
-window.ObserverPage = (() => {
+globalThis.ObserverPage = (() => {
 "use strict";
 const $ = id => document.getElementById("observer-" + id);
 let snapshot = {sessions: [], enabled: false}, pending = false, refreshTask = null, lastSnapshot = "";
