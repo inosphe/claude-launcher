@@ -764,6 +764,66 @@ function toggleSessionPin(name) {
   if (typeof refreshSessions === "function") refreshSessions();
   return on;
 }
+/* The pinned sessions as one inline strip at the very top of the rail: each
+   is a small label card, all of them on a single line, rather than a section
+   of full-height rows. A pin is a shortcut back to a session the reader keeps
+   returning to, so the card carries the name and the state dot and nothing
+   else. The row itself stays where the lineage put it -- still exempt from
+   the state filter, because that exemption is the other half of what a pin
+   is for -- and the strip is only the fast way back to it. */
+function buildSessionPinBar(sessions) {
+  const bar = document.createElement("li");
+  bar.className = "session-pinbar";
+  const mark = document.createElement("span");
+  mark.className = "session-pinbar-mark";
+  mark.textContent = "\u{1F4CC}";
+  mark.title = "sessions you pinned — click one to open it";
+  bar.appendChild(mark);
+  for (const s of sessions) {
+    const card = document.createElement("span");
+    card.className = "pin-card";
+    card.dataset.name = s.name;
+    const dot = document.createElement("span");
+    dot.className = `dot ${s.status}${s.status === "exited" && s.paused_at ? " paused" : ""}`;
+    const label = document.createElement("span");
+    label.className = "pin-card-name";
+    label.textContent = s.name;
+    // Letting go of this one pin, without opening the session first. The
+    // strip's whole point is that it is one line, so the control is the
+    // smallest thing that can still be pressed.
+    const drop = document.createElement("button");
+    drop.className = "pin-card-off";
+    drop.type = "button";
+    drop.textContent = "×";
+    drop.title = `unpin ${s.name} — its row keeps its place in the list`;
+    drop.addEventListener("click", (e) => {
+      e.stopPropagation();   // the card opens the session; this does not
+      toggleSessionPin(s.name);
+    });
+    card.append(dot, label, drop);
+    card.title = `${s.name} — open it`;
+    card.addEventListener("click", () => {
+      location.hash = "#/s/" + encodeURIComponent(s.name);
+    });
+    bar.append(card);
+  }
+  // Letting go of every pin at once, at the end of the strip where it cannot
+  // be hit while reaching for a card.
+  const clear = document.createElement("button");
+  clear.className = "session-pinbar-clear";
+  clear.type = "button";
+  clear.textContent = "unpin all";
+  clear.title = "unpin every session — the strip goes, the rows stay where they are";
+  clear.addEventListener("click", (e) => {
+    e.stopPropagation();
+    if (typeof clearSessionPins === "function") clearSessionPins();
+    if (typeof syncSessionPinUi === "function") syncSessionPinUi();
+    refreshSessions();
+  });
+  bar.appendChild(clear);
+  return bar;
+}
+
 /* ---- end rail pins ---------------------------------------------------- */
 
 /* Convert lineage-ordered rows into headings and rows. Each selected group
@@ -1372,20 +1432,16 @@ async function refreshSessions(options) {
   // one only when the argument is absent. Handed an index it matches
   // nothing, the visible set comes back empty, and every row is laid out
   // as a root with no indent.
-  // The pinned rows come first and come out of the tree: a pinned session
-  // is drawn once, in the section at the top, and its children are laid out
-  // as roots below (byLineage promotes a child whose parent is not visible).
-  // The state filter does not apply to a pin -- that is what pinning is
-  // for -- so the pinned rows are read off the whole cache, not the
-  // filtered view.
+  // The pinned sessions, in pin order, for the strip drawn above the list.
+  // They are a shortcut and not a relocation: each keeps its own row in the
+  // lineage tree, so a pin no longer tears a branch apart to lift one
+  // session out of it. The state filter still does not apply to a pinned
+  // session -- sessionMatchesFilter exempts it where the rows are built --
+  // which is the other half of what a pin is for.
   const pinnedRows = rebuild && typeof sessionPinRows === "function"
     ? sessionPinRows(sessionsCache) : [];
-  const pinnedNames = new Set(pinnedRows.map((s) => s.name));
-  const visibleSessions = sessionsCache.filter((s) =>
-    !pinnedNames.has(s.name) && sessionMatchesFilter(s));
-  const entries = rebuild
-    ? byLineage(sessionsCache.filter((s) => !pinnedNames.has(s.name)),
-                visibleSessions) : [];
+  const visibleSessions = sessionsCache.filter((s) => sessionMatchesFilter(s));
+  const entries = rebuild ? byLineage(sessionsCache, visibleSessions) : [];
   // Isolated web harnesses retain the old mesh-only variable. The fallback
   // keeps those consumers compatible while the page uses the ordered setting.
   const rows = !rebuild ? [] : typeof sessionGroupRows !== "undefined"
@@ -1408,20 +1464,14 @@ async function refreshSessions(options) {
              meshGroup: value === "(no mesh)" ? null : value })),
       ]);
     })() : entries.map(([session, depth]) => ({ type: "session", session, depth }));
-  // The pinned section ahead of everything, closed by an `ungroup` marker so
-  // the rows after it land in the list (or their own group) rather than in
-  // the section's body.
-  if (pinnedRows.length) {
-    rows.unshift(
-      { type: "group", group: "pinned", value: "pinned", level: 0 },
-      ...pinnedRows.map((session) => ({ type: "session", session, depth: 0, pinned: true })),
-      { type: "ungroup" },
-    );
-  }
   // The narrow embedded web harnesses model only a flat list.  Browsers
   // expose Document#createDocumentFragment, which lets the shipped rail use
   // group containers while those reduced consumers retain their old shape.
   const nestedGroupContainers = typeof document.createDocumentFragment === "function";
+  // The pins, inline on one line above everything the list draws.
+  if (pinnedRows.length && typeof buildSessionPinBar === "function") {
+    list.appendChild(buildSessionPinBar(pinnedRows));
+  }
   const groupBodies = [];
   // The count each open heading shows, one per level, kept alongside the
   // bodies so a row appended at any depth raises every heading above it.
@@ -1439,10 +1489,9 @@ async function refreshSessions(options) {
       if (!nestedGroupContainers) {
         const heading = document.createElement("li");
         heading.className = `session-group-heading session-group-level-${row.level}`;
-        if (row.group === "pinned") heading.classList.add("session-group-pinned");
         const label = row.group === "workspace"
           ? sessionWorkspaceLabel(row.value) : row.value;
-        heading.textContent = row.group === "pinned" ? "📌 pinned" : `${row.group} · ${label}`;
+        heading.textContent = `${row.group} · ${label}`;
         heading.title = `${row.group} group ${row.value}`;
         list.appendChild(heading);
         continue;
@@ -1453,11 +1502,6 @@ async function refreshSessions(options) {
       const heading = document.createElement("div");
       heading.className = `session-group-heading session-group-level-${row.level}`;
       heading.dataset.groupLevel = String(row.level);
-      const pinnedGroup = row.group === "pinned";
-      if (pinnedGroup) {
-        group.classList.add("session-group-pinned");
-        heading.classList.add("session-group-pinned");
-      }
       const label = row.group === "workspace"
         ? sessionWorkspaceLabel(row.value) : row.value;
       // The fold marker, the name, then how many sessions are inside it. The
@@ -1467,14 +1511,12 @@ async function refreshSessions(options) {
       caret.className = "session-group-caret";
       const name = document.createElement("span");
       name.className = "session-group-name";
-      name.textContent = pinnedGroup ? "📌 pinned" : `${row.group} · ${label}`;
+      name.textContent = `${row.group} · ${label}`;
       const count = document.createElement("span");
       count.className = "session-group-count";
       count.textContent = "0";
       heading.append(caret, name, count);
-      heading.title = pinnedGroup
-        ? "sessions you pinned — click to fold the section shut"
-        : `${row.group} group ${row.value} — click to fold it shut`;
+      heading.title = `${row.group} group ${row.value} — click to fold it shut`;
       const body = document.createElement("ul");
       body.className = "session-group-body";
       // Jump to the group's first session. Every grouping gets one: a
@@ -1554,22 +1596,6 @@ async function refreshSessions(options) {
         }
         heading.appendChild(plus);
       }
-      // The pinned section's one action: let go of every pin at once. The
-      // rows themselves are still in the fleet, only their place changes.
-      if (pinnedGroup) {
-        const clear = document.createElement("button");
-        clear.className = "session-group-unpin";
-        clear.type = "button";
-        clear.textContent = "unpin all";
-        clear.title = "unpin every session — each returns to its place in the list";
-        clear.addEventListener("click", (e) => {
-          e.stopPropagation();   // the heading itself folds; this does not
-          if (typeof clearSessionPins === "function") clearSessionPins();
-          if (typeof syncSessionPinUi === "function") syncSessionPinUi();
-          refreshSessions();
-        });
-        heading.appendChild(clear);
-      }
       const collapsed = isSessionGroupCollapsed(row.group, row.value);
       const paintFold = (shut) => {
         group.classList.toggle("collapsed", shut);
@@ -1609,13 +1635,6 @@ async function refreshSessions(options) {
     li.classList.add("sess-card");
     li.tabIndex = 0;
     if (s.name === currentName) li.classList.add("active");
-    // A row in the pinned section: drawn at depth 0 whatever its parent, so
-    // the lineage it left goes in the tooltip where the tree would have
-    // said it.
-    if (row.pinned) {
-      li.classList.add("pinned");
-      if (s.parent) li.title = `spawned by ${s.parent}`;
-    }
     // The indent goes on the row, not on a spacer element, so the whole row
     // stays one click target and the hover/active background still spans it.
     // The step is deliberately small: on a 260px rail every pixel of indent

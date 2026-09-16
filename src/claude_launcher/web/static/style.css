@@ -3725,7 +3725,7 @@ body.embed #main { width: 100%; }
 /* The rail's 📌, third of the row actions. Dim until pinned; lit in the
    warning amber once it is, because a pinned row is one the reader asked to
    have held apart from the rest and the colour should say so on every poll.
-   The section it lives in wears the same amber on its heading. */
+   The strip at the top of the rail wears the same amber on hover. */
 #session-list .sess-pin {
   flex: none; background: none; border: none; color: #6e7681;
   font-size: 12px; line-height: 1; padding: 2px 4px; cursor: pointer;
@@ -3733,14 +3733,42 @@ body.embed #main { width: 100%; }
 }
 #session-list .sess-pin:hover { filter: none; opacity: 1; }
 #session-list .sess-pin.on { filter: none; opacity: 1; }
-#session-list li.pinned { border-left: 2px solid #d29922; }
-#session-list .session-group-heading.session-group-pinned { color: #d29922; }
-#session-list .session-group-unpin {
-  flex: none; margin-left: 6px; background: none; color: #8b949e;
-  border: 1px solid #30363d; border-radius: 4px; font-size: 10px;
-  padding: 1px 5px; cursor: pointer;
+/* The pins, inline on one line at the very top of the rail. Not a group and
+   not a section: a strip of small label cards, each one a shortcut back to a
+   session whose own row is still down in the tree where it belongs. It holds
+   to a single line and scrolls sideways when the pins outgrow the rail --
+   wrapping would turn the shortcut back into the block of rows it replaced. */
+#session-list li.session-pinbar {
+  display: flex; align-items: center; gap: 4px; flex-wrap: nowrap;
+  overflow-x: auto; overflow-y: hidden; scrollbar-width: none;
+  padding: 4px 6px; margin-bottom: 2px;
+  border-bottom: 1px solid #21262d; background: #0d1117;
+  position: sticky; top: 0; z-index: 3;
 }
-#session-list .session-group-unpin:hover { color: #f0f6fc; border-color: #d29922; }
+#session-list li.session-pinbar::-webkit-scrollbar { display: none; }
+#session-list .session-pinbar-mark { flex: none; font-size: 10px; opacity: 0.8; }
+#session-list .pin-card {
+  flex: none; display: inline-flex; align-items: center; gap: 4px;
+  max-width: 130px; padding: 1px 4px; cursor: pointer;
+  border: 1px solid #30363d; border-radius: 4px; background: #161b22;
+  font-size: 11px; line-height: 1.5; color: #c9d1d9;
+}
+#session-list .pin-card:hover { border-color: #d29922; color: #f0f6fc; }
+#session-list .pin-card .dot { flex: none; }
+#session-list .pin-card-name {
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+#session-list .pin-card-off {
+  flex: none; background: none; border: none; padding: 0 1px; cursor: pointer;
+  color: #6e7681; font-size: 11px; line-height: 1;
+}
+#session-list .pin-card-off:hover { color: #f85149; }
+#session-list .session-pinbar-clear {
+  flex: none; margin-left: auto; background: none; color: #8b949e;
+  border: 1px solid #30363d; border-radius: 4px; font-size: 10px;
+  padding: 1px 5px; cursor: pointer; white-space: nowrap;
+}
+#session-list .session-pinbar-clear:hover { color: #f0f6fc; border-color: #d29922; }
 /* The header's pin chip: the same toggle, on the attached session. */
 .pin-chip { flex: none; filter: grayscale(1); opacity: 0.7; }
 .pin-chip:hover { filter: none; opacity: 1; }
