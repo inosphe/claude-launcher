@@ -367,5 +367,45 @@ check("every grouping gets a jump, not only mesh",
 check("the jump is styled as a heading control",
       /#session-list \.session-group-jump\s*\{/.test(css), true);
 
+// Search updates must reveal matches through every folded ancestor, without
+// overwriting the saved folds. Include a state-filtered match and no matches.
+const searchState = { q: "s561" };
+let measurements = 0;
+function searchGroup(value, visible) {
+  let collapsed = true;
+  const caret = {};
+  const heading = { setAttribute: (key, value) => { heading[key] = value; } };
+  return {
+    dataset: { group: "mesh", value }, caret, heading,
+    classList: {
+      contains: () => collapsed,
+      toggle: (_, value) => { collapsed = value; },
+    },
+    querySelector: (selector) => selector === ".session-group-caret" ? caret
+      : selector === ".session-group-heading" ? heading : visible ? {} : null,
+  };
+}
+const outer = searchGroup("outer", true);
+const inner = searchGroup("inner", true);
+const absent = searchGroup("absent", false);
+const groupList = { querySelectorAll: () => [outer, inner, absent] };
+const syncSearch = new Function("sessionSearch", "isSessionGroupCollapsed",
+  "syncSessionGroupStickyOffsets", slice("function syncSessionGroupSearch(",
+  "function syncSessionFilters(") + "return syncSessionGroupSearch;")(
+    searchState, () => true, () => { measurements++; });
+syncSearch(groupList);
+check("search opens matching nested groups only",
+  [outer, inner, absent].map(g => g.classList.contains("collapsed")), [false, false, true]);
+check("search updates expanded accessibility state", inner.heading["aria-expanded"], "true");
+check("search updates fold marker", inner.caret.textContent, "▾");
+check("search remeasures changed group geometry", measurements, 1);
+syncSearch(groupList);
+check("unchanged search does not remeasure geometry", measurements, 1);
+searchState.q = "   ";
+syncSearch(groupList);
+check("clearing search restores saved nested folds",
+  [outer, inner, absent].map(g => g.classList.contains("collapsed")), [true, true, true]);
+check("clearing search restores accessibility state", inner.heading["aria-expanded"], "false");
+
 if (failures) process.exit(1);
 console.log("sessiongroupstack_check: ok");
