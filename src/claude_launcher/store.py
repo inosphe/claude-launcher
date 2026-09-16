@@ -445,38 +445,195 @@ def daemon_config(doc: Optional[dict] = None) -> dict:
     return merged
 
 
-def relay_config(doc: Optional[dict] = None) -> dict:
-    """The ``daemon.relay`` uplink block (empty dict if unset).
+def _normalize_relay(entry: dict, index: int) -> dict:
+    """One relay entry with its local handle (``id``) filled in.
 
-    Recognized keys: ``url`` (relay ws/wss address), ``token`` (backend
-    registration token — prefer the ``CLAUNCH_RELAY_TOKEN`` env var),
-    ``name`` (directory label; defaults to hostname), ``verify_tls``.
+    ``id`` is how the CLI and the API address this relay among the others. It
+    is NOT the backend name the relay directory sees (``name``): two relays may
+    legitimately register this daemon under the same name, so the name cannot
+    identify a config row. An entry that does not carry one gets ``relay1``,
+    ``relay2`` ... by position.
+    """
+    out = dict(entry)
+    ident = str(out.get("id") or "").strip()
+    out["id"] = ident or f"relay{index + 1}"
+    return out
+
+
+def relays_config(doc: Optional[dict] = None) -> List[dict]:
+    """Every configured relay uplink, in config order.
+
+    Two shapes are read. ``daemon.relays`` is a LIST of blocks and is the one
+    to write for more than one relay; ``daemon.relay`` is the original single
+    block and is still honoured so an existing config keeps working untouched.
+    When both are present the list wins and the single block is ignored — one
+    file must not describe the same daemon's uplinks two ways.
+
+    Recognized keys per entry: ``url`` (relay ws/wss address), ``token``
+    (backend registration token), ``name`` (directory label; defaults to
+    hostname), ``verify_tls``, and ``id`` (local handle, see
+    :func:`_normalize_relay`).
     """
     doc = load() if doc is None else doc
-    block = daemon_config(doc).get("relay")
-    return dict(block) if isinstance(block, dict) else {}
+    daemon = daemon_config(doc)
+    rows = daemon.get("relays")
+    if isinstance(rows, list):
+        return [
+            _normalize_relay(row, i)
+            for i, row in enumerate(r for r in rows if isinstance(r, dict))
+        ]
+    block = daemon.get("relay")
+    if isinstance(block, dict) and block:
+        return [_normalize_relay(block, 0)]
+    return []
 
 
-def set_relay_field(key: str, value) -> None:
-    """Set (or clear, when ``value`` is ``None``) one ``daemon.relay`` setting."""
+def relay_config(doc: Optional[dict] = None) -> dict:
+    """The FIRST configured relay uplink (empty dict if none).
+
+    Kept for callers that only ever meant "the relay": with a single-relay
+    config it answers exactly what it always did. Code that must see every
+    uplink uses :func:`relays_config`.
+    """
+    rows = relays_config(doc)
+    return rows[0] if rows else {}
+
+
+def _daemon_block(doc: dict) -> dict:
+    block = doc.get("daemon")
+    if not isinstance(block, dict):
+        block = {}
+        doc["daemon"] = block
+    return block
+
+
+def _uses_relay_list(doc: dict) -> bool:
+    return isinstance(_daemon_block(doc).get("relays"), list)
+
+
+def _migrate_to_relay_list(daemon: dict) -> List[dict]:
+    """Move a legacy ``daemon.relay`` block into ``daemon.relays``.
+
+    Called only when a write actually needs the list shape, so a
+    single-relay config file is never rewritten just for being read.
+    """
+    rows = daemon.get("relays")
+    if not isinstance(rows, list):
+        rows = []
+        legacy = daemon.pop("relay", None)
+        if isinstance(legacy, dict) and legacy:
+            rows.append(legacy)
+        daemon["relays"] = rows
+    return rows
+
+
+def _find_relay(rows: List[dict], relay: str) -> Optional[dict]:
+    """The entry addressed by ``relay`` — its ``id``, else its position."""
+    for i, row in enumerate(rows):
+        if not isinstance(row, dict):
+            continue
+        ident = str(row.get("id") or "").strip() or f"relay{i + 1}"
+        if ident == relay:
+            return row
+    return None
+
+
+def set_relay_field(key: str, value, *, relay: Optional[str] = None) -> None:
+    """Set (or clear, when ``value`` is ``None``) one relay uplink setting.
+
+    Without ``relay`` this addresses the first (or only) uplink and keeps the
+    file in whatever shape it already has: a config that never had more than
+    one relay stays a plain ``daemon.relay`` block. Naming a ``relay`` handle
+    switches the file to the ``daemon.relays`` list, migrating the legacy
+    block into it first, because that is the only shape that can hold a second
+    entry.
+    """
 
     def _mutate(doc: dict) -> None:
-        daemon = doc.get("daemon")
-        if not isinstance(daemon, dict):
-            daemon = {}
-            doc["daemon"] = daemon
-        block = daemon.get("relay")
-        if not isinstance(block, dict):
-            block = {}
-            daemon["relay"] = block
+        daemon = _daemon_block(doc)
+        if relay is None and not isinstance(daemon.get("relays"), list):
+            _set_legacy_relay_field(doc, daemon, key, value)
+            return
+        rows = _migrate_to_relay_list(daemon)
+        target = _find_relay(rows, relay) if relay is not None else (
+            rows[0] if rows else None
+        )
+        if target is None:
+            if value is None:
+                return
+            target = {"id": relay} if relay is not None else {}
+            rows.append(target)
         if value is None:
-            block.pop(key, None)
-            if not block:
-                daemon.pop("relay", None)
+            target.pop(key, None)
+            # An entry left with nothing but its handle is not a relay.
+            if not [k for k in target if k != "id"]:
+                rows.remove(target)
+            if not rows:
+                daemon.pop("relays", None)
         else:
-            block[key] = value
+            target[key] = value
 
     update(_mutate)
+
+
+def _set_legacy_relay_field(doc: dict, daemon: dict, key: str, value) -> None:
+    block = daemon.get("relay")
+    if not isinstance(block, dict):
+        if value is None:
+            return
+        block = {}
+        daemon["relay"] = block
+    if value is None:
+        block.pop(key, None)
+        if not block:
+            daemon.pop("relay", None)
+    else:
+        block[key] = value
+
+
+def add_relay(relay: str, **fields) -> None:
+    """Append a relay uplink under the local handle ``relay``.
+
+    Raises ``ValueError`` when the handle is already taken — silently merging
+    into an existing entry would let a typo point two commands at one uplink.
+    """
+    ident = str(relay or "").strip()
+    if not ident:
+        raise ValueError("a relay handle is required")
+
+    def _mutate(doc: dict) -> None:
+        rows = _migrate_to_relay_list(_daemon_block(doc))
+        if _find_relay(rows, ident) is not None:
+            raise ValueError(f"relay {ident!r} already exists")
+        entry = {"id": ident}
+        entry.update({k: v for k, v in fields.items() if v is not None})
+        rows.append(entry)
+
+    update(_mutate)
+
+
+def remove_relay(relay: str) -> bool:
+    """Drop the relay uplink addressed by ``relay``; False if there was none."""
+    removed = False
+
+    def _mutate(doc: dict) -> None:
+        nonlocal removed
+        daemon = _daemon_block(doc)
+        # Look before migrating: a handle that is not there must leave the
+        # file exactly as it was, legacy single block included.
+        if _find_relay(relays_config(doc), relay) is None:
+            return
+        rows = _migrate_to_relay_list(daemon)
+        target = _find_relay(rows, relay)
+        if target is None:
+            return
+        rows.remove(target)
+        removed = True
+        if not rows:
+            daemon.pop("relays", None)
+
+    update(_mutate)
+    return removed
 
 
 def set_daemon_field(key: str, value) -> None:

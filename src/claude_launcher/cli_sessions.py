@@ -1973,50 +1973,106 @@ def _parse_value(raw: str):
     return raw
 
 
-#: Settable ``daemon.relay`` uplink keys (token is write-only via config file /
+#: Settable relay uplink keys (token is write-only via config file /
 #: CLAUNCH_RELAY_TOKEN, never printed back).
 _RELAY_KEYS = ("url", "name", "token", "verify_tls")
 
 
+def _relay_token_set(cfg: dict, ident: str) -> bool:
+    """Whether this relay has a token from the config file or the environment."""
+    from .daemon.relay_uplink import _env_suffix
+
+    return bool(
+        cfg.get("token")
+        or os.environ.get(f"CLAUNCH_RELAY_TOKEN_{_env_suffix(ident)}")
+        or os.environ.get("CLAUNCH_RELAY_TOKEN")
+    )
+
+
+def _print_relay_entry(cfg: dict, *, prefix: str = "") -> None:
+    ident = cfg.get("id") or "relay1"
+    print(f"{prefix}[{ident}]")
+    print(f"{prefix}  url:        {cfg.get('url') or '(unset)'}")
+    print(f"{prefix}  name:       {cfg.get('name') or '(hostname)'}")
+    print(f"{prefix}  token:      "
+          f"{'set' if _relay_token_set(cfg, ident) else '(unset)'}")
+    print(f"{prefix}  verify_tls: {cfg.get('verify_tls', True)}")
+
+
 def _cmd_daemon_relay(args: argparse.Namespace) -> int:
-    cfg = store.relay_config()
+    relays = store.relays_config()
+    target = getattr(args, "relay", None)
+
+    if getattr(args, "remove", None):
+        if not store.remove_relay(args.remove):
+            print(f"error: no relay {args.remove!r} configured", file=sys.stderr)
+            return 1
+        print(f"removed relay {args.remove!r}")
+        _relay_restart_hint()
+        return 0
+
     if not args.key:
-        url = cfg.get("url") or "(unset)"
-        name = cfg.get("name") or "(hostname)"
-        has_token = bool(os.environ.get("CLAUNCH_RELAY_TOKEN") or cfg.get("token"))
-        verify = cfg.get("verify_tls", True)
-        print(f"url:        {url}")
-        print(f"name:       {name}")
-        print(f"token:      {'set' if has_token else '(unset)'}")
-        print(f"verify_tls: {verify}")
-        if not has_token:
+        if not relays:
+            print("(no relay configured)")
+            print(
+                "\nadd one with 'claunch daemon relay url wss://HOST/agent' and "
+                "'claunch daemon relay token <TOKEN>'; a second one with "
+                "'claunch daemon relay --relay <handle> url wss://OTHER/agent'",
+                file=sys.stderr,
+            )
+            return 0
+        for cfg in relays:
+            _print_relay_entry(cfg)
+        if not all(_relay_token_set(c, c.get("id") or "") for c in relays):
             print(
                 "\nset a token with 'claunch daemon relay token <TOKEN>' or the "
-                "CLAUNCH_RELAY_TOKEN env var (matches relay.toml backend_token)",
+                "CLAUNCH_RELAY_TOKEN env var (matches relay.toml backend_token); "
+                "with several relays use CLAUNCH_RELAY_TOKEN_<HANDLE>",
                 file=sys.stderr,
             )
         return 0
+
     if args.key not in _RELAY_KEYS:
         print(
             f"error: unknown relay setting {args.key!r} (known: {', '.join(_RELAY_KEYS)})",
             file=sys.stderr,
         )
         return 1
+
+    # Which entry this key belongs to: the named handle, else the first (which
+    # is the only one a single-relay config has).
+    if target is None:
+        cfg = relays[0] if relays else {}
+    else:
+        cfg = next((c for c in relays if c.get("id") == target), {})
+
     if args.value is None:
+        if target is not None and not cfg:
+            print(f"error: no relay {target!r} configured", file=sys.stderr)
+            return 1
         if args.key == "token":
-            print("set" if (os.environ.get("CLAUNCH_RELAY_TOKEN") or cfg.get("token")) else "(unset)")
+            print("set" if _relay_token_set(cfg, cfg.get("id") or target or "")
+                  else "(unset)")
         else:
             print(cfg.get(args.key, ""))
         return 0
+
     clear = args.value == "" or args.value.lower() == "none"
-    store.set_relay_field(args.key, None if clear else _parse_value(args.value))
+    store.set_relay_field(
+        args.key, None if clear else _parse_value(args.value), relay=target
+    )
+    where = f" on relay {target!r}" if target else ""
     if args.key == "token" and not clear:
-        print("token = set")
+        print(f"token = set{where}")
     else:
-        print(f"{args.key} = {'(cleared)' if clear else args.value}")
+        print(f"{args.key} = {'(cleared)' if clear else args.value}{where}")
+    _relay_restart_hint()
+    return 0
+
+
+def _relay_restart_hint() -> None:
     if daemon_client.connect() is not None:
         print(f"(restart the daemon to apply: {RESTART_HINT})", file=sys.stderr)
-    return 0
 
 
 def _cmd_web(args: argparse.Namespace) -> int:
@@ -2744,6 +2800,17 @@ def register(sub) -> None:
     )
     p_relay.add_argument("key", nargs="?", help="url | name | token | verify_tls")
     p_relay.add_argument("value", nargs="?", help="new value ('' or none to clear)")
+    p_relay.add_argument(
+        "--relay",
+        metavar="HANDLE",
+        help="which relay the key belongs to (a new handle adds a second "
+             "uplink; omit for the first/only one)",
+    )
+    p_relay.add_argument(
+        "--remove",
+        metavar="HANDLE",
+        help="delete the relay uplink with this handle",
+    )
     p_relay.set_defaults(func=_cmd_daemon_relay)
 
     p_web = sub.add_parser("web", help="print the web UI URL")

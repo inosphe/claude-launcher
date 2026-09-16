@@ -2643,6 +2643,9 @@ a.wf-btn { display: inline-block; text-decoration: none; line-height: 1.5; }
 .badge.relay-on { background: #1f4428; color: #3fb950; }
 .badge.relay-off { background: #30363d; color: #8b949e; }
 .badge.relay-down { background: #442022; color: #ff7b72; }
+/* Several relays configured and only some of them up: the mesh still spans
+   machines, so this is not the red of relay-down. */
+.badge.relay-partial { background: #46350f; color: #e3b341; }
 
 /* mesh list page (#/mesh) */
 #mesh-list { list-style: none; }

@@ -20615,18 +20615,37 @@ function renderRelayBadge(relay) {
   const badge = $("relay-badge");
   if (!relay) return;
   badge.classList.remove("hidden");
+  const rows = Array.isArray(relay.relays) ? relay.relays : [];
+  const total = relay.count || (relay.configured ? 1 : 0);
+  const live = relay.connected_count != null
+    ? relay.connected_count
+    : (relay.connected ? 1 : 0);
+  /* With one relay the count says nothing the badge doesn't already; with
+     several it is the only place a half-down pool is visible, because
+     "connected" there means at least one is up. */
+  const count = total > 1 ? ` ${live}/${total}` : "";
+  const detail = rows.length
+    ? "\n" + rows.map((r) =>
+        `${r.id}: ${r.connected ? "connected" : "DISCONNECTED"} (${r.url})`
+      ).join("\n")
+    : "";
   if (!relay.configured) {
     badge.textContent = "relay: off";
     badge.className = "badge relay-off";
     badge.title = "no relay uplink configured — sessions and mesh are local to this machine";
   } else if (relay.connected) {
-    badge.textContent = `relay: ${relay.name}`;
-    badge.className = "badge relay-on";
-    badge.title = `connected to ${relay.url || "the relay"} as '${relay.name}'`;
+    badge.textContent = `relay: ${relay.name}${count}`;
+    /* One relay down out of several is not the same state as all of them up:
+       the mesh still spans machines, but not every route does. */
+    badge.className = live < total ? "badge relay-partial" : "badge relay-on";
+    badge.title =
+      `connected to ${relay.url || "the relay"} as '${relay.name}'${detail}`;
   } else {
-    badge.textContent = "relay: down";
+    badge.textContent = `relay: down${count}`;
     badge.className = "badge relay-down";
-    badge.title = `uplink to ${relay.url || "the relay"} is disconnected — remote machines unreachable`;
+    badge.title =
+      `uplink to ${relay.url || "the relay"} is disconnected — ` +
+      `remote machines unreachable${detail}`;
   }
 }
 

@@ -69,6 +69,7 @@ class RelayUplink:
         local_host: str,
         local_port: int,
         verify_tls: bool = True,
+        id: str = "",
     ) -> None:
         self.url = url
         self.token = token
@@ -76,6 +77,10 @@ class RelayUplink:
         self.local_host = local_host
         self.local_port = local_port
         self.verify_tls = verify_tls
+        #: Local handle for this uplink among the daemon's others (config
+        #: ``id``). Distinct from ``name``, which is what the relay directory
+        #: calls this backend and may repeat across relays.
+        self.id = id or name or url
 
         self._room = secrets.token_bytes(w.ROOM_ID_LEN)
         self._ws: Optional[aiohttp.ClientWebSocketResponse] = None
@@ -395,6 +400,183 @@ class RelayUplink:
                 pass
 
 
+class RelayPool:
+    """Every relay uplink this daemon holds open at once.
+
+    One daemon may register with several relays — a work relay and a home
+    relay, say — so that a mesh member on either side can reach it without the
+    operator choosing between them. The pool owns the uplinks, runs them
+    concurrently, and presents the same surface a single uplink did
+    (``connected``, ``name``, ``peer_http``, ``peer_list``) so the federation
+    wiring does not have to know how many there are.
+
+    Peer addressing stays the relay's: a backend is addressed by name, and the
+    pool works out WHICH relay currently carries that name. It learns the
+    mapping from PEER_LIST and caches it, falling back to trying each
+    peering-capable uplink in turn when no relay can list.
+    """
+
+    def __init__(self, uplinks) -> None:
+        self.uplinks = list(uplinks)
+        #: peer name -> the uplink that last reached it. Invalidated on
+        #: failure, so a backend that moves relays is re-found rather than
+        #: retried forever against the relay it left.
+        self._routes: Dict[str, RelayUplink] = {}
+
+    # --------------------------------------------------------------------- #
+    @property
+    def name(self) -> str:
+        """The backend name this daemon answers to.
+
+        The mesh has one machine identity, so the pool reports the first
+        uplink's name. Configuring different names per relay is allowed by the
+        schema but the mesh only ever uses this one.
+        """
+        return self.uplinks[0].name if self.uplinks else ""
+
+    @property
+    def url(self) -> str:
+        return self.uplinks[0].url if self.uplinks else ""
+
+    @property
+    def connected(self) -> bool:
+        """True while AT LEAST ONE relay is registered.
+
+        This is what the mesh asks before it treats remote members as
+        reachable, and one live relay is enough for that to be true.
+        """
+        return any(up.connected for up in self.uplinks)
+
+    def state(self) -> dict:
+        """Status for the API/CLI/web: the aggregate plus a row per relay.
+
+        The top-level ``configured``/``connected``/``name``/``url`` keys keep
+        the shape a single uplink reported, so readers that predate multiple
+        relays keep working; ``relays`` and ``connected_count`` are what a
+        reader shows when there is more than one.
+        """
+        rows = [
+            {
+                "id": up.id,
+                "name": up.name,
+                "url": up.url,
+                "connected": up.connected,
+                "peering": up.peering,
+                "listing": up.listing,
+            }
+            for up in self.uplinks
+        ]
+        return {
+            "configured": bool(self.uplinks),
+            "connected": self.connected,
+            "name": self.name or None,
+            "url": self.url or None,
+            "count": len(rows),
+            "connected_count": sum(1 for r in rows if r["connected"]),
+            "relays": rows,
+        }
+
+    async def run(self) -> None:
+        """Run every uplink's reconnect loop until :meth:`stop`."""
+        if not self.uplinks:
+            return
+        await asyncio.gather(*(up.run() for up in self.uplinks))
+
+    def stop(self) -> None:
+        for up in self.uplinks:
+            up.stop()
+
+    # --------------------------------------------------------------------- #
+    def _live(self, attr: str) -> list:
+        return [up for up in self.uplinks if up.connected and getattr(up, attr)]
+
+    async def peer_list(self, *, timeout: float = 10.0) -> list:
+        """Union of the backends registered on any of this daemon's relays.
+
+        A name reachable through two relays appears once. Relays that fail to
+        answer do not sink the call — their error is only reported when NONE
+        of them answered, because a partial list is still the truth about the
+        relays that are up.
+        """
+        lister = self._live("listing")
+        if not lister:
+            raise PeerError(self._why_no_peering("listing"))
+        results = await asyncio.gather(
+            *(up.peer_list(timeout=timeout) for up in lister),
+            return_exceptions=True,
+        )
+        names: list = []
+        errors: list = []
+        answered = False
+        for up, res in zip(lister, results):
+            if isinstance(res, BaseException):
+                errors.append(f"{up.id}: {res}")
+                continue
+            answered = True
+            for peer in res:
+                # Remember where each name lives so peer_http can go straight
+                # there instead of probing every relay.
+                self._routes.setdefault(peer, up)
+                if peer not in names:
+                    names.append(peer)
+        if not answered:
+            raise PeerError("; ".join(errors) or "no relay answered PEER_LIST")
+        return names
+
+    async def peer_http(self, peer: str, request: bytes, *,
+                        timeout: float = 30.0) -> bytes:
+        """One bridged HTTP request to backend ``peer`` over whichever relay
+        currently carries it.
+
+        The cached route is tried first. When it fails — or when there is no
+        route yet and no relay can list — every peering-capable uplink is
+        tried in turn, and the collected reasons are raised together so the
+        operator sees why each relay refused rather than only the last one.
+        """
+        candidates = self._live("peering")
+        if not candidates:
+            raise PeerError(self._why_no_peering("peering"))
+        order = self._order_for(peer, candidates)
+        if len(order) > 1:
+            # No route yet: ask the relays who they carry, then retry ordering.
+            try:
+                await self.peer_list()
+            except PeerError:
+                pass
+            order = self._order_for(peer, candidates)
+        errors = []
+        for up in order:
+            try:
+                resp = await up.peer_http(peer, request, timeout=timeout)
+            except PeerError as exc:
+                errors.append(f"{up.id}: {exc}")
+                if self._routes.get(peer) is up:
+                    del self._routes[peer]
+                continue
+            self._routes[peer] = up
+            return resp
+        raise PeerError(
+            f"peer {peer!r} unreachable on any relay -- " + "; ".join(errors)
+        )
+
+    def _order_for(self, peer: str, candidates: list) -> list:
+        """Candidates with the known route for ``peer`` first."""
+        known = self._routes.get(peer)
+        if known in candidates:
+            return [known] + [up for up in candidates if up is not known]
+        return list(candidates)
+
+    def _why_no_peering(self, attr: str) -> str:
+        if not self.uplinks:
+            return "no relay uplink is configured"
+        if not self.connected:
+            return "no relay uplink is connected"
+        verb = ("support peer listing" if attr == "listing"
+                else "allow backend peering")
+        names = ", ".join(up.id for up in self.uplinks if up.connected)
+        return f"no connected relay ({names}) can {verb}"
+
+
 def _peer_err_text(code: int) -> str:
     return {
         w.PEER_ERR_UNKNOWN_BACKEND: "peer backend is not registered with the relay",
@@ -403,26 +585,56 @@ def _peer_err_text(code: int) -> str:
     }.get(code, f"peer open failed (code {code})")
 
 
-def config_from_env_and_dict(cfg: dict, *, local_host: str, local_port: int
-                             ) -> Optional[RelayUplink]:
-    """Build an uplink from a ``relay`` config block, or None if not enabled.
+def _env_suffix(ident: str) -> str:
+    """``CLAUNCH_RELAY_TOKEN_<SUFFIX>`` form of a relay handle."""
+    return "".join(c if c.isalnum() else "_" for c in ident).upper()
+
+
+def _relay_env(key: str, ident: str, *, allow_bare: bool) -> Optional[str]:
+    """Environment override for one relay setting.
+
+    With several relays configured the bare ``CLAUNCH_RELAY_*`` names are
+    ambiguous — one value cannot mean three different uplinks — so they are
+    read only when a single relay is configured. Per-relay values are always
+    read and always win: ``CLAUNCH_RELAY_TOKEN_HOME`` for the relay whose
+    handle is ``home``.
+    """
+    scoped = os.environ.get(f"CLAUNCH_RELAY_{key}_{_env_suffix(ident)}")
+    if scoped:
+        return scoped
+    if allow_bare:
+        return os.environ.get(f"CLAUNCH_RELAY_{key}")
+    return None
+
+
+def config_from_env_and_dict(cfg: dict, *, local_host: str, local_port: int,
+                             allow_bare_env: bool = True,
+                             default_name: str = "") -> Optional[RelayUplink]:
+    """Build an uplink from one ``relay`` config block, or None if not enabled.
 
     The environment overrides the config file: ``CLAUNCH_RELAY_TOKEN`` (a
     secret that need not live on disk), plus ``CLAUNCH_RELAY_URL`` and
     ``CLAUNCH_RELAY_NAME`` so a named daemon instance can be pointed at a
-    relay per-process while sharing the config file with its siblings.
+    relay per-process while sharing the config file with its siblings. Each
+    also has a per-relay form (``CLAUNCH_RELAY_TOKEN_<HANDLE>``) that takes
+    precedence; ``allow_bare_env`` is what :func:`pool_from_config` turns off
+    when more than one relay is configured, so the bare names cannot silently
+    point every uplink at the same relay.
     """
     if not isinstance(cfg, dict):
         return None
-    url = (os.environ.get("CLAUNCH_RELAY_URL") or str(cfg.get("url") or "")).strip()
+    ident = str(cfg.get("id") or "").strip()
+    env = lambda key: _relay_env(key, ident, allow_bare=allow_bare_env)  # noqa: E731
+    url = (env("URL") or str(cfg.get("url") or "")).strip()
     if not url:
         return None
-    token = os.environ.get("CLAUNCH_RELAY_TOKEN") or str(cfg.get("token") or "")
+    token = env("TOKEN") or str(cfg.get("token") or "")
     if not token:
-        log.warning("relay uplink configured but no token (set CLAUNCH_RELAY_TOKEN "
-                    "or daemon.relay.token) — uplink disabled")
+        log.warning("relay uplink %s configured but no token (set "
+                    "CLAUNCH_RELAY_TOKEN or daemon.relay.token) — uplink disabled",
+                    ident or url)
         return None
-    name = (os.environ.get("CLAUNCH_RELAY_NAME") or str(cfg.get("name") or "")).strip()
+    name = (env("NAME") or str(cfg.get("name") or "") or default_name).strip()
     if not name:
         import socket
 
@@ -435,4 +647,38 @@ def config_from_env_and_dict(cfg: dict, *, local_host: str, local_port: int
         local_host=local_host,
         local_port=local_port,
         verify_tls=bool(verify_tls),
+        id=ident,
     )
+
+
+def pool_from_config(rows, *, local_host: str, local_port: int,
+                     default_name: str = "") -> Optional["RelayPool"]:
+    """Build a :class:`RelayPool` from a list of relay config blocks.
+
+    ``default_name`` is the backend name for rows that name none and have no
+    ``CLAUNCH_RELAY_NAME`` either — the daemon passes its instance-suffixed
+    hostname so sibling instances sharing a config file do not all register
+    under one directory entry.
+
+    Returns None when no block yields a usable uplink, which is the same
+    "relay not configured" answer the single-uplink path gave.
+    """
+    rows = [r for r in (rows or []) if isinstance(r, dict)]
+    if not rows:
+        # No relay in the config file does not mean no relay: CLAUNCH_RELAY_URL
+        # and CLAUNCH_RELAY_TOKEN alone configure one, which is how a named
+        # daemon instance gets its own relay identity without a file at all.
+        # One empty row gives the environment something to fill.
+        rows = [{}]
+    allow_bare = len(rows) <= 1
+    uplinks = []
+    for row in rows:
+        up = config_from_env_and_dict(
+            row, local_host=local_host, local_port=local_port,
+            allow_bare_env=allow_bare, default_name=default_name,
+        )
+        if up is not None:
+            uplinks.append(up)
+    if not uplinks:
+        return None
+    return RelayPool(uplinks)

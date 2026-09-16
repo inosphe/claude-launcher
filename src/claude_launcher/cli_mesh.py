@@ -19,15 +19,39 @@ from . import daemon_client
 
 
 def relay_line(relay: Optional[dict]) -> str:
-    """One-line relay connectivity summary, printed all over the CLI."""
+    """One-line relay connectivity summary, printed all over the CLI.
+
+    With several relays configured the line still answers the one question it
+    always answered — can this machine reach the others right now — and adds
+    the count, because "connected" there means at least one relay is up and
+    the operator cannot see from the old wording that another is down.
+    """
     # ASCII only: this line goes through redirected stdio on cp949 consoles.
     if not relay or not relay.get("configured"):
         return "relay: not configured -- sessions/mesh reachable on this machine only"
+    total = int(relay.get("count") or 1)
+    live = int(relay.get("connected_count") or (1 if relay.get("connected") else 0))
+    if total > 1:
+        suffix = f" [{live}/{total} relays: {_relay_names(relay)}]"
+    else:
+        suffix = ""
     if relay.get("connected"):
-        return f"relay: connected as {relay.get('name')!r}"
+        return f"relay: connected as {relay.get('name')!r}{suffix}"
     return (
         f"relay: DISCONNECTED (registered name {relay.get('name')!r}) -- "
-        "remote machines unreachable"
+        f"remote machines unreachable{suffix}"
+    )
+
+
+def _relay_names(relay: dict) -> str:
+    """``home=up, work=down`` — per-relay state behind the aggregate."""
+    rows = relay.get("relays")
+    if not isinstance(rows, list):
+        return ""
+    return ", ".join(
+        f"{row.get('id')}={'up' if row.get('connected') else 'down'}"
+        for row in rows
+        if isinstance(row, dict)
     )
 
 
