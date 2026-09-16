@@ -629,11 +629,12 @@ def test_pi_launch_loads_the_tools_extension_on_every_provider(home):
     lineage.set_harness(plain, "pi")
     entry = harnesses.get("pi")
     tools = str(pi_provider.tools_extension_path())
+    activity = str(pi_provider.activity_extension_path())
     cmd = runner.harness_launch_args(custom, entry, [])
-    assert cmd[:2] == ["--extension", tools]
-    assert cmd[2:4] == ["--extension", str(pi_provider.extension_path())]
+    assert cmd[:4] == ["--extension", activity, "--extension", tools]
+    assert cmd[4:6] == ["--extension", str(pi_provider.extension_path())]
     cmd = runner.harness_launch_args(plain, entry, ["-p", "hi"])
-    assert cmd == ["--extension", tools, "-p", "hi"]
+    assert cmd == ["--extension", activity, "--extension", tools, "-p", "hi"]
     env = runner.harness_child_env(custom, entry, base_env={pi_provider.ENV_TOOLS: "stale"})
     assert pi_provider.ENV_TOOLS not in env  # all tools: nothing to narrow
 
@@ -645,6 +646,7 @@ def test_pi_tools_can_be_switched_off_per_profile(home):
     entry = harnesses.get("pi")
     cmd = runner.harness_launch_args(p, entry, [])
     assert str(pi_provider.tools_extension_path()) not in cmd
+    assert str(pi_provider.activity_extension_path()) in cmd
     env = runner.harness_child_env(p, entry, base_env={})
     assert env[pi_provider.ENV_TOOLS] == ""
     store.set_profile_field(p.name, "harness_options", {"pi": {"tools": {"full_read": "no"}}})

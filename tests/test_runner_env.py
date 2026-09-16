@@ -779,6 +779,7 @@ def test_pi_launch_injects_extension_provider_and_default_model(
     cmd = reached["cmd"]
     extensions = [cmd[i + 1] for i, a in enumerate(cmd) if a == "--extension"]
     assert extensions == [
+        str(pi_provider.activity_extension_path()),
         str(pi_provider.tools_extension_path()),
         str(pi_provider.extension_path()),
     ]
