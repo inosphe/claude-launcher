@@ -1,7 +1,7 @@
-/* The one-line send-keys input under the terminal. A native <input> where
-   xterm's composer is a terminal — the field the reader types a prompt into,
-   Enter handing the line to the session through the same send-keys
-   passthrough `claunch send-keys` uses.
+/* The send-keys input under the terminal. A native field where xterm's
+   composer is a terminal — the field the reader types a prompt into, Enter
+   handing the line to the session through the same send-keys passthrough
+   `claunch send-keys` uses, Ctrl+J putting a newline in it instead.
 
    The box has to hold the contract the whole raw-keystroke path lives under:
    the text and its Enter go in ONE /keys call (a client that splits them
@@ -9,8 +9,11 @@
    Session.send_keys alone), an empty or unaddressed line sends nothing, a
    refusal's words are shown and the half-typed line kept, a dead daemon does
    not look like a delivery, and a session that has ended has the box closed
-   with the reason shown. Slice the real functions out of app.js, drive them
-   against a stub DOM, and check all of it. */
+   with the reason shown, Ctrl+J inserts a newline at the caret rather than
+   sending, and a line that carries a newline goes as ONE paste (the keys
+   path would write a raw LF, which every harness reads as a submit, so the
+   block would arrive a line at a time). Slice the real functions out of
+   app.js, drive them against a stub DOM, and check all of it. */
 const fs = require("fs");
 const path = require("path");
 const src = fs.readFileSync(
@@ -37,6 +40,9 @@ function node(tag) {
   const n = {
     tag, classes: new Set(), _text: "", title: "",
     value: "", disabled: false,
+    selectionStart: 0, selectionEnd: 0,
+    style: {}, scrollHeight: 0,
+    setSelectionRange(a, b) { n.selectionStart = a; n.selectionEnd = b; },
     focus() {},
     classList: {
       add(c) { n.classes.add(c); },
@@ -65,26 +71,49 @@ const api = async (p, opts) => {
   return { ok: reply.ok, status: reply.status || 200, json: async () => reply.doc };
 };
 
+const FIELD = node("textarea");
+const BTN = node("button");
+const NOTE = node("span");
+/* the page's element lookup, over the three elements this strip owns */
+const $ = (id) => ({
+  "term-input-field": FIELD,
+  "term-input-send": BTN,
+  "term-input-note": NOTE,
+}[id] || null);
+
 const ctx = {};
 new Function(
-  "exports", "api",
+  "exports", "api", "$",
   `let currentName = null;
 let sessionEnded = false;
 ` + slice("termInputNote") + `
 ` + slice("sendKeyLine") + `
 ` + slice("termInputBlock") + `
+` + slice("autogrowTermInput") + `
+` + slice("onTermInputKeydown") + `
 Object.assign(exports, {
   sendKeyLine,
   termInputBlock,
   termInputNote,
+  onTermInputKeydown,
   setSession: (name, ended) => { currentName = name; sessionEnded = !!ended; },
 });`
-)(ctx, api);
+)(ctx, api, $);
 
-const FIELD = node("input");
-const BTN = node("button");
-const NOTE = node("span");
 const box = () => ({ field: FIELD, btn: BTN, note: NOTE });
+
+/* a keydown as the browser delivers it, with the two things the handler
+   answers with recorded */
+function press(key, mods = {}) {
+  const ev = {
+    key, ctrlKey: false, shiftKey: false, altKey: false, metaKey: false,
+    isComposing: false, keyCode: 0, currentTarget: FIELD, target: FIELD,
+    prevented: false, preventDefault() { ev.prevented = true; },
+    ...mods,
+  };
+  ctx.onTermInputKeydown(ev);
+  return ev;
+}
 
 /* let every pending await in the code under test run to the end */
 const settle = () => new Promise((r) => setImmediate(r));
@@ -167,6 +196,57 @@ async function main() {
         NOTE.textContent.includes("nothing was sent"), NOTE.textContent);
   check("the line survives that too", b.field.value === "hello?");
   check("and the button is usable again", b.btn.disabled === false);
+
+  /* ---- Ctrl+J is a newline at the caret, not a send ---- */
+  sent = [];
+  reply = { ok: true, doc: {} };
+  ctx.setSession("coder4", false);
+  FIELD.disabled = false;
+  FIELD.value = "first";
+  FIELD.selectionStart = FIELD.selectionEnd = 5;
+  const cj = press("j", { ctrlKey: true });
+  check("Ctrl+J is taken from the browser", cj.prevented === true);
+  check("Ctrl+J puts a newline in the box", FIELD.value === "first\n",
+        FIELD.value);
+  check("...with the caret after it", FIELD.selectionStart === 6,
+        FIELD.selectionStart);
+  check("...and sends nothing", sent.length === 0, sent);
+
+  /* ---- it inserts where the caret is, over a selection ---- */
+  FIELD.value = "abcd";
+  FIELD.selectionStart = 1; FIELD.selectionEnd = 3;
+  press("j", { ctrlKey: true });
+  check("Ctrl+J replaces the selection", FIELD.value === "a\nd", FIELD.value);
+
+  /* ---- Enter sends, and an IME committing a syllable does not ---- */
+  sent = [];
+  FIELD.value = "send me";
+  const ime = press("Enter", { isComposing: true });
+  check("an Enter that commits an IME syllable sends nothing",
+        sent.length === 0 && ime.prevented === false, sent);
+  const ent = press("Enter");
+  await settle();
+  check("Enter sends the line", sent.length === 1 && ent.prevented === true, sent);
+
+  /* ---- a line with a newline in it goes as ONE paste ---- */
+  sent = [];
+  reply = { ok: true, doc: {} };
+  FIELD.value = "line one\nline two";
+  const multi = await ctx.sendKeyLine(FIELD, BTN, NOTE);
+  check("a multi-line send returns true", multi === true);
+  check("exactly one request for the block", sent.length === 1, sent);
+  check("it is a paste, carrying both lines",
+        sent[0].body.paste === "line one\nline two", sent[0].body);
+  check("...submitted by the daemon's own separate Enter",
+        sent[0].body.enter === true, sent[0].body);
+  check("...never as keys — a raw LF there is a submit per line",
+        sent[0].body.keys === undefined, sent[0].body);
+  check("...with the operator's force, like the one-line path",
+        sent[0].body.force === true, sent[0].body);
+  check("...and the same duplicate-suppression id",
+        typeof sent[0].body.input_id === "string" && sent[0].body.input_id,
+        sent[0].body);
+  check("the box is emptied for the next block", FIELD.value === "");
 
   console.log(failures ? `\n${failures} failure(s)` : "all send-input checks passed");
   process.exit(failures ? 1 : 0);

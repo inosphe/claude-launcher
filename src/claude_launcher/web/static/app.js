@@ -7380,7 +7380,16 @@ function endSession() {
    client is what re-spreads the submit/enter split across call sites, and
    the split belongs to Session.send_keys — the one place that may fold and
    un-fold it (split_submit, under the bracketed-paste marker). A test pins
-   this single-call shape (tests/web/sendinput_check.js). */
+   this single-call shape (tests/web/sendinput_check.js).
+
+   The box holds more than one line, because Ctrl+J puts a newline in it the
+   way Claude Code's own composer does. A line that carries a newline cannot
+   go down the keys path: a raw LF written to a PTY is a submit, so the
+   session would receive the block a line at a time. It goes as ONE paste
+   instead (`paste` + `enter` on the same route), which the daemon writes as
+   a bracketed paste with its Enter as a separate, paced write — the path
+   `claunch send-keys --paste` and every delivery already use, and the reason
+   the newline survives whatever harness is running in the session. */
 
 function termInputBlock(ended) {
   if (ended) return "this session has ended — nothing to send keys to";
@@ -7410,19 +7419,24 @@ async function sendKeyLine(field, btn, note) {
   btn.disabled = true;
   try {
     const inputId = `input-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    // This is an explicit operator action either way. The daemon uses the
+    // short forced grace and submits an existing draft first, so a busy
+    // session does not turn a deliberate send into a 30s wait/409.
+    // A single line is keys; a line with a newline in it is one paste, whose
+    // Enter the daemon writes separately (Session.paste).
+    const body = text.includes("\n")
+      ? { paste: text, enter: true, force: true, input_id: inputId }
+      : { keys: [text, "Enter"], force: true, input_id: inputId };
     const resp = await api(
       `/api/sessions/${encodeURIComponent(currentName)}/keys`,
       { method: "POST",
         headers: { "Content-Type": "application/json" },
-        // This is an explicit operator action. The daemon uses the short
-        // forced grace and submits an existing draft first, so a busy
-        // session does not turn a deliberate send into a 30s wait/409.
-        body: JSON.stringify({ keys: [text, "Enter"], force: true,
-                              input_id: inputId }) }
+        body: JSON.stringify(body) }
     );
     const doc = await resp.json().catch(() => ({}));
     if (resp.ok) {
       field.value = "";
+      autogrowTermInput(field);
       return true;
     }
     termInputNote(note, doc.error || "the session refused these keys", true);
@@ -7489,6 +7503,7 @@ function insertPromptPreset(text) {
   const cursor = start + text.length;
   if (field.setSelectionRange) field.setSelectionRange(cursor, cursor);
   field.focus();
+  if (typeof autogrowTermInput === "function") autogrowTermInput(field);
   return true;
 }
 
@@ -7504,12 +7519,58 @@ function onTermInputSubmit(ev) {
   sendKeyLine($("term-input-field"), $("term-input-send"), $("term-input-note"));
 }
 
+/* The field's height is its content's. A <textarea> does not shrink back on
+   its own, so the height is cleared before it is read: scrollHeight of a
+   collapsed box is the height the text actually needs. The CSS ceiling
+   (max-height) turns the rest into a scroll rather than letting the composer
+   push the terminal off the screen. */
+function autogrowTermInput(field) {
+  if (!field || !field.style) return;
+  field.style.height = "auto";
+  const needed = field.scrollHeight;
+  if (needed) field.style.height = `${needed}px`;
+}
+
+/* Ctrl+J inserts a newline at the caret, Enter sends — the split Claude Code
+   uses in its own composer, and the reason this field is a <textarea>.
+   Enter is handled here rather than by the form, because a <textarea> does
+   not submit its form on Enter. An IME composing a syllable owns the key
+   while it composes (isComposing / keyCode 229): committing a Hangul block
+   with Enter must not also send the line. */
+function onTermInputKeydown(ev) {
+  const field = ev.currentTarget || ev.target;
+  if (!field || field.disabled) return;
+  if (ev.isComposing || ev.keyCode === 229) return;
+  const key = ev.key;
+  if (ev.ctrlKey && !ev.altKey && !ev.metaKey &&
+      (key === "j" || key === "J" || key === "\n")) {
+    ev.preventDefault();
+    const start = Number.isInteger(field.selectionStart)
+      ? field.selectionStart : field.value.length;
+    const end = Number.isInteger(field.selectionEnd) ? field.selectionEnd : start;
+    field.value = field.value.slice(0, start) + "\n" + field.value.slice(end);
+    const caret = start + 1;
+    if (field.setSelectionRange) field.setSelectionRange(caret, caret);
+    autogrowTermInput(field);
+    return;
+  }
+  if (key === "Enter" && !ev.shiftKey && !ev.ctrlKey && !ev.altKey && !ev.metaKey) {
+    ev.preventDefault();
+    sendKeyLine($("term-input-field"), $("term-input-send"), $("term-input-note"));
+  }
+}
+
 // Wired at load, like every other listener this page mounts — guarded like
 // every OTHER element access the whole-block harnesses (reconnect/wheel) boot
 // without: those eval this block against a stub DOM that only carries what the
 // block under test touches, and #term-input is not one of them.
 if ($("term-input"))
   $("term-input").addEventListener("submit", onTermInputSubmit);
+if ($("term-input-field")) {
+  $("term-input-field").addEventListener("keydown", onTermInputKeydown);
+  $("term-input-field").addEventListener("input", (ev) =>
+    autogrowTermInput(ev.currentTarget || ev.target));
+}
 
 /* ---- typing marks ----
    Keystrokes that reach the daemon as bytes mark its keyboard busy on
@@ -8956,7 +9017,10 @@ function attach(name) {
   // (like #term-input below) for the whole-block harnesses that boot this
   // function without the input's element in their stub DOM.
   const termInputField = $("term-input-field");
-  if (termInputField) termInputField.value = "";
+  if (termInputField) {
+    termInputField.value = "";
+    if (typeof autogrowTermInput === "function") autogrowTermInput(termInputField);
+  }
   if (typeof refreshPromptPresets === "function") refreshPromptPresets();
   // The common hop: this session has been up before, so bring its parked
   // terminal back instead of building a new one — no socket, no repaint.

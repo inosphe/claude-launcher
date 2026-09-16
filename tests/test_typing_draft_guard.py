@@ -59,6 +59,7 @@ def _fake_session(*, bracketed: bool = True):
         deliver = session_mod.Session.deliver
         _deliver = session_mod.Session._deliver
         send_keys = session_mod.Session.send_keys
+        submit_open_draft = session_mod.Session.submit_open_draft
         _await_readable = session_mod.Session._await_readable
         await_keyboard_quiet = session_mod.Session.await_keyboard_quiet
         note_human_input = session_mod.Session.note_human_input
@@ -390,6 +391,109 @@ def test_the_keys_endpoint_answers_409_while_a_draft_is_open(home, tmp_path,
                 headers=BEARER,
             )
             assert resp.status == 200, await resp.text()
+
+            await mgr.shutdown_all()
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_a_forced_paste_submits_the_draft_and_is_journalled(home, tmp_path,
+                                                            monkeypatch):
+    """The web session line sends a multi-line composition as a paste.
+
+    A newline cannot ride the keys path: the daemon writes it to the PTY as a
+    raw LF, which the program reads as a submit, so the block would arrive a
+    line at a time. So the paste branch has to carry what the keys branch
+    carries for the same operator press -- ``force`` (submit the open draft
+    first, on the short grace, rather than answering 409 to a deliberate
+    send) and ``input_id`` (the durable record a reconnect reads to tell an
+    accepted line from one that never went).
+    """
+    from aiohttp.test_utils import TestClient, TestServer
+
+    from claude_launcher.daemon import session_input
+
+    store.update(
+        lambda doc: doc.update(
+            {"harnesses": {"py": {"command": [sys.executable, "-u", "-c", CHILD]}}}
+        )
+    )
+    monkeypatch.setattr(session_mod, "TYPING_HOLD_TIMEOUT", 0.2)
+    monkeypatch.setattr(session_mod, "FORCE_TYPING_GRACE", 0.1)
+    monkeypatch.setattr(session_mod, "FORCE_DRAFT_SETTLE", 0.0)
+    monkeypatch.setattr(session_mod, "PASTE_ENTER_DELAY", 0.0)
+
+    async def run():
+        mgr = SessionManager(idle_threshold=0.5, scrollback=200,
+                             restore_default=True)
+        app = build_app(mgr, "sekrit", started_at=time.monotonic())
+        client = TestClient(TestServer(app))
+        await client.start_server()
+        try:
+            mgr.create(SessionDef(name="s1", harness="py", cwd=str(tmp_path)))
+            session = mgr.get("s1")
+            await session.wait_for("idle", timeout=10.0, threshold=0.5)
+            session.note_human_input(at_terminal=True, data=b"half a line")
+            assert session.draft_open()
+
+            body = {"paste": "line one\nline two", "enter": True,
+                    "force": True, "input_id": "req-1"}
+            resp = await client.post("/api/sessions/s1/keys", json=body,
+                                     headers=BEARER)
+            assert resp.status == 200, await resp.text()
+            # the human's line was submitted, not typed over
+            assert not session.draft_open()
+
+            entries = [e for e in session_input.read("s1")
+                       if e.get("request_id") == "req-1"]
+            assert [e["status"] for e in entries] == ["accepted", "sent"], entries
+            assert entries[-1]["text"] == "line one\nline two"
+
+            # the same id twice is the same submission, not a second one
+            resp = await client.post("/api/sessions/s1/keys", json=body,
+                                     headers=BEARER)
+            assert resp.status == 200
+            assert (await resp.json())["duplicate"] is True
+
+            await mgr.shutdown_all()
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_an_unforced_paste_still_refuses_a_draft(home, tmp_path, monkeypatch):
+    """force is the operator's press, not the paste branch's new default: a
+    paste without it keeps the 409 every automated sender relies on."""
+    from aiohttp.test_utils import TestClient, TestServer
+
+    store.update(
+        lambda doc: doc.update(
+            {"harnesses": {"py": {"command": [sys.executable, "-u", "-c", CHILD]}}}
+        )
+    )
+    monkeypatch.setattr(session_mod, "TYPING_HOLD_TIMEOUT", 0.2)
+
+    async def run():
+        mgr = SessionManager(idle_threshold=0.5, scrollback=200,
+                             restore_default=True)
+        app = build_app(mgr, "sekrit", started_at=time.monotonic())
+        client = TestClient(TestServer(app))
+        await client.start_server()
+        try:
+            mgr.create(SessionDef(name="s1", harness="py", cwd=str(tmp_path)))
+            session = mgr.get("s1")
+            await session.wait_for("idle", timeout=10.0, threshold=0.5)
+            session.note_human_input(at_terminal=True, data=b"half a line")
+
+            resp = await client.post(
+                "/api/sessions/s1/keys",
+                json={"paste": "a\nb", "enter": True}, headers=BEARER,
+            )
+            assert resp.status == 409
+            assert session.draft_open(), "the draft was not submitted"
 
             await mgr.shutdown_all()
         finally:

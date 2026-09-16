@@ -1418,14 +1418,14 @@ a.cflow-scope:hover { background: #1d3559; text-decoration: underline; }
   justify-content: center; text-align: center; padding: 24px;
   color: #8b949e; line-height: 1.5; font-size: 13px;
 }
-/* The one-line native input under the terminal. Real browser input where the
+/* The native input under the terminal. Real browser input where the
    xterm composer is a terminal — an IME, a phone's soft keyboard and a pasted
    block behave here the way the browser makes them behave, and Enter hands
    the line to the session via the send-keys passthrough. A strip like the
    queued deliveries' (same background and rule), pinned to the column's
    bottom as its last flex child. */
 #term-input {
-  flex: none; display: flex; align-items: center; gap: 8px; min-width: 0;
+  flex: none; display: flex; align-items: flex-end; gap: 8px; min-width: 0;
   padding: 8px 12px; background: #1b1e24; border-top: 1px solid #2a2e36;
 }
 #term-preset-buttons {
@@ -1436,10 +1436,15 @@ a.cflow-scope:hover { background: #1d3559; text-decoration: underline; }
   flex: none; max-width: 220px; overflow: hidden; text-overflow: ellipsis;
   white-space: nowrap;
 }
+/* One row tall by default and grown from script (autogrowTermInput) as
+   Ctrl+J adds lines, up to a ceiling past which it scrolls rather than
+   eating the terminal above it. The manual resize grip is off: the height
+   is the content's, and a dragged box would fight the script for it. */
 #term-input-field {
   flex: 1; min-width: 0; padding: 5px 10px; font-size: 13px; line-height: 1.5;
   color: #d8dbe0; background: #14161a; border: 1px solid #30363d;
-  border-radius: 5px;
+  border-radius: 5px; font-family: inherit; resize: none; overflow-y: auto;
+  max-height: 30vh; white-space: pre-wrap; word-break: break-word;
 }
 #term-input-field:focus { outline: none; border-color: #1f6feb; }
 #term-input-field:disabled { opacity: 0.5; cursor: not-allowed; }

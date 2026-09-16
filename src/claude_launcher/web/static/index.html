@@ -333,18 +333,23 @@
          A click places its message in the current session's field, ready for
          the operator to review or send. -->
     <div id="term-preset-buttons" class="hidden" aria-label="Prompt presets"></div>
-    <!-- The one-line native input under the terminal. Everything the terminal's
+    <!-- The native input under the terminal. Everything the terminal's
          own textarea is bad at — an IME composing a syllable, a phone's soft
          keyboard, a pasted block — is what a web <input> IS for, so this is
          the field the reader types a prompt into, and Enter hands the line to
          the session through the same send-keys passthrough `claunch send-keys`
          uses (POST /api/sessions/name/keys, keys=[text, "Enter"], in one
-         call). Hidden with the terminal; only live while one is attached. -->
+         call). It opens as one row and grows with what is typed, because
+         Ctrl+J puts a newline in it the way Claude Code's own composer does;
+         a line that carries a newline is sent as ONE bracketed paste instead
+         (POST .../keys with `paste`), which is what keeps the block from
+         being submitted a line at a time under any harness.
+         Hidden with the terminal; only live while one is attached. -->
     <form id="term-input" class="hidden" autocomplete="off">
-      <input id="term-input-field" type="text"
-             placeholder="type for this session — Enter to send"
+      <textarea id="term-input-field" rows="1"
+             placeholder="type for this session — Enter to send, Ctrl+J for a newline"
              autocomplete="off" spellcheck="false"
-             aria-label="type text and send it to this session">
+             aria-label="type text and send it to this session"></textarea>
       <span id="term-input-note" class="wf-note hidden"></span>
       <button id="term-input-send" class="term-btn" type="submit"
               title="send these keys to the session">⏎</button>

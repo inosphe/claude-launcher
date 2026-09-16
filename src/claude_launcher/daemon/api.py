@@ -60,6 +60,7 @@ from .harness import HarnessError, SessionDef
 from .manager import ManagerError, SessionManager
 from .mesh import MeshBusy, MeshConflict, MeshError, MeshManager
 from .session import STATUS_IDLE, KeyboardHeld, SessionGone
+from . import session as session_mod
 from . import ws as ws_mod
 
 COOKIE_NAME = "claunch_session"
@@ -5182,6 +5183,14 @@ async def h_session_skip_permissions(request: web.Request) -> web.Response:
 async def h_session_keys(request: web.Request) -> web.Response:
     session = _session(request)
     body = await _json_body(request)
+    force = body.get("force", False)
+    if not isinstance(force, bool):
+        return json_error(400, "'force' must be a boolean")
+    request_id = body.get("input_id")
+    if request_id is not None and (
+        not isinstance(request_id, str) or not request_id.strip()
+    ):
+        return json_error(400, "'input_id' must be a non-empty string")
     paste = body.get("paste")
     if paste is not None:
         if not isinstance(paste, str):
@@ -5190,26 +5199,49 @@ async def h_session_keys(request: web.Request) -> web.Response:
         # behind a human typing at this terminal rather than splicing into
         # their half-written line — and refuses outright rather than typing
         # over a composer that never emptied (see Session.send_keys).
-        quiet = await session.await_keyboard_quiet(terminal_only=True)
+        #
+        # 'force' carries the same operator meaning it has for keys: the web
+        # session line sends a multi-line composition this way (a newline in
+        # the keys path would submit the block a line at a time), so it must
+        # not turn into a 30s wait or a 409 on a busy session.
+        quiet = await session.await_keyboard_quiet(
+            terminal_only=True,
+            timeout=session_mod.FORCE_TYPING_GRACE if force else None,
+        )
         if not quiet and session.draft_open():
-            return json_error(
-                409,
-                f"session {session.sdef.name!r}: someone is typing there "
-                f"right now — nothing was pasted. Retry in a moment.",
-            )
-        data = await session.paste(paste, enter=bool(body.get("enter")))
+            if force:
+                await session.submit_open_draft()
+            else:
+                return json_error(
+                    409,
+                    f"session {session.sdef.name!r}: someone is typing there "
+                    f"right now — nothing was pasted. Retry in a moment.",
+                )
+        if request_id is not None:
+            prior = session_input.latest(session.sdef.name, request_id)
+            if prior and prior.get("status") == "sent":
+                return json_response({"ok": True, "bytes": 0, "duplicate": True})
+            session_input.write(session.sdef.name, "input_accepted",
+                                request_id=request_id, text=paste,
+                                status="accepted", pid=session.pid)
+        try:
+            data = await session.paste(paste, enter=bool(body.get("enter")))
+        except Exception:
+            if request_id is not None:
+                session_input.write(session.sdef.name, "input_failed",
+                                    request_id=request_id, text=paste,
+                                    status="failed", pid=session.pid)
+            raise
+        if request_id is not None:
+            session_input.write(session.sdef.name, "input_sent",
+                                request_id=request_id, text=paste,
+                                status="sent", pid=session.pid)
         return json_response({"ok": True, "bytes": len(data)})
     keys = body.get("keys")
     if not isinstance(keys, list) or not all(isinstance(k, str) for k in keys):
         return json_error(400, "'keys' must be a list of strings")
-    force = body.get("force", False)
-    if not isinstance(force, bool):
-        return json_error(400, "'force' must be a boolean")
-    request_id = body.get("input_id")
     audit_text = keys[0] if request_id and len(keys) == 2 and keys[1] == "Enter" else None
     if request_id is not None:
-        if not isinstance(request_id, str) or not request_id.strip():
-            return json_error(400, "'input_id' must be a non-empty string")
         if audit_text is None:
             return json_error(400, "'input_id' requires [text, 'Enter'] keys")
         prior = session_input.latest(session.sdef.name, request_id)
