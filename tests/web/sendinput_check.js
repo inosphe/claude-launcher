@@ -66,7 +66,12 @@ function node(tag) {
 let sent = [];
 let reply = { ok: true, doc: {} };
 const api = async (p, opts) => {
-  sent.push({ path: p, method: opts.method, contentType: opts.headers["Content-Type"], body: JSON.parse(opts.body) });
+  const type = opts.headers["Content-Type"];
+  // A key line posts JSON; an image posts the blob itself, so only the
+  // former is parsed — parsing the latter would be the test inventing a
+  // shape the page never sends.
+  const body = String(type).startsWith("image/") ? opts.body : JSON.parse(opts.body);
+  sent.push({ path: p, method: opts.method, contentType: type, body });
   if (reply.throw) throw new Error("offline");
   return { ok: reply.ok, status: reply.status || 200, json: async () => reply.doc };
 };
@@ -74,6 +79,23 @@ const api = async (p, opts) => {
 const FIELD = node("textarea");
 const BTN = node("button");
 const NOTE = node("span");
+/* the browser's clipboard, scripted by each test: an image, nothing, or a
+   refusal (no permission, an insecure origin, a browser without read()) */
+let clipboard = { items: [] };
+const navigator = {
+  clipboard: {
+    read: async () => {
+      if (clipboard.refuse) throw new Error("NotAllowedError");
+      if (clipboard.absent) return [];
+      return clipboard.items;
+    },
+  },
+};
+const imageItem = (type, blob) => ({
+  types: [type],
+  getType: async () => blob,
+});
+
 /* the page's element lookup, over the three elements this strip owns */
 const $ = (id) => ({
   "term-input-field": FIELD,
@@ -83,22 +105,28 @@ const $ = (id) => ({
 
 const ctx = {};
 new Function(
-  "exports", "api", "$",
+  "exports", "api", "$", "navigator",
   `let currentName = null;
 let sessionEnded = false;
 ` + slice("termInputNote") + `
 ` + slice("sendKeyLine") + `
 ` + slice("termInputBlock") + `
 ` + slice("autogrowTermInput") + `
+` + slice("uploadPastedImage") + `
+` + slice("clipboardImage") + `
+` + slice("pasteClipboardImage") + `
+` + slice("onTermInputPaste") + `
 ` + slice("onTermInputKeydown") + `
 Object.assign(exports, {
   sendKeyLine,
   termInputBlock,
   termInputNote,
   onTermInputKeydown,
+  onTermInputPaste,
+  pasteClipboardImage,
   setSession: (name, ended) => { currentName = name; sessionEnded = !!ended; },
 });`
-)(ctx, api, $);
+)(ctx, api, $, navigator);
 
 const box = () => ({ field: FIELD, btn: BTN, note: NOTE });
 
@@ -247,6 +275,88 @@ async function main() {
         typeof sent[0].body.input_id === "string" && sent[0].body.input_id,
         sent[0].body);
   check("the box is emptied for the next block", FIELD.value === "");
+
+  /* ---- Alt+V uploads the clipboard image and types its path ---- */
+  sent = [];
+  reply = { ok: true, doc: { ok: true, path: "C:/state/sessions/coder4/pastes/x.png", bytes: 12 } };
+  ctx.setSession("coder4", false);
+  FIELD.disabled = false;
+  FIELD.value = "look at ";
+  FIELD.selectionStart = FIELD.selectionEnd = 8;
+  const blob = { type: "image/png", size: 12 };
+  clipboard = { items: [imageItem("image/png", blob)] };
+  const altv = press("v", { altKey: true });
+  await settle();
+  check("Alt+V is taken from the browser", altv.prevented === true);
+  check("exactly one upload", sent.length === 1, sent);
+  check("...to the session's paste-image route",
+        sent[0].path === "/api/sessions/coder4/paste-image", sent[0].path);
+  check("...carrying the blob itself, typed as the image it is",
+        sent[0].body === blob && sent[0].contentType === "image/png", sent[0]);
+  check("the path the daemon answered is typed at the caret",
+        FIELD.value === "look at C:/state/sessions/coder4/pastes/x.png ",
+        FIELD.value);
+  check("...and nothing was sent to the session",
+        !sent.some((r) => r.path.endsWith("/keys")), sent);
+
+  /* ---- an empty clipboard says so and uploads nothing ---- */
+  sent = [];
+  FIELD.value = "";
+  clipboard = { absent: true };
+  await ctx.pasteClipboardImage(NOTE);
+  check("an empty clipboard uploads nothing", sent.length === 0, sent);
+  check("...and says what was wrong",
+        NOTE.textContent.includes("no image"), NOTE.textContent);
+  check("...as a warning", NOTE.classes.has("wf-warning"));
+
+  /* ---- a refused clipboard points at the way that still works ---- */
+  sent = [];
+  clipboard = { refuse: true };
+  await ctx.pasteClipboardImage(NOTE);
+  check("a refused clipboard uploads nothing", sent.length === 0, sent);
+  check("...and names Ctrl+V as the way through",
+        NOTE.textContent.includes("Ctrl+V"), NOTE.textContent);
+
+  /* ---- an ordinary Ctrl+V carrying an image takes the same path ---- */
+  sent = [];
+  FIELD.value = "";
+  const pasted = { type: "image/png", size: 9 };
+  const ev = {
+    currentTarget: FIELD, target: FIELD, prevented: false,
+    preventDefault() { ev.prevented = true; },
+    clipboardData: { items: [
+      { kind: "string", type: "text/plain" },
+      { kind: "file", type: "image/png", getAsFile: () => pasted },
+    ] },
+  };
+  ctx.onTermInputPaste(ev);
+  await settle();
+  check("a pasted image file is uploaded too", sent.length === 1, sent);
+  check("...and the browser's own paste is taken", ev.prevented === true);
+  check("the path lands in the box",
+        FIELD.value === "C:/state/sessions/coder4/pastes/x.png ", FIELD.value);
+
+  /* ---- a paste with no image is left to the browser ---- */
+  sent = [];
+  const textEv = {
+    currentTarget: FIELD, target: FIELD, prevented: false,
+    preventDefault() { textEv.prevented = true; },
+    clipboardData: { items: [{ kind: "string", type: "text/plain" }] },
+  };
+  ctx.onTermInputPaste(textEv);
+  await settle();
+  check("a text paste is not intercepted",
+        sent.length === 0 && textEv.prevented === false, sent);
+
+  /* ---- a refused upload keeps the daemon's words and types nothing ---- */
+  sent = [];
+  FIELD.value = "keep me";
+  clipboard = { items: [imageItem("image/png", blob)] };
+  reply = { ok: false, status: 413, doc: { error: "the image is larger than 24 MiB" } };
+  await ctx.pasteClipboardImage(NOTE);
+  check("a refused upload types no path", FIELD.value === "keep me", FIELD.value);
+  check("...and shows the daemon's reason",
+        NOTE.textContent.includes("larger than"), NOTE.textContent);
 
   console.log(failures ? `\n${failures} failure(s)` : "all send-input checks passed");
   process.exit(failures ? 1 : 0);

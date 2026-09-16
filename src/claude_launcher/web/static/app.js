@@ -7554,10 +7554,113 @@ function onTermInputKeydown(ev) {
     autogrowTermInput(field);
     return;
   }
+  if (ev.altKey && !ev.ctrlKey && !ev.metaKey && (key === "v" || key === "V")) {
+    ev.preventDefault();
+    pasteClipboardImage($("term-input-note"));
+    return;
+  }
   if (key === "Enter" && !ev.shiftKey && !ev.ctrlKey && !ev.altKey && !ev.metaKey) {
     ev.preventDefault();
     sendKeyLine($("term-input-field"), $("term-input-send"), $("term-input-note"));
   }
+}
+
+/* ---- Alt+V: a clipboard image becomes a path in the line ----------------
+   The program in the PTY reads bytes, so there is no way to hand it an
+   attachment from here. What CAN be handed over is a path: the image is
+   uploaded, the daemon writes it beside the session's own state, and the
+   path it answers with is typed into the composer — Claude Code opens an
+   image path given in a prompt, which is what makes the round trip worth
+   taking. The machine clipboard is never written to; it is shared with the
+   person at this keyboard and with every other session on this machine.
+
+   Two ways in, because the browsers differ on which one a page may use:
+   Alt+V reads the clipboard itself (navigator.clipboard.read, which needs
+   the permission and a secure context), and an ordinary Ctrl+V carrying an
+   image file is handled on the paste event, which needs neither. */
+
+async function uploadPastedImage(blob, note) {
+  if (!currentName) return false;
+  const kind = (blob.type || "").toLowerCase();
+  try {
+    const resp = await api(
+      `/api/sessions/${encodeURIComponent(currentName)}/paste-image`,
+      { method: "POST", headers: { "Content-Type": kind }, body: blob }
+    );
+    const doc = await resp.json().catch(() => ({}));
+    if (!resp.ok || !doc.path) {
+      if (note) termInputNote(note, doc.error || "the image was not stored", true);
+      return false;
+    }
+    const field = $("term-input-field");
+    if (!field) return false;
+    const start = Number.isInteger(field.selectionStart)
+      ? field.selectionStart : field.value.length;
+    const end = Number.isInteger(field.selectionEnd) ? field.selectionEnd : start;
+    // Padded with a space so the path does not fuse with what is already
+    // typed around it — a path glued to a word is not a path any more.
+    const text = `${doc.path} `;
+    field.value = field.value.slice(0, start) + text + field.value.slice(end);
+    const caret = start + text.length;
+    if (field.setSelectionRange) field.setSelectionRange(caret, caret);
+    if (typeof autogrowTermInput === "function") autogrowTermInput(field);
+    if (note) termInputNote(note, `image stored: ${doc.path}`);
+    return true;
+  } catch {
+    if (note) termInputNote(note, "nothing was stored — the daemon is unreachable", true);
+    return false;
+  }
+}
+
+/* The image on the clipboard right now, or null. Reading the clipboard can
+   be refused (no permission, an insecure origin, a browser that has no
+   read()), and a refusal is not an image — the caller says so rather than
+   leaving the reader looking at a box that did nothing. */
+async function clipboardImage() {
+  const clip = navigator.clipboard;
+  if (!clip || typeof clip.read !== "function") return null;
+  const items = await clip.read();
+  for (const item of items) {
+    const kind = (item.types || []).find((t) => t.startsWith("image/"));
+    if (kind) return await item.getType(kind);
+  }
+  return null;
+}
+
+async function pasteClipboardImage(note) {
+  let blob = null;
+  try {
+    blob = await clipboardImage();
+  } catch {
+    if (note) {
+      termInputNote(note, "the browser would not hand over the clipboard — "
+        + "use Ctrl+V to paste the image instead", true);
+    }
+    return false;
+  }
+  if (!blob) {
+    if (note) termInputNote(note, "there is no image on the clipboard", true);
+    return false;
+  }
+  return uploadPastedImage(blob, note);
+}
+
+/* An ordinary paste carrying an image file. The text of a mixed paste is
+   left to the browser; only the image is taken, and only then is the event
+   taken from it. */
+function onTermInputPaste(ev) {
+  const field = ev.currentTarget || ev.target;
+  if (!field || field.disabled) return;
+  const data = ev.clipboardData;
+  if (!data) return;
+  const items = Array.from(data.items || []);
+  const image = items.find((it) => it.kind === "file"
+    && (it.type || "").startsWith("image/"));
+  if (!image) return;
+  const blob = image.getAsFile();
+  if (!blob) return;
+  ev.preventDefault();
+  uploadPastedImage(blob, $("term-input-note"));
 }
 
 // Wired at load, like every other listener this page mounts — guarded like
@@ -7568,6 +7671,7 @@ if ($("term-input"))
   $("term-input").addEventListener("submit", onTermInputSubmit);
 if ($("term-input-field")) {
   $("term-input-field").addEventListener("keydown", onTermInputKeydown);
+  $("term-input-field").addEventListener("paste", onTermInputPaste);
   $("term-input-field").addEventListener("input", (ev) =>
     autogrowTermInput(ev.currentTarget || ev.target));
 }
