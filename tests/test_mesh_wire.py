@@ -476,6 +476,62 @@ def _brief(mgr, *, session_role, member_role, roles_doc=None):
     return mm.briefing_block(mesh, member)
 
 
+@pytest.mark.parametrize("wired", [False, True])
+def test_briefing_excludes_exited_and_missing_peers(home, wired):
+    mgr = _Manager()
+    mm, mesh = _mesh(mgr)
+    me = _member(mesh, "me", mgr.add("self"), role="worker", wired=wired)
+    _member(mesh, "live", mgr.add("running"), role="worker", wired=wired)
+    _member(mesh, "killed", mgr.add("ended"), role="worker", wired=wired)
+    _member(mesh, "missing", "removed", role="worker", wired=wired)
+    mgr.get("ended").exited = True
+    for handle in ("live", "killed", "missing"):
+        _connect(mesh, "me", handle)
+
+    block = mm.briefing_block(mesh, me)
+    assert "members: live (worker)\n" in block
+    assert "other member(s)" not in block
+    assert set(mesh.members) == {"me", "live", "killed", "missing"}
+    assert set(mesh.neighbours("me")) == {"live", "killed", "missing"}
+
+    # Rebuilding the briefing after respawn must restore the peer immediately.
+    mgr.get("ended").exited = False
+    assert "members: killed (worker), live (worker)\n" in mm.briefing_block(mesh, me)
+
+
+def test_briefing_hidden_count_excludes_ended_and_missing_sessions(home):
+    mgr = _Manager()
+    mm, mesh = _mesh(mgr)
+    me = _member(mesh, "me", mgr.add("self"), role="worker")
+    _member(mesh, "live", mgr.add("running"), role="worker")
+    _member(mesh, "killed", mgr.add("ended"), role="worker")
+    _member(mesh, "missing", "removed", role="worker")
+    mgr.get("ended").exited = True
+
+    block = mm.briefing_block(mesh, me)
+    assert "members: (nobody else yet)\n" in block
+    assert "note: 1 other member(s)" in block
+    mgr.get("running").exited = True
+    assert "other member(s)" not in mm.briefing_block(mesh, me)
+
+
+@pytest.mark.parametrize("mirror", [False, True])
+def test_briefing_keeps_remote_peers_with_unknown_liveness(home, mirror):
+    mgr = _Manager()
+    mm, mesh = _mesh(mgr)
+    mm._machine = "pcA"
+    mesh.me = "pcA"
+    mesh.peers = ["pcB", "pcA"] if mirror else ["pcA", "pcB"]
+    me = _member(mesh, "me", mgr.add("self"), role="worker", machine="pcA")
+    _member(mesh, "far", "remote-session", role="worker", machine="pcB")
+    _member(mesh, "far-hidden", "other-remote", machine="pcB")
+    _connect(mesh, "me", "far")
+
+    block = mm.briefing_block(mesh, me)
+    assert "members: far (worker)\n" in block
+    assert "note: 1 other member(s)" in block
+
+
 def test_a_legacy_session_role_still_gets_the_common_stance_briefing(home):
     """SessionDef.role no longer selects a harness-specific delivery path."""
     block = _brief(_Manager(), session_role="worker", member_role="worker")
