@@ -108,7 +108,7 @@ claunch run work:claude                  # explicit Claude selector
 | `template [--init]`    | Show or write the default env template. |
 | `migrate <name> [src]` | Copy skills/MCP servers from a global or local path. |
 | `plugin [list\|install\|uninstall\|marketplace]` | Declare [plugins and marketplaces](#plugins--shared-settings-every-profile) for every profile, and install them. |
-| `shared [KEY=VALUE ...]` | Show or declare the `settings.json` keys every profile carries (`--unset KEY`). |
+| `shared [KEY=VALUE ...]` | Show the `settings.json` keys every profile carries (`--unset KEY`). A dotted `KEY` writes inside a nested object, e.g. `shared permissions.defaultMode=auto` — the value claunch ships as a default. |
 | `apply [name]`         | Converge profiles onto the shared declaration (`--dry-run`, `--check`). |
 | `prune [--dry-run]`    | Delete local profile dirs not declared in `~/.claunch.yaml`. |
 | `sync [--mode ...]`    | Reconcile `~/.claunch.yaml` with the sync server (`merge`/`up`/`down`). |
@@ -968,9 +968,9 @@ same call.
 | `plugin marketplace add <source>` | Declare a marketplace (URL, directory path or `owner/repo`) and register it everywhere. |
 | `plugin marketplace remove <source>` | Stop declaring a marketplace; the profiles keep the one they have. |
 | `plugin list [--json]` | The declaration, plus which profiles have drifted from it. |
-| `shared` | List the declared `settings.json` keys. |
-| `shared KEY=VALUE ...` | Declare settings keys and write them to every profile. |
-| `shared --unset KEY` | Stop managing a key; each profile keeps the value it has. |
+| `shared` | List the effective `settings.json` keys, marking the ones claunch defaults. |
+| `shared KEY=VALUE ...` | Declare settings keys and write them to every profile. A dotted `KEY` writes inside a nested object (`permissions.defaultMode`). |
+| `shared --unset KEY` | Stop managing a key; each profile keeps the value it has — unless claunch defaults it, in which case the key returns to that default. |
 | `apply [NAME]` | Converge every profile, or just `NAME`. |
 | `apply --dry-run` | Show what applying would do, and do nothing. |
 | `apply --check` | Report drift and exit 1 if any profile is missing something. |
@@ -978,6 +978,27 @@ same call.
 `plugin install`, `plugin marketplace add` and `shared KEY=VALUE` apply straight
 away. `--no-apply` declares without touching the profiles, and `--profile NAME`
 narrows one call to a single profile.
+
+### Keys claunch defaults
+
+One `settings.json` key is converged whether or not you declare it:
+**`permissions.defaultMode` = `"auto"`**. A profile *is* the file Claude Code
+reads it from (`$CLAUDE_CONFIG_DIR/settings.json` is user scope, the only scope
+where `auto` and `bypassPermissions` take effect at all), and the alternative is
+that the profile asks before every tool call. `claunch create` writes it into a
+new profile, and `claunch apply` writes it into the ones already on disk — so a
+profile created before the default existed is one `claunch apply` away from it.
+
+It is a default, not a decision: declaring `shared permissions.defaultMode=default`
+replaces it (and `bypassPermissions`, `acceptEdits`, `plan` are the other modes
+Claude Code accepts), while `shared --unset permissions.defaultMode` puts it back.
+A write inside `permissions` merges — the `deny` rules `claunch install` puts
+there for the cflow gate commands survive it.
+
+```bash
+claunch apply --check                                    # what is not converged yet
+claunch shared permissions.defaultMode=default           # one profile set asks instead
+```
 
 ### A worked run
 

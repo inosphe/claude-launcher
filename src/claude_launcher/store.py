@@ -839,6 +839,29 @@ def set_template_env(env: Dict[str, str]) -> None:
 #: once here, converged onto every profile by :mod:`plugins`.
 SHARED_KEYS = ("marketplaces", "plugins", "settings")
 
+#: ``settings.json`` keys claunch converges unless the file says otherwise.
+#:
+#: ``permissions.defaultMode`` is here because a profile *is* the file Claude
+#: Code reads it from (``$CLAUDE_CONFIG_DIR/settings.json`` is user scope, the
+#: only scope where ``auto`` and ``bypassPermissions`` take effect at all), and
+#: because the alternative default is expensive in exactly the place this
+#: project runs: a profile with no value asks before *every* tool call, so an
+#: agent session spends its round answering prompts. ``seed`` copies the
+#: global ``settings.json`` at creation time, which gives a new profile
+#: whatever that file happens to say and nothing at all when there is none --
+#: profiles created before the value was set, or seeded from a different
+#: source, stay on the asking default with nothing reporting it.
+#:
+#: ``auto`` is the mode this project's own sessions run in: a classifier
+#: approves what it can and defers the rest, rather than ``bypassPermissions``
+#: (no prompts at all, but refused outright in sessions where Claude Code
+#: declines the mode). A profile that should keep asking declares
+#: ``"default"``; ``claunch shared --unset permissions.defaultMode`` returns it
+#: to this.
+SHARED_SETTINGS_DEFAULTS: Dict[str, object] = {
+    "permissions.defaultMode": "auto",
+}
+
 
 def shared(doc: Optional[dict] = None) -> dict:
     """The ``shared`` block (``{}`` if absent or malformed)."""
@@ -865,9 +888,28 @@ def shared_plugins(doc: Optional[dict] = None) -> List[str]:
 
 
 def shared_settings(doc: Optional[dict] = None) -> Dict[str, object]:
-    """``settings.json`` keys every profile should carry (e.g. ``outputStyle``)."""
+    """The ``settings.json`` keys the FILE declares (e.g. ``outputStyle``).
+
+    This is the declaration as written, not the effective set: a key claunch
+    ships a default for but nobody declared is absent here (see
+    :func:`effective_shared_settings`). The distinction matters because this
+    mapping is what ``claunch shared`` writes back — materializing a default
+    into the user's file as a side effect of an unrelated edit would record a
+    decision they did not make.
+    """
     block = shared(doc).get("settings")
     return {str(k): v for k, v in block.items()} if isinstance(block, dict) else {}
+
+
+def effective_shared_settings(doc: Optional[dict] = None) -> Dict[str, object]:
+    """``settings.json`` keys every Claude Code profile should carry.
+
+    :data:`SHARED_SETTINGS_DEFAULTS` merged under the file's declaration, the
+    same shape as :func:`daemon_config`. This is what convergence reads: a
+    declared key replaces the default (including with a value that switches
+    the feature off), and ``claunch shared --unset`` returns the key to it.
+    """
+    return {**SHARED_SETTINGS_DEFAULTS, **shared_settings(doc)}
 
 
 def set_shared_field(key: str, value) -> None:

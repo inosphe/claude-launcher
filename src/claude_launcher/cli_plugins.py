@@ -94,13 +94,18 @@ def _cmd_plugin_list(args: argparse.Namespace) -> int:
     marketplaces = store.shared_marketplaces(doc)
     declared = store.shared_plugins(doc)
     keys = store.shared_settings(doc)
+    # The drift line below is computed against the effective set, so the
+    # listing has to be too: a key claunch ships a default for is converged
+    # whether or not anyone declared it, and a report that left it out would
+    # say a profile is pending and not say for what.
+    effective = store.effective_shared_settings(doc)
     if args.json:
         print(json.dumps(
             {"marketplaces": marketplaces, "plugins": declared, "settings": keys},
             indent=2, ensure_ascii=False,
         ))
         return 0
-    if not (marketplaces or declared or keys):
+    if not (marketplaces or declared or effective):
         print("nothing declared shared yet (claunch plugin install <plugin@marketplace>)")
         return 0
     if marketplaces:
@@ -111,10 +116,11 @@ def _cmd_plugin_list(args: argparse.Namespace) -> int:
         print("plugins:")
         for plugin_id in declared:
             print(f"  {plugin_id}")
-    if keys:
+    if effective:
         print("settings:")
-        for key in sorted(keys):
-            print(f"  {key}={json.dumps(keys[key], ensure_ascii=False)}")
+        for key in sorted(effective):
+            mark = "" if key in keys else "  (claunch default)"
+            print(f"  {key}={json.dumps(effective[key], ensure_ascii=False)}{mark}")
     targets = _claude_profiles()
     drifted = [p.name for p in targets if plugins.plan(p, doc)]
     if drifted:
@@ -225,11 +231,18 @@ def _cmd_shared_set(args: argparse.Namespace) -> int:
             print(f"settings key {key}={value} was already declared")
     keys = store.shared_settings()
     if not (args.assignments or args.unset):
-        if not keys:
+        effective = store.effective_shared_settings()
+        if not effective:
             print("no shared settings keys declared")
             return 0
-        for key in sorted(keys):
-            print(f"{key}={json.dumps(keys[key], ensure_ascii=False)}")
+        # A key claunch ships a default for is converged whether or not the
+        # file declares it, so the listing shows it either way and marks
+        # which is which -- otherwise "what will apply write?" and "what did
+        # I declare?" read as the same question and the default is invisible
+        # right up until it shows up in a profile.
+        for key in sorted(effective):
+            mark = "" if key in keys else "  (claunch default)"
+            print(f"{key}={json.dumps(effective[key], ensure_ascii=False)}{mark}")
         return 0
     if args.no_apply:
         print("not applied (--no-apply); run 'claunch apply' when ready")
@@ -331,7 +344,11 @@ def register(sub) -> None:
         description=(
             "Show, declare or stop managing the settings.json keys applied to "
             "every Claude Code profile. Values parse as JSON when they can, so "
-            "true/2/[\"a\"] keep their types and anything else is a string."
+            "true/2/[\"a\"] keep their types and anything else is a string. "
+            "A dotted KEY writes inside a nested object without replacing its "
+            "siblings (permissions.defaultMode leaves permissions.deny alone). "
+            "Keys claunch ships a default for are shown marked and converge "
+            "whether or not they are declared."
         ),
     )
     p_shared.add_argument(
