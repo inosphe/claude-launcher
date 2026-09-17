@@ -2274,6 +2274,16 @@ so Claude aliases can continue to resolve through values such as
 child inherits its parent's selection; changing or clearing it is governed
 by `spawn.allow_args`.
 
+Each choice is shown with the backend model id it reaches, where the
+launcher can name one: the daemon resolves the alias out of the profile's
+own environment on Claude (`ANTHROPIC_DEFAULT_SONNET_MODEL` and its
+siblings, published as `profile_details[].model_ids`) and out of the
+harness's declared `model_aliases` elsewhere, so the row reads
+`sonnet (deepseek-flash[1m])`. An alias nothing here resolves — a plain
+Anthropic profile picks its own latest sonnet inside Claude Code — keeps
+its name alone, and the ids are dropped rather than shown wrong while a
+borrow puts the launch on another profile's backend.
+
 `claude` is the one harness whose executable is `CLAUDE_LAUNCHER_BIN`; it uses
 the profile root as `CLAUDE_CONFIG_DIR` for backwards compatibility. Other
 packaged harnesses receive a namespaced home/config path below that root when

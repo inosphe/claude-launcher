@@ -117,7 +117,8 @@ const form = {
   profile: picker([["work", "work"], ["home", "home"]]),
   harness: picker([["claude", "claude"]]),
   model: picker(),
-  borrow: picker([["(this profile's own token)", ""], ["work", "work"]]),
+  borrow: picker([["(this profile's own token)", ""], ["work", "work"],
+                  ["home", "home"]]),
   null_token: control(""),
   cwd: picker([["(daemon cwd)", ""], ["repo — F:/repo", "F:/repo"]]),
   args: control(""), resume: control(""), fork: control(""),
@@ -140,7 +141,8 @@ const reports = {};
 const ctx = {};
 const PROFILE_DETAILS = {
   work: { name: "work", harness: "claude", harness_available: true,
-          borrow_allowed: true, borrow_mode: "provider-token" },
+          borrow_allowed: true, borrow_mode: "provider-token",
+          model_ids: { sonnet: "work-sonnet", opus: "work-opus" } },
   home: { name: "home", harness: "claude", harness_available: true,
           borrow_allowed: true, borrow_mode: "provider-token" },
 };
@@ -151,7 +153,8 @@ const PROFILE_OPTIONS = [
   { value: "home:pi", profile: "home", harness: "pi", default: false },
 ];
 const HARNESS_DETAILS = {
-  claude: { name: "claude", models: ["haiku", "sonnet", "opus", "fable"] },
+  claude: { name: "claude", builtin: true,
+            models: ["haiku", "sonnet", "opus", "fable"] },
   codex: { name: "codex", models: ["luna", "terra", "sol"] },
   pi: { name: "pi", tools: ["full_read"] },
 };
@@ -170,6 +173,8 @@ new Function(
    // slicing the function does not slice it away from its own state.
    sliceLet("parentsRendered"),
    slice("baseProfileName"), slice("spawnProfileSelector"),
+   slice("modelChoiceLabel"), slice("modelIdsInPlay"), slice("borrowInPlay"),
+   slice("relabelModelOptions"),
    slice("spawnProfileOverride"), slice("refillSpawnHarnesses"),
    slice("newProfileUi"), slice("newProfileSelector"),
    slice("newProfileOverride"), slice("newProfileDetail"),
@@ -365,6 +370,26 @@ async function main() {
   check("the report is fetched once per parent", fetched, ["lead"]);
 
   /* The payload: only what the policy left open AND the operator filled in. */
+  /* What each model choice reaches, beside it. The form never works this out:
+     the id behind an alias is written by config it does not read, so the
+     daemon resolves it per profile and the row carries the daemon's answer. */
+  form.profile.value = "work";
+  ctx.sync();
+  check("the model row names the id each alias reaches",
+        form.model.options.map((o) => `${o.value}=${o.textContent}`),
+        ["=(harness default)", "haiku=haiku", "sonnet=sonnet (work-sonnet)",
+         "opus=opus (work-opus)", "fable=fable"]);
+  /* A borrow by ANOTHER profile moves the backend those ids describe: the row
+     keeps the alias and stops naming an id that is no longer its own. */
+  form.borrow.value = "home";
+  ctx.sync();
+  check("a borrow by another profile drops the ids",
+        form.model.options.map((o) => o.textContent),
+        ["(harness default)", "haiku", "sonnet", "opus", "fable"]);
+  form.borrow.value = "work";
+  ctx.sync();
+  check("...and the profile's own token keeps them",
+        form.model.options.map((o) => o.textContent)[2], "sonnet (work-sonnet)");
   form.profile.value = "home";
   form.harness.value = "claude";
   ctx.sync();

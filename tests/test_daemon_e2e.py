@@ -2052,6 +2052,72 @@ def test_api_harnesses_report_declared_and_installed_separately(home, tmp_path):
     asyncio.run(run())
 
 
+def test_api_profiles_publish_what_each_model_choice_reaches(home, tmp_path):
+    """The dashboard's model rows carry the id behind each alias.
+
+    A form cannot work that out: an alias is what a launch passes, and the id
+    behind it is written by provider and profile config no form reads. So the
+    daemon resolves it once per profile and publishes it beside the harness's
+    own choices -- and on a profile that pins nothing, the answer is an empty
+    map rather than an invented id.
+    """
+    from aiohttp.test_utils import TestClient, TestServer
+
+    async def run():
+        mgr = _manager()
+        app = build_app(mgr, "sekrit", started_at=time.monotonic())
+        client = TestClient(TestServer(app))
+        await client.start_server()
+        bearer = {"Authorization": "Bearer sekrit"}
+        try:
+            store.update(
+                lambda doc: doc.setdefault("providers", {}).update(
+                    {
+                        "backend": {
+                            "models": {
+                                "default": "backend-sonnet",
+                                "large": "backend-opus",
+                            }
+                        }
+                    }
+                )
+            )
+            pinned = profile.create("pinned")
+            store.set_profile_field(pinned.name, "provider", "backend")
+            profile.create("plain")
+
+            resp = await client.get("/api/profiles", headers=bearer)
+            assert resp.status == 200
+            details = {
+                row["name"]: row
+                for row in (await resp.json())["profile_details"]
+            }
+
+            assert details["pinned"]["harness"] == "claude"
+            assert details["pinned"]["model_ids"] == {
+                "sonnet": "backend-sonnet",
+                "opus": "backend-opus",
+                # `xlarge` follows `large` where nobody sets it, so the alias
+                # the runtime calls fable reaches opus's model.
+                "fable": "backend-opus",
+            }
+            # The same answer under the harness-qualified selector the
+            # dashboard's profile picker hands back.
+            assert details["pinned:claude"]["model_ids"]["sonnet"] == (
+                "backend-sonnet"
+            )
+            # Codex resolves its own aliases, which no profile decides.
+            assert details["pinned:codex"]["model_ids"]["luna"] == "gpt-5.6-luna"
+            # Nothing is pinned: Claude Code picks its own sonnet, and the map
+            # says so by being empty.
+            assert details["plain"]["model_ids"] == {}
+        finally:
+            await mgr.shutdown_all()
+            await client.close()
+
+    asyncio.run(run())
+
+
 def test_api_workspaces_feed_the_directory_picker(home, tmp_path):
     """The web form picks a directory from this list instead of taking one
     typed free-hand — so the endpoint has to carry enough to render it."""

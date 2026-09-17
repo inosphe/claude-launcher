@@ -136,6 +136,31 @@ def form(**kw) -> wizard.Wizard:
     return wiz
 
 
+class ResolvedSources(CodexSources):
+    """A daemon that publishes what each model choice resolves to.
+
+    ``model_ids`` is per profile and harness: the id each declared choice
+    reaches. The form shows it and never works it out -- the alias is what the
+    launch passes, and the id behind it is written by config no form reads.
+    """
+
+    def harnesses(self):
+        rows = super().harnesses()
+        for row in rows:
+            row["builtin"] = row["name"] == "claude"
+        return rows
+
+    def profile_details(self):
+        return [
+            {"name": "work:claude", "harness": "claude",
+             "harness_available": True, "borrow_allowed": True,
+             "model_ids": {"sonnet": "backend-sonnet", "opus": "backend-opus"}},
+            {"name": "codex:codex", "harness": "codex",
+             "harness_available": True, "borrow_allowed": False,
+             "model_ids": {"luna": "gpt-5.6-luna"}},
+        ]
+
+
 def focus_on(wiz: wizard.Wizard, key: str) -> None:
     """Put the cursor on a field the way a person would: with the arrow keys."""
     for _ in range(len(wiz.fields)):
@@ -258,6 +283,46 @@ def test_new_session_model_picker_follows_the_profile_harness():
     wiz.apply(answers)
     assert answers.profile == "codex:codex"
     assert answers.model == "terra"
+
+
+def _model_details(wiz) -> dict:
+    return {option.value: option.detail for option in wiz.field("model").options}
+
+
+def test_new_session_model_row_names_the_id_each_alias_reaches():
+    """`sonnet` is what the launch passes; the profile decides the id behind it.
+
+    The id is not the form's to work out -- it is written by provider and
+    profile config the form never reads -- so the daemon publishes it per
+    profile and the row carries it beside the alias.
+    """
+    wiz = form(sources=ResolvedSources())
+    details = _model_details(wiz)
+    assert details["sonnet"] == "backend-sonnet"
+    assert details["opus"] == "backend-opus"
+    # Not a declared choice: nothing resolved the harness default, and an
+    # alias nothing resolved is left bare rather than given an invented id.
+    assert details[""] == ""
+    # Codex's aliases come from its own declaration, not from the profile.
+    pick(wiz, "profile", "codex/codex")
+    assert _model_details(wiz)["luna"] == "gpt-5.6-luna"
+
+
+def test_new_session_model_row_drops_what_a_borrow_makes_someone_elses():
+    """A borrow that names another profile moves the backend.
+
+    The ids describe the selected profile's OWN backend, so they stop applying
+    the moment the launch talks to a lender's -- the row keeps the alias and
+    says nothing about an id that is no longer its own.
+    """
+    wiz = form(sources=ResolvedSources())
+    assert _model_details(wiz)["sonnet"] == "backend-sonnet"
+
+    pick(wiz, "borrow", "ds4")
+    assert _model_details(wiz)["sonnet"] == ""
+
+    pick(wiz, "borrow", "(this profile's own token)")
+    assert _model_details(wiz)["sonnet"] == "backend-sonnet"
 
 
 def test_profile_picker_labels_the_default_and_omits_denied_selectors():
@@ -1385,6 +1450,20 @@ class CodexSpawnSources(FakeSpawnSources, CodexSources):
         )
 
 
+class ResolvedSpawnSources(FakeSpawnSources, ResolvedSources):
+    """Spawn sources over a daemon that publishes the model resolution."""
+
+    def __init__(self, *, borrow="", **kw):
+        super().__init__(
+            sessions=[
+                {"name": "lead", "status": "idle", "harness": "claude",
+                 "profile": "work:claude", "borrow": borrow,
+                 "cwd": "/work/repo"},
+            ],
+            **kw,
+        )
+
+
 def spawn_form(**kw) -> wizard.SpawnWizard:
     # `defaults` is the namespace argparse already filled in: flags typed
     # alongside --wizard arrive exactly this way, so a test that passes one
@@ -1640,6 +1719,29 @@ def test_spawn_model_inherits_changes_and_can_return_to_harness_default():
     cleared = argparse.Namespace()
     open_form.apply(cleared)
     assert cleared.model == ""
+
+
+def test_spawn_model_row_names_the_id_each_alias_reaches():
+    """The spawn form's model row carries the same resolution as the other's.
+
+    Both read it off the daemon (``profile_details[].model_ids``) for the
+    profile and harness the child would run under.
+    """
+    wiz = spawn_form(sources=ResolvedSpawnSources(report=_open_report()))
+    assert _model_details(wiz)["sonnet"] == "backend-sonnet"
+
+
+def test_spawn_model_row_follows_the_borrow_a_child_would_inherit():
+    """The empty borrow answer means "as the parent does".
+
+    A child of a session that borrows another profile lands on the lender's
+    backend too, so the ids describe a backend this launch is not talking to
+    -- and are dropped, rather than shown wrong.
+    """
+    wiz = spawn_form(
+        sources=ResolvedSpawnSources(report=_open_report(), borrow="ds4")
+    )
+    assert _model_details(wiz)["sonnet"] == ""
 
 
 def test_spawn_codex_runtime_is_visible_but_inherited_when_args_are_locked():

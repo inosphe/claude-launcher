@@ -801,3 +801,33 @@ def test_profile_layer_moving_large_moves_fable_unless_xlarge_is_pinned(home):
     env = providers.claude_env(p)
     assert env["ANTHROPIC_DEFAULT_OPUS_MODEL"] == "bigger[1m]"
     assert env["ANTHROPIC_DEFAULT_FABLE_MODEL"] == "provider-max[1m]"
+
+
+def test_claude_alias_vars_are_read_off_the_role_table():
+    """``--model=sonnet`` is resolved through ANTHROPIC_DEFAULT_SONNET_MODEL.
+
+    Those variables are already in :data:`CLAUDE_MODEL_VARS` -- one per role --
+    so the alias names are derived from that table rather than typed beside it.
+    A role added there adds its alias, and the two directions cannot disagree.
+    """
+    assert provider_spec.CLAUDE_ALIAS_VARS == {
+        "sonnet": "ANTHROPIC_DEFAULT_SONNET_MODEL",
+        "haiku": "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+        "opus": "ANTHROPIC_DEFAULT_OPUS_MODEL",
+        "fable": "ANTHROPIC_DEFAULT_FABLE_MODEL",
+    }
+    for alias, var in provider_spec.CLAUDE_ALIAS_VARS.items():
+        assert alias == alias.lower()
+        assert var in provider_spec.CLAUDE_MODEL_KEYS
+
+
+def test_every_declared_claude_model_has_an_alias_variable(home):
+    """The harness's own choices must each be resolvable.
+
+    ``harnesses.yaml`` lists what the Claude picker offers; the alias table is
+    what says which environment variable decides where each one lands. A model
+    added to the declaration without one would be offered and then shown with
+    nothing beside it, with no error to notice.
+    """
+    entry = harnesses.registry()["claude"]
+    assert set(entry.models) <= set(provider_spec.CLAUDE_ALIAS_VARS)
