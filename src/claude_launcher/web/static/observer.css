@@ -1,4 +1,9 @@
-#observer-view { flex: 1; min-height: 0; min-width: 0; display: flex; flex-direction: column; overflow: hidden; }
+#observer-view { flex: 1; min-height: 0; min-width: 0; display: flex; flex-direction: column; overflow: hidden; font-size: 13px; }
+#observer-mobile-monitor { display: none; }
+@media(max-width:820px) {
+  body.observer-active #observer-view > header { display: none; }
+  body.observer-active #observer-mobile-monitor { display: inline-flex; align-items: center; flex: none; min-height: 44px; font-size: 12px; }
+}
 #observer-view > header { flex: none; margin: 0; padding: 16px 20px; border-bottom: 1px solid #2a2e36; gap: 12px; }
 #observer-view h1 { flex: 1; font-size: 18px; }
 #observer-view .observer-content { flex: 1; min-height: 0; overflow: auto; padding: 16px 20px; }
@@ -14,7 +19,7 @@
 #observer-view a { color: #58a6ff; }
 #observer-cards { display: grid; grid-template-columns: repeat(auto-fit,minmax(min(100%,420px),1fr)); gap: 16px; }
 #observer-view .observer-card { min-width: 0; padding: 18px; background: #1b1e24; border: 1px solid #2a2e36; border-radius: 8px; }
-#observer-view h2 { font-size: 16px; overflow-wrap: anywhere; }
+#observer-view h2 { font-size: 14px; overflow-wrap: anywhere; }
 #observer-view .state { font-size: 12px; background: #243247; border-radius: 4px; padding: 3px 8px; }
 #observer-view .observer-links { display: flex; flex-wrap: wrap; gap: 14px; margin: 10px 0; font-size: 12px; }
 #observer-view .observer-card p, #observer-view .event { white-space: pre-wrap; overflow-wrap: anywhere; }

@@ -116,6 +116,7 @@ function render() {
   const attention=s=> (s.events||[]).filter(e=>e.needs_action&&!e.acknowledged);
   $("counts").textContent=`${visible.length}개 세션 · 미확인 요청 ${visible.reduce((n,s)=>n+attention(s).length+sessionRuns(s).filter(sessCflowGated).length,0)}개`;
   $("monitor").textContent=snapshot.enabled?"관찰 끄기":"관찰 시작";
+  $("mobile-monitor").textContent=$("monitor").textContent;
   $("notice").textContent=(cflowError?"cflow 상태 조회 실패 · 마지막 조회 결과 표시":snapshot.error) || (snapshot.enabled ? "관찰 중 · 세션별 순차 처리 · 최소 60초 간격" : "관찰이 꺼져 있습니다. 시작하면 ds4-official/deepseek-flash API로 트랜스크립트를 전송합니다.");
   const cards=$("cards"); cards.replaceChildren();
   visible.sort((a,b)=>(attention(b).length+sessionRuns(b).filter(sessCflowGated).length)-(attention(a).length+sessionRuns(a).filter(sessCflowGated).length));
@@ -195,6 +196,7 @@ $("activity").onchange=render;
 $("selection").onchange=navigate;$("actions-only").onchange=render;$("ended").onchange=render;
 $("target").onchange=()=>chooseTarget($("target").value);$("prompt").oninput=controls;
 $("monitor").onclick=async()=>{try{await request("api/observer/settings",{enabled:!snapshot.enabled});await refresh();}catch(err){$("notice").textContent=err.message;}};
+$("mobile-monitor").onclick=()=>$("monitor").click();
 async function send(interrupt) {
   const target=$("target").value, text=$("prompt").value;
   if(pending||!target||(!interrupt&&!text.trim()))return;
@@ -208,9 +210,10 @@ async function send(interrupt) {
 }
 $("send").onclick=()=>send(false);$("interrupt").onclick=()=>send(true);
 let poll = null, routeScope = "global", routeName = "", generation = 0;
-function stop() { clearInterval(poll); poll=null; generation++; }
+function stop() { clearInterval(poll); poll=null; generation++; document.body.classList.remove("observer-active"); }
 async function open(scope = "global", name = "") {
   stop();
+  document.body.classList.add("observer-active");
   const ticket=generation;
   routeScope=scope; routeName=name;
   $("scope").value=scope;
