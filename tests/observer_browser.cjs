@@ -7,6 +7,7 @@ const path = require("node:path");
 const { chromium } = require(process.env.CLAUNCH_PLAYWRIGHT || "playwright");
 const root = path.join(__dirname, "../src/claude_launcher/web/static");
 const sent = [];
+let gates=[];
 let observerReads = 0, needsLogin = true;
 const data = { enabled: true, sessions: [
   { name: "s1", status: "busy", running: true, meshes: ["team-a"], summary: "테스트 12개 통과. 결정을 기다립니다.",
@@ -25,6 +26,18 @@ const server = http.createServer((req, res) => {
         if(needsLogin) { needsLogin=false; res.statusCode=401; return res.end('{}'); }
         return res.end(JSON.stringify(data));
       }
+      if(req.method==="GET" && req.url.startsWith("/api/cflow/run?")) {
+        const run=gates[0];
+        return res.end(JSON.stringify({cwd:"/repo",scope:"s1",sessions:["s1"],run:run||{status:"step"}}));
+      }
+      if(req.method==="GET" && req.url.startsWith("/api/cflow?")) return res.end(JSON.stringify({runs:gates}));
+      if(req.url.endsWith("/images/image")) {res.setHeader("Content-Type","image/png");return res.end(Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=","base64"));}
+      if(req.url.endsWith("/reports/question/answer")) {
+        const e=data.sessions[0].events.find(e=>e.id==="question");
+        e.answer={text:JSON.parse(body).text};e.needs_action=false;e.acknowledged=true;e.delivery="sent";
+        sent.push({url:req.url,body:JSON.parse(body)});return res.end(JSON.stringify(e));
+      }
+      if(req.url==="/api/cflow/approve") gates=[];
       if (req.url.endsWith("/events/e1")) return res.end('{"content":"Which environment?"}');
       if(req.method === "GET") {
         if(req.url === "/api/daemon") return res.end('{"version":"test","boot_id":"test"}');
@@ -117,7 +130,48 @@ const server = http.createServer((req, res) => {
     await page.evaluate(() => {location.hash="#/observer/session/s1";});
     await page.waitForFunction(() => document.getElementById("observer-target").value === "s1");
     assert.equal(await page.locator(".observer-card").count(), 1);
+    await page.unroute("**/api/observer");
+    data.sessions[0].status="idle";
+    data.sessions[0].last_activity_at=new Date(Date.now()-3600000).toISOString();
+    data.sessions[0].events.push({id:"question",origin:"agent",kind:"action",source:"agent:s1",question:true,
+      text:"Review screenshot and choose",choices:["Accept","Revise"],attachments:[{id:"image"}],needs_action:true,at:new Date().toISOString()});
+    data.sessions[1].state="done";
+    data.sessions.push({name:"s3",running:true,status:"busy",meshes:[],events:[],state:"done"});
+    gates=[{run:"r1",scope:"s1",cwd:"/repo",status:"waiting_approval",step_id:"review",gate:"Approve deployment",sessions:["s1"]}];
+    await page.evaluate(()=>{location.hash="#/observer";});
+    await page.reload();
+    await page.getByRole("button",{name:"Approve gate",exact:true}).waitFor();
+    assert.equal(await page.locator(".state.waiting").innerText(),"장기 대기");
+    assert.equal(await page.locator(".state.done").innerText(),"완료 후 유휴");
+    assert.equal(await page.locator(".state.working").innerText(),"동작 중");
+    await page.selectOption("#observer-activity","working");
+    assert.equal(await page.locator(".observer-card").count(),1);
+    assert.match(await page.locator(".observer-card").innerText(),/s3/);
+    await page.selectOption("#observer-activity","all");
+    await page.locator(".observer-image img").waitFor();
+    assert.equal(await page.locator(".observer-image img").evaluate(img=>img.complete&&img.naturalWidth>0),true);
+    await page.locator(".observer-answer").getByRole("button",{name:"Revise",exact:true}).click();
+    await page.locator(".observer-answer textarea").fill("Revise the mobile spacing");
+    data.sessions[1].summary="new summary while user is typing";
+    await page.waitForTimeout(250);
+    assert.equal(await page.locator(".observer-answer textarea").inputValue(),"Revise the mobile spacing");
+    await page.locator(".observer-answer").getByRole("button",{name:"답변 전송",exact:true}).click();
+    await page.getByText("사용자 답변: Revise the mobile spacing",{exact:true}).waitFor();
+    assert(sent.some(r=>r.url.endsWith("/reports/question/answer")&&r.body.text==="Revise the mobile spacing"));
+    page.on("dialog",dialog=>dialog.accept());
+    await page.getByRole("button",{name:"Approve gate",exact:true}).click();
+    await page.waitForFunction(()=>!document.querySelector(".observer-gate"));
+    assert(sent.some(r=>r.url==="/api/cflow/approve"&&r.body.scope==="s1"&&r.body.cwd==="/repo"));
+    gates=[{run:"r1",scope:"s1",cwd:"/repo",status:"waiting_selection",step_id:"environment",chooser:"user",prompt:"Choose target",options:[{name:"staging",description:"Test environment"},{name:"production",description:"Live environment"}],sessions:["s1"]}];
+    await page.getByRole("button",{name:"staging",exact:true}).waitFor();
+    await page.getByRole("button",{name:"staging",exact:true}).click();
+    await page.waitForTimeout(150);
+    assert(sent.some(r=>r.url==="/api/cflow/select"&&r.body.option==="staging"&&r.body.scope==="s1"));
+    await page.setViewportSize({width:390,height:844});
+    await page.locator(".observer-content").evaluate(e=>e.scrollTop=0);
+    assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);
+    if(process.env.CLAUNCH_SCREENSHOT) await page.screenshot({path:process.env.CLAUNCH_SCREENSHOT,fullPage:true});
     assert.deepEqual(errors, []);
-    console.log("PASS: mobile layout, scope/action filters, evidence, Escape, target input, per-session drafts, shared auth, deep links, polling lifecycle, legacy redirect");
+    console.log("PASS: mobile layout, scope/action filters, evidence, Escape, target input, per-session drafts, shared auth, deep links, polling lifecycle, legacy redirect, direct screenshot/answer, activity filters, cflow approval/selection");
   } finally { await browser.close(); server.close(); server.closeAllConnections(); }
 })().catch(error => { console.error(error); server.close(); server.closeAllConnections(); process.exitCode = 1; });
