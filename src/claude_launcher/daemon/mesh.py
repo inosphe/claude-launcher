@@ -2202,11 +2202,27 @@ class MeshManager:
         roster and never the system prompt: the graph is rewired mid-session,
         an appended prompt is not.)
         """
-        reachable = mesh.neighbours(member.handle)
+        # Membership survives session exit so history and queued mail remain
+        # available after respawn. The briefing should offer current peers,
+        # excluding local sessions known to have exited or been removed.
+        # Remote session liveness is unknown here; keep those members.
+        available = set()
+        for handle, peer in mesh.members.items():
+            if handle == member.handle:
+                continue
+            if self._is_local(mesh, peer):
+                try:
+                    session = self.manager.get(peer.session)
+                except ManagerError:
+                    continue
+                if session.exited:
+                    continue
+            available.add(handle)
+        reachable = [h for h in mesh.neighbours(member.handle) if h in available]
         others = ", ".join(
             f"{h} ({mesh.members[h].role_label()})" for h in reachable
         ) or "(nobody else yet)"
-        hidden = len(mesh.members) - 1 - len(reachable)
+        hidden = len(available) - len(reachable)
         return (
             "---\n"
             "# claunch mesh: join briefing -- machine-generated, not typed by the user\n"
