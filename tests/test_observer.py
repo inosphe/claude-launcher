@@ -1,7 +1,9 @@
-"""Observer cursor, durability, API contract and prefix reuse regressions."""
+"""Observer cursor, durability, API contract, usage meter and prefix reuse regressions."""
 import asyncio
 import copy
 import json
+import re
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -57,6 +59,57 @@ def test_prefix_restart_ack_and_no_new_evidence(setup, monkeypatch):
     monkeypatch.setattr(restored, "evidence", lambda *args: (["path", "c1"], 2, {}, [], False))
     asyncio.run(restored.observe(session, CFG))
     assert len(calls) == 2
+
+
+def test_usage_meter_totals_every_call_and_every_local_day(setup, monkeypatch):
+    service, session = setup
+    days = iter(["2026-09-16", "2026-09-17", "2026-09-17"])
+    monkeypatch.setattr(observer, "usage_date", lambda: next(days))
+    monkeypatch.setattr(service, "evidence", lambda *args: evidence())
+    async def fake(cfg, messages):
+        # A provider that reports a subset: the missing counter must read as
+        # zero rather than poison the sum with None.
+        return answer(), {"prompt_tokens": 100, "completion_tokens": 7, "prompt_cache_hit_tokens": 40}
+    monkeypatch.setattr(observer, "complete", fake)
+    for _ in range(3):
+        asyncio.run(service.observe(session, CFG))
+    row = service.data["sessions"]["s1"]
+    assert row["usage_totals"] == {"calls": 3, "prompt_tokens": 300, "completion_tokens": 21,
+                                   "prompt_cache_hit_tokens": 120, "prompt_cache_miss_tokens": 0}
+    assert row["usage_daily"] == {
+        "2026-09-17": {"calls": 2, "prompt_tokens": 200, "completion_tokens": 14,
+                       "prompt_cache_hit_tokens": 80, "prompt_cache_miss_tokens": 0},
+        "2026-09-16": {"calls": 1, "prompt_tokens": 100, "completion_tokens": 7,
+                       "prompt_cache_hit_tokens": 40, "prompt_cache_miss_tokens": 0}}
+    # The meter is what the dashboard reads, so it must survive into the snapshot
+    # without the model conversation that produced it.
+    published = service.snapshot()["sessions"][0]
+    assert published["usage_totals"] == row["usage_totals"]
+    assert published["usage_daily"] == row["usage_daily"]
+    assert "messages" not in published
+
+
+def test_failed_call_does_not_advance_the_meter(setup, monkeypatch):
+    service, session = setup
+    monkeypatch.setattr(service, "evidence", lambda *args: evidence())
+    async def ok(cfg, messages):
+        return answer(), {"prompt_tokens": 100}
+    monkeypatch.setattr(observer, "complete", ok)
+    asyncio.run(service.observe(session, CFG))
+    assert service.data["sessions"]["s1"]["usage_totals"]["calls"] == 1
+    async def fail(*args):
+        raise ValueError("bad response")
+    monkeypatch.setattr(observer, "complete", fail)
+    with pytest.raises(ValueError):
+        asyncio.run(service.observe(session, CFG))
+    row = service.data["sessions"]["s1"]
+    assert row["usage_totals"]["calls"] == 1 and row["usage"]["prompt_tokens"] == 100
+
+
+def test_usage_date_is_the_local_calendar_day():
+    """UTC bucketing would move an evening's calls onto the next day here."""
+    assert observer.usage_date() == time.strftime("%Y-%m-%d", time.localtime())
+    assert re.fullmatch(r"\d{4}-\d{2}-\d{2}", observer.usage_date())
 
 
 def test_failure_does_not_consume_cursor(setup, monkeypatch):
