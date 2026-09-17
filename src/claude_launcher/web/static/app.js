@@ -7188,6 +7188,9 @@ const LINK_JITTER = 0.25;
 // loop wearing a different hat. A press of the chip is exempt: that is a
 // person asking, and asking twice is their business.
 const LINK_KICK_MS = 3000;
+// A handshake alone does not end an outage. Require init and five seconds
+// on that socket before giving the next outage a fresh retry budget.
+const LINK_STABLE_MS = 5000;
 // Held keystrokes. Small on purpose — this covers a restart, not a walk.
 const LINK_QUEUE_MAX = 4096;
 
@@ -7279,11 +7282,13 @@ function openSocket(name) {
     + url(`/api/sessions/${encodeURIComponent(name)}/ws?scrollback=1`)
   );
   sock.binaryType = "arraybuffer";
+  sock.linkOpenedAt = null;
+  sock.linkReadyAt = null;
   ws = sock;
 
   sock.onopen = () => {
     if (ticket !== linkTicket) return;
-    linkTry = 0;   // this outage is over; the next one starts with a full budget
+    sock.linkOpenedAt = Date.now();
     setLink("live");
     syncTerminalFocus();
   };
@@ -7293,20 +7298,21 @@ function openSocket(name) {
     if (typeof ev.data === "string") {
       let msg;
       try { msg = JSON.parse(ev.data); } catch { return; }
+      if (msg.type === "init" && sock.linkReadyAt === null) sock.linkReadyAt = Date.now();
       handleFrame(msg);
     } else if (term) {
       term.write(new Uint8Array(ev.data));
     }
   };
 
-  sock.onclose = () => {
+  sock.onclose = (ev) => {
     // A socket we have already replaced closing late is not an outage — it is
     // the tail of one we have dealt with. Without this, the losing half of a
     // race schedules retries against a link that is already live.
     if (ticket !== linkTicket) return;
     ws = null;
     if (linkState === "idle" || sessionEnded) { setLink("idle"); return; }
-    linkDown();
+    linkDown(ev, sock);
   };
 }
 
@@ -7933,7 +7939,20 @@ function flushInput(sameChild) {
   }
 }
 
-function linkDown() {
+function linkDown(ev, sock) {
+  const now = Date.now();
+  const readyMs = sock && Number.isFinite(sock.linkReadyAt)
+    ? now - sock.linkReadyAt : null;
+  if (readyMs !== null && readyMs >= LINK_STABLE_MS) linkTry = 0;
+  console.warn("[claunch] terminal WebSocket closed", {
+    session: linkName,
+    code: ev ? ev.code : null,
+    reason: ev ? ev.reason : "",
+    wasClean: ev ? ev.wasClean : null,
+    openMs: sock && Number.isFinite(sock.linkOpenedAt) ? now - sock.linkOpenedAt : null,
+    readyMs,
+    retries: linkTry,
+  });
   if (term) term.write("\r\n\x1b[90m[disconnected — reconnecting…]\x1b[0m\r\n");
   scheduleReconnect();
 }
@@ -8713,6 +8732,7 @@ function suspendActive() {
     pid: attachedPid, boot: attachedBoot,
     alt: altScreen, mouse: mouseTracking,
     scroll: scrollOffset, exited: sessionEnded,
+    retries: linkTry,
   };
   if (ws) {
     setTerminalFocus(false);
@@ -8735,6 +8755,7 @@ function suspendActive() {
 function resetLive() {
   if (wheelTimer) { clearTimeout(wheelTimer); wheelTimer = null; }
   wheelAccum = 0;
+  clearTimeout(linkTimer);
   linkTimer = null;
   linkTry = 0;
   linkTicket += 1;               // sockets opened before are no one's link now
@@ -8786,6 +8807,7 @@ function shimFrame(b, ev) {
     let msg;
     try { msg = JSON.parse(ev.data); } catch { return; }
     if (msg.type === "init") {
+      if (b.ws && b.ws.linkReadyAt === null) b.ws.linkReadyAt = Date.now();
       b.pid = msg.pid || null;
       b.boot = msg.boot_id || null;
       b.alt = !!msg.alt;
@@ -8832,7 +8854,7 @@ function wireActive(b) {
   const sock = b.ws;
   sock.onopen = () => {
     if (ws !== sock) return;
-    linkTry = 0;
+    sock.linkOpenedAt = Date.now();
     setLink("live");
   };
   sock.onmessage = (ev) => {
@@ -8840,16 +8862,17 @@ function wireActive(b) {
     if (typeof ev.data === "string") {
       let msg;
       try { msg = JSON.parse(ev.data); } catch { return; }
+      if (msg.type === "init" && sock.linkReadyAt === null) sock.linkReadyAt = Date.now();
       handleFrame(msg);
     } else if (term) {
       term.write(new Uint8Array(ev.data));
     }
   };
-  sock.onclose = () => {
+  sock.onclose = (ev) => {
     if (ws !== sock) return;
     ws = null;
     if (linkState === "idle" || sessionEnded) { setLink("idle"); return; }
-    linkDown();
+    linkDown(ev, sock);
   };
 }
 
@@ -8871,6 +8894,7 @@ function restoreTerminal(b) {
   altScreen = b.alt;
   mouseTracking = !!b.mouse;
   sessionEnded = b.exited;
+  linkTry = b.retries || 0;
   // The same header seeding a fresh attach does, so the previous session's
   // controls never linger on this one.
   showView("terminal");

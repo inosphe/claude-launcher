@@ -82,7 +82,10 @@ function build(opts) {
     close() { this.readyState = 3; }
     // what the browser would call
     opened() { this.readyState = 1; if (this.onopen) this.onopen(); }
-    dropped() { this.readyState = 3; if (this.onclose) this.onclose(); }
+    dropped(event = { code: 1006, reason: "", wasClean: false }) {
+      this.readyState = 3;
+      if (this.onclose) this.onclose(event);
+    }
     text(msg) { this.onmessage({ data: JSON.stringify(msg) }); }
   }
   FakeSocket.OPEN = 1;
@@ -109,6 +112,7 @@ function build(opts) {
     dispose: () => { term.disposed = true; },
   };
   const statuses = [];
+  const diagnostics = [];
   const winOn = {};
 
   // detach() reaches for the keep-alive cache map and the attached session's
@@ -116,7 +120,8 @@ function build(opts) {
   // provides stand-ins the sliced detach() can safely no-op against.
   const code = "let keptTerms = new Map();\nlet currentName = null;\n"
     + "let snapshotName = null;\nfunction removeSnapshot() {}\n"
-    + slice("/* ---- the link ----", "/* ---- text size ----");
+    + slice("/* ---- the link ----", "/* ---- text size ----")
+    + slice("function wireActive(b) {", "/* Bring a parked terminal back.");
   // The link slice ends before the wheel block, so the wheel machinery lives
   // outside this Function's scope: the wheel handlers are not what is being
   // checked here, and a live handleFrame/detach still reaches for them, so
@@ -128,10 +133,10 @@ function build(opts) {
     "ws", "term", "fitAddon", "attachedPid", "applyingRemoteResize",
     "setStatusBadge", "refitSoon", "setTimeout", "clearTimeout", "Math", "Date",
     "updateScrollChip", "wheelTimer", "wheelAccum", "altScreen", "scrollOffset",
-    "fitView", "resyncTerminal", "terminalOnScreen",
+    "fitView", "resyncTerminal", "terminalOnScreen", "console",
     code +
     "\nreturn {openSocket, closeLink, detach, reconnectNow, tryReconnect," +
-    " sendInput, handleFrame, syncLinkChip," +
+    " sendInput, handleFrame, syncLinkChip, wireActive," +
     " get state() { return linkState; }," +
     " get tries() { return linkTry; }," +
     " get queued() { return linkQueue.slice(); }," +
@@ -169,6 +174,7 @@ function build(opts) {
     () => {},   // fitView: glyph shrinking is the view-fit harness's concern
     () => {},   // resyncTerminal: handleFrame's resize branch reaches for it
     () => false, // terminalOnScreen: with hasFocus below, resize frames adopt
+    { warn: (message, details) => diagnostics.push({ message, ...details }) },
   );
 
   // What the page TYPED into a socket: keystrokes go out as bytes, and
@@ -178,7 +184,7 @@ function build(opts) {
   const typed = (s) => s.sent.filter((m) => typeof m !== "string");
   const controls = (s) => s.sent.filter((m) => typeof m === "string").map((m) => JSON.parse(m));
 
-  return { api, nodes, sockets, health, apiCalls, term, written, statuses,
+  return { api, nodes, sockets, health, apiCalls, term, written, statuses, diagnostics,
            winOn, now, pending, fire, settle, typed, controls,
            // the ordinary starting point: attached, socket open, frames flowing
            live: async (pid) => {
@@ -262,8 +268,53 @@ function build(opts) {
           /\/api\/sessions\/s7\/ws(\?|$)/.test(w.sockets[1].url), w.sockets[1].url);
     w.sockets[1].opened();
     check("which is live again", w.api.state === "live", w.api.state);
-    check("with a full retry budget for the next outage", w.api.tries === 0,
+    check("a handshake alone retains the retry budget", w.api.tries === 1,
           w.api.tries);
+  })();
+}
+
+/* A successful handshake followed by a close must consume the same bounded
+   budget, including sockets whose handlers were restored from the cache. */
+for (const restored of [false, true]) {
+  const w = build();
+  (async () => {
+    let s = await w.live();
+    for (let i = 0; i < w.api.backoff.length; i += 1) {
+      if (restored) w.api.wireActive({ ws: s });
+      s.dropped({ code: 1011, reason: "startup failure", wasClean: true });
+      check("short connections advance backoff", await w.fire() === w.api.backoff[i]);
+      s = w.sockets[w.sockets.length - 1];
+      s.opened();
+      s.text({ type: "init", cols: 80, rows: 24, status: "busy", pid: 4242 });
+      w.now.at += 100;
+    }
+    if (restored) w.api.wireActive({ ws: s });
+    s.dropped();
+    check("post-handshake failures exhaust retries", w.api.state === "lost");
+    check("no retry is left scheduled", w.pending() === 0);
+    check("bounded socket count", w.sockets.length === w.api.backoff.length + 1);
+    const d = w.diagnostics[0];
+    check("close diagnostics preserve event and session", d.session === "s7"
+      && d.code === 1011 && d.reason === "startup failure" && d.wasClean === true);
+    check("close diagnostics include connection ages", d.openMs === 0 && d.readyMs === 0);
+  })();
+}
+
+for (const initialized of [false, true]) {
+  const w = build();
+  (async () => {
+    const first = await w.live();
+    first.dropped();
+    await w.fire();
+    const back = w.sockets[1];
+    back.opened();
+    if (initialized) back.text({ type: "init", cols: 80, rows: 24, status: "busy", pid: 4242 });
+    w.now.at += 5000;
+    back.dropped();
+    check("only initialized stable connections restore the budget",
+      w.api.tries === (initialized ? 1 : 2));
+    check("stable init determines next backoff",
+      await w.fire() === w.api.backoff[initialized ? 0 : 1]);
   })();
 }
 
