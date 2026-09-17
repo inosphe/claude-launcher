@@ -567,6 +567,12 @@ def test_daemon_launch_carries_the_session_header_only_behind_a_shim(home, tmp_p
     from claude_launcher.daemon.session import SessionDef
 
     monkeypatch.delenv("ANTHROPIC_AUTH_TOKEN", raising=False)
+    # ``build_command`` builds the child env from ``os.environ``, and a
+    # metering-on managed session exports its own ``ANTHROPIC_CUSTOM_HEADERS``
+    # (the daemon injects it). Without this the "not in env" assertion below
+    # measures the shell the suite happens to run in, not what the daemon
+    # injects.
+    monkeypatch.delenv("ANTHROPIC_CUSTOM_HEADERS", raising=False)
     shim_url = routing.local_url(routing.candidate_ports(routing.fingerprint("https://d/anthropic", {}))[0])
     monkeypatch.setattr(routing, "ensure_shim", lambda upstream, block: shim_url)
 
@@ -598,6 +604,11 @@ def test_daemon_pi_launch_names_the_session_in_the_provider_headers(home, tmp_pa
     from claude_launcher.daemon import harness
     from claude_launcher.daemon.session import SessionDef
 
+    # Same ambient leak as the test above. This one currently passes with the
+    # variable set as well -- ``finalize_harness_env`` drops ``ANTHROPIC_*``
+    # for a declared (non-builtin) harness -- so the line is here to keep the
+    # assertion hermetic rather than to repair a live failure.
+    monkeypatch.delenv("ANTHROPIC_CUSTOM_HEADERS", raising=False)
     shim_url = routing.local_url(routing.candidate_ports(routing.fingerprint("https://omlx.example/v1", {}))[0])
     monkeypatch.setattr(routing, "ensure_shim", lambda upstream, block: shim_url)
     # a declared pi-adapter harness pointed at an executable that exists
