@@ -1209,6 +1209,17 @@ class MeshManager:
     #: that a caller reimplementing it would get it wrong on a mirror.
     is_local_member = _is_local
 
+    def machine_name(self, mesh: Mesh, member: Member) -> str:
+        """The daemon name to PRINT for ``member`` — "" when it is this one.
+
+        ``Member.machine`` is not readable on its own for this: a blank means
+        "the primary's own" on a mirror and "not stamped yet" on the
+        authority, so the question has to go through :meth:`_is_local` first.
+        """
+        if self._is_local(mesh, member):
+            return self.machine or ""
+        return member.machine or ""
+
     def meshes_for_session(self, session: str) -> List[dict]:
         """Every mesh THIS daemon's ``session`` is a member of, as
         ``{mesh, handle, role, joined_at, members}``.
@@ -5023,6 +5034,48 @@ class MeshManager:
             )
         return member
 
+    def resolve_peer(self, mesh: Mesh, ref: str) -> Member:
+        """The member a peer operation names.
+
+        Three forms, tried in this order: a handle, a member's session name,
+        or a daemon-qualified ``<machine>/<session>``. The handle comes first
+        so that no address which already worked changes meaning. A session
+        name is accepted because that is usually how the caller was told about
+        the peer — the spawn, the board and the terminal all name sessions
+        rather than handles — and the daemon to route to then comes from the
+        member row instead of having to be typed alongside it. The qualified
+        form settles the one case a bare session name cannot: two daemons each
+        running a session of that name.
+        """
+        ref = str(ref or "").strip()
+        if not ref:
+            raise MeshError("no member named")
+        if ref in mesh.members:
+            return mesh.members[ref]
+        machine, sep, session = ref.rpartition("/")
+        if not sep:
+            machine, session = "", ref
+        hits = [
+            m for m in mesh.members.values()
+            if m.session == session
+            and (not machine or self.machine_name(mesh, m) == machine)
+        ]
+        if len(hits) == 1:
+            return hits[0]
+        if not hits:
+            raise MeshError(
+                f"no member {ref!r} in mesh {mesh.name!r} — name a handle, a "
+                f"member's session, or <machine>/<session>"
+            )
+        where = ", ".join(
+            f"{self.machine_name(mesh, m) or 'here'}/{m.session} ({m.handle})"
+            for m in sorted(hits, key=lambda m: m.handle)
+        )
+        raise MeshError(
+            f"session {session!r} runs on more than one daemon in mesh "
+            f"{mesh.name!r} — qualify it as <machine>/<session>: {where}"
+        )
+
     def _ops_target(self, mesh: Mesh, actor: Member, handle: str) -> Member:
         """The member whose checkout is being read, after the graph check.
 
@@ -5030,9 +5083,7 @@ class MeshManager:
         the same reason: a lead that keeps two workers apart so their work
         stays independent did not mean for one to read the other's tree.
         """
-        target = mesh.members.get(handle)
-        if target is None:
-            raise MeshError(f"no member {handle!r} in mesh {mesh.name!r}")
+        target = self.resolve_peer(mesh, handle)
         if not mesh.connected(actor.handle, target.handle):
             raise MeshError(
                 f"{actor.handle!r} is not connected to {target.handle!r} — "
@@ -5063,13 +5114,19 @@ class MeshManager:
                 )
             except mesh_ops.OpsError as exc:
                 raise MeshError(str(exc)) from None
-            return {"member": target.handle, "machine": self.machine, **result}
+            return {
+                "member": target.handle, "session": target.session,
+                "machine": self.machine, **result,
+            }
         payload = await self._peer_call(
             mesh, target.machine, "/peer/ops/file",
             {"session": target.session, "actor": me.handle,
              "path": path, "max_bytes": max_bytes},
         )
-        return {"member": target.handle, "machine": target.machine, **payload}
+        return {
+            "member": target.handle, "session": target.session,
+            "machine": target.machine, **payload,
+        }
 
     async def ops_git(
         self, name: str, actor: str, handle: str, op: str,
@@ -5085,13 +5142,19 @@ class MeshManager:
                 result = await asyncio.to_thread(mesh_ops.git_query, cwd, op, args)
             except mesh_ops.OpsError as exc:
                 raise MeshError(str(exc)) from None
-            return {"member": target.handle, "machine": self.machine, **result}
+            return {
+                "member": target.handle, "session": target.session,
+                "machine": self.machine, **result,
+            }
         payload = await self._peer_call(
             mesh, target.machine, "/peer/ops/git",
             {"session": target.session, "actor": me.handle,
              "op": op, "args": args or {}},
         )
-        return {"member": target.handle, "machine": target.machine, **payload}
+        return {
+            "member": target.handle, "session": target.session,
+            "machine": target.machine, **payload,
+        }
 
     def _lease_apply(
         self, mesh: Mesh, op: str, key: str, holder: str, ttl, note: str,
@@ -6474,6 +6537,33 @@ class MeshManager:
             state, waiting,
         )
 
+    def _delivery_origins(self, mesh: Mesh, msgs: List[dict]) -> Dict[str, str]:
+        """Which daemon each sender in this batch speaks from, "" for ours.
+
+        The block is composed on the daemon the RECIPIENT runs on, so asking
+        :meth:`_is_local` about the SENDER already answers "same daemon as the
+        reader". That answer is worth carrying because it decides what the
+        reader may assume about a peer before it replies: a member on this
+        daemon shares the filesystem, the git objects and the board, and one
+        on another daemon shares only the relay, which is the difference
+        between reading its checkout directly and going through ``peer_file``.
+        A sender with no member row is an external send — the operator at the
+        dashboard — and is left out rather than guessed at.
+        """
+        out: Dict[str, str] = {}
+        for m in msgs:
+            handle = str(m.get("from") or "")
+            if not handle or handle in out:
+                continue
+            member = mesh.members.get(handle)
+            if member is None:
+                continue
+            out[handle] = (
+                "" if self._is_local(mesh, member)
+                else (member.machine or "?")
+            )
+        return out
+
     async def _deliver_to(
         self, mesh: Mesh, member: Member, *, force: bool = False
     ) -> None:
@@ -6562,7 +6652,10 @@ class MeshManager:
             gap = self.paced_for(mesh, member.handle)
             if gap > 0:
                 return  # paced: the last delivery into this terminal is recent
-        block = format_delivery(mesh.name, member.handle, pending)
+        block = format_delivery(
+            mesh.name, member.handle, pending,
+            origins=self._delivery_origins(mesh, pending),
+        )
         if not await session.deliver(block, force=force):
             return  # undelivered: hold the cursor, the next tick retries
         mesh.cursors[member.handle] = len(mesh.messages)
@@ -6982,14 +7075,29 @@ _Dumper.add_representer(
 )
 
 
-def format_delivery(mesh_name: str, handle: str, msgs: List[dict]) -> str:
-    """The fenced YAML block typed into the recipient's terminal."""
+def format_delivery(
+    mesh_name: str,
+    handle: str,
+    msgs: List[dict],
+    *,
+    origins: Optional[Dict[str, str]] = None,
+) -> str:
+    """The fenced YAML block typed into the recipient's terminal.
+
+    ``origins`` maps a sender's handle to the daemon it speaks from, with ""
+    meaning the reader's own; a sender it does not mention gets no ``machine``
+    line at all. Same-daemon is the common case and is written short, so what
+    stands out in a batch is the sender the reader cannot reach by filesystem.
+    """
     batch = []
     for m in msgs:
         body = recipient_body(m, handle)
         if len(body) > MAX_DELIVERY_BODY:
             body = body[:MAX_DELIVERY_BODY] + " …[clipped — see mesh history]"
         entry: dict = {"id": m.get("id"), "from": m.get("from")}
+        origin = (origins or {}).get(str(m.get("from") or ""))
+        if origin is not None:
+            entry["machine"] = "local" if not origin else f"{origin} (remote)"
         if m.get("to") != "*":
             entry["to"] = m.get("to")
         intent = str(msg_type_for(m, handle)).strip().lower() or "say"

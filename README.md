@@ -2418,6 +2418,9 @@ claunch mesh peers dev            # ...or this mesh's daemons in RANK order
 claunch mesh ops file dev worker_1 src/app.py      # read a member's file, here or
 claunch mesh ops git dev worker_1 status           #   over the relay (read-only:
 claunch mesh ops git dev worker_1 diff --base master --stat   # status/diff/log/show/branch)
+claunch mesh ops file dev s244 src/app.py          # ...name the member by handle OR
+claunch mesh ops file dev pc-b/s244 src/app.py     #   session; qualify when two
+                                  #   daemons run a session of that name
 claunch mesh lease dev acquire path:src/app.py --note "refactor"  # one holder at a
 claunch mesh lease dev ls                          #   time, mesh-wide; exit 2 = held
 claunch mesh lease dev release path:src/app.py

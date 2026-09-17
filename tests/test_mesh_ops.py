@@ -38,6 +38,20 @@ D. through the mesh (two daemons, in-process peer transport)
       the primary's own acquire is local, and they conflict on the same key
    D6 a member leaving drops its leases; leases survive a reload
    D7 git status over the link returns the porcelain output
+
+F. addressing a peer (two daemons)
+   F1 a member's SESSION name resolves to that member and routes to its
+      daemon; the reply names the member, session and machine it hit
+   F2 a handle still wins over a different member's session of that name
+   F3 one session name on two daemons is refused as ambiguous, and
+      <machine>/<session> settles it either way
+   F4 an address that is neither handle nor session is refused
+
+G. which daemon a sender speaks from (delivery block)
+   G1 a sender whose session is local maps to "", one on another daemon
+      to its machine name, and an external sender is left out
+   G2 format_delivery writes 'local' and '<machine> (remote)', and writes
+      no machine line at all when it was given no origins
 """
 
 from __future__ import annotations
@@ -54,7 +68,11 @@ from claude_launcher import store
 from claude_launcher.daemon import mesh_ops
 from claude_launcher.daemon.harness import SessionDef
 from claude_launcher.daemon.manager import SessionManager
-from claude_launcher.daemon.mesh import MeshError, MeshManager
+from claude_launcher.daemon.mesh import (
+    MeshError,
+    MeshManager,
+    format_delivery,
+)
 from claude_launcher.daemon.mesh_ops import LeaseHeld, LeaseRegistry, OpsError
 
 CHILD = (
@@ -598,3 +616,128 @@ def test_mesh_skill_teaches_peer_ops():
         assert f"`{name}" in md, f"the mesh skill never mentions {name}"
     assert "claunch mesh lease" in md
     assert "claunch mesh ops" in md
+
+
+# --------------------------------------------------------------------------- #
+# F. addressing a peer: handle, session name, <machine>/<session>
+# --------------------------------------------------------------------------- #
+def test_session_name_addresses_a_peer(home, tmp_path):
+    _register_py_harness()
+    calls = []
+
+    async def run():
+        mgr = _manager()
+        mm_a, mm_b = await _linked_pair(mgr, tmp_path, calls)
+        # F1: bob names alice by the SESSION it was told about, not the handle
+        out = await mm_b.ops_file("m", "sb", "sa", "README.md")
+        assert out["content"] == "hello from sa\n"
+        assert out["member"] == "alice"
+        assert out["session"] == "sa" and out["machine"] == "pcA"
+        assert ("pcA", "/peer/ops/file") in calls
+        # the same address stays local when the session is on this daemon
+        n = len(calls)
+        mine = await mm_a.ops_file("m", "sa", "sa", "README.md")
+        assert mine["member"] == "alice" and len(calls) == n
+        # git takes the same address
+        out = await mm_b.ops_git("m", "sb", "sa", "branch")
+        assert out["session"] == "sa" and out["machine"] == "pcA"
+        # F4: neither a handle nor a session
+        with pytest.raises(MeshError, match="no member"):
+            await mm_a.ops_file("m", "sa", "nobody", "README.md")
+        await mm_a.shutdown()
+        await mm_b.shutdown()
+        await mgr.shutdown_all()
+
+    asyncio.run(run())
+
+
+def test_handle_wins_over_a_colliding_session_name(home, tmp_path):
+    _register_py_harness()
+    calls = []
+
+    async def run():
+        mgr = _manager()
+        mm_a, mm_b = await _linked_pair(mgr, tmp_path, calls)
+        # a third member on pcA whose HANDLE is the SESSION name of the member
+        # on pcB: the two addresses now collide by construction
+        cwd = tmp_path / "cwd_s2"
+        cwd.mkdir()
+        (cwd / "README.md").write_text(
+            "hello from s2\n", encoding="utf-8", newline="\n"
+        )
+        mgr.create(SessionDef(name="s2", harness="py", cwd=str(cwd), rows=80))
+        await mm_a.join("m", "s2", handle="sb")
+        out = await mm_a.ops_file("m", "sa", "sb", "README.md")
+        assert out["content"] == "hello from s2\n"
+        assert out["member"] == "sb" and out["session"] == "s2"
+        await mm_a.shutdown()
+        await mm_b.shutdown()
+        await mgr.shutdown_all()
+
+    asyncio.run(run())
+
+
+def test_same_session_on_two_daemons_must_be_qualified(home, tmp_path):
+    _register_py_harness()
+    calls = []
+
+    async def run():
+        mgr = _manager()
+        mm_a, mm_b = await _linked_pair(mgr, tmp_path, calls)
+        mesh = mm_a.get("m")
+        # one SessionManager cannot hold two sessions of a name, so the
+        # collision is made on the roster — which is what resolve_peer reads
+        mesh.members["bob"].session = "sa"
+        with pytest.raises(MeshError, match="more than one daemon"):
+            mm_a.resolve_peer(mesh, "sa")
+        assert mm_a.resolve_peer(mesh, "pcA/sa").handle == "alice"
+        assert mm_a.resolve_peer(mesh, "pcB/sa").handle == "bob"
+        # the handle is untouched by the collision
+        assert mm_a.resolve_peer(mesh, "bob").handle == "bob"
+        await mm_a.shutdown()
+        await mm_b.shutdown()
+        await mgr.shutdown_all()
+
+    asyncio.run(run())
+
+
+# --------------------------------------------------------------------------- #
+# G. which daemon a sender speaks from
+# --------------------------------------------------------------------------- #
+def test_delivery_origins_split_local_from_remote(home, tmp_path):
+    _register_py_harness()
+    calls = []
+
+    async def run():
+        mgr = _manager()
+        mm_a, mm_b = await _linked_pair(mgr, tmp_path, calls)
+        msgs = [{"from": "alice"}, {"from": "bob"}, {"from": "the-operator"}]
+        origins = mm_a._delivery_origins(mm_a.get("m"), msgs)
+        assert origins["alice"] == ""         # alice's session runs here
+        assert origins["bob"] == "pcB"        # bob's does not
+        assert "the-operator" not in origins  # external send: no member row
+        # the same batch read on the OTHER daemon flips the answer
+        flipped = mm_b._delivery_origins(mm_b.get("m"), msgs)
+        assert flipped["bob"] == "" and flipped["alice"] == "pcA"
+        await mm_a.shutdown()
+        await mm_b.shutdown()
+        await mgr.shutdown_all()
+
+    asyncio.run(run())
+
+
+def test_format_delivery_marks_the_sender_machine():
+    msgs = [
+        {"id": "m1", "from": "alice", "to": "bob", "type": "say", "body": "hi"},
+        {"id": "m2", "from": "carl", "to": "bob", "type": "say", "body": "yo"},
+        {"id": "m3", "from": "ops", "to": "bob", "type": "say", "body": "hey"},
+    ]
+    block = format_delivery(
+        "m", "bob", msgs, origins={"alice": "", "carl": "pcB"}
+    )
+    assert "machine: local" in block
+    assert "machine: pcB (remote)" in block
+    # the external sender has no member row, so it gets no line of its own
+    assert block.count("machine:") == 2
+    # a caller that asks nothing gets the block it always got
+    assert "machine:" not in format_delivery("m", "bob", msgs)

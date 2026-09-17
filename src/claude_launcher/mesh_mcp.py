@@ -121,14 +121,24 @@ TOOLS = [
             "machine or, over the relay, on theirs. The path is confined to "
             "that session's checkout; the reply carries the content (cut at "
             "max_bytes, default 64K), its size, whether it was truncated, and "
-            "the sha256 of the WHOLE file. Read-only. You must be connected "
-            "to that member in the mesh (see 'members' -> reachable)."
+            "the sha256 of the WHOLE file, and the member/session/machine it "
+            "resolved to. Name the member by handle OR by session name — "
+            "the daemon to route to comes from the member row. Read-only. "
+            "You must be connected to that member in the mesh (see "
+            "'members' -> reachable)."
         ),
         "inputSchema": {
             "type": "object",
             "properties": {
                 "mesh": {"type": "string", "description": "mesh name"},
-                "member": {"type": "string", "description": "handle whose checkout to read"},
+                "member": {
+                    "type": "string",
+                    "description": (
+                        "whose checkout to read — a handle, a member's "
+                        "session name, or <machine>/<session> when two "
+                        "daemons run a session of that name"
+                    ),
+                },
                 "path": {
                     "type": "string",
                     "description": "file path, relative to that session's working directory",
@@ -157,7 +167,14 @@ TOOLS = [
             "type": "object",
             "properties": {
                 "mesh": {"type": "string", "description": "mesh name"},
-                "member": {"type": "string", "description": "handle whose checkout to query"},
+                "member": {
+                    "type": "string",
+                    "description": (
+                        "whose checkout to query — a handle, a member's "
+                        "session name, or <machine>/<session> when two "
+                        "daemons run a session of that name"
+                    ),
+                },
                 "op": {
                     "type": "string",
                     "description": "status | diff | log | show | branch",

@@ -898,6 +898,11 @@ def _need_session(args: argparse.Namespace) -> Optional[str]:
     return session
 
 
+#: How a peer operation may be addressed, said once for both subcommands.
+_TARGET_DOC = (
+    "a handle, a member's session name, or <machine>/<session> when two daemons run a session of that name"
+)
+
 def _cmd_ops_file(args: argparse.Namespace) -> int:
     session = _need_session(args)
     if not session:
@@ -1381,7 +1386,7 @@ def register(sub) -> None:
     osub = p_ops.add_subparsers(dest="ops_cmd", required=True)
     p = osub.add_parser("file", help="print one file from a member's working directory")
     p.add_argument("mesh")
-    p.add_argument("member", help="handle whose checkout to read")
+    p.add_argument("member", help="whose checkout to read: " + _TARGET_DOC)
     p.add_argument("path", help="path relative to that session's working directory")
     p.add_argument("--max-bytes", type=int, default=0,
                    help="cut after this many bytes (default 65536)")
@@ -1394,7 +1399,7 @@ def register(sub) -> None:
                     "| log [-n N] [--range R] | show --ref R [--stat] | branch",
     )
     p.add_argument("mesh")
-    p.add_argument("member", help="handle whose checkout to query")
+    p.add_argument("member", help="whose checkout to query: " + _TARGET_DOC)
     p.add_argument("op", choices=["status", "diff", "log", "show", "branch"])
     p.add_argument("paths", nargs="*", help="limit to these paths")
     p.add_argument("--base")
