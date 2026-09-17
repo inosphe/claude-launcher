@@ -1280,7 +1280,10 @@ def _rpc(method, params=None, msg_id=1):
 def test_mcp_initialize_and_tools():
     resp = _rpc("initialize", {"protocolVersion": "2024-11-05"})
     assert resp["result"]["serverInfo"]["name"] == "cflow"
+    assert resp["result"]["instructions"] == mcp.AGENT_AUTHORITY
     resp = _rpc("tools/list")
+    for tool in resp["result"]["tools"]:
+        assert tool["description"].startswith(mcp.AGENT_AUTHORITY + "\n\n")
     names = {t["name"] for t in resp["result"]["tools"]}
     assert names == {
         # this session's own run
@@ -1308,6 +1311,29 @@ def test_mcp_initialize_and_tools():
     # either: it only ever FILES, the person (or the deadline) settles, and a
     # run this session does not command is refused by the daemon.
     assert "approve" not in names
+
+
+@pytest.mark.parametrize("merged", [False, True])
+@pytest.mark.parametrize("chooser", ["agent", "user"])
+def test_mcp_select_preserves_chooser_authority(flow_dir, merged, chooser):
+    from claude_launcher import mcp_server
+
+    server = mcp_server.SERVER if merged else mcp.SERVER
+    _write(flow_dir, "branch", USER_BRANCH.replace("chooser: user", f"chooser: {chooser}"))
+    engine.start("branch")
+    response = server.handle({
+        "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+        "params": {"name": "select", "arguments": {
+            "option": "auto", "reason": "the workflow permits this option",
+        }},
+    })["result"]
+    assert response["isError"] is False
+    payload = json.loads(response["content"][0]["text"])
+    if chooser == "user":
+        assert payload["status"] == "waiting_selection"
+        assert engine.status()["step_id"] == "triage"
+    else:
+        assert engine.status()["step_id"] == "after"
 
 
 def test_mcp_tool_call_flow(flow_dir):

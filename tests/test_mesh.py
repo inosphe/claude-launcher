@@ -1669,6 +1669,13 @@ def test_merged_server_offers_both_toolsets():
         {"jsonrpc": "2.0", "id": 2, "method": "initialize", "params": {}}
     )
     assert init["result"]["serverInfo"]["name"] == "claunch"
+    assert cflow_mcp.AGENT_AUTHORITY in init["result"]["instructions"]
+    cflow_names = {t["name"] for t in cflow_mcp.TOOLS}
+    for tool in listed["result"]["tools"]:
+        if tool["name"] in cflow_names:
+            assert tool["description"].startswith(cflow_mcp.AGENT_AUTHORITY + "\n\n")
+        else:
+            assert cflow_mcp.AGENT_AUTHORITY not in tool["description"]
 
 
 def test_merged_server_routes_errors_to_the_owning_half(home, monkeypatch):
@@ -1711,6 +1718,18 @@ def test_merge_refuses_colliding_tool_names():
     b = mcp_rpc.Server("b", ({"name": "dup"},), lambda n, x: {}, (ValueError,))
     with pytest.raises(mcp_rpc.ToolNameCollision):
         mcp_rpc.merge("both", [a, b])
+
+
+def test_merge_preserves_instructions_from_each_server():
+    from claude_launcher import mcp_rpc
+
+    a = mcp_rpc.Server("a", (), lambda n, x: {}, (ValueError,), instructions="Scope A")
+    b = mcp_rpc.Server("b", (), lambda n, x: {}, (ValueError,), instructions="Scope B")
+    silent = mcp_rpc.Server("silent", (), lambda n, x: {}, (ValueError,))
+    request = {"jsonrpc": "2.0", "id": 1, "method": "initialize"}
+    assert "instructions" not in silent.handle(request)["result"]
+    merged = mcp_rpc.merge("all", [a, silent, b])
+    assert merged.handle(request)["result"]["instructions"] == "Scope A\n\nScope B"
 
 
 def test_mesh_mcp_tools(home, monkeypatch):
