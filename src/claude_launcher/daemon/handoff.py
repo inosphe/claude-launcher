@@ -88,11 +88,29 @@ def fork_name(origin: str, taken) -> str:
 
 # ---- the blocks --------------------------------------------------------- #
 
-def compose_marker(*, origin: str, fork: str, marker: str, forked_at: str) -> str:
+def compose_marker(
+    *, origin: str, fork: str, marker: str, forked_at: str, cwd: str = "",
+    mesh: str = "", workflow: str = "",
+) -> str:
     """The block at the top of the copy: where the fork begins, and how it
     ends. Fenced like every other machine-generated block a session gets, so
-    the agent reads it as the daemon's and not as the user's."""
-    return "\n".join([
+    the agent reads it as the daemon's and not as the user's.
+
+    The ``checkout`` line is not decoration. A fork cannot be given a worktree
+    of its own -- claude keeps transcripts per working directory, so a copy
+    started anywhere else resolves no conversation and boots empty, which
+    :func:`claude_launcher.spawn.check` refuses outright. The copy therefore
+    stands in the SAME checkout as its origin, and two claude sessions editing
+    one checkout overwrite each other. That is a property of the fork and
+    cannot be configured away, so the only defence is that both agents know
+    it -- stated here, in the copy's first block, rather than left to be
+    discovered in a lost edit.
+
+    ``mesh`` and ``workflow`` are named only when the fork was given them.
+    The copy joins neither by default, and a line about a mesh it is not in
+    would be a room it cannot send to.
+    """
+    lines = [
         "---",
         f"# claunch quick-fork: {MARKER_TITLE} (machine-generated, not typed by the user)",
         f"origin: {origin}",
@@ -103,6 +121,14 @@ def compose_marker(*, origin: str, fork: str, marker: str, forked_at: str) -> st
         f"taken from {origin} at this point. Everything above this block "
         f"happened in {origin} and stays its own; what happens below is this "
         "session's alone, and nothing typed here reaches the origin by itself.",
+        f"checkout: this copy runs in the SAME working directory as {origin}"
+        + (f" ({cwd})" if cwd else "")
+        + " -- a fork cannot be given a checkout of its own, because claude "
+        "keeps transcripts per directory. So the two of you edit the same "
+        "files with no lock between you, and the git state (branch, index, "
+        "stash) is one. Keep to an area the origin is not writing, or settle "
+        "the boundary with it through a merge, before you touch a file it "
+        "may be holding.",
         "merge: when the work is done, write a wrap-up of everything since "
         f"marker {marker} -- what changed, files and commits, decisions taken, "
         "what is still open -- and hand it in with the MCP 'handoff' tool "
@@ -110,8 +136,21 @@ def compose_marker(*, origin: str, fork: str, marker: str, forked_at: str) -> st
         f"types it into {origin} and ends this session. The wrap-up is the "
         "only thing of this session that survives, so do not merge before "
         "the work is done, and do not end this session any other way.",
-        "---",
-    ])
+    ]
+    if mesh:
+        lines.append(
+            f"mesh: you were put in mesh {mesh} as {fork} -- the mesh the fork "
+            "was asked to join. Its members are live sessions doing real work "
+            "and what you send is typed into their terminals, so read the "
+            "roster before you send: claunch mesh members " + mesh
+        )
+    if workflow:
+        lines.append(
+            f"workflow: you were started on the {workflow} cflow run, scoped "
+            f"to {fork}. Call the cflow 'status' tool to pick it up."
+        )
+    lines.append("---")
+    return "\n".join(lines)
 
 
 def compose_request(*, kind: str, source: str, target: str, marker: str = "") -> str:

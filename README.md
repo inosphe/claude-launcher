@@ -1628,7 +1628,7 @@ and a form painted into its PTY would hang the session it was creating.
 | `capture-pane S`      | Print the current rendered screen (`--history` for scrolled-off lines, `--json` for lines + cursor + status). |
 | `wait-for S`          | Block until `--idle` (default) or `--exited`; `--timeout SECS`, `--idle-threshold SECS`. Exits 1 on timeout. |
 | `rebrief [--session S]` | Print the session's briefing re-derived from current daemon state: mesh memberships and roster, replies it owes, the cflow run it drives, parent/children, and its recorded opening `--task`. Managed claude sessions run it **automatically** — a `SessionStart` hook injected at spawn fires it after `/compact` and `/clear`, and claude reads the output back into context — so an agent's lost context is restored without the agent having to remember to ask. Defaults to `$CLAUNCH_SESSION`; also a **rebrief** button in the web UI, which types the same block into the session's terminal. |
-| `quick-fork [S] [--as NAME] [--task T] [-a]` | Start a **copy** of `S`'s conversation as a child of it, marked `--- forked from here ---` (see [quick-fork and merge](#quick-fork-and-merge--a-scratch-copy-that-reports-back)). `S` defaults to `$CLAUNCH_SESSION`. |
+| `quick-fork [S] [--as NAME] [--task T] [--mesh M] [--workflow W] [-a]` | Start a **copy** of `S`'s conversation as a child of it, marked `--- forked from here ---` (see [quick-fork and merge](#quick-fork-and-merge--a-scratch-copy-that-reports-back)). `S` defaults to `$CLAUNCH_SESSION`. The copy joins no mesh and drives no run unless `--mesh`/`--workflow` say otherwise; `.` means the origin's. It always shares the origin's checkout. |
 | `quick-fork merge [TEXT] [-f FILE] [-t COPY]` | The way back from a copy: with text (or `-f`), from inside the copy, the wrap-up is typed into the origin and the copy ends; without text (`-t COPY` from outside) the copy is asked to write one. |
 | `handoff --to C [TEXT] [-f FILE] [-t D]` | Hand `D`'s work to `C` and end `D` — with text it happens now, without it `D` is asked to write one; `--cancel` withdraws a pending request. Detail-panel-only in the web UI, because it needs the target picked. |
 | `kill-session S`      | Terminate a running session (`--force` skips graceful terminate). Idempotent: an already-exited session is left alone — dropping a record is a different verb, below. |
@@ -2011,6 +2011,7 @@ is the one-press version, and it comes with its way back:
 ```bash
 claunch quick-fork A                    # start A-qf1: a copy of A's conversation
 claunch quick-fork A --task "try the other approach" -a
+claunch quick-fork A --mesh . --workflow .   # ...and give it A's mesh and run
 claunch quick-fork merge -f wrap.md     # from inside the copy: hand the wrap-up in
 ```
 
@@ -2018,10 +2019,28 @@ The copy is a **child** of `A` (spawned with `fork`, so it restores and
 respawns like any child) whose conversation is `A`'s up to this moment, with
 one block on top — *`--- forked from here ---`*, naming the origin, the copy
 and a marker id. Everything above the marker is `A`'s; everything below is
-the copy's. It joins no mesh, drives no run and mints no board issue: it is a
-branch of one session's conversation, and the work it does is the origin's.
-The web UI has it as the terminal header's **⑂ fork** button (and `q` on a
-rail card), which opens the copy.
+the copy's. By default it joins no mesh, drives no run and mints no board
+issue: it is a branch of one session's conversation, and the work it does is
+the origin's. The web UI has it as the terminal header's **⑂ fork** button
+(and `q` on a rail card), which asks which of the two you want and then opens
+the copy.
+
+That default is a judgement and not a limit. A copy given a job of its own
+has to be able to report it, so `--mesh` and `--workflow` (body fields
+`mesh` and `workflow`) take it the other way, and **`.`** means *the
+origin's* — resolved by the daemon, so you never type a name. One corner is
+worth knowing: `--mesh .` on an origin that is in **no** mesh follows spawn's
+usual rule and **opens** one between the two.
+
+**The copy shares the origin's checkout, and cannot be given one of its
+own.** Claude keeps transcripts per working directory, so a copy started
+anywhere else would resolve no conversation and boot empty — `fork` together
+with `worktree` is refused for exactly that reason. Two claude sessions then
+edit the same files with one shared git state and no lock between them. The
+marker block says so in the copy's first screen, and the CLI prints it on
+every fork, because the only defence is that both sessions know: keep them to
+different areas, or settle the boundary through a merge before writing to a
+file the other may be holding.
 
 **merge** is only offered on a session that *is* a quick-fork (its record
 carries `quick_fork_of`), and it goes back to that one session. It has two
@@ -3113,7 +3132,7 @@ REST endpoints (JSON, `Bearer` or cookie auth; `/api/health` is open):
 | GET/DELETE | `/api/sessions/{name}`     | info / kill (`?force=1`) |
 | GET    | `/api/sessions/{name}/meta`    | everything known *about* one session: definition, workspace, harness, role stance, mesh memberships, its cflow slot and the workflows startable in it; borrowed sessions also include a secret-free live `borrowed_auth` validation |
 | POST   | `/api/sessions/{name}/respawn` | relaunch an exited session (claude resumes its conversation) |
-| POST   | `/api/sessions/{name}/quick-fork` | copy this session's conversation into a child marked `--- forked from here ---` (`{name?, task?, mesh?, workflow?}`; joins no mesh and drives no run unless named); 201 with the child, `origin`, `marker`, `forked_at` |
+| POST   | `/api/sessions/{name}/quick-fork` | copy this session's conversation into a child marked `--- forked from here ---` (`{name?, task?, mesh?, workflow?}`; joins no mesh and drives no run unless named, and `"."` means this session's own). 201 with the child, `origin`, `marker`, `forked_at`, and `quick_fork` — `{mesh, workflow, cwd, shared_checkout}`, what the copy actually ended up in. A fork always stands in the origin's checkout; it cannot be given a worktree |
 | POST/DELETE | `/api/sessions/{name}/handoff` | POST without `text`: ask this session for its wrap-up (`kind: merge`, quick-forks only, back to the origin) or handoff (`to`), recorded as pending on its row; POST with `text`: the completion — delivered to the target as a fenced block, then this session ends, in that order. DELETE withdraws a pending request |
 | POST   | `/api/sessions/{name}/migrate` | move to another checkout: exactly one of `{worktree: NAME-or-""}` / `{cwd: DIR}`; `{children: true}` moves the descendants standing in the same directory. The claude transcript is carried to the new directory's slug |
 | POST   | `/api/sessions/{name}/reborrow` | restart on another answer to "whose token": `{borrow: NAME-or-null, null_token?}` — picking one clears the others; the session is relaunched with the definition's auth swapped, the directory untouched |
