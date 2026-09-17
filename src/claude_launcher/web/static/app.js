@@ -21128,6 +21128,21 @@ const MESH_MESSAGE_PAGE_SIZE = 25;
 let meshMessageFilter = "current";
 let meshMessageOffset = 0;
 
+/* Which lifecycle partitions the Members roster shows. A mesh that has been
+   running a while is mostly ended records — the daemon's own gds6 roster is
+   8 dead of 12 — and the roster's first job is to answer "who is here", so
+   ``current`` is the default: the same word, and the same default, the
+   session rail uses. The dead ones are named apart from each other because
+   the verbs differ: a killed record is one that stopped, a paused one is
+   waiting to be resumed, an archived one was put away on purpose.
+   Page-local and reset on entry (openMesh), like the message filter above:
+   this is a question asked of one page, not a reader preference. */
+const MESH_MEMBER_FILTERS = ["current", "killed", "paused", "archived", "all"];
+const MESH_MEMBER_CATEGORIES = [
+  "running", "killed", "paused", "archived", "missing", "remote",
+];
+let meshMemberFilter = "current";
+
 /* Relay connectivity is surfaced permanently in the header: mesh can only
    span machines while the uplink is registered, so the state must never be
    more than one glance away. */
@@ -21361,6 +21376,7 @@ async function openMesh(name) {
   meshName = name;
   meshMessageFilter = "current";
   meshMessageOffset = 0;
+  meshMemberFilter = "current";  // back to "who is here" on every entry
   missingMeshShown = "";   // a different route deserves a fresh verdict
   rolesEditor = "";        // never carry one mesh's open editor into another
   showView("mesh");
@@ -22418,10 +22434,18 @@ function renderWiring(info) {
   head.appendChild(el("h3", null, "Connections"));
   box.appendChild(head);
   if (members.length < 2) {
+    // The member filter can empty this panel on a mesh with a full roster.
+    // "a mesh needs two members" would then be a false statement about the
+    // mesh, so the two cases say different things.
+    const hidden = info.members_hidden || 0;
     box.appendChild(el(
       "p", "wf-note",
-      "a mesh needs two members before there is anything to wire — enrol "
-      + "one below"
+      hidden
+        ? `the member filter leaves ${members.length} of this mesh's `
+          + `${info.members_total} here, and wiring is a thing done between `
+          + "two agents — choose another filter above to wire the rest"
+        : "a mesh needs two members before there is anything to wire — enrol "
+          + "one below"
     ));
     return box;
   }
@@ -22451,13 +22475,20 @@ function renderWiring(info) {
     // rules match and leaves the rest shut, so the open set is the short one
     // and the one somebody chose. (The diagram and the CLI agree on this.)
     const open = (info.member_links || []).filter((e) => e.enabled);
+    // A pair is only as visible as both of its ends, so a filtered view loses
+    // the pairs of every hidden member. Say how many, or the count below
+    // reads as the mesh's whole wiring.
+    const hiddenPairs = info.members_hidden
+      ? ` (${info.members_hidden} member${info.members_hidden === 1 ? "" : "s"} `
+        + "hidden by the member filter, and their pairs with them)"
+      : "";
     box.appendChild(el(
       "p", "wf-note",
-      open.length
+      (open.length
         ? `${open.length} connected pair${open.length === 1 ? "" : "s"}. Pick an `
           + "agent above, or click one in the diagram, to change what it reaches"
         : "no pair is connected — nobody here can message anybody. Pick an "
-          + "agent above to wire it up"
+          + "agent above to wire it up") + hiddenPairs
     ));
     for (const e of open) {
       const row = el("div", "mesh-member");
@@ -22478,7 +22509,11 @@ function renderWiring(info) {
   const on = others.filter((m) => reach.has(m.handle));
   box.appendChild(el(
     "p", "wf-note",
-    `${meshFocus} can message ${on.length} of ${others.length}. A disconnected `
+    `${meshFocus} can message ${on.length} of ${others.length}`
+    + (info.members_hidden
+      ? ` shown (${info.members_hidden} more hidden by the member filter)`
+      : "")
+    + ". A disconnected "
     + "pair is not sent the long way round like a cut peer link — members are "
     + "not routed at all, so the send is simply refused"
   ));
@@ -22566,6 +22601,107 @@ function formInUse(root) {
     ["INPUT", "TEXTAREA", "SELECT"].includes(document.activeElement.tagName);
 }
 
+/* The roster's filter, as pure predicates over the rows the daemon sent —
+   they take their filter as an argument and read no module state, which is
+   what lets the node harness in tests/web slice and drive them.
+   A row from a daemon older than the `category` field carries none, and is
+   read as ``remote`` (shown under Current): of the two ways to be wrong
+   about a member, hiding one that is working is the one that costs. */
+function meshMemberCategory(m) {
+  const category = m && m.category;
+  return MESH_MEMBER_CATEGORIES.includes(category) ? category : "remote";
+}
+
+function meshMemberShown(category, filter) {
+  if (filter === "all") return true;
+  // ``remote`` has no local record — another daemon's member, whose death is
+  // never reported here. Unknown is not dead, so it stays with the living.
+  if (filter === "current") return category === "running" || category === "remote";
+  return category === filter;
+}
+
+function meshMemberVisible(m, filter) {
+  return meshMemberShown(meshMemberCategory(m), filter);
+}
+
+/* The buttons' counts, over every member — never over the shown ones, or the
+   bar could not tell you what it is hiding. */
+function meshMemberCounts(members) {
+  const counts = { current: 0, killed: 0, paused: 0, archived: 0, all: 0 };
+  for (const m of members || []) {
+    const category = meshMemberCategory(m);
+    counts.all += 1;
+    if (category === "running" || category === "remote") counts.current += 1;
+    if (counts[category] !== undefined) counts[category] += 1;
+  }
+  return counts;
+}
+
+/* The filter applied to the members AND to the links between them: the graph
+   and the wiring list must not draw a line to a member the roster hides, and
+   an edge is only as visible as both of its ends. */
+function meshVisibleInfo(info, filter) {
+  const all = info.members || [];
+  const members = all.filter((m) => meshMemberVisible(m, filter));
+  const shown = new Set(members.map((m) => m.handle));
+  return {
+    ...info,
+    members,
+    // Carried so the panels can say how much they are not showing: a count
+    // taken over a filtered list is only honest beside what it left out.
+    members_total: all.length,
+    members_hidden: all.length - members.length,
+    member_links: (info.member_links || [])
+      .filter((e) => shown.has(e.a) && shown.has(e.b)),
+  };
+}
+
+/* The state word a member row prints. The daemon's ``reachability`` collapses
+   every ended record into ``exited``; where the daemon knows more, say it —
+   "killed", "paused" and "archived" are three different things to do next. */
+function meshMemberStateWord(m) {
+  const category = meshMemberCategory(m);
+  return ["killed", "paused", "archived", "missing"].includes(category)
+    ? category : m.reachability;
+}
+
+function meshMemberFilterBar(members) {
+  const counts = meshMemberCounts(members);
+  const labels = {
+    current: "Current", killed: "Killed", paused: "Paused",
+    archived: "Archived", all: "All",
+  };
+  const titles = {
+    current: "members not known to have ended — what the roster shows by default",
+    killed: "records that stopped and were neither paused nor archived",
+    paused: "records stopped with the pause marker, waiting to be resumed",
+    archived: "records put away on purpose; still resumable",
+    all: "every member on the roster, ended ones included",
+  };
+  const bar = el("div", "seq-tabs mesh-member-filters");
+  bar.setAttribute("role", "group");
+  bar.setAttribute("aria-label", "Filter members by lifecycle state");
+  for (const filter of MESH_MEMBER_FILTERS) {
+    const button = el(
+      "button",
+      "seq-tab" + (meshMemberFilter === filter ? " on" : ""),
+      `${labels[filter]} (${counts[filter] || 0})`
+    );
+    button.type = "button";
+    button.title = titles[filter];
+    button.setAttribute(
+      "aria-pressed", meshMemberFilter === filter ? "true" : "false"
+    );
+    button.addEventListener("click", () => {
+      if (meshMemberFilter === filter) return;
+      meshMemberFilter = filter;
+      refreshMeshView(true);
+    });
+    bar.appendChild(button);
+  }
+  return bar;
+}
+
 function renderMesh(info, history, force, owed, historyPage) {
   const view = $("mesh-view");
   if (!force && formInUse(view)) return; // don't wipe in-progress input
@@ -22610,24 +22746,47 @@ function renderMesh(info, history, force, owed, historyPage) {
     "agents reply with: claunch mesh send " + info.name + " <to|*> \"...\""
   ));
 
+  /* One filter decides what the graph, the wiring list and the roster below
+     show, so the three cannot disagree about who is here. */
+  const shown = meshVisibleInfo(info, meshMemberFilter);
+  // A selection on a member the filter hides is dropped rather than kept
+  // invisibly: the wiring panel speaks about the selected agent, and a panel
+  // about an agent with no row on screen is a panel about nobody.
+  if (meshFocus && !shown.members.some((m) => m.handle === meshFocus)) {
+    meshFocus = null;
+  }
+
   // the graph leads; the boxes below own the text-level detail and the forms
-  view.appendChild(renderTopology(info));
+  view.appendChild(renderTopology(shown));
   // Who may message whom is the mesh's own shape and the thing an operator
   // actually rewires, so it sits directly under the picture of it. The peer
   // links are transport, and follow as a status board.
-  view.appendChild(renderWiring(info));
+  view.appendChild(renderWiring(shown));
   if ((info.links || []).length) view.appendChild(renderPeerLinks(info));
 
   // members table
   const members = info.members || [];
   const box = el("div", "mesh-members");
-  box.appendChild(el("h3", null, "Members"));
+  const membersHead = el("div", "mesh-members-head");
+  membersHead.appendChild(el("h3", null, "Members"));
+  membersHead.appendChild(meshMemberFilterBar(members));
+  box.appendChild(membersHead);
   if (!members.length) {
     box.appendChild(el("p", "wf-note", "no members yet — enrol a session below"));
+  } else if (!shown.members.length) {
+    // The bar counts what is hidden; this says why the box is empty, so a
+    // filtered roster never reads as a mesh that lost its agents.
+    box.appendChild(el(
+      "p", "wf-note",
+      `all ${members.length} members are hidden by this filter — `
+      + "choose Current or All to see them"
+    ));
   }
-  for (const m of members) {
+  for (const m of shown.members) {
     const row = el("div", "mesh-member");
-    const dot = el("span", `dot ${meshDotClass(m.reachability)}`);
+    const category = meshMemberCategory(m);
+    const dot = el("span", `dot ${meshDotClass(m.reachability)}`
+      + (category === "paused" ? " paused" : ""));
     const name = el("span", "mesh-handle", m.handle);
     const role = el("span", "mesh-role", m.role);
     const machineLabel = m.machine || (isMirror ? info.primary : "");
@@ -22645,7 +22804,7 @@ function renderMesh(info, history, force, owed, historyPage) {
     // 'pending' is mail the daemon has not managed to deliver; 'owed' is mail
     // it delivered that the agent never answered. Different faults, so the
     // row names both rather than one "behind" number.
-    const state = el("span", "meta", m.reachability +
+    const state = el("span", "meta", meshMemberStateWord(m) +
       (m.pending ? ` · ${m.pending} pending` : "") +
       (m.owed ? ` · ${m.owed} unanswered` : ""));
     if (m.owed) state.classList.add("mesh-owes");
@@ -22872,7 +23031,7 @@ function renderMesh(info, history, force, owed, historyPage) {
   }
   // Only sessions this daemon actually hosts: speaking as a member on another
   // machine is impersonation, and the primary rejects it.
-  for (const m of members.filter((m) => isLocalMember(m))) {
+  for (const m of shown.members.filter((m) => isLocalMember(m))) {
     const opt = document.createElement("option");
     opt.value = m.handle;
     opt.textContent = `from: ${m.handle}`;
@@ -22885,11 +23044,22 @@ function renderMesh(info, history, force, owed, historyPage) {
     opt.textContent = "to: * (everyone)";
     to.appendChild(opt);
   }
-  for (const m of members) {
+  for (const m of shown.members) {
     const opt = document.createElement("option");
     opt.value = m.handle;
     opt.textContent = `to: ${m.handle}`;
     to.appendChild(opt);
+  }
+  // The member filter narrows these two lists as well, so a form cannot offer
+  // to address a member the roster is not showing. Say so on the controls:
+  // an option that is absent with no explanation reads as a broken form, and
+  // the way back (the filter bar) is above, off the top of this panel.
+  if (meshMemberFilter !== "all") {
+    const why = `the member filter is "${meshMemberFilter}", so this lists only `
+      + "the members the roster shows — pick All in the Members bar to reach "
+      + "the rest";
+    from.title = why;
+    to.title = why;
   }
   const intent = document.createElement("select");
   for (const [v, label] of [

@@ -3596,18 +3596,22 @@ async def h_sessions_list(request: web.Request) -> web.Response:
     # front instead of every click discovering the 400 for itself.
     sessions = []
     for s in manager.list():
-        archived = bool(getattr(s, "archived_at", None))
         # Paused is a partition of the exited records, as the rail draws it:
         # ``killed`` is the exited ones that were not paused, so a record is
-        # in exactly one of the two lists and the filter counts add up.
-        paused = bool(s.exited and getattr(s, "paused_at", None))
+        # in exactly one of the two lists and the filter counts add up. The
+        # partition itself is defined once, in ``session.session_category``,
+        # because the mesh roster filters its members by the same words and
+        # two copies of the rule would file one record two ways.
+        category = session_mod.session_category(s)
+        archived = category == session_mod.CATEGORY_ARCHIVED
+        paused = category == session_mod.CATEGORY_PAUSED
         if list_state == "active" and s.exited:
             continue
         if list_state == "current" and archived:
             continue
-        if list_state == "killed" and (not s.exited or archived or paused):
+        if list_state == "killed" and category != session_mod.CATEGORY_KILLED:
             continue
-        if list_state == "paused" and (not paused or archived):
+        if list_state == "paused" and not paused:
             continue
         if list_state == "archived" and not archived:
             continue

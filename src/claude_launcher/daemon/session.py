@@ -273,6 +273,31 @@ STATUS_BUSY = "busy"
 STATUS_IDLE = "idle"
 STATUS_EXITED = "exited"
 
+#: The lifecycle partition every reader filters a record by. An exited record
+#: is ``killed`` unless it carries the pause marker, and an archived one is
+#: neither however it exited — so a record lands in exactly one of the four
+#: and the counts of the filters built on this add up. Defined once, here:
+#: the session rail (``daemon/api.py``) and the mesh roster
+#: (``daemon/mesh.py``) both ask this question, and two copies of the answer
+#: would let the same record be filed two ways on one page.
+CATEGORY_RUNNING = "running"
+CATEGORY_KILLED = "killed"
+CATEGORY_PAUSED = "paused"
+CATEGORY_ARCHIVED = "archived"
+
+
+def session_category(session) -> str:
+    """Which of the four partitions ``session`` belongs to."""
+    if getattr(session, "archived_at", None):
+        return CATEGORY_ARCHIVED
+    if session.exited:
+        return (
+            CATEGORY_PAUSED
+            if getattr(session, "paused_at", None)
+            else CATEGORY_KILLED
+        )
+    return CATEGORY_RUNNING
+
 #: A positive "a turn is in flight" marker the claude TUI paints into its
 #: footer iff a turn is running, and omits when it is awaiting input. The
 #: idle heuristic below is built to ignore exactly the rows that move during

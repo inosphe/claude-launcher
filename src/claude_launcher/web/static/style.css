@@ -2728,6 +2728,22 @@ a.wf-btn { display: inline-block; text-decoration: none; line-height: 1.5; }
 .mesh-links h3, .mesh-roles h3, .mesh-owed h3, .mesh-wiring h3 {
   font-size: 12px; text-transform: uppercase; color: #7d8590; margin-bottom: 10px;
 }
+/* The Members heading and its lifecycle filter share one row: the bar answers
+   the heading's own question ("who is here"), so it belongs beside it rather
+   than in a toolbar of its own. The rule below has the same specificity as
+   the shared `h3` rule above and comes later, so it wins where it applies —
+   the row's own gap is the spacing. */
+.mesh-members-head {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 12px; flex-wrap: wrap; margin-bottom: 10px;
+}
+.mesh-members-head h3 { margin-bottom: 0; }
+/* `.seq-tabs` carries a top margin for the boards it usually sits in; inside
+   this row the row's gap already spaces it. */
+.mesh-members-head .seq-tabs { margin-top: 0; }
+/* The counts are read as a column down the bar's width, so the digits line up
+   and a 12 does not look wider than a 4. */
+.mesh-member-filters .seq-tab { font-variant-numeric: tabular-nums; }
 /* Role set. A chip is a role in the vocabulary and how many members hold it;
    a role nobody holds stays dim, and one held but no longer DEFINED is called
    out — that is what "an upload is not retroactive" looks like from here. */

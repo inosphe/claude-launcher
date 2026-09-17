@@ -44,7 +44,7 @@ import yaml
 from .. import atomic, digests
 from . import loops, mesh_ops, mesh_policy, mesh_roles, paths, wire
 from .manager import AnySession, ManagerError, SessionManager
-from .session import STATUS_IDLE
+from .session import STATUS_IDLE, session_category
 
 log = logging.getLogger("claunch.daemon.mesh")
 
@@ -6308,6 +6308,12 @@ class MeshManager:
                     "pending": len(mesh.pending(handle)) if local else None,
                     "owed": owed,
                     "reachability": self._reachability(mesh, m),
+                    # The lifecycle partition the roster filters by: the same
+                    # four words the session rail uses, plus the two a member
+                    # can be in and a session cannot (``missing``, ``remote``
+                    # — see `_member_category`). `reachability` stays exactly
+                    # as it was: the CLI prints it and the spawn tests read it.
+                    "category": self._member_category(mesh, m),
                     "parent": parent if parent in mesh.members else None,
                 }
             )
@@ -6411,6 +6417,30 @@ class MeshManager:
         except ManagerError:
             return "missing"
         return "exited" if session.exited else session.status()
+
+    def _member_category(self, mesh: Mesh, member: Member) -> str:
+        """Which lifecycle partition a member is in, for the roster's filter.
+
+        A local member gets the same answer the session rail gets, from the
+        same function (:func:`session.session_category`), so one record cannot
+        be filed as killed on one page and archived on another.
+
+        The other two words are the cases a session cannot be in, and they are
+        not guesses. ``missing`` means the record is gone entirely. ``remote``
+        means another daemon's member: our copy of its liveness comes from the
+        activity report, which skips exited sessions, so a dead remote member
+        is indistinguishable from a live one here. Calling it dead would hide
+        a member that may be working, so a filter that drops killed records
+        keeps ``remote`` — the roster would otherwise be least trustworthy
+        exactly where it is least able to check.
+        """
+        if not self._is_local(mesh, member):
+            return "remote"
+        try:
+            session = self.manager.get(member.session)
+        except ManagerError:
+            return "missing"
+        return session_category(session)
 
     # ------------------------------------------------------------------ #
     # delivery worker
