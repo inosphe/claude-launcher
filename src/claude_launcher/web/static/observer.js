@@ -109,56 +109,104 @@ function addDirect(item, s, e) {
   };
   item.append(form);
 }
-function render() {
+const mobileView = matchMedia("(max-width:820px)");
+let boardOrder = [];
+const timestamp = value => Number.isFinite(Date.parse(value)) ? Date.parse(value) : 0;
+const latestActivity = s => Math.max(timestamp(s.last_activity_at),timestamp(s.generated_at),...(s.events||[]).map(e=>timestamp(e.at)));
+function visibleSessions() {
   const scope=$("scope").value, selected=$("selection").value;
-  const active=snapshot.sessions.filter(s=>($("ended").checked||s.running) && ($("activity").value==="all" || activity(s).kind===$("activity").value));
-  const visible=active.filter(s=>scope==="global" || (scope==="session" ? s.name===selected : s.meshes.includes(selected)));
-  const attention=s=> (s.events||[]).filter(e=>e.needs_action&&!e.acknowledged);
-  $("counts").textContent=`${visible.length}개 세션 · 미확인 요청 ${visible.reduce((n,s)=>n+attention(s).length+sessionRuns(s).filter(sessCflowGated).length,0)}개`;
+  return snapshot.sessions.filter(s=>($("ended").checked||s.running)
+    && ($("activity").value==="all"||activity(s).kind===$("activity").value)
+    && (scope==="global"||(scope==="session"?s.name===selected:(s.meshes||[]).includes(selected)))
+    && (!$("actions-only").checked||(s.events||[]).some(e=>e.needs_action&&!e.acknowledged)||sessionRuns(s).some(sessCflowGated)));
+}
+function syncTargets(visible) {
+  const names=visible.filter(s=>s.running).map(s=>s.name);
+  drafts.set(draftTarget,$("prompt").value);
+  options($("target"),names,"세션 선택");
+  if(!names.includes(draftTarget)) chooseTarget("");
+}
+function sessionHeader(s, cls="") {
+  const card=node("article","",`observer-card ${cls}`);card.dataset.session=s.name;
+  const title=node("h2",s.name+" "), state=activity(s);
+  title.append(node("span",state.label,`state ${state.kind}`));card.append(title);
+  const links=node("nav","","observer-links");
+  for(const [label,href] of [["관찰 결과","#/observer/session/"],["터미널","#/s/"],["트랜스크립트","#/log/"]]) {
+    const link=node("a",label);link.href=href+encodeURIComponent(s.name);links.append(link);
+  }
+  card.append(links);
+  return card;
+}
+function inputButton(card,s) {
+  const button=node("button","이 세션에 입력");button.disabled=!s.running;
+  button.onclick=()=>{chooseTarget(s.name);$("prompt").focus();};card.append(button);
+}
+function eventItem(s,e) {
+  const item=node("div","",`event${e.needs_action&&!e.acknowledged?" action":""}`);
+  item.dataset.event=e.id;
+  item.append(node("small",`${e.origin==="agent"?"에이전트 직접 보고":"자동 관찰"} · ${e.kind} · ${new Date(e.at).toLocaleString()}${e.acknowledged?" · 확인됨":""}`),node("div",e.text));
+  if(e.origin==="agent") {addDirect(item,s,e);return item;}
+  const detail=document.createElement("details"), evidence=node("pre","불러오는 중…");
+  detail.append(node("summary",`근거 · ${e.source}`),evidence);
+  detail.ontoggle=async()=>{if(!detail.open||detail.dataset.loaded)return;try{const data=await request(`api/observer/${encodeURIComponent(s.name)}/events/${encodeURIComponent(e.id)}`);evidence.textContent=JSON.stringify(data,null,2);detail.dataset.loaded="1";}catch(err){evidence.textContent=err.message;}};
+  item.append(detail);
+  if(e.needs_action&&!e.acknowledged) {
+    const button=node("button","확인 표시");button.onclick=async()=>{try{await request(`api/observer/${encodeURIComponent(s.name)}/acknowledge`,{id:e.id});await refresh();}catch(err){$("notice").textContent=err.message;}};item.append(button);
+  }
+  return item;
+}
+function render() {
+  const visible=visibleSessions(), cards=$("cards"), mobile=mobileView.matches;
+  syncTargets(visible);
+  $("counts").textContent=`${visible.length}개 세션 · 미확인 요청 ${visible.reduce((n,s)=>n+(s.events||[]).filter(e=>e.needs_action&&!e.acknowledged).length+sessionRuns(s).filter(sessCflowGated).length,0)}개`;
   $("monitor").textContent=snapshot.enabled?"관찰 끄기":"관찰 시작";
   $("mobile-monitor").textContent=$("monitor").textContent;
-  $("notice").textContent=(cflowError?"cflow 상태 조회 실패 · 마지막 조회 결과 표시":snapshot.error) || (snapshot.enabled ? "관찰 중 · 세션별 순차 처리 · 최소 60초 간격" : "관찰이 꺼져 있습니다. 시작하면 ds4-official/deepseek-flash API로 트랜스크립트를 전송합니다.");
-  const cards=$("cards"); cards.replaceChildren();
-  visible.sort((a,b)=>(attention(b).length+sessionRuns(b).filter(sessCflowGated).length)-(attention(a).length+sessionRuns(a).filter(sessCflowGated).length));
-  for(const s of visible) {
-    if($("actions-only").checked&&!attention(s).length&&!sessionRuns(s).some(sessCflowGated)) continue;
-    const card=node("article","","observer-card");
-    const title=node("h2",s.name+" "); const active=activity(s); title.append(node("span",active.label,`state ${active.kind}`)); card.append(title);
-    const links=node("nav", "", "observer-links");
-    for (const [label, href] of [["관찰 결과", "#/observer/session/"], ["터미널", "#/s/"], ["트랜스크립트", "#/log/"]]) {
-      const link=node("a",label); link.href=href+encodeURIComponent(s.name); links.append(link);
+  $("notice").textContent=(cflowError?"cflow 상태 조회 실패 · 마지막 조회 결과 표시":snapshot.error)||(snapshot.enabled?"관찰 중 · 세션별 순차 처리 · 최소 60초 간격":"관찰이 꺼져 있습니다. 시작하면 ds4-official/deepseek-flash API로 트랜스크립트를 전송합니다.");
+  $("sort").hidden=mobile;
+  $("layout-hint").textContent=mobile?"최신 보고부터 표시하는 타임라인":"세션 보드 · 내용은 자동 갱신되며 세션 순서는 최신순 정렬을 누를 때 바뀝니다.";
+  cards.className=mobile?"observer-timeline":"observer-board";
+  const horizontal=cards.scrollLeft;
+  const scrolls=new Map([...cards.querySelectorAll(".observer-column-body")].map(e=>[e.parentElement.dataset.session,e.scrollTop]));
+  cards.replaceChildren();
+  if(mobile) {
+    const entries=[];
+    for(const s of visible) {
+      const events=(s.events||[]).filter(e=>!$("actions-only").checked||(e.needs_action&&!e.acknowledged));
+      for(const e of events) entries.push({s,e,at:timestamp(e.at),key:s.name+":"+e.id});
+      for(const r of sessionRuns(s).filter(r=>String(r.status).startsWith("waiting")))
+        entries.push({s,r,at:timestamp(r.updated_at||r.started_at)||latestActivity(s),key:s.name+":gate:"+(r.run||r.step_id)});
+      if(!events.length&&!sessionRuns(s).some(r=>String(r.status).startsWith("waiting")))entries.push({s,at:latestActivity(s),key:s.name+":summary"});
     }
-    card.append(links,node("p",`${active.duration} · 하니스: ${s.status||"unknown"}`,"meta"));
-    for(const run of sessionRuns(s).filter(r=>String(r.status).startsWith("waiting"))) addGate(card,s,run);
-    card.append(node("div",s.meshes.join(" · ")||"메시 없음","meta"));
-    card.append(node("p",s.summary||"아직 관찰 결과가 없습니다."));
-    if(s.error)card.append(node("p",s.error));
-    if(s.generated_at)card.append(node("div",`마지막 요약 ${new Date(s.generated_at).toLocaleString()}`,"meta"));
-    const all = [...(s.events||[])].reverse();
-    const events = $("actions-only").checked ? all.filter(e=>e.needs_action&&!e.acknowledged) : all;
-    // Unanswered requests stay visible even when newer progress fills history.
-    const urgent = events.filter(e=>e.needs_action&&!e.acknowledged);
-    const ordinary = events.filter(e=>!urgent.includes(e));
-    const shown = scope === "session" || $("actions-only").checked ? events : [...urgent,...ordinary.slice(0,20)];
-    if(shown.length<events.length)card.append(node("p","미확인 요청과 최근 20개 결과 · 세션 보기에서 전체 이력 확인","meta"));
-    for(const e of shown) {
-      const item=node("div","",`event${e.needs_action&&!e.acknowledged?" action":""}`);
-      item.append(node("small",`${e.origin==="agent"?"에이전트 직접 보고":"자동 관찰"} · ${e.kind} · ${new Date(e.at).toLocaleString()}${e.acknowledged?" · 확인됨":""}`),node("div",e.text));
-      if(e.origin==="agent") {addDirect(item,s,e);card.append(item);continue;}
-      const detail=document.createElement("details"), evidence=node("pre","불러오는 중…");
-      detail.append(node("summary",`근거 · ${e.source}`),evidence);
-      detail.ontoggle=async()=>{if(!detail.open||detail.dataset.loaded)return;try{const data=await request(`api/observer/${encodeURIComponent(s.name)}/events/${encodeURIComponent(e.id)}`);evidence.textContent=JSON.stringify(data,null,2);detail.dataset.loaded="1";}catch(err){evidence.textContent=err.message;}};
-      item.append(detail);
-      if(e.needs_action&&!e.acknowledged) {const b=node("button","확인 표시"); b.onclick=async()=>{try{await request(`api/observer/${encodeURIComponent(s.name)}/acknowledge`,{id:e.id});await refresh();}catch(err){$("notice").textContent=err.message;}};item.append(b);}
-      card.append(item);
+    entries.sort((a,b)=>b.at-a.at||a.key.localeCompare(b.key));
+    for(const {s,e,r} of entries) {
+      const card=sessionHeader(s,"observer-post");
+      if(e)card.append(eventItem(s,e));
+      else if(r)addGate(card,s,r);
+      else card.append(node("p",s.summary||"아직 관찰 결과가 없습니다."),node("small",activity(s).duration));
+      inputButton(card,s);cards.append(card);
     }
-    const more=document.createElement("details");more.append(node("summary","관찰 API 사용량"),node("pre",JSON.stringify({usage:s.usage,context_rotations:s.rotations},null,2)));card.append(more);
-    const input=node("button","이 세션에 입력");input.disabled=!s.running;input.onclick=()=>{chooseTarget(s.name);$("prompt").focus();};card.append(input);
-    cards.append(card);
+  } else {
+    if(!boardOrder.length)boardOrder=[...snapshot.sessions].sort((a,b)=>latestActivity(b)-latestActivity(a)||a.name.localeCompare(b.name)).map(s=>s.name);
+    for(const s of snapshot.sessions)if(!boardOrder.includes(s.name))boardOrder.push(s.name);
+    visible.sort((a,b)=>boardOrder.indexOf(a.name)-boardOrder.indexOf(b.name));
+    for(const s of visible) {
+      const card=sessionHeader(s,"observer-column"), body=node("div","","observer-column-body");
+      body.append(node("p",activity(s).duration,"meta"),node("div",(s.meshes||[]).join(" · ")||"메시 없음","meta"));
+      for(const r of sessionRuns(s).filter(r=>String(r.status).startsWith("waiting")))addGate(body,s,r);
+      body.append(node("p",s.summary||"아직 관찰 결과가 없습니다."));
+      if(s.error)body.append(node("p",s.error));
+      const events=[...(s.events||[])].sort((a,b)=>timestamp(b.at)-timestamp(a.at));
+      for(const e of events.filter(e=>!$("actions-only").checked||(e.needs_action&&!e.acknowledged)))body.append(eventItem(s,e));
+      const more=document.createElement("details");more.append(node("summary","관찰 API 사용량"),node("pre",JSON.stringify({usage:s.usage,context_rotations:s.rotations},null,2)));body.append(more);
+      card.append(body);inputButton(card,s);cards.append(card);body.scrollTop=scrolls.get(s.name)||0;
+    }
   }
   if(!cards.children.length)cards.append(node("p","선택한 조건에 해당하는 세션이 없습니다."));
+  cards.scrollLeft=horizontal;
   controls();
 }
+$("sort").onclick=()=>{boardOrder=[...snapshot.sessions].sort((a,b)=>latestActivity(b)-latestActivity(a)||a.name.localeCompare(b.name)).map(s=>s.name);render();};
+mobileView.addEventListener("change",()=>{if(document.body.classList.contains("observer-active"))render();});
 function selections() {
   const scope=$("scope").value;
   $("selection-label").hidden=scope==="global";
@@ -179,7 +227,6 @@ function refresh() {
       if(signature!==lastSnapshot) {
         snapshot=data; lastSnapshot=signature;
         selections();
-        options($("target"),snapshot.sessions.filter(s=>s.running).map(s=>s.name),"세션 선택");
         render();
       }
     } catch(err) { $("notice").textContent=err.message; }
@@ -224,7 +271,8 @@ async function open(scope = "global", name = "") {
   if(scope === "session") {
     const session=snapshot.sessions.find(s=>s.name===name);
     if(session&&!session.running) $("ended").checked=true;
-    chooseTarget(session?.running ? name : "");
+    render();
+    chooseTarget(session?.running && visibleSessions().some(s=>s.name===name) ? name : "");
   }
   render();
   poll=setInterval(()=>{if(!document.hidden)refresh();},10000);
