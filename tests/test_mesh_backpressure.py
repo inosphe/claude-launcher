@@ -79,6 +79,22 @@ def _cap(mm, mesh, **patch):
     mm.set_policy(mesh, {"backpressure": patch})
 
 
+async def _await_exit(mgr, *names):
+    """Wait for each session's record to read ``exited``.
+
+    ``kill``/``pause`` return as soon as the signal is sent; ``exited``
+    flips on the PTY's EOF, which is a moment later. Every gate that asks
+    whether a receiver is reading — delivery, the absolute cap — reads the
+    record, so a test that does not wait here is testing a live session.
+    """
+    for name in names:
+        for _ in range(100):
+            if mgr.get(name).exited:
+                break
+            await asyncio.sleep(0.05)
+        assert mgr.get(name).exited, name
+
+
 # --------------------------------------------------------------------- #
 # policy
 # --------------------------------------------------------------------- #
@@ -566,5 +582,216 @@ def test_the_queued_endpoint_reports_the_door_and_the_pacing(home, tmp_path):
             await mgr.shutdown_all()
         finally:
             await client.close()
+
+    asyncio.run(run())
+
+
+# --------------------------------------------------------------------- #
+# the absolute wall: receivers whose queue cannot drain
+# --------------------------------------------------------------------- #
+def test_an_exited_receiver_stays_shut_after_its_mail_ages_out(home, tmp_path):
+    """A dead terminal is capped on full depth, not on recent traffic.
+
+    ``door_secs`` stops aged mail weighing on the door, which is right for a
+    receiver that is merely slow: its queue drains, so the aging only
+    forgives pressure that has already gone. For a receiver nothing is
+    reading, the queue never drains and the aging reopened the door once per
+    ``door_secs`` forever — ``inbox_max`` more messages each time, with no
+    ceiling. The backlog that revealed it was 45 deep and would have been
+    typed into that terminal in one block on respawn.
+    """
+    _register_py_harness()
+
+    async def run():
+        mgr = SessionManager(idle_threshold=0.5, scrollback=200, restore_default=True)
+        mm = MeshManager(mgr, root=tmp_path / "mesh")
+        mm.create("team")
+        for name in ("s1", "s2"):
+            mgr.create(SessionDef(name=name, harness="py", cwd=str(tmp_path)))
+        await mm.join("team", "s1", handle="lead")
+        await mm.join("team", "s2", handle="w1")
+        _cap(mm, "team", inbox_max=4, retry_after=45.0)
+        mm.set_policy("team", {"ack_timeout": {"door_secs": 1.0}})
+
+        for n in range(4):
+            await mm.send("team", "w1", "lead", f"report {n}")
+        mesh = mm.get("team")
+        # Paused rather than killed to pin the state the report came from;
+        # the two are the same record to delivery, which the test below
+        # holds on to.
+        mgr.pause("s1", force=True)
+        await _await_exit(mgr, "s1")
+        for msg in mesh.pending("lead"):
+            msg["ts"] = "2000-01-01T00:00:00+00:00"
+
+        # The traffic window is empty and the true depth is not: before the
+        # wall, this pair is exactly what let a fifth message in.
+        assert mm.countable_inbox(mesh, "lead") == 0
+        assert len(mesh.pending("lead")) == 4
+
+        with pytest.raises(MeshBusy) as caught:
+            await mm.send("team", "w1", "lead", "report 4")
+
+        assert caught.value.entries == [{
+            "handle": "lead",
+            "queued": 4,
+            "inbox_max": 4,
+            "retry_after": 0.0,
+            "remote": False,
+            "reason": "exited",
+        }]
+        # Waiting never opens this door, so the notice names the remedy that
+        # does instead of a number of seconds.
+        assert caught.value.retry_after == 0.0
+        # Lowercased for the compare only: the notice capitalises its first
+        # letter, and which action lands first is not what this test is for.
+        assert "respawn lead" in str(caught.value).lower()
+        assert "45s" not in str(caught.value)
+        # Refused means refused: nothing may land behind the sender's back.
+        assert len(mesh.pending("lead")) == 4
+
+        await mgr.shutdown_all()
+
+    asyncio.run(run())
+
+
+def test_the_wall_does_not_ask_whether_the_session_was_killed_or_paused(
+    home, tmp_path
+):
+    """Kill and pause are one state to delivery, so they are one state here.
+
+    ``_deliver_to`` branches on ``session.exited`` alone and never reads
+    ``paused_at``; ``respawn`` accepts either record. A cap that told them
+    apart would be a distinction the delivery path does not make.
+    """
+    _register_py_harness()
+
+    async def run():
+        mgr = SessionManager(idle_threshold=0.5, scrollback=200, restore_default=True)
+        mm = MeshManager(mgr, root=tmp_path / "mesh")
+        mm.create("team")
+        for name in ("s1", "s2", "s3"):
+            mgr.create(SessionDef(name=name, harness="py", cwd=str(tmp_path)))
+        await mm.join("team", "s1", handle="killed")
+        await mm.join("team", "s2", handle="paused")
+        await mm.join("team", "s3", handle="w1")
+        _cap(mm, "team", inbox_max=4, retry_after=45.0)
+        mm.set_policy("team", {"ack_timeout": {"door_secs": 1.0}})
+
+        for handle in ("killed", "paused"):
+            for n in range(4):
+                await mm.send("team", "w1", handle, f"report {n}")
+        mesh = mm.get("team")
+        mgr.kill("s1", force=True)
+        mgr.pause("s2", force=True)
+        await _await_exit(mgr, "s1", "s2")
+        for handle in ("killed", "paused"):
+            for msg in mesh.pending(handle):
+                msg["ts"] = "2000-01-01T00:00:00+00:00"
+
+        assert getattr(mgr.get("s1"), "paused_at", None) is None
+        assert getattr(mgr.get("s2"), "paused_at", None) is not None
+
+        refused = mm.congested_recipients(mesh, ["killed", "paused"])
+        assert [e["handle"] for e in refused] == ["killed", "paused"]
+        assert {e["reason"] for e in refused} == {"exited"}
+        assert {e["queued"] for e in refused} == {4}
+
+        await mgr.shutdown_all()
+
+    asyncio.run(run())
+
+
+def test_the_wall_is_the_operators_cap_and_not_a_constant(home, tmp_path):
+    """A dead receiver is weighed on full depth against ``inbox_max``.
+
+    Which depth the door weighs is what the receiver's state decides; the
+    number it is weighed against stays the one the operator set. A mesh that
+    raised the cap to accept long backlogs still accepts them from a
+    terminal that has died.
+    """
+    _register_py_harness()
+
+    async def run():
+        mgr = SessionManager(idle_threshold=0.5, scrollback=200, restore_default=True)
+        mm = MeshManager(mgr, root=tmp_path / "mesh")
+        mm.create("team")
+        for name in ("s1", "s2"):
+            mgr.create(SessionDef(name=name, harness="py", cwd=str(tmp_path)))
+        await mm.join("team", "s1", handle="lead")
+        await mm.join("team", "s2", handle="w1")
+        _cap(mm, "team", inbox_max=8, retry_after=45.0)
+        mm.set_policy("team", {"ack_timeout": {"door_secs": 1.0}})
+
+        for n in range(6):
+            await mm.send("team", "w1", "lead", f"report {n}")
+        mesh = mm.get("team")
+        mgr.kill("s1", force=True)
+        await _await_exit(mgr, "s1")
+        for msg in mesh.pending("lead"):
+            msg["ts"] = "2000-01-01T00:00:00+00:00"
+
+        # Six deep under a cap of eight: still accepting, aged mail or not.
+        assert mm.congested_recipients(mesh, ["lead"]) == []
+        for n in range(6, 8):
+            await mm.send("team", "w1", "lead", f"report {n}")
+        assert len(mesh.pending("lead")) == 8
+
+        with pytest.raises(MeshBusy) as caught:
+            await mm.send("team", "w1", "lead", "report 8")
+        assert caught.value.entries[0]["inbox_max"] == 8
+        assert caught.value.entries[0]["queued"] == 8
+        assert caught.value.entries[0]["reason"] == "exited"
+
+        await mgr.shutdown_all()
+
+    asyncio.run(run())
+
+
+def test_the_session_report_agrees_with_the_door(home, tmp_path):
+    """``backpressure_for_session`` asks the door instead of re-deciding.
+
+    It held a second copy of the rule: full depth against the cap, while the
+    door weighed the aged depth. The two disagreed for exactly the backlogs
+    someone opens the page to look at — the 45-deep queue this change came
+    from read "congested, cap 4" there while the door was letting four more
+    in per ``door_secs``.
+    """
+    _register_py_harness()
+
+    async def run():
+        mgr = SessionManager(idle_threshold=0.5, scrollback=200, restore_default=True)
+        mm = MeshManager(mgr, root=tmp_path / "mesh")
+        mm.create("team")
+        for name in ("s1", "s2"):
+            mgr.create(SessionDef(name=name, harness="py", cwd=str(tmp_path)))
+        await mm.join("team", "s1", handle="lead")
+        await mm.join("team", "s2", handle="w1")
+        _cap(mm, "team", inbox_max=2, retry_after=45.0)
+        mm.set_policy("team", {"ack_timeout": {"door_secs": 1.0}})
+        mesh = mm.get("team")
+
+        for n in range(2):
+            await mm.send("team", "w1", "lead", f"report {n}")
+        # At the cap with fresh mail: both agree it is shut.
+        assert mm.backpressure_for_session("s1")["congested"] is True
+        assert mm.congested_recipients(mesh, ["lead"]) != []
+
+        # Aged past the door, session still live: the door has reopened, so
+        # the report must not keep calling it congested.
+        for msg in mesh.pending("lead"):
+            msg["ts"] = "2000-01-01T00:00:00+00:00"
+        assert mm.congested_recipients(mesh, ["lead"]) == []
+        bp = mm.backpressure_for_session("s1")
+        assert bp["congested"] is False
+        assert bp["queued"] == 2  # the mail is still there, and still reported
+
+        # Same queue, dead session: weighed on full depth, so both shut again.
+        mgr.kill("s1", force=True)
+        await _await_exit(mgr, "s1")
+        assert mm.congested_recipients(mesh, ["lead"]) != []
+        assert mm.backpressure_for_session("s1")["congested"] is True
+
+        await mgr.shutdown_all()
 
     asyncio.run(run())

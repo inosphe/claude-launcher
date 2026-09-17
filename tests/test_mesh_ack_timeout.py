@@ -177,14 +177,21 @@ def test_sender_gets_four_durable_response_nudges_then_no_more(tmp_path):
 # --------------------------------------------------------------------- #
 # the door
 # --------------------------------------------------------------------- #
-def test_an_exited_member_stops_holding_the_door_shut(home, tmp_path):
-    """The deadlock, and its release.
+def test_an_undelivered_backlog_stops_holding_the_door_shut(home, tmp_path):
+    """The deadlock, and its release, for a receiver that is still reading.
 
-    A member whose session has exited can never drain its queue, so before
-    the timeout the cap was permanent: every later 1:1 send refused, nothing
-    queued, no path back. Here the same queue ages past ``door_secs`` and the
-    door opens by itself — while the aged mail stays exactly where it was,
-    because respawning that session must still deliver it.
+    A backlog that is not being delivered held the cap shut for as long as
+    it sat there: every later 1:1 send refused, nothing queued, no path
+    back. Here the same queue ages past ``door_secs`` and the door opens by
+    itself — while the aged mail stays exactly where it was, because it is
+    still going to be delivered.
+
+    The session below stays LIVE, which is what this test is now about. The
+    aging is for a queue that can still drain; a receiver whose session has
+    exited is weighed on its full depth instead
+    (``test_an_exited_receiver_stays_shut_after_its_mail_ages_out`` in
+    tests/test_mesh_backpressure.py), because nothing consumes that queue
+    and the reopening had no end.
     """
     _register_py_harness()
 
@@ -234,8 +241,8 @@ def test_an_exited_member_stops_holding_the_door_shut(home, tmp_path):
         ]
 
         # And the bucket refills: one fresh message is under a cap of two,
-        # two is at it. A dead terminal takes inbox_max per door_secs
-        # instead of inbox_max ever.
+        # two is at it. A live terminal whose queue is not moving takes
+        # inbox_max per door_secs.
         await mm.send("team", "lead", "w1", "one more")
         with pytest.raises(MeshBusy):
             await mm.send("team", "lead", "w1", "over again")
