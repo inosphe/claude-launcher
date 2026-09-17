@@ -7555,16 +7555,16 @@ function autogrowTermInput(field) {
   if (needed) field.style.height = `${needed}px`;
 }
 
-/* Ctrl+Enter sends. Enter, Shift+Enter and Ctrl+J all break the line at the
-   caret, and this field is a <textarea> for that reason. Claude Code's own
-   composer sends on Enter and breaks on Ctrl+J, but Ctrl+J is a browser
-   shortcut in the Firefox family — it opens the downloads panel and never
-   reaches this handler — so the line break is on the key every browser
-   delivers and the send moved to the chord.
+/* Ctrl+J breaks the line at the caret, Enter sends — the split Claude Code
+   uses in its own composer, and the reason this field is a <textarea>.
    Enter is handled here rather than by the form, because a <textarea> does
    not submit its form on Enter. An IME composing a syllable owns the key
    while it composes (isComposing / keyCode 229): committing a Hangul block
-   with Enter must not also break the line. */
+   with Enter must not also send the line.
+
+   Ctrl+J is also a browser shortcut in the Firefox family (the downloads
+   panel). A listener on this field alone was not enough there, so the key is
+   taken in the capture phase at the window — see onWindowCtrlJ. */
 function onTermInputKeydown(ev) {
   const field = ev.currentTarget || ev.target;
   if (!field || field.disabled) return;
@@ -7575,19 +7575,47 @@ function onTermInputKeydown(ev) {
     pasteClipboardImage($("term-input-note"));
     return;
   }
-  if (key === "Enter" && ev.ctrlKey && !ev.altKey && !ev.metaKey) {
-    ev.preventDefault();
-    sendKeyLine($("term-input-field"), $("term-input-send"), $("term-input-note"));
-    return;
-  }
-  const breaksLine =
-    (key === "Enter" && !ev.ctrlKey && !ev.altKey && !ev.metaKey) ||
-    (ev.ctrlKey && !ev.altKey && !ev.metaKey &&
-     (key === "j" || key === "J" || key === "\n"));
-  if (breaksLine) {
+  if (isCtrlJ(ev)) {
     ev.preventDefault();
     insertTermInputText(field, "\n");
+    return;
   }
+  if (key === "Enter" && !ev.shiftKey && !ev.ctrlKey && !ev.altKey && !ev.metaKey) {
+    ev.preventDefault();
+    sendKeyLine($("term-input-field"), $("term-input-send"), $("term-input-note"));
+  }
+}
+
+function isCtrlJ(ev) {
+  if (!ev.ctrlKey || ev.altKey || ev.metaKey) return false;
+  const key = ev.key;
+  // Firefox reports "j" for the chord; keyCode 74 covers a layout that gives
+  // this physical key another label, and "\n" is what a terminal-style
+  // keymap sends for the same chord.
+  return key === "j" || key === "J" || key === "\n" || ev.keyCode === 74;
+}
+
+/* Ctrl+J, taken before the browser gets to it.
+
+   Firefox opens the downloads panel on Ctrl+J, and cancelling the event from
+   a listener on the field did not stop it — by the time the event bubbled to
+   where the page could answer, the browser had already decided. A capture
+   listener on the window runs at the first step of the dispatch, ahead of
+   every other listener and ahead of the default action, which is the only
+   point in the page where the key can still be claimed.
+
+   It claims the key only while the composer holds focus. A Ctrl+J pressed
+   anywhere else on the dashboard is the browser's, and taking it there would
+   break the downloads panel for a page that had no business doing so. */
+function onWindowCtrlJ(ev) {
+  if (!isCtrlJ(ev)) return;
+  if (ev.isComposing || ev.keyCode === 229) return;
+  const field = $("term-input-field");
+  if (!field || field.disabled) return;
+  if (document.activeElement !== field) return;
+  ev.preventDefault();
+  ev.stopPropagation();
+  insertTermInputText(field, "\n");
 }
 
 /* One place that writes into the composer at the caret, so a line break and
@@ -7704,6 +7732,9 @@ if ($("term-input"))
   $("term-input").addEventListener("submit", onTermInputSubmit);
 if ($("term-input-field")) {
   $("term-input-field").addEventListener("keydown", onTermInputKeydown);
+  // Capture phase, on the window: the browser's own Ctrl+J wins against a
+  // listener that only sees the event on its way back up.
+  window.addEventListener("keydown", onWindowCtrlJ, true);
   $("term-input-field").addEventListener("paste", onTermInputPaste);
   $("term-input-field").addEventListener("input", (ev) =>
     autogrowTermInput(ev.currentTarget || ev.target));

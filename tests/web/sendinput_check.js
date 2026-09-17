@@ -1,7 +1,7 @@
 /* The send-keys input under the terminal. A native field where xterm's
    composer is a terminal — the field the reader types a prompt into,
-   Ctrl+Enter handing the line to the session through the same send-keys
-   passthrough `claunch send-keys` uses, Enter putting a newline in it
+   Enter handing the line to the session through the same send-keys
+   passthrough `claunch send-keys` uses, Ctrl+J putting a newline in it
    instead.
 
    The box has to hold the contract the whole raw-keystroke path lives under:
@@ -10,9 +10,9 @@
    Session.send_keys alone), an empty or unaddressed line sends nothing, a
    refusal's words are shown and the half-typed line kept, a dead daemon does
    not look like a delivery, and a session that has ended has the box closed
-   with the reason shown, Enter and Shift+Enter insert a newline at the caret
-   rather than sending (Ctrl+J does too, where the browser lets it through —
-   the Firefox family takes it for the downloads panel), and a line that
+   with the reason shown, Ctrl+J inserts a newline at the caret rather than
+   sending — taken in the capture phase at the window, because the Firefox
+   family claims that chord for its downloads panel — and a line that
    carries a newline goes as ONE paste (the keys
    path would write a raw LF, which every harness reads as a submit, so the
    block would arrive a line at a time). Slice the real functions out of
@@ -106,9 +106,14 @@ const $ = (id) => ({
   "term-input-note": NOTE,
 }[id] || null);
 
+/* which element the page would call focused. The window hook reads it to
+   decide whether this Ctrl+J is the composer's or the browser's. */
+let ACTIVE = FIELD;
+const document = { get activeElement() { return ACTIVE; } };
+
 const ctx = {};
 new Function(
-  "exports", "api", "$", "navigator",
+  "exports", "api", "$", "navigator", "document",
   `let currentName = null;
 let sessionEnded = false;
 ` + slice("termInputNote") + `
@@ -120,17 +125,20 @@ let sessionEnded = false;
 ` + slice("clipboardImage") + `
 ` + slice("pasteClipboardImage") + `
 ` + slice("onTermInputPaste") + `
+` + slice("isCtrlJ") + `
 ` + slice("onTermInputKeydown") + `
+` + slice("onWindowCtrlJ") + `
 Object.assign(exports, {
   sendKeyLine,
   termInputBlock,
   termInputNote,
   onTermInputKeydown,
+  onWindowCtrlJ,
   onTermInputPaste,
   pasteClipboardImage,
   setSession: (name, ended) => { currentName = name; sessionEnded = !!ended; },
 });`
-)(ctx, api, $, navigator);
+)(ctx, api, $, navigator, document);
 
 const box = () => ({ field: FIELD, btn: BTN, note: NOTE });
 
@@ -144,6 +152,20 @@ function press(key, mods = {}) {
     ...mods,
   };
   ctx.onTermInputKeydown(ev);
+  return ev;
+}
+
+/* the same keydown, delivered the way the window's capture listener gets it
+   — before any element handler, and with the propagation stop recorded */
+function capture(key, mods = {}) {
+  const ev = {
+    key, ctrlKey: false, shiftKey: false, altKey: false, metaKey: false,
+    isComposing: false, keyCode: 0, currentTarget: null, target: ACTIVE,
+    prevented: false, preventDefault() { ev.prevented = true; },
+    stopped: false, stopPropagation() { ev.stopped = true; },
+    ...mods,
+  };
+  ctx.onWindowCtrlJ(ev);
   return ev;
 }
 
@@ -229,50 +251,75 @@ async function main() {
   check("the line survives that too", b.field.value === "hello?");
   check("and the button is usable again", b.btn.disabled === false);
 
-  /* ---- Enter breaks the line at the caret and sends nothing ---- */
+  /* ---- Ctrl+J is a newline at the caret, not a send ---- */
   sent = [];
   reply = { ok: true, doc: {} };
   ctx.setSession("coder4", false);
   FIELD.disabled = false;
   FIELD.value = "first";
   FIELD.selectionStart = FIELD.selectionEnd = 5;
-  const ent = press("Enter");
-  check("Enter is taken from the browser", ent.prevented === true);
-  check("Enter puts a newline in the box", FIELD.value === "first\n",
+  const cj = press("j", { ctrlKey: true });
+  check("Ctrl+J is taken from the browser", cj.prevented === true);
+  check("Ctrl+J puts a newline in the box", FIELD.value === "first\n",
         FIELD.value);
   check("...with the caret after it", FIELD.selectionStart === 6,
         FIELD.selectionStart);
   check("...and sends nothing", sent.length === 0, sent);
 
-  /* ---- Shift+Enter and Ctrl+J break the line the same way ---- */
-  FIELD.value = "first";
-  FIELD.selectionStart = FIELD.selectionEnd = 5;
-  const se = press("Enter", { shiftKey: true });
-  check("Shift+Enter breaks the line",
-        se.prevented === true && FIELD.value === "first\n", FIELD.value);
-  FIELD.value = "first";
-  FIELD.selectionStart = FIELD.selectionEnd = 5;
-  const cj = press("j", { ctrlKey: true });
-  check("Ctrl+J still breaks the line, where the browser lets it through",
-        cj.prevented === true && FIELD.value === "first\n", FIELD.value);
-  check("...and none of those sent anything", sent.length === 0, sent);
-
   /* ---- it inserts where the caret is, over a selection ---- */
   FIELD.value = "abcd";
   FIELD.selectionStart = 1; FIELD.selectionEnd = 3;
-  press("Enter");
-  check("Enter replaces the selection", FIELD.value === "a\nd", FIELD.value);
+  press("j", { ctrlKey: true });
+  check("Ctrl+J replaces the selection", FIELD.value === "a\nd", FIELD.value);
 
-  /* ---- Ctrl+Enter sends, and an IME committing a syllable does not ---- */
+  /* ---- the window hook takes Ctrl+J before the browser does ----
+     Firefox opens its downloads panel on this chord, and a listener that
+     only sees the event on the way back up loses the race. The capture
+     listener is what the page actually relies on, so it is driven here the
+     way the window would deliver it. */
+  sent = [];
+  FIELD.value = "first";
+  FIELD.selectionStart = FIELD.selectionEnd = 5;
+  ACTIVE = FIELD;
+  const wcj = capture("j", { ctrlKey: true });
+  check("the window hook takes the chord", wcj.prevented === true);
+  check("...and stops it reaching anything else", wcj.stopped === true);
+  check("...putting the newline in the box", FIELD.value === "first\n",
+        FIELD.value);
+  check("...and sending nothing", sent.length === 0, sent);
+
+  /* a layout that labels the key differently still reports keyCode 74 */
+  FIELD.value = "first";
+  FIELD.selectionStart = FIELD.selectionEnd = 5;
+  const wkc = capture("Unidentified", { ctrlKey: true, keyCode: 74 });
+  check("keyCode 74 counts as the same chord",
+        wkc.prevented === true && FIELD.value === "first\n", FIELD.value);
+
+  /* elsewhere on the page the chord belongs to the browser */
+  FIELD.value = "kept";
+  ACTIVE = null;
+  const wout = capture("j", { ctrlKey: true });
+  check("Ctrl+J outside the composer is left to the browser",
+        wout.prevented === false && FIELD.value === "kept", FIELD.value);
+  ACTIVE = FIELD;
+
+  /* a disabled composer does not claim it either */
+  FIELD.disabled = true;
+  const wdis = capture("j", { ctrlKey: true });
+  check("a disabled composer does not claim the chord",
+        wdis.prevented === false, wdis);
+  FIELD.disabled = false;
+
+  /* ---- Enter sends, and an IME committing a syllable does not ---- */
   sent = [];
   FIELD.value = "send me";
-  const ime = press("Enter", { ctrlKey: true, isComposing: true });
+  const ime = press("Enter", { isComposing: true });
   check("an Enter that commits an IME syllable sends nothing",
         sent.length === 0 && ime.prevented === false, sent);
-  const ce = press("Enter", { ctrlKey: true });
+  const ent = press("Enter");
   await settle();
-  check("Ctrl+Enter sends the line",
-        sent.length === 1 && ce.prevented === true, sent);
+  check("Enter sends the line",
+        sent.length === 1 && ent.prevented === true, sent);
   check("...and the line it sent is the one in the box",
         sent[0].body.keys[0] === "send me", sent[0].body);
 
