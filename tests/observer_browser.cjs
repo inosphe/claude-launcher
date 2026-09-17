@@ -38,6 +38,7 @@ const server = http.createServer((req, res) => {
         sent.push({url:req.url,body:JSON.parse(body)});return res.end(JSON.stringify(e));
       }
       if(req.url==="/api/cflow/approve") gates=[];
+      if(req.url==="/api/observer/settings") data.enabled=JSON.parse(body).enabled;
       if (req.url.endsWith("/events/e1")) return res.end('{"content":"Which environment?"}');
       if(req.method === "GET") {
         if(req.url === "/api/daemon") return res.end('{"version":"test","boot_id":"test"}');
@@ -68,6 +69,18 @@ const server = http.createServer((req, res) => {
     await page.goto(`http://127.0.0.1:${server.address().port}/#/observer`);
     await page.waitForSelector(".observer-card");
     assert.equal(await page.locator(".observer-card").count(), 2);
+    assert.equal(await page.locator("#observer-view > header").isVisible(), false);
+    assert.equal(await page.locator("#observer-mobile-monitor").isVisible(), true);
+    assert.equal(await page.locator(".observer-card").first().evaluate(e=>getComputedStyle(e).fontSize), "13px");
+    await page.click("#observer-mobile-monitor");
+    await page.waitForFunction(()=>document.getElementById("observer-mobile-monitor").textContent==="관찰 시작");
+    assert(sent.some(r=>r.url==="/api/observer/settings" && r.body.enabled===false));
+    await page.click("#observer-mobile-monitor");
+    await page.waitForFunction(()=>document.getElementById("observer-mobile-monitor").textContent==="관찰 끄기");
+    await page.setViewportSize({width:1280,height:900});
+    assert.equal(await page.locator("#observer-view > header").isVisible(), true);
+    assert.equal(await page.locator("#observer-mobile-monitor").isVisible(), false);
+    await page.setViewportSize({width:390,height:844});
     assert(sent.some(r=>r.url==="/api/auth/session" && r.body.token==="fixture-token"));
     assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
     await page.selectOption("#observer-scope", "mesh"); await page.selectOption("#observer-selection", "team-b");

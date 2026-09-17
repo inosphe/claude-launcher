@@ -169,7 +169,8 @@ class Reports:
                 image_id=hashlib.sha256(raw).hexdigest()
                 path=self.root / "images" / hashlib.sha256(name.encode()).hexdigest() / image_id
                 with atomic.scratch(path) as scratch:
-                    scratch.write_bytes(raw)
+                    with scratch.open("wb") as image_file:
+                        image_file.write(raw)
                     atomic.replace(scratch,path)
                 return web.json_response({"id":image_id})
             except (ValueError, TypeError, AttributeError) as exc:
