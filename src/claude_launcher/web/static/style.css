@@ -3981,3 +3981,13 @@ a.window-owner:hover { color: #79c0ff; text-decoration: underline; }
 .sess-pr-steps li.failed { color: #f85149; }
 .sess-pr-link { display: inline-block; margin: 4px 0 8px; color: #58a6ff; word-break: break-all; }
 .sess-pr-note { color: #7d8590; font-size: 12px; margin: 4px 0; }
+
+.relay-settings-form { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; margin-top: 14px; }
+.relay-settings-form label { display: flex; flex-direction: column; gap: 5px; min-width: 0; }
+.relay-settings-form input:not([type="checkbox"]) { width: 100%; box-sizing: border-box; min-width: 0; padding: 8px; border: 1px solid #30363d; border-radius: 4px; background: #0d1117; color: #c9d1d9; }
+.relay-settings-form .relay-tls { flex-direction: row; align-items: center; }
+@media (max-width: 600px) {
+  .relay-settings-form { grid-template-columns: minmax(0, 1fr); }
+  .relay-settings-form input { font-size: 16px; }
+  .relay-settings-card .ws-row { flex-wrap: wrap; }
+}

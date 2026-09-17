@@ -450,6 +450,8 @@ def build_app(
     r.add_post("/api/mesh/{mesh}/ops/git", h_mesh_ops_git)
     r.add_get("/api/mesh/{mesh}/leases", h_mesh_leases_list)
     r.add_post("/api/mesh/{mesh}/leases", h_mesh_lease)
+    r.add_get("/api/relays", h_relay_settings)
+    r.add_post("/api/relays", h_relay_save)
     r.add_get("/api/relay/peers", h_relay_peers)
     r.add_get("/api/relay/peers/{machine}/sessions", h_relay_peer_sessions)
     # Peer federation endpoints. Deliberately outside /api/: the auth
@@ -3071,6 +3073,24 @@ async def h_mesh_invitation(request: web.Request) -> web.Response:
         subroles=_subroles_in(body),
     )
     return json_response({"member": member}, status=201)
+
+
+async def h_relay_settings(request: web.Request) -> web.Response:
+    service = request.app.get("relay_settings")
+    if service is None:
+        return json_error(503, "Relay settings are not available yet")
+    return json_response(service.state())
+
+
+async def h_relay_save(request: web.Request) -> web.Response:
+    service = request.app.get("relay_settings")
+    if service is None:
+        return json_error(503, "Relay settings are not available yet")
+    try:
+        result = await service.save(await _json_body(request))
+    except ValueError as exc:
+        return json_error(400, str(exc))
+    return json_response(result)
 
 
 async def h_relay_peers(request: web.Request) -> web.Response:
