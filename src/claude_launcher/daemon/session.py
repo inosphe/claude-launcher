@@ -939,9 +939,10 @@ class Session:
         Best-effort by design — every caller is a background sender with
         nothing to tell a user. Returns whether it landed, so a caller that
         must not lose the message (mesh delivery advancing its cursor) can
-        hold its position and retry on the next tick. Nothing is stored here:
-        a ``False`` means nothing was typed and the message is still wholly
-        the caller's, exactly as it was before the call.
+        hold its position and retry on the next tick. Nothing is stored here.
+        A draft refusal writes nothing; a failure during PTY I/O can have
+        written part of the message, so callers cannot assume every False
+        permits safe replay.
 
         With ``wait_for_draft``, a pre-write draft refusal returns ``None``
         internally so :meth:`deliver` can retry after releasing its lock.
