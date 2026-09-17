@@ -44,6 +44,7 @@ from . import (
     briefing, cflow_clock, clipty, ctxsize, loops, onboard, prompt_presets,
     rebrief, session_input, status_checks,
 )
+from . import paths
 from . import transcript_view
 from . import window as window_mod
 from ..cli_beads import BeadsError
@@ -60,6 +61,7 @@ from .harness import HarnessError, SessionDef
 from .manager import ManagerError, SessionManager
 from .mesh import MeshBusy, MeshConflict, MeshError, MeshManager
 from .session import STATUS_IDLE, KeyboardHeld, SessionGone
+from . import session as session_mod
 from . import ws as ws_mod
 
 COOKIE_NAME = "claunch_session"
@@ -521,6 +523,7 @@ def build_app(
         "/api/sessions/{name}/skip-permissions", h_session_skip_permissions
     )
     r.add_post("/api/sessions/{name}/keys", h_session_keys)
+    r.add_post("/api/sessions/{name}/paste-image", h_session_paste_image)
     r.add_post("/api/sessions/{name}/deliver", h_session_deliver)
     # The PR wizard (prflow.py): what the session's directory would push,
     # and the push itself. GET is the preview the form opens on, POST does
@@ -5211,9 +5214,90 @@ async def h_session_skip_permissions(request: web.Request) -> web.Response:
     return json_response(session.info())
 
 
+#: What a pasted image may weigh. A screenshot off a 4K display is a few MiB,
+#: and the aiohttp default body cap (1 MiB) is below that -- hence the
+#: route reading its own payload rather than calling request.read(), which
+#: would enforce the app-wide cap on every other route's behalf.
+PASTE_IMAGE_MAX_BYTES = 24 * 1024 * 1024
+
+#: Clipboard image types a browser actually produces, and the extension each
+#: one is saved under. Anything else is refused: the file is named for what it
+#: claims to be, and a wrong name is what makes a reader open the wrong thing.
+PASTE_IMAGE_TYPES = {
+    "image/png": ".png",
+    "image/jpeg": ".jpg",
+    "image/gif": ".gif",
+    "image/webp": ".webp",
+}
+
+
+async def h_session_paste_image(request: web.Request) -> web.Response:
+    """Store one pasted image for a session and answer with its path.
+
+    The web session line cannot hand a harness an *attachment*: the program in
+    the PTY reads bytes, and an image is not bytes it can read as a prompt. So
+    the image is written to a file next to the session's own state and the
+    path is what goes into the composer -- Claude Code opens an image path
+    given in a prompt, which is the whole point of the round trip.
+
+    The body is the image itself, with its media type in ``Content-Type``. It
+    is read in chunks against this route's own ceiling rather than through
+    ``request.read()``: raising the app-wide ``client_max_size`` for this one
+    route would raise it for every route.
+
+    The file lands in the session's state directory (``pastes/``), never in
+    the session's working directory -- a repository is not a place to drop
+    somebody's screenshot, and an untracked file there shows up in every
+    ``git status`` the session runs afterwards.
+    """
+    session = _session(request)
+    kind = (request.headers.get("Content-Type") or "").split(";")[0].strip().lower()
+    suffix = PASTE_IMAGE_TYPES.get(kind)
+    if suffix is None:
+        return json_error(
+            415,
+            f"{kind or 'no Content-Type'} is not an image this accepts "
+            f"({', '.join(sorted(PASTE_IMAGE_TYPES))})",
+        )
+    chunks: List[bytes] = []
+    total = 0
+    async for chunk in request.content.iter_chunked(64 * 1024):
+        total += len(chunk)
+        if total > PASTE_IMAGE_MAX_BYTES:
+            return json_error(
+                413,
+                f"the image is larger than "
+                f"{PASTE_IMAGE_MAX_BYTES // (1024 * 1024)} MiB",
+            )
+        chunks.append(chunk)
+    if not total:
+        return json_error(400, "the body carried no image bytes")
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+    folder = paths.session_dir(session.sdef.name) / "pastes"
+    folder.mkdir(parents=True, exist_ok=True)
+    target = folder / f"{stamp}-{secrets.token_hex(3)}{suffix}"
+    # Written through an open file rather than Path.write_bytes: the delivery
+    # contract's guard (tests/test_delivery_contract.py) reads call names, and
+    # a PTY write is spelled .write_bytes() too. Allowlisting this handler
+    # would excuse a real PTY write here later; spelling it differently does
+    # not.
+    with target.open("wb") as fh:
+        for chunk in chunks:
+            fh.write(chunk)
+    return json_response({"ok": True, "path": str(target), "bytes": total})
+
+
 async def h_session_keys(request: web.Request) -> web.Response:
     session = _session(request)
     body = await _json_body(request)
+    force = body.get("force", False)
+    if not isinstance(force, bool):
+        return json_error(400, "'force' must be a boolean")
+    request_id = body.get("input_id")
+    if request_id is not None and (
+        not isinstance(request_id, str) or not request_id.strip()
+    ):
+        return json_error(400, "'input_id' must be a non-empty string")
     paste = body.get("paste")
     if paste is not None:
         if not isinstance(paste, str):
@@ -5222,26 +5306,49 @@ async def h_session_keys(request: web.Request) -> web.Response:
         # behind a human typing at this terminal rather than splicing into
         # their half-written line — and refuses outright rather than typing
         # over a composer that never emptied (see Session.send_keys).
-        quiet = await session.await_keyboard_quiet(terminal_only=True)
+        #
+        # 'force' carries the same operator meaning it has for keys: the web
+        # session line sends a multi-line composition this way (a newline in
+        # the keys path would submit the block a line at a time), so it must
+        # not turn into a 30s wait or a 409 on a busy session.
+        quiet = await session.await_keyboard_quiet(
+            terminal_only=True,
+            timeout=session_mod.FORCE_TYPING_GRACE if force else None,
+        )
         if not quiet and session.draft_open():
-            return json_error(
-                409,
-                f"session {session.sdef.name!r}: someone is typing there "
-                f"right now — nothing was pasted. Retry in a moment.",
-            )
-        data = await session.paste(paste, enter=bool(body.get("enter")))
+            if force:
+                await session.submit_open_draft()
+            else:
+                return json_error(
+                    409,
+                    f"session {session.sdef.name!r}: someone is typing there "
+                    f"right now — nothing was pasted. Retry in a moment.",
+                )
+        if request_id is not None:
+            prior = session_input.latest(session.sdef.name, request_id)
+            if prior and prior.get("status") == "sent":
+                return json_response({"ok": True, "bytes": 0, "duplicate": True})
+            session_input.write(session.sdef.name, "input_accepted",
+                                request_id=request_id, text=paste,
+                                status="accepted", pid=session.pid)
+        try:
+            data = await session.paste(paste, enter=bool(body.get("enter")))
+        except Exception:
+            if request_id is not None:
+                session_input.write(session.sdef.name, "input_failed",
+                                    request_id=request_id, text=paste,
+                                    status="failed", pid=session.pid)
+            raise
+        if request_id is not None:
+            session_input.write(session.sdef.name, "input_sent",
+                                request_id=request_id, text=paste,
+                                status="sent", pid=session.pid)
         return json_response({"ok": True, "bytes": len(data)})
     keys = body.get("keys")
     if not isinstance(keys, list) or not all(isinstance(k, str) for k in keys):
         return json_error(400, "'keys' must be a list of strings")
-    force = body.get("force", False)
-    if not isinstance(force, bool):
-        return json_error(400, "'force' must be a boolean")
-    request_id = body.get("input_id")
     audit_text = keys[0] if request_id and len(keys) == 2 and keys[1] == "Enter" else None
     if request_id is not None:
-        if not isinstance(request_id, str) or not request_id.strip():
-            return json_error(400, "'input_id' must be a non-empty string")
         if audit_text is None:
             return json_error(400, "'input_id' requires [text, 'Enter'] keys")
         prior = session_input.latest(session.sdef.name, request_id)

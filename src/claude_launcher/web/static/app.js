@@ -7404,7 +7404,16 @@ function endSession() {
    client is what re-spreads the submit/enter split across call sites, and
    the split belongs to Session.send_keys — the one place that may fold and
    un-fold it (split_submit, under the bracketed-paste marker). A test pins
-   this single-call shape (tests/web/sendinput_check.js). */
+   this single-call shape (tests/web/sendinput_check.js).
+
+   The box holds more than one line, because Ctrl+J puts a newline in it the
+   way Claude Code's own composer does. A line that carries a newline cannot
+   go down the keys path: a raw LF written to a PTY is a submit, so the
+   session would receive the block a line at a time. It goes as ONE paste
+   instead (`paste` + `enter` on the same route), which the daemon writes as
+   a bracketed paste with its Enter as a separate, paced write — the path
+   `claunch send-keys --paste` and every delivery already use, and the reason
+   the newline survives whatever harness is running in the session. */
 
 function termInputBlock(ended) {
   if (ended) return "this session has ended — nothing to send keys to";
@@ -7434,19 +7443,24 @@ async function sendKeyLine(field, btn, note) {
   btn.disabled = true;
   try {
     const inputId = `input-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    // This is an explicit operator action either way. The daemon uses the
+    // short forced grace and submits an existing draft first, so a busy
+    // session does not turn a deliberate send into a 30s wait/409.
+    // A single line is keys; a line with a newline in it is one paste, whose
+    // Enter the daemon writes separately (Session.paste).
+    const body = text.includes("\n")
+      ? { paste: text, enter: true, force: true, input_id: inputId }
+      : { keys: [text, "Enter"], force: true, input_id: inputId };
     const resp = await api(
       `/api/sessions/${encodeURIComponent(currentName)}/keys`,
       { method: "POST",
         headers: { "Content-Type": "application/json" },
-        // This is an explicit operator action. The daemon uses the short
-        // forced grace and submits an existing draft first, so a busy
-        // session does not turn a deliberate send into a 30s wait/409.
-        body: JSON.stringify({ keys: [text, "Enter"], force: true,
-                              input_id: inputId }) }
+        body: JSON.stringify(body) }
     );
     const doc = await resp.json().catch(() => ({}));
     if (resp.ok) {
       field.value = "";
+      autogrowTermInput(field);
       return true;
     }
     termInputNote(note, doc.error || "the session refused these keys", true);
@@ -7513,6 +7527,7 @@ function insertPromptPreset(text) {
   const cursor = start + text.length;
   if (field.setSelectionRange) field.setSelectionRange(cursor, cursor);
   field.focus();
+  if (typeof autogrowTermInput === "function") autogrowTermInput(field);
   return true;
 }
 
@@ -7528,12 +7543,162 @@ function onTermInputSubmit(ev) {
   sendKeyLine($("term-input-field"), $("term-input-send"), $("term-input-note"));
 }
 
+/* The field's height is its content's. A <textarea> does not shrink back on
+   its own, so the height is cleared before it is read: scrollHeight of a
+   collapsed box is the height the text actually needs. The CSS ceiling
+   (max-height) turns the rest into a scroll rather than letting the composer
+   push the terminal off the screen. */
+function autogrowTermInput(field) {
+  if (!field || !field.style) return;
+  field.style.height = "auto";
+  const needed = field.scrollHeight;
+  if (needed) field.style.height = `${needed}px`;
+}
+
+/* Ctrl+J inserts a newline at the caret, Enter sends — the split Claude Code
+   uses in its own composer, and the reason this field is a <textarea>.
+   Enter is handled here rather than by the form, because a <textarea> does
+   not submit its form on Enter. An IME composing a syllable owns the key
+   while it composes (isComposing / keyCode 229): committing a Hangul block
+   with Enter must not also send the line. */
+function onTermInputKeydown(ev) {
+  const field = ev.currentTarget || ev.target;
+  if (!field || field.disabled) return;
+  if (ev.isComposing || ev.keyCode === 229) return;
+  const key = ev.key;
+  if (ev.ctrlKey && !ev.altKey && !ev.metaKey &&
+      (key === "j" || key === "J" || key === "\n")) {
+    ev.preventDefault();
+    const start = Number.isInteger(field.selectionStart)
+      ? field.selectionStart : field.value.length;
+    const end = Number.isInteger(field.selectionEnd) ? field.selectionEnd : start;
+    field.value = field.value.slice(0, start) + "\n" + field.value.slice(end);
+    const caret = start + 1;
+    if (field.setSelectionRange) field.setSelectionRange(caret, caret);
+    autogrowTermInput(field);
+    return;
+  }
+  if (ev.altKey && !ev.ctrlKey && !ev.metaKey && (key === "v" || key === "V")) {
+    ev.preventDefault();
+    pasteClipboardImage($("term-input-note"));
+    return;
+  }
+  if (key === "Enter" && !ev.shiftKey && !ev.ctrlKey && !ev.altKey && !ev.metaKey) {
+    ev.preventDefault();
+    sendKeyLine($("term-input-field"), $("term-input-send"), $("term-input-note"));
+  }
+}
+
+/* ---- Alt+V: a clipboard image becomes a path in the line ----------------
+   The program in the PTY reads bytes, so there is no way to hand it an
+   attachment from here. What CAN be handed over is a path: the image is
+   uploaded, the daemon writes it beside the session's own state, and the
+   path it answers with is typed into the composer — Claude Code opens an
+   image path given in a prompt, which is what makes the round trip worth
+   taking. The machine clipboard is never written to; it is shared with the
+   person at this keyboard and with every other session on this machine.
+
+   Two ways in, because the browsers differ on which one a page may use:
+   Alt+V reads the clipboard itself (navigator.clipboard.read, which needs
+   the permission and a secure context), and an ordinary Ctrl+V carrying an
+   image file is handled on the paste event, which needs neither. */
+
+async function uploadPastedImage(blob, note) {
+  if (!currentName) return false;
+  const kind = (blob.type || "").toLowerCase();
+  try {
+    const resp = await api(
+      `/api/sessions/${encodeURIComponent(currentName)}/paste-image`,
+      { method: "POST", headers: { "Content-Type": kind }, body: blob }
+    );
+    const doc = await resp.json().catch(() => ({}));
+    if (!resp.ok || !doc.path) {
+      if (note) termInputNote(note, doc.error || "the image was not stored", true);
+      return false;
+    }
+    const field = $("term-input-field");
+    if (!field) return false;
+    const start = Number.isInteger(field.selectionStart)
+      ? field.selectionStart : field.value.length;
+    const end = Number.isInteger(field.selectionEnd) ? field.selectionEnd : start;
+    // Padded with a space so the path does not fuse with what is already
+    // typed around it — a path glued to a word is not a path any more.
+    const text = `${doc.path} `;
+    field.value = field.value.slice(0, start) + text + field.value.slice(end);
+    const caret = start + text.length;
+    if (field.setSelectionRange) field.setSelectionRange(caret, caret);
+    if (typeof autogrowTermInput === "function") autogrowTermInput(field);
+    if (note) termInputNote(note, `image stored: ${doc.path}`);
+    return true;
+  } catch {
+    if (note) termInputNote(note, "nothing was stored — the daemon is unreachable", true);
+    return false;
+  }
+}
+
+/* The image on the clipboard right now, or null. Reading the clipboard can
+   be refused (no permission, an insecure origin, a browser that has no
+   read()), and a refusal is not an image — the caller says so rather than
+   leaving the reader looking at a box that did nothing. */
+async function clipboardImage() {
+  const clip = navigator.clipboard;
+  if (!clip || typeof clip.read !== "function") return null;
+  const items = await clip.read();
+  for (const item of items) {
+    const kind = (item.types || []).find((t) => t.startsWith("image/"));
+    if (kind) return await item.getType(kind);
+  }
+  return null;
+}
+
+async function pasteClipboardImage(note) {
+  let blob = null;
+  try {
+    blob = await clipboardImage();
+  } catch {
+    if (note) {
+      termInputNote(note, "the browser would not hand over the clipboard — "
+        + "use Ctrl+V to paste the image instead", true);
+    }
+    return false;
+  }
+  if (!blob) {
+    if (note) termInputNote(note, "there is no image on the clipboard", true);
+    return false;
+  }
+  return uploadPastedImage(blob, note);
+}
+
+/* An ordinary paste carrying an image file. The text of a mixed paste is
+   left to the browser; only the image is taken, and only then is the event
+   taken from it. */
+function onTermInputPaste(ev) {
+  const field = ev.currentTarget || ev.target;
+  if (!field || field.disabled) return;
+  const data = ev.clipboardData;
+  if (!data) return;
+  const items = Array.from(data.items || []);
+  const image = items.find((it) => it.kind === "file"
+    && (it.type || "").startsWith("image/"));
+  if (!image) return;
+  const blob = image.getAsFile();
+  if (!blob) return;
+  ev.preventDefault();
+  uploadPastedImage(blob, $("term-input-note"));
+}
+
 // Wired at load, like every other listener this page mounts — guarded like
 // every OTHER element access the whole-block harnesses (reconnect/wheel) boot
 // without: those eval this block against a stub DOM that only carries what the
 // block under test touches, and #term-input is not one of them.
 if ($("term-input"))
   $("term-input").addEventListener("submit", onTermInputSubmit);
+if ($("term-input-field")) {
+  $("term-input-field").addEventListener("keydown", onTermInputKeydown);
+  $("term-input-field").addEventListener("paste", onTermInputPaste);
+  $("term-input-field").addEventListener("input", (ev) =>
+    autogrowTermInput(ev.currentTarget || ev.target));
+}
 
 /* ---- typing marks ----
    Keystrokes that reach the daemon as bytes mark its keyboard busy on
@@ -8980,7 +9145,10 @@ function attach(name) {
   // (like #term-input below) for the whole-block harnesses that boot this
   // function without the input's element in their stub DOM.
   const termInputField = $("term-input-field");
-  if (termInputField) termInputField.value = "";
+  if (termInputField) {
+    termInputField.value = "";
+    if (typeof autogrowTermInput === "function") autogrowTermInput(termInputField);
+  }
   if (typeof refreshPromptPresets === "function") refreshPromptPresets();
   // The common hop: this session has been up before, so bring its parked
   // terminal back instead of building a new one — no socket, no repaint.
