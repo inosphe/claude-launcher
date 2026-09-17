@@ -10744,7 +10744,13 @@ function parseHash(h) {
     ? { page: "beads", section: parts[1] }
     : { page: "beads", id: parts[1] || "" };
   if (parts[0] === "reports") return { page: "beads", section: "reports" };
-  if (parts[0] === "settings" || parts[0] === "workspaces") return { page: "settings" };
+  // #/settings is the machine's own settings; #/settings/profiles the profile
+  // manager beside it. One shell, one section deep — the same spelling
+  // #/beads/<section> already uses, so a section is linkable and the Back
+  // button keeps meaning "out of Settings".
+  if (parts[0] === "settings" || parts[0] === "workspaces") {
+    return { page: "settings", section: parts[1] || "" };
+  }
   return { page: "home" };   // an unknown link is a wrong turn, not an error
 }
 
@@ -10794,7 +10800,7 @@ function route() {
     case "flows": showView("flows"); refreshCflow(); break;
     case "window": openWindowPage(); break;
     case "cli": openCli(); break;
-    case "settings": openSettings(); break;
+    case "settings": openSettings(r.section); break;
     case "beads": openBeads(r.id, r.section); break;
     default: openHome();
   }
@@ -11700,15 +11706,30 @@ let statusCheckEdit = null;
 // like an unresponsive click.
 const statusCheckRefreshes = new Map();
 
-function openWorkspaces() {
+//: Which section of the Settings page is up. Module state rather than an
+//: argument to renderWorkspaces(), the way beadsSection works: the
+//: refreshers below re-render from a poll, and a poll has no route to
+//: hand a section back through. "" is the machine tab, so a bare
+//: "#/settings" — and every existing bookmark — keeps landing where it did.
+let wsSection = "";
+
+function openWorkspaces(section) {
   wsOpen = true;
+  wsSection = section || "";
   showView("settings");
   renderWorkspaces();
   refreshWorkspaces();  // don't make the user wait out the 2s poll
 }
 
-function openSettings() {
-  openWorkspaces();
+function openSettings(section) {
+  openWorkspaces(section);
+  if (wsSection === "profiles") {
+    // The profile manager draws from its own list. Firing the other
+    // sections' refreshers here would spend six requests on cards this
+    // section does not render, and each one re-renders on arrival.
+    refreshProfiles();
+    return;
+  }
   refreshFaq();
   refreshPromptPresets();
   refreshStatusChecks();
@@ -14172,6 +14193,243 @@ function wsSessionsIn(path) {
   return want ? sessionsCache.filter((s) => norm(s.cwd) === want) : [];
 }
 
+/* ------------------------------------------------------------------ */
+/* Profiles (#/settings/profiles) — the profile manager                */
+/*                                                                    */
+/* A profile is one storage root: its own CLAUDE_CONFIG_DIR, its own   */
+/* token, its own settings.json. The CLI has owned their lifecycle     */
+/* since the beginning (create/remove/env/parent/set-token), and this  */
+/* section is the reading half of that plus the one key whose value    */
+/* every session feels before it does anything.                        */
+/*                                                                    */
+/* What it deliberately is NOT: a second writer. The one control that  */
+/* writes goes through POST /api/profiles/permission-mode, which edits */
+/* the store's shared declaration and then calls the same convergence  */
+/* ``claunch apply`` calls. A page holding its own copy of the answer  */
+/* would disagree with the CLI about a key that is in every profile.   */
+/* ------------------------------------------------------------------ */
+let profilesCache = [];
+let profilesError = "";
+let profileModeBusy = false;
+let profileModeNotice = "";
+let profileModeError = "";
+
+function settingsTabs() {
+  const tabs = el("div", "seq-tabs settings-tabs");
+  for (const [section, label, href] of [
+    ["", "General", "#/settings"],
+    ["profiles", "Profiles", "#/settings/profiles"],
+  ]) {
+    const tab = el("a", "seq-tab" + (wsSection === section ? " on" : ""), label);
+    tab.href = href;
+    tabs.appendChild(tab);
+  }
+  return tabs;
+}
+
+async function refreshProfiles() {
+  try {
+    const resp = await api("/api/profiles");
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
+    profilesCache = data.profile_details || [];
+    profilesError = "";
+  } catch (err) {
+    profilesError = String(err);
+  }
+  if (wsOpen) renderWorkspaces();
+}
+
+/* One row per profile, not one per harness. ``profile_details`` carries a
+   default row per profile and then a row per (profile, harness) selector;
+   ``explicit`` is what tells them apart, and it is absent on the rows that
+   stand for a profile the daemon could not describe at all — those are
+   reported rather than dropped, because a profile missing from this table
+   reads as a profile that does not exist. */
+function profileRows() {
+  return profilesCache.filter((p) => p.explicit === false || p.error);
+}
+
+function permissionRow(rows) {
+  for (const row of rows) if (row.permission_mode) return row.permission_mode;
+  return null;  // no Claude profile: nothing for this card to talk about
+}
+
+function profileModeCard() {
+  const card = el("div", "ws-card profile-mode-card");
+  const head = el("div", "home-card-head");
+  head.appendChild(el("h3", null, "Permission mode"));
+  card.appendChild(head);
+
+  const rows = profileRows();
+  const mode = permissionRow(rows);
+  if (!mode) {
+    card.appendChild(el(
+      "p", "wf-note",
+      "No Claude Code profile yet, so there is no settings.json for this " +
+      "key to live in."
+    ));
+    return card;
+  }
+
+  card.appendChild(el(
+    "p", "home-sub",
+    "What a session launched on a profile does before it acts. This is one " +
+    "value for every Claude profile — the convergence writes the same key " +
+    "into each one's settings.json — so changing it here changes all of them."
+  ));
+  card.appendChild(el(
+    "p", "home-sub",
+    `Declared: ${mode.declared === null ? "nothing (claunch's default)" : mode.declared}` +
+    ` · converges to ${mode.target}`
+  ));
+
+  const form = el("form", "ws-form profile-mode-form");
+  const select = el("select", "ws-input");
+  select.id = "profile-mode-select";
+  const fallback = el("option", null, `claunch default (${mode.target})`);
+  fallback.value = "";
+  select.appendChild(fallback);
+  for (const name of mode.modes) {
+    const option = el("option", null, name);
+    option.value = name;
+    select.appendChild(option);
+  }
+  select.value = mode.declared || "";
+  form.appendChild(select);
+
+  const apply = el("button", "wf-btn", profileModeBusy ? "Applying…" : "Apply");
+  apply.type = "submit";
+  apply.disabled = profileModeBusy;
+  form.appendChild(apply);
+  form.addEventListener("submit", (event) => {
+    event.preventDefault();
+    profileModeApply(select.value);
+  });
+  card.appendChild(form);
+
+  if (profileModeError) {
+    card.appendChild(el("p", "wf-error", profileModeError));
+  } else if (profileModeNotice) {
+    card.appendChild(el("p", "wf-note", profileModeNotice));
+  }
+  return card;
+}
+
+/* The sentence the write comes back with. Told as three counts rather than
+   one, because a mode change that reached no profile and one that reached
+   every profile both "succeeded", and only the second is what the person
+   pressed the button for. */
+function profileModeResult(data) {
+  const bits = [];
+  if (data.converged && data.converged.length) {
+    bits.push(`wrote it into ${data.converged.length} profile(s)`);
+  }
+  if (data.unchanged && data.unchanged.length) {
+    bits.push(`${data.unchanged.length} already had it`);
+  }
+  if (data.failed && data.failed.length) {
+    const first = data.failed[0];
+    bits.push(`FAILED on ${first.profile}: ${first.reason}`);
+  }
+  const what = data.declared === null || data.declared === undefined
+    ? `back on claunch's default (${data.target})`
+    : `declared ${data.declared}`;
+  return `${what} — ${bits.length ? bits.join(", ") : "nothing to write"}.`;
+}
+
+async function profileModeApply(mode) {
+  profileModeBusy = true;
+  profileModeError = "";
+  profileModeNotice = "";
+  if (wsOpen) renderWorkspaces();
+  try {
+    const resp = await api("/api/profiles/permission-mode", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ mode: mode || null }),
+    });
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
+    profileModeNotice = profileModeResult(data);
+  } catch (err) {
+    profileModeError = String(err);
+  }
+  profileModeBusy = false;
+  // Re-read rather than patch the cache: the write may have changed every
+  // profile, and the table's whole value is that it says what is on disk.
+  await refreshProfiles();
+}
+
+function profilesPanel() {
+  const panel = el("div", "profiles-panel");
+  panel.appendChild(el(
+    "p", "wf-note",
+    "A profile is one storage root — its own CLAUDE_CONFIG_DIR, its own " +
+    "token, its own settings.json. A session is launched on one, and the " +
+    "profile is what decides its harness, provider and settings."
+  ));
+  if (profilesError) panel.appendChild(el("p", "wf-error", profilesError));
+  panel.appendChild(profileModeCard());
+
+  const list = el("div", "ws-list profiles-list");
+  const rows = profileRows();
+  list.appendChild(el("h3", null, `Profiles (${rows.length})`));
+  if (!rows.length) {
+    list.appendChild(el(
+      "p", "wf-note",
+      "No profiles yet. Create one with 'claunch create <name>' — a session " +
+      "needs one to run on."
+    ));
+    panel.appendChild(list);
+    return panel;
+  }
+
+  const table = el("table", "md-table profiles-table");
+  const thead = el("thead", null);
+  const hrow = el("tr", null);
+  for (const label of ["Profile", "Harness", "Provider", "Permission mode", "Directory"]) {
+    hrow.appendChild(el("th", null, label));
+  }
+  thead.appendChild(hrow);
+  table.appendChild(thead);
+
+  const body = el("tbody", null);
+  for (const row of rows) {
+    const tr = el("tr", null);
+    tr.appendChild(el("td", null, row.profile || row.name || "?"));
+    if (row.error) {
+      const cell = el("td", "profile-error", row.error);
+      cell.colSpan = 4;
+      tr.appendChild(cell);
+      body.appendChild(tr);
+      continue;
+    }
+    tr.appendChild(el("td", null, row.harness || "?"));
+    tr.appendChild(el("td", null, (row.harness_policy || {}).provider || "—"));
+    const mode = row.permission_mode;
+    if (!mode) {
+      // Another harness: this is a Claude Code key and that harness never
+      // reads it, so an empty cell is the honest answer, not a zero.
+      tr.appendChild(el("td", "profile-muted", "—"));
+    } else if (mode.value === null) {
+      tr.appendChild(el("td", "profile-pending", "asks (no value)"));
+    } else {
+      const cell = el(
+        "td", mode.converged ? "profile-ok" : "profile-pending",
+        mode.converged ? mode.value : `${mode.value} → ${mode.target}`
+      );
+      tr.appendChild(cell);
+    }
+    tr.appendChild(el("td", null, row.directory || ""));
+    body.appendChild(tr);
+  }
+  table.appendChild(body);
+  list.appendChild(table);
+  panel.appendChild(list);
+  return panel;
+}
+
 function renderWorkspaces() {
   const view = $("ws-view");
   const focused = document.activeElement && document.activeElement.id;
@@ -14183,6 +14441,19 @@ function renderWorkspaces() {
   back.addEventListener("click", () => { location.hash = "#"; });
   head.appendChild(back);
   view.appendChild(head);
+  view.appendChild(settingsTabs());
+
+  // The profile manager is its own section and shares none of the cards
+  // below: they are machine settings, this is the list of storage roots.
+  if (wsSection === "profiles") {
+    view.appendChild(profilesPanel());
+    if (focused) {
+      const again = $(focused);
+      if (again) again.focus();
+    }
+    return;
+  }
+
   view.appendChild(el(
     "p", "wf-note",
     "The directories a session may be spawned in. The create form's " +

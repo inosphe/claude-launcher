@@ -24,6 +24,34 @@ from .profile import Profile
 
 SETTINGS_FILENAME = "settings.json"
 
+#: The values ``permissions.defaultMode`` accepts, in the words the installed
+#: Claude Code itself rejects a wrong one with ("Valid modes: \"acceptEdits\"
+#: (ask before file changes), \"plan\" (analysis only), \"bypassPermissions\"
+#: (auto-accept all), or \"default\" (standard behavior)"). ``manual`` is
+#: accepted as an alias for ``default``, and ``auto`` is the classifier-backed
+#: mode this project's own sessions run in -- all three appear here because all
+#: three are accepted on the wire, and a validator that named fewer would
+#: refuse a value the harness honours.
+#:
+#: This list is a gate, not documentation: it is what stops a typo
+#: (``permisions.defaultMode``, ``accept-edits``) from being converged into
+#: every profile as a key Claude Code then ignores. Keep it beside the file it
+#: describes rather than at a caller, so the CLI, the daemon and the web form
+#: cannot drift apart on which values exist.
+PERMISSION_MODES = (
+    "default",
+    "manual",
+    "acceptEdits",
+    "plan",
+    "auto",
+    "bypassPermissions",
+)
+
+
+def is_permission_mode(value: object) -> bool:
+    """Whether ``value`` is one of :data:`PERMISSION_MODES`."""
+    return str(value) in PERMISSION_MODES
+
 
 def _path(profile: Profile):
     return profile.config_dir / SETTINGS_FILENAME

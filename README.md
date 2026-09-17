@@ -2943,6 +2943,22 @@ itself is never touched, and sessions already in it keep running. The list
 refreshes in place, so a `claunch workspace add` in a terminal shows up here
 too, and `(daemon cwd)` is always available in the picker.
 
+The Settings page has two sections. **General** is everything above.
+**Profiles** (`#/settings/profiles`) is the profile manager: one row per
+profile with its harness, provider, config directory and permission mode, and
+the control for that mode — which is the one profile setting every session
+feels before it does anything. A row whose value differs from what claunch
+converges shows the move (`auto → plan`) rather than a value, because that
+profile's convergence has not run yet; a profile on another harness shows a
+dash, since the key is one Claude Code reads and that harness never will.
+
+The permission mode is **one value for every Claude profile**, not one per
+profile — see [Keys claunch defaults](#keys-claunch-defaults). Changing it here
+declares `permissions.defaultMode` and converges, which is the same two steps
+`claunch shared permissions.defaultMode=<mode>` runs; a profile's own
+`settings.json` is still yours to edit by hand, and claunch converges rather
+than polices.
+
 The same Settings page carries a **GitHub CLI (gh)** card, the machine side
 of the [PR-landing worker](#workflows-cflow): whether `gh` resolves on the
 *daemon's* PATH (a spawned worker inherits that environment, not the
@@ -3159,7 +3175,8 @@ REST endpoints (JSON, `Bearer` or cookie auth; `/api/health` is open):
 | GET    | `/api/sessions/{name}/wait`    | long-poll `?state=idle\|exited&timeout=&threshold=` |
 | POST   | `/api/sessions/{name}/resize`  | `{cols, rows}` |
 | GET    | `/api/sessions/{name}/ws`      | terminal WebSocket (binary = PTY bytes, text = JSON control) |
-| GET    | `/api/profiles`                | base profile names, policy-filtered execution selectors, labelled default options, and diagnostic selector details |
+| GET    | `/api/profiles`                | base profile names, policy-filtered execution selectors, labelled default options, and diagnostic selector details (each profile's own row also carries `directory`, `permission_mode` when it runs Claude, and that profile's `harness_policy`) |
+| POST   | `/api/profiles/permission-mode` | declare claunch's default permission mode and converge: `{"mode": "auto"}` (any of `default`, `manual`, `acceptEdits`, `plan`, `auto`, `bypassPermissions`), or `{"mode": null}` to undeclare and fall back to the packaged default; `400` on an unknown mode, before anything is written |
 | GET    | `/api/borrow-options`          | `?profile=PROFILE[:HARNESS]` — secret-free lender validation; returns every base-profile option, including the runtime base profile, with policy/credential status and `selectable` |
 | GET    | `/api/roles`                   | packaged role preview (name, aliases, stance); a selected mesh's `/roles` resource is authoritative |
 | GET    | `/api/workspaces`              | registered directories, for the create form's picker and the manage page |
