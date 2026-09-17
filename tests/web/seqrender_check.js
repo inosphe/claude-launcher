@@ -22,7 +22,11 @@ function slice(from, to) {
 }
 
 const code = [
-  slice("const TRACE_POLL_MS", "function stopMsgPoll"),
+  // The page's constants and its own controls, down to the poll that feeds
+  // them. The controls are in here because `traceHead` reads one of them —
+  // `toggleTraceOnly`, what its switch is wired to — while it draws, so a
+  // slice that stopped at the poll would not render the header at all.
+  slice("const TRACE_POLL_MS", "async function refreshTrace("),
   slice("function traceMs(", "/* ---- the page"),
   slice("function traceHead(", "/* boot  "),
 ].join("\n");
@@ -65,21 +69,29 @@ const fmtAge = (s) => `${Math.floor(s / 60)}m`;
 const renderMeshOwed = () => el("div", "mesh-owed", "unanswered box");
 const location = { hash: "" };
 const traceSession = "coder3";
-let traceLast = null;
 const traceOpen = new Set();
 
-const ctx = {};
-new Function(
-  "exports", "document", "$", "el", "svg", "go", "fmtAge", "renderMeshOwed",
-  "location", "traceSession", "traceLast", "traceOpen",
-  // svg() itself is the shared helper the rest of the app draws with; it is
-  // three lines and taking it from source keeps this honest.
-  slice("function svg(tag, attrs, text)", "/* Cut state is per EDGE") + "\n" +
-  code +
-  "\nObject.assign(exports, {renderTrace, seqRow, msgEvents, msgLanes, seqW});"
-)(ctx, document, $, el, undefined, go, fmtAge, renderMeshOwed, location,
-  traceSession, traceLast, traceOpen);
-const { renderTrace, seqRow, msgEvents, msgLanes, seqW } = ctx;
+/* The page's own state is passed in, because the slice below starts after
+   app.js declares it. Two of those are the page's to change while it is up,
+   so a second instance is built rather than mutated from out here: a primed
+   traceLast is what a poll has already left behind, and traceOnly is the
+   reading a reader switches into. */
+function build(traceLast, traceOnly) {
+  const ctx = {};
+  new Function(
+    "exports", "document", "$", "el", "svg", "go", "fmtAge", "renderMeshOwed",
+    "location", "traceSession", "traceLast", "traceOpen", "traceOnly",
+    // svg() itself is the shared helper the rest of the app draws with; it is
+    // three lines and taking it from source keeps this honest.
+    slice("function svg(tag, attrs, text)", "/* Cut state is per EDGE") + "\n" +
+    code +
+    "\nObject.assign(exports, {renderTrace, seqRow, msgEvents, msgLanes, seqW});"
+  )(ctx, document, $, el, undefined, go, fmtAge, renderMeshOwed, location,
+    traceSession, traceLast, traceOpen, traceOnly);
+  return ctx;
+}
+
+const { renderTrace, seqRow, msgEvents, msgLanes, seqW } = build(null, false);
 
 /* ---- walk helpers ----------------------------------------------------- */
 function all(root, pred, out = []) {
@@ -92,6 +104,11 @@ const hasClass = (n, c) =>
 const withClass = (root, c) => all(root, (n) => hasClass(n, c));
 const byTag = (root, t) => all(root, (n) => n.tag === t);
 const texts = (root) => all(root, () => true).map((n) => n.text).filter(Boolean);
+/* The legend's own vocabulary, in the order the page draws it. */
+const LEGEND = ["mine", "faint", "waiting", "owed", "flow"];
+const legendKeys = (root) => withClass(root, "seq-legend-swatch")
+  .map((n) => LEGEND.find((k) => hasClass(n, k)))
+  .filter(Boolean);
 
 let failures = 0;
 function check(name, cond, extra) {
@@ -280,6 +297,66 @@ renderTrace(DATA);
         withClass(view, "seq-row-svg").length === 0 &&
         withClass(view, "wf-note").length === 1,
         texts(view));
+}
+
+/* --- the switch: the room, or this session's thread --------------------- */
+{
+  // A second instance of the page, with a payload already in hand — which is
+  // what a poll leaves behind, and what makes the click below redraw rather
+  // than fall through on a null.
+  const page = build(DATA, false);
+  page.renderTrace(DATA);
+
+  const before = withClass(view, "seq-msg").length;
+  const btn = withClass(view, "seq-only");
+  check("the page offers one switch, and it starts off",
+        btn.length === 1 && btn[0].attrs["aria-pressed"] === "false" &&
+        !hasClass(btn[0], "on"),
+        btn.map((n) => [n.text, n.attrs]));
+  check("its title says what turning it on would do",
+        btn[0].title.includes("hide") && btn[0].title.includes("coder3"),
+        btn[0].title);
+
+  btn[0].handlers.click[0]();   // turn it on the way a reader does
+
+  const on = withClass(view, "seq-only")[0];
+  check("the switch lights, and says it is pressed",
+        hasClass(on, "on") && on.attrs["aria-pressed"] === "true", on.attrs);
+  check("...and now offers the way back",
+        on.title.includes("whole room"), on.title);
+  check("the room's other traffic is gone, not merely faded",
+        before === 4 && withClass(view, "seq-msg").length === 2 &&
+        withClass(view, "seq-msg").every((n) => !hasClass(n, "faint")),
+        withClass(view, "seq-msg").map((n) => texts(n)));
+  const names = withClass(view, "seq-lane-name").map((n) => n.text);
+  check("and the column that only those rows held up goes with them",
+        names.join() === "lead,coder3,reviewer", names);
+  check("no joins: an arrival is about another member, and is not a message",
+        withClass(view, "seq-join").length === 0);
+  check("the run's own marks stay, being this session's activity",
+        withClass(view, "seq-flow-label").length === 1);
+  check("the legend stops naming a mark the picture cannot contain",
+        legendKeys(view).join() === "mine,waiting,owed,flow", legendKeys(view));
+  check("the page says which of the two readings it is showing",
+        withClass(view, "wf-desc").some((n) => n.text.includes("is hidden")),
+        withClass(view, "wf-desc").map((n) => n.text));
+
+  withClass(view, "seq-only")[0].handlers.click[0]();   // ...and back
+  check("turning it off restores the room",
+        withClass(view, "seq-msg").length === 4 &&
+        legendKeys(view).join() === "mine,faint,waiting,owed,flow",
+        legendKeys(view));
+}
+
+/* --- a thread with nothing in it is not an empty room ------------------- */
+{
+  const page = build(DATA, true);
+  page.renderTrace({ ...DATA, history: DATA.history.filter((m) => m.id === "b"),
+                     owed: null, flow: null });
+  const desc = withClass(view, "wf-desc").map((n) => n.text).join(" ");
+  check("a session that has said nothing here is told apart from a silent mesh",
+        desc.includes("none of the last 1") && desc.includes("coder3"),
+        desc);
 }
 
 /* --- geometry: the picture is as wide as the room ----------------------- */

@@ -24045,12 +24045,20 @@ async function refreshFlowView() {
    Deliberately not the focus session's mailbox alone. A message from lead to
    reviewer is the reason the next one arrived here, and reading this session's
    half of it explains nothing — so the whole room is drawn, and everything the
-   focus session is not part of is faded rather than dropped. */
+   focus session is not part of is faded rather than dropped.
+
+   `traceOnly` is that fade turned into a filter, for the reader who is done
+   with the context and wants the thread. It is the page's only control, and
+   it is deliberately not in the URL: the hash names which session and which
+   room, and those are what a link is for — how much of the room a reader
+   wants in front of them is theirs, and it follows them from one session's
+   trace to the next. */
 let traceSession = null;   // the session the trace is about (null = closed)
 let traceMesh = "";        // the mesh tab on screen ("" = not chosen yet)
 let tracePollTimer = null;
 let traceLast = null;      // last payload, for an instant redraw on expand
 let traceOpen = new Set(); // message ids expanded to their full body
+let traceOnly = false;     // ...and nothing but the focus session's traffic
 
 /* Slower than the terminal's rail and the mesh page (2s): this is a page you
    read, not a monitor you watch, and every tick costs four calls. */
@@ -24086,6 +24094,14 @@ function openTrace(name, mesh) {
 function traceGoMesh(mesh) {
   location.hash =
     `#/msg/${encodeURIComponent(traceSession)}/${encodeURIComponent(mesh)}`;
+}
+
+/* Flip between the room and this session's thread, and redraw from the
+   payload already in hand: the toggle changes what is drawn, not what is
+   fetched, so it costs no call and no flash of the page reloading. */
+function toggleTraceOnly() {
+  traceOnly = !traceOnly;
+  if (traceLast) renderTrace(traceLast);
 }
 
 function traceFail(msg) {
@@ -24218,6 +24234,9 @@ function traceFlowLabel(e) {
 
 function msgEvents(input) {
   const focus = input.handle || "";
+  // only-mode: the room's own traffic is context, and this is the reader
+  // saying they are done with it. See the note above `traceOnly`.
+  const only = !!input.only;
   const gapMs = input.gapMs === undefined ? TRACE_GAP_MS : input.gapMs;
   const members = input.members || [];
   const known = new Set(members.map((m) => m.handle));
@@ -24237,12 +24256,19 @@ function msgEvents(input) {
   // approximation and the only one available: the run's journal and the
   // roster are written by other hands than the mesh's sequencer.
   const side = [];
-  for (const m of members) {
-    if (!m.joined_at) continue;
-    side.push({
-      kind: "join", at: m.joined_at, handle: m.handle,
-      role: m.role, parent: m.parent, machine: m.machine,
-    });
+  // A join is about another member and is not a message, so only-mode leaves
+  // it out — and it has to, or every member who ever joined would hold a
+  // column up in a picture that is supposed to be one session's thread. The
+  // run marks below are the focus session's own, which is what the mode is
+  // about, so they stay.
+  if (!only) {
+    for (const m of members) {
+      if (!m.joined_at) continue;
+      side.push({
+        kind: "join", at: m.joined_at, handle: m.handle,
+        role: m.role, parent: m.parent, machine: m.machine,
+      });
+    }
   }
   for (const e of (input.journal || [])) {
     const label = traceFlowLabel(e);
@@ -24266,6 +24292,21 @@ function msgEvents(input) {
     const to = resolved
       ? msg.recipients
       : (msg.to === "*" ? [] : Array.isArray(msg.to) ? msg.to : [msg.to]);
+    // The focus session is a party to this if it sent it or is being sent
+    // it. Everything else is the room's business, drawn faded — and dropped
+    // outright in only-mode. Dropped here, before the side events are
+    // flushed, so that the gap markers that follow are measured over what
+    // the reader can see rather than over a conversation that is no longer
+    // on the page.
+    //
+    // Only-mode takes the rows the picture already calls this session's, so
+    // a broadcast from a daemon too old to say who it reached falls on the
+    // faded side and is hidden with the rest. That is deliberate rather than
+    // an oversight: nothing here can tell who that message reached, its row
+    // says so in as many words, and inventing a party from a '*' would be
+    // the guess the annotation exists to refuse.
+    const mine = msg.from === focus || to.includes(focus);
+    if (only && !mine) continue;
     merged.push({
       kind: "msg",
       at: msg.ts,
@@ -24273,9 +24314,7 @@ function msgEvents(input) {
       from: msg.from,
       to,
       resolved,
-      // The focus session is a party to this if it sent it or is being sent
-      // it. Everything else is the room's business, drawn faded.
-      mine: msg.from === focus || to.includes(focus),
+      mine,
       external: !known.has(msg.from),
       delivered: msg.delivered || [],
       remote: msg.remote || [],
@@ -24677,6 +24716,25 @@ function traceHead(data) {
       "the name this session answers to in this mesh — it is a different " +
       "handle in each one";
     head.appendChild(who);
+    // The page's one control, and it sits beside the room it narrows rather
+    // than in a toolbar of its own. It shows its state on its face — pressed,
+    // and lit — instead of by changing its words, the way the rail's pin
+    // does; the title is where the action is spelled out. Drawn only when
+    // there IS a room: on the error and no-mesh pages there is nothing for
+    // it to narrow.
+    const only = el(
+      "button", "wf-btn seq-only" + (traceOnly ? " on" : ""),
+      "only this session"
+    );
+    only.type = "button";
+    only.setAttribute("aria-pressed", traceOnly ? "true" : "false");
+    only.title = traceOnly
+      ? "show the whole room again — every message in this mesh, with the " +
+        "ones that passed between other members faded"
+      : `hide the room's other traffic, and leave only what ${traceSession} ` +
+        "sent or was sent";
+    only.addEventListener("click", toggleTraceOnly);
+    head.appendChild(only);
   }
   const term = el("button", "wf-btn option", "terminal");
   term.title = "watch this session work";
@@ -24703,11 +24761,14 @@ function traceTabs(data) {
   return bar;
 }
 
-function traceLegend() {
+function traceLegend(only) {
   const box = el("div", "seq-legend");
   for (const [cls, label] of [
     ["mine", "this session is a party to it"],
-    ["faint", "between others, for context"],
+    // The faded rows are exactly what only-mode takes out, so its key is left
+    // out with them: a legend naming a mark the picture cannot contain is a
+    // key to nothing.
+    ...(only ? [] : [["faint", "between others, for context"]]),
     ["waiting", "sent, not typed in yet"],
     ["owed", "asked, never answered"],
     ["flow", "its workflow moved"],
@@ -24718,6 +24779,29 @@ function traceLegend() {
     box.appendChild(item);
   }
   return box;
+}
+
+/* What the picture is showing, in one sentence. Only-mode is not the room's
+   sentence with a clause bolted on — it is a different reading, and a reader
+   looking at a thread with nothing in it has to be told which of the two
+   they are in, because "nothing has been said" and "nothing has been said to
+   YOU" are different facts about a busy mesh. */
+function traceDesc(shown, total, focus) {
+  const tail =
+    "Click a message to read all of it. Only what travelled THROUGH the mesh " +
+    "is here — words typed straight into a terminal leave no record.";
+  if (!traceOnly) {
+    return `the last ${total} message(s) in this mesh, in the order the mesh ` +
+      `sequenced them. ${tail}`;
+  }
+  if (!shown) {
+    return `none of the last ${total} message(s) in this mesh is ${focus}'s — ` +
+      "the toggle is hiding every one of them, because they all passed " +
+      "between other members. Turn it off to read the room.";
+  }
+  return `the ${shown} of the last ${total} message(s) in this mesh that ` +
+    `${focus} sent or was sent, in the order the mesh sequenced them — the ` +
+    `rest passed between other members and is hidden. ${tail}`;
 }
 
 function renderTrace(data) {
@@ -24746,6 +24830,7 @@ function renderTrace(data) {
   const focus = data.mesh.handle;
   const events = msgEvents({
     handle: focus,
+    only: traceOnly,
     members: (data.info || {}).members || [],
     messages: data.history || [],
     owed: data.owed,
@@ -24759,14 +24844,12 @@ function renderTrace(data) {
   SEQ.lane = seqFit(lanes.length, Math.max(0, (view.clientWidth || 0) - 56));
   const width = seqW(lanes.length);
 
-  view.appendChild(traceLegend());
-  view.appendChild(el(
-    "p", "wf-desc",
-    "the last " + (data.history || []).length + " message(s) in this mesh, in " +
-    "the order the mesh sequenced them. Only what travelled THROUGH the mesh " +
-    "is here — words typed straight into a terminal leave no record. Click a " +
-    "message to read all of it."
-  ));
+  view.appendChild(traceLegend(traceOnly));
+  view.appendChild(el("p", "wf-desc", traceDesc(
+    events.filter((e) => e.kind === "msg").length,
+    (data.history || []).length,
+    focus
+  )));
 
   // Above the scroller, not inside it: the diagram scrolls sideways, and a
   // block of prose and buttons dragged along by that is unreadable on a
@@ -24789,7 +24872,9 @@ function renderTrace(data) {
 
   const rows = el("div", "seq-rows");
   if (!events.length) {
-    rows.appendChild(el("p", "wf-note", "nothing has been said in this mesh yet"));
+    rows.appendChild(el("p", "wf-note", traceOnly
+      ? `nothing has passed between ${focus} and another member in this mesh`
+      : "nothing has been said in this mesh yet"));
   }
   for (const ev of events) rows.appendChild(seqRow(ev, lanes, width));
   scroll.appendChild(rows);

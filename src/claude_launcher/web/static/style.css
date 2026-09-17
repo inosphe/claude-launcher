@@ -2359,6 +2359,12 @@ a.wf-btn { display: inline-block; text-decoration: none; line-height: 1.5; }
 .wf-btn.approve:hover { background: #2ea043; }
 .wf-btn.option { background: #1f6feb; }
 .wf-btn.option:hover { background: #388bfd; }
+/* A toggle rather than a press: the message trace's "only this session"
+   switch wears the same blue the mesh page's message filters do while it is
+   on, and keeps the plain face while it is off. Its own class as well, so the
+   lit state cannot land on a button that is not one. */
+.wf-btn.seq-only.on { background: #1f6feb; }
+.wf-btn.seq-only.on:hover { background: #388bfd; }
 .wf-btn.nudge { background: #30363d; color: #c6cdd5; }
 .wf-btn.nudge:hover { background: #3c444d; }
 .wf-btn.force { background: #7d4e11; margin-top: 10px; }
