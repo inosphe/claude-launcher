@@ -7555,38 +7555,54 @@ function autogrowTermInput(field) {
   if (needed) field.style.height = `${needed}px`;
 }
 
-/* Ctrl+J inserts a newline at the caret, Enter sends — the split Claude Code
-   uses in its own composer, and the reason this field is a <textarea>.
+/* Ctrl+Enter sends. Enter, Shift+Enter and Ctrl+J all break the line at the
+   caret, and this field is a <textarea> for that reason. Claude Code's own
+   composer sends on Enter and breaks on Ctrl+J, but Ctrl+J is a browser
+   shortcut in the Firefox family — it opens the downloads panel and never
+   reaches this handler — so the line break is on the key every browser
+   delivers and the send moved to the chord.
    Enter is handled here rather than by the form, because a <textarea> does
    not submit its form on Enter. An IME composing a syllable owns the key
    while it composes (isComposing / keyCode 229): committing a Hangul block
-   with Enter must not also send the line. */
+   with Enter must not also break the line. */
 function onTermInputKeydown(ev) {
   const field = ev.currentTarget || ev.target;
   if (!field || field.disabled) return;
   if (ev.isComposing || ev.keyCode === 229) return;
   const key = ev.key;
-  if (ev.ctrlKey && !ev.altKey && !ev.metaKey &&
-      (key === "j" || key === "J" || key === "\n")) {
-    ev.preventDefault();
-    const start = Number.isInteger(field.selectionStart)
-      ? field.selectionStart : field.value.length;
-    const end = Number.isInteger(field.selectionEnd) ? field.selectionEnd : start;
-    field.value = field.value.slice(0, start) + "\n" + field.value.slice(end);
-    const caret = start + 1;
-    if (field.setSelectionRange) field.setSelectionRange(caret, caret);
-    autogrowTermInput(field);
-    return;
-  }
   if (ev.altKey && !ev.ctrlKey && !ev.metaKey && (key === "v" || key === "V")) {
     ev.preventDefault();
     pasteClipboardImage($("term-input-note"));
     return;
   }
-  if (key === "Enter" && !ev.shiftKey && !ev.ctrlKey && !ev.altKey && !ev.metaKey) {
+  if (key === "Enter" && ev.ctrlKey && !ev.altKey && !ev.metaKey) {
     ev.preventDefault();
     sendKeyLine($("term-input-field"), $("term-input-send"), $("term-input-note"));
+    return;
   }
+  const breaksLine =
+    (key === "Enter" && !ev.ctrlKey && !ev.altKey && !ev.metaKey) ||
+    (ev.ctrlKey && !ev.altKey && !ev.metaKey &&
+     (key === "j" || key === "J" || key === "\n"));
+  if (breaksLine) {
+    ev.preventDefault();
+    insertTermInputText(field, "\n");
+  }
+}
+
+/* One place that writes into the composer at the caret, so a line break and
+   a pasted image path land the same way and leave the caret after what was
+   put in. A field that reports no selection (an older browser, a stub) is
+   appended to. */
+function insertTermInputText(field, text) {
+  if (!field) return;
+  const start = Number.isInteger(field.selectionStart)
+    ? field.selectionStart : field.value.length;
+  const end = Number.isInteger(field.selectionEnd) ? field.selectionEnd : start;
+  field.value = field.value.slice(0, start) + text + field.value.slice(end);
+  const caret = start + text.length;
+  if (field.setSelectionRange) field.setSelectionRange(caret, caret);
+  autogrowTermInput(field);
 }
 
 /* ---- Alt+V: a clipboard image becomes a path in the line ----------------
@@ -7618,16 +7634,9 @@ async function uploadPastedImage(blob, note) {
     }
     const field = $("term-input-field");
     if (!field) return false;
-    const start = Number.isInteger(field.selectionStart)
-      ? field.selectionStart : field.value.length;
-    const end = Number.isInteger(field.selectionEnd) ? field.selectionEnd : start;
     // Padded with a space so the path does not fuse with what is already
     // typed around it — a path glued to a word is not a path any more.
-    const text = `${doc.path} `;
-    field.value = field.value.slice(0, start) + text + field.value.slice(end);
-    const caret = start + text.length;
-    if (field.setSelectionRange) field.setSelectionRange(caret, caret);
-    if (typeof autogrowTermInput === "function") autogrowTermInput(field);
+    insertTermInputText(field, `${doc.path} `);
     if (note) termInputNote(note, `image stored: ${doc.path}`);
     return true;
   } catch {

@@ -1,7 +1,8 @@
 /* The send-keys input under the terminal. A native field where xterm's
-   composer is a terminal — the field the reader types a prompt into, Enter
-   handing the line to the session through the same send-keys passthrough
-   `claunch send-keys` uses, Ctrl+J putting a newline in it instead.
+   composer is a terminal — the field the reader types a prompt into,
+   Ctrl+Enter handing the line to the session through the same send-keys
+   passthrough `claunch send-keys` uses, Enter putting a newline in it
+   instead.
 
    The box has to hold the contract the whole raw-keystroke path lives under:
    the text and its Enter go in ONE /keys call (a client that splits them
@@ -9,8 +10,10 @@
    Session.send_keys alone), an empty or unaddressed line sends nothing, a
    refusal's words are shown and the half-typed line kept, a dead daemon does
    not look like a delivery, and a session that has ended has the box closed
-   with the reason shown, Ctrl+J inserts a newline at the caret rather than
-   sending, and a line that carries a newline goes as ONE paste (the keys
+   with the reason shown, Enter and Shift+Enter insert a newline at the caret
+   rather than sending (Ctrl+J does too, where the browser lets it through —
+   the Firefox family takes it for the downloads panel), and a line that
+   carries a newline goes as ONE paste (the keys
    path would write a raw LF, which every harness reads as a submit, so the
    block would arrive a line at a time). Slice the real functions out of
    app.js, drive them against a stub DOM, and check all of it. */
@@ -112,6 +115,7 @@ let sessionEnded = false;
 ` + slice("sendKeyLine") + `
 ` + slice("termInputBlock") + `
 ` + slice("autogrowTermInput") + `
+` + slice("insertTermInputText") + `
 ` + slice("uploadPastedImage") + `
 ` + slice("clipboardImage") + `
 ` + slice("pasteClipboardImage") + `
@@ -225,36 +229,52 @@ async function main() {
   check("the line survives that too", b.field.value === "hello?");
   check("and the button is usable again", b.btn.disabled === false);
 
-  /* ---- Ctrl+J is a newline at the caret, not a send ---- */
+  /* ---- Enter breaks the line at the caret and sends nothing ---- */
   sent = [];
   reply = { ok: true, doc: {} };
   ctx.setSession("coder4", false);
   FIELD.disabled = false;
   FIELD.value = "first";
   FIELD.selectionStart = FIELD.selectionEnd = 5;
-  const cj = press("j", { ctrlKey: true });
-  check("Ctrl+J is taken from the browser", cj.prevented === true);
-  check("Ctrl+J puts a newline in the box", FIELD.value === "first\n",
+  const ent = press("Enter");
+  check("Enter is taken from the browser", ent.prevented === true);
+  check("Enter puts a newline in the box", FIELD.value === "first\n",
         FIELD.value);
   check("...with the caret after it", FIELD.selectionStart === 6,
         FIELD.selectionStart);
   check("...and sends nothing", sent.length === 0, sent);
 
+  /* ---- Shift+Enter and Ctrl+J break the line the same way ---- */
+  FIELD.value = "first";
+  FIELD.selectionStart = FIELD.selectionEnd = 5;
+  const se = press("Enter", { shiftKey: true });
+  check("Shift+Enter breaks the line",
+        se.prevented === true && FIELD.value === "first\n", FIELD.value);
+  FIELD.value = "first";
+  FIELD.selectionStart = FIELD.selectionEnd = 5;
+  const cj = press("j", { ctrlKey: true });
+  check("Ctrl+J still breaks the line, where the browser lets it through",
+        cj.prevented === true && FIELD.value === "first\n", FIELD.value);
+  check("...and none of those sent anything", sent.length === 0, sent);
+
   /* ---- it inserts where the caret is, over a selection ---- */
   FIELD.value = "abcd";
   FIELD.selectionStart = 1; FIELD.selectionEnd = 3;
-  press("j", { ctrlKey: true });
-  check("Ctrl+J replaces the selection", FIELD.value === "a\nd", FIELD.value);
+  press("Enter");
+  check("Enter replaces the selection", FIELD.value === "a\nd", FIELD.value);
 
-  /* ---- Enter sends, and an IME committing a syllable does not ---- */
+  /* ---- Ctrl+Enter sends, and an IME committing a syllable does not ---- */
   sent = [];
   FIELD.value = "send me";
-  const ime = press("Enter", { isComposing: true });
+  const ime = press("Enter", { ctrlKey: true, isComposing: true });
   check("an Enter that commits an IME syllable sends nothing",
         sent.length === 0 && ime.prevented === false, sent);
-  const ent = press("Enter");
+  const ce = press("Enter", { ctrlKey: true });
   await settle();
-  check("Enter sends the line", sent.length === 1 && ent.prevented === true, sent);
+  check("Ctrl+Enter sends the line",
+        sent.length === 1 && ce.prevented === true, sent);
+  check("...and the line it sent is the one in the box",
+        sent[0].body.keys[0] === "send me", sent[0].body);
 
   /* ---- a line with a newline in it goes as ONE paste ---- */
   sent = [];
