@@ -2479,6 +2479,33 @@ a.wf-btn { display: inline-block; text-decoration: none; line-height: 1.5; }
 /* Natural size (the svg's own width/height attrs), shrunk-to-fit only:
    a wider column must not zoom the graph, so 100% became a ceiling. */
 .wfd { max-width: 100%; height: auto; display: block; }
+/* Navigation bounds stay inside the column, including narrow split panes. */
+.diagram-viewer { width: 100%; min-width: 0; max-width: 100%; margin-top: 8px; }
+.diagram-tools { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding: 6px 0; }
+.diagram-tools .wf-btn { min-width: 40px; min-height: 40px; margin: 0; }
+.diagram-tools [aria-pressed="true"] { border-color: #58a6ff; background: #172947; }
+.diagram-scale { min-width: 46px; text-align: center; font-size: 12px; }
+.diagram-viewport {
+  width: 100%; min-width: 0; height: clamp(220px, 55vh, 640px);
+  height: clamp(220px, 55dvh, 640px); overflow: auto;
+  position: relative; border: 1px solid #30363d; border-radius: 8px;
+  background: #161b22; touch-action: none; overscroll-behavior: contain;
+}
+.diagram-viewport:focus-visible { outline: 2px solid #58a6ff; outline-offset: 2px; }
+.diagram-stage { position: relative; }
+.diagram-stage > svg {
+  position: absolute; left: 12px; top: 12px; display: block;
+  max-width: none; min-width: 0; margin: 0; border: 0;
+}
+.diagram-viewport.pan-mode, .diagram-viewport.pan-mode * { cursor: grab; }
+.diagram-viewport.dragging, .diagram-viewport.dragging * { cursor: grabbing; user-select: none; }
+.diagram-help { color: #9da5b0; font-size: 11px; line-height: 1.5; padding: 4px 0; overflow-wrap: anywhere; }
+.diagram-viewer.diagram-expanded {
+  position: fixed; inset: 8px; z-index: 1000; margin: 0; padding: 12px;
+  width: auto; max-width: none; background: #161b22;
+  display: flex; flex-direction: column; border: 1px solid #4d5566; border-radius: 8px;
+}
+.diagram-expanded .diagram-viewport { flex: 1; min-height: 0; height: 0; }
 .wfd-node { cursor: pointer; }
 .wfd-node:hover rect { stroke: #8fa1b3; }
 .wfd-node rect { fill: #1b1e24; stroke: #30363d; stroke-width: 1.5; }

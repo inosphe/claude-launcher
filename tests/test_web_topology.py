@@ -422,3 +422,24 @@ def test_every_harness_is_registered():
         "CHECKS names a file that is not in tests/web: "
         + ", ".join(sorted(listed - present))
     )
+
+
+def test_diagram_viewport_browser():
+    """Real scroll geometry and native touch input need a browser.
+
+    Optional locally: install Playwright externally and set NODE_PATH to its
+    node_modules directory, then run this test with Chromium installed.
+    """
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node is not installed")
+    available = subprocess.run(
+        [node, "-e", "require.resolve('playwright')"], capture_output=True, timeout=10,
+    )
+    if available.returncode:
+        pytest.skip("Playwright is not installed (or not on NODE_PATH)")
+    proc = subprocess.run(
+        [node, str(WEB / "diagramviewport_browser.cjs")],
+        capture_output=True, text=True, encoding="utf-8", timeout=60,
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
