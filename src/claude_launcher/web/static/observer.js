@@ -6,6 +6,9 @@ let snapshot = {sessions: [], enabled: false}, pending = false, refreshTask = nu
 const drafts = new Map(), answerDrafts = new Map();
 let runs = [], gateCache = new Map(), cflowError = false;
 let draftTarget = "";
+// The composer starts folded on a phone and stays where the reader left it.
+// Desktop ignores this: there the whole footer is always laid out.
+let composerFolded = true;
 const node = (tag, text, cls) => { const e = document.createElement(tag); e.textContent = text; if(cls)e.className=cls; return e; };
 async function request(path, body) {
   const options = body === undefined ? {} : {method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)};
@@ -113,6 +116,26 @@ const mobileView = matchMedia("(max-width:820px)");
 let boardOrder = [];
 const timestamp = value => Number.isFinite(Date.parse(value)) ? Date.parse(value) : 0;
 const latestActivity = s => Math.max(timestamp(s.last_activity_at),timestamp(s.generated_at),...(s.events||[]).map(e=>timestamp(e.at)));
+function ageText(value) {
+  const at=timestamp(value);
+  if(!at)return null;
+  const age=Math.max(0,Date.now()-at);
+  if(age<60000)return "방금";
+  if(age<3600000)return `${Math.floor(age/60000)}분 전`;
+  if(age<86400000)return `${Math.floor(age/3600000)}시간 전`;
+  return `${Math.floor(age/86400000)}일 전`;
+}
+/* How stale a card is, in two parts because they answer different questions:
+   when the observer last rewrote this session's summary, and when the session
+   itself last did anything. Both absent (a row written before the meter) is
+   answered by saying nothing rather than by a dash. */
+function updatedText(s) {
+  const parts=[];
+  const generated=ageText(s.generated_at), active=ageText(s.last_activity_at);
+  if(generated)parts.push(`업데이트 ${generated}`);
+  if(active)parts.push(`활동 ${active}`);
+  return parts.length?parts.join(" · "):null;
+}
 function visibleSessions() {
   const scope=$("scope").value, selected=$("selection").value;
   return snapshot.sessions.filter(s=>($("ended").checked||s.running)
@@ -130,6 +153,8 @@ function sessionHeader(s, cls="") {
   const card=node("article","",`observer-card ${cls}`);card.dataset.session=s.name;
   const title=node("h2",s.name+" "), state=activity(s);
   title.append(node("span",state.label,`state ${state.kind}`));card.append(title);
+  const updated=updatedText(s);
+  if(updated)card.append(node("small",updated,"observer-updated"));
   const links=node("nav","","observer-links");
   for(const [label,href] of [["관찰 결과","#/observer/session/"],["터미널","#/s/"],["트랜스크립트","#/log/"]]) {
     const link=node("a",label);link.href=href+encodeURIComponent(s.name);links.append(link);
@@ -137,9 +162,18 @@ function sessionHeader(s, cls="") {
   card.append(links);
   return card;
 }
+function composerState() {
+  const toggle=$("composer-toggle"), folded=mobileView.matches&&composerFolded;
+  $("composer").classList.toggle("folded",folded);
+  toggle.hidden=!mobileView.matches;
+  toggle.setAttribute("aria-expanded",String(!folded));
+  toggle.textContent=`입력 대상 세션 ${folded?"▸":"▾"}`;
+}
 function inputButton(card,s) {
   const button=node("button","이 세션에 입력");button.disabled=!s.running;
-  button.onclick=()=>{chooseTarget(s.name);$("prompt").focus();};card.append(button);
+  // Picking a session is a request to type at it, so the composer opens first
+  // when it is folded — a focus() on a hidden textarea would go nowhere.
+  button.onclick=()=>{chooseTarget(s.name);composerFolded=false;composerState();$("prompt").focus();};card.append(button);
 }
 function eventItem(s,e) {
   const item=node("div","",`event${e.needs_action&&!e.acknowledged?" action":""}`);
@@ -155,10 +189,46 @@ function eventItem(s,e) {
   }
   return item;
 }
+/* The observation meter. The daemon keeps a lifetime total and a per-day
+   breakdown per session; the page-level figure is those added up here, so
+   the daemon stores one shape and the client decides how to read it. A row
+   written before the meter carries only the last call's `usage`, and that is
+   shown as it was rather than as an empty meter. */
+const USAGE_FIELDS = [["prompt_tokens","입력"],["completion_tokens","출력"],
+                      ["prompt_cache_hit_tokens","캐시적중"],["prompt_cache_miss_tokens","미스"]];
+const usageCount = value => Number.isFinite(value) ? value.toLocaleString("ko-KR") : "0";
+function usageSum(base, add) {
+  const out={calls:(base?.calls||0)+(add?.calls||0)};
+  for(const [key] of USAGE_FIELDS)out[key]=(base?.[key]||0)+(add?.[key]||0);
+  return out;
+}
+function usageLine(label,u) {
+  return `${label}  호출 ${usageCount(u.calls)}회 · `
+    + USAGE_FIELDS.map(([key,name])=>`${name} ${usageCount(u[key])}`).join(" · ");
+}
+function usageText(sessions) {
+  let total=null; const daily={};
+  for(const s of sessions) {
+    if(s.usage_totals)total=usageSum(total,s.usage_totals);
+    for(const [day,u] of Object.entries(s.usage_daily||{}))daily[day]=usageSum(daily[day],u);
+  }
+  if(!total)return "";
+  return [usageLine("누적",total),...Object.keys(daily).sort().reverse().map(day=>usageLine(day,daily[day]))].join("\n");
+}
+function usageBlock(s) {
+  const more=document.createElement("details");
+  const body=s.usage_totals?usageText([s]):JSON.stringify({usage:s.usage,context_rotations:s.rotations},null,2);
+  more.append(node("summary","관찰 API 사용량 (누적)"),node("pre",body));
+  return more;
+}
 function render() {
   const visible=visibleSessions(), cards=$("cards"), mobile=mobileView.matches;
   syncTargets(visible);
+  composerState();
   $("counts").textContent=`${visible.length}개 세션 · 미확인 요청 ${visible.reduce((n,s)=>n+(s.events||[]).filter(e=>e.needs_action&&!e.acknowledged).length+sessionRuns(s).filter(sessCflowGated).length,0)}개`;
+  const usage=usageText(snapshot.sessions);
+  $("usage").hidden=!usage;
+  $("usage-body").textContent=usage;
   $("monitor").textContent=snapshot.enabled?"관찰 끄기":"관찰 시작";
   $("mobile-monitor").textContent=$("monitor").textContent;
   $("notice").textContent=(cflowError?"cflow 상태 조회 실패 · 마지막 조회 결과 표시":snapshot.error)||(snapshot.enabled?"관찰 중 · 세션별 순차 처리 · 최소 60초 간격":"관찰이 꺼져 있습니다. 시작하면 ds4-official/deepseek-flash API로 트랜스크립트를 전송합니다.");
@@ -178,11 +248,16 @@ function render() {
       if(!events.length&&!sessionRuns(s).some(r=>String(r.status).startsWith("waiting")))entries.push({s,at:latestActivity(s),key:s.name+":summary"});
     }
     entries.sort((a,b)=>b.at-a.at||a.key.localeCompare(b.key));
+    // One meter per session, on that session's newest post: the timeline
+    // repeats a busy session for every event, and the same totals under each
+    // of them would be noise rather than a measurement.
+    const metered=new Set();
     for(const {s,e,r} of entries) {
       const card=sessionHeader(s,"observer-post");
       if(e)card.append(eventItem(s,e));
       else if(r)addGate(card,s,r);
       else card.append(node("p",s.summary||"아직 관찰 결과가 없습니다."),node("small",activity(s).duration));
+      if(!metered.has(s.name)) {metered.add(s.name);card.append(usageBlock(s));}
       inputButton(card,s);cards.append(card);
     }
   } else {
@@ -197,7 +272,7 @@ function render() {
       if(s.error)body.append(node("p",s.error));
       const events=[...(s.events||[])].sort((a,b)=>timestamp(b.at)-timestamp(a.at));
       for(const e of events.filter(e=>!$("actions-only").checked||(e.needs_action&&!e.acknowledged)))body.append(eventItem(s,e));
-      const more=document.createElement("details");more.append(node("summary","관찰 API 사용량"),node("pre",JSON.stringify({usage:s.usage,context_rotations:s.rotations},null,2)));body.append(more);
+      body.append(usageBlock(s));
       card.append(body);inputButton(card,s);cards.append(card);body.scrollTop=scrolls.get(s.name)||0;
     }
   }
@@ -242,6 +317,7 @@ $("scope").onchange=()=>{selections();navigate();};
 $("activity").onchange=render;
 $("selection").onchange=navigate;$("actions-only").onchange=render;$("ended").onchange=render;
 $("target").onchange=()=>chooseTarget($("target").value);$("prompt").oninput=controls;
+$("composer-toggle").onclick=()=>{if(!mobileView.matches)return;composerFolded=!composerFolded;composerState();if(!composerFolded)$("prompt").focus();};
 $("monitor").onclick=async()=>{try{await request("api/observer/settings",{enabled:!snapshot.enabled});await refresh();}catch(err){$("notice").textContent=err.message;}};
 $("mobile-monitor").onclick=()=>$("monitor").click();
 async function send(interrupt) {
@@ -277,5 +353,6 @@ async function open(scope = "global", name = "") {
   render();
   poll=setInterval(()=>{if(!document.hidden)refresh();},10000);
 }
+composerState();
 return {open, stop};
 })();

@@ -175,12 +175,22 @@
       <button id="observer-sort" type="button">최신순 정렬</button>
       </div>
       <p id="observer-counts"></p>
+      <!-- Every observed session's meter summed, so the cost of watching the
+           fleet is one number rather than one per card. The client adds the
+           per-session totals up; the daemon keeps only those. -->
+      <details id="observer-usage" hidden><summary>관찰 API 사용량 합계 (전체 세션)</summary><pre id="observer-usage-body"></pre></details>
       <p id="observer-layout-hint" class="hint"></p>
       <p class="hint">직접 보고·사용자 질문·cflow 응답 대기를 표시합니다. 자동 요약의 근거는 각 이벤트에서 확인할 수 있습니다. 장기 대기는 마지막 실질 활동 후 30분 이상인 경우입니다.</p>
       <section id="observer-cards" aria-label="세션 결과"></section>
       </div>
       <footer id="observer-composer">
-      <label for="observer-target">입력 대상 세션</label><select id="observer-target"><option value="">세션 선택</option></select>
+      <!-- On a phone this footer is most of the screen, so it folds: the
+           button below is its header and the only thing left when folded.
+           Desktop never hides any of it (the button is hidden there). The
+           select keeps its own accessible name because the <label> that
+           names it is hidden at the same width. -->
+      <button id="observer-composer-toggle" type="button" aria-expanded="true" hidden>입력 대상 세션 ▾</button>
+      <label for="observer-target">입력 대상 세션</label><select id="observer-target" aria-label="입력 대상 세션"><option value="">세션 선택</option></select>
       <button id="observer-interrupt" disabled>현재 응답 중단 (Esc)</button>
       <label for="observer-prompt" class="sr-only">세션에 보낼 지시</label>
       <textarea id="observer-prompt" rows="3" placeholder="선택한 세션에 보낼 지시를 입력하십시오."></textarea>

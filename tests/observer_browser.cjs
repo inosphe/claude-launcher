@@ -9,9 +9,19 @@ const root = path.join(__dirname, "../src/claude_launcher/web/static");
 const sent = [];
 let gates=[];
 let observerReads = 0, needsLogin = true;
+// The meter's days are fixed strings, not "today": the panel labels them as
+// written, so a fixture that used the clock would only assert the clock.
 const data = { enabled: true, sessions: [
   { name: "s1", status: "busy", running: true, meshes: ["team-a"], summary: "테스트 12개 통과. 결정을 기다립니다.",
-    generated_at: new Date().toISOString(), events: [{ id: "e1", kind: "action", text: "배포 환경을 선택하십시오.",
+    generated_at: new Date().toISOString(), last_activity_at: new Date(Date.now()-300000).toISOString(),
+    usage_totals: { calls: 3, prompt_tokens: 3000, completion_tokens: 210,
+                    prompt_cache_hit_tokens: 1200, prompt_cache_miss_tokens: 1800 },
+    usage_daily: {
+      "2026-09-17": { calls: 2, prompt_tokens: 2000, completion_tokens: 140,
+                      prompt_cache_hit_tokens: 800, prompt_cache_miss_tokens: 1200 },
+      "2026-09-16": { calls: 1, prompt_tokens: 1000, completion_tokens: 70,
+                      prompt_cache_hit_tokens: 400, prompt_cache_miss_tokens: 600 } },
+    events: [{ id: "e1", kind: "action", text: "배포 환경을 선택하십시오.",
       needs_action: true, source: "transcript:1", at: new Date().toISOString(), acknowledged: false }] },
   { name: "s2", status: "idle", running: true, meshes: ["team-b"], summary: "병합 완료", events: [] },
 ] };
@@ -72,6 +82,34 @@ const server = http.createServer((req, res) => {
     assert.equal(await page.locator("#observer-view > header").isVisible(), false);
     assert.equal(await page.locator("#observer-mobile-monitor").isVisible(), true);
     assert.equal(await page.locator(".observer-card").first().evaluate(e=>getComputedStyle(e).fontSize), "13px");
+    // The composer is most of this screen, so it arrives folded with its own
+    // header standing in for it, and the header alone opens it back up.
+    assert.equal(await page.locator("#observer-composer-toggle").isVisible(), true);
+    assert.equal(await page.locator("#observer-composer").evaluate(e=>e.classList.contains("folded")), true);
+    assert.equal(await page.locator("#observer-prompt").isVisible(), false);
+    assert.equal(await page.locator("#observer-target").isVisible(), false);
+    await page.click("#observer-composer-toggle");
+    assert.equal(await page.locator("#observer-prompt").isVisible(), true);
+    assert.equal(await page.locator("#observer-composer").evaluate(e=>e.classList.contains("folded")), false);
+    await page.click("#observer-composer-toggle");
+    assert.equal(await page.locator("#observer-prompt").isVisible(), false);
+    // The observation meter: per session on its own post, and once for the
+    // whole board. Both name a day rather than only a lifetime figure.
+    const s1Post = page.locator('.observer-post[data-session="s1"]');
+    assert.equal(await s1Post.count(), 1);
+    assert.match(await s1Post.locator(".observer-updated").innerText(), /업데이트 방금/);
+    assert.match(await s1Post.locator(".observer-updated").innerText(), /활동 5분 전/);
+    const meter = s1Post.locator("details", { hasText: "관찰 API 사용량 (누적)" });
+    await meter.locator("summary").click();
+    const meterText = await meter.locator("pre").innerText();
+    assert.match(meterText, /누적\s+호출 3회 · 입력 3,000 · 출력 210 · 캐시적중 1,200 · 미스 1,800/);
+    assert.match(meterText, /2026-09-17\s+호출 2회/);
+    assert.match(meterText, /2026-09-16\s+호출 1회/);
+    await page.locator("#observer-usage summary").click();
+    const boardUsage = await page.locator("#observer-usage-body").innerText();
+    assert.match(boardUsage, /누적\s+호출 3회 · 입력 3,000 · 출력 210 · 캐시적중 1,200 · 미스 1,800/);
+    assert.match(boardUsage, /2026-09-17\s+호출 2회/);
+    await page.locator("#observer-usage summary").click();
     await page.click("#observer-mobile-monitor");
     await page.waitForFunction(()=>document.getElementById("observer-mobile-monitor").textContent==="관찰 시작");
     assert(sent.some(r=>r.url==="/api/observer/settings" && r.body.enabled===false));
@@ -134,8 +172,19 @@ const server = http.createServer((req, res) => {
     await page.waitForFunction(() => document.body.dataset.page === "observer");
     await page.waitForTimeout(150);
     assert(observerReads > stoppedReads, "observer polling resumes on return");
+    // Folded on the phone, and desktop ignores that state rather than
+    // inheriting it: there the whole footer is laid out and the header is gone.
+    const isFolded = () => page.locator("#observer-composer").evaluate(e=>e.classList.contains("folded"));
+    if (!await isFolded()) await page.click("#observer-composer-toggle");
+    assert.equal(await isFolded(), true);
+    assert.equal(await page.locator("#observer-prompt").isVisible(), false);
     await page.setViewportSize({width:1280,height:900});
     await page.waitForSelector(".observer-board");
+    assert.equal(await page.locator("#observer-composer").evaluate(e=>e.classList.contains("folded")), false);
+    assert.equal(await page.locator("#observer-prompt").isVisible(), true);
+    assert.equal(await page.locator("#observer-composer-toggle").isVisible(), false);
+    assert((await page.locator('.observer-column[data-session="s1"] details', { hasText: "관찰 API 사용량 (누적)" }).count()) >= 1,
+      "the desktop column keeps its own meter");
     const beforeOrder=await page.locator(".observer-column").evaluateAll(es=>es.map(e=>e.dataset.session));
     data.sessions[1].last_activity_at=new Date(Date.now()+60000).toISOString();
     data.sessions[1].summary="latest activity for s2";
@@ -205,6 +254,6 @@ const server = http.createServer((req, res) => {
     assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);
     if(process.env.CLAUNCH_SCREENSHOT) await page.screenshot({path:process.env.CLAUNCH_SCREENSHOT,fullPage:true});
     assert.deepEqual(errors, []);
-    console.log("PASS: mobile layout, scope/action filters, evidence, Escape, target input, per-session drafts, shared auth, deep links, polling lifecycle, legacy redirect, direct screenshot/answer, activity filters, cflow approval/selection");
+    console.log("PASS: mobile layout, composer fold, usage meter over calls and days, elapsed-since-update, scope/action filters, evidence, Escape, target input, per-session drafts, shared auth, deep links, polling lifecycle, legacy redirect, direct screenshot/answer, activity filters, cflow approval/selection");
   } finally { await browser.close(); server.close(); server.closeAllConnections(); }
 })().catch(error => { console.error(error); server.close(); server.closeAllConnections(); process.exitCode = 1; });
