@@ -44,7 +44,7 @@ import yaml
 from .. import atomic, digests
 from . import loops, mesh_ops, mesh_policy, mesh_roles, paths, wire
 from .manager import AnySession, ManagerError, SessionManager
-from .session import STATUS_IDLE
+from .session import STATUS_IDLE, session_category
 
 log = logging.getLogger("claunch.daemon.mesh")
 
@@ -2271,18 +2271,21 @@ class MeshManager:
         # available after respawn. The briefing should offer current peers,
         # excluding local sessions known to have exited or been removed.
         # Remote session liveness is unknown here; keep those members.
-        available = set()
-        for handle, peer in mesh.members.items():
-            if handle == member.handle:
-                continue
-            if self._is_local(mesh, peer):
-                try:
-                    session = self.manager.get(peer.session)
-                except ManagerError:
-                    continue
-                if session.exited:
-                    continue
-            available.add(handle)
+        #
+        # "Known to have exited or been removed" is `_member_category`'s
+        # question, so it is asked in the one place that answers it rather
+        # than re-derived from `session.exited` here: that category is
+        # ``running``, ``killed``, ``paused``, ``archived`` or ``missing``,
+        # and the two a briefing keeps are the running ones and ``remote``
+        # (unknowable, so not called dead). Deriving it twice is how the
+        # roster, the filter above it and this briefing would come to
+        # disagree about which peers are still around.
+        available = {
+            handle
+            for handle, peer in mesh.members.items()
+            if handle != member.handle
+            and self._member_category(mesh, peer) in ("running", "remote")
+        }
         reachable = [h for h in mesh.neighbours(member.handle) if h in available]
         others = ", ".join(
             f"{h} ({mesh.members[h].role_label()})" for h in reachable
@@ -6378,6 +6381,12 @@ class MeshManager:
                     "pending": len(mesh.pending(handle)) if local else None,
                     "owed": owed,
                     "reachability": self._reachability(mesh, m),
+                    # The lifecycle partition the roster filters by: the same
+                    # four words the session rail uses, plus the two a member
+                    # can be in and a session cannot (``missing``, ``remote``
+                    # — see `_member_category`). `reachability` stays exactly
+                    # as it was: the CLI prints it and the spawn tests read it.
+                    "category": self._member_category(mesh, m),
                     "parent": parent if parent in mesh.members else None,
                 }
             )
@@ -6481,6 +6490,30 @@ class MeshManager:
         except ManagerError:
             return "missing"
         return "exited" if session.exited else session.status()
+
+    def _member_category(self, mesh: Mesh, member: Member) -> str:
+        """Which lifecycle partition a member is in, for the roster's filter.
+
+        A local member gets the same answer the session rail gets, from the
+        same function (:func:`session.session_category`), so one record cannot
+        be filed as killed on one page and archived on another.
+
+        The other two words are the cases a session cannot be in, and they are
+        not guesses. ``missing`` means the record is gone entirely. ``remote``
+        means another daemon's member: our copy of its liveness comes from the
+        activity report, which skips exited sessions, so a dead remote member
+        is indistinguishable from a live one here. Calling it dead would hide
+        a member that may be working, so a filter that drops killed records
+        keeps ``remote`` — the roster would otherwise be least trustworthy
+        exactly where it is least able to check.
+        """
+        if not self._is_local(mesh, member):
+            return "remote"
+        try:
+            session = self.manager.get(member.session)
+        except ManagerError:
+            return "missing"
+        return session_category(session)
 
     # ------------------------------------------------------------------ #
     # delivery worker

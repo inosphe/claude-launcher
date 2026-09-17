@@ -499,6 +499,47 @@ def test_briefing_excludes_exited_and_missing_peers(home, wired):
     assert "members: killed (worker), live (worker)\n" in mm.briefing_block(mesh, me)
 
 
+def test_briefing_excludes_paused_peers_too(home):
+    """A paused peer is dropped, and paused is not a state of its own here.
+
+    ``claunch-rli9`` named killed and archived, but the rule it wrote drops
+    every exited record, so a paused one went with them. That was implicit
+    while the check was ``session.exited``; it is worth pinning now that the
+    answer comes from ``session_category``, where ``paused`` *is* a category
+    of its own and keeping it would look like a deliberate choice. It is not
+    one: a paused peer has stopped, and the briefing lists who to address
+    now. Removing the marker changes nothing — killed and paused are both
+    out.
+    """
+    mgr = _Manager()
+    mm, mesh = _mesh(mgr)
+    me = _member(mesh, "me", mgr.add("self"), role="worker")
+    _member(mesh, "live", mgr.add("running"), role="worker")
+    _member(mesh, "held", mgr.add("paused"), role="worker")
+    held = mgr.get("paused")
+    held.exited = True
+    held.paused_at = "2026-09-17T12:00:00+00:00"  # the pause marker
+    _connect(mesh, "me", "live")
+    _connect(mesh, "me", "held")
+
+    def listed(block: str) -> str:
+        return next(
+            line for line in block.splitlines() if line.startswith("members: ")
+        )
+
+    block = mm.briefing_block(mesh, me)
+    assert listed(block) == "members: live (worker)"
+    # Not counted as hidden either: that note counts members who are around
+    # and merely not connected, and a paused one is not around.
+    assert "other member(s)" not in block
+
+    # The marker off is a plain kill: still out, and the count does not move.
+    held.paused_at = None
+    block = mm.briefing_block(mesh, me)
+    assert listed(block) == "members: live (worker)"
+    assert "other member(s)" not in block
+
+
 def test_briefing_hidden_count_excludes_ended_and_missing_sessions(home):
     mgr = _Manager()
     mm, mesh = _mesh(mgr)

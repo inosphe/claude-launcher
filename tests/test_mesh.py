@@ -74,6 +74,16 @@ async def _wait_screen(session, needle: str, timeout: float = 20.0) -> None:
     )
 
 
+async def _wait_exited(session, timeout: float = 20.0) -> None:
+    """Wait for a killed session's reader to see EOF and mark the record."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if session.exited:
+            return
+        await asyncio.sleep(0.05)
+    raise AssertionError(f"{session.name!r} never exited")
+
+
 async def _wait_drained(mesh, handle: str, timeout: float = 10.0) -> None:
     """Wait for ``handle``'s cursor to catch up (delivery ends a beat after
     the block hits the screen — the submitting Enter is a delayed write)."""
@@ -1849,6 +1859,70 @@ def test_mesh_mcp_tools(home, monkeypatch):
     )
     assert resp["result"]["isError"] is True
     assert "'session' is required" in resp["result"]["content"][0]["text"]
+
+
+def test_member_rows_carry_the_lifecycle_partition(home, tmp_path):
+    """The roster's filter needs the four words the session rail filters by.
+
+    ``reachability`` collapses every ended record into ``exited``, and the
+    roster is where that collapse costs most: 8 of the 12 members of the
+    daemon's own gds6 mesh are ended records, so "exited" leaves the reader
+    unable to tell one that was respawnable from one waiting to be resumed
+    from one put away on purpose. The words come from the single function that
+    defines them (``session.session_category``), which is what the rail
+    filters by too — otherwise one record could be filed two ways on one
+    screen. ``reachability`` itself is unchanged: the CLI prints it and the
+    spawn tests read it.
+    """
+    _register_py_harness()
+    mgr = _manager()
+    mm = MeshManager(mgr)
+    mm.create("m")
+
+    async def run():
+        for name in ("live", "killed", "paused", "away"):
+            mgr.create(SessionDef(name=name, harness="py", cwd=str(tmp_path)))
+        await mm.join("m", "live", handle="alice")
+        await mm.join("m", "killed", handle="bob")
+        await mm.join("m", "paused", handle="carol")
+        await mm.join("m", "away", handle="dave")
+
+        def categories() -> dict:
+            mesh = mm.get("m")
+            return {
+                r["handle"]: r["category"] for r in mm.mesh_info(mesh)["members"]
+            }
+
+        assert categories() == {
+            "alice": "running", "bob": "running",
+            "carol": "running", "dave": "running",
+        }
+
+        mgr.kill("killed")
+        mgr.pause("paused")
+        mgr.kill("away", force=True)
+        for name in ("killed", "paused", "away"):
+            await _wait_exited(mgr.get(name))
+        mgr.archive("away")
+
+        # Four records, four words — the partition the roster's filter buttons
+        # are built on, and what lets their counts be added up.
+        assert categories() == {
+            "alice": "running", "bob": "killed",
+            "carol": "paused", "dave": "archived",
+        }
+        rows = {r["handle"]: r for r in mm.mesh_info(mm.get("m"))["members"]}
+        assert rows["bob"]["reachability"] == "exited"  # the old word, unchanged
+        assert rows["dave"]["reachability"] == "exited"
+
+        # A record that is gone is neither running nor killed: the word says
+        # so, and the filter that drops ended records drops it too.
+        mgr.remove("away")
+        assert categories()["dave"] == "missing"
+
+        await mgr.shutdown_all()
+
+    asyncio.run(run())
 
 
 def test_members_tool_response_is_linear_without_the_pair_table(monkeypatch):

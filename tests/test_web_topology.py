@@ -298,6 +298,7 @@ CHECKS = [
         "handoff_check.js",
         "owed_check.js",
         "meshmessages_check.js",
+        "meshmembers_check.js",
         "panel_check.js",
         "sesssend_check.js",
         "meshjoin_check.js",
