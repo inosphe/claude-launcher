@@ -5756,6 +5756,12 @@ async def h_beads_fleet(request: web.Request) -> web.Response:
 
 async def h_beads_stream(request: web.Request) -> web.Response:
     """One bounded Beads page for the fixed-height board viewport."""
+    sort = request.query.get("sort", "updated_at")
+    direction = request.query.get("direction", "desc")
+    if sort not in {"updated_at", "created_at", "priority", "title"}:
+        return json_error(400, "sort must be updated_at, created_at, priority or title")
+    if direction not in {"asc", "desc"}:
+        return json_error(400, "direction must be asc or desc")
     try:
         offset = int(request.query.get("offset", "0"))
         limit = int(request.query.get("limit", "50"))
@@ -5777,6 +5783,7 @@ async def h_beads_stream(request: web.Request) -> web.Response:
         extra.insert(0, cwd)
     view = await request.app["beads"].stream_view(
         list(manager.list()), extra, offset=offset, limit=limit, priority=priority,
+        sort=sort, direction=direction,
     )
     return json_response(view)
 
@@ -5881,9 +5888,18 @@ async def h_beads_issue(request: web.Request) -> web.Response:
         issue = await board.show(root, issue_id)
     except BeadsError as exc:
         return json_error(404, str(exc))
+    linked = []
+    for session in request.app["manager"].list():
+        sdef = session.sdef
+        matches = beads_mod.match([issue], sdef.name, issue=sdef.issue, task=sdef.task)
+        if matches and await board.root_for(sdef.cwd) == root:
+            linked.append({
+                "name": sdef.name, "status": session.status(), "via": matches[0]["via"],
+            })
     return json_response({
         "root": str(root),
         "issue": issue,
+        "sessions": linked,
         "reports": reports_mod.for_issue(issue_id),
     })
 

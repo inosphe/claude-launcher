@@ -126,6 +126,17 @@ function check(what, got, want) {
   }
 }
 
+for (const field of ["priority", "title", "created_at", "updated_at"]) {
+  const values = field === "priority" ? [1, 2, 3] : ["a", "b", "c"];
+  const issues = [2, 0, 1].map((n) => ({ id: String(n), [field]: values[n] }));
+  check(field + " ascending", ctx.sort(issues, field, "asc").map((i) => i.id), ["0", "1", "2"]);
+  check(field + " descending", ctx.sort(issues, field, "desc").map((i) => i.id), ["2", "1", "0"]);
+}
+ctx.setDetail({ issue: { id: "linked" }, sessions: [{ name: "ended session", status: "exited" }] });
+check("detail links ended session", ctx.pane().find("beads-sess")[0].href, "#/s/ended%20session");
+check("detail explains resume", ctx.pane().find("wf-note").some((n) => n.text.includes("original path")), true);
+ctx.setDetail(null);
+
 /* ---- the merged page -------------------------------------------------- */
 let tabs = ctx.tabs();
 check("the combined page names all three readings", tabs.kids.map((n) => n.text),
