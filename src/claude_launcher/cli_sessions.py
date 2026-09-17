@@ -1390,12 +1390,42 @@ def _cmd_quick_fork(args: argparse.Namespace) -> int:
         body["name"] = args.as_name
     if getattr(args, "task", None):
         body["task"] = args.task
+    # The copy joins nothing by default. These two are how you say otherwise.
+    # A bare `.` is passed straight through: the route reads it as "the
+    # origin's", which it answers by letting the spawn path's own
+    # inheritance run — so the name is never resolved twice, and never here
+    # from a session list that may have moved on.
+    if getattr(args, "mesh", None):
+        body["mesh"] = str(args.mesh).strip()
+    if getattr(args, "workflow", None):
+        body["workflow"] = str(args.workflow).strip()
     info = client.post(f"/api/sessions/{origin}/quick-fork", body)
     child = info["session"]
+    got = info.get("quick_fork") or {}
+    joined = []
+    if got.get("mesh"):
+        joined.append(f"mesh {got['mesh']}")
+    if got.get("workflow"):
+        joined.append(f"workflow {got['workflow']}")
+    where = got.get("cwd") or "the origin's directory"
     print(
         f"quick-fork {child['name']!r} of {origin!r} started (pid {child.get('pid')}, "
-        f"marker {info.get('marker')}) — a copy of its conversation from here. "
-        f"From inside it, when the work is done: claunch quick-fork merge -f <wrap-up file>"
+        f"marker {info.get('marker')}) — a copy of its conversation from here"
+        + (", in " + " and ".join(joined) if joined else "")
+        + "."
+    )
+    # Said every time, not only when it bites: the copy stands in the
+    # origin's checkout because a fork cannot be moved out of one, and the
+    # person who just pressed this is the only one who can keep the two
+    # sessions off the same files.
+    print(
+        f"It shares this checkout ({where}) — a fork cannot be given one of "
+        "its own, so both sessions edit the same files. Keep them to "
+        "different areas."
+    )
+    print(
+        "From inside it, when the work is done: "
+        "claunch quick-fork merge -f <wrap-up file>"
     )
     for w in info.get("warnings") or []:
         print(f"warning: {w}")
@@ -2737,6 +2767,17 @@ def register(sub) -> None:
     p_qf.add_argument("-f", "--file", help="with 'merge': read the wrap-up from FILE ('-' = stdin)")
     p_qf.add_argument("--as", dest="as_name", help="name for the copy (default: <origin>-qf<n>)")
     p_qf.add_argument("--task", help="what the copy should do, typed under the marker")
+    p_qf.add_argument(
+        "--mesh",
+        help="put the copy in this mesh ('.' = the origin's, which OPENS one "
+             "between the two when the origin is in none). Default: none - a "
+             "scratch copy answers to nobody",
+    )
+    p_qf.add_argument(
+        "--workflow",
+        help="start the copy on this cflow workflow ('.' = the same one as "
+             "the origin). Default: none",
+    )
     p_qf.add_argument("-a", "--attach", action="store_true", help="attach to the copy once started")
     p_qf.set_defaults(func=_cmd_quick_fork)
 

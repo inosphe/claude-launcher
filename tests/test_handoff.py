@@ -541,3 +541,134 @@ def test_mcp_handoff_tool_posts_from_the_calling_session(monkeypatch):
     assert calls[-1] == ("/api/sessions/a-qf1/handoff", {"text": "wrap", "to": "c"})
     with pytest.raises(mesh_mcp.MeshMcpError):
         mesh_mcp.call_tool("handoff", {"text": "  "})
+
+
+# ---- what the copy is told, and what it may be given -------------------- #
+
+def test_the_marker_says_the_copy_shares_the_origins_checkout():
+    """A fork cannot be moved out of its origin's directory (claude keeps
+    transcripts per cwd, so ``spawn.check`` refuses ``fork`` with
+    ``worktree``). Two claude sessions then edit one checkout with no lock
+    between them, and the only defence is that both know — so the block says
+    it, with the directory named."""
+    block = handoff_mod.compose_marker(
+        origin="a", fork="a-qf1", marker="qf-1", forked_at="T",
+        cwd="F:/works/repo",
+    )
+    line = [ln for ln in block.split("\n") if ln.startswith("checkout: ")]
+    assert len(line) == 1, block
+    assert "SAME working directory as a" in line[0]
+    assert "F:/works/repo" in line[0]
+    # and it says what to do about it, not merely that it is so
+    assert "same files" in line[0] and "git state" in line[0]
+    # the copy joined nothing, so it is told about nothing
+    assert "\nmesh: " not in block and "\nworkflow: " not in block
+
+
+def test_the_marker_names_a_mesh_or_run_only_when_the_fork_was_given_one():
+    plain = handoff_mod.compose_marker(
+        origin="a", fork="a-qf1", marker="qf-1", forked_at="T",
+    )
+    assert "\nmesh: " not in plain and "\nworkflow: " not in plain
+    # no cwd to name is not a missing line: the sentence stands without it
+    assert "SAME working directory as a --" in plain
+
+    given = handoff_mod.compose_marker(
+        origin="a", fork="a-qf1", marker="qf-1", forked_at="T",
+        mesh="mesh-9", workflow="improv-worker",
+    )
+    mesh_line = [ln for ln in given.split("\n") if ln.startswith("mesh: ")][0]
+    assert "mesh-9" in mesh_line and "a-qf1" in mesh_line
+    # told how to look before it sends, since a delivery is typed into a
+    # real session's terminal
+    assert "claunch mesh members mesh-9" in mesh_line
+    run_line = [ln for ln in given.split("\n") if ln.startswith("workflow: ")][0]
+    assert "improv-worker" in run_line and "a-qf1" in run_line
+    # the block still ends where it did
+    assert given.strip().endswith("---")
+
+
+def test_quick_fork_carries_a_mesh_and_run_when_asked_and_neither_by_default(
+    home, tmp_path, forkable, typed
+):
+    """The default is the scratch copy; the body is how a caller says
+    otherwise. Both answers are checked here because the default is a
+    judgement (a copy's work is the origin's) and not a limitation — the
+    other one has to actually work."""
+    _register_py_harness()
+
+    async def run():
+        mgr = _mgr()
+        meshes = MeshManager(mgr, root=tmp_path / "mesh")
+        client = await _serve(mgr, meshes)
+        try:
+            mgr.create(SessionDef(name="a", harness="py", cwd=str(tmp_path)))
+            # The daemon refuses a mesh it does not know, which is the right
+            # answer and is why this stands up first.
+            meshes.create("mesh-9")
+
+            resp = await client.post("/api/sessions/a/quick-fork", headers=BEARER)
+            doc = await resp.json()
+            assert resp.status == 201, doc
+            # Under its own key: onboarding already answers `mesh` with the
+            # join record, and a second `mesh` beside it meaning only the
+            # name shadowed it — which side won depended on spread order.
+            got = doc["quick_fork"]
+            assert got["mesh"] == "" and got["workflow"] == ""
+            assert got["shared_checkout"] is True
+            assert got["cwd"] == str(tmp_path)
+            task = doc["session"]["task"]
+            assert "\nmesh: " not in task
+            assert f"checkout: this copy runs in the SAME working directory as a ({tmp_path})" in task
+
+            resp = await client.post(
+                "/api/sessions/a/quick-fork",
+                json={"mesh": "mesh-9", "workflow": "-"},
+                headers=BEARER,
+            )
+            doc = await resp.json()
+            assert resp.status == 201, doc
+            assert doc["quick_fork"]["mesh"] == "mesh-9"
+            # '-' is the spelling for none and is reported as none, not as a
+            # workflow literally called '-'
+            assert doc["quick_fork"]["workflow"] == ""
+            task = doc["session"]["task"]
+            assert "mesh: you were put in mesh mesh-9 as a-qf2" in task
+            assert "\nworkflow: " not in task
+            # the join record itself is still there, unshadowed
+            assert (doc.get("mesh") or {}).get("handle") == "a-qf2"
+
+            # '.' is the third answer: the origin's, without naming it. The
+            # spawn path's own inheritance settles it, so the request never
+            # carries a name that a client cache might have got wrong — and
+            # the answer is read back from what onboarding actually did.
+            resp = await client.post(
+                "/api/sessions/a/quick-fork", json={"mesh": "."}, headers=BEARER,
+            )
+            doc = await resp.json()
+            assert resp.status == 201, doc
+            # The origin is in no mesh, and inheriting from a session in none
+            # is spawn's "open one for the two of you" — so the copy lands in
+            # a room named for the origin, NOT in one named '.'. Asserted
+            # because it is the surprising half of the dot: asking for the
+            # origin's mesh can create a mesh.
+            assert doc["quick_fork"]["mesh"] == "a"
+            assert "\nmesh: ." not in doc["session"]["task"]
+            await mgr.shutdown_all()
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_a_fork_cannot_be_given_a_checkout_of_its_own():
+    """Not a gap this round left open — the refusal is the reason the marker
+    block warns instead. Asserted here so a later change that 'fixes' the
+    sharing by handing the fork a worktree fails loudly: what it would
+    actually hand over is a copy that resolves no conversation."""
+    parent = {"harness": "claude", "conversation_id": "u1", "cwd": "F:/w"}
+    with pytest.raises(spawn_mod.SpawnDenied) as got:
+        spawn_mod._fork_parents_conversation(
+            {"harness": "claude"}, parent, {"worktree": "mine"},
+        )
+    assert "transcripts per working directory" in str(got.value)

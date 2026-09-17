@@ -4921,6 +4921,28 @@ async def _winding_down(request: web.Request, session, *, force: bool) -> bool:
     return await request.app["beads"].begin_winddown(session, request.app["manager"])
 
 
+def _quick_fork_joined(reported, inherited: bool, asked: str) -> str:
+    """The NAME of what the copy ended up in, whatever shape the onboarding
+    reported it as.
+
+    Onboarding answers a join with a record (``{ok, mesh, handle, role}``)
+    and an inheritance with whatever it settled on, so the name is read back
+    from that rather than from the request: an inherited mesh has no name in
+    the request at all, and a requested one can still fail to join. Falls
+    back to what was asked only when the report says nothing and the caller
+    did name one -- never inventing a name for an inheritance nobody
+    confirmed.
+    """
+    if isinstance(reported, dict):
+        name = reported.get("mesh") or reported.get("workflow") or reported.get("name")
+        return str(name or "")
+    if isinstance(reported, str) and reported.strip():
+        return "" if reported.strip() in (onboard.NO_MESH, onboard.NO_WORKFLOW) else reported.strip()
+    if inherited:
+        return ""
+    return "" if asked in (onboard.NO_MESH, onboard.NO_WORKFLOW, ".") else asked
+
+
 async def h_session_quick_fork(request: web.Request) -> web.Response:
     """Copy this session's conversation into a child and mark where the copy
     begins — the one-press fork (see :mod:`daemon.handoff`).
@@ -4932,11 +4954,27 @@ async def h_session_quick_fork(request: web.Request) -> web.Response:
     child's opening — the line the merge later refers back to — and the
     record (``quick_fork_of``) that makes merge available on the copy.
 
-    The copy joins no mesh and drives no run unless the body says otherwise:
-    it is a scratch branch of ONE session's conversation, and a copy that
-    inherited the parent's mesh handle would be a second agent answering for
-    the same conversation. Nor does it mint a board issue from the marker
-    text (``beads: false``) — the work it does is the origin's.
+    The copy joins no mesh and drives no run unless the body says otherwise.
+    That default is for the common press: a scratch branch of ONE session's
+    conversation, whose work is the origin's, and a session with no issue
+    sitting on a roster is one a leader cannot place. It is a default and not
+    a rule -- ``mesh`` and ``workflow`` in the body take the copy the other
+    way, and the CLI and the header button both offer the choice, because the
+    other use is real: a fork given a job of its own has to be able to report
+    it. (An earlier draft of this docstring justified the default by saying
+    an inherited mesh would make the copy "a second agent answering for the
+    same conversation". That was wrong and is corrected here: the copy joins
+    under its OWN session name, so no handle is ever shared.) It does not
+    mint a board issue from the marker text (``beads: false``) either -- the
+    work it does is the origin's.
+
+    What the copy cannot have is a checkout of its own. ``fork`` and
+    ``worktree`` are refused together by :func:`claude_launcher.spawn.check`,
+    because claude keeps transcripts per working directory and a copy started
+    elsewhere would resolve nothing and boot empty. So the copy stands in the
+    origin's directory, sharing its files and its git state, and the marker
+    block says so in as many words -- the only defence available against two
+    claude sessions writing one checkout is that both of them know.
     """
     manager: SessionManager = request.app["manager"]
     parent = request.match_info["name"]
@@ -4959,8 +4997,25 @@ async def h_session_quick_fork(request: web.Request) -> web.Response:
     )
     marker = handoff_mod.new_marker()
     forked_at = handoff_mod._utcnow()
+    # Three answers, not two. A spawn that names no mesh INHERITS the
+    # parent's (``onboard.inherit_mesh``), so "the origin's" is spelled by
+    # leaving the field out — and this route cannot simply leave it out,
+    # because its default is the opposite. The dot is that third answer said
+    # out loud: the caller asks for the origin's without having to know its
+    # name, and the inheritance that already exists does the work.
+    mesh = str(body.get("mesh") or onboard.NO_MESH)
+    workflow = str(body.get("workflow") or onboard.NO_WORKFLOW)
+    inherit_mesh = mesh == "."
+    inherit_workflow = workflow == "."
     opening = handoff_mod.compose_marker(
         origin=parent, fork=name, marker=marker, forked_at=forked_at,
+        # The origin's own directory, because a fork cannot be moved out of
+        # it. Named in the block so the copy can see what it shares.
+        cwd=str(origin.sdef.cwd or ""),
+        # An inherited one is not named here: it is settled downstream, and
+        # the block would be guessing. The join itself tells the copy.
+        mesh="" if mesh in (onboard.NO_MESH, ".") else mesh,
+        workflow="" if workflow in (onboard.NO_WORKFLOW, ".") else workflow,
     )
     task = str(body.get("task") or "").strip()
     if task:
@@ -4970,10 +5025,12 @@ async def h_session_quick_fork(request: web.Request) -> web.Response:
         "fork": True,
         "quick_fork_of": parent,
         "task": opening,
-        "mesh": str(body.get("mesh") or onboard.NO_MESH),
-        "workflow": str(body.get("workflow") or onboard.NO_WORKFLOW),
         "beads": False,
     }
+    if not inherit_mesh:
+        spawn_body["mesh"] = mesh
+    if not inherit_workflow:
+        spawn_body["workflow"] = workflow
     warnings: list = []
     try:
         session = manager.stage_child(parent, spawn_body, warnings=warnings)
@@ -4992,6 +5049,21 @@ async def h_session_quick_fork(request: web.Request) -> web.Response:
     out = {
         "session": session.info(), "origin": parent, "marker": marker,
         "forked_at": forked_at, **result,
+    }
+    # Under its own key, not spread beside `result`: onboarding already
+    # answers `mesh` with the join itself (ok/handle/role), and a second
+    # `mesh` meaning only the name silently took its place — the spread put
+    # `result` last, so what the caller read depended on which side won.
+    # One key, one meaning, and nothing of the join is lost.
+    out["quick_fork"] = {
+        "mesh": _quick_fork_joined(result.get("mesh"), inherit_mesh, mesh),
+        "workflow": _quick_fork_joined(
+            result.get("workflow"), inherit_workflow, workflow,
+        ),
+        # The origin's directory, and the fact that the copy is standing in
+        # it. A caller that prints one line about this fork should print this.
+        "cwd": str(origin.sdef.cwd or ""),
+        "shared_checkout": True,
     }
     if warnings:
         out["warnings"] = warnings

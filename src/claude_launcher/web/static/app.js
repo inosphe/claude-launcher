@@ -1975,6 +1975,14 @@ async function refreshSessions(options) {
   // The header badge and the PTY overlay read the same list; repaint them
   // on every poll so a finished answer shows within one poll interval.
   if (typeof renderTermTps === "function") renderTermTps();
+  // The fork/merge pair reads the same list and has to be repainted here for
+  // the same reason -- but it was hung off setStatusBadge alone, which on a
+  // LIVE link fires only when the status changes. A tab that attached before
+  // the first list landed therefore read an absent record, hid both buttons
+  // and never looked again: the copy of a session sat there with no way back
+  // until something happened to change its status. Reported live on
+  // s556-qf1, whose record carried quick_fork_of the whole time.
+  if (typeof syncSessionHandoffControls === "function") syncSessionHandoffControls();
   // The rows and the runs arrive on separate polls; whichever lands last
   // paints the cflow badges over the rows that exist now. The session poll
   // also carries the independent Role reminder and the session-level pause.
@@ -6980,10 +6988,63 @@ function handoffControlState(session) {
   };
 }
 
-async function quickForkSession(name, task) {
+/* What the press asks before it forks. The default answer is the scratch
+   copy — no mesh, no run — because that is what the button is for and the
+   first option is the one Enter takes. The other answer exists because a
+   fork given a job of its own has to be able to report it, and until now
+   the only way to ask for that was to POST the route by hand.
+
+   Skipped entirely when the origin is in no mesh and drives no run: a
+   question with one possible answer is a dialog that teaches nothing. */
+async function askForkOptions(session) {
+  const s = session || {};
+  // Neither fact is on the session record: /api/sessions knows nothing about
+  // meshes or runs, and the client already holds both from their own polls.
+  // Same two readers the rail rows use, so the dialog offers exactly what
+  // the row beside it shows.
+  const mesh = typeof sessMeshes === "function"
+    ? ((sessMeshes(s.name) || [])[0] || {}).mesh || "" : "";
+  const run = typeof sessCflowRun === "function"
+    ? ((sessCflowRun(s.name) || {}).workflow || "") : "";
+  if (!mesh && !run) return {};
+  const inherited = [mesh && `mesh ${mesh}`, run && `workflow ${run}`]
+    .filter(Boolean).join(" and ");
+  const picked = await showModal({
+    title: `Quick-fork '${s.name}'`,
+    body: "The copy opens this conversation from here and reports back with "
+      + "merge. It runs in this session's checkout either way — a fork "
+      + "cannot be given one of its own — so keep the two off the same files.",
+    choices: {
+      options: [
+        {
+          label: "Scratch copy",
+          hint: "joins no mesh, drives no run — its work is this session's",
+          value: {},
+        },
+        {
+          label: `Carry this session's ${inherited}`,
+          hint: "for a copy given a job of its own, that has to report it",
+          // "." and not the names read above: those came from two client
+          // caches that are each a poll behind, and the daemon settles the
+          // same question from its own state. The names are for the label.
+          value: { mesh: mesh ? "." : undefined, workflow: run ? "." : undefined },
+        },
+      ],
+    },
+    actions: [
+      { label: "Cancel", value: null },
+      { label: "Fork", value: {} },
+    ],
+  });
+  return picked;
+}
+
+async function quickForkSession(name, task, options) {
   if (!name) return null;
   const body = {};
   if (task) body.task = task;
+  if (options && options.mesh) body.mesh = options.mesh;
+  if (options && options.workflow) body.workflow = options.workflow;
   let resp;
   try {
     resp = await api(`/api/sessions/${encodeURIComponent(name)}/quick-fork`, {
@@ -7097,8 +7158,15 @@ function syncSessionHandoffControls(name = currentName) {
 }
 
 if ($("term-fork")) {
-  $("term-fork").addEventListener("click", () => {
-    if (currentName) quickForkSession(currentName);
+  $("term-fork").addEventListener("click", async () => {
+    if (!currentName) return;
+    const rec = sessionsCache.find((s) => s.name === currentName);
+    const picked = await askForkOptions(rec);
+    // null is Cancel and every other dismissal; an empty object is the
+    // scratch answer, which is also what a session with nothing to carry
+    // returns without asking.
+    if (picked === null) return;
+    quickForkSession(currentName, "", picked);
   });
 }
 if ($("term-merge")) {
@@ -7107,11 +7175,17 @@ if ($("term-merge")) {
   });
 }
 
-/* `q` on a rail card: the header's fork button on the card's session. */
+/* `q` on a rail card: the header's fork button on the card's session, and
+   the same question with it. Asking on the key too rather than making the
+   fast path the one that quietly picks an answer — the dialog's first
+   option is the scratch copy and Enter takes it, so the speed is kept. */
 function railCardQuickFork(name) {
   const rec = railCardRecord(name);
   if (!rec || !forkControlState(rec).fork) return false;
-  quickForkSession(name);
+  Promise.resolve(askForkOptions(rec)).then((picked) => {
+    if (picked === null) return;
+    quickForkSession(name, "", picked);
+  });
   return true;
 }
 

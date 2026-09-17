@@ -47,9 +47,21 @@ const refreshSessions = async () => { refreshes += 1; };
 const killSession = async (name) => { kills.push(name); };
 const $ = (id) => buttons[id];
 
+// The fork dialog: what it was asked, and what the next press answers. A
+// null answer is Cancel, an object is a pressed action merged with the
+// picked option — the shape showModal actually resolves to.
+const modals = [];
+let modalAnswer = {};
+const showModal = async (spec) => { modals.push(spec); return modalAnswer; };
+// Neither of these is on the session record; the page reads them from the
+// mesh and cflow polls, so the check supplies the same two readers.
+let meshOf = {};
+let runOf = {};
+
 const ctx = {};
 new Function(
   "exports", "$", "api", "modalInfo", "refreshSessions", "killSession", "location",
+  "showModal", "meshOf", "runOf",
   `let currentName = "a";
    let sessionsCache = [
      {name: "a", status: "busy", harness: "claude", conversation_id: "u1"},
@@ -57,14 +69,18 @@ new Function(
      {name: "py", status: "busy", harness: "py"},
    ];
    function railCardRecord(name) { return sessionsCache.find((s) => s.name === name) || null; }
+   function sessMeshes(name) { return meshOf[name] ? [{mesh: meshOf[name]}] : []; }
+   function sessCflowRun(name) { return runOf[name] ? {workflow: runOf[name]} : null; }
    ${code}
    Object.assign(exports, {
      forkControlState, handoffControlState, quickForkSession, requestHandoff,
      cancelHandoff, syncSessionHandoffControls, railCardQuickFork,
+     askForkOptions,
      sessions: () => sessionsCache,
      setCurrent: (name) => { currentName = name; },
    });`
-)(ctx, $, api, modalInfo, refreshSessions, killSession, location);
+)(ctx, $, api, modalInfo, refreshSessions, killSession, location,
+  showModal, meshOf, runOf);
 
 let failures = 0;
 function check(name, actual, expected) {
@@ -82,6 +98,16 @@ const response = (body, ok = true, status = 200) => ({
         [/id="term-fork" class="term-btn hidden"/.test(html),
          /id="term-merge" class="term-btn hidden"/.test(html)],
         [true, true]);
+
+  // The pair reads the SESSION LIST (quick_fork_of, handoff), which arrives
+  // on the poll — so the poll has to repaint it. Hung off setStatusBadge
+  // alone it was repainted only when the status changed, and a tab attached
+  // before the first list landed hid both buttons for good: a copy with no
+  // way back, reported live on s556-qf1. Asserted on the source outside this
+  // section because that caller is refreshSessions, not sliced here.
+  const poll = src.slice(0, a);
+  check("the session poll repaints the fork/merge pair, not only setStatusBadge",
+        /syncSessionHandoffControls/.test(poll), true);
 
   // which button a record gets
   check("a live claude session with a conversation gets fork, not merge",
@@ -171,9 +197,57 @@ const response = (body, ok = true, status = 200) => ({
   check("q forks a forkable card and refuses the others",
         [ctx.railCardQuickFork("py"), ctx.railCardQuickFork("a-qf1")], [false, false]);
   const viaKey = ctx.railCardQuickFork("a");
+  await Promise.resolve();  // the key asks first, then posts
+  await Promise.resolve();
   check("q on the origin posts the fork", [viaKey, calls[calls.length - 1].url],
         [true, "/api/sessions/a/quick-fork"]);
   replies.shift().resolve(response({ session: { name: "a-qf3" } }));
+
+  // ---- what the copy is asked to carry ------------------------------- //
+
+  // A session in nothing has nothing to choose, so it is not asked.
+  const before = modals.length;
+  check("a session with no mesh and no run is forked without a question",
+        [await ctx.askForkOptions({ name: "a" }), modals.length - before],
+        [{}, 0]);
+
+  // One in a mesh is, and the offered answer carries that mesh by name.
+  meshOf["a"] = "mesh-1";
+  runOf["a"] = "improv-worker";
+  modalAnswer = {};
+  await ctx.askForkOptions({ name: "a" });
+  const asked = modals[modals.length - 1];
+  check("the question names the session and both things it could carry",
+        [/'a'/.test(asked.title),
+         asked.choices.options.map((o) => o.label)],
+        [true, ["Scratch copy", "Carry this session's mesh mesh-1 and workflow improv-worker"]]);
+  check("the scratch answer is first, so Enter takes the copy that joins nothing",
+        asked.choices.options[0].value, {});
+  // The names are read from two client caches that are each a poll behind,
+  // so they label the option and nothing more: what is SENT is the dot, and
+  // the daemon settles it from its own state.
+  check("the other answer sends the dot, not the name it displayed",
+        asked.choices.options[1].value, { mesh: ".", workflow: "." });
+  check("the body warns that the copy shares this checkout",
+        /checkout/.test(asked.body) && /same files/.test(asked.body), true);
+
+  // ...and the press sends what was picked.
+  const carried = ctx.quickForkSession("a", "", { mesh: "mesh-1", workflow: "improv-worker" });
+  check("a fork that was told to carry them says so in the body",
+        JSON.parse(calls[calls.length - 1].options.body),
+        { mesh: "mesh-1", workflow: "improv-worker" });
+  replies.shift().resolve(response({ session: { name: "a-qf4" } }));
+  await carried;
+
+  // Cancel is not "fork with the defaults".
+  const postsBefore = calls.length;
+  modalAnswer = null;
+  check("a cancelled question forks nothing",
+        [await ctx.askForkOptions({ name: "a" }), calls.length - postsBefore],
+        [null, 0]);
+  modalAnswer = {};
+  delete meshOf["a"];
+  delete runOf["a"];
 
   if (failures) process.exit(1);
   console.log("handoff_check: ok");
