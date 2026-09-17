@@ -297,18 +297,46 @@ def _busy_notice(entries: List[dict]) -> str:
         f"{e['handle']} ({e['queued']} waiting, cap {e['inbox_max']})"
         for e in entries
     )
-    held = [e for e in entries if e.get("reason") == "delivery_hold"]
-    timed = [e for e in entries if e.get("reason") != "delivery_hold"]
-    wait = max((e.get("retry_after") or 0.0 for e in timed), default=0.0)
+    # Split on whether WAITING is the remedy, not on the reason name: a
+    # reason the sender cannot wait out needs its own sentence, and keying
+    # the other branch off "everything that is not a delivery hold" put
+    # every such reason back into the wait bucket it does not belong in.
+    wait = max(
+        (
+            e.get("retry_after") or 0.0
+            for e in entries
+            if not e.get("reason")
+        ),
+        default=0.0,
+    )
     actions = []
-    if held:
+    if any(e.get("reason") == "delivery_hold" for e in entries):
         actions.append("wait until delivery resumes for held receivers")
+    # Named per state because the remedies are not interchangeable, and a
+    # respawn costs a real terminal and a real agent's context — the same
+    # judgement stranded_notice() leaves with the sender.
+    exited = [e["handle"] for e in entries if e.get("reason") == "exited"]
+    if exited:
+        actions.append(
+            "respawn " + ", ".join(exited) + " if the message must land, "
+            "or take the work to a live peer"
+        )
+    missing = [e["handle"] for e in entries if e.get("reason") == "missing"]
+    if missing:
+        actions.append(
+            "route around " + ", ".join(missing)
+            + " — nothing can bring those sessions back"
+        )
     if wait:
         actions.append(f"wait about {int(wait)}s for other receivers")
     action = "; ".join(actions) or "wait before sending there again"
+    # First letter only. ``str.capitalize`` lowercases the rest, which was
+    # harmless while every action began with "wait" and destroys a handle's
+    # spelling now that one can begin with a member's name.
+    action = action[:1].upper() + action[1:]
     return (
         f"NOT DELIVERED to {who}: that terminal has not read what it already "
-        f"has, so the mesh is not accepting more for it. {action.capitalize()}, "
+        f"has, so the mesh is not accepting more for it. {action}, "
         "then re-send. Nothing was queued: this message "
         "does not exist anywhere and will not arrive on its own."
     )
@@ -392,12 +420,6 @@ _INLINE_STANCE = 4000
 
 #: Worker rescan cadence while messages are pending (seconds).
 _POLL = 1.0
-
-#: Maximum undelivered messages accepted for a session whose operator has
-#: explicitly held delivery.  The policy inbox is a recent-traffic limit and
-#: may reopen as messages age; an explicit hold has no timer, so its queue
-#: needs an absolute bound of its own.
-DELIVERY_HOLD_INBOX_MAX = 4
 
 #: Peer flush retry backoff after a failure (seconds, doubling to the cap).
 _PEER_BACKOFF_BASE = 5.0
@@ -1315,9 +1337,16 @@ class MeshManager:
         So mail past ``door_secs`` stops being weighed. It is NOT dropped —
         it stays queued and still lands if the session is respawned, which
         is a contract of its own — it just stops holding the door shut
-        against everybody who came later. The effect is a leaky bucket: a
-        dead terminal accepts ``inbox_max`` messages per ``door_secs``
-        instead of ``inbox_max`` ever.
+        against everybody who came later.
+
+        What that leaves is a leaky bucket, and for a terminal that is
+        merely slow the leak is the point: the queue drains, so the aging
+        only forgives pressure that is already gone. For a terminal that is
+        not reading at all it was a bucket with no bottom — ``inbox_max``
+        more messages per ``door_secs``, without end, because nothing
+        consumed them. So :meth:`congested_recipients` weighs those
+        receivers on the true depth instead, and the aging here governs
+        LIVE receivers alone: the ones whose queue it was ever about.
 
         Remote members are returned unaged: their queue lives on their own
         daemon and all we hold is a depth it piggybacked on a sync ack, with
@@ -1374,58 +1403,86 @@ class MeshManager:
         """Which of ``recipients`` are too far behind to accept another
         message, as ``{handle, queued, inbox_max, retry_after, remote}``.
 
-        The policy limit weighs recent traffic.  A receiver under an explicit
-        delivery hold additionally has an absolute limit of
-        :data:`DELIVERY_HOLD_INBOX_MAX`, including messages that have aged out
-        of the traffic window.
+        One cap — ``backpressure.inbox_max`` — weighed against one of two
+        depths, and the receiver's state picks which. A receiver that is
+        reading is weighed on recent traffic (:meth:`countable_inbox`); a
+        receiver whose queue cannot drain at all is weighed on the true
+        depth, so mail that has aged out of the traffic window still counts
+        against it. The second group is an explicit delivery hold, and a
+        session that has exited or left the registry — the states
+        :meth:`stranded_recipients` reports, which are the states
+        :meth:`_deliver_to` refuses to deliver into.
+
+        The refusal is not a loss of the message's purpose: ``_send_core``
+        records it on the sender's own loop ledger, where a re-briefing
+        hands it back. What it costs is the queue-until-respawn contract
+        past the cap, and what it buys is a sender that is told so while it
+        can still act.
+
+        ``reason`` names which wall was hit, because the remedies differ:
+        ``delivery_hold`` (a person resumes delivery), ``exited`` (respawn
+        the session) and ``missing`` (nothing can revive it). All three
+        carry ``retry_after: 0.0`` — waiting alone never opens them, and a
+        sender told to wait 90s for a door that time does not open spends
+        every later turn on the same bounce.
         """
         bp = self.backpressure(mesh)
-        traffic_limited = bool(bp["enabled"] and bp["inbox_max"])
+        # ``inbox_max: 0`` and ``enabled: false`` are documented as "no
+        # door, unbounded queueing again" (mesh_policy.default_policy), so
+        # there is nothing to weigh against.
+        if not (bp["enabled"] and bp["inbox_max"]):
+            return []
+        # Materialised because it is walked twice, and the parameter is an
+        # Iterable: a generator would be empty by the time the loop runs.
+        recipients = list(recipients)
+        # One pass for the whole batch: the call walks every recipient, so
+        # asking it per handle inside the loop would make this quadratic.
+        stranded = {
+            e["handle"]: str(e.get("state") or "exited")
+            for e in self.stranded_recipients(mesh, recipients)
+        }
         out: List[dict] = []
         for handle in recipients:
-            # Weighed on the countable depth, REPORTED on the true one: the
-            # sender is refused because of recent pressure, but what is
-            # actually waiting for that terminal is the number it needs to
-            # see. They differ only once mail has aged past the door.
             depth = self.inbox_depth(mesh, handle)
-            held = self.receiver_delivery_held(mesh, handle)
-            hold_full = bool(
-                held
-                and depth is not None
-                and depth >= DELIVERY_HOLD_INBOX_MAX
+            reason = (
+                "delivery_hold"
+                if self.receiver_delivery_held(mesh, handle)
+                else stranded.get(handle)
             )
-            countable = self.countable_inbox(mesh, handle)
-            traffic_full = bool(
-                traffic_limited
-                and countable is not None
-                and countable >= bp["inbox_max"]
-            )
-            if not hold_full and not traffic_full:
+            # WHICH depth the door weighs is the whole of it, and the
+            # receiver's state picks it.
+            #
+            # For a receiver that is reading, aging past ``door_secs`` is
+            # right: its queue drains, so old mail is pressure that has
+            # already gone, and weighing it would shut the door over a burst
+            # that is over. Weighed on the countable depth, REPORTED on the
+            # true one — the sender is refused for recent pressure, but what
+            # is waiting for that terminal is the number it needs to see.
+            #
+            # For a receiver that is not reading at all — an explicit
+            # delivery hold, or a session that exited — nothing consumes the
+            # queue, so nothing about it is stale and the aging had no
+            # meaning to supply. It only reopened the door once per
+            # ``door_secs``, forever, and the backlog grew without a
+            # ceiling: the 45-deep queue that led here, which a respawn
+            # would have typed into that terminal in ONE block. Those
+            # receivers are weighed on the true depth, so the cap the
+            # operator set is the cap that holds.
+            weighed = depth if reason else self.countable_inbox(mesh, handle)
+            if weighed is None or weighed < bp["inbox_max"]:
                 continue
-
-            # When both limits apply, report the first limit the sender can
-            # act on.  A smaller traffic cap remains the effective cap;
-            # otherwise the explicit hold is the limiting condition and has
-            # no time-based retry recommendation.
-            held_is_limit = hold_full and (
-                not traffic_full
-                or DELIVERY_HOLD_INBOX_MAX <= bp["inbox_max"]
-            )
-            limit = (
-                DELIVERY_HOLD_INBOX_MAX if held_is_limit else bp["inbox_max"]
-            )
             member = mesh.members.get(handle)
             entry = {
                 "handle": handle,
-                "queued": depth if depth is not None else countable,
-                "inbox_max": limit,
-                "retry_after": 0.0 if held_is_limit else bp["retry_after"],
+                "queued": depth if depth is not None else weighed,
+                "inbox_max": bp["inbox_max"],
+                "retry_after": 0.0 if reason else bp["retry_after"],
                 "remote": bool(
                     member is not None and not self._is_local(mesh, member)
                 ),
             }
-            if held_is_limit:
-                entry["reason"] = "delivery_hold"
+            if reason:
+                entry["reason"] = reason
             out.append(entry)
         return out
 

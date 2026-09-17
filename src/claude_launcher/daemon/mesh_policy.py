@@ -21,10 +21,14 @@ member's terminal and when that member last *sent*:
   module was missing. Everything above ACCOUNTS for unanswered mail; nothing
   aged it. A debt was discharged only by the member speaking or an operator
   dismissing it by hand, and a queued message stopped weighing on the door
-  only by being delivered — so a member whose session exited could do
+  only by being delivered — so a member who was not reading could do
   neither, forever. ``owed_secs`` writes off a delivered question nobody
   answered; ``door_secs`` stops undelivered mail counting toward
-  ``inbox_max`` (without dropping it — it still lands on respawn). See
+  ``inbox_max`` (without dropping it — it still lands when delivery
+  resumes). That forgiveness applies to a receiver whose queue can still
+  drain: for one whose session has exited, nothing consumes the queue, so
+  the reopening had no end and the backlog no ceiling — those are weighed
+  on their full depth in :meth:`MeshManager.congested_recipients`. See
   :meth:`Mesh.ack_timeout` and :meth:`MeshManager.countable_inbox`.
 * **backpressure** — the odd one out: not a nudge at all, but the gate that
   keeps the three above (and every member's traffic) from arriving faster
@@ -112,9 +116,11 @@ def default_policy() -> dict:
             # 0 disables (debts last forever, the pre-timeout behaviour).
             "owed_secs": 3600.0,
             # An UNDELIVERED message older than this stops counting toward
-            # ``backpressure.inbox_max``. The message is NOT dropped — it
-            # still lands on respawn — it just stops holding the door shut
-            # against every later sender. 0 disables.
+            # ``backpressure.inbox_max`` for a receiver whose queue can
+            # still drain. The message is NOT dropped — it just stops
+            # holding the door shut against every later sender. 0 disables.
+            # A receiver that has exited does not get this: its queue never
+            # drains, so the aging only reopened the door forever.
             "door_secs": 900.0,
         },
         # ON by default, unlike the three nudges above, and for the opposite
@@ -126,7 +132,9 @@ def default_policy() -> dict:
             "enabled": True,
             # Undelivered messages a member may have waiting before it stops
             # accepting new ones. Four is already more than one turn can act
-            # on; 0 disables the door and restores unbounded queueing.
+            # on; 0 disables the door and restores unbounded queueing. It is
+            # the cap for both depths the door weighs — see
+            # :meth:`MeshManager.congested_recipients`.
             "inbox_max": 4,
             # Least time between two deliveries INTO one terminal. Delivery
             # already coalesces a burst into one block (``settle``); this is
