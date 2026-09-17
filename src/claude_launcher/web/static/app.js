@@ -15089,7 +15089,7 @@ async function nudgeRun(cwd, scope) {
   } catch {
     return;
   }
-  if (!(doc.nudged_sessions || []).length) {
+  if (!(doc.nudged_sessions || []).length && !(doc.nudge_scheduled_sessions || []).length) {
     alert("no live session in this run's directory to nudge");
   }
 }

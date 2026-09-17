@@ -241,7 +241,7 @@ class _FakeSession:
     def status(self, threshold=None):
         return "idle"
 
-    async def deliver(self, text: str) -> bool:
+    def queue_delivery(self, text: str) -> bool:
         self.delivered.append(text)
         return True
 

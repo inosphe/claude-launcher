@@ -2094,7 +2094,7 @@ async def _cflow_action_cwd(request: web.Request):
 async def _nudge_sessions(
     manager: SessionManager, cwd: str, scope: str, message: str
 ) -> list:
-    """Type a resume nudge into the run's own session (scope == session
+    """Queue a resume nudge for the run's own session (scope == session
     name, 1:1), so an agent that stopped its turn picks the run back up.
     Default-scope runs belong to no session — nothing to nudge."""
     nudged = []
@@ -2103,7 +2103,7 @@ async def _nudge_sessions(
             session = manager.get(name)
         except Exception:  # noqa: BLE001 — raced with a removal
             continue
-        if await session.deliver(message):
+        if session.queue_delivery(message):
             nudged.append(name)
     return nudged
 
@@ -2144,13 +2144,15 @@ def _schedule_cflow_nudges(
 
 
 async def _deliver_cflow_nudge(session, message: str, *, force: bool = False) -> None:
-    """Deliver a cflow nudge after the session becomes readable.
+    """Submit an operator-forced nudge or queue an ordinary notification.
 
-    ``Session.deliver`` owns the readiness wait. A second attempt after an
-    I/O error could duplicate a partially written message, so this path is
-    intentionally single-delivery.
+    The session owns readiness and draft waits. Neither path retries a PTY
+    write after an I/O error, which could duplicate a partial message.
     """
-    await session.deliver(message, force=force)
+    if force:
+        await session.deliver(message, force=True)
+    else:
+        session.queue_delivery(message)
 
 
 def _startable_workflows(cwd: str) -> list:
@@ -2341,7 +2343,7 @@ async def h_cflow_approve(request: web.Request) -> web.Response:
     cwd, scope, _ = resolved
     payload = cflow_engine.approve(by="web", cwd=cwd, scope=scope)
     if payload.get("status") == "approved":
-        payload["nudged_sessions"] = await _nudge_sessions(
+        payload["nudge_scheduled_sessions"] = await _nudge_sessions(
             request.app["manager"], cwd, scope, cflow_engine.NUDGE_APPROVED
         )
     return json_response(payload)
@@ -2359,7 +2361,7 @@ async def h_cflow_select(request: web.Request) -> web.Response:
     reason = str(body.get("reason") or "") or None
     payload = cflow_engine.select(option, reason, by="web", cwd=cwd, scope=scope)
     if payload.get("status") == "selected":
-        payload["nudged_sessions"] = await _nudge_sessions(
+        payload["nudge_scheduled_sessions"] = await _nudge_sessions(
             request.app["manager"], cwd, scope, cflow_engine.NUDGE_SELECTED
         )
     return json_response(payload)
@@ -2375,7 +2377,7 @@ async def h_cflow_nudge(request: web.Request) -> web.Response:
     nudged = await _nudge_sessions(
         request.app["manager"], cwd, scope, cflow_engine.NUDGE_CONTINUE
     )
-    return json_response({"ok": True, "nudged_sessions": nudged})
+    return json_response({"ok": True, "nudge_scheduled_sessions": nudged})
 
 
 async def h_cflow_goto(request: web.Request) -> web.Response:
@@ -2390,7 +2392,7 @@ async def h_cflow_goto(request: web.Request) -> web.Response:
         return json_error(400, "'step' required in the JSON body")
     reason = str(body.get("reason") or "") or None
     payload = cflow_engine.goto(step, by="web", reason=reason, cwd=cwd, scope=scope)
-    payload["nudged_sessions"] = await _nudge_sessions(
+    payload["nudge_scheduled_sessions"] = await _nudge_sessions(
         request.app["manager"], cwd, scope, cflow_engine.nudge_for_state(step)
     )
     return json_response(payload)
@@ -2417,7 +2419,7 @@ async def h_cflow_goto_resolve(request: web.Request) -> web.Response:
         decision, by="web", reason=reason, cwd=cwd, scope=scope
     )
     asked = (payload.get("goto_request") or {}).get("step") or ""
-    payload["nudged_sessions"] = await _nudge_sessions(
+    payload["nudge_scheduled_sessions"] = await _nudge_sessions(
         request.app["manager"],
         cwd,
         scope,
@@ -5281,12 +5283,17 @@ async def h_session_input_journal(request: web.Request) -> web.Response:
 async def h_session_deliver(request: web.Request) -> web.Response:
     """Hand a message to the agent in this session — the out-of-process door
     to :meth:`Session.deliver`, for senders that live outside the daemon (the
-    CLI's cflow nudges). ``/keys`` stays the raw keyboard passthrough."""
+    CLI's cflow nudges). ``defer: true`` accepts the message into the session's
+    in-memory queue and returns immediately with ``queued``, not a delivery
+    receipt. ``/keys`` stays the raw keyboard passthrough."""
     session = _session(request)
     body = await _json_body(request)
     text = body.get("text")
     if not isinstance(text, str) or not text:
         return json_error(400, "'text' must be a non-empty string")
+    if body.get("defer") is True:
+        queued = session.queue_delivery(text) if not session.exited else False
+        return json_response({"ok": True, "queued": queued, "delivered": False})
     delivered = await session.deliver(text)
     return json_response({"ok": True, "delivered": delivered})
 

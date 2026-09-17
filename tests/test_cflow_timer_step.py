@@ -232,7 +232,7 @@ class _FakeSession:
         self.sdef = SessionDef(name=name, cwd=cwd)
         self.delivered: list = []
 
-    async def deliver(self, text: str) -> bool:
+    def queue_delivery(self, text: str) -> bool:
         self.delivered.append(text)
         return True
 

@@ -435,6 +435,8 @@ class Session:
         #: start nudge together; serialising the complete delivery keeps the
         #: two paste/Enter pairs whole and ordered.
         self._delivery_lock = asyncio.Lock()
+        self._deferred_deliveries: Set[asyncio.Task] = set()
+        self._deferred_delivery_lock = asyncio.Lock()
         #: Monotonic time a human last typed here (attach/web keystrokes,
         #: ``claunch send-keys``); 0.0 = never. See :meth:`keyboard_busy`.
         self._last_human_input = 0.0
@@ -741,6 +743,8 @@ class Session:
 
     def _finish(self) -> None:
         self.exited = True
+        for task in self._deferred_deliveries:
+            task.cancel()
         self.exit_code = self.pty.exit_code()
         self.exited_at = _utcnow()
         self._status = STATUS_EXITED
@@ -919,7 +923,9 @@ class Session:
             return None
         return idle_for
 
-    async def _deliver(self, text: str, *, force: bool = False) -> bool:
+    async def _deliver(
+        self, text: str, *, force: bool = False, wait_for_draft: bool = False
+    ) -> Optional[bool]:
         """Put ``text`` in front of the agent running here, as a user message.
 
         **The** way anything automated hands an agent something to act on —
@@ -936,6 +942,11 @@ class Session:
         hold its position and retry on the next tick. Nothing is stored here:
         a ``False`` means nothing was typed and the message is still wholly
         the caller's, exactly as it was before the call.
+
+        With ``wait_for_draft``, a pre-write draft refusal returns ``None``
+        internally so :meth:`deliver` can retry after releasing its lock.
+        An I/O failure returns ``False`` and is never retried: a write may
+        have partially succeeded. Public :meth:`deliver` always returns bool.
 
         A human writing a prompt in this terminal is one of the reasons for
         that ``False`` (see :meth:`await_keyboard_quiet`). The message waits
@@ -972,6 +983,8 @@ class Session:
             quiet = await self.await_keyboard_quiet(
                 timeout=FORCE_TYPING_GRACE if force else None
             )
+            if self.exited:
+                return False
             if not quiet and self.draft_open():
                 if not force:
                     # Not a failure to report to anyone: somebody is
@@ -987,7 +1000,9 @@ class Session:
                         "or clears it",
                         self.sdef.name,
                     )
-                    return False
+                    # Only this pre-write refusal is safe to retry. False
+                    # also covers I/O failures that may have written bytes.
+                    return None if wait_for_draft else False
                 # Forced past it. The line is submitted rather than typed
                 # over: a bare CR is the keypress the composer was waiting
                 # for, so the human's text reaches the agent as they wrote it
@@ -1008,10 +1023,44 @@ class Session:
             return False
         return True
 
-    async def deliver(self, text: str, *, force: bool = False) -> bool:
+    async def deliver(
+        self, text: str, *, force: bool = False, wait_for_draft: bool = False
+    ) -> bool:
         """Deliver one automated message without interleaving another's input."""
-        async with self._delivery_lock:
-            return await self._deliver(text, force=force)
+        while True:
+            async with self._delivery_lock:
+                result = await self._deliver(
+                    text, force=force, wait_for_draft=wait_for_draft
+                )
+            if result is not None:
+                return result
+            # Release the lock between safe retries, so an explicit forced
+            # delivery can still submit the draft and release this wait.
+            await asyncio.sleep(0.2)
+
+    def queue_delivery(self, text: str) -> bool:
+        """Accept a notification for delivery after an input draft is released.
+
+        Acceptance is not a delivery receipt. Tasks belong to this live
+        session, preserve delivery ordering, and are cancelled on exit; they
+        are not a durable mailbox across daemon restarts. Waiting in a task
+        keeps HTTP handlers and other sessions' clock ticks responsive.
+        """
+        if self.exited:
+            return False
+
+        async def send() -> None:
+            async with self._deferred_delivery_lock:
+                delivered = await self.deliver(text, wait_for_draft=True)
+            log.info(
+                "queued notification to %r %s",
+                self.sdef.name, "delivered" if delivered else "failed",
+            )
+
+        task = asyncio.create_task(send())
+        self._deferred_deliveries.add(task)
+        task.add_done_callback(self._deferred_deliveries.discard)
+        return True
 
     async def _await_readable(self) -> None:
         """Block until a starting TUI can actually take a message.
@@ -1475,6 +1524,11 @@ class Session:
 
     async def shutdown(self, grace: float = 5.0) -> None:
         """Terminate the child and wait briefly; force-kill stragglers."""
+        pending = tuple(self._deferred_deliveries)
+        for task in pending:
+            task.cancel()
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
         if self.exited or self.pty is None:
             return
         self.pty.terminate(force=False)
@@ -1772,8 +1826,13 @@ class DeadSession:
     async def paste(self, text: str, *, enter: bool = False) -> bytes:
         raise self._gone()
 
-    async def deliver(self, text: str, *, force: bool = False) -> bool:
+    async def deliver(
+        self, text: str, *, force: bool = False, wait_for_draft: bool = False
+    ) -> bool:
         return False  # nothing is running to read it, forced or not
+
+    def queue_delivery(self, text: str) -> bool:
+        return False
 
     async def write_bytes(self, data: bytes) -> None:
         raise self._gone()

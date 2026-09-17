@@ -1129,12 +1129,12 @@ class WindowClock:
             # regardless, and whoever picks it up reads the new position.
             return
         try:
-            delivered = await session.deliver(block)
+            delivered = session.queue_delivery(block)
         except Exception:
             log.exception("cflow window notice delivery to %r failed", scope)
             return
         if delivered:
-            log.info("cflow window notice delivered to %r (%s)", scope, cwd)
+            log.info("cflow window notice queued for %r (%s)", scope, cwd)
 
 
 def window_block(moved: dict) -> str:
@@ -1250,12 +1250,12 @@ class TimerClock:
             # regardless, and whoever picks it up reads the new position.
             return
         try:
-            delivered = await session.deliver(block)
+            delivered = session.queue_delivery(block)
         except Exception:
             log.exception("cflow timer notice delivery to %r failed", scope)
             return
         if delivered:
-            log.info("cflow timer notice delivered to %r (%s)", scope, cwd)
+            log.info("cflow timer notice queued for %r (%s)", scope, cwd)
 
 
 def timer_block(moved: dict) -> str:
@@ -1414,12 +1414,12 @@ class ChecklistClock:
             # regardless, and whoever picks it up reads the new position.
             return
         try:
-            delivered = await session.deliver(frame)
+            delivered = session.queue_delivery(frame)
         except Exception:
             log.exception("cflow checklist notice delivery to %r failed", scope)
             return
         if delivered:
-            log.info("cflow checklist notice delivered to %r (%s)", scope, cwd)
+            log.info("cflow checklist notice queued for %r (%s)", scope, cwd)
 
 
 def checklist_block(result: dict) -> str:
@@ -1574,7 +1574,7 @@ class RestartClock:
         if session is None:
             return
         try:
-            await session.deliver(block)
+            session.queue_delivery(block)
         except Exception:
             log.exception("cflow restart notice delivery to %r failed", scope)
 
@@ -1693,12 +1693,12 @@ class RoundStartClock:
             # running regardless, and whoever picks it up reads its position.
             return
         try:
-            delivered = await session.deliver(block)
+            delivered = session.queue_delivery(block)
         except Exception:
             log.exception("cflow round notice delivery to %r failed", scope)
             return
         if delivered:
-            log.info("cflow round notice delivered to %r (%s)", scope, cwd)
+            log.info("cflow round notice queued for %r (%s)", scope, cwd)
 
 
 def round_block(started: dict) -> str:
