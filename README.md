@@ -2852,7 +2852,20 @@ refusing it would lose it rather than un-send it.
 Unlike the nudges this ships **on**: those *spend* a recipient's turn, so
 switching one on is a choice; this is the only thing that stops a fan-in from
 spending them for it. `inbox_max: 0` or `enabled: false` restores the old
-unbounded queue. A refusal leaves no message anywhere — not in the log, not
+unbounded queue.
+
+Which backlog the cap is weighed against depends on whether that backlog can
+drain. A recipient that is reading is weighed on recent traffic only: mail
+older than `ack_timeout.door_secs` stops counting, because its queue drains
+and old mail is pressure that has already gone. A recipient that cannot read
+at all — an explicit delivery hold, or a session that has exited or left the
+registry — is weighed on its **full** depth, because nothing consumes that
+queue, so the aging reopened the door once per `door_secs` with no end and
+the backlog had no ceiling (a paused session was found holding 45 messages
+under a cap of 4, all of which a respawn would have typed into that terminal
+in one block). Refusals for those name the state in `reason`
+(`delivery_hold`, `exited`, `missing`) and carry no retry-after: waiting is
+not what opens them. A refusal leaves no message anywhere — not in the log, not
 in a queue — so it is counted on the recipient instead, and that count is
 what the terminal header's delivery chip and the session panel's
 **Mesh backpressure** box read: past the cap the backlog *stops growing*,
