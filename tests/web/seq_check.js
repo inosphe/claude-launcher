@@ -212,6 +212,60 @@ const kinds = (evs) => evs.map((e) => e.kind).join(",");
   check("a message nobody owes on carries none", out[1].debts.length === 0);
 }
 
+/* --- only this session: the fade turned into a filter ------------------ */
+{
+  const input = {
+    handle: "coder3", members: MEMBERS, gapMs: 0,
+    messages: [
+      msg({ id: "in", seq: 0, from: "lead", recipients: ["coder3"] }),
+      msg({ id: "out", seq: 1, from: "coder3", to: "reviewer", recipients: ["reviewer"] }),
+      msg({ id: "other", seq: 2, from: "lead", to: "reviewer", recipients: ["reviewer"] }),
+      msg({ id: "cast", seq: 3, from: "lead", to: "*",
+            recipients: ["coder3", "reviewer"] }),
+    ],
+  };
+  const all = msgEvents(input).filter((e) => e.kind === "msg");
+  check("unfiltered, the room's four messages are all there",
+        all.map((e) => e.msg.id).join() === "in,out,other,cast",
+        all.map((e) => e.msg.id));
+  const only = msgEvents({ ...input, only: true }).filter((e) => e.kind === "msg");
+  check("what it was sent, what it sent, and the broadcast it was on",
+        only.map((e) => e.msg.id).join() === "in,out,cast",
+        only.map((e) => e.msg.id));
+  check("...and the one that passed between other members is gone",
+        !only.some((e) => e.msg.id === "other"));
+}
+
+{
+  // A join is about another member and holds a column up; the focus session's
+  // own run marks are what the mode is about. Only one of the two survives.
+  const out = msgEvents({
+    handle: "coder3", members: MEMBERS, gapMs: 0, only: true,
+    messages: [msg({ seq: 0, from: "lead", recipients: ["coder3"] })],
+    journal: [{ at: T(5), event: "step_completed", step: "build" }],
+  });
+  check("only-mode drops the joins and keeps its own run",
+        kinds(out) === "msg,flow", kinds(out));
+}
+
+{
+  // The gap markers are the page saying "nothing happened for a while". A
+  // filter that ran after they were computed would leave them measuring a
+  // conversation the reader can no longer see.
+  const out = msgEvents({
+    handle: "coder3", members: MEMBERS, only: true,
+    messages: [
+      msg({ id: "a", seq: 0, from: "lead", recipients: ["coder3"] }),
+      msg({ id: "x", seq: 1, ts: T(6), from: "lead", to: "reviewer",
+            recipients: ["reviewer"] }),
+      msg({ id: "b", seq: 2, ts: T(12), from: "lead", recipients: ["coder3"] }),
+    ],
+  });
+  check("a silence is measured over the rows that are left",
+        kinds(out) === "msg,gap,msg" && out[1].ms === 12 * 60 * 1000,
+        [kinds(out), out[1]]);
+}
+
 /* --- the columns ------------------------------------------------------ */
 {
   const events = msgEvents({
@@ -240,6 +294,22 @@ const kinds = (evs) => evs.map((e) => e.kind).join(",");
   check("the focus session always has a lane",
         lanes.length === 1 && lanes[0].key === "coder3" && lanes[0].self === true,
         lanes);
+}
+
+{
+  // The columns follow the rows: a member with nothing left on the page has
+  // no reason to keep a column on it.
+  const events = msgEvents({
+    handle: "coder3", members: MEMBERS, gapMs: 0, only: true,
+    messages: [
+      msg({ seq: 0, from: "lead", recipients: ["coder3"] }),
+      msg({ id: "x", seq: 1, from: "operator", to: "lead", recipients: ["lead"] }),
+    ],
+  });
+  const lanes = msgLanes(events, "coder3");
+  check("only-mode's columns are the thread's parties, and the session itself",
+        lanes.map((l) => l.key).join() === "lead,coder3",
+        lanes.map((l) => l.key));
 }
 
 /* --- the vocabulary of a run ------------------------------------------ */
