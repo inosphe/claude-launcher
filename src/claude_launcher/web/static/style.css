@@ -84,9 +84,28 @@ option:disabled { color: #6b7280; }
 #refresh-all.spinning, #refresh-archived.spinning { color: #58a6ff; animation: spin 0.7s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
 
+/* The panel is closed by its own darker background, the way it is opened
+   above: the search row carries no rule either, and the colour step is what
+   says where the controls end. A bottom hairline had one more job than the
+   panel needed: it sat on whatever row the rail drew first, and the rail's
+   first row is the pin strip. Against two near-identical darks the line read
+   as a stray 1px floating in one surface rather than as a boundary.
+
+   The panel then reaches one pixel INTO the list and paints over it, which
+   is why it is positioned and lifted. The list declares no background, so
+   its own surface is the sidebar's #1b1e24 — lighter than the panel above it
+   and the pin strip below it. Any pixel row where the two boxes fail to meet
+   exactly shows that lighter surface as a hairline, and they can fail to
+   meet: the list's top edge lands on a fractional device pixel at the display
+   scales this runs at, and a stuck sticky strip is composited on its own
+   layer, rounded independently of the box behind it. Neither is something
+   the list can cover from the inside — the row is outside its scrollport —
+   so the panel covers it from above. The padding grows by the pixel the
+   margin takes back, so nothing below this moves. */
 .session-filters {
   flex: none; display: grid; grid-template-columns: 1fr 1fr; gap: 1px;
-  padding: 6px; border-bottom: 1px solid #2a2e36; background: #11151b;
+  padding: 6px 6px 7px; margin-bottom: -1px; background: #11151b;
+  position: relative; z-index: 4;   /* over the pin strip's own z-index */
 }
 .session-filters button {
   min-width: 0; padding: 6px 7px; border: 0; border-radius: 4px;
@@ -3742,12 +3761,29 @@ body.embed #main { width: 100%; }
    not a section: a strip of small label cards, each one a shortcut back to a
    session whose own row is still down in the tree where it belongs. It holds
    to a single line and scrolls sideways when the pins outgrow the rail --
-   wrapping would turn the shortcut back into the block of rows it replaced. */
+   wrapping would turn the shortcut back into the block of rows it replaced.
+
+   The strip wears the filter panel's own surface, not one of its own. It is
+   the first row of the list, so whatever colour it paints abuts the panel --
+   and a darker strip drew an edge there, read as a 1px line or gap sitting
+   between the last filter control and the pins. With the two surfaces equal
+   the junction draws nothing, and the strip is held apart by the one thing
+   that does belong to it: the border below, where the list's own rows start.
+   The colour is opaque because the strip sticks: scrolled, it has to cover
+   the rows that pass under it, and #11151b still reads as a band over them.
+
+   Below the strip the separation is a 3px divider, and the whole of it is
+   drawn. It used to be a 1px border with a 2px margin under it, and a margin
+   paints nothing: the list declares no background, so those 2px showed the
+   sidebar's #1b1e24 -- lighter than the strip above and the row below, which
+   read as an empty slot cut beside the pins. The divider keeps that height,
+   so nothing below it moves, and states what the space is for: the pins are
+   a strip over the rail, and the tree starts under this line. */
 #session-list li.session-pinbar {
   display: flex; align-items: center; gap: 4px; flex-wrap: nowrap;
   overflow-x: auto; overflow-y: hidden; scrollbar-width: none;
-  padding: 4px 6px; margin-bottom: 2px;
-  border-bottom: 1px solid #21262d; background: #0d1117;
+  padding: 4px 6px;
+  border-bottom: 3px solid #21262d; background: #11151b;
   position: sticky; top: 0; z-index: 3;
 }
 #session-list li.session-pinbar::-webkit-scrollbar { display: none; }
