@@ -667,6 +667,9 @@ class Mesh:
         #: Reply-expecting deliveries without a threaded ack/reply.  This is
         #: a delivery receipt, so it persists with cursors across restarts.
         self.response_watches: Dict[str, dict] = {}
+        # Recipient -> senders already warned during this absence. Persisted
+        # with cursors so restarting the daemon does not repeat the warning.
+        self.stranded_told: Dict[str, List[str]] = {}
         #: Outstanding invite tickets (authority only; pre-approval for a
         #: join request): token -> minted-at ISO timestamp. TTL-checked at
         #: redemption (MeshManager.invite_ttl).
@@ -2310,6 +2313,11 @@ class MeshManager:
         # write-offs made against whoever wore it last — the same reason the
         # member edges below are pruned.
         mesh.dismissed.pop(handle, None)
+        mesh.stranded_told.pop(handle, None)
+        for told in mesh.stranded_told.values():
+            if handle in told:
+                told.remove(handle)
+        mesh._stranded_scan.clear()
         # A reply receipt belongs to this member instance as well.  A reused
         # handle must not inherit a request or sender notification from the
         # session that previously held it.
@@ -6502,18 +6510,19 @@ class MeshManager:
         latch on the dead member alone told the first sender and left every
         later one in the silence this exists to break. So the latch records
         WHO has been told, and a sender not in it is told once. The record
-        clears when the session comes back (see :meth:`_deliver_to`), which
-        is what makes a second death reportable.
+        persists with delivery cursors across daemon restarts and clears
+        when the session comes back (see :meth:`_deliver_to`), which makes
+        a second death reportable. Only explicitly addressed messages count;
+        wildcard broadcasts remain queued without generating these reports.
 
         Sent as ``fyi`` from the policy handle, like a stall warning: the
         senders are being told something, not asked for anything, and an
         answer here would only be owed back to a daemon.
         """
-        st = mesh.activity.setdefault(member.handle, {"anchor": time.monotonic()})
-        # A list, not a set: everything else in ``activity`` is a plain
-        # JSON value, and the one entry that is not is the one that
-        # breaks the day somebody serialises this dict.
-        told = list(st.get("stranded_told") or [])
+        told = mesh.stranded_told.get(member.handle, [])
+        # General broadcasts do not establish a delivery obligation to each
+        # absent member. Keep their mail queued, but do not notify the author.
+        pending = [m for m in pending if m.get("to") != "*"]
         # Only members can be messaged back. An external sender (the operator
         # at a dashboard, or the policy engine itself) has no terminal in this
         # mesh, and a self-report would be a daemon talking to itself.
@@ -6526,32 +6535,31 @@ class MeshManager:
             }
         )
         fresh = [s for s in senders if s not in told]
-        st["stranded_told"] = told + fresh  # marked before the send: a raise
-        if not fresh:                       # below puts it back
+        if not fresh:
             return
         held = stranded_notice(
             [{"handle": member.handle, "session": member.session, "state": state}]
         )
-        waiting = len([
-            m for m in pending if str(m.get("from") or "") in fresh
-        ])
-        body = (
-            f"{member.handle} is not reading you: {held} "
-            f"{waiting} message(s) of yours are waiting there."
-        )
-        try:
-            self._send_core(mesh, mesh_policy.POLICY_SENDER, fresh, body,
-                            external=True, type="fyi")
+        for sender in fresh:
+            waiting = sum(m.get("from") == sender for m in pending)
+            body = (
+                f"{member.handle} is not reading you: {held} "
+                f"{waiting} message(s) of yours are waiting there."
+            )
+            try:
+                self._send_core(mesh, mesh_policy.POLICY_SENDER, [sender], body,
+                                external=True, type="fyi")
+            except MeshError as exc:
+                log.debug("mesh %r: stranded report failed: %s", mesh.name, exc)
+                continue
+            told = [*told, sender]
+            mesh.stranded_told[member.handle] = told
+            self._persist_cursors(mesh)
             self._flush_guests_soon(mesh)
-        except MeshError as exc:
-            log.debug("mesh %r: stranded report failed: %s", mesh.name, exc)
-            st["stranded_told"] = told  # unreported; let a later tick retry
-            return
-        log.info(
-            "mesh %r: told %s that %r (session %r) is %s with %d message(s) held",
-            mesh.name, ", ".join(fresh), member.handle, member.session,
-            state, waiting,
-        )
+            log.info(
+                "mesh %r: told %s that %r (session %r) is %s with %d message(s) held",
+                mesh.name, sender, member.handle, member.session, state, waiting,
+            )
 
     def _delivery_origins(self, mesh: Mesh, msgs: List[dict]) -> Dict[str, str]:
         """Which daemon each sender in this batch speaks from, "" for ours.
@@ -6611,15 +6619,13 @@ class MeshManager:
             )
             return
         mesh._stranded_scan.pop(member.handle, None)
+        # Seeing a live recipient re-arms warnings even when its queue is empty.
+        if mesh.stranded_told.pop(member.handle, None) is not None:
+            self._persist_cursors(mesh)
         if not pending:
             mesh._first_pending.pop(member.handle, None)
             return
         assert session is not None
-        # Alive again: arm the report, so a second death is reported afresh
-        # rather than swallowed by the first one's latch.
-        mesh.activity.setdefault(
-            member.handle, {"anchor": time.monotonic()}
-        ).pop("stranded_told", None)
         # ``force`` is a human at the dashboard saying "type it in now" (see
         # :meth:`flush_session`). It drops THIS gate — the gate exists to keep
         # an automated paste out of a running turn, and waiting that out is
@@ -6868,6 +6874,11 @@ class MeshManager:
                         for k, v in (raw.get("response_watches") or {}).items()
                         if isinstance(v, dict)
                     }
+                    mesh.stranded_told = {
+                        str(k): [str(sender) for sender in v]
+                        for k, v in (raw.get("stranded_told") or {}).items()
+                        if isinstance(v, list)
+                    }
                 else:  # phase-1 format: a flat {handle: index} map
                     mesh.cursors = {str(k): int(v) for k, v in raw.items()}
             except (ValueError, TypeError):
@@ -6875,6 +6886,7 @@ class MeshManager:
                 mesh.link_cursors = {}
                 mesh.dismissed = {}
                 mesh.response_watches = {}
+                mesh.stranded_told = {}
         outbox_path = d / "outbox.jsonl"
         if mesh.primary and outbox_path.is_file():
             for line in outbox_path.read_text(encoding="utf-8").splitlines():
@@ -6949,6 +6961,8 @@ class MeshManager:
                 doc["dismissed"] = dismissed
             if mesh.response_watches:
                 doc["response_watches"] = mesh.response_watches
+            if mesh.stranded_told:
+                doc["stranded_told"] = mesh.stranded_told
             path = self._mesh_dir(mesh.name) / "cursors.json"
             with atomic.scratch(path) as tmp:
                 tmp.write_text(json.dumps(doc, indent=2), encoding="utf-8")

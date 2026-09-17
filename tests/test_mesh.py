@@ -496,12 +496,12 @@ def test_a_member_that_dies_holding_mail_is_reported_to_its_senders(home, tmp_pa
         member = mesh.members["bob"]
         await mm._deliver_to(mesh, member)
         reports = [m for m in mesh.messages if m["from"] == "policy"]
-        assert len(reports) == 1
+        assert len(reports) == 2
         report = reports[0]
-        assert sorted(report["to"]) == ["carol", "leader"]
+        assert [r["to"] for r in reports] == [["carol"], ["leader"]]
         assert report["type"] == "fyi"          # informs, never asks
         assert "claunch respawn w2" in report["body"]
-        assert "2 message(s) of yours are waiting" in report["body"]
+        assert all("1 message(s) of yours are waiting" in r["body"] for r in reports)
         assert "bob" not in report["to"]        # bob is not told about bob
         # Reporting changes nothing about the mail: it is still held for the
         # respawn, which is the contract test_delivery_waits_for_respawn pins.
@@ -511,19 +511,19 @@ def test_a_member_that_dies_holding_mail_is_reported_to_its_senders(home, tmp_pa
         # drains on its own: without a latch this is a message per tick.
         for _ in range(3):
             await mm._deliver_to(mesh, member)
-        assert len([m for m in mesh.messages if m["from"] == "policy"]) == 1
+        assert len([m for m in mesh.messages if m["from"] == "policy"]) == 2
         # dave now sends into the same closed terminal. His send result says
         # so (the other half of this contract), and the mail queues -- and
         # he is told, about his mail, while the two already told are not.
         await mm.send("m4", "dave", "bob", "late")
         await mm._deliver_to(mesh, member)
         reports = [m for m in mesh.messages if m["from"] == "policy"]
-        assert len(reports) == 2, "the second sender heard nothing"
-        assert reports[1]["to"] == ["dave"]
-        assert "1 message(s) of yours are waiting" in reports[1]["body"]
+        assert len(reports) == 3, "the late sender heard nothing"
+        assert reports[2]["to"] == ["dave"]
+        assert "1 message(s) of yours are waiting" in reports[2]["body"]
         for _ in range(3):
             await mm._deliver_to(mesh, member)
-        assert len([m for m in mesh.messages if m["from"] == "policy"]) == 2
+        assert len([m for m in mesh.messages if m["from"] == "policy"]) == 3
 
         # Respawn re-arms it: a second death is news again.
         revived = mgr.respawn("w2")
@@ -534,10 +534,69 @@ def test_a_member_that_dies_holding_mail_is_reported_to_its_senders(home, tmp_pa
         await revived.send_keys(["quit", "Enter"])
         await revived.wait_for("exited", timeout=10.0, threshold=0.5)
         await mm._deliver_to(mesh, mesh.members["bob"])
-        assert len([m for m in mesh.messages if m["from"] == "policy"]) == 3
+        assert len([m for m in mesh.messages if m["from"] == "policy"]) == 4
 
         await mm.shutdown()
         await mgr.shutdown_all()
+
+    asyncio.run(run())
+
+
+def test_stranded_reports_survive_restart_and_ignore_broadcasts(home, tmp_path):
+    """Old general announcements must not wake their author after a restart."""
+    from types import SimpleNamespace
+
+    async def run():
+        mgr = _manager()
+        mm = MeshManager(mgr, root=tmp_path / "meshes")
+        mesh = mm.create("stranded")
+        mesh.policy = {"backpressure": {"inbox_max": 100}}
+        for handle in ("alice", "bob", "carol", "dave"):
+            mesh.members[handle] = mesh_mod.Member(handle, handle)
+        mm._persist_def(mesh)
+        for intent in ("fyi", "say", "ask"):
+            mm._send_core(mesh, "alice", "*", "announcement", type=intent)
+        mm._send_core(mesh, "carol", "bob", "one", type="fyi")
+        mm._send_core(mesh, "carol", ["bob"], "two")
+        mm._send_core(mesh, "dave", "bob", "three")
+        await mm._deliver_to(mesh, mesh.members["bob"])
+        reports = [m for m in mesh.messages if m["from"] == "policy"]
+        assert [m["to"] for m in reports] == [["carol"], ["dave"]]
+        assert "2 message(s)" in reports[0]["body"]
+        assert "1 message(s)" in reports[1]["body"]
+        pending_ids = [m["id"] for m in mesh.pending("bob")]
+        assert len(pending_ids) == 6  # broadcasts stay queued
+
+        restored = MeshManager(mgr, root=tmp_path / "meshes")
+        restored.load_all()
+        mesh = restored.get("stranded")
+        await restored._deliver_to(mesh, mesh.members["bob"])
+        assert len([m for m in mesh.messages if m["from"] == "policy"]) == 2
+        assert [m["id"] for m in mesh.pending("bob")] == pending_ids
+
+        # A broadcast-only sender can later receive a directed warning.
+        restored._send_core(mesh, "alice", "bob", "direct question", type="ask")
+        await restored._deliver_to(mesh, mesh.members["bob"])
+        reports = [m for m in mesh.messages if m["from"] == "policy"]
+        assert len(reports) == 3
+        assert reports[-1]["to"] == ["alice"]
+        assert "1 message(s)" in reports[-1]["body"]
+
+        # A live observation with an empty queue must durably re-arm notices.
+        mesh.cursors["bob"] = len(mesh.messages)
+        original_get = mgr.get
+        mgr.get = lambda name: SimpleNamespace(exited=False)
+        await restored._deliver_to(mesh, mesh.members["bob"])
+        mgr.get = original_get
+        again = MeshManager(mgr, root=tmp_path / "meshes")
+        again.load_all()
+        mesh = again.get("stranded")
+        again._send_core(mesh, "carol", "bob", "after second exit")
+        await again._deliver_to(mesh, mesh.members["bob"])
+        reports = [m for m in mesh.messages if m["from"] == "policy"]
+        assert len(reports) == 4
+        assert reports[-1]["to"] == ["carol"]
+        assert "1 message(s)" in reports[-1]["body"]
 
     asyncio.run(run())
 
