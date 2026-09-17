@@ -1944,6 +1944,10 @@ body.term-split #terminal { flex: var(--split-term, 0.6) 1 0; min-height: 80px; 
 .gh-guide-step .wf-warning, .gh-guide-step .wf-note { margin: 0 0 4px; }
 .gh-ready { color: #3fb950; }
 .beads-page-tabs { margin-bottom: 12px; }
+.beads-workspace-tabs { overflow-x: auto; flex-wrap: nowrap; margin-bottom: 12px; }
+.beads-workspace-tabs .seq-tab { flex-shrink: 0; }
+.beads-sort { display: inline-flex; align-items: center; gap: 6px; }
+.beads-sort select,
 .beads-session-pick {
   margin-left: auto; padding: 4px 8px; background: #0d1117; color: #e6edf3;
   border: 1px solid #30363d; border-radius: 6px; font-size: 12px;

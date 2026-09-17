@@ -906,6 +906,29 @@ def test_stream_view_reads_a_bounded_priority_page(repo):
     asyncio.run(run())
 
 
+@pytest.mark.parametrize("field", ["updated_at", "created_at", "priority", "title"])
+def test_stream_sort_direction_and_cache_are_separate(repo, field):
+    br = FakeBr()
+    br.add(id="a")
+    board = _board(br, repo)
+
+    async def run():
+        for direction in ("asc", "desc"):
+            await board.stream_view([], [str(repo)], sort=field, direction=direction)
+            listing = [c for c in br.calls if "list" in c][-1]
+            assert listing[listing.index("--sort") + 1] == field
+            assert ("--reverse" in listing) == (
+                (direction == "asc") == (field in {"created_at", "updated_at"})
+            )
+        assert len([c for c in br.calls if "list" in c]) == 2
+        await board.stream_view([], [str(repo)], sort=field, direction="asc")
+        assert len([c for c in br.calls if "list" in c]) == 2
+        assert len(board._page_cache) == 2
+        assert len(board._page_deps) == 2
+
+    asyncio.run(run())
+
+
 def test_stream_route_validates_and_returns_the_continuation(home, tmp_path, repo):
     br = FakeBr()
     br.add(id="a", priority=1)
@@ -927,6 +950,16 @@ def test_stream_route_validates_and_returns_the_continuation(home, tmp_path, rep
             assert doc["has_more"] is True and doc["next_offset"] == 1
             bad = await client.get("/api/beads/stream?limit=zero", headers=BEARER)
             assert bad.status == 400
+            for query in ("sort=status", "direction=sideways"):
+                bad = await client.get(f"/api/beads/stream?{query}", headers=BEARER)
+                assert bad.status == 400
+            resp = await client.get(
+                f"/api/beads/stream?cwd={repo}&sort=title&direction=asc", headers=BEARER,
+            )
+            assert resp.status == 200
+            listing = [c for c in br.calls if "list" in c][-1]
+            assert listing[listing.index("--sort") + 1] == "title"
+            assert "--reverse" not in listing
         finally:
             await client.close()
 
@@ -1056,7 +1089,9 @@ def test_create_and_spawn_link_an_issue_and_tell_the_agent(home, tmp_path, repo)
             assert sorted(s["name"] for s in joined["sessions"]) == ["w1", "w2"]
             assert joined["assignee"] == "w1"
             resp = await client.get(f"/api/beads/t-1?cwd={repo}", headers=BEARER)
-            assert (await resp.json())["issue"]["title"] == "Lead the work"
+            detail = await resp.json()
+            assert detail["issue"]["title"] == "Lead the work"
+            assert [s["name"] for s in detail["sessions"]] == ["lead"]
 
             # the record survives a restart: the link is in the definition
             mgr.persist()

@@ -914,8 +914,9 @@ class Board:
     async def issue_page(
         self, root: Path, *, offset: int = 0, limit: int = 50,
         priority: Optional[int] = None,
+        sort: str = "updated_at", direction: str = "desc",
     ) -> Tuple[List[dict], bool]:
-        """One bounded page of a board, ordered by recent updates.
+        """One bounded page of a board in the requested order.
 
         ``br list`` performs the offset and priority filtering in the board's
         database.  Asking for one extra row makes the continuation marker
@@ -925,15 +926,22 @@ class Board:
         """
         offset = max(0, offset)
         limit = max(1, limit)
-        key = (str(root), offset, limit, priority)
+        if sort not in {"updated_at", "created_at", "priority", "title"}:
+            raise ValueError("unsupported sort field")
+        if direction not in {"asc", "desc"}:
+            raise ValueError("unsupported sort direction")
+        key = (str(root), offset, limit, priority, sort, direction)
         now = self._clock()
         hit = self._page_cache.get(key)
         if hit and now - hit[0] < CACHE_TTL:
             return hit[1], hit[2]
         args = [
             "list", "--all", "--limit", str(limit + 1), "--offset", str(offset),
-            "--sort", "updated_at", "--reverse",
+            "--sort", sort,
         ]
+        # br defaults dates to newest first, priority/title to ascending.
+        if (direction == "asc") == (sort in {"updated_at", "created_at"}):
+            args.append("--reverse")
         if priority is not None:
             args.extend(["--priority", str(priority)])
         data = await self.br(root, args)
@@ -1169,6 +1177,7 @@ class Board:
     async def stream_view(
         self, sessions: Sequence, extra_roots: Sequence[str] = (), *,
         offset: int = 0, limit: int = 50, priority: Optional[int] = None,
+        sort: str = "updated_at", direction: str = "desc",
     ) -> dict:
         """A bounded, resumable page for each board on the Beads screen.
 
@@ -1200,6 +1209,7 @@ class Board:
             try:
                 rows, entry["has_more"] = await self.issue_page(
                     root, offset=offset, limit=limit, priority=priority,
+                    sort=sort, direction=direction,
                 )
             except cli_beads.BeadsError as exc:
                 entry["error"] = str(exc)
@@ -1216,7 +1226,7 @@ class Board:
             ]
             try:
                 entry["deps"] = await self.edges(
-                    root, rows, cache_key=(str(root), offset, limit, priority),
+                    root, rows, cache_key=(str(root), offset, limit, priority, sort, direction),
                 )
             except cli_beads.BeadsError as exc:
                 log.debug("beads: no edge read for %s: %s", root, exc)
