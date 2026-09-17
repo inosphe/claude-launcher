@@ -7619,6 +7619,95 @@ function sendPromptPreset(text) {
   );
 }
 
+let hostClipboardRequest = 0;
+let hostClipboardSession = null;
+
+function closeHostClipboard() {
+  hostClipboardRequest++;
+  $("term-clipboard-menu")?.classList.add("hidden");
+  $("term-clipboard-toggle")?.setAttribute("aria-expanded", "false");
+}
+
+async function loadHostClipboard() {
+  const request = ++hostClipboardRequest;
+  const status = $("term-clipboard-status");
+  status.textContent = "Loading…";
+  try {
+    const response = await api("/api/clipboard");
+    const doc = await response.json();
+    if (request !== hostClipboardRequest) return;
+    if (!response.ok) throw new Error(doc.error || "Clipboard could not be loaded");
+    const box = $("term-clipboard-items");
+    box.replaceChildren();
+    status.textContent = doc.error || (doc.items.length ? "Select Paste to insert text." : "No text history yet.");
+    for (const item of doc.items) {
+      const row = el("div", "clipboard-entry");
+      row.appendChild(el("time", "", new Date(item.copied_at).toLocaleString()));
+      row.appendChild(el("pre", "", item.text));
+      const paste = el("button", "term-btn", "Paste");
+      paste.type = "button";
+      paste.addEventListener("click", () => {
+        if (hostClipboardSession !== currentName || sessionEnded) {
+          closeHostClipboard();
+          return;
+        }
+        if (insertPromptPreset(item.text)) closeHostClipboard();
+      });
+      const remove = el("button", "term-btn", "Delete");
+      remove.type = "button";
+      remove.addEventListener("click", () => deleteHostClipboard(item.id));
+      row.appendChild(paste);
+      row.appendChild(remove);
+      box.appendChild(row);
+    }
+  } catch (error) {
+    if (request === hostClipboardRequest) status.textContent = error.message;
+  }
+}
+
+async function deleteHostClipboard(id) {
+  const request = ++hostClipboardRequest;
+  try {
+    const response = await api("/api/clipboard" + (id ? `/${encodeURIComponent(id)}` : ""), { method: "DELETE" });
+    if (!response.ok) throw new Error("Clipboard history could not be deleted");
+    if (request === hostClipboardRequest) await loadHostClipboard();
+  } catch (error) {
+    if (request === hostClipboardRequest) $("term-clipboard-status").textContent = error.message;
+  }
+}
+
+function toggleHostClipboard() {
+  const menu = $("term-clipboard-menu");
+  if (!menu.classList.contains("hidden")) {
+    closeHostClipboard();
+    return;
+  }
+  hostClipboardSession = currentName;
+  menu.classList.remove("hidden");
+  $("term-clipboard-toggle").setAttribute("aria-expanded", "true");
+  $("term-clipboard-refresh").focus();
+  loadHostClipboard();
+}
+
+$("term-clipboard-toggle")?.addEventListener("click", toggleHostClipboard);
+$("term-clipboard-refresh")?.addEventListener("click", loadHostClipboard);
+$("term-clipboard-clear")?.addEventListener("click", () => deleteHostClipboard());
+$("term-clipboard-close")?.addEventListener("click", () => {
+  closeHostClipboard();
+  $("term-clipboard-toggle").focus();
+});
+$("term-input")?.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && !$("term-clipboard-menu").classList.contains("hidden")) {
+    event.preventDefault();
+    closeHostClipboard();
+    $("term-clipboard-toggle").focus();
+  }
+});
+if ($("term-clipboard-menu")) document.addEventListener("pointerdown", (event) => {
+  if (!$("term-clipboard-menu")?.contains(event.target)
+      && !$("term-clipboard-toggle")?.contains(event.target)) closeHostClipboard();
+});
+
 function onTermInputSubmit(ev) {
   ev.preventDefault();
   sendKeyLine($("term-input-field"), $("term-input-send"), $("term-input-note"));
@@ -8025,6 +8114,7 @@ function closeLink() {
 }
 
 function detach() {
+  closeHostClipboard();
   // A full tear-down supersedes whatever parked copy of this session exists —
   // the stale child the respawn-follow path leaves behind is exactly that.
   if (currentName) keptTerms.delete(currentName);

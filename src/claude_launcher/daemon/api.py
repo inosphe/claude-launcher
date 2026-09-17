@@ -247,6 +247,8 @@ def build_app(
     app["mesh"] = mesh if mesh is not None else MeshManager(manager)
     from . import observer
     observer.install(app)
+    from . import clipboard
+    clipboard.install(app)
     app["relay_state"] = relay_state if relay_state is not None else _relay_unconfigured
     app["token"] = token
     app["cookie_sessions"] = cookie_sessions

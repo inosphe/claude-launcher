@@ -1444,9 +1444,24 @@ a.cflow-scope:hover { background: #1d3559; text-decoration: underline; }
    queued deliveries' (same background and rule), pinned to the column's
    bottom as its last flex child. */
 #term-input {
+  position: relative;
   flex: none; display: flex; align-items: flex-end; gap: 8px; min-width: 0;
   padding: 8px 12px; background: #1b1e24; border-top: 1px solid #2a2e36;
 }
+#term-clipboard-menu {
+  position: absolute; bottom: 100%; left: 8px; z-index: 50;
+  width: min(520px, calc(100% - 16px)); max-height: 60vh; overflow: auto;
+  padding: 12px; color: #d8dbe0; background: #1b1e24;
+  border: 1px solid #484f58; border-radius: 6px; box-shadow: 0 4px 18px #0008;
+}
+#term-clipboard-menu p { font-size: 12px; margin: 8px 0; }
+.clipboard-actions { display: flex; gap: 8px; }
+.clipboard-entry { border-top: 1px solid #30363d; padding: 8px 0; }
+.clipboard-entry pre {
+  white-space: pre-wrap; overflow-wrap: anywhere; max-height: 180px;
+  overflow: auto; user-select: text; font-size: 12px;
+}
+.clipboard-entry time { display: block; color: #9da7b3; font-size: 11px; }
 #term-preset-buttons {
   flex: none; display: flex; gap: 6px; overflow-x: auto; min-width: 0;
   padding: 6px 12px; background: #1b1e24; border-top: 1px solid #2a2e36;
