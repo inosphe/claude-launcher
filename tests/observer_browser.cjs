@@ -253,7 +253,60 @@ const server = http.createServer((req, res) => {
     await page.locator(".observer-content").evaluate(e=>e.scrollTop=0);
     assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);
     if(process.env.CLAUNCH_SCREENSHOT) await page.screenshot({path:process.env.CLAUNCH_SCREENSHOT,fullPage:true});
+    // The grid limits posts (across sessions), after filters, and persists its
+    // size. The board/timeline remains available with all original controls.
+    await page.locator('label:has(#observer-layout-grid)').click();
+    assert.equal(await page.locator('#observer-limit-control').isVisible(),true);
+    assert.equal(await page.locator('#observer-limit').inputValue(),'5');
+    await page.locator('#observer-limit').fill('1');
+    assert.equal(await page.locator('.observer-grid .observer-card').count(),1);
+    assert.equal(await page.locator('.observer-grid .event').getAttribute('data-event'),'mobile-new');
+    if(process.env.CLAUNCH_GRID_SCREENSHOT) await page.screenshot({path:process.env.CLAUNCH_GRID_SCREENSHOT,fullPage:true});
+    await page.reload();
+    await page.waitForSelector('.observer-grid .observer-card');
+    assert.equal(await page.locator('#observer-layout-grid').isChecked(),true);
+    assert.equal(await page.locator('#observer-limit').inputValue(),'1');
+    assert.equal(await page.locator('.observer-card').count(),1);
+    await page.setViewportSize({width:1280,height:900});
+    assert.equal(await page.locator('.observer-grid').isVisible(),true);
+    await page.check('#observer-actions-only');
+    await page.getByRole('button',{name:'staging',exact:true}).waitFor();
+    assert.equal(await page.locator('.observer-card').count(),1,'gate remains reachable after filtering');
+    await page.uncheck('#observer-actions-only');
+    data.sessions[1].events=Array.from({length:12},(_,i)=>({id:`grid-${i}`,kind:'result',text:`Grid post ${i}`,source:'transcript:2',at:new Date(Date.now()+(i+1)*60000).toISOString()}));
+    await page.locator('#observer-limit').fill('10');
+    await page.getByText('Grid post 11',{exact:true}).waitFor();
+    assert.equal(await page.locator('.observer-card').count(),10);
+    assert.deepEqual(await page.locator('.observer-grid .event').evaluateAll(es=>es.map(e=>e.dataset.event)),Array.from({length:10},(_,i)=>`grid-${11-i}`));
+    await page.locator('.observer-grid .observer-card').last().scrollIntoViewIfNeeded();
+    assert.equal(await page.locator('.observer-grid .observer-card').last().isVisible(),true);
+    await page.selectOption('#observer-activity','working');
+    assert.equal(await page.locator('.observer-card').count(),1);
+    assert.equal(await page.locator('.observer-card').getAttribute('data-session'),'s3');
+    await page.selectOption('#observer-activity','all');
+    await page.locator('label:has(#observer-layout-board)').click();
+    assert.equal(await page.locator('.observer-column').count(),3);
+    assert.equal(await page.locator('#observer-limit-control').isVisible(),false);
+    await page.setViewportSize({width:320,height:740});
+    assert.equal(await page.locator('.observer-timeline .observer-card').count(),16);
+    assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);
+    // Corrupt and unavailable storage must not prevent rendering.
+    await page.evaluate(()=>localStorage.setItem('claunch-observer-grid-limit','999'));
+    await page.reload();
+    await page.waitForSelector('.observer-card');
+    await page.locator('label:has(#observer-layout-grid)').click();
+    assert.equal(await page.locator('#observer-limit').inputValue(),'5');
+    await page.addInitScript(()=>{
+      const get=Storage.prototype.getItem,set=Storage.prototype.setItem;
+      Storage.prototype.getItem=function(key){if(key.startsWith('claunch-observer-'))throw Error('storage blocked');return get.call(this,key);};
+      Storage.prototype.setItem=function(key,value){if(key.startsWith('claunch-observer-'))throw Error('storage blocked');return set.call(this,key,value);};
+    });
+    await page.reload();
+    await page.waitForSelector('.observer-card');
+    await page.locator('label:has(#observer-layout-grid)').click();
+    await page.locator('#observer-limit').fill('1');
+    assert.equal(await page.locator('.observer-card').count(),1);
     assert.deepEqual(errors, []);
-    console.log("PASS: mobile layout, composer fold, usage meter over calls and days, elapsed-since-update, scope/action filters, evidence, Escape, target input, per-session drafts, shared auth, deep links, polling lifecycle, legacy redirect, direct screenshot/answer, activity filters, cflow approval/selection");
+    console.log("PASS: mobile layout, composer fold, usage meter over calls and days, elapsed-since-update, scope/action filters, evidence, Escape, target input, per-session drafts, shared auth, deep links, polling lifecycle, legacy redirect, direct screenshot/answer, activity filters, cflow approval/selection, latest-N grid, 1/10 limits, filter-before-limit, storage persistence/fallback, responsive view switching");
   } finally { await browser.close(); server.close(); server.closeAllConnections(); }
 })().catch(error => { console.error(error); server.close(); server.closeAllConnections(); process.exitCode = 1; });

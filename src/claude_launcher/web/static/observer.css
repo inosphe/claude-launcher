@@ -36,6 +36,18 @@
 #observer-input-status { grid-column: 1/-1; font-size: 12px; color: #8b949e; margin: 0 !important; }
 #observer-view .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0,0,0,0); }
 #observer-view [hidden] { display: none !important; }
+#observer-view .observer-view-controls { display:flex; flex-wrap:wrap; align-items:center; gap:12px 24px; margin-bottom:12px; flex:none; }
+#observer-view .observer-view-tabs { display:flex; gap:4px; padding:4px; margin:0; border:1px solid #303b4b; border-radius:24px; background:#111820; }
+#observer-view .observer-view-tabs label { position:relative; cursor:pointer; }
+#observer-view .observer-view-tabs input { position:absolute; width:1px; height:1px; opacity:0; }
+#observer-view .observer-view-tabs span { display:flex; align-items:center; justify-content:center; min-height:40px; padding:0 22px; border-radius:20px; color:#96a6b8; font-weight:600; }
+#observer-view .observer-view-tabs input:checked + span { color:#f0f7ff; background:#245d87; }
+#observer-view .observer-view-tabs input:focus-visible + span { outline:2px solid #58a6ff; outline-offset:3px; }
+#observer-limit { width:140px; min-height:44px; accent-color:#58a6ff; cursor:pointer; }
+#observer-limit-value { min-width:3ch; color:#79c0ff; font-variant-numeric:tabular-nums; }
+#observer-cards.observer-grid { overflow-y:auto; min-height:0; align-content:start; grid-template-columns:repeat(auto-fit,minmax(min(100%,340px),1fr)); }
+#observer-view .observer-grid .observer-post { background:#161e28; border:1px solid #303b4b; border-radius:16px; }
+#observer-view .observer-grid .observer-post > button { margin-top:12px; }
 #observer-view :focus-visible { outline: 2px solid #58a6ff; outline-offset: 2px; }
 @media(max-width:600px) {
   #observer-view > header { padding: 10px 12px; }
@@ -81,4 +93,31 @@
   #observer-composer > label[for=observer-target] { display:none; }
   #observer-composer.folded { grid-template-columns:1fr; }
   #observer-composer.folded > :not(#observer-composer-toggle) { display:none; }
+}
+/* A single-column social feed keeps the existing report and reply controls. */
+@media(max-width:820px) {
+  #observer-view .observer-content { padding:12px 0; background:#10171f; }
+  #observer-view .observer-content > :not(#observer-cards) { margin-left:16px; margin-right:16px; }
+  #observer-view .observer-view-controls { justify-content:space-between; }
+  #observer-view .observer-view-tabs { flex:1; }
+  #observer-view .observer-view-tabs label { flex:1; }
+  #observer-view .filters { gap:8px 12px; padding:12px 0; border-bottom:1px solid #263341; }
+  #observer-view .filters select { border-radius:18px; background:#152231; }
+  #observer-view #observer-notice { font-size:12px; line-height:1.5; }
+  #observer-view #observer-counts { font-weight:600; color:#c4d4e5; }
+  #observer-cards.observer-grid { display:grid; grid-template-columns:1fr; gap:12px; padding:0 12px; overflow:visible; }
+  #observer-view .observer-post { padding:20px 16px; border-bottom:1px solid #263341; }
+  #observer-view .observer-post h2 { display:flex; flex-wrap:wrap; align-items:center; gap:8px; margin:0 0 8px; font-size:15px; }
+  #observer-view .observer-post h2::before { content:""; width:30px; height:30px; flex:none; border-radius:50%; background:radial-gradient(circle at 50% 35%,#9ed7ff 0 4px,transparent 5px),radial-gradient(ellipse at 50% 100%,#669cc7 0 10px,transparent 11px),#213e56; }
+  #observer-view .observer-post .state { border-radius:12px; font-size:11px; font-weight:500; }
+  #observer-view .observer-post .observer-links { gap:16px; margin:10px 0 14px; }
+  #observer-view .observer-post .observer-links a { text-decoration:none; min-height:32px; display:inline-flex; align-items:center; }
+  #observer-view .observer-post .event { line-height:1.75; }
+  #observer-view .observer-post .event > small { margin-bottom:8px; font-size:11px; }
+  #observer-view .observer-post > button { border-radius:22px; padding:8px 18px; color:#8dcaff; background:#142b3e; border-color:#285271; }
+  #observer-view .observer-answer button { border-radius:20px; }
+  #observer-view .observer-answer textarea { border-radius:14px; background:#101923; }
+  #observer-composer { background:#14202c; border-color:#2c4155; }
+  #observer-view #observer-send { border-radius:22px; background:#237db4; border-color:#237db4; color:#fff; font-weight:600; }
+  #observer-composer #observer-composer-toggle { border-radius:22px; color:#8dcaff; border-color:#285271; }
 }
