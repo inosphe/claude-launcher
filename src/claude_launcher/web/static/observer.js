@@ -6,8 +6,8 @@ let snapshot = {sessions: [], enabled: false}, pending = false, refreshTask = nu
 const drafts = new Map(), answerDrafts = new Map();
 let runs = [], gateCache = new Map(), cflowError = false;
 let draftTarget = "";
-// The composer starts folded on a phone and stays where the reader left it.
-// Desktop ignores this: there the whole footer is always laid out.
+// The composer starts folded at every width and stays where the reader left
+// it for as long as the page is loaded; a reload comes back folded.
 let composerFolded = true;
 let layout = "board", gridLimit = 5;
 try {
@@ -175,11 +175,10 @@ function sessionHeader(s, cls="") {
   return card;
 }
 function composerState() {
-  const toggle=$("composer-toggle"), folded=mobileView.matches&&composerFolded;
-  $("composer").classList.toggle("folded",folded);
-  toggle.hidden=!mobileView.matches;
-  toggle.setAttribute("aria-expanded",String(!folded));
-  toggle.textContent=`입력 대상 세션 ${folded?"▸":"▾"}`;
+  const toggle=$("composer-toggle");
+  $("composer").classList.toggle("folded",composerFolded);
+  toggle.setAttribute("aria-expanded",String(!composerFolded));
+  toggle.textContent=`입력 대상 세션 ${composerFolded?"▸":"▾"}`;
 }
 function inputButton(card,s) {
   const button=node("button","이 세션에 입력");button.disabled=!s.running;
@@ -201,36 +200,67 @@ function eventItem(s,e) {
   }
   return item;
 }
-/* The observation meter. The daemon keeps a lifetime total and a per-day
-   breakdown per session; the page-level figure is those added up here, so
-   the daemon stores one shape and the client decides how to read it. A row
-   written before the meter carries only the last call's `usage`, and that is
-   shown as it was rather than as an empty meter. */
-const USAGE_FIELDS = [["prompt_tokens","입력"],["completion_tokens","출력"],
-                      ["prompt_cache_hit_tokens","캐시적중"],["prompt_cache_miss_tokens","미스"]];
+/* The observation meter, reported as the three figures the panel is for: the
+   prompt that was not served from cache (입력), the part that was (캐시), and
+   what came back (출력). `prompt_tokens` spans both cache sides, so a reported
+   miss is the uncached input; when no cache counter was reported at all the
+   miss side is unknown too, and the whole prompt is shown as 입력 with the
+   cache column dropped rather than claimed as zero.
+   The daemon keeps a lifetime total and a per-day breakdown per session; the
+   page-level figure is those added up here, so the daemon stores one shape and
+   the client decides how to read it. A row written before the meter carries
+   only the last call's `usage`, and that is labelled as a last-call figure
+   instead of being passed off as a lifetime total. */
 const usageCount = value => Number.isFinite(value) ? value.toLocaleString("ko-KR") : "0";
-function usageSum(base, add) {
-  const out={calls:(base?.calls||0)+(add?.calls||0)};
-  for(const [key] of USAGE_FIELDS)out[key]=(base?.[key]||0)+(add?.[key]||0);
-  return out;
+const usageNumber = value => Number.isFinite(Number(value)) ? Number(value) : 0;
+function usageShape(row) {
+  const tokens=usageNumber(row.prompt_tokens), output=usageNumber(row.completion_tokens);
+  const hit=usageNumber(row.prompt_cache_hit_tokens), miss=usageNumber(row.prompt_cache_miss_tokens);
+  // A provider reports the cache as a pair; both sides zero means it reported
+  // no cache at all, and then the whole prompt is the input.
+  const reported=hit+miss>0;
+  const calls=Number.isFinite(Number(row.calls))?Number(row.calls):null;
+  return {calls,input:reported?Math.max(0,tokens-hit):tokens,cached:reported?hit:0,output,counted:reported};
 }
-function usageLine(label,u) {
-  return `${label}  호출 ${usageCount(u.calls)}회 · `
-    + USAGE_FIELDS.map(([key,name])=>`${name} ${usageCount(u[key])}`).join(" · ");
+function usageSum(rows) {
+  const total={calls:0,hasCalls:false,input:0,cached:0,output:0,counted:false};
+  for(const row of rows) {
+    if(!row)continue;
+    const shape=usageShape(row);
+    total.input+=shape.input;total.cached+=shape.cached;total.output+=shape.output;
+    total.counted=total.counted||shape.counted;
+    if(shape.calls!==null){total.calls+=shape.calls;total.hasCalls=true;}
+  }
+  return total;
+}
+function usageLine(label,total) {
+  const parts=[];
+  if(total.hasCalls)parts.push(`호출 ${usageCount(total.calls)}회`);
+  parts.push(`입력 ${usageCount(total.input)}`);
+  if(total.counted)parts.push(`캐시 ${usageCount(total.cached)}`);
+  return `${label}  ${parts.join(" · ")} · 출력 ${usageCount(total.output)}`;
 }
 function usageText(sessions) {
-  let total=null; const daily={};
-  for(const s of sessions) {
-    if(s.usage_totals)total=usageSum(total,s.usage_totals);
-    for(const [day,u] of Object.entries(s.usage_daily||{}))daily[day]=usageSum(daily[day],u);
-  }
-  if(!total)return "";
-  return [usageLine("누적",total),...Object.keys(daily).sort().reverse().map(day=>usageLine(day,daily[day]))].join("\n");
+  const metered=sessions.filter(s=>s.usage_totals), lastCall=sessions.filter(s=>!s.usage_totals&&s.usage);
+  const daily={};
+  for(const s of sessions)for(const [day,u] of Object.entries(s.usage_daily||{}))(daily[day]||=[]).push(u);
+  const lines=[];
+  if(metered.length)lines.push(usageLine("누적",usageSum(metered.map(s=>s.usage_totals))));
+  // Only the sessions the meter never reached: their last call is already
+  // inside the lifetime total of the others, and counting it twice would
+  // overstate the fleet.
+  if(lastCall.length)lines.push(usageLine("마지막 관찰",usageSum(lastCall.map(s=>s.usage))));
+  for(const day of Object.keys(daily).sort().reverse())lines.push(usageLine(day,usageSum(daily[day])));
+  return lines.join("\n");
 }
 function usageBlock(s) {
+  const lines=s.usage_totals?[usageLine("누적",usageSum([s.usage_totals])),
+      ...Object.keys(s.usage_daily||{}).sort().reverse().map(day=>usageLine(day,usageSum([s.usage_daily[day]])))]
+    : s.usage?[usageLine("마지막 관찰",usageSum([s.usage]))]:[];
+  if(Number(s.rotations)>0)lines.push(`컨텍스트 회전 ${usageCount(Number(s.rotations))}회`);
+  if(!lines.length)return null;
   const more=document.createElement("details");
-  const body=s.usage_totals?usageText([s]):JSON.stringify({usage:s.usage,context_rotations:s.rotations},null,2);
-  more.append(node("summary","관찰 API 사용량 (누적)"),node("pre",body));
+  more.append(node("summary",`관찰 API 사용량${s.usage_totals?" (누적)":" (마지막 관찰)"}`),node("pre",lines.join("\n")));
   return more;
 }
 function fillSession(body,s,actionsOnly=false) {
@@ -240,7 +270,10 @@ function fillSession(body,s,actionsOnly=false) {
   if(s.error)body.append(node("p",s.error));
   const events=[...(s.events||[])].sort((a,b)=>timestamp(b.at)-timestamp(a.at));
   for(const e of events.filter(e=>!actionsOnly||(e.needs_action&&!e.acknowledged)))body.append(eventItem(s,e));
-  body.append(usageBlock(s));
+  // A session the meter never reached and whose last call was never recorded
+  // has nothing to report; the block is omitted rather than shown empty.
+  const usage=usageBlock(s);
+  if(usage)body.append(usage);
 }
 let embedded = null, embeddedPoll = null;
 function showError(message) {
@@ -289,7 +322,7 @@ function render() {
   $("mobile-monitor").textContent=$("monitor").textContent;
   $("notice").textContent=(cflowError?"cflow 상태 조회 실패 · 마지막 조회 결과 표시":snapshot.error)||(snapshot.enabled?"관찰 중 · 세션별 순차 처리 · 최소 60초 간격":"관찰이 꺼져 있습니다. 시작하면 ds4-official/deepseek-flash API로 트랜스크립트를 전송합니다.");
   $("sort").hidden=mobile||grid;
-  $("layout-hint").textContent=grid?`현재 필터에서 최신 항목 최대 ${gridLimit}개 · 보고·승인 요청 기준`:mobile?"최신 보고부터 표시하는 타임라인":"세션 보드 · 내용은 자동 갱신되며 세션 순서는 최신순 정렬을 누를 때 바뀝니다.";
+  $("layout-hint").textContent=grid?`세션마다 최신 항목 최대 ${gridLimit}개 · 세션 목록은 필터 그대로 · 보고·승인 요청 기준`:mobile?"최신 보고부터 표시하는 타임라인":"세션 보드 · 내용은 자동 갱신되며 세션 순서는 최신순 정렬을 누를 때 바뀝니다.";
   cards.className=grid?"observer-grid":mobile?"observer-timeline":"observer-board";
   const horizontal=cards.scrollLeft;
   const scrolls=new Map([...cards.querySelectorAll(".observer-column-body")].map(e=>[e.parentElement.dataset.session,e.scrollTop]));
@@ -304,16 +337,27 @@ function render() {
       if(!events.length&&!sessionRuns(s).some(r=>String(r.status).startsWith("waiting")))entries.push({s,at:latestActivity(s),key:s.name+":summary"});
     }
     entries.sort((a,b)=>b.at-a.at||a.key.localeCompare(b.key));
+    // The slider bounds each session's history, not the fleet: the filtered
+    // session list is what the reader asked to see, so every session in it is
+    // drawn and the cut falls inside each one's own posts. `entries` is newest
+    // first, so the first N a session contributes are its latest N.
+    const perSession=new Map();
+    const shown=grid?entries.filter(({s})=>{
+      const seen=perSession.get(s.name)||0;
+      if(seen>=gridLimit)return false;
+      perSession.set(s.name,seen+1);
+      return true;
+    }):entries;
     // One meter per session, on that session's newest post: the timeline
     // repeats a busy session for every event, and the same totals under each
     // of them would be noise rather than a measurement.
     const metered=new Set();
-    for(const {s,e,r} of (grid?entries.slice(0,gridLimit):entries)) {
+    for(const {s,e,r} of shown) {
       const card=sessionHeader(s,"observer-post");
       if(e)card.append(eventItem(s,e));
       else if(r)addGate(card,s,r);
       else card.append(node("p",s.summary||"아직 관찰 결과가 없습니다."),node("small",activity(s).duration));
-      if(!metered.has(s.name)) {metered.add(s.name);card.append(usageBlock(s));}
+      if(!metered.has(s.name)) {metered.add(s.name);const usage=usageBlock(s);if(usage)card.append(usage);}
       inputButton(card,s);cards.append(card);
     }
   } else {
@@ -370,7 +414,7 @@ $("scope").onchange=()=>{selections();navigate();};
 $("activity").onchange=render;
 $("selection").onchange=navigate;$("actions-only").onchange=render;$("ended").onchange=render;
 $("target").onchange=()=>chooseTarget($("target").value);$("prompt").oninput=controls;
-$("composer-toggle").onclick=()=>{if(!mobileView.matches)return;composerFolded=!composerFolded;composerState();if(!composerFolded)$("prompt").focus();};
+$("composer-toggle").onclick=()=>{composerFolded=!composerFolded;composerState();if(!composerFolded)$("prompt").focus();};
 $("monitor").onclick=async()=>{try{await request("api/observer/settings",{enabled:!snapshot.enabled});await refresh();}catch(err){showError(err.message);}};
 $("mobile-monitor").onclick=()=>$("monitor").click();
 async function send(interrupt) {

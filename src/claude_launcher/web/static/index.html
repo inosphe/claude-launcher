@@ -170,7 +170,7 @@
         <label><input type="radio" name="observer-layout" id="observer-layout-board" value="board" checked><span id="observer-board-label">보드</span></label>
         <label><input type="radio" name="observer-layout" id="observer-layout-grid" value="grid"><span>최신 그리드</span></label>
       </fieldset>
-      <label id="observer-limit-control" hidden>표시 항목 <input id="observer-limit" type="range" min="1" max="10" step="1" value="5"><output id="observer-limit-value" for="observer-limit">5개</output></label>
+      <label id="observer-limit-control" hidden>세션당 표시 항목 <input id="observer-limit" type="range" min="1" max="10" step="1" value="5"><output id="observer-limit-value" for="observer-limit">5개</output></label>
       </div>
       <p id="observer-notice" role="status" aria-live="polite"></p>
       <div class="filters">
@@ -182,21 +182,23 @@
       <button id="observer-sort" type="button">최신순 정렬</button>
       </div>
       <p id="observer-counts"></p>
-      <!-- Every observed session's meter summed, so the cost of watching the
-           fleet is one number rather than one per card. The client adds the
-           per-session totals up; the daemon keeps only those. -->
+      <!-- Every observed session summed, so the cost of watching the fleet is
+           one number rather than one per card. The lifetime total covers the
+           sessions the meter reached; a session it never reached contributes
+           its last call on its own line instead, so the two are never added
+           together as if they were the same figure. The client sums both. -->
       <details id="observer-usage" hidden><summary>관찰 API 사용량 합계 (전체 세션)</summary><pre id="observer-usage-body"></pre></details>
       <p id="observer-layout-hint" class="hint"></p>
       <p class="hint">직접 보고·사용자 질문·cflow 응답 대기를 표시합니다. 자동 요약의 근거는 각 이벤트에서 확인할 수 있습니다. 장기 대기는 마지막 실질 활동 후 30분 이상인 경우입니다.</p>
       <section id="observer-cards" aria-label="세션 결과"></section>
       </div>
       <footer id="observer-composer">
-      <!-- On a phone this footer is most of the screen, so it folds: the
-           button below is its header and the only thing left when folded.
-           Desktop never hides any of it (the button is hidden there). The
-           select keeps its own accessible name because the <label> that
-           names it is hidden at the same width. -->
-      <button id="observer-composer-toggle" type="button" aria-expanded="true" hidden>입력 대상 세션 ▾</button>
+      <!-- This footer is most of a phone screen and a third of a desktop
+           window, so it folds: the button below is its header and the only
+           thing left when folded, at every width. Folded is where it starts.
+           The select keeps its own accessible name because on a phone the
+           <label> that names it is hidden. -->
+      <button id="observer-composer-toggle" type="button" aria-expanded="false">입력 대상 세션 ▸</button>
       <label for="observer-target">입력 대상 세션</label><select id="observer-target" aria-label="입력 대상 세션"><option value="">세션 선택</option></select>
       <button id="observer-interrupt" disabled>현재 응답 중단 (Esc)</button>
       <label for="observer-prompt" class="sr-only">세션에 보낼 지시</label>

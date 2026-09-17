@@ -77,6 +77,20 @@
   :is(#observer-view, #log-info-pane) .observer-column > button { flex:none; margin-top:10px; }
   :is(#observer-view, #log-info-pane) .observer-column .event { background:#14161a; border:1px solid #30363d; border-radius:6px; margin:10px 0; padding:12px; }
 }
+/* Everything above the board is chrome: notice, filters, counts, meter and
+   two hint lines, each of which costs the columns height it never gets back.
+   A wide screen has the mouse and the room to run them tighter than a finger
+   needs, so the paragraphs lose their margins and the controls theirs. */
+@media(min-width:821px) {
+  :is(#observer-view, #log-info-pane) .observer-content { padding:10px 20px; }
+  :is(#observer-view, #log-info-pane) .observer-content > p { margin:4px 0; }
+  :is(#observer-view, #log-info-pane) .observer-view-controls { margin-bottom:8px; }
+  :is(#observer-view, #log-info-pane) .filters { gap:8px 12px; }
+  :is(#observer-view, #log-info-pane) .observer-content :is(button,select) { min-height:36px; }
+  :is(#observer-view, #log-info-pane) .observer-view-tabs span { min-height:32px; }
+  :is(#observer-view, #log-info-pane) .observer-content summary { min-height:28px; line-height:28px; }
+  #observer-limit { min-height:32px; }
+}
 @media(max-width:820px) {
   #observer-cards.observer-timeline { display:block; }
   :is(#observer-view, #log-info-pane) .observer-post { border:0; border-bottom:1px solid #30363d; border-radius:0; background:transparent; padding:16px 4px; }
@@ -85,14 +99,16 @@
   :is(#observer-view, #log-info-pane) .observer-post .observer-links { margin:6px 0; }
   :is(#observer-view, #log-info-pane) .observer-updated { margin-bottom:6px; }
 }
-/* The composer is most of a phone screen, so there it folds to its own
-   header. Desktop has the room and never hides any of it. */
-#observer-composer #observer-composer-toggle { display:none; }
+/* The composer folds to its own header at every width: it is most of a phone
+   screen and a third of a desktop window, and either way the room it takes
+   comes out of the board above it. Folded is where it starts, so the first
+   paint is the one with the most content in it. The choice is this visit's —
+   it is not written to storage, so a reload comes back folded. */
+#observer-composer #observer-composer-toggle { display:inline-flex; align-items:center; justify-self:start; gap:6px; }
+#observer-composer.folded { grid-template-columns:1fr; }
+#observer-composer.folded > :not(#observer-composer-toggle) { display:none; }
 @media(max-width:820px) {
-  #observer-composer #observer-composer-toggle { display:inline-flex; align-items:center; justify-self:start; gap:6px; }
   #observer-composer > label[for=observer-target] { display:none; }
-  #observer-composer.folded { grid-template-columns:1fr; }
-  #observer-composer.folded > :not(#observer-composer-toggle) { display:none; }
 }
 /* A single-column social feed keeps the existing report and reply controls. */
 @media(max-width:820px) {

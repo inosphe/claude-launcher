@@ -23,7 +23,12 @@ const data = { enabled: true, sessions: [
                       prompt_cache_hit_tokens: 400, prompt_cache_miss_tokens: 600 } },
     events: [{ id: "e1", kind: "action", text: "배포 환경을 선택하십시오.",
       needs_action: true, source: "transcript:1", at: new Date().toISOString(), acknowledged: false }] },
-  { name: "s2", status: "idle", running: true, meshes: ["team-b"], summary: "병합 완료", events: [] },
+  // A row written before the meter exists carries only the last call, and this
+  // one's provider never reported a cache at all: the panel shows it as a
+  // last-call figure and folds the cache into the input rather than printing
+  // the raw response.
+  { name: "s2", status: "idle", running: true, meshes: ["team-b"], summary: "병합 완료", events: [],
+    usage: { prompt_tokens: 900, completion_tokens: 60 } },
 ] };
 const server = http.createServer((req, res) => {
   let body = "";
@@ -103,13 +108,20 @@ const server = http.createServer((req, res) => {
     const meter = s1Post.locator("details", { hasText: "관찰 API 사용량 (누적)" });
     await meter.locator("summary").click();
     const meterText = await meter.locator("pre").innerText();
-    assert.match(meterText, /누적\s+호출 3회 · 입력 3,000 · 출력 210 · 캐시적중 1,200 · 미스 1,800/);
-    assert.match(meterText, /2026-09-17\s+호출 2회/);
-    assert.match(meterText, /2026-09-16\s+호출 1회/);
+    // Three figures rather than four overlapping ones: the cached side is
+    // reported separately, so the input is the prompt that missed the cache.
+    assert.match(meterText, /누적\s+호출 3회 · 입력 1,800 · 캐시 1,200 · 출력 210/);
+    assert.match(meterText, /2026-09-17\s+호출 2회 · 입력 1,200 · 캐시 800 · 출력 140/);
+    assert.match(meterText, /2026-09-16\s+호출 1회 · 입력 600 · 캐시 400 · 출력 70/);
     await page.locator("#observer-usage summary").click();
     const boardUsage = await page.locator("#observer-usage-body").innerText();
-    assert.match(boardUsage, /누적\s+호출 3회 · 입력 3,000 · 출력 210 · 캐시적중 1,200 · 미스 1,800/);
+    // The fleet figure keeps the lifetime total apart from the sessions the
+    // meter never reached, so a last call is never added in as if cumulative.
+    assert.match(boardUsage, /누적\s+호출 3회 · 입력 1,800 · 캐시 1,200 · 출력 210/);
     assert.match(boardUsage, /2026-09-17\s+호출 2회/);
+    const lastCallLine = boardUsage.split("\n").find(line => line.startsWith("마지막 관찰"));
+    assert.match(lastCallLine, /입력 900 · 출력 60/);
+    assert.doesNotMatch(lastCallLine, /캐시/, "a provider that reported no cache gets no cache column");
     await page.locator("#observer-usage summary").click();
     await page.click("#observer-mobile-monitor");
     await page.waitForFunction(()=>document.getElementById("observer-mobile-monitor").textContent==="관찰 시작");
@@ -181,9 +193,29 @@ const server = http.createServer((req, res) => {
     assert.equal(await page.locator("#observer-prompt").isVisible(), false);
     await page.setViewportSize({width:1280,height:900});
     await page.waitForSelector(".observer-board");
-    assert.equal(await page.locator("#observer-composer").evaluate(e=>e.classList.contains("folded")), false);
+    // The fold is the reader's, not the phone's: desktop keeps the composer
+    // closed until it is asked for, and asking opens it with the caret in it.
+    assert.equal(await isFolded(), true);
+    assert.equal(await page.locator("#observer-prompt").isVisible(), false);
+    assert.equal(await page.locator("#observer-composer-toggle").isVisible(), true);
+    await page.click("#observer-composer-toggle");
+    assert.equal(await isFolded(), false);
     assert.equal(await page.locator("#observer-prompt").isVisible(), true);
-    assert.equal(await page.locator("#observer-composer-toggle").isVisible(), false);
+    assert.equal(await page.locator("#observer-prompt").evaluate(e=>document.activeElement===e), true);
+    await page.click("#observer-composer-toggle");
+    // The band above the board is chrome, so the board has to be what the
+    // window is mostly made of: the composer's 104px and the trimmed hint and
+    // control rows are what the columns got instead (316px before this round).
+    assert(await page.locator("#observer-composer").evaluate(e=>e.classList.contains("folded")));
+    const desktop=await page.evaluate(()=>{
+      const content=document.querySelector("#observer-view .observer-content");
+      const cards=document.querySelector("#observer-cards");
+      const band=[...content.children].filter(e=>e!==cards)
+        .reduce((n,e)=>n+e.getBoundingClientRect().height,0);
+      return {cards:cards.getBoundingClientRect().height,band};
+    });
+    assert(desktop.cards >= 480, `the board should hold the window, not the chrome (${Math.round(desktop.cards)}px)`);
+    assert(desktop.band <= 210, `the band above the board should stay trim (${Math.round(desktop.band)}px)`);
     assert((await page.locator('.observer-column[data-session="s1"] details', { hasText: "관찰 API 사용량 (누적)" }).count()) >= 1,
       "the desktop column keeps its own meter");
     const beforeOrder=await page.locator(".observer-column").evaluateAll(es=>es.map(e=>e.dataset.session));
@@ -212,7 +244,8 @@ const server = http.createServer((req, res) => {
     data.sessions[0].events.push({id:"question",origin:"agent",kind:"action",source:"agent:s1",question:true,
       text:"Review screenshot and choose",choices:["Accept","Revise"],attachments:[{id:"image"}],needs_action:true,at:new Date().toISOString()});
     data.sessions[1].state="done";
-    data.sessions.push({name:"s3",running:true,status:"busy",meshes:[],events:[],state:"done"});
+    data.sessions.push({name:"s3",running:true,status:"busy",meshes:[],events:[],state:"done",
+      usage:{prompt_tokens:500,completion_tokens:40,prompt_cache_hit_tokens:120,prompt_cache_miss_tokens:380}});
     gates=[{run:"r1",scope:"s1",cwd:"/repo",status:"waiting_approval",step_id:"review",gate:"Approve deployment",sessions:["s1"]}];
     await page.evaluate(()=>{location.hash="#/observer";});
     await page.reload();
@@ -254,20 +287,26 @@ const server = http.createServer((req, res) => {
     await page.locator(".observer-content").evaluate(e=>e.scrollTop=0);
     assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);
     if(process.env.CLAUNCH_SCREENSHOT) await page.screenshot({path:process.env.CLAUNCH_SCREENSHOT,fullPage:true});
-    // The grid limits posts (across sessions), after filters, and persists its
-    // size. The board/timeline remains available with all original controls.
+    // The grid limits each session's own posts, after filters, and persists its
+    // size: the filtered session list is what the reader asked for, so the cut
+    // falls inside each session rather than dropping whole sessions off the end.
+    // The board/timeline remains available with all original controls.
+    const gridSessions = () => page.locator('.observer-grid .observer-card')
+      .evaluateAll(es=>[...new Set(es.map(e=>e.dataset.session))].sort());
     await page.locator('label:has(#observer-layout-grid)').click();
     assert.equal(await page.locator('#observer-limit-control').isVisible(),true);
     assert.equal(await page.locator('#observer-limit').inputValue(),'5');
     await page.locator('#observer-limit').fill('1');
-    assert.equal(await page.locator('.observer-grid .observer-card').count(),1);
+    assert.deepEqual(await gridSessions(),['s1','s2','s3']);
+    assert.equal(await page.locator('.observer-grid .observer-card').count(),3,
+      'one post each, and no session dropped by the limit');
     assert.equal(await page.locator('.observer-grid .event').getAttribute('data-event'),'mobile-new');
     if(process.env.CLAUNCH_GRID_SCREENSHOT) await page.screenshot({path:process.env.CLAUNCH_GRID_SCREENSHOT,fullPage:true});
     await page.reload();
     await page.waitForSelector('.observer-grid .observer-card');
     assert.equal(await page.locator('#observer-layout-grid').isChecked(),true);
     assert.equal(await page.locator('#observer-limit').inputValue(),'1');
-    assert.equal(await page.locator('.observer-card').count(),1);
+    assert.equal(await page.locator('.observer-card').count(),3);
     await page.setViewportSize({width:1280,height:900});
     assert.equal(await page.locator('.observer-grid').isVisible(),true);
     await page.check('#observer-actions-only');
@@ -277,8 +316,24 @@ const server = http.createServer((req, res) => {
     data.sessions[1].events=Array.from({length:12},(_,i)=>({id:`grid-${i}`,kind:'result',text:`Grid post ${i}`,source:'transcript:2',at:new Date(Date.now()+(i+1)*60000).toISOString()}));
     await page.locator('#observer-limit').fill('10');
     await page.getByText('Grid post 11',{exact:true}).waitFor();
-    assert.equal(await page.locator('.observer-card').count(),10);
-    assert.deepEqual(await page.locator('.observer-grid .event').evaluateAll(es=>es.map(e=>e.dataset.event)),Array.from({length:10},(_,i)=>`grid-${11-i}`));
+    // Twelve posts on s2 and the limit is ten: the two oldest are cut and the
+    // other sessions keep theirs.
+    assert.deepEqual(await page.locator('.observer-grid .observer-card[data-session="s2"] .event').evaluateAll(es=>es.map(e=>e.dataset.event)),Array.from({length:10},(_,i)=>`grid-${11-i}`));
+    assert.deepEqual(await gridSessions(),['s1','s2','s3']);
+    // A session the meter never reached reports its last call, and the fleet
+    // line adds those on their own row rather than into the lifetime total.
+    const lastCallBlock = page.locator('.observer-grid .observer-card[data-session="s3"] details', { hasText: "관찰 API 사용량 (마지막 관찰)" });
+    assert.equal(await lastCallBlock.count(),1);
+    await lastCallBlock.locator("summary").click();
+    assert.match(await lastCallBlock.locator("pre").innerText(), /마지막 관찰\s+입력 380 · 캐시 120 · 출력 40/);
+    const noCacheBlock = page.locator('.observer-grid .observer-card[data-session="s2"] details', { hasText: "관찰 API 사용량 (마지막 관찰)" });
+    await noCacheBlock.locator("summary").click();
+    const noCacheText = await noCacheBlock.locator("pre").innerText();
+    assert.match(noCacheText, /마지막 관찰\s+입력 900 · 출력 60/);
+    assert.doesNotMatch(noCacheText, /캐시/);
+    await page.locator('#observer-usage summary').click();
+    assert.match(await page.locator('#observer-usage-body').innerText(), /마지막 관찰\s+입력 1,280 · 캐시 120 · 출력 100/);
+    await page.locator('#observer-usage summary').click();
     await page.locator('.observer-grid .observer-card').last().scrollIntoViewIfNeeded();
     assert.equal(await page.locator('.observer-grid .observer-card').last().isVisible(),true);
     await page.selectOption('#observer-activity','working');
@@ -307,7 +362,7 @@ const server = http.createServer((req, res) => {
     await page.waitForSelector('.observer-card');
     await page.locator('label:has(#observer-layout-grid)').click();
     await page.locator('#observer-limit').fill('1');
-    assert.equal(await page.locator('.observer-card').count(),1);
+    assert.deepEqual(await page.locator('.observer-card').evaluateAll(es=>[...new Set(es.map(e=>e.dataset.session))].sort()),['s1','s2','s3']);
     {
     // Transcript session details reuse observer data, independent of its filters.
     await page.evaluate(()=>location.hash="#/log/s1");
@@ -342,6 +397,6 @@ const server = http.createServer((req, res) => {
     await page.waitForSelector('#observer-view:not(.hidden)');
     }
     assert.deepEqual(errors, []);
-    console.log("PASS: mobile layout, composer fold, usage meter over calls and days, elapsed-since-update, scope/action filters, evidence, Escape, target input, per-session drafts, shared auth, deep links, polling lifecycle, legacy redirect, direct screenshot/answer, activity filters, cflow approval/selection, latest-N grid, 1/10 limits, filter-before-limit, storage persistence/fallback, responsive view switching");
+    console.log("PASS: mobile layout, composer fold, usage as input/cache/output over calls and days, fleet total split from last-call rows, elapsed-since-update, scope/action filters, evidence, Escape, target input, per-session drafts, shared auth, deep links, polling lifecycle, legacy redirect, direct screenshot/answer, activity filters, cflow approval/selection, per-session latest-N grid, 1/10 limits, filter-before-limit, storage persistence/fallback, responsive view switching");
   } finally { await browser.close(); server.close(); server.closeAllConnections(); }
 })().catch(error => { console.error(error); server.close(); server.closeAllConnections(); process.exitCode = 1; });
