@@ -84,6 +84,8 @@ const server = http.createServer((req, res) => {
     assert(sent.some(r=>r.url==="/api/auth/session" && r.body.token==="fixture-token"));
     assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
     await page.selectOption("#observer-scope", "mesh"); await page.selectOption("#observer-selection", "team-b");
+    await page.waitForFunction(()=>document.querySelector("#observer-target option[value=s2]")&&!document.querySelector("#observer-target option[value=s1]"));
+    assert.deepEqual(await page.locator("#observer-target option").evaluateAll(es=>es.map(e=>e.value)),["","s2"]);
     assert.equal(await page.locator(".observer-card").count(), 1);
     assert.match(await page.locator(".observer-card").innerText(), /s2/);
     await page.selectOption("#observer-scope", "session"); await page.selectOption("#observer-selection", "s1");
@@ -102,6 +104,8 @@ const server = http.createServer((req, res) => {
     assert.equal(sent.at(-1).url, "/api/sessions/s1/keys");
     assert.deepEqual(sent.at(-1).body.keys, ["새 테스트를 실행하십시오", "Enter"]);
     assert.equal(await page.inputValue("#observer-prompt"), "");
+    assert.deepEqual(await page.locator("#observer-target option").evaluateAll(es=>es.map(e=>e.value)),["","s1"]);
+    await page.uncheck("#observer-actions-only");
     await page.fill("#observer-prompt", "session one draft");
     await page.selectOption("#observer-target", "s2"); await page.fill("#observer-prompt", "session two draft");
     await page.selectOption("#observer-target", "s1");
@@ -121,6 +125,7 @@ const server = http.createServer((req, res) => {
     await page.waitForFunction(() => document.querySelectorAll(".observer-card").length === 2);
     await page.evaluate(() => {location.hash="#/";});
     await page.waitForFunction(() => document.body.dataset.page === "home");
+    assert.equal(await page.locator("#observer-mobile-monitor").isVisible(),false);
     await page.waitForTimeout(150);
     const stoppedReads=observerReads;
     await page.waitForTimeout(300);
@@ -130,6 +135,14 @@ const server = http.createServer((req, res) => {
     await page.waitForTimeout(150);
     assert(observerReads > stoppedReads, "observer polling resumes on return");
     await page.setViewportSize({width:1280,height:900});
+    await page.waitForSelector(".observer-board");
+    const beforeOrder=await page.locator(".observer-column").evaluateAll(es=>es.map(e=>e.dataset.session));
+    data.sessions[1].last_activity_at=new Date(Date.now()+60000).toISOString();
+    data.sessions[1].summary="latest activity for s2";
+    await page.getByText("latest activity for s2",{exact:true}).waitFor();
+    assert.deepEqual(await page.locator(".observer-column").evaluateAll(es=>es.map(e=>e.dataset.session)),beforeOrder,"automatic refresh preserves PC column order");
+    await page.click("#observer-sort");
+    assert.equal(await page.locator(".observer-column").first().getAttribute("data-session"),"s2");
     assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
     await page.goto(`http://127.0.0.1:${server.address().port}/static/observer.html`);
     await page.waitForURL("**/#/observer");
@@ -158,6 +171,8 @@ const server = http.createServer((req, res) => {
     assert.equal(await page.locator(".state.done").innerText(),"완료 후 유휴");
     assert.equal(await page.locator(".state.working").innerText(),"동작 중");
     await page.selectOption("#observer-activity","working");
+    assert.deepEqual(await page.locator("#observer-target option").evaluateAll(es=>es.map(e=>e.value)),["","s3"]);
+    assert.equal(await page.inputValue("#observer-target"),"");
     assert.equal(await page.locator(".observer-card").count(),1);
     assert.match(await page.locator(".observer-card").innerText(),/s3/);
     await page.selectOption("#observer-activity","all");
@@ -180,7 +195,12 @@ const server = http.createServer((req, res) => {
     await page.getByRole("button",{name:"staging",exact:true}).click();
     await page.waitForTimeout(150);
     assert(sent.some(r=>r.url==="/api/cflow/select"&&r.body.option==="staging"&&r.body.scope==="s1"));
+    if(process.env.CLAUNCH_BOARD_SCREENSHOT) await page.screenshot({path:process.env.CLAUNCH_BOARD_SCREENSHOT,fullPage:true});
     await page.setViewportSize({width:390,height:844});
+    data.sessions[1].events=[{id:"mobile-new",kind:"result",text:"newest timeline event",source:"transcript:2",at:new Date(Date.now()+120000).toISOString()}];
+    await page.getByText("newest timeline event",{exact:true}).waitFor();
+    assert.equal(await page.locator(".observer-post .event").first().getAttribute("data-event"),"mobile-new");
+    assert.equal(await page.locator("#observer-sort").isVisible(),false);
     await page.locator(".observer-content").evaluate(e=>e.scrollTop=0);
     assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);
     if(process.env.CLAUNCH_SCREENSHOT) await page.screenshot({path:process.env.CLAUNCH_SCREENSHOT,fullPage:true});
