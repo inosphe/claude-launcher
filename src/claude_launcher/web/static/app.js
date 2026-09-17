@@ -9536,6 +9536,7 @@ function openTranscript(name) {
   transcriptGeneration += 1;
   transcriptBusy = false;
   transcriptName = name;
+  globalThis.TranscriptTabs?.select("transcript");
   transcriptCursor = null;
   transcriptSeen = -1;
   transcriptMore = false;
@@ -9557,6 +9558,7 @@ function openTranscript(name) {
    forgotten too: a conversation moves on while you are away, and coming back
    should land at the bottom rather than at a cursor into a stale page. */
 function closeTranscript() {
+  globalThis.ObserverPage?.closeSession();
   stopTranscriptPoll();
   transcriptGeneration += 1;
   transcriptName = null;
@@ -9775,7 +9777,7 @@ function pollTranscript() {
   // `transcriptIsOpen` is the whole guard now: route() clears the name (and
   // stops this timer) the moment the reader leaves the page, so a live name
   // means the page is the one on screen.
-  if (!transcriptIsOpen() || transcriptBusy) return;
+  if (!transcriptIsOpen() || transcriptBusy || $("term-log-pane")?.hidden) return;
   const pane = $("term-log-pane");
   if (!pane || !transcriptAtEnd(pane)) return;
   loadTranscriptPage({ older: false });

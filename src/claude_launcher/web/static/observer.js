@@ -98,7 +98,7 @@ function addDirect(item, s, e) {
       retry.onclick=async()=>{
         retry.disabled=true;
         try {await request(`api/observer/${encodeURIComponent(s.name)}/reports/${e.id}/answer`,{text:e.answer.text});lastSnapshot="";await refresh();}
-        catch(err) {$("notice").textContent=err.message;} finally {retry.disabled=false;}
+        catch(err) {showError(err.message);} finally {retry.disabled=false;}
       };
       item.append(retry);
     }
@@ -197,7 +197,7 @@ function eventItem(s,e) {
   detail.ontoggle=async()=>{if(!detail.open||detail.dataset.loaded)return;try{const data=await request(`api/observer/${encodeURIComponent(s.name)}/events/${encodeURIComponent(e.id)}`);evidence.textContent=JSON.stringify(data,null,2);detail.dataset.loaded="1";}catch(err){evidence.textContent=err.message;}};
   item.append(detail);
   if(e.needs_action&&!e.acknowledged) {
-    const button=node("button","확인 표시");button.onclick=async()=>{try{await request(`api/observer/${encodeURIComponent(s.name)}/acknowledge`,{id:e.id});await refresh();}catch(err){$("notice").textContent=err.message;}};item.append(button);
+    const button=node("button","확인 표시");button.onclick=async()=>{try{await request(`api/observer/${encodeURIComponent(s.name)}/acknowledge`,{id:e.id});await refresh();}catch(err){showError(err.message);}};item.append(button);
   }
   return item;
 }
@@ -232,6 +232,45 @@ function usageBlock(s) {
   const body=s.usage_totals?usageText([s]):JSON.stringify({usage:s.usage,context_rotations:s.rotations},null,2);
   more.append(node("summary","관찰 API 사용량 (누적)"),node("pre",body));
   return more;
+}
+function fillSession(body,s,actionsOnly=false) {
+  body.append(node("p",activity(s).duration,"meta"),node("div",(s.meshes||[]).join(" · ")||"메시 없음","meta"));
+  for(const r of sessionRuns(s).filter(r=>String(r.status).startsWith("waiting")))addGate(body,s,r);
+  body.append(node("p",s.summary||"아직 관찰 결과가 없습니다."));
+  if(s.error)body.append(node("p",s.error));
+  const events=[...(s.events||[])].sort((a,b)=>timestamp(b.at)-timestamp(a.at));
+  for(const e of events.filter(e=>!actionsOnly||(e.needs_action&&!e.acknowledged)))body.append(eventItem(s,e));
+  body.append(usageBlock(s));
+}
+let embedded = null, embeddedPoll = null;
+function showError(message) {
+  if(embedded) {
+    const notice=embedded.host.querySelector('[role="status"]');
+    if(notice)notice.textContent=message;
+  } else $("notice").textContent=message;
+}
+function closeSession() {
+  clearInterval(embeddedPoll);embeddedPoll=null;embedded=null;
+}
+function renderSession() {
+  if(!embedded)return;
+  const {name,host}=embedded, s=snapshot.sessions.find(s=>s.name===name);
+  const scroll=host.scrollTop;
+  host.replaceChildren();
+  const notice=node("p",cflowError?"cflow 상태 조회 실패 · 마지막 조회 결과 표시":snapshot.error||(snapshot.enabled?"관찰 중":"관찰이 꺼져 있습니다."));
+  notice.setAttribute("role","status");host.append(notice);
+  if(!s) {host.append(node("p","아직 이 세션의 관찰 정보가 없습니다."));return;}
+  const card=sessionHeader(s), body=node("div");
+  fillSession(body,s);card.append(body);host.append(card);host.scrollTop=scroll;
+}
+async function openSession(name,host) {
+  closeSession();
+  const target={name,host};embedded=target;
+  host.replaceChildren(node("p","세션 정보를 불러오는 중…"));
+  const loaded=await refresh();
+  if(embedded!==target)return;
+  if(loaded)renderSession();
+  embeddedPoll=setInterval(()=>{if(!document.hidden)refresh();},10000);
 }
 function render() {
   const visible=visibleSessions(), cards=$("cards"), mobile=mobileView.matches;
@@ -283,13 +322,7 @@ function render() {
     visible.sort((a,b)=>boardOrder.indexOf(a.name)-boardOrder.indexOf(b.name));
     for(const s of visible) {
       const card=sessionHeader(s,"observer-column"), body=node("div","","observer-column-body");
-      body.append(node("p",activity(s).duration,"meta"),node("div",(s.meshes||[]).join(" · ")||"메시 없음","meta"));
-      for(const r of sessionRuns(s).filter(r=>String(r.status).startsWith("waiting")))addGate(body,s,r);
-      body.append(node("p",s.summary||"아직 관찰 결과가 없습니다."));
-      if(s.error)body.append(node("p",s.error));
-      const events=[...(s.events||[])].sort((a,b)=>timestamp(b.at)-timestamp(a.at));
-      for(const e of events.filter(e=>!$("actions-only").checked||(e.needs_action&&!e.acknowledged)))body.append(eventItem(s,e));
-      body.append(usageBlock(s));
+      fillSession(body,s,$("actions-only").checked);
       card.append(body);inputButton(card,s);cards.append(card);body.scrollTop=scrolls.get(s.name)||0;
     }
   }
@@ -321,9 +354,10 @@ function refresh() {
       if(signature!==lastSnapshot) {
         snapshot=data; lastSnapshot=signature;
         selections();
-        render();
+        if(embedded)renderSession();else render();
       }
-    } catch(err) { $("notice").textContent=err.message; }
+      return true;
+    } catch(err) { if(embedded)embedded.host.replaceChildren(node("p",err.message));else showError(err.message);lastSnapshot="";return false; }
     finally { refreshTask=null; }
   })();
   return refreshTask;
@@ -337,7 +371,7 @@ $("activity").onchange=render;
 $("selection").onchange=navigate;$("actions-only").onchange=render;$("ended").onchange=render;
 $("target").onchange=()=>chooseTarget($("target").value);$("prompt").oninput=controls;
 $("composer-toggle").onclick=()=>{if(!mobileView.matches)return;composerFolded=!composerFolded;composerState();if(!composerFolded)$("prompt").focus();};
-$("monitor").onclick=async()=>{try{await request("api/observer/settings",{enabled:!snapshot.enabled});await refresh();}catch(err){$("notice").textContent=err.message;}};
+$("monitor").onclick=async()=>{try{await request("api/observer/settings",{enabled:!snapshot.enabled});await refresh();}catch(err){showError(err.message);}};
 $("mobile-monitor").onclick=()=>$("monitor").click();
 async function send(interrupt) {
   const target=$("target").value, text=$("prompt").value;
@@ -373,5 +407,28 @@ async function open(scope = "global", name = "") {
   poll=setInterval(()=>{if(!document.hidden)refresh();},10000);
 }
 composerState();
-return {open, stop};
+return {open, stop, openSession, closeSession};
+})();
+
+/* Transcript panels keep the conversation DOM and its scroll position intact. */
+globalThis.TranscriptTabs = (() => {
+  const transcript=document.getElementById("term-log-pane"), info=document.getElementById("log-info-pane");
+  const tabs=[document.getElementById("log-transcript-tab"),document.getElementById("log-info-tab")];
+  function select(value) {
+    const showInfo=value==="info";
+    transcript.hidden=showInfo;info.hidden=!showInfo;
+    tabs.forEach((tab,index)=>{const active=(index===1)===showInfo;tab.setAttribute("aria-selected",String(active));tab.tabIndex=active?0:-1;});
+    if(showInfo)ObserverPage.openSession(transcriptName,info);
+    else ObserverPage.closeSession();
+  }
+  tabs.forEach((tab,index)=>{
+    tab.onclick=()=>select(index?"info":"transcript");
+    tab.onkeydown=event=>{
+      if(!["ArrowLeft","ArrowRight","Home","End"].includes(event.key))return;
+      event.preventDefault();
+      const next=event.key==="Home"?0:event.key==="End"?1:1-index;
+      select(next?"info":"transcript");tabs[next].focus();
+    };
+  });
+  return {select};
 })();
