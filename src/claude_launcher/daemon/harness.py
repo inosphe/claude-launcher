@@ -333,6 +333,50 @@ def steers_model(args: Iterable[str]) -> bool:
     )
 
 
+def alias_for_model_id(entry, model_id: str) -> Optional[str]:
+    """Read a backend model id back into one of the harness's ``models``.
+
+    The two directions are not symmetric. A launch hands the harness an alias
+    (``opus``, ``luna``), but what comes back in a transcript is the concrete
+    id the request was answered with (``claude-opus-5``), and one alias covers
+    several ids over its life (``claude-opus-5``, ``claude-opus-4-7``). So the
+    ``model_aliases`` table -- one id per alias -- answers this direction for
+    the ids it happens to name and nothing else.
+
+    Hence two steps, in order:
+
+    1. the inverse of ``model_aliases``, which is exact and wins;
+    2. ``<model_id_prefix>-<alias>`` as a prefix of the id, the alias then
+       being followed either by nothing or by a ``-`` (so ``opus`` claims
+       ``claude-opus-5`` but not a hypothetical ``claude-opusx-1``).
+
+    Returns ``None`` when neither step answers. That is deliberate: the caller
+    writes this into the session definition, and a guessed alias would relaunch
+    the session on a model nobody chose. Not answering leaves the definition as
+    it was, which is the behaviour that existed before this function.
+
+    Longest alias first, so a harness declaring both ``opus`` and ``opus-mini``
+    does not have the shorter one swallow the longer one's ids.
+    """
+    wanted = str(model_id or "").strip()
+    if not wanted:
+        return None
+    models = list(getattr(entry, "models", None) or ())
+    if not models:
+        return None
+    for alias, mapped in (getattr(entry, "model_aliases", None) or {}).items():
+        if mapped == wanted and alias in models:
+            return alias
+    prefix = str(getattr(entry, "model_id_prefix", "") or "").strip()
+    if not prefix:
+        return None
+    for alias in sorted(models, key=len, reverse=True):
+        stem = f"{prefix}-{alias}"
+        if wanted == stem or wanted.startswith(stem + "-"):
+            return alias
+    return None
+
+
 def steers_conversation(args: Iterable[str]) -> bool:
     """Whether these args open an *existing* conversation rather than a new one.
 

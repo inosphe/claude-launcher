@@ -130,6 +130,13 @@ class Harness:
     model_args: List[str] = field(default_factory=list)
     #: Optional model choice -> backend ID mapping, applied before templating.
     model_aliases: Dict[str, str] = field(default_factory=dict)
+    #: Prefix shared by this harness's backend model ids, used to read an id
+    #: back into one of ``models``. A harness reports the concrete id it
+    #: answered with (``claude-opus-5``), while launches take the alias
+    #: (``opus``), and one alias covers several ids over time -- so an exact
+    #: ``model_aliases`` table cannot answer the reverse direction alone. See
+    #: :func:`daemon.harness.alias_for_model_id`.
+    model_id_prefix: str = ""
     effort_args: List[str] = field(default_factory=list)
     #: Harness-native ``/btw`` capability and its interaction limits. None
     #: means claunch has no declaration for a side-conversation command.
@@ -295,6 +302,7 @@ class Harness:
             "tools": list(self.tools),
             "model_args": list(self.model_args),
             "model_aliases": dict(self.model_aliases),
+            "model_id_prefix": self.model_id_prefix,
             "effort_args": list(self.effort_args),
             "btw": self.btw.to_dict() if self.btw else None,
             "restore_args": list(self.restore_args),
@@ -524,6 +532,7 @@ def _parse_entry(name: str, body) -> Harness:
         tools=_as_list(body.get("tools"), f"harness {name!r} tools"),
         model_args=_as_list(body.get("model_args"), f"harness {name!r} model_args"),
         model_aliases=dict(model_aliases),
+        model_id_prefix=str(body.get("model_id_prefix") or "").strip(),
         effort_args=_as_list(body.get("effort_args"), f"harness {name!r} effort_args"),
         btw=_btw_capability(name, body.get("btw")),
         restore_args=_as_list(

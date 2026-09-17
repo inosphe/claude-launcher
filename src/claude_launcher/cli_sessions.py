@@ -1446,6 +1446,48 @@ def _cmd_handoff(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_set_model(args: argparse.Namespace) -> int:
+    """Set the model a session's *next* launch starts on.
+
+    The running program keeps the model it started with — a harness picks one
+    at startup — so this lands at the next restore or respawn.
+
+    Usually nothing needs this: the daemon watches what each session actually
+    answers on and writes that into the saved definition itself, which is what
+    keeps a model switched inside the harness from being undone at the next
+    daemon restart. Reach for this when that cannot see the answer — a session
+    that has not taken a turn yet, a model id the registry does not map (the
+    session's detail view names it), or a deliberate "bring it back on
+    something else". ``--clear`` puts it back on the harness default.
+    """
+    client = daemon_client.ensure_running()
+    chosen = "" if getattr(args, "clear", False) else str(args.model or "")
+    info = client.post(
+        f"/api/sessions/{args.session}/model", {"model": chosen}
+    )
+    saved = info.get("model")
+    if saved:
+        print(
+            f"session {args.session!r} will next start on {saved!r} "
+            "— the running program keeps the model it started with"
+        )
+    else:
+        print(
+            f"session {args.session!r} model choice cleared "
+            "— it will next start on the harness default"
+        )
+    return 0
+
+
+def _cmd_set_model_dispatch(args: argparse.Namespace) -> int:
+    if not _resolve_target(args):
+        return 1
+    if not getattr(args, "clear", False) and not getattr(args, "model", None):
+        print("error: give a model, or --clear to drop the choice", file=sys.stderr)
+        return 1
+    return _cmd_set_model(args)
+
+
 def _cmd_keep_alive(args: argparse.Namespace) -> int:
     """Set (or clear) a session's keep-alive flag.
 
@@ -2654,6 +2696,24 @@ def register(sub) -> None:
     p_ho.add_argument("-f", "--file", help="read the handoff from FILE ('-' = stdin)")
     p_ho.add_argument("--cancel", action="store_true", help="withdraw a pending handoff/merge request")
     p_ho.set_defaults(func=_cmd_handoff)
+
+    p_model = sub.add_parser(
+        "set-model",
+        help="choose the model a session's next launch starts on "
+             "(the running program keeps the one it started with)",
+    )
+    p_model.add_argument("-t", dest="session_t", help=argparse.SUPPRESS)
+    p_model.add_argument("session", nargs="?")
+    p_model.add_argument(
+        "model", nargs="?",
+        help="a model the session's harness declares (Claude: haiku/sonnet/"
+             "opus/fable; Codex: luna/terra/sol/astra)",
+    )
+    p_model.add_argument(
+        "--clear", action="store_true",
+        help="drop the saved choice — the next launch uses the harness default",
+    )
+    p_model.set_defaults(func=_cmd_set_model_dispatch)
 
     p_keep = sub.add_parser(
         "keep-alive",

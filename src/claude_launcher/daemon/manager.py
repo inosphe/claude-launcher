@@ -31,7 +31,7 @@ from typing import Callable, Dict, Iterable, List, Optional, Set, Tuple, Union
 from .. import borrowing, harnesses as harness_registry, profile as profile_mod
 from .. import spawn as spawn_mod
 from .. import transcripts
-from . import codex_sessions, db, harness as harness_mod
+from . import codex_sessions, ctxsize, db, harness as harness_mod
 from . import paths
 from .harness import SessionDef
 from .screen import BACKGROUND_RENDER_BUDGET, RenderBudget
@@ -1143,6 +1143,50 @@ class SessionManager:
         self.persist()
         return session
 
+    def set_model(self, name: str, model: str) -> AnySession:
+        """Set the model the session's *next* launch will be started on.
+
+        The running program is not touched -- a harness picks its model at
+        startup, so this takes effect at the next restore or respawn, the same
+        way the creation-time choice did.
+
+        :meth:`reconcile_models` covers the ordinary case on its own by
+        following what the harness answers on. This is the lever for what it
+        cannot follow: a session that has not taken a turn yet (no reading to
+        read), a model id the registry does not map, and a deliberate "bring
+        it back on something else next time".
+
+        The choice is checked against the harness's declared models, so an
+        unknown one is refused here rather than at the relaunch that would
+        otherwise fail long after the person typed it. An empty value clears
+        the choice, which puts the session back on the harness default.
+        """
+        session = self.get(name)
+        sdef = session.sdef
+        chosen = str(model or "").strip()
+        if chosen:
+            entry = harness_registry.get(sdef.harness)
+            if entry is None or not entry.models:
+                raise harness_mod.HarnessError(
+                    f"harness {sdef.harness!r} does not declare selectable models"
+                )
+            if chosen not in entry.models:
+                raise harness_mod.HarnessError(
+                    f"unknown model {chosen!r} for harness {sdef.harness!r} "
+                    f"(known: {', '.join(entry.models)})"
+                )
+            if harness_mod.steers_model(sdef.args):
+                raise harness_mod.HarnessError(
+                    "this session's extra args already select a model; the "
+                    "saved choice would not win"
+                )
+        session.sdef = replace(sdef, model=chosen or None)
+        # A person naming the model outranks what the last reading said, so
+        # the unmapped-id note it may have left stops being the open question.
+        session.unmapped_model_id = None
+        self.persist()
+        return session
+
     def clear(
         self, *, logs: bool = False, keep: Iterable[str] = ()
     ) -> List[str]:
@@ -1489,9 +1533,82 @@ class SessionManager:
         )
 
     # ------------------------------------------------------------------ #
+    # model reconciliation
+    # ------------------------------------------------------------------ #
+    def reconcile_models(self) -> List[str]:
+        """Carry the model a session is *actually* answering on into its def.
+
+        ``SessionDef.model`` is what the next launch puts on the command line,
+        and until now nothing wrote it after creation. A person who switched
+        model inside the harness (claude's ``/model``) therefore got the
+        creation-time choice back at the next daemon restart, because
+        :meth:`restore_all` replays the saved definition and the explicit
+        ``--model`` flag on it outranks whatever the harness had persisted for
+        itself. The rail showed the new model the whole time -- it reads the
+        transcript, not the definition -- so the two disagreed with nothing
+        saying so (docs/session-model-persistence.md).
+
+        This is the same shape as ``conversation_id``: a value the harness
+        settles at runtime, observed and written back into the definition.
+        Only the newest reading is consulted; an older one is a choice already
+        superseded. An id that :func:`harness.alias_for_model_id` cannot read
+        leaves the definition alone and is recorded on the session, so the
+        mismatch surfaces instead of being guessed at.
+
+        Returns the names whose definition changed -- empty on the ordinary
+        poll, which is why this is cheap enough to run on a timer.
+        """
+        changed: List[str] = []
+        for session in list(self._sessions.values()):
+            if session.exited:
+                continue
+            sdef = session.sdef
+            entry = harness_registry.get(sdef.harness)
+            if entry is None or not entry.models:
+                continue
+            try:
+                reading = ctxsize.for_session(sdef)
+            except Exception:  # a reading is never worth failing a poll for
+                continue
+            observed = (reading or {}).get("model")
+            if not observed:
+                continue
+            alias = harness_mod.alias_for_model_id(entry, observed)
+            if alias is None:
+                # Not an error: a harness may answer on something this
+                # registry does not name. Remember it for the session's meta
+                # so a person can set the model explicitly, and say so once.
+                if getattr(session, "unmapped_model_id", None) != observed:
+                    session.unmapped_model_id = observed
+                    log.info(
+                        "session %r reports model id %r, which harness %r does "
+                        "not map to any of %s; leaving its saved model %r alone",
+                        sdef.name, observed, sdef.harness,
+                        ", ".join(entry.models), sdef.model,
+                    )
+                continue
+            session.unmapped_model_id = None
+            if alias == sdef.model:
+                continue
+            log.info(
+                "session %r is answering on %r (%s); its saved model was %r",
+                sdef.name, alias, observed, sdef.model,
+            )
+            session.sdef = replace(sdef, model=alias)
+            changed.append(sdef.name)
+        return changed
+
+    # ------------------------------------------------------------------ #
     # persistence / restore
     # ------------------------------------------------------------------ #
     def persist(self) -> None:
+        # The last chance to catch a model switch made since the timer's last
+        # pass: at a shutdown this runs before anything is torn down, and what
+        # it writes is exactly what restore_all will relaunch from.
+        try:
+            self.reconcile_models()
+        except Exception:
+            log.warning("model reconciliation failed; persisting as-is", exc_info=True)
         entries = []
         for session in self._sessions.values():
             entries.append(
