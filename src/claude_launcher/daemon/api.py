@@ -511,6 +511,7 @@ def build_app(
     r.add_post("/api/sessions/{name}/archive", h_session_archive)
     r.add_delete("/api/sessions/{name}", h_session_delete)
     r.add_post("/api/sessions/{name}/keep-alive", h_session_keep_alive)
+    r.add_post("/api/sessions/{name}/model", h_session_model)
     r.add_post("/api/sessions/{name}/respawn", h_session_respawn)
     r.add_post("/api/sessions/{name}/migrate", h_session_migrate)
     r.add_post("/api/sessions/{name}/reborrow", h_session_reborrow)
@@ -4360,6 +4361,14 @@ async def h_session_meta(request: web.Request) -> web.Response:
         # every two seconds. Inline it was 80ms of loop per poll, at p90.
         info = ctxsize.attach(session)
         metering.attach(info)
+        # A model id the harness registry cannot read back into one of its
+        # aliases. Reconciliation deliberately leaves the saved model alone in
+        # that case rather than guess, so the disagreement would otherwise be
+        # invisible; here it is, next to the lever that resolves it
+        # (POST /api/sessions/<name>/model).
+        unmapped = getattr(session, "unmapped_model_id", None)
+        if unmapped:
+            info["unmapped_model_id"] = unmapped
         harness = harness_registry.registry().get(info.get("harness") or "")
         borrowed_auth = None
         if info.get("borrow") and info.get("profile"):
@@ -4822,6 +4831,25 @@ async def h_session_keep_alive(request: web.Request) -> web.Response:
     on = request.query.get("off") not in ("1", "true")
     session = manager.set_keep_alive(name, on)
     return json_response({**session.info(), "keep_alive": bool(on)})
+
+
+async def h_session_model(request: web.Request) -> web.Response:
+    """Set the model this session's *next* launch uses (``{"model": "opus"}``).
+
+    The running program keeps the model it started on -- a harness chooses at
+    startup -- so this lands at the next restore or respawn, exactly like the
+    creation-time choice. An empty value clears it back to the harness default.
+
+    Most of the time nothing needs to call this: the daemon follows what the
+    session actually answers on and writes that down itself. This is for what
+    that cannot see -- a session that has not taken a turn, a model id the
+    registry does not map, or a deliberate "next time, something else".
+    An unknown model is a 400 from the manager's own check.
+    """
+    manager: SessionManager = request.app["manager"]
+    body = await _json_body(request)
+    session = manager.set_model(request.match_info["name"], str(body.get("model") or ""))
+    return json_response(session.info())
 
 
 async def _winding_down(request: web.Request, session, *, force: bool) -> bool:

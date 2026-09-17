@@ -5,6 +5,9 @@ harnesses:
   claude:
     builtin: true
     models: [haiku, sonnet, opus, fable]
+    # Launches pass the alias itself (--model=opus); this prefix is what
+    # reads a reported id (claude-opus-5) back into that alias.
+    model_id_prefix: claude
     auth: claude
     token_env: ANTHROPIC_AUTH_TOKEN
     empty_env: [ANTHROPIC_API_KEY]

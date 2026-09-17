@@ -235,6 +235,9 @@ async def _serve(host: str, port: int, cfg: dict, bound: Optional[dict] = None) 
     listener_task = asyncio.ensure_future(
         _listener_watchdog(site_box, runner, host, actual_port)
     )
+    # The saved model of a session drifts from the one it answers on the
+    # moment somebody uses the harness's own model switch; this closes that.
+    model_clock_task = asyncio.ensure_future(_model_reconcile_clock(manager))
 
     try:
         await app["shutdown_event"].wait()
@@ -262,6 +265,11 @@ async def _serve(host: str, port: int, cfg: dict, bound: Optional[dict] = None) 
             await listener_task
         except (asyncio.CancelledError, Exception):
             pass
+        model_clock_task.cancel()
+        try:
+            await model_clock_task
+        except (asyncio.CancelledError, Exception):
+            pass
         await resume_nudge.shutdown()
         # Undelivered debts stay on disk; shutdown only stops offering them.
         await restart_notice_task.shutdown()
@@ -284,6 +292,11 @@ async def _serve(host: str, port: int, cfg: dict, bound: Optional[dict] = None) 
 
 #: How often the watchdog looks at the listening socket.
 LISTENER_POLL = 1.0
+#: How often the saved model of each live session is checked against the
+#: model it is actually answering on. Slow on purpose: the answer only
+#: changes when a person switches model inside a harness, and a pass that
+#: finds nothing writes nothing (see SessionManager.reconcile_models).
+MODEL_RECONCILE_POLL = 60.0
 
 
 def _listener_alive(site) -> bool:
@@ -329,6 +342,37 @@ async def _listener_watchdog(site_box: dict, runner, host: str, port: int) -> No
             continue
         site_box["site"] = new_site
         log.info("listening again on http://%s:%s", host, port)
+
+
+async def _model_reconcile_clock(manager) -> None:
+    """Keep each session's saved model equal to the one it is answering on.
+
+    Without this the definition keeps the creation-time choice for the whole
+    life of the session, and the next daemon restart relaunches on it -- the
+    ``/model`` switch silently undone, which is what this loop exists to stop
+    (docs/session-model-persistence.md).
+
+    ``persist`` reconciles too, and that is the one that matters at a restart;
+    this timer is what keeps the dashboard and the saved definition agreeing
+    in between, and what limits how much a crash (no clean shutdown, so no
+    persist) can lose to one poll interval.
+    """
+    while True:
+        await asyncio.sleep(MODEL_RECONCILE_POLL)
+        try:
+            changed = await asyncio.to_thread(manager.reconcile_models)
+        except Exception:  # noqa: BLE001 -- a bad poll must not end the clock
+            log.warning("model reconciliation pass failed", exc_info=True)
+            continue
+        if changed:
+            # Only a pass that moved something pays for a write.
+            try:
+                await asyncio.to_thread(manager.persist)
+            except Exception:  # noqa: BLE001
+                log.warning(
+                    "could not persist reconciled models for %s",
+                    ", ".join(changed), exc_info=True,
+                )
 
 
 def _acquire_with_grace(
