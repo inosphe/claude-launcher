@@ -38,6 +38,7 @@ from .. import (
 )
 from .. import session_commits
 from .. import ghcli, prflow, spawn as spawn_mod, store, workspaces
+from .. import plugins, settings
 from .. import worktree as worktree_mod
 from . import beads as beads_mod, handoff as handoff_mod, notice as notice_mod
 from . import rag as rag_mod
@@ -353,6 +354,7 @@ def build_app(
     r.add_post("/api/daemon/restart-request/approve", h_restart_request_approve)
     r.add_post("/api/daemon/restart-request/reject", h_restart_request_reject)
     r.add_get("/api/profiles", h_profiles)
+    r.add_post("/api/profiles/permission-mode", h_profiles_permission_mode)
     r.add_get("/api/usage", h_usage)
     r.add_get("/api/metering", h_metering)
     r.add_get("/api/borrow-options", h_borrow_options)
@@ -871,6 +873,68 @@ def _profile_default_tools(profile_obj, entry) -> Optional[list]:
         return list(entry.tools)
 
 
+#: The one settings key the profiles page reports and writes, spelled once.
+#: Every reader (the form, the card, the CLI listing) goes through the store's
+#: declaration, so the spelling is the identity of the thing being converged.
+PERMISSION_MODE_KEY = "permissions.defaultMode"
+
+
+def _permission_mode(profile_obj, doc: dict) -> dict:
+    """What this profile's permission mode is, and where that answer came from.
+
+    Four values, because they answer different questions and a UI that shows
+    one of them lies by omission:
+
+    * ``value``      -- what the profile's ``settings.json`` holds right now,
+                        or ``None`` when it holds nothing (which is the state
+                        that asks before every tool call).
+    * ``target``     -- what claunch converges it to (the declaration, or the
+                        packaged default under it).
+    * ``declared``   -- the declaration as the config file spells it, ``None``
+                        when nobody declared one and the packaged default is
+                        what is in force. This is the half that says *who*
+                        decided: "claunch's default" is not a decision anybody
+                        made, and the page says so.
+    * ``converged``  -- whether ``value`` already equals ``target``. A profile
+                        that disagrees is one whose convergence has not run
+                        yet, which is exactly the state ``claunch apply``
+                        closes; showing the value alone would make a pending
+                        profile look settled.
+    """
+    declared = store.shared_settings(doc).get(PERMISSION_MODE_KEY)
+    value = settings.dotted_get(settings.load(profile_obj), PERMISSION_MODE_KEY)
+    target = store.effective_shared_settings(doc).get(PERMISSION_MODE_KEY)
+    return {
+        "key": PERMISSION_MODE_KEY,
+        "value": value,
+        "target": target,
+        "declared": declared,
+        "source": "claunch-default" if declared is None else "declared",
+        "converged": value == target,
+        "modes": list(settings.PERMISSION_MODES),
+    }
+
+
+def _converge_profiles() -> list:
+    """Every Claude Code profile, the set the shared layer writes to.
+
+    Filters the way :mod:`plugins` does and for the same reason: a profile on
+    another harness has a config dir ``claude`` never reads, so converging a
+    Claude Code settings key into it would write a file nothing loads.
+    """
+    doc = store.load()
+    out = []
+    for candidate in profile_mod.list_all():
+        try:
+            if lineage.effective_harness(candidate, doc) == harness_registry.CLAUDE_HARNESS:
+                out.append(candidate)
+        except lineage.LineageError:
+            # A profile whose chain is broken is not one to write into; the
+            # listing already reports it as an error row.
+            continue
+    return out
+
+
 async def h_profiles(request: web.Request) -> web.Response:
     # One config read for the whole listing, one availability probe per
     # harness. Both used to happen inside the double loop below: fourteen
@@ -945,6 +1009,22 @@ async def h_profiles(request: web.Request) -> web.Response:
                     "explicit": False,
                     "tools": _profile_default_tools(p, registry.get(name)),
                     "model_ids": model_ids.get(name, {}),
+                    # Where the profile actually lives. The management page
+                    # shows it because a profile IS a directory, and the one
+                    # question that needs it ("which of these is the one I am
+                    # running in?") is answered by reading the path.
+                    "directory": str(p.config_dir),
+                    # One row per profile carries this, on the profile's own
+                    # harness: it is a Claude Code settings key, so a row for
+                    # another harness would be reporting something that
+                    # harness never reads. None says "not applicable here"
+                    # rather than "no value", which is what ``value: null``
+                    # on a Claude row means.
+                    "permission_mode": (
+                        _permission_mode(p, doc)
+                        if name == harness_registry.CLAUDE_HARNESS
+                        else None
+                    ),
                 }
             )
         except lineage.LineageError as exc:
@@ -1020,6 +1100,69 @@ async def h_profiles(request: web.Request) -> web.Response:
             "profile_selectors": selectors,
             "profile_options": profile_options,
             "profile_details": items,
+        }
+    )
+
+
+async def h_profiles_permission_mode(request: web.Request) -> web.Response:
+    """Declare claunch's default permission mode, then converge the profiles.
+
+    The browser's ``claunch shared permissions.defaultMode=...``, and the same
+    two steps in the same order: the declaration is edited in the store, then
+    written into every Claude Code profile. Editing applies immediately, which
+    is the shared layer's rule everywhere else -- "declare it and remember to
+    run apply" is a two-step a person would have to repeat for every profile
+    added later.
+
+    One value, not one per profile. The declaration is a single key in the
+    shared block and that is the shape the convergence already has; a
+    per-profile override is a different design, and inventing it here would
+    give the page a state the CLI does not have. A profile that wants to keep
+    asking can still be left alone by editing its own ``settings.json`` by
+    hand -- claunch converges, it does not police.
+
+    ``{"mode": null}`` (or an empty string) undeclares the key, which returns
+    every profile to the packaged default rather than switching the behaviour
+    off. ``personal`` is not a mode, and the ones that are come from
+    :data:`settings.PERMISSION_MODES`: a typo that reached the store would be
+    converged into every profile as a key Claude Code then ignores, silently,
+    in the direction that asks more questions rather than fewer.
+    """
+    body = await _json_body(request)
+    raw = body.get("mode")
+    declared = str(raw).strip() if raw is not None else ""
+    if declared and not settings.is_permission_mode(declared):
+        return json_error(
+            400,
+            f"unknown permission mode {declared!r} (known: "
+            f"{', '.join(settings.PERMISSION_MODES)})",
+        )
+    if declared:
+        plugins.set_shared_setting(PERMISSION_MODE_KEY, declared)
+    else:
+        # Undeclaring pops the key. Setting it to ``None`` would be a
+        # different act: the store would keep the key and the convergence
+        # would write ``"defaultMode": null`` into every profile -- a value
+        # Claude Code ignores, so the mode would fall back to asking while
+        # the page reported a value nobody chose.
+        plugins.unset_shared_setting(PERMISSION_MODE_KEY)
+    targets = _converge_profiles()
+    results = await asyncio.to_thread(plugins.apply_all, targets)
+    failed = [
+        {"profile": result.profile, "reason": plugins.error_line(error)}
+        for result in results
+        for _action, error in result.failed
+    ]
+    return json_response(
+        {
+            "key": PERMISSION_MODE_KEY,
+            # What the declaration reads now. Null means "nobody declared one",
+            # not "no value in force" -- ``target`` is what is in force.
+            "declared": store.shared_settings().get(PERMISSION_MODE_KEY),
+            "target": store.effective_shared_settings().get(PERMISSION_MODE_KEY),
+            "converged": [r.profile for r in results if r.changed],
+            "unchanged": [r.profile for r in results if not r.changed and r.ok],
+            "failed": failed,
         }
     )
 

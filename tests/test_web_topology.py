@@ -358,6 +358,7 @@ CHECKS = [
         "beadsstream_check.js",
         "ragsearch_check.js",
         "relaysettings_check.js",
+        "profilesettings_check.js",
         "beadskanban_check.js",
         "queues_check.js",
         "railbeads_check.js",
