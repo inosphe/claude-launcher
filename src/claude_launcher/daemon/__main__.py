@@ -106,15 +106,10 @@ async def _serve(host: str, port: int, cfg: dict, bound: Optional[dict] = None) 
     relay_state = {"uplink": None}
 
     def _relay_state() -> dict:
+        from .relay_uplink import unconfigured_state
+
         uplink = relay_state["uplink"]
-        if uplink is None:
-            return {"configured": False, "connected": False, "name": None}
-        return {
-            "configured": True,
-            "connected": uplink.connected,
-            "name": uplink.name,
-            "url": uplink.url,
-        }
+        return unconfigured_state() if uplink is None else uplink.state()
 
     app = build_app(
         manager,
@@ -419,32 +414,43 @@ def _acquire_with_grace(
 
 
 def _start_uplink(actual_port: int):
-    """Start the relay uplink task if a ``daemon.relay`` block is configured.
+    """Start the relay uplinks if any relay is configured.
 
-    The uplink always dials the loopback address so the tunnel can't widen the
+    Every configured relay gets its own uplink and they run concurrently
+    inside one :class:`~.relay_uplink.RelayPool`, so a daemon registered with
+    a work relay and a home relay is reachable through both at once. The
+    uplinks always dial the loopback address so the tunnel can't widen the
     daemon's own network exposure, regardless of the daemon's bind host.
     """
     from . import relay_uplink
 
-    cfg = store.relay_config()
     # A named instance sharing the config file with its siblings must not also
     # share their relay identity — suffix the default backend name so every
     # instance registers under its own directory entry.
-    if paths.instance() and not (os.environ.get("CLAUNCH_RELAY_NAME") or cfg.get("name")):
+    default_name = ""
+    if paths.instance():
         import socket
 
-        cfg["name"] = f"{socket.gethostname()}-{paths.instance()}"
-    uplink = relay_uplink.config_from_env_and_dict(
-        cfg, local_host="127.0.0.1", local_port=actual_port
+        default_name = f"{socket.gethostname()}-{paths.instance()}"
+    pool = relay_uplink.pool_from_config(
+        store.relays_config(), local_host="127.0.0.1", local_port=actual_port,
+        default_name=default_name,
     )
-    if uplink is None:
+    if pool is None:
         return None, None
-    log.info("starting relay uplink → %s (backend %r)", uplink.url, uplink.name)
-    return uplink, asyncio.ensure_future(uplink.run())
+    for up in pool.uplinks:
+        log.info("starting relay uplink %s → %s (backend %r)",
+                 up.id, up.url, up.name)
+    return pool, asyncio.ensure_future(pool.run())
 
 
 def _wire_federation(mesh_manager: MeshManager, uplink) -> None:
-    """Give the mesh manager a peer transport riding the relay uplink.
+    """Give the mesh manager a peer transport riding the relay uplink(s).
+
+    ``uplink`` is a :class:`~.relay_uplink.RelayPool` in the daemon and a lone
+    :class:`~.relay_uplink.RelayUplink` in the tests that drive one directly;
+    both expose ``name``/``connected``/``peer_http``/``peer_list``, which is
+    all this wiring needs.
 
     The transport is one JSON POST per call, bridged to the peer daemon's
     ``/peer/*`` endpoint through the relay (PEER_OPEN). Transport-level

@@ -204,7 +204,9 @@ def build_auth_middleware(token: str, cookie_sessions: set):
 
 
 def _relay_unconfigured() -> dict:
-    return {"configured": False, "connected": False, "name": None}
+    from .relay_uplink import unconfigured_state
+
+    return unconfigured_state()
 
 
 def build_app(
