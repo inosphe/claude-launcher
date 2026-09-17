@@ -169,10 +169,12 @@ async def _serve(host: str, port: int, cfg: dict, bound: Optional[dict] = None) 
             ", ".join(sorted({d["kind"] for d in debts})),
         )
 
-    uplink, uplink_task = _start_uplink(actual_port)
-    relay_state["uplink"] = uplink
-    if uplink is not None:
-        _wire_federation(mesh_manager, uplink)
+    from .relay_settings import RelaySettings
+
+    relay_settings = RelaySettings(actual_port, lambda pool: _wire_federation(mesh_manager, pool))
+    await relay_settings.start()
+    relay_state["uplink"] = relay_settings.pool
+    app["relay_settings"] = relay_settings
     mesh_manager.start()
     ask_clock = cflow_clock.AskClock()
     ask_clock.start()
@@ -247,14 +249,7 @@ async def _serve(host: str, port: int, cfg: dict, bound: Optional[dict] = None) 
         # is a daemon stop/restart (reattach later) before shutdown_all makes
         # their sessions look like programs that exited on their own.
         await notify_shutdown(app)
-        if uplink is not None:
-            uplink.stop()
-        if uplink_task is not None:
-            uplink_task.cancel()
-            try:
-                await uplink_task
-            except (asyncio.CancelledError, Exception):
-                pass
+        await relay_settings.close()
         listener_task.cancel()
         try:
             await listener_task

@@ -11418,6 +11418,120 @@ function openSettings() {
   refreshStatusChecks();
   refreshRagStatus();
   refreshGhStatus();
+  refreshRelaySettings();
+}
+
+let relaySettingsRows = [];
+let relaySettingsError = "";
+let relaySettingsNotice = "";
+let relaySettingsBusy = false;
+let relaySettingsDraft = { id: "", url: "", name: "", token: "", verify_tls: true };
+
+async function refreshRelaySettings() {
+  try {
+    const resp = await api("/api/relays");
+    const data = await resp.json();
+    if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
+    relaySettingsRows = data.relays || [];
+    relaySettingsError = "";
+    renderRelayBadge(data.relay);
+  } catch (err) { relaySettingsError = String(err); }
+  if (wsOpen) renderWorkspaces();
+}
+
+function relaySettingsCard() {
+  const card = el("section", "ws-add relay-settings-card");
+  const head = el("div", "gh-head");
+  head.appendChild(el("h3", null, "Relay servers"));
+  const refresh = el("button", "wf-btn clear", "Refresh status");
+  refresh.type = "button";
+  refresh.disabled = relaySettingsBusy;
+  refresh.addEventListener("click", refreshRelaySettings);
+  head.appendChild(refresh);
+  card.appendChild(head);
+  card.appendChild(el("p", "wf-note",
+    "Connect this daemon to multiple relay servers. Save & connect applies immediately. " +
+    "Use the same backend name on each server for mesh access."));
+  for (const relay of relaySettingsRows) {
+    const row = el("div", "ws-row");
+    const text = el("div", "ws-text");
+    text.appendChild(el("strong", null, relay.id || "Environment relay"));
+    text.appendChild(el("span", "ws-path mono", relay.effective_url || relay.url));
+    text.appendChild(el("span", "meta", relay.effective_name || relay.name || "Default hostname"));
+    row.appendChild(text);
+    row.appendChild(el("span", "badge", relay.connected ? "Connected" : "Disconnected"));
+    if (!relay.environment_only) {
+      const edit = el("button", "wf-btn clear", "Edit");
+      edit.type = "button";
+      edit.disabled = relaySettingsBusy;
+      edit.addEventListener("click", () => {
+        relaySettingsDraft = { id: relay.id, url: relay.url, name: relay.name,
+          token: "", verify_tls: relay.verify_tls };
+        relaySettingsNotice = "";
+        renderWorkspaces();
+      });
+      row.appendChild(edit);
+    }
+    card.appendChild(row);
+  }
+  const form = el("form", "relay-settings-form");
+  for (const [key, title, placeholder] of [
+    ["id", "Relay ID", "work"],
+    ["url", "Server URL", "wss://relay.example.com"],
+    ["name", "Backend name", "Default: hostname"],
+    ["token", "Backend token", "Leave blank to keep the saved token"],
+  ]) {
+    const label = el("label", null, title);
+    const input = el("input", "mono");
+    input.id = "relay-setting-" + key;
+    input.type = key === "token" ? "password" : "text";
+    input.autocomplete = key === "token" ? "new-password" : "off";
+    input.placeholder = placeholder;
+    input.value = relaySettingsDraft[key];
+    input.required = key === "id" || key === "url";
+    input.disabled = relaySettingsBusy;
+    input.addEventListener("input", () => { relaySettingsDraft[key] = input.value; });
+    label.appendChild(input);
+    form.appendChild(label);
+  }
+  const tlsLabel = el("label", "relay-tls");
+  const tls = el("input");
+  tls.type = "checkbox";
+  tls.checked = relaySettingsDraft.verify_tls;
+  tls.disabled = relaySettingsBusy;
+  tls.addEventListener("change", () => { relaySettingsDraft.verify_tls = tls.checked; });
+  tlsLabel.appendChild(tls);
+  tlsLabel.appendChild(document.createTextNode(" Verify TLS certificate"));
+  form.appendChild(tlsLabel);
+  const save = el("button", "wf-btn approve", relaySettingsBusy ? "Connecting…" : "Save & connect");
+  save.type = "submit";
+  save.disabled = relaySettingsBusy;
+  form.appendChild(save);
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    if (relaySettingsBusy) return;
+    relaySettingsBusy = true;
+    relaySettingsError = "";
+    relaySettingsNotice = "";
+    const body = { ...relaySettingsDraft };
+    renderWorkspaces();
+    try {
+      const resp = await api("/api/relays", { method: "POST", body: JSON.stringify(body) });
+      const data = await resp.json();
+      if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
+      relaySettingsRows = data.relays || [];
+      relaySettingsDraft = { id: "", url: "", name: "", token: "", verify_tls: true };
+      relaySettingsNotice = "Saved. Connection started; refresh status to check registration.";
+      renderRelayBadge(data.relay);
+    } catch (err) { relaySettingsError = String(err); }
+    relaySettingsDraft.token = "";
+    relaySettingsBusy = false;
+    if (wsOpen) renderWorkspaces();
+  });
+  card.appendChild(form);
+  if (relaySettingsError) card.appendChild(el("p", "error", relaySettingsError));
+  if (relaySettingsNotice) card.appendChild(el("p", "wf-note", relaySettingsNotice));
+  return card;
 }
 
 async function refreshRagStatus() {
@@ -13795,6 +13909,7 @@ function renderWorkspaces() {
   view.appendChild(ragCard());
 
   view.appendChild(ghCard());
+  view.appendChild(relaySettingsCard());
 
   const list = el("div", "ws-list");
   list.appendChild(el("h3", null, `Registered (${workspacesCache.length})`));
