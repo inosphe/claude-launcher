@@ -4863,6 +4863,64 @@ function newProfileHarnessName(f, selector = "") {
     (spawnParent() || {}).harness || "";
 }
 
+/* ---- what a model choice actually reaches ------------------------------- */
+/* A form offers the harness's declared model choices (`sonnet`, `luna`) and
+   sends the picked one as the launch's model. The alias is what the launch
+   passes; what the backend answers on is a different string, and it is the
+   one nobody can see from here. On Claude the alias is resolved out of the
+   profile's own environment (ANTHROPIC_DEFAULT_SONNET_MODEL, which a
+   provider, a profile or a borrow in ~/.claunch.yaml decides) and a form
+   never reads that file, so the daemon publishes the resolution per profile
+   (profile_details[].model_ids) and this only spells it out.
+
+   Two rules, both about not saying something untrue:
+
+   - An alias missing from the map is one nothing here resolved — on a plain
+     Anthropic profile Claude Code picks its own latest sonnet, and no id on
+     this surface would be that fact. Nothing is shown for it.
+   - The map describes the profile's OWN backend, so it stops applying the
+     moment a borrow names another profile: that launch talks to the lender's
+     backend, where these ids are somebody else's. The row goes on naming the
+     alias; the Profile hint (create form) and the borrow row (spawn modal)
+     are what say whose backend it is. A declared harness that resolves its
+     own aliases (Codex's `model_aliases`) is not about the profile at all
+     and is unaffected. */
+function modelChoiceLabel(alias, ids) {
+  const id = ids && Object.prototype.hasOwnProperty.call(ids, alias)
+    ? String(ids[alias] || "") : "";
+  return id ? `${alias} (${id})` : alias;
+}
+
+/* The ids that apply to what this form is about to launch. */
+function modelIdsInPlay(capabilities, detail, borrowProfile, selector) {
+  const ids = (detail && detail.model_ids) || {};
+  if (!capabilities || !capabilities.builtin) return ids;
+  const lender = baseProfileName(borrowProfile || "");
+  if (lender && lender !== baseProfileName(selector || "")) return {};
+  return ids;
+}
+
+/* The borrow a launch would end up with: the row's own answer, or — on a form
+   that names a parent — the empty head option, which means "as the parent
+   does", including a parent's own borrow. */
+function borrowInPlay(select, parent) {
+  const picked = select && !select.disabled ? String(select.value || "") : "";
+  if (picked) return picked;
+  return parent ? String(parent.borrow || "") : "";
+}
+
+/* Re-label a model picker that is already built. The ids can move while the
+   choices and the picked one do not — a borrow picked or dropped changes
+   which backend the aliases reach — and rebuilding the list would throw away
+   the model the operator had already chosen. */
+function relabelModelOptions(select, choices, ids) {
+  for (const opt of (select && select.options) || []) {
+    if (opt.value && choices.includes(opt.value)) {
+      opt.textContent = modelChoiceLabel(opt.value, ids);
+    }
+  }
+}
+
 /* Model aliases belong to the harness declaration.  The selected alias stays
    separate from free Args so a child can inherit it, replace it, or return to
    the harness default without parsing an arbitrary command line. */
@@ -4870,20 +4928,33 @@ function syncNewModelOptions(f, harnessName, capabilities, parent = null) {
   if (!f.model) return;
   const choices = (capabilities.models || []).map(String);
   const selector = newProfileSelector(f);
+  const ids = modelIdsInPlay(
+    capabilities, newProfileDetail(f, selector), borrowInPlay(f.borrow, parent),
+    selector
+  );
   const parentKey = parent ? `${parent.name}:${parent.model || ""}` : "new";
   const key = `${parentKey}:${selector}:${harnessName}:` + choices.join("\u0000");
+  // The ids are in here as well as in the rebuild key: they can move without
+  // the choices moving, and that only re-labels (see relabelModelOptions).
+  const labelKey = key + "|" + JSON.stringify(ids);
   if (f._modelFor !== key) {
     const inherited = parent && harnessName === parent.harness
       ? String(parent.model || "") : "";
     f.model.innerHTML = "";
     f.model.appendChild(new Option("(harness default)", ""));
-    for (const value of choices) f.model.appendChild(new Option(value, value));
+    for (const value of choices) {
+      f.model.appendChild(new Option(modelChoiceLabel(value, ids), value));
+    }
     if (inherited && !choices.includes(inherited)) {
       f.model.appendChild(new Option(inherited, inherited));
     }
     f.model.value = inherited;
     f._modelOriginal = inherited;
     f._modelFor = key;
+    f._modelLabelKey = labelKey;
+  } else if (f._modelLabelKey !== labelKey) {
+    relabelModelOptions(f.model, choices, ids);
+    f._modelLabelKey = labelKey;
   }
   const row = $("new-model-row");
   if (row) row.classList.toggle("hidden", !choices.length);
@@ -5598,7 +5669,6 @@ function syncForkAvailability() {
   const claude = harnessName === "claude";
   const capabilities = (typeof harnessDetails !== "undefined"
     ? harnessDetails[harnessName] : null) || {};
-  syncNewModelOptions(f, harnessName, capabilities, parent);
   const borrowCap = profileBorrowCapability(
     newProfileDetail(f, selector), harnessName
   );
@@ -5618,6 +5688,9 @@ function syncForkAvailability() {
   f.borrow.title = f.borrow._validationError ||
     (f.borrow._validationPending ? "validating borrow candidates" : "");
   if (f.borrow.disabled) f.borrow.value = "";
+  // After the borrow row has settled: the model row's labels read whether a
+  // borrow is in play, and that is a fact about the row above this line.
+  syncNewModelOptions(f, harnessName, capabilities, parent);
   if (!claude) {
     f.resume.value = "";
     f.null_token.checked = false;
@@ -5986,7 +6059,6 @@ function syncSpawnMode() {
     const claude = !childHarness || childHarness === "claude";
     const childCapabilities = (typeof harnessDetails !== "undefined"
       ? harnessDetails[childHarness] : null) || {};
-    syncNewModelOptions(f, childHarness, childCapabilities, parent);
     const modeBase = childHarness === parent.harness ? (parent.args || []) : [];
     seedNewCodexRuntime(
       f, childCapabilities, modeBase,
@@ -6011,6 +6083,9 @@ function syncSpawnMode() {
       f.borrow.value = "";
       f.borrow.disabled = true;
     }
+    // After the borrow row has settled: the model row's labels read whether a
+    // borrow is in play, and that is a fact about the rows above this line.
+    syncNewModelOptions(f, childHarness, childCapabilities, parent);
     // Named, not merely greyed: "inherits everything" is true of a locked
     // form and of an open one alike, and the operator who unlocked profile
     // in ~/.claunch.yaml needs to see which rows are still shut to know the
@@ -18820,20 +18895,33 @@ function syncSpawnModel(ui, childHarness, capabilities, may) {
   if (!ui.model) return;
   const parent = ui.parentSess || {};
   const choices = (capabilities.models || []).map(String);
-  const key = `${spawnProfileSelector(ui)}:${childHarness}:${parent.model || ""}:` +
+  const selector = spawnProfileSelector(ui);
+  const details = ui.profileDetails || {};
+  const detail = details[selector] || details[baseProfileName(selector)] || null;
+  const ids = modelIdsInPlay(
+    capabilities, detail, borrowInPlay(ui.borrow, parent), selector
+  );
+  const key = `${selector}:${childHarness}:${parent.model || ""}:` +
     choices.join("\u0000");
+  // The ids are in here as well as in the rebuild key: they can move without
+  // the choices moving, and that only re-labels (see relabelModelOptions).
+  const labelKey = key + "|" + JSON.stringify(ids);
   if (ui._modelFor !== key) {
     const inherited = childHarness === parent.harness
       ? String(parent.model || "") : "";
     const wanted = ui._modelPreset !== undefined
       ? String(ui._modelPreset || "") : inherited;
     fillSpawnSelect(
-      ui.model, choices.map((value) => [value, value]),
+      ui.model, choices.map((value) => [modelChoiceLabel(value, ids), value]),
       "(harness default)", wanted
     );
     ui._modelFor = key;
     ui._modelOriginal = inherited;
     ui._modelPreset = undefined;
+    ui._modelLabelKey = labelKey;
+  } else if (ui._modelLabelKey !== labelKey) {
+    relabelModelOptions(ui.model, choices, ids);
+    ui._modelLabelKey = labelKey;
   }
   if (ui.modelRow) ui.modelRow.hidden = !choices.length;
   const inherited = !may.includes("model");
@@ -18924,7 +19012,6 @@ function syncSpawnGates(ui) {
     (pickedDetail ? pickedDetail.harness : (ui.parentSess || {}).harness || "");
   const childCapabilities = (typeof harnessDetails !== "undefined"
     ? harnessDetails[childHarness] : null) || {};
-  syncSpawnModel(ui, childHarness, childCapabilities, may);
   syncSpawnCodexRuntime(ui, childHarness, childCapabilities, may);
   syncSpawnPiTools(ui, childHarness, childCapabilities, may);
   lock(ui.profile, ui.profileNote, may.includes("profile") ? "" :
@@ -18961,6 +19048,9 @@ function syncSpawnGates(ui) {
     lock(ui.borrow, ui.borrowNote, may.includes("borrow") ? "" :
       "the child authenticates as its parent does (spawn.allow_profile)");
   }
+  // After the borrow row has settled: the model row's labels read whether a
+  // borrow is in play, and that is a fact about the row above this line.
+  syncSpawnModel(ui, childHarness, childCapabilities, may);
 
   // Absent, not empty, when the policy has it locked: the report only
   // lists workspaces when a child may be sent to one.

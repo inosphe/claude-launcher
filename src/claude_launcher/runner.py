@@ -23,8 +23,10 @@ from . import (
     harnesses,
     lineage,
     pi_provider,
+    provider_spec,
     providers,
     routing,
+    store,
     translators,
 )
 from .profile import Profile
@@ -290,6 +292,112 @@ def child_env(
     # shell value nor a synced ``env`` entry can escape this profile.
     env[config.CLAUDE_CONFIG_DIR_ENV] = str(profile.config_dir)
     return env
+
+
+def claude_model_env(
+    profile: Profile,
+    *,
+    provider_override: Optional[str] = None,
+    borrow: Optional[Profile] = None,
+    doc: Optional[dict] = None,
+) -> dict:
+    """The model keys a claude launch on ``profile`` ends up with.
+
+    The layers :func:`child_env` applies, in the same order and with the same
+    two rules — a lender's env when borrowing, and the profile's own backend
+    pins dropped when the backend in play is not its own — but only the model
+    keys (:data:`provider_spec.CLAUDE_MODEL_KEYS`), and none of the token work
+    a launch needs.
+
+    A session-start form asks this to say which backend model a *choice*
+    (``sonnet``) actually reaches. That is a fact nothing else on the surface
+    can state: the alias is what the launch passes, and the id behind it is
+    written by config the form never sees. It is also not the launcher's to
+    decide, so the answer is read off the same layers rather than kept in a
+    second table.
+
+    ``test_runner_env.test_claude_model_env_agrees_with_child_env`` runs both
+    for one profile and holds them to one answer, so they cannot drift.
+    """
+    auth_source = borrow if borrow is not None else profile
+    provider = provider_override or providers.resolve_name(auth_source, doc)
+    pins_apply = _profile_backend_pins_apply(profile, provider)
+    env: dict = {}
+    env.update(
+        providers.claude_env(
+            profile, provider, doc, overlay_models=pins_apply
+        )
+    )
+    if borrow is not None:
+        env.update(lineage.effective_env(borrow))
+    profile_env = _claude_profile_env(profile)
+    if not pins_apply:
+        profile_env = {
+            key: value
+            for key, value in profile_env.items()
+            if key not in BACKEND_ENV_KEYS
+        }
+    env.update(profile_env)
+    return {
+        key: value
+        for key, value in env.items()
+        if key in provider_spec.CLAUDE_MODEL_KEYS
+    }
+
+
+def model_ids(
+    profile: Profile,
+    entries: Sequence[harnesses.Harness],
+    doc: Optional[dict] = None,
+) -> dict:
+    """Harness name -> the backend model id each of its choices reaches.
+
+    A session-start form offers a harness's declared ``models`` (``sonnet``,
+    ``luna``) and sends the choice as the launch's ``--model``. What the
+    backend then answers on is a different string, and how it is reached
+    depends on the harness:
+
+    * a builtin (Claude) harness passes the alias through and Claude Code
+      resolves it -- here, out of the profile's own environment
+      (:func:`claude_model_env`), which is the only place that resolution is
+      written down;
+    * a declared harness resolves it itself: ``model_aliases`` is the table
+      its launch substitutes into ``model_args``
+      (see :mod:`claude_launcher.daemon.harness`).
+
+    Only choices that resolve to something *other than the alias* are listed.
+    An alias that is missing from the map is one nothing here decides -- a
+    plain Anthropic profile resolves ``sonnet`` inside Claude Code -- and the
+    form says nothing about it rather than inventing an id.
+    """
+    doc = store.load() if doc is None else doc
+    out: dict = {}
+    claude_env: Optional[dict] = None
+    for entry in entries:
+        choices = list(getattr(entry, "models", None) or ())
+        if not choices:
+            continue
+        ids: dict = {}
+        if getattr(entry, "builtin", False):
+            if claude_env is None:
+                try:
+                    claude_env = claude_model_env(profile, doc=doc)
+                except (RunnerError, providers.ProviderError):
+                    claude_env = {}
+            for alias in choices:
+                var = provider_spec.CLAUDE_ALIAS_VARS.get(alias)
+                value = str(claude_env.get(var, "")).strip() if var else ""
+                if value and value != alias:
+                    ids[alias] = value
+        else:
+            aliases = getattr(entry, "model_aliases", None) or {}
+            for alias in choices:
+                value = str(aliases.get(alias) or "").strip()
+                if value and value != alias:
+                    ids[alias] = value
+        if ids:
+            out[entry.name] = ids
+    return out
 
 
 def harness_child_env(

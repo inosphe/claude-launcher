@@ -14,6 +14,7 @@ from claude_launcher import (
     lineage,
     pi_provider,
     profile,
+    provider_spec,
     providers,
     runner,
     settings,
@@ -900,3 +901,104 @@ def test_oauth_harnesses_ignore_api_keys_and_use_namespaced_storage(
     assert "ANTHROPIC_MODEL" not in env
     assert env["PLAIN_SETTING"] == "kept"
     assert env[home_name] == str(p.config_dir / name)
+
+
+# --- what each model choice actually reaches (the forms' resolution) --------
+
+
+def _model_keys(env: dict) -> dict:
+    """The part of a launch env that decides which backend model is asked for."""
+    return {
+        key: value
+        for key, value in env.items()
+        if key in provider_spec.CLAUDE_MODEL_KEYS
+    }
+
+
+def _pinned_provider(doc: dict) -> None:
+    """A backend that names its own models under the Claude aliases."""
+    doc.setdefault("providers", {}).update(
+        {
+            "backend": {
+                "models": {"default": "backend-sonnet", "large": "backend-opus"},
+                "harness_options": {"claude": {"model_tag": "[1m]"}},
+            },
+            "other": {
+                "models": {"default": "other-sonnet"},
+                "harness_options": {"claude": {"model_tag": "[1m]"}},
+            },
+        }
+    )
+
+
+def test_claude_model_env_agrees_with_child_env(home):
+    """The resolution a form SHOWS and the one a launch GETS are one answer.
+
+    ``claude_model_env`` assembles the same layers ``child_env`` applies —
+    provider translation, a lender's env when borrowing, the profile's own env
+    last, and the profile's model pins dropped when the backend in play is not
+    its own — because a form has to be able to ask "which model does `sonnet`
+    reach here" without building a launch (and without touching a token). Two
+    assemblies can drift, so this holds them together across the config shapes
+    that decide the answer.
+    """
+    store.update(_pinned_provider)
+    plain = profile.create("plain")  # the packaged default provider
+    pinned = profile.create("pinned")  # provider-declared models
+    store.set_profile_field("pinned", "provider", "backend")
+    layered = profile.create("layered")  # a profile overlaying one role
+    store.set_profile_field("layered", "provider", "backend")
+    store.set_profile_field("layered", "models", {"small": "layer-haiku"})
+    settings.set_env(layered, {"ANTHROPIC_DEFAULT_SONNET_MODEL": "own-sonnet"})
+    lender = profile.create("lender")
+    store.set_profile_field("lender", "provider", "other")
+
+    for p in (plain, pinned, layered):
+        assert runner.claude_model_env(p) == _model_keys(
+            runner.child_env(p, with_token=True)
+        ), p.name
+    # Borrowing across providers swings the backend to the lender's: the pin
+    # `layered` wrote for itself describes a backend this launch is not
+    # talking to, so the lender's model answers instead.
+    borrowed = runner.claude_model_env(layered, borrow=lender)
+    assert borrowed == _model_keys(
+        runner.child_env(layered, with_token=True, borrow=lender)
+    )
+    assert borrowed["ANTHROPIC_DEFAULT_SONNET_MODEL"] == "other-sonnet[1m]"
+
+
+def test_model_ids_names_the_id_each_alias_reaches(home):
+    """`sonnet` is what the launch passes; the profile decides the id behind it.
+
+    Each alias is asked of the profile's own environment, so a profile that
+    pins roles differently per alias answers differently per alias.
+    """
+    store.update(_pinned_provider)
+    p = profile.create("pinned")
+    store.set_profile_field("pinned", "provider", "backend")
+
+    ids = runner.model_ids(p, [harnesses.registry()["claude"]])
+
+    assert ids["claude"]["sonnet"] == "backend-sonnet[1m]"
+    assert ids["claude"]["opus"] == "backend-opus[1m]"
+    # `small` is pinned by nobody and has no fallback role, so haiku reaches
+    # nothing here and is left out rather than guessed at.
+    assert "haiku" not in ids["claude"]
+
+
+def test_model_ids_says_nothing_where_nothing_here_decides(home):
+    """An unresolved alias is left alone rather than given an invented id.
+
+    A plain Anthropic profile pins nothing, so Claude Code resolves `sonnet`
+    inside itself and no id on a form would be that fact. A declared harness
+    resolves its own aliases (Codex's table), which is not the profile's to
+    answer and is reported all the same.
+    """
+    p = profile.create("plain")
+
+    ids = runner.model_ids(p, list(harnesses.registry().values()))
+
+    assert "claude" not in ids
+    assert ids["codex"]["luna"] == "gpt-5.6-luna"
+    # The alias is what codex passes for a choice its table does not name.
+    assert "pi" not in ids

@@ -1548,6 +1548,45 @@ def _profile_own_auth_label(
     return f"({identity} profile authentication)"
 
 
+def _model_ids_in_play(
+    capabilities: dict, detail: dict, borrow: str, selector: str
+) -> dict:
+    """What each model choice in this picker actually reaches.
+
+    A form offers the harness's declared choices (``sonnet``, ``luna``) and
+    sends the picked one as the launch's model. The alias is what the launch
+    passes; what the backend answers on is a different string, resolved out of
+    config the form never reads -- the profile's own environment on Claude,
+    the harness's ``model_aliases`` elsewhere. The daemon resolves it and
+    publishes it per profile (``profile_details[].model_ids``); this only
+    decides whether it still describes the launch being arranged, on the
+    dashboard model row's rule (its sibling ``modelIdsInPlay`` in
+    ``web/static/app.js``):
+
+    * a declared harness that resolves its own aliases is not about the
+      profile at all, so its ids always apply;
+    * a builtin (Claude) harness resolves the alias out of the profile's
+      environment, so its ids stop applying once a borrow names another
+      profile -- that launch talks to the lender's backend.
+
+    An alias the daemon did not resolve has no entry and is left alone.
+    """
+    ids = dict(detail.get("model_ids") or {})
+    if not capabilities.get("builtin"):
+        return ids
+    lender = str(borrow or "").split(":", 1)[0]
+    if lender and lender != str(selector or "").split(":", 1)[0]:
+        return {}
+    return ids
+
+
+def _model_options(choices: List[str], ids: dict) -> List["Option"]:
+    """Model answers: the alias, and the id the daemon resolved it to."""
+    return [
+        Option(value, value, str(ids.get(value) or "")) for value in choices
+    ]
+
+
 def _argv_has_group(argv: List[str], group: Any) -> bool:
     """Whether the contiguous argv ``group`` occurs in ``argv``."""
     wanted = [str(value) for value in (group or [])]
@@ -1771,7 +1810,7 @@ class Wizard(Form):
         self._issues_for: Optional[tuple] = None
         self._borrow_for: Optional[str] = None
         self._preset_borrow: str = get("borrow") or ""
-        self._models_for: Optional[str] = None
+        self._models_for: Optional[tuple] = None
         self._preset_model: str = get("model") or ""
         self._preset_effort: str = get("effort") or ""
         self._tools_for: Optional[str] = None
@@ -2101,14 +2140,22 @@ class Wizard(Form):
             (h for h in self.sources.harnesses()
              if h.get("name") == harness_name), {}
         )
-        if self._models_for != harness_name:
-            self._models_for = harness_name
+        # The model row's second column: what this profile resolves each alias
+        # to. Part of the rebuild key because it can move without the harness
+        # moving -- a lender picked two rows down changes it.
+        borrow_now = str(self.value("borrow") or "")
+        models_for = (harness_name, borrow_now, self.value("profile") or "")
+        if self._models_for != models_for:
+            self._models_for = models_for
             model = self.field("model")
             keep = self._preset_model or model.value or ""
             choices = [str(value) for value in capabilities.get("models") or []]
-            model.options = [Option("(harness default)", "")] + [
-                Option(value, value) for value in choices
-            ]
+            model.options = [Option("(harness default)", "")] + _model_options(
+                choices,
+                _model_ids_in_play(
+                    capabilities, detail, borrow_now, self.value("profile") or ""
+                ),
+            )
             model.index = 0
             model.select(keep)
             self._preset_model = ""
@@ -2875,10 +2922,19 @@ class SpawnWizard(Form):
             (h for h in self.sources.harnesses()
              if h.get("name") == child_harness), {}
         )
+        # The borrow this launch would end up with: the row's own answer, or
+        # -- the head option -- the parent's, which a child inherits when the
+        # row is locked or left alone. It decides whether the row below still
+        # describes the backend in play (see _model_ids_in_play).
+        borrow_now = (
+            str(self.value("borrow") or "")
+            or str(parent_info.get("borrow") or "")
+        )
         model_for = (
             parent, effective_selector, child_harness,
             str(parent_info.get("model") or ""),
             str(parent_info.get("effort") or ""),
+            borrow_now,
         )
         if model_for != self._model_for:
             self._model_for = model_for
@@ -2888,9 +2944,12 @@ class SpawnWizard(Form):
             )
             choices = [str(value) for value in capabilities.get("models") or []]
             model_f = self.field("model")
-            model_f.options = [Option("(harness default)", "")] + [
-                Option(value, value) for value in choices
-            ]
+            model_f.options = [Option("(harness default)", "")] + _model_options(
+                choices,
+                _model_ids_in_play(
+                    capabilities, detail, borrow_now, effective_selector
+                ),
+            )
             model_f.index = 0
             wanted = (
                 self._preset_model

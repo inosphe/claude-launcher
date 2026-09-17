@@ -147,7 +147,8 @@ let sessionsCache = [];
 let spawnModal = null;
 let BASE = "/";
 let harnessDetails = {
-  claude: { auth: "claude", models: ["haiku", "sonnet", "opus", "fable"] },
+  claude: { auth: "claude", builtin: true,
+            models: ["haiku", "sonnet", "opus", "fable"] },
   codex: {
     auth: "oauth",
     models: ["luna", "terra", "sol"],
@@ -186,6 +187,8 @@ new Function(
   + slice("codexRuntimeArgs") + slice("codexRuntimeText")
   + slice("spawnWorkflowEntry") + slice("spawnWorkflowAdmits") + slice("spawnRankWorkflows")
   + slice("baseProfileName") + slice("profileBorrowCapability")
+  + slice("modelChoiceLabel") + slice("modelIdsInPlay") + slice("borrowInPlay")
+  + slice("relabelModelOptions")
   + slice("profileOwnAuthLabel") + slice("readBorrowOptions")
   + slice("fillValidatedBorrow") + slice("syncSpawnModel")
   + slice("syncSpawnGates") + slice("syncSpawnBeads")
@@ -674,6 +677,53 @@ async function main() {
       Object.values(g.wtMode.inputs).every((i) => i.disabled === true) &&
       /spawn\.allow_worktree/.test(g.worktreeNote.textContent),
     g.worktreeNote.textContent);
+
+  /* What each model choice reaches, beside it. The daemon resolves it per
+     profile -- the id behind an alias is written by config the form never
+     reads -- so the row carries the daemon's answer next to the alias. */
+  const resolved = uiStub({
+    report: { may_choose: ["model"], workspaces: [] },
+    profile: ctl({ value: "p1:claude", disabled: true }),
+    harness: ctl({ value: "claude", disabled: true }),
+    parentSess: { harness: "claude" },
+    profileDetails: { "p1:claude": { harness: "claude",
+      model_ids: { sonnet: "p1-sonnet" } } },
+  });
+  ctx.syncSpawnGates(resolved);
+  check("the model row names the id each alias reaches",
+    resolved.model.options.map((o) => `${o.value}=${o.textContent}`),
+    ["=(harness default)", "haiku=haiku", "sonnet=sonnet (p1-sonnet)",
+     "opus=opus", "fable=fable"]);
+
+  /* A borrow moves the backend the ids describe, so they are dropped rather
+     than shown wrong: picked here, and inherited from a parent that borrows
+     (the row's empty answer means "as the parent does"). */
+  const borrowed = uiStub({
+    report: { may_choose: ["model", "borrow"], workspaces: [] },
+    profile: ctl({ value: "p1:claude", disabled: true }),
+    harness: ctl({ value: "claude", disabled: true }),
+    borrow: ctl({ value: "p2" }),
+    parentSess: { harness: "claude" },
+    profileDetails: { "p1:claude": { harness: "claude", borrow_allowed: true,
+      model_ids: { sonnet: "p1-sonnet" } } },
+  });
+  ctx.syncSpawnGates(borrowed);
+  check("a borrow by another profile drops the ids",
+    borrowed.model.options.map((o) => o.textContent),
+    ["(harness default)", "haiku", "sonnet", "opus", "fable"]);
+
+  const inheriting = uiStub({
+    report: { may_choose: ["model"], workspaces: [] },
+    profile: ctl({ value: "p1:claude", disabled: true }),
+    harness: ctl({ value: "claude", disabled: true }),
+    parentSess: { harness: "claude", borrow: "p2" },
+    profileDetails: { "p1:claude": { harness: "claude",
+      model_ids: { sonnet: "p1-sonnet" } } },
+  });
+  ctx.syncSpawnGates(inheriting);
+  check("a child inheriting a borrowing parent drops them too",
+    inheriting.model.options.map((o) => o.textContent),
+    ["(harness default)", "haiku", "sonnet", "opus", "fable"]);
 
   const codexLocked = uiStub({
     report: { may_choose: [], workspaces: [] },

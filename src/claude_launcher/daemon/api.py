@@ -33,6 +33,7 @@ from .. import (
     providers,
     quickjob,
     reports as reports_mod,
+    runner,
     usage,
 )
 from .. import session_commits
@@ -895,6 +896,22 @@ async def h_profiles(request: web.Request) -> web.Response:
     for p in profiles:
         default_name = None
         default_offered = False
+        # What each harness's model *choices* resolve to on this profile, once
+        # per profile rather than once per row: it is a property of the
+        # profile's provider and env, and both rows below read the same map.
+        # A form cannot work it out itself -- the alias is what the launch
+        # passes and the id behind it is written by config the form never
+        # sees -- so it is published here (see runner.model_ids).
+        try:
+            model_ids = runner.model_ids(p, list(registry.values()), doc=doc)
+        except (
+            runner.RunnerError,
+            providers.ProviderError,
+            harness_registry.HarnessConfigError,
+        ):
+            # A profile whose provider cannot be read is reported as such by
+            # its own rows below; this map simply has nothing to say.
+            model_ids = {}
         try:
             name = lineage.effective_harness(p, doc)
             default_name = name
@@ -925,6 +942,7 @@ async def h_profiles(request: web.Request) -> web.Response:
                     "harness_policy": policy_doc,
                     "explicit": False,
                     "tools": _profile_default_tools(p, registry.get(name)),
+                    "model_ids": model_ids.get(name, {}),
                 }
             )
         except lineage.LineageError as exc:
@@ -989,6 +1007,7 @@ async def h_profiles(request: web.Request) -> web.Response:
                     "harness_policy": policy_doc,
                     "explicit": True,
                     "tools": _profile_default_tools(p, registry.get(harness_name)),
+                    "model_ids": model_ids.get(harness_name, {}),
                 }
             )
     return json_response(

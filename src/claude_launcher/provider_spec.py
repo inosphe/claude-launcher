@@ -124,6 +124,35 @@ CLAUDE_MODEL_VARS: Dict[str, Tuple[str, ...]] = {
 CLAUDE_MODEL_KEYS: Tuple[str, ...] = tuple(
     key for keys in CLAUDE_MODEL_VARS.values() for key in keys
 ) + ("ANTHROPIC_SMALL_FAST_MODEL",)
+
+_ALIAS_VAR_PREFIX = "ANTHROPIC_DEFAULT_"
+_ALIAS_VAR_SUFFIX = "_MODEL"
+
+
+def _claude_alias_vars() -> Dict[str, str]:
+    """Model alias -> the variable that decides the backend model it reaches.
+
+    Claude Code reads ``--model=sonnet`` through
+    ``ANTHROPIC_DEFAULT_SONNET_MODEL``, and that variable is already in
+    :data:`CLAUDE_MODEL_VARS` as one of the ``default`` role's. The names are
+    therefore read off that table rather than typed beside it: the alias is
+    the variable's own middle word, so a role added there adds its alias here
+    and the two directions cannot disagree.
+    """
+    out: Dict[str, str] = {}
+    for keys in CLAUDE_MODEL_VARS.values():
+        for key in keys:
+            if key.startswith(_ALIAS_VAR_PREFIX) and key.endswith(_ALIAS_VAR_SUFFIX):
+                alias = key[len(_ALIAS_VAR_PREFIX):-len(_ALIAS_VAR_SUFFIX)].lower()
+                out[alias] = key
+    return out
+
+
+#: What a harness's model *choice* resolves to, for the harnesses that decide
+#: it here rather than at the harness's own end -- see
+#: :func:`claude_launcher.runner.model_ids`.
+CLAUDE_ALIAS_VARS: Dict[str, str] = _claude_alias_vars()
+
 #: Empty pins the runner enforces itself; a legacy ``env`` carried them by
 #: convention and the migration drops them.
 CLAUDE_REDUNDANT_PINS: Dict[str, str] = {
