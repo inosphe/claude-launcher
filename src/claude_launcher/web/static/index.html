@@ -767,7 +767,12 @@
         <a id="log-back" class="term-btn" href="#/">← terminal</a>
         <h2>transcript · <span id="log-title"></span></h2>
       </div>
-      <div id="term-log-pane"></div>
+      <div id="log-tabs" role="tablist" aria-label="세션 보기">
+        <button id="log-transcript-tab" role="tab" aria-selected="true" aria-controls="term-log-pane" type="button">Transcript</button>
+        <button id="log-info-tab" role="tab" aria-selected="false" aria-controls="log-info-pane" tabindex="-1" type="button">세션 정보</button>
+      </div>
+      <div id="term-log-pane" role="tabpanel" aria-labelledby="log-transcript-tab"></div>
+      <div id="log-info-pane" role="tabpanel" aria-labelledby="log-info-tab" hidden></div>
     </div>
     <div id="msg-view" class="hidden"></div>
     <div id="mesh-view" class="hidden"></div>

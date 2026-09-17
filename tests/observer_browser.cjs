@@ -50,6 +50,7 @@ const server = http.createServer((req, res) => {
       if(req.url==="/api/cflow/approve") gates=[];
       if(req.url==="/api/observer/settings") data.enabled=JSON.parse(body).enabled;
       if (req.url.endsWith("/events/e1")) return res.end('{"content":"Which environment?"}');
+      if(req.url.includes("/transcript?")) return res.end(JSON.stringify({records:[{seq:1,role:"user",blocks:[{type:"text",text:"Transcript retained"}]}],has_more:false,cursor:1}));
       if(req.method === "GET") {
         if(req.url === "/api/daemon") return res.end('{"version":"test","boot_id":"test"}');
         if(/^\/api\/(profiles|sessions|workspaces|mesh|cflow|harnesses|roles)/.test(req.url)) return res.end('[]');
@@ -307,6 +308,39 @@ const server = http.createServer((req, res) => {
     await page.locator('label:has(#observer-layout-grid)').click();
     await page.locator('#observer-limit').fill('1');
     assert.equal(await page.locator('.observer-card').count(),1);
+    {
+    // Transcript session details reuse observer data, independent of its filters.
+    await page.evaluate(()=>location.hash="#/log/s1");
+    await page.getByText("Transcript retained",{exact:true}).waitFor();
+    await page.click("#log-info-tab");
+    await page.waitForSelector('#log-info-pane .observer-card[data-session="s1"]');
+    assert.equal(await page.locator('#log-info-pane .observer-card').count(),1);
+    assert.match(await page.locator('#log-info-pane').innerText(),/테스트 12개 통과/);
+    assert.equal(await page.locator('#term-log-pane').isVisible(),false);
+    assert.equal(await page.locator('#log-info-tab').getAttribute('aria-selected'),'true');
+    assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);
+    await page.locator('#log-info-tab').press('ArrowLeft');
+    assert.equal(await page.getByText("Transcript retained",{exact:true}).isVisible(),true);
+    await page.waitForTimeout(200);
+    const transcriptStoppedReads=observerReads;
+    await page.waitForTimeout(300);
+    assert.equal(observerReads,transcriptStoppedReads,'info poll stops on transcript tab');
+    await page.click('#log-info-tab');
+    data.sessions[0].summary='Updated session summary';
+    await page.getByText('Updated session summary',{exact:true}).waitFor();
+    await page.evaluate(()=>location.hash="#/log/s2");
+    await page.waitForFunction(()=>document.getElementById('log-title').textContent==='s2');
+    assert.equal(await page.locator('#term-log-pane').isVisible(),true);
+    await page.click('#log-info-tab');
+    await page.waitForSelector('#log-info-pane .observer-card[data-session="s2"]');
+    assert.equal(await page.locator('#log-info-pane .observer-card[data-session="s1"]').count(),0);
+    await page.evaluate(()=>location.hash="#/log/missing");
+    await page.waitForFunction(()=>document.getElementById('log-title').textContent==='missing');
+    await page.click('#log-info-tab');
+    await page.getByText('아직 이 세션의 관찰 정보가 없습니다.',{exact:true}).waitFor();
+    await page.evaluate(()=>location.hash="#/observer");
+    await page.waitForSelector('#observer-view:not(.hidden)');
+    }
     assert.deepEqual(errors, []);
     console.log("PASS: mobile layout, composer fold, usage meter over calls and days, elapsed-since-update, scope/action filters, evidence, Escape, target input, per-session drafts, shared auth, deep links, polling lifecycle, legacy redirect, direct screenshot/answer, activity filters, cflow approval/selection, latest-N grid, 1/10 limits, filter-before-limit, storage persistence/fallback, responsive view switching");
   } finally { await browser.close(); server.close(); server.closeAllConnections(); }
