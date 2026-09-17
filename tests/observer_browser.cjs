@@ -288,6 +288,7 @@ const server = http.createServer((req, res) => {
     assert.equal(await page.locator('.observer-column').count(),3);
     assert.equal(await page.locator('#observer-limit-control').isVisible(),false);
     await page.setViewportSize({width:320,height:740});
+    await page.waitForSelector('.observer-timeline .observer-card');
     assert.equal(await page.locator('.observer-timeline .observer-card').count(),16);
     assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);
     // Corrupt and unavailable storage must not prevent rendering.
