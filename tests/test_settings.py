@@ -73,3 +73,34 @@ def test_merge_mcp_servers_cleans_stale_settings_entry(home):
     assert stale["other"] == {"command": "keep"}
     doc = json.loads((p.config_dir / ".claude.json").read_text(encoding="utf-8"))
     assert doc["mcpServers"]["srv"] == {"command": "new"}
+
+
+# --------------------------------------------------------------------------- #
+# dotted keys — how a nested settings.json value is set without its siblings
+# --------------------------------------------------------------------------- #
+def test_dotted_set_keeps_the_siblings_of_its_parent():
+    doc = {"permissions": {"deny": ["Bash(rm -rf /)"]}}
+    assert settings.dotted_set(doc, "permissions.defaultMode", "auto") is True
+    assert doc == {
+        "permissions": {"deny": ["Bash(rm -rf /)"], "defaultMode": "auto"}
+    }
+
+
+def test_dotted_set_creates_every_step_that_is_missing():
+    doc = {}
+    settings.dotted_set(doc, "permissions.defaultMode", "auto")
+    assert doc == {"permissions": {"defaultMode": "auto"}}
+
+
+def test_dotted_set_refuses_a_step_that_is_not_a_mapping():
+    """Not repaired: the settings file is the user's, and this is one key."""
+    doc = {"permissions": "the user's own shape"}
+    assert settings.dotted_set(doc, "permissions.defaultMode", "auto") is False
+    assert doc == {"permissions": "the user's own shape"}
+
+
+def test_dotted_get_answers_none_for_every_kind_of_absent():
+    assert settings.dotted_get({}, "permissions.defaultMode") is None
+    assert settings.dotted_get({"permissions": {}}, "permissions.defaultMode") is None
+    assert settings.dotted_get({"permissions": []}, "permissions.defaultMode") is None
+    assert settings.dotted_get({"permissions": {"defaultMode": "auto"}}, "permissions.defaultMode") == "auto"

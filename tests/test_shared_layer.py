@@ -67,6 +67,21 @@ def write_state(
         settings.save(p, data)
 
 
+#: The one settings key claunch converges without anyone declaring it
+#: (``store.SHARED_SETTINGS_DEFAULTS``). Every plan therefore holds it until the
+#: profile has it, which is why the tests below name it instead of counting
+#: actions: a bare count would go stale the moment the packaged default changes
+#: and would say nothing about which key moved.
+MODE = "permissions.defaultMode"
+
+
+def satisfy_mode(p: profile.Profile) -> None:
+    """Put the packaged default in a profile, so a plan holds only the test's own."""
+    data = settings.load(p)
+    settings.dotted_set(data, MODE, store.SHARED_SETTINGS_DEFAULTS[MODE])
+    settings.save(p, data)
+
+
 # --------------------------------------------------------------------------- #
 # the declaration
 # --------------------------------------------------------------------------- #
@@ -117,6 +132,7 @@ def test_plan_lists_only_what_is_missing(home):
     settings_data = settings.load(p)
     settings_data["outputStyle"] = "korean"
     settings.save(p, settings_data)
+    satisfy_mode(p)
     assert plugins.plan(p) == []
 
 
@@ -124,14 +140,14 @@ def test_plan_counts_a_disabled_plugin_as_missing(home):
     p = profile.create("work")
     plugins.declare_plugin("thing@repo")
     write_state(p, installed=["thing@repo"], enabled=[])
-    assert [a.target for a in plugins.plan(p)] == ["thing@repo"]
+    assert [a.target for a in plugins.plan(p)] == ["thing@repo", MODE]
 
 
 def test_plan_counts_an_enabled_but_unfetched_plugin_as_missing(home):
     p = profile.create("work")
     plugins.declare_plugin("thing@repo")
     write_state(p, installed=[], enabled=["thing@repo"])
-    assert [a.target for a in plugins.plan(p)] == ["thing@repo"]
+    assert [a.target for a in plugins.plan(p)] == ["thing@repo", MODE]
 
 
 def test_plan_matches_a_directory_marketplace_across_path_spelling(home):
@@ -141,6 +157,7 @@ def test_plan_matches_a_directory_marketplace_across_path_spelling(home):
         p,
         marketplaces={"hq": {"source": "directory", "path": "D:\\works\\hq\\harness"}},
     )
+    satisfy_mode(p)
     assert plugins.plan(p) == []
 
 
@@ -155,7 +172,8 @@ def test_apply_runs_claude_per_profile_with_its_own_config_dir(home):
     fake = FakeClaude()
     results = plugins.apply_all([a, b], runner=fake)
     assert all(r.ok for r in results)
-    assert [len(r.done) for r in results] == [2, 2]
+    # Two plugin actions each, plus the packaged settings key.
+    assert [len(r.done) for r in results] == [3, 3]
     assert fake.config_dirs == [
         str(a.config_dir), str(a.config_dir), str(b.config_dir), str(b.config_dir)
     ]
@@ -172,10 +190,11 @@ def test_apply_writes_declared_settings_keys(home):
     plugins.set_shared_setting("outputStyle", "fluent-korean:fluent-korean")
     plugins.set_shared_setting("autoCompactEnabled", False)
     result = plugins.apply_to(p, runner=FakeClaude())
-    assert result.ok and len(result.done) == 2
+    assert result.ok and len(result.done) == 3
     data = settings.load(p)
     assert data["outputStyle"] == "fluent-korean:fluent-korean"
     assert data["autoCompactEnabled"] is False
+    assert data["permissions"]["defaultMode"] == "auto"
 
 
 def test_apply_keeps_the_profiles_other_settings(home):
@@ -192,9 +211,10 @@ def test_dry_run_changes_nothing(home):
     plugins.set_shared_setting("outputStyle", "korean")
     fake = FakeClaude()
     result = plugins.apply_to(p, dry_run=True, runner=fake)
-    assert len(result.done) == 2
+    assert len(result.done) == 3
     assert fake.calls == []
     assert "outputStyle" not in settings.load(p)
+    assert "permissions" not in settings.load(p)
 
 
 def test_a_failed_install_does_not_stop_the_rest(home):
@@ -300,6 +320,7 @@ def test_apply_check_exits_nonzero_on_drift(home, capsys, monkeypatch):
     assert run("apply", "--check") == 1
     assert "drifted" in capsys.readouterr().out
     write_state(p, installed=["thing@repo"], enabled=["thing@repo"])
+    satisfy_mode(p)
     assert run("apply", "--check") == 0
 
 
@@ -438,3 +459,93 @@ def test_shared_command_reports_an_unchanged_declaration(home, capsys, monkeypat
     capsys.readouterr()
     assert run("shared", "outputStyle=korean") == 0
     assert "was already declared" in capsys.readouterr().out
+
+
+# --------------------------------------------------------------------------- #
+# the packaged default permission mode
+# --------------------------------------------------------------------------- #
+def test_apply_lands_the_default_permission_mode(home):
+    """Nothing declares it, and the profile still converges onto it."""
+    p = profile.create("work")
+    result = plugins.apply_to(p, runner=FakeClaude())
+    assert result.ok
+    assert [a.target for a in result.done] == [MODE]
+    assert settings.load(p)["permissions"]["defaultMode"] == "auto"
+
+
+def test_the_mode_write_leaves_the_gate_guard_alone(home):
+    """The whole reason the write is dotted: ``permissions.deny`` is a sibling.
+
+    ``install`` puts the cflow gate guard in that same object, so a write that
+    replaced ``permissions`` outright would drop the rules that keep an agent's
+    shell off the human approve commands -- silently, in the direction nobody
+    checks.
+    """
+    p = profile.create("work")
+    guard = ["Bash(claunch cflow approve)", "PowerShell(claunch cflow approve)"]
+    settings.merge_permission_deny(
+        p.config_dir / settings.SETTINGS_FILENAME, guard
+    )
+    plugins.apply_to(p, runner=FakeClaude())
+    perms = settings.load(p)["permissions"]
+    assert perms["deny"] == guard
+    assert perms["defaultMode"] == "auto"
+
+
+def test_a_declared_mode_replaces_the_default(home, monkeypatch):
+    p = profile.create("a")
+    monkeypatch.setattr(plugins, "_run", FakeClaude())
+    assert run("shared", "permissions.defaultMode=default") == 0
+    assert settings.load(p)["permissions"]["defaultMode"] == "default"
+
+
+def test_unsetting_the_mode_returns_it_to_the_default(home, monkeypatch):
+    p = profile.create("a")
+    monkeypatch.setattr(plugins, "_run", FakeClaude())
+    run("shared", "permissions.defaultMode=default")
+    assert run("shared", "--unset", "permissions.defaultMode") == 0
+    assert store.shared_settings() == {}
+    # Undeclaring says "the launcher no longer decides this", and for a key
+    # claunch ships a default for that means the default -- so the profile is
+    # converged back onto it rather than left on the value nobody declared.
+    run("apply")
+    assert settings.load(p)["permissions"]["defaultMode"] == "auto"
+
+
+def test_creating_a_profile_lands_the_mode(home, monkeypatch):
+    """The creation path, not just ``apply`` -- this is the reported symptom."""
+    monkeypatch.setattr(plugins, "_run", FakeClaude())
+    assert run("create", "fresh") == 0
+    assert settings.load(profile.require("fresh"))["permissions"]["defaultMode"] == "auto"
+
+
+def test_a_permissions_block_that_is_not_an_object_is_reported_not_rewritten(home):
+    p = profile.create("work")
+    settings.save(p, {"permissions": "the user's own shape"})
+    result = plugins.apply_to(p, runner=FakeClaude())
+    assert not result.ok
+    failed = [a.target for a, _ in result.failed]
+    assert failed == [MODE]
+    # Left exactly as it was: one key claunch converges is not worth
+    # overwriting whatever the user wrote in its place.
+    assert settings.load(p) == {"permissions": "the user's own shape"}
+
+
+def test_shared_listing_marks_the_packaged_default(home, capsys, monkeypatch):
+    profile.create("a")
+    monkeypatch.setattr(plugins, "_run", FakeClaude())
+    run("shared", "outputStyle=korean")
+    assert run("shared") == 0
+    out = capsys.readouterr().out
+    assert 'outputStyle="korean"' in out
+    assert 'permissions.defaultMode="auto"  (claunch default)' in out
+
+
+def test_plugin_list_shows_the_key_it_counts_as_drift(home, capsys, monkeypatch):
+    """The listing and the drift line read the same set, so neither can lie alone."""
+    profile.create("a")
+    monkeypatch.setattr(plugins, "_run", FakeClaude())
+    assert run("plugin", "list") == 0
+    out = capsys.readouterr().out
+    assert 'permissions.defaultMode="auto"  (claunch default)' in out
+    assert "pending on 1 of 1 profiles" in out

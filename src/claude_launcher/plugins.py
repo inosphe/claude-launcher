@@ -187,8 +187,8 @@ def plan(profile: Profile, doc: Optional[dict] = None) -> List[Action]:
             actions.append(Action(PLUGIN, plugin_id))
 
     current = settings.load(profile)
-    for key, value in store.shared_settings(doc).items():
-        if current.get(key) != value:
+    for key, value in store.effective_shared_settings(doc).items():
+        if settings.dotted_get(current, key) != value:
             actions.append(Action(SETTING, key, json.dumps(value, ensure_ascii=False)))
     return actions
 
@@ -276,7 +276,17 @@ def apply_to(
             continue
         if action.kind == SETTING:
             data = settings.load(profile)
-            data[action.target] = json.loads(action.detail)
+            if not settings.dotted_set(
+                data, action.target, json.loads(action.detail)
+            ):
+                result.failed.append(
+                    (
+                        action,
+                        f"refused to write {action.target}: a step on that path "
+                        "is not a JSON object",
+                    )
+                )
+                continue
             settings.save(profile, data)
             result.done.append(action)
             continue
@@ -377,7 +387,10 @@ def unset_shared_setting(key: str) -> bool:
     The key is left in the profiles that already have it. Undeclaring says "the
     launcher no longer decides this", which is a different act from setting it
     back to whatever each profile had before -- that value is not recorded
-    anywhere, so it could not be restored even if this tried.
+    anywhere, so it could not be restored even if this tried. A key claunch
+    ships a default for is therefore not switched off by undeclaring it; it
+    goes back to the default, and declaring another value (``"default"`` for
+    ``permissions.defaultMode``) is what turns the behaviour off.
     """
     current = store.shared_settings()
     if str(key) not in current:

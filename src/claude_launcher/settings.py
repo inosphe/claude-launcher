@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Dict, Iterable, Mapping
+from typing import Dict, Iterable, List, Mapping
 
 from . import store
 from .profile import Profile
@@ -104,6 +104,61 @@ def merge_permission_deny(path: Path, rules: Iterable[str]) -> bool:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(doc, indent=2) + "\n", encoding="utf-8")
     return True
+
+
+def dotted_get(doc: Mapping, key: str):
+    """The value at a dotted ``key`` (``permissions.defaultMode``), or ``None``.
+
+    Absent is reported as ``None`` at every step: a missing intermediate
+    mapping, a missing leaf, and a leaf that happens to hold JSON ``null``
+    are one answer here, which is what a caller comparing against a declared
+    value wants. ``None`` is never a value claunch declares, so the three
+    cannot be told apart and do not need to be.
+    """
+    node = doc
+    for part in _dotted_parts(key):
+        if not isinstance(node, Mapping) or part not in node:
+            return None
+        node = node[part]
+    return node
+
+
+def dotted_set(doc: dict, key: str, value) -> bool:
+    """Write ``value`` at a dotted ``key`` inside ``doc``, merging the path.
+
+    Returns True when ``doc`` holds the value afterwards, False when the
+    write was refused. Sibling keys under a shared parent survive — writing
+    ``permissions.defaultMode`` is the reason this exists at all, because the
+    plain assignment it replaces would drop ``permissions.deny`` (the gate
+    guard) on the floor.
+
+    A step that exists but is not a mapping is refused rather than replaced,
+    the same call :func:`merge_permission_deny` makes: the settings file is
+    the user's, and one key claunch converges is not worth overwriting
+    whatever shape they wrote.
+    """
+    parts = _dotted_parts(key)
+    if not parts:
+        return False
+    node = doc
+    for part in parts[:-1]:
+        nxt = node.get(part)
+        if nxt is None:
+            nxt = {}
+            node[part] = nxt
+        if not isinstance(nxt, dict):
+            return False
+        node = nxt
+    last = parts[-1]
+    if node.get(last) == value:
+        return True
+    node[last] = value
+    return True
+
+
+def _dotted_parts(key: str) -> List[str]:
+    """``"permissions.defaultMode"`` -> ``["permissions", "defaultMode"]``."""
+    return [part for part in str(key).split(".") if part]
 
 
 CLAUDE_JSON = ".claude.json"
