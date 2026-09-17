@@ -639,7 +639,7 @@ def withdraw(
 
 
 def nudge(session: str, message: str, *, cwd: str) -> List[str]:
-    """Type a resume nudge into the run's own session. Returns who was nudged.
+    """Queue a resume nudge for the run's own session. Return accepted targets.
 
     A run identifies its session by scope, but a scope is only unique within
     a directory, so both must match — the same pair that identifies the run
@@ -675,14 +675,14 @@ def nudge(session: str, message: str, *, cwd: str) -> List[str]:
         except OSError:
             continue
         try:
-            client.post(
+            result = client.post(
                 f"/api/sessions/{s['name']}/deliver",
-                {"text": message},
+                {"text": message, "defer": True},
                 timeout=CALL_TIMEOUT,
             )
         except daemon_client.DaemonClientError:
             return []
-        return [target]
+        return [target] if result.get("queued") or result.get("delivered") else []
     return []
 
 

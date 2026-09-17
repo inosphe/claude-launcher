@@ -79,6 +79,10 @@ class _FakeSession:
         self.delivered.append(message)
         return True
 
+    def queue_delivery(self, message):
+        self.delivered.append(message)
+        return True
+
     async def shutdown(self):
         self.exited = True
 

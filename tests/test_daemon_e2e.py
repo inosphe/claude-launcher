@@ -798,6 +798,9 @@ def test_cflow_nudge_goes_through_deliver(home, tmp_path, monkeypatch):
         _last_terminal_input = 0.0
         _draft_open = False  # and nothing half-written is sitting in it
         _delivery_lock = asyncio.Lock()
+        _deferred_deliveries = set()
+        _deferred_delivery_lock = asyncio.Lock()
+        queue_delivery = session_mod.Session.queue_delivery
 
         async def write_bytes(self, data: bytes) -> None:
             writes.append(data)
@@ -813,9 +816,12 @@ def test_cflow_nudge_goes_through_deliver(home, tmp_path, monkeypatch):
             assert name == "n1"
             return session
 
-    nudged = asyncio.run(
-        api_mod._nudge_sessions(FakeManager(), cwd, "n1", "cflow: go")
-    )
+    async def run():
+        accepted = await api_mod._nudge_sessions(FakeManager(), cwd, "n1", "cflow: go")
+        await asyncio.gather(*session._deferred_deliveries)
+        return accepted
+
+    nudged = asyncio.run(run())
     assert nudged == ["n1"]
     assert writes == [b"\x1b[200~[T]\rcflow: go\x1b[201~", b"\r"]
 
@@ -1527,7 +1533,7 @@ def test_api_cflow_actions(home, tmp_path, monkeypatch):
             assert resp.status == 200
             doc = await resp.json()
             assert doc["status"] == "approved"
-            assert doc["nudged_sessions"] == ["n1"]
+            assert doc["nudge_scheduled_sessions"] == ["n1"]
             await _wait_screen(worker, "echo:cflow: approved")
             assert (
                 cflow_engine.next_step(cwd=str(gated), scope="n1")["status"] == "step"
@@ -1540,7 +1546,7 @@ def test_api_cflow_actions(home, tmp_path, monkeypatch):
                 headers=bearer,
             )
             assert resp.status == 200
-            assert (await resp.json())["nudged_sessions"] == ["n1"]
+            assert (await resp.json())["nudge_scheduled_sessions"] == ["n1"]
             await _wait_screen(worker, "echo:cflow: continue")
 
             # forced state set (goto) from the dashboard: re-gates + nudges
@@ -1560,7 +1566,7 @@ def test_api_cflow_actions(home, tmp_path, monkeypatch):
             doc = await resp.json()
             assert doc["status"] == "state_set"
             assert doc["visit"] == 2
-            assert doc["nudged_sessions"] == ["n1"]
+            assert doc["nudge_scheduled_sessions"] == ["n1"]
             await _wait_screen(worker, "echo:cflow: current step forced")
 
             # the forced revisit re-closed the gate: approve opens it again...
@@ -1609,7 +1615,7 @@ def test_api_cflow_actions(home, tmp_path, monkeypatch):
             assert resp.status == 200
             doc = await resp.json()
             assert doc["status"] == "goto_denied"
-            assert doc["nudged_sessions"] == ["n2"]
+            assert doc["nudge_scheduled_sessions"] == ["n2"]
             assert cflow_engine.status(
                 cwd=str(jumper), scope="n2"
             )["step_id"] == "two"
@@ -1629,7 +1635,7 @@ def test_api_cflow_actions(home, tmp_path, monkeypatch):
             assert resp.status == 200
             doc = await resp.json()
             assert doc["status"] == "state_set" and doc["step_id"] == "one"
-            assert doc["nudged_sessions"] == ["n2"]
+            assert doc["nudge_scheduled_sessions"] == ["n2"]
             await _wait_screen(worker2, "echo:cflow: current step forced")
 
             # and with nothing left waiting it is a clean 400, not a 500

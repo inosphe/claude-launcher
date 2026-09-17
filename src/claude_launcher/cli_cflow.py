@@ -614,7 +614,7 @@ def _nudge_via_daemon(message: str, scope, cwd) -> list:
 def _report_unblock(action: str, message: str, scope, cwd) -> None:
     nudged = _nudge_via_daemon(message, scope, cwd)
     if nudged:
-        print(f"{action}; nudged session(s): {', '.join(nudged)}")
+        print(f"{action}; nudge accepted for session(s): {', '.join(nudged)}")
     else:
         print(f"{action}; nudge the agent to continue")
 

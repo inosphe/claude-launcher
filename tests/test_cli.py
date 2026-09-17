@@ -108,7 +108,7 @@ def test_cflow_archive_nudges_the_session_that_owned_the_run(
 
     assert run("cflow", "archive") == 0
     assert sent == [(cflow_engine.NUDGE_ARCHIVED, "s9", None)]
-    assert "nudged session(s): s9" in capsys.readouterr().out
+    assert "nudge accepted for session(s): s9" in capsys.readouterr().out
 
 
 def test_install_all_routes_each_profile_to_its_harness_home(home, capsys):
