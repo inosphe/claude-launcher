@@ -168,11 +168,12 @@
       <div class="filters">
       <label>보기 <select id="observer-scope"><option value="global">전체</option><option value="mesh">메시</option><option value="session">세션</option></select></label>
       <label id="observer-selection-label" hidden>대상 <select id="observer-selection"></select></label>
+      <label>활동 <select id="observer-activity"><option value="all">전체</option><option value="working">동작 중</option><option value="waiting">대기</option><option value="done">완료 후 유휴</option><option value="idle">유휴·미확인</option></select></label>
       <label><input id="observer-actions-only" type="checkbox"> 조치 필요만</label>
       <label><input id="observer-ended" type="checkbox"> 종료된 세션 포함</label>
       </div>
       <p id="observer-counts"></p>
-      <p class="hint">중요 결과와 사용자 요청을 표시합니다. 요약은 AI의 해석이며 각 이벤트에서 근거를 확인할 수 있습니다.</p>
+      <p class="hint">직접 보고·사용자 질문·cflow 응답 대기를 표시합니다. 자동 요약의 근거는 각 이벤트에서 확인할 수 있습니다. 장기 대기는 마지막 실질 활동 후 30분 이상인 경우입니다.</p>
       <section id="observer-cards" aria-label="세션 결과"></section>
       </div>
       <footer id="observer-composer">

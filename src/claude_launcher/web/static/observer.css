@@ -43,3 +43,12 @@
   #observer-send { grid-column: 2; }
   #observer-input-status { grid-row: 5; }
 }
+#observer-view .state.working { background:#173c2a; color:#7ee787; }
+#observer-view .state.waiting { background:#493b19; color:#e3b341; }
+#observer-view .state.done { background:#243247; color:#79c0ff; }
+#observer-view .state.idle, #observer-view .state.ended { background:#30343b; color:#a6aeb8; }
+#observer-view .observer-gate { border:1px solid #8b6b20; border-radius:6px; padding:12px; margin:12px 0; }
+#observer-view .observer-gate h3 { font-size:14px; }
+#observer-view .observer-answer { display:flex; flex-wrap:wrap; gap:8px; margin-top:10px; }
+#observer-view .observer-answer textarea { width:100%; min-height:80px; }
+#observer-view .observer-image img { display:block; max-width:100%; max-height:320px; object-fit:contain; margin:10px 0; border-radius:6px; }

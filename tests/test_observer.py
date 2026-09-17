@@ -174,3 +174,23 @@ def test_unusable_completions_fail(finish, content):
             with pytest.raises(ValueError):
                 await observer.complete({**CFG,"endpoint":str(server.make_url("/"))}, [])
     asyncio.run(scenario())
+
+
+def test_direct_reports_survive_inflight_observation(setup, monkeypatch):
+    service,session=setup
+    monkeypatch.setattr(service,'evidence',lambda *args:evidence())
+    async def check():
+        entered=asyncio.Event();release=asyncio.Event()
+        async def complete(*args):
+            entered.set();await release.wait();return answer(),{}
+        monkeypatch.setattr(observer,'complete',complete)
+        task=asyncio.create_task(service.observe(session,CFG))
+        await entered.wait()
+        direct=service.reports.publish('s1',{'text':'Screenshot review needed','question':True})
+        release.set();await task
+        events=service.snapshot()['sessions'][0]['events']
+        assert any(e['id']==direct['id'] for e in events)
+        assert any(e['source']=='transcript:1' for e in events)
+        restored=observer.Observer(service.manager,service.mesh)
+        assert any(e['id']==direct['id'] for e in restored.snapshot()['sessions'][0]['events'])
+    asyncio.run(check())

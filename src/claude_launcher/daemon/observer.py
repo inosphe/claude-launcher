@@ -26,7 +26,7 @@ import aiohttp
 from aiohttp import web
 
 from .. import atomic, lineage, profile, providers, store
-from . import briefing, paths, transcript_view
+from . import briefing, paths, transcript_view, observer_reports
 
 try:
     import truststore
@@ -117,6 +117,7 @@ class Observer:
         except (OSError, ValueError, AttributeError):
             self.data = {"enabled": False}
         self.data["sessions"] = {}
+        self.reports = observer_reports.Reports(self.path.parent, manager)
         self.loaded = set()
         self.task = None
         self.error = None
@@ -267,11 +268,23 @@ class Observer:
             name = session.sdef.name
             row = self.load_session(name)
             info = session.info()
+            direct = self.reports.rows(name)
+            events = sorted(row.get("events", []) + direct, key=lambda e:e.get("at", ""))
+            latest = direct[-1] if direct else None
+            summary = row.get("summary")
+            state = row.get("state")
+            if latest and latest["at"] >= (row.get("generated_at") or ""):
+                summary, state = latest["text"], latest["state"]
+                if latest.get("question") and latest.get("answer"):
+                    summary, state = "사용자 답변: " + latest["answer"]["text"], "unknown"
             result.append({"name": name, "status": info.get("status"), "running": not session.exited,
                            "harness": getattr(session.sdef, "harness", None),
+                           "cwd": session.sdef.cwd,
+                           "last_activity_at": info.get("last_activity_at"),
+                           "last_output_at": info.get("last_output_at"),
                            "meshes": [m["mesh"] for m in self.mesh.meshes_for_session(name)],
-                           "events": [{k: v for k, v in e.items() if k != "evidence"} for e in row.get("events", [])],
-                           **{k: row.get(k) for k in ("summary", "state", "generated_at", "usage", "error", "rotations")}})
+                           "events": [{k: v for k, v in e.items() if k != "evidence"} for e in events],
+                           **{k: row.get(k) for k in ("generated_at", "usage", "error", "rotations")}, "summary":summary, "state":state})
         return {"enabled": self.data.get("enabled", False), "error": self.error,
                 "interval": INTERVAL, "sessions": result}
 
@@ -279,6 +292,7 @@ class Observer:
 def install(app):
     observer = Observer(app["manager"], app["mesh"])
     app["observer"] = observer
+    observer.reports.install(app)
     app.on_startup.append(observer.start)
     app.on_shutdown.append(observer.stop)
 
