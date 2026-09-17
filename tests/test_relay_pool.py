@@ -423,6 +423,28 @@ def test_pool_state_keeps_the_single_uplink_shape():
     assert [r["connected"] for r in state["relays"]] == [True, False]
 
 
+def test_unconfigured_state_has_the_same_keys_as_a_pools():
+    """A reader takes the same keys whether or not a relay is configured.
+
+    ``daemon/api.py`` serves this shape when no uplink is running, so the two
+    must not drift — a badge that reads ``relays`` would otherwise crash on a
+    daemon with no relay.
+    """
+    from claude_launcher.daemon.relay_uplink import unconfigured_state
+
+    off = unconfigured_state()
+    on = RelayPool([_StubUplink("work", [])]).state()
+    assert off.keys() == on.keys()
+    assert off["configured"] is False and off["relays"] == []
+
+
+def test_the_api_serves_that_same_unconfigured_shape():
+    from claude_launcher.daemon.api import _relay_unconfigured
+    from claude_launcher.daemon.relay_uplink import unconfigured_state
+
+    assert _relay_unconfigured() == unconfigured_state()
+
+
 def test_real_uplink_satisfies_the_pool_surface():
     """The pool's stub stands in for this; keep the two shapes in step."""
     up = RelayUplink(url="ws://x", token="t", name="pc",

@@ -106,13 +106,10 @@ async def _serve(host: str, port: int, cfg: dict, bound: Optional[dict] = None) 
     relay_state = {"uplink": None}
 
     def _relay_state() -> dict:
+        from .relay_uplink import unconfigured_state
+
         uplink = relay_state["uplink"]
-        if uplink is None:
-            return {
-                "configured": False, "connected": False, "name": None,
-                "count": 0, "connected_count": 0, "relays": [],
-            }
-        return uplink.state()
+        return unconfigured_state() if uplink is None else uplink.state()
 
     app = build_app(
         manager,

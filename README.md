@@ -1562,7 +1562,7 @@ and a form painted into its PTY would hang the session it was creating.
 | `daemon start\|stop\|status\|restart` | Explicit daemon control (session commands auto-start it, tmux-style). |
 | `daemon token [--rotate]` | Print (or rotate) the API/web auth token. |
 | `daemon config [KEY [VALUE]]` | Show or set daemon settings (stored in `~/.claunch.yaml`). |
-| `daemon relay [KEY [VALUE]]` | Show or set the relay uplink (reach this daemon from outside the LAN — see below). |
+| `daemon relay [KEY [VALUE]] [--relay HANDLE] [--remove HANDLE]` | Show or set the relay uplinks (reach this daemon from outside the LAN — see below). With no argument it lists every configured relay; `--relay` targets one of several (a new handle adds it) and `--remove` drops one. |
 | `web [--open]`        | Print (and open) the web UI URL. |
 
 ### Named daemon instances (tmux `-L`)
@@ -1653,6 +1653,46 @@ env var so it need not live in `~/.claunch.yaml`. For a self-signed relay,
 `claunch daemon relay verify_tls false` accepts its certificate. The uplink
 reconnects on its own (keepalive ping, receive watchdog, backoff+jitter); while
 the relay is down the local daemon is unaffected.
+
+#### Several relays at once
+
+One daemon can register with more than one relay — a work relay and a home
+relay, say — so a mesh member on either side reaches it without you choosing
+between them. Give each one a **handle**, which is how the CLI addresses it
+(distinct from `name`, the label the relay's directory shows; two relays may
+show this daemon under the same `name`):
+
+```powershell
+claunch daemon relay --relay home url wss://home.example.com
+$env:CLAUNCH_RELAY_TOKEN_HOME = "<home backend_token>"
+#   (or persist it: claunch daemon relay --relay home token <backend_token>)
+claunch daemon relay                       # lists every configured relay
+claunch daemon relay --remove home         # drops one
+```
+
+The config file follows. A single relay stays the `daemon.relay` block it
+always was; adding a second moves both into a `daemon.relays` list:
+
+```yaml
+daemon:
+  relays:
+    - url: wss://work.example.com
+      token: <work backend_token>
+    - id: home
+      url: wss://home.example.com
+      token: <home backend_token>
+```
+
+With several relays the bare `CLAUNCH_RELAY_URL` / `_TOKEN` / `_NAME` names are
+ambiguous — one value cannot mean three uplinks — so they are read only when a
+single relay is configured. Use the per-relay form instead, which always wins:
+`CLAUNCH_RELAY_TOKEN_HOME` for the relay whose handle is `home`.
+
+A backend is still addressed by its `name`; the daemon works out which relay
+currently carries that name and sends the request there. `relay: connected`
+means **at least one** relay is up, so the CLI line and the web badge add a
+count (`1/2`) and the per-relay state, and the badge turns amber when some but
+not all of them are registered.
 
 ### Idle detection
 

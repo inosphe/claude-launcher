@@ -400,6 +400,24 @@ class RelayUplink:
                 pass
 
 
+def unconfigured_state() -> dict:
+    """The relay status of a daemon with no uplink at all.
+
+    Lives beside :meth:`RelayPool.state` so the two shapes cannot drift: a
+    reader must be able to take the same keys whether or not a relay is
+    configured.
+    """
+    return {
+        "configured": False,
+        "connected": False,
+        "name": None,
+        "url": None,
+        "count": 0,
+        "connected_count": 0,
+        "relays": [],
+    }
+
+
 class RelayPool:
     """Every relay uplink this daemon holds open at once.
 
