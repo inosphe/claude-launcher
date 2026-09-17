@@ -391,6 +391,19 @@
          can take here.
          Hidden with the terminal; only live while one is attached. -->
     <form id="term-input" class="hidden" autocomplete="off">
+      <button id="term-clipboard-toggle" class="term-btn" type="button"
+              aria-expanded="false" aria-controls="term-clipboard-menu">Clipboard</button>
+      <section id="term-clipboard-menu" class="hidden" role="dialog" aria-label="Host clipboard history">
+        <strong>Host clipboard</strong>
+        <p>Text history · latest 30 · cleared when the daemon restarts</p>
+        <div class="clipboard-actions">
+          <button id="term-clipboard-refresh" type="button" class="term-btn">Refresh</button>
+          <button id="term-clipboard-clear" type="button" class="term-btn">Clear history</button>
+          <button id="term-clipboard-close" type="button" class="term-btn">Close</button>
+        </div>
+        <p id="term-clipboard-status" role="status"></p>
+        <div id="term-clipboard-items"></div>
+      </section>
       <textarea id="term-input-field" rows="1"
              placeholder="type for this session — Enter to send, Ctrl+J for a newline"
              title="Enter sends · Ctrl+J inserts a newline · Alt+V pastes the clipboard image as a file path"

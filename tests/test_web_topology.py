@@ -313,6 +313,7 @@ CHECKS = [
         "queued_check.js",
         "window_check.js",
         "sendinput_check.js",
+        "clipboard_check.js",
         "promptpresets_check.js",
         "holdchip_check.js",
         "backpressure_check.js",
