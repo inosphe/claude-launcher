@@ -161,7 +161,23 @@ connected to, and only from those.
   default, 4 h at most): `renew` while you work, `release` when done, and
   never rely on one you have not renewed. `list` shows who holds what.
 
-CLI equivalents: `claunch mesh ops file|git MESH HANDLE ...` and
+`member` takes three forms: a handle, a member's session name, or
+`<machine>/<session>` when two daemons each run a session of that name.
+The session name is there because a session name is usually what you were
+told — a spawn, the board and a terminal all name sessions — and the
+daemon to route to is then read off the member row instead of being typed
+by you. The reply names the `member`, `session` and `machine` it resolved
+to, so an address that hit the wrong peer is visible in the answer.
+
+Whether you need these tools at all is answered before you ask. Every
+delivered message carries a `machine:` line for its sender: `local` when
+that member's session runs on this daemon, and the daemon's name followed
+by `(remote)` when it does not. Local means you already share the
+filesystem, the git objects and the board with them, so read the path
+yourself and cite it; remote means the relay is the only way in and these
+tools are it.
+
+CLI equivalents: `claunch mesh ops file|git MESH MEMBER ...` and
 `claunch mesh lease MESH acquire|renew|release|ls KEY`. None of these write
 anything on the other machine — a change there is still a message to the
 member who sits there.

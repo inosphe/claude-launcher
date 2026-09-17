@@ -1873,10 +1873,10 @@ each handler scopes the call to the mesh the link belongs to.
 | peer (link-token auth) | `POST /peer/ops/file` | `POST /peer/ops/git` | `POST /peer/ops/lease` (authority only) |
 | local API (`actor` = calling session) | `POST /api/mesh/{m}/ops/file` | `POST /api/mesh/{m}/ops/git` | `GET`/`POST /api/mesh/{m}/leases` |
 | MCP (`claunch-mesh`) | `peer_file` | `peer_git` | `lease` |
-| CLI | `claunch mesh ops file M HANDLE PATH` | `claunch mesh ops git M HANDLE OP …` | `claunch mesh lease M acquire\|renew\|release\|ls KEY` |
+| CLI | `claunch mesh ops file M MEMBER PATH` | `claunch mesh ops git M MEMBER OP …` | `claunch mesh lease M acquire\|renew\|release\|ls KEY` |
 
 `MeshManager.ops_file` / `ops_git` resolve the caller by session, the target
-by handle, check the graph, and either read locally (`mesh_ops.read_file` /
+through `resolve_peer`, check the graph, and either read locally (`mesh_ops.read_file` /
 `git_query`, off the loop) or `_peer_call` the target's machine.
 `MeshManager.lease` applies locally on the authority and forwards from a
 mirror with `_peer_call_primary`. The pure parts — the sandbox, the git
@@ -1898,3 +1898,32 @@ message — see the worker stance). Multi-hop: a member reads the checkouts of
 members it is linked to, on daemons its daemon is linked to, and nothing
 routes further. A web view of leases — the CLI `ls` and the MCP `lease
 list` are the readers for now.
+
+## Addressing a peer, and knowing which daemon it is on (phase 13 — implemented)
+
+Phase 12 left two rough edges that only show up once a mesh actually spans
+two daemons.
+
+**A peer is addressed by handle, session name, or both.** `resolve_peer`
+tries a handle first, so no address that already worked changes meaning;
+failing that it matches a member's *session* name, and the daemon to route to
+is read off the member row rather than typed. This is the address a caller
+usually has: a spawn, the board and a terminal all name sessions, while a
+handle exists only inside the mesh and may differ from the session wearing
+it. `<machine>/<session>` settles the one case the bare name cannot — two
+daemons each running a session of that name — and the reply names the
+`member`, `session` and `machine` it resolved to, so an address that reached
+the wrong peer is visible in the answer instead of in the content.
+
+**A delivered message says whether its sender shares your filesystem.** Each
+entry in a delivery block now carries `machine:` — `local` when that member's
+session runs on the reading daemon, the daemon's name followed by `(remote)`
+when it does not. The block is composed on the recipient's daemon, so the
+question is just `_is_local` asked about the sender; an external send (the
+operator at the dashboard) has no member row and gets no line rather than a
+guess. The distinction is the one a reader acts on before replying: a local
+peer shares the checkout root, the git objects and the board, so a path or a
+hash is enough, while a remote peer shares only the relay and has to be
+handed `peer_file` / `peer_git` or a bundle. Same-daemon is the common case
+and is written short, so what stands out in a batch is the sender that is
+not.
