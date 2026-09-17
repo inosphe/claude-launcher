@@ -1559,9 +1559,14 @@ class MeshManager:
                 depth = len(mesh.pending(handle))
                 gate = self.paced_for(mesh, handle)
                 recs = self.refusals(mesh, handle)
-                hot = bool(
-                    bp["enabled"] and bp["inbox_max"] and depth >= bp["inbox_max"]
-                )
+                # Asked of the door itself rather than recomputed here. This
+                # was a second copy of the rule, comparing the full depth
+                # against the cap while the door weighed the aged one, so the
+                # two disagreed for exactly the backlogs a reader looks at:
+                # the 45-deep queue that led to this change was reported
+                # "congested, cap 4" by this call while the door was in fact
+                # letting four more in per ``door_secs``.
+                hot = bool(self.congested_recipients(mesh, [handle]))
                 enabled = enabled or bp["enabled"]
                 queued += depth
                 refused += len(recs)

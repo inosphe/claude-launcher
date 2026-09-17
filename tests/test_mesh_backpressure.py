@@ -746,3 +746,52 @@ def test_the_wall_is_the_operators_cap_and_not_a_constant(home, tmp_path):
         await mgr.shutdown_all()
 
     asyncio.run(run())
+
+
+def test_the_session_report_agrees_with_the_door(home, tmp_path):
+    """``backpressure_for_session`` asks the door instead of re-deciding.
+
+    It held a second copy of the rule: full depth against the cap, while the
+    door weighed the aged depth. The two disagreed for exactly the backlogs
+    someone opens the page to look at — the 45-deep queue this change came
+    from read "congested, cap 4" there while the door was letting four more
+    in per ``door_secs``.
+    """
+    _register_py_harness()
+
+    async def run():
+        mgr = SessionManager(idle_threshold=0.5, scrollback=200, restore_default=True)
+        mm = MeshManager(mgr, root=tmp_path / "mesh")
+        mm.create("team")
+        for name in ("s1", "s2"):
+            mgr.create(SessionDef(name=name, harness="py", cwd=str(tmp_path)))
+        await mm.join("team", "s1", handle="lead")
+        await mm.join("team", "s2", handle="w1")
+        _cap(mm, "team", inbox_max=2, retry_after=45.0)
+        mm.set_policy("team", {"ack_timeout": {"door_secs": 1.0}})
+        mesh = mm.get("team")
+
+        for n in range(2):
+            await mm.send("team", "w1", "lead", f"report {n}")
+        # At the cap with fresh mail: both agree it is shut.
+        assert mm.backpressure_for_session("s1")["congested"] is True
+        assert mm.congested_recipients(mesh, ["lead"]) != []
+
+        # Aged past the door, session still live: the door has reopened, so
+        # the report must not keep calling it congested.
+        for msg in mesh.pending("lead"):
+            msg["ts"] = "2000-01-01T00:00:00+00:00"
+        assert mm.congested_recipients(mesh, ["lead"]) == []
+        bp = mm.backpressure_for_session("s1")
+        assert bp["congested"] is False
+        assert bp["queued"] == 2  # the mail is still there, and still reported
+
+        # Same queue, dead session: weighed on full depth, so both shut again.
+        mgr.kill("s1", force=True)
+        await _await_exit(mgr, "s1")
+        assert mm.congested_recipients(mesh, ["lead"]) != []
+        assert mm.backpressure_for_session("s1")["congested"] is True
+
+        await mgr.shutdown_all()
+
+    asyncio.run(run())
