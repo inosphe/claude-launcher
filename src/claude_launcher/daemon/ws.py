@@ -408,6 +408,10 @@ async def terminal_ws(request: web.Request) -> web.WebSocketResponse:
         session.note_visit()
         if not ws.closed:
             await ws.close()
+        log.info(
+            "terminal websocket closed session=%s code=%s error=%r",
+            session.sdef.name, ws.close_code, ws.exception(),
+        )
     return ws
 
 

@@ -378,6 +378,10 @@ const localStorage = {
 localStore.set("claunch_token:/", "tok");
 
 let timerSeq = 0;
+let clockNow = Date.now();
+class ClockDate extends Date {
+  static now() { return clockNow; }
+}
 const timers = new Map();
 function setIntervalStub(fn, ms) {
   timerSeq += 1;
@@ -424,6 +428,7 @@ FakeSocket.CLOSED = 3;
 class FakeTerminal {
   constructor(opts) {
     this.opts = opts || {};
+    this.options = this.opts;
     this.cols = 80;
     this.rows = 24;
     this.element = makeEl("div");
@@ -529,7 +534,7 @@ const sandbox = {
   Promise,
   JSON,
   Math,
-  Date,
+  Date: ClockDate,
   Number,
   String,
   Object,
@@ -783,15 +788,19 @@ async function main() {
   for (let i = 0; i < 100; i++) {
     const sock = read("ws");
     if (!sock) break;
+    // This census models separate outages minutes apart, with a healthy
+    // initialized connection in between. Short-lived opens are bounded by
+    // reconnect_check.js instead of receiving a fresh budget every time.
+    if (sock.onmessage) sock.onmessage({ data: JSON.stringify({
+      type: "init", cols: 80, rows: 24, status: "idle", pid: 4242,
+    }) });
+    clockNow += 60000;
     sock.close();          // the browser's side of a dropped connection
     if (sock.onclose) sock.onclose();
     await flush();
     await runTimeouts();   // the backoff's scheduled retry
     const back = read("ws");
-    // The browser's own `open`, which is what tells the page the outage is
-    // over and refills the retry budget. Without it the eighth flap would
-    // exhaust the backoff and the loop would be measuring a page that had
-    // given up rather than one that keeps coming back.
+    // The next connection opens now and receives init on the next pass.
     if (back && back.onopen) back.onopen();
     await flush();
     flaps += 1;

@@ -181,7 +181,7 @@ def test_a_write_with_no_child_says_why_before_the_socket_ends(home, tmp_path):
 
 
 def test_the_final_screen_is_still_served_and_the_socket_is_not_dropped(
-    home, tmp_path
+    home, tmp_path, caplog
 ):
     """Reading a dead session's last screen is a thing this route supports.
 
@@ -191,6 +191,8 @@ def test_the_final_screen_is_still_served_and_the_socket_is_not_dropped(
     become "refuse the socket": the reader who opened ``#/s/s137`` wanted to
     see what it last said.
     """
+
+    caplog.set_level("INFO", logger="claunch.daemon.ws")
 
     async def run():
         mgr = SessionManager(idle_threshold=0.5, scrollback=200,
@@ -218,8 +220,12 @@ def test_the_final_screen_is_still_served_and_the_socket_is_not_dropped(
             await ws.send_str(json.dumps({"type": "ping"}))
             assert json.loads((await ws.receive(timeout=10)).data)["type"] == "pong"
             assert not ws.closed
-            await ws.close()
+            await ws.close(code=4001, message=b"diagnostic close")
         finally:
             await client.close()
 
     asyncio.run(run())
+    assert any(
+        "terminal websocket closed session=s137 code=4001 error=None" in record.message
+        for record in caplog.records
+    )
