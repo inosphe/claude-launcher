@@ -45,6 +45,7 @@ class Server:
     tools: Tuple[dict, ...]
     dispatch: Callable[[str, dict], dict]
     errors: Tuple[type, ...]
+    instructions: str = ""
 
     def handle(self, msg: dict) -> Optional[dict]:
         """Return a response dict, or ``None`` for notifications."""
@@ -62,6 +63,7 @@ class Server:
                     or PROTOCOL_VERSION,
                     "capabilities": {"tools": {}},
                     "serverInfo": {"name": self.name, "version": __version__},
+                    **({"instructions": self.instructions} if self.instructions else {}),
                 },
             )
         if method in ("notifications/initialized", "notifications/cancelled"):
@@ -153,7 +155,10 @@ def merge(name: str, servers: Sequence[Server]) -> Server:
     errors: Tuple[type, ...] = tuple(
         dict.fromkeys(err for server in servers for err in server.errors)
     )
-    return Server(name=name, tools=tuple(tools), dispatch=dispatch, errors=errors)
+    return Server(
+        name=name, tools=tuple(tools), dispatch=dispatch, errors=errors,
+        instructions="\n\n".join(s.instructions for s in servers if s.instructions),
+    )
 
 
 def _result(msg_id, result: dict) -> dict:
