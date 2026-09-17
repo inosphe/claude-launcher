@@ -2206,18 +2206,21 @@ class MeshManager:
         # available after respawn. The briefing should offer current peers,
         # excluding local sessions known to have exited or been removed.
         # Remote session liveness is unknown here; keep those members.
-        available = set()
-        for handle, peer in mesh.members.items():
-            if handle == member.handle:
-                continue
-            if self._is_local(mesh, peer):
-                try:
-                    session = self.manager.get(peer.session)
-                except ManagerError:
-                    continue
-                if session.exited:
-                    continue
-            available.add(handle)
+        #
+        # "Known to have exited or been removed" is `_member_category`'s
+        # question, so it is asked in the one place that answers it rather
+        # than re-derived from `session.exited` here: that category is
+        # ``running``, ``killed``, ``paused``, ``archived`` or ``missing``,
+        # and the two a briefing keeps are the running ones and ``remote``
+        # (unknowable, so not called dead). Deriving it twice is how the
+        # roster, the filter above it and this briefing would come to
+        # disagree about which peers are still around.
+        available = {
+            handle
+            for handle, peer in mesh.members.items()
+            if handle != member.handle
+            and self._member_category(mesh, peer) in ("running", "remote")
+        }
         reachable = [h for h in mesh.neighbours(member.handle) if h in available]
         others = ", ".join(
             f"{h} ({mesh.members[h].role_label()})" for h in reachable
