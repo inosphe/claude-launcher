@@ -15410,9 +15410,11 @@ function wfDiagramSvg(wf, run, selected) {
      and `remeasure` (both await-landing -> rebase) came out at x=127,y=649
      on top of each other, and the loop cost two upward arcs where the reader
      only ever had one way back. A route carries its options instead, so the
-     count of upward arcs is the count of loops: two for improv-worker, which
-     is the floor (each directed cycle must send one arc up, and the rest of
-     this graph flows down). */
+     count of upward arcs is the count of loops, which is the floor (each
+     directed cycle must send one arc up, and the rest of this graph flows
+     down). improv-worker had two when this was written; `await-landing`'s
+     paced `nudge` (back to the wait) and `rework-gate`'s rewind to `work`
+     have since made it four. */
   const routes = [];
   const byPair = new Map();
   for (const e of edges) {
@@ -15456,9 +15458,9 @@ function wfDiagramSvg(wf, run, selected) {
      on the left rail, and counting it would call every retry target a merge.
 
      Forks count DESTINATIONS, not options — which is the fact a reader cannot
-     get from `select:agent`. improv-worker's await-landing offers three
-     options that lead to two places, because `rebase` and `remeasure` both go
-     back to rebase. Three choices, two outcomes. */
+     get from `select:agent`. improv-worker's await-landing offers five
+     options that lead to four places, because `rebase` and `remeasure` both
+     go back to rebase. Five choices, four outcomes. */
   const mergeIn = new Map();
   const forkOut = new Map();
   const orderIndex = new Map(order.map((id, i) => [id, i]));
