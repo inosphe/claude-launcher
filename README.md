@@ -555,6 +555,63 @@ rejects any other key at load time:
 | `codex` | `env`, `config` (each key becomes `-c key=value`, strings quoted) |
 | `pi` | `env`, `settings` (dotted keys merged into the profile's `pi/settings.json`), `tools` (`{full_read: false}` switches a claunch builtin tool off) |
 
+### `models` roles vs. raw `ANTHROPIC_*` variables
+
+A provider or profile that declares `models` does **not** need the matching
+`ANTHROPIC_*` variables under `harness_options.claude.env`. The role table
+above is the translation, and it runs at every launch: `default` fills both
+`ANTHROPIC_MODEL` and `ANTHROPIC_DEFAULT_SONNET_MODEL`, `small` fills
+`ANTHROPIC_DEFAULT_HAIKU_MODEL`, `large` fills `ANTHROPIC_DEFAULT_OPUS_MODEL`,
+`xlarge` fills `ANTHROPIC_DEFAULT_FABLE_MODEL` (following `large` when unset),
+and `subagent` fills `CLAUDE_CODE_SUBAGENT_MODEL` (following `small` when
+unset). The `[1m]` decoration is applied by the same pass, from `model_tag`
+or from a `context_window` of 1,000,000 or more, so an id written under
+`models` stays undecorated.
+
+The `env` channel is applied **after** that translation -- it is the last step
+of each profile layer (see the precedence list below). A model variable
+written there therefore overrides the role it corresponds to, and the two
+sources can disagree with no error raised at load time. The disagreement is
+easy to miss because `default` feeds two variables while an `env` block
+usually names one of them:
+
+```yaml
+# split: ANTHROPIC_MODEL and ANTHROPIC_DEFAULT_SONNET_MODEL end up on
+# different models, and which one serves a request depends on which
+# variable the harness reads for that call
+profiles:
+  ds4:
+    models:
+      default: accounts/fireworks/models/deepseek-v4p1-flash
+    harness_options:
+      claude:
+        model_tag: "[1m]"
+        env:
+          ANTHROPIC_DEFAULT_SONNET_MODEL: accounts/fireworks/models/deepseek-v4-flash-0731[1m]
+          CLAUDE_CODE_SUBAGENT_MODEL: accounts/fireworks/models/dep-glm-5p2
+```
+
+```yaml
+# one source per role; the tag comes from model_tag, and the env channel
+# carries only what no role expresses
+profiles:
+  ds4:
+    models:
+      default:  accounts/fireworks/models/deepseek-v4p1-flash
+      subagent: accounts/fireworks/models/dep-glm-5p2
+    harness_options:
+      claude:
+        model_tag: "[1m]"
+        env:
+          CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: "0"
+```
+
+Write a model variable under `env` only for a deliberate exception no role
+expresses, and expect it to win over `models` for that key. `claunch
+providers` prints a `claude options: env: ...` line listing the keys each
+provider pins that way, which is where a leftover model variable shows up;
+a profile's own block is read from the config file.
+
 `reasoning_effort` accepts the common cross-harness values `low`, `medium`,
 and `high`. Claude Code receives the value through
 `CLAUDE_CODE_EFFORT_LEVEL`; Codex receives `model_reasoning_effort`; Pi
