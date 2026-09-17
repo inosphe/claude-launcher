@@ -354,6 +354,7 @@ CHECKS = [
         "newform_check.js",
         "pollselect_check.js",
         "beads_check.js",
+        "beadsstream_check.js",
         "ragsearch_check.js",
         "beadskanban_check.js",
         "queues_check.js",

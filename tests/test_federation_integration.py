@@ -28,7 +28,7 @@ from claude_launcher.daemon.api import build_app
 from claude_launcher.daemon.harness import SessionDef
 from claude_launcher.daemon.manager import SessionManager
 from claude_launcher.daemon.mesh import MeshManager
-from claude_launcher.daemon.relay_uplink import RelayUplink
+from claude_launcher.daemon.relay_uplink import RelayPool, RelayUplink
 
 PASSWORD = "fed-pw"
 BACKEND_TOKEN = "fed-backend-token"
@@ -93,6 +93,10 @@ class _Daemon:
         self.relay_port = relay_port
         self.runner: web.AppRunner | None = None
         self.uplink: RelayUplink | None = None
+        #: The daemon wires federation to a RelayPool, not to a bare uplink,
+        #: so the test drives the same object the daemon does — with one
+        #: relay in it here.
+        self.pool: RelayPool | None = None
         self.uplink_task: asyncio.Task | None = None
 
     async def start(self) -> None:
@@ -108,13 +112,14 @@ class _Daemon:
             local_host="127.0.0.1",
             local_port=port,
         )
-        self.uplink_task = asyncio.ensure_future(self.uplink.run())
-        _wire_federation(self.mesh, self.uplink)
+        self.pool = RelayPool([self.uplink])
+        self.uplink_task = asyncio.ensure_future(self.pool.run())
+        _wire_federation(self.mesh, self.pool)
         self.mesh.start()
 
     async def stop(self) -> None:
-        if self.uplink is not None:
-            self.uplink.stop()
+        if self.pool is not None:
+            self.pool.stop()
         if self.uplink_task is not None:
             self.uplink_task.cancel()
             try:

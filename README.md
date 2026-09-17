@@ -1562,7 +1562,7 @@ and a form painted into its PTY would hang the session it was creating.
 | `daemon start\|stop\|status\|restart` | Explicit daemon control (session commands auto-start it, tmux-style). |
 | `daemon token [--rotate]` | Print (or rotate) the API/web auth token. |
 | `daemon config [KEY [VALUE]]` | Show or set daemon settings (stored in `~/.claunch.yaml`). |
-| `daemon relay [KEY [VALUE]]` | Show or set the relay uplink (reach this daemon from outside the LAN — see below). |
+| `daemon relay [KEY [VALUE]] [--relay HANDLE] [--remove HANDLE]` | Show or set the relay uplinks (reach this daemon from outside the LAN — see below). With no argument it lists every configured relay; `--relay` targets one of several (a new handle adds it) and `--remove` drops one. |
 | `web [--open]`        | Print (and open) the web UI URL. |
 
 ### Named daemon instances (tmux `-L`)
@@ -1653,6 +1653,46 @@ env var so it need not live in `~/.claunch.yaml`. For a self-signed relay,
 `claunch daemon relay verify_tls false` accepts its certificate. The uplink
 reconnects on its own (keepalive ping, receive watchdog, backoff+jitter); while
 the relay is down the local daemon is unaffected.
+
+#### Several relays at once
+
+One daemon can register with more than one relay — a work relay and a home
+relay, say — so a mesh member on either side reaches it without you choosing
+between them. Give each one a **handle**, which is how the CLI addresses it
+(distinct from `name`, the label the relay's directory shows; two relays may
+show this daemon under the same `name`):
+
+```powershell
+claunch daemon relay --relay home url wss://home.example.com
+$env:CLAUNCH_RELAY_TOKEN_HOME = "<home backend_token>"
+#   (or persist it: claunch daemon relay --relay home token <backend_token>)
+claunch daemon relay                       # lists every configured relay
+claunch daemon relay --remove home         # drops one
+```
+
+The config file follows. A single relay stays the `daemon.relay` block it
+always was; adding a second moves both into a `daemon.relays` list:
+
+```yaml
+daemon:
+  relays:
+    - url: wss://work.example.com
+      token: <work backend_token>
+    - id: home
+      url: wss://home.example.com
+      token: <home backend_token>
+```
+
+With several relays the bare `CLAUNCH_RELAY_URL` / `_TOKEN` / `_NAME` names are
+ambiguous — one value cannot mean three uplinks — so they are read only when a
+single relay is configured. Use the per-relay form instead, which always wins:
+`CLAUNCH_RELAY_TOKEN_HOME` for the relay whose handle is `home`.
+
+A backend is still addressed by its `name`; the daemon works out which relay
+currently carries that name and sends the request there. `relay: connected`
+means **at least one** relay is up, so the CLI line and the web badge add a
+count (`1/2`) and the per-relay state, and the badge turns amber when some but
+not all of them are registered.
 
 ### Idle detection
 
@@ -2987,7 +3027,8 @@ REST endpoints (JSON, `Bearer` or cookie auth; `/api/health` is open):
 | POST   | `/api/sessions/{name}/migrate` | move to another checkout: exactly one of `{worktree: NAME-or-""}` / `{cwd: DIR}`; `{children: true}` moves the descendants standing in the same directory. The claude transcript is carried to the new directory's slug |
 | POST   | `/api/sessions/{name}/reborrow` | restart on another answer to "whose token": `{borrow: NAME-or-null, null_token?}` — picking one clears the others; the session is relaunched with the definition's auth swapped, the directory untouched |
 | POST   | `/api/sessions/{name}/skip-permissions` | restart with permission prompts toggled: `{skip: true|false}` adds/removes `--dangerously-skip-permissions` in the definition's args and relaunches |
-| POST   | `/api/sessions/{name}/keys`    | raw keyboard: `{keys: [...], literal}` — send-keys; or `{paste, enter}` — one bracketed paste (multiline-safe). Text (and any paste) waits out a human typing at that terminal (`CLAUNCH_TYPING_GUARD` quiet, bounded by `CLAUNCH_TYPING_HOLD_TIMEOUT`); bare keys go through at once |
+| POST   | `/api/sessions/{name}/keys`    | raw keyboard: `{keys: [...], literal}` — send-keys; or `{paste, enter}` — one bracketed paste (multiline-safe). Text (and any paste) waits out a human typing at that terminal (`CLAUNCH_TYPING_GUARD` quiet, bounded by `CLAUNCH_TYPING_HOLD_TIMEOUT`); bare keys go through at once. `force` (the operator pressing the web session line) submits an open draft instead of waiting out the full hold, and `input_id` makes a resend the same submission rather than a second one — both hold for `keys` and for `paste` |
+| POST   | `/api/sessions/{name}/paste-image` | the body IS the image, its media type in `Content-Type` (png, jpeg, gif, webp; up to 24 MiB). Stored under the session's state directory and answered as `{path}` — what the web session line's Alt+V types into the line, because a program reading a PTY cannot be handed an attachment |
 | POST   | `/api/sessions/{name}/deliver` | `{text}` — hand the agent a message (paste + separately-written Enter). What every automated sender uses; `/keys` is for a human at a keyboard |
 | GET    | `/api/sessions/{name}/pr/preview` | the PR wizard's preview of the session's directory: checkout branch, HEAD, uncommitted counts, remotes (with `claunch.pr.remote` / `claunch.pr.base` honoured), `gh` install + per-host auth, `blockers` -- what would stop the push -- and `monitor_available` (whether `improv-worker-pr-monitor` is declared for that directory) |
 | POST   | `/api/sessions/{name}/pr` | push what the session's directory holds under a NEW branch and open the pull request with `gh` -- never touching its checkout. Body `{remote, base, branch, title, body, draft, include_uncommitted, force, report, monitor}`; `report` types the outcome into the session's terminal; `monitor` (needs `report`, and an opened PR) spawns a report-only child on `improv-worker-pr-monitor` with the depth/child caps lifted, answered as `monitor: {session, workflow, run_started}` or a `monitor:` warning. Always 200 with `ok` and a `steps` list (`failed`/`error` name a refused step) |

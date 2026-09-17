@@ -93,6 +93,11 @@ function el(tag, cls, text) {
 
 const stubs = `
 let beadsFocus = "";
+let beadsWorkspace = "";
+let beadsDetail = null;
+let beadsSession = "";
+function clearBeadsSearch() { renderBeads(); }
+function $() { return null; }
 let beadsSection = "queues";
 let beadsQueues = null;
 let beadsQueuesError = "";
@@ -124,7 +129,7 @@ new Function(
   + "const BEADS_STATUSES = " + JSON.stringify(["open", "in_ready", "in_progress", "in_review", "blocked", "closed"]) + ";\n"
   + "const BEADS_ACTIVE = new Set([\"open\", \"in_ready\", \"in_progress\", \"in_review\", \"blocked\"]);\n"
   + slice("beadsSortIssues") + slice("beadsPriBadge") + slice("beadsCard")
-  + slice("beadsPageTabs")
+  + slice("beadsPageTabs") + slice("beadsWorkspaceTabs")
   + slice("renderQueues") + slice("beadsQueuesBoard") + slice("beadsQueueLane")
   + slice("beadsLaneSpent") + slice("beadsQueueOrder") + slice("beadsQFoldBar")
   + slice("beadsQueueSummaryText") + slice("beadsQueueCell") + slice("beadsQueueCard")
@@ -289,6 +294,16 @@ async function drop(card, cell) {
   const view2 = el("div");
   ctx.render(view2);
   check("with an answer it draws one grid per board", view2.find("beads-queues").length, 1);
+  ctx.setQueues({ statuses: STATUSES, boards: [BOARD, { ...BOARD, root: "/second" }] });
+  const multi = el("div");
+  ctx.render(multi);
+  check("workspace tabs keep one board visible", multi.find("beads-queues").length, 1);
+  const tabs = multi.find("beads-workspace-tabs")[0];
+  check("one tab per workspace", tabs.children.length, 2);
+  tabs.children[1].handlers.click[0]();
+  const second = el("div");
+  ctx.render(second);
+  check("workspace switch shows selected root", second.find("beads-board-head")[0].children[0].text, "/second");
   ctx.setQueues({ statuses: STATUSES, boards: [] });
   const view3 = el("div");
   ctx.render(view3);

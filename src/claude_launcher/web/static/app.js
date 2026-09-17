@@ -7404,7 +7404,16 @@ function endSession() {
    client is what re-spreads the submit/enter split across call sites, and
    the split belongs to Session.send_keys — the one place that may fold and
    un-fold it (split_submit, under the bracketed-paste marker). A test pins
-   this single-call shape (tests/web/sendinput_check.js). */
+   this single-call shape (tests/web/sendinput_check.js).
+
+   The box holds more than one line, because Ctrl+J puts a newline in it the
+   way Claude Code's own composer does. A line that carries a newline cannot
+   go down the keys path: a raw LF written to a PTY is a submit, so the
+   session would receive the block a line at a time. It goes as ONE paste
+   instead (`paste` + `enter` on the same route), which the daemon writes as
+   a bracketed paste with its Enter as a separate, paced write — the path
+   `claunch send-keys --paste` and every delivery already use, and the reason
+   the newline survives whatever harness is running in the session. */
 
 function termInputBlock(ended) {
   if (ended) return "this session has ended — nothing to send keys to";
@@ -7434,19 +7443,24 @@ async function sendKeyLine(field, btn, note) {
   btn.disabled = true;
   try {
     const inputId = `input-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    // This is an explicit operator action either way. The daemon uses the
+    // short forced grace and submits an existing draft first, so a busy
+    // session does not turn a deliberate send into a 30s wait/409.
+    // A single line is keys; a line with a newline in it is one paste, whose
+    // Enter the daemon writes separately (Session.paste).
+    const body = text.includes("\n")
+      ? { paste: text, enter: true, force: true, input_id: inputId }
+      : { keys: [text, "Enter"], force: true, input_id: inputId };
     const resp = await api(
       `/api/sessions/${encodeURIComponent(currentName)}/keys`,
       { method: "POST",
         headers: { "Content-Type": "application/json" },
-        // This is an explicit operator action. The daemon uses the short
-        // forced grace and submits an existing draft first, so a busy
-        // session does not turn a deliberate send into a 30s wait/409.
-        body: JSON.stringify({ keys: [text, "Enter"], force: true,
-                              input_id: inputId }) }
+        body: JSON.stringify(body) }
     );
     const doc = await resp.json().catch(() => ({}));
     if (resp.ok) {
       field.value = "";
+      autogrowTermInput(field);
       return true;
     }
     termInputNote(note, doc.error || "the session refused these keys", true);
@@ -7513,6 +7527,7 @@ function insertPromptPreset(text) {
   const cursor = start + text.length;
   if (field.setSelectionRange) field.setSelectionRange(cursor, cursor);
   field.focus();
+  if (typeof autogrowTermInput === "function") autogrowTermInput(field);
   return true;
 }
 
@@ -7528,12 +7543,171 @@ function onTermInputSubmit(ev) {
   sendKeyLine($("term-input-field"), $("term-input-send"), $("term-input-note"));
 }
 
+/* The field's height is its content's. A <textarea> does not shrink back on
+   its own, so the height is cleared before it is read: scrollHeight of a
+   collapsed box is the height the text actually needs. The CSS ceiling
+   (max-height) turns the rest into a scroll rather than letting the composer
+   push the terminal off the screen. */
+function autogrowTermInput(field) {
+  if (!field || !field.style) return;
+  field.style.height = "auto";
+  const needed = field.scrollHeight;
+  if (needed) field.style.height = `${needed}px`;
+}
+
+/* Ctrl+Enter sends. Enter, Shift+Enter and Ctrl+J all break the line at the
+   caret, and this field is a <textarea> for that reason. Claude Code's own
+   composer sends on Enter and breaks on Ctrl+J, but Ctrl+J is a browser
+   shortcut in the Firefox family — it opens the downloads panel and never
+   reaches this handler — so the line break is on the key every browser
+   delivers and the send moved to the chord.
+   Enter is handled here rather than by the form, because a <textarea> does
+   not submit its form on Enter. An IME composing a syllable owns the key
+   while it composes (isComposing / keyCode 229): committing a Hangul block
+   with Enter must not also break the line. */
+function onTermInputKeydown(ev) {
+  const field = ev.currentTarget || ev.target;
+  if (!field || field.disabled) return;
+  if (ev.isComposing || ev.keyCode === 229) return;
+  const key = ev.key;
+  if (ev.altKey && !ev.ctrlKey && !ev.metaKey && (key === "v" || key === "V")) {
+    ev.preventDefault();
+    pasteClipboardImage($("term-input-note"));
+    return;
+  }
+  if (key === "Enter" && ev.ctrlKey && !ev.altKey && !ev.metaKey) {
+    ev.preventDefault();
+    sendKeyLine($("term-input-field"), $("term-input-send"), $("term-input-note"));
+    return;
+  }
+  const breaksLine =
+    (key === "Enter" && !ev.ctrlKey && !ev.altKey && !ev.metaKey) ||
+    (ev.ctrlKey && !ev.altKey && !ev.metaKey &&
+     (key === "j" || key === "J" || key === "\n"));
+  if (breaksLine) {
+    ev.preventDefault();
+    insertTermInputText(field, "\n");
+  }
+}
+
+/* One place that writes into the composer at the caret, so a line break and
+   a pasted image path land the same way and leave the caret after what was
+   put in. A field that reports no selection (an older browser, a stub) is
+   appended to. */
+function insertTermInputText(field, text) {
+  if (!field) return;
+  const start = Number.isInteger(field.selectionStart)
+    ? field.selectionStart : field.value.length;
+  const end = Number.isInteger(field.selectionEnd) ? field.selectionEnd : start;
+  field.value = field.value.slice(0, start) + text + field.value.slice(end);
+  const caret = start + text.length;
+  if (field.setSelectionRange) field.setSelectionRange(caret, caret);
+  autogrowTermInput(field);
+}
+
+/* ---- Alt+V: a clipboard image becomes a path in the line ----------------
+   The program in the PTY reads bytes, so there is no way to hand it an
+   attachment from here. What CAN be handed over is a path: the image is
+   uploaded, the daemon writes it beside the session's own state, and the
+   path it answers with is typed into the composer — Claude Code opens an
+   image path given in a prompt, which is what makes the round trip worth
+   taking. The machine clipboard is never written to; it is shared with the
+   person at this keyboard and with every other session on this machine.
+
+   Two ways in, because the browsers differ on which one a page may use:
+   Alt+V reads the clipboard itself (navigator.clipboard.read, which needs
+   the permission and a secure context), and an ordinary Ctrl+V carrying an
+   image file is handled on the paste event, which needs neither. */
+
+async function uploadPastedImage(blob, note) {
+  if (!currentName) return false;
+  const kind = (blob.type || "").toLowerCase();
+  try {
+    const resp = await api(
+      `/api/sessions/${encodeURIComponent(currentName)}/paste-image`,
+      { method: "POST", headers: { "Content-Type": kind }, body: blob }
+    );
+    const doc = await resp.json().catch(() => ({}));
+    if (!resp.ok || !doc.path) {
+      if (note) termInputNote(note, doc.error || "the image was not stored", true);
+      return false;
+    }
+    const field = $("term-input-field");
+    if (!field) return false;
+    // Padded with a space so the path does not fuse with what is already
+    // typed around it — a path glued to a word is not a path any more.
+    insertTermInputText(field, `${doc.path} `);
+    if (note) termInputNote(note, `image stored: ${doc.path}`);
+    return true;
+  } catch {
+    if (note) termInputNote(note, "nothing was stored — the daemon is unreachable", true);
+    return false;
+  }
+}
+
+/* The image on the clipboard right now, or null. Reading the clipboard can
+   be refused (no permission, an insecure origin, a browser that has no
+   read()), and a refusal is not an image — the caller says so rather than
+   leaving the reader looking at a box that did nothing. */
+async function clipboardImage() {
+  const clip = navigator.clipboard;
+  if (!clip || typeof clip.read !== "function") return null;
+  const items = await clip.read();
+  for (const item of items) {
+    const kind = (item.types || []).find((t) => t.startsWith("image/"));
+    if (kind) return await item.getType(kind);
+  }
+  return null;
+}
+
+async function pasteClipboardImage(note) {
+  let blob = null;
+  try {
+    blob = await clipboardImage();
+  } catch {
+    if (note) {
+      termInputNote(note, "the browser would not hand over the clipboard — "
+        + "use Ctrl+V to paste the image instead", true);
+    }
+    return false;
+  }
+  if (!blob) {
+    if (note) termInputNote(note, "there is no image on the clipboard", true);
+    return false;
+  }
+  return uploadPastedImage(blob, note);
+}
+
+/* An ordinary paste carrying an image file. The text of a mixed paste is
+   left to the browser; only the image is taken, and only then is the event
+   taken from it. */
+function onTermInputPaste(ev) {
+  const field = ev.currentTarget || ev.target;
+  if (!field || field.disabled) return;
+  const data = ev.clipboardData;
+  if (!data) return;
+  const items = Array.from(data.items || []);
+  const image = items.find((it) => it.kind === "file"
+    && (it.type || "").startsWith("image/"));
+  if (!image) return;
+  const blob = image.getAsFile();
+  if (!blob) return;
+  ev.preventDefault();
+  uploadPastedImage(blob, $("term-input-note"));
+}
+
 // Wired at load, like every other listener this page mounts — guarded like
 // every OTHER element access the whole-block harnesses (reconnect/wheel) boot
 // without: those eval this block against a stub DOM that only carries what the
 // block under test touches, and #term-input is not one of them.
 if ($("term-input"))
   $("term-input").addEventListener("submit", onTermInputSubmit);
+if ($("term-input-field")) {
+  $("term-input-field").addEventListener("keydown", onTermInputKeydown);
+  $("term-input-field").addEventListener("paste", onTermInputPaste);
+  $("term-input-field").addEventListener("input", (ev) =>
+    autogrowTermInput(ev.currentTarget || ev.target));
+}
 
 /* ---- typing marks ----
    Keystrokes that reach the daemon as bytes mark its keyboard busy on
@@ -8980,7 +9154,10 @@ function attach(name) {
   // (like #term-input below) for the whole-block harnesses that boot this
   // function without the input's element in their stub DOM.
   const termInputField = $("term-input-field");
-  if (termInputField) termInputField.value = "";
+  if (termInputField) {
+    termInputField.value = "";
+    if (typeof autogrowTermInput === "function") autogrowTermInput(termInputField);
+  }
   if (typeof refreshPromptPresets === "function") refreshPromptPresets();
   // The common hop: this session has been up before, so bring its parked
   // terminal back instead of building a new one — no socket, no repaint.
@@ -11512,6 +11689,10 @@ let beadsFilter = "active";  // status filter: active | <status> | all
 let beadsSession = "";     // session filter: "" = everybody
 let beadsPri = null;       // priority filter: null = every priority
 let beadsLayout = "board"; // "board" = status lanes, "tree" = the forest
+let beadsSort = "updated_at";
+let beadsDirection = "desc";
+let beadsWorkspace = "";
+let beadsStreamVersion = 0;
 let beadsSection = "board"; // board | queues | reports
 let beadsQueues = null;    // the last /api/beads/queues payload
 let beadsQueuesError = "";
@@ -11577,6 +11758,8 @@ async function refreshBeads() {
 }
 
 function restartBeadsStream() {
+  beadsStreamVersion++;
+  beadsLoading = false;
   beadsCache = null;
   beadsError = "";
   beadsMore = true;
@@ -11625,6 +11808,7 @@ async function refreshBeadsDetail() {
     const data = await resp.json().catch(() => ({}));
     if (beadsFocus === detailWanted) {
       beadsDetail = resp.ok ? data : { error: data.error || `HTTP ${resp.status}` };
+      if (resp.ok && data.root) beadsWorkspace = data.root;
     }
   } catch { /* preserve the last detail while the connection is unavailable */ }
 }
@@ -11635,16 +11819,21 @@ async function loadBeadsPage(opts = {}) {
   if (!beadsOpen || beadsSection !== "board" || beadsLoading) return;
   if (!reset && !refresh && !beadsMore) return;
   const offset = refresh ? 0 : beadsNextOffset;
+  const version = beadsStreamVersion;
   beadsLoading = true;
   try {
     const q = new URLSearchParams({ offset: String(offset), limit: String(BEADS_STREAM_PAGE) });
+    q.set("sort", beadsSort);
+    q.set("direction", beadsDirection);
     if (beadsPri !== null) q.set("priority", String(beadsPri));
     const resp = await api(`/api/beads/stream?${q}`);
+    if (version !== beadsStreamVersion) return;
     if (resp.status === 404) {
       beadsError = "this daemon predates incremental Beads loading — restart the daemon";
       return;
     }
     const data = await resp.json().catch(() => ({}));
+    if (version !== beadsStreamVersion) return;
     if (!resp.ok) { beadsError = data.error || `HTTP ${resp.status}`; return; }
     if (reset) beadsCache = null;
     mergeBeadsPage(data, refresh);
@@ -11656,8 +11845,10 @@ async function loadBeadsPage(opts = {}) {
     refreshBeadsRelated();
   } catch { return; }   // auth overlay is up, or the daemon is away
   finally {
-    beadsLoading = false;
-    if (beadsOpen && beadsSection === "board") renderBeads();
+    if (version === beadsStreamVersion) {
+      beadsLoading = false;
+      if (beadsOpen && beadsSection === "board") renderBeads();
+    }
   }
 }
 
@@ -11674,7 +11865,7 @@ function beadsRootOf(id) {
   for (const b of (beadsCache && beadsCache.boards) || []) {
     if ((b.issues || []).some((i) => i.id === id)) return b.root;
   }
-  return "";
+  return beadsWorkspace;
 }
 
 /* The rows a board shows under the current filters. `active` is the default
@@ -11694,10 +11885,15 @@ function beadsFilterIssues(issues, filter, session, pri) {
 
 /* Sort for reading: what is being worked first, then by priority, then the
    most recently touched. */
-function beadsSortIssues(issues) {
+function beadsSortIssues(issues, sort = "status", direction = "asc") {
   const rank = {
     in_progress: 0, in_review: 1, blocked: 2, in_ready: 3, open: 4, closed: 9,
   };
+  if (sort !== "status") return [...issues].sort((a, b) => {
+    const delta = sort === "priority" ? (a.priority ?? 9) - (b.priority ?? 9)
+      : String(a[sort] || "").localeCompare(String(b[sort] || ""));
+    return (direction === "desc" ? -delta : delta) || String(a.id).localeCompare(String(b.id));
+  });
   return [...issues].sort((a, b) =>
     (rank[a.status] ?? 8) - (rank[b.status] ?? 8) ||
     (a.priority ?? 9) - (b.priority ?? 9) ||
@@ -11797,6 +11993,31 @@ function beadsFilterBar() {
   }
   sel.addEventListener("change", () => { beadsSession = sel.value; renderBeads(); });
   bar.appendChild(sel);
+  const sortLabel = el("label", "beads-sort", "Sort ");
+  const sortPick = document.createElement("select");
+  sortPick.title = "Sort issues (parents stay before their children)";
+  for (const [value, label] of [["updated_at", "Updated"], ["created_at", "Created"],
+                               ["priority", "Priority"], ["title", "Title"]]) {
+    const option = el("option", null, label);
+    option.value = value;
+    option.selected = beadsSort === value;
+    sortPick.appendChild(option);
+  }
+  sortPick.addEventListener("change", () => {
+    beadsSort = sortPick.value;
+    sortPick.blur();
+    restartBeadsStream();
+  });
+  sortLabel.appendChild(sortPick);
+  bar.appendChild(sortLabel);
+  const direction = el("button", "seq-tab beads-sort-direction",
+    beadsDirection === "asc" ? "Ascending ↑" : "Descending ↓");
+  direction.type = "button";
+  direction.addEventListener("click", () => {
+    beadsDirection = beadsDirection === "asc" ? "desc" : "asc";
+    restartBeadsStream();
+  });
+  bar.appendChild(direction);
   bar.appendChild(beadsSearchBox());
   /* Two readings of the same board, because a family does not fit in a
      column: the lanes say what state everything is in, and the tree says
@@ -11840,6 +12061,7 @@ function clearBeadsSearch() {
 
 function beadsSearchRoots() {
   const roots = ((beadsCache && beadsCache.boards) || []).map((b) => b.root).filter(Boolean);
+  if (beadsWorkspace && roots.includes(beadsWorkspace)) return [beadsWorkspace];
   return roots.length ? roots : [""];
 }
 
@@ -12038,7 +12260,9 @@ function beadsHierarchy(issues, deps) {
     kids.get(up).push(child);
   }
   const rank = (ids) =>
-    beadsSortIssues(ids.map((x) => byId.get(x))).map((i) => i.id);
+    beadsSortIssues(ids.map((x) => byId.get(x)),
+      typeof beadsSort === "undefined" ? "status" : beadsSort,
+      typeof beadsDirection === "undefined" ? "asc" : beadsDirection).map((i) => i.id);
   const order = [];
   const walk = (id) => {
     order.push(id);
@@ -12137,7 +12361,13 @@ function beadsCard(row) {
     badges.appendChild(el("span", "beads-badge label", "#" + l));
   }
   if (issue.assignee) {
-    badges.appendChild(el("span", "beads-badge who", "→ " + issue.assignee));
+    const known = (issue.sessions || []).some((s) => s.name === issue.assignee);
+    const assigned = el(known ? "a" : "span", "beads-badge who", "→ " + issue.assignee);
+    if (known) {
+      assigned.href = "#/s/" + encodeURIComponent(issue.assignee);
+      assigned.title = "Open session; use Resume if it has ended";
+    }
+    badges.appendChild(assigned);
   }
   if (badges.children.length) card.appendChild(badges);
 
@@ -12289,6 +12519,26 @@ function beadsDetailPane() {
   if (i.updated_at) facts.push("updated " + String(i.updated_at).replace("T", " ").slice(0, 19));
   meta.appendChild(el("span", "beads-bits", facts.join("  ·  ")));
   pane.appendChild(meta);
+  const linked = beadsDetail.sessions || i.sessions ||
+    ((beadsCache && beadsCache.boards) || []).flatMap((b) =>
+      (b.issues || []).filter((row) => row.id === i.id).flatMap((row) => row.sessions || []));
+  if (linked.length) {
+    pane.appendChild(el("h4", null, "Sessions"));
+    const links = el("div", "beads-sessions");
+    for (const s of linked) {
+      const link = el("a", `beads-sess ${s.status || ""}`, s.name);
+      link.href = "#/s/" + encodeURIComponent(s.name);
+      link.title = "Open session; use Resume if it has ended";
+      links.appendChild(link);
+    }
+    pane.appendChild(links);
+    if (linked.some((s) => s.status === "exited")) {
+      pane.appendChild(el("p", "wf-note",
+        "Open an ended session and choose Resume to continue its conversation. " +
+        "If its worktree was removed, restore it at the original path first. " +
+        "The saved session and conversation files must still exist."));
+    }
+  }
   const rel = beadsRelationBlock(i.id || beadsFocus);
   if (rel) pane.appendChild(rel);
   if (typeof beadsRelatedBlock === "function") {
@@ -12356,6 +12606,12 @@ function renderBeads() {
     if (!beadsError) view.appendChild(el("p", "wf-note", "loading the first page…"));
     return;
   }
+  const boards = beadsCache.boards || [];
+  if (beadsSession) {
+    const owner = boards.find((b) => (b.sessions || []).some((s) => s.name === beadsSession));
+    if (owner) beadsWorkspace = owner.root;
+  }
+  view.appendChild(beadsWorkspaceTabs(boards));
   const body = el("div", "beads-body" + (beadsFocus ? " split" : ""));
   const list = el("div", "beads-list");
   if (beadsSearch.q) {
@@ -12368,13 +12624,12 @@ function renderBeads() {
   const canvas = el("div", "beads-canvas");
   canvas.id = "beads-canvas";
   canvas.addEventListener("scroll", onBeadsCanvasScroll);
-  const boards = beadsCache.boards || [];
   if (!boards.length) {
     canvas.appendChild(el("p", "wf-note",
       "no board: none of the sessions' directories is a repository with a " +
       ".beads/ — 'claunch beads init --prefix <name>' at its root starts one"));
   }
-  for (const b of boards) canvas.appendChild(beadsBoardSection(b));
+  for (const b of boards.filter((b) => b.root === beadsWorkspace)) canvas.appendChild(beadsBoardSection(b));
   if (beadsLoading) canvas.appendChild(el("p", "wf-note beads-stream-note", "loading more issues…"));
   else if (beadsMore) canvas.appendChild(el("p", "wf-note beads-stream-note", "scroll for more issues"));
   else canvas.appendChild(el("p", "wf-note beads-stream-note", "end of board"));
@@ -12394,6 +12649,32 @@ function beadsPageTabs() {
   ]) {
     const tab = el("a", "seq-tab" + (beadsSection === section ? " on" : ""), label);
     tab.href = href;
+    tabs.appendChild(tab);
+  }
+  return tabs;
+}
+
+function beadsWorkspaceTabs(boards) {
+  if (!boards.some((b) => b.root === beadsWorkspace)) beadsWorkspace = boards[0]?.root || "";
+  const tabs = el("div", "seq-tabs beads-workspace-tabs");
+  for (const board of boards) {
+    const root = board.root || "";
+    const label = root.replace(/\\/g, "/").split("/").filter(Boolean).pop() || root;
+    const duplicate = boards.some((b) => b !== board &&
+      (b.root || "").replace(/\\/g, "/").split("/").filter(Boolean).pop() === label);
+    const tab = el("button", "seq-tab" + (root === beadsWorkspace ? " on" : ""), duplicate ? root : label);
+    tab.type = "button";
+    tab.title = root;
+    tab.addEventListener("click", () => {
+      if (root === beadsWorkspace) return;
+      beadsWorkspace = root;
+      beadsFocus = "";
+      beadsDetail = null;
+      beadsSession = "";
+      clearBeadsSearch();
+      const canvas = $("beads-canvas");
+      if (canvas) canvas.scrollTop = 0;
+    });
     tabs.appendChild(tab);
   }
   return tabs;
@@ -12453,7 +12734,8 @@ function renderQueues(view) {
       ".beads/ — 'claunch beads init --prefix <name>' at its root starts one"));
   }
   const statuses = beadsQueues.statuses || BEADS_STATUSES.filter((s) => BEADS_ACTIVE.has(s));
-  for (const b of boards) view.appendChild(beadsQueuesBoard(b, statuses));
+  view.appendChild(beadsWorkspaceTabs(boards));
+  for (const b of boards.filter((b) => b.root === beadsWorkspace)) view.appendChild(beadsQueuesBoard(b, statuses));
 }
 
 function beadsQueuesBoard(board, statuses) {
@@ -20617,18 +20899,37 @@ function renderRelayBadge(relay) {
   const badge = $("relay-badge");
   if (!relay) return;
   badge.classList.remove("hidden");
+  const rows = Array.isArray(relay.relays) ? relay.relays : [];
+  const total = relay.count || (relay.configured ? 1 : 0);
+  const live = relay.connected_count != null
+    ? relay.connected_count
+    : (relay.connected ? 1 : 0);
+  /* With one relay the count says nothing the badge doesn't already; with
+     several it is the only place a half-down pool is visible, because
+     "connected" there means at least one is up. */
+  const count = total > 1 ? ` ${live}/${total}` : "";
+  const detail = rows.length
+    ? "\n" + rows.map((r) =>
+        `${r.id}: ${r.connected ? "connected" : "DISCONNECTED"} (${r.url})`
+      ).join("\n")
+    : "";
   if (!relay.configured) {
     badge.textContent = "relay: off";
     badge.className = "badge relay-off";
     badge.title = "no relay uplink configured — sessions and mesh are local to this machine";
   } else if (relay.connected) {
-    badge.textContent = `relay: ${relay.name}`;
-    badge.className = "badge relay-on";
-    badge.title = `connected to ${relay.url || "the relay"} as '${relay.name}'`;
+    badge.textContent = `relay: ${relay.name}${count}`;
+    /* One relay down out of several is not the same state as all of them up:
+       the mesh still spans machines, but not every route does. */
+    badge.className = live < total ? "badge relay-partial" : "badge relay-on";
+    badge.title =
+      `connected to ${relay.url || "the relay"} as '${relay.name}'${detail}`;
   } else {
-    badge.textContent = "relay: down";
+    badge.textContent = `relay: down${count}`;
     badge.className = "badge relay-down";
-    badge.title = `uplink to ${relay.url || "the relay"} is disconnected — remote machines unreachable`;
+    badge.title =
+      `uplink to ${relay.url || "the relay"} is disconnected — ` +
+      `remote machines unreachable${detail}`;
   }
 }
 
