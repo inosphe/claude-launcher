@@ -13,6 +13,7 @@ from claude_launcher.daemon import db, paths
 from claude_launcher.daemon.api import build_app
 from claude_launcher.daemon.harness import SessionDef
 from claude_launcher.daemon.manager import ManagerError, SessionManager
+from claude_launcher.daemon.mesh import Member, MeshManager
 from claude_launcher.daemon.session import DeadSession
 
 
@@ -86,6 +87,31 @@ def test_archive_refuses_a_running_session(home):
     )
     with pytest.raises(ManagerError, match="kill it before archiving"):
         mgr.archive("live")
+
+
+@pytest.mark.parametrize("connected", [False, True])
+@pytest.mark.parametrize("restart", [False, True])
+def test_join_briefing_excludes_archived_sessions(home, connected, restart):
+    mgr = manager()
+    add_dead(mgr, "old")
+    mgr.archive("old")
+    if restart:
+        mgr = manager()
+        mgr.restore_all()
+    assert mgr.get("old").archived_at
+
+    mm = MeshManager(mgr)
+    mm.create("team")
+    mesh = mm.get("team")
+    me = Member("me", "self", role="worker", wired=True)
+    mesh.members = {"me": me, "archived-peer": Member("archived-peer", "old")}
+    mesh.member_edges[mesh.member_key("me", "archived-peer")] = connected
+
+    block = mm.briefing_block(mesh, me)
+    assert "members: (nobody else yet)\n" in block
+    assert "archived-peer" not in block
+    assert "other member(s)" not in block
+    assert "archived-peer" in mesh.members
 
 
 def test_archive_api_handles_one_or_every_unarchived_exited_record(home):
