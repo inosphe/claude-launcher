@@ -9,6 +9,18 @@ let draftTarget = "";
 // The composer starts folded on a phone and stays where the reader left it.
 // Desktop ignores this: there the whole footer is always laid out.
 let composerFolded = true;
+let layout = "board", gridLimit = 5;
+try {
+  layout = localStorage.getItem("claunch-observer-layout") === "grid" ? "grid" : "board";
+  const saved = Number(localStorage.getItem("claunch-observer-grid-limit"));
+  if(Number.isInteger(saved) && saved >= 1 && saved <= 10) gridLimit = saved;
+} catch { /* Storage may be unavailable; controls still work for this visit. */ }
+function saveView() {
+  try {
+    localStorage.setItem("claunch-observer-layout",layout);
+    localStorage.setItem("claunch-observer-grid-limit",String(gridLimit));
+  } catch { /* Keep the in-memory preference. */ }
+}
 const node = (tag, text, cls) => { const e = document.createElement(tag); e.textContent = text; if(cls)e.className=cls; return e; };
 async function request(path, body) {
   const options = body === undefined ? {} : {method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)};
@@ -223,6 +235,11 @@ function usageBlock(s) {
 }
 function render() {
   const visible=visibleSessions(), cards=$("cards"), mobile=mobileView.matches;
+  const grid=layout==="grid";
+  $("layout-board").checked=!grid;$("layout-grid").checked=grid;
+  $("board-label").textContent=mobile?"타임라인":"보드";
+  $("limit-control").hidden=!grid;
+  $("limit").value=String(gridLimit);$("limit-value").value=`${gridLimit}개`;
   syncTargets(visible);
   composerState();
   $("counts").textContent=`${visible.length}개 세션 · 미확인 요청 ${visible.reduce((n,s)=>n+(s.events||[]).filter(e=>e.needs_action&&!e.acknowledged).length+sessionRuns(s).filter(sessCflowGated).length,0)}개`;
@@ -232,13 +249,13 @@ function render() {
   $("monitor").textContent=snapshot.enabled?"관찰 끄기":"관찰 시작";
   $("mobile-monitor").textContent=$("monitor").textContent;
   $("notice").textContent=(cflowError?"cflow 상태 조회 실패 · 마지막 조회 결과 표시":snapshot.error)||(snapshot.enabled?"관찰 중 · 세션별 순차 처리 · 최소 60초 간격":"관찰이 꺼져 있습니다. 시작하면 ds4-official/deepseek-flash API로 트랜스크립트를 전송합니다.");
-  $("sort").hidden=mobile;
-  $("layout-hint").textContent=mobile?"최신 보고부터 표시하는 타임라인":"세션 보드 · 내용은 자동 갱신되며 세션 순서는 최신순 정렬을 누를 때 바뀝니다.";
-  cards.className=mobile?"observer-timeline":"observer-board";
+  $("sort").hidden=mobile||grid;
+  $("layout-hint").textContent=grid?`현재 필터에서 최신 항목 최대 ${gridLimit}개 · 보고·승인 요청 기준`:mobile?"최신 보고부터 표시하는 타임라인":"세션 보드 · 내용은 자동 갱신되며 세션 순서는 최신순 정렬을 누를 때 바뀝니다.";
+  cards.className=grid?"observer-grid":mobile?"observer-timeline":"observer-board";
   const horizontal=cards.scrollLeft;
   const scrolls=new Map([...cards.querySelectorAll(".observer-column-body")].map(e=>[e.parentElement.dataset.session,e.scrollTop]));
   cards.replaceChildren();
-  if(mobile) {
+  if(mobile||grid) {
     const entries=[];
     for(const s of visible) {
       const events=(s.events||[]).filter(e=>!$("actions-only").checked||(e.needs_action&&!e.acknowledged));
@@ -252,7 +269,7 @@ function render() {
     // repeats a busy session for every event, and the same totals under each
     // of them would be noise rather than a measurement.
     const metered=new Set();
-    for(const {s,e,r} of entries) {
+    for(const {s,e,r} of (grid?entries.slice(0,gridLimit):entries)) {
       const card=sessionHeader(s,"observer-post");
       if(e)card.append(eventItem(s,e));
       else if(r)addGate(card,s,r);
@@ -280,6 +297,8 @@ function render() {
   cards.scrollLeft=horizontal;
   controls();
 }
+for(const mode of ["board","grid"]) $("layout-"+mode).onchange=()=>{layout=mode;saveView();render();};
+$("limit").oninput=()=>{gridLimit=Number($("limit").value);saveView();render();};
 $("sort").onclick=()=>{boardOrder=[...snapshot.sessions].sort((a,b)=>latestActivity(b)-latestActivity(a)||a.name.localeCompare(b.name)).map(s=>s.name);render();};
 mobileView.addEventListener("change",()=>{if(document.body.classList.contains("observer-active"))render();});
 function selections() {

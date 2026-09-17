@@ -165,6 +165,13 @@
     <section id="observer-view" class="hidden">
       <header class="wf-head"><h1>관찰 대시보드</h1><button id="observer-monitor">관찰 시작</button></header>
       <div class="observer-content">
+      <div class="observer-view-controls">
+      <fieldset class="observer-view-tabs"><legend class="sr-only">결과 표시 방식</legend>
+        <label><input type="radio" name="observer-layout" id="observer-layout-board" value="board" checked><span id="observer-board-label">보드</span></label>
+        <label><input type="radio" name="observer-layout" id="observer-layout-grid" value="grid"><span>최신 그리드</span></label>
+      </fieldset>
+      <label id="observer-limit-control" hidden>표시 항목 <input id="observer-limit" type="range" min="1" max="10" step="1" value="5"><output id="observer-limit-value" for="observer-limit">5개</output></label>
+      </div>
       <p id="observer-notice" role="status" aria-live="polite"></p>
       <div class="filters">
       <label>보기 <select id="observer-scope"><option value="global">전체</option><option value="mesh">메시</option><option value="session">세션</option></select></label>
