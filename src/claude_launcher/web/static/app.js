@@ -1084,11 +1084,9 @@ function renderSessionTabs() {
   }
 }
 
-// The details toggle is anchored to the layout's right edge. Reserve the
-// tab strip's actual height, including wrapping and mobile rail visibility.
+// Refit the terminal when tab wrapping or mobile rail visibility changes.
 if (typeof ResizeObserver === "function" && typeof $ === "function" && $("session-tabs")) {
   new ResizeObserver(() => {
-    document.documentElement.style.setProperty("--session-tabs-height", `${$("session-tabs").getBoundingClientRect().height}px`);
     if (typeof refitSoon === "function") refitSoon();
   }).observe($("session-tabs"));
 }
