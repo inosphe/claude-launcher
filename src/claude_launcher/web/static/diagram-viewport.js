@@ -119,7 +119,7 @@
     });
     const hint = document.createElement("div");
     hint.className = "diagram-help";
-    hint.textContent = "Scroll to move · Ctrl/⌘ + scroll to zoom · drag background or Space + drag · pinch to zoom";
+    hint.textContent = "Scroll the page · Ctrl/⌘ + scroll to zoom · drag background or Space + drag · pinch to zoom";
     box.append(hint);
     on(viewport, "scroll", save, { passive: true });
     on(viewport, "wheel", (e) => {
@@ -133,6 +133,22 @@
         e.preventDefault();
         viewport.scrollLeft += e.deltaY * (e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? viewport.clientWidth : 1);
         save();
+      } else if (!box.classList.contains("diagram-expanded")) {
+        // Ordinary wheel input reads the content below the diagram, even
+        // when the diagram itself has room to scroll. Walk outward at an
+        // ancestor's boundary (desktop column -> page, mobile -> run page).
+        e.preventDefault();
+        let dx = e.deltaX, dy = e.deltaY;
+        if (e.deltaMode === 1) { dx *= 16; dy *= 16; }
+        if (e.deltaMode === 2) { dx *= viewport.clientWidth; dy *= viewport.clientHeight; }
+        for (let parent = box.parentElement; parent && (dx || dy); parent = parent.parentElement) {
+          const css = getComputedStyle(parent);
+          const left = parent.scrollLeft, top = parent.scrollTop;
+          if (/^(auto|scroll|overlay)$/.test(css.overflowX)) parent.scrollLeft += dx;
+          if (/^(auto|scroll|overlay)$/.test(css.overflowY)) parent.scrollTop += dy;
+          dx -= parent.scrollLeft - left;
+          dy -= parent.scrollTop - top;
+        }
       }
     }, { passive: false });
     const point = (e) => ({ x: e.clientX, y: e.clientY });
