@@ -576,6 +576,10 @@ function syncBulkActions(sessions, filter = "current") {
    picked option's `value` is merged into the pressed action's value, so the
    caller reads one object. */
 function showModal({ title, body, actions, checkbox = null, choices = null }) {
+  if (typeof sessionModal !== "undefined" && sessionModal) {
+    sessionModalClose();
+    if (sessionModal) return Promise.resolve(null);
+  }
   return new Promise((resolve) => {
     const overlay = $("modal-overlay");
     $("modal-title").textContent = title;
@@ -6649,15 +6653,9 @@ function spawnChildFields(f, body) {
 document
   .querySelector("#new-session select[name=parent]")
   .addEventListener("change", () => {
-    // Picking a parent by hand is the same event as the tab naming one, so
-    // both run applySessionParentChange and the two cannot drift. It also
-    // re-reads which tab the form is now on: pointing the picker at
-    // "(none)" is the New session tab, whatever the strip last said.
-    if (sessionModal) {
-      sessionModal.parent = $("new-session").parent.value || "";
-      sessionModal.tab = sessionModal.parent ? "spawn" : "new";
-      syncSessionModalTabStrip();
-    }
+    // A cleared parent remains an unanswered Spawn form; it must never
+    // silently change this operation into creating an independent session.
+    sessionFormView().parent = $("new-session").parent.value || "";
     applySessionParentChange();
     syncSessionModalChrome();
   });
@@ -6716,7 +6714,16 @@ $("new-session").addEventListener("submit", async (e) => {
   e.preventDefault();
   if (createBusy) return;
   const f = e.target;
+  if (sessionFormView().mode === "fork") {
+    await submitSessionFork(f);
+    return;
+  }
   const parent = spawnParent();
+  if (sessionFormView().mode === "spawn" && !parent) {
+    $("create-error").textContent = "Choose a parent session.";
+    $("create-error").classList.remove("hidden");
+    return;
+  }
   // A child is built from its parent's definition, so only the fields that
   // make it a different worker are sent — the rest would be refused by the
   // spawn policy, field by field.
@@ -6817,6 +6824,7 @@ $("new-session").addEventListener("submit", async (e) => {
     body.fork_session = f.fork.checked;
   }
   const err = $("create-error");
+  const payload = sessionFormPayload(sessionFormView().mode, body);
   createBusy = true;
   setCreatePending(f, true, parent);
   err.classList.add("hidden");
@@ -6828,7 +6836,7 @@ $("new-session").addEventListener("submit", async (e) => {
       {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body),
+        body: JSON.stringify(payload),
       }
     );
     if (!resp.ok) {
@@ -6861,6 +6869,8 @@ $("new-session").addEventListener("submit", async (e) => {
     const made = info.session || info;
     // The form is in the modal when it was opened as one, and the page it was
     // opened over is not where the operator is going: the new session is.
+    createBusy = false;
+    setCreatePending(f, false, parent);
     if (sessionModal) sessionModalClose({ route: false });
     // The rail is refreshed FIRST and awaited: the terminal route repoints
     // the detail panel and paints the header from `sessionsCache`, and a
@@ -7373,80 +7383,96 @@ function handoffControlState(session) {
   };
 }
 
-/* What the press asks before it forks. The default answer is the scratch
-   copy — no mesh, no run — because that is what the button is for and the
-   first option is the one Enter takes. The other answer exists because a
-   fork given a job of its own has to be able to report it, and until now
-   the only way to ask for that was to POST the route by hand.
-
-   Skipped entirely when the origin is in no mesh and drives no run: a
-   question with one possible answer is a dialog that teaches nothing. */
-async function askForkOptions(session) {
-  const s = session || {};
-  // Neither fact is on the session record: /api/sessions knows nothing about
-  // meshes or runs, and the client already holds both from their own polls.
-  // Same two readers the rail rows use, so the dialog offers exactly what
-  // the row beside it shows.
+/* Fork has its own fields and endpoint, within the same form host. */
+function quickForkInheritance(session) {
+  const name = (session || {}).name;
   const mesh = typeof sessMeshes === "function"
-    ? ((sessMeshes(s.name) || [])[0] || {}).mesh || "" : "";
-  const run = typeof sessCflowRun === "function"
-    ? ((sessCflowRun(s.name) || {}).workflow || "") : "";
-  if (!mesh && !run) return {};
-  const inherited = [mesh && `mesh ${mesh}`, run && `workflow ${run}`]
-    .filter(Boolean).join(" and ");
-  const picked = await showModal({
-    title: `Quick-fork '${s.name}'`,
-    body: "The copy opens this conversation from here and reports back with "
-      + "merge. It runs in this session's checkout either way — a fork "
-      + "cannot be given one of its own — so keep the two off the same files.",
-    choices: {
-      options: [
-        {
-          label: "Scratch copy",
-          hint: "joins no mesh, drives no run — its work is this session's",
-          value: {},
-        },
-        {
-          label: `Carry this session's ${inherited}`,
-          hint: "for a copy given a job of its own, that has to report it",
-          // "." and not the names read above: those came from two client
-          // caches that are each a poll behind, and the daemon settles the
-          // same question from its own state. The names are for the label.
-          value: { mesh: mesh ? "." : undefined, workflow: run ? "." : undefined },
-        },
-      ],
-    },
-    actions: [
-      { label: "Cancel", value: null },
-      { label: "Fork", value: {} },
-    ],
-  });
-  return picked;
+    ? ((sessMeshes(name) || [])[0] || {}).mesh || "" : "";
+  const workflow = typeof sessCflowRun === "function"
+    ? ((sessCflowRun(name) || {}).workflow || "") : "";
+  return { mesh, workflow };
 }
 
-async function quickForkSession(name, task, options) {
+function openQuickForkModal(name) {
+  const source = sessionsCache.find((s) => s.name === name);
+  if (!forkControlState(source).fork) return;
+  return openSessionModal({ tab: "fork", source });
+}
+
+function configureSessionFork(source) {
+  const f = $("new-session");
+  const inherited = quickForkInheritance(source);
+  sessionFormView().inheritance = inherited;
+  $("new-quick-fork-source").textContent = `Copy the conversation from '${source.name}'. `
+    + "The copy shares the original checkout and reports back with Merge. "
+    + "Avoid editing the same files in both sessions.";
+  f.quick_fork_task.value = "";
+  f.quick_fork_carry.innerHTML = "";
+  f.quick_fork_carry.appendChild(new Option("Scratch copy — no mesh or workflow", ""));
+  const labels = [inherited.mesh && `mesh ${inherited.mesh}`,
+    inherited.workflow && `workflow ${inherited.workflow}`].filter(Boolean);
+  if (labels.length) f.quick_fork_carry.appendChild(
+    new Option(`Inherit ${labels.join(" and ")}`, "inherit"));
+  f.quick_fork_carry.value = "";
+  $("new-quick-fork-carry-row").classList.toggle("hidden", !labels.length);
+}
+
+async function submitSessionFork(f) {
+  const view = sessionFormView();
+  const options = {};
+  if (f.quick_fork_carry.value === "inherit") {
+    if (view.inheritance.mesh) options.mesh = ".";
+    if (view.inheritance.workflow) options.workflow = ".";
+  }
+  createBusy = true;
+  setActionPending(f.querySelector("button[type=submit]"), true, "Forking…");
+  $("create-error").classList.add("hidden");
+  try {
+    await quickForkSession(view.source.name, f.quick_fork_task.value.trim(), options, {
+      onError: (message) => {
+        $("create-error").textContent = message;
+        $("create-error").classList.remove("hidden");
+      },
+      onCreated: () => {
+        createBusy = false;
+        setActionPending(f.querySelector("button[type=submit]"), false);
+        sessionModalClose({ route: false });
+      },
+    });
+  } finally {
+    createBusy = false;
+    setActionPending(f.querySelector("button[type=submit]"), false);
+    syncSessionModalChrome();
+  }
+}
+
+async function quickForkSession(name, task, options, view = {}) {
   if (!name) return null;
   const body = {};
   if (task) body.task = task;
   if (options && options.mesh) body.mesh = options.mesh;
   if (options && options.workflow) body.workflow = options.workflow;
+  const payload = sessionFormPayload("fork", body);
   let resp;
   try {
     resp = await api(`/api/sessions/${encodeURIComponent(name)}/quick-fork`, {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
+      body: JSON.stringify(payload),
     });
   } catch (err) {
-    await modalInfo(`Could not quick-fork '${name}'`,
-                    err && err.message ? err.message : "request failed");
+    const message = err && err.message ? err.message : "request failed";
+    if (view.onError) view.onError(message);
+    else await modalInfo(`Could not quick-fork '${name}'`, message);
     return null;
   }
   const info = await resp.json().catch(() => ({}));
   if (!resp.ok) {
-    await modalInfo(`Could not quick-fork '${name}'`,
-                    info.error || `HTTP ${resp.status}`);
+    const message = info.error || `HTTP ${resp.status}`;
+    if (view.onError) view.onError(message);
+    else await modalInfo(`Could not quick-fork '${name}'`, message);
     return null;
   }
+  if (view.onCreated) view.onCreated(info);
   await refreshSessions({ state: "current" });
   // Straight to the copy: a quick-fork is made to be worked in, and the
   // origin's terminal is where the reader already was.
@@ -7545,13 +7571,7 @@ function syncSessionHandoffControls(name = currentName) {
 if ($("term-fork")) {
   $("term-fork").addEventListener("click", async () => {
     if (!currentName) return;
-    const rec = sessionsCache.find((s) => s.name === currentName);
-    const picked = await askForkOptions(rec);
-    // null is Cancel and every other dismissal; an empty object is the
-    // scratch answer, which is also what a session with nothing to carry
-    // returns without asking.
-    if (picked === null) return;
-    quickForkSession(currentName, "", picked);
+    openQuickForkModal(currentName);
   });
 }
 if ($("term-merge")) {
@@ -7567,10 +7587,7 @@ if ($("term-merge")) {
 function railCardQuickFork(name) {
   const rec = railCardRecord(name);
   if (!rec || !forkControlState(rec).fork) return false;
-  Promise.resolve(askForkOptions(rec)).then((picked) => {
-    if (picked === null) return;
-    quickForkSession(name, "", picked);
-  });
+  openQuickForkModal(name);
   return true;
 }
 
@@ -11290,8 +11307,10 @@ let pendingNewMesh = "";
    which roles may be picked, exactly as it does when the operator picks one
    by hand, so the same refresh runs. */
 async function openNewSession(mesh) {
+  if (createBusy) return;
   if (sessionModal) sessionModalClose({ route: false });
   if (sessionModal) return; // A pending creation still owns the form.
+  $("new-session")._sessionView = createSessionFormView("new", "page");
   refreshParentChoices();
   setSessionModalTab("new");
   applySessionModalRecall($("new-session"));
@@ -20138,31 +20157,82 @@ function spawnSizeRemember(box) {
   box.style.height = "";
 }
 
-/* ---- the session modal: one form, two tabs ----
-   Creating a session and spawning a child were two forms: this page's
-   `#new-session` and a wizard the spawn button assembled row by row in
-   JavaScript. They asked the same twenty-one questions, so every row
-   existed twice, and the two copies drifted — a rule fixed on one of them
-   was still wrong on the other, and which one an operator met depended on
-   which button they had pressed.
-
-   There is one form now, and it is the shipped markup. The modal does not
-   build a form: it BORROWS the page's, moving the node into `#modal-body`
-   and putting it back in `#new-view` on close. Every listener, every
-   `$("new-session")` lookup and every value the operator has typed
-   survives that move, which is what makes switching tabs free — the tab
-   does not rebuild anything, it only changes the one answer the two paths
-   differ on: whether a parent is named.
-
-   What each tab is:
-   - "New session" — no parent. Every row is the operator's to answer, and
-     `#/new` arrives here.
-   - "Spawn child" — a parent is named, so the rows a child INHERITS are
-     greyed by the spawn policy's per-parent verdict (syncSpawnMode), and
-     the submit posts to that parent's `/children`. The rail's +, the detail
-     panel's Spawn button and the leader's quick job all arrive here with
-     the opener pinned as the parent. */
+/* Shared session form: operation policies select fields and payloads;
+   page tabs and contextual dialogs supply the host. */
 let sessionModal = null;
+
+/* Operation policy is independent of its host. A page offers New/Spawn;
+   contextual dialogs expose just the operation their opener requested.
+   editable is the UI ceiling; spawn policy can narrow it further. */
+function sessionFormConfig(mode) {
+  const sections = ["new-where", "new-identity", "new-runs-on", "new-onboard",
+    "new-runtime", "new-worktree", "new-task", "new-beads"];
+  const editable = ["cwd", "name", "profile", "harness", "model", "effort",
+    "mesh", "handle", "role", "workflow", "context", "borrow", "null_token",
+    "resume", "fork", "skip_permissions", "codex_yolo", "codex_sandbox", "args",
+    "worktree_mode", "worktree_name", "worktree_existing", "worktree_rebase",
+    "task", "beads", "issue_text", "issue_filter", "issue", "pi_tool_*"];
+  const modes = {
+    new: { title: "New session", submit: "Create", sections, editable,
+      payload: ["name", "profile", "cwd", "args", "model", "effort", "tools", "worktree",
+        "rebase_onto", "role", "borrow", "null_token", "mesh", "handle", "workflow",
+        "context", "task", "beads", "issue", "issue_text", "resume", "fork_session"] },
+    spawn: { title: "Spawn child", submit: "Spawn child", sections,
+      editable: [...editable, "parent", "fork_parent", "over_limit"],
+      payload: ["name", "profile", "workspace", "cwd", "args", "model", "effort", "tools", "worktree",
+        "rebase_onto", "role", "borrow", "null_token", "mesh", "handle", "workflow",
+        "context", "task", "beads", "issue", "issue_text", "fork", "connect", "over_limit"] },
+    fork: { title: "Quick fork", submit: "Fork", sections: ["new-quick-fork"],
+      editable: ["quick_fork_carry", "quick_fork_task"], payload: ["task", "mesh", "workflow"] },
+  };
+  return modes[mode] || modes.new;
+}
+
+function sessionFormPayload(mode, body) {
+  const allowed = sessionFormConfig(mode).payload;
+  return Object.fromEntries(Object.entries(body).filter(([key]) => allowed.includes(key)));
+}
+
+function createSessionFormView(mode, host, options = {}) {
+  return {
+    mode, modes: host === "page" ? ["new", "spawn"] : [mode],
+    parent: options.parent || "", source: options.source || null,
+  };
+}
+
+function sessionFormView() {
+  const f = $("new-session");
+  return f._sessionView ||= createSessionFormView("new", "page");
+}
+
+function renderSessionForm() {
+  const f = $("new-session");
+  const view = sessionFormView();
+  const config = sessionFormConfig(view.mode);
+  for (const id of [...sessionFormConfig("new").sections, "new-quick-fork"]) {
+    const section = $(id);
+    if (!section) continue;
+    const visible = config.sections.includes(id);
+    section.classList.toggle("session-field-hidden", !visible);
+    // Fieldset disabled also excludes hidden radios from native validation.
+    if (section.tagName === "FIELDSET") section.disabled = !visible;
+  }
+  for (const control of f.querySelectorAll("input[name], select[name], textarea[name]")) {
+    const allowed = config.editable.some((name) => name.endsWith("*")
+      ? control.name.startsWith(name.slice(0, -1)) : control.name === name);
+    if (!allowed) {
+      control._sessionReadOnly ||= { disabled: control.disabled };
+      control.disabled = true;
+    } else if (allowed && control._sessionReadOnly) {
+      control.disabled = control._sessionReadOnly.disabled;
+      delete control._sessionReadOnly;
+    }
+  }
+  const tabs = $("new-tabs");
+  if (tabs) tabs.classList.toggle("hidden", view.modes.length < 2);
+  syncSessionModalTabStrip();
+  syncSessionModalChrome();
+}
 
 function sessionModalKey(e) {
   if (e.key === "Escape" && !(sessionModal && sessionModal.busy)) {
@@ -20363,12 +20433,15 @@ function sessionConnectFields(f, body) {
    typed are in the same DOM either way, which is what "switching tabs
    keeps the input" means here. */
 function setSessionModalTab(tab) {
-  if (!sessionModal && tab === "spawn") return openSessionModal({ tab });
+  if (createBusy) return;
   const f = $("new-session");
-  const want = tab === "spawn" ? "spawn" : "new";
-  if (sessionModal) sessionModal.tab = want;
+  const view = sessionFormView();
+  if (!view.modes.includes(tab)) return;
+  const want = tab;
+  if (view.mode === "spawn" && f.parent.value) view.parent = f.parent.value;
+  view.mode = want;
   if (want === "spawn") {
-    const pin = (sessionModal && sessionModal.parent) || "";
+    const pin = view.parent || "";
     if (pin) {
       ensureOption(f.parent, pin, `${pin} — running`);
       f.parent.value = pin;
@@ -20376,18 +20449,15 @@ function setSessionModalTab(tab) {
   } else {
     f.parent.value = "";
   }
-  syncSessionModalTabStrip();
-  applySessionParentChange();
-  syncSessionModalChrome();
+  renderSessionForm();
+  if (want !== "fork") applySessionParentChange();
+  renderSessionForm();
 }
 
-/* The strip itself, drawn from the tab the modal is on. Its own function
-   because the parent picker can change the tab without being one of its
-   buttons: pointing it at "(none)" IS the New session tab, and a strip that
-   went on claiming otherwise would be the one part of the box disagreeing
-   with the form under it. */
+/* Mode selects the fields; choosing or clearing a parent never changes it. */
 function syncSessionModalTabStrip() {
-  const want = (sessionModal && sessionModal.tab) === "spawn" ? "spawn" : "new";
+  const view = sessionFormView();
+  const want = view.mode;
   const parentRow = $("new-parent-row");
   // On the New session tab the parent row is not merely empty, it is the
   // question the tab has already answered — a visible "(none)" picker there
@@ -20396,6 +20466,7 @@ function syncSessionModalTabStrip() {
   for (const [id, key] of [["new-tab-new", "new"], ["new-tab-spawn", "spawn"]]) {
     const btn = $(id);
     if (!btn) continue;
+    btn.classList.toggle("hidden", !view.modes.includes(key));
     btn.setAttribute("aria-selected", key === want ? "true" : "false");
     btn.classList.toggle("active", key === want);
   }
@@ -20407,16 +20478,20 @@ function syncSessionModalTabStrip() {
    the word it restores is the one this function last wrote. */
 function syncSessionModalChrome() {
   const f = $("new-session");
+  const view = sessionFormView();
+  const config = sessionFormConfig(view.mode);
   const parent = spawnParent();
   const title = $("modal-title");
   if (title && sessionModal) {
-    title.textContent = parent
-      ? `Spawn a child of ${parent.name}`
-      : "New session";
+    title.textContent = view.mode === "fork" ? `Quick fork '${view.source.name}'`
+      : view.mode === "spawn" && parent ? `Spawn a child of ${parent.name}`
+      : config.title;
   }
+  const pageTitle = $("new-page-head").querySelector("h2");
+  if (pageTitle) pageTitle.textContent = config.title;
   const submit = f.querySelector("button[type=submit]");
   if (submit && !submit.classList.contains("action-pending")) {
-    submit.textContent = parent ? "Spawn child" : "Create";
+    submit.textContent = config.submit;
     submit._idleLabel = submit.textContent;
   }
 }
@@ -20447,12 +20522,18 @@ function applySessionParentChange() {
    `mesh` is what a `#/new/<mesh>` link asked for. This is the one entry
    point anything outside this section needs. */
 async function openSessionModal(opts = {}) {
+  if (createBusy) return;
+  if (sessionModal) sessionModalClose({ route: false });
   const f = $("new-session");
   const tab = opts.tab || (opts.parent ? "spawn" : "new");
   const parent = tab === "spawn"
     ? (opts.parent || (f.parent && f.parent.value) || "")
     : "";
-  const st = { tab, parent, seed: opts.seed || null, busy: false };
+  const previousView = sessionFormView();
+  const previousFields = Array.from(f.querySelectorAll("input[name], select[name], textarea[name]"))
+    .map((control) => ({ control, value: control.value, checked: control.checked }));
+  const st = { busy: false, previousView, previousFields };
+  f._sessionView = createSessionFormView(tab, "dialog", { parent, source: opts.source });
   sessionModal = st;
   // The page head says "New session" above a form that is now inside a box
   // with a title of its own, so it is the one part of the page the modal
@@ -20475,6 +20556,11 @@ async function openSessionModal(opts = {}) {
   overlay.classList.remove("hidden");
   overlay.classList.add("spawn-open");
   spawnSizeApply(overlay.querySelector(".modal-box"));
+  if (tab === "fork") {
+    configureSessionFork(opts.source);
+    renderSessionForm();
+    return;
+  }
   if (opts.mesh) pendingNewMesh = opts.mesh;
   refreshParentChoices();
   setSessionModalTab(tab);
@@ -20504,7 +20590,8 @@ async function openSessionModal(opts = {}) {
    with `innerText = ""` is a form deleted out of the page. */
 function sessionModalClose(opts = {}) {
   if (!sessionModal) return;
-  if (sessionModal.busy) return;
+  if (sessionModal.busy || createBusy) return;
+  const st = sessionModal;
   $("new-session-actions").removeChild(sessionModal.cancelBtn);
   sessionModal = null;
   const overlay = $("modal-overlay");
@@ -20514,6 +20601,11 @@ function sessionModalClose(opts = {}) {
   // drag.
   spawnSizeRemember(overlay.querySelector(".modal-box"));
   const f = $("new-session");
+  f._sessionView = st.previousView;
+  for (const { control, value, checked } of st.previousFields) {
+    control.value = value;
+    if (checked !== undefined) control.checked = checked;
+  }
   const home = $("new-view");
   if (f && home) home.appendChild(f);
   const head = $("new-page-head");
@@ -20524,11 +20616,9 @@ function sessionModalClose(opts = {}) {
   overlay.classList.remove("spawn-open");
   $("modal-actions").innerHTML = "";
   document.removeEventListener("keydown", sessionModalKey);
-  // Closing a child dialog over the creation page restores its New session
-  // tab. The page remains the current route, with the typed values intact.
-  if (opts.route !== false && String(location.hash || "").startsWith("#/new")) {
-    setSessionModalTab("new");
-  }
+  renderSessionForm();
+  applySessionParentChange();
+  renderSessionForm();
 }
 
 /* The older entry point, kept under the name everything already presses:
@@ -20729,6 +20819,7 @@ async function openPrModal(sessionName) {
   // modal is open, and this function clears that body. Give it back first or
   // the page loses the form for the life of the tab.
   if (sessionModal) sessionModalClose();
+  if (sessionModal) return;
   if (!sessionName) return;
   const { box, ui, noteShow } = buildPrForm(sessionName);
   const overlay = $("modal-overlay");

@@ -440,15 +440,9 @@
 
     <div id="new-view" class="hidden">
       <form id="new-session">
-        <!-- The two ways a session is created, as one modal with two tabs.
-             They were two forms — this page and the spawn wizard's own —
-             which meant every row existed twice and a fix to one of them
-             was a fix to half the dashboard. There is one form now, and
-             the tab decides the single thing the two answers differ on:
-             whether a parent is named. Switching tabs keeps every value
-             the operator has typed, because it is the same form either
-             way. Kept inside the form so hosting the form in the modal
-             carries the strip with it. -->
+        <!-- One session form, with operation modes declared in sessionFormConfig.
+             The page offers New/Spawn sub-tabs; contextual dialogs expose only
+             their requested mode. The host does not own field or submit logic. -->
         <div id="new-tabs" class="sess-modal-tabs" role="tablist">
           <button type="button" id="new-tab-new" class="sess-modal-tab"
                   role="tab" aria-selected="true">New session</button>
@@ -456,6 +450,16 @@
                   role="tab" aria-selected="false">Spawn child</button>
         </div>
         <div id="new-page-head" class="page-head"><h2>New session</h2></div>
+        <fieldset id="new-quick-fork" class="session-field-hidden" disabled>
+          <legend>Quick fork</legend>
+          <p id="new-quick-fork-source"></p>
+          <label id="new-quick-fork-carry-row">Inheritance
+            <select name="quick_fork_carry"></select>
+          </label>
+          <label>Opening task
+            <textarea name="quick_fork_task" rows="3" placeholder="Optional task for the copy"></textarea>
+          </label>
+        </fieldset>
         <!-- The form asks WHO this session is before HOW it runs. What the
              user came here to decide is the arrangement — whose child it is,
              which mesh it answers in, what role it holds, which run it drives

@@ -3775,6 +3775,7 @@ body.embed #main { width: 100%; }
    down one side. */
 #modal-overlay.spawn-open #new-session { max-width: none; }
 #new-session-actions { display: flex; align-items: center; gap: 8px; }
+#new-session .session-field-hidden { display: none; }
 #new-session-actions button { box-sizing: border-box; min-height: 34px; }
 #new-session-actions .option { background: #21262d; border: 1px solid #30363d; }
 #modal-overlay.spawn-open #new-session-actions { justify-content: flex-end; padding-right: 18px; }

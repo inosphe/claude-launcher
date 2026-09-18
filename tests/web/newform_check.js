@@ -123,6 +123,7 @@ check("the decision blocks are numbered in reading order",
 /* The reading order: where it works, who it is, whose credentials it holds,
    what it joins, how it runs (folded), what it is told first. */
 check("the form's controls read in the new order", named(form.text), [
+  "quick_fork_carry", "quick_fork_task",
   // where it works
   "cwd",
   // who it is

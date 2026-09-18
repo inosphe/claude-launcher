@@ -155,6 +155,7 @@ function node(tag = "div", id = "") {
     getAttribute(k) { return n.attrs[k]; },
     addEventListener(name, fn) { (n.handlers[name] ||= []).push(fn); },
     fire(name) { (n.handlers[name] || []).forEach((fn) => fn({})); },
+    querySelectorAll() { return []; },
     querySelector(sel) {
       return sel === "button[type=submit]" ? n._submit
         : sel === ".modal-box" ? n._boxChild : null;
@@ -183,7 +184,7 @@ function picker(pairs = []) {
 const ids = {};
 function $(id) { return ids[id] || null; }
 for (const id of ["modal-overlay", "modal-body", "modal-actions", "modal-title",
-                  "new-view", "new-page-head", "new-parent-row", "new-session-actions",
+                  "new-view", "new-tabs", "new-page-head", "new-parent-row", "new-session-actions",
                   "new-handle-row", "new-connect-row", "new-tab-new",
                   "new-tab-spawn", "create-status", "create-error"]) {
   ids[id] = node("div", id);
@@ -243,7 +244,7 @@ let newWfPicked = false, pendingNewMesh = "";
 let newWorktreeFor = "held", issuesFor = "held", issuesRead = true,
     issueFilter = "held";
 let sessName = "lead";
-let sessionModal = null;
+let sessionModal = null; let createBusy = false;
 let sessionConnectHandles = [], sessionConnectPicked = [];
 let sessionConnectFor = null, sessionParentMeta = {};
 const BASE = "b";
@@ -287,6 +288,7 @@ function Option(label, value) {
   + slice("renderSessionConnect") + slice("refreshSessionConnect")
   + slice("sessionConnectFields") + slice("setSessionModalTab")
   + slice("syncSessionModalTabStrip") + slice("syncSessionModalChrome")
+  + slice("createSessionFormView") + slice("sessionFormConfig") + slice("sessionFormView") + slice("renderSessionForm")
   + slice("applySessionParentChange") + slice("openSessionModal")
   + slice("openNewSession")
   + slice("sessionModalClose") + slice("openSpawnModal") + `
@@ -300,6 +302,7 @@ Object.assign(exports, {
   recall: applySessionModalRecall, connect: refreshSessionConnect,
   connectFields: sessionConnectFields, meshNow: sessionMeshNow,
   heldIssue: () => pendingSeedIssue,
+  view: sessionFormView,
   modal: () => sessionModal, picked: (v) => { sessionConnectPicked = v; },
   handles: () => sessionConnectHandles, wfPicked: () => newWfPicked,
   pending: () => pendingNewMesh,
@@ -329,61 +332,33 @@ async function main() {
   check("New session remains on the page without a modal",
         [ctx.modal(), ids["modal-overlay"].classes.has("hidden"),
          ids["new-view"].kids.includes(form)], [null, true, true]);
-  await ctx.tab("spawn");
-  check("the page's Spawn child tab opens a modal",
-        ids["modal-overlay"].classes.has("hidden"), false);
-  await ctx.page();
-  check("returning to New session restores the page",
-        [ctx.modal(), ids["new-view"].kids.includes(form)], [null, true]);
-  await ctx.open({ tab: "new" });
-  check("submit and cancel share one action row",
-        ids["new-session-actions"].kids[0] === form._submit &&
-        ids["new-session-actions"].kids[1] === ctx.modal().cancelBtn, true);
-  check("Cancel never submits the form", ctx.modal().cancelBtn.type, "button");
-  check("opening moves the form into the modal body",
-        ids["modal-body"].kids.map((k) => k.id), ["new-session"]);
-  check("...and takes the page's own heading down",
-        ids["new-page-head"].classes.has("hidden"), true);
-  check("...and the overlay is up, wearing the class that widens the box",
-        [ids["modal-overlay"].classes.has("hidden"),
-         ids["modal-overlay"].classes.has("spawn-open")], [false, true]);
-  check("the separate modal footer has no actions",
-        ids["modal-actions"].kids.length, 0);
-  check("the New session tab hides the parent row it has answered",
-        ids["new-parent-row"].classes.has("hidden"), true);
-  check("...and the strip says which tab that is",
-        [ids["new-tab-new"].attrs["aria-selected"],
-         ids["new-tab-spawn"].attrs["aria-selected"]], ["true", "false"]);
-  check("...and the box's title and the button read as a create",
-        [ids["modal-title"].textContent, form._submit.textContent],
-        ["New session", "Create"]);
-
-  // Something typed, so the tab switch can be checked for keeping it.
   form.task.value = "read the board";
   form.name.value = "kid";
-  parentNow = { name: "lead", cwd: "F:/repo" };
-  ctx.modal().parent = "lead";
   ctx.tab("spawn");
-  check("the spawn tab pins the opener as the parent",
-        form.parent.value, "lead");
-  check("...and shows the parent row, since another parent is a valid change",
-        ids["new-parent-row"].classes.has("hidden"), false);
-  check("...and the title and the button follow the parent",
-        [ids["modal-title"].textContent, form._submit.textContent],
-        ["Spawn a child of lead", "Spawn child"]);
-  check("...and nothing the operator typed was cleared",
-        [form.task.value, form.name.value], ["read the board", "kid"]);
-  check("...and the parent change re-asks everything that depends on it",
-        ["spawn-mode", "policy", "worktree", "pickers"]
-          .every((c) => calls.includes(c)), true);
-
-  parentNow = null;
+  check("Spawn sub-tab keeps the page host",
+        [ctx.modal(), ids["new-view"].kids.includes(form), ctx.view().mode],
+        [null, true, "spawn"]);
+  check("Spawn with no parent still says Spawn", form._submit.textContent, "Spawn child");
+  check("Spawn exposes the parent picker", ids["new-parent-row"].classes.has("hidden"), false);
+  parentNow = { name: "lead", cwd: "F:/repo" };
+  form.parent.value = "lead";
   ctx.tab("new");
-  check("back on the New session tab the parent is cleared, not remembered",
-        form.parent.value, "");
-  check("...and the typed values are still there",
-        [form.task.value, form.name.value], ["read the board", "kid"]);
-
+  check("New clears the active parent", form.parent.value, "");
+  ctx.tab("spawn");
+  check("Spawn restores its chosen parent", form.parent.value, "lead");
+  check("sub-tabs preserve typed input", [form.task.value, form.name.value], ["read the board", "kid"]);
+  await ctx.spawn("lead");
+  check("rail Spawn borrows the same form", ids["modal-body"].kids.map(k => k.id), ["new-session"]);
+  check("Spawn dialog has no New session tab",
+        [ids["new-tabs"].classes.has("hidden"), ids["new-tab-new"].classes.has("hidden")], [true, true]);
+  ctx.tab("new");
+  check("a restricted dialog cannot switch to New", ctx.view().mode, "spawn");
+  check("the dialog title and submit describe Spawn",
+        [ids["modal-title"].textContent, form._submit.textContent], ["Spawn a child of lead", "Spawn child"]);
+  check("submit and cancel share one row",
+        ids["new-session-actions"].kids[0] === form._submit &&
+        ids["new-session-actions"].kids[1] === ctx.modal().cancelBtn, true);
+  check("Cancel never submits", ctx.modal().cancelBtn.type, "button");
   // The box was dragged; closing writes that size down and strips the inline
   // pair, which is the only reason close runs before the class is dropped.
   modalBox._w = 820; modalBox._h = 640;
