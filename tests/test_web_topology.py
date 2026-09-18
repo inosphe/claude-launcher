@@ -436,7 +436,8 @@ def test_every_harness_is_registered():
     )
 
 
-def test_diagram_viewport_browser():
+@pytest.mark.parametrize("script", ["diagramviewport_browser.cjs", "sessionform_browser.cjs"])
+def test_diagram_viewport_browser(script):
     """Real scroll geometry and native touch input need a browser.
 
     Optional locally: install Playwright externally and set NODE_PATH to its
@@ -451,7 +452,7 @@ def test_diagram_viewport_browser():
     if available.returncode:
         pytest.skip("Playwright is not installed (or not on NODE_PATH)")
     proc = subprocess.run(
-        [node, str(WEB / "diagramviewport_browser.cjs")],
+        [node, str(WEB / script)],
         capture_output=True, text=True, encoding="utf-8", timeout=60,
     )
     assert proc.returncode == 0, proc.stdout + proc.stderr

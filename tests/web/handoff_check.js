@@ -71,11 +71,13 @@ new Function(
    function railCardRecord(name) { return sessionsCache.find((s) => s.name === name) || null; }
    function sessMeshes(name) { return meshOf[name] ? [{mesh: meshOf[name]}] : []; }
    function sessCflowRun(name) { return runOf[name] ? {workflow: runOf[name]} : null; }
+   function openSessionModal(opts) { return showModal(opts); }
+   ${src.slice(src.indexOf("function sessionFormConfig("), src.indexOf("function createSessionFormView("))}
    ${code}
    Object.assign(exports, {
      forkControlState, handoffControlState, quickForkSession, requestHandoff,
      cancelHandoff, syncSessionHandoffControls, railCardQuickFork,
-     askForkOptions,
+     quickForkInheritance, openQuickForkModal,
      sessions: () => sessionsCache,
      setCurrent: (name) => { currentName = name; },
    });`
@@ -196,40 +198,18 @@ const response = (body, ok = true, status = 200) => ({
   // the rail key
   check("q forks a forkable card and refuses the others",
         [ctx.railCardQuickFork("py"), ctx.railCardQuickFork("a-qf1")], [false, false]);
+  const postsBefore = calls.length;
   const viaKey = ctx.railCardQuickFork("a");
-  await Promise.resolve();  // the key asks first, then posts
-  await Promise.resolve();
-  check("q on the origin posts the fork", [viaKey, calls[calls.length - 1].url],
-        [true, "/api/sessions/a/quick-fork"]);
-  replies.shift().resolve(response({ session: { name: "a-qf3" } }));
-
-  // ---- what the copy is asked to carry ------------------------------- //
-
-  // A session in nothing has nothing to choose, so it is not asked.
-  const before = modals.length;
-  check("a session with no mesh and no run is forked without a question",
-        [await ctx.askForkOptions({ name: "a" }), modals.length - before],
-        [{}, 0]);
-
-  // One in a mesh is, and the offered answer carries that mesh by name.
-  meshOf["a"] = "mesh-1";
-  runOf["a"] = "improv-worker";
-  modalAnswer = {};
-  await ctx.askForkOptions({ name: "a" });
-  const asked = modals[modals.length - 1];
-  check("the question names the session and both things it could carry",
-        [/'a'/.test(asked.title),
-         asked.choices.options.map((o) => o.label)],
-        [true, ["Scratch copy", "Carry this session's mesh mesh-1 and workflow improv-worker"]]);
-  check("the scratch answer is first, so Enter takes the copy that joins nothing",
-        asked.choices.options[0].value, {});
-  // The names are read from two client caches that are each a poll behind,
-  // so they label the option and nothing more: what is SENT is the dot, and
-  // the daemon settles it from its own state.
-  check("the other answer sends the dot, not the name it displayed",
-        asked.choices.options[1].value, { mesh: ".", workflow: "." });
-  check("the body warns that the copy shares this checkout",
-        /checkout/.test(asked.body) && /same files/.test(asked.body), true);
+  check("q opens the reusable Fork view without posting",
+        [viaKey, modals.at(-1).tab, modals.at(-1).source.name, calls.length],
+        [true, "fork", "a", postsBefore]);
+  check("no mesh/run exposes no inheritance", ctx.quickForkInheritance({name:"a"}),
+        {mesh:"", workflow:""});
+  meshOf.a = "mesh-1"; runOf.a = "improv-worker";
+  check("inheritance reads the same cached mesh/run as the rail",
+        ctx.quickForkInheritance({name:"a"}), {mesh:"mesh-1", workflow:"improv-worker"});
+  await buttons["term-fork"].handlers.click();
+  check("header Fork opens the same component", modals.at(-1).tab, "fork");
 
   // ...and the press sends what was picked.
   const carried = ctx.quickForkSession("a", "", { mesh: "mesh-1", workflow: "improv-worker" });
@@ -238,16 +218,6 @@ const response = (body, ok = true, status = 200) => ({
         { mesh: "mesh-1", workflow: "improv-worker" });
   replies.shift().resolve(response({ session: { name: "a-qf4" } }));
   await carried;
-
-  // Cancel is not "fork with the defaults".
-  const postsBefore = calls.length;
-  modalAnswer = null;
-  check("a cancelled question forks nothing",
-        [await ctx.askForkOptions({ name: "a" }), calls.length - postsBefore],
-        [null, 0]);
-  modalAnswer = {};
-  delete meshOf["a"];
-  delete runOf["a"];
 
   if (failures) process.exit(1);
   console.log("handoff_check: ok");
