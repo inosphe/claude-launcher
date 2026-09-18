@@ -43,14 +43,20 @@ def _print(snapshot: dict, closed_limit: int) -> None:
         f"{snapshot.get('open_count', 0)} socket(s) open "
         f"(all daemon connections: {http_text})  at {snapshot.get('now', '?')}"
     )
+    live = snapshot.get("live_by_agent")
+    if live is not None:
+        # The line a browser's own ceiling is about: connections held at this
+        # instant, named by the last request that arrived on each.
+        print(
+            "  held now: "
+            + (", ".join(f"{agent} {n}" for agent, n in live.items()) or "none")
+        )
     ports = snapshot.get("ports_by_agent") or {}
     if ports:
-        # Every peer here is 127.0.0.1, so this is the line that separates a
-        # browser's connections from a shell's. A browser at its own
-        # per-server ceiling stops adding ports while its page says it cannot
-        # connect.
+        # Cumulative over the recorded window, so it counts connections that
+        # have since closed: this is churn, not concurrency.
         print(
-            "  connections used recently: "
+            "  used in the recorded window: "
             + ", ".join(f"{agent} {n}" for agent, n in ports.items())
         )
     by_peer = snapshot.get("by_peer") or {}
@@ -179,9 +185,15 @@ def _wizard_frame(rows: list, cursor: int, marked: set, snapshot: dict, note: st
         f"  claunch connections — {len(rows)} socket(s) open, "
         f"{'unknown' if http is None else http} daemon connection(s)",
     ]
+    live = snapshot.get("live_by_agent")
+    if live is not None:
+        lines.append(
+            "  held now: "
+            + (", ".join(f"{agent} {n}" for agent, n in live.items()) or "none")
+        )
     if ports:
         lines.append(
-            "  connections used recently: "
+            "  used in the recorded window: "
             + ", ".join(f"{agent} {n}" for agent, n in ports.items())
         )
     lines.append("")
