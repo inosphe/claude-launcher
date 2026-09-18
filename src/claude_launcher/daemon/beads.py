@@ -79,7 +79,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Awaitable, Callable, Dict, List, Optional, Sequence, Tuple
 
-from .. import cli_beads, reports as reports_mod, store
+from .. import beads_meta, cli_beads, reports as reports_mod, store, workspaces
 from .session import STATUS_BUSY, STATUS_IDLE, Session
 
 log = logging.getLogger("claude_launcher.daemon.beads")
@@ -344,8 +344,26 @@ class AssignRefused(cli_beads.BeadsError):
     """A dashboard assignment that would move work off a session mid-round."""
 
 
+def workspace_for(cwd: Optional[str]) -> str:
+    """The registered workspace a directory belongs to, or ``""``.
+
+    A worktree deep inside a repository answers with the workspace at its
+    root, which is the point: the issue records where a session should be
+    created, and creation takes a workspace name, not the checkout a previous
+    session happened to stand in.
+    """
+    if not cwd:
+        return ""
+    try:
+        found = workspaces.owning(str(cwd))
+    except Exception:            # an unreadable config is not a reason to fail a mint
+        return ""
+    return found.name if found else ""
+
+
 def compose_description(
-    task: str, *, name: str, parent: Optional[str], text: bool = False
+    task: str, *, name: str, parent: Optional[str], text: bool = False,
+    workspace: str = "",
 ) -> str:
     """The description of a daemon-minted issue, in the shape the workflows
     require (목표 / 범위 / 완료 증거 기준 / 출처) so ``br lint`` and the next
@@ -357,6 +375,11 @@ def compose_description(
     and it has to: the two are no longer the same words, so a later reader
     who wants the wording the operator actually filed must be told which of
     the two they are looking at.
+
+    ``workspace`` is the registered workspace the session is being created in,
+    recorded as YAML front matter above the sections (:mod:`claude_launcher.beads_meta`).
+    An empty one writes no block at all, so an issue minted where no workspace
+    is registered looks exactly as it did before this existed.
     """
     origin = (
         f"session {parent} (spawn)" if parent else "operator (new session)"
@@ -366,7 +389,7 @@ def compose_description(
         if text
         else f"opening task of session {name}"
     )
-    return (
+    body = (
         "## 목표\n"
         f"{task.strip()}\n\n"
         "## 범위(포함·제외)\n"
@@ -376,6 +399,12 @@ def compose_description(
         "(the assignee fills this in at intake: test counts, commit hash)\n\n"
         "## 출처\n"
         f"{origin}, {_utcnow()}, {source}"
+    )
+    # The workspace is recorded at the mint because this is the one moment it
+    # is known for certain: the session is being created in a directory right
+    # now. Asked for later, it is a guess about where the work belongs.
+    return beads_meta.render(
+        {beads_meta.WORKSPACE: workspace} if workspace else {}, body
     )
 
 
@@ -1370,6 +1399,49 @@ class Board:
         )
         return {"issue": issue_id, "assignee": target, "was": was, "changed": True}
 
+    # ---- metadata ------------------------------------------------------- #
+    async def set_workspace(
+        self, root: Path, issue_id: str, name: Optional[str]
+    ) -> dict:
+        """Record (or clear) the workspace an issue's session should be created
+        in, as YAML front matter on its description.
+
+        The dashboard's second write, and it is a write to the DESCRIPTION
+        rather than to a field of its own, because the board has no field of
+        its own to give: ``br`` stores what it stores, and a fact this tool
+        needs back exactly has to live in the text. :mod:`claude_launcher.beads_meta`
+        keeps it separable from the prose, so an issue whose workspace is
+        recorded still reads as the spec it was.
+
+        ``name`` must be a REGISTERED workspace (:func:`workspaces.get`) or
+        empty to clear it. An unregistered name is refused rather than stored:
+        an issue naming a directory nobody registered would send its session
+        nowhere, and the failure would surface as a session created in the
+        wrong tree — which nothing downstream reports.
+        """
+        target = str(name or "").strip()
+        if target and workspaces.get(target) is None:
+            raise cli_beads.BeadsError(
+                f"no workspace named {target!r} -- register it with "
+                "'claunch workspace add <dir>' first"
+            )
+        issue = await self.show(root, issue_id)
+        was = beads_meta.workspace_of(issue)
+        if was == target:
+            return {
+                "issue": issue_id, "workspace": target, "was": was, "changed": False,
+            }
+        updated = beads_meta.set_key(
+            issue.get("description"), beads_meta.WORKSPACE, target
+        )
+        self._cache.pop(str(root), None)
+        await self.br(
+            root,
+            ["update", issue_id, "--description", updated],
+            actor=DASHBOARD_ACTOR,
+        )
+        return {"issue": issue_id, "workspace": target, "was": was, "changed": True}
+
     # ---- creation ------------------------------------------------------- #
     @staticmethod
     def _running(manager) -> Callable[[str], Optional[bool]]:
@@ -1500,7 +1572,8 @@ class Board:
                     "--assignee", name,
                     "--description",
                     compose_description(
-                        goal, name=name, parent=parent, text=bool(written)
+                        goal, name=name, parent=parent, text=bool(written),
+                        workspace=workspace_for(getattr(session.sdef, "cwd", "")),
                     ),
                 ],
                 actor=name,
@@ -1589,7 +1662,8 @@ class Board:
             raise BeadsUnavailable("no board for this session's directory")
         name = session.sdef.name
         desc = description.strip() or compose_description(
-            title, name=name, parent=session.sdef.parent
+            title, name=name, parent=session.sdef.parent,
+            workspace=workspace_for(session.sdef.cwd),
         )
         data = await self.br(
             root,

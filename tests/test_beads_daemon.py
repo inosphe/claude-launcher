@@ -154,6 +154,8 @@ class FakeBr:
                 i["status"] = opts["--status"]
             if "--assignee" in opts:
                 i["assignee"] = opts["--assignee"]
+            if "--description" in opts:
+                i["description"] = opts["--description"]
             return 0, json.dumps([i]), ""
         if cmd == "close":
             i = self.issues.get(rest[0])
