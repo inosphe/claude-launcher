@@ -196,6 +196,57 @@ check("the line is a full-width line-breaker like the cflow badge",
 check("...and carries an order above the row's toggle",
       /#session-list \.rail-quiet \{[^}]*order: 2/.test(css), true);
 
+/* --- what is waiting to be typed in ------------------------------------- */
+/* The two pills above are silences somebody chose. This one is the opposite:
+   a message that was accepted and has not gone in yet, because the delivery
+   waits for the harness to be ready and for any draft to be sent. That wait
+   was invisible, so pressing a cflow button and seeing nothing read exactly
+   like the press having been lost, and it was pressed again
+   (claunch-restart-disconnect-banner-12p2). */
+ctx.setSessions([{
+  name: "s1", status: "busy",
+  pending_deliveries: [
+    { id: 1, at: "2026-09-18T06:48:10+00:00", chars: 40,
+      preview: "cflow: continue per the /cflow protocol" },
+    { id: 2, at: "2026-09-18T06:48:11+00:00", chars: 12, preview: "hello there" },
+  ],
+}]);
+ctx.setRuns([]);
+ctx.apply();
+check("a session with messages waiting says how many", pills(rows.s1),
+      ["2 waiting"]);
+const waitPill = quiet(rows.s1).children[0];
+check("...and not with the pause glyph the chosen silences share",
+      waitPill.children[0].text !== "⏸", true);
+check("the tooltip carries each message, so the reader knows what is held up",
+      /cflow: continue/.test(waitPill.title)
+      && /hello there/.test(waitPill.title), true);
+check("...and says an accepted message is not a delivered one",
+      /Nothing is lost while it waits/.test(waitPill.title), true);
+check("...and that the queue does not survive the daemon",
+      /daemon restart drops/.test(waitPill.title), true);
+
+/* Delivered: the pill goes with it. A count that only grew would report a
+   backlog that is not there. */
+ctx.setSessions([{ name: "s1", status: "busy", pending_deliveries: [] }]);
+ctx.apply();
+check("an empty queue draws no pill", quiet(rows.s1), null);
+
+/* It coexists with the settings rather than replacing them: a held session
+   can have mail waiting on the hold being lifted. */
+ctx.setSessions([{
+  name: "s1", status: "idle", delivery_hold: true,
+  pending_deliveries: [{ id: 3, at: "t", chars: 4, preview: "mail" }],
+}]);
+ctx.apply();
+check("a held session shows both its hold and its backlog",
+      pills(rows.s1), ["held", "1 waiting"]);
+
+/* An older daemon publishing no such field draws nothing, as with the rest. */
+ctx.setSessions([{ name: "s1", status: "idle" }]);
+ctx.apply();
+check("a payload without the field draws nothing", quiet(rows.s1), null);
+
 if (failures) {
   console.error(`${failures} check(s) failed`);
   process.exit(1);
