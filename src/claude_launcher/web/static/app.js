@@ -819,29 +819,10 @@ function setSessionGroupCollapsed(group, value, collapsed, remember = true) {
   return collapsed;
 }
 
-/* ---- rail pins ---------------------------------------------------------
-
-   The sessions the reader is watching right now, lifted to the top of the
-   rail. A machine running twenty sessions has two or three the operator
-   keeps returning to; on a rail sorted by lineage and grouped by mesh those
-   sit wherever their parent put them, and every poll that reshuffles the
-   fleet moves them. A pin takes a row out of that order and parks it in a
-   `pinned` section above every group, in the order it was pinned, where the
-   state filter cannot hide it (the search still can: a reader typing a name
-   is looking for that name, pinned or not).
-
-   Focus is a fact about the reader, not the session: two people watching
-   the same daemon are watching different rows. So the pins live in this
-   browser, beside the filter and the group settings (`SESSION_FILTER_KEY`
-   above), keyed by BASE for the same reason those are — daemons behind one
-   relay share a localStorage. Nothing is written to the daemon and nothing
-   here survives the session record: a pin whose session left the fleet is
-   dropped at the next poll (`pruneSessionPins`), so a name reused later
-   does not come back pinned by a session that is gone.
-
-   Stored as an ordered list rather than a set: pin order is display order,
-   and the operator's "first, second, third" is the whole point of having a
-   section instead of a colour. */
+/* ---- rail pins --------------------------------------------------------
+   Pins are browser-local shortcuts displayed in the main session tabs.
+   Keep the existing BASE-scoped key so previously pinned sessions migrate
+   without changing their order. Rail rows retain their ordinary placement. */
 const SESSION_PIN_KEY = `claunch_session_pins:${BASE}`;
 let sessionPins = (() => {
   try {
@@ -856,21 +837,117 @@ let sessionPins = (() => {
 
 function sessionPinnedNames() { return sessionPins.slice(); }
 
+const sessionTabHistory = typeof SessionTabHistory === "function"
+  ? new SessionTabHistory(localStorage, `claunch_session_tabs:${BASE}`, sessionPins) : null;
+
+function closeSessionTab(name) {
+  if (!sessionTabHistory) return;
+  setSessionPinned(name, false, true, false);
+  sessionTabHistory.close(name);
+  syncSessionPinUi();
+  // Closing a tab only changes navigation; the session process keeps running.
+  if (currentPage === "terminal" && currentName === name) {
+    const next = sessionTabHistory.latest();
+    go(next ? "#/s/" + encodeURIComponent(next) : "#/");
+  }
+}
+
+function renderSessionTabs() {
+  const bar = $("session-tabs");
+  if (!bar || !sessionTabHistory) return;
+  const names = sessionTabHistory.names();
+  const active = currentPage === "terminal" ? currentName : null;
+  const records = new Map(sessionsCache.map(s => [s.name, s]));
+  const signature = JSON.stringify(names.map(name => {
+    const rec = records.get(name);
+    return [name, isSessionPinned(name), name === active, rec?.status, rec?.paused_at];
+  }));
+  // Polls update state in place only when it changed, preserving keyboard focus.
+  if (bar._signature === signature) return;
+  bar._signature = signature;
+  const focused = bar.contains(document.activeElement) ? document.activeElement : null;
+  const focusName = focused?.dataset.name;
+  const focusAction = focused?.dataset.action;
+  bar.replaceChildren();
+  bar.classList.toggle("hidden", !names.length);
+  for (const name of names) {
+    const pinned = isSessionPinned(name);
+    const rec = records.get(name);
+    const tab = document.createElement("span");
+    tab.className = "session-tab" + (pinned ? " pinned" : "") + (name === active ? " active" : "");
+    tab.dataset.name = name;
+    const open = document.createElement("a");
+    open.className = "session-tab-open";
+    open.href = "#/s/" + encodeURIComponent(name);
+    open.dataset.name = name;
+    open.dataset.action = "open";
+    open.title = `${name}${pinned ? " — pinned" : ""}${rec ? " — " + rec.status : ""}`;
+    if (name === active) open.setAttribute("aria-current", "page");
+    const dot = document.createElement("span");
+    dot.className = `dot ${rec?.status || "unknown"}${rec?.paused_at ? " paused" : ""}`;
+    dot.setAttribute("aria-hidden", "true");
+    const label = document.createElement("span");
+    label.className = "session-tab-name";
+    label.textContent = name;
+    open.append(dot, label);
+    const pin = document.createElement("button");
+    pin.type = "button";
+    pin.className = "session-tab-pin";
+    pin.textContent = "📌";
+    pin.title = `${pinned ? "Unpin" : "Pin"} ${name}`;
+    pin.setAttribute("aria-label", pin.title);
+    pin.setAttribute("aria-pressed", String(pinned));
+    pin.dataset.name = name;
+    pin.dataset.action = "pin";
+    pin.addEventListener("click", () => toggleSessionPin(name));
+    const close = document.createElement("button");
+    close.type = "button";
+    close.className = "session-tab-close";
+    close.textContent = "×";
+    close.title = `Close ${name} tab — session keeps running`;
+    close.setAttribute("aria-label", close.title);
+    close.dataset.name = name;
+    close.dataset.action = "close";
+    close.addEventListener("click", () => closeSessionTab(name));
+    tab.append(open, pin, close);
+    bar.append(tab);
+  }
+  if (focused) {
+    const controls = [...bar.querySelectorAll("a, button")];
+    const target = controls.find(el => el.dataset.name === focusName && el.dataset.action === focusAction)
+      || controls.find(el => el.dataset.action === "open");
+    target?.focus({ preventScroll: true });
+  }
+}
+
+// The details toggle is anchored to the layout's right edge. Reserve the
+// tab strip's actual height, including wrapping and mobile rail visibility.
+if ($("session-tabs") && typeof ResizeObserver === "function") {
+  new ResizeObserver(() => {
+    document.documentElement.style.setProperty("--session-tabs-height", `${$("session-tabs").getBoundingClientRect().height}px`);
+    if (typeof refitSoon === "function") refitSoon();
+  }).observe($("session-tabs"));
+}
+
 function isSessionPinned(name) { return sessionPins.includes(name); }
 
 function rememberSessionPins() {
   try { localStorage.setItem(SESSION_PIN_KEY, JSON.stringify(sessionPins)); } catch {}
 }
 
-/* Pin or unpin one session. A pin appends — the newest pinned row is the
-   last of the section, so the order a reader built is not disturbed by
-   adding to it. Returns the state the session is now in. */
-function setSessionPinned(name, pinned, remember = true) {
+/* Pin or unpin a tab, preserving the order of existing pins. */
+function setSessionPinned(name, pinned, remember = true, keepTab = true) {
   if (!name) return false;
   const on = !!pinned;
   const had = sessionPins.includes(name);
   if (on && !had) sessionPins.push(name);
   else if (!on && had) sessionPins = sessionPins.filter((n) => n !== name);
+  if (on !== had && sessionTabHistory) {
+    // Unpinning makes the tab the newest recent entry, then applies the cap.
+    if (!on && keepTab) sessionTabHistory.visit(name);
+    else if (!on) sessionTabHistory.close(name);
+    sessionTabHistory.syncPins(sessionPins);
+  }
   if (remember && on !== had) rememberSessionPins();
   return on;
 }
@@ -878,38 +955,15 @@ function setSessionPinned(name, pinned, remember = true) {
 function clearSessionPins(remember = true) {
   if (!sessionPins.length) return;
   sessionPins = [];
+  if (sessionTabHistory) sessionTabHistory.syncPins(sessionPins);
   if (remember) rememberSessionPins();
 }
 
-/* Drop the pins of sessions the fleet no longer has. Measured against the
-   whole cache, which after any poll carries every unarchived record plus
-   whatever archived ones were opened on purpose: a session that is merely
-   killed or paused is still in it and keeps its pin — the reader may be
-   watching precisely for it to come back — while one that was archived or
-   cleared is not, and its pin goes with it. */
-function pruneSessionPins(sessions) {
-  const names = new Set((sessions || []).map((s) => s.name));
-  const kept = sessionPins.filter((name) => names.has(name));
-  if (kept.length === sessionPins.length) return false;
-  sessionPins = kept;
-  rememberSessionPins();
-  return true;
-}
-
-/* The pinned records, in pin order, for the rows the rail draws at the top.
-   Only names the cache knows: a pin waiting for its session to reappear is
-   not a row. */
-function sessionPinRows(sessions) {
-  const byName = new Map((sessions || []).map((s) => [s.name, s]));
-  return sessionPins.map((name) => byName.get(name)).filter(Boolean);
-}
-
 /* Paint the pin state onto the controls that show it without rebuilding the
-   rail: the row buttons' lit state and the terminal header's chip. The
-   rebuild is what moves rows between the section and the tree; this is the
-   part that has to be right in between. Guarded per element — the reduced
-   harnesses build rails with no header, and a page mid-load has no rows. */
+   rail: the row buttons' lit state and the terminal header's chip. Guarded
+   per element — the reduced harnesses build rails with no header, and a page mid-load has no rows. */
 function syncSessionPinUi() {
+  renderSessionTabs();
   const list = $("session-list");
   if (list && typeof list.querySelectorAll === "function") {
     for (const button of list.querySelectorAll(".sess-pin")) {
@@ -918,8 +972,8 @@ function syncSessionPinUi() {
       if (typeof button.setAttribute === "function") {
         button.setAttribute("aria-pressed", on ? "true" : "false");
       }
-      button.title = on ? "unpin — return this session to its place in the list"
-        : "pin this session to the top of the list";
+      button.title = on ? "unpin this session tab"
+        : "pin this session as a tab";
     }
   }
   const chip = $("term-pin");
@@ -930,14 +984,13 @@ function syncSessionPinUi() {
       chip.setAttribute("aria-pressed", on ? "true" : "false");
     }
     chip.classList.toggle("on", on);
-    chip.title = on ? "unpin — return this session to its place in the session list"
-      : "pin this session to the top of the session list";
+    chip.title = on ? "unpin this session tab"
+      : "pin this session as a tab";
   }
 }
 
-/* The one verb every pin control calls: the row's 📌, `p` on a focused
-   card, the header chip. Rebuilds the rail so the row moves at once rather
-   than at the next poll — the move is the feedback. */
+/* The one verb every pin control calls: the row's 📌, `f` on a focused
+   card, the header chip and the session tabs. */
 function toggleSessionPin(name) {
   if (!name) return false;
   const on = setSessionPinned(name, !isSessionPinned(name));
@@ -945,66 +998,6 @@ function toggleSessionPin(name) {
   if (typeof refreshSessions === "function") refreshSessions();
   return on;
 }
-/* The pinned sessions as one inline strip at the very top of the rail: each
-   is a small label card, all of them on a single line, rather than a section
-   of full-height rows. A pin is a shortcut back to a session the reader keeps
-   returning to, so the card carries the name and the state dot and nothing
-   else. The row itself stays where the lineage put it -- still exempt from
-   the state filter, because that exemption is the other half of what a pin
-   is for -- and the strip is only the fast way back to it. */
-function buildSessionPinBar(sessions) {
-  const bar = document.createElement("li");
-  bar.className = "session-pinbar";
-  const mark = document.createElement("span");
-  mark.className = "session-pinbar-mark";
-  mark.textContent = "\u{1F4CC}";
-  mark.title = "sessions you pinned — click one to open it";
-  bar.appendChild(mark);
-  for (const s of sessions) {
-    const card = document.createElement("span");
-    card.className = "pin-card";
-    card.dataset.name = s.name;
-    const dot = document.createElement("span");
-    dot.className = `dot ${s.status}${s.status === "exited" && s.paused_at ? " paused" : ""}`;
-    const label = document.createElement("span");
-    label.className = "pin-card-name";
-    label.textContent = s.name;
-    // Letting go of this one pin, without opening the session first. The
-    // strip's whole point is that it is one line, so the control is the
-    // smallest thing that can still be pressed.
-    const drop = document.createElement("button");
-    drop.className = "pin-card-off";
-    drop.type = "button";
-    drop.textContent = "×";
-    drop.title = `unpin ${s.name} — its row keeps its place in the list`;
-    drop.addEventListener("click", (e) => {
-      e.stopPropagation();   // the card opens the session; this does not
-      toggleSessionPin(s.name);
-    });
-    card.append(dot, label, drop);
-    card.title = `${s.name} — open it`;
-    card.addEventListener("click", () => {
-      location.hash = "#/s/" + encodeURIComponent(s.name);
-    });
-    bar.append(card);
-  }
-  // Letting go of every pin at once, at the end of the strip where it cannot
-  // be hit while reaching for a card.
-  const clear = document.createElement("button");
-  clear.className = "session-pinbar-clear";
-  clear.type = "button";
-  clear.textContent = "unpin all";
-  clear.title = "unpin every session — the strip goes, the rows stay where they are";
-  clear.addEventListener("click", (e) => {
-    e.stopPropagation();
-    if (typeof clearSessionPins === "function") clearSessionPins();
-    if (typeof syncSessionPinUi === "function") syncSessionPinUi();
-    refreshSessions();
-  });
-  bar.appendChild(clear);
-  return bar;
-}
-
 /* ---- end rail pins ---------------------------------------------------- */
 
 /* Convert lineage-ordered rows into headings and rows. Each selected group
@@ -1242,14 +1235,10 @@ function syncSessionFilters(sessions) {
     button.setAttribute("aria-pressed", filter === sessionFilter ? "true" : "false");
   }
   const searching = typeof sessionMatchesSearch === "function";
-  const pinning = typeof isSessionPinned === "function";
   for (const row of list.querySelectorAll("li[data-name]")) {
     const session = (sessions || []).find((s) => s.name === row.dataset.name);
-    // A pinned row is exempt from the state filter (that is what the pin is
-    // for) but not from the search: a name typed is a name looked for.
-    const pinned = pinning && !!session && isSessionPinned(session.name);
     row.classList.toggle("session-filtered", !session
-      || (!pinned && !sessionMatchesFilter(session))
+      || !sessionMatchesFilter(session)
       || (searching && !sessionMatchesSearch(session)));
   }
   // Search can change without rebuilding the rail. Open every ancestor of
@@ -1581,8 +1570,8 @@ async function refreshSessions(options) {
   briefingLLM = data.llm_configured !== false;
   ragConfigured = data.rag_configured === true;
   forgetDeadSessions();
-  // A pin outlives its session only until the next poll says it is gone.
-  if (typeof pruneSessionPins === "function") pruneSessionPins(sessionsCache);
+  // Pins and recent tabs may refer to records outside this poll category.
+  if (typeof renderSessionTabs === "function") renderSessionTabs();
   const list = $("session-list");
   // Role countdown values change on every response, while the rail rows do
   // not render those numbers.  Exclude only those moving values from the DOM
@@ -1596,8 +1585,7 @@ async function refreshSessions(options) {
   // are refreshed in place instead (refreshRailSeen, below the row loop).
   // `last_output_at` is a detail-panel fact no row draws, and `viewers` only
   // feeds the seen line's "now".
-  // The pins are in it too: pinning moves a row between the section at the
-  // top and its place in the tree, and that is a rebuild.
+  // Pin controls reflect the same state as the main session tabs.
   const pins = typeof sessionPinnedNames === "function" ? sessionPinnedNames() : [];
   const signature = JSON.stringify(
     [briefingLLM, sessionsCache, groupOrder, meshCache, pins],
@@ -1639,14 +1627,6 @@ async function refreshSessions(options) {
   // one only when the argument is absent. Handed an index it matches
   // nothing, the visible set comes back empty, and every row is laid out
   // as a root with no indent.
-  // The pinned sessions, in pin order, for the strip drawn above the list.
-  // They are a shortcut and not a relocation: each keeps its own row in the
-  // lineage tree, so a pin no longer tears a branch apart to lift one
-  // session out of it. The state filter still does not apply to a pinned
-  // session -- sessionMatchesFilter exempts it where the rows are built --
-  // which is the other half of what a pin is for.
-  const pinnedRows = rebuild && typeof sessionPinRows === "function"
-    ? sessionPinRows(sessionsCache) : [];
   const visibleSessions = sessionsCache.filter((s) => sessionMatchesFilter(s));
   const entries = rebuild ? byLineage(sessionsCache, visibleSessions) : [];
   // Isolated web harnesses retain the old mesh-only variable. The fallback
@@ -1675,10 +1655,6 @@ async function refreshSessions(options) {
   // expose Document#createDocumentFragment, which lets the shipped rail use
   // group containers while those reduced consumers retain their old shape.
   const nestedGroupContainers = typeof document.createDocumentFragment === "function";
-  // The pins, inline on one line above everything the list draws.
-  if (pinnedRows.length && typeof buildSessionPinBar === "function") {
-    list.appendChild(buildSessionPinBar(pinnedRows));
-  }
   const groupBodies = [];
   // The count each open heading shows, one per level, kept alongside the
   // bodies so a row appended at any depth raises every heading above it.
@@ -1999,8 +1975,8 @@ async function refreshSessions(options) {
       if (typeof pin.setAttribute === "function") {
         pin.setAttribute("aria-pressed", pinnedNow ? "true" : "false");
       }
-      pin.title = pinnedNow ? "unpin — return this session to its place in the list"
-        : "pin this session to the top of the list";
+      pin.title = pinnedNow ? "unpin this session tab"
+        : "pin this session as a tab";
       pin.addEventListener("click", (e) => {
         e.stopPropagation();   // the row itself attaches; this button does not
         toggleSessionPin(s.name);
@@ -10533,6 +10509,10 @@ let currentPage = "home";
 
 function showView(name) {
   currentPage = name;
+  if (typeof sessionTabHistory !== "undefined" && sessionTabHistory) {
+    if (name === "terminal" && currentName) sessionTabHistory.visit(currentName);
+    renderSessionTabs();
+  }
   const showTerm = name === "terminal";
   // The terminal element is never removed and `term`/`ws` are never touched
   // here: a live PTY socket and 5000 lines of scrollback must survive every

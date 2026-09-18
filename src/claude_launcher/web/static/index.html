@@ -163,6 +163,7 @@
   <div id="rail-split"></div>
 
   <main id="main">
+    <nav id="session-tabs" class="hidden" aria-label="Recent and pinned sessions"></nav>
     <section id="observer-view" class="hidden">
       <section id="observer-token-summary" aria-label="관찰 API 토큰 사용량">
         <button id="observer-token-toggle" aria-expanded="false" aria-controls="observer-token-detail"><span>토큰</span><span id="observer-token-compact">조회 중…</span><span id="observer-token-chevron" aria-hidden="true">⌄</span></button>
@@ -239,14 +240,14 @@
            to the card that stands for it. Owned by gotoSessionCard(). -->
       <button id="term-goto" class="term-btn goto-chip" type="button"
               title="scroll the session list to this session's card">⇱ card</button>
-      <!-- Pin this session to the top of the session list. A toggle: lit
+      <!-- Pin this session in the main tab strip. A toggle: lit
            (aria-pressed) while the session is pinned. The same verb as the
            row's 📌 and `p` on a focused card, placed here because the
            header is where the reader is when they decide a session is one
            they will keep coming back to. Owned by toggleSessionPin(). -->
       <button id="term-pin" class="term-btn pin-chip" type="button"
               aria-pressed="false"
-              title="pin this session to the top of the session list">📌</button>
+              title="pin this session as a tab">📌</button>
       <span id="term-status" class="badge"></span>
       <!-- This session's latest throughput through the metering shim
            (tokens/s of the last answer), from the same record the rail row
@@ -857,6 +858,7 @@
 <script src="static/observer.js"></script>
 <script src="static/diagram-viewport.js"></script>
 <script src="static/search-anything.js"></script>
+<script src="static/session-tabs.js"></script>
 <script src="static/app.js"></script>
 </body>
 </html>
