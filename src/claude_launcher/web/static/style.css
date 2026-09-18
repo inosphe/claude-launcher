@@ -1214,18 +1214,32 @@ a.cflow-scope:hover { background: #1d3559; text-decoration: underline; }
      right: 14px), so no flowing control can slide under it however tight the
      row gets — the overlap the header used to draw when the column narrowed. */
   padding: 8px 96px 8px 14px;
-  display: flex; flex-wrap: wrap; align-items: center; gap: 8px 10px;
+  display: flex; flex-wrap: nowrap; align-items: center; gap: 8px 10px;
   background: #1b1e24; border-bottom: 1px solid #2a2e36; font-size: 13px;
 }
-/* The header is a control bar, and when the column narrows — the detail rail
-   opening, a small window — its buttons wrap onto a second line rather than
-   squeezing until their labels clip. Each keeps its own width; the action
-   group dissolves into the row (display: contents) so its buttons wrap one at
-   a time, while the zoom trio stays welded as a single pill. */
+/* toolbar.js measures available space, then uses icons and an overflow menu. */
 #term-header > *, .term-actions > * { flex: none; }
 .term-actions { display: contents; }
 .term-btn { white-space: nowrap; }
-#term-title { white-space: nowrap; }
+#term-title { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; flex-shrink: 1; }
+#term-header.term-compact { padding-right: 50px; gap: 4px; }
+#term-header.term-compact [data-toolbar-icon] {
+  font-size: 0; min-width: 28px; width: 28px; max-width: 28px;
+  padding: 2px 0; text-align: center; overflow: hidden;
+}
+#term-header.term-compact [data-toolbar-icon]::before {
+  content: attr(data-toolbar-icon); font-size: 13px; line-height: 1.6;
+}
+#term-header .toolbar-overflow { display: none !important; }
+#term-more { flex: none; }
+#term-overflow-menu {
+  position: fixed; inset: auto; margin: 0; padding: 6px;
+  width: max-content; max-width: calc(100vw - 16px); max-height: min(70vh, 480px);
+  overflow-y: auto; overflow-x: hidden; background: #1b1e24;
+  border: 1px solid #3c444d; border-radius: 6px; color: #c6cdd5;
+}
+#term-overflow-menu:popover-open { display: flex; flex-direction: column; gap: 4px; }
+#term-overflow-menu .term-btn { text-align: left; white-space: normal; overflow-wrap: anywhere; }
 .badge {
   font-size: 11px; padding: 2px 8px; border-radius: 10px; background: #30363d;
 }
