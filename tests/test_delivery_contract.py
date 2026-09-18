@@ -48,6 +48,7 @@ RAW_WRITER_ALLOWLIST = {
     ("daemon/session.py", "send_keys"): "implements the raw keystroke path",
     ("daemon/session.py", "submit_open_draft"): "the bare CR that submits a human's own unsent line, for an operator forcing past it",
     ("daemon/api.py", "h_session_keys"): "raw keyboard passthrough over HTTP",
+    ("daemon/api.py", "_deliver_pasted_image"): "the image-paste chord a human pressed in the web session line — a keystroke the harness reads its own clipboard with, carrying no message text",
     ("daemon/ws.py", "_pump_from_client"): "raw keyboard passthrough over WebSocket (terminal_ws receive loop)",
     ("daemon/ws.py", "cli_ws"): "raw keystroke passthrough to the CLI tab's own shell pty",
 }

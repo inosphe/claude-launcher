@@ -13,6 +13,10 @@ harnesses:
     empty_env: [ANTHROPIC_API_KEY]
     opening_transport: argv
     input_readiness: bracketed-paste
+    # Claude Code reads an image off the clipboard on Alt+V, which is what the
+    # web session line's image paste sends after the daemon fills the machine
+    # clipboard. tmux key names: M- is Alt.
+    image_paste_keys: [M-v]
     skip_permissions_args: [--dangerously-skip-permissions]
     btw:
       command: /btw

@@ -8405,14 +8405,20 @@ function insertTermInputText(field, text) {
   autogrowTermInput(field);
 }
 
-/* ---- Alt+V: a clipboard image becomes a path in the line ----------------
+/* ---- Alt+V: a clipboard image goes to the harness --------------------
    The program in the PTY reads bytes, so there is no way to hand it an
-   attachment from here. What CAN be handed over is a path: the image is
-   uploaded, the daemon writes it beside the session's own state, and the
-   path it answers with is typed into the composer — Claude Code opens an
-   image path given in a prompt, which is what makes the round trip worth
-   taking. The machine clipboard is never written to; it is shared with the
-   person at this keyboard and with every other session on this machine.
+   attachment from here. What it does accept is an image off the clipboard —
+   so the image is uploaded, the daemon stores it, puts it on the clipboard
+   of the machine it runs on, and sends the keystroke that harness reads an
+   image with. Nothing is typed into the composer.
+
+   This used to put the daemon's path to the file into the line instead.
+   That only worked for a browser on the daemon's own machine: from another
+   PC the path names a file the person cannot open or check.
+
+   The response says whether the hand-over happened (`delivered`) and why
+   not when it did not (`reason`) — the file is stored either way, so the
+   two are separate answers and the line shows which one it got.
 
    Two ways in, because the browsers differ on which one a page may use:
    Alt+V reads the clipboard itself (navigator.clipboard.read, which needs
@@ -8432,12 +8438,16 @@ async function uploadPastedImage(blob, note) {
       if (note) termInputNote(note, doc.error || "the image was not stored", true);
       return false;
     }
-    const field = $("term-input-field");
-    if (!field) return false;
-    // Padded with a space so the path does not fuse with what is already
-    // typed around it — a path glued to a word is not a path any more.
-    insertTermInputText(field, `${doc.path} `);
-    if (note) termInputNote(note, `image stored: ${doc.path}`);
+    if (!doc.delivered) {
+      // Stored but not handed over. The daemon's reason is shown as it came:
+      // it names the thing that has to change (an undeclared harness, a
+      // missing clipboard tool), and a rewrite here would lose that.
+      if (note) {
+        termInputNote(note, doc.reason || "the image was stored but not delivered", true);
+      }
+      return false;
+    }
+    if (note) termInputNote(note, "image sent to the session");
     return true;
   } catch {
     if (note) termInputNote(note, "nothing was stored — the daemon is unreachable", true);
