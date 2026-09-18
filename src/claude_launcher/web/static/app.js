@@ -9092,7 +9092,47 @@ function updateScrollChip() {
    its parked terminal on the next poll, and a session respawned under the
    same name is re-followed by the same pid test the live link already uses. */
 const TERM_CACHE_MAX = 3;      // the on-screen terminal plus this many parked
+
+/* How many parked terminals may keep their socket. A parked socket is the
+   whole reason coming back is instant, and it is also a connection this
+   browser is holding for a screen nobody is looking at. Firefox allows six
+   per server and the page already spends three on polling (HTTP_BUDGET plus
+   the health probe outside it), so the terminals may have three: the one on
+   screen, one parked, and a free slot for the next session's handshake.
+   Holding more is what put the ceiling within reach -- three parked sockets
+   and the polls reached exactly six, and the next terminal's upgrade was
+   queued in the browser and never sent, which showed up as a terminal stuck
+   on "[disconnected -- reconnecting...]" with nothing in the daemon's
+   records to explain it (claunch-restart-disconnect-banner-12p2).
+
+   The terminals themselves are still cached to TERM_CACHE_MAX: the xterm
+   object and its scrollback are memory, not a connection, and returning to
+   one whose socket was released costs a socket and one repaint -- the path
+   restoreTerminal already takes for a parked socket that died. */
+const PARKED_SOCKET_MAX = 1;
 const keptTerms = new Map();   // session name -> parked {term, fitAddon, ws, ...}
+
+/* Let a parked terminal's socket go, keeping the terminal itself. The shim
+   stops being wired first, so a close this asks for cannot be read as the
+   parked session's link failing. */
+function releaseParkedSocket(b) {
+  if (!b || !b.ws) return;
+  const sock = b.ws;
+  b.ws = null;
+  sock.onopen = null;
+  sock.onmessage = null;
+  sock.onclose = null;
+  try { sock.close(1000, "parked"); } catch { /* already closed */ }
+}
+
+/* Keep the newest parked sockets, release the rest. Called with the cache in
+   insertion order, which is least-recently-parked first. */
+function trimParkedSockets() {
+  const names = [...keptTerms.keys()];
+  for (const name of names.slice(0, Math.max(0, names.length - PARKED_SOCKET_MAX))) {
+    releaseParkedSocket(keptTerms.get(name));
+  }
+}
 
 function park(b) {
   if (b.term && b.term.element) b.term.element.style.display = "none";
@@ -9131,6 +9171,7 @@ function suspendActive() {
   while (keptTerms.size > TERM_CACHE_MAX - 1) {
     dropKept(keptTerms.keys().next().value);     // the least recently parked
   }
+  trimParkedSockets();
   park(b);
   resetLive();
 }
