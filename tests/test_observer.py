@@ -214,6 +214,45 @@ def test_incremental_evidence_uses_forward_pages(setup, monkeypatch):
     assert "private" not in json.dumps(result[3])
 
 
+def test_communication_input_advances_cursor_without_call(setup, monkeypatch):
+    service, session = setup
+    service.data["sessions"]["s1"] = {"identity": ["path", "c1"], "cursor": 1,
+        "state_source": {"cflow": None, "status": "busy"}}
+    monkeypatch.setattr(observer.transcript_view, "page", lambda *a, **kw: {
+        "source": "path", "total": 2, "records": [{"seq": 2, "role": "assistant",
+        "blocks": [{"type": "text", "text": "리더에게 메시지를 전달했습니다."}]}]})
+    monkeypatch.setattr(observer.briefing, "gather_cflow", lambda *a: None)
+    async def unexpected(*a):
+        pytest.fail("Communication alone must not call the model")
+    monkeypatch.setattr(observer, "complete", unexpected)
+    asyncio.run(service.observe(session, CFG))
+    assert service.data["sessions"]["s1"]["cursor"] == 2
+
+
+def test_communication_output_and_legacy_display_filtered(setup, monkeypatch):
+    service, session = setup
+    service.data["sessions"]["s1"] = {"summary": "테스트 12개 통과",
+        "messages": [{"role": "system", "content": "old observer instructions"}],
+        "config": [CFG[k] for k in ("profile", "model", "endpoint")], "events": [
+        {"id": "legacy", "text": "리더에게 메시지를 전달했습니다.", "at": "2026-09-18"}]}
+    monkeypatch.setattr(service, "evidence", lambda *a: evidence())
+    async def fake(cfg, messages):
+        assert messages[0]["content"] == observer.SYSTEM
+        return {"summary": "응답 대기 중입니다.", "state": "waiting", "events": [
+            {"kind": "result", "text": "리더에게 메시지를 전달했습니다.", "source": "transcript:1"},
+            {"kind": "test", "text": "테스트 24개 통과", "source": "transcript:1"}]}, {}
+    monkeypatch.setattr(observer, "complete", fake)
+    asyncio.run(service.observe(session, CFG))
+    row = service.snapshot()["sessions"][0]
+    assert row["summary"] == "테스트 12개 통과"
+    assert [event["text"] for event in row["events"]] == ["테스트 24개 통과"]
+    assert service.data["sessions"]["s1"]["events"][0]["id"] == "legacy"
+    service.reports.publish("s1", {"text": "확인했습니다."})
+    assert service.snapshot()["sessions"][0]["summary"] == "테스트 12개 통과"
+    service.reports.publish("s1", {"text": "확인했습니다.", "question": True})
+    assert any(e.get("question") for e in service.snapshot()["sessions"][0]["events"])
+
+
 def test_http_completion_contract_and_cache_usage():
     async def scenario():
         async def completion(request):
