@@ -138,6 +138,12 @@ def report(session: str, answers: list) -> List[dict]:
     for preset_id, answer in incoming.items():
         reports[preset_id] = {"answer": answer, "reported_at": at, "source": "agent"}
     _write(data)
+    from . import search_records
+    presets = {p["id"]: p for p in data["presets"]}
+    search_records.capture(session, "checks", [
+        {**presets[key], "answer": answer, "reported_at": at}
+        for key, answer in incoming.items()
+    ], at)
     return session_entries(session, enabled_only=True)
 
 

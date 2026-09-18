@@ -65,6 +65,8 @@ class Events:
             with atomic.scratch(path) as tmp:
                 tmp.write_text(json.dumps(rows, ensure_ascii=False), encoding="utf-8")
                 atomic.replace(tmp, path)
+            from . import search_records
+            search_records.remember(session.sdef.name, [event])
         except OSError:
             # A successful control operation must not appear to fail because
             # its history could not be persisted (which would invite retries).

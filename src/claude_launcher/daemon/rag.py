@@ -388,7 +388,8 @@ class VectorIndex:
     file made under another model is discarded rather than mixed.
     """
 
-    def __init__(self, path: Path, *, model: str, dims: int) -> None:
+    def __init__(self, path: Path, *, model: str, dims: int, signature: str = "") -> None:
+        self.signature = signature
         self.path = path
         self.model = model
         self.dims = dims
@@ -410,7 +411,7 @@ class VectorIndex:
         file_dims = int(data.get("dims") or 0)
         # dims 0 means "the model's own width": adopt whatever the file was
         # made with. A configured width that differs is another index.
-        if data.get("model") != self.model or (self.dims and file_dims != self.dims):
+        if data.get("model") != self.model or (self.dims and file_dims != self.dims) or (self.signature and data.get("signature") != self.signature):
             return
         if not self.dims:
             self.dims = file_dims
@@ -432,6 +433,7 @@ class VectorIndex:
             "format": FORMAT,
             "model": self.model,
             "dims": self.dims,
+            "signature": self.signature,
             "updated_at": self.updated_at,
             "docs": {
                 doc_id: {"h": e.hash, "v": [_encode(v) for v in e.vecs], "m": e.meta}
@@ -459,6 +461,8 @@ class VectorIndex:
             return
         if not self.dims:
             self.dims = len(vecs[0])
+        if any(len(v) != self.dims for v in vecs):
+            raise RagError("embedding dimensions changed; rebuild the index")
         self.entries[doc.id] = Entry(doc.hash, list(vecs), dict(doc.meta))
         self.updated_at = _now_iso()
 
@@ -477,6 +481,8 @@ class VectorIndex:
     # -- queries -------------------------------------------------------- #
     def rank(self, qvec: array, k: int, *, exclude: Iterable[str] = ()) -> List[Tuple[str, float]]:
         """The ``k`` best documents by their best chunk, best first."""
+        if self.dims and len(qvec) != self.dims:
+            raise RagError("embedding dimensions changed; rebuild the index")
         skip = set(exclude)
         scored: List[Tuple[str, float]] = []
         for doc_id, entry in self.entries.items():
@@ -545,7 +551,7 @@ class Progress:
         }
 
 
-KINDS = ("beads", "sessions")
+KINDS = ("beads", "sessions", "all")
 
 #: The watcher's sleep while the feature is off or ``watch_interval`` is 0:
 #: it still ticks, because a ``rag:`` block filled in later is noticed by
@@ -595,6 +601,7 @@ class RagService:
         self._client_factory = client_factory
         self._root_dir = root_dir
         self._briefing_for = briefing_for or _cached_briefing
+        self.all_docs = None
         self._indexes: Dict[str, VectorIndex] = {}
         self._progress: Dict[str, Progress] = {}
         self._roots: Dict[str, Optional[Path]] = {}
@@ -638,16 +645,17 @@ class RagService:
         if kind == "beads":
             digest = hashlib.sha1(str(root or "").encode("utf-8", "replace")).hexdigest()[:12]
             return f"beads-{digest}"
-        return "sessions"
+        return kind
 
     def _index(self, kind: str, root: Optional[Path], cfg: dict) -> VectorIndex:
         key = self._key(kind, root)
         model = str(cfg.get("embedding_model") or "")
         dims = int(cfg.get("dimensions") or 0)
+        signature = content_hash(str(cfg.get("base_url") or ""), model, str(dims))
         index = self._indexes.get(key)
-        if index is None or index.model != model or (dims and index.dims != dims):
+        if index is None or index.model != model or index.signature != signature or (dims and index.dims != dims):
             base = self._root_dir if self._root_dir is not None else paths.rag_dir()
-            index = VectorIndex(base / f"{key}.json", model=model, dims=dims)
+            index = VectorIndex(base / f"{key}.json", model=model, dims=dims, signature=signature)
             index.load()
             self._indexes[key] = index
         self._roots[key] = root
@@ -661,6 +669,8 @@ class RagService:
         return prog
 
     async def _docs(self, kind: str, root: Optional[Path]) -> List[Doc]:
+        if kind == "all":
+            return await self.all_docs() if self.all_docs else []
         if kind == "beads":
             if self.board is None or root is None:
                 return []
@@ -719,6 +729,7 @@ class RagService:
             docs = await self._docs(kind, root)
             if force:
                 index.entries.clear()
+                index.dims = int(cfg.get("dimensions") or 0)
             stale, gone = index.diff(docs)
             for doc_id in gone:
                 index.drop(doc_id)
@@ -728,8 +739,7 @@ class RagService:
             prog.pending = len(stale)
             prog.indexed = prog.total - prog.pending
             if not stale:
-                if gone:
-                    index.save()
+                index.save()
                 return
             client = self._client(cfg)
             batch = max(1, int(cfg.get("batch") or 1))
@@ -793,7 +803,7 @@ class RagService:
         """
         if kind not in KINDS:
             raise ValueError(f"unknown corpus {kind!r}")
-        if kind == "sessions":
+        if kind in ("sessions", "all"):
             root = None
         elif root is None:
             return False
@@ -824,10 +834,14 @@ class RagService:
         except Exception:
             pass
         self.enqueue("beads", root)
+        if self.all_docs:
+            self.enqueue("all")
 
     def on_sessions_changed(self, *_args) -> None:
         """The registry's and the briefing cache's hook (either signature)."""
         self.enqueue("sessions")
+        if self.all_docs:
+            self.enqueue("all")
 
     def watch(self, root: Optional[Path]) -> None:
         """Have the watcher stat ``root``'s board from now on."""
@@ -871,6 +885,8 @@ class RagService:
             if self.enqueue("beads", root):
                 queued += 1
         if self.enqueue("sessions"):
+            queued += 1
+        if self.all_docs and self.enqueue("all"):
             queued += 1
         return queued
 
@@ -1004,6 +1020,8 @@ class RagService:
             if invalidate is not None:
                 invalidate(root)
         self.enqueue("beads", root)
+        if self.all_docs:
+            self.enqueue("all")
 
     def queue_view(self) -> dict:
         return {
@@ -1059,13 +1077,20 @@ class RagService:
                 order.remove(doc_id)
                 order.insert(0, doc_id)
         reranked = False
+        warnings = []
         rerank_scores: Dict[str, float] = {}
         rerank_ms = None
         if rerank and cfg.get("rerank_model") and order:
             top = order[: max(limit, int(cfg.get("rerank_top") or limit))]
             texts = [self._rerank_text(index, doc_id) for doc_id in top]
             started = time.monotonic()
-            pairs = await client.rerank(query, texts, len(top))
+            try:
+                pairs = await client.rerank(query, texts, len(top))
+            except RagError:
+                if kind != "all":
+                    raise
+                pairs = []
+                warnings.append("Rerank unavailable; showing embedding and exact-match results.")
             rerank_ms = int((time.monotonic() - started) * 1000)
             if pairs:
                 reranked = True
@@ -1094,6 +1119,7 @@ class RagService:
             "root": str(root) if root else None,
             "results": results,
             "reranked": reranked,
+            "warnings": warnings,
             "index": prog.view(),
             "timing": {"embed_ms": embed_ms, "rerank_ms": rerank_ms},
         }
@@ -1102,7 +1128,7 @@ class RagService:
         meta = index.entries[doc_id].meta
         title = meta.get("title") or meta.get("name") or doc_id
         excerpt = meta.get("excerpt") or meta.get("one_line") or ""
-        return f"{title}\n{excerpt[:RERANK_CHARS]}"
+        return f"{title}\n{excerpt if meta.get('kind') else excerpt[:RERANK_CHARS]}"
 
     async def related(self, root: Path, issue_id: str, *, limit: int = 8, wait: float = 2.0) -> dict:
         """The issues nearest to one — the dedup question, asked of the index."""
@@ -1147,7 +1173,7 @@ class RagService:
             prog = self._progress_of(key)
             row = {
                 "key": key,
-                "kind": "sessions" if key == "sessions" else "beads",
+                "kind": key if key in ("sessions", "all") else "beads",
                 "root": str(self._roots.get(key)) if self._roots.get(key) else None,
                 "documents": len(index.entries),
                 "dims": index.dims,

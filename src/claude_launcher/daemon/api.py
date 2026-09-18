@@ -373,6 +373,8 @@ def build_app(
         change_hooks.append(rag_service.on_sessions_changed)
     manager.exit_hooks.append(rag_service.on_sessions_changed)
     briefing.persist_hooks.append(rag_service.on_sessions_changed)
+    from . import search_anything
+    search_anything.install(app)
     app.on_startup.append(_start_rag)
     app.on_shutdown.append(_stop_rag)
     # The measurement window: one per daemon, injected for tests. Its

@@ -12374,6 +12374,7 @@ async function ragReindex(row, force) {
 
 function ragIndexLine(row) {
   const parts = [`${row.documents} document${row.documents === 1 ? "" : "s"}`];
+  if (row.dims) parts.push(`${row.dims} dimensions`);
   if (row.total) parts.push(`${row.indexed}/${row.total} current`);
   if (row.pending) parts.push(`${row.pending} pending`);
   parts.push(row.syncing ? "syncing" : "idle");
@@ -12399,8 +12400,7 @@ function ragCard() {
   card.appendChild(el("p", "wf-note",
     "The search boxes on the rail, the Beads page and the issue pickers ask " +
     "an embedding endpoint to rank the board and the fleet by meaning. " +
-    "Configured in the rag: block of ~/.claunch.yaml; the index lives under " +
-    "the daemon directory and follows the board on its own."));
+    "Manage the endpoint and models in Search settings below. Indexes update automatically."));
   if (ragError) card.appendChild(el("p", "error", ragError));
   const st = ragStatus;
   if (!st) {
@@ -12428,7 +12428,7 @@ function ragCard() {
   for (const row of st.indexes || []) {
     const item = el("div", "rag-index-row");
     const text = el("div", "rag-index-text");
-    text.appendChild(el("strong", null, row.kind === "sessions" ? "sessions" : `board ${row.root || ""}`.trim()));
+    text.appendChild(el("strong", null, row.kind === "all" ? "Search anything" : row.kind === "sessions" ? "sessions" : `board ${row.root || ""}`.trim()));
     text.appendChild(el("span", "beads-bits", ragIndexLine(row)));
     if (row.error) text.appendChild(el("span", "error", row.error));
     item.appendChild(text);
@@ -15017,6 +15017,7 @@ function renderWorkspaces() {
   view.appendChild(statusCheckCard());
 
   view.appendChild(ragCard());
+  if (globalThis.SearchAnything) view.appendChild(SearchAnything.settingsCard());
 
   view.appendChild(ghCard());
   view.appendChild(relaySettingsCard());

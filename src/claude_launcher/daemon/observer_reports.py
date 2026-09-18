@@ -36,6 +36,8 @@ class Reports:
         return self.cache[name]
 
     def save(self, name):
+        from . import search_records
+        search_records.remember(name, self.rows(name))
         path = self.path(name)
         with atomic.scratch(path) as scratch:
             scratch.write_text(json.dumps(self.rows(name), ensure_ascii=False), encoding="utf-8")

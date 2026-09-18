@@ -31,7 +31,7 @@ import aiohttp
 from aiohttp import web
 
 from .. import atomic, lineage, profile, providers, store
-from . import briefing, paths, transcript_view, observer_reports, session_events
+from . import briefing, paths, transcript_view, observer_reports, session_events, search_records
 
 try:
     import truststore
@@ -161,6 +161,7 @@ class Observer:
         self.loaded = set()
         self.task = None
         self.error = None
+        self.records_imported = False
         self.wake = asyncio.Event()
 
     def load_session(self, name):
@@ -171,6 +172,7 @@ class Observer:
                 row = json.loads(self.session_path(name).read_text(encoding="utf-8"))
                 if isinstance(row, dict):
                     self.data["sessions"][name] = row
+                    search_records.remember(name, row.get("events", []))
             except (OSError, ValueError):
                 pass
         return self.data["sessions"].get(name, {})
@@ -179,6 +181,11 @@ class Observer:
         return self.path.parent / "observer" / (hashlib.sha256(name.encode()).hexdigest() + ".json")
 
     def save(self, name=None):
+        for n, row in self.data["sessions"].items():
+            if name is None or n == name:
+                search_records.remember(n, row.get("events", []))
+                if row.get("summary"):
+                    search_records.capture(n, "summary", {"summary": row["summary"], "state": row.get("state")}, row.get("generated_at", ""))
         # A busy session never rewrites every other session's conversation.
         writes = [(self.session_path(name), self.data["sessions"][name])] if name else [
             (self.path, {"enabled": self.data.get("enabled", False)}),
@@ -304,13 +311,17 @@ class Observer:
         self.save(name)
 
     def snapshot(self):
+        if not self.records_imported:
+            search_records.import_current()
+            self.records_imported = True
         result = []
         for session in self.manager.list():
             name = session.sdef.name
             row = self.load_session(name)
             info = session.info()
             direct = self.reports.rows(name)
-            events = sorted(row.get("events", []) + direct + self.session_events.rows(session),
+            recorded = search_records.rows(name, kinds=("briefing", "checks"), limit=200)
+            events = sorted(row.get("events", []) + direct + recorded + self.session_events.rows(session),
                             key=lambda e: session_events.timestamp(e.get("at")))
             latest = direct[-1] if direct else None
             summary = row.get("summary")
@@ -368,6 +379,10 @@ def install(app):
         return web.json_response({"error": "event not found"}, status=404)
 
     async def event_evidence(request):
+        stored = search_records.find(request.match_info["name"], request.match_info["event"])
+        if stored:
+            return web.json_response(stored.get("evidence", stored))
+        observer.load_session(request.match_info["name"])
         for event in observer.data["sessions"].get(request.match_info["name"], {}).get("events", []):
             if event["id"] == request.match_info["event"]:
                 return web.json_response(event.get("evidence", {}))
