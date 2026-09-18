@@ -123,6 +123,11 @@ async def _serve(host: str, port: int, cfg: dict, bound: Optional[dict] = None) 
 
     runner = web.AppRunner(app, access_log=None)
     await runner.setup()
+    # aiohttp's own connection count, which the WebSocket registry cannot
+    # see: /api/connections reports both, so a reader can tell the sockets
+    # apart from the ordinary request traffic sharing the same per-peer
+    # budget (daemon/connections.py).
+    app["http_server"] = runner.server
     # Default shutdown_timeout is 60s per lingering connection — far longer
     # than the restart flow's patience (stop waits 10s, the successor's lock
     # grace is 15s). Keep teardown well inside that budget.

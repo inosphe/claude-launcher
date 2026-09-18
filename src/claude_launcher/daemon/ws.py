@@ -109,6 +109,7 @@ from typing import Optional
 
 from aiohttp import WSMsgType, web
 
+from . import connections as conn_mod
 from .notice import Notice, Overlay
 from .session import Session, SessionGone
 
@@ -346,6 +347,17 @@ async def terminal_ws(request: web.Request) -> web.WebSocketResponse:
     await ws.prepare(request)
 
     request.app["websockets"].add(ws)
+    # What this socket is, for `GET /api/connections` and the log line below.
+    # Written at the open, not only at the close: a viewer that cannot get a
+    # socket up leaves nothing behind, so "how many are open right now" is the
+    # only reading that answers whether new ones are being refused.
+    conns = conn_mod.install(request.app)
+    record = conns.opened("terminal", session.sdef.name, request)
+    log.info(
+        "terminal websocket opened session=%s peer=%s:%s open=%d",
+        session.sdef.name, record["peer_ip"], record["peer_port"],
+        conns.open_count(),
+    )
     queue = session.subscribe()
     # Someone is looking at this session. This route is the only way to watch
     # one — the web terminal and `claunch attach` both arrive here — so this
@@ -474,9 +486,11 @@ async def terminal_ws(request: web.Request) -> web.WebSocketResponse:
         session.note_visit()
         if not ws.closed:
             await ws.close()
+        conns.closed(record, ws.close_code, ws.exception())
         log.info(
-            "terminal websocket closed session=%s code=%s error=%r",
+            "terminal websocket closed session=%s code=%s error=%r open=%d",
             session.sdef.name, ws.close_code, ws.exception(),
+            conns.open_count(),
         )
     return ws
 
@@ -499,6 +513,8 @@ async def cli_ws(request: web.Request) -> web.WebSocketResponse:
     ws = web.WebSocketResponse(heartbeat=HEARTBEAT)
     await ws.prepare(request)
     request.app["websockets"].add(ws)
+    conns = conn_mod.install(request.app)
+    record = conns.opened("cli", "(cli shell)", request)
 
     # First viewer of this daemon incarnation brings the shell up; afterwards
     # it lives on its own until it exits (see ShellPty.start_once).
@@ -558,6 +574,7 @@ async def cli_ws(request: web.Request) -> web.WebSocketResponse:
         shell.unsubscribe(queue)
         if not ws.closed:
             await ws.close()
+        conns.closed(record, ws.close_code, ws.exception())
     return ws
 
 
