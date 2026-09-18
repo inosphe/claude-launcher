@@ -108,7 +108,13 @@ new Function(
   + slice("beadsFilterIssues") + slice("beadsSortIssues") + slice("beadsStatusBadge")
   + slice("beadsPriBadge")
   + slice("beadsHierarchy") + slice("beadsLaneRows") + slice("beadsCard")
-  + slice("beadsLanes") + slice("beadsLane") + slice("beadsBoardSection")
+  + "const BEADS_BACKLOG = new Set([\"open\"]);\n"
+  + "const BEADS_GROUPS = " + JSON.stringify([
+      { key: "backlog", title: "backlog", note: "nobody has taken these up" },
+      { key: "todo", title: "TODO", note: "taken up, in review, or finished" },
+    ]) + ";\n"
+  + slice("beadsLanes") + slice("beadsGroupOf") + slice("beadsLaneGroups")
+  + slice("beadsGroupBlock") + slice("beadsLane") + slice("beadsBoardSection")
   + `
 Object.assign(exports, {
   tree: beadsHierarchy, rows: beadsLaneRows, card: beadsCard,

@@ -2056,6 +2056,25 @@ body.term-split #terminal { flex: var(--split-term, 0.6) 1 0; min-height: 80px; 
 }
 .beads-comment { padding: 8px 0; border-top: 1px solid #22262d; }
 
+/* The two halves of a board (app.js: BEADS_GROUPS). backlog is what nobody
+   has taken up; TODO is everything already spoken for. The header carries the
+   count so the pile that needs handing out is readable without counting
+   lanes, which is what it took before the split. */
+.beads-group + .beads-group { margin-top: 14px; }
+.beads-group-head {
+  display: flex; align-items: baseline; gap: 8px; margin: 0 0 6px;
+  padding-bottom: 4px; border-bottom: 1px solid #22262d;
+}
+.beads-group-name {
+  margin: 0; font-size: 12px; text-transform: uppercase; letter-spacing: .06em;
+  color: #c6cdd5;
+}
+.beads-group.backlog .beads-group-name { color: #79c0ff; }
+.beads-group-count {
+  font-size: 12px; color: #8b949e; font-variant-numeric: tabular-nums;
+}
+.beads-group-note { margin-left: auto; font-size: 11px; }
+
 /* the kanban: one lane per status, cards nested by parent-child.
    The lanes scroll sideways rather than reflowing -- a board is read by
    comparing lanes, and a lane that wrapped under another is no longer beside

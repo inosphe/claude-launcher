@@ -361,6 +361,7 @@ CHECKS = [
         "relaysettings_check.js",
         "profilesettings_check.js",
         "beadskanban_check.js",
+        "beadsgroups_check.js",
         "queues_check.js",
         "railbeads_check.js",
         "railbeadskanban_check.js",

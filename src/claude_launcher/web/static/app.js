@@ -12823,6 +12823,56 @@ function beadsLanes(filter) {
   return BEADS_STATUSES.includes(filter) ? [filter] : BEADS_STATUSES;
 }
 
+/* The two halves of a board, and the reason the lanes are grouped at all.
+
+   A board read at a glance answers one question first: what has nobody taken
+   up yet. That is `open` — an issue exists and no assignee has moved it — and
+   every other status means somebody is already carrying it or has finished.
+   Drawn as six equal lanes those two readings looked alike, so the operator
+   counted lanes to find the pile that needed handing out.
+
+   `backlog` is `open` alone. `TODO` is in_ready onwards, closed included: the
+   work that is spoken for. A group with no visible lane is not drawn, so a
+   filter narrowed to one status still draws one lane under the group it
+   belongs to rather than an empty header beside it. */
+const BEADS_BACKLOG = new Set(["open"]);
+
+const BEADS_GROUPS = [
+  { key: "backlog", title: "backlog", note: "nobody has taken these up" },
+  { key: "todo", title: "TODO", note: "taken up, in review, or finished" },
+];
+
+function beadsGroupOf(status) {
+  return BEADS_BACKLOG.has(status) ? "backlog" : "todo";
+}
+
+/* The visible lanes, split into the groups above and paired with the rows
+   each lane draws. Groups with no lane are dropped here rather than rendered
+   empty, so the caller lays out what it is given. */
+function beadsLaneGroups(lanes, rowsFor) {
+  return BEADS_GROUPS
+    .map((group) => ({
+      ...group,
+      lanes: lanes.filter((status) => beadsGroupOf(status) === group.key)
+        .map((status) => ({ status, rows: rowsFor(status) })),
+    }))
+    .filter((group) => group.lanes.length);
+}
+
+function beadsGroupBlock(group) {
+  const box = el("div", `beads-group ${group.key}`);
+  const head = el("div", "beads-group-head");
+  head.appendChild(el("h4", "beads-group-name", group.title));
+  const count = group.lanes.reduce((n, lane) => n + lane.rows.length, 0);
+  head.appendChild(el("span", "beads-group-count", String(count)));
+  head.appendChild(el("span", "wf-note beads-group-note", group.note));
+  box.appendChild(head);
+  const grid = el("div", "beads-lanes");
+  for (const lane of group.lanes) grid.appendChild(beadsLane(lane.status, lane.rows));
+  box.appendChild(grid);
+  return box;
+}
+
 function beadsLane(status, rows) {
   const lane = el("div", `beads-lane ${status}`);
   const head = el("div", "beads-lane-head");
@@ -12870,13 +12920,10 @@ function beadsBoardSection(board) {
     sec.appendChild(list);
     return sec;
   }
-  const lanes = beadsLanes(beadsFilter);
-  const grid = el("div", "beads-lanes");
-  for (const status of lanes) {
-    grid.appendChild(beadsLane(
-      status, beadsLaneRows(shown.filter((i) => i.status === status), tree)));
-  }
-  sec.appendChild(grid);
+  const groups = beadsLaneGroups(
+    beadsLanes(beadsFilter),
+    (status) => beadsLaneRows(shown.filter((i) => i.status === status), tree));
+  for (const group of groups) sec.appendChild(beadsGroupBlock(group));
   return sec;
 }
 
