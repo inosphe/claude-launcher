@@ -36,6 +36,9 @@ const server = http.createServer((req, res) => {
   req.on("end", () => {
     if (req.url.startsWith("/api/")) {
       res.setHeader("Content-Type", "application/json");
+      // This fixture serves individual reads. Use the client's supported
+      // fallback instead of claiming a batch succeeded without any answers.
+      if(req.url === "/api/batch") {res.statusCode=404;return res.end('{}');}
       if (req.url === "/api/observer") {
         observerReads++;
         if(needsLogin) { needsLogin=false; res.statusCode=401; return res.end('{}'); }
@@ -363,6 +366,29 @@ const server = http.createServer((req, res) => {
     await page.locator('label:has(#observer-layout-grid)').click();
     await page.locator('#observer-limit').fill('1');
     assert.deepEqual(await page.locator('.observer-card').evaluateAll(es=>[...new Set(es.map(e=>e.dataset.session))].sort()),['s1','s2','s3']);
+    const previousEvents=data.sessions[0].events;
+    // Mechanical events join both timeline and grid by timestamp. They show
+    // their source and changes without querying transcript evidence.
+    data.sessions[0].events = [
+      {id:"m-old",origin:"daemon",kind:"borrow",text:"세션 인증 프로파일 변경",at:"2030-01-01T00:00:00Z",details:{previous:"p1",current:"p2"}},
+      {id:"m-new",origin:"daemon",kind:"worktree",text:"세션 작업 디렉터리 이동",at:"2030-01-01T02:00:00Z",details:{previous:"C:/old",current:"C:/new/<script>"}},
+      {id:"m-middle",kind:"test",text:"모델 관찰 결과",source:"transcript:2",at:"2030-01-01T10:00:00+09:00"}
+    ];
+    await page.selectOption('#observer-scope','session');
+    await page.selectOption('#observer-selection','s1');
+    await page.locator('label:has(#observer-layout-board)').click();
+    await page.waitForSelector('[data-event="m-new"]');
+    assert.deepEqual(await page.locator('#observer-view .event').evaluateAll(es=>es.map(e=>e.dataset.event)),['m-new','m-middle','m-old']);
+    assert.match(await page.locator('[data-event="m-new"]').innerText(),/세션 이벤트 · worktree/);
+    assert.match(await page.locator('[data-event="m-old"]').innerText(),/p1 → p2/);
+    assert.match(await page.locator('[data-event="m-new"]').innerText(),/C:\/old → C:\/new\/<script>/);
+    assert.equal(await page.locator('[data-event="m-new"] script').count(),0);
+    assert.equal(await page.locator('[data-event="m-new"] button').count(),0);
+    await page.locator('label:has(#observer-layout-grid)').click();
+    await page.locator('#observer-limit').fill('10');
+    assert.deepEqual(await page.locator('#observer-view .event').evaluateAll(es=>es.map(e=>e.dataset.event)),['m-new','m-middle','m-old']);
+    data.sessions[0].events=previousEvents;
+    await page.selectOption("#observer-scope","global");
     {
     // Transcript session details reuse observer data, independent of its filters.
     await page.evaluate(()=>location.hash="#/log/s1");

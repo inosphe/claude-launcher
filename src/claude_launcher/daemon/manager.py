@@ -32,7 +32,7 @@ from .. import borrowing, harnesses as harness_registry, profile as profile_mod
 from .. import spawn as spawn_mod
 from .. import transcripts
 from . import codex_sessions, ctxsize, db, harness as harness_mod
-from . import paths
+from . import paths, session_events
 from .harness import SessionDef
 from .screen import BACKGROUND_RENDER_BUDGET, RenderBudget
 from .session import STATUS_BUSY, DeadSession, Session
@@ -87,6 +87,7 @@ class SessionManager:
         #: per-session pace, is what saturated the loop on 2026-09-11.
         self.render_budget = RenderBudget(background_render_budget)
         self._sessions: Dict[str, AnySession] = {}
+        self.events = session_events.Events(paths.daemon_dir())
         #: The durable session registry (:mod:`claude_launcher.daemon.db`). One
         #: row per session; :meth:`persist` writes it, :meth:`restore_all` reads
         #: it. A daemon that predates the database hands its ``sessions.json``
@@ -313,6 +314,8 @@ class SessionManager:
         is going down, in which case nothing has ended."""
         if self.shutting_down:
             return
+        self.events.record(session, "exit", "세션 프로세스 종료",
+                           exit_code=session.exit_code)
         for hook in list(self.exit_hooks):
             try:
                 hook(session)
@@ -377,6 +380,9 @@ class SessionManager:
             # byte, or the restart silently costs every viewer their wheel.
             session.seed_screen_from_log()
         session.start(argv, env, cwd)
+        if not restoring:
+            self.events.record(session, "create", "세션 생성", cwd=cwd,
+                               borrow=session.sdef.borrow)
         if codex_home is not None and known_codex_sessions is not None:
             # The rollout appears a moment after the child starts, and the
             # scan that waits for it (``claim_new``) polls the whole rollout
@@ -1018,6 +1024,7 @@ class SessionManager:
         session = self.get(name)
         if not session.exited:
             session.kill(force=force)
+            self.events.record(session, "kill", "세션 종료 요청", force=force)
             self.persist()
         return session
 
@@ -1035,6 +1042,7 @@ class SessionManager:
         session = self.get(name)
         if not session.exited:
             session.pause(force=force)
+            self.events.record(session, "pause", "세션 일시 중지 요청", force=force)
             self.persist()
         return session
 
@@ -1245,7 +1253,7 @@ class SessionManager:
             )
         del self._sessions[name]
         try:
-            return self.create(
+            relaunched = self.create(
                 session.sdef,
                 restoring=True,
                 created_at=session.created_at,
@@ -1256,6 +1264,10 @@ class SessionManager:
         except Exception:
             self._sessions[name] = session  # keep the exited record on failure
             raise
+        action = "resume" if session.paused_at else "respawn"
+        self.events.record(relaunched, action,
+                           "일시 중지된 세션 재개" if action == "resume" else "세션 재실행")
+        return relaunched
 
     def archive(self, name: str) -> AnySession:
         """Move an exited record out of the working fleet while retaining it.
@@ -1274,6 +1286,7 @@ class SessionManager:
                 timespec="seconds"
             )
             self.persist()
+            self.events.record(session, "archive", "세션 보관")
         return session
 
     async def redefine(self, name: str, **changes) -> Session:
@@ -1393,9 +1406,13 @@ class SessionManager:
                 else f"session {name!r} already runs on profile "
                      f"{old.profile!r}'s own token — nothing to clear"
             )
-        return await self.redefine(
+        relaunched = await self.redefine(
             name, borrow=lender, null_token=null_token
         )
+        self.events.record(relaunched, "borrow", "세션 인증 프로파일 변경",
+                           previous=old.borrow, current=lender,
+                           previous_null=old.null_token, null_token=null_token)
+        return relaunched
 
     async def skip_permissions(self, name: str, skip: bool) -> Session:
         """Restart a session with permission prompts off — or back on.
@@ -1504,6 +1521,9 @@ class SessionManager:
                     config_dir, old.conversation_id, new_cwd, old.cwd
                 )
             raise
+        self.events.record(relaunched, "worktree", "세션 작업 디렉터리 이동",
+                           previous=old.cwd, current=new_cwd,
+                           transcript_moved=moved is not None)
         return relaunched, moved is not None
 
     async def shutdown_all(self) -> None:
@@ -1736,7 +1756,7 @@ class SessionManager:
                         # listings are ordered by it, and a restart that
                         # restamped every relaunched session would flatten the
                         # whole fleet into one moment and lose the order.
-                        self.create(
+                        restored = self.create(
                             sdef,
                             restoring=True,
                             created_at=entry.get("created_at"),
@@ -1744,6 +1764,7 @@ class SessionManager:
                             last_input_at=entry.get("last_input_at"),
                             delivery_hold=bool(entry.get("delivery_hold")),
                         )
+                        self.events.record(restored, "resume", "데몬 재시작 후 세션 복원")
                         if entry.get("was_busy"):
                             self.resumed_busy.append(sdef.name)
                         if not blank:

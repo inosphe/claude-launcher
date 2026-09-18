@@ -189,7 +189,20 @@ function inputButton(card,s) {
 function eventItem(s,e) {
   const item=node("div","",`event${e.needs_action&&!e.acknowledged?" action":""}`);
   item.dataset.event=e.id;
-  item.append(node("small",`${e.origin==="agent"?"에이전트 직접 보고":"자동 관찰"} · ${e.kind} · ${new Date(e.at).toLocaleString()}${e.acknowledged?" · 확인됨":""}`),node("div",e.text));
+  const origin=e.origin==="daemon"?"세션 이벤트":e.origin==="agent"?"에이전트 직접 보고":"자동 관찰";
+  item.append(node("small",`${origin} · ${e.kind} · ${new Date(e.at).toLocaleString()}${e.acknowledged?" · 확인됨":""}`),node("div",e.text));
+  if(e.origin==="daemon") {
+    if(e.kind==="borrow") {
+      const d=e.details||{}, before=d.previous_null?"인증 없음":d.previous||"자체 프로파일", after=d.null_token?"인증 없음":d.current||"자체 프로파일";
+      item.append(node("div",`${before} → ${after}`));
+    } else if(e.kind==="worktree") {
+      item.append(node("div",`${e.details?.previous||""} → ${e.details?.current||""}`));
+    }
+    if(Object.keys(e.details||{}).length) {
+      const detail=node("details","");detail.append(node("summary","이벤트 상세"),node("pre",JSON.stringify(e.details,null,2)));item.append(detail);
+    }
+    return item;
+  }
   if(e.origin==="agent") {addDirect(item,s,e);return item;}
   const detail=document.createElement("details"), evidence=node("pre","불러오는 중…");
   detail.append(node("summary",`근거 · ${e.source}`),evidence);

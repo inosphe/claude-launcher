@@ -31,7 +31,7 @@ import aiohttp
 from aiohttp import web
 
 from .. import atomic, lineage, profile, providers, store
-from . import briefing, paths, transcript_view, observer_reports
+from . import briefing, paths, transcript_view, observer_reports, session_events
 
 try:
     import truststore
@@ -148,6 +148,7 @@ async def complete(cfg, messages):
 class Observer:
     def __init__(self, manager, mesh):
         self.manager, self.mesh = manager, mesh
+        self.session_events = getattr(manager, "events", None) or session_events.Events(paths.daemon_dir())
         self.path = paths.daemon_dir() / "observer.json"
         try:
             self.data = json.loads(self.path.read_text(encoding="utf-8"))
@@ -309,7 +310,8 @@ class Observer:
             row = self.load_session(name)
             info = session.info()
             direct = self.reports.rows(name)
-            events = sorted(row.get("events", []) + direct, key=lambda e:e.get("at", ""))
+            events = sorted(row.get("events", []) + direct + self.session_events.rows(session),
+                            key=lambda e: session_events.timestamp(e.get("at")))
             latest = direct[-1] if direct else None
             summary = row.get("summary")
             state = row.get("state")
