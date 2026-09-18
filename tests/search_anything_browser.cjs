@@ -5,11 +5,12 @@ const path = require('node:path');
 const http = require('node:http');
 const {chromium} = require(process.env.CLAUNCH_PLAYWRIGHT || 'playwright');
 const root = path.join(__dirname, '../src/claude_launcher/web/static');
+const rail = fs.readFileSync(path.join(root, 'index.html'), 'utf8').match(/<div id="session-search-row"[\s\S]*?<\/div>/)[0];
 const writes = [];
 const cfg = {base_url:'http://omlx/v1', api_key_set:true, embedding_model:'embed', rerank_model:'rank', candidates:40, rerank_top:12, batch:16, timeout:120, watch_interval:30, verify_tls:true};
 const server = http.createServer(async (req,res) => {
   if (req.url === '/') { res.setHeader('Content-Type','text/html; charset=utf-8'); res.end(`<!doctype html><html><head><meta charset="utf-8"><link rel="stylesheet" href="/style.css"></head><body>
-    <button id="search-anything-open">Search anything /</button><input id="editor"><div class="xterm"><textarea id="terminal"></textarea></div><div id="settings"></div>
+    <aside style="width:260px">${rail}</aside><input id="editor"><div class="xterm"><textarea id="terminal"></textarea></div><div id="settings"></div>
     <script>function api(path,options){return fetch('/'+path,options)}</script><script src="/search-anything.js"></script></body></html>`); return; }
   if (req.url === '/search-anything.js' || req.url === '/style.css') {
     res.setHeader('Content-Type',req.url.endsWith('.js')?'application/javascript':'text/css'); res.end(fs.readFileSync(path.join(root,req.url.slice(1)))); return;
@@ -31,10 +32,15 @@ const server = http.createServer(async (req,res) => {
   try {
     const page=await browser.newPage(); const errors=[];page.on('pageerror',error=>errors.push(error.message));
     await page.goto(`http://127.0.0.1:${server.address().port}/`);
+    const filterBox = await page.locator('#session-search').boundingBox(), buttonBox = await page.locator('#search-anything-open').boundingBox();
+    assert.equal(buttonBox.y, filterBox.y); assert.ok(buttonBox.x >= filterBox.x + filterBox.width); assert.equal(buttonBox.width, 28);
     await page.locator('#editor').focus();await page.keyboard.type('/');assert.equal(await page.locator('dialog').evaluate(n=>n.open),false);
     await page.locator('#terminal').focus();await page.keyboard.type('/');assert.equal(await page.locator('dialog').evaluate(n=>n.open),false);
     await page.locator('#search-anything-open').focus();await page.keyboard.press('/');assert.equal(await page.locator('dialog').evaluate(n=>n.open),true);
     assert.equal(await page.locator('dialog input').evaluate(n=>n===document.activeElement),true);
+    assert.equal(await page.locator('dialog h2').evaluate(n=>getComputedStyle(n).fontSize),'14px');
+    assert.equal(await page.locator('dialog').evaluate(n=>n.getBoundingClientRect().width),640);
+    if (process.env.CLAUNCH_SCREENSHOT) await page.screenshot({path:process.env.CLAUNCH_SCREENSHOT.replace('.png','-desktop.png')});
     await page.locator('dialog input').fill('needle');await page.keyboard.press('Enter');
     await page.getByRole('link',{name:'needle',exact:true}).waitFor();assert.equal(await page.locator('dialog img').count(),0);
     assert.match(await page.locator('dialog [role=status]').textContent(),/Rerank 사용 불가/);

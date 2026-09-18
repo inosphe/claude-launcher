@@ -12,13 +12,14 @@ globalThis.SearchAnything = (() => {
   const modal = document.createElement("dialog");
   modal.className = "search-anything"; modal.setAttribute("aria-labelledby", "search-anything-title");
   const title = node("h2", "Search anything"); title.id = "search-anything-title";
-  const close = node("button", "닫기"); close.type = "button";
+  const close = node("button", "×", "search-anything-close"); close.type = "button";
+  close.setAttribute("aria-label", "닫기"); close.title = "닫기 (Esc)";
   const header = node("div", "", "search-anything-header"); header.append(title, close);
   const form = document.createElement("form"), input = document.createElement("input");
   input.type = "search"; input.placeholder = "Beads, Observer, briefing, checks 검색";
   input.setAttribute("aria-label", "통합 검색어"); input.maxLength = 2000;
   const submit = node("button", "검색"); submit.type = "submit";
-  const notice = node("p", "검색어를 입력하고 Enter를 누르십시오."); notice.setAttribute("role", "status");
+  const notice = node("p", "Enter로 검색 · Esc로 닫기", "search-anything-notice"); notice.setAttribute("role", "status");
   const results = node("div", "", "search-anything-results");
   form.append(input, submit); modal.append(header, form, notice, results); document.body.append(modal);
   let sequence = 0, controller = null, previousFocus = null;
