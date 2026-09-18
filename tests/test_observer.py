@@ -4,6 +4,7 @@ import copy
 import json
 import re
 import time
+from datetime import datetime, timezone
 from types import SimpleNamespace
 
 import pytest
@@ -110,6 +111,58 @@ def test_usage_date_is_the_local_calendar_day():
     """UTC bucketing would move an evening's calls onto the next day here."""
     assert observer.usage_date() == time.strftime("%Y-%m-%d", time.localtime())
     assert re.fullmatch(r"\d{4}-\d{2}-\d{2}", observer.usage_date())
+
+
+def test_rolling_usage_boundaries_retention_and_restart(setup, monkeypatch):
+    service, session = setup
+    current = 2_000_000_000
+
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime.fromtimestamp(current, tz=timezone.utc)
+
+    monkeypatch.setattr(observer, "datetime", Clock)
+    usage = {"prompt_tokens": 100, "completion_tokens": 7, "prompt_cache_hit_tokens": 40}
+    end = current
+    for age in (604801, 604800, 86400, 3600, 0):
+        current = end - age
+        service.record_usage(usage)
+    current = end
+    windows = service.usage_windows()["windows"]
+    assert [windows[key]["calls"] for key in ("hour", "day", "week")] == [1, 2, 3]
+    assert windows["week"]["total_tokens"] == 321  # cache already in input
+    assert len(service.data["usage_history"]) == 3
+    # Disabled observation, removed sessions and daemon restart retain usage.
+    service.manager.list = lambda: []
+    restored = observer.Observer(service.manager, service.mesh)
+    assert restored.snapshot()["usage_summary"] == service.usage_windows()
+    current += 3600
+    assert restored.usage_windows()["windows"]["hour"]["total_tokens"] == 0
+
+
+def test_rolling_usage_counts_all_sessions_without_backfilling_daily(setup, monkeypatch):
+    service, session = setup
+    service.data["sessions"]["s1"] = {"usage_daily": {"2026-09-18": {"prompt_tokens": 9999}}}
+    assert service.snapshot()["usage_summary"]["windows"]["week"]["calls"] == 0
+    monkeypatch.setattr(service, "evidence", lambda *args: evidence())
+
+    async def complete(*args):
+        return answer(), {"prompt_tokens": 100, "completion_tokens": 7}
+
+    monkeypatch.setattr(observer, "complete", complete)
+    asyncio.run(service.observe(session, CFG))
+    session.sdef.name = "s2"
+    asyncio.run(service.observe(session, CFG))
+    assert service.snapshot()["usage_summary"]["windows"]["hour"]["total_tokens"] == 214
+
+    async def fail(*args):
+        raise ValueError("failed call")
+
+    monkeypatch.setattr(observer, "complete", fail)
+    with pytest.raises(ValueError):
+        asyncio.run(service.observe(session, CFG))
+    assert service.usage_windows()["windows"]["hour"]["calls"] == 2
 
 
 def test_failure_does_not_consume_cursor(setup, monkeypatch):

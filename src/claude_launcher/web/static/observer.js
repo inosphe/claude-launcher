@@ -226,6 +226,27 @@ function eventItem(s,e) {
    instead of being passed off as a lifetime total. */
 const usageCount = value => Number.isFinite(value) ? value.toLocaleString("ko-KR") : "0";
 const usageNumber = value => Number.isFinite(Number(value)) ? Number(value) : 0;
+function renderTokenSummary() {
+  const summary=snapshot.usage_summary;
+  const periods=[["hour","최근 1시간","1h"],["day","최근 24시간","24h"],["week","최근 일주일","7d"]];
+  const compact=new Intl.NumberFormat("en",{notation:"compact",maximumFractionDigits:1});
+  const cards=[], short=[];
+  for(const [key,label,abbreviation] of periods) {
+    const usage=summary?.windows?.[key];
+    const total=usage?usageNumber(usage.total_tokens):null;
+    short.push(`${abbreviation} ${total===null?"—":compact.format(total)}`);
+    const card=node("div","","observer-token-window");
+    card.append(node("span",label),node("strong",total===null?"—":usageCount(total)));
+    if(usage)card.append(node("small",`입력 ${usageCount(usageNumber(usage.prompt_tokens))} · 출력 ${usageCount(usageNumber(usage.completion_tokens))}`));
+    cards.push(card);
+  }
+  $("token-compact").textContent=short.join(" · ");
+  $("token-windows").replaceChildren(...cards);
+  const since=summary?.since && new Date(summary.since);
+  $("token-note").textContent=since && Number.isFinite(since.getTime())
+    ? `집계 시작 ${since.toLocaleString("ko-KR")} · 시작 이전 사용량 제외 · 캐시는 입력에 포함`
+    : "기간별 사용량을 조회할 수 없습니다.";
+}
 function usageShape(row) {
   const tokens=usageNumber(row.prompt_tokens), output=usageNumber(row.completion_tokens);
   const hit=usageNumber(row.prompt_cache_hit_tokens), miss=usageNumber(row.prompt_cache_miss_tokens);
@@ -329,6 +350,7 @@ function render() {
   composerState();
   $("counts").textContent=`${visible.length}개 세션 · 미확인 요청 ${visible.reduce((n,s)=>n+(s.events||[]).filter(e=>e.needs_action&&!e.acknowledged).length+sessionRuns(s).filter(sessCflowGated).length,0)}개`;
   const usage=usageText(snapshot.sessions);
+  renderTokenSummary();
   $("usage").hidden=!usage;
   $("usage-body").textContent=usage;
   $("monitor").textContent=snapshot.enabled?"관찰 끄기":"관찰 시작";
@@ -429,6 +451,12 @@ $("selection").onchange=navigate;$("actions-only").onchange=render;$("ended").on
 $("target").onchange=()=>chooseTarget($("target").value);$("prompt").oninput=controls;
 $("composer-toggle").onclick=()=>{composerFolded=!composerFolded;composerState();if(!composerFolded)$("prompt").focus();};
 $("monitor").onclick=async()=>{try{await request("api/observer/settings",{enabled:!snapshot.enabled});await refresh();}catch(err){showError(err.message);}};
+$("token-toggle").onclick=()=>{
+  const expanded=$("token-toggle").getAttribute("aria-expanded")!=="true";
+  $("token-toggle").setAttribute("aria-expanded",String(expanded));
+  $("token-summary").classList.toggle("expanded",expanded);
+  $("token-chevron").textContent=expanded?"⌃":"⌄";
+};
 $("mobile-monitor").onclick=()=>$("monitor").click();
 async function send(interrupt) {
   const target=$("target").value, text=$("prompt").value;

@@ -163,6 +163,14 @@
 
   <main id="main">
     <section id="observer-view" class="hidden">
+      <section id="observer-token-summary" aria-label="관찰 API 토큰 사용량">
+        <button id="observer-token-toggle" aria-expanded="false" aria-controls="observer-token-detail"><span>토큰</span><span id="observer-token-compact">조회 중…</span><span id="observer-token-chevron" aria-hidden="true">⌄</span></button>
+        <div id="observer-token-detail">
+          <div class="observer-token-heading">관찰 API 토큰 사용량 <span>전체 세션 · 입력 + 출력</span></div>
+          <div id="observer-token-windows"></div>
+          <p id="observer-token-note" class="hint">사용량 조회 중…</p>
+        </div>
+      </section>
       <header class="wf-head"><h1>관찰 대시보드</h1><button id="observer-monitor">관찰 시작</button></header>
       <div class="observer-content">
       <div class="observer-view-controls">
