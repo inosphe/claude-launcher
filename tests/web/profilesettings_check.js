@@ -179,6 +179,49 @@ vm.runInContext(
     .filter((n) => n.tag === "tr")[1];
   assert.equal(asking.children[3].text, "asks (no value)");
 
+  // A profile override does not become the shared card's selected value.
+  const scoped = details({ declared: "plan", target: "plan", first: "plan" });
+  Object.assign(scoped[0].permission_mode, {
+    override: "plan", source: "profile", shared_declared: "acceptEdits",
+    shared_target: "acceptEdits", packaged_default: "auto",
+  });
+  scoped.push({ ...scoped[0], profile: "second", name: "second",
+    permission_mode: { ...scoped[0].permission_mode, override: null } });
+  response = { profile_details: scoped };
+  await context.refreshProfileSettings();
+  card = context.profileModeCard();
+  assert.equal(find(card, (n) => n.id === "profile-mode-select").value, "acceptEdits");
+  assert.match(textOf(card), /claunch default \(auto\)/);
+  assert.match(textOf(card), /Profile overrides below are preserved/);
+  let editor = context.profileModeEditor(scoped[0]);
+  assert.equal(find(editor, (n) => n.tag === "select").value, "plan");
+  assert.match(textOf(editor), /Use shared default \(acceptEdits\)/);
+  assert.match(textOf(editor), /Apply to profile/);
+
+  // Submit the actual per-profile form, including its target and result scope.
+  requests.length = 0;
+  writeResponse = { profile: "work", declared: "auto", target: "auto",
+    converged: ["work"], unchanged: [], failed: [] };
+  find(editor, (n) => n.tag === "select").value = "auto";
+  await find(editor, (n) => n.tag === "form").handlers.submit({ preventDefault() {} });
+  assert.deepEqual(JSON.parse(requests[0][1].body), { profile: "work", mode: "auto" });
+  assert.match(textOf(context.profileModeEditor(scoped[0])), /declared auto/);
+  assert.doesNotMatch(textOf(context.profileModeEditor(scoped.at(-1))), /declared auto/);
+  assert.doesNotMatch(textOf(context.profileModeCard()), /wrote it into/);
+
+  requests.length = 0;
+  writeResponse = { profile: "work", declared: null, target: "acceptEdits",
+    converged: ["work"], unchanged: [], failed: [] };
+  await context.profileModeApply("", "work");
+  assert.deepEqual(JSON.parse(requests[0][1].body), { profile: "work", mode: null });
+  assert.match(textOf(context.profileModeEditor(scoped[0])), /using shared default \(acceptEdits\)/);
+  assert.equal(all(context.profilesPanel()).filter((n) => n.tag === "button" && n.text === "Apply to profile").length, 2);
+
+  writeResponse = { profile: "work", declared: "plan", target: "plan",
+    converged: [], unchanged: [], failed: [{ profile: "work", reason: "write failed" }] };
+  await context.profileModeApply("plan", "work");
+  assert.match(textOf(context.profileModeEditor(scoped[0])), /FAILED on work: write failed/);
+
   // --- no Claude profile at all ------------------------------------------
   response = { profiles: [], profile_details: [details()[2], details()[3]] };
   await context.refreshProfileSettings();

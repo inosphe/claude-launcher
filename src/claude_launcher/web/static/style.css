@@ -3434,6 +3434,8 @@ a.wf-btn { display: inline-block; text-decoration: none; line-height: 1.5; }
   display: flex; gap: 8px; align-items: center; margin-top: 10px;
 }
 .profile-mode-form select { flex: 0 1 240px; }
+.profile-mode-editor .profile-mode-form { flex-wrap: wrap; }
+.profile-mode-editor .wf-note { margin: 6px 0; }
 .profiles-table { width: 100%; }
 .profiles-table td:last-child { color: #7d8590; overflow-wrap: anywhere; }
 .profile-ok { color: #7ee787; }

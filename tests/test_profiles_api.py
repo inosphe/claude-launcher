@@ -2,9 +2,7 @@
 
 The read is on ``GET /api/profiles`` (one row per profile carries
 ``permission_mode``), the write is ``POST /api/profiles/permission-mode``. Both
-go through the store's *declaration* rather than a per-profile field — that is
-the shape the shared layer already converges, and a page that invented its own
-per-profile state would disagree with ``claunch shared`` about the same key.
+go through the store's shared/profile declarations and the common apply planner.
 
 No test here lets a real ``claude`` run: with nothing declared, convergence
 touches only ``settings.json``, so ``apply_all`` never reaches a subprocess.
@@ -14,6 +12,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+
+import pytest
 
 from claude_launcher import plugins, profile, settings, store
 from claude_launcher.daemon import api
@@ -210,3 +210,89 @@ def test_convergence_uses_the_shared_layer_not_a_second_writer(home):
     post({"mode": "plan"})
     assert plugins.store.shared_settings() == {MODE: "plan"}
     assert store.effective_shared_settings()[MODE] == "plan"
+
+
+def test_profile_apply_changes_only_the_selected_profile(home):
+    work = profile.create("work")
+    other = profile.create("other")
+    post({"mode": "plan"})
+    guard = ["Bash(claunch cflow approve)"]
+    settings.merge_permission_deny(work.config_dir / settings.SETTINGS_FILENAME, guard)
+    before = settings.load(other)
+    body = json.loads(post({"profile": "work", "mode": "acceptEdits"}).text)
+    assert body["profile"] == "work"
+    assert body["converged"] == ["work"]
+    assert store.shared_settings()[MODE] == "plan"
+    assert settings.load(other) == before
+    assert settings.load(work)["permissions"] == {"defaultMode": "acceptEdits", "deny": guard}
+    row = modes_by_profile(listing())["work"]
+    assert row["source"] == "profile"
+    assert row["override"] == row["target"] == row["value"] == "acceptEdits"
+    assert row["shared_target"] == row["shared_declared"] == "plan"
+    assert row["converged"] is True
+
+
+def test_profile_override_survives_shared_apply_and_cli_planner(home):
+    work = profile.create("work")
+    other = profile.create("other")
+    post({"profile": "work", "mode": "plan"})
+    post({"mode": "acceptEdits"})
+    plugins.apply_all([work, other])
+    assert settings.load(work)["permissions"]["defaultMode"] == "plan"
+    assert settings.load(other)["permissions"]["defaultMode"] == "acceptEdits"
+    fresh = profile.create("fresh")
+    plugins.apply_to(fresh)
+    assert settings.load(fresh)["permissions"]["defaultMode"] == "acceptEdits"
+    # Removing the shared declaration also preserves the profile override.
+    post({"mode": None})
+    assert settings.load(work)["permissions"]["defaultMode"] == "plan"
+    assert settings.load(other)["permissions"]["defaultMode"] == "auto"
+
+
+@pytest.mark.parametrize("mode", [None, "", "  "])
+def test_removing_profile_override_rejoins_shared_default(home, mode):
+    work = profile.create("work")
+    post({"mode": "acceptEdits"})
+    post({"profile": "work", "mode": "plan"})
+    store.set_profile_setting("work", "outputStyle", "concise")
+    body = json.loads(post({"profile": "work", "mode": mode}).text)
+    assert body["declared"] is None
+    assert body["target"] == "acceptEdits"
+    assert store.profile_settings("work") == {"outputStyle": "concise"}
+    assert settings.load(work)["permissions"]["defaultMode"] == "acceptEdits"
+    assert modes_by_profile(listing())["work"]["override"] is None
+    post({"mode": "default"})
+    assert settings.load(work)["permissions"]["defaultMode"] == "default"
+
+
+@pytest.mark.parametrize("payload", [
+    {"profile": "missing", "mode": "auto"},
+    {"profile": "../work", "mode": "auto"},
+    {"profile": "..", "mode": "auto"},
+    {"profile": ".", "mode": "auto"},
+    {"profile": "work:claude", "mode": "auto"},
+    {"profile": None, "mode": "auto"},
+    {"profile": "", "mode": "auto"},
+    {"profile": "work", "mode": "nope"},
+    {"profile": "work"},
+    {"profile": "cx", "mode": "auto"},
+])
+def test_invalid_profile_edits_do_not_write(home, payload):
+    work = profile.create("work")
+    profile.create("cx")
+    store.set_profile_field("cx", "harness", "codex")
+    before = store.load()
+    assert post(payload).status == 400
+    assert store.load() == before
+    assert settings.load(work) == {}
+
+
+def test_profile_apply_reports_write_failure_and_can_retry(home):
+    work = profile.create("work")
+    settings.save(work, {"permissions": "invalid"})
+    body = json.loads(post({"profile": "work", "mode": "plan"}).text)
+    assert body["failed"][0]["profile"] == "work"
+    assert modes_by_profile(listing())["work"]["converged"] is False
+    settings.save(work, {})
+    plugins.apply_to(work)
+    assert modes_by_profile(listing())["work"]["converged"] is True

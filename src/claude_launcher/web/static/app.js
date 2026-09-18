@@ -14738,20 +14738,15 @@ function wsSessionsIn(path) {
 /* A profile is one storage root: its own CLAUDE_CONFIG_DIR, its own   */
 /* token, its own settings.json. The CLI has owned their lifecycle     */
 /* since the beginning (create/remove/env/parent/set-token), and this  */
-/* section is the reading half of that plus the one key whose value    */
-/* every session feels before it does anything.                        */
-/*                                                                    */
-/* What it deliberately is NOT: a second writer. The one control that  */
-/* writes goes through POST /api/profiles/permission-mode, which edits */
-/* the store's shared declaration and then calls the same convergence  */
-/* ``claunch apply`` calls. A page holding its own copy of the answer  */
-/* would disagree with the CLI about a key that is in every profile.   */
+/* Permission mode edits persist shared defaults or profile overrides */
+/* through one API and the same planner used by `claunch apply`.       */
 /* ------------------------------------------------------------------ */
 let profilesCache = [];
 let profilesError = "";
 let profileModeBusy = false;
 let profileModeNotice = "";
 let profileModeError = "";
+let profileModeScope = null;
 
 function settingsTabs() {
   const tabs = el("div", "seq-tabs settings-tabs");
@@ -14794,14 +14789,19 @@ function profileRows() {
 }
 
 function permissionRow(rows) {
-  for (const row of rows) if (row.permission_mode) return row.permission_mode;
+  for (const row of rows) if (row.permission_mode) {
+    const mode = row.permission_mode;
+    return { ...mode,
+      declared: "shared_declared" in mode ? mode.shared_declared : mode.declared,
+      target: mode.shared_target || mode.target };
+  }
   return null;  // no Claude profile: nothing for this card to talk about
 }
 
 function profileModeCard() {
   const card = el("div", "ws-card profile-mode-card");
   const head = el("div", "home-card-head");
-  head.appendChild(el("h3", null, "Permission mode"));
+  head.appendChild(el("h3", null, "Shared permission mode"));
   card.appendChild(head);
 
   const rows = profileRows();
@@ -14817,9 +14817,9 @@ function profileModeCard() {
 
   card.appendChild(el(
     "p", "home-sub",
-    "What a session launched on a profile does before it acts. This is one " +
-    "value for every Claude profile — the convergence writes the same key " +
-    "into each one's settings.json — so changing it here changes all of them."
+    "Apply saves the shared default and updates existing Claude Code profiles " +
+    "that use it. New profiles use this default too. Profile overrides below " +
+    "are preserved. Running sessions are not restarted."
   ));
   card.appendChild(el(
     "p", "home-sub",
@@ -14830,7 +14830,7 @@ function profileModeCard() {
   const form = el("form", "ws-form profile-mode-form");
   const select = el("select", "ws-input");
   select.id = "profile-mode-select";
-  const fallback = el("option", null, `claunch default (${mode.target})`);
+  const fallback = el("option", null, `claunch default (${mode.packaged_default || "auto"})`);
   fallback.value = "";
   select.appendChild(fallback);
   for (const name of mode.modes) {
@@ -14841,7 +14841,7 @@ function profileModeCard() {
   select.value = mode.declared || "";
   form.appendChild(select);
 
-  const apply = el("button", "wf-btn", profileModeBusy ? "Applying…" : "Apply");
+  const apply = el("button", "wf-btn", profileModeBusy ? "Applying…" : "Apply shared default");
   apply.type = "submit";
   apply.disabled = profileModeBusy;
   form.appendChild(apply);
@@ -14851,9 +14851,9 @@ function profileModeCard() {
   });
   card.appendChild(form);
 
-  if (profileModeError) {
+  if (profileModeScope === null && profileModeError) {
     card.appendChild(el("p", "wf-error", profileModeError));
-  } else if (profileModeNotice) {
+  } else if (profileModeScope === null && profileModeNotice) {
     card.appendChild(el("p", "wf-note", profileModeNotice));
   }
   return card;
@@ -14876,13 +14876,14 @@ function profileModeResult(data) {
     bits.push(`FAILED on ${first.profile}: ${first.reason}`);
   }
   const what = data.declared === null || data.declared === undefined
-    ? `back on claunch's default (${data.target})`
+    ? (data.profile ? `using shared default (${data.target})` : `back on claunch's default (${data.target})`)
     : `declared ${data.declared}`;
   return `${what} — ${bits.length ? bits.join(", ") : "nothing to write"}.`;
 }
 
-async function profileModeApply(mode) {
+async function profileModeApply(mode, profile = null) {
   profileModeBusy = true;
+  profileModeScope = profile;
   profileModeError = "";
   profileModeNotice = "";
   if (wsOpen) renderWorkspaces();
@@ -14890,7 +14891,7 @@ async function profileModeApply(mode) {
     const resp = await api("/api/profiles/permission-mode", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ mode: mode || null }),
+      body: JSON.stringify({ mode: mode || null, ...(profile === null ? {} : { profile }) }),
     });
     const data = await resp.json().catch(() => ({}));
     if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
@@ -14904,6 +14905,43 @@ async function profileModeApply(mode) {
   await refreshProfileSettings();
 }
 
+function profileModeEditor(row) {
+  const mode = row.permission_mode;
+  const box = el("div", "profile-mode-editor");
+  box.appendChild(el("p", "wf-note", mode.override == null
+    ? `Uses shared default (${mode.shared_target || mode.target})`
+    : `Profile override: ${mode.override}`));
+  const form = el("form", "profile-mode-form");
+  const select = el("select", "ws-input");
+  select.setAttribute("aria-label", `Permission mode for ${row.profile}`);
+  const inherit = el("option", null, `Use shared default (${mode.shared_target || mode.target})`);
+  inherit.value = "";
+  select.appendChild(inherit);
+  for (const name of mode.modes) {
+    const option = el("option", null, name);
+    option.value = name;
+    select.appendChild(option);
+  }
+  select.value = mode.override || "";
+  select.disabled = profileModeBusy;
+  form.appendChild(select);
+  const apply = el("button", "wf-btn", profileModeBusy && profileModeScope === row.profile
+    ? "Applying…" : "Apply to profile");
+  apply.type = "submit";
+  apply.disabled = profileModeBusy;
+  form.appendChild(apply);
+  form.addEventListener("submit", (event) => {
+    event.preventDefault();
+    return profileModeApply(select.value, row.profile);
+  });
+  box.appendChild(form);
+  if (profileModeScope === row.profile) {
+    if (profileModeError) box.appendChild(el("p", "wf-error", profileModeError));
+    else if (profileModeNotice) box.appendChild(el("p", "wf-note", profileModeNotice));
+  }
+  return box;
+}
+
 function profilesPanel() {
   const panel = el("div", "profiles-panel");
   panel.appendChild(el(
@@ -14914,6 +14952,10 @@ function profilesPanel() {
   ));
   if (profilesError) panel.appendChild(el("p", "wf-error", profilesError));
   panel.appendChild(profileModeCard());
+  panel.appendChild(el("p", "wf-note",
+    "Apply to profile saves and writes only that profile's mode. Use shared default " +
+    "removes its override. Launch a new session to use the saved mode. This page " +
+    "does not restart sessions or send a mode-change command to running sessions."));
 
   const list = el("div", "ws-list profiles-list");
   const rows = profileRows();
@@ -14955,13 +14997,13 @@ function profilesPanel() {
       // Another harness: this is a Claude Code key and that harness never
       // reads it, so an empty cell is the honest answer, not a zero.
       tr.appendChild(el("td", "profile-muted", "—"));
-    } else if (mode.value === null) {
-      tr.appendChild(el("td", "profile-pending", "asks (no value)"));
     } else {
       const cell = el(
         "td", mode.converged ? "profile-ok" : "profile-pending",
-        mode.converged ? mode.value : `${mode.value} → ${mode.target}`
+        mode.value === null ? "asks (no value)" :
+          (mode.converged ? mode.value : `${mode.value} → ${mode.target}`)
       );
+      cell.appendChild(profileModeEditor(row));
       tr.appendChild(cell);
     }
     tr.appendChild(el("td", null, row.directory || ""));
