@@ -411,6 +411,11 @@ option:disabled { color: #6b7280; }
    reaching a person, where the reminder only stops the daemon repeating
    itself. */
 #session-list .quiet-hold { color: #8b949e; border-color: #3d434d; }
+/* Waiting to be typed in, rather than stopped on purpose. It is the one pill
+   here that reports something in motion, so it is not grey -- but it is not
+   amber either: amber on this rail means the run wants the reader's keyboard
+   (.sess-cflow.gated), and a queued message wants nothing from them. */
+#session-list .quiet-waiting { color: #58a6ff; border-color: #29416b; }
 /* The card itself, wherever it is drawn — the row's fold, the pane under
    the header, the detail panel's section. Box and type are common; only the
    rail's flex-placement below is specific to the list it lives in. */

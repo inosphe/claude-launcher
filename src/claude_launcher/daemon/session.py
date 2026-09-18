@@ -326,6 +326,28 @@ def _utcnow() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
+#: How much of a queued message the rail shows. Long enough to tell a cflow
+#: nudge from a mesh message from a briefing, short enough that a row stays a
+#: row. The message itself is read in the terminal it is going to.
+DELIVERY_PREVIEW_CHARS = 90
+
+
+def _delivery_preview(text: str) -> str:
+    """A single line standing for a message that has not been typed yet.
+
+    Machine-generated deliveries open with a header line (``---``, a title,
+    ``mesh:``), so the first line alone often says nothing about which one
+    this is. The first line that carries words is the one worth showing.
+    """
+    for line in text.splitlines():
+        stripped = line.strip().strip("#").strip()
+        if stripped and stripped != "---":
+            if len(stripped) > DELIVERY_PREVIEW_CHARS:
+                return stripped[:DELIVERY_PREVIEW_CHARS - 1] + "…"
+            return stripped
+    return ""
+
+
 def delivery_stamp() -> str:
     """The wall-clock line prefixed to every :meth:`Session.deliver` message.
 
@@ -461,6 +483,17 @@ class Session:
         #: two paste/Enter pairs whole and ordered.
         self._delivery_lock = asyncio.Lock()
         self._deferred_deliveries: Set[asyncio.Task] = set()
+        #: One record per queued delivery that has not been typed yet, in the
+        #: order they will go in. The tasks above are the delivery; this is
+        #: the only thing anyone outside can see of it. Without it a person
+        #: who presses a cflow or mesh button has nothing to read between
+        #: pressing it and the message appearing in the session minutes
+        #: later, and no way to tell a wait from a message that was dropped
+        #: (claunch-restart-disconnect-banner-12p2). Not durable: a daemon
+        #: restart loses the queue, and this list with it, which is the
+        #: truth about the queue rather than a shortcoming of the list.
+        self._pending_deliveries: list = []
+        self._delivery_seq = 0
         self._deferred_delivery_lock = asyncio.Lock()
         #: Monotonic time a human last typed here (attach/web keystrokes,
         #: ``claunch send-keys``); 0.0 = never. See :meth:`keyboard_busy`.
@@ -1075,13 +1108,38 @@ class Session:
         if self.exited:
             return False
 
+        # Lazily, and inline rather than through the helper, because this
+        # method is also borrowed by doubles that are not Sessions at all:
+        # a queue that needs __init__ (or a second method) to have run would
+        # make those raise where the real session simply records.
+        queue = getattr(self, "_pending_deliveries", None)
+        if queue is None:
+            queue = []
+            self._pending_deliveries = queue
+        self._delivery_seq = getattr(self, "_delivery_seq", 0) + 1
+        record = {
+            "id": self._delivery_seq,
+            "at": _utcnow(),
+            "chars": len(text),
+            "preview": _delivery_preview(text),
+        }
+        queue.append(record)
+
         async def send() -> None:
-            async with self._deferred_delivery_lock:
-                delivered = await self.deliver(text, wait_for_draft=True)
-            log.info(
-                "queued notification to %r %s",
-                self.sdef.name, "delivered" if delivered else "failed",
-            )
+            try:
+                async with self._deferred_delivery_lock:
+                    delivered = await self.deliver(text, wait_for_draft=True)
+                log.info(
+                    "queued notification to %r %s",
+                    self.sdef.name, "delivered" if delivered else "failed",
+                )
+            finally:
+                # Cancelled, failed or delivered, it is no longer waiting --
+                # a queue that only ever grows would be worse than none.
+                try:
+                    queue.remove(record)
+                except ValueError:
+                    pass
 
         task = asyncio.create_task(send())
         self._deferred_deliveries.add(task)
@@ -1721,6 +1779,23 @@ class Session:
     # ------------------------------------------------------------------ #
     # views
     # ------------------------------------------------------------------ #
+    def _delivery_queue(self) -> list:
+        """The waiting-delivery list, created on first use (see queue_delivery)."""
+        queue = getattr(self, "_pending_deliveries", None)
+        if queue is None:
+            queue = []
+            self._pending_deliveries = queue
+        return queue
+
+    def pending_deliveries(self) -> list:
+        """Automated messages accepted for this session and not yet typed.
+
+        Oldest first, which is the order they will be written in. Each is a
+        preview, not the message: the rail shows that something is waiting
+        and roughly what, and the message itself arrives in the terminal.
+        """
+        return [dict(record) for record in self._delivery_queue()]
+
     def info(self) -> dict:
         return {
             **self.sdef.to_dict(),
@@ -1748,6 +1823,10 @@ class Session:
             # question it answers — which of these did I pin shut — is asked
             # of the whole fleet at once.
             "delivery_hold": self.delivery_held(),
+            # What has been accepted for this session and is still waiting to
+            # be typed into it. On the rail poll for the same reason the hold
+            # is: the question is asked of the fleet, not of one session.
+            "pending_deliveries": self.pending_deliveries(),
             # Whether the harness is (or just finished) compacting this
             # session's context — see :mod:`compacting`. Live sessions only:
             # a DeadSession has no stream for the notice to ride.
@@ -1965,4 +2044,5 @@ class DeadSession:
             "archived_at": self.archived_at,
             "paused_at": self.paused_at,
             "delivery_hold": self.delivery_held(),  # always False; see above
+            "pending_deliveries": [],   # nothing is queued for a session that ended
         }

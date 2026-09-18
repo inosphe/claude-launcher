@@ -4032,7 +4032,8 @@ async def h_sessions_list(request: web.Request) -> web.Response:
             "null_token", "issue", "keep_alive", "reminder_paused", "status",
             "pid", "exit_code", "created_at", "last_output_at",
             "last_visited_at", "last_input_at", "last_activity_at", "viewers",
-            "exited_at", "archived_at", "paused_at", "delivery_hold", "compacting",
+            "exited_at", "archived_at", "paused_at", "delivery_hold",
+            "pending_deliveries", "compacting",
             "context", "branch", "briefing", "winddown", "session_reminder",
             "status_checks", "tps",
         }

@@ -2500,6 +2500,35 @@ function railQuietFlags(name) {
         "terminal header's own control.",
     });
   }
+  /* What has been accepted for this session and is still waiting to be typed
+     into it (Session.queue_delivery). A delivery waits for the harness to be
+     ready and for any half-written line to be sent, which can be minutes if
+     the agent is mid-turn -- and until now nothing said so anywhere. Pressing
+     a cflow or mesh button and seeing no change was indistinguishable from
+     the message having been dropped, and the press was often repeated, which
+     is how four identical nudges arrive at once
+     (claunch-restart-disconnect-banner-12p2).
+
+     Not a silence somebody chose, so it does not take the pause glyph the
+     other two share. */
+  const waiting = (s && s.pending_deliveries) || [];
+  if (waiting.length) {
+    const lines = waiting.map((d) => `  ${d.at || "?"}  ${d.preview || "(no text)"}`);
+    out.push({
+      cls: "quiet-waiting",
+      glyph: "✉",
+      text: `${waiting.length} waiting`,
+      title:
+        `${waiting.length} message(s) accepted for this session and not typed ` +
+        "in yet.\n" +
+        "A delivery waits for the harness to be ready to take one and for any " +
+        "draft in the composer to be sent, so this can sit while the agent " +
+        "works. Nothing is lost while it waits.\n" +
+        "It is not a durable mailbox: a daemon restart drops what is queued.\n" +
+        lines.join("\n"),
+    });
+  }
+
   const r = sessCflowRun(name);
   const rem = r && r.timers && r.timers.reminder;
   if (rem && rem.enabled === false) {
@@ -2539,7 +2568,7 @@ function applyRailQuiet() {
       const pill = el("span", `rail-quiet-pill ${f.cls}`);
       // The glyph is the pause the header chip uses for the same fact, so
       // "stopped on purpose" reads the same in both places.
-      pill.append(el("span", "quiet-glyph", "⏸"), el("span", null, f.text));
+      pill.append(el("span", "quiet-glyph", f.glyph || "⏸"), el("span", null, f.text));
       pill.title = f.title;
       line.appendChild(pill);
     }
