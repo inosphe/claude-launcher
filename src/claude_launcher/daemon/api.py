@@ -1095,15 +1095,23 @@ def _permission_mode(profile_obj, doc: dict) -> dict:
                         closes; showing the value alone would make a pending
                         profile look settled.
     """
-    declared = store.shared_settings(doc).get(PERMISSION_MODE_KEY)
+    shared_declared = store.shared_settings(doc).get(PERMISSION_MODE_KEY)
+    override = store.profile_settings(profile_obj.name, doc).get(PERMISSION_MODE_KEY)
+    declared = override if override is not None else shared_declared
     value = settings.dotted_get(settings.load(profile_obj), PERMISSION_MODE_KEY)
-    target = store.effective_shared_settings(doc).get(PERMISSION_MODE_KEY)
+    target = store.effective_profile_settings(profile_obj.name, doc).get(PERMISSION_MODE_KEY)
     return {
         "key": PERMISSION_MODE_KEY,
         "value": value,
         "target": target,
         "declared": declared,
-        "source": "claunch-default" if declared is None else "declared",
+        "source": "profile" if override is not None else (
+            "claunch-default" if declared is None else "declared"
+        ),
+        "override": override,
+        "shared_declared": shared_declared,
+        "shared_target": store.effective_shared_settings(doc).get(PERMISSION_MODE_KEY),
+        "packaged_default": store.SHARED_SETTINGS_DEFAULTS[PERMISSION_MODE_KEY],
         "converged": value == target,
         "modes": list(settings.PERMISSION_MODES),
     }
@@ -1299,30 +1307,30 @@ async def h_profiles(request: web.Request) -> web.Response:
 
 
 async def h_profiles_permission_mode(request: web.Request) -> web.Response:
-    """Declare claunch's default permission mode, then converge the profiles.
+    """Save a shared default or a profile override, then apply that scope.
 
-    The browser's ``claunch shared permissions.defaultMode=...``, and the same
-    two steps in the same order: the declaration is edited in the store, then
-    written into every Claude Code profile. Editing applies immediately, which
-    is the shared layer's rule everywhere else -- "declare it and remember to
-    run apply" is a two-step a person would have to repeat for every profile
-    added later.
-
-    One value, not one per profile. The declaration is a single key in the
-    shared block and that is the shape the convergence already has; a
-    per-profile override is a different design, and inventing it here would
-    give the page a state the CLI does not have. A profile that wants to keep
-    asking can still be left alone by editing its own ``settings.json`` by
-    hand -- claunch converges, it does not police.
-
-    ``{"mode": null}`` (or an empty string) undeclares the key, which returns
-    every profile to the packaged default rather than switching the behaviour
-    off. ``personal`` is not a mode, and the ones that are come from
-    :data:`settings.PERMISSION_MODES`: a typo that reached the store would be
-    converged into every profile as a key Claude Code then ignores, silently,
-    in the direction that asks more questions rather than fewer.
+    Without ``profile``, update the shared declaration and converge all Claude
+    profiles, preserving their overrides. With ``profile``, update and apply
+    only that existing Claude profile. A null/empty mode removes the scoped
+    declaration: profiles resume the shared default; shared resumes the
+    packaged default. Both paths use the same planner as ``claunch apply``.
     """
     body = await _json_body(request)
+    target_profile = None
+    if "profile" in body:
+        name = body["profile"]
+        if not isinstance(name, str) or not name.strip():
+            return json_error(400, "profile must be a non-empty profile name")
+        try:
+            target_profile = profile_mod.require(name)
+            if target_profile.name not in {p.name for p in profile_mod.list_all()}:
+                return json_error(400, "profile must name an existing profile")
+            if lineage.effective_harness(target_profile) != harness_registry.CLAUDE_HARNESS:
+                return json_error(400, "permission mode is only available for Claude Code profiles")
+        except (profile_mod.ProfileError, lineage.LineageError) as exc:
+            return json_error(400, str(exc))
+    if "mode" not in body:
+        return json_error(400, "mode is required; use null to restore the default")
     raw = body.get("mode")
     declared = str(raw).strip() if raw is not None else ""
     if declared and not settings.is_permission_mode(declared):
@@ -1331,7 +1339,9 @@ async def h_profiles_permission_mode(request: web.Request) -> web.Response:
             f"unknown permission mode {declared!r} (known: "
             f"{', '.join(settings.PERMISSION_MODES)})",
         )
-    if declared:
+    if target_profile is not None:
+        store.set_profile_setting(target_profile.name, PERMISSION_MODE_KEY, declared or None)
+    elif declared:
         plugins.set_shared_setting(PERMISSION_MODE_KEY, declared)
     else:
         # Undeclaring pops the key. Setting it to ``None`` would be a
@@ -1340,7 +1350,7 @@ async def h_profiles_permission_mode(request: web.Request) -> web.Response:
         # Claude Code ignores, so the mode would fall back to asking while
         # the page reported a value nobody chose.
         plugins.unset_shared_setting(PERMISSION_MODE_KEY)
-    targets = _converge_profiles()
+    targets = [target_profile] if target_profile is not None else _converge_profiles()
     results = await asyncio.to_thread(plugins.apply_all, targets)
     failed = [
         {"profile": result.profile, "reason": plugins.error_line(error)}
@@ -1352,8 +1362,12 @@ async def h_profiles_permission_mode(request: web.Request) -> web.Response:
             "key": PERMISSION_MODE_KEY,
             # What the declaration reads now. Null means "nobody declared one",
             # not "no value in force" -- ``target`` is what is in force.
-            "declared": store.shared_settings().get(PERMISSION_MODE_KEY),
-            "target": store.effective_shared_settings().get(PERMISSION_MODE_KEY),
+            "profile": target_profile.name if target_profile is not None else None,
+            "declared": declared or None,
+            "target": (
+                store.effective_profile_settings(target_profile.name)
+                if target_profile is not None else store.effective_shared_settings()
+            ).get(PERMISSION_MODE_KEY),
             "converged": [r.profile for r in results if r.changed],
             "unchanged": [r.profile for r in results if not r.changed and r.ok],
             "failed": failed,

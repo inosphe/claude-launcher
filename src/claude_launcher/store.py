@@ -912,6 +912,35 @@ def effective_shared_settings(doc: Optional[dict] = None) -> Dict[str, object]:
     return {**SHARED_SETTINGS_DEFAULTS, **shared_settings(doc)}
 
 
+def profile_settings(name: str, doc: Optional[dict] = None) -> Dict[str, object]:
+    """Native settings declared for this profile only, without parent inheritance."""
+    block = profile_entry(name, doc).get("settings")
+    return dict(block) if isinstance(block, dict) else {}
+
+
+def effective_profile_settings(name: str, doc: Optional[dict] = None) -> Dict[str, object]:
+    """Profile declarations take precedence over shared and packaged defaults."""
+    doc = load() if doc is None else doc
+    return {**effective_shared_settings(doc), **profile_settings(name, doc)}
+
+
+def set_profile_setting(name: str, key: str, value) -> None:
+    """Set one native setting; None removes the override and restores sharing."""
+    def _mutate(doc: dict) -> None:
+        entry = _writable_entry(doc, name)
+        values = profile_settings(name, doc)
+        if value is None:
+            values.pop(key, None)
+        else:
+            values[key] = value
+        if values:
+            entry["settings"] = values
+        else:
+            entry.pop("settings", None)
+
+    update(_mutate)
+
+
 def set_shared_field(key: str, value) -> None:
     """Set (or, when ``value`` is empty, clear) one key of the ``shared`` block."""
     if key not in SHARED_KEYS:

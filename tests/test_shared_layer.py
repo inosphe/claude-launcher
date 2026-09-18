@@ -473,6 +473,20 @@ def test_apply_lands_the_default_permission_mode(home):
     assert settings.load(p)["permissions"]["defaultMode"] == "auto"
 
 
+def test_cli_apply_and_shared_preserve_profile_override(home, monkeypatch):
+    monkeypatch.setattr(plugins, "_run", FakeClaude())
+    p = profile.create("work")
+    other = profile.create("other")
+    store.set_profile_setting("work", MODE, "plan")
+    assert run("shared", "permissions.defaultMode=acceptEdits") == 0
+    assert run("apply") == 0
+    assert run("apply", "--check") == 0
+    assert settings.load(p)["permissions"]["defaultMode"] == "plan"
+    assert settings.load(other)["permissions"]["defaultMode"] == "acceptEdits"
+    assert run("create", "fresh") == 0
+    assert settings.load(profile.require("fresh"))["permissions"]["defaultMode"] == "acceptEdits"
+
+
 def test_the_mode_write_leaves_the_gate_guard_alone(home):
     """The whole reason the write is dotted: ``permissions.deny`` is a sibling.
 

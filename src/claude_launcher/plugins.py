@@ -187,7 +187,7 @@ def plan(profile: Profile, doc: Optional[dict] = None) -> List[Action]:
             actions.append(Action(PLUGIN, plugin_id))
 
     current = settings.load(profile)
-    for key, value in store.effective_shared_settings(doc).items():
+    for key, value in store.effective_profile_settings(profile.name, doc).items():
         if settings.dotted_get(current, key) != value:
             actions.append(Action(SETTING, key, json.dumps(value, ensure_ascii=False)))
     return actions

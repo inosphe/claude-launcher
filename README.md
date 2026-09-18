@@ -2952,12 +2952,22 @@ converges shows the move (`auto → plan`) rather than a value, because that
 profile's convergence has not run yet; a profile on another harness shows a
 dash, since the key is one Claude Code reads and that harness never will.
 
-The permission mode is **one value for every Claude profile**, not one per
-profile — see [Keys claunch defaults](#keys-claunch-defaults). Changing it here
-declares `permissions.defaultMode` and converges, which is the same two steps
-`claunch shared permissions.defaultMode=<mode>` runs; a profile's own
-`settings.json` is still yours to edit by hand, and claunch converges rather
-than polices.
+Permission mode supports a **shared default and per-profile overrides** — see
+[Keys claunch defaults](#keys-claunch-defaults). **Apply shared default** saves
+the common declaration and immediately updates existing Claude profiles that
+use it. New profiles use the common default too. **Apply to profile** saves
+an override and updates only that profile. **Use shared default** removes its
+override and applies the current common value. Overrides are stored under
+`profiles.<name>.settings.permissions.defaultMode` in `~/.claunch.yaml` (the
+setting name `permissions.defaultMode` is a dotted key) and survive subsequent
+shared changes and `claunch apply`. These overrides belong to the named profile
+and are not inherited through its parent profile.
+
+Both buttons write the profile's native `settings.json`; the page does not
+restart running sessions or send them a mode-change command. Launch a new
+session to use the saved setting. Previously, the single **Apply** button
+changed the common declaration and wrote the value into every existing Claude
+profile; its scope included both existing profiles and future profile creation.
 
 The same Settings page carries a **GitHub CLI (gh)** card, the machine side
 of the [PR-landing worker](#workflows-cflow): whether `gh` resolves on the
