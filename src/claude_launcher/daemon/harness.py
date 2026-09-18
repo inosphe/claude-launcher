@@ -171,6 +171,10 @@ class SessionDef:
     #: Persisted with the definition so a daemon restart or respawn does not
     #: silently undo a pause made from the terminal header.
     reminder_paused: bool = False
+    #: Creation opt-in and the last score entered by the operator. At ten
+    #: the selection remains recorded, but the score source stops repeating.
+    score_goal: bool = False
+    user_score: float = 0
     #: The session this one is a quick-fork of, by name (see
     #: :mod:`claude_launcher.daemon.handoff`). Written only by the quick-fork
     #: route, never by a plain spawn: it is what makes ``merge`` available on
@@ -209,6 +213,9 @@ class SessionDef:
         # field exists on disk only when it carries information.
         if self.reminder_paused:
             out["reminder_paused"] = True
+        if self.score_goal:
+            out["score_goal"] = True
+            out["user_score"] = self.user_score
         if self.tools is not None:
             out["tools"] = list(self.tools)
         if self.quick_fork_of:
@@ -217,6 +224,8 @@ class SessionDef:
 
     @classmethod
     def from_dict(cls, data: dict) -> "SessionDef":
+        from . import score_goal
+
         return cls(
             name=str(data["name"]),
             harness=str(data.get("harness") or CLAUDE_HARNESS),
@@ -242,6 +251,8 @@ class SessionDef:
             issue=str(data.get("issue") or "").strip() or None,
             keep_alive=bool(data.get("keep_alive")),
             reminder_paused=bool(data.get("reminder_paused")),
+            score_goal=score_goal.enabled(data.get("score_goal", False)),
+            user_score=score_goal.score(data.get("user_score", 0)),
             quick_fork_of=str(data.get("quick_fork_of") or "").strip() or None,
         )
 

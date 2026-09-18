@@ -2253,6 +2253,7 @@ async function refreshSessions(options) {
   }
 
   const cur = currentName && sessionsCache.find((s) => s.name === currentName);
+  if (typeof renderScoreGoal === "function") renderScoreGoal();
   if (snapshotName && snapshotName === currentName && cur && cur.status !== "exited") {
     // The snapshot's session came back (its own resume, or another tab's): it
     // has a live PTY again, so replace the static last screen with a live
@@ -6799,6 +6800,7 @@ $("new-session").addEventListener("submit", async (e) => {
     body.workflow = "-";
   }
   if (f.task.value.trim()) body.task = f.task.value.trim();
+  if (f.score_goal && f.score_goal._scoreLoaded !== false) body.score_goal = !!f.score_goal.checked;
   // The board answer. "new" is the absence of both keys — a request that says
   // nothing gets an issue minted from the task, which is what every client
   // that has never heard of this field still wants. The two "no issue" rows
@@ -8042,7 +8044,124 @@ async function sendKeyLine(field, btn, note) {
    no PTY any send-keys could reach, so the box is closed with the reason
    shown; a live one is open, and whatever this tab's badge says the daemon
    answers for. */
+function renderScoreGoal() {
+  const box = $("term-score-goal");
+  if (!box) return;
+  const session = sessionsCache.find((s) => s.name === currentName);
+  const visible = !!session?.score_goal;
+  box.classList.toggle("hidden", !visible);
+  if (!visible) return;
+  const field = $("term-score-value");
+  const value = String(session.user_score ?? 0);
+  const switched = box.dataset.session !== currentName;
+  if (switched || field.value === field.dataset.saved) field.value = value;
+  field.dataset.saved = value;
+  box.dataset.session = currentName;
+  field.disabled = session.status === "exited" || sessionEnded;
+  $("term-score-save").disabled = field.disabled || box.dataset.saving === currentName;
+  if (switched || !box.dataset.saving) {
+    $("term-score-note").textContent = Number(value) === 10 ? "Goal reminders off" : "";
+  }
+}
+
+async function saveSessionScore() {
+  const name = currentName;
+  const box = $("term-score-goal");
+  const field = $("term-score-value");
+  const note = $("term-score-note");
+  const value = Number(field.value);
+  if (!field.value.trim() || !Number.isFinite(value) || value < 0 || value > 10) {
+    note.textContent = "Enter a score from 0 to 10.";
+    return;
+  }
+  if (!name || field.disabled || box.dataset.saving) return;
+  box.dataset.saving = name;
+  $("term-score-save").disabled = true;
+  try {
+    const response = await api(`/api/sessions/${encodeURIComponent(name)}/score-goal`, {
+      method: "PUT", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ score: value }),
+    });
+    const doc = await response.json();
+    if (!response.ok) throw new Error(doc.error || "Could not save score.");
+    const session = sessionsCache.find((s) => s.name === name);
+    if (session) session.user_score = doc.score;
+    if (currentName === name) {
+      field.value = String(doc.score);
+      field.dataset.saved = field.value;
+      note.textContent = doc.active ? "Score saved" : "10/10 — goal reminders off";
+    }
+  } catch (err) {
+    if (currentName === name) note.textContent = err.message;
+  } finally {
+    delete box.dataset.saving;
+    $("term-score-save").disabled = field.disabled;
+  }
+}
+
+$("term-score-save")?.addEventListener("click", saveSessionScore);
+$("term-score-value")?.addEventListener("keydown", (event) => {
+  event.stopPropagation();
+  if (event.key === "Enter") {
+    event.preventDefault();
+    saveSessionScore();
+  }
+});
+
+async function refreshScoreGoalDefault(form) {
+  const checkbox = form.score_goal;
+  if (!checkbox) return;
+  const view = form._sessionView;
+  checkbox.checked = false;
+  checkbox._scoreTouched = false;
+  checkbox._scoreLoaded = false;
+  checkbox.onchange = () => { checkbox._scoreTouched = true; checkbox._scoreLoaded = true; };
+  try {
+    const response = await api("/api/score-goal/defaults");
+    if (!response.ok) return;
+    const doc = await response.json();
+    if (form._sessionView === view && !checkbox._scoreTouched) {
+      checkbox.checked = !!doc.enabled;
+      checkbox._scoreLoaded = true;
+    }
+  } catch { /* The shipped default is off. */ }
+}
+
+function scoreGoalSettingsCard() {
+  const card = el("section", "ws-add score-goal-settings");
+  card.appendChild(el("h3", null, "User score goal"));
+  const label = el("label", "check");
+  const checkbox = document.createElement("input");
+  checkbox.type = "checkbox";
+  checkbox.disabled = true;
+  label.append(checkbox, document.createTextNode(" Enable by default for new sessions and children"));
+  const note = el("p", "wf-note", "Starts at 0/10. Set the score beside the session input. Goal reminders stop at 10/10.");
+  card.append(label, note);
+  api("/api/score-goal/defaults").then(async (response) => {
+    if (!response.ok) throw new Error("Could not load score goal default.");
+    checkbox.checked = !!(await response.json()).enabled;
+    checkbox.disabled = false;
+  }).catch((err) => { note.textContent = err.message; });
+  checkbox.addEventListener("change", async () => {
+    const value = checkbox.checked;
+    checkbox.disabled = true;
+    try {
+      const response = await api("/api/score-goal/defaults", {
+        method: "PUT", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ enabled: value }),
+      });
+      if (!response.ok) throw new Error("Could not save score goal default.");
+      note.textContent = "Saved. Applies to newly created sessions; existing sessions keep their setting.";
+    } catch (err) {
+      checkbox.checked = !value;
+      note.textContent = err.message;
+    } finally { checkbox.disabled = false; }
+  });
+  return card;
+}
+
 function refreshTermInput() {
+  if (typeof renderScoreGoal === "function") renderScoreGoal();
   const field = $("term-input-field");
   const note = $("term-input-note");
   const btn = $("term-input-send");
@@ -11312,6 +11431,7 @@ async function openNewSession(mesh) {
   refreshParentChoices();
   setSessionModalTab("new");
   applySessionModalRecall($("new-session"));
+  refreshScoreGoalDefault($("new-session"));
   pendingNewMesh = mesh || "";
   if (pendingNewMesh) {
     if (!(meshCache || []).some((m) => m.name === pendingNewMesh)) {
@@ -15231,6 +15351,7 @@ function renderWorkspaces() {
   ));
 
   view.appendChild(keyHelpCard());
+  view.appendChild(scoreGoalSettingsCard());
 
   view.appendChild(railStaleCard());
 
@@ -20169,17 +20290,17 @@ function sessionFormConfig(mode) {
     "mesh", "handle", "role", "workflow", "context", "borrow", "null_token",
     "resume", "fork", "skip_permissions", "codex_yolo", "codex_sandbox", "args",
     "worktree_mode", "worktree_name", "worktree_existing", "worktree_rebase",
-    "task", "beads", "issue_text", "issue_filter", "issue", "pi_tool_*"];
+    "task", "score_goal", "beads", "issue_text", "issue_filter", "issue", "pi_tool_*"];
   const modes = {
     new: { title: "New session", submit: "Create", sections, editable,
       payload: ["name", "profile", "cwd", "args", "model", "effort", "tools", "worktree",
         "rebase_onto", "role", "borrow", "null_token", "mesh", "handle", "workflow",
-        "context", "task", "beads", "issue", "issue_text", "resume", "fork_session"] },
+        "context", "task", "score_goal", "beads", "issue", "issue_text", "resume", "fork_session"] },
     spawn: { title: "Spawn child", submit: "Spawn child", sections,
       editable: [...editable, "parent", "fork_parent", "over_limit"],
       payload: ["name", "profile", "workspace", "cwd", "args", "model", "effort", "tools", "worktree",
         "rebase_onto", "role", "borrow", "null_token", "mesh", "handle", "workflow",
-        "context", "task", "beads", "issue", "issue_text", "fork", "connect", "over_limit"] },
+        "context", "task", "score_goal", "beads", "issue", "issue_text", "fork", "connect", "over_limit"] },
     fork: { title: "Quick fork", submit: "Fork", sections: ["new-quick-fork"],
       editable: ["quick_fork_carry", "quick_fork_task"], payload: ["task", "mesh", "workflow"] },
   };
@@ -20564,6 +20685,7 @@ async function openSessionModal(opts = {}) {
   setSessionModalTab(tab);
   if (opts.seed) applySessionModalSeed(f, opts.seed);
   else applySessionModalRecall(f);
+  refreshScoreGoalDefault(f);
   // The option sets the form stands on. Each failure degrades its own
   // field, exactly as it does on the page: a daemon that could not answer
   // about worktrees is not a reason to refuse to draw the form.

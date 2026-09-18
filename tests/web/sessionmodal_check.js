@@ -291,6 +291,7 @@ function Option(label, value) {
   + slice("createSessionFormView") + slice("sessionFormConfig") + slice("sessionFormView") + slice("renderSessionForm")
   + slice("applySessionParentChange") + slice("openSessionModal")
   + slice("openNewSession")
+  + slice("refreshScoreGoalDefault")
   + slice("sessionModalClose") + slice("openSpawnModal") + `
 const SPAWN_SIZE_KEY = \`claunch_spawnsize:\${BASE}\`;
 const SPAWN_W_MIN = 420, SPAWN_H_MIN = 240;

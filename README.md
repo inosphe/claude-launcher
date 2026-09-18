@@ -2903,6 +2903,22 @@ injects) but is dismissed there, where its mail is counted.
 
 ## Web UI & HTTP API
 
+**User score goal** is optional in **New session** and **Spawn child**.
+It starts at 0/10 and submits a standalone `/goal …` command before the opening
+task. Later session reminders include the goal and current score as ordinary
+prompt text, including sessions without a workflow. Use the **Score** field
+beside **type for this session** to save a rating from 0 to 10 (decimals allowed).
+Saving a rating also notifies the session. At 10/10, score goal reminders stop;
+other reminder sources retain their settings. Correcting the score below 10
+resumes goal reminders. Selection and score survive daemon restart and session
+resume; the initial command runs only on creation.
+
+The checkbox ships unchecked. **Settings → User score goal** changes the default
+for future sessions and children (`daemon.score_goal_default`); each creation
+form can override it. A child starts at zero independently of its parent's score.
+Periodic goal reminders use the machine's `cflow_reminder_interval` (600 seconds
+when unset or zero) and the session reminder pause/skip controls.
+
 The daemon doubles as a web server. `claunch web --open` prints/opens the UI:
 a session list (status badges, create/kill) plus a **live xterm.js terminal**
 attached over WebSocket — full input and output, multiple viewers allowed.

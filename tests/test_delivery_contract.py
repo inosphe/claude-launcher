@@ -183,6 +183,32 @@ def test_deliver_sends_the_enter_as_its_own_write(monkeypatch):
     assert writes == [b"\x1b[200~[T]\rcflow: go\x1b[201~", b"\r"]
 
 
+def test_goal_command_is_one_unstamped_input_with_separate_enter(monkeypatch):
+    monkeypatch.setattr(session_mod, "PASTE_ENTER_DELAY", 0.0)
+    s, writes = _fake_session(bracketed=True)
+    assert asyncio.run(session_mod.Session.deliver_command(s, "/goal target"))
+    assert writes == [b"\x1b[200~/goal target\x1b[201~", b"\r"]
+    with pytest.raises(ValueError):
+        asyncio.run(session_mod.Session.deliver_command(s, "/goal target\nsecond"))
+
+
+def test_state_dependent_delivery_refreshes_or_cancels_after_wait(monkeypatch):
+    monkeypatch.setattr(session_mod, "PASTE_ENTER_DELAY", 0.0)
+    for updated in [7, 10]:
+        s, writes = _fake_session(bracketed=True)
+        rating = [0]
+
+        async def quiet(**kwargs):
+            rating[0] = updated
+            return True
+
+        s.await_keyboard_quiet = quiet
+        render = lambda: f"score {rating[0]}/10" if rating[0] < 10 else ""
+        result = asyncio.run(s.deliver(render))
+        assert result is (updated < 10)
+        assert writes == ([b"\x1b[200~[T]\rscore 7/10\x1b[201~", b"\r"] if updated < 10 else [])
+
+
 def test_deliver_serializes_each_message_paste_and_enter(monkeypatch):
     """Concurrent mesh and cflow deliveries cannot interleave their Enter keys."""
     monkeypatch.setattr(session_mod, "PASTE_ENTER_DELAY", 0.0)
