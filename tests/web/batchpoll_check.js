@@ -58,11 +58,16 @@ function build(handler) {
   };
   const code = [
     slice("api"),
+    slice("budgeted"),
     slice("batchResponse"),
     slice("batchable"),
     slice("batchQueue"),
     slice("batchFlush"),
     "const BATCH_MAX = 24;",
+    "const BATCH_WINDOW_MS = 0;",   // the harness drives the flush by hand
+    "const HTTP_BUDGET = 4;",
+    "let httpInFlight = 0;",
+    "const httpWaiting = [];",
     "let batchPending = null;",
     "return { api, batchable, batchFlush };",
   ].join("\n");
@@ -143,12 +148,24 @@ async function writesAndProbesGoOutAlone() {
   assert.strictEqual(app.calls[0].method, "POST");
 }
 
-/* ---- 3. one read does not pay for a batch ------------------------------ */
-async function aLoneReadGoesStraightOut() {
-  const app = build(async (u) => jsonResponse({ path: u }));
+/* ---- 3. a read that ends up alone still costs one connection ----------- */
+/* The window is what gathers callers whose timers are merely out of phase;
+   a read that nobody joined is sent as a batch of one. It costs the same
+   single connection either way, and keeping one path here means there is one
+   place where a read becomes a request. */
+async function aReadThatEndsUpAloneIsStillOneRequest() {
+  const app = build(async (u, opts) => {
+    if (u === "/api/batch") {
+      const answers = {};
+      for (const p of JSON.parse(opts.body).paths) answers[p] = { path: p };
+      return jsonResponse({ answers, errors: {} });
+    }
+    return jsonResponse({ path: u });
+  });
   const resp = await app.api("/api/workspaces");
-  assert.strictEqual(app.calls.length, 1);
-  assert.strictEqual(app.calls[0].url, "/api/workspaces", "no batch for one read");
+  assert.strictEqual(app.calls.length, 1, "one read, one request");
+  assert.strictEqual(app.calls[0].url, "/api/batch");
+  assert.deepStrictEqual(batchOf(app.calls[0]), ["/api/workspaces"]);
   assert.deepStrictEqual(await resp.json(), { path: "/api/workspaces" });
 }
 
@@ -192,10 +209,46 @@ async function anOlderDaemonStillServesThePage() {
   assert.ok(tried.includes("/api/sessions") && tried.includes("/api/cflow"), tried.join(","));
 }
 
+/* ---- 6. the page keeps room for the terminal --------------------------- */
+/* Batching reduces how often the ceiling is approached; the budget is what
+   makes the headroom a guarantee. A request past it waits in the page rather
+   than in the browser's connection queue, where a WebSocket handshake would
+   be stuck behind it with nothing to report. */
+async function requestsPastTheBudgetWaitInThePage() {
+  const release = [];
+  const app = build(() => new Promise((resolve) => release.push(
+    () => resolve(jsonResponse({ ok: true }))
+  )));
+
+  // Writes, so nothing is batched and each one is a request of its own.
+  const sent = [];
+  for (let i = 0; i < 7; i++) {
+    sent.push(app.api(`/api/thing/${i}`, { method: "POST", body: "{}" }));
+  }
+  for (let i = 0; i < 5; i++) await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.strictEqual(app.calls.length, 4, "four in flight, three waiting");
+
+  // One answers; the connection it held goes to the next in line, and no
+  // more than that.
+  release.shift()();
+  for (let i = 0; i < 5; i++) await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.strictEqual(app.calls.length, 5, "one finished, one let through");
+
+  // Draining takes several rounds: each one that answers lets a waiter start
+  // a request of its own, which is the property being shown.
+  for (let round = 0; round < 12 && release.length; round++) {
+    while (release.length) release.shift()();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  }
+  await Promise.all(sent);
+  assert.strictEqual(app.calls.length, 7, "and every one of them was sent");
+}
+
 (async () => {
   await cadenceStaysWithTheCaller();
+  await requestsPastTheBudgetWaitInThePage();
   await writesAndProbesGoOutAlone();
-  await aLoneReadGoesStraightOut();
+  await aReadThatEndsUpAloneIsStillOneRequest();
   await aFailedReadIsAloneInFailing();
   await anOlderDaemonStillServesThePage();
   console.log("batchpoll_check ok");

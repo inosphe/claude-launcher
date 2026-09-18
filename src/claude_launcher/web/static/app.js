@@ -83,16 +83,51 @@ function relogin() {
 async function api(path, opts = {}) {
   const batched = batchQueue(path, opts);
   if (batched) return batched;
-  let resp = await fetch(url(path), { credentials: "same-origin", ...opts });
+  let resp = await budgeted(() => fetch(url(path), { credentials: "same-origin", ...opts }));
   if (resp.status === 401) {
     if (await relogin()) {
-      resp = await fetch(url(path), { credentials: "same-origin", ...opts });
+      resp = await budgeted(() => fetch(url(path), { credentials: "same-origin", ...opts }));
       if (resp.status !== 401) return resp;
     }
     showAuth();
     throw new Error("unauthorized");
   }
   return resp;
+}
+
+/* ---- the page's share of the browser's connections ----
+
+   A browser holds a small number of connections to one server and every
+   request in flight owns one until it is answered. A WebSocket needs one of
+   its own, and it cannot wait its turn the way a fetch can: Firefox queues
+   the handshake, sends it when a connection frees, and the page meanwhile
+   reports that it cannot connect. That is what a terminal failing to come up
+   was (claunch-restart-disconnect-banner-12p2).
+
+   So the page spends fewer than it is allowed. Requests past the budget wait
+   here rather than at the socket layer, which leaves room the terminal can
+   take at any moment. Batching reduces how often this is reached; the budget
+   is what makes the headroom a guarantee rather than a tendency.
+
+   Four is chosen against Firefox's default of six: two connections stay free,
+   which is one for the attached terminal and one for the socket a session
+   switch opens before the old one is let go. */
+const HTTP_BUDGET = 4;
+let httpInFlight = 0;
+const httpWaiting = [];
+
+async function budgeted(send) {
+  if (httpInFlight >= HTTP_BUDGET) {
+    await new Promise((resolve) => httpWaiting.push(resolve));
+  }
+  httpInFlight += 1;
+  try {
+    return await send();
+  } finally {
+    httpInFlight -= 1;
+    const next = httpWaiting.shift();
+    if (next) next();
+  }
 }
 
 /* ---- one connection for the reads that happen together ----
@@ -115,7 +150,20 @@ async function api(path, opts = {}) {
    own /api/ reads go straight out as before. So does a lone read: the batch
    would cost the same one connection and add a round of encoding.  */
 const BATCH_MAX = 24;          // the endpoint's own cap
-let batchPending = null;       // path -> [{resolve, reject}], while a turn is open
+
+/* How long a batch stays open for company. One turn of the event loop was
+   too short: the page's reads are on separate timers (the dashboard tick,
+   the board queues, the flows view, the attached session's own polls), so
+   they fall in different turns and each one went out alone, spending a
+   connection apiece. Measured against a live daemon after the first
+   version: `firefox 5` held while one socket was open, with
+   /api/beads/queues and /api/daemon arriving on connections of their own.
+
+   A tenth of a second gathers timers that are merely out of phase and is
+   under what a person notices in a poll. It is never applied to a write,
+   and a read a person is waiting on behind a click pays it once. */
+const BATCH_WINDOW_MS = 100;
+let batchPending = null;       // path -> [{resolve, reject}], while one is open
 
 /* A Response is what every caller expects back; these are the parts they
    use (`ok`, `status`, `json`, `text`). Nothing reads headers off one. */
@@ -149,7 +197,7 @@ function batchQueue(path, opts) {
   batchPending.set(path, waiting);
   // Flushed a turn later, which is what gathers the callers that fired
   // together: every refresh in one tick has queued by then.
-  if (first) setTimeout(batchFlush, 0);
+  if (first) setTimeout(batchFlush, BATCH_WINDOW_MS);
   return promise;
 }
 
@@ -164,10 +212,11 @@ async function batchFlush() {
       else waiter.resolve(response);
     }
   };
-  // One read is not worth a batch, and neither is a set larger than the
-  // endpoint takes: those go out the ordinary way, still one connection each
-  // but never refused for being too many.
-  if (paths.length === 1 || paths.length > BATCH_MAX) {
+  // A set larger than the endpoint takes goes out the ordinary way rather
+  // than being refused for being too many. A lone read does NOT: it costs
+  // the same one connection either way, and sending it as a batch keeps the
+  // decision in one place.
+  if (paths.length > BATCH_MAX) {
     await Promise.all(paths.map(async (path) => {
       try {
         settle(path, await api(path, { method: "GET", noBatch: true }));
@@ -7489,6 +7538,10 @@ function syncLinkChip() {
    plain close with no status at all. */
 async function daemonHealth() {
   try {
+    // Deliberately outside the budget below. It is the probe the recovery
+    // path leans on, and one of it is in flight at a time: putting it behind
+    // a queue of ordinary reads would make "is the daemon back" wait for
+    // requests that are failing because it is not.
     const resp = await fetch(url("/api/health"), { cache: "no-store" });
     if (!resp.ok) return null;
     return await resp.json();
