@@ -22,22 +22,46 @@ globalThis.SearchAnything = (() => {
   const notice = node("p", "Enter로 검색 · Esc로 닫기", "search-anything-notice"); notice.setAttribute("role", "status");
   const results = node("div", "", "search-anything-results");
   form.append(input, submit); modal.append(header, form, notice, results); document.body.append(modal);
-  let sequence = 0, controller = null, previousFocus = null;
+  let sequence = 0, controller = null, previousFocus = null, timeRefresh = null;
+  const relativeTime = new Intl.RelativeTimeFormat("ko", {numeric: "always"});
+  function formatTime(value) {
+    const date = new Date(value);
+    if (!Number.isFinite(date.getTime())) return value;
+    const seconds = (date.getTime() - Date.now()) / 1000;
+    let relative = "방금 전";
+    if (Math.abs(seconds) >= 60) {
+      const [unit, size] = [["year", 31536000], ["month", 2592000], ["day", 86400], ["hour", 3600], ["minute", 60]]
+        .find(([, size]) => Math.abs(seconds) >= size);
+      relative = relativeTime.format(Math.trunc(seconds / size), unit);
+    } else if (seconds > 0) relative = "곧";
+    return `${date.toLocaleString()} (${relative})`;
+  }
+  function refreshTimes() {
+    for (const time of results.querySelectorAll("time")) time.textContent = formatTime(time.dateTime);
+  }
   function open() {
     if (modal.open) { input.focus(); return; }
     previousFocus = document.activeElement; modal.showModal(); input.focus();
+    refreshTimes(); timeRefresh = setInterval(refreshTimes, 30000);
   }
   close.onclick = () => modal.close();
   modal.addEventListener("keydown", event => {
     if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); modal.close(); }
   });
   modal.addEventListener("close", () => {
+    clearInterval(timeRefresh); timeRefresh = null;
     sequence++; controller?.abort(); submit.disabled = false; previousFocus?.focus();
   });
   input.addEventListener("input", () => { sequence++; controller?.abort(); submit.disabled = false; });
   function addResult(row) {
     const item = node("article", "", "search-anything-result");
-    item.append(node("small", [row.kind, row.at ? new Date(row.at).toLocaleString() : "", row.root || ""].filter(Boolean).join(" · ")));
+    const metadata = node("small", row.kind || "");
+    if (row.at) {
+      const time = node("time", formatTime(row.at)); time.dateTime = row.at;
+      metadata.append(document.createTextNode(metadata.textContent ? " · " : ""), time);
+    }
+    if (row.root) metadata.append(document.createTextNode((metadata.textContent ? " · " : "") + row.root));
+    item.append(metadata);
     const link = node("a", row.title || row.id); link.href = row.href;
     link.onclick = () => { if (row.root && typeof beadsWorkspace !== "undefined") beadsWorkspace = row.root; modal.close(); };
     item.append(link, node("p", row.excerpt || ""));
