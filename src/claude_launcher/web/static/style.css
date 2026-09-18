@@ -3702,6 +3702,29 @@ body.embed #main { width: 100%; }
   #mesh-view select, #wf-view select, #sess-view select { max-width: 100%; }
 }
 
+/* ---- the session modal's two tabs ----------------------------------- */
+/* One form, two ways in: a session of its own, or a child of a named parent.
+   The strip is inside the form so it travels with the node when the modal
+   borrows it, which is also why it is styled on its own classes rather than
+   on a modal selector: it has to look the same on the page and in the box.
+   Same shape as the trace page's tabs; the state is `aria-selected`, since
+   that attribute is what a screen reader reads and a second class saying the
+   same thing is a second thing to keep in step. */
+.sess-modal-tabs { display: flex; gap: 6px; margin-bottom: 12px; }
+.sess-modal-tab {
+  cursor: pointer; border: 1px solid #30363d; background: #1b1e24;
+  color: #9da5b0; border-radius: 6px; padding: 5px 12px; font-size: 12px;
+  flex: 1 1 0; max-width: 180px;
+}
+.sess-modal-tab:hover { border-color: #4d5566; color: #d8dbe0; }
+.sess-modal-tab[aria-selected="true"] {
+  background: #172947; border-color: #58a6ff; color: #cfe2ff; cursor: default;
+}
+/* The page caps the form at a readable column; inside the box the box IS the
+   column, and a 520px form in a 700px dialog leaves a stripe of empty sheet
+   down one side. */
+#modal-overlay.spawn-open #new-session { max-width: none; }
+
 /* The spawn wizard as a dialog: every session's fleet-growing verb. The
    confirm dialogs the overlay normally holds are 460px of prose; a form is
    neither — the overlay gets a class while the spawn modal owns it, and the

@@ -427,7 +427,22 @@
 
     <div id="new-view" class="hidden">
       <form id="new-session">
-        <div class="page-head"><h2>New session</h2></div>
+        <!-- The two ways a session is created, as one modal with two tabs.
+             They were two forms — this page and the spawn wizard's own —
+             which meant every row existed twice and a fix to one of them
+             was a fix to half the dashboard. There is one form now, and
+             the tab decides the single thing the two answers differ on:
+             whether a parent is named. Switching tabs keeps every value
+             the operator has typed, because it is the same form either
+             way. Kept inside the form so hosting the form in the modal
+             carries the strip with it. -->
+        <div id="new-tabs" class="sess-modal-tabs" role="tablist">
+          <button type="button" id="new-tab-new" class="sess-modal-tab"
+                  role="tab" aria-selected="true">New session</button>
+          <button type="button" id="new-tab-spawn" class="sess-modal-tab"
+                  role="tab" aria-selected="false">Spawn child</button>
+        </div>
+        <div id="new-page-head" class="page-head"><h2>New session</h2></div>
         <!-- The form asks WHO this session is before HOW it runs. What the
              user came here to decide is the arrangement — whose child it is,
              which mesh it answers in, what role it holds, which run it drives
@@ -479,7 +494,7 @@
         <fieldset id="new-identity">
           <legend><span class="sess-spawn-step">2</span> Identity</legend>
           <p class="sess-spawn-group-blurb">who this session is</p>
-          <label>Parent <select name="parent"></select></label>
+          <label id="new-parent-row">Parent <select name="parent"></select></label>
           <label class="check hidden" id="new-fork-row">
             <input type="checkbox" name="fork_parent">
             <span><code>--fork-session</code> (start the child from a copy of
@@ -539,6 +554,12 @@
           <label id="new-handle-row" class="hidden">
             Handle <input name="handle" placeholder="(session name)">
           </label>
+          <!-- Who the child may talk to on arrival. The mesh join makes it a
+               member; this row is the wiring, and it is offered only for the
+               peers that are actually reachable (a running local session, or
+               a member of another daemon). The boxes are generated from the
+               mesh poll, so the markup carries only the frame. -->
+          <div id="new-connect-row" class="hidden"></div>
           <label>Role <select name="role"></select></label>
           <p id="role-stance" class="hidden"></p>
           <label>Workflow <select name="workflow"></select></label>
