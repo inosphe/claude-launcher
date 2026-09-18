@@ -2501,12 +2501,14 @@ function railQuietFlags(name) {
     });
   }
   /* What has been accepted for this session and is still waiting to be typed
-     into it (Session.queue_delivery). A delivery waits for the harness to be
+     into it (Session.queue_delivery): cflow's reminders, stall pings and
+     nudges. Mesh messages are not here -- they take their own path and the
+     queued view already shows them. A delivery waits for the harness to be
      ready and for any half-written line to be sent, which can be minutes if
      the agent is mid-turn -- and until now nothing said so anywhere. Pressing
-     a cflow or mesh button and seeing no change was indistinguishable from
-     the message having been dropped, and the press was often repeated, which
-     is how four identical nudges arrive at once
+     a cflow button and seeing no change was indistinguishable from the
+     message having been dropped, and the press was often repeated, which is
+     how four identical nudges arrive at once
      (claunch-restart-disconnect-banner-12p2).
 
      Not a silence somebody chose, so it does not take the pause glyph the

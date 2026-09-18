@@ -485,10 +485,13 @@ class Session:
         self._deferred_deliveries: Set[asyncio.Task] = set()
         #: One record per queued delivery that has not been typed yet, in the
         #: order they will go in. The tasks above are the delivery; this is
-        #: the only thing anyone outside can see of it. Without it a person
-        #: who presses a cflow or mesh button has nothing to read between
-        #: pressing it and the message appearing in the session minutes
-        #: later, and no way to tell a wait from a message that was dropped
+        #: the only thing anyone outside can see of it. Everything that comes
+        #: through here is cflow's (the clock's reminders and stall pings, the
+        #: dashboard's nudges); mesh messages take their own path and are
+        #: already published by the queued view. Without it a person who
+        #: presses a cflow button has nothing to read between pressing it and
+        #: the message appearing in the session minutes later, and no way to
+        #: tell a wait from a message that was dropped
         #: (claunch-restart-disconnect-banner-12p2). Not durable: a daemon
         #: restart loses the queue, and this list with it, which is the
         #: truth about the queue rather than a shortcoming of the list.

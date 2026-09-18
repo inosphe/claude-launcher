@@ -1,7 +1,11 @@
 """What is waiting to be typed into a session, and who can see it.
 
-A message sent from the dashboard or by cflow is accepted immediately and
-typed in later: the delivery waits for the harness to be ready and for any
+Everything on this queue is cflow's -- the clock's reminders and stall pings,
+and the dashboard's nudges (the callers of ``Session.queue_delivery``). Mesh
+messages take their own path through ``MeshManager`` and were already
+published by the queued view; this is the half that nothing showed.
+
+Such a message is accepted immediately and typed in later: the delivery waits for the harness to be ready and for any
 half-written line in the composer to be sent. While an agent works a turn
 that can be minutes.
 
