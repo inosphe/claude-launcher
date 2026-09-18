@@ -186,7 +186,11 @@ class Registry:
         """How many sockets are open, for the log lines that say so."""
         return len(self._open)
 
-    def snapshot(self, http_connections: Optional[int] = None) -> dict[str, Any]:
+    def snapshot(
+        self,
+        http_connections: Optional[int] = None,
+        live_ports: Optional[set] = None,
+    ) -> dict[str, Any]:
         """Everything the command and the endpoint print.
 
         ``http_connections`` is the aiohttp server's own count of live
@@ -220,14 +224,44 @@ class Registry:
             "requests": list(reversed(self._requests)),
             "requests_kept": REQUESTS_KEEP,
             "ports_by_agent": self._ports_by_agent(),
+            "live_by_agent": self._live_by_agent(live_ports),
         }
+
+    def _live_by_agent(self, live_ports: Optional[set]) -> Optional[dict[str, int]]:
+        """How many connections each client holds *right now*.
+
+        This is the number a browser's own ceiling is about. ``live_ports``
+        is the set of peer ports aiohttp is holding this instant; each is
+        named by the last request that arrived on it, because the port
+        identifies the connection for as long as it lives. A port nobody has
+        sent a request on yet (a handshake still in flight) counts as
+        ``unknown`` rather than being dropped -- the connection is spent
+        either way.
+
+        ``None`` when the server's connection list is out of reach, which is
+        how the printers know to say so instead of showing a zero they did
+        not measure.
+        """
+        if live_ports is None:
+            return None
+        owner: dict[int, str] = {}
+        for row in self._requests:
+            if row["peer_port"] is not None:
+                owner[row["peer_port"]] = row["agent"]
+        counts: dict[str, int] = {}
+        for port in live_ports:
+            name = owner.get(port, "unknown")
+            counts[name] = counts.get(name, 0) + 1
+        return dict(sorted(counts.items()))
 
     def _ports_by_agent(self) -> dict[str, int]:
         """How many distinct connections each kind of client used recently.
 
-        Recent means the window the request log covers. A browser that has
-        run out of connections to this server shows a count that stops
-        climbing while its page reports that it cannot connect.
+        Cumulative over the window the request log covers, so it counts
+        connections that have since closed. It says how much connection
+        churn a client is causing, and it is NOT the number to compare
+        against a browser's ceiling -- that one is :meth:`_live_by_agent`,
+        which asks the server what is open at this instant.
         """
         seen: dict[str, set] = {}
         for row in self._requests:
@@ -283,6 +317,26 @@ def install(app: web.Application) -> Registry:
         registry = Registry()
         app["connections"] = registry
     return registry
+
+
+def live_peer_ports(app: web.Application) -> Optional[set]:
+    """The peer ports aiohttp is holding this instant, or ``None``.
+
+    Read off the running server's own connection list, which is the only
+    place the count of *concurrent* connections exists: the request log can
+    only say which ports were used, not which are still up.
+    """
+    server = app.get("http_server")
+    connections = getattr(server, "connections", None)
+    if connections is None:
+        return None
+    ports = set()
+    for handler in list(connections):
+        transport = getattr(handler, "transport", None)
+        peer = transport.get_extra_info("peername") if transport is not None else None
+        if isinstance(peer, tuple) and len(peer) >= 2:
+            ports.add(int(peer[1]))
+    return ports
 
 
 def http_connection_count(app: web.Application) -> Optional[int]:

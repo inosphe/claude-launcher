@@ -849,7 +849,10 @@ async def h_connections(request: web.Request) -> web.Response:
     """
     registry = connections.install(request.app)
     return json_response(
-        registry.snapshot(connections.http_connection_count(request.app))
+        registry.snapshot(
+            connections.http_connection_count(request.app),
+            connections.live_peer_ports(request.app),
+        )
     )
 
 

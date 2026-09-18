@@ -359,3 +359,45 @@ def test_the_wizard_frame_shows_what_is_open_and_what_is_marked():
     assert " [ ] #1 terminal s584 from 127.0.0.1:5001" in frame
     assert " >[x] #2 terminal s586 from 127.0.0.1:5002" in frame
     assert "closed 1" in frame
+
+
+# --------------------------------------------------------------------------- #
+# concurrency, which is the number a browser's ceiling is about
+# --------------------------------------------------------------------------- #
+def test_connections_held_now_are_counted_apart_from_ones_since_closed():
+    """`ports_by_agent` is cumulative over the recorded window, so it counts
+    connections that have closed: a client that opens and closes one
+    repeatedly reads high there while holding one. Comparing that number
+    against a browser's ceiling would be wrong, so the reading carries the
+    live count separately."""
+    registry = connections.Registry()
+
+    class _Req(_Request):
+        def __init__(self, port, agent):
+            super().__init__(peer=("127.0.0.1", port), agent=agent)
+
+    for port in (5001, 5002, 5003, 5004, 5005):
+        registry.request(_Req(port, "Mozilla/5.0 Firefox/128"), 200)
+    registry.request(_Req(6001, "Python/3.12 aiohttp/3.9"), 200)
+
+    # Five ports used, two still up.
+    assert registry.snapshot()["ports_by_agent"]["firefox"] == 5
+    live = registry.snapshot(live_ports={5004, 5005, 6001})["live_by_agent"]
+    assert live == {"claunch": 1, "firefox": 2}
+
+
+def test_a_connection_nobody_has_spoken_on_still_counts():
+    """A handshake in flight has spent a connection before any request
+    arrives on it. Dropping it would under-count exactly the case being
+    measured."""
+    registry = connections.Registry()
+    live = registry.snapshot(live_ports={9999})["live_by_agent"]
+    assert live == {"unknown": 1}
+
+
+def test_an_unmeasurable_live_count_says_so_rather_than_reading_zero():
+    """Without a running server there is no connection list. None and 0 mean
+    different things and the printers show only one of them."""
+    registry = connections.Registry()
+    assert registry.snapshot()["live_by_agent"] is None
+    assert registry.snapshot(live_ports=set())["live_by_agent"] == {}
