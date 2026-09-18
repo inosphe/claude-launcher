@@ -81,6 +81,8 @@ function relogin() {
 }
 
 async function api(path, opts = {}) {
+  const batched = batchQueue(path, opts);
+  if (batched) return batched;
   let resp = await fetch(url(path), { credentials: "same-origin", ...opts });
   if (resp.status === 401) {
     if (await relogin()) {
@@ -91,6 +93,129 @@ async function api(path, opts = {}) {
     throw new Error("unauthorized");
   }
   return resp;
+}
+
+/* ---- one connection for the reads that happen together ----
+
+   A browser holds a small number of connections to one server -- Firefox's
+   default is six -- and a request in flight owns one for its whole life. The
+   dashboard's tick asks for nine paths at once, which took all six, and a
+   WebSocket needs a connection of its own: its handshake sat in the queue and
+   was never sent, so the terminal never came up and the daemon never saw a
+   request to refuse (claunch-restart-disconnect-banner-12p2; measured as
+   `firefox 6` in /api/connections against one open socket).
+
+   So the GETs that are issued in the same turn of the event loop go out as
+   one POST /api/batch. Nothing here changes *when* anything is read: each
+   caller keeps its own timer and asks for what it needs, and this only
+   notices that several of them asked at the same moment. A read on a slower
+   period simply is not in the batch on the ticks it skips.
+
+   Writes, paths with a body, and anything that is not one of this daemon's
+   own /api/ reads go straight out as before. So does a lone read: the batch
+   would cost the same one connection and add a round of encoding.  */
+const BATCH_MAX = 24;          // the endpoint's own cap
+let batchPending = null;       // path -> [{resolve, reject}], while a turn is open
+
+/* A Response is what every caller expects back; these are the parts they
+   use (`ok`, `status`, `json`, `text`). Nothing reads headers off one. */
+function batchResponse(payload, ok) {
+  const body = JSON.stringify(payload === undefined ? null : payload);
+  return {
+    ok,
+    status: ok ? 200 : 502,
+    batched: true,
+    json: async () => JSON.parse(body),
+    text: async () => body,
+  };
+}
+
+function batchable(path, opts) {
+  if (opts.noBatch) return false;   // the fallback path, so it cannot re-queue
+  const method = (opts.method || "GET").toUpperCase();
+  if (method !== "GET" || opts.body) return false;
+  if (typeof path !== "string" || !path.startsWith("/api/")) return false;
+  // The batch endpoint itself, and the liveness probe that has to be able to
+  // answer while everything else is refused.
+  return !path.startsWith("/api/batch") && !path.startsWith("/api/health");
+}
+
+function batchQueue(path, opts) {
+  if (!batchable(path, opts)) return null;
+  const first = batchPending === null;
+  if (first) batchPending = new Map();
+  const waiting = batchPending.get(path) || [];
+  const promise = new Promise((resolve, reject) => waiting.push({ resolve, reject }));
+  batchPending.set(path, waiting);
+  // Flushed a turn later, which is what gathers the callers that fired
+  // together: every refresh in one tick has queued by then.
+  if (first) setTimeout(batchFlush, 0);
+  return promise;
+}
+
+async function batchFlush() {
+  const pending = batchPending;
+  batchPending = null;
+  if (!pending || !pending.size) return;
+  const paths = [...pending.keys()];
+  const settle = (path, response, error) => {
+    for (const waiter of pending.get(path) || []) {
+      if (error) waiter.reject(error);
+      else waiter.resolve(response);
+    }
+  };
+  // One read is not worth a batch, and neither is a set larger than the
+  // endpoint takes: those go out the ordinary way, still one connection each
+  // but never refused for being too many.
+  if (paths.length === 1 || paths.length > BATCH_MAX) {
+    await Promise.all(paths.map(async (path) => {
+      try {
+        settle(path, await api(path, { method: "GET", noBatch: true }));
+      } catch (err) {
+        settle(path, null, err);
+      }
+    }));
+    return;
+  }
+  let answers = null;
+  let errors = {};
+  try {
+    const resp = await api("/api/batch", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ paths }),
+    });
+    if (resp.ok) {
+      const body = await resp.json();
+      answers = body.answers || {};
+      errors = body.errors || {};
+    }
+  } catch (err) {
+    // An unauthorized batch has already raised the token prompt inside
+    // api(); the reads it carried fail the same way a direct one would.
+    for (const path of paths) settle(path, null, err);
+    return;
+  }
+  if (answers === null) {
+    // The daemon answered, but not with a batch -- an older one that has no
+    // such route. Fall back so a page served by new assets still works
+    // against it, one connection per read as before.
+    await Promise.all(paths.map(async (path) => {
+      try {
+        settle(path, await api(path, { method: "GET", noBatch: true }));
+      } catch (err) {
+        settle(path, null, err);
+      }
+    }));
+    return;
+  }
+  for (const path of paths) {
+    if (Object.prototype.hasOwnProperty.call(answers, path)) {
+      settle(path, batchResponse(answers[path], true));
+    } else {
+      settle(path, batchResponse({ error: errors[path] || "not answered" }, false));
+    }
+  }
 }
 
 function showAuth() {
