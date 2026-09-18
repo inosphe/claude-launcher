@@ -42,7 +42,8 @@ from .. import beads_meta
 from .. import ghcli, prflow, spawn as spawn_mod, store, workspaces
 from .. import plugins, settings
 from .. import worktree as worktree_mod
-from . import beads as beads_mod, connections, handoff as handoff_mod, notice as notice_mod
+from . import beads as beads_mod, clipboard, connections, handoff as handoff_mod
+from . import notice as notice_mod
 from . import rag as rag_mod
 from . import (
     briefing, cflow_clock, clipty, ctxsize, loops, onboard, prompt_presets,
@@ -318,7 +319,6 @@ def build_app(
     app["mesh"] = mesh if mesh is not None else MeshManager(manager)
     from . import observer
     observer.install(app)
-    from . import clipboard
     clipboard.install(app)
     app["relay_state"] = relay_state if relay_state is not None else _relay_unconfigured
     app["token"] = token
@@ -5832,13 +5832,22 @@ PASTE_IMAGE_TYPES = {
 
 
 async def h_session_paste_image(request: web.Request) -> web.Response:
-    """Store one pasted image for a session and answer with its path.
+    """Store one pasted image for a session and hand it to the harness.
 
     The web session line cannot hand a harness an *attachment*: the program in
-    the PTY reads bytes, and an image is not bytes it can read as a prompt. So
-    the image is written to a file next to the session's own state and the
-    path is what goes into the composer -- Claude Code opens an image path
-    given in a prompt, which is the whole point of the round trip.
+    the PTY reads bytes, and an image is not bytes it can read as a prompt.
+    What a harness does accept is an image off the clipboard, so this route
+    stores the file, puts it on the clipboard of the machine the daemon runs
+    on, and sends the keystroke that harness reads it with (see
+    :func:`_deliver_pasted_image`).
+
+    The path used to go into the composer instead. That only worked for a
+    browser on the daemon's own machine: a person connecting from another PC
+    was handed a path to a file that does not exist on their side, and nothing
+    in the round trip told them so.
+
+    The file is kept either way. It is how the clipboard gets the bytes, and
+    it is the only record of what was handed over.
 
     The body is the image itself, with its media type in ``Content-Type``. It
     is read in chunks against this route's own ceiling rather than through
@@ -5884,7 +5893,55 @@ async def h_session_paste_image(request: web.Request) -> web.Response:
     with target.open("wb") as fh:
         for chunk in chunks:
             fh.write(chunk)
-    return json_response({"ok": True, "path": str(target), "bytes": total})
+    delivered, keys, reason = await _deliver_pasted_image(session, target, kind)
+    return json_response({
+        "ok": True,
+        "path": str(target),
+        "bytes": total,
+        "delivered": delivered,
+        "keys": keys,
+        "reason": reason,
+    })
+
+
+#: Held across the clipboard write AND the keystroke that reads it back. The
+#: clipboard is one per machine while sessions are many, so without this two
+#: pastes racing each other would hand one session the other's image -- the
+#: one failure of this route that produces a wrong result instead of an error.
+_paste_image_lock = asyncio.Lock()
+
+
+async def _deliver_pasted_image(session, path, media_type: str):
+    """Put a stored image on this machine's clipboard and let the harness read it.
+
+    Answers ``(delivered, keys, reason)``. A failure here is not an error
+    response: the file is stored by the time this runs, so the useful answer
+    is "stored, not delivered, because X" -- which the web session line shows
+    where the person who pressed the key is looking.
+
+    Which keystroke a harness reads an image with is a property of the
+    harness, so it comes from its declaration (``image_paste_keys``) rather
+    than from a name check here. An undeclared harness gets nothing sent: a
+    chord that means "paste an image" to one program means something else to
+    another, and guessing would type that something else into a session.
+    """
+    entry = harness_registry.registry().get(session.sdef.harness or "")
+    keys = list(entry.image_paste_keys) if entry else []
+    if not keys:
+        return False, [], (
+            f"harness {session.sdef.harness or 'unknown'!r} has no image paste "
+            f"key declared, so the image was stored but not handed over"
+        )
+    async with _paste_image_lock:
+        try:
+            await clipboard.put_image(path, media_type)
+        except clipboard.ClipboardError as exc:
+            return False, [], str(exc)
+        try:
+            await session.send_keys(keys, force=True)
+        except Exception as exc:  # the PTY is gone, or the session refused
+            return False, keys, f"the keystroke did not reach the session: {exc}"
+    return True, keys, ""
 
 
 async def h_session_keys(request: web.Request) -> web.Response:

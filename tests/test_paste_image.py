@@ -1,16 +1,20 @@
-"""A clipboard image pasted into the web session line becomes a file path.
+"""A clipboard image pasted into the web session line reaches the harness.
 
 The program in the PTY reads bytes, so nothing here can hand it an
-attachment. What it can be handed is a path: the browser uploads the image,
-the daemon writes it beside the session's own state, and the path it answers
-with is what the operator's line carries. Claude Code opens an image path
-given in a prompt, which is what makes the round trip worth taking.
+attachment. What it does accept is an image off the clipboard, so the browser
+uploads the image, the daemon writes it beside the session's own state, puts
+it on the clipboard of its own machine, and sends the keystroke that harness
+reads an image with.
 
-The rules this pins are the ones that decide whether the path is safe to use:
-the file is named for the type it actually claims, it lands outside the
-session's working directory (a repository is not a place to drop a
-screenshot), a body too big is refused rather than written, and a type the
-route does not know is refused rather than saved under a misleading name.
+Two groups of rules are pinned here. The storage rules decide whether the
+file is safe to hand over at all: it is named for the type it actually
+claims, it lands outside the session's working directory (a repository is not
+a place to drop a screenshot), a body too big is refused rather than written,
+and a type the route does not know is refused rather than saved under a
+misleading name. The delivery rules decide what the operator is told: the
+keystroke comes from the harness declaration, an undeclared harness is said
+to be undeclared instead of being sent a guess, and a clipboard that could
+not be filled is reported rather than passed over in silence.
 """
 
 from __future__ import annotations
@@ -25,6 +29,7 @@ from claude_launcher.daemon import api as api_mod
 from claude_launcher.daemon import paths
 from claude_launcher.daemon.api import build_app
 from claude_launcher.daemon.harness import SessionDef
+from claude_launcher.daemon import session as session_mod
 from claude_launcher.daemon.manager import SessionManager
 
 BEARER = {"Authorization": "Bearer sekrit"}
@@ -39,19 +44,18 @@ CHILD = (
 PNG = bytes.fromhex("89504e470d0a1a0a") + b"a pretend png body"
 
 
-def _harness():
-    store.update(
-        lambda doc: doc.update(
-            {"harnesses": {"py": {"command": [sys.executable, "-u", "-c", CHILD]}}}
-        )
-    )
+def _harness(image_paste_keys=None):
+    body = {"command": [sys.executable, "-u", "-c", CHILD]}
+    if image_paste_keys is not None:
+        body["image_paste_keys"] = list(image_paste_keys)
+    store.update(lambda doc: doc.update({"harnesses": {"py": body}}))
 
 
-def _run(tmp_path, body):
+def _run(tmp_path, body, image_paste_keys=None):
     """Boot a daemon with one session and hand it to ``body(client)``."""
     from aiohttp.test_utils import TestClient, TestServer
 
-    _harness()
+    _harness(image_paste_keys)
 
     async def run():
         mgr = SessionManager(idle_threshold=0.5, scrollback=200,
@@ -173,3 +177,194 @@ def test_a_body_larger_than_the_app_wide_cap_still_reaches_this_route(
         assert (await resp.json())["bytes"] == len(big)
 
     _run(tmp_path, body)
+
+
+# ---- delivery: the clipboard and the keystroke -------------------------
+
+
+def test_a_declared_harness_gets_the_image_on_the_clipboard_then_its_keystroke(
+    home, tmp_path, monkeypatch
+):
+    """The whole point of the route. The file is stored, the daemon's own
+    clipboard is filled with it, and the key that harness reads an image with
+    is sent — in that order, because the key is what makes the harness read
+    what was just put there."""
+    seen = []
+    sent = []
+
+    async def fake_put(path, media_type, **kw):
+        seen.append((Path(path), media_type))
+
+    async def fake_send(self, keys, **kw):
+        sent.append((list(keys), kw))
+        return b""
+
+    monkeypatch.setattr(api_mod.clipboard, "put_image", fake_put)
+    monkeypatch.setattr(session_mod.Session, "send_keys", fake_send)
+
+    async def body(client):
+        resp = await client.post("/api/sessions/s1/paste-image", data=PNG,
+                                 headers={**BEARER, "Content-Type": "image/png"})
+        assert resp.status == 200, await resp.text()
+        doc = await resp.json()
+        assert doc["delivered"] is True
+        assert doc["keys"] == ["M-v"]
+        assert doc["reason"] == ""
+
+        # the file that went on the clipboard is the file that was stored
+        assert seen == [(Path(doc["path"]), "image/png")]
+        assert Path(doc["path"]).read_bytes() == PNG
+
+        # forced, like every other key the operator presses in the session
+        # line: an image paste must not turn into a 30s wait on a busy session
+        assert sent == [(["M-v"], {"force": True})]
+
+    _run(tmp_path, body, image_paste_keys=["M-v"])
+
+
+def test_an_undeclared_harness_is_told_so_and_is_sent_nothing(home, tmp_path,
+                                                              monkeypatch):
+    """A chord that means "paste an image" to one program means something else
+    to another, so a harness with no declaration gets no keystroke at all."""
+    sent = []
+
+    async def fake_send(self, keys, **kw):
+        sent.append(list(keys))
+        return b""
+
+    async def fake_put(path, media_type, **kw):
+        raise AssertionError("the clipboard must not be touched for this")
+
+    monkeypatch.setattr(api_mod.clipboard, "put_image", fake_put)
+    monkeypatch.setattr(session_mod.Session, "send_keys", fake_send)
+
+    async def body(client):
+        resp = await client.post("/api/sessions/s1/paste-image", data=PNG,
+                                 headers={**BEARER, "Content-Type": "image/png"})
+        assert resp.status == 200, await resp.text()
+        doc = await resp.json()
+        assert doc["delivered"] is False
+        assert doc["keys"] == []
+        assert "py" in doc["reason"]
+        # stored all the same — the store succeeded and the hand-over did not,
+        # and those are two answers, not one
+        assert Path(doc["path"]).read_bytes() == PNG
+        assert sent == []
+
+    _run(tmp_path, body)
+
+
+def test_a_clipboard_that_could_not_be_filled_is_reported_and_no_key_is_sent(
+    home, tmp_path, monkeypatch
+):
+    """Sending the key after a failed clipboard write would make the harness
+    read whatever was on the clipboard before — somebody else's image, or the
+    operator's own copied text."""
+    sent = []
+
+    async def fake_put(path, media_type, **kw):
+        raise api_mod.clipboard.ClipboardError("xclip is not installed")
+
+    async def fake_send(self, keys, **kw):
+        sent.append(list(keys))
+        return b""
+
+    monkeypatch.setattr(api_mod.clipboard, "put_image", fake_put)
+    monkeypatch.setattr(session_mod.Session, "send_keys", fake_send)
+
+    async def body(client):
+        resp = await client.post("/api/sessions/s1/paste-image", data=PNG,
+                                 headers={**BEARER, "Content-Type": "image/png"})
+        assert resp.status == 200, await resp.text()
+        doc = await resp.json()
+        assert doc["delivered"] is False
+        assert doc["reason"] == "xclip is not installed"
+        assert sent == []
+
+    _run(tmp_path, body, image_paste_keys=["M-v"])
+
+
+def test_a_keystroke_that_does_not_reach_the_session_is_reported(
+    home, tmp_path, monkeypatch
+):
+    async def fake_put(path, media_type, **kw):
+        return None
+
+    async def fake_send(self, keys, **kw):
+        raise RuntimeError("the session is gone")
+
+    monkeypatch.setattr(api_mod.clipboard, "put_image", fake_put)
+    monkeypatch.setattr(session_mod.Session, "send_keys", fake_send)
+
+    async def body(client):
+        resp = await client.post("/api/sessions/s1/paste-image", data=PNG,
+                                 headers={**BEARER, "Content-Type": "image/png"})
+        assert resp.status == 200, await resp.text()
+        doc = await resp.json()
+        assert doc["delivered"] is False
+        assert doc["keys"] == ["M-v"]
+        assert "the session is gone" in doc["reason"]
+
+    _run(tmp_path, body, image_paste_keys=["M-v"])
+
+
+def test_two_pastes_do_not_interleave_their_clipboard_and_their_key(
+    home, tmp_path, monkeypatch
+):
+    """The clipboard is one per machine while sessions are many. Without the
+    lock the second write can land between the first write and the first key,
+    and then a session is handed an image nobody sent it — the one failure of
+    this route that produces a wrong result instead of an error."""
+    order = []
+
+    async def fake_put(path, media_type, **kw):
+        order.append(f"put:{Path(path).name}")
+        await asyncio.sleep(0.05)
+
+    async def fake_send(self, keys, **kw):
+        order.append("key")
+        return b""
+
+    monkeypatch.setattr(api_mod.clipboard, "put_image", fake_put)
+    monkeypatch.setattr(session_mod.Session, "send_keys", fake_send)
+
+    async def body(client):
+        async def one():
+            return await client.post(
+                "/api/sessions/s1/paste-image", data=PNG,
+                headers={**BEARER, "Content-Type": "image/png"},
+            )
+
+        responses = await asyncio.gather(one(), one())
+        for resp in responses:
+            assert (await resp.json())["delivered"] is True
+        # each put is followed by its own key before the next put starts
+        assert [step.split(":")[0] for step in order] == ["put", "key", "put", "key"]
+
+    _run(tmp_path, body, image_paste_keys=["M-v"])
+
+
+def test_the_key_the_harness_declares_is_the_key_that_is_sent(home, tmp_path,
+                                                              monkeypatch):
+    """No harness-name switch in the route: whatever the declaration says is
+    what goes to the PTY, which is how a harness with a different chord is
+    added without touching this code."""
+    sent = []
+
+    async def fake_put(path, media_type, **kw):
+        return None
+
+    async def fake_send(self, keys, **kw):
+        sent.append(list(keys))
+        return b""
+
+    monkeypatch.setattr(api_mod.clipboard, "put_image", fake_put)
+    monkeypatch.setattr(session_mod.Session, "send_keys", fake_send)
+
+    async def body(client):
+        resp = await client.post("/api/sessions/s1/paste-image", data=PNG,
+                                 headers={**BEARER, "Content-Type": "image/png"})
+        assert (await resp.json())["keys"] == ["C-v", "Enter"]
+        assert sent == [["C-v", "Enter"]]
+
+    _run(tmp_path, body, image_paste_keys=["C-v", "Enter"])

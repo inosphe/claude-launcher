@@ -343,9 +343,10 @@ async function main() {
         sent[0].body);
   check("the box is emptied for the next block", FIELD.value === "");
 
-  /* ---- Alt+V uploads the clipboard image and types its path ---- */
+  /* ---- Alt+V hands the clipboard image to the session ---- */
   sent = [];
-  reply = { ok: true, doc: { ok: true, path: "C:/state/sessions/coder4/pastes/x.png", bytes: 12 } };
+  reply = { ok: true, doc: { ok: true, path: "C:/state/sessions/coder4/pastes/x.png",
+                             bytes: 12, delivered: true, keys: ["M-v"], reason: "" } };
   ctx.setSession("coder4", false);
   FIELD.disabled = false;
   FIELD.value = "look at ";
@@ -360,10 +361,12 @@ async function main() {
         sent[0].path === "/api/sessions/coder4/paste-image", sent[0].path);
   check("...carrying the blob itself, typed as the image it is",
         sent[0].body === blob && sent[0].contentType === "image/png", sent[0]);
-  check("the path the daemon answered is typed at the caret",
-        FIELD.value === "look at C:/state/sessions/coder4/pastes/x.png ",
-        FIELD.value);
-  check("...and nothing was sent to the session",
+  check("what was already typed is left alone — no path goes in the line",
+        FIELD.value === "look at ", FIELD.value);
+  check("...and the line says the image reached the session",
+        NOTE.textContent.includes("sent to the session"), NOTE.textContent);
+  check("...with no keystroke sent from the page: the daemon sends it, on the "
+        + "machine whose clipboard now holds the image",
         !sent.some((r) => r.path.endsWith("/keys")), sent);
 
   /* ---- an empty clipboard says so and uploads nothing ---- */
@@ -400,8 +403,7 @@ async function main() {
   await settle();
   check("a pasted image file is uploaded too", sent.length === 1, sent);
   check("...and the browser's own paste is taken", ev.prevented === true);
-  check("the path lands in the box",
-        FIELD.value === "C:/state/sessions/coder4/pastes/x.png ", FIELD.value);
+  check("...and the box is left empty here too", FIELD.value === "", FIELD.value);
 
   /* ---- a paste with no image is left to the browser ---- */
   sent = [];
@@ -421,9 +423,25 @@ async function main() {
   clipboard = { items: [imageItem("image/png", blob)] };
   reply = { ok: false, status: 413, doc: { error: "the image is larger than 24 MiB" } };
   await ctx.pasteClipboardImage(NOTE);
-  check("a refused upload types no path", FIELD.value === "keep me", FIELD.value);
+  check("a refused upload leaves the line alone", FIELD.value === "keep me", FIELD.value);
   check("...and shows the daemon's reason",
         NOTE.textContent.includes("larger than"), NOTE.textContent);
+
+  /* ---- stored but not handed over is its own answer ----
+     The store can succeed while the hand-over does not: a harness with no
+     declared image key, a clipboard tool that is not installed. The reason
+     names the thing that has to change, so it is shown as it came. */
+  sent = [];
+  FIELD.value = "keep me";
+  reply = { ok: true, doc: { ok: true, path: "C:/state/sessions/coder4/pastes/y.png",
+                             bytes: 12, delivered: false, keys: [],
+                             reason: "harness 'py' has no image paste key declared" } };
+  await ctx.pasteClipboardImage(NOTE);
+  check("an undelivered image leaves the line alone",
+        FIELD.value === "keep me", FIELD.value);
+  check("...and the daemon's reason is shown, not a rewrite of it",
+        NOTE.textContent.includes("no image paste key declared"), NOTE.textContent);
+  check("...as a warning", NOTE.classes.has("wf-warning"));
 
   console.log(failures ? `\n${failures} failure(s)` : "all send-input checks passed");
   process.exit(failures ? 1 : 0);

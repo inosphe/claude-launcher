@@ -408,10 +408,11 @@
          (POST .../keys with `paste`), which is what keeps the block from
          being submitted a line at a time under any harness.
          Alt+V is the third key it answers: the clipboard's image is uploaded
-         (POST .../paste-image), the daemon writes it beside the session's
-         state, and the path it answers with is typed into the line — the
-         program in the PTY reads bytes, so a path is the only form an image
-         can take here.
+         (POST .../paste-image), the daemon stores it, puts it on the
+         clipboard of the machine it runs on, and sends the keystroke that
+         harness reads an image with. Nothing is typed into the line — the
+         program in the PTY reads bytes, and the clipboard is the door it
+         already has for an image.
          Hidden with the terminal; only live while one is attached. -->
     <form id="term-input" class="hidden" autocomplete="off">
       <button id="term-clipboard-toggle" class="term-btn" type="button"
@@ -429,7 +430,7 @@
       </section>
       <textarea id="term-input-field" rows="1"
              placeholder="type for this session — Enter to send, Ctrl+J for a newline"
-             title="Enter sends · Ctrl+J inserts a newline · Alt+V pastes the clipboard image as a file path"
+             title="Enter sends · Ctrl+J inserts a newline · Alt+V hands the clipboard image to the session"
              autocomplete="off" spellcheck="false"
              aria-label="type text and send it to this session"></textarea>
       <span id="term-input-note" class="wf-note hidden"></span>

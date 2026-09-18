@@ -201,6 +201,13 @@ class Harness:
     #: How Enter is paced after a bracketed paste.
     submit_strategy: str = "fixed"
     paste_enter_delay: Optional[float] = None
+    #: The keystroke this harness reads an image off the clipboard with, in
+    #: tmux key-name form (``M-v`` is Alt+V). The web session line's image
+    #: paste fills the daemon machine's clipboard and then sends exactly this
+    #: -- so a harness with no declaration gets no image, and is told so,
+    #: rather than receiving a chord that means something else to it. Empty
+    #: for every harness whose behaviour here has not been established.
+    image_paste_keys: List[str] = field(default_factory=list)
 
     @property
     def borrow_mode(self) -> str:
@@ -326,6 +333,7 @@ class Harness:
             "input_readiness": self.input_readiness,
             "submit_strategy": self.submit_strategy,
             "paste_enter_delay": self.paste_enter_delay,
+            "image_paste_keys": list(self.image_paste_keys),
             "borrowable": self.borrowable,
             "borrow_mode": self.borrow_mode,
             # Resolved per call, never stored: installing pi should not need a
@@ -580,6 +588,10 @@ def _parse_entry(name: str, body) -> Harness:
         input_readiness=strategies["input_readiness"][0],
         submit_strategy=strategies["submit_strategy"][0],
         paste_enter_delay=paste_enter_delay,
+        image_paste_keys=_as_list(
+            body.get("image_paste_keys"),
+            f"harness {name!r} image_paste_keys",
+        ),
     )
 
 
