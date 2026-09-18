@@ -3555,7 +3555,11 @@ function hideBeadPop() {
    "## 목표" body, mostly -- cut at six lines or 400 characters, with an
    ellipsis line when there was more. */
 function beadPopExcerpt(text) {
-  const lines = String(text || "").split("\n").map((l) => l.trimEnd())
+  // The front matter comes off first. It is three lines at the very top of
+  // the description (`beads_meta`), and the excerpt keeps six — so an issue
+  // recording a workspace would have spent half of its preview on YAML and
+  // pushed the goal out of the popover entirely.
+  const lines = beadsStripMeta(text).split("\n").map((l) => l.trimEnd())
     .filter((l) => l.trim() && !/^#{1,6}\s/.test(l));
   const out = [];
   let n = 0;

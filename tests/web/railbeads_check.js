@@ -132,7 +132,7 @@ new Function(
   stubs
   + slice("refreshRailBeads") + slice("railBeadsIndex") + slice("applyRailBeads")
   + slice("railBeadsLine") + slice("showBeadPop") + slice("hideBeadPop")
-  + slice("beadPopExcerpt")
+  + slice("beadsStripMeta") + slice("beadPopExcerpt")
   + `
 Object.assign(exports, {
   index: railBeadsIndex, line: railBeadsLine, apply: applyRailBeads,
@@ -256,6 +256,12 @@ check("a long description is cut with an ellipsis line",
       ctx.excerpt(Array.from({ length: 9 }, (_, i) => `line ${i}`).join("\n")).split("\n").length, 7);
 check("and so is a wide one",
       ctx.excerpt("x".repeat(300) + "\n" + "y".repeat(300)).endsWith("…"), true);
+/* The front matter is three lines at the top of a description and the excerpt
+   keeps six, so an issue recording a workspace would have spent half its
+   preview on YAML and pushed the goal out of the popover. */
+check("the excerpt takes the front matter off before counting lines",
+      ctx.excerpt("---\nworkspace: alpha\n---\n## 목표\nfix the thing\n"),
+      "fix the thing");
 
 const filedByOther = ctx.line("s1", { issues: [{
   id: "z-1", status: "open", title: "filed by another", assignee: "s2", created_by: "s1",
