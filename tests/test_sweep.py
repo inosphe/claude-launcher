@@ -1450,10 +1450,34 @@ def test_the_sweep_covers_the_whole_suite():
     something eventually runs everything. This is that something, so it must
     not grow a marker filter: ``-m "not worktree"`` here would silently drop
     the slow tail from the only run that covers it.
+
+    The one permitted exception is a single, named ``--deselect`` for a test
+    that crashes the *xdist worker process* rather than failing an assertion
+    (``claunch-rl2x.1``: Windows heap corruption, cause unknown, reproducing
+    at the same rate on master and on every branch measured against it). A
+    crashed worker reports no verdict at all -- not for that test, and not
+    for whatever other test shared its worker -- so running it inside the
+    parallel gate does not give the batch sweep coverage of it. The node
+    still runs in every plain ``pytest tests`` and in CI's own suite; only
+    this one parallel gate skips it, and this test pins the exception to
+    exactly that one node id so a second one cannot be added silently.
     """
+    import re
+
     assert " -m " not in sweep.DEFAULT_COMMAND, (
-        "the batch sweep must stay unfiltered -- it is the only run that "
-        "covers the whole suite"
+        "the batch sweep must stay unfiltered by marker -- markers exist for "
+        "developers iterating locally, not for the one run that covers "
+        "everything"
+    )
+    deselected = re.findall(r"--deselect (\S+)", sweep.DEFAULT_COMMAND)
+    permitted = [
+        "tests/test_federation_integration.py::test_mesh_federation_over_real_relay"
+    ]
+    assert deselected in ([], permitted), (
+        f"the batch sweep deselects {deselected!r} -- the only permitted "
+        f"exception is {permitted!r} (claunch-rl2x.1); adding another one "
+        f"silently drops coverage of it, exactly what this test exists to "
+        f"catch"
     )
     assert "pytest tests" in sweep.DEFAULT_COMMAND
 

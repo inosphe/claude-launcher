@@ -180,7 +180,31 @@ CANNOT_TELL = 2
 #: 260 chars (MAX_PATH) is a FileNotFoundError. Measured: 48 chars passes at
 #: 258, 49 fails at 260. And pytest empties its basetemp at startup, so two
 #: concurrent runs sharing one path delete each other's temp trees mid-run.
-DEFAULT_COMMAND = 'uv run --no-sync pytest tests -q -n 8 --basetemp="C:/t/{session}w"'
+#:
+#: ``--deselect ...test_mesh_federation_over_real_relay``: the one named
+#: exception to "no marker filter" above, and it stays a single ``--deselect``
+#: rather than a marker for exactly that reason -- a marker is a knob anyone
+#: can widen by adding a name to it later, a literal node id is not.
+#: ``claunch-rl2x.1``: under ``-n 8`` this test's xdist *worker process*
+#: crashes (Windows ``0xc0000374`` heap corruption, cause unknown) at a rate
+#: that reached 13/13 across two batches (2026-09-18, sessions s469/s572/
+#: s582), reproducing identically on plain master and on every branch tested
+#: against it -- it is a property of running this test under parallel
+#: workers on this machine, not of any change. A crashed xdist worker does
+#: not report "this test failed"; it reports nothing, and whatever *other*
+#: test that worker was mid-run on also gets no verdict (the varying second
+#: failure in the same batches' receipts). Leaving it in the parallel run
+#: therefore does not buy coverage of it -- it spends the batch sweep's one
+#: shot on a coin flip that also endangers an unrelated test. The node still
+#: runs in every plain ``pytest tests`` (a developer's default, and CI's own
+#: suite) and passed 3/3 standalone in the same measurements; only this one
+#: parallel gate skips it. See ``tests/test_sweep.py::
+#: test_the_sweep_covers_the_whole_suite`` for the test that pins this to
+#: exactly one exception.
+DEFAULT_COMMAND = (
+    'uv run --no-sync pytest tests -q -n 8 --basetemp="C:/t/{session}w" '
+    "--deselect tests/test_federation_integration.py::test_mesh_federation_over_real_relay"
+)
 
 
 def default_command(session: str, workers: int = 8) -> str:
