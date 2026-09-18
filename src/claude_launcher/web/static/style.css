@@ -30,9 +30,6 @@ option, optgroup {
 option:disabled { color: #6b7280; }
 .error { color: #ff7b72; font-size: 12px; margin-top: 6px; }
 
-/* relative: the terminal header's `details` anchors to this box's right edge
-   rather than to #main's, so opening the rail — which takes a column off
-   #main — does not move the button that opened it. */
 #layout { display: flex; height: 100vh; position: relative; }
 
 /* The width is a preference, not a constant: the drag bar beside it writes
@@ -1129,12 +1126,9 @@ a.cflow-scope:hover { background: #1d3559; text-decoration: underline; }
   background: none; color: #7d8590;
   border: 1px solid #30363d; border-radius: 5px;
 }
-/* Anchored to #layout's right edge, not to the end of this flex row: the rail
-   it opens takes its width out of #main, and a toggle that moves when you
-   toggle it is a toggle you have to hunt for on the way back. Pressed is that
-   rail standing open on *this* session — the state in which this button is
-   also the panel's close button, and the panel drops its own ×. */
-#term-details { position: absolute; top: calc(8px + var(--session-tabs-height, 0px)); right: 14px; z-index: 3; }
+/* Keep the toggle inside the terminal header when the detail panel opens.
+   Header padding reserves its space in both full and compact layouts. */
+#term-details { position: absolute; top: 8px; right: 14px; z-index: 3; }
 #term-details:hover { color: #c6cdd5; border-color: #3c444d; }
 #term-details[aria-pressed="true"] {
   background: #10203a; color: #58a6ff; border-color: #1f6feb;
@@ -1233,6 +1227,7 @@ a.cflow-scope:hover { background: #1d3559; text-decoration: underline; }
 .session-tab button:hover, .session-tab-open:hover { color: #f0f6fc; background: #21262d; }
 .session-tab :focus-visible { outline: 2px solid #58a6ff; outline-offset: -2px; border-radius: 4px; }
 #term-header {
+  position: relative;
   /* The right padding reserves the lane #term-details floats in (absolute,
      right: 14px), so no flowing control can slide under it however tight the
      row gets — the overlap the header used to draw when the column narrowed. */
@@ -2356,14 +2351,10 @@ a.beads-q-name:hover { color: #79c0ff; text-decoration: underline; }
   content: ""; height: 44px; width: 2px; border-radius: 2px; background: #4d5566;
 }
 #detail-split:hover::after, #detail-split.dragging::after { background: #58a6ff; }
-/* The head stays while the rest scrolls — it is the line that says which
-   session all of this belongs to, and the rail got long enough (the run folds
-   out inside it) to scroll that answer off the top. Its right end is kept
-   clear on purpose: the header's `details` chip is anchored over that corner,
-   and it is this panel's close button. */
+/* Keep the session identity visible while the detail panel scrolls. */
 .docked .wf-head {
   position: sticky; top: 0; z-index: 1; flex-wrap: wrap; gap: 6px 8px;
-  margin: 0 -16px 8px; padding: 11px 92px 9px 16px;
+  margin: 0 -16px 8px; padding: 11px 16px 9px;
   background: #1b1e24; border-bottom: 1px solid #262b33;
 }
 .docked .wf-head h2 { font-size: 15px; overflow-wrap: anywhere; }

@@ -75,6 +75,43 @@ const header = html.slice(html.indexOf('<div id="term-header"'), html.indexOf(' 
     await page.evaluate(() => { document.getElementById("term-title").textContent = "s581"; });
     await check(1920);
     assert.equal(await page.locator("#term-header").evaluate(el => el.classList.contains("term-compact")), false);
+    // Exercise the real column hierarchy: wrapped tabs above the header,
+    // with a resizable detail panel beside the terminal column.
+    await page.evaluate(() => {
+      const layout = document.getElementById("layout");
+      layout.style.display = "flex";
+      const main = document.createElement("main");
+      main.id = "main";
+      const tabs = document.createElement("div");
+      tabs.id = "session-tabs";
+      tabs.style.height = "130px";
+      main.append(tabs, document.getElementById("term-header"));
+      const panel = document.createElement("aside");
+      panel.id = "sess-view";
+      panel.className = "docked";
+      layout.replaceChildren(main, panel);
+    });
+    for (const width of [1200, 1000]) {
+      for (const panelWidth of [0, 300, 600]) {
+        await page.evaluate(({ width, panelWidth }) => {
+          document.getElementById("layout").style.width = `${width}px`;
+          const panel = document.getElementById("sess-view");
+          panel.classList.toggle("hidden", !panelWidth);
+          panel.style.setProperty("--detail-w", `${panelWidth}px`);
+        }, { width, panelWidth });
+        await page.waitForTimeout(80);
+        const headerBox = await page.locator("#term-header").boundingBox();
+        const details = await page.locator("#term-details").boundingBox();
+        assert(details.x >= headerBox.x && details.x + details.width <= headerBox.x + headerBox.width,
+          `details stays within terminal column at ${width}/${panelWidth}`);
+        assert(details.y >= headerBox.y && details.y + details.height <= headerBox.y + headerBox.height,
+          "details stays within header below wrapped tabs");
+        if (panelWidth) {
+          const panelBox = await page.locator("#sess-view").boundingBox();
+          assert(details.x + details.width <= panelBox.x, "details does not overlap detail panel");
+        }
+      }
+    }
     assert.deepEqual(errors, []);
     console.log("toolbar browser checks passed");
   } finally { await browser.close(); }
