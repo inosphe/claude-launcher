@@ -393,6 +393,7 @@ def build_app(
     # Open sockets as state (daemon/connections.py), for `claunch connections`
     # and for anyone diagnosing a terminal that will not come up.
     r.add_get("/api/connections", h_connections)
+    r.add_post("/api/connections/close", h_connections_close)
     # The measurement window (daemon/window.py): the machine's test-run
     # arbiter as readable state — who holds it, who waits — so the sweep
     # protocol stops standing on process scans and mesh chat.
@@ -766,6 +767,40 @@ async def h_connections(request: web.Request) -> web.Response:
     return json_response(
         registry.snapshot(connections.http_connection_count(request.app))
     )
+
+
+async def h_connections_close(request: web.Request) -> web.Response:
+    """Close sockets the caller names, by the ids a reading gave them.
+
+    An operator's lever, and the only way to test from this side what a
+    connection is costing: end one and watch whether the page that could not
+    get a socket now gets one. A viewer whose socket is closed here is not
+    harmed -- the page's own retry brings it back, which is the same path a
+    daemon restart puts it on.
+
+    ``ids`` names them; ``all`` takes every open one. An id that has already
+    closed is reported as such rather than failing the call, because the
+    reading a caller acted on is always a moment old.
+    """
+    body = await _json_body(request)
+    registry = connections.install(request.app)
+    if body.get("all"):
+        wanted = [row["id"] for row in registry.snapshot()["open"]]
+    else:
+        wanted = [int(i) for i in (body.get("ids") or [])]
+    if not wanted:
+        return json_error(400, "name ids, or pass all")
+    closed, gone = [], []
+    for socket_id in wanted:
+        ws = registry.socket(socket_id)
+        if ws is None:
+            gone.append(socket_id)
+            continue
+        with contextlib.suppress(Exception):
+            await ws.close()
+        closed.append(socket_id)
+    log.info("closed %d socket(s) on request: %s", len(closed), closed)
+    return json_response({"closed": closed, "already_gone": gone})
 
 
 async def h_window_status(request: web.Request) -> web.Response:

@@ -266,3 +266,96 @@ def test_requests_are_counted_per_client_by_the_connection_they_arrived_on():
     assert ports == {"claunch": 1, "firefox": 3}
     newest = registry.snapshot()["requests"][0]
     assert newest["peer_port"] == 6001 and newest["status"] == 200
+
+
+# --------------------------------------------------------------------------- #
+# closing a connection on request
+# --------------------------------------------------------------------------- #
+def test_a_named_socket_can_be_closed_and_a_stale_id_says_so(home, tmp_path):
+    """The lever `--close` and `--wizard` pull. A viewer whose socket ends
+    here is not harmed: its own retry brings it back, the same path a daemon
+    restart puts it on. An id from a reading that is a moment old is answered
+    rather than raised on."""
+    import asyncio
+    import time
+
+    from aiohttp.test_utils import TestClient, TestServer
+
+    from claude_launcher.daemon.api import build_app
+    from claude_launcher.daemon.harness import SessionDef
+    from claude_launcher.daemon.manager import SessionManager
+    from test_daemon_e2e import _register_py_harness, _wait_screen
+
+    _register_py_harness()
+    auth = {"Authorization": "Bearer sekrit"}
+
+    async def run():
+        mgr = SessionManager(idle_threshold=0.5, scrollback=200, restore_default=True)
+        app = build_app(mgr, "sekrit", started_at=time.monotonic())
+        client = TestClient(TestServer(app))
+        await client.start_server()
+        try:
+            session = mgr.create(SessionDef(name="cz1", harness="py", cwd=str(tmp_path)))
+            await _wait_screen(session, "READY")
+            ws = await client.ws_connect("/api/sessions/cz1/ws", headers=auth)
+            await asyncio.sleep(0.2)
+
+            body = await (await client.get("/api/connections", headers=auth)).json()
+            assert body["open_count"] == 1
+            socket_id = body["open"][0]["id"]
+
+            result = await (
+                await client.post(
+                    "/api/connections/close", json={"ids": [socket_id]}, headers=auth
+                )
+            ).json()
+            assert result == {"closed": [socket_id], "already_gone": []}
+            await asyncio.sleep(0.3)
+            body = await (await client.get("/api/connections", headers=auth)).json()
+            assert body["open_count"] == 0
+
+            # The same id again: the reading a caller acts on is always a
+            # moment old, so this is an answer, not a failure.
+            again = await (
+                await client.post(
+                    "/api/connections/close", json={"ids": [socket_id]}, headers=auth
+                )
+            ).json()
+            assert again == {"closed": [], "already_gone": [socket_id]}
+
+            # Naming nothing is a mistake worth saying out loud.
+            assert (
+                await client.post("/api/connections/close", json={}, headers=auth)
+            ).status == 400
+            await ws.close()
+        finally:
+            await client.close()
+            for name in list(mgr._sessions):
+                mgr.kill(name)
+
+    asyncio.run(run())
+
+
+def test_the_wizard_frame_shows_what_is_open_and_what_is_marked():
+    """The screen itself, without a terminal: the rows, the cursor, the
+    marks and the two counts a reader is there for."""
+    from claude_launcher import cli_connections
+
+    snapshot = {
+        "open": [
+            {"id": 1, "kind": "terminal", "session": "s584",
+             "peer_ip": "127.0.0.1", "peer_port": 5001, "age_s": 12.0},
+            {"id": 2, "kind": "terminal", "session": "s586",
+             "peer_ip": "127.0.0.1", "peer_port": 5002, "age_s": 3.0},
+        ],
+        "http_connections": 8,
+        "ports_by_agent": {"claunch": 2, "firefox": 6},
+    }
+    frame = cli_connections._wizard_frame(
+        cli_connections._wizard_rows(snapshot), 1, {2}, snapshot, "closed 1"
+    )
+    assert "2 socket(s) open, 8 daemon connection(s)" in frame
+    assert "firefox 6" in frame
+    assert " [ ] #1 terminal s584 from 127.0.0.1:5001" in frame
+    assert " >[x] #2 terminal s586 from 127.0.0.1:5002" in frame
+    assert "closed 1" in frame

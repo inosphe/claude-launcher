@@ -95,6 +95,22 @@ def _cmd_connections(args) -> int:
     client = _client()
     if client is None:
         return 2
+    if args.close:
+        result = client.post("/api/connections/close", {"ids": args.close})
+        closed = result.get("closed") or []
+        gone = result.get("already_gone") or []
+        print(f"closed {len(closed)}: {closed}" if closed else "closed none")
+        if gone:
+            print(f"already gone: {gone}")
+        return 0
+    if args.wizard:
+        from .wizard import WizardUnavailable
+
+        try:
+            return _wizard(client)
+        except WizardUnavailable as exc:
+            print(str(exc), file=sys.stderr)
+            return 2
     while True:
         snapshot = client.get("/api/connections")
         if args.json:
@@ -123,4 +139,114 @@ def register(sub) -> None:
         help="how many recently closed sockets to show (default 10)",
     )
     p.add_argument("--json", action="store_true", help="print the raw reading")
+    p.add_argument(
+        "--close", type=int, nargs="+", metavar="ID", default=[],
+        help="close these sockets by the id the listing gives them; the "
+             "viewer's own retry brings it back, so this ends a connection "
+             "rather than a session",
+    )
+    p.add_argument(
+        "--wizard", action="store_true",
+        help="pick sockets off the list and close them (needs a terminal)",
+    )
     p.set_defaults(func=_cmd_connections)
+
+
+# --------------------------------------------------------------------------- #
+# --wizard: the list, with the ability to end what is on it
+# --------------------------------------------------------------------------- #
+# A page whose terminal will not come up is looking at a socket that either
+# does not exist or is not the one it wants, and the reading alone cannot
+# settle which. Ending a connection and watching what the page does next can:
+# the viewer's own retry brings it back, the same path a daemon restart puts
+# it on, so this is a safe lever rather than a destructive one.
+#
+# The screen reuses the new-session wizard's primitives (raw terminal, key
+# decoding, alternate screen) so there is one interactive dialect in this
+# product, not two.
+_HELP = "↑/↓ move · space mark · x close marked · r refresh · q quit"
+
+
+def _wizard_rows(snapshot: dict) -> list:
+    return list(snapshot.get("open") or [])
+
+
+def _wizard_frame(rows: list, cursor: int, marked: set, snapshot: dict, note: str) -> str:
+    http = snapshot.get("http_connections")
+    ports = snapshot.get("ports_by_agent") or {}
+    lines = [
+        "\x1b[2J\x1b[H",
+        f"  claunch connections — {len(rows)} socket(s) open, "
+        f"{'unknown' if http is None else http} daemon connection(s)",
+    ]
+    if ports:
+        lines.append(
+            "  connections used recently: "
+            + ", ".join(f"{agent} {n}" for agent, n in ports.items())
+        )
+    lines.append("")
+    if not rows:
+        lines.append("  (nothing open)")
+    for i, row in enumerate(rows):
+        mark = "x" if row.get("id") in marked else " "
+        point = ">" if i == cursor else " "
+        lines.append(
+            f" {point}[{mark}] #{row.get('id')} {row.get('kind')} "
+            f"{row.get('session')} from {_fmt_peer(row)}  {row.get('age_s')}s"
+        )
+    lines.append("")
+    if note:
+        lines.append(f"  {note}")
+    lines.append(f"  {_HELP}")
+    return "\r\n".join(lines) + "\r\n"
+
+
+def _wizard(client) -> int:
+    import codecs
+
+    from . import attach as attach_mod
+    from .wizard import _ENTER, _LEAVE, _write, decode_keys, require_terminal
+
+    require_terminal()
+    decoder = codecs.getincrementaldecoder("utf-8")("replace")
+    snapshot = client.get("/api/connections")
+    rows = _wizard_rows(snapshot)
+    cursor, marked, note = 0, set(), ""
+    _write(_ENTER)
+    try:
+        with attach_mod._RawTerminal():
+            while True:
+                cursor = max(0, min(cursor, max(0, len(rows) - 1)))
+                _write(_wizard_frame(rows, cursor, marked, snapshot, note))
+                data = attach_mod._read_stdin()
+                if not data:
+                    return 0
+                for key in decode_keys(decoder.decode(data)):
+                    if key in ("q", "escape"):
+                        return 0
+                    if key in ("up", "k"):
+                        cursor -= 1
+                    elif key in ("down", "j"):
+                        cursor += 1
+                    elif key == " " and rows:
+                        socket_id = rows[cursor]["id"]
+                        marked.symmetric_difference_update({socket_id})
+                    elif key == "r":
+                        snapshot = client.get("/api/connections")
+                        rows = _wizard_rows(snapshot)
+                        note = "refreshed"
+                    elif key == "x":
+                        wanted = sorted(marked) or ([rows[cursor]["id"]] if rows else [])
+                        if not wanted:
+                            note = "nothing to close"
+                            continue
+                        result = client.post("/api/connections/close", {"ids": wanted})
+                        marked.clear()
+                        snapshot = client.get("/api/connections")
+                        rows = _wizard_rows(snapshot)
+                        note = (
+                            f"closed {len(result.get('closed') or [])}, "
+                            f"already gone {len(result.get('already_gone') or [])}"
+                        )
+    finally:
+        _write(_LEAVE)

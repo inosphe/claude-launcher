@@ -71,7 +71,13 @@ class Registry:
         self._requests: list[dict[str, Any]] = []
 
     # -- writing -------------------------------------------------------- #
-    def opened(self, kind: str, name: str, request: web.Request) -> dict[str, Any]:
+    def opened(
+        self,
+        kind: str,
+        name: str,
+        request: web.Request,
+        ws: Any = None,
+    ) -> dict[str, Any]:
         """Record a socket that has just been accepted.
 
         The returned record is the handle its own handler passes back to
@@ -89,6 +95,10 @@ class Registry:
             "query": dict(request.query),
             "opened_at": _now_iso(),
             "_mono": time.monotonic(),
+            # The socket itself, so a reader who can see a connection can
+            # also end it. Never serialised: keys that begin with an
+            # underscore are stripped from every reading below.
+            "_ws": ws,
         }
         self._open[record["id"]] = record
         return record
@@ -98,12 +108,11 @@ class Registry:
     ) -> None:
         """Move a record to the closed half, with why it ended."""
         self._open.pop(record["id"], None)
-        done = dict(record)
+        done = _public(record)
         done["closed_at"] = _now_iso()
         done["age_s"] = round(time.monotonic() - record["_mono"], 1)
         done["code"] = code
         done["error"] = repr(error) if error is not None else None
-        done.pop("_mono", None)
         self._closed.append(done)
         del self._closed[:-CLOSED_KEEP]
 
@@ -163,6 +172,16 @@ class Registry:
         del self._refused[:-REFUSED_KEEP]
 
     # -- reading -------------------------------------------------------- #
+    def socket(self, socket_id: int) -> Any:
+        """The open socket with this id, or ``None``.
+
+        What the close endpoint stands on: an id a reader saw in a reading
+        is the handle for ending that connection, and an id that has since
+        closed answers ``None`` rather than raising.
+        """
+        record = self._open.get(socket_id)
+        return record.get("_ws") if record else None
+
     def open_count(self) -> int:
         """How many sockets are open, for the log lines that say so."""
         return len(self._open)
@@ -178,8 +197,8 @@ class Registry:
         now = time.monotonic()
         rows = []
         for record in sorted(self._open.values(), key=lambda r: r["id"]):
-            row = dict(record)
-            row["age_s"] = round(now - row.pop("_mono"), 1)
+            row = _public(record)
+            row["age_s"] = round(now - record["_mono"], 1)
             rows.append(row)
         by_peer: dict[str, int] = {}
         by_session: dict[str, int] = {}
@@ -214,6 +233,11 @@ class Registry:
         for row in self._requests:
             seen.setdefault(row["agent"], set()).add(row["peer_port"])
         return {agent: len(ports) for agent, ports in sorted(seen.items())}
+
+
+def _public(record: dict[str, Any]) -> dict[str, Any]:
+    """A record without its private keys, which hold live objects."""
+    return {k: v for k, v in record.items() if not k.startswith("_")}
 
 
 def _agent_kind(user_agent: str) -> str:
