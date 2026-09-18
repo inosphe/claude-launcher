@@ -289,6 +289,7 @@ CHECKS = [
         "layout_check.js",
         "batchpoll_check.js",
         "controlsocket_check.js",
+        "channels_check.js",
         "render_check.js",
         "lineage_check.js",
         "sessionfilters_check.js",
