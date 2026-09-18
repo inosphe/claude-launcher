@@ -48,6 +48,12 @@ CLOSED_KEEP = 100
 #: How many refused requests to keep. The same bound, for the same reason.
 REFUSED_KEEP = 100
 
+#: How many recent requests to keep. Larger, because these are what tell one
+#: client's connections from another's on a machine where every peer is
+#: 127.0.0.1: the port a request arrived on identifies the connection, and
+#: the User-Agent identifies whose it is.
+REQUESTS_KEEP = 400
+
 _ids = itertools.count(1)
 
 
@@ -62,6 +68,7 @@ class Registry:
         self._open: dict[int, dict[str, Any]] = {}
         self._closed: list[dict[str, Any]] = []
         self._refused: list[dict[str, Any]] = []
+        self._requests: list[dict[str, Any]] = []
 
     # -- writing -------------------------------------------------------- #
     def opened(self, kind: str, name: str, request: web.Request) -> dict[str, Any]:
@@ -99,6 +106,28 @@ class Registry:
         done.pop("_mono", None)
         self._closed.append(done)
         del self._closed[:-CLOSED_KEEP]
+
+    def request(self, request: web.Request, status: int) -> None:
+        """Record that a request arrived, and on which connection.
+
+        Every client of this daemon is 127.0.0.1, so the address cannot say
+        whether a connection belongs to a browser, to ``claunch`` in a shell
+        or to an agent's poll. The port can, because it identifies the
+        connection, and the User-Agent says whose it is. Counting the
+        distinct ports one agent is using at a moment is how a browser's own
+        per-server connection budget becomes visible from this side.
+        """
+        peer_ip, peer_port = _peer(request)
+        self._requests.append({
+            "at": _now_iso(),
+            "method": request.method,
+            "path": request.path,
+            "status": status,
+            "peer_ip": peer_ip,
+            "peer_port": peer_port,
+            "agent": _agent_kind(request.headers.get("User-Agent", "")),
+        })
+        del self._requests[:-REQUESTS_KEEP]
 
     def refused(self, request: web.Request, reason: str) -> None:
         """Record a request the auth middleware turned away.
@@ -169,7 +198,37 @@ class Registry:
             "refused": list(reversed(self._refused)),
             "refused_kept": REFUSED_KEEP,
             "refused_count": len(self._refused),
+            "requests": list(reversed(self._requests)),
+            "requests_kept": REQUESTS_KEEP,
+            "ports_by_agent": self._ports_by_agent(),
         }
+
+    def _ports_by_agent(self) -> dict[str, int]:
+        """How many distinct connections each kind of client used recently.
+
+        Recent means the window the request log covers. A browser that has
+        run out of connections to this server shows a count that stops
+        climbing while its page reports that it cannot connect.
+        """
+        seen: dict[str, set] = {}
+        for row in self._requests:
+            seen.setdefault(row["agent"], set()).add(row["peer_port"])
+        return {agent: len(ports) for agent, ports in sorted(seen.items())}
+
+
+def _agent_kind(user_agent: str) -> str:
+    """A coarse name for who is calling, from the User-Agent.
+
+    Coarse on purpose: the reading needs to separate a browser's connections
+    from a shell's, not to identify a build.
+    """
+    agent = user_agent.lower()
+    for name in ("firefox", "chrome", "safari", "edg"):
+        if name in agent:
+            return "edge" if name == "edg" else name
+    if "python" in agent or "aiohttp" in agent or "claunch" in agent:
+        return "claunch"
+    return "other" if user_agent else "none"
 
 
 def reason_cookie_name() -> str:

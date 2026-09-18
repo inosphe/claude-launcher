@@ -195,6 +195,32 @@ async def error_middleware(request: web.Request, handler):
         raise
 
 
+@web.middleware
+async def record_middleware(request: web.Request, handler):
+    """Write down that a request arrived, and on which connection.
+
+    Outermost, so it sees the refusals the auth middleware makes as well as
+    the requests that get through. aiohttp's access log is off on this
+    daemon (``AppRunner(access_log=None)``) and turning it on would put every
+    poll of every open page in the log; this keeps a bounded window in memory
+    instead, which is what ``/api/connections`` needs and what the log cannot
+    give (claunch-restart-disconnect-banner-12p2).
+    """
+    status = 0
+    try:
+        response = await handler(request)
+        status = getattr(response, "status", 0)
+        return response
+    except web.HTTPException as exc:
+        status = exc.status
+        raise
+    finally:
+        try:
+            connections.install(request.app).request(request, status)
+        except Exception:  # noqa: BLE001 -- diagnosis must not fail a request
+            log.debug("could not record a request", exc_info=True)
+
+
 def build_auth_middleware(token: str, cookie_sessions: set):
     @web.middleware
     async def auth_middleware(request: web.Request, handler):
@@ -264,6 +290,7 @@ def build_app(
         middlewares=[
             revalidate_middleware,
             error_middleware,
+            record_middleware,
             build_auth_middleware(token, cookie_sessions),
         ]
     )
