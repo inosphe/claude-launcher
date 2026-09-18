@@ -52,6 +52,22 @@ def _print(snapshot: dict, closed_limit: int) -> None:
             f"  #{row.get('id')} {row.get('kind')} {row.get('session')} "
             f"from {_fmt_peer(row)}  {row.get('age_s')}s"
         )
+    refused = (snapshot.get("refused") or [])[:closed_limit]
+    if refused:
+        # The line that answers "why will this terminal not come up". An
+        # upgrade refused here never became a socket, so it appears nowhere
+        # above and nowhere in the daemon's close lines.
+        print(f"  {snapshot.get('refused_count', len(refused))} refused, last {len(refused)}:")
+        for row in refused:
+            kind = "upgrade" if row.get("upgrade") else row.get("method", "?")
+            credential = (
+                "cookie" if row.get("had_cookie")
+                else "bearer" if row.get("had_bearer") else "none"
+            )
+            print(
+                f"    {row.get('at')} {kind} {row.get('path')} "
+                f"from {_fmt_peer(row)} sent={credential} -- {row.get('reason')}"
+            )
     closed = (snapshot.get("closed") or [])[:closed_limit]
     if closed:
         print(f"  last {len(closed)} closed:")

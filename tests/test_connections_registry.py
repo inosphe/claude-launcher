@@ -13,6 +13,8 @@ of the endpoint depends on.
 
 from __future__ import annotations
 
+import json
+
 from claude_launcher.daemon import connections
 
 
@@ -188,5 +190,53 @@ def test_live_sockets_appear_in_the_reading_and_leave_it_on_close(home, tmp_path
             await client.close()
             for name in list(mgr._sessions):
                 mgr.kill(name)
+
+    asyncio.run(run())
+
+
+# --------------------------------------------------------------------------- #
+# refusals: the half that leaves no other trace
+# --------------------------------------------------------------------------- #
+def test_a_refused_upgrade_is_recorded_with_what_it_presented(home, tmp_path):
+    """A WebSocket upgrade turned away by the auth middleware is the one
+    failure that wrote nothing anywhere: no socket, no close line, and the
+    access log is off. The reading has to hold it, and has to say whether a
+    credential was presented -- a handshake with no cookie and one with a
+    cookie this daemon has never heard of call for different fixes."""
+    import asyncio
+    import time
+
+    from aiohttp.test_utils import TestClient, TestServer
+
+    from claude_launcher.daemon.api import COOKIE_NAME, build_app
+    from claude_launcher.daemon.manager import SessionManager
+
+    async def run():
+        mgr = SessionManager(idle_threshold=0.5, scrollback=200, restore_default=True)
+        app = build_app(mgr, "sekrit", started_at=time.monotonic())
+        client = TestClient(TestServer(app))
+        await client.start_server()
+        auth = {"Authorization": "Bearer sekrit"}
+        try:
+            # No credential at all.
+            assert (await client.get("/api/sessions/s584/ws?scrollback=1")).status == 401
+            # A cookie from a daemon that is no longer running.
+            assert (
+                await client.get(
+                    "/api/sessions/s584/ws", cookies={COOKIE_NAME: "from-a-dead-daemon"}
+                )
+            ).status == 401
+
+            body = await (await client.get("/api/connections", headers=auth)).json()
+            assert body["refused_count"] == 2, body
+            newest, older = body["refused"][0], body["refused"][1]
+            assert newest["reason"] == "stale cookie" and newest["had_cookie"] is True
+            assert older["reason"] == "no credential" and older["had_cookie"] is False
+            assert older["query"] == {"scrollback": "1"}
+            assert older["path"] == "/api/sessions/s584/ws"
+            # The credential itself is never written down.
+            assert "from-a-dead-daemon" not in json.dumps(body)
+        finally:
+            await client.close()
 
     asyncio.run(run())
