@@ -4182,3 +4182,25 @@ a.window-owner:hover { color: #79c0ff; text-decoration: underline; }
   .relay-settings-form input { font-size: 16px; }
   .relay-settings-card .ws-row { flex-wrap: wrap; }
 }
+:root { --search-dialog-width: 860px; }
+.search-anything { width: min(var(--search-dialog-width), calc(100vw - 32px)); max-height: 85vh; margin: auto; overflow: auto; box-sizing: border-box; background: #1b1e24; color: #d8dbe0; border: 1px solid #667085; border-radius: 12px; padding: 20px; }
+.search-anything::backdrop { background: #0009; }
+.search-anything-header, .search-anything form { display: flex; align-items: center; gap: 12px; }
+.search-anything-header { justify-content: space-between; }
+.search-anything input { flex: 1; min-width: 0; font-size: 16px; padding: 10px; }
+.search-anything-result { border-top: 1px solid #667085; padding: 16px 0; overflow-wrap: anywhere; }
+.search-anything-result > a { display: block; font-weight: bold; margin: 6px 0; }
+.search-anything-result p { white-space: pre-wrap; max-height: 180px; overflow: auto; }
+.search-anything-result pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 360px; overflow: auto; }
+.search-anything-sessions { display: flex; gap: 12px; flex-wrap: wrap; margin: 8px 0; }
+.search-anything a { color: #79b8ff; }
+.search-anything button, #search-anything-open { background: #252b35; color: #d8dbe0; border: 1px solid #4d5566; border-radius: 6px; padding: 8px 12px; cursor: pointer; }
+.search-anything summary { cursor: pointer; color: #79b8ff; }
+.search-anything small { color: #a2aab8; }
+.search-anything input { background: #14161a; color: #d8dbe0; border: 1px solid #4d5566; border-radius: 6px; }
+.search-settings label { display: flex; flex-direction: column; gap: 4px; margin: 10px 0; }
+.search-settings input { max-width: 100%; box-sizing: border-box; padding: 8px; font-size: 16px; }
+.search-settings input[type=checkbox] { align-self: flex-start; }
+.search-settings button { margin-right: 8px; }
+#session-search-row { flex-wrap: wrap; }
+#search-anything-open { width: 100%; text-align: left; padding: 8px; }

@@ -189,8 +189,8 @@ function inputButton(card,s) {
 function eventItem(s,e) {
   const item=node("div","",`event${e.needs_action&&!e.acknowledged?" action":""}`);
   item.dataset.event=e.id;
-  const origin=e.origin==="daemon"?"세션 이벤트":e.origin==="agent"?"에이전트 직접 보고":"자동 관찰";
-  item.append(node("small",`${origin} · ${e.kind} · ${new Date(e.at).toLocaleString()}${e.acknowledged?" · 확인됨":""}`),node("div",e.text));
+  const origin=e.origin==="record"?"저장된 기록":e.origin==="daemon"?"세션 이벤트":e.origin==="agent"?"에이전트 직접 보고":"자동 관찰";
+  item.append(node("small",`${s.name} · ${origin} · ${e.kind} · ${new Date(e.at).toLocaleString()}${e.acknowledged?" · 확인됨":""}`),node("div",e.text));
   if(e.origin==="daemon") {
     if(e.kind==="borrow") {
       const d=e.details||{}, before=d.previous_null?"인증 없음":d.previous||"자체 프로파일", after=d.null_token?"인증 없음":d.current||"자체 프로파일";

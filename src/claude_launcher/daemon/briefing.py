@@ -748,6 +748,8 @@ async def compose(session, cfg: dict, *, refresh: bool = False) -> dict:
     }
     _cache[name] = (cache_key, result)
     _persist_cache()
+    from . import search_records
+    search_records.capture(name, "briefing", parsed or {"raw": answer.text}, result["generated_at"])
     return result
 
 
