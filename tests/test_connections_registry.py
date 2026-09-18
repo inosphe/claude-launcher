@@ -401,3 +401,18 @@ def test_an_unmeasurable_live_count_says_so_rather_than_reading_zero():
     registry = connections.Registry()
     assert registry.snapshot()["live_by_agent"] is None
     assert registry.snapshot(live_ports=set())["live_by_agent"] == {}
+
+
+def test_a_live_socket_is_named_by_its_own_viewer():
+    """A socket that is up has not been through the request log: its handler
+    returns only when it closes. Before this, every live viewer counted as
+    ``unknown``, which is the one thing the reading is for."""
+    registry = connections.Registry()
+    request = _Request(peer=("127.0.0.1", 4100), agent="Mozilla/5.0 Firefox/141.0")
+    record = registry.opened("terminal", "s586", request)
+    live = registry.snapshot(live_ports={4100})["live_by_agent"]
+    assert live == {"firefox (socket)": 1}
+    # And once it closes it leaves the count, rather than turning into a
+    # second kind of viewer.
+    registry.closed(record, 1000, None)
+    assert registry.snapshot(live_ports=set())["live_by_agent"] == {}

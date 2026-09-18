@@ -248,6 +248,12 @@ class Registry:
         for row in self._requests:
             if row["peer_port"] is not None:
                 owner[row["peer_port"]] = row["agent"]
+        # A socket that is up has not been through the request log yet: its
+        # handler only returns when the socket closes, so without this every
+        # live viewer read as ``unknown`` -- the one thing this count is for.
+        for record in self._open.values():
+            if record["peer_port"] is not None:
+                owner[record["peer_port"]] = _agent_kind(record["user_agent"]) + " (socket)"
         counts: dict[str, int] = {}
         for port in live_ports:
             name = owner.get(port, "unknown")
