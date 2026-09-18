@@ -283,6 +283,12 @@ async def put_image(path: Path, media_type: str, *, timeout: float = 15.0) -> No
         _, err = await asyncio.wait_for(proc.communicate(), timeout=timeout)
     except asyncio.TimeoutError as exc:
         proc.kill()
+        # Reaped, not just killed. A kill only asks; until the process is
+        # waited for, the child stays around and its transport stays open,
+        # and on Windows a loop closing over a live subprocess transport
+        # takes the whole process down with it.
+        with contextlib.suppress(Exception):
+            await proc.communicate()
         raise ClipboardError(f"{cmd.argv[0]} did not finish within {timeout:g}s") from exc
     if proc.returncode != 0:
         lines = (err or b"").decode("utf-8", "replace").strip().splitlines()

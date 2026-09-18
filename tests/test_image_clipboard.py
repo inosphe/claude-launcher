@@ -113,37 +113,106 @@ def test_a_command_that_is_not_installed_comes_back_as_a_clipboard_error(
         "image_command",
         lambda *a, **k: clipboard.ClipboardCommand(["claunch-no-such-tool"]),
     )
+
+    async def missing(*argv, **kw):
+        raise FileNotFoundError(argv[0])
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", missing)
     with pytest.raises(clipboard.ClipboardError) as exc:
         asyncio.run(clipboard.put_image(target, "image/png"))
     assert "claunch-no-such-tool" in str(exc.value)
 
 
-def test_a_command_that_fails_reports_its_last_stderr_line(tmp_path):
-    target = tmp_path / "a.png"
-    target.write_bytes(b"x")
-    script = "import sys; sys.stderr.write('first\\nclipboard is locked\\n'); sys.exit(3)"
-    argv = [sys.executable, "-c", script]
+def test_a_command_that_fails_reports_its_last_stderr_line(monkeypatch, tmp_path):
+    proc = _FakeProc(returncode=3, stderr=b"first\nclipboard is locked\n")
+    _stub(monkeypatch, proc)
     with pytest.raises(clipboard.ClipboardError) as exc:
-        asyncio.run(_put_with(argv, target))
+        asyncio.run(clipboard.put_image(tmp_path / "a.png", "image/png"))
     # The last line, because that is where a tool puts the thing that went
     # wrong; the operator reads this in the web session line.
     assert "clipboard is locked" in str(exc.value)
 
 
-def test_a_command_that_hangs_is_killed_and_reported(tmp_path):
-    target = tmp_path / "a.png"
-    target.write_bytes(b"x")
-    argv = [sys.executable, "-c", "import time; time.sleep(30)"]
+def test_a_command_that_says_nothing_still_reports_its_exit_code(monkeypatch,
+                                                                 tmp_path):
+    _stub(monkeypatch, _FakeProc(returncode=9, stderr=b""))
     with pytest.raises(clipboard.ClipboardError) as exc:
-        asyncio.run(_put_with(argv, target, timeout=0.5))
-    assert "0.5s" in str(exc.value)
+        asyncio.run(clipboard.put_image(tmp_path / "a.png", "image/png"))
+    assert "exit 9" in str(exc.value)
 
 
-async def _put_with(argv, target, timeout=15.0):
-    """Run :func:`put_image` against a stand-in command."""
-    real = clipboard.image_command
-    clipboard.image_command = lambda *a, **k: clipboard.ClipboardCommand(list(argv))
-    try:
-        await clipboard.put_image(target, "image/png", timeout=timeout)
-    finally:
-        clipboard.image_command = real
+def test_a_command_that_hangs_is_killed_reaped_and_reported(monkeypatch, tmp_path):
+    """Killing only asks. Until the process is waited for, the child stays
+    around and its transport stays open, and a loop closing over a live
+    subprocess transport takes the whole process down with it on Windows —
+    which is how this was found: a pytest worker crashed inside winpty."""
+    proc = _FakeProc(returncode=0, stderr=b"", hang=True)
+    _stub(monkeypatch, proc)
+    with pytest.raises(clipboard.ClipboardError) as exc:
+        asyncio.run(clipboard.put_image(tmp_path / "a.png", "image/png", timeout=0.05))
+    assert "0.05s" in str(exc.value)
+    assert proc.killed is True
+    assert proc.reaped is True
+
+
+def test_a_wl_copy_style_command_is_fed_the_file_on_stdin(monkeypatch, tmp_path):
+    target = tmp_path / "a.png"
+    target.write_bytes(b"png bytes")
+    proc = _FakeProc(returncode=0, stderr=b"")
+    monkeypatch.setattr(
+        clipboard,
+        "image_command",
+        lambda *a, **k: clipboard.ClipboardCommand(["wl-copy"], stdin_path=target),
+    )
+    _record = {}
+
+    async def fake_exec(*argv, **kw):
+        # Read here, while the handle is still the caller's: put_image closes
+        # its own copy right after the spawn.
+        _record["stdin"] = kw["stdin"].read()
+        return proc
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
+    asyncio.run(clipboard.put_image(target, "image/png"))
+    assert _record["stdin"] == b"png bytes"
+
+
+class _FakeProc:
+    """A subprocess that never exists.
+
+    These tests are about how :func:`put_image` translates what a command
+    did, not about the platform's ability to start one. Spawning a real
+    child for that turned out to cost more than it proved: an asyncio
+    subprocess left in the same pytest process ahead of the winpty-backed
+    session tests produced a heap-corruption crash on Windows.
+    """
+
+    def __init__(self, returncode, stderr, hang=False):
+        self.returncode = returncode
+        self._stderr = stderr
+        self._hang = hang
+        self.killed = False
+        self.reaped = False
+
+    async def communicate(self):
+        if self._hang and not self.killed:
+            await asyncio.sleep(3600)
+        if self.killed:
+            self.reaped = True
+        return b"", self._stderr
+
+    def kill(self):
+        self.killed = True
+
+
+def _stub(monkeypatch, proc):
+    monkeypatch.setattr(
+        clipboard,
+        "image_command",
+        lambda *a, **k: clipboard.ClipboardCommand(["a-clipboard-tool"]),
+    )
+
+    async def fake_exec(*argv, **kw):
+        return proc
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
