@@ -79,6 +79,7 @@ def test_pause_api_partitions_the_records_and_resumes_only_the_paused(home, tmp_
             body = await response.json()
             assert body["paused_at"] and "already_exited" not in body
             await mgr.get("a0").wait_for("exited", timeout=10.0, threshold=0.5)
+            assert [e["kind"] for e in mgr.events.rows(mgr.get("a0"))] == ["create", "pause", "exit"]
 
             # A second pause says so and keeps the marker; a pause of a
             # killed record does not turn it into a paused one.

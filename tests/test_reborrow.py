@@ -92,6 +92,10 @@ def test_reborrow_relaunches_a_live_session_on_the_new_borrow(home, tmp_path, mo
         )
         relaunched = await mgr.reborrow("s1", "p2")
         assert relaunched.sdef.borrow == "p2"
+        event = mgr.events.rows(relaunched)[-1]
+        assert event["kind"] == "borrow"
+        assert event["details"] == {"previous": None, "current": "p2",
+                                    "previous_null": False, "null_token": False}
         assert not relaunched.exited  # relaunched, not just redefined
         assert relaunched.sdef.conversation_id == session.sdef.conversation_id
         assert mgr.get("s1") is relaunched
@@ -196,6 +200,7 @@ def test_reborrow_refusals_touch_nothing(home, tmp_path, monkeypatch):
         # none of them went down for a refusal
         for s in (session, other, nulled):
             assert not s.exited
+            assert all(e["kind"] != "borrow" for e in mgr.events.rows(s))
         await mgr.shutdown_all()
 
     asyncio.run(run())
