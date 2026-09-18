@@ -86,7 +86,7 @@ vm.runInContext(
 
   // --- the card, declared ------------------------------------------------
   response = { profiles: [], profile_details: details() };
-  await context.refreshProfiles();
+  await context.refreshProfileSettings();
   assert.equal(requests.at(-1)[0], "/api/profiles");
 
   let card = context.profileModeCard();
@@ -102,7 +102,7 @@ vm.runInContext(
 
   // --- the card, nothing declared ----------------------------------------
   response = { profiles: [], profile_details: details({ declared: null }) };
-  await context.refreshProfiles();
+  await context.refreshProfileSettings();
   card = context.profileModeCard();
   assert.match(textOf(card), /Declared: nothing \(claunch's default\)/);
   assert.equal(find(card, (n) => n.id === "profile-mode-select").value, "");
@@ -141,7 +141,7 @@ vm.runInContext(
 
   // --- the table ---------------------------------------------------------
   response = { profiles: [], profile_details: details({ declared: "plan", target: "plan" }) };
-  await context.refreshProfiles();
+  await context.refreshProfileSettings();
   const panel = context.profilesPanel();
   const table = find(panel, (n) => n.tag === "table");
   const rows = all(table).filter((n) => n.tag === "tr").slice(1);  // drop the header
@@ -166,7 +166,7 @@ vm.runInContext(
 
   // --- converged reads as settled ----------------------------------------
   response = { profiles: [], profile_details: details({ declared: "auto", target: "auto", first: "auto" }) };
-  await context.refreshProfiles();
+  await context.refreshProfileSettings();
   const settled = all(find(context.profilesPanel(), (n) => n.tag === "table"))
     .filter((n) => n.tag === "tr")[1];
   assert.equal(settled.children[3].text, "auto");
@@ -174,14 +174,14 @@ vm.runInContext(
 
   // --- a profile with no value at all ------------------------------------
   response = { profiles: [], profile_details: details({ declared: null, target: "auto", first: null }) };
-  await context.refreshProfiles();
+  await context.refreshProfileSettings();
   const asking = all(find(context.profilesPanel(), (n) => n.tag === "table"))
     .filter((n) => n.tag === "tr")[1];
   assert.equal(asking.children[3].text, "asks (no value)");
 
   // --- no Claude profile at all ------------------------------------------
   response = { profiles: [], profile_details: [details()[2], details()[3]] };
-  await context.refreshProfiles();
+  await context.refreshProfileSettings();
   assert.match(textOf(context.profileModeCard()), /No Claude Code profile yet/);
 
   console.log("profilesettings_check: ok");
