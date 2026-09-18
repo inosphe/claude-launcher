@@ -74,7 +74,7 @@ ok(/max-height:\s*none/.test(formRules),
    "the form's own height cap is lifted while the box owns the height");
 
 /* The native grip is drawn in the corner the actions sit in. */
-const actionRules = cssBlock("#modal-overlay.spawn-open #modal-actions") || "";
+const actionRules = cssBlock("#modal-overlay.spawn-open #new-session-actions") || "";
 ok(/padding-right:\s*\d+px/.test(actionRules),
    "the actions clear the grip's corner");
 
