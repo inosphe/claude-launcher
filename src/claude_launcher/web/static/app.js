@@ -192,6 +192,7 @@ function openControlSocket() {
   }
   const proto = location.protocol === "https:" ? "wss" : "ws";
   const sock = new WebSocket(`${proto}://${location.host}` + url("/api/control/ws"));
+  sock.binaryType = "arraybuffer";
   controlSock = sock;
 
   sock.onopen = () => {
@@ -200,9 +201,11 @@ function openControlSocket() {
   };
 
   sock.onmessage = (ev) => {
-    if (sock !== controlSock || typeof ev.data !== "string") return;
+    if (sock !== controlSock) return;
+    if (typeof ev.data !== "string") { channelBinary(ev.data); return; }
     let msg;
     try { msg = JSON.parse(ev.data); } catch { return; }
+    if (typeof msg.ch === "number") { channelFrame(msg); return; }
     if (msg.type !== "read_result") return;
     const waiter = controlWaiting.get(msg.id);
     if (!waiter) return;                 // timed out already, and re-sent
@@ -215,6 +218,7 @@ function openControlSocket() {
     if (sock !== controlSock) return;
     controlSock = null;
     controlAbort("control socket closed");
+    channelsCarrierGone();
     scheduleControlReopen();
   };
 }
@@ -275,6 +279,143 @@ function controlSay(frame) {
   } catch {
     return false;
   }
+}
+
+/* ---- terminals on the control socket ----
+
+   A WebSocket costs a connection, and the page opened one per session it
+   was looking at, so the count grew as a person moved between sessions and
+   the next upgrade waited in the browser's connection queue with nothing on
+   the daemon's side to record (claunch-gh4f). These carry a terminal over
+   the control socket instead: one connection, however many sessions.
+
+   `ChannelLink` presents the part of WebSocket the terminal code uses --
+   `readyState`, `send`, `close`, `onopen`, `onmessage`, `onclose` and the
+   two timing marks -- so openSocket, suspendActive and shimFrame are
+   unchanged and there is one terminal client, not two. Framing matches
+   daemon/channel.py: two big-endian bytes of channel id in front of binary
+   payloads, and `"ch": N` inside text frames.
+
+   The fallback stays: with the control socket down, openSocket opens a
+   socket of its own, which is also what happens against a daemon too old to
+   route channels. */
+const CHANNEL_HEADER = 2;
+const channelLinks = new Map();   // channel id -> ChannelLink
+let channelSeq = 0;
+
+class ChannelLink {
+  constructor(ch, name) {
+    this.ch = ch;
+    this.name = name;
+    this.readyState = WebSocket.CONNECTING;
+    this.binaryType = "arraybuffer";
+    this.linkOpenedAt = null;
+    this.linkReadyAt = null;
+    this.onopen = null;
+    this.onmessage = null;
+    this.onclose = null;
+  }
+
+  send(data) {
+    if (this.readyState !== WebSocket.OPEN || !controlUp()) return;
+    if (typeof data === "string") {
+      let frame;
+      try { frame = JSON.parse(data); } catch { return; }
+      frame.ch = this.ch;
+      controlSock.send(JSON.stringify(frame));
+      return;
+    }
+    const body = data instanceof Uint8Array ? data : new Uint8Array(data);
+    const out = new Uint8Array(CHANNEL_HEADER + body.length);
+    out[0] = (this.ch >> 8) & 0xff;
+    out[1] = this.ch & 0xff;
+    out.set(body, CHANNEL_HEADER);
+    controlSock.send(out.buffer);
+  }
+
+  close(code, reason) {
+    if (this.readyState === WebSocket.CLOSED) return;
+    channelLinks.delete(this.ch);
+    if (controlUp()) {
+      try {
+        controlSock.send(JSON.stringify({ type: "detach", ch: this.ch }));
+      } catch { /* the socket went while we were speaking */ }
+    }
+    this._ended(code || 1000, reason || "", true);
+  }
+
+  _ended(code, reason, wasClean) {
+    if (this.readyState === WebSocket.CLOSED) return;
+    this.readyState = WebSocket.CLOSED;
+    channelLinks.delete(this.ch);
+    if (this.onclose) this.onclose({ code, reason, wasClean });
+  }
+}
+
+/* Attach `name` on a fresh channel, or null when the control socket is not
+   up to carry one. The caller falls back to a socket of its own. */
+function openChannel(name, opts) {
+  if (!controlUp()) return null;
+  const ch = (channelSeq = (channelSeq + 1) & 0xffff) || (channelSeq = 1);
+  const link = new ChannelLink(ch, name);
+  channelLinks.set(ch, link);
+  try {
+    controlSock.send(JSON.stringify({
+      type: "attach", ch, session: name,
+      scrollback: !!(opts && opts.scrollback),
+      overlay: !!(opts && opts.overlay),
+    }));
+  } catch {
+    channelLinks.delete(ch);
+    return null;
+  }
+  return link;
+}
+
+/* One binary frame off the control socket: the channel id, then the bytes a
+   terminal's output arrived as. */
+function channelBinary(buf) {
+  const view = new Uint8Array(buf);
+  if (view.length < CHANNEL_HEADER) return;
+  const ch = (view[0] << 8) | view[1];
+  const link = channelLinks.get(ch);
+  if (!link || !link.onmessage) return;
+  link.onmessage({ data: view.slice(CHANNEL_HEADER).buffer });
+}
+
+/* One text frame that named a channel: the bookkeeping this file owns, or a
+   terminal frame handed on with the `ch` tag taken back off. */
+function channelFrame(msg) {
+  const link = channelLinks.get(msg.ch);
+  if (!link) return;
+  if (msg.type === "attached") {
+    link.readyState = WebSocket.OPEN;
+    link.linkOpenedAt = Date.now();
+    if (link.onopen) link.onopen({});
+    return;
+  }
+  if (msg.type === "attach_error") {
+    link._ended(1011, msg.error || "attach refused", false);
+    return;
+  }
+  if (msg.type === "detached") {
+    link._ended(msg.code || 1000, "", true);
+    return;
+  }
+  if (!link.onmessage) return;
+  const body = { ...msg };
+  delete body.ch;
+  link.onmessage({ data: JSON.stringify(body) });
+}
+
+/* The control socket went, so every terminal on it went with it. Reported
+   as 1006 because that is what the same outage looked like when each
+   terminal had a socket of its own, and the retry above reads the code. */
+function channelsCarrierGone() {
+  for (const link of [...channelLinks.values()]) {
+    link._ended(1006, "control socket closed", false);
+  }
+  channelLinks.clear();
 }
 
 /* ---- one connection for the reads that happen together ----
@@ -7762,7 +7903,10 @@ function openSocket(name) {
   // land somewhere and the wheel over them is the browser's own. The daemon
   // sends nothing without the flag — `claunch attach` never asked for five
   // thousand lines, and a client that says nothing must keep what it had.
-  const sock = new WebSocket(
+  // A channel on the control socket when there is one, and a socket of this
+  // terminal's own when there is not. Both speak the same protocol from
+  // here down; only the connection count differs.
+  const sock = openChannel(name, { scrollback: true }) || new WebSocket(
     `${proto}://${location.host}`
     + url(`/api/sessions/${encodeURIComponent(name)}/ws?scrollback=1`)
   );

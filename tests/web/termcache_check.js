@@ -208,6 +208,10 @@ function syncTerminalFocus() {}
   const api = new Function(
     "__record", "$", "document", "Terminal", "FitAddon", "WebSocket",
     "handleFrame", "url", "location", "fontSize",
+    // No control socket in this world, so openSocket takes its
+    // fallback: a socket of the terminal's own. The channel path is
+    // checked in channels_check.js.
+    "function openChannel() { return null; }\n" +
     stubs + focusSrc + "\n" + keepAliveSrc + "\n" + openSocketSrc + "\n"
     + `
 return {

@@ -42,7 +42,8 @@ from .. import beads_meta
 from .. import ghcli, prflow, spawn as spawn_mod, store, workspaces
 from .. import plugins, settings
 from .. import worktree as worktree_mod
-from . import beads as beads_mod, clipboard, connections, handoff as handoff_mod
+from . import beads as beads_mod, channel, clipboard, connections
+from . import handoff as handoff_mod
 from . import notice as notice_mod
 from . import rag as rag_mod
 from . import (
@@ -913,9 +914,13 @@ async def h_control_ws(request: web.Request) -> web.WebSocketResponse:
     request.app["websockets"].add(ws)
     conns = connections.install(request.app)
     record = conns.opened("control", "(control)", request, ws=ws)
+    carrier = channel.Carrier(ws, request.app, request)
     try:
         await ws.send_str(json.dumps({"type": "init"}))
         async for msg in ws:
+            if msg.type == WSMsgType.BINARY:
+                carrier.deliver_binary(msg.data)
+                continue
             if msg.type != WSMsgType.TEXT:
                 if msg.type in (WSMsgType.CLOSE, WSMsgType.ERROR):
                     break
@@ -925,6 +930,8 @@ async def h_control_ws(request: web.Request) -> web.WebSocketResponse:
             except (ValueError, TypeError):
                 continue
             if not isinstance(frame, dict):
+                continue
+            if await carrier.deliver_text(frame):
                 continue
             kind = frame.get("type")
             if kind == "ping":
@@ -942,6 +949,7 @@ async def h_control_ws(request: web.Request) -> web.WebSocketResponse:
     except ConnectionResetError:
         pass
     finally:
+        await carrier.shutdown(ws.exception())
         request.app["websockets"].discard(ws)
         if not ws.closed:
             await ws.close()

@@ -337,6 +337,13 @@ class _SyncLane:
 
 
 async def terminal_ws(request: web.Request) -> web.WebSocketResponse:
+    """The terminal on a socket of its own: one upgrade, one session.
+
+    Still the only way a non-browser client attaches (``claunch attach``),
+    and still what the dashboard falls back to. The dashboard's own path is
+    now :func:`attach_terminal` over a shared socket -- same protocol, same
+    code below, one connection for every session a tab visits.
+    """
     # Auth already happened: this route lives under /api/, so the middleware
     # validated a Bearer header (CLI/scripts) or the session cookie (the SPA
     # calls /api/auth/session before opening any terminal socket).
@@ -358,15 +365,54 @@ async def terminal_ws(request: web.Request) -> web.WebSocketResponse:
         session.sdef.name, record["peer_ip"], record["peer_port"],
         conns.open_count(),
     )
+    try:
+        await attach_terminal(
+            ws,
+            session,
+            request.app,
+            want_scrollback=_wants_scrollback(request),
+            overlay=_wants_overlay(request),
+        )
+    finally:
+        request.app["websockets"].discard(ws)
+        if not ws.closed:
+            await ws.close()
+        conns.closed(record, ws.close_code, ws.exception())
+        log.info(
+            "terminal websocket closed session=%s code=%s error=%r open=%d",
+            session.sdef.name, ws.close_code, ws.exception(),
+            conns.open_count(),
+        )
+    return ws
+
+
+async def attach_terminal(
+    ws,
+    session: Session,
+    app,
+    *,
+    want_scrollback: bool,
+    overlay: bool,
+) -> None:
+    """Attach ``ws`` to ``session`` and serve it until one of them ends.
+
+    ``ws`` is anything with the small write/read surface a socket has:
+    :class:`aiohttp.web.WebSocketResponse` when the terminal has an upgrade
+    to itself, :class:`daemon.channel.ChannelSocket` when it is one channel
+    of a shared one. Everything the protocol is lives here, once, so the two
+    carriers cannot drift into two dialects.
+
+    The caller owns the socket: it registers and closes it, and it writes
+    the connection record. This owns the attachment.
+    """
     queue = session.subscribe()
     # Someone is looking at this session. This route is the only way to watch
     # one — the web terminal and `claunch attach` both arrive here — so this
     # is where a visit is, and the rail's "last looked in" line is stamped on
     # the socket's two edges rather than on a timer.
     session.note_visit()
-    state = ViewerState(focus_token=queue, overlay_bytes=_wants_overlay(request))
-    want_scrollback = _wants_scrollback(request)
-    boot_id = request.app["boot_id"]
+    state = ViewerState(focus_token=queue, overlay_bytes=overlay)
+    boot_id = app["boot_id"]
     # Set once the frames a fresh socket opens with have all been written.
     # The controls that answer with a snapshot wait for it, so nothing is
     # painted over a screen the viewer has not been given yet.
@@ -476,7 +522,6 @@ async def terminal_ws(request: web.Request) -> web.WebSocketResponse:
     except ConnectionResetError:
         _viewer_left(ws, "terminal")
     finally:
-        request.app["websockets"].discard(ws)
         if state.expiry is not None:
             state.expiry.cancel()
         session.set_viewer_focused(queue, False)
@@ -484,15 +529,6 @@ async def terminal_ws(request: web.Request) -> web.WebSocketResponse:
         # ...and the visit ended now, not when it started. A tab open all
         # afternoon would otherwise report this morning.
         session.note_visit()
-        if not ws.closed:
-            await ws.close()
-        conns.closed(record, ws.close_code, ws.exception())
-        log.info(
-            "terminal websocket closed session=%s code=%s error=%r open=%d",
-            session.sdef.name, ws.close_code, ws.exception(),
-            conns.open_count(),
-        )
-    return ws
 
 
 # --------------------------------------------------------------------------- #

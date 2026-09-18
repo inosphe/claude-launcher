@@ -133,6 +133,10 @@ function build(opts) {
     // currentName needs a stand-in here.
     "let currentName = null;\n" +
     "const WHEEL_LINE_PX = 20;\n" +
+    // No control socket in this world, so openSocket takes its
+    // fallback: a socket of the terminal's own. The channel path is
+    // checked in channels_check.js.
+    "function openChannel() { return null; }\n" +
     code +
     "\nreturn {openSocket, handleFrame, sendInput, detach, handleWheel," +
     " flushWheel, updateScrollChip, syncLinkChip, wheelBelongsToProgram," +

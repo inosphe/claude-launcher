@@ -140,6 +140,10 @@ function build(opts) {
     "setStatusBadge", "refitSoon", "setTimeout", "clearTimeout", "Math", "Date",
     "updateScrollChip", "wheelTimer", "wheelAccum", "altScreen", "scrollOffset",
     "fitView", "resyncTerminal", "terminalOnScreen", "console", "reported",
+    // No control socket in this world, so openSocket takes its
+    // fallback: a socket of the terminal's own. The channel path is
+    // checked in channels_check.js.
+    "function openChannel() { return null; }\n" +
     code +
     "\nreturn {openSocket, closeLink, detach, reconnectNow, tryReconnect," +
     " sendInput, handleFrame, syncLinkChip, wireActive," +

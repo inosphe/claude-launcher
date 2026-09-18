@@ -127,6 +127,15 @@ function build() {
     slice("ensureControlSocket"),
     slice("controlRead"),
     slice("controlSay"),
+    // The terminals now ride this socket too (daemon/channel.py), so its
+    // own machine reaches for the channel routing. Sliced in as it stands:
+    // channels_check.js is where that half is actually exercised.
+    `const CHANNEL_HEADER = ${constOf("CHANNEL_HEADER")};`,
+    "const channelLinks = new Map();",
+    "let channelSeq = 0;",
+    slice("channelBinary"),
+    slice("channelFrame"),
+    slice("channelsCarrierGone"),
     slice("daemonHealth"),
     "return { controlUp, openControlSocket, ensureControlSocket, controlRead,"
     + " controlSay, daemonHealth, waiting: () => controlWaiting.size,"
