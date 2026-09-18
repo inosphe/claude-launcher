@@ -41,6 +41,7 @@ option:disabled { color: #6b7280; }
    never the rail. */
 #sidebar {
   width: var(--rail-w, 260px); flex: none; display: flex; flex-direction: column;
+  container-type: inline-size; container-name: session-rail;
   background: #1b1e24; border-right: 1px solid #2a2e36;
 }
 
@@ -105,7 +106,7 @@ option:disabled { color: #6b7280; }
   padding: 4px 7px 2px; color: #8b949e; font-size: 11px; cursor: pointer;
 }
 .session-group-toggle input { margin: 0; accent-color: #58a6ff; }
-#session-list { list-style: none; overflow-y: auto; flex: 1; }
+#session-list { list-style: none; overflow-y: auto; overflow-x: hidden; flex: 1; }
 #session-list .session-group {
   display: block; padding: 0; border: 0; background: transparent; list-style: none;
 }
@@ -778,17 +779,31 @@ option:disabled { color: #6b7280; }
    list above is the only thing that stays, because it moves on its own and
    is meant to be watched while you work in the terminal beside it. */
 #rail-nav {
-  flex: none; display: flex; background: #1b1e24;
+  flex: none; display: grid; grid-template-columns: repeat(auto-fit, minmax(50px, 1fr));
+  background: #1b1e24;
   border-top: 1px solid #2a2e36;
 }
 #rail-nav a {
-  flex: 1; min-width: 0; padding: 9px 4px; text-align: center;
-  font-size: 11px; color: #7d8590; text-decoration: none;
+  min-width: 0; padding: 6px 2px; text-align: center;
+  font-size: 10px; color: #7d8590; text-decoration: none;
   border-top: 2px solid transparent;
 }
 #rail-nav a span { display: block; font-size: 15px; line-height: 1.3; }
 #rail-nav a:hover { color: #c6cdd5; background: #22262d; }
 #rail-nav a.active { color: #d8dbe0; border-top-color: #58a6ff; }
+
+/* The rail can be resized independently of the window. Give identity its
+   own line before the fixed-width actions consume the name's space. */
+@container session-rail (max-width: 420px) {
+  #session-list li[data-name] > .dot { order: -1; }
+  #session-list li.child::before { order: -1; }
+  #session-list li[data-name] > .rail-head {
+    order: -1; flex: 1 1 calc(100% - 13px);
+  }
+  #session-list li.child > .rail-head { flex-basis: calc(100% - 24px); }
+  #session-list .rail-name { flex-shrink: 0; max-width: 50%; }
+  #session-list .meta { margin-left: 0; margin-right: auto; }
+}
 
 /* ---- the pages that live in #main ---- */
 #home-view, #new-view, #meshes-view, #flows-view, #window-view, #beads-view {
@@ -3640,7 +3655,7 @@ body.embed #main { width: 100%; }
   /* The rail is the whole screen here, so the list takes what it needs and
      the nav sits at the thumb end rather than floating mid-screen. */
   #session-list { flex: 1 0 auto; max-height: none; overflow: visible; }
-  #rail-nav { position: sticky; bottom: 0; }
+  #rail-nav { position: sticky; bottom: 0; grid-template-columns: repeat(auto-fit, minmax(64px, 1fr)); }
   #rail-nav a { padding: 12px 4px; font-size: 12px; }
 
   /* thumb-sized rows */
