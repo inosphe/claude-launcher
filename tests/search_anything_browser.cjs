@@ -7,6 +7,7 @@ const {chromium} = require(process.env.CLAUNCH_PLAYWRIGHT || 'playwright');
 const root = path.join(__dirname, '../src/claude_launcher/web/static');
 const rail = fs.readFileSync(path.join(root, 'index.html'), 'utf8').match(/<div id="session-search-row"[\s\S]*?<\/div>/)[0];
 const writes = [];
+const now = Date.parse('2026-09-18T10:00:00Z');
 const cfg = {base_url:'http://omlx/v1', api_key_set:true, embedding_model:'embed', rerank_model:'rank', candidates:40, rerank_top:12, batch:16, timeout:120, watch_interval:30, verify_tls:true};
 const server = http.createServer(async (req,res) => {
   if (req.url === '/') { res.setHeader('Content-Type','text/html; charset=utf-8'); res.end(`<!doctype html><html><head><meta charset="utf-8"><link rel="stylesheet" href="/style.css"></head><body>
@@ -20,7 +21,8 @@ const server = http.createServer(async (req,res) => {
   if(req.url.startsWith('/api/search?')) {
     const q=new URL(req.url,'http://local').searchParams.get('q');
     if(q==='slow') await new Promise(resolve=>setTimeout(resolve,250));
-    res.end(JSON.stringify({results:[{id:'r1',title:q,kind:'checks',excerpt:'<img src=x onerror=alert(1)>',sessions:[{name:'s1'}],href:'#/observer/session/s1',source_url:'api/search/records/s1/e1'}],index:{indexed:1,total:1},warnings:['rerank unavailable']})); return;
+    const at = q === 'invalid-time' ? 'invalid' : q === 'no-time' ? '' : new Date(now - 5 * 60000).toISOString();
+    res.end(JSON.stringify({results:[{id:'r1',title:q,kind:'checks',at,excerpt:'<img src=x onerror=alert(1)>',sessions:[{name:'s1'}],href:'#/observer/session/s1',source_url:'api/search/records/s1/e1'}],index:{indexed:1,total:1},warnings:['rerank unavailable']})); return;
   }
   if(req.url==='/api/rag/settings') {res.end(JSON.stringify(cfg));return;}
   if(req.url==='/api/rag/test') {res.end(JSON.stringify({ok:true,dimensions:2560,rerank:true}));return;}
@@ -32,6 +34,7 @@ const server = http.createServer(async (req,res) => {
   try {
     const page=await browser.newPage(); const errors=[];page.on('pageerror',error=>errors.push(error.message));
     await page.goto(`http://127.0.0.1:${server.address().port}/`);
+    await page.clock.install({time: now});
     const filterBox = await page.locator('#session-search').boundingBox(), buttonBox = await page.locator('#search-anything-open').boundingBox();
     assert.equal(buttonBox.y, filterBox.y); assert.ok(buttonBox.x >= filterBox.x + filterBox.width); assert.equal(buttonBox.width, 28);
     await page.locator('#editor').focus();await page.keyboard.type('/');assert.equal(await page.locator('dialog').evaluate(n=>n.open),false);
@@ -43,14 +46,26 @@ const server = http.createServer(async (req,res) => {
     if (process.env.CLAUNCH_SCREENSHOT) await page.screenshot({path:process.env.CLAUNCH_SCREENSHOT.replace('.png','-desktop.png')});
     await page.locator('dialog input').fill('needle');await page.keyboard.press('Enter');
     await page.getByRole('link',{name:'needle',exact:true}).waitFor();assert.equal(await page.locator('dialog img').count(),0);
+    const time = page.locator('dialog time');
+    assert.match(await time.textContent(), /\(5분 전\)$/);
+    assert.ok(await time.evaluate(n => n.textContent.startsWith(new Date(n.dateTime).toLocaleString())));
+    await page.clock.fastForward(60000);
+    assert.match(await time.textContent(), /\(6분 전\)$/);
     assert.match(await page.locator('dialog [role=status]').textContent(),/Rerank 사용 불가/);
     assert.equal(await page.getByRole('link',{name:'s1',exact:true}).getAttribute('href'),'#/s/s1');
     await page.getByText('원문 보기',{exact:true}).click();await page.waitForFunction(()=>document.querySelector('dialog pre').textContent.includes('원문 기록'));
     await page.keyboard.press('Escape');assert.equal(await page.locator('dialog').evaluate(n=>n.open),false);
     assert.equal(await page.locator('#search-anything-open').evaluate(n=>n===document.activeElement),true);
     await page.locator('#search-anything-open').click();await page.locator('dialog input').fill('slow');await page.keyboard.press('Enter');
+    assert.match(await time.textContent(), /\(6분 전\)$/);
     await page.locator('dialog input').fill('newest');await page.keyboard.press('Enter');await page.getByRole('link',{name:'newest',exact:true}).waitFor();
     await page.waitForTimeout(350);assert.equal(await page.getByRole('link',{name:'slow',exact:true}).count(),0);
+    for (const query of ['invalid-time', 'no-time']) {
+      await page.locator('dialog input').fill(query); await page.keyboard.press('Enter');
+      await page.getByRole('link',{name:query,exact:true}).waitFor();
+      if (query === 'invalid-time') assert.equal(await time.textContent(), 'invalid');
+      else assert.equal(await time.count(), 0);
+    }
     await page.keyboard.press('Escape');
     await page.evaluate(()=>document.querySelector('#settings').append(SearchAnything.settingsCard()));
     await page.locator('input[name=embedding_model]').waitFor();await page.locator('input[name=embedding_model]').fill('replacement');
