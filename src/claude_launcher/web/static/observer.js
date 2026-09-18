@@ -11,7 +11,8 @@ let draftTarget = "";
 let composerFolded = true;
 let layout = "board", gridLimit = 5;
 try {
-  layout = localStorage.getItem("claunch-observer-layout") === "grid" ? "grid" : "board";
+  const savedLayout = localStorage.getItem("claunch-observer-layout");
+  if(["board","grid","timeline"].includes(savedLayout)) layout = savedLayout;
   const saved = Number(localStorage.getItem("claunch-observer-grid-limit"));
   if(Number.isInteger(saved) && saved >= 1 && saved <= 10) gridLimit = saved;
 } catch { /* Storage may be unavailable; controls still work for this visit. */ }
@@ -341,9 +342,8 @@ async function openSession(name,host) {
 }
 function render() {
   const visible=visibleSessions(), cards=$("cards"), mobile=mobileView.matches;
-  const grid=layout==="grid";
-  $("layout-board").checked=!grid;$("layout-grid").checked=grid;
-  $("board-label").textContent=mobile?"타임라인":"보드";
+  const view=mobile?"timeline":layout, grid=view==="grid", timeline=view==="timeline";
+  for(const mode of ["board","grid","timeline"]) $("layout-"+mode).checked=view===mode;
   $("limit-control").hidden=!grid;
   $("limit").value=String(gridLimit);$("limit-value").value=`${gridLimit}개`;
   syncTargets(visible);
@@ -356,13 +356,13 @@ function render() {
   $("monitor").textContent=snapshot.enabled?"관찰 끄기":"관찰 시작";
   $("mobile-monitor").textContent=$("monitor").textContent;
   $("notice").textContent=(cflowError?"cflow 상태 조회 실패 · 마지막 조회 결과 표시":snapshot.error)||(snapshot.enabled?"관찰 중 · 세션별 순차 처리 · 최소 60초 간격":"관찰이 꺼져 있습니다. 시작하면 ds4-official/deepseek-flash API로 트랜스크립트를 전송합니다.");
-  $("sort").hidden=mobile||grid;
-  $("layout-hint").textContent=grid?`세션마다 최신 항목 최대 ${gridLimit}개 · 세션 목록은 필터 그대로 · 보고·승인 요청 기준`:mobile?"최신 보고부터 표시하는 타임라인":"세션 보드 · 내용은 자동 갱신되며 세션 순서는 최신순 정렬을 누를 때 바뀝니다.";
-  cards.className=grid?"observer-grid":mobile?"observer-timeline":"observer-board";
+  $("sort").hidden=timeline||grid;
+  $("layout-hint").textContent=grid?`세션마다 최신 항목 최대 ${gridLimit}개 · 세션 목록은 필터 그대로 · 보고·승인 요청 기준`:timeline?"최신 보고부터 표시하는 타임라인":"세션 보드 · 내용은 자동 갱신되며 세션 순서는 최신순 정렬을 누를 때 바뀝니다.";
+  cards.className=grid?"observer-grid":timeline?"observer-timeline":"observer-board";
   const horizontal=cards.scrollLeft;
   const scrolls=new Map([...cards.querySelectorAll(".observer-column-body")].map(e=>[e.parentElement.dataset.session,e.scrollTop]));
   cards.replaceChildren();
-  if(mobile||grid) {
+  if(timeline||grid) {
     const entries=[];
     for(const s of visible) {
       const events=(s.events||[]).filter(e=>!$("actions-only").checked||(e.needs_action&&!e.acknowledged));
@@ -409,7 +409,7 @@ function render() {
   cards.scrollLeft=horizontal;
   controls();
 }
-for(const mode of ["board","grid"]) $("layout-"+mode).onchange=()=>{layout=mode;saveView();render();};
+for(const mode of ["board","grid","timeline"]) $("layout-"+mode).onchange=()=>{layout=mode;saveView();render();};
 $("limit").oninput=()=>{gridLimit=Number($("limit").value);saveView();render();};
 $("sort").onclick=()=>{boardOrder=[...snapshot.sessions].sort((a,b)=>latestActivity(b)-latestActivity(a)||a.name.localeCompare(b.name)).map(s=>s.name);render();};
 mobileView.addEventListener("change",()=>{if(document.body.classList.contains("observer-active"))render();});

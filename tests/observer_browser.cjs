@@ -319,6 +319,8 @@ const server = http.createServer((req, res) => {
     // size: the filtered session list is what the reader asked for, so the cut
     // falls inside each session rather than dropping whole sessions off the end.
     // The board/timeline remains available with all original controls.
+    assert.equal(await page.locator('.observer-view-controls').isVisible(),false);
+    await page.setViewportSize({width:1280,height:900});
     const gridSessions = () => page.locator('.observer-grid .observer-card')
       .evaluateAll(es=>[...new Set(es.map(e=>e.dataset.session))].sort());
     await page.locator('label:has(#observer-layout-grid)').click();
@@ -375,6 +377,29 @@ const server = http.createServer((req, res) => {
     await page.waitForSelector('.observer-timeline .observer-card');
     assert.equal(await page.locator('.observer-timeline .observer-card').count(),16);
     assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);
+    // Desktop preferences survive mobile's mandatory full timeline, including reloads.
+    await page.setViewportSize({width:1280,height:900});
+    await page.locator('label:has(#observer-layout-timeline)').click();
+    assert.equal(await page.locator('.observer-timeline .observer-card').count(),16);
+    assert.equal(await page.locator('#observer-sort').isVisible(),false);
+    assert.equal(await page.locator('#observer-limit-control').isVisible(),false);
+    await page.locator('.observer-timeline .observer-card').last().scrollIntoViewIfNeeded();
+    assert.equal(await page.locator('.observer-timeline').evaluate(e=>e.scrollTop>0),true);
+    await page.reload();
+    await page.waitForSelector('.observer-timeline .observer-card');
+    assert.equal(await page.locator('#observer-layout-timeline').isChecked(),true);
+    await page.locator('label:has(#observer-layout-grid)').click();
+    await page.setViewportSize({width:390,height:844});
+    await page.waitForSelector('.observer-timeline .observer-card');
+    assert.equal(await page.locator('.observer-timeline .observer-card').count(),16);
+    assert.equal(await page.locator('.observer-view-controls').isVisible(),false);
+    await page.reload();
+    await page.waitForSelector('.observer-timeline .observer-card');
+    assert.equal(await page.locator('.observer-timeline .observer-card').count(),16);
+    await page.setViewportSize({width:1280,height:900});
+    await page.waitForSelector('.observer-grid .observer-card');
+    assert.equal(await page.locator('#observer-layout-grid').isChecked(),true);
+    assert.equal(await page.locator('#observer-limit').inputValue(),'10');
     // Corrupt and unavailable storage must not prevent rendering.
     await page.evaluate(()=>localStorage.setItem('claunch-observer-grid-limit','999'));
     await page.reload();
@@ -401,7 +426,7 @@ const server = http.createServer((req, res) => {
     ];
     await page.selectOption('#observer-scope','session');
     await page.selectOption('#observer-selection','s1');
-    await page.locator('label:has(#observer-layout-board)').click();
+    await page.locator('label:has(#observer-layout-timeline)').click();
     await page.waitForSelector('[data-event="m-new"]');
     assert.deepEqual(await page.locator('#observer-view .event').evaluateAll(es=>es.map(e=>e.dataset.event)),['m-new','m-middle','m-old']);
     assert.match(await page.locator('[data-event="m-new"]').innerText(),/세션 이벤트 · worktree/);
