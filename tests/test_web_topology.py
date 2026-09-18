@@ -362,6 +362,7 @@ CHECKS = [
         "profilesettings_check.js",
         "beadskanban_check.js",
         "beadsgroups_check.js",
+        "beadsworkspace_check.js",
         "queues_check.js",
         "railbeads_check.js",
         "railbeadskanban_check.js",

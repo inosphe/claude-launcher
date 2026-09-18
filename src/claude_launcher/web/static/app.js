@@ -12965,6 +12965,88 @@ function beadsRelationBlock(id) {
 }
 
 /* The opened issue: what the row cannot show — description and comments. */
+/* ---- the issue's workspace, and starting a session on it ---------------
+   An issue says what to do. Where to do it was nowhere on the board, so the
+   operator picked a directory by hand at every creation and a wrong pick is
+   reported by nothing downstream — the session simply works, in the wrong
+   tree. The daemon records it as YAML front matter on the description
+   (`beads_meta`), reads it back as `workspace` on /api/beads/<id>, and takes
+   a new value on POST /api/beads/<id>/workspace. This pane is where it is
+   read and set. */
+
+/* The description as prose, with the front matter taken off the top. The
+   block is drawn as the Workspace row above rather than as three lines of
+   YAML in the middle of the spec; this strips exactly what the daemon
+   writes (an opening `---` line, a closing `---` line) and leaves anything
+   else, including a description that merely begins with a horizontal rule. */
+function beadsStripMeta(text) {
+  const body = String(text || "");
+  if (!body.startsWith("---\n")) return body;
+  const end = body.indexOf("\n---\n", 3);
+  return end === -1 ? body : body.slice(end + 5);
+}
+
+/* The Workspace row: what the issue records, and the picker that changes it.
+   The options are the daemon's registered workspaces, because that is what it
+   will accept — a name nobody registered is refused rather than stored, so
+   offering a free-text box here would only move the refusal later. */
+function beadsWorkspaceBlock() {
+  const box = el("div", "beads-detail-ws");
+  box.appendChild(el("h4", null, "Workspace"));
+  const options = beadsDetail.workspaces || [];
+  const current = beadsDetail.workspace || "";
+  if (!options.length) {
+    box.appendChild(el("p", "wf-note",
+      current
+        ? `${current} — no workspace is registered on this daemon, so it cannot be changed here`
+        : "no workspace is registered on this daemon (claunch workspace add <dir>)"));
+    return box;
+  }
+  const row = el("label", "beads-ws-row");
+  row.appendChild(el("span", null, "target"));
+  const pick = el("select", "beads-ws-pick");
+  const none = el("option", null, "— none recorded —");
+  none.value = "";
+  pick.appendChild(none);
+  for (const w of options) {
+    const opt = el("option", null, w.path ? `${w.name} — ${w.path}` : w.name);
+    opt.value = w.name;
+    pick.appendChild(opt);
+  }
+  pick.value = current;
+  const note = el("p", "wf-note beads-ws-note",
+    "where a session created from this issue is opened");
+  pick.addEventListener("change", async () => {
+    const want = pick.value;
+    pick.disabled = true;
+    note.textContent = "saving…";
+    try {
+      const resp = await api(`/api/beads/${encodeURIComponent(beadsFocus)}/workspace`, {
+        method: "POST",
+        body: JSON.stringify({ workspace: want, cwd: beadsDetail.root || "" }),
+      });
+      const data = await resp.json().catch(() => ({}));
+      if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
+      beadsDetail.workspace = data.workspace || "";
+      note.textContent = "where a session created from this issue is opened";
+      // The description carries the block, so the pane must be redrawn from
+      // the daemon rather than patched here — otherwise the Description
+      // section keeps showing the value that was just replaced.
+      beadsDetail = null;
+      renderBeads();
+    } catch (err) {
+      note.textContent = String((err && err.message) || err);
+      pick.value = beadsDetail.workspace || "";
+    } finally {
+      pick.disabled = false;
+    }
+  });
+  row.appendChild(pick);
+  box.appendChild(row);
+  box.appendChild(note);
+  return box;
+}
+
 function beadsDetailPane() {
   const pane = el("div", "beads-detail");
   const head = el("div", "beads-detail-head");
@@ -13027,9 +13109,10 @@ function beadsDetailPane() {
   // heading. Reports and Comments both announce themselves; the issue's own
   // text just began, so a reader scrolling in landed in the middle of prose
   // with nothing saying what it was. One rule draws all three now.
+  pane.appendChild(beadsWorkspaceBlock());
   if (i.description) {
     pane.appendChild(el("h4", null, "Description"));
-    pane.appendChild(el("pre", "beads-desc", i.description));
+    pane.appendChild(el("pre", "beads-desc", beadsStripMeta(i.description)));
   }
   if (i.close_reason) pane.appendChild(el("p", "wf-note", "closed: " + i.close_reason));
   // The rounds that were written up for this issue. Keyed by issue across
