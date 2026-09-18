@@ -11090,10 +11090,7 @@ function route() {
     case "mesh": openMesh(r.name); break;
     case "flow": openFlowTopology(r.name); break;
     case "meshes": showView("meshes"); refreshMeshList(); break;
-    // The form is a modal now, and the route still names the page it sleeps
-    // on: `#new-view` is where the node goes back to, so closing the box at
-    // this route leaves the page form standing (sessionModalClose then walks
-    // off `#/new`, which is what takes it down).
+    // New sessions use the page; child creation borrows its form in a modal.
     case "new": showView("new"); openNewSession(r.mesh); break;
     case "flows": showView("flows"); refreshCflow(); break;
     case "window": openWindowPage(); break;
@@ -11126,6 +11123,11 @@ let pendingNewMesh = "";
    which roles may be picked, exactly as it does when the operator picks one
    by hand, so the same refresh runs. */
 async function openNewSession(mesh) {
+  if (sessionModal) sessionModalClose({ route: false });
+  if (sessionModal) return; // A pending creation still owns the form.
+  refreshParentChoices();
+  setSessionModalTab("new");
+  applySessionModalRecall($("new-session"));
   pendingNewMesh = mesh || "";
   if (pendingNewMesh) {
     if (!(meshCache || []).some((m) => m.name === pendingNewMesh)) {
@@ -11135,11 +11137,11 @@ async function openNewSession(mesh) {
     const form = $("new-session");
     if (form.mesh.value) await refreshRoles(form.mesh.value);
   }
-  // The form is one modal with two tabs now (see openSessionModal), and the
-  // route keeps its name: `#/new` is the New session tab. The mesh the link
-  // named is handed over rather than applied here, because the picker it
-  // belongs to may not have that option until the mesh poll lands.
-  await openSessionModal({ tab: "new", mesh: pendingNewMesh });
+  await Promise.all([
+    Promise.resolve(refreshWorkspaces()).catch(() => {}),
+    Promise.resolve(refreshWorkflowChoices()).catch(() => {}),
+  ]);
+  syncOnboardPickers();
 }
 
 /* The create form's mesh and workflow pickers. Both are lists the daemon
@@ -20151,6 +20153,7 @@ function sessionConnectFields(f, body) {
    typed are in the same DOM either way, which is what "switching tabs
    keeps the input" means here. */
 function setSessionModalTab(tab) {
+  if (!sessionModal && tab === "spawn") return openSessionModal({ tab });
   const f = $("new-session");
   const want = tab === "spawn" ? "spawn" : "new";
   if (sessionModal) sessionModal.tab = want;
@@ -20253,8 +20256,9 @@ async function openSessionModal(opts = {}) {
   const actions = $("modal-actions");
   actions.innerHTML = "";
   const cancel = el("button", "wf-btn option", "Cancel");
+  cancel.type = "button";
   cancel.addEventListener("click", sessionModalClose);
-  actions.appendChild(cancel);
+  $("new-session-actions").appendChild(cancel);
   st.cancelBtn = cancel;
   overlay.onclick = (e) => { if (e.target === overlay) sessionModalClose(); };
   document.addEventListener("keydown", sessionModalKey);
@@ -20291,6 +20295,7 @@ async function openSessionModal(opts = {}) {
 function sessionModalClose(opts = {}) {
   if (!sessionModal) return;
   if (sessionModal.busy) return;
+  $("new-session-actions").removeChild(sessionModal.cancelBtn);
   sessionModal = null;
   const overlay = $("modal-overlay");
   // Before the class goes: the size is read off the box while the spawn
@@ -20309,13 +20314,10 @@ function sessionModalClose(opts = {}) {
   overlay.classList.remove("spawn-open");
   $("modal-actions").innerHTML = "";
   document.removeEventListener("keydown", sessionModalKey);
-  // `#/new` is the modal's own route, so closing it is leaving that route.
-  // Any other page was merely behind the overlay and stays where it was.
-  // `route: false` is for the caller that is already navigating somewhere
-  // better — the submit handler, which is on its way to the new session and
-  // does not want a hop through home first.
+  // Closing a child dialog over the creation page restores its New session
+  // tab. The page remains the current route, with the typed values intact.
   if (opts.route !== false && String(location.hash || "").startsWith("#/new")) {
-    go("#/");
+    setSessionModalTab("new");
   }
 }
 

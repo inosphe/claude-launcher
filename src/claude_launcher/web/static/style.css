@@ -3735,6 +3735,11 @@ body.embed #main { width: 100%; }
    column, and a 520px form in a 700px dialog leaves a stripe of empty sheet
    down one side. */
 #modal-overlay.spawn-open #new-session { max-width: none; }
+#new-session-actions { display: flex; align-items: center; gap: 8px; }
+#new-session-actions button { box-sizing: border-box; min-height: 34px; }
+#new-session-actions .option { background: #21262d; border: 1px solid #30363d; }
+#modal-overlay.spawn-open #new-session-actions { justify-content: flex-end; }
+#modal-overlay.spawn-open #modal-actions:empty { display: none; }
 
 /* The spawn wizard as a dialog: every session's fleet-growing verb. The
    confirm dialogs the overlay normally holds are 460px of prose; a form is
