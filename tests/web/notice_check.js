@@ -120,6 +120,10 @@ function build(opts) {
     "renderRelayBadge", "refreshProfiles", "refreshHarnesses", "refreshRoles",
     "refreshWorkspaces", "refreshSessions", "refreshMeshList", "refreshCflow",
     "refreshTermQueued", "reconnectNow", "route", "refreshNewWorktree",
+    // boot() opens the page's control socket once the first authenticated
+    // read has answered. Whether it does is controlsocket_check's subject;
+    // here it only has to exist.
+    "ensureControlSocket",
     code +
     "\nreturn {notify, dismissNotice, noticeClock, setDaemonOnline, boot, pollOnce," +
     " get cards() { return [...notices.keys()]; }," +
@@ -134,6 +138,7 @@ function build(opts) {
     setTimeoutStub, clearTimeoutStub, FakeDate, apiStub, daemonHealth,
     () => {}, () => {}, () => {}, () => {}, () => {}, () => {}, () => {},
     () => {}, () => {}, () => {}, () => {},
+    () => {},   // ensureControlSocket
     // The poll's refresh batch gained the worktree picker with the spawn
     // form's checkout choice; what it fetches and greys is newform_check's
     // and spawnform_check's to hold — here it only has to exist.

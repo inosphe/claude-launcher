@@ -3,21 +3,29 @@
    Clicking between sessions used to tear the terminal down and rebuild it —
    a new xterm object, a new WebSocket, and the daemon repainting its whole
    screen — on every hop. Now the visitable terminals are parked: the xterm
-   object, its element (hidden in place, never moved) and the socket
-   underneath stay up, and returning to a parked one is a swap of the live
-   globals and a re-fit, not a reconnect. The rules pinned here are the ones
-   that make that honest:
+   object and its element (hidden in place, never moved) stay up, so
+   returning to one is a swap of the live globals, a re-fit and a fresh
+   socket rather than a rebuild.
+
+   What is NOT kept is the connection. A socket is not memory: it is one of
+   the six connections a browser allows per server, and a page that keeps one
+   per visited session reaches that ceiling, at which point the next
+   handshake is queued inside the browser and never sent — a terminal stuck
+   on "reconnecting" with nothing in the daemon's records to explain it,
+   because the daemon never saw a request to refuse (claunch-riq5,
+   claunch-restart-disconnect-banner-12p2). `PARKED_SOCKET_MAX` is therefore
+   zero, and the rules pinned here are the ones that make that honest:
 
      - a fresh session opens exactly one socket;
-     - walking to a parked session opens none at all;
-     - while parked, the socket still feeds the hidden terminal's buffer but
-       says nothing to the viewer's machine — no link changes, no frames, no
-       badge;
-     - the oldest is evicted when the cache fills, and its socket and xterm
-       die with it;
-     - a socket that died while parked reconnects exactly once, on return;
+     - parking releases the socket and keeps the terminal, so the page holds
+       one socket however many sessions have been visited;
+     - returning to a parked session opens exactly one socket and gets its
+       screen back without a rebuild;
+     - the oldest is evicted when the cache fills, and its xterm dies with it;
      - a session that exited while parked comes back as exited, with no
-       reconnect offered.
+       reconnect offered;
+     - the shim that a retained socket would run keeps the parked bundle
+       current and says nothing to the viewer's machine.
 
    None of that is visible to a stylesheet or to Python, so the real
    functions are sliced out of the shipped app.js and driven here against a
@@ -203,10 +211,11 @@ function syncTerminalFocus() {}
     stubs + focusSrc + "\n" + keepAliveSrc + "\n" + openSocketSrc + "\n"
     + `
 return {
-  attach, suspendActive, dropKept,
+  attach, suspendActive, dropKept, shimFrame,
   keep: () => [...keptTerms.keys()],
   kept: (n) => keptTerms.get(n) || null,
   cap: TERM_CACHE_MAX,
+  parkedMax: PARKED_SOCKET_MAX,
   get current() { return currentName; },
   get term() { return term; },
   get ws() { return ws; },
@@ -252,28 +261,32 @@ return {
   w.api.attach("b");
   check("a second fresh session opens a second socket",
         w.sockets.length === 2, w.sockets.length);
-  check("and the first is parked with its terminal and socket alive",
+  check("and the first is parked with its terminal alive",
         w.api.keep().length === 1 && w.api.keep()[0] === "a", w.api.keep());
   const parkedA = w.api.kept("a");
   check("the parked terminal is exactly the one that was on screen",
-        parkedA.term === aTerm && parkedA.ws === aSock, !!parkedA);
-  check("its socket is still open", aSock.readyState === 1, aSock.readyState);
+        parkedA.term === aTerm, !!parkedA);
+  check("its socket was released", aSock.readyState === 3, aSock.readyState);
+  check("and the bundle no longer points at it", parkedA.ws === null, parkedA.ws);
   check("its element is hidden", aTerm.element.style.display === "none",
         aTerm.element.style.display);
-  // The socket stays up, so the daemon would go on ranking `a` as watched
-  // unless told otherwise: parking is the moment nobody is looking at it.
-  check("and the daemon is told nobody is looking at it any more",
+  // Said before the socket goes, so the daemon stops ranking `a` as watched
+  // rather than inferring it from the close.
+  check("and the daemon was told nobody is looking at it any more",
         aSock.sent.length === 1
         && aSock.sent[0] === JSON.stringify({ type: "focus", focused: false }),
         aSock.sent);
 
   const before = w.sockets.length;
   w.api.attach("a");
-  check("walking back to the parked one opens no socket",
-        w.sockets.length === before, w.sockets.length);
-  check("the parked terminal is on screen again",
-        w.api.current === "a" && w.api.term === aTerm && w.api.ws === aSock,
-        [w.api.current, w.api.term === aTerm, w.api.ws === aSock]);
+  check("walking back to the parked one opens one socket",
+        w.sockets.length === before + 1, w.sockets.length);
+  const backSock = w.sockets[w.sockets.length - 1];
+  check("...for that session",
+        /\/api\/sessions\/a\/ws(\?|$)/.test(backSock.url), backSock.url);
+  check("the parked terminal is on screen again — the same object",
+        w.api.current === "a" && w.api.term === aTerm,
+        [w.api.current, w.api.term === aTerm]);
   check("its element is shown again", aTerm.element.style.display === "",
         aTerm.element.style.display);
   check("and its retained buffer is redrawn after being shown",
@@ -284,12 +297,19 @@ return {
         w.api.keep().includes("b"), w.api.keep());
 
   const h = w.handled.length;
-  aSock.text({ type: "state", status: "idle" });
-  check("a live frame on the restored socket reaches the live handler",
+  backSock.opened();
+  backSock.text({ type: "state", status: "idle" });
+  check("a live frame on the new socket reaches the live handler",
         w.handled.length === h + 1, w.handled.length);
 }
 
-/* --- while parked, the socket feeds the buffer and nothing else --------- */
+/* --- the shim a retained socket would run --------------------------------
+   At a budget of zero nothing reaches this in the shipped page: the socket
+   is released as the terminal parks. The machinery is kept because the
+   budget is a constant that may be raised again, and it is pinned here so
+   raising it is a one-line change rather than a rewrite. So the shim is
+   driven directly, against the bundle the cache holds, instead of through a
+   park that no longer leaves a socket behind. */
 {
   const w = build();
   w.api.attach("a");
@@ -297,6 +317,12 @@ return {
   aSock.opened();
   w.api.attach("b");
   const bTerm = w.api.term;
+  // Re-arm the released socket onto the parked bundle, which is the state a
+  // budget of one would leave it in.
+  const parked = w.api.kept("a");
+  parked.ws = aSock;
+  aSock.readyState = 1;
+  aSock.onmessage = (ev) => w.api.shimFrame(parked, ev);
   const linksBefore = w.rec("link").length;
   const statusesBefore = w.rec("status").length;
   const handledBefore = w.handled.length;
@@ -362,7 +388,13 @@ return {
   check("and the session is back on screen", w.api.current === "a", w.api.current);
 }
 
-/* --- a session that exited while parked comes back exited --------------- */
+/* --- a session that exited while parked ----------------------------------
+   With no socket retained there is nothing to hear the exit while away, so
+   the parked bundle still reads as live and the return opens a socket. The
+   daemon's answer is what settles it: every socket is met with an `init`
+   frame carrying `exited`, so the terminal lands on the same state it would
+   have reached through the shim, one round trip later. What must not happen
+   is a retry loop against a session that has finished. */
 {
   const w = build();
   w.api.attach("a");
@@ -370,6 +402,33 @@ return {
   aSock.opened();
   w.api.attach("b");
   aSock.text({ type: "exit", code: 0 });       // it finished while we were away
+  check("the released socket's exit reaches nobody",
+        w.api.kept("a").exited !== true, w.api.kept("a").exited);
+  const before = w.sockets.length;
+  w.api.attach("a");
+  check("returning opens one socket", w.sockets.length === before + 1,
+        w.sockets.length);
+  const fresh = w.sockets[w.sockets.length - 1];
+  fresh.opened();
+  const seen = w.handled.length;
+  fresh.text({ type: "init", cols: 80, rows: 24, exited: true, exit_code: 0 });
+  // handleFrame is stubbed here (it is frames_check.js's subject); what this
+  // block owns is that the frame carrying `exited` reaches it at all.
+  check("and the daemon's init frame reaches the live handler",
+        w.handled.length === seen + 1
+        && w.handled[w.handled.length - 1].exited === true,
+        w.handled[w.handled.length - 1]);
+}
+
+/* --- a bundle already marked exited is not reconnected ------------------ */
+/* The flag survives on the parked bundle when the shim did see the exit (a
+   budget above zero), and restoreTerminal must not open a socket for it. */
+{
+  const w = build();
+  w.api.attach("a");
+  w.api.ws.opened();
+  w.api.attach("b");
+  w.api.kept("a").exited = true;
   const before = w.sockets.length;
   w.api.attach("a");
   check("the exited terminal comes back exited, not reconnecting",
@@ -381,44 +440,56 @@ return {
 /* --- a parked terminal keeps its screen, not its connection ------------- */
 /* The cache holds terminals so returning to one is cheap. A socket is not
    memory: it is one of the six connections this browser allows per server,
-   and the page already spends three on polling. Three parked sockets reached
-   that ceiling, and the next session's handshake was then queued inside the
+   and the page holds one more for the control socket that carries the poll.
+   A page that kept a socket per visited session climbed toward that ceiling
+   with ordinary use, and past it the next handshake was queued inside the
    browser and never sent -- a terminal stuck on "reconnecting" with nothing
    in the daemon's records, because the daemon never saw a request to refuse
-   (claunch-restart-disconnect-banner-12p2). So one parked socket is kept and
-   older ones are let go, while their terminals stay. */
+   (claunch-riq5). So no parked socket is kept, while every parked terminal
+   is. */
 {
   const w = build();
   w.api.attach("a");
   const aSock = w.api.ws;
   aSock.opened();
   w.api.attach("b");
+  check("the session just left releases its socket", aSock.readyState === 3,
+        aSock.readyState);
+  check("but its terminal is still cached", !w.terms[0].disposed);
+
   const bSock = w.api.ws;
   bSock.opened();
-  check("the session just left keeps its socket", aSock.readyState !== 3,
-        aSock.readyState);
-
   w.api.attach("c");                      // now two are parked: a, then b
-  check("the older parked session's socket is released", aSock.readyState === 3,
-        aSock.readyState);
-  check("and the newer parked one still has its", bSock.readyState !== 3,
-        bSock.readyState);
-  check("but the released terminal is still cached", !w.terms[0].disposed);
+  check("the newer parked session's socket is released too",
+        bSock.readyState === 3, bSock.readyState);
+  check("and both parked terminals are alive",
+        !w.terms[0].disposed && !w.terms[1].disposed,
+        [w.terms[0].disposed, w.terms[1].disposed]);
 
-  // Three terminals visited, and the browser is holding one socket for the
-  // one on screen and one for the newest parked -- never three.
+  // Three terminals visited, and the browser is holding exactly one socket:
+  // the one on screen. That is the number this whole file exists to pin.
   const live = w.sockets.filter((s) => s.readyState !== 3).length;
-  check("two sockets held, not one per visited terminal", live === 2, live);
+  check("one socket held, whatever has been visited", live === 1, live);
 
-  // Coming back to the released one costs a socket and a repaint, which is
-  // the path a parked socket that died already took.
+  // Coming back costs a socket and a repaint. The screen does not come back
+  // from the daemon -- it never left.
   const before = w.sockets.length;
   w.api.attach("a");
-  check("returning to it opens one socket", w.sockets.length === before + 1,
-        [before, w.sockets.length]);
+  check("returning to a parked one opens one socket",
+        w.sockets.length === before + 1, [before, w.sockets.length]);
   const fresh = w.sockets[w.sockets.length - 1];
   check("...for that session", /\/api\/sessions\/a\/ws(\?|$)/.test(fresh.url), fresh.url);
   check("and its buffer was not thrown away", !w.terms[0].disposed);
+  check("still one socket held after the hop",
+        w.sockets.filter((s) => s.readyState !== 3).length === 1,
+        w.sockets.filter((s) => s.readyState !== 3).length);
+}
+
+/* --- the budget is the thing under test, so it is read, not assumed ----- */
+{
+  const w = build();
+  check("PARKED_SOCKET_MAX is zero", w.api.parkedMax === 0, w.api.parkedMax);
+  check("the terminal cache itself is unchanged", w.api.cap === 3, w.api.cap);
 }
 
 process.on("exit", (code) => {

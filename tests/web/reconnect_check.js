@@ -114,12 +114,18 @@ function build(opts) {
   const statuses = [];
   const diagnostics = [];
   const winOn = {};
+  // What linkDown asked the daemon to write down about a socket it could not
+  // open. The control socket is stubbed as down, so nothing leaves the page;
+  // this is where the frame lands instead.
+  const reported = [];
 
   // detach() reaches for the keep-alive cache map and the attached session's
   // name; this slice is below the block that declares them, so the harness
   // provides stand-ins the sliced detach() can safely no-op against.
   const code = "let keptTerms = new Map();\nlet currentName = null;\n"
     + "let snapshotName = null;\nfunction removeSnapshot() {}\n"
+    + "function controlUp() { return false; }\n"
+    + "function controlSay(f) { reported.push(f); return false; }\n"
     + slice("/* ---- the link ----", "/* ---- text size ----")
     + slice("function wireActive(b) {", "/* Bring a parked terminal back.");
   // The link slice ends before the wheel block, so the wheel machinery lives
@@ -133,7 +139,7 @@ function build(opts) {
     "ws", "term", "fitAddon", "attachedPid", "applyingRemoteResize",
     "setStatusBadge", "refitSoon", "setTimeout", "clearTimeout", "Math", "Date",
     "updateScrollChip", "wheelTimer", "wheelAccum", "altScreen", "scrollOffset",
-    "fitView", "resyncTerminal", "terminalOnScreen", "console",
+    "fitView", "resyncTerminal", "terminalOnScreen", "console", "reported",
     code +
     "\nreturn {openSocket, closeLink, detach, reconnectNow, tryReconnect," +
     " sendInput, handleFrame, syncLinkChip, wireActive," +
@@ -175,6 +181,7 @@ function build(opts) {
     () => {},   // resyncTerminal: handleFrame's resize branch reaches for it
     () => false, // terminalOnScreen: with hasFocus below, resize frames adopt
     { warn: (message, details) => diagnostics.push({ message, ...details }) },
+    reported,
   );
 
   // What the page TYPED into a socket: keystrokes go out as bytes, and
@@ -185,6 +192,7 @@ function build(opts) {
   const controls = (s) => s.sent.filter((m) => typeof m === "string").map((m) => JSON.parse(m));
 
   return { api, nodes, sockets, health, apiCalls, term, written, statuses, diagnostics,
+           reported,
            winOn, now, pending, fire, settle, typed, controls,
            // the ordinary starting point: attached, socket open, frames flowing
            live: async (pid) => {
@@ -315,6 +323,43 @@ for (const initialized of [false, true]) {
       w.api.tries === (initialized ? 1 : 2));
     check("stable init determines next backoff",
       await w.fire() === w.api.backoff[initialized ? 0 : 1]);
+  })();
+}
+
+/* --- a socket that never opened is reported to the daemon ---------------
+   The failure the connection registry could not see. When a browser has hit
+   its per-server ceiling it holds the handshake in its own connection queue
+   and never sends it, so there is nothing on the daemon's side to open,
+   close or refuse -- its records read exactly as they do when nobody asked.
+   The page says it instead, over the control socket it already holds, and
+   `claunch connections` prints those lines (claunch-riq5).
+
+   It is said only for a socket that never reached OPEN. One that was up and
+   then died is already in the daemon's close lines, and reporting it again
+   would bury the case this exists for. */
+{
+  const w = build();
+  (async () => {
+    const s = await w.live();          // opened, and an init frame received
+    s.dropped();
+    check("a socket that was live is not reported — the daemon saw it",
+          w.reported.length === 0, w.reported);
+
+    await w.fire();
+    const never = w.sockets[w.sockets.length - 1];
+    never.dropped();                   // closed without ever opening
+    check("a socket that never opened is reported", w.reported.length === 1,
+          w.reported);
+    const r = w.reported[0];
+    check("...naming the session it was for", r.session === "s7", r.session);
+    check("...as a link_failed frame", r.type === "link_failed", r.type);
+    // 1006 is what a browser reports for a socket that never completed.
+    check("...carrying the close code the browser gave",
+          r.code === 1006, r.code);
+    check("...and how many tries had been spent",
+          typeof r.tries === "number", r.tries);
+    check("...with no open time, which is what says it never came up",
+          r.open_ms === null, r.open_ms);
   })();
 }
 

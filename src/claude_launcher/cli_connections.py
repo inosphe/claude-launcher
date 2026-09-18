@@ -84,6 +84,27 @@ def _print(snapshot: dict, closed_limit: int) -> None:
                 f"    {row.get('at')} {kind} {row.get('path')} "
                 f"from {_fmt_peer(row)} sent={credential} -- {row.get('reason')}"
             )
+    failures = (snapshot.get("link_failures") or [])[:closed_limit]
+    if failures:
+        # The half no record above can hold: the client could not open a
+        # socket at all. A browser that has hit its per-server ceiling keeps
+        # the handshake in its own connection queue, so nothing arrives here
+        # to open, close or refuse, and the daemon's view of that failure is
+        # indistinguishable from nobody having asked. These lines are the
+        # page's own account, sent over the connection it does hold.
+        print(
+            f"  {snapshot.get('link_failures_count', len(failures))} link "
+            f"failure(s) reported by clients, last {len(failures)}:"
+        )
+        for row in failures:
+            tries = row.get("tries")
+            spent = f" after {tries} tr{'y' if tries == 1 else 'ies'}" if tries else ""
+            reason = row.get("reason")
+            why = f" {reason}" if reason else ""
+            print(
+                f"    {row.get('at')} {row.get('agent')} could not open "
+                f"{row.get('session')} code={row.get('code')}{why}{spent}"
+            )
     closed = (snapshot.get("closed") or [])[:closed_limit]
     if closed:
         print(f"  last {len(closed)} closed:")

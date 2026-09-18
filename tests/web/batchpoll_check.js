@@ -17,7 +17,14 @@
    The rest are the ways this could quietly cost a reader something it had
    before: a write must never be folded in, one read must not pay for a batch
    it does not need, a failed path must not take the others down, and a
-   daemon too old to know the route must still be usable. */
+   daemon too old to know the route must still be usable.
+
+   Since claunch-riq5 the page prefers a control WebSocket for these reads
+   and falls back to `POST /api/batch` when it is not up. This file drives
+   the fallback: `controlRead` is stubbed as permanently down, so every check
+   below is the shape the page takes against an old daemon, a refused
+   upgrade, or a socket that has just died. The socket path itself is
+   controlsocket_check.js. */
 const assert = require("assert");
 const fs = require("fs");
 const path = require("path");
@@ -63,6 +70,10 @@ function build(handler) {
     slice("batchable"),
     slice("batchQueue"),
     slice("batchFlush"),
+    // The control socket is down for every check in this file, which is what
+    // makes them the HTTP fallback's tests: the reads below are the ones the
+    // page issues when the socket it prefers is not available.
+    "const controlRead = () => Promise.reject(new Error('control socket down'));",
     "const BATCH_MAX = 24;",
     "const BATCH_WINDOW_MS = 0;",   // the harness drives the flush by hand
     "const HTTP_BUDGET = 4;",

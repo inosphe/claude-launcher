@@ -22,7 +22,7 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
 
-from aiohttp import web
+from aiohttp import WSMsgType, web
 
 from .. import __version__, borrowing, harness_policy, harnesses as harness_registry
 from .. import (
@@ -395,6 +395,7 @@ def build_app(
     # Open sockets as state (daemon/connections.py), for `claunch connections`
     # and for anyone diagnosing a terminal that will not come up.
     r.add_post("/api/batch", h_batch)
+    r.add_get("/api/control/ws", h_control_ws)
     r.add_get("/api/connections", h_connections)
     r.add_post("/api/connections/close", h_connections_close)
     # The measurement window (daemon/window.py): the machine's test-run
@@ -841,6 +842,114 @@ async def _batch_one(template: web.Request, path: str):
     if payload is None:
         return None
     return json.loads(bytes(payload).decode("utf-8"))
+
+
+#: How long a control socket waits between heartbeats. Same value the
+#: terminal sockets use, and for the same reason -- see ws.HEARTBEAT.
+CONTROL_HEARTBEAT = 60
+
+
+async def h_control_ws(request: web.Request) -> web.WebSocketResponse:
+    """The page's reads, on a connection it already holds.
+
+    ``/api/batch`` put the dashboard's tick on one connection instead of
+    nine, which was not enough. A browser keeps a connection in its pool
+    after the answer arrives, so the page still held one for the poll, one
+    for the liveness probe and one for each terminal socket -- five against
+    Firefox's ceiling of six. One more tab, and a terminal's upgrade sat in
+    the connection queue until an idle pooled connection timed out, roughly
+    two minutes later (claunch-riq5).
+
+    A socket does not have that shape. It is one connection for as long as
+    the page is open, every read of every tick rides it, and the count stops
+    depending on what the person clicks. The reads themselves are unchanged:
+    each frame names paths, and :func:`_batch_one` answers them through the
+    same router that serves them over HTTP, so there is no second copy of
+    any payload to drift.
+
+    Frames, client to server:
+
+    - ``{"type":"read","id":N,"paths":[...]}`` -> ``{"type":"read_result",
+      "id":N,"answers":{...},"errors":{...}}``. ``id`` is the client's, echoed
+      back, because several reads may be in flight on one socket.
+    - ``{"type":"link_failed", ...}`` -> recorded, not answered. What the page
+      reports when it could not open a terminal socket at all; see
+      :meth:`connections.Registry.link_failed`.
+    - ``{"type":"ping"}`` -> ``{"type":"pong"}``.
+
+    The socket being open is itself the liveness answer, which is what
+    retires the probe the page used to spend a connection on.
+    """
+    # Auth already happened: /api/ prefix, so the shared middleware validated
+    # a Bearer header or the session cookie.
+    template = request.clone(method="GET")
+    ws = web.WebSocketResponse(heartbeat=CONTROL_HEARTBEAT)
+    await ws.prepare(request)
+    request.app["websockets"].add(ws)
+    conns = connections.install(request.app)
+    record = conns.opened("control", "(control)", request, ws=ws)
+    try:
+        await ws.send_str(json.dumps({"type": "init"}))
+        async for msg in ws:
+            if msg.type != WSMsgType.TEXT:
+                if msg.type in (WSMsgType.CLOSE, WSMsgType.ERROR):
+                    break
+                continue
+            try:
+                frame = json.loads(msg.data)
+            except (ValueError, TypeError):
+                continue
+            if not isinstance(frame, dict):
+                continue
+            kind = frame.get("type")
+            if kind == "ping":
+                await ws.send_str(json.dumps({"type": "pong"}))
+            elif kind == "link_failed":
+                conns.link_failed(request, frame)
+            elif kind == "read":
+                answers, errors = await _control_read(template, frame.get("paths"))
+                await ws.send_str(json.dumps({
+                    "type": "read_result",
+                    "id": frame.get("id"),
+                    "answers": answers,
+                    "errors": errors,
+                }))
+    except ConnectionResetError:
+        pass
+    finally:
+        request.app["websockets"].discard(ws)
+        if not ws.closed:
+            await ws.close()
+        conns.closed(record, ws.close_code, ws.exception())
+    return ws
+
+
+async def _control_read(template: web.Request, paths) -> tuple[dict, dict]:
+    """The read half of :func:`h_control_ws`, with the same rules as a batch.
+
+    Kept beside the socket rather than shared with :func:`h_batch` at the
+    top: what the two have in common is :func:`_batch_one`, and that is
+    already the part where a payload could drift. The validation above it is
+    six lines that read better twice than they would behind a third name.
+    """
+    answers: dict = {}
+    errors: dict = {}
+    if not isinstance(paths, list) or not paths:
+        return answers, {"": "paths must be a non-empty list"}
+    if len(paths) > BATCH_MAX:
+        return answers, {"": f"at most {BATCH_MAX} paths per read"}
+    for raw in paths:
+        if not isinstance(raw, str) or not raw.startswith("/api/"):
+            errors[str(raw)] = "only this daemon's /api/ paths"
+            continue
+        try:
+            answers[raw] = await _batch_one(template, raw)
+        except web.HTTPException as exc:
+            errors[raw] = f"{exc.status} {exc.reason}"
+        except Exception as exc:  # noqa: BLE001 -- one bad read, eight good
+            log.debug("control read %s failed", raw, exc_info=True)
+            errors[raw] = repr(exc)
+    return answers, errors
 
 
 async def h_connections(request: web.Request) -> web.Response:
