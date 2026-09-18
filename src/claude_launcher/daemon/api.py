@@ -392,6 +392,7 @@ def build_app(
     r.add_get("/api/health", h_health)
     # Open sockets as state (daemon/connections.py), for `claunch connections`
     # and for anyone diagnosing a terminal that will not come up.
+    r.add_post("/api/batch", h_batch)
     r.add_get("/api/connections", h_connections)
     r.add_post("/api/connections/close", h_connections_close)
     # The measurement window (daemon/window.py): the machine's test-run
@@ -755,6 +756,89 @@ async def h_auth_session(request: web.Request) -> web.Response:
         COOKIE_NAME, session_id, httponly=True, samesite="Strict", path="/"
     )
     return resp
+
+
+#: How many reads one batch may carry. The dashboard's own tick asks for
+#: nine; the cap is above that with room for a view's extra reads, and low
+#: enough that one request cannot be made to walk the whole API.
+BATCH_MAX = 24
+
+
+async def h_batch(request: web.Request) -> web.Response:
+    """Answer several reads on one connection.
+
+    A browser holds a small number of connections to one server -- Firefox's
+    default is six -- and every one of them is spent for as long as a request
+    is in flight. The dashboard polls nine paths at once every few seconds,
+    which took all six, and a WebSocket needs a connection of its own: the
+    handshake was queued behind the polls and never sent, so the terminal
+    never came up and the daemon never saw a request to refuse
+    (claunch-restart-disconnect-banner-12p2; measured as `firefox 6` in
+    /api/connections while one socket was open).
+
+    The paths come from the caller, one list per request, so a client keeps
+    whatever cadence each read deserves: it asks for the ones that are due
+    and leaves out the rest. Nothing here decides how often anything is
+    read.
+
+    Only this daemon's own GET routes are reachable, each answer is put
+    under the path that asked for it, and a read that fails is reported in
+    ``errors`` rather than failing the others -- a batch is a convenience of
+    transport, so one bad path must not cost a reader the other eight.
+    """
+    # Taken before the body is read: aiohttp refuses to clone a request whose
+    # content has been consumed, and every read below is a clone of this one
+    # (same app, same credential, same peer).
+    template = request.clone(method="GET")
+    body = await _json_body(request)
+    paths = body.get("paths")
+    if not isinstance(paths, list) or not paths:
+        return json_error(400, "paths must be a non-empty list")
+    if len(paths) > BATCH_MAX:
+        return json_error(400, f"at most {BATCH_MAX} paths per batch")
+    answers: dict = {}
+    errors: dict = {}
+    for raw in paths:
+        if not isinstance(raw, str) or not raw.startswith("/api/"):
+            errors[str(raw)] = "only this daemon's /api/ paths"
+            continue
+        if raw.split("?", 1)[0] == "/api/batch":
+            errors[raw] = "a batch cannot carry a batch"
+            continue
+        try:
+            answers[raw] = await _batch_one(template, raw)
+        except web.HTTPException as exc:
+            errors[raw] = f"{exc.status} {exc.reason}"
+        except Exception as exc:  # noqa: BLE001 -- one bad read, eight good
+            log.debug("batch read %s failed", raw, exc_info=True)
+            errors[raw] = repr(exc)
+    return json_response({"answers": answers, "errors": errors})
+
+
+async def _batch_one(template: web.Request, path: str):
+    """Run one of this app's own GET routes and hand back its JSON.
+
+    The route is resolved through the same router that serves it normally,
+    so a batched read and a direct one are the same code answering: there is
+    no second copy of any payload to drift.
+    """
+    sub = template.clone(rel_url=path)
+    match = await template.app.router.resolve(sub)
+    handler = getattr(match, "handler", None)
+    if handler is None or getattr(match, "http_exception", None) is not None:
+        raise web.HTTPNotFound(reason=f"no route for {path}")
+    # What aiohttp's own request handler does before calling a route: hand
+    # the match to the request (it is where path parameters live) and name
+    # the app the route belongs to (``request.app`` reads it from there).
+    sub._match_info = match  # noqa: SLF001
+    match.add_app(template.app)
+    response = await handler(sub)
+    if getattr(response, "status", 200) >= 400:
+        raise web.HTTPException(reason=f"{response.status}")
+    payload = getattr(response, "body", None)
+    if payload is None:
+        return None
+    return json.loads(bytes(payload).decode("utf-8"))
 
 
 async def h_connections(request: web.Request) -> web.Response:
