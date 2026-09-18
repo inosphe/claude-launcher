@@ -392,6 +392,10 @@ check("the issue text is sent only under the answer that mints",
   const bctx = {};
   new Function("exports", "$", "Option", "issuesCache", "issuesError",
     "issuesRead", "issueFilter",
+    // The seeded-issue hold the renderer applies its preset from.
+    // Nothing here seeds one, so it starts empty — the state every
+    // ordinary fill runs in.
+    "let pendingSeedIssue = '';\n" +
     sliceFrom("function issueSearchMatches(") + "\n" +
     sliceFrom("function beadsMode()") + "\n" +
     sliceFrom("function syncBeadsRow()") + "\n" +

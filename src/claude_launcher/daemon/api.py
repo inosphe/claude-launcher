@@ -37,6 +37,7 @@ from .. import (
     usage,
 )
 from .. import session_commits
+from .. import beads_meta
 from .. import ghcli, prflow, spawn as spawn_mod, store, workspaces
 from .. import plugins, settings
 from .. import worktree as worktree_mod
@@ -568,6 +569,7 @@ def build_app(
     r.add_get("/api/beads/stream", h_beads_stream)
     r.add_get("/api/beads/{id}", h_beads_issue)
     r.add_post("/api/beads/{id}/assign", h_beads_assign)
+    r.add_post("/api/beads/{id}/workspace", h_beads_workspace)
     # Semantic search (daemon/rag.py): the board or the fleet ranked for a
     # query, an issue's nearest neighbours, and the index's own state.
     r.add_get("/api/beads/{id}/related", h_beads_related)
@@ -6305,7 +6307,47 @@ async def h_beads_issue(request: web.Request) -> web.Response:
         "issue": issue,
         "sessions": linked,
         "reports": reports_mod.for_issue(issue_id),
+        # Derived here rather than re-parsed in the page: the front matter's
+        # spelling is the daemon's (beads_meta), and a second reader of it in
+        # JavaScript is a second place for it to drift.
+        "workspace": beads_meta.workspace_of(issue),
+        # What the workspace picker may offer. The issue may only name one of
+        # these, so the form that writes it and the daemon that refuses an
+        # unregistered name are reading the same list.
+        "workspaces": [
+            {"name": w.name, "path": w.path} for w in workspaces.list_all()
+        ],
     })
+
+
+async def h_beads_workspace(request: web.Request) -> web.Response:
+    """Record which workspace an issue's session should be created in.
+
+    Body: ``workspace`` (a registered workspace NAME, or ``null``/``""`` to
+    clear it) and ``cwd`` (which board; the daemon's by default). The value is
+    written as YAML front matter on the issue's description
+    (:meth:`daemon.beads.Board.set_workspace`), which is what lets the Beads
+    page open a creation modal already pointed at the right directory instead
+    of asking the operator to pick it again.
+
+    404 for an issue the board does not have, 400 for a name nobody registered.
+    """
+    board = request.app["beads"]
+    body = await _json_body(request)
+    cwd = str(body.get("cwd") or request.query.get("cwd") or os.getcwd())
+    root = await board.root_for(cwd)
+    if not board.has_board(root):
+        return json_error(404, f"no board for {cwd}")
+    name = body.get("workspace")
+    if name is not None and not isinstance(name, str):
+        return json_error(400, "'workspace' must be a workspace name or null")
+    try:
+        written = await board.set_workspace(root, request.match_info["id"], name)
+    except BeadsError as exc:
+        text = str(exc)
+        status = 404 if "no issue" in text else 400 if "no workspace" in text else 500
+        return json_error(status, text)
+    return json_response({"root": str(root), **written})
 
 
 def _int_query(request: web.Request, key: str, default: int, lo: int, hi: int) -> Optional[int]:

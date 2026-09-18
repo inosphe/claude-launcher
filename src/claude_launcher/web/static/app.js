@@ -3555,7 +3555,11 @@ function hideBeadPop() {
    "## 목표" body, mostly -- cut at six lines or 400 characters, with an
    ellipsis line when there was more. */
 function beadPopExcerpt(text) {
-  const lines = String(text || "").split("\n").map((l) => l.trimEnd())
+  // The front matter comes off first. It is three lines at the very top of
+  // the description (`beads_meta`), and the excerpt keeps six — so an issue
+  // recording a workspace would have spent half of its preview on YAML and
+  // pushed the goal out of the popover entirely.
+  const lines = beadsStripMeta(text).split("\n").map((l) => l.trimEnd())
     .filter((l) => l.trim() && !/^#{1,6}\s/.test(l));
   const out = [];
   let n = 0;
@@ -6297,18 +6301,17 @@ function spawnChildFields(f, body) {
 document
   .querySelector("#new-session select[name=parent]")
   .addEventListener("change", () => {
-    newWorktreeFor = null;
-    refreshNewWorktree();
-    syncSpawnMode();
-    refreshSpawnPolicy();
-    // A child is created on the board of ITS directory, which the parent
-    // decides — so the memo is dropped here as well as on the Directory row.
-    issuesFor = null;
-    issuesRead = false;
-    // ...and the search with it: the board the filter was written against
-    // is not the board a new parent stands in.
-    issueFilter = "";
-    if (beadsMode() === "existing") refreshIssueChoices();
+    // Picking a parent by hand is the same event as the tab naming one, so
+    // both run applySessionParentChange and the two cannot drift. It also
+    // re-reads which tab the form is now on: pointing the picker at
+    // "(none)" is the New session tab, whatever the strip last said.
+    if (sessionModal) {
+      sessionModal.parent = $("new-session").parent.value || "";
+      sessionModal.tab = sessionModal.parent ? "spawn" : "new";
+      syncSessionModalTabStrip();
+    }
+    applySessionParentChange();
+    syncSessionModalChrome();
   });
 
 document
@@ -6403,9 +6406,20 @@ $("new-session").addEventListener("submit", async (e) => {
   // standing on a greyed row is not an answer anybody gave, and sending it
   // provokes a 403 naming a field nobody in this form could still choose.
   if (parent) spawnChildFields(f, body);
+  if (parent) sessionConnectFields(f, body);
   if (parent && f.fork_parent.checked) body.fork = true;
   const worktreeMode = newWorktreeMode();
-  if (worktreeMode === "new") body.worktree = f.worktree_name.value.trim();
+  if (worktreeMode === "new") {
+    const typed = f.worktree_name.value.trim();
+    // A blank name means "cut one and name it yourself", and the two
+    // endpoints spell that differently. The create one reads an empty
+    // string that way (api.py: "An empty name means the standard generated
+    // name"); the spawn one needs `true`, because the generated name is
+    // `<parent>-<child>-<stamp>` and the child has no name until the daemon
+    // stages it (spawn.AUTO_WORKTREE). An empty string sent to a child is
+    // refused outright — `validate_name` calls it an empty worktree name.
+    body.worktree = typed || (parent ? true : "");
+  }
   else if (worktreeMode === "existing" && f.worktree_existing.value)
     body.worktree = f.worktree_existing.value;
   if (worktreeMode !== "" && f.worktree_rebase.value.trim())
@@ -6423,6 +6437,13 @@ $("new-session").addEventListener("submit", async (e) => {
   if (f.workflow.value) {
     body.workflow = f.workflow.value;
     if (f.context.value.trim()) body.context = f.context.value.trim();
+  } else if (parent && newSpawnReportFor === parent.name &&
+             (newSpawnReport || {}).child_cflow) {
+    // "" is not silence on a child: the daemon reads an absent workflow as
+    // "give it the pair my run declares", so a row the operator cleared has
+    // to say no out loud — otherwise the form hands back the very run it was
+    // used to take away. Only worth saying when there is a pair to refuse.
+    body.workflow = "-";
   }
   if (f.task.value.trim()) body.task = f.task.value.trim();
   // The board answer. "new" is the absence of both keys — a request that says
@@ -6479,11 +6500,27 @@ $("new-session").addEventListener("submit", async (e) => {
     f.task.value = "";
     f.context.value = "";
     syncForkAvailability();
+    // What the next opening starts from — the CLI wizard's recall_fields,
+    // and only the rows that actually travelled.
+    saveSpawnRecall({
+      parent: parent ? parent.name : "",
+      profile: body.profile, borrow: body.borrow,
+      null_token: !!body.null_token, role: body.role,
+    });
     const info = await resp.json();
     // The spawn endpoint wraps the child (it also reports the parent and what
     // the onboarding did); the create one answers with the session itself.
     const made = info.session || info;
+    // The form is in the modal when it was opened as one, and the page it was
+    // opened over is not where the operator is going: the new session is.
+    if (sessionModal) sessionModalClose({ route: false });
+    // The rail is refreshed FIRST and awaited: the terminal route repoints
+    // the detail panel and paints the header from `sessionsCache`, and a
+    // route entered before the child is in that cache paints an empty one.
     await refreshSessions();
+    // The leader's own children list is on screen behind the box when the
+    // spawn was started from there.
+    if (parent && sessName === parent.name) refreshSessKids();
     location.hash = "#/s/" + encodeURIComponent(made.name);
   } catch (e) {
     err.textContent = `Could not reach the daemon: ${e.message || e}`;
@@ -10796,6 +10833,10 @@ function route() {
     case "mesh": openMesh(r.name); break;
     case "flow": openFlowTopology(r.name); break;
     case "meshes": showView("meshes"); refreshMeshList(); break;
+    // The form is a modal now, and the route still names the page it sleeps
+    // on: `#new-view` is where the node goes back to, so closing the box at
+    // this route leaves the page form standing (sessionModalClose then walks
+    // off `#/new`, which is what takes it down).
     case "new": showView("new"); openNewSession(r.mesh); break;
     case "flows": showView("flows"); refreshCflow(); break;
     case "window": openWindowPage(); break;
@@ -10837,8 +10878,11 @@ async function openNewSession(mesh) {
     const form = $("new-session");
     if (form.mesh.value) await refreshRoles(form.mesh.value);
   }
-  syncOnboardPickers();
-  refreshWorkflowChoices();
+  // The form is one modal with two tabs now (see openSessionModal), and the
+  // route keeps its name: `#/new` is the New session tab. The mesh the link
+  // named is handed over rather than applied here, because the picker it
+  // belongs to may not have that option until the mesh poll lands.
+  await openSessionModal({ tab: "new", mesh: pendingNewMesh });
 }
 
 /* The create form's mesh and workflow pickers. Both are lists the daemon
@@ -10849,9 +10893,18 @@ function syncOnboardPickers() {
   const form = $("new-session");
   const mesh = form.mesh;
   const keptMesh = mesh.value;
+  const child = !!spawnParent();
   mesh.innerHTML = "";
-  mesh.appendChild(new Option("(none)", ""));
+  // The empty answer is two different facts, said in words rather than left
+  // for the operator to guess: no mesh at all for a session of its own, the
+  // parent's room for a child.
+  mesh.appendChild(new Option(child ? "(inherit the parent's mesh)" : "(none)", ""));
   for (const m of meshCache) mesh.appendChild(new Option(m.name, m.name));
+  // Only a child has an inheritance to REFUSE. "-" is the API's own spelling
+  // for "none at all"; on a session of its own the empty answer already
+  // means that, and a second row saying it would be two spellings of one
+  // answer.
+  if (child) mesh.appendChild(new Option("(none) — no mesh", "-"));
   mesh.value = [...mesh.options].some((o) => o.value === keptMesh) ? keptMesh : "";
   // A #/new/<mesh> link's answer, applied on the first fill that actually
   // carries that mesh. Assigning a value a select has no option for is
@@ -10862,7 +10915,15 @@ function syncOnboardPickers() {
     mesh.value = pendingNewMesh;
     pendingNewMesh = "";
   }
-  $("new-handle-row").classList.toggle("hidden", !mesh.value);
+  // A child that refuses the mesh has no handle to pick and no peers to be
+  // wired to, so both rows fold with the answer rather than standing there
+  // collecting values nothing will send.
+  const noMesh = !mesh.value || mesh.value === "-";
+  $("new-handle-row").classList.toggle("hidden", noMesh);
+  if ($("new-connect-row")) {
+    $("new-connect-row").classList.toggle(
+      "hidden", noMesh || !sessionConnectHandles.length);
+  }
   // Before a mesh is picked the packaged vocabulary is a useful preview.
   // Submission still requires a mesh for a non-empty role; once one is
   // selected refreshRoles replaces these options with that mesh's authority.
@@ -11037,6 +11098,12 @@ function issueSearchMatches(q, issue) {
 /* What the search box is asking right now. Not part of the request: it
    only narrows what the picker offers. */
 let issueFilter = "";
+/* An issue a SEED arrived with (a board item creating a session about
+   itself). Held rather than assigned, on the same contract as
+   `pendingNewMesh`: the picker is filled from a fetch, and a value assigned
+   to a select that has no option for it is silently dropped. Cleared once it
+   has been applied. */
+let pendingSeedIssue = "";
 /* The daemon's answer to the same box asked by meaning (Enter): the query
    it was for, the candidate ids in rank order, and their scores. Dropped
    the moment the box's text changes, so a stale ranking never reorders a
@@ -11121,6 +11188,20 @@ function renderIssueOptions() {
     );
   }
   sel.value = [...sel.options].some((o) => o.value === kept) ? kept : "";
+  // A seeded id, applied on the first fill that could carry it. An id the
+  // candidate list does NOT hold is still offered — the board answers about
+  // open issues on this directory, and a caller naming a closed one or one
+  // from elsewhere gets the daemon's own verdict rather than a picker that
+  // quietly reads "(pick an issue)". The row says which case it is.
+  if (pendingSeedIssue) {
+    if (![...sel.options].some((o) => o.value === pendingSeedIssue)) {
+      sel.appendChild(new Option(
+        `${pendingSeedIssue} — not among this board's open candidates`,
+        pendingSeedIssue));
+    }
+    sel.value = pendingSeedIssue;
+    pendingSeedIssue = "";
+  }
   syncBeadsRow();
 }
 
@@ -11164,30 +11245,49 @@ if (sessionSearchBox) {
 }
 
 $("new-session").mesh.addEventListener("change", async () => {
+  // The peers on offer are the picked mesh's, not the parent's: moving the
+  // child to another room changes who it could be wired to.
+  refreshSessionConnect();
   const form = $("new-session");
   await refreshRoles(form.mesh.value);
   syncOnboardPickers();
 });
+/* The two tabs. Wired once, from the shipped markup: the strip travels with
+   the form into the modal and back, so the buttons are the same nodes
+   whichever home the form is in. */
+for (const [id, tab] of [["new-tab-new", "new"], ["new-tab-spawn", "spawn"]]) {
+  const btn = $(id);
+  if (btn) btn.addEventListener("click", () => setSessionModalTab(tab));
+}
+
 $("new-session").workflow.addEventListener("change", () => {
   // From here on this row is the operator's, not the role's.
   newWfPicked = true;
   syncOnboardPickers();
 });
+/* Everything that follows the Directory row: the worktree list, the
+   workflows declared where the session will stand, and the board it will be
+   created on. Its own function because the row is not the only thing that
+   sets it — a seed can arrive with the directory already decided (the board
+   item that knows which workspace its issue is about), and two copies of
+   this list would drift. */
+function applySessionCwdChange() {
+  newWorktreeFor = null;
+  refreshNewWorktree();
+  refreshWorkflowChoices();
+  // The board moves with the directory too — but only while it is being
+  // looked at; the memo below makes the next open re-read it regardless.
+  issuesFor = null;
+  issuesRead = false;
+  // A different directory is a different board: a search that meant
+  // something on the old one means nothing here.
+  issueFilter = "";
+  if (beadsMode() === "existing") refreshIssueChoices();
+}
+
 document
   .querySelector("#new-session select[name=cwd]")
-  .addEventListener("change", () => {
-    newWorktreeFor = null;
-    refreshNewWorktree();
-    refreshWorkflowChoices();
-    // The board moves with the directory too — but only while it is being
-    // looked at; the memo below makes the next open re-read it regardless.
-    issuesFor = null;
-    issuesRead = false;
-    // A different directory is a different board: a search that meant
-    // something on the old one means nothing here.
-    issueFilter = "";
-    if (beadsMode() === "existing") refreshIssueChoices();
-  });
+  .addEventListener("change", applySessionCwdChange);
 
 for (const radio of document.querySelectorAll('#new-worktree input[name="worktree_mode"]')) {
   radio.addEventListener("change", syncNewWorktree);
@@ -12823,6 +12923,56 @@ function beadsLanes(filter) {
   return BEADS_STATUSES.includes(filter) ? [filter] : BEADS_STATUSES;
 }
 
+/* The two halves of a board, and the reason the lanes are grouped at all.
+
+   A board read at a glance answers one question first: what has nobody taken
+   up yet. That is `open` — an issue exists and no assignee has moved it — and
+   every other status means somebody is already carrying it or has finished.
+   Drawn as six equal lanes those two readings looked alike, so the operator
+   counted lanes to find the pile that needed handing out.
+
+   `backlog` is `open` alone. `TODO` is in_ready onwards, closed included: the
+   work that is spoken for. A group with no visible lane is not drawn, so a
+   filter narrowed to one status still draws one lane under the group it
+   belongs to rather than an empty header beside it. */
+const BEADS_BACKLOG = new Set(["open"]);
+
+const BEADS_GROUPS = [
+  { key: "backlog", title: "backlog", note: "nobody has taken these up" },
+  { key: "todo", title: "TODO", note: "taken up, in review, or finished" },
+];
+
+function beadsGroupOf(status) {
+  return BEADS_BACKLOG.has(status) ? "backlog" : "todo";
+}
+
+/* The visible lanes, split into the groups above and paired with the rows
+   each lane draws. Groups with no lane are dropped here rather than rendered
+   empty, so the caller lays out what it is given. */
+function beadsLaneGroups(lanes, rowsFor) {
+  return BEADS_GROUPS
+    .map((group) => ({
+      ...group,
+      lanes: lanes.filter((status) => beadsGroupOf(status) === group.key)
+        .map((status) => ({ status, rows: rowsFor(status) })),
+    }))
+    .filter((group) => group.lanes.length);
+}
+
+function beadsGroupBlock(group) {
+  const box = el("div", `beads-group ${group.key}`);
+  const head = el("div", "beads-group-head");
+  head.appendChild(el("h4", "beads-group-name", group.title));
+  const count = group.lanes.reduce((n, lane) => n + lane.rows.length, 0);
+  head.appendChild(el("span", "beads-group-count", String(count)));
+  head.appendChild(el("span", "wf-note beads-group-note", group.note));
+  box.appendChild(head);
+  const grid = el("div", "beads-lanes");
+  for (const lane of group.lanes) grid.appendChild(beadsLane(lane.status, lane.rows));
+  box.appendChild(grid);
+  return box;
+}
+
 function beadsLane(status, rows) {
   const lane = el("div", `beads-lane ${status}`);
   const head = el("div", "beads-lane-head");
@@ -12870,13 +13020,10 @@ function beadsBoardSection(board) {
     sec.appendChild(list);
     return sec;
   }
-  const lanes = beadsLanes(beadsFilter);
-  const grid = el("div", "beads-lanes");
-  for (const status of lanes) {
-    grid.appendChild(beadsLane(
-      status, beadsLaneRows(shown.filter((i) => i.status === status), tree)));
-  }
-  sec.appendChild(grid);
+  const groups = beadsLaneGroups(
+    beadsLanes(beadsFilter),
+    (status) => beadsLaneRows(shown.filter((i) => i.status === status), tree));
+  for (const group of groups) sec.appendChild(beadsGroupBlock(group));
   return sec;
 }
 
@@ -12918,6 +13065,137 @@ function beadsRelationBlock(id) {
 }
 
 /* The opened issue: what the row cannot show — description and comments. */
+/* ---- the issue's workspace, and starting a session on it ---------------
+   An issue says what to do. Where to do it was nowhere on the board, so the
+   operator picked a directory by hand at every creation and a wrong pick is
+   reported by nothing downstream — the session simply works, in the wrong
+   tree. The daemon records it as YAML front matter on the description
+   (`beads_meta`), reads it back as `workspace` on /api/beads/<id>, and takes
+   a new value on POST /api/beads/<id>/workspace. This pane is where it is
+   read and set. */
+
+/* The description as prose, with the front matter taken off the top. The
+   block is drawn as the Workspace row above rather than as three lines of
+   YAML in the middle of the spec; this strips exactly what the daemon
+   writes (an opening `---` line, a closing `---` line) and leaves anything
+   else, including a description that merely begins with a horizontal rule. */
+function beadsStripMeta(text) {
+  const body = String(text || "");
+  if (!body.startsWith("---\n")) return body;
+  const end = body.indexOf("\n---\n", 3);
+  return end === -1 ? body : body.slice(end + 5);
+}
+
+/* The Workspace row: what the issue records, and the picker that changes it.
+   The options are the daemon's registered workspaces, because that is what it
+   will accept — a name nobody registered is refused rather than stored, so
+   offering a free-text box here would only move the refusal later. */
+function beadsWorkspaceBlock() {
+  const box = el("div", "beads-detail-ws");
+  box.appendChild(el("h4", null, "Workspace"));
+  const options = beadsDetail.workspaces || [];
+  const current = beadsDetail.workspace || "";
+  if (!options.length) {
+    box.appendChild(el("p", "wf-note",
+      current
+        ? `${current} — no workspace is registered on this daemon, so it cannot be changed here`
+        : "no workspace is registered on this daemon (claunch workspace add <dir>)"));
+    return box;
+  }
+  const row = el("label", "beads-ws-row");
+  row.appendChild(el("span", null, "target"));
+  const pick = el("select", "beads-ws-pick");
+  const none = el("option", null, "— none recorded —");
+  none.value = "";
+  pick.appendChild(none);
+  for (const w of options) {
+    const opt = el("option", null, w.path ? `${w.name} — ${w.path}` : w.name);
+    opt.value = w.name;
+    pick.appendChild(opt);
+  }
+  pick.value = current;
+  const note = el("p", "wf-note beads-ws-note",
+    "where a session created from this issue is opened");
+  pick.addEventListener("change", async () => {
+    const want = pick.value;
+    pick.disabled = true;
+    note.textContent = "saving…";
+    try {
+      const resp = await api(`/api/beads/${encodeURIComponent(beadsFocus)}/workspace`, {
+        method: "POST",
+        body: JSON.stringify({ workspace: want, cwd: beadsDetail.root || "" }),
+      });
+      const data = await resp.json().catch(() => ({}));
+      if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
+      beadsDetail.workspace = data.workspace || "";
+      note.textContent = "where a session created from this issue is opened";
+      // The description carries the block, so the pane must be redrawn from
+      // the daemon rather than patched here — otherwise the Description
+      // section keeps showing the value that was just replaced.
+      beadsDetail = null;
+      renderBeads();
+    } catch (err) {
+      note.textContent = String((err && err.message) || err);
+      pick.value = beadsDetail.workspace || "";
+    } finally {
+      pick.disabled = false;
+    }
+  });
+  row.appendChild(pick);
+  box.appendChild(row);
+  box.appendChild(note);
+  return box;
+}
+
+/* Start a session on this issue.
+
+   The board is where the work is decided and the terminal is where it was
+   created, so an operator who picked an issue here had to carry its id and
+   its directory across to a form by hand — and the id is the half that goes
+   wrong silently, because a session created without it mints a SECOND issue
+   for work the board already had.
+
+   Two buttons because there are two answers, and which one is right is not
+   the board's to guess: a root session, or a child of one that is running.
+   Both open the one creation modal (`openSessionModal`) on the matching tab
+   with this issue and its recorded workspace already filled in. */
+function beadsStartBlock() {
+  const box = el("div", "beads-detail-start");
+  box.appendChild(el("h4", null, "Start a session"));
+  if (typeof openSessionModal !== "function") {
+    box.appendChild(el("p", "wf-note",
+      "this daemon's dashboard has no session modal to open"));
+    return box;
+  }
+  const issue = (beadsDetail.issue || {}).id || beadsFocus;
+  const seed = { issue };
+  // Only when the issue actually records one: seeding an empty workspace
+  // would override the form's own default with nothing.
+  if (beadsDetail.workspace) seed.workspace = beadsDetail.workspace;
+  const row = el("div", "beads-start-row");
+  const mk = (label, tab, title) => {
+    const btn = el("button", "wf-btn option", label);
+    btn.title = title;
+    btn.addEventListener("click", () => { openSessionModal({ tab, seed }); });
+    return btn;
+  };
+  row.appendChild(mk("New session", "new",
+    `create a session on ${issue}`));
+  row.appendChild(mk("Spawn child", "spawn",
+    `create a session on ${issue} under a running parent`));
+  box.appendChild(row);
+  const note = seed.workspace
+    ? `opens in ${seed.workspace}, which this issue records`
+    : "this issue records no workspace, so the form opens on its own default";
+  box.appendChild(el("p", "wf-note", note));
+  // Worth saying once, here: the Spawn tab does not refuse a blank Parent, it
+  // creates a root session. Somebody who pressed Spawn meant a child.
+  box.appendChild(el("p", "wf-note",
+    "Spawn child asks for the parent in the form; leaving it blank creates a "
+    + "root session instead"));
+  return box;
+}
+
 function beadsDetailPane() {
   const pane = el("div", "beads-detail");
   const head = el("div", "beads-detail-head");
@@ -12980,9 +13258,11 @@ function beadsDetailPane() {
   // heading. Reports and Comments both announce themselves; the issue's own
   // text just began, so a reader scrolling in landed in the middle of prose
   // with nothing saying what it was. One rule draws all three now.
+  pane.appendChild(beadsWorkspaceBlock());
+  pane.appendChild(beadsStartBlock());
   if (i.description) {
     pane.appendChild(el("h4", null, "Description"));
-    pane.appendChild(el("pre", "beads-desc", i.description));
+    pane.appendChild(el("pre", "beads-desc", beadsStripMeta(i.description)));
   }
   if (i.close_reason) pane.appendChild(el("p", "wf-note", "closed: " + i.close_reason));
   // The rounds that were written up for this issue. Keyed by issue across
@@ -19162,44 +19442,6 @@ function saveSpawnRecall(picks) {
   try { localStorage.setItem(SPAWN_RECALL_KEY, JSON.stringify(keep)); } catch {}
 }
 
-/* The mesh the child would land in: the one picked, or the parent's own.
-   "-" is the API's own spelling for "none at all". */
-function spawnMeshNow(ui) {
-  const picked = ui.mesh.value || "";
-  if (picked === "-") return "";
-  return picked || ui.parentMesh || "";
-}
-
-/* worktree._fragment in the browser: what survives as part of a name. */
-function spawnWtFragment(text) {
-  return String(text || "").replace(/[^\w.]+/g, "-").replace(/^[-.]+|[-.]+$/g, "");
-}
-
-/* worktree.child_name in the browser: `<parent>-<child>-<stamp>`, the two
-   sessions the checkout is between plus a stamp fixed once at build — a name
-   that ticked over between being shown and being sent would cut a worktree
-   nobody read.
-
-   `""` when the child has no name yet, which is the QUICK JOB's normal case:
-   the daemon picks the child's `sN`, so nothing here can finish the name, and
-   naming the checkout after the parent alone (which is what this used to do)
-   is how a repository fills up with `s45-<stamp>` directories that no longer
-   say which worker each one belongs to. `spawnPayload` asks the daemon to
-   name it instead of guessing. */
-function spawnAutoWorktree(ui) {
-  const kid = spawnWtFragment((ui.name.value || "").trim());
-  if (!kid) return "";
-  return `${spawnWtFragment(ui.parent.value) || "child"}-${kid}-${ui.stamp}`;
-}
-
-/* What the blank-name placeholder reads: the generated name when this side
-   can compute it, and its SHAPE when it cannot. Spelling out an exact string
-   the daemon is going to pick differently is worse than naming the hole. */
-function spawnAutoWorktreeHint(ui) {
-  return spawnAutoWorktree(ui) ||
-    `${spawnWtFragment(ui.parent.value) || "child"}-<the child's name>-<time cut>`;
-}
-
 /* One workflow the daemon offered, normalized — a bare name (an older
    daemon) reads as a workflow that volunteers for nobody. */
 function spawnWorkflowEntry(raw) {
@@ -19263,544 +19505,25 @@ function spawnRankWorkflows(raws, role) {
   return { options, auto: auto ? auto.name : "" };
 }
 
-function syncSpawnCodexRuntime(ui, childHarness, capabilities, may) {
-  if (!ui.codexPanel || !ui.codexYolo || !ui.codexSandbox) return;
-  const codex = childHarness === "codex";
-  ui.codexPanel.hidden = !codex;
-  if (!codex) return;
-
-  const parentArgs = childHarness === (ui.parentSess || {}).harness
-    ? ((ui.parentSess || {}).args || []) : [];
-  const key = `${spawnProfileSelector(ui)}:${childHarness}:` +
-    JSON.stringify(parentArgs);
-  if (ui._codexRuntimeFor !== key) {
-    const state = codexRuntimeState(parentArgs, capabilities);
-    ui.codexYolo.checked = state.yolo;
-    ui.codexSandbox.checked = state.sandbox;
-    ui._codexRuntimeFor = key;
-    ui._codexRuntimeOriginal = state;
-    ui._codexRuntimeBaseArgs = parentArgs.slice();
-  }
-
-  const inherited = !may.includes("args");
-  const inheritsParent = childHarness === (ui.parentSess || {}).harness;
-  ui.codexYolo.disabled = inherited;
-  ui.codexSandbox.disabled = inherited;
-  for (const [field, note] of [
-    [ui.codexYolo, ui.codexYoloNote],
-    [ui.codexSandbox, ui.codexSandboxNote],
-  ]) {
-    if (!note) continue;
-    note.hidden = !inherited;
-    note.textContent = inherited
-      ? (inheritsParent
-        ? `inherited from the parent: ${field.checked ? "enabled" : "disabled"} ` +
-          "(spawn.allow_args)"
-        : `Codex default: ${field.checked ? "enabled" : "disabled"} ` +
-          "(spawn.allow_args to override)")
-      : "";
-  }
-  if (ui.codexState) {
-    ui.codexState.textContent = codexRuntimeText(
-      ui.codexYolo.checked, ui.codexSandbox.checked
-    );
-  }
-}
-
-/* Pi's builtin tools, seeded the way the create form seeds them: from the
-   parent's own explicit choice when the child runs the parent's harness
-   (that is what an absent key inherits), else from the picked profile's
-   default. Gated by spawn.allow_args like the Codex mode. */
-function syncSpawnPiTools(ui, childHarness, capabilities, may) {
-  if (!ui.piPanel || !ui.piTools) return;
-  const pi = childHarness === "pi";
-  ui.piPanel.hidden = !pi;
-  if (!pi) return;
-
-  const parent = ui.parentSess || {};
-  const inheritsParent = childHarness === parent.harness;
-  const inherited = inheritsParent && Array.isArray(parent.tools)
-    ? parent.tools.map(String) : null;
-  const selector = spawnProfileSelector(ui);
-  const detail = (ui.profileDetails || {})[selector] ||
-    (ui.profileDetails || {})[baseProfileName(selector)] || null;
-  const seed = inherited || piToolsDefault(detail, capabilities);
-  // The seed is part of the key, so a parent whose choice moved under the
-  // modal reseeds and a re-gate with nothing changed does not.
-  const key = `${selector}:${childHarness}:${JSON.stringify(seed)}`;
-  if (ui._piToolsFor !== key) {
-    const on = new Set(seed);
-    for (const { name, input } of ui.piTools) input.checked = on.has(name);
-    ui._piToolsFor = key;
-    ui._piToolsOriginal = ui.piTools.filter(({ name }) => on.has(name))
-      .map(({ name }) => name);
-  }
-
-  const locked = !may.includes("args");
-  for (const { input, note } of ui.piTools) {
-    input.disabled = locked;
-    if (!note) continue;
-    note.hidden = !locked;
-    note.textContent = locked
-      ? (inheritsParent
-        ? `inherited from the parent: ${input.checked ? "enabled" : "disabled"} ` +
-          "(spawn.allow_args)"
-        : `Pi default: ${input.checked ? "enabled" : "disabled"} ` +
-          "(spawn.allow_args to override)")
-      : "";
-  }
-  if (ui.piState) {
-    ui.piState.textContent = piToolsText(
-      ui.piTools.filter(({ input }) => input.checked).map(({ name }) => name)
-    );
-  }
-}
-
-function syncSpawnModel(ui, childHarness, capabilities, may) {
-  if (!ui.model) return;
-  const parent = ui.parentSess || {};
-  const choices = (capabilities.models || []).map(String);
-  const selector = spawnProfileSelector(ui);
-  const details = ui.profileDetails || {};
-  const detail = details[selector] || details[baseProfileName(selector)] || null;
-  const ids = modelIdsInPlay(
-    capabilities, detail, borrowInPlay(ui.borrow, parent), selector
-  );
-  const key = `${selector}:${childHarness}:${parent.model || ""}:` +
-    choices.join("\u0000");
-  // The ids are in here as well as in the rebuild key: they can move without
-  // the choices moving, and that only re-labels (see relabelModelOptions).
-  const labelKey = key + "|" + JSON.stringify(ids);
-  if (ui._modelFor !== key) {
-    const inherited = childHarness === parent.harness
-      ? String(parent.model || "") : "";
-    const wanted = ui._modelPreset !== undefined
-      ? String(ui._modelPreset || "") : inherited;
-    fillSpawnSelect(
-      ui.model, choices.map((value) => [modelChoiceLabel(value, ids), value]),
-      "(harness default)", wanted
-    );
-    ui._modelFor = key;
-    ui._modelOriginal = inherited;
-    ui._modelPreset = undefined;
-    ui._modelLabelKey = labelKey;
-  } else if (ui._modelLabelKey !== labelKey) {
-    relabelModelOptions(ui.model, choices, ids);
-    ui._modelLabelKey = labelKey;
-  }
-  if (ui.modelRow) ui.modelRow.hidden = !choices.length;
-  const inherited = !may.includes("model");
-  ui.model.disabled = inherited;
-  if (ui.modelNote) {
-    ui.modelNote.hidden = !inherited;
-    ui.modelNote.textContent = inherited
-      ? `inherited from the parent: ${ui._modelOriginal || "harness default"} ` +
-        "(spawn.allow_args)"
-      : "";
-  }
-  if (ui.effort) {
-    const efforts = (capabilities.efforts || []).map(String);
-    const parentEffort = childHarness === parent.harness ? String(parent.effort || "") : "";
-    fillSpawnSelect(ui.effort, efforts.map((value) => [value, value]), "(harness default)", parentEffort);
-    ui.effort.hidden = !efforts.length;
-    ui.effort.disabled = !may.includes("args");
-  }
-}
-
-/* The wizard's _sync: every dependency between rows, re-derived on every
-   change. Locks carry the wizard's own wording — a greyed row says which
-   policy key opens it, not just that it is shut. */
-function syncSpawnGates(ui) {
-  const report = ui.report || {};
-  const may = report.may_choose || [];
-  const sess = ui.parentSess || {};
-  /* A locked row must not still be carrying a yes. spawnPayload reads every
-     answer THROUGH its disable, so a tick left standing on a greyed box is
-     not a weaker answer -- it is a dropped one, and dropped without a word:
-     the operator ticks "start from a copy of the parent's conversation",
-     picks a worktree two rows down, and the child boots empty with nothing
-     on screen having said the fork went away. That is the failure this
-     clears (claunch-409i, measured on session s245 -- its recorded argv
-     carries --session-id and no --resume).
-
-     Checkboxes only. A select or a text box keeps what was typed in it,
-     which is the same line the borrow and beads rows already draw: words
-     somebody typed are theirs to find again when the row comes back, while
-     a tick IS the whole answer and has nowhere else to be read from. */
-  const lock = (field, note, why) => {
-    field.disabled = !!why;
-    if (why && field.type === "checkbox") field.checked = false;
-    if (note) { note.hidden = !why; note.textContent = why || ""; }
-  };
-
-  // Two different folds, because they answer two different questions. The
-  // CROSSING is offered only where the daemon named something soft to cross;
-  // the GATE around it opens wherever the button is dead for a reason this
-  // form is allowed to state (`ui.capped`, set by the load) — including the
-  // policy's bare "this session may not spawn", which names no crossing and
-  // so opens the gate on its reason alone rather than on an empty box.
-  const overCap = !!(report.soft_blocked_by || []).length;
-  // `!== false`, not truthiness: the row is built without a `hidden` at all,
-  // and an undefined one is a row nobody has shown yet -- which is exactly
-  // the way-up this pre-tick is for.
-  const capRowWasHidden = ui.overRow.hidden !== false;
-  ui.overRow.hidden = !overCap;
-  // Pre-answered on the way UP only, like the new-session form's row: the
-  // cap warns rather than refusing, so the crossing is the default and the
-  // tick is there to be TAKEN AWAY by anyone who wants the strict reading.
-  // Re-ticking on every sync would undo that untick.
-  if (overCap && capRowWasHidden) ui.over.checked = true;
-  if (!overCap) ui.over.checked = false;
-  if (ui.capGate) ui.capGate.hidden = !(overCap || ui.capped);
-
-  // Read the profile pair through the policy that locks it, the way
-  // `spawnPayload` already does -- it sends `profile` only when NEITHER row
-  // is disabled. A <select> keeps its value when lock() greys it (only a tick
-  // goes with its row), so a harness picked while the rows were open stayed
-  // readable here after the parent changed to one that forbids the crossing.
-  // That stale name then decided two other rows: `nonClaude` locked --null
-  // and fork, and the new lock cleared the operator's --null tick -- all on
-  // the strength of a harness the child will never run under, because the
-  // payload drops the profile the same sync. Measured on master 97c37ef with
-  // the policy forbidding `profile` and the parent on claude: harness "codex"
-  // left standing gave nullTok/fork locked and the tick gone, while the same
-  // form with the row's value empty left both open and sent null_token.
-  // (claunch-disy, the other half of claunch-409i's rule.)
-  const mayProfile = may.includes("profile");
-  const pickedProfile = mayProfile ? spawnProfileSelector(ui) : "";
-  const details = ui.profileDetails || {};
-  const pickedDetail = pickedProfile
-    ? details[pickedProfile] || details[baseProfileName(pickedProfile)]
-    : null;
-  const childHarness =
-    (mayProfile ? String((ui.harness && ui.harness.value) || "") : "") ||
-    (pickedDetail ? pickedDetail.harness : (ui.parentSess || {}).harness || "");
-  const childCapabilities = (typeof harnessDetails !== "undefined"
-    ? harnessDetails[childHarness] : null) || {};
-  syncSpawnCodexRuntime(ui, childHarness, childCapabilities, may);
-  syncSpawnPiTools(ui, childHarness, childCapabilities, may);
-  lock(ui.profile, ui.profileNote, may.includes("profile") ? "" :
-    "the child runs under its parent's profile (spawn.allow_profile)");
-  if (ui.harness) {
-    lock(ui.harness, ui.harnessNote, may.includes("profile") ? "" :
-      "the child runs under its parent's harness (spawn.allow_profile)");
-  }
-
-  // Null is Claude-only. Borrow follows the selected harness's declared auth
-  // capability: Claude borrows token+provider, API-key harnesses borrow only
-  // the shared token, OAuth harnesses borrow neither.
-  const nonClaude = !!childHarness && childHarness !== "claude";
-  const parentProfile = (ui.parentSess || {}).profile || "";
-  const effectiveDetail = pickedDetail || details[parentProfile] ||
-    details[baseProfileName(parentProfile)];
-  const borrowCap = profileBorrowCapability(effectiveDetail, childHarness);
-  if (nonClaude) {
-    lock(ui.nullTok, ui.nullNote, "the claude harness only");
-  } else {
-    lock(ui.nullTok, ui.nullNote, "");
-  }
-  if (ui._borrowValidationError) {
-    ui.borrow.value = "";
-    lock(ui.borrow, ui.borrowNote, ui._borrowValidationError);
-  } else if (!borrowCap.allowed) {
-    ui.borrow.value = "";
-    lock(ui.borrow, ui.borrowNote,
-      `harness ${childHarness || "?"} keeps auth in its own profile storage`);
-  } else if (!nonClaude && ui.nullTok.checked) {
-    ui.borrow.value = "";
-    lock(ui.borrow, ui.borrowNote, "--null launches without any token");
-  } else {
-    lock(ui.borrow, ui.borrowNote, may.includes("borrow") ? "" :
-      "the child authenticates as its parent does (spawn.allow_profile)");
-  }
-  // After the borrow row has settled: the model row's labels read whether a
-  // borrow is in play, and that is a fact about the row above this line.
-  syncSpawnModel(ui, childHarness, childCapabilities, may);
-
-  // Absent, not empty, when the policy has it locked: the report only
-  // lists workspaces when a child may be sent to one.
-  lock(ui.workspace, ui.workspaceNote, report.workspaces != null ? "" :
-    "the child inherits its parent's directory (spawn.allow_workspace)");
-  lock(ui.args, ui.argsNote, may.includes("args") ? "" :
-    "the child runs its parent's args (spawn.allow_args)");
-
-  // The worktree rows: a locked row greys every mode with the key that opens
-  // it, while a directory that is no repository takes the rows away entirely.
-  const git = ui.git || {};
-  if (!may.includes("worktree")) {
-    ui.wtRow.hidden = false;
-    lock(ui.wtMode, ui.worktreeNote,
-      "a child inherits its parent's directory (spawn.allow_worktree)");
-  } else {
-    ui.wtRow.hidden = !git.repo;
-    lock(ui.wtMode, ui.worktreeNote, "");
-  }
-  const wtDead = ui.wtRow.hidden || ui.wtMode.disabled;
-  // Reuse is an answer only where there is something to reuse. Greying the
-  // one mode — rather than offering it over an empty picker — is the whole
-  // reason the row is three radios and not a <select>.
-  const reusable = (git.worktrees || []).length > 0;
-  if (typeof ui.wtMode.enable === "function") {
-    ui.wtMode.enable("existing", reusable);
-  }
-  const mode = ui.wtMode.value || "";
-  ui.wtNameRow.hidden = wtDead || mode !== "new";
-  // The name a blank field would cut, spelt out: the operator reads the
-  // generated name instead of pressing Spawn to discover it -- or, when the
-  // child is not named on this form either, its shape, because the session
-  // name in the middle of it is the daemon's to pick.
-  ui.wtName.placeholder = `blank = ${spawnAutoWorktreeHint(ui)}`;
-  ui.wtPickRow.hidden = wtDead || mode !== "existing";
-  // Only a REUSED checkout can be behind: a new one is cut from the
-  // repository as it stands, so there is nothing to catch up on.
-  ui.updateRow.hidden = ui.wtPickRow.hidden;
-  ui.rebaseRow.hidden = ui.updateRow.hidden || !ui.update.checked;
-
-  // Forking needs a parent holding a claude conversation AND a child that
-  // stays in the directory it was held in — claude keeps transcripts per
-  // directory, so a workspace or a worktree of its own would leave the
-  // child opening a conversation that is not there.
-  const elsewhere =
-    (!ui.workspace.disabled && ui.workspace.value) ? "a workspace"
-      : (!wtDead && mode) ? "a worktree of its own" : "";
-  if (nonClaude) {
-    lock(ui.fork, ui.forkNote, "the claude harness only");
-  } else if (!may.includes("fork")) {
-    lock(ui.fork, ui.forkNote, "the parent has no claude conversation to copy");
-  } else if (elsewhere) {
-    lock(ui.fork, ui.forkNote,
-      `the child runs in ${elsewhere}, and claude keeps transcripts per directory`);
-  } else {
-    lock(ui.fork, ui.forkNote, "");
-  }
-
-  // Inheriting is only ambiguous upward: several meshes and the daemon will
-  // refuse the spawn by name. Saying it here costs the operator one read
-  // instead of one failed spawn — and the picker stays live, because naming
-  // one is exactly the fix.
-  if (ui.meshNote) {
-    const several = (ui.parentMeshes || []).length > 1;
-    const ambiguous = several && !ui.mesh.value;
-    ui.meshNote.hidden = !ambiguous;
-    ui.meshNote.textContent = ambiguous
-      ? `the parent is in ${ui.parentMeshes.length} meshes `
-        + `(${ui.parentMeshes.join(", ")}) — name the one this child belongs `
-        + `in, or pick (none)`
-      : "";
-  }
-
-  const noMesh = ui.mesh.value === "-";
-  ui.handleRow.hidden = noMesh;
-  ui.connectRow.hidden = noMesh || !(ui.connectHandles || []).length;
-  ui.contextRow.hidden = !ui.workflow.value;
-  syncSpawnBeads(ui);
-}
-
-/* The board row: which of its three answers is picked decides which of the
-   two detail rows exists, and only "existing" is allowed to ask what the
-   board holds — the fetch costs the daemon a `br` fork, so it happens once
-   somebody picks the one answer that looks at it (see refreshSpawnBeads).
-
-   Every row carries the daemon's own verdict on it (daemon/beads.adoption):
-   an issue nobody holds would be ASSIGNED to the child, one a running
-   session holds would be JOINED and the assignment left where it is. Saying
-   so here rather than in the child's opening block is the whole point of
-   the row — by then the choice has been made.
-
-   Optional like meshNote: a ui bag that predates the row (a test driving
-   only the older fields) must still pass through the gates. */
-function syncSpawnBeads(ui) {
-  if (!ui.beads) return;
-  const picking = ui.beads.value === "existing";
-  // Hidden, not cleared: somebody who types a specification, tries the other
-  // two answers and comes back should find their words where they left them.
-  ui.issueTextRow.hidden = ui.beads.value !== "new";
-  ui.issueRow.hidden = !picking;
-  // The search box folds with the picker — it narrows the SAME list. A ui
-  // bag that predates the row was never hidden from anything.
-  if (ui.issueFilterRow) ui.issueFilterRow.hidden = !picking;
-  const hint = ui.issueHint;
-  // Only the consequence a reader cannot see from the row is written out:
-  // an issue that would simply be assigned needs no warning.
-  const row = picking
-    ? (ui._issues || []).find((i) => i.id === ui.issuePick.value)
-    : null;
-  if (row && row.held_by) {
-    hint.textContent =
-      `${row.held_by} is assigned to ${row.id} and still running — this ` +
-      "session JOINS it: the assignment stays put and the two settle " +
-      "ownership between them.";
-    hint.hidden = false;
-  } else if (picking && ui._issuesRead && !(ui._issues || []).length) {
-    // Only once the board has actually answered: an empty list held while
-    // the fetch is still in flight would read as "this board has nothing",
-    // which is a different and wrong thing to tell somebody.
-    hint.textContent = ui._issuesError ||
-      "no open issue on this directory's board.";
-    hint.hidden = false;
-  } else {
-    hint.hidden = true;
-  }
-}
-
-/* The POST body, in the CLI's spelling: non-falsy keys only, and read
-   THROUGH the disables like SpawnWizard.apply — a value standing on a
-   greyed row is not an answer the user gave, and sending it provokes a 403
-   naming a field nobody in this form could still choose. */
-function spawnPayload(ui) {
-  const body = {};
-  const put = (k, v) => { if (v) body[k] = v; };
-  put("name", (ui.name.value || "").trim());
-  // Read through the hidden flag: a yes given while the row was shown, on a
-  // parent that then changed to one with slots free, must not travel.
-  // Both answers travel, from a VISIBLE row only. The `false` is the one
-  // that does something now — it asks for the refusal the cap no longer
-  // gives by default — so it cannot ride the falsy-dropping `put` below.
-  if (!ui.overRow.hidden) body.over_limit = !!ui.over.checked;
-  if (!ui.profile.disabled && (!ui.harness || !ui.harness.disabled)) {
-    put("profile", spawnProfileOverride(ui));
-  }
-  if (!ui.borrow.disabled) put("borrow", ui.borrow.value);
-  if (!ui.nullTok.disabled && ui.nullTok.checked) body.null_token = true;
-  if (!ui.fork.disabled && ui.fork.checked) body.fork = true;
-  if (ui.model && !ui.model.disabled &&
-      ui.model.value !== String(ui._modelOriginal || "")) {
-    body.model = ui.model.value;
-  }
-  if (ui.effort && !ui.effort.disabled && ui.effort.value !== String((ui.parentSess || {}).effort || "")) {
-    body.effort = ui.effort.value;
-  }
-  const typedArgs = !ui.args.disabled && (ui.args.value || "").trim()
-    ? ui.args.value.trim().split(/\s+/) : [];
-  const codexOpen = ui.codexPanel && !ui.codexPanel.hidden &&
-    ui.codexYolo && !ui.codexYolo.disabled;
-  if (codexOpen) {
-    const original = ui._codexRuntimeOriginal || { yolo: true, sandbox: false };
-    const changed = ui.codexYolo.checked !== original.yolo ||
-      ui.codexSandbox.checked !== original.sandbox;
-    if (typedArgs.length || changed) {
-      const selector = spawnProfileSelector(ui);
-      const detail = (ui.profileDetails || {})[selector] ||
-        (ui.profileDetails || {})[baseProfileName(selector)] || {};
-      const harnessName = String((ui.harness && ui.harness.value) || "") ||
-        detail.harness || (ui.parentSess || {}).harness || "";
-      const capabilities = (typeof harnessDetails !== "undefined"
-        ? harnessDetails[harnessName] : null) || {};
-      body.args = codexRuntimeArgs(
-        typedArgs.length ? typedArgs : (ui._codexRuntimeBaseArgs || []),
-        capabilities,
-        !!ui.codexYolo.checked,
-        !!ui.codexSandbox.checked
-      );
-    }
-  } else if (typedArgs.length) {
-    body.args = typedArgs;
-  }
-  // The tool ticks, only from an open panel and only once they differ from
-  // the seeding — an absent key inherits, and `[]` (no builtin tools) is an
-  // answer in its own right, so it does not go through `put`.
-  const piOpen = ui.piPanel && !ui.piPanel.hidden &&
-    (ui.piTools || []).length && !ui.piTools[0].input.disabled;
-  if (piOpen) {
-    const chosen = ui.piTools.filter(({ input }) => input.checked)
-      .map(({ name }) => name);
-    if (JSON.stringify(chosen) !== JSON.stringify(ui._piToolsOriginal || [])) {
-      body.tools = chosen;
-    }
-  }
-  // Both travel as NAMES, never paths: the workspace is what the API
-  // resolves, and the child's worktree is cut by the daemon from the
-  // parent's own repository.
-  if (!ui.workspace.disabled) put("workspace", ui.workspace.value);
-  // The three modes collapse back into the ONE key the API has: a name.
-  // "new" with a blank field is the generated one; "existing" travels as the
-  // checkout it names, and only that mode may carry a rebase.
-  const mode = ui.wtMode.value || "";
-  if (!ui.wtRow.hidden && !ui.wtMode.disabled && mode) {
-    if (mode === "new") {
-      // A typed name is the whole name. Blank is the generated one — spelled
-      // out here when the child is named on this form (so what the
-      // placeholder read is what gets cut), and otherwise handed to the
-      // daemon as `true`, the only side that knows the child's session name.
-      body.worktree =
-        (ui.wtName.value || "").trim() || spawnAutoWorktree(ui) || true;
-    } else if (mode === "existing" && ui.wtPick.value) {
-      body.worktree = ui.wtPick.value;
-      if (!ui.rebaseRow.hidden && ui.rebase.value) {
-        body.rebase_onto = ui.rebase.value;
-      }
-    }
-  }
-  const mesh = ui.mesh.value || "";
-  put("mesh", mesh);   // "" = inherit the parent's; "-" travels, meaning none
-  if (mesh !== "-") {
-    put("handle", (ui.handle.value || "").trim());
-    const conn = (ui.connect ? ui.connect() : []).filter(Boolean);
-    if (conn.length) body.connect = conn;
-  }
-  put("role", ui.role.value);
-  // "" is not silence here: the daemon reads an absent workflow as "give the
-  // child the pair my run declares", so a row the operator cleared has to say
-  // no out loud — otherwise the form hands back the very run it was used to
-  // take away. Only worth saying when there is a pair to refuse.
-  const paired = ((ui.report || {}).child_cflow) || "";
-  if (ui.workflow.value) {
-    put("workflow", ui.workflow.value);
-    put("context", (ui.context.value || "").trim());
-  } else if (paired) {
-    body.workflow = "-";
-  }
-  // The board answer, the same contract as the create form's: "new" with
-  // an empty box sends nothing — a request that says nothing gets an issue
-  // minted from the task, which is what every client that has never heard
-  // of this field still wants. Only the key of the answer PICKED travels:
-  // issue_text beside "existing" or "none" is a contradiction the daemon
-  // refuses (beads.check_request).
-  if (ui.beads) {
-    const mode = ui.beads.value || "new";
-    if (mode === "none") body.beads = false;
-    else if (mode === "none-auto") body.beads = "none-auto";
-    else if (mode === "existing" && ui.issuePick.value) {
-      body.issue = ui.issuePick.value;
-    } else if (mode === "new" && (ui.issueText.value || "").trim()) {
-      body.issue_text = ui.issueText.value.trim();
-    }
-  }
-  put("task", (ui.task.value || "").trim());
-  return body;
-}
-
-/* ---- the spawn modal itself ----
-   The wizard as a dialog. Any session may be a parent, and the three ways a
-   spawn starts — the rail's +, the detail panel's Spawn button, and the
-   leader's quick job — all land here. The modal owns the fetch and the POST;
-   the brain above owns the rules. Built as DOM over the shared #modal-overlay
-   (showModal's body is text; a form is not), and closed the same way it is
-   opened: the backdrop, Escape, or the Cancel button. */
+/* ---- rows built in JavaScript ----
+   The session form is shipped markup (see the session modal below), so what
+   is left here is the row vocabulary for the dialogs that have no markup of
+   their own — the PR wizard is the one that uses it. Same classes as the
+   session form's rows, so the two read alike inside the same box. */
 
 function spawnRow(label, control, note) {
   const wrap = el("div", "sess-spawn-row");
   wrap.appendChild(el("label", "sess-spawn-label", label));
   wrap.appendChild(control);
   if (note) {
-    // THE note element, not a fresh one: syncSpawnGates writes the policy's
-    // "which key unlocks this" line straight onto it, so the caller hands the
-    // element in and keeps its reference for exactly that purpose. A plain
-    // string is tolerated — it becomes a span, read but not referenced.
+    // THE note element, not a fresh one: the caller hands the element in and
+    // keeps its reference, so whatever writes that row's explanation later
+    // writes onto this node. A plain string is tolerated — it becomes a
+    // span, read but not referenced.
     const n = typeof note === "string" ? el("span", "sess-spawn-note", note) : note;
     n.hidden = true;
     wrap.appendChild(n);
   }
-  return wrap;
-}
-
-/* A row that belongs to the answer above it rather than to the form. Same
-   grid, one class more: the stylesheet indents it and hangs it off the
-   answer it details, so a fold-out is read as part of its mode and not as
-   the next question. */
-function spawnSubRow(label, control, note) {
-  const wrap = spawnRow(label, control, note);
-  wrap.classList.add("sess-spawn-sub");
   return wrap;
 }
 
@@ -19817,79 +19540,6 @@ function spawnCheckRow(label, note) {
     wrap.appendChild(n);
   }
   return wrap;
-}
-
-/* ---- a radio group the gates can drive like a <select> ------------------
-   Three answers that are not one list. The worktree row used to be a single
-   picker holding "(no worktree)", "@auto", "@named" and every checkout the
-   repository already has — four different KINDS of answer racked as if they
-   were four values of one, so the reader had to open the popup to find out
-   that two of them were modes and the rest were names. Radios say the three
-   modes on the face of the form and leave the detail of each to its own
-   sub-rows.
-
-   The rest of the wizard must not learn a second widget for that, so the
-   group answers to `.value` and `.disabled` exactly as the <select> did:
-   syncSpawnGates' `lock()` writes `.disabled`, spawnPayload reads `.value`,
-   and neither knows the difference. `enable(v, on)` is the one thing a
-   <select> could not do — greying ONE answer (there is nothing to reuse in a
-   repository with no worktrees) while the others stay live. */
-function spawnRadioGroup(name, items) {
-  const wrap = el("div", "sess-spawn-radios");
-  const inputs = {};
-  for (const [value, label, hint] of items) {
-    const inp = document.createElement("input");
-    inp.type = "radio";
-    inp.name = name;
-    inp.value = value;
-    const lab = el("label", "check sess-spawn-radio");
-    lab.append(inp, el("span", null, label));
-    if (hint) lab.appendChild(el("span", "sess-spawn-hint", hint));
-    wrap.appendChild(lab);
-    inputs[value] = inp;
-  }
-  const keys = () => Object.keys(inputs);
-  const off = {};          // per-answer greying, on top of the row's own
-  const group = {
-    el: wrap, inputs,
-    get value() {
-      for (const k of keys()) if (inputs[k].checked) return k;
-      return "";
-    },
-    set value(v) {
-      // An unknown answer falls back to the FIRST, which is why "no worktree"
-      // is declared first: clearing the group must land on the harmless one.
-      const want = inputs[v] ? v : keys()[0];
-      for (const k of keys()) inputs[k].checked = (k === want);
-    },
-    get disabled() { return !!group._off; },
-    set disabled(v) {
-      group._off = !!v;
-      for (const k of keys()) inputs[k].disabled = !!v || !!off[k];
-    },
-    /* Grey one answer. A greyed answer that was the current one is dropped
-       rather than left standing: a checked radio nobody can uncheck would
-       send a value the form is telling the operator they may not have. */
-    enable(v, on) {
-      off[v] = !on;
-      if (!inputs[v]) return;
-      inputs[v].disabled = !on || !!group._off;
-      if (!on && group.value === v) group.value = "";
-    },
-    /* One handler over the three buttons. The browser unchecks the siblings
-       itself (they share `name`); the assignment repeats that so a stub DOM —
-       and any node that drifted out of the group — reads the same. */
-    listen(fn) {
-      for (const k of keys()) {
-        inputs[k].addEventListener("change", () => {
-          if (inputs[k].checked) group.value = k;
-          fn(group.value);
-        });
-      }
-    },
-  };
-  group.value = "";
-  return group;
 }
 
 function fillSpawnSelect(sel, pairs, noneLabel, want) {
@@ -19918,44 +19568,6 @@ function fillSpawnSelect(sel, pairs, noneLabel, want) {
     sel.value = want;
   }
   return sel;
-}
-
-/* The workflow picker, filtered and ranked by the picked role the way the
-   CLI wizard does it: only workflows the role's filter_roles admits, the
-   role's own defaults first, then the rest. The current selection is
-   carried over UNLESS it was the auto-pick — then it follows the pair, so a
-   role switch re-filters the list without trampling a pick the operator
-   made. `last` is the auto value the caller last applied; it is returned so
-   the caller can remember it.
-
-   What is auto-picked is NOT the role's default, though: this form makes a
-   CHILD, and a child's run comes from the pair its parent's own run declares
-   (`child_cflow`, the daemon's reading of `default_child_cflow`). The role
-   only ranks the list. A parent that pairs with nothing preselects nothing —
-   that "" is an answer, not a missing one, which is why it is not fallen
-   back from: reading the child's run off its role is exactly what handed a
-   worker-role child the worker flow under a parent driving something else. */
-function refillSpawnWorkflows(ui, role, last) {
-  const { options } = spawnRankWorkflows(
-    ui._wfs || [], role
-  );
-  const auto = ((ui.report || {}).child_cflow) || "";
-  const want = ui.workflow.value === last ? auto
-    : (ui.workflow.value || auto);
-  fillSpawnSelect(ui.workflow,
-    options.map((o) => [o.name, o.detail ? `${o.name} — ${o.detail}` : o.name]),
-    "(no workflow)", want);
-  return { auto };
-}
-
-/* The field the child would be its own name in the picked mesh — excluded
-   from the connect list along with the parent's own handle, both of which are
-   wired by the mesh join itself. */
-function spawnConnectNow(ui, handles) {
-  const mine = (ui.handle.value || "").trim();
-  return handles.filter(
-    (h) => h !== mine && h !== ui.parentSess._meshHandle
-  );
 }
 
 /* A local mesh member must also be a currently RUNNING session (the rail's
@@ -19993,290 +19605,6 @@ function spawnGroup(step, title, blurb) {
   g.appendChild(legend);
   if (blurb) g.appendChild(el("p", "sess-spawn-group-blurb", blurb));
   return g;
-}
-
-function buildSpawnForm(parentName, seed) {
-  seed = seed || {};
-  const rec = spawnRecall();
-  const box = el("div", "sess-spawn");
-  const st = {
-    parent: parentName,
-    parentSess: {}, parentMesh: "", parentMeshes: [], report: {}, git: {},
-    _meshHandle: null, _wfs: [], stamp: qjStamp(),
-    connectHandles: [], lastWfAuto: "",
-  };
-  const ui = st;
-
-  // The parent is not a control: every entry point pins it, and relocating
-  // the child means reopening from another row. Its facts open the form.
-  ui.parent = { value: parentName };
-  const parentLine = el("p", "sess-spawn-parent",
-    `child of ${parentName} — inherits its harness, profile, directory and args`);
-  box.appendChild(parentLine);
-
-  ui.note = el("p", "wf-note hidden");
-  box.appendChild(ui.note);
-  const noteShow = (msg, cls) => {
-    ui.note.className = cls || "wf-note";
-    ui.note.textContent = msg;
-  };
-  ui.noteShow = noteShow;
-
-  /* ---- five decisions, in the order the child meets them ---------------
-     Where it works; who it is; what it is for; who it may talk to; how it
-     runs. The rows are the same objects they were in the flat list -- the
-     gates fold them and the payload reads them by `ui.*` -- only the fence
-     around each decision is new.
-
-     Location opens the form rather than closing it. The directory decides
-     which checkout every later row acts on, and a child created in the
-     wrong tree does not refuse: it works, and the mistake arrives as a
-     commit on somebody else's branch. Read last, it was the decision most
-     likely to be left at whatever the previous spawn had used. */
-  const gPlace = spawnGroup(1, "Location", "where it works");
-  const gIdentity = spawnGroup(2, "Identity", "who the child is");
-  const gTask = spawnGroup(3, "Assignment",
-    "what it is for, and where that is written down");
-  const gMesh = spawnGroup(4, "Mesh", "who it can talk to");
-  const gRuntime = spawnGroup(5, "Runtime",
-    "how it runs — profile, harness, credentials, flags");
-  ui.groups = { place: gPlace, identity: gIdentity, task: gTask, mesh: gMesh,
-                runtime: gRuntime };
-  box.append(gPlace, gIdentity, gTask, gMesh, gRuntime);
-
-  ui.name = document.createElement("input");
-  ui.name.placeholder = "child name (blank = auto)";
-  gIdentity.appendChild(spawnRow("Name", ui.name, null));
-
-  ui.role = document.createElement("select");
-  gIdentity.appendChild(spawnRow("Role", ui.role, null));
-
-  /* what the child is for: the task it opens with, the board record that
-     task becomes, and the run it drives once it has read both */
-  ui.task = document.createElement("textarea");
-  ui.task.rows = 3;
-  ui.task.placeholder = "opened with this once it has booted — what it is for";
-  gTask.appendChild(spawnRow("Opening task", ui.task, null));
-
-  /* The board row, after the opening task because it is still the fallback
-     two of its four shapes are read off: "new" mints from the box below
-     when that is filled and from the task when it is not, so an empty pair
-     has nothing to mint from. The third — an issue that already exists —
-     is a picker rather than a text box for the same reason every other row
-     here is: the daemon publishes the list, and an id it does not have
-     would be a refusal nobody needed to provoke. The child's issue is its
-     own answer — not something the spawn policy decides — so the row
-     stands ungated, exactly like the create form's #new-beads. */
-  ui.beads = spawnRadioGroup("spawn-beads", [
-    ["new", "new issue", "minted from the task or the box below"],
-    ["existing", "an existing issue", "assigned, or joined while its holder is running"],
-    ["none", "no issue — waits for instructions",
-     "no board record, and the child is told not to go looking for one"],
-    ["none-auto", "no issue — picks its own",
-     "no board record, and the child is told to take an open issue itself"],
-  ]);
-  ui.beads.value = "new";
-  gTask.appendChild(spawnRow("Board issue", ui.beads.el, null));
-  ui.issueText = document.createElement("textarea");
-  ui.issueText.rows = 3;
-  ui.issueText.placeholder =
-    "what the issue says — first line is its title; empty uses the opening task";
-  ui.issueTextRow = spawnSubRow("Issue text", ui.issueText, null);
-  ui.issueTextRow.hidden = true;
-  gTask.appendChild(ui.issueTextRow);
-  /* The search box above the picker, folded shut with it: a board of
-     hundreds of open issues is not navigable through a bare popup, and
-     the box's value narrows the SAME list — it is not a second question,
-     so it has no label of its own beyond its placeholder. */
-  ui.issueFilter = document.createElement("input");
-  ui.issueFilter.type = "search";
-  ui.issueFilter.autocomplete = "off";
-  ui.issueFilter.placeholder = "filter the board — id, title or assignee";
-  ui.issueFilterRow = spawnSubRow("Find", ui.issueFilter, null);
-  ui.issueFilterRow.hidden = true;
-  gTask.appendChild(ui.issueFilterRow);
-  ui.issuePick = document.createElement("select");
-  ui.issueHint = el("span", "sess-spawn-note");
-  ui.issueRow = spawnSubRow("Issue", ui.issuePick, ui.issueHint);
-  ui.issueRow.hidden = true;
-  gTask.appendChild(ui.issueRow);
-  ui._issues = [];
-  ui._issuesFor = null;
-  ui._issuesRead = false;
-  ui._issuesError = "";
-
-  /* the run: ranked by the role picked above, preset from the parent's
-     own pair (refillSpawnWorkflows), and the context that run is opened
-     with -- folded until a workflow is named */
-  ui.workflow = document.createElement("select");
-  gTask.appendChild(spawnRow("Workflow", ui.workflow, null));
-  ui.contextRow = spawnRow("Context", (ui.context = document.createElement("input")), null);
-  ui.contextRow.hidden = true;
-  gTask.appendChild(ui.contextRow);
-
-  /* who it may talk to: the mesh it lands in, its handle there, and the
-     peers beyond its parent it is wired to */
-  ui.mesh = document.createElement("select");
-  gMesh.appendChild(spawnRow("Mesh", ui.mesh, (ui.meshNote = el("span", "sess-spawn-note"))));
-  ui.handleRow = spawnRow("Handle", (ui.handle = document.createElement("input")), null);
-  ui.handleRow.hidden = true;
-  gMesh.appendChild(ui.handleRow);
-  ui.connectRow = el("div", "sess-spawn-row sess-spawn-connect");
-  gMesh.appendChild(ui.connectRow);
-  ui.connect = () => spawnConnectNow(ui, ui._connectChecked || []);
-
-  /* the inherited rows: what a child may be told to differ on */
-  ui.profile = document.createElement("select");
-  gRuntime.appendChild(spawnRow("Profile", ui.profile, (ui.profileNote = el("span", "sess-spawn-note"))));
-  ui.harness = document.createElement("select");
-  gRuntime.appendChild(spawnRow("Harness", ui.harness, (ui.harnessNote = el("span", "sess-spawn-note"))));
-  ui.model = document.createElement("select");
-  ui.modelRow = spawnRow(
-    "Model", ui.model, (ui.modelNote = el("span", "sess-spawn-note"))
-  );
-  ui.modelRow.hidden = true;
-  gRuntime.appendChild(ui.modelRow);
-  ui.effort = document.createElement("select");
-  ui.effortRow = spawnRow("Reasoning effort", ui.effort, null);
-  ui.effortRow.hidden = true;
-  gRuntime.appendChild(ui.effortRow);
-  ui.borrow = document.createElement("select");
-  gRuntime.appendChild(spawnRow("Borrow", ui.borrow, (ui.borrowNote = el("span", "sess-spawn-note"))));
-  ui.nullTok = null; ui.nullNote = null;
-  const nullRow = spawnCheckRow("run with no token (--null — log in inside)", null);
-  ui.nullTok = nullRow.querySelector("input");
-  ui.nullNote = nullRow.querySelector(".sess-spawn-note");
-  gRuntime.appendChild(nullRow);
-  ui.args = document.createElement("input");
-  ui.args.placeholder = "extra harness flags";
-  gRuntime.appendChild(spawnRow("Args", ui.args, (ui.argsNote = el("span", "sess-spawn-note"))));
-
-  /* Codex has a named runtime panel rather than generic permission rows.
-     Other harnesses do not acquire Codex labels merely because their
-     declaration exposes a similar argv capability. */
-  ui.codexPanel = document.createElement("fieldset");
-  ui.codexPanel.className = "sess-spawn-harness sess-spawn-codex";
-  ui.codexPanel.hidden = true;
-  ui.codexPanel.appendChild(el("legend", null, "Codex runtime"));
-  const yoloRow = spawnCheckRow("YOLO mode — skip approval prompts", true);
-  ui.codexYolo = yoloRow.querySelector("input");
-  ui.codexYolo.checked = true;
-  ui.codexYoloNote = yoloRow.querySelector(".sess-spawn-note");
-  const sandboxRow = spawnCheckRow(
-    "Sandbox — limit writes to the workspace", true
-  );
-  ui.codexSandbox = sandboxRow.querySelector("input");
-  ui.codexSandbox.checked = false;
-  ui.codexSandboxNote = sandboxRow.querySelector(".sess-spawn-note");
-  ui.codexState = el("p", "sess-spawn-harness-state");
-  ui.codexPanel.append(yoloRow, sandboxRow, ui.codexState);
-  gRuntime.appendChild(ui.codexPanel);
-
-  /* Pi's builtin tools, one row per name the harness declares (GET
-     /api/harnesses → tools, standing in harnessDetails since the page
-     loaded). Generated rather than written out, so the panel follows the
-     declaration; the gate decides which of them the child may differ on. */
-  ui.piPanel = document.createElement("fieldset");
-  ui.piPanel.className = "sess-spawn-harness sess-spawn-pi";
-  ui.piPanel.hidden = true;
-  ui.piPanel.appendChild(el("legend", null, "Pi tools"));
-  const piDetail = (typeof harnessDetails !== "undefined"
-    ? harnessDetails.pi : null) || {};
-  ui.piTools = (piDetail.tools || []).map(String).map((name) => {
-    const row = spawnCheckRow(name, true);
-    ui.piPanel.appendChild(row);
-    return {
-      name, input: row.querySelector("input"),
-      note: row.querySelector(".sess-spawn-note"),
-    };
-  });
-  ui.piState = el("p", "sess-spawn-harness-state");
-  ui.piPanel.appendChild(ui.piState);
-  gRuntime.appendChild(ui.piPanel);
-
-  /* where it works: the directory, the checkout cut inside it, and -- last
-     within this group, because both of those can take it away -- the
-     conversation it opens on. The group is built here, after the rows above
-     it in the DOM, because `gPlace` was appended to the box first. */
-  ui.workspace = document.createElement("select");
-  gPlace.appendChild(spawnRow("Directory", ui.workspace, (ui.workspaceNote = el("span", "sess-spawn-note"))));
-
-  /* worktree: the daemon cuts it from the parent's repository.
-     Three modes on the face of the form, each with its own sub-rows folded
-     under it — the name for a fresh checkout, the picker and its catch-up
-     for a reused one. Only the picked mode's sub-rows are on screen, so what
-     is asked is never a question about a mode nobody chose. */
-  ui.worktreeNote = el("span", "sess-spawn-note");
-  ui.wtMode = spawnRadioGroup("spawn-wt", [
-    ["", "no worktree", "the child runs in the parent's directory"],
-    ["new", "new worktree", "cut fresh from this repository, on a branch of its own"],
-    ["existing", "existing worktree", "reuse a checkout that is already here"],
-  ]);
-  ui.wtRow = spawnRow("Worktree", ui.wtMode.el, ui.worktreeNote);
-  ui.wtName = document.createElement("input");
-  ui.wtNameRow = spawnSubRow("Name", ui.wtName, null);
-  ui.wtNameRow.hidden = true;
-  ui.wtPick = document.createElement("select");
-  ui.wtPickRow = spawnSubRow("Reuse", ui.wtPick, null);
-  ui.wtPickRow.hidden = true;
-  ui.update = null; ui.updateRow = null;
-  const updRow = spawnCheckRow("bring the reused checkout up to date", null);
-  updRow.classList.add("sess-spawn-sub");
-  ui.update = updRow.querySelector("input");
-  ui.updateRow = updRow;
-  ui.updateRow.hidden = true;
-  ui.rebase = document.createElement("input");
-  ui.rebase.placeholder = "branch to fold this reused checkout onto";
-  ui.rebaseRow = spawnSubRow("Rebase onto", ui.rebase, null);
-  ui.rebaseRow.hidden = true;
-  gPlace.append(ui.wtRow, ui.wtNameRow, ui.wtPickRow, updRow, ui.rebaseRow);
-
-  ui.fork = null; ui.forkNote = null;
-  // A note is asked for here because this box is greyed more often than it is
-  // offered: a non-claude child, a parent holding no conversation, and — the
-  // one an operator meets first — the "new worktree" this form opens on, which
-  // puts the child in a directory claude keeps no transcript of. syncSpawnGates
-  // has the wording for all three; without the element it wrote them nowhere,
-  // and the row went grey saying nothing at all.
-  const forkRow = spawnCheckRow("start from a copy of the parent's conversation", true);
-  ui.fork = forkRow.querySelector("input");
-  ui.forkNote = forkRow.querySelector(".sess-spawn-note");
-  gPlace.appendChild(forkRow);
-
-  /* ---- the child cap: laid out at the press, not inside the form -------
-     The cap is not a property of the child being described — it is a gate on
-     the button — and it used to be laid out as if it were neither. Its three
-     parts stood in three places: the reason ("child limit reached (4/4)") in
-     the note at the TOP of a 21-row form, the crossing that revives the
-     button as the LAST row of that form, and the dead button itself out in
-     #modal-actions, which is not even inside the form's scroller. So the
-     operator read a warning, found the button under it dead, and had twenty
-     rows to scroll before meeting the box the warning had named — which is
-     the mismatch this row is being moved to end. Reason and crossing are
-     built here as ONE block, and openSpawnModal hangs it in the action bar
-     on the line above Spawn, where the button they explain actually is. */
-  ui.capNote = el("p", "sess-spawn-cap-msg");
-  // spawnCheckRow's second argument is a request for a note element, not its
-  // text; the cost of the crossing hangs there, under the action it costs,
-  // instead of riding inside the label as parentheses nobody reads.
-  ui.overRow = spawnCheckRow("spawn over the child limit", true);
-  ui.over = ui.overRow.querySelector("input");
-  ui.overNote = ui.overRow.querySelector(".sess-spawn-note");
-  ui.overNote.textContent = "the daemon counts it against you";
-  ui.overNote.hidden = false;
-  ui.capGate = el("div", "sess-spawn-cap");
-  ui.capGate.hidden = true;
-  ui.capGate.append(ui.capNote, ui.overRow);
-
-  // Seed: a quick-job launch fingers role/workflow/worktree/task; everything
-  // else falls back to what the browser used last, then the wizard's defaults.
-  if (seed.stamp) ui.stamp = seed.stamp;
-  ui.name.value = seed.name || "";
-  ui.task.value = seed.task || "";
-  ui.args.value = (seed.args || []).join(" ");
-  ui._modelPreset = seed.model;
-  ui.nullTok.checked = !!(seed.null_token ?? rec.null_token);
-  return { box, ui, noteShow };
 }
 
 /* ---- the box's remembered size --------------------------------------- */
@@ -20341,571 +19669,406 @@ function spawnSizeRemember(box) {
   box.style.height = "";
 }
 
-/* ---- open / load / go / close ---------------------------------------- */
-let spawnModal = null;
+/* ---- the session modal: one form, two tabs ----
+   Creating a session and spawning a child were two forms: this page's
+   `#new-session` and a wizard the spawn button assembled row by row in
+   JavaScript. They asked the same twenty-one questions, so every row
+   existed twice, and the two copies drifted — a rule fixed on one of them
+   was still wrong on the other, and which one an operator met depended on
+   which button they had pressed.
 
-function spawnModalKey(e) {
-  if (e.key === "Escape" && !(spawnModal && spawnModal.busy)) spawnModalClose();
-}
+   There is one form now, and it is the shipped markup. The modal does not
+   build a form: it BORROWS the page's, moving the node into `#modal-body`
+   and putting it back in `#new-view` on close. Every listener, every
+   `$("new-session")` lookup and every value the operator has typed
+   survives that move, which is what makes switching tabs free — the tab
+   does not rebuild anything, it only changes the one answer the two paths
+   differ on: whether a parent is named.
 
-function spawnModalClose() {
-  if (!spawnModal) return;
-  if (spawnModal.busy) return;
-  spawnModal = null;
-  const overlay = $("modal-overlay");
-  // Before the class goes: the size is read off the box while the spawn rules
-  // still apply to it, and the inline pair is stripped so the next confirm
-  // dialog opens at the sheet's 460px rather than at this form's drag.
-  spawnSizeRemember(overlay.querySelector(".modal-box"));
-  overlay.classList.add("hidden");
-  overlay.classList.remove("spawn-open");
-  const body = $("modal-body");
-  body.innerText = "";
-  $("modal-actions").innerHTML = "";
-  document.removeEventListener("keydown", spawnModalKey);
-}
+   What each tab is:
+   - "New session" — no parent. Every row is the operator's to answer, and
+     `#/new` arrives here.
+   - "Spawn child" — a parent is named, so the rows a child INHERITS are
+     greyed by the spawn policy's per-parent verdict (syncSpawnMode), and
+     the submit posts to that parent's `/children`. The rail's +, the detail
+     panel's Spawn button and the leader's quick job all arrive here with
+     the opener pinned as the parent. */
+let sessionModal = null;
 
-/* Borrow candidates depend on the effective Profile : Harness selection.
-   The daemon validates each base profile against both sides' allow-lists and
-   current credential state. Rebuild the list whenever that execution
-   selector changes; a remembered lender is retained only when the fresh
-   verdict still marks it selectable. */
-async function refreshSpawnBorrowOptions(st, force = false) {
-  const ui = st.ui;
-  const selector = spawnProfileSelector(ui);
-  const details = ui.profileDetails || {};
-  const detail = details[selector] || details[baseProfileName(selector)];
-  const childHarness = String((ui.harness && ui.harness.value) || "") ||
-    (detail && detail.harness) ||
-    (ui.parentSess || {}).harness || "";
-  const borrowCap = profileBorrowCapability(detail, childHarness);
-  const ownLabel = borrowCap.allowed
-    ? `(as ${st.parent} authenticates)`
-    : profileOwnAuthLabel(selector, childHarness);
-  // A borrow-capable child keeps the parent's auth on the empty answer, so the
-  // selected profile's OWN token rides as a separate head option. An OAuth
-  // child has one empty answer, labelled as its selected profile login above.
-  const ownName = borrowCap.allowed ? baseProfileName(selector) : "";
-  const key = `${selector}|${ownLabel}`;
-  if (!force && ui._borrowFor === key) return;
-  ui._borrowFor = key;
-  const seq = (ui._borrowSeq || 0) + 1;
-  ui._borrowSeq = seq;
-  const current = ui._borrowPreset || ui.borrow.value || "";
-
-  // Do not leave a lender from the previous harness selectable while the
-  // matching policy verdict is in flight.
-  fillValidatedBorrow(ui.borrow, { options: [] }, ownLabel, "", "", ownName);
-  ui.borrow.disabled = true;
-  ui._borrowValidationError = "";
-  try {
-    const doc = await readBorrowOptions(selector);
-    if (spawnModal !== st || ui._borrowSeq !== seq || ui._borrowFor !== key) return;
-    fillValidatedBorrow(ui.borrow, doc, ownLabel, current, "", ownName);
-  } catch (e) {
-    if (spawnModal !== st || ui._borrowSeq !== seq || ui._borrowFor !== key) return;
-    ui._borrowValidationError =
-      `borrow validation unavailable: ${e.message || e}`;
-    fillValidatedBorrow(ui.borrow, { options: [] }, ownLabel, "", "", ownName);
-    ui.borrow.title = ui._borrowValidationError;
+function sessionModalKey(e) {
+  if (e.key === "Escape" && !(sessionModal && sessionModal.busy)) {
+    sessionModalClose();
   }
-  ui._borrowPreset = "";
-  syncSpawnGates(ui);
 }
 
-async function openSpawnModal(parentName, opts = {}) {
-  if (!parentName) return;
-  const { box, ui, noteShow } = buildSpawnForm(parentName, opts.seed || null);
-  const overlay = $("modal-overlay");
-  $("modal-title").textContent = `Spawn a child of ${parentName}`;
-  const body = $("modal-body");
-  body.innerText = "";
-  body.appendChild(box);
-  const actions = $("modal-actions");
-  actions.innerHTML = "";
-  const spawnBtn = el("button", "wf-btn approve",
-                      (opts.seed && opts.seed.quick) ? "Spawn worker" : "Spawn child");
-  const cancel = el("button", "wf-btn option", "Cancel");
-  spawnBtn.disabled = true;
-  // The cap gate first, so DOM order is reading order: the stylesheet gives
-  // it the whole first line of the bar and the buttons keep the second. It
-  // stays folded until syncSpawnGates finds a soft block to open it for.
-  actions.append(ui.capGate, cancel, spawnBtn);
-  const st = { ui, parent: parentName, seed: opts.seed || null,
-               spawnBtn, cancelBtn: cancel, noteShow, busy: false };
-  cancel.addEventListener("click", spawnModalClose);
-  spawnBtn.addEventListener("click", () => spawnModalGo(st));
-  overlay.onclick = (e) => { if (e.target === overlay) spawnModalClose(); };
-  document.addEventListener("keydown", spawnModalKey);
-  overlay.classList.remove("hidden");
-  overlay.classList.add("spawn-open");
-  spawnSizeApply(overlay.querySelector(".modal-box"));
-  spawnModal = st;
-  await spawnModalLoad(st);
+/* Append an option a seed or a recall asks for but the fill has not
+   offered. A quick job's role comes from `/api/roles` while the form's role
+   list is filtered by the picked mesh, so the seeded answer can be one this
+   list does not hold — and assigning a value a select has no option for is
+   silently dropped, which is how a seeded row ends up reading "(none)". */
+function ensureOption(select, value, label) {
+  if (!select || !value || !select.options) return;
+  if ([...select.options].some((o) => o.value === value)) return;
+  select.appendChild(new Option(label || value, value));
 }
 
-/* Everything the form can be, fetched in two rounds: the parent's own facts
-   first (its cwd is what the workflow and git questions are about), then the
-   daemon-wide option sets in parallel. Each failure degrades its own field,
-   exactly like the quick job's. */
-async function spawnModalLoad(st) {
-  const ui = st.ui, parent = st.parent;
-  const meta = await api(`/api/sessions/${encodeURIComponent(parent)}/meta`)
-    .then((r) => (r.ok ? r.json() : null)).catch(() => null);
-  if (spawnModal !== st) return;
-  const found = (meta && meta.session) ||
-    sessionsCache.find((s) => s.name === parent) || null;
-  const sess = found || {};
-  ui.parentSess = sess;
-  const ms = (meta && meta.meshes) || [];
-  // The parent's own handle in its mesh, for the connect list to leave out.
-  ui.parentSess._meshHandle = ms.length ? ms[0].handle : null;
-  ui.parentMeshes = ms.map((m) => (m && m.mesh) || "").filter(Boolean);
-  // The mesh an INHERITING child lands in — defined only when the parent is
-  // in exactly one. The daemon refuses to guess between several and says why
-  // (daemon/onboard.py inherit_mesh), so neither does this: a guess here does
-  // not fail, it broadcasts the child into a room of strangers.
-  ui.parentMesh = ui.parentMeshes.length === 1 ? ui.parentMeshes[0] : "";
-  // Where the child will stand — the question the git and workflow fetches
-  // below are BOTH about. A blank cwd is a real answer for a parent that runs
-  // in no directory of its own: the child inherits that and runs where the
-  // daemon does, which is what an absent cwd resolves to (daemon/api.py
-  // h_cflow_workflows). It is not an answer when the parent's own record
-  // never arrived — its meta fetch failed and the rail's cache has no row for
-  // it. Asking anyway would succeed about the DAEMON's directory and fill the
-  // pickers with workflows and worktrees the child will never see, with
-  // nothing on screen to say so. `null` means "not known", and the two
-  // fetches that need it are skipped so they report as missing sources.
-  const cwd = found ? (sess.cwd || "") : null;
-  const askCwd = (path) => (cwd === null ? Promise.resolve(null)
-    : api(`${path}${encodeURIComponent(cwd)}`)
-        .then((r) => (r.ok ? r.json() : null)).catch(() => null));
-  const [report, roles, profDoc, meshDoc, gitDoc, wfDoc] = await Promise.all([
-    spawnReport(parent),
-    api("/api/roles").then((r) => (r.ok ? r.json() : null)).catch(() => null),
-    api("/api/profiles").then((r) => (r.ok ? r.json() : null)).catch(() => null),
-    api("/api/mesh").then((r) => (r.ok ? r.json() : null)).catch(() => null),
-    askCwd("/api/git?cwd="),
-    askCwd("/api/cflow/workflows?cwd="),
-  ]);
-  if (spawnModal !== st) return;
-  ui.report = report || {};
-  ui.git = gitDoc || { repo: false, worktrees: [] };
-  ui._wfs = (wfDoc && wfDoc.workflows) || [];
-  const roleNames = ((roles && roles.roles) || []).map((r) => r.name).filter(Boolean);
-  const rawProfileOptions = ui.report.profile_options ||
-    (profDoc && profDoc.profile_options) ||
-    ((ui.report.profile_selectors) ||
-      (profDoc && (profDoc.profile_selectors || profDoc.profiles)) || [])
-      .map((value) => ({ value, label: value }));
-  const profileOptions = normalizeSpawnProfileOptions(rawProfileOptions);
-  const meshNames = (meshDoc && meshDoc.meshes || []).map((m) => (m && m.name) || "");
-  const seed = st.seed || {};
+/* The quick job's three pickers and its task, applied to the shared form.
+   Only the keys the seed actually carries are touched: everything else is
+   what the browser last used, then the form's own defaults — the same
+   precedence the wizard had. */
+function applySessionModalSeed(f, seed) {
+  if (!seed) return;
+  if (seed.name !== undefined) f.name.value = seed.name || "";
+  if (seed.task !== undefined) f.task.value = seed.task || "";
+  if (seed.role !== undefined) {
+    ensureOption(f.role, seed.role);
+    f.role.value = seed.role || "";
+    renderRoleStance();
+  }
+  if (seed.workflow !== undefined) {
+    ensureOption(f.workflow, seed.workflow);
+    f.workflow.value = seed.workflow || "";
+    // A seeded workflow is a pick, not a default: the role's own auto-pick
+    // must not come back over it on the next sync (see syncOnboardPickers).
+    newWfPicked = true;
+  }
+  if (seed.worktree !== undefined && f.worktree_mode) {
+    f.worktree_mode.value = seed.worktree ? "new" : "";
+    syncNewWorktree();
+  }
+  // Where it works, from either spelling: a registry NAME (what an issue
+  // records) or the path the picker's values actually are. The name is
+  // resolved against the workspace list, so a seed that arrives before that
+  // list does is applied on the second pass (see openSessionModal).
+  if (seed.workspace !== undefined || seed.cwd !== undefined) {
+    const hit = (workspacesCache || []).find((w) => w.name === seed.workspace);
+    const path = seed.cwd || (hit ? hit.path : "");
+    if (path && [...(f.cwd.options || [])].some((o) => o.value === path) &&
+        f.cwd.value !== path) {
+      f.cwd.value = path;
+      // The rows that follow the directory are the directory's, not the
+      // seed's — the same work the row's own change does.
+      applySessionCwdChange();
+    }
+  }
+  // An issue that already exists, picked rather than minted. The radio is
+  // set first, because the picker's row is folded under any other answer
+  // and the board read is only paid for by this one.
+  if (seed.issue !== undefined && f.beads) {
+    f.beads.value = "existing";
+    pendingSeedIssue = seed.issue || "";
+    syncBeadsRow();
+    refreshIssueChoices();
+  }
+  if (seed.args !== undefined) f.args.value = (seed.args || []).join(" ");
+  if (seed.null_token !== undefined) f.null_token.checked = !!seed.null_token;
+  if (seed.model !== undefined) f._modelPreset = seed.model;
+}
+
+/* What the modal remembers between openings, applied to the rows that are
+   still the operator's to answer. A remembered value is never written onto
+   a greyed row or over one that already holds something: the policy shut
+   the first, and the second is an answer somebody gave. */
+function applySessionModalRecall(f) {
   const re = spawnRecall();
-
-  ui.profileDetails = {};
-  for (const item of (profDoc && profDoc.profile_details) || []) {
-    if (item && item.name) ui.profileDetails[item.name] = item;
+  if (re.role && !f.role.disabled && !f.role.value) {
+    ensureOption(f.role, re.role);
+    f.role.value = re.role;
   }
-  ui._profileOptions = profileOptions;
-  const desiredSelector =
-    (seed.profile !== undefined && seed.profile !== null) ? seed.profile :
-      (re.profile || "");
-  const desiredParts = String(desiredSelector || "").split(":", 2);
-  const desiredProfile = desiredParts[0] || "";
-  const desiredHarness = desiredParts[1] || "";
-  const groupedProfiles = new Map();
-  for (const item of profileOptions) {
-    const group = groupedProfiles.get(item.profile) || [];
-    group.push(item);
-    groupedProfiles.set(item.profile, group);
+  if (re.profile && !f.profile.disabled && !f.profile.value) {
+    const want = String(re.profile).split(":", 1)[0];
+    if ([...(f.profile.options || [])].some((o) => o.value === want)) {
+      f.profile.value = want;
+    }
   }
-  fillSpawnSelect(ui.profile, [...groupedProfiles].map(([profile, options]) => [
-    profile, profile,
-    options.every((item) => item.harness_available === false),
-  ]), "(inherit the parent's profile)", desiredProfile);
-  refillSpawnHarnesses(ui, desiredHarness);
-  ui._borrowPreset =
-    (seed.borrow !== undefined && seed.borrow !== null) ? seed.borrow :
-      (re.borrow || "");
-  const initialSelector = spawnProfileSelector(ui);
-  const initialDetail = ui.profileDetails[initialSelector] ||
-    ui.profileDetails[baseProfileName(initialSelector)];
-  const initialHarness = (initialDetail && initialDetail.harness) ||
-    sess.harness || "";
-  const initialBorrowCap = profileBorrowCapability(
-    initialDetail, initialHarness
-  );
-  fillValidatedBorrow(
-    ui.borrow, { options: [] },
-    initialBorrowCap.allowed
-      ? `(as ${parent} authenticates)`
-      : profileOwnAuthLabel(initialSelector, initialHarness),
-    "", "",
-    initialBorrowCap.allowed ? baseProfileName(initialSelector) : ""
-  );
-  fillSpawnSelect(ui.role, roleNames.map((r) => [r, r]), "(no role)",
-    (seed.role !== undefined && seed.role !== null) ? seed.role :
-      (re.role || ""));
-  fillSpawnSelect(ui.mesh,
-    [].concat(meshNames.map((n) => [n, n]), [["-", "(none) — no mesh"]]),
-    "(inherit the parent's mesh)",
-    // Inherit is the DEFAULT, not merely an option: the row now opens the way
-    // Profile and Directory do. Naming the parent's mesh outright is
-    // the same answer only while the parent is in one mesh, and it spells that
-    // answer into the payload — which takes the choice away from
-    // daemon/onboard.py inherit_mesh, the one place that knows the rule.
-    seed.mesh !== undefined ? seed.mesh : "");
-  const wsp = ui.report.workspaces;   // absent when the policy locks the row
-  fillSpawnSelect(ui.workspace,
-    (wsp || []).map((w) => [w.name, w.exists ? `${w.name} — ${w.path}` : `${w.name} (missing)`, !w.exists]),
-    "(inherit the parent's directory)", seed.workspace || "");
-  /* The seed still speaks the API's language — `true` for "one of its own",
-     a name for a particular checkout — and this is where that becomes a mode.
-     A name the repository already has is a REUSE; a name it does not have is
-     a new checkout carrying its name, which is what the quick job's saved
-     default means when it names one. */
-  const wts = ui.git.worktrees || [];
-  const wt = seed.worktree;
-  const named = (typeof wt === "string" && wt) ? wt : "";
-  const reuse = named && wts.includes(named);
-  fillSpawnSelect(ui.wtPick, wts.map((n) => [n, n]),
-    wts.length ? null : "(no worktree here yet)", reuse ? named : "");
-  /* Silence in the seed opens on "new". A checkout of its own is what a
-     child usually needs -- two sessions in one checkout tread on each
-     other's edits and branch switches -- so the form opens on the mode that
-     keeps them apart, and sharing the parent's directory becomes an answer
-     the operator gives rather than one they forget to take away. Only
-     SILENCE, though: `worktree: false` is what the quick-job panel sends for
-     an unticked box, and that is an answer already.
-
-     Where the row cannot be used the default stays the harmless one. A
-     directory that is no repository takes the row away and a locked
-     `spawn.allow_worktree` greys every radio (syncSpawnGates), and
-     spawnPayload reads through both -- so a "new worktree" left checked
-     there would send nothing while telling the operator, over a note reading
-     "a child inherits its parent's directory", that a checkout is coming. */
-  const wtSaid = wt !== undefined && wt !== null;
-  const wtOpen = !!ui.git.repo &&
-    ((ui.report.may_choose || []).includes("worktree"));
-  ui.wtMode.value = wt === true || (named && !reuse) || (!wtSaid && wtOpen)
-    ? "new"
-    : reuse ? "existing" : "";
-  if (named && !reuse) ui.wtName.value = named;
-  if (seed.wtName) ui.wtName.value = seed.wtName;
-  if (seed.context) ui.context.value = seed.context;
-  if (seed.rebase) ui.rebase.value = seed.rebase;
-
-  // Only a HARD block stops the load here. The child cap is soft and is
-  // crossed by the Over-limit row below, so stopping on it would hide that
-  // row (syncSpawnGates is what un-hides it) AND leave the Workflow picker
-  // unfilled -- a modal that reports "child limit reached" over an empty
-  // dropdown, which is what a full parent used to open as.
-  const hard = spawnHardBlocks(ui.report);
-  if (hard.length) {
-    st.noteShow(hard.join("; ") || "this session may not spawn", "wf-warning");
-    return;   // the form stands readable; the button stays dead
-  }
-  const verdict = spawnPreflightNote(ui.report);
-  // Which of the six sources did not arrive. Said before the slot count,
-  // and in the warning colour: a picker that is empty because its fetch
-  // failed is the one thing this form cannot let the operator discover by
-  // pressing Spawn — the payload simply omits the field, and the child comes
-  // up without the role or workflow it was meant to have.
-  const srcNote = spawnSourceNote(spawnMissingSources({
-    "the spawn policy": report, roles, profiles: profDoc,
-    meshes: meshDoc, "the git state": gitDoc, workflows: wfDoc,
-  }));
-  // Where the verdict is SAID depends on which verdict it is. Below the cap
-  // it is a standing fact about the parent ("2 child slot(s) left") and reads
-  // with the form's other standing facts, at the top. At the cap it is the
-  // reason a particular button is dead, so it goes to that button — as the
-  // gate's heading, one line above the crossing that revives it. Carrying it
-  // in both places would only teach the operator to read neither.
-  const capped = !verdict.ok;
-  // The cap has its own home now -- the gate down in the action bar, beside
-  // the button it is about. Saying it up here as well is the three-places
-  // layout that gate was built to end: in both places would only teach the
-  // operator to read neither.
-  const softCap = !!(report.soft_blocked_by || []).length;
-  const lines = [];
-  if (srcNote) lines.push(srcNote);
-  if (verdict.msg && !capped && !softCap) lines.push(verdict.msg);
-  if (lines.length) {
-    st.noteShow(lines.join(" · "), srcNote ? "wf-warning" : "wf-note");
-  }
-  ui.capped = capped;
-  // Two sentences for two situations, and they are no longer the same one.
-  // A hard block (spawning off, depth) leaves Spawn dead and no box can
-  // change that. The soft cap leaves Spawn alive and says so — the box under
-  // it is how someone asks to be refused, which is the opposite errand from
-  // the one the old "until this box is ticked" sent them on.
-  ui.capNote.textContent = capped
-    ? `${verdict.msg || "this session may not spawn"} — Spawn stays dead`
-    : (report.soft_blocked_by || []).join("; ");
-
-  // The workflow picker's first fill: a seed names the workflow outright (the
-  // quick-job default), otherwise the parent's own pair is offered.
-  // Reading THROUGH the seed lets refill keep a value the auto had set, which
-  // is how a role switch re-homes it without trampling an explicit pick.
-  ui.workflow.value = seed.workflow || "";
-  syncSpawnGates(ui);
-  st.lastWfAuto = refillSpawnWorkflows(ui, seed.role || re.role || ui.role.value, "").auto;
-  syncSpawnGates(ui);
-  await refreshSpawnBorrowOptions(st, true);
-  if (spawnModal !== st) return;
-  // The child cap no longer shuts the button, so the tick no longer opens
-  // it: what is left in `capped` is spawning switched off and the depth
-  // ceiling, and neither of those is a thing a checkbox waives. The button
-  // follows the hard verdict alone, and the title says which one it is
-  // instead of pointing at a box that would not help.
-  st.spawnBtn.disabled = capped;
-  st.spawnBtn.title = capped
-    ? (verdict.msg || "this session may not spawn")
-    : "";
-  // The default mesh's own members, fetched once so the connect offers are
-  // standing before anyone touches the mesh picker.
-  refreshSpawnConnect(st).then(() => {
-    if (spawnModal === st) syncSpawnGates(ui);
-  });
-
-  // The choices that re-gate their neighbours:
-  ui.profile.addEventListener("change", () => {
-    refillSpawnHarnesses(ui, ui.profile.value ? undefined : "");
-    return refreshSpawnBorrowOptions(st, true);
-  });
-  ui.harness.addEventListener("change", () =>
-    refreshSpawnBorrowOptions(st, true));
-  ui.nullTok.addEventListener("change", () => syncSpawnGates(ui));
-  ui.codexYolo.addEventListener("change", () => syncSpawnGates(ui));
-  ui.codexSandbox.addEventListener("change", () => syncSpawnGates(ui));
-  for (const { input } of ui.piTools || []) {
-    input.addEventListener("change", () => syncSpawnGates(ui));
-  }
-  ui.wtMode.listen(() => syncSpawnGates(ui));
-  ui.wtPick.addEventListener("change", () => syncSpawnGates(ui));
-  ui.update.addEventListener("change", () => syncSpawnGates(ui));
-  ui.workspace.addEventListener("change", () => {
-    syncSpawnGates(ui);
-    // The board follows the Directory row in the create form, and a child
-    // aimed at another workspace stands on that board — the issue memo is
-    // given back so the next "existing" reads there regardless (the same
-    // drop the create form does on its Directory row).
-    ui._issuesFor = null;
-    ui._issuesRead = false;
-    // A different workspace is a different board — the search goes with
-    // the memo, or a filter written for one directory reads as silence on
-    // another.
-    ui.issueFilter.value = "";
-    if (ui.beads.value === "existing") refreshSpawnBeads(st);
-  });
-  ui.workflow.addEventListener("change", () => syncSpawnGates(ui));
-  ui.mesh.addEventListener("change", () => refreshSpawnConnect(st).then(() => syncSpawnGates(ui)));
-  ui.handle.addEventListener("input", () => refreshSpawnConnect(st).then(() => syncSpawnGates(ui)));
-  ui.role.addEventListener("change", () => {
-    const last = st.lastWfAuto;
-    st.lastWfAuto = refillSpawnWorkflows(ui, ui.role.value, last).auto;
-    syncSpawnGates(ui);
-  });
-
-  /* The board row's own wiring. The radio listener exists for the FETCH —
-     the gates already re-sync the row on any change — because the list is
-     only worth a board read once somebody picks the one answer that looks
-     at it; the pick listener re-verdicts the hint under the picked row.
-     syncSpawnGates re-syncs the row on any other change. */
-  ui.beads.listen(() => {
-    if (ui.beads.value === "existing") refreshSpawnBeads(st);
-    syncSpawnBeads(ui);
-  });
-  ui.issuePick.addEventListener("change", () => syncSpawnBeads(ui));
-  /* The search box re-narrows the picker on every keystroke; it answers to
-     the same list the picker reads, so it needs no fetch of its own. */
-  ui.issueFilter.addEventListener("input", () => {
-    ui._semantic = null;
-    fillSpawnIssueOptions(ui);
-  });
-  ui.issueFilter.addEventListener("keydown", (e) => {
-    if (e.key === "Enter") { e.preventDefault(); runSpawnIssueSemantic(st); }
-  });
 }
 
-/* Enter in the modal's search box: the same board the candidates came from
-   (`ui._issueWhere`, set by refreshSpawnBeads), asked by meaning. */
-async function runSpawnIssueSemantic(st) {
-  const ui = st.ui;
-  const q = ((ui.issueFilter && ui.issueFilter.value) || "").trim();
-  if (!q || !ui._issueWhere) return;
-  let next;
+/* ---- the peers a child is wired to on arrival -------------------------
+   The mesh row makes the child a MEMBER; this row is the wiring, and the
+   two are different questions — a member of a room it may not address is
+   the state this row exists to avoid having to repair afterwards. Offered
+   from the EFFECTIVE mesh rather than the literal pick, since sitting on
+   "(inherit)" still lands the child in the parent's mesh, and only for
+   members that are actually reachable (connectCandidate). */
+let sessionConnectHandles = [];
+let sessionConnectPicked = [];
+let sessionConnectFor = null;
+let sessionParentMeta = {};   // parent name -> { meshes, handle }
+
+async function readParentMeshes(name) {
+  if (sessionParentMeta[name]) return sessionParentMeta[name];
+  let doc = null;
   try {
-    const resp = await api(`/api/search?kind=beads&q=${encodeURIComponent(q)}&limit=30&${ui._issueWhere}`);
-    const data = await resp.json().catch(() => ({}));
-    next = resp.ok
-      ? { q, order: (data.results || []).map((r) => r.id),
-          scores: Object.fromEntries((data.results || []).map((r) => [r.id, r.rerank_score ?? r.score])) }
-      : { q, order: null, error: data.error || `HTTP ${resp.status}` };
-  } catch (err) {
-    next = { q, order: null, error: String(err) };
-  }
-  if (((ui.issueFilter && ui.issueFilter.value) || "").trim() !== q) return;
-  ui._semantic = next;
-  fillSpawnIssueOptions(ui);
-}
-
-/* The issues the "existing" answer offers, fetched from the daemon's own
-   verdicts (daemon/beads.py adoption) so the row promises exactly what the
-   spawn is about to do. The child stands in the parent's directory unless
-   the workspace row moves it, and the board follows the child — which is
-   why the candidates endpoint takes `?parent=` and resolves it to the
-   parent's cwd (api.py h_beads_candidates); a pick of a particular
-   workspace asks that board directly.
-
-   Claimed before the await and given back on failure, like the create
-   form's refreshIssueChoices: an empty list remembered as an answer would
-   leave the picker blank for the life of the open. */
-async function refreshSpawnBeads(st) {
-  const ui = st.ui;
-  const wsp = (!ui.workspace.disabled && ui.workspace.value)
-    ? ((ui.report && ui.report.workspaces) || [])
-        .find((w) => w.name === ui.workspace.value)
-    : null;
-  const key = wsp ? `cwd:${wsp.path || wsp.name}` : `parent:${st.parent}`;
-  if (key === ui._issuesFor) return;
-  ui._issuesFor = key;
-  let answered = false;
-  try {
-    const q = wsp && wsp.path
-      ? `cwd=${encodeURIComponent(wsp.path)}`
-      : `parent=${encodeURIComponent(st.parent)}`;
-    ui._issueWhere = q;
-    const resp = await api(`/api/beads/candidates?${q}`);
-    const doc = resp.ok ? await resp.json() : {};
-    ui._issues = doc.issues || [];
-    ui._issuesError = doc.error || "";
-    answered = resp.ok;
-  } catch {
-    ui._issues = [];
-    ui._issuesError = "";
-  }
-  if (!answered && ui._issuesFor === key) ui._issuesFor = null;
-  ui._issuesRead = true;
-  fillSpawnIssueOptions(ui);
-  if (spawnModal === st) syncSpawnBeads(ui);
-}
-
-/* The picker, filled from the last board answer and kept on the row the
-   operator already chose — the same "leave a value standing where it was"
-   rule the other pickers refill under. The search box narrows the same
-   list, with a lead row that says how many survived; a pick the filter
-   left out is given back, exactly as the create form's picker lets it go. */
-function fillSpawnIssueOptions(ui) {
-  const kept = ui.issuePick.value;
-  const q = ((ui.issueFilter && ui.issueFilter.value) || "").trim();
-  const all = ui._issues || [];
-  const order = q && typeof issueSemanticOrder === "function"
-    ? issueSemanticOrder(all, q, ui._semantic || null) : null;
-  const shown = !q ? all : order ? order.shown : all.filter((i) => issueSearchMatches(q, i));
-  fillSpawnSelect(
-    ui.issuePick,
-    shown.map((i) => {
-      const held = i.held_by ? ` — held by ${i.held_by}, would JOIN` : "";
-      return [
-        i.id,
-        `${i.id}  ${i.title || ""}`.trim() + ` [${i.status}]${held}`,
-      ];
-    }),
-    typeof issuePickerLead === "function"
-      ? issuePickerLead(q, shown, all.length, order && order.semantic)
-      : !q ? "(pick an issue)"
-        : shown.length
-          ? `(${shown.length} of ${all.length} match)`
-          : `(no issue matches "${q}")`,
-    kept && shown.some((i) => i.id === kept) ? kept : ""
-  );
-}
-
-/* The connect row: the members of the picked mesh the child may also message.
-   The parent's own handle and the child's pick are excluded — the mesh join
-   wires both — and the list is opt-in, so nothing is connected it was not
-   asked to be. */
-async function refreshSpawnConnect(st) {
-  const ui = st.ui;
-  // The effective mesh, not the literal pick: sitting on "(inherit)" still
-  // lands the child in the parent's mesh, so its members are still the peers
-  // on offer. spawnMeshNow answers "" when there is nothing to inherit — a
-  // parent in no mesh (the daemon opens a fresh one holding only the pair) or
-  // in several (the daemon refuses rather than guess) — and an empty answer
-  // is the right one to offer no peers for.
-  const mesh = spawnMeshNow(ui);
-  ui._connectChecked = [];
-  const row = ui.connectRow;
-  row.innerHTML = "";
-  if (!mesh || mesh === "-") { ui.connectHandles = []; return; }
-  let info = null;
-  try {
-    info = await api(`/api/mesh/${encodeURIComponent(mesh)}`)
+    doc = await api(`/api/sessions/${encodeURIComponent(name)}/meta`)
       .then((r) => (r.ok ? r.json() : null));
-  } catch { info = null; }
-  if (spawnModal !== st) return;
-  const handles = spawnConnectNow(ui,
-    (info && info.members || []).filter(connectCandidate).map((m) => m.handle));
-  ui.connectHandles = handles;
-  if (!handles.length) return;   // the row stays hidden; the join is enough
+  } catch { doc = null; }
+  // Not memoised on a failure: an unanswered fetch is not the fact "this
+  // session is in no mesh", and remembering it as one would hold the row
+  // empty for the life of the tab.
+  if (!doc) return { meshes: [], handle: null, missing: true };
+  const rooms = (doc.meshes || []).filter(Boolean);
+  const meta = {
+    meshes: rooms.map((m) => m.mesh || "").filter(Boolean),
+    handle: rooms.length ? rooms[0].handle : null,
+  };
+  sessionParentMeta[name] = meta;
+  return meta;
+}
+
+/* The mesh the child would land in: the one picked, or the parent's own.
+   "-" is the API's own spelling for "none at all", and a parent in several
+   meshes has no inheritance this row can name — the daemon refuses to guess
+   between them (daemon/onboard.py inherit_mesh), so neither does this. */
+function sessionMeshNow(parentMeta) {
+  const f = $("new-session");
+  const picked = f.mesh.value || "";
+  if (picked === "-") return "";
+  if (picked) return picked;
+  const rooms = (parentMeta && parentMeta.meshes) || [];
+  return rooms.length === 1 ? rooms[0] : "";
+}
+
+function renderSessionConnect() {
+  const row = $("new-connect-row");
+  if (!row) return;
+  row.innerHTML = "";
+  const f = $("new-session");
+  const mine = (f.handle.value || "").trim();
+  const handles = sessionConnectHandles.filter((h) => h && h !== mine);
+  row.classList.toggle("hidden", !handles.length);
+  if (!handles.length) return;   // the row stays shut; the join is enough
   row.appendChild(el("span", "sess-spawn-label", "Connect"));
   const boxes = [];
   for (const h of handles) {
     const lab = el("label", "check sess-spawn-check");
     const cb = document.createElement("input");
     cb.type = "checkbox";
+    cb.checked = sessionConnectPicked.includes(h);
     boxes.push({ h, cb });
     cb.addEventListener("change", () => {
-      ui._connectChecked =
-        boxes.filter((b) => b.cb.checked).map((b) => b.h);
+      sessionConnectPicked = boxes.filter((b) => b.cb.checked).map((b) => b.h);
     });
     lab.append(cb, el("span", null, h));
     row.appendChild(lab);
   }
 }
 
-async function spawnModalGo(st) {
-  if (st.busy) return;
-  const ui = st.ui;
-  const body = spawnPayload(ui);
-  st.busy = true;
-  setActionPending(st.spawnBtn, true, "Spawning…");
-  st.cancelBtn.disabled = true;
-  st.noteShow("Starting child session…", "wf-note submit-status");
-  const res = await postSpawn(st.parent, body);
-  st.busy = false;
-  if (spawnModal !== st) return;
-  if (!res.ok) {
-    st.noteShow(res.error, "wf-warning");
-    st.cancelBtn.disabled = false;
-    setActionPending(st.spawnBtn, false);
-    return;
+async function refreshSessionConnect(force = false) {
+  const parent = spawnParent();
+  const meta = parent ? await readParentMeshes(parent.name) : null;
+  const mesh = parent ? sessionMeshNow(meta) : "";
+  const key = parent ? `${parent.name}|${mesh}` : "";
+  if (!force && key === sessionConnectFor) return;
+  sessionConnectFor = key;
+  sessionConnectHandles = [];
+  sessionConnectPicked = [];
+  if (!mesh) { renderSessionConnect(); return; }
+  let info = null;
+  try {
+    info = await api(`/api/mesh/${encodeURIComponent(mesh)}`)
+      .then((r) => (r.ok ? r.json() : null));
+  } catch { info = null; }
+  if (sessionConnectFor !== key) return;   // the pick moved on while we asked
+  sessionConnectHandles = ((info && info.members) || [])
+    .filter(connectCandidate)
+    .map((m) => m.handle)
+    .filter((h) => h && h !== (meta && meta.handle));
+  renderSessionConnect();
+}
+
+/* The wiring the form asks for, read from the row that is actually up: a
+   tick standing on a hidden row is not an answer, and neither is one given
+   before the mesh row was set to "no mesh". */
+function sessionConnectFields(f, body) {
+  const row = $("new-connect-row");
+  if (!row || row.classList.contains("hidden")) return;
+  if (f.mesh.value === "-") return;
+  const mine = (f.handle.value || "").trim();
+  const conn = sessionConnectPicked.filter((h) => h && h !== mine);
+  if (conn.length) body.connect = conn;
+}
+
+/* ---- the tab ----------------------------------------------------------
+   The whole difference between the two paths: whether a parent is named.
+   Nothing is rebuilt and nothing is cleared — the values the operator has
+   typed are in the same DOM either way, which is what "switching tabs
+   keeps the input" means here. */
+function setSessionModalTab(tab) {
+  const f = $("new-session");
+  const want = tab === "spawn" ? "spawn" : "new";
+  if (sessionModal) sessionModal.tab = want;
+  if (want === "spawn") {
+    const pin = (sessionModal && sessionModal.parent) || "";
+    if (pin) {
+      ensureOption(f.parent, pin, `${pin} — running`);
+      f.parent.value = pin;
+    }
+  } else {
+    f.parent.value = "";
   }
-  saveSpawnRecall({
-    parent: st.parent,
-    profile: body.profile, borrow: body.borrow,
-    null_token: !!body.null_token, role: body.role,
-  });
-  spawnModalClose();
-  // The spawned session is what the press was for, so the page goes there —
-  // the same landing the create form gives (`#/s/<name>` right after its
-  // POST). Without it the wizard closed onto whatever was behind it and the
-  // new terminal had to be found in the rail by hand, which on a busy rail
-  // is a scroll and a guess at which `sN` is the new one.
-  //
-  // The rail is refreshed FIRST and awaited: the terminal route repoints the
-  // detail panel and paints the header from `sessionsCache`, and a route
-  // entered before the child is in that cache paints an empty one.
-  await refreshSessions();
-  if (sessName === st.parent) refreshSessKids();
-  // The spawn endpoint wraps the child ("session"), and the same shape is
-  // read in the create form. A daemon that answered without a name is not a
-  // reason to navigate nowhere — the spawn still happened, so the rail
-  // refresh above stands and only the hop is skipped.
-  const made = (res.doc && res.doc.session) || res.doc || {};
-  if (made.name) go("#/s/" + encodeURIComponent(made.name));
+  syncSessionModalTabStrip();
+  applySessionParentChange();
+  syncSessionModalChrome();
+}
+
+/* The strip itself, drawn from the tab the modal is on. Its own function
+   because the parent picker can change the tab without being one of its
+   buttons: pointing it at "(none)" IS the New session tab, and a strip that
+   went on claiming otherwise would be the one part of the box disagreeing
+   with the form under it. */
+function syncSessionModalTabStrip() {
+  const want = (sessionModal && sessionModal.tab) === "spawn" ? "spawn" : "new";
+  const parentRow = $("new-parent-row");
+  // On the New session tab the parent row is not merely empty, it is the
+  // question the tab has already answered — a visible "(none)" picker there
+  // would be a second, contradicting way to change tabs.
+  if (parentRow) parentRow.classList.toggle("hidden", want === "new");
+  for (const [id, key] of [["new-tab-new", "new"], ["new-tab-spawn", "spawn"]]) {
+    const btn = $(id);
+    if (!btn) continue;
+    btn.setAttribute("aria-selected", key === want ? "true" : "false");
+    btn.classList.toggle("active", key === want);
+  }
+}
+
+/* The box's title and the submit button's wording — the two places besides
+   the strip where the modal says which tab it is on. The label is left
+   alone while a request is in flight: setActionPending owns it then, and
+   the word it restores is the one this function last wrote. */
+function syncSessionModalChrome() {
+  const f = $("new-session");
+  const parent = spawnParent();
+  const title = $("modal-title");
+  if (title && sessionModal) {
+    title.textContent = parent
+      ? `Spawn a child of ${parent.name}`
+      : "New session";
+  }
+  const submit = f.querySelector("button[type=submit]");
+  if (submit && !submit.classList.contains("action-pending")) {
+    submit.textContent = parent ? "Spawn child" : "Create";
+    submit._idleLabel = submit.textContent;
+  }
+}
+
+/* Everything that has to be re-asked when the parent changes — by the tab,
+   by the picker, or by a pin. It was the parent select's own listener; the
+   tab needs the same work done, and two copies of it would be the drift
+   this modal exists to end. */
+function applySessionParentChange() {
+  newWorktreeFor = null;
+  refreshNewWorktree();
+  syncSpawnMode();
+  refreshSpawnPolicy();
+  // A child is created on the board of ITS directory, which the parent
+  // decides — so the memo is dropped here as well as on the Directory row.
+  issuesFor = null;
+  issuesRead = false;
+  // ...and the search with it: the board the filter was written against
+  // is not the board a new parent stands in.
+  issueFilter = "";
+  if (beadsMode() === "existing") refreshIssueChoices();
+  syncOnboardPickers();
+  refreshSessionConnect(true);
+}
+
+/* Open it. `tab` picks the side ("new" by default, "spawn" when a parent is
+   named), `parent` pins the opener, `seed` is the quick job's pickers and
+   `mesh` is what a `#/new/<mesh>` link asked for. This is the one entry
+   point anything outside this section needs. */
+async function openSessionModal(opts = {}) {
+  const f = $("new-session");
+  const tab = opts.tab || (opts.parent ? "spawn" : "new");
+  const parent = tab === "spawn"
+    ? (opts.parent || (f.parent && f.parent.value) || "")
+    : "";
+  const st = { tab, parent, seed: opts.seed || null, busy: false };
+  sessionModal = st;
+  // The page head says "New session" above a form that is now inside a box
+  // with a title of its own, so it is the one part of the page the modal
+  // takes down.
+  const head = $("new-page-head");
+  if (head) head.classList.add("hidden");
+  const overlay = $("modal-overlay");
+  const body = $("modal-body");
+  body.innerText = "";
+  body.appendChild(f);
+  const actions = $("modal-actions");
+  actions.innerHTML = "";
+  const cancel = el("button", "wf-btn option", "Cancel");
+  cancel.addEventListener("click", sessionModalClose);
+  actions.appendChild(cancel);
+  st.cancelBtn = cancel;
+  overlay.onclick = (e) => { if (e.target === overlay) sessionModalClose(); };
+  document.addEventListener("keydown", sessionModalKey);
+  overlay.classList.remove("hidden");
+  overlay.classList.add("spawn-open");
+  spawnSizeApply(overlay.querySelector(".modal-box"));
+  if (opts.mesh) pendingNewMesh = opts.mesh;
+  refreshParentChoices();
+  setSessionModalTab(tab);
+  if (opts.seed) applySessionModalSeed(f, opts.seed);
+  else applySessionModalRecall(f);
+  // The option sets the form stands on. Each failure degrades its own
+  // field, exactly as it does on the page: a daemon that could not answer
+  // about worktrees is not a reason to refuse to draw the form.
+  await Promise.all([
+    Promise.resolve(refreshWorkspaces()).catch(() => {}),
+    Promise.resolve(refreshNewWorktree()).catch(() => {}),
+    Promise.resolve(refreshWorkflowChoices()).catch(() => {}),
+    Promise.resolve(refreshRoles(f.mesh.value || "")).catch(() => {}),
+  ]);
+  if (sessionModal !== st) return;
+  syncOnboardPickers();
+  // Again, and deliberately: the fills above rebuild the role and workflow
+  // lists, and a seeded answer set before them is one those rebuilds can
+  // drop. The second pass is what makes a quick job's pickers survive the
+  // arrival of the daemon's own option sets.
+  if (opts.seed) applySessionModalSeed(f, opts.seed);
+  syncSessionModalChrome();
+}
+
+/* Give the form back. The node returns to `#new-view` before the overlay is
+   hidden: a form left hanging in a modal body that the next dialog clears
+   with `innerText = ""` is a form deleted out of the page. */
+function sessionModalClose(opts = {}) {
+  if (!sessionModal) return;
+  if (sessionModal.busy) return;
+  sessionModal = null;
+  const overlay = $("modal-overlay");
+  // Before the class goes: the size is read off the box while the spawn
+  // rules still apply to it, and the inline pair is stripped so the next
+  // confirm dialog opens at the sheet's 460px rather than at this form's
+  // drag.
+  spawnSizeRemember(overlay.querySelector(".modal-box"));
+  const f = $("new-session");
+  const home = $("new-view");
+  if (f && home) home.appendChild(f);
+  const head = $("new-page-head");
+  if (head) head.classList.remove("hidden");
+  const parentRow = $("new-parent-row");
+  if (parentRow) parentRow.classList.remove("hidden");
+  overlay.classList.add("hidden");
+  overlay.classList.remove("spawn-open");
+  $("modal-actions").innerHTML = "";
+  document.removeEventListener("keydown", sessionModalKey);
+  // `#/new` is the modal's own route, so closing it is leaving that route.
+  // Any other page was merely behind the overlay and stays where it was.
+  // `route: false` is for the caller that is already navigating somewhere
+  // better — the submit handler, which is on its way to the new session and
+  // does not want a hop through home first.
+  if (opts.route !== false && String(location.hash || "").startsWith("#/new")) {
+    go("#/");
+  }
+}
+
+/* The older entry point, kept under the name everything already presses:
+   the rail's +, the detail panel's Spawn button and the leader's quick job.
+   It is the spawn tab with the opener pinned. */
+async function openSpawnModal(parentName, opts = {}) {
+  if (!parentName) return;
+  await openSessionModal({ tab: "spawn", parent: parentName,
+                           seed: (opts || {}).seed || null });
 }
 
 /* ---- the PR wizard: a branch and a pull request from a session's directory ----
@@ -21093,6 +20256,10 @@ function prModalClose() {
 }
 
 async function openPrModal(sessionName) {
+  // The session form is a borrowed node: it lives in #modal-body while its
+  // modal is open, and this function clears that body. Give it back first or
+  // the page loses the form for the life of the tab.
+  if (sessionModal) sessionModalClose();
   if (!sessionName) return;
   const { box, ui, noteShow } = buildPrForm(sessionName);
   const overlay = $("modal-overlay");

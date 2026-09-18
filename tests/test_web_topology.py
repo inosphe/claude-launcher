@@ -42,12 +42,17 @@ into the terminal's column, and the localStorage both are remembered in —
 claim which panels, the leader's quick-job dispatch (its pickers now seed the
 spawn wizard rather than POSTing, and how a refused policy keeps the button
 dead) and its reaping nudge, which reports idle children into the leader's own
-terminal rather than killing anything — ``spawnmodal_check`` on the spawn
-wizard as a dialog — the rail's +, the detail panel's Spawn button and the
-leader's quick job all landing in it with the opener pinned as the parent; the
-brain's gating (a policy-locked row greys with the key that opens it) and the
-payload it emits reading through the disables, plus what the modal remembers
-between spawns — ``queued_check`` on
+terminal rather than killing anything — ``sessionmodal_check`` on the one
+modal both ways of creating a session now use: the shipped ``#new-session``
+form, BORROWED by the modal (the node is moved into the modal body and put
+back in ``#new-view`` on close) with a tab strip that sets the single answer
+the two paths differ on, whether a parent is named. It holds the borrow's
+round trip and the remembered box size, the tab keeping every typed value and
+never disagreeing with the parent picker, the three rows that only a child
+has (the mesh refusal, the Connect list and the run refusal a cleared
+Workflow row travels as) and the quick job's seed surviving the arrival of
+the daemon's option sets. It replaces ``spawnmodal_check``, which drove the
+second form this change removed — ``queued_check`` on
 the queued-deliveries banner — the backlog the daemon is holding for the
 attached session, and whose keyboard it blames for the hold —
 ``window_check`` on the read-only measurement Window page — holders, FIFO
@@ -310,7 +315,7 @@ CHECKS = [
         "transcript_check.js",
         "sesslayout_check.js",
         "rolepanel_check.js",
-        "spawnmodal_check.js",
+        "sessionmodal_check.js",
         "queued_check.js",
         "window_check.js",
         "sendinput_check.js",
@@ -361,6 +366,8 @@ CHECKS = [
         "relaysettings_check.js",
         "profilesettings_check.js",
         "beadskanban_check.js",
+        "beadsgroups_check.js",
+        "beadsworkspace_check.js",
         "queues_check.js",
         "railbeads_check.js",
         "railbeadskanban_check.js",

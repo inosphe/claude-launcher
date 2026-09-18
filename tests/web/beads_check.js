@@ -108,6 +108,10 @@ new Function(
   + slice("sessReports") + slice("sessReportRow")
   + slice("fmtReportSize") + slice("reportWhen")
   + slice("beadsHierarchy") + slice("beadsRelationBlock")
+  // The pane's own two sections: the issue's target workspace, and the two
+  // ways to start a session on it. beadsworkspace_check.js is what pins their
+  // behaviour; they are here because the pane calls them.
+  + slice("beadsStripMeta") + slice("beadsWorkspaceBlock") + slice("beadsStartBlock")
   + slice("beadsDetailPane")
   + slice("beadsPageTabs")
   + `

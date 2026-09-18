@@ -2056,6 +2056,45 @@ body.term-split #terminal { flex: var(--split-term, 0.6) 1 0; min-height: 80px; 
 }
 .beads-comment { padding: 8px 0; border-top: 1px solid #22262d; }
 
+/* The issue's target workspace: where a session created from it is opened.
+   A row rather than a line of prose, because it is the one thing in this pane
+   the reader can change. */
+.beads-detail-ws { margin-top: 10px; }
+.beads-ws-row { display: flex; align-items: center; gap: 8px; margin: 4px 0 2px; }
+.beads-ws-row > span {
+  font-size: 11px; text-transform: uppercase; letter-spacing: .04em; color: #8b949e;
+}
+.beads-ws-pick {
+  flex: 1; min-width: 0; background: #16191f; color: #c6cdd5;
+  border: 1px solid #22262d; border-radius: 6px; padding: 4px 6px; font-size: 12px;
+}
+.beads-ws-note { margin: 0; }
+
+/* The two answers to "start a session on this issue": a root session, or a
+   child of a running one. Side by side because neither is the default. */
+.beads-detail-start { margin-top: 12px; }
+.beads-start-row { display: flex; gap: 8px; flex-wrap: wrap; margin: 4px 0 6px; }
+.beads-detail-start .wf-note { margin: 0 0 2px; }
+
+/* The two halves of a board (app.js: BEADS_GROUPS). backlog is what nobody
+   has taken up; TODO is everything already spoken for. The header carries the
+   count so the pile that needs handing out is readable without counting
+   lanes, which is what it took before the split. */
+.beads-group + .beads-group { margin-top: 14px; }
+.beads-group-head {
+  display: flex; align-items: baseline; gap: 8px; margin: 0 0 6px;
+  padding-bottom: 4px; border-bottom: 1px solid #22262d;
+}
+.beads-group-name {
+  margin: 0; font-size: 12px; text-transform: uppercase; letter-spacing: .06em;
+  color: #c6cdd5;
+}
+.beads-group.backlog .beads-group-name { color: #79c0ff; }
+.beads-group-count {
+  font-size: 12px; color: #8b949e; font-variant-numeric: tabular-nums;
+}
+.beads-group-note { margin-left: auto; font-size: 11px; }
+
 /* the kanban: one lane per status, cards nested by parent-child.
    The lanes scroll sideways rather than reflowing -- a board is read by
    comparing lanes, and a lane that wrapped under another is no longer beside
@@ -3668,6 +3707,29 @@ body.embed #main { width: 100%; }
      path is enough to push the panel off the side of the screen */
   #mesh-view select, #wf-view select, #sess-view select { max-width: 100%; }
 }
+
+/* ---- the session modal's two tabs ----------------------------------- */
+/* One form, two ways in: a session of its own, or a child of a named parent.
+   The strip is inside the form so it travels with the node when the modal
+   borrows it, which is also why it is styled on its own classes rather than
+   on a modal selector: it has to look the same on the page and in the box.
+   Same shape as the trace page's tabs; the state is `aria-selected`, since
+   that attribute is what a screen reader reads and a second class saying the
+   same thing is a second thing to keep in step. */
+.sess-modal-tabs { display: flex; gap: 6px; margin-bottom: 12px; }
+.sess-modal-tab {
+  cursor: pointer; border: 1px solid #30363d; background: #1b1e24;
+  color: #9da5b0; border-radius: 6px; padding: 5px 12px; font-size: 12px;
+  flex: 1 1 0; max-width: 180px;
+}
+.sess-modal-tab:hover { border-color: #4d5566; color: #d8dbe0; }
+.sess-modal-tab[aria-selected="true"] {
+  background: #172947; border-color: #58a6ff; color: #cfe2ff; cursor: default;
+}
+/* The page caps the form at a readable column; inside the box the box IS the
+   column, and a 520px form in a 700px dialog leaves a stripe of empty sheet
+   down one side. */
+#modal-overlay.spawn-open #new-session { max-width: none; }
 
 /* The spawn wizard as a dialog: every session's fleet-growing verb. The
    confirm dialogs the overlay normally holds are 460px of prose; a form is

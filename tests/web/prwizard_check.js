@@ -1,6 +1,6 @@
 /* The PR wizard: the detail head's "Open PR" button, its modal, its rules.
    A browser judges how it looks; the RULES are what break, and they are
-   driven here against a stub DOM the way spawnmodal_check does. What must
+   driven here against a stub DOM the way sessionmodal_check does. What must
    hold: the preview fills the form's defaults and a blocker keeps the button
    dead; the monitor checkbox lives only under a ticked report checkbox AND
    a daemon that offers a monitor (a tick on a greyed box is dropped); the
@@ -113,6 +113,11 @@ function cwdLine() { return el("div", "sess-cwd"); }
 function closeDetail() {}
 function go() {}
 function openSpawnModal() {}
+/* The session form is a node the session modal borrows, and this dialog
+   clears the body it would be sitting in — so openPrModal gives it back
+   first. Nothing here opens that modal, so the state is simply absent. */
+let sessionModal = null;
+function sessionModalClose() {}
 const MOBILE_MQ = { matches: false };
 `;
 
@@ -120,7 +125,7 @@ const ctx = {};
 new Function(
   "exports", "document", "el", "api", "$",
   stubs
-  + slice("spawnRow") + slice("spawnSubRow") + slice("spawnCheckRow")
+  + slice("spawnRow") + slice("spawnCheckRow")
   + slice("spawnGroup") + slice("fillSpawnSelect") + slice("setActionPending")
   + slice("prCheck") + slice("buildPrForm") + slice("syncPrGates") + slice("prPayload")
   + slice("prApplyPreview") + slice("prModalKey") + slice("prModalClose")

@@ -1,7 +1,11 @@
-/* New-session's Borrow row follows the Profile + Harness pair and the two
-   controls recombine to PROFILE:HARNESS for the daemon. This is intentionally
-   separate from spawn checks: no parent/policy exists here to explain an
-   accidentally grey row. */
+/* The session form's Borrow row follows the Profile + Harness pair, and the
+   two controls recombine to PROFILE:HARNESS for the daemon. Both sides of
+   the form are driven here, because one function answers for both now: with
+   no parent the base profile folds into the own-token choice, and with one
+   the inherited arrangement and the profile's own token are two separate
+   head answers. The spawn wizard used to own a second copy of this rule
+   (refreshSpawnBorrowOptions) and it was checked separately; there is one
+   form and one rule now, so there is one set of checks. */
 const fs = require("fs");
 const path = require("path");
 const src = fs.readFileSync(
@@ -180,12 +184,17 @@ async function checkBorrowAuthModes() {
     claude: { auth: "claude" }, codex: { auth: "oauth" },
   };
   let parent = null;
+  // The base profile's own credential state, flipped by the last check: an
+  // own-token head answer the daemon says is unusable must be offered
+  // GREYED with its reason, never quietly dropped.
+  let baseSelectable = true;
   const authApi = async (url) => ({
     ok: true, status: 200,
     json: async () => url.includes("codex%3Acodex")
       ? { capability: { allowed: false, mode: "none" }, options: [] }
       : { options: [
-          { name: "work", label: "work", selectable: true, message: "ready" },
+          { name: "work", label: "work", selectable: baseSelectable,
+            message: baseSelectable ? "ready" : "no usable token" },
           { name: "ds4", label: "ds4", selectable: true, message: "ready" },
         ] },
   });
@@ -228,6 +237,14 @@ exports.sync = syncNewBorrowOptions;`
   check("the duplicate lender row is folded into that head answer",
     borrow.options.filter((o) => o.value === "work").length === 1, values);
 
+  baseSelectable = false;
+  await auth.sync(true);
+  const own2 = borrow.options.find((o) => o.value === "work");
+  check("an unusable own token is greyed with the lender's reason",
+    own2 !== undefined && own2.disabled && /no usable token/.test(own2.title || ""),
+    own2 && [own2.disabled, own2.title]);
+  baseSelectable = true;
+
   authForm.profile.value = "codex";
   authForm.harness.value = "codex";
   await auth.sync(true);
@@ -238,76 +255,8 @@ exports.sync = syncNewBorrowOptions;`
     borrow.options.map((o) => [o.value, o.textContent]));
 }
 
-async function checkSpawnModalBorrowHead() {
-  const mkBorrow = () => ({
-    kids: [], value: "", disabled: false, title: "",
-    set innerHTML(value) { this.kids = []; },
-    get innerHTML() { return ""; },
-    appendChild(child) { this.kids.push(child); return child; },
-    get options() { return this.kids; },
-  });
-  const mkUi = () => ({
-    profile: { value: "" },           // inherit the parent's profile
-    parentSess: { profile: "work:claude", harness: "claude" },
-    profileDetails: {
-      "work:claude": { harness: "claude", borrow_allowed: true,
-                         borrow_mode: "provider-token" },
-    },
-    borrow: mkBorrow(),
-  });
-  let baseSelectable = true;
-  const spawnApi = async () => ({
-    ok: true, status: 200,
-    json: async () => ({ options: [
-      { name: "work", label: "work", selectable: baseSelectable,
-        message: baseSelectable ? "ready" : "no usable token" },
-      { name: "ds4", label: "ds4", selectable: true, message: "ready" },
-    ] }),
-  });
-  const spawn = {};
-  new Function(
-    "exports", "api", "document",
-    `let spawnModal = null;
-function syncSpawnGates() {}
-function spawnModalClose() {}
-` + slice("baseProfileName") + slice("spawnProfileSelector")
-    + slice("profileBorrowCapability")
-    + slice("profileOwnAuthLabel") + slice("fillValidatedBorrow")
-    + slice("readBorrowOptions") + slice("refreshSpawnBorrowOptions") + `
-exports.refresh = refreshSpawnBorrowOptions;
-exports._setModal = (s) => { spawnModal = s; };`
-  )(spawn, spawnApi,
-    { createElement: () => ({ value: "", textContent: "", title: "", disabled: false }) });
-
-  const st = { ui: mkUi(), parent: "lead" };
-  spawn._setModal(st);
-  await spawn.refresh(st, true);
-  const values = borrow2values(st.ui.borrow);
-  check("the spawn modal heads with inherit, then the profile's own token",
-    values.join(",") === ",work,ds4", values);
-  const own = st.ui.borrow.options.find((o) => o.value === "work");
-  check("the spawn modal's own answer names the base profile",
-    own !== undefined && own.textContent === "work's own token" && !own.disabled,
-    own && [own.textContent, own.disabled]);
-  check("the spawn modal folds the duplicate lender row",
-    st.ui.borrow.options.filter((o) => o.value === "work").length === 1, values);
-
-  baseSelectable = false;
-  const st2 = { ui: mkUi(), parent: "lead" };
-  spawn._setModal(st2);
-  await spawn.refresh(st2, true);
-  const own2 = st2.ui.borrow.options.find((o) => o.value === "work");
-  check("an unusable own token is greyed with the lender's reason",
-    own2 !== undefined && own2.disabled && /no usable token/.test(own2.title || ""),
-    own2 && [own2.disabled, own2.title]);
-}
-
-function borrow2values(select) {
-  return select.options.map((o) => o.value);
-}
-
 Promise.all([
-  checkProfilePicker(), checkBorrowAuthModes(), checkSpawnModalBorrowHead(),
+  checkProfilePicker(), checkBorrowAuthModes(),
 ]).then(() => {
   console.log("borrowform_check: " + (failures ? `${failures} failing` : "ok"));
   process.exitCode = failures ? 1 : 0;
