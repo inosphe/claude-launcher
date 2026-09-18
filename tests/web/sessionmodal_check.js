@@ -100,9 +100,8 @@ check("openSpawnModal is the spawn tab with the opener pinned",
 check("the #/new route keeps its name and its mesh argument",
       /case "new": showView\("new"\); openNewSession\(r\.mesh\);/.test(src),
       true);
-check("...and that opener is the New session tab",
-      /openSessionModal\(\{ tab: "new", mesh: pendingNewMesh \}\)/.test(src),
-      true);
+check("the page opener does not create an overlay",
+      slice("openNewSession").includes("openSessionModal("), false);
 check("the PR wizard gives the borrowed form back before clearing the body",
       /async function openPrModal\(sessionName\) \{[\s\S]{0,400}if \(sessionModal\) sessionModalClose\(\);/
         .test(src), true);
@@ -184,7 +183,7 @@ function picker(pairs = []) {
 const ids = {};
 function $(id) { return ids[id] || null; }
 for (const id of ["modal-overlay", "modal-body", "modal-actions", "modal-title",
-                  "new-view", "new-page-head", "new-parent-row",
+                  "new-view", "new-page-head", "new-parent-row", "new-session-actions",
                   "new-handle-row", "new-connect-row", "new-tab-new",
                   "new-tab-spawn", "create-status", "create-error"]) {
   ids[id] = node("div", id);
@@ -216,6 +215,7 @@ form.issue = picker([["(pick an issue)", ""]]);
 form._submit = Object.assign(node("button"), { textContent: "Create" });
 form._submit.attrs.type = "submit";
 ids["new-session"] = form;
+ids["new-session-actions"].appendChild(form._submit);
 ids["new-view"].appendChild(form);
 
 let parentNow = null;
@@ -288,12 +288,14 @@ function Option(label, value) {
   + slice("sessionConnectFields") + slice("setSessionModalTab")
   + slice("syncSessionModalTabStrip") + slice("syncSessionModalChrome")
   + slice("applySessionParentChange") + slice("openSessionModal")
+  + slice("openNewSession")
   + slice("sessionModalClose") + slice("openSpawnModal") + `
 const SPAWN_SIZE_KEY = \`claunch_spawnsize:\${BASE}\`;
 const SPAWN_W_MIN = 420, SPAWN_H_MIN = 240;
 const spawnWMax = () => 2000, spawnHMax = () => 1200;
 Object.assign(exports, {
   open: openSessionModal, close: sessionModalClose, spawn: openSpawnModal,
+  page: openNewSession,
   tab: setSessionModalTab, seed: applySessionModalSeed,
   recall: applySessionModalRecall, connect: refreshSessionConnect,
   connectFields: sessionConnectFields, meshNow: sessionMeshNow,
@@ -305,7 +307,7 @@ Object.assign(exports, {
 )(
   ctx, $, { createElement: node, addEventListener() {}, removeEventListener() {} },
   { innerWidth: 1600, innerHeight: 1000 }, localStorage,
-  { hash: "#/" },
+  { hash: "#/new" },
   async (url) => { calls.push("api:" + url); return apiAnswer(url); },
   state
 );
@@ -323,7 +325,21 @@ function apiAnswer(url) {
 
 /* ---- the borrow: open, and the round trip ----------------------------- */
 async function main() {
+  await ctx.page();
+  check("New session remains on the page without a modal",
+        [ctx.modal(), ids["modal-overlay"].classes.has("hidden"),
+         ids["new-view"].kids.includes(form)], [null, true, true]);
+  await ctx.tab("spawn");
+  check("the page's Spawn child tab opens a modal",
+        ids["modal-overlay"].classes.has("hidden"), false);
+  await ctx.page();
+  check("returning to New session restores the page",
+        [ctx.modal(), ids["new-view"].kids.includes(form)], [null, true]);
   await ctx.open({ tab: "new" });
+  check("submit and cancel share one action row",
+        ids["new-session-actions"].kids[0] === form._submit &&
+        ids["new-session-actions"].kids[1] === ctx.modal().cancelBtn, true);
+  check("Cancel never submits the form", ctx.modal().cancelBtn.type, "button");
   check("opening moves the form into the modal body",
         ids["modal-body"].kids.map((k) => k.id), ["new-session"]);
   check("...and takes the page's own heading down",
@@ -331,8 +347,8 @@ async function main() {
   check("...and the overlay is up, wearing the class that widens the box",
         [ids["modal-overlay"].classes.has("hidden"),
          ids["modal-overlay"].classes.has("spawn-open")], [false, true]);
-  check("...with exactly one action beside the form's own submit",
-        ids["modal-actions"].kids.map((k) => k.textContent), ["Cancel"]);
+  check("the separate modal footer has no actions",
+        ids["modal-actions"].kids.length, 0);
   check("the New session tab hides the parent row it has answered",
         ids["new-parent-row"].classes.has("hidden"), true);
   check("...and the strip says which tab that is",
@@ -389,6 +405,9 @@ async function main() {
         [modalBox.style.width, modalBox.style.height], ["", ""]);
   check("closing twice is not a second close",
         ctx.modal(), null);
+  check("closing removes Cancel from the page action row",
+        ids["new-session-actions"].kids.length, 1);
+  check("Cancel keeps the creation page open", calls.includes("go:#/"), false);
 
   /* ---- the seed --------------------------------------------------------- */
   form.task.value = ""; form.name.value = "";
