@@ -43,6 +43,16 @@ def _print(snapshot: dict, closed_limit: int) -> None:
         f"{snapshot.get('open_count', 0)} socket(s) open "
         f"(all daemon connections: {http_text})  at {snapshot.get('now', '?')}"
     )
+    ports = snapshot.get("ports_by_agent") or {}
+    if ports:
+        # Every peer here is 127.0.0.1, so this is the line that separates a
+        # browser's connections from a shell's. A browser at its own
+        # per-server ceiling stops adding ports while its page says it cannot
+        # connect.
+        print(
+            "  connections used recently: "
+            + ", ".join(f"{agent} {n}" for agent, n in ports.items())
+        )
     by_peer = snapshot.get("by_peer") or {}
     if by_peer:
         per = ", ".join(f"{ip} {n}" for ip, n in sorted(by_peer.items()))

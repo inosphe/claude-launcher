@@ -30,6 +30,8 @@ class _Request:
     """Enough of an aiohttp request for the registry: peer, headers, query."""
 
     def __init__(self, peer=("127.0.0.1", 51000), query=None, agent="Firefox/128"):
+        self.method = "GET"
+        self.path = "/api/sessions"
         self.transport = _Transport(peer)
         self.headers = {"User-Agent": agent, "Origin": "http://127.0.0.1:8378"}
         self.query = query or {}
@@ -240,3 +242,27 @@ def test_a_refused_upgrade_is_recorded_with_what_it_presented(home, tmp_path):
             await client.close()
 
     asyncio.run(run())
+
+
+def test_requests_are_counted_per_client_by_the_connection_they_arrived_on():
+    """Every client of this daemon is 127.0.0.1, so the address separates
+    nothing. The port identifies the connection and the User-Agent says whose
+    it is, which together answer how many connections a browser is using."""
+    registry = connections.Registry()
+
+    class _Req(_Request):
+        def __init__(self, port, agent):
+            super().__init__(peer=("127.0.0.1", port), agent=agent)
+            self.method = "GET"
+            self.path = "/api/sessions"
+
+    for port in (5001, 5002, 5003):
+        registry.request(_Req(port, "Mozilla/5.0 Firefox/128"), 200)
+    # The same connection used twice is one connection, not two.
+    registry.request(_Req(5001, "Mozilla/5.0 Firefox/128"), 200)
+    registry.request(_Req(6001, "Python/3.12 aiohttp/3.9"), 200)
+
+    ports = registry.snapshot()["ports_by_agent"]
+    assert ports == {"claunch": 1, "firefox": 3}
+    newest = registry.snapshot()["requests"][0]
+    assert newest["peer_port"] == 6001 and newest["status"] == 200
