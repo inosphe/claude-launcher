@@ -204,6 +204,32 @@ def _viewer_left(ws: web.WebSocketResponse, where: str) -> None:
 #: it anyway.
 SYNC_TIMEOUT = 2.0
 
+#: How often the daemon pings an attached socket. aiohttp allows half of it
+#: for the pong and closes the socket when none comes back, so this number
+#: is also how long a viewer may go without answering: 60 gives it 30
+#: seconds.
+#:
+#: It was 30 (a 15-second window), and 15 seconds is inside what a loaded
+#: browser takes. A second dashboard page is the case that was reported: two
+#: pages share one renderer, the renderer is what answers for the page, and
+#: while it is busy the ping goes unanswered. The daemon then closes the
+#: socket -- ``terminal websocket closed code=1006 error=TimeoutError('No
+#: PONG received after 15.0 seconds')``, five of them in the daemon log of
+#: 2026-09-18 -- the page reconnects into the same load and is closed again,
+#: which is the terminal that will not come up (claunch-u6lz).
+#:
+#: A dead peer is still found, 60 seconds later than before; nothing else
+#: reads this number. What it may not be is unbounded: a socket nobody is on
+#: the other end of holds a viewer subscription and its screen.
+#:
+#: The receive loop is the only place a pong is read, so anything that
+#: blocks that loop for a whole window costs the socket whatever this is set
+#: to -- which is why the frames a fresh socket opens with are written from
+#: the sender task (see :func:`terminal_ws`). A module constant so tests can
+#: shorten it.
+HEARTBEAT = 60.0
+
+
 
 async def _synced(session, timeout: float = SYNC_TIMEOUT) -> None:
     """Let the rendered grid catch up before it is replayed to a viewer.
@@ -242,7 +268,7 @@ class _SyncLane:
     notice) is cheap and stays inline.
     """
 
-    def __init__(self, ws, session, state: "ViewerState") -> None:
+    def __init__(self, ws, session, state: "ViewerState", opened=None) -> None:
         self._ws = ws
         self._session = session
         self._state = state
@@ -250,6 +276,10 @@ class _SyncLane:
         self._scrolled = False
         self._repaint = False
         self._task: Optional[asyncio.Task] = None
+        #: The socket's opening frames, still being written (terminal_ws).
+        #: A snapshot served ahead of them would paint over a grid the viewer
+        #: has not been sent yet, so the lane holds until they are out.
+        self._opened = opened
 
     @property
     def busy(self) -> bool:
@@ -283,6 +313,8 @@ class _SyncLane:
 
     async def _run(self) -> None:
         try:
+            if self._opened is not None:
+                await self._opened.wait()
             while self._scrolled or self._repaint:
                 if self._scrolled:
                     lines, self._scroll = self._scroll, 0
@@ -310,7 +342,7 @@ async def terminal_ws(request: web.Request) -> web.WebSocketResponse:
     manager = request.app["manager"]
     session: Session = manager.get(request.match_info["name"])
 
-    ws = web.WebSocketResponse(heartbeat=30)
+    ws = web.WebSocketResponse(heartbeat=HEARTBEAT)
     await ws.prepare(request)
 
     request.app["websockets"].add(ws)
@@ -321,7 +353,29 @@ async def terminal_ws(request: web.Request) -> web.WebSocketResponse:
     # the socket's two edges rather than on a timer.
     session.note_visit()
     state = ViewerState(focus_token=queue, overlay_bytes=_wants_overlay(request))
-    try:
+    want_scrollback = _wants_scrollback(request)
+    boot_id = request.app["boot_id"]
+    # Set once the frames a fresh socket opens with have all been written.
+    # The controls that answer with a snapshot wait for it, so nothing is
+    # painted over a screen the viewer has not been given yet.
+    opened = asyncio.Event()
+
+    async def prologue() -> None:
+        """The frames every fresh socket opens with: init, the scrollback it
+        asked for, then the grid as it stands.
+
+        Written from the sender task, not from this coroutine before the
+        receive loop starts. A client that is slow to drain (a browser with a
+        second dashboard page competing for the same renderer) stops reading
+        its socket, the write blocks on the full window, and a receive loop
+        that has not started yet reads no PONG -- so aiohttp closes the
+        socket after :data:`HEARTBEAT`/2 and the viewer sees a terminal that
+        never comes up, retrying into the same wedge. Measured 2026-09-18:
+        ``terminal websocket closed code=1006 error=TimeoutError('No PONG
+        received after 15.0 seconds')`` against a client that stopped reading
+        (claunch-u6lz). With the write on the sender task the receive loop is
+        already running, so the pong is answered while the seed drains.
+        """
         await ws.send_str(
             json.dumps(
                 {
@@ -338,7 +392,7 @@ async def terminal_ws(request: web.Request) -> web.WebSocketResponse:
                     # the pid they last had, so a pid on its own can repeat
                     # across daemons; a reconnecting viewer that is about to
                     # replay keystrokes needs both to be sure of its child.
-                    "boot_id": request.app["boot_id"],
+                    "boot_id": boot_id,
                     # Which buffer the program is in right now, so a viewer
                     # joining mid-TUI knows whether the wheel browses history
                     # (alt screen) or xterm's own scrollback (main buffer).
@@ -378,14 +432,26 @@ async def terminal_ws(request: web.Request) -> web.WebSocketResponse:
         # Skipped on the alternate screen whatever the client asked: those
         # rows would land in a buffer that keeps no scrollback, and a program
         # there has usually taken the mouse anyway.
-        if _wants_scrollback(request) and not session.screen.alt_screen:
+        if want_scrollback and not session.screen.alt_screen:
             seed = session.screen.history_sequence()
             if seed:
                 await ws.send_bytes(seed)
         await ws.send_bytes(session.screen.repaint_sequence(0))
+        opened.set()
 
-        sender = asyncio.ensure_future(_pump_to_client(ws, queue, session, state))
-        lane = _SyncLane(ws, session, state)
+    try:
+        sender = asyncio.ensure_future(
+            _pump_to_client(ws, queue, session, state, prologue=prologue)
+        )
+        # The writes used to be inline, so a socket that died under them
+        # ended this coroutine. They are on the sender task now, and a task
+        # that stops has no way back here -- the receive loop would sit on a
+        # socket nothing writes to. Closing it ends that loop, which is the
+        # same exit the inline write produced.
+        sender.add_done_callback(
+            lambda t: None if t.cancelled() else asyncio.ensure_future(ws.close())
+        )
+        lane = _SyncLane(ws, session, state, opened=opened)
         try:
             await _pump_from_client(ws, session, state, lane)
         finally:
@@ -430,7 +496,7 @@ async def cli_ws(request: web.Request) -> web.WebSocketResponse:
     # a Bearer header (CLI/scripts) or the session cookie (the SPA).
     shell = request.app["shell"]
 
-    ws = web.WebSocketResponse(heartbeat=30)
+    ws = web.WebSocketResponse(heartbeat=HEARTBEAT)
     await ws.prepare(request)
     request.app["websockets"].add(ws)
 
@@ -438,7 +504,15 @@ async def cli_ws(request: web.Request) -> web.WebSocketResponse:
     # it lives on its own until it exits (see ShellPty.start_once).
     shell.start_once()
     queue, replay = shell.attach()
-    try:
+
+    async def prologue() -> None:
+        """This socket's opening frames, written from the sender task.
+
+        Same reason as the session terminal's (see :func:`terminal_ws`): the
+        replay ring can be large, a client that has stopped draining blocks
+        the write, and a receive loop that has not started yet answers no
+        PONG -- which costs the socket after :data:`HEARTBEAT`/2.
+        """
         await ws.send_str(
             json.dumps(
                 {
@@ -458,7 +532,11 @@ async def cli_ws(request: web.Request) -> web.WebSocketResponse:
         if replay:
             await ws.send_bytes(replay)
 
-        sender = asyncio.ensure_future(_pump_cli(ws, queue))
+    try:
+        sender = asyncio.ensure_future(_pump_cli(ws, queue, prologue=prologue))
+        sender.add_done_callback(
+            lambda t: None if t.cancelled() else asyncio.ensure_future(ws.close())
+        )
         try:
             async for msg in ws:
                 if msg.type == WSMsgType.BINARY:
@@ -483,7 +561,11 @@ async def cli_ws(request: web.Request) -> web.WebSocketResponse:
     return ws
 
 
-async def _pump_cli(ws: web.WebSocketResponse, queue: asyncio.Queue) -> None:
+async def _pump_cli(
+    ws: web.WebSocketResponse, queue: asyncio.Queue, prologue=None
+) -> None:
+    if prologue is not None:
+        await prologue()
     while True:
         kind, payload = await queue.get()
         if kind == "data":
@@ -595,7 +677,21 @@ async def _pump_to_client(
     queue: asyncio.Queue,
     session: Session,
     state: ViewerState,
+    prologue=None,
 ) -> None:
+    """Everything this socket writes, on one task.
+
+    ``prologue`` is the socket's opening frames when the caller has them
+    (terminal_ws). They are written here rather than inline before the
+    receive loop starts, because a write to a client that has stopped
+    draining blocks until the window opens, and while that write is
+    outstanding nothing reads the socket -- including the PONG that keeps
+    aiohttp from closing it (see :data:`HEARTBEAT`). The queue is subscribed
+    before this task is created, so nothing the session printed meanwhile is
+    lost, and it is drained only after the prologue has gone out.
+    """
+    if prologue is not None:
+        await prologue()
     while True:
         kind, payload = await queue.get()
         if kind == "data":
