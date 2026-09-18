@@ -11727,7 +11727,7 @@ function openSettings(section) {
     // The profile manager draws from its own list. Firing the other
     // sections' refreshers here would spend six requests on cards this
     // section does not render, and each one re-renders on arrival.
-    refreshProfiles();
+    refreshProfileSettings();
     return;
   }
   refreshFaq();
@@ -14227,7 +14227,11 @@ function settingsTabs() {
   return tabs;
 }
 
-async function refreshProfiles() {
+/* Named apart from the new-session form's own `refreshProfiles`, which reads
+   the same endpoint for a different consumer: two top-level declarations of
+   one name do not coexist in a script, the later one replaces the earlier,
+   and the form's Profile <select> was left empty by exactly that. */
+async function refreshProfileSettings() {
   try {
     const resp = await api("/api/profiles");
     const data = await resp.json().catch(() => ({}));
@@ -14358,7 +14362,7 @@ async function profileModeApply(mode) {
   profileModeBusy = false;
   // Re-read rather than patch the cache: the write may have changed every
   // profile, and the table's whole value is that it says what is on disk.
-  await refreshProfiles();
+  await refreshProfileSettings();
 }
 
 function profilesPanel() {
