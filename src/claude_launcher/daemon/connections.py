@@ -48,6 +48,11 @@ CLOSED_KEEP = 100
 #: How many refused requests to keep. The same bound, for the same reason.
 REFUSED_KEEP = 100
 
+#: How many client-reported link failures to keep. Same bound, same reason:
+#: a page that cannot get a socket retries for as long as a person leaves it
+#: open, and the useful part of that is the shape of the run, not its length.
+LINK_FAILURES_KEEP = 100
+
 #: How many recent requests to keep. Larger, because these are what tell one
 #: client's connections from another's on a machine where every peer is
 #: 127.0.0.1: the port a request arrived on identifies the connection, and
@@ -69,6 +74,7 @@ class Registry:
         self._closed: list[dict[str, Any]] = []
         self._refused: list[dict[str, Any]] = []
         self._requests: list[dict[str, Any]] = []
+        self._link_failures: list[dict[str, Any]] = []
 
     # -- writing -------------------------------------------------------- #
     def opened(
@@ -171,6 +177,42 @@ class Registry:
         })
         del self._refused[:-REFUSED_KEEP]
 
+    def link_failed(self, request: web.Request, report: dict) -> dict[str, Any]:
+        """Record a socket the *client* could not open.
+
+        The one thing every record above has in common is that the daemon saw
+        the request. The failure this project spent three rounds on has the
+        opposite shape: the browser reached its per-server connection ceiling,
+        so the upgrade never left the connection queue and nothing arrived to
+        open, close or refuse. From this side the page looked idle, and the
+        only evidence was a person saying the terminal would not come up.
+
+        So the page says it instead. The report is the client's account and is
+        stored as such -- what it asked for, what the close event said, how
+        many tries it had spent -- next to the peer port of the connection
+        that carried the report, which is a connection the browser did manage
+        to get and therefore dates the failure against the rest of the log.
+        """
+        peer_ip, peer_port = _peer(request)
+        row = {
+            "at": _now_iso(),
+            "session": str(report.get("session") or "")[:64],
+            "code": report.get("code") if isinstance(report.get("code"), int) else None,
+            "reason": str(report.get("reason") or "")[:200],
+            "tries": report.get("tries") if isinstance(report.get("tries"), int) else None,
+            # None when the socket never reached OPEN, which is the case this
+            # record exists for: a handshake that was answered and then died
+            # is already in ``closed``.
+            "open_ms": report.get("open_ms") if isinstance(report.get("open_ms"), int) else None,
+            "held": report.get("held") if isinstance(report.get("held"), int) else None,
+            "peer_ip": peer_ip,
+            "peer_port": peer_port,
+            "agent": _agent_kind(request.headers.get("User-Agent", "")),
+        }
+        self._link_failures.append(row)
+        del self._link_failures[:-LINK_FAILURES_KEEP]
+        return row
+
     # -- reading -------------------------------------------------------- #
     def socket(self, socket_id: int) -> Any:
         """The open socket with this id, or ``None``.
@@ -223,6 +265,9 @@ class Registry:
             "refused_count": len(self._refused),
             "requests": list(reversed(self._requests)),
             "requests_kept": REQUESTS_KEEP,
+            "link_failures": list(reversed(self._link_failures)),
+            "link_failures_kept": LINK_FAILURES_KEEP,
+            "link_failures_count": len(self._link_failures),
             "ports_by_agent": self._ports_by_agent(),
             "live_by_agent": self._live_by_agent(live_ports),
         }

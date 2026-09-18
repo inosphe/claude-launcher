@@ -137,6 +137,146 @@ async function budgeted(send) {
   }
 }
 
+/* ---- the connection the page keeps ----
+
+   The budget above caps what the page has in flight; it does not cap what
+   the browser keeps. A pooled connection stays in Firefox's per-server
+   count for `network.http.keep-alive.timeout` (115s by default) after the
+   answer arrives, so the page held five against a ceiling of six: two for
+   the budget, one for the liveness probe, one for the terminal socket and
+   one for the parked one. One more tab reached the ceiling, and a terminal's
+   upgrade waited in the connection queue until a pooled connection expired
+   — about two minutes, with nothing on the daemon's side to see, because a
+   queued handshake is never sent (claunch-riq5).
+
+   A socket has no such arithmetic. This one is opened once, carries every
+   read of every tick, and is the liveness answer as well, which retires the
+   probe. The page then keeps two: this and the terminal.
+
+   It must not become the single point the page dies at, so nothing here
+   removes the HTTP path — `batchFlush` prefers this socket and falls back to
+   `POST /api/batch` whenever it is not up, which is also what happens
+   against a daemon too old to have the route. */
+const CONTROL_BACKOFF = [500, 1000, 2000, 4000, 8000, 10000];
+const CONTROL_READ_TIMEOUT_MS = 15000;
+let controlSock = null;
+let controlTry = 0;
+let controlTimer = null;
+let controlSeq = 0;
+const controlWaiting = new Map();
+
+function controlUp() {
+  return !!controlSock && controlSock.readyState === WebSocket.OPEN;
+}
+
+/* Fail every read still waiting on a socket that has gone. They are
+   rejected rather than left pending: `batchFlush` catches the rejection and
+   re-sends the same paths over HTTP, so a read outlives the transport that
+   was carrying it. */
+function controlAbort(why) {
+  for (const [id, waiter] of [...controlWaiting]) {
+    controlWaiting.delete(id);
+    clearTimeout(waiter.timer);
+    waiter.reject(new Error(why));
+  }
+}
+
+function openControlSocket() {
+  clearTimeout(controlTimer);
+  controlTimer = null;
+  if (controlSock) {
+    controlSock.onopen = null;
+    controlSock.onmessage = null;
+    controlSock.onclose = null;
+    try { controlSock.close(); } catch { /* already closed */ }
+  }
+  const proto = location.protocol === "https:" ? "wss" : "ws";
+  const sock = new WebSocket(`${proto}://${location.host}` + url("/api/control/ws"));
+  controlSock = sock;
+
+  sock.onopen = () => {
+    if (sock !== controlSock) return;
+    controlTry = 0;
+  };
+
+  sock.onmessage = (ev) => {
+    if (sock !== controlSock || typeof ev.data !== "string") return;
+    let msg;
+    try { msg = JSON.parse(ev.data); } catch { return; }
+    if (msg.type !== "read_result") return;
+    const waiter = controlWaiting.get(msg.id);
+    if (!waiter) return;                 // timed out already, and re-sent
+    controlWaiting.delete(msg.id);
+    clearTimeout(waiter.timer);
+    waiter.resolve({ answers: msg.answers || {}, errors: msg.errors || {} });
+  };
+
+  sock.onclose = () => {
+    if (sock !== controlSock) return;
+    controlSock = null;
+    controlAbort("control socket closed");
+    scheduleControlReopen();
+  };
+}
+
+/* Unlike the terminal's retry, this one never gives up. The terminal stops
+   because a person is looking at it and can press reconnect; nobody is
+   looking at this, and the page's whole tick rides it. The backoff ends at
+   ten seconds and stays there. */
+function scheduleControlReopen() {
+  clearTimeout(controlTimer);
+  const wait = CONTROL_BACKOFF[Math.min(controlTry, CONTROL_BACKOFF.length - 1)];
+  controlTry += 1;
+  controlTimer = setTimeout(openControlSocket, wait);
+}
+
+/* Open it if it is not already opening, open, or waiting to retry. Called
+   from boot(), which runs after the first authenticated read has answered:
+   an upgrade sent before the cookie exists is refused, and the retry that
+   follows would be the page's own doing. */
+function ensureControlSocket() {
+  if (controlSock || controlTimer) return;
+  controlTry = 0;
+  openControlSocket();
+}
+
+/* Ask for these paths over the socket. Resolves the way a batch does, or
+   rejects — on a socket that is down, a frame that will not send, or an
+   answer that does not come — and every rejection is a signal to the caller
+   to use HTTP instead. */
+function controlRead(paths) {
+  if (!controlUp()) return Promise.reject(new Error("control socket down"));
+  const id = ++controlSeq;
+  const sock = controlSock;
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      controlWaiting.delete(id);
+      reject(new Error("control read timed out"));
+    }, CONTROL_READ_TIMEOUT_MS);
+    controlWaiting.set(id, { resolve, reject, timer });
+    try {
+      sock.send(JSON.stringify({ type: "read", id, paths }));
+    } catch (err) {
+      controlWaiting.delete(id);
+      clearTimeout(timer);
+      reject(err);
+    }
+  });
+}
+
+/* Say something the daemon should write down, with no answer expected.
+   Silent when the socket is down: what rides this is diagnostic, and a
+   report that cannot be sent must not become a second failure. */
+function controlSay(frame) {
+  if (!controlUp()) return false;
+  try {
+    controlSock.send(JSON.stringify(frame));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 /* ---- one connection for the reads that happen together ----
 
    A browser holds a small number of connections to one server -- Firefox's
@@ -235,6 +375,26 @@ async function batchFlush() {
   }
   let answers = null;
   let errors = {};
+  // The socket first, because it costs no connection. Its rejection is not a
+  // failed read: it says this transport is not available right now, and the
+  // same paths go out over HTTP below exactly as they did before it existed.
+  try {
+    const carried = await controlRead(paths);
+    answers = carried.answers;
+    errors = carried.errors;
+  } catch {
+    answers = null;
+  }
+  if (answers !== null) {
+    for (const path of paths) {
+      if (Object.prototype.hasOwnProperty.call(answers, path)) {
+        settle(path, batchResponse(answers[path], true));
+      } else {
+        settle(path, batchResponse({ error: errors[path] || "not answered" }, false));
+      }
+    }
+    return;
+  }
   try {
     const resp = await api("/api/batch", {
       method: "POST",
@@ -7575,6 +7735,11 @@ function syncLinkChip() {
    cannot tell them apart either — the browser reports a 401 upgrade as a
    plain close with no status at all. */
 async function daemonHealth() {
+  // An open control socket has already answered this. It was opened against
+  // this daemon, the daemon has not closed it, and its heartbeat is what
+  // notices when the daemon stops -- so probing over HTTP would spend a
+  // connection to learn what the page is already holding.
+  if (controlUp()) return { ok: true, via: "control" };
   try {
     // Deliberately outside the budget below. It is the probe the recovery
     // path leans on, and one of it is in flight at a time: putting it behind
@@ -8370,6 +8535,21 @@ function linkDown(ev, sock) {
     retries: linkTry,
   });
   if (term) term.write("\r\n\x1b[90m[disconnected — reconnecting…]\x1b[0m\r\n");
+  // Tell the daemon, over the connection the page did manage to get. A
+  // socket that never reached OPEN leaves nothing on the daemon's side --
+  // no open, no close, not even a refusal -- because the browser holds the
+  // handshake in its connection queue and never sends it. Without this
+  // line the only evidence of the failure is a person reporting it.
+  if (readyMs === null) {
+    controlSay({
+      type: "link_failed",
+      session: linkName,
+      code: ev ? ev.code : null,
+      reason: ev ? String(ev.reason || "") : "",
+      tries: linkTry,
+      open_ms: sock && Number.isFinite(sock.linkOpenedAt) ? now - sock.linkOpenedAt : null,
+    });
+  }
   scheduleReconnect();
 }
 
@@ -9140,7 +9320,14 @@ const TERM_CACHE_MAX = 3;      // the on-screen terminal plus this many parked
    object and its scrollback are memory, not a connection, and returning to
    one whose socket was released costs a socket and one repaint -- the path
    restoreTerminal already takes for a parked socket that died. */
-const PARKED_SOCKET_MAX = 1;
+/* Zero, now that the poll no longer spends connections: the page holds the
+   control socket and the terminal it is looking at, and nothing else. One
+   parked socket was the difference between a second tab being safe and being
+   at the ceiling, and what it bought was a reconnect on the way back to a
+   session -- the terminal itself stays in `keptTerms` either way, so the
+   screen returns without a repaint. Raise it to 1 if that reconnect is ever
+   worth a connection again. */
+const PARKED_SOCKET_MAX = 0;
 const keptTerms = new Map();   // session name -> parked {term, fitAddon, ws, ...}
 
 /* Let a parked terminal's socket go, keeping the terminal itself. The shim
@@ -25363,6 +25550,10 @@ async function boot() {
     return;   // down, or the auth overlay is up — the poll comes back to this
   }
   daemonCache = info;
+  // That read was authenticated and answered, so the cookie this socket
+  // needs exists. boot() runs again on every recovery, and the guard inside
+  // means only the first of those opens anything.
+  ensureControlSocket();
   // Uptime is a duration measured at the instant it was read, so it goes
   // stale the moment it lands; the wall-clock start it implies does not.
   // That is what the home card shows, and it is what makes "did it restart
