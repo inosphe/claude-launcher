@@ -62,6 +62,7 @@ from . import mesh_roles
 from . import restart_gate
 from . import restart_notice
 from .harness import HarnessError, SessionDef
+from . import score_goal
 from .manager import ManagerError, SessionManager
 from .mesh import MeshBusy, MeshConflict, MeshError, MeshManager
 from .session import STATUS_IDLE, KeyboardHeld, SessionGone
@@ -587,6 +588,10 @@ def build_app(
     r.add_post("/api/sessions/{name}/queued/flush", h_session_queued_flush)
     r.add_post("/api/sessions/{name}/queued/hold", h_session_hold)
     r.add_get("/api/sessions/{name}/reminder", h_session_reminder)
+    r.add_get("/api/score-goal/defaults", h_score_goal_defaults)
+    r.add_put("/api/score-goal/defaults", h_score_goal_defaults_set)
+    r.add_get("/api/sessions/{name}/score-goal", h_session_score_goal)
+    r.add_put("/api/sessions/{name}/score-goal", h_session_score_goal_set)
     r.add_post("/api/sessions/{name}/reminder", h_session_reminder_set)
     r.add_post("/api/sessions/{name}/reminder/skip", h_session_reminder_skip)
     r.add_get("/api/sessions/{name}/children", h_session_children)
@@ -4175,6 +4180,7 @@ async def h_sessions_list(request: web.Request) -> web.Response:
             "name", "harness", "profile", "cwd", "args", "model", "effort",
             "tools", "restore", "conversation_id", "role", "parent", "borrow",
             "null_token", "issue", "keep_alive", "reminder_paused", "status",
+            "score_goal", "user_score",
             "pid", "exit_code", "created_at", "last_output_at",
             "last_visited_at", "last_input_at", "last_activity_at", "viewers",
             "exited_at", "archived_at", "paused_at", "delivery_hold",
@@ -4284,6 +4290,13 @@ async def _onboard_and_launch(
     manager: SessionManager = request.app["manager"]
     name, cwd = session.sdef.name, session.sdef.cwd
     try:
+        try:
+            selected = score_goal.enabled(body.get(
+                "score_goal", store.daemon_config().get("score_goal_default", False)
+            ))
+        except ValueError as exc:
+            raise onboard.OnboardError(str(exc)) from None
+        session.sdef = replace(session.sdef, score_goal=selected, user_score=0)
         # Inside the discarding try, and before anything is arranged: a board
         # answer that contradicts itself is checkable without a session, and
         # the alternative is a request that half-happens.
@@ -4379,7 +4392,9 @@ async def _onboard_and_launch(
         )
         report.update(arranged)
     try:
-        manager.launch(session, opening=opening)
+        # Slash commands must be entered alone in the terminal before the
+        # opening task. An argv prompt would start that task first.
+        manager.launch(session, opening="" if selected else opening)
     except Exception:
         manager.discard(name)
         await onboard.unwind(report, name=name, cwd=cwd, mesh_mgr=_mesh_mgr(request))
@@ -4817,6 +4832,46 @@ def _session(request: web.Request):
 
 async def h_session_get(request: web.Request) -> web.Response:
     return json_response(_session(request).info())
+
+
+async def h_score_goal_defaults(request: web.Request) -> web.Response:
+    return json_response({"enabled": bool(store.daemon_config().get("score_goal_default", False))})
+
+
+async def h_score_goal_defaults_set(request: web.Request) -> web.Response:
+    body = await _json_body(request)
+    try:
+        value = score_goal.enabled(body.get("enabled"))
+    except ValueError as exc:
+        return json_error(400, str(exc))
+    store.set_daemon_field("score_goal_default", value)
+    return json_response({"enabled": value})
+
+
+async def h_session_score_goal(request: web.Request) -> web.Response:
+    return json_response(score_goal.view(_session(request).sdef))
+
+
+async def h_session_score_goal_set(request: web.Request) -> web.Response:
+    session = _session(request)
+    if session.exited:
+        return json_error(409, "session has exited")
+    if not session.sdef.score_goal:
+        return json_error(409, "score goal is not enabled for this session")
+    body = await _json_body(request)
+    try:
+        value = score_goal.score(body.get("score"))
+    except ValueError as exc:
+        return json_error(400, str(exc))
+    changed = value != session.sdef.user_score
+    session.sdef = replace(session.sdef, user_score=value)
+    request.app["manager"].persist()
+    if changed:
+        message = score_goal.prompt(value)
+        if value == 10:
+            message += "\n목표 점수 10점에 도달하여 점수 목표 알림을 해제합니다."
+        session.queue_delivery(message)
+    return json_response(score_goal.view(session.sdef))
 
 
 def _session_reminder_service(request: web.Request):

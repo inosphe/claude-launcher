@@ -433,6 +433,14 @@
              autocomplete="off" spellcheck="false"
              aria-label="type text and send it to this session"></textarea>
       <span id="term-input-note" class="wf-note hidden"></span>
+      <span id="term-score-goal" class="hidden">
+        <label for="term-score-value">Score</label>
+        <input id="term-score-value" type="text" inputmode="decimal"
+               aria-label="Session score, 0 to 10" autocomplete="off" size="3">
+        <span>/10</span>
+        <button id="term-score-save" class="term-btn" type="button">Set score</button>
+        <span id="term-score-note" role="status"></span>
+      </span>
       <button id="term-input-send" class="term-btn" type="submit"
               title="send these keys to the session">⏎</button>
     </form>
@@ -672,6 +680,9 @@
         <fieldset id="new-task">
           <legend><span class="sess-spawn-step">7</span> Opening task</legend>
           <p class="sess-spawn-group-blurb">what it is told once it boots</p>
+          <label class="check"><input type="checkbox" name="score_goal">
+            Aim for a user score of 10/10</label>
+          <p class="wf-note">Starts at 0. Sends /goal once, then repeats the goal in reminders until you give 10/10.</p>
           <textarea name="task" rows="3"
             placeholder="typed in once it has booted — what it is for"></textarea>
         </fieldset>

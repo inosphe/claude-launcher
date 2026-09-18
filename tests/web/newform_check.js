@@ -140,7 +140,7 @@ check("the form's controls read in the new order", named(form.text), [
   "worktree_mode", "worktree_mode", "worktree_name", "worktree_mode",
   "worktree_existing", "worktree_rebase",
   // what it is told first
-  "task",
+  "score_goal", "task",
   // where that job is written down — four radios sharing one name, then
   // the rows each of which only one of them opens
   "beads", "beads", "beads", "beads", "issue_text", "issue_filter", "issue",

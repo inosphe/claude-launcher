@@ -359,6 +359,7 @@ DAEMON_DEFAULTS = {
     # combined Session reminder.
     "role_reminder": True,
     "role_reminder_interval": 600.0,
+    "score_goal_default": False,
     # The run event clock's machine switch: whether an overseer session (the
     # driver's spawn parent, else its mesh leader) is told when a run it
     # oversees hits a human gate, finishes a recurring round, or loses its

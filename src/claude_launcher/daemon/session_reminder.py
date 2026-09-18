@@ -24,7 +24,7 @@ from typing import Dict, List, Optional, Tuple
 
 from .. import digests, store
 from ..cflow import engine as cflow_engine
-from . import cflow_clock, mesh_roles, rebrief
+from . import cflow_clock, mesh_roles, rebrief, score_goal
 from .session import STATUS_BUSY
 
 log = logging.getLogger("claunch.daemon.session-reminder")
@@ -240,9 +240,12 @@ def reminder_block(
     situation: Optional[List[str]] = None,
     context: Optional[List[str]] = None,
     cflow_guidance: bool = False,
+    goal: str = "",
 ) -> str:
     """Render one session reminder with peer Role and Cflow sections."""
     sections: List[Tuple[str, List[str]]] = []
+    if goal:
+        sections.append(("Score goal", [goal]))
     role_lines = role_section(roles, cflow_guidance=cflow_guidance)
     if role_lines:
         sections.append(("Role", role_lines))
@@ -279,6 +282,7 @@ class SessionReminderService:
         # table directly.  The table still belongs to the cflow source.
         self._seen = self.cflow._seen
         self._roles: Dict[str, dict] = {}
+        self._goals: Dict[str, dict] = {}
         self._task: Optional[asyncio.Task] = None
 
     def start(self) -> None:
@@ -345,6 +349,10 @@ class SessionReminderService:
             role["at"] = stamp
             role["held_at"] = None
             sources.append("role")
+        goal = self._goals.get(name)
+        if goal is not None:
+            goal.update(at=stamp, held_at=None)
+            sources.append("score_goal")
         return sources
 
     def set_paused(
@@ -552,6 +560,25 @@ class SessionReminderService:
                 view["state"] = "due" if busy else "held"
         return {"paused": paused, "role": view}
 
+    def scan_goals(self, now: float, cfg: dict) -> set:
+        """An opted-in goal also repeats without a role or cflow run."""
+        interval = max(
+            cflow_engine.REMINDER_MIN_INTERVAL,
+            float(cfg.get("cflow_reminder_interval") or 600),
+        )
+        due, live = set(), set()
+        for session in self.manager.list():
+            if getattr(session, "exited", False) or not score_goal.active(session.sdef):
+                continue
+            name = session.sdef.name
+            live.add(name)
+            entry = self._goals.setdefault(name, {"at": now, "held_at": None})
+            if now - entry["at"] >= interval:
+                due.add(name)
+        for name in set(self._goals) - live:
+            del self._goals[name]
+        return due
+
     async def tick(self, now: float) -> None:
         """One coordinated pass, grouping due sources by session."""
         cflow_due, cfg = await asyncio.gather(
@@ -563,6 +590,7 @@ class SessionReminderService:
             if cfg is not None
             else {}
         )
+        goals_due = self.scan_goals(now, cfg) if cfg is not None else set()
 
         reminders: Dict[str, tuple] = {}
         for cwd, scope, block, kind in cflow_due:
@@ -571,7 +599,7 @@ class SessionReminderService:
             elif not self.session_paused(scope):
                 reminders[scope] = (cwd, block)
 
-        for name in sorted(set(reminders) | set(roles_due)):
+        for name in sorted(set(reminders) | set(roles_due) | goals_due):
             if self.session_paused(name):
                 continue
             cflow_item = reminders.get(name)
@@ -586,8 +614,8 @@ class SessionReminderService:
             else:
                 await self._deliver_session(
                     name,
-                    roles=roles_due[name],
-                    role_due=True,
+                    roles=roles_due.get(name),
+                    role_due=name in roles_due,
                 )
 
     @staticmethod
@@ -640,6 +668,7 @@ class SessionReminderService:
                 return
 
         cflow_entry = self._seen.get((cwd, name)) if cwd else None
+        goal_entry = self._goals.get(name)
         cflow_full = bool(cflow_block) and not bool((cflow_entry or {}).get("restated"))
         current_roles = (
             roles if roles is not None else role_entries(name, self.manager, self.mesh)
@@ -651,6 +680,8 @@ class SessionReminderService:
                 cflow_entry["held_at"] = stamp
             if role_due and name in self._roles:
                 self._roles[name]["held_at"] = stamp
+            if goal_entry is not None:
+                goal_entry["held_at"] = stamp
             log.debug("session reminder held for %r: session is not working", name)
             return
 
@@ -661,6 +692,9 @@ class SessionReminderService:
         # immediately.  Keep this transition scoped to sources that were
         # actually held; an unrelated source may still be delivered normally.
         resumed = False
+        if goal_entry is not None and goal_entry.get("held_at") is not None:
+            goal_entry.update(at=time.monotonic(), held_at=None)
+            resumed = True
         if cflow_entry is not None and cflow_entry.get("held_at") is not None:
             cflow_entry["at"] = time.monotonic()
             cflow_entry["held_at"] = None
@@ -686,17 +720,24 @@ class SessionReminderService:
             if (cflow_full or role_due)
             else []
         )
-        block = reminder_block(
-            name,
-            roles=current_roles,
-            cflow=cflow_block,
-            situation=situation,
-            context=context,
-            # The role-specific stalled-step correction retains its existing
-            # single-fire budget.  The role identity and stance id remain in
-            # every session reminder.
-            cflow_guidance=cflow_full,
-        )
+        def render():
+            active = score_goal.active(session.sdef)
+            if not cflow_block and not role_due and not active:
+                return ""
+            return reminder_block(
+                name,
+                goal=score_goal.prompt(session.sdef.user_score) if active else "",
+                roles=current_roles,
+                cflow=cflow_block,
+                situation=situation,
+                context=context,
+                cflow_guidance=cflow_full,
+            )
+
+        # Score may change while delivery waits for the person's input draft.
+        block = render if getattr(session.sdef, "score_goal", False) else render()
+        if not block:
+            return
         try:
             delivered = await session.deliver(block)
         except Exception:
@@ -704,6 +745,8 @@ class SessionReminderService:
             return
         if not delivered:
             return
+        if goal_entry is not None:
+            goal_entry.update(at=time.monotonic(), held_at=None)
         if cflow_block:
             self._mark_cflow(cwd, name, "reminder")
         if current_roles:

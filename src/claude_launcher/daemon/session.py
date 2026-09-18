@@ -22,7 +22,7 @@ import os
 import threading
 import time
 from datetime import datetime, timezone
-from typing import Callable, Dict, List, Optional, Set, Tuple
+from typing import Callable, Dict, List, Optional, Set, Tuple, Union
 
 from .. import atomic
 from .. import harnesses as harness_registry
@@ -985,7 +985,8 @@ class Session:
         return idle_for
 
     async def _deliver(
-        self, text: str, *, force: bool = False, wait_for_draft: bool = False
+        self, text: Union[str, Callable[[], str]], *, force: bool = False, wait_for_draft: bool = False,
+        command: bool = False,
     ) -> Optional[bool]:
         """Put ``text`` in front of the agent running here, as a user message.
 
@@ -1079,16 +1080,24 @@ class Session:
                 )
                 await self.write_bytes(b"\r")
                 await asyncio.sleep(FORCE_DRAFT_SETTLE)
-            await self.paste(f"{delivery_stamp()}\n{text}", enter=True)
+            # State-dependent reminders resolve after readiness and draft
+            # waits, so a newer user rating can replace or cancel them.
+            if callable(text):
+                text = text()
+                if not text:
+                    return False
+            await self.paste(text if command else f"{delivery_stamp()}\n{text}", enter=True)
         except Exception as exc:  # noqa: BLE001 — SessionGone, PTY write, ...
             log.debug("deliver to %r failed: %s", self.sdef.name, exc)
             return False
         return True
 
     async def deliver(
-        self, text: str, *, force: bool = False, wait_for_draft: bool = False
+        self, text: Union[str, Callable[[], str]], *, force: bool = False, wait_for_draft: bool = False
     ) -> bool:
-        """Deliver one automated message without interleaving another's input."""
+        """Deliver without interleaving input. A text factory can refresh state
+        after the keyboard wait; returning an empty string cancels the send.
+        """
         while True:
             async with self._delivery_lock:
                 result = await self._deliver(
@@ -1098,6 +1107,17 @@ class Session:
                 return result
             # Release the lock between safe retries, so an explicit forced
             # delivery can still submit the draft and release this wait.
+            await asyncio.sleep(0.2)
+
+    async def deliver_command(self, text: str) -> bool:
+        """Submit a single slash command without the automated-message stamp."""
+        if not text.startswith("/") or "\n" in text or "\r" in text:
+            raise ValueError("expected a single-line slash command")
+        while True:
+            async with self._delivery_lock:
+                result = await self._deliver(text, command=True, wait_for_draft=True)
+            if result is not None:
+                return result
             await asyncio.sleep(0.2)
 
     def queue_delivery(self, text: str) -> bool:

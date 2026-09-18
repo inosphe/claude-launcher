@@ -437,7 +437,7 @@ def test_every_harness_is_registered():
     )
 
 
-@pytest.mark.parametrize("script", ["diagramviewport_browser.cjs", "sessionform_browser.cjs"])
+@pytest.mark.parametrize("script", ["diagramviewport_browser.cjs", "sessionform_browser.cjs", "scoregoal_browser.cjs"])
 def test_diagram_viewport_browser(script):
     """Real scroll geometry and native touch input need a browser.
 

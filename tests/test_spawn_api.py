@@ -42,6 +42,88 @@ def _register_py_harness():
         lineage.set_harness(profile.create("py"), "py")
 
 
+def test_score_goal_defaults_creation_children_and_user_rating(home, tmp_path, monkeypatch):
+    from claude_launcher.daemon.session import Session
+    from claude_launcher.daemon import score_goal
+
+    _register_py_harness()
+    commands = []
+
+    async def command(session, text):
+        commands.append((session.sdef.name, text))
+        return True
+
+    monkeypatch.setattr(Session, "deliver_command", command)
+
+    async def run():
+        mgr = _manager()
+        mm = MeshManager(mgr, root=tmp_path / "mesh")
+        client = await _serve(mgr, mm)
+        launch = mgr.launch
+        openings = []
+
+        def record_launch(session, **kwargs):
+            openings.append(kwargs.get("opening"))
+            return launch(session, **kwargs)
+
+        monkeypatch.setattr(mgr, "launch", record_launch)
+        try:
+            resp = await client.get("/api/score-goal/defaults", headers=BEARER)
+            assert await resp.json() == {"enabled": False}
+            resp = await client.put("/api/score-goal/defaults", headers=BEARER, json={"enabled": "yes"})
+            assert resp.status == 400
+            resp = await client.put("/api/score-goal/defaults", headers=BEARER, json={"enabled": True})
+            assert resp.status == 200
+            assert store.daemon_config()["score_goal_default"] is True
+            resp = await client.post("/api/sessions", headers=BEARER, json={
+                "name": "rated", "profile": "py", "cwd": str(tmp_path),
+                "task": "do this task", "beads": False,
+            })
+            doc = await resp.json()
+            assert resp.status == 201, doc
+            assert doc["score_goal"] is True and doc["user_score"] == 0
+            assert openings == [""]  # No argv task may precede /goal.
+            await _wait_for(lambda: bool(commands), "initial goal")
+            assert commands == [("rated", "/goal " + score_goal.prompt(0))]
+            for value in [-1, 11, True, "7", None]:
+                resp = await client.put("/api/sessions/rated/score-goal", headers=BEARER, json={"score": value})
+                assert resp.status == 400
+            for value in [7.5, 10]:
+                resp = await client.put("/api/sessions/rated/score-goal", headers=BEARER, json={"score": value})
+                assert resp.status == 200
+                assert await resp.json() == {"enabled": True, "score": value, "active": value < 10}
+                assert mgr.get("rated").sdef.user_score == value
+                saved = next(row["def"] for row in mgr._store.load_all() if row["def"]["name"] == "rated")
+                assert SessionDef.from_dict(saved).user_score == value
+                assert SessionDef.from_dict(saved).score_goal
+            # Rating the session does not submit another slash command.
+            assert len(commands) == 1
+            resp = await client.post("/api/sessions/rated/children", headers=BEARER, json={
+                "name": "off", "score_goal": False, "mesh": "-", "workflow": "-", "beads": False,
+            })
+            doc = await resp.json()
+            assert resp.status == 201, doc
+            assert not mgr.get("off").sdef.score_goal
+            resp = await client.put("/api/sessions/off/score-goal", headers=BEARER, json={"score": 10})
+            assert resp.status == 409
+            resp = await client.post("/api/sessions/rated/children", headers=BEARER, json={
+                "name": "child", "mesh": "-", "workflow": "-", "beads": False,
+            })
+            assert resp.status == 201, await resp.json()
+            await _wait_for(lambda: len(commands) == 2, "child goal")
+            assert mgr.get("child").sdef.user_score == 0  # Never inherits the parent's ten.
+            assert commands[-1] == ("child", "/goal " + score_goal.prompt(0))
+            await client.put("/api/score-goal/defaults", headers=BEARER, json={"enabled": False})
+            assert mgr.get("rated").sdef.score_goal
+            resp = await client.get("/api/sessions?view=rail", headers=BEARER)
+            assert resp.status == 200
+        finally:
+            await mgr.shutdown_all()
+            await client.close()
+
+    asyncio.run(run())
+
+
 def _manager() -> SessionManager:
     return SessionManager(idle_threshold=0.5, scrollback=200, restore_default=True)
 
