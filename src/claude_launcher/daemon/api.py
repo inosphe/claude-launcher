@@ -129,23 +129,43 @@ def _token_eq(supplied: str, expected: str) -> bool:
 
 @web.middleware
 async def revalidate_middleware(request: web.Request, handler):
-    """Make the dashboard's own assets always revalidate.
+    """Make the dashboard's own assets revalidate, and release the
+    connection each one was served on.
 
-    ``index.html`` names ``static/app.js`` with no version, and aiohttp's
-    static handler sends no ``Cache-Control`` — so browsers fall back to
-    *heuristic* freshness (a fraction of the file's age) and serve a stale
-    bundle without ever asking us. A daemon that has already been upgraded
-    then keeps rendering the old UI, which reads as "the fix did not ship".
+    Two things, because the page's assets cause two separate problems and
+    both are settled in the same place -- the response that carries them.
 
-    ``no-cache`` does not mean "do not store": the ETag and Last-Modified
-    the static handler already sends turn each load into a conditional GET
-    that answers 304 in a couple of hundred bytes. Correctness for the cost
-    of one round-trip per asset.
+    *Revalidation.* ``index.html`` names ``static/app.js`` with no version,
+    and aiohttp's static handler sends no ``Cache-Control``, so browsers
+    fall back to *heuristic* freshness (a fraction of the file's age) and
+    serve a stale bundle without ever asking us. A daemon that has already
+    been upgraded then keeps rendering the old UI, which reads as "the fix
+    did not ship". ``no-cache`` does not mean "do not store": the ETag and
+    Last-Modified the static handler already sends turn each load into a
+    conditional GET that answers 304 in a couple of hundred bytes.
+
+    *Release.* A browser keeps a connection in its pool after the answer
+    arrives -- Firefox for 115 seconds by default -- and counts it against
+    a per-server ceiling of six. This page asks for twelve assets on a
+    load, so the load alone fills that pool, and for the next two minutes a
+    terminal's WebSocket upgrade waits in the browser's own connection
+    queue without ever being sent. Measured: at 10:02:56 six firefox
+    connections opened for ``app.js``, ``observer.js``, ``search-anything
+    .js``, ``diagram-viewport.js``, ``session-tabs.js`` and one ``/api/
+    batch``; from 10:03:02 to 10:03:34 the page reported twenty terminal
+    sockets it could not open (claunch-6j09). Closing the connection with
+    the response returns the slot when the asset is delivered rather than
+    two minutes later. It costs one TCP handshake per asset, which over
+    127.0.0.1 is not a cost worth keeping the pool for.
+
+    Both apply to the page and its assets only. ``/api/`` is left alone: it
+    is where the reads live, and they are on a socket of their own.
     """
     response = await handler(request)
     path = request.path
     if path == "/" or path.startswith("/static/"):
         response.headers.setdefault("Cache-Control", "no-cache")
+        response.force_close()
     return response
 
 
