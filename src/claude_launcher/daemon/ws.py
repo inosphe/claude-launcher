@@ -352,7 +352,7 @@ async def terminal_ws(request: web.Request) -> web.WebSocketResponse:
     # socket up leaves nothing behind, so "how many are open right now" is the
     # only reading that answers whether new ones are being refused.
     conns = conn_mod.install(request.app)
-    record = conns.opened("terminal", session.sdef.name, request)
+    record = conns.opened("terminal", session.sdef.name, request, ws=ws)
     log.info(
         "terminal websocket opened session=%s peer=%s:%s open=%d",
         session.sdef.name, record["peer_ip"], record["peer_port"],
@@ -514,7 +514,7 @@ async def cli_ws(request: web.Request) -> web.WebSocketResponse:
     await ws.prepare(request)
     request.app["websockets"].add(ws)
     conns = conn_mod.install(request.app)
-    record = conns.opened("cli", "(cli shell)", request)
+    record = conns.opened("cli", "(cli shell)", request, ws=ws)
 
     # First viewer of this daemon incarnation brings the shell up; afterwards
     # it lives on its own until it exits (see ShellPty.start_once).
