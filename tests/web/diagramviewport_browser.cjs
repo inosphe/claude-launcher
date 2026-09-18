@@ -38,6 +38,32 @@ const diagram = (kind = "wfd") => `<svg class="${kind}" viewBox="0 0 1600 2400" 
       let g = await geometry();
       assert(g.sw <= g.w + 1 && g.sh <= g.h + 1, "fit contains whole diagram"); checks++;
       assert(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), "no mobile page overflow"); checks++;
+      async function checkPageWheel() {
+        await page.evaluate(() => {
+          const host = document.getElementById("wf-view");
+          host.style.height = "600px";
+          const below = document.createElement("div");
+          below.id = "below-diagram";
+          below.style.height = "2000px";
+          host.append(below);
+        });
+        const initial = await geometry();
+        const bounds = await vp.boundingBox();
+        await page.mouse.move(bounds.x + 100, bounds.y + 100);
+        await page.mouse.wheel(0, 120);
+        await page.waitForTimeout(80);
+        assert(await page.locator("#wf-view").evaluate((e) => e.scrollTop >= 119), "wheel over diagram scrolls run page"); checks++;
+        assert.equal((await geometry()).top, initial.top, "ordinary wheel leaves canvas position unchanged"); checks++;
+        await page.mouse.move(bounds.x + 100, bounds.y + 20);
+        await page.mouse.wheel(0, -120);
+        await page.waitForTimeout(80);
+        assert.equal(await page.locator("#wf-view").evaluate((e) => e.scrollTop), 0, "reverse wheel scrolls page up"); checks++;
+        await page.evaluate(() => {
+          document.getElementById("below-diagram").remove();
+          document.getElementById("wf-view").style.removeProperty("height");
+        });
+      }
+      await checkPageWheel();
       await page.getByRole("button", { name: "Actual size", exact: true }).click();
       g = await geometry();
       assert.equal(g.svgW, 1600); checks++;
@@ -56,10 +82,9 @@ const diagram = (kind = "wfd") => `<svg class="${kind}" viewBox="0 0 1600 2400" 
       const oldPoint = (before.left + 120 - 12) / before.svgW;
       const newPoint = (g.left + 120 - 12) / g.svgW;
       assert(Math.abs(oldPoint - newPoint) < 0.002, "zoom anchors cursor"); checks++;
-      await page.mouse.wheel(0, 120);
-      await page.waitForTimeout(120);
+      await checkPageWheel();
       const scrolled = await geometry();
-      assert(scrolled.top > g.top, "native wheel scroll"); checks++;
+      await page.mouse.move(box.x + 120, box.y + 120);
       await page.keyboard.down("Shift");
       await page.mouse.wheel(0, 100);
       await page.keyboard.up("Shift");
