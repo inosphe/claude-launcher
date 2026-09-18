@@ -11,7 +11,11 @@ let gates=[];
 let observerReads = 0, needsLogin = true;
 // The meter's days are fixed strings, not "today": the panel labels them as
 // written, so a fixture that used the clock would only assert the clock.
-const data = { enabled: true, sessions: [
+const data = { enabled: true, usage_summary: {since:"2026-09-18T00:00:00Z", windows:{
+  hour:{total_tokens:1234,prompt_tokens:1200,completion_tokens:34},
+  day:{total_tokens:56789,prompt_tokens:56000,completion_tokens:789},
+  week:{total_tokens:1234567,prompt_tokens:1234000,completion_tokens:567},
+}}, sessions: [
   { name: "s1", status: "busy", running: true, meshes: ["team-a"], summary: "테스트 12개 통과. 결정을 기다립니다.",
     generated_at: new Date().toISOString(), last_activity_at: new Date(Date.now()-300000).toISOString(),
     usage_totals: { calls: 3, prompt_tokens: 3000, completion_tokens: 210,
@@ -88,6 +92,21 @@ const server = http.createServer((req, res) => {
     await page.goto(`http://127.0.0.1:${server.address().port}/#/observer`);
     await page.waitForSelector(".observer-card");
     assert.equal(await page.locator(".observer-card").count(), 2);
+    const tokenToggle=page.locator("#observer-token-toggle");
+    assert.equal(await tokenToggle.getAttribute("aria-expanded"),"false");
+    assert.equal(await page.locator("#observer-token-detail").isVisible(),false);
+    assert.match(await tokenToggle.innerText(),/1h 1.2K · 24h 56.8K · 7d 1.2M/);
+    assert(await tokenToggle.evaluate(e=>e.offsetHeight<=40 && e.scrollWidth<=e.clientWidth));
+    await tokenToggle.click();
+    await page.setViewportSize({width:320,height:844});
+    assert(await tokenToggle.evaluate(e=>e.offsetHeight<=40 && e.scrollWidth<=e.clientWidth));
+    await page.setViewportSize({width:390,height:844});
+    assert.equal(await tokenToggle.getAttribute("aria-expanded"),"true");
+    assert.deepEqual(await page.locator(".observer-token-window strong").allTextContents(),["1,234","56,789","1,234,567"]);
+    assert.match(await page.locator("#observer-token-note").innerText(),/시작 이전 사용량 제외/);
+    await page.waitForTimeout(250);
+    assert.equal(await tokenToggle.getAttribute("aria-expanded"),"true","refresh preserves expansion");
+    await tokenToggle.click();
     assert.equal(await page.locator("#observer-view > header").isVisible(), false);
     assert.equal(await page.locator("#observer-mobile-monitor").isVisible(), true);
     assert.equal(await page.locator(".observer-card").first().evaluate(e=>getComputedStyle(e).fontSize), "13px");
@@ -132,6 +151,8 @@ const server = http.createServer((req, res) => {
     await page.click("#observer-mobile-monitor");
     await page.waitForFunction(()=>document.getElementById("observer-mobile-monitor").textContent==="관찰 끄기");
     await page.setViewportSize({width:1280,height:900});
+    assert.equal(await tokenToggle.isVisible(),false);
+    assert.equal(await page.locator("#observer-token-detail").isVisible(),true);
     assert.equal(await page.locator("#observer-view > header").isVisible(), true);
     assert.equal(await page.locator("#observer-mobile-monitor").isVisible(), false);
     await page.setViewportSize({width:390,height:844});
@@ -142,6 +163,7 @@ const server = http.createServer((req, res) => {
     assert.deepEqual(await page.locator("#observer-target option").evaluateAll(es=>es.map(e=>e.value)),["","s2"]);
     assert.equal(await page.locator(".observer-card").count(), 1);
     assert.match(await page.locator(".observer-card").innerText(), /s2/);
+    assert.match(await tokenToggle.innerText(),/1h 1.2K · 24h 56.8K · 7d 1.2M/,"scope filters do not change global totals");
     await page.selectOption("#observer-scope", "session"); await page.selectOption("#observer-selection", "s1");
     assert.equal(await page.locator(".observer-card").count(), 1);
     await page.selectOption("#observer-scope", "global"); await page.check("#observer-actions-only");
@@ -215,9 +237,12 @@ const server = http.createServer((req, res) => {
       const cards=document.querySelector("#observer-cards");
       const band=[...content.children].filter(e=>e!==cards)
         .reduce((n,e)=>n+e.getBoundingClientRect().height,0);
-      return {cards:cards.getBoundingClientRect().height,band};
+      const usage=document.querySelector("#observer-token-summary").getBoundingClientRect().height;
+      return {cards:cards.getBoundingClientRect().height,band,usage};
     });
-    assert(desktop.cards >= 480, `the board should hold the window, not the chrome (${Math.round(desktop.cards)}px)`);
+    // The requested top-level monitor shares the old board's vertical budget.
+    assert(desktop.cards + desktop.usage >= 468, `board and token monitor should retain their vertical budget (${Math.round(desktop.cards)}px)`);
+    assert(desktop.usage <= 180, `the token monitor should stay compact (${Math.round(desktop.usage)}px)`);
     assert(desktop.band <= 210, `the band above the board should stay trim (${Math.round(desktop.band)}px)`);
     assert((await page.locator('.observer-column[data-session="s1"] details', { hasText: "관찰 API 사용량 (누적)" }).count()) >= 1,
       "the desktop column keeps its own meter");
