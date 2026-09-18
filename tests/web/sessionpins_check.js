@@ -1,18 +1,4 @@
-/* Session pins: the rows the reader lifted to the top of the rail.
-
-   Three things share one feature and fail apart. The state helpers (what
-   is pinned, in what order, what survives a poll); the rail (a pinned
-   session gets a label card on the strip above the list while its own row
-   stays in the lineage tree, and the state filter leaves it alone); and the
-   controls (the row's 📌, `p` on a focused card,
-   the header chip) that all have to call the same verb. The checks below
-   pin each against the shipped code rather than a description of it.
-
-   The row builder is sliced out of refreshSessions the way railkeys_check
-   does it, with the same standing liability: a branch that adds a call to
-   the builder breaks this harness with a ReferenceError that reads like a
-   defect and is not one. The stubs list at the bottom is where to add the
-   missing name. */
+/* Pin persistence and controls; rail rows retain ordinary order and filters. */
 const fs = require("fs");
 const path = require("path");
 
@@ -223,8 +209,6 @@ Object.assign(exports, {
   setPinned: setSessionPinned,
   toggle: toggleSessionPin,
   clear: clearSessionPins,
-  prune: pruneSessionPins,
-  rowsOf: sessionPinRows,
   syncUi: syncSessionPinUi,
   syncFilters: syncSessionFilters,
   setFilter: (f) => { sessionFilter = f; },
@@ -256,9 +240,6 @@ const headingText = (h) => {
 };
 /* The pin strip above the list, and the label cards on it. */
 const bar = () => list.kids.find((k) => k.classes.has("session-pinbar")) || null;
-const cards = () => (bar() ? bar().querySelectorAll(".pin-card") : []);
-const cardNames = () => cards().map((c) => c.dataset.name);
-const card = (name) => cards().find((c) => c.dataset.name === name);
 const ev = (key, over = {}) => Object.assign({
   key, ctrlKey: false, metaKey: false, altKey: false, shiftKey: false,
   prevented: 0, preventDefault() { this.prevented += 1; },
@@ -277,24 +258,10 @@ const ev = (key, over = {}) => Object.assign({
   ] };
   await ctx.refresh();
 
-  check("a pin whose session left the fleet is dropped at the poll",
-        ctx.pinned(), ["s2"]);
-  check("the prune is written back so a reload does not resurrect it",
-        writes.at(-1), ["claunch_session_pins:/t/local/", "[\"s2\"]"]);
-  check("a pin no longer moves the row: the lineage tree is left whole",
-        names(), ["s1", "s2", "s3", "s4"]);
-  check("the pins are one inline strip, not a group heading",
-        [!!bar(), headings().length], [true, 0]);
-  check("the strip is the first thing in the list, above every row",
-        list.kids[0].classes.has("session-pinbar"), true);
-  check("one small label card per pin, in pin order", cardNames(), ["s2"]);
-  check("the card names its session and carries its state dot",
-        [card("s2").querySelector(".pin-card-name").textContent,
-         card("s2").querySelector(".dot").className], ["s2", "dot idle"]);
-  check("the card opens the session",
-        (card("s2").handlers.click({}), location.hash), "#/s/s2");
-  check("the strip carries the one action that empties it",
-        !!bar().querySelector(".session-pinbar-clear"), true);
+  check("partial polls preserve pins outside the response category", ctx.pinned(), ["s2", "gone"]);
+  ctx.setPinned("gone", false);
+  check("the rail has no pinned label strip", !!bar(), false);
+  check("pinning does not move rows", names(), ["s1", "s2", "s3", "s4"]);
   check("the pinned session keeps its place and indent in the tree",
         [row("s2").classes.has("child"), row("s2").style.paddingLeft,
          row("s2").title], [true, "22px", "spawned by s1"]);
@@ -314,20 +281,12 @@ const ev = (key, over = {}) => Object.assign({
   // The row's pin button is the toggle, and toggling rebuilds the rail at once.
   pinButton("s4").handlers.click({ stopPropagation() {} });
   await new Promise((r) => setTimeout(r, 0));
-  check("pinning appends: the newest pin is the last card on the strip",
-        [ctx.pinned(), cardNames()], [["s2", "s4"], ["s2", "s4"]]);
-  check("the strip grows at the click, not at the next poll, and the tree holds",
+  check("pinning appends without reordering existing pins",
+        ctx.pinned(), ["s2", "s4"]);
+  check("pinning leaves the tree in place",
         names(), ["s1", "s2", "s3", "s4"]);
   check("the pin is remembered in this browser",
         writes.at(-1), ["claunch_session_pins:/t/local/", "[\"s2\",\"s4\"]"]);
-
-  // The card's own × lets go of that one pin without opening the session.
-  card("s4").querySelector(".pin-card-off").handlers.click({ stopPropagation() {} });
-  await new Promise((r) => setTimeout(r, 0));
-  check("the card's cross unpins just that session", [ctx.pinned(), cardNames()],
-        [["s2"], ["s2"]]);
-  ctx.setPinned("s4", true);
-  await ctx.refresh();
 
   // `f` on the focused card is the same verb. It was `p` until `p` became
   // pause (claunch-vxji); the two verbs must never share a key, because the
@@ -337,8 +296,8 @@ const ev = (key, over = {}) => Object.assign({
   check("`f` on a card pins its session", ctx.key(press, "s1"), true);
   check("the keypress is consumed", press.prevented, 1);
   await new Promise((r) => setTimeout(r, 0));
-  check("the card's session joins the strip",
-        [ctx.pinned(), cardNames()], [["s2", "s4", "s1"], ["s2", "s4", "s1"]]);
+  check("the card's session joins the pins",
+        ctx.pinned(), ["s2", "s4", "s1"]);
   check("`f` with a modifier is the browser's",
         ctx.key(ev("f", { target: s1, ctrlKey: true }), "s1"), false);
   check("`f` on the card's button is the button's",
@@ -351,7 +310,7 @@ const ev = (key, over = {}) => Object.assign({
   ctx.key(ev("f", { target: row("s1") }), "s1");
   await new Promise((r) => setTimeout(r, 0));
   check("`f` on a pinned card unpins it",
-        [ctx.pinned(), cardNames()], [["s2", "s4"], ["s2", "s4"]]);
+        ctx.pinned(), ["s2", "s4"]);
   check("the tree was never disturbed by any of it",
         [names(), row("s2").classes.has("child"), row("s3").classes.has("child")],
         [["s1", "s2", "s3", "s4"], true, true]);
@@ -374,17 +333,17 @@ const ev = (key, over = {}) => Object.assign({
         [["s1", false], ["s2", false], ["s3", true], ["s4", false]]);
   ctx.setPinned("s3", true);
   ctx.syncFilters(ctx.cache());
-  check("pinning an exited row brings it through the running filter",
-        row("s3").classes.has("session-filtered"), false);
+  check("pinning leaves the running filter unchanged",
+        row("s3").classes.has("session-filtered"), true);
   ctx.setPinned("s3", false);
   ctx.setFilter("current");
 
   // Grouping: the strip stays above every group and outside them.
   ctx.setGroups(["mesh"]);
   await ctx.refresh();
-  check("with grouping on, the strip is still first and the headings follow",
+  check("grouping has no pinned strip",
         [list.kids[0].classes.has("session-pinbar"), headings().map(headingText)],
-        [true, ["mesh · (no mesh)"]]);
+        [false, ["mesh · (no mesh)"]]);
   check("the pinned sessions are grouped with everything else, not lifted out",
         list.kids.filter((k) => k.classes.has("session-group")).map((k) =>
           k.querySelectorAll("li[data-name]").map((r) => r.dataset.name)),
@@ -393,7 +352,8 @@ const ev = (key, over = {}) => Object.assign({
 
   // Unpin all: the strip goes, the rows never moved.
   await ctx.refresh();
-  bar().querySelector(".session-pinbar-clear").handlers.click({ stopPropagation() {} });
+  ctx.clear();
+  await ctx.refresh();
   await new Promise((r) => setTimeout(r, 0));
   check("unpin all empties the pins", ctx.pinned(), []);
   check("and the strip goes with them", [!!bar(), names()],
@@ -408,15 +368,8 @@ const ev = (key, over = {}) => Object.assign({
   check("the header has the pin chip", html.includes('id="term-pin"'), true);
   check("the chip is wired to the attached session",
         src.includes('$("term-pin").addEventListener("click"'), true);
-  check("the pin state is styled on the row, the strip and the chip",
-        [/#session-list \.sess-pin\.on/.test(css),
-         /#session-list li\.session-pinbar/.test(css),
-         /#session-list \.pin-card\b/.test(css),
-         /\.session-pinbar-clear/.test(css),
-         /\.pin-chip\[aria-pressed="true"\]/.test(css)],
-        [true, true, true, true, true]);
-  check("the strip holds to one line rather than wrapping into a block",
-        /#session-list li\.session-pinbar \{[^}]*flex-wrap: nowrap/.test(css), true);
+  check("the main region has session tabs", html.includes('id="session-tabs"'), true);
+  check("the old pinned strip styles are removed", css.includes("li.session-pinbar"), false);
   check("the pins are part of the rail's rebuild signature",
         src.includes("[briefingLLM, sessionsCache, groupOrder, meshCache, pins]"), true);
 

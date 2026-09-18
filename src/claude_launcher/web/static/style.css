@@ -84,28 +84,11 @@ option:disabled { color: #6b7280; }
 #refresh-all.spinning, #refresh-archived.spinning { color: #58a6ff; animation: spin 0.7s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
 
-/* The panel is closed by its own darker background, the way it is opened
-   above: the search row carries no rule either, and the colour step is what
-   says where the controls end. A bottom hairline had one more job than the
-   panel needed: it sat on whatever row the rail drew first, and the rail's
-   first row is the pin strip. Against two near-identical darks the line read
-   as a stray 1px floating in one surface rather than as a boundary.
-
-   The panel then reaches one pixel INTO the list and paints over it, which
-   is why it is positioned and lifted. The list declares no background, so
-   its own surface is the sidebar's #1b1e24 — lighter than the panel above it
-   and the pin strip below it. Any pixel row where the two boxes fail to meet
-   exactly shows that lighter surface as a hairline, and they can fail to
-   meet: the list's top edge lands on a fractional device pixel at the display
-   scales this runs at, and a stuck sticky strip is composited on its own
-   layer, rounded independently of the box behind it. Neither is something
-   the list can cover from the inside — the row is outside its scrollport —
-   so the panel covers it from above. The padding grows by the pixel the
-   margin takes back, so nothing below this moves. */
+/* Keep the filter panel and session list visually continuous. */
 .session-filters {
   flex: none; display: grid; grid-template-columns: 1fr 1fr; gap: 1px;
   padding: 6px 6px 7px; margin-bottom: -1px; background: #11151b;
-  position: relative; z-index: 4;   /* over the pin strip's own z-index */
+  position: relative; z-index: 4;
 }
 .session-filters button {
   min-width: 0; padding: 6px 7px; border: 0; border-radius: 4px;
@@ -1136,7 +1119,7 @@ a.cflow-scope:hover { background: #1d3559; text-decoration: underline; }
    toggle it is a toggle you have to hunt for on the way back. Pressed is that
    rail standing open on *this* session — the state in which this button is
    also the panel's close button, and the panel drops its own ×. */
-#term-details { position: absolute; top: 8px; right: 14px; z-index: 3; }
+#term-details { position: absolute; top: calc(8px + var(--session-tabs-height, 0px)); right: 14px; z-index: 3; }
 #term-details:hover { color: #c6cdd5; border-color: #3c444d; }
 #term-details[aria-pressed="true"] {
   background: #10203a; color: #58a6ff; border-color: #1f6feb;
@@ -1209,6 +1192,31 @@ a.cflow-scope:hover { background: #1d3559; text-decoration: underline; }
 }
 
 #main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+#session-tabs {
+  display: flex; flex: none; flex-wrap: wrap; align-items: center; gap: 4px;
+  padding: 5px 8px; min-width: 0; background: #11151b;
+  border-bottom: 1px solid #30363d;
+}
+.session-tab {
+  display: inline-flex; align-items: center; min-width: 0; max-width: 100%;
+  border: 1px solid #30363d; border-radius: 5px; background: #161b22;
+}
+.session-tab.pinned { border-color: #66501e; }
+.session-tab.active { background: #10203a; border-color: #58a6ff; }
+.session-tab-open {
+  display: flex; align-items: center; gap: 5px; padding: 5px 7px;
+  min-width: 0; color: #c9d1d9; text-decoration: none; font-size: 12px;
+}
+.session-tab-open .dot { flex: none; width: 7px; height: 7px; border-radius: 50%; }
+.session-tab-name { max-width: 160px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.session-tab button {
+  flex: none; background: none; border: 0; color: #8b949e; cursor: pointer;
+  padding: 4px; min-width: 24px; min-height: 28px;
+}
+.session-tab-pin { filter: grayscale(1); opacity: .65; font-size: 11px; }
+.session-tab-pin[aria-pressed="true"] { filter: none; opacity: 1; }
+.session-tab button:hover, .session-tab-open:hover { color: #f0f6fc; background: #21262d; }
+.session-tab :focus-visible { outline: 2px solid #58a6ff; outline-offset: -2px; border-radius: 4px; }
 #term-header {
   /* The right padding reserves the lane #term-details floats in (absolute,
      right: 14px), so no flowing control can slide under it however tight the
@@ -3926,59 +3934,6 @@ body.embed #main { width: 100%; }
 }
 #session-list .sess-pin:hover { filter: none; opacity: 1; }
 #session-list .sess-pin.on { filter: none; opacity: 1; }
-/* The pins, inline on one line at the very top of the rail. Not a group and
-   not a section: a strip of small label cards, each one a shortcut back to a
-   session whose own row is still down in the tree where it belongs. It holds
-   to a single line and scrolls sideways when the pins outgrow the rail --
-   wrapping would turn the shortcut back into the block of rows it replaced.
-
-   The strip wears the filter panel's own surface, not one of its own. It is
-   the first row of the list, so whatever colour it paints abuts the panel --
-   and a darker strip drew an edge there, read as a 1px line or gap sitting
-   between the last filter control and the pins. With the two surfaces equal
-   the junction draws nothing, and the strip is held apart by the one thing
-   that does belong to it: the border below, where the list's own rows start.
-   The colour is opaque because the strip sticks: scrolled, it has to cover
-   the rows that pass under it, and #11151b still reads as a band over them.
-
-   Below the strip the separation is a 3px divider, and the whole of it is
-   drawn. It used to be a 1px border with a 2px margin under it, and a margin
-   paints nothing: the list declares no background, so those 2px showed the
-   sidebar's #1b1e24 -- lighter than the strip above and the row below, which
-   read as an empty slot cut beside the pins. The divider keeps that height,
-   so nothing below it moves, and states what the space is for: the pins are
-   a strip over the rail, and the tree starts under this line. */
-#session-list li.session-pinbar {
-  display: flex; align-items: center; gap: 4px; flex-wrap: nowrap;
-  overflow-x: auto; overflow-y: hidden; scrollbar-width: none;
-  padding: 4px 6px;
-  border-bottom: 3px solid #21262d; background: #11151b;
-  position: sticky; top: 0; z-index: 3;
-}
-#session-list li.session-pinbar::-webkit-scrollbar { display: none; }
-#session-list .session-pinbar-mark { flex: none; font-size: 10px; opacity: 0.8; }
-#session-list .pin-card {
-  flex: none; display: inline-flex; align-items: center; gap: 4px;
-  max-width: 130px; padding: 1px 4px; cursor: pointer;
-  border: 1px solid #30363d; border-radius: 4px; background: #161b22;
-  font-size: 11px; line-height: 1.5; color: #c9d1d9;
-}
-#session-list .pin-card:hover { border-color: #d29922; color: #f0f6fc; }
-#session-list .pin-card .dot { flex: none; }
-#session-list .pin-card-name {
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-}
-#session-list .pin-card-off {
-  flex: none; background: none; border: none; padding: 0 1px; cursor: pointer;
-  color: #6e7681; font-size: 11px; line-height: 1;
-}
-#session-list .pin-card-off:hover { color: #f85149; }
-#session-list .session-pinbar-clear {
-  flex: none; margin-left: auto; background: none; color: #8b949e;
-  border: 1px solid #30363d; border-radius: 4px; font-size: 10px;
-  padding: 1px 5px; cursor: pointer; white-space: nowrap;
-}
-#session-list .session-pinbar-clear:hover { color: #f0f6fc; border-color: #d29922; }
 /* The header's pin chip: the same toggle, on the attached session. */
 .pin-chip { flex: none; filter: grayscale(1); opacity: 0.7; }
 .pin-chip:hover { filter: none; opacity: 1; }
