@@ -109,10 +109,17 @@ async function api(path, opts = {}) {
    take at any moment. Batching reduces how often this is reached; the budget
    is what makes the headroom a guarantee rather than a tendency.
 
-   Four is chosen against Firefox's default of six: two connections stay free,
-   which is one for the attached terminal and one for the socket a session
-   switch opens before the old one is let go. */
-const HTTP_BUDGET = 4;
+   Two is chosen against Firefox's default of six. The budget caps requests
+   in flight, but a browser keeps a connection in its pool after the answer
+   arrives, so the number of connections the page ends up holding is the
+   high-water mark of its own concurrency. Measured at a budget of four:
+   `firefox 4` held with nothing in flight, plus the health probe outside
+   the budget, which leaves one connection for every socket the page needs.
+   At two the pool settles around three and the rest stay free.
+
+   Batching is what makes two enough: the reads of a tick are one request,
+   so the second slot is for a person's click rather than for the poll. */
+const HTTP_BUDGET = 2;
 let httpInFlight = 0;
 const httpWaiting = [];
 
