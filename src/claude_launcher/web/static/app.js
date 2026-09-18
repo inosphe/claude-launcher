@@ -13143,6 +13143,55 @@ function beadsWorkspaceBlock() {
   return box;
 }
 
+/* Start a session on this issue.
+
+   The board is where the work is decided and the terminal is where it was
+   created, so an operator who picked an issue here had to carry its id and
+   its directory across to a form by hand — and the id is the half that goes
+   wrong silently, because a session created without it mints a SECOND issue
+   for work the board already had.
+
+   Two buttons because there are two answers, and which one is right is not
+   the board's to guess: a root session, or a child of one that is running.
+   Both open the one creation modal (`openSessionModal`) on the matching tab
+   with this issue and its recorded workspace already filled in. */
+function beadsStartBlock() {
+  const box = el("div", "beads-detail-start");
+  box.appendChild(el("h4", null, "Start a session"));
+  if (typeof openSessionModal !== "function") {
+    box.appendChild(el("p", "wf-note",
+      "this daemon's dashboard has no session modal to open"));
+    return box;
+  }
+  const issue = (beadsDetail.issue || {}).id || beadsFocus;
+  const seed = { issue };
+  // Only when the issue actually records one: seeding an empty workspace
+  // would override the form's own default with nothing.
+  if (beadsDetail.workspace) seed.workspace = beadsDetail.workspace;
+  const row = el("div", "beads-start-row");
+  const mk = (label, tab, title) => {
+    const btn = el("button", "wf-btn option", label);
+    btn.title = title;
+    btn.addEventListener("click", () => { openSessionModal({ tab, seed }); });
+    return btn;
+  };
+  row.appendChild(mk("New session", "new",
+    `create a session on ${issue}`));
+  row.appendChild(mk("Spawn child", "spawn",
+    `create a session on ${issue} under a running parent`));
+  box.appendChild(row);
+  const note = seed.workspace
+    ? `opens in ${seed.workspace}, which this issue records`
+    : "this issue records no workspace, so the form opens on its own default";
+  box.appendChild(el("p", "wf-note", note));
+  // Worth saying once, here: the Spawn tab does not refuse a blank Parent, it
+  // creates a root session. Somebody who pressed Spawn meant a child.
+  box.appendChild(el("p", "wf-note",
+    "Spawn child asks for the parent in the form; leaving it blank creates a "
+    + "root session instead"));
+  return box;
+}
+
 function beadsDetailPane() {
   const pane = el("div", "beads-detail");
   const head = el("div", "beads-detail-head");
@@ -13206,6 +13255,7 @@ function beadsDetailPane() {
   // text just began, so a reader scrolling in landed in the middle of prose
   // with nothing saying what it was. One rule draws all three now.
   pane.appendChild(beadsWorkspaceBlock());
+  pane.appendChild(beadsStartBlock());
   if (i.description) {
     pane.appendChild(el("h4", null, "Description"));
     pane.appendChild(el("pre", "beads-desc", beadsStripMeta(i.description)));

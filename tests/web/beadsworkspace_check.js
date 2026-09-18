@@ -88,9 +88,10 @@ new Function(
   + "function renderBeads() { record('render'); }\n"
   + "function setState(detail, focus) { beadsDetail = detail; beadsFocus = focus; }\n"
   + "function detailState() { return beadsDetail; }\n"
-  + slice("beadsStripMeta") + slice("beadsWorkspaceBlock")
+  + "function openSessionModal(o) { record('modal:' + JSON.stringify(o)); }\n"
+  + slice("beadsStripMeta") + slice("beadsWorkspaceBlock") + slice("beadsStartBlock")
   + "Object.assign(exports, { strip: beadsStripMeta, block: beadsWorkspaceBlock,"
-  + " setState, detailState });",
+  + " start: beadsStartBlock, setState, detailState });",
 )(
   ctx,
   el,
@@ -196,6 +197,48 @@ check("a refusal is shown and the picker goes back to what is recorded",
 }
 
 writes().then(() => {
-  if (failures) process.exit(1);
+  /* ---- starting a session on the issue ----------------------------------- */
+ctx.setState(
+  { root: "/repo", workspace: "alpha", workspaces: WORKSPACES,
+    issue: { id: "claunch-7" } },
+  "claunch-7",
+);
+let start = ctx.start();
+check("two answers are offered, and neither is the default",
+      tags(start, "button").map((b) => b.text), ["New session", "Spawn child"]);
+check("the recorded workspace is named where the operator can see it",
+      find(start, "wf-note")[0].text,
+      "opens in alpha, which this issue records");
+check("and the blank-parent consequence is stated once",
+      find(start, "wf-note")[1].text,
+      "Spawn child asks for the parent in the form; leaving it blank creates a "
+      + "root session instead");
+
+calls.length = 0;
+tags(start, "button")[0].handlers.click[0]();
+check("New session opens the modal on the new tab, seeded with issue and workspace",
+      JSON.parse(String(calls[0].event).slice("modal:".length)),
+      { tab: "new", seed: { issue: "claunch-7", workspace: "alpha" } });
+calls.length = 0;
+tags(start, "button")[1].handlers.click[0]();
+check("Spawn child opens the same modal on the spawn tab",
+      JSON.parse(String(calls[0].event).slice("modal:".length)).tab, "spawn");
+
+ctx.setState(
+  { root: "/repo", workspace: "", workspaces: WORKSPACES,
+    issue: { id: "claunch-8" } },
+  "claunch-8",
+);
+start = ctx.start();
+calls.length = 0;
+tags(start, "button")[0].handlers.click[0]();
+check("an issue recording no workspace seeds only the issue id",
+      JSON.parse(String(calls[0].event).slice("modal:".length)).seed,
+      { issue: "claunch-8" });
+check("and says the form will open on its own default",
+      find(start, "wf-note")[0].text,
+      "this issue records no workspace, so the form opens on its own default");
+
+if (failures) process.exit(1);
   console.log("beadsworkspace_check ok");
 });

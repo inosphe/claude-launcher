@@ -2070,6 +2070,12 @@ body.term-split #terminal { flex: var(--split-term, 0.6) 1 0; min-height: 80px; 
 }
 .beads-ws-note { margin: 0; }
 
+/* The two answers to "start a session on this issue": a root session, or a
+   child of a running one. Side by side because neither is the default. */
+.beads-detail-start { margin-top: 12px; }
+.beads-start-row { display: flex; gap: 8px; flex-wrap: wrap; margin: 4px 0 6px; }
+.beads-detail-start .wf-note { margin: 0 0 2px; }
+
 /* The two halves of a board (app.js: BEADS_GROUPS). backlog is what nobody
    has taken up; TODO is everything already spoken for. The header carries the
    count so the pile that needs handing out is readable without counting
