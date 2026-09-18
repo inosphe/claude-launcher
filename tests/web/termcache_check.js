@@ -378,6 +378,49 @@ return {
   check("and no new socket was opened", w.sockets.length === before, w.sockets.length);
 }
 
+/* --- a parked terminal keeps its screen, not its connection ------------- */
+/* The cache holds terminals so returning to one is cheap. A socket is not
+   memory: it is one of the six connections this browser allows per server,
+   and the page already spends three on polling. Three parked sockets reached
+   that ceiling, and the next session's handshake was then queued inside the
+   browser and never sent -- a terminal stuck on "reconnecting" with nothing
+   in the daemon's records, because the daemon never saw a request to refuse
+   (claunch-restart-disconnect-banner-12p2). So one parked socket is kept and
+   older ones are let go, while their terminals stay. */
+{
+  const w = build();
+  w.api.attach("a");
+  const aSock = w.api.ws;
+  aSock.opened();
+  w.api.attach("b");
+  const bSock = w.api.ws;
+  bSock.opened();
+  check("the session just left keeps its socket", aSock.readyState !== 3,
+        aSock.readyState);
+
+  w.api.attach("c");                      // now two are parked: a, then b
+  check("the older parked session's socket is released", aSock.readyState === 3,
+        aSock.readyState);
+  check("and the newer parked one still has its", bSock.readyState !== 3,
+        bSock.readyState);
+  check("but the released terminal is still cached", !w.terms[0].disposed);
+
+  // Three terminals visited, and the browser is holding one socket for the
+  // one on screen and one for the newest parked -- never three.
+  const live = w.sockets.filter((s) => s.readyState !== 3).length;
+  check("two sockets held, not one per visited terminal", live === 2, live);
+
+  // Coming back to the released one costs a socket and a repaint, which is
+  // the path a parked socket that died already took.
+  const before = w.sockets.length;
+  w.api.attach("a");
+  check("returning to it opens one socket", w.sockets.length === before + 1,
+        [before, w.sockets.length]);
+  const fresh = w.sockets[w.sockets.length - 1];
+  check("...for that session", /\/api\/sessions\/a\/ws(\?|$)/.test(fresh.url), fresh.url);
+  check("and its buffer was not thrown away", !w.terms[0].disposed);
+}
+
 process.on("exit", (code) => {
   if (failures) { console.log(`${failures} check(s) failed`); process.exitCode = 1; }
   else if (!code) console.log("all terminal-cache checks passed");
