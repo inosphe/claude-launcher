@@ -40,7 +40,7 @@ from .. import session_commits
 from .. import ghcli, prflow, spawn as spawn_mod, store, workspaces
 from .. import plugins, settings
 from .. import worktree as worktree_mod
-from . import beads as beads_mod, handoff as handoff_mod, notice as notice_mod
+from . import beads as beads_mod, connections, handoff as handoff_mod, notice as notice_mod
 from . import rag as rag_mod
 from . import (
     briefing, cflow_clock, clipty, ctxsize, loops, onboard, prompt_presets,
@@ -283,6 +283,10 @@ def build_app(
     app["cflow_nudge_tasks"] = set()
     app.on_shutdown.append(_close_cflow_nudges)
     app["websockets"] = set()
+    # Who is holding a socket right now, and the last hundred that closed
+    # (daemon/connections.py). The close log alone could not answer whether
+    # new sockets were being refused, because a refused one writes nothing.
+    connections.install(app)
     # Open terminal sockets never close on their own; without this, runner
     # cleanup waits its shutdown timeout for every browser tab left open.
     app.on_shutdown.append(_close_websockets)
@@ -336,6 +340,9 @@ def build_app(
 
     r = app.router
     r.add_get("/api/health", h_health)
+    # Open sockets as state (daemon/connections.py), for `claunch connections`
+    # and for anyone diagnosing a terminal that will not come up.
+    r.add_get("/api/connections", h_connections)
     # The measurement window (daemon/window.py): the machine's test-run
     # arbiter as readable state — who holds it, who waits — so the sweep
     # protocol stops standing on process scans and mesh chat.
@@ -696,6 +703,18 @@ async def h_auth_session(request: web.Request) -> web.Response:
         COOKIE_NAME, session_id, httponly=True, samesite="Strict", path="/"
     )
     return resp
+
+
+async def h_connections(request: web.Request) -> web.Response:
+    """Every socket the daemon holds open, and the last hundred that closed.
+
+    Authenticated like the rest of ``/api/``: this names sessions and remote
+    addresses, which is exactly what the open endpoint above must not.
+    """
+    registry = connections.install(request.app)
+    return json_response(
+        registry.snapshot(connections.http_connection_count(request.app))
+    )
 
 
 async def h_window_status(request: web.Request) -> web.Response:
