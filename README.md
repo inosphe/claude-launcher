@@ -2210,6 +2210,11 @@ harnesses:
       - OPENAI_API_KEY
     empty_env: []            # variables forced to the empty string
     login_args: [login]      # optional interactive login argv
+    image_paste_keys: [M-v]  # optional; the key this harness reads a
+                             # clipboard image with, in tmux key names.
+                             # The web session line's Alt+V fills the
+                             # daemon machine's clipboard and sends this.
+                             # Undeclared means images are not handed over.
     description: "..."      # optional, shown in status surfaces
   pi: null                  # a tombstone: drop a packaged harness
 ```
