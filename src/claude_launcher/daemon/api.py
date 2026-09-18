@@ -13,6 +13,7 @@ import asyncio
 import contextlib
 import functools
 import json
+import logging
 import os
 import secrets
 import time
@@ -115,6 +116,9 @@ def json_error(status: int, message: str) -> web.Response:
     return json_response({"error": message}, status=status)
 
 
+log = logging.getLogger("claunch.daemon.api")
+
+
 def _token_eq(supplied: str, expected: str) -> bool:
     # compare_digest rejects non-ASCII *strings* with a TypeError (a pasted
     # wrong token must yield 401, not a 500) — compare bytes instead.
@@ -203,6 +207,24 @@ def build_auth_middleware(token: str, cookie_sessions: set):
         cookie = request.cookies.get(COOKIE_NAME)
         if cookie and cookie in cookie_sessions:
             return await handler(request)
+        # Write the refusal down. Nothing else does: the access log is off,
+        # and a refused upgrade never reaches a handler, so a terminal that
+        # could not authenticate left no trace at all while the page showed
+        # "disconnected" (claunch-restart-disconnect-banner-12p2). The reason
+        # separates a request that brought no credential from one whose
+        # cookie this daemon has never heard of, which is what a restart
+        # leaves behind.
+        reason = "stale cookie" if cookie else "no credential"
+        try:
+            connections.install(request.app).refused(request, reason)
+            log.info(
+                "refused %s %s: %s (upgrade=%s peer=%s)",
+                request.method, request.path, reason,
+                request.headers.get("Upgrade", "").lower() == "websocket",
+                request.remote,
+            )
+        except Exception:  # noqa: BLE001 -- diagnosis must not fail a request
+            log.debug("could not record a refusal", exc_info=True)
         return json_error(401, "authentication required")
 
     return auth_middleware
