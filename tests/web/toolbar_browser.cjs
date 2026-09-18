@@ -51,7 +51,11 @@ const header = html.slice(html.indexOf('<div id="term-header"'), html.indexOf(' 
       const ordered = geometry.rects.filter(r => r.right > r.left).sort((a, b) => a.left - b.left);
       for (let i = 1; i < ordered.length; i++) assert(ordered[i].left >= ordered[i - 1].right - 1, `overlap at ${width}`);
     }
-    for (const width of [1920, 1193, 1000, 800, 600, 480, 360, 240, 180]) await check(width);
+    for (const width of [1920, 1193, 1000, 800, 600, 480, 360, 240, 180]) {
+      await check(width);
+      assert(await page.locator("#term-title").evaluate(el => el.clientWidth >= el.scrollWidth),
+        `session name stays fully visible at ${width}`);
+    }
     await page.locator("#term-more").click();
     await page.locator("#term-overflow-menu button").filter({ hasText: "⬒ run" }).click();
     assert.equal(await page.evaluate(() => window.clicks), 1, "overflow forwards original action");

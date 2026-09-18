@@ -1244,7 +1244,12 @@ a.cflow-scope:hover { background: #1d3559; text-decoration: underline; }
 #term-header > *, .term-actions > * { flex: none; }
 .term-actions { display: contents; }
 .term-btn { white-space: nowrap; }
-#term-title { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; flex-shrink: 1; }
+/* Reserve the session name before fitting controls. Only a name longer than
+   the column itself is clipped, leaving room for the overflow button. */
+#term-title {
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  min-width: 0; flex-shrink: 0; max-width: calc(100% - 40px);
+}
 #term-header.term-compact { padding-right: 50px; gap: 4px; }
 #term-header.term-compact [data-toolbar-icon] {
   font-size: 0; min-width: 28px; width: 28px; max-width: 28px;

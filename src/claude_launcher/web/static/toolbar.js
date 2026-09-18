@@ -69,6 +69,8 @@
     header.querySelectorAll(".toolbar-overflow").forEach(el => el.classList.remove("toolbar-overflow"));
     more.classList.add("hidden");
     overflow = [];
+    const title = document.getElementById("term-title");
+    if (title) title.title = title.textContent.trim();
     for (const [id, icon] of Object.entries(icons)) {
       const el = document.getElementById(id);
       if (!el) continue;
