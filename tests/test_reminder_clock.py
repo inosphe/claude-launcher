@@ -1431,3 +1431,91 @@ def test_recall_is_journalled_so_the_pull_rate_can_be_measured(proj):
     recalls = [e for e in entries if e["event"] == "recall"]
     assert [e["hit"] for e in recalls] == [True, False]
     assert recalls[0]["id"] == d and recalls[0]["step"] == "one"
+
+
+# --------------------------------------------------------------------------- #
+# the idle-session loop: a reminder must not keep its own timer alive
+# --------------------------------------------------------------------------- #
+class _AnsweringSession(_ActivitySession):
+    """A terminal that answers a delivery and then does nothing else.
+
+    Models the two things the real :class:`Session` does and the plain fake
+    does not.  The screen moves *because of* the delivery — the submit
+    repaint and the turn both land after ``deliver()`` has returned, so the
+    marker read at the next scan is always later than the one ``_mark_role``
+    recorded.  And the screen then stays still, which ``idle_since`` reports
+    as a duration that keeps growing.
+
+    Reconstructed from session s602 (2026-09-19): 97 reminders, 0.4–7.2 s of
+    turn time each, and no other output between them.
+    """
+
+    def __init__(self, name, cwd, *, work: float = 5.0) -> None:
+        super().__init__(name, cwd)
+        self.work = work          # seconds the terminal moves per delivery
+        self.delivered_at: list = []
+        self.now = 0.0            # the test's clock, in the same units
+        self._pending_paint = False
+
+    async def deliver(self, text):
+        ok = await super().deliver(text)
+        self.delivered_at.append(self.now)
+        # The repaint the delivery causes is observed by the sampler after
+        # the write returns, so the value _mark_role reads is still the old
+        # one.  The next reader sees the new screen.
+        self._pending_paint = True
+        return ok
+
+    def last_activity_at(self):
+        if self._pending_paint:
+            self._pending_paint = False
+            return self.activity
+        if self.delivered_at:
+            self.activity = f"paint-{len(self.delivered_at)}"
+        return self.activity
+
+    def idle_since(self):
+        if not self.delivered_at:
+            return None
+        return max(0.0, self.now - self.delivered_at[-1] - self.work)
+
+
+def test_role_reminder_stops_once_the_session_only_answers_it(proj):
+    """The marker moves on every delivery; the idle duration does not lie."""
+    sess = _AnsweringSession("w1", str(proj))
+    service = session_reminder.SessionReminderService(
+        _KinManager({"w1": sess}), _FakeMeshMgr(_FakeMesh("m", 0), role="worker")
+    )
+    base = time.monotonic()
+    for i in range(12):
+        sess.now = base + 601.0 * i
+        asyncio.run(service.tick(sess.now))
+    # One reminder reaches a terminal that then does nothing but take it in;
+    # the timer is re-armed from there rather than typed into every interval.
+    assert len(sess.delivered) == 1
+
+
+def test_role_reminder_repeats_while_the_session_is_actually_working(proj):
+    """Real work between two reminders is what the repeat exists for."""
+    sess = _AnsweringSession("w1", str(proj), work=400.0)
+    service = session_reminder.SessionReminderService(
+        _KinManager({"w1": sess}), _FakeMeshMgr(_FakeMesh("m", 0), role="worker")
+    )
+    base = time.monotonic()
+    for i in range(4):
+        sess.now = base + 601.0 * i
+        asyncio.run(service.tick(sess.now))
+    assert len(sess.delivered) == 3
+
+
+def test_cflow_reminder_stops_once_the_session_only_answers_it(proj):
+    """The cflow source carries the same rule as Role."""
+    cwd = str(proj)
+    cflow_engine.start("linear", cwd=cwd, scope="w1")
+    sess = _AnsweringSession("w1", cwd)
+    service = session_reminder.SessionReminderService(_KinManager({"w1": sess}))
+    base = time.monotonic()
+    for i in range(12):
+        sess.now = base + 601.0 * i
+        asyncio.run(service.tick(sess.now))
+    assert len(sess.delivered) == 1
