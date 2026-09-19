@@ -66,6 +66,7 @@ from . import restart_notice
 from .harness import HarnessError, SessionDef
 from . import score_goal
 from .manager import ManagerError, SessionManager
+from . import mesh as mesh_mod
 from .mesh import MeshBusy, MeshConflict, MeshError, MeshManager
 from .session import STATUS_IDLE, KeyboardHeld, SessionGone
 from . import session as session_mod
@@ -3306,8 +3307,14 @@ async def h_mesh_get(request: web.Request) -> web.Response:
     # `?session=` asks "which member am I?" — answered as `you`. Optional, so
     # the dashboard poll (which is nobody's session) is unchanged.
     session = str(request.query.get("session") or "")
+    # `?state=` is the roster filter, applied before the expensive half of
+    # the answer is built rather than after it reaches the page. Absent means
+    # every member, which is what this route has always sent.
+    state = str(request.query.get("state") or "all")
+    if state not in mesh_mod.MEMBER_STATES:
+        return json_error(400, f"invalid member state: {state!r}")
     return json_response(
-        {**mm.mesh_info(mesh, session=session),
+        {**mm.mesh_info(mesh, session=session, state=state),
          "relay": request.app["relay_state"]()}
     )
 
