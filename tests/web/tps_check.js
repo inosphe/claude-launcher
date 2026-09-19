@@ -13,6 +13,10 @@
    - A call that was not counted (an error answer) still shows that the
      session called out: its HTTP status stands where the number would.
    - A reading older than ten minutes dims (`stale`) instead of vanishing.
+   - A rate is never drawn without saying which rate it is. `generation` is
+     the streamed answer's own rate; `call` is a whole-body answer's average
+     over the entire call, which is a different measurement and is marked
+     `avg` in every place the number appears.
    - The overlay is drawn only while the terminal is on screen, and it is
      pointer-transparent by CSS (railayout_check's sibling in test_metering
      pins that), so it can never take a click from the PTY. */
@@ -67,8 +71,8 @@ const ctx = {};
 new Function(
   "exports", "el", "$", "sessionsCache", "currentName", "railOpen",
   ["fmtAge", "modelShort", "terminalOnScreen", "tpsFmt", "tpsAgeSecs", "ttftFmt",
-   "tpsText", "tpsTooltip", "tpsStaleClass", "tpsRailLine", "tpsChip",
-   "renderTermTps"].map(slice).join("\n") + `
+   "tpsLatencyText", "tpsText", "tpsTooltip", "tpsStaleClass", "tpsRailLine",
+   "tpsChip", "renderTermTps"].map(slice).join("\n") + `
 exports.text = tpsText;
 exports.tooltip = tpsTooltip;
 exports.rail = tpsRailLine;
@@ -94,18 +98,26 @@ const OLD = new Date(Date.now() - 3_600_000).toISOString();      // 1h ago
    and the check is about the format, not about float rounding. */
 const FAST = {
   ts: AT, model: "deepseek-flash", status: 200, counted: true, tps: 38.06,
-  ttft_ms: 715, output_tokens: 16, input_tokens: 36, cache_read: 0,
-  window: 4, tps_median: 35.2, ttft_ms_median: 900, upstream: "https://api.deepseek.com/v1",
+  tps_basis: "generation",
+  ttft_ms: 715, ttfb_ms: 733, output_tokens: 16, input_tokens: 36, cache_read: 0,
+  window: 4, tps_median: 35.2, tps_median_n: 4, ttft_ms_median: 900,
+  upstream: "https://api.deepseek.com/v1",
 };
-const BIG = { ...FAST, tps: 248.75, ttft_ms: 1054 };
+const BIG = { ...FAST, tps: 248.75, ttft_ms: 1054, ttfb_ms: 1067 };
 const ERR = { ts: AT, model: null, status: 502, counted: false, tps: null, ttft_ms: null,
               window: 1, tps_median: null, ttft_ms_median: null };
 const STALE = { ...FAST, ts: OLD, window: 1, tps_median: 38.06 };
+/* A whole-body answer: no generation rate was measurable, so the daemon sent
+   the call's own average and named it. 2.41 and 3158 are the shape of the
+   record this marker exists for — the same call divided by its own sliver of
+   network time read as five digits. */
+const WHOLE = { ...FAST, tps: 2.41, tps_basis: "call", ttft_ms: null, ttfb_ms: 3158 };
 
 const PI = { name: "pi", harness: "pi", tps: FAST };
 const CLAUDE = { name: "ds4", harness: "claude", tps: BIG };
 const BROKEN = { name: "broken", harness: "claude", tps: ERR };
 const QUIET = { name: "quiet", harness: "claude", tps: STALE };
+const WHOLEBODY = { name: "whole", harness: "claude", tps: WHOLE };
 const OAUTH = { name: "nc", harness: "claude" };                 // never metered
 
 /* ---- the glance ---- */
@@ -123,11 +135,21 @@ check("the tooltip dates the call and names the model",
       tip.split("\n")[0], "last call 45s ago on deepseek-flash (HTTP 200)");
 check("...gives the token counts behind the rate",
       tip.includes("38.1 tokens/s over the generation, 16 out, 36 in"), true);
-check("...and the rolling median with its window",
-      tip.includes("median over the last 4 calls: 35.2 tok/s, ttft 900ms"), true);
+check("...and the rolling median, over the calls that could give one",
+      tip.includes("median over the last 4 streamed calls: 35.2 tok/s, ttft 900ms"), true);
 check("...and where the call went", tip.includes("via https://api.deepseek.com/v1"), true);
 check("an error answer's tooltip has no rate lines",
       ctx.tooltip(ERR).includes("tokens/s"), false);
+
+/* ---- a whole-body answer: a call average, never a generation rate ---- */
+check("a call average is marked avg in the glance",
+      ctx.text(WHOLE), "2.4 tok/s avg · first byte 3.2s");
+check("...and the tooltip says which measurement the number is",
+      ctx.tooltip(WHOLE).includes(
+        "2.4 tokens/s over the whole call (the wait for the first token included), 16 out, 36 in"),
+      true);
+check("...and gives the first byte where a streamed call would give a ttft",
+      ctx.tooltip(WHOLE).includes("first byte 3.2s"), true);
 
 /* ---- the rail row's line ---- */
 const line = ctx.rail(PI);
@@ -136,15 +158,19 @@ check("the rail line is a bolt, the glance and the age, with the story on hover"
       ["rail-tps-line", ["⚡", "38.1 tok/s · ttft 715ms", "45s ago"], true]);
 check("a reading an hour old dims", ctx.rail(QUIET).className, "rail-tps-line stale");
 check("an error answer still gets a line", ctx.rail(BROKEN).kids[1].textContent, "HTTP 502");
+check("a whole-body answer's call average reaches the rail line, marked",
+      ctx.rail(WHOLEBODY).kids[1].textContent, "2.4 tok/s avg · first byte 3.2s");
 check("a session that never went through the shim gets no line at all",
       ctx.rail(OAUTH), null);
 
 /* ---- the card chip ---- */
-ctx.setSessions([PI, CLAUDE, BROKEN, QUIET, OAUTH]);
+ctx.setSessions([PI, CLAUDE, BROKEN, QUIET, WHOLEBODY, OAUTH]);
 check("the chip is the glance with the story on hover",
       [ctx.chip("pi").textContent, ctx.chip("pi").className, ctx.chip("pi").title === tip],
       ["38.1 tok/s · ttft 715ms", "sess-brief-tps", true]);
 check("and dims when stale", ctx.chip("quiet").className, "sess-brief-tps stale");
+check("and carries the avg marker a call average needs",
+      ctx.chip("whole").textContent, "2.4 tok/s avg · first byte 3.2s");
 check("no chip for an unmetered session, nor for one the rail no longer knows",
       [ctx.chip("nc"), ctx.chip("gone")], [null, null]);
 
@@ -179,6 +205,14 @@ ctx.setCurrent("quiet");
 ctx.render();
 check("a stale reading dims both", [dom["term-tps"].className, dom["term-tps-overlay"].className],
       ["badge tps stale", "term-tps-overlay stale"]);
+
+ctx.setCurrent("whole");
+ctx.render();
+check("a call average reaches the badge and the overlay, marked in both",
+      [dom["term-tps"].textContent,
+       dom["term-tps-overlay"].kids.map((k) => k.textContent)],
+      ["2.4 tok/s avg · first byte 3.2s",
+       ["2.4 tok/s avg", "first byte 3.2s · deepseek flash · 45s ago"]]);
 
 ctx.setCurrent("nc");
 ctx.render();

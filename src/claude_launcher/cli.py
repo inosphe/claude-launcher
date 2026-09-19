@@ -923,6 +923,11 @@ def _tps_summary_lines(label: str, s: dict) -> List[str]:
         f"    tps median {_fmt(s['tps_median'])}  mean {_fmt(s['tps_mean'])}  "
         f"min {_fmt(s['tps_min'])}  max {_fmt(s['tps_max'])}  "
         f"ttft median {_fmt(s['ttft_ms_median'], 'ms')}",
+        # The counts above are generation rates, so a request that did not
+        # stream is not among them. Its call average is its own measurement
+        # and gets its own line rather than being folded into the median.
+        f"    call-avg median {_fmt(s['tps_total_median'])}  "
+        f"(over the whole call, for the {s['tps_total_n']} that did not stream)",
     ]
 
 
@@ -962,7 +967,7 @@ def _cmd_tps(args: argparse.Namespace) -> int:
                 f"{str(rec.get('model') or '-')[:28]:<28} "
                 f"{_fmt(rec.get('output_tokens')):>6} "
                 f"{_fmt(rec.get('ttft_ms'), 'ms'):>7} "
-                f"{_fmt(rec.get('tps')):>7} "
+                f"{_fmt(metering.reported_tps(rec)):>7} "
                 f"{_fmt(rec.get('status'))}"
             )
     return 0

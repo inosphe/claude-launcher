@@ -171,6 +171,12 @@ class Meter:
     when the request asked for ``stream_options.include_usage``) carries
     ``usage``. A non-streamed JSON body of either shape is buffered and read
     at the end.
+
+    ``streamed`` records whether any content delta actually came through,
+    which is what decides whether a generation rate can be computed at all —
+    see :func:`finish`. It is not the same as ``stream``: that one is the
+    response's content type, and an SSE body that ends before a single delta
+    (an error event, a refusal) is streamed without ever being generated.
     """
 
     session: Optional[str]
@@ -182,10 +188,13 @@ class Meter:
     encoding: Optional[str] = None
     first_byte: Optional[float] = None
     first_token: Optional[float] = None
+    last_token: Optional[float] = None
+    streamed: bool = False
     usage: Dict[str, Optional[int]] = field(default_factory=dict)
     _sse_tail: bytes = b""
     _buffer: bytearray = field(default_factory=bytearray)
     _overflow: bool = False
+    _chunk_content: bool = False
 
     def headers(self, status: int, headers) -> None:
         """Called once the upstream answered (before any body byte)."""
@@ -199,12 +208,17 @@ class Meter:
     def chunk(self, data: bytes) -> None:
         if not data:
             return
+        # One timestamp per read, handed down to the parser: everything this
+        # read carried was observed to arrive at this instant, so the first and
+        # the last content delta of a single read share it exactly. That is
+        # what makes their window zero rather than a sliver of parse time.
+        now = time.monotonic()
         if self.first_byte is None:
-            self.first_byte = time.monotonic()
+            self.first_byte = now
         if self.encoding not in (None, "identity"):
             return  # compressed: we forward it untouched and count nothing
         if self.stream:
-            self._feed_sse(data)
+            self._feed_read(data, now)
         elif not self._overflow:
             if len(self._buffer) + len(data) > BUFFER_LIMIT:
                 self._overflow = True
@@ -213,7 +227,20 @@ class Meter:
                 self._buffer.extend(data)
 
     # -- SSE ---------------------------------------------------------------- #
-    def _feed_sse(self, data: bytes) -> None:
+    def _feed_read(self, data: bytes, now: float) -> None:
+        """Feed one read, and mark when content was seen in it.
+
+        The mark is per read and not per delta on purpose: two deltas parsed
+        out of the same read reached us at the same instant, and the rate
+        below is meant to be divided by the time content was *observed*
+        arriving, not by how long it took to parse.
+        """
+        self._chunk_content = False
+        self._feed_sse(data, now)
+        if self._chunk_content:
+            self.last_token = now
+
+    def _feed_sse(self, data: bytes, now: float) -> None:
         buf = self._sse_tail + data
         while True:
             # An event ends at a blank line; either newline convention.
@@ -224,11 +251,11 @@ class Meter:
                 break
             end = min(candidates)
             sep = 4 if end == idx_rn else 2
-            self._event(buf[:end])
+            self._event(buf[:end], now)
             buf = buf[end + sep:]
         self._sse_tail = buf
 
-    def _event(self, raw: bytes) -> None:
+    def _event(self, raw: bytes, now: float) -> None:
         data_lines = []
         for line in raw.splitlines():
             if line.startswith(b"data:"):
@@ -242,7 +269,7 @@ class Meter:
         if not isinstance(doc, dict):
             return
         if str(doc.get("object") or "").startswith("chat.completion"):
-            self._openai_chunk(doc)
+            self._openai_chunk(doc, now)
             return
         kind = doc.get("type")
         if kind == "message_start":
@@ -251,17 +278,30 @@ class Meter:
                 self._take_message(message)
         elif kind == "content_block_delta":
             if self.first_token is None:
-                self.first_token = time.monotonic()
+                self.first_token = now
+            self.streamed = True
+            self._chunk_content = True
         elif kind == "message_delta":
             usage = doc.get("usage")
             if isinstance(usage, dict):
                 self._merge_usage(usage)
 
-    def _openai_chunk(self, doc: dict) -> None:
+    def _openai_chunk(self, doc: dict, now: float) -> None:
         """One ``chat.completion.chunk`` (or a whole ``chat.completion``)."""
         self._take_message(doc)
-        if self.first_token is not None:
+        if self.streamed:
+            # Already counting: this chunk settles only whether the content is
+            # still arriving, which ``_feed_read`` reads off ``_chunk_content``.
+            if self._chunk_carries_content(doc):
+                self._chunk_content = True
             return
+        if self._chunk_carries_content(doc):
+            self.first_token = now
+            self.streamed = True
+            self._chunk_content = True
+
+    @staticmethod
+    def _chunk_carries_content(doc: dict) -> bool:
         choices = doc.get("choices")
         for choice in choices if isinstance(choices, list) else []:
             if not isinstance(choice, dict):
@@ -270,8 +310,8 @@ class Meter:
             if isinstance(delta, dict) and any(
                 delta.get(key) for key in ("content", "reasoning_content", "tool_calls")
             ):
-                self.first_token = time.monotonic()
-                return
+                return True
+        return False
 
     # -- JSON --------------------------------------------------------------- #
     def _take_message(self, message: dict) -> None:
@@ -296,9 +336,12 @@ class Meter:
             return
         if isinstance(doc, dict):
             self._take_message(doc)
-            if self.first_token is None and self.usage.get("output_tokens"):
-                # Not streamed: the whole answer arrived with its first byte.
-                self.first_token = self.first_byte
+            # No first-token mark is taken here. A whole JSON answer arrives
+            # in one chunk, so any mark read off the arrival would sit at the
+            # end of the call and leave the generation rate dividing by the
+            # network's sliver -- an inflated rate, not a missing one. The
+            # record keeps ``ttfb_ms`` for the wait and reports no generation
+            # rate at all; see ``finish`` and ``reported_tps``.
 
     # -- the record --------------------------------------------------------- #
     def finish(self, ended: Optional[float] = None) -> dict:
@@ -306,13 +349,32 @@ class Meter:
         if not self.stream:
             self._read_buffer()
         elif self._sse_tail.strip():
-            self._event(self._sse_tail)
+            # A last event with no blank line after it: whatever it carried
+            # reached us by the time the body ended.
+            self._feed_read(self._sse_tail, ended)
             self._sse_tail = b""
         out_tokens = self.usage.get("output_tokens")
         total_s = ended - self.started
-        gen_s = (ended - self.first_token) if self.first_token is not None else None
+        # The generation window runs from the content that was seen first to
+        # the content that was seen last -- not to the end of the body, which
+        # carries trailing events, and not to the end of the call, which for an
+        # answer that did not stream carries the whole wait for it.
+        #
+        # A rate needs that window to be positive, and a window is only
+        # positive when the content was seen arriving in more than one read.
+        # Content that arrived in a single read was never observed to take any
+        # time, and dividing by the parse time of the read that carried it
+        # invents a rate -- which is how a 27-token answer came to be recorded
+        # at 435483 tok/s and a 5-token one at 26709. Neither answer has a
+        # generation rate to give, so the record says null and keeps
+        # ``tps_total``, the whole call's own average.
+        gen_s = (
+            self.last_token - self.first_token
+            if self.first_token is not None and self.last_token is not None
+            else None
+        )
         tps = None
-        if out_tokens and gen_s is not None and gen_s > 0:
+        if self.streamed and out_tokens and gen_s is not None and gen_s > 0:
             tps = round(out_tokens / gen_s, 2)
         tps_total = None
         if out_tokens and total_s > 0:
@@ -323,6 +385,13 @@ class Meter:
             "path": self.path,
             "status": self.status,
             "stream": bool(self.stream),
+            # Not the same fact as ``stream``: an SSE answer that ended before
+            # a single delta streamed without generating, and has no rate.
+            "streamed": bool(self.streamed),
+            # The window ``tps`` was divided by, in whole milliseconds. Written
+            # so a reader can tell a rate that was measured from one left
+            # behind by a formula that divided by nothing.
+            "generation_ms": int(gen_s * 1000) if gen_s is not None and gen_s > 0 else None,
             "model": self.model,
             "input_tokens": self.usage.get("input_tokens"),
             "cache_read": self.usage.get("cache_read"),
@@ -339,6 +408,86 @@ class Meter:
 
 def _ms(later: Optional[float], earlier: float) -> Optional[int]:
     return None if later is None else int((later - earlier) * 1000)
+
+
+# --------------------------------------------------------------------------- #
+# reading a record's throughput
+# --------------------------------------------------------------------------- #
+#: ``record["tps"]`` is the rate over the generation, ``tps_total`` the rate
+#: over the whole call. They are different facts and a reader that shows one
+#: number has to say which it got; :func:`tps_basis` names it.
+GENERATION = "generation"
+CALL = "call"
+
+
+def generation_tps(record: dict) -> Optional[float]:
+    """``record``'s rate over the generation, or ``None`` when it has none.
+
+    Decided from the response's own shape rather than from the presence of the
+    field, so that a record written before this rule was fixed is read
+    correctly without rewriting the file. Two residues have to be turned away,
+    and neither is trusted on ``tps`` alone: an answer that did not stream, and
+    an answer whose content arrived in one read -- both were divided by a
+    window that measured nothing. ``_timed_generation`` is that judgement.
+    """
+    if not record.get("stream"):
+        return None
+    tps = record.get("tps")
+    if not tps or not _timed_generation(record):
+        return None
+    return float(tps)
+
+
+def _timed_generation(record: dict) -> bool:
+    """Whether the window behind ``record``'s rate was one worth dividing by.
+
+    ``generation_ms`` is written by the reader from here on and answers this
+    directly. A record that has none was written before the window was measured
+    on its own, and there the window was ``ended - first_token`` -- which are
+    exactly the record's ``total_ms`` and ``ttft_ms``. Their difference is the
+    window, but both are rounded to whole milliseconds, so it carries up to a
+    millisecond of error either way; a difference below two does not
+    establish that a millisecond passed, and the answer may just as well have
+    arrived in a single read.
+
+    A record that says nothing either way is given the benefit of the doubt;
+    the alternative is to throw away a rate that may be the only one there is.
+    """
+    ms = record.get("generation_ms")
+    if ms is not None:
+        return ms > 0
+    total, ttft = record.get("total_ms"), record.get("ttft_ms")
+    if total is None or ttft is None:
+        return True
+    return total - ttft >= 2
+
+
+def reported_tps(record: dict) -> Optional[float]:
+    """The one rate to show for ``record``.
+
+    The generation rate when there is one, otherwise the call's own average
+    over its whole duration (``tps_total``), which for a non-streamed answer
+    is pessimistic by the wait and honest about being so. ``None`` when the
+    call was not counted at all. Read :func:`tps_basis` alongside it to know
+    which of the two the number is.
+    """
+    return generation_tps(record) or _call_tps(record)
+
+
+def _call_tps(record: dict) -> Optional[float]:
+    if not record.get("output_tokens"):
+        return None
+    total = record.get("tps_total")
+    return float(total) if total else None
+
+
+def tps_basis(record: dict) -> Optional[str]:
+    """``GENERATION``, ``CALL``, or ``None`` for a call with no rate."""
+    if generation_tps(record) is not None:
+        return GENERATION
+    if _call_tps(record) is not None:
+        return CALL
+    return None
 
 
 # --------------------------------------------------------------------------- #
@@ -413,17 +562,24 @@ def clear() -> int:
 # aggregation (what `claunch tps` prints)
 # --------------------------------------------------------------------------- #
 def summarize(records: Iterable[dict]) -> dict:
-    """Counts, token totals and TPS/TTFT medians over ``records``."""
+    """Counts, token totals and TPS/TTFT medians over ``records``.
+
+    The numbers under ``tps_*`` are generation rates, so ``counted`` is the
+    number of calls whose generation was timed at all. A call that was not
+    still has a rate of its own -- the whole call's average -- and it is under
+    ``tps_total_*`` instead, in its own column rather than mixed into a median
+    that would then be over two different measurements.
+    """
     recs = list(records)
-    counted = [r for r in recs if r.get("tps")]
-    tps = [float(r["tps"]) for r in counted]
+    tps = [v for v in (generation_tps(r) for r in recs) if v is not None]
+    total = [v for v in (_call_tps(r) for r in recs) if v is not None]
     ttft = [float(r["ttft_ms"]) for r in recs if r.get("ttft_ms") is not None]
     out_tokens = sum(int(r.get("output_tokens") or 0) for r in recs)
     in_tokens = sum(int(r.get("input_tokens") or 0) for r in recs)
     cache_read = sum(int(r.get("cache_read") or 0) for r in recs)
     return {
         "requests": len(recs),
-        "counted": len(counted),
+        "counted": len(tps),
         "output_tokens": out_tokens,
         "input_tokens": in_tokens,
         "cache_read": cache_read,
@@ -431,6 +587,8 @@ def summarize(records: Iterable[dict]) -> dict:
         "tps_mean": round(statistics.fmean(tps), 2) if tps else None,
         "tps_min": round(min(tps), 2) if tps else None,
         "tps_max": round(max(tps), 2) if tps else None,
+        "tps_total_n": len(total),
+        "tps_total_median": round(statistics.median(total), 2) if total else None,
         "ttft_ms_median": int(statistics.median(ttft)) if ttft else None,
     }
 
@@ -520,26 +678,34 @@ def session_summary(session: str) -> Optional[dict]:
     record whether or not it was counted (an error answer still says when
     the session last called out); the medians are over the counted ones in
     the window.
+
+    ``tps`` is the last call's :func:`reported_tps` and ``tps_basis`` says
+    which rate that is -- ``generation`` when the answer streamed, ``call``
+    when it arrived whole and only the whole-call average exists. A reader
+    that shows the number must show the basis with it; the two are not
+    interchangeable.
     """
     recs = recent(session, limit=SUMMARY_WINDOW)
     if not recs:
         return None
     last = recs[-1]
-    counted = [r for r in recs if r.get("tps")]
-    tps = [float(r["tps"]) for r in counted]
+    tps = [v for v in (generation_tps(r) for r in recs) if v is not None]
     ttft = [float(r["ttft_ms"]) for r in recs if r.get("ttft_ms") is not None]
     return {
         "ts": last.get("ts"),
         "model": last.get("model"),
         "status": last.get("status"),
         "counted": bool(last.get("counted")),
-        "tps": last.get("tps"),
+        "tps": reported_tps(last),
+        "tps_basis": tps_basis(last),
         "ttft_ms": last.get("ttft_ms"),
+        "ttfb_ms": last.get("ttfb_ms"),
         "output_tokens": last.get("output_tokens"),
         "input_tokens": last.get("input_tokens"),
         "cache_read": last.get("cache_read"),
         "window": len(recs),
         "tps_median": round(statistics.median(tps), 2) if tps else None,
+        "tps_median_n": len(tps),
         "ttft_ms_median": int(statistics.median(ttft)) if ttft else None,
         "upstream": last.get("upstream"),
     }
