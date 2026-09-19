@@ -81,21 +81,29 @@ def test_score_goal_defaults_creation_children_and_user_rating(home, tmp_path, m
             })
             doc = await resp.json()
             assert resp.status == 201, doc
-            assert doc["score_goal"] is True and doc["user_score"] == 0
+            assert doc["score_goal"] is True
+            assert doc["user_reward"] == 0 and doc["user_penalty"] == 0
             assert openings == [""]  # No argv task may precede /goal.
             await _wait_for(lambda: bool(commands), "initial goal")
-            assert commands == [("rated", "/goal " + score_goal.prompt(0))]
-            for value in [-1, 11, True, "7", None]:
-                resp = await client.put("/api/sessions/rated/score-goal", headers=BEARER, json={"score": value})
-                assert resp.status == 400
-            for value in [7.5, 10]:
-                resp = await client.put("/api/sessions/rated/score-goal", headers=BEARER, json={"score": value})
-                assert resp.status == 200
-                assert await resp.json() == {"enabled": True, "score": value, "active": value < 10}
-                assert mgr.get("rated").sdef.user_score == value
-                saved = next(row["def"] for row in mgr._store.load_all() if row["def"]["name"] == "rated")
-                assert SessionDef.from_dict(saved).user_score == value
-                assert SessionDef.from_dict(saved).score_goal
+            assert commands == [("rated", "/goal " + score_goal.prompt(mgr.get("rated").sdef))]
+            # Scores are no longer set directly: the old PUT route is gone.
+            resp = await client.put(
+                "/api/sessions/rated/score-goal", headers=BEARER, json={"score": 7.5})
+            assert resp.status == 405
+            # Feedback rides an input send, one point at a time.
+            await mgr.get("rated").wait_for("idle", timeout=10.0, threshold=0.5)
+            for kind, key, want in [("reward", "user_reward", 1), ("penalty", "user_penalty", 1)]:
+                resp = await client.post("/api/sessions/rated/keys", headers=BEARER, json={
+                    "keys": ["note", "Enter"], "force": True, "feedback": kind,
+                })
+                doc = await resp.json()
+                assert resp.status == 200, doc
+                assert doc["score_goal"][kind] == want
+                assert getattr(mgr.get("rated").sdef, key) == want
+            saved = next(row["def"] for row in mgr._store.load_all() if row["def"]["name"] == "rated")
+            restored = SessionDef.from_dict(saved)
+            assert restored.user_reward == 1 and restored.user_penalty == 1
+            assert restored.score_goal
             # Rating the session does not submit another slash command.
             assert len(commands) == 1
             resp = await client.post("/api/sessions/rated/children", headers=BEARER, json={
@@ -104,15 +112,19 @@ def test_score_goal_defaults_creation_children_and_user_rating(home, tmp_path, m
             doc = await resp.json()
             assert resp.status == 201, doc
             assert not mgr.get("off").sdef.score_goal
-            resp = await client.put("/api/sessions/off/score-goal", headers=BEARER, json={"score": 10})
+            resp = await client.post("/api/sessions/off/keys", headers=BEARER, json={
+                "keys": ["note", "Enter"], "force": True, "feedback": "reward",
+            })
             assert resp.status == 409
             resp = await client.post("/api/sessions/rated/children", headers=BEARER, json={
                 "name": "child", "mesh": "-", "workflow": "-", "beads": False,
             })
             assert resp.status == 201, await resp.json()
             await _wait_for(lambda: len(commands) == 2, "child goal")
-            assert mgr.get("child").sdef.user_score == 0  # Never inherits the parent's ten.
-            assert commands[-1] == ("child", "/goal " + score_goal.prompt(0))
+            # A child never inherits the parent's counts.
+            assert mgr.get("child").sdef.user_reward == 0
+            assert mgr.get("child").sdef.user_penalty == 0
+            assert commands[-1] == ("child", "/goal " + score_goal.prompt(mgr.get("child").sdef))
             await client.put("/api/score-goal/defaults", headers=BEARER, json={"enabled": False})
             assert mgr.get("rated").sdef.score_goal
             resp = await client.get("/api/sessions?view=rail", headers=BEARER)

@@ -1526,8 +1526,8 @@ a.cflow-scope:hover { background: #1d3559; text-decoration: underline; }
 #term-input-field:disabled { opacity: 0.5; cursor: not-allowed; }
 #term-score-goal { display: flex; align-items: center; gap: 0.3rem; flex-wrap: wrap; flex-shrink: 0; }
 #term-score-goal.hidden { display: none; }
-#term-score-value { width: 3.5rem; }
-#term-score-note { font-size: 0.8rem; }
+#term-score-feedback { font: inherit; }
+#term-score-counts { font-size: 0.8rem; font-variant-numeric: tabular-nums; white-space: nowrap; }
 @media (max-width: 700px) {
   #term-input:has(#term-score-goal:not(.hidden)) { flex-wrap: wrap; }
   #term-score-goal { order: 2; flex-basis: 100%; }

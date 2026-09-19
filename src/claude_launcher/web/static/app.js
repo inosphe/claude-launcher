@@ -8178,9 +8178,12 @@ async function sendKeyLine(field, btn, note) {
     // session does not turn a deliberate send into a 30s wait/409.
     // A single line is keys; a line with a newline in it is one paste, whose
     // Enter the daemon writes separately (Session.paste).
+    // Operator feedback rides with the send: one point, applied only when
+    // the input actually lands, and the choice resets for the next input.
+    const feedback = currentScoreFeedback();
     const body = text.includes("\n")
-      ? { paste: text, enter: true, force: true, input_id: inputId }
-      : { keys: [text, "Enter"], force: true, input_id: inputId };
+      ? { paste: text, enter: true, force: true, input_id: inputId, feedback }
+      : { keys: [text, "Enter"], force: true, input_id: inputId, feedback };
     const resp = await api(
       `/api/sessions/${encodeURIComponent(currentName)}/keys`,
       { method: "POST",
@@ -8191,6 +8194,16 @@ async function sendKeyLine(field, btn, note) {
     if (resp.ok) {
       field.value = "";
       autogrowTermInput(field);
+      if (doc.score_goal) {
+        const session = sessionsCache.find((s) => s.name === currentName);
+        if (session) {
+          session.user_reward = doc.score_goal.reward;
+          session.user_penalty = doc.score_goal.penalty;
+        }
+      }
+      const sel = $("term-score-feedback");
+      if (sel) sel.value = "none";
+      renderScoreGoal();
       return true;
     }
     termInputNote(note, doc.error || "the session refused these keys", true);
@@ -8215,62 +8228,27 @@ function renderScoreGoal() {
   const visible = !!session?.score_goal;
   box.classList.toggle("hidden", !visible);
   if (!visible) return;
-  const field = $("term-score-value");
-  const value = String(session.user_score ?? 0);
-  const switched = box.dataset.session !== currentName;
-  if (switched || field.value === field.dataset.saved) field.value = value;
-  field.dataset.saved = value;
-  box.dataset.session = currentName;
-  field.disabled = session.status === "exited" || sessionEnded;
-  $("term-score-save").disabled = field.disabled || box.dataset.saving === currentName;
-  if (switched || !box.dataset.saving) {
-    $("term-score-note").textContent = Number(value) === 10 ? "Goal reminders off" : "";
-  }
+  const reward = Number(session.user_reward ?? 0);
+  const penalty = Number(session.user_penalty ?? 0);
+  const counts = $("term-score-counts");
+  counts.textContent = `R${reward} · P${penalty}`;
+  counts.title = `reward ${reward} · penalty ${penalty}`;
+  const sel = $("term-score-feedback");
+  const ended = session.status === "exited" || sessionEnded;
+  sel.disabled = ended;
+  if (ended) sel.value = "none";
 }
 
-async function saveSessionScore() {
-  const name = currentName;
+/* The feedback choice riding the next send from this box: "none" unless the
+   operator picked a point and the feature is on for this session. */
+function currentScoreFeedback() {
   const box = $("term-score-goal");
-  const field = $("term-score-value");
-  const note = $("term-score-note");
-  const value = Number(field.value);
-  if (!field.value.trim() || !Number.isFinite(value) || value < 0 || value > 10) {
-    note.textContent = "Enter a score from 0 to 10.";
-    return;
+  const sel = $("term-score-feedback");
+  if (!box || box.classList.contains("hidden") || !sel || sel.disabled) {
+    return "none";
   }
-  if (!name || field.disabled || box.dataset.saving) return;
-  box.dataset.saving = name;
-  $("term-score-save").disabled = true;
-  try {
-    const response = await api(`/api/sessions/${encodeURIComponent(name)}/score-goal`, {
-      method: "PUT", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ score: value }),
-    });
-    const doc = await response.json();
-    if (!response.ok) throw new Error(doc.error || "Could not save score.");
-    const session = sessionsCache.find((s) => s.name === name);
-    if (session) session.user_score = doc.score;
-    if (currentName === name) {
-      field.value = String(doc.score);
-      field.dataset.saved = field.value;
-      note.textContent = doc.active ? "Score saved" : "10/10 — goal reminders off";
-    }
-  } catch (err) {
-    if (currentName === name) note.textContent = err.message;
-  } finally {
-    delete box.dataset.saving;
-    $("term-score-save").disabled = field.disabled;
-  }
+  return sel.value || "none";
 }
-
-$("term-score-save")?.addEventListener("click", saveSessionScore);
-$("term-score-value")?.addEventListener("keydown", (event) => {
-  event.stopPropagation();
-  if (event.key === "Enter") {
-    event.preventDefault();
-    saveSessionScore();
-  }
-});
 
 async function refreshScoreGoalDefault(form) {
   const checkbox = form.score_goal;
@@ -8299,7 +8277,7 @@ function scoreGoalSettingsCard() {
   checkbox.type = "checkbox";
   checkbox.disabled = true;
   label.append(checkbox, document.createTextNode(" Enable by default for new sessions and children"));
-  const note = el("p", "wf-note", "Starts at 0/10. Set the score beside the session input. Goal reminders stop at 10/10.");
+  const note = el("p", "wf-note", "Both counts start at 0. Each input sent from the session line can carry one reward or penalty point. Goal reminders repeat while enabled.");
   card.append(label, note);
   api("/api/score-goal/defaults").then(async (response) => {
     if (!response.ok) throw new Error("Could not load score goal default.");

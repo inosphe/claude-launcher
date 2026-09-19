@@ -594,7 +594,6 @@ def build_app(
     r.add_get("/api/score-goal/defaults", h_score_goal_defaults)
     r.add_put("/api/score-goal/defaults", h_score_goal_defaults_set)
     r.add_get("/api/sessions/{name}/score-goal", h_session_score_goal)
-    r.add_put("/api/sessions/{name}/score-goal", h_session_score_goal_set)
     r.add_post("/api/sessions/{name}/reminder", h_session_reminder_set)
     r.add_post("/api/sessions/{name}/reminder/skip", h_session_reminder_skip)
     r.add_get("/api/sessions/{name}/children", h_session_children)
@@ -4356,7 +4355,7 @@ async def h_sessions_list(request: web.Request) -> web.Response:
             "name", "harness", "profile", "cwd", "args", "model", "effort",
             "tools", "restore", "conversation_id", "role", "parent", "borrow",
             "null_token", "issue", "keep_alive", "reminder_paused", "status",
-            "score_goal", "user_score",
+            "score_goal", "user_reward", "user_penalty",
             "pid", "exit_code", "created_at", "last_output_at",
             "last_visited_at", "last_input_at", "last_activity_at", "viewers",
             "exited_at", "archived_at", "paused_at", "delivery_hold",
@@ -4472,7 +4471,7 @@ async def _onboard_and_launch(
             ))
         except ValueError as exc:
             raise onboard.OnboardError(str(exc)) from None
-        session.sdef = replace(session.sdef, score_goal=selected, user_score=0)
+        session.sdef = replace(session.sdef, score_goal=selected)
         # Inside the discarding try, and before anything is arranged: a board
         # answer that contradicts itself is checkable without a session, and
         # the alternative is a request that half-happens.
@@ -5026,28 +5025,6 @@ async def h_score_goal_defaults_set(request: web.Request) -> web.Response:
 
 async def h_session_score_goal(request: web.Request) -> web.Response:
     return json_response(score_goal.view(_session(request).sdef))
-
-
-async def h_session_score_goal_set(request: web.Request) -> web.Response:
-    session = _session(request)
-    if session.exited:
-        return json_error(409, "session has exited")
-    if not session.sdef.score_goal:
-        return json_error(409, "score goal is not enabled for this session")
-    body = await _json_body(request)
-    try:
-        value = score_goal.score(body.get("score"))
-    except ValueError as exc:
-        return json_error(400, str(exc))
-    changed = value != session.sdef.user_score
-    session.sdef = replace(session.sdef, user_score=value)
-    request.app["manager"].persist()
-    if changed:
-        message = score_goal.prompt(value)
-        if value == 10:
-            message += "\n목표 점수 10점에 도달하여 점수 목표 알림을 해제합니다."
-        session.queue_delivery(message)
-    return json_response(score_goal.view(session.sdef))
 
 
 def _session_reminder_service(request: web.Request):
@@ -6175,6 +6152,21 @@ async def _deliver_pasted_image(session, path, media_type: str):
     return True, keys, ""
 
 
+def _keys_payload(session, nbytes: int, **extra) -> dict:
+    out = {"ok": True, "bytes": nbytes}
+    out.update(extra)
+    if session.sdef.score_goal:
+        out["score_goal"] = score_goal.view(session.sdef)
+    return out
+
+
+def _apply_score_feedback(request, session, kind: str) -> None:
+    changes = score_goal.apply(session.sdef, kind)
+    if changes:
+        session.sdef = replace(session.sdef, **changes)
+        request.app["manager"].persist()
+
+
 async def h_session_keys(request: web.Request) -> web.Response:
     session = _session(request)
     body = await _json_body(request)
@@ -6186,6 +6178,15 @@ async def h_session_keys(request: web.Request) -> web.Response:
         not isinstance(request_id, str) or not request_id.strip()
     ):
         return json_error(400, "'input_id' must be a non-empty string")
+    # One point of operator feedback may ride with an input send. It applies
+    # only when that send actually lands — never on a duplicate replay and
+    # never when nothing was delivered.
+    try:
+        feedback = score_goal.feedback(body.get("feedback", "none"))
+    except ValueError as exc:
+        return json_error(400, str(exc))
+    if feedback != "none" and not session.sdef.score_goal:
+        return json_error(409, "score goal is not enabled for this session")
     paste = body.get("paste")
     if paste is not None:
         if not isinstance(paste, str):
@@ -6215,7 +6216,7 @@ async def h_session_keys(request: web.Request) -> web.Response:
         if request_id is not None:
             prior = session_input.latest(session.sdef.name, request_id)
             if prior and prior.get("status") == "sent":
-                return json_response({"ok": True, "bytes": 0, "duplicate": True})
+                return json_response(_keys_payload(session, 0, duplicate=True))
             session_input.write(session.sdef.name, "input_accepted",
                                 request_id=request_id, text=paste,
                                 status="accepted", pid=session.pid)
@@ -6231,7 +6232,8 @@ async def h_session_keys(request: web.Request) -> web.Response:
             session_input.write(session.sdef.name, "input_sent",
                                 request_id=request_id, text=paste,
                                 status="sent", pid=session.pid)
-        return json_response({"ok": True, "bytes": len(data)})
+        _apply_score_feedback(request, session, feedback)
+        return json_response(_keys_payload(session, len(data)))
     keys = body.get("keys")
     if not isinstance(keys, list) or not all(isinstance(k, str) for k in keys):
         return json_error(400, "'keys' must be a list of strings")
@@ -6241,7 +6243,7 @@ async def h_session_keys(request: web.Request) -> web.Response:
             return json_error(400, "'input_id' requires [text, 'Enter'] keys")
         prior = session_input.latest(session.sdef.name, request_id)
         if prior and prior.get("status") == "sent":
-            return json_response({"ok": True, "bytes": 0, "duplicate": True})
+            return json_response(_keys_payload(session, 0, duplicate=True))
         session_input.write(session.sdef.name, "input_accepted",
                             request_id=request_id, text=audit_text,
                             status="accepted", pid=session.pid)
@@ -6259,7 +6261,8 @@ async def h_session_keys(request: web.Request) -> web.Response:
         session_input.write(session.sdef.name, "input_sent",
                             request_id=request_id, text=audit_text,
                             status="sent", pid=session.pid)
-    return json_response({"ok": True, "bytes": len(data)})
+    _apply_score_feedback(request, session, feedback)
+    return json_response(_keys_payload(session, len(data)))
 
 
 async def h_session_input_journal(request: web.Request) -> web.Response:

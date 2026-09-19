@@ -23,6 +23,7 @@ const root = path.resolve(__dirname, '../../src/claude_launcher/web/static');
     await page.evaluate(() => {
       window.requests = [];
       window.defaultScoreGoal = false;
+      window.counts = { reward: 0, penalty: 0 };
       api = async (url, options = {}) => {
         const body = options.body ? JSON.parse(options.body) : null;
         if (options.method) requests.push({ url, body });
@@ -30,11 +31,15 @@ const root = path.resolve(__dirname, '../../src/claude_launcher/web/static');
           if (options.method === 'PUT') defaultScoreGoal = body.enabled;
           return { ok: true, json: async () => ({ enabled: defaultScoreGoal }) };
         }
-        if (url.endsWith('/score-goal')) return { ok: true, json: async () => ({ enabled: true, score: body.score, active: body.score < 10 }) };
+        if (url.endsWith('/keys')) {
+          if (body && body.feedback === 'reward') counts.reward += 1;
+          if (body && body.feedback === 'penalty') counts.penalty += 1;
+          return { ok: true, json: async () => ({ ok: true, bytes: 2, score_goal: { enabled: true, ...counts, active: true } }) };
+        }
         if (options.method === 'POST') return { ok: false, status: 400, json: async () => ({ error: 'test refusal' }) };
         return { ok: true, json: async () => ({}) };
       };
-      sessionsCache = [{ name: 'rated', status: 'idle', score_goal: true, user_score: 0, harness: 'claude', cwd: 'F:/repo' },
+      sessionsCache = [{ name: 'rated', status: 'idle', score_goal: true, user_reward: 0, user_penalty: 0, harness: 'claude', cwd: 'F:/repo' },
         { name: 'other', status: 'idle' }];
       for (const name of ['refreshWorkspaces', 'refreshNewWorktree', 'refreshWorkflowChoices', 'refreshRoles',
         'refreshSpawnPolicy', 'refreshSessionConnect', 'syncSpawnMode', 'syncOnboardPickers', 'refreshIssueChoices',
@@ -69,25 +74,37 @@ const root = path.resolve(__dirname, '../../src/claude_launcher/web/static');
       renderScoreGoal();
     });
     assert.equal(await page.locator('#term-score-goal').isVisible(), true);
-    await page.locator('#term-input-field').fill('preserve this draft');
-    await page.locator('#term-score-value').fill('11');
-    await page.locator('#term-score-save').click();
-    assert.match(await page.locator('#term-score-note').innerText(), /0 to 10/);
-    await page.locator('#term-score-value').fill('7.5');
-    await page.locator('#term-score-value').press('Enter');
-    await page.waitForFunction(() => sessionsCache[0].user_score === 7.5);
-    assert.equal(await page.locator('#term-input-field').inputValue(), 'preserve this draft');
-    await page.locator('#term-score-value').fill('10');
-    await page.locator('#term-score-save').click();
-    await page.waitForFunction(() => sessionsCache[0].user_score === 10);
-    assert.match(await page.locator('#term-score-note').innerText(), /reminders off/);
+    assert.equal(await page.locator('#term-score-counts').innerText(), 'R0 · P0');
+    // Choosing feedback never touches the draft it rides with.
+    await page.locator('#term-input-field').fill('keep this draft');
+    await page.locator('#term-score-feedback').selectOption('reward');
+    assert.equal(await page.locator('#term-input-field').inputValue(), 'keep this draft');
+    // The send carries one point, the counts refresh, the choice resets.
+    await page.locator('#term-input-send').click();
+    await page.waitForFunction(() => requests.some(r => r.url.endsWith('/keys')));
+    let sent = await page.evaluate(() => requests.find(r => r.url.endsWith('/keys')).body);
+    assert.equal(sent.feedback, 'reward');
+    assert.deepEqual(sent.keys, ['keep this draft', 'Enter']);
+    await page.waitForFunction(() => sessionsCache[0].user_reward === 1);
+    assert.equal(await page.locator('#term-score-counts').innerText(), 'R1 · P0');
+    assert.equal(await page.locator('#term-score-feedback').inputValue(), 'none');
+    assert.equal(await page.locator('#term-input-field').inputValue(), '');
+    // A send without a choice carries none.
+    await page.locator('#term-input-field').fill('plain note');
+    await page.locator('#term-input-send').click();
+    await page.waitForFunction(() => requests.filter(r => r.url.endsWith('/keys')).length === 2);
+    sent = await page.evaluate(() => requests.filter(r => r.url.endsWith('/keys'))[1].body);
+    assert.equal(sent.feedback, 'none');
+    await page.waitForFunction(() => sessionsCache[0].user_reward === 1 && sessionsCache[0].user_penalty === 0);
+    // Mobile layout keeps the selector inside the viewport.
     await page.setViewportSize({ width: 390, height: 844 });
-    assert.equal(await page.locator('#term-score-save').isVisible(), true);
+    assert.equal(await page.locator('#term-score-feedback').isVisible(), true);
     const bounds = await page.locator('#term-score-goal').boundingBox();
     assert.ok(bounds.x >= 0 && bounds.x + bounds.width <= 390);
+    // A session without the feature shows no feedback control.
     await page.evaluate(() => { currentName = 'other'; renderScoreGoal(); });
     assert.equal(await page.locator('#term-score-goal').isVisible(), false);
     assert.deepEqual(errors, []);
-    console.log('score goal: defaults, new/spawn payloads, rating, draft preservation, completion and mobile layout passed');
+    console.log('score goal: defaults, new/spawn payloads, input feedback, reset, counts and mobile layout passed');
   } finally { await browser.close(); }
 })().catch(error => { console.error(error); process.exitCode = 1; });

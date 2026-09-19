@@ -803,7 +803,7 @@ class SessionReminderService:
                 return ""
             return reminder_block(
                 name,
-                goal=score_goal.prompt(session.sdef.user_score) if active else "",
+                goal=score_goal.prompt(session.sdef) if active else "",
                 roles=current_roles,
                 cflow=cflow_block,
                 situation=situation,

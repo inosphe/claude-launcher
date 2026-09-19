@@ -174,10 +174,13 @@ class SessionDef:
     #: Persisted with the definition so a daemon restart or respawn does not
     #: silently undo a pause made from the terminal header.
     reminder_paused: bool = False
-    #: Creation opt-in and the last score entered by the operator. At ten
-    #: the selection remains recorded, but the score source stops repeating.
+    #: Creation opt-in and the operator's feedback counts. Each input sent
+    #: through the session line may carry one reward or penalty point; the
+    #: two counts are independent, start at zero, and stop nothing — while
+    #: the selection is recorded, the score source repeats.
     score_goal: bool = False
-    user_score: float = 0
+    user_reward: int = 0
+    user_penalty: int = 0
     #: The session this one is a quick-fork of, by name (see
     #: :mod:`claude_launcher.daemon.handoff`). Written only by the quick-fork
     #: route, never by a plain spawn: it is what makes ``merge`` available on
@@ -218,7 +221,8 @@ class SessionDef:
             out["reminder_paused"] = True
         if self.score_goal:
             out["score_goal"] = True
-            out["user_score"] = self.user_score
+            out["user_reward"] = self.user_reward
+            out["user_penalty"] = self.user_penalty
         if self.tools is not None:
             out["tools"] = list(self.tools)
         if self.quick_fork_of:
@@ -255,7 +259,10 @@ class SessionDef:
             keep_alive=bool(data.get("keep_alive")),
             reminder_paused=bool(data.get("reminder_paused")),
             score_goal=score_goal.enabled(data.get("score_goal", False)),
-            user_score=score_goal.score(data.get("user_score", 0)),
+            # A record written before the split carries one ``user_score``;
+            # it is discarded here, not carried into either count.
+            user_reward=score_goal.count(data.get("user_reward", 0)),
+            user_penalty=score_goal.count(data.get("user_penalty", 0)),
             quick_fork_of=str(data.get("quick_fork_of") or "").strip() or None,
         )
 
