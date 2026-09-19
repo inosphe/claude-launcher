@@ -632,6 +632,10 @@ def build_app(
     # know it needs one.
     r.add_get("/api/sessions/{name}/rebrief", h_session_rebrief)
     r.add_post("/api/sessions/{name}/rebrief", h_session_rebrief)
+    # The harness telling the daemon which conversation the session is on
+    # now — claude's SessionStart hook after /clear mints a new session id
+    # (see SessionManager.repin_conversation).
+    r.add_post("/api/sessions/{name}/conversation", h_session_conversation)
     r.add_get("/api/sessions/{name}/loops", h_session_loops)
     r.add_post("/api/sessions/{name}/loops", h_session_loop_add)
     r.add_post("/api/sessions/{name}/loops/{loop}/close", h_session_loop_close)
@@ -6357,6 +6361,38 @@ async def h_session_rebrief(request: web.Request) -> web.Response:
         return json_response({"ok": True, "delivered": False, "empty": True})
     delivered = await manager.get(name).deliver(block)
     return json_response({"ok": True, "delivered": delivered, "empty": False})
+
+
+async def h_session_conversation(request: web.Request) -> web.Response:
+    """Record the conversation id the harness says this session is on.
+
+    Body: ``{"conversation_id": ..., "source": ..., "transcript_path": ...}``.
+    ``conversation_id`` is required; the rest is carried into the log line.
+    The caller is the session's own SessionStart hook (``claunch rebrief``
+    reads claude's hook payload off stdin and posts it here), and the moment
+    it matters is ``/clear``: claude continues in a new conversation under a
+    new id, and until the daemon hears of it a restore reopens the old one and
+    the transcript page reads it. Reporting the id already pinned is a no-op
+    (``/compact`` keeps the id), so the hook can post unconditionally.
+    """
+    manager: SessionManager = request.app["manager"]
+    name = request.match_info["name"]
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    if not isinstance(body, dict):
+        body = {}
+    conversation_id = str(body.get("conversation_id") or "").strip()
+    if not conversation_id:
+        return json_error(400, "'conversation_id' is required")
+    try:
+        outcome = manager.repin_conversation(
+            name, conversation_id, source=str(body.get("source") or ""),
+        )
+    except ManagerError as exc:
+        return json_error(404, str(exc))
+    return json_response({"ok": True, "session": name, **outcome})
 
 
 async def h_session_loops(request: web.Request) -> web.Response:

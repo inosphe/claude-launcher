@@ -515,3 +515,134 @@ def test_a_page_long_completion_test_is_capped(home, tmp_path, monkeypatch):
     assert "'status' has it whole" in block
     line = [ln for ln in block.splitlines() if ln.startswith("done when: ")][0]
     assert len(line) < rebrief.DONE_WHEN_LIMIT + 80
+# --------------------------------------------------------------------------- #
+# the hook reports which conversation the session is on (a /clear moved it)
+# --------------------------------------------------------------------------- #
+def test_the_conversation_endpoint_repins_and_persists(home, tmp_path):
+    _register_py_harness()
+    mgr = _manager()
+
+    async def scenario():
+        from aiohttp.test_utils import TestClient, TestServer
+
+        app = build_app(mgr, "sekrit", started_at=time.monotonic())
+        client = TestClient(TestServer(app))
+        await client.start_server()
+        try:
+            resp = await client.post(
+                "/api/sessions", headers=BEARER,
+                json={
+                    "name": "s1", "profile": "py", "cwd": str(tmp_path),
+                    "conversation_id": "old-id",
+                },
+            )
+            assert resp.status == 201, await resp.text()
+
+            # Missing id is a 400, unknown session a 404.
+            resp = await client.post(
+                "/api/sessions/s1/conversation", headers=BEARER, json={})
+            assert resp.status == 400
+            resp = await client.post(
+                "/api/sessions/nobody/conversation", headers=BEARER,
+                json={"conversation_id": "x"})
+            assert resp.status == 404
+
+            # Reporting the pinned id changes nothing.
+            resp = await client.post(
+                "/api/sessions/s1/conversation", headers=BEARER,
+                json={"conversation_id": "old-id", "source": "compact"})
+            body = await resp.json()
+            assert body["changed"] is False
+
+            # Reporting the id /clear minted moves the pin and persists it.
+            resp = await client.post(
+                "/api/sessions/s1/conversation", headers=BEARER,
+                json={"conversation_id": "new-id", "source": "clear"})
+            body = await resp.json()
+            assert body["ok"] is True and body["changed"] is True
+            assert mgr.get("s1").sdef.conversation_id == "new-id"
+            from claude_launcher.daemon import db
+
+            entries = db.open_default().load_all()
+            assert entries[0]["def"]["conversation_id"] == "new-id"
+        finally:
+            await client.close()
+        await mgr.shutdown_all()
+
+    asyncio.run(scenario())
+
+
+def test_the_hook_posts_the_session_id_claude_handed_it(home, monkeypatch, capsys):
+    """``claunch rebrief`` reads the hook payload's stdin and reports the id.
+
+    Before: the hook never read stdin, so a /clear left the daemon pinned to
+    the conversation the session had just left. Measured payload (2026-09-15):
+    session_id, transcript_path, cwd, hook_event_name, source.
+    """
+    import io
+    import json
+
+    from claude_launcher import cli_sessions
+
+    calls = []
+
+    class FakeClient:
+        def get(self, path, **kw):
+            calls.append(("GET", path))
+            return {"block": "---\nbriefing\n---"}
+
+        def post(self, path, body=None, **kw):
+            calls.append(("POST", path, body))
+            return {"ok": True, "changed": True}
+
+    monkeypatch.setenv("CLAUNCH_SESSION", "s9")
+    monkeypatch.setattr(
+        cli_sessions.daemon_client, "ensure_running", lambda: FakeClient())
+    monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps({
+        "session_id": "new-id",
+        "transcript_path": "C:/p/new-id.jsonl",
+        "cwd": "F:/works",
+        "hook_event_name": "SessionStart",
+        "source": "clear",
+    })))
+
+    rc = cli_sessions._cmd_rebrief(argparse.Namespace(session=None, id=""))
+    out, err = capsys.readouterr()
+
+    assert rc == 0
+    assert ("POST", "/api/sessions/s9/conversation", {
+        "conversation_id": "new-id",
+        "source": "clear",
+        "transcript_path": "C:/p/new-id.jsonl",
+    }) in calls
+    # The pin report rides ahead of the briefing fetch.
+    assert calls[0][0] == "POST"
+    assert "briefing" in out
+
+
+def test_the_hook_survives_a_missing_or_foreign_stdin(home, monkeypatch, capsys):
+    """A human's bare run, a piped nothing, and piped junk all still rebrief."""
+    import io
+
+    from claude_launcher import cli_sessions
+
+    calls = []
+
+    class FakeClient:
+        def get(self, path, **kw):
+            return {"block": ""}
+
+        def post(self, path, body=None, **kw):
+            calls.append(path)
+            return {"ok": True}
+
+    monkeypatch.setenv("CLAUNCH_SESSION", "s9")
+    monkeypatch.setattr(
+        cli_sessions.daemon_client, "ensure_running", lambda: FakeClient())
+
+    for stdin in (io.StringIO(""), io.StringIO("not json"),
+                  io.StringIO('{"hook_event_name": "PreToolUse"}')):
+        monkeypatch.setattr("sys.stdin", stdin)
+        rc = cli_sessions._cmd_rebrief(argparse.Namespace(session=None, id=""))
+        assert rc == 0
+    assert calls == []  # nothing here was a SessionStart report

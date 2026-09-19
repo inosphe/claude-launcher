@@ -50,6 +50,9 @@ _NESTED_SESSION_MARKERS = (
 #: half of a session's briefing is lost while the process lives on — and whose
 #: stdout claude reads back into context. That makes re-briefing deterministic
 #: instead of resting on the agent remembering, post-loss, that it should ask.
+#: The hook payload on stdin also carries the session id claude is now on, and
+#: ``clear`` mints a new one; ``claunch rebrief`` posts it back so the pinned
+#: conversation follows the switch (see :func:`cli_sessions._report_hook_conversation`).
 #: One static command with no arguments: the hook process inherits
 #: ``CLAUNCH_SESSION`` (exported below), which is all ``claunch rebrief``
 #: needs to find its session, and a command that never varies survives every

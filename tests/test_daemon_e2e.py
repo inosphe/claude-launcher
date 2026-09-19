@@ -127,7 +127,7 @@ def test_sessions_json_persistence(home, tmp_path):
 
 
 async def _settled(condition, *, timeout: float = 5.0) -> None:
-    """Wait for an off-loop claim to land (see Manager._claim_codex_launch)."""
+    """Wait for an off-loop claim to land (see Manager._claim_in_thread)."""
     deadline = time.monotonic() + timeout
     while not condition():
         if time.monotonic() > deadline:
@@ -279,7 +279,7 @@ def test_codex_new_replaces_and_persists_the_conversation_id(
         session = mgr.create(SessionDef(
             name="cx", profile="codex", cwd=str(tmp_path)
         ))
-        # The launch-time claim lands off the loop (see _claim_codex_launch).
+        # The launch-time claim lands off the loop (see _claim_in_thread).
         await _settled(lambda: session.sdef.conversation_id)
         assert session.sdef.conversation_id == "codex-thread-1"
 
@@ -296,6 +296,147 @@ def test_codex_new_replaces_and_persists_the_conversation_id(
             ({"older"}, 2.0),
             ({"older", "codex-thread-1"}, 3.0),
         ]
+
+    asyncio.run(run())
+
+
+def test_codex_new_claim_retries_until_the_rollout_appears(
+    home, tmp_path, monkeypatch
+):
+    """The /new claim is a pending claim, not a one-shot 3s wait.
+
+    Before: a miss inside the short wait left the pin on the superseded
+    rollout forever (measured 2026-09-14, session s536: /new at 09:46:39Z,
+    the rollout written the same second, "could not discover Codex /new
+    conversation id" at 09:46:42, pin never moved). Now the listing polls
+    keep scanning and the next one settles it.
+    """
+    store.update(lambda doc: doc.update({"harnesses": {"codex": {
+        "command": [sys.executable, "-u", "-c", CHILD],
+        "home_env": "CODEX_HOME",
+        "restore_args": ["resume", "--last"],
+    }}}))
+    lineage.set_harness(profile.create("codex"), "codex")
+    claims = ["codex-thread-1", None, "codex-thread-2"]  # launch, /new miss, retry
+
+    monkeypatch.setattr(codex_sessions, "snapshot", lambda _home: set())
+    monkeypatch.setattr(
+        codex_sessions, "claim_new",
+        lambda _home, cwd, known, *, timeout=0.0, poll=0.02: claims.pop(0),
+    )
+
+    async def run():
+        mgr = _manager()
+        session = mgr.create(SessionDef(
+            name="cx", profile="codex", cwd=str(tmp_path)
+        ))
+        await _settled(lambda: session.sdef.conversation_id)
+        assert session.sdef.conversation_id == "codex-thread-1"
+
+        await session.send_keys(["/new", "Enter"])
+        # The short wait runs and misses: only the retry's answer is left.
+        await _settled(lambda: len(claims) == 1)
+        # The short wait missed; the pin is still the old conversation...
+        await asyncio.sleep(0.1)
+        assert session.sdef.conversation_id == "codex-thread-1"
+        # ...until an ordinary listing poll runs the claim's retry scan.
+        mgr.list()
+        assert session.sdef.conversation_id == "codex-thread-2"
+        entries = db.open_default().load_all()
+        assert entries[0]["def"]["conversation_id"] == "codex-thread-2"
+        await mgr.shutdown_all()
+
+    asyncio.run(run())
+
+
+def test_pi_new_repins_to_the_file_pi_created(home, tmp_path, monkeypatch):
+    """pi's /new mints its own file; the pin follows it.
+
+    pi writes ``<timestamp>_<id>.jsonl`` beside the pinned one and only when
+    the first answer lands, so there is no short wait at all — the claim sits
+    until a listing poll (or shutdown) settles it. The pinned id becomes the
+    new file's stem, which ``pi_session_file`` turns back into the path a
+    restore reopens.
+    """
+    from claude_launcher.daemon import pi_sessions
+
+    store.update(lambda doc: doc.update({"harnesses": {"pi": {
+        "command": [sys.executable, "-u", "-c", CHILD],
+        "home_env": "PI_CODING_AGENT_DIR",
+        "restore_args": ["--continue"],
+    }}}))
+    lineage.set_harness(profile.create("pi"), "pi")
+    stems = ["2026-09-15T01-00-00-000Z_newpi"]
+    monkeypatch.setattr(pi_sessions, "snapshot", lambda _dir: {"old-pin"})
+    monkeypatch.setattr(
+        pi_sessions, "claim_new",
+        lambda _dir, cwd, known, *, since, timeout=0.0, poll=0.05: stems.pop(0)
+        if stems else None,
+    )
+
+    async def run():
+        mgr = _manager()
+        session = mgr.create(SessionDef(
+            name="p1", profile="pi", cwd=str(tmp_path),
+            conversation_id="old-pin",
+        ))
+        assert session.sdef.conversation_id == "old-pin"
+
+        await session.send_keys(["/new", "Enter"])
+        await asyncio.sleep(0.1)
+        assert session.sdef.conversation_id == "old-pin"  # nothing written yet
+        mgr.list()  # a dashboard poll settles the claim
+        assert session.sdef.conversation_id == "2026-09-15T01-00-00-000Z_newpi"
+        entries = db.open_default().load_all()
+        assert entries[0]["def"]["conversation_id"] == (
+            "2026-09-15T01-00-00-000Z_newpi"
+        )
+        await mgr.shutdown_all()
+
+    asyncio.run(run())
+
+
+def test_repin_conversation_moves_the_pin_and_drops_pending_claims(
+    home, tmp_path, monkeypatch
+):
+    """The hook's report is the same pin move the claims make.
+
+    claude's /clear mints a new session id (measured 2026-09-15: hook fired
+    with source "clear" and a new session_id, transcript at the new file);
+    the daemon must pin it, persist it, and drop any claim still hunting for
+    the conversation the session just left.
+    """
+    _register_py_harness()
+
+    async def run():
+        mgr = _manager()
+        session = mgr.create(SessionDef(
+            name="c1", profile="py", cwd=str(tmp_path),
+            conversation_id="old-id",
+        ))
+        mgr._pending_claims["c1"] = manager_mod._PendingClaim(
+            session=session, claim=lambda timeout: None, previous="old-id",
+            since=time.monotonic(), give_up=600.0, what="test", cwd=str(tmp_path),
+        )
+
+        same = mgr.repin_conversation("c1", "old-id", source="compact")
+        assert same["changed"] is False
+        assert "c1" in mgr._pending_claims  # a same-id report settles nothing
+
+        moved = mgr.repin_conversation("c1", "new-id", source="clear")
+        assert moved == {
+            "changed": True, "conversation_id": "new-id", "previous": "old-id",
+        }
+        assert session.sdef.conversation_id == "new-id"
+        assert "c1" not in mgr._pending_claims
+        entries = db.open_default().load_all()
+        assert entries[0]["def"]["conversation_id"] == "new-id"
+
+        with pytest.raises(ManagerError):
+            mgr.repin_conversation("nobody", "x")
+        with pytest.raises(ManagerError):
+            mgr.repin_conversation("c1", "  ")
+        await mgr.shutdown_all()
 
     asyncio.run(run())
 

@@ -130,7 +130,7 @@ class _SubmittedLineTracker:
     """Recover submitted terminal lines from the raw input byte stream.
 
     The tracker covers the input needed to recognize an explicitly typed
-    Codex ``/new`` before that command reaches the child: ordinary text,
+    ``/new`` before that command reaches the child: ordinary text,
     erase/clear keys and ANSI escape sequences. Bracketed-paste newlines stay
     inside the buffered composer content.
     """
@@ -540,10 +540,10 @@ class Session:
         #: work to do schedules it.
         self.on_exit: Optional[Callable[["Session"], None]] = None
         #: Called before a complete terminal line reaches the child.  The
-        #: manager uses the one launcher-relevant command, Codex ``/new``, to
-        #: snapshot rollout ownership before Codex creates the replacement
-        #: conversation. Other submitted lines are intentionally ignored by
-        #: the manager.
+        #: manager uses the one launcher-relevant command, ``/new``, to
+        #: snapshot conversation ownership before the harness creates the
+        #: replacement (Codex its rollout, pi its session file). Other
+        #: submitted lines are intentionally ignored by the manager.
         self.on_command_submitted: Optional[
             Callable[["Session", str], None]
         ] = None
