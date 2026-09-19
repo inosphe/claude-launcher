@@ -413,11 +413,27 @@ def _ms(later: Optional[float], earlier: float) -> Optional[int]:
 # --------------------------------------------------------------------------- #
 # reading a record's throughput
 # --------------------------------------------------------------------------- #
-#: ``record["tps"]`` is the rate over the generation, ``tps_total`` the rate
-#: over the whole call. They are different facts and a reader that shows one
-#: number has to say which it got; :func:`tps_basis` names it.
-GENERATION = "generation"
-CALL = "call"
+def reported_tps(record: dict) -> Optional[float]:
+    """The one rate to show for ``record``: its tokens over the whole call.
+
+    The window starts at the request, which is the one window every call is
+    guaranteed to have. Nothing has to be observed arriving for it to exist, so
+    it is never zero, and it carries the wait for the first token -- which is
+    what keeps the number bounded when the upstream generated the answer ahead
+    of time and then flushed it, since the flush is clocked against the whole
+    call rather than against itself.
+
+    That last property is why this and not the generation rate is the number a
+    reader shows. The generation rate measured on a record is the backend's own
+    speed, and it is the more interesting number, but it can only be measured
+    from an answer that was watched arriving a piece at a time: whether one was
+    is a property of that call, so two rows would carry rates on different
+    bases and could not be compared. :func:`generation_tps` is still there for
+    a reader that wants the backend's speed and will say which calls have it.
+
+    ``None`` when the call was not counted at all.
+    """
+    return _call_tps(record)
 
 
 def generation_tps(record: dict) -> Optional[float]:
@@ -438,8 +454,15 @@ def generation_tps(record: dict) -> Optional[float]:
     return float(tps)
 
 
+def _call_tps(record: dict) -> Optional[float]:
+    if not record.get("output_tokens"):
+        return None
+    total = record.get("tps_total")
+    return float(total) if total else None
+
+
 def _timed_generation(record: dict) -> bool:
-    """Whether the window behind ``record``'s rate was one worth dividing by.
+    """Whether the window behind ``record``'s generation rate was worth dividing by.
 
     ``generation_ms`` is written by the reader from here on and answers this
     directly. A record that has none was written before the window was measured
@@ -460,34 +483,6 @@ def _timed_generation(record: dict) -> bool:
     if total is None or ttft is None:
         return True
     return total - ttft >= 2
-
-
-def reported_tps(record: dict) -> Optional[float]:
-    """The one rate to show for ``record``.
-
-    The generation rate when there is one, otherwise the call's own average
-    over its whole duration (``tps_total``), which for a non-streamed answer
-    is pessimistic by the wait and honest about being so. ``None`` when the
-    call was not counted at all. Read :func:`tps_basis` alongside it to know
-    which of the two the number is.
-    """
-    return generation_tps(record) or _call_tps(record)
-
-
-def _call_tps(record: dict) -> Optional[float]:
-    if not record.get("output_tokens"):
-        return None
-    total = record.get("tps_total")
-    return float(total) if total else None
-
-
-def tps_basis(record: dict) -> Optional[str]:
-    """``GENERATION``, ``CALL``, or ``None`` for a call with no rate."""
-    if generation_tps(record) is not None:
-        return GENERATION
-    if _call_tps(record) is not None:
-        return CALL
-    return None
 
 
 # --------------------------------------------------------------------------- #
@@ -564,15 +559,14 @@ def clear() -> int:
 def summarize(records: Iterable[dict]) -> dict:
     """Counts, token totals and TPS/TTFT medians over ``records``.
 
-    The numbers under ``tps_*`` are generation rates, so ``counted`` is the
-    number of calls whose generation was timed at all. A call that was not
-    still has a rate of its own -- the whole call's average -- and it is under
-    ``tps_total_*`` instead, in its own column rather than mixed into a median
-    that would then be over two different measurements.
+    The numbers under ``tps_*`` are :func:`reported_tps`, the whole-call rate --
+    one definition over every call, which is what makes them comparable. The
+    generation rate is a different measurement and gets ``generation_*``; a
+    median over the two at once would be a median of nothing.
     """
     recs = list(records)
-    tps = [v for v in (generation_tps(r) for r in recs) if v is not None]
-    total = [v for v in (_call_tps(r) for r in recs) if v is not None]
+    tps = [v for v in (reported_tps(r) for r in recs) if v is not None]
+    generation = [v for v in (generation_tps(r) for r in recs) if v is not None]
     ttft = [float(r["ttft_ms"]) for r in recs if r.get("ttft_ms") is not None]
     out_tokens = sum(int(r.get("output_tokens") or 0) for r in recs)
     in_tokens = sum(int(r.get("input_tokens") or 0) for r in recs)
@@ -587,8 +581,8 @@ def summarize(records: Iterable[dict]) -> dict:
         "tps_mean": round(statistics.fmean(tps), 2) if tps else None,
         "tps_min": round(min(tps), 2) if tps else None,
         "tps_max": round(max(tps), 2) if tps else None,
-        "tps_total_n": len(total),
-        "tps_total_median": round(statistics.median(total), 2) if total else None,
+        "generation_n": len(generation),
+        "generation_median": round(statistics.median(generation), 2) if generation else None,
         "ttft_ms_median": int(statistics.median(ttft)) if ttft else None,
     }
 
@@ -679,17 +673,14 @@ def session_summary(session: str) -> Optional[dict]:
     the session last called out); the medians are over the counted ones in
     the window.
 
-    ``tps`` is the last call's :func:`reported_tps` and ``tps_basis`` says
-    which rate that is -- ``generation`` when the answer streamed, ``call``
-    when it arrived whole and only the whole-call average exists. A reader
-    that shows the number must show the basis with it; the two are not
-    interchangeable.
+    ``tps`` is the last call's :func:`reported_tps` -- tokens over the whole
+    call, one definition for every row.
     """
     recs = recent(session, limit=SUMMARY_WINDOW)
     if not recs:
         return None
     last = recs[-1]
-    tps = [v for v in (generation_tps(r) for r in recs) if v is not None]
+    tps = [v for v in (reported_tps(r) for r in recs) if v is not None]
     ttft = [float(r["ttft_ms"]) for r in recs if r.get("ttft_ms") is not None]
     return {
         "ts": last.get("ts"),
@@ -697,7 +688,6 @@ def session_summary(session: str) -> Optional[dict]:
         "status": last.get("status"),
         "counted": bool(last.get("counted")),
         "tps": reported_tps(last),
-        "tps_basis": tps_basis(last),
         "ttft_ms": last.get("ttft_ms"),
         "ttfb_ms": last.get("ttfb_ms"),
         "output_tokens": last.get("output_tokens"),

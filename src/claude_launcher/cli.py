@@ -923,11 +923,11 @@ def _tps_summary_lines(label: str, s: dict) -> List[str]:
         f"    tps median {_fmt(s['tps_median'])}  mean {_fmt(s['tps_mean'])}  "
         f"min {_fmt(s['tps_min'])}  max {_fmt(s['tps_max'])}  "
         f"ttft median {_fmt(s['ttft_ms_median'], 'ms')}",
-        # The counts above are generation rates, so a request that did not
-        # stream is not among them. Its call average is its own measurement
-        # and gets its own line rather than being folded into the median.
-        f"    call-avg median {_fmt(s['tps_total_median'])}  "
-        f"(over the whole call, for the {s['tps_total_n']} that did not stream)",
+        # The line above is tokens over the whole call, which every counted
+        # call has. The backend's own speed is a different measurement, and
+        # only the calls that were watched arriving a piece at a time have it.
+        f"    generation median {_fmt(s['generation_median'])}  "
+        f"(over the {s['generation_n']} calls that streamed and were timed)",
     ]
 
 

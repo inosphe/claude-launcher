@@ -3697,13 +3697,13 @@ function ctxRailLine(s) {
    go through the shim and carry no `tps` at all -- absence, drawn as
    nothing, never as a slow number.
 
-   The number comes in two kinds and `tps_basis` says which. `generation` is
-   the rate over the answer's generation, which only a streamed answer can
-   give. `call` is the whole call's average, for an answer that arrived in
-   one piece: it includes the wait for the first token, so it reads lower
-   and is marked `avg` wherever it is drawn. A reader must never show one as
-   the other -- a non-streamed five-token answer divided by its own sliver of
-   network time is a five-digit number that means nothing. */
+   The number is the answer's tokens over the whole call, from the request to
+   the last byte. One definition over every row, so rows can be compared. It
+   is not the backend's own speed: that one can only be measured from an
+   answer watched arriving a piece at a time, and an upstream that generates
+   ahead and then flushes would report the flush as if it were the
+   generation. `claunch tps` prints the backend's speed beside this one, over
+   the calls that can carry it. */
 function tpsFmt(v) {
   if (!Number.isFinite(v)) return "?";
   return v >= 100 ? String(Math.round(v)) : v.toFixed(1);
@@ -3730,17 +3730,14 @@ function tpsLatencyText(t) {
 
 /* The one-line glance: "38.1 tok/s · ttft 0.7s". A last call that was not
    counted (an error answer, a compressed body) shows its status instead of
-   a number, so the row still says that the session called out. A call
-   average says so in the line rather than in the tooltip alone: it is the
-   rate a reader would otherwise misread as the generation's. */
+   a number, so the row still says that the session called out. */
 function tpsText(t) {
   if (!t) return "";
   if (!t.counted || !Number.isFinite(t.tps)) {
     return t.status && t.status !== 200 ? `HTTP ${t.status}` : "tps ?";
   }
-  const avg = t.tps_basis === "call" ? " avg" : "";
   const lat = tpsLatencyText(t);
-  return `${tpsFmt(t.tps)} tok/s${avg}` + (lat ? ` · ${lat}` : "");
+  return `${tpsFmt(t.tps)} tok/s` + (lat ? ` · ${lat}` : "");
 }
 
 /* The story behind the number, for the tooltip. */
@@ -3751,22 +3748,16 @@ function tpsTooltip(t) {
   lines.push(`last call${age !== null ? " " + fmtAge(age) + " ago" : ""}` +
              (t.model ? ` on ${t.model}` : "") + (t.status ? ` (HTTP ${t.status})` : ""));
   if (t.counted && Number.isFinite(t.tps)) {
-    lines.push(`${tpsFmt(t.tps)} tokens/s ` +
-               (t.tps_basis === "call"
-                 ? "over the whole call (the wait for the first token included)"
-                 : "over the generation") +
+    lines.push(`${tpsFmt(t.tps)} tokens/s over the whole call` +
                (Number.isFinite(t.output_tokens) ? `, ${t.output_tokens} out` : "") +
                (Number.isFinite(t.input_tokens) ? `, ${t.input_tokens} in` : "") +
                (Number.isFinite(t.cache_read) && t.cache_read ? ` (${t.cache_read} cached)` : ""));
-    lines.push(t.tps_basis === "call"
-      ? `first byte ${ttftFmt(t.ttfb_ms)}`
-      : `time to first token ${ttftFmt(t.ttft_ms)}`);
+    lines.push(Number.isFinite(t.ttft_ms)
+      ? `time to first token ${ttftFmt(t.ttft_ms)}`
+      : `first byte ${ttftFmt(t.ttfb_ms)}`);
   }
-  /* The median is over generation rates, so it is over the streamed calls
-     in the window and not over all of them; `tps_median_n` is that count. */
   if (Number.isFinite(t.tps_median) && t.tps_median_n > 1) {
-    lines.push(`median over the last ${t.tps_median_n} streamed calls: ` +
-               `${tpsFmt(t.tps_median)} tok/s` +
+    lines.push(`median over the last ${t.tps_median_n} calls: ${tpsFmt(t.tps_median)} tok/s` +
                (Number.isFinite(t.ttft_ms_median) ? `, ttft ${ttftFmt(t.ttft_ms_median)}` : ""));
   }
   if (t.upstream) lines.push(`via ${t.upstream}`);
@@ -3829,8 +3820,7 @@ function renderTermTps() {
       overlay.className = "term-tps-overlay" + tpsStaleClass(t);
       overlay.replaceChildren(
         el("span", "term-tps-big", t.counted && Number.isFinite(t.tps)
-          ? `${tpsFmt(t.tps)} tok/s${t.tps_basis === "call" ? " avg" : ""}`
-          : tpsText(t)),
+          ? `${tpsFmt(t.tps)} tok/s` : tpsText(t)),
         el("span", "term-tps-small",
           [t.counted && Number.isFinite(t.tps) ? tpsLatencyText(t) : "",
            t.model ? modelShort(t.model) : "",

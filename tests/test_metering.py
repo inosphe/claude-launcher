@@ -146,9 +146,8 @@ def test_a_non_streamed_answer_reports_no_generation_rate(home):
 
     Dividing the token count by the sliver the finished body took to cross
     the socket is how a five-token answer was recorded as 26709 tok/s; the
-    record says null instead, and what it does have to give is the call's own
-    average. The rate is left unmeasurable rather than invented, and a reader
-    that shows a number shows ``reported_tps`` with ``tps_basis`` beside it.
+    record says null instead. What every call does have is its own whole-call
+    rate, and that is what a reader is shown.
     """
     m = metering.Meter(session="s2", path="/v1/messages")
     time.sleep(0.4)  # the upstream thinks, before a byte of body exists
@@ -160,7 +159,6 @@ def test_a_non_streamed_answer_reports_no_generation_rate(home):
     assert rec["tps_total"] is not None and rec["tps_total"] < 100
     assert metering.generation_tps(rec) is None
     assert metering.reported_tps(rec) == rec["tps_total"]
-    assert metering.tps_basis(rec) == metering.CALL
 
 
 def test_a_streamed_answer_keeps_its_generation_rate(home):
@@ -172,8 +170,6 @@ def test_a_streamed_answer_keeps_its_generation_rate(home):
     rec = m.finish()
     assert rec["stream"] is True and rec["streamed"] is True
     assert metering.generation_tps(rec) == rec["tps"]
-    assert metering.tps_basis(rec) == metering.GENERATION
-    assert metering.reported_tps(rec) == rec["tps"]
     # The window is the span the content was seen over, and the rate is the
     # count divided by it. `generation_ms` is that window truncated to whole
     # milliseconds, so the rate falls in the band the truncation allows.
@@ -182,14 +178,34 @@ def test_a_streamed_answer_keeps_its_generation_rate(home):
     assert rec["output_tokens"] * 1000 / (ms + 1) < rec["tps"] <= rec["output_tokens"] * 1000 / ms
 
 
+def test_the_shown_rate_is_the_whole_call_even_when_generation_was_timed(home):
+    """One definition over every row, whatever the row's answer looked like.
+
+    The generation rate is kept and reported as itself, but the number the
+    rail shows is the whole call's -- otherwise a row whose answer streamed
+    and a row whose answer did not would be showing two different
+    measurements side by side, and a reader could not compare them.
+    """
+    m = metering.Meter(session="s1", path="/v1/messages")
+    m.headers(200, _Headers({"content-type": "text/event-stream"}))
+    for ev in STREAM:
+        m.chunk(_sse([ev]))
+        time.sleep(0.02)
+    rec = m.finish()
+    assert metering.generation_tps(rec) is not None
+    assert metering.reported_tps(rec) == rec["tps_total"]
+    assert rec["tps_total"] < rec["tps"]  # the wait for the first token is inside it
+    assert metering.reported_tps({"stream": False, "output_tokens": 5, "tps_total": 2.0}) == 2.0
+
+
 def test_content_that_arrived_in_one_read_has_no_generation_rate(home):
     """A streamed answer can still be untimeable, and says so the same way.
 
     Every event of the answer, deltas included, arrives in a single read --
     what a backend that generates and then flushes looks like from here. The
     content was never observed to take any time, so the window is zero and
-    dividing by it invents a rate; the record reports none and keeps the
-    call's average. This is the shape behind the recorded 435483 tok/s.
+    dividing by it invents a rate; the record reports none. This is the shape
+    behind the recorded 435483 tok/s.
     """
     m = metering.Meter(session="s1", path="/v1/messages")
     m.headers(200, _Headers({"content-type": "text/event-stream"}))
@@ -198,7 +214,6 @@ def test_content_that_arrived_in_one_read_has_no_generation_rate(home):
     assert rec["stream"] is True and rec["streamed"] is True
     assert rec["tps"] is None and rec["generation_ms"] is None
     assert metering.generation_tps(rec) is None
-    assert metering.tps_basis(rec) == metering.CALL
     assert metering.reported_tps(rec) == rec["tps_total"]
 
 
@@ -210,12 +225,11 @@ def test_a_record_written_before_the_fix_is_read_by_its_own_shape(home):
     denominator was the socket rather than the model, and the records of
     answers whose content arrived in one read. Reading is decided from the
     record's own shape, so none of them needs a rewrite. A record that says
-    nothing either way keeps its rate.
+    nothing either way keeps its generation rate.
     """
     whole = {"stream": False, "output_tokens": 5, "tps": 26709.41, "tps_total": 0.98}
     assert metering.generation_tps(whole) is None
     assert metering.reported_tps(whole) == 0.98
-    assert metering.tps_basis(whole) == metering.CALL
     # A record with no `stream` at all is read as one that did not stream.
     assert metering.generation_tps({"output_tokens": 5, "tps": 99.0}) is None
     # Streamed, but the call did not outlast its own ttft: the window the rate
@@ -224,14 +238,15 @@ def test_a_record_written_before_the_fix_is_read_by_its_own_shape(home):
     flushed = {"stream": True, "output_tokens": 27, "tps": 435483.83,
                "tps_total": 10.49, "total_ms": 2575, "ttft_ms": 2575}
     assert metering.generation_tps(flushed) is None
-    assert metering.reported_tps(flushed) == 10.49
     # One millisecond of difference is still rounding; two establish a window.
     assert metering.generation_tps({**flushed, "ttft_ms": 2574}) is None
     assert metering.generation_tps({**flushed, "ttft_ms": 2500}) == 435483.83
     s = metering.summarize([whole, flushed, {"stream": True, "output_tokens": 5, "tps": 50.0,
                                              "tps_total": 40.0, "generation_ms": 200}])
-    assert s["counted"] == 1 and s["tps_median"] == 50.0  # neither residue is in it
-    assert s["tps_total_n"] == 3 and s["tps_total_median"] == 10.49
+    # The shown rates include every counted call, and none of them is 435483.
+    assert s["counted"] == 3 and s["tps_max"] == 40.0
+    # The generation median is over the one call that has a generation rate.
+    assert s["generation_n"] == 1 and s["generation_median"] == 50.0
 
 
 def test_a_final_event_with_no_blank_line_is_read_at_finish(home):
@@ -482,10 +497,11 @@ def test_records_append_load_filter_and_summarize(home):
     assert len(metering.load(limit=2)) == 2
     s = metering.summarize(metering.load())
     assert s["requests"] == 3 and s["counted"] == 2
-    assert s["tps_median"] == 60.0 and s["tps_min"] == 50.0 and s["tps_max"] == 70.0
-    # The third call was never counted (no output count), so it has no average
-    # either -- the two that do are both 40.0.
-    assert s["tps_total_n"] == 2 and s["tps_total_median"] == 40.0
+    # The shown rates are the whole-call ones. The third call was never counted
+    # (no output count), so it has no rate either; the two that do are both 40.0.
+    assert s["tps_median"] == 40.0 and s["tps_min"] == 40.0 and s["tps_max"] == 40.0
+    # The same two calls' own generation rates are kept in their own column.
+    assert s["generation_n"] == 2 and s["generation_median"] == 60.0
     assert s["ttft_ms_median"] == 200
     assert s["output_tokens"] == 200
     assert set(metering.by_key(metering.load(), "model")) == {"m", "n"}
@@ -498,7 +514,7 @@ def test_cli_tps_prints_the_summary_and_the_last_rows(home, capsys):
     assert cli.main(["tps"]) == 0
     out = capsys.readouterr().out
     assert "requests 1 (counted 1)" in out
-    assert "tps median 50.0" in out
+    assert "tps median 40.0" in out  # the whole-call rate the record carries
     assert "s1" in out and "last 10:" in out
     assert cli.main(["tps", "--json", "-n", "0"]) == 0
     assert json.loads(capsys.readouterr().out)[0]["tps"] == 50.0
@@ -763,16 +779,19 @@ def test_daemon_pi_launch_names_the_session_in_the_provider_headers(home, tmp_pa
 # --------------------------------------------------------------------------- #
 def test_session_summary_is_the_last_call_plus_a_rolling_median(home):
     for i in range(12):
-        metering.append("fp1", _rec(session="s1", tps=10.0 + i, ttft_ms=100 + i, output_tokens=5,
+        metering.append("fp1", _rec(session="s1", tps=10.0 + i, tps_total=40.0 + i,
+                                     ttft_ms=100 + i, output_tokens=5,
                                      ts=f"2026-09-11T10:00:{i:02d}+0900"))
-    metering.append("fp2", _rec(session="s1", tps=99.0, ttft_ms=50, model="other", output_tokens=7,
+    metering.append("fp2", _rec(session="s1", tps=99.0, tps_total=99.0, ttft_ms=50,
+                                 model="other", output_tokens=7,
                                  ts="2026-09-11T10:01:00+0900"))  # newest, on another shim
-    metering.append("fp1", _rec(session="s2", tps=1.0, ts="2026-09-11T10:02:00+0900"))
+    metering.append("fp1", _rec(session="s2", tps=1.0, tps_total=1.0, ts="2026-09-11T10:02:00+0900"))
     got = metering.session_summary("s1")
     assert got["tps"] == 99.0 and got["model"] == "other" and got["ts"] == "2026-09-11T10:01:00+0900"
-    assert got["tps_basis"] == metering.GENERATION
     assert got["window"] == metering.SUMMARY_WINDOW  # the last 10 of 13, across both files
-    assert got["tps_median"] == 17.5  # median of 13..21 and 99
+    # Median of the whole-call rates in the window: the last nine of the run
+    # (43..51) and the newest 99, of which the middle pair is 47 and 48.
+    assert got["tps_median"] == 47.5
     assert got["tps_median_n"] == metering.SUMMARY_WINDOW
     assert got["counted"] is True and got["ttft_ms"] == 50
     assert metering.session_summary("s3") is None  # never measured: absence, not zero
@@ -786,23 +805,22 @@ def test_session_summary_keeps_an_uncounted_last_call_visible(home):
                                  ts="2026-09-11T10:00:01+0900"))
     got = metering.session_summary("s1")
     assert got["counted"] is False and got["status"] == 502 and got["tps"] is None
-    assert got["tps_basis"] is None  # a call with no rate has no basis to name
     assert got["tps_median"] == 40.0  # the median is over the counted calls in the window
 
 
-def test_session_summary_reports_a_whole_body_call_as_its_call_average(home):
-    """A session whose last call did not stream still shows a rate, named.
+def test_session_summary_reports_a_whole_body_call_with_its_first_byte(home):
+    """A session whose last call did not stream still shows a rate.
 
-    The row is not left blank and it is not given a generation rate it does
-    not have: the summary carries ``tps_basis: call`` and the first byte, so
-    the reader can say which measurement the number is.
+    The row is not left blank. What it shows is the call's own whole-call
+    rate, and the latency beside it is the first byte -- there is no first
+    token to have timed for an answer that arrived in one piece.
     """
     metering.append("fp1", _rec(session="s1", stream=False, tps=None, tps_total=2.41,
                                  ttft_ms=None, ttfb_ms=200, ts="2026-09-11T10:00:00+0900"))
     got = metering.session_summary("s1")
-    assert got["tps"] == 2.41 and got["tps_basis"] == metering.CALL
+    assert got["tps"] == 2.41
     assert got["ttft_ms"] is None and got["ttfb_ms"] == 200
-    assert got["tps_median"] is None and got["tps_median_n"] == 0  # no streamed call to median
+    assert got["tps_median"] == 2.41 and got["tps_median_n"] == 1
 
 
 def test_tail_reader_only_reads_the_end_and_rereads_on_change(home, monkeypatch):
@@ -818,7 +836,7 @@ def test_tail_reader_only_reads_the_end_and_rereads_on_change(home, monkeypatch)
 
 
 def test_attach_hangs_tps_on_a_session_record_only_when_there_is_one(home):
-    metering.append("fp1", _rec(session="s1", tps=33.0))
+    metering.append("fp1", _rec(session="s1", tps=33.0, tps_total=33.0))
     info = metering.attach({"name": "s1", "status": "busy"})
     assert info["tps"]["tps"] == 33.0 and info["status"] == "busy"
     assert "tps" not in metering.attach({"name": "s2"})
@@ -837,7 +855,8 @@ def test_metering_api_serves_a_sessions_records_and_the_session_list_carries_the
     store.update(lambda doc: doc.update({
         "harnesses": {"py": {"command": [sys.executable, "-u", "-c", "import time; time.sleep(60)"]}}
     }))
-    metering.append("fp1", _rec(session="s1", tps=42.5, ttft_ms=800, model="deepseek-flash",
+    metering.append("fp1", _rec(session="s1", tps=42.5, tps_total=42.5, ttft_ms=800,
+                                 model="deepseek-flash",
                                  ts="2026-09-11T10:00:00+0900"), upstream="https://d/v1")
     metering.append("fp1", _rec(session="other", tps=5.0, ts="2026-09-11T10:00:01+0900"))
     bearer = {"Authorization": "Bearer sekrit"}
