@@ -1986,6 +1986,42 @@ async def h_roles(request: web.Request) -> web.Response:
 #: Recent step reports included per run in a run's own payload.
 _CFLOW_REPORT_TAIL = 10
 
+#: How much of a finished run's journal the session detail panel is sent.
+#: The panel draws the newest 40 lines and the total (app.js
+#: SESS_RUN_JOURNAL), out of the step name and the event -- never the
+#: summary or the details, which reach it as ``reports``. Whole, the journal
+#: of a 63-step run was 135KB of a 166KB answer, polled every five seconds
+#: (s586 on 2026-09-20).
+_META_JOURNAL_TAIL = 40
+
+#: Fields of a journal entry the detail panel does not draw. They are the
+#: run's own record, which the agent-facing payload still carries in full.
+_META_JOURNAL_DROP = ("summary", "details")
+
+
+def _clip_journal(entry: dict) -> dict:
+    """A run entry with its journal cut to what the detail panel draws.
+
+    Only a finished run has one at all (``engine._done_payload``), which is
+    why this is worth its own function rather than a line: the size arrives
+    with the last step, so a run that was cheap to poll all round becomes
+    expensive exactly when it ends.
+    """
+    journal = entry.get("journal")
+    if not isinstance(journal, list):
+        return entry
+    return {
+        **entry,
+        "journal": [
+            {k: v for k, v in e.items() if k not in _META_JOURNAL_DROP}
+            for e in journal[-_META_JOURNAL_TAIL:]
+        ],
+        # The count is over the whole journal, so "newest 40 of N" stays
+        # true after the cut.
+        "journal_total": len(journal),
+    }
+
+
 #: What the *list* poll carries instead. /api/cflow is fetched every two
 #: seconds by every open page, and it answers for every run slot this machine
 #: knows about -- around a hundred of them on a working machine, most of them
@@ -2722,15 +2758,58 @@ async def _deliver_cflow_nudge(session, message: str, *, force: bool = False) ->
         session.queue_delivery(message)
 
 
+#: Composed workflow lists, cwd -> (stamp, entries). See
+#: :func:`_startable_workflows` for what the stamp covers.
+_WORKFLOW_LISTS: Dict[str, Tuple[tuple, list]] = {}
+
+#: Files a cwd's answer was composed from last time, so a base that is edited
+#: without any of the *found* files changing still invalidates the entry.
+_WORKFLOW_BASES: Dict[str, Set[str]] = {}
+
+
+def _file_stamp(paths) -> tuple:
+    """Each path with its mtime and size — absent files stamped as absent,
+    so a file appearing or going away is a change like any other."""
+    out = []
+    for path in sorted({str(p) for p in paths}):
+        try:
+            st = os.stat(path)
+        except OSError:
+            out.append((path, None, None))
+        else:
+            out.append((path, st.st_mtime_ns, st.st_size))
+    return tuple(out)
+
+
 def _startable_workflows(cwd: str) -> list:
     """What can be started here, each entry saying which file it would run.
 
     ``origin``/``shadowed`` travel with the path because the dashboard is
     where somebody picks a workflow by name — the one surface where two
     same-named files in two layers look like one thing.
+
+    Cached against the files it was composed from. Resolving which files
+    those are costs under a millisecond; composing them costs 161ms for the
+    sixteen declared in this repository, and the session detail panel asks
+    for this every five seconds (measured 2026-09-20). That composition is
+    synchronous Python, so it is not merely slow for its own caller -- it
+    holds the event loop, and every terminal the daemon is pumping stops for
+    the length of it. A workflow file changes when somebody edits one; the
+    poll is not what should be paying to find that out.
     """
+    located = list(cflow_state.resolved_workflows(cwd))
+    watched = [f.path for f in located]
+    for f in located:
+        watched.extend(f.shadows)
+    watched.extend(_WORKFLOW_BASES.get(cwd) or ())
+    stamp = _file_stamp(watched)
+    hit = _WORKFLOW_LISTS.get(cwd)
+    if hit is not None and hit[0] == stamp:
+        return hit[1]
+
+    bases: Set[str] = set()
     flows = []
-    for found in cflow_state.resolved_workflows(cwd):
+    for found in located:
         entry = {
             "name": found.name,
             "path": str(found.path),
@@ -2739,6 +2818,7 @@ def _startable_workflows(cwd: str) -> list:
         }
         try:
             composed = cflow_state.compose_located(found, cwd)
+            bases.update(str(b) for b in composed.bases)
             wf = composed.workflow
             if composed.layered:
                 entry["extends"] = [str(p) for p in composed.bases]
@@ -2762,6 +2842,11 @@ def _startable_workflows(cwd: str) -> list:
         except WorkflowError as exc:
             entry["error"] = str(exc)
         flows.append(entry)
+    # Stamped again with the bases this composition turned out to read, so
+    # the next call watches them too. A base found now that was not watched
+    # a moment ago makes this entry a miss once, and a hit after that.
+    _WORKFLOW_BASES[cwd] = bases
+    _WORKFLOW_LISTS[cwd] = (_file_stamp(watched + sorted(bases)), flows)
     return flows
 
 
@@ -5086,7 +5171,7 @@ async def h_session_meta(request: web.Request) -> web.Response:
             "workflows": [],
         }
         if cwd:
-            out["cflow"] = _cflow_entry(manager, cwd, info["name"])
+            out["cflow"] = _clip_journal(_cflow_entry(manager, cwd, info["name"]))
             out["workflows"] = _startable_workflows(cwd)
         return out
 
