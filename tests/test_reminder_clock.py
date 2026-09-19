@@ -1519,3 +1519,121 @@ def test_cflow_reminder_stops_once_the_session_only_answers_it(proj):
         sess.now = base + 601.0 * i
         asyncio.run(service.tick(sess.now))
     assert len(sess.delivered) == 1
+
+
+class _BusyAnsweringSession(_ActivitySession):
+    """The s602 shape: the terminal reads busy, and only the reminder moves it.
+
+    ``status`` is inherited as "busy", which is what the delivered fleet log
+    says every one of those 97 reminders saw -- ``_deliver_session`` types
+    into a session only in that state.  ``idle_since`` therefore answers
+    ``None`` (a busy session has no idle duration), so the duration rule has
+    nothing to work with and the baseline is the only thing left to get
+    right.
+
+    The marker moves on a delay: what ``_mark_role`` reads the moment
+    ``deliver`` returns is still the old screen, because the submit repaint
+    and the turn have not been sampled yet.
+    """
+
+    def __init__(self, name, cwd) -> None:
+        super().__init__(name, cwd)
+        self._pending_paint = False
+        self._paints = 0
+        self.work = 0                      # the test bumps this to do work
+        self.pty_frozen = False            # True: the program writes nothing
+
+    async def deliver(self, text):
+        ok = await super().deliver(text)
+        self._pending_paint = True
+        return ok
+
+    def _marker(self):
+        return f"paint-{self._paints}/work-{self.work}"
+
+    def last_activity_at(self):
+        if self._pending_paint:
+            # What _mark_role reads the moment deliver() returns: the sampler
+            # has not seen the submit repaint yet.
+            self._pending_paint = False
+            marker = self._marker()
+            self._paints += 1
+            return marker
+        return self._marker()
+
+    def last_output_at(self):
+        if self.pty_frozen:
+            return "2026-09-19T08:00:00+00:00"
+        return f"out-{self._paints}-{self.work}"
+
+    def idle_since(self):
+        return None                        # busy sessions have no idle time
+
+
+def _poll(service, base, cycles, interval=601.0):
+    """Tick the way the daemon does: every REMINDER_POLL, not once a cycle."""
+    step = cflow_clock.REMINDER_POLL
+    for i in range(cycles):
+        start = base + interval * i
+        at = start
+        while at < start + interval:
+            asyncio.run(service.tick(at))
+            at += step
+
+
+def test_role_reminder_stops_on_a_busy_session_that_only_answers_it(proj):
+    """The baseline is re-taken after the delivery has landed, so the
+    comparison it feeds can actually come out equal."""
+    sess = _BusyAnsweringSession("w1", str(proj))
+    service = session_reminder.SessionReminderService(
+        _KinManager({"w1": sess}), _FakeMeshMgr(_FakeMesh("m", 0), role="worker")
+    )
+    _poll(service, time.monotonic(), cycles=6)
+    assert len(sess.delivered) == 1
+
+
+def test_cflow_reminder_stops_on_a_busy_session_that_only_answers_it(proj):
+    cwd = str(proj)
+    cflow_engine.start("linear", cwd=cwd, scope="w1")
+    sess = _BusyAnsweringSession("w1", cwd)
+    service = session_reminder.SessionReminderService(_KinManager({"w1": sess}))
+    _poll(service, time.monotonic(), cycles=6)
+    assert len(sess.delivered) == 1
+
+
+def test_a_busy_session_that_keeps_working_still_hears_the_repeat(proj):
+    """Work between two reminders moves the settled baseline, so it repeats."""
+    sess = _BusyAnsweringSession("w1", str(proj))
+    service = session_reminder.SessionReminderService(
+        _KinManager({"w1": sess}), _FakeMeshMgr(_FakeMesh("m", 0), role="worker")
+    )
+    base = time.monotonic()
+    step = cflow_clock.REMINDER_POLL
+    for i in range(4):
+        start = base + 601.0 * i
+        at = start
+        while at < start + 601.0:
+            asyncio.run(service.tick(at))
+            sess.work += 1  # the agent is doing its own work, every poll
+            at += step
+    assert len(sess.delivered) == 4
+
+
+def test_a_frozen_pty_stops_the_repeat_even_while_the_grid_moves(proj):
+    """A resize or an attaching viewer restamps the grid without the program
+    writing a byte, and that must not read as progress."""
+    sess = _BusyAnsweringSession("w1", str(proj))
+    sess.pty_frozen = True
+    service = session_reminder.SessionReminderService(
+        _KinManager({"w1": sess}), _FakeMeshMgr(_FakeMesh("m", 0), role="worker")
+    )
+    base = time.monotonic()
+    step = cflow_clock.REMINDER_POLL
+    for i in range(6):
+        start = base + 601.0 * i
+        at = start
+        while at < start + 601.0:
+            asyncio.run(service.tick(at))
+            sess.work += 1  # the grid keeps moving; the PTY does not
+            at += step
+    assert len(sess.delivered) == 1
