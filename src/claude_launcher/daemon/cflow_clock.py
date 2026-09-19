@@ -233,15 +233,14 @@ def settle_activity(session, entry: dict, now: float, *, due: bool) -> None:
         return
     if session is None:
         return
-    activity = None
     reader = getattr(session, "last_activity_at", None)
-    if activity is None and callable(reader):
+    if callable(reader):
         try:
             activity = reader()
         except Exception:  # noqa: BLE001 - activity is decoration only
             activity = None
-    if activity is not None:
-        entry["activity"] = activity
+        if activity is not None:
+            entry["activity"] = activity
     entry["output_at"] = session_output_at(session)
     entry["settled"] = True
 
