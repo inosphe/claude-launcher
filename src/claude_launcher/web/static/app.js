@@ -3695,7 +3695,15 @@ function ctxRailLine(s) {
    `tps`: the last call's tokens/s and time-to-first-token, the model that
    answered, and a short rolling median. Sessions on the OAuth routes never
    go through the shim and carry no `tps` at all -- absence, drawn as
-   nothing, never as a slow number. */
+   nothing, never as a slow number.
+
+   The number is the answer's tokens over the whole call, from the request to
+   the last byte. One definition over every row, so rows can be compared. It
+   is not the backend's own speed: that one can only be measured from an
+   answer watched arriving a piece at a time, and an upstream that generates
+   ahead and then flushes would report the flush as if it were the
+   generation. `claunch tps` prints the backend's speed beside this one, over
+   the calls that can carry it. */
 function tpsFmt(v) {
   if (!Number.isFinite(v)) return "?";
   return v >= 100 ? String(Math.round(v)) : v.toFixed(1);
@@ -3711,6 +3719,15 @@ function ttftFmt(ms) {
   return ms >= 1000 ? (ms / 1000).toFixed(1) + "s" : ms + "ms";
 }
 
+/* The answer's own latency: time to the first token when the answer
+   streamed, otherwise the first byte, which for a whole-body answer is the
+   wait that the call average is already carrying. */
+function tpsLatencyText(t) {
+  if (Number.isFinite(t.ttft_ms)) return `ttft ${ttftFmt(t.ttft_ms)}`;
+  if (Number.isFinite(t.ttfb_ms)) return `first byte ${ttftFmt(t.ttfb_ms)}`;
+  return "";
+}
+
 /* The one-line glance: "38.1 tok/s · ttft 0.7s". A last call that was not
    counted (an error answer, a compressed body) shows its status instead of
    a number, so the row still says that the session called out. */
@@ -3719,7 +3736,8 @@ function tpsText(t) {
   if (!t.counted || !Number.isFinite(t.tps)) {
     return t.status && t.status !== 200 ? `HTTP ${t.status}` : "tps ?";
   }
-  return `${tpsFmt(t.tps)} tok/s · ttft ${ttftFmt(t.ttft_ms)}`;
+  const lat = tpsLatencyText(t);
+  return `${tpsFmt(t.tps)} tok/s` + (lat ? ` · ${lat}` : "");
 }
 
 /* The story behind the number, for the tooltip. */
@@ -3730,14 +3748,16 @@ function tpsTooltip(t) {
   lines.push(`last call${age !== null ? " " + fmtAge(age) + " ago" : ""}` +
              (t.model ? ` on ${t.model}` : "") + (t.status ? ` (HTTP ${t.status})` : ""));
   if (t.counted && Number.isFinite(t.tps)) {
-    lines.push(`${tpsFmt(t.tps)} tokens/s over the generation` +
+    lines.push(`${tpsFmt(t.tps)} tokens/s over the whole call` +
                (Number.isFinite(t.output_tokens) ? `, ${t.output_tokens} out` : "") +
                (Number.isFinite(t.input_tokens) ? `, ${t.input_tokens} in` : "") +
                (Number.isFinite(t.cache_read) && t.cache_read ? ` (${t.cache_read} cached)` : ""));
-    lines.push(`time to first token ${ttftFmt(t.ttft_ms)}`);
+    lines.push(Number.isFinite(t.ttft_ms)
+      ? `time to first token ${ttftFmt(t.ttft_ms)}`
+      : `first byte ${ttftFmt(t.ttfb_ms)}`);
   }
-  if (Number.isFinite(t.tps_median) && t.window > 1) {
-    lines.push(`median over the last ${t.window} calls: ${tpsFmt(t.tps_median)} tok/s` +
+  if (Number.isFinite(t.tps_median) && t.tps_median_n > 1) {
+    lines.push(`median over the last ${t.tps_median_n} calls: ${tpsFmt(t.tps_median)} tok/s` +
                (Number.isFinite(t.ttft_ms_median) ? `, ttft ${ttftFmt(t.ttft_ms_median)}` : ""));
   }
   if (t.upstream) lines.push(`via ${t.upstream}`);
@@ -3802,7 +3822,7 @@ function renderTermTps() {
         el("span", "term-tps-big", t.counted && Number.isFinite(t.tps)
           ? `${tpsFmt(t.tps)} tok/s` : tpsText(t)),
         el("span", "term-tps-small",
-          [t.counted && Number.isFinite(t.tps) ? `ttft ${ttftFmt(t.ttft_ms)}` : "",
+          [t.counted && Number.isFinite(t.tps) ? tpsLatencyText(t) : "",
            t.model ? modelShort(t.model) : "",
            tpsAgeSecs(t) !== null ? fmtAge(tpsAgeSecs(t)) + " ago" : ""]
             .filter(Boolean).join(" · "))

@@ -923,6 +923,11 @@ def _tps_summary_lines(label: str, s: dict) -> List[str]:
         f"    tps median {_fmt(s['tps_median'])}  mean {_fmt(s['tps_mean'])}  "
         f"min {_fmt(s['tps_min'])}  max {_fmt(s['tps_max'])}  "
         f"ttft median {_fmt(s['ttft_ms_median'], 'ms')}",
+        # The line above is tokens over the whole call, which every counted
+        # call has. The backend's own speed is a different measurement, and
+        # only the calls that were watched arriving a piece at a time have it.
+        f"    generation median {_fmt(s['generation_median'])}  "
+        f"(over the {s['generation_n']} calls that streamed and were timed)",
     ]
 
 
@@ -962,7 +967,7 @@ def _cmd_tps(args: argparse.Namespace) -> int:
                 f"{str(rec.get('model') or '-')[:28]:<28} "
                 f"{_fmt(rec.get('output_tokens')):>6} "
                 f"{_fmt(rec.get('ttft_ms'), 'ms'):>7} "
-                f"{_fmt(rec.get('tps')):>7} "
+                f"{_fmt(metering.reported_tps(rec)):>7} "
                 f"{_fmt(rec.get('status'))}"
             )
     return 0
