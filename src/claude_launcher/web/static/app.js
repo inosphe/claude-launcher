@@ -19930,17 +19930,23 @@ function renderSessRun(body, data) {
   }
 
   const events = (data.journal || []).slice().reverse();
+  // The daemon sends the newest SESS_RUN_JOURNAL entries and the count of
+  // the whole thing, because a finished run's journal is most of the
+  // answer's size and none of it is drawn below (see _clip_journal). An
+  // older daemon sends the lot and no count; then the length is the count.
+  const total = typeof data.journal_total === "number"
+    ? data.journal_total : events.length;
   const journal = document.createElement("details");
   journal.className = "wf-journal";
-  journal.appendChild(el("summary", null, `journal (${events.length} events)`));
+  journal.appendChild(el("summary", null, `journal (${total} events)`));
   for (const e of events.slice(0, SESS_RUN_JOURNAL)) {
     journal.appendChild(el("div", "wf-journal-line mono",
       `${(e.at || "").replace("T", " ")}  ${e.event || ""}` +
       `${e.step ? "  " + e.step : ""}${e.option ? "  -> " + e.option : ""}`));
   }
-  if (events.length > SESS_RUN_JOURNAL) {
+  if (total > SESS_RUN_JOURNAL) {
     journal.appendChild(el("p", "wf-note",
-      `newest ${SESS_RUN_JOURNAL} of ${events.length}`));
+      `newest ${Math.min(SESS_RUN_JOURNAL, events.length)} of ${total}`));
   }
   body.appendChild(journal);
 }
