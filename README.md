@@ -2909,18 +2909,20 @@ injects) but is dismissed there, where its mail is counted.
 ## Web UI & HTTP API
 
 **User score goal** is optional in **New session** and **Spawn child**.
-It starts at 0/10 and submits a standalone `/goal …` command before the opening
-task. Later session reminders include the goal and current score as ordinary
-prompt text, including sessions without a workflow. Use the **Score** field
-beside **type for this session** to save a rating from 0 to 10 (decimals allowed).
-Saving a rating also notifies the session. At 10/10, score goal reminders stop;
-other reminder sources retain their settings. Correcting the score below 10
-resumes goal reminders. Selection and score survive daemon restart and session
-resume; the initial command runs only on creation.
+It starts with independent reward and penalty counts at zero and submits a
+standalone `/goal …` command before the opening task. Later session reminders
+include the goal and current counts as ordinary prompt text, including
+sessions without a workflow. Each send from **type for this session** can
+carry one point of operator feedback: the **none/reward/penalty** selector
+beside the input (shown only while the feature is on) adds one point to the
+matching count when the send lands, then resets to none. No count stops the
+goal reminders — they repeat while the feature is enabled; other reminder
+sources retain their settings. Selection and counts survive daemon restart
+and session resume; the initial command runs only on creation.
 
 The checkbox ships unchecked. **Settings → User score goal** changes the default
 for future sessions and children (`daemon.score_goal_default`); each creation
-form can override it. A child starts at zero independently of its parent's score.
+form can override it. A child starts at zero independently of its parent's counts.
 Periodic goal reminders use the machine's `cflow_reminder_interval` (600 seconds
 when unset or zero) and the session reminder pause/skip controls.
 
