@@ -150,6 +150,30 @@ def recipient_body(msg: dict, handle: str) -> str:
     return str(msg.get("body") or "")
 
 
+#: The words :func:`MeshManager.mesh_info` accepts for ``state``. The same
+#: partition the roster's filter bar draws, named the same way, because a
+#: filter the page applies and a filter the daemon applies must agree about
+#: what "current" means.
+MEMBER_STATES = (
+    "all", "current", "running", "remote",
+    "killed", "paused", "archived", "missing",
+)
+
+
+def member_in_state(category: str, state: str) -> bool:
+    """Is a member of ``category`` in the roster ``state`` asked for?
+
+    ``remote`` counts as current: another daemon's member has no local record
+    and its death is never reported here, so unknown is not dead. Hiding a
+    member that is working is the expensive way to be wrong.
+    """
+    if state == "all":
+        return True
+    if state == "current":
+        return category in ("running", "remote")
+    return category == state
+
+
 def _age_secs(ts, now: datetime) -> Optional[float]:
     """Seconds since an ISO ``ts``; None if it is missing or unparsable (a
     message from a future/older daemon must not sink the whole report)."""
@@ -902,15 +926,22 @@ class Mesh:
             h for h in self.members if h != handle and self.connected(handle, h)
         )
 
-    def member_edge_table(self) -> List[dict]:
+    def member_edge_table(self, only: Optional[Iterable[str]] = None) -> List[dict]:
         """Every member pair with its state — what a topology view needs.
 
         Emitted for all pairs, not just the cut ones, because "connected" is
         a default rather than a stored fact: a caller handed only the cut set
         would have to know the default to draw the graph, and the two answers
         would drift the first time the default changed.
+
+        ``only`` narrows it to pairs where both ends are in that set, which is
+        the table for a roster that was filtered: an edge is only as visible
+        as both of its ends, and a reader draws no line to a member it was
+        not sent. The count is quadratic, so the narrowing is what keeps a
+        filtered answer small -- 251 members is 31375 pairs and 1.6MB, and
+        the eight running ones are 28 pairs (mesh-0826, 2026-09-20).
         """
-        handles = sorted(self.members)
+        handles = sorted(self.members if only is None else set(only) & set(self.members))
         return [
             {"a": a, "b": b, "enabled": self.connected(a, b)}
             for i, a in enumerate(handles)
@@ -6346,11 +6377,41 @@ class MeshManager:
             "requests": len(mesh.pending_requests) if not mesh.primary else 0,
         }
 
-    def mesh_info(self, mesh: Mesh, *, session: str = "") -> dict:
+    def mesh_info(
+        self, mesh: Mesh, *, session: str = "", state: str = "all"
+    ) -> dict:
+        """One mesh in full. ``state`` selects which members get a record.
+
+        The roster is the expensive half of this answer, and almost all of it
+        is usually hidden: the page's default filter shows running and remote
+        members, and a long-lived mesh is mostly ended ones. Building what the
+        reader cannot see is not free -- ``pending`` and ``owed`` walk the
+        message log per member, so the cost is members times messages. On
+        mesh-0826 (251 members, 27708 messages) that was 4.1s per request,
+        against a view that polls every 5 seconds (measured 2026-09-20).
+
+        So the filter is applied here rather than in the reader. The counts
+        are taken over every member either way -- a filter bar that cannot
+        say what it is hiding is worse than no filter -- and ``state="all"``
+        is the default, so a caller that says nothing gets what it always
+        got.
+        """
         members = []
         lineage = self._local_lineage(mesh)
+        counts = {
+            "all": 0, "current": 0, "running": 0, "remote": 0,
+            "killed": 0, "paused": 0, "archived": 0, "missing": 0,
+        }
         for handle in sorted(mesh.members):
             m = mesh.members[handle]
+            category = self._member_category(mesh, m)
+            counts["all"] += 1
+            if category in counts:
+                counts[category] += 1
+            if category in ("running", "remote"):
+                counts["current"] += 1
+            if not member_in_state(category, state):
+                continue
             local = self._is_local(mesh, m)
             # Unanswered mail alongside undelivered: 'pending' is the daemon's
             # debt to the member, 'owed' the member's debt to the mesh. Remote
@@ -6386,7 +6447,7 @@ class MeshManager:
                     # can be in and a session cannot (``missing``, ``remote``
                     # — see `_member_category`). `reachability` stays exactly
                     # as it was: the CLI prints it and the spawn tests read it.
-                    "category": self._member_category(mesh, m),
+                    "category": category,
                     "parent": parent if parent in mesh.members else None,
                 }
             )
@@ -6459,6 +6520,10 @@ class MeshManager:
             "epoch": mesh.authority_epoch,
             "you": you.handle if you else None,
             "members": members,
+            # Over every member, not the shown ones: what the bar is hiding
+            # is exactly what these are for.
+            "member_counts": counts,
+            "member_state": state,
             "messages": len(mesh.messages),
             "provisional": len(mesh.provisional),
             "peers": peers,
@@ -6466,7 +6531,9 @@ class MeshManager:
             # The member graph, one layer up from `links`: who may message
             # whom. Every pair is listed with its state — see
             # Mesh.member_edge_table on why the cut set alone is not enough.
-            "member_links": mesh.member_edge_table(),
+            "member_links": mesh.member_edge_table(
+                None if state == "all" else [m["handle"] for m in members]
+            ),
             "requests": requests,
             "policy": mesh.policy,
             # A summary only — the stance prose is fetched on demand from

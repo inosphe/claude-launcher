@@ -1925,6 +1925,61 @@ def test_member_rows_carry_the_lifecycle_partition(home, tmp_path):
     asyncio.run(run())
 
 
+def test_the_roster_is_filtered_before_it_is_built(home, tmp_path):
+    """``state`` decides which members get a record, not which are drawn.
+
+    A member's record costs a walk of the message log twice (``pending`` and
+    ``owed``), so the roster is members times messages. Almost all of it is
+    hidden: the view's default filter shows the live members and a long-lived
+    mesh is mostly ended ones. Measured against mesh-0826 on 2026-09-20 --
+    251 members, 27708 messages -- the answer was 4.0s and 1.66MB with every
+    member and 11ms and 4.7KB with the eight running ones.
+
+    The counts stay whole, because a filter bar that cannot say what it is
+    hiding is worse than no filter; and the default is still every member, so
+    a caller that says nothing gets what it always got.
+    """
+    _register_py_harness()
+    mgr = _manager()
+    mm = MeshManager(mgr)
+    mm.create("m")
+
+    async def run():
+        for name in ("live", "gone"):
+            mgr.create(SessionDef(name=name, harness="py", cwd=str(tmp_path)))
+        await mm.join("m", "live", handle="alice")
+        await mm.join("m", "gone", handle="bob")
+        mgr.kill("gone")
+        await _wait_exited(mgr.get("gone"))
+        mesh = mm.get("m")
+
+        everyone = mm.mesh_info(mesh)
+        assert [r["handle"] for r in everyone["members"]] == ["alice", "bob"]
+
+        current = mm.mesh_info(mesh, state="current")
+        assert [r["handle"] for r in current["members"]] == ["alice"]
+        # Taken over every member either way.
+        assert current["member_counts"]["all"] == 2
+        assert current["member_counts"]["killed"] == 1
+        assert current["member_counts"]["current"] == 1
+        assert current["member_state"] == "current"
+
+        # The pair table follows the roster: an edge is only as visible as
+        # both of its ends, and this is the half that grows quadratically.
+        assert everyone["member_links"] == [
+            {"a": "alice", "b": "bob", "enabled": True}
+        ]
+        assert current["member_links"] == []
+
+        # And the word for one category alone.
+        only_dead = mm.mesh_info(mesh, state="killed")
+        assert [r["handle"] for r in only_dead["members"]] == ["bob"]
+
+        await mgr.shutdown_all()
+
+    asyncio.run(run())
+
+
 def test_members_tool_response_is_linear_without_the_pair_table(monkeypatch):
     """The MCP ``members`` tool must not ship the daemon's O(n²) pair table.
 

@@ -20697,7 +20697,9 @@ async function refreshSessionConnect(force = false) {
   if (!mesh) { renderSessionConnect(); return; }
   let info = null;
   try {
-    info = await api(`/api/mesh/${encodeURIComponent(mesh)}`)
+    // Only the live members can be connected to, and the ended ones are
+    // what makes this answer expensive (see refreshMeshView).
+    info = await api(`/api/mesh/${encodeURIComponent(mesh)}?state=current`)
       .then((r) => (r.ok ? r.json() : null));
   } catch { info = null; }
   if (sessionConnectFor !== key) return;   // the pick moved on while we asked
@@ -21887,8 +21889,14 @@ async function refreshMeshView(force = false) {
       offset: String(meshMessageOffset),
       filter: meshMessageFilter,
     });
+    // The roster filter goes to the daemon rather than being applied to
+    // what it sends: building a record costs a walk of the message log per
+    // member, and on a long-lived mesh almost every member is an ended one
+    // this view does not draw. mesh-0826 answered in 4.0s and 1.66MB with
+    // every member, 11ms and 4.7KB with the eight running ones (2026-09-20).
     const [r1, r2, r3] = await Promise.all([
-      api(`/api/mesh/${encodeURIComponent(meshName)}`),
+      api(`/api/mesh/${encodeURIComponent(meshName)}`
+          + `?state=${encodeURIComponent(meshMemberFilter)}`),
       api(`/api/mesh/${encodeURIComponent(meshName)}/messages?${historyQuery}`),
       api(`/api/mesh/${encodeURIComponent(meshName)}/owed`),
     ]);
@@ -23112,7 +23120,17 @@ function meshMemberVisible(m, filter) {
 
 /* The buttons' counts, over every member — never over the shown ones, or the
    bar could not tell you what it is hiding. */
-function meshMemberCounts(members) {
+function meshMemberCounts(members, given) {
+  // A daemon that filtered the roster sends the counts with it: taken over
+  // every member, which is the only list that can say what is hidden. An
+  // older one sends every member and no counts, and they are taken here.
+  if (given && typeof given.all === "number") {
+    return {
+      current: given.current || 0, killed: given.killed || 0,
+      paused: given.paused || 0, archived: given.archived || 0,
+      all: given.all || 0,
+    };
+  }
   const counts = { current: 0, killed: 0, paused: 0, archived: 0, all: 0 };
   for (const m of members || []) {
     const category = meshMemberCategory(m);
@@ -23128,15 +23146,19 @@ function meshMemberCounts(members) {
    an edge is only as visible as both of its ends. */
 function meshVisibleInfo(info, filter) {
   const all = info.members || [];
+  // Still applied here: a daemon that already filtered sends nothing this
+  // drops, and one too old to know the parameter sends everything.
   const members = all.filter((m) => meshMemberVisible(m, filter));
   const shown = new Set(members.map((m) => m.handle));
+  const counted = info.member_counts && typeof info.member_counts.all === "number"
+    ? info.member_counts.all : all.length;
   return {
     ...info,
     members,
     // Carried so the panels can say how much they are not showing: a count
     // taken over a filtered list is only honest beside what it left out.
-    members_total: all.length,
-    members_hidden: all.length - members.length,
+    members_total: counted,
+    members_hidden: counted - members.length,
     member_links: (info.member_links || [])
       .filter((e) => shown.has(e.a) && shown.has(e.b)),
   };
@@ -23151,8 +23173,8 @@ function meshMemberStateWord(m) {
     ? category : m.reachability;
 }
 
-function meshMemberFilterBar(members) {
-  const counts = meshMemberCounts(members);
+function meshMemberFilterBar(members, given) {
+  const counts = meshMemberCounts(members, given);
   const labels = {
     current: "Current", killed: "Killed", paused: "Paused",
     archived: "Archived", all: "All",
@@ -23255,7 +23277,7 @@ function renderMesh(info, history, force, owed, historyPage) {
   const box = el("div", "mesh-members");
   const membersHead = el("div", "mesh-members-head");
   membersHead.appendChild(el("h3", null, "Members"));
-  membersHead.appendChild(meshMemberFilterBar(members));
+  membersHead.appendChild(meshMemberFilterBar(members, info.member_counts));
   box.appendChild(membersHead);
   if (!members.length) {
     box.appendChild(el("p", "wf-note", "no members yet — enrol a session below"));
@@ -24756,7 +24778,9 @@ async function refreshFlowView() {
   let info, data;
   try {
     const [r1, r2] = await Promise.all([
-      api(`/api/mesh/${encodeURIComponent(flowMesh)}`),
+      // `state=current`: the ended members this view never draws cost a
+      // walk of the message log each to build (see refreshMeshView).
+      api(`/api/mesh/${encodeURIComponent(flowMesh)}?state=current`),
       api(`/api/mesh/${encodeURIComponent(flowMesh)}/flows`),
     ]);
     info = await r1.json();
@@ -24886,7 +24910,9 @@ async function refreshTrace() {
   let info, history, owed, flow;
   try {
     const calls = [
-      api(`/api/mesh/${encodeURIComponent(seat.mesh)}`),
+      // `state=current`: the ended members this view never draws cost a
+      // walk of the message log each to build (see refreshMeshView).
+      api(`/api/mesh/${encodeURIComponent(seat.mesh)}?state=current`),
       api(`/api/mesh/${encodeURIComponent(seat.mesh)}/messages?limit=200`),
       api(`/api/mesh/${encodeURIComponent(seat.mesh)}/owed`),
     ];

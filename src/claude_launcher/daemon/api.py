@@ -66,6 +66,7 @@ from . import restart_notice
 from .harness import HarnessError, SessionDef
 from . import score_goal
 from .manager import ManagerError, SessionManager
+from . import mesh as mesh_mod
 from .mesh import MeshBusy, MeshConflict, MeshError, MeshManager
 from .session import STATUS_IDLE, KeyboardHeld, SessionGone
 from . import session as session_mod
@@ -878,6 +879,12 @@ async def _batch_one(template: web.Request, path: str):
 #: terminal sockets use, and for the same reason -- see ws.HEARTBEAT.
 CONTROL_HEARTBEAT = 60
 
+#: How many reads this socket will serve at once. Reads run off the receive
+#: loop (see :func:`h_control_ws`), so without a ceiling a client could make
+#: one connection hold an arbitrary number of router dispatches open. The
+#: page has at most a tick's batch and a few widget polls in flight.
+CONTROL_READS_IN_FLIGHT = 8
+
 
 async def h_control_ws(request: web.Request) -> web.WebSocketResponse:
     """The page's reads, on a connection it already holds.
@@ -901,7 +908,8 @@ async def h_control_ws(request: web.Request) -> web.WebSocketResponse:
 
     - ``{"type":"read","id":N,"paths":[...]}`` -> ``{"type":"read_result",
       "id":N,"answers":{...},"errors":{...}}``. ``id`` is the client's, echoed
-      back, because several reads may be in flight on one socket.
+      back, because several reads may be in flight on one socket -- and they
+      are answered as each finishes, which is not the order they arrived in.
     - ``{"type":"link_failed", ...}`` -> recorded, not answered. What the page
       reports when it could not open a terminal socket at all; see
       :meth:`connections.Registry.link_failed`.
@@ -919,8 +927,25 @@ async def h_control_ws(request: web.Request) -> web.WebSocketResponse:
     conns = connections.install(request.app)
     record = conns.opened("control", "(control)", request, ws=ws)
     carrier = channel.Carrier(ws, request.app, request)
+    reads: set[asyncio.Task] = set()
+
+    async def answer_read(frame: dict) -> None:
+        try:
+            answers, errors = await _control_read(template, frame.get("paths"))
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 -- one read, not the socket
+            log.debug("control read failed", exc_info=True)
+            answers, errors = {}, {"": repr(exc)}
+        await carrier.send_str(json.dumps({
+            "type": "read_result",
+            "id": frame.get("id"),
+            "answers": answers,
+            "errors": errors,
+        }))
+
     try:
-        await ws.send_str(json.dumps({"type": "init"}))
+        await carrier.send_str(json.dumps({"type": "init"}))
         async for msg in ws:
             if msg.type == WSMsgType.BINARY:
                 carrier.deliver_binary(msg.data)
@@ -939,20 +964,36 @@ async def h_control_ws(request: web.Request) -> web.WebSocketResponse:
                 continue
             kind = frame.get("type")
             if kind == "ping":
-                await ws.send_str(json.dumps({"type": "pong"}))
+                await carrier.send_str(json.dumps({"type": "pong"}))
             elif kind == "link_failed":
                 conns.link_failed(request, frame)
             elif kind == "read":
-                answers, errors = await _control_read(template, frame.get("paths"))
-                await ws.send_str(json.dumps({
-                    "type": "read_result",
-                    "id": frame.get("id"),
-                    "answers": answers,
-                    "errors": errors,
-                }))
+                # Off this loop, on a task of its own. A read is a router
+                # dispatch per path and some of them are slow -- /api/mesh
+                # answered 1.7MB in 3.3s on this machine, 2026-09-20 -- and
+                # the loop is now also the lane every terminal's keystrokes
+                # arrive in. Awaited here, one read stopped this socket from
+                # reading anything for its whole duration: nothing typed in
+                # any terminal reached a PTY, and no resize or repaint got
+                # through, which is a terminal that paints once and then sits
+                # there (claunch-gh4f made the terminals share this socket;
+                # the reads were already on it from claunch-riq5).
+                if len(reads) >= CONTROL_READS_IN_FLIGHT:
+                    await carrier.send_str(json.dumps({
+                        "type": "read_result",
+                        "id": frame.get("id"),
+                        "answers": {},
+                        "errors": {"": "too many reads in flight"},
+                    }))
+                    continue
+                task = asyncio.ensure_future(answer_read(frame))
+                reads.add(task)
+                task.add_done_callback(reads.discard)
     except ConnectionResetError:
         pass
     finally:
+        for task in list(reads):
+            task.cancel()
         await carrier.shutdown(ws.exception())
         request.app["websockets"].discard(ws)
         if not ws.closed:
@@ -3266,8 +3307,14 @@ async def h_mesh_get(request: web.Request) -> web.Response:
     # `?session=` asks "which member am I?" — answered as `you`. Optional, so
     # the dashboard poll (which is nobody's session) is unchanged.
     session = str(request.query.get("session") or "")
+    # `?state=` is the roster filter, applied before the expensive half of
+    # the answer is built rather than after it reaches the page. Absent means
+    # every member, which is what this route has always sent.
+    state = str(request.query.get("state") or "all")
+    if state not in mesh_mod.MEMBER_STATES:
+        return json_error(400, f"invalid member state: {state!r}")
     return json_response(
-        {**mm.mesh_info(mesh, session=session),
+        {**mm.mesh_info(mesh, session=session, state=state),
          "relay": request.app["relay_state"]()}
     )
 
