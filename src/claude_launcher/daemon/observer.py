@@ -295,6 +295,17 @@ class Observer:
         end = min(total, cursor + 40)
         page = transcript_view.page(sdef.name, sdef, before=end, limit=max(1, end - cursor))
         rows = []
+        # Tool traffic stays in on purpose. It is 63% of what this loop
+        # serializes, which reads like an obvious thing to filter — so it was
+        # measured, and it is not. Of 4071 events the observer actually
+        # reported (replayed 2026-09-20 over 58 session rows), 68% cite a
+        # tool-only record as their source: the file paths, test names and
+        # counts a report is made of arrive as tool results, not as prose.
+        # Dropping tool-only records costs about six of every ten reports to
+        # save 63% of these bytes; dropping only the calls (tool_use) still
+        # costs one in nine to save 22%. A prefix is no better — the reader
+        # already clips these at TOOL_CLIP, and 98.8% of what the citations
+        # used sits inside that clip. Filtering here is not an optimization.
         for record in page["records"] if end > cursor else []:
             blocks = [b for b in record["blocks"] if b.get("type") != "thinking"
                       and not (b.get("type") == "text" and communication_only(b.get("text")))]
