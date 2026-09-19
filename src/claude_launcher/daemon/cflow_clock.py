@@ -141,6 +141,61 @@ REMINDER_POLL = 15.0
 #: agent to act on a step it is not allowed to enter.
 _ACTIONABLE = ("step", "select")
 
+#: How much work after a delivered reminder still counts as "the session only
+#: answered the reminder". A terminal that took the message, rendered it,
+#: replied and went quiet again spends seconds here; a session that actually
+#: worked on the step spends minutes. Measured on the fleet: the codex
+#: sessions whose reminders repeated for 21 hours answered each one in
+#: 0.4–7.2 s of turn time (session s602, 2026-09-19).
+REMINDER_WORK_GRACE = 60.0
+
+
+def session_idle_for(session) -> Optional[float]:
+    """Seconds this session's screen has been still, or ``None``.
+
+    ``None`` covers both "the session is working right now" and "this session
+    object does not expose the API" (older/fake implementations), and callers
+    treat both the same way: no suppression is inferred from a number that
+    was never measured.
+    """
+    reader = getattr(session, "idle_since", None)
+    if not callable(reader):
+        return None
+    try:
+        value = reader()
+    except Exception:  # noqa: BLE001 - idle time is decoration only
+        return None
+    return None if value is None else float(value)
+
+
+def answered_only_the_reminder(
+    session, now: float, fired_at: Optional[float]
+) -> bool:
+    """Whether nothing but the last reminder itself has moved this terminal.
+
+    The activity marker alone cannot answer this. A reminder is typed into
+    the session, rendered there and usually answered, so the marker moves
+    every single time one is delivered — which is why comparing it against a
+    baseline taken when the delivery returned never suppresses anything in
+    production (the submit repaint and the turn both land after that
+    baseline).
+
+    Durations do answer it. ``now - fired_at`` is how long ago the session
+    was last spoken to, and ``idle_since`` is how long its screen has been
+    still; the difference is how long the terminal moved in between. When
+    that is under :data:`REMINDER_WORK_GRACE`, the only thing that happened
+    since the last reminder was the session taking delivery of it.
+    """
+    if fired_at is None:
+        return False
+    idle_for = session_idle_for(session)
+    if idle_for is None:
+        return False  # working right now, or a session that cannot say
+    elapsed = now - fired_at
+    if elapsed <= 0:
+        return False
+    return (elapsed - idle_for) <= REMINDER_WORK_GRACE
+
 
 def _ask_reached_nobody(payload: dict) -> bool:
     """A ``waiting_answer`` that was never actually put to anyone.
@@ -375,7 +430,15 @@ class CflowReminderSource:
                     activity = (
                         None if session is None else self._session_activity(session)
                     )
-                    if activity is not None and activity == entry.get("activity"):
+                    unmoved = activity is not None and activity == entry.get("activity")
+                    # ...and the marker's blind spot: it moved, but only
+                    # because the last reminder was typed here and answered.
+                    # See :func:`answered_only_the_reminder`.
+                    if not unmoved and session is not None:
+                        unmoved = answered_only_the_reminder(
+                            session, now, entry.get("fired_at")
+                        )
+                    if unmoved:
                         entry["at"] = now
                         entry["held_at"] = None
                         continue

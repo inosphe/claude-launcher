@@ -456,11 +456,22 @@ class SessionReminderService:
                 # API (older/fake session implementations), so retain the
                 # compatibility behaviour in that case.
                 activity = self._session_activity(session)
-                if (
-                    entry.get("fired_at") is not None
+                fired_at = entry.get("fired_at")
+                unmoved = (
+                    fired_at is not None
                     and activity is not None
                     and activity == entry.get("activity")
-                ):
+                )
+                # The marker has a blind spot the duration check covers: a
+                # reminder is typed into the terminal, rendered there and
+                # answered, so the marker moves on every delivery whether or
+                # not the session did any work.  See
+                # :func:`cflow_clock.answered_only_the_reminder`.
+                if not unmoved:
+                    unmoved = cflow_clock.answered_only_the_reminder(
+                        session, now, fired_at
+                    )
+                if unmoved:
                     entry["at"] = now
                     entry["held_at"] = None
                     continue
@@ -572,8 +583,19 @@ class SessionReminderService:
                 continue
             name = session.sdef.name
             live.add(name)
-            entry = self._goals.setdefault(name, {"at": now, "held_at": None})
+            entry = self._goals.setdefault(
+                name, {"at": now, "held_at": None, "fired_at": None}
+            )
             if now - entry["at"] >= interval:
+                # The same no-progress rule the other two sources apply: a
+                # goal restated into a terminal that has done nothing since
+                # the last one only grows the pending queue.
+                if cflow_clock.answered_only_the_reminder(
+                    session, now, entry.get("fired_at")
+                ):
+                    entry["at"] = now
+                    entry["held_at"] = None
+                    continue
                 due.add(name)
         for name in set(self._goals) - live:
             del self._goals[name]
@@ -610,12 +632,14 @@ class SessionReminderService:
                     cwd=cwd,
                     cflow_block=block,
                     role_due=name in roles_due,
+                    now=now,
                 )
             else:
                 await self._deliver_session(
                     name,
                     roles=roles_due.get(name),
                     role_due=name in roles_due,
+                    now=now,
                 )
 
     @staticmethod
@@ -654,7 +678,14 @@ class SessionReminderService:
         cflow_block: str = "",
         roles: Optional[List[dict]] = None,
         role_due: bool = False,
+        now: Optional[float] = None,
     ) -> None:
+        # One clock for the whole decision.  The scan that found this source
+        # due and the stamps written back when it lands have to be on the
+        # same reading, or "how long since I last spoke here" is measured
+        # against a different origin than "how long has this terminal been
+        # still" -- which is the comparison the no-progress rule makes.
+        at = time.monotonic() if now is None else now
         if cwd:
             session = self.cflow._session_for(cwd, name)
             if session is None:
@@ -675,7 +706,7 @@ class SessionReminderService:
         )
 
         if session.status() != STATUS_BUSY:
-            stamp = time.monotonic()
+            stamp = at
             if cflow_entry is not None:
                 cflow_entry["held_at"] = stamp
             if role_due and name in self._roles:
@@ -693,15 +724,15 @@ class SessionReminderService:
         # actually held; an unrelated source may still be delivered normally.
         resumed = False
         if goal_entry is not None and goal_entry.get("held_at") is not None:
-            goal_entry.update(at=time.monotonic(), held_at=None)
+            goal_entry.update(at=at, held_at=None)
             resumed = True
         if cflow_entry is not None and cflow_entry.get("held_at") is not None:
-            cflow_entry["at"] = time.monotonic()
+            cflow_entry["at"] = at
             cflow_entry["held_at"] = None
             resumed = True
         role_entry = self._roles.get(name) if role_due else None
         if role_entry is not None and role_entry.get("held_at") is not None:
-            role_entry["at"] = time.monotonic()
+            role_entry["at"] = at
             role_entry["held_at"] = None
             resumed = True
         if resumed:
@@ -746,11 +777,11 @@ class SessionReminderService:
         if not delivered:
             return
         if goal_entry is not None:
-            goal_entry.update(at=time.monotonic(), held_at=None)
+            goal_entry.update(at=at, fired_at=at, held_at=None)
         if cflow_block:
-            self._mark_cflow(cwd, name, "reminder")
+            self._mark_cflow(cwd, name, "reminder", now=at)
         if current_roles:
-            self._mark_role(name)
+            self._mark_role(name, now=at)
         log.info(
             "session reminder delivered to %r (role=%s, cflow=%s)",
             name,
@@ -758,11 +789,13 @@ class SessionReminderService:
             bool(cflow_block),
         )
 
-    def _mark_cflow(self, cwd: str, scope: str, kind: str) -> None:
+    def _mark_cflow(
+        self, cwd: str, scope: str, kind: str, *, now: Optional[float] = None
+    ) -> None:
         entry = self._seen.get((cwd, scope))
         if entry is None:
             return
-        stamp = time.monotonic()
+        stamp = time.monotonic() if now is None else now
         entry["at"] = stamp
         entry["fired_at"] = stamp
         entry["fired_kind"] = kind
@@ -775,11 +808,11 @@ class SessionReminderService:
         if session is not None:
             entry["activity"] = self._session_activity(session)
 
-    def _mark_role(self, name: str) -> None:
+    def _mark_role(self, name: str, *, now: Optional[float] = None) -> None:
         entry = self._roles.get(name)
         if entry is None:
             return
-        stamp = time.monotonic()
+        stamp = time.monotonic() if now is None else now
         entry["at"] = stamp
         entry["fired_at"] = stamp
         try:
