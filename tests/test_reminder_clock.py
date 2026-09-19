@@ -1637,3 +1637,114 @@ def test_a_frozen_pty_stops_the_repeat_even_while_the_grid_moves(proj):
             sess.work += 1  # the grid keeps moving; the PTY does not
             at += step
     assert len(sess.delivered) == 1
+
+
+# --------------------------------------------------------------------------- #
+# the firing condition: a repeat has to be earned by a terminal that moved
+# --------------------------------------------------------------------------- #
+class _ScriptedSession(_FakeSession):
+    """Two movement readings the test drives independently.
+
+    ``paints`` stands for the screen marker (animation already filtered out
+    by the tracker) and ``bytes_out`` for the PTY stamp.  Moving one without
+    the other is exactly the pair of false positives the rule has to reject:
+    bytes without a screen change is an animating TUI, a screen change
+    without bytes is a resize.
+    """
+
+    def __init__(self, name, cwd) -> None:
+        super().__init__(name, cwd)
+        self.paints = 0
+        self.bytes_out = 0
+
+    def last_activity_at(self):
+        return f"paint-{self.paints}"
+
+    def last_output_at(self):
+        return f"out-{self.bytes_out}"
+
+    def idle_since(self):
+        return None                        # reads busy, as the s602 log shows
+
+
+def _run(service, sess, cycles, *, per_poll, interval=601.0):
+    """Tick at the daemon's cadence, letting ``per_poll`` move the session.
+
+    ``per_poll`` is handed the offset inside the current cycle, so a test can
+    place the movement well after the settle point rather than before the
+    first reminder has even gone out.
+    """
+    base = time.monotonic()
+    step = cflow_clock.REMINDER_POLL
+    for i in range(cycles):
+        at = base + interval * i
+        while at < base + interval * (i + 1):
+            asyncio.run(service.tick(at))
+            per_poll(sess, at - (base + interval * i))
+            at += step
+
+
+def _service(sess, proj):
+    return session_reminder.SessionReminderService(
+        _KinManager({"w1": sess}), _FakeMeshMgr(_FakeMesh("m", 0), role="worker")
+    )
+
+
+def test_an_animating_terminal_does_not_earn_the_repeat(proj):
+    """Bytes keep flowing, no non-animated row changes: that is not work."""
+    sess = _ScriptedSession("w1", str(proj))
+    service = _service(sess, proj)
+    _run(service, sess, 6, per_poll=lambda s, _off: setattr(
+        s, "bytes_out", s.bytes_out + 1
+    ))
+    assert len(sess.delivered) == 1
+
+
+def test_a_restamped_grid_does_not_earn_the_repeat(proj):
+    """A resize moves every row without the program writing a byte."""
+    sess = _ScriptedSession("w1", str(proj))
+    service = _service(sess, proj)
+    _run(service, sess, 6, per_poll=lambda s, _off: setattr(
+        s, "paints", s.paints + 1
+    ))
+    assert len(sess.delivered) == 1
+
+
+def _both(sess, _off):
+    sess.paints += 1
+    sess.bytes_out += 1
+
+
+def test_short_bursts_pace_the_repeat_by_how_much_the_session_moved(proj):
+    """Both readings move, well after the settle point, but only briefly.
+
+    This is the case only the firing condition catches: the settled baseline
+    was left behind (both readings differ from it) and the session reports no
+    idle duration, so neither suppression applies. The timer alone would have
+    typed into this terminal once per cycle.
+
+    What the condition does instead is pace the repeat by the work: two scans
+    of movement per cycle is 30 s, so REMINDER_MIN_MOVEMENT is reached every
+    second cycle and the reminder arrives then. The total carries across
+    cycles rather than resetting, because work spread thin is still work.
+    """
+    assert cflow_clock.REMINDER_MIN_MOVEMENT == 2 * (2 * cflow_clock.REMINDER_POLL)
+    sess = _ScriptedSession("w1", str(proj))
+    service = _service(sess, proj)
+    cycles, burst = 6, 2 * cflow_clock.REMINDER_POLL
+    # Movement placed halfway through each cycle: long after the delivery has
+    # settled, long before the next one is due.
+    _run(service, sess, cycles, per_poll=lambda s, off: (
+        _both(s, off) if 300.0 <= off < 300.0 + burst else None
+    ))
+    # One opening reminder, then one per two cycles of 30 s movement.
+    assert len(sess.delivered) == 3
+    assert len(sess.delivered) < cycles  # what the bare timer would have sent
+
+
+def test_a_terminal_that_keeps_moving_earns_every_repeat(proj):
+    """Both readings advance on every scan: the session is working."""
+    sess = _ScriptedSession("w1", str(proj))
+    service = _service(sess, proj)
+    _run(service, sess, 4, per_poll=_both)
+    assert len(sess.delivered) == 4

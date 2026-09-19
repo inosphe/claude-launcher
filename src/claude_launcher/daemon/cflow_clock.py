@@ -159,6 +159,86 @@ REMINDER_WORK_GRACE = 60.0
 #: what it says.
 REMINDER_SETTLE = 30.0
 
+#: How long a terminal has to have been moving, since the last reminder
+#: settled, before the next one is allowed to fire. This is a condition on
+#: sending, not another way of suppressing: the timer says a reminder is due,
+#: and this says the session it would go to is one that has been working.
+#:
+#: Counted in whole scans (:data:`REMINDER_POLL`), so 60 s means the session
+#: was seen moving on four separate looks — long enough that a single burst
+#: cannot carry it, short enough that a minute of real work does.
+REMINDER_MIN_MOVEMENT = 60.0
+
+
+def _movement_readings(session) -> tuple:
+    """This terminal's two independent "did it move" readings.
+
+    ``(marker, output)``, either of which may be ``None`` when the session
+    does not expose it. They fail in opposite directions, which is why both
+    are taken: the screen marker ignores animated rows but is restamped by a
+    resize, and the PTY stamp cannot be moved by a resize but advances on
+    every animation frame.
+    """
+    marker = None
+    reader = getattr(session, "last_activity_at", None)
+    if callable(reader):
+        try:
+            marker = reader()
+        except Exception:  # noqa: BLE001 - activity is decoration only
+            marker = None
+    return marker, session_output_at(session)
+
+
+def observe_movement(session, entry: dict, now: float) -> None:
+    """Add this scan's interval to the entry's movement total, if it moved.
+
+    A scan counts as movement only when *every* reading the session offers
+    has changed since the previous scan. Requiring all of them is what keeps
+    the two false positives out: an animating TUI moves the PTY stamp while
+    the screen marker stands still, and a resize moves the marker while the
+    PTY stamp stands still. Neither is the session doing work.
+
+    Accumulated rather than sampled, because the question is how long the
+    terminal has been moving since the last reminder, and a single look
+    cannot answer that.
+    """
+    # ``moved_for`` is the tracking switch as well as the total: ``None``
+    # means there is no delivery to measure from -- nothing has been sent
+    # here yet, or its effects are still landing, or the position moved and
+    # the next reminder is a first one rather than a repeat.
+    if session is None or entry.get("moved_for") is None:
+        return
+    marker, output = _movement_readings(session)
+    seen_at = entry.get("seen_at")
+    changed = []
+    if marker is not None:
+        changed.append(marker != entry.get("seen_activity"))
+    if output is not None:
+        changed.append(output != entry.get("seen_output_at"))
+    if changed and all(changed) and seen_at is not None:
+        entry["moved_for"] += max(0.0, now - seen_at)
+    entry["seen_activity"] = marker
+    entry["seen_output_at"] = output
+    entry["seen_at"] = now
+
+
+def moved_enough(session, entry: dict) -> bool:
+    """Whether this terminal has moved long enough to be worth speaking to.
+
+    Waived in the two cases where the total cannot mean anything: there is
+    no delivery to measure from (``moved_for`` is ``None`` -- see
+    :func:`observe_movement`), and a session that reports neither reading
+    (older or fake implementations keep their original cadence rather than
+    falling silent).
+    """
+    moved_for = entry.get("moved_for")
+    if moved_for is None:
+        return True
+    marker, output = _movement_readings(session)
+    if marker is None and output is None:
+        return True
+    return moved_for >= REMINDER_MIN_MOVEMENT
+
 
 def session_output_at(session) -> Optional[str]:
     """When the session's PTY last produced a byte, or ``None``.
@@ -243,6 +323,12 @@ def settle_activity(session, entry: dict, now: float, *, due: bool) -> None:
             entry["activity"] = activity
     entry["output_at"] = session_output_at(session)
     entry["settled"] = True
+    # Movement is counted from here, not from the delivery: what the reminder
+    # itself made the terminal do is not the session working.
+    entry["seen_activity"] = entry.get("activity")
+    entry["seen_output_at"] = entry["output_at"]
+    entry["seen_at"] = now
+    entry["moved_for"] = 0.0
 
 
 def session_idle_for(session) -> Optional[float]:
@@ -485,8 +571,10 @@ class CflowReminderSource:
                         None if session is None else self._session_activity(session)
                     ),
                     # A position the run just reached is its own baseline;
-                    # there is no delivery of ours still landing on it.
+                    # there is no delivery of ours still landing on it, and
+                    # its first reminder is not a repeat to be earned.
                     "settled": True,
+                    "moved_for": None,
                 }
                 self._seen[key] = entry
             if awaits.get("probe"):
@@ -519,9 +607,13 @@ class CflowReminderSource:
             # is stale.  Move it onto the screen the delivery actually left
             # behind, once, before any comparison is made against it.
             due_now = interval > 0 and now - entry["at"] >= interval
-            settle_activity(
-                self._session_for(cwd, scope), entry, now, due=due_now
-            )
+            session = self._session_for(cwd, scope)
+            settle_activity(session, entry, now, due=due_now)
+            observe_movement(session, entry, now)
+            if due_now and not moved_enough(session, entry):
+                # Due, but this terminal has not been working. Left due
+                # rather than re-armed, so it speaks as soon as it is.
+                continue
             if due_now:
                 # A repeat is useful after the session has made progress, but
                 # restating a position a second time on a terminal that has
@@ -532,7 +624,6 @@ class CflowReminderSource:
                 # the activity API (older/fake implementations), and those
                 # retain the original repeat cadence.
                 if entry.get("restated"):
-                    session = self._session_for(cwd, scope)
                     activity = (
                         None if session is None else self._session_activity(session)
                     )

@@ -440,8 +440,10 @@ class SessionReminderService:
                     "held_at": None,
                     "activity": activity,
                     # Nothing of ours is landing on a session we have not
-                    # spoken to yet, so this reading needs no settling.
+                    # spoken to yet, so this reading needs no settling and
+                    # its first reminder is not a repeat to be earned.
                     "settled": True,
+                    "moved_for": None,
                 }
                 continue
             if entry["key"] != key:
@@ -455,6 +457,11 @@ class SessionReminderService:
             # left behind before anything is compared against it.
             due_now = now - entry["at"] >= interval
             cflow_clock.settle_activity(session, entry, now, due=due_now)
+            cflow_clock.observe_movement(session, entry, now)
+            if due_now and not cflow_clock.moved_enough(session, entry):
+                # Due, but this terminal has not been working. Left due
+                # rather than re-armed, so it speaks as soon as it is.
+                continue
             if due_now:
                 # A role reminder is useful after the session has made
                 # progress, but repeating it while the terminal has stayed
@@ -602,6 +609,7 @@ class SessionReminderService:
                     "activity": None,
                     "output_at": None,
                     "settled": True,
+                    "moved_for": None,
                 },
             )
             # The same no-progress rule the other two sources carry, on the
@@ -609,6 +617,11 @@ class SessionReminderService:
             # done nothing since the last one only grows the pending queue.
             due_now = now - entry["at"] >= interval
             cflow_clock.settle_activity(session, entry, now, due=due_now)
+            cflow_clock.observe_movement(session, entry, now)
+            if due_now and not cflow_clock.moved_enough(session, entry):
+                # Due, but this terminal has not been working. Left due
+                # rather than re-armed, so it speaks as soon as it is.
+                continue
             if due_now:
                 if cflow_clock.nothing_moved_since_settle(
                     session, entry
@@ -804,6 +817,7 @@ class SessionReminderService:
                 # Provisional, for the same reason the other two sources
                 # mark theirs so: the delivery's own effects land later.
                 activity=self._session_activity(session), settled=False,
+                moved_for=None,
             )
         if cflow_block:
             self._mark_cflow(cwd, name, "reminder", now=at)
@@ -838,6 +852,7 @@ class SessionReminderService:
         if session is not None:
             entry["activity"] = self._session_activity(session)
         entry["settled"] = False
+        entry["moved_for"] = None
 
     def _mark_role(self, name: str, *, now: Optional[float] = None) -> None:
         entry = self._roles.get(name)
@@ -856,4 +871,5 @@ class SessionReminderService:
         # this delivery provokes both land after it, so a later scan re-takes
         # the baseline once they have (:func:`cflow_clock.settle_activity`).
         entry["settled"] = False
+        entry["moved_for"] = None
         entry["held_at"] = None
