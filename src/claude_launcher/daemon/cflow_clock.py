@@ -149,6 +149,102 @@ _ACTIONABLE = ("step", "select")
 #: 0.4–7.2 s of turn time (session s602, 2026-09-19).
 REMINDER_WORK_GRACE = 60.0
 
+#: How long after a delivery its own effects on the terminal keep landing.
+#: ``deliver`` returns once the paste has been rendered and the Enter keys
+#: written, so the submit repaint and the turn the message provokes are both
+#: still ahead of it. A baseline for "has this terminal moved since I last
+#: spoke" that is taken at that moment is therefore always one repaint stale,
+#: and the comparison it feeds can never come out equal. Re-anchoring the
+#: baseline this long after the delivery is what makes the comparison mean
+#: what it says.
+REMINDER_SETTLE = 30.0
+
+
+def session_output_at(session) -> Optional[str]:
+    """When the session's PTY last produced a byte, or ``None``.
+
+    The screen marker and this answer different questions. The marker is
+    taken off the *rendered grid*, and the grid can move without the program
+    writing anything — a resize restamps every row, an attaching viewer
+    renders a parked tail, a restored session is seeded from its log. Any of
+    those reads as activity and, for the two seconds after, as a busy
+    session. The PTY stamp cannot be moved that way: it advances only when
+    the program under the terminal actually wrote something.
+
+    So a terminal whose PTY has not moved has done nothing, whatever the
+    grid and the busy/idle heuristic say about it.
+    """
+    value = getattr(session, "last_output_at", None)
+    if callable(value):  # a double may expose it as a method
+        try:
+            value = value()
+        except Exception:  # noqa: BLE001 - the stamp is decoration only
+            return None
+    return value if isinstance(value, str) and value else None
+
+
+def nothing_moved_since_settle(session, entry: dict) -> bool:
+    """Whether this terminal has been still since the last reminder landed.
+
+    Two independent readings, either of which settles it. The screen marker
+    says no non-animated row has changed; the PTY stamp says no byte has been
+    written at all. The second catches what the first cannot — a session that
+    reads busy because its grid was restamped by something other than the
+    program, such as a resize.
+    """
+    if entry.get("fired_at") is None or not entry.get("settled", False):
+        # Never spoken to here, or the baseline is still the pre-delivery
+        # one. Either way there is no "since the last reminder" to measure.
+        return False
+    marker = entry.get("activity")
+    reader = getattr(session, "last_activity_at", None)
+    if marker is not None and callable(reader):
+        try:
+            if reader() == marker:
+                return True
+        except Exception:  # noqa: BLE001 - activity is decoration only
+            pass
+    output = entry.get("output_at")
+    return output is not None and session_output_at(session) == output
+
+
+def settle_activity(session, entry: dict, now: float, *, due: bool) -> None:
+    """Re-anchor one entry's no-progress baseline once a delivery has landed.
+
+    Called from the scan, which runs every :data:`REMINDER_POLL` seconds —
+    far more often than any reminder interval, so in the daemon this always
+    happens on a scan of its own, minutes before the entry comes due again.
+
+    ``due`` is the guard that keeps it that way. Re-anchoring on the very
+    scan that is about to compare against the baseline would compare a
+    reading with itself and suppress every repeat, including the ones a
+    working session has earned. A baseline that was never settled stays as
+    it was, which errs toward delivering.
+
+    Idempotent per delivery: ``settled`` is cleared when the reminder is
+    marked as fired and set here, so the baseline moves once and then stays
+    put until the next delivery. That is the point — the screen the session
+    was left on after taking the message is what later scans compare against.
+    """
+    if due or entry.get("settled", True):
+        return
+    fired_at = entry.get("fired_at")
+    if fired_at is None or (now - fired_at) < REMINDER_SETTLE:
+        return
+    if session is None:
+        return
+    activity = None
+    reader = getattr(session, "last_activity_at", None)
+    if activity is None and callable(reader):
+        try:
+            activity = reader()
+        except Exception:  # noqa: BLE001 - activity is decoration only
+            activity = None
+    if activity is not None:
+        entry["activity"] = activity
+    entry["output_at"] = session_output_at(session)
+    entry["settled"] = True
+
 
 def session_idle_for(session) -> Optional[float]:
     """Seconds this session's screen has been still, or ``None``.
@@ -389,6 +485,9 @@ class CflowReminderSource:
                     "activity": (
                         None if session is None else self._session_activity(session)
                     ),
+                    # A position the run just reached is its own baseline;
+                    # there is no delivery of ours still landing on it.
+                    "settled": True,
                 }
                 self._seen[key] = entry
             if awaits.get("probe"):
@@ -416,7 +515,15 @@ class CflowReminderSource:
                 # be the reason a stalled run goes quiet.
             if arrived:
                 continue
-            if interval > 0 and now - entry["at"] >= interval:
+            # The previous reminder's own repaint and the turn it provoked
+            # land after ``deliver`` returned, so the baseline recorded then
+            # is stale.  Move it onto the screen the delivery actually left
+            # behind, once, before any comparison is made against it.
+            due_now = interval > 0 and now - entry["at"] >= interval
+            settle_activity(
+                self._session_for(cwd, scope), entry, now, due=due_now
+            )
+            if due_now:
                 # A repeat is useful after the session has made progress, but
                 # restating a position a second time on a terminal that has
                 # not moved since the last reminder only feeds the pending
@@ -431,11 +538,12 @@ class CflowReminderSource:
                         None if session is None else self._session_activity(session)
                     )
                     unmoved = activity is not None and activity == entry.get("activity")
-                    # ...and the marker's blind spot: it moved, but only
-                    # because the last reminder was typed here and answered.
-                    # See :func:`answered_only_the_reminder`.
                     if not unmoved and session is not None:
-                        unmoved = answered_only_the_reminder(
+                        # The settled baseline (screen marker and PTY stamp),
+                        # then the duration reading as a third opinion.
+                        unmoved = nothing_moved_since_settle(
+                            session, entry
+                        ) or answered_only_the_reminder(
                             session, now, entry.get("fired_at")
                         )
                     if unmoved:

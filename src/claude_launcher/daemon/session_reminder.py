@@ -439,6 +439,9 @@ class SessionReminderService:
                     "fired_at": None,
                     "held_at": None,
                     "activity": activity,
+                    # Nothing of ours is landing on a session we have not
+                    # spoken to yet, so this reading needs no settling.
+                    "settled": True,
                 }
                 continue
             if entry["key"] != key:
@@ -446,7 +449,13 @@ class SessionReminderService:
                 # received.  It is due now, while first sight merely arms: the
                 # initial opening already carried that first stance.
                 entry.update({"key": key, "at": now - interval, "held_at": None})
-            if now - entry["at"] >= interval:
+            # The last reminder's own repaint and the turn it provoked land
+            # after ``deliver`` returned, so the baseline recorded then is one
+            # repaint stale.  Move it onto the screen that delivery actually
+            # left behind before anything is compared against it.
+            due_now = now - entry["at"] >= interval
+            cflow_clock.settle_activity(session, entry, now, due=due_now)
+            if due_now:
                 # A role reminder is useful after the session has made
                 # progress, but repeating it while the terminal has stayed
                 # at the same meaningful screen only grows the pending
@@ -462,13 +471,14 @@ class SessionReminderService:
                     and activity is not None
                     and activity == entry.get("activity")
                 )
-                # The marker has a blind spot the duration check covers: a
-                # reminder is typed into the terminal, rendered there and
-                # answered, so the marker moves on every delivery whether or
-                # not the session did any work.  See
-                # :func:`cflow_clock.answered_only_the_reminder`.
+                # The marker taken at delivery time has a blind spot both of
+                # these cover: a reminder is typed into the terminal,
+                # rendered there and answered, so that marker moves on every
+                # delivery whether or not the session did any work.
                 if not unmoved:
-                    unmoved = cflow_clock.answered_only_the_reminder(
+                    unmoved = cflow_clock.nothing_moved_since_settle(
+                        session, entry
+                    ) or cflow_clock.answered_only_the_reminder(
                         session, now, fired_at
                     )
                 if unmoved:
@@ -804,9 +814,13 @@ class SessionReminderService:
             entry["restated"] = True
         # Anchor the no-progress suppression baseline to the screen state the
         # delivery actually landed on, so a later scan compares like with like.
+        # Provisional: what the delivery is about to do to this terminal has
+        # not happened yet, so the scan re-takes it once it has (see
+        # :func:`cflow_clock.settle_activity`).
         session = self.cflow._session_for(cwd, scope)
         if session is not None:
             entry["activity"] = self._session_activity(session)
+        entry["settled"] = False
 
     def _mark_role(self, name: str, *, now: Optional[float] = None) -> None:
         entry = self._roles.get(name)
@@ -821,4 +835,8 @@ class SessionReminderService:
             session = None
         if session is not None:
             entry["activity"] = self._session_activity(session)
+        # ...and that reading is provisional. The submit repaint and the turn
+        # this delivery provokes both land after it, so a later scan re-takes
+        # the baseline once they have (:func:`cflow_clock.settle_activity`).
+        entry["settled"] = False
         entry["held_at"] = None
