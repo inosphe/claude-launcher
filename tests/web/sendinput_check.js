@@ -7,15 +7,16 @@
    The box has to hold the contract the whole raw-keystroke path lives under:
    the text and its Enter go in ONE /keys call (a client that splits them
    re-spreads the submit/enter split across call sites — the split belongs to
-   Session.send_keys alone), an empty or unaddressed line sends nothing, a
-   refusal's words are shown and the half-typed line kept, a dead daemon does
-   not look like a delivery, and a session that has ended has the box closed
-   with the reason shown, Ctrl+J inserts a newline at the caret rather than
-   sending — taken in the capture phase at the window, because the Firefox
-   family claims that chord for its downloads panel — and a line that
-   carries a newline goes as ONE paste (the keys
-   path would write a raw LF, which every harness reads as a submit, so the
-   block would arrive a line at a time). Slice the real functions out of
+   Session.send_keys alone), an empty or unaddressed line sends nothing, an
+   operator feedback choice rides that same call as one point (none by
+   default, reset once the send lands), a refusal's words are shown and the
+   half-typed line kept, a dead daemon does not look like a delivery, and a
+   session that has ended has the box closed with the reason shown, Ctrl+J
+   inserts a newline at the caret rather than sending — taken in the capture
+   phase at the window, because the Firefox family claims that chord for its
+   downloads panel — and a line that carries a newline goes as ONE paste (the
+   keys path would write a raw LF, which every harness reads as a submit, so
+   the block would arrive a line at a time). Slice the real functions out of
    app.js, drive them against a stub DOM, and check all of it. */
 const fs = require("fs");
 const path = require("path");
@@ -99,11 +100,19 @@ const imageItem = (type, blob) => ({
   getType: async () => blob,
 });
 
-/* the page's element lookup, over the three elements this strip owns */
+/* the page's element lookup, over the elements this strip owns */
+const SCORE_BOX = node("span");
+SCORE_BOX.classes.add("hidden");
+const SCORE_SEL = node("select");
+SCORE_SEL.value = "none";
+const SCORE_COUNTS = node("span");
 const $ = (id) => ({
   "term-input-field": FIELD,
   "term-input-send": BTN,
   "term-input-note": NOTE,
+  "term-score-goal": SCORE_BOX,
+  "term-score-feedback": SCORE_SEL,
+  "term-score-counts": SCORE_COUNTS,
 }[id] || null);
 
 /* which element the page would call focused. The window hook reads it to
@@ -116,8 +125,11 @@ new Function(
   "exports", "api", "$", "navigator", "document",
   `let currentName = null;
 let sessionEnded = false;
+let sessionsCache = [];
 ` + slice("termInputNote") + `
 ` + slice("sendKeyLine") + `
+` + slice("currentScoreFeedback") + `
+` + slice("renderScoreGoal") + `
 ` + slice("termInputBlock") + `
 ` + slice("autogrowTermInput") + `
 ` + slice("insertTermInputText") + `
@@ -137,6 +149,7 @@ Object.assign(exports, {
   onTermInputPaste,
   pasteClipboardImage,
   setSession: (name, ended) => { currentName = name; sessionEnded = !!ended; },
+  setSessions: (rows) => { sessionsCache = rows; },
 });`
 )(ctx, api, $, navigator, document);
 
@@ -227,6 +240,42 @@ async function main() {
         sent[0].body);
   check("the field is emptied for the next line", b.field.value === "");
   check("no pitfall keys field", sent[0].body.paste === undefined, sent[0].body);
+  check("no feedback chosen rides as none", sent[0].body.feedback === "none",
+        sent[0].body);
+
+  /* ---- operator feedback rides the send when the feature is on ----
+     The control is only shown for an opted-in session; a chosen point goes
+     with the next input, the daemon's answer refreshes the counts, and the
+     choice resets so a point is never spent twice. */
+  sent = [];
+  reply = { ok: true,
+            doc: { score_goal: { enabled: true, reward: 1, penalty: 1, active: true } } };
+  ctx.setSession("coder4", false);
+  ctx.setSessions([
+    { name: "coder4", status: "idle", score_goal: true, user_reward: 1, user_penalty: 0 },
+  ]);
+  SCORE_BOX.classes.delete("hidden");
+  SCORE_SEL.value = "penalty";
+  b.field.value = "fix the lint";
+  const fb = await ctx.sendKeyLine(b.field, b.btn, b.note);
+  check("a send carrying feedback returns true", fb === true);
+  check("the chosen point rides the one send",
+        sent.length === 1 && sent[0].body.feedback === "penalty",
+        sent[0] && sent[0].body);
+  check("the choice resets for the next input", SCORE_SEL.value === "none",
+        SCORE_SEL.value);
+  check("the cache and the counts refresh from the daemon's answer",
+        SCORE_COUNTS.textContent === "R1 · P1", SCORE_COUNTS.textContent);
+  sent = [];
+  reply = { ok: true, doc: {} };
+  b.field.value = "and the tests";
+  await ctx.sendKeyLine(b.field, b.btn, b.note);
+  check("the send after the reset carries none again",
+        sent.length === 1 && sent[0].body.feedback === "none",
+        sent[0] && sent[0].body);
+  SCORE_BOX.classes.add("hidden");
+  ctx.setSessions([]);
+  reply = { ok: true, doc: {} };
 
   /* ---- a refusal keeps the words and the line ---- */
   sent = [];

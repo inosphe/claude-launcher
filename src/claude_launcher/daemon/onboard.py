@@ -723,7 +723,7 @@ async def _open_with_score_goal(session, block: str) -> None:
 
     # This path is called only by creation, never by restore/respawn. The
     # command is one standalone input; repeats use ordinary prompt delivery.
-    delivered = await session.deliver_command("/goal " + score_goal.prompt(session.sdef.user_score))
+    delivered = await session.deliver_command("/goal " + score_goal.prompt(session.sdef))
     if not delivered:
         log.warning("initial score goal command for %r did not land", session.sdef.name)
     if block:
