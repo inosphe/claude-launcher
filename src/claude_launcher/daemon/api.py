@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import functools
+import hashlib
 import json
 import logging
 import os
@@ -3438,9 +3439,18 @@ async def h_mesh_history(request: web.Request) -> web.Response:
 
 
 async def h_mesh_owed(request: web.Request) -> web.Response:
-    """Who has been asked something and answered nothing — per message."""
+    """Who has been asked something and answered nothing — per message.
+
+    ``?state=`` narrows the roster before the ledger is built, the same way
+    and for the same cost as on the mesh itself (see :func:`h_mesh_get`).
+    """
     mm = _mesh_mgr(request)
-    return json_response(mm.owed_report(mm.get(request.match_info["mesh"])))
+    state = str(request.query.get("state") or "all")
+    if state not in mesh_mod.MEMBER_STATES:
+        return json_error(400, f"invalid member state: {state!r}")
+    return json_response(
+        mm.owed_report(mm.get(request.match_info["mesh"]), state=state)
+    )
 
 
 async def h_mesh_flows(request: web.Request) -> web.Response:
@@ -3452,12 +3462,17 @@ async def h_mesh_flows(request: web.Request) -> web.Response:
     that payload is polled by a page which does not need the graphs, and a
     workflow snapshot is an order of magnitude bigger than a member row.
 
-    Graphs are deduplicated by ``workflow@cwd``: a team of four running the
-    same workflow in the same tree is the ordinary case, and shipping that
-    graph four times a poll is waste. The first snapshot found under a key
-    wins, so two runs of the same name over an edited YAML would share the
-    older picture; the drawing side treats a step id it cannot find as
-    off-graph rather than trusting the key blindly.
+    Graphs are deduplicated by what they contain, not by where they came
+    from. ``workflow@cwd`` was the key, and a mesh whose members each stand
+    in their own worktree defeats it entirely: one workflow file, copied into
+    73 trees, shipped 73 identical 247KB graphs -- 16.3MB of a 11.9MB answer
+    (mesh-0826, 2026-09-20). The digest collapses those to one and still
+    separates two runs of the same name over an edited YAML, which is what
+    the directory in the old key was there to do.
+
+    ``state`` narrows the roster first, the same word :func:`h_mesh_get`
+    takes: a lane is drawn per member, and a member whose session has ended
+    has a run nobody is driving.
 
     Remote members carry no run: their state lives on their own daemon, and
     saying so is more use than an empty track that reads as "not started".
@@ -3471,13 +3486,21 @@ async def h_mesh_flows(request: web.Request) -> web.Response:
     """
     mm = _mesh_mgr(request)
     mesh = mm.get(request.match_info["mesh"])
+    state = str(request.query.get("state") or "all")
+    if state not in mesh_mod.MEMBER_STATES:
+        return json_error(400, f"invalid member state: {state!r}")
     manager: SessionManager = request.app["manager"]
     known = {s.sdef.name: s for s in manager.list()}
 
     flows: dict = {}
     workflows: dict = {}
+    #: workflow@cwd -> digest, so one tree's snapshot is read once per poll
+    #: even though several members may stand in it.
+    digests: dict = {}
     for handle in sorted(mesh.members):
         member = mesh.members[handle]
+        if not mesh_mod.member_in_state(mm.member_category(mesh, member), state):
+            continue
         if not mm.is_local_member(mesh, member):
             flows[handle] = {
                 "session": member.session,
@@ -3509,18 +3532,27 @@ async def h_mesh_flows(request: web.Request) -> web.Response:
         name = entry.get("workflow")
         if entry.get("status") in (None, "idle", "error") or not name:
             continue
-        key = f"{name}@{cwd}"
-        flows[handle]["key"] = key
-        if key not in workflows:
+        where = f"{name}@{cwd}"
+        if where not in digests:
             try:
-                workflows[key] = _serialize_workflow(
+                graph = _serialize_workflow(
                     cflow_state.load_snapshot(cwd, member.session)
                 )
             except (WorkflowError, StateError, OSError) as exc:
                 # A missing or unreadable snapshot costs the track, not the
                 # card: status, step and blockage all still read.
+                digests[where] = None
                 flows[handle]["graph_error"] = str(exc)
-                flows[handle].pop("key", None)
+                continue
+            digest = hashlib.sha256(
+                json.dumps(graph, sort_keys=True, default=str).encode("utf-8")
+            ).hexdigest()[:16]
+            digests[where] = digest
+            workflows.setdefault(digest, graph)
+        if digests[where] is None:
+            flows[handle]["graph_error"] = "workflow snapshot unreadable"
+            continue
+        flows[handle]["key"] = digests[where]
     return json_response(
         {"mesh": mesh.name, "flows": flows, "workflows": workflows}
     )
