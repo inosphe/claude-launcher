@@ -1748,3 +1748,57 @@ def test_a_terminal_that_keeps_moving_earns_every_repeat(proj):
     service = _service(sess, proj)
     _run(service, sess, 4, per_poll=_both)
     assert len(sess.delivered) == 4
+
+
+def test_a_gap_in_the_scan_loop_does_not_count_as_movement(proj):
+    """A look credits one scan, not the whole interval since the last look.
+
+    The daemon log has a gap between 2026-09-19 17:36 and 2026-09-20 01:01.
+    Whatever produced it -- a suspended machine, a stalled tick loop -- both
+    readings differ on the far side of it, and crediting the elapsed time
+    would clear REMINDER_MIN_MOVEMENT from a single observation.
+    """
+    sess = _ScriptedSession("w1", str(proj))
+    entry = {
+        "moved_for": 0.0, "seen_at": 1000.0,
+        "seen_activity": "paint-0", "seen_output_at": "out-0",
+    }
+    sess.paints, sess.bytes_out = 1, 1
+    cflow_clock.observe_movement(sess, entry, 1000.0 + 7 * 3600)
+    assert entry["moved_for"] == cflow_clock.REMINDER_POLL
+    assert not cflow_clock.moved_enough(sess, entry)
+
+    # An ordinary scan is unaffected: it credits the real interval.
+    sess.paints, sess.bytes_out = 2, 2
+    cflow_clock.observe_movement(sess, entry, 1000.0 + 7 * 3600 + 15.0)
+    assert entry["moved_for"] == 2 * cflow_clock.REMINDER_POLL
+
+
+def test_a_stance_change_reaches_a_session_that_never_moved(proj):
+    """What the movement rule paces is the repeat, not a state update.
+
+    A changed role or stance is current state the session has not received,
+    and scan_roles makes it due at once for that reason.  Whether the
+    terminal earned a repeat is a question about the same reminder being
+    sent again, so it must not hold back a different one.
+    """
+    sess = _ScriptedSession("w1", str(proj))
+    mesh_mgr = _FakeMeshMgr(_FakeMesh("m", 0), role="worker")
+    service = session_reminder.SessionReminderService(
+        _KinManager({"w1": sess}), mesh_mgr
+    )
+    cfg = {"role_reminder": True, "role_reminder_interval": 600.0}
+    service.scan_roles(1000.0, cfg)
+    due = service.scan_roles(1601.0, cfg)
+    assert due
+    asyncio.run(
+        service._deliver_session("w1", roles=due[0][1], role_due=True, now=1601.0)
+    )
+    # The session answers nothing and paints nothing from here on.
+    for at in (1640.0, 1700.0, 2300.0, 2900.0):
+        assert service.scan_roles(at, cfg) == []
+    assert len(sess.delivered) == 1
+
+    mesh_mgr._role = "reviewer"
+    due = service.scan_roles(2901.0, cfg)
+    assert [e["name"] for _name, entries in due for e in entries] == ["reviewer"]

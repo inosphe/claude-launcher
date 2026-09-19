@@ -216,7 +216,13 @@ def observe_movement(session, entry: dict, now: float) -> None:
     if output is not None:
         changed.append(output != entry.get("seen_output_at"))
     if changed and all(changed) and seen_at is not None:
-        entry["moved_for"] += max(0.0, now - seen_at)
+        # One look credits at most one scan's worth, however long ago the
+        # previous look was. A gap larger than that is the scan loop having
+        # stalled or the machine having slept, and neither is evidence that
+        # the terminal was moving the whole time -- a suspended machine that
+        # came back to a changed screen would otherwise clear the threshold
+        # in a single step (the daemon log has such a gap on 2026-09-19).
+        entry["moved_for"] += min(max(0.0, now - seen_at), REMINDER_POLL)
     entry["seen_activity"] = marker
     entry["seen_output_at"] = output
     entry["seen_at"] = now

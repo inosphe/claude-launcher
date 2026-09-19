@@ -446,11 +446,17 @@ class SessionReminderService:
                     "moved_for": None,
                 }
                 continue
-            if entry["key"] != key:
-                # A role or stance update is current state the session has not
-                # received.  It is due now, while first sight merely arms: the
-                # initial opening already carried that first stance.
-                entry.update({"key": key, "at": now - interval, "held_at": None})
+            # A role or stance update is current state the session has not
+            # received.  It is due now, while first sight merely arms: the
+            # initial opening already carried that first stance.  The
+            # movement total goes with it for the same reason the rules
+            # below are skipped: this delivery carries something new.
+            changed = entry["key"] != key
+            if changed:
+                entry.update(
+                    {"key": key, "at": now - interval, "held_at": None,
+                     "moved_for": None}
+                )
             # The last reminder's own repaint and the turn it provoked land
             # after ``deliver`` returned, so the baseline recorded then is one
             # repaint stale.  Move it onto the screen that delivery actually
@@ -458,11 +464,15 @@ class SessionReminderService:
             due_now = now - entry["at"] >= interval
             cflow_clock.settle_activity(session, entry, now, due=due_now)
             cflow_clock.observe_movement(session, entry, now)
-            if due_now and not cflow_clock.moved_enough(session, entry):
-                # Due, but this terminal has not been working. Left due
-                # rather than re-armed, so it speaks as soon as it is.
-                continue
-            if due_now:
+            # Both rules below ask whether this terminal has earned the same
+            # reminder a second time.  A changed key makes it a different
+            # reminder, so neither applies: a session holding a stance that
+            # has since been rewritten is not corrected by having worked.
+            if due_now and not changed:
+                if not cflow_clock.moved_enough(session, entry):
+                    # Due, but this terminal has not been working. Left due
+                    # rather than re-armed, so it speaks as soon as it is.
+                    continue
                 # A role reminder is useful after the session has made
                 # progress, but repeating it while the terminal has stayed
                 # at the same meaningful screen only grows the pending
@@ -492,6 +502,7 @@ class SessionReminderService:
                     entry["at"] = now
                     entry["held_at"] = None
                     continue
+            if due_now:
                 due.append((name, entries))
         for name in list(self._roles):
             if name not in live:
