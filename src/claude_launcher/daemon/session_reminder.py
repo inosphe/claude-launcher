@@ -594,13 +594,25 @@ class SessionReminderService:
             name = session.sdef.name
             live.add(name)
             entry = self._goals.setdefault(
-                name, {"at": now, "held_at": None, "fired_at": None}
+                name,
+                {
+                    "at": now,
+                    "held_at": None,
+                    "fired_at": None,
+                    "activity": None,
+                    "output_at": None,
+                    "settled": True,
+                },
             )
-            if now - entry["at"] >= interval:
-                # The same no-progress rule the other two sources apply: a
-                # goal restated into a terminal that has done nothing since
-                # the last one only grows the pending queue.
-                if cflow_clock.answered_only_the_reminder(
+            # The same no-progress rule the other two sources carry, on the
+            # same two readings: a goal restated into a terminal that has
+            # done nothing since the last one only grows the pending queue.
+            due_now = now - entry["at"] >= interval
+            cflow_clock.settle_activity(session, entry, now, due=due_now)
+            if due_now:
+                if cflow_clock.nothing_moved_since_settle(
+                    session, entry
+                ) or cflow_clock.answered_only_the_reminder(
                     session, now, entry.get("fired_at")
                 ):
                     entry["at"] = now
@@ -787,7 +799,12 @@ class SessionReminderService:
         if not delivered:
             return
         if goal_entry is not None:
-            goal_entry.update(at=at, fired_at=at, held_at=None)
+            goal_entry.update(
+                at=at, fired_at=at, held_at=None,
+                # Provisional, for the same reason the other two sources
+                # mark theirs so: the delivery's own effects land later.
+                activity=self._session_activity(session), settled=False,
+            )
         if cflow_block:
             self._mark_cflow(cwd, name, "reminder", now=at)
         if current_roles:
