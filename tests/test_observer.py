@@ -409,3 +409,27 @@ def test_an_exit_is_reported_once(setup, monkeypatch):
     asyncio.run(service.observe(session, CFG))
     assert len(sent) == 1
     assert sent[0][0]["content"]["status"] == "exited"
+
+
+def test_tool_only_records_stay_in_the_evidence(setup, monkeypatch):
+    """Filtering tool traffic out of the evidence was measured and rejected.
+
+    Tool records are 63% of what the builder serializes, which makes them look
+    like an obvious saving. They are the evidence: of the 4071 events the
+    observer actually reported (replayed 2026-09-20 over 58 session rows), 68%
+    cite a tool-only record as their source — the file paths, test names and
+    counts a report is made of arrive as tool results rather than as prose.
+    Dropping them costs about six of every ten reports; dropping only the calls
+    still costs one in nine. This test fails if someone adds that filter, so the
+    measurement has to be answered rather than rediscovered.
+    """
+    service, session = setup
+    records = [
+        {"seq": 1, "role": "assistant",
+         "blocks": [{"type": "tool_use", "name": "Read", "input": {"path": "a.py"}}]},
+        {"seq": 2, "role": "user",
+         "blocks": [{"type": "tool_result", "content": "tests/test_a.py:12 3 passed"}]},
+    ]
+    sent = watching(service, session, monkeypatch, ["busy"], records=records)
+    asyncio.run(service.observe(session, CFG))
+    assert [row["id"] for row in sent[0]] == ["transcript:1", "transcript:2"]
