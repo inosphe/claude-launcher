@@ -145,6 +145,94 @@ def test_every_member_carries_its_run_and_the_graph_is_shared(home, tmp_path):
     asyncio.run(run())
 
 
+def test_one_workflow_in_many_worktrees_is_one_graph(home, tmp_path):
+    """The dedup key is what a graph contains, not where it was read from.
+
+    A mesh of agents is a mesh of worktrees: each member stands in its own
+    checkout of the same repository, running the same workflow file. Keyed by
+    ``workflow@cwd`` that is a separate graph per member -- mesh-0826 shipped
+    73 copies of one 247KB graph, 11.9MB on a poll every 5 seconds, which the
+    browser parses on the thread that also handles keystrokes (2026-09-20).
+
+    Two runs of the same *name* over different YAML still get a graph each,
+    which is what the directory in the old key was for; the digest keeps that
+    apart without keeping identical copies apart.
+    """
+    _register_py_harness()
+    trees = []
+    for i in range(2):
+        tree = tmp_path / f"tree{i}"
+        tree.mkdir()
+        _declare(tree)          # the same workflow file, copied
+        trees.append(tree)
+
+    async def run():
+        mgr = SessionManager(idle_threshold=0.5, scrollback=200, restore_default=True)
+        mm = MeshManager(mgr, root=tmp_path / "mesh")
+        client = await _serve(mgr, mm)
+        try:
+            mm.create("team")
+            for i, name in enumerate(("w1", "w2")):
+                mgr.create(SessionDef(name=name, harness="py", cwd=str(trees[i])))
+                await mm.join("team", name, handle=name)
+                cflow_engine.start("review", cwd=str(trees[i].resolve()), scope=name)
+
+            body = await (await client.get(
+                "/api/mesh/team/flows", headers=BEARER)).json()
+            assert set(body["flows"]) == {"w1", "w2"}
+            assert body["flows"]["w1"]["key"] == body["flows"]["w2"]["key"]
+            assert len(body["workflows"]) == 1, "one file, two trees, one graph"
+
+            await mgr.shutdown_all()
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_the_flow_roster_is_filtered_before_the_graphs_are_read(home, tmp_path):
+    """``state`` drops the lanes the view will not draw, and with them the
+    snapshot each one would have cost."""
+    _register_py_harness()
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    _declare(proj)
+
+    async def run():
+        mgr = SessionManager(idle_threshold=0.5, scrollback=200, restore_default=True)
+        mm = MeshManager(mgr, root=tmp_path / "mesh")
+        client = await _serve(mgr, mm)
+        try:
+            mm.create("team")
+            cwd = str(proj.resolve())
+            for name in ("live", "gone"):
+                mgr.create(SessionDef(name=name, harness="py", cwd=str(proj)))
+                await mm.join("team", name, handle=name)
+                cflow_engine.start("review", cwd=cwd, scope=name)
+            mgr.kill("gone")
+            for _ in range(200):
+                if mgr.get("gone").exited:
+                    break
+                await asyncio.sleep(0.05)
+
+            everyone = await (await client.get(
+                "/api/mesh/team/flows", headers=BEARER)).json()
+            assert set(everyone["flows"]) == {"live", "gone"}
+
+            current = await (await client.get(
+                "/api/mesh/team/flows?state=current", headers=BEARER)).json()
+            assert set(current["flows"]) == {"live"}
+
+            bad = await client.get("/api/mesh/team/flows?state=nope", headers=BEARER)
+            assert bad.status == 400
+
+            await mgr.shutdown_all()
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
 def test_a_member_with_no_run_says_so_rather_than_looking_unstarted(home, tmp_path):
     """Absence has to be legible: an empty track and a missing run would draw
     the same, and only one of them means 'has not got going yet'."""

@@ -1980,6 +1980,43 @@ def test_the_roster_is_filtered_before_it_is_built(home, tmp_path):
     asyncio.run(run())
 
 
+def test_the_owed_ledger_takes_the_same_roster_filter(home, tmp_path):
+    """The ledger is the larger of the two walks, and the least worth paying
+    for a member that has ended: there is nothing left to nudge.
+
+    mesh-0826 answered this route in 4.2s over 251 members and 27708
+    messages (2026-09-20), polled every 5 seconds by a view that draws the
+    live ones. The totals follow the rows the answer contains, so a narrowed
+    report reads as narrowed; ``member_counts`` still counts everybody.
+    """
+    _register_py_harness()
+    mgr = _manager()
+    mm = MeshManager(mgr)
+    mm.create("m")
+
+    async def run():
+        for name in ("live", "gone"):
+            mgr.create(SessionDef(name=name, harness="py", cwd=str(tmp_path)))
+        await mm.join("m", "live", handle="alice")
+        await mm.join("m", "gone", handle="bob")
+        mgr.kill("gone")
+        await _wait_exited(mgr.get("gone"))
+        mesh = mm.get("m")
+
+        everyone = mm.owed_report(mesh)
+        assert [r["handle"] for r in everyone["members"]] == ["alice", "bob"]
+        assert everyone["member_state"] == "all"
+
+        current = mm.owed_report(mesh, state="current")
+        assert [r["handle"] for r in current["members"]] == ["alice"]
+        assert current["member_counts"]["all"] == 2
+        assert current["member_counts"]["killed"] == 1
+
+        await mgr.shutdown_all()
+
+    asyncio.run(run())
+
+
 def test_members_tool_response_is_linear_without_the_pair_table(monkeypatch):
     """The MCP ``members`` tool must not ship the daemon's O(n²) pair table.
 

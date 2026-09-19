@@ -21878,6 +21878,11 @@ async function openMesh(name) {
    would otherwise hold back the very list the pick just asked for. */
 async function refreshMeshView(force = false) {
   if (!meshName) return;
+  // A poll for a tab nobody is looking at (the dashboard tick's own rule).
+  // An explicit refresh -- a save, a filter press -- still goes through.
+  if (!force && typeof document !== "undefined" && document.hidden === true) {
+    return;
+  }
   // An open role-set editor holds unsaved YAML in a textarea the rebuild
   // below would discard. A poll-driven refresh stands down until it closes;
   // an explicit one (a save, a cancel) still goes through.
@@ -21898,7 +21903,8 @@ async function refreshMeshView(force = false) {
       api(`/api/mesh/${encodeURIComponent(meshName)}`
           + `?state=${encodeURIComponent(meshMemberFilter)}`),
       api(`/api/mesh/${encodeURIComponent(meshName)}/messages?${historyQuery}`),
-      api(`/api/mesh/${encodeURIComponent(meshName)}/owed`),
+      api(`/api/mesh/${encodeURIComponent(meshName)}/owed`
+          + `?state=${encodeURIComponent(meshMemberFilter)}`),
     ]);
     info = await r1.json();
     if (!r1.ok) {
@@ -24774,6 +24780,7 @@ async function openFlowTopology(name) {
 }
 
 async function refreshFlowView() {
+  if (typeof document !== "undefined" && document.hidden === true) return;
   if (!flowMesh) return;
   let info, data;
   try {
@@ -24781,7 +24788,11 @@ async function refreshFlowView() {
       // `state=current`: the ended members this view never draws cost a
       // walk of the message log each to build (see refreshMeshView).
       api(`/api/mesh/${encodeURIComponent(flowMesh)}?state=current`),
-      api(`/api/mesh/${encodeURIComponent(flowMesh)}/flows`),
+      // A lane per member, so the same narrowing — and this is the payload
+      // that grew worst: one workflow graph per member's worktree made
+      // mesh-0826's answer 11.9MB on a 5s poll, which the browser parses on
+      // the thread that also handles keystrokes (2026-09-20).
+      api(`/api/mesh/${encodeURIComponent(flowMesh)}/flows?state=current`),
     ]);
     info = await r1.json();
     if (!r1.ok) {
@@ -24839,6 +24850,14 @@ const TRACE_POLL_MS = 5000;
    quiet" is visible as itself rather than as a scrollbar. */
 const TRACE_GAP_MS = 5 * 60 * 1000;
 
+/* How much history this view asks for, and how much more each press adds.
+   It used to ask for 200 every tick whatever was on screen -- 126KB a poll
+   on mesh-0826 (2026-09-20), parsed on the thread that also handles this
+   page's keystrokes. What a reader arrives wanting is the recent end; the
+   rest is loaded when they say so. */
+const TRACE_WINDOW_STEP = 60;
+let traceWindow = TRACE_WINDOW_STEP;
+
 function stopMsgPoll() {
   if (tracePollTimer) { clearInterval(tracePollTimer); tracePollTimer = null; }
   traceSession = null;
@@ -24849,7 +24868,10 @@ function openTrace(name, mesh) {
   if (tracePollTimer) clearInterval(tracePollTimer);
   // Re-entering the same session keeps what is expanded; arriving at another
   // one starts clean, because those ids belong to a different conversation.
-  if (traceSession !== name) traceOpen = new Set();
+  if (traceSession !== name) {
+    traceOpen = new Set();
+    traceWindow = TRACE_WINDOW_STEP;   // a different conversation, from its end
+  }
   traceSession = name;
   traceMesh = mesh || "";
   traceLast = null;
@@ -24881,6 +24903,7 @@ function traceFail(msg) {
 }
 
 async function refreshTrace() {
+  if (typeof document !== "undefined" && document.hidden === true) return;
   if (!traceSession) return;
   const want = traceSession;
   let meta;
@@ -24907,14 +24930,18 @@ async function refreshTrace() {
   const seat = meshes.find((m) => m.mesh === traceMesh) || meshes[0];
 
   const cwd = (meta.session || {}).cwd || "";
-  let info, history, owed, flow;
+  let info, history, historyPage, owed, flow;
   try {
     const calls = [
       // `state=current`: the ended members this view never draws cost a
       // walk of the message log each to build (see refreshMeshView).
       api(`/api/mesh/${encodeURIComponent(seat.mesh)}?state=current`),
-      api(`/api/mesh/${encodeURIComponent(seat.mesh)}/messages?limit=200`),
-      api(`/api/mesh/${encodeURIComponent(seat.mesh)}/owed`),
+      api(`/api/mesh/${encodeURIComponent(seat.mesh)}/messages`
+          + `?limit=${traceWindow}`),
+      // Same narrowing, and the larger of the two: the ledger walks the log
+      // twice per member, and a debt owed by an ended session is the one
+      // nobody can act on. 4.2s over 251 members, 2026-09-20.
+      api(`/api/mesh/${encodeURIComponent(seat.mesh)}/owed?state=current`),
     ];
     // The focus lane's workflow, and only its: a run is keyed by (directory,
     // scope) and the scope IS the session name, so this is one call. Every
@@ -24933,14 +24960,18 @@ async function refreshTrace() {
       return;
     }
     info = await r1.json();
-    history = r2.ok ? (await r2.json()).messages || [] : [];
+    const historyDoc = r2.ok ? await r2.json() : {};
+    history = historyDoc.messages || [];
+    historyPage = historyDoc.page || null;
     owed = r3.ok ? await r3.json() : null;
     flow = r4 && r4.ok ? await r4.json() : null;
   } catch {
     return;
   }
   if (traceSession !== want) return;
-  traceLast = { meta, meshes, mesh: seat, info, history, owed, flow };
+  traceLast = {
+    meta, meshes, mesh: seat, info, history, historyPage, owed, flow,
+  };
   renderTrace(traceLast);
 }
 
@@ -25576,6 +25607,37 @@ function traceDesc(shown, total, focus) {
     `rest passed between other members and is hidden. ${tail}`;
 }
 
+/* "There is older traffic, and here is how to ask for it." The window grows
+   in place -- what is on screen stays, and the older end is added above it --
+   because this view is read as one story and a pager would cut it. Absent
+   when the daemon says there is nothing older, so a mesh whose whole history
+   fits shows no control at all. */
+function traceMoreBar(page) {
+  const bar = el("div", "mesh-message-pager");
+  if (!page || !page.has_older) {
+    bar.appendChild(el(
+      "span", "mesh-message-range",
+      page && page.total
+        ? `all ${page.total} message(s) loaded`
+        : "nothing older to load"
+    ));
+    return bar;
+  }
+  const more = el("button", "wf-btn option", `Load ${TRACE_WINDOW_STEP} older`);
+  more.type = "button";
+  more.addEventListener("click", () => {
+    more.disabled = true;
+    traceWindow += TRACE_WINDOW_STEP;
+    refreshTrace();
+  });
+  bar.appendChild(more);
+  bar.appendChild(el(
+    "span", "mesh-message-range",
+    `showing the newest ${(page.limit || traceWindow)} of ${page.total}`
+  ));
+  return bar;
+}
+
 function renderTrace(data) {
   const view = $("msg-view");
   const old = view.querySelector(".seq-scroll");
@@ -25622,6 +25684,7 @@ function renderTrace(data) {
     (data.history || []).length,
     focus
   )));
+  view.appendChild(traceMoreBar(data.historyPage));
 
   // Above the scroller, not inside it: the diagram scrolls sideways, and a
   // block of prose and buttons dragged along by that is unreadable on a

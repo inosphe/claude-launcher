@@ -6043,7 +6043,7 @@ class MeshManager:
     #: triage list, and the full text is one click away in the message log.
     OWED_PREVIEW = 240
 
-    def owed_report(self, mesh: Mesh) -> dict:
+    def owed_report(self, mesh: Mesh, *, state: str = "all") -> dict:
         """Per-member ledger of unanswered mail: who owes what, since when.
 
         Backs ``claunch mesh owed`` and the web dashboard. Local members are
@@ -6053,11 +6053,36 @@ class MeshManager:
         ``reported`` and the per-message detail lives on that daemon. This is
         the same split ``pending`` has always made, for the same reason: a
         guest owns its members' cursors.
+
+        ``state`` narrows it to one lifecycle partition, the same words
+        :func:`mesh_info` takes, and for the same reason: a local row costs a
+        walk of the message log twice, so this is members times messages.
+        mesh-0826 answered in 4.2s over 251 members and 27708 messages
+        (2026-09-20), for a view that polls every 5 seconds and draws the
+        live ones. A debt owed by a session that has ended is also the one
+        nobody can act on -- there is nothing left to nudge.
+
+        The totals are over the rows this answer contains, so a narrowed
+        report reads as the narrowing says; ``member_counts`` is over every
+        member, so what was left out is still countable. ``state="all"`` is
+        the default, which is what the CLI asks for.
         """
         now = datetime.now(timezone.utc)
         rows = []
+        counts = {
+            "all": 0, "current": 0, "running": 0, "remote": 0,
+            "killed": 0, "paused": 0, "archived": 0, "missing": 0,
+        }
         for handle in sorted(mesh.members):
             member = mesh.members[handle]
+            category = self._member_category(mesh, member)
+            counts["all"] += 1
+            if category in counts:
+                counts[category] += 1
+            if category in ("running", "remote"):
+                counts["current"] += 1
+            if not member_in_state(category, state):
+                continue
             local = self._is_local(mesh, member)
             row: dict = {
                 "handle": handle,
@@ -6127,6 +6152,8 @@ class MeshManager:
             "mesh": mesh.name,
             "at": utcnow(),
             "members": rows,
+            "member_counts": counts,
+            "member_state": state,
             "owed": sum(r["owed"] or 0 for r in rows),
             "pending": sum(r["pending"] or 0 for r in rows),
             "owing": sum(1 for r in rows if (r["owed"] or 0) > 0),
@@ -6557,6 +6584,15 @@ class MeshManager:
         except ManagerError:
             return "missing"
         return "exited" if session.exited else session.status()
+
+    def member_category(self, mesh: Mesh, member: Member) -> str:
+        """Which lifecycle partition a member is in — the public name.
+
+        The routes that narrow a roster by ``state`` ask this; the word and
+        the rule are :meth:`_member_category`'s, so there is one definition
+        of what "killed" means whoever is asking.
+        """
+        return self._member_category(mesh, member)
 
     def _member_category(self, mesh: Mesh, member: Member) -> str:
         """Which lifecycle partition a member is in, for the roster's filter.
