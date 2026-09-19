@@ -16,7 +16,10 @@ Runtime state is per daemon, never part of the repository or browser storage.
 Configure ``observer: {profile: ds4-official, model: deepseek-flash}`` in the
 launcher config (these are the defaults), then enable from Observer in the UI.
 First observation reads the latest 40 records; subsequent passes consume every
-new record in batches of 40. Each session retains 200 important events. Context
+new record in batches of 40. A pass calls the model only for new records, for a
+cflow position that moved, or for a session that stopped running: a busy/idle
+flip on its own spends no call and rides along on the next one that is
+justified. Each session retains 200 important events. Context
 rotates after 100,000 serialized characters, retaining the previous summary.
 The UI's acknowledgement records that the human read a request, not that the
 underlying task was resolved. Escape is a separate explicit keyboard action.
@@ -301,7 +304,25 @@ class Observer:
         cflow = briefing.gather_cflow(sdef.cwd or "", sdef.name)
         live = session.info()
         state = {"cflow": cflow, "status": live.get("status")}
-        if reset or state != previous.get("state_source"):
+        previous_state = previous.get("state_source")
+        if not isinstance(previous_state, dict):
+            # Rows are read back from disk: an absent or older shape must read
+            # as "nothing was told yet", not raise on the comparison below.
+            previous_state = {}
+        # A call is justified by new records, by a cflow position that moved, or
+        # by a session that stopped running. The busy/idle pair is none of them:
+        # the model is told to report results, not liveness, and a pass carrying
+        # only ``status`` buys the same answer as the previous one for the whole
+        # conversation again. Replayed over this daemon's own rows, 659 of 1116
+        # evidence-bearing calls across 58 sessions carried nothing else — one
+        # row spent 210 of its 212 calls that way.
+        # The flip is deferred, not dropped: whenever a justified call happens
+        # the state row rides along, so the model is never shown a stale status,
+        # and the pass that only saw the flip leaves ``state_source`` alone to
+        # keep it pending.
+        justified = bool(reset or rows or getattr(session, "exited", False)
+                         or state.get("cflow") != previous_state.get("cflow"))
+        if justified and state != previous_state:
             rows.append({"id": "daemon:state", "content": state})
         return identity, end, state, rows, reset
 
@@ -310,6 +331,11 @@ class Observer:
         old = self.load_session(name)
         identity, cursor, state, rows, reset = await asyncio.to_thread(self.evidence, session, old)
         if not rows:
+            # ``state_source`` is deliberately left as it was. A pass that only
+            # saw a status change writes no state row, so the stored state must
+            # stay the one the model was last told: that way the change is still
+            # pending at the next call that new records justify, and the model
+            # is never shown a status older than the evidence beside it.
             if cursor != old.get("cursor"):
                 self.data["sessions"].setdefault(name, {}).update(cursor=cursor, identity=identity)
                 self.save(name)

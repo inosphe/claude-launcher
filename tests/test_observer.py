@@ -339,3 +339,73 @@ def test_direct_reports_survive_inflight_observation(setup, monkeypatch):
         restored=observer.Observer(service.manager,service.mesh)
         assert any(e['id']==direct['id'] for e in restored.snapshot()['sessions'][0]['events'])
     asyncio.run(check())
+
+
+# What a pass may spend a call on. The model is told to report results, not
+# liveness, so a busy/idle flip with nothing new to read must not buy the whole
+# conversation again. Measured on this daemon's own rows, 668 of 1116
+# evidence-bearing calls across 58 sessions carried only that flip.
+def watching(service, session, monkeypatch, statuses, records=None):
+    """Drive ``evidence`` off a scripted status and a transcript of nothing."""
+    queue = iter(statuses)
+    monkeypatch.setattr(session, "info", lambda: {"status": next(queue)})
+    monkeypatch.setattr(observer.transcript_view, "page",
+                        lambda *a, **kw: {"source": "path", "total": 1 + len(records or []),
+                                          "records": list(records or [])})
+    monkeypatch.setattr(observer.briefing, "gather_cflow", lambda *a: None)
+    service.data["sessions"]["s1"] = {"identity": ["path", "c1"], "cursor": 1,
+                                      "state_source": {"cflow": None, "status": "busy"}}
+    sent = []
+    async def fake(cfg, messages):
+        sent.append(json.loads(messages[-1]["content"]))
+        return answer(), {}
+    monkeypatch.setattr(observer, "complete", fake)
+    return sent
+
+
+def test_a_status_flip_alone_spends_no_call(setup, monkeypatch):
+    service, session = setup
+    sent = watching(service, session, monkeypatch, ["busy", "idle", "busy", "idle"])
+    for _ in range(3):
+        asyncio.run(service.observe(session, CFG))
+    assert sent == []
+    # The flip is deferred rather than written away, so the call that new
+    # records later justify still carries it.
+    assert service.data["sessions"]["s1"]["state_source"] == {"cflow": None, "status": "busy"}
+
+
+def test_a_status_flip_rides_on_the_next_record_call(setup, monkeypatch):
+    service, session = setup
+    records = []
+    sent = watching(service, session, monkeypatch, ["idle", "idle"], records=records)
+    asyncio.run(service.observe(session, CFG))
+    assert sent == []
+    records.append({"seq": 1, "role": "assistant", "blocks": [{"type": "text", "text": "테스트 12개 통과"}]})
+    asyncio.run(service.observe(session, CFG))
+    assert len(sent) == 1
+    state_row = [row for row in sent[0] if row["id"] == "daemon:state"]
+    assert state_row and state_row[0]["content"]["status"] == "idle"
+
+
+def test_cflow_movement_alone_calls_the_model(setup, monkeypatch):
+    service, session = setup
+    sent = watching(service, session, monkeypatch, ["busy"])
+    monkeypatch.setattr(observer.briefing, "gather_cflow",
+                        lambda *a: {"workflow": "improv-worker", "status": "step",
+                                    "step": "work", "title": "작업 실행"})
+    asyncio.run(service.observe(session, CFG))
+    assert len(sent) == 1
+    state_row = [row for row in sent[0] if row["id"] == "daemon:state"]
+    assert state_row and state_row[0]["content"]["cflow"]["step"] == "work"
+    assert state_row[0]["content"]["status"] == "busy"
+
+
+def test_an_exit_is_reported_once(setup, monkeypatch):
+    """An exit is terminal, not a flip: it spends one call, and only one."""
+    service, session = setup
+    sent = watching(service, session, monkeypatch, ["exited", "exited"])
+    session.exited = True
+    asyncio.run(service.observe(session, CFG))
+    asyncio.run(service.observe(session, CFG))
+    assert len(sent) == 1
+    assert sent[0][0]["content"]["status"] == "exited"
