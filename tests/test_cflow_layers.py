@@ -167,7 +167,11 @@ def test_the_worker_workflow_keeps_its_branch_setup_isolation_rules():
     assert options["no-issue-auto"].next == "issue-auto"
     assert worker.steps["issue-auto"].next == "branch-setup"
     assert worker.steps["issue-decision"].select.options["none"].next == "branch-setup"
-    assert worker.steps["issue-claim"].next == "branch-setup"
+    # Getting an issue reaches branch-setup by two distinct edges now, each
+    # through the step that does its own half of the work -- adopt takes or
+    # joins an existing record, create mints one.
+    assert worker.steps["issue-adopt"].next == "branch-setup"
+    assert worker.steps["issue-create"].next == "branch-setup"
 
 
 def test_the_improv_workflows_carry_no_repo_specific_verify():
@@ -452,13 +456,24 @@ def test_the_worker_end_is_gated_by_a_user_without_a_timeout():
         assert settle.options["unsettled"].next == "settle-wait", (
             f"{label}: an unsettled filing must wait on the leader, not skip to the gate"
         )
-        wait = wf.steps["settle-wait"].select
-        assert wait.options["acted"].next == "settle-check", (
-            f"{label}: settle-wait must loop back to the mechanical check, not trust the leader's word"
+        wait = wf.steps["settle-wait"]
+        assert wait.timer is not None and wait.select is None, (
+            f"{label}: settle-wait must be the clock's wait, not a responder's "
+            "question -- the `acted` answer it used to carry could not move "
+            "the run, because the next settle-check re-reads the same board "
+            "whatever that answer says (2026-09-21, user)"
         )
-        assert wait.delegate.otherwise == model.OTHERWISE_HUMAN, (
-            f"{label}: settle-wait must fall through to a person when the leader times out"
+        assert wait.timer.then == "settle-check", (
+            f"{label}: the wait must loop back to the mechanical check"
         )
+        stall = wf.steps[wait.timer.after].select
+        assert stall is not None and stall.chooser == "user", (
+            f"{label}: once the clock's budget is spent a person decides -- an "
+            "agent chooser here would let the run release its own ending"
+        )
+        assert {k: o.next for k, o in stall.options.items()} == {
+            "proceed": "end-gate", "keep-waiting": "settle-check",
+        }, f"{label}: the stall's two answers must route to different steps"
         # No step other than the gate and its hold reaches END: every ending
         # passes the user's approval.
         enders = sorted(

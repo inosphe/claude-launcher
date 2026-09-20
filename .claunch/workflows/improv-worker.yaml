@@ -39,7 +39,7 @@ description: >
   (공통 규칙의 다섯 조건, 회차당 2건)뿐이다. 세션이 회차 중 만든 이슈는
   세 갈래로 간다 — 발견 즉시 자식에게 위임(work), 다음 회차에 직접(self),
   풀(pool) — 그리고 그 전부가 누군가의 손에 있어야 세션이 끝난다
-  (settle-check → settle-wait → end-gate).
+  (settle-check → settle-wait → settle-stall → end-gate).
 start: intake
 
 # 이 런의 드라이버는 worker 역할 세션이다 — 리더가 실수로 워커 런을 몰지
@@ -263,8 +263,11 @@ steps:
       --assignee ""` + `UNQUEUED by leader: <이유>`). 세션이 만든 활성
       이슈가 전부 누군가의 손(살아 있는 세션의 assignee, 또는 리더의
       `HOLD:` 코멘트)에 있어야 세션이 끝난다 — 워커의 settle-check가
-      그것을 확인하고, 미충족이면 settle-wait가 상위의 보드 쓰기를
-      기다린다.
+      그것을 확인하고, 미충족이면 settle-wait가 시계로 기다린다(사람이나
+      상위에게 묻지 않는다). 타이머가 여섯 번 깨우는 동안에도 안 서면
+      settle-stall로 사람이 처분한다. 그러므로 이 리더가 그 보드 쓰기를
+      하는 자리는 wrapup의 정산 ask 하나다 — 거기서 답하지 않으면 워커는
+      기다리다 사람에게 넘어간다.
       br가 실패하면(잠금·바이너리 없음) --lock-timeout 5000으로 한 번 더,
       그래도 안 되면 mesh fyi 첫 줄에 `NO-BEAD:` + 위 규격 그대로 — 리더가
       다음 관제 대기에서 대신 만들고 id를 답한다. 이슈 없이 착수하는
@@ -402,42 +405,69 @@ steps:
         기록이 없는 쪽보다 싸다.
       options:
         adopt:
-          description: 보고의 후보 하나를 이 회차의 일감으로 잡는다(id는 reason에) — 잡기·전이는 다음 단계가 실행한다
-          next: issue-claim
+          description: 보고의 후보 하나를 이 회차의 일감으로 잡는다(id는 reason에) — 잡거나 참가하는 것은 다음 단계가 실행한다
+          next: issue-adopt
         create:
-          description: 오프닝 task 설명에서 새 이슈를 민팅한다 — 규격·전이는 다음 단계가 실행한다
-          next: issue-claim
+          description: 오프닝 task 설명에서 새 이슈를 민팅한다 — 규격과 민팅은 다음 단계가 실행한다
+          next: issue-create
         none:
           description: 이슈 없이 이 회차를 진행한다 — 이 확정이 명시적 동의로 저널에 남고, 회차 기록은 cflow 저널·커밋·회차 보고서에만 남는다
           next: branch-setup
 
-  issue-claim:
-    title: 일감 잡기·민팅
+  # adopt와 create가 서로 다른 스텝인 이유 (2026-09-21, 사용자 지시).
+  # 한동안 둘 다 `next: issue-claim`이었고, 그 한 스텝이 프롬프트 산문에서
+  # 「adopt였으면 … create였으면 …」으로 갈라졌다. 그래서 엔진이 보는 그래프
+  # 위에서는 두 선택이 같은 전이 하나였고 — 이 회차의 출발점이 그것이다 —
+  # 갈래는 사람이 reason에 적은 산문에만 남았다. 그 산문은 기계가 읽을 수
+  # 있는 입력이 아니다: require_reason은 reason이 비지 않았다는 것만 보장하고,
+  # adopt가 요구하는 id가 그 안에 어떤 형식으로 있는지는 보장하지 않는다.
+  # 실제로 그 산문을 다시 파싱해야 아는 것을 스텝이 지고 있었다.
+  # 스텝을 나눈 뒤에도 id는 여전히 reason에서 온다(select에는 응답자가 값을
+  # 실어 보내는 통로가 없다 — 옵션 이름 하나와 reason 하나가 전부다). 나뉘어
+  # 달라진 것은 그 id를 어느 절차에 넣을지가 산문 해석이 아니라 전이 자체가
+  # 정한다는 점이고, `claunch cflow status`와 대시보드가 둘 중 어느 쪽인지
+  # 말한다는 점이다.
+  issue-adopt:
+    title: 일감 잡기 (adopt)
     instructions: |
-      직전 결정대로 이슈를 세우고 회차를 시작 상태로 만든다.
-      · adopt였으면: 확정된 id를 `claunch beads show <id> --json`으로 다시
-        읽는다. assignee가 비었거나 그 세션이 종료됐으면 `claunch beads
-        update <id> --assignee $CLAUNCH_SESSION`으로 잡고, 살아 있는 세션이
-        붙잡고 있으면 assignee를 손대지 않고 참가만 한다: `claunch beads
-        comments add <id> "JOINED: $CLAUNCH_SESSION — <이번 목표 요지>"` —
-        데몬의 adoption 판정과 같은 규칙이다. 그 이슈의 본문과 이번 목표가
-        정확히 같지 않으면 본문을 덮지 말고 이 회차가 맡는 범위를 코멘트로
-        남긴다.
-      · create였으면: intake의 규격 그대로 만든다 — 제목 한 줄 「무엇을
-        어떻게」, --description은 `## 목표 / ## 범위(포함·제외) / ## 완료
-        증거 기준 / ## 출처(누가·언제·원문)`(원문은 오프닝 task 설명),
-        --labels에는 목표의 실제 출처 하나(터미널 직접 지시면 user-direct,
-        리더 브리핑이면 leader), staged 순서는 description이 먼저
-        --assignee $CLAUNCH_SESSION이 마지막.
-      어느 쪽이든 assignee가 자신이면 마지막에 `claunch beads update <id>
-      --status in_progress --external-ref <run id>` — intake가 말하는
-      회차 시작 전이가 이 자리로 미뤄진 것이다. join이면 상태 전이는 보유
+      확정된 id를 reason에서 읽는다. 읽어낼 수 없으면 지어내지 않는다 — 그
+      사실을 보고에 적고 상위에 한 줄로 묻는다(사람의 확정 reason이 유일한
+      전달 통로이고, 그 통로가 비면 이 스텝은 진행할 수 없다). id를 읽었으면
+      `claunch beads show <id> --json`으로 다시 읽고 다음을 판정한다.
+
+      assignee가 비었거나 그 세션이 종료됐으면 `claunch beads update <id>
+      --assignee $CLAUNCH_SESSION`으로 잡고, 이어서 `claunch beads update
+      <id> --status in_progress --external-ref <run id>` — intake가 말하는
+      회차 시작 전이가 이 자리로 미뤄진 것이다.
+      살아 있는 세션이 붙잡고 있으면 assignee를 손대지 않고 참가만 한다:
+      `claunch beads comments add <id> "JOINED: $CLAUNCH_SESSION — <이번 목표
+      요지>"` — 데몬의 adoption 판정과 같은 규칙이고, 이때 상태 전이는 보유
       세션의 것이므로 하지 않는다.
-      메시에 속해 있으면 목표 요지를 이슈 id와 함께 리더에게 fyi로
-      남긴다(intake에서 미뤄 둔 그 fyi다).
+      그 이슈의 본문과 이번 목표가 정확히 같지 않으면 본문을 덮지 말고 이
+      회차가 맡는 범위를 코멘트로 남긴다.
+      메시에 속해 있으면 목표 요지를 이슈 id와 함께 리더에게 fyi로 남긴다
+      (intake에서 미뤄 둔 그 fyi다).
     done_when: |
-      이슈 id가 확정되어 보고에 있고, assignee가 자신이면 in_progress
-      전이가 함께 기록되어 있다(join이면 JOINED 코멘트와 참가 사실).
+      확정된 이슈 id가 보고에 있고, assignee가 자신이면 in_progress 전이가
+      함께 기록되어 있다(join이면 JOINED 코멘트와 참가 사실).
+    next: branch-setup
+
+  issue-create:
+    title: 일감 민팅 (create)
+    instructions: |
+      intake의 규격 그대로 새 이슈를 만든다 — 제목 한 줄 「무엇을 어떻게」,
+      --description은 `## 목표 / ## 범위(포함·제외) / ## 완료 증거 기준 /
+      ## 출처(누가·언제·원문)`(원문은 오프닝 task 설명), --labels에는 목표의
+      실제 출처 하나(터미널 직접 지시면 user-direct, 리더 브리핑이면
+      leader). staged 순서는 description이 먼저, --assignee
+      $CLAUNCH_SESSION이 마지막.
+      만든 뒤 `claunch beads update <id> --status in_progress --external-ref
+      <run id>`로 회차를 시작 상태로 만든다.
+      메시에 속해 있으면 목표 요지를 이슈 id와 함께 리더에게 fyi로 남긴다
+      (intake에서 미뤄 둔 그 fyi다).
+    done_when: |
+      새 이슈 id가 보고에 있고, in_progress 전이와 external-ref가 함께
+      기록되어 있다.
     next: branch-setup
 
   branch-setup:
@@ -2542,32 +2572,86 @@ steps:
           next: settle-wait
 
   settle-wait:
-    title: 생성 이슈 정산 대기 (리더 응답)
-    # 리더가 답할 때까지 여기서 기다린다(D3, 사용자 지시 2026-09-04).
-    # end-hold는 못 쓴다 — end-hold는 사람이 `goto`로 보내는 keep-alive
-    # 경로이고 런을 done으로 마감한다(:2047대), 여기서 다시 확인으로
-    # 돌아올 수 없다. 그래서 peer-review와 같은 위임 select 구조를 쓴다:
-    # 리더가 답하면(보드에 배정·spawn·HOLD·adopt를 먼저 쓴 뒤) 기계
-    # 재확인으로 돌아가고, 리더가 타임아웃 안에 답하지 않으면 사람에게
-    # 넘어간다(otherwise: human) — 무한 대기가 아니다.
+    title: 생성 이슈 정산 대기 (시계가 깨운다)
+    # 여기 있던 것은 위임 select였다: 리더에게 `acted` 하나를 묻고 곧바로
+    # settle-check로 돌아갔다. 그 응답이 만드는 값이 없다는 것이 이 회차의
+    # 출발점이다. 스텝 자신의 프롬프트가 "판정은 기계가 다시 읽는다, 이 답은
+    # 신호일 뿐이다"라고 적고 있었고 실제로 그랬다 — 응답이 무엇이든 다음
+    # settle-check는 같은 보드를 다시 읽으므로, 응답자가 보드를 고치지
+    # 않았으면 `acted`를 골라도 루프는 끝나지 않고 고쳤으면 `acted` 없이도
+    # 끝난다. 응답이 결과에 닿지 못한다.
+    # 그 무가치한 응답이 사람에게까지 갔다. 이 회차가 그랬다: 라우팅할 상위가
+    # 없어(데몬이 만든 세션은 스폰 계통에 부모가 없다) otherwise: human으로
+    # 떨어졌고, 사람은 자기가 하지도 않은 보드 쓰기를 「했다」고 확언하는 버튼
+    # 하나를 앞에 두게 됐다.
+    # 고치는 방향은 cflow-author가 이름 붙여 둔 안티패턴이다 — 「명령이 답할
+    # 수 있는 것을 사람에게 묻는 것」. 정산 여부는 보드를 읽으면 답할 수 있는
+    # 사실이고, 묻는 대신 시계를 쓴다. 기다림의 주체가 상위의 답이 아니라
+    # 보드의 변화이므로 깨우는 것도 데몬의 타이머다 — 라우팅되든 안 되든
+    # (상위가 있든 없든) 똑같이 동작한다.
+    # end-hold는 여전히 못 쓴다: 사람이 `goto`로 보내는 keep-alive 경로이고
+    # 런을 done으로 마감해 여기서 다시 확인으로 돌아올 수 없다.
+    # `then`이 settle-check를 다시 밟으므로 예산은 라운드 안에서 누적되고,
+    # 다 쓰면 settle-stall로 간다 — 무한 대기가 아니라 유한 대기다.
+    timer:
+      every: 600
+      max: 6
+      then: settle-check
+      after: settle-stall
+    instructions: |
+      이 세션이 만든 이슈가 정산되기를 기다린다. 아무에게도 묻지 않는다 —
+      깨우는 것도 데몬의 시계가 한다.
+
+      하지 않는 것부터 적는다:
+      · 상위에게 재촉을 보내지 않는다. 상위는 wrapup의 정산 ask로 이미
+        요청받았고(assign·spawn·pool 세 갈래가 그 프롬프트에 있다), 그 답이
+        이 자리의 조건을 만든다. 여기서 한 번 더 밀면 같은 요청이 두 번 간다.
+      · 보드에 코멘트를 쓰지 않는다. 이 세션은 자기 생성 이슈의 정산자가
+        아니다 — 정산은 리더·운영자의 쓰기다.
+      · 브랜치·워크트리를 건드리지 않는다.
+
+      이 스텝은 타이머 스텝이다. 데몬이 `every`초마다 런을 settle-check로
+      옮겨 이 세션을 깨우고, 깨어나서 할 일은 settle-check가 시키는 것
+      하나뿐이다 — 보드를 다시 읽고 정산 여부를 판정한다. 바뀐 것이 없으면
+      그대로 다시 이 자리다. 턴을 끝내고 idle로 있으면 되고, 손으로 폴링하지
+      않는다. `max`번 깨워도 조건이 안 서면 런이 settle-stall로 가서 그때
+      사람이 판단한다.
+    next: settle-check
+
+  settle-stall:
+    title: 생성 이슈 정산 교착 (사람)
+    # 위 타이머의 `after:`가 오는 자리. 여섯 번 깨우는 동안 보드가 변하지
+    # 않았다는 뜻이고, 그때는 사람이 판단할 재료가 있다 — 기다릴 것인가,
+    # 이 세션을 끝낼 것인가. 여기 오는 선택은 settle-wait가 만들던 무가치한
+    # `acted`와 다르다: 응답이 런의 다음 상태를 실제로 정한다(proceed는
+    # end-gate로, keep-waiting은 settle-check로 — 다른 곳이다).
+    # settle-check가 아니라 여기에 사람을 세우는 이유: settle-check의 판정은
+    # 보드가 하고(그래서 사람이 확인할 것이 없다), 사람에게 남는 것은 보드가
+    # 끝내 답하지 않았을 때의 처분뿐이다. 그 처분은 settle-check의 두 갈래
+    # 어디에도 없다 — 그래서 별도 스텝이다.
     select:
-      chooser:
-        from:
-          - {role: leader, scope: ancestor}
-        otherwise: human
-        timeout: 1800
+      chooser: user
       require_reason: true
       prompt: |
-        이 워커가 만든 생성 이슈 중 미정산인 것이 있다(settle-check의
-        reason에 목록). 정산 세 갈래 중 하나로 보드에 먼저 쓴 뒤 답한다:
-        assign(`claunch beads update <id> --assignee <세션>`), spawn(자식
-        세션에 `--issue <id>`), 또는 pool로 남기려면 `claunch beads
-        comments add <id> "HOLD: <이유>"`. 살아 있는 자식이 있으면 adopt
-        (mesh-retopology)까지. 다 쓴 뒤 아래 옵션으로 답한다 — 판정은
-        기계가 다시 읽는다(settle-check), 이 답은 신호일 뿐이다.
+        이 세션이 만든 이슈가 아직 정산되지 않았다(살아 있는 assignee가 없고
+        `HOLD:` 마커도 없다). 타이머가 여섯 번 깨우는 동안 보드가 변하지
+        않았다는 뜻이다 — 리더가 아직 답하지 않았거나, 답할 세션이 없거나,
+        정산 대상이 아닌 무언가가 남아 있다.
+
+        남은 것이 무엇인지는 `claunch cflow journal -t <세션>`의 settle-check
+        보고와 `claunch beads list --status open --status in_ready --limit 0
+        --json`(생성자 필터는 settle-check의 프롬프트에 있다)로 확인한다.
+        정산됐다고 판정한 근거가 아니라 「무엇이 남았는가」를 보러 가는 것이다.
+
+        판단은 사람의 것이다: 이 세션을 지금 끝내도 그 이슈가 유실되지
+        않는지(열린 채로 남아 다음 adoption이 이어받을 수 있는지)를 보고
+        고른다. 무엇을 보고 골랐는지 reason에 적는다.
       options:
-        acted:
-          description: 보드에 필요한 쓰기를 마쳤다 — 기계 재확인으로 돌아간다
+        proceed:
+          description: 정산 없이 이 세션을 끝낸다 — 남은 이슈는 열린 채로 남고, 이어받을 자리는 다음 회차의 adoption이 정한다
+          next: end-gate
+        keep-waiting:
+          description: 더 기다린다 — 보드가 바뀔 때까지 settle-check로 돌아가 시계를 다시 건다
           next: settle-check
 
   end-gate:
