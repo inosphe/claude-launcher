@@ -180,7 +180,7 @@ def test_failure_does_not_consume_cursor(setup, monkeypatch):
 
 def test_source_validation_rotation_and_reset(setup, monkeypatch):
     service, session = setup
-    service.data["sessions"]["s1"] = {"messages": [{"role": "user", "content": "x"*101000}],
+    service.data["sessions"]["s1"] = {"messages": [{"role": "user", "content": "x"*(observer.MAX_CONTEXT + 1)}],
         "summary": "previous", "events": [], "config": [CFG[k] for k in ("profile", "model", "endpoint")]}
     monkeypatch.setattr(service, "evidence", lambda *args: evidence())
     async def fake(cfg, messages):
@@ -433,3 +433,45 @@ def test_tool_only_records_stay_in_the_evidence(setup, monkeypatch):
     sent = watching(service, session, monkeypatch, ["busy"], records=records)
     asyncio.run(service.observe(session, CFG))
     assert [row["id"] for row in sent[0]] == ["transcript:1", "transcript:2"]
+
+
+def test_context_rotates_at_the_ceiling_and_keeps_the_summary(setup, monkeypatch):
+    """The ceiling is what the replayed share scales with, so it is pinned.
+
+    The append-only conversation is billed again on every call. Replaying the
+    daemon's own 58 session windows at lower ceilings priced the trade
+    (2026-09-20): 100,000 bills 100% of today's characters, 24,000 bills 35.6%,
+    12,000 bills 22.9%, and dropping the history outright — which this design
+    does not do — floors at 12.7%. The constant is set to hold at least three
+    p90-sized exchanges (3 x 3,122 characters of batch and answer), so this
+    test measures against the constant rather than a size of its own.
+    """
+    service, session = setup
+
+    def conversation(size):
+        """A stored conversation whose serialized length is exactly ``size``."""
+        msgs = [{"role": "system", "content": observer.SYSTEM},
+                {"role": "user", "content": ""}]
+        msgs[1]["content"] = "x" * (size - len(json.dumps(msgs)))
+        assert len(json.dumps(msgs)) == size
+        return msgs
+
+    monkeypatch.setattr(service, "evidence", lambda *args: evidence())
+    async def fake(cfg, messages):
+        return answer(), {}
+    monkeypatch.setattr(observer, "complete", fake)
+
+    for size, rotations in ((observer.MAX_CONTEXT, 0), (observer.MAX_CONTEXT + 1, 1)):
+        service.data["sessions"]["s1"] = {
+            "messages": conversation(size), "summary": "이전 요약",
+            "events": [], "config": [CFG[k] for k in ("profile", "model", "endpoint")]}
+        asyncio.run(service.observe(session, CFG))
+        row = service.data["sessions"]["s1"]
+        assert row.get("rotations", 0) == rotations, f"ceiling {observer.MAX_CONTEXT}, size {size}"
+        assert row["messages"][0]["content"] == observer.SYSTEM
+        # Whether it rotated or not, the model keeps the thread: the summary is
+        # carried into the init message exactly when the history is dropped.
+        # (ensure_ascii=False: the default dump escapes the Korean, so a search
+        # for the summary would miss the very text it is looking for.)
+        init = json.dumps(row["messages"][1], ensure_ascii=False)
+        assert ("이전 요약" in init) == bool(rotations)
