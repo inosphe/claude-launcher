@@ -349,10 +349,10 @@ def _profile_lines(profile: Profile) -> List[str]:
         # make a successful install misleading.
         mcp_lines = ["mcp server skipped (Pi does not support MCP)"]
         guard_lines = []
-    else:
-        # Claude Code is the native installer target. Other declared
-        # harnesses retain its historical profile-root configuration until
-        # they declare their own MCP and permission formats.
+    elif harness_name == harnesses.CLAUDE_HARNESS:
+        # Claude Code is the native installer target: its config dir *is*
+        # the profile root, so it is the one harness whose files land there,
+        # and the only one claunch knows the permission format of.
         settings.merge_mcp_servers(
             profile, {MCP_NAME: mcp_server_def()}, remove=LEGACY_MCP_NAMES
         )
@@ -363,6 +363,30 @@ def _profile_lines(profile: Profile) -> List[str]:
         guard_lines = _gate_guard_lines(
             profile.config_dir / settings.SETTINGS_FILENAME
         )
+    else:
+        # A declared harness with no MCP or permission format of its own.
+        #
+        # This used to be the Claude Code branch, reached by everything the
+        # branches above did not name -- so a harness whose author had not
+        # written a branch yet silently received Claude Code's `.claude.json`
+        # and a gate guard in its profile home, files it never opens. The
+        # install printed those writes as successes, so the mistake was
+        # invisible from the outside until a session could not find its
+        # tools. That is the form this arrived in: devin sat here until
+        # claunch-2qr22 gave it a branch, and the next harness would have
+        # landed in exactly the same place.
+        #
+        # Naming the fall-through is the fix. Claiming to have installed
+        # something into a harness nobody has taught claunch to speak to is
+        # worse than saying nothing was installed, because the caller (and
+        # the human reading the output) can act on the second and not the
+        # first. Skills still go to the harness's profile home below: that
+        # path is the declared convention for any harness with a home_env,
+        # so it is a default rather than a guess.
+        mcp_lines = [
+            f"mcp server skipped ({harness_name!r} declares no MCP format)"
+        ]
+        guard_lines = []
     return (
         mcp_lines
         + _skill_lines(skills_home / "skills")
