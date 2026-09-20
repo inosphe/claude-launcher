@@ -250,7 +250,14 @@ function renderTokenSummary() {
       const parts=[`입력 ${usageCount(shape.input)}`];
       if(shape.counted)parts.push(`캐시 ${usageCount(shape.cached)}`);
       parts.push(`출력 ${usageCount(shape.output)}`);
-      card.append(node("small",parts.join(" · ")));
+      // Each figure is its own nowrap span so a narrow card breaks between
+      // figures rather than between a label and the number it labels.
+      const line=node("small","");
+      parts.forEach((part,index)=>{
+        if(index)line.append(" · ");
+        line.append(node("span",part));
+      });
+      card.append(line);
     }
     cards.push(card);
   }

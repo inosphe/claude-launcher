@@ -131,7 +131,12 @@
 .observer-token-heading { font-size:13px; font-weight:600; }
 .observer-token-heading span { color:#8b949e; font-size:11px; font-weight:400; margin-left:8px; }
 #observer-token-windows { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:16px; margin-top:10px; }
-.observer-token-window { display:flex; flex-direction:column; gap:4px; min-width:0; font-size:12px; }
+/* keep-all: the labels are Korean, and the default lets a line break between
+   any two syllables, so a narrow card split "출력" across two lines once the
+   sub-line grew to carry 입력 · 캐시 · 출력. This keeps a word whole and lets
+   the line break at the separators instead. */
+.observer-token-window { display:flex; flex-direction:column; gap:4px; min-width:0; font-size:12px; word-break:keep-all; }
+.observer-token-window small span { white-space:nowrap; }
 .observer-token-window strong { color:#79c0ff; font-size:23px; font-variant-numeric:tabular-nums; overflow-wrap:anywhere; }
 #observer-view #observer-token-note { margin:8px 0 0; font-size:11px; }
 #observer-view #observer-token-toggle { display:none; }
