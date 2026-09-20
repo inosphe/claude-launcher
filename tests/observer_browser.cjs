@@ -11,10 +11,17 @@ let gates=[];
 let observerReads = 0, needsLogin = true;
 // The meter's days are fixed strings, not "today": the panel labels them as
 // written, so a fixture that used the clock would only assert the clock.
+// Each window's cache pair adds up to its prompt_tokens, the identity the
+// provider's own counters hold. The cards split those the same way the
+// per-session block below does, so a window that reported no cache at all
+// would drop the column instead of printing a zero.
 const data = { enabled: true, usage_summary: {since:"2026-09-18T00:00:00Z", windows:{
-  hour:{total_tokens:1234,prompt_tokens:1200,completion_tokens:34},
-  day:{total_tokens:56789,prompt_tokens:56000,completion_tokens:789},
-  week:{total_tokens:1234567,prompt_tokens:1234000,completion_tokens:567},
+  hour:{total_tokens:1234,prompt_tokens:1200,completion_tokens:34,
+        prompt_cache_hit_tokens:900,prompt_cache_miss_tokens:300},
+  day:{total_tokens:56789,prompt_tokens:56000,completion_tokens:789,
+       prompt_cache_hit_tokens:42000,prompt_cache_miss_tokens:14000},
+  week:{total_tokens:1234567,prompt_tokens:1234000,completion_tokens:567,
+        prompt_cache_hit_tokens:925500,prompt_cache_miss_tokens:308500},
 }}, sessions: [
   { name: "s1", status: "busy", running: true, meshes: ["team-a"], summary: "테스트 12개 통과. 결정을 기다립니다.",
     generated_at: new Date().toISOString(), last_activity_at: new Date(Date.now()-300000).toISOString(),
@@ -103,6 +110,12 @@ const server = http.createServer((req, res) => {
     await page.setViewportSize({width:390,height:844});
     assert.equal(await tokenToggle.getAttribute("aria-expanded"),"true");
     assert.deepEqual(await page.locator(".observer-token-window strong").allTextContents(),["1,234","56,789","1,234,567"]);
+    // 입력 is the uncached prefill and 캐시 the part served from cache, which is
+    // the same reading the per-session block below gives the same word.
+    assert.deepEqual(await page.locator(".observer-token-window small").allTextContents(),
+      ["입력 300 · 캐시 900 · 출력 34",
+       "입력 14,000 · 캐시 42,000 · 출력 789",
+       "입력 308,500 · 캐시 925,500 · 출력 567"]);
     assert.match(await page.locator("#observer-token-note").innerText(),/시작 이전 사용량 제외/);
     await page.waitForTimeout(250);
     assert.equal(await tokenToggle.getAttribute("aria-expanded"),"true","refresh preserves expansion");
