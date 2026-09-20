@@ -54,6 +54,7 @@ live servers would offer the agent every tool twice.
 from __future__ import annotations
 
 import json
+import os
 import sys
 from pathlib import Path
 from typing import List
@@ -188,6 +189,57 @@ def _json_mcp_lines(home: Path) -> List[str]:
     return [f"mcp server {MCP_NAME!r} -> {path}"]
 
 
+def devin_home() -> Path:
+    """Devin's machine-wide config home.
+
+    Devin is the one declared harness with no per-profile home, and that is a
+    property of the harness rather than a gap in this installer: no
+    environment variable relocates it (see the ``devin`` entry in
+    ``harnesses.yaml`` for the measurement). So a profile install has two
+    honest options -- write where devin actually reads, or write into a
+    profile child devin never opens. This picks the first, and every line it
+    returns says ``machine-wide`` so the caller is not misled into thinking a
+    profile install isolated anything.
+
+    The layout differs by platform, so both are resolved rather than
+    assumed: ``APPDATA\\devin`` on Windows, ``~/.config/devin`` elsewhere
+    (which is where ``XDG_CONFIG_HOME`` would put it on a platform that
+    honours it).
+
+    ``CLAUNCH_DEVIN_HOME`` overrides the whole thing. It exists because this
+    is the only install target that resolves to a *real machine directory
+    outside* the throwaway home the test fixture builds -- without it, any
+    test that installs a devin profile would write into the developer's own
+    devin config and still pass, which is the exact failure the ``home``
+    fixture exists to prevent. The fixture sets it for every test.
+    """
+    override = os.environ.get("CLAUNCH_DEVIN_HOME")
+    if override:
+        return Path(override)
+    if sys.platform == "win32":
+        roaming = os.environ.get("APPDATA")
+        if roaming:
+            return Path(roaming) / "devin"
+    return Path.home() / ".config" / "devin"
+
+
+def _devin_mcp_lines() -> List[str]:
+    """Register the merged server where the devin CLI reads MCP servers.
+
+    ``devin mcp add -s user`` writes a ``mcpServers`` document -- the same
+    shape Kimi and Cursor Agent use, so the same merge helper applies -- plus
+    a ``transport`` key that devin requires on each stdio entry. Written
+    directly rather than by shelling out to ``devin mcp add``, so the install
+    stays a pure file write and needs no working binary.
+    """
+    path = devin_home() / "mcp_config.json"
+    server = {**mcp_server_def(), "transport": "stdio"}
+    settings.merge_mcp_servers_into(
+        path, {MCP_NAME: server}, remove=LEGACY_MCP_NAMES
+    )
+    return [f"mcp server {MCP_NAME!r} -> {path} (machine-wide)"]
+
+
 def _workflow_lines() -> List[str]:
     """Report the global-layer seeding, in the same voice as the rest.
 
@@ -274,11 +326,22 @@ def _profile_lines(profile: Profile) -> List[str]:
     harness = harnesses.get(harness_name)
     assert harness is not None  # effective_harness validates the registry
     home = harness.profile_home(profile.config_dir)
+    # Skills normally live inside the harness's profile home. Devin has no
+    # per-profile home to put them in, so it overrides this below; keeping
+    # the default here means the other four branches are untouched.
+    skills_home = home
     if harness_name == "codex":
         mcp_lines = _codex_mcp_lines(home)
         guard_lines: List[str] = []
     elif harness_name in {"kimi", "agent"}:
         mcp_lines = _json_mcp_lines(home)
+        guard_lines = []
+    elif harness_name == "devin":
+        # Devin reads neither a profile child nor Claude Code's files, so the
+        # profile-scope targets are its own machine-wide home. Its permission
+        # format is likewise unmeasured, so no gate guard is claimed.
+        mcp_lines = _devin_mcp_lines()
+        skills_home = devin_home()
         guard_lines = []
     elif harness_name == "pi":
         # Pi intentionally has no MCP client.  Skills remain useful for the
@@ -302,7 +365,7 @@ def _profile_lines(profile: Profile) -> List[str]:
         )
     return (
         mcp_lines
-        + _skill_lines(home / "skills")
+        + _skill_lines(skills_home / "skills")
         + guard_lines
     )
 

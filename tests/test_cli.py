@@ -150,6 +150,39 @@ def test_install_profile_accepts_a_harness_selector(home, capsys):
     assert (config.profiles_dir() / "work" / "kimi" / "mcp.json").is_file()
 
 
+def test_install_devin_profile_targets_devins_own_home(home, capsys):
+    """Devin is the one harness with no per-profile home to install into.
+
+    Its config directory cannot be relocated (see the ``devin`` entry in
+    ``harnesses.yaml``), so a profile install writes where devin actually
+    reads -- its machine-wide home -- rather than into a profile child it
+    would never open. The fixture points that home at a throwaway directory.
+    """
+    import json
+    from claude_launcher import install
+
+    run("create", "work", "--no-seed", "--harness", "devin")
+    capsys.readouterr()
+    assert run("install", "--profile", "work") == 0
+    out = capsys.readouterr().out
+
+    dhome = install.devin_home()
+    # Nothing was written into the profile's child directory, which devin
+    # does not read: an install that landed there would be a silent no-op.
+    assert not (config.profiles_dir() / "work" / "devin").exists()
+    assert (dhome / "skills" / "cflow" / "SKILL.md").is_file()
+    assert (dhome / "skills" / "mesh" / "SKILL.md").is_file()
+    servers = json.loads(
+        (dhome / "mcp_config.json").read_text(encoding="utf-8")
+    )["mcpServers"]
+    assert servers["claunch"] == {**install.mcp_server_def(), "transport": "stdio"}
+    # devin requires an explicit transport on each stdio entry; a bare
+    # claude-shaped entry is not registered the same way.
+    assert servers["claunch"]["transport"] == "stdio"
+    # The machine-wide target is stated, not implied.
+    assert "machine-wide" in out
+
+
 def test_install_all_profile_without_profiles_says_so(home, capsys, tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     assert run("install", "--all-profile") == 0

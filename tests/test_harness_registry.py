@@ -64,9 +64,43 @@ def test_packaged_set_declares_supported_harnesses(home):
         "tool_access": "restricted",
         "response_mode": "conversation",
     }
-    assert all(reg[name].btw is None for name in ("pi", "kimi", "agent"))
+    assert all(reg[name].btw is None for name in ("pi", "kimi", "agent", "devin"))
     # Claude leads displays; it is the default and the only builtin one.
     assert harnesses.names()[0] == "claude"
+
+
+def test_devin_declaration_pins_its_measured_launch_contract(home):
+    """Devin is declared from measurements, not from its CLI's shape guessed.
+
+    Each assertion here is a fact established against the installed CLI
+    (``devin 3000.10.31``) on this machine, so an edit that drops one goes
+    red here rather than silently mislaunching a session later.
+    """
+    devin = harnesses.registry()["devin"]
+    assert devin.command == ["devin"]
+    assert devin.auth == "oauth"
+    # OAuth harnesses keep credentials in their own home and never receive
+    # the launcher token; the parser rejects a token_env here.
+    assert devin.token_env == ""
+    assert devin.borrowable is False
+    assert devin.login_args == ["auth", "login"]
+    # `devin ... -p <prompt>` runs once and exits; with the trust waiver
+    # below this composes to the argv that was run against a live account.
+    assert devin.heartbeat_args == ["-p"]
+    assert devin.args == ["--respect-workspace-trust", "false"]
+    # `-c/--continue` reopens the most recent conversation in the working
+    # directory; `-r/--resume` with no id opens an interactive picker.
+    assert devin.restore_args == ["--continue"]
+    assert devin.skip_permissions_args == ["--permission-mode", "dangerous"]
+    # No environment variable relocates devin's home (measured: XDG_CONFIG_HOME
+    # and APPDATA are both ignored on win32, and --config moves only
+    # config.json). Declaring a home_env nothing honours would be a setting
+    # that silently does nothing -- install.py targets the real home instead.
+    assert devin.home_env == ""
+    # Devin's prompt is only a positional after `--`, so an appended argv
+    # prompt would be read as a PATH. The opening is typed in instead.
+    assert devin.opening_transport == "pty"
+    assert devin.input_readiness == "bracketed-paste"
 
 
 @pytest.mark.parametrize("aliases", [[], None, {"astra": ""}, {"astra": 6}, {1: "model"}])
@@ -290,7 +324,7 @@ def test_packaged_document_is_proven_by_the_same_parser():
     """The default is YAML read through the parser every user entry goes
     through, so it cannot drift into a shape the parser would reject."""
     parsed = harnesses.parse(harnesses.DEFAULT_YAML)
-    assert set(parsed) == {"claude", "codex", "pi", "kimi", "agent"}
+    assert set(parsed) == {"claude", "codex", "pi", "kimi", "agent", "devin"}
     packaged = resources.files("claude_launcher").joinpath(
         harnesses.DEFAULT_RESOURCE
     )
