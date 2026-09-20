@@ -7249,14 +7249,34 @@ class MeshManager:
             self._persist_cursors(mesh)
 
     def _settle_response_watch(self, mesh: Mesh, reply: dict) -> None:
-        """Clear a watch when its recipient sends a threaded ack or reply."""
-        replied_to = str(reply.get("reply_to") or "")
+        """Clear what this member's send answers -- everything watched that
+        was delivered to it before now.
+
+        The same rule :meth:`Mesh.owed` settles on, deliberately: its walk
+        stops at the member's own last send, so any message it sends closes
+        every debt delivered to it beforehand. The watch used to clear only
+        on a reply carrying ``reply_to``, and the two then disagreed. An ack
+        sent without one closed the debt in the ledger and in the heartbeat
+        and left the watch standing, so the sender was nudged at 5, 10, 15
+        and 20 minutes about a message that had been answered -- four
+        notices typed into that session's terminal, and a dismissal that
+        was refused because the ledger had nothing left to dismiss
+        (mesh-0826, 2026-09-21; claunch-response-nudge-disagrees-owed-ga9v8).
+
+        Backwards only: a watch recorded after this send is a question the
+        member has not seen yet, and :meth:`_record_response_watches` runs
+        at delivery, which is after this.
+        """
         sender = str(reply.get("from") or "")
-        if not replied_to or not sender:
+        if not sender or sender not in mesh.members:
             return
-        key = self._response_watch_key(replied_to, sender)
-        if key in mesh.response_watches:
-            del mesh.response_watches[key]
+        settled = [
+            key for key, watch in mesh.response_watches.items()
+            if str(watch.get("to") or "") == sender
+        ]
+        if settled:
+            for key in settled:
+                del mesh.response_watches[key]
             self._persist_cursors(mesh)
 
     def _response_watch_tick(self, mesh: Mesh) -> None:
