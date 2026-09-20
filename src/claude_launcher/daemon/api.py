@@ -611,6 +611,7 @@ def build_app(
     r.add_post("/api/sessions/{name}/archive", h_session_archive)
     r.add_delete("/api/sessions/{name}", h_session_delete)
     r.add_post("/api/sessions/{name}/keep-alive", h_session_keep_alive)
+    r.add_post("/api/sessions/{name}/note", h_session_note)
     r.add_post("/api/sessions/{name}/model", h_session_model)
     r.add_post("/api/sessions/{name}/respawn", h_session_respawn)
     r.add_post("/api/sessions/{name}/migrate", h_session_migrate)
@@ -4354,7 +4355,8 @@ async def h_sessions_list(request: web.Request) -> web.Response:
         rail_fields = {
             "name", "harness", "profile", "cwd", "args", "model", "effort",
             "tools", "restore", "conversation_id", "role", "parent", "borrow",
-            "null_token", "issue", "keep_alive", "reminder_paused", "status",
+            "null_token", "issue", "keep_alive", "reminder_paused", "note",
+            "status",
             "score_goal", "user_reward", "user_penalty",
             "pid", "exit_code", "created_at", "last_output_at",
             "last_visited_at", "last_input_at", "last_activity_at", "viewers",
@@ -5572,6 +5574,30 @@ async def h_session_keep_alive(request: web.Request) -> web.Response:
     on = request.query.get("off") not in ("1", "true")
     session = manager.set_keep_alive(name, on)
     return json_response({**session.info(), "keep_alive": bool(on)})
+
+
+async def h_session_note(request: web.Request) -> web.Response:
+    """Set (or, with an empty value, clear) a session's user note.
+
+    The note is the *operator's* annotation on a terminal — why this one is
+    being kept around — so it lives on the session record and is read back by
+    the rail row, the session header and the detail panel (and by search).
+    Nothing sends it into the session: it is the person's, not the agent's,
+    which is what keeps it usable as a reminder to self rather than an
+    instruction. Unlike the reminder and score levers this one is deliberately
+    settable on a session that has already exited, since "why am I keeping
+    this record" is asked most often about one that is gone.
+    """
+    manager: SessionManager = request.app["manager"]
+    body = await _json_body(request)
+    note = body.get("note")
+    if note is not None and not isinstance(note, str):
+        return json_error(400, "'note' must be text, or null to clear it")
+    try:
+        session = manager.set_note(request.match_info["name"], note or "")
+    except ValueError as exc:
+        return json_error(400, str(exc))
+    return json_response(session.info())
 
 
 async def h_session_model(request: web.Request) -> web.Response:

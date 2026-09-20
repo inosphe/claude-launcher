@@ -112,6 +112,10 @@ function applyCflowBadges() {}
 function applyGotoFlash() {}
 function applyRailQuiet() {}
 function applyBriefingCards() {}
+/* The reader's own note line, stubbed for the same reason as the briefing
+   decoration below: its wording and its stylesheet contract are
+   railnote_check's subject, not this harness's. */
+function decorateNoteRow(li, s) {}
 function decorateBriefingRow(li, s) {
   li.appendChild(el("button", "sess-brief-rowref", "R"));
 }

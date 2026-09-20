@@ -966,7 +966,7 @@ let sessionSearch = { q: "", hits: null, pending: false, error: "", index: null 
 
 function sessionSearchText(s) {
   return [
-    s.name, s.identity, s.role, s.issue, s.branch, s.task,
+    s.name, s.identity, s.role, s.issue, s.branch, s.task, s.note,
     s.briefing && s.briefing.one_line,
   ].filter(Boolean).join(" ").toLowerCase();
 }
@@ -2339,6 +2339,8 @@ async function refreshSessions(options) {
     li.addEventListener("keydown", (ev) => railCardKey(ev, s.name));
     // The briefing's one-line and the collapsed ⟳, always on the row.
     decorateBriefingRow(li, s);
+    // The reader's own note for this session, when there is one.
+    decorateNoteRow(li, s);
     const parent = nestedGroupContainers
       ? (groupBodies[groupBodies.length - 1] || list) : list;
     parent.appendChild(li);
@@ -2436,6 +2438,10 @@ async function refreshSessions(options) {
   // The header badge and the PTY overlay read the same list; repaint them
   // on every poll so a finished answer shows within one poll interval.
   if (typeof renderTermTps === "function") renderTermTps();
+  // The note chip reads the same list and, like the tps badge, is repainted
+  // on every poll rather than only on a rebuild: it is written only when its
+  // value moves, so a poll that changes nothing costs one string compare.
+  if (typeof renderTermNote === "function") renderTermNote();
   // The fork/merge pair reads the same list and has to be repainted here for
   // the same reason -- but it was hung off setStatusBadge alone, which on a
   // LIVE link fires only when the status changes. A tab that attached before
@@ -2643,6 +2649,34 @@ function renderTermHandle() {
   box.classList.toggle("hidden", !tag);
   box.textContent = tag ? tag.text : "";
   box.title = tag ? tag.title : "";
+}
+
+/* The reader's own note about the attached session, as a chip in the header
+   beside the handle. The chip is a label and the note is the tooltip: a note
+   is prose of whatever length the person typed, and this bar is one line at a
+   fixed width, so what the header can honestly show is that a note EXISTS.
+   Hovering the word is the reading.
+
+   Read from the same /api/sessions record the rail is built from — the note
+   rides that poll (see the daemon's rail_fields), so a save in the detail
+   panel turns this chip on within one interval and nothing here fetches.
+
+   The DOM is written only when the note changes. This runs on every poll,
+   and toolbar.js's fit() watches this header's class and title attributes,
+   so a write that says what it already said buys a re-measure of the whole
+   bar five seconds at a time for nothing. */
+function renderTermNote() {
+  const chip = $("term-note");
+  if (!chip) return;
+  const s = currentName
+    ? (sessionsCache || []).find((row) => row.name === currentName)
+    : null;
+  const note = String((s && s.note) || "").trim();
+  if (chip.dataset.note === note) return;
+  chip.dataset.note = note;
+  chip.classList.toggle("hidden", !note);
+  chip.textContent = note ? "note" : "";
+  chip.title = note;
 }
 
 /* The cflow run a rail row speaks for. Runs are keyed (cwd, session); after a
@@ -4624,6 +4658,42 @@ function applyBriefingTop() {
     pane.dataset.sig = sig;
     refitSoon(60);
   }
+}
+
+/* The reader's own note for this row, when they wrote one: the annotation
+   that says why this terminal is being kept, in the person's words rather
+   than the session's. Its own full-width line under the name, wrapping like
+   the briefing one-liner below it — both are prose whose length nobody chose
+   for a 260px column.
+
+   Created on first sight, repainted in place, and removed when the note is
+   cleared, so a rebuild and a note that arrives with one land on the same
+   DOM. Built here on every row rebuild and deliberately not re-run from
+   refreshRailSeen: that tick exists for the lines that carry an age, and a
+   note has none — a changed note reaches the rail as a changed sessionsCache,
+   which is part of the signature that decides the rebuild. */
+function decorateNoteRow(li, s) {
+  const text = String(s.note || "").trim();
+  const line = li.querySelector(".rail-note");
+  if (!text) {
+    if (line) line.remove();
+    return;
+  }
+  if (line) {
+    line.textContent = text;
+    line.title = text;
+    return;
+  }
+  const fresh = el("div", "rail-note", text);
+  fresh.title = text;  // the column clips it; hover still gives the whole note
+  // Directly under the name, ahead of the path and context lines: this is the
+  // one line about the session that the reader wrote themselves, and putting
+  // it last would bury it under the facts the daemon reports. Same insertion
+  // as the beads line's — anchor on a line that is always present, because
+  // the ones between here and there come and go with the session's state.
+  const cwd = li.querySelector(".rail-cwd");
+  if (cwd) li.insertBefore(fresh, cwd);
+  else li.appendChild(fresh);
 }
 
 /* What a rail row says whether folded or open: the briefing's one-line job
@@ -9807,6 +9877,7 @@ function restoreTerminal(b) {
   showView("terminal");
   $("term-title").textContent = b.name;
   renderTermHandle();
+  renderTermNote();
   setStatusBadge((sessionsCache.find((s) => s.name === b.name) || {}).status || "starting");
   document.querySelectorAll("#session-list li").forEach((li) =>
     li.classList.toggle("active", li.dataset.name === b.name)
@@ -10040,6 +10111,7 @@ async function snapshotAttach(name) {
   showView("terminal");
   $("term-title").textContent = name;
   renderTermHandle();
+  renderTermNote();
   setStatusBadge((sessionsCache.find((s) => s.name === name) || {}).status || "exited");
   document.querySelectorAll("#session-list li").forEach((li) =>
     li.classList.toggle("active", li.dataset.name === name)
@@ -10124,6 +10196,7 @@ function freshAttach(name) {
   showView("terminal");
   $("term-title").textContent = name;
   renderTermHandle();
+  renderTermNote();
   // Seed the header from the list until the socket's `init` says otherwise,
   // so the previous session's controls never linger on this one.
   setStatusBadge((sessionsCache.find((s) => s.name === name) || {}).status || "starting");
@@ -18182,6 +18255,7 @@ let sessJoinBox = null;   // and the mesh-join row, which holds a typed handle
 let sessMigrateBox = null; // and the migrate picker — same reason again
 let sessReborrowBox = null; // and the borrow picker — same reason again
 let sessPermsBox = null;    // and the permissions toggle — same reason again
+let sessNoteBox = null;     // and the note editor — it holds a half-typed note
 let sessRunFold = null;   // reused across polls too: it holds open/shut
 let sessRunTimer = null;  // the fold's own poll, alive only while it is open
 let sessQuickJobBox = null; // the quick-job form — it holds a typed task
@@ -18205,6 +18279,7 @@ function dropDetail() {
   sessKidsBox = null;
   sessBeadsBox = null;
   sessRunFold = null;
+  sessNoteBox = null;
   $("sess-view").innerHTML = "";
   markDetailRow();
 }
@@ -18241,6 +18316,7 @@ function repointDetail(name) {
   sessKidsBox = null;
   sessBeadsBox = null;
   sessRunFold = null;
+  sessNoteBox = null;
   $("sess-view").innerHTML = "<p class='wf-note'>loading…</p>";
   markDetailRow();
   refreshSession();
@@ -18607,6 +18683,11 @@ function renderSession(data) {
     metaRow(dl, "paused", (s.paused_at || "").replace("T", " "));
   }
   view.appendChild(dl);
+
+  // The reader's own note, above everything the session itself supplies: it
+  // is the one line in this panel written for the person, by the person, and
+  // its whole reason for existing is to be read before the rest.
+  if (s.name) view.appendChild(sessNote(s));
 
   // What it was asked to do, in the words it was asked in. Above the
   // briefing because the briefing is a reading OF this — the summary says
@@ -19084,6 +19165,115 @@ function sessReborrow(data) {
     }
   });
 
+  return box;
+}
+
+/* ---- the reader's own note on this session -------------------------
+   Shown, and edited in place. The note belongs to the person rather than to
+   the session, so this is the one control in the panel that writes something
+   the session itself never reads — it is stored on the session record, drawn
+   on the rail row and the terminal header, and indexed by Search anything,
+   and that is the whole of its reach.
+
+   The form survives the poll, the way the send box and the mesh-join row do:
+   renderSession returns early on formInUse(view) while a field has focus, and
+   the slot below is keyed on the SAVED note rather than on what is in the
+   box, so a poll landing between two keystrokes reuses this node instead of
+   replacing it and the half-written note is still there afterwards. */
+
+// The daemon's own cap on a note (manager.MAX_NOTE). Held here too so the box
+// stops the typist where the server would, rather than letting them write a
+// paragraph that comes back a 400 with nothing saved.
+const SESSION_NOTE_MAX = 2000;
+
+function sessNote(s) {
+  const box = el("div", "sess-note");
+  const head = el("h3", null, "Note");
+  head.title =
+    "yours, kept on the session record — shown on this session's rail row " +
+    "and its terminal header, and found by Search anything; the session " +
+    "never sees it";
+  box.appendChild(head);
+  const saved = String(s.note || "");
+  const key = `${s.name}|${saved}`;
+  if (sessNoteBox && sessNoteBox.dataset.slot === key) {
+    box.appendChild(sessNoteBox);   // appending moves the live node here
+    return box;
+  }
+  const form = el("div", "sess-note-form");
+  form.dataset.slot = key;
+  sessNoteBox = form;
+  box.appendChild(form);
+
+  const area = document.createElement("textarea");
+  area.className = "sess-note-area";
+  area.rows = 3;
+  area.maxLength = SESSION_NOTE_MAX;
+  area.value = saved;
+  area.placeholder = "why this session is being kept…";
+  area.setAttribute("aria-label", "session note");
+  const save = el("button", "wf-btn option", "Save note");
+  save.type = "button";
+  save.title = `keep this note on the session record (up to ${SESSION_NOTE_MAX} characters)`;
+  const clear = el("button", "wf-btn option", "Clear");
+  clear.type = "button";
+  clear.title = "remove this session's note";
+  const actions = el("div", "sess-note-actions");
+  actions.append(save, clear);
+  const status = el("p", "wf-note hidden");
+  form.append(area, actions, status);
+
+  const say = (msg, cls) => {
+    status.className = cls || "wf-note";
+    status.textContent = msg;
+  };
+
+  async function write(value, verb) {
+    if (save.disabled) return;
+    save.disabled = clear.disabled = true;
+    say(`${verb}…`);
+    let doc = {};
+    let resp;
+    try {
+      resp = await api(`/api/sessions/${encodeURIComponent(s.name)}/note`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ note: value }),
+      });
+      doc = await resp.json().catch(() => ({}));
+    } catch {
+      say("could not reach the daemon — nothing was changed", "wf-warning");
+      save.disabled = clear.disabled = false;
+      return;
+    }
+    save.disabled = clear.disabled = false;
+    if (!resp.ok) {
+      say(doc.error || `HTTP ${resp.status}`, "wf-warning");
+      return;
+    }
+    // Adopt the reply instead of re-rendering: the daemon trims and caps what
+    // it stores, so what comes back is the truth about this session — and
+    // writing it into the box and the slot here means a save made with the
+    // caret still in the textarea is not thrown away by a repaint that
+    // formInUse is holding back anyway.
+    const kept = String(doc.note || "");
+    area.value = kept;
+    form.dataset.slot = `${s.name}|${kept}`;
+    say(kept ? "saved" : "cleared");
+    // The rail row and the header chip read the list, not this reply, so the
+    // list is what has to be refetched for them to say the new thing.
+    if (typeof refreshSessions === "function") await refreshSessions();
+  }
+
+  save.addEventListener("click", () => write(area.value, "saving"));
+  clear.addEventListener("click", () => write("", "clearing"));
+  form.addEventListener("keydown", (ev) => {
+    // Enter in a note is a newline; the shortcut is the send box's.
+    if (ev.key === "Enter" && (ev.ctrlKey || ev.metaKey)) {
+      ev.preventDefault();
+      write(area.value, "saving");
+    }
+  });
   return box;
 }
 

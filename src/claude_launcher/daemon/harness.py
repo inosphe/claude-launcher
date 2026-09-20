@@ -189,6 +189,14 @@ class SessionDef:
     #: a name for the same reason ``parent`` is: the origin may exit first,
     #: and the record still has to say where this copy came from.
     quick_fork_of: Optional[str] = None
+    #: A person's own free-text annotation on this session, written from the
+    #: web UI and read back in the rail row, the session header and the detail
+    #: panel. It belongs to the *user*, not to the session: nothing injects it
+    #: into a prompt, an opening or a re-briefing, so it stays usable for
+    #: "why am I keeping this terminal around" without the agent reading it as
+    #: an instruction. Persisted with the definition, so it survives a daemon
+    #: restart and a respawn with the rest of the session's record.
+    note: Optional[str] = None
 
     def to_dict(self) -> dict:
         out = {
@@ -227,6 +235,10 @@ class SessionDef:
             out["tools"] = list(self.tools)
         if self.quick_fork_of:
             out["quick_fork_of"] = self.quick_fork_of
+        # Same rule as the two blocks above: a session with no note writes no
+        # key, so the common record on disk is unchanged by this field.
+        if self.note:
+            out["note"] = self.note
         return out
 
     @classmethod
@@ -264,6 +276,7 @@ class SessionDef:
             user_reward=score_goal.count(data.get("user_reward", 0)),
             user_penalty=score_goal.count(data.get("user_penalty", 0)),
             quick_fork_of=str(data.get("quick_fork_of") or "").strip() or None,
+            note=str(data.get("note") or "").strip() or None,
         )
 
 

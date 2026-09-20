@@ -122,6 +122,10 @@ function ctxNoteOnRow() {}
 function ctxRailLine() { return el("span", "rail-ctx-line unknown"); }
 function railCwdLine() { return el("span", "rail-cwd"); }
 function railSeenLine() { return el("span", "rail-seen"); }
+/* The reader's own note line, stubbed for the same reason as the briefing
+   decoration below: its wording and its stylesheet contract are
+   railnote_check's subject, not this harness's. */
+function decorateNoteRow(li, s) {}
 function decorateBriefingRow() {}
 `;
 

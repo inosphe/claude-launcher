@@ -76,8 +76,15 @@ class Corpus:
             search_records.remember(name, row.get("events", []) + self.observer.reports.rows(name))
             if hasattr(self.observer, "session_events"):
                 search_records.remember(name, self.observer.session_events.rows(session))
+            # The note is the reader's own word for why this terminal exists,
+            # so it belongs in the session's searchable text rather than only
+            # on the row: it is how somebody finds the session they annotated
+            # a fortnight ago and can no longer name. Read through getattr for
+            # the same reason ``identity`` is -- a record written by an older
+            # daemon has no such key and must not cost the corpus the session.
             docs.extend(documents("session:" + name, name, "\n".join(str(v or "") for v in
-                                  (session.sdef.task, getattr(session.sdef, "identity", ""), row.get("summary"))),
+                                  (session.sdef.task, getattr(session.sdef, "identity", ""),
+                                   getattr(session.sdef, "note", ""), row.get("summary"))),
                                   kind="session", sessions=[{"name": name}], href="#/s/" + quote(name, safe="")))
         for event in await asyncio.to_thread(search_records.rows):
             name, eid = event["session"], event["id"]

@@ -6,6 +6,7 @@
   const icons = {
     "term-goto": "⇱", "term-pin": "📌", "term-status": "●",
     "term-handle": "@", "term-tps": "↯", "term-timer": "◷",
+    "term-note": "note",
     "term-timer-skip": "⏭", "term-hold": "⇥", "term-link": "↻",
     "term-scroll": "↥", "term-resume": "▶", "term-brief": "▤",
     "term-observer": "◉", "term-log": "≡", "term-rebrief": "↻",

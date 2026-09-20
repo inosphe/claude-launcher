@@ -241,6 +241,29 @@ def test_session_doc_reads_task_identity_and_briefing():
     assert doc.meta["excerpt"] == "Build the widget"
 
 
+def test_session_doc_carries_the_readers_own_note():
+    """The note is how a session gets found again once its own name has
+    stopped meaning anything, so it is searchable text like the task is.
+
+    This corpus and the unified one (search_anything.Corpus) are two
+    hand-written answers to "what makes up a session's searchable text"; a
+    field added to one and not the other leaves the session findable by its
+    note in Search anything and not in the rail's semantic search. This pins
+    this side of that pair.
+    """
+    doc = rag.session_doc(
+        {"name": "s9", "note": "  waiting on the vendor  ", "identity": "worker w1"}
+    )
+    chunk = doc.chunks[0]
+    assert "note: waiting on the vendor" in chunk
+    # It is the reader's line about the session, so it reads before the
+    # record's own fields rather than after them.
+    assert chunk.index("note:") < chunk.index("identity:")
+    # A session nobody annotated writes no such line, rather than an empty one.
+    bare = rag.session_doc({"name": "s9", "note": "   "})
+    assert "note:" not in bare.chunks[0]
+
+
 def test_vector_index_round_trips_and_diffs(tmp_path):
     path = tmp_path / "idx.json"
     index = rag.VectorIndex(path, model="m", dims=0)
@@ -418,8 +441,9 @@ def test_sessions_corpus_reads_the_registry_and_briefing_cache(tmp_path):
     ep = Endpoint()
 
     class Sdef:
-        def __init__(self, name, task, identity=None, issue=None):
+        def __init__(self, name, task, identity=None, issue=None, note=None):
             self.name, self.task, self.identity, self.issue = name, task, identity, issue
+            self.note = note
             self.role = None
             self.cwd = "/r"
 
@@ -433,7 +457,8 @@ def test_sessions_corpus_reads_the_registry_and_briefing_cache(tmp_path):
 
     class Manager:
         def list(self):
-            return [Sess(Sdef("s1", "kanban lane work", identity="worker w1", issue="x-1")),
+            return [Sess(Sdef("s1", "kanban lane work", identity="worker w1", issue="x-1",
+                              note="waiting on the vendor reply")),
                     Sess(Sdef("s2", "pytest cleanup"), status="exited")]
 
     async def run():
@@ -450,6 +475,15 @@ def test_sessions_corpus_reads_the_registry_and_briefing_cache(tmp_path):
             assert view["results"][0]["status"] == "exited"
             first = [r for r in view["results"] if r["id"] == "s1"][0]
             assert first["identity"] == "worker w1" and first["issue"] == "x-1"
+            # A session is findable by the note the reader wrote on it. The
+            # note is the one field here a person typed, and this corpus is
+            # the rail's semantic search — a session searchable by its note
+            # in Search anything and not here would be the two builders
+            # disagreeing (see session_doc's own note). "vendor" appears
+            # nowhere in s1's own fields, so ranking it first for that word
+            # is the note doing the work.
+            by_note = await svc.search("sessions", "vendor", limit=2, rerank=False)
+            assert by_note["results"][0]["id"] == "s1"
             assert (tmp_path / "rag" / "sessions.json").is_file()
         finally:
             await server.close()

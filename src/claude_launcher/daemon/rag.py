@@ -328,16 +328,27 @@ def issue_doc(issue: dict) -> Doc:
 
 
 def session_doc(info: dict, briefing: Optional[dict] = None) -> Doc:
-    """A session as a document: what it was asked to do, who it is, what
-    the briefing says it is doing. ``info`` is the session's definition
-    fields; ``briefing`` the cached briefing dict when one exists."""
+    """A session as a document: what it was asked to do, who it is, what the
+    reader called it, what the briefing says it is doing. ``info`` is the
+    session's definition fields; ``briefing`` the cached briefing dict when
+    one exists."""
     name = str(info.get("name") or "")
     task = str(info.get("task") or "").strip()
     identity = str(info.get("identity") or info.get("role") or "").strip()
+    note = str(info.get("note") or "").strip()
     issue = str(info.get("issue") or "").strip()
     cwd = str(info.get("cwd") or "").strip()
     brief = briefing if isinstance(briefing, dict) else {}
     lines = [f"session {name}"]
+    # The reader's own words for this session, ahead of the record's own
+    # fields: a note is a person saying what this terminal is, which is the
+    # strongest thing to match on. This corpus and the unified one
+    # (search_anything.Corpus) are two hand-written copies of "what makes up
+    # a session's searchable text", so the note has to be in both or a
+    # session is findable by its note in Search anything and not in the
+    # rail's semantic search.
+    if note:
+        lines.append(f"note: {note}")
     if identity:
         lines.append(f"identity: {identity}")
     if issue:
@@ -688,6 +699,7 @@ class RagService:
                     "name": getattr(sdef, "name", ""),
                     "task": getattr(sdef, "task", None),
                     "identity": getattr(sdef, "identity", None),
+                    "note": getattr(sdef, "note", None),
                     "role": getattr(sdef, "role", None),
                     "issue": getattr(sdef, "issue", None),
                     "cwd": getattr(sdef, "cwd", None),
