@@ -385,6 +385,7 @@ CHECKS = [
         "termtimer_check.js",
         "mdrender_check.js",
         "railseen_check.js",
+        "railnote_check.js",
         "reports_check.js",
         "sesscommits_check.js",
         "sesstask_check.js",

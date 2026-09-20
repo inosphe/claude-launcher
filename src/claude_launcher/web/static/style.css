@@ -228,10 +228,11 @@ option:disabled { color: #6b7280; }
    The invariant the rest of this rail depends on: everything that belongs on
    the name's line keeps the default `order: 0` and declares no
    `flex-basis: 100%`. Only the deliberate line-breakers below
-   (.rail-cwd, .rail-ctx-line, .rail-seen, .rail-quiet, .rail-status-checks, .sess-cflow, .sess-brief) are full-width, and they carry
-   an `order` above the ▸ toggle's so the toggle still lands at the end of the
-   name line. A full-width child at order 0 would break the line before the
-   toggle got there.
+   (.rail-cwd, .rail-ctx-line, .rail-seen, .rail-quiet, .rail-note,
+   .rail-status-checks, .sess-cflow, .sess-brief) are full-width, and they
+   carry an `order` above the ▸ toggle's so the toggle still lands at the end
+   of the name line. A full-width child at order 0 would break the line
+   before the toggle got there.
 
    `flex-basis: 0` is the load-bearing part, not tidiness: a flex line is
    wrapped on its items' BASE sizes and only shrunk afterwards, so a box that
@@ -432,6 +433,20 @@ option:disabled { color: #6b7280; }
 #session-list .rail-brief {
   flex-basis: 100%; order: 2; min-width: 0; padding-left: 16px;
   font-size: 11px; color: #8b949e; line-height: 1.45;
+  white-space: pre-wrap; overflow-wrap: anywhere;
+}
+/* The reader's own note for a session, on its rail row. Same line geometry as
+   the briefing one-liner below it and the same reasons for `pre-wrap` and
+   `anywhere`: it is prose the person typed, with the breaks they chose, and
+   it may hold a path or a branch name that offers no break of its own. Set
+   apart from the briefing by rule and colour because the two are different
+   kinds of statement — the briefing is what the daemon read about the
+   session, this is what the person wrote about it — and a reader scanning
+   the rail needs to tell at a glance which one they are looking at. */
+#session-list .rail-note {
+  flex-basis: 100%; order: 2; min-width: 0; margin-left: 12px;
+  padding-left: 8px; border-left: 2px solid #2f4a63;
+  font-size: 11px; color: #9fb4cb; line-height: 1.45; font-style: italic;
   white-space: pre-wrap; overflow-wrap: anywhere;
 }
 #session-list .rail-status-checks {
@@ -1274,6 +1289,17 @@ a.cflow-scope:hover { background: #1d3559; text-decoration: underline; }
   font-size: 11px; padding: 2px 8px; border-radius: 10px;
   background: #10251a; color: #3fb950; border: 1px solid #1b4522;
 }
+/* The header's note chip: up only when the reader wrote a note about the
+   attached session, and carrying the note in its title rather than in the
+   bar. Not a .badge — the badges on this row report what the session is
+   doing, and this reports something a person said about it. Blue, so it is
+   not read as one more piece of session state, and `help` so the pointer
+   itself says the hover is the point. */
+.term-note {
+  font-size: 11px; padding: 2px 8px; border-radius: 10px;
+  background: #10202e; color: #79c0ff; border: 1px solid #1f3a52;
+  cursor: help;
+}
 .badge.idle { background: #1f4428; color: #3fb950; }
 .badge.busy { background: #4d3800; color: #d29922; }
 .badge.exited { background: #30363d; color: #8b949e; }
@@ -1714,15 +1740,29 @@ body.term-split #terminal { flex: var(--split-term, 0.6) 1 0; min-height: 80px; 
 .sess-meta dt { color: #7d8590; }
 .sess-meta dd { color: #c6cdd5; overflow-wrap: anywhere; }
 .sess-meshes, .sess-wf, .sess-send, .sess-queued, .sess-bp, .sess-migrate,
-.sess-reborrow, .sess-perms, .sess-brief-section, .sess-task {
+.sess-reborrow, .sess-perms, .sess-brief-section, .sess-task, .sess-note {
   margin: 14px 0; padding: 12px 16px; background: #1b1e24;
   border: 1px solid #2a2e36; border-radius: 8px; max-width: 760px;
 }
 .sess-meshes h3, .sess-wf h3, .sess-send h3, .sess-queued h3, .sess-bp h3,
 .sess-migrate h3, .sess-reborrow h3, .sess-perms h3, .sess-brief-section h3,
-.sess-task h3 {
+.sess-task h3, .sess-note h3 {
   font-size: 12px; text-transform: uppercase; color: #7d8590; margin-bottom: 10px;
 }
+/* the reader's own note on this session. One field, on the panel's input
+   colours, and resizable because a note is however long the person needs it
+   to be — three rows is a starting height, not a limit. */
+.sess-note-form { display: flex; flex-direction: column; gap: 8px; }
+.sess-note-area {
+  width: 100%; box-sizing: border-box; resize: vertical; min-height: 56px;
+  background: #14161a; color: #c6cdd5; border: 1px solid #2a2e36;
+  border-radius: 5px; padding: 6px 9px; font-size: 13px; line-height: 1.5;
+  font-family: inherit;
+}
+.sess-note-area:focus { outline: none; border-color: #3b6ea5; }
+.sess-note-actions { display: flex; gap: 8px; }
+.sess-note-actions .wf-btn { margin-right: 0; }
+.sess-note .wf-note, .sess-note .wf-warning { margin: 0; line-height: 1.5; }
 .sess-brief-section .sess-brief, .sess-brief-section .sess-brief-note {
   margin: 0;
 }
@@ -2377,7 +2417,8 @@ a.beads-q-name:hover { color: #79c0ff; text-decoration: underline; }
 .docked .sess-meshes, .docked .sess-wf, .docked .sess-send, .docked .sess-queued,
 .docked .sess-bp,
 .docked .sess-migrate, .docked .sess-reborrow, .docked .sess-perms,
-.docked .sess-quickjob, .docked .sess-kids, .docked .sess-task {
+.docked .sess-quickjob, .docked .sess-kids, .docked .sess-task,
+.docked .sess-note {
   margin: 10px 0; padding: 10px 12px; max-width: none; background: #16181d;
 }
 /* a rail column has no room for two controls side by side */
@@ -3722,7 +3763,7 @@ body.embed #main { width: 100%; }
   .mesh-roles, .mesh-owed, .wf-start, .mesh-log, .mesh-topo,
   .sess-meta, .sess-meshes, .sess-wf, .sess-send, .sess-queued, .sess-bp,
   .sess-migrate, .sess-reborrow, .sess-perms, .sess-quickjob, .sess-kids,
-  .sess-task,
+  .sess-task, .sess-note,
   .wf-pending, .ws-add, .ws-list, .ws-card, #ws-view > .wf-note { max-width: none; }
   /* The add row is three controls on one line at desk width; on a phone the
      path alone needs the whole line. */

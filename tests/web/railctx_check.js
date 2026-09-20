@@ -126,6 +126,10 @@ function applyBriefingCards() {}
    its own harness (briefrow_check); here, like applyBriefingCards, it is a
    no-op so what this harness pins — the context note's containment — stays
    about context. */
+/* The reader's own note line, stubbed for the same reason as the briefing
+   decoration below: its wording and its stylesheet contract are
+   railnote_check's subject, not this harness's. */
+function decorateNoteRow(li, s) {}
 function decorateBriefingRow(li, s) {}
 function terminalOnScreen() { return false; }
 function attach() {}

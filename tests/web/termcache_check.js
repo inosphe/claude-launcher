@@ -184,6 +184,11 @@ function markDetailRow() { __record("detail"); }
    (sesshandle_check's subject); here it is only a call that has to
    resolve. */
 function renderTermHandle() {}
+/* And the note chip beside it, repainted on the same attach (see
+   renderTermNote; the chip's own behaviour is railnote_check's subject).
+   Stubbed for the same reason as the handle above: this harness pins what
+   the attach keeps alive, not what the header says. */
+function renderTermNote() {}
 function showView(v) { __record("show", v); }
 function refitSoon(d) { __record("fit", d); }
 function updateScrollChip() {}

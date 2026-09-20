@@ -234,6 +234,15 @@
            the title because it is the same fact as the title: who this is.
            Rendered by renderTermHandle(). -->
       <span id="term-handle" class="term-handle hidden"></span>
+      <!-- The reader's own note about this session, when they wrote one. A
+           label rather than the text: a note is prose of whatever length the
+           person typed and this bar is one line at a fixed width, so the chip
+           says a note EXISTS and its title carries the note itself — hovering
+           the word is the whole interaction. Absent for a session nobody
+           annotated, which is most of them. The note is the reader's, not the
+           session's: it is never sent to the agent. Rendered by
+           renderTermNote(). -->
+      <span id="term-note" class="term-note hidden" title=""></span>
       <!-- The name, and beside it the way back to that name in the rail. The
            list is a monitor of twenty-odd sessions in a 260px column: the row
            for the one you are typing in is as likely to be scrolled out of

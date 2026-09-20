@@ -41,6 +41,11 @@ from .session import STATUS_BUSY, DeadSession, Session
 AnySession = Union[Session, DeadSession]
 
 _NAME_RE = re.compile(r"^[A-Za-z0-9._-]+$")
+#: Longest user note a session may carry. The note is stored in the session
+#: record and copied into the search corpus, so it is bounded rather than
+#: free: a paste that lands here by accident must not grow either without
+#: limit. The web UI's own field carries the same cap.
+MAX_NOTE = 2000
 log = logging.getLogger(__name__)
 
 
@@ -1352,6 +1357,24 @@ class SessionManager:
         """
         session = self.get(name)
         session.sdef = replace(session.sdef, keep_alive=bool(on))
+        self.persist()
+        return session
+
+    def set_note(self, name: str, note: str) -> AnySession:
+        """Set (or, with an empty value, clear) a session's user note.
+
+        The note is the *person's* annotation on a terminal, so it is written
+        straight to the definition and persisted there; nothing reads it back
+        into the session itself (see :attr:`SessionDef.note`). An empty or
+        whitespace-only value clears it, which is what makes the same call the
+        editor's save and its "remove" — the field is either there or absent,
+        and there is no empty-string note to render.
+        """
+        session = self.get(name)
+        text = str(note or "").strip()
+        if len(text) > MAX_NOTE:
+            raise ValueError(f"a note is at most {MAX_NOTE} characters")
+        session.sdef = replace(session.sdef, note=text or None)
         self.persist()
         return session
 
