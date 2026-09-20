@@ -20,7 +20,7 @@ new record in batches of 40. A pass calls the model only for new records, for a
 cflow position that moved, or for a session that stopped running: a busy/idle
 flip on its own spends no call and rides along on the next one that is
 justified. Each session retains 200 important events. Context
-rotates after 100,000 serialized characters, retaining the previous summary.
+rotates after 12,000 serialized characters, retaining the previous summary.
 The UI's acknowledgement records that the human read a request, not that the
 underlying task was resolved. Escape is a separate explicit keyboard action.
 """
@@ -48,7 +48,30 @@ except ImportError:
 
 log = logging.getLogger(__name__)
 INTERVAL = 60
-MAX_CONTEXT = 100_000
+#: The conversation is rebuilt from the system prompt and the retained summary
+#: once it grows past this many serialized characters. The append-only
+#: conversation is billed again on every call, so the ceiling is what the
+#: replayed share scales with: replayed here means 92.1% of the characters
+#: 58 sessions billed, and the ceiling was 100,000. Replaying the same
+#: windows at lower ceilings (2026-09-20) priced the trade —
+#:
+#:     100,000 -> 100%    12,000 -> 22.9%    3,000 -> 12.9%
+#:      50,000 ->  60.3%   6,000 -> 15.8%   stateless -> 12.7%
+#:      24,000 ->  35.6%
+#:
+#: The saving is roughly linear in the ceiling down to a floor set by the
+#: per-call payload itself, so the value is a policy choice about how much
+#: history the model keeps. It is set to hold at least three p90-sized
+#: exchanges, since a window smaller than the model's own previous call is
+#: self-defeating: a p90 call is 1,950 + 1,172 characters of batch and answer,
+#: so three of them need 9,366. The median batch is 113 characters, and the
+#: window holds about twenty of those. Below this the curve has flattened —
+#: 6,000 buys 7 points more and gives up half the window again.
+#: The measure is ``len(json.dumps(...))``, which escapes non-ASCII; a
+#: Korean-heavy conversation therefore reaches this ceiling at roughly 1/1.8
+#: of the character count the number reads as. That is left alone here: the
+#: constant is calibrated in the same measure the comparison uses.
+MAX_CONTEXT = 12_000
 KINDS = {"cflow", "commit", "merge", "test", "action", "result"}
 #: Counters a provider reports per call. The meter sums exactly these, so a
 #: provider that adds one changes what the dashboard shows in one place.
