@@ -965,7 +965,11 @@ async def h_control_ws(request: web.Request) -> web.WebSocketResponse:
                 continue
             kind = frame.get("type")
             if kind == "ping":
-                await carrier.send_str(json.dumps({"type": "pong"}))
+                # Queued, not awaited: this loop is the lane every
+                # terminal's keystrokes arrive in, and a page that has
+                # stopped draining parks a write for as long as it
+                # stays stopped (test_control_write_offloop).
+                await carrier.send_soon(json.dumps({"type": "pong"}))
             elif kind == "link_failed":
                 conns.link_failed(request, frame)
             elif kind == "read":
@@ -980,7 +984,7 @@ async def h_control_ws(request: web.Request) -> web.WebSocketResponse:
                 # there (claunch-gh4f made the terminals share this socket;
                 # the reads were already on it from claunch-riq5).
                 if len(reads) >= CONTROL_READS_IN_FLIGHT:
-                    await carrier.send_str(json.dumps({
+                    await carrier.send_soon(json.dumps({
                         "type": "read_result",
                         "id": frame.get("id"),
                         "answers": {},
