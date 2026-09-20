@@ -4577,10 +4577,14 @@ async def _onboard_and_launch(
             plan, name=name, cwd=cwd, mesh_mgr=_mesh_mgr(request)
         )
         report.update(arranged)
+    if selected:
+        # The goal is the head of the opening itself — one block either way
+        # it travels (argv or typed in), never a slash command.
+        opening = score_goal.prompt(session.sdef) + (
+            "\n\n" + opening if opening else ""
+        )
     try:
-        # Slash commands must be entered alone in the terminal before the
-        # opening task. An argv prompt would start that task first.
-        manager.launch(session, opening="" if selected else opening)
+        manager.launch(session, opening=opening)
     except Exception:
         manager.discard(name)
         await onboard.unwind(report, name=name, cwd=cwd, mesh_mgr=_mesh_mgr(request))

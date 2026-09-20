@@ -710,24 +710,9 @@ def open_with(session, block: str) -> None:
     declared transport: a block too long for the command line is left off it
     (:func:`harness.carries_opening`), and a declaration alone would drop it.
     """
-    if getattr(session.sdef, "score_goal", False):
-        asyncio.ensure_future(_open_with_score_goal(session, block))
-        return
     if not block or harness_mod.carries_opening(session.argv, block):
         return
     asyncio.ensure_future(_deliver_until_it_lands(session, block))
-
-
-async def _open_with_score_goal(session, block: str) -> None:
-    from . import score_goal
-
-    # This path is called only by creation, never by restore/respawn. The
-    # command is one standalone input; repeats use ordinary prompt delivery.
-    delivered = await session.deliver_command("/goal " + score_goal.prompt(session.sdef))
-    if not delivered:
-        log.warning("initial score goal command for %r did not land", session.sdef.name)
-    if block:
-        await _deliver_until_it_lands(session, block)
 
 
 #: How long :func:`open_with` keeps trying to hand over the opening block.

@@ -1,6 +1,7 @@
 """Reward and penalty counts persist independently, ride input sends, and stop nothing."""
 
 import asyncio
+import inspect
 import sys
 import time
 from dataclasses import replace
@@ -30,6 +31,7 @@ class Session:
         self.exited = False
         self.messages = []
         self.state = "busy"
+        self.argv = ()
 
     def status(self):
         return self.state
@@ -40,10 +42,6 @@ class Session:
         if not text:
             return False
         self.messages.append(("prompt", text))
-        return True
-
-    async def deliver_command(self, text):
-        self.messages.append(("command", text))
         return True
 
 
@@ -89,13 +87,28 @@ def test_apply_adds_one_point_to_one_count_only():
     assert score_goal.apply(sdef, "penalty") == {"user_penalty": 3}
 
 
-def test_first_input_is_command_then_opening():
+def test_open_with_delivers_the_block_as_is_for_goal_sessions():
+    """No startup slash command: the goal text arrives inside the opening,
+    so open_with has nothing to special-case even for an opted-in session."""
     session = Session()
-    asyncio.run(onboard._open_with_score_goal(session, "opening task"))
-    assert session.messages == [
-        ("command", "/goal " + score_goal.prompt(session.sdef)),
-        ("prompt", "opening task"),
-    ]
+
+    async def scenario():
+        onboard.open_with(session, "opening task")
+        await asyncio.gather(
+            *[t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
+        )
+
+    asyncio.run(scenario())
+    assert session.messages == [("prompt", "opening task")]
+
+
+def test_the_unstamped_command_path_is_gone():
+    from claude_launcher.daemon import session as session_mod
+
+    assert not hasattr(session_mod.Session, "deliver_command")
+    assert "command" not in inspect.signature(
+        session_mod.Session._deliver
+    ).parameters
 
 
 def test_goal_repeats_while_enabled_regardless_of_counts(monkeypatch):
