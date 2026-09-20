@@ -106,6 +106,8 @@ class ShellPty:
         self._buffered = 0                     # their total length
         self._subscribers = set()
         self._loop = asyncio.get_running_loop()
+        #: One writer into the PTY at a time; see :meth:`write_bytes`.
+        self._write_lock = asyncio.Lock()
 
     @property
     def cols(self) -> int:
@@ -235,9 +237,10 @@ class ShellPty:
         """Keystrokes from a viewer. Dropped while the shell is dead."""
         if self.exited or self._pty is None:
             return
-        # PTY writes can block briefly (ConPTY backpressure); write from the
-        # thread pool to keep the event loop responsive, as sessions do.
-        await self._loop.run_in_executor(None, self._pty.write, data)
+        # One writer at a time, and off the loop: the same two rules a
+        # session's writes follow, for the same reasons (Session.write_bytes).
+        async with self._write_lock:
+            await self._loop.run_in_executor(None, self._pty.write, data)
 
     def resize(self, cols: int, rows: int) -> None:
         """The viewer's grid. Remembered for the next child, applied and
