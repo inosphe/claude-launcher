@@ -143,12 +143,25 @@ def _config_dir(sdef) -> Optional[Path]:
     return Path(env) if env else Path.home() / ".claude"
 
 
-def locate_transcript(sdef) -> Optional[Path]:
-    """The session's transcript file, or ``None`` (no conversation, no file)."""
+def locate_transcript(sdef, *, deep: bool = True) -> Optional[Path]:
+    """The session's transcript file, or ``None`` (no conversation, no file).
+
+    ``deep`` is the search that runs when the direct address misses: claude's
+    id scan reads every project directory (235 of them in this fleet), and
+    codex has no direct address at all — its locator opens every rollout file
+    to read the id out of it. Both cost a directory walk per session, which a
+    caller resolving one session pays gladly and a caller resolving the whole
+    fleet cannot. With ``deep`` off, claude answers from the direct address
+    alone and codex answers nothing, so a conversation filed under a slug
+    this module spells differently reads as absent to that caller and is
+    still found when the session is asked for by name.
+    """
     cid = getattr(sdef, "conversation_id", None)
     if not cid:
         return None
     if getattr(sdef, "harness", None) == "codex":
+        if not deep:
+            return None
         try:
             profile = profile_mod.require_selector(
                 str(getattr(sdef, "profile", "") or "")
@@ -168,7 +181,7 @@ def locate_transcript(sdef) -> Optional[Path]:
         p = transcripts.project_dir(cdir, sdef.cwd) / f"{cid}.jsonl"
         if p.is_file():
             return p
-    return transcripts.find(cdir, cid)
+    return transcripts.find(cdir, cid) if deep else None
 
 
 def _clip(text: str, limit: int) -> str:

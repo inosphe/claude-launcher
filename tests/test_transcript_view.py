@@ -29,7 +29,7 @@ def transcript(tmp_path, monkeypatch):
     """A jsonl in claude's shape, plus a home for the index beside it."""
     src = tmp_path / "conv.jsonl"
     sessions = tmp_path / "sessions"
-    monkeypatch.setattr(tv, "locate_transcript", lambda sdef: src)
+    monkeypatch.setattr(tv, "locate_transcript", lambda sdef, **kw: src)
     monkeypatch.setattr(tv.paths, "session_dir", lambda name: sessions / name)
     return src
 
@@ -251,7 +251,7 @@ def test_a_replaced_transcript_rebuilds_the_index(transcript):
 def test_no_conversation_is_an_empty_page_not_an_error(transcript, monkeypatch):
     """A session with no transcript — a plain shell, a harness that keeps
     none — has nothing to show and must not fail the pane."""
-    monkeypatch.setattr(tv, "locate_transcript", lambda sdef: None)
+    monkeypatch.setattr(tv, "locate_transcript", lambda sdef, **kw: None)
     page = tv.page("s1", FakeDef())
     assert page == {"records": [], "has_more": False, "total": 0, "source": None}
 
@@ -330,7 +330,7 @@ def pi_transcript(tmp_path, monkeypatch):
     src = tmp_path / "pi.jsonl"
     sessions = tmp_path / "sessions"
 
-    def no_scan(sdef):  # pragma: no cover - a hit here is the failure
+    def no_scan(sdef, **kw):  # pragma: no cover - a hit here is the failure
         raise AssertionError("a pi session is not located by scanning")
 
     monkeypatch.setattr(tv, "locate_transcript", no_scan)

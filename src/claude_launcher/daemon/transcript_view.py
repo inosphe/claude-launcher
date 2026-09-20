@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -76,6 +77,21 @@ PAGE_MAX = 200
 #: ran and roughly what came back — not to have the page carry the whole of it.
 #: Text and thinking blocks are what the reader came for, so they arrive whole.
 TOOL_CLIP = 2000
+
+#: Block kinds holding what a person wrote or the model said, as opposed to
+#: what a tool was handed and gave back. ``--prose`` narrows a search to these.
+PROSE_BLOCKS = ("text", "thinking")
+
+#: How many matching records a search carries back, and the ceiling a caller
+#: may raise it to. The scan walks newest to oldest and stops once it has
+#: this many, so the default is "the most recent 20 times this was said".
+SEARCH_LIMIT_DEFAULT = 20
+SEARCH_LIMIT_MAX = 500
+
+#: Characters of the matching block carried either side of the hit. Enough to
+#: read the sentence it sat in; short enough that a screenful of matches is a
+#: screenful.
+EXCERPT_PAD = 120
 
 
 # --------------------------------------------------------------------------- #
@@ -190,14 +206,14 @@ def _peek_type(raw: bytes) -> str:
 # --------------------------------------------------------------------------- #
 # projection
 # --------------------------------------------------------------------------- #
-def _clip(text: str, limit: int = TOOL_CLIP) -> Dict[str, Any]:
+def _clip(text: str, limit: Optional[int] = TOOL_CLIP) -> Dict[str, Any]:
     text = str(text)
-    if len(text) <= limit:
+    if limit is None or len(text) <= limit:
         return {"text": text, "clipped": False}
     return {"text": text[:limit], "clipped": True, "full": len(text)}
 
 
-def _blocks(content: Any) -> List[Dict[str, Any]]:
+def _blocks(content: Any, clip: Optional[int] = TOOL_CLIP) -> List[Dict[str, Any]]:
     """One record's content, flattened to what a reader is shown.
 
     Prose and thinking arrive whole; tool calls and their results arrive
@@ -227,7 +243,7 @@ def _blocks(content: Any) -> List[Dict[str, Any]]:
                 "name": str(block.get("name") or "?"),
                 "id": str(block.get("id") or ""),
                 **_clip(json.dumps(block.get("input"), ensure_ascii=False,
-                                   default=str)),
+                                   default=str), clip),
             })
         elif kind == "tool_result":
             body = block.get("content")
@@ -243,12 +259,22 @@ def _blocks(content: Any) -> List[Dict[str, Any]]:
                 "type": "tool_result",
                 "id": str(block.get("tool_use_id") or ""),
                 "error": bool(block.get("is_error")),
-                **_clip("" if body is None else str(body)),
+                **_clip("" if body is None else str(body), clip),
             })
     return out
 
 
-def _project(raw: bytes, seq: int) -> Optional[Dict[str, Any]]:
+def _project(
+    raw: bytes, seq: int, clip: Optional[int] = TOOL_CLIP
+) -> Optional[Dict[str, Any]]:
+    """One record in the shape a reader is shown.
+
+    ``clip`` is how much of a tool call or its result the record carries;
+    ``None`` carries all of it. A page clips, because a reader scrolling
+    prose does not want a megabyte of file content in the way. A search does
+    not, because a match past the clip is still a match and reporting the
+    conversation as not holding it would be false.
+    """
     try:
         doc = json.loads(raw)
     except ValueError:
@@ -256,12 +282,12 @@ def _project(raw: bytes, seq: int) -> Optional[Dict[str, Any]]:
     if not isinstance(doc, dict):
         return None
     if doc.get("type") == "response_item":
-        return _project_codex(doc, seq)
+        return _project_codex(doc, seq, clip)
     if doc.get("type") == "message":
-        return _project_pi(doc, seq)
+        return _project_pi(doc, seq, clip)
     msg = doc.get("message")
     content = msg.get("content") if isinstance(msg, dict) else None
-    blocks = _blocks(content)
+    blocks = _blocks(content, clip)
     if not blocks:
         return None
     return {
@@ -273,7 +299,9 @@ def _project(raw: bytes, seq: int) -> Optional[Dict[str, Any]]:
     }
 
 
-def _project_codex(doc: dict, seq: int) -> Optional[Dict[str, Any]]:
+def _project_codex(
+    doc: dict, seq: int, clip: Optional[int] = TOOL_CLIP
+) -> Optional[Dict[str, Any]]:
     """Project one Codex rollout ``response_item`` into the shared UI shape."""
     payload = doc.get("payload")
     if not isinstance(payload, dict):
@@ -297,7 +325,7 @@ def _project_codex(doc: dict, seq: int) -> Optional[Dict[str, Any]]:
                 "type": "tool_use",
                 "name": str(payload.get("name") or "?"),
                 "id": str(payload.get("call_id") or ""),
-                **_clip("" if body is None else str(body)),
+                **_clip("" if body is None else str(body), clip),
             }
         )
     elif kind in ("function_call_output", "custom_tool_call_output"):
@@ -306,7 +334,7 @@ def _project_codex(doc: dict, seq: int) -> Optional[Dict[str, Any]]:
                 "type": "tool_result",
                 "id": str(payload.get("call_id") or ""),
                 "error": False,
-                **_clip(str(payload.get("output") or "")),
+                **_clip(str(payload.get("output") or ""), clip),
             }
         )
     if not blocks:
@@ -334,7 +362,9 @@ def _pi_timestamp(value: Any) -> str:
     return when.isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
 
-def _project_pi(doc: dict, seq: int) -> Optional[Dict[str, Any]]:
+def _project_pi(
+    doc: dict, seq: int, clip: Optional[int] = TOOL_CLIP
+) -> Optional[Dict[str, Any]]:
     """Project one pi ``message`` record into the shared UI shape.
 
     Pi's file is the API's shape with its own spelling: a tool call is a
@@ -364,7 +394,7 @@ def _project_pi(doc: dict, seq: int) -> Optional[Dict[str, Any]]:
             "type": "tool_result",
             "id": str(msg.get("toolCallId") or ""),
             "error": bool(msg.get("isError")),
-            **_clip("" if body is None else str(body)),
+            **_clip("" if body is None else str(body), clip),
         })
         role = "user"
     elif isinstance(content, str):
@@ -389,7 +419,7 @@ def _project_pi(doc: dict, seq: int) -> Optional[Dict[str, Any]]:
                     "name": str(block.get("name") or "?"),
                     "id": str(block.get("id") or ""),
                     **_clip(json.dumps(block.get("arguments"),
-                                       ensure_ascii=False, default=str)),
+                                       ensure_ascii=False, default=str), clip),
                 })
     if not blocks:
         return None
@@ -402,17 +432,82 @@ def _project_pi(doc: dict, seq: int) -> Optional[Dict[str, Any]]:
     }
 
 
-def _source_of(sdef) -> Optional[Path]:
+def _source_of(sdef, *, deep: bool = True) -> Optional[Path]:
     """The file this session's conversation is in, or ``None``.
 
     Pi's file is not found by scanning: claunch named it at launch, and
     :func:`ctxsize.transcript_of` already computes that path (and caches the
     lookup) for the context gauge. Every other harness goes through the
     briefing's locator, as before.
+
+    ``deep`` is what a fleet listing turns off. Both deep searches cost a
+    directory walk per session -- claude's id scan reads every project
+    directory, codex's opens every rollout file -- and a listing resolves
+    hundreds of sessions in one request, where a page resolves one. With it
+    off, claude answers from the direct address and codex from the context
+    gauge's cache, so a conversation filed under a slug this module spells
+    differently is missing from a listing and still found when the session
+    is asked for by name.
     """
-    if getattr(sdef, "harness", None) == PI_HARNESS:
+    harness = str(getattr(sdef, "harness", None) or "")
+    if harness == PI_HARNESS:
         return ctxsize.transcript_of(sdef)
-    return locate_transcript(sdef)
+    if harness == ctxsize.CODEX_HARNESS and not deep:
+        return ctxsize.transcript_of(sdef)
+    return locate_transcript(sdef, deep=deep)
+
+
+def source_of(sdef, *, deep: bool = True) -> Optional[Path]:
+    """Public name for :func:`_source_of` -- one rule for where a
+    conversation is, shared by the page, the search and the listing."""
+    return _source_of(sdef, deep=deep)
+
+
+def _stamp(when: float) -> str:
+    try:
+        return (
+            datetime.fromtimestamp(when, tz=timezone.utc)
+            .isoformat(timespec="seconds")
+            .replace("+00:00", "Z")
+        )
+    except (OverflowError, OSError, ValueError):
+        return ""
+
+
+def info(name: str, sdef, *, deep: bool = False) -> Dict[str, Any]:
+    """Where this session's conversation is, and how big it is.
+
+    Cheap on purpose: a stat, plus the record count only when an index
+    already beside the session describes exactly this file at exactly this
+    size. A listing of the whole fleet would otherwise scan every transcript
+    on it, so ``records`` is ``None`` -- "not counted" -- rather than paid
+    for. Reading one page or running one search builds the index and the
+    count appears.
+    """
+    source = _source_of(sdef, deep=deep)
+    row: Dict[str, Any] = {
+        "session": name,
+        "harness": str(getattr(sdef, "harness", None) or ""),
+        "conversation_id": str(getattr(sdef, "conversation_id", None) or ""),
+        "cwd": str(getattr(sdef, "cwd", None) or ""),
+        "source": None,
+        "size": None,
+        "modified_at": None,
+        "records": None,
+    }
+    if source is None:
+        return row
+    row["source"] = str(source)
+    try:
+        stat = source.stat()
+    except OSError:
+        return row
+    row["size"] = stat.st_size
+    row["modified_at"] = _stamp(stat.st_mtime)
+    doc = _load_index(name)
+    if doc.get("source") == str(source) and doc.get("scanned") == stat.st_size:
+        row["records"] = len(doc.get("offsets") or [])
+    return row
 
 
 # --------------------------------------------------------------------------- #
@@ -461,5 +556,146 @@ def page(
         "has_more": start > 0,
         "cursor": start,
         "total": total,
+        "source": str(source),
+    }
+
+
+# --------------------------------------------------------------------------- #
+# search
+# --------------------------------------------------------------------------- #
+def _block_text(block: Dict[str, Any]) -> str:
+    """What one block reads as, for matching and for the excerpt.
+
+    A tool call carries its name in front of its arguments because that is
+    how the pane shows it and how a reader asks for it -- somebody looking
+    for what a session ran greps for ``Bash``, which appears nowhere in the
+    arguments.
+    """
+    text = str(block.get("text") or "")
+    if block.get("type") == "tool_use":
+        name = str(block.get("name") or "")
+        return f"{name}: {text}" if name else text
+    return text
+
+
+def _excerpt(text: str, start: int, end: int, pad: int = EXCERPT_PAD) -> str:
+    """The hit with its surroundings, on one line.
+
+    Whitespace is collapsed: a match inside a wrapped paragraph or a JSON
+    argument would otherwise break the line it is printed on, and a list of
+    matches is read down the left edge.
+    """
+    left = max(0, start - pad)
+    right = min(len(text), end + pad)
+    piece = " ".join(text[left:right].split())
+    return ("..." if left > 0 else "") + piece + ("..." if right < len(text) else "")
+
+
+def _match(
+    rec: Dict[str, Any], pattern, prose_only: bool
+) -> Optional[Dict[str, Any]]:
+    """One record's hits, or ``None`` when it holds none."""
+    count = 0
+    head: Optional[Dict[str, Any]] = None
+    for block in rec.get("blocks") or []:
+        kind = str(block.get("type") or "")
+        if prose_only and kind not in PROSE_BLOCKS:
+            continue
+        text = _block_text(block)
+        if not text:
+            continue
+        for found in pattern.finditer(text):
+            count += 1
+            if head is None:
+                head = {
+                    "block": kind,
+                    "excerpt": _excerpt(text, found.start(), found.end()),
+                }
+    if head is None:
+        return None
+    return {
+        "seq": rec.get("seq"),
+        "role": rec.get("role"),
+        "ts": rec.get("ts"),
+        "sidechain": rec.get("sidechain"),
+        "matches": count,
+        **head,
+    }
+
+
+def search(
+    name: str,
+    sdef,
+    *,
+    query: str,
+    regex: bool = False,
+    ignore_case: bool = True,
+    limit: int = SEARCH_LIMIT_DEFAULT,
+    roles=None,
+    prose_only: bool = False,
+) -> Dict[str, Any]:
+    """Where in this conversation ``query`` was said, newest first.
+
+    The scan walks the index backwards and stops at ``limit`` matches, so a
+    question asked of a 16 MiB transcript usually reads its last few hundred
+    records rather than all of them. ``scanned`` and ``truncated`` report
+    that honestly: ``truncated`` means the walk stopped with records still
+    behind it, and older matches may exist.
+
+    Tool calls and their results are matched whole (:func:`_project` with no
+    clip) -- a match past the page's 2000-character clip is still a match.
+    ``prose_only`` drops them from the search instead, for a reader after
+    what was said rather than what was run.
+
+    A bad regular expression raises :class:`ValueError`; the caller turns it
+    into an answer rather than a traceback.
+    """
+    if not str(query or ""):
+        raise ValueError("a query is required")
+    limit = max(1, min(int(limit or SEARCH_LIMIT_DEFAULT), SEARCH_LIMIT_MAX))
+    try:
+        pattern = re.compile(
+            query if regex else re.escape(query),
+            re.IGNORECASE if ignore_case else 0,
+        )
+    except re.error as exc:
+        raise ValueError(f"bad pattern: {exc}") from exc
+
+    source = _source_of(sdef)
+    if source is None:
+        return {"matches": [], "total": 0, "scanned": 0, "truncated": False,
+                "source": None}
+
+    offsets = refresh_index(name, source)
+    total = len(offsets)
+    want = frozenset(str(r) for r in (roles or ())) or None
+    matches: List[Dict[str, Any]] = []
+    scanned = 0
+    try:
+        with source.open("rb") as fh:
+            for seq in range(total - 1, -1, -1):
+                if len(matches) >= limit:
+                    break
+                fh.seek(offsets[seq])
+                scanned += 1
+                rec = _project(fh.readline(), seq, None)
+                if rec is None:
+                    continue
+                if want is not None and str(rec.get("role") or "") not in want:
+                    continue
+                hit = _match(rec, pattern, prose_only)
+                if hit is not None:
+                    matches.append(hit)
+    except OSError:
+        return {"matches": matches, "total": total, "scanned": scanned,
+                "truncated": True, "source": str(source)}
+
+    return {
+        "matches": matches,
+        "total": total,
+        "scanned": scanned,
+        # The walk stopped early only if it had its fill; a walk that reached
+        # the first record has seen everything there is, however few it kept.
+        "truncated": scanned < total,
         "source": str(source),
     }

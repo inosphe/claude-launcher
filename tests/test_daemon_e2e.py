@@ -1575,7 +1575,7 @@ def test_api_transcript_pages_the_conversation(home, tmp_path, monkeypatch):
         ),
         encoding="utf-8",
     )
-    monkeypatch.setattr(transcript_view, "locate_transcript", lambda sdef: conv)
+    monkeypatch.setattr(transcript_view, "locate_transcript", lambda sdef, **kw: conv)
 
     async def run():
         mgr = _manager()
