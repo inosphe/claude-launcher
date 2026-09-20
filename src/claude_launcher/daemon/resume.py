@@ -95,6 +95,37 @@ POLL = 1.0
 #: paste into a TUI that is still starting is typed and never sent.
 WINDOW = 600.0
 
+#: Why a session is still on the pending list. Reported when the window
+#: closes, because these are not one event and they do not call for one
+#: response: a session still ``starting`` never got its TUI up (something is
+#: wrong with the restore), one without ``keyboard`` is up but has not taken
+#: the keyboard, and one that is ``working`` is doing exactly what this nudge
+#: exists to restore — it needs nothing, and its silence is not a lost
+#: resume. Reporting all of them as "never became ready" is true of the first
+#: only: ``gave up on s635 (never became ready)`` was logged on 2026-09-21
+#: 04:24:19 while that session's own transcript carries 66 entries inside the
+#: window and a 179-second quiet gap that is a tool call in flight, not a
+#: TUI that failed to come up. The distinction is the whole reason an
+#: operator reads the line: "the daemon did not resume my session" and "my
+#: session was busy" are different findings and only one is a defect.
+WAIT_STARTING = "starting"
+WAIT_KEYBOARD = "no-keyboard"
+WAIT_WORKING = "working"
+WAIT_SETTLING = "settling"
+WAIT_RUN = "run-unreadable"
+WAIT_PASTE = "paste-refused"
+
+#: The same keys as the sentence the give-up line prints. Written out rather
+#: than interpolated so the line reads as a reason and not as a code.
+_WAIT_REASONS = {
+    WAIT_STARTING: "its TUI never finished starting",
+    WAIT_KEYBOARD: "its TUI never took the keyboard (no bracketed paste)",
+    WAIT_WORKING: "it was working the whole window (a turn was in flight)",
+    WAIT_SETTLING: "it never held still long enough to paste into",
+    WAIT_RUN: "its cflow run state could not be read",
+    WAIT_PASTE: "the terminal would not take the paste",
+}
+
 
 def gate(cwd: str, scope: str) -> Optional[bool]:
     """Whether this session's cflow position allows a resume nudge.
@@ -157,6 +188,10 @@ class ResumeNudge:
         #: seen ready and then working again is being driven by somebody, and
         #: is dropped rather than nudged.
         self._ready_since: Dict[str, float] = {}
+        #: name -> the :data:`WAIT_*` key it was last held by. Read only when
+        #: the window closes, so the give-up line can say which of the six
+        #: things actually happened instead of naming one of them for all.
+        self._waiting: Dict[str, str] = {}
         self._task: Optional[asyncio.Task] = None
         #: Names actually delivered to — the tests' handle on the outcome,
         #: and what the log line at the end reports.
@@ -203,10 +238,10 @@ class ResumeNudge:
         except asyncio.CancelledError:
             raise
         finally:
-            if self.pending:
+            for name in self.pending:
                 log.info(
-                    "resume nudge: gave up on %s (never became ready)",
-                    ", ".join(self.pending),
+                    "resume nudge: gave up on %r (%s)",
+                    name, self._waiting_reason(name),
                 )
             if self.delivered:
                 log.info("resume nudge delivered to %s", ", ".join(self.delivered))
@@ -244,6 +279,7 @@ class ResumeNudge:
         else:
             verdict = await asyncio.to_thread(gate, session.sdef.cwd or "", name)
             if verdict is None:
+                self._waiting[name] = WAIT_RUN
                 return False  # unreadable run state: look again next poll
             if not verdict:
                 log.info(
@@ -253,7 +289,12 @@ class ResumeNudge:
             block = nudge_block(name)
 
         if not await session.deliver(block):
-            return False  # readiness/keyboard holds refused it; try again
+            # readiness/keyboard holds refused it; try again. Worth its own
+            # reason: this one means the session *is* settled by this module's
+            # test and still would not take the paste, which points at the
+            # terminal rather than at the restore.
+            self._waiting[name] = WAIT_PASTE
+            return False
         self.delivered.append(name)
         return True
 
@@ -284,24 +325,51 @@ class ResumeNudge:
     def _readiness(self, session, name: str) -> str:
         """``"wait"`` / ``"ready"`` / ``"driven"`` for one session.
 
-        Ready is the same two-part test :meth:`Session._await_readable`
+        The readiness half is the two-part test :meth:`Session._await_readable`
         applies — the TUI has taken the keyboard (bracketed paste) and has
         been quiet since — with the settle counted here so the whole window,
         not deliver's spawn-bound one, pays for a slow restore. A harness that
         is not the claude TUI never sets the mode, so for those "not starting
         any more" is all there is to wait for.
+
+        The two halves answer different questions and this method's caller
+        needs both, so it is deliberately not the same call: ``_await_readable``
+        asks *may I type into this terminal*, and reads the quiescence
+        heuristic. This one also asks *is somebody already driving it*, which
+        only a finished turn can answer, so the waiting branches read
+        :meth:`Session.status` — the heuristic plus the turn-in-flight
+        override. That is the stricter of the two, and it is why a session can
+        be receiving mesh mail and reminders (delivery's test) while this
+        module still holds its nudge. Both facts are true at once and they are
+        not in conflict.
+
+        Every ``"wait"`` records which of the :data:`WAIT_*` states it was,
+        because the caller reports that when the window closes and "held
+        because it is busy" is not the same finding as "held because the TUI
+        never came up".
         """
         status = session.status()
         if status == STATUS_STARTING:
+            self._waiting[name] = WAIT_STARTING
             return "wait"
         if getattr(session.sdef, "harness", CLAUDE_HARNESS) != CLAUDE_HARNESS:
             return "ready"
         armed = self._ready_since.get(name)
         if armed is None:
             screen = getattr(session, "screen", None)
-            if status != STATUS_IDLE or not (screen and screen.bracketed_paste):
+            if not (screen and screen.bracketed_paste):
+                self._waiting[name] = WAIT_KEYBOARD
+                return "wait"
+            if status != STATUS_IDLE:
+                # Output is still flowing and no settle has been observed
+                # since the mode went on. That is the shape of a restored
+                # session painting its transcript *and* of one already at
+                # work, and the two cannot be told apart this early — which
+                # is why this waits for a quiet moment rather than guessing.
+                self._waiting[name] = WAIT_WORKING
                 return "wait"
             self._ready_since[name] = time.monotonic()
+            self._waiting[name] = WAIT_SETTLING
             return "wait"  # armed, not settled: later polls serve the settle
         if time.monotonic() - armed < INPUT_SETTLE:
             if status != STATUS_IDLE:
@@ -309,9 +377,24 @@ class ResumeNudge:
                 # going on. Begin the count again, exactly as _await_readable
                 # does, rather than counting a busy TUI as settled.
                 del self._ready_since[name]
+                self._waiting[name] = WAIT_WORKING
+            else:
+                self._waiting[name] = WAIT_SETTLING
             return "wait"
         # Settled once. Working now is somebody else driving it.
+        self._waiting.pop(name, None)
         return "driven" if status == STATUS_BUSY else "ready"
+
+    def _waiting_reason(self, name: str) -> str:
+        """The sentence the give-up line prints for one still-pending name.
+
+        The state it was last held in, which is the state it was *still* in
+        when the window closed — that is the question an operator is asking.
+        A name that reached no branch (it was settled and refused delivery
+        only through a path that did not record one) falls back to the
+        generic wording rather than inventing a cause.
+        """
+        return _WAIT_REASONS.get(self._waiting.get(name, ""), "it never became ready")
 
 
 def nudge_block(name: str) -> str:

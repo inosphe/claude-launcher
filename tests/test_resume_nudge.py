@@ -420,18 +420,99 @@ def test_a_session_that_went_away_settles_quietly(home, tmp_path, monkeypatch, i
 
 
 def test_a_session_that_never_becomes_ready_is_given_up_on(home, tmp_path,
-                                                           monkeypatch, instant):
-    """The window bounds it: a paste into a TUI still starting is never sent."""
+                                                           monkeypatch, instant,
+                                                           caplog):
+    """The window bounds it: a paste into a TUI still starting is never sent.
+
+    And the line says *starting*, which is the one of the six reasons this
+    wording was invented for.
+    """
     monkeypatch.setattr(resume, "gate", lambda cwd, scope: True)
     session = _Session("w1", str(tmp_path))
     session.statuses = ["starting"]
     nudge = resume.ResumeNudge(
         _Manager({"w1": session}), ["w1"], poll=0.01, window=0.05
     )
-    asyncio.run(_drain(nudge))
+    with caplog.at_level("INFO", logger="claunch.daemon.resume"):
+        asyncio.run(_drain(nudge))
 
     assert session.delivered == []
     assert nudge.pending == ["w1"]  # owed and unpaid, said so in the log
+    assert "gave up on 'w1' (its TUI never finished starting)" in caplog.text
+
+
+def test_a_session_that_worked_the_whole_window_is_not_called_unready(
+    home, tmp_path, monkeypatch, instant, caplog
+):
+    """Busy from the first poll to the last is being driven, not unready.
+
+    ``driven`` is only reachable *after* a session has armed, so a session
+    that never finds a quiet moment never gets that verdict — and used to be
+    reported as "never became ready" whatever it was actually doing. That is
+    the wording this test exists to keep honest: s635 was logged that way on
+    2026-09-21 04:24:19 while its own transcript carried 66 entries inside
+    the window. The nudge is still not delivered (a turn is in flight, so
+    there is nothing to restore); only the reason changes.
+    """
+    monkeypatch.setattr(resume, "gate", lambda cwd, scope: True)
+    session = _Session("w1", str(tmp_path))
+    session.statuses = ["busy"]  # the TUI is up and a turn is running
+    nudge = resume.ResumeNudge(
+        _Manager({"w1": session}), ["w1"], poll=0.01, window=0.05
+    )
+    with caplog.at_level("INFO", logger="claunch.daemon.resume"):
+        asyncio.run(_drain(nudge))
+
+    assert session.delivered == []
+    assert nudge.pending == ["w1"]
+    assert "it was working the whole window (a turn was in flight)" in caplog.text
+    assert "never became ready" not in caplog.text
+
+
+def test_a_tui_that_never_took_the_keyboard_is_reported_as_such(
+    home, tmp_path, monkeypatch, instant, caplog
+):
+    """A third state, and not the same finding as a session that never started."""
+    monkeypatch.setattr(resume, "gate", lambda cwd, scope: True)
+    session = _Session("w1", str(tmp_path))
+    session.statuses = ["idle"]
+    session.screen.bracketed_paste = False
+    nudge = resume.ResumeNudge(
+        _Manager({"w1": session}), ["w1"], poll=0.01, window=0.05
+    )
+    with caplog.at_level("INFO", logger="claunch.daemon.resume"):
+        asyncio.run(_drain(nudge))
+
+    assert session.delivered == []
+    assert "its TUI never took the keyboard (no bracketed paste)" in caplog.text
+
+
+def test_a_relaunch_that_raises_leaves_its_traceback_in_the_log(
+    home, tmp_path, caplog
+):
+    """A restore that fails must say *why*, because nothing retries it.
+
+    The record is retired as an exited session on the same code path, so the
+    next boot starts from a fleet that simply has one fewer terminal in it.
+    Before this, the only trace was the name: `failed to restore session
+    's560'` and `'s571'` (2026-09-18 11:35:57) cannot be diagnosed now.
+    """
+    cwd = str(tmp_path)
+    _write_sessions_json([_entry("boom", cwd=cwd, busy=True)])
+
+    class _Boom(_NoSpawnManager):
+        def create(self, sdef, **_kwargs):
+            raise OSError("pty is gone")
+
+    mgr = _Boom(idle_threshold=0.5, scrollback=100, restore_default=True)
+    with caplog.at_level("ERROR", logger="claunch.daemon.manager"):
+        failed = mgr.restore_all()
+
+    assert failed == ["boom"]
+    assert mgr.get("boom").exited  # retired, not half-registered
+    assert "failed to restore session 'boom'" in caplog.text
+    assert "pty is gone" in caplog.text  # the cause, not just the name
+    assert any(r.exc_info for r in caplog.records)
 
 
 def test_the_switch_turns_the_whole_thing_off(home, tmp_path, monkeypatch, instant):
