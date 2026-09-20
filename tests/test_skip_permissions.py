@@ -6,7 +6,8 @@ as a reborrow: :meth:`SessionManager.skip_permissions` validates before
 anything is stopped, restarts the session through
 :meth:`SessionManager.redefine`, and rolls the record back if the relaunch
 fails. These tests pin the toggle both ways, the refusals, the rollback,
-and that a session's other args are never touched.
+that a session's other args are never touched, and that the answer outlives
+the daemon that was told it.
 """
 
 from __future__ import annotations
@@ -173,6 +174,43 @@ def test_skip_permissions_rolls_back_when_the_relaunch_fails(home, tmp_path, mon
         kept = mgr.get("s1")
         assert FLAG not in kept.sdef.args  # the record keeps its old args
         assert kept.exited  # it was stopped; the record says so honestly
+
+    asyncio.run(run())
+
+
+def test_skip_permissions_survives_a_daemon_restart(home, tmp_path, monkeypatch):
+    """Both answers are part of the definition, so both must be persisted:
+    a restart restores the session still skipping the asks, and — once the
+    toggle is turned back — still asking. The removal counts as much as the
+    addition; a restart that dropped the flag would silently put the
+    questions back."""
+    profile_mod.create("p1")
+    monkeypatch.setattr(harness_mod, "build_command", _fake_claude_build_command)
+
+    async def run():
+        mgr = _manager()
+        mgr.create(
+            SessionDef(name="s1", harness="claude", profile="p1", cwd=str(tmp_path))
+        )
+        skipping = await mgr.skip_permissions("s1", True)
+        assert skipping.sdef.args == (FLAG,)
+        await mgr.shutdown_all()
+
+        # A fresh manager reads the persisted definitions off disk, the way a
+        # restarted daemon does.
+        restarted = _manager()
+        assert not restarted.restore_all()
+        still_skipping = restarted.get("s1")
+        assert still_skipping.sdef.args == (FLAG,)
+        assert not still_skipping.exited  # restored, not merely remembered
+
+        asking = await restarted.skip_permissions("s1", False)
+        assert asking.sdef.args == ()
+        await restarted.shutdown_all()
+
+        again = _manager()
+        assert not again.restore_all()
+        assert again.get("s1").sdef.args == ()
 
     asyncio.run(run())
 
