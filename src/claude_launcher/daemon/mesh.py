@@ -6043,7 +6043,10 @@ class MeshManager:
     #: triage list, and the full text is one click away in the message log.
     OWED_PREVIEW = 240
 
-    def owed_report(self, mesh: Mesh, *, state: str = "all") -> dict:
+    def owed_report(
+        self, mesh: Mesh, *, state: str = "all",
+        handle: Optional[str] = None,
+    ) -> dict:
         """Per-member ledger of unanswered mail: who owes what, since when.
 
         Backs ``claunch mesh owed`` and the web dashboard. Local members are
@@ -6064,8 +6067,13 @@ class MeshManager:
 
         The totals are over the rows this answer contains, so a narrowed
         report reads as the narrowing says; ``member_counts`` is over every
-        member, so what was left out is still countable. ``state="all"`` is
-        the default, which is what the CLI asks for.
+        member, so what was left out is still countable.
+
+        ``handle`` narrows it to one member and overrides ``state``: a caller
+        that names a member is answering a question about that member, and a
+        row missing because the session has since been killed reads as "no
+        such member". It is also the cheap form of the same question -- one
+        member's walk instead of every member's.
         """
         now = datetime.now(timezone.utc)
         rows = []
@@ -6073,19 +6081,22 @@ class MeshManager:
             "all": 0, "current": 0, "running": 0, "remote": 0,
             "killed": 0, "paused": 0, "archived": 0, "missing": 0,
         }
-        for handle in sorted(mesh.members):
-            member = mesh.members[handle]
+        for h in sorted(mesh.members):
+            member = mesh.members[h]
             category = self._member_category(mesh, member)
             counts["all"] += 1
             if category in counts:
                 counts[category] += 1
             if category in ("running", "remote"):
                 counts["current"] += 1
-            if not member_in_state(category, state):
+            if handle is not None:
+                if h != handle:
+                    continue
+            elif not member_in_state(category, state):
                 continue
             local = self._is_local(mesh, member)
             row: dict = {
-                "handle": handle,
+                "handle": h,
                 "role": member.role,
                 "subroles": list(member.subroles),
                 "roles": member.roles,
@@ -6109,16 +6120,16 @@ class MeshManager:
                 "can_dismiss": local,
             }
             if local:
-                owed = mesh.owed(handle)
-                row["pending"] = len(mesh.pending(handle))
+                owed = mesh.owed(h)
+                row["pending"] = len(mesh.pending(h))
                 row["owed"] = len(owed)
                 for m in owed:
-                    body = recipient_body(m, handle)
+                    body = recipient_body(m, h)
                     row["messages"].append(
                         {
                             "id": m.get("id"),
                             "from": m.get("from"),
-                            "type": msg_type_for(m, handle),
+                            "type": msg_type_for(m, h),
                             "ts": m.get("ts"),
                             "age": _age_secs(m.get("ts"), now),
                             "reply_to": m.get("reply_to"),
@@ -6132,7 +6143,7 @@ class MeshManager:
                 ages = [e["age"] for e in row["messages"] if e["age"] is not None]
                 row["oldest_age"] = max(ages) if ages else None
             else:
-                rep = mesh.remote_activity.get(handle)
+                rep = mesh.remote_activity.get(h)
                 if isinstance(rep, dict):
                     row["pending"] = rep.get("pending")
                     # 'owed' is only present from a daemon new enough to count
@@ -6153,7 +6164,8 @@ class MeshManager:
             "at": utcnow(),
             "members": rows,
             "member_counts": counts,
-            "member_state": state,
+            "member_state": "one" if handle is not None else state,
+            "member_handle": handle,
             "owed": sum(r["owed"] or 0 for r in rows),
             "pending": sum(r["pending"] or 0 for r in rows),
             "owing": sum(1 for r in rows if (r["owed"] or 0) > 0),

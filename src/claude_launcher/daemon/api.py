@@ -965,7 +965,11 @@ async def h_control_ws(request: web.Request) -> web.WebSocketResponse:
                 continue
             kind = frame.get("type")
             if kind == "ping":
-                await carrier.send_str(json.dumps({"type": "pong"}))
+                # Queued, not awaited: this loop is the lane every
+                # terminal's keystrokes arrive in, and a page that has
+                # stopped draining parks a write for as long as it
+                # stays stopped (test_control_write_offloop).
+                await carrier.send_soon(json.dumps({"type": "pong"}))
             elif kind == "link_failed":
                 conns.link_failed(request, frame)
             elif kind == "read":
@@ -980,7 +984,7 @@ async def h_control_ws(request: web.Request) -> web.WebSocketResponse:
                 # there (claunch-gh4f made the terminals share this socket;
                 # the reads were already on it from claunch-riq5).
                 if len(reads) >= CONTROL_READS_IN_FLIGHT:
-                    await carrier.send_str(json.dumps({
+                    await carrier.send_soon(json.dumps({
                         "type": "read_result",
                         "id": frame.get("id"),
                         "answers": {},
@@ -3528,13 +3532,18 @@ async def h_mesh_owed(request: web.Request) -> web.Response:
 
     ``?state=`` narrows the roster before the ledger is built, the same way
     and for the same cost as on the mesh itself (see :func:`h_mesh_get`).
+    ``?handle=`` narrows it to one member, which overrides ``state`` so that
+    a member asked for by name is answered for whatever its session's state.
     """
     mm = _mesh_mgr(request)
     state = str(request.query.get("state") or "all")
     if state not in mesh_mod.MEMBER_STATES:
         return json_error(400, f"invalid member state: {state!r}")
+    handle = request.query.get("handle") or None
     return json_response(
-        mm.owed_report(mm.get(request.match_info["mesh"]), state=state)
+        mm.owed_report(
+            mm.get(request.match_info["mesh"]), state=state, handle=handle
+        )
     )
 
 

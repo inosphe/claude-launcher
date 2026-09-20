@@ -185,22 +185,95 @@ class Carrier:
         self._request = request
         self._channels: dict[int, ChannelSocket] = {}
         self._tasks: dict[int, asyncio.Task] = {}
-        self._write = asyncio.Lock()
+        self._out: asyncio.Queue = asyncio.Queue()
+        self._writer: Optional[asyncio.Task] = None
+        self._unwaited = 0
         self._gone = False
 
+    @property
+    def channels(self) -> dict:
+        """The attachments on this socket, by channel id."""
+        return self._channels
+
     # -- the one writer ----------------------------------------------------
+    #
+    # Every frame leaves through one queue and one task. The queue is what
+    # keeps two terminals from interleaving a frame, which is what the lock
+    # here used to do, and the task is what keeps a parked write off the
+    # caller that asked for it.
+    #
+    # The difference matters because the callers are not alike. A terminal's
+    # pump awaits its send and must go on waiting: that wait is the whole of
+    # the backpressure between a fast PTY and a page slow to read it. The
+    # socket's receive loop must never wait, because it is the lane every
+    # terminal's keystrokes arrive in -- a browser with a full send buffer
+    # parked one write, and with it the ping, the attach and every keystroke
+    # on every channel (see tests/test_control_write_offloop.py).
+
+    #: Frames asked for without waiting that may be outstanding at once.
+    #: They are small bookkeeping frames (pong, attached, detached), so this
+    #: is generous; it exists so a socket that has stopped draining cannot
+    #: make the daemon hold an unbounded queue for it.
+    UNWAITED_MAX = 64
 
     async def send_str(self, data: str) -> None:
-        if self._gone or self._ws.closed:
-            return
-        async with self._write:
-            await self._ws.send_str(data)
+        await self._put(("str", data), wait=True)
 
     async def send_bytes(self, data: bytes) -> None:
+        await self._put(("bytes", data), wait=True)
+
+    async def send_soon(self, data: str) -> None:
+        """Queue a frame and return, without waiting for the socket.
+
+        For the receive loop and anything else that must keep reading. The
+        frame keeps its place in the queue, so ordering against an awaited
+        send is the order they were asked in.
+        """
+        await self._put(("str", data), wait=False)
+
+    async def _put(self, payload: tuple, *, wait: bool) -> None:
         if self._gone or self._ws.closed:
             return
-        async with self._write:
-            await self._ws.send_bytes(data)
+        if not wait and self._unwaited >= self.UNWAITED_MAX:
+            log.warning("control socket is not draining; dropped a %s frame",
+                        payload[0])
+            return
+        if self._writer is None or self._writer.done():
+            self._writer = asyncio.ensure_future(self._pump())
+        done = asyncio.get_running_loop().create_future() if wait else None
+        if done is None:
+            self._unwaited += 1
+        self._out.put_nowait((payload, done))
+        if done is not None:
+            await done
+
+    async def _pump(self) -> None:
+        """Write queued frames, one at a time, for as long as the socket is
+        open. A frame that fails is reported to whoever waited for it; the
+        socket's own end is handled by the loop that owns it."""
+        while True:
+            (kind, data), done = await self._out.get()
+            if done is None:
+                self._unwaited -= 1
+            try:
+                if self._gone or self._ws.closed:
+                    raise ConnectionResetError("the shared socket is gone")
+                if kind == "str":
+                    await self._ws.send_str(data)
+                else:
+                    await self._ws.send_bytes(data)
+            except asyncio.CancelledError:
+                if done is not None and not done.done():
+                    done.cancel()
+                raise
+            except Exception as exc:  # noqa: BLE001 -- one frame, not the socket
+                if done is not None and not done.done():
+                    done.set_exception(exc)
+                else:
+                    log.debug("control socket write failed", exc_info=True)
+            else:
+                if done is not None and not done.done():
+                    done.set_result(None)
 
     # -- incoming ----------------------------------------------------------
 
@@ -254,7 +327,9 @@ class Carrier:
             return
         chan = ChannelSocket(self, ch)
         self._channels[ch] = chan
-        await self.send_str(json.dumps({"type": "attached", "ch": ch, "session": name}))
+        await self.send_soon(
+            json.dumps({"type": "attached", "ch": ch, "session": name})
+        )
         self._tasks[ch] = asyncio.create_task(
             self._serve(chan, session, bool(frame.get("scrollback")), bool(frame.get("overlay"))),
             name=f"channel-{ch}-{name}",
@@ -289,10 +364,18 @@ class Carrier:
         task = self._tasks.pop(ch, None)
         if task is not None and task is not asyncio.current_task():
             task.cancel()
-        await self.send_str(json.dumps({"type": "detached", "ch": ch, "code": code}))
+        await self.send_soon(
+            json.dumps({"type": "detached", "ch": ch, "code": code})
+        )
 
     async def _fail(self, ch, error: str) -> None:
-        await self.send_str(json.dumps({"type": "attach_error", "ch": ch, "error": error}))
+        # Said out loud as well as sent: a page whose attach is refused
+        # shows a terminal that never fills, and nothing on this side
+        # recorded why (s586, 2026-09-20).
+        log.info("channel %s refused: %s", ch, error)
+        await self.send_soon(
+            json.dumps({"type": "attach_error", "ch": ch, "error": error})
+        )
 
     async def shutdown(self, exc: Optional[BaseException] = None) -> None:
         """The shared socket ended. Every attachment on it ends with it."""
@@ -302,6 +385,9 @@ class Carrier:
         self._channels.clear()
         tasks = list(self._tasks.values())
         self._tasks.clear()
+        writer, self._writer = self._writer, None
+        if writer is not None:
+            tasks.append(writer)
         for task in tasks:
             task.cancel()
         for task in tasks:
@@ -309,3 +395,10 @@ class Carrier:
                 await task
             except (asyncio.CancelledError, Exception):  # noqa: BLE001
                 pass
+        # Whoever was waiting on a frame that will now never be written is
+        # told so, rather than left awaiting a future nothing will finish.
+        while not self._out.empty():
+            _, done = self._out.get_nowait()
+            if done is not None and not done.done():
+                done.set_exception(ConnectionResetError("the shared socket is gone"))
+        self._unwaited = 0
