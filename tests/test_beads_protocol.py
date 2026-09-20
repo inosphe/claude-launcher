@@ -164,7 +164,7 @@ def test_the_worker_settles_its_issue_before_branch_setup(layer):
     auto = wf.steps["issue-auto"]
     assert auto.next == "branch-setup", (
         f"{layer}: the auto branch takes its own issue and then joins the "
-        "same place issue-claim does — routing it through issue-claim "
+        "same place issue-adopt does — routing it through issue-adopt "
         "instead would strand the round when the board has nothing worth "
         "taking, and routing it past branch-setup would leave it without a "
         "branch to work on"
@@ -184,14 +184,30 @@ def test_the_worker_settles_its_issue_before_branch_setup(layer):
         "person's call — an agent chooser would let the round consent "
         "to itself"
     )
-    assert decision.options["adopt"].next == "issue-claim"
-    assert decision.options["create"].next == "issue-claim"
+    # adopt and create are two transitions, not one edge with two labels
+    # (2026-09-21, user). While they shared a `next`, the engine saw a single
+    # edge and the difference survived only in the human's `reason` prose --
+    # which is not a machine-readable input: `require_reason` guarantees the
+    # reason is non-empty, not that an issue id is recoverable from it.
+    assert decision.options["adopt"].next == "issue-adopt"
+    assert decision.options["create"].next == "issue-create"
     assert decision.options["none"].next == "branch-setup"
-    claim = wf.steps["issue-claim"]
-    assert claim.next == "branch-setup"
-    assert "--status in_progress" in claim.instructions
-    assert "JOINED" in claim.instructions            # a live holder is joined, not taken
-    assert "in_progress" in claim.done_when
+    assert decision.options["adopt"].next != decision.options["create"].next, (
+        f"{layer}: adopt and create must not collapse into the same edge"
+    )
+    adopt = wf.steps["issue-adopt"]
+    assert adopt.next == "branch-setup"
+    assert "--status in_progress" in adopt.instructions
+    assert "JOINED" in adopt.instructions            # a live holder is joined, not taken
+    assert "in_progress" in adopt.done_when
+    mint = wf.steps["issue-create"]
+    assert mint.next == "branch-setup"
+    assert "--status in_progress" in mint.instructions
+    assert "in_progress" in mint.done_when
+    assert "JOINED" not in mint.instructions, (
+        f"{layer}: a freshly minted issue has no holder to join -- a JOINED "
+        "line on this branch describes something that cannot happen"
+    )
     assert wf.steps["branch-setup"].next == "work"
     # an assigned-but-empty issue is filled from the opening task in intake,
     # where the issue is first read — not minted a second time
@@ -616,11 +632,15 @@ def test_the_worker_rechecks_its_queue_after_landing_and_loops(layer):
     assert {k: o.next for k, o in settle.select.options.items()} == {
         "settled": "end-gate", "unsettled": "settle-wait",
     }
-    wait = wf.steps["settle-wait"].select
-    assert wait.chooser == "delegate"
-    assert [c.role for c in wait.delegate.candidates] == ["leader"]
-    assert wait.delegate.otherwise == "human"          # D3: bounded wait, then a person
-    assert {k: o.next for k, o in wait.options.items()} == {"acted": "settle-check"}
+    # The wait is the clock's now, and asks nobody (2026-09-21, user). It used
+    # to be a delegated select put to the leader with a single option, `acted`,
+    # whose answer could not move the run -- the next settle-check re-reads the
+    # same board regardless -- and which fell to a person whenever no leader
+    # was routable, asking them to confirm a board write they had not made.
+    wait = wf.steps["settle-wait"]
+    assert wait.timer is not None and wait.select is None
+    assert wait.timer.then == "settle-check"
+    assert wait.timer.after == "settle-stall"          # bounded, and a person decides at the end
     # intake knows a revisit: the primary issue is the head of the queue
     intake = " ".join(wf.steps["intake"].instructions.split())
     assert "재방문 회차(queue-recheck가 next-round로 보낸 것" in intake

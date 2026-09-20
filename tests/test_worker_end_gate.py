@@ -182,29 +182,82 @@ def test_settle_check_settled_reaches_the_user_gate(worker_run):
     assert "instructions" not in payload
 
 
-def test_settle_check_unsettled_waits_on_the_leader_not_the_gate(worker_run):
-    """``unsettled`` does not reach ``end-gate`` at all -- it opens a
-    delegated question to the leader (``settle-wait``), the same shape
-    ``peer-review`` uses, so a person is never asked to approve an ending
-    the board itself does not yet support."""
+def test_settle_check_unsettled_parks_on_the_clock_and_asks_nobody(worker_run):
+    """``unsettled`` reaches a timed wait, and puts no question to anybody.
+
+    The step it reaches (``settle-wait``) is a ``waiting_timer`` position: the
+    daemon moves the run back to ``settle-check`` when the timer fires, so what
+    ends the wait is a change on the BOARD. It used to be a delegated select put
+    to the leader with one option, ``acted`` -- an answer that could not move
+    the run, because the next ``settle-check`` re-reads the same board whatever
+    it says. When no leader was routable it fell through to a person (this
+    fixture's mesh has a parent session, but nobody carries the ``leader``
+    role), who was then asked to confirm a board write they had not made. A
+    question whose answer changes nothing costs a responder and buys nothing,
+    so there is no question here at all (2026-09-21, user).
+    """
     _at("queue-recheck")
     engine.select("done", "queue empty: claunch beads list returned 0 rows")
     payload = engine.select(
         "unsettled", "created-by read: claunch-x9 open, no assignee, no HOLD"
     )
     assert payload["step_id"] == "settle-wait"
-    # this fixture's mesh has no leader above the driving session, so the
-    # delegate falls through to a person -- the same shape a reachable
-    # leader would answer as "waiting_answer"/"branch" (see
-    # test_a_responder_picks_the_branch in test_cflow.py), just with nobody
-    # left to ask first
-    assert payload["status"] == "waiting_selection"
-    assert payload["ask"]["kind"] == "branch"
-    assert {o["name"] for o in payload["ask"]["options"]} == {"acted"}
-    assert payload["ask"]["asked"] == []
-    assert any(
-        s["candidate"].startswith("leader") for s in payload["ask"]["skipped"]
+    assert payload["status"] == "waiting_timer"
+    assert payload["then"] == "settle-check", (
+        "the wait must end by re-reading the board, not by taking anyone's word"
     )
+    assert payload["after"] == "settle-stall", (
+        "a wait with no exit is a hang -- the clock's budget has to end somewhere"
+    )
+    assert "ask" not in payload, (
+        "no question is put here; the `acted` option that used to be its only "
+        "one changed nothing, so nobody should be asked it"
+    )
+
+
+def test_the_settle_stall_lets_a_person_keep_waiting(worker_run):
+    """When the clock's budget is spent, a person decides.
+
+    This is the gate the valueless ``acted`` should have been: a person is
+    reached only after the mechanical loop has genuinely failed to settle, and
+    their answer routes the run somewhere -- ``keep-waiting`` re-arms the clock
+    at ``settle-check`` rather than ending the round.
+    """
+    _at("settle-stall")
+    # the driving agent may only propose here -- the answer is a person's
+    payload = engine.select("keep-waiting", "looks settled to me", by="agent")
+    assert payload["status"] == "waiting_selection"
+    assert payload["proposal"]["option"] == "keep-waiting"
+
+    payload = engine.select(
+        "keep-waiting", "the leader has not seen it yet", by="user"
+    )
+    assert payload["status"] == "selected"
+    payload = engine.next_step()
+    assert payload["step_id"] == "settle-check", (
+        "keep-waiting must go back to the mechanical check, not end the round"
+    )
+
+
+def test_the_settle_stall_can_still_release_the_ending(worker_run):
+    """``proceed`` opens the user gate -- the escape the stall exists for.
+
+    Without it a session whose filings never settle would sit on the clock
+    forever. With it the human decides, and what they open is still the user's
+    ending gate, not the ending itself.
+    """
+    _at("settle-stall")
+    payload = engine.select(
+        "proceed", "claunch-x9 is P3 and stays open for the pool", by="user"
+    )
+    assert payload["status"] == "selected"
+    payload = engine.next_step()
+    assert payload["step_id"] == "end-gate"
+    assert payload["status"] == "waiting_approval"
+    assert payload["ask"]["asked"] == [], (
+        "no session role may approve the ending -- only a person"
+    )
+    assert payload["ask"]["deadline"] is None
 
 
 def _run_with_verify(proj, monkeypatch, replacement):
