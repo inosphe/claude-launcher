@@ -2,6 +2,11 @@
 
 The observer cannot send input. Its append-only model conversation preserves
 prefixes between calls; rotation is explicit and usage includes cache counters.
+Besides the loop, one session can be observed on demand
+(``POST /api/observer/{name}/refresh``) — a human's one-shot, not a mode: it
+takes the same lock as the loop, so a refresh never overlaps a pass that is
+already out, and it is refused while observation is off rather than spending
+against a switch the operator turned off.
 Each session's row also carries a meter: ``usage_totals`` sums the counters of
 every call made for that session and ``usage_daily`` breaks the same counters
 down by local calendar day, so the dashboard can show an accumulated figure and
@@ -208,6 +213,32 @@ class Observer:
         self.error = None
         self.records_imported = False
         self.wake = asyncio.Event()
+        self._pass_lock = None
+        self._pass_loop = None
+
+    def pass_lock(self):
+        """The lock that keeps a manual refresh and the loop's pass apart.
+
+        One lock for the whole observer rather than one per session: a pass
+        accounts a call into a row it copied before the request went out, so
+        two passes over the same session lose one call's usage — and a human's
+        button is exactly the case where a second pass arrives while the first
+        is still out.
+        The lock is made per running loop because an ``asyncio.Lock`` binds to
+        the loop that first contends on it, while the tests drive one Observer
+        through several ``asyncio.run`` calls, each on a fresh loop.
+        """
+        loop = asyncio.get_running_loop()
+        if self._pass_loop is not loop:
+            self._pass_lock, self._pass_loop = asyncio.Lock(), loop
+        return self._pass_lock
+
+    def failed(self, name):
+        """Record that a pass raised, the same way from either entry point."""
+        row = self.data["sessions"].setdefault(name, {})
+        row["error"] = "관찰 실패: 다음 주기에 재시도합니다."
+        self.save(name)
+        log.warning("observer failed for %s", name)
 
     def load_session(self, name):
         # Route construction must not enumerate sessions or load their files.
@@ -294,10 +325,7 @@ class Observer:
                         try:
                             await self.observe(session, cfg)
                         except Exception:
-                            row = self.data["sessions"].setdefault(session.sdef.name, {})
-                            row["error"] = "관찰 실패: 다음 주기에 재시도합니다."
-                            self.save(session.sdef.name)
-                            log.warning("observer failed for %s", session.sdef.name)
+                            self.failed(session.sdef.name)
             except Exception:
                 self.error = "관찰 설정 또는 저장 오류: 프로파일과 데몬 저장소를 확인하십시오."
             try:
@@ -361,6 +389,41 @@ class Observer:
         return identity, end, state, rows, reset
 
     async def observe(self, session, cfg):
+        """One observation pass, serialized against every other one.
+
+        Returns what the pass did: ``{"called": bool, "events": int}``, where
+        ``called`` says whether a request was made at all. A pass whose
+        evidence holds nothing new spends no call, so ``called`` false is a
+        real outcome rather than a failure — the loop's justification rules
+        (see :meth:`evidence`) apply to a human's press the same way.
+        """
+        async with self.pass_lock():
+            return await self._observe(session, cfg)
+
+    async def refresh(self, name):
+        """Observe one session now, at a human's request.
+
+        Returns ``(status, payload)``: the payload is what the pass did, or
+        why it did nothing. Refusing is a real answer — observation being off
+        is the operator's cost switch, and a button press does not flip it.
+        """
+        session = next((s for s in self.manager.list() if s.sdef.name == name), None)
+        if session is None:
+            return 404, {"error": "세션을 찾을 수 없습니다."}
+        if not self.data.get("enabled"):
+            return 409, {"error": "관찰이 꺼져 있습니다. 관찰을 시작한 뒤 다시 시도하십시오."}
+        try:
+            cfg = await asyncio.to_thread(configuration)
+        except Exception:
+            return 400, {"error": "관찰 프로파일의 API endpoint와 인증 설정을 확인하십시오."}
+        self.load_session(name)
+        try:
+            return 200, await self.observe(session, cfg)
+        except Exception:
+            self.failed(name)
+            return 502, {"error": "관찰 호출이 실패했습니다. 자동 주기가 다시 시도합니다."}
+
+    async def _observe(self, session, cfg):
         name = session.sdef.name
         old = self.load_session(name)
         identity, cursor, state, rows, reset = await asyncio.to_thread(self.evidence, session, old)
@@ -373,7 +436,7 @@ class Observer:
             if cursor != old.get("cursor"):
                 self.data["sessions"].setdefault(name, {}).update(cursor=cursor, identity=identity)
                 self.save(name)
-            return
+            return {"called": False, "events": 0}
         row = copy.deepcopy(old)
         signature = [cfg["profile"], cfg["model"], cfg["endpoint"]]
         messages = row.get("messages", [])
@@ -390,6 +453,7 @@ class Observer:
         answer, usage = await complete(cfg, messages)
         events = [] if reset else row.get("events", [])
         evidence = {r["id"]: r for r in rows}
+        added = 0
         for event in answer["events"][:12]:
             if not isinstance(event, dict) or not isinstance(event.get("kind"), str) or event["kind"] not in KINDS:
                 continue
@@ -405,6 +469,7 @@ class Observer:
             events.append({"id": event_id, "kind": event["kind"], "text": text[:2000],
                            "needs_action": event.get("needs_action") is True, "source": source,
                            "evidence": evidence[source], "at": now(), "acknowledged": False})
+            added += 1
         answer_state = answer.get("state")
         add_usage(row, usage)
         row.update(identity=identity, cursor=cursor, state_source=state, config=signature,
@@ -421,6 +486,7 @@ class Observer:
         self.data["sessions"][name] = row
         self.save(name)
         self.record_usage(usage)
+        return {"called": True, "events": added}
 
     def snapshot(self):
         if not self.records_imported:
@@ -503,7 +569,12 @@ def install(app):
                 return web.json_response(event.get("evidence", {}))
         return web.json_response({"error": "event not found"}, status=404)
 
+    async def one_shot(request):
+        status, payload = await observer.refresh(request.match_info["name"])
+        return web.json_response(payload, status=status)
+
     app.router.add_get("/api/observer", snapshot)
+    app.router.add_post("/api/observer/{name}/refresh", one_shot)
     app.router.add_post("/api/observer/settings", settings)
     app.router.add_post("/api/observer/{name}/acknowledge", acknowledge)
     app.router.add_get("/api/observer/{name}/events/{event}", event_evidence)
