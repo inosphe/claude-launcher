@@ -115,3 +115,52 @@ harnesses:
     login_args: [login]
     heartbeat_args: [-p]
     description: Cursor Agent CLI.
+
+  devin:
+    command: devin
+    # OAuth harness: the account session lives in devin's own home and
+    # claunch never hands it the launcher token. No home_env is declared,
+    # and that is a measurement rather than an omission -- devin is the one
+    # harness with no environment variable that relocates its home.
+    # Measured 2026-09-20 on win32: XDG_CONFIG_HOME and APPDATA are both
+    # ignored (devin resolves the directory through the Win32 known-folder
+    # API, reproduced from a native shell as well as Git Bash), and
+    # `--config PATH` replaces only config.json, leaving credentials.toml
+    # machine-wide. A home_env nothing honours would be a setting that
+    # silently does nothing. install.py therefore targets devin's real
+    # machine-wide home, and reports it as machine-wide.
+    auth: oauth
+    login_args: [auth, login]
+    # An unattended session cannot answer devin's workspace-trust prompt,
+    # and no directory is trusted by default (there is no trust record for
+    # any path on this machine). Interactive sessions would block on a
+    # question the daemon cannot type an answer to, so the waiver is
+    # packaged here for the same reason codex packages its approvals
+    # bypass. Non-interactive mode refuses outright without it.
+    # The value is quoted on purpose: a bare YAML `false` parses to a
+    # boolean, and claunch stringifies argv elements, so the harness would
+    # receive `--respect-workspace-trust False` -- which devin's argument
+    # parser rejects (its possible values are the lowercase spellings).
+    args: [--respect-workspace-trust, "false"]
+    # devin's print mode: `devin ... -p <prompt>` runs once and exits.
+    # With the trust waiver in `args` this composes to
+    # `devin --respect-workspace-trust false -p <prompt>`, which was run
+    # against a live account and answered.
+    heartbeat_args: [-p]
+    # `-c/--continue` reopens the most recent conversation in the working
+    # directory, which is the same shape as codex's `resume --last`.
+    # `-r/--resume` without an id opens an interactive picker instead.
+    restore_args: [--continue]
+    # devin's own short names (``devin models list`` prints an `aliases:`
+    # line per family); claunch hands the choice over as `--model=<alias>`.
+    models: [opus, sonnet, haiku, gemini, gpt, swe, codex]
+    skip_permissions_args: [--permission-mode, dangerous]
+    # `--sandbox` is deliberately not declared for the full-access group:
+    # its help text scopes it to macOS seatbelt and Linux bwrap+seccomp,
+    # so its behaviour here (win32) is unmeasured, and devin's unswitched
+    # default already has no sandbox.
+    opening_transport: pty
+    input_readiness: bracketed-paste
+    description: >-
+      Devin CLI, signed in with the account's own OAuth session. The config
+      home is machine-wide, so profiles do not isolate its credentials.

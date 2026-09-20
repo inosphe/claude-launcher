@@ -91,6 +91,12 @@ def home(tmp_path, monkeypatch):
     monkeypatch.setenv("CLAUDE_LAUNCHER_SYNC_FILE", str(h / ".claunch.yaml"))
     monkeypatch.setenv("CLAUDE_LAUNCHER_SEED", str(seed))
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / ".claude-config"))
+    # Devin is the one harness whose install target is not under any of the
+    # paths above: its config home is machine-wide (see install.devin_home).
+    # Left unset, a test that installs a devin profile would write the MCP
+    # registration and five skill trees into the developer's real devin
+    # config — and pass. Same reasoning as the two lines above it.
+    monkeypatch.setenv("CLAUNCH_DEVIN_HOME", str(tmp_path / ".devin-home"))
     # Metering fronts every API-key provider with a real proxy process; the
     # env-assembly tests would each start one against a made-up upstream.
     # Off by default here — the tests of the feature set it back to "1".
