@@ -570,6 +570,7 @@ def build_app(
     r.add_post("/peer/ops/git", h_peer_ops_git)
     r.add_post("/peer/ops/lease", h_peer_ops_lease)
     r.add_get("/api/sessions", h_sessions_list)
+    r.add_get("/api/transcripts", h_transcripts_list)
     r.add_post("/api/sessions", h_sessions_create)
     r.add_delete("/api/sessions", h_sessions_clear)
     # The bulk verbs, one segment deep so they cannot be read as a session
@@ -643,6 +644,8 @@ def build_app(
     r.add_post("/api/sessions/{name}/loops/{loop}/close", h_session_loop_close)
     r.add_get("/api/sessions/{name}/capture", h_session_capture)
     r.add_get("/api/sessions/{name}/transcript", h_session_transcript)
+    r.add_get("/api/sessions/{name}/transcript/info", h_session_transcript_info)
+    r.add_get("/api/sessions/{name}/transcript/search", h_session_transcript_search)
     r.add_get("/api/sessions/{name}/wait", h_session_wait)
     r.add_post("/api/sessions/{name}/resize", h_session_resize)
     r.add_get("/api/sessions/{name}/ws", ws_mod.terminal_ws)
@@ -6812,6 +6815,115 @@ async def h_session_transcript(request: web.Request) -> web.Response:
         limit=limit,
     )
     return json_response(page)
+
+
+async def h_session_transcript_info(request: web.Request) -> web.Response:
+    """Where one session's conversation is, and how big it is.
+
+    The question "which file is this session's conversation" on its own,
+    without building the index a page or a search would. Deep by default,
+    unlike the fleet listing: this resolves one session, and the walk it may
+    cost is one walk.
+    """
+    session = _session(request)
+    row = await asyncio.to_thread(
+        transcript_view.info,
+        session.sdef.name,
+        session.sdef,
+        deep=request.query.get("deep") not in ("0", "false"),
+    )
+    return json_response(row)
+
+
+async def h_session_transcript_search(request: web.Request) -> web.Response:
+    """Where in this session's conversation a string or pattern was said.
+
+    The page answers "what is in front of me"; this answers "when did X come
+    up", which is the question a person asks of a conversation they did not
+    watch. ``q`` is a literal unless ``regex=1``; ``role``, ``prose`` and
+    ``case`` narrow it. Run in a thread for the same reason the page is: the
+    first search of a large transcript builds the index, and the event loop
+    has terminals to pump.
+    """
+    session = _session(request)
+    query = request.query.get("q") or ""
+    if not query:
+        return json_error(400, "'q' is required")
+    try:
+        limit = int(
+            request.query.get("limit", transcript_view.SEARCH_LIMIT_DEFAULT)
+        )
+    except ValueError:
+        return json_error(400, "'limit' must be an integer")
+    roles = [r for r in (request.query.get("role") or "").split(",") if r]
+    try:
+        view = await asyncio.to_thread(
+            transcript_view.search,
+            session.sdef.name,
+            session.sdef,
+            query=query,
+            regex=request.query.get("regex") in ("1", "true"),
+            ignore_case=request.query.get("case") not in ("1", "true"),
+            limit=limit,
+            roles=roles or None,
+            prose_only=request.query.get("prose") in ("1", "true"),
+        )
+    except ValueError as exc:
+        return json_error(400, str(exc))
+    return json_response(view)
+
+
+async def h_transcripts_list(request: web.Request) -> web.Response:
+    """Which sessions have a conversation on disk, and where each one is.
+
+    The fleet's index of readable conversations: one row per session that
+    has a transcript, newest written first, so a reader looking for where
+    something was said starts with the sessions that said something
+    recently. ``all=1`` keeps the sessions with nothing to read as well.
+
+    The lookup is the shallow one by default (see
+    :func:`transcript_view.source_of`): the deep searches cost a directory
+    walk per session, and this endpoint resolves hundreds at once. ``deep=1``
+    asks for them anyway, for a reader who knows a session's file is filed
+    under a slug we spell differently.
+    """
+    manager: SessionManager = request.app["manager"]
+    state = request.query.get("state") or "all"
+    states = {
+        "all": None,
+        "active": session_mod.CATEGORY_RUNNING,
+        "killed": session_mod.CATEGORY_KILLED,
+        "paused": session_mod.CATEGORY_PAUSED,
+        "archived": session_mod.CATEGORY_ARCHIVED,
+    }
+    if state not in states:
+        return json_error(400, f"invalid session list state: {state!r}")
+    want = states[state]
+    deep = request.query.get("deep") in ("1", "true")
+    keep_empty = request.query.get("all") in ("1", "true")
+
+    listed = []
+    for s in manager.list():
+        category = session_mod.session_category(s)
+        if want is not None and category != want:
+            continue
+        listed.append((s.sdef.name, s.sdef, category, s.status()))
+
+    def resolve():
+        out = []
+        for name, sdef, category, status in listed:
+            row = transcript_view.info(name, sdef, deep=deep)
+            row["status"] = status
+            row["category"] = category
+            if row["source"] or keep_empty:
+                out.append(row)
+        # Newest conversation first; the ones with no file (``all=1``) sort
+        # last, having no time to be ordered by.
+        out.sort(key=lambda r: r.get("modified_at") or "", reverse=True)
+        return out
+
+    rows = await asyncio.to_thread(resolve)
+    return json_response({"sessions": rows, "total": len(rows)})
 
 
 async def h_session_wait(request: web.Request) -> web.Response:
