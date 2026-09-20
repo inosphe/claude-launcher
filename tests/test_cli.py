@@ -183,6 +183,44 @@ def test_install_devin_profile_targets_devins_own_home(home, capsys):
     assert "machine-wide" in out
 
 
+def test_install_does_not_give_an_unbranched_harness_claude_codes_files(home, capsys):
+    """A declared harness with no branch of its own must not silently get Claude's.
+
+    The MCP branch chain used to end in the Claude Code branch, so any name
+    the branches above did not cover received ``.claude.json`` and a gate
+    guard in its profile home -- files it never opens -- while the install
+    printed those writes as successes. That is the state devin arrived in
+    (``claunch-2qr22``), and the next harness would have followed it there.
+    The chain now names Claude explicitly and reports the fall-through.
+    """
+    store.update(
+        lambda doc: doc.update(
+            {"harnesses": {"mystery": {"command": "mystery-agent"}}}
+        )
+    )
+    run("create", "work", "--no-seed", "--harness", "mystery")
+    capsys.readouterr()
+    assert run("install", "--profile", "work") == 0
+    out = capsys.readouterr().out
+
+    pdir = config.profiles_dir() / "work"
+    # Claude Code's files land in the profile root; this harness reads none
+    # of them, so their presence was a success report about nothing.
+    assert not (pdir / ".claude.json").exists()
+    assert not (pdir / "settings.json").exists()
+    assert "mcp server skipped" in out
+    assert "mystery" in out
+    # Claude itself must keep its branch: the split added a fall-through, it
+    # did not move the native installer target out of the chain.
+    capsys.readouterr()
+    run("create", "claude-work", "--no-seed")
+    capsys.readouterr()
+    assert run("install", "--profile", "claude-work") == 0
+    cdir = config.profiles_dir() / "claude-work"
+    assert (cdir / ".claude.json").is_file()
+    assert (cdir / "settings.json").is_file()
+
+
 def test_install_all_profile_without_profiles_says_so(home, capsys, tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     assert run("install", "--all-profile") == 0
