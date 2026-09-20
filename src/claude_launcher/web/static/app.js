@@ -6044,6 +6044,15 @@ async function refreshWorkspaces() {
   // whatever the spawn mode had done to it (the "inherit" wording) goes with
   // the old options and has to be said again.
   syncSpawnMode();
+  // And the rebuild can MOVE the row, which no `change` event reports: a
+  // workspace that went missing on disk drops the selection back to
+  // "(daemon cwd)" right here. Every picker below reads its options from
+  // wherever this row points, so they get the work the row's own change
+  // handler does. Left undone, a Reuse list built from the repository that
+  // was selected a moment ago stays on screen under a row that no longer
+  // names it — and the name picked from it would cut a checkout of the new
+  // repository instead.
+  if (select.value !== previous) applySessionCwdChange();
 }
 
 async function refreshRoles(meshName = "") {

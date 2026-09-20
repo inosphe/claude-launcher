@@ -84,7 +84,7 @@ function box(id) {
 }
 for (const id of ["new-worktree", "new-worktree-name-row",
                   "new-worktree-existing-row", "new-worktree-rebase-row",
-                  "worktree-hint", "worktree-rebase-trunk"]) {
+                  "worktree-hint", "worktree-rebase-trunk", "cwd-hint"]) {
   box_[id] = box(id);
 }
 
@@ -102,6 +102,7 @@ const form = {
 };
 
 let sessions = [];
+let registry = [];
 const asked = [];
 /* The daemon's answer per directory. Three repositories are enough to tell
    the sources apart: the picked one, the parent's, and the daemon's own. */
@@ -120,7 +121,9 @@ function answer(cwd) {
 
 const ctx = {};
 new Function(
-  "exports", "$", "Option", "sessionsCache", "api",
+  "exports", "$", "document", "Option", "sessionsCache", "api",
+  "workspacesCache", "renderWorkspaces", "renderHome", "syncSpawnMode",
+  "refreshWorkflowChoices", "beadsMode", "refreshIssueChoices",
   [`let newSpawnReport = null, newSpawnReportFor = null;`,
    sliceLet("newWorktreeFor"), sliceLet("newWorktreeGit"),
    sliceLet("newWorktreeFilter"),
@@ -129,6 +132,13 @@ new Function(
    slice("worktreeTrunkBranch"), slice("syncWorktreeTrunkButton"),
    slice("renderWorktreeOptions"), slice("syncNewWorktree"),
    slice("refreshNewWorktree"),
+   // The registry poll, which rebuilds the Directory row behind the form's
+   // back. Everything it closes over that is a function arrives as a
+   // parameter; the module state it reads is declared here.
+   sliceLet("workspacesRendered"),
+   `let wsOpen = false, currentPage = "home";`,
+   slice("refreshWorkspaces"),
+   slice("applySessionCwdChange"),
    `exports.refresh = refreshNewWorktree;
     exports.render = renderWorktreeOptions;
     exports.sync = syncNewWorktree;
@@ -140,15 +150,28 @@ new Function(
     // the row is only usable once THIS parent's report says so.
     exports.policy = (name, report) => {
       newSpawnReportFor = name; newSpawnReport = report;
-    };`].join("\n")
+    };
+    exports.pollRegistry = refreshWorkspaces;
+    exports.setRegistry = (list) => { registry = list; };`].join("\n")
 )(ctx,
    (id) => (id === "new-session" ? form : box_[id] || null),
+   // refreshWorkspaces reaches the row the way the page does, by selector.
+   { querySelector: (sel) => (sel.includes("name=cwd") ? form.cwd : null),
+     createElement: () => option("", "") },
    function Option(label, value) { return option(label, value); },
    sessions,
    async (url) => {
+     if (String(url) === "/api/workspaces") return { ok: true, json: async () => ({ workspaces: registry }) };
      const cwd = decodeURIComponent(String(url).replace(/^.*cwd=/, ""));
      return { ok: true, json: async () => answer(cwd) };
-   });
+   },
+   registry,
+   // renderWorkspaces and renderHome belong to other pages this check does
+   // not open; syncSpawnMode is the form's own gating.
+   () => {}, () => {}, () => {},
+   // applySessionCwdChange is sliced for real, so its own dependencies have
+   // to exist — what it does to the worktree list is the point of the case.
+   () => {}, () => "", () => {});
 
 let failures = 0;
 function check(what, got, want) {
@@ -160,6 +183,10 @@ function check(what, got, want) {
 }
 const names = () => form.worktree_existing.options
   .map((o) => o.value).filter((v) => v !== "");
+/* The poll reaches the pickers through applySessionCwdChange, which calls
+   refreshNewWorktree without awaiting it — one macrotask turn lets the fetch
+   it started settle, the way it would on a live page before the next frame. */
+const settle = () => new Promise((r) => setTimeout(r, 0));
 
 async function main() {
   ctx.setSessions([{ name: "lead", status: "idle", cwd: "F:/repo" }]);
@@ -269,9 +296,39 @@ async function main() {
   check("a box already holding the trunk reads as pressed",
         btn.getAttribute("aria-pressed"), "true");
 
+  /* -- the registry poll can move the row without a change event -------- */
+  // A workspace whose directory went missing is dropped from the registry,
+  // and the poll puts the Directory row back on "(daemon cwd)" from inside
+  // itself. A programmatic `.value` fires no `change` event, so unless the
+  // poll re-reads them the pickers below go on showing the repository the
+  // row has already stopped naming — and a name taken from that list would
+  // cut a checkout of the NEW repository.
+  form.parent.value = "";
+  ctx.policy("", null);
+  registry = [{ name: "repo", path: "F:/repo", exists: true },
+              { name: "other", path: "F:/other", exists: true }];
+  await ctx.pollRegistry();
+  form.cwd.value = "F:/repo";
+  await ctx.refresh();
+  check("with the workspace registered, the row and the list agree",
+        [form.cwd.value, names()], ["F:/repo", ["w-alpha", "w-beta"]]);
+
+  registry = [{ name: "other", path: "F:/other", exists: true }];
+  await ctx.pollRegistry();
+  await settle();
+  check("a workspace that went missing drops the row to the daemon's cwd",
+        form.cwd.value, "");
+  check("...and the worktree list is re-read from where the row now points",
+        asked[asked.length - 1], "");
+  check("...so the old repository's checkouts are off the picker",
+        names(), []);
+
   /* -- a locked row says so instead of captioning ------------------------ */
   // The same parent, with spawn.allow_worktree shut: the row is not merely
   // unusable, it is unusable for a reason the operator can act on.
+  form.parent.value = "lead";
+  form.cwd.value = "F:/repo";
+  await ctx.refresh();
   ctx.policy("lead", { may_choose: [] });
   ctx.sync();
   const locked = box_["worktree-hint"];
