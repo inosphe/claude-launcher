@@ -136,9 +136,11 @@ check("the form's controls read in the new order", named(form.text), [
   "borrow", "null_token", "resume", "fork", "skip_permissions",
   "codex_yolo", "codex_sandbox", "args",
   // worktree selection is a create-only checkout choice, after the runtime
-  // fold so it is not mistaken for an inherited spawn row
+  // fold so it is not mistaken for an inherited spawn row. The narrowing box
+  // sits between the mode's radio and the list it narrows, the way the
+  // board's own box sits between its radio and its picker.
   "worktree_mode", "worktree_mode", "worktree_name", "worktree_mode",
-  "worktree_existing", "worktree_rebase",
+  "worktree_filter", "worktree_existing", "worktree_rebase",
   // what it is told first
   "score_goal", "task",
   // where that job is written down — four radios sharing one name, then

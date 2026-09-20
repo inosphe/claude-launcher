@@ -5885,11 +5885,66 @@ let workspacesCache = [];
 
 let newWorktreeFor = null;
 let newWorktreeGit = { repo: false, worktrees: [] };
+/* The name typed into the box above the picker, kept here rather than read
+   off the input at render time: the rebuild is driven by a fetch that lands
+   after the box may have changed, and the two must not disagree about which
+   narrowing is on screen. */
+let newWorktreeFilter = "";
 
 function newWorktreeMode() {
   const f = $("new-session");
   const picked = f && f.worktree_mode;
   return picked ? picked.value : "";
+}
+
+/* The trunk a rebase should aim at, spelled the way this repository spells
+   it. ``master`` and ``main`` are both in the wild and the form cannot know
+   which one a given checkout uses, so the answer is read off the branch list
+   the picker already fetched rather than assumed -- and a repository with
+   neither (a fresh ``git init`` on ``trunk``, say) offers no button instead
+   of offering a branch that is not there. */
+function worktreeTrunkBranch() {
+  const branches = newWorktreeGit.branches || [];
+  for (const name of ["master", "main"]) {
+    if (branches.includes(name)) return name;
+  }
+  return "";
+}
+
+/* The trunk button's face, and whether the box already holds it. */
+function syncWorktreeTrunkButton() {
+  const f = $("new-session");
+  const btn = $("worktree-rebase-trunk");
+  if (!f || !btn) return;
+  const trunk = worktreeTrunkBranch();
+  btn.disabled = !!f.worktree_rebase.disabled || !trunk;
+  btn.textContent = trunk || "trunk";
+  btn.title = trunk
+    ? `rebase onto ${trunk} — press again to clear`
+    : "this repository has no master or main branch";
+  btn.setAttribute(
+    "aria-pressed",
+    String(!!trunk && f.worktree_rebase.value.trim() === trunk),
+  );
+}
+
+/* The picker's rows, narrowed by the box above it. Rebuilt rather than
+   filtered in place, for the reason the board's picker is: a hidden <option>
+   can still be what `select.value` holds, and a filter that leaves a pick
+   standing that the operator can no longer see is a filter that lies about
+   what Reuse will do. */
+function renderWorktreeOptions() {
+  const f = $("new-session");
+  const sel = f && f.worktree_existing;
+  if (!sel) return;
+  const q = (newWorktreeFilter || "").trim().toLowerCase();
+  const all = newWorktreeGit.worktrees || [];
+  const shown = q ? all.filter((n) => n.toLowerCase().includes(q)) : all;
+  const kept = sel.value;
+  sel.innerHTML = "";
+  sel.appendChild(new Option("(pick a worktree)", ""));
+  for (const name of shown) sel.appendChild(new Option(name, name));
+  sel.value = shown.includes(kept) ? kept : "";
 }
 
 function syncNewWorktree() {
@@ -5910,11 +5965,25 @@ function syncNewWorktree() {
   $("new-worktree-name-row").classList.toggle("hidden", mode !== "new");
   $("new-worktree-existing-row").classList.toggle("hidden", mode !== "existing");
   $("new-worktree-rebase-row").classList.toggle("hidden", mode === "");
+  // Which directory the list was read from, said out loud. The picker is the
+  // daemon's answer about ONE directory and it is not always the one the row
+  // above names — a policy report still in flight leaves the row on
+  // "(inherit the parent's directory)", and a parent the session poll has not
+  // carried yet is no directory at all. A picker showing another repository's
+  // checkouts silently is the failure this row exists to prevent, and the
+  // only defence is to name the repository the names came from.
   const hint = $("worktree-hint");
-  hint.textContent = usable ? "" : parent
-    ? "worktree selection is locked by spawn.allow_worktree"
-    : "the selected directory is not a git repository";
-  hint.classList.toggle("hidden", usable);
+  const locked = !usable;
+  hint.textContent = locked
+    ? (parent
+        ? "worktree selection is locked by spawn.allow_worktree"
+        : "the selected directory is not a git repository")
+    : (mode === "existing" && newWorktreeFor
+        ? `checkouts of ${cwdShort(newWorktreeFor)}`
+        : "");
+  hint.classList.toggle("info", !locked);
+  hint.classList.toggle("hidden", !hint.textContent);
+  syncWorktreeTrunkButton();
 }
 
 async function refreshNewWorktree() {
@@ -5923,17 +5992,17 @@ async function refreshNewWorktree() {
   const cwd = newSessionCwd();
   if (cwd === newWorktreeFor) return;
   newWorktreeFor = cwd;
+  // A narrowing written against one repository's checkouts means nothing
+  // against another's — the same rule the board's search follows when the
+  // directory moves under it. The box is emptied with the memo, so what is
+  // on screen is what the list was built from.
+  newWorktreeFilter = "";
+  if (f.worktree_filter) f.worktree_filter.value = "";
   try {
     const resp = await api(`/api/git?cwd=${encodeURIComponent(cwd)}`);
     newWorktreeGit = resp.ok ? await resp.json() : { repo: false, worktrees: [] };
   } catch { newWorktreeGit = { repo: false, worktrees: [] }; }
-  const keep = f.worktree_existing.value;
-  f.worktree_existing.innerHTML = "";
-  f.worktree_existing.appendChild(new Option("(pick a worktree)", ""));
-  for (const name of newWorktreeGit.worktrees || [])
-    f.worktree_existing.appendChild(new Option(name, name));
-  f.worktree_existing.value = [...f.worktree_existing.options]
-    .some((o) => o.value === keep) ? keep : "";
+  renderWorktreeOptions();
   syncNewWorktree();
 }
 
@@ -6017,6 +6086,15 @@ async function refreshWorkspaces() {
   // whatever the spawn mode had done to it (the "inherit" wording) goes with
   // the old options and has to be said again.
   syncSpawnMode();
+  // And the rebuild can MOVE the row, which no `change` event reports: a
+  // workspace that went missing on disk drops the selection back to
+  // "(daemon cwd)" right here. Every picker below reads its options from
+  // wherever this row points, so they get the work the row's own change
+  // handler does. Left undone, a Reuse list built from the repository that
+  // was selected a moment ago stays on screen under a row that no longer
+  // names it — and the name picked from it would cut a checkout of the new
+  // repository instead.
+  if (select.value !== previous) applySessionCwdChange();
 }
 
 async function refreshRoles(meshName = "") {
@@ -6596,13 +6674,20 @@ async function refreshSpawnPolicy() {
   newSpawnReport = null;
   syncSpawnMode();
   // A child's workflows are the ones declared where the child will stand,
-  // which is its parent's directory unless the policy lets it be moved.
-  if (!name) { refreshWorkflowChoices(); return; }
+  // which is its parent's directory unless the policy lets it be moved. The
+  // worktree list is read from that same directory, so it is re-read on the
+  // same two edges. The second one is not decoration: the report is what
+  // settles the Directory row, and a list fetched before it landed was
+  // fetched from wherever the row pointed while the answer was still in
+  // flight -- "" among the possibilities, which the daemon reads as its own
+  // directory. Left alone, that list stood for the rest of the modal's life.
+  if (!name) { refreshWorkflowChoices(); refreshNewWorktree(); return; }
   const report = await spawnReport(name);
   if (newSpawnReportFor !== name) return;   // the pick moved on while we asked
   newSpawnReport = report;
   syncSpawnMode();
   refreshWorkflowChoices();
+  refreshNewWorktree();
 }
 
 /* The workspace a picked directory IS, by name. The picker's values are
@@ -12121,6 +12206,38 @@ document
 
 for (const radio of document.querySelectorAll('#new-worktree input[name="worktree_mode"]')) {
   radio.addEventListener("change", syncNewWorktree);
+}
+
+/* The box above the Reuse picker. Present on any page that ships the row,
+   but an older markup without it must still boot — a missing filter field is
+   a missing search, not a reason the form dies (the board's own box is
+   guarded the same way). */
+const worktreeSearch = $("new-session").worktree_filter;
+if (worktreeSearch) {
+  worktreeSearch.addEventListener("input", () => {
+    newWorktreeFilter = worktreeSearch.value;
+    renderWorktreeOptions();
+    syncNewWorktree();
+  });
+}
+
+/* The trunk button, and one press of it. A toggle rather than a fill,
+   because the box is also where a stacked worker names its PARENT's branch:
+   one press aims the rebase at the trunk, the next takes it back, and the
+   pressed face says which of the two the box is holding. */
+const worktreeTrunk = $("worktree-rebase-trunk");
+if (worktreeTrunk) {
+  worktreeTrunk.addEventListener("click", () => {
+    const f = $("new-session");
+    const trunk = worktreeTrunkBranch();
+    if (!trunk || f.worktree_rebase.disabled) return;
+    f.worktree_rebase.value =
+      f.worktree_rebase.value.trim() === trunk ? "" : trunk;
+    syncWorktreeTrunkButton();
+  });
+  $("new-session").worktree_rebase.addEventListener(
+    "input", syncWorktreeTrunkButton,
+  );
 }
 
 
