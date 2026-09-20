@@ -43,17 +43,9 @@ def _register_py_harness():
 
 
 def test_score_goal_defaults_creation_children_and_user_rating(home, tmp_path, monkeypatch):
-    from claude_launcher.daemon.session import Session
     from claude_launcher.daemon import score_goal
 
     _register_py_harness()
-    commands = []
-
-    async def command(session, text):
-        commands.append((session.sdef.name, text))
-        return True
-
-    monkeypatch.setattr(Session, "deliver_command", command)
 
     async def run():
         mgr = _manager()
@@ -83,9 +75,11 @@ def test_score_goal_defaults_creation_children_and_user_rating(home, tmp_path, m
             assert resp.status == 201, doc
             assert doc["score_goal"] is True
             assert doc["user_reward"] == 0 and doc["user_penalty"] == 0
-            assert openings == [""]  # No argv task may precede /goal.
-            await _wait_for(lambda: bool(commands), "initial goal")
-            assert commands == [("rated", "/goal " + score_goal.prompt(mgr.get("rated").sdef))]
+            # The goal rides the head of the opening itself, ahead of the
+            # task — one block, and never a slash command.
+            opening = openings[0]
+            assert opening.startswith(score_goal.prompt(mgr.get("rated").sdef))
+            assert "\n\ndo this task" in opening
             # Scores are no longer set directly: the old PUT route is gone.
             resp = await client.put(
                 "/api/sessions/rated/score-goal", headers=BEARER, json={"score": 7.5})
@@ -104,14 +98,14 @@ def test_score_goal_defaults_creation_children_and_user_rating(home, tmp_path, m
             restored = SessionDef.from_dict(saved)
             assert restored.user_reward == 1 and restored.user_penalty == 1
             assert restored.score_goal
-            # Rating the session does not submit another slash command.
-            assert len(commands) == 1
             resp = await client.post("/api/sessions/rated/children", headers=BEARER, json={
                 "name": "off", "score_goal": False, "mesh": "-", "workflow": "-", "beads": False,
             })
             doc = await resp.json()
             assert resp.status == 201, doc
             assert not mgr.get("off").sdef.score_goal
+            # Opted out: the opening is the parent block alone, no goal head.
+            assert openings[1].startswith("---\n# claunch: the session that created you")
             resp = await client.post("/api/sessions/off/keys", headers=BEARER, json={
                 "keys": ["note", "Enter"], "force": True, "feedback": "reward",
             })
@@ -120,11 +114,12 @@ def test_score_goal_defaults_creation_children_and_user_rating(home, tmp_path, m
                 "name": "child", "mesh": "-", "workflow": "-", "beads": False,
             })
             assert resp.status == 201, await resp.json()
-            await _wait_for(lambda: len(commands) == 2, "child goal")
-            # A child never inherits the parent's counts.
+            # A child never inherits the parent's counts, and its own goal
+            # heads its own opening, ahead of the parent block.
             assert mgr.get("child").sdef.user_reward == 0
             assert mgr.get("child").sdef.user_penalty == 0
-            assert commands[-1] == ("child", "/goal " + score_goal.prompt(mgr.get("child").sdef))
+            assert openings[2].startswith(score_goal.prompt(mgr.get("child").sdef))
+            assert "parent: rated" in openings[2]
             await client.put("/api/score-goal/defaults", headers=BEARER, json={"enabled": False})
             assert mgr.get("rated").sdef.score_goal
             resp = await client.get("/api/sessions?view=rail", headers=BEARER)

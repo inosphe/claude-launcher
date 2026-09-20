@@ -184,15 +184,6 @@ def test_deliver_sends_the_enter_as_its_own_write(monkeypatch):
     assert writes == [b"\x1b[200~[T]\rcflow: go\x1b[201~", b"\r"]
 
 
-def test_goal_command_is_one_unstamped_input_with_separate_enter(monkeypatch):
-    monkeypatch.setattr(session_mod, "PASTE_ENTER_DELAY", 0.0)
-    s, writes = _fake_session(bracketed=True)
-    assert asyncio.run(session_mod.Session.deliver_command(s, "/goal target"))
-    assert writes == [b"\x1b[200~/goal target\x1b[201~", b"\r"]
-    with pytest.raises(ValueError):
-        asyncio.run(session_mod.Session.deliver_command(s, "/goal target\nsecond"))
-
-
 def test_state_dependent_delivery_refreshes_or_cancels_after_wait(monkeypatch):
     monkeypatch.setattr(session_mod, "PASTE_ENTER_DELAY", 0.0)
     for updated in [7, 10]:

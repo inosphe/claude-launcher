@@ -986,7 +986,6 @@ class Session:
 
     async def _deliver(
         self, text: Union[str, Callable[[], str]], *, force: bool = False, wait_for_draft: bool = False,
-        command: bool = False,
     ) -> Optional[bool]:
         """Put ``text`` in front of the agent running here, as a user message.
 
@@ -1086,7 +1085,7 @@ class Session:
                 text = text()
                 if not text:
                     return False
-            await self.paste(text if command else f"{delivery_stamp()}\n{text}", enter=True)
+            await self.paste(f"{delivery_stamp()}\n{text}", enter=True)
         except Exception as exc:  # noqa: BLE001 — SessionGone, PTY write, ...
             log.debug("deliver to %r failed: %s", self.sdef.name, exc)
             return False
@@ -1107,17 +1106,6 @@ class Session:
                 return result
             # Release the lock between safe retries, so an explicit forced
             # delivery can still submit the draft and release this wait.
-            await asyncio.sleep(0.2)
-
-    async def deliver_command(self, text: str) -> bool:
-        """Submit a single slash command without the automated-message stamp."""
-        if not text.startswith("/") or "\n" in text or "\r" in text:
-            raise ValueError("expected a single-line slash command")
-        while True:
-            async with self._delivery_lock:
-                result = await self._deliver(text, command=True, wait_for_draft=True)
-            if result is not None:
-                return result
             await asyncio.sleep(0.2)
 
     def queue_delivery(self, text: str) -> bool:
