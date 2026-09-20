@@ -17,6 +17,15 @@ from urllib.parse import quote
 
 from . import daemon_client
 
+#: The roster partitions ``--state`` accepts, spelled here rather than
+#: imported: ``daemon.mesh`` pulls aiohttp in, and this module is loaded by
+#: every ``claunch mesh`` invocation. ``test_mesh_cli_owed`` pins the two
+#: lists equal, so a partition added there and not here is a test failure.
+MEMBER_STATES = (
+    "all", "current", "running", "remote",
+    "killed", "paused", "archived", "missing",
+)
+
 
 def relay_line(relay: Optional[dict]) -> str:
     """One-line relay connectivity summary, printed all over the CLI.
@@ -1044,15 +1053,27 @@ def _fmt_age(secs) -> str:
 
 
 def _cmd_owed(args: argparse.Namespace) -> int:
-    """Unanswered mail, per member — the terminal form of the web dashboard."""
+    """Unanswered mail, per member — the terminal form of the web dashboard.
+
+    Narrowed at the daemon rather than here. Building a local row walks the
+    message log twice, so an unnarrowed report is members times messages:
+    mesh-0826 answered in 4.2s over 251 members and 27708 messages, and it
+    is synchronous, so for those seconds the daemon answers nothing else --
+    every terminal it is pumping stops with it. ``--state`` picks the
+    partition; the default leaves out the sessions that have ended, which
+    are also the ones whose debt nobody can act on.
+    """
     client = daemon_client.ensure_running()
-    report = client.get(f"/api/mesh/{args.mesh}/owed")
-    rows = report.get("members", [])
+    query = f"?state={args.state}"
     if args.handle:
-        rows = [r for r in rows if r["handle"] == args.handle]
-        if not rows:
-            print(f"no member {args.handle!r} in mesh {args.mesh!r}", file=sys.stderr)
-            return 1
+        # By name, so the state filter is not applied at all: a member asked
+        # for by name and missing would otherwise read as "no such member".
+        query = f"?handle={quote(args.handle)}"
+    report = client.get(f"/api/mesh/{args.mesh}/owed{query}")
+    rows = report.get("members", [])
+    if args.handle and not rows:
+        print(f"no member {args.handle!r} in mesh {args.mesh!r}", file=sys.stderr)
+        return 1
     if not report.get("owed"):
         print(f"mesh {args.mesh!r}: nobody owes an answer")
     for r in rows:
@@ -1079,6 +1100,14 @@ def _cmd_owed(args: argparse.Namespace) -> int:
                 f"    {m.get('id')} {_fmt_age(m.get('age')):>6} ago  "
                 f"from {m.get('from')} [{intent}]: {body}"
             )
+    counts = report.get("member_counts") or {}
+    shown = len(rows)
+    total = counts.get("all")
+    if not args.handle and isinstance(total, int) and total > shown:
+        print(
+            f"note: {shown} of {total} members, state={args.state} "
+            f"('--state all' for every member)"
+        )
     hb = report.get("heartbeat") or {}
     if report.get("owed") and not hb.get("enabled"):
         # A debt nobody is chasing: worth saying, because the obvious reading
@@ -1136,7 +1165,12 @@ def register(sub) -> None:
     )
     p.add_argument("mesh")
     p.add_argument("--handle", metavar="HANDLE",
-                   help="one member only (shown even when it owes nothing)")
+                   help="one member only (shown even when it owes nothing, "
+                        "and whatever state its session is in)")
+    p.add_argument("--state", default="current", choices=MEMBER_STATES,
+                   help="which members to read (default: current -- running "
+                        "and remote; a report over every member costs a walk "
+                        "of the message log per member)")
     p.set_defaults(func=_cmd_owed)
 
     p = msub.add_parser("leave", help="leave a mesh")
