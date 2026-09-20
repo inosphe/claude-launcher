@@ -86,8 +86,15 @@ async def _serve(host: str, port: int, cfg: dict, bound: Optional[dict] = None) 
         background_render_budget=float(cfg["background_render_budget_kib"]) * 1024,
     )
     failed = manager.restore_all()
-    for name in failed:
-        log.warning("failed to restore session %r", name)
+    if failed:
+        # The cause of each one is already in the log — restore_all logs the
+        # traceback where it catches. What belongs here is the set, said once,
+        # which is the thing boot output is read for; a warning per name said
+        # the same sentence a second time and no more than that.
+        log.warning(
+            "failed to restore %d session(s): %s",
+            len(failed), ", ".join(failed),
+        )
     restored = [s.sdef.name for s in manager.list() if not s.exited]
     retired = [s.sdef.name for s in manager.list() if s.exited]
     if restored:

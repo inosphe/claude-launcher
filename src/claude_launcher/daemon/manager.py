@@ -2013,6 +2013,15 @@ class SessionManager:
                             self.resumed_blank.append(sdef.name)
                         continue
                     except Exception:
+                        # The traceback is the only record this failure will
+                        # ever have: the record is retired on the next line
+                        # and nothing retries a relaunch, so the next boot
+                        # starts from a session that is simply not there
+                        # any more. Without it the log names the session and
+                        # says nothing about why — `failed to restore session
+                        # 's560'` and `'s571'` (2026-09-18 11:35:57) are
+                        # unrecoverable for exactly this reason.
+                        log.exception("failed to restore session %r", sdef.name)
                         failed.append(sdef.name)
                 self._retire(sdef, entry)
         finally:
