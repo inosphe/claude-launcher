@@ -134,6 +134,7 @@ form.harness.value = "claude";
 let forkSyncs = 0;
 let stances = 0;
 let wfRefreshes = 0;
+let wtRefreshes = 0;
 const fetched = [];
 /* The daemon's answer per parent, scripted per test. A parent with no entry
    answers null — a fetch that failed, which must open nothing. */
@@ -160,7 +161,8 @@ const HARNESS_DETAILS = {
 };
 new Function(
   "exports", "$", "document", "Option", "sessionsCache", "syncForkAvailability",
-  "renderRoleStance", "refreshWorkflowChoices", "spawnReport", "workspacesCache",
+  "renderRoleStance", "refreshWorkflowChoices", "refreshNewWorktree",
+  "spawnReport", "workspacesCache",
   "profileDetails", "profileOptions", "harnessDetails",
   "syncRuntimeFold", "renderRuntimeSummary", "renderProfileHint",
   "syncNewBorrowOptions", "syncNewWorktree",
@@ -211,6 +213,7 @@ exports.setSessions = (s) => { sessionsCache = s; };
    () => { forkSyncs++; },
    () => { stances++; },
    () => { wfRefreshes++; },
+   () => { wtRefreshes++; },
    async (name) => { fetched.push(name); return reports[name] || null; },
    [{ name: "repo", path: "F:/repo", exists: true }],
    PROFILE_DETAILS, PROFILE_OPTIONS, HARNESS_DETAILS,
@@ -358,6 +361,12 @@ async function main() {
                    true, false, false]);
   check("a child's workflows are re-read for where the child will stand",
         wfRefreshes > 0, true);
+  /* The worktree picker is read from that same directory, so the report's
+     arrival has to re-ask it too. Without this the list fetched while the
+     report was in flight stands for the rest of the modal's life, and the
+     row it was read from is exactly what the report settles. */
+  check("...and so is the worktree list",
+        wtRefreshes > 0, true);
   check("the profile row gains an inherit entry, and starts on it",
         [form.profile.options[0].label, form.profile.value],
         ["(inherit the parent's profile)", ""]);

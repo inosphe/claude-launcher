@@ -995,9 +995,31 @@ a.cflow-scope:hover { background: #1d3559; text-decoration: underline; }
   padding: 0 6px; font-size: 11px; text-transform: uppercase; color: #7d8590;
 }
 #new-worktree-existing-row, #new-worktree-rebase-row { margin-left: 22px; }
+/* The rebase row carries a control of its own beside the branch box, so it
+   is a flex line rather than a block: the label takes the room, the trunk
+   button keeps its own width at the end. */
+#new-worktree-rebase-row { display: flex; gap: 8px; align-items: flex-end; }
+#new-worktree-rebase-row > label { flex: 1 1 auto; min-width: 0; margin-bottom: 0; }
+#worktree-rebase-trunk {
+  flex: none; padding: 4px 10px; font-size: 11px; cursor: pointer;
+  border: 1px solid #30363d; border-radius: 5px;
+  background: #21262d; color: #c6cdd5;
+}
+#worktree-rebase-trunk:hover { background: #30363d; }
+/* Pressed, not merely hovered: the box holds this branch, and one more press
+   is what empties it again — the same lit face the message trace's
+   "only this session" switch wears while it is on. */
+#worktree-rebase-trunk[aria-pressed="true"] {
+  background: #1f6feb; border-color: #1f6feb; color: #fff;
+}
+#worktree-rebase-trunk[aria-pressed="true"]:hover { background: #388bfd; }
+#worktree-rebase-trunk:disabled { opacity: 0.45; cursor: not-allowed; }
 #worktree-hint {
   margin: -2px 0 8px; font-size: 11px; line-height: 1.45; color: #d29922;
 }
+/* The same line, saying where the list came from rather than what is wrong
+   with the form — so it is read as a caption, not as a warning. */
+#worktree-hint.info { color: #7d8590; }
 /* WHO it runs as. Fenced like the two fieldsets below it so the form reads
    as three questions and a fold, not as a pile of rows — and placed with the
    parent and the name because whose credentials a session holds belongs with

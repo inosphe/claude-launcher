@@ -341,6 +341,7 @@ CHECKS = [
         "railscroll_check.js",
         "railquiet_check.js",
         "spawnform_check.js",
+        "worktreepicker_check.js",
         "newflow_check.js",
         "spawnsize_check.js",
         "selectpopup_check.js",

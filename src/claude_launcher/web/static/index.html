@@ -677,10 +677,26 @@
             <input name="worktree_name" placeholder="(auto: session-time)"></label>
           <label class="check"><input type="radio" name="worktree_mode" value="existing">
             <span>existing worktree</span></label>
+          <!-- The search box above the picker, in the same hidden row, for
+               the reason the board's has one: a machine that has been
+               spawning for weeks has a hundred checkouts, and the box
+               narrows the SAME list rather than asking a second question.
+               It carries no label of its own beyond its placeholder. -->
           <label id="new-worktree-existing-row">Reuse
+            <input name="worktree_filter" type="search"
+                   placeholder="filter the checkouts — name"
+                   autocomplete="off">
             <select name="worktree_existing"></select></label>
-          <label id="new-worktree-rebase-row">Rebase onto
-            <input name="worktree_rebase" placeholder="branch (optional)"></label>
+          <!-- A div rather than a label: the trunk button is a control of its
+               own, and a button inside a label forwards the click to the
+               label's control as well, so pressing it would both fill the
+               branch and open the box under it. -->
+          <div id="new-worktree-rebase-row">
+            <label>Rebase onto
+              <input name="worktree_rebase" placeholder="branch (optional)"></label>
+            <button type="button" id="worktree-rebase-trunk"
+                    aria-pressed="false"></button>
+          </div>
           <p id="worktree-hint" class="hidden"></p>
         </fieldset>
 
