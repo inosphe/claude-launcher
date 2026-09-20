@@ -9,7 +9,11 @@ the sidebar's own forest, which orders the session list by lineage.
 So the harnesses in ``tests/web`` slice the real functions out of the shipped
 ``app.js`` — not a copy of them — and exercise them: ``layout_check`` on the
 maths, ``render_check`` on the SVG the drawing code assembles against a stub
-DOM, ``lineage_check`` on the session list's tree ordering, ``railbadge_check`` on
+DOM, ``lineage_check`` on the session list's tree ordering,
+``railgroupdepth_check`` on what that ordering becomes once the rail is
+grouped — grouping cuts the forest up, and a row whose parent went under
+another heading must not keep the indent and the `└` tick that claim the
+row above it — ``railbadge_check`` on
 the cflow line each rail row carries — which run it speaks for, and when it is
 flagged as the reader's move rather than a peer's — ``sessmesh_check`` on
 the mesh tags beside each row's name, which come from the mesh poll rather
@@ -292,6 +296,7 @@ CHECKS = [
         "channels_check.js",
         "render_check.js",
         "lineage_check.js",
+        "railgroupdepth_check.js",
         "sessionfilters_check.js",
         "sessiongroupsticky_check.js",
         "sessiongroupstack_check.js",

@@ -1303,10 +1303,46 @@ function toggleSessionPin(name) {
 }
 /* ---- end rail pins ---------------------------------------------------- */
 
+/* Re-measure lineage depth inside one bucket of rows.
+
+   `byLineage` numbers the whole rail, and grouping then cuts that tree up:
+   a session lands under the heading its own mesh (or workspace) names, and
+   the session that spawned it can land under a different heading entirely.
+   The depth it was given outside says nothing about the rows it now sits
+   among -- but the row builder spends it anyway, indenting the row and
+   drawing the `└` tick that claims the row above is its parent, with a
+   `spawned by <name>` title naming a session that is not in this group.
+
+   Seen on s640-qf1: a quick-fork that joined no mesh, drawn one level in
+   under s599 in the `(no mesh)` group while its origin s640 sat under
+   mesh-0826. `claunch sessions` printed the same pair correctly, because
+   the CLI never splits the forest.
+
+   So depth is counted again here, against the rows actually present: a row
+   whose parent is in this bucket sits one level under it, and a row whose
+   parent is elsewhere is a root of this bucket. Entries arrive
+   parent-before-child and bucketing keeps that order, so the parent's own
+   bucket depth is always known by the time its child is reached. A row
+   `byLineage` already made a root (depth 0 -- a cleared parent, a cycle, a
+   parent the filter hid) stays one: this only ever takes indentation away.
+
+   On an ungrouped rail every parent is in the one bucket, so every row
+   comes back with the depth it went in with. */
+function regroupDepths(entries) {
+  const depths = new Map();
+  return entries.map(([session, depth]) => {
+    const parent = session.parent;
+    const own = depth > 0 && parent && depths.has(parent)
+      ? depths.get(parent) + 1 : 0;
+    depths.set(session.name, own);
+    return [session, own];
+  });
+}
+
 /* Convert lineage-ordered rows into headings and rows. Each selected group
    occupies one level, so selection order is also nesting priority. */
 function sessionGroupRows(entries, groups, level = 0, meshGroup = null) {
-  if (level >= groups.length) return entries.map(([session, depth]) =>
+  if (level >= groups.length) return regroupDepths(entries).map(([session, depth]) =>
     ({ type: "session", session, depth, meshGroup }));
   const group = groups[level];
   const buckets = new Map();
@@ -1946,10 +1982,16 @@ async function refreshSessions(options) {
         if (!buckets.has(value)) buckets.set(value, []);
         buckets.get(value).push(entry);
       }
+      // Depth is counted again per bucket here for the same reason the
+      // nested helper does it (see `regroupDepths`): this path cuts the
+      // forest up too, and a row whose parent went to another heading must
+      // not keep the indent that heading gave it.
+      const regroup = typeof regroupDepths === "function"
+        ? regroupDepths : (rows) => rows;
       return [...buckets.keys()].sort((a, b) =>
         a.localeCompare(b, undefined, { sensitivity: "base" })).flatMap((value) => [
         { type: "group", group: "mesh", value, level: 0 },
-        ...buckets.get(value).map(([session, depth]) =>
+        ...regroup(buckets.get(value)).map(([session, depth]) =>
           ({ type: "session", session, depth,
              meshGroup: value === "(no mesh)" ? null : value })),
       ]);
