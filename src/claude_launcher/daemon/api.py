@@ -4372,6 +4372,14 @@ async def h_sessions_list(request: web.Request) -> web.Response:
             "exited_at", "archived_at", "paused_at", "delivery_hold",
             "pending_deliveries", "compacting",
             "context", "branch", "briefing", "winddown", "session_reminder",
+            # Whose conversation this session is a copy of, and the merge or
+            # handoff the operator has already asked for. The header's
+            # fork/merge pair reads both off this list and nothing else
+            # (``forkControlState``/``handoffControlState`` in app.js), so
+            # leaving them out is not a saving: it hid ``↩ merge`` on every
+            # quick-fork there has ever been, and left ``⑂ fork`` offered on
+            # the copy — the fork button's guard is the same absent field.
+            "quick_fork_of", "handoff",
             "status_checks", "tps",
         }
         attached = [

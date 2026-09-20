@@ -262,6 +262,52 @@ def test_merge_request_types_the_instruction_into_the_fork_and_marks_it_pending(
     asyncio.run(run())
 
 
+def test_the_rail_poll_carries_what_the_fork_merge_pair_reads(home, tmp_path, forkable, typed):
+    """``/api/sessions?view=rail`` is the only list the dashboard header reads.
+
+    ``sessionsCache`` in app.js is filled from this response and from nothing
+    else, and ``forkControlState``/``handoffControlState`` decide the header's
+    ``⑂ fork`` / ``↩ merge`` pair off that cache. The rail view answers a
+    whitelist of fields, and while ``quick_fork_of`` was not on it the merge
+    button was hidden on every quick-fork there was, and the fork button --
+    whose guard is ``!s.quick_fork_of`` -- was offered on the copy instead.
+    """
+    _register_py_harness()
+
+    async def run():
+        mgr = _mgr()
+        client = await _serve(mgr, MeshManager(mgr, root=tmp_path / "mesh"))
+        try:
+            mgr.create(SessionDef(name="a", harness="py", cwd=str(tmp_path)))
+            resp = await client.post("/api/sessions/a/quick-fork", headers=BEARER)
+            assert resp.status == 201, await resp.json()
+
+            async def rail():
+                got = await client.get("/api/sessions?view=rail", headers=BEARER)
+                return {r["name"]: r for r in (await got.json())["sessions"]}
+
+            rows = await rail()
+            # the copy says whose copy it is; the origin has no such field
+            assert rows["a-qf1"]["quick_fork_of"] == "a"
+            assert "quick_fork_of" not in rows["a"]
+            # and the rail view still withholds what only the detail panel wants
+            assert "task" not in rows["a-qf1"] and "env" not in rows["a-qf1"]
+
+            # a pending merge rides the same poll: the button reads "merging…"
+            # and a second press is "stop now", both off this field
+            resp = await client.post("/api/sessions/a-qf1/handoff", json={}, headers=BEARER)
+            assert resp.status == 200, await resp.json()
+            rows = await rail()
+            assert rows["a-qf1"]["handoff"]["kind"] == "merge"
+            assert rows["a-qf1"]["handoff"]["target"] == "a"
+            assert "handoff" not in rows["a"]
+            await mgr.shutdown_all()
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
 def test_merge_completion_delivers_to_the_origin_then_ends_the_fork(home, tmp_path, forkable, typed):
     _register_py_harness()
 
