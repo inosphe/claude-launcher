@@ -165,7 +165,9 @@ new Function(
      const cwd = decodeURIComponent(String(url).replace(/^.*cwd=/, ""));
      return { ok: true, json: async () => answer(cwd) };
    },
-   registry,
+   // workspacesCache starts empty; the poll fills it from the registry the
+   // api stub above serves.
+   [],
    // renderWorkspaces and renderHome belong to other pages this check does
    // not open; syncSpawnMode is the form's own gating.
    () => {}, () => {}, () => {},
