@@ -224,7 +224,14 @@ function eventItem(s,e) {
    page-level figure is those added up here, so the daemon stores one shape and
    the client decides how to read it. A row written before the meter carries
    only the last call's `usage`, and that is labelled as a last-call figure
-   instead of being passed off as a lifetime total. */
+   instead of being passed off as a lifetime total.
+   The window cards and the per-session block read those same three figures
+   off the same shape, which is what makes one word mean one quantity across
+   the page: naming `prompt_tokens` "입력" in a card while the block named the
+   uncached remainder by that word made the same usage read 9.8x apart
+   (measured 2026-09-20: 73,965,831 against 7,583,639 over 53 session rows,
+   with 89.5% of prompt tokens served from cache). The headline stays the
+   summed `total_tokens`, so 입력 + 캐시 + 출력 still adds up to it. */
 const usageCount = value => Number.isFinite(value) ? value.toLocaleString("ko-KR") : "0";
 const usageNumber = value => Number.isFinite(Number(value)) ? Number(value) : 0;
 function renderTokenSummary() {
@@ -238,14 +245,20 @@ function renderTokenSummary() {
     short.push(`${abbreviation} ${total===null?"—":compact.format(total)}`);
     const card=node("div","","observer-token-window");
     card.append(node("span",label),node("strong",total===null?"—":usageCount(total)));
-    if(usage)card.append(node("small",`입력 ${usageCount(usageNumber(usage.prompt_tokens))} · 출력 ${usageCount(usageNumber(usage.completion_tokens))}`));
+    if(usage){
+      const shape=usageShape(usage);
+      const parts=[`입력 ${usageCount(shape.input)}`];
+      if(shape.counted)parts.push(`캐시 ${usageCount(shape.cached)}`);
+      parts.push(`출력 ${usageCount(shape.output)}`);
+      card.append(node("small",parts.join(" · ")));
+    }
     cards.push(card);
   }
   $("token-compact").textContent=short.join(" · ");
   $("token-windows").replaceChildren(...cards);
   const since=summary?.since && new Date(summary.since);
   $("token-note").textContent=since && Number.isFinite(since.getTime())
-    ? `집계 시작 ${since.toLocaleString("ko-KR")} · 시작 이전 사용량 제외 · 캐시는 입력에 포함`
+    ? `집계 시작 ${since.toLocaleString("ko-KR")} · 시작 이전 사용량 제외 · 캐시는 입력과 별도로 표시`
     : "기간별 사용량을 조회할 수 없습니다.";
 }
 function usageShape(row) {
