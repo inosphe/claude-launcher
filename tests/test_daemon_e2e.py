@@ -600,6 +600,64 @@ def test_restart_keeps_exited_sessions_respawnable(home, tmp_path):
     asyncio.run(run())
 
 
+def test_an_ending_is_recorded_when_it_lands_not_at_the_next_shutdown(
+    home, tmp_path
+):
+    """An ended session must stop being recorded as running at once.
+
+    ``was_running`` is what the next daemon relaunches from, and it is read
+    off the live object — so every verb that ends a session persists in the
+    same breath as the signal it sends, while the child is still on its way
+    out, and what lands on disk is ``True``. A graceful shutdown corrects it
+    (``shutdown_all`` persists before it tears anything down), but a daemon
+    that never gets there — an abrupt exit, a successor that takes the lock
+    while the predecessor is still draining — leaves the stale ``True``, and
+    the next boot relaunches a session that was ended. That is a kill undone
+    by the restart, and for a run the daemon ends itself it is a session that
+    comes back only to be ended again, once per restart.
+
+    Read here through the store rather than through a second manager's view
+    of it: the second manager below is built *without* the first one ever
+    reaching ``shutdown_all``, which is the whole point — it stands in for
+    the daemon that died before it could write anything.
+    """
+    _register_py_harness()
+
+    async def run():
+        mgr = _manager()
+        # (1) the child ends itself
+        selfquit = mgr.create(SessionDef(name="selfquit", harness="py",
+                                         cwd=str(tmp_path)))
+        await _wait_screen(selfquit, "READY")
+        await selfquit.send_keys(["quit", "Enter"])
+        await selfquit.wait_for("exited", timeout=10.0, threshold=0.5)
+        # (2) the operator ends it — the kill path the goal is about
+        killed = mgr.create(SessionDef(name="killed", harness="py",
+                                       cwd=str(tmp_path)))
+        await _wait_screen(killed, "READY")
+        mgr.kill("killed")
+        await killed.wait_for("exited", timeout=10.0, threshold=0.5)
+
+        entries = {e["def"]["name"]: e for e in db.open_default().load_all()}
+        assert entries["selfquit"]["was_running"] is False
+        assert entries["killed"]["was_running"] is False
+        assert entries["killed"]["exit_code"] == killed.exit_code
+
+        # the "daemon that died first": a fresh manager over the same store,
+        # with no shutdown_all behind it
+        mgr2 = _manager()
+        assert mgr2.restore_all() == []
+        assert sorted(s.sdef.name for s in mgr2.list()) == ["killed", "selfquit"]
+        for name in ("killed", "selfquit"):
+            record = mgr2.get(name)
+            assert record.exited, f"{name} was relaunched after its kill landed"
+            assert record.info()["status"] == "exited"
+        await mgr.shutdown_all()
+        await mgr2.shutdown_all()
+
+    asyncio.run(run())
+
+
 def test_ws_attach_to_a_retired_record(home, tmp_path):
     """A viewer can open a session the daemon only has a *record* of: it gets
     the final screen and an 'exited' status (resume is the way out from there)

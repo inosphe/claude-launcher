@@ -478,11 +478,31 @@ class SessionManager:
 
     def _session_exited(self, session: Session) -> None:
         """Fan a session's exit out to :attr:`exit_hooks` — unless the daemon
-        is going down, in which case nothing has ended."""
+        is going down, in which case nothing has ended.
+
+        The exit reaches the store *here*, and not at whatever the next
+        :meth:`persist` for another reason happens to be. ``was_running`` is
+        read off the live object, and every ending that goes through a verb
+        persists in the same breath as the signal it sends — while the child
+        is still on its way out, so what lands on disk is ``True``. A daemon
+        that then goes down without a graceful :meth:`shutdown_all` (an
+        abrupt exit, a successor that takes the lock while the predecessor is
+        still draining) leaves that stale ``True`` behind, and the next boot's
+        :meth:`restore_all` relaunches a session whose child is already gone:
+        the kill is undone by the restart, and a run the daemon ends comes
+        back only to be ended again. Writing it here means the record is right
+        from the moment it becomes right, whatever happens to the daemon
+        after.
+
+        :attr:`change_hooks` has documented this as the one funnel a session's
+        *exit* goes through since it was written; until now it was the one
+        registry change that did not.
+        """
         if self.shutting_down:
             return
         self.events.record(session, "exit", "세션 프로세스 종료",
                            exit_code=session.exit_code)
+        self.persist()
         for hook in list(self.exit_hooks):
             try:
                 hook(session)
