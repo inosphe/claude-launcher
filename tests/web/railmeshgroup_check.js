@@ -136,7 +136,7 @@ new Function(
   + slice("sessionCategory") + slice("sessionMatchesFilter")
   + slice("byLineage") + slice("sessionMeshGroup")
   + slice("sessionWorkspaceGroup") + slice("sessionWorkspaceLabel")
-  + slice("sessionGroupValue") + slice("sessionGroupRows")
+  + slice("sessionGroupValue") + slice("regroupDepths") + slice("sessionGroupRows")
   + slice("sessMeshes") + slice("railMeshTags")
   + slice("sessHandles") + slice("handleTag")
   + slice("profileHarnessLabel") + slice("railMetaText")

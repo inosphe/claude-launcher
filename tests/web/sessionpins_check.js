@@ -198,7 +198,7 @@ const ctx = {};
 new Function(
   "exports", "document", "el", "api", "$", "location", "localStorage", "BASE",
   stubs + slice("byLineage") + groupBlock() + pinsBlock()
-  + slice("sessionGroupRows") + filterBlock()
+  + slice("regroupDepths") + slice("sessionGroupRows") + filterBlock()
   + slice("refreshSessions")
   + `
 function railCardKill() { return false; }
