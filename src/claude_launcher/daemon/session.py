@@ -472,6 +472,8 @@ class Session:
         self._started_mono = time.monotonic()
         self._subscribers: Set[asyncio.Queue] = set()
         self._loop = asyncio.get_running_loop()
+        #: One writer into the PTY at a time; see :meth:`write_bytes`.
+        self._write_lock = asyncio.Lock()
         self._status = STATUS_STARTING
         self._saw_output = False
         #: Latched once the harness has been seen ready to take a message; see
@@ -1564,9 +1566,17 @@ class Session:
     async def write_bytes(self, data: bytes) -> None:
         if self.exited or self.pty is None:
             raise SessionGone(f"session {self.sdef.name!r} has exited")
-        # PTY writes can block briefly (ConPTY pipe backpressure); keep the
-        # event loop responsive by writing from the thread pool.
-        await self._loop.run_in_executor(None, self.pty.write, data)
+        # One writer at a time. A session has several -- each viewer, the
+        # delivery queue, send-keys -- and the executor below runs them on
+        # different threads, so without this they reach the PTY interleaved.
+        # On Windows the backend also decodes as it writes and carries a
+        # partial character between calls (pty_backend._WinPty.write), and a
+        # second writer entering that decoder would have its first bytes
+        # read as the end of someone else's character.
+        async with self._write_lock:
+            # PTY writes can block briefly (ConPTY pipe backpressure); keep
+            # the event loop responsive by writing from the thread pool.
+            await self._loop.run_in_executor(None, self.pty.write, data)
 
     def resize(self, cols: int, rows: int) -> None:
         if self.exited or self.pty is None:

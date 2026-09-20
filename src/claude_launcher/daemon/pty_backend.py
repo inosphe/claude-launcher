@@ -8,6 +8,7 @@ single concurrency model regardless of OS.
 
 from __future__ import annotations
 
+import codecs
 import os
 import subprocess
 import sys
@@ -104,7 +105,9 @@ class _WinPty(PtyHandle):
     """ConPTY via pywinpty's ptyprocess-style ``PtyProcess``.
 
     pywinpty's ``read`` returns *decoded text*; it is re-encoded to UTF-8 here
-    so the rest of the pipeline is bytes-only like the Unix backend.
+    so the rest of the pipeline is bytes-only like the Unix backend. Writes
+    go the other way, and that direction has to remember what it has seen:
+    see :meth:`write`.
     """
 
     def __init__(self, argv, *, env, cwd, cols, rows):
@@ -127,6 +130,7 @@ class _WinPty(PtyHandle):
         from . import win_job
 
         self._job = win_job.ProcessJob.for_pid(self.pid)
+        self._open_decoder()
 
     def read(self) -> bytes:
         try:
@@ -137,8 +141,35 @@ class _WinPty(PtyHandle):
             return b""
         return data.encode("utf-8", errors="replace") if isinstance(data, str) else data
 
+    def _open_decoder(self) -> None:
+        """The decoder :meth:`write` carries between calls."""
+        self._in = codecs.getincrementaldecoder("utf-8")("replace")
+
     def write(self, data: bytes) -> None:
-        self._pty.write(data.decode("utf-8", errors="replace"))
+        """Bytes in, text out, with a sequence split across two calls kept.
+
+        ConPTY takes text, so what a viewer typed is decoded here. Decoding
+        each call on its own destroyed any character whose bytes were split
+        between two of them: the leading bytes became U+FFFD at the end of
+        one call and the trailing bytes became U+FFFD at the start of the
+        next, so one character typed reached the child as two replacement
+        characters. ASCII cannot show it -- one byte per character -- and
+        Hangul is three bytes per syllable, which is where it was reported
+        (s586, 2026-09-20: syllables going missing while typing quickly).
+
+        Splits are ordinary. Every writer into a PTY chunks by something
+        that is not a character boundary: a socket frame, a pipe read, a
+        buffer that filled. So the decoder is kept and fed, and a trailing
+        fragment waits here for the rest of its character. Bytes that can
+        begin no sequence are still replaced, so rubbish cannot stall what
+        follows it.
+
+        The decoder carries state between calls, so two writers must not be
+        inside it at once. Session.write_bytes serialises them.
+        """
+        text = self._in.decode(data)
+        if text:
+            self._pty.write(text)
 
     def resize(self, cols: int, rows: int) -> None:
         self._pty.setwinsize(rows, cols)
