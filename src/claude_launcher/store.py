@@ -42,6 +42,9 @@ Schema::
       dimensions: 0             # 0 = the model's own width; a smaller value truncates (Matryoshka)
     workspaces:                 # machine-local; see :mod:`workspaces`
       <name>: <absolute path>
+    projects:                   # the tier above meshes/sessions; see :mod:`projects`
+      <name>:
+        default_workspace: <workspace name>   # optional
 
 The on-disk file is first created from a bootstrap *template* (``template.yaml``,
 see :mod:`template`); after that this file is authoritative and is read live —

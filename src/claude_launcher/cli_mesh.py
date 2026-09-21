@@ -89,8 +89,12 @@ def _mesh_as_me(client, mesh: str, session: str = "") -> dict:
 
 def _cmd_create(args: argparse.Namespace) -> int:
     client = daemon_client.ensure_running()
-    info = client.post("/api/mesh", {"name": args.mesh})
-    print(f"created mesh {info['name']!r}")
+    body = {"name": args.mesh}
+    if getattr(args, "project", None):
+        body["project"] = args.project
+    info = client.post("/api/mesh", body)
+    where = f" in project {info['project']!r}" if info.get("project") else ""
+    print(f"created mesh {info['name']!r}{where}")
     _print_relay(client.get("/api/daemon").get("relay"))
     return 0
 
@@ -108,14 +112,22 @@ def _cmd_ls(_args: argparse.Namespace) -> int:
             return 1
         print(f"{daemon_client.unreachable_reason(why)}; no meshes")
         return 0
-    payload = client.get("/api/mesh")
+    project_filter = getattr(_args, "project", None) or ""
+    query = f"?project={quote(project_filter)}" if project_filter else ""
+    payload = client.get(f"/api/mesh{query}")
     meshes = payload.get("meshes", [])
     if not meshes:
-        print("no meshes; create one with 'claunch mesh create <name>'")
+        if project_filter:
+            print(f"no meshes in project {project_filter!r}")
+        else:
+            print("no meshes; create one with 'claunch mesh create <name>'")
     for m in meshes:
         tag = f"  (mirror of {m['primary']})" if m.get("primary") else ""
+        # The project column is drawn only on the unfiltered list, so a
+        # one-project view reads exactly as the list always did.
+        proj = "" if project_filter else f"{m.get('project') or 'default':<10} "
         print(
-            f"{m['name']:<16} {len(m['members'])} member(s), "
+            f"{m['name']:<16} {proj}{len(m['members'])} member(s), "
             f"{m['messages']} message(s)"
             + tag
         )
@@ -1127,9 +1139,18 @@ def register(sub) -> None:
 
     p = msub.add_parser("create", help="create a mesh")
     p.add_argument("mesh")
+    p.add_argument(
+        "--project", "-P", metavar="NAME",
+        help="file the mesh under this project ('claunch project ls' lists "
+        "them; default: the 'default' project)",
+    )
     p.set_defaults(func=_cmd_create)
 
     p = msub.add_parser("ls", aliases=["list"], help="list meshes")
+    p.add_argument(
+        "--project", "-P", metavar="NAME",
+        help="only the meshes filed under this project",
+    )
     p.set_defaults(func=_cmd_ls)
 
     p = msub.add_parser("rm", aliases=["delete"], help="remove a mesh")

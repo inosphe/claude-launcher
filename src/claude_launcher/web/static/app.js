@@ -1881,7 +1881,12 @@ async function refreshSessions(options) {
   };
   let data;
   try {
-    const resp = await api(`/api/sessions?view=rail&state=${encodeURIComponent(state)}`);
+    // The project filter is spelled inline rather than through a helper so
+    // the poll stands on its own: the rail harnesses run this function
+    // against a stub page that declares none of the project state, and a
+    // helper they never defined would throw here and empty the rail.
+    const resp = await api(
+      `/api/sessions?view=rail&state=${encodeURIComponent(state)}${typeof currentProject === "string" && currentProject ? "&project=" + encodeURIComponent(currentProject) : ""}`);
     // An error response carries a JSON body of its own, so `resp.json()`
     // succeeds and `data.sessions` is simply absent -- which used to read as
     // "this daemon has no sessions" and empty the rail, drop every parked
@@ -5864,6 +5869,118 @@ let rolesRequest = 0;
    so the options are only rebuilt when the list actually differs. */
 let workspacesRendered = null;
 
+/* Projects: the tier above meshes and sessions (see projects.py). The rail's
+   selector picks one, or "" for every project; the choice narrows the
+   session and mesh polls (the daemon filters, ?project=) and seeds the
+   create form's Project row. Remembered per browser, like the state filter,
+   because "the project I am working in" outlives a reload. */
+const PROJECT_KEY = `claunch_project:${BASE}`;
+let projectsCache = [];
+let projectsRendered = null;
+let currentProject = (() => {
+  try { return localStorage.getItem(PROJECT_KEY) || ""; } catch { return ""; }
+})();
+
+/* The query-string fragment the polls append for the picked project — one
+   spelling, so the session list and the mesh list can never disagree about
+   which project the page is showing. */
+function projectQuery(prefix) {
+  return currentProject ? `${prefix}project=${encodeURIComponent(currentProject)}` : "";
+}
+
+function setCurrentProject(name) {
+  const next = String(name || "");
+  if (next === currentProject) return;
+  currentProject = next;
+  try { localStorage.setItem(PROJECT_KEY, next); } catch {}
+  const rail = $("project-select");
+  if (rail && rail.value !== next) rail.value = next;
+  // The form files a new session where the rail is looking, unless the
+  // rail says "all" — then the form keeps whatever the operator picked.
+  const form = document.querySelector("#new-session select[name=project]");
+  if (form && next && [...form.options].some((o) => o.value === next)) {
+    form.value = next;
+    applyProjectDefaultCwd(form);
+  }
+  // Both lists redraw on the next poll anyway; asking now spares the
+  // two-second wait after a pick, the way the state filter does.
+  refreshSessions();
+  refreshMeshList();
+  if (currentPage === "home") renderHome();
+}
+
+/* Fill the Directory row from the picked project's default workspace. A
+   default only: applied when the directory is still the daemon's own (the
+   empty answer) or still the previous project's default — never over a
+   directory the operator chose by hand. */
+function applyProjectDefaultCwd(form) {
+  const f = form.form || form.closest && form.closest("form") || $("new-session");
+  const cwd = f && f.cwd;
+  if (!cwd) return;
+  const picked = projectsCache.find((p) => p.name === form.value);
+  const previous = projectsCache.find((p) => p.name === (form._lastProject || ""));
+  form._lastProject = form.value;
+  const untouched = !cwd.value || (previous && cwd.value === previous.default_cwd);
+  if (!untouched) return;
+  const target = picked && picked.default_cwd;
+  if (target && [...cwd.options].some((o) => o.value === target)) {
+    cwd.value = target;
+  } else if (!picked || !picked.default_cwd) {
+    // Back to the daemon's own directory when the project has no default:
+    // leaving the old project's directory in place would file the session
+    // under one project and start it in another's checkout.
+    if (previous && cwd.value === previous.default_cwd) cwd.value = "";
+  }
+}
+
+function projectSelectOptions(select, withAll) {
+  const kept = select.value;
+  select.innerHTML = "";
+  if (withAll) select.appendChild(new Option("All projects", ""));
+  for (const p of projectsCache) {
+    const label = p.default_workspace
+      ? `${p.name} — ${p.default_workspace}` : p.name;
+    select.appendChild(new Option(label, p.name));
+  }
+  select.value = [...select.options].some((o) => o.value === kept) ? kept : "";
+}
+
+async function refreshProjects() {
+  let list;
+  try {
+    const resp = await api("/api/projects");
+    if (!resp.ok) throw new Error(String(resp.status));
+    list = (await resp.json()).projects || [];
+  } catch {
+    // A daemon older than these assets has no /api/projects. The rail then
+    // shows the flat roster it always did, and the form's Project row stays
+    // on the default project rather than offering a list nobody serves.
+    return;
+  }
+  const signature = JSON.stringify(list);
+  if (signature === projectsRendered) return;
+  projectsRendered = signature;
+  projectsCache = list;
+  const rail = $("project-select");
+  if (rail) {
+    projectSelectOptions(rail, true);
+    // A remembered project that was removed since falls back to "all",
+    // and the memory is corrected so the next load does not ask for it.
+    if (currentProject && rail.value !== currentProject) setCurrentProject("");
+    else rail.value = currentProject;
+  }
+  const form = document.querySelector("#new-session select[name=project]");
+  if (form) {
+    projectSelectOptions(form, false);
+    if (currentProject && [...form.options].some((o) => o.value === currentProject)) {
+      form.value = currentProject;
+    }
+    form._lastProject = form.value;
+  }
+  if (wsOpen) renderWorkspaces();
+  if (currentPage === "home") renderHome();
+}
+
 /* The same guard for the two create-form pickers built out of the session
    list, which the rail's own two-second poll rebuilds. Same symptom exactly:
    a user who opens either dropdown and reads it for two seconds has it shut
@@ -6597,7 +6714,8 @@ $("new-session").addEventListener("input", () => {
    spawn modal. A form that offers what it cannot send teaches the policy
    wrong; one that withholds what the policy opened teaches it just as
    wrong, and lies to the person who set 'allow_profile: true'. */
-const SPAWN_INHERITS = ["profile", "harness", "model", "effort", "borrow", "null_token", "cwd",
+const SPAWN_INHERITS = ["profile", "harness", "model", "effort", "borrow", "null_token",
+                        "project", "cwd",
                         "args", "resume", "fork", "skip_permissions", "codex_yolo",
                         "codex_sandbox"];
 
@@ -6616,7 +6734,7 @@ const SPAWN_INHERITS = ["profile", "harness", "model", "effort", "borrow", "null
    held to the same partition by tests/web/newform_check.js: the fold's rows
    plus these must be exactly SPAWN_INHERITS, so promoting a row means moving
    it, never copying it. */
-const RUNTIME_PROMOTED = ["profile", "harness", "model", "effort", "cwd"];
+const RUNTIME_PROMOTED = ["profile", "harness", "model", "effort", "project", "cwd"];
 
 /* The picked parent's spawn capabilities, and which parent they are about:
    one report per parent, kept until the pick moves. */
@@ -6646,6 +6764,11 @@ function spawnUnlocked(report) {
     // is built from is exactly what 'allow_workspace' opens. The report
     // omits the list rather than emptying it when that is shut.
     cwd: !!(report && report.workspaces),
+    // Ungated: a project is a label on the roster, not a change to what
+    // runs, so a child may always be filed elsewhere than its parent. (The
+    // default workspace that follows from it rides the cwd gate on the
+    // daemon, which warns rather than refuses.)
+    project: true,
     args: may.includes("args"),
     // The child API treats an empty args list as inheritance, so a checkbox
     // cannot faithfully remove a parent's sole Claude permission flag. Keep
@@ -6757,6 +6880,16 @@ function syncSpawnMode() {
   const open = spawnUnlocked(report);
   for (const key of SPAWN_INHERITS) {
     if (f[key]) f[key].disabled = !!parent && !open[key];
+  }
+  // The project row is seeded from the parent the first time a parent is
+  // named: a child is filed where its parent is unless the operator says
+  // otherwise, and the daemon reads an absent field as the default project.
+  if (parent && newSpawnDefaultsFor !== parent.name && f.project) {
+    const inherited = parent.project || "default";
+    if ([...f.project.options].some((o) => o.value === inherited)) {
+      f.project.value = inherited;
+      f.project._lastProject = inherited;
+    }
   }
   // Seeding happens once per parent, not on every poll: the second call
   // would be the one that throws away the operator's own pick.
@@ -7090,6 +7223,10 @@ $("new-session").addEventListener("submit", async (e) => {
     cwd: f.cwd.value,  // a registered workspace path, or "" = the daemon's cwd
     args: f.args.value.trim() ? f.args.value.trim().split(/\s+/) : [],
   };
+  // The project travels on both shapes. A session of its own is filed under
+  // it; a child is filed under it too, and the daemon starts the child in
+  // that project's default workspace when no directory row was sent.
+  if (f.project && f.project.value) body.project = f.project.value;
   if (!parent && f.model && f.model.value) body.model = f.model.value;
   if (!parent && f.effort && f.effort.value) body.effort = f.effort.value;
   if (!parent) {
@@ -7553,6 +7690,16 @@ for (const filter of SESSION_FILTERS) {
   const button = $(`session-filter-${filter}`);
   if (button) button.addEventListener("click", () => setSessionFilter(filter));
 }
+const projectSelect = $("project-select");
+if (projectSelect) {
+  projectSelect.addEventListener("change", () => setCurrentProject(projectSelect.value));
+}
+{
+  const formProject = document.querySelector("#new-session select[name=project]");
+  if (formProject) {
+    formProject.addEventListener("change", () => applyProjectDefaultCwd(formProject));
+  }
+}
 const meshGroupToggle = $("session-group-mesh");
 if (meshGroupToggle) {
   meshGroupToggle.checked = sessionGroupByMesh;
@@ -7585,6 +7732,7 @@ $("refresh-all").addEventListener("click", async () => {
       refreshMeshList(),
       refreshCflow(),
       refreshWorkspaces(),
+      refreshProjects(),
       // The spawn form's pickers come from the same daemon and go stale the
       // same way — a workspace or harness added since load belongs here too.
       refreshHarnesses(),
@@ -12623,6 +12771,13 @@ function renderHome() {
     "the repository board, by session — who is on what"
   ));
 
+  grid.appendChild(homeCard(
+    "Projects", "#/workspaces",
+    projectsCache.length > 1
+      ? projectsCache.map((p) => p.name).join(" · ")
+      : "one project (default) — add one to file sessions and meshes apart"
+  ));
+
   const missing = workspacesCache.filter((w) => !w.exists).length;
   grid.appendChild(homeCard(
     "Workspaces", "#/workspaces",
@@ -15740,6 +15895,7 @@ function renderWorkspaces() {
   view.appendChild(railStaleCard());
 
   view.appendChild(wsAddCard());
+  view.appendChild(projectsCard());
 
   view.appendChild(faqCard());
 
@@ -16226,6 +16382,136 @@ function wsAddCard() {
     await wsAdd(path.value, name.value);
   });
   return card;
+}
+
+/* The projects card: the registry the rail's selector and the create form's
+   Project row read. Add a project (with an optional default workspace),
+   change a project's default from a picker over the registered workspaces,
+   or drop one. The default project is listed but has no remove button —
+   it is where every unfiled session and mesh lives. */
+let projectError = "";
+let projectDraft = { name: "", workspace: "" };
+
+function projectsCard() {
+  const card = el("div", "ws-add");
+  card.appendChild(el("h3", null, `Projects (${projectsCache.length})`));
+  card.appendChild(el(
+    "p", "wf-note",
+    "The tier above meshes and sessions. Each project keeps its own session " +
+    "and mesh lists (the rail's Project selector), and a default workspace: " +
+    "the directory a session created in it starts in when no other is chosen."
+  ));
+
+  const workspaceOptions = (select, chosen) => {
+    select.innerHTML = "";
+    select.appendChild(new Option("(no default workspace)", ""));
+    for (const w of workspacesCache) select.appendChild(new Option(w.name, w.name));
+    select.value = [...select.options].some((o) => o.value === chosen) ? chosen : "";
+  };
+
+  const form = el("form", "project-add-row");
+  const name = el("input");
+  name.id = "project-name";
+  name.placeholder = "project name";
+  name.autocomplete = "off";
+  name.value = projectDraft.name;
+  name.addEventListener("input", () => { projectDraft.name = name.value; });
+  const ws = el("select");
+  ws.id = "project-workspace";
+  workspaceOptions(ws, projectDraft.workspace);
+  ws.addEventListener("change", () => { projectDraft.workspace = ws.value; });
+  const submit = el("button", "wf-btn approve", "Add project");
+  submit.type = "submit";
+  form.appendChild(name);
+  form.appendChild(ws);
+  form.appendChild(submit);
+  form.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    await projectAdd(name.value, ws.value);
+  });
+  card.appendChild(form);
+  if (projectError) card.appendChild(el("p", "error", projectError));
+
+  for (const p of projectsCache) {
+    const row = el("div", "project-row-item");
+    row.appendChild(el("span", "project-name", p.name));
+    const pick = el("select");
+    pick.id = `project-default-${p.name}`;
+    workspaceOptions(pick, p.default_workspace || "");
+    pick.addEventListener("change", () => projectSetWorkspace(p.name, pick.value));
+    row.appendChild(pick);
+    if (p.default_workspace && !p.default_cwd) {
+      row.appendChild(el("span", "badge exited", "workspace not registered"));
+    }
+    const here = sessionsCache.filter(
+      (s) => (s.project || "default") === p.name).length;
+    if (here) row.appendChild(el("span", "badge idle", plural(here, "session")));
+    if (!p.is_default) {
+      const rm = el("button", "wf-btn clear", "Remove");
+      rm.addEventListener("click", () => projectRemove(p));
+      row.appendChild(rm);
+    }
+    card.appendChild(row);
+  }
+  return card;
+}
+
+async function projectRequest(method, url, body) {
+  projectError = "";
+  try {
+    const resp = await api(url, {
+      method,
+      headers: { "Content-Type": "application/json" },
+      body: body === undefined ? undefined : JSON.stringify(body),
+    });
+    const doc = await resp.json().catch(() => ({}));
+    if (!resp.ok) {
+      projectError = doc.error || `HTTP ${resp.status}`;
+      renderWorkspaces();
+      return false;
+    }
+  } catch (err) {
+    projectError = String(err);
+    renderWorkspaces();
+    return false;
+  }
+  await refreshProjects();
+  renderWorkspaces();
+  return true;
+}
+
+async function projectAdd(rawName, workspace) {
+  const name = (rawName || "").trim();
+  if (!name) {
+    projectError = "a project needs a name";
+    renderWorkspaces();
+    return;
+  }
+  const body = { name };
+  if (workspace) body.default_workspace = workspace;
+  if (await projectRequest("POST", "/api/projects", body)) {
+    projectDraft = { name: "", workspace: "" };
+    renderWorkspaces();
+  }
+}
+
+async function projectSetWorkspace(name, workspace) {
+  await projectRequest(
+    "PATCH", `/api/projects/${encodeURIComponent(name)}`,
+    { default_workspace: workspace || null }
+  );
+}
+
+async function projectRemove(p) {
+  const here = sessionsCache.filter((s) => (s.project || "default") === p.name).length;
+  const note = here
+    ? ` ${plural(here, "session")} filed under it keep the name on their records.`
+    : "";
+  if (!confirm(`Remove project '${p.name}'?${note}`)) return;
+  if (await projectRequest("DELETE", `/api/projects/${encodeURIComponent(p.name)}`) &&
+      currentProject === p.name) {
+    setCurrentProject("");
+  }
 }
 
 function wsRow(w) {
@@ -22008,7 +22294,8 @@ function renderRelayBadge(relay) {
 async function refreshMeshList() {
   let data;
   try {
-    const resp = await api("/api/mesh?view=rail");
+    // Inline for the same reason as the session poll's filter.
+    const resp = await api(`/api/mesh?view=rail${typeof currentProject === "string" && currentProject ? "&project=" + encodeURIComponent(currentProject) : ""}`);
     data = await resp.json();
   } catch {
     return;
@@ -22038,6 +22325,12 @@ async function refreshMeshList() {
     // a mirror is somebody else's mesh: say so before the counts, since what
     // you can do here (no invites, no policy edits) depends on it
     if (m.primary) li.appendChild(el("span", "mesh-tag", `mirror · ${m.primary}`));
+    // Which project the mesh is filed under, only on the unfiltered list
+    // (one project picked = every row is that project) and only off the
+    // default (the unfiled majority would tag every row the same).
+    if (!currentProject && m.project && m.project !== "default") {
+      li.appendChild(el("span", "mesh-tag", `project · ${m.project}`));
+    }
     const inbound = Array.isArray(m.requests)
       ? m.requests.length : Number(m.requests || 0);
     if (inbound) {
@@ -22175,10 +22468,13 @@ $("new-mesh").addEventListener("submit", async (e) => {
     if (!doc.pending) location.hash = "#/mesh/" + encodeURIComponent(addr.split("@")[0]);
     return;
   }
+  // Filed where the rail is looking: a mesh created while one project is
+  // picked belongs to it, or the list that just gained it could not show it.
+  const meshBody = currentProject ? { name, project: currentProject } : { name };
   const resp = await api("/api/mesh", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ name }),
+    body: JSON.stringify(meshBody),
   });
   if (!resp.ok) return fail(resp);
   err.classList.add("hidden");
@@ -26402,6 +26698,7 @@ async function boot() {
     refreshHarnesses(),
     refreshRoles(),
     refreshWorkspaces(),
+    refreshProjects(),
     refreshSessions(),
     refreshMeshList(),
     refreshCflow(),
@@ -26494,6 +26791,7 @@ async function pollOnce() {
   // Polled because the registry is edited from the CLI, in another window;
   // it redraws only when the list really changed (see refreshWorkspaces).
   refreshes.push(refreshWorkspaces());
+  refreshes.push(refreshProjects());
   refreshes.push(refreshNewWorktree());
   // The restart gate can be opened from any session's terminal, so the card
   // is fed by the same heartbeat as the registry — and the goto gate beside

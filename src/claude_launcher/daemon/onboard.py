@@ -143,7 +143,9 @@ class Plan:
         return bool(self.mesh or self.workflow or self.task or self.parent)
 
 
-async def inherit_mesh(body: dict, *, parent: str, mesh_mgr) -> None:
+async def inherit_mesh(
+    body: dict, *, parent: str, mesh_mgr, project: str = ""
+) -> None:
     """Settle which mesh a child joins when its parent named none.
 
     Rewrites ``body['mesh']`` in place, so everything downstream — preflight,
@@ -186,7 +188,10 @@ async def inherit_mesh(body: dict, *, parent: str, mesh_mgr) -> None:
             "A child is put in its parent's mesh by default, and with several "
             "there is no default to take"
         )
-    body["mesh"] = mine[0] if mine else await _open_mesh_for(parent, mesh_mgr)
+    body["mesh"] = (
+        mine[0] if mine
+        else await _open_mesh_for(parent, mesh_mgr, project=project)
+    )
 
 
 def inherit_workflow(body: dict, *, parent: str, parent_cwd: str, cwd: str) -> None:
@@ -265,7 +270,7 @@ def paired_child_workflow(*, parent: str, parent_cwd: str, cwd: str) -> str:
     return paired
 
 
-async def _open_mesh_for(parent: str, mesh_mgr) -> str:
+async def _open_mesh_for(parent: str, mesh_mgr, *, project: str = "") -> str:
     """Create a mesh for a parent that is in none, and put the parent in it.
 
     Named after the parent because the name has to mean something to a human
@@ -289,7 +294,10 @@ async def _open_mesh_for(parent: str, mesh_mgr) -> str:
             f"could not open a mesh for {parent!r}: every name from {parent!r} "
             f"to {parent}-99 is taken — name a mesh for this child explicitly"
         )
-    mesh_mgr.create(name)
+    # Filed where the parent is: the mesh exists for the parent's subtree,
+    # and a project's session list that could not reach its own meshes
+    # would be the tier failing at the first spawn.
+    mesh_mgr.create(name, project=project)
     # The parent is briefed as usual: it is being put in a mesh it did not ask
     # for, and a session that discovers its own membership from a child's
     # first message has been told by the wrong party.

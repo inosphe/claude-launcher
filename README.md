@@ -1907,6 +1907,41 @@ claunch clear-sessions
   harness keeps running — decide in the script whether to keep waiting,
   capture what's there, or `kill-session`.
 
+### Projects (the tier above meshes and sessions)
+
+A **project** is a name meshes and sessions are filed under, so one daemon
+carrying dozens of meshes and hundreds of sessions still answers "the
+sessions for *this* piece of work":
+
+```bash
+claunch project add launcher --default-workspace claude-launcher
+claunch project ls
+claunch project set-workspace launcher hq   # '' clears the default
+claunch project rm launcher                 # records keep the name; nothing is killed
+
+claunch new-session --profile nc --project launcher   # filed under it, started in its default workspace
+claunch spawn --project launcher --task "..."          # a child may be filed elsewhere than its parent
+claunch sessions --project launcher
+claunch mesh create --project launcher room
+claunch mesh ls --project launcher
+```
+
+- Every session and mesh belongs to exactly one project. The `default`
+  project always exists and cannot be removed: every record written before
+  projects existed reads as its, so nothing on disk is migrated.
+- A project's **default workspace** is a registered [workspace](#workspaces-where-a-session-may-be-spawned)
+  name. A session created in the project with no directory of its own starts
+  there — a default only; `-c`, `--workspace`, `--worktree` and the form's
+  Directory row still win, and a session in the project may sit anywhere.
+- Workspaces are not filed under projects: two projects may point at the
+  same directory.
+- The web UI's rail has a **Project** selector that narrows both the
+  session list and the mesh list (`?project=` on `/api/sessions` and
+  `/api/mesh`) and files what the create form and the mesh form make. The
+  registry itself is `/api/projects` and the Projects card on the settings
+  page. Config lives under `projects:` in `~/.claunch.yaml`, machine-local
+  like `workspaces`.
+
 ### Workspaces (where a session may be spawned)
 
 A **workspace** is a directory you have vouched for once, on this machine:
