@@ -383,6 +383,10 @@ def test_service_indexes_incrementally_and_ranks(tmp_path, repo):
             view2 = await fresh.search("beads", "relay", root=repo, limit=1, rerank=False)
             assert view2["results"][0]["id"] == "x-3" and view2["reranked"] is False
             assert len(ep.embed_calls) == before + 1  # the query only
+            # The search no longer waits on the sync it started, so settle
+            # that pass before changing the board -- otherwise the sync
+            # below joins the running one, which read the old issues.
+            await fresh.drain(5)
             # one issue changes text: only that one is re-embedded
             issues[0]["description"] = "kanban lanes rewritten"
             br.issues = issues
