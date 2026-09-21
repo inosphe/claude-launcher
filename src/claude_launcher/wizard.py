@@ -2666,6 +2666,13 @@ class SpawnWizard(Form):
         self._model_original: str = ""
         self._tools_for: Optional[tuple] = None
         self._tools_original: List[str] = []
+        #: Which project the Workspace row currently holds the default of, so
+        #: `_sync` moves it when that answer changes and never moves it over a
+        #: workspace somebody picked by hand.
+        self._project_for: str = ""
+        #: Rows exactly as the spawn report carries them, kept for the lookup
+        #: from a project name to the workspace it defaults to.
+        self._project_rows: List[dict] = []
         # Fixed once, not per render: a name that ticked over between the
         # picker showing it and Create sending it would cut a worktree under
         # a name nobody read.
@@ -2834,6 +2841,18 @@ class SpawnWizard(Form):
                  "YOLO mode",
             checked=False,
         )
+        # Above the Workspace row because it answers it: naming a project
+        # moves the row below to that project's default workspace, the same
+        # order new-session's form asks Project and Directory in. Options are
+        # the parent's to offer, so they are filled in _rebuild_for_parent
+        # with the rest of them.
+        project = ChoiceField(
+            key="project", label="Project",
+            hint="the roster this child is filed under; naming one starts it "
+                 "in that project's default workspace",
+            options=[],
+        )
+        self._project_preset = str(get("project") or "")
         workspace = ChoiceField(
             key="workspace", label="Workspace",
             hint="a registered directory to run the child in instead of its "
@@ -2903,7 +2922,7 @@ class SpawnWizard(Form):
         attach.select(bool(get("attach")))
         return [
             parent, over_limit, name, profile, model, effort, borrow, null, fork,
-            workspace,
+            project, workspace,
             *worktree_fields(""), codex_yolo, codex_sandbox,
             *self._tool_fields, args_field,
             mesh, handle, role, connect, workflow, context, task,
@@ -2944,6 +2963,65 @@ class SpawnWizard(Form):
         if chosen:
             return self._paths.get(chosen, "")
         return self._session(self.value("parent") or "").get("cwd") or ""
+
+    def _default_project(self) -> str:
+        """The project a session with no project of its own is filed under.
+
+        Read off the report rather than spelled here: the daemon marks the
+        default row (`projects.Project.to_dict`), and writing the name a
+        second time in this file is how the two come to disagree.
+        """
+        for row in self._project_rows:
+            if row.get("is_default"):
+                return str(row.get("name") or "")
+        return ""
+
+    def _project_workspace(self, name: str) -> str:
+        """The workspace a project starts its sessions in, by name."""
+        for row in self._project_rows:
+            if row.get("name") == name:
+                return str(row.get("default_workspace") or "")
+        return ""
+
+    def _sync_project_workspace(self) -> None:
+        """Follow a project change down to the Workspace row.
+
+        `spawn._file_under_project` sends a child to the named project's
+        default workspace when the request settles no directory of its own,
+        so the form answers the Workspace row the same way rather than
+        leaving it reading "the parent's directory" for a child that will
+        not be there. Every row below reads the child's directory through
+        :meth:`_child_cwd`, so moving the answer here is also what keeps the
+        board, worktree and workflow rows asking about the right tree.
+
+        Two things it does not do. It does not move over a workspace somebody
+        picked by hand -- only over the answer it put there itself, tracked
+        the same way new-session's form tracks the Directory row. And it does
+        not move at all while the policy holds the row shut, which is the one
+        case where the daemon warns and leaves the child with its parent
+        (`spawn.allow_workspace`).
+        """
+        field = self.field("project")
+        if field.hidden:
+            return
+        picked = str(field.value or "")
+        if picked == self._project_for:
+            return
+        before = self._project_workspace(self._project_for)
+        self._project_for = picked
+        workspace = self.field("workspace")
+        if workspace.disabled:
+            return
+        if workspace.value and workspace.value != before:
+            return
+        target = self._project_workspace(picked)
+        if target and workspace.select(target):
+            return
+        # Back to the parent's directory: the project picked has no default
+        # workspace, or the one it names is no longer registered. Either way
+        # the answer standing there belongs to the project just left.
+        if before:
+            workspace.select("")
 
     def _mesh_now(self) -> str:
         """The mesh the child lands in: the one picked, or the parent's own."""
@@ -3211,6 +3289,10 @@ class SpawnWizard(Form):
             connect.chosen = [c for c in connect.chosen if c in members]
         connect.hidden = no_mesh or not connect.options
 
+        # Before the directory is read, not after: every row below answers
+        # for the tree the child lands in, and a project picked this pass has
+        # already moved which tree that is.
+        self._sync_project_workspace()
         cwd = self._child_cwd()
         # The child's board is the board of the directory the child lands in,
         # which is the parent's unless a workspace moved it -- so the picker
@@ -3384,6 +3466,45 @@ class SpawnWizard(Form):
         workspace.disabled_note = (
             "the child inherits its parent's directory (spawn.allow_workspace)"
         )
+
+        # Present whatever the policy says, and never greyed: filing a child
+        # under a project is not gated (`spawn._file_under_project`), so the
+        # report lists every project the way `/api/projects` publishes them.
+        # The first entry is what the daemon reaches on its own -- a request
+        # naming no project files the child under its parent's -- so leaving
+        # this row alone has to travel as nothing at all, which is what the
+        # empty value does in `apply`.
+        project = self.field("project")
+        keep = project.value
+        self._project_rows = [
+            p for p in (report.get("projects") or []) if p.get("name")
+        ]
+        theirs = str(info.get("project") or "") or self._default_project()
+        project.options = [Option(f"(the parent's: {theirs})", "")] + [
+            Option(
+                str(p.get("name")), str(p.get("name")),
+                str(p.get("default_workspace") or ""),
+            )
+            for p in self._project_rows
+        ]
+        project.index = 0
+        preset = keep or self._project_preset
+        if preset and not project.select(preset):
+            # A project this daemon does not list still has to reach
+            # `projects.require`, which refuses it by name and says which
+            # ones exist. Dropping it here would file the child under its
+            # parent's project instead of refusing anything.
+            project.options.append(Option(preset, preset, ""))
+            project.index = len(project.options) - 1
+        # A daemon too old to report projects leaves only the inherited
+        # entry, and a row with one answer is not a question.
+        project.hidden = len(project.options) < 2
+        # Deliberately the INHERITED answer rather than what now stands: a
+        # `--project` typed alongside `--wizard` then reaches the Workspace
+        # row through the same move a pick does, instead of needing its own
+        # path here. A workspace already picked survives it -- the move only
+        # writes over the answer it put there itself.
+        self._project_for = ""
 
         mesh = self.field("mesh")
         keep = mesh.value
@@ -3563,6 +3684,13 @@ class SpawnWizard(Form):
                     yolo=args.codex_yolo,
                     sandbox=args.codex_sandbox,
                 )
+        # Empty is the whole point of the inherited entry: `spawn` files a
+        # child under its parent's project when the request names none, so a
+        # row nobody touched has to travel as nothing rather than as the
+        # parent's project spelled out. Sending the name would make every
+        # spawn take the `asked` path in `_file_under_project`, which is the
+        # one that moves the child's directory.
+        args.project = self.value("project") or None
         # The workspace travels as a NAME, which is what `-w` means and what
         # the API resolves -- a path would be the free-text directory that
         # spawn.allow_cwd exists to keep an agent away from.
