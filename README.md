@@ -386,6 +386,20 @@ claunch create work --seed-from DIR # seed from a specific config dir
 claunch create work --no-seed       # start fully fresh (onboarding will run)
 ```
 
+`claunch create` makes the profile directory first and writes its entry into
+`~/.claunch.yaml` second, so a failure on that write (on Windows a sharing
+conflict can refuse the rename: "run the command again") leaves the directory
+behind with no entry and no seeded config. Running `create` again then reports
+`profile 'work' already exists`. `--reinit` finishes that setup in place:
+it registers the directory, seeds only what is missing (a profile that already
+ran keeps its own config), and re-applies the template and the shared
+declaration. It is idempotent, so it is also how you converge an existing
+profile after the shared declaration changes.
+
+```bash
+claunch create work --reinit        # finish or redo work's setup in place
+```
+
 ## Per-profile environment variables
 
 Each profile can set Claude Code environment variables. They live in the central
