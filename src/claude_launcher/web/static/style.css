@@ -627,6 +627,13 @@ option:disabled { color: #6b7280; }
 #session-list .rail-tps-age { flex: none; font-size: 11px; color: #7d8590; }
 #session-list .rail-tps-line.stale .rail-tps { color: #7d8590; }
 #session-list .rail-tps-line.stale .rail-tps-bolt { color: #6e7681; }
+/* An idle row: the session has records but none recent enough to describe
+   now, so the line reads "tps none" beside the age of the last call. Dimmer
+   again than a merely stale number, because it is not a number. */
+#session-list .rail-tps-line.idle .rail-tps,
+.sess-brief-tps.idle,
+.badge.tps.idle,
+#term-tps-overlay.idle { color: #6e7681; }
 /* Where the session runs, the line right under its name: a path in the
    same monospace as the count, dimmer than the name, and a full-width
    line-breaker like the gauge beneath it (order 2, and it is appended before

@@ -3814,6 +3814,13 @@ function ctxRailLine(s) {
    go through the shim and carry no `tps` at all -- absence, drawn as
    nothing, never as a slow number.
 
+   Three states, not two. A session that went quiet comes back with `idle`
+   set and no rate: the daemon's window is bounded in time (`max_age_s`
+   seconds, 10 minutes by default), and past that the last call describes
+   nothing about now. That row shows "none" and how long ago the last call
+   was -- which is a different thing from a session that was never measured,
+   and is drawn differently on purpose.
+
    The number is the answer's tokens over the whole call, from the request to
    the last byte. One definition over every row, so rows can be compared. It
    is not the backend's own speed: that one can only be measured from an
@@ -3847,9 +3854,13 @@ function tpsLatencyText(t) {
 
 /* The one-line glance: "38.1 tok/s · ttft 0.7s". A last call that was not
    counted (an error answer, a compressed body) shows its status instead of
-   a number, so the row still says that the session called out. */
+   a number, so the row still says that the session called out. An idle
+   session shows "none": it has been quiet past the measuring window, so
+   there is no current rate to give and the last one would be a stale
+   number wearing the same font as a live one. */
 function tpsText(t) {
   if (!t) return "";
+  if (t.idle) return "tps none";
   if (!t.counted || !Number.isFinite(t.tps)) {
     return t.status && t.status !== 200 ? `HTTP ${t.status}` : "tps ?";
   }
@@ -3864,6 +3875,10 @@ function tpsTooltip(t) {
   const age = tpsAgeSecs(t);
   lines.push(`last call${age !== null ? " " + fmtAge(age) + " ago" : ""}` +
              (t.model ? ` on ${t.model}` : "") + (t.status ? ` (HTTP ${t.status})` : ""));
+  if (t.idle) {
+    lines.push(`no call in the last ${fmtAge(t.max_age_s)} -- nothing to measure,` +
+               " so this row shows none rather than the last number");
+  }
   if (t.counted && Number.isFinite(t.tps)) {
     lines.push(`${tpsFmt(t.tps)} tokens/s over the whole call` +
                (Number.isFinite(t.output_tokens) ? `, ${t.output_tokens} out` : "") +
@@ -3874,7 +3889,11 @@ function tpsTooltip(t) {
       : `first byte ${ttftFmt(t.ttfb_ms)}`);
   }
   if (Number.isFinite(t.tps_median) && t.tps_median_n > 1) {
-    lines.push(`median over the last ${t.tps_median_n} calls: ${tpsFmt(t.tps_median)} tok/s` +
+    /* Both bounds named: the count is what the reader sees, the time is what
+       keeps the count from quietly spanning a day and a half. */
+    lines.push(`median over ${t.tps_median_n} calls` +
+               (Number.isFinite(t.max_age_s) ? ` in the last ${fmtAge(t.max_age_s)}` : "") +
+               `: ${tpsFmt(t.tps_median)} tok/s` +
                (Number.isFinite(t.ttft_ms_median) ? `, ttft ${ttftFmt(t.ttft_ms_median)}` : ""));
   }
   if (t.upstream) lines.push(`via ${t.upstream}`);
@@ -3882,10 +3901,19 @@ function tpsTooltip(t) {
   return lines.join("\n");
 }
 
-/* Stale readings dim: a number from an hour ago says nothing about now. */
+/* Stale readings dim: a number from an hour ago says nothing about now. An
+   idle row is dimmed too and carries `idle` on top, so a stylesheet can tell
+   "none" from a number that is merely getting old.
+
+   The 600 is only a fallback. The daemon states its own bound in
+   `max_age_s`, and past that bound it sends `idle` instead of a number, so
+   this branch is reached by a payload from a daemon that has not been
+   restarted since -- where dimming at the old threshold is still right. */
 function tpsStaleClass(t) {
+  if (t && t.idle) return " stale idle";
   const age = tpsAgeSecs(t);
-  return age !== null && age > 600 ? " stale" : "";
+  const bound = t && Number.isFinite(t.max_age_s) ? t.max_age_s : 600;
+  return age !== null && age > bound ? " stale" : "";
 }
 
 /* The rail row's line: a bolt, the glance, and the age -- indented like the
@@ -3936,10 +3964,10 @@ function renderTermTps() {
     if (show) {
       overlay.className = "term-tps-overlay" + tpsStaleClass(t);
       overlay.replaceChildren(
-        el("span", "term-tps-big", t.counted && Number.isFinite(t.tps)
+        el("span", "term-tps-big", !t.idle && t.counted && Number.isFinite(t.tps)
           ? `${tpsFmt(t.tps)} tok/s` : tpsText(t)),
         el("span", "term-tps-small",
-          [t.counted && Number.isFinite(t.tps) ? tpsLatencyText(t) : "",
+          [!t.idle && t.counted && Number.isFinite(t.tps) ? tpsLatencyText(t) : "",
            t.model ? modelShort(t.model) : "",
            tpsAgeSecs(t) !== null ? fmtAge(tpsAgeSecs(t)) + " ago" : ""]
             .filter(Boolean).join(" · "))
