@@ -299,6 +299,26 @@ check("a pi detail panel has the full model id and its context reading",
 check("another harness gets no model row at all",
       "model" in rowsOf(OTHER), false);
 
+/* ---- the end-of-run protection, on the panel ---------------------------- */
+/* `cflow kill-on-end` ends the session driving a finished one-shot run, and
+   `SessionDef.keep_alive` is the lever that says "record the ending, skip the
+   termination". It is drawn beside `restore` because the two are one question
+   asked at the two ends of a session's life — `restore` is whether it comes
+   back after a daemon restart, this is whether it is allowed to stay after
+   its run ends. Only when set: an "off" row on every session would be the
+   noise the rail's own version of this flag exists to avoid. */
+const PROTECTED = rowsOf({ ...FULL, name: "protected", keep_alive: true });
+check("a protected session gets a keep-alive row",
+      !!PROTECTED["keep-alive"], true);
+check("...saying what the daemon does at the run's end",
+      /records its ending but does not end this session/.test(
+        (PROTECTED["keep-alive"] || {}).text || ""), true);
+check("...and naming the command that lifts it on hover",
+      ((PROTECTED["keep-alive"] || {}).title || "")
+        .includes("claunch keep-alive protected off"), true);
+check("an unprotected session gets no such row",
+      "keep-alive" in rowsOf({ ...FULL, name: "plain" }), false);
+
 /* ---- the chip has to be drawable --------------------------------------- */
 /* An unfamiliar id from a gateway can be long, and the row is a flex line:
    without a cap it would push the count off the row it is supposed to

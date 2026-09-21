@@ -247,6 +247,69 @@ ctx.setSessions([{ name: "s1", status: "idle" }]);
 ctx.apply();
 check("a payload without the field draws nothing", quiet(rows.s1), null);
 
+/* --- the end-of-run protection ------------------------------------------ */
+/* The one flag on this line that is not a silence. `cflow kill-on-end` ends
+   the session driving a finished one-shot run; keep-alive says "record the
+   ending, skip the termination". Nothing else on the row moves when it is
+   set, so a protected session and an unprotected one looked identical until
+   the run ended and one of them disappeared. */
+
+/* Alone, and on a row with no other setting. */
+ctx.setSessions([live("s1", { keep_alive: true }), live("s2")]);
+ctx.setRuns([]);
+ctx.apply();
+check("a protected session says so", pills(rows.s1), ["keep-alive"]);
+check("the neighbour is untouched", quiet(rows.s2), null);
+/* Read through `pills`' own path rather than off a child that may not be
+   there: the first check above is the one that should report a missing pill,
+   and a later line dereferencing null would replace its message with a
+   stack trace from the harness itself. */
+const kaTitle = (quiet(rows.s1) && quiet(rows.s1).children[0]
+                 ? quiet(rows.s1).children[0].title : "");
+check("the tooltip names the command that clears it",
+      kaTitle.includes("claunch keep-alive s1 off"), true);
+check("...and says the flag outlives a restart",
+      /persists across daemon restarts/.test(kaTitle), true);
+
+/* Off is the default and draws nothing: an "off" pill on twenty rows is the
+   noise the whole line exists to avoid. */
+ctx.setSessions([live("s1", { keep_alive: false })]);
+ctx.apply();
+check("an unprotected session draws no pill", quiet(rows.s1), null);
+
+/* An exited record may still carry the flag — the definition keeps it — and
+   the row must not draw it: there is no terminal left to protect. */
+ctx.setSessions([{ name: "dead", status: "exited", keep_alive: true }]);
+ctx.apply();
+check("an exited row draws no keep-alive", quiet(rows.dead), null);
+
+/* It shares the line with the settings rather than replacing them, and sorts
+   after the two that stop typing: those are about this terminal's input, this
+   one is about how long it lives. */
+ctx.setSessions([live("s1", { delivery_hold: true, keep_alive: true })]);
+ctx.setRuns([run("s1", false, false)]);
+ctx.apply();
+check("keep-alive shares the line with the hold and the reminder",
+      pills(rows.s1), ["held", "keep-alive", "reminder off"]);
+
+/* And it is the flag that survives the others being cleared. */
+ctx.setSessions([live("s1", { keep_alive: true })]);
+ctx.setRuns([run("s1", true)]);
+ctx.apply();
+check("clearing the silences leaves keep-alive standing",
+      pills(rows.s1), ["keep-alive"]);
+
+/* The stylesheet: grey like the decided flags, and not the amber that means
+   "your move", nor the blue that means something is in motion. */
+check("the keep-alive pill has a rule of its own",
+      /#session-list \.quiet-keepalive \{/.test(css), true);
+const kaRule = css.slice(css.indexOf("#session-list .quiet-keepalive {"));
+const kaDecl = kaRule.slice(0, kaRule.indexOf("}"));
+check("...painted grey and not amber",
+      /#d29922/.test(kaRule.slice(0, 200)), false);
+check("...and not the blue the in-motion pill takes",
+      /#58a6ff/.test(kaDecl), false);
+
 if (failures) {
   console.error(`${failures} check(s) failed`);
   process.exit(1);
