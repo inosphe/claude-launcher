@@ -15,6 +15,7 @@ import time
 from pathlib import Path
 
 import pytest
+import yaml
 
 from claude_launcher import store
 from claude_launcher.daemon import keys as keys_mod
@@ -212,8 +213,52 @@ def test_format_delivery_block():
     assert "mesh: m1" in block
     assert "line one" in block and "line two" in block
     assert "…[clipped — see mesh history]" in block  # long body clipped
-    # direct messages keep their 'to'; broadcasts drop it
-    assert "to: bob" in block
+    assert "to: bob" in block  # the header names the terminal it was typed into
+
+
+def test_delivery_entries_carry_no_recipient_list():
+    """Who else received a message is the log's to keep, not the terminal's.
+
+    An entry used to repeat the message's own ``to``: the reader's own handle
+    again when the send was 1:1, and one line per co-recipient when it was a
+    multi-send, in every one of those recipients' terminals. Parse the YAML
+    instead of grepping it — ``"to: bob" in block`` also matches the block's
+    top-level header, which is how the old assertion passed without ever
+    reading an entry.
+    """
+    blocks = {}
+    for name, to in (
+        ("direct", "bob"),
+        ("multi", ["bob", "cleo", "dara"]),
+        ("broadcast", "*"),
+    ):
+        blocks[name] = format_delivery(
+            "m1", "bob", [{"id": "m-1", "from": "leader", "to": to, "body": "hi"}]
+        )
+        doc = yaml.safe_load(blocks[name])
+        assert doc["to"] == "bob"  # the header still names the reader
+        assert "to" not in doc["batch"][0]
+    # and a multi-send's co-recipients are nowhere in that reader's text either
+    assert "cleo" not in blocks["multi"] and "dara" not in blocks["multi"]
+
+    # Everything else an entry carries is unchanged. Pin the whole key set,
+    # not just the absence: that is what catches both a re-added 'to' and a
+    # field lost while removing it.
+    plain = yaml.safe_load(blocks["direct"])["batch"][0]
+    assert set(plain) == {"id", "from", "body"}
+    decorated = yaml.safe_load(
+        format_delivery(
+            "m1",
+            "bob",
+            [{"id": "m-2", "from": "leader", "to": ["bob", "cleo"],
+              "type": "fyi", "reply_to": "m-1", "body": "hi"}],
+            origins={"leader": "otherbox"},
+        )
+    )["batch"][0]
+    assert set(decorated) == {"id", "from", "machine", "type", "reply_to", "body"}
+    assert decorated["machine"] == "otherbox (remote)"
+    assert decorated["type"] == "fyi"
+    assert decorated["reply_to"] == "m-1"
 
 
 # --------------------------------------------------------------------------- #
