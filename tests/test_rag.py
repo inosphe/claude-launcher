@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import threading
 import time
 from pathlib import Path
 
@@ -875,6 +876,141 @@ def test_search_routes_contract(tmp_path, repo, monkeypatch):
             await server.close()
 
     asyncio.run(run())
+
+
+# --------------------------------------------------------------------------- #
+# what a search costs: the reranker's budget, the query vector, the wait
+# --------------------------------------------------------------------------- #
+def test_rerank_budget_is_rerank_top_not_the_page_size(tmp_path, repo):
+    """``rerank_top`` bounds the reranker; the page size does not widen it.
+
+    The reranker was measured at 18.6 s of a 29.7 s search because a screen
+    asking for 30 results sent 30 documents to a reranker configured for 12.
+    Results past the budget keep their vector order behind the reranked head.
+    """
+    ep = Endpoint()
+    br = FakeBr(_issues())
+
+    async def run():
+        server = await _start_endpoint(ep)
+        try:
+            cfg = _cfg(server, rerank_top=2)
+            svc = rag.RagService(board=_board(br, repo), config=lambda: cfg,
+                                 root_dir=tmp_path / "rag")
+            view = await svc.search("beads", "kanban lanes", root=repo, limit=3)
+            assert len(view["results"]) == 3
+            assert len(ep.rerank_calls[-1]["documents"]) == 2
+            assert view["reranked"] is True
+            # Only the reranked head carries a rerank score.
+            scored = [r for r in view["results"] if "rerank_score" in r]
+            assert len(scored) == 2
+        finally:
+            await server.close()
+
+    asyncio.run(run())
+
+
+def test_query_vector_is_reused_across_repeats_of_the_same_query(tmp_path, repo):
+    """The same query text under the same endpoint and model embeds once.
+
+    Embedding the query was measured at 6.6 s of a 29.7 s search, and a search
+    box repeats a query often (a re-opened modal, a filter changed on the
+    page, the same question from two sessions).
+    """
+    ep = Endpoint()
+    br = FakeBr(_issues())
+
+    async def run():
+        server = await _start_endpoint(ep)
+        try:
+            cfg = _cfg(server)
+            svc = rag.RagService(board=_board(br, repo), config=lambda: cfg,
+                                 root_dir=tmp_path / "rag")
+            first = await svc.search("beads", "relay", root=repo, limit=1, rerank=False)
+            assert first["timing"]["embed_cached"] is False
+            calls = len(ep.embed_calls)
+            again = await svc.search("beads", "relay", root=repo, limit=1, rerank=False)
+            assert again["timing"]["embed_cached"] is True
+            assert len(ep.embed_calls) == calls
+            assert again["results"][0]["id"] == first["results"][0]["id"]
+            # Another model is another key: the vector is fetched again.
+            cfg["embedding_model"] = "emb2"
+            svc._indexes.clear()
+            third = await svc.search("beads", "relay", root=repo, limit=1, rerank=False)
+            assert third["timing"]["embed_cached"] is False
+            # The cache holds at most QUERY_CACHE entries, oldest dropped first.
+            for n in range(rag.QUERY_CACHE + 5):
+                await svc.search("beads", "q%d" % n, root=repo, limit=1, rerank=False)
+            assert len(svc._qvecs) == rag.QUERY_CACHE
+        finally:
+            await server.close()
+
+    asyncio.run(run())
+
+
+def test_search_waits_for_a_sync_only_while_the_index_is_empty(tmp_path, repo):
+    """A filled index answers now; an empty one still waits for its sync.
+
+    The answer reports its own coverage, so spending the wait budget on every
+    search buys nothing once there is something to rank.
+    """
+    ep = Endpoint()
+    br = FakeBr(_issues())
+
+    async def run():
+        server = await _start_endpoint(ep)
+        try:
+            cfg = _cfg(server)
+            svc = rag.RagService(board=_board(br, repo), config=lambda: cfg,
+                                 root_dir=tmp_path / "rag")
+            waits = []
+            real_wait = svc.wait_sync
+
+            async def record(prog, budget):
+                waits.append(budget)
+                await real_wait(prog, budget)
+
+            svc.wait_sync = record
+            first = await svc.search("beads", "relay", root=repo, limit=1, rerank=False)
+            assert first["results"] and waits == [2.0]
+            await svc.search("beads", "kanban", root=repo, limit=1, rerank=False)
+            assert waits == [2.0]
+        finally:
+            await server.close()
+
+    asyncio.run(run())
+
+
+def test_rank_survives_entries_changing_while_it_scans(tmp_path):
+    """``rank`` runs in a worker thread while the sync writes the same dict.
+
+    Iterating the live dict raised "dictionary changed size during iteration"
+    and the request answered HTTP 500 (daemon.log, 2026-09-21).
+    """
+    index = rag.VectorIndex(tmp_path / "i.json", model="emb", dims=DIMS)
+    for n in range(200):
+        doc = rag.Doc("d%d" % n, "h%d" % n, ["relay"], {"title": "d%d" % n})
+        index.put(doc, [rag.unit(_vector_for("relay"))])
+
+    stop = False
+
+    def churn():
+        n = 1000
+        while not stop:
+            doc = rag.Doc("late%d" % n, "h", ["relay"], {"title": "late"})
+            index.put(doc, [rag.unit(_vector_for("relay"))])
+            index.drop("late%d" % (n - 1))
+            n += 1
+
+    writer = threading.Thread(target=churn)
+    writer.start()
+    try:
+        for _ in range(50):
+            ranked = index.rank(rag.unit(_vector_for("relay")), 5)
+            assert len(ranked) == 5
+    finally:
+        stop = True
+        writer.join()
 
 
 # --------------------------------------------------------------------------- #
