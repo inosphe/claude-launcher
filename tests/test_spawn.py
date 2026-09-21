@@ -558,6 +558,41 @@ def test_forking_a_conversation_with_no_transcript_is_refused():
     )["may_choose"]
 
 
+def test_a_transcript_with_nothing_in_it_is_not_a_conversation_to_fork():
+    """The same window as the test above, caught one step later: claude has
+    created the jsonl and its first turn is not in it yet. ``--resume`` of a
+    zero-byte file fails exactly as ``--resume`` of a missing one does, so
+    the offer and the refusal both have to read it as nothing.
+
+    The check stops at the byte count and does not go on to ask whether the
+    file can be read — a transcript held or corrupted by something else is
+    still answered yes, because a wrong no takes the fork off the form with
+    a reason that is not true (claunch-vxca, ruled 2026-09-21).
+    """
+    from claude_launcher import transcripts
+
+    hollow = {**TALKER, "conversation_id": "c-hollow"}
+    where = transcripts.project_dir(
+        profile.require("talk").config_dir, str(hollow["cwd"])
+    )
+    where.mkdir(parents=True, exist_ok=True)
+    empty = where / "c-hollow.jsonl"
+    empty.write_text("", encoding="utf-8")
+    with pytest.raises(spawn.SpawnDenied) as exc:
+        spawn.check(
+            _policy(), {"fork": True}, parent=hollow, depth=0, children=0
+        )
+    assert "no transcript on disk" in str(exc.value)
+    assert "fork" not in spawn.capabilities(
+        _policy(), depth=0, children=0, parent=hollow
+    )["may_choose"]
+    # One byte is a conversation, and nothing else about the parent changed.
+    empty.write_text("{}", encoding="utf-8")
+    assert "fork" in spawn.capabilities(
+        _policy(), depth=0, children=0, parent=hollow
+    )["may_choose"]
+
+
 def test_a_fork_offer_survives_a_profile_this_process_cannot_resolve():
     """Generous in one direction on purpose: an unresolvable profile leaves
     the transcript unprovable, and a wrong yes costs one child that fails

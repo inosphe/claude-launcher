@@ -2039,6 +2039,16 @@ is the point when you are picking up an exited session's work elsewhere — and
 a footgun if the source is still running. The web picker shows each session's
 status next to its name for exactly that reason.
 
+A fork is only offered once the source has actually spoken. Claude writes the
+transcript on a session's first turn, so a session started seconds ago has a
+pinned id and an empty or missing jsonl behind it, and `--resume` of one kills
+the child on startup. Both the offer and the refusal read the same answer, so
+the row greys instead of inviting a spawn that dies. The check stops at
+whether there are bytes there: a transcript that exists but cannot be read
+(corrupt, permission-denied, held by another process) is still offered, and
+fails loudly in the child, because a wrong refusal would take the fork away
+with a reason that is not true.
+
 ### quick-fork and merge — a scratch copy that reports back
 
 The fork above is a creation-time choice with a form around it. **quick-fork**

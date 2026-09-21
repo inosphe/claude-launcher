@@ -590,7 +590,10 @@ def can_fork(parent: Optional[dict]) -> bool:
     :func:`claude_launcher.daemon.harness.restores_blank`). ``--resume`` of a
     file claude never wrote is fatal on startup, so offering the fork there
     hands the operator a child that exits instead of one that inherits.
-    :func:`_on_disk` is what asks.
+    :func:`_on_disk` is what asks, and a file with nothing in it counts as
+    never written (:func:`claude_launcher.transcripts._has_content`): the
+    same window can be caught one step later, with the file created and
+    the first turn not yet in it.
     """
     if not parent:
         return False
@@ -611,6 +614,15 @@ def _on_disk(parent: dict) -> bool:
     ID", while a wrong no takes the fork off the form with a reason that is
     not true and no way for the operator to tell. The unprovable case is the
     one where the loud failure is the better of the two.
+
+    That trade is also why the question stops where it does. A transcript
+    that is on disk but cannot be read — corrupt, permission-denied, held
+    by another process — is answered *yes* here and dies in the child.
+    Widening the check to readability would answer *no* to files this
+    process merely cannot open at this instant, which is the expensive
+    error above (claunch-vxca, ruled 2026-09-21: take the size, leave
+    readability). An empty file is the one case with no such doubt, and
+    :func:`claude_launcher.transcripts.exists` excludes it.
     """
     conversation = str(parent.get("conversation_id") or "")
     if not conversation:
