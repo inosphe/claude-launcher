@@ -126,11 +126,12 @@ new Function(
   "refreshWorkflowChoices", "beadsMode", "refreshIssueChoices",
   [`let newSpawnReport = null, newSpawnReportFor = null;`,
    sliceLet("newWorktreeFor"), sliceLet("newWorktreeGit"),
-   sliceLet("newWorktreeFilter"),
+   sliceLet("newWorktreeFilter"), sliceLet("pendingWorktreeMode"),
    slice("cwdSplit"), slice("shortenPath"), slice("cwdShort"),
    slice("spawnParent"), slice("newSessionCwd"), slice("newWorktreeMode"),
    slice("worktreeTrunkBranch"), slice("syncWorktreeTrunkButton"),
-   slice("renderWorktreeOptions"), slice("syncNewWorktree"),
+   slice("renderWorktreeOptions"), slice("worktreeRowUsable"),
+   slice("syncNewWorktree"),
    slice("refreshNewWorktree"),
    // The registry poll, which rebuilds the Directory row behind the form's
    // back. Everything it closes over that is a function arrives as a
@@ -151,6 +152,10 @@ new Function(
     exports.policy = (name, report) => {
       newSpawnReportFor = name; newSpawnReport = report;
     };
+    // The recall parks its answer here and the sync spends it, so a check
+    // needs both ends: what was parked, and what is left after a sync.
+    exports.park = (m) => { pendingWorktreeMode = m; };
+    exports.parked = () => pendingWorktreeMode;
     exports.pollRegistry = refreshWorkspaces;
     exports.setRegistry = (list) => { registry = list; };`].join("\n")
 )(ctx,
@@ -337,6 +342,53 @@ async function main() {
   check("a locked row keeps its warning rather than a caption",
         [locked.textContent, locked.classes.has("info")],
         ["worktree selection is locked by spawn.allow_worktree", false]);
+
+  /* -- a remembered mode waits for a row that can carry it ------------- */
+  // Still the locked parent from the case above. A remembered answer put
+  // on the radios here would be sent at submit as a worktree the policy
+  // refused, so it stays parked until the row can say otherwise.
+  form.worktree_mode.value = "";
+  ctx.park("new");
+  ctx.sync();
+  check("a locked row does not take the remembered answer, and holds it",
+        [form.worktree_mode.value, ctx.parked()], ["", "new"]);
+
+  ctx.policy("lead", { may_choose: ["worktree"] });
+  ctx.sync();
+  check("the first sync that may carry it applies the remembered answer",
+        [form.worktree_mode.value, ctx.parked()], ["new", ""]);
+  // Spent, so a sync that runs later cannot put it back over a pick the
+  // operator made in the meantime.
+  form.worktree_mode.value = "";
+  ctx.sync();
+  check("...and it is spent, so a later sync leaves the row alone",
+        form.worktree_mode.value, "");
+
+  /* -- "existing" needs a checkout to name ----------------------------- */
+  // A directory that offers none cannot carry that answer: taking it would
+  // leave the row reading "existing" while the launch sends no worktree.
+  form.parent.value = "";
+  ctx.policy("", null);
+  const bare = REPOS["F:/other"];
+  REPOS["F:/other"] = { ...bare, worktrees: [] };
+  form.cwd.value = "F:/repo";
+  await ctx.refresh();
+  form.cwd.value = "F:/other";
+  await ctx.refresh();
+  form.worktree_mode.value = "";
+  ctx.park("existing");
+  ctx.sync();
+  check("a remembered \"existing\" is dropped where no checkout is offered",
+        [form.worktree_mode.value, ctx.parked()], ["", ""]);
+  REPOS["F:/other"] = bare;
+
+  form.cwd.value = "F:/repo";
+  await ctx.refresh();
+  form.worktree_mode.value = "";
+  ctx.park("existing");
+  ctx.sync();
+  check("...and is taken where the directory has one to name",
+        form.worktree_mode.value, "existing");
 
   if (failures) process.exit(1);
   console.log("worktreepicker_check: ok");
