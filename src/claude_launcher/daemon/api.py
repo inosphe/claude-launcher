@@ -659,6 +659,12 @@ def build_app(
     # full, and a session's own slice of it (GET), with the one write the
     # dashboard offers — an issue for a session that has none (POST).
     r.add_get("/api/beads", h_beads_fleet)
+    # File an issue on a board without a session and without a shell: the
+    # Beads page's own form. Registered before the "{id}" routes for the
+    # same reason the literal GETs below are.
+    r.add_post("/api/beads", h_beads_create)
+    # The boards a create may be filed on, and the workspaces it may record.
+    r.add_get("/api/beads/boards", h_beads_boards)
     # Before the {id} route, which would otherwise swallow it: aiohttp matches
     # in registration order and "candidates" is a perfectly good issue id as
     # far as that pattern is concerned.
@@ -7064,7 +7070,14 @@ async def h_beads_fleet(request: web.Request) -> web.Response:
 
 
 async def h_beads_stream(request: web.Request) -> web.Response:
-    """One bounded Beads page for the fixed-height board viewport."""
+    """One numbered Beads page.
+
+    ``status`` may be repeated and narrows the page in the board's database,
+    so the page the reader is on is a page of what is being drawn rather than
+    fifty rows of which some happen to match. Omitted, every status is
+    included. Each board entry carries ``total``, which is what the page
+    control counts pages with.
+    """
     sort = request.query.get("sort", "updated_at")
     direction = request.query.get("direction", "desc")
     if sort not in {"updated_at", "created_at", "priority", "title"}:
@@ -7090,11 +7103,85 @@ async def h_beads_stream(request: web.Request) -> web.Response:
     cwd = request.query.get("cwd")
     if cwd:
         extra.insert(0, cwd)
+    statuses = [s for s in request.query.getall("status", []) if s]
+    unknown = [s for s in statuses if s not in beads_mod.KNOWN_STATUSES]
+    if unknown:
+        return json_error(
+            400,
+            "unknown status "
+            + ", ".join(repr(s) for s in unknown)
+            + " (known: "
+            + ", ".join(beads_mod.KNOWN_STATUSES)
+            + ")",
+        )
     view = await request.app["beads"].stream_view(
         list(manager.list()), extra, offset=offset, limit=limit, priority=priority,
-        sort=sort, direction=direction,
+        sort=sort, direction=direction, statuses=statuses,
     )
     return json_response(view)
+
+
+async def h_beads_boards(request: web.Request) -> web.Response:
+    """Where an issue can be filed, and where its session can be opened.
+
+    Two lists the creation form needs before it can be drawn, and neither is
+    derivable in the browser: ``boards`` -- one entry per repository board
+    the fleet touches, the same grouping :func:`h_beads_fleet` uses, each
+    with the sessions on it so the assignee picker offers names that exist --
+    and ``workspaces``, the registry a recorded workspace is checked against
+    (``claunch workspace add <dir>``).
+
+    Cheap on purpose: no issue is listed. A form that had to wait for a
+    board listing to draw its own fields would be paying the cost this
+    round was about removing.
+    """
+    manager: SessionManager = request.app["manager"]
+    board = request.app["beads"]
+    sessions = list(manager.list())
+    extra = [os.getcwd()]
+    cwd = request.query.get("cwd")
+    if cwd:
+        extra.insert(0, cwd)
+    view = await board.boards_view(sessions, extra)
+    return json_response({
+        **view,
+        "default": view["boards"][0]["root"] if view["boards"] else None,
+        "workspaces": [w.to_dict() for w in workspaces.list_all()],
+    })
+
+
+async def h_beads_create(request: web.Request) -> web.Response:
+    """File an issue on a board — the Beads page's create form.
+
+    Body: ``title`` (required), ``description``, ``priority`` (0..4, or
+    ``P2``), ``type``, ``labels`` (a list or a comma-separated string),
+    ``assignee``, ``parent``, ``status`` (``open`` or ``in_ready``),
+    ``workspace`` (a registered workspace NAME, recorded on the description
+    so a session started from this issue opens in the right directory) and
+    ``cwd`` (which board; the daemon's own by default).
+
+    Every rule is :func:`daemon.beads.check_new_issue`'s, so the route holds
+    none of its own and the refusal text is the same one the tests pin.
+    400 for a request the board would not accept, 404 for a directory with
+    no board.
+    """
+    board = request.app["beads"]
+    body = await _json_body(request)
+    cwd = str(body.get("cwd") or request.query.get("cwd") or os.getcwd())
+    root = await board.root_for(cwd)
+    if not board.has_board(root):
+        return json_error(404, f"no board for {cwd}")
+    try:
+        spec = beads_mod.check_new_issue(body)
+    except beads_mod.BoardRequestError as exc:
+        return json_error(400, str(exc))
+    try:
+        made = await board.create_issue(root, spec)
+    except beads_mod.BeadsUnavailable as exc:
+        return json_error(503, str(exc))
+    except BeadsError as exc:
+        return json_error(400, str(exc))
+    return json_response(made, status=201)
 
 
 async def h_beads_queues(request: web.Request) -> web.Response:
@@ -7214,6 +7301,17 @@ async def h_beads_issue(request: web.Request) -> web.Response:
         # spelling is the daemon's (beads_meta), and a second reader of it in
         # JavaScript is a second place for it to drift.
         "workspace": beads_meta.workspace_of(issue),
+        # Whether that name is STILL registered. It was checked when it was
+        # written (Board.set_workspace refuses an unregistered one), but a
+        # workspace can be removed afterwards and the issue keeps naming it.
+        # Said here because the page cannot tell the two apart otherwise: a
+        # name it cannot resolve looks exactly like no name at all, and the
+        # creation modal would open on its own default while the board went
+        # on claiming the issue's directory had been honoured.
+        "workspace_known": bool(
+            beads_meta.workspace_of(issue)
+            and workspaces.get(beads_meta.workspace_of(issue)) is not None
+        ),
         # What the workspace picker may offer. The issue may only name one of
         # these, so the form that writes it and the daemon that refuses an
         # unregistered name are reading the same list.

@@ -162,6 +162,22 @@ check("but a recorded name is still shown when the registry cannot offer it",
       find(ctx.block(), "wf-note")[0].text,
       "gone — no workspace is registered on this daemon, so it cannot be changed here");
 
+/* 3b. a registry that HAS entries but not the one the issue names. A select
+   handed a value none of its options carry falls back to the first, which
+   here reads "none recorded" -- the pane would report an issue as naming no
+   directory when it names one that was removed. */
+ctx.setState(
+  { root: "/repo", workspace: "removed", workspaces: WORKSPACES,
+    workspace_known: false, issue: {} },
+  "claunch-1",
+);
+block = ctx.block();
+check("a recorded name the registry dropped is still offered, and selected",
+      [tags(block, "option").map((o) => o.value), find(block, "beads-ws-pick")[0].value],
+      [["", "alpha", "beta", "removed"], "removed"]);
+check("and the option says why it is there",
+      tags(block, "option")[3].text, "removed — no longer registered");
+
 /* 4. the write. Wrapped rather than awaited at the top level: a top-level
    await turns this file into an ES module and `require` stops existing. */
 async function writes() {
@@ -238,6 +254,64 @@ check("an issue recording no workspace seeds only the issue id",
 check("and says the form will open on its own default",
       find(start, "wf-note")[0].text,
       "this issue records no workspace, so the form opens on its own default");
+
+/* An issue naming a workspace the daemon no longer has. The seed must not
+   carry it: applySessionModalSeed resolves a NAME against the workspace list,
+   so an unregistered one resolves to nothing and the modal quietly opens on
+   the form's own default -- while this block used to go on claiming the
+   issue's directory had been honoured. */
+ctx.setState(
+  { root: "/repo", workspace: "removed", workspaces: WORKSPACES,
+    workspace_known: false, issue: { id: "claunch-9" } },
+  "claunch-9",
+);
+start = ctx.start();
+calls.length = 0;
+tags(start, "button")[0].handlers.click[0]();
+check("a workspace the daemon no longer has is not seeded",
+      JSON.parse(String(calls[0].event).slice("modal:".length)).seed,
+      { issue: "claunch-9" });
+check("and the pane warns instead of claiming the directory was honoured",
+      find(start, "wf-warning")[0].text,
+      "this issue records the workspace removed, which is not registered on "
+      + "this daemon any more — the form opens on its own default instead. "
+      + "Register it (claunch workspace add <dir>) or pick another above.");
+
+/* A closed issue: still startable, and said so. */
+ctx.setState(
+  { root: "/repo", workspace: "alpha", workspaces: WORKSPACES,
+    issue: { id: "claunch-11", status: "closed" } },
+  "claunch-11",
+);
+start = ctx.start();
+check("a closed issue still offers both answers",
+      tags(start, "button").map((b) => b.text), ["New session", "Spawn child"]);
+check("but says the record is already settled",
+      find(start, "wf-warning")[0].text,
+      "this issue is closed — a session started on it works a record that is "
+      + "already settled. File a new issue instead unless this is a follow-up "
+      + "round on the same one.");
+ctx.setState(
+  { root: "/repo", workspace: "alpha", workspaces: WORKSPACES,
+    issue: { id: "claunch-12", status: "open" } },
+  "claunch-12",
+);
+check("an open issue is not warned about",
+      find(ctx.start(), "wf-warning").length, 0);
+
+/* A daemon that predates `workspace_known` sends no such field. Undefined is
+   not false: the recorded name is seeded exactly as before. */
+ctx.setState(
+  { root: "/repo", workspace: "alpha", workspaces: WORKSPACES,
+    issue: { id: "claunch-10" } },
+  "claunch-10",
+);
+start = ctx.start();
+calls.length = 0;
+tags(start, "button")[0].handlers.click[0]();
+check("an older daemon that says nothing about the registry seeds as before",
+      JSON.parse(String(calls[0].event).slice("modal:".length)).seed,
+      { issue: "claunch-10", workspace: "alpha" });
 
 if (failures) process.exit(1);
   console.log("beadsworkspace_check ok");

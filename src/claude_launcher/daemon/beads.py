@@ -73,6 +73,7 @@ import json
 import logging
 import re
 import shutil
+import sqlite3
 import time
 from dataclasses import replace
 from datetime import datetime, timezone
@@ -86,6 +87,11 @@ log = logging.getLogger("claude_launcher.daemon.beads")
 
 #: Issue statuses that mean "somebody still means to do this".
 ACTIVE_STATUSES = ("open", "in_ready", "in_progress", "in_review", "blocked")
+
+#: Every status a board issue can hold -- the active ones plus ``closed``.
+#: What a status filter coming in over the API is checked against, so a
+#: typo answers 400 instead of silently listing nothing.
+KNOWN_STATUSES = ACTIVE_STATUSES + ("closed",)
 
 #: The label every issue the daemon mints carries, so the sweep can tell its
 #: own placeholder from an issue an agent or a human wrote.
@@ -139,6 +145,19 @@ CACHE_TTL = 2.0
 #: a board with no edges draws; the page is never held up for it.
 DEPS_SCAN_LIMIT = 200
 
+#: How much of an issue's description a LISTING carries.
+#:
+#: The dashboard draws an excerpt of a listed issue and nothing more -- six
+#: lines or 400 characters in the rail's hover card (``beadPopExcerpt`` in
+#: ``web/static/app.js``), nothing at all in a board row -- and the detail
+#: pane reads the full text from ``/api/beads/<id>``. So a listing that
+#: serialized every description in full was sending text no reader rendered:
+#: measured on this machine's own board (1051 issues), ``/api/beads`` was
+#: 3.1 MB and ``/api/beads/queues`` 2.3 MB, both of them mostly description.
+#: The cut is on the response only; :meth:`Board.issues` still caches the
+#: text whole, because the daemon's own lifecycle reads need it.
+PREVIEW_CHARS = 700
+
 #: A wind-down: how long the agent has to react to the block at all before it
 #: is treated as not listening, and the ceiling on the whole turn after that.
 REACT_WINDOW = 20.0
@@ -149,6 +168,18 @@ DEFAULT_TITLE_LIMIT = 100
 #: page moves an assignment on the operator's behalf, and a comment signed by
 #: the session it was moved TO would read as that session claiming the work.
 DASHBOARD_ACTOR = "dashboard"
+
+#: The issue types the workflows use, and what a create coming in over the
+#: API is checked against. ``br`` itself takes any word; the check is here so
+#: a typed type does not quietly become a category nothing filters on.
+KNOWN_TYPES = ("task", "bug", "epic", "doc", "chore", "feature")
+
+#: The priorities a board issue can hold -- ``br``'s own 0..4.
+MIN_PRIORITY, MAX_PRIORITY = 0, 4
+
+#: The label a dashboard-filed issue carries, so the board says where it came
+#: from the way the workflows' source labels do (user | leader | found | ...).
+OPERATOR_LABEL = "user"
 
 Runner = Callable[[List[str], str], Awaitable[Tuple[int, str, str]]]
 
@@ -329,6 +360,30 @@ def queue_summary(queue: Sequence[dict]) -> dict:
     }
 
 
+def preview_row(row: dict) -> dict:
+    """``row`` with its description cut to :data:`PREVIEW_CHARS`.
+
+    Always a copy. The row it is given belongs to the cached listing that
+    :meth:`Board.issues` hands to the daemon's own lifecycle work, which
+    reads the description whole -- trimming in place would take the text away
+    from a reader that needs it and leave no trace of having done so.
+
+    ``description_full`` is ``False`` when something was actually cut, so a
+    client can tell a description that ends there from one that continues in
+    ``/api/beads/<id>``. A row whose description fits carries no such key and
+    is unchanged apart from being a copy.
+    """
+    text = row.get("description")
+    if not isinstance(text, str) or len(text) <= PREVIEW_CHARS:
+        return dict(row)
+    return {**row, "description": text[:PREVIEW_CHARS], "description_full": False}
+
+
+def preview_rows(rows: Sequence[dict]) -> List[dict]:
+    """:func:`preview_row` over a listing."""
+    return [preview_row(r) for r in rows]
+
+
 def assign_note(issue_id: str, target: str, was: str) -> str:
     """The comment a dashboard assignment leaves on the issue, so the board
     says who moved it and from where -- the same ``QUEUED``/``UNQUEUED``
@@ -361,6 +416,49 @@ def workspace_for(cwd: Optional[str]) -> str:
     return found.name if found else ""
 
 
+#: The headings a board issue's description is written under, in order.
+#: The workflows' intake reads these exact strings and ``br lint`` expects
+#: them, so they are a contract with something outside this file rather than
+#: a formatting choice. One tuple, because two functions write a description
+#: here and a third heading set typed into either of them would produce
+#: issues that look right and that the intake step cannot read.
+SPEC_HEADINGS = ("## 목표", "## 범위(포함·제외)", "## 완료 증거 기준", "## 출처")
+
+#: What the 완료 증거 기준 section says when nobody has filled it in. The
+#: same sentence either way it was filed: the assignee is the one who knows.
+SPEC_EVIDENCE = "(the assignee fills this in at intake: test counts, commit hash)"
+
+
+def render_spec(
+    goal: str, *, scope: str, source: str, workspace: str = "",
+    evidence: str = SPEC_EVIDENCE,
+) -> str:
+    """A description in the four sections the workflows read.
+
+    The one place :data:`SPEC_HEADINGS` is turned into text. Its callers
+    differ only in the goal, who filed it and what the scope placeholder
+    says; writing the headings out at each of them is how two issues filed
+    by the same daemon come to carry different spellings of the same
+    section, which nothing reports because each write looks correct on its
+    own.
+
+    ``workspace`` is recorded as YAML front matter above the sections
+    (:mod:`claude_launcher.beads_meta`). An empty one writes no block at
+    all, so a description composed where no workspace is known looks exactly
+    as it did before that existed.
+    """
+    goal_h, scope_h, evidence_h, source_h = SPEC_HEADINGS
+    body = (
+        f"{goal_h}\n{goal.strip()}\n\n"
+        f"{scope_h}\n{scope}\n\n"
+        f"{evidence_h}\n{evidence}\n\n"
+        f"{source_h}\n{source}"
+    )
+    return beads_meta.render(
+        {beads_meta.WORKSPACE: workspace} if workspace else {}, body
+    )
+
+
 def compose_description(
     task: str, *, name: str, parent: Optional[str], text: bool = False,
     workspace: str = "",
@@ -389,23 +487,118 @@ def compose_description(
         if text
         else f"opening task of session {name}"
     )
-    body = (
-        "## 목표\n"
-        f"{task.strip()}\n\n"
-        "## 범위(포함·제외)\n"
-        "(registered at session creation by the claunch daemon — the "
-        "assignee fills this in at intake)\n\n"
-        "## 완료 증거 기준\n"
-        "(the assignee fills this in at intake: test counts, commit hash)\n\n"
-        "## 출처\n"
-        f"{origin}, {_utcnow()}, {source}"
-    )
     # The workspace is recorded at the mint because this is the one moment it
     # is known for certain: the session is being created in a directory right
     # now. Asked for later, it is a guess about where the work belongs.
-    return beads_meta.render(
-        {beads_meta.WORKSPACE: workspace} if workspace else {}, body
+    return render_spec(
+        task,
+        scope=(
+            "(registered at session creation by the claunch daemon — the "
+            "assignee fills this in at intake)"
+        ),
+        source=f"{origin}, {_utcnow()}, {source}",
+        workspace=workspace,
     )
+
+
+def compose_board_description(title: str, *, workspace: str = "") -> str:
+    """The description a dashboard-filed issue starts with.
+
+    The same four sections :func:`compose_description` writes, through the
+    same :func:`render_spec`, but filed by a person at the board rather than
+    minted for a session -- so the 출처 line says that and no session is
+    named.
+
+    An operator who typed a description of their own never reaches this: it
+    is the template for the one who typed only a title, and every section
+    below the goal says who fills it in.
+    """
+    return render_spec(
+        title,
+        scope=(
+            "(filed from the dashboard with a title only -- the assignee "
+            "fills this in at intake)"
+        ),
+        source=f"operator (dashboard board form), {_utcnow()}",
+        workspace=workspace,
+    )
+
+
+def check_new_issue(body: dict) -> dict:
+    """Read a board create request, or refuse it.
+
+    Answers the normalised fields; raises :class:`BoardRequestError` with the
+    reason otherwise. Pure, so the rules are testable without a board, and
+    the one place they are written -- the route validates nothing of its own.
+
+    What it refuses and why:
+
+    * no title -- an issue with no title is unfindable on a board of a
+      thousand, and every listing this dashboard draws is titles.
+    * a priority outside 0..4, or one that is not a number. ``br`` takes
+      ``P2`` as well as ``2``; both are read here and stored as the number.
+    * a type the workflows do not use. ``br`` would take the typo and the
+      board would gain a category nothing filters on.
+    * a workspace that is not registered. An issue naming a directory nobody
+      registered sends its session nowhere, and nothing downstream reports
+      it -- the same rule :meth:`Board.set_workspace` enforces.
+    """
+    title = str(body.get("title") or "").strip()
+    if not title:
+        raise BoardRequestError("an issue needs a title")
+
+    raw_priority = body.get("priority", 2)
+    if isinstance(raw_priority, str):
+        raw_priority = raw_priority.strip().lstrip("pP") or "2"
+    try:
+        priority = int(raw_priority)
+    except (TypeError, ValueError):
+        raise BoardRequestError(f"priority must be a number, not {body.get('priority')!r}")
+    if not MIN_PRIORITY <= priority <= MAX_PRIORITY:
+        raise BoardRequestError(
+            f"priority must be {MIN_PRIORITY}..{MAX_PRIORITY}, not {priority}"
+        )
+
+    issue_type = str(body.get("type") or body.get("issue_type") or "task").strip()
+    if issue_type not in KNOWN_TYPES:
+        raise BoardRequestError(
+            f"unknown type {issue_type!r} (known: {', '.join(KNOWN_TYPES)})"
+        )
+
+    raw_labels = body.get("labels") or []
+    if isinstance(raw_labels, str):
+        raw_labels = raw_labels.split(",")
+    labels = [str(l).strip() for l in raw_labels if str(l).strip()]
+    if OPERATOR_LABEL not in labels:
+        labels.insert(0, OPERATOR_LABEL)
+    if any("," in l for l in labels):
+        raise BoardRequestError("a label cannot contain a comma")
+
+    workspace = str(body.get("workspace") or "").strip()
+    if workspace and workspaces.get(workspace) is None:
+        raise BoardRequestError(
+            f"no workspace named {workspace!r} -- register it with "
+            "'claunch workspace add <dir>' first"
+        )
+
+    status = str(body.get("status") or "open").strip()
+    if status not in ("open", "in_ready"):
+        raise BoardRequestError(
+            "a new issue starts open, or in_ready when its spec has been "
+            f"reviewed -- not {status!r}"
+        )
+
+    return {
+        "title": title,
+        "description": str(body.get("description") or "").strip(),
+        "priority": priority,
+        "type": issue_type,
+        "labels": labels,
+        "assignee": str(body.get("assignee") or "").strip(),
+        "workspace": workspace,
+        "status": status,
+        "parent": str(body.get("parent") or "").strip(),
+    }
 
 
 def none_mode(body: dict) -> Optional[str]:
@@ -784,7 +977,7 @@ class Board:
         #: separate from ``_cache`` because a full listing is useful to the
         #: daemon's lifecycle work, while the dashboard must not ask a large
         #: board to serialize every issue just to paint its first viewport.
-        self._page_cache: Dict[tuple, Tuple[float, List[dict], bool]] = {}
+        self._page_cache: Dict[tuple, Tuple[float, List[dict], bool, Optional[int]]] = {}
         #: The dependency edges of a board, cached beside its listing and
         #: dropped with it -- an edge read is derived from the listing it was
         #: taken against, so keeping one past the other would draw a hierarchy
@@ -967,14 +1160,28 @@ class Board:
         self, root: Path, *, offset: int = 0, limit: int = 50,
         priority: Optional[int] = None,
         sort: str = "updated_at", direction: str = "desc",
-    ) -> Tuple[List[dict], bool]:
+        statuses: Optional[Sequence[str]] = None,
+    ) -> Tuple[List[dict], bool, Optional[int]]:
         """One bounded page of a board in the requested order.
 
-        ``br list`` performs the offset and priority filtering in the board's
-        database.  Asking for one extra row makes the continuation marker
-        independent of a separate count query.  The small local slice keeps
-        the contract correct for older ``br`` versions (and test runners)
-        that ignore pagination flags.
+        ``br list`` performs the offset, priority and status filtering in the
+        board's database.  Asking for one extra row makes the continuation
+        marker independent of a separate count query.  The small local slice
+        keeps the contract correct for older ``br`` versions (and test
+        runners) that ignore pagination flags.
+
+        ``statuses`` is the filter the page is NUMBERED under, which is why
+        it belongs here rather than in the client: a reader looking at open
+        work wants page 2 of the open issues, and a page filtered after it
+        was cut holds however many of its fifty rows happened to be open --
+        a different count on every page, and pages that are entirely empty
+        while the board still has hundreds of matching issues. ``None`` is
+        every status, closed ones included.
+
+        Answers ``(page, has_more, total)``.  ``total`` is how many issues
+        match the filter on the whole board, which is what a page control
+        needs to say how many pages there are; it is ``None`` when ``br``
+        does not report one.
         """
         offset = max(0, offset)
         limit = max(1, limit)
@@ -982,11 +1189,12 @@ class Board:
             raise ValueError("unsupported sort field")
         if direction not in {"asc", "desc"}:
             raise ValueError("unsupported sort direction")
-        key = (str(root), offset, limit, priority, sort, direction)
+        wanted = tuple(dict.fromkeys(statuses or ()))
+        key = (str(root), offset, limit, priority, sort, direction, wanted)
         now = self._clock()
         hit = self._page_cache.get(key)
         if hit and now - hit[0] < CACHE_TTL:
-            return hit[1], hit[2]
+            return hit[1], hit[2], hit[3]
         args = [
             "list", "--all", "--limit", str(limit + 1), "--offset", str(offset),
             "--sort", sort,
@@ -996,20 +1204,81 @@ class Board:
             args.append("--reverse")
         if priority is not None:
             args.extend(["--priority", str(priority)])
+        for status in wanted:
+            # Repeated, never comma-joined: a comma list is accepted and
+            # matches nothing (claunch-beads-list-comma-status-tmh).
+            args.extend(["--status", status])
         data = await self.br(root, args)
         rows = data.get("issues") if isinstance(data, dict) else data
         rows = [r for r in (rows or []) if isinstance(r, dict)]
+        total = data.get("total") if isinstance(data, dict) else None
+        if not isinstance(total, int):
+            total = None
         if priority is not None:
             rows = [r for r in rows if r.get("priority") == priority]
+        if wanted:
+            rows = [r for r in rows if r.get("status") in wanted]
         # A compatible but pre-pagination ``br`` can return the full list.
         # Its response is larger than the requested extra row, which is an
-        # unambiguous signal to apply the requested window locally.
+        # unambiguous signal to apply the requested window locally -- and
+        # then the rows in hand ARE the whole match, so they are the count.
         if len(rows) > limit + 1:
+            total = len(rows)
             rows = rows[offset:offset + limit + 1]
         has_more = len(rows) > limit
         page = rows[:limit]
-        self._page_cache[key] = (now, page, has_more)
-        return page, has_more
+        self._page_cache[key] = (now, page, has_more, total)
+        return page, has_more, total
+
+    async def _edges_from_db(self, root: Path) -> Optional[List[dict]]:
+        """Every dependency edge on ``root``'s board in one read, or ``None``.
+
+        The per-issue path in :meth:`edges` forks ``br dep list`` once for
+        each issue that has any, and this board's lock serialises them. One
+        fork costs about 0.6 s on this machine, so a board with 59 such
+        issues spent most of a page load on edges: ``/api/beads`` measured
+        13.5 s and ``/api/beads/stream?limit=50`` 7.8 s, against 0.66 s for
+        the listing itself.
+
+        ``br`` stores those edges in a SQLite table, so the same answer is
+        one query. The file is opened read-only and never written.
+
+        Answers ``None`` rather than raising for every reason this reading
+        can be unavailable -- a JSONL board with no database, a schema
+        without this table, a locked file -- and the caller falls back to
+        ``br``. The edges are an ornament over a listing that is already
+        useful, and a board that could not be drawn as a forest is still a
+        board.
+        """
+        db = root / cli_beads.BEADS_DIR / cli_beads.DB_NAME
+        if not db.is_file():
+            return None
+
+        def read() -> List[dict]:
+            # A URI so the connection can be read-only; the path is quoted
+            # because a '?' or '#' in it would otherwise start the query
+            # part of the URI.
+            quoted = db.as_posix().replace("?", "%3f").replace("#", "%23")
+            conn = sqlite3.connect(f"file:{quoted}?mode=ro", uri=True, timeout=2.0)
+            try:
+                rows = conn.execute(
+                    "SELECT issue_id, depends_on_id, type FROM dependencies"
+                ).fetchall()
+            finally:
+                conn.close()
+            # Direction is ``br``'s own and matches the per-issue path: the
+            # depending issue is stored as ``issue_id``, which for a
+            # parent-child edge is the CHILD.
+            return [
+                {"from": str(src), "to": str(dst), "type": str(kind or "")}
+                for src, dst, kind in rows if src and dst
+            ]
+
+        try:
+            return await asyncio.to_thread(read)
+        except Exception as exc:  # no such table, locked, unreadable
+            log.debug("beads: no bulk edge read for %s: %s", root, exc)
+            return None
 
     async def edges(
         self, root: Path, rows: Sequence[dict], *, cache_key: Optional[tuple] = None,
@@ -1041,6 +1310,17 @@ class Board:
         hit = cache.get(key)
         if hit and now - hit[0] < CACHE_TTL:
             return hit[1]
+        # One read of the board's database answers for every issue at once.
+        # When it does, the page-scoped cache key stops mattering: the result
+        # is the whole graph rather than one page's slice of it, so it is
+        # cached under the board and every page shares it.
+        whole = self._deps.get(str(root))
+        if whole and now - whole[0] < CACHE_TTL:
+            return whole[1]
+        bulk = await self._edges_from_db(root)
+        if bulk is not None:
+            self._deps[str(root)] = (now, bulk)
+            return bulk
         wanted = [
             r.get("id") for r in rows
             if r.get("id") and (r.get("dependency_count") or 0)
@@ -1136,7 +1416,9 @@ class Board:
         except cli_beads.BeadsError as exc:
             view["error"] = str(exc)
             return view
-        view["issues"] = match(rows, sdef.name, issue=sdef.issue, task=sdef.task)
+        view["issues"] = preview_rows(
+            match(rows, sdef.name, issue=sdef.issue, task=sdef.task)
+        )
         wd = self.winddowns.get(sdef.name)
         if wd:
             view["winddown"] = wd
@@ -1214,7 +1496,9 @@ class Board:
                         {"name": s.sdef.name, "via": m["via"], "status": s.status()}
                     )
             for raw in rows:
-                entry["issues"].append({**raw, "sessions": owners.get(raw.get("id"), [])})
+                entry["issues"].append(
+                    {**preview_row(raw), "sessions": owners.get(raw.get("id"), [])}
+                )
             # The edges the page nests the board by. Read after the issues and
             # from them, so a board that could not be listed never reaches here
             # -- there is nothing to hang a hierarchy on.
@@ -1226,23 +1510,63 @@ class Board:
             result["boards"].append(entry)
         return result
 
+    async def boards_view(
+        self, sessions: Sequence, extra_roots: Sequence[str] = (),
+    ) -> dict:
+        """Which boards exist and who is on them -- no issues.
+
+        What a form needs before it can be drawn: where an issue may be
+        filed, and which session names an assignee picker may offer. It is
+        deliberately the cheapest reading on this class -- it resolves
+        directories to boards and stops -- because a create form that had to
+        wait for a board listing would be paying the cost a paged board was
+        built to avoid.
+        """
+        by_root, order = await self._group_by_root(sessions, extra_roots)
+        return {
+            "available": self.available(),
+            "boards": [
+                {
+                    "root": str(root),
+                    "sessions": [
+                        {"name": s.sdef.name, "status": s.status()}
+                        for s in by_root[str(root)]
+                    ],
+                }
+                for root in order
+            ],
+        }
+
     async def stream_view(
         self, sessions: Sequence, extra_roots: Sequence[str] = (), *,
         offset: int = 0, limit: int = 50, priority: Optional[int] = None,
         sort: str = "updated_at", direction: str = "desc",
+        statuses: Optional[Sequence[str]] = None,
     ) -> dict:
-        """A bounded, resumable page for each board on the Beads screen.
+        """One bounded page of each board on the Beads screen.
 
         The cursor is an offset shared by the boards in this response.  A
-        fleet normally has one board; with several boards, the client keeps
-        requesting while any board still has another page.  Existing
-        :meth:`fleet_view` remains the complete compatibility response used
-        by callers that need every issue at once.
+        fleet normally has one board; with several boards, the client asks
+        for the same window of each.  Existing :meth:`fleet_view` remains the
+        complete compatibility response used by callers that need every issue
+        at once.
+
+        ``statuses`` narrows the page in the board's database rather than
+        after it was cut, so the page the reader is on is a page OF what is
+        being shown.  Each board entry carries ``total`` -- how many issues
+        match on that board -- so a page control can say how many pages there
+        are instead of only whether one more exists.
+
+        Descriptions are cut to :data:`PREVIEW_CHARS` (see
+        :func:`preview_row`): a listing draws an excerpt, and the full text
+        is one request away at ``/api/beads/<id>``.
         """
         result = {
             "available": self.available(), "boards": [], "offset": offset,
             "limit": limit, "priority": priority, "has_more": False,
             "next_offset": None,
+            "statuses": list(statuses or ()),
+            "total": None,
         }
         if not result["available"]:
             result["error"] = f"'{cli_beads.BINARY}' is not installed on the daemon machine"
@@ -1251,7 +1575,7 @@ class Board:
         for root in order:
             entry: dict = {
                 "root": str(root), "issues": [], "deps": [], "sessions": [],
-                "error": None, "has_more": False,
+                "error": None, "has_more": False, "total": None,
             }
             members = by_root[str(root)]
             entry["sessions"] = [
@@ -1259,9 +1583,9 @@ class Board:
                 for s in members
             ]
             try:
-                rows, entry["has_more"] = await self.issue_page(
+                rows, entry["has_more"], entry["total"] = await self.issue_page(
                     root, offset=offset, limit=limit, priority=priority,
-                    sort=sort, direction=direction,
+                    sort=sort, direction=direction, statuses=statuses,
                 )
             except cli_beads.BeadsError as exc:
                 entry["error"] = str(exc)
@@ -1274,15 +1598,22 @@ class Board:
                         {"name": s.sdef.name, "via": m["via"], "status": s.status()}
                     )
             entry["issues"] = [
-                {**raw, "sessions": owners.get(raw.get("id"), [])} for raw in rows
+                {**preview_row(raw), "sessions": owners.get(raw.get("id"), [])}
+                for raw in rows
             ]
             try:
                 entry["deps"] = await self.edges(
-                    root, rows, cache_key=(str(root), offset, limit, priority, sort, direction),
+                    root, rows,
+                    cache_key=(
+                        str(root), offset, limit, priority, sort, direction,
+                        tuple(statuses or ()),
+                    ),
                 )
             except cli_beads.BeadsError as exc:
                 log.debug("beads: no edge read for %s: %s", root, exc)
             result["has_more"] = result["has_more"] or entry["has_more"]
+            if entry["total"] is not None:
+                result["total"] = (result["total"] or 0) + entry["total"]
             result["boards"].append(entry)
         if result["has_more"]:
             result["next_offset"] = offset + limit
@@ -1352,8 +1683,11 @@ class Board:
                     "status": s.status() if s is not None else None,
                     "issue": s.sdef.issue if s is not None else None,
                     "cflow": None,
-                    "issues": queue,
-                    "created": created,
+                    # The cards carry an excerpt, not the text: every lane on
+                    # this page repeats its issues' descriptions, which made
+                    # the response 2.3 MB on this machine's own board.
+                    "issues": preview_rows(queue),
+                    "created": preview_rows(created),
                     "summary": queue_summary(queue),
                 }
                 if s is not None and cflow_for is not None:
@@ -1364,7 +1698,7 @@ class Board:
                 entry["lanes"].append(lane)
             pool = [r for r in active if not r.get("assignee")]
             pool.sort(key=_queue_rank)
-            entry["unassigned"] = [dict(r) for r in pool]
+            entry["unassigned"] = preview_rows(pool)
             result["boards"].append(entry)
         return result
 
@@ -1703,6 +2037,66 @@ class Board:
         if not iid:
             raise cli_beads.BeadsError("br create answered without an id")
         return {"issue": str(iid), "created": True}
+
+    async def create_issue(self, root: Path, spec: dict) -> dict:
+        """File an issue on ``root``'s board from the dashboard's form.
+
+        ``spec`` is what :func:`check_new_issue` answered -- this method does
+        no validating of its own, so there is one place the rules live.
+
+        The write is stamped :data:`DASHBOARD_ACTOR` rather than a session:
+        an operator filed it, and a ``created_by`` naming a session would put
+        the issue on that session's rail as its own follow-up work (see
+        :func:`created_of`), which is a different fact.
+
+        The workspace is recorded the way :meth:`set_workspace` records it --
+        front matter on the description -- so an issue filed here is
+        immediately one the "Start a session" block can open in the right
+        directory. It is written in the SAME create as the description
+        rather than as a second update, so an issue never exists with its
+        directory missing.
+        """
+        if not self.has_board(root):
+            raise BeadsUnavailable(f"no board at {root}")
+        description = spec["description"] or compose_board_description(
+            spec["title"], workspace=spec["workspace"],
+        )
+        if spec["workspace"]:
+            # An operator-written description gets the block put on it; the
+            # template above already carries one, and set_key replacing an
+            # identical value writes the same bytes back.
+            description = beads_meta.set_key(
+                description, beads_meta.WORKSPACE, spec["workspace"],
+            )
+        args = [
+            "create", spec["title"],
+            "--type", spec["type"],
+            "--priority", str(spec["priority"]),
+            "--labels", ",".join(spec["labels"]),
+            "--description", description,
+        ]
+        if spec["status"] != "open":
+            args.extend(["--status", spec["status"]])
+        if spec["parent"]:
+            args.extend(["--parent", spec["parent"]])
+        # Last, and on its own: the workflows' create spec puts the assignee
+        # after the description for the same reason -- a board that failed
+        # halfway should not leave an issue assigned to somebody with no
+        # goal written in it.
+        if spec["assignee"]:
+            args.extend(["--assignee", spec["assignee"]])
+        data = await self.br(root, args, actor=DASHBOARD_ACTOR)
+        iid = data.get("id") if isinstance(data, dict) else None
+        if not iid and isinstance(data, list) and data:
+            iid = data[0].get("id")
+        if not iid:
+            raise cli_beads.BeadsError("br create answered without an id")
+        return {
+            "issue": str(iid),
+            "root": str(root),
+            "workspace": spec["workspace"],
+            "created": True,
+        }
 
     # ---- ending --------------------------------------------------------- #
     async def active_issues(self, session) -> List[dict]:

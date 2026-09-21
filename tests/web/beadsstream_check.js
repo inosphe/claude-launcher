@@ -1,4 +1,10 @@
-/* Exercise overlapping stream requests when the operator changes sort. */
+/* The Beads board reads ONE page and shows it.
+
+   Three things this pins, all of which were different under the infinite
+   scroll it replaced: a page request carries the status filter (so the page
+   is a page of what is drawn), a page REPLACES what was on screen rather
+   than being merged onto it, and the answer to a request the reader has
+   already moved past is dropped. */
 const assert = require("assert");
 const fs = require("fs");
 const path = require("path");
@@ -14,41 +20,85 @@ function slice(name) {
   }
   throw new Error(name);
 }
-const ctx = vm.createContext({ URLSearchParams, requests: [], merged: [] });
+const ctx = vm.createContext({ URLSearchParams, Math, requests: [], shown: [] });
 vm.runInContext(`
-let beadsOpen = true, beadsSection = "board", beadsLoading = false, beadsMore = true;
-let beadsNextOffset = 0, beadsStreamVersion = 0, beadsPri = null, beadsCache = null;
-let beadsError = "", beadsSort = "updated_at", beadsDirection = "desc";
-const BEADS_STREAM_PAGE = 48;
-function renderBeads() {}
-function mergeBeadsPage(data) { merged.push(data.marker); beadsCache = data; }
+let beadsOpen = true, beadsSection = "board", beadsLoading = false, beadsMore = false;
+let beadsPage = 0, beadsTotal = null, beadsStreamVersion = 0, beadsPri = null;
+let beadsCache = null, beadsError = "", beadsSort = "updated_at", beadsDirection = "desc";
+let beadsFilter = "active";
+const BEADS_PAGE_SIZE = 48;
+const BEADS_ACTIVE = new Set(["open", "in_ready", "in_progress", "in_review", "blocked"]);
+function renderBeads() { shown.push(beadsCache && beadsCache.marker); }
 async function refreshBeadsDetail() {}
 function refreshBeadsRelated() {}
 function api(url) { return new Promise(resolve => requests.push({ url, resolve })); }
-` + slice("loadBeadsPage") + slice("restartBeadsStream"), ctx);
-function reply(n, marker, more = true) {
-  ctx.requests[n].resolve({ ok: true, status: 200,
-    json: async () => ({ marker, has_more: more, next_offset: more ? 48 : null }) });
+` + slice("loadBeadsPage") + slice("restartBeadsStream")
+  + slice("beadsGoToPage") + slice("beadsPageCount") + slice("beadsStatusQuery"), ctx);
+
+function reply(n, marker, { more = true, total = 200 } = {}) {
+  ctx.requests[n].resolve({
+    ok: true, status: 200,
+    json: async () => ({ marker, has_more: more, total,
+                         next_offset: more ? undefined : null }),
+  });
 }
 const flush = () => new Promise(resolve => setImmediate(resolve));
+
 (async () => {
+  // The default filter is `active`, so the request names those statuses and
+  // the daemon cuts the page to them.
   vm.runInContext("restartBeadsStream()", ctx);
-  assert(ctx.requests[0].url.includes("sort=updated_at&direction=desc"));
-  vm.runInContext('beadsSort = "priority"; beadsDirection = "asc"; restartBeadsStream()', ctx);
-  assert(ctx.requests[1].url.includes("sort=priority&direction=asc"));
+  const first = ctx.requests[0].url;
+  assert(first.includes("offset=0") && first.includes("limit=48"), first);
+  for (const s of ["open", "in_ready", "in_progress", "in_review", "blocked"]) {
+    assert(first.includes(`status=${s}`), `${s} missing from ${first}`);
+  }
+
+  // A filter change renumbers the pages, so it restarts at the first one.
+  vm.runInContext('beadsPage = 3; beadsFilter = "closed"; restartBeadsStream()', ctx);
+  assert.strictEqual(vm.runInContext("beadsPage", ctx), 0);
+  assert(ctx.requests[1].url.includes("status=closed"), ctx.requests[1].url);
+  assert(!ctx.requests[1].url.includes("status=open"), ctx.requests[1].url);
+
+  // The answer to the request that was superseded is dropped.
   reply(0, "stale");
   await flush();
-  assert.deepStrictEqual(ctx.merged, []);
+  assert.deepStrictEqual(ctx.shown, [null, null]);   // two renders, no data
   assert.strictEqual(vm.runInContext("beadsLoading", ctx), true);
-  reply(1, "current");
+  reply(1, "page-1");
   await flush();
-  assert.deepStrictEqual(ctx.merged, ["current"]);
-  vm.runInContext("loadBeadsPage()", ctx);
-  assert(ctx.requests[2].url.includes("offset=48"));
-  assert(ctx.requests[2].url.includes("sort=priority&direction=asc"));
-  reply(2, "next", false);
+  assert.strictEqual(vm.runInContext("beadsCache.marker", ctx), "page-1");
+  assert.strictEqual(vm.runInContext("beadsTotal", ctx), 200);
+  // 200 issues at 48 a page is five pages, the last one short.
+  assert.strictEqual(vm.runInContext("beadsPageCount()", ctx), 5);
+
+  // Next page: a fresh offset, and the page REPLACES the one before it.
+  vm.runInContext("beadsGoToPage(1)", ctx);
+  assert(ctx.requests[2].url.includes("offset=48"), ctx.requests[2].url);
+  reply(2, "page-2");
   await flush();
-  assert.deepStrictEqual(ctx.merged, ["current", "next"]);
-  assert.strictEqual(vm.runInContext("beadsLoading || beadsMore", ctx), false);
+  assert.strictEqual(vm.runInContext("beadsCache.marker", ctx), "page-2");
+  assert.strictEqual(vm.runInContext("beadsPage", ctx), 1);
+
+  // A page past the last one is clamped to the last one rather than asking
+  // the daemon for an offset the board does not have.
+  const before = ctx.requests.length;
+  vm.runInContext("beadsGoToPage(99)", ctx);
+  assert(ctx.requests[before].url.includes(`offset=${4 * 48}`), ctx.requests[before].url);
+  assert.strictEqual(vm.runInContext("beadsPage", ctx), 4);
+  reply(before, "page-5", { more: false, total: 200 });
+  await flush();
+
+  // A daemon that reports no total leaves next/previous working and the page
+  // count unknown, rather than the control refusing to draw.
+  vm.runInContext("beadsGoToPage(0)", ctx);
+  ctx.requests[ctx.requests.length - 1].resolve({
+    ok: true, status: 200, json: async () => ({ marker: "no-total", has_more: true }),
+  });
+  await flush();
+  assert.strictEqual(vm.runInContext("beadsTotal", ctx), null);
+  assert.strictEqual(vm.runInContext("beadsPageCount()", ctx), 0);
+  assert.strictEqual(vm.runInContext("beadsMore", ctx), true);
+
   console.log("beadsstream_check ok");
 })().catch(err => { console.error(err); process.exitCode = 1; });
