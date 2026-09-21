@@ -906,8 +906,30 @@ card a chip with the same figure, and the attached session's header a badge
 with a twin overlay drawn over the top-right corner of its terminal. All of
 them read the `tps` block the daemon hangs on the session (`GET /api/sessions`
 and `/api/sessions/<name>/meta`); `GET /api/metering?session=<name>` returns
-the records behind it. A reading older than ten minutes dims, and a session
-that never went through the shim shows nothing rather than a zero.
+the records behind it.
+
+That block is computed over a window bounded on two axes: the last ten calls,
+and only those made in the last ten minutes. The count on its own was not a
+window — a session that called ten times over a day and a half had its
+"median over the last 10 calls" drawn from calls 34 hours apart. So a session
+row has **three** states, and they are drawn differently because they are
+different facts:
+
+| state | what the row shows |
+| --- | --- |
+| never went through the shim (the OAuth routes) | nothing — no line, no chip, no badge |
+| quiet longer than the window | `tps none` and how long ago the last call was |
+| called within the window | the rate, the latency and the rolling median |
+
+Change the bound with `metering.summary_max_age` (seconds); `0` switches it
+off and restores the count-only window, where the last reading stands however
+old it is.
+
+```yaml
+metering:
+  enabled: true
+  summary_max_age: 600          # a call describes the session for this long
+```
 
 ## Migrating skills & MCP servers
 
