@@ -87,6 +87,34 @@ def _has_content(path: Path) -> bool:
         return False
 
 
+def locate(
+    config_dir: Path, conversation_id: str, cwd: str, *, deep: bool = True
+) -> Optional[Path]:
+    """Where ``conversation_id``'s transcript is, or ``None``.
+
+    The strict address (:func:`project_dir` of ``cwd``) answers first, and
+    with ``deep`` on the whole config dir is then searched by id
+    (:func:`find`). Both steps go through :func:`_has_content`, so an empty
+    jsonl at the strict address does not shadow a written one filed under a
+    slug spelled differently.
+
+    ``deep`` is off for callers that resolve many sessions at once: the id
+    scan reads every project directory, which one lookup pays gladly and a
+    fleet-wide sweep cannot. With it off, a conversation filed under an
+    unexpected slug reads as absent to that caller.
+
+    This is the one place the question "is that conversation on disk" is
+    answered for claude. :func:`exists` is this with the path thrown away,
+    and :func:`claude_launcher.daemon.briefing.locate_transcript` is this
+    with codex's own locator joined onto it. Neither spells the rule again
+    (claunch-fork-family-recheck-amnqg.1).
+    """
+    direct = project_dir(config_dir, cwd) / f"{conversation_id}.jsonl"
+    if _has_content(direct):
+        return direct
+    return find(config_dir, conversation_id) if deep else None
+
+
 def exists(config_dir: Path, conversation_id: str, cwd: str) -> bool:
     """Whether ``conversation_id`` has a transcript on disk at all.
 
@@ -109,10 +137,12 @@ def exists(config_dir: Path, conversation_id: str, cwd: str) -> bool:
     resumable than a missing one, and :func:`_has_content` is what draws that
     line. The check stops at the byte count on purpose -- see that function
     for why a corrupt or locked transcript is still answered yes.
+
+    Both halves live in :func:`locate`, which the daemon's briefing reads
+    too. Only the shape differs: a restore wants a yes or no, a reader wants
+    the path.
     """
-    if _has_content(project_dir(config_dir, cwd) / f"{conversation_id}.jsonl"):
-        return True
-    return find(config_dir, conversation_id) is not None
+    return locate(config_dir, conversation_id, cwd) is not None
 
 
 def relocate(

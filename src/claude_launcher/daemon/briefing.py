@@ -155,6 +155,16 @@ def locate_transcript(sdef, *, deep: bool = True) -> Optional[Path]:
     alone and codex answers nothing, so a conversation filed under a slug
     this module spells differently reads as absent to that caller and is
     still found when the session is asked for by name.
+
+    What counts as on disk for claude is not spelled here: that branch calls
+    :func:`claude_launcher.transcripts.locate`, the same answer
+    :func:`claude_launcher.transcripts.exists` gives a restore. The two
+    callers differ in what they do with it -- this one reads the file, that
+    one runs ``--resume`` -- and agree on the case that separates a name from
+    a conversation: a zero-byte jsonl has nothing to read and nothing to
+    resume. Spelling it twice is how the two drifted, with the copy here
+    answering "there is a transcript" where the canonical one answered "there
+    is not" (claunch-fork-family-recheck-amnqg.1).
     """
     cid = getattr(sdef, "conversation_id", None)
     if not cid:
@@ -178,9 +188,7 @@ def locate_transcript(sdef, *, deep: bool = True) -> Optional[Path]:
     if cdir is None:
         return None
     if sdef.cwd:
-        p = transcripts.project_dir(cdir, sdef.cwd) / f"{cid}.jsonl"
-        if p.is_file():
-            return p
+        return transcripts.locate(cdir, cid, sdef.cwd, deep=deep)
     return transcripts.find(cdir, cid) if deep else None
 
 

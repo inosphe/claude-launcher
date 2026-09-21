@@ -203,6 +203,51 @@ def test_codex_rollout_is_located_and_its_messages_are_extracted(tmp_path):
     ]
 
 
+def test_an_empty_transcript_does_not_shadow_the_written_one(tmp_path):
+    """briefing reads the same predicate a restore reads.
+
+    It used to spell its own: ``is_file()`` on the strict address. A
+    zero-byte jsonl there answered yes and the id search never ran, so a
+    conversation written under a slug this module spells differently read as
+    an empty transcript instead of being found. The canonical predicate had
+    already stopped counting an empty file as a conversation, and the two
+    answered opposite things about the same session
+    (claunch-fork-family-recheck-amnqg.1).
+    """
+    prof = profile.create("brief-empty")
+    cid = "d0d0d0d0-0000-0000-0000-000000000001"
+    cwd = tmp_path / "here"
+    cwd.mkdir()
+
+    strict = transcripts.project_dir(prof.config_dir, str(cwd))
+    strict.mkdir(parents=True)
+    (strict / f"{cid}.jsonl").write_bytes(b"")
+
+    elsewhere = prof.config_dir / "projects" / "spelled--differently"
+    elsewhere.mkdir(parents=True)
+    written = elsewhere / f"{cid}.jsonl"
+    written.write_text(
+        _jl(type="user", message={"role": "user", "content": "it is here"})
+        + "\n",
+        encoding="utf-8",
+    )
+
+    sdef = SessionDef(
+        name="brief-empty-session",
+        profile=prof.name,
+        cwd=str(cwd),
+        conversation_id=cid,
+    )
+
+    assert briefing.locate_transcript(sdef) == written
+    assert briefing.tail_events(written) == ["user: it is here"]
+    # the same session, asked the restore's question: one answer, not two
+    assert transcripts.exists(prof.config_dir, cid, str(cwd)) is True
+    # the shallow caller cannot afford the id scan, and reads the zero-byte
+    # file as absent rather than as a conversation with nothing in it
+    assert briefing.locate_transcript(sdef, deep=False) is None
+
+
 # --------------------------------------------------------------------------- #
 # prompt gathering
 # --------------------------------------------------------------------------- #
