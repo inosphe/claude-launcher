@@ -6840,13 +6840,7 @@ async def h_session_status_checks_refresh(request: web.Request) -> web.Response:
         return json_error(500, str(exc))
     if not checks:
         return json_response({"session": name, "delivered": False, "checks": []})
-    delivered = await session.deliver(
-        "[claunch status-check refresh]\n"
-        "Read the current user-configured Y/N checks with MCP tool `status_checks`. "
-        "Verify their current values from your work, then call `report_status_checks` "
-        "with every enabled ID and a yes/no answer. The list is editable; do not use "
-        "IDs remembered from an earlier request."
-    )
+    delivered = await session.deliver(status_checks.REFRESH_PROMPT)
     return json_response({"session": name, "delivered": delivered, "checks": checks})
 
 

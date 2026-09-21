@@ -111,6 +111,7 @@ def test_checklist_wake_up_survives_after_state_transition(tmp_path, monkeypatch
 @pytest.mark.parametrize("clock_type", [
     cflow_clock.WindowClock, cflow_clock.TimerClock,
     cflow_clock.RoundStartClock, cflow_clock.RestartClock,
+    cflow_clock.TriggerClock,
 ])
 def test_other_transition_clocks_queue_behind_drafts(tmp_path, clock_type):
     async def run():

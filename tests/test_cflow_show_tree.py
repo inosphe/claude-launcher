@@ -27,6 +27,7 @@ def _step(step_id, *, next=None, options=None):
         done_when=None,
         awaits=None,
         timer=None,
+        triggers=(),
     )
 
 

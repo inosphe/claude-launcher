@@ -302,6 +302,64 @@ The rules, and the reason for each:
 A human override is still a human override: `claunch cflow goto <step>`
 moves a run past a gate that will never go green, and is journaled as such.
 
+## `triggers:` — daemon side effects, declared instead of asked for
+
+Two things this daemon can do to a session have no tool a run can call for
+itself: re-take its user-configured Y/N **status checks**, and recompose its
+LLM **briefing** (the "what is it doing right now" the dashboard rail shows).
+Before `triggers:` a workflow that wanted either wrote a paragraph asking its
+agent to do it — and an instruction an agent may simply not reach is not a
+mechanism.
+
+```yaml
+commit:
+  instructions: commit the work, then report.
+  triggers:
+    - do: checks          # the daemon types a status-check refresh request
+      at: leave           #   into this session once it advances past here
+  next: review
+
+work:
+  instructions: implement it.
+  triggers: [briefing]    # shorthand for `{do: briefing, at: enter}`
+  next: review
+```
+
+`do` is one of:
+
+- **`checks`** — the daemon queues the same refresh request the operator's
+  button sends (`POST /api/sessions/{name}/status-checks/refresh`), and the
+  agent answers it with the `status_checks` and `report_status_checks` MCP
+  tools. It costs the driver a few lines of context, so put it where the
+  answers have just changed rather than on every step.
+- **`briefing`** — the daemon recomposes the session's LLM briefing. Nothing
+  is typed into the terminal and the driver spends nothing; the cost is one
+  call to the configured endpoint, so put it at the few positions an overseer
+  actually reads the rail at.
+
+`at` is `enter` (the default — the run arrived here) or `leave` (the run
+moved off, whichever edge it took). Spell it **`at`**, never `on`: PyYAML
+reads a bare `on:` key as the boolean `true`, and the parser refuses that
+with a message saying so.
+
+Three properties to design against:
+
+- **It fires once per visit, not per event inside the step.** Prose could say
+  "after every commit"; a trigger fires when the run passes a moment. If you
+  need per-event behaviour, the trigger is the wrong tool.
+- **It is never a gate.** A trigger cannot hold a step, move a run or fail
+  one. Every "could not" — no enabled status check, no `llm:` block, a
+  driving session that exited — is journaled as `trigger_skipped` with its
+  reason and the run carries on. That is why it is allowed on any step,
+  including a `select`, and it is the opposite of `restart:`, which a
+  checklist is required to gate on.
+- **A missed one is not replayed.** The engine queues the entry as it
+  performs the move and the daemon's claim is single-use, so a daemon that
+  was down does not type a stale refresh request (or spend a stale LLM call)
+  on its next boot. The evidence is in the journal either way: a
+  `trigger_queued` with no `trigger_done` or `trigger_skipped` beside it
+  names exactly the one that did not happen.
+
 ## `awaits:` — what the step is WAITING for
 
 `verify` and `done_when` both answer "may this step be left?". `awaits`

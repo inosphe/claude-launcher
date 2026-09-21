@@ -1356,6 +1356,68 @@ def _arrive_timer(
     )
 
 
+#: How many un-performed triggers one run may hold. A trigger is only ever
+#: drained by a daemon, so a run driven with no daemon behind it would
+#: otherwise accumulate one entry per move for the life of the run. The
+#: oldest go first: a briefing composed from a position the run left an hour
+#: ago is the entry with the least left to say.
+TRIGGER_QUEUE_MAX = 32
+
+
+def _queue_triggers(workflow: Workflow, state: dict, step_id: Optional[str],
+                    moment: str, cwd) -> None:
+    """Record this step's ``triggers:`` for the moment the run just passed.
+
+    Written here rather than detected by a clock diffing positions, because
+    a position is not a transition: two moves between two scans leave the
+    middle one invisible, and a daemon restart in that gap leaves every
+    trigger of that visit invisible. The engine performs the move, so the
+    engine is the only place that sees each one exactly once.
+
+    Nothing here can fail the move. An entry is appended to the run state
+    and the daemon drains it afterwards (:func:`claim_triggers`); a run
+    nobody is watching simply carries the entries until the cap above drops
+    the oldest.
+    """
+    if not step_id:
+        return
+    step = workflow.steps.get(step_id)
+    if step is None or not step.triggers:
+        return
+    due = [t for t in step.triggers if t.at == moment]
+    if not due:
+        return
+    queue = state.get("triggers")
+    if not isinstance(queue, list):
+        queue = []
+    visit = _visits(state, step_id)
+    for trigger in due:
+        queue.append({
+            "do": trigger.do,
+            "at": moment,
+            "step": step_id,
+            "visit": visit,
+            "queued_at": state_mod.utcnow(),
+        })
+    dropped = len(queue) - TRIGGER_QUEUE_MAX
+    if dropped > 0:
+        lost, queue = queue[:dropped], queue[dropped:]
+        state_mod.journal(
+            "trigger_dropped",
+            {"run": state["run_id"], "count": dropped,
+             "oldest": [{"do": e.get("do"), "step": e.get("step")} for e in lost]},
+            cwd,
+        )
+    state["triggers"] = queue
+    for trigger in due:
+        state_mod.journal(
+            "trigger_queued",
+            {"run": state["run_id"], "do": trigger.do, "at": moment,
+             "step": step_id, "visit": visit},
+            cwd,
+        )
+
+
 def _move_to(workflow: Workflow, state: dict, target: Optional[str], cwd) -> None:
     """Advance to ``target`` (None = termination)."""
     # An ask still open here is one nobody answered — a human forced the run
@@ -1401,6 +1463,9 @@ def _move_to(workflow: Workflow, state: dict, target: Optional[str], cwd) -> Non
     state["checklist"] = None
     state["checklist_opened"] = None
     from_step = state.get("current")
+    # Before the visit counter moves below: the leaving step's `visit` is
+    # still the one that was being left.
+    _queue_triggers(workflow, state, from_step, model.TRIGGER_AT_LEAVE, cwd)
     _settle_timers(workflow, state, target, cwd)
     if target is None:
         # BEFORE the run is marked done, and deliberately: `status == "done"`
@@ -1440,6 +1505,7 @@ def _move_to(workflow: Workflow, state: dict, target: Optional[str], cwd) -> Non
         return
     state["current"] = target
     state["visits"][target] = _visits(state, target) + 1
+    _queue_triggers(workflow, state, target, model.TRIGGER_AT_ENTER, cwd)
     state.pop("sub_errors", None)  # a failure belongs to the position it happened at
     _arrive_timer(workflow, state, target, from_step, cwd)
     state_mod.save_state(state, cwd)
@@ -1996,6 +2062,12 @@ def _position_payload(
     restart = _restart_payload(state, step)
     if restart is not None:
         base["restart"] = restart
+    if step.triggers:
+        # Declared, not measured: nothing acts on this field — the daemon
+        # reads the run's own queue, not the position. It rides the payload
+        # so a person asking `claunch cflow status --json` can see what the
+        # daemon will do here, which the journal only says afterwards.
+        base["triggers"] = [{"do": t.do, "at": t.at} for t in step.triggers]
     awaited = _awaits_payload(step)
     if awaited:
         # On `base`, so it rides every payload this position can produce. The
@@ -2848,6 +2920,10 @@ def _start_impl(
     # be armed here, or the daemon has nothing to fire and the run sits at
     # its first step forever. `_move_to` arms every later arrival.
     _arrive_timer(workflow, state, workflow.start, None, cwd)
+    # And an arrival for `triggers:` for the same reason: `_move_to` records
+    # every later one, and a workflow whose FIRST step wants a briefing
+    # composed would otherwise have to wait for its second.
+    _queue_triggers(workflow, state, workflow.start, model.TRIGGER_AT_ENTER, cwd)
     state_mod.snapshot_workflow(text, cwd)
     state_mod.save_state(state, cwd)
     state_mod.register_run_dir(cwd)
@@ -3874,6 +3950,72 @@ def complete_restart(*, step_id: str, visit: int, exit_code: Optional[int], outp
                       "visit": visit, "exit_code": exit_code, "output": output[-4000:]}, cwd)
     return {"run": state["run_id"], "workflow": state["workflow"], "step": step_id,
             "visit": visit, "exit_code": exit_code, "output": output[-4000:]}
+
+
+@_locked_op
+def claim_triggers(*, cwd: Optional[str] = None) -> List[dict]:
+    """Take every queued daemon side effect off this run, at most once.
+
+    Removing rather than marking, because a trigger is a side effect with no
+    outcome the run reads: there is nothing later to reconcile a claimed-
+    but-unfinished entry against, and re-performing one after a daemon
+    restart would type a second refresh request into a terminal (or spend a
+    second LLM call) for a position the run left long ago. What survives a
+    lost claim is the journal: ``trigger_queued`` with no ``trigger_done``
+    beside it says exactly which one did not happen.
+
+    Claimed from a finished run too. The entries a run queued on its way out
+    are the ones that describe how it ended, and dropping them would make
+    ``leave`` on a terminating step the one moment the feature does not
+    cover.
+    """
+    if not state_mod.has_run(cwd):
+        return []
+    state = state_mod.load_state(cwd)
+    queue = state.get("triggers")
+    if not isinstance(queue, list) or not queue:
+        return []
+    state["triggers"] = []
+    state_mod.save_state(state, cwd)
+    claimed = []
+    for entry in queue:
+        if not isinstance(entry, dict) or not entry.get("do"):
+            continue
+        claimed.append({
+            "run": state["run_id"],
+            "workflow": state.get("workflow"),
+            "do": str(entry.get("do")),
+            "at": str(entry.get("at") or model.TRIGGER_AT_ENTER),
+            "step": entry.get("step"),
+            "visit": entry.get("visit"),
+            "queued_at": entry.get("queued_at"),
+        })
+    return claimed
+
+
+@_scoped_op
+def complete_trigger(*, do: str, step_id: Optional[str], visit: Optional[int],
+                     performed: bool, detail: str = "",
+                     cwd: Optional[str] = None) -> None:
+    """Journal what became of one claimed trigger.
+
+    ``performed`` False is an ordinary outcome, not an error: no enabled
+    status check, no ``llm:`` block, a driving session that has already
+    exited. It is journalled with its reason and nothing else happens —
+    a trigger never holds, moves or fails a run.
+    """
+    if not state_mod.has_run(cwd):
+        return
+    # The run id goes in because `read_journal(run_id=...)` filters on it:
+    # an entry without one is invisible to every reader that asks for one
+    # run's history, which is the only way these are ever read back.
+    state = state_mod.load_state(cwd)
+    state_mod.journal(
+        "trigger_done" if performed else "trigger_skipped",
+        {"run": state.get("run_id"), "do": do, "step": step_id,
+         "visit": visit, "detail": detail[:500]},
+        cwd,
+    )
 
 
 @_scoped_op
