@@ -53,25 +53,72 @@ globalThis.SearchAnything = (() => {
     sequence++; controller?.abort(); submit.disabled = false; previousFocus?.focus();
   });
   input.addEventListener("input", () => { sequence++; controller?.abort(); submit.disabled = false; });
+  // A result is either a session or a record about one, and the two are drawn
+  // as two shapes rather than as one shape with different words: a session row
+  // is headed by the session and by the state it is in right now, a record row
+  // by the source it came from. The daemon marks a session row with this kind
+  // (see the unified corpus in daemon/search_anything.py), which is the only
+  // thing this dialog decides a row's class from.
+  const SESSION = "session";
+  // What the state of a session is called here. `status` is the fleet's live
+  // reading (starting/busy/idle/exited) and comes from the daemon on every
+  // answer rather than from the index, which is embedded in the background
+  // and would report whatever was true when it was last synced. A record that
+  // was paused or archived is named by that: its process is gone either way,
+  // so `exited` would be true and would not be what a reader is looking at.
+  function sessionState(session) {
+    if (session.archived) return "archived";
+    if (session.paused) return "paused";
+    return session.status || "";
+  }
+  // One session, drawn the same wherever a result names one. It wears the
+  // board's own chip class (`beads-sess`, style.css) rather than a copy of it,
+  // so a session carries one colour in the board list, on the rail and here —
+  // the reuse the spawn form's fieldsets document for `.sess-spawn-step`. The
+  // state is in the chip twice over: the class is the colour the rest of the
+  // app gives that state, and the word is the same fact without colour.
+  function sessionChip(session) {
+    const state = sessionState(session);
+    const link = node("a", session.name, "beads-sess" + (state ? " " + state : ""));
+    link.href = "#/s/" + encodeURIComponent(session.name);
+    const via = (session.via || []).join(", ");
+    link.title = session.name + (state ? ` (${state})` : "") + (via ? " — " + via : "");
+    if (state) link.append(node("span", state, "beads-sess-state"));
+    link.onclick = () => modal.close();
+    return link;
+  }
+  function resultHeader(row) {
+    const head = node("div", "", "search-anything-meta");
+    head.append(node("span", row.kind || "기록", "search-anything-kind"));
+    if (row.at) { const time = node("time", formatTime(row.at)); time.dateTime = row.at; head.append(time); }
+    if (row.root) head.append(node("span", row.root, "search-anything-root"));
+    return head;
+  }
   function addResult(row) {
-    const item = node("article", "", "search-anything-result");
-    const metadata = node("small", row.kind || "");
-    if (row.at) {
-      const time = node("time", formatTime(row.at)); time.dateTime = row.at;
-      metadata.append(document.createTextNode(metadata.textContent ? " · " : ""), time);
+    const isSession = row.kind === SESSION;
+    const item = node("article", "", "search-anything-result " + (isSession ? "search-anything-session" : "search-anything-record"));
+    item.append(resultHeader(row));
+    if (isSession) {
+      // The row is the session, so its own name and state are the link. The
+      // `sessions` this row also carries would only repeat it. The chip sits
+      // in a line of its own because style.css styles a record's headline
+      // through `.search-anything-result > a`, whose rules a chip must not
+      // inherit (a block-level, bold, 13px pill would not be a chip).
+      const title = node("div", "", "search-anything-session-title");
+      title.append(sessionChip(row));
+      item.append(title);
+    } else {
+      const link = node("a", row.title || row.id); link.href = row.href;
+      link.onclick = () => { if (row.root && typeof beadsWorkspace !== "undefined") beadsWorkspace = row.root; modal.close(); };
+      item.append(link);
     }
-    if (row.root) metadata.append(document.createTextNode((metadata.textContent ? " · " : "") + row.root));
-    item.append(metadata);
-    const link = node("a", row.title || row.id); link.href = row.href;
-    link.onclick = () => { if (row.root && typeof beadsWorkspace !== "undefined") beadsWorkspace = row.root; modal.close(); };
-    item.append(link, node("p", row.excerpt || ""));
-    const sessions = node("div", "", "search-anything-sessions");
-    for (const session of row.sessions || []) {
-      const a = node("a", session.name); a.href = "#/s/" + encodeURIComponent(session.name);
-      a.title = (session.via || []).join(", "); a.onclick = () => modal.close(); sessions.append(a);
+    item.append(node("p", row.excerpt || ""));
+    if (!isSession) {
+      const sessions = node("div", "", "search-anything-sessions");
+      for (const session of row.sessions || []) sessions.append(sessionChip(session));
+      if (!sessions.childNodes.length) sessions.append(node("span", "연결된 세션 없음"));
+      item.append(sessions);
     }
-    if (!sessions.childNodes.length) sessions.append(node("span", "연결된 세션 없음"));
-    item.append(sessions);
     if (row.source_url) {
       const detail = document.createElement("details"), text = node("pre", "불러오는 중…");
       detail.append(node("summary", "원문 보기"), text);
@@ -82,7 +129,26 @@ globalThis.SearchAnything = (() => {
       };
       item.append(detail);
     }
-    results.append(item);
+    return item;
+  }
+  // The results as two labelled lists rather than one. The rank still orders
+  // every answer, but it orders it *within* the class it belongs to: whether a
+  // row is a session is the first thing a reader needs from it, and a session
+  // mixed into a list of records cannot be picked out of it by rank alone.
+  // Rows arrive ranked, so each list keeps that order among its own rows.
+  function addGroups(rows) {
+    const groups = [["세션", rows.filter(row => row.kind === SESSION)],
+                    ["그 외 항목", rows.filter(row => row.kind !== SESSION)]];
+    for (const [title, group] of groups) {
+      if (!group.length) continue;
+      const section = node("section", "", "search-anything-group");
+      const heading = node("h3", title);
+      heading.append(node("span", group.length, "search-anything-group-count"));
+      section.append(heading);
+      for (const row of group) section.append(addResult(row));
+      results.append(section);
+    }
+    return groups.map(([, group]) => group.length);
   }
   form.onsubmit = async event => {
     event.preventDefault(); const query = input.value.trim(); if (!query) return;
@@ -91,9 +157,10 @@ globalThis.SearchAnything = (() => {
     try {
       const data = await request("api/search?kind=all&limit=30&q=" + encodeURIComponent(query), undefined, "GET", controller.signal);
       if (ticket !== sequence || !modal.open) return;
-      for (const row of data.results || []) addResult(row);
+      const rows = data.results || [];
+      const [sessions, records] = addGroups(rows);
       const index = data.index || {};
-      notice.textContent = `${data.results.length}개 결과 · 색인 ${index.indexed || 0}/${index.total || 0}`
+      notice.textContent = `${rows.length}개 결과 · 세션 ${sessions} · 그 외 ${records} · 색인 ${index.indexed || 0}/${index.total || 0}`
         + (index.pending || index.syncing ? " · 색인 진행 중, 다시 검색하면 추가 결과가 표시됩니다." : "")
         + (index.error ? " · 색인 오류: " + index.error : "");
       if (data.warnings?.length) notice.textContent += " · Rerank 사용 불가: embedding 및 정확한 단어 일치 기준으로 표시합니다.";

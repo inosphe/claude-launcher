@@ -22,7 +22,16 @@ const server = http.createServer(async (req,res) => {
     const q=new URL(req.url,'http://local').searchParams.get('q');
     if(q==='slow') await new Promise(resolve=>setTimeout(resolve,250));
     const at = q === 'invalid-time' ? 'invalid' : q === 'no-time' ? '' : new Date(now - 5 * 60000).toISOString();
-    res.end(JSON.stringify({results:[{id:'r1',title:q,kind:'checks',at,excerpt:'<img src=x onerror=alert(1)>',sessions:[{name:'s1'}],href:'#/observer/session/s1',source_url:'api/search/records/s1/e1'}],index:{indexed:1,total:1},warnings:['rerank unavailable']})); return;
+    // A session and a record about sessions, as the daemon sends them: the
+    // states come down on the row that *is* the session and on each chip a
+    // record carries, and a session row has no `at` (the unified corpus does
+    // not stamp one), which is what leaves the record's time the only one.
+    const session={id:'s1',kind:'session',name:'s1',title:'s1',status:'idle',excerpt:'세션 작업 내용',
+      sessions:[{name:'s1',status:'idle'}],href:'#/s/s1'};
+    const record={id:'r1',title:q,kind:'checks',at,excerpt:'<img src=x onerror=alert(1)>',
+      sessions:[{name:'s1',status:'idle'},{name:'s2',status:'busy'},{name:'s3',status:'exited',paused:true}],
+      href:'#/observer/session/s1',source_url:'api/search/records/s1/e1'};
+    res.end(JSON.stringify({results:q==='only-session'?[session]:[session,record],index:{indexed:1,total:1},warnings:['rerank unavailable']})); return;
   }
   if(req.url==='/api/rag/settings') {res.end(JSON.stringify(cfg));return;}
   if(req.url==='/api/rag/test') {res.end(JSON.stringify({ok:true,dimensions:2560,rerank:true}));return;}
@@ -52,7 +61,36 @@ const server = http.createServer(async (req,res) => {
     await page.clock.fastForward(60000);
     assert.match(await time.textContent(), /\(6분 전\)$/);
     assert.match(await page.locator('dialog [role=status]').textContent(),/Rerank 사용 불가/);
-    assert.equal(await page.getByRole('link',{name:'s1',exact:true}).getAttribute('href'),'#/s/s1');
+    // The two classes are two lists, each headed by what it holds and how
+    // many of them there were; the answer's own counts are in the notice.
+    assert.match(await page.locator('dialog [role=status]').textContent(), /2개 결과 · 세션 1 · 그 외 1/);
+    const heads = page.locator('dialog .search-anything-group h3');
+    assert.deepEqual(await heads.evaluateAll(nodes=>nodes.map(n=>n.childNodes[0].textContent)),['세션','그 외 항목']);
+    assert.deepEqual(await page.locator('dialog .search-anything-group-count').allTextContents(),['1','1']);
+    // The session's own row: it is the link, and its state rides in the chip.
+    const sessionChip = page.locator('dialog .search-anything-session .beads-sess');
+    assert.equal(await sessionChip.getAttribute('class'),'beads-sess idle');
+    assert.equal(await sessionChip.getAttribute('href'),'#/s/s1');
+    assert.equal(await sessionChip.locator('.beads-sess-state').textContent(),'idle');
+    // A record keeps its source on the head line, and each session it names
+    // carries that session's own state — including `paused`, which is a
+    // status the fleet reports as `exited` and a word only this marker holds.
+    const recordRows = page.locator('dialog .search-anything-record');
+    assert.equal(await recordRows.count(),1);
+    assert.equal(await recordRows.locator('.search-anything-kind').textContent(),'checks');
+    const chips = recordRows.locator('.beads-sess');
+    assert.deepEqual(await chips.evaluateAll(nodes=>nodes.map(n=>n.className)),['beads-sess idle','beads-sess busy','beads-sess paused']);
+    assert.deepEqual(await chips.locator('.beads-sess-state').allTextContents(),['idle','busy','paused']);
+    assert.equal(await chips.nth(2).getAttribute('title'),'s3 (paused)');
+    // An answer holding one class draws one list: no heading for a list that
+    // has no rows, and the notice still says what the answer held.
+    await page.locator('dialog input').fill('only-session');await page.keyboard.press('Enter');
+    await page.locator('dialog .search-anything-session').waitFor();
+    assert.equal(await page.locator('dialog .search-anything-record').count(),0);
+    assert.deepEqual(await heads.evaluateAll(nodes=>nodes.map(n=>n.childNodes[0].textContent)),['세션']);
+    assert.match(await page.locator('dialog [role=status]').textContent(), /1개 결과 · 세션 1 · 그 외 0/);
+    await page.locator('dialog input').fill('needle');await page.keyboard.press('Enter');
+    await page.getByRole('link',{name:'needle',exact:true}).waitFor();
     await page.getByText('원문 보기',{exact:true}).click();await page.waitForFunction(()=>document.querySelector('dialog pre').textContent.includes('원문 기록'));
     await page.keyboard.press('Escape');assert.equal(await page.locator('dialog').evaluate(n=>n.open),false);
     assert.equal(await page.locator('#search-anything-open').evaluate(n=>n===document.activeElement),true);

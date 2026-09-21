@@ -82,10 +82,15 @@ class Corpus:
             # a fortnight ago and can no longer name. Read through getattr for
             # the same reason ``identity`` is -- a record written by an older
             # daemon has no such key and must not cost the corpus the session.
+            # ``name`` is carried as well as ``sessions``: a result row that
+            # *is* a session has to be able to say which one, so that the
+            # answer can carry that session's state on the row itself rather
+            # than only on a link beside it (see RagService._live_states).
             docs.extend(documents("session:" + name, name, "\n".join(str(v or "") for v in
                                   (session.sdef.task, getattr(session.sdef, "identity", ""),
                                    getattr(session.sdef, "note", ""), row.get("summary"))),
-                                  kind="session", sessions=[{"name": name}], href="#/s/" + quote(name, safe="")))
+                                  kind="session", name=name, sessions=[{"name": name}],
+                                  href="#/s/" + quote(name, safe="")))
         for event in await asyncio.to_thread(search_records.rows):
             name, eid = event["session"], event["id"]
             text = event.get("text", "")

@@ -1125,6 +1125,10 @@ class RagService:
                 row["rerank_score"] = round(rerank_scores[doc_id], 4)
             row.update(entry.meta)
             results.append(row)
+        # A search answer is asked for *now*, so the session state on it is
+        # read now: the index is embedded in the background, and a status
+        # stored in a document's metadata is only as fresh as its last sync.
+        self._live_states(results)
         return {
             "kind": kind,
             "query": query,
@@ -1135,6 +1139,42 @@ class RagService:
             "index": prog.view(),
             "timing": {"embed_ms": embed_ms, "rerank_ms": rerank_ms},
         }
+
+    def _live_states(self, rows: List[dict]) -> None:
+        """Put the fleet's *current* session state on each result row, in place.
+
+        Two places on a row can name a session: the row itself, when the
+        corpus that produced it is the sessions one (its metadata carries
+        ``name``), and the ``sessions`` list any corpus may attach to a
+        record. Both are refreshed here, because the state written into the
+        index is as old as the last sync while the question was asked now.
+
+        The fields are the ones the web readers compose a state from --
+        ``status`` beside the ``paused``/``archived`` markers that turn an
+        exited process into what a person is actually looking at (see
+        ``session.session_category`` for the same partition). A name the
+        registry does not know is left exactly as the index had it: a session
+        dropped from the fleet has no live state to report.
+        """
+        if self.manager is None or not rows:
+            return
+        registry = {}
+        for session in self.manager.list():
+            name = getattr(getattr(session, "sdef", None), "name", None)
+            if name:
+                registry[str(name)] = session
+        for row in rows:
+            own = registry.get(str(row.get("name") or ""))
+            if own is not None:
+                row.update(_session_state(own))
+            linked = row.get("sessions")
+            if not linked:
+                continue
+            named = []
+            for entry in linked:
+                session = registry.get(str(entry.get("name") or ""))
+                named.append({**entry, **_session_state(session)} if session is not None else entry)
+            row["sessions"] = named
 
     def _rerank_text(self, index: VectorIndex, doc_id: str) -> str:
         meta = index.entries[doc_id].meta
@@ -1204,6 +1244,24 @@ class RagService:
             "indexes": indexes,
             "queue": self.queue_view(),
         }
+
+
+def _session_state(session) -> dict:
+    """A live session's state in the flat form a JSON payload carries.
+
+    ``status`` is the heuristic's own word (``starting``/``busy``/``idle``/
+    ``exited``); ``paused`` and ``archived`` are the two markers that turn an
+    exited process into the state a person is looking at, since a record kept
+    aside or moved out of the fleet reports ``exited`` from its process just
+    like one that was killed. This is ``session.session_category``'s partition
+    written out as fields rather than as one word, because a reader draws the
+    status and the marker in different places.
+    """
+    return {
+        "status": _status_of(session),
+        "paused": bool(getattr(session, "paused_at", None)),
+        "archived": bool(getattr(session, "archived_at", None)),
+    }
 
 
 def _status_of(session) -> Optional[str]:

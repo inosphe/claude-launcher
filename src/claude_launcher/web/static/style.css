@@ -2154,6 +2154,16 @@ body.term-split #terminal { flex: var(--split-term, 0.6) 1 0; min-height: 80px; 
 .beads-sess.idle { background: #1f4428; color: #3fb950; }
 .beads-sess.busy { background: #4d3800; color: #d29922; }
 .beads-sess.exited { background: #30363d; color: #8b949e; }
+/* The third state a kept session can be in, and the fourth word for it: a
+   paused record's process is gone exactly like a killed one, so its status
+   reads `exited` and this is what says otherwise. The blue is the terminal
+   header badge's paused blue (`.badge.exited.paused`).
+   `.beads-sess` is also the chip the Search anything results wear (see
+   sessionChip in search-anything.js), which is why the state word gets a
+   rule here: the chip says its state in colour and in text, and the text is
+   what a reader without the colour still gets. */
+.beads-sess.paused { background: #172947; color: #58a6ff; }
+.beads-sess-state { margin-left: 5px; opacity: .75; }
 .badge.beads-status { white-space: nowrap; }
 .badge.beads-status.open { background: #1c2a3a; color: #79c0ff; }
 .badge.beads-status.ready { background: #173b2b; color: #56d364; }
@@ -4278,7 +4288,30 @@ a.window-owner:hover { color: #79c0ff; text-decoration: underline; }
 .search-anything-sessions { display: flex; gap: 8px; flex-wrap: wrap; margin: 6px 0; font-size: 11px; }
 .search-anything a, .search-anything summary { color: #79b8ff; }
 .search-anything summary { cursor: pointer; font-size: 11px; }
-.search-anything small { font-size: 11px; color: #9da5b0; }
+/* Results are drawn as two lists, so the list needs a head: what the rows
+   below it are, and how many of them there were. The count sits in the head
+   rather than in the notice above because it belongs to the list it counts —
+   the notice's own numbers are about the answer as a whole. */
+.search-anything-group { margin-top: 14px; }
+.search-anything-group:first-child { margin-top: 0; }
+.search-anything-group h3 {
+  display: flex; align-items: center; gap: 8px; margin-bottom: 2px;
+  font-size: 12px; font-weight: 600; color: #c6cdd5;
+}
+.search-anything-group-count {
+  font-size: 11px; font-weight: 400; padding: 0 7px; border-radius: 10px;
+  background: #21262d; color: #9da5b0; font-variant-numeric: tabular-nums;
+}
+/* A session's own row: the accent edge is the second reading of "this one is
+   a session", beside the list it is filed under, so it survives being
+   scrolled to without the heading in sight. */
+.search-anything-session { border-left: 2px solid #1f6feb; padding-left: 10px; }
+.search-anything-session-title { margin: 4px 0; }
+/* The row's first line: where it came from, when, and which board. `kind` is
+   the payload's own word for the source, which is what this dialog has always
+   shown; a pseudo-kind is only for a row that carried none. */
+.search-anything-meta { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; font-size: 11px; color: #9da5b0; }
+.search-anything-kind { padding: 1px 7px; border-radius: 10px; background: #21262d; color: #9da5b0; }
 .search-settings label { display: flex; flex-direction: column; gap: 4px; margin: 10px 0; }
 .search-settings input { max-width: 100%; box-sizing: border-box; padding: 8px; font-size: 16px; }
 .search-settings input[type=checkbox] { align-self: flex-start; }
