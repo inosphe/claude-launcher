@@ -122,7 +122,13 @@ write-up matches on any part.
    every query word — the exact-match half an embedding is weakest at) →
    rerank the top `rerank_top` when a reranker is configured → return
    `limit` rows with `score` (vector), `rerank_score` (when it ran),
-   `lexical`, the display metadata, and the index's coverage.
+   `lexical`, the display metadata, and the index's coverage. The state of
+   every session a row names — the row itself when it is one, and each entry
+   of its `sessions` — is then read from the registry and put on the answer
+   (`status`, plus `paused`/`archived` for a record whose process is gone
+   either way). Step 1's metadata refresh is what keeps the index from
+   re-embedding on a status change; this is what keeps the *answer* from
+   reporting the state the sync happened to see.
 5. **Related.** `RagService.related`: an issue's nearest neighbours by its
    first chunk's vector — the "is this a duplicate" question. An issue not
    yet indexed is embedded on the spot.

@@ -140,6 +140,74 @@ def test_all_search_uses_reranker_and_rebuilds_for_endpoint_change(tmp_path):
     asyncio.run(run())
 
 
+def test_search_answer_reports_the_sessions_state_read_now(tmp_path):
+    """The state a result shows is the fleet's state when it was asked for.
+
+    The index is embedded in the background, so a status stored in a
+    document's metadata is only as old as the sync that wrote it — and the
+    session a person is looking for may have gone busy or been paused since.
+    This pins the two places a row can name a session (the row itself, and the
+    chips a record carries) against a registry that moved after the index was
+    written, and pins that reading it again cost no embedding.
+    """
+
+    class Sdef:
+        def __init__(self, name):
+            self.name = name
+
+    class Sess:
+        def __init__(self, name, status="idle", paused_at=None, archived_at=None):
+            self.sdef = Sdef(name)
+            self._status, self.paused_at, self.archived_at = status, paused_at, archived_at
+
+        def status(self):
+            return self._status
+
+    sessions = [Sess("s1", "busy"), Sess("s9", "exited", paused_at="2026-09-20")]
+    manager = SimpleNamespace(list=lambda: sessions)
+
+    async def run():
+        endpoint = Endpoint()
+        server = await _start_endpoint(endpoint)
+        cfg = _cfg(server, watch_interval=0)
+        service = rag.RagService(manager=manager, config=lambda: cfg, root_dir=tmp_path / "index")
+
+        async def docs():
+            return (search_anything.documents("session:s1", "s1", "relay needle", kind="session",
+                                              name="s1", sessions=[{"name": "s1"}], href="#/s/s1")
+                    + search_anything.documents("beads:r:x-1", "x-1 · board", "relay needle",
+                                                kind="beads", sessions=[{"name": "s1"}, {"name": "s9"},
+                                                                        {"name": "s7"}]))
+
+        service.all_docs = docs
+        try:
+            result = await service.search("all", "relay", wait=10, rerank=False)
+            session_row = next(r for r in result["results"] if r["kind"] == "session")
+            assert session_row["name"] == "s1"
+            assert (session_row["status"], session_row["paused"], session_row["archived"]) == ("busy", False, False)
+            assert session_row["sessions"][0]["status"] == "busy"
+            record = next(r for r in result["results"] if r["kind"] == "beads")
+            chips = {chip["name"]: chip for chip in record["sessions"]}
+            assert chips["s1"]["status"] == "busy" and chips["s1"]["paused"] is False
+            assert chips["s9"]["status"] == "exited" and chips["s9"]["paused"] is True
+            # A name the registry does not hold stays exactly as it was
+            # indexed: there is no live state to put beside it.
+            assert chips["s7"] == {"name": "s7"}
+            # The registry moves on; the next answer says so, and costs the
+            # query's own embedding and nothing else — a state read from the
+            # registry is not a reason to re-embed the corpus.
+            embedded = len(endpoint.embed_calls)
+            sessions[0]._status = "idle"
+            again = await service.search("all", "relay", wait=10, rerank=False)
+            assert next(r for r in again["results"] if r["kind"] == "session")["status"] == "idle"
+            assert len(endpoint.embed_calls) == embedded + 1
+        finally:
+            await service.shutdown()
+            await server.close()
+
+    asyncio.run(run())
+
+
 def test_board_and_record_changes_queue_unified_search(tmp_path):
     service = rag.RagService()
     service.all_docs = object()

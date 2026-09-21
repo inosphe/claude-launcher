@@ -3,9 +3,24 @@
 The session rail's **Search anything** button and `/` open a search dialog.
 Enter submits a semantic search, and Escape closes the dialog and restores
 focus. `/` remains ordinary input in text fields, editors and terminals.
-Results show the source type, date, matching passage and related sessions.
-**원문 보기** retrieves the original issue (including comments) or event.
-This feature retrieves records; it does not generate answers.
+Results are drawn as two labelled lists, **세션** and **그 외 항목**, each headed by
+how many rows it holds; the answer's counts of both are repeated in the status
+line above them. The ranking still orders every answer, and it orders it within
+the list the row belongs to: whether a row is a session is the first thing a
+reader needs from it. A session row is headed by the session's own name and the
+state it is in now, and carries an accent edge; a record row is headed by the
+source kind it came from. Both keep the matching passage and the sessions they
+concern, and **원문 보기** retrieves the original issue (including comments) or
+event. This feature retrieves records; it does not generate answers.
+
+The state shown on a session — on the row that is a session and on every chip a
+record carries — is read from the session registry when the answer is built, not
+from the index: the index is embedded in the background, so a state stored in it
+would be as old as its last sync. `status` is the registry's own word
+(`starting`, `busy`, `idle`, `exited`); a record that was paused or archived
+says so instead, since its process is gone in either case. A name the registry
+does not hold keeps whatever the index had, because there is no live state to
+put beside it.
 
 The unified corpus covers all known/registered repository boards, issue
 descriptions, design/acceptance/notes fields, labels and comments; session
@@ -43,7 +58,8 @@ history already discarded before this feature cannot be reconstructed.
 Search indexes remain derived data under the daemon's `rag/` directory.
 
 Validation: `tests/test_search_anything.py` covers durability, source coverage,
-session links, settings and retrieval. `tests/search_anything_browser.cjs`
-uses an isolated fixture server to exercise actual browser focus, keyboard,
-stale-response handling, source display and settings forms. Set
-`CLAUNCH_PLAYWRIGHT` and `CLAUNCH_CHROMIUM` to local installations if needed.
+session links, session state at answer time, settings and retrieval.
+`tests/search_anything_browser.cjs` uses an isolated fixture server to exercise
+actual browser focus, keyboard, stale-response handling, the two result lists
+with their states, source display and settings forms. Set `CLAUNCH_PLAYWRIGHT`
+and `CLAUNCH_CHROMIUM` to local installations if needed.
