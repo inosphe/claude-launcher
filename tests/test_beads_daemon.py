@@ -24,7 +24,7 @@ from pathlib import Path
 
 import pytest
 
-from claude_launcher import lineage, profile, store
+from claude_launcher import beads_meta, lineage, profile, store
 from claude_launcher.daemon import beads as beads_mod
 from claude_launcher.daemon import db, paths
 from claude_launcher.daemon.api import build_app
@@ -1168,6 +1168,170 @@ def test_a_board_without_that_table_still_draws_its_edges(repo):
             {"from": "kid", "to": "epic", "type": "parent-child"},
         ]
         assert sum(1 for c in br.calls if "dep" in c) == 1
+
+    asyncio.run(run())
+
+
+def test_a_title_is_enough_to_file_an_issue_from_the_board(repo):
+    """The form's smallest answer: a title. Everything else has a default,
+    and the description is the workflows' four sections so the assignee's
+    intake finds the headings it reads."""
+    br = FakeBr()
+    board = _board(br, repo)
+
+    async def run():
+        spec = beads_mod.check_new_issue({"title": "  make the board fast  "})
+        made = await board.create_issue(repo, spec)
+        assert made["created"] is True
+        filed = br.issues[made["issue"]]
+        assert filed["title"] == "make the board fast"
+        assert filed["priority"] == 2 and filed["issue_type"] == "task"
+        # The source label the workflows read, and the actor that says an
+        # operator filed this rather than a session claiming the work.
+        assert filed["labels"] == ["user"]
+        assert filed["created_by"] == beads_mod.DASHBOARD_ACTOR
+        for heading in ("## 목표", "## 범위(포함·제외)", "## 완료 증거 기준", "## 출처"):
+            assert heading in filed["description"]
+        assert "make the board fast" in filed["description"]
+
+    asyncio.run(run())
+
+
+def test_a_filed_issue_records_the_workspace_its_session_opens_in(repo, home, tmp_path):
+    """The workspace goes on in the create, not in a second write: an issue
+    must never exist with its directory missing."""
+    from claude_launcher import workspaces
+
+    target = tmp_path / "somewhere"
+    target.mkdir()
+    workspaces.add(str(target), "somewhere")
+    br = FakeBr()
+    board = _board(br, repo)
+
+    async def run():
+        spec = beads_mod.check_new_issue({
+            "title": "ship it", "workspace": "somewhere",
+            "description": "## 목표\nship it\n",
+        })
+        made = await board.create_issue(repo, spec)
+        assert made["workspace"] == "somewhere"
+        filed = br.issues[made["issue"]]
+        # Read back the way the Start-a-session block reads it.
+        assert beads_meta.workspace_of(filed) == "somewhere"
+        # and the operator's own words are still under the block
+        assert "ship it" in beads_meta.parse(filed["description"])[1]
+        # one create, no follow-up update
+        assert [c[0] for c in br.calls if c and c[0] in ("create", "update")] == []
+        assert sum(1 for c in br.calls if "create" in c) == 1
+        assert sum(1 for c in br.calls if "update" in c) == 0
+
+    asyncio.run(run())
+
+
+def test_the_board_refuses_a_request_it_cannot_file(repo, home):
+    """Every refusal is check_new_issue's, so the route holds none of its
+    own and a typo never becomes a category nothing filters on."""
+    cases = [
+        ({}, "needs a title"),
+        ({"title": "x", "priority": 9}, "priority must be"),
+        ({"title": "x", "priority": "high"}, "must be a number"),
+        ({"title": "x", "type": "tsak"}, "unknown type"),
+        ({"title": "x", "workspace": "nowhere"}, "no workspace named"),
+        ({"title": "x", "status": "closed"}, "starts open"),
+    ]
+    for body, reason in cases:
+        with pytest.raises(beads_mod.BoardRequestError) as caught:
+            beads_mod.check_new_issue(body)
+        assert reason in str(caught.value), body
+    # And the answers it accepts, normalised: P-spelling, a comma string of
+    # labels, the source label added once and only once.
+    spec = beads_mod.check_new_issue({
+        "title": "x", "priority": "P1", "labels": "user, ui", "type": "bug",
+    })
+    assert spec["priority"] == 1 and spec["type"] == "bug"
+    assert spec["labels"] == ["user", "ui"]
+
+
+def test_the_create_route_files_an_issue_and_names_its_board(home, tmp_path, repo):
+    br = FakeBr()
+    board = _board(br, repo)
+
+    async def run():
+        mgr = SessionManager(idle_threshold=0.5, scrollback=200, restore_default=True)
+        mm = MeshManager(mgr, root=tmp_path / "mesh")
+        client = await _serve(mgr, mm, board)
+        try:
+            resp = await client.post(
+                "/api/beads",
+                json={"title": "from the web", "cwd": str(repo), "priority": 1},
+                headers=BEARER,
+            )
+            doc = await resp.json()
+            assert resp.status == 201, doc
+            assert doc["root"] == str(repo)
+            assert br.issues[doc["issue"]]["title"] == "from the web"
+            assert br.issues[doc["issue"]]["priority"] == 1
+
+            bad = await client.post(
+                "/api/beads", json={"cwd": str(repo)}, headers=BEARER,
+            )
+            assert bad.status == 400
+            assert "title" in (await bad.json())["error"]
+
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_the_create_route_refuses_a_directory_with_no_board(home, tmp_path):
+    """A directory that is not in a repository with a ``.beads/`` has
+    nowhere to file an issue, and a create that answered 201 there would
+    report success for work the board never received."""
+    br = FakeBr()
+    board = beads_mod.Board(br, root_for=lambda cwd: None)
+
+    async def run():
+        mgr = SessionManager(idle_threshold=0.5, scrollback=200, restore_default=True)
+        mm = MeshManager(mgr, root=tmp_path / "mesh")
+        client = await _serve(mgr, mm, board)
+        try:
+            resp = await client.post(
+                "/api/beads",
+                json={"title": "x", "cwd": str(tmp_path / "not-a-repo")},
+                headers=BEARER,
+            )
+            assert resp.status == 404
+            assert "no board" in (await resp.json())["error"]
+            assert br.issues == {}
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_the_form_learns_its_boards_without_listing_a_single_issue(home, tmp_path, repo):
+    """What the create form needs before it draws: the boards, who is on
+    them, and the workspace registry. Listing issues here would pay the cost
+    the paged board exists to avoid."""
+    br = FakeBr()
+    br.add(id="noise")
+    board = _board(br, repo)
+
+    async def run():
+        mgr = SessionManager(idle_threshold=0.5, scrollback=200, restore_default=True)
+        mm = MeshManager(mgr, root=tmp_path / "mesh")
+        client = await _serve(mgr, mm, board)
+        try:
+            resp = await client.get(f"/api/beads/boards?cwd={repo}", headers=BEARER)
+            doc = await resp.json()
+            assert resp.status == 200, doc
+            assert doc["default"] == str(repo)
+            assert [b["root"] for b in doc["boards"]] == [str(repo)]
+            assert "workspaces" in doc
+            assert [c for c in br.calls if "list" in c] == []
+        finally:
+            await client.close()
 
     asyncio.run(run())
 

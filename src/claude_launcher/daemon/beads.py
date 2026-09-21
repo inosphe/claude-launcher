@@ -169,6 +169,18 @@ DEFAULT_TITLE_LIMIT = 100
 #: the session it was moved TO would read as that session claiming the work.
 DASHBOARD_ACTOR = "dashboard"
 
+#: The issue types the workflows use, and what a create coming in over the
+#: API is checked against. ``br`` itself takes any word; the check is here so
+#: a typed type does not quietly become a category nothing filters on.
+KNOWN_TYPES = ("task", "bug", "epic", "doc", "chore", "feature")
+
+#: The priorities a board issue can hold -- ``br``'s own 0..4.
+MIN_PRIORITY, MAX_PRIORITY = 0, 4
+
+#: The label a dashboard-filed issue carries, so the board says where it came
+#: from the way the workflows' source labels do (user | leader | found | ...).
+OPERATOR_LABEL = "user"
+
 Runner = Callable[[List[str], str], Awaitable[Tuple[int, str, str]]]
 
 
@@ -449,6 +461,111 @@ def compose_description(
     return beads_meta.render(
         {beads_meta.WORKSPACE: workspace} if workspace else {}, body
     )
+
+
+def compose_board_description(title: str, *, workspace: str = "") -> str:
+    """The description a dashboard-filed issue starts with.
+
+    The same four sections :func:`compose_description` writes, for the same
+    reason -- the workflows' intake reads them and ``br lint`` expects them --
+    but filed by a person at the board rather than minted for a session, so
+    the 출처 line says that and no session is named.
+
+    An operator who typed a description of their own never reaches this: it
+    is the template for the one who typed only a title, and every section
+    below the goal says who fills it in.
+    """
+    body = (
+        "## 목표\n"
+        f"{title.strip()}\n\n"
+        "## 범위(포함·제외)\n"
+        "(filed from the dashboard with a title only -- the assignee fills "
+        "this in at intake)\n\n"
+        "## 완료 증거 기준\n"
+        "(the assignee fills this in at intake: test counts, commit hash)\n\n"
+        "## 출처\n"
+        f"operator (dashboard board form), {_utcnow()}"
+    )
+    return beads_meta.render(
+        {beads_meta.WORKSPACE: workspace} if workspace else {}, body
+    )
+
+
+def check_new_issue(body: dict) -> dict:
+    """Read a board create request, or refuse it.
+
+    Answers the normalised fields; raises :class:`BoardRequestError` with the
+    reason otherwise. Pure, so the rules are testable without a board, and
+    the one place they are written -- the route validates nothing of its own.
+
+    What it refuses and why:
+
+    * no title -- an issue with no title is unfindable on a board of a
+      thousand, and every listing this dashboard draws is titles.
+    * a priority outside 0..4, or one that is not a number. ``br`` takes
+      ``P2`` as well as ``2``; both are read here and stored as the number.
+    * a type the workflows do not use. ``br`` would take the typo and the
+      board would gain a category nothing filters on.
+    * a workspace that is not registered. An issue naming a directory nobody
+      registered sends its session nowhere, and nothing downstream reports
+      it -- the same rule :meth:`Board.set_workspace` enforces.
+    """
+    title = str(body.get("title") or "").strip()
+    if not title:
+        raise BoardRequestError("an issue needs a title")
+
+    raw_priority = body.get("priority", 2)
+    if isinstance(raw_priority, str):
+        raw_priority = raw_priority.strip().lstrip("pP") or "2"
+    try:
+        priority = int(raw_priority)
+    except (TypeError, ValueError):
+        raise BoardRequestError(f"priority must be a number, not {body.get('priority')!r}")
+    if not MIN_PRIORITY <= priority <= MAX_PRIORITY:
+        raise BoardRequestError(
+            f"priority must be {MIN_PRIORITY}..{MAX_PRIORITY}, not {priority}"
+        )
+
+    issue_type = str(body.get("type") or body.get("issue_type") or "task").strip()
+    if issue_type not in KNOWN_TYPES:
+        raise BoardRequestError(
+            f"unknown type {issue_type!r} (known: {', '.join(KNOWN_TYPES)})"
+        )
+
+    raw_labels = body.get("labels") or []
+    if isinstance(raw_labels, str):
+        raw_labels = raw_labels.split(",")
+    labels = [str(l).strip() for l in raw_labels if str(l).strip()]
+    if OPERATOR_LABEL not in labels:
+        labels.insert(0, OPERATOR_LABEL)
+    if any("," in l for l in labels):
+        raise BoardRequestError("a label cannot contain a comma")
+
+    workspace = str(body.get("workspace") or "").strip()
+    if workspace and workspaces.get(workspace) is None:
+        raise BoardRequestError(
+            f"no workspace named {workspace!r} -- register it with "
+            "'claunch workspace add <dir>' first"
+        )
+
+    status = str(body.get("status") or "open").strip()
+    if status not in ("open", "in_ready"):
+        raise BoardRequestError(
+            "a new issue starts open, or in_ready when its spec has been "
+            f"reviewed -- not {status!r}"
+        )
+
+    return {
+        "title": title,
+        "description": str(body.get("description") or "").strip(),
+        "priority": priority,
+        "type": issue_type,
+        "labels": labels,
+        "assignee": str(body.get("assignee") or "").strip(),
+        "workspace": workspace,
+        "status": status,
+        "parent": str(body.get("parent") or "").strip(),
+    }
 
 
 def none_mode(body: dict) -> Optional[str]:
@@ -1337,6 +1454,33 @@ class Board:
             result["boards"].append(entry)
         return result
 
+    async def boards_view(
+        self, sessions: Sequence, extra_roots: Sequence[str] = (),
+    ) -> dict:
+        """Which boards exist and who is on them -- no issues.
+
+        What a form needs before it can be drawn: where an issue may be
+        filed, and which session names an assignee picker may offer. It is
+        deliberately the cheapest reading on this class -- it resolves
+        directories to boards and stops -- because a create form that had to
+        wait for a board listing would be paying the cost a paged board was
+        built to avoid.
+        """
+        by_root, order = await self._group_by_root(sessions, extra_roots)
+        return {
+            "available": self.available(),
+            "boards": [
+                {
+                    "root": str(root),
+                    "sessions": [
+                        {"name": s.sdef.name, "status": s.status()}
+                        for s in by_root[str(root)]
+                    ],
+                }
+                for root in order
+            ],
+        }
+
     async def stream_view(
         self, sessions: Sequence, extra_roots: Sequence[str] = (), *,
         offset: int = 0, limit: int = 50, priority: Optional[int] = None,
@@ -1837,6 +1981,66 @@ class Board:
         if not iid:
             raise cli_beads.BeadsError("br create answered without an id")
         return {"issue": str(iid), "created": True}
+
+    async def create_issue(self, root: Path, spec: dict) -> dict:
+        """File an issue on ``root``'s board from the dashboard's form.
+
+        ``spec`` is what :func:`check_new_issue` answered -- this method does
+        no validating of its own, so there is one place the rules live.
+
+        The write is stamped :data:`DASHBOARD_ACTOR` rather than a session:
+        an operator filed it, and a ``created_by`` naming a session would put
+        the issue on that session's rail as its own follow-up work (see
+        :func:`created_of`), which is a different fact.
+
+        The workspace is recorded the way :meth:`set_workspace` records it --
+        front matter on the description -- so an issue filed here is
+        immediately one the "Start a session" block can open in the right
+        directory. It is written in the SAME create as the description
+        rather than as a second update, so an issue never exists with its
+        directory missing.
+        """
+        if not self.has_board(root):
+            raise BeadsUnavailable(f"no board at {root}")
+        description = spec["description"] or compose_board_description(
+            spec["title"], workspace=spec["workspace"],
+        )
+        if spec["workspace"]:
+            # An operator-written description gets the block put on it; the
+            # template above already carries one, and set_key replacing an
+            # identical value writes the same bytes back.
+            description = beads_meta.set_key(
+                description, beads_meta.WORKSPACE, spec["workspace"],
+            )
+        args = [
+            "create", spec["title"],
+            "--type", spec["type"],
+            "--priority", str(spec["priority"]),
+            "--labels", ",".join(spec["labels"]),
+            "--description", description,
+        ]
+        if spec["status"] != "open":
+            args.extend(["--status", spec["status"]])
+        if spec["parent"]:
+            args.extend(["--parent", spec["parent"]])
+        # Last, and on its own: the workflows' create spec puts the assignee
+        # after the description for the same reason -- a board that failed
+        # halfway should not leave an issue assigned to somebody with no
+        # goal written in it.
+        if spec["assignee"]:
+            args.extend(["--assignee", spec["assignee"]])
+        data = await self.br(root, args, actor=DASHBOARD_ACTOR)
+        iid = data.get("id") if isinstance(data, dict) else None
+        if not iid and isinstance(data, list) and data:
+            iid = data[0].get("id")
+        if not iid:
+            raise cli_beads.BeadsError("br create answered without an id")
+        return {
+            "issue": str(iid),
+            "root": str(root),
+            "workspace": spec["workspace"],
+            "created": True,
+        }
 
     # ---- ending --------------------------------------------------------- #
     async def active_issues(self, session) -> List[dict]:

@@ -13419,6 +13419,16 @@ let beadsDirection = "desc";
 let beadsWorkspace = "";
 let beadsStreamVersion = 0;
 let beadsRenderedPage = 0; // which page the last render drew, for the scroll
+/* The board's own create form (POST /api/beads). Folded until it is asked
+   for, because the page is read far more often than it is written to, and
+   its option sets (the boards, the workspace registry) are fetched once on
+   the first opening rather than with every board poll. */
+let beadsNew = {
+  open: false, busy: false, error: "", done: "",
+  boards: null, workspaces: [], loading: false,
+  draft: { title: "", description: "", priority: "2", type: "task",
+           labels: "", assignee: "", workspace: "", status: "open" },
+};
 let beadsSection = "board"; // board | queues | reports
 let beadsQueues = null;    // the last /api/beads/queues payload
 let beadsQueuesError = "";
@@ -13624,7 +13634,11 @@ function beadsPager() {
   const count = ((beadsCache && beadsCache.boards) || [])
     .filter((b) => b.root === beadsWorkspace)
     .reduce((n, b) => n + (b.issues || []).length, 0);
-  const where = beadsTotal === null
+  // A page with no rows says so. Spelled out because the arithmetic below
+  // would otherwise read "49–48 of 0", which is worse than nothing.
+  const where = count === 0
+    ? (beadsTotal === 0 ? "nothing matches this filter" : "no issues on this page")
+    : beadsTotal === null
     ? `${count} issue${count === 1 ? "" : "s"} on page ${beadsPage + 1}`
     : `${first}–${first + count - 1} of ${beadsTotal}` +
       (known ? `  ·  page ${beadsPage + 1} of ${pages}` : "");
@@ -13721,6 +13735,223 @@ function beadsIssueRow(issue, opts = {}) {
     row.appendChild(who);
   }
   return row;
+}
+
+/* The option sets the create form stands on, fetched once.
+
+   /api/beads/boards lists no issues on purpose: a form that waited for a
+   board listing before it could draw its own fields would be paying exactly
+   the cost the paged board removed. */
+async function loadBeadsNewOptions() {
+  if (beadsNew.loading || beadsNew.boards) return;
+  beadsNew.loading = true;
+  try {
+    const resp = await api("/api/beads/boards");
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
+    beadsNew.boards = data.boards || [];
+    beadsNew.workspaces = data.workspaces || [];
+  } catch (err) {
+    beadsNew.error = String((err && err.message) || err);
+    beadsNew.boards = [];
+  } finally {
+    beadsNew.loading = false;
+    if (beadsOpen && beadsSection === "board") renderBeads();
+  }
+}
+
+/* File the drafted issue, then open it.
+
+   The board is re-read rather than the new row being spliced into the page
+   on screen: the page the reader is on is a window onto a filter and a sort,
+   and an issue put into it by hand would sit wherever it was appended rather
+   than where the board puts it. */
+async function submitNewIssue() {
+  if (beadsNew.busy) return;
+  const draft = beadsNew.draft;
+  if (!draft.title.trim()) {
+    beadsNew.error = "an issue needs a title";
+    renderBeads();
+    return;
+  }
+  beadsNew.busy = true;
+  beadsNew.error = "";
+  beadsNew.done = "";
+  renderBeads();
+  try {
+    const resp = await api("/api/beads", {
+      method: "POST",
+      body: JSON.stringify({
+        title: draft.title.trim(),
+        description: draft.description,
+        priority: draft.priority,
+        type: draft.type,
+        labels: draft.labels,
+        assignee: draft.assignee,
+        workspace: draft.workspace,
+        status: draft.status,
+        cwd: beadsWorkspace || undefined,
+      }),
+    });
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
+    beadsNew.open = false;
+    beadsNew.done = data.issue || "";
+    beadsNew.draft = { title: "", description: "", priority: "2", type: "task",
+                       labels: "", assignee: "", workspace: "", status: "open" };
+    // Straight to the issue that was just filed: the next thing an operator
+    // does with a new issue is start a session on it, and that button is in
+    // its detail pane.
+    if (data.issue) location.hash = "#/beads/" + encodeURIComponent(data.issue);
+    else restartBeadsStream();
+  } catch (err) {
+    beadsNew.error = String((err && err.message) || err);
+  } finally {
+    beadsNew.busy = false;
+    if (beadsOpen && beadsSection === "board") renderBeads();
+  }
+}
+
+/* The create form: the button that opens it, and the fields when it is. */
+function beadsNewBlock() {
+  const box = el("div", "beads-new");
+  const head = el("div", "beads-new-head");
+  const toggle = el("button", "wf-btn option", beadsNew.open ? "Close" : "+ New issue");
+  toggle.type = "button";
+  toggle.title = "file an issue on this board";
+  toggle.addEventListener("click", () => {
+    beadsNew.open = !beadsNew.open;
+    beadsNew.error = "";
+    if (beadsNew.open) loadBeadsNewOptions();
+    renderBeads();
+  });
+  head.appendChild(toggle);
+  if (beadsNew.done) {
+    const link = el("a", "beads-id", beadsNew.done);
+    link.href = "#/beads/" + encodeURIComponent(beadsNew.done);
+    const said = el("span", "wf-note");
+    said.append(document.createTextNode("filed "), link);
+    head.appendChild(said);
+  }
+  box.appendChild(head);
+  if (!beadsNew.open) return box;
+
+  const form = el("div", "beads-new-form");
+  const field = (label, control, hint) => {
+    const row = el("label", "beads-new-row");
+    row.appendChild(el("span", "beads-new-label", label));
+    row.appendChild(control);
+    if (hint) row.appendChild(el("small", "wf-note", hint));
+    form.appendChild(row);
+    return control;
+  };
+  const bind = (control, key) => {
+    control.value = beadsNew.draft[key];
+    control.addEventListener("input", () => { beadsNew.draft[key] = control.value; });
+    control.addEventListener("change", () => { beadsNew.draft[key] = control.value; });
+    return control;
+  };
+  const title = bind(el("input", "beads-new-input"), "title");
+  title.placeholder = "what to do, in one line";
+  field("Title", title);
+
+  const desc = bind(el("textarea", "beads-new-input beads-new-desc"), "description");
+  desc.rows = 6;
+  desc.placeholder =
+    "## 목표 / ## 범위(포함·제외) / ## 완료 증거 기준 / ## 출처\n"
+    + "leave empty and the daemon writes these four headings with the title "
+    + "as the goal";
+  field("Description", desc);
+
+  const pri = el("select", "beads-new-input");
+  for (const [value, label] of [["0", "P0 — critical"], ["1", "P1 — live fault"],
+                                ["2", "P2 — normal"], ["3", "P3 — follow-up"],
+                                ["4", "P4 — idea"]]) {
+    const opt = el("option", null, label);
+    opt.value = value;
+    pri.appendChild(opt);
+  }
+  bind(pri, "priority");
+  field("Priority", pri);
+
+  const type = el("select", "beads-new-input");
+  for (const value of ["task", "bug", "epic", "doc", "chore", "feature"]) {
+    const opt = el("option", null, value);
+    opt.value = value;
+    type.appendChild(opt);
+  }
+  bind(type, "type");
+  field("Type", type);
+
+  const labels = bind(el("input", "beads-new-input"), "labels");
+  labels.placeholder = "comma separated";
+  field("Labels", labels, "'user' is added for you — it is where this came from");
+
+  // Every session the daemon knows on this board, so an assignee is a name
+  // that exists rather than one that was typed from memory.
+  const assignee = el("select", "beads-new-input");
+  const nobody = el("option", null, "— nobody (the pool) —");
+  nobody.value = "";
+  assignee.appendChild(nobody);
+  const onThisBoard = (beadsNew.boards || [])
+    .filter((b) => !beadsWorkspace || b.root === beadsWorkspace)
+    .flatMap((b) => b.sessions || []);
+  for (const sess of onThisBoard) {
+    const opt = el("option", null,
+      sess.status && sess.status !== "idle" ? `${sess.name} (${sess.status})` : sess.name);
+    opt.value = sess.name;
+    assignee.appendChild(opt);
+  }
+  bind(assignee, "assignee");
+  field("Assignee", assignee,
+    "assigning is the leader's call — leave it in the pool unless you are making it");
+
+  // The registered workspace a session started from this issue opens in. It
+  // is recorded on the issue now because this is the moment somebody knows
+  // it; asked for later it is a guess (see Board.set_workspace).
+  const ws = el("select", "beads-new-input");
+  const noWs = el("option", null, "— none recorded —");
+  noWs.value = "";
+  ws.appendChild(noWs);
+  for (const w of beadsNew.workspaces || []) {
+    const opt = el("option", null, w.path ? `${w.name} — ${w.path}` : w.name);
+    opt.value = w.name;
+    ws.appendChild(opt);
+  }
+  bind(ws, "workspace");
+  field("Workspace", ws,
+    (beadsNew.workspaces || []).length
+      ? "where a session created from this issue opens"
+      : "no workspace is registered (claunch workspace add <dir>)");
+
+  const board = el("span", "wf-note beads-new-board",
+    beadsWorkspace || "the daemon's own directory");
+  field("Board", board, "the workspace tabs above choose this");
+
+  form.appendChild(el("p", "wf-note",
+    "Writes are normally the agents' (`claunch beads …`). This one is the "
+    + "operator's: it is stamped `dashboard`, not a session, so the issue "
+    + "does not appear on anybody's rail as their own follow-up work."));
+
+  const actions = el("div", "beads-new-actions");
+  const file = el("button", "wf-btn option", beadsNew.busy ? "filing…" : "File issue");
+  file.type = "button";
+  file.disabled = beadsNew.busy;
+  file.addEventListener("click", submitNewIssue);
+  actions.appendChild(file);
+  const cancel = el("button", "wf-btn clear", "Cancel");
+  cancel.type = "button";
+  cancel.disabled = beadsNew.busy;
+  cancel.addEventListener("click", () => {
+    beadsNew.open = false;
+    beadsNew.error = "";
+    renderBeads();
+  });
+  actions.appendChild(cancel);
+  form.appendChild(actions);
+  if (beadsNew.error) form.appendChild(el("p", "wf-warning", beadsNew.error));
+  box.appendChild(form);
+  return box;
 }
 
 function beadsFilterBar() {
@@ -14361,6 +14592,14 @@ function beadsWorkspaceBlock() {
     opt.value = w.name;
     pick.appendChild(opt);
   }
+  if (current && !options.some((w) => w.name === current)) {
+    // A `select` handed a value none of its options carry falls back to the
+    // first one, which here reads "none recorded" -- the page would report
+    // the issue as naming no directory when it names one that was removed.
+    const gone = el("option", null, `${current} — no longer registered`);
+    gone.value = current;
+    pick.appendChild(gone);
+  }
   pick.value = current;
   const note = el("p", "wf-note beads-ws-note",
     "where a session created from this issue is opened");
@@ -14417,9 +14656,26 @@ function beadsStartBlock() {
   }
   const issue = (beadsDetail.issue || {}).id || beadsFocus;
   const seed = { issue };
-  // Only when the issue actually records one: seeding an empty workspace
-  // would override the form's own default with nothing.
-  if (beadsDetail.workspace) seed.workspace = beadsDetail.workspace;
+  // Only when the issue actually records one AND that name is still
+  // registered: seeding an empty workspace would override the form's own
+  // default with nothing, and seeding one nobody registered is worse --
+  // `applySessionModalSeed` resolves the name against the workspace list, so
+  // an unregistered one silently resolves to nothing and the session opens
+  // in the default directory while this block says it opened in the issue's.
+  const stale = !!beadsDetail.workspace && beadsDetail.workspace_known === false;
+  if (beadsDetail.workspace && !stale) seed.workspace = beadsDetail.workspace;
+  // A closed issue is still startable -- a follow-up round on work that
+  // landed is ordinary -- but it is said out loud, because the board row
+  // that got the operator here does not carry the status into this block and
+  // a session created on a closed issue does its round against a record
+  // nobody is going to reopen.
+  const status = (beadsDetail.issue || {}).status || "";
+  if (status === "closed") {
+    box.appendChild(el("p", "wf-warning",
+      "this issue is closed — a session started on it works a record that is "
+      + "already settled. File a new issue instead unless this is a follow-up "
+      + "round on the same one."));
+  }
   const row = el("div", "beads-start-row");
   const mk = (label, tab, title) => {
     const btn = el("button", "wf-btn option", label);
@@ -14432,10 +14688,17 @@ function beadsStartBlock() {
   row.appendChild(mk("Spawn child", "spawn",
     `create a session on ${issue} under a running parent`));
   box.appendChild(row);
-  const note = seed.workspace
-    ? `opens in ${seed.workspace}, which this issue records`
-    : "this issue records no workspace, so the form opens on its own default";
-  box.appendChild(el("p", "wf-note", note));
+  if (stale) {
+    box.appendChild(el("p", "wf-warning",
+      `this issue records the workspace ${beadsDetail.workspace}, which is `
+      + "not registered on this daemon any more — the form opens on its own "
+      + "default instead. Register it (claunch workspace add <dir>) or pick "
+      + "another above."));
+  } else {
+    box.appendChild(el("p", "wf-note", seed.workspace
+      ? `opens in ${seed.workspace}, which this issue records`
+      : "this issue records no workspace, so the form opens on its own default"));
+  }
   // Worth saying once, here: the Spawn tab does not refuse a blank Parent, it
   // creates a root session. Somebody who pressed Spawn meant a child.
   box.appendChild(el("p", "wf-note",
@@ -14573,6 +14836,7 @@ function renderBeads() {
     if (owner) beadsWorkspace = owner.root;
   }
   view.appendChild(beadsWorkspaceTabs(boards));
+  view.appendChild(beadsNewBlock());
   const body = el("div", "beads-body" + (beadsFocus ? " split" : ""));
   const list = el("div", "beads-list");
   if (beadsSearch.q) {
