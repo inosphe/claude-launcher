@@ -90,7 +90,14 @@ def create(name: str) -> Profile:
 
     profile = resolve(name)
     if profile.exists():
-        raise ProfileError(f"profile {profile.name!r} already exists")
+        # The directory can exist without the store entry this call would add:
+        # the write below is what a Windows sharing conflict refuses, and it
+        # runs *after* the mkdir. Point at the path that finishes that setup
+        # rather than at `prune`, which deletes the directory instead.
+        raise ProfileError(
+            f"profile {profile.name!r} already exists "
+            f"(re-run its setup with 'claunch create {profile.name} --reinit')"
+        )
     profile.config_dir.mkdir(parents=True, exist_ok=False)
     store.ensure_profile(profile.name)
     return profile

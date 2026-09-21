@@ -79,6 +79,19 @@ from .wizard import WizardUnavailable
 # --------------------------------------------------------------------------- #
 # command handlers
 # --------------------------------------------------------------------------- #
+def _carries_seeded_files(p: profile.Profile) -> bool:
+    """Whether the profile already holds a file ``seed`` would copy.
+
+    ``--reinit`` asks seed for missing files only, so an empty result means
+    either that the profile already had them or that the seed source had none.
+    The summary line says which.
+    """
+    return any(
+        (p.config_dir / name).is_file()
+        for name in (seed.CONFIG_FILENAME, seed.SETTINGS_FILENAME)
+    )
+
+
 def _cmd_create(args: argparse.Namespace) -> int:
     if args.parent:
         profile.require(args.parent)  # fail before creating if parent is missing
@@ -106,21 +119,37 @@ def _cmd_create(args: argparse.Namespace) -> int:
         )
     else:
         lineage.effective_harness(prospective, prospective_doc)
-    p = profile.create(args.name)
+    if args.reinit:
+        # A create that stopped on a store write leaves its directory behind
+        # with no entry to match it, and running create again then refuses --
+        # the directory "already exists". So the initialization is finished in
+        # place instead: register the directory (retrying the write that
+        # failed), then run the same tail below. Skipping seeding is not an
+        # option here: the failure may have landed before it.
+        p = profile.require(args.name)
+        store.ensure_profile(p.name)
+        verb = "reinitializing"
+    else:
+        p = profile.create(args.name)
+        verb = "created"
     if args.parent:
         lineage.set_parent(p, args.parent)
     if args.harness:
         # Parent first: inherited allowed_harnesses is part of deciding whether
         # this explicit pin is legal.
         lineage.set_harness(p, args.harness)
-    print(f"created profile {p.name!r} at {p.config_dir}")
+    print(f"{verb} profile {p.name!r} at {p.config_dir}")
     selected = lineage.effective_harness(p)
     is_claude = selected == harnesses.CLAUDE_HARNESS
     if not args.no_seed and is_claude:
         source = Path(args.seed_from).expanduser() if args.seed_from else None
-        copied = seed.seed_profile(p, source)
+        # --reinit fills only what is missing: this directory may already have
+        # been used, and seed writes the destination unconditionally.
+        copied = seed.seed_profile(p, source, missing_only=args.reinit)
         if copied:
             print(f"seeded global config ({', '.join(copied)}); onboarding skipped")
+        elif args.reinit and _carries_seeded_files(p):
+            print("seed: profile already carries its global config; left as it is")
         else:
             print("no global config found to seed; first run will show onboarding")
     elif not args.no_seed:
@@ -1269,6 +1298,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_create = sub.add_parser("create", help="create a new profile (seeds global config)")
     p_create.add_argument("name")
+    p_create.add_argument(
+        "--reinit",
+        action="store_true",
+        help="finish the setup of a profile whose directory already exists "
+        "(a create that stopped on a config-file write leaves one behind)",
+    )
     p_create.add_argument(
         "--no-seed",
         action="store_true",

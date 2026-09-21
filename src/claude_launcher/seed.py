@@ -37,7 +37,12 @@ def _source_config_file(source_dir: Path) -> Optional[Path]:
     return None
 
 
-def _seed_config(source_dir: Path, profile: Profile) -> bool:
+def _seed_config(
+    source_dir: Path, profile: Profile, *, missing_only: bool = False
+) -> bool:
+    dest = profile.config_dir / CONFIG_FILENAME
+    if missing_only and dest.is_file():
+        return False
     src = _source_config_file(source_dir)
     if src is None:
         return False
@@ -47,16 +52,19 @@ def _seed_config(source_dir: Path, profile: Profile) -> bool:
         return False
     if isinstance(data, dict):
         data = {k: v for k, v in data.items() if k not in _EXCLUDED_KEYS}
-    dest = profile.config_dir / CONFIG_FILENAME
     dest.write_text(json.dumps(data, indent=2), encoding="utf-8")
     return True
 
 
-def _seed_settings(source_dir: Path, profile: Profile) -> bool:
+def _seed_settings(
+    source_dir: Path, profile: Profile, *, missing_only: bool = False
+) -> bool:
+    dest = profile.config_dir / SETTINGS_FILENAME
+    if missing_only and dest.is_file():
+        return False
     src = source_dir / SETTINGS_FILENAME
     if not src.is_file():
         return False
-    dest = profile.config_dir / SETTINGS_FILENAME
     text = src.read_text(encoding="utf-8")
     # The launcher's env lives in ~/.claunch.yaml (the source of truth); never
     # carry an "env" block over from the seed source, or Claude Code would read
@@ -72,12 +80,23 @@ def _seed_settings(source_dir: Path, profile: Profile) -> bool:
     return True
 
 
-def seed_profile(profile: Profile, source_dir: Optional[Path] = None) -> List[str]:
-    """Seed ``profile`` from the global config; return the files copied."""
+def seed_profile(
+    profile: Profile,
+    source_dir: Optional[Path] = None,
+    *,
+    missing_only: bool = False,
+) -> List[str]:
+    """Seed ``profile`` from the global config; return the files copied.
+
+    ``missing_only`` copies only the files the profile does not have yet. A
+    re-initialization (``claunch create --reinit``) uses it, because that
+    profile directory may already have been used and its own config must not
+    be replaced with the global one a second time.
+    """
     source_dir = source_dir or config.seed_source_dir()
     copied: List[str] = []
-    if _seed_config(source_dir, profile):
+    if _seed_config(source_dir, profile, missing_only=missing_only):
         copied.append(CONFIG_FILENAME)
-    if _seed_settings(source_dir, profile):
+    if _seed_settings(source_dir, profile, missing_only=missing_only):
         copied.append(SETTINGS_FILENAME)
     return copied

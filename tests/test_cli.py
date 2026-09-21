@@ -252,6 +252,94 @@ def test_create_registers_and_applies_template(home, capsys):
     }
 
 
+def _tree(root: Path) -> dict:
+    """Every file under ``root`` with its bytes, for an unchanged-tree check."""
+    return {
+        str(path.relative_to(root)): path.read_bytes()
+        for path in sorted(root.rglob("*"))
+        if path.is_file()
+    }
+
+
+def test_create_reinit_finishes_a_directory_left_by_a_failed_store_write(home, capsys, monkeypatch):
+    # Run one command first, so the one-time legacy migration has written its
+    # marker -- on a machine that has used claunch before, that marker is what
+    # keeps the next orphan directory from being registered silently.
+    assert run("list") == 0
+    capsys.readouterr()
+
+    real_ensure = store.ensure_profile
+
+    def locked(name):
+        raise store.TransientStoreError("config file is temporarily locked")
+
+    monkeypatch.setattr(store, "ensure_profile", locked)
+    assert run("create", "work") == 1
+    assert "temporarily locked" in capsys.readouterr().err
+    # The directory landed, the entry it was registering did not.
+    assert profile.resolve("work").config_dir.is_dir()
+    assert "work" not in store.profiles()
+
+    # Land the write on the second try, the way re-running the command does.
+    # `monkeypatch.undo()` would also undo the `home` fixture's env vars and
+    # send the rest of this test at the real machine -- it did exactly that
+    # once, and left an empty `work` directory in a real launcher home.
+    monkeypatch.setattr(store, "ensure_profile", real_ensure)
+    assert config.launcher_home() == home
+    assert run("create", "work") == 1
+    assert "already exists" in capsys.readouterr().err
+
+    assert run("create", "work", "--reinit") == 0
+    assert "work" in store.profiles()
+    # The tail ran too, not just the registration.
+    assert store.profile_entry("work")["auto_compact_at"] == 400000
+
+
+def test_create_names_reinit_when_the_directory_is_already_there(home, capsys):
+    run("create", "work", "--no-seed")
+    capsys.readouterr()
+    assert run("create", "work", "--no-seed") == 1
+    assert "--reinit" in capsys.readouterr().err
+
+
+def test_create_reinit_needs_a_directory_to_reinitialize(home, capsys):
+    assert run("create", "work", "--reinit") == 1
+    assert "does not exist" in capsys.readouterr().err
+    assert not profile.resolve("work").config_dir.exists()
+
+
+def test_create_reinit_leaves_an_initialized_profile_unchanged(home, capsys):
+    assert run("create", "work") == 0
+    capsys.readouterr()
+    p = profile.require("work")
+    files, entry, config = _tree(p.config_dir), store.profile_entry("work"), store.path().read_bytes()
+
+    for _ in range(2):
+        assert run("create", "work", "--reinit") == 0
+        assert _tree(p.config_dir) == files
+        assert store.profile_entry("work") == entry
+        assert store.path().read_bytes() == config
+
+
+def test_create_reinit_keeps_the_profile_config_it_already_has(home, capsys, monkeypatch, tmp_path):
+    import json
+
+    src = tmp_path / "seedsrc"
+    src.mkdir()
+    (src / ".claude.json").write_text(json.dumps({"global": True}), encoding="utf-8")
+    (src / "settings.json").write_text(json.dumps({"global": True}), encoding="utf-8")
+    monkeypatch.setenv("CLAUDE_LAUNCHER_SEED", str(src))
+
+    assert run("create", "work") == 0
+    capsys.readouterr()
+    p = profile.require("work")
+    wrote = p.config_dir / ".claude.json"
+    wrote.write_text(json.dumps({"own": True}), encoding="utf-8")
+
+    assert run("create", "work", "--reinit") == 0
+    assert json.loads(wrote.read_text(encoding="utf-8")) == {"own": True}
+
+
 def test_env_set_and_show(home, capsys):
     run("create", "work", "--no-seed")
     capsys.readouterr()
