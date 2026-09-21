@@ -1005,6 +1005,31 @@ function setSessionSearch(q) {
   syncSessionFilters(sessionsCache);
 }
 
+/* The box's own clear button (index.html #session-search-clear). It is shown
+   only while there is something to clear, so the rail's one-line row never
+   carries a control that would do nothing. Driven off the box's value rather
+   than off sessionSearch.q: Enter trims the query it sends, so the two differ
+   whenever the typed text has leading or trailing spaces, and it is the typed
+   text the button erases. */
+function syncSessionSearchClear() {
+  const box = $("session-search");
+  const button = $("session-search-clear");
+  if (!box || !button) return;
+  button.classList.toggle("hidden", !box.value);
+}
+
+/* The pointer route to what Esc already did, down the same path: empty the
+   box, drop the search state (a ranking by meaning with it), hide the button
+   again, and hand the caret back so the next query is typed straight in. */
+function clearSessionSearch() {
+  const box = $("session-search");
+  if (!box) return;
+  box.value = "";
+  setSessionSearch("");
+  syncSessionSearchClear();
+  box.focus();
+}
+
 async function runSessionSearch(q) {
   q = String(q || "").trim();
   if (!q) { setSessionSearch(""); return; }
@@ -12409,14 +12434,26 @@ if (issueSearch) {
 }
 
 /* The rail's search box (index.html #session-search): substring on input,
-   meaning on Enter, Esc clears. Absent on a page holding older markup. */
+   meaning on Enter, Esc or the × button clears. Absent on a page holding
+   older markup -- and so is the button, which is guarded separately because a
+   page may ship the box from before the button existed. */
 const sessionSearchBox = $("session-search");
 if (sessionSearchBox) {
-  sessionSearchBox.addEventListener("input", () => setSessionSearch(sessionSearchBox.value));
+  sessionSearchBox.addEventListener("input", () => {
+    setSessionSearch(sessionSearchBox.value);
+    syncSessionSearchClear();
+  });
   sessionSearchBox.addEventListener("keydown", (e) => {
     if (e.key === "Enter") { e.preventDefault(); runSessionSearch(sessionSearchBox.value); }
-    if (e.key === "Escape") { sessionSearchBox.value = ""; setSessionSearch(""); }
+    if (e.key === "Escape") clearSessionSearch();
   });
+  const sessionSearchClearButton = $("session-search-clear");
+  if (sessionSearchClearButton) {
+    sessionSearchClearButton.addEventListener("click", clearSessionSearch);
+  }
+  // A reload can hand the box back with text in it, so the button's first
+  // state is read from the box rather than assumed to be empty.
+  syncSessionSearchClear();
 }
 
 $("new-session").mesh.addEventListener("change", async () => {

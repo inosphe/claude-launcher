@@ -100,11 +100,23 @@
     </div>
     <!-- The rail's search: typing narrows by substring (name, task, issue,
          branch, briefing); Enter asks the daemon to rank the fleet by
-         meaning, which needs the rag: block; Esc clears. -->
+         meaning, which needs the rag: block; Esc and the × button clear. -->
     <div id="session-search-row" class="session-search-row">
-      <input id="session-search" type="search" autocomplete="off"
-             placeholder="filter sessions — Enter searches by meaning"
-             aria-label="Filter sessions by text; Enter searches by meaning">
+      <!-- The box and its clear button share one grid cell: the × sits
+           inside the input's right edge, so it takes no width from the box
+           and leaves the Search-anything button where it was. It is hidden
+           while the box is empty -- over an empty field it would be a
+           control that does nothing. -->
+      <div class="session-search-box">
+        <input id="session-search" type="search" autocomplete="off"
+               placeholder="filter sessions — Enter searches by meaning"
+               aria-label="Filter sessions by text; Enter searches by meaning">
+        <button id="session-search-clear" class="session-search-clear hidden"
+                type="button" aria-label="Clear the session filter"
+                title="Clear the filter (Esc)">
+          <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" aria-hidden="true"><path d="M6 6 18 18M18 6 6 18"/></svg>
+        </button>
+      </div>
       <button id="search-anything-open" type="button" aria-haspopup="dialog"
               aria-label="Search anything (/)" title="Search anything (/)">
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 4.5 4.5"/></svg>
