@@ -390,6 +390,15 @@ TOOLS = [
                         "started elsewhere would boot empty"
                     ),
                 },
+                "project": {
+                    "type": "string",
+                    "description": (
+                        "file the child under a project other than yours "
+                        "('children' lists them). With no 'workspace', 'cwd' "
+                        "or 'worktree' beside it, the child starts in that "
+                        "project's default workspace when it has one"
+                    ),
+                },
                 "workspace": {
                     "type": "string",
                     "description": (
@@ -976,7 +985,7 @@ _SPAWN_KEYS = (
     "name", "mesh", "handle", "role", "subroles", "connect", "workflow", "context",
     "task", "issue", "issue_text", "harness", "workspace", "worktree",
     "rebase_onto", "profile", "borrow", "null_token", "cwd", "args", "env",
-    "fork", "tools",
+    "fork", "tools", "project",
 )
 
 

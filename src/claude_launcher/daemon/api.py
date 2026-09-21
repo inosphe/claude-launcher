@@ -40,7 +40,7 @@ from .. import (
 )
 from .. import session_commits
 from .. import beads_meta
-from .. import ghcli, prflow, spawn as spawn_mod, store, workspaces
+from .. import ghcli, prflow, projects, spawn as spawn_mod, store, workspaces
 from .. import plugins, settings
 from .. import worktree as worktree_mod
 from . import beads as beads_mod, channel, clipboard, connections
@@ -445,6 +445,10 @@ def build_app(
     r.add_get("/api/metering", h_metering)
     r.add_get("/api/borrow-options", h_borrow_options)
     r.add_get("/api/roles", h_roles)
+    r.add_get("/api/projects", h_projects)
+    r.add_post("/api/projects", h_project_add)
+    r.add_patch("/api/projects/{name}", h_project_update)
+    r.add_delete("/api/projects/{name}", h_project_remove)
     r.add_get("/api/workspaces", h_workspaces)
     r.add_get("/api/git", h_git)
     r.add_post("/api/workspaces", h_workspace_add)
@@ -1696,6 +1700,61 @@ async def h_harnesses(request: web.Request) -> web.Response:
             ]
         }
     )
+
+
+async def h_projects(request: web.Request) -> web.Response:
+    """The projects meshes and sessions are filed under, for the pickers.
+
+    Each carries its default workspace both as the registered *name* and as
+    the resolved directory (``default_cwd``), so the create form can fill
+    its directory field from a project choice without a second round trip.
+    """
+    return json_response({"projects": [p.to_dict() for p in projects.list_all()]})
+
+
+async def h_project_add(request: web.Request) -> web.Response:
+    """Create a project — the browser's ``claunch project add``.
+
+    Idempotent like the CLI: an existing name with the same default
+    workspace is returned as it is, and a different ``default_workspace``
+    updates the setting. The workspace must already be registered, because
+    a default that names nothing would send every session of the project
+    nowhere.
+    """
+    body = await _json_body(request)
+    ws = body.get("default_workspace")
+    try:
+        project = projects.add(
+            str(body.get("name") or ""),
+            default_workspace=None if ws is None else str(ws or ""),
+        )
+    except projects.ProjectError as exc:
+        return json_error(400, str(exc))
+    return json_response({"project": project.to_dict()}, status=201)
+
+
+async def h_project_update(request: web.Request) -> web.Response:
+    """Set (or clear, with null/"") a project's default workspace."""
+    body = await _json_body(request)
+    if "default_workspace" not in body:
+        return json_error(400, "'default_workspace' is required (null clears it)")
+    try:
+        project = projects.set_default_workspace(
+            request.match_info["name"], str(body.get("default_workspace") or "")
+        )
+    except projects.ProjectError as exc:
+        return json_error(404 if "no project named" in str(exc) else 400, str(exc))
+    return json_response({"project": project.to_dict()})
+
+
+async def h_project_remove(request: web.Request) -> web.Response:
+    """Drop one project from the registry. Its sessions and meshes keep the
+    name on their records and are neither killed nor moved."""
+    try:
+        removed = projects.remove(request.match_info["name"])
+    except projects.ProjectError as exc:
+        return json_error(404 if "no project named" in str(exc) else 400, str(exc))
+    return json_response({"project": removed.to_dict()})
 
 
 async def h_workspaces(request: web.Request) -> web.Response:
@@ -3371,6 +3430,8 @@ def _mesh_mgr(request: web.Request) -> MeshManager:
 async def h_mesh_list(request: web.Request) -> web.Response:
     mm = _mesh_mgr(request)
     rail_view = request.query.get("view") == "rail"
+    # ``?project=`` narrows to one project's meshes; absent = every mesh.
+    project_filter = str(request.query.get("project") or "").strip()
     return json_response(
         {
             # The rail view is what the sidebar polls: names, local members
@@ -3381,6 +3442,7 @@ async def h_mesh_list(request: web.Request) -> web.Response:
             "meshes": [
                 mm.mesh_rail_info(m) if rail_view else mm.mesh_info(m)
                 for m in mm.list()
+                if projects.matches(m.project, project_filter)
             ],
             "outgoing": mm.outgoing_list(),
             "relay": request.app["relay_state"](),
@@ -3390,7 +3452,9 @@ async def h_mesh_list(request: web.Request) -> web.Response:
 
 async def h_mesh_create(request: web.Request) -> web.Response:
     body = await _json_body(request)
-    mesh = _mesh_mgr(request).create(str(body.get("name") or ""))
+    mesh = _mesh_mgr(request).create(
+        str(body.get("name") or ""), project=str(body.get("project") or "")
+    )
     return json_response(_mesh_mgr(request).mesh_info(mesh), status=201)
 
 
@@ -4254,6 +4318,11 @@ async def h_sessions_list(request: web.Request) -> web.Response:
         "all", "active", "current", "killed", "paused", "archived",
     }:
         return json_error(400, f"invalid session list state: {list_state!r}")
+    # ``?project=`` narrows the list to one project's sessions; absent means
+    # every project, which is what this route has always answered. Applied
+    # here, before the per-session assembly, for the same reason the state
+    # filter is: what the reader cannot see is not built.
+    project_filter = str(request.query.get("project") or "").strip()
     reminder_service = request.app.get("session_reminder")
     reminder_cfg = None
     if reminder_service is not None:
@@ -4289,6 +4358,8 @@ async def h_sessions_list(request: web.Request) -> web.Response:
         if list_state == "paused" and not paused:
             continue
         if list_state == "archived" and not archived:
+            continue
+        if not projects.matches(s.sdef.project, project_filter):
             continue
         sessions.append(s)
     winddowns = request.app["beads"].winddowns
@@ -4410,6 +4481,21 @@ async def h_sessions_create(request: web.Request) -> web.Response:
     """
     manager: SessionManager = request.app["manager"]
     body = await _json_body(request)
+    # The project is settled first: it is checked against the registry (a
+    # session filed under an unknown name is reachable from no listing), and
+    # its default workspace is what a request naming no directory starts
+    # in — before the worktree below is resolved against that directory.
+    project_name = str(body.get("project") or "").strip()
+    if project_name:
+        try:
+            project_name = projects.require(project_name).name
+        except projects.ProjectError as exc:
+            return json_error(400, str(exc))
+        body["project"] = project_name
+    if not str(body.get("cwd") or "").strip():
+        default_cwd = projects.default_cwd(project_name)
+        if default_cwd:
+            body["cwd"] = default_cwd
     # The browser sends a worktree name separately from the session directory.
     # Resolve it before SessionDef is built so the persistent definition keeps
     # the actual checkout path, just like the CLI launch path does. An empty
@@ -4502,7 +4588,12 @@ async def _onboard_and_launch(
         except beads_mod.BoardRequestError as exc:
             raise onboard.OnboardError(str(exc)) from None
         if parent:
-            await onboard.inherit_mesh(body, parent=parent, mesh_mgr=_mesh_mgr(request))
+            await onboard.inherit_mesh(
+                body,
+                parent=parent,
+                mesh_mgr=_mesh_mgr(request),
+                project=session.sdef.project or "",
+            )
             onboard.inherit_workflow(
                 body,
                 parent=parent,

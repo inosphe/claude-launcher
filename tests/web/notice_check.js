@@ -120,6 +120,10 @@ function build(opts) {
     "renderRelayBadge", "refreshProfiles", "refreshHarnesses", "refreshRoles",
     "refreshWorkspaces", "refreshSessions", "refreshMeshList", "refreshCflow",
     "refreshTermQueued", "reconnectNow", "route", "refreshNewWorktree",
+    // The poll's refresh batch also pulls the project registry for the
+    // rail's selector and the create form's Project row; what it renders
+    // is projects_check's to hold — here it only has to exist.
+    "refreshProjects",
     // boot() opens the page's control socket once the first authenticated
     // read has answered. Whether it does is controlsocket_check's subject;
     // here it only has to exist.
@@ -143,6 +147,7 @@ function build(opts) {
     // form's checkout choice; what it fetches and greys is newform_check's
     // and spawnform_check's to hold — here it only has to exist.
     () => {},
+    () => {},   // refreshProjects
   );
 
   return { api, nodes, daemon, clock, apiCalls, timers,

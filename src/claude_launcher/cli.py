@@ -32,6 +32,7 @@ from . import (
     cli_sync,
     cli_transcript,
     cli_window,
+    cli_project,
     cli_workspace,
     config,
     credentials,
@@ -56,6 +57,7 @@ from . import (
     store,
     template,
     usage,
+    projects,
     workspaces,
     worktree,
 )
@@ -1608,6 +1610,7 @@ def build_parser() -> argparse.ArgumentParser:
     cli_cflow.register(sub)
     cli_sync.register(sub)
     cli_workspace.register(sub)
+    cli_project.register(sub)
     cli_beads.register(sub)
     cli_search.register(sub)
     cli_transcript.register(sub)
@@ -1671,6 +1674,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         WorkflowError,
         CflowStateError,
         workspaces.WorkspaceError,
+        projects.ProjectError,
         worktree.WorktreeError,
         WizardUnavailable,
     ) as exc:

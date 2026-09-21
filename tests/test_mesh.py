@@ -690,7 +690,7 @@ def test_mesh_api(home, tmp_path):
             resp = await client.get("/api/mesh?view=rail", headers=bearer)
             rail_mesh = (await resp.json())["meshes"]
             assert rail_mesh == [{
-                "name": "web", "primary": None,
+                "name": "web", "project": "default", "primary": None,
                 "members": [{
                     "handle": "worker_a", "session": "w1", "role": "worker",
                     "subroles": [], "roles": ["worker"],

@@ -80,6 +80,7 @@ from . import (
     harnesses,
     lineage,
     profile as profile_mod,
+    projects,
     providers,
     store,
     transcripts,
@@ -512,10 +513,61 @@ def check(
             if not request.get("null_token"):
                 child["null_token"] = False
 
+    _file_under_project(policy, child, request, parent=parent, warnings=warnings)
+
     if request.get("fork"):
         _fork_parents_conversation(child, parent, request)
 
     return child
+
+
+def _file_under_project(
+    policy: SpawnPolicy,
+    child: dict,
+    request: dict,
+    *,
+    parent: dict,
+    warnings: Optional[List[str]],
+) -> None:
+    """Settle the child's project, and the directory that follows from it.
+
+    A child is filed under its parent's project unless the request names
+    another — ungated, because a project is a label on the roster and not a
+    change to what runs. What *is* gated is the one consequence a project
+    has at spawn time: when the request names a project and nothing about
+    where the child should sit (no ``cwd``, ``workspace`` or ``worktree``),
+    the child starts in that project's default workspace. That is a move to
+    a registered directory, exactly what ``allow_workspace`` governs, so it
+    takes the same gate — and when the gate is shut the child simply stays
+    in its parent's directory, with a warning rather than a refusal, because
+    a default that was not asked for by name is not something to fail on.
+    """
+    asked = str(request.get("project") or "").strip()
+    inherited = str(parent.get("project") or "").strip()
+    chosen = projects.normalize(asked or inherited)
+    if asked:
+        try:
+            projects.require(asked)
+        except projects.ProjectError as exc:
+            raise SpawnDenied(str(exc)) from None
+    # Written only when it says something: a child of the default project
+    # carries no key, the same rule the session record itself keeps.
+    if chosen != projects.DEFAULT:
+        child["project"] = chosen
+    if not asked or any(request.get(k) for k in _MOVES_THE_CHILD):
+        return
+    default_cwd = projects.default_cwd(chosen)
+    if not default_cwd:
+        return
+    if not policy.allow_workspace:
+        if warnings is not None:
+            warnings.append(
+                f"project {chosen!r} has a default workspace, but "
+                "spawn.allow_workspace is off — the child stays in its "
+                "parent's directory"
+            )
+        return
+    child["cwd"] = resolve_workspace(default_cwd)
 
 
 #: The request keys that send a child somewhere other than its parent's
@@ -813,4 +865,7 @@ def capabilities(
         # naming the field without listing the options would leave it
         # guessing — the one thing the registry exists to prevent.
         report["workspaces"] = [w.to_dict() for w in workspaces.list_all()]
+    # Always listed: filing a child under a project is not gated, and the
+    # names only exist in a registry the agent cannot see.
+    report["projects"] = [p.to_dict() for p in projects.list_all()]
     return report

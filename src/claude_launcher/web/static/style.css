@@ -2041,6 +2041,20 @@ body.term-split #terminal { flex: var(--split-term, 0.6) 1 0; min-height: 80px; 
 }
 .beads-filters { align-items: center; margin-bottom: 12px; }
 /* ---- semantic search --------------------------------------------------- */
+/* The project selector sits above the search: one row, label then picker. */
+.project-row { padding: 6px 8px 0; display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 6px; align-items: center; }
+.project-row label { font-size: 11px; color: #7d8590; white-space: nowrap; }
+.project-row label a { color: #58a6ff; text-decoration: none; margin-left: 4px; }
+.project-row label a:hover { text-decoration: underline; }
+#project-select {
+  width: 100%; box-sizing: border-box; padding: 4px 6px; font-size: 12px;
+  background: #0d1117; color: #e6edf3; border: 1px solid #30363d; border-radius: 6px;
+}
+.project-add-row { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+.project-add-row input, .project-add-row select { flex: 1 1 160px; min-width: 120px; }
+.project-row-item { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; padding: 6px 0; border-top: 1px solid #21262d; }
+.project-row-item .project-name { font-weight: 600; min-width: 100px; }
+.project-row-item select { flex: 1 1 180px; min-width: 140px; }
 .session-search-row { padding: 6px 8px 0; display: grid; grid-template-columns: minmax(0, 1fr) 28px; gap: 3px 4px; align-items: stretch; }
 #session-search {
   width: 100%; box-sizing: border-box; padding: 5px 8px; font-size: 12px;

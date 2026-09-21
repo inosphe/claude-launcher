@@ -109,8 +109,12 @@ check("Identity fences exactly who the session is",
    inside the "How it runs" fold with its value echoed on the fold's summary
    line, which is a place to notice a directory rather than a place to
    choose one. */
-check("the directory is fenced on its own and asks exactly one thing",
-      named(where.text), ["cwd"]);
+/* The project joined the fence above the directory because it answers it:
+   picking a project fills the Directory row with that project's default
+   workspace (a default — the row stays free), so the two are one question
+   asked in two rows, project first. */
+check("the fence asks the project, then the directory it answers",
+      named(where.text), ["project", "cwd"]);
 check("Where it works opens the form, ahead of every other fence",
       [where.start < identity.start, identity.start < runsOn.start],
       [true, true]);
@@ -124,8 +128,8 @@ check("the decision blocks are numbered in reading order",
    what it joins, how it runs (folded), what it is told first. */
 check("the form's controls read in the new order", named(form.text), [
   "quick_fork_carry", "quick_fork_task",
-  // where it works
-  "cwd",
+  // where it works: the project, then the directory its default fills
+  "project", "cwd",
   // who it is
   "parent", "fork_parent", "over_limit", "name",
   // whose credentials it holds — promoted out of the fold

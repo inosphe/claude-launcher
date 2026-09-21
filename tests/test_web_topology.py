@@ -402,6 +402,7 @@ CHECKS = [
         "sessiontabs_check.js",
         "prwizard_check.js",
         "railmeshgroup_check.js",
+        "projects_check.js",
 ]
 
 

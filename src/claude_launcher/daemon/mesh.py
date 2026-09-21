@@ -41,7 +41,7 @@ from typing import Callable, Dict, Iterable, List, Optional, Sequence, Tuple, Un
 
 import yaml
 
-from .. import atomic, digests
+from .. import atomic, digests, projects
 from . import loops, mesh_ops, mesh_policy, mesh_roles, paths, wire
 from .manager import AnySession, ManagerError, SessionManager
 from .session import STATUS_IDLE, session_category
@@ -624,9 +624,16 @@ def _dedupe_roles(names: Sequence[str], *, skip: str = "") -> List[str]:
 class Mesh:
     """One mesh: membership, its message log, and per-member delivery state."""
 
-    def __init__(self, name: str, *, created_at: str = "", me: str = "") -> None:
+    def __init__(
+        self, name: str, *, created_at: str = "", me: str = "", project: str = ""
+    ) -> None:
         self.name = name
         self.created_at = created_at or utcnow()
+        #: The project this mesh is filed under (see
+        #: :mod:`claude_launcher.projects`). ``""`` = the default project,
+        #: which is what every mesh.json written before the field existed
+        #: reads as — nothing on disk moves.
+        self.project: str = "" if projects.normalize(project) == projects.DEFAULT else projects.normalize(project)
         self.members: Dict[str, Member] = {}
         self.messages: List[dict] = []  # in-memory mirror of log.jsonl
         self.cursors: Dict[str, int] = {}  # handle -> delivered log index
@@ -1797,7 +1804,14 @@ class MeshManager:
     # ------------------------------------------------------------------ #
     # registry operations
     # ------------------------------------------------------------------ #
-    def create(self, name: str) -> Mesh:
+    def create(self, name: str, *, project: str = "") -> Mesh:
+        """Create a mesh, filed under ``project`` (blank = the default).
+
+        An unknown project is refused rather than recorded: a mesh filed
+        under a name the registry does not know would be reachable from no
+        project's listing, which is the one failure the tier exists to
+        prevent.
+        """
         name = (name or "").strip()
         if not _NAME_RE.match(name):
             raise MeshError(
@@ -1805,7 +1819,11 @@ class MeshManager:
             )
         if name in self._meshes:
             raise MeshConflict(f"mesh {name!r} already exists")
-        mesh = Mesh(name, me=self.machine)
+        try:
+            project = projects.require(project).name
+        except projects.ProjectError as exc:
+            raise MeshError(str(exc)) from None
+        mesh = Mesh(name, me=self.machine, project=project)
         self._meshes[name] = mesh
         self._persist_def(mesh)
         self._ensure_worker(name)
@@ -6409,6 +6427,7 @@ class MeshManager:
         ]
         return {
             "name": mesh.name,
+            "project": mesh.project or projects.DEFAULT,
             "primary": mesh.primary or None,
             "members": members,
             "member_count": len(mesh.members),
@@ -6552,6 +6571,7 @@ class MeshManager:
         you = self.member_for_session(mesh, session) if session else None
         return {
             "name": mesh.name,
+            "project": mesh.project or projects.DEFAULT,
             "created_at": mesh.created_at,
             "primary": mesh.primary or None,
             "authority": mesh.authority or None,
@@ -6989,6 +7009,7 @@ class MeshManager:
             # to the identity this directory was last written with — that is
             # what makes rank (and therefore `primary`) correct on reload.
             me=self.machine or str(doc.get("self") or ""),
+            project=str(doc.get("project") or ""),
         )
         for entry in (doc.get("members") or {}).values():
             member = Member.from_dict(entry)
@@ -7127,6 +7148,9 @@ class MeshManager:
                 "name": mesh.name,
                 "created_at": mesh.created_at,
                 "self": mesh.me,
+                # Absent for the default project, so a mesh that was never
+                # filed writes exactly the file it always did.
+                **({"project": mesh.project} if mesh.project else {}),
                 "peers": mesh.peers,
                 "links": mesh.links,
                 "pair_links": mesh.pair_links,

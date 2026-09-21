@@ -197,6 +197,13 @@ class SessionDef:
     #: an instruction. Persisted with the definition, so it survives a daemon
     #: restart and a respawn with the rest of the session's record.
     note: Optional[str] = None
+    #: The project this session is filed under (see :mod:`claude_launcher.
+    #: projects`). ``None`` means the default project — the reading every
+    #: record written before projects existed gets, so nothing on disk moves.
+    #: Set at creation (``--project``, the form's project field, a spawn's
+    #: ``project`` or, failing all of those, the parent's) and carried on
+    #: restores like the rest of the definition.
+    project: Optional[str] = None
 
     def to_dict(self) -> dict:
         out = {
@@ -239,6 +246,10 @@ class SessionDef:
         # key, so the common record on disk is unchanged by this field.
         if self.note:
             out["note"] = self.note
+        # Absent for the default project, so a record that never named one
+        # is byte-for-byte what it was — and reads as the default either way.
+        if self.project:
+            out["project"] = self.project
         return out
 
     @classmethod
@@ -277,6 +288,7 @@ class SessionDef:
             user_penalty=score_goal.count(data.get("user_penalty", 0)),
             quick_fork_of=str(data.get("quick_fork_of") or "").strip() or None,
             note=str(data.get("note") or "").strip() or None,
+            project=str(data.get("project") or "").strip() or None,
         )
 
 

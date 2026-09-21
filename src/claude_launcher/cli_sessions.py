@@ -36,6 +36,7 @@ from . import (
     harnesses,
     lineage,
     profile as profile_mod,
+    projects,
     store,
     worktree,
 )
@@ -177,7 +178,19 @@ def _cmd_new_session(args: argparse.Namespace) -> int:
     extra = list(args.args or [])
     if extra and extra[0] == "--":
         extra = extra[1:]
-    cwd = os.path.abspath(args.cwd) if args.cwd else os.getcwd()
+    project_name = getattr(args, "project", None)
+    if project_name:
+        # Checked here, where the error can name the known projects, and
+        # before a worktree is cut: the daemon checks again.
+        projects.require(project_name)
+    if args.cwd:
+        cwd = os.path.abspath(args.cwd)
+    else:
+        # The project's default workspace stands in for the current
+        # directory — a default, and only in the absence of -c. Blank when
+        # the project has none (or its workspace is unregistered), and the
+        # old answer applies.
+        cwd = projects.default_cwd(project_name) or os.getcwd()
     # Resolved here and not in the daemon, on purpose. The daemon builds
     # sessions for three other callers too -- the web UI, a restore after a
     # restart, an agent's spawn -- and none of them has a terminal to ask in
@@ -217,6 +230,8 @@ def _cmd_new_session(args: argparse.Namespace) -> int:
     }
     if args.restore is not None:
         body["restore"] = args.restore
+    if project_name:
+        body["project"] = project_name
     if args.role:
         body["role"] = args.role
     if getattr(args, "subroles", None):
@@ -589,6 +604,7 @@ def _cmd_spawn(args: argparse.Namespace) -> int:
             ("args", extra),
             ("env", env),
             ("workspace", args.workspace),
+            ("project", getattr(args, "project", None)),
             # Cut by the daemon, from the parent's own repository: the child
             # is on the daemon's filesystem and this CLI may not be, and a
             # path travelling in `cwd` is the door `spawn.allow_cwd` keeps
@@ -1064,6 +1080,7 @@ def _by_lineage(sessions):
 
 
 def _cmd_sessions(_args: argparse.Namespace) -> int:
+    project_filter = getattr(_args, "project", None) or ""
     client, why = daemon_client.connect_with_diagnosis()
     if client is None:
         if not daemon_client.is_absent(why):
@@ -1080,9 +1097,13 @@ def _cmd_sessions(_args: argparse.Namespace) -> int:
             return 1
         print(f"{daemon_client.unreachable_reason(why)}; no sessions")
         return 0
-    sessions = client.get("/api/sessions").get("sessions", [])
+    query = f"?project={quote(project_filter)}" if project_filter else ""
+    sessions = client.get(f"/api/sessions{query}").get("sessions", [])
     if not sessions:
-        print("no sessions; create one with 'claunch new-session --profile <name>'")
+        if project_filter:
+            print(f"no sessions in project {project_filter!r}")
+        else:
+            print("no sessions; create one with 'claunch new-session --profile <name>'")
         return 0
     for s, depth in _by_lineage(sessions):
         state = s["status"]
@@ -1093,8 +1114,11 @@ def _cmd_sessions(_args: argparse.Namespace) -> int:
         # ASCII only: this prints to a Windows console as often as not, and
         # the box-drawing characters arrive there as mojibake.
         label = ("  " * (depth - 1) + "`- " + s["name"] if depth else s["name"])[:16]
+        # The project column is only drawn when the list is not already
+        # narrowed to one, so the one-project view reads as it always did.
+        proj = "" if project_filter else f"{projects.normalize(s.get('project')):<10} "
         print(
-            f"{label:<16} [{state:<10}] {s['harness']:<8} {prof:<12} "
+            f"{label:<16} [{state:<10}] {s['harness']:<8} {prof:<12} {proj}"
             f"{s['cols']}x{s['rows']}  {s.get('cwd', '')}"
         )
     dead = [s["name"] for s in sessions if s["status"] == "exited"]
@@ -2323,7 +2347,16 @@ def register(sub) -> None:
         "--harness", default=None,
         help="deprecated/read-only: configure it on the profile with set-harness",
     )
-    p_new.add_argument("-c", "--cwd", help="working directory (default: current dir)")
+    p_new.add_argument(
+        "-c", "--cwd",
+        help="working directory (default: the project's default workspace, "
+        "else the current dir)",
+    )
+    p_new.add_argument(
+        "--project", "-P", metavar="NAME",
+        help="file the session under this project ('claunch project ls' "
+        "lists them; default: the 'default' project)",
+    )
     wt = p_new.add_mutually_exclusive_group()
     wt.add_argument(
         "--worktree", nargs="?", const="", default=worktree.ASK, metavar="NAME",
@@ -2573,6 +2606,13 @@ def register(sub) -> None:
              "spawn.allow_workspace turns this off)",
     )
     p_spawn.add_argument(
+        "--project", "-P", metavar="NAME",
+        help="file the child under this project instead of the parent's "
+             "('claunch project ls' lists them); without --workspace/"
+             "--worktree the child starts in that project's default "
+             "workspace when it has one",
+    )
+    p_spawn.add_argument(
         "args", nargs=argparse.REMAINDER,
         help="extra arguments passed to the harness, REPLACING the inherited "
              "ones (prefix with -- if they start with -; needs "
@@ -2591,6 +2631,10 @@ def register(sub) -> None:
     p_reparent.set_defaults(func=_cmd_reparent)
 
     p_ls = sub.add_parser("sessions", aliases=["lss"], help="list daemon-managed sessions")
+    p_ls.add_argument(
+        "--project", "-P", metavar="NAME",
+        help="only the sessions filed under this project",
+    )
     p_ls.set_defaults(func=_cmd_sessions)
 
     p_attach = sub.add_parser(

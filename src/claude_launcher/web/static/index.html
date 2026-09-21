@@ -89,6 +89,15 @@
       </div>
       <span id="relay-badge" class="badge hidden"></span>
     </header>
+    <!-- The tier above the rail: which project's sessions and meshes the
+         page shows. "All projects" is the flat roster the rail always drew;
+         a project narrows both lists (the daemon filters, ?project=) and is
+         what the create form files a new session under. Remembered per
+         browser, like the state filter below it. -->
+    <div id="project-row" class="project-row">
+      <label for="project-select">Project <a href="#/workspaces" title="manage projects">manage</a></label>
+      <select id="project-select" aria-label="Project"></select>
+    </div>
     <!-- The rail's search: typing narrows by substring (name, task, issue,
          branch, briefing); Enter asks the daemon to rank the fleet by
          meaning, which needs the rag: block; Esc clears. -->
@@ -512,7 +521,15 @@
              the face of the form. -->
         <fieldset id="new-where">
           <legend><span class="sess-spawn-step">1</span> Where it works</legend>
-          <p class="sess-spawn-group-blurb">the directory this session is created in</p>
+          <p class="sess-spawn-group-blurb">the project this session is filed under, and the directory it is created in</p>
+          <!-- The project comes first because it answers the directory: choosing
+               one fills the Directory row with that project's default workspace
+               (a default only — the row below stays free to change). It follows
+               the rail's selector when one project is picked there. -->
+          <label class="with-link">
+            <span>Project <a href="#/workspaces">manage</a></span>
+            <select name="project"></select>
+          </label>
           <label class="with-link">
             <span>Directory <a href="#/workspaces">manage</a></span>
             <select name="cwd"></select>
