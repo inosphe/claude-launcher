@@ -403,6 +403,7 @@ CHECKS = [
         "prwizard_check.js",
         "railmeshgroup_check.js",
         "projects_check.js",
+        "searchclear_check.js",
 ]
 
 
