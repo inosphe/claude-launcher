@@ -22,6 +22,19 @@ says so instead, since its process is gone in either case. A name the registry
 does not hold keeps whatever the index had, because there is no live state to
 put beside it.
 
+**종류 필터** sits between the status line and the rows: `전체` and one chip per
+kind the answer holds, each with how many rows it would leave, pressed-state
+shown on the chip. Choosing one narrows the two lists to that kind; `전체`
+restores them. A chip is built from the rows in hand rather than from a fixed
+list of kinds, so a kind the corpus gains later becomes a chip with no change
+here, and a chip never promises rows the answer does not have. The filter
+narrows what arrived, and does not ask the daemon again — so it can only show
+what the answer's window (`limit=30`) already holds: a kind whose matches all
+rank below that window has no chip on this answer. Filling the window with one
+kind instead would take a server-side `only=` filter, which this change does not
+add. A new search starts unfiltered: the chips count the answer they belong to,
+so the line above them and the rows below them agree when it arrives.
+
 The unified corpus covers all known/registered repository boards, issue
 descriptions, design/acceptance/notes fields, labels and comments; session
 tasks and summaries; Observer events and direct reports/answers; briefing

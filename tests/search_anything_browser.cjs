@@ -5,7 +5,24 @@ const path = require('node:path');
 const http = require('node:http');
 const {chromium} = require(process.env.CLAUNCH_PLAYWRIGHT || 'playwright');
 const root = path.join(__dirname, '../src/claude_launcher/web/static');
-const rail = fs.readFileSync(path.join(root, 'index.html'), 'utf8').match(/<div id="session-search-row"[\s\S]*?<\/div>/)[0];
+/* The rail row's markup, taken whole. The row holds nested divs (the search box
+   and its clear button), so slicing to the first `</div>` cut it short and the
+   fixture served a page without the button this test drives — silently, until
+   the day the row gained its first nested div. Balanced counting, and a miss
+   throws rather than serving a page with no rail. */
+function railMarkup(html) {
+  const start = html.indexOf('<div id="session-search-row"');
+  if (start < 0) throw Error('no #session-search-row in index.html');
+  const tag = /<\/?div\b[^>]*>/g;
+  tag.lastIndex = start;
+  let depth = 0, match;
+  while ((match = tag.exec(html))) {
+    depth += match[0].startsWith('</') ? -1 : 1;
+    if (depth === 0) return html.slice(start, match.index + match[0].length);
+  }
+  throw Error('the #session-search-row div is not closed in index.html');
+}
+const rail = railMarkup(fs.readFileSync(path.join(root, 'index.html'), 'utf8'));
 const writes = [];
 const now = Date.parse('2026-09-18T10:00:00Z');
 const cfg = {base_url:'http://omlx/v1', api_key_set:true, embedding_model:'embed', rerank_model:'rank', candidates:40, rerank_top:12, batch:16, timeout:120, watch_interval:30, verify_tls:true};
@@ -82,13 +99,38 @@ const server = http.createServer(async (req,res) => {
     assert.deepEqual(await chips.evaluateAll(nodes=>nodes.map(n=>n.className)),['beads-sess idle','beads-sess busy','beads-sess paused']);
     assert.deepEqual(await chips.locator('.beads-sess-state').allTextContents(),['idle','busy','paused']);
     assert.equal(await chips.nth(2).getAttribute('title'),'s3 (paused)');
+    // The kind filter: 전체 plus one chip per kind this answer holds, each
+    // carrying its own count; picking one narrows the two lists to that kind
+    // and 전체 puts them back.
+    const kindChips = page.locator('dialog .search-anything-filter');
+    assert.deepEqual(await kindChips.evaluateAll(nodes=>nodes.map(n=>n.dataset.kind)),['','session','checks']);
+    assert.deepEqual(await kindChips.locator('.search-anything-filter-count').allTextContents(),['2','1','1']);
+    assert.deepEqual(await kindChips.evaluateAll(nodes=>nodes.map(n=>n.getAttribute('aria-pressed'))),['true','false','false']);
+    await page.locator('dialog .search-anything-filter[data-kind="checks"]').click();
+    assert.equal(await page.locator('dialog .search-anything-session').count(),0);
+    assert.equal(await page.locator('dialog .search-anything-record').count(),1);
+    assert.equal(await page.locator('dialog .search-anything-filter[data-kind="checks"]').getAttribute('aria-pressed'),'true');
+    assert.match(await page.locator('dialog [role=status]').textContent(), /· 표시 1$/);
+    await page.locator('dialog .search-anything-filter[data-kind="session"]').click();
+    assert.equal(await page.locator('dialog .search-anything-session').count(),1);
+    assert.equal(await page.locator('dialog .search-anything-record').count(),0);
+    assert.deepEqual(await heads.evaluateAll(nodes=>nodes.map(n=>n.childNodes[0].textContent)),['세션']);
+    assert.match(await page.locator('dialog [role=status]').textContent(), /· 표시 1$/);
+    // The filter narrows what arrived and does not re-ask the daemon, so the
+    // counts on the chips stay the answer's counts.
+    assert.deepEqual(await page.locator('dialog .search-anything-filter-count').allTextContents(),['2','1','1']);
     // An answer holding one class draws one list: no heading for a list that
-    // has no rows, and the notice still says what the answer held.
+    // has no rows, and the notice still says what the answer held. A filter
+    // whose kind is not in the new answer is dropped with it — the chips are
+    // the answer's, so a pressed chip with nothing under it cannot survive.
     await page.locator('dialog input').fill('only-session');await page.keyboard.press('Enter');
     await page.locator('dialog .search-anything-session').waitFor();
     assert.equal(await page.locator('dialog .search-anything-record').count(),0);
     assert.deepEqual(await heads.evaluateAll(nodes=>nodes.map(n=>n.childNodes[0].textContent)),['세션']);
     assert.match(await page.locator('dialog [role=status]').textContent(), /1개 결과 · 세션 1 · 그 외 0/);
+    assert.deepEqual(await kindChips.evaluateAll(nodes=>nodes.map(n=>n.dataset.kind)),['','session']);
+    assert.deepEqual(await kindChips.evaluateAll(nodes=>nodes.map(n=>n.getAttribute('aria-pressed'))),['true','false']);
+    assert.ok(!/· 표시/.test(await page.locator('dialog [role=status]').textContent()));
     await page.locator('dialog input').fill('needle');await page.keyboard.press('Enter');
     await page.getByRole('link',{name:'needle',exact:true}).waitFor();
     await page.getByText('원문 보기',{exact:true}).click();await page.waitForFunction(()=>document.querySelector('dialog pre').textContent.includes('원문 기록'));
