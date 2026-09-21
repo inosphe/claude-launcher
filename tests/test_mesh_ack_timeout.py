@@ -127,49 +127,111 @@ def test_the_section_ships_on_because_the_gate_it_releases_does():
     assert old["ack_timeout"] == mesh_policy.default_policy()["ack_timeout"]
 
 
-def test_sender_gets_four_durable_response_nudges_then_no_more(tmp_path):
-    """A delivered request notifies its sender at five-minute intervals.
-
-    The receipt is written before a restart, and deterministic notification
-    ids keep a repeated clock pass from appending the same notice twice.
-    """
-    async def run():
-        mm = MeshManager(_manager(), root=tmp_path / "mesh")
-        mesh = mm.create("team")
-        mesh.members = {
-            "lead": Member("lead", "s1"),
-            "worker": Member("worker", "s2"),
-        }
-        mm._persist_def(mesh)
-        mm.set_policy("team", {"backpressure": {"inbox_max": 0}})
-        sent = await mm.send("team", "lead", "worker", "please check", type="ask")
+def _watched(mm, mesh, *, minutes: float, type: str = "ask"):
+    """Send lead -> worker, mark it delivered, and backdate the watch."""
+    async def go():
+        sent = await mm.send("team", "lead", "worker", "please check", type=type)
         original = next(m for m in mesh.messages if m["id"] == sent["id"])
         mm._watch_delivered_responses(mesh, "worker", [original])
         watch = next(iter(mesh.response_watches.values()))
         watch["delivered_at"] = (
-            datetime.now(timezone.utc) - timedelta(minutes=25)
+            datetime.now(timezone.utc) - timedelta(minutes=minutes)
         ).isoformat(timespec="seconds")
+        return sent
+    return go
+
+
+def _team(tmp_path, name="mesh"):
+    mm = MeshManager(_manager(), root=tmp_path / name)
+    mesh = mm.create("team")
+    mesh.members = {
+        "lead": Member("lead", "s1"),
+        "worker": Member("worker", "s2"),
+    }
+    mm._persist_def(mesh)
+    mm.set_policy("team", {"backpressure": {"inbox_max": 0}})
+    return mm, mesh
+
+
+def test_the_sender_is_told_once_at_ten_minutes_and_not_again(tmp_path):
+    """One notice per unanswered message, and the receipt outlives a restart.
+
+    Four notices at 5/10/15/20 minutes is what this replaced. The ledger is
+    cleared by anything the recipient says, so a watch still standing at ten
+    minutes is one nobody has spoken to at all, and repeating that does not
+    make it more true: one mesh had spent 424 notices on 106 watches.
+    """
+    async def run():
+        mm, mesh = _team(tmp_path)
+        sent = await _watched(mm, mesh, minutes=9)()
         mm._persist_cursors(mesh)
 
         restarted = MeshManager(_manager(), root=tmp_path / "mesh")
         restarted.load_all()
         loaded = restarted.get("team")
-        for n in range(1, 5):
-            restarted._response_watch_tick(loaded)
-            watch = next(iter(loaded.response_watches.values()))
-            watch["delivered_at"] = (
-                datetime.now(timezone.utc) - timedelta(minutes=5 * (n + 1))
-            ).isoformat(timespec="seconds")
-        assert [m["id"] for m in loaded.messages if m["from"] == "policy"] == [
-            f"response-nudge-{sent['id']}-worker-{n}" for n in range(1, 5)
-        ]
         restarted._response_watch_tick(loaded)
-        assert len([m for m in loaded.messages if m["from"] == "policy"]) == 4
+        assert [m["id"] for m in loaded.messages if m["from"] == "policy"] == []
 
-        await restarted.send(
-            "team", "worker", "lead", "taking it", type="ack", reply_to=sent["id"]
-        )
-        assert not loaded.response_watches
+        watch = next(iter(loaded.response_watches.values()))
+        watch["delivered_at"] = (
+            datetime.now(timezone.utc) - timedelta(minutes=11)
+        ).isoformat(timespec="seconds")
+        restarted._response_watch_tick(loaded)
+        notices = [m for m in loaded.messages if m["from"] == "policy"]
+        assert [m["id"] for m in notices] == [
+            f"response-nudge-{sent['id']}-worker-1"
+        ]
+        assert "after 10 minutes" in notices[0]["body"]
+
+        for extra in (20, 40, 90):
+            watch["delivered_at"] = (
+                datetime.now(timezone.utc) - timedelta(minutes=extra)
+            ).isoformat(timespec="seconds")
+            restarted._response_watch_tick(loaded)
+        assert len([m for m in loaded.messages if m["from"] == "policy"]) == 1
+
+    asyncio.run(run())
+
+
+def test_anything_the_recipient_says_settles_the_watch(tmp_path):
+    """The closing rule is ``Mesh.owed``'s, not a threaded reply alone.
+
+    ``owed`` walks back from the newest message and stops at the member's own
+    last send, so any message closes everything delivered beforehand. While
+    this ledger waited for a ``reply_to`` and ``owed`` accepted anything, the
+    two drifted: one mesh read 0 owed and 107 watches on the same roster at
+    the same moment, and only the agent could see the 107.
+    """
+    async def run():
+        mm, mesh = _team(tmp_path)
+        await _watched(mm, mesh, minutes=1)()
+        assert len(mesh.response_watches) == 1
+        # No reply_to, a different type, and not even about that message.
+        await mm.send("team", "worker", "lead", "on something else", type="say")
+        assert not mesh.response_watches
+
+    asyncio.run(run())
+
+
+def test_a_watch_on_an_exited_recipient_stops_being_carried(tmp_path):
+    """An exited session cannot answer, so the wait is over.
+
+    Without this the watch outlives the session it names and keeps its line
+    in the sender's rebrief for as long as the mesh exists; one mesh was
+    carrying such a watch 18 days after the recipient exited. The sender is
+    not told here: ``_report_stranded`` already says who has gone.
+    """
+    async def run():
+        mm, mesh = _team(tmp_path)
+        await _watched(mm, mesh, minutes=30)()
+        assert len(mesh.response_watches) == 1
+
+        gone = [{"handle": "worker", "session": "s2", "state": "exited"}]
+        mm.stranded_recipients = lambda _mesh, _handles: gone
+        mm._response_watch_tick(mesh)
+        assert not mesh.response_watches
+        # Dropped, not announced — the notice would be the second clock.
+        assert [m for m in mesh.messages if m["from"] == "policy"] == []
 
     asyncio.run(run())
 

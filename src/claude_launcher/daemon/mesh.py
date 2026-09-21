@@ -79,6 +79,14 @@ _CTRL_RE = re.compile("[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 #: :data:`INTENT_TYPES`), so no reply can ever arrive to close the debt. Left
 #: reply-expected, :meth:`Mesh.owed` would close it on the member's next
 #: unrelated message and report a decision as handled that nobody made.
+#: How long a delivered reply-expecting message may go unanswered before its
+#: SENDER is told once. One notice, not a series: the ledger below is cleared
+#: by anything the recipient says, so a watch that survives this long is one
+#: nobody has spoken to at all, and a second telling of that does not make it
+#: more true. Four notices at 5/10/15/20 minutes is what this replaced, and
+#: one mesh had spent 424 of them on 106 watches by the time it was measured.
+RESPONSE_NUDGE_AFTER = 600.0
+
 REPLY_OPTIONAL_TYPES = frozenset({"fyi", "ack", "ping", "decide"})
 
 #: The known message INTENTS. Other types are still accepted (and count as
@@ -7134,40 +7142,100 @@ class MeshManager:
             self._persist_cursors(mesh)
 
     def _settle_response_watch(self, mesh: Mesh, reply: dict) -> None:
-        """Clear a watch when its recipient sends a threaded ack or reply."""
-        replied_to = str(reply.get("reply_to") or "")
+        """Clear the watches a message from its recipient settles.
+
+        ANY message closes everything delivered to its sender beforehand,
+        which is :meth:`Mesh.owed`'s rule exactly: that walk runs backwards
+        from the newest message and stops at the member's own last send. A
+        threaded reply is one case of it and needs no separate branch.
+
+        The two ledgers answer the same question -- who has not responded --
+        and they are read in different places: the operator reads ``owed`` on
+        the mesh page, the agent reads these watches in its rebrief. While
+        this one waited for a threaded ``reply_to`` and ``owed`` accepted
+        anything, they drifted apart without either side being wrong: one
+        mesh read 0 owed and 107 watches on the same roster at the same
+        moment, and only the agent could see the 107.
+
+        Called for every appended message, so "delivered beforehand" needs no
+        timestamp comparison: a message being appended now has not been
+        delivered yet, so every watch that exists is one from earlier.
+        """
         sender = str(reply.get("from") or "")
-        if not replied_to or not sender:
+        if not sender:
             return
-        key = self._response_watch_key(replied_to, sender)
-        if key in mesh.response_watches:
+        settled = [
+            key for key, watch in mesh.response_watches.items()
+            if str(watch.get("to") or "") == sender
+        ]
+        for key in settled:
             del mesh.response_watches[key]
+        if settled:
             self._persist_cursors(mesh)
 
     def _response_watch_tick(self, mesh: Mesh) -> None:
-        """Nudge each sender after 5, 10, 15, and 20 minutes at most once."""
+        """Tell each sender once, and drop what can no longer be answered.
+
+        A recipient with no terminal left is the closing this ledger had no
+        way to make: a threaded reply cannot arrive from an exited session,
+        so without this the watch outlives the session it names and keeps
+        its line in the sender's rebrief for as long as the mesh exists. One
+        mesh was carrying such a watch 18 days after the recipient exited.
+        The sender is not told here -- :meth:`_report_stranded` already says
+        who has gone, and saying it twice from two clocks is the drift this
+        ledger was just brought out of.
+
+        Guest members are left alone: :meth:`stranded_recipients` answers
+        for local sessions only, because another daemon's liveness is not
+        this one's to judge.
+        """
         now = datetime.now(timezone.utc)
         changed = False
+        waited_on = {
+            str(w.get("to") or "") for w in mesh.response_watches.values()
+        }
+        waited_on.discard("")
+        # ``exited`` only, not ``missing``. A session that exited is a
+        # terminal that will not answer; a record that is gone entirely is a
+        # roster question, and removing the member is what clears its watches
+        # (see :meth:`leave`). Reading the second as an answer here
+        # would let any failure to resolve a name erase the ledger quietly.
+        gone = {
+            str(e.get("handle") or "")
+            for e in self.stranded_recipients(mesh, sorted(waited_on))
+            if e.get("state") == "exited"
+        }
+        if gone:
+            for key in [
+                k for k, w in mesh.response_watches.items()
+                if str(w.get("to") or "") in gone
+            ]:
+                del mesh.response_watches[key]
+                changed = True
         for watch in list(mesh.response_watches.values()):
             try:
                 notices = int(watch.get("notices") or 0)
             except (TypeError, ValueError):
                 notices = 0
-            if notices >= 4:
+            if notices >= 1:
                 continue
             age = _age_secs(watch.get("delivered_at"), now)
-            if age is None or age < 300.0 * (notices + 1):
+            if age is None or age < RESPONSE_NUDGE_AFTER:
                 continue
             sender = str(watch.get("from") or "")
             recipient = str(watch.get("to") or "")
             msg_id = str(watch.get("id") or "")
             if not sender or sender not in mesh.members or not recipient or not msg_id:
                 continue
-            notice_id = f"response-nudge-{msg_id}-{recipient}-{notices + 1}"
+            # The old id carried the notice's ordinal; with one notice there
+            # is nothing to count, and a watch that reaches here has sent
+            # none, so no earlier id can collide with this one.
+            notice_id = f"response-nudge-{msg_id}-{recipient}-1"
             if notice_id not in mesh.seen_ids:
                 body = (
                     f"no ack/reply from {recipient} for message {msg_id} after "
-                    f"{5 * (notices + 1)} minutes. Decide whether to request it again."
+                    f"{RESPONSE_NUDGE_AFTER / 60:.0f} minutes. Decide whether "
+                    "to request it again."
                 )
                 try:
                     self._send_core(mesh, mesh_policy.POLICY_SENDER, sender, body,
@@ -7175,7 +7243,7 @@ class MeshManager:
                 except MeshError as exc:
                     log.debug("mesh %r: response nudge failed: %s", mesh.name, exc)
                     continue
-            watch["notices"] = notices + 1
+            watch["notices"] = 1
             changed = True
         if changed:
             self._persist_cursors(mesh)
