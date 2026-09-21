@@ -342,6 +342,7 @@ CHECKS = [
         "briefcard_check.js",
         "briefingtop_check.js",
         "briefrow_check.js",
+        "observerrecord_check.js",
         "railhold_check.js",
         "railscroll_check.js",
         "railquiet_check.js",
