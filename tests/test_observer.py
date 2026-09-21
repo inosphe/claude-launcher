@@ -286,6 +286,84 @@ def test_endpoints_enable_validate_and_ack(setup, monkeypatch):
     asyncio.run(scenario())
 
 
+def test_one_shot_refresh_observes_only_the_named_session(setup, monkeypatch):
+    """The button is per session: pressing s2's must not spend on s1's."""
+    service, first = setup
+    second = SimpleNamespace(sdef=SimpleNamespace(name="s2", task="task", cwd="/repo", conversation_id="c2"),
+                             exited=False, info=lambda: {"status": "busy"})
+    service.manager.list = lambda: [first, second]
+    service.data["enabled"] = True
+    monkeypatch.setattr(observer, "configuration", lambda: CFG)
+    observed = []
+    def evidence_for(session, previous):
+        observed.append(session.sdef.name)
+        return ["path", "c1"], 1, {"status": "busy"}, [{"id": "transcript:1", "content": "12 tests passed"}], False
+    monkeypatch.setattr(service, "evidence", evidence_for)
+    async def fake(cfg, messages):
+        return answer(), {"prompt_tokens": 10}
+    monkeypatch.setattr(observer, "complete", fake)
+    assert asyncio.run(service.refresh("s2")) == (200, {"called": True, "events": 1})
+    assert observed == ["s2"]
+    assert set(service.data["sessions"]) == {"s2"}
+
+
+def test_one_shot_refresh_spends_no_call_when_nothing_is_new(setup, monkeypatch):
+    """A pass the loop would not have made is not one the button makes either."""
+    service, _ = setup
+    service.data["enabled"] = True
+    monkeypatch.setattr(observer, "configuration", lambda: CFG)
+    monkeypatch.setattr(service, "evidence", lambda *args: (["path", "c1"], 5, {}, [], False))
+    async def unexpected(*args):
+        pytest.fail("a pass with nothing new must not call the API")
+    monkeypatch.setattr(observer, "complete", unexpected)
+    assert asyncio.run(service.refresh("s1")) == (200, {"called": False, "events": 0})
+
+
+def test_one_shot_refresh_is_refused_while_observation_is_off(setup, monkeypatch):
+    """Observation off is the operator's cost switch; a press does not flip it."""
+    service, _ = setup
+    monkeypatch.setattr(observer, "configuration", lambda: CFG)
+    async def unexpected(*args):
+        pytest.fail("observation being off must not spend a call")
+    monkeypatch.setattr(observer, "complete", unexpected)
+    status, payload = asyncio.run(service.refresh("s1"))
+    assert status == 409
+    assert "관찰이 꺼져 있습니다" in payload["error"]
+    assert service.data["sessions"] == {}
+
+
+def test_one_shot_refresh_reports_an_unknown_session(setup, monkeypatch):
+    service, _ = setup
+    service.data["enabled"] = True
+    monkeypatch.setattr(observer, "configuration", lambda: pytest.fail("no session, no configuration"))
+    assert asyncio.run(service.refresh("nope")) == (404, {"error": "세션을 찾을 수 없습니다."})
+
+
+def test_the_refresh_route_carries_the_pass_outcome(setup, monkeypatch):
+    service, _ = setup
+    async def scenario():
+        app=web.Application();app["manager"]=service.manager;app["mesh"]=service.mesh
+        observer.install(app)
+        # The loop would observe the same session on its own schedule and race
+        # the button this test is about, so the route is driven alone. The
+        # app builds its own Observer, so the evidence patch goes on that one.
+        app.on_startup.remove(app["observer"].start)
+        monkeypatch.setattr(observer,"configuration",lambda:CFG)
+        monkeypatch.setattr(app["observer"],"evidence",lambda *args: evidence())
+        async def fake(cfg, messages):
+            return answer(), {"prompt_tokens": 10}
+        monkeypatch.setattr(observer,"complete",fake)
+        async with TestClient(TestServer(app)) as client:
+            off=await client.post("/api/observer/s1/refresh")
+            assert off.status==409 and "관찰이 꺼져 있습니다" in (await off.json())["error"]
+            app["observer"].data["enabled"]=True
+            assert (await client.post("/api/observer/nope/refresh")).status==404
+            done=await client.post("/api/observer/s1/refresh")
+            assert done.status==200 and await done.json()=={"called":True,"events":1}
+            await client.post("/api/observer/settings",json={"enabled":False})
+    asyncio.run(scenario())
+
+
 def test_ignored_records_advance_without_api_call(setup, monkeypatch):
     service, session = setup
     service.data["sessions"]["s1"] = {"cursor": 10}

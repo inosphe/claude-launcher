@@ -4,6 +4,10 @@ globalThis.ObserverPage = (() => {
 const $ = id => document.getElementById("observer-" + id);
 let snapshot = {sessions: [], enabled: false}, pending = false, refreshTask = null, lastSnapshot = "";
 const drafts = new Map(), answerDrafts = new Map();
+// A refresh is one request per session, so its state is per session too: the
+// board is rebuilt on every poll, and a note kept in the card's DOM would go
+// with the card it was typed into.
+const refreshing = new Set(), refreshNotes = new Map();
 let runs = [], gateCache = new Map(), cflowError = false;
 let draftTarget = "";
 // The composer starts folded at every width and stays where the reader left
@@ -181,11 +185,44 @@ function composerState() {
   toggle.setAttribute("aria-expanded",String(!composerFolded));
   toggle.textContent=`입력 대상 세션 ${composerFolded?"▸":"▾"}`;
 }
-function inputButton(card,s) {
-  const button=node("button","이 세션에 입력");button.disabled=!s.running;
+/* Everything a card does to its session is in one row: the three links to what
+   already exists, the action that types at this session, and the one that
+   observes it now. Both buttons used to be bars under the card, where the
+   board's column flex made them as wide as the card and the shared 44px touch
+   target made them the tallest thing on it — the type-at action read as the
+   card's primary action, which it is not.
+   The two act rather than link, so they are chips and the three stay text. */
+function cardActions(card,s) {
+  const links=card.querySelector(".observer-links");
+  const input=node("button","이 세션에 입력","observer-action");
   // Picking a session is a request to type at it, so the composer opens first
   // when it is folded — a focus() on a hidden textarea would go nowhere.
-  button.onclick=()=>{chooseTarget(s.name);composerFolded=false;composerState();$("prompt").focus();};card.append(button);
+  input.disabled=!s.running;
+  input.onclick=()=>{chooseTarget(s.name);composerFolded=false;composerState();$("prompt").focus();};
+  const update=node("button","지금 갱신","observer-action");
+  update.disabled=refreshing.has(s.name);
+  update.onclick=()=>oneShot(s.name);
+  links.append(input,update);
+  const note=refreshNotes.get(s.name);
+  if(note)links.append(node("small",note,"observer-action-note"));
+}
+/* One observation pass for one session, now. The button is a request, not a
+   mode: the daemon runs one pass and answers what it did, and it refuses while
+   observation is off instead of spending against the switch that was turned
+   off. A pass with nothing new to read spends no API call at all, and saying
+   that is half of what this reports — the reader pressed a button that costs
+   money exactly when there is something new. */
+async function oneShot(name) {
+  if(refreshing.has(name))return;
+  refreshing.add(name);refreshNotes.set(name,"갱신 중…");render();
+  try {
+    const result=await request(`api/observer/${encodeURIComponent(name)}/refresh`,{});
+    refreshNotes.set(name,result.called?`갱신됨 · 새 항목 ${result.events}개`:"갱신됨 · 새 기록 없음");
+  } catch(err) {
+    refreshNotes.set(name,err.message);
+  } finally {
+    refreshing.delete(name);lastSnapshot="";await refresh();
+  }
 }
 function eventItem(s,e) {
   const item=node("div","",`event${e.needs_action&&!e.acknowledged?" action":""}`);
@@ -413,7 +450,7 @@ function render() {
       else if(r)addGate(card,s,r);
       else card.append(node("p",s.summary||"아직 관찰 결과가 없습니다."),node("small",activity(s).duration));
       if(!metered.has(s.name)) {metered.add(s.name);const usage=usageBlock(s);if(usage)card.append(usage);}
-      inputButton(card,s);cards.append(card);
+      cardActions(card,s);cards.append(card);
     }
   } else {
     if(!boardOrder.length)boardOrder=[...snapshot.sessions].sort((a,b)=>latestActivity(b)-latestActivity(a)||a.name.localeCompare(b.name)).map(s=>s.name);
@@ -422,7 +459,7 @@ function render() {
     for(const s of visible) {
       const card=sessionHeader(s,"observer-column"), body=node("div","","observer-column-body");
       fillSession(body,s,$("actions-only").checked);
-      card.append(body);inputButton(card,s);cards.append(card);body.scrollTop=scrolls.get(s.name)||0;
+      card.append(body);cardActions(card,s);cards.append(card);body.scrollTop=scrolls.get(s.name)||0;
     }
   }
   if(!cards.children.length)cards.append(node("p","선택한 조건에 해당하는 세션이 없습니다."));

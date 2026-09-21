@@ -22,6 +22,17 @@
 :is(#observer-view, #log-info-pane) h2 { font-size: 14px; overflow-wrap: anywhere; }
 :is(#observer-view, #log-info-pane) .state { font-size: 12px; background: #243247; border-radius: 4px; padding: 3px 8px; }
 :is(#observer-view, #log-info-pane) .observer-links { display: flex; flex-wrap: wrap; gap: 14px; margin: 10px 0; font-size: 12px; }
+/* The two actions in that row are chips so they read apart from the three
+   links, and they are sized to the row rather than to a finger: as bars under
+   the card they took the column's full width and the 44px touch target, which
+   made the type-at action the largest and most prominent thing on a 340px
+   card. 30px still clears the 24px minimum target with the row's own gaps. */
+:is(#observer-view, #log-info-pane) .observer-links .observer-action {
+  display: inline-flex; align-items: center; min-height: 30px; padding: 0 14px;
+  font-size: 12px; line-height: 1; white-space: nowrap; border-radius: 15px;
+  color: #8dcaff; background: #142b3e; border-color: #285271;
+}
+:is(#observer-view, #log-info-pane) .observer-links .observer-action-note { flex: 1 1 100%; margin: 0; }
 :is(#observer-view, #log-info-pane) .observer-card p, :is(#observer-view, #log-info-pane) .event { white-space: pre-wrap; overflow-wrap: anywhere; }
 :is(#observer-view, #log-info-pane) .event { padding: 12px 0; line-height: 1.6; border-top: 1px solid #2a2e36; }
 :is(#observer-view, #log-info-pane) .event.action { border-left: 3px solid #d29922; padding-left: 12px; }
@@ -47,7 +58,6 @@
 #observer-limit-value { min-width:3ch; color:#79c0ff; font-variant-numeric:tabular-nums; }
 #observer-cards.observer-grid { overflow-y:auto; min-height:0; align-content:start; grid-template-columns:repeat(auto-fit,minmax(min(100%,340px),1fr)); }
 :is(#observer-view, #log-info-pane) .observer-grid .observer-post { background:#161e28; border:1px solid #303b4b; border-radius:16px; }
-:is(#observer-view, #log-info-pane) .observer-grid .observer-post > button { margin-top:12px; }
 :is(#observer-view, #log-info-pane) :focus-visible { outline: 2px solid #58a6ff; outline-offset: 2px; }
 @media(max-width:600px) {
   :is(#observer-view, #log-info-pane) > header { padding: 10px 12px; }
@@ -74,7 +84,6 @@
   #observer-cards.observer-board { display:flex; flex:1; min-height:180px; overflow-x:auto; gap:16px; padding-bottom:12px; align-items:stretch; }
   :is(#observer-view, #log-info-pane) .observer-column { flex:0 0 340px; display:flex; flex-direction:column; padding:14px; }
   :is(#observer-view, #log-info-pane) .observer-column-body { flex:1; min-height:0; overflow-y:auto; overscroll-behavior:contain; padding-right:6px; }
-  :is(#observer-view, #log-info-pane) .observer-column > button { flex:none; margin-top:10px; }
   :is(#observer-view, #log-info-pane) .observer-column .event { background:#14161a; border:1px solid #30363d; border-radius:6px; margin:10px 0; padding:12px; }
 }
 /* Everything above the board is chrome: notice, filters, counts, meter and
@@ -163,7 +172,6 @@
 :is(#observer-view, #log-info-pane) .observer-timeline .observer-post .observer-links a { text-decoration:none; min-height:32px; display:inline-flex; align-items:center; }
 :is(#observer-view, #log-info-pane) .observer-timeline .observer-post .event { line-height:1.75; }
 :is(#observer-view, #log-info-pane) .observer-timeline .observer-post .event > small { margin-bottom:8px; font-size:11px; }
-:is(#observer-view, #log-info-pane) .observer-timeline .observer-post > button { border-radius:22px; padding:8px 18px; color:#8dcaff; background:#142b3e; border-color:#285271; }
 
 #observer-cards.observer-timeline { display:block; }
 @media(min-width:821px) {

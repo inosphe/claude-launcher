@@ -68,6 +68,9 @@ const server = http.createServer((req, res) => {
       }
       if(req.url==="/api/cflow/approve") gates=[];
       if(req.url==="/api/observer/settings") data.enabled=JSON.parse(body).enabled;
+      // One-shot refresh: the pass ran and added two events, which is what the
+      // card reports back. A pass with nothing new answers called:false.
+      if(req.url.endsWith("/refresh")) { sent.push({url:req.url,body:JSON.parse(body||"{}")}); return res.end('{"called":true,"events":2}'); }
       if (req.url.endsWith("/events/e1")) return res.end('{"content":"Which environment?"}');
       if(req.url.includes("/transcript?")) return res.end(JSON.stringify({records:[{seq:1,role:"user",blocks:[{type:"text",text:"Transcript retained"}]}],has_more:false,cursor:1}));
       if(req.method === "GET") {
@@ -194,6 +197,25 @@ const server = http.createServer((req, res) => {
     assert.deepEqual(sent.at(-1).body.keys, ["새 테스트를 실행하십시오", "Enter"]);
     assert.equal(await page.inputValue("#observer-prompt"), "");
     assert.deepEqual(await page.locator("#observer-target option").evaluateAll(es=>es.map(e=>e.value)),["","s1"]);
+    // The card's two per-session actions share its action row with the three
+    // links: as bars under the card they took the column's full width and the
+    // 44px touch target, which made them the largest thing on the card.
+    const actions = page.locator('.observer-post[data-session="s1"] .observer-links button');
+    assert.deepEqual(await actions.allTextContents(), ["이 세션에 입력","지금 갱신"]);
+    const action = await actions.first().evaluate(e=>{
+      const card=e.closest(".observer-card");
+      return {width:e.offsetWidth,height:e.offsetHeight,card:card.offsetWidth};
+    });
+    assert(action.width < action.card/2, `the action is not a full-width bar (${action.width} of ${action.card}px)`);
+    assert(action.height <= 32, `the action sits in the row (${action.height}px)`);
+    // One press, one pass, and the card says what the pass did — including
+    // when it spent no API call because there was nothing new to read.
+    await actions.nth(1).click();
+    const note = page.locator(".observer-post[data-session=s1] .observer-action-note");
+    await page.waitForFunction(()=>document.querySelector(".observer-post[data-session=s1] .observer-action-note")?.textContent==="갱신됨 · 새 항목 2개");
+    assert.equal(sent.filter(r=>r.url.endsWith("/refresh")).length, 1);
+    assert.equal(sent.at(-1).url, "/api/observer/s1/refresh");
+    assert.equal(await note.innerText(), "갱신됨 · 새 항목 2개");
     await page.uncheck("#observer-actions-only");
     await page.fill("#observer-prompt", "session one draft");
     await page.selectOption("#observer-target", "s2"); await page.fill("#observer-prompt", "session two draft");
