@@ -5809,11 +5809,22 @@ async function syncNewBorrowOptions(force = false) {
   // already names the selected profile login above.
   const ownName = parent && borrowCap.allowed ? baseProfileName(selector) : "";
   const omitName = parent ? "" : baseProfileName(selector);
+  // Which answer the row STARTS on. A child given a profile of its own runs
+  // on that profile's token: the empty answer carries the parent's whole
+  // auth arrangement, its own borrow included, and that was the parent's
+  // answer to a question the Profile row above has just been given a
+  // separate answer to. So an overridden Profile moves the row to the
+  // own-token head, and the inherited arrangement stays one pick away. A
+  // profile left on "(inherit the parent's profile)" keeps the empty answer,
+  // which is what inheriting means.
+  const preferred = ownName && f.profile.value ? ownName : "";
   const key = `${selector}|${ownLabel}`;
   if (!force && key === newBorrowFor) return;
   newBorrowFor = key;
   const seq = ++newBorrowSeq;
-  const current = f.borrow.value;
+  // A lender the operator picked is theirs and survives the refill; an
+  // untouched row follows the Profile row above it.
+  const current = f.borrow._borrowTouched ? f.borrow.value : preferred;
   f.borrow._validationPending = true;
   f.borrow._validationError = "";
   // Clear the previous harness's lenders before waiting for the new policy
@@ -6599,6 +6610,18 @@ function syncForkAvailability() {
    hiding, so a locked row is left out and the parent is named instead.
    Which rows are shut is the parent hint's job, above the fold and always
    visible; this line says what would be used, not what is forbidden. */
+/* The Borrow row's own-token answer names the SELECTED profile as its own
+   lender: an explicit credential that replaces what the child would have
+   inherited with the one the Profile row above already names. It is what the
+   row starts on once a child is given a profile of its own
+   (syncNewBorrowOptions), so both readers below stay quiet about it — each
+   of them is there to name a credential that is NOT the selected profile's,
+   and "borrow work" on a child running as work says the opposite. */
+function borrowIsOwnToken(f, parent) {
+  return !!parent && !!f.profile && !!f.profile.value &&
+    !!f.borrow && f.borrow.value === f.profile.value;
+}
+
 function renderRuntimeSummary() {
   const out = $("new-runtime-sum");
   if (!out) return;  // the fold is markup; a page that predates it still runs
@@ -6606,7 +6629,9 @@ function renderRuntimeSummary() {
   const parent = spawnParent();
   const speaks = (key) => !parent || !!(f[key] && !f[key].disabled);
   const bits = [];
-  if (speaks("borrow") && f.borrow.value) bits.push(`borrow ${f.borrow.value}`);
+  if (speaks("borrow") && f.borrow.value && !borrowIsOwnToken(f, parent)) {
+    bits.push(`borrow ${f.borrow.value}`);
+  }
   if (speaks("null_token") && f.null_token.checked) bits.push("--null");
   if (speaks("resume") && f.resume.value) {
     bits.push(f.resume.value === PICKER ? "resume (picker)" : `resume ${f.resume.value}`);
@@ -6629,6 +6654,12 @@ function renderRuntimeSummary() {
   if (piPanel && !piPanel.classList.contains("hidden") && speaks("args")) {
     const tools = newPiToolsOverride(f);
     if (tools) bits.push(`Pi ${piToolsText(tools)}`);
+  }
+  // The goal moved into the fold, and a shut fold must not be where a
+  // ticked box goes to hide: the face names it exactly as it names the
+  // other rows that are set.
+  if (speaks("score_goal") && f.score_goal && f.score_goal.checked) {
+    bits.push("score goal");
   }
   if (parent) {
     out.textContent = bits.length
@@ -6680,7 +6711,8 @@ function renderProfileHint() {
   if (speaks("null_token") && f.null_token && f.null_token.checked) {
     text = `--null: it boots with no token at all — ${whose}'s config and ` +
            `skills, but somebody has to run /login inside before it works.`;
-  } else if (speaks("borrow") && f.borrow && f.borrow.value) {
+  } else if (speaks("borrow") && f.borrow && f.borrow.value &&
+             !borrowIsOwnToken(f, parent)) {
     text = `--borrow ${f.borrow.value}: it runs on ${f.borrow.value}'s token ` +
            `and provider — only the credential is theirs, the config and ` +
            `skills stay ${whose}'s.`;
@@ -6723,8 +6755,11 @@ function syncRuntimeFold(f, parent) {
 
 /* One listener for the whole form rather than one per folded row: `input`
    bubbles from every control in it, and both lines are cheap to rebuild. */
-$("new-session").addEventListener("input", () => {
+$("new-session").addEventListener("input", (event) => {
   const f = $("new-session");
+  // An answered Borrow row stops following the Profile row above it
+  // (syncNewBorrowOptions picks the row's default only while this is unset).
+  if (event && event.target === f.borrow) f.borrow._borrowTouched = true;
   const harnessName = newProfileHarnessName(f) || "claude";
   const capabilities = (typeof harnessDetails !== "undefined"
     ? harnessDetails[harnessName] : null) || {};
@@ -21464,6 +21499,12 @@ function syncSessionModalChrome() {
    tab needs the same work done, and two copies of it would be the drift
    this modal exists to end. */
 function applySessionParentChange() {
+  // Gaining or losing a parent re-asks the Borrow row's question: the empty
+  // answer means the parent's arrangement on one side of that change and the
+  // selected profile's own token on the other, so the operator's pick does
+  // not carry across it (syncNewBorrowOptions).
+  const form = $("new-session");
+  if (form && form.borrow) form.borrow._borrowTouched = false;
   newWorktreeFor = null;
   refreshNewWorktree();
   syncSpawnMode();

@@ -236,6 +236,32 @@ exports.sync = syncNewBorrowOptions;`
     own && [own.textContent, own.disabled]);
   check("the duplicate lender row is folded into that head answer",
     borrow.options.filter((o) => o.value === "work").length === 1, values);
+  /* Which of the two heads the row STARTS on. The Profile row here names a
+     profile of its own, so the child runs on THAT profile's token: the empty
+     answer carries the parent's whole arrangement, its own borrow included,
+     and that is the parent's answer to a question this form has just been
+     given a separate answer to. */
+  check("an overridden profile starts the row on its own token",
+    borrow.value === "work", borrow.value);
+
+  /* Back on "(inherit the parent's profile)" — the profile select's empty
+     value — inheriting is what was asked for, auth included. */
+  authForm.profile.value = "";
+  await auth.sync(true);
+  check("an inherited profile keeps the parent's arrangement",
+    borrow.value === "", borrow.value);
+  authForm.profile.value = "work";
+
+  /* A lender the operator picked is theirs: the row stops following the
+     Profile row above it once it has been answered. */
+  await auth.sync(true);
+  borrow.value = "ds4";
+  borrow._borrowTouched = true;
+  await auth.sync(true);
+  check("an operator's own pick survives a refill",
+    borrow.value === "ds4", borrow.value);
+  borrow._borrowTouched = false;
+  await auth.sync(true);
 
   baseSelectable = false;
   await auth.sync(true);

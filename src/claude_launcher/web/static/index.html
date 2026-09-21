@@ -645,6 +645,17 @@
               <input type="checkbox" name="fork" disabled>
               <span><code>--fork-session</code> (leave the original untouched)</span>
             </label>
+            <!-- A session setting, not a task: the goal block rides the
+                 opening and then repeats in reminders for the life of the
+                 session, and the daemon default (score_goal_default) answers
+                 it for every session the same way whatever the task says. It
+                 sat next to the task box, which read as a property of the
+                 text typed there. A ticked box still shows on the fold's
+                 face (renderRuntimeSummary), so shutting the fold does not
+                 hide it. -->
+            <label class="check"><input type="checkbox" name="score_goal">
+              Track operator reward/penalty feedback</label>
+            <p class="wf-note">Both counts start at 0. Each input you send can carry one reward or penalty point. The goal rides the session opening once, then repeats in reminders while enabled.</p>
             <!-- Harness runtime controls have their own layout and wording.
                  Codex is the first specialised panel: its approval and file
                  isolation choices form one two-axis mode, while Claude and
@@ -722,9 +733,6 @@
         <fieldset id="new-task">
           <legend><span class="sess-spawn-step">7</span> Opening task</legend>
           <p class="sess-spawn-group-blurb">what it is told once it boots</p>
-          <label class="check"><input type="checkbox" name="score_goal">
-            Track operator reward/penalty feedback</label>
-          <p class="wf-note">Both counts start at 0. Each input you send can carry one reward or penalty point. The goal rides the session opening once, then repeats in reminders while enabled.</p>
           <textarea name="task" rows="3"
             placeholder="typed in once it has booted — what it is for"></textarea>
         </fieldset>
