@@ -132,8 +132,10 @@ check("the form's controls read in the new order", named(form.text), [
   "profile", "harness", "model", "effort",
   // what it joins, and what it drives
   "mesh", "handle", "role", "workflow", "context",
-  // how it runs — folded
-  "borrow", "null_token", "resume", "fork", "skip_permissions",
+  // how it runs — folded. The score goal is a session setting the daemon
+  // default already answers, not a property of the task text, so it sits
+  // here rather than beside the task box it used to be fenced with.
+  "borrow", "null_token", "resume", "fork", "score_goal", "skip_permissions",
   "codex_yolo", "codex_sandbox", "args",
   // worktree selection is a create-only checkout choice, after the runtime
   // fold so it is not mistaken for an inherited spawn row. The narrowing box
@@ -142,7 +144,7 @@ check("the form's controls read in the new order", named(form.text), [
   "worktree_mode", "worktree_mode", "worktree_name", "worktree_mode",
   "worktree_filter", "worktree_existing", "worktree_rebase",
   // what it is told first
-  "score_goal", "task",
+  "task",
   // where that job is written down — four radios sharing one name, then
   // the rows each of which only one of them opens
   "beads", "beads", "beads", "beads", "issue_text", "issue_filter", "issue",
@@ -168,6 +170,15 @@ check("the opening task is the last thing asked before the board",
       ["task"]);
 check("...and it is not inside the fold",
       named(fold.text).includes("task"), false);
+/* The opening task fence asks one thing. The score goal was fenced with it
+   and read as a property of the text typed there, while it is a session
+   setting with a daemon default of its own — and one that outlives the
+   opening, since the goal repeats in reminders. */
+check("the task fence asks the task and nothing else",
+      named(block('<fieldset id="new-task">', "</fieldset>", form.start).text),
+      ["task"]);
+check("the score goal moved into the fold with the other session settings",
+      named(fold.text).includes("score_goal"), true);
 check("the fold sits between the two",
       [form.text.indexOf("new-onboard") < form.text.indexOf("new-runtime"),
        form.text.indexOf("new-runtime") < form.text.indexOf("new-task")],
@@ -290,10 +301,21 @@ const INHERITS = new Function(
   `${sliceConst("SPAWN_INHERITS")}; return SPAWN_INHERITS;`)();
 const PROMOTED = new Function(
   `${sliceConst("RUNTIME_PROMOTED")}; return RUNTIME_PROMOTED;`)();
+/* The score goal is the one row inside the fold that is not part of the
+   inheritance. It is a session setting the daemon answers for every session
+   the same way (score_goal_default), it is sent on a create and on a spawn
+   alike, and the spawn policy never gates it — so the fold's face may always
+   speak for it. Named here rather than waved through by a loose comparison,
+   so a second such row cannot arrive without this line changing. */
+const FOLD_SETTINGS = ["score_goal"];
+check("the fold's only non-inherited row is the score goal",
+      named(fold.text).filter((k) => !INHERITS.includes(k)), FOLD_SETTINGS);
 /* The partition, both ways round: nothing inherited went missing in the
    move, and nothing was copied into both halves. */
 check("the fold plus the promoted rows are exactly what a child inherits",
-      [...named(fold.text), ...PROMOTED].sort(), INHERITS.slice().sort());
+      [...named(fold.text).filter((k) => !FOLD_SETTINGS.includes(k)),
+       ...PROMOTED].sort(),
+      INHERITS.slice().sort());
 check("nothing promoted is still in the fold",
       PROMOTED.filter((k) => named(fold.text).includes(k)), []);
 check("...and everything promoted is genuinely inherited",
@@ -618,12 +640,14 @@ function ctl(v) { return { value: v, checked: false, disabled: false }; }
 const f = {
   profile: ctl(""), model: ctl(""), borrow: ctl(""),
   null_token: ctl(""), args: ctl(""), resume: ctl(""), parent: ctl(""),
+  score_goal: ctl(""),
   cwd: { value: "", disabled: false, selectedIndex: 0,
          options: [{ text: "(daemon cwd)" }] },
 };
 let parentSession = null;
 const ctx = {};
 new Function("exports", "$", "spawnParent", "PICKER",
+  sliceFrom("function borrowIsOwnToken(") +
   sliceFrom("function renderRuntimeSummary()") +
   "\nexports.render = renderRuntimeSummary;\n")(
   ctx,
@@ -683,6 +707,17 @@ ctx.render();
 check("only the open FOLDED rows speak for a child",
       sumBox.textContent, "— lead's setup · borrow work");
 
+/* The own-token answer names the SELECTED profile as its own lender, and
+   that is what the row starts on for a child given a profile of its own
+   (syncNewBorrowOptions). It agrees with the Profile row above, so calling
+   it a borrow on the face would say the credential belongs to somebody
+   else. */
+f.borrow.value = f.profile.value;
+ctx.render();
+check("a child on its own profile's token is not announced as a borrow",
+      sumBox.textContent, "— inherited from lead");
+f.borrow.value = "work";
+
 /* Back to a session of its own: every row speaks again, disables and all —
    the create form's own greying (a non-claude harness) is not the policy's. */
 parentSession = null;
@@ -691,11 +726,20 @@ check("with no parent every folded row speaks again",
       sumBox.textContent,
       "— borrow work · --null · resume lead · +args");
 
+/* The score goal lives in the fold now. A shut fold is where a ticked box
+   would otherwise go unseen, so the face names it like any other set row. */
+f.score_goal.checked = true;
+ctx.render();
+check("a tracked score goal is named on the fold's face",
+      sumBox.textContent.endsWith("+args · score goal"), true);
+f.score_goal.checked = false;
+
 /* Served against a page that predates the fold (a daemon serving older
    assets), the summary has nowhere to go — and must not take the form
    down with it. */
 const bare = {};
 new Function("exports", "$", "spawnParent", "PICKER",
+  sliceFrom("function borrowIsOwnToken(") +
   sliceFrom("function renderRuntimeSummary()") +
   "\nexports.render = renderRuntimeSummary;\n")(
   bare, () => null, () => null, "@picker");
@@ -819,6 +863,7 @@ new Function("exports", "$", "spawnParent", "profileDetails",
   sliceFrom("function newProfileSelector(") +
   sliceFrom("function newProfileDetail(") +
   sliceFrom("function profileHarnessLabel(") +
+  sliceFrom("function borrowIsOwnToken(") +
   sliceFrom("function renderProfileHint()") +
   "\nexports.hint = renderProfileHint;\n")(
   hintCtx,
@@ -875,6 +920,14 @@ hintCtx.hint();
 check("...and speaks again once the policy hands it back",
       /work's token/.test(shown()), true);
 
+/* The own-token answer names the profile the row above already names, and
+   it is what the row starts on for a child given a profile of its own. No
+   credential belongs to anybody else, so there is no gap left to close. */
+h.borrow.value = h.profile.value;
+hintCtx.hint();
+check("a child on its own profile's token has no borrow to report",
+      shown(), "");
+
 /* A profile error the daemon reported (lineage.LineageError, api.py) beats
    the harness line: it is the reason the harness is unknown. */
 h.borrow.value = "";
@@ -895,6 +948,7 @@ new Function("exports", "$", "spawnParent", "profileDetails",
   sliceFrom("function newProfileSelector(") +
   sliceFrom("function newProfileDetail(") +
   sliceFrom("function profileHarnessLabel(") +
+  sliceFrom("function borrowIsOwnToken(") +
   sliceFrom("function renderProfileHint()") +
   "\nexports.hint = renderProfileHint;\n")(
   bareHint, () => null, () => null, {});

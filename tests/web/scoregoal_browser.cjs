@@ -51,6 +51,11 @@ const root = path.resolve(__dirname, '../../src/claude_launcher/web/static');
       showView('new');
       return openNewSession();
     });
+    // The row sits in the "How it runs" fold, which arrives shut: a ticked
+    // box still shows on the fold's face (renderRuntimeSummary), but ticking
+    // one means opening the fold first, here as in the browser.
+    const openFold = () => page.evaluate(() => { $('new-runtime').open = true; });
+    await openFold();
     const option = page.locator('[name=score_goal]');
     assert.equal(await option.isChecked(), false);
     await option.check();
@@ -62,6 +67,7 @@ const root = path.resolve(__dirname, '../../src/claude_launcher/web/static');
     await page.waitForFunction(() => defaultScoreGoal);
     await page.evaluate(() => openSpawnModal('rated'));
     await page.waitForFunction(() => $('new-session').score_goal.checked);
+    await openFold();
     await option.uncheck();
     await page.evaluate(() => $('new-session').dispatchEvent(new Event('submit', { bubbles: true, cancelable: true })));
     await page.waitForFunction(() => requests.some(r => r.url.includes('/children')));
