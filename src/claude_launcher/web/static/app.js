@@ -6080,6 +6080,15 @@ let newWorktreeGit = { repo: false, worktrees: [] };
    narrowing is on screen. */
 let newWorktreeFilter = "";
 
+/* A remembered worktree MODE, held until the row can say whether it is
+   answerable at all. That answer depends on two fetches that land after the
+   form is drawn — the git read for the picked directory, and a child's
+   spawn policy report -- so the recall parks its value here and the first
+   sync that can carry it applies it (see syncNewWorktree). Writing the
+   radios straight away instead would either be undone by that sync or leave
+   an answer standing on a row the policy shut. */
+let pendingWorktreeMode = "";
+
 function newWorktreeMode() {
   const f = $("new-session");
   const picked = f && f.worktree_mode;
@@ -6136,16 +6145,41 @@ function renderWorktreeOptions() {
   sel.value = shown.includes(kept) ? kept : "";
 }
 
+/* Whether the Worktree row is the operator's to answer at all: the picked
+   directory has to be a git repository, and a child's spawn policy has to
+   have named `worktree` among the fields it may choose. Read both by the
+   sync that greys the row and by the submit that builds the payload,
+   because those two have to agree — a value left standing on a greyed row
+   is not an answer anybody gave, and sending it asks the daemon for a
+   checkout the form itself said could not be chosen. A parent whose report
+   has not landed reads as not usable, which is why a remembered answer
+   waits rather than being written on arrival. */
+function worktreeRowUsable() {
+  const parent = spawnParent();
+  const report = parent && newSpawnReportFor === parent.name
+    ? newSpawnReport : null;
+  return !!newWorktreeGit.repo &&
+    (!parent || !!(report && (report.may_choose || []).includes("worktree")));
+}
+
 function syncNewWorktree() {
   const f = $("new-session");
   const box = $("new-worktree");
   if (!f || !box) return;
-  const mode = newWorktreeMode();
   const parent = spawnParent();
-  const report = parent && newSpawnReportFor === parent.name
-    ? newSpawnReport : null;
-  const usable = !!newWorktreeGit.repo &&
-    (!parent || !!(report && (report.may_choose || []).includes("worktree")));
+  const usable = worktreeRowUsable();
+  if (pendingWorktreeMode && usable) {
+    // The remembered answer, applied on the first sync that can carry it.
+    // "existing" carries no checkout of its own: a directory offering none
+    // would leave the row reading "existing" while the launch sends no
+    // worktree, so that answer falls back to the row's default.
+    if (pendingWorktreeMode !== "existing" ||
+        (newWorktreeGit.worktrees || []).length) {
+      f.worktree_mode.value = pendingWorktreeMode;
+    }
+    pendingWorktreeMode = "";
+  }
+  const mode = newWorktreeMode();
   box.disabled = !usable;
   for (const radio of f.worktree_mode || []) radio.disabled = !usable;
   f.worktree_name.disabled = !usable || mode !== "new";
@@ -7373,7 +7407,12 @@ $("new-session").addEventListener("submit", async (e) => {
   if (parent) spawnChildFields(f, body);
   if (parent) sessionConnectFields(f, body);
   if (parent && f.fork_parent.checked) body.fork = true;
-  const worktreeMode = newWorktreeMode();
+  // What the row carried, not merely what it displays. A directory that is
+  // no repository and a policy that shut the row both leave the radios on
+  // their last value, and sending that value is the same mistake
+  // spawnChildFields guards against two lines above.
+  const worktreeUsable = worktreeRowUsable();
+  const worktreeMode = worktreeUsable ? newWorktreeMode() : "";
   if (worktreeMode === "new") {
     const typed = f.worktree_name.value.trim();
     // A blank name means "cut one and name it yourself", and the two
@@ -7473,6 +7512,10 @@ $("new-session").addEventListener("submit", async (e) => {
       parent: parent ? parent.name : "",
       profile: body.profile, borrow: body.borrow,
       null_token: !!body.null_token, role: body.role,
+      // A launch whose row was closed carried no worktree answer, so the
+      // last one the operator did give is kept rather than overwritten with
+      // a "no worktree" the policy picked for them.
+      worktree_mode: worktreeUsable ? worktreeMode : spawnRecall().worktree_mode,
     });
     const info = await resp.json();
     // The spawn endpoint wraps the child (it also reports the parent and what
@@ -21308,9 +21351,18 @@ function refillSpawnHarnesses(ui, want) {
 }
 
 /* What the modal remembers between spawns — the CLI wizard's recall_fields,
-   minus attach (the web has no terminal to take over). BASE-scoped like the
-   auth token: daemons behind one relay share this localStorage. */
-const SPAWN_RECALL_FIELDS = ["parent", "profile", "borrow", "null_token", "role"];
+   minus attach (the web has no terminal to take over), plus the worktree
+   MODE. That last one is the web's own, and it does not break the wizard's
+   rule: wizard.py excludes `worktree` because its single picker answers
+   with a checkout NAME, which is per-launch identity. This form asks the
+   mode and the name on separate rows, and only the mode is a repeatable
+   answer — "cut the next one its own worktree" is a standing preference,
+   while the name, the checkout to reuse and the rebase base belong to one
+   launch and stay out for the wizard's reason. BASE-scoped like the auth
+   token: daemons behind one relay share this localStorage. */
+const SPAWN_RECALL_FIELDS = [
+  "parent", "profile", "borrow", "null_token", "role", "worktree_mode",
+];
 const SPAWN_RECALL_KEY = `claunch_spawn_recall:${BASE}`;
 
 function spawnRecall() {
@@ -21717,6 +21769,14 @@ function applySessionModalRecall(f) {
       f.profile.value = want;
     }
   }
+  // The worktree row's MODE, and only over the row's own default: a radio
+  // already off "no worktree" is an answer somebody gave on this page, the
+  // same reason the two rows above are left alone once filled. Parked, not
+  // written — syncNewWorktree is what knows whether the row can take it.
+  pendingWorktreeMode =
+    (re.worktree_mode && f.worktree_mode && !f.worktree_mode.value)
+      ? re.worktree_mode : "";
+  if (pendingWorktreeMode) syncNewWorktree();
 }
 
 /* ---- the peers a child is wired to on arrival -------------------------
@@ -21998,6 +22058,9 @@ function sessionModalClose(opts = {}) {
   if (!sessionModal) return;
   if (sessionModal.busy || createBusy) return;
   const st = sessionModal;
+  // A remembered answer the row never became able to carry is dropped with
+  // the box: the next opening asks the recall again.
+  pendingWorktreeMode = "";
   $("new-session-actions").removeChild(sessionModal.cancelBtn);
   sessionModal = null;
   const overlay = $("modal-overlay");

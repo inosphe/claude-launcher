@@ -123,6 +123,19 @@ check("a blank worktree name is the daemon's to fill, spelt per endpoint",
 check("the picks the next opening starts from are written down",
       /saveSpawnRecall\(\{\s*parent: parent \? parent\.name : "",/.test(submit),
       true);
+// The Worktree row is read through the same predicate that greys it, so a
+// value left standing on a row the policy or the directory closed cannot
+// reach the daemon as an answer.
+check("the payload reads the worktree row only while it may be answered",
+      /const worktreeUsable = worktreeRowUsable\(\);\s*const worktreeMode = worktreeUsable \? newWorktreeMode\(\) : "";/
+        .test(submit), true);
+check("the mode joins the recall, and a closed row keeps the last answer",
+      /worktree_mode: worktreeUsable \? worktreeMode : spawnRecall\(\)\.worktree_mode,/
+        .test(submit), true);
+check("...and the name, the reuse pick and the rebase base stay out of it",
+      ((src.match(/const SPAWN_RECALL_FIELDS = \[([\s\S]*?)\];/) || [, ""])[1]
+        .match(/worktree\w*/g)) || [],
+      ["worktree_mode"]);
 
 /* ---- the stub DOM ----------------------------------------------------- */
 function classList(node) {
@@ -241,6 +254,7 @@ new Function(
   "state",
   `let meshCache = state.meshCache, workflowsCache = state.workflowsCache;
 let newWfPicked = false, pendingNewMesh = "";
+let pendingWorktreeMode = "";
 let newWorktreeFor = "held", issuesFor = "held", issuesRead = true,
     issueFilter = "held";
 let sessName = "lead";
@@ -306,7 +320,7 @@ Object.assign(exports, {
   view: sessionFormView,
   modal: () => sessionModal, picked: (v) => { sessionConnectPicked = v; },
   handles: () => sessionConnectHandles, wfPicked: () => newWfPicked,
-  pending: () => pendingNewMesh,
+  pending: () => pendingNewMesh, parked: () => pendingWorktreeMode,
 });`
 )(
   ctx, $, { createElement: node, addEventListener() {}, removeEventListener() {} },
@@ -442,6 +456,21 @@ async function main() {
   ctx.recall(form);
   check("a greyed row and a filled one are both left alone",
         [form.role.value, form.profile.value], ["", "work"]);
+  // The worktree row keeps the same rule, and is parked rather than
+  // written: only the sync knows whether the row may carry an answer.
+  form.worktree_mode = { value: "" };
+  state.recall = { worktree_mode: "new" };
+  calls.length = 0;
+  ctx.recall(form);
+  check("a remembered worktree mode is parked and handed to the sync",
+        [form.worktree_mode.value, ctx.parked(),
+         calls.includes("worktree-sync")], ["", "new", true]);
+  form.worktree_mode = { value: "existing" };
+  calls.length = 0;
+  ctx.recall(form);
+  check("a row already off its default keeps the answer it holds",
+        [form.worktree_mode.value, ctx.parked(),
+         calls.includes("worktree-sync")], ["existing", "", false]);
 
   /* ---- the rows only a child has: mesh, connect, the run refusal -------- */
   form.mesh.value = "";
