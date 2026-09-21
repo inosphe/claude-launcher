@@ -206,6 +206,16 @@ def _cmd_show(args: argparse.Namespace) -> int:
                 f"timer: every {s.timer.every:g}s x{s.timer.max} "
                 f"-> {s.timer.then}, then {s.timer.after}"
             )
+        if s.triggers:
+            # Daemon side effects. On a graph review they belong beside the
+            # other declared properties: nothing else shows them, and a
+            # reader who cannot see them reads a step that quietly costs the
+            # driver context (`checks`) or an LLM call (`briefing`) as one
+            # that does neither.
+            flags.append(
+                "triggers: "
+                + ", ".join(f"{t.do} at {t.at}" for t in s.triggers)
+            )
         suffix = f"  ({'; '.join(flags)})" if flags else ""
         if s.select:
             chooser = s.select.chooser

@@ -15,6 +15,21 @@ class StatusCheckError(Exception):
     """The status-check file could not be read or written."""
 
 
+#: What an agent is asked when somebody wants its Y/N answers re-taken. Two
+#: callers type it: the operator's button (``POST
+#: /api/sessions/{name}/status-checks/refresh``) and a workflow's ``triggers:
+#: [{do: checks}]`` (:class:`..daemon.cflow_clock.TriggerClock`). One spelling
+#: for both, because the second exists to replace prose in a workflow file
+#: that said the same thing in its own words.
+REFRESH_PROMPT = (
+    "[claunch status-check refresh]\n"
+    "Read the current user-configured Y/N checks with MCP tool `status_checks`. "
+    "Verify their current values from your work, then call `report_status_checks` "
+    "with every enabled ID and a yes/no answer. The list is editable; do not use "
+    "IDs remembered from an earlier request."
+)
+
+
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 

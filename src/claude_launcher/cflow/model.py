@@ -39,6 +39,9 @@ and loops need no duplicated content::
         instructions: ...
         gate: "message"     # DEPRECATED spelling of `ask: {prompt: message}`
         verify: "pytest -q" # machine gate to LEAVE (exit 0)
+        triggers: [briefing]  # daemon side effects fired on entering (or,
+                            # with `at: leave`, on moving off) this step.
+                            # See "Daemon side effects" below
         next: test
       test:
         instructions: ...
@@ -253,6 +256,57 @@ for the same reasons: below the floor the clock hammers the condition instead
 of sampling it, and above the ceiling a checklist item becomes a way to run a
 test suite on a loop. An item is a cheap question about state somebody else
 changed.
+
+Daemon side effects — `triggers:`
+---------------------------------
+A step may declare ``triggers:`` — daemon capabilities that exist OUTSIDE
+cflow and that a run has no tool of its own to call, fired at a named moment
+in the step's life::
+
+    commit:
+      instructions: ...
+      triggers:
+        - do: checks            # ask this session to re-report its Y/N
+          at: leave             #   status checks, once it advances past here
+        - do: briefing          # recompose this session's LLM briefing
+          at: enter             #   (the dashboard's "what is it doing")
+      next: queue-next
+
+    work:
+      instructions: ...
+      triggers: [briefing]      # shorthand: the action name alone is
+      next: review              #   `{do: <name>, at: enter}`
+
+Two actions are defined, both daemon-side and both already reachable from the
+web dashboard by hand:
+
+* ``checks`` — the daemon types a status-check refresh request into the
+  DRIVING session (the same text as ``POST
+  /api/sessions/{name}/status-checks/refresh``), and the agent answers it
+  with the ``status_checks`` and ``report_status_checks`` MCP tools. It costs
+  the driver a few lines of context, so it belongs at the few positions where
+  the answers have just changed.
+* ``briefing`` — the daemon recomposes that session's LLM briefing
+  (:func:`..daemon.briefing.compose` with ``refresh=True``). Nothing is typed
+  into the terminal and the driver spends nothing; what it costs is one call
+  to the configured endpoint.
+
+``at`` takes ``enter`` (the run arrived at this step — the default) or
+``leave`` (the run moved off it, whichever edge it took). It is spelled
+``at`` and not ``on`` because this file is read by PyYAML, whose YAML 1.1
+resolver turns a bare ``on:`` key into the boolean ``True``. Both moments
+are recorded
+by the engine at the moment it performs the move, so a trigger is queued
+once per visit and a daemon that was down does not replay the ones it
+missed on the next boot.
+
+**A trigger is a side effect, never a gate.** It cannot hold a step, cannot
+move a run and cannot fail one: an action with nothing to do (no enabled
+status check, no ``llm:`` block, a driving session that has exited) is
+journalled with its reason and the run carries on. This is the opposite of
+``restart:``, which is followed by a checklist precisely so its outcome can
+hold the run — and it is why a trigger may sit on any step, including a
+``select``.
 
 Waiting for a signal
 --------------------
@@ -494,6 +548,40 @@ class Restart:
         if system in ("linux", "wsl"):
             return self.linux
         return None
+
+
+#: The daemon capabilities a ``triggers:`` entry may name. Each one exists
+#: outside cflow, is already reachable by hand from the web dashboard, and
+#: has no tool a run could call for itself.
+TRIGGER_CHECKS = "checks"
+TRIGGER_BRIEFING = "briefing"
+TRIGGER_ACTIONS = (TRIGGER_CHECKS, TRIGGER_BRIEFING)
+
+#: When in a step's life a trigger fires. Both moments are recorded by the
+#: engine as it performs the move, so neither depends on a clock catching a
+#: position before it changes again.
+TRIGGER_AT_ENTER = "enter"
+TRIGGER_AT_LEAVE = "leave"
+TRIGGER_MOMENTS = (TRIGGER_AT_ENTER, TRIGGER_AT_LEAVE)
+
+
+@dataclass(frozen=True)
+class Trigger:
+    """One daemon side effect a step asks for, and when.
+
+    Deliberately two fields. A trigger names a capability the daemon already
+    has and a moment the engine already passes through; everything about how
+    the capability behaves (which checks are enabled, which endpoint composes
+    a briefing) is configured where that capability lives, not here. An
+    author who has to restate it in a workflow file is an author who can get
+    it wrong in one workflow and right in the next.
+
+    It is a side effect and never a gate: see "Daemon side effects" in this
+    module's docstring for why a failed one does not stop the run.
+    """
+
+    do: str
+    at: str = TRIGGER_AT_ENTER
 
 
 @dataclass(frozen=True)
@@ -837,6 +925,11 @@ class Step:
     #: A project-local external service restart, executed by the daemon from
     #: the run's CWD after its entry gate has opened.
     restart: Optional[Restart] = None
+    #: Daemon side effects this step asks for, each with the moment it fires
+    #: (``enter`` or ``leave``). Queued by the engine as it performs the
+    #: move and performed by the daemon afterwards; a failed one is
+    #: journalled and never holds the run. See :class:`Trigger`.
+    triggers: Tuple["Trigger", ...] = ()
     select: Optional[Select] = None
     #: Ending the run HERE hands the slot to another workflow instead of
     #: going quiet: the engine files a start request for it. Only meaningful
@@ -1728,6 +1821,7 @@ def _parse_step(step_id: str, raw) -> Step:
     timer = _parse_timer(raw.get("timer"), step_id)
     checklist = _parse_checklist(raw.get("checklist"), step_id)
     restart = _parse_restart(raw.get("restart"), step_id)
+    triggers = _parse_triggers(raw.get("triggers"), step_id)
     select = _parse_select(raw.get("select"), step_id)
     escalate = _parse_escalate(raw.get("escalate"), step_id)
     subflows = _parse_subflows(raw.get("subflows"), step_id)
@@ -1833,6 +1927,7 @@ def _parse_step(step_id: str, raw) -> Step:
         timer=timer,
         checklist=checklist,
         restart=restart,
+        triggers=triggers,
         select=select,
         escalate=escalate,
         subflows=subflows,
@@ -1851,6 +1946,73 @@ def _parse_step(step_id: str, raw) -> Step:
             f"ends the run, or give this one a terminating edge"
         )
     return step
+
+
+def _parse_triggers(raw, step_id: str) -> Tuple[Trigger, ...]:
+    """``triggers: [checks]`` or ``triggers: [{do: checks, at: leave}, ...]``.
+
+    The shorthand — a bare action name — means ``{do: <name>, at: enter}``,
+    which is the common case: most of these fire because the run has just
+    arrived somewhere worth recomposing a briefing from.
+
+    An unknown action name is refused rather than ignored. A trigger is a
+    side effect nobody watches for, so a misspelled one would be
+    indistinguishable from a daemon that never got round to it — silence
+    means the same thing in both cases, and only one of them is a bug the
+    author can fix.
+    """
+    if raw is None or raw is False:
+        return ()
+    if not isinstance(raw, list):
+        raise WorkflowError(
+            f"step {step_id!r}: 'triggers' must be a list of action names or "
+            f"{{do, at}} mappings"
+        )
+    out: List[Trigger] = []
+    seen: Set[Tuple[str, str]] = set()
+    for entry in raw:
+        if isinstance(entry, str):
+            entry = {"do": entry}
+        if not isinstance(entry, dict):
+            raise WorkflowError(
+                f"step {step_id!r}: each 'triggers' entry must be an action "
+                f"name or a {{do, at}} mapping"
+            )
+        if True in entry or False in entry:
+            # PyYAML's 1.1 resolver turns a bare `on:`/`off:` key into a
+            # boolean, so the natural spelling of this field arrives here as
+            # `True`. Say that, rather than reporting an unknown key named
+            # "True" and leaving the author to work out where it came from.
+            raise WorkflowError(
+                f"step {step_id!r}: a 'triggers' entry has a boolean key — "
+                f"YAML reads a bare 'on:' as true. Spell the moment 'at:'"
+            )
+        unknown = sorted(str(k) for k in set(entry) - {"do", "at"})
+        if unknown:
+            raise WorkflowError(
+                f"step {step_id!r}: a 'triggers' entry has unknown key(s): "
+                f"{', '.join(unknown)}"
+            )
+        do = str(entry.get("do") or "").strip()
+        if do not in TRIGGER_ACTIONS:
+            raise WorkflowError(
+                f"step {step_id!r}: unknown trigger action {do!r} — "
+                f"one of {', '.join(TRIGGER_ACTIONS)}"
+            )
+        at = str(entry.get("at") or TRIGGER_AT_ENTER).strip()
+        if at not in TRIGGER_MOMENTS:
+            raise WorkflowError(
+                f"step {step_id!r}: trigger {do!r} has unknown moment {at!r} "
+                f"— one of {', '.join(TRIGGER_MOMENTS)}"
+            )
+        if (do, at) in seen:
+            raise WorkflowError(
+                f"step {step_id!r}: trigger {do!r} is declared twice for "
+                f"{at!r} — one firing is one firing"
+            )
+        seen.add((do, at))
+        out.append(Trigger(do=do, at=at))
+    return tuple(out)
 
 
 def _parse_restart(raw, step_id: str) -> Optional[Restart]:

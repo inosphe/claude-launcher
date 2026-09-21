@@ -1,8 +1,8 @@
 """The clocks cflow cannot carry itself.
 
 Everything else in cflow happens because somebody called a tool: the agent
-advances, a human approves, a responder answers. Five things have nobody to
-call them, so the daemon carries all five, scanning the same machine-local
+advances, a human approves, a responder answers. Six things have nobody to
+call them, so the daemon carries all six, scanning the same machine-local
 run registry the dashboard lists runs from:
 
 * :class:`AskClock` — a delegated decision's ``timeout``. The one agent that
@@ -25,6 +25,11 @@ run registry the dashboard lists runs from:
   chose, and the workflow said "not more often than every N seconds", so
   the choice is parked; the one agent that would notice the moment is the
   one that ended its turn to wait for it.
+* :class:`TriggerClock` — the daemon side effects a step declared with
+  ``triggers:``. Two capabilities of this daemon — re-taking a session's Y/N
+  status checks, recomposing its LLM briefing — have no tool a run could
+  call, so a workflow that wanted one used to ask its agent in prose. The
+  step names the capability and the moment instead, and this performs it.
 
 Two consequences worth stating plainly, because both are deliberate:
 
@@ -55,6 +60,7 @@ from typing import Dict, List, Optional, Set, Tuple
 
 from .. import store
 from ..cflow import engine as cflow_engine, model as cflow_model, state as cflow_state
+from . import briefing, status_checks
 from .session import STATUS_BUSY, STATUS_IDLE
 
 log = logging.getLogger("claunch.daemon.cflow")
@@ -1878,6 +1884,151 @@ def restart_finished_block(result: dict) -> str:
                       "protocol: the restart result is journaled; the checklist decides whether deployment can advance.", "---"])
 
 
+class TriggerClock:
+    """Perform the daemon side effects a workflow declared with ``triggers:``.
+
+    Two capabilities live in this daemon that a run has no tool to call for
+    itself, and both were reachable only by a person clicking in the web UI:
+    re-taking a session's Y/N status checks, and recomposing its LLM
+    briefing. A workflow that wanted either asked for it in prose — the
+    driving agent read "call `status_checks`, then `report_status_checks`"
+    in a step's instructions and did it, or did not. This clock is the
+    declarative half: the step names the capability and the moment
+    (``triggers: [{do: checks, at: leave}]``), the engine records the moment
+    as it performs the move, and this drains what it recorded.
+
+    **Nothing here can hold a run.** Unlike :class:`RestartClock`, whose
+    outcome a checklist is required to gate on, a trigger is a side effect
+    with no reader: the run has already moved by the time the entry is
+    claimed. So every "could not" is an ordinary outcome — no enabled status
+    check, no ``llm:`` block, a driving session that exited, an endpoint that
+    refused — journalled as ``trigger_skipped`` with its reason, and the run
+    carries on. That is the whole failure policy, and it is why a trigger is
+    allowed on any step including a ``select``.
+
+    Claims are single-use (:func:`cflow.engine.claim_triggers` removes what
+    it hands back), so a daemon that dies mid-action does not repeat it on
+    the next boot: a second refresh request typed into a terminal, or a
+    second paid LLM call, for a position the run left is worse than the
+    silence. The journal keeps the evidence either way — a
+    ``trigger_queued`` with no ``trigger_done`` or ``trigger_skipped`` beside
+    it names exactly the one that did not happen.
+    """
+
+    def __init__(self, manager, *, poll: float = 5.0) -> None:
+        self.manager = manager
+        self.poll = poll
+        self._task: Optional[asyncio.Task] = None
+
+    def start(self) -> None:
+        if self._task is None:
+            self._task = asyncio.get_running_loop().create_task(self._run())
+
+    async def shutdown(self) -> None:
+        task, self._task = self._task, None
+        if task is not None:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await task
+
+    async def _run(self) -> None:
+        while True:
+            try:
+                await asyncio.sleep(self.poll)
+                # Sequential on purpose. A `briefing` action waits on the
+                # user's own endpoint (up to `briefing.LLM_TIMEOUT`), so a
+                # slow one delays the rest of this pass — which is the right
+                # trade at this volume (a handful per round) and keeps one
+                # misconfigured endpoint from opening N concurrent calls.
+                for cwd, scope, action in await asyncio.to_thread(self.scan):
+                    performed, detail = await self._perform(cwd, scope, action)
+                    await asyncio.to_thread(
+                        cflow_engine.complete_trigger,
+                        cwd=cwd, scope=scope, do=action["do"],
+                        step_id=action.get("step"), visit=action.get("visit"),
+                        performed=performed, detail=detail,
+                    )
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                log.exception("cflow trigger clock tick failed")
+
+    def scan(self) -> List[Tuple[str, str, dict]]:
+        """One pass over the registry: every trigger queued since the last.
+        Blocking (every run's state); call it in a thread. Public for the
+        tests, like the other clocks' scans."""
+        out: List[Tuple[str, str, dict]] = []
+        for cwd, scope in cflow_state.known_runs():
+            try:
+                claimed = cflow_engine.claim_triggers(cwd=cwd, scope=scope)
+            except Exception as exc:
+                log.debug("cflow trigger scan skipped %s/%s: %s", cwd, scope, exc)
+                continue
+            for action in claimed or []:
+                out.append((cwd, scope, action))
+        return out
+
+    async def _perform(self, cwd: str, scope: str, action: dict) -> Tuple[bool, str]:
+        """Do one claimed action. Returns (performed, why/what)."""
+        do = action.get("do")
+        session = session_for(self.manager, cwd, scope)
+        if session is None:
+            return False, "no live session drives this run"
+        if do == cflow_model.TRIGGER_CHECKS:
+            return await self._checks(cwd, scope, session)
+        if do == cflow_model.TRIGGER_BRIEFING:
+            return await self._briefing(session)
+        # A workflow snapshot taken by a newer version than this daemon.
+        return False, f"this daemon has no trigger action named {do!r}"
+
+    async def _checks(self, cwd: str, scope: str, session) -> Tuple[bool, str]:
+        try:
+            checks = await asyncio.to_thread(
+                status_checks.session_entries, session.sdef.name, enabled_only=True
+            )
+        except status_checks.StatusCheckError as exc:
+            return False, f"status checks unreadable: {exc}"
+        if not checks:
+            return False, "no enabled status checks are configured"
+        if not await self._deliver(cwd, scope, status_checks.REFRESH_PROMPT):
+            return False, "the refresh request could not be queued for the session"
+        return True, f"asked for {len(checks)} status check(s)"
+
+    async def _deliver(self, cwd: str, scope: str, block: str) -> bool:
+        """Queue text for the driving session, the way every clock here does.
+
+        ``queue_delivery`` and not ``deliver``: the latter waits out a
+        half-typed draft in the terminal, for as long as it stands, and a
+        clock that awaits one stops ticking for every other run on the
+        machine. Queueing defers behind the draft instead and returns now.
+        """
+        session = session_for(self.manager, cwd, scope)
+        if session is None:
+            return False
+        try:
+            return bool(session.queue_delivery(block))
+        except Exception:
+            log.exception("cflow trigger delivery to %r failed", scope)
+            return False
+
+    @staticmethod
+    async def _briefing(session) -> Tuple[bool, str]:
+        cfg = await asyncio.to_thread(briefing.llm_config)
+        if not briefing.llm_configured(cfg):
+            return False, "no llm endpoint is configured (the llm: block is empty)"
+        try:
+            payload = await briefing.compose(session, cfg, refresh=True)
+        except briefing.BriefingError as exc:
+            return False, f"briefing endpoint failed: {exc}"
+        except Exception as exc:  # the endpoint is the user's own choice
+            return False, f"briefing could not be composed: {exc}"
+        state = ((payload.get("briefing") or {}).get("state")
+                 if isinstance(payload.get("briefing"), dict) else None)
+        if state:
+            return True, f"briefing recomposed (state {state!r})"
+        return True, "briefing recomposed"
+
+
 class RoundStartClock:
     """Starts a recurring run's next round when its workflow opted in.
 
@@ -2075,7 +2226,7 @@ class RunEventClock:
     session is left alive: killing behind a record that did not land is the
     exact thing this mechanical end exists to prevent.
 
-    Scan-budget note (five clocks already share one sequential pass over
+    Scan-budget note (six clocks already share one sequential pass over
     ``known_runs()``): this detection adds no pass of its own and no per-run
     cost beyond the orphaned branch's own two lookups — one dict get for the
     run state, one ``manager.get(scope)``. The idle-wait runs once per

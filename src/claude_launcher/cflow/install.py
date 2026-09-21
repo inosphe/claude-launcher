@@ -189,6 +189,18 @@ workflow to be started here), that is the answer; otherwise list candidates
    and stop. A recur request is never wrong to fulfil — it is the loop the
    workflow declared. The request clears once you start.
 
+7. `triggers` in a `status` payload names daemon side effects this step
+   declared — what the daemon does here, not what you do. `{do: briefing}`
+   costs you nothing: the daemon recomposes this session's dashboard
+   briefing on its own and types nothing. `{do: checks}` is the one that
+   reaches you: at the moment it declares, the daemon types a
+   `[claunch status-check refresh]` block into this terminal, and answering
+   it — `status_checks`, then `report_status_checks` with every enabled id
+   — is the whole of your part. Do not anticipate it: if no status check is
+   configured, no request is sent, and reporting one unasked is reporting
+   against a list you have not read. A trigger never blocks `next`, so a
+   request that has not arrived is not something to wait for.
+
 ## Reports are markdown
 
 `summary` and `details` are rendered as markdown on the daemon web
