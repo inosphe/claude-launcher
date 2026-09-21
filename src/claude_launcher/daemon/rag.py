@@ -407,6 +407,8 @@ class VectorIndex:
         self.entries: Dict[str, Entry] = {}
         self.updated_at: Optional[str] = None
         self._loaded = False
+        # Created on first use: an index may be built outside a running loop.
+        self._lock: Optional[asyncio.Lock] = None
 
     # -- persistence ---------------------------------------------------- #
     def load(self) -> None:
@@ -440,6 +442,14 @@ class VectorIndex:
         self.updated_at = data.get("updated_at")
 
     def save(self) -> None:
+        """Serialise the whole index and replace the file.
+
+        Every document, every vector, base64-encoded: the cost is the size
+        of the corpus, not the size of the change. On the live daemon the
+        fleet index measured 376 MB, so this is seconds of work and never
+        belongs on the event loop -- :meth:`save_soon` is what a coroutine
+        calls.
+        """
         data = {
             "format": FORMAT,
             "model": self.model,
@@ -458,6 +468,19 @@ class VectorIndex:
                 atomic.replace(tmp, self.path)
         except OSError:
             pass
+
+    async def save_soon(self) -> None:
+        """:meth:`save`, in a worker thread.
+
+        The daemon runs one event loop and the terminal sockets are on it,
+        so a caller that is a coroutine uses this one. Two writes of the
+        same index cannot overlap -- the second would serialise entries the
+        first is still reading -- so they queue behind one lock per index.
+        """
+        if self._lock is None:
+            self._lock = asyncio.Lock()
+        async with self._lock:
+            await asyncio.to_thread(self.save)
 
     # -- maintenance ---------------------------------------------------- #
     def diff(self, docs: List[Doc]) -> Tuple[List[Doc], List[str]]:
@@ -621,6 +644,8 @@ class RagService:
         #: the same set with what each key names, so a second enqueue of a
         #: waiting key joins it instead of queueing it again.
         self._queue: "asyncio.Queue[str]" = asyncio.Queue()
+        #: The key the consumer is working on, cleared after its counters.
+        self._in_flight: Optional[str] = None
         self._pending: Dict[str, Tuple[str, Optional[Path]]] = {}
         self._consumer: Optional[asyncio.Task] = None
         self._watcher: Optional[asyncio.Task] = None
@@ -751,13 +776,16 @@ class RagService:
             prog.pending = len(stale)
             prog.indexed = prog.total - prog.pending
             if not stale:
-                index.save()
+                await index.save_soon()
                 return
             client = self._client(cfg)
             batch = max(1, int(cfg.get("batch") or 1))
             # Embed document by document in groups whose chunk count fits one
-            # request, saving after each group so an interrupted sync keeps
-            # what it did and the next one starts where it stopped.
+            # request. The file is written once for the pass, not once per
+            # group: a save serialises the whole index, so on a large corpus
+            # a per-group save rewrote hundreds of megabytes hundreds of
+            # times. What an interrupted pass had embedded is still kept --
+            # the error paths below write it.
             group: List[Doc] = []
             chunks = 0
             for doc in stale:
@@ -768,13 +796,27 @@ class RagService:
                 chunks += len(doc.chunks)
             if group:
                 await self._embed_group(client, index, group, prog)
+            await index.save_soon()
         except RagError as exc:
             prog.error = str(exc)
             index = self._indexes.get(self._key(kind, root))
             if index is not None:
+                await index.save_soon()
+        except asyncio.CancelledError:
+            # Shutdown is the only caller that cancels a pass. Written here
+            # rather than handed to a thread: a cancelled coroutine cannot
+            # wait for one, and an embedding pass costs minutes of endpoint
+            # calls that would otherwise be repeated by the next daemon.
+            # The loop has nothing left to serve at this point.
+            index = self._indexes.get(self._key(kind, root))
+            if index is not None:
                 index.save()
+            raise
         except Exception as exc:  # a corpus read failed; say so, keep the daemon
             prog.error = f"{type(exc).__name__}: {exc}"
+            index = self._indexes.get(self._key(kind, root))
+            if index is not None:
+                await index.save_soon()
         finally:
             prog.finished_at = _now_iso()
 
@@ -788,7 +830,6 @@ class RagService:
             pos += n
             prog.indexed += 1
             prog.pending = max(0, prog.pending - 1)
-        index.save()
 
     async def wait_sync(self, prog: Progress, budget: float) -> None:
         """Give a running sync up to ``budget`` seconds to finish."""
@@ -912,9 +953,11 @@ class RagService:
             self._watcher = asyncio.get_running_loop().create_task(self._watch_loop())
 
     async def shutdown(self) -> None:
-        """Cancel the watcher, the consumer and any sync in flight. A sync
-        saves after every batch, so the next daemon resumes where this one
-        stopped."""
+        """Cancel the watcher, the consumer and any sync in flight.
+
+        A cancelled pass writes what it embedded before it re-raises, so the
+        next daemon resumes from there rather than embedding it again.
+        """
         self._closed = True
         tasks = [self._watcher, self._consumer]
         self._watcher = self._consumer = None
@@ -942,6 +985,12 @@ class RagService:
             kind, root = self._pending.pop(key, (None, None))
             if kind is None:
                 continue
+            # Held from here until the counters below are written, so
+            # ``drain`` does not report a settled queue while this key's
+            # bookkeeping is still owed. A pass ends on a thread hop (the
+            # index write), so "the pass task is done" arrives a turn before
+            # the consumer resumes.
+            self._in_flight = key
             try:
                 await self._consume(kind, root)
             except asyncio.CancelledError:
@@ -952,6 +1001,7 @@ class RagService:
                 self.consumed += 1
                 self.last_consumed_at = _now_iso()
                 self.last_consumed_key = key
+                self._in_flight = None
 
     async def _consume(self, kind: str, root: Optional[Path]) -> None:
         prog = self._progress_of(self._key(kind, root))
@@ -975,6 +1025,7 @@ class RagService:
         deadline = time.monotonic() + budget
         while time.monotonic() < deadline:
             busy = bool(self._pending) or not self._queue.empty()
+            busy = busy or self._in_flight is not None
             busy = busy or any(p.task is not None and not p.task.done() for p in self._progress.values())
             if not busy:
                 return
@@ -1200,7 +1251,7 @@ class RagService:
             doc = issue_doc(match)
             vecs = await self._client(cfg).embed(doc.chunks)
             index.put(doc, vecs)
-            index.save()
+            await index.save_soon()
         pairs = await asyncio.to_thread(index.neighbors, issue_id, limit)
         results = []
         for doc_id, score in pairs:
