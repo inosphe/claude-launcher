@@ -1551,6 +1551,7 @@ claunch spawn
    Profile : Harness  the child inherits its parent's selection (spawn.allow_profile)
    Borrow          the child authenticates as its parent does (spawn.allow_profile)
    Null token      no - authenticate as the parent does
+   Project         (the parent's: default)
    Workspace       (the parent's directory: /work/repo)
    Args            the child runs its parent's args (spawn.allow_args)
 
@@ -1578,6 +1579,14 @@ the child holds); `Null token` (`--null`) is never gated, because it takes a
 credential away rather than granting one — and saying yes to it greys the
 borrow row, exactly as in the other form; `Args` opens under
 `spawn.allow_args` and **replaces** the inherited command line.
+**Project** is the one row here the policy has no say in: filing a child under
+a project is a label on the roster, not a change to what runs, so it is never
+greyed. Left alone it travels as nothing and the child is filed under its
+parent's project. Naming one moves the **Workspace** row to that project's
+default workspace, which is the one consequence a project has at spawn time —
+and that move *is* gated, by the same `spawn.allow_workspace` as the row it
+moves, so under a shut gate the row stays where it is and the child stays with
+its parent.
 There is still no free-text directory row (a registered **workspace** is the
 vouched-for exception). But there *is* a **Worktree** row, and it is the row
 a fleet needs: two children

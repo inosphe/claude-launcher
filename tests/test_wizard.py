@@ -1539,6 +1539,17 @@ class FakeSpawnSources(FakeSources):
             # list, and a checkout of the repository the parent is already in
             "may_choose": ["workspace", "worktree"], "spawnable_harnesses": [],
             "workspaces": [{"name": "api", "path": "/srv/api", "exists": True}],
+            # Always carried, whatever the policy says: filing a child under
+            # a project is not gated. `hq` names a workspace this daemon no
+            # longer has registered, which is a state a project keeps.
+            "projects": [
+                {"name": "default", "default_workspace": None,
+                 "default_cwd": None, "is_default": True},
+                {"name": "api", "default_workspace": "api",
+                 "default_cwd": "/srv/api", "is_default": False},
+                {"name": "hq", "default_workspace": "hq",
+                 "default_cwd": None, "is_default": False},
+            ],
             # the run this parent's own workflow pairs its children with:
             # nothing, unless a test says otherwise
             "child_cflow": "",
@@ -1625,6 +1636,148 @@ def test_the_spawn_form_asks_only_what_a_child_may_be_asked():
         assert present in keys, present
     for absent in ("cwd", "resume", "fork_session", "restore"):
         assert absent not in keys, absent
+
+
+def test_the_project_is_asked_above_the_workspace_it_answers():
+    """Picking a project moves the Workspace row, so it is asked first — the
+    same order new-session's form asks Project and Directory in."""
+    wiz = spawn_form()
+    keys = [f.key for f in wiz.fields]
+    assert keys.index("project") < keys.index("workspace")
+
+
+def test_the_project_row_opens_on_the_parents_own():
+    """A child is filed under its parent's project unless the request names
+    another (`spawn._file_under_project`), so the answer nobody has to give
+    is the first entry — and it says which project that is."""
+    wiz = spawn_form()
+    assert wiz.value("project") == ""
+    assert wiz.field("project").options[0].label == "(the parent's: default)"
+
+
+def test_a_parent_filed_elsewhere_names_that_project_on_the_row():
+    wiz = spawn_form(sessions=[
+        {"name": "lead", "status": "idle", "harness": "claude",
+         "profile": "work", "cwd": "/work/repo", "project": "api"},
+    ])
+    assert wiz.field("project").options[0].label == "(the parent's: api)"
+
+
+def test_an_untouched_project_row_travels_as_nothing():
+    """The empty answer is the point of the inherited entry. Sending the
+    parent's project spelled out would take the `asked` path in
+    `_file_under_project`, which is the one that moves the child."""
+    wiz = spawn_form()
+    args = argparse.Namespace()
+    wiz.apply(args)
+    assert args.project is None
+
+
+def test_the_project_travels_in_the_answers():
+    wiz = spawn_form()
+    pick(wiz, "project", "api")
+    args = argparse.Namespace()
+    wiz.apply(args)
+    assert args.project == "api"
+
+
+def test_picking_a_project_moves_the_workspace_to_its_default():
+    """The daemon sends a child to the named project's default workspace
+    when the request settles no directory of its own, so the row says so
+    rather than reading 'the parent's directory' for a child that will not
+    be there."""
+    wiz = spawn_form()
+    assert wiz.value("workspace") == ""
+    pick(wiz, "project", "api")
+    assert wiz.value("workspace") == "api"
+    args = argparse.Namespace()
+    wiz.apply(args)
+    assert (args.project, args.workspace) == ("api", "api")
+
+
+def test_a_workspace_picked_by_hand_survives_a_project_change():
+    wiz = spawn_form(report={
+        **FakeSpawnSources().spawn_report("lead"),
+        "workspaces": [
+            {"name": "api", "path": "/srv/api", "exists": True},
+            {"name": "ops", "path": "/srv/ops", "exists": True},
+        ],
+    })
+    pick(wiz, "workspace", "ops")
+    pick(wiz, "project", "api")
+    assert wiz.value("workspace") == "ops"
+
+
+def test_a_project_whose_workspace_is_gone_sends_the_child_back():
+    """`hq` keeps its setting after the workspace was unregistered, which is
+    what a project does. There is nothing to move to, so the row returns to
+    the parent's directory rather than standing on the project left behind."""
+    wiz = spawn_form()
+    pick(wiz, "project", "api")
+    assert wiz.value("workspace") == "api"
+    pick(wiz, "project", "hq")
+    assert wiz.value("workspace") == ""
+
+
+def test_going_back_to_the_parents_project_returns_the_workspace():
+    wiz = spawn_form()
+    pick(wiz, "project", "api")
+    assert wiz.value("workspace") == "api"
+    pick(wiz, "project", "(the parent's")
+    assert wiz.value("workspace") == ""
+
+
+def test_a_typed_project_opens_the_workspace_row_on_its_own():
+    """`--project` alongside `--wizard` reaches the Workspace row through the
+    same move a pick does, so the form opens on the directory the child will
+    actually start in."""
+    wiz = spawn_form(defaults=argparse.Namespace(project="api"))
+    assert wiz.value("project") == "api"
+    assert wiz.value("workspace") == "api"
+
+
+def test_a_project_the_daemon_does_not_list_still_reaches_the_check():
+    """`projects.require` refuses an unknown name and says which ones exist.
+    Dropping it here would file the child under its parent's project instead
+    of refusing anything."""
+    wiz = spawn_form(defaults=argparse.Namespace(project="ghost"))
+    assert wiz.value("project") == "ghost"
+    args = argparse.Namespace()
+    wiz.apply(args)
+    assert args.project == "ghost"
+    # nothing to move to, so the child stays where its parent is
+    assert wiz.value("workspace") == ""
+
+
+def test_a_daemon_too_old_to_report_projects_shows_no_project_row():
+    """One answer is not a question. The child files under its parent's
+    project, which is what it did before the row existed."""
+    report = {**FakeSpawnSources().spawn_report("lead")}
+    report.pop("projects")
+    wiz = spawn_form(report=report)
+    assert wiz.field("project").hidden
+    args = argparse.Namespace()
+    wiz.apply(args)
+    assert args.project is None
+
+
+def test_a_locked_workspace_row_leaves_the_project_row_open():
+    """Filing a child under a project is not gated. What `allow_workspace`
+    governs is the move that follows, so the row stays pickable and the
+    Workspace row simply does not follow it — the daemon warns there and
+    leaves the child with its parent."""
+    wiz = spawn_form(report={
+        **FakeSpawnSources().spawn_report("lead"),
+        "may_choose": ["worktree"], "workspaces": None,
+    })
+    assert not wiz.field("project").hidden
+    assert not wiz.field("project").disabled
+    assert wiz.field("workspace").disabled
+    pick(wiz, "project", "api")
+    args = argparse.Namespace()
+    wiz.apply(args)
+    assert args.project == "api"
+    assert args.workspace is None
 
 
 def test_the_parent_is_a_picker_of_the_sessions_that_exist():
