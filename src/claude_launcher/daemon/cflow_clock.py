@@ -2070,10 +2070,22 @@ class RunEventClock:
     Recurring workflows are exempt by construction (they file the next round
     instead of ending), a run that reached done with a pending next start is
     exempt (its driver is expected to perform it), and a session whose record
-    carries ``keep_alive`` — the user said keep it — is recorded but not
-    killed. A record that could not be written is reported loudly and the
-    session is left alive: killing behind a record that did not land is the
-    exact thing this mechanical end exists to prevent.
+    carries ``keep_alive`` — the user said keep it, standing, until they say
+    otherwise — is recorded but not killed. A session a person respawned by
+    name after the run had already finished (:attr:`Session.resumed_by_human`)
+    gets a one-time deference instead of a standing one: this kill is called
+    off and the transcript corrected, but the next daemon restart judges a
+    fresh incarnation from scratch — a restart's own unattended
+    :meth:`SessionManager.restore_all` is not a person asking, so it does not
+    set the flag. Before this, ``keep_alive`` was the only thing this method
+    read to decide, and a session nobody had told to stay alive had no way to
+    say "not yet" for even one boot's kill — it could only be resurrected
+    after the fact, respawn after respawn, each one undone by the next
+    restart's mop-up (the run stayed ``done`` throughout, so every restart
+    that first-saw it queued another kill). A record that could not be
+    written is reported loudly and the session is left alive: killing behind
+    a record that did not land is the exact thing this mechanical end exists
+    to prevent.
 
     Scan-budget note (five clocks already share one sequential pass over
     ``known_runs()``): this detection adds no pass of its own and no per-run
@@ -2303,7 +2315,8 @@ class RunEventClock:
         self, cwd: str, scope: str, run_id: str, workflow: str = "?"
     ) -> None:
         """End a finished one-shot run's session: wait out its current turn
-        (bounded), then kill unless it was kept alive.
+        (bounded), then kill unless it was kept alive or a person respawned
+        it since the run finished.
 
         The durable record is already in the session's transcript — the scan
         that queued this wrote it first, and would not have queued a kill it
@@ -2340,6 +2353,22 @@ class RunEventClock:
                 "cflow kill-on-end: %r recorded but left running (keep-alive)",
                 scope,
             )
+            return
+        if session.resumed_by_human:
+            # A person respawned this session, by name, after the run had
+            # already finished -- unlike keep-alive (a standing "never"),
+            # this is a one-time deference: it holds off THIS kill, and
+            # lapses at the next daemon restart, when a fresh incarnation
+            # (auto-restored, not asked for) is judged from scratch. The
+            # earlier end_block already reads "the session is ended" from
+            # the scan that queued this, so the record needs a correction
+            # or a future reader sees a session alive past its own "ended"
+            # notice with nothing explaining why.
+            log.info(
+                "cflow kill-on-end: %r was respawned by a person after "
+                "run %s finished; leaving it running", scope, run_id,
+            )
+            session.append_wal(resumed_block(scope, run_id))
             return
         try:
             session.kill(force=False)
@@ -2495,6 +2524,29 @@ def end_block(scope: str, run_id: str, workflow: str, *, keep_alive: bool) -> st
             "resume: `claunch respawn " + scope + "`",
         ]
     lines.append("---")
+    return "\n".join(lines)
+
+
+def resumed_block(scope: str, run_id: str) -> str:
+    """Correction to a session's own :func:`end_block`: it said the session
+    was ending, and a person respawned it before that landed.
+
+    Appended the same durable way, so a future reader of the transcript
+    sees why a session marked "ended" above is running after all, instead
+    of the ending simply not happening with no trace of why.
+    """
+    lines = [
+        "---",
+        "# claunch: session ended notice superseded -- machine-generated, "
+        "not typed by the user",
+        f"session: {scope}",
+        f"run: {run_id}",
+        "outcome: a person respawned this session after the notice above "
+        "was written, so the pending end was called off",
+        "note: this holds only until the daemon that saw the respawn goes "
+        "down -- the next restart judges the session fresh, same as before",
+        "---",
+    ]
     return "\n".join(lines)
 
 

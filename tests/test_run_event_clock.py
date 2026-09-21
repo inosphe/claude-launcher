@@ -78,12 +78,19 @@ def proj(home, tmp_path, monkeypatch):
 
 class _FakeSession:
     def __init__(
-        self, name: str, cwd: str, parent: str = None, *, keep_alive: bool = False
+        self,
+        name: str,
+        cwd: str,
+        parent: str = None,
+        *,
+        keep_alive: bool = False,
+        resumed_by_human: bool = False,
     ) -> None:
         self.exited = False
         self.sdef = SessionDef(
             name=name, cwd=cwd, parent=parent, keep_alive=keep_alive
         )
+        self.resumed_by_human = resumed_by_human
         self.delivered: list = []
         self.deliver_ok = True
         # The kill-on-end half: ``append_wal`` records (and fails when
@@ -412,6 +419,54 @@ def test_kill_on_end_keep_alive_records_but_ends_nothing(proj):
     asyncio.run(clock._finish_end(cwd, "w1", _run_id(cwd)))
     assert worker.killed is False               # ...but nothing is ended
     assert worker.exited is False
+
+
+def test_kill_on_end_defers_to_a_person_who_just_respawned_it(proj):
+    """claunch-dgnv.1: a person respawning the session after the run
+    finished is a signal of its own, independent of keep_alive -- it holds
+    off this one kill and corrects the transcript, without the session
+    ever having to opt into keep_alive."""
+    cwd = str(proj)
+    cflow_engine.start("linear", cwd=cwd, scope="w1")
+    worker = _FakeSession("w1", cwd)
+    clock = cflow_clock.RunEventClock(_FakeManager({"w1": worker}))
+    clock.scan()
+    _finish_linear(cwd)
+    run_id = _run_id(cwd)
+    assert clock.scan() == []
+    assert "session ended" in worker.recorded[0]  # the scan's notice landed
+    worker.resumed_by_human = True                # ...then a person respawned it
+    asyncio.run(clock._finish_end(cwd, "w1", run_id))
+    assert worker.killed is False                 # ...so the kill is called off
+    assert worker.exited is False
+    assert len(worker.recorded) == 2              # and the transcript says why
+    assert "respawned" in worker.recorded[1]
+
+
+def test_kill_on_end_resumed_by_human_lapses_on_the_next_incarnation(proj):
+    """The deference is one-time: a fresh Session (a restart's own unattended
+    restore_all, never a person asking) starts with resumed_by_human False,
+    so the same still-done run is judged again from scratch."""
+    cwd = str(proj)
+    cflow_engine.start("linear", cwd=cwd, scope="w1")
+    worker = _FakeSession("w1", cwd, resumed_by_human=True)
+    clock = cflow_clock.RunEventClock(_FakeManager({"w1": worker}))
+    clock.scan()
+    _finish_linear(cwd)
+    run_id = _run_id(cwd)
+    clock.scan()
+    asyncio.run(clock._finish_end(cwd, "w1", run_id))
+    assert worker.killed is False                 # deferred, same as above
+
+    # A restart: fresh clock (in-memory _end_done gone) and a fresh Session
+    # auto-restored by restore_all, which never sets the flag.
+    restarted = _FakeSession("w1", cwd)
+    assert restarted.resumed_by_human is False
+    clock2 = cflow_clock.RunEventClock(_FakeManager({"w1": restarted}))
+    clock2.scan()                                  # the run is still "done"
+    assert [s[1] for s in clock2._end_pending] == ["w1"]
+    asyncio.run(clock2._finish_end(cwd, "w1", run_id))
+    assert restarted.killed is True                # ...and this time it ends
 
 
 def test_kill_on_end_waits_out_a_busy_turn_then_kills(proj):
