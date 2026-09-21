@@ -4415,6 +4415,11 @@ async def h_sessions_list(request: web.Request) -> web.Response:
         # the loop, because a miss schedules its git read on the loop (see
         # _read_branch_later); the hit itself is one stat and a dict lookup.
         info["branch"] = _branch_of(_session_cwd(s))
+        # The rail's observe-pin box and the observer card's read the same
+        # definition field. Answering it here rather than in the observer's
+        # snapshot is what lets the rail draw it off the poll it already
+        # makes, with no second request and no state of its own to keep.
+        info["observe_pin"] = bool(getattr(s.sdef, "observe_pin", False))
     # A config file that cannot be read must not cost the caller the session
     # list: this poll is the rail's lifeline (it carries every row, and the
     # client rebuilds the whole list off it), while the llm flag is one

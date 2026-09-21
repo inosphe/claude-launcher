@@ -1274,6 +1274,14 @@ a.cflow-scope:hover { background: #1d3559; text-decoration: underline; }
 }
 .session-tab-pin { filter: grayscale(1); opacity: .65; font-size: 11px; }
 .session-tab-pin[aria-pressed="true"] { filter: none; opacity: 1; }
+/* The observe pin sits beside the 📌 pin and shares its compact footprint,
+   but it is a checkbox because it is a state rather than an action: 📌 is
+   pressed to change something and this one is read to see which sessions the
+   observer's pinned-only scope covers. */
+.session-tab-observe {
+  flex: none; width: 13px; height: 13px; margin: 0 2px 0 6px;
+  accent-color: #58a6ff; cursor: pointer;
+}
 .session-tab button:hover, .session-tab-open:hover { color: #f0f6fc; background: #21262d; }
 .session-tab :focus-visible { outline: 2px solid #58a6ff; outline-offset: -2px; border-radius: 4px; }
 #term-header {

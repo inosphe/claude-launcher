@@ -174,6 +174,17 @@ class SessionDef:
     #: Persisted with the definition so a daemon restart or respawn does not
     #: silently undo a pause made from the terminal header.
     reminder_paused: bool = False
+    #: Whether the observer's "pinned only" scope covers this session.
+    #: The scope is a cost switch: while it is on, the loop observes only the
+    #: sessions this flag names, so the API bill tracks what somebody asked to
+    #: watch rather than the size of the fleet. It lives on the definition and
+    #: not in the observer's own settings because two views read it — the
+    #: observer card and the session rail — and the rail already polls the
+    #: session list, so one field reaches both without a second read. Being a
+    #: definition field it also survives a daemon restart, which is the whole
+    #: point of a standing selection. A respawn constructs a fresh definition
+    #: and so clears it, like the other lifecycle markers here.
+    observe_pin: bool = False
     #: Creation opt-in and the operator's feedback counts. Each input sent
     #: through the session line may carry one reward or penalty point; the
     #: two counts are independent, start at zero, and stop nothing — while
@@ -230,6 +241,11 @@ class SessionDef:
             "issue": self.issue,
             "keep_alive": self.keep_alive,
         }
+        # Same rule as the note and the reminder pause below: a session that
+        # was never pinned writes no key, so the common record on disk is
+        # unchanged by this field.
+        if self.observe_pin:
+            out["observe_pin"] = True
         # Keep old session records stable in the common enabled case.  The
         # field exists on disk only when it carries information.
         if self.reminder_paused:
@@ -281,6 +297,7 @@ class SessionDef:
             issue=str(data.get("issue") or "").strip() or None,
             keep_alive=bool(data.get("keep_alive")),
             reminder_paused=bool(data.get("reminder_paused")),
+            observe_pin=bool(data.get("observe_pin")),
             score_goal=score_goal.enabled(data.get("score_goal", False)),
             # A record written before the split carries one ``user_score``;
             # it is discarded here, not carried into either count.

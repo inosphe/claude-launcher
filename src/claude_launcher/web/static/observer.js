@@ -202,7 +202,16 @@ function cardActions(card,s) {
   const update=node("button","지금 갱신","observer-action");
   update.disabled=refreshing.has(s.name);
   update.onclick=()=>oneShot(s.name);
-  links.append(input,update);
+  // The same flag the rail's box writes, drawn here so the reader can see
+  // which sessions the pinned-only scope covers without leaving the page.
+  // Both read it off the session record, so neither owns the state.
+  const pin=document.createElement("input");
+  pin.type="checkbox";pin.checked=!!s.observe_pin;pin.id=`observer-pin-${s.name}`;
+  const pinLabel=node("label","","observer-pin");
+  pinLabel.title=`「고정만 관찰」 모드에서 ${s.name}을 관찰 대상에 넣습니다`;
+  pinLabel.append(pin,node("span","관찰 고정"));
+  pin.onchange=()=>setObservePin(s.name,pin.checked);
+  links.append(pinLabel,input,update);
   const note=refreshNotes.get(s.name);
   if(note)links.append(node("small",note,"observer-action-note"));
 }
@@ -212,6 +221,19 @@ function cardActions(card,s) {
    off. A pass with nothing new to read spends no API call at all, and saying
    that is half of what this reports — the reader pressed a button that costs
    money exactly when there is something new. */
+/* Which sessions the 「고정만 관찰」 scope covers. The flag is a session
+   definition field, so this writes it through the observer's route and the
+   rail's box reads the same value off its own poll — the page keeps no copy,
+   and the reply is what redraws, so a refusal does not read as applied. */
+async function setObservePin(name,on) {
+  try {
+    await request(`api/observer/${encodeURIComponent(name)}/pin`,{pinned:on});
+  } catch(err) {
+    showError(err.message);
+  } finally {
+    lastSnapshot="";await refresh();
+  }
+}
 async function oneShot(name) {
   if(refreshing.has(name))return;
   refreshing.add(name);refreshNotes.set(name,"갱신 중…");render();
@@ -412,6 +434,11 @@ function render() {
   $("usage-body").textContent=usage;
   $("monitor").textContent=snapshot.enabled?"관찰 끄기":"관찰 시작";
   $("mobile-monitor").textContent=$("monitor").textContent;
+  // Drawn from the snapshot, never from the click: the scope is the daemon's
+  // answer, and a request that failed must not leave the box reading as set.
+  const scoped=snapshot.scope==="pinned";
+  $("scope-pinned").checked=scoped;
+  $("mobile-scope-pinned").checked=scoped;
   $("notice").textContent=(cflowError?"cflow 상태 조회 실패 · 마지막 조회 결과 표시":snapshot.error)||(snapshot.enabled?"관찰 중 · 세션별 순차 처리 · 최소 60초 간격":"관찰이 꺼져 있습니다. 시작하면 ds4-official/deepseek-flash API로 트랜스크립트를 전송합니다.");
   $("sort").hidden=timeline||grid;
   $("layout-hint").textContent=grid?`세션마다 최신 항목 최대 ${gridLimit}개 · 세션 목록은 필터 그대로 · 보고·승인 요청 기준`:timeline?"최신 보고부터 표시하는 타임라인":"세션 보드 · 내용은 자동 갱신되며 세션 순서는 최신순 정렬을 누를 때 바뀝니다.";
@@ -508,6 +535,20 @@ $("selection").onchange=navigate;$("actions-only").onchange=render;$("ended").on
 $("target").onchange=()=>chooseTarget($("target").value);$("prompt").oninput=controls;
 $("composer-toggle").onclick=()=>{composerFolded=!composerFolded;composerState();if(!composerFolded)$("prompt").focus();};
 $("monitor").onclick=async()=>{try{await request("api/observer/settings",{enabled:!snapshot.enabled});await refresh();}catch(err){showError(err.message);}};
+/* The scope rides the same settings call as the monitor switch, and both
+   sides are sent every time: the route takes ``enabled`` as required and
+   ``scope`` as optional, so leaving one out is how a control would silently
+   undo the other's setting. Two boxes drive it — the header's, and the one
+   that stands in for the header on a phone — and both are redrawn from the
+   snapshot, so they cannot disagree. */
+async function setScope(pinned) {
+  try {
+    await request("api/observer/settings",{enabled:snapshot.enabled,scope:pinned?"pinned":"all"});
+  } catch(err) {showError(err.message);}
+  finally {lastSnapshot="";await refresh();}
+}
+$("scope-pinned").onchange=()=>setScope($("scope-pinned").checked);
+$("mobile-scope-pinned").onchange=()=>setScope($("mobile-scope-pinned").checked);
 $("token-toggle").onclick=()=>{
   const expanded=$("token-toggle").getAttribute("aria-expanded")!=="true";
   $("token-toggle").setAttribute("aria-expanded",String(expanded));

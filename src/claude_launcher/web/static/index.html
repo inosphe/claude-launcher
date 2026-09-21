@@ -49,6 +49,11 @@
     <button id="m-menu" type="button" aria-label="open menu">☰</button>
     <span id="m-dot" class="dot"></span>
     <span id="m-title">no session</span>
+    <!-- The observer header goes down on a phone, and the scope switch goes
+         with it — but the rail's own observe-pin box stays reachable, so a
+         phone that can pin sessions must also be able to choose the mode
+         that reads them. Both boxes drive one setting. -->
+    <label id="observer-mobile-scope" class="m-act" title="켜면 observe-pin 한 세션만 관찰합니다"><input type="checkbox" id="observer-mobile-scope-pinned"> 고정만</label>
     <button id="observer-mobile-monitor" class="m-act" type="button">관찰 시작</button>
     <span id="m-status" class="badge"></span>
     <!-- Mirror of the header's link chip. It says what the *socket* is doing,
@@ -197,7 +202,7 @@
           <p id="observer-token-note" class="hint">사용량 조회 중…</p>
         </div>
       </section>
-      <header class="wf-head"><h1>관찰 대시보드</h1><button id="observer-monitor">관찰 시작</button></header>
+      <header class="wf-head"><h1>관찰 대시보드</h1><label id="observer-scope-control" title="켜면 observe-pin 한 세션만 관찰합니다. 관찰 API 호출이 그 수에 비례해 줄어듭니다. 세션 레일의 체크박스와 카드의 「관찰 고정」이 같은 표시입니다."><input type="checkbox" id="observer-scope-pinned"> 고정만 관찰</label><button id="observer-monitor">관찰 시작</button></header>
       <div class="observer-content">
       <div class="observer-view-controls">
       <fieldset class="observer-view-tabs"><legend class="sr-only">결과 표시 방식</legend>

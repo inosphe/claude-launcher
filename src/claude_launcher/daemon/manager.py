@@ -1360,6 +1360,22 @@ class SessionManager:
         self.persist()
         return session
 
+    def set_observe_pin(self, name: str, on: bool) -> AnySession:
+        """Set (or clear) whether the observer's pinned-only scope covers this.
+
+        Written to the definition rather than to the observer's own settings
+        because two views read the same value — the observer card and the
+        session rail — and the rail's poll is the session list (see
+        :attr:`SessionDef.observe_pin`). The observer reads it live from the
+        session it is already iterating, so flipping it takes effect on the
+        next pass with no wake: a session that just left the scope is skipped,
+        and one that just entered it is observed on the loop's own schedule.
+        """
+        session = self.get(name)
+        session.sdef = replace(session.sdef, observe_pin=bool(on))
+        self.persist()
+        return session
+
     def set_note(self, name: str, note: str) -> AnySession:
         """Set (or, with an empty value, clear) a session's user note.
 

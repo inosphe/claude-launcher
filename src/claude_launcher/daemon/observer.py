@@ -18,6 +18,14 @@ Its coverage starts when timestamped recording is first enabled; the older
 calendar-day meters cannot supply exact rolling windows.
 Runtime state is per daemon, never part of the repository or browser storage.
 
+The loop's scope is the operator's second cost switch, after on/off: ``all``
+observes every session the daemon knows, and ``pinned`` observes only the ones
+a person marked (``SessionDef.observe_pin``, written through
+``POST /api/observer/{name}/pin``). The pin lives on the session definition so
+that the rail's list and the observer's snapshot read one value; the manual
+refresh is deliberately outside the scope, being an explicit one-shot for one
+named session rather than the standing bill the scope is about.
+
 Configure ``observer: {profile: ds4-official, model: deepseek-flash}`` in the
 launcher config (these are the defaults), then enable from Observer in the UI.
 First observation reads the latest 40 records; subsequent passes consume every
@@ -77,6 +85,14 @@ INTERVAL = 60
 #: of the character count the number reads as. That is left alone here: the
 #: constant is calibrated in the same measure the comparison uses.
 MAX_CONTEXT = 12_000
+#: Which sessions the loop covers. ``all`` observes every session the daemon
+#: knows, which is what every daemon did before the scope existed. ``pinned``
+#: observes only the sessions a person marked (``SessionDef.observe_pin``), so
+#: the API bill tracks what somebody asked to watch rather than the size of the
+#: fleet. Only the loop is scoped: a human's ``POST .../refresh`` is an explicit
+#: one-shot for one named session and is served in either mode.
+SCOPE_ALL = "all"
+SCOPE_PINNED = "pinned"
 KINDS = {"cflow", "commit", "merge", "test", "action", "result"}
 #: Counters a provider reports per call. The meter sums exactly these, so a
 #: provider that adds one changes what the dashboard shows in one place.
@@ -203,6 +219,14 @@ class Observer:
             self.data = {"enabled": False}
         self.data["sessions"] = {}
         self.data.setdefault("enabled", False)
+        #: Which sessions the loop covers: ``all`` (the default, and what every
+        #: record written before this key means) or ``pinned``, where only the
+        #: sessions carrying ``SessionDef.observe_pin`` are observed. A scope
+        #: that silently narrowed on an unreadable value would be worse than
+        #: either: an operator who chose it would pay for sessions they meant
+        #: to drop, so anything unrecognised reads as ``all``.
+        if self.data.get("scope") not in (SCOPE_ALL, SCOPE_PINNED):
+            self.data["scope"] = SCOPE_ALL
         # A daemon-wide ledger survives session removal. Calendar-day meters
         # cannot be backfilled into exact rolling windows.
         self.data.setdefault("usage_since", now())
@@ -272,7 +296,19 @@ class Observer:
                 atomic.replace(scratch, path)
 
     def settings_state(self):
-        return {key: self.data[key] for key in ("enabled", "usage_since", "usage_history")}
+        return {key: self.data[key] for key in ("enabled", "scope", "usage_since", "usage_history")}
+
+    def observes(self, session):
+        """Whether the loop's current scope covers this session.
+
+        Read live off the session rather than kept in a set here: the pin is a
+        definition field so that the rail can read it from the list it already
+        polls, and a second copy in this object would be one more thing to keep
+        in step with the record.
+        """
+        if self.data.get("scope") != SCOPE_PINNED:
+            return True
+        return bool(getattr(session.sdef, "observe_pin", False))
 
     def record_usage(self, usage):
         stamp = datetime.now(timezone.utc).timestamp()
@@ -309,23 +345,34 @@ class Observer:
             except asyncio.CancelledError:
                 pass
 
+    async def pass_once(self, cfg):
+        """One sweep over every session the current scope covers.
+
+        Serial calls cap concurrency and avoid burst cost for a fleet. The
+        scope is checked before anything is loaded or read, so a session
+        outside it costs one attribute read rather than a transcript page and
+        a row on disk — which is the point of having a scope at all.
+        """
+        for session in list(self.manager.list()):
+            if not self.data.get("enabled"):
+                break
+            if not self.observes(session):
+                continue
+            self.load_session(session.sdef.name)
+            if session.exited and session.sdef.name not in self.data["sessions"]:
+                continue
+            try:
+                await self.observe(session, cfg)
+            except Exception:
+                self.failed(session.sdef.name)
+
     async def run(self):
         while True:
             try:
                 if self.data.get("enabled"):
                     cfg = await asyncio.to_thread(configuration)
                     self.error = None
-                    # Serial calls cap concurrency and avoid burst cost for a fleet.
-                    for session in list(self.manager.list()):
-                        if not self.data.get("enabled"):
-                            break
-                        self.load_session(session.sdef.name)
-                        if session.exited and session.sdef.name not in self.data["sessions"]:
-                            continue
-                        try:
-                            await self.observe(session, cfg)
-                        except Exception:
-                            self.failed(session.sdef.name)
+                    await self.pass_once(cfg)
             except Exception:
                 self.error = "관찰 설정 또는 저장 오류: 프로파일과 데몬 저장소를 확인하십시오."
             try:
@@ -519,9 +566,14 @@ class Observer:
                            "meshes": [m["mesh"] for m in self.mesh.meshes_for_session(name)],
                            "events": [{k: v for k, v in e.items() if k != "evidence"} for e in events],
                            **{k: row.get(k) for k in ("generated_at", "usage", "usage_totals", "usage_daily",
-                                                     "error", "rotations")}, "summary":summary, "state":state})
+                                                     "error", "rotations")}, "summary":summary, "state":state,
+                           # The card draws the same pin the rail does, and
+                           # both read it from the session rather than from a
+                           # copy kept here (see :meth:`observes`).
+                           "observe_pin": bool(getattr(session.sdef, "observe_pin", False))})
         return {"enabled": self.data.get("enabled", False), "error": self.error,
-                "interval": INTERVAL, "sessions": result, "usage_summary": self.usage_windows()}
+                "interval": INTERVAL, "scope": self.data.get("scope", SCOPE_ALL),
+                "sessions": result, "usage_summary": self.usage_windows()}
 
 
 def install(app):
@@ -538,15 +590,42 @@ def install(app):
         body = await request.json()
         if not isinstance(body, dict) or not isinstance(body.get("enabled"), bool):
             return web.json_response({"error": "enabled must be boolean"}, status=400)
+        # ``scope`` rides the same switch because both answer the same
+        # question — what this daemon is willing to pay for — and a scope
+        # written while observation is off must still be there when it is
+        # turned on. Absent means "leave it alone" so the monitor button,
+        # which only knows about ``enabled``, cannot reset the mode.
+        scope = body.get("scope", observer.data.get("scope", SCOPE_ALL))
+        if scope not in (SCOPE_ALL, SCOPE_PINNED):
+            return web.json_response({"error": "scope must be 'all' or 'pinned'"}, status=400)
         if body["enabled"]:
             try:
                 await asyncio.to_thread(configuration)
             except Exception:
                 return web.json_response({"error": "ds4-official 프로파일의 API endpoint와 인증 설정을 확인하십시오."}, status=400)
         observer.data["enabled"] = body["enabled"]
+        observer.data["scope"] = scope
         observer.save()
         observer.wake.set()
-        return web.json_response({"enabled": body["enabled"]})
+        return web.json_response({"enabled": body["enabled"], "scope": scope})
+
+    async def set_pin(request):
+        """Mark one session as covered by the pinned-only scope.
+
+        The pin is a session *definition* field, not observer state (see
+        :attr:`SessionDef.observe_pin`), so it is written through the manager —
+        the same way the rail's own routes write a session — and both readers
+        see it without a second store to keep in step.
+        """
+        body = await request.json()
+        if not isinstance(body, dict) or not isinstance(body.get("pinned"), bool):
+            return web.json_response({"error": "pinned must be boolean"}, status=400)
+        manager = request.app["manager"]
+        try:
+            session = manager.set_observe_pin(request.match_info["name"], body["pinned"])
+        except KeyError:
+            return web.json_response({"error": "세션을 찾을 수 없습니다."}, status=404)
+        return web.json_response({"name": session.sdef.name, "pinned": bool(session.sdef.observe_pin)})
 
     async def acknowledge(request):
         body = await request.json()
@@ -575,6 +654,7 @@ def install(app):
 
     app.router.add_get("/api/observer", snapshot)
     app.router.add_post("/api/observer/{name}/refresh", one_shot)
+    app.router.add_post("/api/observer/{name}/pin", set_pin)
     app.router.add_post("/api/observer/settings", settings)
     app.router.add_post("/api/observer/{name}/acknowledge", acknowledge)
     app.router.add_get("/api/observer/{name}/events/{event}", event_evidence)
