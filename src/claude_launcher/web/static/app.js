@@ -8398,8 +8398,7 @@ async function sendKeyLine(field, btn, note) {
           session.user_penalty = doc.score_goal.penalty;
         }
       }
-      const sel = $("term-score-feedback");
-      if (sel) sel.value = "none";
+      setScoreFeedbackChoice("none");
       renderScoreGoal();
       return true;
     }
@@ -8430,21 +8429,43 @@ function renderScoreGoal() {
   const counts = $("term-score-counts");
   counts.textContent = `R${reward} · P${penalty}`;
   counts.title = `reward ${reward} · penalty ${penalty}`;
-  const sel = $("term-score-feedback");
   const ended = session.status === "exited" || sessionEnded;
-  sel.disabled = ended;
-  if (ended) sel.value = "none";
+  setScoreFeedbackDisabled(ended);
+  if (ended) setScoreFeedbackChoice("none");
+}
+
+/* The three feedback radios, one per kind. The reset is written out per
+   input rather than left to the group's unchecking, so a driver without
+   radio-group semantics (the sendinput stub DOM) observes the same state a
+   browser shows. */
+const SCORE_FEEDBACK_KINDS = ["none", "reward", "penalty"];
+
+function setScoreFeedbackChoice(kind) {
+  for (const k of SCORE_FEEDBACK_KINDS) {
+    const radio = $(`term-score-feedback-${k}`);
+    if (radio) radio.checked = k === kind;
+  }
+}
+
+function setScoreFeedbackDisabled(disabled) {
+  for (const k of SCORE_FEEDBACK_KINDS) {
+    const radio = $(`term-score-feedback-${k}`);
+    if (radio) radio.disabled = disabled;
+  }
 }
 
 /* The feedback choice riding the next send from this box: "none" unless the
    operator picked a point and the feature is on for this session. */
 function currentScoreFeedback() {
   const box = $("term-score-goal");
-  const sel = $("term-score-feedback");
-  if (!box || box.classList.contains("hidden") || !sel || sel.disabled) {
+  if (!box || box.classList.contains("hidden")) {
     return "none";
   }
-  return sel.value || "none";
+  for (const kind of ["reward", "penalty"]) {
+    const radio = $(`term-score-feedback-${kind}`);
+    if (radio?.checked && !radio.disabled) return kind;
+  }
+  return "none";
 }
 
 async function refreshScoreGoalDefault(form) {

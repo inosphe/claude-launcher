@@ -2914,9 +2914,9 @@ It starts with independent reward and penalty counts at zero and carries the
 goal text at the head of the session's opening message. Later session reminders
 include the goal and current counts as ordinary prompt text, including
 sessions without a workflow. Each send from **type for this session** can
-carry one point of operator feedback: the **none/reward/penalty** selector
-beside the input (shown only while the feature is on) adds one point to the
-matching count when the send lands, then resets to none. No count stops the
+carry one point of operator feedback: the **none/reward/penalty** radio
+buttons beside the input (shown only while the feature is on) add one point
+to the matching count when the send lands, then reset to none. No count stops the
 goal reminders — they repeat while the feature is enabled; other reminder
 sources retain their settings. Selection and counts survive daemon restart
 and session resume; the goal text rides the opening only on creation.

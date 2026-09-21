@@ -441,13 +441,19 @@
              aria-label="type text and send it to this session"></textarea>
       <span id="term-input-note" class="wf-note hidden"></span>
       <span id="term-score-goal" class="hidden">
-        <label for="term-score-feedback">Feedback</label>
-        <select id="term-score-feedback"
-                aria-label="Feedback sent with the next input: none, reward, or penalty">
-          <option value="none" selected>none</option>
-          <option value="reward">reward +1</option>
-          <option value="penalty">penalty +1</option>
-        </select>
+        <span class="term-score-label">Feedback</span>
+        <span class="term-score-radios" role="radiogroup"
+              aria-label="Feedback sent with the next input: none, reward, or penalty">
+          <label class="term-score-opt">
+            <input type="radio" name="term-score-feedback"
+                   id="term-score-feedback-none" value="none" checked> none</label>
+          <label class="term-score-opt">
+            <input type="radio" name="term-score-feedback"
+                   id="term-score-feedback-reward" value="reward"> reward +1</label>
+          <label class="term-score-opt">
+            <input type="radio" name="term-score-feedback"
+                   id="term-score-feedback-penalty" value="penalty"> penalty +1</label>
+        </span>
         <span id="term-score-counts" role="status">R0 · P0</span>
       </span>
       <button id="term-input-send" class="term-btn" type="submit"
