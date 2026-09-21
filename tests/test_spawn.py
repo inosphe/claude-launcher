@@ -8,6 +8,10 @@ in ``test_member_graph.py``.
 from __future__ import annotations
 
 import asyncio
+import os
+import shutil
+import tempfile
+from pathlib import Path
 
 import pytest
 
@@ -461,6 +465,33 @@ def _talker_has_spoken(_profile_owned_harnesses):
     _wrote_a_transcript(TALKER)
 
 
+@pytest.fixture
+def short_cwd():
+    """A real directory whose absolute path is short, for the fork tests.
+
+    Not ``tmp_path``, and the reason is a Windows path ceiling rather than a
+    preference. ``transcripts.project_dir`` mirrors claude's own scheme: it
+    flattens the WHOLE cwd into a single directory name under the profile's
+    config dir. That config dir already lives under ``tmp_path``
+    (conftest's ``home``), so a cwd of ``tmp_path`` spends the same long path
+    twice inside one filename. The pair crosses MAX_PATH (260) and every
+    write under it fails with ``FileNotFoundError`` -- as a function of how
+    long the basetemp happens to be, which is why these tests were red or
+    green by machine and by how many pytest runs had already numbered
+    themselves that day (claunch-2k9).
+
+    So the directory comes from the shortest writable root there is instead,
+    with the pid in its name because test processes share that root. It has
+    to exist: ``harness.normalize`` refuses a cwd that is not a directory.
+    """
+    root = Path(tempfile.gettempdir()) / f"clspawn{os.getpid()}"
+    root.mkdir(parents=True, exist_ok=True)
+    try:
+        yield str(root)
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
 def test_fork_hands_the_child_a_copy_of_the_parents_conversation():
     """Spelled as the two fields the harness already launches with, so the
     child's copy is restorable like any other conversation."""
@@ -500,13 +531,17 @@ def test_forking_a_parent_with_no_conversation_is_refused():
     assert "no conversation to fork" in str(exc.value)
 
 
-def test_forking_a_conversation_with_no_transcript_is_refused(tmp_path):
+def test_forking_a_conversation_with_no_transcript_is_refused():
     """A pinned id is not yet a conversation. Claude writes the jsonl on the
     session's first turn (a measured 7-28 s after the daemon records the
     session), and `--resume` of a file it never wrote kills the child on
     startup — so a parent that has not spoken is refused here rather than
-    handed to a child that exits."""
-    quiet = {**TALKER, "cwd": str(tmp_path), "conversation_id": "c-unspoken"}
+    handed to a child that exits.
+
+    TALKER's cwd, not ``tmp_path``: nothing here launches, so the directory
+    is only a string to be flattened, and a long one costs the MAX_PATH
+    failure ``short_cwd`` describes."""
+    quiet = {**TALKER, "conversation_id": "c-unspoken"}
     with pytest.raises(spawn.SpawnDenied) as exc:
         spawn.check(_policy(), {"fork": True}, parent=quiet, depth=0, children=0)
     assert "no transcript on disk" in str(exc.value)
@@ -520,6 +555,41 @@ def test_forking_a_conversation_with_no_transcript_is_refused(tmp_path):
     _wrote_a_transcript(quiet)
     assert "fork" in spawn.capabilities(
         _policy(), depth=0, children=0, parent=quiet
+    )["may_choose"]
+
+
+def test_a_transcript_with_nothing_in_it_is_not_a_conversation_to_fork():
+    """The same window as the test above, caught one step later: claude has
+    created the jsonl and its first turn is not in it yet. ``--resume`` of a
+    zero-byte file fails exactly as ``--resume`` of a missing one does, so
+    the offer and the refusal both have to read it as nothing.
+
+    The check stops at the byte count and does not go on to ask whether the
+    file can be read — a transcript held or corrupted by something else is
+    still answered yes, because a wrong no takes the fork off the form with
+    a reason that is not true (claunch-vxca, ruled 2026-09-21).
+    """
+    from claude_launcher import transcripts
+
+    hollow = {**TALKER, "conversation_id": "c-hollow"}
+    where = transcripts.project_dir(
+        profile.require("talk").config_dir, str(hollow["cwd"])
+    )
+    where.mkdir(parents=True, exist_ok=True)
+    empty = where / "c-hollow.jsonl"
+    empty.write_text("", encoding="utf-8")
+    with pytest.raises(spawn.SpawnDenied) as exc:
+        spawn.check(
+            _policy(), {"fork": True}, parent=hollow, depth=0, children=0
+        )
+    assert "no transcript on disk" in str(exc.value)
+    assert "fork" not in spawn.capabilities(
+        _policy(), depth=0, children=0, parent=hollow
+    )["may_choose"]
+    # One byte is a conversation, and nothing else about the parent changed.
+    empty.write_text("{}", encoding="utf-8")
+    assert "fork" in spawn.capabilities(
+        _policy(), depth=0, children=0, parent=hollow
     )["may_choose"]
 
 
@@ -595,17 +665,23 @@ def test_capabilities_offers_fork_only_where_there_is_one_to_offer():
     )["may_choose"]
 
 
-def test_a_forked_child_launches_on_the_parents_conversation(tmp_path):
+def test_a_forked_child_launches_on_the_parents_conversation(short_cwd):
     """The whole point, end to end: what `check` records has to survive into
     the command line the child actually starts with — the parent's
     conversation, copied, on a fresh id of the child's own so the copy is
-    restorable and the parent's is untouched."""
+    restorable and the parent's is untouched.
+
+    This one builds a real command line, so ``harness.normalize`` insists the
+    cwd is a directory that exists — and ``short_cwd`` is what keeps that
+    directory from crossing MAX_PATH on the way into a transcript path
+    (claunch-2k9).
+    """
     from claude_launcher import profile as profile_mod
     from claude_launcher.daemon import harness as harness_mod
 
     conversation = "11111111-2222-3333-4444-555555555555"
     parent = _wrote_a_transcript({
-        **TALKER, "cwd": str(tmp_path), "args": [],
+        **TALKER, "cwd": short_cwd, "args": [],
         "conversation_id": conversation,
     })
     child = spawn.check(_policy(), {"fork": True}, parent=parent, depth=0, children=0)

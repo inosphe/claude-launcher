@@ -48,6 +48,12 @@ def find(config_dir: Path, conversation_id: str) -> Optional[Path]:
     claude normalized differently than :func:`project_slug` predicts). The id
     is a uuid, so one match is the match; scanning tens of project dirs for
     one filename is cheap enough to be the safety net.
+
+    An empty file is not a match. Claude creates the jsonl and writes the
+    first turn into it, so a zero-byte one is a conversation caught mid-birth
+    or a write that failed; ``--resume`` of it fails the same way ``--resume``
+    of a missing file does. Callers ask this to find out whether there is
+    something to reopen, and "a name with nothing behind it" is not.
     """
     root = Path(config_dir) / "projects"
     if not root.is_dir():
@@ -56,11 +62,29 @@ def find(config_dir: Path, conversation_id: str) -> Optional[Path]:
     try:
         for child in root.iterdir():
             candidate = child / name
-            if candidate.is_file():
+            if _has_content(candidate):
                 return candidate
     except OSError:
         return None
     return None
+
+
+def _has_content(path: Path) -> bool:
+    """Whether ``path`` is a file with at least one byte in it.
+
+    The size is asked, and nothing beyond it. A readability probe would fail
+    on a file another process holds and a file this process could in fact
+    read a moment later, and a wrong "not resumable" is the expensive error
+    here -- it takes the fork off the form with a reason that is not true,
+    while a wrong "resumable" costs one child that exits loudly with claude's
+    own "No conversation found with session ID" (the trade :func:`exists` and
+    :func:`claude_launcher.spawn._on_disk` both spell out). Zero bytes is the
+    one case that needs no probe to be sure of.
+    """
+    try:
+        return path.is_file() and path.stat().st_size > 0
+    except OSError:
+        return False
 
 
 def exists(config_dir: Path, conversation_id: str, cwd: str) -> bool:
@@ -80,8 +104,13 @@ def exists(config_dir: Path, conversation_id: str, cwd: str) -> bool:
     "not resumable" about a conversation that *does* exist would send the
     caller off to start a fresh one at that id, and a scrollback is not worth
     gambling on a slug spelling. So a match anywhere is a yes.
+
+    Generous about *where*, not about *whether*: an empty jsonl is no more
+    resumable than a missing one, and :func:`_has_content` is what draws that
+    line. The check stops at the byte count on purpose -- see that function
+    for why a corrupt or locked transcript is still answered yes.
     """
-    if (project_dir(config_dir, cwd) / f"{conversation_id}.jsonl").is_file():
+    if _has_content(project_dir(config_dir, cwd) / f"{conversation_id}.jsonl"):
         return True
     return find(config_dir, conversation_id) is not None
 

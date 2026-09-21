@@ -6962,6 +6962,16 @@ function syncSpawnMode() {
       f.project._lastProject = inherited;
     }
   }
+  // The policy's own answer, taken here because the harness rules further
+  // down overrule it row by row. Two different facts shut a row and they
+  // need different words: the spawn.* policy, which an unlock in
+  // ~/.claunch.yaml opens, and what the child itself runs, which no unlock
+  // opens. After the overrules, `.disabled` alone cannot tell them apart --
+  // and the hint then tells an operator who HAS unlocked a row that the
+  // unlock did not take.
+  const policyShut = new Set(
+    SPAWN_INHERITS.filter((k) => f[k] && !!parent && !open[k])
+  );
   // Seeding happens once per parent, not on every poll: the second call
   // would be the one that throws away the operator's own pick.
   newSpawnDefaultsFor = parent ? parent.name : null;
@@ -7014,7 +7024,9 @@ function syncSpawnMode() {
     // Named, not merely greyed: "inherits everything" is true of a locked
     // form and of an open one alike, and the operator who unlocked profile
     // in ~/.claunch.yaml needs to see which rows are still shut to know the
-    // daemon read the file.
+    // daemon read the file. Which is also why the two reasons are spelled
+    // apart below: one sentence for both would answer "did the unlock take?"
+    // with "no" on a row the unlock opened and the harness then closed.
     const panelVisible = (id) => {
       const panel = $(id);
       return panel && !panel.classList.contains("hidden");
@@ -7026,11 +7038,19 @@ function syncSpawnMode() {
     const shut = SPAWN_INHERITS.filter(
       (k) => f[k] && runtimeVisible(k) && f[k].disabled &&
         k !== "resume" && k !== "fork");
+    const byPolicy = shut.filter((k) => policyShut.has(k));
+    const byChild = shut.filter((k) => !policyShut.has(k));
     hint.textContent =
       `a child of ${parent.name}: it inherits that session's setup, and the ` +
       `rows left open below are what may differ` +
-      (shut.length
-        ? ` — ${shut.join(", ")} stay its parent's (the spawn.* unlocks in ~/.claunch.yaml)`
+      (byPolicy.length
+        ? ` — ${byPolicy.join(", ")} stay its parent's (the spawn.* unlocks in ~/.claunch.yaml)`
+        : "") +
+      (byChild.length
+        ? `${byPolicy.length ? ";" : " —"} ${byChild.join(", ")} ` +
+          `${byChild.length > 1 ? "are" : "is"} closed by what this child ` +
+          `runs, not by the policy — an unlock does not reopen ` +
+          `${byChild.length > 1 ? "them" : "it"}`
         : "");
     hint.classList.remove("hidden");
     // The policy has just decided which folded rows are the operator's, and
