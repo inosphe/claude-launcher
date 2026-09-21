@@ -802,11 +802,34 @@ class Board:
         #: through :meth:`br`. The search index's producer hangs here
         #: (:meth:`daemon.rag.RagService.on_board_write`).
         self.write_hooks: List[Callable[[Path], None]] = []
+        #: ``br`` was found on PATH (sticky), and when PATH was last walked.
+        self._which_found = False
+        self._which_checked = 0.0
 
     # ---- availability -------------------------------------------------- #
+    #: How long a "``br`` is not on PATH" answer is reused before PATH is
+    #: walked again, so installing it mid-run is noticed without a restart.
+    WHICH_MISS_TTL = 30.0
+
     def available(self) -> bool:
-        """Whether ``br`` can be run at all (a fake runner counts)."""
-        return self._runner is not None or shutil.which(cli_beads.BINARY) is not None
+        """Whether ``br`` can be run at all (a fake runner counts).
+
+        Cached, because this is asked on every board view, every session view
+        and every session list, and the detail panel polls one of those every
+        five seconds per open card. ``shutil.which`` stats each PATH entry
+        once per ``PATHEXT`` suffix on Windows, so one answer is dozens of
+        filesystem calls on the event loop. A hit is kept for the life of the
+        daemon; a miss for :data:`WHICH_MISS_TTL` seconds.
+        """
+        if self._runner is not None:
+            return True
+        if self._which_found:
+            return True
+        if time.monotonic() - self._which_checked < self.WHICH_MISS_TTL:
+            return False
+        self._which_checked = time.monotonic()
+        self._which_found = shutil.which(cli_beads.BINARY) is not None
+        return self._which_found
 
     async def root_for(self, cwd: str) -> Optional[Path]:
         """The repository root owning ``cwd``'s board, or ``None``."""

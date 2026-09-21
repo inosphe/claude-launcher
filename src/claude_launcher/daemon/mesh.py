@@ -6838,6 +6838,18 @@ class MeshManager:
         if gone and not force and mesh._stranded_scan.get(member.handle) == log_shape:
             return  # nothing appended since the last look at this dead member
         pending = mesh.pending(member.handle)
+        if not pending:
+            # This scan has established that nothing in the log up to here is
+            # for this member, and nothing turns into a pending message for it
+            # later: a member joins already caught up (``join`` stamps its
+            # cursor at the end of the log), so a backlog is never replayed
+            # for it, not even when its edges change. Leaving the cursor
+            # behind meant every pass re-walked the same messages, for every
+            # member, for as long as nobody addressed it -- which on a mesh
+            # with hundreds of members is most of them. The cursor is not
+            # persisted here: it is an optimisation, and a daemon that reads
+            # the older number back simply re-walks once.
+            mesh.cursors[member.handle] = len(mesh.messages)
         if gone:
             if pending:
                 # Hold until respawn (same name, same cursor) — and tell
