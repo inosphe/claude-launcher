@@ -398,6 +398,12 @@ option:disabled { color: #6b7280; }
    amber either: amber on this rail means the run wants the reader's keyboard
    (.sess-cflow.gated), and a queued message wants nothing from them. */
 #session-list .quiet-waiting { color: #58a6ff; border-color: #29416b; }
+/* The end-of-run protection. Grey like the decided flags and not blue like
+   the one above: nothing is in motion, and it is a state a person set that
+   wants nothing back. Slightly lighter than `quiet-hold`, because a hold
+   silences other people's messages and this only decides how long this
+   session's own terminal lives. */
+#session-list .quiet-keepalive { color: #7d8590; border-color: #363c45; }
 /* The card itself, wherever it is drawn — the row's fold, the pane under
    the header, the detail panel's section. Box and type are common; only the
    rail's flex-placement below is specific to the list it lives in. */

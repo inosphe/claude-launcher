@@ -2824,17 +2824,23 @@ function applyCflowBadges() {
   }
 }
 
-/* The two settings that stop the daemon typing into a session, drawn on that
+/* The settings a person made that the rail must not hide, drawn on that
    session's own row.
 
-   They are separate mechanisms — one is the mesh delivery gate
-   (Session.delivery_held), the other is the cflow reminder source
-   (session_reminder.SessionReminderService) — and they are shown together because from the
-   rail they are one question: which of these terminals is the daemon not
-   going to speak into. Both are silences somebody chose, and a silence
-   nobody remembers choosing is indistinguishable from a broken daemon; that
-   is the whole reason these have a row at all rather than living only in the
-   pages that own them.
+   They are separate mechanisms — the mesh delivery gate
+   (Session.delivery_held), the cflow reminder source
+   (session_reminder.SessionReminderService), the untyped backlog
+   (Session.queue_delivery) and the end-of-run protection
+   (SessionDef.keep_alive) — and they are shown together because from the
+   rail they are one question: what has been decided about this terminal that
+   is invisible from the terminal. Most of them are silences somebody chose,
+   and a silence nobody remembers choosing is indistinguishable from a broken
+   daemon; that is the whole reason these have a row at all rather than living
+   only in the pages that own them. Keep-alive is the one that is not a
+   silence — it decides whether the session survives its run's end — and it is
+   here for the same reason the rest are: it is a decision already made, it
+   changes what the fleet does next, and nothing on the row would otherwise
+   say so.
 
    Only drawn when a flag is actually set. An "everything is normal" pill on
    twenty rows is a row of noise, and the state worth finding is the odd one.
@@ -2889,6 +2895,36 @@ function railQuietFlags(name) {
         "works. Nothing is lost while it waits.\n" +
         "It is not a durable mailbox: a daemon restart drops what is queued.\n" +
         lines.join("\n"),
+    });
+  }
+
+  /* Whether this session outlives its run.
+
+     `cflow kill-on-end` ends the session driving a finished one-shot run, and
+     `SessionDef.keep_alive` is the one lever that says "record the ending,
+     skip the termination" (daemon/cflow_clock._finish_end reads it right
+     beside the kill). Nothing else on the row moves when it is set, which is
+     the whole problem: a protected session and an unprotected one look
+     identical until the run ends and one of them disappears. That it
+     survives an accidental respawn is the reason a person most often sets it
+     -- which makes the row the place to notice it was never cleared.
+
+     Exited rows are left out for the reason the hold above is: a record with
+     no terminal has nothing left to protect. Same grey as the decided flags
+     -- it wants nothing from the reader -- and not the amber this rail
+     reserves for a run waiting on their keyboard. */
+  if (s && s.keep_alive && s.status !== "exited") {
+    out.push({
+      cls: "quiet-keepalive",
+      text: "keep-alive",
+      title:
+        "keep-alive: when this session's one-shot run finishes, the daemon " +
+        "records the ending but does not end the session.\n" +
+        "Set with `claunch keep-alive " + name + "`. The flag is part of the " +
+        "session definition, so it persists across daemon restarts and " +
+        "respawns.\n" +
+        "Clear it when the terminal is no longer wanted: " +
+        "`claunch keep-alive " + name + " off`.",
     });
   }
 
@@ -19118,6 +19154,19 @@ function renderSession(data) {
   if (envKeys.length) metaRow(dl, "env", envKeys.join(", "));
   metaRow(dl, "size", `${s.cols}×${s.rows}`);
   metaRow(dl, "restore", s.restore ? "yes (relaunched with the daemon)" : "no");
+  // Beside `restore`, because the two are the same question asked at the two
+  // ends of a session's life: `restore` is whether it comes back after a
+  // daemon restart, and this is whether it is allowed to stay after its run
+  // ends. Only drawn when set, like every other flag row here — an "off" row
+  // would be a row on every session that says nothing.
+  if (s.keep_alive) {
+    metaRow(
+      dl, "keep-alive",
+      "on — a finished run records its ending but does not end this session",
+      "claunch keep-alive " + (s.name || "") + " off lifts it; the flag is " +
+      "part of the definition, so it survives a restart or a respawn"
+    );
+  }
   metaRow(dl, "pid", s.pid);
   metaRow(dl, "created", (s.created_at || "").replace("T", " "));
   metaRow(dl, "last output", (s.last_output_at || "").replace("T", " "));
