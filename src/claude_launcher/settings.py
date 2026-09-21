@@ -103,15 +103,15 @@ def unset_env(profile: Profile, keys: Iterable[str]) -> Dict[str, str]:
     return env
 
 
-def merge_permission_deny(path: Path, rules: Iterable[str]) -> bool:
-    """Append ``rules`` to a Claude Code settings file's ``permissions.deny``.
+def _merge_permission_rules(path: Path, key: str, rules: Iterable[str]) -> bool:
+    """Append ``rules`` to ``permissions[key]``; True when the file changed.
 
-    Creates the file (and parents) when missing; returns True when the file
-    changed. Only ever appends what is absent — the user's own permission
-    edits (allow lists included) survive a reinstall untouched. A settings
-    file whose ``permissions``/``deny`` is some other shape is left alone
-    rather than repaired: it is the user's file, and a guard is not worth
-    clobbering whatever they meant.
+    Shared by :func:`merge_permission_deny` and :func:`merge_permission_allow`
+    so the two cannot drift: both create the file (and parents) when missing,
+    both append only what is absent, and both leave a file whose
+    ``permissions`` or rule list is some other shape exactly as they found it.
+    That last half is the load-bearing one. A rule list is the user's, and a
+    guard is not worth clobbering whatever they meant.
     """
     try:
         doc = json.loads(path.read_text(encoding="utf-8")) if path.is_file() else {}
@@ -122,16 +122,48 @@ def merge_permission_deny(path: Path, rules: Iterable[str]) -> bool:
     perms = doc.setdefault("permissions", {})
     if not isinstance(perms, dict):
         return False
-    deny = perms.setdefault("deny", [])
-    if not isinstance(deny, list):
+    present = perms.setdefault(key, [])
+    if not isinstance(present, list):
         return False
-    missing = [rule for rule in rules if rule not in deny]
+    missing = [rule for rule in rules if rule not in present]
     if not missing:
         return False
-    deny.extend(missing)
+    present.extend(missing)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(doc, indent=2) + "\n", encoding="utf-8")
     return True
+
+
+def merge_permission_deny(path: Path, rules: Iterable[str]) -> bool:
+    """Append ``rules`` to a Claude Code settings file's ``permissions.deny``.
+
+    Creates the file (and parents) when missing; returns True when the file
+    changed. Only ever appends what is absent — the user's own permission
+    edits (allow lists included) survive a reinstall untouched. A settings
+    file whose ``permissions``/``deny`` is some other shape is left alone
+    rather than repaired: it is the user's file, and a guard is not worth
+    clobbering whatever they meant.
+    """
+    return _merge_permission_rules(path, "deny", rules)
+
+
+def merge_permission_allow(path: Path, rules: Iterable[str]) -> bool:
+    """Append ``rules`` to a Claude Code settings file's ``permissions.allow``.
+
+    The other half of :func:`merge_permission_deny`, and the same shape on
+    purpose: a **union**, never a replacement. An allow list is something a
+    person grows, so an entry already there stays and a rule already there is
+    not duplicated.
+
+    This is why the claunch MCP rule is planted here rather than declared as a
+    shared settings key: ``claunch apply`` converges a declared value through
+    :func:`dotted_set`, which assigns the leaf — a declared
+    ``permissions.allow`` would replace the whole list and silently drop
+    whatever the person had added. :func:`merge_permission_deny` has always
+    promised the opposite for the neighbouring key; this keeps the promise for
+    this one too.
+    """
+    return _merge_permission_rules(path, "allow", rules)
 
 
 def dotted_get(doc: Mapping, key: str):
