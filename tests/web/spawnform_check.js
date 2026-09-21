@@ -452,6 +452,16 @@ async function main() {
         [form.null_token.disabled, form.borrow.disabled, form.role.disabled,
          form.borrow.value, form.role.value],
         [true, true, false, "", ""]);
+  /* The two reasons a row is shut, kept apart. The policy above opened
+     borrow and null_token; the codex harness is what closed them again. One
+     sentence for both told the operator who HAS unlocked those rows in
+     ~/.claunch.yaml that the unlock did not take. */
+  check("a row the policy opened and the child then shut is not blamed on the policy",
+        [box_["parent-hint"].textContent.includes("stay its parent's"),
+         box_["parent-hint"].textContent.includes(
+           "borrow, null_token are closed by what this child runs, not by " +
+           "the policy — an unlock does not reopen them")],
+        [false, true]);
   check("Codex gets its own runtime panel",
         [box_["new-codex-runtime"].classList.contains("hidden"),
          form.codex_yolo.checked, form.codex_sandbox.checked],
