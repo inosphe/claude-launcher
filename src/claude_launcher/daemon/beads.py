@@ -416,6 +416,49 @@ def workspace_for(cwd: Optional[str]) -> str:
     return found.name if found else ""
 
 
+#: The headings a board issue's description is written under, in order.
+#: The workflows' intake reads these exact strings and ``br lint`` expects
+#: them, so they are a contract with something outside this file rather than
+#: a formatting choice. One tuple, because two functions write a description
+#: here and a third heading set typed into either of them would produce
+#: issues that look right and that the intake step cannot read.
+SPEC_HEADINGS = ("## 목표", "## 범위(포함·제외)", "## 완료 증거 기준", "## 출처")
+
+#: What the 완료 증거 기준 section says when nobody has filled it in. The
+#: same sentence either way it was filed: the assignee is the one who knows.
+SPEC_EVIDENCE = "(the assignee fills this in at intake: test counts, commit hash)"
+
+
+def render_spec(
+    goal: str, *, scope: str, source: str, workspace: str = "",
+    evidence: str = SPEC_EVIDENCE,
+) -> str:
+    """A description in the four sections the workflows read.
+
+    The one place :data:`SPEC_HEADINGS` is turned into text. Its callers
+    differ only in the goal, who filed it and what the scope placeholder
+    says; writing the headings out at each of them is how two issues filed
+    by the same daemon come to carry different spellings of the same
+    section, which nothing reports because each write looks correct on its
+    own.
+
+    ``workspace`` is recorded as YAML front matter above the sections
+    (:mod:`claude_launcher.beads_meta`). An empty one writes no block at
+    all, so a description composed where no workspace is known looks exactly
+    as it did before that existed.
+    """
+    goal_h, scope_h, evidence_h, source_h = SPEC_HEADINGS
+    body = (
+        f"{goal_h}\n{goal.strip()}\n\n"
+        f"{scope_h}\n{scope}\n\n"
+        f"{evidence_h}\n{evidence}\n\n"
+        f"{source_h}\n{source}"
+    )
+    return beads_meta.render(
+        {beads_meta.WORKSPACE: workspace} if workspace else {}, body
+    )
+
+
 def compose_description(
     task: str, *, name: str, parent: Optional[str], text: bool = False,
     workspace: str = "",
@@ -444,50 +487,40 @@ def compose_description(
         if text
         else f"opening task of session {name}"
     )
-    body = (
-        "## 목표\n"
-        f"{task.strip()}\n\n"
-        "## 범위(포함·제외)\n"
-        "(registered at session creation by the claunch daemon — the "
-        "assignee fills this in at intake)\n\n"
-        "## 완료 증거 기준\n"
-        "(the assignee fills this in at intake: test counts, commit hash)\n\n"
-        "## 출처\n"
-        f"{origin}, {_utcnow()}, {source}"
-    )
     # The workspace is recorded at the mint because this is the one moment it
     # is known for certain: the session is being created in a directory right
     # now. Asked for later, it is a guess about where the work belongs.
-    return beads_meta.render(
-        {beads_meta.WORKSPACE: workspace} if workspace else {}, body
+    return render_spec(
+        task,
+        scope=(
+            "(registered at session creation by the claunch daemon — the "
+            "assignee fills this in at intake)"
+        ),
+        source=f"{origin}, {_utcnow()}, {source}",
+        workspace=workspace,
     )
 
 
 def compose_board_description(title: str, *, workspace: str = "") -> str:
     """The description a dashboard-filed issue starts with.
 
-    The same four sections :func:`compose_description` writes, for the same
-    reason -- the workflows' intake reads them and ``br lint`` expects them --
-    but filed by a person at the board rather than minted for a session, so
-    the 출처 line says that and no session is named.
+    The same four sections :func:`compose_description` writes, through the
+    same :func:`render_spec`, but filed by a person at the board rather than
+    minted for a session -- so the 출처 line says that and no session is
+    named.
 
     An operator who typed a description of their own never reaches this: it
     is the template for the one who typed only a title, and every section
     below the goal says who fills it in.
     """
-    body = (
-        "## 목표\n"
-        f"{title.strip()}\n\n"
-        "## 범위(포함·제외)\n"
-        "(filed from the dashboard with a title only -- the assignee fills "
-        "this in at intake)\n\n"
-        "## 완료 증거 기준\n"
-        "(the assignee fills this in at intake: test counts, commit hash)\n\n"
-        "## 출처\n"
-        f"operator (dashboard board form), {_utcnow()}"
-    )
-    return beads_meta.render(
-        {beads_meta.WORKSPACE: workspace} if workspace else {}, body
+    return render_spec(
+        title,
+        scope=(
+            "(filed from the dashboard with a title only -- the assignee "
+            "fills this in at intake)"
+        ),
+        source=f"operator (dashboard board form), {_utcnow()}",
+        workspace=workspace,
     )
 
 
