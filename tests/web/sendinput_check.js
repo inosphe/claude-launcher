@@ -103,15 +103,22 @@ const imageItem = (type, blob) => ({
 /* the page's element lookup, over the elements this strip owns */
 const SCORE_BOX = node("span");
 SCORE_BOX.classes.add("hidden");
-const SCORE_SEL = node("select");
-SCORE_SEL.value = "none";
+/* the feedback radios, one stub per kind: the browser would uncheck the
+   rest of the group on its own, this DOM leaves that to the code under
+   test — which is exactly what the contract checks below read */
+const SCORE_NONE = node("input");
+SCORE_NONE.checked = true;
+const SCORE_REWARD = node("input");
+const SCORE_PENALTY = node("input");
 const SCORE_COUNTS = node("span");
 const $ = (id) => ({
   "term-input-field": FIELD,
   "term-input-send": BTN,
   "term-input-note": NOTE,
   "term-score-goal": SCORE_BOX,
-  "term-score-feedback": SCORE_SEL,
+  "term-score-feedback-none": SCORE_NONE,
+  "term-score-feedback-reward": SCORE_REWARD,
+  "term-score-feedback-penalty": SCORE_PENALTY,
   "term-score-counts": SCORE_COUNTS,
 }[id] || null);
 
@@ -121,15 +128,22 @@ let ACTIVE = FIELD;
 const document = { get activeElement() { return ACTIVE; } };
 
 const ctx = {};
+/* the kinds array is data, not a function: read the declaration out of the
+   source instead of copying its values here, so the two cannot drift */
+const kindsDecl = src.match(/const SCORE_FEEDBACK_KINDS = \[[^\]]*\];/);
+if (!kindsDecl) throw new Error("missing SCORE_FEEDBACK_KINDS");
 new Function(
   "exports", "api", "$", "navigator", "document",
   `let currentName = null;
 let sessionEnded = false;
 let sessionsCache = [];
+${kindsDecl[0]}
 ` + slice("termInputNote") + `
 ` + slice("sendKeyLine") + `
 ` + slice("currentScoreFeedback") + `
 ` + slice("renderScoreGoal") + `
+` + slice("setScoreFeedbackChoice") + `
+` + slice("setScoreFeedbackDisabled") + `
 ` + slice("termInputBlock") + `
 ` + slice("autogrowTermInput") + `
 ` + slice("insertTermInputText") + `
@@ -144,6 +158,8 @@ Object.assign(exports, {
   sendKeyLine,
   termInputBlock,
   termInputNote,
+  renderScoreGoal,
+  currentScoreFeedback,
   onTermInputKeydown,
   onWindowCtrlJ,
   onTermInputPaste,
@@ -255,15 +271,18 @@ async function main() {
     { name: "coder4", status: "idle", score_goal: true, user_reward: 1, user_penalty: 0 },
   ]);
   SCORE_BOX.classes.delete("hidden");
-  SCORE_SEL.value = "penalty";
+  SCORE_NONE.checked = false;
+  SCORE_PENALTY.checked = true;
   b.field.value = "fix the lint";
   const fb = await ctx.sendKeyLine(b.field, b.btn, b.note);
   check("a send carrying feedback returns true", fb === true);
   check("the chosen point rides the one send",
         sent.length === 1 && sent[0].body.feedback === "penalty",
         sent[0] && sent[0].body);
-  check("the choice resets for the next input", SCORE_SEL.value === "none",
-        SCORE_SEL.value);
+  check("the choice resets for the next input",
+        SCORE_NONE.checked === true && SCORE_PENALTY.checked === false &&
+        SCORE_REWARD.checked === false,
+        { none: SCORE_NONE.checked, reward: SCORE_REWARD.checked, penalty: SCORE_PENALTY.checked });
   check("the cache and the counts refresh from the daemon's answer",
         SCORE_COUNTS.textContent === "R1 · P1", SCORE_COUNTS.textContent);
   sent = [];
@@ -273,8 +292,50 @@ async function main() {
   check("the send after the reset carries none again",
         sent.length === 1 && sent[0].body.feedback === "none",
         sent[0] && sent[0].body);
+  /* a point checked behind a hidden control does not ride: the early return
+     in currentScoreFeedback is the only thing keeping it out of the body */
+  sent = [];
+  SCORE_NONE.checked = false;
+  SCORE_REWARD.checked = true;
+  SCORE_BOX.classes.add("hidden");
+  b.field.value = "quiet note";
+  await ctx.sendKeyLine(b.field, b.btn, b.note);
+  check("a checked point behind a hidden control does not ride",
+        sent.length === 1 && sent[0].body.feedback === "none",
+        sent[0] && sent[0].body);
+  SCORE_NONE.checked = true;
+  SCORE_REWARD.checked = false;
+  /* an ended session greys the radios out and shows none, whatever was
+     checked — a disabled point is not a choice the operator can still make */
+  SCORE_BOX.classes.delete("hidden");
+  SCORE_NONE.checked = false;
+  SCORE_PENALTY.checked = true;
+  ctx.setSessions([
+    { name: "coder4", status: "exited", score_goal: true, user_reward: 1, user_penalty: 1 },
+  ]);
+  ctx.setSession("coder4", true);
+  ctx.renderScoreGoal();
+  check("an ended session disables every radio",
+        SCORE_NONE.disabled && SCORE_REWARD.disabled && SCORE_PENALTY.disabled,
+        { none: SCORE_NONE.disabled, reward: SCORE_REWARD.disabled, penalty: SCORE_PENALTY.disabled });
+  check("...and the choice reads none",
+        SCORE_NONE.checked === true && SCORE_PENALTY.checked === false,
+        { none: SCORE_NONE.checked, penalty: SCORE_PENALTY.checked });
+  /* a checked-but-disabled radio reads none: the guard is what stands when
+     the control was greyed out without clearing the mark (sendKeyLine itself
+     refuses an ended session before this point, so this is read directly) */
+  SCORE_PENALTY.checked = true;
+  SCORE_NONE.checked = false;
+  check("a checked-but-disabled point reads none",
+        ctx.currentScoreFeedback() === "none",
+        ctx.currentScoreFeedback());
+  SCORE_PENALTY.checked = false;
+  SCORE_NONE.checked = true;
+  SCORE_NONE.disabled = SCORE_REWARD.disabled = SCORE_PENALTY.disabled = false;
+  SCORE_NONE.checked = true;
   SCORE_BOX.classes.add("hidden");
   ctx.setSessions([]);
+  ctx.setSession("coder4", false);
   reply = { ok: true, doc: {} };
 
   /* ---- a refusal keeps the words and the line ---- */

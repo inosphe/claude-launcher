@@ -1580,7 +1580,10 @@ a.cflow-scope:hover { background: #1d3559; text-decoration: underline; }
 #term-input-field:disabled { opacity: 0.5; cursor: not-allowed; }
 #term-score-goal { display: flex; align-items: center; gap: 0.3rem; flex-wrap: wrap; flex-shrink: 0; }
 #term-score-goal.hidden { display: none; }
-#term-score-feedback { font: inherit; }
+#term-score-goal .term-score-label { font-size: 0.85rem; }
+#term-score-goal .term-score-radios { display: inline-flex; align-items: center; gap: 0.45rem; flex-wrap: wrap; font: inherit; }
+#term-score-goal .term-score-opt { display: inline-flex; align-items: center; gap: 0.15rem; white-space: nowrap; font-size: 0.85rem; cursor: pointer; }
+#term-score-goal .term-score-opt:has(input:disabled) { cursor: default; opacity: 0.6; }
 #term-score-counts { font-size: 0.8rem; font-variant-numeric: tabular-nums; white-space: nowrap; }
 @media (max-width: 700px) {
   #term-input:has(#term-score-goal:not(.hidden)) { flex-wrap: wrap; }

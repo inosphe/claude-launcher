@@ -83,7 +83,7 @@ const root = path.resolve(__dirname, '../../src/claude_launcher/web/static');
     assert.equal(await page.locator('#term-score-counts').innerText(), 'R0 · P0');
     // Choosing feedback never touches the draft it rides with.
     await page.locator('#term-input-field').fill('keep this draft');
-    await page.locator('#term-score-feedback').selectOption('reward');
+    await page.locator('#term-score-feedback-reward').check();
     assert.equal(await page.locator('#term-input-field').inputValue(), 'keep this draft');
     // The send carries one point, the counts refresh, the choice resets.
     await page.locator('#term-input-send').click();
@@ -93,7 +93,8 @@ const root = path.resolve(__dirname, '../../src/claude_launcher/web/static');
     assert.deepEqual(sent.keys, ['keep this draft', 'Enter']);
     await page.waitForFunction(() => sessionsCache[0].user_reward === 1);
     assert.equal(await page.locator('#term-score-counts').innerText(), 'R1 · P0');
-    assert.equal(await page.locator('#term-score-feedback').inputValue(), 'none');
+    assert.equal(await page.locator('#term-score-feedback-none').isChecked(), true);
+    assert.equal(await page.locator('#term-score-feedback-reward').isChecked(), false);
     assert.equal(await page.locator('#term-input-field').inputValue(), '');
     // A send without a choice carries none.
     await page.locator('#term-input-field').fill('plain note');
@@ -102,9 +103,9 @@ const root = path.resolve(__dirname, '../../src/claude_launcher/web/static');
     sent = await page.evaluate(() => requests.filter(r => r.url.endsWith('/keys'))[1].body);
     assert.equal(sent.feedback, 'none');
     await page.waitForFunction(() => sessionsCache[0].user_reward === 1 && sessionsCache[0].user_penalty === 0);
-    // Mobile layout keeps the selector inside the viewport.
+    // Mobile layout keeps the radios inside the viewport.
     await page.setViewportSize({ width: 390, height: 844 });
-    assert.equal(await page.locator('#term-score-feedback').isVisible(), true);
+    assert.equal(await page.locator('#term-score-feedback-reward').isVisible(), true);
     const bounds = await page.locator('#term-score-goal').boundingBox();
     assert.ok(bounds.x >= 0 && bounds.x + bounds.width <= 390);
     // A session without the feature shows no feedback control.
