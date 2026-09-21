@@ -13404,9 +13404,10 @@ let beadsOpen = false;
 let beadsTimer = null;
 let beadsCache = null;     // the last /api/beads payload
 let beadsError = "";
-let beadsLoading = false;  // one incremental page request at a time
-let beadsMore = true;      // whether the stream has another page
-let beadsNextOffset = 0;   // shared page offset, supplied by the daemon
+let beadsLoading = false;  // one page request at a time
+let beadsMore = false;     // whether a page follows the one being shown
+let beadsPage = 0;         // which page is being shown, from 0
+let beadsTotal = null;     // how many issues match the filter, or null
 let beadsFocus = "";       // the issue opened in the detail pane, by id
 let beadsDetail = null;    // its /api/beads/<id> payload
 let beadsFilter = "active";  // status filter: active | <status> | all
@@ -13417,6 +13418,7 @@ let beadsSort = "updated_at";
 let beadsDirection = "desc";
 let beadsWorkspace = "";
 let beadsStreamVersion = 0;
+let beadsRenderedPage = 0; // which page the last render drew, for the scroll
 let beadsSection = "board"; // board | queues | reports
 let beadsQueues = null;    // the last /api/beads/queues payload
 let beadsQueuesError = "";
@@ -13446,8 +13448,13 @@ const BEADS_Q_CELL_CAP = 24;
 
 const BEADS_STATUSES = ["open", "in_ready", "in_progress", "in_review", "blocked", "closed"];
 const BEADS_ACTIVE = new Set(["open", "in_ready", "in_progress", "in_review", "blocked"]);
-const BEADS_STREAM_PAGE = 48;
-const BEADS_STREAM_NEAR_END = 280;
+/* One page of the board. The reader moves between pages with the control
+   under the list; the board is not scrolled into. */
+const BEADS_PAGE_SIZE = 48;
+/* How many numbered buttons the pager draws around the current page before
+   it gives up and writes an ellipsis. A board of 1051 issues is 22 pages at
+   this size, and 22 buttons is a second filter bar nobody asked for. */
+const BEADS_PAGER_SPAN = 2;
 
 function openBeads(id, section) {
   beadsSection = section === "reports" ? "reports"
@@ -13476,50 +13483,52 @@ function stopBeadsPoll() {
 async function refreshBeads() {
   if (!beadsOpen) return;
   if (beadsSection === "queues") { await refreshQueues(); return; }
-  // A refresh only replaces the first page.  It keeps a reader's already
-  // loaded scroll window and avoids repeatedly serializing a large board.
-  await loadBeadsPage({ refresh: true });
+  // The poll re-reads the page the reader is on, and only that one.
+  await loadBeadsPage({ page: beadsPage });
 }
 
+/* Go back to the first page and read it: what a change to the filter, the
+   sort or the priority means, because all three renumber the pages. */
 function restartBeadsStream() {
   beadsStreamVersion++;
   beadsLoading = false;
   beadsCache = null;
   beadsError = "";
-  beadsMore = true;
-  beadsNextOffset = 0;
+  beadsMore = false;
+  beadsPage = 0;
+  beadsTotal = null;
   renderBeads();
-  loadBeadsPage({ reset: true });
+  loadBeadsPage({ page: 0 });
 }
 
-function mergeBeadsPage(data, replaceFirst) {
-  if (!beadsCache || !replaceFirst) {
-    if (!beadsCache) {
-      beadsCache = data;
-      return;
-    }
-  }
-  const oldByRoot = new Map((beadsCache.boards || []).map((b) => [b.root, b]));
-  for (const incoming of data.boards || []) {
-    const old = oldByRoot.get(incoming.root);
-    if (!old) {
-      (beadsCache.boards ||= []).push(incoming);
-      continue;
-    }
-    old.sessions = incoming.sessions || old.sessions;
-    old.error = incoming.error;
-    old.has_more = incoming.has_more;
-    const rows = new Map((old.issues || []).map((i) => [i.id, i]));
-    for (const issue of incoming.issues || []) rows.set(issue.id, issue);
-    old.issues = [...rows.values()];
-    const edges = new Map((old.deps || []).map((d) => [`${d.from}\u0000${d.to}\u0000${d.type}`, d]));
-    for (const edge of incoming.deps || []) {
-      edges.set(`${edge.from}\u0000${edge.to}\u0000${edge.type}`, edge);
-    }
-    old.deps = [...edges.values()];
-  }
-  beadsCache.available = data.available;
-  beadsCache.error = data.error || "";
+/* Show page `n` (0-based), clamped to what the board has. */
+function beadsGoToPage(n) {
+  const last = beadsPageCount() - 1;
+  const want = Math.max(0, last >= 0 ? Math.min(n, last) : n);
+  if (want === beadsPage && beadsCache) return;
+  beadsPage = want;
+  loadBeadsPage({ page: want });
+  renderBeads();
+}
+
+/* How many pages the current filter has, or 0 when the board has not said.
+   `total` is the daemon's count of MATCHING issues (see Board.issue_page),
+   so this is a real page count and not an estimate from what has arrived. */
+function beadsPageCount() {
+  if (beadsTotal === null || beadsTotal === undefined) return 0;
+  return Math.max(1, Math.ceil(beadsTotal / BEADS_PAGE_SIZE));
+}
+
+/* The statuses the daemon should cut the page to, for the current filter.
+   An empty list means every status, which is what `all` asks for. The point
+   of sending them at all is that a page must be a page OF what is drawn:
+   filtered after the cut, page 3 of a board showing active work held however
+   many of its 48 rows happened to be active, and whole pages were blank
+   while the board still had hundreds of matching issues. */
+function beadsStatusQuery() {
+  if (beadsFilter === "all") return [];
+  if (beadsFilter === "active") return [...BEADS_ACTIVE];
+  return [beadsFilter];
 }
 
 async function refreshBeadsDetail() {
@@ -13537,34 +13546,38 @@ async function refreshBeadsDetail() {
   } catch { /* preserve the last detail while the connection is unavailable */ }
 }
 
+/* Read one page and show it. The page REPLACES what was on screen -- there
+   is no accumulated window any more, so a reader on page 9 of a board of
+   1051 issues holds 48 rows rather than 480. */
 async function loadBeadsPage(opts = {}) {
-  const reset = !!opts.reset;
-  const refresh = !!opts.refresh;
   if (!beadsOpen || beadsSection !== "board" || beadsLoading) return;
-  if (!reset && !refresh && !beadsMore) return;
-  const offset = refresh ? 0 : beadsNextOffset;
+  const page = Math.max(0, opts.page === undefined ? beadsPage : opts.page);
+  const offset = page * BEADS_PAGE_SIZE;
   const version = beadsStreamVersion;
   beadsLoading = true;
   try {
-    const q = new URLSearchParams({ offset: String(offset), limit: String(BEADS_STREAM_PAGE) });
+    const q = new URLSearchParams({ offset: String(offset), limit: String(BEADS_PAGE_SIZE) });
     q.set("sort", beadsSort);
     q.set("direction", beadsDirection);
     if (beadsPri !== null) q.set("priority", String(beadsPri));
+    for (const status of beadsStatusQuery()) q.append("status", status);
     const resp = await api(`/api/beads/stream?${q}`);
     if (version !== beadsStreamVersion) return;
     if (resp.status === 404) {
-      beadsError = "this daemon predates incremental Beads loading — restart the daemon";
+      beadsError = "this daemon predates the paged Beads board — restart the daemon";
       return;
     }
     const data = await resp.json().catch(() => ({}));
     if (version !== beadsStreamVersion) return;
     if (!resp.ok) { beadsError = data.error || `HTTP ${resp.status}`; return; }
-    if (reset) beadsCache = null;
-    mergeBeadsPage(data, refresh);
+    beadsCache = data;
+    beadsPage = page;
     beadsError = data.error || "";
     beadsMore = !!data.has_more;
-    beadsNextOffset = data.next_offset === null || data.next_offset === undefined
-      ? offset : data.next_offset;
+    // A daemon that does not report a total leaves the pager with next and
+    // previous alone, which is still navigation -- it just cannot say how
+    // many pages there are.
+    beadsTotal = typeof data.total === "number" ? data.total : null;
     await refreshBeadsDetail();
     refreshBeadsRelated();
   } catch { return; }   // auth overlay is up, or the daemon is away
@@ -13576,12 +13589,48 @@ async function loadBeadsPage(opts = {}) {
   }
 }
 
-function onBeadsCanvasScroll() {
-  const canvas = $("beads-canvas");
-  if (!canvas || beadsLoading || !beadsMore) return;
-  if (canvas.scrollHeight - canvas.scrollTop - canvas.clientHeight < BEADS_STREAM_NEAR_END) {
-    loadBeadsPage();
+/* The control under the list: first / previous / a few numbered pages /
+   next / last, and a line saying which rows of how many are on screen. */
+function beadsPager() {
+  const bar = el("div", "beads-pager");
+  const pages = beadsPageCount();
+  const known = pages > 0;
+  const mk = (label, target, opts = {}) => {
+    const b = el("button", "wf-btn" + (opts.on ? " option on" : " clear"), label);
+    b.type = "button";
+    if (opts.title) b.title = opts.title;
+    if (opts.disabled) b.disabled = true;
+    else b.addEventListener("click", () => beadsGoToPage(target));
+    return b;
+  };
+  bar.appendChild(mk("« First", 0, { disabled: beadsPage === 0, title: "the first page" }));
+  bar.appendChild(mk("‹ Prev", beadsPage - 1, { disabled: beadsPage === 0 }));
+  if (known) {
+    const from = Math.max(0, Math.min(beadsPage - BEADS_PAGER_SPAN, pages - 1 - BEADS_PAGER_SPAN * 2));
+    const to = Math.min(pages - 1, Math.max(beadsPage + BEADS_PAGER_SPAN, BEADS_PAGER_SPAN * 2));
+    if (from > 0) bar.appendChild(el("span", "beads-pager-gap", "…"));
+    for (let n = Math.max(0, from); n <= to; n++) {
+      bar.appendChild(mk(String(n + 1), n, { on: n === beadsPage }));
+    }
+    if (to < pages - 1) bar.appendChild(el("span", "beads-pager-gap", "…"));
+  } else {
+    bar.appendChild(el("span", "beads-pager-gap", `page ${beadsPage + 1}`));
   }
+  bar.appendChild(mk("Next ›", beadsPage + 1, { disabled: !beadsMore }));
+  bar.appendChild(mk("Last »", Math.max(0, pages - 1), {
+    disabled: !known || beadsPage === pages - 1, title: "the last page",
+  }));
+  const first = beadsPage * BEADS_PAGE_SIZE + 1;
+  const count = ((beadsCache && beadsCache.boards) || [])
+    .filter((b) => b.root === beadsWorkspace)
+    .reduce((n, b) => n + (b.issues || []).length, 0);
+  const where = beadsTotal === null
+    ? `${count} issue${count === 1 ? "" : "s"} on page ${beadsPage + 1}`
+    : `${first}–${first + count - 1} of ${beadsTotal}` +
+      (known ? `  ·  page ${beadsPage + 1} of ${pages}` : "");
+  bar.appendChild(el("span", "beads-pager-where wf-note",
+    beadsLoading ? "loading…" : where));
+  return bar;
 }
 
 /* The board an issue id belongs to, from the last listing. */
@@ -13679,7 +13728,13 @@ function beadsFilterBar() {
   for (const f of ["active", ...BEADS_STATUSES, "all"]) {
     const b = el("button", "seq-tab" + (beadsFilter === f ? " on" : ""), f);
     b.type = "button";
-    b.addEventListener("click", () => { beadsFilter = f; renderBeads(); });
+    b.addEventListener("click", () => {
+      if (beadsFilter === f) return;
+      // The status filter is the daemon's now, so changing it renumbers the
+      // pages: go back to the first one and read it.
+      beadsFilter = f;
+      restartBeadsStream();
+    });
     bar.appendChild(b);
   }
   // The fixed priority set is visible before its first page lands and maps
@@ -14481,6 +14536,8 @@ function renderBeads() {
   if (formInUse(view)) return;
   const previousCanvas = view.querySelector("#beads-canvas");
   const previousCanvasTop = previousCanvas ? previousCanvas.scrollTop : 0;
+  const previousCanvasPage = beadsRenderedPage;
+  beadsRenderedPage = beadsPage;
   view.innerHTML = "";
   const head = el("div", "wf-head");
   head.appendChild(el("h2", null, "Beads"));
@@ -14527,21 +14584,23 @@ function renderBeads() {
   }
   const canvas = el("div", "beads-canvas");
   canvas.id = "beads-canvas";
-  canvas.addEventListener("scroll", onBeadsCanvasScroll);
   if (!boards.length) {
     canvas.appendChild(el("p", "wf-note",
       "no board: none of the sessions' directories is a repository with a " +
       ".beads/ — 'claunch beads init --prefix <name>' at its root starts one"));
   }
   for (const b of boards.filter((b) => b.root === beadsWorkspace)) canvas.appendChild(beadsBoardSection(b));
-  if (beadsLoading) canvas.appendChild(el("p", "wf-note beads-stream-note", "loading more issues…"));
-  else if (beadsMore) canvas.appendChild(el("p", "wf-note beads-stream-note", "scroll for more issues"));
-  else canvas.appendChild(el("p", "wf-note beads-stream-note", "end of board"));
   list.appendChild(canvas);
+  if (boards.length) list.appendChild(beadsPager());
   body.appendChild(list);
   if (beadsFocus) body.appendChild(beadsDetailPane());
   view.appendChild(body);
-  if (previousCanvasTop) requestAnimationFrame(() => { canvas.scrollTop = previousCanvasTop; });
+  // A poll of the SAME page keeps the reader's scroll position; moving to
+  // another page starts at the top, because the rows under the cursor are
+  // not the rows that were there.
+  if (previousCanvasTop && previousCanvasPage === beadsPage) {
+    requestAnimationFrame(() => { canvas.scrollTop = previousCanvasTop; });
+  }
 }
 
 function beadsPageTabs() {

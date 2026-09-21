@@ -108,12 +108,27 @@ class FakeBr:
             rows = list(self.issues.values())
             if "--priority" in opts:
                 rows = [r for r in rows if r.get("priority") == int(opts["--priority"])]
+            # `--status` is repeatable and the real br ORs the values; a
+            # comma-joined single value matches nothing, which is the bug
+            # claunch-beads-list-comma-status-tmh records, so the fake is
+            # literal about it and only ever matches whole values.
+            wanted = _opts_all(rest, "--status")
+            if wanted:
+                rows = [r for r in rows if r.get("status") in wanted]
+            elif "--all" not in rest:
+                rows = [r for r in rows if r.get("status") != "closed"]
+            # The count br reports is of every MATCHING issue, taken before
+            # the window -- it is what a page control counts pages with.
+            total = len(rows)
             offset = int(opts.get("--offset", 0))
             limit = int(opts.get("--limit", 0))
             rows = rows[offset:]
             if limit:
                 rows = rows[:limit]
-            return 0, json.dumps({"issues": rows}), ""
+            return 0, json.dumps({
+                "issues": rows, "total": total,
+                "offset": offset, "limit": limit,
+            }), ""
         if cmd == "show":
             i = self.issues.get(rest[0])
             return (0, json.dumps([i]), "") if i else (1, "", f"no issue {rest[0]}")
@@ -165,6 +180,11 @@ class FakeBr:
             i["close_reason"] = _opts(rest[1:]).get("--reason")
             return 0, json.dumps([i]), ""
         return 1, "", f"unknown command {cmd}"
+
+
+def _opts_all(args, flag):
+    """Every value given for a repeatable flag, in order."""
+    return [args[i + 1] for i in range(len(args) - 1) if args[i] == flag]
 
 
 def _opts(args):
@@ -964,6 +984,190 @@ def test_stream_route_validates_and_returns_the_continuation(home, tmp_path, rep
             assert "--reverse" not in listing
         finally:
             await client.close()
+
+    asyncio.run(run())
+
+
+def test_a_page_is_a_page_of_what_the_filter_shows(repo):
+    """The status filter is applied in the board, not after the page was cut.
+
+    Filtered afterwards, a page of 2 rows over a board whose closed issues
+    outnumber its open ones holds however many of those 2 happened to be
+    open -- a different count on every page, and pages that draw nothing
+    while the board still has matching issues left.
+    """
+    br = FakeBr()
+    br.add(id="open-1", status="open")
+    br.add(id="done-1", status="closed")
+    br.add(id="open-2", status="open")
+    br.add(id="done-2", status="closed")
+    br.add(id="open-3", status="open")
+    board = _board(br, repo)
+
+    async def run():
+        view = await board.stream_view(
+            [], extra_roots=[str(repo)], limit=2,
+            statuses=["open", "in_ready", "in_progress", "in_review", "blocked"],
+        )
+        entry = view["boards"][0]
+        assert [i["id"] for i in entry["issues"]] == ["open-1", "open-2"]
+        assert entry["has_more"] is True
+        # The count is of the MATCHING issues, which is what a page control
+        # counts pages with -- three open, not five on the board.
+        assert entry["total"] == 3 and view["total"] == 3
+        listing = [c for c in br.calls if "list" in c][-1]
+        assert _opts_all(listing, "--status") == [
+            "open", "in_ready", "in_progress", "in_review", "blocked",
+        ]
+
+        board.invalidate(repo)
+        tail = await board.stream_view(
+            [], extra_roots=[str(repo)], offset=2, limit=2,
+            statuses=["open", "in_ready", "in_progress", "in_review", "blocked"],
+        )
+        assert [i["id"] for i in tail["boards"][0]["issues"]] == ["open-3"]
+        assert tail["has_more"] is False and tail["next_offset"] is None
+
+    asyncio.run(run())
+
+
+def test_every_status_is_the_page_when_none_is_asked_for(repo):
+    """No ``statuses`` is every status, closed ones included -- the ``all``
+    tab, and what every caller that predates the filter still gets."""
+    br = FakeBr()
+    br.add(id="open-1", status="open")
+    br.add(id="done-1", status="closed")
+    board = _board(br, repo)
+
+    async def run():
+        view = await board.stream_view([], extra_roots=[str(repo)], limit=10)
+        assert [i["id"] for i in view["boards"][0]["issues"]] == ["open-1", "done-1"]
+        assert view["boards"][0]["total"] == 2
+        listing = [c for c in br.calls if "list" in c][-1]
+        assert "--status" not in listing and "--all" in listing
+
+    asyncio.run(run())
+
+
+def test_the_stream_route_takes_repeated_status_and_refuses_a_typo(home, tmp_path, repo):
+    br = FakeBr()
+    br.add(id="a", status="open")
+    br.add(id="b", status="in_review")
+    br.add(id="c", status="closed")
+    board = _board(br, repo)
+
+    async def run():
+        mgr = SessionManager(idle_threshold=0.5, scrollback=200, restore_default=True)
+        mm = MeshManager(mgr, root=tmp_path / "mesh")
+        client = await _serve(mgr, mm, board)
+        try:
+            resp = await client.get(
+                f"/api/beads/stream?cwd={repo}&status=open&status=in_review",
+                headers=BEARER,
+            )
+            doc = await resp.json()
+            assert resp.status == 200, doc
+            entry = next(b for b in doc["boards"] if b["root"] == str(repo))
+            assert [i["id"] for i in entry["issues"]] == ["a", "b"]
+            assert entry["total"] == 2
+            assert doc["statuses"] == ["open", "in_review"]
+            # A status the board cannot hold is a typo, and a typo that
+            # silently lists nothing reads as an empty board.
+            bad = await client.get(
+                f"/api/beads/stream?cwd={repo}&status=in_progres", headers=BEARER,
+            )
+            assert bad.status == 400
+            assert "in_progres" in (await bad.json())["error"]
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_a_listing_carries_an_excerpt_and_the_detail_carries_the_text(repo):
+    """A listing draws an excerpt of a description and nothing more, so it
+    serializes an excerpt. The whole text stays one request away."""
+    body = "## goal\n" + ("x" * 4000)
+    br = FakeBr()
+    br.add(id="long", description=body)
+    br.add(id="short", description="fits")
+    board = _board(br, repo)
+
+    async def run():
+        view = await board.stream_view([], extra_roots=[str(repo)], limit=10)
+        rows = {i["id"]: i for i in view["boards"][0]["issues"]}
+        assert len(rows["long"]["description"]) == beads_mod.PREVIEW_CHARS
+        assert body.startswith(rows["long"]["description"])
+        assert rows["long"]["description_full"] is False
+        # A description that fits is untouched and says nothing about it.
+        assert rows["short"]["description"] == "fits"
+        assert "description_full" not in rows["short"]
+        # And the cached listing the daemon's own lifecycle work reads still
+        # holds the text whole -- the cut is on the response only.
+        cached = await board.issues(repo)
+        assert next(r for r in cached if r["id"] == "long")["description"] == body
+        # As does the detail read.
+        assert (await board.show(repo, "long"))["description"] == body
+
+    asyncio.run(run())
+
+
+def test_edges_come_from_one_read_of_the_board_database(tmp_path):
+    """``br dep list`` per issue is one process each; the same answer is one
+    query of the file br already keeps them in."""
+    import sqlite3
+
+    root = tmp_path / "repo"
+    (root / ".beads").mkdir(parents=True)
+    conn = sqlite3.connect(root / ".beads" / "beads.db")
+    conn.execute(
+        "CREATE TABLE dependencies (issue_id TEXT, depends_on_id TEXT, type TEXT)"
+    )
+    conn.executemany(
+        "INSERT INTO dependencies VALUES (?, ?, ?)",
+        [("kid", "epic", "parent-child"), ("kid", "epic", "blocks")],
+    )
+    conn.commit()
+    conn.close()
+
+    br = FakeBr()
+    br.add(id="epic")
+    br.add(id="kid")
+    br.link("kid", "epic")
+    br.link("kid", "epic", kind="blocks")
+    board = _board(br, root)
+
+    async def run():
+        view = await board.fleet_view([], extra_roots=[str(root)])
+        entry = next(b for b in view["boards"] if b["root"] == str(root))
+        assert entry["deps"] == [
+            {"from": "kid", "to": "epic", "type": "parent-child"},
+            {"from": "kid", "to": "epic", "type": "blocks"},
+        ]
+        # and not one fork of `br dep list`
+        assert [c for c in br.calls if "dep" in c] == []
+
+    asyncio.run(run())
+
+
+def test_a_board_without_that_table_still_draws_its_edges(repo):
+    """The ``repo`` fixture's database is an empty file: no table to read.
+    The edges are an ornament over a listing that is already useful, so the
+    reading falls back to ``br`` rather than the page losing them."""
+    br = FakeBr()
+    br.add(id="epic")
+    br.add(id="kid")
+    br.link("kid", "epic")
+    board = _board(br, repo)
+
+    async def run():
+        assert await board._edges_from_db(repo) is None
+        view = await board.fleet_view([], extra_roots=[str(repo)])
+        entry = next(b for b in view["boards"] if b["root"] == str(repo))
+        assert entry["deps"] == [
+            {"from": "kid", "to": "epic", "type": "parent-child"},
+        ]
+        assert sum(1 for c in br.calls if "dep" in c) == 1
 
     asyncio.run(run())
 

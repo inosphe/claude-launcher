@@ -73,6 +73,7 @@ import json
 import logging
 import re
 import shutil
+import sqlite3
 import time
 from dataclasses import replace
 from datetime import datetime, timezone
@@ -86,6 +87,11 @@ log = logging.getLogger("claude_launcher.daemon.beads")
 
 #: Issue statuses that mean "somebody still means to do this".
 ACTIVE_STATUSES = ("open", "in_ready", "in_progress", "in_review", "blocked")
+
+#: Every status a board issue can hold -- the active ones plus ``closed``.
+#: What a status filter coming in over the API is checked against, so a
+#: typo answers 400 instead of silently listing nothing.
+KNOWN_STATUSES = ACTIVE_STATUSES + ("closed",)
 
 #: The label every issue the daemon mints carries, so the sweep can tell its
 #: own placeholder from an issue an agent or a human wrote.
@@ -138,6 +144,19 @@ CACHE_TTL = 2.0
 #: that were read and the rest of the board stays flat, which is the same shape
 #: a board with no edges draws; the page is never held up for it.
 DEPS_SCAN_LIMIT = 200
+
+#: How much of an issue's description a LISTING carries.
+#:
+#: The dashboard draws an excerpt of a listed issue and nothing more -- six
+#: lines or 400 characters in the rail's hover card (``beadPopExcerpt`` in
+#: ``web/static/app.js``), nothing at all in a board row -- and the detail
+#: pane reads the full text from ``/api/beads/<id>``. So a listing that
+#: serialized every description in full was sending text no reader rendered:
+#: measured on this machine's own board (1051 issues), ``/api/beads`` was
+#: 3.1 MB and ``/api/beads/queues`` 2.3 MB, both of them mostly description.
+#: The cut is on the response only; :meth:`Board.issues` still caches the
+#: text whole, because the daemon's own lifecycle reads need it.
+PREVIEW_CHARS = 700
 
 #: A wind-down: how long the agent has to react to the block at all before it
 #: is treated as not listening, and the ceiling on the whole turn after that.
@@ -327,6 +346,30 @@ def queue_summary(queue: Sequence[dict]) -> dict:
         "blocked": sum(1 for i in queue if i.get("status") == "blocked"),
         "next": waiting[0].get("id") if waiting else None,
     }
+
+
+def preview_row(row: dict) -> dict:
+    """``row`` with its description cut to :data:`PREVIEW_CHARS`.
+
+    Always a copy. The row it is given belongs to the cached listing that
+    :meth:`Board.issues` hands to the daemon's own lifecycle work, which
+    reads the description whole -- trimming in place would take the text away
+    from a reader that needs it and leave no trace of having done so.
+
+    ``description_full`` is ``False`` when something was actually cut, so a
+    client can tell a description that ends there from one that continues in
+    ``/api/beads/<id>``. A row whose description fits carries no such key and
+    is unchanged apart from being a copy.
+    """
+    text = row.get("description")
+    if not isinstance(text, str) or len(text) <= PREVIEW_CHARS:
+        return dict(row)
+    return {**row, "description": text[:PREVIEW_CHARS], "description_full": False}
+
+
+def preview_rows(rows: Sequence[dict]) -> List[dict]:
+    """:func:`preview_row` over a listing."""
+    return [preview_row(r) for r in rows]
 
 
 def assign_note(issue_id: str, target: str, was: str) -> str:
@@ -784,7 +827,7 @@ class Board:
         #: separate from ``_cache`` because a full listing is useful to the
         #: daemon's lifecycle work, while the dashboard must not ask a large
         #: board to serialize every issue just to paint its first viewport.
-        self._page_cache: Dict[tuple, Tuple[float, List[dict], bool]] = {}
+        self._page_cache: Dict[tuple, Tuple[float, List[dict], bool, Optional[int]]] = {}
         #: The dependency edges of a board, cached beside its listing and
         #: dropped with it -- an edge read is derived from the listing it was
         #: taken against, so keeping one past the other would draw a hierarchy
@@ -944,14 +987,28 @@ class Board:
         self, root: Path, *, offset: int = 0, limit: int = 50,
         priority: Optional[int] = None,
         sort: str = "updated_at", direction: str = "desc",
-    ) -> Tuple[List[dict], bool]:
+        statuses: Optional[Sequence[str]] = None,
+    ) -> Tuple[List[dict], bool, Optional[int]]:
         """One bounded page of a board in the requested order.
 
-        ``br list`` performs the offset and priority filtering in the board's
-        database.  Asking for one extra row makes the continuation marker
-        independent of a separate count query.  The small local slice keeps
-        the contract correct for older ``br`` versions (and test runners)
-        that ignore pagination flags.
+        ``br list`` performs the offset, priority and status filtering in the
+        board's database.  Asking for one extra row makes the continuation
+        marker independent of a separate count query.  The small local slice
+        keeps the contract correct for older ``br`` versions (and test
+        runners) that ignore pagination flags.
+
+        ``statuses`` is the filter the page is NUMBERED under, which is why
+        it belongs here rather than in the client: a reader looking at open
+        work wants page 2 of the open issues, and a page filtered after it
+        was cut holds however many of its fifty rows happened to be open --
+        a different count on every page, and pages that are entirely empty
+        while the board still has hundreds of matching issues. ``None`` is
+        every status, closed ones included.
+
+        Answers ``(page, has_more, total)``.  ``total`` is how many issues
+        match the filter on the whole board, which is what a page control
+        needs to say how many pages there are; it is ``None`` when ``br``
+        does not report one.
         """
         offset = max(0, offset)
         limit = max(1, limit)
@@ -959,11 +1016,12 @@ class Board:
             raise ValueError("unsupported sort field")
         if direction not in {"asc", "desc"}:
             raise ValueError("unsupported sort direction")
-        key = (str(root), offset, limit, priority, sort, direction)
+        wanted = tuple(dict.fromkeys(statuses or ()))
+        key = (str(root), offset, limit, priority, sort, direction, wanted)
         now = self._clock()
         hit = self._page_cache.get(key)
         if hit and now - hit[0] < CACHE_TTL:
-            return hit[1], hit[2]
+            return hit[1], hit[2], hit[3]
         args = [
             "list", "--all", "--limit", str(limit + 1), "--offset", str(offset),
             "--sort", sort,
@@ -973,20 +1031,81 @@ class Board:
             args.append("--reverse")
         if priority is not None:
             args.extend(["--priority", str(priority)])
+        for status in wanted:
+            # Repeated, never comma-joined: a comma list is accepted and
+            # matches nothing (claunch-beads-list-comma-status-tmh).
+            args.extend(["--status", status])
         data = await self.br(root, args)
         rows = data.get("issues") if isinstance(data, dict) else data
         rows = [r for r in (rows or []) if isinstance(r, dict)]
+        total = data.get("total") if isinstance(data, dict) else None
+        if not isinstance(total, int):
+            total = None
         if priority is not None:
             rows = [r for r in rows if r.get("priority") == priority]
+        if wanted:
+            rows = [r for r in rows if r.get("status") in wanted]
         # A compatible but pre-pagination ``br`` can return the full list.
         # Its response is larger than the requested extra row, which is an
-        # unambiguous signal to apply the requested window locally.
+        # unambiguous signal to apply the requested window locally -- and
+        # then the rows in hand ARE the whole match, so they are the count.
         if len(rows) > limit + 1:
+            total = len(rows)
             rows = rows[offset:offset + limit + 1]
         has_more = len(rows) > limit
         page = rows[:limit]
-        self._page_cache[key] = (now, page, has_more)
-        return page, has_more
+        self._page_cache[key] = (now, page, has_more, total)
+        return page, has_more, total
+
+    async def _edges_from_db(self, root: Path) -> Optional[List[dict]]:
+        """Every dependency edge on ``root``'s board in one read, or ``None``.
+
+        The per-issue path in :meth:`edges` forks ``br dep list`` once for
+        each issue that has any, and this board's lock serialises them. One
+        fork costs about 0.6 s on this machine, so a board with 59 such
+        issues spent most of a page load on edges: ``/api/beads`` measured
+        13.5 s and ``/api/beads/stream?limit=50`` 7.8 s, against 0.66 s for
+        the listing itself.
+
+        ``br`` stores those edges in a SQLite table, so the same answer is
+        one query. The file is opened read-only and never written.
+
+        Answers ``None`` rather than raising for every reason this reading
+        can be unavailable -- a JSONL board with no database, a schema
+        without this table, a locked file -- and the caller falls back to
+        ``br``. The edges are an ornament over a listing that is already
+        useful, and a board that could not be drawn as a forest is still a
+        board.
+        """
+        db = root / cli_beads.BEADS_DIR / cli_beads.DB_NAME
+        if not db.is_file():
+            return None
+
+        def read() -> List[dict]:
+            # A URI so the connection can be read-only; the path is quoted
+            # because a '?' or '#' in it would otherwise start the query
+            # part of the URI.
+            quoted = db.as_posix().replace("?", "%3f").replace("#", "%23")
+            conn = sqlite3.connect(f"file:{quoted}?mode=ro", uri=True, timeout=2.0)
+            try:
+                rows = conn.execute(
+                    "SELECT issue_id, depends_on_id, type FROM dependencies"
+                ).fetchall()
+            finally:
+                conn.close()
+            # Direction is ``br``'s own and matches the per-issue path: the
+            # depending issue is stored as ``issue_id``, which for a
+            # parent-child edge is the CHILD.
+            return [
+                {"from": str(src), "to": str(dst), "type": str(kind or "")}
+                for src, dst, kind in rows if src and dst
+            ]
+
+        try:
+            return await asyncio.to_thread(read)
+        except Exception as exc:  # no such table, locked, unreadable
+            log.debug("beads: no bulk edge read for %s: %s", root, exc)
+            return None
 
     async def edges(
         self, root: Path, rows: Sequence[dict], *, cache_key: Optional[tuple] = None,
@@ -1018,6 +1137,17 @@ class Board:
         hit = cache.get(key)
         if hit and now - hit[0] < CACHE_TTL:
             return hit[1]
+        # One read of the board's database answers for every issue at once.
+        # When it does, the page-scoped cache key stops mattering: the result
+        # is the whole graph rather than one page's slice of it, so it is
+        # cached under the board and every page shares it.
+        whole = self._deps.get(str(root))
+        if whole and now - whole[0] < CACHE_TTL:
+            return whole[1]
+        bulk = await self._edges_from_db(root)
+        if bulk is not None:
+            self._deps[str(root)] = (now, bulk)
+            return bulk
         wanted = [
             r.get("id") for r in rows
             if r.get("id") and (r.get("dependency_count") or 0)
@@ -1113,7 +1243,9 @@ class Board:
         except cli_beads.BeadsError as exc:
             view["error"] = str(exc)
             return view
-        view["issues"] = match(rows, sdef.name, issue=sdef.issue, task=sdef.task)
+        view["issues"] = preview_rows(
+            match(rows, sdef.name, issue=sdef.issue, task=sdef.task)
+        )
         wd = self.winddowns.get(sdef.name)
         if wd:
             view["winddown"] = wd
@@ -1191,7 +1323,9 @@ class Board:
                         {"name": s.sdef.name, "via": m["via"], "status": s.status()}
                     )
             for raw in rows:
-                entry["issues"].append({**raw, "sessions": owners.get(raw.get("id"), [])})
+                entry["issues"].append(
+                    {**preview_row(raw), "sessions": owners.get(raw.get("id"), [])}
+                )
             # The edges the page nests the board by. Read after the issues and
             # from them, so a board that could not be listed never reaches here
             # -- there is nothing to hang a hierarchy on.
@@ -1207,19 +1341,32 @@ class Board:
         self, sessions: Sequence, extra_roots: Sequence[str] = (), *,
         offset: int = 0, limit: int = 50, priority: Optional[int] = None,
         sort: str = "updated_at", direction: str = "desc",
+        statuses: Optional[Sequence[str]] = None,
     ) -> dict:
-        """A bounded, resumable page for each board on the Beads screen.
+        """One bounded page of each board on the Beads screen.
 
         The cursor is an offset shared by the boards in this response.  A
-        fleet normally has one board; with several boards, the client keeps
-        requesting while any board still has another page.  Existing
-        :meth:`fleet_view` remains the complete compatibility response used
-        by callers that need every issue at once.
+        fleet normally has one board; with several boards, the client asks
+        for the same window of each.  Existing :meth:`fleet_view` remains the
+        complete compatibility response used by callers that need every issue
+        at once.
+
+        ``statuses`` narrows the page in the board's database rather than
+        after it was cut, so the page the reader is on is a page OF what is
+        being shown.  Each board entry carries ``total`` -- how many issues
+        match on that board -- so a page control can say how many pages there
+        are instead of only whether one more exists.
+
+        Descriptions are cut to :data:`PREVIEW_CHARS` (see
+        :func:`preview_row`): a listing draws an excerpt, and the full text
+        is one request away at ``/api/beads/<id>``.
         """
         result = {
             "available": self.available(), "boards": [], "offset": offset,
             "limit": limit, "priority": priority, "has_more": False,
             "next_offset": None,
+            "statuses": list(statuses or ()),
+            "total": None,
         }
         if not result["available"]:
             result["error"] = f"'{cli_beads.BINARY}' is not installed on the daemon machine"
@@ -1228,7 +1375,7 @@ class Board:
         for root in order:
             entry: dict = {
                 "root": str(root), "issues": [], "deps": [], "sessions": [],
-                "error": None, "has_more": False,
+                "error": None, "has_more": False, "total": None,
             }
             members = by_root[str(root)]
             entry["sessions"] = [
@@ -1236,9 +1383,9 @@ class Board:
                 for s in members
             ]
             try:
-                rows, entry["has_more"] = await self.issue_page(
+                rows, entry["has_more"], entry["total"] = await self.issue_page(
                     root, offset=offset, limit=limit, priority=priority,
-                    sort=sort, direction=direction,
+                    sort=sort, direction=direction, statuses=statuses,
                 )
             except cli_beads.BeadsError as exc:
                 entry["error"] = str(exc)
@@ -1251,15 +1398,22 @@ class Board:
                         {"name": s.sdef.name, "via": m["via"], "status": s.status()}
                     )
             entry["issues"] = [
-                {**raw, "sessions": owners.get(raw.get("id"), [])} for raw in rows
+                {**preview_row(raw), "sessions": owners.get(raw.get("id"), [])}
+                for raw in rows
             ]
             try:
                 entry["deps"] = await self.edges(
-                    root, rows, cache_key=(str(root), offset, limit, priority, sort, direction),
+                    root, rows,
+                    cache_key=(
+                        str(root), offset, limit, priority, sort, direction,
+                        tuple(statuses or ()),
+                    ),
                 )
             except cli_beads.BeadsError as exc:
                 log.debug("beads: no edge read for %s: %s", root, exc)
             result["has_more"] = result["has_more"] or entry["has_more"]
+            if entry["total"] is not None:
+                result["total"] = (result["total"] or 0) + entry["total"]
             result["boards"].append(entry)
         if result["has_more"]:
             result["next_offset"] = offset + limit
@@ -1329,8 +1483,11 @@ class Board:
                     "status": s.status() if s is not None else None,
                     "issue": s.sdef.issue if s is not None else None,
                     "cflow": None,
-                    "issues": queue,
-                    "created": created,
+                    # The cards carry an excerpt, not the text: every lane on
+                    # this page repeats its issues' descriptions, which made
+                    # the response 2.3 MB on this machine's own board.
+                    "issues": preview_rows(queue),
+                    "created": preview_rows(created),
                     "summary": queue_summary(queue),
                 }
                 if s is not None and cflow_for is not None:
@@ -1341,7 +1498,7 @@ class Board:
                 entry["lanes"].append(lane)
             pool = [r for r in active if not r.get("assignee")]
             pool.sort(key=_queue_rank)
-            entry["unassigned"] = [dict(r) for r in pool]
+            entry["unassigned"] = preview_rows(pool)
             result["boards"].append(entry)
         return result
 

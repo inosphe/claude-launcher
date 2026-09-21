@@ -2127,6 +2127,16 @@ body.term-split #terminal { flex: var(--split-term, 0.6) 1 0; min-height: 80px; 
   border-bottom: 1px solid #22262d;
 }
 .beads-stream-note { text-align: center; margin: 10px 0 2px; }
+/* The page control under the board. It sits outside .beads-canvas so it
+   stays put while the rows of the page it belongs to are scrolled. */
+.beads-pager {
+  display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+  padding: 10px 0 2px;
+}
+.beads-pager .wf-btn { padding: 3px 9px; font-size: 12px; min-width: 0; }
+.beads-pager .wf-btn:disabled { opacity: .38; cursor: default; }
+.beads-pager-gap { color: #7d8590; font-size: 12px; padding: 0 2px; }
+.beads-pager-where { margin-left: auto; white-space: nowrap; }
 .beads-board { margin-bottom: 18px; }
 .beads-board-head { display: flex; align-items: baseline; gap: 12px; margin-bottom: 6px; flex-wrap: wrap; }
 .beads-board-head h3 { font-size: 13px; color: #c6cdd5; overflow-wrap: anywhere; }

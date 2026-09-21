@@ -7070,7 +7070,14 @@ async def h_beads_fleet(request: web.Request) -> web.Response:
 
 
 async def h_beads_stream(request: web.Request) -> web.Response:
-    """One bounded Beads page for the fixed-height board viewport."""
+    """One numbered Beads page.
+
+    ``status`` may be repeated and narrows the page in the board's database,
+    so the page the reader is on is a page of what is being drawn rather than
+    fifty rows of which some happen to match. Omitted, every status is
+    included. Each board entry carries ``total``, which is what the page
+    control counts pages with.
+    """
     sort = request.query.get("sort", "updated_at")
     direction = request.query.get("direction", "desc")
     if sort not in {"updated_at", "created_at", "priority", "title"}:
@@ -7096,9 +7103,20 @@ async def h_beads_stream(request: web.Request) -> web.Response:
     cwd = request.query.get("cwd")
     if cwd:
         extra.insert(0, cwd)
+    statuses = [s for s in request.query.getall("status", []) if s]
+    unknown = [s for s in statuses if s not in beads_mod.KNOWN_STATUSES]
+    if unknown:
+        return json_error(
+            400,
+            "unknown status "
+            + ", ".join(repr(s) for s in unknown)
+            + " (known: "
+            + ", ".join(beads_mod.KNOWN_STATUSES)
+            + ")",
+        )
     view = await request.app["beads"].stream_view(
         list(manager.list()), extra, offset=offset, limit=limit, priority=priority,
-        sort=sort, direction=direction,
+        sort=sort, direction=direction, statuses=statuses,
     )
     return json_response(view)
 
