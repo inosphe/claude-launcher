@@ -477,9 +477,20 @@ def test_merge_body_with_an_empty_spec_is_the_identity():
 # --------------------------------------------------------------------------- #
 # records and the aggregation `claunch tps` prints
 # --------------------------------------------------------------------------- #
+def _ago(secs):
+    """A record timestamp ``secs`` seconds in the past, in the shim's format.
+
+    ``session_summary``'s window is bounded in time, so how old a record is
+    is part of what these tests assert. A literal date cannot say that: it is
+    a fixed distance from whenever the suite happens to run, and every such
+    record reads as idle.
+    """
+    return time.strftime(metering.TS_FORMAT, time.localtime(time.time() - secs))
+
+
 def _rec(**kw):
     base = {
-        "ts": "2026-09-11T10:00:00+0900", "session": "s1", "model": "m", "status": 200,
+        "ts": _ago(0), "session": "s1", "model": "m", "status": 200,
         "output_tokens": 100, "input_tokens": 10, "cache_read": 0, "stream": True,
         "ttft_ms": 200, "tps": 50.0, "tps_total": 40.0, "counted": True,
     }
@@ -781,28 +792,30 @@ def test_session_summary_is_the_last_call_plus_a_rolling_median(home):
     for i in range(12):
         metering.append("fp1", _rec(session="s1", tps=10.0 + i, tps_total=40.0 + i,
                                      ttft_ms=100 + i, output_tokens=5,
-                                     ts=f"2026-09-11T10:00:{i:02d}+0900"))
+                                     ts=_ago(60 - i)))
+    newest = _ago(40)
     metering.append("fp2", _rec(session="s1", tps=99.0, tps_total=99.0, ttft_ms=50,
                                  model="other", output_tokens=7,
-                                 ts="2026-09-11T10:01:00+0900"))  # newest, on another shim
-    metering.append("fp1", _rec(session="s2", tps=1.0, tps_total=1.0, ts="2026-09-11T10:02:00+0900"))
+                                 ts=newest))  # newest, on another shim
+    metering.append("fp1", _rec(session="s2", tps=1.0, tps_total=1.0, ts=_ago(30)))
     got = metering.session_summary("s1")
-    assert got["tps"] == 99.0 and got["model"] == "other" and got["ts"] == "2026-09-11T10:01:00+0900"
+    assert got["tps"] == 99.0 and got["model"] == "other" and got["ts"] == newest
     assert got["window"] == metering.SUMMARY_WINDOW  # the last 10 of 13, across both files
     # Median of the whole-call rates in the window: the last nine of the run
     # (43..51) and the newest 99, of which the middle pair is 47 and 48.
     assert got["tps_median"] == 47.5
     assert got["tps_median_n"] == metering.SUMMARY_WINDOW
     assert got["counted"] is True and got["ttft_ms"] == 50
+    assert got["idle"] is False and got["max_age_s"] == int(metering.SUMMARY_MAX_AGE)
     assert metering.session_summary("s3") is None  # never measured: absence, not zero
     recs = metering.recent("s1", limit=3)
     assert [r["tps"] for r in recs] == [20.0, 21.0, 99.0]
 
 
 def test_session_summary_keeps_an_uncounted_last_call_visible(home):
-    metering.append("fp1", _rec(session="s1", tps=40.0, ts="2026-09-11T10:00:00+0900"))
+    metering.append("fp1", _rec(session="s1", tps=40.0, ts=_ago(21)))
     metering.append("fp1", _rec(session="s1", tps=None, counted=False, status=502, output_tokens=None,
-                                 ts="2026-09-11T10:00:01+0900"))
+                                 ts=_ago(20)))
     got = metering.session_summary("s1")
     assert got["counted"] is False and got["status"] == 502 and got["tps"] is None
     assert got["tps_median"] == 40.0  # the median is over the counted calls in the window
@@ -816,22 +829,120 @@ def test_session_summary_reports_a_whole_body_call_with_its_first_byte(home):
     token to have timed for an answer that arrived in one piece.
     """
     metering.append("fp1", _rec(session="s1", stream=False, tps=None, tps_total=2.41,
-                                 ttft_ms=None, ttfb_ms=200, ts="2026-09-11T10:00:00+0900"))
+                                 ttft_ms=None, ttfb_ms=200, ts=_ago(20)))
     got = metering.session_summary("s1")
     assert got["tps"] == 2.41
     assert got["ttft_ms"] is None and got["ttfb_ms"] == 200
     assert got["tps_median"] == 2.41 and got["tps_median_n"] == 1
 
 
+def test_the_summary_window_is_bounded_in_time_and_not_only_in_count(home):
+    """The median is over recent calls, not over the last ten whenever they were.
+
+    Measured on this machine before the bound existed: a live session's "last
+    10 calls" spanned 124349 seconds (34.5 hours), and the UI labelled the
+    median of them "over the last 10 calls". Count alone is not a window.
+    """
+    for i in range(7):  # yesterday's run, fast
+        metering.append("fp1", _rec(session="s1", tps_total=500.0, ts=_ago(40000 + i)))
+    for i in range(3):  # this minute, slow
+        metering.append("fp1", _rec(session="s1", tps_total=20.0, ts=_ago(30 - i)))
+    got = metering.session_summary("s1")
+    assert got["idle"] is False
+    assert got["window"] == 3 and got["tps_median_n"] == 3
+    assert got["tps_median"] == 20.0  # yesterday's 500s are outside the window
+    # The records themselves are untouched: `recent` is the raw reader that
+    # the /api/metering listing uses, and it still hands back all ten.
+    assert len(metering.recent("s1")) == 10
+
+
+def test_a_session_that_went_quiet_reports_none_instead_of_its_last_number(home):
+    """The reported defect: an idle session kept showing an old rate.
+
+    What the row keeps is when it last called out and on what. What it must
+    not keep is the number, which measured a call that is over.
+    """
+    metering.append("fp1", _rec(session="s1", tps_total=42.5, model="deepseek-flash",
+                                 ts=_ago(metering.SUMMARY_MAX_AGE + 60)))
+    got = metering.session_summary("s1")
+    assert got["idle"] is True
+    assert got["tps"] is None and got["tps_median"] is None and got["tps_median_n"] == 0
+    assert got["ttft_ms"] is None and got["output_tokens"] is None
+    assert got["window"] == 0
+    assert got["model"] == "deepseek-flash"  # still says what it last talked to
+    assert got["age_s"] >= metering.SUMMARY_MAX_AGE
+    assert got["max_age_s"] == int(metering.SUMMARY_MAX_AGE)
+    # The same records with the bound switched off are what the row used to
+    # show, and what was reported: an hour-old number standing as a rate.
+    unbounded = metering.session_summary("s1", max_age=0)
+    assert unbounded["idle"] is False and unbounded["tps"] == 42.5
+
+
+def test_gone_quiet_and_never_measured_are_two_states_not_one(home):
+    """``attach`` must tell them apart: one draws "none", the other nothing."""
+    metering.append("fp1", _rec(session="quiet", ts=_ago(metering.SUMMARY_MAX_AGE + 1)))
+    metering.append("fp1", _rec(session="busy", ts=_ago(5)))
+    quiet = metering.attach({"name": "quiet"})
+    assert quiet["tps"]["idle"] is True and quiet["tps"]["tps"] is None
+    assert metering.attach({"name": "busy"})["tps"]["idle"] is False
+    assert "tps" not in metering.attach({"name": "never"})  # OAuth route, no shim
+
+
+def test_one_fresh_call_reopens_the_window_on_a_session_that_was_idle(home):
+    metering.append("fp1", _rec(session="s1", tps_total=42.5,
+                                 ts=_ago(metering.SUMMARY_MAX_AGE + 60)))
+    assert metering.session_summary("s1")["idle"] is True
+    metering.append("fp1", _rec(session="s1", tps_total=7.5, ts=_ago(1)))
+    got = metering.session_summary("s1")
+    assert got["idle"] is False and got["tps"] == 7.5
+    # The call from before the quiet stretch does not come back with it.
+    assert got["window"] == 1 and got["tps_median"] == 7.5
+
+
+def test_the_window_bound_is_configurable_and_zero_switches_it_off(home):
+    assert metering.summary_max_age() == metering.SUMMARY_MAX_AGE
+    store.update(lambda doc: doc.update({"metering": {"enabled": True, "summary_max_age": 30}}))
+    assert metering.summary_max_age() == 30.0
+    metering.append("fp1", _rec(session="s1", tps_total=42.5, ts=_ago(120)))
+    assert metering.session_summary("s1")["idle"] is True  # 120s > the configured 30
+    # Zero is the opt-out: the count-only window this had before.
+    store.update(lambda doc: doc.update({"metering": {"summary_max_age": 0}}))
+    assert metering.summary_max_age() == 0.0
+    got = metering.session_summary("s1")
+    assert got["idle"] is False and got["tps"] == 42.5 and got["max_age_s"] is None
+    # A value that is not a number is ignored, not raised: this is read on the
+    # daemon's session poll and must not stop the list being served.
+    store.update(lambda doc: doc.update({"metering": {"summary_max_age": "soon"}}))
+    assert metering.summary_max_age() == metering.SUMMARY_MAX_AGE
+    # Metering switched off wholesale still parses as a max age.
+    store.update(lambda doc: doc.update({"metering": False}))
+    assert metering.summary_max_age() == metering.SUMMARY_MAX_AGE
+
+
+def test_record_age_reads_the_offset_and_gives_up_on_an_unreadable_stamp(home):
+    from datetime import datetime, timedelta, timezone
+
+    now = datetime(2026, 9, 21, 12, 0, 0, tzinfo=timezone.utc)
+    assert metering.record_age({"ts": "2026-09-21T20:55:00+0900"}, now=now) == 300.0
+    assert metering.record_age({"ts": "2026-09-21T11:55:00+0000"}, now=now) == 300.0
+    for bad in ({"ts": "nonsense"}, {"ts": "2026-09-21T11:55:00"}, {"ts": ""}, {}):
+        assert metering.record_age(bad, now=now) is None
+    # A record with no readable stamp stays in the window rather than being
+    # thrown out: an unreadable clock is not evidence that the call was old.
+    metering.append("fp1", _rec(session="s1", tps_total=11.0, ts="nonsense"))
+    got = metering.session_summary("s1")
+    assert got["idle"] is False and got["tps"] == 11.0 and got["age_s"] is None
+
+
 def test_tail_reader_only_reads_the_end_and_rereads_on_change(home, monkeypatch):
     monkeypatch.setattr(metering, "TAIL_BYTES", 600)
     for i in range(20):
-        metering.append("fp1", _rec(session="s1", tps=float(i), ts=f"2026-09-11T10:00:{i:02d}+0900"))
+        metering.append("fp1", _rec(session="s1", tps=float(i), ts=_ago(60 - i)))
     path = metering.record_file("fp1")
     recs = metering._tail_records(path)
     assert 0 < len(recs) < 20 and recs[-1]["tps"] == 19.0  # a bounded read off the end
     assert metering._tail_records(path) is recs  # unchanged file: the cached parse
-    metering.append("fp1", _rec(session="s1", tps=77.0, ts="2026-09-11T10:01:00+0900"))
+    metering.append("fp1", _rec(session="s1", tps=77.0, ts=_ago(10)))
     assert metering._tail_records(path)[-1]["tps"] == 77.0  # it grew: re-read
 
 
@@ -857,8 +968,8 @@ def test_metering_api_serves_a_sessions_records_and_the_session_list_carries_the
     }))
     metering.append("fp1", _rec(session="s1", tps=42.5, tps_total=42.5, ttft_ms=800,
                                  model="deepseek-flash",
-                                 ts="2026-09-11T10:00:00+0900"), upstream="https://d/v1")
-    metering.append("fp1", _rec(session="other", tps=5.0, ts="2026-09-11T10:00:01+0900"))
+                                 ts=_ago(6)), upstream="https://d/v1")
+    metering.append("fp1", _rec(session="other", tps=5.0, ts=_ago(5)))
     bearer = {"Authorization": "Bearer sekrit"}
 
     async def run():
@@ -911,3 +1022,28 @@ def test_web_page_draws_tps_in_the_rail_the_card_the_header_and_over_the_pty():
     for sel in ("#session-list .rail-tps-line", ".sess-brief-tps", ".badge.tps", "#term-tps-overlay"):
         assert sel in css
     assert "pointer-events: none" in css.split("#term-tps-overlay {", 1)[1].split("}", 1)[0]
+
+
+def test_web_page_draws_an_idle_session_as_none_rather_than_its_last_number():
+    """The four surfaces all read `idle` before they read `tps`.
+
+    The rail line, the card chip, the header badge and the PTY overlay all go
+    through `tpsText`, so the word is written once; the overlay has its own
+    branch for the big number and is asserted separately. The stylesheet gets
+    the `idle` class so the row can be told from a number that is merely
+    getting old.
+    """
+    from pathlib import Path
+
+    static = Path(metering.__file__).with_name("web") / "static"
+    js = (static / "app.js").read_text(encoding="utf-8")
+    css = (static / "style.css").read_text(encoding="utf-8")
+    assert 'if (t.idle) return "tps none";' in js  # the one-line glance
+    assert 'if (t && t.idle) return " stale idle";' in js  # and its class
+    assert "!t.idle && t.counted && Number.isFinite(t.tps)" in js  # the PTY overlay's big number
+    assert "no call in the last ${fmtAge(t.max_age_s)}" in js  # the tooltip says why
+    assert "`median over ${t.tps_median_n} calls`" in js  # no longer "the last 10 calls"
+    assert "in the last ${fmtAge(t.max_age_s)}" in js  # the median names its time bound too
+    assert ".sess-brief-tps.idle" in css and ".badge.tps.idle" in css
+    assert "#session-list .rail-tps-line.idle .rail-tps" in css
+    assert "#term-tps-overlay.idle" in css

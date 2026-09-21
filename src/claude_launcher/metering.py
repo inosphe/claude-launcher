@@ -40,6 +40,7 @@ import statistics
 import threading
 import time
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional
 
@@ -51,6 +52,9 @@ CONFIG_KEY = "metering"
 #: Process-level override of :data:`CONFIG_KEY` (``0`` off, ``1`` on).
 ENV_OVERRIDE = "CLAUNCH_METERING"
 
+#: Key under a dict-valued ``metering:`` that overrides :data:`SUMMARY_MAX_AGE`.
+MAX_AGE_KEY = "summary_max_age"
+
 #: Request header the daemon adds so the shim can attribute a request.
 SESSION_HEADER = "x-claunch-session"
 
@@ -61,6 +65,11 @@ CUSTOM_HEADERS_ENV = "ANTHROPIC_CUSTOM_HEADERS"
 #: Non-streaming bodies are buffered up to this many bytes for the usage
 #: lookup; a bigger one is forwarded as-is and recorded without token counts.
 BUFFER_LIMIT = 8 * 1024 * 1024
+
+#: How a record's ``ts`` is written and read back: local time with its own UTC
+#: offset. The offset is what makes an age computable from a file that may
+#: carry records written on either side of a clock change.
+TS_FORMAT = "%Y-%m-%dT%H:%M:%S%z"
 
 
 # --------------------------------------------------------------------------- #
@@ -380,7 +389,7 @@ class Meter:
         if out_tokens and total_s > 0:
             tps_total = round(out_tokens / total_s, 2)
         return {
-            "ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+            "ts": time.strftime(TS_FORMAT),
             "session": self.session,
             "path": self.path,
             "status": self.status,
@@ -604,8 +613,48 @@ def by_key(records: Iterable[dict], key: str) -> Dict[str, dict]:
 #: long the file has grown.
 TAIL_BYTES = 256 * 1024
 
-#: The rolling window ``session_summary`` computes its median over.
+#: The rolling window ``session_summary`` computes its median over: how many
+#: calls at most. On its own this is not a window -- a session that called ten
+#: times over a day and a half has its "last 10 calls" spread across that day
+#: and a half -- so :data:`SUMMARY_MAX_AGE` bounds the same window in time and
+#: the summary is taken over what satisfies both.
 SUMMARY_WINDOW = 10
+
+#: The other axis of that window: how long a call keeps describing a session,
+#: in seconds. A session whose newest call is older than this has no current
+#: throughput to show, and ``session_summary`` says so (``idle``) instead of
+#: leaving the last number standing.
+#:
+#: Ten minutes is where the UI already stopped believing the number -- it drew
+#: a reading older than that dimmed -- so this makes the reading go away at
+#: the point it was already being disclaimed, rather than at a new one.
+#: Override with ``metering.summary_max_age``; ``0`` switches the bound off.
+SUMMARY_MAX_AGE = 600.0
+
+
+def summary_max_age(doc: Optional[dict] = None) -> float:
+    """How long a call keeps describing a session, in seconds.
+
+    :data:`SUMMARY_MAX_AGE` unless the config file overrides it with
+    ``metering.summary_max_age`` (the same dict-valued ``metering:`` section
+    ``enabled`` reads). ``0`` switches the bound off, which restores the
+    count-only window this had before -- available for a reader who wants the
+    last ten calls whenever they happened, and not the default, because that
+    window has no upper bound in time.
+
+    A value that is not a number is ignored rather than raising: this is read
+    on the daemon's session poll, and a typo in the config file must not stop
+    the session list from being served.
+    """
+    doc = store.load() if doc is None else doc
+    section = doc.get(CONFIG_KEY)
+    if isinstance(section, dict) and section.get(MAX_AGE_KEY) is not None:
+        try:
+            return max(0.0, float(section[MAX_AGE_KEY]))
+        except (TypeError, ValueError):
+            return SUMMARY_MAX_AGE
+    return SUMMARY_MAX_AGE
+
 
 #: Per-session summary key hung on the session record (see :func:`attach`).
 INFO_KEY = "tps"
@@ -664,41 +713,115 @@ def recent(session: str, *, limit: int = SUMMARY_WINDOW) -> List[dict]:
     return out[-limit:] if limit else out
 
 
-def session_summary(session: str) -> Optional[dict]:
+def record_age(record: dict, *, now: Optional[datetime] = None) -> Optional[float]:
+    """Seconds since ``record`` was written, or ``None`` when it cannot be read.
+
+    ``ts`` is local time carrying its own UTC offset (:data:`TS_FORMAT`), so
+    the subtraction is correct for a file that spans a clock change or was
+    carried over from another offset.
+
+    A stamp that will not parse gives ``None`` rather than a large age: not
+    being able to read a clock is not evidence that the call was old, and the
+    callers below treat ``None`` as "leave it in the window".
+    """
+    stamp = record.get("ts")
+    if not stamp:
+        return None
+    try:
+        when = datetime.strptime(str(stamp), TS_FORMAT)
+    except (TypeError, ValueError):
+        return None
+    if when.tzinfo is None:
+        return None
+    now = datetime.now(timezone.utc) if now is None else now
+    return (now - when).total_seconds()
+
+
+def _in_window(record: dict, now: Optional[datetime], max_age: float) -> bool:
+    """Whether ``record`` is recent enough to be part of the current window."""
+    if not max_age:
+        return True
+    age = record_age(record, now=now)
+    return age is None or age <= max_age
+
+
+def session_summary(
+    session: str,
+    *,
+    now: Optional[datetime] = None,
+    max_age: Optional[float] = None,
+) -> Optional[dict]:
     """What a session row shows: its latest call and a short rolling median.
 
-    ``None`` when the session has no records at all -- absence, so a reader
-    cannot draw "never measured" as a slow session. ``last`` is the newest
-    record whether or not it was counted (an error answer still says when
-    the session last called out); the medians are over the counted ones in
-    the window.
+    The window is bounded on both axes -- at most :data:`SUMMARY_WINDOW`
+    calls, and only those made within :func:`summary_max_age` seconds. The
+    count alone was not a window: measured on this machine's own records, a
+    live session's "last 10 calls" spanned 124349 seconds (34.5 hours), and a
+    median over calls 34 hours apart describes no moment at all.
+
+    Three answers, and they are three different facts:
+
+    * ``None`` -- the session has no records. Absence, so a reader cannot
+      draw "never measured" as a slow session; :func:`attach` leaves the key
+      off entirely.
+    * ``idle`` true -- it has records and none is recent enough to describe
+      now. The row keeps saying when the session last called out and on what,
+      and carries no rate at all. The previous behaviour was to keep showing
+      the last number, which is how a session that had been quiet for an hour
+      still read as a throughput.
+    * ``idle`` false -- the rates are from the bounded window above.
 
     ``tps`` is the last call's :func:`reported_tps` -- tokens over the whole
-    call, one definition for every row.
+    call, one definition for every row. ``last`` is the newest record whether
+    or not it was counted (an error answer still says when the session last
+    called out); the medians are over the counted ones in the window.
+
+    ``now`` and ``max_age`` are injection points for tests and for a caller
+    that already knows both; left out, the clock and the config file answer.
     """
     recs = recent(session, limit=SUMMARY_WINDOW)
     if not recs:
         return None
+    max_age = summary_max_age() if max_age is None else max(0.0, float(max_age))
     last = recs[-1]
-    tps = [v for v in (reported_tps(r) for r in recs) if v is not None]
-    ttft = [float(r["ttft_ms"]) for r in recs if r.get("ttft_ms") is not None]
-    return {
+    age = record_age(last, now=now)
+    # Records arrive oldest first, so a newest one that is out of the window
+    # puts every one of them out of it: one test answers both questions.
+    window = [r for r in recs if _in_window(r, now, max_age)] if max_age else recs
+    out = {
         "ts": last.get("ts"),
         "model": last.get("model"),
         "status": last.get("status"),
         "counted": bool(last.get("counted")),
-        "tps": reported_tps(last),
-        "ttft_ms": last.get("ttft_ms"),
-        "ttfb_ms": last.get("ttfb_ms"),
-        "output_tokens": last.get("output_tokens"),
-        "input_tokens": last.get("input_tokens"),
-        "cache_read": last.get("cache_read"),
-        "window": len(recs),
-        "tps_median": round(statistics.median(tps), 2) if tps else None,
-        "tps_median_n": len(tps),
-        "ttft_ms_median": int(statistics.median(ttft)) if ttft else None,
+        "idle": not window,
+        "age_s": int(age) if age is not None else None,
+        "max_age_s": int(max_age) if max_age else None,
+        "window": len(window),
         "upstream": last.get("upstream"),
     }
+    if not window:
+        # Every rate field is present and empty rather than missing, so a
+        # reader that only knows the old shape draws no number either.
+        out.update(
+            tps=None, ttft_ms=None, ttfb_ms=None,
+            output_tokens=None, input_tokens=None, cache_read=None,
+            tps_median=None, tps_median_n=0, ttft_ms_median=None,
+        )
+        return out
+    tps = [v for v in (reported_tps(r) for r in window) if v is not None]
+    ttft = [float(r["ttft_ms"]) for r in window if r.get("ttft_ms") is not None]
+    out.update(
+        tps=reported_tps(last),
+        ttft_ms=last.get("ttft_ms"),
+        ttfb_ms=last.get("ttfb_ms"),
+        output_tokens=last.get("output_tokens"),
+        input_tokens=last.get("input_tokens"),
+        cache_read=last.get("cache_read"),
+        tps_median=round(statistics.median(tps), 2) if tps else None,
+        tps_median_n=len(tps),
+        ttft_ms_median=int(statistics.median(ttft)) if ttft else None,
+    )
+    return out
 
 
 def attach(info: dict) -> dict:
@@ -707,6 +830,12 @@ def attach(info: dict) -> dict:
     The same shape of hook as ``daemon/ctxsize.attach``: the key is absent
     rather than null when the session has no records, so the UI draws
     nothing rather than a zero.
+
+    A session that has records but has been quiet longer than
+    :func:`summary_max_age` still gets the key, carrying ``idle`` and no
+    rate. The two are different facts and the UI draws them differently:
+    nothing at all for a session that was never measured, "none" plus the age
+    of the last call for one that has gone quiet.
     """
     name = info.get("name")
     if name:
