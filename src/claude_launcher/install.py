@@ -105,6 +105,28 @@ GATE_DENY_RULES = tuple(
     for suffix in ("", ":*")
 )
 
+#: The claunch MCP server, allowed to the agent as one server-scoped rule.
+#:
+#: The other half of the deny rules above, planted in the same file for the
+#: same reason: the harness permission layer is the one place that knows *who*
+#: issued a call.
+#:
+#: Denying the agent the human CLI is what makes the MCP gate commands the
+#: agent's only channel. But a session in Claude Code's ``auto`` mode reads
+#: the deny list, then sees the MCP tool producing the same effect, and a
+#: classifier handed only that list calls it "tool-switching circumvention of
+#: an explicit deny rule". The session is then left with no way to advance its
+#: own run -- and the effect it was denied is one the MCP tool does not
+#: actually have: ``select`` on a ``user`` chooser records a proposal, it does
+#: not answer the gate. Allow rules are consulted *before* that classifier, so
+#: naming the server here is what keeps the agent's own channel open.
+#:
+#: Server-scoped (``mcp__claunch``) rather than one rule per tool, because the
+#: split this guard draws is between channels, not between tools. Same form
+#: the project's own ``.claude/settings.local.json`` already uses for another
+#: MCP server; measured in ``claunch-1o3o``.
+GATE_ALLOW_RULES = (f"mcp__{MCP_NAME}",)
+
 
 def mcp_server_def() -> dict:
     """The stdio server entry for the merged MCP bridge.
@@ -119,10 +141,14 @@ def mcp_server_def() -> dict:
 
 
 def _gate_guard_lines(settings_path: Path) -> List[str]:
-    """Merge :data:`GATE_DENY_RULES` into one settings file; report it."""
-    changed = settings.merge_permission_deny(settings_path, GATE_DENY_RULES)
-    note = "" if changed else " (already present)"
-    return [f"gate guard (cflow human commands) -> {settings_path}{note}"]
+    """Merge both halves of the gate guard into one settings file; report it."""
+    denied = settings.merge_permission_deny(settings_path, GATE_DENY_RULES)
+    allowed = settings.merge_permission_allow(settings_path, GATE_ALLOW_RULES)
+    note = "" if (denied or allowed) else " (already present)"
+    return [
+        f"gate guard (cflow human commands, {MCP_NAME} MCP allowed) "
+        f"-> {settings_path}{note}"
+    ]
 
 
 def _skill_lines(skills_dir: Path) -> List[str]:
