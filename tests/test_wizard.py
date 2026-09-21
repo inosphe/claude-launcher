@@ -64,6 +64,19 @@ class FakeSources(wizard.Sources):
         return [
             {"name": "api", "path": "/srv/api", "exists": True},
             {"name": "gone", "path": "/srv/gone", "exists": False},
+            {"name": "ops", "path": "/srv/ops", "exists": True},
+        ]
+
+    def projects(self):
+        # As /api/projects publishes them: the default first, and each
+        # carrying the resolved directory of its default workspace.
+        return [
+            {"name": "default", "default_workspace": None,
+             "default_cwd": None, "is_default": True},
+            {"name": "api", "default_workspace": "api",
+             "default_cwd": "/srv/api", "is_default": False},
+            {"name": "ops", "default_workspace": "ops",
+             "default_cwd": "/srv/ops", "is_default": False},
         ]
 
     def roles(self):
@@ -256,6 +269,129 @@ def test_the_directory_starts_where_the_command_was_typed():
     wiz = form()
     assert wiz.value("cwd") == wizard.os.path.abspath("/work/repo")
     assert wiz.field("cwd").options[0].label == "this directory"
+
+
+def test_project_is_asked_above_the_directory_it_answers():
+    """The row order carries the dependency: picking a project fills the
+    Directory row below it, so it has to be read first."""
+    wiz = form()
+    keys = [f.key for f in wiz.fields]
+    assert keys.index("project") == keys.index("cwd") - 1
+    assert isinstance(wiz.field("project"), wizard.ChoiceField)
+
+
+def test_the_project_row_opens_on_the_default_project():
+    wiz = form()
+    assert [o.value for o in wiz.field("project").options] == [
+        "default", "api", "ops",
+    ]
+    assert wiz.value("project") == "default"
+    # Second column: the workspace the project starts its sessions in.
+    assert wiz.field("project").options[1].detail == "api"
+
+
+def test_picking_a_project_moves_the_directory_to_its_workspace():
+    wiz = form()
+    assert wiz.value("cwd") == wizard.os.path.abspath("/work/repo")
+    pick(wiz, "project", "api")
+    assert wiz.value("cwd") == "/srv/api"
+    # And a second pick moves it off the first project's workspace, which is
+    # still an answer the form supplied rather than one anybody chose.
+    pick(wiz, "project", "ops")
+    assert wiz.value("cwd") == "/srv/ops"
+
+
+def test_a_directory_picked_by_hand_survives_a_project_change():
+    """The project fills the Directory row as a default only -- the same rule
+    the web form applies (``applyProjectDefaultCwd``)."""
+    wiz = form()
+    pick(wiz, "cwd", "ops")
+    assert wiz.value("cwd") == "/srv/ops"
+    pick(wiz, "project", "api")
+    assert wiz.value("cwd") == "/srv/ops"
+
+
+def test_a_project_with_no_workspace_sends_the_directory_back():
+    """Keeping the previous project's workspace would file the session under
+    one project and start it in another's checkout."""
+    wiz = form()
+    pick(wiz, "project", "api")
+    assert wiz.value("cwd") == "/srv/api"
+    pick(wiz, "project", "default")
+    assert wiz.value("cwd") == wizard.os.path.abspath("/work/repo")
+
+
+def test_an_unregistered_default_workspace_reads_as_no_default():
+    """A project keeps its setting when the workspace is unregistered, and
+    the daemon then publishes a blank ``default_cwd``."""
+    class StaleSources(FakeSources):
+        def projects(self):
+            return [
+                {"name": "default", "default_workspace": None,
+                 "default_cwd": None, "is_default": True},
+                {"name": "api", "default_workspace": "api",
+                 "default_cwd": "/srv/api", "is_default": False},
+                {"name": "old", "default_workspace": "unregistered",
+                 "default_cwd": None, "is_default": False},
+            ]
+
+    wiz = form(sources=StaleSources())
+    pick(wiz, "project", "api")
+    assert wiz.value("cwd") == "/srv/api"
+    pick(wiz, "project", "old")
+    assert wiz.value("cwd") == wizard.os.path.abspath("/work/repo")
+
+
+def test_the_project_travels_in_the_answers():
+    wiz = form()
+    answers = argparse.Namespace()
+    wiz.apply(answers)
+    assert answers.project == "default"
+    pick(wiz, "project", "api")
+    wiz.apply(answers)
+    assert answers.project == "api"
+    assert answers.cwd == "/srv/api"
+
+
+def test_a_typed_project_starts_in_its_workspace_like_the_flag_does():
+    """``--project api`` without ``-c`` starts there without the wizard
+    (cli_sessions._cmd_new_session), so the form opens on the same answer."""
+    defaults = argparse.Namespace(project="api")
+    wiz = wizard.Wizard(FakeSources(), cwd="/work/repo", defaults=defaults)
+    assert wiz.value("project") == "api"
+    assert wiz.value("cwd") == "/srv/api"
+
+
+def test_a_typed_directory_outranks_the_typed_project():
+    defaults = argparse.Namespace(project="api", cwd="/srv/ops")
+    wiz = wizard.Wizard(FakeSources(), cwd="/work/repo", defaults=defaults)
+    assert wiz.value("project") == "api"
+    assert wiz.value("cwd") == wizard.os.path.abspath("/srv/ops")
+
+
+def test_a_project_the_daemon_does_not_list_still_reaches_the_check():
+    """Dropping it would file the session under the default; kept, it reaches
+    ``projects.require``, which refuses it by name."""
+    defaults = argparse.Namespace(project="ghost")
+    wiz = wizard.Wizard(FakeSources(), cwd="/work/repo", defaults=defaults)
+    assert wiz.value("project") == "ghost"
+    answers = argparse.Namespace()
+    wiz.apply(answers)
+    assert answers.project == "ghost"
+
+
+def test_a_daemon_too_old_to_serve_projects_shows_no_project_row():
+    class OldSources(FakeSources):
+        def projects(self):
+            return []
+
+    wiz = form(sources=OldSources())
+    assert wiz.field("project").hidden
+    assert wiz.value("cwd") == wizard.os.path.abspath("/work/repo")
+    answers = argparse.Namespace()
+    wiz.apply(answers)
+    # No key at all is what tells the daemon to file it under the default.
+    assert answers.project is None
 
 
 def test_the_form_defaults_to_a_real_profile():

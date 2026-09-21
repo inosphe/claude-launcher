@@ -1455,6 +1455,7 @@ claunch new-session
  > Profile : Harness  work/claude
    Borrow          (this profile's own token)
    Null token      no - inject the profile's token
+   Project         default
    Directory       this directory  F:\works\claude-launcher
    Worktree        (none) - work in the directory as it stands
    Role            (no role)

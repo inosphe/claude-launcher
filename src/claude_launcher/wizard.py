@@ -392,6 +392,17 @@ class Sources:
     def workspaces(self) -> List[dict]:
         return []
 
+    def projects(self) -> List[dict]:
+        """The projects a session can be filed under, the default one first.
+
+        Rows exactly as ``/api/projects`` publishes them
+        (:meth:`projects.Project.to_dict`): ``name``, ``default_workspace``,
+        ``default_cwd``, ``is_default``. Empty from a daemon too old to serve
+        them, and the form then has no Project row to show -- the launch files
+        under the default project, which is what it did before the row existed.
+        """
+        return []
+
     def roles(self) -> List[dict]:
         return []
 
@@ -522,6 +533,9 @@ class DaemonSources(Sources):
 
     def workspaces(self) -> List[dict]:
         return self._get("workspaces", "/api/workspaces", "workspaces", [])
+
+    def projects(self) -> List[dict]:
+        return self._get("projects", "/api/projects", "projects", [])
 
     def roles(self) -> List[dict]:
         return self._get("roles", "/api/roles", "roles", [])
@@ -1873,12 +1887,60 @@ class Wizard(Form):
         if get("null_token"):
             null.select(True)
 
+        # Above the Directory row because it answers it: picking a project
+        # moves the directory to that project's default workspace. The web
+        # form's first group is ordered the same way round (index.html,
+        # "Where it works").
+        self._project_rows: List[dict] = [
+            row for row in (self.sources.projects() or []) if row.get("name")
+        ]
+        project = ChoiceField(
+            key="project", label="Project",
+            hint="which project the session is filed under; picking one moves "
+                 "the Directory row to its default workspace",
+            options=[
+                Option(
+                    str(row.get("name")), str(row.get("name")),
+                    str(row.get("default_workspace") or ""),
+                )
+                for row in self._project_rows
+            ],
+        )
+        # The daemon lists the default project first and marks it, so the row
+        # opens on the answer nobody has to give.
+        for i, row in enumerate(self._project_rows):
+            if row.get("is_default"):
+                project.index = i
+                break
+        preset_project = str(get("project") or "")
+        if preset_project and not project.select(preset_project):
+            # A project this daemon does not list still has to reach
+            # `projects.require`, which refuses it by name and says which ones
+            # exist. Dropping it here would file the session under the default
+            # instead of refusing anything.
+            project.options.append(Option(preset_project, preset_project, ""))
+            project.index = len(project.options) - 1
+        # A daemon too old to publish projects has no row to show.
+        project.hidden = not project.options
+
         directory = ChoiceField(
             key="cwd", label="Directory",
             hint="where the session runs; register more with 'claunch workspace add'",
             options=self._directory_options(get("cwd")),
         )
         directory.select(os.path.abspath(get("cwd")) if get("cwd") else self.cwd)
+        # Without the wizard, `--project NAME` and no `-c` starts the session
+        # in that project's default workspace (`cli_sessions._cmd_new_session`).
+        # The form opens on the same answer, rather than filing the session
+        # under one project while starting it where the command was typed.
+        if preset_project and not get("cwd"):
+            target = self._project_default_cwd(project.value)
+            if target:
+                directory.select(target)
+        # Which project the Directory row currently holds the default of, so
+        # `_sync` moves it when that answer changes and never moves it over a
+        # directory somebody picked by hand.
+        self._project_cwd_for: str = str(project.value or "")
 
 
         roles = self.sources.roles() or []
@@ -2051,7 +2113,7 @@ class Wizard(Form):
         )
 
         return [
-            name, profile, model, effort, borrow, null, directory,
+            name, profile, model, effort, borrow, null, project, directory,
             *worktree_fields(""), role,
             resume, fork, skip_permissions, codex_yolo, codex_sandbox,
             *self._tool_fields,
@@ -2067,6 +2129,48 @@ class Wizard(Form):
             restore, attach,
             ActionField(key="create", label="Create session"),
         ]
+
+    def _project_default_cwd(self, name: Optional[str]) -> str:
+        """The directory project ``name`` starts its sessions in, or "".
+
+        Read from the row the daemon published rather than worked out here:
+        ``default_cwd`` is already blank when the project has no default
+        workspace and when the workspace it names is no longer registered,
+        and those two answer the same way (:meth:`projects.Project.default_cwd`).
+        """
+        for row in self._project_rows:
+            if row.get("name") == name:
+                return str(row.get("default_cwd") or "")
+        return ""
+
+    def _sync_project_cwd(self) -> None:
+        """Move the Directory row to the picked project's default workspace.
+
+        A default, and the rule the web form already applies
+        (``applyProjectDefaultCwd`` in app.js): the row moves while it still
+        holds an answer the form supplied -- the directory the command was
+        typed in, or the previous project's default -- and never over one the
+        operator picked. A project with no default sends it back to the typed
+        directory, because leaving the previous project's workspace there
+        would file the session under one project and start it in another's
+        checkout.
+        """
+        field = self.field("project")
+        if field.hidden:
+            return
+        picked = str(field.value or "")
+        if picked == self._project_cwd_for:
+            return
+        before = self._project_default_cwd(self._project_cwd_for)
+        self._project_cwd_for = picked
+        cwd = self.field("cwd")
+        if cwd.value != self.cwd and not (before and cwd.value == before):
+            return
+        target = self._project_default_cwd(picked)
+        if target:
+            cwd.select(target)
+        elif before and cwd.value == before:
+            cwd.select(self.cwd)
 
     def _directory_options(self, preset: Optional[str]) -> List[Option]:
         """This directory first, then the registered workspaces.
@@ -2228,6 +2332,7 @@ class Wizard(Form):
         for f in self._tool_fields:
             f.hidden = not pi_runtime
 
+        self._sync_project_cwd()
         cwd = self.value("cwd") or self.cwd
         sync_worktree(self, cwd)
 
@@ -2311,6 +2416,7 @@ class Wizard(Form):
             (self.value("borrow") or None) if borrow_allowed else None
         )
         args.null_token = bool(self.value("null_token")) if claude else False
+        args.project = self.value("project") or None
         args.cwd = self.value("cwd") or self.cwd
 
         args.worktree, args.rebase_onto = worktree_answer(self)
