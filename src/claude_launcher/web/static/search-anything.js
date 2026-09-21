@@ -72,11 +72,11 @@ globalThis.SearchAnything = (() => {
     return session.status || "";
   }
   // One session, drawn the same wherever a result names one. It wears the
-  // board's own chip class (`beads-sess`, style.css) rather than a copy of it,
-  // so a session carries one colour in the board list, on the rail and here —
-  // the reuse the spawn form's fieldsets document for `.sess-spawn-step`. The
-  // state is in the chip twice over: the class is the colour the rest of the
-  // app gives that state, and the word is the same fact without colour.
+  // state chip the board rows and the queue lanes already wear (`beads-sess`,
+  // style.css) rather than a copy of its colours — the reuse the spawn form's
+  // fieldsets document for `.sess-spawn-step`. The state is in the chip twice
+  // over: the class is the colour the rest of the app gives that state, and
+  // the word is the same fact without colour.
   function sessionChip(session) {
     const state = sessionState(session);
     const link = node("a", session.name, "beads-sess" + (state ? " " + state : ""));
