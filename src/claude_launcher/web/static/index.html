@@ -857,16 +857,29 @@
 
     <div id="flows-view" class="hidden">
       <div class="page-head"><h2>Workflows</h2></div>
-      <!-- The reminder clock's machine defaults. Rendered once (not by the
-           list's rebuild) so a half-typed interval survives the poll; each
-           run's own override lives on its run page. -->
-      <div id="cflow-reminder-defaults" class="cflow-defaults"></div>
-      <!-- The stall ping's machine settings — the reminder's complement:
-           that clock steers a session that is working, this one wakes one
-           that stopped at a step no gate is holding. Rendered once, same
-           reason. -->
-      <div id="cflow-ping-defaults" class="cflow-defaults"></div>
-      <ul id="cflow-list"></ul>
+      <!-- Two readings of the same poll, one section deep in the URL the way
+           #/beads/<section> already is: Runs is every run on the machine,
+           Orphans is the subset whose driving session has exited. The daemon
+           already pushes that subset at the overseeing session as an fyi
+           ("nobody is driving"); this is where a person reads the same list
+           and acts on it. Filled by renderFlowsTabs(). -->
+      <div id="flows-tabs" class="seq-tabs flows-page-tabs"></div>
+      <div id="flows-runs">
+        <!-- The reminder clock's machine defaults. Rendered once (not by the
+             list's rebuild) so a half-typed interval survives the poll; each
+             run's own override lives on its run page. -->
+        <div id="cflow-reminder-defaults" class="cflow-defaults"></div>
+        <!-- The stall ping's machine settings — the reminder's complement:
+             that clock steers a session that is working, this one wakes one
+             that stopped at a step no gate is holding. Rendered once, same
+             reason. -->
+        <div id="cflow-ping-defaults" class="cflow-defaults"></div>
+        <ul id="cflow-list"></ul>
+      </div>
+      <div id="flows-orphans" class="hidden">
+        <p class="wf-note" id="flows-orphans-note"></p>
+        <ul id="cflow-orphan-list"></ul>
+      </div>
     </div>
 
     <!-- The session detail. Not a page on a wide screen but the rail down
