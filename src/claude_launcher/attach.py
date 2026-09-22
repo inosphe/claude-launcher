@@ -157,10 +157,19 @@ def _read_stdin_windows() -> bytes:
     handle = k32.GetStdHandle(-10)  # STD_INPUT_HANDLE
     buf = ctypes.create_string_buffer(_STDIN_CHUNK)
     n = ctypes.c_uint32()
-    ok = k32.ReadFile(handle, buf, _STDIN_CHUNK, ctypes.byref(n), None)
-    if not ok or n.value == 0:
-        return b""
-    return _console_input_to_utf8(buf.raw[: n.value], k32.GetConsoleCP())
+    while True:
+        ok = k32.ReadFile(handle, buf, _STDIN_CHUNK, ctypes.byref(n), None)
+        if not ok or n.value == 0:
+            return b""  # the one b"" this function means: stdin is closed
+        out = _console_input_to_utf8(buf.raw[: n.value], k32.GetConsoleCP())
+        if out:
+            return out
+        # The chunk ended mid-character, so the transcode is holding its
+        # leading bytes for the rest. That is not end of input, and the
+        # callers of this function read b"" as exactly that: pump_stdin puts
+        # None on the queue and returns, send_pump closes the socket and
+        # calls it a detach. So read again rather than hand back an empty
+        # result -- the keyboard is still there, the character is half in it.
 
 
 _CP_UTF8 = 65001
