@@ -25,6 +25,28 @@ const textOf = (root) => all(root).map((n) => n.text || "").join(" ");
 
 // One Claude profile holding `auto`, one whose convergence has not run, and
 // one on another harness -- the three states the table has to tell apart.
+// The gate guard's two halves as the daemon reports them: what claunch plants,
+// what is missing from it, and what -- if anything -- the shared layer
+// declares. Only the two halves' presence changes between cases; the shape
+// does not, because the card and the table both read the answer off `missing`.
+function rules({ allow = true, deny = true } = {}) {
+  const parts = {
+    allow: { key: "permissions.allow", expected: ["mcp__claunch"],
+      declared: ["mcp__claunch"] },
+    deny: { key: "permissions.deny", declared: null,
+      expected: ["Bash(claunch cflow approve)", "Bash(claunch cflow approve:*)",
+        "PowerShell(claunch cflow approve)",
+        "PowerShell(claunch cflow approve:*)"] },
+  };
+  for (const [half, whole] of [["allow", allow], ["deny", deny]]) {
+    const part = parts[half];
+    part.value = whole ? part.expected.slice() : [];
+    part.missing = whole ? [] : part.expected.slice();
+    part.converged = whole;
+  }
+  return { ...parts, converged: allow && deny };
+}
+
 function details({ declared = "auto", target = "auto", first = "auto" } = {}) {
   return [
     { name: "work", profile: "work", harness: "claude", explicit: false,
@@ -33,12 +55,14 @@ function details({ declared = "auto", target = "auto", first = "auto" } = {}) {
       permission_mode: { key: "permissions.defaultMode", value: first,
         target, declared, source: declared === null ? "claunch-default" : "declared",
         converged: first === target,
-        modes: ["default", "manual", "acceptEdits", "plan", "auto", "bypassPermissions"] } },
+        modes: ["default", "manual", "acceptEdits", "plan", "auto", "bypassPermissions"] },
+      permission_rules: rules() },
     { name: "work:codex", profile: "work", harness: "codex", explicit: true,
-      permission_mode: null },
+      permission_mode: null, permission_rules: null },
     { name: "cx", profile: "cx", harness: "codex", explicit: false,
       directory: "C:\\profiles\\cx",
-      harness_policy: { provider: "" }, permission_mode: null },
+      harness_policy: { provider: "" }, permission_mode: null,
+      permission_rules: null },
     { name: "broken", error: "profile 'broken' selects unknown harness 'nope'" },
   ];
 }
@@ -100,6 +124,19 @@ vm.runInContext(
   assert.match(textOf(card), /Declared: auto/);
   assert.match(textOf(card), /converges to auto/);
 
+  // --- the rules card ----------------------------------------------------
+  // Both halves are named with the counts behind them, because "has some
+  // rules" and "has the guard" are the two facts this card exists to tell
+  // apart. Read-only: putting the rules there is `claunch install`'s job.
+  let rulesCard = context.permissionRulesCard();
+  assert.match(textOf(rulesCard), /1 allow rule\(s\), 4 deny rule\(s\)/);
+  assert.match(textOf(rulesCard), /allow: mcp__claunch/);
+  assert.match(textOf(rulesCard), /deny: nothing declared/);
+  assert.match(textOf(rulesCard), /All 1 Claude Code profile\(s\) carry the allow half\./);
+  assert.match(textOf(rulesCard), /All 1 Claude Code profile\(s\) carry the deny half\./);
+  assert.equal(all(rulesCard).filter((n) => n.tag === "button").length, 0);
+  assert.equal(all(rulesCard).filter((n) => n.tag === "form").length, 0);
+
   // --- the card, nothing declared ----------------------------------------
   response = { profiles: [], profile_details: details({ declared: null }) };
   await context.refreshProfileSettings();
@@ -148,17 +185,26 @@ vm.runInContext(
 
   // One row per profile: the per-harness selector row is not a profile.
   assert.equal(rows.length, 3);
+  assert.deepEqual(all(table).filter((n) => n.tag === "th").map((n) => n.text), [
+    "Profile", "Harness", "Provider", "Permission mode", "Rules", "Directory",
+  ]);
   assert.equal(rows[0].children[0].text, "work");
   assert.equal(rows[0].children[2].text, "deepseek");
   // `auto` in the file, `plan` being converged: shown as the move, not as a
   // value -- this is the state `claunch apply` closes.
   assert.equal(rows[0].children[3].text, "auto → plan");
   assert.equal(rows[0].children[3].cls.includes("profile-pending"), true);
-  assert.equal(rows[0].children[4].text, "C:\\profiles\\work");
+  // ...and the rules column sits between it and the path, settled.
+  assert.equal(rows[0].children[4].text, "guard ok");
+  assert.equal(rows[0].children[4].cls.includes("profile-ok"), true);
+  assert.equal(rows[0].children[5].text, "C:\\profiles\\work");
 
-  // Another harness gets a dash: this is a Claude Code key it never reads.
+  // Another harness gets a dash in both Claude Code columns: these are keys
+  // it never reads, so an empty cell is the honest answer, not a zero.
   assert.equal(rows[1].children[3].text, "—");
   assert.equal(rows[1].children[3].cls.includes("profile-muted"), true);
+  assert.equal(rows[1].children[4].text, "—");
+  assert.equal(rows[1].children[4].cls.includes("profile-muted"), true);
 
   // A profile the daemon could not describe is reported, not dropped.
   assert.equal(rows[2].children[0].text, "broken");
@@ -222,10 +268,37 @@ vm.runInContext(
   await context.profileModeApply("plan", "work");
   assert.match(textOf(context.profileModeEditor(scoped[0])), /FAILED on work: write failed/);
 
+  // --- a gap is named, not just flagged ----------------------------------
+  // The boundary the card exists for: one profile short of the guard, one
+  // short of both halves. Which profiles, by name -- a count alone does not
+  // say which settings.json to go and look at.
+  const short = [details()[0]];
+  short[0].permission_rules = rules({ deny: false });
+  short.push({ ...short[0], profile: "bare", name: "bare",
+               permission_rules: rules({ allow: false, deny: false }) });
+  response = { profile_details: short };
+  await context.refreshProfileSettings();
+  rulesCard = context.permissionRulesCard();
+  assert.match(textOf(rulesCard),
+    /1 of 2 profile\(s\): the claunch MCP server is not allowed — bare/);
+  assert.match(textOf(rulesCard),
+    /2 of 2 profile\(s\): the gate guard is incomplete — work, bare/);
+  assert.doesNotMatch(textOf(rulesCard), /carry the allow half/);
+
+  // The same two states in the table, told apart by which rules are absent
+  // rather than by a boolean -- a half-planted guard is the case this shape
+  // is for.
+  const shortRows = all(find(context.profilesPanel(), (n) => n.tag === "table"))
+    .filter((n) => n.tag === "tr").slice(1);
+  assert.equal(shortRows[0].children[4].text, "deny: 4 missing");
+  assert.equal(shortRows[0].children[4].cls.includes("profile-pending"), true);
+  assert.equal(shortRows[1].children[4].text, "allow: 1 missing · deny: 4 missing");
+
   // --- no Claude profile at all ------------------------------------------
   response = { profiles: [], profile_details: [details()[2], details()[3]] };
   await context.refreshProfileSettings();
   assert.match(textOf(context.profileModeCard()), /No Claude Code profile yet/);
+  assert.match(textOf(context.permissionRulesCard()), /No Claude Code profile yet/);
 
   console.log("profilesettings_check: ok");
 })();

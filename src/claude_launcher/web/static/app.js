@@ -16405,6 +16405,72 @@ function profileModeCard() {
   return card;
 }
 
+/* The rules half of the same settings file. The mode card above says how
+   loudly Claude Code asks; this says which rules it will not ask about at all.
+   Both halves of the gate guard are reported because they fail in opposite
+   directions -- without `allow` the claunch MCP server is refused by the auto
+   classifier, and without `deny` the agent holds the human's gate commands.
+
+   Read-only on purpose. Planting them is `claunch install`'s job, and the
+   daemon writing into a person's settings files behind a button on this page
+   is a write flow that has not been designed yet. Saying which profiles are
+   short is the whole of what this card does. */
+function permissionRulesCard() {
+  const card = el("div", "ws-card profile-rules-card");
+  const head = el("div", "home-card-head");
+  head.appendChild(el("h3", null, "Permission rules"));
+  card.appendChild(head);
+
+  const rows = profileRows().filter((p) => p.permission_rules);
+  if (!rows.length) {
+    card.appendChild(el("p", "wf-note",
+      "No Claude Code profile yet, so there is no settings.json for these " +
+      "rules to live in."));
+    return card;
+  }
+
+  const guard = rows[0].permission_rules;
+  card.appendChild(el("p", "home-sub",
+    "The gate guard takes the cflow approve/select/goto/abort commands off " +
+    "the agent's shell and allows the claunch MCP server in the same file, so " +
+    "auto mode does not read the second as a way around the first. claunch " +
+    `install plants both: ${guard.allow.expected.length} allow rule(s), ` +
+    `${guard.deny.expected.length} deny rule(s).`));
+  card.appendChild(el("p", "home-sub",
+    "Declared shared -- " + ruleDeclarationLine(guard) +
+    " · a declaration reaches a profile through 'claunch apply', the guard " +
+    "through 'claunch install', and a profile can hold either without the other."));
+
+  for (const [half, what] of [
+    ["allow", "the claunch MCP server is not allowed"],
+    ["deny", "the gate guard is incomplete"],
+  ]) {
+    const short = rows.filter((p) => !p.permission_rules[half].converged);
+    card.appendChild(el("p", short.length ? "wf-error" : "wf-note",
+      short.length
+        ? `${short.length} of ${rows.length} profile(s): ${what} — ` +
+          short.map((p) => p.profile || p.name || "?").join(", ")
+        : `All ${rows.length} Claude Code profile(s) carry the ${half} half.`));
+  }
+  return card;
+}
+
+/* What the shared layer declares for each half, or nothing. A declaration is
+   not a planted rule -- that is why the card prints it beside the counts and
+   not as one of them. */
+function ruleDeclarationLine(guard) {
+  const bits = [];
+  for (const half of ["allow", "deny"]) {
+    const declared = guard[half].declared;
+    const shown = Array.isArray(declared)
+      ? declared.join(", ")
+      : (declared === null || declared === undefined
+        ? "nothing declared" : String(declared));
+    bits.push(`${half}: ${shown}`);
+  }
+  return bits.join(" · ");
+}
+
 /* The sentence the write comes back with. Told as three counts rather than
    one, because a mode change that reached no profile and one that reached
    every profile both "succeeded", and only the second is what the person
@@ -16498,6 +16564,7 @@ function profilesPanel() {
   ));
   if (profilesError) panel.appendChild(el("p", "wf-error", profilesError));
   panel.appendChild(profileModeCard());
+  panel.appendChild(permissionRulesCard());
   panel.appendChild(el("p", "wf-note",
     "Apply to profile saves and writes only that profile's mode. Use shared default " +
     "removes its override. Launch a new session to use the saved mode. This page " +
@@ -16519,7 +16586,9 @@ function profilesPanel() {
   const table = el("table", "md-table profiles-table");
   const thead = el("thead", null);
   const hrow = el("tr", null);
-  for (const label of ["Profile", "Harness", "Provider", "Permission mode", "Directory"]) {
+  for (const label of [
+    "Profile", "Harness", "Provider", "Permission mode", "Rules", "Directory",
+  ]) {
     hrow.appendChild(el("th", null, label));
   }
   thead.appendChild(hrow);
@@ -16531,7 +16600,7 @@ function profilesPanel() {
     tr.appendChild(el("td", null, row.profile || row.name || "?"));
     if (row.error) {
       const cell = el("td", "profile-error", row.error);
-      cell.colSpan = 4;
+      cell.colSpan = 5;
       tr.appendChild(cell);
       body.appendChild(tr);
       continue;
@@ -16551,6 +16620,21 @@ function profilesPanel() {
       );
       cell.appendChild(profileModeEditor(row));
       tr.appendChild(cell);
+    }
+    const rules = row.permission_rules;
+    if (!rules) {
+      // Same reason the mode cell is a dash here: a rule list this harness
+      // never reads has no count, and a zero would read as "none planted".
+      tr.appendChild(el("td", "profile-muted", "—"));
+    } else {
+      const gaps = [];
+      for (const half of ["allow", "deny"]) {
+        if (rules[half].missing.length) {
+          gaps.push(`${half}: ${rules[half].missing.length} missing`);
+        }
+      }
+      tr.appendChild(el("td", gaps.length ? "profile-pending" : "profile-ok",
+        gaps.length ? gaps.join(" · ") : "guard ok"));
     }
     tr.appendChild(el("td", null, row.directory || ""));
     body.appendChild(tr);
