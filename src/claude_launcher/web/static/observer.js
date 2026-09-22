@@ -205,15 +205,22 @@ function cardActions(card,s) {
   update.onclick=()=>oneShot(s.name);
   // The same flag the rail's glyph writes, drawn here so the reader can see
   // which sessions the pinned-only scope covers without leaving the page.
-  // All three surfaces read it off the session record, so none of them owns
+  // All four surfaces read it off the session record, so none of them owns
   // the state. This one wears the card's action chip so the row keeps one
   // weight, and CSS dims it until it is on — the same rule and the same 👁
   // the rail uses, so the control is recognisable across both pages.
+  // The sentence comes from observePinTitle, which is also where the tab, the
+  // rail row and the detail panel's Flags box get theirs. A title written here
+  // would be a fourth wording of one flag, and a fixed one would go on saying
+  // 넣습니다 after the flag is already on — telling the reader the opposite
+  // of what the press would do. This file reaches an app.js global the way
+  // request() already reaches api(): both are classic scripts in one document,
+  // and cardActions runs at render time, long after each has been parsed.
   const pin=node("button","👁 관찰 고정","observer-action observer-pin");
   pin.type="button";
   pin.classList.toggle("on",!!s.observe_pin);
   pin.setAttribute("aria-pressed",String(!!s.observe_pin));
-  pin.title=`「고정만 관찰」 모드에서 ${s.name}을 관찰 대상에 넣습니다`;
+  pin.title=observePinTitle(s.name,!!s.observe_pin);
   pin.onclick=()=>setObservePin(s.name,!s.observe_pin);
   links.append(pin,input,update);
   const note=refreshNotes.get(s.name);
