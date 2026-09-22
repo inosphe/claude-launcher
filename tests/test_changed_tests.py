@@ -41,6 +41,11 @@ from pathlib import Path
 
 import pytest
 
+# The gate resolves which checkout to measure through this module, and
+# three cases below replace that lookup -- the same idiom, and the same
+# reason, as tests/test_landed_check.py.
+from claude_launcher.cflow import checkout
+
 SCRIPT = Path(__file__).resolve().parents[1] / "tools" / "changed_tests.py"
 
 
@@ -1684,3 +1689,216 @@ def test_a_path_no_rule_recognises_is_still_code(repo):
         ".beadsdata/issues.jsonl",
         "notes.jsonl",
     ]
+
+
+# --------------------------------------------------------------------------- #
+# which tree the gate measures (claunch-7sj, tree axis)
+#
+# The engine runs a step's verify with cwd set to the RUN's directory, and
+# that is not this session's own tree whenever the run was keyed somewhere the
+# session does not stand. `landed_check.py` and `merge_ready.py` already route
+# the question through `own_checkout`; this gate kept `--repo` defaulting to
+# `Path(".")`, so the diff, the selection and the suite were all about
+# whatever tree the run happened to be keyed to -- and it reported green about
+# it.
+# --------------------------------------------------------------------------- #
+def test_the_run_directory_is_not_taken_for_the_sessions_tree(
+    repo, tmp_path, monkeypatch, capsys
+):
+    """The rescue: with no ``--repo``, the gate asks where this session stands.
+
+    The working directory here is deliberately NOT the repository, because
+    that is the shape the defect needs: before the lookup, the gate measured
+    this empty directory instead.
+    """
+    _write(repo, "src/pkg/mesh.py", "x = 2\n")
+    monkeypatch.setattr(
+        checkout, "own_checkout", lambda *a, **k: (str(repo), checkout.SESSION)
+    )
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+
+    assert changed_tests.main(["--base", "master", "--list"]) == 0
+    out = capsys.readouterr().out
+    assert str(repo) in out, "the tree it measured has to be in the output"
+    assert "(session)" in out, "and how it came to think so"
+    assert "tests/test_mesh.py" in out
+
+
+def test_an_explicit_repo_survives_the_lookup_failing(repo, monkeypatch, capsys):
+    """``--repo`` may not depend on a daemon.
+
+    The case where somebody reaches for it is the case where the machine
+    could not work the tree out by itself, so the fallback has to keep the
+    named directory rather than the working one.
+    """
+
+    def boom(*a, **k):
+        raise RuntimeError("no daemon")
+
+    monkeypatch.setattr(checkout, "own_checkout", boom)
+    assert changed_tests.main(
+        ["--repo", str(repo), "--base", "master", "--list"]
+    ) == 0
+    out = capsys.readouterr().out
+    assert str(repo) in out
+    assert "(named)" in out
+
+
+def test_with_no_lookup_the_working_directory_is_still_the_answer(
+    repo, monkeypatch, capsys
+):
+    """Degrades in one direction only: no package, no daemon and no managed
+    session all fall back to what this gate always did."""
+
+    def boom(*a, **k):
+        raise RuntimeError("no package")
+
+    monkeypatch.setattr(checkout, "own_checkout", boom)
+    monkeypatch.chdir(repo)
+    assert changed_tests.main(["--base", "master", "--list"]) == 0
+    assert "(run cwd)" in capsys.readouterr().out
+
+
+# --------------------------------------------------------------------------- #
+# which pytest would run (claunch-7sj, environment axis)
+#
+# `uv run --no-sync pytest` resolves a console script: the project
+# environment's Scripts/bin first, then the ambient PATH. A worktree whose
+# .venv was never built therefore runs ANOTHER checkout's pytest and says
+# nothing about it. Measured in this repository on 2026-09-22: a worker
+# worktree holding no pytest of its own answered `pytest 9.1.1` out of
+# `F:\works\claude-launcher\.venv\Scripts\pytest.EXE`.
+# --------------------------------------------------------------------------- #
+class _Probe:
+    """A stand-in for the one subprocess ``foreign_pytest`` runs."""
+
+    def __init__(self, stdout: str, code: int = 0):
+        self.returncode = code
+        self.stdout = stdout
+        self.stderr = ""
+
+
+def _answers(monkeypatch, stdout: str, code: int = 0) -> list:
+    """Make the probe answer ``stdout``; return the list of calls it saw."""
+    seen: list = []
+
+    def fake(cmd, **kw):
+        seen.append((cmd, kw))
+        return _Probe(stdout, code)
+
+    monkeypatch.setattr(changed_tests.subprocess, "run", fake)
+    return seen
+
+
+UV_COMMAND = ["uv", "run", "--no-sync", "pytest", "tests/test_mesh.py", "-q"]
+
+
+def test_a_command_that_is_not_uv_has_no_console_script_to_resolve(
+    tmp_path, monkeypatch
+):
+    """The decision that keeps this check off every other caller's back.
+
+    A command that is not ``uv run`` resolves nothing through uv, so there is
+    nothing to answer, and a caller substituting its own command is not
+    measured against a resolution it never asked for.
+    """
+    seen = _answers(monkeypatch, "")
+    assert changed_tests.foreign_pytest(tmp_path, [sys.executable, "-c", "x"]) is None
+    assert seen == [], "it must not even ask"
+
+
+def test_a_pytest_from_another_checkout_is_named_and_refused(tmp_path, monkeypatch):
+    """The finding, in the words the operator needs in order to act on it."""
+    stranger = tmp_path / "other" / ".venv" / "Scripts" / "pytest.exe"
+    stranger.parent.mkdir(parents=True)
+    stranger.write_text("")
+    here = tmp_path / "mine"
+    here.mkdir()
+    _answers(monkeypatch, str(stranger) + "\n")
+
+    note = changed_tests.foreign_pytest(here, UV_COMMAND)
+    assert note is not None
+    assert str(stranger) in note, "which binary would have run"
+    assert str(here) in note, "and which tree it does not belong to"
+    assert "uv sync --extra test" in note, "the one action that fixes it"
+    assert "claunch-7sj" in note
+
+
+def test_the_trees_own_pytest_is_not_a_finding(tmp_path, monkeypatch):
+    """The ordinary case has to stay silent, or the check is a wall."""
+    here = tmp_path / "mine"
+    mine = here / ".venv" / "Scripts" / "pytest.exe"
+    mine.parent.mkdir(parents=True)
+    mine.write_text("")
+    _answers(monkeypatch, str(mine) + "\n")
+    assert changed_tests.foreign_pytest(here, UV_COMMAND) is None
+
+
+def test_no_pytest_anywhere_is_left_to_the_run_to_report(tmp_path, monkeypatch):
+    """``shutil.which`` found nothing: that is the run's finding rather than
+    this one's, and the run states it in the words of whatever is missing."""
+    here = tmp_path / "mine"
+    here.mkdir()
+    _answers(monkeypatch, "\n")
+    assert changed_tests.foreign_pytest(here, UV_COMMAND) is None
+
+
+@pytest.mark.parametrize(
+    "explode",
+    [
+        OSError(2, "no uv"),
+        subprocess.TimeoutExpired(cmd="uv", timeout=1),
+    ],
+    ids=["no-uv", "timeout"],
+)
+def test_a_probe_that_cannot_run_is_not_an_accusation(tmp_path, monkeypatch, explode):
+    """Unmeasurable is a different answer from "another checkout's".
+
+    The command this gate is about to run is itself ``uv run``, so an
+    environment that cannot answer fails loudly at the run. Turning a probe's
+    silence into a blocked round is the trade this file already refuses to
+    make for its git calls.
+    """
+
+    def boom(*a, **k):
+        raise explode
+
+    monkeypatch.setattr(changed_tests.subprocess, "run", boom)
+    assert changed_tests.foreign_pytest(tmp_path, UV_COMMAND) is None
+
+
+def test_the_gate_refuses_before_it_takes_a_window(repo, gate, monkeypatch, capsys):
+    """A refusal starts no run, so it must not hold a slot others queue for.
+
+    The window is made to explode: reaching it at all is the failure this
+    case pins, and the exit code has to be ``CANNOT_TELL`` rather than a pass.
+    """
+    _write(repo, "src/pkg/mesh.py", "x = 2\n")
+    monkeypatch.setattr(
+        changed_tests, "foreign_pytest", lambda repo, cmd: "another checkout's pytest"
+    )
+
+    def never(*a, **k):
+        raise AssertionError("a window was taken for a run that was refused")
+
+    monkeypatch.setattr(changed_tests.test_window, "acquire", never)
+
+    assert gate() == changed_tests.CANNOT_TELL
+    assert gate.runs() == 0
+    assert "another checkout's pytest" in capsys.readouterr().err
+
+
+def test_the_stub_command_in_these_tests_is_never_called_foreign(repo, gate):
+    """The property the exemption above buys, stated where it can break.
+
+    Every case driven through the ``gate`` fixture substitutes a plain
+    ``python -c`` command. If the check ever stopped reading the command and
+    began probing the environment regardless, those cases would start
+    spawning uv, so this asserts the exemption directly instead of leaving it
+    to be noticed as a slowdown.
+    """
+    _write(repo, "src/pkg/mesh.py", "x = 2\n")
+    assert gate() == 0
+    assert gate.runs() == 1

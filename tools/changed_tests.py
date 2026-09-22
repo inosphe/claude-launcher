@@ -356,6 +356,42 @@ def _git(repo: Path, *args: str, env: Optional[dict] = None) -> str:
     return proc.stdout.strip()
 
 
+def _resolve_repo(explicit) -> tuple:
+    """Which checkout to measure, and how we came to think so.
+
+    The third gate to ask this, and the last to ask it properly.
+    ``landed_check.py`` and ``merge_ready.py`` already route the question
+    through :func:`claude_launcher.cflow.checkout.own_checkout`, and each of
+    them says in its own docstring that the precedence lives there "so all
+    three answers are decided in one place" -- while this file, the one that
+    actually runs the tests, kept ``--repo`` defaulting to ``Path(".")``.
+    Three was the count of gates, not of files doing it.
+
+    What that default is, spelled out: the engine runs a ``verify`` with
+    ``cwd`` set to the RUN's directory (``cflow/engine.py`` ``_run_verify``),
+    and the run's directory is not this session's own tree whenever the run
+    was keyed somewhere the session does not stand. ``cflow/checkout.py``
+    detects exactly that shape and the engine attaches its warning to the
+    payload -- without acting on it, which is what ``claunch-7sj`` recorded:
+    "경고가 판정에 안 걸린다". Until this call, the diff, the selection and
+    the suite were all about a tree the session is not editing, and the gate
+    reported green about it.
+
+    ``--repo`` wins outright, so tests and hand-runs are never at the mercy
+    of a daemon. Every failure of the lookup falls back to the working
+    directory, which is what this always did, so nothing that worked stops.
+    """
+    try:
+        from claude_launcher.cflow import checkout
+
+        where, how = checkout.own_checkout(explicit)
+        return Path(where), how
+    except Exception:
+        # No package, no daemon, no managed session: the answer this gave
+        # before the lookup existed.
+        return Path(explicit or ".").resolve(), "named" if explicit else "run cwd"
+
+
 def resolve_base(repo: Path, base: str) -> tuple:
     """The ref to measure against, and how we came to think so.
 
@@ -1173,6 +1209,98 @@ def apply_worker_advice(cmd: List[str], workers: int) -> List[str]:
     return adjusted
 
 
+#: How long the environment probe below may take. It starts an interpreter
+#: (and, in a worktree with no ``.venv`` at all, lets uv create an empty one),
+#: which is seconds -- and it sits in front of a test run, so a probe that
+#: hangs must not become the thing that blocks the round.
+ENV_PROBE_TIMEOUT = 60.0
+
+#: Asked inside ``uv run``, so the answer is the resolution that command will
+#: perform: the project environment's ``Scripts``/``bin`` first, then the
+#: ambient PATH. One line, because it is passed with ``-c``.
+_WHICH_PYTEST = "import shutil; print(shutil.which('pytest') or '')"
+
+
+def foreign_pytest(repo: Path, cmd: List[str]) -> Optional[str]:
+    r"""Why the pytest this command would run is another checkout's, or None.
+
+    The second axis of ``claunch-7sj``, and the one with no loud failure of
+    its own. ``build_command`` emits ``uv run --no-sync pytest ...``;
+    ``--no-sync`` is a promise never to populate the tree's ``.venv``, and
+    ``pytest`` is a console script -- so when the tree's environment holds
+    none, uv resolves it off PATH and runs it. Nothing says so.
+
+    Measured in this repository on 2026-09-22, in a worker worktree whose
+    ``.venv/Scripts`` held no pytest::
+
+        $ uv run --no-sync pytest --version
+        pytest 9.1.1
+        $ uv run --no-sync python -c "import shutil; print(shutil.which('pytest'))"
+        F:\works\claude-launcher\.venv\Scripts\pytest.EXE
+
+    The main checkout's pytest answered for the worktree, and the only line
+    on stderr was uv's unrelated ``VIRTUAL_ENV ... will be ignored`` warning.
+
+    What that costs is not the source under test: ``pythonpath = src`` is
+    resolved against pytest's rootdir and prepended to ``sys.path``, so the
+    suite still imports the tree it was collected from (``pyproject.toml``
+    states that, and why). It is everything else -- the pytest version, the
+    plugins, and every third-party import the tests make come from a
+    directory this gate does not manage. A branch that changes a test
+    dependency is then measured against the dependency it did not change.
+
+    Two decisions in here, both deliberate:
+
+    * **Only the uv path is asked about.** A ``cmd`` that is not ``uv run``
+      has no console script for uv to resolve, so there is nothing to answer
+      -- and a caller that substitutes its own command is not measured
+      against a resolution it never asked for.
+    * **Unmeasurable is not an accusation.** No uv, no interpreter, a probe
+      that times out: all return None and the run proceeds. The command this
+      gate is about to run is itself ``uv run``, so an environment that
+      cannot answer fails loudly at the run instead -- and turning a probe's
+      silence into a blocked round is the trade this file already refuses to
+      make for its git calls ("a failure here costs the reuse, never the
+      gate").
+    """
+    if cmd[:2] != ["uv", "run"]:
+        return None
+    try:
+        proc = subprocess.run(
+            ["uv", "run", "--no-sync", "python", "-c", _WHICH_PYTEST],
+            cwd=str(repo),
+            capture_output=True,
+            text=True,
+            errors="replace",
+            timeout=ENV_PROBE_TIMEOUT,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    lines = [ln.strip() for ln in (proc.stdout or "").splitlines() if ln.strip()]
+    if proc.returncode != 0 or not lines:
+        # No pytest anywhere is not this function's finding: the run itself
+        # says so, in the words of whatever is missing.
+        return None
+    try:
+        where = Path(lines[-1]).resolve()
+        here = repo.resolve()
+    except OSError:
+        return None
+    if where == here or here in where.parents:
+        return None
+    return (
+        f"cannot run selected tests: uv would run {where}, which is not "
+        f"inside {here}.\n"
+        f"  This tree's environment has no pytest, so 'uv run --no-sync "
+        f"pytest' resolved one off PATH -- another checkout's. Its version, "
+        f"its plugins and every third-party import the tests make would be "
+        f"that checkout's, so a green from it is a green about packages this "
+        f"branch does not control (claunch-7sj).\n"
+        f"  Build this tree's environment once, then re-run the gate:\n"
+        f"    uv sync --extra test --directory {here}"
+    )
+
+
 def run_and_record(
     repo: Path,
     files: List[str],
@@ -1295,7 +1423,15 @@ def main(argv: Optional[list] = None) -> int:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=STREAMS,
     )
-    ap.add_argument("--repo", type=Path, default=Path("."))
+    ap.add_argument(
+        "--repo",
+        default=None,
+        help=(
+            "the checkout to measure (default: the one this session stands "
+            "in, per cflow.checkout.own_checkout, falling back to the "
+            "working directory)"
+        ),
+    )
     ap.add_argument(
         "--base",
         default=DEFAULT_BASE,
@@ -1341,7 +1477,11 @@ def main(argv: Optional[list] = None) -> int:
     )
     args = ap.parse_args(argv)
 
-    repo = args.repo.resolve()
+    repo, how_repo = _resolve_repo(args.repo)
+    # Printed before anything is measured, because every number below is
+    # about this directory and a reader who assumes it is the working
+    # directory reads the whole report as being about a different tree.
+    print(f"tree    : {repo}  ({how_repo})")
     base, how = resolve_base(repo, args.base)
     if how == "self-tracking":
         print(
@@ -1500,6 +1640,13 @@ def main(argv: Optional[list] = None) -> int:
     session = os.environ.get("CLAUNCH_SESSION", "worker")
     for gone in prune_basetemps(session):
         print(f"pruned old basetemp: {gone}", file=sys.stderr)
+
+    # Before the window, not after: a refusal here starts no run, so it must
+    # not hold a slot other sessions are queueing for.
+    stranger = foreign_pytest(repo, cmd)
+    if stranger:
+        print(stranger, file=sys.stderr)
+        return CANNOT_TELL
 
     try:
         grant = test_window.acquire(
