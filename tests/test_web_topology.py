@@ -409,6 +409,25 @@ CHECKS = [
 ]
 
 
+# The same registry for the harnesses that need a real browser. They are a
+# separate list because they run behind a different gate -- Playwright has to be
+# resolvable -- and folding them into CHECKS would make every harness wait on
+# that. `test_every_harness_is_registered` holds this list to the directory the
+# same way, which is what was missing: four of the seven browser harnesses ran
+# nowhere. `observer_browser.cjs` and `search_anything_browser.cjs` sat in
+# tests/ rather than tests/web, and `sessiontabs_browser.cjs` and
+# `toolbar_browser.cjs` sat in tests/web unlisted (claunch-6jerx).
+BROWSER_CHECKS = [
+        "diagramviewport_browser.cjs",
+        "sessionform_browser.cjs",
+        "scoregoal_browser.cjs",
+        "sessiontabs_browser.cjs",
+        "toolbar_browser.cjs",
+        "observer_browser.cjs",
+        "search_anything_browser.cjs",
+]
+
+
 @pytest.mark.parametrize("script", CHECKS)
 def test_topology_diagram_logic(script):
     node = shutil.which("node")
@@ -422,8 +441,9 @@ def test_topology_diagram_logic(script):
 
 
 def test_every_harness_is_registered():
-    """Every `*_check.js` in tests/web is named in CHECKS, and every name in
-    CHECKS is a file that exists.
+    """Every harness file in tests/web is named in its registry, and every name
+    in a registry is a file that exists: `*_check.js` against CHECKS,
+    `*_browser.cjs` against BROWSER_CHECKS.
 
     CHECKS is what the suite runs; the directory is what the repository has.
     Nothing kept the two in step, so a harness added without touching this file
@@ -433,24 +453,31 @@ def test_every_harness_is_registered():
     makes the gap expensive rather than obvious.
 
     The reverse direction costs one more line and is worth it: a name left in
-    CHECKS after its file is renamed or deleted fails as `cannot locate ...`,
-    and reading that as "the harness broke" sends the next person the wrong way.
+    a registry after its file is renamed or deleted fails as `cannot locate
+    ...`, and reading that as "the harness broke" sends the next person the
+    wrong way.
+
+    BROWSER_CHECKS was added to this check after the same gap opened there:
+    four of the seven browser harnesses ran nowhere, two because they sat
+    outside tests/web and two because nobody listed them (claunch-6jerx).
     """
-    assert len(set(CHECKS)) == len(CHECKS), "a harness is listed twice in CHECKS"
-    listed = set(CHECKS)
-    present = {path.name for path in WEB.glob("*_check.js")}
-    assert not present - listed, (
-        "harness files that nothing runs -- add them to CHECKS: "
-        + ", ".join(sorted(present - listed))
-    )
-    assert not listed - present, (
-        "CHECKS names a file that is not in tests/web: "
-        + ", ".join(sorted(listed - present))
-    )
+    for name, names, pattern in (("CHECKS", CHECKS, "*_check.js"),
+                                 ("BROWSER_CHECKS", BROWSER_CHECKS, "*_browser.cjs")):
+        assert len(set(names)) == len(names), f"a harness is listed twice in {name}"
+        listed = set(names)
+        present = {path.name for path in WEB.glob(pattern)}
+        assert not present - listed, (
+            f"harness files that nothing runs -- add them to {name}: "
+            + ", ".join(sorted(present - listed))
+        )
+        assert not listed - present, (
+            f"{name} names a file that is not in tests/web: "
+            + ", ".join(sorted(listed - present))
+        )
 
 
-@pytest.mark.parametrize("script", ["diagramviewport_browser.cjs", "sessionform_browser.cjs", "scoregoal_browser.cjs"])
-def test_diagram_viewport_browser(script):
+@pytest.mark.parametrize("script", BROWSER_CHECKS)
+def test_browser_harness(script):
     """Real scroll geometry and native touch input need a browser.
 
     Optional locally: install Playwright externally and set NODE_PATH to its

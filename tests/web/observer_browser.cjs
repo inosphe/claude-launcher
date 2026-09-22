@@ -5,7 +5,7 @@ const fs = require("node:fs");
 const http = require("node:http");
 const path = require("node:path");
 const { chromium } = require(process.env.CLAUNCH_PLAYWRIGHT || "playwright");
-const root = path.join(__dirname, "../src/claude_launcher/web/static");
+const root = path.join(__dirname, "../../src/claude_launcher/web/static");
 const sent = [];
 let gates=[];
 let observerReads = 0, needsLogin = true;

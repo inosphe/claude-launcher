@@ -82,8 +82,8 @@ Search indexes remain derived data under the daemon's `rag/` directory.
 Validation: `tests/test_search_anything.py` covers durability, source coverage,
 session links, session state at answer time, opening-task retention,
 settings and retrieval.
-`tests/search_anything_browser.cjs` uses an isolated fixture server to exercise
-actual browser focus, keyboard, stale-response handling, the two result lists
-with their headings and states, the kind filter, source display and settings
-forms. Set `CLAUNCH_PLAYWRIGHT`
-and `CLAUNCH_CHROMIUM` to local installations if needed.
+`tests/web/search_anything_browser.cjs` uses an isolated fixture server to
+exercise actual browser focus, keyboard, stale-response handling, the two
+result lists with their headings and states, the kind filter, source display
+and settings forms. Set `CLAUNCH_PLAYWRIGHT` and `CLAUNCH_CHROMIUM` to local
+installations if needed.
