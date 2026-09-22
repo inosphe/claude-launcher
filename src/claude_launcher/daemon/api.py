@@ -7201,8 +7201,11 @@ async def h_beads_queues(request: web.Request) -> web.Response:
     cwd = request.query.get("cwd")
     if cwd:
         extra.insert(0, cwd)
+    # One summarizer per response: every lane's containment check lists the
+    # lane's directory, and lanes share directories heavily (this machine's
+    # board: 703 sessions over 132 of them). See cflow_clock.run_summarizer.
     view = await request.app["beads"].queues_view(
-        list(manager.list()), extra, cflow_for=cflow_clock.run_summary,
+        list(manager.list()), extra, cflow_for=cflow_clock.run_summarizer(),
     )
     return json_response(view)
 
