@@ -69,7 +69,17 @@ def _graft_fields() -> tuple:
 #: merge. Both exist because their step used to be prose alone -- a round
 #: could be filed as swept, or as deployed, with nothing having happened.
 #:
-#: The worker arms three. ``review`` runs the tests its own change can affect;
+#: ``workspace-ok`` is the newest, and it is armed for a reason none of the
+#: others share: it is what keeps the ``chooser: agent`` on ``workspace-check``
+#: from being a decision the driver profits by. That select's ``match`` option
+#: skips a human approval, so the branch it routes to re-runs the same command
+#: on the way out -- a false ``match`` stops the run at ``workspace-ok``, and
+#: the only way on from there is ``request_goto`` to the approval the agent
+#: was avoiding. Disarm this one and the select becomes an agent choosing
+#: whether to stand a person up. ``tests/test_workspace_gate.py`` holds the
+#: pair together.
+#:
+#: The worker arms four more. ``review`` runs the tests its own change can affect;
 #: ``wrapup`` asks whether the round left its HTML report behind. The second
 #: is armed for the same reason the leader's two are -- the step was prose
 #: alone, and it sits in the last thing a session does before killing itself,
@@ -86,7 +96,7 @@ def _graft_fields() -> tuple:
 #: done. 세션 종료한다" and exited, and a request that was rejected, or asked
 #: for a rebase, or quietly dropped from a batch, had nobody left to notice.
 ARMED = {
-    "improv-worker": ("review", "rebase", "wrapup", "end-hold"),
+    "improv-worker": ("workspace-ok", "review", "rebase", "wrapup", "end-hold"),
     "improv-leader": ("sweep",),
 }
 
@@ -164,6 +174,16 @@ def gate_commands(step) -> list:
 #: affect, and the leader's two read a fact somebody else already established
 #: (a sweep receipt, a daemon's boot time).
 GATES = {
+    # The one gate here that judges *where* the round is running rather than
+    # what it produced, and the only one that runs before anything is made.
+    # It is also the one that exists to keep another control point honest:
+    # `workspace-check` lets the driving agent choose `match` and skip a human
+    # approval, so the branch that choice routes to re-runs the same command
+    # on the way out. Three axes, no suite -- two `git rev-parse` answers and
+    # three daemon reads: the repository the issue's board and workspace name
+    # point at, the repository the session was spawned into, and whether
+    # another live session is standing in this same linked worktree.
+    ("improv-worker", "workspace-ok"): "tools/workspace_check.py",
     ("improv-worker", "review"): "tools/changed_tests.py",
     # This one was twice wrong before it was a path like the other three.
     # First `claunch report check`: the PATH entry is whichever copy happens
@@ -174,7 +194,7 @@ GATES = {
     # directory, so it comes from site-packages, and --no-sync is a promise
     # that the worktree's .venv stays empty (measured: ModuleNotFoundError).
     # A path into this checkout is the only form that does not depend on what
-    # is installed. tests/test_gates_run_this_checkout.py holds all five to it.
+    # is installed. tests/test_gates_run_this_checkout.py holds all six to it.
     ("improv-worker", "wrapup"): "tools/report_check.py",
     # Two git calls, no suite: "is there a merge commit on another branch with
     # my frozen tip as a parent?". Asked that way on purpose -- "does any
