@@ -38,9 +38,42 @@ def _fresh_cache():
 # --------------------------------------------------------------------------- #
 # llm config parsing
 # --------------------------------------------------------------------------- #
+def _profile_backend_config(
+    name: str = "brief",
+    *,
+    provider: str = "ds",
+    api_key: str = "provider-secret",
+    models=None,
+    endpoints=None,
+):
+    """A profile whose provider describes an OpenAI-compatible backend.
+
+    The default ``models.default`` carries Claude's ``[1m]`` tag on purpose:
+    it is what a real profile aimed at a 1M-context backend records, and an
+    OpenAI endpoint asked for the tagged id answers 404.
+    """
+    prof = profile.create(name)
+
+    def mutate(doc):
+        doc.setdefault("providers", {})[provider] = {
+            "api_key": api_key,
+            "endpoints": {"openai": "https://example.test/v1"}
+            if endpoints is None
+            else endpoints,
+            "models": {"default": "deepseek-flash[1m]", "small": "glm-small"}
+            if models is None
+            else models,
+        }
+        doc.setdefault("profiles", {}).setdefault(name, {})["provider"] = provider
+
+    store.update(mutate)
+    return prof
+
+
 def test_llm_config_absent_block_is_disabled_defaults(home):
     cfg = briefing.llm_config({})
     assert cfg == {
+        "profile": "",
         "endpoint": "",
         "model": "",
         "api_key": "",
@@ -80,6 +113,108 @@ def test_llm_config_reads_the_store_and_keeps_params(config_file):
     # a non-numeric max_tokens falls back rather than erroring the endpoint
     cfg = briefing.llm_config({"llm": {"max_tokens": "lots"}})
     assert cfg["max_tokens"] == briefing.DEFAULT_MAX_TOKENS
+
+
+def test_profile_backend_reads_endpoint_key_and_models(config_file):
+    """A profile is resolved the way the Observer resolves its own."""
+    _profile_backend_config()
+    backend = briefing.profile_backend("brief")
+    assert backend.endpoint == "https://example.test/v1/chat/completions"
+    assert backend.api_key == "provider-secret"
+    # the tag is stripped, and 'default' leads the suggestion list
+    assert backend.model == "deepseek-flash"
+    assert backend.models == ("deepseek-flash", "glm-small")
+
+
+def test_profile_backend_refuses_a_profile_with_no_openai_endpoint(config_file):
+    """Anthropic-only is a real provider shape, and not one this call speaks."""
+    _profile_backend_config(endpoints={"anthropic": "https://example.test/anthropic"})
+    with pytest.raises(briefing.BriefingError, match="OpenAI-compatible endpoint"):
+        briefing.profile_backend("brief")
+    with pytest.raises(briefing.BriefingError, match="does not exist"):
+        briefing.profile_backend("no-such-profile")
+
+
+def test_llm_config_takes_the_backend_from_the_named_profile(config_file):
+    _profile_backend_config()
+    store.update(lambda doc: doc.update({"llm": {"profile": "brief"}}))
+    cfg = briefing.llm_config()
+    assert cfg["profile"] == "brief"
+    assert cfg["endpoint"] == "https://example.test/v1/chat/completions"
+    assert cfg["api_key"] == "provider-secret"
+    assert cfg["model"] == "deepseek-flash"
+    assert briefing.llm_configured(cfg)
+
+
+def test_llm_config_profile_owns_the_endpoint_key_pair_and_not_the_model(config_file):
+    """The block's endpoint/key are dropped, its model is kept.
+
+    The endpoint and the key identify one backend together, so a key typed
+    for the direct form must not be sent to the profile's endpoint. The model
+    is this feature's own choice about that backend, so the field the
+    Settings card writes wins over the profile's default.
+    """
+    _profile_backend_config()
+    store.update(
+        lambda doc: doc.update(
+            {
+                "llm": {
+                    "profile": "brief",
+                    "model": "glm-small",
+                    "endpoint": "https://typed.example/v1/chat/completions",
+                    "api_key": "sk-typed",
+                }
+            }
+        )
+    )
+    cfg = briefing.llm_config()
+    assert cfg["endpoint"] == "https://example.test/v1/chat/completions"
+    assert cfg["api_key"] == "provider-secret"
+    assert cfg["model"] == "glm-small"
+
+
+def test_llm_config_unresolvable_profile_leaves_the_feature_off(config_file):
+    """A hand-edited name that cannot serve turns it off rather than raising.
+
+    The direct fields are not used as a fallback either: the profile is the
+    operator's statement of which backend to call, and quietly calling the
+    previous one instead would be worse than composing nothing.
+    """
+    store.update(
+        lambda doc: doc.update(
+            {
+                "llm": {
+                    "profile": "gone",
+                    "model": "m",
+                    "endpoint": "https://typed.example/v1/chat/completions",
+                    "api_key": "sk-typed",
+                }
+            }
+        )
+    )
+    cfg = briefing.llm_config()
+    assert (cfg["endpoint"], cfg["api_key"]) == ("", "")
+    assert not briefing.llm_configured(cfg)
+
+
+def test_llm_config_direct_endpoint_still_works(config_file):
+    """The pre-profile form of the block is unchanged."""
+    store.update(
+        lambda doc: doc.update(
+            {
+                "llm": {
+                    "endpoint": "https://typed.example/v1/chat/completions",
+                    "model": "m",
+                    "api_key": "sk-typed",
+                }
+            }
+        )
+    )
+    cfg = briefing.llm_config()
+    assert cfg["profile"] == ""
+    assert cfg["endpoint"] == "https://typed.example/v1/chat/completions"
+    assert cfg["api_key"] == "sk-typed"
+    assert briefing.llm_configured(cfg)
 
 
 # --------------------------------------------------------------------------- #
@@ -1146,6 +1281,164 @@ def test_sessions_list_attaches_the_cached_briefing_digest(home, tmp_path):
             resp = await client.get("/api/sessions", headers=BEARER)
             row = (await resp.json())["sessions"][0]
             assert row["briefing"] == {"one_line": "한 줄", "state": "waiting"}
+
+            await mgr.shutdown_all()
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+# --------------------------------------------------------------------------- #
+# the settings endpoint the web dashboard's Briefing model card edits
+# --------------------------------------------------------------------------- #
+def test_briefing_llm_settings_endpoint_reads_and_saves(home):
+    """``GET``/``PUT /api/briefing/llm``: the card's two calls.
+
+    What is pinned here is the contract the card draws from — the written
+    fields beside the resolved ones, the profile list it offers, and that the
+    key is reported as a boolean and never returned.
+    """
+    _profile_backend_config()
+
+    async def run():
+        mgr = SessionManager(idle_threshold=0.5, scrollback=200, restore_default=True)
+        client = await _serve(mgr)
+        try:
+            resp = await client.get("/api/briefing/llm", headers=BEARER)
+            assert resp.status == 200
+            body = await resp.json()
+            assert body["profile"] == "" and body["configured"] is False
+            assert body["api_key_set"] is False
+            assert [row["name"] for row in body["profiles"]] == ["brief"]
+            assert body["profiles"][0]["models"] == ["deepseek-flash", "glm-small"]
+            assert body["profiles"][0]["has_key"] is True
+
+            resp = await client.put(
+                "/api/briefing/llm", headers=BEARER,
+                json={"profile": "brief", "model": "glm-small", "max_tokens": 2048},
+            )
+            assert resp.status == 200
+            body = await resp.json()
+            assert body["configured"] is True
+            assert body["resolved"] == {
+                "endpoint": "https://example.test/v1/chat/completions",
+                "model": "glm-small",
+                "has_key": True,
+            }
+            # no secret crosses the boundary, in either direction of the save
+            assert "api_key" not in json.dumps(body) or body["api_key_set"] is False
+
+            # and it is the file that changed, so the next reader agrees
+            assert briefing.llm_config()["model"] == "glm-small"
+            resp = await client.get("/api/briefing/llm", headers=BEARER)
+            assert (await resp.json())["profile"] == "brief"
+
+            await mgr.shutdown_all()
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_briefing_llm_settings_key_handling_and_refusals(home):
+    """The api_key convention, and what a save refuses.
+
+    A blank password field arrives on every reload, so blank keeps the stored
+    key and ``null`` is the explicit removal. The refusals are the values a
+    form cannot produce but a script can: an unknown field, an unknown
+    profile, a URL carrying credentials, a budget that is not a number.
+    """
+    _profile_backend_config()
+
+    async def run():
+        mgr = SessionManager(idle_threshold=0.5, scrollback=200, restore_default=True)
+        client = await _serve(mgr)
+        try:
+            resp = await client.put(
+                "/api/briefing/llm", headers=BEARER,
+                json={
+                    "endpoint": "https://typed.example/v1/chat/completions",
+                    "model": "m",
+                    "api_key": "sk-typed",
+                },
+            )
+            assert resp.status == 200 and (await resp.json())["api_key_set"] is True
+
+            # blank keeps it
+            resp = await client.put(
+                "/api/briefing/llm", headers=BEARER, json={"api_key": ""},
+            )
+            assert (await resp.json())["api_key_set"] is True
+            assert briefing.llm_config()["api_key"] == "sk-typed"
+
+            # null removes it
+            resp = await client.put(
+                "/api/briefing/llm", headers=BEARER, json={"api_key": None},
+            )
+            body = await resp.json()
+            assert body["api_key_set"] is False and body["configured"] is False
+            assert briefing.llm_config()["api_key"] == ""
+
+            for payload, fragment in [
+                ({"params": {"temperature": 0.2}}, "unsupported"),
+                ({"profile": "no-such-profile"}, "does not exist"),
+                ({"endpoint": "https://user:pw@host/v1"}, "without credentials"),
+                ({"endpoint": "ftp://host/v1"}, "without credentials"),
+                ({"max_tokens": "lots"}, "whole number"),
+                ({"max_tokens": 0}, "between 1"),
+            ]:
+                resp = await client.put(
+                    "/api/briefing/llm", headers=BEARER, json=payload,
+                )
+                assert resp.status == 400, payload
+                assert fragment in (await resp.json())["error"], payload
+            # a refused save changed nothing
+            assert briefing.llm_config()["model"] == "m"
+
+            await mgr.shutdown_all()
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_briefing_llm_save_drops_cached_briefings_when_the_backend_changes(home):
+    """A model change takes effect on the next card, not on the next commit.
+
+    The cache key is a session's evidence, so a briefing written by the
+    previous model would otherwise stay on the card until that session's
+    transcript moved. A save that leaves the resolved backend alone (here,
+    the token budget) keeps the cache, because the answers are still that
+    model's.
+    """
+    _profile_backend_config()
+
+    async def run():
+        mgr = SessionManager(idle_threshold=0.5, scrollback=200, restore_default=True)
+        client = await _serve(mgr)
+        try:
+            seed = lambda: briefing._cache.__setitem__(
+                "s1",
+                (("key",), {"session": "s1", "briefing": {
+                    "goal": "g", "state": "working",
+                    "one-line-job-description": "한 줄",
+                }}),
+            )
+            seed()
+            resp = await client.put(
+                "/api/briefing/llm", headers=BEARER,
+                json={"profile": "brief", "model": "glm-small"},
+            )
+            assert resp.status == 200
+            assert briefing.digest("s1") is None
+
+            seed()
+            resp = await client.put(
+                "/api/briefing/llm", headers=BEARER, json={"max_tokens": 8192},
+            )
+            assert resp.status == 200
+            assert briefing.digest("s1") is not None
 
             await mgr.shutdown_all()
         finally:

@@ -103,7 +103,11 @@ header and the terminal) and the detail panel's section, bound to the same
 open-set and off-state — ``briefrow_check`` on the row's always-on face —
 the one-line job description the /api/sessions poll pours into every row
 (the briefing digest — the recorded opening task is detail-panel-only) and
-the collapsed ⟳ that refreshes without opening — ``railhold_check`` on why those two glyphs used
+the collapsed ⟳ that refreshes without opening — ``briefmodel_check`` on the
+Settings card that chooses the backend those three surfaces draw from: a
+profile owns the endpoint/key pair, so picking one disables both fields and
+leaves them out of the save, while the model is saved either way —
+``railhold_check`` on why those two glyphs used
 to swallow a press: changed session data rebuilds the rail, and a rebuild
 landing between a pointerdown and its pointerup takes the pressed node out
 of the document, leaving the browser no common ancestor to send the click
@@ -361,6 +365,7 @@ CHECKS = [
         "termcache_check.js",
         "briefcard_check.js",
         "briefingtop_check.js",
+        "briefmodel_check.js",
         "briefrow_check.js",
         "railhold_check.js",
         "railscroll_check.js",

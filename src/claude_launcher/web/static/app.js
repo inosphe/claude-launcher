@@ -4584,6 +4584,15 @@ const briefingCache = new Map();    // name -> {phase, data?, error?}
    locked away by a missing key. */
 let briefingLLM = true;
 
+/* What every inert briefing control says instead of working. One string
+   because it appears on four of them (the row toggle, the header button,
+   the collapsed row's ⟳ and the detail drawer) and they were drifting
+   apart; it names the page that now edits the setting, which is what the
+   reader can act on, and keeps the config key for whoever edits the file. */
+const BRIEFING_OFF_HINT =
+  "briefing off — pick a profile and model in Settings ▸ Briefing model "
+  + "(the llm: block of ~/.claunch.yaml)";
+
 /* The states the summariser is allowed to claim. blocked and waiting are
    the two where the reader may BE the unblock, so they carry the loud
    colours; anything unrecognised stays neutral rather than borrowing a
@@ -4779,7 +4788,7 @@ function renderBriefingCard(name, entry) {
   } else if (!entry || entry.phase === "unconfigured") {
     card.appendChild(el(
       "div", "sess-brief-note",
-      "no LLM configured — set the llm section (endpoint, model, api_key) in ~/.claunch.yaml"
+      `no LLM configured — ${BRIEFING_OFF_HINT}`
     ));
   } else if (entry.phase === "norecord") {
     card.appendChild(el("div", "sess-brief-note", "no session record to summarise"));
@@ -4842,14 +4851,14 @@ function applyBriefingCards() {
       li.appendChild(btn);
     }
     // The toggle is the feature's one always-visible handle, so it is also
-    // where "this exists but is off" is said: without an llm: block the
-    // button stays put but inert, and its tooltip points at the config to
-    // write — better than a live-looking button opening onto that sentence.
+    // where "this exists but is off" is said: without a backend the button
+    // stays put but inert, and its tooltip points at the Settings card that
+    // sets one — better than a live-looking button opening onto that
+    // sentence.
     btn.disabled = !briefingLLM;
     btn.title = briefingLLM
       ? "briefing: goal, current work, state — summarised"
-      : "briefing off — set the llm section (endpoint, model, api_key)"
-        + " in ~/.claunch.yaml to enable";
+      : BRIEFING_OFF_HINT;
     const open = briefingLLM && briefingOpen.has(name);
     btn.textContent = open ? "▾" : "▸";
     syncRowRefresh(li, name);
@@ -4875,7 +4884,7 @@ function applyBriefingCards() {
    sized up so it is discoverable from the strip below the header instead of
    a glyph in a 260px rail. The button owns the current session's card —
    opening it here opens the row's too, and vice versa — and, without an
-   llm: block, goes inert with a tooltip that says how to turn it on, a
+   backend, goes inert with a tooltip that says how to turn it on, a
    louder echo of the disabled row toggle. Safe to call any time; the pane
    and button are hidden by the view system when no terminal is up. */
 function applyBriefingTop() {
@@ -4886,8 +4895,7 @@ function applyBriefingTop() {
   btn.setAttribute("aria-pressed", open ? "true" : "false");
   btn.title = briefingLLM
     ? "briefing: goal, current work, state — summarised"
-    : "briefing off — set the llm section (endpoint, model, api_key)"
-      + " in ~/.claunch.yaml to enable";
+    : BRIEFING_OFF_HINT;
   btn.textContent = (open ? "▾ " : "▸ ") + "briefing";
   const pane = $("term-brief-pane");
   if (!pane) return;
@@ -5032,8 +5040,7 @@ function syncRowRefresh(li, name) {
   refresh.classList.toggle("failed", failed);
   refresh.disabled = !briefingLLM || loading;
   refresh.title = !briefingLLM
-    ? "briefing off — set the llm section (endpoint, model, api_key)"
-      + " in ~/.claunch.yaml to enable"
+    ? BRIEFING_OFF_HINT
     : loading ? "summarising…"
     : failed ? `briefing failed: ${entry.error || "unknown error"} — click to retry`
     : "refresh the summary without opening it";
@@ -5050,17 +5057,13 @@ function refreshBriefingRow(name) {
    drawn under the session's facts so the panel says what the session is
    DOING instead of only what it is. Fetches on first open — the 2s poll
    repaints from the cache, and the card's own ⟳ still refreshes it. Without
-   an llm: block the drawer is a static pointer at the config to write, so
-   someone who just set the section sees it acknowledged. */
+   a backend the drawer is a static pointer at the Settings card that sets
+   one, so someone who just saved it there sees it acknowledged. */
 function sessBriefSection(name) {
   const box = el("div", "sess-brief-section");
   box.appendChild(el("h3", null, "Briefing"));
   if (!briefingLLM) {
-    box.appendChild(el(
-      "p", "sess-brief-note",
-      "briefing off — set the llm section (endpoint, model, api_key)"
-        + " in ~/.claunch.yaml to enable"
-    ));
+    box.appendChild(el("p", "sess-brief-note", BRIEFING_OFF_HINT));
     return box;
   }
   if (!briefingCache.has(name)) fetchBriefing(name, false);
@@ -13470,6 +13473,7 @@ function openSettings(section) {
     refreshProfileSettings();
     return;
   }
+  refreshLlmSettings();
   refreshFaq();
   refreshPromptPresets();
   refreshStatusChecks();
@@ -16842,6 +16846,8 @@ function renderWorkspaces() {
   view.appendChild(wsAddCard());
   view.appendChild(projectsCard());
 
+  view.appendChild(llmSettingsCard());
+
   view.appendChild(faqCard());
 
   view.appendChild(promptPresetCard());
@@ -17100,6 +17106,250 @@ async function statusCheckRemove(row) {
     statusCheckCache = data.checks || []; statusCheckEdit = null; statusCheckError = "";
   } catch (err) { statusCheckError = String(err); }
   renderWorkspaces();
+}
+
+/* Briefing model (#/settings) — which backend composes the summaries.      */
+/* The feature used to be reachable only by hand-editing the llm: block of  */
+/* ~/.claunch.yaml, and every inert briefing control on the page said so.   */
+/* A profile is the short way to say it: the profile's provider already     */
+/* records an OpenAI-compatible endpoint, the key that opens it and the     */
+/* models it serves, so the card offers the profiles that qualify and lets  */
+/* the endpoint/key be typed in only when no profile is chosen.             */
+let llmSettings = null;
+let llmSettingsError = "";
+let llmSettingsNotice = "";
+let llmSettingsBusy = false;
+//: The form's own values while it is being edited. renderWorkspaces() rebuilds
+//: this card on every poll, so a draft kept in the DOM would be typed over
+//: mid-word; null means "take the saved values again".
+let llmDraft = null;
+
+async function refreshLlmSettings() {
+  try {
+    const resp = await api("/api/briefing/llm");
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
+    llmSettings = data;
+    llmSettingsError = "";
+  } catch (err) {
+    llmSettingsError = String(err);
+  }
+  if (wsOpen) renderWorkspaces();
+}
+
+function llmDraftValues() {
+  if (llmDraft) return llmDraft;
+  const saved = llmSettings || {};
+  llmDraft = {
+    profile: saved.profile || "",
+    model: saved.model || "",
+    endpoint: saved.endpoint || "",
+    api_key: "",
+    max_tokens: saved.max_tokens || 4096,
+  };
+  return llmDraft;
+}
+
+async function llmSettingsSave(body) {
+  llmSettingsBusy = true;
+  llmSettingsNotice = "";
+  renderWorkspaces();
+  try {
+    const resp = await api("/api/briefing/llm", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
+    llmSettings = data;
+    llmDraft = null;
+    llmSettingsError = "";
+    llmSettingsNotice = data.configured
+      ? "Saved. New briefings use this backend."
+      : "Saved — briefing stays off until endpoint, model and key are all set.";
+    // The rail's ▸ toggles read this flag, and it otherwise waits for the
+    // next /api/sessions poll to flip.
+    briefingLLM = data.configured !== false;
+    applyBriefingTop();
+  } catch (err) {
+    llmSettingsError = String(err);
+  }
+  llmSettingsBusy = false;
+  renderWorkspaces();
+}
+
+function llmSettingsCard() {
+  const card = el("section", "ws-add llm-settings");
+  card.appendChild(el("h3", null, "Briefing model"));
+  card.appendChild(el(
+    "p", "wf-note",
+    "Which backend writes the session briefings (the ▸ card on a rail row). " +
+    "Pick a profile and the call reuses that profile's OpenAI-compatible " +
+    "endpoint and key; leave the profile empty to type an endpoint and key " +
+    "in here instead."
+  ));
+  if (llmSettingsError) card.appendChild(el("p", "error", llmSettingsError));
+  if (!llmSettings) {
+    card.appendChild(el("p", "wf-note", "reading…"));
+    return card;
+  }
+  const draft = llmDraftValues();
+  const rows = llmSettings.profiles || [];
+  const chosen = rows.find((r) => r.name === draft.profile);
+  const form = el("form", "llm-settings-form");
+
+  const profileLabel = el("label", null, "Profile");
+  const profileSelect = document.createElement("select");
+  profileSelect.id = "llm-profile";
+  const none = document.createElement("option");
+  none.value = "";
+  none.textContent = "— none (endpoint below) —";
+  profileSelect.appendChild(none);
+  const names = rows.map((r) => r.name);
+  // A hand-edited name the picker does not offer is still shown, or the form
+  // would quietly propose replacing it with "none".
+  if (draft.profile && !names.includes(draft.profile)) names.unshift(draft.profile);
+  for (const name of names) {
+    const row = rows.find((r) => r.name === name);
+    const opt = document.createElement("option");
+    opt.value = name;
+    opt.textContent = row
+      ? `${name} — ${row.endpoint}${row.has_key ? "" : " (no key)"}`
+      : `${name} (not offered: no OpenAI endpoint)`;
+    profileSelect.appendChild(opt);
+  }
+  profileSelect.value = draft.profile;
+  profileSelect.addEventListener("change", () => {
+    draft.profile = profileSelect.value;
+    renderWorkspaces();
+  });
+  profileLabel.appendChild(profileSelect);
+  form.appendChild(profileLabel);
+
+  const modelLabel = el("label", null, "Model");
+  const model = document.createElement("input");
+  model.id = "llm-model";
+  model.type = "text";
+  model.value = draft.model;
+  model.placeholder = chosen && chosen.models.length
+    ? `${chosen.models[0]} (the profile's default)`
+    : "model id the backend accepts";
+  model.setAttribute("list", "llm-model-options");
+  model.addEventListener("input", () => { draft.model = model.value; });
+  modelLabel.appendChild(model);
+  const options = document.createElement("datalist");
+  options.id = "llm-model-options";
+  for (const id of (chosen && chosen.models) || []) {
+    const opt = document.createElement("option");
+    opt.value = id;
+    options.appendChild(opt);
+  }
+  modelLabel.appendChild(options);
+  form.appendChild(modelLabel);
+
+  const endpointLabel = el("label", null, "Endpoint");
+  const endpoint = document.createElement("input");
+  endpoint.id = "llm-endpoint";
+  endpoint.type = "text";
+  endpoint.value = draft.endpoint;
+  endpoint.placeholder = "https://host/v1/chat/completions";
+  endpoint.disabled = !!draft.profile;
+  endpoint.title = draft.profile
+    ? "the chosen profile supplies the endpoint"
+    : "the OpenAI-compatible chat/completions URL";
+  endpoint.addEventListener("input", () => { draft.endpoint = endpoint.value; });
+  endpointLabel.appendChild(endpoint);
+  form.appendChild(endpointLabel);
+
+  const keyLabel = el("label", null, "API key");
+  const key = document.createElement("input");
+  key.id = "llm-api-key";
+  key.type = "password";
+  key.autocomplete = "new-password";
+  key.value = draft.api_key;
+  key.placeholder = llmSettings.api_key_set
+    ? "stored · blank keeps it"
+    : "API key";
+  key.disabled = !!draft.profile;
+  key.title = draft.profile
+    ? "the chosen profile supplies the key"
+    : "sent as the Authorization header, and never returned to this page";
+  key.addEventListener("input", () => { draft.api_key = key.value; });
+  keyLabel.appendChild(key);
+  form.appendChild(keyLabel);
+
+  const budgetLabel = el("label", null, "Token budget");
+  const budget = document.createElement("input");
+  budget.id = "llm-max-tokens";
+  budget.type = "number";
+  budget.min = "1";
+  budget.max = "1000000";
+  budget.value = String(draft.max_tokens);
+  budget.title = "bounds the whole completion — a reasoning model's thinking "
+    + "is billed to it too";
+  budget.addEventListener("input", () => { draft.max_tokens = budget.value; });
+  budgetLabel.appendChild(budget);
+  form.appendChild(budgetLabel);
+
+  const save = el("button", "wf-btn approve", "Save");
+  save.type = "submit";
+  save.disabled = llmSettingsBusy;
+  form.appendChild(save);
+  if (llmSettings.api_key_set && !draft.profile) {
+    const clear = el("button", "wf-btn clear", "Remove stored key");
+    clear.type = "button";
+    clear.disabled = llmSettingsBusy;
+    clear.addEventListener("click", () => {
+      if (!confirm("Remove the API key saved in the llm: block?")) return;
+      llmSettingsSave({ api_key: null });
+    });
+    form.appendChild(clear);
+  }
+  form.addEventListener("submit", (event) => {
+    event.preventDefault();
+    const budgetValue = Number(draft.max_tokens);
+    if (!Number.isInteger(budgetValue) || budgetValue < 1) {
+      llmSettingsError = "Token budget must be a whole number of 1 or more.";
+      renderWorkspaces();
+      return;
+    }
+    const body = {
+      profile: draft.profile,
+      model: draft.model,
+      max_tokens: budgetValue,
+    };
+    // A profile owns the endpoint/key pair, so the two fields the form
+    // disabled are left out of the save instead of being written as blanks.
+    if (!draft.profile) {
+      body.endpoint = draft.endpoint;
+      body.api_key = draft.api_key;
+    }
+    // Returned, not fired and forgotten: the caller (and the harness that
+    // stands in for it) can then wait for the save to land.
+    return llmSettingsSave(body);
+  });
+  card.appendChild(form);
+
+  const resolved = llmSettings.resolved || {};
+  const facts = [
+    llmSettings.configured ? "on" : "off",
+    `endpoint ${resolved.endpoint || "(none)"}`,
+    `model ${resolved.model || "(none)"}`,
+    resolved.has_key ? "key set" : "NO key",
+  ];
+  card.appendChild(el("p", "beads-bits", facts.join("  ·  ")));
+  if (llmSettings.error) card.appendChild(el("p", "wf-warning", llmSettings.error));
+  if (llmSettingsNotice) card.appendChild(el("p", "wf-note", llmSettingsNotice));
+  if (!rows.length) {
+    card.appendChild(el(
+      "p", "wf-note",
+      "No profile names an OpenAI-compatible endpoint, so the list is empty " +
+      "— add providers.<provider>.endpoints.openai, or type an endpoint and " +
+      "key in above."
+    ));
+  }
+  return card;
 }
 
 function faqCard() {

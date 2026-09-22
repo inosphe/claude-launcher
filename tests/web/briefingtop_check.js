@@ -17,6 +17,15 @@ const src = fs.readFileSync(
   "utf8"
 );
 
+/* Module-level constants the sliced functions read. Taken from app.js instead
+   of retyped, so what runs here is the string the page really carries; the
+   expectations below still spell it out, which is what pins the wording. */
+function sliceConst(name) {
+  const match = src.match(new RegExp(`const ${name} =[\\s\\S]*?;`));
+  if (!match) throw new Error(`cannot locate ${name} in app.js`);
+  return match[0];
+}
+
 function slice(name) {
   let start = src.indexOf(`async function ${name}(`);
   if (start < 0) start = src.indexOf(`function ${name}(`);
@@ -124,7 +133,7 @@ let refits = 0;
 const refitSoon = () => { refits += 1; };
 new Function(
   "exports", "$", "document", "api", "ctxChip", "refitSoon",
-  [slice("el"), slice("fmtAge"), slice("briefingStateClass"),
+  [sliceConst("BRIEFING_OFF_HINT"), slice("el"), slice("fmtAge"), slice("briefingStateClass"),
    slice("sessionStatusChecks"), slice("statusCheckText"), slice("appendStatusChecks"),
    slice("fetchBriefing"), slice("toggleBriefing"),
    slice("renderBriefingCard"), slice("applyBriefingTop"),
@@ -265,8 +274,8 @@ function findTag(node, tag) {
   check("off, the button is disabled and its tooltip points at the config",
         [btn.disabled, btn.title, btn.textContent],
         [true,
-         "briefing off — set the llm section (endpoint, model, api_key)"
-         + " in ~/.claunch.yaml to enable",
+         "briefing off — pick a profile and model in Settings ▸ Briefing model "
+         + "(the llm: block of ~/.claunch.yaml)",
          "▸ briefing"]);
   ctx.setLLM(true);
   ctx.apply();
@@ -302,8 +311,8 @@ function findTag(node, tag) {
   check("off, the section is a static pointer at the config, no fetch",
         [note.className, note.textContent, calls.length === c0],
         ["sess-brief-note",
-         "briefing off — set the llm section (endpoint, model, api_key)"
-         + " in ~/.claunch.yaml to enable",
+         "briefing off — pick a profile and model in Settings ▸ Briefing model "
+         + "(the llm: block of ~/.claunch.yaml)",
          true]);
   ctx.setLLM(true);
 

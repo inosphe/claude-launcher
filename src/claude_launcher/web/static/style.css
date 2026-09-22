@@ -4406,6 +4406,18 @@ a.window-owner:hover { color: #79c0ff; text-decoration: underline; }
 .sess-pr-link { display: inline-block; margin: 4px 0 8px; color: #58a6ff; word-break: break-all; }
 .sess-pr-note { color: #7d8590; font-size: 12px; margin: 4px 0; }
 
+/* Briefing model: the same two-column grid as the relay form, because it is
+   the same kind of card — a handful of named fields and one Save. */
+.llm-settings-form { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; margin: 14px 0 10px; }
+.llm-settings-form label { display: flex; flex-direction: column; gap: 5px; min-width: 0; }
+.llm-settings-form input, .llm-settings-form select { width: 100%; box-sizing: border-box; min-width: 0; padding: 8px; border: 1px solid #30363d; border-radius: 4px; background: #0d1117; color: #c9d1d9; }
+.llm-settings-form input:disabled, .llm-settings-form select:disabled { color: #7d8590; background: #161b22; }
+.llm-settings-form .wf-btn { align-self: end; }
+@media (max-width: 600px) {
+  .llm-settings-form { grid-template-columns: minmax(0, 1fr); }
+  .llm-settings-form input, .llm-settings-form select { font-size: 16px; }
+}
+
 .relay-settings-form { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; margin-top: 14px; }
 .relay-settings-form label { display: flex; flex-direction: column; gap: 5px; min-width: 0; }
 .relay-settings-form input:not([type="checkbox"]) { width: 100%; box-sizing: border-box; min-width: 0; padding: 8px; border: 1px solid #30363d; border-radius: 4px; background: #0d1117; color: #c9d1d9; }

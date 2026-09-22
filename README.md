@@ -3084,6 +3084,24 @@ session to use the saved setting. Previously, the single **Apply** button
 changed the common declaration and wrote the value into every existing Claude
 profile; its scope included both existing profiles and future profile creation.
 
+General also carries a **Briefing model** card, which chooses the backend that
+writes the session briefings (the `▸` card on a rail row). Picking a
+**profile** reuses that profile's backend: its provider already records an
+OpenAI-compatible endpoint (`endpoints.openai`), the key that opens it (the
+profile's `set-token` secret, else the provider's `api_key`) and the model ids
+it serves, which the card offers beside the **model** field. The endpoint and
+key fields are editable only while no profile is chosen — the two identify one
+backend together, so a profile supplies both or neither, and a save under a
+profile leaves the typed pair untouched. The model is saved either way, and an
+empty model under a profile means that profile's `models.default`. The key is
+never returned to the page: the field shows `stored · blank keeps it`, and
+**Remove stored key** is the one way to take it back out. The card writes the
+`llm:` block of `~/.claunch.yaml` (`GET`/`PUT /api/briefing/llm`), which is
+still hand-editable; saving a different backend drops the cached briefings so
+the next card is written by the model just chosen. While endpoint, model and
+key are not all present the feature is off, and every briefing control says so
+and names this card.
+
 The same Settings page carries a **GitHub CLI (gh)** card, the machine side
 of the [PR-landing worker](#workflows-cflow): whether `gh` resolves on the
 *daemon's* PATH (a spawned worker inherits that environment, not the
