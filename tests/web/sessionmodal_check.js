@@ -137,6 +137,27 @@ check("...and the name, the reuse pick and the rebase base stay out of it",
         .match(/worktree\w*/g)) || [],
       ["worktree_mode"]);
 
+/* ---- the rows one launch spends ----------------------------------------
+   The form is one long-lived node and everything on it stands until somebody
+   changes it, which is right for the answers that describe a TEAM and wrong
+   for the ones that describe a job. The issue body was in the second group
+   and treated as the first: it stayed in the box after its session was
+   created, so the next child was filed on the board under the previous
+   child's goal while the operator was looking at a task they had just
+   retyped (claunch-ke7ke). */
+const SPENT = JSON.parse(
+  (src.match(/const SESSION_FORM_SPENT = (\[[\s\S]*?\]);/) || [, "[]"])[1]);
+check("the issue body is spent by its launch, beside the task it belongs to",
+      SPENT, ["name", "resume", "task", "context", "issue_text"]);
+check("a created session clears it on the form",
+      /f\.issue_text\.value = "";/.test(submit), true);
+check("...and says so, since the modal's restore would otherwise put it back",
+      /if \(sessionModal\) sessionModal\.spent = new Set\(SESSION_FORM_SPENT\);/
+        .test(submit), true);
+check("...which is the one thing that restore steps over",
+      /if \(spent && spent\.has\(control\.name\)\) continue;/
+        .test(slice("sessionModalClose")), true);
+
 /* ---- the stub DOM ----------------------------------------------------- */
 function classList(node) {
   return {
@@ -398,6 +419,41 @@ async function main() {
   check("closing removes Cancel from the page action row",
         ids["new-session-actions"].kids.length, 1);
   check("Cancel keeps the creation page open", calls.includes("go:#/"), false);
+
+  /* ---- a launch, and what the close puts back after one ------------------
+     The restore exists to undo editing inside a box that was cancelled. A
+     session that was actually created is not a cancelled edit, so the rows
+     the submit cleared have to still be clear when the form reaches the page
+     — and the rows it left alone have to come back, which is what keeps a
+     second worker on the same team one press away. */
+  const spentRows = {
+    task: Object.assign(node("textarea"), { name: "task" }),
+    issue_text: Object.assign(node("textarea"), { name: "issue_text" }),
+    role: Object.assign(node("select"), { name: "role" }),
+  };
+  const pageTask = form.task, pageIssueText = form.issue_text;
+  form.task = spentRows.task;
+  form.issue_text = spentRows.issue_text;
+  form.querySelectorAll = () => Object.values(spentRows);
+  spentRows.task.value = "the previous child's job";
+  spentRows.issue_text.value = "the previous child's issue body";
+  spentRows.role.value = "worker";
+  await ctx.spawn("lead");
+  // What the submit handler does on a 200, in its own order.
+  spentRows.role.value = "reviewer";     // an edit made inside the box
+  spentRows.task.value = "";
+  spentRows.issue_text.value = "";
+  ctx.modal().spent = new Set(SPENT);
+  ctx.close();
+  check("a launch that went through does not get its task handed back",
+        spentRows.task.value, "");
+  check("...nor its issue body, which would file the next child on that goal",
+        spentRows.issue_text.value, "");
+  check("...while a row the launch did not spend is put back as the box found it",
+        spentRows.role.value, "worker");
+  form.querySelectorAll = () => [];
+  form.task = pageTask;
+  form.issue_text = pageIssueText;
 
   /* ---- the seed --------------------------------------------------------- */
   form.task.value = ""; form.name.value = "";

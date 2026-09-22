@@ -7851,6 +7851,17 @@ $("new-session").addEventListener("submit", async (e) => {
     // team is the normal next thing to want.
     f.task.value = "";
     f.context.value = "";
+    // The issue body is the task's twin and is spent with it: it described
+    // THIS launch's job, and the next session started from the same box has a
+    // different one. Left standing it was silently reused as the next child's
+    // issue body, which is the one row of the board record nobody re-reads
+    // before pressing Create (claunch-ke7ke).
+    f.issue_text.value = "";
+    // Say which rows the launch just spent, so the restore in
+    // sessionModalClose steps over them. Without this the five clears above
+    // are undone four lines later — the modal puts back whatever the form
+    // held when the box opened — and only the #/new page ever sees them.
+    if (sessionModal) sessionModal.spent = new Set(SESSION_FORM_SPENT);
     syncForkAvailability();
     // What the next opening starts from — the CLI wizard's recall_fields,
     // and only the rows that actually travelled.
@@ -19920,6 +19931,8 @@ let sessRunTimer = null;  // the fold's own poll, alive only while it is open
 let sessQuickJobBox = null; // the quick-job form — it holds a typed task
 let sessKidsBox = null;   // the children panel, which polls on its own
 let sessKidsTimer = null;
+let sessJournalBox = null;  // the input journal — it holds a fold's open/shut
+                            // state and the lines a reader is selecting
 
 /* Forget the open detail. State only — the caller syncs the layout, which is
    what actually takes the panel off the screen. */
@@ -19937,6 +19950,7 @@ function dropDetail() {
   sessQuickJobBox = null;
   sessKidsBox = null;
   sessBeadsBox = null;
+  sessJournalBox = null;
   sessRunFold = null;
   sessNoteBox = null;
   $("sess-view").innerHTML = "";
@@ -19974,6 +19988,7 @@ function repointDetail(name) {
   sessQuickJobBox = null;
   sessKidsBox = null;
   sessBeadsBox = null;
+  sessJournalBox = null;
   sessRunFold = null;
   sessNoteBox = null;
   $("sess-view").innerHTML = "<p class='wf-note'>loading…</p>";
@@ -20363,7 +20378,23 @@ function renderSession(data) {
   // the mesh page keeps, and for the same reason: a message being written is
   // worth more than a two-second-fresher 'last output'.
   if (formInUse(view)) return;
+  // And the same rule for a selection, which is the claim a reader who is
+  // copying a line has on this panel. It needs saying separately because the
+  // lines worth copying here are not fields and never take focus.
+  if (selectionInUse(view)) return;
+  // `#sess-view` is the scroll container, so emptying it collapses its
+  // content to nothing and the browser clamps scrollTop to 0. Every poll
+  // therefore threw the reader back to the top of the panel, which put
+  // everything below the fold — the input journal among it — out of reach for
+  // longer than five seconds at a time. Read before the wipe, written after
+  // the rebuild.
+  const previousTop = view.scrollTop;
   view.innerHTML = "";
+  // Called at each of this function's three exits. Assigning past the new
+  // content's height is clamped by the browser rather than refused, so a
+  // panel that came back shorter lands at its own bottom instead of throwing;
+  // a stub DOM with no scrollTop reads undefined and writes nothing.
+  const keepScroll = () => { if (previousTop) view.scrollTop = previousTop; };
 
   view.appendChild(sessHead(s));
 
@@ -20374,6 +20405,7 @@ function renderSession(data) {
   view.appendChild(sessRailTabs(name));
   if (sessLayoutFor(name).rail === "wf") {
     view.appendChild(sessWorkflow(data));
+    keepScroll();
     return;
   }
   // The fold belongs to the other panel; showing this one must take its poll
@@ -20386,6 +20418,7 @@ function renderSession(data) {
   // run's poll is off.
   if (sessLayoutFor(name).rail === "beads") {
     view.appendChild(sessBeadsPanel(data));
+    keepScroll();
     return;
   }
 
@@ -20583,6 +20616,7 @@ function renderSession(data) {
   view.appendChild(sessReborrow(data));
   view.appendChild(sessPerms(data));
   view.appendChild(sessMigrate(data));
+  keepScroll();
 }
 
 /* Enrol THIS session in a mesh, from the panel that names it.
@@ -20753,14 +20787,21 @@ function sessMeshJoin(data) {
 
 /* Durable history for the native session-line control.  This is separate
    from the PTY transcript: the latter cannot prove which request was sent,
-   retried, or rejected during a daemon/session replacement. */
-function sessInputJournal(name) {
-  const box = el("details", "sess-input-journal");
-  box.appendChild(el("summary", null, "Session input journal"));
-  box.appendChild(el("p", "wf-note", "loading…"));
+   retried, or rejected during a daemon/session replacement.
+
+   Read the lines into `box`, replacing whatever is in it. The `open`
+   attribute lives on the `details` element rather than among its children,
+   so emptying the children leaves an expanded fold expanded.
+
+   `quiet` marks a reread the poll asked for rather than the reader: it is
+   abandoned if the fold turns out to be open, because then these lines are
+   on screen and somebody is reading or selecting them. Dropped rather than
+   queued — the next poll asks again, and the reopen asks unconditionally. */
+function sessInputJournalFill(box, name, quiet) {
   api(`/api/sessions/${encodeURIComponent(name)}/input-journal?limit=20`)
     .then(async (resp) => {
       const doc = await resp.json().catch(() => ({}));
+      if (quiet && box.open) return;
       box.innerHTML = "";
       box.appendChild(el("summary", null,
         `Session input journal (${(doc.entries || []).length})`));
@@ -20776,6 +20817,38 @@ function sessInputJournal(name) {
         box.appendChild(row);
       }
     }).catch(() => {});
+}
+
+/* The fold itself, kept alive across polls the way the send box and the
+   children panel are. Built fresh every five seconds it lost the two pieces
+   of state a reader puts into it: an expanded fold snapped shut on the next
+   poll, and the lines being dragged across were replaced mid-selection. Both
+   came back once per poll, which is what made this section the one people
+   name when they say the panel will not hold still (claunch-ke7ke).
+
+   Keyed on the session so repointing the panel at another one draws that
+   session's journal. A reread is the reopen: the fold is shut most of the
+   time, and a durable record nobody is looking at does not need a request
+   every five seconds. */
+function sessInputJournal(name) {
+  if (sessJournalBox && sessJournalBox.dataset.session === name) {
+    // The count in the summary is the only part of this on screen while the
+    // fold is shut, so the poll keeps it current. An OPEN fold is left
+    // exactly as it is — its lines are what the reader is looking at.
+    if (!sessJournalBox.open) sessInputJournalFill(sessJournalBox, name, true);
+    return sessJournalBox;   // appending moves the live node back into place
+  }
+  const box = el("details", "sess-input-journal");
+  box.dataset.session = name;
+  box.appendChild(el("summary", null, "Session input journal"));
+  box.appendChild(el("p", "wf-note", "loading…"));
+  if (box.addEventListener) {
+    box.addEventListener("toggle", () => {
+      if (box.open) sessInputJournalFill(box, name);
+    });
+  }
+  sessJournalBox = box;
+  sessInputJournalFill(box, name);
   return box;
 }
 
@@ -22459,6 +22532,19 @@ let sessionModal = null;
    in the right checkout and is filed under `default` — no error anywhere.
    That is how a session created in a named project came back on the rail's
    default project (claunch-jvxvq). */
+
+/* The rows ONE launch consumes, cleared the moment that launch succeeds.
+   Everything else the form holds is a standing preference and is deliberately
+   left standing — the mesh, the role, the workflow, the worktree mode, since a
+   second worker on the same team is the normal next thing to want. These five
+   name a single session's job, so a value carried past its launch becomes the
+   NEXT session's answer without anybody typing it: the operator writes a fresh
+   task and the board record still reads the previous child's issue body
+   (claunch-ke7ke). sessionModalClose steps over these when it puts the form
+   back, which is what makes the clearing survive a launch made from the modal
+   rather than from the #/new page. */
+const SESSION_FORM_SPENT = ["name", "resume", "task", "context", "issue_text"];
+
 function sessionFormConfig(mode) {
   const sections = ["new-where", "new-identity", "new-runs-on", "new-onboard",
     "new-runtime", "new-worktree", "new-task", "new-beads"];
@@ -22925,7 +23011,13 @@ function sessionModalClose(opts = {}) {
   spawnSizeRemember(overlay.querySelector(".modal-box"));
   const f = $("new-session");
   f._sessionView = st.previousView;
+  // A launch that went through clears the rows it consumed (SESSION_FORM_SPENT)
+  // and records them here. Those are the rows this restore must NOT put back:
+  // it exists to undo editing inside a box that was cancelled, and a session
+  // that was actually created is not a cancelled edit.
+  const spent = st.spent || null;
   for (const { control, value, checked } of st.previousFields) {
+    if (spent && spent.has(control.name)) continue;
     control.value = value;
     if (checked !== undefined) control.checked = checked;
   }
@@ -25136,6 +25228,29 @@ function hoverLink(row, handle) {
 function formInUse(root) {
   return root.contains(document.activeElement) &&
     ["INPUT", "TEXTAREA", "SELECT"].includes(document.activeElement.tagName);
+}
+
+/* The other claim a reader can have on a panel the poll wants to rebuild: a
+   run of text they have selected inside it. A focused field is not involved
+   — the lines people drag across here are plain divs, the input journal's
+   most of all — so formInUse sees nothing and the rebuild takes the
+   selection with the nodes it held. Selecting a journal line was therefore
+   impossible for longer than one poll interval (claunch-ke7ke).
+
+   Held only while the selection is real and inside this root. A collapsed
+   selection is a caret, not a claim, and clicking anywhere collapses one —
+   so this releases itself and the poll resumes on the next tick, the same
+   way focus releases formInUse. Guarded for the test harness's stub DOM,
+   which has no selection API. */
+function selectionInUse(root) {
+  const sel = typeof window !== "undefined" && window.getSelection
+    ? window.getSelection() : null;
+  if (!sel || sel.isCollapsed || !sel.rangeCount) return false;
+  let node = sel.getRangeAt(0).commonAncestorContainer;
+  // Node.contains takes text nodes, but a stub DOM's may not: ask about the
+  // element that holds the text instead.
+  if (node && node.nodeType !== 1) node = node.parentNode;
+  return !!node && root.contains(node);
 }
 
 /* The roster's filter, as pure predicates over the rows the daemon sent —
