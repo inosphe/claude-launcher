@@ -27,7 +27,7 @@ from .. import borrowing, harnesses as harness_registry
 from .. import lineage, metering, pi_provider, profile as profile_mod, routing, runner
 from .. import store, transcripts
 from .. import config as launcher_config
-from . import mesh_roles, pty_backend
+from . import mesh_roles, paths, pty_backend
 
 log = logging.getLogger("claunch.daemon.harness")
 
@@ -1071,6 +1071,13 @@ def build_command(
     # its MCP servers, `!` shells) inherit it — cflow keys its run state by
     # it, mapping each session 1:1 to its own workflow run.
     env["CLAUNCH_SESSION"] = sdef.name
+    # Where this session writes intermediate files, so that two sessions
+    # picking the same file name do not overwrite each other. ``/tmp`` is one
+    # machine-wide directory here and cannot be moved per session (MSYS mounts
+    # it fixed, so TMP/TEMP do not shift it), which is why the fix is a path
+    # of our own rather than a redirect. Assembling the env is pure -- the
+    # directory itself is created by ``Session.__init__``, next to the log.
+    env["CLAUNCH_SCRATCH"] = str(paths.session_scratch_dir(sdef.name))
     if sdef.harness == CLAUDE_HARNESS and routing.is_shim_url(
         env.get("ANTHROPIC_BASE_URL")
     ):

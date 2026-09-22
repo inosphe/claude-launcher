@@ -76,8 +76,9 @@ steps:
          보내고 wrapup으로 간다).
       2. headRefOid가 context의 `tip`과 같다 — 다르면 누가 브랜치를 더
          밀었다는 뜻이고, 그것도 보고 대상이다(고치지 않는다).
-      3. 기준선을 세션 스크래치 파일에 적는다(CLAUDE.md의 규칙대로
-         세션별 경로에 — 저장소 트리 안이나 `/tmp/<고정이름>`이 아니다):
+      3. 기준선을 `$CLAUNCH_SCRATCH` 아래 파일에 적는다(데몬이 세션마다
+         만들어 내보내는 디렉터리다 — 저장소 트리 안이나 `/tmp/<고정이름>`이
+         아니다):
          state · isDraft · mergeable · reviewDecision · headRefOid ·
          statusCheckRollup의 (name, conclusion) 목록. 다음 check가 이 값과
          비교해 델타만 보낸다.

@@ -554,6 +554,11 @@ class Session:
 
         session_dir = paths.session_dir(sdef.name)
         session_dir.mkdir(parents=True, exist_ok=True)
+        # The session's own scratch space, named to it in ``CLAUNCH_SCRATCH``
+        # (see ``harness.build_command``). It is created here so that the
+        # variable names a directory that exists from the session's first
+        # command, rather than one its first writer has to remember to make.
+        paths.session_scratch_dir(sdef.name).mkdir(parents=True, exist_ok=True)
         self._log_path = paths.session_log(sdef.name)
         self._log = open(self._log_path, "ab")
         #: Bytes posted to the loop by the reader thread and not yet consumed

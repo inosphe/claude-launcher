@@ -152,6 +152,29 @@ def session_log(name: str) -> Path:
     return session_dir(name) / "output.log"
 
 
+def session_scratch_dir(name: str) -> Path:
+    """Where a session writes its own intermediate files.
+
+    Git Bash's ``/tmp`` is not per session on this platform: it resolves to
+    the one machine-wide Temp directory, which ``TMP`` and ``TEMP`` name too.
+    Two sessions that choose the same file name there overwrite each other
+    with no error and no warning, and the second reader takes the first
+    writer's bytes for its own. That happened -- the measurement is on
+    ``claunch-shared-tmp-clobber-xjn`` -- and what is lost is not the file but
+    the evidence a verdict rests on: a judgement built on overwritten values
+    is wrong in a way that still reads as reasonable.
+
+    Redirecting ``/tmp`` is not available as a fix. Running with ``TMP`` and
+    ``TEMP`` pointed elsewhere still leaves ``cygpath -w /tmp`` at the
+    machine-wide path, because MSYS mounts it fixed. So the prevention is a
+    directory that is per session by construction: ``harness.build_command``
+    exports this path as ``CLAUNCH_SCRATCH`` and ``Session.__init__`` creates
+    it, which gives it the same lifetime as the session's log -- ``manager``
+    removes the whole session directory when the record is cleared.
+    """
+    return session_dir(name) / "scratch"
+
+
 def mesh_root() -> Path:
     """Root for mesh state (definitions, message logs, delivery cursors)."""
     return daemon_dir() / "mesh"
