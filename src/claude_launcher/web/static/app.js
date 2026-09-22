@@ -27404,6 +27404,11 @@ async function refreshRestartGate() {
       "approved on its own — either way every attached terminal goes " +
       "down with it";
     reject.title = "nothing restarts; the asking session keeps working";
+    const extend = el("button", "wf-btn gate-extend", "+5 min");
+    extend.title =
+      "not a decision: the deadline moves out and the request stays open, " +
+      "so the countdown stops answering for you while you read. Twice at " +
+      "most — the waiting session's own shell cannot be held longer than that";
     approve.addEventListener("click", async (ev) => {
       ev.stopPropagation();
       if (await gatePost("/api/daemon/restart-request/approve", approve)) {
@@ -27427,7 +27432,14 @@ async function refreshRestartGate() {
         dismissNotice(NOTICE_GATE);
       }
     });
+    extend.addEventListener("click", async (ev) => {
+      ev.stopPropagation();
+      // No dismissal and no banner: nothing settled. The next poll repaints
+      // the countdown and this button's own state from the moved record.
+      await gatePost("/api/daemon/restart-request/extend", extend);
+    });
     actions.appendChild(approve);
+    actions.appendChild(extend);
     actions.appendChild(reject);
     node.appendChild(title);
     node.appendChild(sub);
@@ -27437,6 +27449,8 @@ async function refreshRestartGate() {
     notices.set(NOTICE_GATE, entry);
     card = entry;   // the freshly built card carries this poll's countdown too
   }
+  const used = rec.extensions || 0;
+  const max = rec.max_extensions || 0;
   const sub = card.node.querySelector(".notice-sub");
   if (sub) {
     sub.textContent =
@@ -27444,7 +27458,16 @@ async function refreshRestartGate() {
       (rec.requested_at
         ? ` asked at ${new Date(rec.requested_at).toLocaleTimeString()}`
         : "") +
-      ` — auto-approves in ${gateCountdown(rec.deadline)}`;
+      ` — auto-approves in ${gateCountdown(rec.deadline)}` +
+      (used ? ` (extended ${used}/${max})` : "");
+  }
+  // Repainted every poll, not only on the click: the budget is the gate's
+  // and another page may have spent it.
+  const extendBtn = card.node.querySelector(".gate-extend");
+  if (extendBtn) {
+    const spent = max > 0 && used >= max;
+    extendBtn.disabled = spent;
+    extendBtn.textContent = spent ? "extended" : "+5 min";
   }
 }
 

@@ -196,7 +196,8 @@ async def error_middleware(request: web.Request, handler):
         if exc.retry_after:
             resp.headers["Retry-After"] = str(int(exc.retry_after))
         return resp
-    except (SessionGone, MeshConflict, LockBusy, KeyboardHeld, restart_gate.GateBusy, goto_gate.GateBusy) as exc:
+    except (SessionGone, MeshConflict, LockBusy, KeyboardHeld, restart_gate.GateBusy,
+            restart_gate.GateExhausted, goto_gate.GateBusy) as exc:
         # LockBusy is transient by construction (the other writer is mid-
         # transition), so it gets a retryable status, not a flat 400.
         # KeyboardHeld is transient in the same way, and for the most human
@@ -439,6 +440,7 @@ def build_app(
     r.add_post("/api/daemon/restart-request", h_restart_request_submit)
     r.add_post("/api/daemon/restart-request/approve", h_restart_request_approve)
     r.add_post("/api/daemon/restart-request/reject", h_restart_request_reject)
+    r.add_post("/api/daemon/restart-request/extend", h_restart_request_extend)
     r.add_get("/api/profiles", h_profiles)
     r.add_post("/api/profiles/permission-mode", h_profiles_permission_mode)
     r.add_get("/api/usage", h_usage)
@@ -1255,6 +1257,21 @@ async def h_restart_request_reject(request: web.Request) -> web.Response:
     if record is None:
         return json_error(409, "no pending restart request")
     return json_response({"ok": True, "rejected": True, "request": record})
+
+
+async def h_restart_request_extend(request: web.Request) -> web.Response:
+    """The web UI's Extend: move the deadline out, settle nothing.
+
+    The gate's default answer belongs to the clock, and this is how somebody
+    who is at the page takes it back without having decided: the request
+    stays pending, the asking session stays where it was, and both sides read
+    the new deadline off the same record. ``GateExhausted`` (the budget is
+    spent) escapes to the middleware and comes back as 409, because a press
+    that changed nothing must not answer like one that did."""
+    record = request.app["restart_gate"].extend(decided_by="web")
+    if record is None:
+        return json_error(409, "no pending restart request")
+    return json_response({"ok": True, "extended": True, "request": record})
 
 
 def _profile_default_tools(profile_obj, entry) -> Optional[list]:

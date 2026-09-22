@@ -26,8 +26,12 @@ The settlement is three-way, and the third answer is not a choice:
 * **Rejected** — nothing restarts. The request is marked and stays readable
   until the next submit, so the asker's CLI poll can report the outcome; the
   asking turn is alive (nothing has died) and carries on.
-* **Unanswered** — after :data:`GATE_TIMEOUT` the request *counts as
-  approved* and the restart goes out. A timeout is not a no-op: the agent's
+* **Extended** — not a settlement: the deadline moves out by
+  :data:`EXTENSION` and the request stays pending, at most
+  :data:`MAX_EXTENSIONS` times. It is for the person who is here and is not
+  ready, whom the deadline would otherwise answer for.
+* **Unanswered** — after :data:`GATE_TIMEOUT` (plus whatever was added) the
+  request *counts as approved* and the restart goes out. A timeout is not a no-op: the agent's
   stop may be load-bearing (a config change, a new build), and holding it
   forever means the turn waits on a person who may be away all afternoon. The
   deadlock breaker is the revert of the default: approval does nothing that
@@ -60,12 +64,45 @@ from . import restart_notice
 GATE_TIMEOUT = 300.0
 
 
+#: How much one Extend adds to a pending request's deadline, and how many
+#: times it may be pressed. The two multiply into the whole budget a gate can
+#: ever hold a restart for: 300 + 2*300 = 900 seconds, which is the ceiling
+#: cflow puts on a step's ``restart.timeout`` (``cflow.model``). Past that the
+#: shell running ``claunch daemon restart`` is killed by the RestartClock and
+#: the run journals a timeout, while the gate lives on and restarts later --
+#: the journal and the machine saying different things, which is the failure
+#: this budget exists to stay inside.
+EXTENSION = 300.0
+MAX_EXTENSIONS = 2
+
+#: The whole span one request may hold a restart for, measured from when it
+#: was filed. ``GATE_TIMEOUT + EXTENSION * MAX_EXTENSIONS`` is 900 exactly,
+#: which is cflow's own ceiling -- leaving nothing for the seconds the CLI
+#: spends diagnosing the daemon before it files anything. The last extension
+#: is clamped to this rather than overshooting it, so a gate held for as long
+#: as it can be held still ends inside the shell that is waiting on it.
+TOTAL_BUDGET = 870.0
+
+
 class GateBusy(Exception):
     """A restart request is already pending; the gate takes one at a time."""
 
 
+class GateExhausted(Exception):
+    """The pending request has been extended as often as it may be."""
+
+
 def _utcnow() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def _parse(stamp) -> Optional[datetime]:
+    """One of this record's own timestamps, or None if it cannot be read."""
+    try:
+        parsed = datetime.fromisoformat(str(stamp))
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
 
 
 class RestartGate:
@@ -112,6 +149,8 @@ class RestartGate:
                 timespec="seconds"
             ),
             "status": "pending",
+            "extensions": 0,
+            "max_extensions": MAX_EXTENSIONS,
         }
         self._timer = asyncio.get_running_loop().call_later(
             self.timeout, self._on_timeout, self.record["id"]
@@ -125,6 +164,59 @@ class RestartGate:
     # ------------------------------------------------------------------ #
     # the settlement
     # ------------------------------------------------------------------ #
+    def extend(self, *, decided_by: str = "web") -> Optional[dict]:
+        """Push the deadline out and leave the request pending.
+
+        The gate's third answer is the clock's, and this is how a person who
+        is present takes it back without deciding yet: reading the diff that
+        the restart would interrupt, waiting for a worker to reach a resting
+        point, finishing a turn of their own. Nothing settles, so the asking
+        session stays exactly where it was -- it is still waiting, just for
+        longer, and its CLI poll reads the new deadline off the same record.
+
+        Returns None when nothing is pending; raises :class:`GateExhausted`
+        when the budget is spent, because a press that does nothing must not
+        read as a press that worked.
+        """
+        record = self.record
+        if record is None or record["status"] != "pending":
+            return None
+        used = int(record.get("extensions") or 0)
+        if used >= MAX_EXTENSIONS:
+            raise GateExhausted(
+                f"this request has already been extended {used} times; "
+                f"approve or reject it"
+            )
+        # Added to the deadline, not to now: pressing early must not shorten
+        # the wait it was meant to lengthen. The ceiling is measured from the
+        # filing, so two presses buy the same total whenever they land.
+        now = datetime.now(timezone.utc)
+        current = _parse(record.get("deadline")) or now
+        filed = _parse(record.get("requested_at")) or now
+        deadline = min(
+            current + timedelta(seconds=EXTENSION),
+            filed + timedelta(seconds=TOTAL_BUDGET),
+        )
+        if deadline <= current:
+            # The clamp bit, and it bit backwards. A configured
+            # ``restart_approval_timeout`` above TOTAL_BUDGET opens a gate
+            # that is already past the ceiling, and min() would then hand
+            # back an EARLIER deadline -- a press for more time taking some
+            # away. There is nothing left to add here, so say so.
+            raise GateExhausted(
+                "this request is already open for as long as one may be; "
+                "approve or reject it"
+            )
+        self._clear_timer()
+        record["extensions"] = used + 1
+        record["deadline"] = deadline.isoformat(timespec="seconds")
+        record["extended_at"] = _utcnow()
+        record["extended_by"] = decided_by
+        self._timer = asyncio.get_running_loop().call_later(
+            (deadline - now).total_seconds(), self._on_timeout, record["id"]
+        )
+        return dict(record)
+
     def approve(self, *, decided_by: str = "web") -> Optional[dict]:
         """Approve and restart. No-op (None) when nothing is pending.
 

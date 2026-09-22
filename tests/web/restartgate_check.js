@@ -13,8 +13,9 @@
    and clamps at zero; the buttons POST to approve/reject and only a
    successful POST settles the card (a refused one re-enables the button);
    approving hands the gap to the same "restarting the daemon" notice the
-   web button shows; a settled or gone request retires the card; and a
-   stray click anywhere on the card decides nothing. Time and the network
+   web button shows; Extend moves the deadline without settling anything and
+   retires itself once the budget is spent; a settled or gone request retires
+   the card; and a stray click anywhere on the card decides nothing. Time and the network
    belong to the harness, so none of it is waited for. */
 const fs = require("fs");
 const path = require("path");
@@ -59,6 +60,12 @@ function build(opts) {
           n.className = n.className.split(" ").filter((x) => x !== c).join(" ");
         },
       },
+      // `isConnected` is what decides whether a poll REUSES the card or
+      // builds a new one. Without it every poll rebuilt the card, so the
+      // buttons a previous poll handed out went stale -- and a check holding
+      // one of them read the state of a node the page had already dropped.
+      // A card is connected while something still holds it.
+      get isConnected() { return n.parentNode !== null; },
       appendChild: (c) => { c.parentNode = n; n.children.push(c); return c; },
       removeChild: (c) => {
         const i = n.children.indexOf(c);
@@ -70,12 +77,19 @@ function build(opts) {
       // stopPropagation must not care. click() on a node with no listener
       // is a no-op, which is itself a thing tested below.
       click: (ev) => n.on.click && n.on.click(ev || { stopPropagation() {} }),
-      // The card's countdown is updated by re-finding its sub-line; the
-      // stub knows only class selectors.
+      // The card is re-found by class each poll: its sub-line to repaint the
+      // countdown, its Extend button to repaint the budget. The real
+      // querySelector searches DESCENDANTS, and the button lives one level
+      // down inside the action row -- a stub that looked only at direct
+      // children would report it missing and pass code that never runs in a
+      // browser. Depth-first, first match, like the real one.
       querySelector: (sel) => {
-        if (sel.startsWith(".")) {
-          const cls = sel.slice(1);
-          return n.children.find((c) => c.classList.contains(cls)) || null;
+        if (!sel.startsWith(".")) return null;
+        const cls = sel.slice(1);
+        for (const c of n.children) {
+          if (c.classList.contains(cls)) return c;
+          const deeper = c.querySelector(sel);
+          if (deeper) return deeper;
         }
         return null;
       },
@@ -121,7 +135,8 @@ function build(opts) {
   // What the stub daemon would answer on the gate endpoints. The test sets
   // `rec` to a pending/settled record or null, and the failure flags to
   // make a POST refuse.
-  const gate = { rec: null, approveFail: false, rejectFail: false };
+  const gate = { rec: null, approveFail: false, rejectFail: false,
+                 extendFail: false };
   const apiStub = async (p) => {
     apiCalls.push(p);
     if (!daemon.up) throw new Error("down");
@@ -135,6 +150,15 @@ function build(opts) {
     if (p === "/api/daemon/restart-request/reject") {
       if (gate.rejectFail) throw new Error("refused");
       return { json: async () => ({ ok: true, rejected: true }) };
+    }
+    if (p === "/api/daemon/restart-request/extend") {
+      if (gate.extendFail) throw new Error("refused");
+      // The daemon moves the deadline and leaves the request pending; the
+      // next poll is what the card repaints from, exactly as in the browser.
+      gate.rec = { ...gate.rec,
+                   extensions: (gate.rec.extensions || 0) + 1,
+                   deadline: new Date(clockBase() + 600000).toISOString() };
+      return { json: async () => ({ ok: true, extended: true, request: gate.rec }) };
     }
     return { json: async () => ({ version: daemon.version, uptime: daemon.uptime, relay: null }) };
   };
@@ -169,7 +193,8 @@ function pending(rec) {
   return { id: "g1", session: "s9",
            requested_at: new Date(clockBase()).toISOString(),
            deadline: new Date(clockBase() + 300000).toISOString(),
-           status: "pending", ...(rec || {}) };
+           status: "pending", extensions: 0, max_extensions: 2,
+           ...(rec || {}) };
 }
 const clockBase = () => 1700000000000;
 
@@ -190,6 +215,8 @@ const clockBase = () => 1700000000000;
     check("an Approve button", actions.children.some((b) => b.textContent === "Approve"),
           actions.children.map((b) => b.textContent));
     check("a Reject button", actions.children.some((b) => b.textContent === "Reject"),
+          actions.children.map((b) => b.textContent));
+    check("an Extend button", actions.children.some((b) => b.textContent === "+5 min"),
           actions.children.map((b) => b.textContent));
 
     await w.api.refreshRestartGate();
@@ -272,6 +299,66 @@ const clockBase = () => 1700000000000;
           w.strip().length === 1, w.said());
     check("and re-enables the button for a second try",
           reject.disabled === false, reject.disabled);
+  })();
+}
+
+/* --- extend: buys time, decides nothing --------------------------------- */
+{
+  const w = build();
+  w.gate.rec = pending();
+  (async () => {
+    await w.api.refreshRestartGate();
+    const actions = w.strip()[0].children.find((c) => c.className.includes("gate-actions"));
+    const extend = actions.children.find((b) => b.textContent === "+5 min");
+    await extend.click();
+    check("Extend posts the extension", w.apiCalls.includes("/api/daemon/restart-request/extend"),
+          w.apiCalls);
+    check("and settles nothing — the card stays up", w.strip().length === 1, w.said());
+    check("nothing was approved or rejected by it",
+          w.apiCalls.every((p) => !p.includes("approve") && !p.includes("reject")),
+          w.apiCalls);
+
+    await w.api.refreshRestartGate();
+    check("the countdown repaints from the moved deadline",
+          /auto-approves in 10:00/.test(w.said()), w.said());
+    check("and the card says how much of the budget is spent",
+          /extended 1\/2/.test(w.said()), w.said());
+    check("the button comes back for the second press",
+          extend.disabled === false, extend.disabled);
+  })();
+}
+
+/* --- extend: the last press retires the button -------------------------- */
+{
+  const w = build();
+  w.gate.rec = pending({ extensions: 2 });
+  (async () => {
+    await w.api.refreshRestartGate();
+    const actions = w.strip()[0].children.find((c) => c.className.includes("gate-actions"));
+    const extend = actions.children.find((b) => b.className.includes("gate-extend"));
+    check("a spent budget disables the button", extend.disabled === true, extend.disabled);
+    check("and says so rather than offering more time",
+          extend.textContent === "extended", extend.textContent);
+    check("while Approve and Reject stay live",
+          actions.children.filter((b) => b.disabled).length === 1,
+          actions.children.map((b) => [b.textContent, b.disabled]));
+  })();
+}
+
+/* --- a refused extension leaves the deadline alone ---------------------- */
+{
+  const w = build();
+  w.gate.rec = pending();
+  w.gate.extendFail = true;
+  (async () => {
+    await w.api.refreshRestartGate();
+    const actions = w.strip()[0].children.find((c) => c.className.includes("gate-actions"));
+    const extend = actions.children.find((b) => b.className.includes("gate-extend"));
+    await extend.click();
+    check("a refused extension leaves the card standing", w.strip().length === 1, w.said());
+    check("and the countdown where it was", /auto-approves in 5:00/.test(w.said()), w.said());
+    await w.api.refreshRestartGate();
+    check("with the button available again", extend.disabled === false, extend.disabled);
   })();
 }
 
