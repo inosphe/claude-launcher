@@ -38,6 +38,7 @@ from .. import (
     runner,
     usage,
 )
+from .. import install
 from .. import session_commits
 from .. import beads_meta
 from .. import ghcli, prflow, projects, spawn as spawn_mod, store, workspaces
@@ -1322,6 +1323,82 @@ def _permission_mode(profile_obj, doc: dict) -> dict:
     }
 
 
+#: The two rule lists the profiles page reports on, spelled once each for the
+#: same reason :data:`PERMISSION_MODE_KEY` is. ``defaultMode`` is one value and
+#: the page shows it; these are lists, and the question a person asks about a
+#: list is not "what does it hold" but "is the rule claunch plants in it" --
+#: so they are reported as presence set against an expectation, and the value
+#: rides along only as the evidence for that answer.
+PERMISSION_ALLOW_KEY = "permissions.allow"
+PERMISSION_DENY_KEY = "permissions.deny"
+
+
+def _permission_rule_list(data: dict, key: str, expected, declared) -> dict:
+    """One rule list, read against what claunch plants in it.
+
+    ``expected`` is the gate guard's half for this key. ``missing`` is the
+    whole answer to "is it whole" -- a list rather than a boolean because a
+    half-planted guard is the state worth seeing, and the names of the absent
+    rules are what makes the page actionable. Counts are read off
+    ``expected``/``missing`` by the caller; carrying them here as well would be
+    a third spelling of the same fact, free to disagree with the other two.
+    """
+    found = settings.dotted_get(data, key)
+    found = [str(rule) for rule in found] if isinstance(found, list) else []
+    missing = [rule for rule in expected if rule not in found]
+    return {
+        "key": key,
+        "value": found,
+        "expected": [*expected],
+        "missing": missing,
+        "declared": declared,
+        "converged": not missing,
+    }
+
+
+def _permission_rules(profile_obj, doc: dict) -> dict:
+    """Which of the gate guard's rules this profile's settings file is missing.
+
+    The guard has two halves and they fail in opposite directions, which is why
+    both are reported and neither is folded into a single "ok":
+
+    * ``allow`` -- the claunch MCP server. Missing it is the failure this
+      project spent a round on: Claude Code's ``auto`` classifier reads the
+      ``deny`` half, finds the MCP tool that reaches the same commands, and
+      refuses the second as circumvention of the first, leaving a run with no
+      channel to advance on.
+    * ``deny`` -- the four human gate commands, taken off the agent's shell.
+      Expect-many (a shell times both spellings of each verb), so it is the one
+      that can be *partly* planted, and a count that silently rounds to "has
+      some" would hide exactly that.
+
+    ``expected`` is read off :mod:`install` rather than re-spelled here. That
+    module is where the guard is defined; a second copy is a second thing to
+    forget the day a gate command gains a shell.
+
+    ``declared`` is the shared declaration (``claunch shared permissions.allow``
+    and friends), ``None`` when nobody declared one. It is reported beside the
+    files rather than instead of them, because the two routes are not the same:
+    a declaration reaches profiles through ``claunch apply``, which converges a
+    list by *assigning* it, while the guard reaches them through ``claunch
+    install``, which merges. A profile can hold the rules with nothing declared
+    and vice versa, and the page is the place that says which is in play.
+    """
+    data = settings.load(profile_obj)
+    shared = store.shared_settings(doc)
+    allow = _permission_rule_list(
+        data, PERMISSION_ALLOW_KEY, install.GATE_ALLOW_RULES,
+        shared.get(PERMISSION_ALLOW_KEY))
+    deny = _permission_rule_list(
+        data, PERMISSION_DENY_KEY, install.GATE_DENY_RULES,
+        shared.get(PERMISSION_DENY_KEY))
+    return {
+        "allow": allow,
+        "deny": deny,
+        "converged": allow["converged"] and deny["converged"],
+    }
+
+
 def _converge_profiles() -> list:
     """Every Claude Code profile, the set the shared layer writes to.
 
@@ -1429,6 +1506,15 @@ async def h_profiles(request: web.Request) -> web.Response:
                     # on a Claude row means.
                     "permission_mode": (
                         _permission_mode(p, doc)
+                        if name == harness_registry.CLAUDE_HARNESS
+                        else None
+                    ),
+                    # The other half of the same settings file, gated on the
+                    # same harness for the same reason: a rule list another
+                    # harness never reads has no answer here, and ``None``
+                    # says that rather than ``missing: everything``.
+                    "permission_rules": (
+                        _permission_rules(p, doc)
                         if name == harness_registry.CLAUDE_HARNESS
                         else None
                     ),
