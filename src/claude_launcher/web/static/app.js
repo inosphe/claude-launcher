@@ -1308,7 +1308,11 @@ function renderSessionTabs() {
     close.dataset.name = name;
     close.dataset.action = "close";
     close.addEventListener("click", () => closeSessionTab(name));
-    tab.append(open, observe, pin, close);
+    // 📌 before 👁, the order the rail's row draws them in. The two controls
+    // sit together on both surfaces, so a reader who learns where they are in
+    // one has to find them again in the other if the order flips — which is
+    // what this did until the round that fixed the glyph's legibility.
+    tab.append(open, pin, observe, close);
     bar.append(tab);
   }
   if (focused) {
