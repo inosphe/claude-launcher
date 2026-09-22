@@ -319,17 +319,23 @@ def test_one_shot_refresh_spends_no_call_when_nothing_is_new(setup, monkeypatch)
     assert asyncio.run(service.refresh("s1")) == (200, {"called": False, "events": 0})
 
 
-def test_one_shot_refresh_is_refused_while_observation_is_off(setup, monkeypatch):
-    """Observation off is the operator's cost switch; a press does not flip it."""
+def test_one_shot_refresh_runs_while_observation_is_off(setup, monkeypatch):
+    """The switch governs the loop; the button is one call for one session.
+
+    Reading one session without leaving the loop running over the whole fleet
+    is what the press is for, so the pass happens with the switch off — and it
+    does not turn the loop on behind the operator's back.
+    """
     service, _ = setup
     monkeypatch.setattr(observer, "configuration", lambda: CFG)
-    async def unexpected(*args):
-        pytest.fail("observation being off must not spend a call")
-    monkeypatch.setattr(observer, "complete", unexpected)
-    status, payload = asyncio.run(service.refresh("s1"))
-    assert status == 409
-    assert "관찰이 꺼져 있습니다" in payload["error"]
-    assert service.data["sessions"] == {}
+    monkeypatch.setattr(service, "evidence", lambda *args: evidence())
+    async def fake(cfg, messages):
+        return answer(), {"prompt_tokens": 10}
+    monkeypatch.setattr(observer, "complete", fake)
+    assert service.data["enabled"] is False
+    assert asyncio.run(service.refresh("s1")) == (200, {"called": True, "events": 1})
+    assert service.data["sessions"]["s1"]["summary"] == "테스트 완료"
+    assert service.data["enabled"] is False
 
 
 def test_one_shot_refresh_reports_an_unknown_session(setup, monkeypatch):
@@ -349,13 +355,21 @@ def test_the_refresh_route_carries_the_pass_outcome(setup, monkeypatch):
         # app builds its own Observer, so the evidence patch goes on that one.
         app.on_startup.remove(app["observer"].start)
         monkeypatch.setattr(observer,"configuration",lambda:CFG)
-        monkeypatch.setattr(app["observer"],"evidence",lambda *args: evidence())
+        # Each press reads one record further, so both of them have something
+        # new to report: a second press over the same evidence would dedupe to
+        # zero events and say nothing about the switch this test is about.
+        passes = []
+        monkeypatch.setattr(app["observer"],"evidence",lambda *args: evidence(len(passes) + 1))
         async def fake(cfg, messages):
-            return answer(), {"prompt_tokens": 10}
+            passes.append(messages)
+            return answer(f"transcript:{len(passes)}"), {"prompt_tokens": 10}
         monkeypatch.setattr(observer,"complete",fake)
         async with TestClient(TestServer(app)) as client:
+            # The route is the same answer with the switch either way: off
+            # first, and the loop is still off after it (settings say so).
             off=await client.post("/api/observer/s1/refresh")
-            assert off.status==409 and "관찰이 꺼져 있습니다" in (await off.json())["error"]
+            assert off.status==200 and await off.json()=={"called":True,"events":1}
+            assert (await (await client.get("/api/observer")).json())["enabled"] is False
             app["observer"].data["enabled"]=True
             assert (await client.post("/api/observer/nope/refresh")).status==404
             done=await client.post("/api/observer/s1/refresh")

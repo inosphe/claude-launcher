@@ -78,9 +78,14 @@ const server = http.createServer((req, res) => {
         sent.push({url:req.url, body:patch});
         return res.end(JSON.stringify({enabled:data.enabled, scope:data.scope||"all"}));
       }
-      // One-shot refresh: the pass ran and added two events, which is what the
+      // One-shot refresh: the pass ran and added events, which is what the
       // card reports back. A pass with nothing new answers called:false.
-      if(req.url.endsWith("/refresh")) { sent.push({url:req.url,body:JSON.parse(body||"{}")}); return res.end('{"called":true,"events":2}'); }
+      // Each press answers one event more than the last, so a second press is
+      // told apart from the first by the note the card draws.
+      if(req.url.endsWith("/refresh")) {
+        sent.push({url:req.url,body:JSON.parse(body||"{}")});
+        return res.end(JSON.stringify({called:true, events:sent.filter(r=>r.url.endsWith("/refresh")).length + 1}));
+      }
       if (req.url.endsWith("/events/e1")) return res.end('{"content":"Which environment?"}');
       if(req.url.includes("/transcript?")) return res.end(JSON.stringify({records:[{seq:1,role:"user",blocks:[{type:"text",text:"Transcript retained"}]}],has_more:false,cursor:1}));
       // The observe pin is one session field read by two polls: the rail's
@@ -300,6 +305,19 @@ async function fadeCost(page, selector, fade) {
     assert.equal(sent.filter(r=>r.url.endsWith("/refresh")).length, 1);
     assert.equal(sent.at(-1).url, "/api/observer/s1/refresh");
     assert.equal(await note.innerText(), "갱신됨 · 새 항목 2개");
+    // The observation switch governs the loop, not this chip: with observation
+    // off the press still runs one pass for this one session, which is the only
+    // way to read a session without leaving the loop on over the whole fleet.
+    await page.click("#observer-mobile-monitor");
+    await page.waitForFunction(()=>document.getElementById("observer-mobile-monitor").textContent==="관찰 시작");
+    assert.equal(await refreshAction.isDisabled(), false, "the one-shot stays pressable while observation is off");
+    await refreshAction.click();
+    await page.waitForFunction(()=>document.querySelector(".observer-post[data-session=s1] .observer-action-note")?.textContent==="갱신됨 · 새 항목 3개");
+    assert.equal(sent.filter(r=>r.url.endsWith("/refresh")).length, 2);
+    // The press asked for one pass and nothing else: the switch is still off.
+    assert.equal(await page.textContent("#observer-mobile-monitor"), "관찰 시작");
+    await page.click("#observer-mobile-monitor");
+    await page.waitForFunction(()=>document.getElementById("observer-mobile-monitor").textContent==="관찰 끄기");
     await page.uncheck("#observer-actions-only");
     // The observe pin on the card, drawn from the session's own flag: the two
     // cards disagree (s1 out of the scope, s2 in it), so a control reading

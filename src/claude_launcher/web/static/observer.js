@@ -201,6 +201,7 @@ function cardActions(card,s) {
   input.onclick=()=>{chooseTarget(s.name);composerFolded=false;composerState();$("prompt").focus();};
   const update=node("button","지금 갱신","observer-action");
   update.disabled=refreshing.has(s.name);
+  update.title=`${s.name}을 지금 한 번 관찰합니다. 관찰이 꺼져 있어도 이 한 번은 수행됩니다.`;
   update.onclick=()=>oneShot(s.name);
   // The same flag the rail's glyph writes, drawn here so the reader can see
   // which sessions the pinned-only scope covers without leaving the page.
@@ -219,9 +220,10 @@ function cardActions(card,s) {
   if(note)links.append(node("small",note,"observer-action-note"));
 }
 /* One observation pass for one session, now. The button is a request, not a
-   mode: the daemon runs one pass and answers what it did, and it refuses while
-   observation is off instead of spending against the switch that was turned
-   off. A pass with nothing new to read spends no API call at all, and saying
+   mode: the daemon runs one pass and answers what it did, and it is served
+   while observation is off as well — the switch governs the loop's standing
+   bill over the whole fleet, and this press buys one call for the session the
+   reader named. A pass with nothing new to read spends no API call at all, and saying
    that is half of what this reports — the reader pressed a button that costs
    money exactly when there is something new. */
 /* Which sessions the 「고정만 관찰」 scope covers. The flag is a session
@@ -407,7 +409,7 @@ function renderSession() {
   const {name,host}=embedded, s=snapshot.sessions.find(s=>s.name===name);
   const scroll=host.scrollTop;
   host.replaceChildren();
-  const notice=node("p",cflowError?"cflow 상태 조회 실패 · 마지막 조회 결과 표시":snapshot.error||(snapshot.enabled?"관찰 중":"관찰이 꺼져 있습니다."));
+  const notice=node("p",cflowError?"cflow 상태 조회 실패 · 마지막 조회 결과 표시":snapshot.error||(snapshot.enabled?"관찰 중":"관찰이 꺼져 있습니다 · 「지금 갱신」은 사용할 수 있습니다."));
   notice.setAttribute("role","status");host.append(notice);
   if(!s) {host.append(node("p","아직 이 세션의 관찰 정보가 없습니다."));return;}
   const card=sessionHeader(s), body=node("div");
@@ -442,7 +444,7 @@ function render() {
   const scoped=snapshot.scope==="pinned";
   $("scope-pinned").checked=scoped;
   $("mobile-scope-pinned").checked=scoped;
-  $("notice").textContent=(cflowError?"cflow 상태 조회 실패 · 마지막 조회 결과 표시":snapshot.error)||(snapshot.enabled?"관찰 중 · 세션별 순차 처리 · 최소 60초 간격":"관찰이 꺼져 있습니다. 시작하면 ds4-official/deepseek-flash API로 트랜스크립트를 전송합니다.");
+  $("notice").textContent=(cflowError?"cflow 상태 조회 실패 · 마지막 조회 결과 표시":snapshot.error)||(snapshot.enabled?"관찰 중 · 세션별 순차 처리 · 최소 60초 간격":"관찰이 꺼져 있습니다. 시작하면 ds4-official/deepseek-flash API로 트랜스크립트를 전송합니다. 「지금 갱신」은 꺼져 있어도 그 세션 하나를 한 번 전송합니다.");
   $("sort").hidden=timeline||grid;
   $("layout-hint").textContent=grid?`세션마다 최신 항목 최대 ${gridLimit}개 · 세션 목록은 필터 그대로 · 보고·승인 요청 기준`:timeline?"최신 보고부터 표시하는 타임라인":"세션 보드 · 내용은 자동 갱신되며 세션 순서는 최신순 정렬을 누를 때 바뀝니다.";
   cards.className=grid?"observer-grid":timeline?"observer-timeline":"observer-board";

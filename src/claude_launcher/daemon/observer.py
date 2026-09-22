@@ -5,8 +5,11 @@ prefixes between calls; rotation is explicit and usage includes cache counters.
 Besides the loop, one session can be observed on demand
 (``POST /api/observer/{name}/refresh``) — a human's one-shot, not a mode: it
 takes the same lock as the loop, so a refresh never overlaps a pass that is
-already out, and it is refused while observation is off rather than spending
-against a switch the operator turned off.
+already out. It is served whether or not observation is on: the on/off switch
+governs the standing bill the loop runs up on its own schedule, and a person
+pressing the button for one named session is asking for that one call. Reading
+one session without leaving the loop on is what the switch being off otherwise
+made impossible.
 Each session's row also carries a meter: ``usage_totals`` sums the counters of
 every call made for that session and ``usage_daily`` breaks the same counters
 down by local calendar day, so the dashboard can show an accumulated figure and
@@ -90,7 +93,8 @@ MAX_CONTEXT = 12_000
 #: observes only the sessions a person marked (``SessionDef.observe_pin``), so
 #: the API bill tracks what somebody asked to watch rather than the size of the
 #: fleet. Only the loop is scoped: a human's ``POST .../refresh`` is an explicit
-#: one-shot for one named session and is served in either mode.
+#: one-shot for one named session and is served in either mode, and while
+#: observation is off as well.
 SCOPE_ALL = "all"
 SCOPE_PINNED = "pinned"
 KINDS = {"cflow", "commit", "merge", "test", "action", "result"}
@@ -451,14 +455,16 @@ class Observer:
         """Observe one session now, at a human's request.
 
         Returns ``(status, payload)``: the payload is what the pass did, or
-        why it did nothing. Refusing is a real answer — observation being off
-        is the operator's cost switch, and a button press does not flip it.
+        why it did nothing. The observation switch is not consulted — it
+        governs the loop, which observes every covered session every
+        :data:`INTERVAL` seconds, while this is one call for one session at
+        the moment somebody asked for it. The press does not turn the loop on
+        either: ``self.data["enabled"]`` is left as it was, so the next thing
+        the daemon does on its own is still nothing.
         """
         session = next((s for s in self.manager.list() if s.sdef.name == name), None)
         if session is None:
             return 404, {"error": "세션을 찾을 수 없습니다."}
-        if not self.data.get("enabled"):
-            return 409, {"error": "관찰이 꺼져 있습니다. 관찰을 시작한 뒤 다시 시도하십시오."}
         try:
             cfg = await asyncio.to_thread(configuration)
         except Exception:
