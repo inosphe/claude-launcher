@@ -39,17 +39,20 @@
 }
 :is(#observer-view, #log-info-pane) .observer-links .observer-action-note { flex: 1 1 100%; margin: 0; }
 /* The observe pin wears the action chip so the row keeps one visual weight,
-   but it is a state rather than an action, so it takes the rail's rule
-   instead of the chip's filled blue: greyscale and dim until it is on, lit
-   once it is. The same 👁 and the same rule as the rail make the control
-   recognisable across both pages. */
+   but it is a state rather than an action, so it is an outline chip when off
+   and the filled one when on — the state is carried by the chip's shape as
+   well as by the glyph's colour. Filtering the whole filled chip to greyscale
+   was what made the off state read as a disabled button rather than a toggle,
+   and fading the glyph on top of that erased it: 👁 is thin-lined, so it is
+   drawn at full strength in both states here too. */
 :is(#observer-view, #log-info-pane) .observer-links .observer-pin {
-  filter: grayscale(1); opacity: .6; cursor: pointer;
+  background: transparent; border-color: #30363d; color: #8b949e;
+  filter: grayscale(1); cursor: pointer;
 }
 :is(#observer-view, #log-info-pane) .observer-links .observer-pin:hover,
 :is(#observer-view, #log-info-pane) .observer-links .observer-pin.on,
 :is(#observer-view, #log-info-pane) .observer-links .observer-pin[aria-pressed="true"] {
-  filter: none; opacity: 1;
+  background: #142b3e; border-color: #285271; color: #8dcaff; filter: none;
 }
 /* The scope switch sits with the monitor button it modifies: the two are one
    decision — whether the observer runs, and over what. */

@@ -1274,16 +1274,18 @@ a.cflow-scope:hover { background: #1d3559; text-decoration: underline; }
 }
 .session-tab-pin { filter: grayscale(1); opacity: .65; font-size: 11px; }
 .session-tab-pin[aria-pressed="true"] { filter: none; opacity: 1; }
-/* The observe pin sits beside the 📌 pin and wears the same rule: greyscale
-   and dim until it is on, the glyph's own colour at full strength once it is.
-   The two are different flags — 📌 is this browser's shortcut list in
-   localStorage, this one is which sessions the observer may spend on — so
-   they are told apart by glyph (👁) and position rather than by being drawn
-   in two vocabularies. The box comes from the `.session-tab button` rule
-   above; only the glyph differs. */
-.session-tab-observe { filter: grayscale(1); opacity: .65; font-size: 11px; }
+/* The observe pin sits beside the 📌 pin and answers a different question —
+   📌 is this browser's shortcut list in localStorage, this one is which
+   sessions the observer may spend on. It carried 📌's rule verbatim, and that
+   is exactly what broke it: 📌 is a solid shape, so greyscale plus 65% still
+   leaves a shape you can read, while 👁 is drawn in thin lines and the same
+   two settings collapsed it into an unreadable grey smudge — reported from
+   the live UI and measured off a 5x enlargement of the rail. The glyph is
+   now always drawn at full opacity; only its colour carries the state, and
+   it is one step larger so the eye has pixels to be an eye with. */
+.session-tab-observe { filter: grayscale(1); font-size: 13px; }
 .session-tab-observe:hover, .session-tab-observe.on,
-.session-tab-observe[aria-pressed="true"] { filter: none; opacity: 1; }
+.session-tab-observe[aria-pressed="true"] { filter: none; }
 .session-tab button:hover, .session-tab-open:hover { color: #f0f6fc; background: #21262d; }
 .session-tab :focus-visible { outline: 2px solid #58a6ff; outline-offset: -2px; border-radius: 4px; }
 #term-header {
@@ -4136,18 +4138,19 @@ body.embed #main { width: 100%; }
 #session-list .sess-pin:hover { filter: none; opacity: 1; }
 #session-list .sess-pin.on { filter: none; opacity: 1; }
 /* The rail row's 👁, the fourth action and the sibling of the 📌 it sits
-   beside. Same dim-until-lit rule and the same box, because the two are read
-   in one glance down the row; the glyph and the tooltip carry which is which.
-   Unlike the 📌 this one is not the reader's own list — it is the flag the
-   daemon holds on the session, so it is repainted from the poll. */
+   beside. Same box as the 📌 so the two read as one cluster down the row, but
+   it does not take the 📌's dimming: this glyph is thin-lined and turned into
+   a smudge by greyscale plus a low opacity. It is drawn at full strength in
+   both states and the colour alone carries which one it is. Unlike the 📌
+   this one is not the reader's own list — it is the flag the daemon holds on
+   the session, so it is repainted from the poll. */
 #session-list .sess-observe {
   flex: none; background: none; border: none; color: #6e7681;
-  font-size: 12px; line-height: 1; padding: 2px 4px; cursor: pointer;
-  filter: grayscale(1); opacity: 0.55;
+  font-size: 14px; line-height: 1; padding: 1px 4px; cursor: pointer;
+  filter: grayscale(1);
 }
-#session-list .sess-observe:hover { filter: none; opacity: 1; }
-#session-list .sess-observe.on,
-#session-list .sess-observe[aria-pressed="true"] { filter: none; opacity: 1; }
+#session-list .sess-observe:hover, #session-list .sess-observe.on,
+#session-list .sess-observe[aria-pressed="true"] { filter: none; }
 /* The header's pin chip: the same toggle, on the attached session. */
 .pin-chip { flex: none; filter: grayscale(1); opacity: 0.7; }
 .pin-chip:hover { filter: none; opacity: 1; }

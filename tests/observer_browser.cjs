@@ -123,6 +123,48 @@ const server = http.createServer((req, res) => {
     } catch { res.statusCode = 404; res.end(); }
   });
 });
+/* How readable a glyph actually is, measured rather than asserted about. The
+   element is screenshotted, the PNG is decoded by the page itself, and the
+   spread of luminance inside the glyph's own box comes back: a glyph drawn at
+   full strength has light and dark pixels in it, while one faded toward its
+   background collapses toward a single value. This exists because a check on
+   `filter: grayscale(1)` passed green while the live rail showed a grey
+   smudge — the rule had been applied and the eye was gone. */
+async function glyphContrast(page, selector) {
+  const shot = (await page.locator(selector).screenshot()).toString("base64");
+  return page.evaluate(async (b64) => {
+    const img = new Image();
+    img.src = "data:image/png;base64," + b64;
+    await img.decode();
+    const c = document.createElement("canvas");
+    c.width = img.width; c.height = img.height;
+    const g = c.getContext("2d");
+    g.drawImage(img, 0, 0);
+    const d = g.getImageData(0, 0, c.width, c.height).data;
+    const lum = [];
+    for (let i = 0; i < d.length; i += 4) lum.push(0.2126 * d[i] + 0.7152 * d[i + 1] + 0.0722 * d[i + 2]);
+    const mean = lum.reduce((a, b) => a + b, 0) / lum.length;
+    const sd = Math.sqrt(lum.reduce((a, b) => a + (b - mean) ** 2, 0) / lum.length);
+    return { mean: Math.round(mean), sd: Math.round(sd),
+             spread: Math.round(Math.max(...lum) - Math.min(...lum)) };
+  }, shot);
+}
+
+/* The defect this round fixes, expressed as a measurement: the shipped rule
+   against the rule it replaced, on the same box, on this machine. The replaced
+   rule is re-injected rather than remembered as a number, so the check is
+   relative and self-calibrating — what it asserts is that the fade is what
+   costs the glyph its legibility, which is the whole finding. A magic absolute
+   threshold would have to be retuned per font and per zoom and would still not
+   say what went wrong. */
+async function fadeCost(page, selector, fade) {
+  const shipped = await glyphContrast(page, selector);
+  const tag = await page.addStyleTag({content: `${selector}{${fade} !important}`});
+  const faded = await glyphContrast(page, selector);
+  await tag.evaluate(el => el.remove());
+  return { shipped: shipped.spread, faded: faded.spread };
+}
+
 (async () => {
   await new Promise(resolve => server.listen(0, "127.0.0.1", resolve));
   const browser = await chromium.launch({ headless: true, executablePath: process.env.CLAUNCH_CHROMIUM || undefined });
@@ -271,8 +313,20 @@ const server = http.createServer((req, res) => {
                                                    el.classList.contains("on")]);
     assert.deepEqual(await cardOn("s1"), ["false", false]);
     assert.deepEqual(await cardOn("s2"), ["true", true]);
-    assert.match(await cardPin("s1").evaluate(e => getComputedStyle(e).filter), /grayscale/, "an unpinned card's glyph is dimmed");
-    assert.equal(await cardPin("s2").evaluate(e => getComputedStyle(e).filter), "none", "a pinned card's glyph is not dimmed");
+    assert.match(await cardPin("s1").evaluate(e => getComputedStyle(e).filter), /grayscale/, "an unpinned card's glyph is desaturated");
+    assert.equal(await cardPin("s2").evaluate(e => getComputedStyle(e).filter), "none", "a pinned card's glyph keeps its colour");
+    // ...and desaturated is not the same as faded. The off chip used to be
+    // greyscaled at 60% opacity, which left the eye a smudge; what is measured
+    // here is that it is still drawn at full strength, so the state is carried
+    // by colour and by the chip's shape, never by erasing the glyph.
+    assert.equal(await cardPin("s1").evaluate(e => getComputedStyle(e).opacity), "1",
+      "the off chip's glyph is not faded toward the background");
+    // And the chip itself keeps a readable outline when off rather than being
+    // greyed whole, which is what made it read as a disabled button.
+    assert.equal(await cardPin("s1").evaluate(e => getComputedStyle(e).backgroundColor), "rgba(0, 0, 0, 0)",
+      "the off chip is an outline, not a greyed fill");
+    assert.notEqual(await cardPin("s2").evaluate(e => getComputedStyle(e).backgroundColor), "rgba(0, 0, 0, 0)",
+      "the on chip is filled");
     // Evidence for the round report: the two cards side by side, one dimmed
     // and one lit, which is the pair the change is about. Captured at the
     // desktop width the board is read at, then put back for the rest.
@@ -602,6 +656,38 @@ const server = http.createServer((req, res) => {
     // the class CSS keys on — the same one the pin beside it uses.
     assert.equal(await railGlyph.evaluate(e => e.textContent), "👁");
     assert.match(await railGlyph.evaluate(e => getComputedStyle(e).filter), /grayscale/);
+    // The glyph box holds nothing but the eye, so this reads the glyph itself:
+    // the off state must still draw light and dark pixels of its own rather
+    // than a single smudged value. See glyphContrast for why this replaced a
+    // check on the CSS rule.
+    // Measured on this fixture: the same glyph box read spread 76 under the
+    // rule this round replaced and 117 under this one, and the row's read 48
+    // against the tab's 76 — a blot is what "everything in the box is within
+    // a few dozen luminance of everything else" looks like as a number. The
+    // threshold sits between the two, and the opacity check beside it names
+    // the cause directly instead of resting on the pixel margin alone.
+    const rowGlyphOff = '#session-list li[data-name="s1"] .sess-observe';
+    const tabFade = await fadeCost(page, ".session-tab-observe", "opacity:.65");
+    const rowFade = await fadeCost(page, rowGlyphOff, "opacity:.55");
+    console.log(`measured: off tab glyph spread ${tabFade.shipped} shipped vs ${tabFade.faded} under the fade it replaced;`
+      + ` off row glyph ${rowFade.shipped} vs ${rowFade.faded}`);
+    assert(tabFade.shipped >= tabFade.faded * 1.3,
+      `the off tab glyph is materially clearer than the faded rule it replaced (${tabFade.shipped} vs ${tabFade.faded})`);
+    assert(rowFade.shipped >= rowFade.faded * 1.3,
+      `the off row glyph is materially clearer than the faded rule it replaced (${rowFade.shipped} vs ${rowFade.faded})`);
+    assert.equal(await railGlyph.evaluate(e => getComputedStyle(e).opacity), "1",
+      "the off tab glyph is not faded toward the background");
+    assert.equal(await page.locator(rowGlyphOff).evaluate(e => getComputedStyle(e).opacity), "1",
+      "the off row glyph is not faded toward the background");
+    // 📌 before 👁, the same way round on both surfaces. The tab drew the pair
+    // the other way from the row, so a reader who learned the position in one
+    // had to find it again in the other.
+    const pinOrder = (sel) => page.locator(sel).evaluate(el =>
+      [...el.querySelectorAll(".session-tab-pin, .session-tab-observe, .sess-pin, .sess-observe")]
+        .map(n => n.classList.contains("session-tab-pin") || n.classList.contains("sess-pin")
+          ? "pin" : "observe"));
+    assert.deepEqual(await pinOrder(".session-tab"), ["pin", "observe"], "the tab draws 📌 before 👁");
+    assert.deepEqual(await pinOrder('#session-list li[data-name="s1"]'), ["pin", "observe"], "the row draws 📌 before 👁");
     // Evidence for the round report, taken before the write below so the rail
     // still shows both states at once: s1's tab glyph and row glyph dimmed,
     // s2's lit — the pair the reader is asked to tell apart from the 📌.
