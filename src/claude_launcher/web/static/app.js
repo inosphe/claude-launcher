@@ -1182,15 +1182,24 @@ function closeSessionTab(name) {
   }
 }
 
+/* One sentence for one state, so the tab, the rail row and the observer card
+   cannot drift into three ways of saying it. Each surface draws its own
+   control — one is a tab button, one a row button, one a card chip — but the
+   words and the direction they name come from here. */
+function observePinTitle(name, on) {
+  return `${on ? "관찰 대상에서 빼기" : "관찰 대상으로 고정"} ${name}`
+    + " — Observer의 「고정만」 모드가 이 표시를 읽습니다";
+}
+
 /* The observer's pinned-only scope reads this off the session record, so the
    rail writes it through the observer's own route and the daemon persists it
    on the definition — the rail shares no state with the observer page beyond
-   this flag. It sits beside the 📌 pin and looks like it, but the two answer
-   different questions: 📌 is this browser's shortcut list, held in
+   this flag. It sits beside the 📌 pin and wears the same rule, but the two
+   answer different questions: 📌 is this browser's shortcut list, held in
    localStorage, and this one is which sessions the observer is allowed to
-   spend on. The box is drawn from sessionsCache and never from the browser's
-   own checkbox state, so a failure that reverted on the server reverts here
-   on the next poll instead of reading as applied. */
+   spend on. The glyph is drawn from sessionsCache and never from the
+   browser's own pressed state, so a failure that reverted on the server
+   reverts here on the next poll instead of reading as applied. */
 async function setObservePin(name, on) {
   const label = on ? "관찰 대상으로 고정" : "관찰 대상에서 제외";
   try {
@@ -1211,7 +1220,13 @@ async function setObservePin(name, on) {
     await modalInfo(`'${name}'을 ${label}하지 못했습니다`,
                     err && err.message ? err.message : "request failed");
   } finally {
-    renderSessionTabs();
+    // The tab and the rail row both read this one field, so both are repainted
+    // from the response rather than each waiting for the poll that would
+    // otherwise reach it — the tab is rebuilt by this call and the row's glyph
+    // is repainted inside syncSessionPinUi. Without it a row would lag a tab
+    // by up to one poll and read as the row disagreeing with the tab beside it.
+    if (typeof syncSessionPinUi === "function") syncSessionPinUi();
+    else renderSessionTabs();
   }
 }
 
@@ -1264,16 +1279,26 @@ function renderSessionTabs() {
     pin.dataset.name = name;
     pin.dataset.action = "pin";
     pin.addEventListener("click", () => toggleSessionPin(name));
-    const observe = document.createElement("input");
-    observe.type = "checkbox";
-    observe.className = "session-tab-observe";
-    observe.checked = Boolean(rec?.observe_pin);
-    observe.title = `${observe.checked ? "관찰 대상에서 빼기" : "관찰 대상으로 고정"} ${name}`
-      + " — Observer의 「고정만」 모드가 이 표시를 읽습니다";
+    // A button wearing the same glyph rule as the 📌 beside it, not a bare
+    // checkbox: the two controls answer different questions but they are
+    // read in the same glance, so they are told apart by glyph (👁) and
+    // position rather than by being drawn in two different vocabularies.
+    const observe = document.createElement("button");
+    observe.type = "button";
+    observe.className = "session-tab-observe" + (rec?.observe_pin ? " on" : "");
+    observe.textContent = "👁";
+    observe.title = observePinTitle(name, !!rec?.observe_pin);
     observe.setAttribute("aria-label", observe.title);
+    observe.setAttribute("aria-pressed", String(Boolean(rec?.observe_pin)));
     observe.dataset.name = name;
     observe.dataset.action = "observe-pin";
-    observe.addEventListener("change", () => setObservePin(name, observe.checked));
+    // Read the click's direction from the record rather than from the
+    // control: a rejected write reverts the record, and the next render has
+    // to offer the opposite of what the server actually holds.
+    observe.addEventListener("click", () => {
+      const cur = sessionsCache.find((s) => s.name === name);
+      setObservePin(name, !(cur && cur.observe_pin));
+    });
     const close = document.createElement("button");
     close.type = "button";
     close.className = "session-tab-close";
@@ -1332,8 +1357,11 @@ function clearSessionPins(remember = true) {
 }
 
 /* Paint the pin state onto the controls that show it without rebuilding the
-   rail: the row buttons' lit state and the terminal header's chip. Guarded
-   per element — the reduced harnesses build rails with no header, and a page mid-load has no rows. */
+   rail: the row buttons' lit state and the terminal header's chip. The
+   observe glyph beside them is repainted here too, but from a different
+   source — it is a server-held session field, not a browser-local list.
+   Guarded per element — the reduced harnesses build rails with no header,
+   and a page mid-load has no rows. */
 function syncSessionPinUi() {
   renderSessionTabs();
   const list = $("session-list");
@@ -1346,6 +1374,17 @@ function syncSessionPinUi() {
       }
       button.title = on ? "unpin this session tab"
         : "pin this session as a tab";
+    }
+    for (const button of list.querySelectorAll(".sess-observe")) {
+      const name = button.dataset && button.dataset.name;
+      const rec = (typeof sessionsCache === "undefined" ? [] : sessionsCache || [])
+        .find((row) => row.name === name);
+      const on = !!(rec && rec.observe_pin);
+      button.classList.toggle("on", on);
+      if (typeof button.setAttribute === "function") {
+        button.setAttribute("aria-pressed", on ? "true" : "false");
+      }
+      if (typeof observePinTitle === "function") button.title = observePinTitle(name, on);
     }
   }
   const chip = $("term-pin");
@@ -2401,6 +2440,33 @@ async function refreshSessions(options) {
         toggleSessionPin(s.name);
       });
     }
+    // The observe pin, fourth of the row actions and the second one about the
+    // reader. It sits beside the 📌 and deliberately wears the same rule —
+    // dim until it is on — because the two are read in one glance and are
+    // told apart by glyph (👁) and position. They are not the same flag: 📌
+    // is this browser's shortcut list in localStorage, this one is which
+    // sessions the observer is allowed to spend on, and the daemon holds it
+    // on the definition. Guarded like the pin above, for the harnesses that
+    // slice this builder without the observer helpers.
+    let observePin = null;
+    if (typeof setObservePin === "function" && typeof observePinTitle === "function") {
+      const on = !!s.observe_pin;
+      observePin = document.createElement("button");
+      observePin.className = "sess-observe" + (on ? " on" : "");
+      observePin.type = "button";
+      observePin.dataset.name = s.name;
+      observePin.textContent = "👁";
+      if (typeof observePin.setAttribute === "function") {
+        observePin.setAttribute("aria-pressed", on ? "true" : "false");
+      }
+      observePin.title = observePinTitle(s.name, on);
+      observePin.addEventListener("click", (e) => {
+        e.stopPropagation();   // the row itself attaches; this button does not
+        const cur = (typeof sessionsCache === "undefined" ? [] : sessionsCache || [])
+          .find((x) => x.name === s.name);
+        setObservePin(s.name, !(cur && cur.observe_pin));
+      });
+    }
     // Spawn beside it, same row-action pattern, but for creating. An exited
     // session has nothing to spawn from ("an exited session cannot spawn
     // children"), so the + is the one action that row's state denies.
@@ -2448,7 +2514,8 @@ async function refreshSessions(options) {
     const railSeen = railSeenLine(s);
     li.append(dot, head, meta, railCwd, ...(railCtx ? [railCtx] : []),
               ...(railTps ? [railTps] : []),
-              railSeen, ...(plus ? [plus] : []), ...(pin ? [pin] : []), info);
+              railSeen, ...(plus ? [plus] : []), ...(pin ? [pin] : []),
+              ...(observePin ? [observePin] : []), info);
     li.addEventListener("click", () => {
       location.hash = "#/s/" + encodeURIComponent(s.name);
     });
