@@ -56,6 +56,19 @@ GATE_TIMEOUT = 300.0
 #: state). Pending ones are never pruned.
 _KEEP_SETTLED = 20
 
+#: The child run's own journal events that answer a request, and the gate
+#: status each one means here. Every door to the question writes one of these
+#: against the request id — the run page's Move/Refuse
+#: (``engine.resolve_goto``), ``claunch cflow goto --approve|--deny``, a human
+#: forcing a third position (``goto_superseded``), the driver's own withdrawal
+#: — which is what lets this gate see an answer it did not make.
+_ANSWER_EVENTS = {
+    "goto_approved": "approved",
+    "goto_denied": "denied",
+    "goto_withdrawn": "withdrawn",
+    "goto_superseded": "moot",
+}
+
 
 class GateBusy(Exception):
     """This run already has a pending goto request; one question at a time."""
@@ -196,7 +209,13 @@ class GotoGate:
         return dict(record) if record is not None else None
 
     def list(self) -> List[dict]:
-        """Pending first, then settled, newest last within each."""
+        """Pending first, then settled, newest last within each.
+
+        Reconciled before it is answered: every reader here — the web card,
+        the asking leader's poll — is asking what is still open, and a
+        request answered through another door has not been open since.
+        """
+        self.reconcile()
         records = sorted(
             self.records.values(), key=lambda r: r.get("requested_at") or ""
         )
@@ -251,6 +270,89 @@ class GotoGate:
             settled["error"] = str(exc)
         self._nudge_child(settled, cflow_engine.NUDGE_CONTINUE)
         return dict(settled)
+
+    # ------------------------------------------------------------------ #
+    # answers this gate did not make
+    # ------------------------------------------------------------------ #
+    def _answer_elsewhere(self, record: dict) -> Optional[dict]:
+        """The child run's own journal entry answering this request, if one
+        of the other doors already did, else ``None``.
+
+        The card's Approve/Deny is one of several doors to the same question,
+        and the others settle the request ON THE RUN knowing nothing about
+        this record. The journal is where they meet: each writes an event
+        carrying the request id. Reading it is cheap enough for the page's
+        two-second poll — entries are parsed once per write of the file — and
+        only pending records are ever looked up.
+
+        A run that cannot be read answers ``None``: "I cannot see it" is not
+        "it was answered", and a record settled on a failed read would take
+        down a card that is still the live question.
+        """
+        try:
+            entries = cflow_state.read_journal(
+                record["cwd"],
+                record["scope"],
+                run_id=record.get("run"),
+                events=list(_ANSWER_EVENTS),
+            )
+        except Exception:  # noqa: BLE001 — unreadable is not answered
+            return None
+        for entry in reversed(entries):
+            if entry.get("request") == record.get("request"):
+                return entry
+        return None
+
+    def reconcile(self) -> List[dict]:
+        """Settle here what was already answered elsewhere, and say which.
+
+        Without this a question answered on the run page kept its card, its
+        countdown and its deadline: at the deadline the timeout "approved" a
+        request that no longer existed, the apply failed inside the engine,
+        the record went ``moot`` and the leader was told its move had not
+        applied — after a person had in fact applied it. Nothing reconciled
+        the two halves because nothing looked.
+
+        Runs on every read of the records and before the timeout fires, so
+        the settlement reaches the card on its next poll. The leader is told
+        the outcome it would otherwise never hear, since the door that was
+        used does not know it asked.
+        """
+        settled: List[dict] = []
+        for request_id in [
+            r["id"] for r in self.records.values() if r["status"] == "pending"
+        ]:
+            record = self.records.get(request_id)
+            if record is None or record["status"] != "pending":
+                continue
+            entry = self._answer_elsewhere(record)
+            if entry is None:
+                continue
+            status = _ANSWER_EVENTS[str(entry.get("event"))]
+            decided_by = str(entry.get("by") or "").strip() or "another door"
+            found = self._settle(request_id, status, decided_by)
+            if found is None:
+                continue
+            # Says the answer came from one of the other doors, so a reader
+            # of the record is not left thinking this gate was clicked.
+            found["settled_elsewhere"] = True
+            if entry.get("at"):
+                found["decided_at"] = str(entry["at"])
+            if entry.get("reason"):
+                found["decided_reason"] = str(entry["reason"])
+            if status == "moot":
+                found["error"] = (
+                    f"superseded by a forced move to "
+                    f"{entry.get('forced_to') or '?'}"
+                )
+            self._tell_leader(
+                found,
+                f"goto request {found['id']} ({found['target_session']} -> "
+                f"{found['step']!r}) was answered without this gate: "
+                f"{status} by {decided_by}",
+            )
+            settled.append(dict(found))
+        return settled
 
     def _settle(self, request_id: str, status: str, decided_by: str) -> Optional[dict]:
         record = self.records.get(request_id)
@@ -319,7 +421,13 @@ class GotoGate:
     def _on_timeout(self, request_id: str) -> None:
         """The deadline fired: count as approval. The settlement path clears
         the timer, so a request already answered between deadline and
-        callback no longer has this handle to fire."""
+        callback no longer has this handle to fire.
+
+        An answer given through one of the other doors clears nothing here,
+        so that is checked first: auto-approving a request a person already
+        settled is the one thing the fallback must not do.
+        """
+        self.reconcile()
         record = self.records.get(request_id)
         if record is not None and record["status"] == "pending":
             self.approve(request_id, decided_by="timeout")
