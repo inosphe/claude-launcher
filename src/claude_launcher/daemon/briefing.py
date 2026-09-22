@@ -51,6 +51,12 @@ from typing import Callable, Dict, List, NamedTuple, Optional, Tuple
 
 import aiohttp
 
+try:
+    import ssl as _ssl
+    import truststore as _truststore
+except ImportError:  # Python < 3.10, or truststore not installed
+    _truststore = None
+
 log = logging.getLogger("claunch.daemon.briefing")
 
 from .. import atomic, harnesses as harness_registry
@@ -99,6 +105,18 @@ TOTAL_LIMIT = 60_000
 #: the user's own choice and may be slow; the aiohttp handler awaiting this is
 #: one request, not the daemon.
 LLM_TIMEOUT = 60.0
+
+#: An SSL context that verifies against the OS's own trust store instead of
+#: OpenSSL's own chain validation, the same one :mod:`.rag` and
+#: :mod:`.observer` already use for their endpoints. A corporate TLS-inspection
+#: root that the OS trusts can still fail OpenSSL's stricter X.509 checks:
+#: measured here as ``SSLCertVerificationError: ... Basic Constraints of CA
+#: cert not marked critical`` against ``api.deepseek.com``, with the same
+#: request returning 200 once this context carried it. Without it the whole
+#: feature is dark on such a machine, and the only sign is a 502 on the card.
+#: ``None`` when ``truststore`` is unavailable, and the caller then falls back
+#: to aiohttp's default context rather than failing.
+_OS_TRUST_CONTEXT = _truststore.SSLContext(_ssl.PROTOCOL_TLS_CLIENT) if _truststore else None
 
 _STATES = frozenset({"working", "blocked", "waiting", "idle", "done", "unknown"})
 
@@ -637,7 +655,14 @@ async def call_llm(cfg: dict, prompt: str, *, timeout: float = LLM_TIMEOUT) -> L
     }
     try:
         client_timeout = aiohttp.ClientTimeout(total=timeout)
-        async with aiohttp.ClientSession(timeout=client_timeout) as http:
+        connector = (
+            aiohttp.TCPConnector(ssl=_OS_TRUST_CONTEXT)
+            if _OS_TRUST_CONTEXT is not None
+            else None
+        )
+        async with aiohttp.ClientSession(
+            timeout=client_timeout, connector=connector
+        ) as http:
             async with http.post(cfg["endpoint"], json=body, headers=headers) as resp:
                 if resp.status != 200:
                     snippet = (await resp.text())[:300]

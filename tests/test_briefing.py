@@ -610,6 +610,91 @@ def test_call_llm_sends_the_openai_shape_and_reads_the_answer(home):
     assert seen["body"]["messages"] == [{"role": "user", "content": "summarize this"}]
 
 
+def _spy_on_the_session(monkeypatch):
+    """Record the connector every ``call_llm`` session is built with.
+
+    The session is created inside the call, so the connector is not reachable
+    from the outside; the spy delegates to the real class so the request still
+    goes out and the answer is still read.
+    """
+    made = []
+    real = briefing.aiohttp.ClientSession
+
+    def spy(*args, **kwargs):
+        made.append(kwargs.get("connector"))
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(briefing.aiohttp, "ClientSession", spy)
+    return made
+
+
+def test_call_llm_verifies_through_the_os_trust_store(home, monkeypatch):
+    """The call hands its session a connector backed by the OS trust store.
+
+    A TLS-inspection root the OS already trusts can still fail OpenSSL's own
+    chain validation, and the whole feature is then dark on that machine with
+    only a 502 on the card to show it. Measured against ``api.deepseek.com``
+    before this: ``SSLCertVerificationError ... Basic Constraints of CA cert
+    not marked critical``; the same request answered 200 through this context
+    (claunch-h3ldl). :mod:`.observer` and :mod:`.rag` already call this way.
+    """
+    from aiohttp import web as aioweb
+
+    made = _spy_on_the_session(monkeypatch)
+
+    async def handler(request):
+        return aioweb.json_response(_llm_answer("ok"))
+
+    async def run():
+        server = await _start_llm(handler)
+        try:
+            cfg = {
+                "endpoint": str(server.make_url("/v1/chat/completions")),
+                "model": "m",
+                "api_key": "sk-test",
+                "max_tokens": 64,
+            }
+            assert (await briefing.call_llm(cfg, "hi")).text == "ok"
+        finally:
+            await server.close()
+
+    asyncio.run(run())
+    assert len(made) == 1
+    if briefing._OS_TRUST_CONTEXT is not None:
+        assert made[0]._ssl is briefing._OS_TRUST_CONTEXT
+    else:  # truststore unavailable in this interpreter
+        assert made[0] is None
+
+
+def test_call_llm_falls_back_when_truststore_is_unavailable(home, monkeypatch):
+    """No OS-backed context (Python < 3.10, or ``truststore`` not installed)
+    leaves the connector unset, so the call keeps working on aiohttp's own
+    default context instead of failing for want of the better one."""
+    from aiohttp import web as aioweb
+
+    monkeypatch.setattr(briefing, "_OS_TRUST_CONTEXT", None)
+    made = _spy_on_the_session(monkeypatch)
+
+    async def handler(request):
+        return aioweb.json_response(_llm_answer("still answered"))
+
+    async def run():
+        server = await _start_llm(handler)
+        try:
+            cfg = {
+                "endpoint": str(server.make_url("/v1/chat/completions")),
+                "model": "m",
+                "api_key": "sk-test",
+                "max_tokens": 64,
+            }
+            assert (await briefing.call_llm(cfg, "hi")).text == "still answered"
+        finally:
+            await server.close()
+
+    asyncio.run(run())
+    assert made == [None]
+
+
 def test_call_llm_http_error_and_bad_shape_raise(home):
     from aiohttp import web as aioweb
 
