@@ -17134,6 +17134,11 @@ async function statusCheckRemove(row) {
 /* records an OpenAI-compatible endpoint, the key that opens it and the     */
 /* models it serves, so the card offers the profiles that qualify and lets  */
 /* the endpoint/key be typed in only when no profile is chosen.             */
+/* Choosing one moves three fields at once — the endpoint box shows that    */
+/* profile's URL read-only, the model becomes its default, and the save     */
+/* deletes the block's own endpoint and key. Picking a profile used to      */
+/* change only which credential went out, leaving both boxes on the         */
+/* backend typed in before and the file holding a key nobody called.        */
 let llmSettings = null;
 let llmSettingsError = "";
 let llmSettingsNotice = "";
@@ -17205,8 +17210,9 @@ function llmSettingsCard() {
     "p", "wf-note",
     "Which backend writes the session briefings (the ▸ card on a rail row). " +
     "Pick a profile and the call reuses that profile's OpenAI-compatible " +
-    "endpoint and key; leave the profile empty to type an endpoint and key " +
-    "in here instead."
+    "endpoint, key and default model; saving then drops the endpoint and key " +
+    "typed in here, which that backend does not use. Leave the profile empty " +
+    "to type them in instead."
   ));
   if (llmSettingsError) card.appendChild(el("p", "error", llmSettingsError));
   if (!llmSettings) {
@@ -17241,6 +17247,12 @@ function llmSettingsCard() {
   profileSelect.value = draft.profile;
   profileSelect.addEventListener("change", () => {
     draft.profile = profileSelect.value;
+    // A model id belongs to the backend that serves it, so the pick carries
+    // the model with it. Leaving the previous backend's id in the field read
+    // as "this is the model it now uses" while the save wrote it to a
+    // backend that has never heard of it.
+    const picked = rows.find((r) => r.name === draft.profile);
+    if (picked && picked.models.length) draft.model = picked.models[0];
     renderWorkspaces();
   });
   profileLabel.appendChild(profileSelect);
@@ -17271,13 +17283,23 @@ function llmSettingsCard() {
   const endpoint = document.createElement("input");
   endpoint.id = "llm-endpoint";
   endpoint.type = "text";
-  endpoint.value = draft.endpoint;
-  endpoint.placeholder = "https://host/v1/chat/completions";
-  endpoint.disabled = !!draft.profile;
+  // With a profile chosen the field shows the URL that profile resolves to,
+  // read-only rather than disabled-and-blank: the endpoint is the thing the
+  // operator is choosing between, and an empty box answers nothing. The
+  // typed value stays in the draft untouched, so going back to "none"
+  // returns it instead of the profile's URL.
+  endpoint.value = draft.profile ? (chosen ? chosen.endpoint : "") : draft.endpoint;
+  endpoint.placeholder = draft.profile
+    ? "this profile resolves to no endpoint"
+    : "https://host/v1/chat/completions";
+  endpoint.readOnly = !!draft.profile;
   endpoint.title = draft.profile
-    ? "the chosen profile supplies the endpoint"
+    ? "the chosen profile supplies this — saving removes the one typed here"
     : "the OpenAI-compatible chat/completions URL";
-  endpoint.addEventListener("input", () => { draft.endpoint = endpoint.value; });
+  endpoint.addEventListener("input", () => {
+    if (draft.profile) return;
+    draft.endpoint = endpoint.value;
+  });
   endpointLabel.appendChild(endpoint);
   form.appendChild(endpointLabel);
 
@@ -17292,7 +17314,7 @@ function llmSettingsCard() {
     : "API key";
   key.disabled = !!draft.profile;
   key.title = draft.profile
-    ? "the chosen profile supplies the key"
+    ? "the chosen profile supplies this — saving removes the one stored here"
     : "sent as the Authorization header, and never returned to this page";
   key.addEventListener("input", () => { draft.api_key = key.value; });
   keyLabel.appendChild(key);
@@ -17338,9 +17360,16 @@ function llmSettingsCard() {
       model: draft.model,
       max_tokens: budgetValue,
     };
-    // A profile owns the endpoint/key pair, so the two fields the form
-    // disabled are left out of the save instead of being written as blanks.
-    if (!draft.profile) {
+    // A profile owns the endpoint/key pair, so the block's own two values are
+    // removed on save ("" deletes the endpoint, null deletes the key) rather
+    // than left where they are. They are not read while a profile is set, and
+    // a key left behind belongs to whichever backend was typed in before: the
+    // card would keep showing that endpoint as the one in use, and the file
+    // would keep a credential for a backend nobody calls.
+    if (draft.profile) {
+      body.endpoint = "";
+      body.api_key = null;
+    } else {
       body.endpoint = draft.endpoint;
       body.api_key = draft.api_key;
     }

@@ -3089,11 +3089,15 @@ writes the session briefings (the `▸` card on a rail row). Picking a
 **profile** reuses that profile's backend: its provider already records an
 OpenAI-compatible endpoint (`endpoints.openai`), the key that opens it (the
 profile's `set-token` secret, else the provider's `api_key`) and the model ids
-it serves, which the card offers beside the **model** field. The endpoint and
-key fields are editable only while no profile is chosen — the two identify one
-backend together, so a profile supplies both or neither, and a save under a
-profile leaves the typed pair untouched. The model is saved either way, and an
-empty model under a profile means that profile's `models.default`. The key is
+it serves. Choosing one moves three fields together: the **endpoint** box
+shows that profile's URL read-only, the **model** becomes that profile's
+default (its other ids stay on offer beside the field, and you can type
+another), and the save deletes the block's own endpoint and key, which a call
+under a profile never reads. Before, a profile changed only which credential
+went out while both boxes went on showing the backend typed in before. The
+endpoint you typed survives in the form, so a profile tried and abandoned
+costs nothing — it is the save that drops it. An empty model under a profile
+means that profile's `models.default`. The key is
 never returned to the page: the field shows `stored · blank keeps it`, and
 **Remove stored key** is the one way to take it back out. The card writes the
 `llm:` block of `~/.claunch.yaml` (`GET`/`PUT /api/briefing/llm`), which is
