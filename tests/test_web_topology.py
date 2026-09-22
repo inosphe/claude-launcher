@@ -405,6 +405,7 @@ CHECKS = [
         "railmeshgroup_check.js",
         "projects_check.js",
         "searchclear_check.js",
+        "modalgitwait_check.js",
 ]
 
 
