@@ -315,10 +315,10 @@ def test_run_summary_shows_the_recur_wait(proj):
     cflow_engine.report("round done", cwd=cwd, scope="w1")
     cflow_engine.next_step(cwd=cwd, scope="w1")
     out = cflow_clock.run_summary("w1", cwd)
-    # recur records the workflow as the resolved file path, and the summary
-    # passes the record through rather than prettifying it
+    # recur records the workflow by the name the round ran under, and the
+    # summary passes the record through rather than prettifying it
     assert out["pending_start"]["by"] == "recur"
-    assert out["pending_start"]["workflow"].endswith("rounds.yaml")
+    assert out["pending_start"]["workflow"] == "rounds"
 
 
 # --------------------------------------------------------------------------- #
