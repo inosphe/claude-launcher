@@ -513,6 +513,9 @@ async def attach_terminal(
         try:
             await _pump_from_client(ws, session, state, lane)
         finally:
+            # Whatever half-character this keyboard never finished goes with
+            # it: held, it would be handed to whoever writes next.
+            session.forget_writer(ws)
             lane.close()
             sender.cancel()
             try:
@@ -592,7 +595,10 @@ async def cli_ws(request: web.Request) -> web.WebSocketResponse:
         try:
             async for msg in ws:
                 if msg.type == WSMsgType.BINARY:
-                    await shell.write_bytes(msg.data)
+                    # This socket is the writer: a frame that ends
+                    # mid-character waits for the next frame from THIS
+                    # viewer, not for whatever another one types next.
+                    await shell.write_bytes(msg.data, ws)
                 elif msg.type == WSMsgType.TEXT:
                     await _cli_control(ws, shell, msg.data)
                 elif msg.type in (WSMsgType.CLOSE, WSMsgType.ERROR):
@@ -608,6 +614,8 @@ async def cli_ws(request: web.Request) -> web.WebSocketResponse:
     finally:
         request.app["websockets"].discard(ws)
         shell.unsubscribe(queue)
+        # Whatever half-character this viewer never finished goes with it.
+        shell.forget_writer(ws)
         if not ws.closed:
             await ws.close()
         conns.closed(record, ws.close_code, ws.exception())
@@ -695,7 +703,12 @@ async def _pump_from_client(
                 continue
             session.note_human_input(at_terminal=True, data=msg.data)
             try:
-                await session.write_bytes(msg.data)
+                # This socket is the writer. A frame that ends mid-character
+                # waits for the next frame from THIS keyboard: an automated
+                # delivery landing in the gap is a different writer and must
+                # not have its first bytes read as the end of this one's
+                # character (claunch-pty-shared-decoder-across-writers-o3cy4).
+                await session.write_bytes(msg.data, ws)
             except SessionGone:
                 # The child is gone — it died under this socket, or it
                 # was already gone when the viewer arrived and the

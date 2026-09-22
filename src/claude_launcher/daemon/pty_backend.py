@@ -9,6 +9,7 @@ single concurrency model regardless of OS.
 from __future__ import annotations
 
 import codecs
+from collections import OrderedDict
 import os
 import subprocess
 import sys
@@ -27,8 +28,19 @@ class PtyHandle:
     def read(self) -> bytes:  # blocking; b"" signals EOF
         raise NotImplementedError
 
-    def write(self, data: bytes) -> None:
+    def write(self, data: bytes, writer: object = None) -> None:
+        """Write ``data``, on behalf of ``writer``.
+
+        ``writer`` identifies who is writing. A backend that has to decode
+        (Windows) carries a partial character between calls, and a partial
+        character belongs to the writer that sent its leading bytes -- see
+        :meth:`_WinPty.write`. Backends that pass bytes through ignore it.
+        """
         raise NotImplementedError
+
+    def forget_writer(self, writer: object) -> None:
+        """Drop whatever was being held for ``writer``; it will write no more."""
+        return None
 
     def resize(self, cols: int, rows: int) -> None:
         raise NotImplementedError
@@ -141,11 +153,32 @@ class _WinPty(PtyHandle):
             return b""
         return data.encode("utf-8", errors="replace") if isinstance(data, str) else data
 
-    def _open_decoder(self) -> None:
-        """The decoder :meth:`write` carries between calls."""
-        self._in = codecs.getincrementaldecoder("utf-8")("replace")
+    #: A session's writers are its viewers plus its own delivery, send-keys
+    #: and paste paths, so the count is small and bounded by the people
+    #: looking at one terminal. The cap is a backstop against a caller that
+    #: invents a key per write rather than per writer: past it the oldest is
+    #: dropped, which costs that writer a partial character and nothing else.
+    MAX_WRITERS = 64
 
-    def write(self, data: bytes) -> None:
+    def _open_decoder(self) -> None:
+        """The decoders :meth:`write` carries between calls, one per writer."""
+        self._in: "OrderedDict[object, codecs.IncrementalDecoder]" = OrderedDict()
+
+    def _decoder_for(self, writer: object) -> codecs.IncrementalDecoder:
+        dec = self._in.get(writer)
+        if dec is None:
+            if len(self._in) >= self.MAX_WRITERS:
+                self._in.popitem(last=False)
+            dec = codecs.getincrementaldecoder("utf-8")("replace")
+            self._in[writer] = dec
+        else:
+            self._in.move_to_end(writer)
+        return dec
+
+    def forget_writer(self, writer: object) -> None:
+        self._in.pop(writer, None)
+
+    def write(self, data: bytes, writer: object = None) -> None:
         """Bytes in, text out, with a sequence split across two calls kept.
 
         ConPTY takes text, so what a viewer typed is decoded here. Decoding
@@ -159,15 +192,24 @@ class _WinPty(PtyHandle):
 
         Splits are ordinary. Every writer into a PTY chunks by something
         that is not a character boundary: a socket frame, a pipe read, a
-        buffer that filled. So the decoder is kept and fed, and a trailing
+        buffer that filled. So a decoder is kept and fed, and a trailing
         fragment waits here for the rest of its character. Bytes that can
         begin no sequence are still replaced, so rubbish cannot stall what
         follows it.
 
-        The decoder carries state between calls, so two writers must not be
-        inside it at once. Session.write_bytes serialises them.
+        One decoder per writer, because a partial character belongs to the
+        writer that sent its leading bytes. A single decoder was enough only
+        as long as nobody wrote between those two calls, and a session has
+        several writers: each viewer, the delivery queue, send-keys. The
+        lock in Session.write_bytes keeps two of them out of one decoder at
+        the same moment; it does not keep a delivery from landing in the gap
+        between a viewer's two frames, and then the delivery's first bytes
+        were read as the end of the viewer's character. Measured on the two
+        syllables of a Hangul word split over two frames with one delivery
+        between them, four of the five split points lost a syllable (s586,
+        2026-09-22).
         """
-        text = self._in.decode(data)
+        text = self._decoder_for(writer).decode(data)
         if text:
             self._pty.write(text)
 
@@ -254,7 +296,10 @@ class _UnixPty(PtyHandle):
         except OSError:
             return b""  # EIO once every slave fd is gone == EOF
 
-    def write(self, data: bytes) -> None:
+    def write(self, data: bytes, writer: object = None) -> None:
+        # Bytes go to the master as they are; there is nothing to decode and
+        # so nothing to hold between calls. ``writer`` is accepted for the
+        # one signature and ignored.
         os.write(self._master, data)
 
     def resize(self, cols: int, rows: int) -> None:

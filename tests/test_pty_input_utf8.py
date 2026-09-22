@@ -140,7 +140,10 @@ def test_two_writers_do_not_interleave_into_one_decoder(home, tmp_path):
             order = []
             started = asyncio.Event()
 
-            def slow(data):
+            # The backend takes the writer alongside the bytes (one decoder
+            # per writer, pty_backend._WinPty.write); this stub stands in for
+            # it and the test is about the lock, so the writer is unused.
+            def slow(data, writer=None):
                 order.append(("in", data))
                 if not started.is_set():
                     started.set()
