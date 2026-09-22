@@ -359,3 +359,120 @@ def test_every_status_the_canon_workflows_name_is_in_the_vocabulary():
         f"the canon workflows prescribe --status values the wrapper "
         f"refuses: {unknown}"
     )
+
+
+# --------------------------------------------------------------------------- #
+# free-text values that begin with '-'
+#
+# ``br``'s parser reads a value beginning with ``-`` as another option, so
+# ``--description "---\nworkspace: ...\n---\n..."`` is refused at parse time
+# with ``unexpected argument '---...' found`` and nothing is written. That is
+# what a session-minted issue looks like in a registered workspace: the
+# workspace front matter opens with the YAML fence (beads_meta.render), so
+# every mint in one failed, leaving a daemon log warning and a session with
+# no issue (claunch-c7oad; 63 in the daemon log between 2026-09-18 and
+# 2026-09-22). ``plan`` binds those values to their option with ``=``, the
+# one spelling clap reads as a value whatever it starts with.
+# --------------------------------------------------------------------------- #
+FENCED = "---\nworkspace: claude-launcher\n---\n## 목표\nfix it"
+
+BIND_FORMS = [
+    # the shape that failed, and the two other spellings of the same option
+    (["create", "t", "--description", FENCED], ["create", "t", f"--description={FENCED}"]),
+    (["create", "t", "-d", FENCED], ["create", "t", f"-d={FENCED}"]),
+    (["create", "t", "--body", FENCED], ["create", "t", f"--body={FENCED}"]),
+    # the other free-text options, each on the subcommand that offers it
+    (["update", "i-1", "--notes", "-n"], ["update", "i-1", "--notes=-n"]),
+    (["close", "i-1", "--reason", "-- merged abc"], ["close", "i-1", "--reason=-- merged abc"]),
+    (["close", "i-1", "-r", "-- merged abc"], ["close", "i-1", "-r=-- merged abc"]),
+    # a value that does not begin with '-' keeps the argument list it had
+    (["create", "t", "--description", "plain"], ["create", "t", "--description", "plain"]),
+    # an option that is not free text is left alone: its value is a status,
+    # an id or a number, and binding it would only make a failure less legible
+    (["update", "i-1", "--assignee", "s1"], ["update", "i-1", "--assignee", "s1"]),
+    # already bound by the caller
+    ([f"--description={FENCED}"], [f"--description={FENCED}"]),
+    # nothing follows the option: br's own refusal is the right answer
+    (["create", "t", "--description"], ["create", "t", "--description"]),
+    # after a bare '--' everything is a positional, so nothing is an
+    # option's value — including a word that is spelled like one
+    (["search", "--", "--description", "-x"], ["search", "--", "--description", "-x"]),
+]
+
+
+@pytest.mark.parametrize("args,expected", BIND_FORMS)
+def test_a_free_text_value_is_bound_to_its_option_when_it_begins_with_a_dash(
+    args, expected
+):
+    assert cli_beads.bind_text_values(args) == expected
+
+
+def test_the_binding_happens_in_plan_so_every_caller_gets_it(tmp_path):
+    """The daemon composes its ``br`` calls through ``Board.br`` and the CLI
+    through ``run``; both meet in ``plan``, which is why the fix is here and
+    not at the four call sites that write a description."""
+    (cmd,) = cli_beads.plan(
+        ["create", "t", "--type", "task", "--description", FENCED,
+         "--assignee", "s1", "--json"],
+        tmp_path / "r", "s1", db_exists=True, jsonl_exists=True,
+    )
+    assert cmd[5:] == [
+        "create", "t", "--type", "task", f"--description={FENCED}",
+        "--assignee", "s1", "--json",
+    ]
+
+
+def test_the_daemon_composed_description_is_the_shape_that_needs_binding():
+    """The two modules read together: what ``compose_description`` writes for
+    a session in a registered workspace opens with the fence, which is the
+    value ``plan`` has to bind. Without this the fix and the failure could
+    drift apart — a change to the front matter format would leave the test
+    above passing on a string nothing produces."""
+    from claude_launcher.daemon import beads as beads_mod
+
+    description = beads_mod.compose_description(
+        "do the thing", name="s689", parent="s469", workspace="claude-launcher"
+    )
+    assert description.startswith("---")
+    (cmd,) = cli_beads.plan(
+        ["create", "t", "--description", description],
+        Path("r"), "s689", db_exists=True, jsonl_exists=True,
+    )
+    assert cmd[-1] == f"--description={description}"
+    assert description not in cmd
+
+
+def test_br_itself_accepts_the_bound_form_and_refuses_the_unbound_one(tmp_path):
+    """The claim the unit tests above cannot make: that the spelling ``plan``
+    produces is the one ``br``'s parser takes. Run against a throwaway board,
+    so it touches nothing this repository tracks."""
+    import shutil as _shutil
+
+    if _shutil.which(cli_beads.BINARY) is None:
+        pytest.skip(f"{cli_beads.BINARY} is not installed on this machine")
+    root = tmp_path / "board"
+    root.mkdir()
+    db = str(root / ".beads" / "beads.db")
+
+    def br(args, **kwargs):
+        # ``encoding`` explicitly: the console default on this machine is
+        # cp949, which mangles the Korean headings the daemon's own
+        # description carries and would fail this test on the decode rather
+        # than on what it is asking about.
+        return REAL_RUN([cli_beads.BINARY, "--db", db, *args], cwd=str(root),
+                        capture_output=True, text=True, encoding="utf-8",
+                        **kwargs)
+
+    br(["init", "--prefix", "t"], check=True)
+
+    unbound = br(["create", "unbound", "--type", "task", "--priority", "2",
+                  "--description", FENCED])
+    assert unbound.returncode != 0
+    assert "unexpected argument" in (unbound.stderr + unbound.stdout)
+
+    bound = br(["create", "bound", "--type", "task", "--priority", "2",
+                f"--description={FENCED}", "--json"])
+    assert bound.returncode == 0, bound.stderr
+    import json
+
+    assert json.loads(bound.stdout)["description"] == FENCED
