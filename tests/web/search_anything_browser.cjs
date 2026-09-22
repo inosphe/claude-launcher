@@ -4,7 +4,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const http = require('node:http');
 const {chromium} = require(process.env.CLAUNCH_PLAYWRIGHT || 'playwright');
-const root = path.join(__dirname, '../src/claude_launcher/web/static');
+const root = path.join(__dirname, '../../src/claude_launcher/web/static');
 /* The rail row's markup, taken whole. The row holds nested divs (the search box
    and its clear button), so slicing to the first `</div>` cut it short and the
    fixture served a page without the button this test drives — silently, until
