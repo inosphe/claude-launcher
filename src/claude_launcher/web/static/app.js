@@ -27034,6 +27034,24 @@ function dismissNotice(key) {
   if (rec.node.parentNode) rec.node.parentNode.removeChild(rec.node);
 }
 
+/* A session named on a notification card, as a press that opens its
+   terminal. A gate card names the two sessions the answer turns on — who is
+   asking and whose run moves — and the reader's first move is usually to
+   look at one of them; until now the name was plain text and the row had to
+   be hunted for in the rail. `stopPropagation` because a card may carry its
+   own click, and opening a session is not deciding anything. A record with
+   no name to open keeps plain text rather than a dead press. */
+function gateSessionLink(name) {
+  if (!name) return el("span", null, "?");
+  const node = el("span", "linkish gate-session", name);
+  node.title = `open ${name}`;
+  node.addEventListener("click", (ev) => {
+    ev.stopPropagation();
+    location.hash = "#/s/" + encodeURIComponent(name);
+  });
+  return node;
+}
+
 /* ------------------------------------------------------------------ */
 /* the restart gate: an agent session's restart, waiting on a person   */
 /* ------------------------------------------------------------------ */
@@ -27152,6 +27170,14 @@ async function refreshRestartGate() {
    keyed by request id and each poll reconciles the set. */
 const GOTO_GATE_PREFIX = "goto-gate-";
 
+/* Cards the reader closed by hand. Ignoring answers nothing — the request
+   stays open and still auto-approves at its deadline — so the id has to be
+   remembered somewhere the redraw reads: the poll rebuilds any card it
+   cannot find, and without this the next tick would put the closed card
+   straight back. An id is forgotten again as soon as its request leaves the
+   pending set, so it can never silence a later card. */
+const gotoGateIgnored = new Set();
+
 async function refreshGotoGate() {
   const host = $("notices");
   if (!host) return;
@@ -27164,20 +27190,33 @@ async function refreshGotoGate() {
   const pending = (body && body.requests ? body.requests : []).filter(
     (r) => r.status === "pending"
   );
+  const live = new Set(pending.map((r) => r.id));
+  for (const id of [...gotoGateIgnored]) {
+    if (!live.has(id)) gotoGateIgnored.delete(id);
+  }
   const seen = new Set();
   for (const rec of pending) {
     const key = GOTO_GATE_PREFIX + rec.id;
+    if (gotoGateIgnored.has(rec.id)) continue;   // closed by hand, still open
     seen.add(key);
     let card = notices.get(key);
     if (!card || !card.node.isConnected) {
       dismissNotice(key);
       const node = el("div", "notice warn gate");
-      const title = el(
-        "div",
-        "notice-title",
-        `run move requested: ${rec.target_session || "?"}`
-      );
+      const title = el("div", "notice-title");
+      title.appendChild(el("span", null, "run move requested: "));
+      title.appendChild(gateSessionLink(rec.target_session));
+      /* Who asked and what moves, with both sessions as presses. Built once
+         and left alone: the countdown is the only part that changes, and it
+         has its own line so that redrawing it cannot wipe the links. */
       const sub = el("div", "notice-sub");
+      sub.appendChild(gateSessionLink(rec.session));
+      sub.appendChild(el("span", null, " asks to move "));
+      sub.appendChild(gateSessionLink(rec.target_session));
+      sub.appendChild(el(
+        "span", null, ` — ${rec.from || "?"} → ${rec.step || "?"}`
+      ));
+      const clock = el("div", "notice-sub gate-clock");
       const why = el(
         "div",
         "notice-sub",
@@ -27186,11 +27225,19 @@ async function refreshGotoGate() {
       const actions = el("div", "gate-actions");
       const approve = el("button", "wf-btn approve", "Approve");
       const deny = el("button", "wf-btn clear", "Deny");
+      const ignore = el("button", "wf-btn", "Ignore");
       approve.title =
         `move this run to '${rec.step}' now — or the timeout counts the ` +
         "request as approved on its own";
       deny.title =
         "nothing moves; the refusal is handed to the run's driver";
+      /* The third press answers nothing, and says so: a reader who has seen
+         the card and does not want to decide from here had only Approve,
+         Deny or a card that stays. Closing it leaves the request exactly as
+         it was — including its deadline. */
+      ignore.title =
+        "close this card only — nothing is answered, the request stays open " +
+        "and still auto-approves at its deadline";
       approve.addEventListener("click", async (ev) => {
         ev.stopPropagation();
         if (
@@ -27210,25 +27257,34 @@ async function refreshGotoGate() {
           dismissNotice(key);
         }
       });
+      ignore.addEventListener("click", (ev) => {
+        ev.stopPropagation();
+        gotoGateIgnored.add(rec.id);
+        dismissNotice(key);
+      });
       actions.appendChild(approve);
       actions.appendChild(deny);
+      actions.appendChild(ignore);
       node.appendChild(title);
       node.appendChild(sub);
+      node.appendChild(clock);
       node.appendChild(why);
       node.appendChild(actions);
       host.appendChild(node);
       notices.set(key, { node, timer: null });
       card = notices.get(key);
     }
-    const sub = card.node.querySelector(".notice-sub");
-    if (sub) {
-      sub.textContent =
-        `${rec.session || "?"} asks to move ${rec.target_session || "?"}'s ` +
-        `run ${rec.from || "?"} → ${rec.step || "?"}` +
-        ` — auto-approves in ${gateCountdown(rec.deadline)}`;
+    const clock = card.node.querySelector(".gate-clock");
+    if (clock) {
+      clock.textContent = `auto-approves in ${gateCountdown(rec.deadline)}`;
     }
   }
-  // Settled or vanished requests lose their card on this pass.
+  // Settled or vanished requests lose their card on this pass. That is also
+  // how a request answered somewhere else — the run page's own Move/Refuse,
+  // `claunch cflow goto --approve`, a forced third position — takes its card
+  // down: the gate reconciles those settlements against the run before it
+  // answers this poll (daemon/goto_gate.py reconcile), so they stop being
+  // pending here and the card goes with them.
   for (const key of [...notices.keys()]) {
     if (key.startsWith(GOTO_GATE_PREFIX) && !seen.has(key)) {
       dismissNotice(key);

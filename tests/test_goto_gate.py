@@ -515,6 +515,164 @@ def test_a_vanished_engine_request_settles_as_moot(home, tmp_path):
     asyncio.run(run())
 
 
+# --------------------------------------------------------------------------- #
+# answers given through one of the other doors
+# --------------------------------------------------------------------------- #
+def test_an_answer_on_the_run_page_settles_the_card(home, tmp_path):
+    """The request is one question with several doors, and the card is only
+    one of them: the run page's own Move/Refuse (``/api/cflow/goto/resolve``)
+    and ``claunch cflow goto --approve`` settle it on the run and know
+    nothing about the gate record.
+
+    Before this reconciliation the record stayed ``pending`` after such an
+    answer, so the card kept its countdown for a question nobody could still
+    answer, and the leader was never told the move had gone through.
+    """
+    proj = _child_run(tmp_path)
+
+    async def run():
+        mgr = _manager(("lead", None, ""), ("w1", "lead", str(proj)))
+        app = build_app(mgr, "sekrit", started_at=time.monotonic(), goto_timeout=600)
+        client = await _client(app)
+        try:
+            rec = (
+                await (
+                    await client.post(
+                        "/api/cflow/goto-requests",
+                        json={
+                            "session": "lead",
+                            "target_session": "w1",
+                            "step": "three",
+                            "reason": "verified landed by git",
+                        },
+                        headers=AUTH,
+                    )
+                ).json()
+            )["request"]
+
+            # The person answers on the run page instead of on the card.
+            resp = await client.post(
+                "/api/cflow/goto/resolve",
+                json={"cwd": str(proj), "scope": "w1", "decision": "approve"},
+                headers=AUTH,
+            )
+            assert resp.status == 200
+            assert engine.status(str(proj), scope="w1")["step_id"] == "three"
+
+            listed = (
+                await (
+                    await client.get("/api/cflow/goto-requests", headers=AUTH)
+                ).json()
+            )["requests"]
+            [same] = [r for r in listed if r["id"] == rec["id"]]
+            assert same["status"] == "approved"
+            assert same["settled_elsewhere"] is True
+            assert same["decided_by"] == "web"
+            assert not [r for r in listed if r["status"] == "pending"]
+
+            await asyncio.sleep(0.1)
+            assert any(
+                "answered without this gate" in m
+                for m in mgr._sessions["lead"].delivered
+            )
+        finally:
+            await mgr.shutdown_all()
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_an_answer_elsewhere_stops_the_deadline_approving_it_again(home, tmp_path):
+    """A refusal on the run page must survive the gate's own deadline.
+
+    The timeout counts silence as approval, and it used to count it on a
+    record that another door had already settled: the auto-approval fired on
+    a request that no longer existed, the engine refused the move, and the
+    leader was told its request had not applied — a refusal reported as a
+    failed approval. Here the run is denied first, and the deadline finds
+    nothing left to approve.
+    """
+    proj = _child_run(tmp_path)
+
+    async def run():
+        mgr = _manager(("lead", None, ""), ("w1", "lead", str(proj)))
+        app = build_app(mgr, "sekrit", started_at=time.monotonic(), goto_timeout=0.05)
+        gate = app["goto_gate"]
+        rec = gate.submit(
+            session="lead", target_session="w1", step="three", reason="verified"
+        )
+        try:
+            engine.resolve_goto(
+                "deny", by="user", reason="not yet", cwd=str(proj), scope="w1"
+            )
+            await asyncio.sleep(0.3)
+            settled = gate.get(rec["id"])
+            assert settled["status"] == "denied"
+            assert settled["settled_elsewhere"] is True
+            assert settled["decided_by"] == "user"
+            assert settled["decided_reason"] == "not yet"
+            # The run stayed where the refusal left it, and no second
+            # settlement was written against it.
+            assert engine.status(str(proj), scope="w1")["step_id"] == "two"
+            assert _events(proj, "w1", "goto_approved") == []
+            assert len(_events(proj, "w1", "goto_denied")) == 1
+        finally:
+            await mgr.shutdown_all()
+
+    asyncio.run(run())
+
+
+def test_a_forced_third_position_settles_the_card_as_moot(home, tmp_path):
+    """The operator's other answer: send the run somewhere neither the leader
+    nor the graph asked for. The engine supersedes the request; the gate says
+    moot and names what overtook it, rather than leaving a card for a
+    question the run has already left behind."""
+    proj = _child_run(tmp_path)
+
+    async def run():
+        mgr = _manager(("lead", None, ""), ("w1", "lead", str(proj)))
+        app = build_app(mgr, "sekrit", started_at=time.monotonic(), goto_timeout=600)
+        gate = app["goto_gate"]
+        rec = gate.submit(
+            session="lead", target_session="w1", step="three", reason="verified"
+        )
+        try:
+            engine.goto("one", by="user", reason="redo it", cwd=str(proj), scope="w1")
+            [listed] = [r for r in gate.list() if r["id"] == rec["id"]]
+            assert listed["status"] == "moot"
+            assert "one" in listed["error"]
+            assert listed["settled_elsewhere"] is True
+            assert engine.status(str(proj), scope="w1")["step_id"] == "one"
+        finally:
+            await mgr.shutdown_all()
+
+    asyncio.run(run())
+
+
+def test_an_unreadable_run_leaves_the_card_standing(home, tmp_path):
+    """Reconciliation settles on evidence of an answer, never on the absence
+    of one: a run whose journal cannot be read is not a run that was
+    answered, and a card taken down on a failed read is a live question
+    nobody is looking at any more."""
+    proj = _child_run(tmp_path)
+
+    async def run():
+        mgr = _manager(("lead", None, ""), ("w1", "lead", str(proj)))
+        app = build_app(mgr, "sekrit", started_at=time.monotonic(), goto_timeout=600)
+        gate = app["goto_gate"]
+        rec = gate.submit(
+            session="lead", target_session="w1", step="three", reason="verified"
+        )
+        try:
+            gate.records[rec["id"]]["cwd"] = str(tmp_path / "gone")
+            [listed] = [r for r in gate.list() if r["id"] == rec["id"]]
+            assert listed["status"] == "pending"
+        finally:
+            await mgr.shutdown_all()
+
+    asyncio.run(run())
+
+
 def test_settling_with_nothing_pending_is_a_conflict(home, tmp_path):
     async def run():
         mgr = _manager(("lead", None, ""))

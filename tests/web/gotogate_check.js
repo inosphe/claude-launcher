@@ -11,12 +11,20 @@
    POST settles the card; a settled or gone request retires its own card
    while a still-pending neighbour keeps its; and a stray click anywhere on
    the card decides nothing. Time and the network belong to the harness, so
-   none of it is waited for. */
+   none of it is waited for.
+
+   Three later additions are checked here too: the session names are presses
+   that open those sessions, since the answer usually turns on what one of
+   them is doing; a request answered through another door stops being
+   pending and loses its card by the same set discipline; and the Ignore
+   press closes one card without answering anything, which has to survive
+   the redraw that would otherwise put it straight back. */
 const fs = require("fs");
 const path = require("path");
 const STATIC = path.join(__dirname, "..", "..", "src", "claude_launcher", "web",
                          "static");
 const src = fs.readFileSync(path.join(STATIC, "app.js"), "utf8");
+const css = fs.readFileSync(path.join(STATIC, "style.css"), "utf8");
 
 function slice(from, to) {
   const a = src.indexOf(from);
@@ -81,6 +89,10 @@ function build() {
   }
   FakeDate.now = () => clock.at;
 
+  // The page's own address bar: a session link writes to it and nothing else
+  // in this slice touches it, so its last value is where the press led.
+  const loc = { hash: "" };
+
   const apiCalls = [];
   // What the stub daemon answers on the goto-gate endpoints: `recs` is the
   // list the GET returns; the failure flags make a POST refuse.
@@ -102,18 +114,41 @@ function build() {
   const code = slice("/* notices — the page's own voice",
                      "pollTimer = setInterval(pollTick, DASHBOARD_POLL_MS);");
   const api = new Function(
-    "$", "el", "setTimeout", "clearTimeout", "Date", "api",
+    "$", "el", "setTimeout", "clearTimeout", "Date", "api", "location",
     code + "\nreturn { refreshGotoGate," +
     " get cards() { return [...notices.keys()]; } };"
   )(
     (id) => nodes[id],
     (tag, cls, text) => node(cls, text),
-    setTimeoutStub, clearTimeoutStub, FakeDate, apiStub,
+    setTimeoutStub, clearTimeoutStub, FakeDate, apiStub, loc,
   );
 
-  return { api, nodes, clock, gate, apiCalls,
+  return { api, nodes, clock, gate, apiCalls, loc,
            strip: () => nodes.notices.children,
-           said: () => nodes.notices.children.map((c) => c.text()).join(" | ") };
+           /* Every session press on the strip, in document order: the title's
+              target, then the move line's asker and target. */
+           links: () => {
+             const out = [];
+             const walk = (n) => {
+               if (n.classList.contains("gate-session")) out.push(n);
+               n.children.forEach(walk);
+             };
+             nodes.notices.children.forEach(walk);
+             return out;
+           },
+           buttons: () => {
+             const card = nodes.notices.children[0];
+             if (!card) return [];
+             const row = card.children.find(
+               (c) => c.className.includes("gate-actions"));
+             return row ? row.children : [];
+           },
+           /* The strip as one string. Runs of whitespace are collapsed:
+              the card builds its lines out of several nodes (the session
+              presses sit between text), and what is checked here is the
+              sentence, not how many nodes it took. */
+           said: () => nodes.notices.children.map((c) => c.text())
+             .join(" | ").replace(/[ ]+/g, " ") };
 }
 
 function pending(rec) {
@@ -134,8 +169,8 @@ function pending(rec) {
     check("a pending request draws one card", w.strip().length === 1, w.said());
     check("titled with the run being moved",
           /run move requested: w1/.test(w.said()), w.said());
-    check("naming who asked and the move", /lead asks to move w1's run landed → wrapup/.test(w.said()),
-          w.said());
+    check("naming who asked and the move",
+          /lead asks to move w1 — landed → wrapup/.test(w.said()), w.said());
     check("printing the reason in full", /branch verified landed by git/.test(w.said()), w.said());
     check("with a countdown to the deadline", /auto-approves in 5:00/.test(w.said()), w.said());
     const card = w.strip()[0];
@@ -233,8 +268,97 @@ function pending(rec) {
   })();
 }
 
-if (failures) {
-  console.log(`${failures} check(s) failed`);
-  process.exit(1);
+/* --- the session names are presses that open those sessions ------------- */
+{
+  const w = build();
+  w.gate.recs = [pending()];
+  (async () => {
+    await w.api.refreshGotoGate();
+    const links = w.links();
+    check("both sessions on the card are presses", links.length === 3,
+          links.map((l) => l.textContent));
+    check("the title names the run being moved",
+          links[0].textContent === "w1", links.map((l) => l.textContent));
+    check("the move line names the asker then the target",
+          links[1].textContent === "lead" && links[2].textContent === "w1",
+          links.map((l) => l.textContent));
+
+    links[1].click();
+    check("pressing the asker opens that session",
+          w.loc.hash === "#/s/lead", w.loc.hash);
+    links[0].click();
+    check("pressing the target opens the run's own session",
+          w.loc.hash === "#/s/w1", w.loc.hash);
+    check("and opening a session decides nothing",
+          w.strip().length === 1 &&
+          w.apiCalls.every((c) => !/approve|deny/.test(c)), w.apiCalls);
+
+    // The countdown is rewritten on every poll; the links must outlive it.
+    w.clock.at += 61000;
+    await w.api.refreshGotoGate();
+    check("the redrawn countdown leaves the links standing",
+          w.links().length === 3 && /auto-approves in 3:59/.test(w.said()),
+          w.said());
+  })();
 }
-console.log("gotogate_check: ok");
+
+/* --- Ignore closes the card and answers nothing -------------------------- */
+{
+  const w = build();
+  w.gate.recs = [pending(), pending({ id: "g2", target_session: "w2" })];
+  (async () => {
+    await w.api.refreshGotoGate();
+    const ignore = w.buttons().find((b) => b.textContent === "Ignore");
+    check("the card offers a third press that answers nothing",
+          ignore !== undefined, w.buttons().map((b) => b.textContent));
+
+    ignore.click();
+    check("Ignore takes its own card down", w.strip().length === 1, w.said());
+    check("and leaves the other request's card alone", /w2/.test(w.said()),
+          w.said());
+    check("nothing was posted for it",
+          w.apiCalls.every((c) => !/approve|deny/.test(c)), w.apiCalls);
+
+    await w.api.refreshGotoGate();
+    check("and the redraw does not put the closed card back",
+          w.strip().length === 1 && !/w1/.test(w.said()), w.said());
+
+    // Settled elsewhere, then filed again under the same id: the id must not
+    // still be silencing a card.
+    w.gate.recs = [pending({ status: "approved" }),
+                   pending({ id: "g2", target_session: "w2" })];
+    await w.api.refreshGotoGate();
+    w.gate.recs = [pending(), pending({ id: "g2", target_session: "w2" })];
+    await w.api.refreshGotoGate();
+    check("an ignored id is forgotten once its request settles",
+          w.strip().length === 2, w.said());
+  })();
+}
+
+/* --- a request that vanishes from the list loses its card ---------------- */
+{
+  const w = build();
+  w.gate.recs = [pending()];
+  (async () => {
+    await w.api.refreshGotoGate();
+    check("drawn while pending", w.strip().length === 1, w.said());
+    w.gate.recs = [];                 // answered on the run page, then pruned
+    await w.api.refreshGotoGate();
+    check("gone from the list, gone from the strip", w.strip().length === 0,
+          w.said());
+  })();
+}
+
+/* --- the markup and the stylesheet the code reaches for ------------------ */
+check("pollOnce feeds the gate card", /refreshGotoGate\(\)/.test(src));
+check("a session press routes to that session's page",
+      /location\.hash = "#\/s\/" \+ encodeURIComponent\(name\)/.test(src));
+check("the countdown owns a line of its own",
+      /gate-clock/.test(src) && /gate-clock/.test(css));
+check("a session name is marked as a press before it is hovered",
+      /\.notice \.gate-session\s*\{[^}]*cursor:\s*pointer/.test(css));
+
+process.on("exit", (code) => {
+  if (failures) { console.log(`${failures} check(s) failed`); process.exitCode = 1; }
+  else if (!code) console.log("gotogate_check: ok");
+});

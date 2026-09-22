@@ -4173,6 +4173,19 @@ body.embed #main { width: 100%; }
 .notice.gate { cursor: default; }
 .gate-actions { display: flex; gap: 8px; margin-top: 8px; }
 .gate-actions .wf-btn { margin: 0; padding: 3px 10px; font-size: 11px; }
+/* A session named on a gate card opens that session. Marked as a press the
+   way the run list marks its own session line, so it reads as one before it
+   is hovered: the card is read once and answered, and a link nobody can see
+   is a link nobody uses. */
+.notice .gate-session {
+  cursor: pointer; color: #c9d1d9;
+  border-bottom: 1px dotted #6e7681;
+}
+.notice .gate-session:hover { color: #58a6ff; border-bottom-color: #58a6ff; }
+.notice-title .gate-session { color: #e6edf3; }
+/* The countdown is its own line so the poll can rewrite it without touching
+   the links beside it. */
+.notice .gate-clock { color: #8b949e; }
 /* A phone has no corner to spare: the strip spans the width under the
    mobile bar instead of floating over the session it is reporting on. */
 @media (max-width: 700px) {
