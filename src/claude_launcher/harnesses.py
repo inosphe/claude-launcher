@@ -43,14 +43,56 @@ from __future__ import annotations
 import re
 import shutil
 import sys
+import time
 from dataclasses import dataclass, field
 from importlib import resources
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 import yaml
 
 from . import config, store
+
+#: How long a "not on PATH" answer is trusted before the walk is repeated
+#: (see :func:`_which_cached`).
+WHICH_MISS_TTL = 30.0
+
+#: program -> (found, when it was looked up). Module level rather than per
+#: :class:`Harness`, because ``registry()`` builds fresh instances on every
+#: call and the answer is a property of the machine.
+_which_seen: Dict[str, Tuple[bool, float]] = {}
+
+
+def _which_cached(program: str) -> bool:
+    """Whether ``program`` resolves on PATH, asked of the machine once.
+
+    ``/api/profiles`` asks this of every declared harness, on the event loop
+    that also pumps the terminals. On Windows ``shutil.which`` stats each
+    PATH entry once per ``PATHEXT`` suffix, so one answer is dozens of
+    filesystem calls: measured on the live daemon (s586, 2026-09-22, seven
+    declared harnesses) the registry cost 18.5 ms per request, and py-spy put
+    15.9% of the event loop thread's samples under this walk.
+
+    A positive is kept: an executable on PATH does not leave it while the
+    daemon runs, and a stale positive costs a spawn that fails with the
+    harness's own error, which is what an uncached miss would have produced
+    too. A negative expires after :data:`WHICH_MISS_TTL`, so a harness
+    installed beside a running daemon is noticed without a restart.
+    """
+    hit = _which_seen.get(program)
+    now = time.monotonic()
+    if hit is not None and (hit[0] or now - hit[1] < WHICH_MISS_TTL):
+        return hit[0]
+    found = shutil.which(program) is not None
+    _which_seen[program] = (found, now)
+    return found
+
+
+def reset_which_cache() -> None:
+    """Forget every remembered PATH walk -- for tests, and for a config change
+    that moves a harness's command out from under an answer already given."""
+    _which_seen.clear()
+
 
 #: The harness spawned through the profile machinery rather than a plain
 #: command — its executable comes from ``config.claude_bin()``, not from this
@@ -286,9 +328,11 @@ class Harness:
 
         ``shutil.which`` resolves against the *daemon's* PATH — the same
         environment a session's child is spawned with — so a false answer here
-        is a spawn that would have failed.
+        is a spawn that would have failed. The walk is remembered; see
+        :func:`_which_cached` for what that costs and what it can be wrong
+        about.
         """
-        return shutil.which(self.program()) is not None
+        return _which_cached(self.program())
 
     def profile_home(self, config_dir: Path) -> Path:
         """Directory this harness owns inside a claunch profile.

@@ -56,7 +56,7 @@ import platform as platform_mod
 import subprocess
 import tempfile
 import time
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Callable, Dict, List, Optional, Set, Tuple
 
 from .. import store
 from ..cflow import engine as cflow_engine, model as cflow_model, state as cflow_state
@@ -2728,18 +2728,32 @@ def event_block(scope: str, kind: str, payload: dict) -> str:
     return "\n".join(lines)
 
 
-def run_summary(name: str, cwd: str) -> Optional[dict]:
+def run_summary(
+    name: str, cwd: str, scopes: Optional[Dict[str, frozenset]] = None
+) -> Optional[dict]:
     """The cflow run session ``name`` drives in ``cwd``, compactly — or None.
 
     The same containment rule as the clocks, read in the other direction: the
     scope IS the session name and the run must live in the session's own
     directory. Serves the ``children`` API view, so an overseer's roster can
-    carry each child's run position without a second tool."""
+    carry each child's run position without a second tool.
+
+    ``scopes`` is a directory -> scope-set map that a caller asking about many
+    sessions at once may pass, so the containment check lists each directory
+    once instead of once per session; :func:`run_summarizer` builds one and
+    owns it. Left out, the directory is listed on every call as before.
+    """
     if not name or not cwd:
         return None
     try:
         resolved = cflow_state.resolve_cwd(cwd)
-        if name not in cflow_state.scopes_in(resolved):
+        if scopes is None:
+            known = cflow_state.scopes_in(resolved)
+        else:
+            known = scopes.get(resolved)
+            if known is None:
+                known = scopes[resolved] = frozenset(cflow_state.scopes_in(resolved))
+        if name not in known:
             return None
         payload = cflow_engine.status(resolved, scope=name)
     except Exception:
@@ -2759,3 +2773,26 @@ def run_summary(name: str, cwd: str) -> Optional[dict]:
             "workflow": pending.get("workflow"), "by": pending.get("by"),
         }
     return out
+
+
+def run_summarizer() -> Callable[[str, str], Optional[dict]]:
+    """:func:`run_summary` with the directory listing shared across its calls.
+
+    ``beads.queues_view`` asks for one summary per lane, and the containment
+    check lists the lane's directory each time. That answer is a property of
+    the directory, so lanes sharing one paid for the same listing repeatedly:
+    measured on the live daemon (s586, 2026-09-22 -- 703 sessions over 132
+    directories, two of which held 307 and 252 of them), the listings cost
+    2618 ms asked once per session and 31 ms asked once per directory. On the
+    event loop that also pumps the terminals.
+
+    The map lives exactly as long as the returned callable, so a caller gets
+    one consistent reading per response. A run that starts inside that window
+    is not seen by it, which is the window the response already was.
+    """
+    scopes: Dict[str, frozenset] = {}
+
+    def one(name: str, cwd: str) -> Optional[dict]:
+        return run_summary(name, cwd, scopes)
+
+    return one
