@@ -44,6 +44,11 @@ from pathlib import Path
 
 import pytest
 
+# The two cases at the end of this file patch this module's lookup to a
+# decoy directory. The gate under test never calls it, and that is the
+# property they pin -- see the section comment there.
+from claude_launcher.cflow import checkout
+
 SWEEP = Path(__file__).resolve().parents[1] / "tools" / "sweep.py"
 
 
@@ -1492,3 +1497,89 @@ def test_the_script_runs_as_a_script_and_its_exit_status_reaches_the_shell():
         env={**os.environ, "PYTHONIOENCODING": "utf-8"},
     )
     assert proc.returncode in (0, 1, 2)
+
+
+# --------------------------------------------------------------------------- #
+# which checkout --repo means (claunch-7sj.1)
+#
+# Three gates under tools/ resolve this through
+# ``claude_launcher.cflow.checkout.own_checkout``: changed_tests, landed_check
+# and merge_ready. Each of them asks "did MY branch land", a question about one
+# session's tree, and the lookup prefers the session's checkout over the
+# directory the run happens to stand in. This file's gate is not a fourth of
+# those, and these two cases are what stops it being changed to match by
+# somebody reading the pattern instead of the question.
+#
+# ``own_checkout`` is patched to a decoy directory in both. Nothing here calls
+# it -- that is the point: the day somebody wires it in, the decoy is what the
+# gate measures and these cases go red instead of the leader's sweeps going
+# quiet.
+# --------------------------------------------------------------------------- #
+def test_the_suite_runs_in_the_working_tree_it_was_pointed_at(
+    repo, receipts, tmp_path, monkeypatch
+):
+    """``run`` sweeps where it stands, and the session's checkout is not it.
+
+    The design puts this command in a scratch worktree detached at the tip --
+    ``cmd_run`` refuses outright when ``HEAD`` is not ``--branch`` -- so the
+    tree it must measure is a third directory, neither the session's nor the
+    run's. Measured 2026-09-22: the leader's sweep ran in ``C:/cl-sweep-93``
+    while the session it belonged to was recorded in the main checkout, and
+    that checkout held an uncommitted path at that moment. Resolving through
+    the session would have aimed this run there and filed the "master plus
+    whatever is lying around" receipt the refusal above exists to stop.
+    """
+    decoy = tmp_path / "the-sessions-checkout"
+    decoy.mkdir()
+    monkeypatch.setattr(
+        checkout, "own_checkout", lambda *a, **k: (str(decoy), checkout.SESSION)
+    )
+    monkeypatch.chdir(repo)
+
+    assert sweep.main(
+        ["run", "--receipts", str(receipts), "--command", GREEN]
+    ) == 0
+
+    commit = _git(repo, "rev-parse", "master").strip()
+    written = list(receipts.rglob("*.json"))
+    assert written, "no receipt was filed for the tree it was standing in"
+    filed = json.loads(written[0].read_text(encoding="utf-8"))
+    assert filed["commit"] == commit
+
+
+def test_the_gate_reads_the_receipt_from_the_working_tree(
+    repo, receipts, tmp_path, monkeypatch
+):
+    """And ``check`` agrees with ``run`` about which repository is meant.
+
+    ``check`` would survive the lookup either way -- it resolves ``--branch``
+    through a shared ref and keys the receipt by ``repo_key``
+    (``--git-common-dir``), both identical in every worktree -- but the two
+    subcommands share one ``--repo``, so they cannot be decided separately.
+    """
+    decoy = tmp_path / "the-sessions-checkout"
+    decoy.mkdir()
+    monkeypatch.setattr(
+        checkout, "own_checkout", lambda *a, **k: (str(decoy), checkout.SESSION)
+    )
+    assert _run(repo, receipts, "--command", GREEN) == 0
+    monkeypatch.chdir(repo)
+
+    assert sweep.main(["check", "--receipts", str(receipts)]) == 0
+
+
+def test_the_repo_option_says_what_it_means(capsys):
+    """The judgment above is only useful where somebody looking will find it.
+
+    ``--help`` is where a reader goes before the source, and a bare
+    ``--repo`` there reads as "the repository", which is the reading that
+    makes pointing it at the session's checkout look harmless.
+    """
+    with pytest.raises(SystemExit):
+        sweep.main(["run", "--help"])
+    # Whitespace-collapsed because argparse wraps help text to the terminal
+    # width, and at 80 columns it breaks this phrase across two lines. A
+    # literal search passes or fails on how wide the window happens to be.
+    rendered = " ".join(capsys.readouterr().out.split())
+    assert "default: the working directory" in rendered
+    assert "the tree the suite executes in" in rendered
