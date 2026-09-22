@@ -2019,7 +2019,10 @@ def _llm_block_update(body: dict, doc: dict) -> dict:
     string keeps the stored secret (a password field arrives blank on every
     reload), and ``null`` is the explicit "remove it" — without that, a key
     typed for a backend nobody calls any more would sit in the file with no
-    way to take it out from the page that put it there.
+    way to take it out from the page that put it there. Saving a profile is
+    one such moment, and the card says so itself: it sends ``""`` for the
+    endpoint and ``null`` for the key, because the profile now supplies both
+    and the pair left behind describes whatever was typed in before.
     """
     if not isinstance(body, dict) or set(body) - LLM_EDITABLE:
         raise ValueError("unsupported briefing llm setting")

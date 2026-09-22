@@ -37,7 +37,7 @@ Schema::
       profile: <profile name>   # the backend to call: its provider's endpoints.openai + key
       model: <model id>         # sent to that backend; empty = the profile's models.default
       endpoint: https://host/v1/chat/completions  # instead of a profile: typed in directly
-      api_key: <key>            # with endpoint, the direct form; a profile supplies its own
+      api_key: <key>            # with endpoint, the direct form; saving a profile removes both
       max_tokens: 4096          # bounds the whole completion, reasoning included
       params: {<extra chat/completions field>: <value>, ...}
     rag:                        # semantic search over the board and the fleet; see daemon/rag.py

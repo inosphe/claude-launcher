@@ -1341,6 +1341,63 @@ def test_briefing_llm_settings_endpoint_reads_and_saves(home):
     asyncio.run(run())
 
 
+def test_briefing_llm_save_clears_the_pair_a_profile_takes_over(home):
+    """Choosing a profile takes the block's own endpoint and key out of the file.
+
+    Both values are dead once a profile is named — the call reads neither —
+    but they stay visible, and the one the card showed as "the endpoint in
+    use" was whichever URL had been typed before. The card sends ``""`` for
+    the endpoint and ``null`` for the key so the file says what the card
+    says, and so a credential for a backend nobody calls does not sit there.
+    """
+    _profile_backend_config()
+    store.update(
+        lambda doc: doc.update(
+            {
+                "llm": {
+                    "endpoint": "https://typed.test/v1/chat/completions",
+                    "api_key": "typed-secret",
+                    "model": "typed-model",
+                    "max_tokens": 4096,
+                }
+            }
+        )
+    )
+
+    async def run():
+        mgr = SessionManager(idle_threshold=0.5, scrollback=200, restore_default=True)
+        client = await _serve(mgr)
+        try:
+            resp = await client.put(
+                "/api/briefing/llm",
+                headers=BEARER,
+                json={
+                    "profile": "brief",
+                    "model": "deepseek-flash",
+                    "max_tokens": 4096,
+                    "endpoint": "",
+                    "api_key": None,
+                },
+            )
+            assert resp.status == 200
+            body = await resp.json()
+            assert body["endpoint"] == "" and body["api_key_set"] is False
+            assert body["resolved"]["endpoint"] == (
+                "https://example.test/v1/chat/completions"
+            )
+
+            block = store.load()["llm"]
+            assert "endpoint" not in block and "api_key" not in block
+            assert block["profile"] == "brief"
+            assert block["model"] == "deepseek-flash"
+
+            await mgr.shutdown_all()
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
 def test_briefing_llm_settings_key_handling_and_refusals(home):
     """The api_key convention, and what a save refuses.
 
