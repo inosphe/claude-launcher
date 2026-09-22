@@ -160,6 +160,14 @@ let keptTerms = new Map();
 const killUiState = new Map();
 function syncSessionKillControls() {}
 function modalInfo() {}
+/* Archiving a LIVE session ends it, so the page asks first. The stub
+   records what was asked and answers with whatever the check set, which is
+   how the refusal path ("the reader said no") is exercised at all. */
+let confirms = [], confirmAnswer = true;
+async function modalConfirm(title, body, label) {
+  confirms.push({ title, body, label });
+  return confirmAnswer;
+}
 function dropKept() {}
 function railHeld() { return false; }
 let railRedrawPending = false;
@@ -213,7 +221,7 @@ new Function(
   + slice("answerFellToUs") + slice("answerBranchOptions")
   + slice("sessCflowRun")
   + keysBlock() + slice("killSession") + slice("pauseSession")
-  + slice("archiveExitedSession") + slice("refreshSessions")
+  + slice("archiveSession") + slice("refreshSessions")
   + `
 Object.assign(exports, {
   refresh: refreshSessions,
@@ -233,7 +241,9 @@ Object.assign(exports, {
   setCflow: (v) => { cflowCache = v; },
   approvals: () => approvals,
   pinPresses: () => pinPresses,
-  resetPresses: () => { approvals = []; pinPresses = []; },
+  confirms: () => confirms,
+  answerConfirm: (v) => { confirmAnswer = v; },
+  resetPresses: () => { approvals = []; pinPresses = []; confirms = []; },
 });`)(ctx, document, el, api, list, [], false, $, location);
 
 let failures = 0;
@@ -425,9 +435,33 @@ const ev = (key, over = {}) => Object.assign({
     { name: "s3", status: "exited" },
     { name: "s4", status: "exited", archived_at: "2026-09-01T00:00:00Z" },
   ]);
-  check("a live session is not archivable", ctx.archive("s1"), false);
-  check("...and neither is one already archived", ctx.archive("s4"), false);
-  check("...so nothing was sent", posted("/archive").length, 0);
+  /* A live session IS archivable — the route ends it and files it in one
+     call — but ending a running program is not a keypress's to take
+     silently, so the press asks first and only then sends. */
+  ctx.resetPresses();
+  check("a live session is archivable too", ctx.archive("s1"), true);
+  await new Promise((r) => setTimeout(r, 0));
+  check("...but it asks before ending it", ctx.confirms().length, 1);
+  check("...naming the session in the question",
+        ctx.confirms()[0].title.includes("s1"), true);
+  check("...and only then sends", posted("/archive"), ["/api/sessions/s1/archive"]);
+
+  calls.length = 0;
+  ctx.resetPresses();
+  ctx.answerConfirm(false);
+  check("the press is still accepted when the reader may say no",
+        ctx.archive("s2"), true);
+  await new Promise((r) => setTimeout(r, 0));
+  check("...but a refused confirmation sends nothing",
+        posted("/archive").length, 0);
+  ctx.answerConfirm(true);
+
+  calls.length = 0;
+  ctx.resetPresses();
+  check("a record already archived has nowhere further to go",
+        ctx.archive("s4"), false);
+  check("...so nothing was asked and nothing was sent",
+        [ctx.confirms().length, posted("/archive").length], [0, 0]);
 
   /* `a` is the one key that reads a second cache. A run stopped on an
      approval is the reader's press; a run stopped on a CHOICE is not, and

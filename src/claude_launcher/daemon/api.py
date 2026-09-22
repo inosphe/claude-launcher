@@ -5974,10 +5974,38 @@ async def h_session_delete(request: web.Request) -> web.Response:
 
 
 async def h_session_archive(request: web.Request) -> web.Response:
-    """Retain an exited record in the archive so it remains inspectable."""
+    """File a session in the archive, ending it first if it is still running.
+
+    Archive is available at every moment of a session's life, not only after
+    it has ended. On a live session this route IS the ending: the program is
+    terminated and the record is filed in the one call, so an operator who
+    has decided a session is finished presses once instead of pressing kill,
+    watching for the exit to land, and pressing archive.
+
+    Nothing waits in between. The board wind-down that a first kill turns
+    into is dropped rather than run (:func:`_winding_down` is not consulted
+    here), because it asks the session for one more turn and a session being
+    archived has none left to give; a pending merge or handoff is forgotten
+    for the same reason the kill route forgets it — the operator pressed past
+    it. The issues the session held are released by the daemon's own exit
+    sweep, exactly as they are for a kill.
+
+    ``?force=1`` is SIGKILL rather than a graceful stop. The reply carries
+    ``stopped: true`` when this call was the one that ended the session, so a
+    caller can tell "archived a record that was already dead" from "ended a
+    running session and archived it" — the second is the destructive one, and
+    a UI that cannot tell them apart cannot warn about it.
+    """
     manager: SessionManager = request.app["manager"]
-    session = manager.archive(request.match_info["name"])
-    return json_response(session.info())
+    name = request.match_info["name"]
+    force = request.query.get("force") in ("1", "true")
+    session = manager.get(name)  # ManagerError -> 400, as it always did
+    if session.exited:
+        return json_response(manager.archive(name).info())
+    request.app["handoff"].forget(name)
+    request.app["beads"].winddowns.pop(name, None)
+    session = await manager.stop_and_archive(name, force=force)
+    return json_response({**session.info(), "stopped": True})
 
 
 async def h_session_keep_alive(request: web.Request) -> web.Response:

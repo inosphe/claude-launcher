@@ -31,6 +31,39 @@ def add_dead(mgr: SessionManager, name: str, *, archived_at=None) -> DeadSession
     return record
 
 
+class FakeLive(DeadSession):
+    """A record that reads as running until its shutdown lands.
+
+    Built on DeadSession so the registry can persist it like any other
+    record; what it adds is the one thing under test — a shutdown that ends
+    asynchronously, which is why an archive cannot simply follow a kill.
+    """
+
+    def __init__(self, sdef) -> None:
+        super().__init__(sdef, exit_code=None)
+        self.exited = False
+        self.graces: list = []
+
+    def status(self, threshold=None) -> str:
+        return "exited" if self.exited else "idle"
+
+    def kill(self, *, force: bool = False) -> None:
+        # What the real Session.kill does: signal, and leave `exited` to the
+        # reader task. An archive pressed straight after one finds it running.
+        self.graces.append(("kill", force))
+
+    async def shutdown(self, grace: float = 5.0) -> None:
+        self.graces.append(("shutdown", grace))
+        self.exited = True
+        self.exit_code = 0
+
+
+def add_live(mgr: SessionManager, name: str) -> FakeLive:
+    record = FakeLive(SessionDef(name=name, harness="claude", cwd="C:/work"))
+    mgr._sessions[name] = record
+    return record
+
+
 def test_archive_retains_the_record_across_restart_and_respawn_clears_it(
     home, monkeypatch
 ):
@@ -79,14 +112,59 @@ def test_archived_records_are_not_swept_at_boot(home):
     assert swept == {"killed"}
 
 
-def test_archive_refuses_a_running_session(home):
+def test_archive_alone_refuses_a_running_session_and_names_the_verb(home):
+    # The filing half on its own still refuses: a record written as archived
+    # while its program runs would say something that is not true yet. The
+    # refusal names stop_and_archive, which is what every operator route
+    # calls — the refusal is only reachable from the bulk "archive the exited
+    # ones" pass, where selecting nothing live is the point.
     mgr = manager()
     mgr._sessions["live"] = SimpleNamespace(
         sdef=SessionDef(name="live", harness="claude", cwd="C:/work"),
         exited=False,
     )
-    with pytest.raises(ManagerError, match="kill it before archiving"):
+    with pytest.raises(ManagerError, match="stop_and_archive"):
         mgr.archive("live")
+
+
+@pytest.mark.parametrize("force, grace", [(False, 5.0), (True, 0.0)])
+def test_stop_and_archive_ends_a_running_session_in_the_same_call(
+    home, force, grace
+):
+    # The point of the verb: archive is available while a session runs, and
+    # the record it leaves is both ended and filed. The stop is shutdown()
+    # rather than kill() because kill only signals — the exit lands later,
+    # and an archive written in between would be refused.
+    mgr = manager()
+    live = add_live(mgr, "busy")
+
+    archived = asyncio.run(mgr.stop_and_archive("busy", force=force))
+
+    assert live.exited
+    assert live.graces == [("shutdown", grace)]
+    assert archived.archived_at
+    assert archived is live
+
+    saved = {row["def"]["name"]: row for row in db.open_default().load_all()}
+    assert saved["busy"]["archived_at"] == live.archived_at
+    assert saved["busy"]["was_running"] is False
+
+    kinds = [row["kind"] for row in mgr.events.rows(live)]
+    assert kinds == ["kill", "archive"]
+
+
+def test_stop_and_archive_on_an_exited_record_is_plain_archive(home):
+    # Nothing to end, so nothing is ended: the verb is the always-available
+    # entry point, not a second way to kill something.
+    mgr = manager()
+    dead = add_dead(mgr, "old")
+
+    archived = asyncio.run(mgr.stop_and_archive("old"))
+    assert archived.archived_at
+    assert [row["kind"] for row in mgr.events.rows(dead)] == ["archive"]
+
+    first = archived.archived_at
+    assert asyncio.run(mgr.stop_and_archive("old")).archived_at == first
 
 
 @pytest.mark.parametrize("connected", [False, True])
@@ -137,6 +215,64 @@ def test_archive_api_handles_one_or_every_unarchived_exited_record(home):
             response = await client.get("/api/sessions", headers=headers)
             rows = {row["name"]: row for row in (await response.json())["sessions"]}
             assert all(rows[name]["archived_at"] for name in ("one", "two", "already"))
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_archive_route_stops_a_running_session_and_files_it_in_one_call(home):
+    # The operator-facing half of the same decision: the route answers for a
+    # live session too, and the reply distinguishes the call that ended one
+    # from the call that filed a record already dead. The bulk route keeps
+    # its own meaning — it is labelled "archive the exited ones" and skips
+    # the live session rather than ending it.
+    async def run():
+        mgr = manager()
+        live = add_live(mgr, "busy")
+        add_dead(mgr, "old")
+        app = build_app(mgr, "sekrit", started_at=0.0)
+        client = TestClient(TestServer(app))
+        await client.start_server()
+        headers = {"Authorization": "Bearer sekrit"}
+        try:
+            # A wind-down standing for this session is dropped, not awaited:
+            # archiving leaves the session no turn to settle anything in.
+            app["beads"].winddowns["busy"] = object()
+
+            response = await client.post("/api/sessions/busy/archive", headers=headers)
+            assert response.status == 200
+            body = await response.json()
+            assert body["stopped"] is True
+            assert body["archived_at"]
+            assert live.exited and live.graces == [("shutdown", 5.0)]
+            assert "busy" not in app["beads"].winddowns
+
+            # An already-exited record is filed without claiming to have
+            # stopped anything.
+            response = await client.post("/api/sessions/old/archive", headers=headers)
+            body = await response.json()
+            assert body["archived_at"] and "stopped" not in body
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_bulk_archive_leaves_a_running_session_alone(home):
+    async def run():
+        mgr = manager()
+        live = add_live(mgr, "busy")
+        add_dead(mgr, "old")
+        app = build_app(mgr, "sekrit", started_at=0.0)
+        client = TestClient(TestServer(app))
+        await client.start_server()
+        try:
+            response = await client.post(
+                "/api/sessions/archive", headers={"Authorization": "Bearer sekrit"}
+            )
+            assert (await response.json()) == {"archived": ["old"], "failed": []}
+            assert not live.exited and live.archived_at is None
         finally:
             await client.close()
 

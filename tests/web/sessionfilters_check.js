@@ -206,7 +206,7 @@ check("mesh group headings have dedicated styling",
    wrapper still found a body, still passed, and inspected the wrong
    one. */
 const killStart = src.indexOf("async function killSession(");
-const killEnd = src.indexOf("async function archiveExitedSession(", killStart);
+const killEnd = src.indexOf("async function archiveSession(", killStart);
 const archiveStart = killEnd;
 const archiveEnd = src.indexOf('$("term-archive")', archiveStart);
 const bulkKillStart = src.indexOf('$("stop-all").addEventListener');
