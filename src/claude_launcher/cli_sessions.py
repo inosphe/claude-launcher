@@ -1788,11 +1788,19 @@ def _gated_restart() -> int:
         print(f"could not request the restart: {exc}", file=sys.stderr)
         return 1
     record = (resp or {}).get("request") or {}
-    deadline_at = None
-    try:
-        deadline_at = datetime.fromisoformat(record.get("deadline") or "")
-    except (KeyError, TypeError, ValueError):
-        deadline_at = None
+
+    def _deadline(rec):
+        """This record's deadline, or None. It MOVES: the web UI's Extend
+        pushes it out while the request stays pending, so the loop below
+        re-reads it every poll instead of trusting the one filed here."""
+        try:
+            parsed = datetime.fromisoformat((rec or {}).get("deadline") or "")
+        except (AttributeError, TypeError, ValueError):
+            return None
+        return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+    deadline_at = _deadline(record)
+    extensions = int(record.get("extensions") or 0)
     # The waiting announcement goes to stderr, the scripted-console channel
     # (the file's own convention: stdout stays parseable).
     print(
@@ -1836,6 +1844,19 @@ def _gated_restart() -> int:
                     file=sys.stderr,
                 )
                 return 1
+            moved = int(record.get("extensions") or 0)
+            if moved > extensions:
+                extensions = moved
+                deadline_at = _deadline(record) or deadline_at
+                when = (
+                    deadline_at.isoformat(timespec="minutes")
+                    if deadline_at is not None else "later"
+                )
+                print(
+                    f"  the operator extended the request — it now counts as "
+                    f"approved at {when}",
+                    file=sys.stderr,
+                )
             status = record.get("status")
             if status == "rejected":
                 print(
