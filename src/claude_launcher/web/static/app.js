@@ -6293,10 +6293,19 @@ async function refreshNewWorktree() {
   // on screen is what the list was built from.
   newWorktreeFilter = "";
   if (f.worktree_filter) f.worktree_filter.value = "";
+  let git;
   try {
     const resp = await api(`/api/git?cwd=${encodeURIComponent(cwd)}`);
-    newWorktreeGit = resp.ok ? await resp.json() : { repo: false, worktrees: [] };
-  } catch { newWorktreeGit = { repo: false, worktrees: [] }; }
+    git = resp.ok ? await resp.json() : { repo: false, worktrees: [] };
+  } catch { git = { repo: false, worktrees: [] }; }
+  // Half a second passes here (four git processes over the parent's
+  // checkout), and the form is drawn without waiting for it. In that time
+  // the modal can be closed, or reopened on another parent, and a second
+  // call is already the one whose answer the rows should show. Painting
+  // this one anyway would put another repository's checkouts on screen --
+  // the failure the "checkouts of ..." hint exists to prevent.
+  if (cwd !== newWorktreeFor) return;
+  newWorktreeGit = git;
   renderWorktreeOptions();
   syncNewWorktree();
 }
@@ -22104,12 +22113,20 @@ async function openSessionModal(opts = {}) {
   if (opts.seed) applySessionModalSeed(f, opts.seed);
   else applySessionModalRecall(f);
   refreshScoreGoalDefault(f);
+  // The worktree list is not waited for. /api/git runs four git processes
+  // over the parent's checkout, and on a repository this machine has been
+  // working in for a while that is the whole wait: measured 496-547ms
+  // against 1.5-8.6ms for the three below, so the form was drawn a half
+  // second after it could have been, and every field looked slow (see
+  // claunch-web-session-modal-waits-on-git-w75gv). refreshNewWorktree
+  // renders its own rows when it lands and renderWorktreeOptions keeps a
+  // selection that survives the arrival, so late is the same picture.
+  Promise.resolve(refreshNewWorktree()).catch(() => {});
   // The option sets the form stands on. Each failure degrades its own
   // field, exactly as it does on the page: a daemon that could not answer
   // about worktrees is not a reason to refuse to draw the form.
   await Promise.all([
     Promise.resolve(refreshWorkspaces()).catch(() => {}),
-    Promise.resolve(refreshNewWorktree()).catch(() => {}),
     Promise.resolve(refreshWorkflowChoices()).catch(() => {}),
     Promise.resolve(refreshRoles(f.mesh.value || "")).catch(() => {}),
   ]);
