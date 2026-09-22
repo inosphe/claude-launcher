@@ -52,6 +52,11 @@ from pathlib import Path
 
 import pytest
 
+# The two cases at the end of this file patch this module's lookup to a
+# decoy directory. The gate under test never calls it, and that is the
+# property they pin -- see the section comment there.
+from claude_launcher.cflow import checkout
+
 CHECK = Path(__file__).resolve().parents[1] / "tools" / "deploy_check.py"
 
 #: The two commits the fixture repository is built from, and a boot that
@@ -562,3 +567,56 @@ def test_no_two_answers_are_the_same_string(
     codes = {code for code, _ in answers.values()}
     assert codes == {0, 1, 2, 3}, f"the four facts are not all reachable: {codes}"
     assert len(answers) == 15
+
+
+# --------------------------------------------------------------------------- #
+# which checkout --repo means (claunch-7sj.1)
+#
+# The same decision as ``tests/test_sweep.py``'s closing section, for the same
+# reason and with the same decoy. What separates this gate from the three that
+# do resolve through ``own_checkout`` is the question: they ask whether one
+# session's branch landed, and this one asks what the live daemon is serving.
+# Every use of ``--repo`` below it goes through a shared ref or through
+# ``sweep.repo_key`` (``--git-common-dir``), so every worktree of the
+# repository answers the same and there is nothing for the lookup to correct.
+# --------------------------------------------------------------------------- #
+def test_the_working_directory_is_what_the_question_is_asked_about(
+    repo, shas, tmp_path, monkeypatch, capsys
+):
+    """No ``--repo``: the repository under the working directory is meant.
+
+    ``own_checkout`` is patched to a decoy that is not a repository at all.
+    Nothing here calls it, and that is what the case pins -- wiring it in
+    would make this gate answer about a checkout the caller never named.
+    """
+    decoy = tmp_path / "the-sessions-checkout"
+    decoy.mkdir()
+    monkeypatch.setattr(
+        checkout, "own_checkout", lambda *a, **k: (str(decoy), checkout.SESSION)
+    )
+    doc = _doc(tmp_path, repo, shas["tip"])
+    monkeypatch.chdir(repo)
+
+    code = deploy_check.main(["--daemon-json", str(doc)])
+    message = _answer(capsys, code)
+    assert code == 0
+    assert shas["tip"][:12] in message
+
+
+def test_the_repo_option_says_what_it_means(capsys):
+    """``--help`` is where the next reader looks before the source.
+
+    A bare ``--repo`` there reads as "the repository", and that reading is
+    what makes resolving it through the session's checkout look like a
+    tidy-up rather than a change of subject.
+    """
+    with pytest.raises(SystemExit):
+        deploy_check.main(["--help"])
+    # Whitespace-collapsed for the reason given in ``tests/test_sweep.py``'s
+    # case of the same name: argparse wraps to the terminal width, so a
+    # literal search turns on how wide the window is. This phrase survives at
+    # 80 columns and the one there does not, which is the whole argument for
+    # not relying on either.
+    rendered = " ".join(capsys.readouterr().out.split())
+    assert "default: the working directory" in rendered
+    assert "Any worktree of it answers the same" in rendered

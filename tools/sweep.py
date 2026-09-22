@@ -1032,7 +1032,37 @@ def main(argv: Optional[list] = None) -> int:
         ),
     ):
         p = sub.add_parser(name, help=help_text)
-        p.add_argument("--repo", type=Path, default=Path("."))
+        # The working directory, and deliberately NOT the session's checkout.
+        # Three gates under tools/ resolve this through
+        # ``cflow.checkout.own_checkout`` instead (changed_tests, landed_check,
+        # merge_ready), and the hole here looks like the fourth. It is not
+        # (claunch-7sj.1).
+        #
+        # ``run`` sweeps the tree it is standing in -- ``cmd_run`` says so and
+        # refuses when HEAD is not --branch -- and the whole point of the
+        # design is that the tree is a scratch worktree detached at the tip,
+        # which is neither the session's checkout nor the run's. Measured
+        # 2026-09-22: the leader's sweep ran in C:/cl-sweep-93 (detached at
+        # d5461356) while its session's recorded cwd was the main checkout,
+        # which held an uncommitted path at that moment. ``own_checkout``
+        # prefers the session over the working directory, so it would have
+        # aimed the sweep at the main checkout -- the "master plus whatever is
+        # lying around" receipt that ``cmd_run``'s refusal exists to stop.
+        #
+        # ``check`` reads a receipt keyed by ``repo_key`` (--git-common-dir)
+        # and resolves --branch through shared refs, so every worktree of this
+        # repository answers identically and there is nothing for the lookup
+        # to correct.
+        p.add_argument(
+            "--repo",
+            type=Path,
+            default=Path("."),
+            help=(
+                "the checkout to work in (default: the working directory). "
+                "For 'run' this is the tree the suite executes in, so point "
+                "it at a clean checkout of --branch."
+            ),
+        )
         p.add_argument("--branch", default="master")
         p.add_argument(
             "--receipts",

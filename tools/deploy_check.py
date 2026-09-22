@@ -233,7 +233,24 @@ def main(argv: Optional[list] = None) -> int:
         prog="deploy_check",
         description="fail unless the live daemon is serving <branch>'s code",
     )
-    ap.add_argument("--repo", type=Path, default=Path("."))
+    # The working directory, not the session's checkout. Three gates under
+    # tools/ resolve this through ``cflow.checkout.own_checkout``
+    # (changed_tests, landed_check, merge_ready) and this one reads like a
+    # fourth that was missed. It is not (claunch-7sj.1): those three ask "did
+    # MY branch land", a question about one session's tree, and this one asks
+    # what the live daemon serves -- a question about the repository. Every
+    # use of ``repo`` below goes through a shared ref (--branch) or through
+    # ``sweep.repo_key`` (--git-common-dir), both of which are the same in
+    # every worktree, so the lookup would move no answer.
+    ap.add_argument(
+        "--repo",
+        type=Path,
+        default=Path("."),
+        help=(
+            "a checkout of the repository to ask about (default: the working "
+            "directory). Any worktree of it answers the same."
+        ),
+    )
     ap.add_argument("--branch", default="master")
     ap.add_argument(
         "--daemon-json",
