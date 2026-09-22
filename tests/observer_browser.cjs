@@ -99,10 +99,16 @@ const server = http.createServer((req, res) => {
       }
       if(req.method === "GET") {
         if(req.url === "/api/daemon") return res.end('{"version":"test","boot_id":"test"}');
+        // The rail reads `data.sessions`; a bare array leaves it empty, which
+        // is what this fixture served until the round that put the observe
+        // glyph on the rail's rows. The fields are the ones the row builder
+        // and the tabs both draw — status and the observe flag are the two
+        // the assertions here turn on.
         if(req.url === "/api/sessions" || req.url.startsWith("/api/sessions?")) {
-          return res.end(JSON.stringify(data.sessions.map(s => ({
+          return res.end(JSON.stringify({sessions: data.sessions.map(s => ({
             name:s.name, status:s.status, observe_pin:!!s.observe_pin,
-          }))));
+            running:!!s.running, meshes:s.meshes||[], summary:s.summary||"",
+          }))}));
         }
         if(/^\/api\/(profiles|sessions|workspaces|mesh|cflow|harnesses|roles)/.test(req.url)) return res.end('[]');
         return res.end('{}');
@@ -226,12 +232,19 @@ const server = http.createServer((req, res) => {
     assert.deepEqual(sent.at(-1).body.keys, ["새 테스트를 실행하십시오", "Enter"]);
     assert.equal(await page.inputValue("#observer-prompt"), "");
     assert.deepEqual(await page.locator("#observer-target option").evaluateAll(es=>es.map(e=>e.value)),["","s1"]);
-    // The card's two per-session actions share its action row with the three
+    // The card's per-session controls share its action row with the three
     // links: as bars under the card they took the column's full width and the
-    // 44px touch target, which made them the largest thing on the card.
+    // 44px touch target, which made them the largest thing on the card. The
+    // observe pin joined them as a chip in this round rather than a checkbox
+    // with its own weight, so it counts here too.
     const actions = page.locator('.observer-post[data-session="s1"] .observer-links button');
-    assert.deepEqual(await actions.allTextContents(), ["이 세션에 입력","지금 갱신"]);
-    const action = await actions.first().evaluate(e=>{
+    assert.deepEqual(await actions.allTextContents(), ["👁 관찰 고정","이 세션에 입력","지금 갱신"]);
+    // Addressed by their own words rather than by position: the observe pin
+    // joined this row in this round and the pin belongs at the front of it,
+    // which would otherwise silently renumber the two the assertions are about.
+    const inputAction = actions.filter({hasText:"이 세션에 입력"});
+    const refreshAction = actions.filter({hasText:"지금 갱신"});
+    const action = await inputAction.evaluate(e=>{
       const card=e.closest(".observer-card");
       return {width:e.offsetWidth,height:e.offsetHeight,card:card.offsetWidth};
     });
@@ -239,7 +252,7 @@ const server = http.createServer((req, res) => {
     assert(action.height <= 32, `the action sits in the row (${action.height}px)`);
     // One press, one pass, and the card says what the pass did — including
     // when it spent no API call because there was nothing new to read.
-    await actions.nth(1).click();
+    await refreshAction.click();
     const note = page.locator(".observer-post[data-session=s1] .observer-action-note");
     await page.waitForFunction(()=>document.querySelector(".observer-post[data-session=s1] .observer-action-note")?.textContent==="갱신됨 · 새 항목 2개");
     assert.equal(sent.filter(r=>r.url.endsWith("/refresh")).length, 1);
@@ -247,11 +260,28 @@ const server = http.createServer((req, res) => {
     assert.equal(await note.innerText(), "갱신됨 · 새 항목 2개");
     await page.uncheck("#observer-actions-only");
     // The observe pin on the card, drawn from the session's own flag: the two
-    // cards disagree (s1 out of the scope, s2 in it), so a box reading the
-    // wrong row or one shared value would show the same state twice.
-    const cardBox = s => page.locator(`.observer-card[data-session="${s}"] .observer-pin input`);
-    assert.equal(await cardBox("s1").isChecked(), false);
-    assert.equal(await cardBox("s2").isChecked(), true);
+    // cards disagree (s1 out of the scope, s2 in it), so a control reading
+    // the wrong row or one shared value would show the same state twice.
+    // It is a pressed-state button wearing the rail's glyph rule, not a
+    // checkbox, so the state is read from aria-pressed and from the dimming
+    // CSS keys on — a control that reported the right state but stayed grey
+    // would read as off to the eye even while the scope covered the session.
+    const cardPin = s => page.locator(`.observer-card[data-session="${s}"] .observer-pin`);
+    const cardOn = s => cardPin(s).evaluate(el => [el.getAttribute("aria-pressed"),
+                                                   el.classList.contains("on")]);
+    assert.deepEqual(await cardOn("s1"), ["false", false]);
+    assert.deepEqual(await cardOn("s2"), ["true", true]);
+    assert.match(await cardPin("s1").evaluate(e => getComputedStyle(e).filter), /grayscale/, "an unpinned card's glyph is dimmed");
+    assert.equal(await cardPin("s2").evaluate(e => getComputedStyle(e).filter), "none", "a pinned card's glyph is not dimmed");
+    // Evidence for the round report: the two cards side by side, one dimmed
+    // and one lit, which is the pair the change is about. Captured at the
+    // desktop width the board is read at, then put back for the rest.
+    if (process.env.CLAUNCH_SCREENSHOT_DIR) {
+      await page.setViewportSize({width:1280,height:900});
+      await page.waitForTimeout(200);
+      await page.screenshot({path: path.join(process.env.CLAUNCH_SCREENSHOT_DIR, "observer-cards.png"), fullPage:true});
+      await page.setViewportSize({width:390,height:844});
+    }
     await page.fill("#observer-prompt", "session one draft");
     await page.selectOption("#observer-target", "s2"); await page.fill("#observer-prompt", "session two draft");
     await page.selectOption("#observer-target", "s1");
@@ -564,20 +594,43 @@ const server = http.createServer((req, res) => {
     await page.evaluate(()=>localStorage.setItem("claunch_session_pins:/", JSON.stringify(["s1"])));
     await page.reload();
     await page.waitForSelector(".observer-card");
-    const railBox = page.locator(".session-tab-observe");
-    await railBox.waitFor();
-    assert.equal(await railBox.isChecked(), false, "the rail box reads s1's own flag");
-    assert.equal(await page.locator(".session-tab").count(), 1, "one tab, so one box");
+    const railGlyph = page.locator(".session-tab-observe");
+    await railGlyph.waitFor();
+    assert.equal(await railGlyph.getAttribute("aria-pressed"), "false", "the rail glyph reads s1's own flag");
+    assert.equal(await page.locator(".session-tab").count(), 1, "one tab, so one control");
+    // It wears the 📌's rule rather than a checkbox's, so the lit state is
+    // the class CSS keys on — the same one the pin beside it uses.
+    assert.equal(await railGlyph.evaluate(e => e.textContent), "👁");
+    assert.match(await railGlyph.evaluate(e => getComputedStyle(e).filter), /grayscale/);
+    // Evidence for the round report, taken before the write below so the rail
+    // still shows both states at once: s1's tab glyph and row glyph dimmed,
+    // s2's lit — the pair the reader is asked to tell apart from the 📌.
+    if (process.env.CLAUNCH_SCREENSHOT_DIR) {
+      await page.screenshot({path: path.join(process.env.CLAUNCH_SCREENSHOT_DIR, "rail-observe-pin.png"), fullPage:true});
+    }
     // Writing through the rail reaches the card on the observer's own poll:
-    // both read the session's one field rather than keeping a copy, and the
-    // rail's poll is the slower of the two, so this is the direction whose
-    // convergence the two cadences could actually disagree on.
-    await railBox.check();
-    await page.waitForFunction(()=>document.querySelector('.observer-card[data-session="s1"] .observer-pin input')?.checked);
+    // all three surfaces read the session's one field rather than keeping a
+    // copy, and the rail's poll is the slower of the two, so this is the
+    // direction whose convergence the two cadences could actually disagree on.
+    await railGlyph.click();
+    await page.waitForFunction(()=>document.querySelector('.observer-card[data-session="s1"] .observer-pin')?.getAttribute('aria-pressed')==='true');
     assert.equal(sent.filter(r=>r.url.endsWith("/pin")).at(-1).url, "/api/observer/s1/pin");
     assert.deepEqual(sent.filter(r=>r.url.endsWith("/pin")).at(-1).body, {pinned:true});
-    await railBox.uncheck();
-    await page.waitForFunction(()=>!document.querySelector('.observer-card[data-session="s1"] .observer-pin input')?.checked);
+    assert.equal(await railGlyph.evaluate(e => getComputedStyle(e).filter), "none", "the lit rail glyph loses the dimming");
+    // The rail's session list row, the surface this round adds. Same glyph,
+    // same record, same route — so a row that kept its own copy would show
+    // the opposite of the tab beside it here.
+    const rowGlyph = page.locator('#session-list li[data-name="s1"] .sess-observe');
+    await rowGlyph.waitFor();
+    assert.equal(await rowGlyph.getAttribute("aria-pressed"), "true", "the row glyph follows the same record");
+    await rowGlyph.click();
+    await page.waitForFunction(()=>document.querySelector('#session-list li[data-name="s1"] .sess-observe')?.getAttribute('aria-pressed')==='false');
+    assert.deepEqual(sent.filter(r=>r.url.endsWith("/pin")).at(-1).body, {pinned:false});
+    await page.waitForFunction(()=>document.querySelector('.observer-card[data-session="s1"] .observer-pin')?.getAttribute('aria-pressed')==='false');
+    await railGlyph.click();
+    await page.waitForFunction(()=>document.querySelector('.observer-card[data-session="s1"] .observer-pin')?.getAttribute('aria-pressed')==='true');
+    await railGlyph.click();
+    await page.waitForFunction(()=>document.querySelector('.observer-card[data-session="s1"] .observer-pin')?.getAttribute('aria-pressed')==='false');
     }
     assert.deepEqual(errors, []);
     console.log("PASS: mobile layout, composer fold, usage as input/cache/output over calls and days, fleet total split from last-call rows, elapsed-since-update, scope/action filters, evidence, Escape, target input, per-session drafts, shared auth, deep links, polling lifecycle, legacy redirect, direct screenshot/answer, activity filters, cflow approval/selection, per-session latest-N grid, 1/10 limits, filter-before-limit, storage persistence/fallback, responsive view switching");

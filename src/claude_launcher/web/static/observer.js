@@ -202,16 +202,19 @@ function cardActions(card,s) {
   const update=node("button","지금 갱신","observer-action");
   update.disabled=refreshing.has(s.name);
   update.onclick=()=>oneShot(s.name);
-  // The same flag the rail's box writes, drawn here so the reader can see
+  // The same flag the rail's glyph writes, drawn here so the reader can see
   // which sessions the pinned-only scope covers without leaving the page.
-  // Both read it off the session record, so neither owns the state.
-  const pin=document.createElement("input");
-  pin.type="checkbox";pin.checked=!!s.observe_pin;pin.id=`observer-pin-${s.name}`;
-  const pinLabel=node("label","","observer-pin");
-  pinLabel.title=`「고정만 관찰」 모드에서 ${s.name}을 관찰 대상에 넣습니다`;
-  pinLabel.append(pin,node("span","관찰 고정"));
-  pin.onchange=()=>setObservePin(s.name,pin.checked);
-  links.append(pinLabel,input,update);
+  // All three surfaces read it off the session record, so none of them owns
+  // the state. This one wears the card's action chip so the row keeps one
+  // weight, and CSS dims it until it is on — the same rule and the same 👁
+  // the rail uses, so the control is recognisable across both pages.
+  const pin=node("button","👁 관찰 고정","observer-action observer-pin");
+  pin.type="button";
+  pin.classList.toggle("on",!!s.observe_pin);
+  pin.setAttribute("aria-pressed",String(!!s.observe_pin));
+  pin.title=`「고정만 관찰」 모드에서 ${s.name}을 관찰 대상에 넣습니다`;
+  pin.onclick=()=>setObservePin(s.name,!s.observe_pin);
+  links.append(pin,input,update);
   const note=refreshNotes.get(s.name);
   if(note)links.append(node("small",note,"observer-action-note"));
 }
