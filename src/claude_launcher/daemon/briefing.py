@@ -9,9 +9,22 @@ OpenAI-compatible ``chat/completions`` endpoint to compress it into a fixed
 JSON shape.
 
 Configuration is the ``llm:`` block of ``~/.claunch.yaml`` (``store.load()``
-is authoritative). An empty ``api_key`` means the feature is off — the key is
-typed in by the user and must never be committed or logged; it leaves this
-module only as the ``Authorization`` header of the LLM call itself.
+is authoritative), editable from the web dashboard's Settings page
+(``GET``/``PUT /api/briefing/llm``). It says where the call goes in one of
+two ways:
+
+* ``profile: <name>`` — the call reuses a claunch profile's backend. That
+  profile's provider chain states the OpenAI-compatible endpoint
+  (``endpoints.openai``), the key that reaches it and the model ids it
+  serves; see :func:`profile_backend`.
+* ``endpoint:`` plus ``api_key:`` typed in directly, which is what the block
+  held before a profile was an option and still works.
+
+``model:`` is the id sent to the backend in either form, and falls back to
+the profile's ``models.default`` when a profile is named and the field is
+empty. An empty ``api_key`` with no profile to supply one means the feature
+is off — the key must never be committed or logged; it leaves this module
+only as the ``Authorization`` header of the LLM call itself.
 
 Results are cached per session, keyed by what would change the answer: the
 transcript file's (mtime, size) and the cflow step. The cache is persisted in
@@ -36,7 +49,8 @@ import aiohttp
 log = logging.getLogger("claunch.daemon.briefing")
 
 from .. import atomic, harnesses as harness_registry
-from .. import profile as profile_mod, store, transcripts
+from .. import lineage, profile as profile_mod, provider_spec, providers
+from .. import store, transcripts
 from ..cflow import engine as cflow_engine, state as cflow_state
 from ..cflow.engine import CflowError
 from ..cflow.model import WorkflowError
@@ -95,12 +109,90 @@ class FaqError(Exception):
 # --------------------------------------------------------------------------- #
 # config
 # --------------------------------------------------------------------------- #
+class Backend(NamedTuple):
+    """One profile's OpenAI-compatible call values."""
+
+    #: The full ``chat/completions`` URL, ``/chat/completions`` appended when
+    #: the provider records the base alone.
+    endpoint: str
+    #: The key that reaches it: the launcher-managed token first, the
+    #: provider's own ``api_key`` second, ``""`` when neither is set.
+    api_key: str
+    #: The model the profile leads with (its ``default`` role).
+    model: str
+    #: Every model id the profile names, ``default`` first — what the
+    #: Settings page offers beside the model field.
+    models: Tuple[str, ...]
+
+
+def profile_backend(name: str, doc: Optional[dict] = None) -> Backend:
+    """Resolve profile ``name`` into the values :func:`call_llm` needs.
+
+    The same resolution the Observer performs
+    (:func:`daemon.observer.configuration`), and for the same reason: a
+    profile already records where its backend is, which key opens it and
+    which models it serves, so naming one is shorter than retyping all three
+    into the ``llm:`` block and cannot drift from what the sessions on that
+    profile call.
+
+    Only the ``openai`` protocol is read, because that is the protocol
+    :func:`call_llm` speaks. A profile whose provider declares an Anthropic
+    endpoint alone raises :class:`BriefingError` here rather than producing a
+    call that fails at the endpoint later; the Settings page shows that
+    message beside the profile it belongs to.
+
+    Model ids are returned without Claude's context-window tag
+    (``deepseek-flash[1m]`` -> ``deepseek-flash``), which is a decoration
+    Claude Code reads and an OpenAI-compatible backend rejects.
+    """
+    doc = store.load() if doc is None else doc
+    try:
+        prof = profile_mod.require_selector(name)
+    except ProfileError as exc:
+        raise BriefingError(str(exc)) from exc
+    try:
+        spec = providers.spec_for(prof, doc=doc)
+    except (providers.ProviderError, ProfileError) as exc:
+        raise BriefingError(str(exc)) from exc
+    endpoint = (spec.endpoint("openai") or "").rstrip("/")
+    if not endpoint:
+        raise BriefingError(
+            f"profile {prof.name!r} has no OpenAI-compatible endpoint "
+            f"(set providers.<provider>.endpoints.openai)"
+        )
+    if not endpoint.endswith("/chat/completions"):
+        endpoint += "/chat/completions"
+    models = tuple(
+        value
+        for value in (
+            provider_spec.split_model_tag(raw)[0] for raw in spec.model_list()
+        )
+        if value
+    )
+    return Backend(
+        endpoint=endpoint,
+        api_key=str(lineage.stored_auth_token(prof) or spec.api_key or ""),
+        model=models[0] if models else "",
+        models=models,
+    )
+
+
 def llm_config(doc: Optional[dict] = None) -> dict:
     """The effective ``llm`` settings (missing keys filled with defaults).
 
     Mirrors :func:`store.daemon_config`'s shape-tolerance: a missing or
     malformed block yields the disabled default rather than an error, because
-    this file is hand-edited.
+    this file is hand-edited. A ``profile`` that cannot be resolved is the
+    same case: the returned config is simply not configured, and
+    ``GET /api/briefing/llm`` is where the reason is reported.
+
+    A named profile supplies ``endpoint`` and ``api_key`` as one pair, and
+    the block's own two fields are then left out of the result. The two
+    identify one backend together, so filling one of them from the block
+    would send a key typed for one endpoint to another. ``model`` is the
+    exception: the block's value wins, because the model is this feature's
+    choice about the backend rather than a property of it, and the profile's
+    ``default`` fills in only when the field is empty.
     """
     doc = store.load() if doc is None else doc
     block = doc.get("llm")
@@ -111,10 +203,23 @@ def llm_config(doc: Optional[dict] = None) -> dict:
         max_tokens = int(block.get("max_tokens") or DEFAULT_MAX_TOKENS)
     except (TypeError, ValueError):
         max_tokens = DEFAULT_MAX_TOKENS
+    profile_name = str(block.get("profile") or "").strip()
+    endpoint = str(block.get("endpoint") or "").strip()
+    api_key = str(block.get("api_key") or "").strip()
+    model = str(block.get("model") or "").strip()
+    if profile_name:
+        try:
+            backend = profile_backend(profile_name, doc)
+        except BriefingError:
+            endpoint, api_key = "", ""
+        else:
+            endpoint, api_key = backend.endpoint, backend.api_key
+            model = model or backend.model
     return {
-        "endpoint": str(block.get("endpoint") or "").strip(),
-        "model": str(block.get("model") or "").strip(),
-        "api_key": str(block.get("api_key") or "").strip(),
+        "profile": profile_name,
+        "endpoint": endpoint,
+        "model": model,
+        "api_key": api_key,
         "max_tokens": max_tokens,
         "params": dict(params) if isinstance(params, dict) else {},
     }
@@ -693,6 +798,20 @@ def _jsonable(value):
     return value
 
 
+def forget_all() -> None:
+    """Drop every cached briefing, persisted copy included.
+
+    Called when the backend behind the feature changes — a different profile,
+    endpoint or model. The cache key is a session's *evidence* and not the
+    model that read it, so without this a briefing written by the previous
+    model would stay on the card until that session's transcript moved, and
+    the change the operator just saved would look like it had done nothing.
+    """
+    _restore_cache()
+    _cache.clear()
+    _persist_cache()
+
+
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
@@ -756,8 +875,8 @@ async def compose(session, cfg: dict, *, refresh: bool = False) -> dict:
         raise BriefingError(
             f"llm answer was truncated at max_tokens={cfg['max_tokens']} "
             f"(finish_reason='length', completion_tokens={answer.completion_tokens}, "
-            f"{len(answer.text)} chars, not parseable) — raise llm.max_tokens "
-            "in ~/.claunch.yaml"
+            f"{len(answer.text)} chars, not parseable) — raise the token "
+            "budget in Settings ▸ Briefing model (llm.max_tokens)"
         )
     result = {
         "session": name,

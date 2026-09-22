@@ -22,6 +22,7 @@ from datetime import datetime, timezone
 from dataclasses import replace
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
+from urllib.parse import urlsplit
 
 from aiohttp import WSMsgType, web
 
@@ -456,6 +457,8 @@ def build_app(
     r.add_get("/api/git", h_git)
     r.add_post("/api/workspaces", h_workspace_add)
     r.add_delete("/api/workspaces/{name}", h_workspace_remove)
+    r.add_get("/api/briefing/llm", h_briefing_llm)
+    r.add_put("/api/briefing/llm", h_briefing_llm_save)
     r.add_get("/api/briefing/faq", h_briefing_faq)
     r.add_post("/api/briefing/faq", h_briefing_faq_add)
     r.add_put("/api/briefing/faq/{faq_id}", h_briefing_faq_update)
@@ -1929,6 +1932,181 @@ async def h_workspace_remove(request: web.Request) -> web.Response:
     except workspaces.WorkspaceError as exc:
         return json_error(404, str(exc))
     return json_response({"workspace": removed.to_dict()})
+
+
+#: The ``llm`` block fields the Settings page may write. ``params`` is left
+#: out on purpose: it is a free map of extra chat/completions fields, which a
+#: text box cannot validate and which nothing in the UI reads back.
+LLM_EDITABLE = frozenset({"profile", "model", "endpoint", "api_key", "max_tokens"})
+#: Upper bound for the completion budget a form may save. The endpoint's own
+#: limit is the real one; this only keeps a typo (a pasted model id, a stray
+#: zero) from being written as a number the call then spends a minute failing
+#: on.
+LLM_MAX_TOKENS_CEILING = 1_000_000
+
+
+def _llm_profile_rows(doc: dict) -> List[dict]:
+    """Every on-disk profile the briefing could call, with what it resolves to.
+
+    Profiles whose provider names no OpenAI-compatible endpoint are left out
+    rather than offered and refused on save: the reason belongs to the
+    provider, and this list is a picker, not a diagnosis. The one profile
+    that *is* configured is reported separately (``error`` below), so a
+    hand-edited name that cannot serve still says why.
+    """
+    rows: List[dict] = []
+    for prof in profile_mod.list_all():
+        try:
+            backend = briefing.profile_backend(prof.name, doc)
+        except briefing.BriefingError:
+            continue
+        rows.append(
+            {
+                "name": prof.name,
+                "endpoint": backend.endpoint,
+                "models": list(backend.models),
+                "has_key": bool(backend.api_key),
+            }
+        )
+    return rows
+
+
+def _llm_settings_payload(doc: Optional[dict] = None) -> dict:
+    """What the Settings card draws, and what a save answers with.
+
+    Two layers, deliberately both: ``profile``/``model``/``endpoint`` are the
+    block as *written* (what the form's fields hold), ``resolved`` is what a
+    call would actually use after a profile is applied. A card showing only
+    the second could not tell a typed endpoint from an inherited one; one
+    showing only the first could not show that a profile supplies the key.
+
+    No secret crosses this boundary. The key itself is never returned —
+    ``api_key_set`` says the block holds one, ``resolved.has_key`` says a
+    call would have one (from the block or from the profile).
+    """
+    doc = store.load() if doc is None else doc
+    block = doc.get("llm")
+    if not isinstance(block, dict):
+        block = {}
+    cfg = briefing.llm_config(doc)
+    error = ""
+    if cfg["profile"]:
+        try:
+            briefing.profile_backend(cfg["profile"], doc)
+        except briefing.BriefingError as exc:
+            error = str(exc)
+    return {
+        "profile": cfg["profile"],
+        "model": str(block.get("model") or "").strip(),
+        "endpoint": str(block.get("endpoint") or "").strip(),
+        "max_tokens": cfg["max_tokens"],
+        "api_key_set": bool(str(block.get("api_key") or "").strip()),
+        "configured": briefing.llm_configured(cfg),
+        "resolved": {
+            "endpoint": cfg["endpoint"],
+            "model": cfg["model"],
+            "has_key": bool(cfg["api_key"]),
+        },
+        "error": error,
+        "profiles": _llm_profile_rows(doc),
+    }
+
+
+def _llm_block_update(body: dict, doc: dict) -> dict:
+    """Validate a save and return the ``llm`` block it would write.
+
+    ``api_key`` follows the convention the search settings set: an empty
+    string keeps the stored secret (a password field arrives blank on every
+    reload), and ``null`` is the explicit "remove it" — without that, a key
+    typed for a backend nobody calls any more would sit in the file with no
+    way to take it out from the page that put it there.
+    """
+    if not isinstance(body, dict) or set(body) - LLM_EDITABLE:
+        raise ValueError("unsupported briefing llm setting")
+    block = dict(doc.get("llm") if isinstance(doc.get("llm"), dict) else {})
+    for key, value in body.items():
+        if key == "max_tokens":
+            if isinstance(value, bool) or not isinstance(value, int):
+                raise ValueError("max_tokens must be a whole number")
+            if value < 1 or value > LLM_MAX_TOKENS_CEILING:
+                raise ValueError(
+                    f"max_tokens must be between 1 and {LLM_MAX_TOKENS_CEILING}"
+                )
+            block["max_tokens"] = value
+            continue
+        if key == "api_key" and value is None:
+            block.pop("api_key", None)
+            continue
+        if not isinstance(value, str):
+            raise ValueError(f"{key} must be text")
+        value = value.strip()
+        if key == "api_key":
+            if not value:
+                continue  # a blank password field preserves the saved secret
+            block["api_key"] = value
+            continue
+        if key == "profile" and value:
+            # A name the picker did not offer is still checked, because this
+            # endpoint is also how a script saves: an unknown profile would
+            # otherwise turn the feature off with nothing said.
+            try:
+                profile_mod.require_selector(value)
+            except ProfileError as exc:
+                raise ValueError(str(exc)) from exc
+        if key == "endpoint" and value:
+            address = urlsplit(value)
+            if (
+                address.scheme not in ("http", "https")
+                or not address.hostname
+                or address.username
+                or address.password
+                or address.query
+                or address.fragment
+            ):
+                raise ValueError(
+                    "endpoint must be an HTTP(S) URL without credentials, "
+                    "query or fragment"
+                )
+        if value:
+            block[key] = value
+        else:
+            block.pop(key, None)
+    return block
+
+
+async def h_briefing_llm(request: web.Request) -> web.Response:
+    """Which backend and model the session briefing calls."""
+    return json_response(_llm_settings_payload())
+
+
+async def h_briefing_llm_save(request: web.Request) -> web.Response:
+    """Write the ``llm`` block from the Settings card.
+
+    Cached briefings are dropped when the resolved backend changed, so the
+    next card is composed by the model that was just chosen instead of
+    showing the previous one's answer until the session's transcript moves.
+    """
+    body = await _json_body(request)
+    doc = store.load()
+    before = briefing.llm_config(doc)
+    try:
+        block = _llm_block_update(body, doc)
+    except ValueError as exc:
+        return json_error(400, str(exc))
+    try:
+        def mutate(document: dict) -> None:
+            if block:
+                document["llm"] = block
+            else:
+                document.pop("llm", None)
+
+        saved = store.update(mutate)
+    except store.StoreError as exc:
+        return json_error(500, str(exc))
+    after = briefing.llm_config(saved)
+    if (after["endpoint"], after["model"]) != (before["endpoint"], before["model"]):
+        briefing.forget_all()
+    return json_response(_llm_settings_payload(saved))
 
 
 def _faq_body(body: dict) -> dict:

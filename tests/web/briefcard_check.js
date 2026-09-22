@@ -17,6 +17,15 @@ const src = fs.readFileSync(
   "utf8"
 );
 
+/* Module-level constants the sliced functions read. Taken from app.js instead
+   of retyped, so what runs here is the string the page really carries; the
+   expectations below still spell it out, which is what pins the wording. */
+function sliceConst(name) {
+  const match = src.match(new RegExp(`const ${name} =[\\s\\S]*?;`));
+  if (!match) throw new Error(`cannot locate ${name} in app.js`);
+  return match[0];
+}
+
 function slice(name) {
   // an async function must keep its `async` — the body awaits
   let start = src.indexOf(`async function ${name}(`);
@@ -97,7 +106,7 @@ const ctx = {};
 const noChip = () => null;
 new Function(
   "exports", "$", "document", "api", "ctxChip",
-  [slice("el"), slice("fmtAge"), slice("briefingStateClass"),
+  [sliceConst("BRIEFING_OFF_HINT"), slice("el"), slice("fmtAge"), slice("briefingStateClass"),
    slice("sessionStatusChecks"), slice("statusCheckText"), slice("statusCheckIcon"),
    slice("statusCheckName"), slice("statusCheckRefreshState"),
    slice("paintStatusCheckRefresh"), slice("appendStatusChecks"),
@@ -244,7 +253,8 @@ const kv = (li) => {
   await flush();
   check("no LLM points at the config to write",
         note(s3).textContent,
-        "no LLM configured — set the llm section (endpoint, model, api_key) in ~/.claunch.yaml");
+        "no LLM configured — briefing off — pick a profile and model in "
+        + "Settings ▸ Briefing model (the llm: block of ~/.claunch.yaml)");
 
   const s4 = row("s4");
   answer = { status: 404, body: { error: "no record" } };
@@ -291,8 +301,8 @@ const kv = (li) => {
         [toggle(s6).disabled, toggle(s6).textContent], [true, "▸"]);
   check("its tooltip points at the config to write",
         toggle(s6).title,
-        "briefing off — set the llm section (endpoint, model, api_key)"
-        + " in ~/.claunch.yaml to enable");
+        "briefing off — pick a profile and model in Settings ▸ Briefing model "
+        + "(the llm: block of ~/.claunch.yaml)");
   check("the open card is folded away while off", card(s6), null);
   ctx.setLLM(true);
   ctx.apply();

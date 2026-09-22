@@ -33,6 +33,13 @@ Schema::
       settings: {<settings.json key>: <value>, ...}
     briefing:                  # legacy FAQ source; imported by the daemon
       faq: [{id: <id>, question: <text>, answer: <optional reference>, enabled: true}, ...]
+    llm:                        # the session briefing's summariser; see daemon/briefing.py
+      profile: <profile name>   # the backend to call: its provider's endpoints.openai + key
+      model: <model id>         # sent to that backend; empty = the profile's models.default
+      endpoint: https://host/v1/chat/completions  # instead of a profile: typed in directly
+      api_key: <key>            # with endpoint, the direct form; a profile supplies its own
+      max_tokens: 4096          # bounds the whole completion, reasoning included
+      params: {<extra chat/completions field>: <value>, ...}
     rag:                        # semantic search over the board and the fleet; see daemon/rag.py
       base_url: https://host/v1  # OpenAI-compatible base: /embeddings and /rerank hang off it
       api_key: <key>            # empty = the feature is off (or CLAUNCH_RAG_API_KEY)

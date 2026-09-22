@@ -9,8 +9,9 @@
    opening task is drawn only in the detail panel (sesstask_check), never as
    the row's summary. The row's ⟳ refreshes the summary from the collapsed
    state: it re-asks the daemon, bypassing the cache, and does not open the
-   card. Off (no llm: block) the ⟳ goes inert, its tooltip pointing at the
-   config, while the digest one-line still shows. */
+   card. Off (no backend configured) the ⟳ goes inert, its tooltip pointing
+   at the Settings card that sets one, while the digest one-line still
+   shows. */
 const fs = require("fs");
 const path = require("path");
 const src = fs.readFileSync(
@@ -18,6 +19,15 @@ const src = fs.readFileSync(
             "app.js"),
   "utf8"
 );
+
+/* Module-level constants the sliced functions read. Taken from app.js instead
+   of retyped, so what runs here is the string the page really carries; the
+   expectations below still spell it out, which is what pins the wording. */
+function sliceConst(name) {
+  const match = src.match(new RegExp(`const ${name} =[\\s\\S]*?;`));
+  if (!match) throw new Error(`cannot locate ${name} in app.js`);
+  return match[0];
+}
 
 function slice(name) {
   let start = src.indexOf(`async function ${name}(`);
@@ -105,7 +115,7 @@ const ctx = {};
 const noChip = () => null;
 new Function(
   "exports", "$", "document", "api", "ctxChip",
-  [slice("el"), slice("fmtAge"), slice("seenAgo"), slice("briefingStateClass"),
+  [sliceConst("BRIEFING_OFF_HINT"), slice("el"), slice("fmtAge"), slice("seenAgo"), slice("briefingStateClass"),
    slice("sessionStatusChecks"), slice("statusCheckText"), slice("statusCheckIcon"),
    slice("statusCheckName"), slice("statusCheckRefreshState"),
    slice("paintStatusCheckRefresh"), slice("requestStatusChecksRefresh"),
@@ -282,8 +292,8 @@ const ago = (secs) => new Date(Date.now() - secs * 1000).toISOString();
   ctx.decorate(s4, { name: "s4", task: "로컬 태스크" });
   check("off, the ⟳ is disabled and points at the config",
         [refresh(s4).disabled, refresh(s4).title],
-        [true, "briefing off — set the llm section (endpoint, model, api_key)"
-          + " in ~/.claunch.yaml to enable"]);
+        [true, "briefing off — pick a profile and model in Settings ▸ "
+          + "Briefing model (the llm: block of ~/.claunch.yaml)"]);
   check("off, a task is still no one-line", oneLine(s4), null);
   const s7 = row("s7");
   ctx.decorate(s7, { name: "s7", briefing: { one_line: "뽑아온 줄", state: "working" } });
