@@ -307,6 +307,17 @@ function's exits, the selection guard including the text-node case a real drag
 produces, and the journal node's reuse, its reread on reopen and its
 background refresh while shut.
 
+``observerpin_check`` holds the sentence that names what pressing the
+observe-pin will do, and the rule that all four surfaces drawing that flag
+read it from one function. The observer card used to write its own fixed
+title, so it said the session would be added while the flag was already on --
+the opposite of what the press does. Its checks compare the card's title
+against ``observePinTitle`` for both states rather than against the Korean
+words, so the wording can be rewritten and one edit still moves every
+surface; the rest hold that no second copy of the sentence is left in
+``observer.js`` and that the two files still share one document, which is
+what lets the card reach that function at all.
+
 Skipped, not failed, where node is unavailable: node is a convenience for
 testing this project, never a requirement for using it.
 """
@@ -448,6 +459,7 @@ CHECKS = [
         "floworphans_check.js",
         "sessflags_check.js",
         "sessstill_check.js",
+        "observerpin_check.js",
 ]
 
 

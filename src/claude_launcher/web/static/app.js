@@ -1182,10 +1182,10 @@ function closeSessionTab(name) {
   }
 }
 
-/* One sentence for one state, so the tab, the rail row and the observer card
-   cannot drift into three ways of saying it. Each surface draws its own
-   control — one is a tab button, one a row button, one a card chip — but the
-   words and the direction they name come from here. */
+/* One sentence for one state, so the tab, the rail row, the observer card and
+   the detail panel's Flags box cannot drift into four ways of saying it. Each
+   surface draws its own control — one is a tab button, two are row buttons, one
+   a card chip — but the words and the direction they name come from here. */
 function observePinTitle(name, on) {
   return `${on ? "관찰 대상에서 빼기" : "관찰 대상으로 고정"} ${name}`
     + " — Observer의 「고정만」 모드가 이 표시를 읽습니다";
