@@ -20,7 +20,8 @@ dashboard, the CLI and any agent ask it the same `GET /api/search`.
 ## Configuration — the `rag:` block
 
 Top-level in `~/.claunch.yaml`, beside `llm:` (which stays what it is: the
-full `chat/completions` URL the briefing posts to). `store.rag_config()` is
+backend the briefing posts to — a profile, or a `chat/completions` URL and key
+typed in; edited in the dashboard's **Settings ▸ Briefing model** card). `store.rag_config()` is
 the one reader; every key has a default and a malformed block is the
 disabled default, never an error.
 
