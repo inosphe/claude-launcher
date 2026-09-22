@@ -1810,13 +1810,14 @@ body.term-split #terminal { flex: var(--split-term, 0.6) 1 0; min-height: 80px; 
 .sess-meta dt { color: #7d8590; }
 .sess-meta dd { color: #c6cdd5; overflow-wrap: anywhere; }
 .sess-meshes, .sess-wf, .sess-send, .sess-queued, .sess-bp, .sess-migrate,
-.sess-reborrow, .sess-perms, .sess-brief-section, .sess-task, .sess-note {
+.sess-reborrow, .sess-perms, .sess-brief-section, .sess-task, .sess-note,
+.sess-flags {
   margin: 14px 0; padding: 12px 16px; background: #1b1e24;
   border: 1px solid #2a2e36; border-radius: 8px; max-width: 760px;
 }
 .sess-meshes h3, .sess-wf h3, .sess-send h3, .sess-queued h3, .sess-bp h3,
 .sess-migrate h3, .sess-reborrow h3, .sess-perms h3, .sess-brief-section h3,
-.sess-task h3, .sess-note h3 {
+.sess-task h3, .sess-note h3, .sess-flags h3 {
   font-size: 12px; text-transform: uppercase; color: #7d8590; margin-bottom: 10px;
 }
 /* the reader's own note on this session. One field, on the panel's input
@@ -1833,6 +1834,30 @@ body.term-split #terminal { flex: var(--split-term, 0.6) 1 0; min-height: 80px; 
 .sess-note-actions { display: flex; gap: 8px; }
 .sess-note-actions .wf-btn { margin-right: 0; }
 .sess-note .wf-note, .sess-note .wf-warning { margin: 0; line-height: 1.5; }
+/* The three standing marks: keep-alive, observe and the browser's own pin.
+   Buttons rather than checkboxes, and lit in the same amber the rail's pin
+   and the header's pin chip wear, because a reader who has learnt the
+   colour on one surface must not have to learn a second one here. They wrap
+   instead of shrinking: on a docked rail three of them do not fit a line,
+   and a clipped label on a control that changes the session is worse than a
+   second row. */
+.sess-flag-row { display: flex; flex-wrap: wrap; gap: 8px; }
+.sess-flag {
+  display: inline-flex; align-items: center; gap: 7px; cursor: pointer;
+  background: #14161a; color: #c6cdd5; border: 1px solid #2a2e36;
+  border-radius: 5px; padding: 5px 10px; font-size: 13px; font-family: inherit;
+}
+.sess-flag:hover:not(:disabled) { border-color: #3b6ea5; }
+.sess-flag.on { border-color: #d29922; background: #2a2210; color: #e3cf9a; }
+/* Drawn, not offered — keep-alive on a session that has already exited. The
+   state still has to be readable, so this dims the control without hiding
+   what it says. */
+.sess-flag:disabled { cursor: default; opacity: 0.5; }
+.sess-flag-state {
+  font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em;
+  color: #7d8590;
+}
+.sess-flag.on .sess-flag-state { color: #d29922; }
 .sess-brief-section .sess-brief, .sess-brief-section .sess-brief-note {
   margin: 0;
 }
@@ -2563,7 +2588,7 @@ a.beads-q-name:hover { color: #79c0ff; text-decoration: underline; }
 .docked .sess-bp,
 .docked .sess-migrate, .docked .sess-reborrow, .docked .sess-perms,
 .docked .sess-quickjob, .docked .sess-kids, .docked .sess-task,
-.docked .sess-note {
+.docked .sess-note, .docked .sess-flags {
   margin: 10px 0; padding: 10px 12px; max-width: none; background: #16181d;
 }
 /* a rail column has no room for two controls side by side */
@@ -3912,7 +3937,7 @@ body.embed #main { width: 100%; }
   .mesh-roles, .mesh-owed, .wf-start, .mesh-log, .mesh-topo,
   .sess-meta, .sess-meshes, .sess-wf, .sess-send, .sess-queued, .sess-bp,
   .sess-migrate, .sess-reborrow, .sess-perms, .sess-quickjob, .sess-kids,
-  .sess-task, .sess-note,
+  .sess-task, .sess-note, .sess-flags,
   .wf-pending, .ws-add, .ws-list, .ws-card, #ws-view > .wf-note { max-width: none; }
   /* The add row is three controls on one line at desk width; on a phone the
      path alone needs the whole line. */

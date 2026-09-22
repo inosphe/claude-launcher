@@ -115,6 +115,9 @@ function rolePanels() { return []; }
 function sessBeads() { return el("div", "sess-beads"); }
 function sessCommits() { return el("div", "sess-commits"); }
 function sessTask() { return el("div", "sess-task"); }
+/* The three standing marks under the facts list — sessflags_check's subject;
+   here it is only a call that has to resolve. */
+function sessFlags() { return el("div", "sess-flags"); }
 function sessInputJournal() { return el("div", "sess-input-journal"); }
 /* The mesh handle a row/head wears when it differs from the session name
    (sesshandle_check's subject); here it is only a call that has to
@@ -299,24 +302,20 @@ check("a pi detail panel has the full model id and its context reading",
 check("another harness gets no model row at all",
       "model" in rowsOf(OTHER), false);
 
-/* ---- the end-of-run protection, on the panel ---------------------------- */
+/* ---- the end-of-run protection is no longer a row ----------------------- */
 /* `cflow kill-on-end` ends the session driving a finished one-shot run, and
    `SessionDef.keep_alive` is the lever that says "record the ending, skip the
-   termination". It is drawn beside `restore` because the two are one question
-   asked at the two ends of a session's life — `restore` is whether it comes
-   back after a daemon restart, this is whether it is allowed to stay after
-   its run ends. Only when set: an "off" row on every session would be the
-   noise the rail's own version of this flag exists to avoid. */
-const PROTECTED = rowsOf({ ...FULL, name: "protected", keep_alive: true });
-check("a protected session gets a keep-alive row",
-      !!PROTECTED["keep-alive"], true);
-check("...saying what the daemon does at the run's end",
-      /records its ending but does not end this session/.test(
-        (PROTECTED["keep-alive"] || {}).text || ""), true);
-check("...and naming the command that lifts it on hover",
-      ((PROTECTED["keep-alive"] || {}).title || "")
-        .includes("claunch keep-alive protected off"), true);
-check("an unprotected session gets no such row",
+   termination". This list used to draw it beside `restore`, in the one state
+   where it was set. It is now a control in the Flags box under this list,
+   which draws both states and can change them, and the sentence and the
+   hover moved there with it (sessflags_check). What this harness still has
+   to hold is that the fact is not ALSO here: a value a reader can change in
+   one place and read unchanged in another, four lines apart in one panel, is
+   read twice and believed once. */
+check("a protected session gets no keep-alive row in the facts list",
+      "keep-alive" in rowsOf({ ...FULL, name: "protected", keep_alive: true }),
+      false);
+check("nor does an unprotected one",
       "keep-alive" in rowsOf({ ...FULL, name: "plain" }), false);
 
 /* ---- the chip has to be drawable --------------------------------------- */

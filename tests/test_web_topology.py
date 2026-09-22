@@ -279,6 +279,17 @@ outside any session looks identical and is nobody's to resume. The rest is
 the summary line, which has to read as a sentence when the run is missing
 the fields a healthy one would have.
 
+``sessflags_check`` holds the detail panel's Flags box, the three standing
+marks a reader sets on a session: keep-alive, observe and the browser's own
+pin. Its checks are about where each control's state comes from and where
+each press goes -- the state off the record rather than off the button, the
+press asking for the opposite of the record, keep-alive's two routes (plain
+to set, ``?off=1`` to clear), and the one case where the value is drawn and
+the lever withheld (an exited session). It also holds that the facts list
+above the box no longer draws keep-alive, because a value that can be
+changed in one place and read stale four lines up is read twice and believed
+once.
+
 Skipped, not failed, where node is unavailable: node is a convenience for
 testing this project, never a requirement for using it.
 """
@@ -416,6 +427,7 @@ CHECKS = [
         "searchclear_check.js",
         "modalgitwait_check.js",
         "floworphans_check.js",
+        "sessflags_check.js",
 ]
 
 

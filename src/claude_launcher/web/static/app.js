@@ -19943,6 +19943,147 @@ function sessTask(s) {
   return box;
 }
 
+/* ---- the panel's standing marks ---------------------------------------
+
+   Three flags a reader sets ON a session, as opposed to the facts above them
+   that the session reports. They are drawn together because they are asked
+   about together — is this one being kept, is it being watched, is it held
+   near the top — and because each was set somewhere else until now:
+   keep-alive only from the CLI, the other two from a rail row or a session
+   tab, neither of which is on screen while this panel IS the page (the
+   phone) or while the rail is scrolled elsewhere.
+
+   They are not one kind of state, and the box does not pretend otherwise.
+   keep-alive and observe live on the session definition, so the daemon holds
+   them and every reader in every browser sees the same value; the pin is
+   this browser's own shortcut list in localStorage, and no other reader has
+   it at all. Each button's hover says which of the two it is. */
+
+/* The keep-alive flag, written through the route the CLI uses: POST
+   /api/sessions/<name>/keep-alive, cleared with ?off=1. The panel is
+   repainted from the daemon's reply rather than from the press, so a write
+   that is refused leaves the button reading what the daemon actually holds
+   instead of what was asked of it. */
+async function setKeepAlive(name, on) {
+  const label = on ? "keep-alive 설정" : "keep-alive 해제";
+  try {
+    const resp = await api(
+      `/api/sessions/${encodeURIComponent(name)}/keep-alive` + (on ? "" : "?off=1"),
+      { method: "POST" }
+    );
+    const info = await resp.json().catch(() => ({}));
+    if (!resp.ok) {
+      await modalInfo(`'${name}'의 ${label}에 실패했습니다`,
+                      info.error || `HTTP ${resp.status}`);
+      return;
+    }
+    // The rail's quiet chip reads this same field off the list poll, so the
+    // cache is corrected here too — without it the row and this panel
+    // disagree for up to one poll, which reads as one of them being wrong.
+    if (typeof sessionsCache !== "undefined" && Array.isArray(sessionsCache)) {
+      const at = sessionsCache.findIndex((row) => row.name === name);
+      if (at >= 0) {
+        sessionsCache[at] = { ...sessionsCache[at], keep_alive: !!info.keep_alive };
+      }
+    }
+  } catch (err) {
+    await modalInfo(`'${name}'의 ${label}에 실패했습니다`,
+                    err && err.message ? err.message : "request failed");
+  } finally {
+    // Whatever happened, redraw from the record rather than leave the button
+    // showing the direction that was pressed.
+    refreshSession();
+  }
+}
+
+/* One of the three, drawn the way the rail row and the session tab draw
+   theirs: lit while on, with `aria-pressed` saying the same to a screen
+   reader, and the state read off the record rather than off the control's
+   own pressed state. `press` of null is a control that is drawn but not
+   offered — the state is still shown and the hover says why the lever is
+   not there. */
+function sessFlagButton(cls, label, on, title, press) {
+  const button = el("button", `sess-flag ${cls}` + (on ? " on" : ""), label);
+  button.type = "button";
+  button.title = title;
+  if (typeof button.setAttribute === "function") {
+    button.setAttribute("aria-pressed", on ? "true" : "false");
+  }
+  // The word beside the glyph, because this is a panel and not a dense row:
+  // colour alone tells a reader which button is lit only once they have
+  // another lit one to compare it with, and a session with all three off has
+  // none.
+  button.appendChild(el("span", "sess-flag-state", on ? "on" : "off"));
+  if (press) button.addEventListener("click", press);
+  else button.disabled = true;
+  return button;
+}
+
+function sessFlags(s) {
+  const box = el("div", "sess-flags");
+  const head = el("h3", null, "Flags");
+  head.title = "what a reader has set on this session — keep-alive and " +
+    "observe are the daemon's and every reader sees them, the pin is this " +
+    "browser's own";
+  box.appendChild(head);
+  const name = s.name || "";
+  const row = el("div", "sess-flag-row");
+
+  // keep-alive, first because it is the one of the three that decides
+  // whether the session is still here to read. Meaningless on a session that
+  // has already exited — the flag governs an ending that is behind it — so
+  // that state draws the value and withholds the lever, the way the head's
+  // Spawn button does.
+  const exited = s.status === "exited";
+  const keepOn = !!s.keep_alive;
+  row.appendChild(sessFlagButton(
+    "sess-flag-keep", "keep-alive", keepOn,
+    exited
+      ? "this session has already exited — keep-alive only decides whether " +
+        "a finished run ends a session that is still running"
+      : (keepOn
+          ? "press to lift it: a finished run would then end this session, " +
+            "which is the daemon's ordinary ending. "
+          : "press to set it: when this session's one-shot run finishes the " +
+            "daemon records the ending and leaves the session running. ") +
+        "The flag is part of the definition, so it survives a restart or a " +
+        "respawn; `claunch keep-alive " + name + "` is the same lever",
+    exited ? null : () => setKeepAlive(name, !keepOn)
+  ));
+
+  // observe, the other daemon-held flag: which sessions the observer is
+  // allowed to spend on. Written through the same helper the rail's eye uses,
+  // and its sentence comes from the same place (observePinTitle), so the two
+  // surfaces cannot end up wording one flag in two ways.
+  const observeOn = !!s.observe_pin;
+  row.appendChild(sessFlagButton(
+    "sess-flag-observe", "👁 observe", observeOn,
+    observePinTitle(name, observeOn),
+    async () => {
+      await setObservePin(name, !observeOn);
+      refreshSession();
+    }
+  ));
+
+  // The pin last, because it is the only one of the three that no other
+  // reader can see. The glyph goes ahead of the word for the reason the rail
+  // draws it that way — it is what a reader has already learnt on the row
+  // and on the tab — and pin before observe is the order both of those keep.
+  const pinOn = isSessionPinned(name);
+  row.appendChild(sessFlagButton(
+    "sess-flag-pin", "📌 pin", pinOn,
+    (pinOn
+      ? "press to unpin " + name + "; its tab stays until it falls out of " +
+        "the recent list. "
+      : "press to pin " + name + " as a tab. ") +
+    "This list is held in this browser alone, so no other reader sees it",
+    () => { toggleSessionPin(name); refreshSession(); }
+  ));
+
+  box.appendChild(row);
+  return box;
+}
+
 function renderSession(data) {
   const view = $("sess-view");
   const s = data.session || {};
@@ -20063,19 +20204,12 @@ function renderSession(data) {
   if (envKeys.length) metaRow(dl, "env", envKeys.join(", "));
   metaRow(dl, "size", `${s.cols}×${s.rows}`);
   metaRow(dl, "restore", s.restore ? "yes (relaunched with the daemon)" : "no");
-  // Beside `restore`, because the two are the same question asked at the two
-  // ends of a session's life: `restore` is whether it comes back after a
-  // daemon restart, and this is whether it is allowed to stay after its run
-  // ends. Only drawn when set, like every other flag row here — an "off" row
-  // would be a row on every session that says nothing.
-  if (s.keep_alive) {
-    metaRow(
-      dl, "keep-alive",
-      "on — a finished run records its ending but does not end this session",
-      "claunch keep-alive " + (s.name || "") + " off lifts it; the flag is " +
-      "part of the definition, so it survives a restart or a respawn"
-    );
-  }
+  // `keep-alive` used to be the row under this one, and the two are still the
+  // same question asked at the two ends of a session's life: `restore` is
+  // whether it comes back after a daemon restart, and keep-alive is whether
+  // it is allowed to stay after its run ends. It moved into the Flags box
+  // below, where it can be changed as well as read — one fact drawn twice
+  // inside one panel is a fact that gets read twice and believed once.
   metaRow(dl, "pid", s.pid);
   metaRow(dl, "created", (s.created_at || "").replace("T", " "));
   metaRow(dl, "last output", (s.last_output_at || "").replace("T", " "));
@@ -20086,6 +20220,10 @@ function renderSession(data) {
     metaRow(dl, "paused", (s.paused_at || "").replace("T", " "));
   }
   view.appendChild(dl);
+
+  // The levers on the facts above, directly under them: the marks a reader
+  // can set on this session while reading it.
+  if (s.name) view.appendChild(sessFlags(s));
 
   // The reader's own note, above everything the session itself supplies: it
   // is the one line in this panel written for the person, by the person, and
