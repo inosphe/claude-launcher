@@ -20,6 +20,11 @@ two ways:
 * ``endpoint:`` plus ``api_key:`` typed in directly, which is what the block
   held before a profile was an option and still works.
 
+The two never sit in the block together: naming a profile from the Settings
+card removes the typed pair, because a call under a profile reads neither and
+the values left behind describe whichever backend was typed in before. A
+block that holds both was hand-edited, and the profile wins.
+
 ``model:`` is the id sent to the backend in either form, and falls back to
 the profile's ``models.default`` when a profile is named and the field is
 empty. An empty ``api_key`` with no profile to supply one means the feature
