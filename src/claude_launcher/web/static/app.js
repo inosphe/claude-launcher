@@ -1230,6 +1230,39 @@ async function setObservePin(name, on) {
   }
 }
 
+/* What a session tab's hover tooltip says about that session's briefing.
+
+   The tab bar has room for a name and four controls, so the summary the rail
+   row spends a line on — and the card several — goes where a pointer can
+   reach it without leaving the terminal: the one-line first, then the same
+   goal / now / progress rows the open card draws, in the card's order, under
+   a head that names the summariser's state.
+
+   Read off the list poll's digest (daemon/briefing.digest), so hovering
+   composes nothing and calls no LLM: a tab whose session has no cached
+   briefing keeps its plain title, and one composed while the tab is on screen
+   gains the tooltip on the next poll. Empty string means "add nothing", which
+   is what keeps the plain title intact rather than appending a blank line.
+
+   Separate from the render so it can be tested on its own, and beside
+   observePinTitle because both answer the same question: what this bar's
+   controls say when the pointer stops on them. */
+function briefingTabTooltip(brief) {
+  if (!brief) return "";
+  const lines = [];
+  const one = String(brief.one_line || "").trim();
+  if (one) lines.push(one);
+  // The card's own order and the card's own labels, so a reader who has read
+  // one surface is not learning a second vocabulary on the other.
+  for (const key of ["goal", "now", "progress"]) {
+    const value = String(brief[key] || "").trim();
+    if (value) lines.push(`${key}: ${value}`);
+  }
+  if (!lines.length) return "";
+  const state = String(brief.state || "").trim();
+  return [`briefing${state ? ` · ${state}` : ""}`, ...lines].join("\n");
+}
+
 function renderSessionTabs() {
   const bar = $("session-tabs");
   if (!bar || !sessionTabHistory) return;
@@ -1238,8 +1271,12 @@ function renderSessionTabs() {
   const records = new Map(sessionsCache.map(s => [s.name, s]));
   const signature = JSON.stringify(names.map(name => {
     const rec = records.get(name);
+    // The briefing rides the signature because it is on the tab's tooltip: a
+    // summary composed (or refreshed) while the bar is on screen has to
+    // repaint the title, and the bar is otherwise only rebuilt when the
+    // fields above move.
     return [name, isSessionPinned(name), name === active, rec?.status, rec?.paused_at,
-            rec?.observe_pin];
+            rec?.observe_pin, rec?.briefing];
   }));
   // Polls update state in place only when it changed, preserving keyboard focus.
   if (bar._signature === signature) return;
@@ -1260,7 +1297,16 @@ function renderSessionTabs() {
     open.href = "#/s/" + encodeURIComponent(name);
     open.dataset.name = name;
     open.dataset.action = "open";
-    open.title = `${name}${pinned ? " — pinned" : ""}${rec ? " — " + rec.status : ""}`;
+    // The briefing goes under the line that names the tab, on the anchor and
+    // on the tab itself: a child's title wins over its parent's wherever the
+    // pointer lands, and the pointer lands on the anchor, while the tab
+    // carries the padding around it. The three buttons keep their own titles,
+    // which say what pressing them does — the right answer for a pointer
+    // that stopped on a button.
+    const brief = briefingTabTooltip(rec && rec.briefing);
+    open.title = `${name}${pinned ? " — pinned" : ""}${rec ? " — " + rec.status : ""}`
+      + (brief ? `\n${brief}` : "");
+    tab.title = open.title;
     if (name === active) open.setAttribute("aria-current", "page");
     const dot = document.createElement("span");
     dot.className = `dot ${rec?.status || "unknown"}${rec?.paused_at ? " paused" : ""}`;

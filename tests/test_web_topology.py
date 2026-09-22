@@ -439,6 +439,7 @@ CHECKS = [
         "railkeys_check.js",
         "sessionpins_check.js",
         "sessiontabs_check.js",
+        "sesstabbrief_check.js",
         "prwizard_check.js",
         "railmeshgroup_check.js",
         "projects_check.js",

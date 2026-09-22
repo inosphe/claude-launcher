@@ -506,23 +506,48 @@ def test_parse_briefing_absent_one_line_is_empty(home):
     assert parsed["goal"] == "g"
 
 
-def test_digest_serves_the_cached_one_line_only(home):
-    """digest() is the list's cheap read: nothing composed -> None, and only a
-    parsed one-line makes it into the digest — a raw/unshaped result or an
-    empty one-line yields no digest (the rail falls back to the record)."""
+def test_digest_serves_the_cached_briefing_fields(home):
+    """digest() is the list's cheap read: nothing composed -> None, a
+    raw/unshaped result -> None, and a parsed briefing -> its short fields.
+
+    The one-line is what the rail row draws and goal/now/progress are what a
+    session tab's hover tooltip draws, so the digest carries both and omits
+    the fields the summariser left empty. A briefing with no one-line still
+    has a tooltip's worth of text, so it yields a digest; one with no text at
+    all does not."""
     assert briefing.digest("s1") is None
     briefing._cache["s1"] = (
         ("key",),
-        {"briefing": {"goal": "g", "state": "working",
+        {"briefing": {"goal": "g", "now": "n", "progress": "", "state": "working",
                        "one-line-job-description": "한 줄"}},
     )
-    assert briefing.digest("s1") == {"one_line": "한 줄", "state": "working"}
+    assert briefing.digest("s1") == {
+        "one_line": "한 줄", "state": "working", "goal": "g", "now": "n",
+    }
     # a raw (unshaped) result: no parsed briefing, hence no digest
     briefing._cache["s2"] = (("key",), {"briefing": None, "raw": "prose"})
     assert briefing.digest("s2") is None
-    # a parsed briefing with no one-line: nothing to put on the row
+    # no one-line, but a goal the tooltip can show
     briefing._cache["s3"] = (("key",), {"briefing": {"goal": "g", "state": "idle"}})
-    assert briefing.digest("s3") is None
+    assert briefing.digest("s3") == {"one_line": "", "state": "idle", "goal": "g"}
+    # every field empty: nothing for either surface to draw
+    briefing._cache["s4"] = (("key",), {"briefing": {"goal": "", "state": "idle"}})
+    assert briefing.digest("s4") is None
+
+
+def test_digest_clips_long_fields(home):
+    """One digest per session rides every list poll, and both of its readers
+    are a glance, so each field is clipped to a bounded length — the card is
+    where the summariser's full sentence is read."""
+    briefing._cache["s1"] = (
+        ("key",),
+        {"briefing": {"goal": "가" * 400, "state": "working",
+                       "one-line-job-description": "나" * 400}},
+    )
+    d = briefing.digest("s1")
+    limit = briefing.DIGEST_FIELD_CHARS
+    assert d["goal"].startswith("가" * limit) and len(d["goal"]) <= limit + 2
+    assert d["one_line"].startswith("나" * limit)
 
 
 def test_briefing_cache_survives_daemon_restart(home):
@@ -541,7 +566,10 @@ def test_briefing_cache_survives_daemon_restart(home):
     # A new daemon process starts with an empty in-memory cache.
     briefing._cache.clear()
     briefing._loaded_cache_path = None
-    assert briefing.digest("s1") == {"one_line": "작업", "state": "working"}
+    assert briefing.digest("s1") == {
+        "one_line": "작업", "state": "working",
+        "goal": "목표", "now": "진행", "progress": "50%",
+    }
 
 
 def test_parse_briefing_bad_state_and_garbage():
@@ -1280,7 +1308,9 @@ def test_sessions_list_attaches_the_cached_briefing_digest(home, tmp_path):
             )
             resp = await client.get("/api/sessions", headers=BEARER)
             row = (await resp.json())["sessions"][0]
-            assert row["briefing"] == {"one_line": "한 줄", "state": "waiting"}
+            assert row["briefing"] == {
+                "one_line": "한 줄", "state": "waiting", "goal": "g",
+            }
 
             await mgr.shutdown_all()
         finally:

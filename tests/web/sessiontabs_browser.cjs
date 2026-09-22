@@ -10,6 +10,10 @@ const sessions = Array.from({ length: 9 }, (_, i) => ({
   name: `s${i + 1}`, status: i === 7 ? "busy" : "exited",
   paused_at: i === 7 ? null : "2026-09-18T00:00:00Z", cwd: "/repo", harness: "codex",
 }));
+// One session the summariser has already run on. Its tab is the only place
+// that briefing can be read without opening a card, and the fixture serves it
+// the way the daemon does -- on the session list, as a digest.
+sessions[8].briefing = { one_line: "한 줄", state: "working", goal: "g", now: "n" };
 const server = http.createServer((req, res) => {
   const url = new URL(req.url, "http://fixture");
   if (url.pathname.startsWith("/api/")) {
@@ -54,6 +58,14 @@ const server = http.createServer((req, res) => {
       await page.waitForFunction(name => document.querySelector(`.session-tab[data-name="${name}"] .session-tab-open`)?.getAttribute("aria-current") === "page", name);
     }
     assert.deepEqual(await names(), ["s9"], "legacy pin migrates");
+    // The shipped page puts the briefing on the element a pointer stops on:
+    // the anchor, under the line that names the tab (sesstabbrief_check pins
+    // how the text is composed).
+    assert.equal(await tab("s9").locator("a").getAttribute("title"),
+                 "s9 — pinned — exited\nbriefing · working\n한 줄\ngoal: g\nnow: n",
+                 "the tab tooltip carries the cached briefing");
+    assert.equal(await tab("s9").getAttribute("title"),
+                 await tab("s9").locator("a").getAttribute("title"));
     assert.equal(await page.locator(".session-pinbar").count(), 0);
     for (const name of ["s1", "s2", "s3", "s4", "s5"]) await visit(name);
     await tab("s1").locator("a").click();

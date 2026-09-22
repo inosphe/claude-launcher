@@ -898,16 +898,29 @@ async def compose(session, cfg: dict, *, refresh: bool = False) -> dict:
     return result
 
 
+#: How much of one briefing field the session list is allowed to carry. The
+#: poll holds one digest per session for as long as the fleet is up, and both
+#: of its readers are a glance — an ellipsised rail line and a hover tooltip —
+#: so a summariser that answers in paragraphs costs the poll a bounded amount
+#: and the card (which fetches the full text) is where the rest is read.
+DIGEST_FIELD_CHARS = 240
+
+
 def digest(name: str) -> Optional[dict]:
-    """The cached one-liner (+ state) for the session list, never composed.
+    """The cached briefing's short fields for the session list, never composed.
 
     Served on the ``/api/sessions`` poll so a rail row can show the briefing's
-    one-line without opening the card — and without an LLM call. Reading the
-    cache is what makes the one-line survive a browser refresh without
-    regeneration: the browser loses its in-memory copy, the daemon does not,
-    and the list poll pours the digest straight back. ``None`` when no
-    briefing has been composed for this session (the row then falls back to
-    the recorded opening task).
+    one-line without opening the card — and without an LLM call — and so a
+    session tab can put the summary itself on its hover tooltip. Reading the
+    cache is what makes both survive a browser refresh without regeneration:
+    the browser loses its in-memory copy, the daemon does not, and the list
+    poll pours the digest straight back. ``None`` when no briefing has been
+    composed for this session (the row then falls back to the recorded
+    opening task), and also when a composed one holds no text at all.
+
+    ``goal``/``now``/``progress`` are present only when the summariser filled
+    them, so a reader can tell an empty field from one the older response
+    shape never had.
     """
     _restore_cache()
     hit = _cache.get(name)
@@ -916,7 +929,16 @@ def digest(name: str) -> Optional[dict]:
     brief = (hit[1] or {}).get("briefing")
     if not isinstance(brief, dict):
         return None
-    one = str(brief.get("one-line-job-description") or "").strip()
-    if not one:
+    out = {
+        "one_line": _clip(
+            str(brief.get("one-line-job-description") or ""), DIGEST_FIELD_CHARS
+        ),
+        "state": str(brief.get("state") or "").strip(),
+    }
+    for key in ("goal", "now", "progress"):
+        value = _clip(str(brief.get(key) or ""), DIGEST_FIELD_CHARS)
+        if value:
+            out[key] = value
+    if not any(out.get(key) for key in ("one_line", "goal", "now", "progress")):
         return None
-    return {"one_line": one, "state": str(brief.get("state") or "").strip()}
+    return out
