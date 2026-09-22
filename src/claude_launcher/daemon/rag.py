@@ -56,6 +56,7 @@ import re
 import sys
 import time
 from array import array
+from collections import OrderedDict
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, NamedTuple, Optional, Tuple
@@ -99,6 +100,12 @@ MAX_CHUNKS = 8
 RERANK_CHARS = 600
 #: What a search result carries as its excerpt.
 EXCERPT_CHARS = 240
+#: Query embeddings kept for reuse. The endpoint measured 6-11 s to embed one
+#: query, and the same text under the same endpoint and model always returns
+#: the same vector, so a repeated search (a re-opened modal, a refined filter,
+#: the same question from two sessions) skips that call. Small on purpose: the
+#: entry is a vector per query, and the corpus's own vectors live in the index.
+QUERY_CACHE = 64
 #: Index file format version; a file of another version is rebuilt.
 FORMAT = 1
 
@@ -519,7 +526,11 @@ class VectorIndex:
             raise RagError("embedding dimensions changed; rebuild the index")
         skip = set(exclude)
         scored: List[Tuple[str, float]] = []
-        for doc_id, entry in self.entries.items():
+        # A search runs in a worker thread (``asyncio.to_thread``) while the
+        # event loop's sync may be putting or dropping entries. Iterating the
+        # live dict raises "dictionary changed size during iteration" and the
+        # request answers HTTP 500, so rank a snapshot of the keys instead.
+        for doc_id, entry in list(self.entries.items()):
             if doc_id in skip:
                 continue
             best = max((dot(qvec, v) for v in entry.vecs), default=-1.0)
@@ -638,6 +649,10 @@ class RagService:
         self.all_docs = None
         self._indexes: Dict[str, VectorIndex] = {}
         self._progress: Dict[str, Progress] = {}
+        #: Query text -> its embedding, newest last (see ``QUERY_CACHE``). The
+        #: endpoint and model are part of the key, so changed settings answer
+        #: from a fresh vector rather than a stale one.
+        self._qvecs: "OrderedDict[Tuple[str, str, str], array]" = OrderedDict()
         self._roots: Dict[str, Optional[Path]] = {}
         # -- the queue (see the module docstring) --
         #: Keys waiting for the consumer, in arrival order; ``_pending`` is
@@ -1100,6 +1115,25 @@ class RagService:
         }
 
     # -- search --------------------------------------------------------- #
+    async def _query_vector(self, client: RagClient, cfg: dict, query: str) -> Tuple[array, bool]:
+        """The query's embedding, and whether it came from the cache.
+
+        Embedding the query is one endpoint round trip per search, measured at
+        6-11 s on this endpoint while the whole search was 30 s. The vector
+        depends only on the text, the endpoint and the model, all three of
+        which are the key here, so a repeat of the same query skips the call.
+        """
+        key = (str(cfg.get("base_url") or ""), str(cfg.get("embedding_model") or ""), query)
+        hit = self._qvecs.get(key)
+        if hit is not None:
+            self._qvecs.move_to_end(key)
+            return hit, True
+        vec = (await client.embed([query]))[0]
+        self._qvecs[key] = vec
+        while len(self._qvecs) > QUERY_CACHE:
+            self._qvecs.popitem(last=False)
+        return vec, False
+
     async def search(
         self,
         kind: str,
@@ -1120,11 +1154,17 @@ class RagService:
         if not query:
             raise ValueError("empty query")
         prog = self.ensure_sync(kind, root)
-        await self.wait_sync(prog, wait)
         index = self._index(kind, root, cfg)
+        # An index that already holds documents answers now. Waiting on the
+        # running sync would add up to ``wait`` seconds to every search for a
+        # coverage the answer reports anyway (``index`` below). An empty index
+        # has nothing to answer from, so that case still waits.
+        if not index.entries:
+            await self.wait_sync(prog, wait)
+            index = self._index(kind, root, cfg)
         client = self._client(cfg)
         started = time.monotonic()
-        qvec = (await client.embed([query]))[0]
+        qvec, embed_cached = await self._query_vector(client, cfg, query)
         embed_ms = int((time.monotonic() - started) * 1000)
         candidates = max(limit, int(cfg.get("candidates") or limit))
         ranked = await asyncio.to_thread(index.rank, qvec, candidates)
@@ -1144,7 +1184,12 @@ class RagService:
         rerank_scores: Dict[str, float] = {}
         rerank_ms = None
         if rerank and cfg.get("rerank_model") and order:
-            top = order[: max(limit, int(cfg.get("rerank_top") or limit))]
+            # ``rerank_top`` is the reranker's budget, not a floor under the
+            # page size: a screen that asks for 30 results must not silently
+            # widen a 12-document rerank to 30 (0.2-0.35 s each on the
+            # measured endpoint). Candidates past it keep their vector order
+            # behind the reranked head.
+            top = order[: max(1, int(cfg.get("rerank_top") or limit))]
             texts = [self._rerank_text(index, doc_id) for doc_id in top]
             started = time.monotonic()
             try:
@@ -1188,7 +1233,7 @@ class RagService:
             "reranked": reranked,
             "warnings": warnings,
             "index": prog.view(),
-            "timing": {"embed_ms": embed_ms, "rerank_ms": rerank_ms},
+            "timing": {"embed_ms": embed_ms, "rerank_ms": rerank_ms, "embed_cached": embed_cached},
         }
 
     def _live_states(self, rows: List[dict]) -> None:
@@ -1231,7 +1276,11 @@ class RagService:
         meta = index.entries[doc_id].meta
         title = meta.get("title") or meta.get("name") or doc_id
         excerpt = meta.get("excerpt") or meta.get("one_line") or ""
-        return f"{title}\n{excerpt if meta.get('kind') else excerpt[:RERANK_CHARS]}"
+        # Every candidate is cut to RERANK_CHARS. The unified corpus stores
+        # a whole chunk as its excerpt (up to CHUNK_CHARS, five times this),
+        # so leaving those uncut sent the reranker five times its intended
+        # budget per document -- the cost the module docstring says it bounds.
+        return f"{title}\n{excerpt[:RERANK_CHARS]}"
 
     async def related(self, root: Path, issue_id: str, *, limit: int = 8, wait: float = 2.0) -> dict:
         """The issues nearest to one — the dedup question, asked of the index."""

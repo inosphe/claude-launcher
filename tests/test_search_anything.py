@@ -193,14 +193,16 @@ def test_search_answer_reports_the_sessions_state_read_now(tmp_path):
             # A name the registry does not hold stays exactly as it was
             # indexed: there is no live state to put beside it.
             assert chips["s7"] == {"name": "s7"}
-            # The registry moves on; the next answer says so, and costs the
-            # query's own embedding and nothing else — a state read from the
-            # registry is not a reason to re-embed the corpus.
+            # The registry moves on; the next answer says so, and costs no
+            # endpoint call at all — a state read from the registry is not a
+            # reason to re-embed the corpus, and the repeated query answers
+            # from the query-vector cache.
             embedded = len(endpoint.embed_calls)
             sessions[0]._status = "idle"
             again = await service.search("all", "relay", wait=10, rerank=False)
             assert next(r for r in again["results"] if r["kind"] == "session")["status"] == "idle"
-            assert len(endpoint.embed_calls) == embedded + 1
+            assert len(endpoint.embed_calls) == embedded
+            assert again["timing"]["embed_cached"] is True
         finally:
             await service.shutdown()
             await server.close()
@@ -227,3 +229,44 @@ def test_board_and_record_changes_queue_unified_search(tmp_path):
         assert queued == ["all"]
     finally:
         search_records.change_hooks.remove(hook)
+
+
+def test_rerank_candidates_are_cut_to_rerank_chars(tmp_path):
+    """A candidate reaches the reranker as its title and RERANK_CHARS of body.
+
+    The unified corpus keeps a whole chunk as a result's excerpt so the page
+    can show any part of a long issue, and that excerpt is what the reranker
+    text is built from. Uncut, a 30-result screen sent five times the
+    reranker's intended budget per document; it was measured at 18.6 s of a
+    29.7 s search.
+    """
+
+    async def run():
+        endpoint = Endpoint()
+        server = await _start_endpoint(endpoint)
+        cfg = _cfg(server, watch_interval=0, rerank_top=2)
+        service = rag.RagService(config=lambda: cfg, root_dir=tmp_path / "index")
+
+        async def docs():
+            body = "relay " + ("padding " * 900)
+            return (search_anything.documents("beads:r:x-1", "x-1 long issue", body, kind="beads")
+                    + search_anything.documents("beads:r:x-2", "x-2 long issue", body, kind="beads"))
+
+        service.all_docs = docs
+        try:
+            result = await service.search("all", "relay", wait=10)
+            assert result["reranked"] is True
+            sent = endpoint.rerank_calls[-1]["documents"]
+            assert len(sent) == 2
+            for text in sent:
+                title, _, excerpt = text.partition(chr(10))
+                assert len(excerpt) <= rag.RERANK_CHARS
+                assert title.startswith("x-")
+            # The result itself still carries the whole chunk it was indexed
+            # from: cutting is what the reranker reads, not what the page shows.
+            assert len(result["results"][0]["excerpt"]) > rag.RERANK_CHARS
+        finally:
+            await service.shutdown()
+            await server.close()
+
+    asyncio.run(run())
