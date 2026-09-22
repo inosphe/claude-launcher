@@ -1949,6 +1949,51 @@ def test_a_kill_winds_down_first_then_terminates_and_sweeps(home, tmp_path, repo
     asyncio.run(run())
 
 
+def test_an_archive_skips_the_winddown_and_ends_the_session_now(
+    home, tmp_path, repo, monkeypatch
+):
+    # Kill and archive answer different questions. A kill asks the session to
+    # settle its board first, because it may well carry on afterwards in some
+    # other form; an archive says where the record is going, and a session on
+    # its way there has no turn left to settle anything in. So the archive
+    # route does not consult the wind-down — with a 60s grace configured, a
+    # wind-down would leave the session running and this assertion would fail.
+    _register_py_harness()
+    store.update(lambda doc: doc.update({"daemon": {"beads_winddown_grace": 60.0}}))
+    br = FakeBr()
+    br.add(id="w", title="the job", assignee="w1", status="in_progress")
+    board = _board(br, repo)
+    typed = []
+
+    async def fake_deliver(self, text):
+        typed.append((self.sdef.name, text))
+        return True
+
+    monkeypatch.setattr(Session, "deliver", fake_deliver)
+
+    async def run():
+        mgr = SessionManager(idle_threshold=0.2, scrollback=200, restore_default=True)
+        mm = MeshManager(mgr, root=tmp_path / "mesh")
+        client = await _serve(mgr, mm, board)
+        try:
+            mgr.create(SessionDef(name="w1", harness="py", cwd=str(repo)))
+            resp = await client.post("/api/sessions/w1/archive", headers=BEARER)
+            doc = await resp.json()
+            assert resp.status == 200
+            assert doc["stopped"] is True and doc["archived_at"]
+            assert mgr.get("w1").exited          # ended by this call, not later
+            assert "w1" not in board.winddowns   # no settle-the-board turn
+            assert typed == []                   # and nothing typed in to ask for one
+            # The issues it held are released by the ordinary exit sweep, the
+            # same one every other ending goes through.
+            await _wait_for(lambda: br.issues["w"]["status"] == "open", "the sweep")
+            assert br.comments["w"][0]["text"].startswith("SESSION ENDED: w1 exited")
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
 def test_a_second_kill_or_force_stops_at_once(home, tmp_path, repo, monkeypatch):
     _register_py_harness()
     store.update(lambda doc: doc.update({"daemon": {"beads_winddown_grace": 60.0}}))

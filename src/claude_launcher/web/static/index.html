@@ -378,8 +378,11 @@
                 title="pause this session: the program is terminated as kill does, and the record is filed as paused so it can be resumed on its own or with every other paused one">pause</button>
         <button id="term-kill" class="term-btn"
                 title="terminate the program running in this session">kill</button>
+        <!-- Archive is available whatever the session is doing. On a live
+             one it is also the ending: the route stops the program and files
+             the record in one call, with no wind-down in between. -->
         <button id="term-archive" class="term-btn hidden"
-                title="retain this exited session in the archive">archive</button>
+                title="file this session in the archive, where it stays inspectable and resumable — a session still running is ended by this press, after a confirmation">archive</button>
       </span>
       <!-- Text size, and with it the session's grid: bigger glyphs mean fewer
            columns and rows, and that new size is sent to the program. Three

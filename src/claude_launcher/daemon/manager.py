@@ -1530,11 +1530,19 @@ class SessionManager:
         The definition, conversation id, output log and lineage remain in
         place, so archive is reversible through :meth:`respawn`. Repeating
         the operation is idempotent and preserves the original archive time.
+
+        This is the filing half alone, so it refuses a session that is still
+        running: a record written as archived while its program runs would
+        describe something that is not true yet. :meth:`stop_and_archive` is
+        the verb for a live session, and every operator route reaches for
+        that one — this one is what the bulk "archive the exited ones" pass
+        calls, where the refusal is the selection working.
         """
         session = self.get(name)
         if not session.exited:
             raise ManagerError(
-                f"session {name!r} is still running — kill it before archiving"
+                f"session {name!r} is still running — "
+                "archive it with stop_and_archive, which ends it first"
             )
         if not session.archived_at:
             session.archived_at = datetime.now(timezone.utc).isoformat(
@@ -1543,6 +1551,48 @@ class SessionManager:
             self.persist()
             self.events.record(session, "archive", "세션 보관")
         return session
+
+    async def stop_and_archive(
+        self, name: str, *, force: bool = False
+    ) -> AnySession:
+        """Archive a session whatever state it is in, ending it first if it
+        is still running.
+
+        :meth:`archive` files a record that has already ended, so archiving a
+        live session used to be three operator steps: kill it, wait for the
+        exit to land, archive it. The middle step is the one that does not
+        work by hand — :meth:`Session.kill` only signals the child, and the
+        record turns ``exited`` later, when the reader task sees EOF, so an
+        archive pressed straight after a kill finds the session still running
+        and is refused. That is the whole reason archive read as unavailable
+        on a live session, and it is why this is one verb rather than a note
+        in the documentation telling the operator to try again in a moment.
+
+        The stop is :meth:`Session.shutdown`, the same primitive
+        :meth:`redefine` stops a session with: it terminates the child, waits
+        for the exit to land, escalates to SIGKILL, and marks the record
+        itself if even that is ignored. So the call returns with the session
+        actually ended and the archive time written in the same breath.
+        ``force`` goes straight to the escalation instead of waiting out the
+        grace period.
+
+        The board wind-down is not consulted here, and that is deliberate: it
+        belongs to the kill route, where a first press means "let it settle
+        its issues, then stop". A session on its way to the archive has no
+        turn left to settle anything in, so asking for one would leave the
+        operator waiting for a reply to a request that has already been
+        answered. Its issues are released by the exit path's own sweep,
+        exactly as they are for any other ending.
+        """
+        session = self.get(name)
+        if not session.exited:
+            self.events.record(
+                session, "kill", "보관을 위한 세션 종료",
+                force=force, reason="archive",
+            )
+            await session.shutdown(grace=0.0 if force else 5.0)
+            self.persist()
+        return self.archive(name)
 
     async def redefine(self, name: str, **changes) -> Session:
         """Stop a session and relaunch it under a changed definition.

@@ -14,7 +14,7 @@ const css = fs.readFileSync(
 );
 
 const a = src.indexOf("const killUiState = new Map()");
-const b = src.indexOf("async function archiveExitedSession", a);
+const b = src.indexOf("async function archiveSession", a);
 if (a < 0 || b <= a) throw new Error("cannot locate the kill state section");
 const code = src.slice(a, b);
 

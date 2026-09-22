@@ -1842,13 +1842,15 @@ function railCardPause(name) {
   return true;
 }
 
-/* `e` on the focused card. Archiving takes an ended record out of the rail's
-   "current" view and keeps it inspectable; the route answers for exited
-   records only, and a record already archived has nowhere further to go. */
+/* `e` on the focused card. Archiving takes a record out of the rail's
+   "current" view and keeps it inspectable. A live session is ended by the
+   same press (the route stops it first, and archiveSession confirms that
+   before asking for it); a record already archived has nowhere further to
+   go, which is the one state the key does nothing in. */
 function railCardArchive(name) {
   const rec = railCardRecord(name);
-  if (!rec || rec.status !== "exited" || rec.archived_at) return false;
-  archiveExitedSession(name);
+  if (!rec || rec.archived_at) return false;
+  archiveSession(name);
   return true;
 }
 
@@ -1919,7 +1921,8 @@ const RAIL_CARD_KEYS = [
     keys: ["e"],
     label: "e",
     what: "archive the record",
-    when: "an exited session that is not already archived",
+    when: "any session that is not already archived — a live one is ended "
+      + "by the same press, after a confirmation",
     act: (name) => railCardArchive(name),
   },
   {
@@ -8058,7 +8061,22 @@ async function pauseCurrentSession() { await pauseSession(currentName); }
 
 if ($("term-pause")) $("term-pause").addEventListener("click", pauseCurrentSession);
 
-async function archiveExitedSession(name) {
+/* Archive is available on any record, and on a live one it is also the
+   ending: the route terminates the program and writes the archive time in
+   one call, with no wind-down in between (see h_session_archive). That makes
+   it destructive in a way archiving an already-ended record is not, so a
+   running session is confirmed first and an exited one goes straight
+   through, exactly as it always did. */
+async function archiveSession(name) {
+  const record = sessionsCache.find((s) => s.name === name) || {};
+  if (record.status !== "exited" && !(await modalConfirm(
+    `Archive '${name}'?`,
+    `It is still running. Archiving ends the program now — the board ` +
+    `wind-down that a kill offers is skipped — and files the record in the ` +
+    `same step. The record itself stays, so it can be resumed from the ` +
+    `archive afterwards.`,
+    "End and archive"
+  ))) return false;
   const resp = await api(
     `/api/sessions/${encodeURIComponent(name)}/archive`, { method: "POST" }
   );
@@ -8079,7 +8097,7 @@ async function archiveExitedSession(name) {
 
 $("term-archive").addEventListener("click", async () => {
   if (!currentName) return;
-  await archiveExitedSession(currentName);
+  await archiveSession(currentName);
 });
 
 /* Stop everything. The records stay and every one of them is resumable after,
@@ -8603,8 +8621,9 @@ function railCardQuickFork(name) {
 
 function setStatusBadge(status) {
   const badge = $("term-status");
-  // An exited session is revivable and archivable. An archived record keeps
-  // resume while archive itself disappears because the transition is done.
+  // Every session is archivable — a live one is ended by the press (see
+  // archiveSession). An archived record keeps resume while archive itself
+  // disappears, because that transition is the one already done.
   const exited = status === "exited";
   const record = sessionsCache.find((s) => s.name === currentName) || {};
   const archived = !!record.archived_at;
@@ -8620,7 +8639,7 @@ function setStatusBadge(status) {
   $("term-rebrief").classList.toggle("hidden", exited);
   $("term-kill").classList.toggle("hidden", exited);
   if ($("term-pause")) $("term-pause").classList.toggle("hidden", exited);
-  $("term-archive").classList.toggle("hidden", !exited || archived);
+  $("term-archive").classList.toggle("hidden", archived);
   if (typeof syncSessionPinUi === "function") syncSessionPinUi();
   syncSessionKillControls();
   if (typeof syncSessionHandoffControls === "function") syncSessionHandoffControls();
@@ -11745,7 +11764,7 @@ function syncMobileBars() {
     $("m-pause").classList.toggle("hidden", !has || status === "exited");
   }
   $("m-archive").classList.toggle(
-    "hidden", !has || status !== "exited" || !!(sess && sess.archived_at));
+    "hidden", !has || !!(sess && sess.archived_at));
   syncSessionKillControls();
 
   const bDot = $("mb-dot");
