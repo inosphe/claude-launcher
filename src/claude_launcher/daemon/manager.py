@@ -32,7 +32,7 @@ from .. import borrowing, harnesses as harness_registry, profile as profile_mod
 from .. import spawn as spawn_mod
 from .. import transcripts
 from . import codex_sessions, ctxsize, db, harness as harness_mod, pi_sessions
-from . import paths, session_events
+from . import paths, search_records, session_events
 from .harness import SessionDef
 from .screen import BACKGROUND_RENDER_BUDGET, RenderBudget
 from .session import STATUS_BUSY, DeadSession, Session
@@ -575,6 +575,18 @@ class SessionManager:
         if not restoring:
             self.events.record(session, "create", "세션 생성", cwd=cwd,
                                borrow=session.sdef.borrow)
+            # The opening task is archived here rather than left to the
+            # search corpus to pick up, because that corpus only runs once
+            # semantic search is configured: on a daemon without it, a
+            # session created and later cleared would take its task with
+            # it. Best effort for the same reason the event above is --
+            # a session must not fail to start because an archive write
+            # did.
+            try:
+                search_records.capture_task(session.sdef.name, session.sdef.task,
+                                            session.created_at or "")
+            except (OSError, sqlite3.Error):
+                log.exception("could not archive the opening task for %s", session.sdef.name)
         if codex_home is not None and known_codex_sessions is not None:
             # The rollout appears a moment after the child starts, and the
             # scan that waits for it (``claim_new``) polls the whole rollout

@@ -66,6 +66,54 @@ def test_unified_corpus_includes_comments_events_and_session_links(tmp_path):
     assert "tail needle" in long[-1].chunks[0]
 
 
+def test_opening_task_is_its_own_source_and_outlives_the_registry(tmp_path):
+    root = tmp_path / "repo"
+
+    class Board:
+        async def issues(self, root): return []
+        async def br(self, root, args): return []
+
+    sdef = SimpleNamespace(name="s1", cwd=str(root), task="ship the kanban needle",
+                           issue=None, identity="worker w1", note="")
+    live = [SimpleNamespace(sdef=sdef, created_at="2026-09-21T00:00:00+00:00")]
+
+    async def resolve(cwd): return root
+
+    service = SimpleNamespace(manager=SimpleNamespace(list=lambda: list(live)), board=Board(),
+                              known_roots=lambda: [], resolve_root=resolve)
+    obs = SimpleNamespace(load_session=lambda n: {}, reports=SimpleNamespace(rows=lambda n: []))
+    corpus = search_anything.Corpus(service, obs)
+
+    docs = asyncio.run(corpus.docs())
+    task_docs = [d for d in docs if d.meta["kind"] == "opening-task"]
+    assert len(task_docs) == 1
+    assert "ship the kanban needle" in task_docs[0].chunks[0]
+    # A result the reader can open: the record endpoint returns the whole task.
+    assert task_docs[0].meta["source_url"] == "api/search/records/s1/opening-task"
+    assert task_docs[0].meta["href"] == "#/s/s1"
+    # One match, one result: the session's own document no longer repeats it.
+    session_doc = next(d for d in docs if d.meta["kind"] == "session")
+    assert "ship the kanban needle" not in session_doc.chunks[0]
+    assert "worker w1" in session_doc.chunks[0]
+
+    # The registry entry is what a clear removes; the opening task is not.
+    live.clear()
+    docs = asyncio.run(corpus.docs())
+    assert not [d for d in docs if d.meta["kind"] == "session"]
+    survivors = [d for d in docs if d.meta["kind"] == "opening-task"]
+    assert len(survivors) == 1 and "ship the kanban needle" in survivors[0].chunks[0]
+
+
+def test_opening_task_record_replaces_itself_and_skips_empty_tasks():
+    search_records.capture_task("s2", "first task", "2026-09-21T00:00:00+00:00")
+    search_records.capture_task("s2", "second task", "2026-09-21T01:00:00+00:00")
+    rows = [r for r in search_records.rows("s2") if r["kind"] == "opening-task"]
+    assert len(rows) == 1 and rows[0]["text"] == "second task"
+    assert search_records.capture_task("s3", "   ") is None
+    assert search_records.capture_task("s3", None) is None
+    assert search_records.rows("s3") == []
+
+
 def test_settings_routes_test_without_saving_and_persist_models(tmp_path):
     async def run():
         endpoint = Endpoint()

@@ -42,6 +42,36 @@ def remember(session, events):
             hook()
 
 
+#: The opening task is one record per session, not one per write: the id is
+#: fixed so a task edited after creation replaces the old row instead of
+#: leaving two records of the same session's job.
+OPENING_TASK_ID = "opening-task"
+
+
+def capture_task(session, task, at=""):
+    """Archive a session's opening task so it outlives the registry entry.
+
+    The task is already searchable while the session is registered, because
+    the unified corpus reads it off the definition. That is exactly what ends
+    when the session is cleared: the definition goes with it, and the opening
+    task is the part a reader searches for by memory months later. Stored
+    here it is kept beside the Observer records, which already survive that
+    removal.
+
+    The text is stored raw rather than as a JSON payload the way
+    :func:`capture` stores structured snapshots -- embedding and the result
+    excerpt both read this field, and JSON quoting would put escaped newlines
+    in front of the reader.
+    """
+    text = str(task or "").strip()
+    if not text:
+        return None
+    event = {"id": OPENING_TASK_ID, "kind": "opening-task", "origin": "record",
+             "at": at or "", "text": text, "source": "opening-task", "needs_action": False}
+    remember(session, [event])
+    return event
+
+
 def capture(session, kind, payload, at):
     text = json.dumps(payload, ensure_ascii=False, indent=2)
     event_id = kind + "-" + hashlib.sha256((session + at + text).encode()).hexdigest()[:24]
