@@ -6076,6 +6076,11 @@ async function refreshProjects() {
       form.value = currentProject;
     }
     form._lastProject = form.value;
+    // The rebuild just dropped the child's inherit entry and put a project
+    // name in its place, which is the one state that makes an untouched row
+    // move the child. Asked back here rather than left to the next sync:
+    // between the two the form would submit a project nobody chose.
+    if (spawnParent()) syncSpawnMode();
   }
   if (wsOpen) renderWorkspaces();
   if (currentPage === "home") renderHome();
@@ -6898,11 +6903,6 @@ const RUNTIME_PROMOTED = ["profile", "harness", "model", "effort", "project", "c
    one report per parent, kept until the pick moves. */
 let newSpawnReport = null;
 let newSpawnReportFor = null;
-/* The parent the inherited rows were last seeded for, so entering child mode
-   can default them (to the parent's own harness, to "inherit") without a
-   poll stamping on what the operator picked afterwards. */
-let newSpawnDefaultsFor = null;
-
 /* Which inherited rows a report hands back, keyed like SPAWN_INHERITS. No
    report — none fetched yet, or the fetch failed — opens nothing, so the
    form behaves exactly as it did before it asked: the reading that cannot
@@ -7039,16 +7039,6 @@ function syncSpawnMode() {
   for (const key of SPAWN_INHERITS) {
     if (f[key]) f[key].disabled = !!parent && !open[key];
   }
-  // The project row is seeded from the parent the first time a parent is
-  // named: a child is filed where its parent is unless the operator says
-  // otherwise, and the daemon reads an absent field as the default project.
-  if (parent && newSpawnDefaultsFor !== parent.name && f.project) {
-    const inherited = parent.project || "default";
-    if ([...f.project.options].some((o) => o.value === inherited)) {
-      f.project.value = inherited;
-      f.project._lastProject = inherited;
-    }
-  }
   // The policy's own answer, taken here because the harness rules further
   // down overrule it row by row. Two different facts shut a row and they
   // need different words: the spawn.* policy, which an unlock in
@@ -7059,13 +7049,11 @@ function syncSpawnMode() {
   const policyShut = new Set(
     SPAWN_INHERITS.filter((k) => f[k] && !!parent && !open[k])
   );
-  // Seeding happens once per parent, not on every poll: the second call
-  // would be the one that throws away the operator's own pick.
-  newSpawnDefaultsFor = parent ? parent.name : null;
   syncSpawnProfileRow(f, !!parent);
   refillNewHarnessOptions(
     f, parent && !f.profile.value ? "" : undefined
   );
+  syncSpawnProjectRow(f, parent);
   syncSpawnCwdRow(f, !!parent);
   syncNewBorrowOptions();
   if (parent) {
@@ -7186,6 +7174,50 @@ function syncSpawnProfileRow(f, child) {
     if (!sel.value) {
       const first = [...sel.options].find((o) => !o.disabled);
       sel.value = first ? first.value : "";
+    }
+  }
+}
+
+/* The same shape again for the project row, and here the empty entry is the
+   one that changes what the daemon does rather than only what the row reads.
+   A child is filed under its parent's project when the request says nothing
+   (spawn.py's `_file_under_project`: `asked or inherited`), so the inherit
+   entry travels as "" and the row starts on it. Sending the parent's own
+   name instead would file the child exactly where it was already going AND
+   take the branch that follows a NAMED project: with the Directory row left
+   on its inherit entry, the daemon then starts the child in that project's
+   default workspace rather than beside its parent. The operator changed
+   nothing and the child moved. Naming a project here is what asks for that
+   move, which is why the entry is removed once the form is its own session's
+   again — there "" would mean the default project, not an inherited one. */
+function syncSpawnProjectRow(f, parent) {
+  const sel = f.project;
+  if (!sel || !sel.options) return;
+  const at = [...sel.options].findIndex((o) => o.value === "");
+  if (parent) {
+    const theirs = parent.project || "default";
+    const label = `(the parent's: ${theirs})`;
+    if (at >= 0) {
+      // Relabelled rather than re-selected. "" says "the parent's" whichever
+      // parent is named, so a change of parent only changes the words; and
+      // re-selecting it on every sync would throw away a project the
+      // operator picked, which is what the old seed guarded against with a
+      // once-per-parent flag.
+      sel.options[at].textContent = label;
+      return;
+    }
+    sel.insertBefore(new Option(label, ""), sel.options[0] || null);
+    sel.value = "";
+    // No previous project to compare a directory against, which is what
+    // leaves the Directory row free to follow the first project picked.
+    sel._lastProject = "";
+  } else if (at >= 0) {
+    sel.remove(at);
+    if (!sel.value) {
+      const rail = [...sel.options].find((o) => o.value === currentProject);
+      sel.value = rail ? rail.value
+        : (sel.options[0] ? sel.options[0].value : "");
+      sel._lastProject = sel.value;
     }
   }
 }
@@ -7401,9 +7433,13 @@ $("new-session").addEventListener("submit", async (e) => {
     cwd: f.cwd.value,  // a registered workspace path, or "" = the daemon's cwd
     args: f.args.value.trim() ? f.args.value.trim().split(/\s+/) : [],
   };
-  // The project travels on both shapes. A session of its own is filed under
-  // it; a child is filed under it too, and the daemon starts the child in
-  // that project's default workspace when no directory row was sent.
+  // The project travels on both shapes, and the empty answer is a different
+  // one on each. A session of its own is filed under the project named here,
+  // and "" is the default project. A child is filed under its parent's
+  // unless a project is named, and a NAMED one also starts the child in that
+  // project's default workspace when no directory row was sent — so "" (the
+  // inherit entry syncSpawnProjectRow puts there) has to travel as nothing
+  // rather than as the parent's own name, or every spawn asks for that move.
   if (f.project && f.project.value) body.project = f.project.value;
   if (!parent && f.model && f.model.value) body.model = f.model.value;
   if (!parent && f.effort && f.effort.value) body.effort = f.effort.value;

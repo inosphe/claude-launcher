@@ -121,6 +121,11 @@ const form = {
                   ["home", "home"]]),
   null_token: control(""),
   cwd: picker([["(daemon cwd)", ""], ["repo — F:/repo", "F:/repo"]]),
+  /* Labelled the way projectSelectOptions builds them, and with no empty
+     entry of its own: on this form "" is the inherit answer the spawn arm
+     puts there, so a stub that started with one would hide the bug where
+     that arm fails to. */
+  project: picker([["default", "default"], ["repo — F:/repo", "repo"]]),
   args: control(""), resume: control(""), fork: control(""),
   skip_permissions: control(""),
   codex_yolo: control(""), codex_sandbox: control(""),
@@ -130,6 +135,7 @@ const form = {
 };
 form.profile.value = "work";
 form.harness.value = "claude";
+form.project.value = "default";
 
 let forkSyncs = 0;
 let stances = 0;
@@ -165,10 +171,10 @@ new Function(
   "spawnReport", "workspacesCache",
   "profileDetails", "profileOptions", "harnessDetails",
   "syncRuntimeFold", "renderRuntimeSummary", "renderProfileHint",
-  "syncNewBorrowOptions", "syncNewWorktree",
+  "syncNewBorrowOptions", "syncNewWorktree", "currentProject",
   [`let newProfileOptions = profileOptions, newHarnessFor = null;`,
    sliceConst("SPAWN_INHERITS"), sliceLet("newSpawnReport"),
-   sliceLet("newSpawnReportFor"), sliceLet("newSpawnDefaultsFor"),
+   sliceLet("newSpawnReportFor"),
    // The picker's signature guard against the two-second poll, which lives
    // at module scope because it has to outlive the call that wrote it. What
    // it holds off is pollselect_check's; here it only has to exist, so that
@@ -195,7 +201,8 @@ new Function(
    slice("spawnUnlocked"), slice("refreshSpawnPolicy"),
    slice("spawnWorkspaceName"), slice("refreshParentChoices"),
    slice("spawnParent"), slice("syncSpawnMode"),
-   slice("syncSpawnProfileRow"), slice("syncSpawnCwdRow"),
+   slice("syncSpawnProfileRow"), slice("syncSpawnProjectRow"),
+   slice("syncSpawnCwdRow"),
    slice("syncSpawnOverRow"), slice("spawnChildFields")].join("\n") + `
 exports.refresh = refreshParentChoices;
 exports.sync = syncSpawnMode;
@@ -203,6 +210,7 @@ exports.parentOf = spawnParent;
 exports.policy = refreshSpawnPolicy;
 exports.fields = spawnChildFields;
 exports.setSessions = (s) => { sessionsCache = s; };
+exports.setProject = (p) => { currentProject = p; };
 `)(ctx,
    (id) => (id === "new-session" ? form : box_[id] || null),
    // The pickers are reached the way the page reaches them, by selector.
@@ -226,7 +234,10 @@ exports.setSessions = (s) => { sessionsCache = s; };
    // syncSpawnMode ends by re-greying the worktree picker, whose rows and
    // radios this stub form does not carry — same story again: it has to
    // exist, and its gating is held where the picker is actually driven.
-   () => {});
+   () => {},
+   // Where the rail is looking. Only the project row's own-session arm reads
+   // it, to put the row back on something after the inherit entry goes.
+   "");
 
 let failures = 0;
 function check(what, got, want) {
@@ -686,6 +697,80 @@ async function main() {
   ctx.refresh();
   check("a parent that vanished falls back to a session of its own",
         [form.parent.value, ctx.parentOf()], ["", null]);
+
+  /* ---- the project row ----
+     A child is filed under its parent's project when the request says
+     nothing about one (spawn.py's `_file_under_project`: `asked or
+     inherited`). Naming one is also what asks for the move that follows it:
+     with no directory sent, the daemon then starts the child in that
+     project's default workspace. So the row's untouched answer has to travel
+     as NOTHING. Sending the parent's own name would file the child exactly
+     where it was already going and move it out of its parent's directory on
+     the way — the operator having chosen neither. */
+  ctx.setSessions(SESSIONS);
+  ctx.refresh();
+  form.parent.value = "";
+  ctx.sync();
+  form.parent.value = "lead";
+  ctx.sync();
+  check("a child's project row opens on an entry that travels as nothing",
+        [form.project.options[0].value, form.project.value], ["", ""]);
+  check("that entry names the project the child would be filed under",
+        form.project.options[0].textContent, "(the parent's: default)");
+  /* The payload rule this row is written for lives in the create form's
+     submit handler (`if (f.project && f.project.value) body.project = ...`),
+     which is not a function this harness can slice. What it reads is exactly
+     the value above, so the rule is spelled out here against it. */
+  const projectSent = () => (form.project.value ? form.project.value : undefined);
+  check("so an untouched row sends no project at all", projectSent(), undefined);
+
+  /* The label follows the parent, because "" means "the parent's" whichever
+     parent is named — and a parent filed elsewhere says so. */
+  SESSIONS[1].project = "repo";
+  ctx.setSessions(SESSIONS);
+  ctx.refresh();
+  form.parent.value = "quiet";
+  ctx.sync();
+  check("a parent filed elsewhere names that project on the row",
+        [form.project.options[0].textContent, form.project.value],
+        ["(the parent's: repo)", ""]);
+
+  /* A pick is an answer, and the two-second poll must not take it back —
+     which is what the old seed needed a once-per-parent flag to avoid. */
+  form.project.value = "default";
+  ctx.sync();
+  ctx.sync();
+  check("a picked project survives the poll", form.project.value, "default");
+  check("and it is what travels", projectSent(), "default");
+  form.parent.value = "lead";
+  ctx.sync();
+  check("a change of parent relabels the entry without taking the pick back",
+        [form.project.options[0].textContent, form.project.value],
+        ["(the parent's: default)", "default"]);
+
+  /* Ungated: filing a child under a project is a label on the roster, not a
+     change to what runs (spawn.py: "Always listed"). A report that opens
+     nothing greys every other inherited row and leaves this one alone. */
+  form.parent.value = "";
+  ctx.sync();
+  form.parent.value = "pi";
+  ctx.sync();
+  check("no report greys the inherited rows but not the project",
+        [form.cwd.disabled, form.args.disabled, form.project.disabled],
+        [true, true, false]);
+
+  /* Back to a session of its own, "" would mean the default project rather
+     than an inherited one, so the entry goes — and the row lands on where
+     the rail is looking rather than on nothing. */
+  ctx.setProject("repo");
+  form.parent.value = "";
+  ctx.sync();
+  check("its own session's form has no inherit entry",
+        form.project.options.some((o) => o.value === ""), false);
+  check("and the row falls back to the rail's project",
+        form.project.value, "repo");
+  ctx.setProject("");
+  SESSIONS[1].project = undefined;
 
   if (failures) {
     console.error(`${failures} check(s) failed`);

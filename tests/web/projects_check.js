@@ -134,10 +134,18 @@ const renderWorkspaces = () => {};
 let wsOpen = false;
 let currentPage = "rail";
 const BASE = "/t";
+/* Rebuilding the form's picker drops the inherit entry a spawn puts at the
+   top of it, so refreshProjects asks the spawn arm back. Here the form is
+   never a spawn — what that arm does with the row is spawnform_check's, and
+   these two only have to exist. */
+let spawnResyncs = 0;
+const spawnParent = () => null;
+const syncSpawnMode = () => { spawnResyncs++; };
 
 const ctx = {
   Option, document, $, api, localStorage, refreshSessions, refreshMeshList,
   renderHome, renderWorkspaces, wsOpen, currentPage, BASE,
+  spawnParent, syncSpawnMode,
 };
 const stateBlock = src.slice(
   src.indexOf("const PROJECT_KEY = "),
