@@ -39,6 +39,8 @@ class _Session:
         self.screen = _Screen()
         self.sdef = type("D", (), {"harness": "codex"})()
         self.writes = []
+        self.writers = []
+        self.forgotten = []
         self.drained = asyncio.Event()  # never set unless a test does it
         self.sync_calls = 0
 
@@ -49,8 +51,12 @@ class _Session:
     def note_human_input(self, **kw):
         pass
 
-    async def write_bytes(self, data):
+    async def write_bytes(self, data, writer=None):
         self.writes.append(data)
+        self.writers.append(writer)
+
+    def forget_writer(self, writer):
+        self.forgotten.append(writer)
 
 
 class _WS:
@@ -128,6 +134,11 @@ def test_keys_are_written_while_a_repaint_still_waits_on_the_render(monkeypatch)
         t0 = time.monotonic()
         await ws_mod._pump_from_client(ws, session, state, lane)
         assert session.writes == [b"\x1b", b"\x03"]
+        # Each key is written on behalf of the socket it came from: the
+        # backend keeps one decoder per writer, so a frame that ends
+        # mid-character waits for the next frame from this keyboard
+        # (claunch-pty-shared-decoder-across-writers-o3cy4).
+        assert session.writers == [ws, ws]
         assert time.monotonic() - t0 < 1.0
         await asyncio.sleep(0)
         assert lane.busy, "the repaint is still parked on the render, off the loop"

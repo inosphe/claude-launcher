@@ -172,15 +172,24 @@ _console_decoder: Optional[Tuple[int, codecs.IncrementalDecoder]] = None
 def _console_input_to_utf8(data: bytes, codepage: int) -> bytes:
     """Transcode console input bytes from ``codepage`` to UTF-8.
 
-    UTF-8 consoles pass through untouched; an unknown code page is passed
-    through too (better a wrong byte than a dropped key).
+    Every code page goes through an incremental decoder, UTF-8 included.
+    A UTF-8 console used to pass its bytes through untouched, and that left
+    ``ReadFile``'s chunk boundary wherever it fell -- which is not a
+    character boundary. The daemon then held the leading bytes of a split
+    syllable while it waited for the rest, and a delivery landing in that
+    gap had its own first bytes read as the end of that character: the
+    syllable was lost. So the boundary is repaired here, where the code page
+    is known, rather than being carried across the wire
+    (``claunch-pty-shared-decoder-across-writers-o3cy4``).
+
+    An unknown code page is still passed through -- better a wrong byte than
+    a dropped key.
     """
     global _console_decoder
-    if codepage == _CP_UTF8:
-        return data
     if _console_decoder is None or _console_decoder[0] != codepage:
+        name = "utf-8" if codepage == _CP_UTF8 else f"cp{codepage}"
         try:
-            decoder = codecs.getincrementaldecoder(f"cp{codepage}")("replace")
+            decoder = codecs.getincrementaldecoder(name)("replace")
         except LookupError:
             return data
         _console_decoder = (codepage, decoder)

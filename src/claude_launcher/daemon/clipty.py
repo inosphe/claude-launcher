@@ -20,6 +20,7 @@ why the browser gets a scrollback where the session terminal has none.
 from __future__ import annotations
 
 import asyncio
+import functools
 import logging
 import os
 import sys
@@ -233,14 +234,28 @@ class ShellPty:
     # ------------------------------------------------------------------ #
     # commands
     # ------------------------------------------------------------------ #
-    async def write_bytes(self, data: bytes) -> None:
-        """Keystrokes from a viewer. Dropped while the shell is dead."""
+    async def write_bytes(self, data: bytes, writer: object = None) -> None:
+        """Keystrokes from a viewer. Dropped while the shell is dead.
+
+        ``writer`` names the viewer, and a shell has as many as it has
+        windows open on it. It is carried for the same reason a session
+        carries it: the Windows backend holds a character split across two
+        calls, and that fragment must not be finished off by somebody
+        else's bytes (Session.write_bytes).
+        """
         if self.exited or self._pty is None:
             return
         # One writer at a time, and off the loop: the same two rules a
         # session's writes follow, for the same reasons (Session.write_bytes).
         async with self._write_lock:
-            await self._loop.run_in_executor(None, self._pty.write, data)
+            await self._loop.run_in_executor(
+                None, functools.partial(self._pty.write, data, writer)
+            )
+
+    def forget_writer(self, writer: object) -> None:
+        """A viewer has gone; drop the partial character it never finished."""
+        if self._pty is not None:
+            self._pty.forget_writer(writer)
 
     def resize(self, cols: int, rows: int) -> None:
         """The viewer's grid. Remembered for the next child, applied and

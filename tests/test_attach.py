@@ -122,6 +122,41 @@ def test_console_input_unknown_code_page_passes_through(monkeypatch):
     assert attach_mod._console_input_to_utf8(raw, 424242) == raw
 
 
+def test_console_input_utf8_code_page_repairs_a_split_syllable(monkeypatch):
+    """A UTF-8 console passed its bytes through untouched, so ReadFile's chunk
+    boundary reached the daemon wherever it fell, which is not a character
+    boundary. The daemon then held the lead bytes of a split syllable while it
+    waited for the rest, and whatever was written to that PTY in between -- a
+    mesh delivery, another viewer -- was read as the end of that character
+    (``claunch-pty-shared-decoder-across-writers-o3cy4``). The boundary is
+    repaired here, where the code page is known."""
+    monkeypatch.setattr(attach_mod, "_console_decoder", None)
+    raw = "한글".encode("utf-8")
+    first = attach_mod._console_input_to_utf8(raw[:4], attach_mod._CP_UTF8)
+    second = attach_mod._console_input_to_utf8(raw[4:], attach_mod._CP_UTF8)
+    assert first == "한".encode("utf-8")  # the lead byte of 글 is held back
+    assert second == "글".encode("utf-8")
+    assert first + second == raw
+
+
+def test_console_input_utf8_code_page_leaves_a_whole_chunk_alone(monkeypatch):
+    """The ordinary case: a chunk that ends on a character boundary comes out
+    as the bytes that went in, VT sequences included."""
+    monkeypatch.setattr(attach_mod, "_console_decoder", None)
+    raw = "한글".encode("utf-8") + b"\x1b[A\r"
+    assert attach_mod._console_input_to_utf8(raw, attach_mod._CP_UTF8) == raw
+
+
+def test_console_input_changing_code_page_starts_a_fresh_decoder(monkeypatch):
+    """_RawTerminal moves the console from 949 to 65001 for the attach. The
+    decoder is kept per code page, so a byte left over from the old one is
+    dropped rather than fed to the new one."""
+    monkeypatch.setattr(attach_mod, "_console_decoder", None)
+    attach_mod._console_input_to_utf8("한".encode("cp949")[:1], 949)
+    out = attach_mod._console_input_to_utf8("글".encode("utf-8"), attach_mod._CP_UTF8)
+    assert out == "글".encode("utf-8")
+
+
 def test_raw_terminal_switches_console_input_to_utf8_and_restores(monkeypatch):
     """On a console whose input code page is not UTF-8, the attach moves it
     to 65001 (so emoji and other out-of-code-page characters survive

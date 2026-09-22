@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import functools
 import json
 import logging
 import os
@@ -1563,20 +1564,41 @@ class Session:
             return data + b"\r\r"
         return data + b"\r"
 
-    async def write_bytes(self, data: bytes) -> None:
+    async def write_bytes(self, data: bytes, writer: object = None) -> None:
+        """Write ``data`` into the PTY on behalf of ``writer``.
+
+        ``writer`` says who is typing: a viewer socket passes itself, and the
+        paths this class owns (delivery, send-keys, paste) leave it as the
+        default. It matters because on Windows the backend decodes as it
+        writes and holds a character whose bytes are split between two calls
+        until the rest arrives, and that held fragment belongs to the writer
+        that sent it. A viewer whose frame ends mid-syllable and a delivery
+        that lands before the next frame are two writers, and sharing one
+        decoder made the delivery's first bytes the end of the viewer's
+        character -- the syllable was lost, and the delivery was prefixed
+        with a replacement character. See
+        ``claunch-pty-shared-decoder-across-writers-o3cy4``.
+        """
         if self.exited or self.pty is None:
             raise SessionGone(f"session {self.sdef.name!r} has exited")
         # One writer at a time. A session has several -- each viewer, the
         # delivery queue, send-keys -- and the executor below runs them on
         # different threads, so without this they reach the PTY interleaved.
-        # On Windows the backend also decodes as it writes and carries a
-        # partial character between calls (pty_backend._WinPty.write), and a
-        # second writer entering that decoder would have its first bytes
-        # read as the end of someone else's character.
         async with self._write_lock:
             # PTY writes can block briefly (ConPTY pipe backpressure); keep
             # the event loop responsive by writing from the thread pool.
-            await self._loop.run_in_executor(None, self.pty.write, data)
+            await self._loop.run_in_executor(
+                None, functools.partial(self.pty.write, data, writer)
+            )
+
+    def forget_writer(self, writer: object) -> None:
+        """A writer has gone; drop the partial character it never finished.
+
+        Held indefinitely it would be handed to whoever next writes under the
+        same key, and it keeps a socket object alive besides.
+        """
+        if self.pty is not None:
+            self.pty.forget_writer(writer)
 
     def resize(self, cols: int, rows: int) -> None:
         if self.exited or self.pty is None:
@@ -1969,8 +1991,11 @@ class DeadSession:
     def queue_delivery(self, text: str) -> bool:
         return False
 
-    async def write_bytes(self, data: bytes) -> None:
+    async def write_bytes(self, data: bytes, writer: object = None) -> None:
         raise self._gone()
+
+    def forget_writer(self, writer: object) -> None:
+        return None  # there is no PTY left holding anything for it
 
     def resize(self, cols: int, rows: int) -> None:
         raise self._gone()
