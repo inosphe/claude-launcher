@@ -142,6 +142,15 @@ def test_the_worker_workflow_keeps_its_branch_setup_isolation_rules():
     ``intake`` establishes the goal and supplies the branch summary. Every
     path that can start implementation then passes through ``branch-setup``;
     it names the fresh branch and isolates a shared checkout in a worktree.
+
+    Since claunch-vc5ma those paths reach it one stop later: each issue
+    verdict lands on ``workspace-check``, which judges whether this directory
+    is the one the round's work belongs to and hands on to ``branch-setup``
+    either by machine (``workspace-ok``) or by a person's approval
+    (``workspace-gate``). What this test pins is unchanged -- no path starts
+    implementing without a branch of its own -- and the gate's own shape is
+    ``tests/test_workspace_gate.py``'s, including the assertion that those
+    two steps are the ONLY ways into ``branch-setup``.
     """
     bundled = dict(state_mod.bundled_workflows())
     worker = model.load(bundled["improv-worker"])
@@ -158,20 +167,25 @@ def test_the_worker_workflow_keeps_its_branch_setup_isolation_rules():
         assert anchor in branch_setup.instructions, f"branch-setup lost its {anchor!r} rule"
     assert branch_setup.next == "work"
     options = worker.steps["issue-check"].select.options
-    assert options["claimed"].next == "branch-setup"
-    # Both halves of the "no issue" answer still reach branch-setup: the one
-    # that works the opening task goes straight there, and the one that picks
-    # its own issue off the board passes through issue-auto first. Neither may
-    # start implementing without a branch of its own.
-    assert options["no-issue-wait"].next == "branch-setup"
+    assert options["claimed"].next == "workspace-check"
+    # Both halves of the "no issue" answer still reach the branch: the one
+    # that works the opening task goes straight to the location check, and the
+    # one that picks its own issue off the board passes through issue-auto
+    # first. Neither may start implementing without a branch of its own.
+    assert options["no-issue-wait"].next == "workspace-check"
     assert options["no-issue-auto"].next == "issue-auto"
-    assert worker.steps["issue-auto"].next == "branch-setup"
-    assert worker.steps["issue-decision"].select.options["none"].next == "branch-setup"
-    # Getting an issue reaches branch-setup by two distinct edges now, each
+    assert worker.steps["issue-auto"].next == "workspace-check"
+    assert worker.steps["issue-decision"].select.options["none"].next == "workspace-check"
+    # Getting an issue reaches the branch by two distinct edges now, each
     # through the step that does its own half of the work -- adopt takes or
     # joins an existing record, create mints one.
-    assert worker.steps["issue-adopt"].next == "branch-setup"
-    assert worker.steps["issue-create"].next == "branch-setup"
+    assert worker.steps["issue-adopt"].next == "workspace-check"
+    assert worker.steps["issue-create"].next == "workspace-check"
+    # ...and both branches of the location check land on branch-setup, so the
+    # "every path" above is still every path.
+    check = worker.steps["workspace-check"].select.options
+    assert worker.steps[check["match"].next].next == "branch-setup"
+    assert worker.steps[check["mismatch"].next].next == "branch-setup"
 
 
 def test_the_improv_workflows_carry_no_repo_specific_verify():

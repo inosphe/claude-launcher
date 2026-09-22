@@ -146,6 +146,15 @@ def test_the_worker_settles_its_issue_before_branch_setup(layer):
     board looking for one. ``no-issue-wait`` goes straight to work with no
     search; ``no-issue-auto`` goes to a branch that searches and takes,
     with no user gate, because the person answered at creation time.
+
+    "Straight to work" stopped meaning "straight to ``branch-setup``" when
+    the location check was added in front of it (claunch-vc5ma): every
+    verdict now lands on ``workspace-check``, which judges whether this
+    directory is the one the round's work belongs to and routes on to
+    ``branch-setup`` either by machine or by a person's approval. What this
+    test pins is unchanged -- a round still reaches the branch only through
+    an issue verdict -- and the route it takes there is
+    ``tests/test_workspace_gate.py``'s.
     """
     path = (
         _bundled("improv-worker") if layer == "bundled"
@@ -155,14 +164,14 @@ def test_the_worker_settles_its_issue_before_branch_setup(layer):
     assert wf.steps["intake"].next == "issue-check"
     check = wf.steps["issue-check"].select
     assert check.chooser == "agent"                  # four readable facts
-    assert check.options["claimed"].next == "branch-setup"
-    assert check.options["no-issue-wait"].next == "branch-setup"
+    assert check.options["claimed"].next == "workspace-check"
+    assert check.options["no-issue-wait"].next == "workspace-check"
     assert check.options["no-issue-auto"].next == "issue-auto"
     assert check.options["unclaimed"].next == "issue-search"
     # the auto branch is the one that has no user gate, so it says out loud
     # that it takes the issue itself and how
     auto = wf.steps["issue-auto"]
-    assert auto.next == "branch-setup", (
+    assert auto.next == "workspace-check", (
         f"{layer}: the auto branch takes its own issue and then joins the "
         "same place issue-adopt does — routing it through issue-adopt "
         "instead would strand the round when the board has nothing worth "
@@ -191,17 +200,17 @@ def test_the_worker_settles_its_issue_before_branch_setup(layer):
     # reason is non-empty, not that an issue id is recoverable from it.
     assert decision.options["adopt"].next == "issue-adopt"
     assert decision.options["create"].next == "issue-create"
-    assert decision.options["none"].next == "branch-setup"
+    assert decision.options["none"].next == "workspace-check"
     assert decision.options["adopt"].next != decision.options["create"].next, (
         f"{layer}: adopt and create must not collapse into the same edge"
     )
     adopt = wf.steps["issue-adopt"]
-    assert adopt.next == "branch-setup"
+    assert adopt.next == "workspace-check"
     assert "--status in_progress" in adopt.instructions
     assert "JOINED" in adopt.instructions            # a live holder is joined, not taken
     assert "in_progress" in adopt.done_when
     mint = wf.steps["issue-create"]
-    assert mint.next == "branch-setup"
+    assert mint.next == "workspace-check"
     assert "--status in_progress" in mint.instructions
     assert "in_progress" in mint.done_when
     assert "JOINED" not in mint.instructions, (
