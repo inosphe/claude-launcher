@@ -10,6 +10,7 @@ keywords = ["claude", "claude-code", "launcher", "profile", "cli"]
 dependencies = [
     "pyyaml>=6",
     "aiohttp>=3.10,<4",
+    "zvec>=0.7,<1",
     "pyte>=0.8.2",
     "pywinpty>=2.0.12; sys_platform == 'win32'",
     "truststore>=0.9.1; python_version >= '3.10'",

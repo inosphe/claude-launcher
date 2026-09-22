@@ -1,22 +1,28 @@
 """Writing the vector index must not stop the daemon's event loop.
 
-``VectorIndex.save`` serialises the whole index -- every document, every
-vector, base64-encoded -- and writes it. ``_sync`` called it directly, on
-the loop, after every embed group, and the group size is ``batch`` chunks
+``VectorIndex.save`` used to serialise the whole index -- every document,
+every vector, base64-encoded -- and write it. ``_sync`` called it directly,
+on the loop, after every embed group, and the group size is ``batch`` chunks
 (16 by default), so one pass over a changed corpus rewrote the whole file
 hundreds of times without ever yielding.
 
-The file it rewrites is not small. Measured on the live daemon (s586,
-2026-09-21): ``~/.claude-launcher/daemon/rag/all.json`` is 376,519,999
+The file it rewrote was not small. Measured on the live daemon (s586,
+2026-09-21): ``~/.claude-launcher/daemon/rag/all.json`` was 376,519,999
 bytes. A py-spy sample of that daemon put 35.4% of the event loop thread's
 time under ``_sync -> _embed_group -> save``, 19.0% of it inside
 ``json.dumps`` and 13.3% inside ``write_text``. Over the same window a
 0.5 KB endpoint answered with a p99 of 2507 ms and a maximum of 6551 ms,
 and ``daemon_client.ensure_running`` reported a live daemon as not running.
 
-Terminal input rides that loop. So these pin two rules: the serialisation
-and the write happen off the loop, and a pass does not rewrite the file
-once per group.
+The vectors now live in a zvec collection (s676, 2026-09-22), so ``save``
+writes four corpus-level fields and flushes: the serialisation those numbers
+measured is gone. The rules it left behind are still worth pinning, because
+what replaced them is a different mechanism reaching the same guarantees --
+the write stays off the loop, a pass still writes once rather than once per
+group, and what a pass embedded is on disk when it ends (now because
+``put`` wrote it there, not because a later save did).
+
+Terminal input rides that loop.
 """
 
 from __future__ import annotations
@@ -42,12 +48,22 @@ from test_rag import (
 )
 
 
+def _signature(cfg: dict) -> str:
+    """What ``RagService._index`` stamps on the index it opens."""
+    return rag.content_hash(
+        str(cfg.get("base_url") or ""),
+        str(cfg.get("embedding_model") or ""),
+        str(int(cfg.get("dimensions") or 0)),
+    )
+
+
 def _index(tmp_path, *, docs: int = 8, dims: int = 64) -> rag.VectorIndex:
-    """An index big enough that serialising it is measurable work."""
-    index = rag.VectorIndex(tmp_path / "idx.json", model="m", dims=dims)
+    """An index with several documents and several chunks each."""
+    index = rag.VectorIndex(tmp_path / "idx.zvec", model="m", dims=dims)
     for i in range(docs):
-        index.entries[f"d-{i}"] = rag.Entry(
-            f"h{i}", [array("f", [0.1] * dims) for _ in range(4)], {"title": f"t{i}"}
+        index.put(
+            rag.Doc(f"d-{i}", f"h{i}", [], {"title": f"t{i}"}),
+            [array("f", [0.1] * dims) for _ in range(4)],
         )
     return index
 
@@ -107,11 +123,14 @@ def test_the_file_written_is_the_one_a_fresh_index_reads_back(tmp_path):
     async def run():
         index = _index(tmp_path, docs=3, dims=8)
         await index.save_soon()
-        again = rag.VectorIndex(tmp_path / "idx.json", model="m", dims=8)
+        written = set(index.entries)
+        index.close()
+        again = rag.VectorIndex(tmp_path / "idx.zvec", model="m", dims=8)
         again.load()
-        assert set(again.entries) == set(index.entries)
+        assert set(again.entries) == written
         assert again.entries["d-1"].hash == "h1"
-        assert len(again.entries["d-1"].vecs) == 4
+        assert again.entries["d-1"].chunks == 4
+        again.close()
 
     asyncio.run(run())
 
@@ -170,10 +189,14 @@ def test_what_the_pass_embedded_is_on_disk_when_it_ends(tmp_path, repo):  # noqa
             )
             prog = svc.ensure_sync("beads", repo)
             await svc.wait_sync(prog, 10)
-            files = list((tmp_path / "rag").glob("beads-*.json"))
-            assert len(files) == 1
-            data = json.loads(files[0].read_text(encoding="utf-8"))
-            assert set(data["docs"]) == {"x-1", "x-2", "x-3"}
+            collections = list((tmp_path / "rag").glob("beads-*.zvec"))
+            assert len(collections) == 1
+            await svc.shutdown()  # the collection's lock is exclusive
+            on_disk = rag.VectorIndex(collections[0], model=cfg["embedding_model"],
+                                      dims=0, signature=_signature(cfg))
+            on_disk.load()
+            assert set(on_disk.entries) == {"x-1", "x-2", "x-3"}
+            on_disk.close()
         finally:
             await server.close()
 
@@ -210,10 +233,14 @@ def test_a_pass_that_fails_midway_keeps_what_it_embedded(tmp_path, repo):  # noq
             finally:
                 rag.RagClient.embed = real_embed
             assert prog.error, "the premise: this pass failed"
-            files = list((tmp_path / "rag").glob("beads-*.json"))
-            assert len(files) == 1
-            data = json.loads(files[0].read_text(encoding="utf-8"))
-            assert data["docs"], "the pass threw away the documents it had embedded"
+            collections = list((tmp_path / "rag").glob("beads-*.zvec"))
+            assert len(collections) == 1
+            await svc.shutdown()  # the collection's lock is exclusive
+            on_disk = rag.VectorIndex(collections[0], model=cfg["embedding_model"],
+                                      dims=0, signature=_signature(cfg))
+            on_disk.load()
+            assert on_disk.entries, "the pass threw away the documents it had embedded"
+            on_disk.close()
         finally:
             await server.close()
 

@@ -19,11 +19,19 @@ the measured endpoint, which is why it scores a dozen and not the board.
 Indexes are machine-local derived data under ``<daemon dir>/rag/`` — the same
 rule ``briefings.json`` follows: ``~/.claunch.yaml`` carries configuration and
 is synced, this directory carries what a reindex can rebuild and is not. Each
-entry remembers a content hash, so a sync embeds only what changed since the
-last one; a full first index of a 778-issue board was measured at 10-12
-minutes and an incremental one at a second or two per changed issue, which is
-why syncing is a background task and a search reports how much of the corpus
-it covered rather than waiting for all of it.
+corpus is a zvec collection (``<key>.zvec/``) beside a small sidecar
+(``<key>.meta.json``) holding the model, width and signature it was built
+under. Each entry remembers a content hash, so a sync embeds only what changed
+since the last one; a full first index of a 778-issue board was measured at
+10-12 minutes and an incremental one at a second or two per changed issue,
+which is why syncing is a background task and a search reports how much of the
+corpus it covered rather than waiting for all of it.
+
+A collection holds an exclusive lock on its directory — it refuses a second
+open even for reading — so one process at a time owns an index. That is the
+daemon; ``claunch search`` reaches the same index through the daemon's API
+rather than opening it. Anything else that needs the files (the migration in
+``tools/migrate_rag_index.py``) runs with the daemon stopped.
 
 The index follows its corpora rather than waiting for a search. Producers
 call :meth:`RagService.enqueue` when something changed — the daemon's own
@@ -109,6 +117,28 @@ QUERY_CACHE = 64
 #: Index file format version; a file of another version is rebuilt.
 FORMAT = 1
 
+#: zvec refuses a write batch larger than this.
+WRITE_BATCH = 1000
+
+#: The name every collection carries inside its own directory.
+COLLECTION = "index"
+
+
+def _zvec():
+    """The zvec module, or a RagError naming what is missing.
+
+    The import is deferred rather than top-level so a daemon whose
+    environment predates this dependency still starts, answers everything
+    else, and fails only where a vector index is actually touched.
+    """
+    try:
+        import zvec
+    except ImportError as exc:  # pragma: no cover - dependency present in CI
+        raise RagError(
+            "rag: zvec is not installed (pip install zvec, or reinstall this package)"
+        ) from exc
+    return zvec
+
 
 class RagError(Exception):
     """The endpoint call failed (transport, HTTP status, or an unusable body)."""
@@ -126,21 +156,13 @@ def unit(values: Iterable[float]) -> array:
     return vec
 
 
-def dot(a: array, b: array) -> float:
-    """Cosine of two unit vectors of the same width."""
-    if len(a) != len(b):
-        return 0.0
-    return sum(map(float.__mul__, a, b))
-
-
-def _encode(vec: array) -> str:
-    out = array("f", vec)
-    if sys.byteorder != "little":
-        out.byteswap()
-    return base64.b64encode(out.tobytes()).decode("ascii")
-
-
 def _decode(text: str) -> array:
+    """One vector out of the JSON layout the index used before zvec.
+
+    Nothing in the search path calls this any more. It stays because
+    ``tools/migrate_rag_index.py`` reads those old files, and it is the only
+    thing that knows how they were written.
+    """
     vec = array("f")
     vec.frombytes(base64.b64decode(text))
     if sys.byteorder != "little":
@@ -396,17 +418,39 @@ def session_doc(info: dict, briefing: Optional[dict] = None) -> Doc:
 # --------------------------------------------------------------------------- #
 class Entry(NamedTuple):
     hash: str
-    vecs: List[array]
+    chunks: int
     meta: dict
 
 
+def vector_id(doc_id: str, chunk: int) -> str:
+    """The id one chunk carries inside the collection.
+
+    zvec accepts only ``[A-Za-z0-9._-]`` in a document id, and every id in
+    these corpora is built from colon-joined parts (``beads:<board>:<issue>
+    :<chunk>``), so the id it stores is a digest of the real one. The digest
+    is derived, not looked up: an update or a delete recomputes it from the
+    document id it already holds, which is why no reverse table is kept. The
+    document id itself rides along as a field and comes back on every hit.
+    """
+    key = f"{doc_id}#{chunk}".encode("utf-8")
+    return hashlib.blake2b(key, digest_size=16).hexdigest()
+
+
 class VectorIndex:
-    """One corpus's vectors, mirrored to a JSON file.
+    """One corpus's vectors, held in a zvec collection.
 
     Keyed by document id; each entry keeps the content hash it was embedded
-    from, one vector per chunk, and the display metadata a result needs, so a
-    search answers from the index alone. ``model``/``dims`` are recorded and a
-    file made under another model is discarded rather than mixed.
+    from, how many chunks it has, and the display metadata a result needs, so
+    a search answers from the index alone. ``model``/``dims`` are recorded in
+    a sidecar and a collection made under another model is discarded rather
+    than mixed.
+
+    The vectors themselves stay in the collection. Ranking is a matrix
+    operation inside zvec rather than a Python loop over every stored vector:
+    on the live daemon's 31k-document corpus the loop measured 4.6 s per
+    search against 0.04 s here, and the process no longer holds 314 MB of
+    float arrays to do it. ``entries`` therefore carries no vectors --
+    :meth:`neighbors` fetches the one vector it needs (0.3 ms).
     """
 
     def __init__(self, path: Path, *, model: str, dims: int, signature: str = "") -> None:
@@ -417,16 +461,65 @@ class VectorIndex:
         self.entries: Dict[str, Entry] = {}
         self.updated_at: Optional[str] = None
         self._loaded = False
-        # Created on first use: an index may be built outside a running loop.
         self._lock: Optional[asyncio.Lock] = None
+        self._col = None
 
     # -- persistence ---------------------------------------------------- #
+    @property
+    def meta_path(self) -> Path:
+        """Where the corpus-level fields live (model, dims, signature).
+
+        The collection stores documents; these four values describe the
+        collection itself, and they are small enough that a JSON file beside
+        it is simpler than a document reserved to hold them.
+        """
+        return self.path.with_suffix(".meta.json")
+
+    def _open(self, *, create: bool):
+        """The zvec collection, opened once per index object."""
+        if self._col is not None:
+            return self._col
+        zvec = _zvec()
+        if self.path.is_dir():
+            try:
+                self._col = zvec.open(path=str(self.path))
+            except RuntimeError as exc:
+                # The lock is exclusive and covers read-only opens too, so a
+                # second holder of this directory is not a corrupt index: it
+                # is another process (a daemon that has not finished exiting,
+                # a migration run) still holding it.
+                raise RagError(
+                    f"rag: index {self.path.name} is held by another process ({exc})"
+                ) from exc
+            return self._col
+        if not create:
+            return None
+        if not self.dims:
+            return None
+        schema = zvec.CollectionSchema(
+            # A fixed name, not the path's: zvec validates it against a
+            # pattern that rejects anything under three characters and every
+            # colon, and a corpus key is neither guaranteed. The directory
+            # already identifies the collection -- there is one per path.
+            name=COLLECTION,
+            fields=[
+                zvec.FieldSchema("doc_id", zvec.DataType.STRING),
+                zvec.FieldSchema("hash", zvec.DataType.STRING),
+                zvec.FieldSchema("chunk", zvec.DataType.INT32),
+                zvec.FieldSchema("meta", zvec.DataType.STRING),
+            ],
+            vectors=zvec.VectorSchema("embedding", zvec.DataType.VECTOR_FP32, self.dims),
+        )
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self._col = zvec.create_and_open(path=str(self.path), schema=schema)
+        return self._col
+
     def load(self) -> None:
         if self._loaded:
             return
         self._loaded = True
         try:
-            data = json.loads(self.path.read_text(encoding="utf-8")) if self.path.is_file() else None
+            data = json.loads(self.meta_path.read_text(encoding="utf-8")) if self.meta_path.is_file() else None
         except (OSError, ValueError):
             data = None
         if not isinstance(data, dict) or data.get("format") != FORMAT:
@@ -438,27 +531,43 @@ class VectorIndex:
             return
         if not self.dims:
             self.dims = file_dims
-        docs = data.get("docs")
-        if not isinstance(docs, dict):
+        col = self._open(create=False)
+        if col is None:
             return
-        for doc_id, row in docs.items():
-            try:
-                vecs = [_decode(v) for v in row["v"]]
-                if not vecs or any(len(v) != self.dims for v in vecs if self.dims):
-                    continue
-                self.entries[str(doc_id)] = Entry(str(row["h"]), vecs, dict(row.get("m") or {}))
-            except (KeyError, TypeError, ValueError):
+        # One pass over the collection's fields rebuilds what a search needs
+        # besides the vectors. Measured at 0.077 s for 31k documents, which
+        # is why the hashes a sync diffs against need no file of their own.
+        try:
+            rows = col.iter_docs(include_vector=False,
+                                 output_fields=["doc_id", "hash", "chunk", "meta"])
+        except Exception:  # pragma: no cover - a collection we cannot read
+            return
+        seen: Dict[str, int] = {}
+        for row in rows:
+            fields = row.fields or {}
+            doc_id = str(fields.get("doc_id") or "")
+            if not doc_id:
                 continue
+            seen[doc_id] = max(seen.get(doc_id, 0), int(fields.get("chunk") or 0) + 1)
+            if doc_id in self.entries:
+                continue
+            try:
+                meta = json.loads(fields.get("meta") or "{}")
+            except ValueError:
+                meta = {}
+            self.entries[doc_id] = Entry(str(fields.get("hash") or ""), 0, dict(meta))
+        for doc_id, chunks in seen.items():
+            entry = self.entries[doc_id]
+            self.entries[doc_id] = Entry(entry.hash, chunks, entry.meta)
         self.updated_at = data.get("updated_at")
 
     def save(self) -> None:
-        """Serialise the whole index and replace the file.
+        """Write the sidecar and flush the collection.
 
-        Every document, every vector, base64-encoded: the cost is the size
-        of the corpus, not the size of the change. On the live daemon the
-        fleet index measured 376 MB, so this is seconds of work and never
-        belongs on the event loop -- :meth:`save_soon` is what a coroutine
-        calls.
+        The vectors were already durable when :meth:`put` wrote them, so this
+        is four fields and a flush -- not the whole corpus. The JSON index it
+        replaced re-serialised every vector on every pass, which is why the
+        old sync saved once per pass instead of once per document.
         """
         data = {
             "format": FORMAT,
@@ -466,26 +575,38 @@ class VectorIndex:
             "dims": self.dims,
             "signature": self.signature,
             "updated_at": self.updated_at,
-            "docs": {
-                doc_id: {"h": e.hash, "v": [_encode(v) for v in e.vecs], "m": e.meta}
-                for doc_id, e in self.entries.items()
-            },
         }
         try:
-            self.path.parent.mkdir(parents=True, exist_ok=True)
-            with atomic.scratch(self.path) as tmp:
+            self.meta_path.parent.mkdir(parents=True, exist_ok=True)
+            with atomic.scratch(self.meta_path) as tmp:
                 tmp.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
-                atomic.replace(tmp, self.path)
+                atomic.replace(tmp, self.meta_path)
         except OSError:
             pass
+        if self._col is not None:
+            with contextlib.suppress(Exception):
+                self._col.flush()
+
+    def close(self) -> None:
+        """Release the collection's lock on its directory.
+
+        zvec holds a read-write lock per collection path, so a second
+        ``open`` of the same directory raises while the first object still
+        holds it. Anything that replaces an index (a changed model, a test
+        reading back what it wrote) closes the old one first.
+        """
+        col, self._col = self._col, None
+        if col is not None:
+            with contextlib.suppress(Exception):
+                col.close()
+        self._loaded = False
 
     async def save_soon(self) -> None:
         """:meth:`save`, in a worker thread.
 
-        The daemon runs one event loop and the terminal sockets are on it,
-        so a caller that is a coroutine uses this one. Two writes of the
-        same index cannot overlap -- the second would serialise entries the
-        first is still reading -- so they queue behind one lock per index.
+        The daemon runs one event loop and the terminal sockets are on it, so
+        a caller that is a coroutine uses this one. Two flushes of the same
+        collection queue behind one lock per index.
         """
         if self._lock is None:
             self._lock = asyncio.Lock()
@@ -500,6 +621,17 @@ class VectorIndex:
         gone = [doc_id for doc_id in self.entries if doc_id not in wanted]
         return stale, gone
 
+    def clear(self) -> None:
+        """Drop every document -- what a forced reindex starts from."""
+        col = self._open(create=False)
+        if col is not None:
+            with contextlib.suppress(Exception):
+                col.destroy()
+            self._col = None
+        self.entries.clear()
+        self._loaded = True
+        self.updated_at = _now_iso()
+
     def put(self, doc: Doc, vecs: List[array]) -> None:
         if not vecs:
             return
@@ -507,49 +639,110 @@ class VectorIndex:
             self.dims = len(vecs[0])
         if any(len(v) != self.dims for v in vecs):
             raise RagError("embedding dimensions changed; rebuild the index")
-        self.entries[doc.id] = Entry(doc.hash, list(vecs), dict(doc.meta))
+        col = self._open(create=True)
+        if col is None:
+            raise RagError("rag: index unavailable")
+        zvec = _zvec()
+        meta = dict(doc.meta)
+        text = json.dumps(meta, ensure_ascii=False)
+        rows = [
+            zvec.Doc(
+                id=vector_id(doc.id, i),
+                vectors={"embedding": list(v)},
+                fields={"doc_id": doc.id, "hash": doc.hash, "chunk": i, "meta": text},
+            )
+            for i, v in enumerate(vecs)
+        ]
+        # A document that shrank leaves its tail behind: the ids past the new
+        # chunk count are still in the collection and would keep matching.
+        previous = self.entries.get(doc.id)
+        if previous is not None and previous.chunks > len(vecs):
+            with contextlib.suppress(Exception):
+                col.delete([vector_id(doc.id, i) for i in range(len(vecs), previous.chunks)])
+        for start in range(0, len(rows), WRITE_BATCH):
+            col.upsert(rows[start:start + WRITE_BATCH])
+        self.entries[doc.id] = Entry(doc.hash, len(vecs), meta)
         self.updated_at = _now_iso()
 
     def refresh_meta(self, doc: Doc) -> None:
         """Carry changed display fields (status, assignee) for an entry whose
-        text — and so whose vectors — did not change."""
+        text -- and so whose vectors -- did not change."""
         entry = self.entries.get(doc.id)
-        if entry is not None and entry.meta != doc.meta:
-            self.entries[doc.id] = Entry(entry.hash, entry.vecs, dict(doc.meta))
+        if entry is None or entry.meta == doc.meta:
+            return
+        col = self._open(create=False)
+        if col is not None:
+            text = json.dumps(doc.meta, ensure_ascii=False)
+            with contextlib.suppress(Exception):
+                col.update([
+                    _zvec().Doc(id=vector_id(doc.id, i), fields={"meta": text})
+                    for i in range(entry.chunks)
+                ])
+        self.entries[doc.id] = Entry(entry.hash, entry.chunks, dict(doc.meta))
 
     def drop(self, doc_id: str) -> None:
-        if doc_id in self.entries:
-            del self.entries[doc_id]
-            self.updated_at = _now_iso()
+        entry = self.entries.get(doc_id)
+        if entry is None:
+            return
+        col = self._open(create=False)
+        if col is not None:
+            with contextlib.suppress(Exception):
+                col.delete([vector_id(doc_id, i) for i in range(entry.chunks)])
+        del self.entries[doc_id]
+        self.updated_at = _now_iso()
 
     # -- queries -------------------------------------------------------- #
     def rank(self, qvec: array, k: int, *, exclude: Iterable[str] = ()) -> List[Tuple[str, float]]:
         """The ``k`` best documents by their best chunk, best first."""
         if self.dims and len(qvec) != self.dims:
             raise RagError("embedding dimensions changed; rebuild the index")
+        col = self._open(create=False)
+        if col is None or not self.entries:
+            return []
         skip = set(exclude)
-        scored: List[Tuple[str, float]] = []
-        # A search runs in a worker thread (``asyncio.to_thread``) while the
-        # event loop's sync may be putting or dropping entries. Iterating the
-        # live dict raises "dictionary changed size during iteration" and the
-        # request answers HTTP 500, so rank a snapshot of the keys instead.
-        for doc_id, entry in list(self.entries.items()):
-            if doc_id in skip:
+        # Hits are per chunk and a document can own several, so ask for more
+        # than ``k`` and fold them down. The excluded ids cost their own room
+        # on top: neighbors() excludes the document it started from.
+        want = min(len(self.entries) * 2 + len(skip), max(k * 4, k + len(skip) + 16))
+        try:
+            hits = col.query(
+                _zvec().Query(field_name="embedding", vector=list(qvec)),
+                topk=want,
+                output_fields=["doc_id"],
+            )
+        except Exception as exc:  # pragma: no cover - endpoint-free failure
+            raise RagError(f"rag: index query failed ({exc})") from exc
+        best: Dict[str, float] = {}
+        for hit in hits:
+            doc_id = str((hit.fields or {}).get("doc_id") or "")
+            if not doc_id or doc_id in skip:
                 continue
-            best = max((dot(qvec, v) for v in entry.vecs), default=-1.0)
-            scored.append((doc_id, best))
-        scored.sort(key=lambda p: -p[1])
+            score = float(hit.score or 0.0)
+            if score > best.get(doc_id, -1.0):
+                best[doc_id] = score
+        scored = sorted(best.items(), key=lambda p: -p[1])
         return scored[:k]
 
     def neighbors(self, doc_id: str, k: int) -> List[Tuple[str, float]]:
         """Documents nearest to one already in the index (its first chunk)."""
         entry = self.entries.get(doc_id)
-        if entry is None or not entry.vecs:
+        if entry is None or not entry.chunks:
             return []
-        return self.rank(entry.vecs[0], k, exclude=(doc_id,))
+        col = self._open(create=False)
+        if col is None:
+            return []
+        try:
+            got = col.fetch(vector_id(doc_id, 0), include_vector=True)
+        except Exception:  # pragma: no cover - a vector that went missing
+            return []
+        row = got.get(vector_id(doc_id, 0)) if isinstance(got, dict) else None
+        if row is None:
+            return []
+        vec = array("f", row.vectors["embedding"])
+        return self.rank(vec, k, exclude=(doc_id,))
 
     def lexical(self, query: str, k: int) -> List[str]:
-        """Ids whose id or title contains every query word — the exact-match
+        """Ids whose id or title contains every query word -- the exact-match
         half a vector stage is weakest at (an issue id, a rare token)."""
         terms = [t for t in query.lower().split() if t]
         if not terms:
@@ -708,8 +901,12 @@ class RagService:
         signature = content_hash(str(cfg.get("base_url") or ""), model, str(dims))
         index = self._indexes.get(key)
         if index is None or index.model != model or index.signature != signature or (dims and index.dims != dims):
+            if index is not None:
+                # The collection locks its directory, so the replacement
+                # cannot open it until this one lets go.
+                index.close()
             base = self._root_dir if self._root_dir is not None else paths.rag_dir()
-            index = VectorIndex(base / f"{key}.json", model=model, dims=dims, signature=signature)
+            index = VectorIndex(base / f"{key}.zvec", model=model, dims=dims, signature=signature)
             index.load()
             self._indexes[key] = index
         self._roots[key] = root
@@ -783,7 +980,7 @@ class RagService:
             index = self._index(kind, root, cfg)
             docs = await self._docs(kind, root)
             if force:
-                index.entries.clear()
+                index.clear()
                 index.dims = int(cfg.get("dimensions") or 0)
             stale, gone = index.diff(docs)
             for doc_id in gone:
@@ -990,6 +1187,13 @@ class RagService:
         self._pending.clear()
         while not self._queue.empty():
             self._queue.get_nowait()
+        # Each collection holds an exclusive lock on its directory, and the
+        # lock outlives the process only if the handle is never released. A
+        # daemon restart starts the next process while this one is still
+        # unwinding, so the indexes let go here rather than at exit.
+        for index in self._indexes.values():
+            index.close()
+        self._indexes.clear()
 
     def _ensure_consumer(self) -> None:
         if self._consumer is None or self._consumer.done():

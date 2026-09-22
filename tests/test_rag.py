@@ -266,7 +266,7 @@ def test_session_doc_carries_the_readers_own_note():
 
 
 def test_vector_index_round_trips_and_diffs(tmp_path):
-    path = tmp_path / "idx.json"
+    path = tmp_path / "idx.zvec"
     index = rag.VectorIndex(path, model="m", dims=0)
     index.load()
     d1 = rag.Doc("a", "h1", ["a one", "a two"], {"title": "A"})
@@ -274,11 +274,14 @@ def test_vector_index_round_trips_and_diffs(tmp_path):
     index.put(d1, [rag.unit([1, 0, 0]), rag.unit([0, 1, 0])])
     index.put(d2, [rag.unit([0, 0, 1])])
     index.save()
+    # The collection locks its directory, so the writer lets go before a
+    # second index reads the same path back.
+    index.close()
     again = rag.VectorIndex(path, model="m", dims=0)
     again.load()
     assert set(again.entries) == {"a", "b"}
     assert again.dims == 3
-    assert list(again.entries["a"].vecs[1]) == pytest.approx([0, 1, 0])
+    assert again.entries["a"].chunks == 2
     # the best chunk decides the document's score
     ranked = again.rank(rag.unit([0, 1, 0]), 5)
     assert ranked[0][0] == "a" and ranked[0][1] == pytest.approx(1.0)
@@ -289,11 +292,13 @@ def test_vector_index_round_trips_and_diffs(tmp_path):
     # metadata refresh without re-embedding
     again.refresh_meta(rag.Doc("a", "h1", ["a"], {"title": "A2"}))
     assert again.entries["a"].meta["title"] == "A2"
+    assert again.lexical("A2", 5) == ["a"]
+    again.close()
     # another model's file is not mixed in
     other = rag.VectorIndex(path, model="m2", dims=0)
     other.load()
     assert other.entries == {}
-    assert again.lexical("A2", 5) == ["a"]
+    other.close()
 
 
 # --------------------------------------------------------------------------- #
@@ -375,10 +380,16 @@ def test_service_indexes_incrementally_and_ranks(tmp_path, repo):
             # documents embedded in one pass: 3 issues, 1 chunk each, + 1 query
             embedded = [t for call in ep.embed_calls for t in call["input"]]
             assert len(embedded) == 4
-            # the index file exists and a fresh service reads it without re-embedding
-            files = list((tmp_path / "rag").glob("beads-*.json"))
-            assert len(files) == 1
+            # the index exists and a fresh service reads it without re-embedding
+            collections = list((tmp_path / "rag").glob("beads-*.zvec"))
+            sidecars = list((tmp_path / "rag").glob("beads-*.meta.json"))
+            assert len(collections) == 1 and collections[0].is_dir()
+            assert len(sidecars) == 1
             before = len(ep.embed_calls)
+            # The collection locks its directory and the lock is exclusive --
+            # it refuses a read-only open too. So this service lets go before
+            # the next one reads the same corpus.
+            await svc.shutdown()
             fresh = rag.RagService(board=_board(br, repo), config=lambda: cfg, root_dir=tmp_path / "rag")
             view2 = await fresh.search("beads", "relay", root=repo, limit=1, rerank=False)
             assert view2["results"][0]["id"] == "x-3" and view2["reranked"] is False
@@ -489,7 +500,8 @@ def test_sessions_corpus_reads_the_registry_and_briefing_cache(tmp_path):
             # is the note doing the work.
             by_note = await svc.search("sessions", "vendor", limit=2, rerank=False)
             assert by_note["results"][0]["id"] == "s1"
-            assert (tmp_path / "rag" / "sessions.json").is_file()
+            assert (tmp_path / "rag" / "sessions.zvec").is_dir()
+            assert (tmp_path / "rag" / "sessions.meta.json").is_file()
         finally:
             await server.close()
 
@@ -1077,3 +1089,102 @@ def test_cli_search_registers_under_claunch():
     assert args.func.__name__ == "_cmd_search"
     args = parser.parse_args(["rag", "status"])
     assert args.func.__name__ == "_cmd_rag_status"
+
+
+# --------------------------------------------------------------------------- #
+# the collection's own rules
+# --------------------------------------------------------------------------- #
+def test_vector_ids_are_derived_not_looked_up(tmp_path):
+    """The collection's id is a digest of the document id and chunk number.
+
+    zvec accepts only ``[A-Za-z0-9._-]`` in an id and every id in these
+    corpora is colon-joined, so the real id cannot be the stored one. Because
+    the digest is computed rather than recorded, an update or a delete finds
+    the right rows from the document id alone -- no reverse table to keep in
+    step, and none to lose.
+    """
+    a = rag.vector_id("beads:aef8808f7e8d387d:claunch-9sf9", 0)
+    assert a == rag.vector_id("beads:aef8808f7e8d387d:claunch-9sf9", 0)
+    assert set(a) <= set("0123456789abcdef") and len(a) == 32
+    # chunk number and document id both take part
+    assert a != rag.vector_id("beads:aef8808f7e8d387d:claunch-9sf9", 1)
+    assert a != rag.vector_id("beads:aef8808f7e8d387d:claunch-9sfa", 0)
+
+
+def test_a_document_that_shrank_leaves_no_chunks_behind(tmp_path):
+    """Re-embedding with fewer chunks deletes the tail.
+
+    The ids past the new chunk count are still in the collection, and a
+    vector nobody points at still answers a query -- so the document would
+    keep matching text it no longer contains.
+    """
+    index = rag.VectorIndex(tmp_path / "idx.zvec", model="m", dims=3)
+    index.put(rag.Doc("a", "h1", [], {"title": "A"}),
+              [rag.unit([1, 0, 0]), rag.unit([0, 1, 0]), rag.unit([0, 0, 1])])
+    assert index.entries["a"].chunks == 3
+    # the middle vector is what the query matches; after the shrink it is gone
+    assert index.rank(rag.unit([0, 1, 0]), 5)[0][1] == pytest.approx(1.0)
+    index.put(rag.Doc("a", "h2", [], {"title": "A"}), [rag.unit([1, 0, 0])])
+    assert index.entries["a"].chunks == 1
+    assert index.rank(rag.unit([0, 1, 0]), 5)[0][1] == pytest.approx(0.0, abs=1e-6)
+    index.close()
+
+
+def test_the_index_survives_entries_changing_while_it_ranks(tmp_path):
+    """A search runs in a worker thread while the loop's sync writes.
+
+    The JSON index raised "dictionary changed size during iteration" here and
+    answered HTTP 500 (fixed in claunch-djfo6). The collection is the one
+    doing the scanning now, so the same race has to stay quiet.
+    """
+    index = rag.VectorIndex(tmp_path / "idx.zvec", model="m", dims=3)
+    for i in range(12):
+        index.put(rag.Doc(f"d-{i}", f"h{i}", [], {"title": f"t{i}"}),
+                  [rag.unit([1, i / 12, 0])])
+    errors = []
+
+    def search():
+        try:
+            for _ in range(20):
+                index.rank(rag.unit([1, 0, 0]), 5)
+        except Exception as exc:  # noqa: BLE001 -- the failure is the finding
+            errors.append(repr(exc))
+
+    def write():
+        try:
+            for i in range(12, 32):
+                index.put(rag.Doc(f"d-{i}", f"h{i}", [], {"title": f"t{i}"}),
+                          [rag.unit([0, 1, i / 32])])
+        except Exception as exc:  # noqa: BLE001
+            errors.append(repr(exc))
+
+    threads = [threading.Thread(target=search), threading.Thread(target=write)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert errors == []
+    assert len(index.entries) == 32
+    index.close()
+
+
+def test_a_second_holder_of_one_index_is_named_not_a_traceback(tmp_path):
+    """The collection's lock is exclusive -- it refuses read-only opens too.
+
+    So a second holder is a normal situation (a daemon that has not finished
+    exiting, a migration run), and what it gets back should say that rather
+    than the storage engine's own RuntimeError.
+    """
+    first = rag.VectorIndex(tmp_path / "idx.zvec", model="m", dims=3)
+    first.put(rag.Doc("a", "h1", [], {"title": "A"}), [rag.unit([1, 0, 0])])
+    first.save()
+    second = rag.VectorIndex(tmp_path / "idx.zvec", model="m", dims=3)
+    with pytest.raises(rag.RagError) as caught:
+        second.load()
+    assert "held by another process" in str(caught.value)
+    first.close()
+    # once the first lets go, the second reads it
+    third = rag.VectorIndex(tmp_path / "idx.zvec", model="m", dims=3)
+    third.load()
+    assert set(third.entries) == {"a"}
+    third.close()
