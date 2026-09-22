@@ -182,21 +182,34 @@ class FakeBr:
         return 1, "", f"unknown command {cmd}"
 
 
+#: Both spellings the real ``br`` accepts for a long option's value:
+#: ``--flag value`` and ``--flag=value``. The second is what
+#: :func:`claude_launcher.cli_beads.bind_text_values` writes for a value
+#: that begins with ``-``, so a fake that read only the first would stop
+#: seeing every description the daemon composes with front matter on it.
+def _opt_pairs(args):
+    """``(flag, value)`` for each long option in ``args``, in order."""
+    pairs = []
+    i = 0
+    while i < len(args):
+        token = args[i]
+        if token.startswith("--") and "=" in token:
+            flag, value = token.split("=", 1)
+            pairs.append((flag, value))
+        elif token.startswith("--") and i + 1 < len(args):
+            pairs.append((token, args[i + 1]))
+            i += 1
+        i += 1
+    return pairs
+
+
 def _opts_all(args, flag):
     """Every value given for a repeatable flag, in order."""
-    return [args[i + 1] for i in range(len(args) - 1) if args[i] == flag]
+    return [value for name, value in _opt_pairs(args) if name == flag]
 
 
 def _opts(args):
-    out = {}
-    i = 0
-    while i < len(args):
-        if args[i].startswith("--") and i + 1 < len(args):
-            out[args[i]] = args[i + 1]
-            i += 2
-        else:
-            i += 1
-    return out
+    return dict(_opt_pairs(args))
 
 
 @pytest.fixture
@@ -622,6 +635,45 @@ def test_issue_text_alone_still_mints(repo):
         )
         assert made and made["created"] is True
         assert br.issues[made["issue"]]["title"] == "the whole job"
+
+    asyncio.run(run())
+
+
+def test_a_mint_in_a_registered_workspace_reaches_the_board(repo, home):
+    """The regression the user reported as "issue text does not work".
+
+    A session created in a registered workspace has its workspace recorded
+    as YAML front matter, so its description opens with ``---`` -- and
+    ``br`` read that as another option and refused the create at parse time.
+    Nothing was written, the session started with no issue, and the only
+    trace was a warning in the daemon log (63 of them between 2026-09-18 and
+    2026-09-22). What the mint is asked for is both halves at once: the
+    issue exists, and the session is its assignee.
+    """
+    from claude_launcher import workspaces
+
+    workspaces.add(str(repo), "somewhere")
+    br = FakeBr()
+    board = _board(br, repo)
+
+    async def run():
+        made = await board.ensure_issue(
+            _Sess(_sdef("s689", repo)),
+            body={"task": "boot", "issue_text": "fix the rail"},
+            parent="s469",
+        )
+        assert made and made["created"] is True
+        issue = br.issues[made["issue"]]
+        assert issue["assignee"] == "s689"
+        assert beads_meta.workspace_of(issue) == "somewhere"
+        assert issue["description"].startswith("---")
+        assert "fix the rail" in beads_meta.parse(issue["description"])[1]
+        # the description reached br as a VALUE, which is the whole fix
+        (create,) = [c for c in br.calls if "create" in c]
+        assert not any(arg == "--description" for arg in create)
+        assert any(
+            arg.startswith("--description=---") for arg in create
+        ), create
 
     asyncio.run(run())
 

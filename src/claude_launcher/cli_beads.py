@@ -171,6 +171,71 @@ def check_statuses(args: List[str]) -> None:
         )
 
 
+#: Options whose value is free text — a description, a title, a close
+#: reason, a comment body. What they carry is written by a person or an
+#: agent, so it may begin with ``-``, and ``br``'s parser reads a value that
+#: begins with ``-`` as another option: a description that opens with a
+#: YAML front matter fence (``---``) is refused with ``unexpected
+#: argument '---...' found`` before anything is written. That is how
+#: every issue the daemon minted in a registered workspace failed: the
+#: workspace front matter opens with that fence
+#: (:mod:`claude_launcher.beads_meta`), and the create never ran.
+#: :func:`bind_text_values` binds those values to their option with ``=``,
+#: the one spelling clap reads as a value whatever it starts with.
+#:
+#: Every spelling of each option is listed, aliases and short forms
+#: included, because the pair is recognised by an exact match. Read against
+#: **br 0.2.14** (``br create|update|close|comments add --help``). An option
+#: missing from this tuple is not broken — it only keeps the behaviour it
+#: had, which is a refusal when its value begins with ``-``.
+TEXT_OPTIONS = (
+    "--description", "-d", "--body",
+    "--title",
+    "--design",
+    "--acceptance-criteria", "--acceptance",
+    "--notes",
+    "--reason", "-r",
+    "--bypass-reason",
+    "--message",
+)
+
+
+def bind_text_values(args: List[str]) -> List[str]:
+    """``args`` with each free-text option value bound to its option by ``=``.
+
+    Only a value that begins with ``-`` is bound, so an ordinary call keeps
+    the argument list it always had and a failing ``br`` command still reads
+    the way it was written. Parsing stops at a bare ``--``: everything after
+    it is a positional and none of it is an option's value.
+
+    What this does not reach: a *positional* that begins with ``-`` — a
+    comment body whose first line is a markdown list item, as
+    ``comments add <id> "- branch: x"``. There is no ``=`` to bind a
+    positional with, and telling one from an option needs ``br``'s
+    per-subcommand flag table. That call is refused by ``br`` with its own
+    message in front of the caller, which is a different cost from the
+    silent one this function removes; it is filed as claunch-c7oad.1.
+    """
+    bound: List[str] = []
+    index = 0
+    while index < len(args):
+        token = args[index]
+        if token == "--":
+            bound.extend(args[index:])
+            break
+        if (
+            token in TEXT_OPTIONS
+            and index + 1 < len(args)
+            and args[index + 1].startswith("-")
+        ):
+            bound.append(f"{token}={args[index + 1]}")
+            index += 2
+            continue
+        bound.append(token)
+        index += 1
+    return bound
+
+
 def repo_root(cwd: Optional[str] = None) -> Optional[Path]:
     """The directory that owns the board for ``cwd``, or ``None``.
 
@@ -231,8 +296,16 @@ def plan(
     and refuses when nothing is there to rebuild from — a typo'd directory
     must not grow a board of its own. A ``--status`` value that is not a
     status is refused here too, before any ``br`` runs.
+
+    The caller's arguments also go through :func:`bind_text_values`, which
+    binds a free-text value that begins with ``-`` to its option with ``=``.
+    It is done here rather than at each caller because this is the one place
+    every ``br`` invocation is composed, and the failure it removes is one
+    the callers cannot see: ``br`` refuses the command at parse time and
+    the daemon logs a warning nobody reads.
     """
     check_statuses(args)
+    args = bind_text_values(args)
     beads_dir = root / BEADS_DIR
     db = str(beads_dir / DB_NAME)
     base = [BINARY, "--db", db]
