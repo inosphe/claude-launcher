@@ -95,6 +95,47 @@ def test_restart_clock_executes_in_the_run_cwd(proj):
     assert str(proj).lower() in result["output"].lower()
 
 
+def _echo_session_command():
+    """A command that prints whatever ``CLAUNCH_SESSION`` it was handed."""
+    body = "import os; print('SESSION=' + os.environ.get('CLAUNCH_SESSION', 'unset'))"
+    return f'"{sys.executable}" -c "{body}"'
+
+
+def test_restart_command_carries_the_runs_session(proj, monkeypatch):
+    """The restart goes out as the run's session, not as the daemon.
+
+    ``claunch daemon restart`` inside the script reads ``CLAUNCH_SESSION`` to
+    decide whether it is the operator restarting their own daemon (immediate)
+    or an agent asking for one (filed with the web UI's approval gate). The
+    clock runs the command as a child of the daemon, whose environment has
+    the variable unset -- so without this the gate was never reached and the
+    daemon restarted with nobody asked. The operator's own value must not
+    leak through either: the run's scope is the answer, whatever the daemon
+    was started with.
+    """
+    monkeypatch.setenv(state_mod.SESSION_ENV, "whoever-started-the-daemon")
+    action = {"command": _echo_session_command(), "timeout": 20}
+    result = cflow_clock.RestartClock._execute(str(proj), action, "s469")
+    assert result["exit_code"] == 0
+    assert "SESSION=s469" in result["output"]
+
+
+@pytest.mark.parametrize("scope", ["", "default"])
+def test_restart_command_carries_no_session_for_an_unmanaged_run(proj, monkeypatch, scope):
+    """A run outside a managed session answers to no name.
+
+    Passing ``default`` through would file a gate request attributed to a
+    session that does not exist; the operator's inherited value would be
+    worse still, since the restart is not theirs. Both are removed, which is
+    the immediate path -- the same behaviour such a run had before the gate.
+    """
+    monkeypatch.setenv(state_mod.SESSION_ENV, "whoever-started-the-daemon")
+    action = {"command": _echo_session_command(), "timeout": 20}
+    result = cflow_clock.RestartClock._execute(str(proj), action, scope)
+    assert result["exit_code"] == 0
+    assert "SESSION=unset" in result["output"]
+
+
 def test_restart_requires_a_checklist():
     text = FLOW.replace("    checklist:\n      prompt: did it deploy?\n      then: end\n      items:\n        - id: deployed\n          describe: live service has deployed\n          check: 'python -c \"raise SystemExit(1)\"'\n", "")
     with pytest.raises(WorkflowError, match="requires a 'checklist'"):

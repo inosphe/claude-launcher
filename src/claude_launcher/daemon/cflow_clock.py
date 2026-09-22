@@ -52,6 +52,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import os
 import platform as platform_mod
 import subprocess
 import tempfile
@@ -1787,7 +1788,7 @@ class RestartClock:
                     await self._deliver(cwd, scope, restart_started_block(action))
                     if action["kind"] != "run":
                         continue
-                    result = await asyncio.to_thread(self._execute, cwd, action)
+                    result = await asyncio.to_thread(self._execute, cwd, action, scope)
                     recorded = await asyncio.to_thread(
                         cflow_engine.complete_restart,
                         cwd=cwd, scope=scope, step_id=action["step"],
@@ -1817,7 +1818,7 @@ class RestartClock:
         return actions
 
     @staticmethod
-    def _execute(cwd: str, action: dict) -> dict:
+    def _execute(cwd: str, action: dict, scope: str = "") -> dict:
         # Output goes to a file, not a pipe. The restart command is a shell
         # whose descendants (this repository's tools/restart_live.ps1 runs
         # `claunch daemon restart`) inherit stdout; with a pipe, the reader
@@ -1827,11 +1828,29 @@ class RestartClock:
         # in the daemon's default executor and blocked its shutdown for
         # minutes (2026-09-11). A file has no reader thread: wait() returns
         # the moment the shell exits, timeout or not.
+        #
+        # The command carries the run's scope in CLAUNCH_SESSION, because the
+        # restart it performs belongs to that session and not to the person
+        # at the keyboard. A `claunch daemon restart` inside the script reads
+        # the same variable to tell the two apart: set, and the CLI files the
+        # request with the web UI's approval gate and waits for the answer
+        # (`cli_sessions._gated_restart`); unset, and the restart goes out on
+        # the spot, which is the operator's own door. A child of the daemon
+        # inherits the daemon's environment, where the variable is unset, so
+        # every restart this clock ran went out with nobody asked -- the
+        # precondition `claunch-028r` wrote down as C-3 and the implementation
+        # did not meet. Scopes that are not a managed session (`default`)
+        # answer to no name, so the variable is removed rather than set to one.
+        env = dict(os.environ)
+        if scope and scope != cflow_state.DEFAULT_SCOPE:
+            env[cflow_state.SESSION_ENV] = scope
+        else:
+            env.pop(cflow_state.SESSION_ENV, None)
         try:
             with tempfile.TemporaryFile(mode="w+b") as out:
                 try:
                     done = subprocess.run(
-                        action["command"], cwd=cwd, shell=True,
+                        action["command"], cwd=cwd, shell=True, env=env,
                         stdout=out, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
                         timeout=float(action["timeout"]), check=False,
                     )
