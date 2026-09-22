@@ -476,3 +476,191 @@ def test_br_itself_accepts_the_bound_form_and_refuses_the_unbound_one(tmp_path):
     import json
 
     assert json.loads(bound.stdout)["description"] == FENCED
+
+
+# --------------------------------------------------------------------------- #
+# free text that arrives as a positional argument
+#
+# Two subcommands take their free text positionally, so binding it to an
+# option is not available: ``create "<title>"`` and ``comments add <id>
+# "<text>"``. A positional beginning with ``-`` is read by ``br``'s parser as
+# an option and the command is refused — which is what happens to an evidence
+# bundle written the way the workflows ask for it, as lines of
+# ``(axis, tree, value)``, because such a line opens with ``-``
+# (claunch-c7oad.1). ``br`` 0.2.14 offers ``create --title`` and
+# ``comments add --message`` as exact alternatives, so ``plan`` moves the text
+# onto the flag, where ``=`` binds it.
+# --------------------------------------------------------------------------- #
+DASH_TITLE = "-로 시작하는 제목"
+DASH_BODY = "- branch: s689-x\n- tip: abc1234"
+
+MOVE_FORMS = [
+    # the two shapes that failed
+    (
+        ["create", DASH_TITLE, "--type", "bug", "--priority", "3"],
+        ["create", f"--title={DASH_TITLE}", "--type", "bug", "--priority", "3"],
+    ),
+    (
+        ["comments", "add", "i-1", DASH_BODY, "--json"],
+        ["comments", "add", "i-1", f"--message={DASH_BODY}", "--json"],
+    ),
+    # the id is found past an option that takes a value, not by position
+    (
+        ["comments", "add", "--author", "s689", "i-1", DASH_BODY],
+        ["comments", "add", "--author", "s689", "i-1", f"--message={DASH_BODY}"],
+    ),
+    # several TEXT positionals join with one space, which is what br does
+    # with them itself
+    (
+        ["comments", "add", "i-1", "- a", "- b", "--json"],
+        ["comments", "add", "i-1", "--message=- a - b", "--json"],
+    ),
+    # a value bound by '=' does not hide the token after it
+    (
+        ["create", "--description=-x", DASH_TITLE],
+        ["create", "--description=-x", f"--title={DASH_TITLE}"],
+    ),
+    # text that does not begin with '-' is left where the caller put it
+    (["create", "plain", "--type", "task"], ["create", "plain", "--type", "task"]),
+    (["comments", "add", "i-1", "plain"], ["comments", "add", "i-1", "plain"]),
+    # the text already has a flag, or a file
+    (["create", f"--title={DASH_TITLE}"], ["create", f"--title={DASH_TITLE}"]),
+    (
+        ["comments", "add", "i-1", "-f", "body.md"],
+        ["comments", "add", "i-1", "-f", "body.md"],
+    ),
+    (["create", "-f", "bulk.md"], ["create", "-f", "bulk.md"]),
+    # a bare '--' already makes everything after it a positional
+    (
+        ["comments", "add", "i-1", "--json", "--", DASH_BODY],
+        ["comments", "add", "i-1", "--json", "--", DASH_BODY],
+    ),
+    # an option this module's tables do not know lands in a slot, the shape
+    # stops matching, and nothing is rewritten
+    (["create", "--unknown", "v", DASH_TITLE], ["create", "--unknown", "v", DASH_TITLE]),
+    (
+        ["comments", "add", "--unknown", "i-1", DASH_BODY],
+        ["comments", "add", "--unknown", "i-1", DASH_BODY],
+    ),
+    # other subcommands are not touched at all
+    (["list", "--status", "open"], ["list", "--status", "open"]),
+    (["comments", "list", "i-1"], ["comments", "list", "i-1"]),
+]
+
+
+@pytest.mark.parametrize("given,expected", MOVE_FORMS)
+def test_positional_text_moves_to_its_flag_when_it_begins_with_a_dash(given, expected):
+    assert cli_beads.flag_text_positionals(list(given)) == expected
+
+
+def test_the_move_happens_in_plan_so_every_caller_gets_it(tmp_path):
+    """Same reason as the binding above: ``run`` and ``Board.br`` both compose
+    their argument list here, and the daemon appends ``--json`` after the
+    caller's text — so the transformation has to survive a trailing option."""
+    (cmd,) = cli_beads.plan(
+        ["comments", "add", "i-1", DASH_BODY, "--json"],
+        tmp_path / "r", "s689", db_exists=True, jsonl_exists=True,
+    )
+    assert cmd[5:] == ["comments", "add", "i-1", f"--message={DASH_BODY}", "--json"]
+
+
+def test_a_flagged_value_is_bound_before_the_positional_move_reads_it():
+    """The two rewrites run in one order and the second reads the first's
+    result. ``--title "-x"`` is bound to ``--title=-x``, after which the move
+    sees the text already has a flag and leaves the call alone — rather than
+    reading ``-x`` as a positional and writing a second ``--title``."""
+    (cmd,) = cli_beads.plan(
+        ["create", "--title", "-x", "--type", "bug"],
+        Path("r"), "s689", db_exists=True, jsonl_exists=True,
+    )
+    assert cmd[5:] == ["create", "--title=-x", "--type", "bug"]
+    assert sum(token.startswith("--title") for token in cmd) == 1
+
+
+def test_br_itself_takes_the_moved_form_and_stores_the_text_unchanged(tmp_path):
+    """What the unit tests cannot claim: that ``br`` accepts the flag as an
+    alternative to the positional, refuses the positional it was given, and
+    stores the text byte for byte. Run against a throwaway board."""
+    import json
+    import shutil as _shutil
+
+    if _shutil.which(cli_beads.BINARY) is None:
+        pytest.skip(f"{cli_beads.BINARY} is not installed on this machine")
+    root = tmp_path / "board"
+    root.mkdir()
+    db = str(root / ".beads" / "beads.db")
+
+    def br(args, **kwargs):
+        # ``encoding`` explicitly, for the same reason as the test above.
+        return REAL_RUN([cli_beads.BINARY, "--db", db, *args], cwd=str(root),
+                        capture_output=True, text=True, encoding="utf-8",
+                        **kwargs)
+
+    br(["init", "--prefix", "t"], check=True)
+
+    refused = br(["create", DASH_TITLE, "--type", "bug", "--priority", "3"])
+    assert refused.returncode != 0
+    assert "unexpected argument" in (refused.stderr + refused.stdout)
+
+    moved = br(["create", f"--title={DASH_TITLE}", "--type", "bug",
+                "--priority", "3", "--json"])
+    assert moved.returncode == 0, moved.stderr
+    created = json.loads(moved.stdout)
+    assert created["title"] == DASH_TITLE
+
+    refused = br(["comments", "add", created["id"], DASH_BODY])
+    assert refused.returncode != 0
+
+    moved = br(["comments", "add", created["id"],
+                f"--message={DASH_BODY}", "--json"])
+    assert moved.returncode == 0, moved.stderr
+    assert json.loads(moved.stdout)["text"] == DASH_BODY
+
+
+def br_help_options(*subcommand):
+    """Every option ``br`` lists for ``subcommand``, read off its ``--help``.
+
+    Options occupy the head of their line and the description follows after
+    two or more spaces, so the head is where the names are; a ``-`` inside
+    the description text is not one.
+    """
+    import re
+
+    out = REAL_RUN([cli_beads.BINARY, *subcommand, "--help"],
+                   capture_output=True, text=True, encoding="utf-8")
+    assert out.returncode == 0, out.stderr
+    names = set()
+    for line in out.stdout.splitlines():
+        if not re.match(r"^\s{2,}-", line):
+            continue
+        head = re.split(r"\s{2,}", line.strip())[0]
+        names.update(re.findall(r"(?<![\w-])(--?[A-Za-z][\w-]*)", head))
+    return names
+
+
+def test_the_option_tables_match_the_installed_br():
+    """The tables are read off ``br --help`` by hand, so they can go stale
+    silently. This reads the help back and fails when the installed ``br``
+    has an option for these two subcommands that the tables do not name.
+
+    Only the direction that can rewrite a call wrongly is checked: an option
+    ``br`` has and the tables lack, which ``_positional_slots`` would count
+    as a positional. The other direction costs nothing — a name the tables
+    keep after ``br`` drops it matches no token."""
+    import shutil as _shutil
+
+    if _shutil.which(cli_beads.BINARY) is None:
+        pytest.skip(f"{cli_beads.BINARY} is not installed on this machine")
+
+    for subcommand, known in (
+        (("create",),
+         set(cli_beads.CREATE_VALUE_OPTIONS) | set(cli_beads.CREATE_FLAGS)),
+        (("comments", "add"),
+         set(cli_beads.COMMENTS_ADD_VALUE_OPTIONS)
+         | set(cli_beads.COMMENTS_ADD_FLAGS)),
+    ):
+        missing = br_help_options(*subcommand) - known
+        assert not missing, (
+            f"br {' '.join(subcommand)} has options the tables do not name: "
+            f"{sorted(missing)}"
+        )

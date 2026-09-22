@@ -32,9 +32,21 @@ active — while ``update --status in_reviw`` stores the typo and drops
 that issue out of every status filter and out of ``ready``. Both are the
 same failure: the answer to "I could not read your question" and the
 answer to "there is nothing" arrive identical. So the value is checked
-here, before ``br`` sees it. That one named check is the whole of it —
-no other argument is inspected, and this is not a place to grow a
-general validation layer.
+here, before ``br`` sees it. That one named check is the whole of the
+validation — no other argument is judged, and this is not a place to grow
+a general validation layer.
+
+Two rewrites sit beside that check, and they change spelling rather than
+meaning. ``br``'s parser reads any value that begins with ``-`` as another
+option, so free text written by a person or an agent is refused whenever it
+opens with one: a description carrying the workspace's YAML front matter
+(``---``), an evidence bundle whose first line is a markdown list item, a
+title that starts with a dash. :func:`bind_text_values` binds such a value
+to its option with ``=``, and :func:`flag_text_positionals` moves such a
+positional onto the flag ``br`` offers for the same text. Both leave every
+other call exactly as it was written, and both stand down whenever the
+argument list can be read more than one way, so what a caller gets back in
+that case is ``br``'s own refusal rather than a rewritten command.
 """
 
 from __future__ import annotations
@@ -211,10 +223,8 @@ def bind_text_values(args: List[str]) -> List[str]:
     What this does not reach: a *positional* that begins with ``-`` — a
     comment body whose first line is a markdown list item, as
     ``comments add <id> "- branch: x"``. There is no ``=`` to bind a
-    positional with, and telling one from an option needs ``br``'s
-    per-subcommand flag table. That call is refused by ``br`` with its own
-    message in front of the caller, which is a different cost from the
-    silent one this function removes; it is filed as claunch-c7oad.1.
+    positional with. :func:`flag_text_positionals` handles that case
+    separately, by moving the text onto the flag ``br`` offers for it.
     """
     bound: List[str] = []
     index = 0
@@ -234,6 +244,162 @@ def bind_text_values(args: List[str]) -> List[str]:
         bound.append(token)
         index += 1
     return bound
+
+
+#: The options ``br`` carries on every subcommand. They are split by whether
+#: they consume the token after them, because that is the only thing
+#: :func:`_positional_slots` needs from them: an option that takes a value
+#: hides the token behind it, and reading that token as a positional is how
+#: a scan goes wrong. Read against **br 0.2.14**.
+GLOBAL_VALUE_OPTIONS = ("--db", "--actor", "--lock-timeout")
+GLOBAL_FLAGS = (
+    "--json", "--no-daemon", "--no-auto-flush", "--no-auto-import",
+    "--allow-stale", "--no-db", "--verbose", "-v", "--quiet", "-q",
+    "--no-color", "--help", "-h",
+)
+
+#: The same split for ``br create`` (``br create --help``, br 0.2.14).
+CREATE_VALUE_OPTIONS = GLOBAL_VALUE_OPTIONS + (
+    "--title",
+    "--type", "-t",
+    "--slug",
+    "--priority", "-p",
+    "--description", "-d", "--body",
+    "--assignee", "-a",
+    "--owner",
+    "--labels", "-l",
+    "--parent",
+    "--deps",
+    "--estimate", "-e",
+    "--due",
+    "--defer",
+    "--external-ref",
+    "--status", "-s",
+    "--file", "-f",
+)
+CREATE_FLAGS = GLOBAL_FLAGS + ("--ephemeral", "--dry-run", "--silent")
+
+#: And for ``br comments add`` (``br comments add --help``, br 0.2.14).
+COMMENTS_ADD_VALUE_OPTIONS = GLOBAL_VALUE_OPTIONS + (
+    "--file", "-f",
+    "--author",
+    "--message",
+)
+COMMENTS_ADD_FLAGS = GLOBAL_FLAGS
+
+
+def _positional_slots(
+    args: List[str], value_options, flags
+) -> Optional[List[int]]:
+    """Indices in ``args`` that ``br`` would read as positional arguments.
+
+    ``None`` means the question cannot be answered here: a bare ``--`` was
+    found, after which everything is a positional and the call already
+    reaches ``br`` intact.
+
+    A token that begins with ``-`` and is in neither table is counted as a
+    positional, because that is exactly the case being looked for — ``br``'s
+    parser would read it as an option and refuse the command. The cost of
+    the tables being incomplete is therefore a real option counted as a
+    positional, and :func:`flag_text_positionals` guards against acting on
+    that by refusing to transform a call whose slots do not have the shape
+    the subcommand declares.
+    """
+    slots: List[int] = []
+    index = 0
+    while index < len(args):
+        token = args[index]
+        if token == "--":
+            return None
+        if token.startswith("-") and token != "-":
+            name = token.split("=", 1)[0]
+            if name in value_options:
+                index += 1 if "=" in token else 2
+                continue
+            if name in flags:
+                index += 1
+                continue
+        slots.append(index)
+        index += 1
+    return slots
+
+
+def flag_text_positionals(args: List[str]) -> List[str]:
+    """``args`` with positional free text moved onto the flag ``br`` offers.
+
+    Two subcommands take their free text as a positional argument, and a
+    positional that begins with ``-`` is read by ``br``'s parser as an
+    option and refuses the command: ``create "-로 시작하는 제목"`` and
+    ``comments add <id> "- branch: x"``. The second is an ordinary input in
+    this repository, because the workflows ask for evidence bundles written
+    as lines of ``(axis, tree, value)`` and such a line opens with ``-``.
+
+    ``br`` 0.2.14 offers a flag for both — ``create --title`` and
+    ``comments add --message`` — and a flag's value is bound with ``=``,
+    which clap reads as a value whatever it starts with. So the text is
+    moved there. Both flags are already in :data:`TEXT_OPTIONS`, and the
+    positional and its flag are mutually exclusive in ``br``, so the
+    positional is removed rather than kept alongside.
+
+    Only a call whose slots have the shape the subcommand declares is
+    transformed — one title for ``create``, an id followed by a contiguous
+    run of text for ``comments add`` — and only when one of those text
+    slots begins with ``-``. Anything else is handed on unchanged and gets
+    whatever ``br`` makes of it, which for the failing shapes is the same
+    refusal as before with ``br``'s own message in front of the caller.
+    That is the deliberate fallback for an option this module's tables do
+    not know: an unknown option lands in a slot, the shape stops matching,
+    and nothing is rewritten.
+
+    Text in several positionals is joined with one space, which is what
+    ``br`` itself does with them (``comments add <id> "alpha" "beta"``
+    stores ``"alpha beta"``).
+    """
+    if args[:1] == ["create"]:
+        head, flag = 1, "--title"
+        value_options, flags = CREATE_VALUE_OPTIONS, CREATE_FLAGS
+        id_first = False
+    elif args[:2] == ["comments", "add"]:
+        head, flag = 2, "--message"
+        value_options, flags = COMMENTS_ADD_VALUE_OPTIONS, COMMENTS_ADD_FLAGS
+        id_first = True
+    else:
+        return args
+
+    rest = args[head:]
+    # The text is already somewhere else: on its own flag, or in a file.
+    for token in rest:
+        if token.split("=", 1)[0] in (flag, "--file", "-f"):
+            return args
+
+    slots = _positional_slots(rest, value_options, flags)
+    if slots is None:
+        return args
+    if id_first:
+        # The issue id is the first positional and is never the text.
+        if not slots or rest[slots[0]].startswith("-"):
+            return args
+        text_slots = slots[1:]
+    else:
+        # ``create`` declares one positional. More means a token was read
+        # as a positional that is not one.
+        if len(slots) != 1:
+            return args
+        text_slots = slots
+    if not text_slots:
+        return args
+    if not any(rest[i].startswith("-") for i in text_slots):
+        return args
+    if text_slots != list(range(text_slots[0], text_slots[-1] + 1)):
+        return args
+
+    joined = " ".join(rest[i] for i in text_slots)
+    moved = (
+        rest[: text_slots[0]]
+        + [f"{flag}={joined}"]
+        + rest[text_slots[-1] + 1 :]
+    )
+    return args[:head] + moved
 
 
 def repo_root(cwd: Optional[str] = None) -> Optional[Path]:
@@ -297,15 +463,20 @@ def plan(
     must not grow a board of its own. A ``--status`` value that is not a
     status is refused here too, before any ``br`` runs.
 
-    The caller's arguments also go through :func:`bind_text_values`, which
-    binds a free-text value that begins with ``-`` to its option with ``=``.
-    It is done here rather than at each caller because this is the one place
-    every ``br`` invocation is composed, and the failure it removes is one
-    the callers cannot see: ``br`` refuses the command at parse time and
-    the daemon logs a warning nobody reads.
+    The caller's arguments also go through two rewrites that make free text
+    beginning with ``-`` reach ``br`` as text: :func:`bind_text_values` for
+    text given to an option, :func:`flag_text_positionals` for text given as
+    a positional argument. Both are done here rather than at each caller
+    because this is the one place every ``br`` invocation is composed, and
+    the first removes a failure the callers cannot see: ``br`` refuses the
+    command at parse time and the daemon logs a warning nobody reads.
+
+    Order matters between them only in that the second reads the result of
+    the first. ``create --title "-x"`` is bound to ``create --title=-x`` and
+    then left alone, because its text already has a flag.
     """
     check_statuses(args)
-    args = bind_text_values(args)
+    args = flag_text_positionals(bind_text_values(args))
     beads_dir = root / BEADS_DIR
     db = str(beads_dir / DB_NAME)
     base = [BINARY, "--db", db]
