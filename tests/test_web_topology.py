@@ -270,6 +270,15 @@ This wrapper is what makes them run with everything else — and
 ``test_every_harness_is_registered`` is what makes the list below match the
 directory, so the next harness cannot arrive the way those two did.
 
+``floworphans_check`` holds the Flows page's second reading, the runs whose
+driving session has exited. Its checks are about where the judgment comes
+from: the daemon marks those runs (one predicate, shared with the clock that
+pushes the same fact at the overseeing session), and the tab filters on that
+mark rather than inferring it from an empty session list — a run started
+outside any session looks identical and is nobody's to resume. The rest is
+the summary line, which has to read as a sentence when the run is missing
+the fields a healthy one would have.
+
 Skipped, not failed, where node is unavailable: node is a convenience for
 testing this project, never a requirement for using it.
 """
@@ -406,6 +415,7 @@ CHECKS = [
         "projects_check.js",
         "searchclear_check.js",
         "modalgitwait_check.js",
+        "floworphans_check.js",
 ]
 
 

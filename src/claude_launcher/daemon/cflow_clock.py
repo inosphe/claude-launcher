@@ -2162,6 +2162,49 @@ _RUNNING = ("step", "select")
 #: (below the beads default, this is the only clock reading it, read live).
 _END_MAX = 120.0
 
+#: Statuses in which a run is finished and can no longer be driven. A run that
+#: has reached one of them is not orphaned by its session's exit -- there is
+#: nothing left for anyone to drive.
+_SETTLED = ("done", "aborted")
+
+
+def driver_gone(manager, cwd: str, scope: str) -> bool:
+    """True when the run's scope names a managed session that has exited.
+
+    Same containment rule as :func:`session_for`: the scope IS the session
+    name, and the cwd must match. A scope no manager knows is a standalone or
+    CLI run -- not driven by a session, so never orphaned by one -- and a
+    matching name in another directory is somebody else's session.
+    """
+    try:
+        session = manager.get(scope)
+    except Exception:
+        return False
+    if not session.sdef.cwd:
+        return False
+    try:
+        if cflow_state.resolve_cwd(session.sdef.cwd) != cwd:
+            return False
+    except Exception:
+        return False
+    return bool(session.exited)
+
+
+def run_orphaned(manager, cwd: str, scope: str, payload: dict) -> bool:
+    """The run at ``(cwd, scope)`` is unfinished and nobody is driving it.
+
+    One rule with two readers: :class:`RunEventClock` pushes the ``orphaned``
+    fyi off it, and ``/api/cflow`` marks the same runs so the dashboard's
+    Orphans tab lists exactly what the clock reported. Written in one place
+    because the two would otherwise drift, and a tab that disagrees with the
+    notification that sent the reader to it is worse than no tab.
+    """
+    return bool(
+        payload.get("run")
+        and payload.get("status") not in _SETTLED
+        and driver_gone(manager, cwd, scope)
+    )
+
 
 class RunEventClock:
     """Tells a run's overseer when the run stops being its own agent's.
@@ -2373,9 +2416,9 @@ class RunEventClock:
                             )
                 continue
             if (
-                enabled and run_id and status not in ("done", "aborted")
+                enabled
                 and (cwd, scope, run_id) not in self._orphaned
-                and self._driver_gone(cwd, scope)
+                and run_orphaned(self.manager, cwd, scope, payload)
             ):
                 # State, not a transition — fires on sight, once per run.
                 self._orphaned.add((cwd, scope, run_id))
@@ -2412,28 +2455,6 @@ class RunEventClock:
             "kind": kind,
             "block": event_block(scope, kind, payload),
         }
-
-    def _driver_gone(self, cwd: str, scope: str) -> bool:
-        """True when the run's scope names a managed session that has exited.
-
-        Same containment rule as :func:`session_for`: the
-        scope IS the session name, and the cwd must match. A scope no manager
-        knows is a standalone/CLI run — not driven by a session, so never
-        orphaned by one — and a matching name in another directory is
-        somebody else's session.
-        """
-        try:
-            session = self.manager.get(scope)
-        except Exception:
-            return False
-        if not session.sdef.cwd:
-            return False
-        try:
-            if cflow_state.resolve_cwd(session.sdef.cwd) != cwd:
-                return False
-        except Exception:
-            return False
-        return bool(session.exited)
 
     def _drain_ends(self) -> None:
         """Hand the queued end-sequences to the loop as tasks.

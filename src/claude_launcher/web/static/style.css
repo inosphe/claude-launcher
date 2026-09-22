@@ -869,14 +869,34 @@ option:disabled { color: #6b7280; }
 .home-row .meta { margin-left: auto; color: #7d8590; font-size: 11px; }
 .home-rows .wf-note { padding-top: 6px; font-size: 12px; }
 
-#cflow-list { list-style: none; }
-#cflow-list .cflow-empty {
+/* Both readings of the Flows page draw the same card, so both lists wear
+   the same rules -- the Orphans tab is a filter over the Runs list, not a
+   second design. */
+#cflow-list, #cflow-orphan-list { list-style: none; }
+#cflow-list .cflow-empty, #cflow-orphan-list .cflow-empty {
   padding: 8px 16px 10px; font-size: 12px; color: #6e7681;
   border-bottom: none; cursor: default;
 }
-#cflow-list li { padding: 8px 16px 10px; border-bottom: 1px solid #22262d; font-size: 13px; }
-#cflow-list li.clickable { cursor: pointer; }
-#cflow-list li.clickable:hover { background: #22262d; }
+#cflow-list li, #cflow-orphan-list li {
+  padding: 8px 16px 10px; border-bottom: 1px solid #22262d; font-size: 13px;
+}
+#cflow-list li.clickable, #cflow-orphan-list li.clickable { cursor: pointer; }
+#cflow-list li.clickable:hover,
+#cflow-orphan-list li.clickable:hover { background: #22262d; }
+/* A driverless run is the one thing on this page nothing else will move, so
+   its card carries a mark down the side that survives the hover colour. */
+#cflow-orphan-list li.cflow-orphan {
+  border-left: 2px solid #ff7b72; padding-left: 14px;
+}
+/* The buttons under an orphan's card. They sit inside a card whose own click
+   opens the run page, so they need the room to be pressed on their own. */
+.cflow-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+.cflow-actions .wf-btn { margin-right: 0; }
+/* The Orphans tab's standing explanation. Indented to the cards' own 16px so
+   it reads as their heading rather than as a stray line above the list. */
+#flows-orphans-note {
+  margin: 0 0 14px; padding: 0 16px; max-width: 760px; line-height: 1.5;
+}
 .cflow-head { display: flex; align-items: center; gap: 8px; }
 .cflow-scope {
   font-size: 11px; padding: 1px 7px; border-radius: 9px;
@@ -2958,7 +2978,8 @@ a.wf-btn { display: inline-block; text-decoration: none; line-height: 1.5; }
 .wf-journal { margin-top: 18px; color: #7d8590; font-size: 12px; }
 .wf-journal summary { cursor: pointer; margin-bottom: 6px; }
 .wf-journal-line { padding: 1px 0; color: #6e7681; }
-#cflow-list .linkish:hover { color: #58a6ff; }
+#cflow-list .linkish:hover,
+#cflow-orphan-list .linkish:hover { color: #58a6ff; }
 
 /* relay badge (header): permanent connectivity indicator. It owns a row of
    its own, so it keeps to one line — a name too long for the rail is cut

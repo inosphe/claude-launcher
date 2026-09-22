@@ -5452,6 +5452,8 @@ async function refreshCflow() {
   // route() calls refreshCflow on the way in, so arriving still finds it
   // drawn from the poll that just landed.
   if (currentPage !== "flows") return;
+  renderFlowsTabs();   // the Orphans label carries a count off this answer
+  if (flowsSection === "orphans") { renderFlowsOrphans(runs); return; }
   const list = $("cflow-list");
   list.innerHTML = "";
   if (runs.length === 0) {
@@ -5461,151 +5463,301 @@ async function refreshCflow() {
     list.appendChild(li);
     return;
   }
-  for (const r of runs) {
-    const li = document.createElement("li");
+  for (const r of runs) list.appendChild(cflowCard(r));
+}
 
-    const head = document.createElement("div");
-    head.className = "cflow-head";
-    const [markCls, markGlyph] = wfMark(r.status, r);
-    const mark = document.createElement("span");
-    mark.className = markCls;
-    mark.textContent = markGlyph;
-    const name = document.createElement("span");
-    // A run is keyed by (directory, session), so a team working one workflow
-    // in one tree makes cards that differ ONLY by the session. That makes the
-    // session part of the run's name here, not a decoration beside it — the
-    // whole point of this list is picking the right one of them.
-    const scoped = r.scope && r.scope !== "default";
-    name.textContent = scoped
-      ? `${r.workflow || "(workflow)"} · ${r.scope}`
-      : (r.workflow || "(workflow)");
-    const st = document.createElement("span");
-    st.className = "meta";
-    st.textContent =
-      r.status === "waiting_approval" && r.reason === "loop_limit"
-        ? "loop limit"
-        : r.status === "waiting_approval" && r.reason === "declined"
-        ? "declined"
-        : r.status === "waiting_answer"
-        ? (answerFellToUs(r) ? "asked of nobody" : `with ${askWho(r.ask)}`)
-        : r.status === "waiting_goto"
-        ? "step change asked"
-        : r.status;
-    head.append(mark, name, st);
-    li.appendChild(head);
+/* One run, as a list card. Split out of the list's own loop because the
+   Orphans tab draws the same card for the runs it lists: the two readings
+   differ in WHICH runs they carry and in the actions offered under them, not
+   in how a run is described. */
+function cflowCard(r) {
+  const li = document.createElement("li");
 
-    if (r.step_id) {
-      const visit = r.visit > 1 ? ` · visit ${r.visit}` : "";
-      const round = r.round ? ` · round ${r.round}` : r.recur ? " · recurs" : "";
-      li.appendChild(cflowLine(
-        `step: ${r.title || r.step_id}${visit}${round} · ${r.steps_completed ?? 0} done`
-      ));
-    }
-    // A slot with no run but a request filed against it is listed too — that
-    // waiting period is exactly when a human wants to see something.
-    if (r.pending_start) {
-      li.appendChild(cflowLine(
-        r.pending_start.by === "recur"
-          ? `recurs — next round requested` +
-            (r.pending_start.round ? ` (round ${r.pending_start.round})` : "")
-          : `start requested: ${r.pending_start.name || r.pending_start.workflow}`,
-        "report"
-      ));
-    }
+  const head = document.createElement("div");
+  head.className = "cflow-head";
+  const [markCls, markGlyph] = wfMark(r.status, r);
+  const mark = document.createElement("span");
+  mark.className = markCls;
+  mark.textContent = markGlyph;
+  const name = document.createElement("span");
+  // A run is keyed by (directory, session), so a team working one workflow
+  // in one tree makes cards that differ ONLY by the session. That makes the
+  // session part of the run's name here, not a decoration beside it — the
+  // whole point of this list is picking the right one of them.
+  const scoped = r.scope && r.scope !== "default";
+  name.textContent = scoped
+    ? `${r.workflow || "(workflow)"} · ${r.scope}`
+    : (r.workflow || "(workflow)");
+  const st = document.createElement("span");
+  st.className = "meta";
+  st.textContent =
+    r.status === "waiting_approval" && r.reason === "loop_limit"
+      ? "loop limit"
+      : r.status === "waiting_approval" && r.reason === "declined"
+      ? "declined"
+      : r.status === "waiting_answer"
+      ? (answerFellToUs(r) ? "asked of nobody" : `with ${askWho(r.ask)}`)
+      : r.status === "waiting_goto"
+      ? "step change asked"
+      : r.status;
+  head.append(mark, name, st);
+  li.appendChild(head);
 
-    // Latest step reports: the agent's own account of each finished step
-    // (plus the current step's filed-but-not-advanced report, if any).
-    const reports = (r.reports || []).slice(-3);
-    for (const rep of reports) {
-      const line = cflowLine(`${rep.step}: ${mdPlain(rep.summary)}`, "report");
-      if (rep.details) line.title = mdText(rep.details);
-      li.appendChild(line);
-    }
+  if (r.step_id) {
+    const visit = r.visit > 1 ? ` · visit ${r.visit}` : "";
+    const round = r.round ? ` · round ${r.round}` : r.recur ? " · recurs" : "";
+    li.appendChild(cflowLine(
+      `step: ${r.title || r.step_id}${visit}${round} · ${r.steps_completed ?? 0} done`
+    ));
+  }
+  // A slot with no run but a request filed against it is listed too — that
+  // waiting period is exactly when a human wants to see something.
+  if (r.pending_start) {
+    li.appendChild(cflowLine(
+      r.pending_start.by === "recur"
+        ? `recurs — next round requested` +
+          (r.pending_start.round ? ` (round ${r.pending_start.round})` : "")
+        : `start requested: ${r.pending_start.name || r.pending_start.workflow}`,
+      "report"
+    ));
+  }
 
-    const cwdLine = cflowLine(shortenPath(r.cwd), "dim");
-    cwdLine.title = r.cwd;
-    li.appendChild(cwdLine);
-    li.classList.add("clickable");
-    li.addEventListener("click", () => {
-      location.hash = "#/wf/" + encodeURIComponent(`${r.scope || "default"}|${r.cwd}`);
+  // Latest step reports: the agent's own account of each finished step
+  // (plus the current step's filed-but-not-advanced report, if any).
+  const reports = (r.reports || []).slice(-3);
+  for (const rep of reports) {
+    const line = cflowLine(`${rep.step}: ${mdPlain(rep.summary)}`, "report");
+    if (rep.details) line.title = mdText(rep.details);
+    li.appendChild(line);
+  }
+
+  const cwdLine = cflowLine(shortenPath(r.cwd), "dim");
+  cwdLine.title = r.cwd;
+  li.appendChild(cwdLine);
+  li.classList.add("clickable");
+  li.addEventListener("click", () => {
+    location.hash = "#/wf/" + encodeURIComponent(`${r.scope || "default"}|${r.cwd}`);
+  });
+  // Always, not only while the session is alive: a run whose session has
+  // exited is exactly the one a human mistakes for someone else's, and the
+  // exited session is still there to attach (it resumes).
+  if (scoped) {
+    const live = (r.sessions || []).includes(r.scope);
+    const sess = cflowLine(
+      `session: ${r.scope}${live ? "" : " (not running)"}`, "dim"
+    );
+    sess.classList.add("linkish");
+    sess.title = live
+      ? "attach the session's terminal"
+      : "this run's session is not running — open it to resume";
+    sess.addEventListener("click", (e) => {
+      e.stopPropagation();
+      location.hash = "#/s/" + encodeURIComponent(r.scope);
     });
-    // Always, not only while the session is alive: a run whose session has
-    // exited is exactly the one a human mistakes for someone else's, and the
-    // exited session is still there to attach (it resumes).
-    if (scoped) {
-      const live = (r.sessions || []).includes(r.scope);
-      const sess = cflowLine(
-        `session: ${r.scope}${live ? "" : " (not running)"}`, "dim"
-      );
-      sess.classList.add("linkish");
-      sess.title = live
-        ? "attach the session's terminal"
-        : "this run's session is not running — open it to resume";
-      sess.addEventListener("click", (e) => {
-        e.stopPropagation();
-        location.hash = "#/s/" + encodeURIComponent(r.scope);
-      });
-      li.appendChild(sess);
-    }
+    li.appendChild(sess);
+  }
 
-    if (r.status === "waiting_answer") {
-      if (answerFellToUs(r)) {
-        // Nobody holds this one, so name the matching human control: branch
-        // options use select, while approval questions use approve.
-        const opts = answerBranchOptions(r);
-        if (opts !== null) {
-          const names = opts.map((o) => o.name || o).join("|") || "option";
-          li.appendChild(cflowLine(`put to nobody — choose ${names}`));
-          li.appendChild(cflowHint(`claunch cflow select <${names}>`));
-        } else {
-          li.appendChild(cflowLine("put to nobody — it is yours to approve"));
-          li.appendChild(cflowHint("claunch cflow approve"));
-        }
+  if (r.status === "waiting_answer") {
+    if (answerFellToUs(r)) {
+      // Nobody holds this one, so name the matching human control: branch
+      // options use select, while approval questions use approve.
+      const opts = answerBranchOptions(r);
+      if (opts !== null) {
+        const names = opts.map((o) => o.name || o).join("|") || "option";
+        li.appendChild(cflowLine(`put to nobody — choose ${names}`));
+        li.appendChild(cflowHint(`claunch cflow select <${names}>`));
       } else {
-        li.appendChild(cflowLine(`waiting on ${askWho(r.ask)} to decide`));
-        if (r.ask && r.ask.deadline) {
-          li.appendChild(cflowLine(`moves on after ${r.ask.deadline}`));
-        }
+        li.appendChild(cflowLine("put to nobody — it is yours to approve"));
+        li.appendChild(cflowHint("claunch cflow approve"));
       }
-    } else if (r.status === "waiting_approval") {
-      if (r.reason === "declined" && r.declined) {
-        li.appendChild(cflowLine(
-          `${r.declined.by} declined — ` +
-          (mdPlain(r.declined.reason) || "no reason given")
-        ));
+    } else {
+      li.appendChild(cflowLine(`waiting on ${askWho(r.ask)} to decide`));
+      if (r.ask && r.ask.deadline) {
+        li.appendChild(cflowLine(`moves on after ${r.ask.deadline}`));
       }
-      li.appendChild(cflowHint("claunch cflow approve"));
-    } else if (r.status === "waiting_selection" || r.status === "select") {
-      if (r.proposal) {
-        li.appendChild(cflowLine(
-          `agent proposes: ${r.proposal.option} — ${r.proposal.reason || ""}`
-        ));
-      }
-      if (r.status === "waiting_selection" || r.chooser === "user") {
-        const opts = (r.options || []).map((o) => o.name).join("|");
-        li.appendChild(cflowHint(`claunch cflow select <${opts}>`));
-      }
-    } else if (r.status === "waiting_checklist") {
-      for (const line of checklistLines(r.checklist)) li.appendChild(line);
-    } else if (r.status === "waiting_goto") {
-      const gr = r.goto_request || {};
-      li.appendChild(cflowLine(
-        `asked to move '${gr.from || r.step_id}' → '${gr.step}' — ` +
-        (mdPlain(gr.reason) || "no reason given")
-      ));
-      li.appendChild(cflowHint("claunch cflow goto --approve | --deny"));
-    } else if (r.status === "waiting_window") {
-      li.appendChild(cflowLine(
-        `chose '${r.option}' — held until ${fmtOpensAt(r.opens_at)} ` +
-        `(at most every ${r.interval}s); the daemon releases it`
-      ));
-      li.appendChild(cflowHint(`claunch cflow select ${r.option}`));
-    } else if (r.status === "error") {
-      li.appendChild(cflowLine(r.error || "error", "error"));
     }
+  } else if (r.status === "waiting_approval") {
+    if (r.reason === "declined" && r.declined) {
+      li.appendChild(cflowLine(
+        `${r.declined.by} declined — ` +
+        (mdPlain(r.declined.reason) || "no reason given")
+      ));
+    }
+    li.appendChild(cflowHint("claunch cflow approve"));
+  } else if (r.status === "waiting_selection" || r.status === "select") {
+    if (r.proposal) {
+      li.appendChild(cflowLine(
+        `agent proposes: ${r.proposal.option} — ${r.proposal.reason || ""}`
+      ));
+    }
+    if (r.status === "waiting_selection" || r.chooser === "user") {
+      const opts = (r.options || []).map((o) => o.name).join("|");
+      li.appendChild(cflowHint(`claunch cflow select <${opts}>`));
+    }
+  } else if (r.status === "waiting_checklist") {
+    for (const line of checklistLines(r.checklist)) li.appendChild(line);
+  } else if (r.status === "waiting_goto") {
+    const gr = r.goto_request || {};
+    li.appendChild(cflowLine(
+      `asked to move '${gr.from || r.step_id}' → '${gr.step}' — ` +
+      (mdPlain(gr.reason) || "no reason given")
+    ));
+    li.appendChild(cflowHint("claunch cflow goto --approve | --deny"));
+  } else if (r.status === "waiting_window") {
+    li.appendChild(cflowLine(
+      `chose '${r.option}' — held until ${fmtOpensAt(r.opens_at)} ` +
+      `(at most every ${r.interval}s); the daemon releases it`
+    ));
+    li.appendChild(cflowHint(`claunch cflow select ${r.option}`));
+  } else if (r.status === "error") {
+    li.appendChild(cflowLine(r.error || "error", "error"));
+  }
 
+  return li;
+}
+
+/* ------------------------------------------------------------------ */
+/* the Flows page's two readings                                        */
+/* ------------------------------------------------------------------ */
+/* Which section of the Flows page is on screen. "runs" is every run the
+   daemon registers; "orphans" is the subset it already reports on its own —
+   a run still active while the session that was driving it has exited, which
+   the run event clock types at the overseeing session as "nobody is
+   driving". That fyi lands in an agent's terminal and names a CLI command;
+   this tab is where a person reads the same list and acts on it. One section
+   deep in the URL, the spelling #/beads/<section> already uses, so the tab
+   is linkable and Back means "out of the section". */
+let flowsSection = "runs";
+
+function openFlows(section) {
+  flowsSection = section === "orphans" ? "orphans" : "runs";
+  showView("flows");
+  renderFlowsTabs();
+  refreshCflow();
+}
+
+/* The tab strip, and the panes it shows and hides. Rebuilt on every poll
+   rather than once, because the Orphans label carries the count: a run whose
+   session dies while the page is open has to move the number without the
+   reader navigating. Two anchors is a cheap rebuild. */
+function renderFlowsTabs() {
+  const tabs = $("flows-tabs");
+  if (!tabs) return;
+  const orphans = cflowOrphans(cflowCache).length;
+  tabs.innerHTML = "";
+  for (const [section, label, href] of [
+    ["runs", "Runs", "#/flows"],
+    ["orphans", orphans ? `Orphans (${orphans})` : "Orphans", "#/flows/orphans"],
+  ]) {
+    const tab = el("a", "seq-tab" + (flowsSection === section ? " on" : ""), label);
+    tab.href = href;
+    tabs.appendChild(tab);
+  }
+  $("flows-runs").classList.toggle("hidden", flowsSection !== "runs");
+  $("flows-orphans").classList.toggle("hidden", flowsSection !== "orphans");
+}
+
+/* The runs nobody is driving. The judgment is the daemon's — `orphaned` is
+   set by /api/cflow from the same predicate the run event clock fires on
+   (cflow_clock.run_orphaned) — so this tab cannot list a different set from
+   the one the notification reported. Deriving it here from `sessions` being
+   empty would have been a second rule: a run started from the CLI has no
+   session at all and is nobody's to resume. */
+function cflowOrphans(runs) {
+  return (runs || []).filter((r) => r && r.orphaned);
+}
+
+/* The one line that says what is wrong with this run, above the card's
+   ordinary description of where it stands. */
+function cflowOrphanSummary(r) {
+  const who = r.scope && r.scope !== "default" ? r.scope : "its session";
+  const run = r.run ? `run ${r.run}` : "the run";
+  const step = r.title || r.step_id;
+  const where = step ? `at step '${step}'` : `in ${r.status || "an unknown state"}`;
+  return `${who} has exited — ${run} is still ${where}, and nothing is driving it`;
+}
+
+const FLOWS_ORPHAN_NOTE =
+  "Runs that are still active while the session driving them has exited. " +
+  "Nothing will advance them: the reminder and the stall ping both type " +
+  "into a session, and there is none. Resume the session to carry the run " +
+  "on from where it stands, or archive the run to free the slot for a new " +
+  "one. The daemon reports the same runs to the overseeing session as a " +
+  "machine-generated fyi (the cflow_events switch).";
+
+function renderFlowsOrphans(runs) {
+  $("flows-orphans-note").textContent = FLOWS_ORPHAN_NOTE;
+  const list = $("cflow-orphan-list");
+  list.innerHTML = "";
+  const orphans = cflowOrphans(runs);
+  if (!orphans.length) {
+    list.appendChild(el(
+      "li", "cflow-empty",
+      "no driverless runs — every active run still has its session"
+    ));
+    return;
+  }
+  for (const r of orphans) {
+    const li = cflowCard(r);
+    li.classList.add("cflow-orphan");
+    // Above the card's own step line, not below it: the reason this run is
+    // listed here at all is the first thing to read.
+    li.insertBefore(
+      cflowLine(cflowOrphanSummary(r), "error"), li.firstChild.nextSibling
+    );
+    li.appendChild(cflowOrphanActions(r));
     list.appendChild(li);
   }
+}
+
+/* The two things a person can do about a driverless run, as buttons rather
+   than as the CLI lines the fyi names. Both stop the click from reaching the
+   card, whose own job is to open the run page. */
+function cflowOrphanActions(r) {
+  const row = el("div", "cflow-actions");
+
+  const resume = el("button", "wf-btn", "Resume session");
+  resume.type = "button";
+  resume.title =
+    `relaunch ${r.scope} under its own definition, so the run has a ` +
+    "driver again (the claude harness comes back with --resume)";
+  resume.addEventListener("click", async (e) => {
+    e.stopPropagation();
+    resume.disabled = true;
+    try {
+      const resp = await api(
+        `/api/sessions/${encodeURIComponent(r.scope)}/respawn`,
+        { method: "POST" }
+      );
+      const info = await resp.json().catch(() => ({}));
+      if (!resp.ok) {
+        alert(info.error || `HTTP ${resp.status}`);
+        return;
+      }
+      await refreshSessions();
+      refreshCflow();
+    } catch { /* auth overlay is up */ }
+    finally { resume.disabled = false; }
+  });
+  row.appendChild(resume);
+
+  const arch = el("button", "wf-btn archive", "Abort & archive run");
+  arch.type = "button";
+  arch.title =
+    "move this run's state and journal into .cflow archive, freeing the " +
+    "slot for a new workflow";
+  arch.addEventListener("click", (e) => {
+    e.stopPropagation();
+    const q =
+      `Abort and archive ${r.run || "this run"}?\n\nIts state and journal ` +
+      `move into .cflow archive. ${r.scope} keeps its record and can still ` +
+      "be resumed; it just comes back without this run.";
+    if (confirm(q)) {
+      cflowAction("/api/cflow/archive", { cwd: r.cwd, scope: r.scope });
+    }
+  });
+  row.appendChild(arch);
+  return row;
 }
 
 let profileDetails = {};
@@ -11535,7 +11687,8 @@ function mobileTitle() {
     case "observer": return "관찰 대시보드";
     case "new": return "new session";
     case "meshes": return "mesh";
-    case "flows": return "workflows";
+    case "flows": return flowsSection === "orphans"
+      ? "workflows · orphans" : "workflows";
     case "window": return "measurement window";
     case "settings": return "settings";
     case "beads": return beadsSection === "reports" ? "reports"
@@ -12143,6 +12296,7 @@ function wfSplitBar(host, dia, side) {
  *   #/mesh/<name>       one mesh
  *   #/mesh/<name>/flows ...and where each of its agents is in its workflow
  *   #/flows             cflow runs
+ *   #/flows/orphans     ...the ones whose driving session has exited
  *   #/window            measurement grants and their FIFO queue
  *   #/wf/<scope|cwd>    one run
  *   #/msg/<name>        what that session has said and been told
@@ -12195,7 +12349,11 @@ function parseHash(h) {
     scope: ["session", "mesh"].includes(parts[1]) ? parts[1] : "global",
     name: parts[2] || "",
   };
-  if (parts[0] === "flows") return { page: "flows" };
+  // #/flows is every run; #/flows/orphans the ones whose driving session
+  // has exited. Same one-section-deep spelling as #/beads/<section>.
+  if (parts[0] === "flows") {
+    return { page: "flows", section: parts[1] === "orphans" ? "orphans" : "" };
+  }
   if (parts[0] === "window") return { page: "window" };
   // One page, one shell: nothing else about the CLI tab is addressable, so
   // anything past "#/cli" is still the same terminal.
@@ -12261,7 +12419,7 @@ function route() {
     case "meshes": showView("meshes"); refreshMeshList(); break;
     // New sessions use the page; child creation borrows its form in a modal.
     case "new": showView("new"); openNewSession(r.mesh); break;
-    case "flows": showView("flows"); refreshCflow(); break;
+    case "flows": openFlows(r.section); break;
     case "window": openWindowPage(); break;
     case "cli": openCli(); break;
     case "settings": openSettings(r.section); break;
