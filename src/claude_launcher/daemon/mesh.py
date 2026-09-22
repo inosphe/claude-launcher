@@ -7431,6 +7431,15 @@ def format_delivery(
     meaning the reader's own; a sender it does not mention gets no ``machine``
     line at all. Same-daemon is the common case and is written short, so what
     stands out in a batch is the sender the reader cannot reach by filesystem.
+
+    An entry does NOT carry the message's own ``to``. In a 1:1 send it
+    repeats the block's top-level ``to:`` verbatim, and in a multi-send it
+    spells the whole recipient roster into every one of those recipients'
+    terminals — a cost that grows with the fan-out and buys the reader
+    nothing it acts on. The widest fan-out, ``to: "*"``, has never carried
+    it, and the reader protocol in ``mesh_install`` has never listed it. The
+    roster is still on the message in the log, so ``claunch mesh history``
+    remains the way to ask who else received one (claunch-mesh-drop-batch-to-8lqg1).
     """
     batch = []
     for m in msgs:
@@ -7441,8 +7450,6 @@ def format_delivery(
         origin = (origins or {}).get(str(m.get("from") or ""))
         if origin is not None:
             entry["machine"] = "local" if not origin else f"{origin} (remote)"
-        if m.get("to") != "*":
-            entry["to"] = m.get("to")
         intent = str(msg_type_for(m, handle)).strip().lower() or "say"
         if intent != "say":
             entry["type"] = intent
