@@ -4390,6 +4390,24 @@ a.window-owner:hover { color: #79c0ff; text-decoration: underline; }
    shown; a pseudo-kind is only for a row that carried none. */
 .search-anything-meta { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; font-size: 11px; color: #9da5b0; }
 .search-anything-kind { padding: 1px 7px; border-radius: 10px; background: #21262d; color: #9da5b0; }
+/* The kind filter: what the page's other filters wear (`.seq-tab` below), and
+   carrying its colours rather than its class — `.search-anything button` is
+   broader than `.seq-tab` and would win on the same element. The pressed
+   spelling is `[aria-pressed]` because that is what the chip actually is (a
+   toggle), and the rail's state filters already read their on-state that way;
+   `.on` would be a fourth spelling of the same idea. */
+.search-anything-filters { display: flex; flex-wrap: wrap; gap: 6px; margin: 10px 0 2px; flex: none; }
+.search-anything-filters:empty { margin: 0; }
+.search-anything-filter {
+  display: inline-flex; align-items: center; gap: 6px;
+  cursor: pointer; border: 1px solid #30363d; background: #1b1e24;
+  color: #9da5b0; border-radius: 6px; padding: 4px 10px; font-size: 12px;
+}
+.search-anything-filter:hover { border-color: #4d5566; color: #d8dbe0; }
+.search-anything-filter[aria-pressed="true"] {
+  background: #172947; border-color: #58a6ff; color: #cfe2ff; cursor: default;
+}
+.search-anything-filter-count { font-variant-numeric: tabular-nums; opacity: .75; }
 .search-settings label { display: flex; flex-direction: column; gap: 4px; margin: 10px 0; }
 .search-settings input { max-width: 100%; box-sizing: border-box; padding: 8px; font-size: 16px; }
 .search-settings input[type=checkbox] { align-self: flex-start; }

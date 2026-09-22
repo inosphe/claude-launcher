@@ -20,9 +20,17 @@ globalThis.SearchAnything = (() => {
   input.setAttribute("aria-label", "통합 검색어"); input.maxLength = 2000;
   const submit = node("button", "검색"); submit.type = "submit";
   const notice = node("p", "Enter로 검색 · Esc로 닫기", "search-anything-notice"); notice.setAttribute("role", "status");
+  // The kind filter, between the answer's own line and the rows it narrows.
+  const filters = node("div", "", "search-anything-filters");
+  filters.setAttribute("role", "group"); filters.setAttribute("aria-label", "항목 종류 필터");
   const results = node("div", "", "search-anything-results");
-  form.append(input, submit); modal.append(header, form, notice, results); document.body.append(modal);
+  form.append(input, submit); modal.append(header, form, notice, filters, results); document.body.append(modal);
   let sequence = 0, controller = null, previousFocus = null, timeRefresh = null;
+  // The last answer, kept so that changing the filter re-narrows what is
+  // already on screen instead of asking the daemon the same question again.
+  // `kindFilter` empty means every kind; `lastNotice` is that answer's own
+  // line, which the filter appends its count to.
+  let lastRows = [], lastNotice = "", kindFilter = "";
   const relativeTime = new Intl.RelativeTimeFormat("ko", {numeric: "always"});
   function formatTime(value) {
     const date = new Date(value);
@@ -60,6 +68,10 @@ globalThis.SearchAnything = (() => {
   // (see the unified corpus in daemon/search_anything.py), which is the only
   // thing this dialog decides a row's class from.
   const SESSION = "session";
+  // What a row's source is called: the daemon's own word for it, and 기록 for a
+  // row that arrived without one. The filter chips are built from this same
+  // value, so a chip and the badge on the rows it selects always agree.
+  const kindLabel = row => row.kind || "기록";
   // What the state of a session is called here. `status` is the fleet's live
   // reading (starting/busy/idle/exited) and comes from the daemon on every
   // answer rather than from the index, which is embedded in the background
@@ -89,7 +101,7 @@ globalThis.SearchAnything = (() => {
   }
   function resultHeader(row) {
     const head = node("div", "", "search-anything-meta");
-    head.append(node("span", row.kind || "기록", "search-anything-kind"));
+    head.append(node("span", kindLabel(row), "search-anything-kind"));
     if (row.at) { const time = node("time", formatTime(row.at)); time.dateTime = row.at; head.append(time); }
     if (row.root) head.append(node("span", row.root, "search-anything-root"));
     return head;
@@ -150,20 +162,59 @@ globalThis.SearchAnything = (() => {
     }
     return groups.map(([, group]) => group.length);
   }
+  // The kind filter: 전체 plus one chip per kind this answer actually holds,
+  // each carrying how many rows it would leave. The chips are built from the
+  // rows rather than from a fixed list of kinds, so a chip never promises rows
+  // the answer does not have. What that leaves out — a kind that exists in the
+  // index but not in this answer's window — is written down in
+  // docs/search-anything.md instead of being papered over here.
+  function renderFilters(rows) {
+    const counts = new Map();
+    for (const row of rows) counts.set(kindLabel(row), (counts.get(kindLabel(row)) || 0) + 1);
+    const chips = [["", "전체", rows.length]];
+    for (const [kind, count] of [...counts].sort((a, b) => b[1] - a[1])) chips.push([kind, kind, count]);
+    filters.replaceChildren();
+    for (const [value, label, count] of chips) {
+      const chip = node("button", "", "search-anything-filter"); chip.type = "button";
+      chip.append(node("span", label), node("span", count, "search-anything-filter-count"));
+      chip.dataset.kind = value;
+      chip.setAttribute("aria-pressed", String(value === kindFilter));
+      chip.onclick = () => { kindFilter = value; renderFilters(rows); renderResults(); };
+      filters.append(chip);
+    }
+  }
+  // The rows the filter leaves, drawn as the two lists. Called on every new
+  // answer and on every filter change; a filter change does not re-ask the
+  // daemon, so a chip narrows exactly what is already on screen and the
+  // answer's own line keeps its meaning.
+  function renderResults() {
+    const rows = kindFilter ? lastRows.filter(row => kindLabel(row) === kindFilter) : lastRows;
+    results.replaceChildren();
+    addGroups(rows);
+    notice.textContent = lastNotice + (kindFilter ? ` · 표시 ${rows.length}` : "");
+  }
   form.onsubmit = async event => {
     event.preventDefault(); const query = input.value.trim(); if (!query) return;
     controller?.abort(); controller = new AbortController(); const ticket = ++sequence;
-    submit.disabled = true; notice.textContent = "검색 중…"; results.replaceChildren();
+    submit.disabled = true; notice.textContent = "검색 중…"; results.replaceChildren(); filters.replaceChildren();
     try {
       const data = await request("api/search?kind=all&limit=30&q=" + encodeURIComponent(query), undefined, "GET", controller.signal);
       if (ticket !== sequence || !modal.open) return;
       const rows = data.results || [];
-      const [sessions, records] = addGroups(rows);
       const index = data.index || {};
-      notice.textContent = `${rows.length}개 결과 · 세션 ${sessions} · 그 외 ${records} · 색인 ${index.indexed || 0}/${index.total || 0}`
+      const sessions = rows.filter(row => row.kind === SESSION).length;
+      lastRows = rows;
+      // A new answer starts unfiltered: the chips belong to the answer in hand,
+      // so the line that counts it and the rows under it always agree when it
+      // arrives, and a chip is re-picked deliberately rather than inherited
+      // from a query the reader has already moved on from.
+      kindFilter = "";
+      lastNotice = `${rows.length}개 결과 · 세션 ${sessions} · 그 외 ${rows.length - sessions} · 색인 ${index.indexed || 0}/${index.total || 0}`
         + (index.pending || index.syncing ? " · 색인 진행 중, 다시 검색하면 추가 결과가 표시됩니다." : "")
         + (index.error ? " · 색인 오류: " + index.error : "");
-      if (data.warnings?.length) notice.textContent += " · Rerank 사용 불가: embedding 및 정확한 단어 일치 기준으로 표시합니다.";
+      if (data.warnings?.length) lastNotice += " · Rerank 사용 불가: embedding 및 정확한 단어 일치 기준으로 표시합니다.";
+      renderFilters(rows);
+      renderResults();
     } catch (error) { if (ticket === sequence && error.name !== "AbortError") notice.textContent = error.message; }
     finally { if (ticket === sequence) submit.disabled = false; }
   };
