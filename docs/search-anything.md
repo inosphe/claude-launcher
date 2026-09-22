@@ -3,11 +3,14 @@
 The session rail's **Search anything** button and `/` open a search dialog.
 Enter submits a semantic search, and Escape closes the dialog and restores
 focus. `/` remains ordinary input in text fields, editors and terminals.
-Results are drawn as two labelled lists, **세션** and **그 외 항목**, each headed by
-how many rows it holds; the answer's counts of both are repeated in the status
-line above them. The ranking still orders every answer, and it orders it within
-the list the row belongs to: whether a row is a session is the first thing a
-reader needs from it. A session row is headed by the session's own name and the
+Results are drawn as two labelled lists, **세션** and everything else, each headed
+by what it holds and how many rows that is: the first by the one word for the
+rows in it, the second by the kinds it actually carries (`beads · comment`),
+taken from the same count the filter chips below are built from. The answer's
+counts of both are repeated in the status line above them. The ranking still
+orders every answer, and it orders it within the list the row belongs to:
+whether a row is a session is the first thing a reader needs from it. A session
+row is headed by the session's own name and the
 state it is in now, and carries an accent edge; a record row is headed by the
 source kind it came from. Both keep the matching passage and the sessions they
 concern, and **원문 보기** retrieves the original issue (including comments) or
@@ -81,5 +84,6 @@ session links, session state at answer time, opening-task retention,
 settings and retrieval.
 `tests/search_anything_browser.cjs` uses an isolated fixture server to exercise
 actual browser focus, keyboard, stale-response handling, the two result lists
-with their states, source display and settings forms. Set `CLAUNCH_PLAYWRIGHT`
+with their headings and states, the kind filter, source display and settings
+forms. Set `CLAUNCH_PLAYWRIGHT`
 and `CLAUNCH_CHROMIUM` to local installations if needed.

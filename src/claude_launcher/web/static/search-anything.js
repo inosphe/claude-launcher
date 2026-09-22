@@ -72,6 +72,15 @@ globalThis.SearchAnything = (() => {
   // row that arrived without one. The filter chips are built from this same
   // value, so a chip and the badge on the rows it selects always agree.
   const kindLabel = row => row.kind || "기록";
+  // How many rows of each kind are in hand, most numerous first, ties keeping
+  // the order the answer arrived in. The filter chips and the second list's
+  // heading are both built from this one count, so the two cannot disagree
+  // about which kinds an answer holds.
+  function kindCounts(rows) {
+    const counts = new Map();
+    for (const row of rows) counts.set(kindLabel(row), (counts.get(kindLabel(row)) || 0) + 1);
+    return [...counts].sort((a, b) => b[1] - a[1]);
+  }
   // What the state of a session is called here. `status` is the fleet's live
   // reading (starting/busy/idle/exited) and comes from the daemon on every
   // answer rather than from the index, which is embedded in the background
@@ -153,9 +162,15 @@ globalThis.SearchAnything = (() => {
   // row is a session is the first thing a reader needs from it, and a session
   // mixed into a list of records cannot be picked out of it by rank alone.
   // Rows arrive ranked, so each list keeps that order among its own rows.
+  // The first list is all sessions, so one word names it. The second is
+  // everything else, which is not one thing — so it is named by the kinds it
+  // actually holds, from the same count the chips are built from. 「그 외 항목」
+  // said only that those rows are not sessions, which the row badges already
+  // say, and left a reader to open the list to learn what was inside it.
   function addGroups(rows) {
-    const groups = [["세션", rows.filter(row => row.kind === SESSION)],
-                    ["그 외 항목", rows.filter(row => row.kind !== SESSION)]];
+    const sessions = rows.filter(row => row.kind === SESSION);
+    const rest = rows.filter(row => row.kind !== SESSION);
+    const groups = [["세션", sessions], [kindCounts(rest).map(([kind]) => kind).join(" · "), rest]];
     for (const [title, group] of groups) {
       if (!group.length) continue;
       const section = node("section", "", "search-anything-group");
@@ -174,10 +189,7 @@ globalThis.SearchAnything = (() => {
   // index but not in this answer's window — is written down in
   // docs/search-anything.md instead of being papered over here.
   function renderFilters(rows) {
-    const counts = new Map();
-    for (const row of rows) counts.set(kindLabel(row), (counts.get(kindLabel(row)) || 0) + 1);
-    const chips = [["", "전체", rows.length]];
-    for (const [kind, count] of [...counts].sort((a, b) => b[1] - a[1])) chips.push([kind, kind, count]);
+    const chips = [["", "전체", rows.length], ...kindCounts(rows).map(([kind, count]) => [kind, kind, count])];
     filters.replaceChildren();
     for (const [value, label, count] of chips) {
       const chip = node("button", "", "search-anything-filter"); chip.type = "button";

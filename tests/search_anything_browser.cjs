@@ -50,7 +50,12 @@ const server = http.createServer(async (req,res) => {
     const record={id:'r1',title:q,kind,at,excerpt:'<img src=x onerror=alert(1)>',
       sessions:[{name:'s1',status:'idle'},{name:'s2',status:'busy'},{name:'s3',status:'exited',paused:true}],
       href:kind==='opening-task'?'#/s/s1':'#/observer/session/s1',source_url:'api/search/records/s1/e1'};
-    res.end(JSON.stringify({results:q==='only-session'?[session]:[session,record],index:{indexed:1,total:1},warnings:['rerank unavailable']})); return;
+    // A second record of another kind, so an answer can be asked for that holds
+    // several — the second list is named by the kinds it carries, and this is
+    // what tells that name apart from the one-kind case.
+    const board={id:'r2',title:q,kind:'beads',at,excerpt:'보드 항목',sessions:[{name:'s2',status:'busy'}],href:'#/beads/claunch-b1'};
+    const results = q === 'only-session' ? [session] : q === 'mixed' ? [session, record, board] : [session, record];
+    res.end(JSON.stringify({results,index:{indexed:1,total:1},warnings:['rerank unavailable']})); return;
   }
   if(req.url==='/api/rag/settings') {res.end(JSON.stringify(cfg));return;}
   if(req.url==='/api/rag/test') {res.end(JSON.stringify({ok:true,dimensions:2560,rerank:true}));return;}
@@ -81,10 +86,12 @@ const server = http.createServer(async (req,res) => {
     assert.match(await time.textContent(), /\(6분 전\)$/);
     assert.match(await page.locator('dialog [role=status]').textContent(),/Rerank 사용 불가/);
     // The two classes are two lists, each headed by what it holds and how
-    // many of them there were; the answer's own counts are in the notice.
+    // many of them there were; the answer's own counts are in the notice. The
+    // first list is named for the one thing it holds; the second is named by
+    // the kinds it carries, so a reader learns what is inside without opening it.
     assert.match(await page.locator('dialog [role=status]').textContent(), /2개 결과 · 세션 1 · 그 외 1/);
     const heads = page.locator('dialog .search-anything-group h3');
-    assert.deepEqual(await heads.evaluateAll(nodes=>nodes.map(n=>n.childNodes[0].textContent)),['세션','그 외 항목']);
+    assert.deepEqual(await heads.evaluateAll(nodes=>nodes.map(n=>n.childNodes[0].textContent)),['세션','checks']);
     assert.deepEqual(await page.locator('dialog .search-anything-group-count').allTextContents(),['1','1']);
     // The session's own row: it is the link, and its state rides in the chip.
     const sessionChip = page.locator('dialog .search-anything-session .beads-sess');
@@ -133,6 +140,16 @@ const server = http.createServer(async (req,res) => {
     assert.deepEqual(await kindChips.evaluateAll(nodes=>nodes.map(n=>n.dataset.kind)),['','session']);
     assert.deepEqual(await kindChips.evaluateAll(nodes=>nodes.map(n=>n.getAttribute('aria-pressed'))),['true','false']);
     assert.ok(!/· 표시/.test(await page.locator('dialog [role=status]').textContent()));
+    // The second list is named by the kinds it holds, in the order the chips
+    // count them, and the two are read from one count — so an answer holding
+    // several kinds says all of them, and says exactly what the chips say.
+    await page.locator('dialog input').fill('mixed');await page.keyboard.press('Enter');
+    await page.locator('dialog .search-anything-record').first().waitFor();
+    assert.match(await page.locator('dialog [role=status]').textContent(), /3개 결과 · 세션 1 · 그 외 2/);
+    assert.deepEqual(await kindChips.evaluateAll(nodes=>nodes.map(n=>n.dataset.kind)),['','session','checks','beads']);
+    assert.equal(await heads.nth(1).evaluate(n=>n.childNodes[0].textContent),'checks · beads');
+    assert.equal(await heads.nth(1).evaluate(n=>n.childNodes[0].textContent),
+      (await kindChips.evaluateAll(nodes=>nodes.map(n=>n.dataset.kind))).filter(kind=>kind&&kind!=='session').join(' · '));
     await page.locator('dialog input').fill('needle');await page.keyboard.press('Enter');
     await page.getByRole('link',{name:'needle',exact:true}).waitFor();
     await page.getByText('원문 보기',{exact:true}).click();await page.waitForFunction(()=>document.querySelector('dialog pre').textContent.includes('원문 기록'));
