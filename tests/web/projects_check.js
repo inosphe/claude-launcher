@@ -87,6 +87,24 @@ check("the create form sends the project on both shapes",
       /if \(f\.project && f\.project\.value\) body\.project = f\.project\.value;/.test(src),
       true);
 
+/* That assignment is only half the journey. sessionFormPayload filters the
+   body against the mode's allowlist on the line before the POST, so a name
+   missing from `payload` is dropped between the two: the row still shows the
+   pick, the Directory row still takes the project's default workspace, and
+   the session is filed under `default` with no error anywhere
+   (claunch-jvxvq). The real pair is run here because the drop is silent in
+   exactly the way a text match over the source cannot see. */
+const formCfg = new Function(
+  slice("sessionFormConfig") + slice("sessionFormPayload") +
+  "return { sessionFormConfig, sessionFormPayload };")();
+for (const mode of ["new", "spawn"]) {
+  check(`...and the ${mode} payload still carries it to the daemon`,
+        formCfg.sessionFormPayload(mode, { name: "s1", project: "hq" }),
+        { name: "s1", project: "hq" });
+  check(`...over a row the ${mode} form lets the operator answer`,
+        formCfg.sessionFormConfig(mode).editable.includes("project"), true);
+}
+
 /* ---- the functions, against a stub DOM ---------------------------------- */
 function Option(text, value) {
   return { text, value, selected: false };

@@ -21800,23 +21800,32 @@ let sessionModal = null;
 
 /* Operation policy is independent of its host. A page offers New/Spawn;
    contextual dialogs expose just the operation their opener requested.
-   editable is the UI ceiling; spawn policy can narrow it further. */
+   editable is the UI ceiling; spawn policy can narrow it further.
+
+   A row has to be named in BOTH lists to reach the daemon, and `project` is
+   the row that proves it: submit fills `body.project` from the picker, and a
+   name missing from `payload` is dropped by sessionFormPayload between that
+   line and the POST. The row still shows the pick and still fills the
+   Directory row from the project's default workspace, so the session starts
+   in the right checkout and is filed under `default` — no error anywhere.
+   That is how a session created in a named project came back on the rail's
+   default project (claunch-jvxvq). */
 function sessionFormConfig(mode) {
   const sections = ["new-where", "new-identity", "new-runs-on", "new-onboard",
     "new-runtime", "new-worktree", "new-task", "new-beads"];
-  const editable = ["cwd", "name", "profile", "harness", "model", "effort",
+  const editable = ["project", "cwd", "name", "profile", "harness", "model", "effort",
     "mesh", "handle", "role", "workflow", "context", "borrow", "null_token",
     "resume", "fork", "skip_permissions", "codex_yolo", "codex_sandbox", "args",
     "worktree_mode", "worktree_name", "worktree_existing", "worktree_rebase",
     "task", "score_goal", "beads", "issue_text", "issue_filter", "issue", "pi_tool_*"];
   const modes = {
     new: { title: "New session", submit: "Create", sections, editable,
-      payload: ["name", "profile", "cwd", "args", "model", "effort", "tools", "worktree",
+      payload: ["name", "profile", "project", "cwd", "args", "model", "effort", "tools", "worktree",
         "rebase_onto", "role", "borrow", "null_token", "mesh", "handle", "workflow",
         "context", "task", "score_goal", "beads", "issue", "issue_text", "resume", "fork_session"] },
     spawn: { title: "Spawn child", submit: "Spawn child", sections,
       editable: [...editable, "parent", "fork_parent", "over_limit"],
-      payload: ["name", "profile", "workspace", "cwd", "args", "model", "effort", "tools", "worktree",
+      payload: ["name", "profile", "project", "workspace", "cwd", "args", "model", "effort", "tools", "worktree",
         "rebase_onto", "role", "borrow", "null_token", "mesh", "handle", "workflow",
         "context", "task", "score_goal", "beads", "issue", "issue_text", "fork", "connect", "over_limit"] },
     fork: { title: "Quick fork", submit: "Fork", sections: ["new-quick-fork"],
