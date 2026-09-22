@@ -294,6 +294,19 @@ above the box no longer draws keep-alive, because a value that can be
 changed in one place and read stale four lines up is read twice and believed
 once.
 
+``sessstill_check`` holds the same panel still while somebody is using it.
+The panel is emptied and rebuilt every five seconds, and three things a
+reader puts into it were destroyed on every one of those rebuilds: the scroll
+position (``#sess-view`` is the scroll container, so emptying it clamps
+scrollTop to 0), a run of selected text (no field has focus when someone
+drags across a journal line, so the existing ``formInUse`` guard saw nothing),
+and the input journal's fold, which snapped shut and refetched its lines
+under the reader once per poll. The harness drives the real ``renderSession``
+with its sections stubbed out and checks the scroll at all three of that
+function's exits, the selection guard including the text-node case a real drag
+produces, and the journal node's reuse, its reread on reopen and its
+background refresh while shut.
+
 Skipped, not failed, where node is unavailable: node is a convenience for
 testing this project, never a requirement for using it.
 """
@@ -433,6 +446,7 @@ CHECKS = [
         "modalgitwait_check.js",
         "floworphans_check.js",
         "sessflags_check.js",
+        "sessstill_check.js",
 ]
 
 
