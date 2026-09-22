@@ -15,7 +15,7 @@ let observerReads = 0, needsLogin = true;
 // provider's own counters hold. The cards split those the same way the
 // per-session block below does, so a window that reported no cache at all
 // would drop the column instead of printing a zero.
-const data = { enabled: true, usage_summary: {since:"2026-09-18T00:00:00Z", windows:{
+const data = { enabled: true, scope: "all", usage_summary: {since:"2026-09-18T00:00:00Z", windows:{
   hour:{total_tokens:1234,prompt_tokens:1200,completion_tokens:34,
         prompt_cache_hit_tokens:900,prompt_cache_miss_tokens:300},
   day:{total_tokens:56789,prompt_tokens:56000,completion_tokens:789,
@@ -39,6 +39,10 @@ const data = { enabled: true, usage_summary: {since:"2026-09-18T00:00:00Z", wind
   // last-call figure and folds the cache into the input rather than printing
   // the raw response.
   { name: "s2", status: "idle", running: true, meshes: ["team-b"], summary: "병합 완료", events: [],
+    // Pinned, so the two boxes have something to disagree about: s1 is out of
+    // the scope and s2 is in it, and a box drawn from the wrong session would
+    // read the same on both.
+    observe_pin: true,
     usage: { prompt_tokens: 900, completion_tokens: 60 } },
 ] };
 const server = http.createServer((req, res) => {
@@ -67,14 +71,39 @@ const server = http.createServer((req, res) => {
         sent.push({url:req.url,body:JSON.parse(body)});return res.end(JSON.stringify(e));
       }
       if(req.url==="/api/cflow/approve") gates=[];
-      if(req.url==="/api/observer/settings") data.enabled=JSON.parse(body).enabled;
+      if(req.url==="/api/observer/settings") {
+        const patch=JSON.parse(body);
+        data.enabled=patch.enabled;
+        if(patch.scope!==undefined) data.scope=patch.scope;
+        sent.push({url:req.url, body:patch});
+        return res.end(JSON.stringify({enabled:data.enabled, scope:data.scope||"all"}));
+      }
       // One-shot refresh: the pass ran and added two events, which is what the
       // card reports back. A pass with nothing new answers called:false.
       if(req.url.endsWith("/refresh")) { sent.push({url:req.url,body:JSON.parse(body||"{}")}); return res.end('{"called":true,"events":2}'); }
       if (req.url.endsWith("/events/e1")) return res.end('{"content":"Which environment?"}');
       if(req.url.includes("/transcript?")) return res.end(JSON.stringify({records:[{seq:1,role:"user",blocks:[{type:"text",text:"Transcript retained"}]}],has_more:false,cursor:1}));
+      // The observe pin is one session field read by two polls: the rail's
+      // session list and the observer's own snapshot. The fixture keeps the
+      // one value both read, so a write through either box is visible to the
+      // other on its next poll — which is what the page claims and what a
+      // fixture serving two independent copies would silently not test.
+      if(req.url.endsWith("/pin")) {
+        const name = decodeURIComponent(req.url.split("/")[3]);
+        const on = JSON.parse(body||"{}").pinned === true;
+        const row = data.sessions.find(s => s.name === name);
+        if(!row) { res.statusCode=404; return res.end('{"error":"세션을 찾을 수 없습니다."}'); }
+        row.observe_pin = on;
+        sent.push({url:req.url, body:JSON.parse(body||"{}")});
+        return res.end(JSON.stringify({name, pinned:on}));
+      }
       if(req.method === "GET") {
         if(req.url === "/api/daemon") return res.end('{"version":"test","boot_id":"test"}');
+        if(req.url === "/api/sessions" || req.url.startsWith("/api/sessions?")) {
+          return res.end(JSON.stringify(data.sessions.map(s => ({
+            name:s.name, status:s.status, observe_pin:!!s.observe_pin,
+          }))));
+        }
         if(/^\/api\/(profiles|sessions|workspaces|mesh|cflow|harnesses|roles)/.test(req.url)) return res.end('[]');
         return res.end('{}');
       }
@@ -217,6 +246,12 @@ const server = http.createServer((req, res) => {
     assert.equal(sent.at(-1).url, "/api/observer/s1/refresh");
     assert.equal(await note.innerText(), "갱신됨 · 새 항목 2개");
     await page.uncheck("#observer-actions-only");
+    // The observe pin on the card, drawn from the session's own flag: the two
+    // cards disagree (s1 out of the scope, s2 in it), so a box reading the
+    // wrong row or one shared value would show the same state twice.
+    const cardBox = s => page.locator(`.observer-card[data-session="${s}"] .observer-pin input`);
+    assert.equal(await cardBox("s1").isChecked(), false);
+    assert.equal(await cardBox("s2").isChecked(), true);
     await page.fill("#observer-prompt", "session one draft");
     await page.selectOption("#observer-target", "s2"); await page.fill("#observer-prompt", "session two draft");
     await page.selectOption("#observer-target", "s1");
@@ -279,6 +314,22 @@ const server = http.createServer((req, res) => {
     assert(desktop.cards + desktop.usage >= 468, `board and token monitor should retain their vertical budget (${Math.round(desktop.cards)}px)`);
     assert(desktop.usage <= 180, `the token monitor should stay compact (${Math.round(desktop.usage)}px)`);
     assert(desktop.band <= 210, `the band above the board should stay trim (${Math.round(desktop.band)}px)`);
+    // The scope switch sits beside the monitor button it modifies — one
+    // decision, whether the observer runs and over what — and is drawn from
+    // the snapshot rather than from the click.
+    const scopeBox = page.locator("#observer-scope-pinned");
+    assert.equal(await scopeBox.isVisible(), true);
+    assert.equal(await scopeBox.isChecked(), false);
+    await scopeBox.check();
+    await page.waitForFunction(()=>document.getElementById("observer-scope-pinned").checked);
+    assert.deepEqual(sent.filter(r=>r.url==="/api/observer/settings").at(-1).body, {enabled:true,scope:"pinned"});
+    // The monitor button posts `enabled` alone; a route that reset the scope
+    // on every switch would silently widen what the operator is paying for.
+    await page.click("#observer-monitor");
+    await page.waitForFunction(()=>document.getElementById("observer-monitor").textContent==="관찰 시작");
+    assert.equal(await scopeBox.isChecked(), true, "the monitor switch leaves the mode alone");
+    await page.click("#observer-monitor");
+    await page.waitForFunction(()=>document.getElementById("observer-monitor").textContent==="관찰 끄기");
     assert((await page.locator('.observer-column[data-session="s1"] details', { hasText: "관찰 API 사용량 (누적)" }).count()) >= 1,
       "the desktop column keeps its own meter");
     const beforeOrder=await page.locator(".observer-column").evaluateAll(es=>es.map(e=>e.dataset.session));
@@ -506,6 +557,27 @@ const server = http.createServer((req, res) => {
     await page.getByText('아직 이 세션의 관찰 정보가 없습니다.',{exact:true}).waitFor();
     await page.evaluate(()=>location.hash="#/observer");
     await page.waitForSelector('#observer-view:not(.hidden)');
+    // The rail's observe-pin box, beside the 📌 pin. It is checked last and on
+    // its own load because a rail tab costs vertical space the board's own
+    // budget is measured against — a session pinned from the start would move
+    // that measurement rather than test this control.
+    await page.evaluate(()=>localStorage.setItem("claunch_session_pins:/", JSON.stringify(["s1"])));
+    await page.reload();
+    await page.waitForSelector(".observer-card");
+    const railBox = page.locator(".session-tab-observe");
+    await railBox.waitFor();
+    assert.equal(await railBox.isChecked(), false, "the rail box reads s1's own flag");
+    assert.equal(await page.locator(".session-tab").count(), 1, "one tab, so one box");
+    // Writing through the rail reaches the card on the observer's own poll:
+    // both read the session's one field rather than keeping a copy, and the
+    // rail's poll is the slower of the two, so this is the direction whose
+    // convergence the two cadences could actually disagree on.
+    await railBox.check();
+    await page.waitForFunction(()=>document.querySelector('.observer-card[data-session="s1"] .observer-pin input')?.checked);
+    assert.equal(sent.filter(r=>r.url.endsWith("/pin")).at(-1).url, "/api/observer/s1/pin");
+    assert.deepEqual(sent.filter(r=>r.url.endsWith("/pin")).at(-1).body, {pinned:true});
+    await railBox.uncheck();
+    await page.waitForFunction(()=>!document.querySelector('.observer-card[data-session="s1"] .observer-pin input')?.checked);
     }
     assert.deepEqual(errors, []);
     console.log("PASS: mobile layout, composer fold, usage as input/cache/output over calls and days, fleet total split from last-call rows, elapsed-since-update, scope/action filters, evidence, Escape, target input, per-session drafts, shared auth, deep links, polling lifecycle, legacy redirect, direct screenshot/answer, activity filters, cflow approval/selection, per-session latest-N grid, 1/10 limits, filter-before-limit, storage persistence/fallback, responsive view switching");

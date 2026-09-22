@@ -364,6 +364,127 @@ def test_the_refresh_route_carries_the_pass_outcome(setup, monkeypatch):
     asyncio.run(scenario())
 
 
+def two_sessions(setup):
+    """The fixture's session plus a second one that the pin distinguishes."""
+    service, first = setup
+    first.sdef.observe_pin = False
+    second = SimpleNamespace(sdef=SimpleNamespace(name="s2", task="task", cwd="/repo",
+                                                 conversation_id="c2", observe_pin=True),
+                             exited=False, info=lambda: {"status": "busy"})
+    service.manager.list = lambda: [first, second]
+    return service, first, second
+
+
+def test_the_pinned_scope_spends_only_on_pinned_sessions(setup, monkeypatch):
+    """The scope is a cost switch: an unpinned session must not reach the model.
+
+    Driven through :meth:`Observer.pass_once` rather than through ``observes``
+    alone, because what the operator buys is the loop's behaviour — a
+    predicate read correctly but not consulted by the sweep would pass the
+    weaker test and pay for the whole fleet.
+    """
+    service, first, second = two_sessions(setup)
+    service.data["enabled"] = True
+    service.data["scope"] = observer.SCOPE_PINNED
+    observed = []
+    def evidence_for(session, previous):
+        observed.append(session.sdef.name)
+        return ["path", "c1"], 1, {"status": "busy"}, [{"id": "transcript:1", "content": "12 tests passed"}], False
+    monkeypatch.setattr(service, "evidence", evidence_for)
+    async def fake(cfg, messages):
+        return answer(), {"prompt_tokens": 10}
+    monkeypatch.setattr(observer, "complete", fake)
+    asyncio.run(service.pass_once(CFG))
+    assert observed == ["s2"], "only the pinned session is read at all"
+    assert set(service.data["sessions"]) == {"s2"}
+
+
+def test_the_default_scope_still_covers_everything(setup, monkeypatch):
+    """A daemon that never chose a scope must behave exactly as it did before."""
+    service, first, second = two_sessions(setup)
+    service.data["enabled"] = True
+    assert service.data["scope"] == observer.SCOPE_ALL
+    assert service.observes(first) and service.observes(second)
+    observed = []
+    def evidence_for(session, previous):
+        observed.append(session.sdef.name)
+        return ["path", "c1"], 1, {}, [], False
+    monkeypatch.setattr(service, "evidence", evidence_for)
+    asyncio.run(service.pass_once(CFG))
+    assert observed == ["s1", "s2"]
+
+
+def test_the_scope_persists_and_an_unknown_value_reads_as_all(setup):
+    service, _ = setup
+    service.data["scope"] = observer.SCOPE_PINNED
+    service.save()
+    assert json.loads(service.path.read_text(encoding="utf-8"))["scope"] == observer.SCOPE_PINNED
+    assert observer.Observer(service.manager, service.mesh).data["scope"] == observer.SCOPE_PINNED
+    # An unrecognised value must not silently widen the scope: an operator who
+    # chose the narrower one would start paying for the whole fleet again
+    # without saying so. Only the two named scopes are readings.
+    settings = json.loads(service.path.read_text(encoding="utf-8"))
+    settings["scope"] = "evrything"
+    service.path.write_text(json.dumps(settings), encoding="utf-8")
+    assert observer.Observer(service.manager, service.mesh).data["scope"] == observer.SCOPE_ALL
+
+
+def test_the_pin_route_writes_the_definition_field(setup, monkeypatch):
+    service, session = setup
+    # The fixture's manager only answers ``list``; the route reaches the pin
+    # through the manager exactly as the rail's own routes do, so the stub
+    # records the call instead of standing in for it.
+    written = []
+    def set_observe_pin(name, on):
+        if name != session.sdef.name:
+            raise KeyError(name)
+        session.sdef.observe_pin = bool(on)
+        written.append((name, bool(on)))
+        return session
+    service.manager.set_observe_pin = set_observe_pin
+    async def scenario():
+        app=web.Application();app["manager"]=service.manager;app["mesh"]=service.mesh
+        observer.install(app)
+        app.on_startup.remove(app["observer"].start)
+        async with TestClient(TestServer(app)) as client:
+            assert (await client.post("/api/observer/s1/pin", json={"pinned":"yes"})).status == 400
+            assert (await client.post("/api/observer/nope/pin", json={"pinned":True})).status == 404
+            said = await client.post("/api/observer/s1/pin", json={"pinned":True})
+            assert said.status == 200 and await said.json() == {"name":"s1","pinned":True}
+            off = await client.post("/api/observer/s1/pin", json={"pinned":False})
+            assert await off.json() == {"name":"s1","pinned":False}
+    asyncio.run(scenario())
+    assert written == [("s1", True), ("s1", False)]
+
+
+def test_the_settings_route_carries_the_scope_without_undoing_it(setup, monkeypatch):
+    """The monitor button posts ``enabled`` alone; that must not reset the mode."""
+    service, _ = setup
+    async def scenario():
+        app=web.Application();app["manager"]=service.manager;app["mesh"]=service.mesh
+        observer.install(app)
+        app.on_startup.remove(app["observer"].start)
+        monkeypatch.setattr(observer,"configuration",lambda:CFG)
+        async with TestClient(TestServer(app)) as client:
+            assert (await client.post("/api/observer/settings", json={"enabled":False,"scope":"narrow"})).status == 400
+            first = await client.post("/api/observer/settings", json={"enabled":True,"scope":"pinned"})
+            assert await first.json() == {"enabled":True,"scope":"pinned"}
+            # No scope in the body: the button's own call leaves the mode alone.
+            second = await client.post("/api/observer/settings", json={"enabled":False})
+            assert await second.json() == {"enabled":False,"scope":"pinned"}
+            assert app["observer"].data["scope"] == "pinned"
+            published = await (await client.get("/api/observer")).json()
+            assert published["scope"] == "pinned"
+    asyncio.run(scenario())
+
+
+def test_the_snapshot_carries_the_pin_the_card_draws(setup, monkeypatch):
+    service, first, second = two_sessions(setup)
+    published = {row["name"]: row for row in service.snapshot()["sessions"]}
+    assert published["s1"]["observe_pin"] is False
+    assert published["s2"]["observe_pin"] is True
+
+
 def test_ignored_records_advance_without_api_call(setup, monkeypatch):
     service, session = setup
     service.data["sessions"]["s1"] = {"cursor": 10}

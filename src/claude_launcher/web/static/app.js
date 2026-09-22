@@ -1182,6 +1182,39 @@ function closeSessionTab(name) {
   }
 }
 
+/* The observer's pinned-only scope reads this off the session record, so the
+   rail writes it through the observer's own route and the daemon persists it
+   on the definition — the rail shares no state with the observer page beyond
+   this flag. It sits beside the 📌 pin and looks like it, but the two answer
+   different questions: 📌 is this browser's shortcut list, held in
+   localStorage, and this one is which sessions the observer is allowed to
+   spend on. The box is drawn from sessionsCache and never from the browser's
+   own checkbox state, so a failure that reverted on the server reverts here
+   on the next poll instead of reading as applied. */
+async function setObservePin(name, on) {
+  const label = on ? "관찰 대상으로 고정" : "관찰 대상에서 제외";
+  try {
+    const resp = await api(`/api/observer/${encodeURIComponent(name)}/pin`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ pinned: on }),
+    });
+    const info = await resp.json().catch(() => ({}));
+    if (!resp.ok) {
+      await modalInfo(`'${name}'을 ${label}하지 못했습니다`,
+                      info.error || `HTTP ${resp.status}`);
+    } else {
+      const at = sessionsCache.findIndex((s) => s.name === name);
+      if (at >= 0) sessionsCache[at] = { ...sessionsCache[at], observe_pin: !!info.pinned };
+    }
+  } catch (err) {
+    await modalInfo(`'${name}'을 ${label}하지 못했습니다`,
+                    err && err.message ? err.message : "request failed");
+  } finally {
+    renderSessionTabs();
+  }
+}
+
 function renderSessionTabs() {
   const bar = $("session-tabs");
   if (!bar || !sessionTabHistory) return;
@@ -1190,7 +1223,8 @@ function renderSessionTabs() {
   const records = new Map(sessionsCache.map(s => [s.name, s]));
   const signature = JSON.stringify(names.map(name => {
     const rec = records.get(name);
-    return [name, isSessionPinned(name), name === active, rec?.status, rec?.paused_at];
+    return [name, isSessionPinned(name), name === active, rec?.status, rec?.paused_at,
+            rec?.observe_pin];
   }));
   // Polls update state in place only when it changed, preserving keyboard focus.
   if (bar._signature === signature) return;
@@ -1230,6 +1264,16 @@ function renderSessionTabs() {
     pin.dataset.name = name;
     pin.dataset.action = "pin";
     pin.addEventListener("click", () => toggleSessionPin(name));
+    const observe = document.createElement("input");
+    observe.type = "checkbox";
+    observe.className = "session-tab-observe";
+    observe.checked = Boolean(rec?.observe_pin);
+    observe.title = `${observe.checked ? "관찰 대상에서 빼기" : "관찰 대상으로 고정"} ${name}`
+      + " — Observer의 「고정만」 모드가 이 표시를 읽습니다";
+    observe.setAttribute("aria-label", observe.title);
+    observe.dataset.name = name;
+    observe.dataset.action = "observe-pin";
+    observe.addEventListener("change", () => setObservePin(name, observe.checked));
     const close = document.createElement("button");
     close.type = "button";
     close.className = "session-tab-close";
@@ -1239,11 +1283,11 @@ function renderSessionTabs() {
     close.dataset.name = name;
     close.dataset.action = "close";
     close.addEventListener("click", () => closeSessionTab(name));
-    tab.append(open, pin, close);
+    tab.append(open, observe, pin, close);
     bar.append(tab);
   }
   if (focused) {
-    const controls = [...bar.querySelectorAll("a, button")];
+    const controls = [...bar.querySelectorAll("a, button, input")];
     const target = controls.find(el => el.dataset.name === focusName && el.dataset.action === focusAction)
       || controls.find(el => el.dataset.action === "open");
     target?.focus({ preventScroll: true });
