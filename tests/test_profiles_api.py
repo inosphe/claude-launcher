@@ -1,8 +1,12 @@
-"""The profiles page's two server facts: what a profile's mode is, and setting it.
+"""The profiles page's server facts: a profile's mode, its rule lists, and setting it.
 
 The read is on ``GET /api/profiles`` (one row per profile carries
-``permission_mode``), the write is ``POST /api/profiles/permission-mode``. Both
-go through the store's shared/profile declarations and the common apply planner.
+``permission_mode`` and ``permission_rules``), the write is
+``POST /api/profiles/permission-mode``. Both go through the store's
+shared/profile declarations and the common apply planner. ``permission_rules``
+is read-only here and everywhere — planting the gate guard is ``claunch
+install``'s job, and the expectation it is read against is imported from there
+rather than copied.
 
 No test here lets a real ``claude`` run: with nothing declared, convergence
 touches only ``settings.json``, so ``apply_all`` never reaches a subprocess.
@@ -15,7 +19,7 @@ import json
 
 import pytest
 
-from claude_launcher import plugins, profile, settings, store
+from claude_launcher import install, plugins, profile, settings, store
 from claude_launcher.daemon import api
 
 MODE = "permissions.defaultMode"
@@ -296,3 +300,136 @@ def test_profile_apply_reports_write_failure_and_can_retry(home):
     settings.save(work, {})
     plugins.apply_to(work)
     assert modes_by_profile(listing())["work"]["converged"] is True
+
+
+# --------------------------------------------------------------------------- #
+# the rules: the other half of the same settings file
+# --------------------------------------------------------------------------- #
+def rules_by_profile(body):
+    return {
+        row["profile"]: row["permission_rules"]
+        for row in body["profile_details"]
+        if row.get("explicit") is False
+    }
+
+
+def plant(p, *, allow=True, deny=True):
+    """What ``claunch install``'s gate guard does to one profile's file."""
+    path = p.config_dir / settings.SETTINGS_FILENAME
+    if deny:
+        settings.merge_permission_deny(path, install.GATE_DENY_RULES)
+    if allow:
+        settings.merge_permission_allow(path, install.GATE_ALLOW_RULES)
+
+
+def test_a_profile_with_no_rules_reports_both_halves_missing(home):
+    profile.create("work")
+    row = rules_by_profile(listing())["work"]
+    assert row["allow"]["key"] == "permissions.allow"
+    assert row["deny"]["key"] == "permissions.deny"
+    # The expectation is read off the installer, not re-spelled in the daemon:
+    # a second copy is a second thing to forget when a gate verb gains a shell.
+    assert row["allow"]["expected"] == list(install.GATE_ALLOW_RULES)
+    assert row["deny"]["expected"] == list(install.GATE_DENY_RULES)
+    assert len(row["deny"]["expected"]) == 16
+    assert row["allow"]["value"] == []
+    assert row["allow"]["missing"] == ["mcp__claunch"]
+    assert row["deny"]["missing"] == list(install.GATE_DENY_RULES)
+    assert row["allow"]["converged"] is False
+    assert row["deny"]["converged"] is False
+    assert row["converged"] is False
+
+
+def test_a_planted_guard_reports_both_halves_whole(home):
+    plant(profile.create("work"))
+    row = rules_by_profile(listing())["work"]
+    assert row["allow"]["missing"] == []
+    assert row["deny"]["missing"] == []
+    assert row["allow"]["converged"] is True and row["deny"]["converged"] is True
+    assert row["converged"] is True
+    # The value is the file's list, not the guard's slice of it -- the card and
+    # the table both read the answer off ``missing``.
+    assert row["allow"]["value"] == list(install.GATE_ALLOW_RULES)
+
+
+def test_a_rule_the_person_added_is_not_a_gap(home):
+    """Both lists are unions; a profile holding more than the guard is settled."""
+    p = profile.create("work")
+    path = p.config_dir / settings.SETTINGS_FILENAME
+    settings.merge_permission_allow(path, ("Bash(git status)",))
+    settings.merge_permission_deny(path, ("Bash(rm -rf:*)",))
+    plant(p)
+    row = rules_by_profile(listing())["work"]
+    assert row["converged"] is True
+    assert "Bash(git status)" in row["allow"]["value"]
+    assert "Bash(rm -rf:*)" in row["deny"]["value"]
+
+
+def test_a_half_planted_guard_names_the_rules_that_are_absent(home):
+    """Why ``missing`` is a list and not a boolean: the deny half can be partway.
+
+    A guard that reports "has some" is the failure this shape exists to catch —
+    sixteen rules with three planted is a profile an agent can still be locked
+    out of, and only the names say which.
+    """
+    p = profile.create("work")
+    path = p.config_dir / settings.SETTINGS_FILENAME
+    settings.merge_permission_deny(path, install.GATE_DENY_RULES[:3])
+    settings.merge_permission_allow(path, install.GATE_ALLOW_RULES)
+    row = rules_by_profile(listing())["work"]
+    assert row["allow"]["converged"] is True
+    assert row["deny"]["converged"] is False
+    assert row["converged"] is False
+    assert row["deny"]["value"] == list(install.GATE_DENY_RULES[:3])
+    assert row["deny"]["missing"] == list(install.GATE_DENY_RULES[3:])
+
+
+def test_a_rule_list_of_another_shape_is_reported_not_repaired(home):
+    """A list claunch does not recognise reads as empty; the file is left alone."""
+    p = profile.create("work")
+    settings.save(p, {"permissions": {"allow": "managed elsewhere"}})
+    row = rules_by_profile(listing())["work"]
+    assert row["allow"]["value"] == []
+    assert row["allow"]["converged"] is False
+    assert settings.load(p)["permissions"]["allow"] == "managed elsewhere"
+
+
+def test_a_row_for_another_harness_reports_no_rules(home):
+    """A rule list another harness never reads has no answer here."""
+    profile.create("work")
+    profile.create("cx")
+    store.set_profile_field("cx", "harness", "codex")
+    rows = rules_by_profile(listing())
+    assert rows["cx"] is None
+    assert rows["work"] is not None
+
+
+def test_the_shared_declaration_is_reported_beside_the_files(home):
+    """Two routes reach a profile and the answer says which one is in play.
+
+    A declaration arrives through ``claunch apply`` (which assigns the list);
+    the guard arrives through ``claunch install`` (which merges). Here one is
+    declared and nothing has been written yet, which is the state between
+    ``claunch shared`` and the apply that follows it.
+    """
+    profile.create("work")
+    store.update(lambda doc: doc.setdefault("shared", {}).setdefault(
+        "settings", {}).update({"permissions.allow": ["mcp__claunch"]}))
+    row = rules_by_profile(listing())["work"]
+    assert row["allow"]["declared"] == ["mcp__claunch"]
+    assert row["deny"]["declared"] is None
+    # Declared is not planted: the file is still empty.
+    assert row["allow"]["value"] == []
+    assert row["allow"]["converged"] is False
+
+
+def test_two_profiles_are_told_apart(home):
+    """The boundary the page exists for: one profile guarded, one not."""
+    guarded = profile.create("guarded")
+    profile.create("bare")
+    plant(guarded)
+    rows = rules_by_profile(listing())
+    assert rows["guarded"]["converged"] is True
+    assert rows["bare"]["converged"] is False
+    assert rows["bare"]["allow"]["missing"] == ["mcp__claunch"]
+    assert len(rows["bare"]["deny"]["missing"]) == 16
