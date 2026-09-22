@@ -11,7 +11,8 @@ reader needs from it. A session row is headed by the session's own name and the
 state it is in now, and carries an accent edge; a record row is headed by the
 source kind it came from. Both keep the matching passage and the sessions they
 concern, and **원문 보기** retrieves the original issue (including comments) or
-event. This feature retrieves records; it does not generate answers.
+event; an opening task is shown as its own text rather than as the record around
+it. This feature retrieves records; it does not generate answers.
 
 The state shown on a session — on the row that is a session and on every chip a
 record carries — is read from the session registry when the answer is built, not
@@ -37,11 +38,12 @@ so the line above them and the rows below them agree when it arrives.
 
 The unified corpus covers all known/registered repository boards, issue
 descriptions, design/acceptance/notes fields, labels and comments; session
-tasks and summaries; Observer events and direct reports/answers; briefing
-and checks; and session lifecycle/borrow/worktree events. Long records are
-split into independently searchable passages without the older eight-chunk
-cap. Embedding and optional reranking use the existing oMLX-compatible
-client. `/api/search?kind=all&q=...` exposes the same search to API clients.
+opening tasks, identities, notes and summaries; Observer events and direct
+reports/answers; briefing and checks; and session lifecycle/borrow/worktree
+events. Long records are split into independently searchable passages
+without the older eight-chunk cap. Embedding and optional reranking use the
+existing oMLX-compatible client. `/api/search?kind=all&q=...` exposes the
+same search to API clients.
 If reranking fails, unified search still returns embedding/exact-match results
 and explicitly displays that reranking was unavailable.
 The response reports indexed/total passages and indexing errors. Initial
@@ -65,13 +67,18 @@ archive, `search-records.sqlite3`, retains source records for search beyond
 that display limit, including records from sessions later removed from the
 registry. Re-importing a source ID updates that record instead of duplicating
 it. New briefing/check snapshots are recorded on write, independently of
-whether automatic model observation or semantic search is enabled. Existing
-retained Observer records and latest briefing/check snapshots are imported;
+whether automatic model observation or semantic search is enabled. A session's
+opening task is written to the same archive when the session starts, so it
+remains searchable after the session is cleared from the registry and its
+definition is gone. That record carries the source URL the result opens, and
+the session's own document no longer repeats the task. Existing retained
+Observer records and latest briefing/check snapshots are imported;
 history already discarded before this feature cannot be reconstructed.
 Search indexes remain derived data under the daemon's `rag/` directory.
 
 Validation: `tests/test_search_anything.py` covers durability, source coverage,
-session links, session state at answer time, settings and retrieval.
+session links, session state at answer time, opening-task retention,
+settings and retrieval.
 `tests/search_anything_browser.cjs` uses an isolated fixture server to exercise
 actual browser focus, keyboard, stale-response handling, the two result lists
 with their states, source display and settings forms. Set `CLAUNCH_PLAYWRIGHT`

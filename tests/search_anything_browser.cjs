@@ -45,9 +45,11 @@ const server = http.createServer(async (req,res) => {
     // not stamp one), which is what leaves the record's time the only one.
     const session={id:'s1',kind:'session',name:'s1',title:'s1',status:'idle',excerpt:'세션 작업 내용',
       sessions:[{name:'s1',status:'idle'}],href:'#/s/s1'};
-    const record={id:'r1',title:q,kind:'checks',at,excerpt:'<img src=x onerror=alert(1)>',
+    // An opening task result reads its record as prose; every other kind stays JSON.
+    const kind = q === 'task-source' ? 'opening-task' : 'checks';
+    const record={id:'r1',title:q,kind,at,excerpt:'<img src=x onerror=alert(1)>',
       sessions:[{name:'s1',status:'idle'},{name:'s2',status:'busy'},{name:'s3',status:'exited',paused:true}],
-      href:'#/observer/session/s1',source_url:'api/search/records/s1/e1'};
+      href:kind==='opening-task'?'#/s/s1':'#/observer/session/s1',source_url:'api/search/records/s1/e1'};
     res.end(JSON.stringify({results:q==='only-session'?[session]:[session,record],index:{indexed:1,total:1},warnings:['rerank unavailable']})); return;
   }
   if(req.url==='/api/rag/settings') {res.end(JSON.stringify(cfg));return;}
@@ -134,6 +136,10 @@ const server = http.createServer(async (req,res) => {
     await page.locator('dialog input').fill('needle');await page.keyboard.press('Enter');
     await page.getByRole('link',{name:'needle',exact:true}).waitFor();
     await page.getByText('원문 보기',{exact:true}).click();await page.waitForFunction(()=>document.querySelector('dialog pre').textContent.includes('원문 기록'));
+    await page.locator('dialog input').fill('task-source');await page.keyboard.press('Enter');
+    await page.getByRole('link',{name:'task-source',exact:true}).waitFor();
+    await page.getByText('원문 보기',{exact:true}).click();
+    await page.waitForFunction(()=>document.querySelector('dialog pre').textContent==='원문 기록');
     await page.keyboard.press('Escape');assert.equal(await page.locator('dialog').evaluate(n=>n.open),false);
     assert.equal(await page.locator('#search-anything-open').evaluate(n=>n===document.activeElement),true);
     await page.locator('#search-anything-open').click();await page.locator('dialog input').fill('slow');await page.keyboard.press('Enter');

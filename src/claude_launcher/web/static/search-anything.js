@@ -16,7 +16,7 @@ globalThis.SearchAnything = (() => {
   close.setAttribute("aria-label", "닫기"); close.title = "닫기 (Esc)";
   const header = node("div", "", "search-anything-header"); header.append(title, close);
   const form = document.createElement("form"), input = document.createElement("input");
-  input.type = "search"; input.placeholder = "Beads, Observer, briefing, checks 검색";
+  input.type = "search"; input.placeholder = "Beads, opening task, Observer, briefing, checks 검색";
   input.setAttribute("aria-label", "통합 검색어"); input.maxLength = 2000;
   const submit = node("button", "검색"); submit.type = "submit";
   const notice = node("p", "Enter로 검색 · Esc로 닫기", "search-anything-notice"); notice.setAttribute("role", "status");
@@ -106,6 +106,11 @@ globalThis.SearchAnything = (() => {
     if (row.root) head.append(node("span", row.root, "search-anything-root"));
     return head;
   }
+  // An opening task is prose and its record is only the envelope around
+  // it, so the raw text is what the reader asked for; every other record
+  // is a structured snapshot and stays readable as JSON.
+  const sourceText = (row, data) => row.kind === "opening-task" && typeof data.text === "string"
+    ? data.text : JSON.stringify(data, null, 2);
   function addResult(row) {
     const isSession = row.kind === SESSION;
     const item = node("article", "", "search-anything-result " + (isSession ? "search-anything-session" : "search-anything-record"));
@@ -136,7 +141,7 @@ globalThis.SearchAnything = (() => {
       detail.append(node("summary", "원문 보기"), text);
       detail.ontoggle = async () => {
         if (!detail.open || detail.dataset.loaded) return;
-        try { const data = await request(row.source_url); text.textContent = JSON.stringify(data, null, 2); detail.dataset.loaded = "1"; }
+        try { const data = await request(row.source_url); text.textContent = sourceText(row, data); detail.dataset.loaded = "1"; }
         catch (error) { text.textContent = error.message; }
       };
       item.append(detail);

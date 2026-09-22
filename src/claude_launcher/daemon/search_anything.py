@@ -76,6 +76,14 @@ class Corpus:
             search_records.remember(name, row.get("events", []) + self.observer.reports.rows(name))
             if hasattr(self.observer, "session_events"):
                 search_records.remember(name, self.observer.session_events.rows(session))
+            # The opening task is archived rather than inlined below.
+            # Archived, it survives the session leaving the registry, and
+            # it comes back in the loop underneath as its own result --
+            # one carrying a source_url, so a reader can open the whole
+            # task instead of the passage that matched. Inlining it here
+            # as well would put the same text on screen twice for one
+            # match.
+            search_records.capture_task(name, session.sdef.task, getattr(session, "created_at", "") or "")
             # The note is the reader's own word for why this terminal exists,
             # so it belongs in the session's searchable text rather than only
             # on the row: it is how somebody finds the session they annotated
@@ -87,7 +95,7 @@ class Corpus:
             # answer can carry that session's state on the row itself rather
             # than only on a link beside it (see RagService._live_states).
             docs.extend(documents("session:" + name, name, "\n".join(str(v or "") for v in
-                                  (session.sdef.task, getattr(session.sdef, "identity", ""),
+                                  (getattr(session.sdef, "identity", ""),
                                    getattr(session.sdef, "note", ""), row.get("summary"))),
                                   kind="session", name=name, sessions=[{"name": name}],
                                   href="#/s/" + quote(name, safe="")))
@@ -100,9 +108,14 @@ class Corpus:
                 text += "\n" + json.dumps(event["details"], ensure_ascii=False)
             if event.get("answer"):
                 text += "\n" + event["answer"].get("text", "")
-            docs.extend(documents(f"event:{name}:{eid}", f"{name} · {event.get('kind', 'observer')}", text,
-                                  kind=event.get("kind", "observer"), event=eid, at=event.get("at"),
-                                  sessions=[{"name": name}], href="#/observer/session/" + quote(name, safe=""),
+            kind = event.get("kind", "observer")
+            # An opening task belongs to the session rather than to its
+            # Observer stream, so its result opens the session page the way
+            # the session's own document does.
+            href = "#/s/" if kind == "opening-task" else "#/observer/session/"
+            docs.extend(documents(f"event:{name}:{eid}", f"{name} · {kind}", text,
+                                  kind=kind, event=eid, at=event.get("at"),
+                                  sessions=[{"name": name}], href=href + quote(name, safe=""),
                                   source_url=f"api/search/records/{quote(name, safe='')}/{quote(eid, safe='')}"))
         return docs
 

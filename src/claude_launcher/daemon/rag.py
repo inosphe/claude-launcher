@@ -353,7 +353,10 @@ def session_doc(info: dict, briefing: Optional[dict] = None) -> Doc:
     # (search_anything.Corpus) are two hand-written copies of "what makes up
     # a session's searchable text", so the note has to be in both or a
     # session is findable by its note in Search anything and not in the
-    # rail's semantic search.
+    # rail's semantic search. The opening task is the one field the two no
+    # longer share: the unified corpus archives it as a record of its own
+    # (search_records.capture_task) so that it survives the session leaving
+    # the registry, which this index, rebuilt from the registry, cannot do.
     if note:
         lines.append(f"note: {note}")
     if identity:
