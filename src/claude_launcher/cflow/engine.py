@@ -1562,11 +1562,15 @@ def _request_next_round(workflow: Workflow, state: dict, cwd) -> None:
         return  # a legacy run with no recorded source cannot restart itself
     request = {
         "id": f"req-{secrets.token_hex(3)}",
-        # The snapshot's own file, not the name: a name can resolve to a
-        # different layer between rounds, and the loop that was started is
-        # the one that should keep running. Edits to that file DO take
-        # effect — each round re-reads and re-snapshots it.
-        "workflow": source,
+        # The NAME the round ran under, not the file it resolved to: a name
+        # is re-resolved through the layers at the next round's start, the
+        # same way it is for a human's own 'claunch cflow start'. That is
+        # what lets a project layer added after the loop began reach it on
+        # its very next round, instead of never — the loop keeps running
+        # under the same name, on whichever file that name resolves to now.
+        # `resolved` below still pins the exact file THIS round used, for
+        # provenance; it is not what the next round is started from.
+        "workflow": state["workflow"],
         "name": state["workflow"],
         "resolved": source,
         "context": str(state.get("context") or ""),
