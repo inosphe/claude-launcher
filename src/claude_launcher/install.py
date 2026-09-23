@@ -105,6 +105,36 @@ GATE_DENY_RULES = tuple(
     for suffix in ("", ":*")
 )
 
+#: The board's export file, denied to the agent's file tools.
+#:
+#: The issue board is the SQLite database ``.beads/beads.db``; ``issues.jsonl``
+#: beside it is an export of that database, and the only supported way in is
+#: ``claunch beads``. A line written into the export by hand never reaches the
+#: database, and the next ``br sync --flush-only`` any session runs rewrites
+#: the file from the database — the record is gone with no error and no
+#: warning. The reverse mistake is worse: an issue present in the export and
+#: missing from the database trips ``br``'s stale-export guard, which stops
+#: every flush in that repository for every session until someone reconciles
+#: the two by hand.
+#:
+#: Measured on this machine (``claunch-beads-guidance-missing-from-profile-g77zs``):
+#: no layer an agent reads said any of this. The instruction now lives in the
+#: mesh skill, the improv workflows and this repository's CLAUDE.md; this rule
+#: is the half of it that does not depend on the agent having read anything.
+#:
+#: ``Edit`` alone, and anchored at the filesystem root: Claude Code consults
+#: file paths only on ``Edit`` and ``Read`` rules — a path rule written for
+#: ``Write``, ``NotebookEdit`` or ``MultiEdit`` is accepted, never consulted,
+#: and warned about at startup — so one ``Edit`` rule covers all four writing
+#: tools. ``//**/`` matches the path in any repository on any drive, which a
+#: rule in user settings otherwise would not: an unanchored path there anchors
+#: under ``~/.claude``.
+#:
+#: What it does not cover: a shell that writes the same file (``sed -i``, a
+#: redirection). Command rules match command text, so a rule that tried would
+#: be both leaky and noisy. That half is the written instruction's job.
+BOARD_DENY_RULES = ("Edit(//**/.beads/issues.jsonl)",)
+
 #: The claunch MCP server, allowed to the agent as one server-scoped rule.
 #:
 #: The other half of the deny rules above, planted in the same file for the
@@ -140,14 +170,24 @@ def mcp_server_def() -> dict:
     return {"command": "claunch", "args": ["mcp"]}
 
 
-def _gate_guard_lines(settings_path: Path) -> List[str]:
-    """Merge both halves of the gate guard into one settings file; report it."""
-    denied = settings.merge_permission_deny(settings_path, GATE_DENY_RULES)
+def _guard_lines(settings_path: Path) -> List[str]:
+    """Merge every permission guard into one settings file; report each one.
+
+    Two guards, one file: the cflow gate split (whose deny half needs the MCP
+    allow half beside it, see :data:`GATE_ALLOW_RULES`) and the board's export
+    file (:data:`BOARD_DENY_RULES`). Both merge as unions, so a reinstall
+    leaves the person's own rules untouched.
+    """
+    denied = settings.merge_permission_deny(
+        settings_path, (*GATE_DENY_RULES, *BOARD_DENY_RULES)
+    )
     allowed = settings.merge_permission_allow(settings_path, GATE_ALLOW_RULES)
     note = "" if (denied or allowed) else " (already present)"
     return [
         f"gate guard (cflow human commands, {MCP_NAME} MCP allowed) "
-        f"-> {settings_path}{note}"
+        f"-> {settings_path}{note}",
+        f"board guard (.beads/issues.jsonl not editable by file tools) "
+        f"-> {settings_path}{note}",
     ]
 
 
@@ -340,7 +380,7 @@ def install_into_user() -> List[str]:
     return (
         [f"mcp server {MCP_NAME!r} -> {path}"]
         + _skill_lines(skills)
-        + _gate_guard_lines(config.default_config_dir() / settings.SETTINGS_FILENAME)
+        + _guard_lines(config.default_config_dir() / settings.SETTINGS_FILENAME)
         + _workflow_lines()
         + defender.lines()
     )
@@ -386,7 +426,7 @@ def _profile_lines(profile: Profile) -> List[str]:
             f"mcp server {MCP_NAME!r} -> "
             f"{profile.config_dir / settings.CLAUDE_JSON}"
         ]
-        guard_lines = _gate_guard_lines(
+        guard_lines = _guard_lines(
             profile.config_dir / settings.SETTINGS_FILENAME
         )
     else:
@@ -469,7 +509,7 @@ def install_into_project(project_dir: Path) -> List[str]:
     return (
         [f"mcp server {MCP_NAME!r} -> {mcp_path}"]
         + _skill_lines(project_dir / ".claude" / "skills")
-        + _gate_guard_lines(
+        + _guard_lines(
             project_dir / ".claude" / settings.SETTINGS_FILENAME
         )
     )

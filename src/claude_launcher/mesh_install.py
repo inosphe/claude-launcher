@@ -119,6 +119,17 @@ makes a message the wrong home for anything that gets read back later.
   `claunch beads comments add <id> -f <file>` takes a long bundle from a file.
   A shared convention that is not itself a work item still belongs there: put
   it in a `doc`-type issue and append its revisions as comments.
+- **Never write to `.beads/issues.jsonl` yourself.** The board is the SQLite
+  database `.beads/beads.db`; that file is an export of it, and `claunch
+  beads` is the only way in. A line you write by hand never reaches the
+  database, and the next `claunch beads sync --flush-only` any session runs
+  overwrites the file from the database — your record is gone with no error
+  and no warning. An issue present in the file and missing from the database
+  trips the export's stale guard instead, which stops every flush in that
+  repository for everyone. This covers every tool that writes a file: Edit,
+  Write, `sed -i`, a shell redirection. Seeing that file modified in `git
+  status` is normal — the daemon and other sessions write the board — so
+  leave it alone rather than reverting or tidying it.
 - **Then send the nudge.** Four lines: the issue id and its state, the comment
   marker you just wrote, the ONE value that changes what the reader does (a
   delta, whether an unresolved limit exists), and what you want from them. The

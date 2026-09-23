@@ -28,6 +28,15 @@
 
 - 세션이 한 회차를 쓸 일, 다른 세션·회차로 넘어갈 일은 이슈로 존재한다. 호출은
   항상 `claunch beads <br 인자>` — 워크트리에서도 저장소 루트의 보드 하나를 쓴다.
+- **`.beads/issues.jsonl`을 직접 고치는 것은 금지다.** 보드의 실체는
+  `.beads/beads.db`이고 jsonl은 그것을 내보낸 산출물이다. 손으로 쓴 줄은 DB에
+  들어가지 않는다. 다음에 어느 세션이든 `claunch beads sync --flush-only`를
+  돌리면 DB 내용이 그 파일을 덮어쓰고, 손으로 쓴 내용은 에러도 경고도 없이
+  사라진다. 반대로 jsonl에만 있고 DB에 없는 이슈가 생기면 export의 stale 가드가
+  걸려 그 저장소의 flush가 전부 멈춘다. Edit·Write·`sed -i`·리다이렉션 어느
+  것으로도 그 파일에 쓰지 않는다. `git status`에 `.beads/issues.jsonl`이 수정된
+  것으로 보이는 것은 데몬과 다른 세션이 보드를 쓴 결과이고, 정상이다 — 되돌리거나
+  손보지 않는다.
 - 누가 만들고 누가 상태를 옮기는지는 워크플로 정본(improv-worker/leader/mid의
   intake에 있는 「beads(br) 규칙 — 공통」 절)이 말한다. 여기에 다시 적지 않는다 —
   두 자리에 적으면 갈린다.

@@ -490,6 +490,36 @@ def test_the_mesh_skill_teaches_where_a_record_goes():
     assert "claunch beads list --status in_review --json" in md
 
 
+@pytest.mark.parametrize("layer", ["bundled", "project"])
+def test_every_layer_forbids_editing_the_export_file(layer):
+    """`.beads/issues.jsonl` is an export of `.beads/beads.db`, and a line
+    written into it by hand reaches no database and survives no flush. The
+    sentence sits in the shared block, so it reaches every role in both
+    layers; the installer plants the matching deny rule
+    (tests/test_board_guard.py) for the sessions that read no workflow."""
+    for name in ("improv-worker", "improv-leader", "improv-mid", "improv-pm"):
+        path = _bundled(name) if layer == "bundled" else PROJECT_OVERRIDES / f"{name}.yaml"
+        if layer == "project" and not path.exists():
+            continue
+        block = _flat(_block(path))
+        assert "`.beads/issues.jsonl`을 직접 고치는 것은 금지다" in block
+        assert "sync --flush-only" in block          # what overwrites it
+        assert "stale 가드" in block                 # what the reverse breaks
+        assert "sed -i" in block                     # the shell spelling too
+
+
+def test_the_mesh_skill_forbids_it_in_the_layer_every_session_reads():
+    """The profile layer is where a session with no cflow run and no assigned
+    issue gets it — or does not. Measured empty in
+    `claunch-beads-guidance-missing-from-profile-g77zs`."""
+    from claude_launcher import mesh_install
+
+    md = mesh_install.SKILL_MD
+    assert "Never write to `.beads/issues.jsonl` yourself." in md
+    assert "claunch beads sync --flush-only" in md
+    assert "stale guard" in md
+
+
 def test_the_packaged_stances_know_a_record_has_a_home():
     """A stance that never names the board leaves `mesh send` the only channel
     an agent knows it has."""
