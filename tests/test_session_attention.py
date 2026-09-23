@@ -93,6 +93,9 @@ def test_new_session_reports_no_visit_and_no_typing(home, tmp_path):
             # Every key is present even when empty — a reader that draws the
             # line unconditionally must not have to guess at a missing key.
             assert "last_activity_at" in info
+            # The rail grades a busy dot by it (dotGrade in app.js); an int
+            # from the first poll, so the grade never has to guess.
+            assert isinstance(info["moved_rows"], int)
         finally:
             await mgr.shutdown_all()
 
