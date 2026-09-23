@@ -109,6 +109,14 @@ TYPING_HOLD_TIMEOUT = float(os.environ.get("CLAUNCH_TYPING_HOLD_TIMEOUT") or 30.
 #: types one character and walks away.
 DRAFT_GUARD = float(os.environ.get("CLAUNCH_DRAFT_GUARD") or 180.0)
 
+#: The same cap for a draft that exists only as a composing mark — an IME
+#: syllable the terminal has reported but whose bytes have not arrived.
+#: While a composition is alive the client re-marks it at ~1s cadence, so
+#: silence this long means it ended without a commit: cancelled, or the
+#: mark was the last thing it ever sent. Text in the composer gets
+#: DRAFT_GUARD; text that never reached the composer gets this.
+COMPOSING_GUARD = float(os.environ.get("CLAUNCH_COMPOSING_GUARD") or 10.0)
+
 #: How long a FORCED delivery ("deliver now", pressed by a person) waits for
 #: the keyboard before it stops waiting. The ordinary wait is
 #: :data:`TYPING_HOLD_TIMEOUT`, which is right for a background sender and
@@ -515,6 +523,14 @@ class Session:
         #: into a half-written line is the corruption all of this exists to
         #: prevent, and the human's own Enter is what says it is safe again.
         self._draft_open = False
+        #: Whether the open draft exists only as a composing mark — an IME
+        #: syllable or a phone word that lives in the terminal's textarea
+        #: and has sent no bytes yet. The composer itself is still empty in
+        #: that case, so the hold is a shorter one (:data:`COMPOSING_GUARD`):
+        #: a composition abandoned mid-syllable (Esc, focus lost) produces
+        #: no closing bytes at all, and DRAFT_GUARD would hold this
+        #: session's mail for minutes over a draft that never existed here.
+        self._draft_uncommitted = False
         #: A person's standing "don't type anything in here" — set from the
         #: dashboard, not derived from the keyboard. Every hold above is the
         #: daemon *guessing* from timing that now is a bad moment; this one
@@ -1243,6 +1259,10 @@ class Session:
         :func:`draft_state_from_bytes`). ``composing`` is the web terminal's
         equivalent claim for keys that produced no bytes yet — an IME
         mid-syllable is a draft being written even though the wire is quiet.
+        A draft it opens is marked *uncommitted*, though: nothing is in the
+        composer until the composition's bytes arrive, so a mark that is
+        never followed by bytes (a cancelled syllable) lapses on
+        :data:`COMPOSING_GUARD` rather than DRAFT_GUARD.
         Both are terminal-only: ``send-keys`` types a line and its Enter
         together, and holding *itself* behind its own text would deadlock.
         """
@@ -1262,11 +1282,19 @@ class Session:
         # than saying nothing.
         self.last_input_at = _utcnow()
         if composing:
+            # A mark only *opens* a draft as uncommitted: one arriving after
+            # the commit's own bytes must not downgrade text that is
+            # already sitting in the composer.
+            if not self._draft_open:
+                self._draft_uncommitted = True
             self._draft_open = True
         if data:
             state = draft_state_from_bytes(data)
             if state is not None:
                 self._draft_open = state
+                # Bytes settle the question either way: a committed
+                # character is a real draft now, a submit/clear closed it.
+                self._draft_uncommitted = False
 
     def draft_open(self) -> bool:
         """Whether a human has an unsent line in this terminal's composer.
@@ -1278,10 +1306,20 @@ class Session:
         harm. Everything short of that is released by the keyboard instead —
         Enter, ``C-c`` — so an actual composer is protected for exactly as
         long as it is being written.
+
+        A draft opened by a composing mark alone gets the shorter
+        :data:`COMPOSING_GUARD`: its bytes have not reached the composer, so
+        there is nothing to splice into, and the marks stop entirely the
+        moment the composition is abandoned rather than submitted.
         """
         if not self._draft_open:
             return False
-        if time.monotonic() - self._last_terminal_input >= DRAFT_GUARD:
+        guard = (
+            COMPOSING_GUARD
+            if getattr(self, "_draft_uncommitted", False)
+            else DRAFT_GUARD
+        )
+        if time.monotonic() - self._last_terminal_input >= guard:
             return False
         return True
 
@@ -1508,6 +1546,7 @@ class Session:
         """
         await self.write_bytes(b"\r")
         self._draft_open = False
+        self._draft_uncommitted = False
         await asyncio.sleep(FORCE_DRAFT_SETTLE)
 
     async def paste(self, text: str, *, enter: bool = False) -> bytes:

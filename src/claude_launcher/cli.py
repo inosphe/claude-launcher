@@ -54,6 +54,7 @@ from . import (
     runner,
     seed,
     settings,
+    stdio,
     store,
     template,
     usage,
@@ -463,7 +464,7 @@ def _cmd_set_token(args: argparse.Namespace) -> int:
     p = _credential_profile(args.name, "set-token")
     token = args.token
     if not token:
-        token = sys.stdin.readline()
+        token = stdio.read_stdin_line()
     credentials.save_token(p, token)
     print(f"stored token for profile {p.name!r}")
     return 0
@@ -1661,13 +1662,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 def _harden_console() -> None:
     """Avoid UnicodeEncodeError on non-UTF-8 consoles (e.g. Windows cp949)."""
-    for stream in (sys.stdout, sys.stderr):
-        reconfigure = getattr(stream, "reconfigure", None)
-        if reconfigure is not None:
-            try:
-                reconfigure(errors="replace")
-            except (ValueError, OSError):
-                pass
+    stdio.harden_console()
 
 
 def main(argv: Optional[List[str]] = None) -> int:

@@ -416,6 +416,7 @@ def repo_root(cwd: Optional[str] = None) -> Optional[Path]:
         proc = subprocess.run(
             ["git", "rev-parse", "--path-format=absolute", "--git-common-dir"],
             cwd=here, capture_output=True, text=True, check=False,
+            encoding="utf-8", errors="replace",
         )
     except OSError:
         proc = None
@@ -528,6 +529,7 @@ def run(args: List[str], cwd: Optional[str] = None) -> int:
         proc = subprocess.run(
             cmd, cwd=cwd or os.getcwd(), check=False,
             capture_output=not last, text=True,
+            encoding="utf-8", errors="replace",
         )
         code = proc.returncode
         if code != 0:

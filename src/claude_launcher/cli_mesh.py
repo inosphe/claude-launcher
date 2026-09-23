@@ -15,7 +15,7 @@ import sys
 from typing import Optional
 from urllib.parse import quote
 
-from . import daemon_client
+from . import daemon_client, stdio
 
 #: The roster partitions ``--state`` accepts, spelled here rather than
 #: imported: ``daemon.mesh`` pulls aiohttp in, and this module is loaded by
@@ -207,7 +207,7 @@ def _cmd_leave(args: argparse.Namespace) -> int:
 
 
 def _cmd_send(args: argparse.Namespace) -> int:
-    text = sys.stdin.read() if args.text == ["-"] else " ".join(args.text)
+    text = stdio.read_stdin() if args.text == ["-"] else " ".join(args.text)
     sections = {}
     for item in args.section or []:
         handle, sep, sec_text = item.partition("=")
