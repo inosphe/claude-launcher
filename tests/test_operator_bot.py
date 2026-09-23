@@ -10,7 +10,10 @@ What has to hold:
   - a dispatch must name the user message (or answered, not denied, ask) it
     relays — the operator cannot originate work;
   - poll returns Observer events after the cursor, and `attention` carries
-    open questions and cflow gates whatever the cursor says;
+    open questions and cflow gates whatever the cursor says — of running
+    sessions only: a paused one is named apart and a killed one not at all;
+  - each session's progress (status-check answers, board issue) reaches the
+    poll as a change once, and the panel shows it;
   - the workflow and the role stance say the same thing about the tools.
 """
 from __future__ import annotations
@@ -186,6 +189,102 @@ def test_poll_cursor_attention_and_project_scope(world):
     assert {s["name"] for s in again["sessions"]} == {"w1", "w2"}
 
 
+def test_paused_and_exited_sessions_raise_no_attention(world):
+    # w1 is paused (exited + paused_at), w2 was killed: their open questions
+    # and blocked state wait on nobody, so nothing of theirs is attention
+    world.sessions["w1"].exited = True
+    world.sessions["w1"].paused_at = "2026-09-23T01:00:00+00:00"
+    world.sessions["w2"].exited = True
+    ask = {"at": "2026-09-23T01:05:00+00:00", "text": "which?", "question": True, "answer": None,
+           "needs_action": True}
+    world.observer.rows = {"w1": {"events": [dict(ask, id="q1")], "state": "blocked"},
+                           "w2": {"events": [dict(ask, id="q2")]}}
+    first = asyncio.run(world.ops.poll("op"))
+    assert first["attention"] == []
+    assert first["paused"] == [{"session": "w1", "paused_at": "2026-09-23T01:00:00+00:00"}]
+    # the events still arrive, marked with their category and never as needing action
+    assert {(e["session"], e["category"], e["needs_action"]) for e in first["events"]} == {
+        ("w1", "paused", False), ("w2", "killed", False)}
+    again = asyncio.run(world.ops.poll("op", first["cursor"]))
+    assert again["attention"] == []
+    # the panel lists the paused one apart, with no questions counted; the killed one not at all
+    rows = world.ops.view("default")["sessions"]
+    assert [(r["name"], r["category"], r["questions"]) for r in rows] == [("w1", "paused", 0)]
+
+
+def test_poll_reports_progress_changes_once(world):
+    progress = {"w1": {"checks": [{"name": "C", "question": "커밋 되었는가?", "answer": "no"}],
+                       "issue": {"id": "cl-1", "status": "in_progress", "title": "t"}}}
+
+    async def work(sessions):
+        return {s.sdef.name: progress[s.sdef.name] for s in sessions if s.sdef.name in progress}
+
+    world.ops.work = work
+    first = asyncio.run(world.ops.poll("op"))
+    assert first["progress"] == []  # a first reading is history
+    assert {s["name"]: s["issue"] for s in first["sessions"]}["w1"]["status"] == "in_progress"
+    progress["w1"] = {"checks": [{"name": "C", "question": "커밋 되었는가?", "answer": "yes"}],
+                      "issue": {"id": "cl-1", "status": "in_review", "title": "t"}}
+    second = asyncio.run(world.ops.poll("op"))
+    assert [(p["session"], p["changes"]) for p in second["progress"]] == [
+        ("w1", ["커밋 되었는가? → yes", "이슈 cl-1: 머지 요청"])]
+    assert asyncio.run(world.ops.poll("op"))["progress"] == []  # said once
+    # the seen state survives a restart, so a restart does not repeat it
+    restored = operator_bot.Operators(world.root, world.ops.manager, world.observer, None, work)
+    assert asyncio.run(restored.poll("op"))["progress"] == []
+
+
+def test_reply_to_threads_a_post_under_its_card(world):
+    card = world.ops.post("op", {"text": "w1 gate", "refs": ["w1"], "request_id": "c1"})
+    reply = world.ops.post("op", {"text": "cleared", "reply_to": card["id"], "request_id": "c2"})
+    assert reply["parent"] == card["id"]
+    # a reply to a reply joins the same card: a thread is one level deep
+    again = world.ops.ask("op", {"text": "land?", "type": "approve", "reply_to": reply["id"], "request_id": "c3"})
+    assert again["parent"] == card["id"]
+    with pytest.raises(ValueError):
+        world.ops.post("op", {"text": "x", "reply_to": "nope", "request_id": "c4"})
+    world.ops.state("default")["feed"].append({"id": "u1", "kind": "user", "text": "hi"})
+    with pytest.raises(ValueError):
+        world.ops.post("op", {"text": "x", "reply_to": "u1", "request_id": "c5"})
+
+
+def test_track_threads_what_moved_by_another_path(world):
+    progress = {"w1": {"checks": [{"name": "C", "question": "커밋 되었는가?", "answer": "no"}],
+                       "issue": {"id": "cl-1", "status": "in_progress", "title": "t"}}}
+
+    async def work(sessions):
+        return {s.sdef.name: progress[s.sdef.name] for s in sessions if s.sdef.name in progress}
+
+    world.ops.work = work
+    world.gates.append({"session": "w1", "step_id": "commit"})
+    card = world.ops.post("op", {"text": "w1 waits at commit", "level": "urgent", "refs": ["w1", "w2"],
+                                 "request_id": "c1"})
+    world.ops.post("op", {"text": "no sessions named", "request_id": "c2"})
+    assert asyncio.run(world.ops.track("default")) == []  # the baseline says nothing
+    assert asyncio.run(world.ops.track("default")) == []  # throttled, and nothing moved anyway
+    # w1: the gate was approved elsewhere, committed, landing requested; w2 paused
+    world.gates.clear()
+    progress["w1"] = {"checks": [{"name": "C", "question": "커밋 되었는가?", "answer": "yes"}],
+                      "issue": {"id": "cl-1", "status": "in_review", "title": "t"}}
+    world.sessions["w2"].exited = True
+    world.sessions["w2"].paused_at = "2026-09-23T01:00:00+00:00"
+    added = asyncio.run(world.ops.track("default", force=True))
+    assert [(e["kind"], e["parent"], e["session"], e["text"].split("\n")) for e in added] == [
+        ("update", card["id"], "w1", ["게이트 commit 해소", "커밋 되었는가? → yes", "이슈 cl-1: 머지 요청"]),
+        ("update", card["id"], "w2", ["상태: 실행 중 → 일시정지"])]
+    # in the feed, in time order, after the card
+    feed = world.ops.state("default")["feed"]
+    assert [e["id"] for e in feed][-2:] == [e["id"] for e in added]
+    assert asyncio.run(world.ops.track("default", force=True)) == []  # said once
+    # a board that cannot be read is not a change, and the baseline survives a restart
+    world.ops.work = None
+    assert asyncio.run(world.ops.track("default", force=True)) == []
+    restored = operator_bot.Operators(world.root, world.ops.manager, world.observer,
+                                      lambda members: [], work)
+    progress["w1"]["issue"] = {"id": "cl-1", "status": "closed", "title": "t"}
+    assert [e["text"] for e in asyncio.run(restored.track("default"))] == ["이슈 cl-1: 닫힘"]
+
+
 def test_view_panel_skips_exited_and_counts_questions(world):
     world.sessions["w2"].exited = True
     world.observer.rows = {"w1": {"events": [{"question": True, "answer": None, "at": "x"}], "summary": "s"}}
@@ -236,10 +335,13 @@ def test_start_route_binds_one_operator_per_project(world, monkeypatch):
             assert resp.status == 409
             resp = await client.post("/api/operator/start", json={"project": "other"})
             assert resp.status == 400  # profile required
-            resp = await client.post("/api/operator/start", json={"project": "other", "profile": "p"})
+            resp = await client.post("/api/operator/start",
+                                     json={"project": "other", "profile": "p:claude", "model": " opus ", "effort": ""})
             assert resp.status == 201
             view = await (await client.get("/api/operator?project=other")).json()
             assert view["operator"]["name"] == "op2"
+            # the view names the bot's harness and model, for the header
+            assert {"harness", "model"} <= set(view["operator"])
             resp = await client.post("/api/operator/message?project=other", json={"text": "hi"})
             assert resp.status == 200
             resp = await client.post("/api/operator/agent/w1/post", json={"text": "x", "request_id": "a"})
@@ -250,6 +352,10 @@ def test_start_route_binds_one_operator_per_project(world, monkeypatch):
     asyncio.run(run())
     assert created[0]["role"] == "operator" and created[0]["workflow"] == "operator"
     assert created[0]["mesh"] == "operator-other" and created[0]["beads"] is False
+    # the picked model travels to the create path; an empty effort is the
+    # harness default and is not sent
+    assert created[0]["profile"] == "p:claude" and created[0]["model"] == "opus"
+    assert "effort" not in created[0]
 
 
 def test_mcp_tools_and_workflow_and_stance_agree():
@@ -265,3 +371,35 @@ def test_mcp_tools_and_workflow_and_stance_agree():
         assert tool in watch, tool
         assert tool in stance, tool
     assert "on_behalf_of" in watch
+
+
+def test_work_reads_checks_and_the_session_s_open_issue():
+    from claude_launcher.daemon import api
+
+    class Board:
+        def available(self):
+            return True
+
+        async def root_for(self, cwd):
+            return cwd
+
+        def has_board(self, root):
+            return True
+
+        async def issues(self, root):
+            return [
+                # the stale link: the round it named is closed
+                {"id": "cl-old", "status": "closed", "assignee": "w1", "title": "old"},
+                {"id": "cl-new", "status": "in_review", "assignee": "w1", "title": "new"},
+                {"id": "cl-x", "status": "in_progress", "assignee": "w9", "title": "other"},
+            ]
+
+    session = FakeSession("w1")
+    session.sdef.cwd, session.sdef.issue, session.sdef.task = "/repo", "cl-old", ""
+    session.info = lambda: {"status_checks": [{"name": "C", "question": "커밋?", "answer": "yes"}]}
+    out = asyncio.run(api._operator_work({"beads": Board()}, [session]))
+    assert out["w1"]["checks"] == [{"name": "C", "question": "커밋?", "answer": "yes"}]
+    assert out["w1"]["issue"] == {"id": "cl-new", "status": "in_review", "title": "new"}
+    # no board: the checks still arrive, the issue is unknown
+    out = asyncio.run(api._operator_work({}, [session]))
+    assert out["w1"]["issue"] is None and out["w1"]["checks"]

@@ -14,9 +14,9 @@
 .operator-head { flex: none; display: flex; flex-wrap: wrap; align-items: center; gap: 12px; padding: 12px 20px; border-bottom: 1px solid #2a2e36; }
 .operator-head h1 { margin: 0; font-size: 18px; }
 .operator-status { color: #8b949e; font-size: 12px; }
-.operator-status[data-state=running]::before { content: "● "; color: #3fb950; }
-.operator-status[data-state=ended]::before { content: "● "; color: #f85149; }
-.operator-start { display: flex; gap: 8px; margin-left: auto; }
+/* The operator's own label carries its status dot (operator.js sessionLink). */
+.operator-self { font-weight: 600; }
+.operator-start { display: flex; flex-wrap: wrap; gap: 8px; margin-left: auto; }
 .operator-body { flex: 1; min-height: 0; display: grid; grid-template-columns: minmax(0, 1fr) 300px; }
 .operator-conversation { display: flex; flex-direction: column; min-height: 0; min-width: 0; border-right: 1px solid #2a2e36; }
 .operator-feed { flex: 1; min-height: 0; overflow: auto; list-style: none; margin: 0; padding: 16px 20px; display: flex; flex-direction: column; gap: 12px; }
@@ -85,3 +85,27 @@ body.operator-page .operator-fab { display: none; }
   .operator-fab { bottom: 72px; }
   .operator-modal { width: 100%; height: 100%; max-width: none; max-height: none; margin: 0; border: none; border-radius: 0; }
 }
+
+/* Session labels carry the session list's status dot; the colours are the
+   list's own .dot rules (style.css). */
+.operator-host .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 5px; vertical-align: 0; flex: none; }
+.operator-ref, .operator-self, .operator-session-top > a { display: inline-flex; align-items: center; }
+.operator-badge-paused { background: #16325c; color: #79c0ff; }
+.operator-sessions > li.operator-paused { opacity: .75; }
+.operator-progress { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px; }
+.operator-chip { font-size: 11px; line-height: 16px; padding: 0 6px; border-radius: 8px; background: #21262d; color: #c9d1d9; white-space: nowrap; }
+.operator-chip-yes { background: #173a2a; color: #56d364; }
+.operator-chip-no { background: #2d2a1f; color: #d29922; }
+.operator-chip-issue-in_review { background: #3d2e12; color: #f0b43c; }
+.operator-chip-issue-closed { background: #1f2a37; color: #8dcaff; }
+
+/* Follow-ups: in time order as a compact line that names its card, and
+   again as the card's thread (operator.js renderFollowup / renderThread). */
+.operator-followup { padding: 6px 12px; background: #161a20; border-style: dashed; }
+.operator-followup .operator-update, .operator-thread .operator-update { margin: 4px 0 0; white-space: pre-line; }
+.operator-parent { color: #8b949e; text-decoration: none; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.operator-parent:hover { color: #58a6ff; }
+.operator-thread { list-style: none; margin: 8px 0 0; padding: 6px 0 0 10px; border-top: 1px solid #2a2e36; border-left: 2px solid #33506e; display: flex; flex-direction: column; gap: 6px; font-size: 12px; }
+.operator-thread time { color: #8b949e; font-size: 11px; }
+.operator-thread .operator-text p { margin: 2px 0; }
+.operator-flash { outline: 2px solid #58a6ff; outline-offset: 2px; }

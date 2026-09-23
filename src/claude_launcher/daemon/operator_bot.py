@@ -36,6 +36,7 @@ from aiohttp import web
 
 from .. import atomic, projects
 from . import paths, session_events
+from .session import CATEGORY_PAUSED, CATEGORY_RUNNING, session_category
 
 log = logging.getLogger(__name__)
 
@@ -58,6 +59,83 @@ def project_of(session) -> str:
     return projects.normalize(getattr(session.sdef, "project", None))
 
 
+#: How a board status reads in a progress line: in_review is the landing
+#: request (improv-worker's integration-request moves the issue there), and a
+#: close is what wrapup does once landed proved the merge.
+ISSUE_STAGES = {"open": "열림", "in_ready": "준비됨", "in_progress": "작업 중",
+                "in_review": "머지 요청", "blocked": "차단", "closed": "닫힘"}
+
+
+def progress_of(entry):
+    """One session's work progress as the panel and poll carry it: its
+    status-check answers (commit / tests / merge, as the user configured
+    them) and the board issue it is on."""
+    entry = entry or {}
+    checks = [{"name": c.get("name"), "question": c.get("question"), "answer": c.get("answer")}
+              for c in entry.get("checks") or [] if isinstance(c, dict) and c.get("name")]
+    issue = entry.get("issue") if isinstance(entry.get("issue"), dict) else None
+    return {"checks": checks, "issue": issue}
+
+
+def progress_changes(before, after):
+    """The lines that say what moved between two ``progress_of`` readings:
+    a status check whose answer changed, or the issue's status. ``before``
+    None is a first reading, which is history and says nothing."""
+    if before is None:
+        return []
+    lines = []
+    old = {c["name"]: c.get("answer") for c in before.get("checks", [])}
+    for check in after.get("checks", []):
+        if check.get("answer") and old.get(check["name"]) != check.get("answer"):
+            lines.append(f"{check.get('question') or check['name']} → {check['answer']}")
+    was, now_issue = before.get("issue") or {}, after.get("issue") or {}
+    if now_issue.get("id") and (was.get("id"), was.get("status")) != (now_issue.get("id"), now_issue.get("status")):
+        stage = ISSUE_STAGES.get(now_issue.get("status"), now_issue.get("status"))
+        lines.append(f"이슈 {now_issue['id']}: {stage}")
+    return lines
+
+
+#: How a session's category reads in a thread line.
+CATEGORY_LABELS = {"running": "실행 중", "paused": "일시정지", "killed": "종료", "archived": "보관",
+                   None: "목록에 없음"}
+#: Cards (the bot's posts and asks that name sessions) whose sessions are
+#: followed; older cards keep the thread they have.
+TRACK_CARDS = 40
+#: Seconds between two follow-up reads of one project: the view polls every
+#: few seconds, and a board read per poll would be waste.
+TRACK_INTERVAL = 15.0
+
+
+def watch_of(category, gate, work):
+    """What a card follows about one of its sessions: its category, the cflow
+    gate it waits at (running sessions only; a stopped run waits on nobody)
+    and, when the board was read, its progress."""
+    reading = {"category": category}
+    if category == CATEGORY_RUNNING:
+        reading["gate"] = gate
+    if work is not None:
+        reading["progress"] = progress_of(work)
+    return reading
+
+
+def watch_changes(before, after):
+    """The thread lines for what moved between two ``watch_of`` readings.
+    A field only one of the two readings has is not compared: a board that
+    could not be read this time is not a change."""
+    lines = []
+    if before.get("category") != after.get("category"):
+        lines.append(f"상태: {CATEGORY_LABELS.get(before.get('category'), before.get('category'))}"
+                     f" → {CATEGORY_LABELS.get(after.get('category'), after.get('category'))}")
+    if "gate" in before and "gate" in after and before["gate"] != after["gate"]:
+        if before["gate"]:
+            lines.append(f"게이트 {before['gate']} 해소")
+        if after["gate"]:
+            lines.append(f"게이트 {after['gate']} 대기")
+    if "progress" in before and "progress" in after:
+        lines.extend(progress_changes(before["progress"], after["progress"]))
+    return lines
+
+
 def _text(value, limit, what="text"):
     if not isinstance(value, str) or not value.strip() or len(value) > limit:
         raise ValueError(f"{what} must contain 1..{limit} characters")
@@ -67,11 +145,17 @@ def _text(value, limit, what="text"):
 class Operators:
     """Feeds, bindings and cursors for every project's operator."""
 
-    def __init__(self, root, manager, observer=None, gates=None):
+    def __init__(self, root, manager, observer=None, gates=None, work=None):
         self.root = root / "operator"
         self.manager, self.observer, self.gates = manager, observer, gates
+        #: async ``work(sessions) -> {name: {"checks": [...], "issue": {...}}}``:
+        #: each session's status-check answers and its board issue, passed in
+        #: by the API module, which owns the board.
+        self.work = work
         self.cache = {}
         self.nudging = set()
+        #: project -> loop time of its last follow-up read (``track``).
+        self.tracked = {}
 
     # -- storage -----------------------------------------------------------
     def path(self, project):
@@ -164,37 +248,118 @@ class Operators:
         return sum(1 for e in self.state(project)["feed"]
                    if e.get("kind") == "ask" and not e.get("answer"))
 
-    def panel(self, project):
-        """The right-hand panel: what each running session is doing now.
-        Exited sessions stay out of it; their events still reach ``poll``."""
+    def panel(self, project, work=None):
+        """The right-hand panel: what each running or paused session is doing.
+        Killed and archived sessions stay out of it. A paused session is
+        listed with its category and never counts its open questions: it is
+        stopped on purpose, and nothing in it waits on the user until it is
+        resumed."""
         snapshot = {row["name"]: row for row in (self.observer.snapshot()["sessions"] if self.observer else [])}
+        work = work or {}
         rows = []
         for session in self.members(project):
-            if session.exited:
+            category = session_category(session)
+            if category not in (CATEGORY_RUNNING, CATEGORY_PAUSED):
                 continue
             name = session.sdef.name
             row = snapshot.get(name, {})
-            open_questions = sum(1 for e in row.get("events", []) if e.get("question") and not e.get("answer"))
-            rows.append({"name": name, "running": not session.exited,
+            open_questions = 0 if category == CATEGORY_PAUSED else sum(
+                1 for e in row.get("events", []) if e.get("question") and not e.get("answer"))
+            rows.append({"name": name, "running": not session.exited, "category": category,
                          "status": row.get("status") or session.info().get("status"),
                          "state": row.get("state"), "summary": row.get("summary"),
                          "last_activity_at": row.get("last_activity_at"),
-                         "questions": open_questions})
-        rows.sort(key=lambda r: (-r["questions"], r["name"]))
+                         "questions": open_questions,
+                         **progress_of(work.get(name))})
+        rows.sort(key=lambda r: (r["category"] == CATEGORY_PAUSED, -r["questions"], r["name"]))
         return rows
 
-    def view(self, project):
+    async def work_of(self, sessions):
+        """``self.work`` for ``sessions``, or nothing when it is not wired or
+        the board cannot be read (the panel then shows no progress)."""
+        if not self.work or not sessions:
+            return {}
+        try:
+            return await self.work(sessions) or {}
+        except Exception:  # a board read failing must not take the panel down
+            log.debug("operator: work read failed", exc_info=True)
+            return {}
+
+    async def track(self, project, *, force=False):
+        """Follow the sessions each recent card names, and when one of them
+        moved by some other path (paused, a gate cleared, committed, merged)
+        append an ``update`` entry under that card: it reads in time order in
+        the feed and in the card's thread (``parent``). The first reading of
+        a card is its baseline and says nothing. Returns the new entries."""
+        project = projects.normalize(project)
+        loop = asyncio.get_running_loop()
+        if not force and loop.time() - self.tracked.get(project, -TRACK_INTERVAL) < TRACK_INTERVAL:
+            return []
+        self.tracked[project] = loop.time()
+        data = self.state(project)
+        cards = [e for e in data["feed"] if e.get("kind") in ("post", "ask") and e.get("refs")
+                 and not e.get("parent")][-TRACK_CARDS:]
+        watch = data.get("watch") or {}
+        if not cards:
+            if watch:
+                data["watch"] = {}
+                self.save(project)
+            return []
+        members = {s.sdef.name: s for s in self.members(project)}
+        named = {r for card in cards for r in card["refs"]}
+        category = {n: session_category(members[n]) if n in members else None for n in named}
+        running = [members[n] for n in named if category[n] == CATEGORY_RUNNING]
+        try:
+            gates = await asyncio.to_thread(self.gates, running) if self.gates and running else []
+        except Exception:  # a run-state read failing must not stop the rest
+            log.debug("operator: gate read failed", exc_info=True)
+            gates = None
+        work = await self.work_of([members[n] for n in named if n in members])
+        waiting = {g.get("session"): g.get("step_id") for g in gates or []}
+        readings = {}
+        for n in named:
+            reading = watch_of(category[n], waiting.get(n), work.get(n) if work else None)
+            if gates is None:
+                reading.pop("gate", None)
+            readings[n] = reading
+        added, kept = [], {}
+        for card in cards:
+            seen = watch.get(card["id"]) or {}
+            now_seen = {}
+            for n in card["refs"]:
+                before = seen.get(n)
+                # A field not read this time keeps its last value; a gate is
+                # only a running session's, so it goes when the session stops.
+                now_seen[n] = {**(before or {}), **readings[n]}
+                if readings[n]["category"] != CATEGORY_RUNNING:
+                    now_seen[n].pop("gate", None)
+                lines = watch_changes(before, readings[n]) if before is not None else []
+                if lines:
+                    added.append({"kind": "update", "role": "system", "parent": card["id"],
+                                  "session": n, "text": "\n".join(lines)})
+            kept[card["id"]] = now_seen
+        data["watch"] = kept
+        entries = [self.append(project, entry) for entry in added]
+        if not entries:
+            self.save(project)
+        return entries
+
+    def view(self, project, work=None):
         project = projects.normalize(project)
         data = self.state(project)
         op = self.operator_session(project)
         operator = None
         if op is not None:
+            # Harness and model say which bot this is: the same feed reads
+            # differently from a small model than from a large one.
             operator = {"name": op.sdef.name, "running": not op.exited,
-                        "status": op.info().get("status")}
+                        "status": op.info().get("status"),
+                        "harness": getattr(op.sdef, "harness", None),
+                        "model": getattr(op.sdef, "model", None)}
         elif data.get("session"):
             operator = {"name": data["session"], "running": False, "status": "missing"}
         return {"project": project, "operator": operator, "feed": data["feed"][-200:],
-                "pending": self.pending(project), "sessions": self.panel(project)}
+                "pending": self.pending(project), "sessions": self.panel(project, work)}
 
     def pending_all(self):
         by_project = {p: self.pending(p) for p in projects.names()}
@@ -224,6 +389,21 @@ class Operators:
             raise ValueError(f"not a session of project {project!r}: {', '.join(unknown)}")
         return refs
 
+    def _parent(self, project, reply_to):
+        """The card a post continues (``reply_to``), which must be one of the
+        bot's own posts or asks in this project's feed; a reply to a reply
+        goes to that reply's card, so a thread is one level deep."""
+        if reply_to is None:
+            return None
+        if not isinstance(reply_to, str) or not reply_to:
+            raise ValueError("reply_to must be a feed entry id")
+        for entry in self.state(project)["feed"]:
+            if entry["id"] == reply_to:
+                if entry.get("kind") not in ("post", "ask", "update"):
+                    raise ValueError("reply_to must name one of the operator's posts or asks")
+                return entry.get("parent") or entry["id"]
+        raise ValueError("reply_to names no entry of this feed")
+
     def post(self, name, body):
         project = self.bound(name)
         if not isinstance(body, dict):
@@ -233,6 +413,9 @@ class Operators:
             raise ValueError("level must be one of " + ", ".join(LEVELS))
         payload = {"kind": "post", "role": "bot", "text": _text(body.get("text"), 4000),
                    "level": level, "refs": self._refs(project, body.get("refs"))}
+        parent = self._parent(project, body.get("reply_to"))
+        if parent:
+            payload["parent"] = parent
         found = self._idempotent(project, body.get("request_id"), payload)
         if found:
             return found
@@ -257,6 +440,9 @@ class Operators:
             raise ValueError("level must be one of " + ", ".join(LEVELS))
         payload = {"kind": "ask", "role": "bot", "type": kind, "text": _text(body.get("text"), 4000),
                    "choices": choices, "level": level, "refs": self._refs(project, body.get("refs"))}
+        parent = self._parent(project, body.get("reply_to"))
+        if parent:
+            payload["parent"] = parent
         found = self._idempotent(project, body.get("request_id"), payload)
         if found:
             return found
@@ -376,15 +562,25 @@ class Operators:
     async def poll(self, name, since=None):
         project = self.bound(name)
         members = {s.sdef.name: s for s in self.members(project)}
+        category = {n: session_category(s) for n, s in members.items()}
+        running = [s for n, s in members.items() if category[n] == CATEGORY_RUNNING]
         # The snapshot is read on the loop, as every Observer reader does; the
         # gates are run-state files, so they are read off it.
         snapshot = self.observer.snapshot()["sessions"] if self.observer else []
-        gates = await asyncio.to_thread(self.gates, list(members.values())) if self.gates else []
+        gates = await asyncio.to_thread(self.gates, running) if self.gates else []
+        work = await self.work_of(running)
         cutoff = session_events.timestamp(since) if since else None
         events, attention = [], []
+        # A paused session is stopped on purpose and a killed or archived one
+        # is gone: their questions and blocked state wait on nobody now, so
+        # only running sessions raise attention. Paused ones are named apart,
+        # so the operator can say they exist without calling them urgent.
+        paused = [{"session": n, "paused_at": getattr(s, "paused_at", None)}
+                  for n, s in members.items() if category[n] == CATEGORY_PAUSED]
         for row in snapshot:
             if row["name"] not in members:
                 continue
+            live = category[row["name"]] == CATEGORY_RUNNING
             for event in row.get("events", []):
                 stamp = session_events.timestamp(event.get("at"))
                 if cutoff is not None and stamp <= cutoff:
@@ -392,16 +588,17 @@ class Operators:
                 events.append({"session": row["name"], "at": event.get("at"),
                                "kind": event.get("kind"), "origin": event.get("origin"),
                                "text": str(event.get("text", ""))[:400],
-                               "needs_action": bool(event.get("needs_action"))})
-                if event.get("question") and not event.get("answer"):
+                               "needs_action": bool(event.get("needs_action")) and live,
+                               "category": category[row["name"]]})
+                if live and event.get("question") and not event.get("answer"):
                     attention.append({"session": row["name"], "kind": "observer_ask", "id": event.get("id"),
                                       "text": str(event.get("text", ""))[:400],
                                       "choices": event.get("choices") or []})
-            if row.get("state") == "blocked":
+            if live and row.get("state") == "blocked":
                 attention.append({"session": row["name"], "kind": "blocked", "text": row.get("summary")})
         # Earlier open questions are still open, whatever the cursor says.
         for row in snapshot:
-            if row["name"] not in members or cutoff is None:
+            if row["name"] not in members or cutoff is None or category[row["name"]] != CATEGORY_RUNNING:
                 continue
             for event in row.get("events", []):
                 if (event.get("question") and not event.get("answer")
@@ -415,26 +612,49 @@ class Operators:
         more = len(events) > POLL_LIMIT
         events = events[:POLL_LIMIT]
         cursor = events[-1]["at"] if events else since
-        sessions = [{"name": n, "running": not s.exited, "status": s.info().get("status")}
+        # Progress (commit, tests, landing request, merge) is compared with
+        # what the last poll saw rather than cut by the cursor: it is state,
+        # not an event stream, and a change is reported once.
+        data = self.state(project)
+        seen = data.setdefault("progress", {})
+        progress = []
+        for session in running:
+            n = session.sdef.name
+            now_progress = progress_of(work.get(n))
+            if not work:
+                continue  # nothing read this time is no evidence of change
+            lines = progress_changes(seen.get(n), now_progress)
+            if lines:
+                progress.append({"session": n, "changes": lines, **now_progress})
+            seen[n] = now_progress
+        if work:
+            self.save(project)
+        await self.track(project)
+        sessions = [{"name": n, "running": not s.exited, "category": category[n],
+                     "status": s.info().get("status"), **progress_of(work.get(n))}
                     for n, s in members.items()]
         return {"project": project, "cursor": cursor, "more": more, "events": events,
-                "attention": attention, "sessions": sessions,
-                "unread_user_input": len(self.unread(project))}
+                "attention": attention, "paused": paused, "progress": progress,
+                "sessions": sessions, "unread_user_input": len(self.unread(project))}
 
 
-def install(app, *, create=None, gates=None):
+def install(app, *, create=None, gates=None, work=None):
     """Mount the operator routes. ``create`` starts a session from a
-    session-create body (the same path ``POST /api/sessions`` takes) and
-    ``gates`` lists the cflow gates waiting on a set of sessions; both are
-    passed in by the API module, which owns those mechanisms."""
-    ops = Operators(paths.daemon_dir(), app["manager"], app.get("observer"), gates)
+    session-create body (the same path ``POST /api/sessions`` takes),
+    ``gates`` lists the cflow gates waiting on a set of sessions and ``work``
+    reads their status checks and board issues; all three are passed in by
+    the API module, which owns those mechanisms."""
+    ops = Operators(paths.daemon_dir(), app["manager"], app.get("observer"), gates, work)
     app["operators"] = ops
 
     def fail(exc):
         return web.json_response({"error": str(exc)}, status=400)
 
     async def view(request):
-        return web.json_response(ops.view(request.query.get("project") or projects.DEFAULT))
+        project = projects.normalize(request.query.get("project") or projects.DEFAULT)
+        shown = [s for s in ops.members(project) if session_category(s) in (CATEGORY_RUNNING, CATEGORY_PAUSED)]
+        await ops.track(project)
+        return web.json_response(ops.view(project, await ops.work_of(shown)))
 
     async def pending(request):
         return web.json_response(ops.pending_all())
@@ -465,6 +685,13 @@ def install(app, *, create=None, gates=None):
                 "beads": False, "name": str(body.get("name") or "").strip(),
                 "task": (f"너는 프로젝트 {project}의 Operator bot이다. stance와 operator 워크플로가 "
                          "규칙이다. 사용자와의 대화는 터미널이 아니라 operator_* 도구로 한다.")}
+        # The model and effort are the new-session form's own fields, checked
+        # by the same create path against the profile's harness; an empty
+        # answer is the harness default and is not sent at all.
+        for key in ("model", "effort"):
+            value = str(body.get(key) or "").strip()
+            if value:
+                spec[key] = value
         status, payload = await create(request, spec)
         if status >= 300:
             return web.json_response(payload, status=status)

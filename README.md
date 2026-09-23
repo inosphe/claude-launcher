@@ -3081,11 +3081,16 @@ when unset or zero) and the session reminder pause/skip controls.
 
 **Operator** is a bot session per project that watches the project's other
 sessions for you. Start it from the **Operator** tab next to Observer (pick a
-profile, press **Operator 시작**); the daemon creates one session with role
+profile — and, when that profile's harness declares model or effort choices,
+the model and effort, the same choices the new-session form offers — then
+press **Operator 시작**); the daemon creates one session with role
 `operator` on mesh `operator-<project>`, running the bundled `operator`
 workflow (declare it where the session works — `claunch cflow update`
 refreshes the global layer). The same conversation opens as a modal over any
-page from the floating **Operator** button or **Alt+O**. The bot polls with
+page from the floating **Operator** button or **Alt+O**. The bot is an
+ordinary claunch session: it is listed with the others, and its name in the
+Operator header links to its terminal (a link followed from the modal closes
+the modal). The bot polls with
 `operator_poll` (Observer events plus cflow gates waiting on a person, open
 `observer_ask` questions and blocked sessions — no LLM call needed for those),
 posts only what changes what you do next with `operator_post`, and asks for
@@ -3095,9 +3100,14 @@ bot through `operator_inbox`, never its terminal, which only gets a one-line
 nudge. It may type into another session of its project with
 `operator_dispatch` only to relay an instruction of yours: the call names the
 message or answered ask it carries, and the relay is recorded in the feed.
-It never approves gates or answers other sessions' questions. HTTP:
+It never approves gates or answers other sessions' questions. When a
+session a card names moves by some other path — a gate approved on the
+dashboard, the session paused, a commit, a landing request, a merge — the
+daemon adds the change under that card: it appears in time order in the feed
+and again in the card's thread. The bot follows up on a card the same way
+(`reply_to` on `operator_post`/`operator_ask`). HTTP:
 `GET /api/operator?project=P` (feed, bound session, watched sessions),
-`GET /api/operator/pending`, `POST /api/operator/start {project, profile}`,
+`GET /api/operator/pending`, `POST /api/operator/start {project, profile, model?, effort?}`,
 `POST /api/operator/message?project=P {text}`,
 `POST /api/operator/asks/{id}/answer?project=P {decision?, text?}`; the bot's
 own calls live under `/api/operator/agent/{session}/…` and are refused to any
