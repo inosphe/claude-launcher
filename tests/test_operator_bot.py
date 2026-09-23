@@ -98,6 +98,20 @@ def test_post_and_ask_are_idempotent_and_survive_restart(world):
     assert restored.pending("default") == 1
 
 
+def test_opening_the_operator_clears_the_badge_and_it_counts_only_what_comes_after(world, monkeypatch):
+    monkeypatch.setattr(operator_bot.projects, "names", lambda doc=None: ["default"])
+    for n in range(3):
+        world.ops.ask("op", {"text": f"q{n}", "type": "approve", "request_id": f"b{n}"})
+    assert world.ops.pending_all()["total"] == 3
+    assert world.ops.mark_seen()["total"] == 0
+    # Seen is not answered: the asks still wait in the feed and the panel.
+    assert world.ops.pending("default") == 3
+    world.ops.ask("op", {"text": "q3", "type": "approve", "request_id": "b3"})
+    assert world.ops.pending_all() == {"total": 1, "by_project": {"default": 1}}
+    restored = operator_bot.Operators(world.root, world.ops.manager)
+    assert restored.pending_all()["total"] == 1
+
+
 def test_ask_validation(world):
     with pytest.raises(ValueError):
         world.ops.ask("op", {"text": "?", "type": "choice", "choices": ["only"], "request_id": "a"})

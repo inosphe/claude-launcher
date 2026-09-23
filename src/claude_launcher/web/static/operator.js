@@ -624,6 +624,12 @@ function setBadge(total) {
 async function refreshBadge() {
   try { setBadge((await request("api/operator/pending")).total); } catch {}
 }
+/* Opening (and leaving) the Operator is taking notice of what waits there:
+   the badge drops to 0 and counts only what is asked after, answered or not. */
+async function markSeen() {
+  setBadge(0);
+  try { setBadge((await request("api/operator/seen", {})).total); } catch {}
+}
 async function refresh() {
   try {
     const [view, projectList] = await Promise.all([
@@ -680,9 +686,12 @@ function open() {
   if (typeof Notification !== "undefined" && Notification.permission === "default") {
     try { Notification.requestPermission(); } catch {}
   }
-  refresh(); poll();
+  refresh(); poll(); markSeen();
 }
-function stop() { pageOpen = false; document.body.classList.remove("operator-page"); detachIdle(); }
+function stop() {
+  if (pageOpen) markSeen();
+  pageOpen = false; document.body.classList.remove("operator-page"); detachIdle();
+}
 
 /* ---- the modal ---- */
 const modal = document.createElement("dialog");
@@ -692,7 +701,7 @@ modalClose.setAttribute("aria-label", "닫기"); modalClose.title = "닫기 (Esc
 modalClose.onclick = () => modal.close();
 const modalRoot = node("div", null, "operator-modal-root");
 modal.append(modalClose, modalRoot);
-modal.addEventListener("close", () => detachIdle());
+modal.addEventListener("close", () => { markSeen(); detachIdle(); });
 // A session link inside the modal goes to that session's page; the modal
 // would otherwise stay over the terminal it just opened.
 modalRoot.addEventListener("click", event => {
@@ -702,7 +711,7 @@ document.body.append(modal);
 function openModal() {
   if (!modal.open) modal.showModal();
   attach(modalRoot);
-  refresh(); poll();
+  refresh(); poll(); markSeen();
   modalRoot.querySelector(".operator-composer textarea")?.focus();
 }
 

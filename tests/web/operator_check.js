@@ -137,6 +137,10 @@ check("the button sits at the feed's newest end; pressing it or scrolling down c
 check("sending a message or switching project goes back to following the bottom",
       [src.includes("h.parts.input.value = \"\"; h.scrolled = false;"), src.includes("h.scrolled = false; h.readId = null;")], [true, true]);
 check("a daemon restart entry gets its own look", src.includes("operator-event-${e.event}"), true);
+check("opening or leaving the page or the modal marks the badge seen",
+      [src.includes('request("api/operator/seen", {})'),
+       src.includes("if (pageOpen) markSeen();"), src.includes('modal.addEventListener("close", () => { markSeen(); detachIdle(); });'),
+       (src.match(/refresh\(\); poll\(\); markSeen\(\);/g) || []).length], [true, true, true, 2]);
 
 const options = [{value: "a:claude", harness: "claude"}, {value: "a:pi", harness: "pi"}];
 const caps = {claude: {models: ["sonnet", "opus"], efforts: ["high"]}, pi: {models: [], efforts: []}};
