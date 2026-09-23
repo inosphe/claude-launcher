@@ -1021,6 +1021,18 @@ def cmd_check(args) -> int:
 
 
 def main(argv: Optional[list] = None) -> int:
+    # This process's own stdout/stderr keep whatever codec the console gave
+    # them (cp949 on this machine); only the error handler changes, so a
+    # replacement character the suite's output already carries (from the
+    # child's errors="replace" decode above) gets re-encoded as '?' instead
+    # of raising and killing the run before the receipt is written. The
+    # child subprocess's environment (grant.child_env()) is untouched --
+    # this reconfigure never reaches it.
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(errors="replace")
+        except (AttributeError, ValueError):
+            pass
     ap = argparse.ArgumentParser(prog="sweep", description=__doc__.splitlines()[0])
     sub = ap.add_subparsers(dest="mode", required=True)
 
