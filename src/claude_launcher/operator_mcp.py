@@ -30,6 +30,8 @@ TOOLS = [
      "description": "Read what happened in your project's other sessions since `since` (the `cursor` of your previous poll): "
                     "Observer events, plus mechanical state that needs no LLM — cflow gates waiting on a person, open "
                     "observer_ask questions, blocked sessions. `attention` lists what is waiting now whatever the cursor. "
+                    "Only running and paused sessions are read; `ended` names, once, a session that was and has since "
+                    "been killed or archived. Without `since` you get the latest events, not the oldest. "
                     "Keep the returned `cursor` for the next call; `more: true` means call again with it. "
                     "`restart` is a daemon restart the daemon recorded (once); `recovered` says earlier polls failed "
                     "and this one answered (first failure, recovery time, count); `degraded` names parts not read in time.",

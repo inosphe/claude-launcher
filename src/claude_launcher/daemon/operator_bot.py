@@ -277,6 +277,19 @@ class Operators:
         return [s for s in self.sessions()
                 if project_of(s) == project and s.sdef.name != me]
 
+    def watched(self, project):
+        """The members whose events and state the operator reads: running and
+        paused ones. A killed or archived session is gone; reading its
+        history on every poll only buries what is live under what is not."""
+        return [s for s in self.members(project)
+                if session_category(s) in (CATEGORY_RUNNING, CATEGORY_PAUSED)]
+
+    def snapshot_of(self, sessions):
+        """The Observer rows of ``sessions`` only."""
+        if not self.observer or not sessions:
+            return []
+        return self.observer.snapshot(names=[s.sdef.name for s in sessions])["sessions"]
+
     # -- view for the UI ---------------------------------------------------
     def pending(self, project):
         return sum(1 for e in self.state(project)["feed"]
@@ -288,13 +301,12 @@ class Operators:
         listed with its category and never counts its open questions: it is
         stopped on purpose, and nothing in it waits on the user until it is
         resumed."""
-        snapshot = {row["name"]: row for row in (self.observer.snapshot()["sessions"] if self.observer else [])}
+        shown = self.watched(project)
+        snapshot = {row["name"]: row for row in self.snapshot_of(shown)}
         work = work or {}
         rows = []
-        for session in self.members(project):
+        for session in shown:
             category = session_category(session)
-            if category not in (CATEGORY_RUNNING, CATEGORY_PAUSED):
-                continue
             name = session.sdef.name
             row = snapshot.get(name, {})
             open_questions = 0 if category == CATEGORY_PAUSED else sum(
@@ -664,12 +676,15 @@ class Operators:
     # -- what the operator polls -------------------------------------------
     async def poll(self, name, since=None):
         project = self.bound(name)
-        members = {s.sdef.name: s for s in self.members(project)}
+        # Only running and paused sessions are read. A killed or archived one
+        # is gone: its history would fill every page of events, and its row
+        # is the most expensive part of the snapshot to build.
+        members = {s.sdef.name: s for s in self.watched(project)}
         category = {n: session_category(s) for n, s in members.items()}
         running = [s for n, s in members.items() if category[n] == CATEGORY_RUNNING]
         # The snapshot is read on the loop, as every Observer reader does; the
         # gates are run-state files, so they are read off it.
-        snapshot = self.observer.snapshot()["sessions"] if self.observer else []
+        snapshot = self.snapshot_of(list(members.values()))
         gates, gates_ok = await self.gates_read(running)
         work, work_ok = await self.work_read(running)
         # What this poll could not read in time: it answers without it rather
@@ -715,8 +730,16 @@ class Operators:
         for gate in gates:
             attention.append({"kind": "cflow_gate", **gate})
         events.sort(key=lambda e: session_events.timestamp(e["at"]))
-        more = len(events) > POLL_LIMIT
-        events = events[:POLL_LIMIT]
+        if since:
+            more = len(events) > POLL_LIMIT
+            events = events[:POLL_LIMIT]
+        else:
+            # A first poll starts at the present: paging from the oldest event
+            # of every session would spend the operator's turns on history,
+            # and a poll that never passes its cursor would read the same
+            # oldest page forever.
+            more = False
+            events = events[-POLL_LIMIT:]
         cursor = events[-1]["at"] if events else since
         # Progress (commit, tests, landing request, merge) is compared with
         # what the last poll saw rather than cut by the cursor: it is state,
@@ -744,9 +767,17 @@ class Operators:
         sessions = [{"name": n, "running": not s.exited, "category": category[n],
                      "status": s.info().get("status"), **progress_of(work.get(n))}
                     for n, s in members.items()]
+        # A session that was watched and is no longer (killed, archived,
+        # removed) is named once, so the operator can say it ended without
+        # the list of every ended session riding on each poll.
+        before = set(data.get("watched") or ())
+        ended = sorted(before - set(members))
+        if ended or before != set(members):
+            data["watched"] = sorted(members)
+            self.save(project)
         return {"project": project, "cursor": cursor, "more": more, "events": events,
                 "attention": attention, "paused": paused, "progress": progress,
-                "degraded": degraded, "restart": restart,
+                "degraded": degraded, "restart": restart, "ended": ended,
                 "sessions": sessions, "unread_user_input": len(self.unread(project))}
 
 

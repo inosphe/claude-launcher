@@ -570,13 +570,19 @@ class Observer:
         self.record_usage(usage)
         return {"called": True, "events": added}
 
-    def snapshot(self):
+    def snapshot(self, names=None):
+        """Every session's row, or only those in ``names``: a row reads the
+        session's records and events off disk, so a reader that wants a few
+        live sessions must not pay for every killed and archived one."""
         if not self.records_imported:
             search_records.import_current()
             self.records_imported = True
+        wanted = None if names is None else set(names)
         result = []
         for session in self.manager.list():
             name = session.sdef.name
+            if wanted is not None and name not in wanted:
+                continue
             row = self.load_session(name)
             info = session.info()
             direct = [event for event in self.reports.rows(name) if visible(event)]

@@ -47,9 +47,12 @@ class FakeSession:
 class FakeObserver:
     def __init__(self):
         self.rows = {}
+        self.asked = []
 
-    def snapshot(self):
-        return {"sessions": [{"name": n, **row} for n, row in self.rows.items()]}
+    def snapshot(self, names=None):
+        self.asked.append(None if names is None else sorted(names))
+        return {"sessions": [{"name": n, **row} for n, row in self.rows.items()
+                             if names is None or n in names]}
 
 
 @pytest.fixture
@@ -202,14 +205,53 @@ def test_paused_and_exited_sessions_raise_no_attention(world):
     first = asyncio.run(world.ops.poll("op"))
     assert first["attention"] == []
     assert first["paused"] == [{"session": "w1", "paused_at": "2026-09-23T01:00:00+00:00"}]
-    # the events still arrive, marked with their category and never as needing action
+    # the paused one's events still arrive, marked and never as needing
+    # action; the killed one's history is not read at all
     assert {(e["session"], e["category"], e["needs_action"]) for e in first["events"]} == {
-        ("w1", "paused", False), ("w2", "killed", False)}
+        ("w1", "paused", False)}
+    assert {s["name"] for s in first["sessions"]} == {"w1"}
+    assert world.observer.asked and all(a == ["w1"] for a in world.observer.asked)
     again = asyncio.run(world.ops.poll("op", first["cursor"]))
     assert again["attention"] == []
     # the panel lists the paused one apart, with no questions counted; the killed one not at all
     rows = world.ops.view("default")["sessions"]
     assert [(r["name"], r["category"], r["questions"]) for r in rows] == [("w1", "paused", 0)]
+
+
+def test_killed_and_archived_sessions_stay_out_of_the_poll_and_end_once(world):
+    # w2 is running at first and then killed: its end is named once, and from
+    # then on neither its events nor its row reach the poll or the snapshot
+    world.observer.rows = {"w2": {"events": [
+        {"id": "e1", "at": "2026-09-23T01:00:00+00:00", "kind": "commit", "text": "commit abc"}]}}
+    first = asyncio.run(world.ops.poll("op"))
+    assert first["ended"] == [] and {s["name"] for s in first["sessions"]} == {"w1", "w2"}
+    world.sessions["w2"].exited = True
+    world.observer.rows["w2"]["events"].append(
+        {"id": "e2", "at": "2026-09-23T01:10:00+00:00", "kind": "exit", "text": "gone"})
+    world.observer.asked.clear()
+    second = asyncio.run(world.ops.poll("op", first["cursor"]))
+    assert second["ended"] == ["w2"]
+    assert second["events"] == [] and {s["name"] for s in second["sessions"]} == {"w1"}
+    assert world.observer.asked == [["w1"]]
+    assert asyncio.run(world.ops.poll("op", first["cursor"]))["ended"] == []  # said once
+    # an archived session is out the same way
+    world.sessions["w1"].exited = True
+    world.sessions["w1"].archived_at = "2026-09-23T02:00:00+00:00"
+    third = asyncio.run(world.ops.poll("op"))
+    assert third["ended"] == ["w1"] and third["sessions"] == []
+
+
+def test_a_first_poll_starts_at_the_latest_events(world):
+    many = [{"id": f"e{i}", "at": f"2026-09-23T{i // 60:02d}:{i % 60:02d}:00+00:00", "kind": "action",
+             "text": f"event {i}"} for i in range(operator_bot.POLL_LIMIT + 20)]
+    world.observer.rows = {"w1": {"events": many}}
+    first = asyncio.run(world.ops.poll("op"))
+    assert first["more"] is False
+    assert [e["text"] for e in first["events"]] == [e["text"] for e in many[-operator_bot.POLL_LIMIT:]]
+    assert first["cursor"] == many[-1]["at"]
+    # with a cursor, paging forward is unchanged
+    paged = asyncio.run(world.ops.poll("op", many[0]["at"]))
+    assert paged["more"] is True and paged["events"][0]["text"] == "event 1"
 
 
 def test_poll_reports_progress_changes_once(world):
