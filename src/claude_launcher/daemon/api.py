@@ -21,6 +21,7 @@ import time
 from datetime import datetime, timezone
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Dict, List, Optional, Set, Tuple
 from urllib.parse import urlsplit
 
@@ -686,6 +687,7 @@ def build_app(
     # query, an issue's nearest neighbours, and the index's own state.
     r.add_get("/api/beads/{id}/related", h_beads_related)
     r.add_get("/api/search", h_search)
+    r.add_get("/api/search/stream", h_search_stream)
     r.add_get("/api/rag/status", h_rag_status)
     r.add_post("/api/rag/reindex", h_rag_reindex)
     # The GitHub CLI as the daemon sees it (ghcli.py): installed, signed in
@@ -7761,6 +7763,32 @@ async def _search_root(request: web.Request, kind: str):
     return root, None
 
 
+async def _search_args(request: web.Request):
+    """The query string a search reads, validated the same way for the JSON
+    answer and the stream. ``(args, error_response)``."""
+    service: rag_mod.RagService = request.app["rag"]
+    kind = (request.query.get("kind") or "beads").strip()
+    if kind not in rag_mod.KINDS:
+        return None, json_error(400, f"kind must be one of {', '.join(rag_mod.KINDS)}")
+    query = (request.query.get("q") or "").strip()
+    if not query:
+        return None, json_error(400, "q is required")
+    if not service.configured():
+        return None, json_error(400, "rag: block not configured (base_url, api_key, embedding_model)")
+    limit = _int_query(request, "limit", 10, 1, 50)
+    wait = _int_query(request, "wait", 2, 0, 30)
+    if limit is None or wait is None:
+        return None, json_error(400, "limit must be 1..50 and wait 0..30")
+    rerank = (request.query.get("rerank") or "1") not in ("0", "false", "no")
+    root, err = await _search_root(request, kind)
+    if err is not None:
+        return None, err
+    return SimpleNamespace(
+        service=service, kind=kind, query=query, root=root,
+        limit=limit, rerank=rerank, wait=float(wait),
+    ), None
+
+
 async def h_search(request: web.Request) -> web.Response:
     """Rank a corpus for a query: ``?q=`` (required), ``?kind=beads|sessions``
     (default beads), ``?limit=`` (1..50, default 10), ``?rerank=0`` to skip
@@ -7774,30 +7802,79 @@ async def h_search(request: web.Request) -> web.Response:
     for the ten minutes a full index takes. 400 when the ``rag:`` block is
     not configured or the query is empty; 502 when the endpoint fails.
     """
-    service: rag_mod.RagService = request.app["rag"]
-    kind = (request.query.get("kind") or "beads").strip()
-    if kind not in rag_mod.KINDS:
-        return json_error(400, f"kind must be one of {', '.join(rag_mod.KINDS)}")
-    query = (request.query.get("q") or "").strip()
-    if not query:
-        return json_error(400, "q is required")
-    if not service.configured():
-        return json_error(400, "rag: block not configured (base_url, api_key, embedding_model)")
-    limit = _int_query(request, "limit", 10, 1, 50)
-    wait = _int_query(request, "wait", 2, 0, 30)
-    if limit is None or wait is None:
-        return json_error(400, "limit must be 1..50 and wait 0..30")
-    rerank = (request.query.get("rerank") or "1") not in ("0", "false", "no")
-    root, err = await _search_root(request, kind)
+    args, err = await _search_args(request)
     if err is not None:
         return err
     try:
-        view = await service.search(
-            kind, query, root=root, limit=limit, rerank=rerank, wait=float(wait),
+        view = await args.service.search(
+            args.kind, args.query, root=args.root, limit=args.limit,
+            rerank=args.rerank, wait=args.wait,
         )
     except rag_mod.RagError as exc:
         return json_error(502, str(exc))
     return json_response(view)
+
+
+async def h_search_stream(request: web.Request) -> web.StreamResponse:
+    """The same search as ``GET /api/search``, answered as server-sent events.
+
+    ``event: ranked`` carries the vector ranking as soon as it exists (tens
+    of milliseconds on the zvec index); ``event: reranked`` follows with the
+    reranker's order, or ``event: error`` when the reranker fails -- the
+    ranked answer already went out, so a page keeps showing it. ``ranked``
+    says in ``rerank_pending`` whether a second event is coming. Each event's
+    ``data`` is one JSON object shaped like the ``/api/search`` answer.
+
+    Measured on the live daemon before this existed: 43-104 ms without the
+    reranker, 1.2-11 s with it, top-10 overlap 8-10 of 10 (claunch-1sszr).
+    One request instead of two lets the query embedding be computed once.
+
+    Failures before the first event answer as JSON (400/502) with the codes
+    ``/api/search`` uses, so a reader checks the status once. A client that
+    goes away closes the generator, which abandons the reranker call.
+    """
+    args, err = await _search_args(request)
+    if err is not None:
+        return err
+    stream = args.service.search_stream(
+        args.kind, args.query, root=args.root, limit=args.limit,
+        rerank=args.rerank, wait=args.wait,
+    )
+    async with contextlib.aclosing(stream):
+        try:
+            event, view = await stream.__anext__()
+        except rag_mod.RagError as exc:
+            return json_error(502, str(exc))
+        except ValueError as exc:
+            return json_error(400, str(exc))
+        resp = web.StreamResponse(headers={
+            "Content-Type": "text/event-stream; charset=utf-8",
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        })
+        await resp.prepare(request)
+        try:
+            while True:
+                await resp.write(_sse(event, view))
+                try:
+                    event, view = await stream.__anext__()
+                except StopAsyncIteration:
+                    break
+        except (ConnectionResetError, asyncio.CancelledError):
+            raise
+        except Exception as exc:  # noqa: BLE001 -- the stream already started
+            log.exception("search stream failed after it started")
+            with contextlib.suppress(ConnectionResetError):
+                await resp.write(_sse("error", {"error": str(exc)}))
+        with contextlib.suppress(ConnectionResetError):
+            await resp.write_eof()
+        return resp
+
+
+def _sse(event: str, payload) -> bytes:
+    """One server-sent event. ``_dumps`` writes no newlines, so ``data`` is
+    one line and needs no splitting."""
+    return f"event: {event}\ndata: {_dumps(payload)}\n\n".encode("utf-8")
 
 
 async def h_beads_related(request: web.Request) -> web.Response:

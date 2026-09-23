@@ -20,17 +20,24 @@ globalThis.SearchAnything = (() => {
   input.setAttribute("aria-label", "통합 검색어"); input.maxLength = 2000;
   const submit = node("button", "검색"); submit.type = "submit";
   const notice = node("p", "Enter로 검색 · Esc로 닫기", "search-anything-notice"); notice.setAttribute("role", "status");
+  // The reranker's order, offered rather than applied. The first list arrives
+  // from the vector ranking in tens of milliseconds and the reranker's in
+  // 1-11 s; the two share 8-10 of their top 10 but the reranker changes the
+  // first row in most queries (claunch-1sszr), so swapping the list under a
+  // reader would move the row they were reading. The swap waits for a click.
+  const apply = node("button", "정렬 개선됨 — 적용", "search-anything-apply"); apply.type = "button"; apply.hidden = true;
   // The kind filter, between the answer's own line and the rows it narrows.
   const filters = node("div", "", "search-anything-filters");
   filters.setAttribute("role", "group"); filters.setAttribute("aria-label", "항목 종류 필터");
   const results = node("div", "", "search-anything-results");
-  form.append(input, submit); modal.append(header, form, notice, filters, results); document.body.append(modal);
+  form.append(input, submit); modal.append(header, form, notice, apply, filters, results); document.body.append(modal);
   let sequence = 0, controller = null, previousFocus = null, timeRefresh = null;
   // The last answer, kept so that changing the filter re-narrows what is
   // already on screen instead of asking the daemon the same question again.
   // `kindFilter` empty means every kind; `lastNotice` is that answer's own
-  // line, which the filter appends its count to.
-  let lastRows = [], lastNotice = "", kindFilter = "";
+  // line, which the filter appends its count to. `rerankNote` says where the
+  // reranker's second answer stands; `offered` holds it until it is applied.
+  let lastRows = [], lastNotice = "", kindFilter = "", rerankNote = "", offered = null;
   const relativeTime = new Intl.RelativeTimeFormat("ko", {numeric: "always"});
   function formatTime(value) {
     const date = new Date(value);
@@ -59,8 +66,13 @@ globalThis.SearchAnything = (() => {
   modal.addEventListener("close", () => {
     clearInterval(timeRefresh); timeRefresh = null;
     sequence++; controller?.abort(); submit.disabled = false; previousFocus?.focus();
+    offered = null; apply.hidden = true;
   });
-  input.addEventListener("input", () => { sequence++; controller?.abort(); submit.disabled = false; });
+  // Typing supersedes the answer in hand, and with it any reranked order
+  // offered for the old query.
+  input.addEventListener("input", () => {
+    sequence++; controller?.abort(); submit.disabled = false; offered = null; apply.hidden = true;
+  });
   // A result is either a session or a record about one, and the two are drawn
   // as two shapes rather than as one shape with different words: a session row
   // is headed by the session and by the state it is in right now, a record row
@@ -208,30 +220,84 @@ globalThis.SearchAnything = (() => {
     const rows = kindFilter ? lastRows.filter(row => kindLabel(row) === kindFilter) : lastRows;
     results.replaceChildren();
     addGroups(rows);
-    notice.textContent = lastNotice + (kindFilter ? ` · 표시 ${rows.length}` : "");
+    notice.textContent = lastNotice + rerankNote + (kindFilter ? ` · 표시 ${rows.length}` : "");
+  }
+  // One answer on screen. A new query starts unfiltered: the chips belong to
+  // the answer in hand, so the line that counts it and the rows under it
+  // always agree when it arrives, and a chip is re-picked deliberately rather
+  // than inherited from a query the reader has already moved on from. The
+  // reranker's order for the *same* query keeps the chip the reader picked,
+  // as long as the new answer still holds that kind.
+  function show(data, keepFilter = false) {
+    const rows = data.results || [];
+    const index = data.index || {};
+    const sessions = rows.filter(row => row.kind === SESSION).length;
+    lastRows = rows;
+    if (!keepFilter || !rows.some(row => kindLabel(row) === kindFilter)) kindFilter = "";
+    lastNotice = `${rows.length}개 결과 · 세션 ${sessions} · 그 외 ${rows.length - sessions} · 색인 ${index.indexed || 0}/${index.total || 0}`
+      + (index.pending || index.syncing ? " · 색인 진행 중, 다시 검색하면 추가 결과가 표시됩니다." : "")
+      + (index.error ? " · 색인 오류: " + index.error : "");
+    renderFilters(rows);
+    renderResults();
+  }
+  apply.onclick = () => {
+    const data = offered; offered = null; apply.hidden = true;
+    if (!data) return;
+    rerankNote = " · 정렬 개선 적용됨";
+    show(data, true);
+  };
+  // Server-sent events off a fetch body, rather than EventSource: the dialog
+  // already cancels a superseded search with an AbortController, which an
+  // EventSource does not take, and an EventSource reconnects -- re-running
+  // the search -- when a finished stream closes.
+  async function readEvents(response, onEvent) {
+    const reader = response.body.getReader(), decoder = new TextDecoder();
+    let buffer = "";
+    for (;;) {
+      const {value, done} = await reader.read();
+      buffer += decoder.decode(value || new Uint8Array(), {stream: !done});
+      let cut;
+      while ((cut = buffer.indexOf("\n\n")) >= 0) {
+        const block = buffer.slice(0, cut); buffer = buffer.slice(cut + 2);
+        let name = "message", data = "";
+        for (const line of block.split("\n")) {
+          if (line.startsWith("event: ")) name = line.slice(7);
+          else if (line.startsWith("data: ")) data += line.slice(6);
+        }
+        if (data) onEvent(name, JSON.parse(data));
+      }
+      if (done) return;
+    }
   }
   form.onsubmit = async event => {
     event.preventDefault(); const query = input.value.trim(); if (!query) return;
     controller?.abort(); controller = new AbortController(); const ticket = ++sequence;
     submit.disabled = true; notice.textContent = "검색 중…"; results.replaceChildren(); filters.replaceChildren();
+    offered = null; apply.hidden = true; rerankNote = "";
     try {
-      const data = await request("api/search?kind=all&limit=30&q=" + encodeURIComponent(query), undefined, "GET", controller.signal);
-      if (ticket !== sequence || !modal.open) return;
-      const rows = data.results || [];
-      const index = data.index || {};
-      const sessions = rows.filter(row => row.kind === SESSION).length;
-      lastRows = rows;
-      // A new answer starts unfiltered: the chips belong to the answer in hand,
-      // so the line that counts it and the rows under it always agree when it
-      // arrives, and a chip is re-picked deliberately rather than inherited
-      // from a query the reader has already moved on from.
-      kindFilter = "";
-      lastNotice = `${rows.length}개 결과 · 세션 ${sessions} · 그 외 ${rows.length - sessions} · 색인 ${index.indexed || 0}/${index.total || 0}`
-        + (index.pending || index.syncing ? " · 색인 진행 중, 다시 검색하면 추가 결과가 표시됩니다." : "")
-        + (index.error ? " · 색인 오류: " + index.error : "");
-      if (data.warnings?.length) lastNotice += " · Rerank 사용 불가: embedding 및 정확한 단어 일치 기준으로 표시합니다.";
-      renderFilters(rows);
-      renderResults();
+      const response = await api("api/search/stream?kind=all&limit=30&q=" + encodeURIComponent(query),
+        {signal: controller.signal, noBatch: true});
+      if (!response.ok) {
+        const data = await response.json().catch(() => ({}));
+        throw Error(data.error || `HTTP ${response.status}`);
+      }
+      await readEvents(response, (name, data) => {
+        if (ticket !== sequence || !modal.open) return;
+        if (name === "ranked") {
+          // The list is usable now; the search button is free for the next
+          // query, which aborts this stream like any superseded search.
+          submit.disabled = false;
+          rerankNote = data.rerank_pending ? " · 정렬 개선 중…" : "";
+          show(data);
+        } else if (name === "reranked") {
+          offered = data; apply.hidden = false;
+          rerankNote = " · 정렬 개선 가능";
+          renderResults();
+        } else if (name === "error") {
+          rerankNote = " · Rerank 사용 불가: embedding 및 정확한 단어 일치 기준으로 표시합니다.";
+          renderResults();
+        }
+      });
     } catch (error) { if (ticket === sequence && error.name !== "AbortError") notice.textContent = error.message; }
     finally { if (ticket === sequence) submit.disabled = false; }
   };
