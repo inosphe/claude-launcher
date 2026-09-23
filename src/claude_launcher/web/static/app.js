@@ -1962,6 +1962,9 @@ function sessionGridCell(layout, row, r, c, records, present, searching) {
         cell.click();
         return;
       }
+      // The list card's keys (k, p, a, e, q, f, Space), from the same table
+      // and with the same guards, on the cell that holds the keyboard.
+      if (typeof railCardKey === "function" && railCardKey(ev, name)) return;
       const step = { ArrowLeft: [0, -1], ArrowRight: [0, 1],
                      ArrowUp: [-1, 0], ArrowDown: [1, 0] }[ev.key];
       if (!step) return;
