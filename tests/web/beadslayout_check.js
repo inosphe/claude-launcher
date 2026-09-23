@@ -104,6 +104,9 @@ new Function(
   "exports", "document", "el",
   stubs
   + slice("renderBeads") + slice("beadsPageTabs") + slice("beadsWorkspaceTabs")
+  // The workspace row names each board and titles it with its database path
+  // (claunch-4aesv); real helpers, so the row reads as the page draws it.
+  + slice("beadsBoardLabel") + slice("beadsBoardWhere")
   + slice("renderQueues") + slice("renderReports") + slice("openBeads")
   + `
 Object.assign(exports, {

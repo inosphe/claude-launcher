@@ -779,6 +779,7 @@ globalThis.TranscriptTabs = (() => {
   function select(value) {
     const showInfo=value==="info";
     transcript.hidden=showInfo;info.hidden=!showInfo;
+    const format=document.getElementById("log-format");if(format)format.hidden=showInfo;
     tabs.forEach((tab,index)=>{const active=(index===1)===showInfo;tab.setAttribute("aria-selected",String(active));tab.tabIndex=active?0:-1;});
     if(showInfo)ObserverPage.openSession(transcriptName,info);
     else ObserverPage.closeSession();
