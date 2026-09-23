@@ -328,8 +328,9 @@ def build_app(
     )
     app["manager"] = manager
     app["mesh"] = mesh if mesh is not None else MeshManager(manager)
-    from . import observer
+    from . import observer, operator_bot
     observer.install(app)
+    operator_bot.install(app, create=_create_session, gates=_operator_gates)
     clipboard.install(app)
     app["relay_state"] = relay_state if relay_state is not None else _relay_unconfigured
     app["token"] = token
@@ -2590,6 +2591,33 @@ _CFLOW_LIST_DROP = (
     "journal", "instructions", "note", "done_when", "context", "report",
     "how_to_unblock",
 )
+
+
+def _operator_gates(sessions) -> list:
+    """The cflow gates waiting on a person among ``sessions`` — what an
+    operator surfaces to its user. Read off the event loop by the caller.
+
+    Only the live sessions' own runs, one slot each, keyed the same way the
+    rail binds a run to a session.
+    """
+    gates = []
+    for session in sessions:
+        cwd = _session_cwd(session)
+        if session.exited or not cwd:
+            continue
+        name = session.sdef.name
+        try:
+            entry = _slim_cflow_payload(cflow_engine.status(cwd, scope=name))
+        except (CflowError, WorkflowError, StateError, OSError):
+            continue
+        status = str(entry.get("status") or "")
+        if not status.startswith("waiting"):
+            continue
+        gates.append({"session": name, "status": status,
+                      "workflow": entry.get("workflow"), "step_id": entry.get("step_id"),
+                      "title": entry.get("title"), "reason": entry.get("reason"),
+                      "ask": entry.get("ask")})
+    return gates
 
 
 def _session_cwd(session) -> str:
@@ -4978,8 +5006,14 @@ async def h_sessions_create(request: web.Request) -> web.Response:
     The response keeps the session's own fields at the top level, as it always
     has, and reports each onboarding leg beside them.
     """
+    status, payload = await _create_session(request, await _json_body(request))
+    return json_response(payload, status=status)
+
+
+async def _create_session(request: web.Request, body: dict) -> Tuple[int, dict]:
+    """The body of :func:`h_sessions_create`, as (status, payload), so the
+    operator's start button creates its session through the same checks."""
     manager: SessionManager = request.app["manager"]
-    body = await _json_body(request)
     # The project is settled first: it is checked against the registry (a
     # session filed under an unknown name is reachable from no listing), and
     # its default workspace is what a request naming no directory starts
@@ -4989,7 +5023,7 @@ async def h_sessions_create(request: web.Request) -> web.Response:
         try:
             project_name = projects.require(project_name).name
         except projects.ProjectError as exc:
-            return json_error(400, str(exc))
+            return 400, {"error": str(exc)}
         body["project"] = project_name
     if not str(body.get("cwd") or "").strip():
         default_cwd = projects.default_cwd(project_name)
@@ -5010,17 +5044,16 @@ async def h_sessions_create(request: web.Request) -> web.Response:
                 base, str(choice), rebase_onto=str(body.pop("rebase_onto", "") or "")
             )
         except worktree_mod.WorktreeError as exc:
-            return json_error(400, str(exc))
+            return 400, {"error": str(exc)}
         if tree is None:
-            return json_error(400, "worktree selection did not produce a checkout")
+            return 400, {"error": "worktree selection did not produce a checkout"}
         body["cwd"] = str(tree.path)
     if "harness" in body:
-        return json_error(
-            400,
-            "harness is read-only and comes from profile; omit 'harness'",
-        )
+        return 400, {
+            "error": "harness is read-only and comes from profile; omit 'harness'"
+        }
     if not str(body.get("profile") or "").strip():
-        return json_error(400, "a session needs profile; its harness comes from it")
+        return 400, {"error": "a session needs profile; its harness comes from it"}
     body.setdefault("restore", manager.restore_default)
     body.setdefault("name", "")
     # ``role`` is onboarding state owned by the selected mesh. Keep the
@@ -5037,16 +5070,16 @@ async def h_sessions_create(request: web.Request) -> web.Response:
     try:
         sdef = SessionDef.from_dict(definition)
     except (KeyError, ValueError, TypeError) as exc:
-        return json_error(400, f"bad session definition: {exc}")
+        return 400, {"error": f"bad session definition: {exc}"}
     try:
         session = manager.stage(sdef)
     except ManagerError as exc:
-        return json_error(409 if "already exists" in str(exc) else 400, str(exc))
+        return 409 if "already exists" in str(exc) else 400, {"error": str(exc)}
     try:
         result = await _onboard_and_launch(request, session, body)
     except onboard.OnboardError as exc:
-        return json_error(400, str(exc))
-    return json_response({**session.info(), **result}, status=201)
+        return 400, {"error": str(exc)}
+    return 201, {**session.info(), **result}
 
 
 async def _onboard_and_launch(

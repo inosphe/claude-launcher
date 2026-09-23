@@ -7,6 +7,7 @@
 <link rel="stylesheet" href="static/vendor/xterm.css">
 <link rel="stylesheet" href="static/style.css">
 <link rel="stylesheet" href="static/observer.css">
+<link rel="stylesheet" href="static/operator.css">
 </head>
 <body>
 <div id="auth-overlay" class="hidden">
@@ -185,6 +186,7 @@
     </div>
     <nav id="rail-nav">
       <a href="#/observer" data-page="observer"><span>◎</span>Observer</a>
+      <a href="#/operator" data-page="operator"><span>◍</span>Operator<span id="operator-nav-badge" class="operator-badge-count" hidden></span></a>
       <a href="#/" data-page="home"><span>⌂</span>Home</a>
       <a href="#/new" data-page="new"><span>+</span>New</a>
       <a href="#/mesh" data-page="meshes"><span>◉</span>Mesh</a>
@@ -203,6 +205,9 @@
 
   <main id="main">
     <nav id="session-tabs" class="hidden" aria-label="Recent and pinned sessions"></nav>
+    <!-- The project Operator bot's conversation (operator.js builds it; the
+         same view also opens as a modal over any page). -->
+    <section id="operator-view" class="hidden" aria-label="Operator"></section>
     <section id="observer-view" class="hidden">
       <header class="wf-head"><h1>관찰 대시보드</h1><label id="observer-scope-control" title="켜면 observe-pin 한 세션만 관찰합니다. 관찰 API 호출이 그 수에 비례해 줄어듭니다. 세션 레일의 체크박스와 카드의 「관찰 고정」이 같은 표시입니다."><input type="checkbox" id="observer-scope-pinned"> 고정만 관찰</label><button id="observer-monitor">관찰 시작</button></header>
       <section id="observer-token-summary" aria-label="관찰 API 토큰 사용량">
@@ -988,6 +993,7 @@
 <script src="static/observer.js"></script>
 <script src="static/diagram-viewport.js"></script>
 <script src="static/search-anything.js"></script>
+<script src="static/operator.js"></script>
 <script src="static/session-tabs.js"></script>
 <script src="static/session-grid.js"></script>
 <script src="static/app.js"></script>

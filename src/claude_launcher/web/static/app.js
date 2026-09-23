@@ -12602,6 +12602,7 @@ function mobileTitle() {
   switch (currentPage) {
     case "home": return "claunch";
     case "observer": return "관찰 대시보드";
+    case "operator": return "operator";
     case "new": return "new session";
     case "meshes": return "mesh";
     case "flows": return flowsSection === "orphans"
@@ -12746,6 +12747,7 @@ let wfLastData = null;     // last payload, for instant re-render on selection
 const VIEWS = {
   home: "home-view",
   observer: "observer-view",
+  operator: "operator-view",
   new: "new-view",
   meshes: "meshes-view",
   flows: "flows-view",
@@ -13263,6 +13265,7 @@ function parseHash(h) {
   if (parts[0] === "new") {
     return { page: "new", mesh: parts[1] ? decodeURIComponent(parts[1]) : "" };
   }
+  if (parts[0] === "operator") return { page: "operator" };
   if (parts[0] === "observer") return {
     page: "observer",
     scope: ["session", "mesh"].includes(parts[1]) ? parts[1] : "global",
@@ -13299,6 +13302,7 @@ function route() {
   // Leaving a page stops what it was polling. Done centrally so a page's
   // open function never has to know which other pages exist.
   if (r.page !== "observer") globalThis.ObserverPage?.stop();
+  if (r.page !== "operator") globalThis.OperatorPanel?.stop();
   if (r.page !== "wf") stopWfPoll();
   if (r.page !== "msg") stopMsgPoll();
   if (r.page !== "mesh") stopMeshPoll();
@@ -13330,6 +13334,7 @@ function route() {
       if (sessName && sessName !== r.name) repointDetail(r.name);
       break;
     case "observer": showView("observer"); globalThis.ObserverPage.open(r.scope, r.name); break;
+    case "operator": showView("operator"); globalThis.OperatorPanel.open(); break;
     case "wf": openWorkflow(r.cwd, r.scope); break;
     case "log": openTranscript(r.name); break;
     case "msg": openTrace(r.name, r.mesh); break;

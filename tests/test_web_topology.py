@@ -467,6 +467,7 @@ CHECKS = [
         "sessflags_check.js",
         "sessstill_check.js",
         "observerpin_check.js",
+        "operator_check.js",
 ]
 
 

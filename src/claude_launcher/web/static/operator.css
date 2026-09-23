@@ -1,0 +1,87 @@
+/* Operator: conversation on the left, watched sessions on the right. The same
+   host is built into #operator-view and into the modal (operator.js). Colours
+   follow observer.css. */
+#operator-view { flex: 1; min-height: 0; min-width: 0; display: flex; flex-direction: column; overflow: hidden; font-size: 13px; }
+.operator-modal, .operator-host, .operator-host * { box-sizing: border-box; }
+.operator-host { display: flex; flex-direction: column; min-height: 0; min-width: 0; flex: 1; color: #d8dbe0; }
+.operator-host button, .operator-host select, .operator-host textarea {
+  font: inherit; color: #d8dbe0; background: #1b1e24; border: 1px solid #3b424e;
+  border-radius: 6px; padding: 8px 12px; min-height: 44px; min-width: 0;
+}
+.operator-host button { cursor: pointer; touch-action: manipulation; }
+.operator-host button:disabled { opacity: .5; cursor: default; }
+.operator-host a { color: #58a6ff; }
+.operator-head { flex: none; display: flex; flex-wrap: wrap; align-items: center; gap: 12px; padding: 12px 20px; border-bottom: 1px solid #2a2e36; }
+.operator-head h1 { margin: 0; font-size: 18px; }
+.operator-status { color: #8b949e; font-size: 12px; }
+.operator-status[data-state=running]::before { content: "● "; color: #3fb950; }
+.operator-status[data-state=ended]::before { content: "● "; color: #f85149; }
+.operator-start { display: flex; gap: 8px; margin-left: auto; }
+.operator-body { flex: 1; min-height: 0; display: grid; grid-template-columns: minmax(0, 1fr) 300px; }
+.operator-conversation { display: flex; flex-direction: column; min-height: 0; min-width: 0; border-right: 1px solid #2a2e36; }
+.operator-feed { flex: 1; min-height: 0; overflow: auto; list-style: none; margin: 0; padding: 16px 20px; display: flex; flex-direction: column; gap: 12px; }
+.operator-item { max-width: min(760px, 92%); padding: 10px 14px; border-radius: 10px; background: #1b1e24; border: 1px solid #2a2e36; overflow-wrap: anywhere; }
+.operator-item p { margin: 6px 0; line-height: 1.55; }
+.operator-user { align-self: flex-end; background: #142b3e; border-color: #285271; }
+.operator-system { align-self: center; background: none; border: none; color: #8b949e; font-size: 12px; padding: 2px; }
+.operator-dispatch { border-style: dashed; color: #b7c3d0; }
+.operator-level-attention { border-left: 3px solid #d29922; }
+.operator-level-urgent { border-left: 3px solid #f85149; }
+.operator-meta { display: flex; gap: 8px; align-items: baseline; font-size: 11px; color: #8b949e; }
+.operator-meta strong { color: #c9d1d9; }
+.operator-level { color: #f0b43c; }
+.operator-level-urgent .operator-level { color: #ff7b72; }
+.operator-refs { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+.operator-ref { font-size: 12px; padding: 1px 8px; border-radius: 10px; background: #1f2a37; text-decoration: none; }
+.operator-ask .operator-ask-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+.operator-ask textarea { width: 100%; box-sizing: border-box; margin-top: 8px; resize: vertical; }
+.operator-host .operator-approve { background: #1f3a26; border-color: #2f6b3c; }
+.operator-host .operator-deny { background: #3a1f22; border-color: #6b2f35; }
+.operator-host .operator-choice { background: #1f2a37; border-color: #33506e; }
+.operator-answer { color: #8dcaff; }
+.operator-empty { color: #8b949e; list-style: none; }
+.operator-notice { margin: 0 20px; min-height: 0; color: #ff7b72; font-size: 12px; }
+.operator-notice:empty { display: none; }
+.operator-composer { flex: none; display: flex; gap: 8px; padding: 12px 20px; border-top: 1px solid #2a2e36; }
+.operator-composer textarea { flex: 1; resize: vertical; max-height: 40vh; }
+.operator-side { min-height: 0; overflow: auto; padding: 14px 16px; }
+.operator-side h2 { margin: 0 0 8px; font-size: 13px; color: #c9d1d9; }
+.operator-pending { color: #f0b43c; margin: 0 0 8px; }
+.operator-sessions { list-style: none; margin: 0 0 12px; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+.operator-sessions > li { padding: 8px 10px; border: 1px solid #2a2e36; border-radius: 8px; background: #1b1e24; }
+.operator-session-top { display: flex; justify-content: space-between; gap: 8px; align-items: center; }
+.operator-summary { margin: 6px 0 0; color: #8b949e; font-size: 12px; line-height: 1.45; }
+.operator-badge { font-size: 11px; border-radius: 4px; padding: 2px 6px; background: #243247; white-space: nowrap; }
+.operator-badge-waiting { background: #3d2e12; color: #f0b43c; }
+.operator-badge-blocked { background: #3a1f22; color: #ff7b72; }
+.operator-badge-working { background: #173a2a; color: #56d364; }
+.operator-badge-done { background: #1f2a37; color: #8dcaff; }
+.operator-badge-count { display: inline-block; min-width: 16px; margin-left: 6px; padding: 0 5px; border-radius: 8px; background: #da3633; color: #fff; font-size: 11px; line-height: 16px; text-align: center; }
+.operator-badge-count[hidden] { display: none; }
+
+/* The modal: the same host, over any page. */
+.operator-modal { width: min(1100px, calc(100vw - 32px)); height: min(760px, calc(100vh - 48px)); padding: 0; border: 1px solid #3b424e; border-radius: 10px; background: #14171c; color: #d8dbe0; }
+.operator-modal[open] { display: flex; flex-direction: column; }
+.operator-modal::backdrop { background: rgba(0, 0, 0, .55); }
+.operator-modal-root { flex: 1; min-height: 0; display: flex; }
+.operator-modal-close { position: absolute; top: 8px; right: 10px; z-index: 1; width: 36px; height: 36px; font-size: 20px; color: #8b949e; background: none; border: none; cursor: pointer; }
+.operator-modal .operator-head { padding-right: 56px; }
+
+/* The floating button that opens the modal from anywhere. */
+.operator-fab { position: fixed; right: 18px; bottom: 18px; z-index: 50; display: inline-flex; align-items: center; gap: 6px; min-height: 44px; padding: 0 16px; border-radius: 22px; border: 1px solid #285271; background: #142b3e; color: #d8dbe0; font: inherit; font-size: 13px; cursor: pointer; box-shadow: 0 4px 14px rgba(0, 0, 0, .4); }
+/* On the Operator page itself the page is the conversation; the button
+   would only open a second copy of it. */
+body.operator-page .operator-fab { display: none; }
+.operator-fab-alert { border-color: #da3633; }
+.operator-fab-icon { color: #58a6ff; }
+
+@media (max-width: 820px) {
+  .operator-body { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 1fr) auto; }
+  .operator-conversation { border-right: none; }
+  .operator-side { max-height: 30vh; border-top: 1px solid #2a2e36; }
+  .operator-feed, .operator-composer, .operator-head { padding-left: 16px; padding-right: 16px; }
+  .operator-item { max-width: 100%; }
+  .operator-fab-label { display: none; }
+  .operator-fab { bottom: 72px; }
+  .operator-modal { width: 100%; height: 100%; max-width: none; max-height: none; margin: 0; border: none; border-radius: 0; }
+}
