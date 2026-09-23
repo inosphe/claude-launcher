@@ -16,14 +16,12 @@ the other teaching ``ask:``. One file, read by everything, is the fix.
 
 from __future__ import annotations
 
-import filecmp
 import hashlib
 import json
-import shutil
 from pathlib import Path
 from typing import Dict, List, Tuple
 
-from .. import atomic
+from .. import atomic, fsplan
 from . import state
 
 SKILL_MD = """\
@@ -461,8 +459,7 @@ run. Both are refused; neither is a thing to work around.
 
 def write_skill(skills_dir: Path) -> Path:
     path = skills_dir / "cflow" / "SKILL.md"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(SKILL_MD, encoding="utf-8")
+    fsplan.write_text(path, SKILL_MD)
     return path
 
 
@@ -486,11 +483,14 @@ SEED_RECORD_NAME = ".seeded.json"
 
 
 def _sha256(path: Path) -> str:
-    h = hashlib.sha256()
-    with path.open("rb") as f:
-        for chunk in iter(lambda: f.read(65536), b""):
-            h.update(chunk)
-    return h.hexdigest()
+    # Through the plan, so a dry run hashes the bytes it would have left.
+    return hashlib.sha256(fsplan.read_bytes(path) or b"").hexdigest()
+
+
+def _same_bytes(src: Path, dest: Path) -> bool:
+    """Whether ``dest`` holds exactly ``src``'s bytes (False when absent)."""
+    theirs = fsplan.read_bytes(dest)
+    return theirs is not None and theirs == fsplan.read_bytes(src)
 
 
 def seed_record(workflows_dir: Path) -> Dict[str, str]:
@@ -502,10 +502,11 @@ def seed_record(workflows_dir: Path) -> Dict[str, str]:
     nothing can tell stale from edited without the memory.
     """
     path = workflows_dir / SEED_RECORD_NAME
-    if not path.is_file():
-        return {}
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
+        text = fsplan.read_text(path)
+        if text is None:
+            return {}
+        data = json.loads(text)
     except (OSError, ValueError):
         return {}
     return data if isinstance(data, dict) else {}
@@ -515,10 +516,12 @@ def write_seed_record(workflows_dir: Path, record: Dict[str, str]) -> None:
     """Write the sidecar atomically — a torn half-JSON is a trashed memory
     that turns every future file ``UNKNOWN`` for no good reason."""
     path = workflows_dir / SEED_RECORD_NAME
+    text = json.dumps(record, indent=2, sort_keys=True) + "\n"
+    if fsplan.active() is not None:
+        fsplan.write_text(path, text)
+        return
     with atomic.scratch(path) as tmp:
-        tmp.write_text(
-            json.dumps(record, indent=2, sort_keys=True) + "\n", encoding="utf-8"
-        )
+        tmp.write_text(text, encoding="utf-8")
         atomic.replace(tmp, path)
 
 
@@ -532,7 +535,7 @@ def worktree_state(src: Path, dest: Path, record: Dict[str, str]) -> str:
     person changed it since seeding, and a refresh must not be silent about
     it. ``UNKNOWN`` is EDITED's twin without proof — no record at all.
     """
-    if dest.is_file() and filecmp.cmp(src, dest, shallow=False):
+    if _same_bytes(src, dest):
         return UNCHANGED
     recorded = record.get(dest.name)
     if recorded is None:
@@ -551,10 +554,9 @@ def install_workflow(src: Path, dest: Path, force: bool = False) -> str:
     Bytes, not text: a workflow that arrives with different line endings than
     it left with is a workflow that will look modified forever after.
     """
-    if dest.exists() and not force:
-        return UNCHANGED if filecmp.cmp(src, dest, shallow=False) else KEPT
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copyfile(src, dest)
+    if fsplan.is_file(dest) and not force:
+        return UNCHANGED if _same_bytes(src, dest) else KEPT
+    fsplan.copyfile(src, dest)
     return SEEDED
 
 
@@ -631,10 +633,10 @@ def update_global_workflows(
             continue
         dest = dest_dir / src.name
 
-        if not dest.is_file():
+        if not fsplan.is_file(dest):
             outcome = SEEDED
             detail = "installed from the packaged copy"
-        elif filecmp.cmp(src, dest, shallow=False):
+        elif _same_bytes(src, dest):
             outcome = UNCHANGED
             detail = "already current"
         else:
@@ -692,7 +694,7 @@ def _backup_one(dest: Path) -> Path:
     that matters.
     """
     bak = dest.with_name(dest.name + ".bak")
-    shutil.copyfile(dest, bak)
+    fsplan.copyfile(dest, bak)
     return bak
 
 

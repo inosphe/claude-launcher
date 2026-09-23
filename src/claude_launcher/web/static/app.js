@@ -14097,6 +14097,10 @@ function openSettings(section) {
     refreshProfileSettings();
     return;
   }
+  if (wsSection === "install") {
+    refreshInstallOverview();
+    return;
+  }
   refreshLlmSettings();
   refreshFaq();
   refreshPromptPresets();
@@ -17085,6 +17089,7 @@ function settingsTabs() {
   for (const [section, label, href] of [
     ["", "General", "#/settings"],
     ["profiles", "Profiles", "#/settings/profiles"],
+    ["install", "Install", "#/settings/install"],
   ]) {
     const tab = el("a", "seq-tab" + (wsSection === section ? " on" : ""), label);
     tab.href = href;
@@ -17431,6 +17436,201 @@ function profilesPanel() {
   return panel;
 }
 
+/* ------------------------------------------------------------------ */
+/* Install (#/settings/install) — every install command, previewed      */
+/* ------------------------------------------------------------------ */
+/* One row per command a person would otherwise type: claunch install
+   in each scope and claunch cflow update with and without --force. The
+   daemon runs the real install code under a dry run (fsplan), so the
+   preview is what the command would write, not a description of it; Run
+   does the same thing the CLI line does, from the daemon's process. */
+let installOverview = null;
+let installError = "";
+let installBusy = "";
+let installDetail = null;   // a plan or an apply result, as the API returns it
+
+async function refreshInstallOverview() {
+  try {
+    const resp = await api("/api/install");
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
+    installOverview = data;
+    installError = "";
+  } catch (err) { installError = String(err); }
+  if (wsOpen) renderWorkspaces();
+}
+
+async function previewInstall(targetId) {
+  installBusy = targetId;
+  if (wsOpen) renderWorkspaces();
+  try {
+    const resp = await api(`/api/install/plan?target=${encodeURIComponent(targetId)}`);
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
+    installDetail = data;
+    installError = "";
+  } catch (err) { installError = String(err); }
+  installBusy = "";
+  if (wsOpen) renderWorkspaces();
+}
+
+async function runInstall(row) {
+  const s = row.summary || {};
+  const writes = (s.create || 0) + (s.update || 0);
+  if (!confirm(`Run "${row.command}" from the daemon now?\n\n` +
+      `The dry run says it creates ${s.create || 0} and updates ${s.update || 0} ` +
+      `file(s)${writes ? "" : " (nothing to change)"}.`)) return;
+  installBusy = row.id;
+  if (wsOpen) renderWorkspaces();
+  try {
+    const resp = await api("/api/install/apply", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ target: row.id }),
+    });
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
+    installDetail = data;
+    installError = "";
+  } catch (err) { installError = String(err); }
+  installBusy = "";
+  await refreshInstallOverview();
+}
+
+/* Lines only on one side — enough to see what a merge adds to a JSON file
+   or what a workflow refresh changes, without a diff library. */
+function installChangedLines(before, after) {
+  const a = (before || "").split(/\r?\n/);
+  const b = (after || "").split(/\r?\n/);
+  const inA = new Set(a), inB = new Set(b);
+  const out = [];
+  for (const line of a) if (!inB.has(line)) out.push("- " + line);
+  for (const line of b) if (!inA.has(line)) out.push("+ " + line);
+  return out.join("\n");
+}
+
+function installDetailCard(d) {
+  const card = el("section", "ws-add install-detail");
+  const t = d.target || {};
+  card.appendChild(el("h3", null,
+    `${d.dry_run ? "Dry run" : "Ran"}: ${t.label || t.id}`));
+  card.appendChild(el("p", "wf-note", t.command || ""));
+  const s = d.summary || {};
+  card.appendChild(el("p", null,
+    `create ${s.create || 0} · update ${s.update || 0} · unchanged ${s.unchanged || 0}`));
+
+  const effects = Object.entries(d.effects || {});
+  if (effects.length) {
+    card.appendChild(el("h4", null, "Expected effect"));
+    const ul = el("ul", "install-effects");
+    for (const [cat, text] of effects) {
+      const li = el("li", null);
+      li.appendChild(el("b", null, cat + ": "));
+      li.appendChild(document.createTextNode(text));
+      ul.appendChild(li);
+    }
+    card.appendChild(ul);
+  } else {
+    card.appendChild(el("p", "wf-note",
+      "Nothing to change: every file is already what this command writes."));
+  }
+
+  const changes = d.changes || [];
+  if (changes.length) {
+    card.appendChild(el("h4", null, "Files"));
+    const table = el("table", "md-table install-files");
+    const head = el("tr", null);
+    for (const h of ["Change", "Kind", "Path"]) head.appendChild(el("th", null, h));
+    table.appendChild(head);
+    for (const c of changes) {
+      const tr = el("tr", "install-" + c.kind);
+      tr.appendChild(el("td", null, c.kind));
+      tr.appendChild(el("td", null, c.category));
+      const td = el("td", null);
+      if (c.after !== undefined && c.after !== null) {
+        const det = el("details", null);
+        det.appendChild(el("summary", null, c.path));
+        const body = c.kind === "create" ? c.after : installChangedLines(c.before, c.after);
+        det.appendChild(el("pre", "install-diff", body));
+        td.appendChild(det);
+      } else {
+        td.textContent = c.path;
+      }
+      tr.appendChild(td);
+      table.appendChild(tr);
+    }
+    card.appendChild(table);
+  }
+
+  if ((d.lines || []).length) {
+    card.appendChild(el("h4", null, d.dry_run ? "What the command would print" : "Output"));
+    card.appendChild(el("pre", "install-lines", d.lines.join("\n")));
+  }
+  if (d.note) card.appendChild(el("p", "wf-note", d.note));
+  const close = el("button", "wf-btn clear", "Close");
+  close.addEventListener("click", () => { installDetail = null; renderWorkspaces(); });
+  card.appendChild(close);
+  return card;
+}
+
+function installPanel() {
+  const panel = el("div", "install-panel");
+  panel.appendChild(el(
+    "p", "wf-note",
+    "Every command that installs or refreshes claunch, one row each. The " +
+    "counts come from a dry run of the real install code: nothing is written " +
+    "until you press Run, which does from the daemon what the command line " +
+    "does from a shell. Sessions already running keep what they started with."
+  ));
+  if (installError) panel.appendChild(el("p", "wf-error", installError));
+  if (installDetail) panel.appendChild(installDetailCard(installDetail));
+  if (!installOverview) {
+    panel.appendChild(el("p", "wf-note", "Reading the install state…"));
+    return panel;
+  }
+  const o = installOverview;
+  panel.appendChild(el("p", "wf-note",
+    `Global workflow layer: ${o.global_workflows_dir} · Claude Code config: ${o.user_config_dir}`));
+
+  const table = el("table", "md-table install-table");
+  const head = el("tr", null);
+  for (const h of ["Target", "Command", "Create", "Update", "Unchanged", ""]) {
+    head.appendChild(el("th", null, h));
+  }
+  table.appendChild(head);
+  for (const row of o.targets || []) {
+    const tr = el("tr", null);
+    tr.appendChild(el("td", null, row.label));
+    tr.appendChild(el("td", "install-cmd", row.command));
+    if (row.error) {
+      const td = el("td", "wf-error", row.error);
+      td.colSpan = 3;
+      tr.appendChild(td);
+    } else {
+      const s = row.summary || {};
+      tr.appendChild(el("td", s.create ? "install-pending" : null, String(s.create || 0)));
+      tr.appendChild(el("td", s.update ? "install-pending" : null, String(s.update || 0)));
+      tr.appendChild(el("td", null, String(s.unchanged || 0)));
+    }
+    const act = el("td", "install-actions");
+    const pv = el("button", "wf-btn", installBusy === row.id ? "…" : "Preview");
+    pv.disabled = !!installBusy;
+    pv.addEventListener("click", () => previewInstall(row.id));
+    act.appendChild(pv);
+    const run = el("button", "wf-btn", "Run");
+    run.disabled = !!installBusy || !!row.error;
+    run.addEventListener("click", () => runInstall(row));
+    act.appendChild(run);
+    tr.appendChild(act);
+    table.appendChild(tr);
+  }
+  panel.appendChild(table);
+  const refresh = el("button", "wf-btn clear", "Re-check");
+  refresh.addEventListener("click", () => refreshInstallOverview());
+  panel.appendChild(refresh);
+  return panel;
+}
+
 function renderWorkspaces() {
   const view = $("ws-view");
   const focused = document.activeElement && document.activeElement.id;
@@ -17446,6 +17646,10 @@ function renderWorkspaces() {
 
   // The profile manager is its own section and shares none of the cards
   // below: they are machine settings, this is the list of storage roots.
+  if (wsSection === "install") {
+    view.appendChild(installPanel());
+    return;
+  }
   if (wsSection === "profiles") {
     view.appendChild(profilesPanel());
     if (focused) {

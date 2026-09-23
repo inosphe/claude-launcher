@@ -19,7 +19,7 @@ import json
 from pathlib import Path
 from typing import Dict, Iterable, List, Mapping
 
-from . import store
+from . import fsplan, store
 from .profile import Profile
 
 SETTINGS_FILENAME = "settings.json"
@@ -59,18 +59,18 @@ def _path(profile: Profile):
 
 def load(profile: Profile) -> dict:
     """Return the profile's native ``settings.json``, or ``{}`` if missing."""
-    path = _path(profile)
-    if not path.is_file():
-        return {}
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+        text = fsplan.read_text(_path(profile))
+        if text is None:
+            return {}
+        data = json.loads(text)
+    except (OSError, ValueError):
         return {}
     return data if isinstance(data, dict) else {}
 
 
 def save(profile: Profile, data: dict) -> None:
-    _path(profile).write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+    fsplan.write_text(_path(profile), json.dumps(data, indent=2) + "\n")
 
 
 def get_env(profile: Profile) -> Dict[str, str]:
@@ -113,12 +113,7 @@ def _merge_permission_rules(path: Path, key: str, rules: Iterable[str]) -> bool:
     That last half is the load-bearing one. A rule list is the user's, and a
     guard is not worth clobbering whatever they meant.
     """
-    try:
-        doc = json.loads(path.read_text(encoding="utf-8")) if path.is_file() else {}
-    except (OSError, json.JSONDecodeError):
-        doc = {}
-    if not isinstance(doc, dict):
-        doc = {}
+    doc = _read_json(path)
     perms = doc.setdefault("permissions", {})
     if not isinstance(perms, dict):
         return False
@@ -129,9 +124,19 @@ def _merge_permission_rules(path: Path, key: str, rules: Iterable[str]) -> bool:
     if not missing:
         return False
     present.extend(missing)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(doc, indent=2) + "\n", encoding="utf-8")
+    fsplan.write_text(path, json.dumps(doc, indent=2) + "\n")
     return True
+
+
+def _read_json(path: Path) -> dict:
+    """A JSON object file through the install plan; ``{}`` when absent or
+    not an object (the callers' long-standing reading of a broken file)."""
+    try:
+        text = fsplan.read_text(path)
+        doc = json.loads(text) if text is not None else {}
+    except (OSError, ValueError):
+        doc = {}
+    return doc if isinstance(doc, dict) else {}
 
 
 def merge_permission_deny(path: Path, rules: Iterable[str]) -> bool:
@@ -259,12 +264,7 @@ def merge_mcp_servers_into(
     (user-scope) install, whose target is not a profile at all — the default
     setup keeps it at ``~/.claude.json``, a sibling of ``~/.claude``.
     """
-    try:
-        doc = json.loads(path.read_text(encoding="utf-8")) if path.is_file() else {}
-    except (OSError, json.JSONDecodeError):
-        doc = {}
-    if not isinstance(doc, dict):
-        doc = {}
+    doc = _read_json(path)
     existing = doc.get("mcpServers")
     if not isinstance(existing, dict):
         existing = {}
@@ -272,8 +272,7 @@ def merge_mcp_servers_into(
         existing.pop(name, None)
     existing.update(servers)
     doc["mcpServers"] = existing
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(doc, indent=2) + "\n", encoding="utf-8")
+    fsplan.write_text(path, json.dumps(doc, indent=2) + "\n")
     return existing
 
 

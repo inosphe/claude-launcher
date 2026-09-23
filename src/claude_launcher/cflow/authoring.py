@@ -17,6 +17,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from .. import fsplan
+
 SKILL_MD = """\
 ---
 name: cflow-author
@@ -872,6 +874,5 @@ child.
 
 def write_skill(skills_dir: Path) -> Path:
     path = skills_dir / "cflow-author" / "SKILL.md"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(SKILL_MD, encoding="utf-8")
+    fsplan.write_text(path, SKILL_MD)
     return path
