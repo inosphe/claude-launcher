@@ -147,6 +147,10 @@ const page = {};
 new Function("exports", "el", "document", "beadsFocus", "beadsSearch", "clearBeadsSearch",
   slice("beadsStatusBadge") + "\n" + slice("beadsPriBadge") + "\n" + slice("beadsIssueRow") + "\n" +
   slice("ragScoreChip") + "\n" + slice("ragCoverageLine") + "\n" +
+  // The board list the page already holds, so a failing board can be named
+  // by its board rather than by the directory it sits in.
+  "let beadsCache = { boards: [{ root: '/b', board: 'bee' }] };\n" +
+  slice("beadsBoardLabel") + "\n" + slice("beadsNameOfRoot") + "\n" +
   slice("beadsMergeSearch") + "\n" + slice("beadsSearchSection") + "\n" +
   "exports.section = beadsSearchSection; exports.merge = beadsMergeSearch;")(
   page, el, document, "", {
@@ -175,9 +179,10 @@ const merged = page.merge("q", [
   { root: "/c", data: { results: [{ id: "c-1", score: 0.1, rerank_score: 0.8 }], reranked: true,
                         index: { total: 5, indexed: 1, syncing: true } } },
 ]);
-check("several boards merge best-first, carrying their root, summing coverage, keeping the error",
+check("several boards merge best-first, carrying their root, summing coverage, "
+      + "naming the failing board in the error",
       [merged.results.map((r) => [r.id, r.root]), merged.index, merged.reranked, merged.error],
-      [[["c-1", "/c"], ["a-1", "/a"]], { total: 8, indexed: 4, syncing: true }, true, "/b: HTTP 502"]);
+      [[["c-1", "/c"], ["a-1", "/a"]], { total: 8, indexed: 4, syncing: true }, true, "bee: HTTP 502"]);
 
 /* ---- the markup and the stylesheet ------------------------------------- */
 check("the rail ships the search box before the state filters",

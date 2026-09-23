@@ -103,6 +103,8 @@ new Function(
   + "const BEADS_ACTIVE = new Set([\"open\", \"in_ready\", \"in_progress\", \"in_review\", \"blocked\"]);\n"
   + slice("beadsFilterIssues") + slice("beadsSortIssues")
   + slice("beadsStatusBadge") + slice("beadsPriBadge") + slice("beadsIssueRow")
+  + slice("beadsBoardLabel") + slice("beadsBoardWhere")
+  + slice("beadsNameOfRoot") + slice("sessBeadsBoardLine")
   + slice("sessBeads") + slice("sessBeadsCreate")
   + slice("url")
   + slice("sessReports") + slice("sessReportRow")

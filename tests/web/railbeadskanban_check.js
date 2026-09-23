@@ -106,6 +106,7 @@ new Function(
   + "const BEADS_STATUSES = " + JSON.stringify(["open", "in_ready", "in_progress", "in_review", "blocked", "closed"]) + ";\n"
   + "const BEADS_ACTIVE = new Set([\"open\", \"in_ready\", \"in_progress\", \"in_review\", \"blocked\"]);\n"
   + slice("beadsPriBadge") + slice("beadsCard")
+  + slice("beadsBoardWhere") + slice("sessBeadsBoardLine")
   + slice("sessBeadsPanel") + slice("sessBeadsLane")
   + `
 Object.assign(exports, {

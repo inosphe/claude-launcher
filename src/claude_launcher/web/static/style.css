@@ -3891,6 +3891,35 @@ a.wf-btn { display: inline-block; text-decoration: none; line-height: 1.5; }
 .ws-row .wf-btn { flex: none; }
 
 /* ------------------------------------------------------------------ */
+/* Beads boards: which database each workspace's board reads            */
+/* ------------------------------------------------------------------ */
+/* Two lines per row rather than one, because the path is the long value
+   and the badges beside the name are what the operator scans first: is
+   this board's path set or derived, is the database there yet, does it
+   share a file with another board. */
+.beads-board-row { padding: 10px 0; border-top: 1px solid #22262d; }
+.beads-board-row:first-of-type { border-top: none; }
+.beads-board-row-head {
+  display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap;
+  margin-bottom: 6px;
+}
+.beads-board-row-head .ws-path { font-size: 12px; }
+.beads-board-row-controls {
+  display: flex; gap: 8px; align-items: center; flex-wrap: wrap;
+}
+.beads-board-db-input { flex: 1 1 320px; min-width: 0; font-size: 12px; }
+.beads-board-row-controls .wf-btn { flex: none; margin: 0; }
+.beads-board-row-problem { margin: 5px 0 0; font-size: 12px; }
+.beads-board-row-problem:empty { display: none; }
+/* The board header on the Beads page: the name is the title, the database
+   is the line under it and is allowed to wrap. */
+.beads-board-db { font-size: 11px; color: #7d8590; overflow-wrap: anywhere; }
+/* The one line that says which board a panel is reading. */
+.beads-detail-board, .sess-beads-board { margin: 2px 0 6px; color: #7d8590; }
+/* A board whose database has not been created yet is still selectable. */
+.beads-workspace-tabs .beads-tab-empty { opacity: 0.72; font-style: italic; }
+
+/* ------------------------------------------------------------------ */
 /* the profile manager (#/settings/profiles)                           */
 /* ------------------------------------------------------------------ */
 /* The card, the list and the table reuse the boxes the rest of the

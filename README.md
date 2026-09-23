@@ -2047,6 +2047,67 @@ straight into it — register it like any other directory:
 claunch workspace add .claude/worktrees/review --name review
 ```
 
+### Each workspace's issue board
+
+A workspace has **one issue board**, and the board is a SQLite file:
+
+```
+<workspace>/.beads/beads.db
+```
+
+That is the default, and it is the file `br` and `claunch beads` were already
+using for a workspace that is a git checkout — nothing moves when you upgrade.
+What is new is that the choice is per workspace and can be changed:
+**Settings ▸ Beads boards** lists one row per registered workspace and lets you
+point any of them at a different database.
+
+The field names **the `.db` file itself**, not a directory holding it. A
+directory would leave the filename inside it to be guessed, and a wrong guess
+is silent — what you would see is an empty board rather than an error. So a
+path is checked before it is stored, and four things are refused: a relative
+path, a name that does not end in `.db`, a path that is a directory, and a
+parent directory that does not exist. A path with no file at it yet is
+accepted: the board is created on first use, or now with the row's **Create**
+button (`br init`, under the workspace's name as the issue prefix).
+
+| Row | What it is |
+| --- | --- |
+| a workspace's name | the board sessions in that directory file on, and the board its issues are listed under on the Beads page |
+| `claunch-default` | the board the daemon was already using, for a directory inside its tree that no other rule claims |
+
+`claunch-default` is pinned once, at the first daemon start after the upgrade,
+to the board that daemon was already using. Every issue filed before workspaces
+had boards of their own therefore stays exactly where it is and reads as that
+board's — nothing is copied and nothing is migrated. Afterwards it is an
+ordinary row on the card like any other.
+
+Resolution, for a session's directory or for `claunch beads` run anywhere:
+
+1. the **registered workspace** the directory lives in (a
+   [worktree](#running-in-a-git-worktree) resolves to the repository that was
+   registered, so it shares that board);
+2. failing that, a **git checkout that already holds a board** — a repository
+   nobody registered keeps the board it has;
+3. failing that, **`claunch-default`** — but only for a directory inside
+   that board's own root.
+
+A directory that matches none of the three has no board, and a session
+started there files no issues. That is what a scratch directory or a
+checkout of an unrelated project got before boards were per workspace, and
+the containment test in rule 3 is what keeps it that way: without it every
+such directory on the machine would file into this one board. Register the
+directory as a workspace to give it a board of its own.
+
+Rule 1 is first, and not git, because a workspace registered *inside* another
+checkout is a separate body of work: asking git would hand both of them the
+outer repository's board. Two boards may deliberately read one file — that is
+what `claunch-default` pinned to a workspace's board is — and the card says so
+on both rows.
+
+The registry lives under `beads.boards` in `~/.claunch.yaml` (board name →
+`.db` path) and is machine-local for the same reason `workspaces` is: the
+values are absolute paths.
+
 ### Joining with a role, or opening another session's conversation
 
 Two creation-time choices sit beside each other in the form. A **role** is the

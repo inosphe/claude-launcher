@@ -129,6 +129,7 @@ new Function(
   + "const BEADS_STATUSES = " + JSON.stringify(["open", "in_ready", "in_progress", "in_review", "blocked", "closed"]) + ";\n"
   + "const BEADS_ACTIVE = new Set([\"open\", \"in_ready\", \"in_progress\", \"in_review\", \"blocked\"]);\n"
   + slice("beadsSortIssues") + slice("beadsPriBadge") + slice("beadsCard")
+  + slice("beadsBoardLabel") + slice("beadsBoardWhere")
   + slice("beadsPageTabs") + slice("beadsWorkspaceTabs")
   + slice("renderQueues") + slice("beadsQueuesBoard") + slice("beadsQueueLane")
   + slice("beadsLaneSpent") + slice("beadsQueueOrder") + slice("beadsQFoldBar")
@@ -294,7 +295,9 @@ async function drop(card, cell) {
   const view2 = el("div");
   ctx.render(view2);
   check("with an answer it draws one grid per board", view2.find("beads-queues").length, 1);
-  ctx.setQueues({ statuses: STATUSES, boards: [BOARD, { ...BOARD, root: "/second" }] });
+  ctx.setQueues({ statuses: STATUSES, boards: [BOARD,
+  { ...BOARD, root: "/second", board: "second-board",
+    db: "/second/.beads/beads.db" }] });
   const multi = el("div");
   ctx.render(multi);
   check("workspace tabs keep one board visible", multi.find("beads-queues").length, 1);
@@ -303,7 +306,10 @@ async function drop(card, cell) {
   tabs.children[1].handlers.click[0]();
   const second = el("div");
   ctx.render(second);
-  check("workspace switch shows selected root", second.find("beads-board-head")[0].children[0].text, "/second");
+  // The head names the board, because that is what the issues on it are
+  // filed under; the directory and the database file are in its title.
+  check("workspace switch shows the selected board's name",
+        second.find("beads-board-head")[0].children[0].text, "second-board");
   ctx.setQueues({ statuses: STATUSES, boards: [] });
   const view3 = el("div");
   ctx.render(view3);

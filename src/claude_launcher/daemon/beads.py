@@ -80,7 +80,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Awaitable, Callable, Dict, List, Optional, Sequence, Tuple
 
-from .. import beads_meta, cli_beads, reports as reports_mod, store, workspaces
+from .. import (
+    beads_db, beads_meta, cli_beads, reports as reports_mod, store, workspaces,
+)
 from .session import STATUS_BUSY, STATUS_IDLE, Session
 
 log = logging.getLogger("claude_launcher.daemon.beads")
@@ -974,6 +976,20 @@ def sweep_plan(
 # --------------------------------------------------------------------------- #
 # the board
 # --------------------------------------------------------------------------- #
+def _board_root(cwd: str) -> Optional[Path]:
+    """The root of the board a directory files on — :func:`cli_beads.resolve`
+    reduced to the key this class groups by.
+
+    The daemon keys every cache, lock and view by the root rather than by the
+    database, because a root resolves to exactly one database
+    (:func:`beads_db.ref_for_root`) while the reverse is not true: two boards
+    may deliberately be pointed at one file, which is what
+    ``claunch-default`` pinned to a workspace's board is.
+    """
+    ref = cli_beads.resolve(cwd)
+    return ref.root_path if ref is not None else None
+
+
 class Board:
     """One daemon's access to every repository board its sessions live in.
 
@@ -992,9 +1008,15 @@ class Board:
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self._runner = runner
-        self._root_for = root_for or cli_beads.repo_root
+        self._root_for = root_for or _board_root
         self._clock = clock
         self._roots: Dict[str, Optional[Path]] = {}
+        #: Board roots resolved to the database under them. Short-lived
+        #: because the mapping is a setting the operator edits while the
+        #: daemon runs; the settings route also drops it outright
+        #: (:meth:`forget_paths`) so a change is visible on the next poll
+        #: rather than after the TTL.
+        self._refs: Dict[str, Tuple[float, beads_db.BoardRef]] = {}
         self._locks: Dict[str, asyncio.Lock] = {}
         self._cache: Dict[str, Tuple[float, List[dict]]] = {}
         #: Short-lived pages for the board's incremental reader.  This is
@@ -1069,12 +1091,57 @@ class Board:
             *(self.root_for(c) for c in wanted), return_exceptions=True
         )
 
-    @staticmethod
-    def has_board(root: Optional[Path]) -> bool:
+    def ref_for(self, root: Optional[Path]) -> Optional[beads_db.BoardRef]:
+        """Which database ``root``'s board is, and what that board is called.
+
+        Cached for :data:`CACHE_TTL` because every listing, every view and
+        every ``br`` call asks it, and answering reads the config file.
+        """
+        if root is None:
+            return None
+        key = str(root)
+        now = self._clock()
+        hit = self._refs.get(key)
+        if hit is not None and now - hit[0] < CACHE_TTL:
+            return hit[1]
+        ref = beads_db.ref_for_root(root) or beads_db.plain_ref(root)
+        self._refs[key] = (now, ref)
+        return ref
+
+    def forget_paths(self) -> None:
+        """Drop every resolved directory, board and listing.
+
+        What a change to the board settings needs done for it: the directory
+        a session sits in may now resolve to a different database, so an
+        answer taken against the old one is not stale, it is the wrong
+        board's.
+        """
+        self._roots.clear()
+        self._refs.clear()
+        self._cache.clear()
+        self._page_cache.clear()
+        self._deps.clear()
+        self._page_deps.clear()
+
+    def has_board(self, root: Optional[Path]) -> bool:
+        """Whether ``root`` has a board, counting one that does not exist yet.
+
+        A registered workspace with no ``.beads/`` at all still answers yes:
+        its board is created on first use (:func:`cli_beads.autocreatable`),
+        and saying no here is what used to leave every such workspace's
+        sessions reporting "no board" while their issues went to the daemon's
+        own directory instead.
+        """
         if root is None:
             return False
-        d = root / cli_beads.BEADS_DIR
-        return (d / cli_beads.DB_NAME).is_file() or (d / cli_beads.JSONL_NAME).is_file()
+        ref = self.ref_for(root)
+        if ref is None:
+            return False
+        if ref.exists():
+            return True
+        if (Path(ref.root) / cli_beads.BEADS_DIR / cli_beads.JSONL_NAME).is_file():
+            return True
+        return cli_beads.autocreatable(ref)
 
     # ---- running br ----------------------------------------------------- #
     async def _run(self, argv: List[str], cwd: str) -> Tuple[int, str, str]:
@@ -1093,6 +1160,32 @@ class Board:
             err.decode("utf-8", "replace"),
         )
 
+    async def create_board(self, ref: beads_db.BoardRef) -> None:
+        """Bring ``ref``'s database into being — the daemon's side of
+        :func:`cli_beads.create_board`.
+
+        The plan is the CLI's, so a board made here and a board made by
+        ``claunch beads`` in a session are laid out identically; only the
+        running of it differs, because this one must not block the event
+        loop. Called with the board's lock already held.
+        """
+        if not self.available():
+            raise BeadsUnavailable(
+                f"'{cli_beads.BINARY}' is not installed on the daemon machine"
+            )
+
+        def runner(argv: List[str], cwd: str):
+            # The subprocess itself is async; this closure only has to look
+            # synchronous to cli_beads.create_board, which is run in a
+            # thread. asyncio.run_coroutine_threadsafe hands the call back
+            # to the loop that owns the runner.
+            future = asyncio.run_coroutine_threadsafe(self._run(argv, cwd), loop)
+            return future.result()
+
+        loop = asyncio.get_running_loop()
+        await asyncio.to_thread(cli_beads.create_board, ref, runner)
+        self._refs.pop(str(ref.root), None)
+
     async def br(
         self, root: Path, args: List[str], *, actor: Optional[str] = None
     ):
@@ -1105,17 +1198,30 @@ class Board:
             raise BeadsUnavailable(
                 f"'{cli_beads.BINARY}' is not installed on the daemon machine"
             )
-        beads_dir = root / cli_beads.BEADS_DIR
-        commands = cli_beads.plan(
-            list(args) + (["--json"] if "--json" not in args else []),
-            root,
-            actor,
-            db_exists=(beads_dir / cli_beads.DB_NAME).is_file(),
-            jsonl_exists=(beads_dir / cli_beads.JSONL_NAME).is_file(),
-        )
+        ref = self.ref_for(root)
+        assert ref is not None  # root is not None here; ref_for only nulls on that
+        beads_dir = Path(ref.root) / cli_beads.BEADS_DIR
         key = str(root)
         lock = self._locks.setdefault(key, asyncio.Lock())
         async with lock:
+            # Both of these are read under the lock, not before it: creating
+            # the board is a step of its own, and two callers that each read
+            # "missing" outside the lock would both run it.
+            if (
+                not ref.exists()
+                and not (beads_dir / cli_beads.JSONL_NAME).is_file()
+                and cli_beads.autocreatable(ref)
+                and args[:1] != ["init"]
+            ):
+                await self.create_board(ref)
+            commands = cli_beads.plan(
+                list(args) + (["--json"] if "--json" not in args else []),
+                Path(ref.root),
+                actor,
+                db_exists=ref.exists(),
+                jsonl_exists=(beads_dir / cli_beads.JSONL_NAME).is_file(),
+                db=ref.db,
+            )
             out = ""
             for cmd in commands:
                 code, out, err = await self._run(cmd, str(root))
@@ -1274,7 +1380,10 @@ class Board:
         useful, and a board that could not be drawn as a forest is still a
         board.
         """
-        db = root / cli_beads.BEADS_DIR / cli_beads.DB_NAME
+        ref = self.ref_for(root)
+        if ref is None:
+            return None
+        db = ref.db_path
         if not db.is_file():
             return None
 
@@ -1404,6 +1513,11 @@ class Board:
         view = {
             "available": self.available(),
             "root": None,
+            # Which board this session's directory files on, so the rail can
+            # say it by name. Filled beside "root" below; null until then.
+            "board": None,
+            "db": None,
+            "workspace": None,
             "issue": sdef.issue,
             "issues": [],
             # The round reports this session has left on disk, newest first.
@@ -1430,11 +1544,17 @@ class Board:
             return view
         if not self.has_board(root):
             view["error"] = (
-                "no board: this directory is not in a repository with a "
-                ".beads/ (claunch beads init --prefix <name> at the root)"
+                "no board: this directory is in no registered workspace "
+                "and in no checkout that already holds one — register it "
+                "with 'claunch workspace add <dir>', or give it a board on "
+                "the Settings page"
             )
             return view
         view["root"] = str(root)
+        head = self.board_head(root)
+        view["board"] = head["board"]
+        view["db"] = head["db"]
+        view["workspace"] = head["workspace"]
         try:
             rows = await self.issues(root)
         except cli_beads.BeadsError as exc:
@@ -1447,6 +1567,30 @@ class Board:
         if wd:
             view["winddown"] = wd
         return view
+
+    def board_head(self, root: Path) -> dict:
+        """The fields every board entry opens with: which board this is.
+
+        ``root`` alone used to be the whole identity, and the page printed it
+        as the board's title -- a directory path, the same one for every
+        workspace once the fleet had settled on the daemon's own board. The
+        name is what the operator set the board up as (a workspace name, or
+        ``claunch-default``), ``db`` is the file it actually reads, and
+        ``configured`` says whether that file was chosen or derived. The page
+        shows the name and keeps the path for the tooltip.
+        """
+        ref = self.ref_for(root)
+        if ref is None:
+            return {"root": str(root), "board": Path(root).name, "db": "",
+                    "workspace": "", "configured": False, "board_exists": False}
+        return {
+            "root": str(root),
+            "board": ref.name,
+            "db": ref.db,
+            "workspace": ref.workspace,
+            "configured": ref.configured,
+            "board_exists": ref.exists(),
+        }
 
     async def _group_by_root(
         self, sessions: Sequence, extra_roots: Sequence[str] = ()
@@ -1499,8 +1643,8 @@ class Board:
         by_root, order = await self._group_by_root(sessions, extra_roots)
         for root in order:
             entry: dict = {
-                "root": str(root), "issues": [], "deps": [], "sessions": [],
-                "error": None,
+                **self.board_head(root),
+                "issues": [], "deps": [], "sessions": [], "error": None,
             }
             members = by_root[str(root)]
             entry["sessions"] = [
@@ -1551,7 +1695,7 @@ class Board:
             "available": self.available(),
             "boards": [
                 {
-                    "root": str(root),
+                    **self.board_head(root),
                     "sessions": [
                         {"name": s.sdef.name, "status": s.status()}
                         for s in by_root[str(root)]
@@ -1598,8 +1742,9 @@ class Board:
         by_root, order = await self._group_by_root(sessions, extra_roots)
         for root in order:
             entry: dict = {
-                "root": str(root), "issues": [], "deps": [], "sessions": [],
-                "error": None, "has_more": False, "total": None,
+                **self.board_head(root),
+                "issues": [], "deps": [], "sessions": [], "error": None,
+                "has_more": False, "total": None,
             }
             members = by_root[str(root)]
             entry["sessions"] = [
@@ -1677,7 +1822,10 @@ class Board:
             return result
         by_root, order = await self._group_by_root(sessions, extra_roots)
         for root in order:
-            entry: dict = {"root": str(root), "lanes": [], "unassigned": [], "error": None}
+            entry: dict = {
+                **self.board_head(root),
+                "lanes": [], "unassigned": [], "error": None,
+            }
             members = by_root[str(root)]
             try:
                 rows = await self.issues(root)
@@ -1988,8 +2136,8 @@ class Board:
         session has; the only branch that would differ for the real one is the
         "already yours" shortcut, which a new session never hits.
         """
-        view = {"available": self.available(), "root": None, "issues": [],
-                "error": None}
+        view = {"available": self.available(), "root": None, "board": None,
+                "db": None, "issues": [], "error": None}
         if not view["available"]:
             view["error"] = (
                 f"'{cli_beads.BINARY}' is not installed on the daemon machine"
@@ -2002,11 +2150,16 @@ class Board:
             return view
         if not self.has_board(root):
             view["error"] = (
-                "no board: this directory is not in a repository with a "
-                ".beads/ (claunch beads init --prefix <name> at the root)"
+                "no board: this directory is in no registered workspace "
+                "and in no checkout that already holds one — register it "
+                "with 'claunch workspace add <dir>', or give it a board on "
+                "the Settings page"
             )
             return view
         view["root"] = str(root)
+        head = self.board_head(root)
+        view["board"] = head["board"]
+        view["db"] = head["db"]
         try:
             rows = await self.issues(root)
         except cli_beads.BeadsError as exc:
