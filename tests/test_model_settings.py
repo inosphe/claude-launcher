@@ -58,7 +58,7 @@ def test_invalid_manual_config_falls_back_to_declaration(home, value):
 
 def test_api_model_save_reset_and_validation(home):
     async def run():
-        mgr = SessionManager(restore_default=False)
+        mgr = SessionManager(idle_threshold=0.5, scrollback=200, restore_default=False)
         app = build_app(mgr, "auth", started_at=time.monotonic())
         headers = {"Authorization": "Bearer auth"}
         url = "/api/harnesses/codex/models"
