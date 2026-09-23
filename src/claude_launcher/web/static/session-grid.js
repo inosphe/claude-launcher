@@ -317,26 +317,37 @@ globalThis.SessionGridLayout = class SessionGridLayout {
     return Math.ceil(used / perLine) * perLine;
   }
 
-  /* How many of row `rowIndex`'s lines, from the top, can be folded away
-     because the current view shows nothing in them: every line before the
-     first one holding a session in `present`. Only when at least one of
-     those lines holds a session out of view -- a filter is what emptied
-     them; lines that are merely empty keep their place on screen. A row
-     with no session in view keeps its last line, so something can still be
-     dropped into it. */
-  hiddenLead(rowIndex, perLine, present = new Set()) {
+  /* The stretches of row `rowIndex` that can be folded away because the
+     current view shows nothing in them: runs of at least `minLines`
+     consecutive lines, at the top or anywhere after it, none holding a
+     session in `present` and at least one holding a session out of view (a
+     filter is what emptied them; lines that are merely empty keep their
+     place on screen). The row's last line is never folded, so something can
+     still be dropped into it. Returns [{ start, end }] in line numbers, end
+     exclusive. */
+  foldRuns(rowIndex, perLine, present = new Set(), minLines = 3) {
     const row = this.rows[rowIndex];
-    if (!row) return 0;
+    if (!row) return [];
     const lines = this.span(rowIndex, perLine) / perLine;
-    let lead = 0;
+    const runs = [];
+    let start = -1;
     let absent = false;
-    for (; lead < lines; lead++) {
-      const slice = row.cells.slice(lead * perLine, (lead + 1) * perLine);
-      if (slice.some((name) => name && present.has(name))) break;
+    const close = (end) => {
+      if (start >= 0 && absent && end - start >= minLines) runs.push({ start, end });
+      start = -1;
+      absent = false;
+    };
+    for (let line = 0; line < lines - 1; line++) {
+      const slice = row.cells.slice(line * perLine, (line + 1) * perLine);
+      if (slice.some((name) => name && present.has(name))) {
+        close(line);
+        continue;
+      }
+      if (start < 0) start = line;
       if (slice.some(Boolean)) absent = true;
     }
-    if (lead === lines) lead = lines - 1;
-    return absent ? lead : 0;
+    close(lines - 1);
+    return runs;
   }
 
   /* The cell one step from (rowIndex, col), or null past an edge. Without

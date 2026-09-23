@@ -207,12 +207,26 @@ option:disabled { color: #6b7280; }
   width: 100%; min-width: 0; padding: 2px 4px; font: inherit; color: #e6edf3;
   background: #0d1117; border: 1px solid #58a6ff; border-radius: 3px;
 }
+/* A folded stretch: a wavy break across the row's full width with the
+   hidden cell range on it. Opened, it becomes a thin bar that folds it back. */
 #session-grid .sg-fold {
-  display: block; width: 100%; margin: 0 0 3px; padding: 2px 6px; text-align: left;
-  font-size: 10px; color: #6e7681; background: none; cursor: pointer;
-  border: 1px dashed #262c35; border-radius: 4px;
+  grid-column: 1 / -1; position: relative; height: 22px; padding: 0; border: 0;
+  cursor: pointer; font-size: 10px; color: #7d8590;
+  background:
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='8' viewBox='0 0 16 8'%3E%3Cpath d='M0 4 Q4 0 8 4 T16 4' fill='none' stroke='%23444c56' stroke-width='1.4'/%3E%3C/svg%3E")
+    repeat-x left 3px,
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='8' viewBox='0 0 16 8'%3E%3Cpath d='M0 4 Q4 0 8 4 T16 4' fill='none' stroke='%23444c56' stroke-width='1.4'/%3E%3C/svg%3E")
+    repeat-x left 11px;
 }
-#session-grid .sg-fold:hover { color: #c9d1d9; border-color: #385273; }
+#session-grid .sg-fold-label {
+  position: relative; padding: 1px 8px; border-radius: 3px; background: #14161a;
+}
+#session-grid .sg-fold:hover { color: #c9d1d9; }
+#session-grid .sg-fold:focus-visible { outline: 2px solid #58a6ff; outline-offset: 1px; }
+#session-grid .sg-fold.open {
+  height: 16px; background: none; border-top: 1px dashed #30363d; text-align: left;
+}
+#session-grid .sg-fold.open .sg-fold-label { background: #14161a; padding: 0 6px 0 0; }
 #session-grid .sg-cells {
   display: grid; gap: 3px;
   grid-template-columns: repeat(var(--sg-per-line, 4), minmax(0, 1fr));
