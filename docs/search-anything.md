@@ -3,6 +3,18 @@
 The session rail's **Search anything** button and `/` open a search dialog.
 Enter submits a semantic search, and Escape closes the dialog and restores
 focus. `/` remains ordinary input in text fields, editors and terminals.
+The **검색 범위** radio group defaults to **일반**, which searches the full
+corpus. **활성 세션 + Beads** searches records of currently live sessions
+(including opening tasks, notes, summaries and Observer details), plus all
+Beads issues and comments regardless of issue status or session ownership.
+Exited, paused, archived and removed sessions are excluded. Changing the mode
+reruns the current query and cancels the previous response. Both JSON and SSE
+search endpoints accept `kind=all&mode=active`; omitted `mode` or
+`mode=general` keeps the existing search. The server filters vector and exact
+match candidates before applying the result limit and reranking, so old
+session records cannot consume the active mode's result window. Index coverage
+still describes the full corpus; newly created records appear after indexing.
+
 Results are drawn as two labelled lists, **세션** and everything else, each headed
 by what it holds and how many rows that is: the first by the one word for the
 rows in it, the second by the kinds it actually carries (`beads · comment`),

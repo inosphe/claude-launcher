@@ -24,6 +24,7 @@ function railMarkup(html) {
 }
 const rail = railMarkup(fs.readFileSync(path.join(root, 'index.html'), 'utf8'));
 const writes = [];
+const searches = [];
 const now = Date.parse('2026-09-18T10:00:00Z');
 const cfg = {base_url:'http://omlx/v1', api_key_set:true, embedding_model:'embed', rerank_model:'rank', candidates:40, rerank_top:12, batch:16, timeout:120, watch_interval:30, verify_tls:true};
 const server = http.createServer(async (req,res) => {
@@ -34,11 +35,18 @@ const server = http.createServer(async (req,res) => {
     res.setHeader('Content-Type',req.url.endsWith('.js')?'application/javascript':'text/css'); res.end(fs.readFileSync(path.join(root,req.url.slice(1)))); return;
   }
   if(req.url.startsWith('/api/search/stream?')) {
+    searches.push(new URL(req.url, 'http://local').searchParams);
     // The daemon's answer is two server-sent events: the vector ranking at
     // once, then the reranker's order (or an error) when it comes back.
     res.setHeader('Content-Type','text/event-stream; charset=utf-8');
     const send = (event, data) => res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
     const q=new URL(req.url,'http://local').searchParams.get('q');
+    if(q==='mode-race') {
+      const mode = new URL(req.url,'http://local').searchParams.get('mode');
+      if(mode==='general') await new Promise(resolve=>setTimeout(resolve,250));
+      send('ranked',{results:[{id:'race',kind:'beads',title:mode,href:'#/beads/race'}],index:{indexed:1,total:1},warnings:[],rerank_pending:false});
+      res.end(); return;
+    }
     if(q==='rerank-offer') {
       // The reranker reverses the ranked order. The page must keep the ranked
       // list until the reader applies the new one.
@@ -89,11 +97,11 @@ const server = http.createServer(async (req,res) => {
     await page.locator('#editor').focus();await page.keyboard.type('/');assert.equal(await page.locator('dialog').evaluate(n=>n.open),false);
     await page.locator('#terminal').focus();await page.keyboard.type('/');assert.equal(await page.locator('dialog').evaluate(n=>n.open),false);
     await page.locator('#search-anything-open').focus();await page.keyboard.press('/');assert.equal(await page.locator('dialog').evaluate(n=>n.open),true);
-    assert.equal(await page.locator('dialog input').evaluate(n=>n===document.activeElement),true);
+    assert.equal(await page.locator('dialog input[type=search]').evaluate(n=>n===document.activeElement),true);
     assert.equal(await page.locator('dialog h2').evaluate(n=>getComputedStyle(n).fontSize),'14px');
     assert.equal(await page.locator('dialog').evaluate(n=>n.getBoundingClientRect().width),640);
     if (process.env.CLAUNCH_SCREENSHOT) await page.screenshot({path:process.env.CLAUNCH_SCREENSHOT.replace('.png','-desktop.png')});
-    await page.locator('dialog input').fill('needle');await page.keyboard.press('Enter');
+    await page.locator('dialog input[type=search]').fill('needle');await page.keyboard.press('Enter');
     await page.getByRole('link',{name:'needle',exact:true}).waitFor();assert.equal(await page.locator('dialog img').count(),0);
     const time = page.locator('dialog time');
     assert.match(await time.textContent(), /\(5분 전\)$/);
@@ -101,6 +109,19 @@ const server = http.createServer(async (req,res) => {
     await page.clock.fastForward(60000);
     assert.match(await time.textContent(), /\(6분 전\)$/);
     assert.match(await page.locator('dialog [role=status]').textContent(),/Rerank 사용 불가/);
+    const generalMode = page.getByRole('radio', {name:'일반', exact:true});
+    const activeMode = page.getByRole('radio', {name:'활성 세션 + Beads', exact:true});
+    assert.equal(await generalMode.isChecked(), true);
+    assert.equal(searches.at(-1).get('mode'), 'general');
+    let searched = page.waitForResponse(r => r.url().includes('mode=active'));
+    await activeMode.check(); await searched;
+    await page.getByRole('link',{name:'needle',exact:true}).waitFor();
+    assert.equal(searches.at(-1).get('mode'), 'active');
+    assert.equal(searches.at(-1).get('q'), 'needle');
+    assert.equal(await generalMode.isChecked(), false);
+    searched = page.waitForResponse(r => r.url().includes('mode=general'));
+    await generalMode.check(); await searched;
+    await page.getByRole('link',{name:'needle',exact:true}).waitFor();
     // The two classes are two lists, each headed by what it holds and how
     // many of them there were; the answer's own counts are in the notice. The
     // first list is named for the one thing it holds; the second is named by
@@ -148,7 +169,7 @@ const server = http.createServer(async (req,res) => {
     // has no rows, and the notice still says what the answer held. A filter
     // whose kind is not in the new answer is dropped with it — the chips are
     // the answer's, so a pressed chip with nothing under it cannot survive.
-    await page.locator('dialog input').fill('only-session');await page.keyboard.press('Enter');
+    await page.locator('dialog input[type=search]').fill('only-session');await page.keyboard.press('Enter');
     await page.locator('dialog .search-anything-session').waitFor();
     assert.equal(await page.locator('dialog .search-anything-record').count(),0);
     assert.deepEqual(await heads.evaluateAll(nodes=>nodes.map(n=>n.childNodes[0].textContent)),['세션']);
@@ -159,7 +180,7 @@ const server = http.createServer(async (req,res) => {
     // The second list is named by the kinds it holds, in the order the chips
     // count them, and the two are read from one count — so an answer holding
     // several kinds says all of them, and says exactly what the chips say.
-    await page.locator('dialog input').fill('mixed');await page.keyboard.press('Enter');
+    await page.locator('dialog input[type=search]').fill('mixed');await page.keyboard.press('Enter');
     await page.locator('dialog .search-anything-record').first().waitFor();
     assert.match(await page.locator('dialog [role=status]').textContent(), /3개 결과 · 세션 1 · 그 외 2/);
     assert.deepEqual(await kindChips.evaluateAll(nodes=>nodes.map(n=>n.dataset.kind)),['','session','checks','beads']);
@@ -168,7 +189,7 @@ const server = http.createServer(async (req,res) => {
       (await kindChips.evaluateAll(nodes=>nodes.map(n=>n.dataset.kind))).filter(kind=>kind&&kind!=='session').join(' · '));
     // The reranker's order is offered, not applied: the ranked list stays on
     // screen after the second answer arrives, and changes only on the click.
-    await page.locator('dialog input').fill('rerank-offer');await page.keyboard.press('Enter');
+    await page.locator('dialog input[type=search]').fill('rerank-offer');await page.keyboard.press('Enter');
     await page.getByRole('link',{name:'first',exact:true}).waitFor();
     const apply = page.locator('dialog .search-anything-apply');
     await apply.waitFor({state:'visible'});
@@ -179,22 +200,31 @@ const server = http.createServer(async (req,res) => {
     assert.deepEqual(await titles(),['second','first']);
     assert.equal(await apply.isHidden(),true);
     assert.match(await page.locator('dialog [role=status]').textContent(), /정렬 개선 적용됨/);
-    await page.locator('dialog input').fill('needle');await page.keyboard.press('Enter');
+    await page.locator('dialog input[type=search]').fill('needle');await page.keyboard.press('Enter');
     await page.getByRole('link',{name:'needle',exact:true}).waitFor();
     assert.equal(await apply.isHidden(),true);
     await page.getByText('원문 보기',{exact:true}).click();await page.waitForFunction(()=>document.querySelector('dialog pre').textContent.includes('원문 기록'));
-    await page.locator('dialog input').fill('task-source');await page.keyboard.press('Enter');
+    await page.locator('dialog input[type=search]').fill('task-source');await page.keyboard.press('Enter');
     await page.getByRole('link',{name:'task-source',exact:true}).waitFor();
     await page.getByText('원문 보기',{exact:true}).click();
     await page.waitForFunction(()=>document.querySelector('dialog pre').textContent==='원문 기록');
+    // Switching scope during an outstanding response must not restore the
+    // old scope's rows, even when that response completes later.
+    await page.locator('dialog input[type=search]').fill('mode-race');
+    const oldRequest = page.waitForRequest(r=>r.url().includes('q=mode-race'));
+    await page.keyboard.press('Enter'); await oldRequest;
+    await activeMode.check();
+    await page.getByRole('link',{name:'active',exact:true}).waitFor();
+    await new Promise(resolve=>setTimeout(resolve,350));
+    assert.equal(await page.getByRole('link',{name:'general',exact:true}).count(),0);
     await page.keyboard.press('Escape');assert.equal(await page.locator('dialog').evaluate(n=>n.open),false);
     assert.equal(await page.locator('#search-anything-open').evaluate(n=>n===document.activeElement),true);
-    await page.locator('#search-anything-open').click();await page.locator('dialog input').fill('slow');await page.keyboard.press('Enter');
+    await page.locator('#search-anything-open').click();await page.locator('dialog input[type=search]').fill('slow');await page.keyboard.press('Enter');
     assert.match(await time.textContent(), /\(6분 전\)$/);
-    await page.locator('dialog input').fill('newest');await page.keyboard.press('Enter');await page.getByRole('link',{name:'newest',exact:true}).waitFor();
+    await page.locator('dialog input[type=search]').fill('newest');await page.keyboard.press('Enter');await page.getByRole('link',{name:'newest',exact:true}).waitFor();
     await page.waitForTimeout(350);assert.equal(await page.getByRole('link',{name:'slow',exact:true}).count(),0);
     for (const query of ['invalid-time', 'no-time']) {
-      await page.locator('dialog input').fill(query); await page.keyboard.press('Enter');
+      await page.locator('dialog input[type=search]').fill(query); await page.keyboard.press('Enter');
       await page.getByRole('link',{name:query,exact:true}).waitFor();
       if (query === 'invalid-time') assert.equal(await time.textContent(), 'invalid');
       else assert.equal(await time.count(), 0);
