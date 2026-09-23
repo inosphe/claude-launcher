@@ -27,19 +27,42 @@ def database():
 
 
 def remember(session, events):
-    if not events:
-        return
+    remember_many([(session, events)])
+
+
+def remember_many(batch, *, notify=True):
+    """Write several sessions' events in one connection and one transaction.
+
+    ``batch`` is ``[(session, events), ...]``, applied in order, so a later
+    entry for the same record wins exactly as a later :func:`remember` call
+    would. The unified corpus writes every registered session on each pass --
+    three calls per session, each opening the database, creating the table if
+    missing and committing -- and on this machine that was hundreds of
+    connections per pass (claunch-lol7h).
+
+    ``notify=False`` leaves the change hooks alone. The corpus pass passes it
+    for its own writes: it reads the records back later in the same pass, so
+    they are already in what it returns, and the hook would only queue a
+    second full pass to find them again. It also keeps this function callable
+    from a worker thread, where the hook's ``enqueue`` has no running loop.
+    Returns whether any row changed.
+    """
+    batch = [(session, events) for session, events in batch if events]
+    if not batch:
+        return False
     changed = False
     with database() as db:
-        for event in events:
-            payload = json.dumps(event, ensure_ascii=False, sort_keys=True)
-            cursor = db.execute("INSERT INTO records VALUES (?,?,?,?) ON CONFLICT(session,id) DO UPDATE SET at=excluded.at,payload=excluded.payload WHERE records.payload != excluded.payload",
-                                (session, event["id"], event.get("at", ""), payload))
-            changed |= bool(cursor.rowcount)
+        for session, events in batch:
+            for event in events:
+                payload = json.dumps(event, ensure_ascii=False, sort_keys=True)
+                cursor = db.execute("INSERT INTO records VALUES (?,?,?,?) ON CONFLICT(session,id) DO UPDATE SET at=excluded.at,payload=excluded.payload WHERE records.payload != excluded.payload",
+                                    (session, event["id"], event.get("at", ""), payload))
+                changed |= bool(cursor.rowcount)
         db.commit()
-    if changed:
+    if changed and notify:
         for hook in list(change_hooks):
             hook()
+    return changed
 
 
 #: The opening task is one record per session, not one per write: the id is
@@ -63,13 +86,21 @@ def capture_task(session, task, at=""):
     excerpt both read this field, and JSON quoting would put escaped newlines
     in front of the reader.
     """
+    event = task_event(task, at)
+    if event is not None:
+        remember(session, [event])
+    return event
+
+
+def task_event(task, at=""):
+    """The record :func:`capture_task` stores, without storing it; None for
+    an empty task. Split out so a caller batching many sessions' writes into
+    one :func:`remember_many` builds the same row."""
     text = str(task or "").strip()
     if not text:
         return None
-    event = {"id": OPENING_TASK_ID, "kind": "opening-task", "origin": "record",
-             "at": at or "", "text": text, "source": "opening-task", "needs_action": False}
-    remember(session, [event])
-    return event
+    return {"id": OPENING_TASK_ID, "kind": "opening-task", "origin": "record",
+            "at": at or "", "text": text, "source": "opening-task", "needs_action": False}
 
 
 def capture(session, kind, payload, at):

@@ -1,5 +1,6 @@
 import asyncio
 import json
+import threading
 from types import SimpleNamespace
 
 import pytest
@@ -9,6 +10,134 @@ from aiohttp.test_utils import TestClient, TestServer
 from claude_launcher import store
 from claude_launcher.daemon import observer, rag, search_anything, search_records, status_checks
 from test_rag import Endpoint, _start_endpoint, _cfg
+
+
+def _world(tmp_path, n_sessions=3):
+    """A registry of sessions with observer events, reports, daemon events
+    and opening tasks, on one board with a commented issue."""
+    root = tmp_path / "repo"
+    issue = {"id": "x-1", "title": "board", "description": "body",
+             "comments": [{"id": 1, "text": "comment needle"}]}
+
+    class Board:
+        async def issues(self, root): return [issue]
+        async def br(self, root, args): return [issue]
+
+    sessions = [SimpleNamespace(sdef=SimpleNamespace(name=f"s{i}", cwd=str(root), task=f"task needle {i}",
+                                                     issue=None, identity=f"w{i}", note=""),
+                                created_at="2026-09-23T00:00:00+00:00")
+                for i in range(n_sessions)]
+
+    async def resolve(cwd): return root
+
+    service = SimpleNamespace(manager=SimpleNamespace(list=lambda: list(sessions)), board=Board(),
+                              known_roots=lambda: [root], resolve_root=resolve)
+    obs = SimpleNamespace(
+        load_session=lambda n: {"events": [{"id": "o1", "kind": "observer", "text": "observed " + n, "at": "1"}],
+                                "summary": "summary " + n},
+        reports=SimpleNamespace(rows=lambda n: [{"id": "r1", "kind": "report", "text": "report " + n, "at": "2"}]),
+        session_events=SimpleNamespace(rows=lambda s: [{"id": "e1", "kind": "action",
+                                                        "text": "acted " + s.sdef.name, "at": "3"}]))
+    return search_anything.Corpus(service, obs), sessions
+
+
+def test_the_corpus_is_built_off_the_event_loop(tmp_path, monkeypatch):
+    """The event loop is the one every terminal's keystrokes wait on, and a
+    pass hashes every chunk of every issue, comment and record and writes
+    every session's records: 17 s on this machine, and 56% of the loop's busy
+    time in a profile taken during one (claunch-lol7h). The hashing and the
+    writes happen on a worker thread."""
+    corpus, _ = _world(tmp_path)
+    seen = {"hash": set(), "write": set()}
+    real_hash, real_write = rag.content_hash, search_records.remember_many
+
+    def spy_hash(*parts):
+        seen["hash"].add(threading.get_ident())
+        return real_hash(*parts)
+
+    def spy_write(batch, **kw):
+        seen["write"].add(threading.get_ident())
+        return real_write(batch, **kw)
+
+    monkeypatch.setattr(rag, "content_hash", spy_hash)
+    monkeypatch.setattr(search_records, "remember_many", spy_write)
+
+    async def run():
+        loop_thread = threading.get_ident()
+        docs = await corpus.docs()
+        return loop_thread, docs
+
+    loop_thread, docs = asyncio.run(run())
+    assert docs
+    assert seen["hash"] and loop_thread not in seen["hash"]
+    assert seen["write"] and loop_thread not in seen["write"]
+
+
+def test_a_pass_does_not_queue_another_pass_for_its_own_writes(tmp_path):
+    """The records a pass writes are read back later in the same pass, so
+    they are already in what it returns. Firing the change hook for them --
+    whose production handler is enqueue("all") -- queued a second full pass
+    that found nothing new: 26 hook calls on a twelve-session fixture before
+    this change, 0 after, with identical documents."""
+    corpus, _ = _world(tmp_path)
+    fired = []
+    hook = lambda: fired.append(1)
+    search_records.change_hooks.append(hook)
+    try:
+        docs = asyncio.run(corpus.docs())
+    finally:
+        search_records.change_hooks.remove(hook)
+    assert fired == []
+    texts = [d.chunks[0] for d in docs]
+    # ...and what it wrote is in what it returned.
+    for needle in ("observed s1", "report s1", "acted s1", "task needle 1"):
+        assert any(needle in t for t in texts), needle
+
+
+def test_another_writer_still_fires_the_change_hook():
+    """Only the corpus's own writes are quiet. An observer save or a report
+    elsewhere is news the index has not seen, and must queue a pass."""
+    fired = []
+    hook = lambda: fired.append(1)
+    search_records.change_hooks.append(hook)
+    try:
+        search_records.remember("s9", [{"id": "a", "text": "new", "at": "1"}])
+        assert fired == [1]
+        search_records.remember("s9", [{"id": "a", "text": "new", "at": "1"}])
+        assert fired == [1], "an unchanged row is not a change"
+    finally:
+        search_records.change_hooks.remove(hook)
+
+
+def test_one_connection_for_every_session_in_a_pass(tmp_path, monkeypatch):
+    """Three writes per registered session, each opening the database, was
+    hundreds of connections per pass on this machine."""
+    corpus, _ = _world(tmp_path, n_sessions=20)
+    opened = []
+    real = search_records.database
+
+    def counting():
+        opened.append(1)
+        return real()
+
+    monkeypatch.setattr(search_records, "database", counting)
+    asyncio.run(corpus.docs())
+    # One for the batched writes, one for reading the records back; the
+    # one-time import of pre-upgrade snapshots reads once more.
+    assert len(opened) <= 3, len(opened)
+
+
+def test_a_batch_applies_in_order_like_separate_calls():
+    """The batch replaces calls made one after another, so a later entry for
+    the same record wins, as the later call did."""
+    search_records.remember_many([
+        ("s1", [{"id": "k", "text": "first", "at": "1"}]),
+        ("s1", [{"id": "k", "text": "second", "at": "2"}]),
+        ("s2", []),
+    ], notify=False)
+    assert search_records.find("s1", "k")["text"] == "second"
+    assert search_records.rows("s2") == []
+    assert search_records.remember_many([], notify=False) is False
 
 
 def test_archive_survives_display_retention_and_updates():
