@@ -3100,7 +3100,12 @@ bot through `operator_inbox`, never its terminal, which only gets a one-line
 nudge. It may type into another session of its project with
 `operator_dispatch` only to relay an instruction of yours: the call names the
 message or answered ask it carries, and the relay is recorded in the feed.
-It never approves gates or answers other sessions' questions. HTTP:
+It never approves gates or answers other sessions' questions. When a
+session a card names moves by some other path — a gate approved on the
+dashboard, the session paused, a commit, a landing request, a merge — the
+daemon adds the change under that card: it appears in time order in the feed
+and again in the card's thread. The bot follows up on a card the same way
+(`reply_to` on `operator_post`/`operator_ask`). HTTP:
 `GET /api/operator?project=P` (feed, bound session, watched sessions),
 `GET /api/operator/pending`, `POST /api/operator/start {project, profile, model?, effort?}`,
 `POST /api/operator/message?project=P {text}`,

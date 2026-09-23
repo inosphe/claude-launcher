@@ -95,6 +95,47 @@ def progress_changes(before, after):
     return lines
 
 
+#: How a session's category reads in a thread line.
+CATEGORY_LABELS = {"running": "실행 중", "paused": "일시정지", "killed": "종료", "archived": "보관",
+                   None: "목록에 없음"}
+#: Cards (the bot's posts and asks that name sessions) whose sessions are
+#: followed; older cards keep the thread they have.
+TRACK_CARDS = 40
+#: Seconds between two follow-up reads of one project: the view polls every
+#: few seconds, and a board read per poll would be waste.
+TRACK_INTERVAL = 15.0
+
+
+def watch_of(category, gate, work):
+    """What a card follows about one of its sessions: its category, the cflow
+    gate it waits at (running sessions only; a stopped run waits on nobody)
+    and, when the board was read, its progress."""
+    reading = {"category": category}
+    if category == CATEGORY_RUNNING:
+        reading["gate"] = gate
+    if work is not None:
+        reading["progress"] = progress_of(work)
+    return reading
+
+
+def watch_changes(before, after):
+    """The thread lines for what moved between two ``watch_of`` readings.
+    A field only one of the two readings has is not compared: a board that
+    could not be read this time is not a change."""
+    lines = []
+    if before.get("category") != after.get("category"):
+        lines.append(f"상태: {CATEGORY_LABELS.get(before.get('category'), before.get('category'))}"
+                     f" → {CATEGORY_LABELS.get(after.get('category'), after.get('category'))}")
+    if "gate" in before and "gate" in after and before["gate"] != after["gate"]:
+        if before["gate"]:
+            lines.append(f"게이트 {before['gate']} 해소")
+        if after["gate"]:
+            lines.append(f"게이트 {after['gate']} 대기")
+    if "progress" in before and "progress" in after:
+        lines.extend(progress_changes(before["progress"], after["progress"]))
+    return lines
+
+
 def _text(value, limit, what="text"):
     if not isinstance(value, str) or not value.strip() or len(value) > limit:
         raise ValueError(f"{what} must contain 1..{limit} characters")
@@ -113,6 +154,8 @@ class Operators:
         self.work = work
         self.cache = {}
         self.nudging = set()
+        #: project -> loop time of its last follow-up read (``track``).
+        self.tracked = {}
 
     # -- storage -----------------------------------------------------------
     def path(self, project):
@@ -242,6 +285,65 @@ class Operators:
             log.debug("operator: work read failed", exc_info=True)
             return {}
 
+    async def track(self, project, *, force=False):
+        """Follow the sessions each recent card names, and when one of them
+        moved by some other path (paused, a gate cleared, committed, merged)
+        append an ``update`` entry under that card: it reads in time order in
+        the feed and in the card's thread (``parent``). The first reading of
+        a card is its baseline and says nothing. Returns the new entries."""
+        project = projects.normalize(project)
+        loop = asyncio.get_running_loop()
+        if not force and loop.time() - self.tracked.get(project, -TRACK_INTERVAL) < TRACK_INTERVAL:
+            return []
+        self.tracked[project] = loop.time()
+        data = self.state(project)
+        cards = [e for e in data["feed"] if e.get("kind") in ("post", "ask") and e.get("refs")
+                 and not e.get("parent")][-TRACK_CARDS:]
+        watch = data.get("watch") or {}
+        if not cards:
+            if watch:
+                data["watch"] = {}
+                self.save(project)
+            return []
+        members = {s.sdef.name: s for s in self.members(project)}
+        named = {r for card in cards for r in card["refs"]}
+        category = {n: session_category(members[n]) if n in members else None for n in named}
+        running = [members[n] for n in named if category[n] == CATEGORY_RUNNING]
+        try:
+            gates = await asyncio.to_thread(self.gates, running) if self.gates and running else []
+        except Exception:  # a run-state read failing must not stop the rest
+            log.debug("operator: gate read failed", exc_info=True)
+            gates = None
+        work = await self.work_of([members[n] for n in named if n in members])
+        waiting = {g.get("session"): g.get("step_id") for g in gates or []}
+        readings = {}
+        for n in named:
+            reading = watch_of(category[n], waiting.get(n), work.get(n) if work else None)
+            if gates is None:
+                reading.pop("gate", None)
+            readings[n] = reading
+        added, kept = [], {}
+        for card in cards:
+            seen = watch.get(card["id"]) or {}
+            now_seen = {}
+            for n in card["refs"]:
+                before = seen.get(n)
+                # A field not read this time keeps its last value; a gate is
+                # only a running session's, so it goes when the session stops.
+                now_seen[n] = {**(before or {}), **readings[n]}
+                if readings[n]["category"] != CATEGORY_RUNNING:
+                    now_seen[n].pop("gate", None)
+                lines = watch_changes(before, readings[n]) if before is not None else []
+                if lines:
+                    added.append({"kind": "update", "role": "system", "parent": card["id"],
+                                  "session": n, "text": "\n".join(lines)})
+            kept[card["id"]] = now_seen
+        data["watch"] = kept
+        entries = [self.append(project, entry) for entry in added]
+        if not entries:
+            self.save(project)
+        return entries
+
     def view(self, project, work=None):
         project = projects.normalize(project)
         data = self.state(project)
@@ -287,6 +389,21 @@ class Operators:
             raise ValueError(f"not a session of project {project!r}: {', '.join(unknown)}")
         return refs
 
+    def _parent(self, project, reply_to):
+        """The card a post continues (``reply_to``), which must be one of the
+        bot's own posts or asks in this project's feed; a reply to a reply
+        goes to that reply's card, so a thread is one level deep."""
+        if reply_to is None:
+            return None
+        if not isinstance(reply_to, str) or not reply_to:
+            raise ValueError("reply_to must be a feed entry id")
+        for entry in self.state(project)["feed"]:
+            if entry["id"] == reply_to:
+                if entry.get("kind") not in ("post", "ask", "update"):
+                    raise ValueError("reply_to must name one of the operator's posts or asks")
+                return entry.get("parent") or entry["id"]
+        raise ValueError("reply_to names no entry of this feed")
+
     def post(self, name, body):
         project = self.bound(name)
         if not isinstance(body, dict):
@@ -296,6 +413,9 @@ class Operators:
             raise ValueError("level must be one of " + ", ".join(LEVELS))
         payload = {"kind": "post", "role": "bot", "text": _text(body.get("text"), 4000),
                    "level": level, "refs": self._refs(project, body.get("refs"))}
+        parent = self._parent(project, body.get("reply_to"))
+        if parent:
+            payload["parent"] = parent
         found = self._idempotent(project, body.get("request_id"), payload)
         if found:
             return found
@@ -320,6 +440,9 @@ class Operators:
             raise ValueError("level must be one of " + ", ".join(LEVELS))
         payload = {"kind": "ask", "role": "bot", "type": kind, "text": _text(body.get("text"), 4000),
                    "choices": choices, "level": level, "refs": self._refs(project, body.get("refs"))}
+        parent = self._parent(project, body.get("reply_to"))
+        if parent:
+            payload["parent"] = parent
         found = self._idempotent(project, body.get("request_id"), payload)
         if found:
             return found
@@ -506,6 +629,7 @@ class Operators:
             seen[n] = now_progress
         if work:
             self.save(project)
+        await self.track(project)
         sessions = [{"name": n, "running": not s.exited, "category": category[n],
                      "status": s.info().get("status"), **progress_of(work.get(n))}
                     for n, s in members.items()]
@@ -529,6 +653,7 @@ def install(app, *, create=None, gates=None, work=None):
     async def view(request):
         project = projects.normalize(request.query.get("project") or projects.DEFAULT)
         shown = [s for s in ops.members(project) if session_category(s) in (CATEGORY_RUNNING, CATEGORY_PAUSED)]
+        await ops.track(project)
         return web.json_response(ops.view(project, await ops.work_of(shown)))
 
     async def pending(request):

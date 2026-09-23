@@ -17,6 +17,9 @@ REFS = {"type": "array", "items": {"type": "string"}, "maxItems": 20,
         "description": "Session names this item is about (must be sessions of your project). The UI links them."}
 LEVEL = {"type": "string", "enum": ["info", "attention", "urgent"],
          "description": "info = worth knowing; attention = the user should look soon; urgent = the user must act now (raises a notification)."}
+REPLY_TO = {"type": "string",
+            "description": "Feed id of your earlier post or ask this one follows up (a status that moved, a result). "
+                           "The UI shows it as a reply in that card's thread as well as in time order."}
 REQUEST_ID = {"type": "string", "description": "Stable unique id. Reuse it on retry to avoid a duplicate."}
 
 TOOLS = [
@@ -32,7 +35,7 @@ TOOLS = [
                     "matters; routine progress and message logistics are noise.",
      "inputSchema": {"type": "object", "properties": {
          "text": {"type": "string", "description": "Markdown, <=4000 chars. Lead with the point; cite session names, ids, hashes."},
-         "level": LEVEL, "refs": REFS, "request_id": REQUEST_ID}, "required": ["text", "request_id"]}},
+         "level": LEVEL, "refs": REFS, "reply_to": REPLY_TO, "request_id": REQUEST_ID}, "required": ["text", "request_id"]}},
     {"name": "operator_ask",
      "description": "Ask the user for a decision in the Operator feed. type=approve shows approve/deny buttons, "
                     "type=choice shows `choices` as buttons, type=text shows a text box; every type also takes a note. "
@@ -42,7 +45,7 @@ TOOLS = [
          "text": {"type": "string", "description": "The question with the facts needed to answer it, <=4000 chars."},
          "type": {"type": "string", "enum": ["approve", "choice", "text"]},
          "choices": {"type": "array", "items": {"type": "string"}, "minItems": 2, "maxItems": 10},
-         "level": LEVEL, "refs": REFS, "request_id": REQUEST_ID}, "required": ["text", "type", "request_id"]}},
+         "level": LEVEL, "refs": REFS, "reply_to": REPLY_TO, "request_id": REQUEST_ID}, "required": ["text", "type", "request_id"]}},
     {"name": "operator_inbox",
      "description": "Read the user's new input: messages typed in the Operator tab and answers to your asks. "
                     "Each item is returned once; call it whenever you are nudged.",
@@ -77,9 +80,9 @@ def call_tool(name, args):
     if name == "operator_inbox":
         return client.get(base + "/inbox")
     if name == "operator_post":
-        return client.post(base + "/post", {k: args.get(k) for k in ("text", "level", "refs", "request_id") if k in args})
+        return client.post(base + "/post", {k: args.get(k) for k in ("text", "level", "refs", "reply_to", "request_id") if k in args})
     if name == "operator_ask":
-        return client.post(base + "/ask", {k: args.get(k) for k in ("text", "type", "choices", "level", "refs", "request_id") if k in args})
+        return client.post(base + "/ask", {k: args.get(k) for k in ("text", "type", "choices", "level", "refs", "reply_to", "request_id") if k in args})
     if name == "operator_dispatch":
         return client.post(base + "/dispatch", {k: args.get(k) for k in ("target", "text", "on_behalf_of")})
     raise OperatorMcpError("unknown Operator tool")

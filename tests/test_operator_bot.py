@@ -234,6 +234,57 @@ def test_poll_reports_progress_changes_once(world):
     assert asyncio.run(restored.poll("op"))["progress"] == []
 
 
+def test_reply_to_threads_a_post_under_its_card(world):
+    card = world.ops.post("op", {"text": "w1 gate", "refs": ["w1"], "request_id": "c1"})
+    reply = world.ops.post("op", {"text": "cleared", "reply_to": card["id"], "request_id": "c2"})
+    assert reply["parent"] == card["id"]
+    # a reply to a reply joins the same card: a thread is one level deep
+    again = world.ops.ask("op", {"text": "land?", "type": "approve", "reply_to": reply["id"], "request_id": "c3"})
+    assert again["parent"] == card["id"]
+    with pytest.raises(ValueError):
+        world.ops.post("op", {"text": "x", "reply_to": "nope", "request_id": "c4"})
+    world.ops.state("default")["feed"].append({"id": "u1", "kind": "user", "text": "hi"})
+    with pytest.raises(ValueError):
+        world.ops.post("op", {"text": "x", "reply_to": "u1", "request_id": "c5"})
+
+
+def test_track_threads_what_moved_by_another_path(world):
+    progress = {"w1": {"checks": [{"name": "C", "question": "커밋 되었는가?", "answer": "no"}],
+                       "issue": {"id": "cl-1", "status": "in_progress", "title": "t"}}}
+
+    async def work(sessions):
+        return {s.sdef.name: progress[s.sdef.name] for s in sessions if s.sdef.name in progress}
+
+    world.ops.work = work
+    world.gates.append({"session": "w1", "step_id": "commit"})
+    card = world.ops.post("op", {"text": "w1 waits at commit", "level": "urgent", "refs": ["w1", "w2"],
+                                 "request_id": "c1"})
+    world.ops.post("op", {"text": "no sessions named", "request_id": "c2"})
+    assert asyncio.run(world.ops.track("default")) == []  # the baseline says nothing
+    assert asyncio.run(world.ops.track("default")) == []  # throttled, and nothing moved anyway
+    # w1: the gate was approved elsewhere, committed, landing requested; w2 paused
+    world.gates.clear()
+    progress["w1"] = {"checks": [{"name": "C", "question": "커밋 되었는가?", "answer": "yes"}],
+                      "issue": {"id": "cl-1", "status": "in_review", "title": "t"}}
+    world.sessions["w2"].exited = True
+    world.sessions["w2"].paused_at = "2026-09-23T01:00:00+00:00"
+    added = asyncio.run(world.ops.track("default", force=True))
+    assert [(e["kind"], e["parent"], e["session"], e["text"].split("\n")) for e in added] == [
+        ("update", card["id"], "w1", ["게이트 commit 해소", "커밋 되었는가? → yes", "이슈 cl-1: 머지 요청"]),
+        ("update", card["id"], "w2", ["상태: 실행 중 → 일시정지"])]
+    # in the feed, in time order, after the card
+    feed = world.ops.state("default")["feed"]
+    assert [e["id"] for e in feed][-2:] == [e["id"] for e in added]
+    assert asyncio.run(world.ops.track("default", force=True)) == []  # said once
+    # a board that cannot be read is not a change, and the baseline survives a restart
+    world.ops.work = None
+    assert asyncio.run(world.ops.track("default", force=True)) == []
+    restored = operator_bot.Operators(world.root, world.ops.manager, world.observer,
+                                      lambda members: [], work)
+    progress["w1"]["issue"] = {"id": "cl-1", "status": "closed", "title": "t"}
+    assert [e["text"] for e in asyncio.run(restored.track("default"))] == ["이슈 cl-1: 닫힘"]
+
+
 def test_view_panel_skips_exited_and_counts_questions(world):
     world.sessions["w2"].exited = True
     world.observer.rows = {"w1": {"events": [{"question": True, "answer": None, "at": "x"}], "summary": "s"}}

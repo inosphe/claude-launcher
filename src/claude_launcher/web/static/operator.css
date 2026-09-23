@@ -98,3 +98,14 @@ body.operator-page .operator-fab { display: none; }
 .operator-chip-no { background: #2d2a1f; color: #d29922; }
 .operator-chip-issue-in_review { background: #3d2e12; color: #f0b43c; }
 .operator-chip-issue-closed { background: #1f2a37; color: #8dcaff; }
+
+/* Follow-ups: in time order as a compact line that names its card, and
+   again as the card's thread (operator.js renderFollowup / renderThread). */
+.operator-followup { padding: 6px 12px; background: #161a20; border-style: dashed; }
+.operator-followup .operator-update, .operator-thread .operator-update { margin: 4px 0 0; white-space: pre-line; }
+.operator-parent { color: #8b949e; text-decoration: none; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.operator-parent:hover { color: #58a6ff; }
+.operator-thread { list-style: none; margin: 8px 0 0; padding: 6px 0 0 10px; border-top: 1px solid #2a2e36; border-left: 2px solid #33506e; display: flex; flex-direction: column; gap: 6px; font-size: 12px; }
+.operator-thread time { color: #8b949e; font-size: 11px; }
+.operator-thread .operator-text p { margin: 2px 0; }
+.operator-flash { outline: 2px solid #58a6ff; outline-offset: 2px; }

@@ -40,7 +40,7 @@ function check(label, actual, expected) {
 const ctx = {};
 vm.createContext(ctx);
 for (const name of ["openAsks", "freshUrgent", "answerLine", "deliveryLabel", "sessionBadge", "startChoices", "startBody",
-                    "dotClass", "progressChips"]) {
+                    "dotClass", "progressChips", "threadsOf", "cardLine"]) {
   vm.runInContext(slice(src, name), ctx);
 }
 vm.runInContext(src.match(/^const STAGES = .*$/m)[0].replace("const ", "var "), ctx);
@@ -82,6 +82,21 @@ check("session labels open the list's card on hover and drop it when rebuilt",
       [src.includes("scheduleSessionCardTip(a, name)"), src.includes("tipAnchor && !tipAnchor.isConnected")], [true, true]);
 check("app.js offers the grid's hover card for any anchor, inside an open dialog too",
       [app.includes("function showSessionCardTip(anchor, name"), app.includes('anchor.closest("dialog[open]")')], [true, true]);
+
+const threaded = [
+  { id: "c1", kind: "post", text: "## w1 waits\nat commit" },
+  { id: "u1", kind: "update", parent: "c1", session: "w1", text: "게이트 commit 해소" },
+  { id: "c2", kind: "post", text: "other" },
+  { id: "r1", kind: "post", parent: "c1", text: "landed" },
+  { id: "o1", kind: "update", parent: "gone", text: "card trimmed" },
+];
+check("follow-ups group under their card, oldest first; an orphan has no thread",
+      [...ctx.threadsOf(threaded)].map(([k, v]) => [k, v.map((e) => e.id)]), [["c1", ["u1", "r1"]]]);
+check("a card reads as its first line without markdown marks", ctx.cardLine(threaded[0]), "w1 waits");
+check("a long card line is cut", ctx.cardLine({ text: "x".repeat(80) }).length, 60);
+check("the feed lists a follow-up in time order and again under its card",
+      [src.includes("if (e.parent) { list.append(renderFollowup(e, byId.get(e.parent))); continue; }"),
+       src.includes("item.append(renderThread(threads.get(e.id)))")], [true, true]);
 
 const options = [{value: "a:claude", harness: "claude"}, {value: "a:pi", harness: "pi"}];
 const caps = {claude: {models: ["sonnet", "opus"], efforts: ["high"]}, pi: {models: [], efforts: []}};

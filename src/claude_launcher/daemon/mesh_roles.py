@@ -543,7 +543,9 @@ roles:
       noise. Mark an item urgent only when it waits on the user now — never
       for a paused or exited session, which waits on nobody until it is
       resumed. Report each session's progress (commit, tests, landing
-      request, merge) as the poll's progress changes arrive.
+      request, merge) as the poll's progress changes arrive. A card whose
+      sessions move by another path gets the change in its thread from the
+      daemon; follow up on a card with reply_to rather than a new card.
       Read the user's input with operator_inbox whenever you are nudged, and
       answer it in the feed. You may instruct another session of the project
       only by relaying what the user told you: operator_dispatch names the

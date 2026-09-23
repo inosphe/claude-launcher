@@ -94,6 +94,26 @@ function progressChips(row) {
   }
   return chips;
 }
+/* Follow-ups by card: an entry with a `parent` (the daemon's update on a
+   session the card names, or the bot's reply_to) is listed under that card
+   as well as in time order. Children whose card was trimmed away stay in
+   the time order only. */
+function threadsOf(feed) {
+  const ids = new Set((feed || []).map(e => e.id));
+  const threads = new Map();
+  for (const e of feed || []) {
+    if (!e.parent || !ids.has(e.parent)) continue;
+    if (!threads.has(e.parent)) threads.set(e.parent, []);
+    threads.get(e.parent).push(e);
+  }
+  return threads;
+}
+/* The card a follow-up points back to, as one short line. */
+function cardLine(card) {
+  const first = String(card?.text || "").split("\n").find(line => line.trim()) || "";
+  const line = first.replace(/^[#>*\-\s]+/, "").trim();
+  return line.length > 60 ? line.slice(0, 59) + "…" : line;
+}
 function operatorLabel(op) {
   if (!op) return "";
   return [op.harness, op.model].filter(Boolean).join(" · ");
@@ -293,8 +313,12 @@ function renderFeed(h) {
   if (!feed.length) {
     list.append(node("li", data?.operator ? "아직 게시된 내용이 없습니다." : "이 프로젝트에는 Operator가 없습니다. 위에서 시작하십시오.", "operator-empty"));
   }
+  const threads = threadsOf(feed);
+  const byId = new Map(feed.map(e => [e.id, e]));
   for (const e of feed) {
+    if (e.parent) { list.append(renderFollowup(e, byId.get(e.parent))); continue; }
     const item = node("li", null, `operator-item operator-${e.kind}` + (e.level ? ` operator-level-${e.level}` : ""));
+    item.dataset.id = e.id;
     const meta = node("div", null, "operator-meta");
     const who = e.role === "user" ? "나" : e.role === "system" ? "system" : "Operator";
     meta.append(node("strong", who));
@@ -319,9 +343,59 @@ function renderFeed(h) {
       item.append(refs);
     }
     if (e.kind === "ask") renderAsk(item, e);
+    if (threads.has(e.id)) item.append(renderThread(threads.get(e.id)));
     list.append(item);
   }
   if (atBottom || !h.scrolled) { list.scrollTop = list.scrollHeight; h.scrolled = true; }
+}
+
+/* A follow-up in time order: one compact line that names its card, which
+   scrolls to the card and marks it. */
+function renderFollowup(e, card) {
+  const item = node("li", null, `operator-item operator-followup operator-${e.kind}`);
+  const meta = node("div", null, "operator-meta");
+  meta.append(node("strong", e.role === "bot" ? "Operator" : "system"));
+  const time = node("time", new Date(e.at).toLocaleTimeString()); time.dateTime = e.at; meta.append(time);
+  if (card) {
+    const back = node("a", `↳ ${cardLine(card) || "원래 카드"}`, "operator-parent");
+    back.href = "#";
+    back.onclick = ev => {
+      ev.preventDefault();
+      const target = item.parentElement?.querySelector(`li[data-id="${CSS.escape(card.id)}"]`);
+      if (!target) return;
+      target.scrollIntoView({block: "center"});
+      target.classList.add("operator-flash");
+      setTimeout(() => target.classList.remove("operator-flash"), 1600);
+    };
+    meta.append(back);
+  }
+  item.append(meta, followupBody(e));
+  if (e.kind === "ask") renderAsk(item, e);
+  return item;
+}
+function followupBody(e) {
+  if (e.kind === "update") {
+    const p = node("p", null, "operator-update");
+    if (e.session) p.append(sessionLink(e.session), " ");
+    p.append(node("span", e.text));
+    return p;
+  }
+  const body = node("div", null, "operator-text");
+  if (typeof mdInto === "function") mdInto(body, e.text); else body.textContent = e.text;
+  return body;
+}
+/* The same follow-ups under their card, oldest first. */
+function renderThread(children) {
+  const thread = node("ol", null, "operator-thread");
+  thread.setAttribute("aria-label", `후속 ${children.length}건`);
+  for (const c of children) {
+    const li = node("li");
+    const time = node("time", new Date(c.at).toLocaleTimeString()); time.dateTime = c.at;
+    li.append(time, followupBody(c));
+    if (c.kind === "ask") li.append(node("p", c.answer ? `답변: ${answerLine(c)}` : "답변 대기", "operator-answer"));
+    thread.append(li);
+  }
+  return thread;
 }
 
 function renderSide(h) {
@@ -485,5 +559,6 @@ refreshBadge();
 badgeTimer = setInterval(() => { if (document.visibilityState === "visible") refreshBadge(); }, 15000);
 
 return {open, stop, openModal, refresh,
-        _test: {openAsks, freshUrgent, answerLine, deliveryLabel, sessionBadge, startChoices, startBody, dotClass, progressChips}};
+        _test: {openAsks, freshUrgent, answerLine, deliveryLabel, sessionBadge, startChoices, startBody, dotClass, progressChips,
+                threadsOf, cardLine}};
 })();
