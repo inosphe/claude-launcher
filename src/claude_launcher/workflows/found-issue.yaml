@@ -74,8 +74,11 @@ steps:
         때만 spawn이다: (1) 이 회차 브랜치와 파일·영역이 겹치지 않는다,
         (2) 규격이 지금 서 있다, (3) 이 세션의 컨텍스트가 필요 없다, (4)
         부모 회차의 착지 전에 끝나는 크기다 — 그리고 `children`이 남은
-        슬롯을 답한다. 하나라도 아니면 pool이다: wrapup의 생성 이슈 정산이
-        self/spawn/pool로 가른다. reason에 넷 각각의 답을 적는다.
+        슬롯을 답한다. 하나라도 아니면 pool이다: 지금은 assignee 없이 두고,
+        wrapup의 생성 이슈 정산이 살아 있는 자식(spawn)이나 이 세션
+        자신(self)에게 배정해 같은 루프 안에서 처리한다 — backlog로 남는
+        것은 착수할 수 없는 것뿐이다(claunch-034c4). reason에 넷 각각의
+        답을 적는다.
       chooser: agent
       require_reason: true
       options:
@@ -83,7 +86,7 @@ steps:
           description: 넷 다 참 — 자식에게 넘긴다
           next: handoff
         pool:
-          description: 하나라도 거짓 — 풀에 둔다(assignee 없음), 정산은 wrapup에서
+          description: 하나라도 거짓 — 지금은 assignee 없이 둔다, 배정은 wrapup 정산에서(자식 또는 자기)
 
   handoff:
     title: 자식에게 넘기기
