@@ -4639,6 +4639,8 @@ a.window-owner:hover { color: #79c0ff; text-decoration: underline; }
 .search-anything button:disabled { opacity: .5; cursor: wait; }
 .search-anything .search-anything-close { width: 26px; height: 26px; padding: 0; font-size: 18px; line-height: 24px; border-color: transparent; background: transparent; color: #9da5b0; }
 .search-anything-notice { margin-top: 10px; color: #9da5b0; font-size: 11px; flex: none; }
+.search-anything .search-anything-apply { align-self: flex-start; margin-top: 6px; padding: 3px 10px; font-size: 11px; flex: none; }
+.search-anything .search-anything-apply[hidden] { display: none; }
 .search-anything-results { overflow-y: auto; min-height: 0; overscroll-behavior: contain; }
 .search-anything-result { border-top: 1px solid #2a2e36; margin-top: 12px; padding-top: 12px; overflow-wrap: anywhere; }
 .search-anything-result > a { display: block; font-size: 13px; font-weight: 600; margin: 4px 0; text-decoration: none; }

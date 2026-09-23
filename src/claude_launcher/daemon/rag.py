@@ -67,7 +67,7 @@ from array import array
 from collections import OrderedDict
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterable, List, NamedTuple, Optional, Tuple
+from typing import Any, AsyncIterator, Callable, Dict, Iterable, List, NamedTuple, Optional, Tuple
 
 import aiohttp
 
@@ -1341,7 +1341,7 @@ class RagService:
             self._qvecs.popitem(last=False)
         return vec, False
 
-    async def search(
+    async def search_stream(
         self,
         kind: str,
         query: str,
@@ -1350,8 +1350,20 @@ class RagService:
         limit: int = 10,
         rerank: bool = True,
         wait: float = 2.0,
-    ) -> dict:
-        """Rank the corpus for ``query``; the answer names its own coverage."""
+    ) -> AsyncIterator[Tuple[str, dict]]:
+        """Answer ``query`` in two stages, as ``(event, view)`` pairs.
+
+        ``ranked`` comes first: the vector ranking with the exact-match head,
+        which the zvec index answers in tens of milliseconds. ``reranked``
+        follows when the reranker has scored the head of that list -- 1-11 s
+        on the measured endpoint, which serves several models at once, so the
+        wait is not something the daemon can shorten. A reranker that fails
+        after ``ranked`` went out yields ``error`` carrying the same ranked
+        view plus the message: the first answer stays usable.
+
+        ``ranked`` says whether a second event is coming (``rerank_pending``),
+        so a reader knows whether to keep listening.
+        """
         if kind not in KINDS:
             raise ValueError(f"unknown corpus {kind!r}")
         cfg = self.config()
@@ -1386,34 +1398,94 @@ class RagService:
             else:
                 order.remove(doc_id)
                 order.insert(0, doc_id)
-        reranked = False
-        warnings = []
+        timing = {"embed_ms": embed_ms, "rerank_ms": None, "embed_cached": embed_cached}
+        pending = bool(rerank and cfg.get("rerank_model") and order)
+        first = self._search_view(
+            kind, query, root, index, prog, order, scores, lexical, {},
+            limit=limit, timing=timing, pending=pending,
+        )
+        yield "ranked", first
+        if not pending:
+            return
+        # ``rerank_top`` is the reranker's budget, not a floor under the
+        # page size: a screen that asks for 30 results must not silently
+        # widen a 12-document rerank to 30 (0.2-0.35 s each on the
+        # measured endpoint). Candidates past it keep their vector order
+        # behind the reranked head.
+        top = order[: max(1, int(cfg.get("rerank_top") or limit))]
+        texts = [self._rerank_text(index, doc_id) for doc_id in top]
+        started = time.monotonic()
+        try:
+            pairs = await client.rerank(query, texts, len(top))
+        except RagError as exc:
+            timing = {**timing, "rerank_ms": int((time.monotonic() - started) * 1000)}
+            failed = {**first, "rerank_pending": False, "timing": timing, "error": str(exc)}
+            failed["warnings"] = first["warnings"] + [
+                "Rerank unavailable; showing embedding and exact-match results."
+            ]
+            yield "error", failed
+            return
+        timing = {**timing, "rerank_ms": int((time.monotonic() - started) * 1000)}
         rerank_scores: Dict[str, float] = {}
-        rerank_ms = None
-        if rerank and cfg.get("rerank_model") and order:
-            # ``rerank_top`` is the reranker's budget, not a floor under the
-            # page size: a screen that asks for 30 results must not silently
-            # widen a 12-document rerank to 30 (0.2-0.35 s each on the
-            # measured endpoint). Candidates past it keep their vector order
-            # behind the reranked head.
-            top = order[: max(1, int(cfg.get("rerank_top") or limit))]
-            texts = [self._rerank_text(index, doc_id) for doc_id in top]
-            started = time.monotonic()
-            try:
-                pairs = await client.rerank(query, texts, len(top))
-            except RagError:
+        for idx, score in pairs:
+            if 0 <= idx < len(top):
+                rerank_scores[top[idx]] = score
+        if rerank_scores:
+            head = set(top)
+            order = sorted(top, key=lambda d: -rerank_scores.get(d, -1.0)) + [
+                d for d in order if d not in head
+            ]
+        yield "reranked", self._search_view(
+            kind, query, root, index, prog, order, scores, lexical, rerank_scores,
+            limit=limit, timing=timing, pending=False,
+        )
+
+    async def search(
+        self,
+        kind: str,
+        query: str,
+        *,
+        root: Optional[Path] = None,
+        limit: int = 10,
+        rerank: bool = True,
+        wait: float = 2.0,
+    ) -> dict:
+        """Rank the corpus for ``query``; the answer names its own coverage.
+
+        The last value :meth:`search_stream` yields, for a caller that wants
+        one answer. A reranker failure raises for a corpus of one kind and
+        falls back to the ranked list for ``all``, which mixes kinds and so
+        has an exact-match head worth showing on its own.
+        """
+        last: Optional[dict] = None
+        async for event, view in self.search_stream(
+            kind, query, root=root, limit=limit, rerank=rerank, wait=wait,
+        ):
+            if event == "error":
                 if kind != "all":
-                    raise
-                pairs = []
-                warnings.append("Rerank unavailable; showing embedding and exact-match results.")
-            rerank_ms = int((time.monotonic() - started) * 1000)
-            if pairs:
-                reranked = True
-                for idx, score in pairs:
-                    if 0 <= idx < len(top):
-                        rerank_scores[top[idx]] = score
-                scored_top = sorted(top, key=lambda d: -rerank_scores.get(d, -1.0))
-                order = scored_top + [d for d in order if d not in set(top)]
+                    raise RagError(view["error"])
+                view = {k: v for k, v in view.items() if k != "error"}
+            last = view
+        assert last is not None  # search_stream always yields ``ranked`` first
+        return last
+
+    def _search_view(
+        self,
+        kind: str,
+        query: str,
+        root: Optional[Path],
+        index: "VectorIndex",
+        prog: "Progress",
+        order: List[str],
+        scores: Dict[str, float],
+        lexical: set,
+        rerank_scores: Dict[str, float],
+        *,
+        limit: int,
+        timing: dict,
+        pending: bool,
+    ) -> dict:
+        """One answer to a search, from an ordering of the index's ids."""
         results = []
         for doc_id in order[:limit]:
             entry = index.entries.get(doc_id)
@@ -1437,10 +1509,11 @@ class RagService:
             "query": query,
             "root": str(root) if root else None,
             "results": results,
-            "reranked": reranked,
-            "warnings": warnings,
+            "reranked": bool(rerank_scores),
+            "rerank_pending": pending,
+            "warnings": [],
             "index": prog.view(),
-            "timing": {"embed_ms": embed_ms, "rerank_ms": rerank_ms, "embed_cached": embed_cached},
+            "timing": dict(timing),
         }
 
     def _live_states(self, rows: List[dict]) -> None:

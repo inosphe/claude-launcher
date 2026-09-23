@@ -1,4 +1,5 @@
 import asyncio
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -317,4 +318,163 @@ def test_rerank_candidates_are_cut_to_rerank_chars(tmp_path):
             await service.shutdown()
             await server.close()
 
+    asyncio.run(run())
+
+
+def _stream_corpus(service):
+    """Three records in the unified corpus: enough for the reranker to reorder."""
+    async def docs():
+        out = []
+        out += search_anything.documents("a", "zebra notes", "relay stripes", kind="checks")
+        out += search_anything.documents("b", "relay board", "relay relay relay", kind="checks")
+        out += search_anything.documents("c", "other record", "relay once", kind="checks")
+        return out
+    service.all_docs = docs
+
+
+def test_search_stream_answers_ranked_before_the_reranker_returns(tmp_path):
+    """The first answer does not wait on the reranker.
+
+    The reranker is the slow half of a search: 1.2-11 s on the live endpoint
+    against 43-104 ms for the vector ranking (claunch-1sszr). This holds the
+    reranker until the ranked answer has been read, so the test fails if the
+    stream ever waits for it before yielding.
+    """
+    async def run():
+        endpoint = Endpoint()
+        server = await _start_endpoint(endpoint)
+        cfg = _cfg(server)
+        service = rag.RagService(config=lambda: cfg, root_dir=tmp_path / "index")
+        _stream_corpus(service)
+        gate = asyncio.Event()
+
+        class HeldRerank(rag.RagClient):
+            async def rerank(self, *args):
+                await gate.wait()
+                return await super().rerank(*args)
+
+        service._client_factory = HeldRerank
+        try:
+            await service.search("all", "relay", wait=10, rerank=False)  # build the index
+            embeds = len(endpoint.embed_calls)
+            stream = service.search_stream("all", "relay", wait=10)
+            event, ranked = await asyncio.wait_for(stream.__anext__(), 5)
+            assert event == "ranked"
+            assert ranked["results"] and ranked["rerank_pending"] is True
+            assert ranked["reranked"] is False and ranked["timing"]["rerank_ms"] is None
+            assert not any("rerank_score" in row for row in ranked["results"])
+            assert not endpoint.rerank_calls
+            gate.set()
+            event, reranked = await asyncio.wait_for(stream.__anext__(), 5)
+            assert event == "reranked"
+            assert reranked["reranked"] is True and reranked["rerank_pending"] is False
+            assert reranked["timing"]["rerank_ms"] is not None
+            assert {r["id"] for r in reranked["results"]} == {r["id"] for r in ranked["results"]}
+            with pytest.raises(StopAsyncIteration):
+                await stream.__anext__()
+            # One query embedding serves both answers.
+            assert len(endpoint.embed_calls) <= embeds + 1
+        finally:
+            await service.shutdown()
+            await server.close()
+    asyncio.run(run())
+
+
+def test_search_stream_keeps_the_ranked_answer_when_the_reranker_fails(tmp_path):
+    """A reranker failure after ``ranked`` went out is an ``error`` event that
+    carries the same results, so a page keeps what it is showing; ``search()``
+    keeps its old contract on top of the stream (fall back for ``all``)."""
+    async def run():
+        endpoint = Endpoint()
+        server = await _start_endpoint(endpoint)
+        cfg = _cfg(server)
+        service = rag.RagService(config=lambda: cfg, root_dir=tmp_path / "index")
+        _stream_corpus(service)
+
+        class FailedRerank(rag.RagClient):
+            async def rerank(self, *args):
+                raise rag.RagError("provider rerank unavailable")
+
+        try:
+            await service.search("all", "relay", wait=10, rerank=False)
+            service._client_factory = FailedRerank
+            events = [e async for e in service.search_stream("all", "relay", wait=10)]
+            assert [name for name, _ in events] == ["ranked", "error"]
+            ranked, failed = events[0][1], events[1][1]
+            assert failed["results"] == ranked["results"]
+            assert failed["error"] == "provider rerank unavailable"
+            assert failed["warnings"] and failed["rerank_pending"] is False
+            fallback = await service.search("all", "relay", wait=10)
+            assert "error" not in fallback and fallback["warnings"] and not fallback["reranked"]
+        finally:
+            await service.shutdown()
+            await server.close()
+    asyncio.run(run())
+
+
+def test_search_without_a_reranker_streams_one_event(tmp_path):
+    """No reranker configured: ``ranked`` says nothing else is coming and the
+    stream ends there."""
+    async def run():
+        endpoint = Endpoint()
+        server = await _start_endpoint(endpoint)
+        cfg = _cfg(server, rerank_model="")
+        service = rag.RagService(config=lambda: cfg, root_dir=tmp_path / "index")
+        _stream_corpus(service)
+        try:
+            events = [e async for e in service.search_stream("all", "relay", wait=10)]
+            assert [name for name, _ in events] == ["ranked"]
+            assert events[0][1]["rerank_pending"] is False
+            assert not endpoint.rerank_calls
+        finally:
+            await service.shutdown()
+            await server.close()
+    asyncio.run(run())
+
+
+def _read_sse(text):
+    """``[(event, data)]`` from a server-sent event body."""
+    out = []
+    for block in text.replace("\r\n", "\n").split("\n\n"):
+        fields = dict(line.split(": ", 1) for line in block.splitlines() if ": " in line)
+        if "event" in fields:
+            out.append((fields["event"], json.loads(fields["data"])))
+    return out
+
+
+def test_search_stream_route_speaks_server_sent_events(tmp_path):
+    """``GET /api/search/stream``: two events in order on one response; a
+    request that fails validation is plain JSON with the status the JSON
+    route uses, before any stream starts."""
+    from claude_launcher.daemon import api
+
+    async def run():
+        endpoint = Endpoint()
+        server = await _start_endpoint(endpoint)
+        cfg = _cfg(server, watch_interval=0)
+        store.save({"rag": cfg})
+        service = rag.RagService(root_dir=tmp_path / "index")
+        _stream_corpus(service)
+        app = web.Application()
+        app["rag"] = service
+        app.router.add_get("/api/search/stream", api.h_search_stream)
+        client = TestClient(TestServer(app))
+        await client.start_server()
+        try:
+            response = await client.get("/api/search/stream",
+                                        params={"q": "relay", "kind": "all", "wait": "10"})
+            assert response.status == 200
+            assert response.headers["Content-Type"].startswith("text/event-stream")
+            events = _read_sse(await response.text())
+            assert [name for name, _ in events] == ["ranked", "reranked"]
+            assert events[0][1]["rerank_pending"] is True
+            assert events[1][1]["reranked"] is True
+            response = await client.get("/api/search/stream", params={"q": "", "kind": "all"})
+            assert response.status == 400 and (await response.json())["error"] == "q is required"
+            response = await client.get("/api/search/stream", params={"q": "x", "kind": "nope"})
+            assert response.status == 400
+        finally:
+            await service.shutdown()
+            await client.close()
+            await server.close()
     asyncio.run(run())

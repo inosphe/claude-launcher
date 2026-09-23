@@ -33,10 +33,22 @@ const server = http.createServer(async (req,res) => {
   if (req.url === '/search-anything.js' || req.url === '/style.css') {
     res.setHeader('Content-Type',req.url.endsWith('.js')?'application/javascript':'text/css'); res.end(fs.readFileSync(path.join(root,req.url.slice(1)))); return;
   }
-  res.setHeader('Content-Type','application/json');
-  if (req.method === 'PUT' || req.method === 'POST') { let text=''; for await(const part of req) text+=part; writes.push({url:req.url,body:JSON.parse(text)}); }
-  if(req.url.startsWith('/api/search?')) {
+  if(req.url.startsWith('/api/search/stream?')) {
+    // The daemon's answer is two server-sent events: the vector ranking at
+    // once, then the reranker's order (or an error) when it comes back.
+    res.setHeader('Content-Type','text/event-stream; charset=utf-8');
+    const send = (event, data) => res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
     const q=new URL(req.url,'http://local').searchParams.get('q');
+    if(q==='rerank-offer') {
+      // The reranker reverses the ranked order. The page must keep the ranked
+      // list until the reader applies the new one.
+      const first={id:'r1',title:'first',kind:'checks',excerpt:'',sessions:[],href:'#/a'};
+      const second={id:'r2',title:'second',kind:'checks',excerpt:'',sessions:[],href:'#/b'};
+      send('ranked',{results:[first,second],index:{indexed:2,total:2},warnings:[],rerank_pending:true});
+      await new Promise(resolve=>setTimeout(resolve,200));
+      send('reranked',{results:[second,first],index:{indexed:2,total:2},warnings:[],reranked:true,rerank_pending:false});
+      res.end(); return;
+    }
     if(q==='slow') await new Promise(resolve=>setTimeout(resolve,250));
     const at = q === 'invalid-time' ? 'invalid' : q === 'no-time' ? '' : new Date(now - 5 * 60000).toISOString();
     // A session and a record about sessions, as the daemon sends them: the
@@ -55,8 +67,12 @@ const server = http.createServer(async (req,res) => {
     // what tells that name apart from the one-kind case.
     const board={id:'r2',title:q,kind:'beads',at,excerpt:'보드 항목',sessions:[{name:'s2',status:'busy'}],href:'#/beads/claunch-b1'};
     const results = q === 'only-session' ? [session] : q === 'mixed' ? [session, record, board] : [session, record];
-    res.end(JSON.stringify({results,index:{indexed:1,total:1},warnings:['rerank unavailable']})); return;
+    send('ranked',{results,index:{indexed:1,total:1},warnings:[],rerank_pending:true});
+    send('error',{results,index:{indexed:1,total:1},warnings:['rerank unavailable'],error:'rerank unavailable',rerank_pending:false});
+    res.end(); return;
   }
+  res.setHeader('Content-Type','application/json');
+  if (req.method === 'PUT' || req.method === 'POST') { let text=''; for await(const part of req) text+=part; writes.push({url:req.url,body:JSON.parse(text)}); }
   if(req.url==='/api/rag/settings') {res.end(JSON.stringify(cfg));return;}
   if(req.url==='/api/rag/test') {res.end(JSON.stringify({ok:true,dimensions:2560,rerank:true}));return;}
   res.end(JSON.stringify({text:'원문 기록',session:'s1'}));
@@ -150,8 +166,22 @@ const server = http.createServer(async (req,res) => {
     assert.equal(await heads.nth(1).evaluate(n=>n.childNodes[0].textContent),'checks · beads');
     assert.equal(await heads.nth(1).evaluate(n=>n.childNodes[0].textContent),
       (await kindChips.evaluateAll(nodes=>nodes.map(n=>n.dataset.kind))).filter(kind=>kind&&kind!=='session').join(' · '));
+    // The reranker's order is offered, not applied: the ranked list stays on
+    // screen after the second answer arrives, and changes only on the click.
+    await page.locator('dialog input').fill('rerank-offer');await page.keyboard.press('Enter');
+    await page.getByRole('link',{name:'first',exact:true}).waitFor();
+    const apply = page.locator('dialog .search-anything-apply');
+    await apply.waitFor({state:'visible'});
+    const titles = () => page.locator('dialog .search-anything-record > a').allTextContents();
+    assert.deepEqual(await titles(),['first','second']);
+    assert.match(await page.locator('dialog [role=status]').textContent(), /정렬 개선 가능/);
+    await apply.click();
+    assert.deepEqual(await titles(),['second','first']);
+    assert.equal(await apply.isHidden(),true);
+    assert.match(await page.locator('dialog [role=status]').textContent(), /정렬 개선 적용됨/);
     await page.locator('dialog input').fill('needle');await page.keyboard.press('Enter');
     await page.getByRole('link',{name:'needle',exact:true}).waitFor();
+    assert.equal(await apply.isHidden(),true);
     await page.getByText('원문 보기',{exact:true}).click();await page.waitForFunction(()=>document.querySelector('dialog pre').textContent.includes('원문 기록'));
     await page.locator('dialog input').fill('task-source');await page.keyboard.press('Enter');
     await page.getByRole('link',{name:'task-source',exact:true}).waitFor();
