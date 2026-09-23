@@ -209,7 +209,7 @@ function findTag(node, tag) {
   } };
   clickButton();
   check("opening asks for the current session's briefing",
-        calls, ["/api/sessions/s1/briefing"]);
+        calls, ["/api/sessions/s1/briefing?cached=1"]);
   check("the button reads open and the pane holds a card",
         [btn.attrs["aria-pressed"], btn.textContent],
         ["true", "▾ briefing"]);
@@ -298,7 +298,7 @@ function findTag(node, tag) {
         [findTag(box, "h3").textContent, calls.length > before,
          box.className], ["Briefing", true, "sess-brief-section"]);
   check("it asked for the panel's own session, not the terminal's",
-        calls[calls.length - 1], "/api/sessions/dt1/briefing");
+        calls[calls.length - 1], "/api/sessions/dt1/briefing?cached=1");
   await flush();
   check("the section's card carries the fetched summary",
         ctx.section("dt1").querySelector(".sess-brief-k").textContent, "goal");

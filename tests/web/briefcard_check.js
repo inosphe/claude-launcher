@@ -170,7 +170,7 @@ const kv = (li) => {
   } };
   click(toggle(rows.s1));
   check("opening asks for this session's briefing",
-        calls, ["/api/sessions/s1/briefing"]);
+        calls, ["/api/sessions/s1/briefing?cached=1"]);
   check("the card says it is summarising while the answer is out",
         note(rows.s1).textContent, "summarising…");
   await flush();

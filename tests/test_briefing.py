@@ -957,7 +957,8 @@ def test_briefing_endpoint_contract_cache_and_refresh(home, tmp_path, monkeypatc
                 },
             )
 
-            resp = await client.get("/api/sessions/s1/briefing", headers=BEARER)
+            # Opening with no saved result still composes the first briefing.
+            resp = await client.get("/api/sessions/s1/briefing?cached=1", headers=BEARER)
             assert resp.status == 200
             body = await resp.json()
             assert body["session"] == "s1"
@@ -975,9 +976,21 @@ def test_briefing_endpoint_contract_cache_and_refresh(home, tmp_path, monkeypatc
             body = await resp.json()
             assert body["cached"] is True and len(hits) == 1
 
+            # A browser reload loses its cache, but opening the panel must
+            # read the durable result even after the session's evidence moves.
+            briefing._cache.clear()
+            briefing._loaded_cache_path = None
+            monkeypatch.setattr(briefing, "gather_live", lambda session: {"status": "busy"})
+            resp = await client.get("/api/sessions/s1/briefing?cached=1", headers=BEARER)
+            saved = await resp.json()
+            assert resp.status == 200
+            assert saved["cached"] is True and len(hits) == 1
+            assert saved["generated_at"] == body["generated_at"]
+            assert saved["briefing"] == answer
+
             # refresh=1 bypasses the cache
             resp = await client.get(
-                "/api/sessions/s1/briefing?refresh=1", headers=BEARER
+                "/api/sessions/s1/briefing?cached=1&refresh=1", headers=BEARER
             )
             body = await resp.json()
             assert body["cached"] is False and len(hits) == 2

@@ -931,6 +931,13 @@ async def compose(session, cfg: dict, *, refresh: bool = False) -> dict:
 DIGEST_FIELD_CHARS = 240
 
 
+def cached_result(name: str) -> Optional[dict]:
+    """Read the last complete briefing without checking changing evidence."""
+    _restore_cache()
+    hit = _cache.get(name)
+    return {**hit[1], "cached": True} if hit is not None else None
+
+
 def digest(name: str) -> Optional[dict]:
     """The cached briefing's short fields for the session list, never composed.
 
