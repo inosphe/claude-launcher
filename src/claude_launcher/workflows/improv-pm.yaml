@@ -186,17 +186,25 @@ steps:
       것이 기본값이던 동안 그 이슈들은 처리되지 않고 쌓였다(s586). 그래서
       배정은 wrapup의 생성 이슈 정산에서 워커가 직접 친다 — 항목마다:
       (1) **spawn** — 살아 있는 자식(`children`)이 있고 그 이슈가 그 자식의
-      영역이면 그 자식에게(`update <id> --assignee <자식>` + `DELEGATED:
-      from <원회차 id> to <자식>` 코멘트 + 자식에게 mesh 한 줄 — 자식의
-      queue-next/queue-recheck가 보드로 읽는다), 또는 work의 위임 조건을
+      영역이며 그 자식의 런이 아직 queue-recheck 앞에 있으면(`claunch
+      cflow status -t <자식> --json`의 `step_id`가 queue-recheck·settle-*·
+      end-*가 아니고 런이 done이 아니다 — 지난 자식은 큐를 다시 읽지
+      않는다) 그 자식에게(`update <id> --assignee <자식> --add-label
+      delegated` + `DELEGATED: from <원회차 id> to <자식>` 코멘트 + 자식에게
+      mesh 한 줄 — 자식의 queue-next/queue-recheck가 보드로 읽는다; 자식이
+      착수 전에 종료되면 데몬이 `delegated` 라벨을 보고 풀에 되돌리고
+      `DELEGATION RELEASED` 코멘트를 남긴다), 또는 work의 위임 조건을
       만족하면 새 자식을 `--issue <id>`로 세운다; (2) **self** — 그 밖에는
       자기에게(`update <id> --assignee $CLAUNCH_SESSION` + `SELF-QUEUED:
       from <원회차 id>` 코멘트) — queue-recheck가 그것을 읽어 같은 런
       안에서 다음 회차로 돈다; (3) **pool** — assignee 없이 남기는 것은 이
       세션이 착수할 수 없는 것(다른 저장소 영역, blocked, 범위·우선순위를
       사용자나 리더가 정해야 하는 것)뿐이고, 그 처분은 상위에게 ask로
-      묻는다. 건수 상한은 두지 않는다 — 루프의 백스톱은 엔진의
-      max_visits(intake 방문 수)다. 리더는 거부권을 가진다(`update <id>
+      묻는다. self에는 런 단위 상한이 있다: 이 런의 intake 방문 수
+      (`claunch cflow status --json`의 `visits.intake`)가 10 이상이면 self
+      대신 pool로 보낸다 — 엔진의 loop guard(max_visits 25)는 26번째
+      intake에서 런을 사람의 승인(`loop_limit`)으로 세우는데, 그 전에 범위
+      판단을 상위에게 넘기기 위해서다. 리더는 거부권을 가진다(`update <id>
       --assignee ""` + `UNQUEUED by leader: <이유>`); 거부된 이슈는
       pool과 같이 상위의 처분을 따른다. 세션이 만든 활성
       이슈가 전부 누군가의 손(살아 있는 세션의 assignee, 또는 리더의

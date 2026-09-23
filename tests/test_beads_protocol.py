@@ -560,7 +560,13 @@ def test_the_shared_block_defines_the_queue_and_the_batch():
     assert "claunch-034c4" in flat
     assert "DELEGATED: from <원회차 id> to <자식>" in flat
     assert "SELF-QUEUED: from <원회차 id>" in flat
-    assert "건수 상한은 두지 않는다" in flat
+    # self has a per-run cap below the engine's loop guard (claunch-zc5ga)
+    assert "`visits.intake`)가 10 이상이면 self 대신 pool로 보낸다" in flat
+    assert "건수 상한은 두지 않는다" not in flat
+    # a child is handed a row only while it will still read its queue, and
+    # the label the daemon releases it by is written with the assignee
+    assert "--assignee <자식> --add-label delegated" in flat
+    assert "아직 queue-recheck 앞에 있으면" in flat
     assert "UNQUEUED by leader: <이유>" in flat          # the leader keeps a veto
     assert "워커가 자기 후속 이슈를 스스로 배정해 큐를 채우는 것은 원칙적으로 금지다" not in flat
     assert "회차당 최대 2건" not in flat
@@ -671,6 +677,9 @@ def test_the_worker_rechecks_its_queue_after_landing_and_loops(layer):
     assert "모호하면 done이다" in prompt                       # the tie-break
     assert "여기서 스스로 자기 배정을 치지 않는다" in prompt     # wrapup assigned; read-only here
     assert "`SELF-QUEUED:` 이슈는 이 세션이 만든 일이므로 착수할 수 있으면 next-round다" in prompt
+    # a self-queued row returned to the pool here was never in wrapup's pool
+    # ask, and settle-wait asks nobody -- so the ask goes out here (claunch-zc5ga)
+    assert "여기가 그 처분을 묻는 유일한 자리다" in prompt
     # end-gate is reached only through settle-check's `settled`
     assert not any(
         s.next == "end-gate" for s in wf.steps.values() if s.next
@@ -703,12 +712,16 @@ def test_the_worker_rechecks_its_queue_after_landing_and_loops(layer):
     assert "**이 자리에서 직접 친다**" in wrapup
     assert "--assignee <자식>" in wrapup                 # a live child's area
     assert "--assignee $CLAUNCH_SESSION" in wrapup       # otherwise the session itself
-    assert "이 세션이 착수할 수 없는 것뿐이다" in wrapup    # pool is the narrow case now
+    assert "이 세션이 착수할 수 없는 것, 그리고 self 상한에 닿은 것이다" in wrapup
+    assert "10 이상이면 self를 치지 않고 pool로 보낸다" in wrapup
+    assert "--assignee <자식> --add-label delegated" in wrapup
+    assert "그 자식은 큐를 다시 읽지 않는다" in wrapup
     assert "`br`에는 생성자로 거르는 옵션이 없다" in wrapup
     assert "settle-check가 기계로 다시 확인한다" in wrapup
     # a row still assigned to the ending session is nobody's hand
     settle_prompt = " ".join(settle.select.prompt.split())
     assert "assignee가 **이 세션 자신**인 것도 미정산이다" in settle_prompt
+    assert "queue-recheck의 done 규칙을 그 항목에 적용한다" in settle_prompt
     # queue-next hands drained rows forward instead of to wrapup
     qn = " ".join(wf.steps["queue-next"].select.prompt.split())
     assert "착지 뒤 queue-recheck가 다시 읽는다" in qn
@@ -730,3 +743,14 @@ def test_the_leader_reads_a_batch_as_one_candidate(layer):
     assert "리더가 대신 닫지 않는다" in text
     assert "--no-ff 한 번으로 머지하고" in text
     assert "실린 이슈 id를 전부 적는다" in text
+
+
+def test_the_delegation_label_is_the_one_the_daemon_releases_by():
+    """The wrapup writes ``--add-label delegated`` and the daemon's exit sweep
+    releases rows by that label (claunch-zc5ga); two spellings would silently
+    leave a dead child's row stuck again."""
+    from claude_launcher.daemon import beads as daemon_beads
+
+    wrapup = " ".join(model.load(_bundled("improv-worker")).steps["wrapup"].instructions.split())
+    assert f"--add-label {daemon_beads.DELEGATED_LABEL}" in wrapup
+

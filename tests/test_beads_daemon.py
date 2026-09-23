@@ -336,6 +336,35 @@ def test_sweep_plan_marks_orphaned_followups_and_releases_self_queued_ones():
     ]
 
 
+def test_sweep_plan_releases_a_follow_up_delegated_to_the_exiting_child():
+    """A parent's wrapup hands a follow-up it filed to a live child
+    (``--assignee <child>`` plus the ``delegated`` label, claunch-zc5ga).
+    If the child exits before it takes the row up, the row is neither the
+    child's creation nor anything it moved to in_progress -- without this
+    branch it stayed ``open`` under a name that can no longer answer, with no
+    marker for anyone to key on. Rows that only happen to be assigned to the
+    child (a leader's queue, no ``delegated`` label) are left as before."""
+    mine = [
+        {"id": "delegated-open", "status": "open", "assignee": "kid",
+         "created_by": "parent", "labels": ["found", "delegated"]},
+        {"id": "delegated-ready", "status": "in_ready", "assignee": "kid",
+         "created_by": "parent", "labels": ["handoff", "delegated"]},
+        # untouched: a leader-queued row, and a delegated row already taken up
+        # (in_progress goes back to open through the first branch instead)
+        {"id": "queued", "status": "open", "assignee": "kid",
+         "created_by": "lead", "labels": ["leader"]},
+    ]
+    plan = beads_mod.sweep_plan(mine, "kid", exit_code=0)
+    note = ("SESSION ENDED: delegate kid exited (code 0) before taking this "
+            "up; delegated follow-up released to the pool (DELEGATION RELEASED)")
+    assert plan == [
+        ["comments", "add", "delegated-open", note],
+        ["update", "delegated-open", "--assignee", "", "--remove-label", "delegated"],
+        ["comments", "add", "delegated-ready", note],
+        ["update", "delegated-ready", "--assignee", "", "--remove-label", "delegated"],
+    ]
+
+
 def test_self_queued_release_does_not_conflict_with_the_placeholder_close():
     """The two branches are told apart by the ``session`` label alone -- both
     are ``open``, self-assigned, and created by the exited session."""

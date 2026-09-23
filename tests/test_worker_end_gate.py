@@ -306,3 +306,29 @@ def test_the_hold_finishes_once_its_check_says_yes(home, tmp_path, monkeypatch):
     engine.next_step()
     engine.report("플래그를 세웠다")
     assert engine.next_step()["status"] == "done"
+
+
+def test_the_self_queue_loop_stops_at_the_engines_loop_guard(worker_run):
+    """What bounds a worker that keeps self-queuing what it files, measured.
+
+    wrapup's settlement assigns a session's own follow-ups to itself, and
+    queue-recheck turns each one into another round (claunch-034c4). Without
+    a cap of its own the only stop is the engine's per-step loop guard: the
+    26th arrival at ``intake`` pauses the run for a human (``loop_limit``) --
+    not a settle, not an error. The workflow's self cap (10 intake visits,
+    claunch-zc5ga) is sized against exactly this number, so the number is
+    pinned here, from the engine, rather than read off the prose.
+    """
+    for _ in range(24):
+        engine.goto("queue-recheck")
+        engine.next_step()
+        payload = engine.select("next-round", reason="a self-queued row remains")
+        assert payload["status"] == "step"
+    engine.goto("queue-recheck")
+    engine.next_step()
+    payload = engine.select("next-round", reason="a self-queued row remains")
+    assert payload["status"] == "waiting_approval"
+    assert payload["reason"] == "loop_limit"
+    assert payload["step_id"] == "intake" and payload["visit"] == 26
+    text = " ".join(WORKER.read_text(encoding="utf-8").split())
+    assert "`visits.intake`)가 10 이상이면 self 대신 pool로 보낸다" in text
