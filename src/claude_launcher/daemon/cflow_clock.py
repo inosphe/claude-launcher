@@ -60,7 +60,7 @@ import time
 from typing import Callable, Dict, List, Optional, Set, Tuple
 
 from .. import store
-from ..cflow import engine as cflow_engine, model as cflow_model, state as cflow_state
+from ..cflow import engine as cflow_engine, landing as cflow_landing, model as cflow_model, state as cflow_state
 from . import briefing, status_checks
 from .session import STATUS_BUSY, STATUS_IDLE
 
@@ -1934,10 +1934,15 @@ class TriggerClock:
     it names exactly the one that did not happen.
     """
 
+    #: How often a run's landing queue is measured against git between
+    #: moves (the move to ``end`` measures it regardless).
+    LANDING_REFRESH = 60.0
+
     def __init__(self, manager, *, poll: float = 5.0) -> None:
         self.manager = manager
         self.poll = poll
         self._task: Optional[asyncio.Task] = None
+        self._landing_checked: Dict[Tuple[str, str], float] = {}
 
     def start(self) -> None:
         if self._task is None:
@@ -1959,6 +1964,7 @@ class TriggerClock:
                 # slow one delays the rest of this pass — which is the right
                 # trade at this volume (a handful per round) and keeps one
                 # misconfigured endpoint from opening N concurrent calls.
+                await asyncio.to_thread(self.refresh_landing)
                 for cwd, scope, action in await asyncio.to_thread(self.scan):
                     performed, detail = await self._perform(cwd, scope, action)
                     await asyncio.to_thread(
@@ -1987,9 +1993,101 @@ class TriggerClock:
                 out.append((cwd, scope, action))
         return out
 
+    def refresh_landing(self, now: Optional[float] = None) -> List[Tuple[str, str, List[str]]]:
+        """Mark landed tips on every running landing queue, at most once a minute each.
+
+        Blocking (git, per entry); call it in a thread. Returns the runs whose
+        queue moved, with the issues marked. Public for the tests.
+        """
+        now = time.monotonic() if now is None else now
+        moved: List[Tuple[str, str, List[str]]] = []
+        for cwd, scope in cflow_state.known_runs():
+            key = (cwd, scope)
+            if now - self._landing_checked.get(key, float("-inf")) < self.LANDING_REFRESH:
+                continue
+            self._landing_checked[key] = now
+            try:
+                token = cflow_state.push_scope(scope)
+                try:
+                    state = cflow_state.load_state(cwd)
+                finally:
+                    cflow_state.pop_scope(token)
+            except Exception:
+                continue
+            if not state.get("landing_queue") or state.get("status") in ("done", "aborted"):
+                continue
+            try:
+                result = cflow_engine.refresh_landing(cwd=cwd, scope=scope)
+            except Exception as exc:
+                log.debug("landing refresh skipped %s/%s: %s", cwd, scope, exc)
+                continue
+            if result.get("landed"):
+                moved.append((cwd, scope, list(result["landed"])))
+        return moved
+
+    def parent_run(self, scope: str) -> Tuple[Optional[str], Optional[str], str]:
+        """(cwd, scope) of the run this session's parent drives, or why not.
+
+        The parent is the session that created this one; its run is found the
+        way a goto request finds a target's (one directory, or none -- two
+        would be a guess).
+        """
+        try:
+            parent = self.manager.get(scope).sdef.parent
+        except Exception:
+            parent = None
+        if not parent:
+            return None, None, "this session has no parent session"
+        hits = sorted({c for c, s in cflow_state.known_runs() if s == parent})
+        if not hits:
+            return None, None, f"parent {parent!r} drives no run"
+        if len(hits) > 1:
+            return None, None, f"parent {parent!r} drives runs in {len(hits)} directories"
+        return hits[0], parent, ""
+
+    async def _enqueue_landing(self, cwd: str, scope: str) -> Tuple[bool, str]:
+        """This worker's landing request, onto its parent's landing queue.
+
+        Read, not reported: the tip and branch from the worker's own
+        checkout (the frozen tip its request names), the issues from the
+        board (what it moved to in_review). Runs whether or not the worker is
+        still alive -- the request stands either way.
+        """
+        pcwd, parent, why = await asyncio.to_thread(self.parent_run, scope)
+        if pcwd is None:
+            return False, why
+        tip = await asyncio.to_thread(cflow_landing.head, cwd)
+        if not tip:
+            return False, f"no commit readable in {cwd}"
+        branch = await asyncio.to_thread(cflow_landing.branch, cwd)
+        issues = await asyncio.to_thread(cflow_landing.in_review_of, cwd, scope)
+        if issues is None:
+            return False, "the issue board could not be read"
+        if not issues:
+            return False, f"{scope} holds no issue in_review (no landing request on the board)"
+        try:
+            result = await asyncio.to_thread(
+                cflow_engine.enqueue_landing, issues, branch, tip,
+                by=scope, cwd=pcwd, scope=parent,
+            )
+        except cflow_engine.CflowError as exc:
+            return False, f"parent {parent!r}: {exc}"
+        added, renewed = result.get("added") or [], result.get("renewed") or []
+        if not added and not renewed:
+            return True, f"already on {parent}'s landing queue at {tip[:8]}"
+        return True, (
+            f"on {parent}'s landing queue at {tip[:8]}: "
+            + ", ".join(
+                [f"added {', '.join(added)}"] * bool(added)
+                + [f"renewed {', '.join(renewed)}"] * bool(renewed)
+            )
+        )
+
     async def _perform(self, cwd: str, scope: str, action: dict) -> Tuple[bool, str]:
         """Do one claimed action. Returns (performed, why/what)."""
         do = action.get("do")
+        if do == cflow_model.TRIGGER_ENQUEUE_LANDING:
+            return await self._enqueue_landing(cwd, scope)
         session = session_for(self.manager, cwd, scope)
         if session is None:
             return False, "no live session drives this run"
@@ -2138,6 +2236,44 @@ class RoundStartClock:
             log.info("cflow round notice queued for %r (%s)", scope, cwd)
 
 
+def landing_lines(payload: dict) -> List[str]:
+    """The landing queue's state at a round's start, for the round block.
+
+    Empty for a workflow without ``landing_queue:``. Otherwise it says what
+    the last round's end dropped and carried (the reset the driver did not
+    watch happen: the engine did it inside the move to ``end``), where the
+    queue stands now, and any disagreement with the issue board.
+    """
+    if "landing_queue" not in payload:
+        return []
+    lines: List[str] = []
+    reset = payload.get("landing_reset") or {}
+    if reset:
+        def ids(rows):
+            return ", ".join(
+                f"{r.get('issue')} ({r.get('status')}"
+                + (", was deferred" if r.get("was") else "") + ")"
+                for r in rows
+            ) or "none"
+        lines.append(
+            f"landing queue reset at the last round's end (run {reset.get('run')}): "
+            f"dropped {ids(reset.get('dropped') or [])}; "
+            f"carried {ids(reset.get('carried') or [])}"
+        )
+        for warning in reset.get("warnings") or []:
+            lines.append(f"landing queue warning: {warning}")
+    queue = payload.get("landing_queue") or []
+    lines.append(
+        f"landing queue now: {len(queue)} entr{'y' if len(queue) == 1 else 'ies'}"
+        + (
+            " -- " + ", ".join(f"{e.get('issue')} {e.get('status')}" for e in queue)
+            if queue else ""
+        )
+        + " (the 'landing_queue' tool lists and moves them)"
+    )
+    return lines
+
+
 def round_block(started: dict) -> str:
     """The text the driver hears when the daemon started its next round.
 
@@ -2154,6 +2290,7 @@ def round_block(started: dict) -> str:
             f"workflow: {started.get('workflow')}",
             f"round: {started.get('round')}",
             f"position: step '{started.get('step')}'",
+            *landing_lines(started),
             "protocol: the daemon started this round for you -- it is "
             "already running and there is nothing to confirm. Call the cflow "
             "'status' tool for the step you are now on and continue per the "
