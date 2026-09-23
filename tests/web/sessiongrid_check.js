@@ -118,16 +118,29 @@ assert.deepEqual(wrap.neighbor(1, 4, 0, -1, 4), { row: 1, col: 3 }, "left runs b
 const wrapPresent = new Set(["a", "b", "c", "d", "e"]);
 assert.ok(wrap.moveBy("b", 1, 0, wrapPresent, 4));
 assert.deepEqual(cells(wrap)[1], ["bravo", "a", null, "c", "d", "e", "b"]);
-// Leading lines a filter emptied fold away up to the first line in view.
-values.delete("lead");
-const lead = new SessionGridLayout(storage, "lead");
-lead.rows[0].cells = ["x1", "x2", null, "x3", "x4", null, null, null, "v1", "x5"];
-assert.equal(lead.hiddenLead(0, 4, new Set(["v1"])), 2, "two lines before v1's line");
-assert.equal(lead.hiddenLead(0, 4, new Set(["x2", "v1"])), 0, "a session in view on the first line");
-assert.equal(lead.hiddenLead(0, 5, new Set(["v1"])), 1);
-assert.equal(lead.hiddenLead(0, 4, new Set()), 2, "nothing in view: the last line stays");
-lead.rows[0].cells = [null, null, null, null, "v1"];
-assert.equal(lead.hiddenLead(0, 4, new Set(["v1"])), 0, "merely empty lines are not folded");
+// Runs of 3+ lines a filter emptied fold away, at the top or in the middle.
+values.delete("runs");
+const runs = new SessionGridLayout(storage, "runs");
+const line = (...names) => [...names, ...Array(4 - names.length).fill(null)];
+runs.rows[0].cells = [
+  ...line("x1"), ...line("x2"), ...line("x3"),          // lines 0-2: out of view
+  ...line("v1"),                                         // line 3: in view
+  ...line("x4"), ...line(), ...line("x5"),               // lines 4-6: out of view
+  ...line("v2"),                                         // line 7
+  ...line("x6"), ...line("x7"),                          // lines 8-9: only two
+  ...line("v3"),                                         // line 10
+  ...line(), ...line(), ...line(),                       // lines 11-13: merely empty
+  ...line("v4", "x8", "x9", "y1"),                       // line 14
+  ...line("x10"), ...line("x11"), ...line("x12"),        // lines 15-17, then the last line
+];
+const inView = new Set(["v1", "v2", "v3", "v4"]);
+assert.deepEqual(runs.foldRuns(0, 4, inView), [
+  { start: 0, end: 3 }, { start: 4, end: 7 }, { start: 15, end: 18 },
+], "top and middle runs of three fold; two lines, empty lines and the last line stay");
+assert.equal(runs.span(0, 4) / 4, 19, "the last line (18) holds the free cell");
+assert.deepEqual(runs.foldRuns(0, 4, inView, 2).map(r => r.start), [0, 4, 8, 15], "the threshold is a parameter");
+assert.deepEqual(runs.foldRuns(0, 4, new Set()), [{ start: 0, end: 18 }], "nothing in view: all but the last line");
+assert.deepEqual(runs.foldRuns(0, 4, new Set(runs.rows[0].cells.filter(Boolean))), [], "everything in view");
 
 // Emptying a row sends everything in it, in view or not, to the default row;
 // the default row itself cannot be emptied or removed this way.

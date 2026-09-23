@@ -1507,8 +1507,10 @@ let sessionGridPerLine = (() => {
   return 4;
 })();
 let sessionGrid = null;
-// Rows whose folded leading lines the reader opened, for this page load.
+// Folded stretches the reader opened, as "rowId:firstLine", for this page
+// load. A stretch folds when it is at least SESSION_GRID_FOLD_LINES lines.
 const sessionGridUnfolded = new Set();
+const SESSION_GRID_FOLD_LINES = 3;
 let sessionGridDragging = null;
 let sessionGridPending = false;
 // The session a long press picked up, waiting for the tap that says where it
@@ -1603,26 +1605,32 @@ function renderSessionGrid(force = false) {
     const body = document.createElement("div");
     body.className = "sg-cells";
     const span = layout.span(r, perLine);
-    // Lines at the top of the row that the filter left with nothing in view
-    // fold into one bar, so the row starts at its first line in view; the
-    // cells keep their numbers, so what is on screen is still where it sits.
-    const lead = layout.hiddenLead(r, perLine, present);
-    const folded = lead && !sessionGridUnfolded.has(row.id);
-    if (lead) {
-      const last = lead * perLine;
-      const bar = sessionGridButton("sg-fold",
-        folded ? `▸ cells 1–${last} · nothing in this view` : `▾ fold cells 1–${last}`,
-        folded ? `show the ${lead} line${lead === 1 ? "" : "s"} at the top of ${row.name} that hold only sessions out of this view`
-          : `fold the lines at the top of ${row.name} that hold only sessions out of this view`,
-        () => {
-          if (folded) sessionGridUnfolded.add(row.id);
-          else sessionGridUnfolded.delete(row.id);
+    // Stretches of three or more lines that the filter left with nothing in
+    // view -- at the top of the row or anywhere in it -- fold into a wavy
+    // break that says so and opens on a click; an opened one keeps a bar that
+    // folds it again. The cells keep their numbers and every stretch starts
+    // on a line boundary, so what is on screen is still where it sits.
+    const runs = new Map(layout.foldRuns(r, perLine, present, SESSION_GRID_FOLD_LINES)
+      .map((run) => [run.start, run]));
+    const lines = span / perLine;
+    for (let line = 0; line < lines; line++) {
+      const run = runs.get(line);
+      if (run) {
+        const key = `${row.id}:${run.start}`;
+        const open = sessionGridUnfolded.has(key);
+        body.append(sessionGridFoldBar(row, run, perLine, open, () => {
+          if (open) sessionGridUnfolded.delete(key);
+          else sessionGridUnfolded.add(key);
           renderSessionGrid(true);
-        });
-      block.append(bar);
-    }
-    for (let c = folded ? lead * perLine : 0; c < span; c++) {
-      body.append(sessionGridCell(layout, row, r, c, records, present, searching));
+        }));
+        if (!open) {
+          line = run.end - 1;
+          continue;
+        }
+      }
+      for (let c = line * perLine; c < (line + 1) * perLine; c++) {
+        body.append(sessionGridCell(layout, row, r, c, records, present, searching));
+      }
     }
     block.append(body);
     host.append(block);
@@ -1642,6 +1650,26 @@ function renderSessionGrid(force = false) {
     host.querySelector(`.sg-cell[data-name="${CSS.escape(focusName)}"]`)
       ?.focus({ preventScroll: true });
   }
+}
+
+/* The marker a folded stretch leaves: a wavy break across the full width
+   naming the cells it hides, or, once opened, a plain bar to fold them. */
+function sessionGridFoldBar(row, run, perLine, open, onToggle) {
+  const first = run.start * perLine + 1;
+  const last = run.end * perLine;
+  const count = run.end - run.start;
+  const bar = sessionGridButton(open ? "sg-fold open" : "sg-fold",
+    "", open
+      ? `fold cells ${first}–${last} of ${row.name} again`
+      : `show cells ${first}–${last} of ${row.name}: ${count} lines holding only sessions out of this view`,
+    onToggle);
+  bar.setAttribute("aria-expanded", String(open));
+  bar.append(Object.assign(document.createElement("span"), {
+    className: "sg-fold-label",
+    textContent: open ? `▴ fold cells ${first}–${last}`
+      : `cells ${first}–${last} hidden · ${count} lines`,
+  }));
+  return bar;
 }
 
 /* Cells per line: 3, 4 or 5, as one radio group at the top of the grid. */
