@@ -457,6 +457,10 @@ class Session:
         self.last_input_at: Optional[str] = last_input_at
         self.exit_code: Optional[int] = None
         self.exited_at: Optional[str] = None
+        #: Set by the manager when Windows ended this process at a logoff or
+        #: shutdown (manager.ended_by_os): the exit is recorded, but the
+        #: record stays one the next boot restores.
+        self.ended_by_os = False
         # Archiving is a retained record's lifecycle marker. A live session
         # always starts outside the archive; respawn therefore clears it by
         # constructing a new Session from the retained definition.
@@ -1943,6 +1947,9 @@ class DeadSession:
         self.exited_at = exited_at
         self.archived_at = archived_at
         self.paused_at = paused_at
+        #: A retired record was not ended by the OS in this daemon's lifetime,
+        #: whatever its exit code says; see Session.ended_by_os.
+        self.ended_by_os = False
         self.idle_threshold = idle_threshold
         self._scrollback = scrollback
         self._screen: Optional[ScreenState] = None

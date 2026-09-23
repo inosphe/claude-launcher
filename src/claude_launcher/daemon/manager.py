@@ -46,7 +46,23 @@ _NAME_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 #: free: a paste that lands here by accident must not grow either without
 #: limit. The web UI's own field carries the same cap.
 MAX_NOTE = 2000
+#: Exit codes Windows stamps on a console process it ends itself, at a logoff
+#: or a system shutdown/restart: DBG_TERMINATE_PROCESS (0x40010004). An exit
+#: with this code is the machine going down around the session, not the
+#: session ending — the daemon usually goes down a moment later, and until it
+#: does it would otherwise record every such exit as final. 2026-09-23 11:09
+#: KST: a Windows restart ended 23 sessions this way while the daemon was
+#: still alive to persist them as exited, and the next boot's restore_all
+#: skipped every one (claunch-wnwa5). POSIX exit statuses are 0-255, so the
+#: value cannot come from anywhere else.
+OS_ENDED_EXIT_CODES = frozenset({0x40010004})
 log = logging.getLogger(__name__)
+
+
+def ended_by_os(exit_code: Optional[int]) -> bool:
+    """Whether ``exit_code`` says Windows ended the process at a logoff or
+    shutdown (see :data:`OS_ENDED_EXIT_CODES`)."""
+    return exit_code in OS_ENDED_EXIT_CODES
 
 
 class ManagerError(Exception):
@@ -504,6 +520,23 @@ class SessionManager:
         registry change that did not.
         """
         if self.shutting_down:
+            return
+        if ended_by_os(session.exit_code):
+            # Windows is logging off or shutting down, and got to the child
+            # before it got to the daemon. That is the daemon's shutdown
+            # arriving out of order, and it is treated like one: persist()
+            # keeps the record running so the next boot restores it, and the
+            # exit hooks — the board sweep that would return its issue to
+            # open above all — do not run, because nothing has ended.
+            log.warning(
+                "session %r was ended by Windows (logoff/shutdown, code %#x); "
+                "kept for restore at the next boot",
+                session.sdef.name, session.exit_code,
+            )
+            session.ended_by_os = True
+            self.events.record(session, "exit", "OS 종료로 세션 프로세스 종료",
+                               exit_code=session.exit_code)
+            self.persist()
             return
         self.events.record(session, "exit", "세션 프로세스 종료",
                            exit_code=session.exit_code)
@@ -1944,7 +1977,15 @@ class SessionManager:
             entries.append(
                 {
                     "def": session.sdef.to_dict(),
-                    "was_running": not session.exited,
+                    # An exit Windows caused at a logoff or shutdown counts
+                    # as running: the machine went down around it, and the
+                    # next boot is what brings it back (see ended_by_os).
+                    # The flag, not the exit code: a record retired at an
+                    # earlier boot keeps its code and must stay retired.
+                    "was_running": not session.exited or (
+                        getattr(session, "ended_by_os", False)
+                        and not session.archived_at
+                    ),
                     # Whether an agent was mid-turn here. persist() runs
                     # first in shutdown_all, before anything is torn down,
                     # so at a restart this is what the session was doing in
