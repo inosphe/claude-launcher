@@ -41,6 +41,7 @@ from .. import (
     usage,
 )
 from .. import install
+from .. import install_plan
 from .. import session_commits
 from .. import beads_meta
 from .. import ghcli, prflow, projects, spawn as spawn_mod, store, workspaces
@@ -446,6 +447,9 @@ def build_app(
     r.add_post("/api/daemon/restart-request/extend", h_restart_request_extend)
     r.add_get("/api/profiles", h_profiles)
     r.add_post("/api/profiles/permission-mode", h_profiles_permission_mode)
+    r.add_get("/api/install", h_install_overview)
+    r.add_get("/api/install/plan", h_install_plan)
+    r.add_post("/api/install/apply", h_install_apply)
     r.add_get("/api/usage", h_usage)
     r.add_get("/api/metering", h_metering)
     r.add_get("/api/borrow-options", h_borrow_options)
@@ -1733,6 +1737,48 @@ async def h_profiles_permission_mode(request: web.Request) -> web.Response:
             "failed": failed,
         }
     )
+
+
+async def h_install_overview(request: web.Request) -> web.Response:
+    """Every install command this machine can run, each previewed as a dry run.
+
+    Counts and pending paths per target (see :func:`install_plan.overview`);
+    nothing is written. File reads across every profile, so off the loop.
+    """
+    return json_response(await asyncio.to_thread(install_plan.overview))
+
+
+async def h_install_plan(request: web.Request) -> web.Response:
+    """One target's dry run in full: every file, its before/after text, the
+    lines the CLI would print and the effect of each kind of write."""
+    target = str(request.query.get("target") or "").strip()
+    if not target:
+        return json_error(400, "target is required")
+    try:
+        return json_response(await asyncio.to_thread(install_plan.plan, target))
+    except install_plan.TargetError as exc:
+        return json_error(404, str(exc))
+
+
+async def h_install_apply(request: web.Request) -> web.Response:
+    """Run one install target for real, from the daemon rather than a shell.
+
+    ``{"target": <id>}``, the ids ``GET /api/install`` lists. The answer
+    carries the dry run taken just before (what it was about to change) and
+    the lines the run printed -- the same lines the CLI command prints.
+    """
+    body = await _json_body(request)
+    target = str(body.get("target") or "").strip()
+    if not target:
+        return json_error(400, "target is required")
+    try:
+        result = await asyncio.to_thread(install_plan.apply, target)
+    except install_plan.TargetError as exc:
+        return json_error(404, str(exc))
+    except (OSError, ProfileError) as exc:
+        return json_error(500, f"install failed: {exc}")
+    log.info("install target %s applied from the web", target)
+    return json_response(result)
 
 
 async def h_metering(request: web.Request) -> web.Response:

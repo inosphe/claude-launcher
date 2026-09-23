@@ -3880,6 +3880,13 @@ a.wf-btn { display: inline-block; text-decoration: none; line-height: 1.5; }
 .profile-mode-editor .wf-note { margin: 6px 0; }
 .profiles-table { width: 100%; }
 .profiles-table td:last-child { color: #7d8590; overflow-wrap: anywhere; }
+.install-table { width: 100%; }
+.install-table .install-cmd, .install-files td:last-child { font-family: ui-monospace, monospace; overflow-wrap: anywhere; }
+.install-table .install-pending { color: #d29922; font-weight: 600; }
+.install-actions { white-space: nowrap; }
+.install-files tr.install-unchanged td { color: #7d8590; }
+.install-diff, .install-lines { max-height: 320px; overflow: auto; white-space: pre-wrap; font-size: 12px; }
+.install-effects li { margin: 2px 0; }
 .profile-ok { color: #7ee787; }
 .profile-pending { color: #e3b341; }
 .profile-muted { color: #6e7681; }

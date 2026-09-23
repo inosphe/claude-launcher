@@ -37,7 +37,7 @@ import sys
 from pathlib import Path
 from typing import List
 
-from . import config, workspaces
+from . import config, fsplan, workspaces
 
 #: Long enough for Defender's cmdlets to load their module on a cold run,
 #: short enough that a wedged PowerShell cannot hang ``claunch install``.
@@ -140,6 +140,9 @@ def lines() -> List[str]:
     """
     if sys.platform != "win32":
         return []
+    plan = fsplan.active()
+    if plan is not None and plan.skip_defender:
+        return []
     paths = wanted_paths()
     if not paths:
         return []
@@ -155,6 +158,13 @@ def lines() -> List[str]:
         return out + [_temp_note()]
 
     cmd = add_command(missing)
+    if plan is not None:
+        # A dry run reads Defender's list (above) and never changes it: the
+        # preview says what would be asked for, and that it needs elevation.
+        return out + [
+            f"defender exclusion -> {p} (would register; needs an elevated shell)"
+            for p in missing
+        ] + [_temp_note()]
     try:
         proc = _powershell(cmd)
     except subprocess.TimeoutExpired:

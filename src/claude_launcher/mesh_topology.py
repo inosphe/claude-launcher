@@ -32,6 +32,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import List
 
+from . import fsplan
+
 WIRE_SKILL_MD = """\
 ---
 name: mesh-wire
@@ -352,7 +354,6 @@ def write_skills(skills_dir: Path) -> List[Path]:
         ("mesh-retopology", RETOPOLOGY_SKILL_MD),
     ):
         path = skills_dir / name / "SKILL.md"
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(text, encoding="utf-8")
+        fsplan.write_text(path, text)
         out.append(path)
     return out

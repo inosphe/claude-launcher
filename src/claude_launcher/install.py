@@ -63,6 +63,7 @@ from . import (
     commit_stamp,
     config,
     defender,
+    fsplan,
     harnesses,
     lineage,
     mesh_install,
@@ -218,8 +219,8 @@ def _codex_mcp_lines(home: Path) -> List[str]:
 
     path = home / "config.toml"
     try:
-        text = path.read_text(encoding="utf-8") if path.is_file() else ""
-    except OSError:
+        text = fsplan.read_text(path) or ""
+    except (OSError, ValueError):
         text = ""
     for name in (*LEGACY_MCP_NAMES, MCP_NAME):
         table = re.escape(name)
@@ -240,8 +241,7 @@ def _codex_mcp_lines(home: Path) -> List[str]:
         f"env_vars = {json.dumps([cflow_state.SESSION_ENV])}\n"
     )
     text = text.rstrip()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(f"{text}\n\n{block}" if text else block, encoding="utf-8")
+    fsplan.write_text(path, f"{text}\n\n{block}" if text else block)
     return [f"mcp server {MCP_NAME!r} -> {path}"]
 
 
@@ -497,11 +497,12 @@ def install_into_project(project_dir: Path) -> List[str]:
     the global workflow layer; that is the global/profile installs' job
     (``claunch install`` prints a hint when the layer is empty).
     """
-    project_dir.mkdir(parents=True, exist_ok=True)
+    fsplan.mkdir(project_dir)
     mcp_path = project_dir / ".mcp.json"
     try:
-        doc = json.loads(mcp_path.read_text(encoding="utf-8")) if mcp_path.is_file() else {}
-    except ValueError:
+        text = fsplan.read_text(mcp_path)
+        doc = json.loads(text) if text is not None else {}
+    except (OSError, ValueError):
         doc = {}
     if not isinstance(doc, dict):
         doc = {}
@@ -510,7 +511,7 @@ def install_into_project(project_dir: Path) -> List[str]:
         for name in LEGACY_MCP_NAMES:
             servers.pop(name, None)
         servers[MCP_NAME] = mcp_server_def()
-    mcp_path.write_text(json.dumps(doc, indent=2) + "\n", encoding="utf-8")
+    fsplan.write_text(mcp_path, json.dumps(doc, indent=2) + "\n")
     return (
         [f"mcp server {MCP_NAME!r} -> {mcp_path}"]
         + _skill_lines(project_dir / ".claude" / "skills")

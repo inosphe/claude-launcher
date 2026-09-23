@@ -426,6 +426,7 @@ CHECKS = [
         "ragsearch_check.js",
         "relaysettings_check.js",
         "profilesettings_check.js",
+        "installsettings_check.js",
         "beadskanban_check.js",
         "beadsgroups_check.js",
         "beadsworkspace_check.js",

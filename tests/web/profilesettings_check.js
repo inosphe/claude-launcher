@@ -97,10 +97,10 @@ vm.runInContext(
   // --- the tab strip -----------------------------------------------------
   context.wsSection = "";
   let tabs = context.settingsTabs();
-  assert.equal(tabs.children.length, 2);
-  assert.deepEqual(tabs.children.map((t) => t.text), ["General", "Profiles"]);
+  assert.equal(tabs.children.length, 3);
+  assert.deepEqual(tabs.children.map((t) => t.text), ["General", "Profiles", "Install"]);
   assert.deepEqual(tabs.children.map((t) => t.href),
-                   ["#/settings", "#/settings/profiles"]);
+                   ["#/settings", "#/settings/profiles", "#/settings/install"]);
   // The section that is up is the one that is not a link away from itself.
   assert.equal(tabs.children[0].cls.includes("on"), true);
   assert.equal(tabs.children[1].cls.includes("on"), false);
