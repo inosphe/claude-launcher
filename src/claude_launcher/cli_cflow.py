@@ -451,6 +451,7 @@ def _cmd_status(args: argparse.Namespace) -> int:
         print(f"pending:  {payload.get('chooser')} decides this one")
     if status == "waiting_checklist":
         _print_checklist(payload.get("checklist") or {})
+    _print_state(payload.get("state"))
     if status == "waiting_window":
         # The agent chose; the workflow paces that option. Nobody is asked
         # anything — but a person CAN take it now: a confirm from here is not
@@ -627,6 +628,41 @@ def _report_unblock(action: str, message: str, scope, cwd) -> None:
         print(f"{action}; nudge accepted for session(s): {', '.join(nudged)}")
     else:
         print(f"{action}; nudge the agent to continue")
+
+
+def _cmd_set(args: argparse.Namespace) -> int:
+    """Write one of the run's declared state paths as a person.
+
+    The person's door to ``editable:``; the agent's is the ``set_state`` MCP
+    tool. The driving session is nudged so it reads the new value from its
+    payload's ``state`` rather than learning of it at some later step.
+    """
+    scope, cwd = _resolve_run(args)
+    payload = engine.set_state(
+        args.path, args.value, by="user", scope=scope, cwd=cwd
+    )
+    print(
+        f"{payload['path']}: {payload['was']!r} -> {payload['value']!r}"
+        + ("" if payload["changed"] else "  (unchanged)")
+    )
+    print(f"applies:  {payload['applies']}")
+    _report_unblock(
+        f"set {payload['path']!r}",
+        engine.nudge_for_state_write(payload["path"], payload["value"]),
+        scope,
+        cwd,
+    )
+    return 0
+
+
+def _print_state(entries) -> None:
+    """The run's writable state: one line per declared path."""
+    for entry in entries or []:
+        who = "/".join(entry.get("by") or [])
+        line = f"{entry.get('path')} = {entry.get('value')!r}  [{who}]"
+        if entry.get("set_by"):
+            line += f"  (set by {entry['set_by']} at {entry.get('set_at')})"
+        print(f"{'state:':<{_LABEL}}{line}")
 
 
 def _cmd_approve(args: argparse.Namespace) -> int:
@@ -1066,6 +1102,18 @@ def register(sub) -> None:
     )
     q.add_argument("--json", action="store_true")
     q.set_defaults(func=_cmd_checklist)
+
+    q = _scoped(csub.add_parser(
+        "set",
+        help="write one of the run's declared state paths (the workflow's "
+        "'editable:'), as a person; auto-nudges the run's session",
+    ))
+    q.add_argument(
+        "path",
+        help="steps.<id>.skip, steps.<id>.checklist.<item>, or a declared name",
+    )
+    q.add_argument("value", help="true/false for a bool path; text otherwise")
+    q.set_defaults(func=_cmd_set)
 
     q = _scoped(csub.add_parser(
         "approve", help="approve the current human gate (the agent cannot)"

@@ -1299,6 +1299,9 @@ def test_mcp_initialize_and_tools():
         "request_child_goto",
         # decisions other sessions' runs are waiting on it for
         "asks", "answer",
+        # the run's own writable state -- only the paths its workflow
+        # declares 'by: [agent]'; a person's paths refuse this tool
+        "set_state",
     }
     select_tool = next(t for t in resp["result"]["tools"]
                        if t["name"] == "select")

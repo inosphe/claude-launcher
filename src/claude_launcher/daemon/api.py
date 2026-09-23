@@ -2932,7 +2932,8 @@ def _serialize_workflow(wf) -> dict:
                     "then": s.checklist.then,
                     "poll": s.checklist.poll,
                     "items": [
-                        {"id": i.id, "describe": i.describe, "check": i.check}
+                        {"id": i.id, "describe": i.describe, "check": i.check,
+                         **({"by": list(i.by)} if i.manual else {})}
                         for i in s.checklist.items
                     ],
                 }
