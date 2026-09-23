@@ -176,8 +176,18 @@ steps:
       나중에 합류한 사람에게는 닿지 않는다. 배포는 doc 이슈 id 한 줄이다.
       호출은 항상 `claunch beads <br 인자>` — 워크트리에서도 저장소 루트의
       .beads/beads.db 하나를 쓰고(--db를 대신 붙인다), 쓰기에 --actor
-      $CLAUNCH_SESSION을 붙이며, DB가 없으면 issues.jsonl에서 스스로
-      만든다. 조회는 --json.
+      $CLAUNCH_SESSION을 붙이며, DB가 없으면 `claunch beads`가 issues.jsonl에서
+      스스로 만든다. 조회는 --json.
+      **`.beads/issues.jsonl`을 직접 고치는 것은 금지다.** 보드의 실체는
+      `.beads/beads.db`이고 jsonl은 그것을 내보낸 산출물이다. 손으로 쓴 줄은
+      DB에 들어가지 않는다. 다음에 어느 세션이든 `claunch beads sync
+      --flush-only`를 돌리면 DB 내용이 그 파일을 덮어쓰고, 손으로 쓴 내용은
+      에러도 경고도 없이 사라진다. 반대로 jsonl에만 있고 DB에 없는 이슈가
+      생기면 export의 stale 가드가 걸려 그 저장소의 flush가 전부 멈춘다
+      (`claunch beads sync --help`). Edit·Write·`sed -i`·리다이렉션 어느
+      것으로도 그 파일에 쓰지 않는다. 이슈를 만들고 고치고 닫는 길은
+      `claunch beads` 하나다. jsonl에서 DB로 되돌리는 것이 정말 필요하면
+      `claunch beads sync --import-only`이고, 그것도 사람의 판단이 있을 때다.
       이슈가 없을 때 만드는 자 = 그 일을 사람에게서 처음 받은 세션, 또는
       발견한 세션이다 — 리더가 아니다. 만들기 전에 `claunch beads search
       "<핵심어>" --json`과 open/in_ready/in_progress/in_review 목록으로 중복을 본다;
