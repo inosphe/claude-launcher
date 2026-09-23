@@ -381,6 +381,11 @@ def build_app(
     # the board, and a daemon shutdown (not an ending) does not.
     board = beads if beads is not None else beads_mod.Board()
     app["beads"] = board
+    # Mesh audience selectors (``to: "@in_review"``) resolve against this
+    # board; the mesh manager itself knows nothing about boards.
+    app["mesh"].audience_resolver = functools.partial(
+        _mesh_audience, manager, board
+    )
     manager.exit_hooks.append(board.session_exited)
     # The board a directory in no registered workspace files on. Pinned once,
     # to the board this daemon was already using, so every issue filed before
@@ -4225,6 +4230,34 @@ async def h_mesh_leave(request: web.Request) -> web.Response:
     return json_response({"ok": True, "handle": member.handle})
 
 
+async def _mesh_audience(
+    manager: SessionManager, board, session: str, status: str
+) -> List[str]:
+    """The sessions assigned an issue in ``status`` on ``session``'s board.
+
+    The board is the one the sender's directory files on — the leader's
+    selector means *its* landing queue, not every board the daemon serves.
+    """
+    try:
+        cwd = manager.get(session).sdef.cwd
+    except ManagerError:
+        raise MeshError(
+            f"audience selectors need a sender session on this daemon; "
+            f"{session!r} is not one"
+        ) from None
+    try:
+        root = await board.root_for(cwd)
+        if root is None:
+            raise MeshError(f"{session!r} files on no board ({cwd})")
+        rows = await board.issues(root)
+    except BeadsError as exc:
+        raise MeshError(f"the board could not be read: {exc}") from None
+    return sorted({
+        str(r.get("assignee")) for r in rows
+        if r.get("status") == status and r.get("assignee")
+    })
+
+
 async def h_mesh_send(request: web.Request) -> web.Response:
     body = await _json_body(request)
     sender = str(body.get("from") or "")
@@ -4233,7 +4266,10 @@ async def h_mesh_send(request: web.Request) -> web.Response:
     if not sender:
         return json_error(400, "'from' required (a handle or a session name)")
     if not isinstance(to, (str, list)) or not to:
-        return json_error(400, "'to' must be '*', a handle, or a list of handles")
+        return json_error(
+            400, "'to' must be '*', an audience selector (@in_review), a "
+            "handle, or a list of handles"
+        )
     if not isinstance(text, str):
         return json_error(400, "'body' must be a string")
     sections = body.get("sections")

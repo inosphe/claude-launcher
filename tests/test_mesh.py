@@ -942,8 +942,10 @@ def test_non_sectioned_recipients_get_the_preamble_and_are_flagged(home, tmp_pat
         block_w3 = format_delivery("b", "w3", [msg])
         assert "sprint goal" in block_w3
         assert "login API" not in block_w3 and "token refresh" not in block_w3
-        # a substantive preamble is the intended use: no advisory
-        assert sent["notice"] is None
+        # a substantive preamble is the intended use: no preamble advisory
+        # (the '*' itself still draws the BROADCAST one)
+        assert sent["notice"].startswith("BROADCAST")
+        assert "ONLY" not in sent["notice"]
 
         # ---- the guard: a heading, not a message ------------------------ #
         thin = await mm.send(
@@ -969,7 +971,8 @@ def test_non_sectioned_recipients_get_the_preamble_and_are_flagged(home, tmp_pat
         ok = await mm.send(
             "b", "leader", "*", long_line, sections={"w1": "yours is in."},
         )
-        assert ok["notice"] is None
+        assert ok["notice"].startswith("BROADCAST")
+        assert "ONLY" not in ok["notice"]
 
         # ---- and the pre-existing floor still holds: no body, no section - #
         with pytest.raises(MeshError):
@@ -2300,3 +2303,120 @@ def test_a_dead_member_is_not_rescanned_while_the_log_is_quiet(home, tmp_path):
         await mgr.shutdown_all()
 
     asyncio.run(run())
+
+
+# --------------------------------------------------------------------------- #
+# '*' is warned on every send; '@in_review' names the landing queue instead
+# --------------------------------------------------------------------------- #
+def test_every_agent_broadcast_carries_the_broadcast_advisory(home, tmp_path):
+    """A '*' reaches finished sessions too, and each spends a turn on it
+    (claunch-424v4). The sender is told on every such send; a named send and
+    the human's dashboard send are not."""
+    _register_py_harness()
+
+    async def run():
+        mgr = _manager()
+        mm = MeshManager(mgr)
+        mm.create("b")
+        for n, h in (("s1", "leader"), ("s2", "w1"), ("s3", "w2")):
+            mgr.create(SessionDef(name=n, harness="py", cwd=str(tmp_path)))
+            await mm.join("b", n, handle=h)
+
+        cast = await mm.send("b", "leader", "*", "master moved.", type="fyi")
+        note = cast["notice"] or ""
+        assert note.startswith("BROADCAST")
+        assert "2 terminal(s)" in note
+        assert "@in_review" in note  # the alternative is named
+
+        named = await mm.send("b", "leader", ["w1"], "yours is next.")
+        assert named["notice"] is None
+
+        human = await mm.send("b", "operator", "*", "hello all", external=True)
+        assert human["notice"] is None
+
+        await mm.shutdown()
+        await mgr.shutdown_all()
+
+    asyncio.run(run())
+
+
+def test_in_review_selector_resolves_to_connected_assignees(home, tmp_path):
+    """'@in_review' becomes the explicit handle list of the members whose
+    session holds an in_review issue; the log records that list, never the
+    selector, and assignees it could not reach are reported."""
+    _register_py_harness()
+
+    async def run():
+        mgr = _manager()
+        mm = MeshManager(mgr)
+        mm.create("b")
+        for n, h in (("s1", "leader"), ("s2", "w1"), ("s3", "w2"), ("s4", "w3")):
+            mgr.create(SessionDef(name=n, harness="py", cwd=str(tmp_path)))
+            await mm.join("b", n, handle=h)
+
+        with pytest.raises(MeshError, match="has none wired"):
+            await mm.send("b", "leader", "@in_review", "remeasure")
+
+        asked = []
+
+        async def resolver(session, status):
+            asked.append((session, status))
+            # s2 and s4 are landing; s9 is an assignee with no member here
+            return ["s2", "s4", "s9"]
+
+        mm.audience_resolver = resolver
+        sent = await mm.send("b", "leader", "@in_review", "remeasure on abc")
+        assert asked == [("s1", "in_review")]
+        assert sent["recipients"] == ["w1", "w3"]
+        assert mm.get("b").messages[-1]["to"] == ["w1", "w3"]
+        assert "s9" in (sent["notice"] or "")
+        assert "BROADCAST" not in (sent["notice"] or "")
+
+        with pytest.raises(MeshError, match="unknown audience selector"):
+            await mm.send("b", "leader", "@everyone", "x")
+
+        async def nobody(session, status):
+            return []
+
+        mm.audience_resolver = nobody
+        with pytest.raises(MeshError, match="nothing was sent"):
+            await mm.send("b", "leader", "@in_review", "x")
+
+        await mm.shutdown()
+        await mgr.shutdown_all()
+
+    asyncio.run(run())
+
+
+def test_mesh_audience_reads_the_senders_board(tmp_path):
+    """The API's resolver: assignees of issues in the status, on the board
+    the sender's directory files on — distinct, sorted, blanks dropped."""
+    from types import SimpleNamespace
+
+    from claude_launcher.daemon import api as api_mod
+    from claude_launcher.daemon.manager import ManagerError
+
+    class _Mgr:
+        def get(self, name):
+            if name != "lead":
+                raise ManagerError(name)
+            return SimpleNamespace(sdef=SimpleNamespace(cwd=str(tmp_path)))
+
+    class _Board:
+        async def root_for(self, cwd):
+            assert cwd == str(tmp_path)
+            return tmp_path
+
+        async def issues(self, root):
+            return [
+                {"id": "a", "status": "in_review", "assignee": "s2"},
+                {"id": "b", "status": "in_review", "assignee": "s2"},
+                {"id": "c", "status": "in_progress", "assignee": "s3"},
+                {"id": "d", "status": "in_review", "assignee": ""},
+                {"id": "e", "status": "in_review", "assignee": "s1"},
+            ]
+
+    got = asyncio.run(api_mod._mesh_audience(_Mgr(), _Board(), "lead", "in_review"))
+    assert got == ["s1", "s2"]
+    with pytest.raises(MeshError, match="not one"):
+        asyncio.run(api_mod._mesh_audience(_Mgr(), _Board(), "ghost", "in_review"))

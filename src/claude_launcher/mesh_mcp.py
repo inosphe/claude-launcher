@@ -37,7 +37,10 @@ TOOLS = [
         "name": "send",
         "description": (
             "Send a message to mesh members. '*' broadcasts to every other "
-            "member; delivery types the message into each recipient's "
+            "connected member (and the result carries a BROADCAST advisory: "
+            "each recipient spends a turn on it); '@in_review' addresses the "
+            "members whose issue is in_review on your board. Delivery types "
+            "the message into each recipient's "
             "terminal (remote members receive it over the relay). The sender "
             "is this session ($CLAUNCH_SESSION) — join the mesh first with "
             "'claunch mesh join <mesh>'."
@@ -48,7 +51,10 @@ TOOLS = [
                 "mesh": {"type": "string", "description": "mesh name"},
                 "to": {
                     "type": "string",
-                    "description": "'*', a member handle, or comma-separated handles",
+                    "description": (
+                        "'*', an audience selector ('@in_review'), a member "
+                        "handle, or comma-separated handles"
+                    ),
                 },
                 "body": {"type": "string", "description": "message text"},
                 "type": {
