@@ -533,7 +533,7 @@ option:disabled { color: #6b7280; }
    above it still owns. */
 #session-list .sess-cflow .dot { width: 6px; height: 6px; }
 #session-list .sess-cflow-text {
-  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  min-width: 0; white-space: normal; overflow-wrap: anywhere;
 }
 /* Blocked on the person reading this — the amber that means "your move". */
 #session-list .sess-cflow.gated { color: #d29922; font-weight: 600; }
