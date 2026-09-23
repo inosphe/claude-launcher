@@ -4700,6 +4700,10 @@ a.window-owner:hover { color: #79c0ff; text-decoration: underline; }
 .search-anything form { display: flex; align-items: stretch; gap: 8px; flex: none; }
 .search-anything input { flex: 1; min-width: 0; height: 32px; padding: 6px 9px; font: inherit; background: #0d1117; color: #e6edf3; border: 1px solid #30363d; border-radius: 6px; }
 .search-anything input:focus-visible { outline: 2px solid #388bfd; outline-offset: 1px; }
+.search-anything-modes { display: flex; flex-wrap: wrap; gap: 8px 16px; border: 0; padding: 0; margin: 0 0 12px; flex: none; }
+.search-anything-modes legend { font-size: 11px; color: #9da5b0; margin-bottom: 6px; }
+.search-anything-modes label { display: flex; align-items: center; gap: 6px; cursor: pointer; }
+.search-anything-modes input { flex: none; width: 14px; height: 14px; padding: 0; margin: 0; accent-color: #388bfd; }
 .search-anything button, #search-anything-open { background: #252b35; color: #c9d1d9; border: 1px solid #30363d; border-radius: 6px; cursor: pointer; }
 .search-anything button { padding: 5px 12px; font: inherit; }
 .search-anything button:hover, #search-anything-open:hover { background: #303844; border-color: #596475; color: #e6edf3; }

@@ -30,7 +30,24 @@ globalThis.SearchAnything = (() => {
   const filters = node("div", "", "search-anything-filters");
   filters.setAttribute("role", "group"); filters.setAttribute("aria-label", "항목 종류 필터");
   const results = node("div", "", "search-anything-results");
-  form.append(input, submit); modal.append(header, form, notice, apply, filters, results); document.body.append(modal);
+  const modes = node("fieldset", "", "search-anything-modes");
+  modes.append(node("legend", "검색 범위"));
+  let searchMode = "general";
+  for (const [value, text] of [["general", "일반"], ["active", "활성 세션 + Beads"]]) {
+    const label = node("label", ""), radio = document.createElement("input");
+    radio.type = "radio"; radio.name = "search-mode"; radio.value = value; radio.checked = value === searchMode;
+    radio.onchange = () => {
+      if (!radio.checked) return;
+      searchMode = value;
+      controller?.abort(); ++sequence;
+      offered = null; apply.hidden = true; submit.disabled = false;
+      lastRows = []; kindFilter = ""; results.replaceChildren(); filters.replaceChildren();
+      notice.textContent = "Enter로 검색 · Esc로 닫기";
+      if (input.value.trim()) form.requestSubmit();
+    };
+    label.append(radio, document.createTextNode(text)); modes.append(label);
+  }
+  form.append(input, submit); modal.append(header, modes, form, notice, apply, filters, results); document.body.append(modal);
   let sequence = 0, controller = null, previousFocus = null, timeRefresh = null;
   // The last answer, kept so that changing the filter re-narrows what is
   // already on screen instead of asking the daemon the same question again.
@@ -275,7 +292,7 @@ globalThis.SearchAnything = (() => {
     submit.disabled = true; notice.textContent = "검색 중…"; results.replaceChildren(); filters.replaceChildren();
     offered = null; apply.hidden = true; rerankNote = "";
     try {
-      const response = await api("api/search/stream?kind=all&limit=30&q=" + encodeURIComponent(query),
+      const response = await api("api/search/stream?kind=all&limit=30&mode=" + searchMode + "&q=" + encodeURIComponent(query),
         {signal: controller.signal, noBatch: true});
       if (!response.ok) {
         const data = await response.json().catch(() => ({}));

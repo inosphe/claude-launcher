@@ -571,6 +571,60 @@ def _read_sse(text):
     return out
 
 
+def test_active_search_filters_before_limits_and_refreshes_liveness(tmp_path):
+    async def run():
+        endpoint = Endpoint()
+        server = await _start_endpoint(endpoint)
+        cfg = _cfg(server, candidates=2, rerank_top=2, watch_interval=0)
+        live = SimpleNamespace(sdef=SimpleNamespace(name="live"), exited=False)
+        sessions = [live, SimpleNamespace(sdef=SimpleNamespace(name="dead"), exited=True),
+                    SimpleNamespace(sdef=SimpleNamespace(name="paused"), exited=True, paused_at="now"),
+                    SimpleNamespace(sdef=SimpleNamespace(name="archived"), exited=False, archived_at="now")]
+        service = rag.RagService(config=lambda: cfg, root_dir=tmp_path / "index",
+                                 manager=SimpleNamespace(list=lambda: sessions))
+
+        async def docs():
+            out = []
+            # Many irrelevant exact and vector matches must not exhaust the
+            # candidate window before the live task and unowned board record.
+            for i in range(30):
+                out += search_anything.documents(f"dead{i}", "relay", "relay", kind="checks", sessions=[{"name": "dead"}])
+            for name in ("paused", "archived", "removed"):
+                out += search_anything.documents(name, "relay", "relay", kind="opening-task", sessions=[{"name": name}])
+            out += search_anything.documents("live-task", "relay task", "relay task details", kind="opening-task", sessions=[{"name": "live"}])
+            out += search_anything.documents("board", "relay board", "relay closed issue", kind="beads", sessions=[])
+            out += search_anything.documents("comment", "relay comment", "relay comment details", kind="comment", sessions=[{"name": "dead"}])
+            return out
+        service.all_docs = docs
+        try:
+            general = await service.search("all", "relay", limit=50, wait=10, rerank=False)
+            assert any(r["id"].startswith("dead") for r in general["results"])
+            active = await service.search("all", "relay", limit=3, mode="active", wait=10)
+            assert {r["id"] for r in active["results"]} == {"live-task:0", "board:0", "comment:0"}
+            assert all("dead" not in text for text in endpoint.rerank_calls[-1]["documents"])
+            vector_only = await service.search("all", "relay unmatched-title-word", limit=2, mode="active", wait=0)
+            assert len(vector_only["results"]) == 2
+            assert all(not r["lexical"] and r["id"] in {"live-task:0", "board:0", "comment:0"}
+                       for r in vector_only["results"])
+            stream = service.search_stream("all", "relay", limit=3, mode="active", wait=0)
+            _, first = await stream.__anext__()
+            assert any(r["id"] == "live-task:0" for r in first["results"])
+            live.exited = True
+            _, reranked = await stream.__anext__()
+            assert all(r["id"] != "live-task:0" for r in reranked["results"])
+            await stream.aclose()
+            # Reusing the same index must reflect process exit without a sync.
+            active = await service.search("all", "relay", limit=3, mode="active", wait=0)
+            assert {r["id"] for r in active["results"]} == {"board:0", "comment:0"}
+            service.manager = None
+            active = await service.search("all", "relay", mode="active", wait=0)
+            assert {r["kind"] for r in active["results"]} == {"beads", "comment"}
+        finally:
+            await service.shutdown()
+            await server.close()
+    asyncio.run(run())
+
+
 def test_search_stream_route_speaks_server_sent_events(tmp_path):
     """``GET /api/search/stream``: two events in order on one response; a
     request that fails validation is plain JSON with the status the JSON
@@ -587,6 +641,7 @@ def test_search_stream_route_speaks_server_sent_events(tmp_path):
         app = web.Application()
         app["rag"] = service
         app.router.add_get("/api/search/stream", api.h_search_stream)
+        app.router.add_get("/api/search", api.h_search)
         client = TestClient(TestServer(app))
         await client.start_server()
         try:
@@ -602,6 +657,14 @@ def test_search_stream_route_speaks_server_sent_events(tmp_path):
             assert response.status == 400 and (await response.json())["error"] == "q is required"
             response = await client.get("/api/search/stream", params={"q": "x", "kind": "nope"})
             assert response.status == 400
+            for route in ("/api/search", "/api/search/stream"):
+                response = await client.get(route, params={"q": "relay", "kind": "all", "mode": "active"})
+                assert response.status == 200
+                views = [v for _, v in _read_sse(await response.text())] if route.endswith("stream") else [await response.json()]
+                assert views and all(v["results"] == [] for v in views)
+                for params in ({"kind": "all", "mode": "invalid"}, {"kind": "sessions", "mode": "active"}):
+                    response = await client.get(route, params={"q": "relay", **params})
+                    assert response.status == 400
         finally:
             await service.shutdown()
             await client.close()

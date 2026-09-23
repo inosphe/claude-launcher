@@ -8121,6 +8121,9 @@ async def _search_args(request: web.Request):
     kind = (request.query.get("kind") or "beads").strip()
     if kind not in rag_mod.KINDS:
         return None, json_error(400, f"kind must be one of {', '.join(rag_mod.KINDS)}")
+    mode = request.query.get("mode", "general")
+    if mode not in ("general", "active") or (mode == "active" and kind != "all"):
+        return None, json_error(400, "mode must be general, or active with kind=all")
     query = (request.query.get("q") or "").strip()
     if not query:
         return None, json_error(400, "q is required")
@@ -8136,7 +8139,7 @@ async def _search_args(request: web.Request):
         return None, err
     return SimpleNamespace(
         service=service, kind=kind, query=query, root=root,
-        limit=limit, rerank=rerank, wait=float(wait),
+        limit=limit, rerank=rerank, wait=float(wait), mode=mode,
     ), None
 
 
@@ -8159,7 +8162,7 @@ async def h_search(request: web.Request) -> web.Response:
     try:
         view = await args.service.search(
             args.kind, args.query, root=args.root, limit=args.limit,
-            rerank=args.rerank, wait=args.wait,
+            rerank=args.rerank, wait=args.wait, mode=args.mode,
         )
     except rag_mod.RagError as exc:
         return json_error(502, str(exc))
@@ -8189,7 +8192,7 @@ async def h_search_stream(request: web.Request) -> web.StreamResponse:
         return err
     stream = args.service.search_stream(
         args.kind, args.query, root=args.root, limit=args.limit,
-        rerank=args.rerank, wait=args.wait,
+        rerank=args.rerank, wait=args.wait, mode=args.mode,
     )
     async with contextlib.aclosing(stream):
         try:

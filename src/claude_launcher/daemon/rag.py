@@ -693,7 +693,8 @@ class VectorIndex:
         self.updated_at = _now_iso()
 
     # -- queries -------------------------------------------------------- #
-    def rank(self, qvec: array, k: int, *, exclude: Iterable[str] = ()) -> List[Tuple[str, float]]:
+    def rank(self, qvec: array, k: int, *, exclude: Iterable[str] = (),
+             include: Optional[Iterable[str]] = None) -> List[Tuple[str, float]]:
         """The ``k`` best documents by their best chunk, best first."""
         if self.dims and len(qvec) != self.dims:
             raise RagError("embedding dimensions changed; rebuild the index")
@@ -705,11 +706,20 @@ class VectorIndex:
         # than ``k`` and fold them down. The excluded ids cost their own room
         # on top: neighbors() excludes the document it started from.
         want = min(len(self.entries) * 2 + len(skip), max(k * 4, k + len(skip) + 16))
+        query_args = {}
+        if include is not None:
+            allowed = set(include) - skip
+            if not allowed:
+                return []
+            # Filter in the engine so historical hits do not consume the
+            # candidate window or require an unbounded result transfer.
+            query_args["filter"] = "doc_id in (" + ",".join(json.dumps(d) for d in sorted(allowed)) + ")"
         try:
             hits = col.query(
                 _zvec().Query(field_name="embedding", vector=list(qvec)),
                 topk=want,
                 output_fields=["doc_id"],
+                **query_args,
             )
         except Exception as exc:  # pragma: no cover - endpoint-free failure
             raise RagError(f"rag: index query failed ({exc})") from exc
@@ -742,14 +752,17 @@ class VectorIndex:
         vec = array("f", row.vectors["embedding"])
         return self.rank(vec, k, exclude=(doc_id,))
 
-    def lexical(self, query: str, k: int) -> List[str]:
+    def lexical(self, query: str, k: int, *, exclude: Iterable[str] = ()) -> List[str]:
         """Ids whose id or title contains every query word -- the exact-match
         half a vector stage is weakest at (an issue id, a rare token)."""
         terms = [t for t in query.lower().split() if t]
         if not terms:
             return []
         hits = []
+        skip = set(exclude)
         for doc_id, entry in self.entries.items():
+            if doc_id in skip:
+                continue
             hay = f"{doc_id} {entry.meta.get('title') or entry.meta.get('name') or ''}".lower()
             if all(t in hay for t in terms):
                 hits.append(doc_id)
@@ -1359,6 +1372,7 @@ class RagService:
         limit: int = 10,
         rerank: bool = True,
         wait: float = 2.0,
+        mode: str = "general",
     ) -> AsyncIterator[Tuple[str, dict]]:
         """Answer ``query`` in two stages, as ``(event, view)`` pairs.
 
@@ -1375,6 +1389,8 @@ class RagService:
         """
         if kind not in KINDS:
             raise ValueError(f"unknown corpus {kind!r}")
+        if mode not in ("general", "active") or (mode == "active" and kind != "all"):
+            raise ValueError("mode must be general, or active with kind=all")
         cfg = self.config()
         if not store.rag_configured(cfg):
             raise RagError("rag: block not configured (base_url, api_key, embedding_model)")
@@ -1395,11 +1411,13 @@ class RagService:
         qvec, embed_cached = await self._query_vector(client, cfg, query)
         embed_ms = int((time.monotonic() - started) * 1000)
         candidates = max(limit, int(cfg.get("candidates") or limit))
-        ranked = await asyncio.to_thread(index.rank, qvec, candidates)
+        excluded = self._inactive_documents(index) if mode == "active" else set()
+        rank_args = {"include": set(index.entries) - excluded} if mode == "active" else {}
+        ranked = await asyncio.to_thread(index.rank, qvec, candidates, **rank_args)
         scores: Dict[str, float] = dict(ranked)
         order = [doc_id for doc_id, _ in ranked]
         lexical = set()
-        for doc_id in index.lexical(query, limit):
+        for doc_id in index.lexical(query, limit, exclude=excluded):
             lexical.add(doc_id)
             if doc_id not in scores:
                 scores[doc_id] = 0.0
@@ -1444,6 +1462,10 @@ class RagService:
             order = sorted(top, key=lambda d: -rerank_scores.get(d, -1.0)) + [
                 d for d in order if d not in head
             ]
+        if mode == "active":
+            # A session may exit while the reranker is running.
+            excluded = self._inactive_documents(index)
+            order = [doc_id for doc_id in order if doc_id not in excluded]
         yield "reranked", self._search_view(
             kind, query, root, index, prog, order, scores, lexical, rerank_scores,
             limit=limit, timing=timing, pending=False,
@@ -1458,6 +1480,7 @@ class RagService:
         limit: int = 10,
         rerank: bool = True,
         wait: float = 2.0,
+        mode: str = "general",
     ) -> dict:
         """Rank the corpus for ``query``; the answer names its own coverage.
 
@@ -1468,7 +1491,7 @@ class RagService:
         """
         last: Optional[dict] = None
         async for event, view in self.search_stream(
-            kind, query, root=root, limit=limit, rerank=rerank, wait=wait,
+            kind, query, root=root, limit=limit, rerank=rerank, wait=wait, mode=mode,
         ):
             if event == "error":
                 if kind != "all":
@@ -1477,6 +1500,30 @@ class RagService:
             last = view
         assert last is not None  # search_stream always yields ``ranked`` first
         return last
+
+    def _inactive_documents(self, index: "VectorIndex") -> set:
+        """Exclude records outside live sessions and Beads, before ranking.
+
+        Beads includes every issue and comment, regardless of issue status or
+        session association. Unknown session names fail closed: old metadata
+        cannot establish that a removed process is still alive.
+        """
+        live = {
+            session.sdef.name for session in (self.manager.list() if self.manager else [])
+            if not getattr(session, "exited", True)
+            and not getattr(session, "paused_at", None)
+            and not getattr(session, "archived_at", None)
+        }
+        excluded = set()
+        for doc_id, entry in index.entries.items():
+            meta = entry.meta
+            if meta.get("kind") in ("beads", "comment"):
+                continue
+            names = {s.get("name") for s in meta.get("sessions", [])}
+            names.add(meta.get("name"))
+            if not live.intersection(names):
+                excluded.add(doc_id)
+        return excluded
 
     def _search_view(
         self,
