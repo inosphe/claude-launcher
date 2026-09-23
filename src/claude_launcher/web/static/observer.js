@@ -258,11 +258,72 @@ async function oneShot(name) {
     refreshing.delete(name);lastSnapshot="";await refresh();
   }
 }
+/* briefing/checks records (search_records.capture, kind "briefing"/"checks")
+   carry their payload as e.text = JSON.stringify(payload,null,2) already, so
+   the structure is on hand without the lazy /events/{id} fetch below. */
+function recordPayload(e) {
+  try { return JSON.parse(e.text); } catch { return null; }
+}
+/* Same box the session rail's briefing card uses (style.css .sess-brief*,
+   unscoped there precisely so other panels can reuse it) so one snapshot
+   reads the same way whether it is seen live on the rail or archived here. */
+function briefingSnapshot(payload) {
+  const box=node("div","","sess-brief");
+  if(!payload||typeof payload!=="object") {
+    box.append(node("div","브리핑 데이터를 표시할 수 없습니다.","sess-brief-note"));
+    return box;
+  }
+  if(payload.raw) {
+    // The model answered outside the agreed shape; its words are still the
+    // best available summary, shown as they came (matches app.js's fallback).
+    box.append(node("pre",payload.raw,"sess-brief-raw"));
+    return box;
+  }
+  if(payload.state) box.append(node("span",payload.state,`sess-brief-state st-${briefingStateClass(payload.state)}`));
+  if(payload["one-line-job-description"]) box.append(node("div",payload["one-line-job-description"],"sess-brief-one"));
+  for(const [key,label] of [["goal","목표"],["now","현재"],["progress","진행"]]) {
+    const val=payload[key];
+    if(!val)continue;
+    const row=node("div","","sess-brief-row");
+    row.append(node("span",label,"sess-brief-k"),node("span",String(val),"sess-brief-v"));
+    box.append(row);
+  }
+  if(Array.isArray(payload.faq)) {
+    for(const item of payload.faq) {
+      if(!item||!item.question||!item.answer)continue;
+      const row=node("div","","sess-brief-row sess-brief-faq");
+      row.append(node("span",String(item.question),"sess-brief-k"),node("span",String(item.answer),"sess-brief-v"));
+      box.append(row);
+    }
+  }
+  if(!box.children.length) box.append(node("div","빈 브리핑입니다.","sess-brief-note"));
+  return box;
+}
+function checksSnapshot(payload) {
+  const box=node("div","","sess-brief");
+  if(!Array.isArray(payload)||!payload.length) {
+    box.append(node("div","표시할 체크 항목이 없습니다.","sess-brief-note"));
+    return box;
+  }
+  for(const check of payload) {
+    const row=node("div","","sess-brief-row sess-brief-check");
+    const answer=node("span",statusCheckIcon(check),`status-check-icon check-${statusCheckText(check)}`);
+    answer.title=String(check.question||"");
+    row.append(answer,node("span",statusCheckName(check),"sess-brief-v"));
+    box.append(row);
+  }
+  return box;
+}
 function eventItem(s,e) {
   const item=node("div","",`event${e.needs_action&&!e.acknowledged?" action":""}`);
   item.dataset.event=e.id;
   const origin=e.origin==="record"?"저장된 기록":e.origin==="daemon"?"세션 이벤트":e.origin==="agent"?"에이전트 직접 보고":"자동 관찰";
-  item.append(node("small",`${s.name} · ${origin} · ${e.kind} · ${new Date(e.at).toLocaleString()}${e.acknowledged?" · 확인됨":""}`),node("div",e.text));
+  item.append(node("small",`${s.name} · ${origin} · ${e.kind} · ${new Date(e.at).toLocaleString()}${e.acknowledged?" · 확인됨":""}`));
+  const isRecord=e.origin==="record"&&(e.kind==="briefing"||e.kind==="checks");
+  const snapshot=isRecord?recordPayload(e):null;
+  if(e.kind==="briefing"&&isRecord) item.append(briefingSnapshot(snapshot));
+  else if(e.kind==="checks"&&isRecord) item.append(checksSnapshot(snapshot));
+  else item.append(node("div",e.text));
   if(e.origin==="daemon") {
     if(e.kind==="borrow") {
       const d=e.details||{}, before=d.previous_null?"인증 없음":d.previous||"자체 프로파일", after=d.null_token?"인증 없음":d.current||"자체 프로파일";
@@ -277,8 +338,13 @@ function eventItem(s,e) {
   }
   if(e.origin==="agent") {addDirect(item,s,e);return item;}
   const detail=document.createElement("details"), evidence=node("pre","불러오는 중…");
-  detail.append(node("summary",`근거 · ${e.source}`),evidence);
-  detail.ontoggle=async()=>{if(!detail.open||detail.dataset.loaded)return;try{const data=await request(`api/observer/${encodeURIComponent(s.name)}/events/${encodeURIComponent(e.id)}`);evidence.textContent=JSON.stringify(data,null,2);detail.dataset.loaded="1";}catch(err){evidence.textContent=err.message;}};
+  detail.append(node("summary",snapshot?"원본 JSON 보기":`근거 · ${e.source}`),evidence);
+  if(snapshot) {
+    // Already have the full payload from e.text — no round trip needed.
+    detail.ontoggle=()=>{if(!detail.open||detail.dataset.loaded)return;evidence.textContent=JSON.stringify(snapshot,null,2);detail.dataset.loaded="1";};
+  } else {
+    detail.ontoggle=async()=>{if(!detail.open||detail.dataset.loaded)return;try{const data=await request(`api/observer/${encodeURIComponent(s.name)}/events/${encodeURIComponent(e.id)}`);evidence.textContent=JSON.stringify(data,null,2);detail.dataset.loaded="1";}catch(err){evidence.textContent=err.message;}};
+  }
   item.append(detail);
   if(e.needs_action&&!e.acknowledged) {
     const button=node("button","확인 표시");button.onclick=async()=>{try{await request(`api/observer/${encodeURIComponent(s.name)}/acknowledge`,{id:e.id});await refresh();}catch(err){showError(err.message);}};item.append(button);
