@@ -1461,6 +1461,298 @@ function toggleSessionPin(name) {
 }
 /* ---- end rail pins ---------------------------------------------------- */
 
+/* ---- rail grid view ---------------------------------------------------
+   The rail's second view of the same sessions. The list places a session by
+   lineage and state, so its place moves whenever the fleet around it does;
+   the grid gives each one a fixed cell in a named row (session-grid.js) that
+   only a person moves -- by dragging a cell, or Alt+arrow on a focused one.
+   The view choice and the layout are both remembered per browser, like the
+   pins and the folds above. The list is still built on every poll while the
+   grid is shown, so switching back is instant and nothing the list's own
+   helpers expect is missing. */
+const SESSION_VIEW_KEY = `claunch_session_view:${BASE}`;
+const SESSION_GRID_KEY = `claunch_session_grid:${BASE}`;
+let sessionView = (() => {
+  try { return localStorage.getItem(SESSION_VIEW_KEY) === "grid" ? "grid" : "list"; } catch {}
+  return "list";
+})();
+let sessionGrid = null;
+let sessionGridDragging = null;
+let sessionGridPending = false;
+
+function sessionGridLayout() {
+  if (!sessionGrid && typeof SessionGridLayout === "function") {
+    sessionGrid = new SessionGridLayout(localStorage, SESSION_GRID_KEY);
+  }
+  return sessionGrid;
+}
+
+function setSessionView(view, remember = true) {
+  sessionView = view === "grid" ? "grid" : "list";
+  if (remember) {
+    try { localStorage.setItem(SESSION_VIEW_KEY, sessionView); } catch {}
+  }
+  syncSessionView();
+}
+
+function syncSessionView() {
+  const grid = sessionView === "grid";
+  $("session-list")?.classList.toggle("hidden", grid);
+  $("session-grid")?.classList.toggle("hidden", !grid);
+  // Mesh and workspace grouping reorder the list; the grid's rows are its
+  // grouping, so the two checkboxes would do nothing there.
+  document.querySelectorAll(".session-group-toggle").forEach((el) =>
+    el.classList.toggle("hidden", grid));
+  document.querySelectorAll('input[name="session-view"]').forEach((input) => {
+    input.checked = input.value === sessionView;
+  });
+  if (grid) renderSessionGrid(true);
+}
+
+/* The sessions the grid draws: those the rail's state filter admits. A
+   placed session outside that set keeps its cell and is drawn faint. */
+function sessionGridVisible() {
+  return sessionsCache.filter((s) => sessionMatchesFilter(s));
+}
+
+function renderSessionGrid(force = false) {
+  const host = $("session-grid");
+  const layout = sessionGridLayout();
+  if (!host || !layout || sessionView !== "grid") return;
+  // A drag or a rename in progress holds the nodes it started on; the poll
+  // that lands meanwhile is owed back when it ends.
+  if (sessionGridDragging || host.querySelector(".sg-rename")) {
+    sessionGridPending = true;
+    return;
+  }
+  sessionGridPending = false;
+  const visible = sessionGridVisible();
+  layout.place(visible);
+  const records = new Map(visible.map((s) => [s.name, s]));
+  const searching = typeof sessionMatchesSearch === "function";
+  const signature = JSON.stringify([
+    layout.rows, currentName,
+    visible.map((s) => [s.name, s.status, s.paused_at, s.role,
+                        handleTag(s.name)?.handle || null,
+                        searching ? sessionMatchesSearch(s) : true,
+                        s.briefing?.one_line || null]),
+  ]);
+  if (!force && host._gridSignature === signature) return;
+  host._gridSignature = signature;
+  const focusName = host.contains(document.activeElement)
+    ? document.activeElement.dataset.name : null;
+  const keptScroll = [host.scrollLeft, host.scrollTop];
+  host.replaceChildren();
+  const cols = layout.columns();
+  host.style.setProperty("--sg-cols", String(cols));
+  // Column numbers, so a position can be named -- "bravo 3" -- and found
+  // again the same way.
+  const ruler = document.createElement("div");
+  ruler.className = "sg-row sg-ruler";
+  ruler.append(Object.assign(document.createElement("div"), { className: "sg-row-head" }));
+  for (let c = 0; c < cols; c++) {
+    ruler.append(Object.assign(document.createElement("div"), {
+      className: "sg-col-num", textContent: String(c + 1),
+    }));
+  }
+  host.append(ruler);
+  const present = new Set(records.keys());
+  layout.rows.forEach((row, r) => {
+    const line = document.createElement("div");
+    line.className = "sg-row";
+    line.dataset.row = row.id;
+    line.append(sessionGridRowHead(layout, row, present));
+    for (let c = 0; c < cols; c++) {
+      line.append(sessionGridCell(layout, row, r, c, records, present, searching));
+    }
+    host.append(line);
+  });
+  const add = document.createElement("button");
+  add.type = "button";
+  add.className = "sg-add-row";
+  add.textContent = "+ row";
+  add.title = `add a row named ${layout.nextRowName()}`;
+  add.addEventListener("click", () => {
+    layout.addRow();
+    renderSessionGrid(true);
+  });
+  host.append(add);
+  [host.scrollLeft, host.scrollTop] = keptScroll;
+  if (focusName) {
+    host.querySelector(`.sg-cell[data-name="${CSS.escape(focusName)}"]`)
+      ?.focus({ preventScroll: true });
+  }
+}
+
+function sessionGridRowHead(layout, row, present) {
+  const head = document.createElement("div");
+  head.className = "sg-row-head";
+  const name = document.createElement("span");
+  name.className = "sg-row-name";
+  name.textContent = row.name;
+  name.title = `${row.name} — double-click to rename`;
+  name.addEventListener("dblclick", () => startSessionGridRename(layout, row, head));
+  const edit = document.createElement("button");
+  edit.type = "button";
+  edit.className = "sg-row-edit";
+  edit.textContent = "✎";
+  edit.title = `rename row ${row.name}`;
+  edit.addEventListener("click", () => startSessionGridRename(layout, row, head));
+  head.append(name, edit);
+  const occupied = row.cells.some((n) => n && present.has(n));
+  if (layout.rows.length > 1) {
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.className = "sg-row-remove";
+    remove.textContent = "×";
+    if (occupied) {
+      remove.setAttribute("aria-disabled", "true");
+      remove.classList.add("disabled");
+      remove.title = `row ${row.name} still holds sessions — move them out first`;
+    } else {
+      remove.title = `remove row ${row.name}`;
+      remove.addEventListener("click", () => {
+        if (layout.removeRow(row.id, present)) renderSessionGrid(true);
+      });
+    }
+    head.append(remove);
+  }
+  return head;
+}
+
+function startSessionGridRename(layout, row, head) {
+  const input = document.createElement("input");
+  input.className = "sg-rename";
+  input.value = row.name;
+  input.setAttribute("aria-label", `new name for row ${row.name}`);
+  let done = false;
+  const finish = (commit) => {
+    if (done) return;
+    if (commit) {
+      const refused = layout.renameRow(row.id, input.value);
+      if (refused) {
+        input.setCustomValidity(refused);
+        input.reportValidity();
+        input.title = refused;
+        return;
+      }
+    }
+    done = true;
+    input.remove();
+    renderSessionGrid(true);
+  };
+  input.addEventListener("keydown", (ev) => {
+    ev.stopPropagation();
+    input.setCustomValidity("");
+    if (ev.key === "Enter") finish(true);
+    else if (ev.key === "Escape") finish(false);
+  });
+  input.addEventListener("blur", () => finish(true));
+  head.replaceChildren(input);
+  input.focus();
+  input.select();
+}
+
+function sessionGridCell(layout, row, r, c, records, present, searching) {
+  const cell = document.createElement("div");
+  cell.className = "sg-cell";
+  cell.dataset.row = row.id;
+  cell.dataset.col = String(c);
+  const name = row.cells[c] || null;
+  const s = name ? records.get(name) : null;
+  const where = `${row.name} ${c + 1}`;
+  if (!s) {
+    cell.classList.add("empty");
+    if (name) {
+      // Out of this view (archived, filtered, cleared): the cell stays its
+      // and says whose it is, until something is moved onto it.
+      cell.classList.add("absent");
+      cell.textContent = name;
+      cell.title = `${where} — ${name}, not in this view; its place is kept`;
+    } else {
+      cell.title = `${where} — empty`;
+    }
+  } else {
+    cell.dataset.name = s.name;
+    cell.tabIndex = 0;
+    cell.draggable = true;
+    if (s.name === currentName) cell.classList.add("active");
+    if (searching && !sessionMatchesSearch(s)) cell.classList.add("session-filtered");
+    const dot = document.createElement("span");
+    dot.className = `dot ${s.status}${s.status === "exited" && s.paused_at ? " paused" : ""}`;
+    const label = document.createElement("span");
+    label.className = "sg-name";
+    label.textContent = s.name;
+    const sub = document.createElement("span");
+    sub.className = "sg-sub";
+    const hTag = handleTag(s.name);
+    sub.textContent = hTag ? hTag.handle : (s.role || "");
+    cell.append(dot, label, sub);
+    const brief = typeof briefingTabTooltip === "function"
+      ? briefingTabTooltip(s.briefing) : "";
+    cell.title = `${where} — ${s.name}${hTag ? ` (${hTag.handle})` : ""} — ${s.status}`
+      + (brief ? `\n${brief}` : "")
+      + "\ndrag, or Alt+arrow, to move it";
+    cell.addEventListener("click", () => {
+      document.querySelectorAll("#session-grid .sg-cell.active")
+        .forEach((el) => el.classList.remove("active"));
+      cell.classList.add("active");
+      location.hash = "#/s/" + encodeURIComponent(s.name);
+    });
+    cell.addEventListener("keydown", (ev) => {
+      if (ev.key === "Enter") {
+        ev.preventDefault();
+        cell.click();
+        return;
+      }
+      const step = { ArrowLeft: [0, -1], ArrowRight: [0, 1],
+                     ArrowUp: [-1, 0], ArrowDown: [1, 0] }[ev.key];
+      if (!step) return;
+      ev.preventDefault();
+      if (ev.altKey) {
+        if (layout.moveBy(s.name, step[0], step[1], present)) renderSessionGrid(true);
+        return;
+      }
+      // Plain arrows walk the occupied cells, the way the eye does.
+      const host = $("session-grid");
+      const rows = [...host.querySelectorAll(".sg-row[data-row]")];
+      for (let rr = r + step[0], cc = c + step[1];
+        rr >= 0 && rr < rows.length && cc >= 0 && cc < layout.columns();
+        rr += step[0], cc += step[1]) {
+        const next = rows[rr].children[cc + 1];
+        if (next && next.dataset.name) { next.focus(); break; }
+      }
+    });
+    cell.addEventListener("dragstart", (ev) => {
+      sessionGridDragging = s.name;
+      ev.dataTransfer.effectAllowed = "move";
+      ev.dataTransfer.setData("text/plain", s.name);
+      cell.classList.add("dragging");
+    });
+    cell.addEventListener("dragend", () => {
+      sessionGridDragging = null;
+      cell.classList.remove("dragging");
+      if (sessionGridPending) renderSessionGrid(true);
+    });
+  }
+  cell.addEventListener("dragover", (ev) => {
+    if (!sessionGridDragging) return;
+    ev.preventDefault();
+    ev.dataTransfer.dropEffect = "move";
+    cell.classList.add("drop-target");
+  });
+  cell.addEventListener("dragleave", () => cell.classList.remove("drop-target"));
+  cell.addEventListener("drop", (ev) => {
+    ev.preventDefault();
+    const moving = sessionGridDragging;
+    sessionGridDragging = null;
+    if (moving) layout.move(moving, row.id, c, present);
+    renderSessionGrid(true);
+  });
+  return cell;
+}
+/* ---- end rail grid view ---------------------------------------------- */
+
 /* Re-measure lineage depth inside one bucket of rows.
 
    `byLineage` numbers the whole rail, and grouping then cuts that tree up:
@@ -1742,6 +2034,7 @@ function syncSessionFilters(sessions) {
   // a visible match while preserving the reader's stored fold preferences.
   if (typeof syncSessionGroupSearch === "function") syncSessionGroupSearch(list);
   if (typeof syncSessionSearchNote === "function") syncSessionSearchNote();
+  if (typeof renderSessionGrid === "function") renderSessionGrid();
   if (typeof syncBulkActions === "function") syncBulkActions(sessions || [], sessionFilter);
 }
 
@@ -2701,6 +2994,9 @@ async function refreshSessions(options) {
     // puts it back, so the mark outlives the poll that lands mid-scroll.
     applyGotoFlash();
   }
+  // The grid keeps its own signature, so it follows every poll whether or
+  // not the list above was rebuilt.
+  if (typeof renderSessionGrid === "function") renderSessionGrid();
 }
 
 /* The meshes a rail row speaks for — the rooms that session is in.
@@ -8283,6 +8579,11 @@ if (meshGroupToggle) {
   meshGroupToggle.addEventListener("change", () =>
     setSessionGroupByMesh(meshGroupToggle.checked));
 }
+document.querySelectorAll('input[name="session-view"]').forEach((input) =>
+  input.addEventListener("change", () => {
+    if (input.checked) setSessionView(input.value);
+  }));
+syncSessionView();
 const workspaceGroupToggle = $("session-group-workspace");
 if (workspaceGroupToggle) {
   workspaceGroupToggle.checked = sessionGroupByWorkspace;

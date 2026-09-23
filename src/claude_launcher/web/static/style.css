@@ -103,6 +103,98 @@ option:disabled { color: #6b7280; }
   padding: 4px 7px 2px; color: #8b949e; font-size: 11px; cursor: pointer;
 }
 .session-group-toggle input { margin: 0; accent-color: #58a6ff; }
+
+/* List | Grid: one segmented radio pair above the filters. */
+.session-view-tabs {
+  flex: none; display: flex; gap: 2px; margin: 0; padding: 3px 6px 0;
+  border: 0; background: #11151b;
+}
+.session-view-tabs legend {
+  position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0,0,0,0);
+}
+.session-view-tabs label { flex: 1; position: relative; cursor: pointer; }
+.session-view-tabs input { position: absolute; width: 1px; height: 1px; opacity: 0; }
+.session-view-tabs span {
+  display: block; padding: 4px 0; border-radius: 4px; text-align: center;
+  color: #7d8590; font-size: 11px; font-weight: 600;
+}
+.session-view-tabs label:hover span { color: #c9d1d9; background: #1d2128; }
+.session-view-tabs input:checked + span {
+  color: #e6edf3; background: #243247; box-shadow: inset 0 0 0 1px #385273;
+}
+.session-view-tabs input:focus-visible + span { outline: 2px solid #58a6ff; outline-offset: 1px; }
+
+/* The grid view. Every row is drawn with the same column count
+   (--sg-cols), so a column is the same x in every row; the row names stay
+   pinned on the left while the cells scroll sideways under them. */
+#session-grid {
+  flex: 1; overflow: auto; padding: 4px 0 8px; font-size: 12px;
+  --sg-head-w: 64px; --sg-cell-w: 76px;
+}
+#session-grid .sg-row {
+  display: grid; align-items: stretch; gap: 3px; padding: 0 6px 3px 0;
+  grid-template-columns: var(--sg-head-w) repeat(var(--sg-cols, 1), var(--sg-cell-w));
+  width: max-content;
+}
+#session-grid .sg-row-head {
+  position: sticky; left: 0; z-index: 1; display: flex; align-items: center;
+  padding: 0 4px 0 8px; background: #14161a; min-width: 0;
+}
+#session-grid .sg-row-name {
+  flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  color: #c9d1d9; font-weight: 600; cursor: text;
+}
+/* The row's two buttons lie over the end of its name on hover instead of
+   holding width the name would otherwise be cut short by. */
+#session-grid .sg-row-edit, #session-grid .sg-row-remove {
+  flex: none; background: #14161a; border: 0; padding: 0 2px; cursor: pointer;
+  color: #6e7681; font-size: 11px; display: none;
+}
+#session-grid .sg-row-head:hover :is(.sg-row-edit, .sg-row-remove),
+#session-grid .sg-row-head :is(.sg-row-edit, .sg-row-remove):focus-visible { display: block; }
+#session-grid .sg-row-edit:hover { color: #58a6ff; }
+#session-grid .sg-row-remove:hover { color: #ff7b72; }
+#session-grid .sg-row-remove.disabled, #session-grid .sg-row-remove.disabled:hover {
+  color: #444c56; cursor: not-allowed;
+}
+#session-grid .sg-rename {
+  width: 100%; min-width: 0; padding: 2px 4px; font: inherit; color: #e6edf3;
+  background: #0d1117; border: 1px solid #58a6ff; border-radius: 3px;
+}
+#session-grid .sg-ruler { position: sticky; top: -4px; z-index: 2; background: #14161a; }
+#session-grid .sg-ruler .sg-row-head { height: 14px; }
+#session-grid .sg-col-num {
+  color: #545d68; font-size: 10px; text-align: center; font-variant-numeric: tabular-nums;
+}
+#session-grid .sg-cell {
+  position: relative; height: 36px; min-width: 0; padding: 3px 5px 3px 14px;
+  border: 1px solid #262c35; border-radius: 4px; background: #1a1e24;
+  display: flex; flex-direction: column; justify-content: center; cursor: pointer;
+  overflow: hidden; white-space: nowrap;
+}
+#session-grid .sg-cell:hover { background: #22262d; }
+#session-grid .sg-cell.active { background: #2b313b; border-color: #385273; }
+#session-grid .sg-cell:focus-visible { outline: 2px solid #58a6ff; outline-offset: -1px; }
+#session-grid .sg-cell.session-filtered { opacity: 0.25; }
+#session-grid .sg-cell.dragging { opacity: 0.4; }
+#session-grid .sg-cell.empty {
+  background: transparent; border-style: dashed; border-color: #22272e; cursor: default;
+}
+#session-grid .sg-cell.absent {
+  color: #444c56; font-size: 11px; font-style: italic; text-overflow: ellipsis;
+}
+#session-grid .sg-cell.drop-target { border: 1px solid #58a6ff; background: #1b2a44; }
+#session-grid .sg-cell .dot {
+  position: absolute; left: 5px; top: 8px; width: 6px; height: 6px; border-radius: 50%;
+}
+#session-grid .sg-name { color: #d8dbe0; overflow: hidden; text-overflow: ellipsis; }
+#session-grid .sg-sub { color: #7d8590; font-size: 10px; overflow: hidden; text-overflow: ellipsis; }
+#session-grid .sg-sub:empty { display: none; }
+#session-grid .sg-add-row {
+  margin: 4px 0 0 8px; padding: 2px 8px; background: none; cursor: pointer;
+  border: 1px dashed #30363d; border-radius: 4px; color: #7d8590; font-size: 11px;
+}
+#session-grid .sg-add-row:hover { color: #58a6ff; border-color: #58a6ff; }
 #session-list { list-style: none; overflow-y: auto; overflow-x: hidden; flex: 1; }
 #session-list .session-group {
   display: block; padding: 0; border: 0; background: transparent; list-style: none;
