@@ -19688,6 +19688,10 @@ async function projectRemove(p) {
    is why every issue filed before workspaces had boards of their own reads as
    that board's. */
 let beadsBoardsCache = [];
+// False until the first answer (or failure) arrives. Before it, an empty
+// cache means "not asked yet", and saying "no board yet" then reads as the
+// feature being broken for the seconds the Settings refreshers take.
+let beadsBoardsLoaded = false;
 let beadsBoardsError = "";
 let beadsBoardsNotice = "";
 let beadsBoardsBusy = "";      // the board name a write is in flight for
@@ -19705,6 +19709,7 @@ async function refreshBeadsBoards() {
   } catch (err) {
     beadsBoardsError = String(err);
   }
+  beadsBoardsLoaded = true;
   if (wsOpen) renderWorkspaces();
 }
 
@@ -19726,22 +19731,28 @@ function beadsBoardPathProblem(raw) {
 
 function beadsBoardsCard() {
   const card = el("section", "ws-add beads-boards-card");
-  card.appendChild(el("h3", null, `Beads boards (${beadsBoardsCache.length})`));
+  card.appendChild(el("h3", null, beadsBoardsLoaded
+    ? `Beads boards (${beadsBoardsCache.length})`
+    : "Beads boards"));
   card.appendChild(el(
     "p", "wf-note",
     "One board per workspace: a session opened there, and every issue filed " +
     "for it, reads that workspace's own database. The field names the .db " +
     "file itself — the database is created on first use if it is not there " +
     "yet, or now with Create. '" + beadsDefaultBoardName + "' is the board " +
-    "for a directory in no registered workspace, and it holds everything " +
-    "filed before workspaces had boards of their own."
+    "the daemon was already using: it holds everything filed before " +
+    "workspaces had boards of their own, and a directory inside its " +
+    "checkout that no workspace claims files there. A directory outside " +
+    "every board files nowhere until it is registered."
   ));
   if (beadsBoardsError) card.appendChild(el("p", "error", beadsBoardsError));
   if (beadsBoardsNotice) card.appendChild(el("p", "wf-note", beadsBoardsNotice));
-  if (!beadsBoardsCache.length) {
+  if (!beadsBoardsLoaded) {
+    card.appendChild(el("p", "wf-note", "loading boards…"));
+  } else if (!beadsBoardsCache.length) {
     card.appendChild(el(
       "p", "wf-note",
-      "no board yet — register a directory below and it gets one."
+      "no board yet — register a directory above and it gets one."
     ));
   }
   for (const b of beadsBoardsCache) card.appendChild(beadsBoardSettingsRow(b));
@@ -19754,7 +19765,8 @@ function beadsBoardSettingsRow(b) {
   head.appendChild(el("span", "ws-name", b.board));
   if (b.kind === "default") {
     const badge = el("span", "badge idle", "default board");
-    badge.title = "used by a directory that is in no registered workspace";
+    badge.title = "the board issues were filed on before workspaces had " +
+      "boards of their own";
     head.appendChild(badge);
   } else {
     const where = el("span", "ws-path mono", b.path || "");

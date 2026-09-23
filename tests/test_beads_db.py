@@ -150,6 +150,43 @@ def test_the_default_board_is_pinned_once_and_then_stays(tmp_path):
     assert beads_db.ensure_default(other) == first
 
 
+def test_the_default_root_is_the_first_candidate_holding_a_database(tmp_path):
+    """The daemon's working directory is often not a checkout at all (it was
+    launched from the home directory), and a checkout with no board is not
+    where anything was filed. Both are skipped."""
+    empty = tmp_path / "no-board"
+    empty.mkdir()
+    real = tmp_path / "has-board"
+    (real / ".beads").mkdir(parents=True)
+    (real / ".beads" / "beads.db").write_bytes(b"")
+    assert beads_db.pick_default_root([None, empty, real]) == real
+    assert beads_db.pick_default_root([None, empty]) is None
+    assert beads_db.pick_default_root([]) is None
+
+
+def test_a_daemon_outside_any_checkout_still_pins_its_source_checkouts_board(
+    tmp_path, monkeypatch
+):
+    """The case that shipped broken: the daemon ran from a directory git does
+    not claim, the first candidate was None, and nothing was pinned -- so
+    Settings had no claunch-default row and the old issues had no name."""
+    src = tmp_path / "checkout"
+    (src / ".beads").mkdir(parents=True)
+    (src / ".beads" / "beads.db").write_bytes(b"")
+    monkeypatch.setattr(beads_db, "source_checkout", lambda: src)
+    pinned = beads_db.ensure_default(
+        beads_db.pick_default_root([None, beads_db.source_checkout()])
+    )
+    assert Path(pinned) == src / ".beads" / "beads.db"
+    assert beads_db.default_ref(None).name == beads_db.DEFAULT_BOARD
+
+
+def test_the_source_checkout_is_found_from_the_package():
+    found = beads_db.source_checkout()
+    assert found is not None
+    assert (found / "src" / "claude_launcher" / "beads_db.py").is_file()
+
+
 def test_without_a_pinned_default_and_without_a_root_there_is_no_board():
     assert beads_db.default_ref(None) is None
 

@@ -49,7 +49,7 @@ import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, Iterable, List, Optional
 
 from . import store, workspaces
 
@@ -312,6 +312,36 @@ def default_ref(
         name=DEFAULT_BOARD, db=str(default_db_for(root)), root=str(root),
         workspace="", configured=False,
     )
+
+
+def source_checkout() -> Optional[Path]:
+    """The git checkout this package is imported from, or ``None``.
+
+    An editable install runs straight out of a repository, and that
+    repository's board is the one the daemon has been filing into. An
+    installed wheel lives under ``site-packages``, which no ``.git`` encloses,
+    and answers ``None``.
+    """
+    here = Path(__file__).resolve().parent
+    for candidate in (here, *here.parents):
+        if (candidate / ".git").exists():
+            return candidate
+    return None
+
+
+def pick_default_root(candidates: Iterable[Optional[Path]]) -> Optional[Path]:
+    """The first candidate root that already holds a board database.
+
+    Pinning :data:`DEFAULT_BOARD` is meant to name a board that exists — the
+    one issues were already filed into. A candidate with no
+    ``.beads/beads.db`` is skipped rather than pinned, so a daemon started
+    from a directory that happens to be some other checkout does not name an
+    empty board as the home of everything filed so far.
+    """
+    for root in candidates:
+        if root is not None and default_db_for(Path(root)).is_file():
+            return Path(root)
+    return None
 
 
 def ensure_default(root: Optional[Path]) -> Optional[str]:
