@@ -136,3 +136,63 @@ def test_pause_api_partitions_the_records_and_resumes_only_the_paused(home, tmp_
             await client.close()
 
     asyncio.run(run())
+
+
+def test_kill_files_a_paused_record_as_killed_and_archive_takes_it(home):
+    """The operator's kill and archive both reach a paused record
+    (claunch-zpyzf). Kill changes the one thing a pause left behind — the
+    marker — so the record moves to *Killed* and out of the bulk resume;
+    archive files it like any other exited record."""
+
+    async def run():
+        mgr = _manager()
+        app = build_app(mgr, "sekrit", started_at=0.0)
+        client = TestClient(TestServer(app))
+        await client.start_server()
+        headers = {"Authorization": "Bearer sekrit"}
+
+        async def names(state: str) -> list:
+            response = await client.get(
+                f"/api/sessions?view=rail&state={state}", headers=headers
+            )
+            return sorted(row["name"] for row in (await response.json())["sessions"])
+
+        try:
+            add_dead(mgr, "p0", paused_at=PAUSED_AT)
+            add_dead(mgr, "p1", paused_at=PAUSED_AT)
+            add_dead(mgr, "k0")
+
+            response = await client.post("/api/sessions/p0/kill", headers=headers)
+            assert response.status == 200
+            body = await response.json()
+            assert body["unpaused"] is True and body["already_exited"] is True
+            assert body["paused_at"] is None and body["status"] == "exited"
+            assert mgr.get("p0").paused_at is None
+            assert [e["kind"] for e in mgr.events.rows(mgr.get("p0"))] == ["kill"]
+            assert await names("paused") == ["p1"]
+            assert await names("killed") == ["k0", "p0"]
+
+            # Once it reads killed there is nothing left for a kill to change,
+            # and a killed record is not turned into anything by one either.
+            for name in ("p0", "k0"):
+                body = await (await client.post(
+                    f"/api/sessions/{name}/kill", headers=headers)).json()
+                assert body["already_exited"] is True and "unpaused" not in body
+
+            # The daemon's own kill path stays a no-op on a paused record.
+            mgr.kill("p1")
+            assert mgr.get("p1").paused_at == PAUSED_AT
+
+            response = await client.post("/api/sessions/p1/archive", headers=headers)
+            assert response.status == 200
+            body = await response.json()
+            assert body["archived_at"] and body["paused_at"] == PAUSED_AT
+            assert "stopped" not in body
+            assert await names("archived") == ["p1"]
+            assert await names("paused") == []
+        finally:
+            for s in list(mgr.list()):
+                await s.shutdown()
+            await client.close()
+
+    asyncio.run(run())

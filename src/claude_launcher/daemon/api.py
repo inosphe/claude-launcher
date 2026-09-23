@@ -5995,6 +5995,12 @@ async def h_session_kill(request: web.Request) -> web.Response:
     silent: a caller that asks twice deserves to know the second ask changed
     nothing, or it will keep asking.
 
+    A *paused* record is the one exited state a kill still changes: the
+    process is already gone, but the record is filed as a temporary stop.
+    Killing it clears the marker (:meth:`SessionManager.unpause`) so it reads
+    as killed and leaves the bulk resume's set; the reply carries
+    ``unpaused: true`` beside ``already_exited``.
+
     ``?force=1`` is SIGKILL, as it always was, and means nothing on an exited
     session — there is nothing left for it to carry. The mesh is untouched
     either way: a member row is *meant* to outlive the terminal, reading
@@ -6005,7 +6011,11 @@ async def h_session_kill(request: web.Request) -> web.Response:
     force = request.query.get("force") in ("1", "true")
     session = manager.get(name)  # ManagerError -> 400, as it always did
     if session.exited:
-        return json_response({**session.info(), "already_exited": True})
+        unpaused = manager.unpause(name)
+        body = {**session.info(), "already_exited": True}
+        if unpaused:
+            body["unpaused"] = True
+        return json_response(body)
     if await _winding_down(request, session, force=force):
         return json_response({**session.info(), "winding_down": True})
     session = manager.kill(name, force=force)

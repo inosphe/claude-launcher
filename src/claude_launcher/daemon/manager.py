@@ -1300,6 +1300,30 @@ class SessionManager:
             self.persist()
         return session
 
+    def unpause(self, name: str) -> bool:
+        """File a paused record as killed: the operator's kill of a pause.
+
+        The process ended at the pause, so the only thing left for a kill to
+        change is the record. Clearing ``paused_at`` moves it from the rail's
+        Paused filter to Killed, and out of the bulk "resume the paused" set —
+        a session the operator has decided is finished must not come back from
+        a button that said *resume the paused*. Anything else is left alone: a
+        running session (that is :meth:`kill`'s job) and an exited one that was
+        never paused. Returns whether the marker was cleared.
+
+        Only the operator's kill route calls this. :meth:`kill` itself stays a
+        no-op on every exited record, because the daemon's own callers (the
+        kill-all pass, a handoff's source) reach it without meaning to refile
+        a pause.
+        """
+        session = self.get(name)
+        if not session.exited or not getattr(session, "paused_at", None):
+            return False
+        session.paused_at = None
+        self.events.record(session, "kill", "일시 중지된 세션을 종료로 전환")
+        self.persist()
+        return True
+
     def escalate_children(self, name: str) -> List[str]:
         """Move ``name``'s direct children up to ``name``'s own parent.
 

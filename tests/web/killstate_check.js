@@ -139,6 +139,64 @@ const response = (body, ok = true, status = 200) => ({
   check("refresh follows every completed request", refreshes, 4);
   check("a wind-down response does not select the killed filter", filter, null);
 
+  /* A paused record (claunch-zpyzf): the press files the pause as killed.
+     Nothing is running, so there is no wind-down to ask for and the reply
+     lands exited at once. */
+  ctx.setSessions([{ name: "s1", status: "exited", paused_at: "2026-09-01T00:00:00Z" }]);
+  ctx.syncSessionKillControls();
+  check("a paused record offers kill, and says what it does there",
+        [buttons["term-kill"].textContent, buttons["term-kill"].disabled,
+         /paused/.test(buttons["term-kill"].title)],
+        ["kill", false, true]);
+  const unpause = ctx.killCurrentSession();
+  check("the press sends the ordinary kill route", calls[calls.length - 1].url,
+        "/api/sessions/s1/kill");
+  replies.shift().resolve(response({
+    name: "s1", status: "exited", paused_at: null,
+    already_exited: true, unpaused: true,
+  }));
+  await unpause;
+  check("the record reads killed before the next poll",
+        [ctx.sessions()[0].paused_at, buttons["term-kill"].disabled],
+        [null, false]);
+
+  /* The header's visibility, which is what the reader sees first. */
+  const hdr = {};
+  for (const id of ["term-status", "term-resume", "term-rebrief", "term-kill",
+                    "term-pause", "term-archive"]) {
+    const classes = new Set();
+    hdr[id] = { textContent: "", className: "", classes,
+      classList: { toggle(n, on) { on ? classes.add(n) : classes.delete(n); } } };
+  }
+  const s = src.indexOf("function setStatusBadge(status)");
+  const e = src.indexOf("/* ---- the link ----", s);
+  if (s < 0 || e <= s) throw new Error("cannot locate setStatusBadge");
+  const badge = {};
+  new Function("exports", "$", `
+    let currentName = "s1", sessionsCache = [];
+    function syncSessionKillControls() {}
+    function renderTermTimer() {}
+    function syncMobileBars() {}
+    ${src.slice(s, e)}
+    Object.assign(exports, { setStatusBadge,
+      setSessions: (v) => { sessionsCache = v; } });`
+  )(badge, (id) => hdr[id]);
+  const shown = () => ["term-kill", "term-pause", "term-archive", "term-resume"]
+    .filter((id) => !hdr[id].classes.has("hidden"));
+  badge.setSessions([{ name: "s1", status: "exited", paused_at: "2026-09-01T00:00:00Z" }]);
+  badge.setStatusBadge("exited");
+  check("a paused header offers kill, archive and resume",
+        [hdr["term-status"].textContent, shown()],
+        ["paused", ["term-kill", "term-archive", "term-resume"]]);
+  badge.setSessions([{ name: "s1", status: "exited" }]);
+  badge.setStatusBadge("exited");
+  check("a killed header has no kill left to offer",
+        shown(), ["term-archive", "term-resume"]);
+  badge.setSessions([{ name: "s1", status: "exited", paused_at: "x", archived_at: "y" }]);
+  badge.setStatusBadge("exited");
+  check("an archived paused record keeps kill and resume",
+        shown(), ["term-kill", "term-resume"]);
+
   console.log(failures ? `\n${failures} failure(s)` : "all kill state checks passed");
   process.exit(failures ? 1 : 0);
 })();
