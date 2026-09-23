@@ -3486,6 +3486,18 @@ function sessCflowLabel(r) {
   return r.title || r.step_id || "running";
 }
 
+/* The step a human-owed stop is sitting on, for the rail line. The bare
+   "approval needed" said that the run wanted a person and not where: an
+   improv-worker run has several gates (workspace, landing, end), and which
+   one it is decides whether the reader approves at a glance or goes to read.
+   The step id is used rather than the title because it is short, it is the
+   word the diagram and `claunch cflow goto` use, and the title (often a long
+   sentence) is carried in the hover text instead. Empty when the payload
+   names no step, so the label then reads exactly as it did before. */
+function sessCflowGateStep(r) {
+  return String((r && r.step_id) || "").trim();
+}
+
 /* A paced option's opening moment, as a local clock time; the raw ISO
    string when it does not parse. */
 function fmtOpensAt(iso) {
@@ -3527,10 +3539,16 @@ function applyCflowBadges() {
     mark.textContent = markGlyph;
     const txt = document.createElement("span");
     txt.className = "sess-cflow-text";
+    const gateStep = gated ? sessCflowGateStep(r) : "";
     txt.textContent =
-      `${r.workflow || "cflow"} · ${gated ? "⚑ " : ""}${sessCflowLabel(r)}`;
+      `${r.workflow || "cflow"} · ${gated ? "⚑ " : ""}` +
+      `${gateStep ? gateStep + ": " : ""}${sessCflowLabel(r)}`;
+    const stepLine = gateStep
+      ? `step: ${r.title && r.title !== gateStep ? `${r.title} (${gateStep})` : gateStep}
+`
+      : "";
     line.title = gated
-      ? (r.gate || r.prompt || "") +
+      ? stepLine + (r.gate || r.prompt || "") +
         (r.options ? ` — options: ${r.options.join(", ")}` : "")
       : (r.title || r.step_id || "");
     line.append(mark, txt);
