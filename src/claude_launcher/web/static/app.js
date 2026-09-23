@@ -211,7 +211,11 @@ function openControlSocket() {
     if (!waiter) return;                 // timed out already, and re-sent
     controlWaiting.delete(msg.id);
     clearTimeout(waiter.timer);
-    waiter.resolve({ answers: msg.answers || {}, errors: msg.errors || {} });
+    waiter.resolve({
+      answers: msg.answers || {},
+      errors: msg.errors || {},
+      statuses: msg.statuses || {},
+    });
   };
 
   sock.onclose = () => {
@@ -454,12 +458,16 @@ const BATCH_WINDOW_MS = 100;
 let batchPending = null;       // path -> [{resolve, reject}], while one is open
 
 /* A Response is what every caller expects back; these are the parts they
-   use (`ok`, `status`, `json`, `text`). Nothing reads headers off one. */
-function batchResponse(payload, ok) {
+   use (`ok`, `status`, `json`, `text`). Nothing reads headers off one.
+   A failed read keeps the status its route answered with when the daemon
+   reports one (`statuses`), because callers branch on it: the briefing card
+   tells 400 "not configured" and 404 "no record" from a 502 failure. 502 is
+   what is left when the read failed without a route status (claunch-authx). */
+function batchResponse(payload, ok, status) {
   const body = JSON.stringify(payload === undefined ? null : payload);
   return {
     ok,
-    status: ok ? 200 : 502,
+    status: ok ? 200 : (Number.isInteger(status) && status >= 400 ? status : 502),
     batched: true,
     json: async () => JSON.parse(body),
     text: async () => body,
@@ -516,6 +524,7 @@ async function batchFlush() {
   }
   let answers = null;
   let errors = {};
+  let statuses = {};
   // The socket first, because it costs no connection. Its rejection is not a
   // failed read: it says this transport is not available right now, and the
   // same paths go out over HTTP below exactly as they did before it existed.
@@ -523,6 +532,7 @@ async function batchFlush() {
     const carried = await controlRead(paths);
     answers = carried.answers;
     errors = carried.errors;
+    statuses = carried.statuses || {};
   } catch {
     answers = null;
   }
@@ -531,7 +541,9 @@ async function batchFlush() {
       if (Object.prototype.hasOwnProperty.call(answers, path)) {
         settle(path, batchResponse(answers[path], true));
       } else {
-        settle(path, batchResponse({ error: errors[path] || "not answered" }, false));
+        settle(path, batchResponse(
+          { error: errors[path] || "not answered" }, false, statuses[path]
+        ));
       }
     }
     return;
@@ -546,6 +558,7 @@ async function batchFlush() {
       const body = await resp.json();
       answers = body.answers || {};
       errors = body.errors || {};
+      statuses = body.statuses || {};
     }
   } catch (err) {
     // An unauthorized batch has already raised the token prompt inside
@@ -570,7 +583,9 @@ async function batchFlush() {
     if (Object.prototype.hasOwnProperty.call(answers, path)) {
       settle(path, batchResponse(answers[path], true));
     } else {
-      settle(path, batchResponse({ error: errors[path] || "not answered" }, false));
+      settle(path, batchResponse(
+        { error: errors[path] || "not answered" }, false, statuses[path]
+      ));
     }
   }
 }

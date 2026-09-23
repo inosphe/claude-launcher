@@ -184,3 +184,45 @@ def test_a_batch_costs_one_connection(home, tmp_path):
             await client.close()
 
     asyncio.run(run())
+
+
+def test_a_refused_read_keeps_its_route_status_and_message(home, tmp_path, monkeypatch):
+    """A route that answers with ``json_error`` must reach the page as that
+    status and that message. The batch used to raise a bare HTTPException,
+    whose status is -1, so a briefing whose LLM call failed showed "-1 502"
+    and a missing session showed as a failure instead of "no record"
+    (claunch-authx)."""
+
+    async def failing_briefing(request):
+        return api_mod.json_error(502, "llm endpoint answered 502: bad gateway")
+
+    monkeypatch.setattr(api_mod, "h_session_briefing", failing_briefing)
+
+    async def run():
+        client = await _serve(tmp_path)
+        try:
+            body = await (
+                await client.post(
+                    "/api/batch",
+                    json={"paths": [
+                        "/api/sessions/s1/briefing",
+                        "/api/sessions/nope/status-checks",
+                        "/api/not-a-route",
+                    ]},
+                    headers=BEARER,
+                )
+            ).json()
+            assert body["errors"]["/api/sessions/s1/briefing"] == (
+                "llm endpoint answered 502: bad gateway"
+            )
+            assert body["statuses"]["/api/sessions/s1/briefing"] == 502
+            assert body["errors"]["/api/sessions/nope/status-checks"] == (
+                "no session named 'nope'"
+            )
+            assert body["statuses"]["/api/sessions/nope/status-checks"] == 404
+            assert body["statuses"]["/api/not-a-route"] == 404
+            assert all("-1" not in why for why in body["errors"].values())
+        finally:
+            await client.close()
+
+    asyncio.run(run())

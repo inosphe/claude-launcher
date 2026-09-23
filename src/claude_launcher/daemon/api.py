@@ -852,6 +852,7 @@ async def h_batch(request: web.Request) -> web.Response:
         return json_error(400, f"at most {BATCH_MAX} paths per batch")
     answers: dict = {}
     errors: dict = {}
+    statuses: dict = {}
     for raw in paths:
         if not isinstance(raw, str) or not raw.startswith("/api/"):
             errors[str(raw)] = "only this daemon's /api/ paths"
@@ -861,12 +862,46 @@ async def h_batch(request: web.Request) -> web.Response:
             continue
         try:
             answers[raw] = await _batch_one(template, raw)
+        except _ReadRefused as exc:
+            errors[raw] = exc.message
+            statuses[raw] = exc.status
         except web.HTTPException as exc:
             errors[raw] = f"{exc.status} {exc.reason}"
+            statuses[raw] = exc.status
         except Exception as exc:  # noqa: BLE001 -- one bad read, eight good
             log.debug("batch read %s failed", raw, exc_info=True)
             errors[raw] = repr(exc)
-    return json_response({"answers": answers, "errors": errors})
+    return json_response({"answers": answers, "errors": errors, "statuses": statuses})
+
+
+class _ReadRefused(Exception):
+    """A carried read whose route answered with an error status.
+
+    Carries the route's own status and ``error`` text so the page can treat a
+    batched read exactly like a direct one: a 400 or 404 means something
+    different from a 502 to the briefing card, and the route's message is
+    what the person needs to see. Raising a bare ``web.HTTPException`` here
+    lost both -- its ``status`` is -1, so a failed briefing read as
+    "-1 502" (claunch-authx).
+    """
+
+    def __init__(self, status: int, message: str) -> None:
+        super().__init__(message)
+        self.status = status
+        self.message = message
+
+
+def _refusal_message(response) -> str:
+    """The ``error`` field of a :func:`json_error` body, else the status."""
+    status = getattr(response, "status", 0)
+    payload = getattr(response, "body", None)
+    try:
+        body = json.loads(bytes(payload).decode("utf-8")) if payload else None
+    except (TypeError, ValueError):
+        body = None
+    if isinstance(body, dict) and isinstance(body.get("error"), str) and body["error"]:
+        return body["error"]
+    return f"HTTP {status}"
 
 
 async def _batch_one(template: web.Request, path: str):
@@ -887,8 +922,9 @@ async def _batch_one(template: web.Request, path: str):
     sub._match_info = match  # noqa: SLF001
     match.add_app(template.app)
     response = await handler(sub)
-    if getattr(response, "status", 200) >= 400:
-        raise web.HTTPException(reason=f"{response.status}")
+    status = getattr(response, "status", 200)
+    if status >= 400:
+        raise _ReadRefused(status, _refusal_message(response))
     payload = getattr(response, "body", None)
     if payload is None:
         return None
@@ -951,17 +987,20 @@ async def h_control_ws(request: web.Request) -> web.WebSocketResponse:
 
     async def answer_read(frame: dict) -> None:
         try:
-            answers, errors = await _control_read(template, frame.get("paths"))
+            answers, errors, statuses = await _control_read(
+                template, frame.get("paths")
+            )
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # noqa: BLE001 -- one read, not the socket
             log.debug("control read failed", exc_info=True)
-            answers, errors = {}, {"": repr(exc)}
+            answers, errors, statuses = {}, {"": repr(exc)}, {}
         await carrier.send_str(json.dumps({
             "type": "read_result",
             "id": frame.get("id"),
             "answers": answers,
             "errors": errors,
+            "statuses": statuses,
         }))
 
     try:
@@ -1026,7 +1065,7 @@ async def h_control_ws(request: web.Request) -> web.WebSocketResponse:
     return ws
 
 
-async def _control_read(template: web.Request, paths) -> tuple[dict, dict]:
+async def _control_read(template: web.Request, paths) -> tuple[dict, dict, dict]:
     """The read half of :func:`h_control_ws`, with the same rules as a batch.
 
     Kept beside the socket rather than shared with :func:`h_batch` at the
@@ -1036,22 +1075,27 @@ async def _control_read(template: web.Request, paths) -> tuple[dict, dict]:
     """
     answers: dict = {}
     errors: dict = {}
+    statuses: dict = {}
     if not isinstance(paths, list) or not paths:
-        return answers, {"": "paths must be a non-empty list"}
+        return answers, {"": "paths must be a non-empty list"}, statuses
     if len(paths) > BATCH_MAX:
-        return answers, {"": f"at most {BATCH_MAX} paths per read"}
+        return answers, {"": f"at most {BATCH_MAX} paths per read"}, statuses
     for raw in paths:
         if not isinstance(raw, str) or not raw.startswith("/api/"):
             errors[str(raw)] = "only this daemon's /api/ paths"
             continue
         try:
             answers[raw] = await _batch_one(template, raw)
+        except _ReadRefused as exc:
+            errors[raw] = exc.message
+            statuses[raw] = exc.status
         except web.HTTPException as exc:
             errors[raw] = f"{exc.status} {exc.reason}"
+            statuses[raw] = exc.status
         except Exception as exc:  # noqa: BLE001 -- one bad read, eight good
             log.debug("control read %s failed", raw, exc_info=True)
             errors[raw] = repr(exc)
-    return answers, errors
+    return answers, errors, statuses
 
 
 async def h_connections(request: web.Request) -> web.Response:
