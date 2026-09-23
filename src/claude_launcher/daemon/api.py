@@ -503,6 +503,7 @@ def build_app(
     r.add_post("/api/cflow/skip", h_cflow_skip)
     r.add_post("/api/cflow/archive", h_cflow_archive)
     r.add_post("/api/cflow/approve", h_cflow_approve)
+    r.add_post("/api/cflow/state", h_cflow_state_set)
     r.add_post("/api/cflow/select", h_cflow_select)
     r.add_post("/api/cflow/nudge", h_cflow_nudge)
     r.add_post("/api/cflow/goto", h_cflow_goto)
@@ -3619,6 +3620,34 @@ async def h_cflow_approve(request: web.Request) -> web.Response:
     if payload.get("status") == "approved":
         payload["nudge_scheduled_sessions"] = await _nudge_sessions(
             request.app["manager"], cwd, scope, cflow_engine.NUDGE_APPROVED
+        )
+    return json_response(payload)
+
+
+async def h_cflow_state_set(request: web.Request) -> web.Response:
+    """Write one of the run's declared state paths from the dashboard.
+
+    The web face of ``claunch cflow set``: the same engine write, as the
+    person (``by="user"``) -- the dashboard token is the person's channel,
+    as it is for approve. The path's ``editable:`` declaration still decides:
+    an agent-only path is refused here exactly as it is on the CLI. The
+    driving session is nudged so it reads the value from its payload now.
+    """
+    resolved, err = await _cflow_action_cwd(request)
+    if err:
+        return err
+    cwd, scope, body = resolved
+    path = str(body.get("path") or "").strip()
+    if not path:
+        return json_error(400, "'path' required in the JSON body")
+    if "value" not in body:
+        return json_error(400, "'value' required in the JSON body")
+    value = body.get("value")
+    payload = cflow_engine.set_state(path, value, by="user", cwd=cwd, scope=scope)
+    if payload.get("changed"):
+        payload["nudge_scheduled_sessions"] = await _nudge_sessions(
+            request.app["manager"], cwd, scope,
+            cflow_engine.nudge_for_state_write(payload["path"], payload["value"]),
         )
     return json_response(payload)
 
