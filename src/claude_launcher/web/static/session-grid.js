@@ -11,7 +11,12 @@
    A row holds any number of cells; a cell holds a session name or nothing.
    A cell whose session is not in the current view (archived, filtered out,
    cleared) keeps its assignment -- the placement survives the session going
-   out of view and coming back -- until something is moved onto it. */
+   out of view and coming back -- until something is moved onto it.
+
+   One row is the default row: every new session lands there. A row may carry
+   a condition (a mesh, a workspace, or both); organize() moves the sessions
+   sitting in the default row to the first row, in row order, whose condition
+   they meet. Nothing outside the default row is ever moved by it. */
 globalThis.SessionGridLayout = class SessionGridLayout {
   static ROW_NAMES = [
     "alpha", "bravo", "charlie", "delta", "echo", "foxtrot", "golf", "hotel",
@@ -25,11 +30,14 @@ globalThis.SessionGridLayout = class SessionGridLayout {
     this.key = key;
     this.rows = [];
     this.nextId = 1;
+    this.defaultId = null;
     try {
       const saved = JSON.parse(storage.getItem(key) || "null");
       if (saved && Array.isArray(saved.rows)) this.load(saved);
     } catch {}
     if (!this.rows.length) this.addRow();
+    if (!this.row(this.defaultId)) this.defaultId = this.rows[0].id;
+    delete this.row(this.defaultId).rule;
   }
 
   /* Takes what storage held, dropping whatever does not parse: a row without
@@ -54,9 +62,13 @@ globalThis.SessionGridLayout = class SessionGridLayout {
       }
       seenIds.add(row.id);
       seenNames.add(name.toLowerCase());
-      this.rows.push({ id: row.id, name, cells });
+      const entry = { id: row.id, name, cells };
+      const rule = SessionGridLayout.cleanRule(row.rule);
+      if (rule) entry.rule = rule;
+      this.rows.push(entry);
       SessionGridLayout.trim(this.rows[this.rows.length - 1]);
     }
+    if (typeof saved.defaultId === "string") this.defaultId = saved.defaultId;
     const n = Number(saved.nextId);
     this.nextId = Number.isSafeInteger(n) && n > 0 ? n : 1;
     for (const id of seenIds) {
@@ -69,6 +81,17 @@ globalThis.SessionGridLayout = class SessionGridLayout {
     return typeof name === "string" ? name.trim().replace(/\s+/g, " ").slice(0, 40) : "";
   }
 
+  /* A row's condition: which mesh, which workspace, or both (both must then
+     hold). Anything else, or neither, is no condition at all. */
+  static cleanRule(rule) {
+    if (!rule || typeof rule !== "object") return null;
+    const out = {};
+    for (const key of ["mesh", "workspace"]) {
+      if (typeof rule[key] === "string" && rule[key].trim()) out[key] = rule[key].trim();
+    }
+    return Object.keys(out).length ? out : null;
+  }
+
   /* Trailing empty cells carry no position, so they are not stored; interior
      ones are the holes that keep the cells after them in place. */
   static trim(row) {
@@ -77,7 +100,9 @@ globalThis.SessionGridLayout = class SessionGridLayout {
 
   save() {
     try {
-      this.storage.setItem(this.key, JSON.stringify({ nextId: this.nextId, rows: this.rows }));
+      this.storage.setItem(this.key, JSON.stringify({
+        nextId: this.nextId, defaultId: this.defaultId, rows: this.rows,
+      }));
     } catch {}
   }
 
@@ -126,15 +151,65 @@ globalThis.SessionGridLayout = class SessionGridLayout {
   }
 
   /* A row is removed only while no session in `present` sits in it; the
-     assignments of sessions that are out of view go with it. The last row
+     assignments of sessions that are out of view go with it. The default row
      stays, so there is always somewhere to place a new session. */
   removeRow(id, present = new Set()) {
     const row = this.row(id);
-    if (!row || this.rows.length < 2) return false;
+    if (!row || id === this.defaultId) return false;
     if (row.cells.some((name) => name && present.has(name))) return false;
     this.rows = this.rows.filter((r) => r !== row);
     this.save();
     return true;
+  }
+
+  isDefault(id) {
+    return id === this.defaultId;
+  }
+
+  setDefault(id) {
+    const row = this.row(id);
+    if (!row) return false;
+    this.defaultId = id;
+    delete row.rule;   // the default row is where unsorted sessions wait
+    this.save();
+    return true;
+  }
+
+  /* Sets (or, with an empty rule, clears) a row's condition. Returns null on
+     success, otherwise the reason it was refused. */
+  setRule(id, rule) {
+    const row = this.row(id);
+    if (!row) return "no such row";
+    if (id === this.defaultId) return "the default row takes every new session and has no condition";
+    const clean = SessionGridLayout.cleanRule(rule);
+    if (clean) row.rule = clean;
+    else delete row.rule;
+    this.save();
+    return null;
+  }
+
+  /* Moves each session in `present` that sits in the default row to the end
+     of the first row, in row order, whose condition `matches(name, rule)`
+     accepts. Sessions no condition accepts stay where they are; the cells
+     the moved ones leave are empty, so the rest of the default row does not
+     shift. Returns how many moved. */
+  organize(matches, present = new Set()) {
+    const inbox = this.row(this.defaultId);
+    if (!inbox) return 0;
+    let moved = 0;
+    inbox.cells.forEach((name, col) => {
+      if (!name || !present.has(name)) return;
+      const target = this.rows.find((r) => r !== inbox && r.rule && matches(name, r.rule));
+      if (!target) return;
+      target.cells.push(name);
+      inbox.cells[col] = null;
+      moved++;
+    });
+    if (moved) {
+      SessionGridLayout.trim(inbox);
+      this.save();
+    }
+    return moved;
   }
 
   positionOf(name) {
@@ -150,18 +225,19 @@ globalThis.SessionGridLayout = class SessionGridLayout {
     return (row && row.cells[col]) || null;
   }
 
-  /* Gives every session without a cell one at the end of a row: its parent's
-     row when the parent is placed, so a spawned child lands beside the one
-     that made it, otherwise the last row. Holes are never filled here -- a
-     hole is somebody's former place, and only a person decides to reuse it.
-     Returns whether anything was placed. */
+  /* Gives every session without a cell one in the default row: its first
+     empty cell, else a new one at the end. Only the default row's holes are
+     reused -- it is a waiting area, and organize() empties cells in it -- and
+     a cell still assigned to a session out of view is not a hole. Returns
+     whether anything was placed. */
   place(sessions) {
     let changed = false;
+    const inbox = this.row(this.defaultId);
     for (const s of sessions || []) {
       if (!s || !s.name || this.positionOf(s.name)) continue;
-      const parent = s.parent ? this.positionOf(s.parent) : null;
-      const row = this.rows[parent ? parent.row : this.rows.length - 1];
-      row.cells.push(s.name);
+      const hole = inbox.cells.indexOf(null);
+      if (hole >= 0) inbox.cells[hole] = s.name;
+      else inbox.cells.push(s.name);
       changed = true;
     }
     if (changed) this.save();

@@ -1483,6 +1483,10 @@ function toggleSessionPin(name) {
    only a person moves -- by dragging a cell, or Alt+arrow on a focused one.
    A row's cells wrap onto lines of 3, 4 or 5 (the reader's pick) instead of
    running off the rail's edge, so the grid scrolls only downwards.
+   New sessions land in the default row; a row may carry a condition (a
+   mesh, a workspace, or both), and the default row's Auto-organize sends the
+   sessions waiting there to the first row, top to bottom, whose condition
+   they meet. It never moves a session out of any other row.
    The view choice, the line width and the layout are all remembered per
    browser, like the pins and the folds above. The list is still built on every poll while the
    grid is shown, so switching back is instant and nothing the list's own
@@ -1561,7 +1565,7 @@ function renderSessionGrid(force = false) {
   if (!host || !layout || sessionView !== "grid") return;
   // A drag or a rename in progress holds the nodes it started on; the poll
   // that lands meanwhile is owed back when it ends.
-  if (sessionGridDragging || host.querySelector(".sg-rename")) {
+  if (sessionGridDragging || host.querySelector(".sg-rename, .sg-rule-edit")) {
     sessionGridPending = true;
     return;
   }
@@ -1646,6 +1650,34 @@ function sessionGridPerLineControl() {
   return box;
 }
 
+/* Whether session `name` meets a row's condition: every part the condition
+   names has to hold -- one of the meshes it is a local member of, and the
+   workspace the list's "Group by workspace" would file it under. */
+function sessionGridMatches(name, rule) {
+  const s = sessionsCache.find((x) => x.name === name);
+  if (!s) return false;
+  if (rule.mesh && !sessMeshes(name).some((m) => m.mesh === rule.mesh)) return false;
+  if (rule.workspace && sessionWorkspaceGroup(s) !== rule.workspace) return false;
+  return true;
+}
+
+function sessionGridRuleText(rule) {
+  const parts = [];
+  if (rule.mesh) parts.push(`mesh ${rule.mesh}`);
+  if (rule.workspace) parts.push(`workspace ${sessionWorkspaceLabel(rule.workspace)}`);
+  return parts.join(" · ");
+}
+
+function sessionGridButton(className, text, title, onClick) {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = className;
+  button.textContent = text;
+  button.title = title;
+  button.addEventListener("click", onClick);
+  return button;
+}
+
 function sessionGridRowHead(layout, row, present) {
   const head = document.createElement("div");
   head.className = "sg-row-head";
@@ -1654,32 +1686,102 @@ function sessionGridRowHead(layout, row, present) {
   name.textContent = row.name;
   name.title = `${row.name} — double-click to rename`;
   name.addEventListener("dblclick", () => startSessionGridRename(layout, row, head));
-  const edit = document.createElement("button");
-  edit.type = "button";
-  edit.className = "sg-row-edit";
-  edit.textContent = "✎";
-  edit.title = `rename row ${row.name}`;
-  edit.addEventListener("click", () => startSessionGridRename(layout, row, head));
-  head.append(name, edit);
-  const occupied = row.cells.some((n) => n && present.has(n));
-  if (layout.rows.length > 1) {
-    const remove = document.createElement("button");
-    remove.type = "button";
-    remove.className = "sg-row-remove";
-    remove.textContent = "×";
+  head.append(name);
+  if (layout.isDefault(row.id)) {
+    // New sessions land here; Auto-organize sends the ones waiting here to
+    // the first row, top to bottom, whose condition they meet.
+    head.append(Object.assign(document.createElement("span"), {
+      className: "sg-row-default", textContent: "default",
+      title: "new sessions land in this row",
+    }));
+    const hasRules = layout.rows.some((r) => r.rule);
+    const organize = sessionGridButton("sg-organize", "Auto-organize",
+      hasRules
+        ? "move the sessions in this row to the first row, top to bottom, whose condition they meet"
+        : "no row has a condition yet — set one with ⚙ on another row",
+      () => {
+        if (!hasRules) return;
+        layout.organize(sessionGridMatches, present);
+        renderSessionGrid(true);
+      });
+    if (!hasRules) {
+      organize.setAttribute("aria-disabled", "true");
+      organize.classList.add("disabled");
+    }
+    head.append(organize);
+  } else if (row.rule) {
+    head.append(Object.assign(document.createElement("span"), {
+      className: "sg-row-rule", textContent: sessionGridRuleText(row.rule),
+      title: `condition: ${[row.rule.mesh && `mesh ${row.rule.mesh}`,
+        row.rule.workspace && `workspace ${row.rule.workspace}`].filter(Boolean).join(" and ")}`,
+    }));
+  }
+  const tools = document.createElement("span");
+  tools.className = "sg-row-tools";
+  tools.append(sessionGridButton("sg-row-edit", "✎", `rename row ${row.name}`,
+    () => startSessionGridRename(layout, row, head)));
+  if (!layout.isDefault(row.id)) {
+    tools.append(
+      sessionGridButton("sg-row-rule-edit", "⚙", `set the condition Auto-organize uses for ${row.name}`,
+        () => startSessionGridRuleEdit(layout, row, head)),
+      sessionGridButton("sg-row-make-default", "★", `make ${row.name} the default row`,
+        () => { if (layout.setDefault(row.id)) renderSessionGrid(true); }));
+    const occupied = row.cells.some((n) => n && present.has(n));
+    const remove = sessionGridButton("sg-row-remove", "×",
+      occupied ? `row ${row.name} still holds sessions — move them out first`
+        : `remove row ${row.name}`,
+      () => { if (!occupied && layout.removeRow(row.id, present)) renderSessionGrid(true); });
     if (occupied) {
       remove.setAttribute("aria-disabled", "true");
       remove.classList.add("disabled");
-      remove.title = `row ${row.name} still holds sessions — move them out first`;
-    } else {
-      remove.title = `remove row ${row.name}`;
-      remove.addEventListener("click", () => {
-        if (layout.removeRow(row.id, present)) renderSessionGrid(true);
-      });
     }
-    head.append(remove);
+    tools.append(remove);
   }
+  head.append(tools);
   return head;
+}
+
+/* The condition editor: a mesh and a workspace, each "any" or one value.
+   The choices are the meshes this daemon has and the workspaces the current
+   sessions are in, plus whatever the row already names. */
+function startSessionGridRuleEdit(layout, row, head) {
+  const rule = row.rule || {};
+  const form = document.createElement("form");
+  form.className = "sg-rule-edit";
+  const select = (label, current, values, text) => {
+    const box = document.createElement("label");
+    box.append(Object.assign(document.createElement("span"), { textContent: label }));
+    const input = document.createElement("select");
+    input.append(new Option("any", ""));
+    for (const value of [...new Set([...values, ...(current ? [current] : [])])].sort()) {
+      input.append(new Option(text(value), value, false, value === current));
+    }
+    box.append(input);
+    form.append(box);
+    return input;
+  };
+  const meshes = (typeof meshCache !== "undefined" ? meshCache || [] : []).map((m) => m.name);
+  const workspaces = sessionsCache.map((s) => sessionWorkspaceGroup(s));
+  const mesh = select("mesh", rule.mesh || "", meshes, (v) => v);
+  const workspace = select("workspace", rule.workspace || "", workspaces, sessionWorkspaceLabel);
+  const save = Object.assign(document.createElement("button"),
+    { type: "submit", className: "sg-rule-save", textContent: "Save" });
+  const cancel = Object.assign(document.createElement("button"),
+    { type: "button", className: "sg-rule-cancel", textContent: "Cancel" });
+  form.append(save, cancel);
+  const close = () => { form.remove(); renderSessionGrid(true); };
+  form.addEventListener("submit", (ev) => {
+    ev.preventDefault();
+    layout.setRule(row.id, { mesh: mesh.value, workspace: workspace.value });
+    close();
+  });
+  cancel.addEventListener("click", close);
+  form.addEventListener("keydown", (ev) => {
+    ev.stopPropagation();
+    if (ev.key === "Escape") close();
+  });
+  head.after(form);
+  mesh.focus();
 }
 
 function startSessionGridRename(layout, row, head) {

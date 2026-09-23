@@ -156,15 +156,49 @@ option:disabled { color: #6b7280; }
   min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   color: #c9d1d9; font-weight: 600; cursor: text;
 }
-#session-grid .sg-row-edit, #session-grid .sg-row-remove {
-  flex: none; background: none; border: 0; padding: 0 2px; cursor: pointer;
-  color: #6e7681; font-size: 11px; visibility: hidden;
+/* Rename, condition, make-default and remove: shown while the heading is
+   hovered or one of them has the keyboard. */
+#session-grid .sg-row-tools { margin-left: auto; flex: none; display: flex; visibility: hidden; }
+#session-grid .sg-row-head:hover .sg-row-tools,
+#session-grid .sg-row-tools:focus-within { visibility: visible; }
+#session-grid .sg-row-tools button {
+  background: none; border: 0; padding: 0 3px; cursor: pointer;
+  color: #6e7681; font-size: 11px;
 }
-#session-grid .sg-row-head:hover :is(.sg-row-edit, .sg-row-remove),
-#session-grid .sg-row-head :is(.sg-row-edit, .sg-row-remove):focus-visible { visibility: visible; }
-#session-grid .sg-row-edit:hover { color: #58a6ff; }
-#session-grid .sg-row-remove:hover { color: #ff7b72; }
-#session-grid .sg-row-remove.disabled, #session-grid .sg-row-remove.disabled:hover {
+#session-grid .sg-row-tools button:hover { color: #58a6ff; }
+#session-grid .sg-row-default {
+  flex: none; padding: 0 5px; border-radius: 3px; font-size: 10px;
+  color: #d29922; box-shadow: inset 0 0 0 1px #5a4a1f;
+}
+#session-grid .sg-organize {
+  flex: none; padding: 1px 6px; border-radius: 4px; cursor: pointer; font-size: 10px;
+  color: #c9d1d9; background: #243247; border: 1px solid #385273;
+}
+#session-grid .sg-organize:hover { color: #fff; border-color: #58a6ff; }
+#session-grid .sg-organize.disabled { color: #545d68; background: none; border-color: #30363d; cursor: not-allowed; }
+#session-grid .sg-row-rule {
+  min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  color: #7d8590; font-size: 10px;
+}
+#session-grid .sg-rule-edit {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 4px 6px;
+  margin: 0 0 4px; padding: 5px 6px; border: 1px solid #30363d; border-radius: 4px;
+  background: #11151b; font-size: 11px; color: #8b949e;
+}
+#session-grid .sg-rule-edit label { display: flex; align-items: center; gap: 4px; min-width: 0; flex: 1 1 100%; }
+#session-grid .sg-rule-edit label span { flex: none; width: 64px; }
+#session-grid .sg-rule-edit select {
+  flex: 1; min-width: 0; font: inherit; color: #c9d1d9; background: #0d1117;
+  border: 1px solid #30363d; border-radius: 3px; padding: 1px 3px;
+}
+#session-grid .sg-rule-edit button {
+  font: inherit; padding: 1px 8px; border-radius: 3px; cursor: pointer;
+  color: #c9d1d9; background: #1d2128; border: 1px solid #30363d;
+}
+#session-grid .sg-rule-edit .sg-rule-save { background: #243247; border-color: #385273; }
+#session-grid .sg-row-tools .sg-row-remove:hover { color: #ff7b72; }
+#session-grid .sg-row-tools .sg-row-remove.disabled,
+#session-grid .sg-row-tools .sg-row-remove.disabled:hover {
   color: #444c56; cursor: not-allowed;
 }
 #session-grid .sg-rename {
