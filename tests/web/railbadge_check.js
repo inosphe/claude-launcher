@@ -91,7 +91,7 @@ new Function(
   "exports", "$", "document", "location", "cflowCache",
   [wfGlyphTable(), slice("wfDotClass"), slice("wfMarkState"), slice("wfMark"), slice("askWho"),
    slice("answerFellToUs"), slice("answerBranchOptions"), slice("sessCflowRun"),
-   slice("sessCflowGated"), slice("sessCflowLabel"), slice("fmtOpensAt"),
+   slice("sessCflowGated"), slice("sessCflowLabel"), slice("sessCflowGateStep"), slice("fmtOpensAt"),
    slice("applyCflowBadges")].join("\n") + `
 exports.apply = applyCflowBadges;
 exports.setRuns = (runs) => { cflowCache = runs; };
@@ -155,6 +155,48 @@ ctx.setRuns([{ scope: "s19", cwd: "F:/repo", status: "waiting_approval",
 ctx.apply();
 check("a loop limit says what approving does",
       badgeText(rows.s19), "ship · ⚑ loop limit — approve to continue");
+
+/* Which gate. "approval needed" alone said a person was wanted and not
+   where; an improv-worker run has a workspace gate, a landing gate and an
+   end gate, and the reader's answer depends on which. The step id goes on
+   the line (short, the diagram's and `cflow goto`'s word), the title into
+   the hover. */
+ctx.setRuns([{ scope: "s19", cwd: "F:/repo", status: "waiting_approval",
+               reason: "gate", workflow: "improv-worker", step_id: "end-gate",
+               title: "세션 종료 사용자 승인", gate: "end the session?",
+               sessions: ["s19"] }]);
+ctx.apply();
+check("a gate names the step it is waiting on",
+      badgeText(rows.s19), "improv-worker · ⚑ end-gate: approval needed");
+check("...and the hover names the step by title, then the gate text",
+      badge(rows.s19).title,
+      "step: 세션 종료 사용자 승인 (end-gate)\nend the session?");
+ctx.setRuns([{ scope: "s19", cwd: "F:/repo", status: "waiting_approval",
+               reason: "loop_limit", workflow: "ship", step_id: "work",
+               sessions: ["s19"] }]);
+ctx.apply();
+check("a loop limit names the step that looped",
+      badgeText(rows.s19), "ship · ⚑ work: loop limit — approve to continue");
+check("...and a step with no title is not repeated in the hover",
+      badge(rows.s19).title.startsWith("step: work\n"), true);
+ctx.setRuns([{ scope: "s19", cwd: "F:/repo", status: "waiting_selection",
+               workflow: "ship", step_id: "landing", prompt: "which lane?",
+               options: ["fast", "safe"], sessions: ["s19"] }]);
+ctx.apply();
+check("a branch choice names its step too",
+      badgeText(rows.s19), "ship · ⚑ landing: choose an option");
+ctx.setRuns([{ scope: "s19", cwd: "F:/repo", status: "waiting_goto",
+               workflow: "ship", step_id: "work",
+               goto_request: { step: "intake" }, sessions: ["s19"] }]);
+ctx.apply();
+check("a goto request says where it is and where it wants to go",
+      badgeText(rows.s19), "ship · ⚑ work: wants to move to 'intake'");
+ctx.setRuns([{ scope: "s19", cwd: "F:/repo", status: "step", workflow: "ship",
+               step_id: "build", title: "Build it", sessions: ["s19"] }]);
+ctx.apply();
+check("a running step is still named once, by its title",
+      [badgeText(rows.s19), badge(rows.s19).title],
+      ["ship · Build it", "Build it"]);
 
 /* Delegated to another agent: shown, but deliberately NOT the reader's
    move — it is with a peer, and amber would grow a queue of fake work. */
@@ -227,7 +269,7 @@ ctx.apply();
 /* The flag is the whole point: sessCflowGated now counts this as the
    reader's move, so the rail marks it like any other gate. */
 check("an ask that reached nobody says so, and is flagged as yours", badgeText(rows.s19),
-      "ship · ⚑ asked of nobody — approve to continue");
+      "ship · ⚑ plan: asked of nobody — approve to continue");
 check("...and is marked as the reader's: the filled twin of the same shape",
       [badge(rows.s19).children[0].className,
        badge(rows.s19).children[0].textContent], ["wf-mark wf-mark-yours", "◆"]);
@@ -235,7 +277,7 @@ check("...and is marked as the reader's: the filled twin of the same shape",
 ctx.setRuns(answerRow(undefined));
 ctx.apply();
 check("no ask at all reads the same way (a forced goto leaves this)",
-      badgeText(rows.s19), "ship · ⚑ asked of nobody — approve to continue");
+      badgeText(rows.s19), "ship · ⚑ plan: asked of nobody — approve to continue");
 
 ctx.setRuns([{
   scope: "s19", cwd: "F:/repo", status: "waiting_answer", workflow: "ship",
@@ -245,7 +287,7 @@ ctx.setRuns([{
 }]);
 ctx.apply();
 check("a branch put to nobody names the owed selection",
-      badgeText(rows.s19), "ship · ⚑ asked of nobody — choose request|hold");
+      badgeText(rows.s19), "ship · ⚑ landing-review: asked of nobody — choose request|hold");
 
 /* ---- a paced hold is nobody's move, not a peer's ----------------------- */
 /* `waiting_window` shares wf-delegated with an ask sitting on a peer, because
