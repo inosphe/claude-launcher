@@ -201,6 +201,42 @@ async function aFailedReadIsAloneInFailing() {
   assert.strictEqual(bad.status, 502);
 }
 
+/* ---- 4b. a refused read keeps the status its route answered ----------- */
+/* The briefing card tells 400 "not configured" and 404 "no record" from a
+   502 failure by status, and shows the route's own message. Every failed
+   batched read used to come back as 502 with "-1 502" as its text
+   (claunch-authx). */
+async function aRefusedReadKeepsItsRouteStatus() {
+  const app = build(async (u, opts) => {
+    if (u === "/api/batch") {
+      return jsonResponse({
+        answers: { "/api/sessions": { ok: 1 } },
+        errors: {
+          "/api/sessions/x/briefing": "no session named 'x'",
+          "/api/sessions/y/briefing": "llm call failed: timeout",
+          "/api/old": "boom",
+        },
+        statuses: {
+          "/api/sessions/x/briefing": 404,
+          "/api/sessions/y/briefing": 502,
+        },
+      });
+    }
+    return jsonResponse({ path: u });
+  });
+  const [, gone, failed, bare] = await Promise.all([
+    app.api("/api/sessions"),
+    app.api("/api/sessions/x/briefing"),
+    app.api("/api/sessions/y/briefing"),
+    app.api("/api/old"),
+  ]);
+  assert.strictEqual(gone.status, 404);
+  assert.deepStrictEqual(await gone.json(), { error: "no session named 'x'" });
+  assert.strictEqual(failed.status, 502);
+  assert.deepStrictEqual(await failed.json(), { error: "llm call failed: timeout" });
+  assert.strictEqual(bare.status, 502, "no reported status is still a failure");
+}
+
 /* ---- 5. a daemon that has never heard of the route --------------------- */
 /* New assets are served by an old daemon after an upgrade until it restarts;
    the page must keep working, one connection per read as before. */
@@ -261,6 +297,7 @@ async function requestsPastTheBudgetWaitInThePage() {
   await writesAndProbesGoOutAlone();
   await aReadThatEndsUpAloneIsStillOneRequest();
   await aFailedReadIsAloneInFailing();
+  await aRefusedReadKeepsItsRouteStatus();
   await anOlderDaemonStillServesThePage();
   console.log("batchpoll_check ok");
 })().catch((err) => { console.error(err); process.exit(1); });

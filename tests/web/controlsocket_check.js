@@ -410,6 +410,17 @@ async function flushPrefersSocketThenFallsBack() {
   assert.strictEqual(bad.ok, false);
   assert.deepStrictEqual(await bad.json(), { error: "404 Not Found" });
   assert.strictEqual(partial.calls.length, 0, "a reported error is not a retry");
+
+  // The route's status rides beside its error text, and the page answers
+  // with it instead of a blanket 502 (claunch-authx).
+  const refused = buildFlush(async (paths) => ({
+    answers: {},
+    errors: { [paths[0]]: "llm not configured" },
+    statuses: { [paths[0]]: 400 },
+  }));
+  const unconfigured = await refused.api("/api/sessions/s1/briefing");
+  assert.strictEqual(unconfigured.status, 400);
+  assert.deepStrictEqual(await unconfigured.json(), { error: "llm not configured" });
 }
 
 (async () => {

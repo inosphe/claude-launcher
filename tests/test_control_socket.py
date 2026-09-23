@@ -323,3 +323,22 @@ def test_an_unauthenticated_upgrade_is_refused_and_recorded(home, tmp_path):
             await client.close()
 
     asyncio.run(run())
+
+
+def test_a_refused_read_keeps_its_route_status_and_message(home, tmp_path):
+    """The socket reports a route's own error text and status, the same as
+    ``/api/batch`` does: the page branches on the status (claunch-authx)."""
+
+    async def run():
+        client = await _serve(tmp_path)
+        try:
+            async with client.ws_connect("/api/control/ws", headers=BEARER) as ws:
+                await ws.receive_json()
+                frame = await _read(ws, ["/api/sessions/nope/briefing"])
+                why = frame["errors"]["/api/sessions/nope/briefing"]
+                assert why == "no session named 'nope'"
+                assert frame["statuses"]["/api/sessions/nope/briefing"] == 404
+        finally:
+            await client.close()
+
+    asyncio.run(run())
