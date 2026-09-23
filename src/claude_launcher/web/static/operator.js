@@ -374,6 +374,37 @@ function sessionLink(name, cls = "operator-ref") {
   }
   return a;
 }
+/* Session names in prose ("s751의 peer-review", "s638, s697") read as the
+   same links the refs row draws. Only names this page knows become links, so
+   an "s3" that is not a session stays text; words inside a link or code are
+   left alone. sessionWords is the pure split (tests/web/operator_check.js). */
+const SESSION_WORD = /(?<![\w-])s\d{1,5}(?![\w-])/g;
+function sessionWords(text, known) {
+  const out = [];
+  let last = 0;
+  for (const m of String(text ?? "").matchAll(SESSION_WORD)) {
+    if (!known(m[0])) continue;
+    if (m.index > last) out.push(text.slice(last, m.index));
+    out.push({session: m[0]});
+    last = m.index + m[0].length;
+  }
+  if (last < String(text ?? "").length) out.push(String(text).slice(last));
+  return out;
+}
+function linkSessions(root) {
+  const known = name => !!sessionRecord(name);
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
+    acceptNode: t => t.parentElement?.closest("a, code, pre") ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT,
+  });
+  const texts = [];
+  for (let t = walker.nextNode(); t; t = walker.nextNode()) texts.push(t);
+  for (const t of texts) {
+    const parts = sessionWords(t.nodeValue, known);
+    if (!parts.some(x => typeof x !== "string")) continue;
+    t.replaceWith(...parts.map(x => typeof x === "string" ? x : sessionLink(x.session)));
+  }
+  return root;
+}
 
 function renderAsk(item, e) {
   if (e.answer) {
@@ -447,13 +478,14 @@ function renderFeed(h) {
     if (e.kind === "dispatch") {
       const line = node("p");
       line.append("→ ", sessionLink(e.target), ` 에 전달 (${deliveryLabel(e.delivery)}): `);
-      line.append(node("span", e.text));
+      line.append(linkSessions(node("span", e.text)));
       item.append(line);
     } else if (e.kind === "user" || e.kind === "system") {
-      item.append(node("p", e.text));
+      item.append(linkSessions(node("p", e.text)));
     } else {
       const body = node("div", null, "operator-text");
       if (typeof mdInto === "function") mdInto(body, e.text); else body.textContent = e.text;
+  linkSessions(body);
       item.append(body);
     }
     if ((e.refs || []).length) {
@@ -508,7 +540,7 @@ function renderGate(g) {
   box.append(head);
   const goto = g.goto_request || {};
   const text = g.kind === "goto" ? `'${goto.from || g.step_id}' → '${goto.step}': ${goto.reason || ""}` : (g.prompt || g.title || "");
-  if (text) box.append(node("p", text, "operator-gate-text"));
+  if (text) box.append(linkSessions(node("p", text, "operator-gate-text")));
   const actions = node("div", null, "operator-gate-actions");
   const buttons = () => actions.querySelectorAll("button");
   for (const a of gateActions(g)) {
@@ -535,11 +567,12 @@ function followupBody(e) {
   if (e.kind === "update") {
     const p = node("p", null, "operator-update");
     if (e.session) p.append(sessionLink(e.session), " ");
-    p.append(node("span", e.text));
+    p.append(linkSessions(node("span", e.text)));
     return p;
   }
   const body = node("div", null, "operator-text");
   if (typeof mdInto === "function") mdInto(body, e.text); else body.textContent = e.text;
+  linkSessions(body);
   return body;
 }
 /* The same follow-ups under their card, oldest first. */
@@ -734,5 +767,5 @@ badgeTimer = setInterval(() => { if (document.visibilityState === "visible") ref
 
 return {open, stop, openModal, refresh,
         _test: {openAsks, freshUrgent, answerLine, deliveryLabel, sessionBadge, startChoices, startBody, dotClass, progressChips,
-                threadsOf, cardLine, sameUpdate, gateActions}};
+                threadsOf, cardLine, sameUpdate, gateActions, sessionWords}};
 })();
