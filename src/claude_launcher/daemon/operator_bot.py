@@ -35,7 +35,7 @@ from datetime import datetime, timezone
 from aiohttp import web
 
 from .. import atomic, projects
-from . import paths, session_events
+from . import operator_transcript, paths, session_events
 from .session import CATEGORY_PAUSED, CATEGORY_RUNNING, session_category
 
 log = logging.getLogger(__name__)
@@ -673,6 +673,63 @@ class Operators:
         return self.append(project, {"kind": "dispatch", "role": "bot", "target": target, "text": text,
                                      "on_behalf_of": basis["id"], "delivery": delivery})
 
+    # -- observation mode ----------------------------------------------------
+    def mode(self, project):
+        """How the operator observes: ``events`` (Observer events, the
+        default) or ``transcript`` (it reads the conversations itself, see
+        :mod:`operator_transcript`)."""
+        mode = self.state(project).get("mode")
+        return mode if mode in operator_transcript.MODES else operator_transcript.DEFAULT_MODE
+
+    async def set_mode(self, project, mode, *, nudge=True):
+        """Switch a project's operator to ``mode`` while it runs. Switching
+        into ``transcript`` drops the transcript cursors, so every session
+        starts again from its last few records. The feed records the switch
+        and the operator's terminal gets a one-line nudge."""
+        project = projects.normalize(project)
+        if mode not in operator_transcript.MODES:
+            raise ValueError("mode must be one of " + ", ".join(operator_transcript.MODES))
+        data = self.state(project)
+        if self.mode(project) == mode:
+            return {"project": project, "mode": mode, "changed": False}
+        data["mode"] = mode
+        if mode == "transcript":
+            data["transcripts"] = {}
+        entry = self.append(project, {"kind": "system", "role": "system",
+                                      "text": f"관찰 모드: {mode}"})
+        result = {"project": project, "mode": mode, "changed": True, "entry": entry["id"]}
+        session = self.operator_session(project)
+        if nudge and session is not None and not session.exited:
+            try:
+                sent = await asyncio.wait_for(
+                    session.deliver(operator_transcript.MODE_NUDGE.format(mode=mode)), timeout=20)
+                result["nudge"] = "sent" if sent else "pending"
+            except Exception:
+                log.warning("operator mode nudge failed for %s", project, exc_info=True)
+                result["nudge"] = "unknown"
+        else:
+            result["nudge"] = "no-operator"
+        return result
+
+    async def transcripts(self, name):
+        """What the operator reads in ``transcript`` mode: each running
+        session's new conversation records since the daemon-held cursor. In
+        ``events`` mode it answers the mode and nothing else, so the bot can
+        call it every round and branch on ``mode``."""
+        project = self.bound(name)
+        mode = self.mode(project)
+        if mode != "transcript":
+            return {"project": project, "mode": mode, "transcripts": [], "more": False}
+        running = [s for s in self.members(project) if session_category(s) == CATEGORY_RUNNING]
+        data = self.state(project)
+        cursors = {k: v for k, v in (data.get("transcripts") or {}).items()
+                   if isinstance(v, int)}
+        read = await asyncio.to_thread(operator_transcript.read_all, running, cursors)
+        data["transcripts"] = read["cursors"]
+        self.save(project)
+        return {"project": project, "mode": mode, "transcripts": read["transcripts"],
+                "more": read["more"]}
+
     # -- what the operator polls -------------------------------------------
     async def poll(self, name, since=None):
         project = self.bound(name)
@@ -809,7 +866,8 @@ def install(app, *, create=None, gates=None, work=None):
         shown = [s for s in ops.members(project) if session_category(s) in (CATEGORY_RUNNING, CATEGORY_PAUSED)]
         await ops.track(project)
         gates, _ = await ops.gates_read([s for s in shown if session_category(s) == CATEGORY_RUNNING])
-        return web.json_response(ops.view(project, await ops.work_of(shown), gates))
+        return web.json_response({**ops.view(project, await ops.work_of(shown), gates),
+                                  "mode": ops.mode(project)})
 
     async def pending(request):
         return web.json_response(ops.pending_all())
@@ -829,6 +887,9 @@ def install(app, *, create=None, gates=None, work=None):
         profile = str(body.get("profile") or "").strip()
         if not profile:
             return fail("profile is required")
+        mode = body.get("mode") or operator_transcript.DEFAULT_MODE
+        if mode not in operator_transcript.MODES:
+            return fail("mode must be one of " + ", ".join(operator_transcript.MODES))
         mesh_mgr = request.app["mesh"]
         mesh = MESH_PREFIX + project
         try:
@@ -851,7 +912,20 @@ def install(app, *, create=None, gates=None, work=None):
         if status >= 300:
             return web.json_response(payload, status=status)
         ops.bind(project, payload["name"])
+        # Set before the bot's first poll, so no nudge: the opening turn has
+        # not started reading yet, and operator_transcripts answers the mode.
+        await ops.set_mode(project, mode, nudge=False)
         return web.json_response(payload, status=201)
+
+    async def mode(request):
+        body = await request.json()
+        if not isinstance(body, dict):
+            return fail("object required")
+        try:
+            project = projects.require(body.get("project") or projects.DEFAULT).name
+            return web.json_response(await ops.set_mode(project, body.get("mode")))
+        except (projects.ProjectError, ValueError) as exc:
+            return fail(exc)
 
     async def message(request):
         try:
@@ -886,6 +960,9 @@ def install(app, *, create=None, gates=None, work=None):
         name = request.match_info["name"]
         return web.json_response(await ops.poll(name, request.query.get("since") or None))
 
+    async def agent_transcripts(request):
+        return web.json_response(await ops.transcripts(request.match_info["name"]))
+
     async def agent_dispatch(request):
         try:
             return web.json_response(await ops.dispatch(request.match_info["name"], await request.json()))
@@ -895,11 +972,13 @@ def install(app, *, create=None, gates=None, work=None):
     app.router.add_get("/api/operator", view)
     app.router.add_get("/api/operator/pending", pending)
     app.router.add_post("/api/operator/start", start)
+    app.router.add_post("/api/operator/mode", mode)
     app.router.add_post("/api/operator/message", message)
     app.router.add_post("/api/operator/asks/{entry}/answer", answer)
     app.router.add_post("/api/operator/agent/{name}/post", agent_post)
     app.router.add_post("/api/operator/agent/{name}/ask", agent_ask)
     app.router.add_get("/api/operator/agent/{name}/inbox", agent_inbox)
     app.router.add_get("/api/operator/agent/{name}/poll", agent_poll)
+    app.router.add_get("/api/operator/agent/{name}/transcripts", agent_transcripts)
     app.router.add_post("/api/operator/agent/{name}/dispatch", agent_dispatch)
     return ops

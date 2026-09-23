@@ -17,7 +17,8 @@
 # `watch` — and never moves the run by itself.
 name: operator
 description: >-
-  Project Operator bot: poll the project's sessions (operator_poll), tell the
+  Project Operator bot: poll the project's sessions (operator_poll, and in
+  transcript mode their conversations via operator_transcripts), tell the
   user only what matters (operator_post), ask for their decisions
   (operator_ask), read their input (operator_inbox) and relay their
   instructions (operator_dispatch). Repeats on a timer; recur, auto.
@@ -47,6 +48,18 @@ steps:
          `/tmp`나 저장소에 쓰지 않는다). `more: true`면 같은 판단 안에서
          다시 부른다. poll은 실행 중·일시정지 세션만 읽는다. `ended`에
          이름이 있으면 그 세션이 이번에 종료·보관된 것이다(한 번만 온다).
+         이어서 `operator_transcripts`를 부른다. 응답의 `mode`가 관찰
+         모드다(사용자가 Operator 탭에서 바꾼다 — 바뀌면 넛지가 온다):
+         - `events`(기본): `transcripts`는 비어 있다. 판단의 재료는 poll의
+           `events`와 `attention`이다.
+         - `transcript`(시범): 판단의 재료는 `transcripts`다 — 세션마다
+           대화 레코드(`{seq, role, ts, text}`)가 데몬이 쥔 커서 뒤로
+           온다. 커서는 데몬이 세션별로 저장하므로 따로 적지 않는다.
+           `more: true`면 같은 판단 안에서 다시 부른다. 이 모드에서
+           대체되는 것은 poll의 일상 `events` 하나다 — 사용자가 처리할
+           것(`attention`: cflow 게이트, observer_ask, blocked)과
+           `progress`, `paused`, `ended`, `restart`, `recovered`, `degraded`는 두
+           모드에서 똑같이 쓴다.
          poll이 실패하면(연결 timeout, 데몬 무응답) 커서는 그대로 두고,
          감시가 끊겼다는 카드를 `level: attention`으로 한 번 올린다 —
          사용자가 할 일이 없으므로 `urgent`가 아니다. 그 카드의 id를
@@ -65,8 +78,8 @@ steps:
          `degraded`에 `board`나 `gates`가 있으면 이번 응답에 그 부분이
          빠졌다(데몬이 제한 시간 안에 읽지 못했다). 게시하지 않고 다음
          poll에서 다시 본다.
-      3. 판단: 새 이벤트와 `attention`에서 사용자가 다음에 할 일을 바꾸는
-         것만 고른다 — 결과(머지·테스트 수치·산출물), 실패·차단, 사용자를
+      3. 판단: 새 이벤트(`transcript` 모드면 새 대화 레코드)와
+         `attention`에서 사용자가 다음에 할 일을 바꾸는 것만 고른다 — 결과(머지·테스트 수치·산출물), 실패·차단, 사용자를
          기다리는 cflow 게이트나 질문, 두 세션의 충돌·중복. 일상 진행과
          메시지 송수신·확인·재촉은 게시하지 않는다. 이미 게시한 것은
          되풀이하지 않는다.

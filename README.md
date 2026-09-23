@@ -3116,9 +3116,18 @@ poll never waits more than a few seconds for the board or the run states: it
 answers without them and names them in `degraded`. A poll that failed is
 remembered by the bot's MCP client, and the first one to succeed carries
 `recovered` (first failure, recovery time, count), which the bot reports as
-a reply to its outage card. HTTP:
-`GET /api/operator?project=P` (feed, bound session, watched sessions),
-`GET /api/operator/pending`, `POST /api/operator/start {project, profile, model?, effort?}`,
+a reply to its outage card. The bot observes in one of two modes, chosen in
+the Operator header (or at start) and switched while it runs — the daemon
+records the switch in the feed and nudges the bot, no restart: `events` (the
+default, above) and `transcript`, a trial in which the bot reads the
+project's running sessions' conversations itself with `operator_transcripts`
+(new records since a cursor the daemon keeps per session, starting from each
+one's last few; prose clipped at 1500 characters, tool calls and results to
+one line, thinking left out). Those records replace the poll's routine events;
+its attention, progress and restart fields still count. HTTP:
+`GET /api/operator?project=P` (feed, bound session, watched sessions, mode),
+`GET /api/operator/pending`, `POST /api/operator/start {project, profile, model?, effort?, mode?}`,
+`POST /api/operator/mode {project, mode}`,
 `POST /api/operator/message?project=P {text}`,
 `POST /api/operator/asks/{id}/answer?project=P {decision?, text?}`; the bot's
 own calls live under `/api/operator/agent/{session}/…` and are refused to any

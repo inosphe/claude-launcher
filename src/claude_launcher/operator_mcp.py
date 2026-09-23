@@ -66,6 +66,15 @@ TOOLS = [
          "text": {"type": "string", "description": "the instruction, faithful to what the user said"},
          "on_behalf_of": {"type": "string", "description": "id from operator_inbox"}},
          "required": ["target", "text", "on_behalf_of"]}},
+    {"name": "operator_transcripts",
+     "description": "Your observation mode, and in `transcript` mode the conversations themselves: each running session's "
+                    "new transcript records since the last call (the daemon keeps the cursor per session; a session "
+                    "seen first starts from its last few records). A record is `{seq, role, ts, text}` — prose clipped "
+                    "at 1500 chars, tool calls and results as one clipped line, thinking omitted. `more: true` means "
+                    "call again; these records replace operator_poll's routine `events`, while its `attention`, `progress` "
+                    "and restart fields still count. In `events` mode it returns only `mode`. "
+                    "The user switches the mode from the Operator tab; you are nudged when they do.",
+     "inputSchema": {"type": "object", "properties": {}}},
 ]
 
 
@@ -147,6 +156,8 @@ def call_tool(name, args):
         return client.post(base + "/ask", {k: args.get(k) for k in ("text", "type", "choices", "level", "refs", "reply_to", "request_id") if k in args})
     if name == "operator_dispatch":
         return client.post(base + "/dispatch", {k: args.get(k) for k in ("target", "text", "on_behalf_of")})
+    if name == "operator_transcripts":
+        return client.get(base + "/transcripts")
     raise OperatorMcpError("unknown Operator tool")
 
 

@@ -70,7 +70,22 @@ function startBody(projectName, choice, offered) {
   const body = {project: projectName, profile: offered.profile};
   if (choice.model && offered.models.includes(choice.model)) body.model = choice.model;
   if (choice.effort && offered.efforts.includes(choice.effort)) body.effort = choice.effort;
+  if (choice.mode && choice.mode !== "events") body.mode = choice.mode;
   return body;
+}
+/* How the operator observes (operator_transcript.MODES): the Observer's
+   events, or — the trial — the sessions' conversations read by the bot. */
+const MODES = [["events", "관찰: Observer 이벤트"], ["transcript", "관찰: transcript 직접 폴링 (시범)"]];
+function modeSelect(current, onpick) {
+  const select = document.createElement("select");
+  select.className = "operator-mode";
+  select.setAttribute("aria-label", "Operator 관찰 모드");
+  for (const [value, label] of MODES) {
+    const o = document.createElement("option"); o.value = value; o.textContent = label; select.append(o);
+  }
+  select.value = current || "events";
+  select.onchange = () => onpick(select.value);
+  return select;
 }
 /* The status dot's class for a session record, the session list's own
    `.dot` classes: idle / busy / starting / exited, and exited + paused for a
@@ -155,7 +170,7 @@ let project = "", data = null, projectNames = [], timer = null, badgeTimer = nul
 /* The Start row's choices. The row is rebuilt on every poll, so what the user
    picked lives here rather than in the elements. */
 let profileOptions = [], modelIds = {}, harnesses = {};
-const startChoice = {profile: "", model: "", effort: ""};
+const startChoice = {profile: "", model: "", effort: "", mode: "events"};
 const hosts = new Set();
 const drafts = new Map();          // ask id -> note text, so a poll never eats a half-typed note
 let composer = "";
@@ -246,6 +261,7 @@ function renderHead(h) {
   if (start.contains(document.activeElement)) return;  // a picker is open: do not rebuild under it
   start.replaceChildren();
   if (data && (!op || !op.running)) renderStart(start);
+  else if (op && op.running) start.append(modeSelect(data.mode, switchMode));
 }
 
 function renderStart(start) {
@@ -273,6 +289,7 @@ function renderStart(start) {
     start.append(picker("Operator 세션의 effort", ["", ...offered.efforts], startChoice.effort,
       v => v || "effort: 기본값", v => { startChoice.effort = v; }));
   }
+  start.append(modeSelect(startChoice.mode, v => { startChoice.mode = v; }));
   const go = node("button", "Operator 시작"); go.type = "button";
   go.disabled = !offered.profile;
   go.onclick = async () => {
@@ -282,6 +299,15 @@ function renderStart(start) {
     catch (err) { notice(err.message); } finally { go.disabled = false; }
   };
   start.append(go);
+}
+
+/* Switch the running operator's mode; the daemon records it in the feed and
+   nudges the bot, which applies it from its next poll. */
+async function switchMode(mode) {
+  try {
+    await request("api/operator/mode", {project: chosenProject(), mode});
+    await refresh();
+  } catch (err) { notice(err.message); await refresh(); }
 }
 
 /* The session record behind a label: the rail's list (every page keeps it

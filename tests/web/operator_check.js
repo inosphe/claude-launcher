@@ -134,6 +134,13 @@ check("the start body carries the picked model and effort",
 check("a model the harness does not offer is not sent",
       ctx.startBody("p", {model: "opus", effort: ""}, ctx.startChoices(options, caps, "a:pi")),
       {project: "p", profile: "a:pi"});
+check("a transcript mode travels in the start request; the default is not sent",
+      [ctx.startBody("p", {mode: "transcript"}, ctx.startChoices(options, caps, "a:pi")).mode,
+       "mode" in ctx.startBody("p", {mode: "events"}, ctx.startChoices(options, caps, "a:pi"))],
+      ["transcript", false]);
+check("a running operator's header offers the mode switch, which posts to api/operator/mode",
+      [src.includes("start.append(modeSelect(data.mode, switchMode))"), src.includes('request("api/operator/mode"')],
+      [true, true]);
 check("the operator's own session links to its terminal",
       [src.includes('sessionLink(op.name, "operator-self")'), src.includes('a.href = "#/s/" + encodeURIComponent(name)')], [true, true]);
 check("a session link in the modal closes the modal",
