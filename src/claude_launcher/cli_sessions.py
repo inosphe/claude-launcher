@@ -1393,7 +1393,13 @@ def _cmd_kill_session(args: argparse.Namespace) -> int:
     client = daemon_client.ensure_running()
     suffix = "?force=1" if args.force else ""
     info = client.post(f"/api/sessions/{args.session}/kill{suffix}")
-    if info.get("already_exited"):
+    if info.get("unpaused"):
+        print(
+            f"session {args.session!r} was paused — it is now filed as "
+            "killed, so resuming the paused sessions no longer brings it "
+            f"back. It is still respawnable ('claunch respawn {args.session}')."
+        )
+    elif info.get("already_exited"):
         code = info.get("exit_code")
         print(
             f"session {args.session!r} had already exited"

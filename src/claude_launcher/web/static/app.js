@@ -2231,12 +2231,13 @@ function restoreRailFocus(name) {
 /* `k` on the focused card. The same request the header's kill button makes,
    on the card's session rather than the attached one -- the wind-down step
    included, where the first press settles the session's board issues and a
-   second one stops it now. An exited record has nothing to kill, so the
-   keystroke does nothing there rather than posting a request the route
-   would refuse. */
+   second one stops it now. A paused record is filed as killed by the same
+   request (h_session_kill). A killed record has nothing left to change, so
+   the keystroke does nothing there rather than posting a request the route
+   would answer with `already_exited`. */
 function railCardKill(name) {
   const rec = railCardRecord(name);
-  if (!rec || rec.status === "exited") return false;
+  if (!rec || (rec.status === "exited" && !rec.paused_at)) return false;
   killSession(name);
   return true;
 }
@@ -2317,7 +2318,7 @@ const RAIL_CARD_KEYS = [
     label: "k",
     what: "kill the session",
     when: "a session that has not exited — the first press winds the board "
-      + "down, a second one stops it now",
+      + "down, a second one stops it now; a paused one is filed as killed",
     act: (name) => railCardKill(name),
   },
   {
@@ -8356,6 +8357,13 @@ function killControlState(session, localState = null) {
       title: "wind-down in progress; stop this session now",
     };
   }
+  if (session && session.status === "exited" && session.paused_at) {
+    return {
+      label: "kill", disabled: false, phase: "ready",
+      title: "file this paused session as killed: it leaves the Paused "
+        + "filter and resuming the paused no longer brings it back",
+    };
+  }
   return {
     label: "kill", disabled: false, phase: "ready",
     title: "terminate the program running in this session",
@@ -9075,7 +9083,11 @@ function setStatusBadge(status) {
   // Rebrief types into a live terminal; on an exited one there is nobody to
   // read it, so the button yields its spot to resume.
   $("term-rebrief").classList.toggle("hidden", exited);
-  $("term-kill").classList.toggle("hidden", exited);
+  // Kill stays on a paused record: the process is already gone, and the
+  // press files the pause as killed, so the bulk resume of the paused no
+  // longer brings it back (h_session_kill). A killed record has nothing
+  // left for it to change.
+  $("term-kill").classList.toggle("hidden", exited && !paused);
   if ($("term-pause")) $("term-pause").classList.toggle("hidden", exited);
   $("term-archive").classList.toggle("hidden", archived);
   if (typeof syncSessionPinUi === "function") syncSessionPinUi();
@@ -12197,7 +12209,9 @@ function syncMobileBars() {
   $("m-resume").classList.toggle("hidden", status !== "exited");
   // Nothing to size without a terminal under the bar.
   $("m-zoom").classList.toggle("hidden", !has);
-  $("m-kill").classList.toggle("hidden", !has || status === "exited");
+  // A paused record keeps kill: it files the pause as killed (see
+  // setStatusBadge).
+  $("m-kill").classList.toggle("hidden", !has || (status === "exited" && !paused));
   if ($("m-pause")) {
     $("m-pause").classList.toggle("hidden", !has || status === "exited");
   }

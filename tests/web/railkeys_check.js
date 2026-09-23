@@ -463,6 +463,34 @@ const ev = (key, over = {}) => Object.assign({
   check("...so nothing was asked and nothing was sent",
         [ctx.confirms().length, posted("/archive").length], [0, 0]);
 
+  /* A paused record keeps both verbs (claunch-zpyzf): kill files the pause
+     as killed, archive files it like any exited record. Its program is
+     already gone, so neither press asks first. */
+  await new Promise((r) => setTimeout(r, 0));
+  calls.length = 0;
+  ctx.resetPresses();
+  ctx.setSessions([
+    { name: "s3", status: "exited" },
+    { name: "s5", status: "exited", paused_at: "2026-09-01T00:00:00Z" },
+    { name: "s6", status: "exited", paused_at: "2026-09-01T00:00:00Z" },
+  ]);
+  check("k reaches a paused record",
+        ctx.key(ev("k", { target: row("s5") }), "s5"), true);
+  await new Promise((r) => setTimeout(r, 0));
+  check("...by the kill route, for that card",
+        kills().map((c) => c.url), ["/api/sessions/s5/kill"]);
+  check("...a killed record still has nothing to change", ctx.kill("s3"), false);
+  // The kill's refresh replaced the cache with the fixture's poll.
+  ctx.setSessions([
+    { name: "s6", status: "exited", paused_at: "2026-09-01T00:00:00Z" },
+  ]);
+  check("e archives a paused record",
+        ctx.key(ev("e", { target: row("s6") }), "s6"), true);
+  await new Promise((r) => setTimeout(r, 0));
+  check("...by the archive route, without a question",
+        [posted("/archive"), ctx.confirms().length],
+        [["/api/sessions/s6/archive"], 0]);
+
   /* `a` is the one key that reads a second cache. A run stopped on an
      approval is the reader's press; a run stopped on a CHOICE is not, and
      picking an option for them is the failure this refusal exists for. */
