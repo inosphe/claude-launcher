@@ -1890,6 +1890,14 @@ a.cflow-scope:hover { background: #1d3559; text-decoration: underline; }
 /* Prose keeps the newlines the model wrote, and wraps: a conversation is read
    as text, so it must never grow a sideways scrollbar. */
 .log-text { white-space: pre-wrap; overflow-wrap: anywhere; }
+/* Raw text | Markdown: the segmented pair of the session list, as a sub-tab
+   of Transcript. Sized to its labels rather than stretched across the page;
+   [hidden] is restated because the class's display:flex outranks it. */
+#log-view .log-format-tabs { align-self: flex-start; padding: 0 20px 8px; background: none; }
+#log-view .log-format-tabs label { flex: none; }
+#log-view .log-format-tabs span { padding: 4px 12px; }
+#log-view .log-format-tabs[hidden] { display: none; }
+.log-md { overflow-wrap: anywhere; }
 .log-think { margin: 4px 0; padding-left: 10px; border-left: 2px solid #3a3f4a; color: #8b93a1; }
 .log-kind { font-size: 11px; color: #8b93a1; margin-bottom: 2px; }
 .log-tool { margin: 4px 0; }

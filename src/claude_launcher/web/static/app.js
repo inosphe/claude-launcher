@@ -12125,6 +12125,51 @@ let transcriptMore = false;        // is there anything above what is loaded
 let transcriptBusy = false;        // one fetch at a time, or a flick sends ten
 let transcriptGeneration = 0;
 
+/* How prose (text and thinking blocks) is drawn: "raw" as typed, or
+   "markdown" through mdInto. Tool traffic stays preformatted in both, since
+   it is output, not writing. Remembered per browser, like the session view. */
+const TRANSCRIPT_FORMAT_KEY = `claunch_transcript_format:${BASE}`;
+let transcriptFormat = (() => {
+  try { return localStorage.getItem(TRANSCRIPT_FORMAT_KEY) === "markdown" ? "markdown" : "raw"; } catch {}
+  return "raw";
+})();
+
+/* Switch the format and redraw what is already loaded, from the records the
+   nodes carry — no refetch. The reader stays on the record they were
+   reading: the first one at or below the top edge keeps its offset, because
+   rendering changes every record's height above and below it. */
+function setTranscriptFormat(format, remember = true) {
+  transcriptFormat = format === "markdown" ? "markdown" : "raw";
+  if (remember) {
+    try { localStorage.setItem(TRANSCRIPT_FORMAT_KEY, transcriptFormat); } catch {}
+  }
+  document.querySelectorAll('input[name="log-format"]').forEach((input) => {
+    input.checked = input.value === transcriptFormat;
+  });
+  const pane = $("term-log-pane");
+  if (!pane) return;
+  const recs = Array.from(pane.children).filter((node) =>
+    node.classList.contains("log-rec") && node.transcriptRecord);
+  if (!recs.length) return;
+  const atEnd = transcriptAtEnd(pane);
+  const anchor = recs.find((node) => node.offsetTop >= pane.scrollTop) || null;
+  const anchorSeq = anchor ? anchor.dataset.seq : null;
+  const anchorGap = anchor ? anchor.offsetTop - pane.scrollTop : 0;
+  let landed = null;
+  for (const old of recs) {
+    const fresh = renderTranscriptRecord(old.transcriptRecord);
+    pane.replaceChild(fresh, old);
+    if (fresh.dataset.seq === anchorSeq) landed = fresh;
+  }
+  if (atEnd) pane.scrollTop = pane.scrollHeight;
+  else if (landed) pane.scrollTop = landed.offsetTop - anchorGap;
+}
+document.querySelectorAll('input[name="log-format"]').forEach((input) =>
+  input.addEventListener("change", () => {
+    if (input.checked) setTranscriptFormat(input.value);
+  }));
+setTranscriptFormat(transcriptFormat, false);
+
 /* Open the page for a session — the route's entry point. Re-entering the one
    already on screen is a no-op rather than a reload: coming back from the
    terminal is the common case, and re-reading would throw away where the
@@ -12299,6 +12344,7 @@ function renderTranscriptRecord(r) {
     || (r.role === "user" && (r.blocks || []).every((b) => b.type === "tool_result"));
   const box = el("div", `log-rec log-${asst ? "asst" : "user"}`);
   box.dataset.seq = String(r.seq);
+  box.transcriptRecord = r;   // so a format switch can redraw without a refetch
   const head = el("div", "log-head");
   head.appendChild(el("span", "log-role", asst ? "assistant" : r.role));
   if (r.ts) {
@@ -12311,12 +12357,17 @@ function renderTranscriptRecord(r) {
   return box;
 }
 
+function renderTranscriptProse(text) {
+  if (transcriptFormat === "markdown") return mdInto(el("div", "log-md md"), text || "");
+  return el("div", "log-text", text);
+}
+
 function renderTranscriptBlock(b) {
-  if (b.type === "text") return el("div", "log-text", b.text);
+  if (b.type === "text") return renderTranscriptProse(b.text);
   if (b.type === "thinking") {
     const d = el("div", "log-think");
     d.appendChild(el("div", "log-kind", "thinking"));
-    d.appendChild(el("div", "log-text", b.text));
+    d.appendChild(renderTranscriptProse(b.text));
     return d;
   }
   if (b.type === "tool_use") {

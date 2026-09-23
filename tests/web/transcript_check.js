@@ -85,6 +85,12 @@ function mkel(tag) {
       c.parent = this;
       return c;
     },
+    replaceChild(c, old) {
+      const at = this.children.indexOf(old);
+      if (at >= 0) { this.children[at] = c; c.parent = this; old.parent = null; }
+      return old;
+    },
+    get offsetTop() { return this.parent ? this.parent.children.indexOf(this) * ROW_H : 0; },
     remove() {
       if (this.parent) this.parent.children.splice(this.parent.children.indexOf(this), 1);
     },
@@ -123,9 +129,16 @@ function build() {
     "log-title": mkel("span"),
     "log-back": mkel("a"),
   };
+  const radios = ["raw", "markdown"].map((value) => ({ value, checked: false }));
+  const store = {};
   const document_ = {
     createElement: mkel,
     createDocumentFragment: () => mkel("#fragment"),
+    querySelectorAll: (sel) => (sel === 'input[name="log-format"]' ? radios : []),
+  };
+  const localStorage_ = {
+    getItem: (k) => (k in store ? store[k] : null),
+    setItem: (k, v) => { store[k] = String(v); },
   };
 
   const calls = [];
@@ -145,14 +158,21 @@ function build() {
     slice("loadTranscriptPage"), slice("renderTranscriptPage"),
     slice("renderTranscriptRecord"), slice("renderTranscriptBlock"),
     slice("transcriptClipped"), slice("fmtLogTime"),
+    slice("renderTranscriptProse"), slice("setTranscriptFormat"),
     slice("startTranscriptPoll"), slice("stopTranscriptPoll"), slice("pollTranscript"),
   ].join("\n");
   new Function(
     "exports", "$", "document", "api", "setInterval", "clearInterval",
-    "Date", "Number",
+    "Date", "Number", "localStorage",
     `
 let shown = null;
 function showView(v) { shown = v; }
+// The real renderer is covered by its own checks; here only WHICH path a
+// block took matters, so the stub records the text it was handed.
+function mdInto(node, text) { node.md = text; return node; }
+const BASE = "/";
+${src.match(/const TRANSCRIPT_FORMAT_KEY = [^;]+;/)[0]}
+let transcriptFormat = "raw";
 const TRANSCRIPT_PAGE = 40;
 ${src.match(/const TRANSCRIPT_FOLLOW_MAX = \d+;/)[0]}
 const TRANSCRIPT_NEAR_TOP = 400;
@@ -167,6 +187,8 @@ exports.close = closeTranscript;
 exports.scroll = onTranscriptScroll;
 exports.poll = pollTranscript;
 exports.shown = () => shown;
+exports.setFormat = setTranscriptFormat;
+Object.defineProperty(exports, "format", { get: () => transcriptFormat });
 Object.defineProperty(exports, "isOpen", { get: () => transcriptIsOpen() });
 Object.defineProperty(exports, "name", { get: () => transcriptName });
 Object.defineProperty(exports, "cursor", { get: () => transcriptCursor });
@@ -174,10 +196,10 @@ Object.defineProperty(exports, "more", { get: () => transcriptMore });
 Object.defineProperty(exports, "polling", { get: () => transcriptTimer !== null });
 `
   )(ctx, (id) => nodes[id], document_, api,
-    () => 1, () => {}, Date, Number);
+    () => 1, () => {}, Date, Number, localStorage_);
 
   return {
-    api: ctx, nodes, calls,
+    api: ctx, nodes, calls, radios, store,
     pane: nodes["term-log-pane"],
     script: (list) => { answers = list.slice(); },
   };
@@ -424,6 +446,82 @@ const texts = (pane) => pane.children
         role && role.textContent === "assistant", role && role.textContent);
 })();
 
+/* --- Raw text | Markdown: prose switches renderer, tool output does not ---- */
+(async () => {
+  const w = build();
+  const mixed = [
+    { seq: 0, role: "assistant", ts: "", blocks: [
+      { type: "thinking", text: "*hm*" },
+      { type: "text", text: "**bold** reply" },
+      { type: "tool_use", name: "Bash", text: "ls **x**" },
+    ] },
+    { seq: 1, role: "user", ts: "", blocks: [{ type: "text", text: "# title" }] },
+  ];
+  w.script([{ status: 200, body: { records: mixed, cursor: 0, has_more: false } }]);
+  w.api.open("fmt");
+  await flush(); await flush();
+
+  const find = (cls) => {
+    const out = [];
+    const walk = (n) => { for (const c of n.children) {
+      if (c.className.split(" ").includes(cls)) out.push(c); walk(c); } };
+    walk(w.pane);
+    return out;
+  };
+  check("raw is the default: prose is drawn as typed",
+        w.api.format === "raw" && find("log-text").length === 3 && find("log-md").length === 0,
+        { format: w.api.format, text: find("log-text").length, md: find("log-md").length });
+
+  w.api.setFormat("markdown");
+  check("switching to markdown redraws the loaded prose through mdInto",
+        find("log-md").length === 3 && find("log-text").length === 0,
+        { text: find("log-text").length, md: find("log-md").length });
+  check("with the text it was written as",
+        find("log-md").map((n) => n.md).join("|") === "*hm*|**bold** reply|# title",
+        find("log-md").map((n) => n.md));
+  check("tool traffic stays preformatted",
+        find("log-pre").length === 1 && find("log-pre")[0].textContent === "ls **x**");
+  check("no refetch — the records rode on the nodes", w.calls.length === 1, w.calls);
+  check("the records stay in order", texts(w.pane).join(",") === "0,1", texts(w.pane));
+  check("the radios follow the choice",
+        w.radios.find((r) => r.value === "markdown").checked
+        && !w.radios.find((r) => r.value === "raw").checked);
+  check("and the choice is remembered for this browser",
+        w.store["claunch_transcript_format:/"] === "markdown", w.store);
+
+  w.script([{ status: 200, body: { records: [
+    { seq: 2, role: "assistant", ts: "", blocks: [{ type: "text", text: "_new_" }] },
+  ], cursor: 0, has_more: false } }]);
+  w.api.poll();
+  await flush(); await flush();
+  check("records that arrive later are drawn in the chosen format",
+        find("log-md").length === 4 && find("log-md")[3].md === "_new_");
+
+  w.api.setFormat("raw", false);
+  check("switching back draws them as typed again",
+        find("log-text").length === 4 && find("log-md").length === 0);
+  check("and a sync without remembering leaves storage alone",
+        w.store["claunch_transcript_format:/"] === "markdown", w.store);
+  check("an unknown value falls back to raw",
+        (w.api.setFormat("html", false), w.api.format === "raw"));
+})();
+
+/* --- switching format holds a reader who scrolled up on their record ----- */
+(async () => {
+  const w = build();
+  w.script([{ status: 200, body: { records: recs(0, 40), cursor: 0, has_more: false } }]);
+  w.api.open("anchor");
+  await flush(); await flush();
+  w.pane.scrollTop = 1250;   // mid-conversation: record 13 is the first at/below the edge
+  w.api.setFormat("markdown", false);
+  check("the first visible record keeps its offset from the top edge",
+        w.pane.scrollTop === 1250, w.pane.scrollTop);
+  w.pane.scrollTop = w.pane.scrollHeight - w.pane.clientHeight;
+  w.api.setFormat("raw", false);
+  check("a reader at the bottom stays at the bottom",
+        w.pane.scrollTop === w.pane.scrollHeight, w.pane.scrollTop);
+})();
+
 /* --- the markup and wiring the code reaches for -------------------------- */
 {
   const html = fs.readFileSync(
@@ -452,6 +550,19 @@ const texts = (pane) => pane.children
         /#term-log-pane\s*\{[^}]*overflow-y:\s*auto/.test(css));
   check("and a flick off its end stays in it",
         /#term-log-pane\s*\{[^}]*overscroll-behavior:\s*contain/.test(css));
+  check("the format is a radio group of two, raw checked by default",
+        /name="log-format" value="raw" checked/.test(html)
+        && /name="log-format" value="markdown"/.test(html));
+  check("it sits between the tabs and the transcript it formats",
+        html.indexOf('id="log-format"') > html.indexOf('id="log-tabs"')
+        && html.indexOf('id="log-format"') < html.indexOf('id="term-log-pane"'));
+  check("the radios are wired to the switch",
+        /name="log-format"\]'\)\.forEach[\s\S]{0,160}setTranscriptFormat\(input\.value\)/.test(src));
+  check("the info tab hides it, and CSS lets [hidden] win over display:flex",
+        /getElementById\("log-format"\)[^;]*;if\(format\)format\.hidden=showInfo/.test(
+          fs.readFileSync(path.join(__dirname, "..", "..", "src", "claude_launcher", "web",
+                                    "static", "observer.js"), "utf8"))
+        && /\.log-format-tabs\[hidden\]\s*\{\s*display:\s*none/.test(css));
   check("prose wraps rather than growing a sideways scrollbar",
         /\.log-text\s*\{[^}]*white-space:\s*pre-wrap/.test(css));
 }
