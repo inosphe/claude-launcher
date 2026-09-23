@@ -449,6 +449,7 @@ CHECKS = [
         "mdrender_check.js",
         "railseen_check.js",
         "dotgrade_check.js",
+        "meshdot_check.js",
         "railnote_check.js",
         "reports_check.js",
         "beadslayout_check.js",

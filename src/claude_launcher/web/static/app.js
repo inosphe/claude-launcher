@@ -27264,7 +27264,7 @@ function renderTopology(info) {
     if (!p) continue;
     const lit = !meshFocus || m.handle === meshFocus || reachable.has(m.handle);
     const g = svg("g", {
-      class: "mesh-agent " + meshDotClass(m.reachability)
+      class: "mesh-agent " + meshDotClass(m.reachability) + (typeof meshDotGrade === "function" ? meshDotGrade(m) : "")
         + (m.handle === meshFocus ? " focus" : "")
         + (lit ? "" : " dim"),
       transform: `translate(${p.x} ${p.y})`,
@@ -27447,7 +27447,9 @@ function renderWiring(info) {
   for (const m of others) {
     const linked = reach.has(m.handle);
     const row = el("div", "mesh-member" + (linked ? " linked" : ""));
-    row.appendChild(el("span", `dot ${meshDotClass(m.reachability)}`));
+    const linkDot = el("span", `dot ${meshDotClass(m.reachability)}${(typeof meshDotGrade === "function" ? meshDotGrade(m) : "")}`);
+    linkDot.title = (typeof meshDotTitle === "function" ? meshDotTitle(m) : "") || m.reachability || "";
+    row.appendChild(linkDot);
     row.appendChild(el("span", "mesh-handle", m.handle));
     row.appendChild(el("span", "mesh-role", m.role));
     // Lineage, where there is any. Cutting the edge along a spawn is the one
@@ -27723,7 +27725,8 @@ function renderMesh(info, history, force, owed, historyPage) {
     const row = el("div", "mesh-member");
     const category = meshMemberCategory(m);
     const dot = el("span", `dot ${meshDotClass(m.reachability)}`
-      + (category === "paused" ? " paused" : ""));
+      + (category === "paused" ? " paused" : "") + (typeof meshDotGrade === "function" ? meshDotGrade(m) : ""));
+    dot.title = (typeof meshDotTitle === "function" ? meshDotTitle(m) : "") || m.reachability || "";
     const name = el("span", "mesh-handle", m.handle);
     const role = el("span", "mesh-role", m.role);
     const machineLabel = m.machine || (isMirror ? info.primary : "");
@@ -28213,7 +28216,9 @@ function renderMeshOwed(info, report) {
   ));
   for (const r of owing) {
     const head = el("div", "mesh-owed-head");
-    head.appendChild(el("span", `dot ${meshDotClass(r.reachability)}`));
+    const owedDot = el("span", `dot ${meshDotClass(r.reachability)}${(typeof meshDotGrade === "function" ? meshDotGrade(r) : "")}`);
+    owedDot.title = (typeof meshDotTitle === "function" ? meshDotTitle(r) : "") || r.reachability || "";
+    head.appendChild(owedDot);
     head.appendChild(el("span", "mesh-handle", r.handle));
     head.appendChild(el("span", "mesh-role", r.role));
     head.appendChild(el("span", "mesh-owed-count", `${r.owed} unanswered`));
@@ -28568,6 +28573,31 @@ function meshDotClass(reachability) {
   return "exited"; // exited / missing / remote-disconnected / unknown
 }
 
+/* A member's session record, when this daemon has one that agrees with the
+   member's reachability word. Reachability is only ever "idle" or "busy" for
+   a member on this daemon (daemon/mesh.py _reachability answers remote-* for
+   the rest), and the rail's record is the one that carries moved_rows,
+   tool_calls and last_activity_at. A record whose status disagrees is a poll
+   behind the mesh view; its readings would grade the wrong word, so none. */
+function meshMemberRecord(m) {
+  if (!m || (m.reachability !== "idle" && m.reachability !== "busy")) return null;
+  const rec = (sessionsCache || []).find((s) => s.name === m.session);
+  return rec && rec.status === m.reachability ? rec : null;
+}
+
+/* The grade suffix (" lvl-N" / " age-N" / "") for a member's dot, the same
+   one the session dot shows (dotGrade). */
+function meshDotGrade(m) {
+  const rec = meshMemberRecord(m);
+  return rec && typeof dotGrade === "function" ? dotGrade(rec) : "";
+}
+
+/* The tooltip the session dot would carry, or "" when there is no record. */
+function meshDotTitle(m) {
+  const rec = meshMemberRecord(m);
+  return rec && typeof dotTitle === "function" ? dotTitle(rec) : "";
+}
+
 /* ------------------------------------------------------------------ */
 /* flow topology (#/mesh/<name>/flows) — the mesh, and how far along   */
 /* every agent in it is                                                */
@@ -28861,7 +28891,7 @@ function flowCardSvg(member, f, wf, m) {
   }));
   const left = -m.cardW / 2 + 12, right = m.cardW / 2 - 12, top = -m.cardH / 2;
   g.appendChild(svg("circle", {
-    class: `flow-dot ${meshDotClass(member.reachability)}`,
+    class: `flow-dot ${meshDotClass(member.reachability)}${(typeof meshDotGrade === "function" ? meshDotGrade(member) : "")}`,
     cx: left + 4, cy: top + 16, r: 4,
   }));
   g.appendChild(svg(

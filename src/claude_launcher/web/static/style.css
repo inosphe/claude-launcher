@@ -3602,6 +3602,13 @@ a.wf-btn { display: inline-block; text-decoration: none; line-height: 1.5; }
 .mesh-agent.busy .mesh-agent-disc { stroke: #d29922; }
 .mesh-agent.starting .mesh-agent-disc { stroke: #58a6ff; }
 .mesh-agent.exited .mesh-agent-disc { stroke: #6e7681; fill: #1e2126; }
+/* The session dot's grades (.dot.busy.lvl-N / .dot.idle.age-N), on the ring. */
+.mesh-agent.busy.lvl-1 .mesh-agent-disc { stroke: #9e6a03; }
+.mesh-agent.busy.lvl-2 .mesh-agent-disc { stroke: #d29922; }
+.mesh-agent.busy.lvl-3 .mesh-agent-disc { stroke: #f0883e; stroke-width: 2.6; }
+.mesh-agent.idle.age-1 .mesh-agent-disc { stroke: #2ea043; }
+.mesh-agent.idle.age-2 .mesh-agent-disc { stroke: #1f6f33; }
+.mesh-agent.idle.age-3 .mesh-agent-disc { stroke: #173d24; }
 .mesh-agent:hover .mesh-agent-disc { stroke-width: 2.6; }
 .mesh-agent.focus .mesh-agent-disc { fill: #17324f; stroke: #58a6ff; stroke-width: 2.6; }
 /* Dimmed rather than hidden: a member you cannot reach is the answer to the
@@ -3694,6 +3701,12 @@ a.wf-btn { display: inline-block; text-decoration: none; line-height: 1.5; }
 .flow-dot.idle { fill: #3fb950; }
 .flow-dot.busy { fill: #d29922; }
 .flow-dot.starting { fill: #58a6ff; }
+.flow-dot.busy.lvl-1 { fill: #9e6a03; }
+.flow-dot.busy.lvl-2 { fill: #d29922; }
+.flow-dot.busy.lvl-3 { fill: #f0883e; }
+.flow-dot.idle.age-1 { fill: #2ea043; }
+.flow-dot.idle.age-2 { fill: #1f6f33; }
+.flow-dot.idle.age-3 { fill: #173d24; }
 
 /* the track: the workflow itself, one line per agent */
 .flow-rail { stroke: #3a4049; stroke-width: 1.6; }
