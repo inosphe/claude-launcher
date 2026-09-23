@@ -14710,6 +14710,9 @@ function openBeads(id, section) {
     beadsOpen = true;
     renderBeads();
     restartBeadsStream();
+    // The Queues tab reads its own endpoint; without this first read it sat
+    // on "loading…" until the 15 s poll came round.
+    if (beadsSection === "queues") refreshQueues();
     if (!beadsTimer) beadsTimer = setInterval(refreshBeads, 15000);
   }
 }
@@ -16046,7 +16049,7 @@ function renderBeads() {
     renderQueues(view);
     return;
   }
-  view.appendChild(el("p", "wf-note",
+  view.appendChild(el("p", "wf-note beads-intro",
     "The repository board (beads), by session: each issue carries the " +
     "sessions the daemon ties it to — the recorded link, assignee, " +
     "creator, or an `issue: <id>` in the session's task. Writes are the " +
@@ -16054,17 +16057,20 @@ function renderBeads() {
     "creation, winds a session down before a kill, and returns what it " +
     "was working on to open when it exits."));
   if (beadsError) view.appendChild(el("p", "wf-warning", beadsError));
-  view.appendChild(beadsFilterBar());
-  if (!beadsCache) {
-    if (!beadsError) view.appendChild(el("p", "wf-note", "loading the first page…"));
-    return;
-  }
-  const boards = beadsCache.boards || [];
+  // The three tabs share one order -- intro, workspace, filters, content --
+  // so the workspace row sits above the filters here as it does on Queues:
+  // it chooses the board, and the filters narrow what that board shows.
+  const boards = (beadsCache && beadsCache.boards) || [];
   if (beadsSession) {
     const owner = boards.find((b) => (b.sessions || []).some((s) => s.name === beadsSession));
     if (owner) beadsWorkspace = owner.root;
   }
-  view.appendChild(beadsWorkspaceTabs(boards));
+  if (boards.length) view.appendChild(beadsWorkspaceTabs(boards));
+  view.appendChild(beadsFilterBar());
+  if (!beadsCache) {
+    if (!beadsError) view.appendChild(el("p", "wf-note", "loading…"));
+    return;
+  }
   view.appendChild(beadsNewBlock());
   const body = el("div", "beads-body" + (beadsFocus ? " split" : ""));
   const list = el("div", "beads-list");
@@ -16164,14 +16170,14 @@ async function refreshQueues() {
 }
 
 function renderQueues(view) {
-  view.appendChild(el("p", "wf-note",
+  // One intro paragraph, as on the other two tabs.
+  view.appendChild(el("p", "wf-note beads-intro",
     "Each row is a session's queue — the active issues the board assigns to " +
     "it, in the order its worker takes them (priority, then age); the last " +
     "row is the unassigned pool. Drag a card to another row to assign it: the " +
     "daemon writes `br update <id> --assignee <session>` and a QUEUED / " +
     "UNQUEUED comment, and nothing else — the column (status) is the " +
-    "assignee's to move. A worker lands its whole queue as one batch."));
-  view.appendChild(el("p", "wf-note",
+    "assignee's to move. A worker lands its whole queue as one batch. " +
     "Rows come busiest first: the queues with something in flight " +
     "(in_progress, in_review), then the ones with work waiting, then the " +
     "idle. Sessions that have ended are folded away, and so is an " +
@@ -16190,7 +16196,7 @@ function renderQueues(view) {
       ".beads/ — 'claunch beads init --prefix <name>' at its root starts one"));
   }
   const statuses = beadsQueues.statuses || BEADS_STATUSES.filter((s) => BEADS_ACTIVE.has(s));
-  view.appendChild(beadsWorkspaceTabs(boards));
+  if (boards.length) view.appendChild(beadsWorkspaceTabs(boards));
   for (const b of boards.filter((b) => b.root === beadsWorkspace)) view.appendChild(beadsQueuesBoard(b, statuses));
 }
 
@@ -17088,8 +17094,9 @@ function reportsFilterBar() {
   bar.appendChild(reportsPick(
     "issue", [...new Set(rows.map((r) => r.issue).filter(Boolean))].sort(),
     reportsIssue, (v) => { reportsIssue = v; renderReports(); }));
-  const order = el("button", "wf-btn clear reports-order",
-    reportsOldest ? "oldest first" : "newest first");
+  // The same control as the Board tab's sort direction, so the two read alike.
+  const order = el("button", "seq-tab reports-order",
+    reportsOldest ? "Oldest first ↑" : "Newest first ↓");
   order.type = "button";
   order.title = "flip the order";
   order.addEventListener("click", () => { reportsOldest = !reportsOldest; renderReports(); });
@@ -17174,7 +17181,7 @@ function renderReports(view = $("beads-view"), withHead = true) {
     head.appendChild(back);
     view.appendChild(head);
   }
-  view.appendChild(el("p", "wf-note",
+  view.appendChild(el("p", "wf-note beads-intro",
     "Every round report on this machine, newest first. One HTML page per " +
     "round, written by the session that ran it and kept outside that " +
     "session's own directory — so the write-up stays readable long after " +

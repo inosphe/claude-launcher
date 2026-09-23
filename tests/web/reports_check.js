@@ -279,10 +279,14 @@ ctx.setCache(ROWS);
 ctx.render();
 check("every round is drawn", view.find("reports-row").length, 4);
 check("and the count says so plainly", view.find("reports-count")[0].text, "4 reports");
+/* The order flip wears `.seq-tab` like the Board tab's sort direction, so it
+   is counted with the state tabs. */
 check("the state tabs are offered, plus the two pickers and the order flip",
       [view.find("seq-tab").length, view.find("reports-pick").length,
        view.find("reports-order").length],
-      [ctx.states.length, 2, 1]);
+      [ctx.states.length + 1, 2, 1]);
+check("the order flip says its direction the way the Board tab does",
+      view.find("reports-order")[0].text, "Newest first ↓");
 
 /* The pickers offer what the rows carry, not the fleet: a session with no
    report would be an option that leads to an empty page. */

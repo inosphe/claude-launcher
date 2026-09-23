@@ -2378,10 +2378,18 @@ body.term-split #terminal { flex: var(--split-term, 0.6) 1 0; min-height: 80px; 
 .gh-guide-step { margin-bottom: 10px; }
 .gh-guide-step .wf-warning, .gh-guide-step .wf-note { margin: 0 0 4px; }
 .gh-ready { color: #3fb950; }
+/* The Beads page's three tabs share one vertical rhythm: tabs, one intro
+   paragraph, the workspace row, the filter row, then the content, 12px apart. */
 .beads-page-tabs { margin-bottom: 12px; }
-.beads-workspace-tabs { overflow-x: auto; flex-wrap: nowrap; margin-bottom: 12px; }
+.beads-intro { margin: 0 0 12px; }
+.seq-tabs.beads-workspace-tabs { overflow-x: auto; flex-wrap: nowrap; margin-top: 0; margin-bottom: 12px; }
 .beads-workspace-tabs .seq-tab { flex-shrink: 0; }
-.beads-sort { display: inline-flex; align-items: center; gap: 6px; }
+/* A filter row is itself a `.seq-tabs`; the groups nested in it (priority,
+   lanes/tree) must not add the row's own top margin a second time, or they
+   sit lower than the chips beside them. */
+.seq-tabs.beads-filters, .seq-tabs.reports-filters { margin-top: 0; }
+.beads-filters .seq-tabs { margin-top: 0; }
+.beads-sort { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: #9da5b0; }
 .beads-sort select,
 .beads-session-pick {
   margin-left: auto; padding: 4px 8px; background: #0d1117; color: #e6edf3;
@@ -3901,6 +3909,9 @@ a.wf-btn { display: inline-block; text-decoration: none; line-height: 1.5; }
   cursor: pointer; border: 1px solid #30363d; background: #1b1e24;
   color: #9da5b0; border-radius: 6px; padding: 4px 10px; font-size: 12px;
 }
+/* Some tab rows are links (a page's own sections), some are buttons; both
+   read as the same control, so the link's underline is dropped. */
+a.seq-tab { text-decoration: none; }
 .seq-tab:hover { border-color: #4d5566; color: #d8dbe0; }
 .seq-tab.on { background: #172947; border-color: #58a6ff; color: #cfe2ff; cursor: default; }
 .seq-legend { display: flex; flex-wrap: wrap; gap: 6px 16px; margin-top: 10px; }
@@ -4535,7 +4546,7 @@ a.window-owner:hover { color: #79c0ff; text-decoration: underline; }
   padding: 4px 8px; background: #0d1117; color: #e6edf3;
   border: 1px solid #30363d; border-radius: 6px; font-size: 12px;
 }
-.reports-order { margin-left: auto; }
+.reports-order { white-space: nowrap; }
 .reports-list { max-width: 980px; }
 .reports-count { color: #7d8590; font-size: 11px; margin: 0 0 6px; }
 .reports-row {
