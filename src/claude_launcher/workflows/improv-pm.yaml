@@ -162,7 +162,8 @@ steps:
       정본이다. 순서는 priority 오름차순, 같으면 created_at 순. 읽는 명령은
       `claunch beads list --assignee <세션> --status open --status in_ready
       --status in_progress --limit 0 --json`. 배정(assignee 쓰기)은 리더·
-      운영자의 것이다 — 대시보드 Beads 페이지의 Queues 탭에서 카드를 세션
+      운영자의 것이다(예외: 세션이 스스로 만든 이슈 — 아래 「스스로 만든
+      이슈는 만든 세션이 처리한다」 절) — 대시보드 Beads 페이지의 Queues 탭에서 카드를 세션
       행으로 끌면 데몬이 `update <id> --assignee <세션>` 하나를 대신 치고
       `QUEUED`/`UNQUEUED` 코멘트를 남긴다; 상태(status)는 손대지 않는다.
       한 세션의 큐는 브랜치 하나 위에서 배치로 처리된다: 일감마다
@@ -176,23 +177,35 @@ steps:
       읽는다 — 착수할 수 있으면 같은 런 안에서 다음 회차의 주 이슈가 되고
       (intake로 루프), 착수할 수 없는 것(blocked·다른 저장소 영역)만
       `update <id> --assignee ""`와 `UNQUEUED: <세션> landed without it`
-      코멘트로 풀에 되돌린다. 워커가 자기 후속 이슈를 스스로 배정해 큐를
-      채우는 것은 원칙적으로 금지다 — 배정은 위 문장대로 리더·운영자의
-      것이다. 예외는 하나뿐이고 좁다(claunch-qac7 Q1: A→B, 2026-09-04
-      사용자 지시): wrapup의 생성 이슈 정산에서, (1) 원회차 이슈에
-      연결되고(`--parent` 자식이거나, 원회차가 닫힌 뒤면 규격의 출처에
-      원회차 id) (2) 같은 저장소 영역·같은 정본 규칙이고 (3) 규격이 서
-      있고 (4) P3이고 (5) 한 회차 크기인 후속에 한해, 회차당 최대 2건을
-      `--assignee $CLAUNCH_SESSION`과 `SELF-QUEUED: from <원회차 id>`
-      코멘트로 자기 큐에 넣는다. 리더는 거부권을 가진다(`update <id>
-      --assignee ""` + `UNQUEUED by leader: <이유>`). 세션이 만든 활성
+      코멘트로 풀에 되돌린다.
+      ── 스스로 만든 이슈는 만든 세션이 처리한다 ──
+      워커가 회차 중 스스로 만든 이슈(work의 `found`, wrapup의 `handoff`)는
+      만든 세션이 같은 런 안에서 처리한다(claunch-034c4, 2026-09-23 사용자
+      지시 — claunch-qac7 Q1의 「워커 자기 배정은 원칙적으로 금지, 좁은
+      self 예외만 제안」을 대체한다). 만들고 assignee 없이 backlog로 두는
+      것이 기본값이던 동안 그 이슈들은 처리되지 않고 쌓였다(s586). 그래서
+      배정은 wrapup의 생성 이슈 정산에서 워커가 직접 친다 — 항목마다:
+      (1) **spawn** — 살아 있는 자식(`children`)이 있고 그 이슈가 그 자식의
+      영역이면 그 자식에게(`update <id> --assignee <자식>` + `DELEGATED:
+      from <원회차 id> to <자식>` 코멘트 + 자식에게 mesh 한 줄 — 자식의
+      queue-next/queue-recheck가 보드로 읽는다), 또는 work의 위임 조건을
+      만족하면 새 자식을 `--issue <id>`로 세운다; (2) **self** — 그 밖에는
+      자기에게(`update <id> --assignee $CLAUNCH_SESSION` + `SELF-QUEUED:
+      from <원회차 id>` 코멘트) — queue-recheck가 그것을 읽어 같은 런
+      안에서 다음 회차로 돈다; (3) **pool** — assignee 없이 남기는 것은 이
+      세션이 착수할 수 없는 것(다른 저장소 영역, blocked, 범위·우선순위를
+      사용자나 리더가 정해야 하는 것)뿐이고, 그 처분은 상위에게 ask로
+      묻는다. 건수 상한은 두지 않는다 — 루프의 백스톱은 엔진의
+      max_visits(intake 방문 수)다. 리더는 거부권을 가진다(`update <id>
+      --assignee ""` + `UNQUEUED by leader: <이유>`); 거부된 이슈는
+      pool과 같이 상위의 처분을 따른다. 세션이 만든 활성
       이슈가 전부 누군가의 손(살아 있는 세션의 assignee, 또는 리더의
       `HOLD:` 코멘트)에 있어야 세션이 끝난다 — 워커의 settle-check가
       그것을 확인하고, 미충족이면 settle-wait가 시계로 기다린다(사람이나
       상위에게 묻지 않는다). 타이머가 여섯 번 깨우는 동안에도 안 서면
       settle-stall로 사람이 처분한다. 그러므로 이 리더가 그 보드 쓰기를
-      하는 자리는 wrapup의 정산 ask 하나다 — 거기서 답하지 않으면 워커는
-      기다리다 사람에게 넘어간다.
+      하는 자리는 wrapup의 pool ask와 거부권 둘이다 — pool ask에 답하지
+      않으면 워커는 기다리다 사람에게 넘어간다.
       br가 실패하면(잠금·바이너리 없음) --lock-timeout 5000으로 한 번 더,
       그래도 안 되면 mesh fyi 첫 줄에 `NO-BEAD:` + 위 규격 그대로 — 리더가
       다음 관제 대기에서 대신 만들고 id를 답한다. 이슈 없이 착수하는
