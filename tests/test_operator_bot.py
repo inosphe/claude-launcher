@@ -403,3 +403,117 @@ def test_work_reads_checks_and_the_session_s_open_issue():
     # no board: the checks still arrive, the issue is unknown
     out = asyncio.run(api._operator_work({}, [session]))
     assert out["w1"]["issue"] is None and out["w1"]["checks"]
+
+
+def test_poll_answers_without_a_board_or_gates_that_do_not_answer_in_time(world, monkeypatch):
+    # 2026-09-23: polls waited behind the board lock past the client's 30s
+    # timeout while the restarted daemon swept exited sessions' issues
+    monkeypatch.setattr(operator_bot, "READ_TIMEOUT", 0.05)
+
+    async def slow_work(sessions):
+        await asyncio.sleep(5)
+
+    def slow_gates(sessions):
+        import time
+        time.sleep(0.3)
+        return [{"session": "w1", "step_id": "late"}]
+
+    world.ops.work, world.ops.gates = slow_work, slow_gates
+    out = asyncio.run(world.ops.poll("op"))
+    assert out["degraded"] == ["gates", "board"]
+    assert not [a for a in out["attention"] if a["kind"] == "cflow_gate"]
+    world.ops.work, world.ops.gates = None, lambda members: []
+    assert asyncio.run(world.ops.poll("op"))["degraded"] == []
+
+
+def test_a_restart_is_written_once_per_boot_and_the_next_poll_carries_it(world):
+    previous = {"pid": 7, "started_at": "2026-09-23T12:37:52+00:00"}
+    current = {"pid": 8, "started_at": "2026-09-23T13:52:08+00:00", "requested": True,
+               "requested_by": ["s469"], "requested_at": "2026-09-23T13:51:29+00:00", "requested_via": "cli"}
+    (entry,) = world.ops.announce_boot(current, previous)
+    assert entry["kind"] == "system" and entry["event"] == "daemon_restart"
+    assert "데몬이 재시작되었습니다" in entry["text"] and "pid 7" in entry["text"] and "s469" in entry["text"]
+    assert entry["boot"]["previous_started_at"] == previous["started_at"]
+    assert world.ops.announce_boot(current, previous) == []  # once per boot
+    # a project without an operator gets nothing
+    world.ops.state("other")
+    world.ops.save("other")
+    assert world.ops.announce_boot({**current, "started_at": "2026-09-23T14:00:00+00:00"}, current)[0]["id"] != entry["id"]
+    assert all(e.get("event") != "daemon_restart" for e in world.ops.state("other")["feed"])
+    first = asyncio.run(world.ops.poll("op"))
+    assert first["restart"]["event"] == "daemon_restart"
+    assert asyncio.run(world.ops.poll("op", first["cursor"]))["restart"] is None
+    # a boot nothing asked for says so, and guesses no cause
+    text = operator_bot.restart_text({"started_at": "2026-09-23T15:00:00+00:00"}, current)
+    assert "재시작 요청 기록 없음" in text and "원인 미상" in text
+
+
+def test_watch_boot_waits_for_this_boot_in_the_ledger(world, monkeypatch):
+    from claude_launcher.daemon import restart_notice, runtime_state
+    ledger = {"boots": [{"started_at": "a"}]}
+    monkeypatch.setattr(runtime_state, "read_daemon_json", lambda: {"started_at": "b"})
+    monkeypatch.setattr(restart_notice, "read_ledger", lambda: ledger)
+
+    async def later():
+        await asyncio.sleep(0.02)
+        ledger["boots"].append({"started_at": "b", "requested": False})
+
+    async def run():
+        task = asyncio.create_task(later())
+        out = await world.ops.watch_boot(attempts=50, delay=0.01)
+        await task
+        return out
+
+    (entry,) = asyncio.run(run())
+    assert entry["boot"] == {"started_at": "b", "previous_started_at": "a", "requested": False,
+                             "requested_by": [], "requested_at": None}
+
+
+def test_a_restart_request_leaves_when_and_how_it_was_asked_in_the_boot_record():
+    from claude_launcher.daemon import restart_notice
+    restart_notice.record_request(via="cli", session="s469", daemon={"pid": 1, "started_at": "x"})
+    restart_notice.note_boot(pid=2, started_at="y")
+    boot = restart_notice.read_ledger()["boots"][-1]
+    assert boot["requested"] and boot["requested_at"] and boot["requested_via"] == "cli"
+
+
+def test_mcp_poll_reports_the_recovery_after_failures(tmp_path, monkeypatch):
+    monkeypatch.setenv("CLAUNCH_SESSION", "op")
+    monkeypatch.setenv("CLAUNCH_SCRATCH", str(tmp_path))
+    from claude_launcher import daemon_client
+    up = {"ok": False}
+
+    class Client:
+        def get(self, path):
+            return {"cursor": "c"}
+
+    monkeypatch.setattr(daemon_client, "connect_with_diagnosis",
+                        lambda **kw: (Client(), {}) if up["ok"] else (None, {}))
+    monkeypatch.setattr(daemon_client, "unreachable_reason", lambda why: "timed out")
+    for _ in range(2):
+        with pytest.raises(operator_mcp.OperatorMcpError):
+            operator_mcp.call_tool("operator_poll", {"since": "s"})
+    up["ok"] = True
+    out = operator_mcp.call_tool("operator_poll", {"since": "s"})
+    assert out["cursor"] == "c"
+    assert out["recovered"]["failures"] == 2 and out["recovered"]["last_error"] == "timed out"
+    assert out["recovered"]["first_failed_at"] <= out["recovered"]["recovered_at"]
+    assert "recovered" not in operator_mcp.call_tool("operator_poll", {})  # said once
+
+
+def test_only_gates_a_person_settles_reach_the_operator():
+    from claude_launcher.daemon import api
+    kind = api._operator_gate_kind
+    assert kind({"status": "waiting_approval"}) == "approval"
+    assert kind({"status": "waiting_goto"}) == "goto"
+    assert kind({"status": "waiting_selection"}) == "selection"
+    # a timer, a checklist, a window and a question still with an agent wait on no one here
+    for status in ("waiting_timer", "waiting_checklist", "waiting_window", "step", "select"):
+        assert kind({"status": status}) == "", status
+    assert kind({"status": "waiting_answer", "ask": {"asked": [{"handle": "s1"}]}}) == ""
+    # one that reached nobody is the user's: a branch by its options, else an approval
+    assert kind({"status": "waiting_answer", "ask": {"asked": [], "kind": "branch",
+                                                     "options": [{"name": "pass"}]}}) == "selection"
+    assert kind({"status": "waiting_answer", "ask": {"asked": []}}) == "approval"
+    assert api._operator_gate_options({"options": [{"name": "a", "description": "x"}, {"bad": 1}]}) == [
+        {"name": "a", "description": "x"}]

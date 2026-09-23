@@ -280,6 +280,10 @@ def note_boot(
         "port": port,
         "requested": bool(requests),
         "requested_by": [r.get("requested_by") for r in requests if r.get("requested_by")],
+        # When the first request was written is the closest record there is
+        # of when the previous daemon stopped; the Operator feed says it.
+        "requested_at": min((r["requested_at"] for r in requests if r.get("requested_at")), default=None),
+        "requested_via": next((r.get("via") for r in requests if r.get("via")), None),
     }
     ledger["boots"] = (ledger["boots"] + [boot])[-BOOT_HISTORY:]
 

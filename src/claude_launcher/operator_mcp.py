@@ -8,7 +8,10 @@ through ``operator_post``/``operator_ask``; input from the user is read with
 """
 from __future__ import annotations
 
+import json
 import os
+from datetime import datetime, timezone
+from pathlib import Path
 from urllib.parse import quote
 
 from . import daemon_client, mcp_rpc
@@ -27,7 +30,9 @@ TOOLS = [
      "description": "Read what happened in your project's other sessions since `since` (the `cursor` of your previous poll): "
                     "Observer events, plus mechanical state that needs no LLM — cflow gates waiting on a person, open "
                     "observer_ask questions, blocked sessions. `attention` lists what is waiting now whatever the cursor. "
-                    "Keep the returned `cursor` for the next call; `more: true` means call again with it.",
+                    "Keep the returned `cursor` for the next call; `more: true` means call again with it. "
+                    "`restart` is a daemon restart the daemon recorded (once); `recovered` says earlier polls failed "
+                    "and this one answered (first failure, recovery time, count); `degraded` names parts not read in time.",
      "inputSchema": {"type": "object", "properties": {"since": {"type": "string", "description": "cursor from the previous poll; omit on the first"}}}},
     {"name": "operator_post",
      "description": "Post one item to the user's Operator feed: a finding, a digest, a status the user should know. "
@@ -66,17 +71,72 @@ class OperatorMcpError(Exception):
     pass
 
 
+#: Where a failed poll is remembered until one succeeds, in the session's own
+#: scratch directory. The daemon cannot record this: a poll that never reached
+#: it, or timed out on the way back, left no trace on its side.
+OUTAGE_FILE = "operator-poll-outage.json"
+
+
+def _outage_path():
+    scratch = os.environ.get("CLAUNCH_SCRATCH")
+    return Path(scratch) / OUTAGE_FILE if scratch else None
+
+
+def _now():
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def note_poll_failure(error):
+    """Count one failed poll: the first failure's time stays, the last error
+    and the count move."""
+    path = _outage_path()
+    if path is None:
+        return
+    try:
+        record = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        record = {}
+    if not isinstance(record, dict) or not record.get("first_failed_at"):
+        record = {"first_failed_at": _now(), "failures": 0}
+    record["failures"] = int(record.get("failures") or 0) + 1
+    record["last_failed_at"] = _now()
+    record["last_error"] = str(error)[:300]
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(record, ensure_ascii=False), encoding="utf-8")
+    except OSError:
+        pass
+
+
+def take_recovery():
+    """The outage the previous polls recorded, closed now that one got an
+    answer, or None when there was none."""
+    path = _outage_path()
+    if path is None or not path.is_file():
+        return None
+    try:
+        record = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        record = None
+    try:
+        path.unlink()
+    except OSError:
+        pass
+    if not isinstance(record, dict) or not record.get("first_failed_at"):
+        return None
+    return {**record, "recovered_at": _now()}
+
+
 def call_tool(name, args):
     session = os.environ.get("CLAUNCH_SESSION")
     if not session:
         raise OperatorMcpError("Operator tools require a managed CLAUNCH_SESSION")
+    if name == "operator_poll":
+        return _poll(session, args.get("since"))
     client, why = daemon_client.connect_with_diagnosis()
     if client is None:
         raise OperatorMcpError(daemon_client.unreachable_reason(why))
     base = "/api/operator/agent/" + quote(session, safe="")
-    if name == "operator_poll":
-        since = args.get("since")
-        return client.get(base + "/poll" + ("?since=" + quote(since, safe="") if since else ""))
     if name == "operator_inbox":
         return client.get(base + "/inbox")
     if name == "operator_post":
@@ -86,6 +146,25 @@ def call_tool(name, args):
     if name == "operator_dispatch":
         return client.post(base + "/dispatch", {k: args.get(k) for k in ("target", "text", "on_behalf_of")})
     raise OperatorMcpError("unknown Operator tool")
+
+
+def _poll(session, since):
+    """One poll. A failure is remembered; the first poll that answers after
+    it carries ``recovered`` (first failure, recovery time, count, last
+    error) so the operator can say the outage ended."""
+    try:
+        client, why = daemon_client.connect_with_diagnosis()
+        if client is None:
+            raise OperatorMcpError(daemon_client.unreachable_reason(why))
+        result = client.get("/api/operator/agent/" + quote(session, safe="") + "/poll"
+                            + ("?since=" + quote(since, safe="") if since else ""))
+    except (OperatorMcpError, daemon_client.DaemonClientError, OSError) as exc:
+        note_poll_failure(exc)
+        raise
+    recovered = take_recovery()
+    if recovered and isinstance(result, dict):
+        result = {**result, "recovered": recovered}
+    return result
 
 
 SERVER = mcp_rpc.Server(name="claunch-operator", tools=tuple(TOOLS), dispatch=call_tool,

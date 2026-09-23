@@ -104,6 +104,40 @@ TRACK_CARDS = 40
 #: Seconds between two follow-up reads of one project: the view polls every
 #: few seconds, and a board read per poll would be waste.
 TRACK_INTERVAL = 15.0
+#: Seconds a poll, the view or a follow-up read waits for the board or the
+#: run states before answering without them. The operator's MCP client gives
+#: up after 30s; a poll that waits behind a busy board lock past that is one
+#: the operator reads as the daemon being down (2026-09-23 22:52, s739: three
+#: failed polls while the daemon swept exited sessions' issues on restart).
+READ_TIMEOUT = 5.0
+
+
+def _local(stamp):
+    """An ISO stamp as this machine's local time, for a line a person reads."""
+    try:
+        return datetime.fromisoformat(stamp).astimezone().strftime("%m-%d %H:%M:%S")
+    except (TypeError, ValueError):
+        return stamp or "기록 없음"
+
+
+def restart_text(current, previous):
+    """The feed line for a daemon restart: when the new daemon came up, which
+    one it replaced, and whether anything on this machine asked for it (the
+    restart ledger, :mod:`.restart_notice`). A boot nothing asked for is said
+    as such; its cause is not recorded anywhere, so none is guessed."""
+    lines = [f"데몬이 재시작되었습니다. 새 데몬 기동: {_local(current.get('started_at'))}"]
+    if previous:
+        lines.append(f"이전 데몬 기동: {_local(previous.get('started_at'))} (pid {previous.get('pid')})")
+    if current.get("requested"):
+        who = ", ".join(current.get("requested_by") or []) or "사용자 셸 또는 웹 UI"
+        at = current.get("requested_at")
+        via = current.get("requested_via")
+        lines.append(f"재시작 요청: {who}" + (f", 요청 시각 {_local(at)}" if at else "")
+                     + (f" ({via})" if via else ""))
+    else:
+        lines.append("재시작 요청 기록 없음: 이전 데몬이 요청 없이 끝났습니다(원인 미상).")
+    lines.append("중단 구간의 세션 이벤트는 Operator가 이어서 읽습니다.")
+    return "\n".join(lines)
 
 
 def watch_of(category, gate, work):
@@ -274,16 +308,86 @@ class Operators:
         rows.sort(key=lambda r: (r["category"] == CATEGORY_PAUSED, -r["questions"], r["name"]))
         return rows
 
+    async def work_read(self, sessions):
+        """``(work, ok)``: ``self.work`` for ``sessions``, and whether it was
+        read. Not wired or nothing to read is ok; a board that fails or takes
+        longer than :data:`READ_TIMEOUT` is not, and gives nothing."""
+        if not self.work or not sessions:
+            return {}, True
+        try:
+            return (await asyncio.wait_for(self.work(sessions), READ_TIMEOUT)) or {}, True
+        except asyncio.TimeoutError:
+            log.info("operator: board read took over %.0fs; answered without it", READ_TIMEOUT)
+            return {}, False
+        except Exception:  # a board read failing must not take the panel down
+            log.debug("operator: work read failed", exc_info=True)
+            return {}, False
+
     async def work_of(self, sessions):
         """``self.work`` for ``sessions``, or nothing when it is not wired or
         the board cannot be read (the panel then shows no progress)."""
-        if not self.work or not sessions:
-            return {}
+        return (await self.work_read(sessions))[0]
+
+    async def gates_read(self, sessions):
+        """``(gates, ok)``: the cflow gates waiting on a person among
+        ``sessions``, read off the loop and bounded like :meth:`work_read`."""
+        if not self.gates or not sessions:
+            return [], True
         try:
-            return await self.work(sessions) or {}
-        except Exception:  # a board read failing must not take the panel down
-            log.debug("operator: work read failed", exc_info=True)
-            return {}
+            return (await asyncio.wait_for(asyncio.to_thread(self.gates, sessions), READ_TIMEOUT)) or [], True
+        except asyncio.TimeoutError:
+            log.info("operator: gate read took over %.0fs; answered without it", READ_TIMEOUT)
+            return [], False
+        except Exception:  # a run-state read failing must not stop the rest
+            log.debug("operator: gate read failed", exc_info=True)
+            return [], False
+
+    # -- daemon restarts ---------------------------------------------------
+    def announce_boot(self, current, previous):
+        """Write a restart entry into every project that has an operator,
+        once per boot: the daemon says it restarted itself rather than leave
+        it to the bot, which only sees that its calls failed for a while. The
+        next poll carries the entry once (``restart``). Returns the entries."""
+        started = (current or {}).get("started_at")
+        if not started:
+            return []
+        out = []
+        for path in sorted(self.root.glob("*.json")) if self.root.is_dir() else []:
+            try:
+                project = json.loads(path.read_text(encoding="utf-8")).get("project")
+            except (OSError, ValueError, AttributeError):
+                continue
+            if not isinstance(project, str):
+                continue
+            data = self.state(project)
+            if not data.get("session") or data.get("boot") == started:
+                continue
+            entry = self.append(project, {
+                "kind": "system", "role": "system", "event": "daemon_restart",
+                "text": restart_text(current, previous),
+                "boot": {"started_at": started, "previous_started_at": (previous or {}).get("started_at"),
+                         "requested": bool(current.get("requested")),
+                         "requested_by": current.get("requested_by") or [],
+                         "requested_at": current.get("requested_at")}})
+            data["boot"] = started
+            data["restart_unpolled"] = entry["id"]
+            self.save(project)
+            out.append(entry)
+        return out
+
+    async def watch_boot(self, *, attempts=60, delay=1.0):
+        """At startup: wait until this boot is in the restart ledger (it is
+        written just after the daemon starts listening), then announce it."""
+        from . import restart_notice, runtime_state
+
+        for _ in range(attempts):
+            started = (runtime_state.read_daemon_json() or {}).get("started_at")
+            boots = restart_notice.read_ledger().get("boots") or []
+            if started and boots and boots[-1].get("started_at") == started:
+                return self.announce_boot(boots[-1], boots[-2] if len(boots) > 1 else None)
+            await asyncio.sleep(delay)
+        log.info("operator: this boot never reached the restart ledger; no restart entry written")
+        return []
 
     async def track(self, project, *, force=False):
         """Follow the sessions each recent card names, and when one of them
@@ -309,12 +413,10 @@ class Operators:
         named = {r for card in cards for r in card["refs"]}
         category = {n: session_category(members[n]) if n in members else None for n in named}
         running = [members[n] for n in named if category[n] == CATEGORY_RUNNING]
-        try:
-            gates = await asyncio.to_thread(self.gates, running) if self.gates and running else []
-        except Exception:  # a run-state read failing must not stop the rest
-            log.debug("operator: gate read failed", exc_info=True)
+        gates, gates_ok = await self.gates_read(running)
+        if not gates_ok:
             gates = None
-        work = await self.work_of([members[n] for n in named if n in members])
+        work, _ = await self.work_read([members[n] for n in named if n in members])
         waiting = {g.get("session"): g.get("step_id") for g in gates or []}
         readings = {}
         for n in named:
@@ -344,7 +446,7 @@ class Operators:
             self.save(project)
         return entries
 
-    def view(self, project, work=None):
+    def view(self, project, work=None, gates=None):
         project = projects.normalize(project)
         data = self.state(project)
         op = self.operator_session(project)
@@ -359,7 +461,8 @@ class Operators:
         elif data.get("session"):
             operator = {"name": data["session"], "running": False, "status": "missing"}
         return {"project": project, "operator": operator, "feed": data["feed"][-200:],
-                "pending": self.pending(project), "sessions": self.panel(project, work)}
+                "pending": self.pending(project), "sessions": self.panel(project, work),
+                "gates": list(gates or [])}
 
     def pending_all(self):
         by_project = {p: self.pending(p) for p in projects.names()}
@@ -567,8 +670,11 @@ class Operators:
         # The snapshot is read on the loop, as every Observer reader does; the
         # gates are run-state files, so they are read off it.
         snapshot = self.observer.snapshot()["sessions"] if self.observer else []
-        gates = await asyncio.to_thread(self.gates, running) if self.gates else []
-        work = await self.work_of(running)
+        gates, gates_ok = await self.gates_read(running)
+        work, work_ok = await self.work_read(running)
+        # What this poll could not read in time: it answers without it rather
+        # than run into the client's timeout, and says so.
+        degraded = [what for what, ok in (("gates", gates_ok), ("board", work_ok)) if not ok]
         cutoff = session_events.timestamp(since) if since else None
         events, attention = [], []
         # A paused session is stopped on purpose and a killed or archived one
@@ -630,11 +736,17 @@ class Operators:
         if work:
             self.save(project)
         await self.track(project)
+        restart = None
+        if data.get("restart_unpolled"):
+            restart = next((e for e in data["feed"] if e["id"] == data["restart_unpolled"]), None)
+            data.pop("restart_unpolled")
+            self.save(project)
         sessions = [{"name": n, "running": not s.exited, "category": category[n],
                      "status": s.info().get("status"), **progress_of(work.get(n))}
                     for n, s in members.items()]
         return {"project": project, "cursor": cursor, "more": more, "events": events,
                 "attention": attention, "paused": paused, "progress": progress,
+                "degraded": degraded, "restart": restart,
                 "sessions": sessions, "unread_user_input": len(self.unread(project))}
 
 
@@ -647,6 +759,17 @@ def install(app, *, create=None, gates=None, work=None):
     ops = Operators(paths.daemon_dir(), app["manager"], app.get("observer"), gates, work)
     app["operators"] = ops
 
+    async def watch_boot(app):
+        ops.boot_task = asyncio.create_task(ops.watch_boot())
+
+    async def stop_boot_watch(app):
+        task = getattr(ops, "boot_task", None)
+        if task is not None:
+            task.cancel()
+
+    app.on_startup.append(watch_boot)
+    app.on_cleanup.append(stop_boot_watch)
+
     def fail(exc):
         return web.json_response({"error": str(exc)}, status=400)
 
@@ -654,7 +777,8 @@ def install(app, *, create=None, gates=None, work=None):
         project = projects.normalize(request.query.get("project") or projects.DEFAULT)
         shown = [s for s in ops.members(project) if session_category(s) in (CATEGORY_RUNNING, CATEGORY_PAUSED)]
         await ops.track(project)
-        return web.json_response(ops.view(project, await ops.work_of(shown)))
+        gates, _ = await ops.gates_read([s for s in shown if session_category(s) == CATEGORY_RUNNING])
+        return web.json_response(ops.view(project, await ops.work_of(shown), gates))
 
     async def pending(request):
         return web.json_response(ops.pending_all())

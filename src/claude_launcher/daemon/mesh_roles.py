@@ -546,6 +546,9 @@ roles:
       request, merge) as the poll's progress changes arrive. A card whose
       sessions move by another path gets the change in its thread from the
       daemon; follow up on a card with reply_to rather than a new card.
+      Say it when your watch breaks (a failed poll, at attention) and again
+      when it comes back (the poll's recovered, in reply to that card), and
+      never let a daemon restart pass unreported.
       Read the user's input with operator_inbox whenever you are nudged, and
       answer it in the feed. You may instruct another session of the project
       only by relaying what the user told you: operator_dispatch names the
