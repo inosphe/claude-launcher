@@ -109,6 +109,15 @@ function progressChips(row) {
   }
   return chips;
 }
+/* How many feed entries came after the last one the reader saw at the
+   bottom: what the "새 내용" button counts. No id yet counts nothing; an id
+   the feed no longer holds (trimmed away) counts everything. */
+function unseenCount(feed, readId) {
+  if (!readId) return 0;
+  const list = feed || [];
+  const at = list.findIndex(e => e.id === readId);
+  return at < 0 ? list.length : list.length - 1 - at;
+}
 /* Follow-ups by card: an entry with a `parent` (the daemon's update on a
    session the card names, or the bot's reply_to) is listed under that card
    as well as in time order. Children whose card was trimmed away stay in
@@ -187,6 +196,7 @@ function setProject(name) {
   project = name;
   try { localStorage.setItem("claunch-operator-project", name); } catch {}
   data = null; seen.clear(); primed = false;
+  for (const h of hosts) { h.scrolled = false; h.readId = null; }
   refresh();
 }
 
@@ -204,6 +214,11 @@ function build(root) {
   const body = node("div", null, "operator-body");
   const feedCol = node("section", null, "operator-conversation");
   const feed = node("ol", null, "operator-feed"); feed.setAttribute("aria-live", "polite");
+  // What arrived while the reader was scrolled up: a button at the newest
+  // end of the feed, instead of a jump that loses their place.
+  const newer = node("button", "", "operator-newer"); newer.type = "button"; newer.hidden = true;
+  const feedWrap = node("div", null, "operator-feed-wrap");
+  feedWrap.append(feed, newer);
   const form = node("form", null, "operator-composer");
   const input = node("textarea"); input.rows = 2; input.maxLength = 12000;
   input.placeholder = "Operator에게 말하기 — 질문, 판단 요청, 다른 세션에 전달할 지시 (Enter 전송, Shift+Enter 줄바꿈)";
@@ -223,17 +238,44 @@ function build(root) {
     try {
       await request(`api/operator/message?project=${encodeURIComponent(chosenProject())}`, {text});
       composer = "";
-      for (const h of hosts) h.parts.input.value = "";
+      // The user's own message is where they want to be: back to the bottom.
+      for (const h of hosts) { h.parts.input.value = ""; h.scrolled = false; }
       await refresh();
     } catch (err) { notice(err.message); } finally { send.disabled = false; }
   };
   const note = node("p", "", "operator-notice"); note.setAttribute("role", "status");
-  feedCol.append(feed, note, form);
+  feedCol.append(feedWrap, note, form);
   const side = node("aside", null, "operator-side");
   side.setAttribute("aria-label", "관찰 중인 세션");
   body.append(feedCol, side);
   root.append(head, body);
-  return {root, parts: {select, status, start, feed, side, input, note}};
+  const h = {root, parts: {select, status, start, feed, newer, side, input, note}};
+  feed.addEventListener("scroll", () => { if (nearBottom(feed)) markRead(h); });
+  newer.onclick = () => { feed.scrollTop = feed.scrollHeight; markRead(h); };
+  return h;
+}
+
+function nearBottom(list) { return list.scrollHeight - list.scrollTop - list.clientHeight < 40; }
+/* The reader has seen the feed down to its newest entry. */
+function markRead(h) {
+  const feed = data?.feed || [];
+  h.readId = feed.length ? feed[feed.length - 1].id : null;
+  h.parts.newer.hidden = true;
+}
+function showUnseen(h) {
+  const count = unseenCount(data?.feed, h.readId);
+  h.parts.newer.hidden = !count;
+  h.parts.newer.textContent = `새 내용 ${count}건 ↓`;
+}
+/* The entry at the top of the reader's view and how far it sits from the
+   list's top edge, so a rebuild can put the same entry back in the same spot. */
+function topEntry(list) {
+  const top = list.getBoundingClientRect().top;
+  for (const li of list.children) {
+    const box = li.getBoundingClientRect();
+    if (box.bottom > top) return {id: li.dataset.entry, offset: box.top - top};
+  }
+  return null;
 }
 
 function notice(text) { for (const h of hosts) h.parts.note.textContent = text || ""; }
@@ -362,9 +404,12 @@ function renderAsk(item, e) {
 
 function renderFeed(h) {
   const list = h.parts.feed;
-  const atBottom = list.scrollHeight - list.scrollTop - list.clientHeight < 40;
+  const atBottom = nearBottom(list);
   const focused = list.contains(document.activeElement) ? document.activeElement : null;
   if (focused) return;  // never rebuild under the reader's cursor
+  // Scrolled up: the rebuild keeps the reader's place (replaceChildren alone
+  // would drop it to the top).
+  const keep = atBottom || !h.scrolled ? null : {top: list.scrollTop, entry: topEntry(list)};
   list.replaceChildren();
   const feed = data?.feed || [];
   if (!feed.length) {
@@ -384,6 +429,7 @@ function renderFeed(h) {
     if (e.parent) {
       if (sameUpdate(last && last.entry, e)) { parentLink(last.item, byId.get(e.parent)); continue; }
       const follow = renderFollowup(e, byId.get(e.parent));
+      follow.dataset.entry = e.id;
       last = {entry: e, item: follow};
       list.append(follow);
       continue;
@@ -391,7 +437,7 @@ function renderFeed(h) {
     last = null;
     const item = node("li", null, `operator-item operator-${e.kind}` + (e.level ? ` operator-level-${e.level}` : "") +
                       (e.event ? ` operator-event-${e.event}` : ""));
-    item.dataset.id = e.id;
+    item.dataset.id = e.id; item.dataset.entry = e.id;
     const meta = node("div", null, "operator-meta");
     const who = e.role === "user" ? "나" : e.role === "system" ? "system" : "Operator";
     meta.append(node("strong", who));
@@ -420,7 +466,11 @@ function renderFeed(h) {
     if (threads.has(e.id)) item.append(renderThread(threads.get(e.id)));
     list.append(item);
   }
-  if (atBottom || !h.scrolled) { list.scrollTop = list.scrollHeight; h.scrolled = true; }
+  if (!keep) { list.scrollTop = list.scrollHeight; h.scrolled = true; markRead(h); return; }
+  list.scrollTop = keep.top;
+  const again = keep.entry?.id && list.querySelector(`:scope > li[data-entry="${CSS.escape(keep.entry.id)}"]`);
+  if (again) list.scrollTop += again.getBoundingClientRect().top - list.getBoundingClientRect().top - keep.entry.offset;
+  showUnseen(h);
 }
 
 /* A follow-up in time order: one compact line that names its card, which
