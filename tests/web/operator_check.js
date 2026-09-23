@@ -84,7 +84,7 @@ check("app.js offers the grid's hover card for any anchor, inside an open dialog
       [app.includes("function showSessionCardTip(anchor, name"), app.includes('anchor.closest("dialog[open]")')], [true, true]);
 
 const threaded = [
-  { id: "c1", kind: "post", text: "## w1 waits\nat commit" },
+  { id: "c1", kind: "post", text: "## **w1** waits\nat commit" },
   { id: "u1", kind: "update", parent: "c1", session: "w1", text: "게이트 commit 해소" },
   { id: "c2", kind: "post", text: "other" },
   { id: "r1", kind: "post", parent: "c1", text: "landed" },

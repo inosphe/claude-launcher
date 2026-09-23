@@ -111,7 +111,7 @@ function threadsOf(feed) {
 /* The card a follow-up points back to, as one short line. */
 function cardLine(card) {
   const first = String(card?.text || "").split("\n").find(line => line.trim()) || "";
-  const line = first.replace(/^[#>*\-\s]+/, "").trim();
+  const line = first.replace(/^[#>\-\s]+/, "").replace(/[*_`]/g, "").trim();
   return line.length > 60 ? line.slice(0, 59) + "…" : line;
 }
 function operatorLabel(op) {
