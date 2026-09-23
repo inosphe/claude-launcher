@@ -1587,6 +1587,7 @@ function renderSessionGrid(force = false) {
   ]);
   if (!force && host._gridSignature === signature) return;
   host._gridSignature = signature;
+  hideSessionGridTip();
   const focusName = host.contains(document.activeElement)
     ? document.activeElement.dataset.name : null;
   const keptScroll = host.scrollTop;
@@ -1894,16 +1895,13 @@ function sessionGridCell(layout, row, r, c, records, present, searching) {
   cell.dataset.col = String(c);
   const name = row.cells[c] || null;
   const s = name ? records.get(name) : null;
-  const where = `${row.name} ${c + 1}`;
   // The cell's own number, so a position can be named -- "bravo 7" -- and
   // found again the same way now that a row runs over several lines.
   const num = document.createElement("span");
   num.className = "sg-num";
   num.textContent = String(c + 1);
-  const moveHint = "\ndrag, Alt+arrow, or press and hold then tap a cell, to move it";
   if (!name) {
     cell.classList.add("empty");
-    cell.title = `${where} — empty`;
     cell.append(num);
   } else {
     // A session out of this view (killed or paused under a Running filter,
@@ -1920,7 +1918,6 @@ function sessionGridCell(layout, row, r, c, records, present, searching) {
     cell.classList.add("empty", "absent");
     cell.append(num, Object.assign(document.createElement("span"),
       { className: "sg-name", textContent: name }));
-    cell.title = `${where} — ${name}, not in this view; its place is kept` + moveHint;
   } else if (s) {
     if (searching && !sessionMatchesSearch(s)) cell.classList.add("session-filtered");
     const dot = document.createElement("span");
@@ -1933,11 +1930,20 @@ function sessionGridCell(layout, row, r, c, records, present, searching) {
     const hTag = handleTag(s.name);
     sub.textContent = hTag ? hTag.handle : (s.role || "");
     cell.append(dot, num, label, sub);
-    const brief = typeof briefingTabTooltip === "function"
-      ? briefingTabTooltip(s.briefing) : "";
-    cell.title = `${where} — ${s.name}${hTag ? ` (${hTag.handle})` : ""} — ${s.status}`
-      + (brief ? `\n${brief}` : "") + moveHint;
   }
+  cell.setAttribute("aria-label", `${row.name} ${c + 1}: ${!name ? "empty"
+    : s ? `${s.name}, ${s.status}` : `${name}, not in this view`}`);
+  // The hover card stands in for the browser's title tooltip.
+  cell.addEventListener("pointerenter", (ev) => {
+    if (ev.pointerType === "mouse") scheduleSessionGridTip(cell, row, c, name, !!s);
+  });
+  cell.addEventListener("pointerleave", hideSessionGridTip);
+  cell.addEventListener("focus", () => {
+    if (cell.matches(":focus-visible")) showSessionGridTip(cell, row, c, name, !!s);
+  });
+  cell.addEventListener("blur", hideSessionGridTip);
+  cell.addEventListener("pointerdown", hideSessionGridTip);
+  cell.addEventListener("dragstart", hideSessionGridTip);
   if (name) {
     cell.addEventListener("click", () => {
       document.querySelectorAll("#session-grid .sg-cell.active")
@@ -2052,6 +2058,120 @@ function sessionGridCell(layout, row, r, c, records, present, searching) {
     renderSessionGrid(true);
   });
   return cell;
+}
+/* The hover card: the list view's own card for the session under the
+   pointer (or keyboard focus), headed by where the cell is -- row name and
+   cell number, line and slot at the current width. The card is a copy of
+   the row the list builds on every poll whether or not it is shown, so the
+   grid shows everything the list does without a second renderer. A session
+   the list does not hold (out of this view) and an empty cell get the header
+   alone. */
+const SESSION_GRID_TIP_DELAY_MS = 350;
+let sessionGridTipTimer = null;
+
+function scheduleSessionGridTip(cell, row, col, name, inView) {
+  clearTimeout(sessionGridTipTimer);
+  sessionGridTipTimer = setTimeout(
+    () => showSessionGridTip(cell, row, col, name, inView), SESSION_GRID_TIP_DELAY_MS);
+}
+
+/* The list's card rules are written against #session-list; the copy sits
+   in #sg-tip, so the first card shown takes a copy of every rule that styles
+   something inside #session-list, re-scoped to #sg-tip. Read from the loaded
+   sheets rather than kept as a second set in style.css, so a card rule added
+   later reaches the hover card without anyone remembering to. */
+function sessionGridTipStyles() {
+  if (document.getElementById("sg-tip-style")) return;
+  const inside = /#session-list(?=\s)/;
+  const out = [];
+  const walk = (rules, wrap) => {
+    for (const rule of rules) {
+      if (rule.media && rule.cssRules) {
+        walk(rule.cssRules, (text) => wrap(`@media ${rule.media.mediaText} { ${text} }`));
+        continue;
+      }
+      if (!rule.selectorText || !inside.test(rule.selectorText)) continue;
+      const selector = rule.selectorText.split(/,(?![^(]*\))/)
+        .filter((part) => inside.test(part))
+        .map((part) => part.replace(inside, "#sg-tip"))
+        .join(", ");
+      out.push(wrap(`${selector} { ${rule.style.cssText} }`));
+    }
+  };
+  for (const sheet of document.styleSheets) {
+    try { walk(sheet.cssRules, (text) => text); } catch { /* another origin's sheet */ }
+  }
+  const style = document.createElement("style");
+  style.id = "sg-tip-style";
+  style.textContent = out.join("\n");
+  document.head.append(style);
+}
+
+function hideSessionGridTip() {
+  clearTimeout(sessionGridTipTimer);
+  sessionGridTipTimer = null;
+  const tip = document.getElementById("sg-tip");
+  if (tip) {
+    tip.classList.add("hidden");
+    tip.replaceChildren();
+  }
+}
+
+function showSessionGridTip(cell, row, col, name, inView) {
+  if (!cell.isConnected || sessionGridDragging || sessionGridPicked) return;
+  let tip = document.getElementById("sg-tip");
+  if (!tip) {
+    sessionGridTipStyles();
+    tip = document.createElement("ul");
+    tip.id = "sg-tip";
+    tip.setAttribute("role", "tooltip");
+    document.body.append(tip);
+  }
+  const perLine = sessionGridPerLine;
+  const head = document.createElement("li");
+  head.className = "sg-tip-head";
+  head.append(
+    Object.assign(document.createElement("span"),
+      { className: "sg-tip-where", textContent: `${row.name} · ${col + 1}` }),
+    Object.assign(document.createElement("span"), {
+      className: "sg-tip-pos",
+      textContent: `line ${Math.floor(col / perLine) + 1}, slot ${(col % perLine) + 1}`,
+    }));
+  const parts = [head];
+  const note = (text) => parts.push(Object.assign(document.createElement("li"),
+    { className: "sg-tip-note", textContent: text }));
+  if (!name) {
+    note("empty");
+  } else {
+    const card = inView
+      ? document.querySelector(`#session-list li.sess-card[data-name="${CSS.escape(name)}"]`)
+      : null;
+    if (card) {
+      const copy = card.cloneNode(true);
+      copy.removeAttribute("id");
+      copy.removeAttribute("tabindex");
+      copy.classList.remove("active", "goto-flash");
+      copy.querySelectorAll("[id]").forEach((el) => el.removeAttribute("id"));
+      copy.querySelectorAll("[title]").forEach((el) => el.removeAttribute("title"));
+      copy.removeAttribute("title");
+      parts.push(copy);
+    } else {
+      note(inView ? name : `${name} — not in this view; its place is kept`);
+    }
+    note("drag, Alt+arrow, or press and hold then tap a cell, to move it");
+  }
+  tip.replaceChildren(...parts);
+  tip.classList.remove("hidden");
+  // Beside the cell, on whichever side has room, kept inside the window.
+  const at = cell.getBoundingClientRect();
+  const box = tip.getBoundingClientRect();
+  const gap = 8;
+  let left = at.right + gap;
+  if (left + box.width > innerWidth - gap) left = at.left - gap - box.width;
+  left = Math.max(gap, Math.min(left, innerWidth - gap - box.width));
+  const top = Math.max(gap, Math.min(at.top, innerHeight - gap - box.height));
+  tip.style.left = `${Math.round(left)}px`;
+  tip.style.top = `${Math.round(top)}px`;
 }
 /* ---- end rail grid view ---------------------------------------------- */
 
