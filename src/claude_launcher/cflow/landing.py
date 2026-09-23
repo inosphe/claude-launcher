@@ -17,7 +17,6 @@ from __future__ import annotations
 import json
 import shutil
 import subprocess
-from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence
 
 from . import model
@@ -82,15 +81,17 @@ def _board_rows(repo: str, args: Sequence[str]) -> Optional[List[dict]]:
 
     if shutil.which(cli_beads.BINARY) is None:
         return None
-    root = cli_beads.repo_root(repo)
-    if root is None:
+    # The same resolution `claunch beads` uses: a registered workspace keeps
+    # its board wherever the operator set it, not necessarily under the root.
+    try:
+        ref = cli_beads.resolve(repo)
+    except Exception:
         return None
-    db = Path(root) / cli_beads.BEADS_DIR / cli_beads.DB_NAME
-    if not db.is_file():
+    if ref is None or not ref.exists():
         return None
     try:
         proc = subprocess.run(
-            [cli_beads.BINARY, "--db", str(db), *args, "--json"],
+            [cli_beads.BINARY, "--db", str(ref.db), *args, "--json"],
             cwd=repo, capture_output=True, text=True, encoding="utf-8",
             errors="replace", timeout=READ_TIMEOUT, check=False,
         )
