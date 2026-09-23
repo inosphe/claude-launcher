@@ -1479,6 +1479,13 @@ let sessionView = (() => {
 let sessionGrid = null;
 let sessionGridDragging = null;
 let sessionGridPending = false;
+// The session a long press picked up, waiting for the tap that says where it
+// goes: the move a touch screen can make, where drag and drop cannot.
+let sessionGridPicked = null;
+// Set when a hold picks a session up, so the click its own release produces
+// is not read as the tap that places it (or as a click that opens it).
+let sessionGridHoldRelease = false;
+const SESSION_GRID_HOLD_MS = 450;
 
 function sessionGridLayout() {
   if (!sessionGrid && typeof SessionGridLayout === "function") {
@@ -1545,6 +1552,8 @@ function renderSessionGrid(force = false) {
   host.replaceChildren();
   const cols = layout.columns();
   host.style.setProperty("--sg-cols", String(cols));
+  if (sessionGridPicked && !records.has(sessionGridPicked)) sessionGridPicked = null;
+  host.classList.toggle("sg-picking", !!sessionGridPicked);
   // Column numbers, so a position can be named -- "bravo 3" -- and found
   // again the same way.
   const ruler = document.createElement("div");
@@ -1677,6 +1686,7 @@ function sessionGridCell(layout, row, r, c, records, present, searching) {
     cell.tabIndex = 0;
     cell.draggable = true;
     if (s.name === currentName) cell.classList.add("active");
+    if (s.name === sessionGridPicked) cell.classList.add("picked");
     if (searching && !sessionMatchesSearch(s)) cell.classList.add("session-filtered");
     const dot = document.createElement("span");
     dot.className = `dot ${s.status}${s.status === "exited" && s.paused_at ? " paused" : ""}`;
@@ -1692,7 +1702,7 @@ function sessionGridCell(layout, row, r, c, records, present, searching) {
       ? briefingTabTooltip(s.briefing) : "";
     cell.title = `${where} — ${s.name}${hTag ? ` (${hTag.handle})` : ""} — ${s.status}`
       + (brief ? `\n${brief}` : "")
-      + "\ndrag, or Alt+arrow, to move it";
+      + "\ndrag, Alt+arrow, or press and hold then tap a cell, to move it";
     cell.addEventListener("click", () => {
       document.querySelectorAll("#session-grid .sg-cell.active")
         .forEach((el) => el.classList.remove("active"));
@@ -1700,6 +1710,11 @@ function sessionGridCell(layout, row, r, c, records, present, searching) {
       location.hash = "#/s/" + encodeURIComponent(s.name);
     });
     cell.addEventListener("keydown", (ev) => {
+      if (ev.key === "Escape" && sessionGridPicked) {
+        sessionGridPicked = null;
+        renderSessionGrid(true);
+        return;
+      }
       if (ev.key === "Enter") {
         ev.preventDefault();
         cell.click();
@@ -1723,7 +1738,38 @@ function sessionGridCell(layout, row, r, c, records, present, searching) {
         if (next && next.dataset.name) { next.focus(); break; }
       }
     });
+    // Press and hold picks the session up. Movement before the hold ends is a
+    // scroll or a drag and cancels it; the click that follows the release is
+    // swallowed so the hold does not also open the session.
+    // The pick is painted in place rather than redrawn: a redraw would swap
+    // the node under the finger, and the release would land on a stranger.
+    let hold = null;
+    let origin = null;
+    const cancelHold = () => { clearTimeout(hold); hold = null; };
+    cell.addEventListener("pointerdown", (ev) => {
+      if (ev.button !== 0 || sessionGridPicked) return;
+      sessionGridHoldRelease = false;
+      origin = [ev.clientX, ev.clientY];
+      cancelHold();
+      hold = setTimeout(() => {
+        hold = null;
+        sessionGridPicked = s.name;
+        sessionGridHoldRelease = true;
+        cell.classList.add("picked");
+        $("session-grid")?.classList.add("sg-picking");
+      }, SESSION_GRID_HOLD_MS);
+    });
+    cell.addEventListener("pointermove", (ev) => {
+      if (hold && origin &&
+          Math.hypot(ev.clientX - origin[0], ev.clientY - origin[1]) > 8) cancelHold();
+    });
+    cell.addEventListener("pointerup", cancelHold);
+    cell.addEventListener("pointercancel", cancelHold);
+    cell.addEventListener("contextmenu", (ev) => {
+      if (hold || sessionGridPicked) ev.preventDefault();
+    });
     cell.addEventListener("dragstart", (ev) => {
+      cancelHold();
       sessionGridDragging = s.name;
       ev.dataTransfer.effectAllowed = "move";
       ev.dataTransfer.setData("text/plain", s.name);
@@ -1735,6 +1781,25 @@ function sessionGridCell(layout, row, r, c, records, present, searching) {
       if (sessionGridPending) renderSessionGrid(true);
     });
   }
+  // With a session picked up, the next tap on any cell is where it goes; a
+  // tap on the picked cell itself puts it back down.
+  // A new press means the release click of the hold, if it came at all, has
+  // been and gone; touch browsers deliver it late, so no timer can say when.
+  cell.addEventListener("pointerdown", () => {
+    if (sessionGridPicked) sessionGridHoldRelease = false;
+  }, true);
+  cell.addEventListener("click", (ev) => {
+    const picked = sessionGridPicked;
+    if (!picked) return;
+    ev.stopImmediatePropagation();
+    if (sessionGridHoldRelease) {
+      sessionGridHoldRelease = false;
+      return;
+    }
+    sessionGridPicked = null;
+    if (picked !== name) layout.move(picked, row.id, c, present);
+    renderSessionGrid(true);
+  }, true);
   cell.addEventListener("dragover", (ev) => {
     if (!sessionGridDragging) return;
     ev.preventDefault();
