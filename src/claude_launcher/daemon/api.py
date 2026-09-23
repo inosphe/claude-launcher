@@ -5033,6 +5033,7 @@ async def h_sessions_list(request: web.Request) -> web.Response:
             "score_goal", "user_reward", "user_penalty",
             "pid", "exit_code", "created_at", "last_output_at",
             "last_visited_at", "last_input_at", "last_activity_at", "viewers",
+            "moved_rows",
             "exited_at", "archived_at", "paused_at", "delivery_hold",
             "pending_deliveries", "compacting",
             "context", "branch", "briefing", "winddown", "session_reminder",

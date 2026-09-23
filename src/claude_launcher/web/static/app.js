@@ -1291,6 +1291,7 @@ function renderSessionTabs() {
     // repaint the title, and the bar is otherwise only rebuilt when the
     // fields above move.
     return [name, isSessionPinned(name), name === active, rec?.status, rec?.paused_at,
+            typeof dotGrade === "function" ? dotGrade(rec) : "",
             rec?.observe_pin, rec?.briefing];
   }));
   // Polls update state in place only when it changed, preserving keyboard focus.
@@ -1324,7 +1325,9 @@ function renderSessionTabs() {
     tab.title = open.title;
     if (name === active) open.setAttribute("aria-current", "page");
     const dot = document.createElement("span");
-    dot.className = `dot ${rec?.status || "unknown"}${rec?.paused_at ? " paused" : ""}`;
+    dot.className = rec && typeof dotClassOf === "function"
+      ? dotClassOf(rec)
+      : `dot ${rec?.status || "unknown"}${rec?.paused_at ? " paused" : ""}`;
     dot.setAttribute("aria-hidden", "true");
     const label = document.createElement("span");
     label.className = "session-tab-name";
@@ -1580,7 +1583,10 @@ function renderSessionGrid(force = false) {
   const searching = typeof sessionMatchesSearch === "function";
   const signature = JSON.stringify([
     layout.rows, currentName, sessionGridPerLine,
-    visible.map((s) => [s.name, s.status, s.paused_at, s.role,
+    // The dot's grade rides here, not the readings under it: those move on
+    // most polls, the grade only when a bound is crossed.
+    visible.map((s) => [s.name, s.status, s.paused_at,
+                        typeof dotGrade === "function" ? dotGrade(s) : "", s.role,
                         handleTag(s.name)?.handle || null,
                         searching ? sessionMatchesSearch(s) : true,
                         s.briefing?.one_line || null,
@@ -1923,7 +1929,8 @@ function sessionGridCell(layout, row, r, c, records, present, searching) {
   } else if (s) {
     if (searching && !sessionMatchesSearch(s)) cell.classList.add("session-filtered");
     const dot = document.createElement("span");
-    dot.className = `dot ${s.status}${s.status === "exited" && s.paused_at ? " paused" : ""}`;
+    if (typeof applyDotGrade === "function") applyDotGrade(dot, s);
+    else dot.className = `dot ${s.status}${s.status === "exited" && s.paused_at ? " paused" : ""}`;
     const label = document.createElement("span");
     label.className = "sg-name";
     label.textContent = s.name;
@@ -2879,7 +2886,7 @@ async function refreshSessions(options) {
       key === "due_in" || key === "fired_ago" ||
       key === "last_visited_at" || key === "last_input_at" ||
       key === "last_activity_at" || key === "last_output_at" ||
-      key === "viewers"
+      key === "viewers" || key === "moved_rows"
     ) ? undefined : value,
   );
   // See the hold above: a press in flight keeps the rows it started on, and
@@ -3128,8 +3135,12 @@ async function refreshSessions(options) {
     }
     const dot = document.createElement("span");
     // The status class is the socket's word; `paused` is the record's, laid
-    // over it so the rail can tell a pause from a kill at the dot.
-    dot.className = `dot ${s.status}${s.status === "exited" && s.paused_at ? " paused" : ""}`;
+    // over it so the rail can tell a pause from a kill at the dot. The grade
+    // (dotGrade) shades it and is kept current by refreshRailSeen. Guarded
+    // like the other late-defined helpers here: a check that lifts only this
+    // function out of app.js still gets the plain dot.
+    if (typeof applyDotGrade === "function") applyDotGrade(dot, s);
+    else dot.className = `dot ${s.status}${s.status === "exited" && s.paused_at ? " paused" : ""}`;
     const label = document.createElement("span");
     label.className = "rail-name";
     label.textContent = s.name;
@@ -5321,6 +5332,84 @@ function resetRailStale(kind) {
   refreshRailSeen($("session-list"));
 }
 
+/* The status dot's grade: how hard a busy session is working and how long
+   an idle one has sat. The dot's colour is still the status word (yellow
+   busy, green idle); the grade only shades it, so every list that draws a
+   dot reads the same way without learning a second vocabulary.
+
+   Busy is graded by `moved_rows` — rows of the screen that changed in the
+   last minute, spinner and clock repaints excluded (daemon/idle.py
+   IdleTracker.moved_rows). A turn streaming a reply moves hundreds; a turn
+   parked on a tool call or a long thought moves next to none, and both used
+   to be the same yellow. Idle is graded by the age of `last_activity_at`,
+   the rail's "moved" reading, so a session that finished a minute ago and
+   one that has sat untouched all afternoon stop looking alike.
+
+   The bounds are lower edges: DOT_BUSY_LEVELS[i] rows lift a busy dot to
+   level i+2, DOT_IDLE_AGES[i] seconds take an idle dot to age i+1. They
+   are first-cut values, not measured ones; the dot's tooltip prints the
+   number each grade came from, so a bound that sorts badly can be seen to. */
+const DOT_BUSY_LEVELS = [40, 240];
+const DOT_IDLE_AGES = [300, 1800, 7200];
+
+function dotGrade(s) {
+  if (!s) return "";
+  if (s.status === "busy") {
+    const n = Number(s.moved_rows);
+    // A daemon too old to send the reading: the plain yellow it always had.
+    if (s.moved_rows == null || !Number.isFinite(n)) return "";
+    return ` lvl-${1 + DOT_BUSY_LEVELS.filter((t) => n >= t).length}`;
+  }
+  if (s.status === "idle") {
+    const ago = seenAgo(s.last_activity_at);
+    if (!ago) return "";
+    const age = DOT_IDLE_AGES.filter((t) => ago.secs >= t).length;
+    return age ? ` age-${age}` : "";
+  }
+  return "";
+}
+
+/* The whole class list of a session's dot: status word, the record's
+   `paused` over an exited one (see the rail's comment on it), then the
+   grade. One function so the rail, the grid, the tabs, the home card and
+   the mobile bar draw the same dot. `status` overrides the record's word
+   for a caller that holds a fresher one (the mobile bar). */
+function dotClassOf(s, status) {
+  const st = status || (s && s.status) || "unknown";
+  const paused = st === "exited" && s && s.paused_at ? " paused" : "";
+  return `dot ${st}${paused}${dotGrade(s && { ...s, status: st })}`;
+}
+
+/* What the grade means for this session, in words, for the dot's title. */
+function dotTitle(s) {
+  if (!s) return "";
+  if (s.status === "busy") {
+    return s.moved_rows == null
+      ? "busy"
+      : `busy — ${s.moved_rows} screen rows moved in the last minute`;
+  }
+  if (s.status === "idle") {
+    const ago = seenAgo(s.last_activity_at);
+    if (!ago) return "idle";
+    return ago.text === "now"
+      ? "idle — the screen moved moments ago"
+      : `idle — the screen last moved ${ago.text} ago`;
+  }
+  return s.status || "";
+}
+
+/* Shade a dot for its session, touching the node only when something
+   changed. The rail does not rebuild for the readings a grade is made of
+   (they move on most polls -- see the signature in renderSessions), so
+   refreshRailSeen hands each kept row here as well. */
+function applyDotGrade(dot, s) {
+  if (!dot || !s) return;
+  const cls = dotClassOf(s);
+  if (dot.className !== cls) dot.className = cls;
+  const title = dotTitle(s);
+  if (dot.title !== title) dot.title = title;
+}
+
 function seenPair(label, iso, title, opts) {
   const pair = el("span", "rail-seen-pair");
   pair.appendChild(el("span", "rail-seen-key", label));
@@ -5420,6 +5509,13 @@ function refreshRailSeen(list) {
       ? li.querySelector(".rail-seen") : null;
     if (!s || !old || typeof old.replaceWith !== "function") continue;
     old.replaceWith(railSeenLine(s));
+    // The dot's grade is read off the same moving stamps (plus moved_rows),
+    // so it is re-shaded on the same tick.
+    // The status dot is the row's first child (see the li.append in
+    // renderSessions); a nested cflow dot must not be the one re-shaded.
+    const dot = li.firstElementChild;
+    if (dot && dot.classList && dot.classList.contains("dot") &&
+        typeof applyDotGrade === "function") applyDotGrade(dot, s);
     // Status-check chips carry a "reported N ago" age (see decorateBriefingRow)
     // that is just as time-based as the seen line above, so it needs the same
     // tick even though the report itself did not change.
@@ -9527,6 +9623,11 @@ function setStatusBadge(status) {
   const paused = exited && !!record.paused_at;
   badge.textContent = paused ? "paused" : status;
   badge.className = `badge ${status}${paused ? " paused" : ""}`;
+  // The rail dot's grade in words (dotTitle): how many rows a busy session
+  // moved in the last minute, how long an idle one has sat. Only when the
+  // poll's record agrees with the socket's word, or the two would contradict.
+  badge.title = typeof dotTitle === "function" && record.status === status
+    ? dotTitle(record) : "";
   $("term-resume").classList.toggle("hidden", !exited);
   // Rebrief types into a live terminal; on an exited one there is nobody to
   // read it, so the button yields its spot to resume.
@@ -12772,7 +12873,9 @@ function syncMobileBars() {
   // status for its controls.
   const paused = status === "paused";
   if (paused) status = "exited";
-  dot.className = `dot ${status}${paused ? " paused" : ""}`;
+  dot.className = sess && typeof dotClassOf === "function"
+    ? dotClassOf(sess, status) : `dot ${status}`;
+  if (paused) dot.classList.add("paused");
   dot.classList.toggle("hidden", !has);
   const badge = $("m-status");
   badge.textContent = paused ? "paused" : status;
@@ -14324,7 +14427,10 @@ function renderHome() {
   for (const s of live.slice(0, 6)) {
     const row = el("a", "home-row");
     row.href = "#/s/" + encodeURIComponent(s.name);
-    row.appendChild(el("span", `dot ${s.status}`));
+    const graded = typeof dotClassOf === "function";
+    const dot = el("span", graded ? dotClassOf(s) : `dot ${s.status}`);
+    if (graded) dot.title = dotTitle(s);
+    row.appendChild(dot);
     row.appendChild(el("span", "home-row-name", s.name));
     row.appendChild(el(
       "span", "meta", profileHarnessLabel(s.profile, s.harness)
@@ -25659,7 +25765,14 @@ function renderSessKids(bodyEl, doc) {
   }
   for (const k of kids) {
     const row = el("div", "sess-kid");
-    row.appendChild(el("span", `dot ${k.status || ""}`));
+    // The children endpoint carries the status word only; the grade's
+    // readings come from the session poll's record, when it agrees.
+    const live = typeof sessionsCache !== "undefined" && typeof dotClassOf === "function"
+      ? (sessionsCache || []).find((s) => s.name === k.name) : null;
+    const graded = live && live.status === k.status;
+    const kidDot = el("span", graded ? dotClassOf(live) : `dot ${k.status || ""}`);
+    if (graded) kidDot.title = dotTitle(live);
+    row.appendChild(kidDot);
     const link = el("a", "sess-kid-name", k.name);
     link.href = "#/s/" + encodeURIComponent(k.name);
     row.appendChild(link);

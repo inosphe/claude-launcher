@@ -1915,6 +1915,12 @@ class Session:
             "last_visited_at": self.last_visited_at,
             "last_input_at": self.last_input_at,
             "last_activity_at": self.last_activity_at(),
+            # How much the screen moved in the last minute (rows, see
+            # IdleTracker.moved_rows): the rail grades a busy dot by it, so
+            # a turn streaming a reply and one parked on a tool call stop
+            # reading as the same yellow. Absent on a DeadSession, which has
+            # no screen to have moved.
+            "moved_rows": self.tracker.moved_rows(time.monotonic()),
             "viewers": self.viewers(),
             "exited_at": self.exited_at,
             "archived_at": self.archived_at,

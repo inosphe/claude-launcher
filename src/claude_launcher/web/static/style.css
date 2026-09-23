@@ -410,6 +410,17 @@ option:disabled { color: #6b7280; }
    drawn in the reminder-pause blue rather than the grey of a kill, so the
    rail tells the two apart at the dot. */
 .dot.exited.paused { background: #58a6ff; }
+/* The dot's grade (dotGrade in app.js). Busy steps up from a dim amber — a
+   turn parked on a tool call — to a bright orange with a halo for a screen
+   moving hundreds of rows a minute. Idle fades as the quiet ages: full
+   green for a turn that just ended, darker by 5m / 30m / 2h, the last
+   keeping a thin ring so it never reads as the grey of an exited one. */
+.dot.busy.lvl-1 { background: #9e6a03; }
+.dot.busy.lvl-2 { background: #d29922; }
+.dot.busy.lvl-3 { background: #f0883e; box-shadow: 0 0 0 2px rgba(240, 136, 62, 0.35); }
+.dot.idle.age-1 { background: #2ea043; }
+.dot.idle.age-2 { background: #1f6f33; }
+.dot.idle.age-3 { background: #173d24; box-shadow: inset 0 0 0 1px #2ea043; }
 #session-list .meta { color: #7d8590; font-size: 11px; margin-left: auto; flex: none;
   max-width: 42%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 /* The meta line grew: an exited row's identity now stays on the line instead

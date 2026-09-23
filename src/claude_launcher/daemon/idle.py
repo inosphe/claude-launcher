@@ -16,6 +16,18 @@ from __future__ import annotations
 from collections import deque
 from typing import Deque, Optional, Set, Tuple
 
+#: How far back :meth:`IdleTracker.moved_rows` sums. A minute is long enough
+#: that one repaint does not decide the reading and short enough that a turn
+#: which stopped a minute ago no longer counts as work.
+MOVED_WINDOW = 60.0
+
+#: A sample that changed at most this many rows may be a spinner or a clock
+#: repainting, so its animated rows are left out of :meth:`moved_rows`. A
+#: sample that changed more is content: a streaming reply scrolls every row
+#: on every sample, which is exactly the flapping that classifies rows as
+#: animated, and dropping them would rank the busiest screen as the quietest.
+ANIMATION_ROWS = 3
+
 
 class IdleTracker:
     """Feed periodic ``line_hashes`` samples; ask when content last changed.
@@ -37,6 +49,11 @@ class IdleTracker:
         #: are excluded from "meaningful": a live spinner IS the activity the
         #: marker claims.
         self._last_change_at: dict = {}
+        #: ``(monotonic time, rows)`` for each sample in which rows moved
+        #: (see :data:`ANIMATION_ROWS`), kept for :data:`MOVED_WINDOW` so a
+        #: caller can ask how MUCH the screen moved lately, not only when it
+        #: last did.
+        self._moved: Deque[Tuple[float, int]] = deque()
 
     def _animated_rows(self) -> Set[int]:
         counts: dict = {}
@@ -67,8 +84,31 @@ class IdleTracker:
         self._prev = hashes
         for i in changed:
             self._last_change_at[i] = now
-        if changed - animated:
+        meaningful = changed - animated
+        if meaningful:
             self._last_meaningful = now
+        moved = len(changed) if len(changed) > ANIMATION_ROWS else len(meaningful)
+        if moved:
+            self._moved.append((now, moved))
+        self._trim(now)
+
+    def _trim(self, now: float) -> None:
+        while self._moved and now - self._moved[0][0] > MOVED_WINDOW:
+            self._moved.popleft()
+
+    def moved_rows(self, now: float, window: float = MOVED_WINDOW) -> int:
+        """Rows that moved in the last ``window`` seconds.
+
+        Summed per sample, so a row rewritten on three samples counts three
+        times: the reading is how much the screen moved, a rate, and a
+        streaming reply that keeps rewriting its last lines is exactly the
+        work it should rank high. A spinner or clock repaint does not count
+        (:data:`ANIMATION_ROWS`), and neither does a resize or the first
+        sample — those restamp the whole grid without the session doing
+        anything. ``window`` beyond
+        :data:`MOVED_WINDOW` reads no further back than that.
+        """
+        return sum(n for at, n in self._moved if now - at <= window)
 
     def last_meaningful_change(self) -> Optional[float]:
         """When (monotonic) non-animated content last changed; None before any sample."""
