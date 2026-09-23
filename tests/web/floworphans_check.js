@@ -118,6 +118,8 @@ const parseHash = new Function(`${slice("parseHash")}; return parseHash;`)();
 eq(parseHash("#/flows"), { page: "flows", section: "" }, "the bare page");
 eq(parseHash("#/flows/orphans"), { page: "flows", section: "orphans" },
    "one section deep");
+eq(parseHash("#/flows/definitions"), { page: "flows", section: "definitions" },
+   "the definition editor has a route");
 // An unknown section is the page itself, the way an unknown link is a wrong
 // turn rather than an error.
 eq(parseHash("#/flows/nonsense"), { page: "flows", section: "" },
@@ -145,6 +147,7 @@ function drawTabs(section, cache) {
     "flows-tabs": stubNode("flows-tabs"),
     "flows-runs": stubNode("flows-runs"),
     "flows-orphans": stubNode("flows-orphans"),
+    "flows-definitions": stubNode("flows-definitions"),
   };
   const render = new Function(
     "$", "el", "cflowOrphans", "cflowCache", "flowsSection",
@@ -162,18 +165,27 @@ function drawTabs(section, cache) {
 
 const onOrphans = drawTabs("orphans", runs);
 const tabs = onOrphans["flows-tabs"].kids;
-assert(tabs.length === 2, `two tabs (got ${tabs.length})`);
+assert(tabs.length === 3, `three tabs (got ${tabs.length})`);
 assert(tabs[0].text === "Runs" && tabs[0].href === "#/flows",
        "the first tab is Runs and links to the bare page");
 assert(tabs[1].href === "#/flows/orphans",
        "the second tab links one section deep");
 assert(tabs[1].text === "Orphans (1)",
        `the count rides the label (got "${tabs[1].text}")`);
+assert(tabs[2].text === "Definitions" && tabs[2].href === "#/flows/definitions",
+       "the third tab links to the definition editor");
 assert(tabs[1].cls.includes("on") && !tabs[0].cls.includes("on"),
        "the section on screen is the lit tab");
 assert(onOrphans["flows-runs"].hiddenState === true &&
-       onOrphans["flows-orphans"].hiddenState === false,
+       onOrphans["flows-orphans"].hiddenState === false &&
+       onOrphans["flows-definitions"].hiddenState === true,
        "the Orphans section hides the Runs pane and shows its own");
+
+const onDefinitions = drawTabs("definitions", runs);
+assert(onDefinitions["flows-definitions"].hiddenState === false &&
+       onDefinitions["flows-runs"].hiddenState === true &&
+       onDefinitions["flows-orphans"].hiddenState === true,
+       "the Definitions section shows only its editor");
 
 const onRuns = drawTabs("runs", runs);
 assert(onRuns["flows-tabs"].kids[0].cls.includes("on"),
@@ -193,6 +205,7 @@ const nodes = {
   "flows-tabs": stubNode("flows-tabs"),
   "flows-runs": stubNode("flows-runs"),
   "flows-orphans": stubNode("flows-orphans"),
+  "flows-definitions": stubNode("flows-definitions"),
 };
 const render = new Function(
   "$", "el", "cflowOrphans", "cflowCache", "flowsSection",
@@ -201,7 +214,7 @@ const render = new Function(
   cflowOrphans, runs, "runs");
 render();
 render();
-assert(nodes["flows-tabs"].kids.length === 2,
-       `a repeated draw leaves two tabs (got ${nodes["flows-tabs"].kids.length})`);
+assert(nodes["flows-tabs"].kids.length === 3,
+       `a repeated draw leaves three tabs (got ${nodes["flows-tabs"].kids.length})`);
 
 console.log("floworphans_check: all assertions passed");

@@ -6537,7 +6537,8 @@ function renderFlowsTabs() {
   }
   $("flows-runs").classList.toggle("hidden", flowsSection !== "runs");
   $("flows-orphans").classList.toggle("hidden", flowsSection !== "orphans");
-  $("flows-definitions").classList.toggle("hidden", flowsSection !== "definitions");
+  const definitions = $("flows-definitions");
+  if (definitions) definitions.classList.toggle("hidden", flowsSection !== "definitions");
 }
 
 let flowDefinition = null;
@@ -12883,7 +12884,8 @@ function mobileTitle() {
     case "new": return "new session";
     case "meshes": return "mesh";
     case "flows": return flowsSection === "orphans"
-      ? "workflows · orphans" : "workflows";
+      ? "workflows · orphans" : flowsSection === "definitions"
+      ? "workflows · definitions" : "workflows";
     case "window": return "measurement window";
     case "settings": return "settings";
     case "beads": return beadsSection === "reports" ? "reports"
@@ -13495,6 +13497,7 @@ function wfSplitBar(host, dia, side) {
  *   #/mesh/<name>/flows ...and where each of its agents is in its workflow
  *   #/flows             cflow runs
  *   #/flows/orphans     ...the ones whose driving session has exited
+ *   #/flows/definitions ...the workflow YAML sources
  *   #/window            measurement grants and their FIFO queue
  *   #/wf/<scope|cwd>    one run
  *   #/msg/<name>        what that session has said and been told
@@ -13548,10 +13551,10 @@ function parseHash(h) {
     scope: ["session", "mesh"].includes(parts[1]) ? parts[1] : "global",
     name: parts[2] || "",
   };
-  // #/flows is every run; #/flows/orphans the ones whose driving session
-  // has exited. Same one-section-deep spelling as #/beads/<section>.
+  // Same one-section-deep spelling as #/beads/<section>.
   if (parts[0] === "flows") {
-    return { page: "flows", section: parts[1] === "orphans" ? "orphans" : "" };
+    return { page: "flows", section: ["orphans", "definitions"].includes(parts[1])
+      ? parts[1] : "" };
   }
   if (parts[0] === "window") return { page: "window" };
   // One page, one shell: nothing else about the CLI tab is addressable, so
