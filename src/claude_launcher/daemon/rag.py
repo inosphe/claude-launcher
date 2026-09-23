@@ -1504,8 +1504,9 @@ class RagService:
     def _inactive_documents(self, index: "VectorIndex") -> set:
         """Exclude records outside live sessions and Beads, before ranking.
 
-        Beads includes every issue and comment, regardless of issue status or
-        session association. Unknown session names fail closed: old metadata
+        Beads and their comments require a live assignee or issue creator.
+        Mere session links and task references do not qualify. Unknown names
+        fail closed: old metadata
         cannot establish that a removed process is still alive.
         """
         live = {
@@ -1518,9 +1519,10 @@ class RagService:
         for doc_id, entry in index.entries.items():
             meta = entry.meta
             if meta.get("kind") in ("beads", "comment"):
-                continue
-            names = {s.get("name") for s in meta.get("sessions", [])}
-            names.add(meta.get("name"))
+                names = {meta.get("assignee"), meta.get("created_by")}
+            else:
+                names = {s.get("name") for s in meta.get("sessions", [])}
+                names.add(meta.get("name"))
             if not live.intersection(names):
                 excluded.add(doc_id)
         return excluded

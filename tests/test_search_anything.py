@@ -175,7 +175,7 @@ def test_config_preserves_secret_and_removes_requested_dimensions():
 
 def test_unified_corpus_includes_comments_events_and_session_links(tmp_path):
     root = tmp_path / "repo"
-    issue = {"id": "x-1", "title": "board", "description": "body", "assignee": "s1",
+    issue = {"id": "x-1", "title": "board", "description": "body", "assignee": "s1", "created_by": "s2",
              "comments": [{"id": 1, "text": "relay comment needle"}]}
     class Board:
         async def issues(self, root): return [issue]
@@ -190,6 +190,10 @@ def test_unified_corpus_includes_comments_events_and_session_links(tmp_path):
     comment = next(d for d in docs if d.meta["kind"] == "comment")
     assert "relay comment needle" in comment.chunks[0]
     assert comment.meta["sessions"] == [{"name": "s1", "via": ["link", "assignee"]}]
+    for doc in docs:
+        if doc.meta["kind"] in ("beads", "comment"):
+            assert doc.meta["assignee"] == "s1"
+            assert doc.meta["created_by"] == "s2"
     assert any(d.meta["kind"] == "briefing" and "kanban needle" in d.chunks[0] for d in docs)
     # Content beyond the old eight-chunk limit must remain searchable.
     long = search_anything.documents("long", "title", "x" * 30000 + "tail needle")
@@ -586,14 +590,21 @@ def test_active_search_filters_before_limits_and_refreshes_liveness(tmp_path):
         async def docs():
             out = []
             # Many irrelevant exact and vector matches must not exhaust the
-            # candidate window before the live task and unowned board record.
+            # candidate window before the live task and owned board record.
             for i in range(30):
                 out += search_anything.documents(f"dead{i}", "relay", "relay", kind="checks", sessions=[{"name": "dead"}])
             for name in ("paused", "archived", "removed"):
                 out += search_anything.documents(name, "relay", "relay", kind="opening-task", sessions=[{"name": name}])
             out += search_anything.documents("live-task", "relay task", "relay task details", kind="opening-task", sessions=[{"name": "live"}])
-            out += search_anything.documents("board", "relay board", "relay closed issue", kind="beads", sessions=[])
-            out += search_anything.documents("comment", "relay comment", "relay comment details", kind="comment", sessions=[{"name": "dead"}])
+            for name in ("dead", "paused", "archived", "removed", None):
+                for kind in ("beads", "comment"):
+                    out += search_anything.documents(f"irrelevant-{kind}-{name}", "relay", "relay details",
+                                                     kind=kind, assignee=name, created_by=name,
+                                                     sessions=[{"name": "live", "via": ["link", "task"]}])
+            out += search_anything.documents("board", "relay board", "relay closed issue", kind="beads",
+                                             assignee="live", created_by="dead", sessions=[])
+            out += search_anything.documents("comment", "relay comment", "relay comment details", kind="comment",
+                                             assignee="dead", created_by="live", sessions=[])
             return out
         service.all_docs = docs
         try:
@@ -611,14 +622,66 @@ def test_active_search_filters_before_limits_and_refreshes_liveness(tmp_path):
             assert any(r["id"] == "live-task:0" for r in first["results"])
             live.exited = True
             _, reranked = await stream.__anext__()
-            assert all(r["id"] != "live-task:0" for r in reranked["results"])
+            assert reranked["results"] == []
             await stream.aclose()
             # Reusing the same index must reflect process exit without a sync.
             active = await service.search("all", "relay", limit=3, mode="active", wait=0)
-            assert {r["id"] for r in active["results"]} == {"board:0", "comment:0"}
+            assert active["results"] == []
+            live.exited = False
+            live.archived_at = "now"
+            active = await service.search("all", "relay", mode="active", wait=0)
+            assert active["results"] == []
+            live.archived_at = None
+            restored = await service.search("all", "relay", mode="active", wait=0)
+            assert {r["id"] for r in restored["results"]} == {"live-task:0", "board:0", "comment:0"}
             service.manager = None
             active = await service.search("all", "relay", mode="active", wait=0)
-            assert {r["kind"] for r in active["results"]} == {"beads", "comment"}
+            assert active["results"] == []
+        finally:
+            await service.shutdown()
+            await server.close()
+    asyncio.run(run())
+
+
+def test_active_beads_ownership_changes_without_text_changes(tmp_path):
+    async def run():
+        endpoint = Endpoint()
+        server = await _start_endpoint(endpoint)
+        cfg = _cfg(server, watch_interval=0)
+        corpus, sessions = _world(tmp_path)
+        for session in sessions:
+            session.exited = False
+        issue = (await corpus.service.board.issues(tmp_path))[0]
+        # A link/task reference alone must never qualify either passage.
+        sessions[0].sdef.issue = issue["id"]
+        sessions[0].sdef.task = "issue: " + issue["id"]
+        service = rag.RagService(config=lambda: cfg, root_dir=tmp_path / "index",
+                                 manager=corpus.service.manager)
+        service.all_docs = corpus.docs
+
+        async def board_results():
+            await service.wait_sync(service.ensure_sync("all", None), 10)
+            result = await service.search("all", "board", mode="active", limit=50, wait=10, rerank=False)
+            # Search starts another background pass on a populated index.
+            # Finish it before the fixture mutates the next ownership field.
+            await service.wait_sync(service.ensure_sync("all", None), 10)
+            return [r for r in result["results"] if r["kind"] in ("beads", "comment")]
+
+        try:
+            assert await board_results() == []
+            issue["assignee"] = "s1"
+            assert {r["kind"] for r in await board_results()} == {"beads", "comment"}
+            issue["assignee"] = "unknown"
+            assert await board_results() == []
+            issue["created_by"] = "s2"
+            assert {r["kind"] for r in await board_results()} == {"beads", "comment"}
+            sessions[2].exited = True
+            assert await board_results() == []
+            # An active assignee still qualifies an issue with a dead creator.
+            issue["assignee"] = "s1"
+            assert {r["kind"] for r in await board_results()} == {"beads", "comment"}
+            sessions[1].archived_at = "now"
+            assert await board_results() == []
         finally:
             await service.shutdown()
             await server.close()

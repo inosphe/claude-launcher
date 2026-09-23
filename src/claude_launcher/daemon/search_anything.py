@@ -109,6 +109,7 @@ def _build(boards, snaps):
         for issue in full:
             iid = issue["id"]
             common = {"kind": "beads", "issue": iid, "root": str(root),
+                      "assignee": issue.get("assignee"), "created_by": issue.get("created_by"),
                       "sessions": owners.get(iid, []), "at": issue.get("updated_at"),
                       "href": "#/beads/" + quote(iid, safe=""),
                       "source_url": "api/beads/" + quote(iid, safe="") + "?cwd=" + quote(str(root), safe="")}
