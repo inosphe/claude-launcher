@@ -910,6 +910,27 @@
         <p class="wf-note" id="flows-orphans-note"></p>
         <ul id="cflow-orphan-list"></ul>
       </div>
+      <div id="flows-definitions" class="hidden">
+        <div class="flow-editor-toolbar">
+          <label>Directory <input id="flow-editor-cwd" list="flow-editor-directories" placeholder="Project directory"></label>
+          <datalist id="flow-editor-directories"></datalist>
+          <button id="flow-editor-open" type="button">Load definitions</button>
+          <label>Definition <select id="flow-editor-choice"></select></label>
+        </div>
+        <p id="flow-editor-source" class="wf-note"></p>
+        <p class="wf-note">Edit the source YAML. Validation uses the cflow loader, including inherited layers. Existing runs keep their snapshots.</p>
+        <textarea id="flow-editor-text" class="flow-editor-text" spellcheck="false" aria-label="Workflow YAML source"></textarea>
+        <div class="flow-editor-actions">
+          <button id="flow-editor-validate" type="button">Validate</button>
+          <button id="flow-editor-save" type="button">Save definition</button>
+          <span id="flow-editor-dirty"></span>
+        </div>
+        <pre id="flow-editor-result" class="flow-editor-result" role="status"></pre>
+        <details id="flow-editor-effective-wrap">
+          <summary>Effective definition after inheritance</summary>
+          <pre id="flow-editor-effective" class="flow-editor-effective"></pre>
+        </details>
+      </div>
     </div>
 
     <!-- The session detail. Not a page on a wide screen but the rail down

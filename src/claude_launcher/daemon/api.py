@@ -61,7 +61,7 @@ from . import transcript_view
 from . import window as window_mod
 from .. import cli_beads
 from ..cli_beads import BeadsError
-from ..cflow import engine as cflow_engine, state as cflow_state
+from ..cflow import editor as cflow_editor, engine as cflow_engine, state as cflow_state
 from ..cflow.engine import CflowError
 from ..cflow.model import WorkflowError
 from ..cflow.state import LockBusy, StateError
@@ -497,6 +497,10 @@ def build_app(
     r.add_get("/api/cflow", h_cflow_runs)
     r.add_get("/api/cflow/run", h_cflow_run_detail)
     r.add_get("/api/cflow/workflows", h_cflow_workflows)
+    r.add_get("/api/cflow/definitions", h_cflow_definitions)
+    r.add_get("/api/cflow/definition", h_cflow_definition)
+    r.add_post("/api/cflow/definition/validate", h_cflow_definition_validate)
+    r.add_put("/api/cflow/definition", h_cflow_definition_save)
     r.add_post("/api/cflow/start", h_cflow_start)
     r.add_post("/api/cflow/request", h_cflow_request)
     r.add_post("/api/cflow/request/cancel", h_cflow_request_cancel)
@@ -3482,6 +3486,62 @@ async def h_cflow_workflows(request: web.Request) -> web.Response:
     raw = request.query.get("cwd")
     cwd = cflow_state.resolve_cwd(raw)
     return json_response({"workflows": _startable_workflows(cwd)})
+
+
+async def h_cflow_definitions(request: web.Request) -> web.Response:
+    """Source declarations for the editor, including shadowed layers."""
+    cwd = cflow_state.resolve_cwd(request.query.get("cwd"))
+    return json_response({"definitions": cflow_editor.declarations(cwd), "cwd": cwd})
+
+
+async def h_cflow_definition(request: web.Request) -> web.Response:
+    cwd = cflow_state.resolve_cwd(request.query.get("cwd"))
+    try:
+        return json_response(cflow_editor.read(
+            cwd, request.query.get("name", ""), request.query.get("layer", ""),
+            request.query.get("path", "")))
+    except (WorkflowError, OSError) as exc:
+        return json_error(404, str(exc))
+
+
+async def _cflow_definition_body(request: web.Request):
+    try:
+        body = await request.json()
+    except (ValueError, web.HTTPError):
+        return None, json_error(400, "invalid JSON body")
+    if not isinstance(body, dict) or not all(isinstance(body.get(k), str)
+                                              for k in ("name", "layer", "text")):
+        return None, json_error(400, "name, layer and text strings are required")
+    return body, None
+
+
+async def h_cflow_definition_validate(request: web.Request) -> web.Response:
+    body, err = await _cflow_definition_body(request)
+    if err:
+        return err
+    cwd = cflow_state.resolve_cwd(body.get("cwd"))
+    try:
+        return json_response({"valid": True, "validation": cflow_editor.validate(
+            cwd, body["name"], body["layer"], body["text"], body.get("path", ""))})
+    except (WorkflowError, OSError) as exc:
+        return json_response({"valid": False, "error": str(exc)}, status=400)
+
+
+async def h_cflow_definition_save(request: web.Request) -> web.Response:
+    body, err = await _cflow_definition_body(request)
+    if err:
+        return err
+    if not isinstance(body.get("revision"), str):
+        return json_error(400, "revision is required")
+    cwd = cflow_state.resolve_cwd(body.get("cwd"))
+    try:
+        return json_response(cflow_editor.save(
+            cwd, body["name"], body["layer"], body["text"], body["revision"],
+            body.get("path", "")))
+    except cflow_editor.EditConflict as exc:
+        return json_error(409, str(exc))
+    except (WorkflowError, OSError) as exc:
+        return json_error(400, str(exc))
 
 
 async def h_cflow_request(request: web.Request) -> web.Response:

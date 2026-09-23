@@ -4828,3 +4828,45 @@ a.window-owner:hover { color: #79c0ff; text-decoration: underline; }
 @media (max-width: 820px) {
   .search-anything input { font-size: 16px; height: 36px; }
 }
+.flow-editor-toolbar,
+.flow-editor-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: end;
+  gap: .65rem;
+  margin: .8rem 0;
+}
+
+.flow-editor-toolbar label {
+  display: flex;
+  flex-direction: column;
+  gap: .25rem;
+  min-width: min(17rem, 100%);
+}
+
+#flow-editor-cwd { min-width: min(30rem, 80vw); }
+#flow-editor-choice { max-width: min(35rem, 80vw); }
+
+.flow-editor-text {
+  display: block;
+  box-sizing: border-box;
+  width: 100%;
+  min-height: 34rem;
+  padding: .8rem;
+  resize: vertical;
+  font: 13px/1.5 ui-monospace, SFMono-Regular, Consolas, monospace;
+  tab-size: 2;
+}
+
+.flow-editor-result {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-size: .85rem;
+}
+
+.flow-editor-effective {
+  max-height: 36rem;
+  overflow: auto;
+  padding: .8rem;
+  font: 13px/1.5 ui-monospace, SFMono-Regular, Consolas, monospace;
+}
