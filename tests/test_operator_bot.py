@@ -14,11 +14,16 @@ What has to hold:
     sessions only: a paused one is named apart and a killed one not at all;
   - each session's progress (status-check answers, board issue) reaches the
     poll as a change once, and the panel shows it;
-  - the workflow and the role stance say the same thing about the tools.
+  - the workflow and the role stance say the same thing about the tools;
+  - the observation mode switches while the operator runs (feed entry, one
+    nudge), and in transcript mode operator_transcripts hands the bot each
+    running session's new conversation records from a daemon-held cursor,
+    starting from the last few, clipped and bounded.
 """
 from __future__ import annotations
 
 import asyncio
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -27,7 +32,7 @@ from aiohttp.test_utils import TestClient, TestServer
 
 from claude_launcher import operator_mcp
 from claude_launcher.cflow import model, state as state_mod
-from claude_launcher.daemon import mesh_roles, operator_bot
+from claude_launcher.daemon import mesh_roles, operator_bot, operator_transcript, transcript_view
 
 
 class FakeSession:
@@ -360,7 +365,8 @@ def test_start_route_binds_one_operator_per_project(world, monkeypatch):
 
 def test_mcp_tools_and_workflow_and_stance_agree():
     names = {t["name"] for t in operator_mcp.TOOLS}
-    assert names == {"operator_poll", "operator_post", "operator_ask", "operator_inbox", "operator_dispatch"}
+    assert names == {"operator_poll", "operator_post", "operator_ask", "operator_inbox", "operator_dispatch",
+                     "operator_transcripts"}
     wf = model.load(dict(state_mod.bundled_workflows())["operator"])
     assert wf.recur_auto and not wf.warnings and not wf.deprecations
     assert wf.steps["watch"].next == "wait"
@@ -517,3 +523,118 @@ def test_only_gates_a_person_settles_reach_the_operator():
     assert kind({"status": "waiting_answer", "ask": {"asked": []}}) == "approval"
     assert api._operator_gate_options({"options": [{"name": "a", "description": "x"}, {"bad": 1}]}) == [
         {"name": "a", "description": "x"}]
+
+
+def _conversation(path, turns):
+    with path.open("a", encoding="utf-8") as fh:
+        for role, content in turns:
+            fh.write(json.dumps({"type": role, "timestamp": "2026-09-23T00:00:00Z",
+                                 "message": {"role": role, "content": content}}) + "\n")
+
+
+@pytest.fixture
+def talk(world, tmp_path, monkeypatch):
+    files = {n: tmp_path / f"{n}.jsonl" for n in ("w1", "w2")}
+    for f in files.values():
+        f.touch()
+    monkeypatch.setattr(transcript_view, "source_of", lambda sdef, **kw: files.get(sdef.name))
+    monkeypatch.setattr(transcript_view.paths, "session_dir", lambda name: tmp_path / "sessions" / name)
+    for n in files:
+        (tmp_path / "sessions" / n).mkdir(parents=True)
+    return files
+
+
+def test_mode_switches_while_the_operator_runs(world):
+    assert world.ops.mode("default") == "events"
+    got = asyncio.run(world.ops.set_mode("default", "transcript"))
+    assert got["changed"] and got["nudge"] == "sent"
+    assert world.ops.mode("default") == "transcript"
+    assert world.sessions["op"].sent[-1] == operator_transcript.MODE_NUDGE.format(mode="transcript")
+    assert world.ops.state("default")["feed"][-1]["text"] == "관찰 모드: transcript"
+    # the same mode again changes nothing and types nothing
+    sent = len(world.sessions["op"].sent)
+    assert not asyncio.run(world.ops.set_mode("default", "transcript"))["changed"]
+    assert len(world.sessions["op"].sent) == sent
+    with pytest.raises(ValueError):
+        asyncio.run(world.ops.set_mode("default", "screen"))
+    # the mode survives a daemon restart
+    assert operator_bot.Operators(world.root, world.ops.manager).mode("default") == "transcript"
+
+
+def test_transcripts_read_new_records_from_a_daemon_held_cursor(world, talk):
+    _conversation(talk["w1"], [("user", f"질문 {i}") for i in range(10)])
+    _conversation(talk["w2"], [("assistant", [{"type": "thinking", "thinking": "hidden"},
+                                              {"type": "text", "text": "done"}])])
+    # events mode answers the mode and nothing else
+    assert asyncio.run(world.ops.transcripts("op")) == {
+        "project": "default", "mode": "events", "transcripts": [], "more": False}
+    with pytest.raises(web.HTTPForbidden):
+        asyncio.run(world.ops.transcripts("w1"))
+    asyncio.run(world.ops.set_mode("default", "transcript"))
+    first = asyncio.run(world.ops.transcripts("op"))
+    rows = {r["session"]: r for r in first["transcripts"]}
+    # a session seen first starts from its last BASELINE records
+    assert [r["text"] for r in rows["w1"]["records"]] == [f"질문 {i}" for i in range(4, 10)]
+    assert rows["w2"]["records"][0]["text"] == "done"  # thinking left out
+    assert asyncio.run(world.ops.transcripts("op"))["transcripts"] == []  # nothing new
+    _conversation(talk["w1"], [("assistant", [
+        {"type": "tool_use", "name": "Bash", "id": "t1", "input": {"command": "x" * 500}}]),
+        ("user", [{"type": "tool_result", "tool_use_id": "t1", "is_error": True, "content": "boom"}])])
+    rows = asyncio.run(world.ops.transcripts("op"))["transcripts"]
+    assert [r["session"] for r in rows] == ["w1"]
+    lines = [r["text"] for r in rows[0]["records"]]
+    assert lines[0].startswith("[tool Bash] ") and len(lines[0]) < 260
+    assert lines[1] == "[tool error] boom"
+    # switching into transcript mode again starts from the tail again
+    asyncio.run(world.ops.set_mode("default", "events"))
+    asyncio.run(world.ops.set_mode("default", "transcript"))
+    assert len({r["session"]: r for r in asyncio.run(world.ops.transcripts("op"))["transcripts"]}["w1"]["records"]) == 6
+
+
+def test_transcripts_skip_stopped_sessions_and_bound_each_poll(world, talk, monkeypatch):
+    world.sessions["w2"].exited = True
+    _conversation(talk["w1"], [("user", "a" * 900) for _ in range(40)])
+    _conversation(talk["w2"], [("user", "gone")])
+    asyncio.run(world.ops.set_mode("default", "transcript"))
+    world.ops.state("default")["transcripts"] = {"w1": 0}
+    monkeypatch.setattr(operator_transcript, "BUDGET", 5000)
+    got = asyncio.run(world.ops.transcripts("op"))
+    assert [r["session"] for r in got["transcripts"]] == ["w1"]  # w2 is not running
+    assert len(got["transcripts"][0]["records"]) == 5 and got["more"]
+    assert world.ops.state("default")["transcripts"]["w1"] == 5
+    # a long prose record is clipped, with the length it left out
+    _conversation(talk["w1"], [("user", "b" * 4000)])
+    world.ops.state("default")["transcripts"]["w1"] = 40
+    text = asyncio.run(world.ops.transcripts("op"))["transcripts"][0]["records"][0]["text"]
+    assert text.endswith("… (+2500)")
+
+
+def test_mode_route_and_start_mode(world, monkeypatch):
+    monkeypatch.setattr(operator_bot.paths, "daemon_dir", lambda: world.root)
+    monkeypatch.setattr(operator_bot.projects, "require", lambda name: SimpleNamespace(name=name))
+    created = []
+
+    async def run():
+        client = TestClient(TestServer(_app(world, created)))
+        await client.start_server()
+        try:
+            resp = await client.post("/api/operator/mode", json={"project": "default", "mode": "nope"})
+            assert resp.status == 400
+            resp = await client.post("/api/operator/mode", json={"project": "default", "mode": "transcript"})
+            assert (await resp.json())["mode"] == "transcript"
+            view = await (await client.get("/api/operator?project=default")).json()
+            assert view["mode"] == "transcript"
+            resp = await client.get("/api/operator/agent/op/transcripts")
+            assert (await resp.json())["mode"] == "transcript"
+            resp = await client.post("/api/operator/start",
+                                     json={"project": "other", "profile": "p", "mode": "bad"})
+            assert resp.status == 400 and not created
+            resp = await client.post("/api/operator/start",
+                                     json={"project": "other", "profile": "p", "mode": "transcript"})
+            assert resp.status == 201
+            view = await (await client.get("/api/operator?project=other")).json()
+            assert view["mode"] == "transcript"
+        finally:
+            await client.close()
+
+    asyncio.run(run())
