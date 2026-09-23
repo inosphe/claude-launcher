@@ -165,14 +165,19 @@ const HARNESS_DETAILS = {
   codex: { name: "codex", models: ["luna", "terra", "sol"] },
   pi: { name: "pi", tools: ["full_read"] },
 };
+const stored = {};
 new Function(
   "exports", "$", "document", "Option", "sessionsCache", "syncForkAvailability",
   "renderRoleStance", "refreshWorkflowChoices", "refreshNewWorktree",
   "spawnReport", "workspacesCache",
   "profileDetails", "profileOptions", "harnessDetails",
   "syncRuntimeFold", "renderRuntimeSummary", "renderProfileHint",
-  "syncNewBorrowOptions", "syncNewWorktree", "currentProject",
+  "syncNewBorrowOptions", "syncNewWorktree", "currentProject", "localStorage",
   [`let newProfileOptions = profileOptions, newHarnessFor = null;`,
+   `const BASE = "t";`,
+   src.match(/const SPAWN_MODEL_KEY = [^\n]*;/)[0],
+   slice("spawnModelRecallKey"), slice("readSpawnModelRecall"),
+   slice("saveSpawnModelRecall"), slice("applySpawnModelRecall"),
    sliceConst("SPAWN_INHERITS"), sliceLet("newSpawnReport"),
    sliceLet("newSpawnReportFor"),
    // The picker's signature guard against the two-second poll, which lives
@@ -211,6 +216,8 @@ exports.policy = refreshSpawnPolicy;
 exports.fields = spawnChildFields;
 exports.setSessions = (s) => { sessionsCache = s; };
 exports.setProject = (p) => { currentProject = p; };
+exports.saveModel = saveSpawnModelRecall;
+exports.modelRecall = applySpawnModelRecall;
 `)(ctx,
    (id) => (id === "new-session" ? form : box_[id] || null),
    // The pickers are reached the way the page reaches them, by selector.
@@ -237,7 +244,10 @@ exports.setProject = (p) => { currentProject = p; };
    () => {},
    // Where the rail is looking. Only the project row's own-session arm reads
    // it, to put the row back on something after the inherit entry goes.
-   "");
+   "",
+   // The Model row's per-parent-profile recall is the one reader.
+   { getItem: (k) => (k in stored ? stored[k] : null),
+     setItem: (k, v) => { stored[k] = String(v); } });
 
 let failures = 0;
 function check(what, got, want) {
@@ -771,6 +781,82 @@ async function main() {
         form.project.value, "repo");
   ctx.setProject("");
   SESSIONS[1].project = undefined;
+
+  /* ---- the Model row remembers the last pick, per parent profile ----
+     The row starts on the parent's own model, so a parent launched on
+     `sonnet` used to hand every child `sonnet` however often the operator
+     picked something else (claunch-pg64g). The last pick is kept per parent
+     PROFILE and child harness, and put back only on a row the policy has
+     opened. */
+  SESSIONS.push(
+    { name: "rec", status: "idle", harness: "claude", profile: "work:claude",
+      model: "sonnet", cwd: "F:/repo" },
+    { name: "rec2", status: "idle", harness: "claude", profile: "home:claude",
+      model: "sonnet", cwd: "F:/repo" },
+    { name: "shut", status: "idle", harness: "claude", profile: "work:claude",
+      model: "sonnet", cwd: "F:/repo" });
+  ctx.setSessions(SESSIONS);
+  ctx.refresh();
+  const modelOpen = { may_choose: ["model"], spawnable_harnesses: [],
+                      soft_blocked_by: [] };
+  reports.rec = modelOpen;
+  reports.rec2 = modelOpen;
+  reports.shut = { may_choose: [], spawnable_harnesses: [], soft_blocked_by: [] };
+  await reread("rec");
+  check("nothing remembered: the row starts on the parent's model",
+        [form.model.disabled, form.model.value], [false, "sonnet"]);
+
+  ctx.saveModel(ctx.parentOf(), "claude", "opus");
+  check("the pick is stored under the parent's profile and the child harness",
+        JSON.parse(stored["claunch_spawn_model:t"]), { "work:claude": "opus" });
+  form.parent.value = "";
+  ctx.sync();
+  ctx.policy();
+  form.parent.value = "rec";
+  // What applySessionParentChange does on every pick of a parent: the row is
+  // not rebuilt for a parent picked again, so the recall is asked out loud.
+  form._modelRecallPending = true;
+  ctx.sync();
+  check("while the policy is unknown the greyed row keeps the parent's model",
+        [form.model.disabled, form.model.value], [true, "sonnet"]);
+  await ctx.policy();
+  check("once the row opens, the remembered pick is put back",
+        form.model.value, "opus");
+  check("...and it travels, since it differs from what the child inherits",
+        ctx.fields(form, {}).model, "opus");
+
+  form.model.value = "haiku";
+  ctx.sync();
+  ctx.sync();
+  check("a pick made in this opening survives the poll", form.model.value, "haiku");
+
+  /* A fresh opening over a row that was not rebuilt: the close put back the
+     page's value, and the recall is asked again (applySessionModalRecall). */
+  form.model.value = "sonnet";
+  form._modelRecallPending = true;
+  ctx.modelRecall(form);
+  check("a new opening asks the recall again without a rebuild",
+        form.model.value, "opus");
+
+  await reread("rec2");
+  check("another parent profile has its own memory",
+        form.model.value, "sonnet");
+
+  await reread("shut");
+  check("a row the policy keeps shut is not written",
+        [form.model.disabled, form.model.value], [true, "sonnet"]);
+
+  ctx.saveModel({ profile: "work:claude" }, "claude", "");
+  form._modelRecallPending = true;
+  await reread("rec");
+  check("\"(harness default)\" is a pick of its own and is put back",
+        form.model.value, "");
+  ctx.saveModel({ profile: "work:claude" }, "claude", "gpt-9");
+  form.model.value = "sonnet";     // what the close put back
+  form._modelRecallPending = true;
+  await reread("rec");
+  check("a remembered model the harness no longer offers is not restored",
+        form.model.value, "sonnet");
 
   if (failures) {
     console.error(`${failures} check(s) failed`);
