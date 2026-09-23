@@ -45,7 +45,8 @@ steps:
          직전 응답의 `cursor`를 넘긴다(커서는 세션 스크래치
          `$CLAUNCH_SCRATCH/operator-cursor.txt`에 적어 두고 읽는다 —
          `/tmp`나 저장소에 쓰지 않는다). `more: true`면 같은 판단 안에서
-         다시 부른다.
+         다시 부른다. poll은 실행 중·일시정지 세션만 읽는다. `ended`에
+         이름이 있으면 그 세션이 이번에 종료·보관된 것이다(한 번만 온다).
          poll이 실패하면(연결 timeout, 데몬 무응답) 커서는 그대로 두고,
          감시가 끊겼다는 카드를 `level: attention`으로 한 번 올린다 —
          사용자가 할 일이 없으므로 `urgent`가 아니다. 그 카드의 id를
