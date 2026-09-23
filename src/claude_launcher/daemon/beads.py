@@ -96,6 +96,10 @@ KNOWN_STATUSES = ACTIVE_STATUSES + ("closed",)
 #: The label every issue the daemon mints carries, so the sweep can tell its
 #: own placeholder from an issue an agent or a human wrote.
 SESSION_LABEL = "session"
+#: Marks a follow-up a parent handed to a live child at wrapup (improv-worker
+#: generated-issue settlement, claunch-zc5ga): the child is its assignee but
+#: not its creator, so only this label lets the child's exit release it.
+DELEGATED_LABEL = "delegated"
 
 #: ``issue: <id>`` — how a task or a workflow context names the issue a
 #: session is for (the improv workflows' own convention).
@@ -894,6 +898,12 @@ def sweep_plan(
     not the daemon's own placeholder — that one already closed above and is
     told apart by the ``session`` label) is released back to the pool, its
     assignee cleared, with a comment of the same kind.
+
+    The last shape is a follow-up a *parent* filed and handed to this session
+    at its wrapup (``delegated`` label, claunch-zc5ga): still ``open`` or
+    ``in_ready`` means the exiting child never took it up, and nothing else
+    would release it -- it was not created here and never went in_progress.
+    It is released the same way, and the label comes off with the assignee.
     """
     plan: List[List[str]] = []
     code = "unknown" if exit_code is None else str(exit_code)
@@ -934,6 +944,20 @@ def sweep_plan(
                      f"(SELF-QUEUE RELEASED)"]
                 )
                 plan.append(["update", iid, "--assignee", ""])
+            elif (
+                status in ("open", "in_ready")
+                and created_by != name
+                and DELEGATED_LABEL in labels
+            ):
+                plan.append(
+                    ["comments", "add", iid,
+                     f"SESSION ENDED: delegate {name} exited (code {code}) before "
+                     f"taking this up; delegated follow-up released to the pool "
+                     f"(DELEGATION RELEASED)"]
+                )
+                plan.append(
+                    ["update", iid, "--assignee", "", "--remove-label", DELEGATED_LABEL]
+                )
         elif (
             not assignee
             and created_by == name

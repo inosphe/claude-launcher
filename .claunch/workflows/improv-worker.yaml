@@ -286,17 +286,25 @@ steps:
       것이 기본값이던 동안 그 이슈들은 처리되지 않고 쌓였다(s586). 그래서
       배정은 wrapup의 생성 이슈 정산에서 워커가 직접 친다 — 항목마다:
       (1) **spawn** — 살아 있는 자식(`children`)이 있고 그 이슈가 그 자식의
-      영역이면 그 자식에게(`update <id> --assignee <자식>` + `DELEGATED:
-      from <원회차 id> to <자식>` 코멘트 + 자식에게 mesh 한 줄 — 자식의
-      queue-next/queue-recheck가 보드로 읽는다), 또는 work의 위임 조건을
+      영역이며 그 자식의 런이 아직 queue-recheck 앞에 있으면(`claunch
+      cflow status -t <자식> --json`의 `step_id`가 queue-recheck·settle-*·
+      end-*가 아니고 런이 done이 아니다 — 지난 자식은 큐를 다시 읽지
+      않는다) 그 자식에게(`update <id> --assignee <자식> --add-label
+      delegated` + `DELEGATED: from <원회차 id> to <자식>` 코멘트 + 자식에게
+      mesh 한 줄 — 자식의 queue-next/queue-recheck가 보드로 읽는다; 자식이
+      착수 전에 종료되면 데몬이 `delegated` 라벨을 보고 풀에 되돌리고
+      `DELEGATION RELEASED` 코멘트를 남긴다), 또는 work의 위임 조건을
       만족하면 새 자식을 `--issue <id>`로 세운다; (2) **self** — 그 밖에는
       자기에게(`update <id> --assignee $CLAUNCH_SESSION` + `SELF-QUEUED:
       from <원회차 id>` 코멘트) — queue-recheck가 그것을 읽어 같은 런
       안에서 다음 회차로 돈다; (3) **pool** — assignee 없이 남기는 것은 이
       세션이 착수할 수 없는 것(다른 저장소 영역, blocked, 범위·우선순위를
       사용자나 리더가 정해야 하는 것)뿐이고, 그 처분은 상위에게 ask로
-      묻는다. 건수 상한은 두지 않는다 — 루프의 백스톱은 엔진의
-      max_visits(intake 방문 수)다. 리더는 거부권을 가진다(`update <id>
+      묻는다. self에는 런 단위 상한이 있다: 이 런의 intake 방문 수
+      (`claunch cflow status --json`의 `visits.intake`)가 10 이상이면 self
+      대신 pool로 보낸다 — 엔진의 loop guard(max_visits 25)는 26번째
+      intake에서 런을 사람의 승인(`loop_limit`)으로 세우는데, 그 전에 범위
+      판단을 상위에게 넘기기 위해서다. 리더는 거부권을 가진다(`update <id>
       --assignee ""` + `UNQUEUED by leader: <이유>`); 거부된 이슈는
       pool과 같이 상위의 처분을 따른다. 세션이 만든 활성
       이슈가 전부 누군가의 손(살아 있는 세션의 assignee, 또는 리더의
@@ -2498,11 +2506,18 @@ steps:
         만들었을 때만이 아니라 위 명령이 하나라도 돌려주면 이 절을 밟는다
         (공통 블록 「스스로 만든 이슈는 만든 세션이 처리한다」, claunch-034c4):
         - **spawn** — 살아 있는 자식(`children`)이 있고 그 이슈가 그 자식의
-          영역(같은 파일·모듈·UI 면)이면 그 자식에게: `claunch beads update
-          <id> --assignee <자식>` + `claunch beads comments add <id>
-          "DELEGATED: from <원회차 id> to <자식>"` + 자식에게 mesh 한 줄
-          (이슈 id, 기준 브랜치). 자식의 queue-next/queue-recheck가 보드로
-          읽어 자기 회차에서 처리한다. 맞는 자식이 없어도 work 스텝의 위임
+          영역(같은 파일·모듈·UI 면)이며, 그 자식의 런이 아직 큐를 다시
+          읽는 자리 앞에 있으면 — `claunch cflow status -t <자식> --json`의
+          `step_id`가 queue-recheck·settle-check·settle-wait·settle-stall·
+          end-gate·end-hold가 아니고 status가 done이 아니다 — 그 자식에게:
+          `claunch beads update <id> --assignee <자식> --add-label delegated`
+          + `claunch beads comments add <id> "DELEGATED: from <원회차 id> to
+          <자식>"` + 자식에게 mesh 한 줄(이슈 id, 기준 브랜치). 자식의
+          queue-next/queue-recheck가 보드로 읽어 자기 회차에서 처리한다.
+          `delegated` 라벨은 자식이 착수하기 전에 종료됐을 때 데몬이 그
+          배정을 풀에 되돌리는 표지다(`DELEGATION RELEASED` 코멘트) — 빼면
+          종료된 assignee를 단 채 표지 없이 남는다. 이미 그 자리를 지난
+          자식에게는 넘기지 않는다: 그 자식은 큐를 다시 읽지 않는다. 맞는 자식이 없어도 work 스텝의 위임
           조건(겹치지 않음·규격·컨텍스트 불필요·크기)을 지금 만족하면 새
           자식을 spawn `--issue <id>`로 세운다.
         - **self** — spawn이 아닌 것 중 이 저장소에서 이 세션이 착수할 수
@@ -2510,11 +2525,15 @@ steps:
           $CLAUNCH_SESSION` + `claunch beads comments add <id> "SELF-QUEUED:
           from <원회차 id>"`. 규격이 모자라면 배정 전에 description을
           채운다(staged 순서: description이 먼저, --assignee가 마지막).
-          queue-recheck가 이것을 읽어 같은 런 안에서 다음 회차로 돈다 —
-          건수 상한은 없고 루프의 백스톱은 intake의 max_visits다.
-        - **pool** — 이 세션이 착수할 수 없는 것뿐이다: 다른 저장소 영역,
-          blocked, 범위·우선순위를 사용자나 리더가 정해야 하는 것.
-          assignee 없이 두고 상위의 처분을 묻는다.
+          queue-recheck가 이것을 읽어 같은 런 안에서 다음 회차로 돈다.
+          런 단위 상한: `claunch cflow status --json`의 `visits.intake`가
+          10 이상이면 self를 치지 않고 pool로 보낸다(근거 「self 상한
+          도달: intake <n>회」). 엔진의 loop guard는 26번째 intake에서 런을
+          사람의 승인(`loop_limit`)으로 세운다 — 그 전에 남은 일의 범위를
+          상위가 정하게 한다.
+        - **pool** — 이 세션이 착수할 수 없는 것, 그리고 self 상한에 닿은
+          것이다: 다른 저장소 영역, blocked, 범위·우선순위를 사용자나
+          리더가 정해야 하는 것. assignee 없이 두고 상위의 처분을 묻는다.
         마감 알림은 한 통이다 — 항목마다 (id, 갈래, 한 줄 근거)를 싣는다.
         pool 항목이 없으면 fyi다(배정은 이미 보드에 있다; 상위는 거부권
         `update <id> --assignee ""` + `UNQUEUED by leader: <이유>`를
@@ -2778,8 +2797,15 @@ steps:
           "UNQUEUED: $CLAUNCH_SESSION landed without it"`. 세션이 끝난 뒤
           배정만 남은 이슈는 다음 세션이 잡기 전까지 아무도 붙잡지 않은 채
           배정된 것으로 보인다.
+          되돌린 것 가운데 이 세션이 만든 이슈(`SELF-QUEUED:` 코멘트가
+          있는 것)가 있으면, 그 id들로 wrapup의 pool ask와 같은 형식
+          (id, pool, 한 줄 근거 — 왜 착수할 수 없게 됐는가)의 ask 한 통을
+          지금 상위에게 보낸다. 그 이슈들은 wrapup에서 self였으므로 pool
+          ask에 실린 적이 없고, 뒤의 settle-wait는 상위에게 다시 요청하지
+          않는다 — 여기가 그 처분을 묻는 유일한 자리다.
         여기서 스스로 자기 배정을 치지 않는다 — 배정은 wrapup 정산에서
-        이미 쳤다(claunch-034c4). 이 스텝은 읽기만 한다.
+        이미 쳤다(claunch-034c4). 이 스텝이 쓰는 것은 done의 되돌리기와
+        그 ask뿐이다.
         `SELF-QUEUED:` 이슈는 이 세션이 만든 일이므로 착수할 수 있으면
         next-round다 — 그것을 풀에 되돌리고 done으로 끝내면 만든 일감이
         backlog에 쌓이는 원래의 결함이 그대로 돌아온다.
@@ -2818,8 +2844,11 @@ steps:
         없음)는 미정산이다. assignee가 **이 세션 자신**인 것도 미정산이다
         — 이 세션은 곧 끝나므로 그 배정은 누구의 손도 아니다; 착수할 수
         있었으면 queue-recheck가 next-round를 냈어야 했다
-        (claunch-034c4). 그런 항목이 보이면 unsettled를 고르고 reason에
-        적는다.
+        (claunch-034c4). 그런 항목이 보이면 unsettled를 고르기 전에
+        queue-recheck의 done 규칙을 그 항목에 적용한다(풀에 되돌리고
+        `UNQUEUED:` 코멘트, 이 세션이 만든 것이면 pool ask 한 통) — 그러지
+        않으면 settle-wait는 재요청을 하지 않으므로 아무도 처분을 요청받지
+        못한 채 settle-stall까지 간다. 한 일을 reason에 적는다.
         살아 있는 자식(`children`)이 있고 리더의 adopt(reparent)가
         확인되지 않으면 그것도 미정산이다 — commit 단계에서 adopt ask를
         보냈으면 그 답을 `claunch cflow asks`나 mesh 기록에서 확인한다.
