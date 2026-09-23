@@ -1583,7 +1583,9 @@ function renderSessionGrid(force = false) {
     visible.map((s) => [s.name, s.status, s.paused_at, s.role,
                         handleTag(s.name)?.handle || null,
                         searching ? sessionMatchesSearch(s) : true,
-                        s.briefing?.one_line || null]),
+                        s.briefing?.one_line || null,
+                        sessionGridChecks(s).map(statusCheckText),
+                        sessionGridGated(s.name)]),
   ]);
   if (!force && host._gridSignature === signature) return;
   host._gridSignature = signature;
@@ -1930,9 +1932,26 @@ function sessionGridCell(layout, row, r, c, records, present, searching) {
     const hTag = handleTag(s.name);
     sub.textContent = hTag ? hTag.handle : (s.role || "");
     cell.append(dot, num, label, sub);
+    // Status checks as a row of tiny dots in the corner, one per check, in
+    // the list's check colours; the hover card has the questions.
+    const checks = sessionGridChecks(s);
+    if (checks.length) {
+      const box = document.createElement("span");
+      box.className = "sg-checks";
+      for (const check of checks) {
+        box.append(Object.assign(document.createElement("i"),
+          { className: `sg-check check-${statusCheckText(check)}` }));
+      }
+      cell.append(box);
+    }
+    // A run stopped on something only the reader resolves (a gate, a choice,
+    // an ask that reached nobody) lights the whole cell, as the list's
+    // amber cflow line does.
+    if (sessionGridGated(s.name)) cell.classList.add("gated");
   }
   cell.setAttribute("aria-label", `${row.name} ${c + 1}: ${!name ? "empty"
-    : s ? `${s.name}, ${s.status}` : `${name}, not in this view`}`);
+    : s ? `${s.name}, ${s.status}${cell.classList.contains("gated") ? ", waiting on you" : ""}`
+    : `${name}, not in this view`}`);
   // The hover card stands in for the browser's title tooltip.
   cell.addEventListener("pointerenter", (ev) => {
     if (ev.pointerType === "mouse") showSessionGridTip(cell, row, c, name, !!s);
@@ -2062,6 +2081,20 @@ function sessionGridCell(layout, row, r, c, records, present, searching) {
   });
   return cell;
 }
+/* The status checks a session reported, as the list row reads them. */
+function sessionGridChecks(s) {
+  return Array.isArray(s.status_checks) ? s.status_checks : [];
+}
+
+/* Whether the session's cflow run waits on the reader -- the list's
+   `.sess-cflow.gated` test. The runs arrive on their own poll, which
+   renders the grid again when this answer can have changed. */
+function sessionGridGated(name) {
+  if (typeof sessCflowRun !== "function") return false;
+  const run = sessCflowRun(name);
+  return !!run && sessCflowGated(run);
+}
+
 /* The hover card: the list view's own card for the session under the
    pointer (or keyboard focus), headed by where the cell is -- row name and
    cell number, line and slot at the current width. The card is a copy of
@@ -6233,6 +6266,7 @@ async function refreshCflow() {
   else if (repaintRail) cflowRailRendered = signature;
   if (repaintRail) {
     applyCflowBadges();  // the rail rows may have painted before this cache filled
+    if (typeof renderSessionGrid === "function") renderSessionGrid(); // and the grid's gate highlight, read off the same cache
     applyRailQuiet();    // one of its two flags is read off this very cache
   }
   renderTermTimer();   // the attached session's own header chip
