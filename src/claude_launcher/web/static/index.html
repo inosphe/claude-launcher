@@ -204,6 +204,7 @@
   <main id="main">
     <nav id="session-tabs" class="hidden" aria-label="Recent and pinned sessions"></nav>
     <section id="observer-view" class="hidden">
+      <header class="wf-head"><h1>관찰 대시보드</h1><label id="observer-scope-control" title="켜면 observe-pin 한 세션만 관찰합니다. 관찰 API 호출이 그 수에 비례해 줄어듭니다. 세션 레일의 체크박스와 카드의 「관찰 고정」이 같은 표시입니다."><input type="checkbox" id="observer-scope-pinned"> 고정만 관찰</label><button id="observer-monitor">관찰 시작</button></header>
       <section id="observer-token-summary" aria-label="관찰 API 토큰 사용량">
         <button id="observer-token-toggle" aria-expanded="false" aria-controls="observer-token-detail"><span>토큰</span><span id="observer-token-compact">조회 중…</span><span id="observer-token-chevron" aria-hidden="true">⌄</span></button>
         <div id="observer-token-detail">
@@ -212,8 +213,8 @@
           <p id="observer-token-note" class="hint">사용량 조회 중…</p>
         </div>
       </section>
-      <header class="wf-head"><h1>관찰 대시보드</h1><label id="observer-scope-control" title="켜면 observe-pin 한 세션만 관찰합니다. 관찰 API 호출이 그 수에 비례해 줄어듭니다. 세션 레일의 체크박스와 카드의 「관찰 고정」이 같은 표시입니다."><input type="checkbox" id="observer-scope-pinned"> 고정만 관찰</label><button id="observer-monitor">관찰 시작</button></header>
       <div class="observer-content">
+      <div class="observer-toolbar">
       <div class="observer-view-controls">
       <fieldset class="observer-view-tabs"><legend class="sr-only">결과 표시 방식</legend>
         <label><input type="radio" name="observer-layout" id="observer-layout-board" value="board" checked><span id="observer-board-label">보드</span></label>
@@ -222,7 +223,6 @@
       </fieldset>
       <label id="observer-limit-control" hidden>세션당 표시 항목 <input id="observer-limit" type="range" min="1" max="10" step="1" value="5"><output id="observer-limit-value" for="observer-limit">5개</output></label>
       </div>
-      <p id="observer-notice" role="status" aria-live="polite"></p>
       <div class="filters">
       <label>보기 <select id="observer-scope"><option value="global">전체</option><option value="mesh">메시</option><option value="session">세션</option></select></label>
       <label id="observer-selection-label" hidden>대상 <select id="observer-selection"></select></label>
@@ -231,6 +231,9 @@
       <label><input id="observer-ended" type="checkbox"> 종료된 세션 포함</label>
       <button id="observer-sort" type="button">최신순 정렬</button>
       </div>
+      </div>
+      <p id="observer-notice" role="status" aria-live="polite"></p>
+      <div class="observer-status-row">
       <p id="observer-counts"></p>
       <!-- Every observed session summed, so the cost of watching the fleet is
            one number rather than one per card. The lifetime total covers the
@@ -238,8 +241,11 @@
            its last call on its own line instead, so the two are never added
            together as if they were the same figure. The client sums both. -->
       <details id="observer-usage" hidden><summary>관찰 API 사용량 합계 (전체 세션)</summary><pre id="observer-usage-body"></pre></details>
+      <details class="observer-help"><summary>화면 안내</summary>
       <p id="observer-layout-hint" class="hint"></p>
       <p class="hint">직접 보고·사용자 질문·cflow 응답 대기를 표시합니다. 자동 요약의 근거는 각 이벤트에서 확인할 수 있습니다. 장기 대기는 마지막 실질 활동 후 30분 이상인 경우입니다.</p>
+      </details>
+      </div>
       <section id="observer-cards" aria-label="세션 결과"></section>
       </div>
       <footer id="observer-composer">

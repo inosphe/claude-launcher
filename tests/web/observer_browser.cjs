@@ -617,7 +617,8 @@ async function fadeCost(page, selector, fade) {
     await page.locator('label:has(#observer-layout-timeline)').click();
     await page.waitForSelector('[data-event="m-new"]');
     assert.deepEqual(await page.locator('#observer-view .event').evaluateAll(es=>es.map(e=>e.dataset.event)),['m-new','m-middle','m-old']);
-    assert.match(await page.locator('[data-event="m-new"]').innerText(),/세션 이벤트 · worktree/);
+    assert.match(await page.locator('[data-event="m-new"] > small').innerText(),/세션 이벤트/);
+    assert.equal(await page.locator('[data-event="m-new"] .obs-kind').innerText(),"워크트리");
     assert.match(await page.locator('[data-event="m-old"]').innerText(),/p1 → p2/);
     assert.match(await page.locator('[data-event="m-new"]').innerText(),/C:\/old → C:\/new\/<script>/);
     assert.equal(await page.locator('[data-event="m-new"] script').count(),0);
