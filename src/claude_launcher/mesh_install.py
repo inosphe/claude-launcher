@@ -95,7 +95,11 @@ from your session automatically):
   Never dress an INSTRUCTION as `fyi`/`ack` either: it tells the recipient it
   owes you nothing, and the daemon will not chase a member who owes nothing.
 - **Direct over broadcast**: address the peer(s) concerned; `'*'` is for
-  genuinely shared announcements only.
+  genuinely shared announcements only. `'*'` reaches every connected member,
+  finished sessions waiting to be ended included, and each spends a turn on
+  it — so every `'*'` send comes back with a `BROADCAST` advisory. When the
+  audience is a board state, name it: `@in_review` resolves to the members
+  whose issue is `in_review` on your board (the landing queue).
 - **Fan-out with per-peer instructions = ONE batch send**: shared preamble
   as the body plus `--section w1="..."` `--section w2="..."` — each peer is
   delivered only its own slice. A recipient you give no section still

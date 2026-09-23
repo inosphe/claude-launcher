@@ -259,6 +259,36 @@ def _preamble_only_notice(
     )
 
 
+#: Audience selectors a sender may put in ``to`` instead of naming handles:
+#: selector -> the board status whose assignees it resolves to. Resolved once,
+#: at send time, into an explicit handle list — the log records who the
+#: message was actually for, and delivery never re-reads the board.
+#: ``@in_review`` exists for the leader's baseline notice: its only audience
+#: is the sessions that have already put numbers up for landing
+#: (claunch-424v4, claunch-no-premature-rebase-lhcz).
+AUDIENCE_SELECTORS: Dict[str, str] = {"@in_review": "in_review"}
+
+
+def broadcast_notice(recipients: List[str]) -> str:
+    """The advisory every agent ``'*'`` send carries.
+
+    ``'*'`` reaches every connected member whatever it is doing — including
+    sessions whose work already landed and that sit waiting for a person to
+    end them — and each of them spends a turn reading it. Measured on
+    mesh-0826: of 33 recipients of one leader broadcast whose run position
+    could be read, 31 had already finished (claunch-424v4).
+    """
+    return (
+        f"BROADCAST: '*' typed this into {len(recipients)} terminal(s), and "
+        "each spends a turn on it whether or not it concerns them — finished "
+        "sessions waiting to be ended included. Address the members it is "
+        "for: their handles, or an audience selector ("
+        + ", ".join(sorted(AUDIENCE_SELECTORS))
+        + " = the sessions whose issue is in that board state). Keep '*' for "
+        "an announcement every member must act on."
+    )
+
+
 #: What ``exited`` and ``missing`` mean to a sender, and what to do about
 #: each. Split because the two need opposite actions: an exited session is
 #: waiting to be respawned, a missing one has had its record cleared and
@@ -1235,6 +1265,12 @@ class MeshManager:
         #: async () -> [machine names] — the other backends on our relay
         #: (RelayUplink.peer_list); None when no uplink or an old relay.
         self.peer_lister: Optional[Callable] = None
+        #: async (sender session, board status) -> [session names]: the
+        #: assignees of the issues in that status on the board the sender's
+        #: directory files on. Set by the daemon entrypoint, which owns the
+        #: board; None means ``to`` selectors are refused (see
+        #: :data:`AUDIENCE_SELECTORS`).
+        self.audience_resolver: Optional[Callable] = None
         #: How often (seconds) a policy-enabled primary syncs each guest even
         #: with nothing to send, so activity reports stay fresh.
         self.report_interval: float = 10.0
@@ -2551,17 +2587,75 @@ class MeshManager:
         unreachable (result carries ``queued: True``).
         """
         mesh = self.get(name)
+        to, unreached = await self._resolve_audience(mesh, sender, to)
         if mesh.primary:
-            return await self._send_from_mirror(
+            result = await self._send_from_mirror(
                 mesh, sender, to, body, external=external, type=type,
                 reply_to=reply_to, sections=sections, ref=ref,
             )
-        result = self._send_core(
-            mesh, sender, to, body, external=external, type=type,
-            reply_to=reply_to, sections=sections, ref=ref,
-        )
-        self._flush_guests_soon(mesh)
+        else:
+            result = self._send_core(
+                mesh, sender, to, body, external=external, type=type,
+                reply_to=reply_to, sections=sections, ref=ref,
+            )
+            self._flush_guests_soon(mesh)
+        if unreached:
+            note = (
+                f"not reached by the selector: {', '.join(unreached)} "
+                "(assignee of an issue in that state, but no connected member "
+                "of this mesh runs that session)"
+            )
+            prior = result.get("notice")
+            result = {**result, "notice": f"{prior} {note}" if prior else note}
         return result
+
+    async def _resolve_audience(
+        self, mesh: Mesh, sender: str, to: Union[str, List[str]]
+    ) -> Tuple[Union[str, List[str]], List[str]]:
+        """Expand an audience selector in ``to`` into the handles it names.
+
+        Anything that is not a selector passes through unchanged. A selector
+        becomes the connected LOCAL members whose session is an assignee of
+        an issue in the selector's board state — the board is this daemon's,
+        so a guest member's session name says nothing about it. Returns the
+        address and the assignee sessions left out of it (not a member here,
+        or not connected to the sender), which the send reports rather than
+        dropping silently.
+        """
+        if not (isinstance(to, str) and to.startswith("@")):
+            return to, []
+        status = AUDIENCE_SELECTORS.get(to)
+        if status is None:
+            raise MeshError(
+                f"unknown audience selector {to!r} — known: "
+                + ", ".join(sorted(AUDIENCE_SELECTORS))
+            )
+        if self.audience_resolver is None:
+            raise MeshError(
+                f"audience selector {to!r} needs the board, and this daemon "
+                "has none wired — name the handles instead"
+            )
+        member = self.resolve_sender(mesh.name, sender)
+        from_handle = member.handle if member is not None else sender
+        session = member.session if member is not None else sender
+        sessions = set(await self.audience_resolver(session, status))
+        handles = sorted(
+            m.handle for m in mesh.members.values()
+            if m.session in sessions
+            and self._is_local(mesh, m)
+            and m.handle != from_handle
+            and mesh.connected(from_handle, m.handle)
+        )
+        reached = {mesh.members[h].session for h in handles}
+        unreached = sorted(s for s in sessions if s not in reached and s != session)
+        if not handles:
+            raise MeshError(
+                f"{to} resolves to nobody you can reach in mesh {mesh.name!r}: "
+                f"no connected member's session holds an issue in {status!r}"
+                + (f" (assignees not reached: {', '.join(unreached)})" if unreached else "")
+                + " — there is no one this message is for, so nothing was sent"
+            )
+        return handles, unreached
 
     def _send_core(
         self,
@@ -2611,6 +2705,10 @@ class MeshManager:
             )
         from_handle = member.handle if member is not None else sender
         body = _CTRL_RE.sub("", str(body)).strip()
+        # Read before backpressure narrows ``to`` to a list. The human at the
+        # dashboard is not warned: the advisory is about agents spending
+        # other agents' turns.
+        broadcast = to == "*" and not external
         recipients = self._resolve_recipients(mesh, from_handle, to)
         if not recipients:
             raise MeshError(self._nobody_to_deliver_to(mesh, from_handle))
@@ -2744,6 +2842,8 @@ class MeshManager:
                         break
         if note:
             advisories.append(note)
+        if broadcast:
+            advisories.append(broadcast_notice(recipients))
         # A recipient whose terminal is gone is the one advisory the sender
         # cannot work out for itself: delivery accepts the message either
         # way, so 'sent' looks identical whether bob is reading or bob died

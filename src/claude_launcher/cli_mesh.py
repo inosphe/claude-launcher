@@ -1206,7 +1206,11 @@ def register(sub) -> None:
         help="send a message ('*' broadcasts); delivery types into recipients' terminals",
     )
     p.add_argument("mesh")
-    p.add_argument("to", help="'*', a handle, or a handle to address")
+    p.add_argument(
+        "to",
+        help="'*' (every connected member -- warned), '@in_review' (members "
+        "whose issue is in_review on your board), or a handle",
+    )
     p.add_argument("text", nargs="+", help="message text ('-' reads stdin)")
     p.add_argument("--from", dest="sender",
                    help="sender handle (default: resolved from $CLAUNCH_SESSION)")
