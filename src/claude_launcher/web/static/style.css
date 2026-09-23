@@ -243,6 +243,19 @@ option:disabled { color: #6b7280; }
 }
 #session-grid .sg-cell:hover { background: #22262d; }
 #session-grid .sg-cell.active { background: #2b313b; border-color: #385273; }
+/* Waiting on the reader (a cflow gate, a choice, an ask that reached
+   nobody): amber, the colour the list gives the same state. */
+#session-grid .sg-cell.gated { background: #33280f; border-color: #9e6a03; }
+#session-grid .sg-cell.gated .sg-name { color: #e3b341; font-weight: 600; }
+/* Status checks: one 4px dot per check, bottom right. */
+#session-grid .sg-checks {
+  position: absolute; right: 4px; bottom: 3px; display: flex; gap: 2px;
+  pointer-events: none;
+}
+#session-grid .sg-check { width: 4px; height: 4px; border-radius: 50%; }
+#session-grid .sg-check.check-yes { background: #3fb950; }
+#session-grid .sg-check.check-no { background: #ff7b72; }
+#session-grid .sg-check.check-unknown { background: #d29922; }
 /* The cell that holds the keyboard, and so the card keys (k, p, ...): red,
    like the list's "⌨ card" chip and ring. A border colour, so the cell does
    not move when it takes focus. */
