@@ -121,6 +121,10 @@ check("gate presses go under the newest card naming the session, and in the pane
       [src.includes("gateCard.set(r, e.id)"), src.includes("if (gateCard.get(r) === e.id) item.append(renderGate(gates.get(r)))"),
        src.includes("승인을 기다리는 cflow 게이트")], [true, true, true]);
 check("a daemon restart entry gets its own look", src.includes("operator-event-${e.event}"), true);
+check("opening or leaving the page or the modal marks the badge seen",
+      [src.includes('request("api/operator/seen", {})'),
+       src.includes("if (pageOpen) markSeen();"), src.includes('modal.addEventListener("close", () => { markSeen(); detachIdle(); });'),
+       (src.match(/refresh\(\); poll\(\); markSeen\(\);/g) || []).length], [true, true, true, 2]);
 
 const options = [{value: "a:claude", harness: "claude"}, {value: "a:pi", harness: "pi"}];
 const caps = {claude: {models: ["sonnet", "opus"], efforts: ["high"]}, pi: {models: [], efforts: []}};

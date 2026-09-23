@@ -3095,7 +3095,8 @@ the modal). The bot polls with
 `observer_ask` questions and blocked sessions — no LLM call needed for those),
 posts only what changes what you do next with `operator_post`, and asks for
 decisions with `operator_ask` (approve/deny, choices or text; the badge and a
-browser notification say when one waits). What you type in the tab reaches the
+browser notification say when one waits — opening the Operator clears the
+badge, answered or not, and it counts again only what is asked after). What you type in the tab reaches the
 bot through `operator_inbox`, never its terminal, which only gets a one-line
 nudge. It may type into another session of its project with
 `operator_dispatch` only to relay an instruction of yours: the call names the

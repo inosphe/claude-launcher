@@ -212,6 +212,10 @@ class Operators:
             #: keys rather than a timestamp, because two inputs in one second
             #: would otherwise hide the second behind the first's mark.
             data.setdefault("read", [])
+            #: Ids of the open asks the user had in front of them when they
+            #: last opened the Operator: the badge counts only the open asks
+            #: that are not here. Ids rather than a time for the reason above.
+            data.setdefault("badge_seen", [])
             self.cache[project] = data
         return self.cache[project]
 
@@ -476,9 +480,32 @@ class Operators:
                 "pending": self.pending(project), "sessions": self.panel(project, work),
                 "gates": list(gates or [])}
 
+    def open_asks(self, project):
+        return [e["id"] for e in self.state(project)["feed"]
+                if e.get("kind") == "ask" and not e.get("answer")]
+
+    def unseen(self, project):
+        """Open asks raised since the user last opened the Operator. The
+        badge shows this, not every open ask: opening the page is taking
+        notice of what waits, answered or not, and the count starts again
+        from there."""
+        seen = set(self.state(project).get("badge_seen") or ())
+        return sum(1 for i in self.open_asks(project) if i not in seen)
+
     def pending_all(self):
-        by_project = {p: self.pending(p) for p in projects.names()}
+        by_project = {p: self.unseen(p) for p in projects.names()}
         return {"total": sum(by_project.values()), "by_project": by_project}
+
+    def mark_seen(self):
+        """The user opened the Operator: every open ask so far is noticed,
+        in every project, since the badge is one total over all of them."""
+        for project in projects.names():
+            data = self.state(project)
+            ids = self.open_asks(project)
+            if data.get("badge_seen") != ids:
+                data["badge_seen"] = ids
+                self.save(project)
+        return self.pending_all()
 
     # -- the bot's output --------------------------------------------------
     def _idempotent(self, project, token, payload):
@@ -872,6 +899,9 @@ def install(app, *, create=None, gates=None, work=None):
     async def pending(request):
         return web.json_response(ops.pending_all())
 
+    async def seen(request):
+        return web.json_response(ops.mark_seen())
+
     async def start(request):
         body = await request.json()
         if not isinstance(body, dict):
@@ -971,6 +1001,7 @@ def install(app, *, create=None, gates=None, work=None):
 
     app.router.add_get("/api/operator", view)
     app.router.add_get("/api/operator/pending", pending)
+    app.router.add_post("/api/operator/seen", seen)
     app.router.add_post("/api/operator/start", start)
     app.router.add_post("/api/operator/mode", mode)
     app.router.add_post("/api/operator/message", message)
