@@ -124,50 +124,97 @@ option:disabled { color: #6b7280; }
 }
 .session-view-tabs input:focus-visible + span { outline: 2px solid #58a6ff; outline-offset: 1px; }
 
-/* The grid view. Every row is drawn with the same column count
-   (--sg-cols), so a column is the same x in every row; the row names stay
-   pinned on the left while the cells scroll sideways under them. */
+/* The grid view. A row is a heading line over its cells, and the cells wrap
+   onto lines of --sg-per-line (3, 4 or 5, the reader's pick) that share the
+   rail's width, so the grid never scrolls sideways. A cell's line and slot
+   follow from its column alone (session-grid.js span), so the same column
+   sits at the same place in every row. */
 #session-grid {
-  flex: 1; overflow: auto; padding: 4px 0 8px; font-size: 12px;
-  --sg-head-w: 64px; --sg-cell-w: 76px;
+  flex: 1; overflow-x: hidden; overflow-y: auto; padding: 4px 6px 8px; font-size: 12px;
 }
-#session-grid .sg-row {
-  display: grid; align-items: stretch; gap: 3px; padding: 0 6px 3px 0;
-  grid-template-columns: var(--sg-head-w) repeat(var(--sg-cols, 1), var(--sg-cell-w));
-  width: max-content;
+#session-grid .sg-per-line {
+  display: flex; align-items: center; gap: 2px; margin: 0 0 4px; padding: 0; border: 0;
+  color: #7d8590; font-size: 11px;
 }
+#session-grid .sg-per-line legend { float: left; margin-right: 6px; }
+#session-grid .sg-per-line label { position: relative; cursor: pointer; }
+#session-grid .sg-per-line input { position: absolute; width: 1px; height: 1px; opacity: 0; }
+#session-grid .sg-per-line span {
+  display: block; min-width: 22px; padding: 2px 6px; border-radius: 4px; text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+#session-grid .sg-per-line label:hover span { color: #c9d1d9; background: #1d2128; }
+#session-grid .sg-per-line input:checked + span {
+  color: #e6edf3; background: #243247; box-shadow: inset 0 0 0 1px #385273;
+}
+#session-grid .sg-per-line input:focus-visible + span { outline: 2px solid #58a6ff; }
+#session-grid .sg-row { margin-bottom: 6px; }
 #session-grid .sg-row-head {
-  position: sticky; left: 0; z-index: 1; display: flex; align-items: center;
-  padding: 0 4px 0 8px; background: #14161a; min-width: 0;
+  display: flex; align-items: center; gap: 4px; padding: 2px 2px 3px; min-width: 0;
 }
 #session-grid .sg-row-name {
-  flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   color: #c9d1d9; font-weight: 600; cursor: text;
 }
-/* The row's two buttons lie over the end of its name on hover instead of
-   holding width the name would otherwise be cut short by. */
-#session-grid .sg-row-edit, #session-grid .sg-row-remove {
-  flex: none; background: #14161a; border: 0; padding: 0 2px; cursor: pointer;
-  color: #6e7681; font-size: 11px; display: none;
+/* Rename, condition, make-default and remove: shown while the heading is
+   hovered or one of them has the keyboard. */
+#session-grid .sg-row-tools { margin-left: auto; flex: none; display: flex; visibility: hidden; }
+#session-grid .sg-row-head:hover .sg-row-tools,
+#session-grid .sg-row-tools:focus-within { visibility: visible; }
+#session-grid .sg-row-tools button {
+  background: none; border: 0; padding: 0 3px; cursor: pointer;
+  color: #6e7681; font-size: 11px;
 }
-#session-grid .sg-row-head:hover :is(.sg-row-edit, .sg-row-remove),
-#session-grid .sg-row-head :is(.sg-row-edit, .sg-row-remove):focus-visible { display: block; }
-#session-grid .sg-row-edit:hover { color: #58a6ff; }
-#session-grid .sg-row-remove:hover { color: #ff7b72; }
-#session-grid .sg-row-remove.disabled, #session-grid .sg-row-remove.disabled:hover {
+#session-grid .sg-row-tools button:hover { color: #58a6ff; }
+#session-grid .sg-row-default {
+  flex: none; padding: 0 5px; border-radius: 3px; font-size: 10px;
+  color: #d29922; box-shadow: inset 0 0 0 1px #5a4a1f;
+}
+#session-grid .sg-organize {
+  flex: none; padding: 1px 6px; border-radius: 4px; cursor: pointer; font-size: 10px;
+  color: #c9d1d9; background: #243247; border: 1px solid #385273;
+}
+#session-grid .sg-organize:hover { color: #fff; border-color: #58a6ff; }
+#session-grid .sg-organize.disabled { color: #545d68; background: none; border-color: #30363d; cursor: not-allowed; }
+#session-grid .sg-row-rule {
+  min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  color: #7d8590; font-size: 10px;
+}
+#session-grid .sg-rule-edit {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 4px 6px;
+  margin: 0 0 4px; padding: 5px 6px; border: 1px solid #30363d; border-radius: 4px;
+  background: #11151b; font-size: 11px; color: #8b949e;
+}
+#session-grid .sg-rule-edit label { display: flex; align-items: center; gap: 4px; min-width: 0; flex: 1 1 100%; }
+#session-grid .sg-rule-edit label span { flex: none; width: 64px; }
+#session-grid .sg-rule-edit select {
+  flex: 1; min-width: 0; font: inherit; color: #c9d1d9; background: #0d1117;
+  border: 1px solid #30363d; border-radius: 3px; padding: 1px 3px;
+}
+#session-grid .sg-rule-edit button {
+  font: inherit; padding: 1px 8px; border-radius: 3px; cursor: pointer;
+  color: #c9d1d9; background: #1d2128; border: 1px solid #30363d;
+}
+#session-grid .sg-rule-edit .sg-rule-save { background: #243247; border-color: #385273; }
+#session-grid .sg-row-tools .sg-row-remove:hover { color: #ff7b72; }
+#session-grid .sg-row-tools .sg-row-remove.disabled,
+#session-grid .sg-row-tools .sg-row-remove.disabled:hover {
   color: #444c56; cursor: not-allowed;
 }
 #session-grid .sg-rename {
   width: 100%; min-width: 0; padding: 2px 4px; font: inherit; color: #e6edf3;
   background: #0d1117; border: 1px solid #58a6ff; border-radius: 3px;
 }
-#session-grid .sg-ruler { position: sticky; top: -4px; z-index: 2; background: #14161a; }
-#session-grid .sg-ruler .sg-row-head { height: 14px; }
-#session-grid .sg-col-num {
-  color: #545d68; font-size: 10px; text-align: center; font-variant-numeric: tabular-nums;
+#session-grid .sg-cells {
+  display: grid; gap: 3px;
+  grid-template-columns: repeat(var(--sg-per-line, 4), minmax(0, 1fr));
+}
+#session-grid .sg-num {
+  position: absolute; right: 4px; top: 2px; color: #545d68; font-size: 9px;
+  font-style: normal; font-variant-numeric: tabular-nums;
 }
 #session-grid .sg-cell {
-  position: relative; height: 36px; min-width: 0; padding: 3px 5px 3px 14px;
+  position: relative; height: 36px; min-width: 0; padding: 3px 14px 3px 14px;
   border: 1px solid #262c35; border-radius: 4px; background: #1a1e24;
   display: flex; flex-direction: column; justify-content: center; cursor: pointer;
   overflow: hidden; white-space: nowrap;
@@ -192,6 +239,7 @@ option:disabled { color: #6b7280; }
   position: absolute; left: 5px; top: 8px; width: 6px; height: 6px; border-radius: 50%;
 }
 #session-grid .sg-name { color: #d8dbe0; overflow: hidden; text-overflow: ellipsis; }
+#session-grid .sg-cell.absent .sg-name { color: inherit; }
 #session-grid .sg-sub { color: #7d8590; font-size: 10px; overflow: hidden; text-overflow: ellipsis; }
 #session-grid .sg-sub:empty { display: none; }
 #session-grid .sg-add-row {
