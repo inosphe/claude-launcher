@@ -654,7 +654,12 @@ function setBadge(total) {
   }
   fab.classList.toggle("operator-fab-alert", !!total);
 }
+/* While the Operator is on screen everything in it is in front of the user,
+   so each badge poll marks it seen again: a seen that failed once (a daemon
+   without the route, a stale cookie) is retried, and an ask that arrives
+   while the page is open does not pile up on the badge. */
 async function refreshBadge() {
+  if (pageOpen || modal.open) return markSeen();
   try { setBadge((await request("api/operator/pending")).total); } catch {}
 }
 /* Opening (and leaving) the Operator is taking notice of what waits there:

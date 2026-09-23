@@ -185,6 +185,8 @@ check("the route opens the page", app.includes('case "operator": showView("opera
 check("leaving the page stops its poll", app.includes('if (r.page !== "operator") globalThis.OperatorPanel?.stop();'), true);
 check("the view is registered", app.includes('operator: "operator-view",'), true);
 check("the view exists", html.includes('<section id="operator-view"'), true);
+check("while the page or the modal is open, every badge poll marks it seen again",
+      src.includes("if (pageOpen || modal.open) return markSeen();"), true);
 check("the nav entry sits next to Observer and carries the badge",
       /data-page="observer">[^\n]*\n\s*<a href="#\/operator" data-page="operator">[^\n]*id="operator-nav-badge"/.test(html), true);
 check("script and stylesheet are loaded",
