@@ -7075,10 +7075,15 @@ function syncNewModelOptions(f, harnessName, capabilities, parent = null) {
     f._modelOriginal = inherited;
     f._modelFor = key;
     f._modelLabelKey = labelKey;
+    f._modelHarness = harnessName;
+    // A rebuilt row is back on the parent's model; the remembered pick for
+    // this parent profile is asked again (applySpawnModelRecall).
+    f._modelRecallPending = !!parent;
   } else if (f._modelLabelKey !== labelKey) {
     relabelModelOptions(f.model, choices, ids);
     f._modelLabelKey = labelKey;
   }
+  if (parent) applySpawnModelRecall(f);
   const row = $("new-model-row");
   if (row) row.classList.toggle("hidden", !choices.length);
   if (f.effort) {
@@ -8992,6 +8997,13 @@ $("new-session").addEventListener("submit", async (e) => {
       // a "no worktree" the policy picked for them.
       worktree_mode: worktreeUsable ? worktreeMode : spawnRecall().worktree_mode,
     });
+    // A child's Model row, under its parent's profile — only when the row
+    // was the operator's to answer; a greyed row holds the parent's model,
+    // which is nobody's pick.
+    if (parent && f.model && !f.model.disabled && f._modelHarness &&
+        (f.model.options || []).length > 1) {
+      saveSpawnModelRecall(parent, f._modelHarness, f.model.value);
+    }
     const info = await resp.json();
     // The spawn endpoint wraps the child (it also reports the parent and what
     // the onboarding did); the create one answers with the session itself.
@@ -24538,6 +24550,52 @@ function saveSpawnRecall(picks) {
   try { localStorage.setItem(SPAWN_RECALL_KEY, JSON.stringify(keep)); } catch {}
 }
 
+/* The spawn tab's Model row, remembered per PARENT PROFILE. The row starts
+   on the parent's own model (syncNewModelOptions), so without this every
+   child of a parent launched on `sonnet` opened on `sonnet` again however
+   often the operator picked something else. The answer is kept per parent
+   profile because that is what decides which backend the aliases reach, and
+   per child harness because the choices are the harness's (`sonnet` is
+   nothing to Codex). "" is an answer too: "(harness default)", picked. */
+const SPAWN_MODEL_KEY = `claunch_spawn_model:${BASE}`;
+
+function spawnModelRecallKey(parent, harness) {
+  const profile = baseProfileName(String((parent || {}).profile || ""));
+  return profile && harness ? `${profile}:${harness}` : "";
+}
+
+function readSpawnModelRecall() {
+  try {
+    const all = JSON.parse(localStorage.getItem(SPAWN_MODEL_KEY) || "{}");
+    return all && typeof all === "object" ? all : {};
+  } catch { return {}; }
+}
+
+function saveSpawnModelRecall(parent, harness, model) {
+  const key = spawnModelRecallKey(parent, harness);
+  if (!key) return;
+  const all = readSpawnModelRecall();
+  all[key] = String(model || "");
+  try { localStorage.setItem(SPAWN_MODEL_KEY, JSON.stringify(all)); } catch {}
+}
+
+/* Put the remembered model on the row, once per opening (or per rebuild of
+   the row), and only once the row is the operator's to answer: the policy
+   report that opens it arrives after the box is drawn, so a pending recall
+   waits for the sync that finds the row open rather than writing onto a
+   greyed one. A value the harness no longer offers is not restored. */
+function applySpawnModelRecall(f) {
+  const parent = spawnParent();
+  if (!parent || !f.model || !f._modelRecallPending || f.model.disabled) return;
+  f._modelRecallPending = false;
+  const all = readSpawnModelRecall();
+  const key = spawnModelRecallKey(parent, f._modelHarness);
+  if (!key || !Object.prototype.hasOwnProperty.call(all, key)) return;
+  const want = String(all[key] || "");
+  if (![...(f.model.options || [])].some((o) => o.value === want)) return;
+  f.model.value = want;
+}
+
 /* One workflow the daemon offered, normalized — a bare name (an older
    daemon) reads as a workflow that volunteers for nobody. */
 function spawnWorkflowEntry(raw) {
@@ -24958,6 +25016,11 @@ function applySessionModalRecall(f) {
     (re.worktree_mode && f.worktree_mode && !f.worktree_mode.value)
       ? re.worktree_mode : "";
   if (pendingWorktreeMode) syncNewWorktree();
+  // The Model row's own recall, keyed by the parent's profile rather than
+  // held in the record above. A fresh opening asks it again even when the
+  // row was not rebuilt, since the close put back what the page held.
+  f._modelRecallPending = true;
+  applySpawnModelRecall(f);
 }
 
 /* ---- the peers a child is wired to on arrival -------------------------
@@ -25147,6 +25210,10 @@ function applySessionParentChange() {
   // not carry across it (syncNewBorrowOptions).
   const form = $("new-session");
   if (form && form.borrow) form.borrow._borrowTouched = false;
+  // A parent picked again is asked its Model recall again: the row is only
+  // rebuilt when its key moves, and coming back to the same parent does not
+  // move it (applySpawnModelRecall runs from syncSpawnMode below).
+  if (form) form._modelRecallPending = true;
   newWorktreeFor = null;
   refreshNewWorktree();
   syncSpawnMode();

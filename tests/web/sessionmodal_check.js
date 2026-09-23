@@ -293,6 +293,7 @@ function spawnParent() { return state.parent(); }
 function spawnRecall() { return state.recall; }
 function connectCandidate(m) { return state.candidate(m); }
 function renderRoleStance() {}
+function applySpawnModelRecall() { state.calls.push("model-recall"); }
 function syncNewWorktree() { state.calls.push("worktree-sync"); }
 function syncSpawnMode() { state.calls.push("spawn-mode"); }
 function refreshSpawnPolicy() { state.calls.push("policy"); }
