@@ -14,11 +14,16 @@ What has to hold:
     sessions only: a paused one is named apart and a killed one not at all;
   - each session's progress (status-check answers, board issue) reaches the
     poll as a change once, and the panel shows it;
-  - the workflow and the role stance say the same thing about the tools.
+  - the workflow and the role stance say the same thing about the tools;
+  - the observation mode switches while the operator runs (feed entry, one
+    nudge), and in transcript mode operator_transcripts hands the bot each
+    running session's new conversation records from a daemon-held cursor,
+    starting from the last few, clipped and bounded.
 """
 from __future__ import annotations
 
 import asyncio
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -27,7 +32,7 @@ from aiohttp.test_utils import TestClient, TestServer
 
 from claude_launcher import operator_mcp
 from claude_launcher.cflow import model, state as state_mod
-from claude_launcher.daemon import mesh_roles, operator_bot
+from claude_launcher.daemon import mesh_roles, operator_bot, operator_transcript, transcript_view
 
 
 class FakeSession:
@@ -47,9 +52,12 @@ class FakeSession:
 class FakeObserver:
     def __init__(self):
         self.rows = {}
+        self.asked = []
 
-    def snapshot(self):
-        return {"sessions": [{"name": n, **row} for n, row in self.rows.items()]}
+    def snapshot(self, names=None):
+        self.asked.append(None if names is None else sorted(names))
+        return {"sessions": [{"name": n, **row} for n, row in self.rows.items()
+                             if names is None or n in names]}
 
 
 @pytest.fixture
@@ -202,14 +210,53 @@ def test_paused_and_exited_sessions_raise_no_attention(world):
     first = asyncio.run(world.ops.poll("op"))
     assert first["attention"] == []
     assert first["paused"] == [{"session": "w1", "paused_at": "2026-09-23T01:00:00+00:00"}]
-    # the events still arrive, marked with their category and never as needing action
+    # the paused one's events still arrive, marked and never as needing
+    # action; the killed one's history is not read at all
     assert {(e["session"], e["category"], e["needs_action"]) for e in first["events"]} == {
-        ("w1", "paused", False), ("w2", "killed", False)}
+        ("w1", "paused", False)}
+    assert {s["name"] for s in first["sessions"]} == {"w1"}
+    assert world.observer.asked and all(a == ["w1"] for a in world.observer.asked)
     again = asyncio.run(world.ops.poll("op", first["cursor"]))
     assert again["attention"] == []
     # the panel lists the paused one apart, with no questions counted; the killed one not at all
     rows = world.ops.view("default")["sessions"]
     assert [(r["name"], r["category"], r["questions"]) for r in rows] == [("w1", "paused", 0)]
+
+
+def test_killed_and_archived_sessions_stay_out_of_the_poll_and_end_once(world):
+    # w2 is running at first and then killed: its end is named once, and from
+    # then on neither its events nor its row reach the poll or the snapshot
+    world.observer.rows = {"w2": {"events": [
+        {"id": "e1", "at": "2026-09-23T01:00:00+00:00", "kind": "commit", "text": "commit abc"}]}}
+    first = asyncio.run(world.ops.poll("op"))
+    assert first["ended"] == [] and {s["name"] for s in first["sessions"]} == {"w1", "w2"}
+    world.sessions["w2"].exited = True
+    world.observer.rows["w2"]["events"].append(
+        {"id": "e2", "at": "2026-09-23T01:10:00+00:00", "kind": "exit", "text": "gone"})
+    world.observer.asked.clear()
+    second = asyncio.run(world.ops.poll("op", first["cursor"]))
+    assert second["ended"] == ["w2"]
+    assert second["events"] == [] and {s["name"] for s in second["sessions"]} == {"w1"}
+    assert world.observer.asked == [["w1"]]
+    assert asyncio.run(world.ops.poll("op", first["cursor"]))["ended"] == []  # said once
+    # an archived session is out the same way
+    world.sessions["w1"].exited = True
+    world.sessions["w1"].archived_at = "2026-09-23T02:00:00+00:00"
+    third = asyncio.run(world.ops.poll("op"))
+    assert third["ended"] == ["w1"] and third["sessions"] == []
+
+
+def test_a_first_poll_starts_at_the_latest_events(world):
+    many = [{"id": f"e{i}", "at": f"2026-09-23T{i // 60:02d}:{i % 60:02d}:00+00:00", "kind": "action",
+             "text": f"event {i}"} for i in range(operator_bot.POLL_LIMIT + 20)]
+    world.observer.rows = {"w1": {"events": many}}
+    first = asyncio.run(world.ops.poll("op"))
+    assert first["more"] is False
+    assert [e["text"] for e in first["events"]] == [e["text"] for e in many[-operator_bot.POLL_LIMIT:]]
+    assert first["cursor"] == many[-1]["at"]
+    # with a cursor, paging forward is unchanged
+    paged = asyncio.run(world.ops.poll("op", many[0]["at"]))
+    assert paged["more"] is True and paged["events"][0]["text"] == "event 1"
 
 
 def test_poll_reports_progress_changes_once(world):
@@ -360,7 +407,8 @@ def test_start_route_binds_one_operator_per_project(world, monkeypatch):
 
 def test_mcp_tools_and_workflow_and_stance_agree():
     names = {t["name"] for t in operator_mcp.TOOLS}
-    assert names == {"operator_poll", "operator_post", "operator_ask", "operator_inbox", "operator_dispatch"}
+    assert names == {"operator_poll", "operator_post", "operator_ask", "operator_inbox", "operator_dispatch",
+                     "operator_transcripts"}
     wf = model.load(dict(state_mod.bundled_workflows())["operator"])
     assert wf.recur_auto and not wf.warnings and not wf.deprecations
     assert wf.steps["watch"].next == "wait"
@@ -403,3 +451,232 @@ def test_work_reads_checks_and_the_session_s_open_issue():
     # no board: the checks still arrive, the issue is unknown
     out = asyncio.run(api._operator_work({}, [session]))
     assert out["w1"]["issue"] is None and out["w1"]["checks"]
+
+
+def test_poll_answers_without_a_board_or_gates_that_do_not_answer_in_time(world, monkeypatch):
+    # 2026-09-23: polls waited behind the board lock past the client's 30s
+    # timeout while the restarted daemon swept exited sessions' issues
+    monkeypatch.setattr(operator_bot, "READ_TIMEOUT", 0.05)
+
+    async def slow_work(sessions):
+        await asyncio.sleep(5)
+
+    def slow_gates(sessions):
+        import time
+        time.sleep(0.3)
+        return [{"session": "w1", "step_id": "late"}]
+
+    world.ops.work, world.ops.gates = slow_work, slow_gates
+    out = asyncio.run(world.ops.poll("op"))
+    assert out["degraded"] == ["gates", "board"]
+    assert not [a for a in out["attention"] if a["kind"] == "cflow_gate"]
+    world.ops.work, world.ops.gates = None, lambda members: []
+    assert asyncio.run(world.ops.poll("op"))["degraded"] == []
+
+
+def test_a_restart_is_written_once_per_boot_and_the_next_poll_carries_it(world):
+    previous = {"pid": 7, "started_at": "2026-09-23T12:37:52+00:00"}
+    current = {"pid": 8, "started_at": "2026-09-23T13:52:08+00:00", "requested": True,
+               "requested_by": ["s469"], "requested_at": "2026-09-23T13:51:29+00:00", "requested_via": "cli"}
+    (entry,) = world.ops.announce_boot(current, previous)
+    assert entry["kind"] == "system" and entry["event"] == "daemon_restart"
+    assert "데몬이 재시작되었습니다" in entry["text"] and "pid 7" in entry["text"] and "s469" in entry["text"]
+    assert entry["boot"]["previous_started_at"] == previous["started_at"]
+    assert world.ops.announce_boot(current, previous) == []  # once per boot
+    # a project without an operator gets nothing
+    world.ops.state("other")
+    world.ops.save("other")
+    assert world.ops.announce_boot({**current, "started_at": "2026-09-23T14:00:00+00:00"}, current)[0]["id"] != entry["id"]
+    assert all(e.get("event") != "daemon_restart" for e in world.ops.state("other")["feed"])
+    first = asyncio.run(world.ops.poll("op"))
+    assert first["restart"]["event"] == "daemon_restart"
+    assert asyncio.run(world.ops.poll("op", first["cursor"]))["restart"] is None
+    # a boot nothing asked for says so, and guesses no cause
+    text = operator_bot.restart_text({"started_at": "2026-09-23T15:00:00+00:00"}, current)
+    assert "재시작 요청 기록 없음" in text and "원인 미상" in text
+
+
+def test_watch_boot_waits_for_this_boot_in_the_ledger(world, monkeypatch):
+    from claude_launcher.daemon import restart_notice, runtime_state
+    ledger = {"boots": [{"started_at": "a"}]}
+    monkeypatch.setattr(runtime_state, "read_daemon_json", lambda: {"started_at": "b"})
+    monkeypatch.setattr(restart_notice, "read_ledger", lambda: ledger)
+
+    async def later():
+        await asyncio.sleep(0.02)
+        ledger["boots"].append({"started_at": "b", "requested": False})
+
+    async def run():
+        task = asyncio.create_task(later())
+        out = await world.ops.watch_boot(attempts=50, delay=0.01)
+        await task
+        return out
+
+    (entry,) = asyncio.run(run())
+    assert entry["boot"] == {"started_at": "b", "previous_started_at": "a", "requested": False,
+                             "requested_by": [], "requested_at": None}
+
+
+def test_a_restart_request_leaves_when_and_how_it_was_asked_in_the_boot_record():
+    from claude_launcher.daemon import restart_notice
+    restart_notice.record_request(via="cli", session="s469", daemon={"pid": 1, "started_at": "x"})
+    restart_notice.note_boot(pid=2, started_at="y")
+    boot = restart_notice.read_ledger()["boots"][-1]
+    assert boot["requested"] and boot["requested_at"] and boot["requested_via"] == "cli"
+
+
+def test_mcp_poll_reports_the_recovery_after_failures(tmp_path, monkeypatch):
+    monkeypatch.setenv("CLAUNCH_SESSION", "op")
+    monkeypatch.setenv("CLAUNCH_SCRATCH", str(tmp_path))
+    from claude_launcher import daemon_client
+    up = {"ok": False}
+
+    class Client:
+        def get(self, path):
+            return {"cursor": "c"}
+
+    monkeypatch.setattr(daemon_client, "connect_with_diagnosis",
+                        lambda **kw: (Client(), {}) if up["ok"] else (None, {}))
+    monkeypatch.setattr(daemon_client, "unreachable_reason", lambda why: "timed out")
+    for _ in range(2):
+        with pytest.raises(operator_mcp.OperatorMcpError):
+            operator_mcp.call_tool("operator_poll", {"since": "s"})
+    up["ok"] = True
+    out = operator_mcp.call_tool("operator_poll", {"since": "s"})
+    assert out["cursor"] == "c"
+    assert out["recovered"]["failures"] == 2 and out["recovered"]["last_error"] == "timed out"
+    assert out["recovered"]["first_failed_at"] <= out["recovered"]["recovered_at"]
+    assert "recovered" not in operator_mcp.call_tool("operator_poll", {})  # said once
+
+
+def test_only_gates_a_person_settles_reach_the_operator():
+    from claude_launcher.daemon import api
+    kind = api._operator_gate_kind
+    assert kind({"status": "waiting_approval"}) == "approval"
+    assert kind({"status": "waiting_goto"}) == "goto"
+    assert kind({"status": "waiting_selection"}) == "selection"
+    # a timer, a checklist, a window and a question still with an agent wait on no one here
+    for status in ("waiting_timer", "waiting_checklist", "waiting_window", "step", "select"):
+        assert kind({"status": status}) == "", status
+    assert kind({"status": "waiting_answer", "ask": {"asked": [{"handle": "s1"}]}}) == ""
+    # one that reached nobody is the user's: a branch by its options, else an approval
+    assert kind({"status": "waiting_answer", "ask": {"asked": [], "kind": "branch",
+                                                     "options": [{"name": "pass"}]}}) == "selection"
+    assert kind({"status": "waiting_answer", "ask": {"asked": []}}) == "approval"
+    assert api._operator_gate_options({"options": [{"name": "a", "description": "x"}, {"bad": 1}]}) == [
+        {"name": "a", "description": "x"}]
+
+
+def _conversation(path, turns):
+    with path.open("a", encoding="utf-8") as fh:
+        for role, content in turns:
+            fh.write(json.dumps({"type": role, "timestamp": "2026-09-23T00:00:00Z",
+                                 "message": {"role": role, "content": content}}) + "\n")
+
+
+@pytest.fixture
+def talk(world, tmp_path, monkeypatch):
+    files = {n: tmp_path / f"{n}.jsonl" for n in ("w1", "w2")}
+    for f in files.values():
+        f.touch()
+    monkeypatch.setattr(transcript_view, "source_of", lambda sdef, **kw: files.get(sdef.name))
+    monkeypatch.setattr(transcript_view.paths, "session_dir", lambda name: tmp_path / "sessions" / name)
+    for n in files:
+        (tmp_path / "sessions" / n).mkdir(parents=True)
+    return files
+
+
+def test_mode_switches_while_the_operator_runs(world):
+    assert world.ops.mode("default") == "events"
+    got = asyncio.run(world.ops.set_mode("default", "transcript"))
+    assert got["changed"] and got["nudge"] == "sent"
+    assert world.ops.mode("default") == "transcript"
+    assert world.sessions["op"].sent[-1] == operator_transcript.MODE_NUDGE.format(mode="transcript")
+    assert world.ops.state("default")["feed"][-1]["text"] == "관찰 모드: transcript"
+    # the same mode again changes nothing and types nothing
+    sent = len(world.sessions["op"].sent)
+    assert not asyncio.run(world.ops.set_mode("default", "transcript"))["changed"]
+    assert len(world.sessions["op"].sent) == sent
+    with pytest.raises(ValueError):
+        asyncio.run(world.ops.set_mode("default", "screen"))
+    # the mode survives a daemon restart
+    assert operator_bot.Operators(world.root, world.ops.manager).mode("default") == "transcript"
+
+
+def test_transcripts_read_new_records_from_a_daemon_held_cursor(world, talk):
+    _conversation(talk["w1"], [("user", f"질문 {i}") for i in range(10)])
+    _conversation(talk["w2"], [("assistant", [{"type": "thinking", "thinking": "hidden"},
+                                              {"type": "text", "text": "done"}])])
+    # events mode answers the mode and nothing else
+    assert asyncio.run(world.ops.transcripts("op")) == {
+        "project": "default", "mode": "events", "transcripts": [], "more": False}
+    with pytest.raises(web.HTTPForbidden):
+        asyncio.run(world.ops.transcripts("w1"))
+    asyncio.run(world.ops.set_mode("default", "transcript"))
+    first = asyncio.run(world.ops.transcripts("op"))
+    rows = {r["session"]: r for r in first["transcripts"]}
+    # a session seen first starts from its last BASELINE records
+    assert [r["text"] for r in rows["w1"]["records"]] == [f"질문 {i}" for i in range(4, 10)]
+    assert rows["w2"]["records"][0]["text"] == "done"  # thinking left out
+    assert asyncio.run(world.ops.transcripts("op"))["transcripts"] == []  # nothing new
+    _conversation(talk["w1"], [("assistant", [
+        {"type": "tool_use", "name": "Bash", "id": "t1", "input": {"command": "x" * 500}}]),
+        ("user", [{"type": "tool_result", "tool_use_id": "t1", "is_error": True, "content": "boom"}])])
+    rows = asyncio.run(world.ops.transcripts("op"))["transcripts"]
+    assert [r["session"] for r in rows] == ["w1"]
+    lines = [r["text"] for r in rows[0]["records"]]
+    assert lines[0].startswith("[tool Bash] ") and len(lines[0]) < 260
+    assert lines[1] == "[tool error] boom"
+    # switching into transcript mode again starts from the tail again
+    asyncio.run(world.ops.set_mode("default", "events"))
+    asyncio.run(world.ops.set_mode("default", "transcript"))
+    assert len({r["session"]: r for r in asyncio.run(world.ops.transcripts("op"))["transcripts"]}["w1"]["records"]) == 6
+
+
+def test_transcripts_skip_stopped_sessions_and_bound_each_poll(world, talk, monkeypatch):
+    world.sessions["w2"].exited = True
+    _conversation(talk["w1"], [("user", "a" * 900) for _ in range(40)])
+    _conversation(talk["w2"], [("user", "gone")])
+    asyncio.run(world.ops.set_mode("default", "transcript"))
+    world.ops.state("default")["transcripts"] = {"w1": 0}
+    monkeypatch.setattr(operator_transcript, "BUDGET", 5000)
+    got = asyncio.run(world.ops.transcripts("op"))
+    assert [r["session"] for r in got["transcripts"]] == ["w1"]  # w2 is not running
+    assert len(got["transcripts"][0]["records"]) == 5 and got["more"]
+    assert world.ops.state("default")["transcripts"]["w1"] == 5
+    # a long prose record is clipped, with the length it left out
+    _conversation(talk["w1"], [("user", "b" * 4000)])
+    world.ops.state("default")["transcripts"]["w1"] = 40
+    text = asyncio.run(world.ops.transcripts("op"))["transcripts"][0]["records"][0]["text"]
+    assert text.endswith("… (+2500)")
+
+
+def test_mode_route_and_start_mode(world, monkeypatch):
+    monkeypatch.setattr(operator_bot.paths, "daemon_dir", lambda: world.root)
+    monkeypatch.setattr(operator_bot.projects, "require", lambda name: SimpleNamespace(name=name))
+    created = []
+
+    async def run():
+        client = TestClient(TestServer(_app(world, created)))
+        await client.start_server()
+        try:
+            resp = await client.post("/api/operator/mode", json={"project": "default", "mode": "nope"})
+            assert resp.status == 400
+            resp = await client.post("/api/operator/mode", json={"project": "default", "mode": "transcript"})
+            assert (await resp.json())["mode"] == "transcript"
+            view = await (await client.get("/api/operator?project=default")).json()
+            assert view["mode"] == "transcript"
+            resp = await client.get("/api/operator/agent/op/transcripts")
+            assert (await resp.json())["mode"] == "transcript"
+            resp = await client.post("/api/operator/start",
+                                     json={"project": "other", "profile": "p", "mode": "bad"})
+            assert resp.status == 400 and not created
+            resp = await client.post("/api/operator/start",
+                                     json={"project": "other", "profile": "p", "mode": "transcript"})
+            assert resp.status == 201
+            view = await (await client.get("/api/operator?project=other")).json()
+            assert view["mode"] == "transcript"
+        finally:
+            await client.close()
+
+    asyncio.run(run())

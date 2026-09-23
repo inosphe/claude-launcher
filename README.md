@@ -3105,9 +3105,29 @@ session a card names moves by some other path — a gate approved on the
 dashboard, the session paused, a commit, a landing request, a merge — the
 daemon adds the change under that card: it appears in time order in the feed
 and again in the card's thread. The bot follows up on a card the same way
-(`reply_to` on `operator_post`/`operator_ask`). HTTP:
-`GET /api/operator?project=P` (feed, bound session, watched sessions),
-`GET /api/operator/pending`, `POST /api/operator/start {project, profile, model?, effort?}`,
+(`reply_to` on `operator_post`/`operator_ask`). A cflow gate waiting on you
+in one of the project's sessions — an approval, a branch to choose, a goto
+request — gets its buttons in the Operator panel and under the newest card
+that names that session; they press the same `/api/cflow/approve`, `select`
+and `goto/resolve` the run page does. When the daemon restarts, it writes the
+restart into every operator's feed itself (previous and new start, who asked
+and when, or that nothing did), and the bot's next poll carries it once. A
+poll never waits more than a few seconds for the board or the run states: it
+answers without them and names them in `degraded`. A poll that failed is
+remembered by the bot's MCP client, and the first one to succeed carries
+`recovered` (first failure, recovery time, count), which the bot reports as
+a reply to its outage card. The bot observes in one of two modes, chosen in
+the Operator header (or at start) and switched while it runs — the daemon
+records the switch in the feed and nudges the bot, no restart: `events` (the
+default, above) and `transcript`, a trial in which the bot reads the
+project's running sessions' conversations itself with `operator_transcripts`
+(new records since a cursor the daemon keeps per session, starting from each
+one's last few; prose clipped at 1500 characters, tool calls and results to
+one line, thinking left out). Those records replace the poll's routine events;
+its attention, progress and restart fields still count. HTTP:
+`GET /api/operator?project=P` (feed, bound session, watched sessions, mode),
+`GET /api/operator/pending`, `POST /api/operator/start {project, profile, model?, effort?, mode?}`,
+`POST /api/operator/mode {project, mode}`,
 `POST /api/operator/message?project=P {text}`,
 `POST /api/operator/asks/{id}/answer?project=P {decision?, text?}`; the bot's
 own calls live under `/api/operator/agent/{session}/…` and are refused to any

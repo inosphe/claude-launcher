@@ -2599,12 +2599,42 @@ _CFLOW_LIST_DROP = (
 )
 
 
+def _operator_gate_kind(entry: dict) -> str:
+    """Which press settles this run position, or '' when no person's does.
+
+    The same reading as the dashboard's rail (app.js ``sessCflowGated``): an
+    approval, a user-chosen branch, a goto request, or an agent question that
+    reached nobody. A timer, a checklist, a window and a question still with
+    another agent wait on no one here, so the operator does not raise them.
+    """
+    status = str(entry.get("status") or "")
+    if status == "waiting_approval":
+        return "approval"
+    if status == "waiting_selection":
+        return "selection"
+    if status == "waiting_goto":
+        return "goto"
+    if status == "waiting_answer" and not ((entry.get("ask") or {}).get("asked") or []):
+        return "selection" if _operator_gate_options(entry) else "approval"
+    return ""
+
+
+def _operator_gate_options(entry: dict) -> list:
+    ask = entry.get("ask") or {}
+    raw = ask.get("options") if ask.get("kind") == "branch" else entry.get("options")
+    return [{"name": str(o.get("name")), "description": o.get("description") or ""}
+            for o in raw or [] if isinstance(o, dict) and o.get("name")]
+
+
 def _operator_gates(sessions) -> list:
     """The cflow gates waiting on a person among ``sessions`` — what an
-    operator surfaces to its user. Read off the event loop by the caller.
+    operator surfaces to its user, and what its panel offers to press. Read
+    off the event loop by the caller.
 
     Only the live sessions' own runs, one slot each, keyed the same way the
-    rail binds a run to a session.
+    rail binds a run to a session. Each carries the ``cwd`` and ``scope`` the
+    dashboard's own presses post (``/api/cflow/approve``, ``select``,
+    ``goto/resolve``), so the Operator panel settles it the same way.
     """
     gates = []
     for session in sessions:
@@ -2616,12 +2646,19 @@ def _operator_gates(sessions) -> list:
             entry = _slim_cflow_payload(cflow_engine.status(cwd, scope=name))
         except (CflowError, WorkflowError, StateError, OSError):
             continue
-        status = str(entry.get("status") or "")
-        if not status.startswith("waiting"):
+        kind = _operator_gate_kind(entry)
+        if not kind:
             continue
-        gates.append({"session": name, "status": status,
+        ask = entry.get("ask") or {}
+        goto = entry.get("goto_request") or {}
+        gates.append({"session": name, "cwd": cwd, "scope": name, "kind": kind,
+                      "status": entry.get("status"), "run": entry.get("run"),
                       "workflow": entry.get("workflow"), "step_id": entry.get("step_id"),
                       "title": entry.get("title"), "reason": entry.get("reason"),
+                      "prompt": _clip(ask.get("prompt") or entry.get("prompt") or entry.get("gate"), 1200),
+                      "options": _operator_gate_options(entry) if kind == "selection" else [],
+                      "goto_request": ({"step": goto.get("step"), "from": goto.get("from"),
+                                        "reason": _clip(goto.get("reason"), 1200)} if goto else None),
                       "ask": entry.get("ask")})
     return gates
 

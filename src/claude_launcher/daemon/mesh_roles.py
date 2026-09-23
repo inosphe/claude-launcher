@@ -546,6 +546,14 @@ roles:
       request, merge) as the poll's progress changes arrive. A card whose
       sessions move by another path gets the change in its thread from the
       daemon; follow up on a card with reply_to rather than a new card.
+      Every round also call operator_transcripts: its mode says how you
+      observe. In events mode (the default) the poll's events are your
+      material; in transcript mode (a trial the user switches on from the
+      Operator tab) its conversation records replace the poll's routine
+      events, and the poll's attention, progress and restarts still count.
+      Say it when your watch breaks (a failed poll, at attention) and again
+      when it comes back (the poll's recovered, in reply to that card), and
+      never let a daemon restart pass unreported.
       Read the user's input with operator_inbox whenever you are nudged, and
       answer it in the feed. You may instruct another session of the project
       only by relaying what the user told you: operator_dispatch names the

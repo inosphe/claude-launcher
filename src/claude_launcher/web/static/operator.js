@@ -70,7 +70,22 @@ function startBody(projectName, choice, offered) {
   const body = {project: projectName, profile: offered.profile};
   if (choice.model && offered.models.includes(choice.model)) body.model = choice.model;
   if (choice.effort && offered.efforts.includes(choice.effort)) body.effort = choice.effort;
+  if (choice.mode && choice.mode !== "events") body.mode = choice.mode;
   return body;
+}
+/* How the operator observes (operator_transcript.MODES): the Observer's
+   events, or — the trial — the sessions' conversations read by the bot. */
+const MODES = [["events", "관찰: Observer 이벤트"], ["transcript", "관찰: transcript 직접 폴링 (시범)"]];
+function modeSelect(current, onpick) {
+  const select = document.createElement("select");
+  select.className = "operator-mode";
+  select.setAttribute("aria-label", "Operator 관찰 모드");
+  for (const [value, label] of MODES) {
+    const o = document.createElement("option"); o.value = value; o.textContent = label; select.append(o);
+  }
+  select.value = current || "events";
+  select.onchange = () => onpick(select.value);
+  return select;
 }
 /* The status dot's class for a session record, the session list's own
    `.dot` classes: idle / busy / starting / exited, and exited + paused for a
@@ -111,8 +126,39 @@ function threadsOf(feed) {
 /* The card a follow-up points back to, as one short line. */
 function cardLine(card) {
   const first = String(card?.text || "").split("\n").find(line => line.trim()) || "";
-  const line = first.replace(/^[#>\-\s]+/, "").replace(/[*_`]/g, "").trim();
+  const line = first.replace(/^[#>\-\s]+/, "").replace(/[*`]/g, "").trim();
   return line.length > 60 ? line.slice(0, 59) + "…" : line;
+}
+/* Updates the daemon wrote in one pass about one session read alike: when
+   several cards name that session, each card gets its own copy for its
+   thread, and in time order they are one line naming every card. */
+function sameUpdate(a, b) {
+  return !!a && !!b && a.kind === "update" && b.kind === "update" &&
+    a.session === b.session && a.text === b.text && a.at === b.at;
+}
+const GATE_KINDS = {approval: "승인 대기", selection: "선택 대기", goto: "이동 요청"};
+/* The presses that settle one waiting cflow gate: the dashboard's own
+   requests (app.js wfActions), with the run's cwd and scope from the
+   daemon's gate list. The bot never presses these; the user does. */
+function gateActions(gate) {
+  const at = {cwd: gate.cwd, scope: gate.scope};
+  const where = `${gate.session} · ${gate.step_id || "?"}`;
+  if (gate.kind === "goto") {
+    const step = (gate.goto_request || {}).step || "?";
+    return [
+      {label: `'${step}' 이동 승인`, cls: "operator-approve", path: "api/cflow/goto/resolve",
+       body: {...at, decision: "approve"}, confirm: `${where}: 런을 '${step}' 스텝으로 옮깁니까?`},
+      {label: "거절", cls: "operator-deny", path: "api/cflow/goto/resolve",
+       body: {...at, decision: "deny"}, reason: true},
+    ];
+  }
+  if (gate.kind === "selection") {
+    return (gate.options || []).map(o => ({
+      label: o.name, title: o.description || "", cls: "operator-choice", path: "api/cflow/select",
+      body: {...at, option: o.name}, confirm: `${where}: '${o.name}' 선택지를 고릅니까?`}));
+  }
+  return [{label: "승인", cls: "operator-approve", path: "api/cflow/approve", body: at,
+           confirm: `${where}: 게이트를 승인합니까?`}];
 }
 function operatorLabel(op) {
   if (!op) return "";
@@ -124,7 +170,7 @@ let project = "", data = null, projectNames = [], timer = null, badgeTimer = nul
 /* The Start row's choices. The row is rebuilt on every poll, so what the user
    picked lives here rather than in the elements. */
 let profileOptions = [], modelIds = {}, harnesses = {};
-const startChoice = {profile: "", model: "", effort: ""};
+const startChoice = {profile: "", model: "", effort: "", mode: "events"};
 const hosts = new Set();
 const drafts = new Map();          // ask id -> note text, so a poll never eats a half-typed note
 let composer = "";
@@ -215,6 +261,7 @@ function renderHead(h) {
   if (start.contains(document.activeElement)) return;  // a picker is open: do not rebuild under it
   start.replaceChildren();
   if (data && (!op || !op.running)) renderStart(start);
+  else if (op && op.running) start.append(modeSelect(data.mode, switchMode));
 }
 
 function renderStart(start) {
@@ -242,6 +289,7 @@ function renderStart(start) {
     start.append(picker("Operator 세션의 effort", ["", ...offered.efforts], startChoice.effort,
       v => v || "effort: 기본값", v => { startChoice.effort = v; }));
   }
+  start.append(modeSelect(startChoice.mode, v => { startChoice.mode = v; }));
   const go = node("button", "Operator 시작"); go.type = "button";
   go.disabled = !offered.profile;
   go.onclick = async () => {
@@ -251,6 +299,15 @@ function renderStart(start) {
     catch (err) { notice(err.message); } finally { go.disabled = false; }
   };
   start.append(go);
+}
+
+/* Switch the running operator's mode; the daemon records it in the feed and
+   nudges the bot, which applies it from its next poll. */
+async function switchMode(mode) {
+  try {
+    await request("api/operator/mode", {project: chosenProject(), mode});
+    await refresh();
+  } catch (err) { notice(err.message); await refresh(); }
 }
 
 /* The session record behind a label: the rail's list (every page keeps it
@@ -315,9 +372,25 @@ function renderFeed(h) {
   }
   const threads = threadsOf(feed);
   const byId = new Map(feed.map(e => [e.id, e]));
+  // A waiting gate's buttons go under the newest card that names its
+  // session, not under every card that ever did.
+  const gates = new Map((data?.gates || []).map(g => [g.session, g]));
+  const gateCard = new Map();
   for (const e of feed) {
-    if (e.parent) { list.append(renderFollowup(e, byId.get(e.parent))); continue; }
-    const item = node("li", null, `operator-item operator-${e.kind}` + (e.level ? ` operator-level-${e.level}` : ""));
+    if ((e.kind === "post" || e.kind === "ask") && !e.parent) for (const r of e.refs || []) if (gates.has(r)) gateCard.set(r, e.id);
+  }
+  let last = null;
+  for (const e of feed) {
+    if (e.parent) {
+      if (sameUpdate(last && last.entry, e)) { parentLink(last.item, byId.get(e.parent)); continue; }
+      const follow = renderFollowup(e, byId.get(e.parent));
+      last = {entry: e, item: follow};
+      list.append(follow);
+      continue;
+    }
+    last = null;
+    const item = node("li", null, `operator-item operator-${e.kind}` + (e.level ? ` operator-level-${e.level}` : "") +
+                      (e.event ? ` operator-event-${e.event}` : ""));
     item.dataset.id = e.id;
     const meta = node("div", null, "operator-meta");
     const who = e.role === "user" ? "나" : e.role === "system" ? "system" : "Operator";
@@ -343,6 +416,7 @@ function renderFeed(h) {
       item.append(refs);
     }
     if (e.kind === "ask") renderAsk(item, e);
+    for (const r of e.refs || []) if (gateCard.get(r) === e.id) item.append(renderGate(gates.get(r)));
     if (threads.has(e.id)) item.append(renderThread(threads.get(e.id)));
     list.append(item);
   }
@@ -356,22 +430,56 @@ function renderFollowup(e, card) {
   const meta = node("div", null, "operator-meta");
   meta.append(node("strong", e.role === "bot" ? "Operator" : "system"));
   const time = node("time", new Date(e.at).toLocaleTimeString()); time.dateTime = e.at; meta.append(time);
-  if (card) {
-    const back = node("a", `↳ ${cardLine(card) || "원래 카드"}`, "operator-parent");
-    back.href = "#";
-    back.onclick = ev => {
-      ev.preventDefault();
-      const target = item.parentElement?.querySelector(`li[data-id="${CSS.escape(card.id)}"]`);
-      if (!target) return;
-      target.scrollIntoView({block: "center"});
-      target.classList.add("operator-flash");
-      setTimeout(() => target.classList.remove("operator-flash"), 1600);
-    };
-    meta.append(back);
-  }
   item.append(meta, followupBody(e));
+  parentLink(item, card);
   if (e.kind === "ask") renderAsk(item, e);
   return item;
+}
+/* One more "↳ card" link on a follow-up line: scrolls to that card and marks it. */
+function parentLink(item, card) {
+  if (!card) return;
+  const back = node("a", `↳ ${cardLine(card) || "원래 카드"}`, "operator-parent");
+  back.href = "#";
+  back.onclick = ev => {
+    ev.preventDefault();
+    const target = item.parentElement?.querySelector(`li[data-id="${CSS.escape(card.id)}"]`);
+    if (!target) return;
+    target.scrollIntoView({block: "center"});
+    target.classList.add("operator-flash");
+    setTimeout(() => target.classList.remove("operator-flash"), 1600);
+  };
+  item.querySelector(".operator-meta").append(back);
+}
+/* A cflow gate waiting on the user, with the presses that settle it. */
+function renderGate(g) {
+  const box = node("div", null, "operator-gate");
+  const head = node("div", null, "operator-gate-head");
+  head.append(sessionLink(g.session), node("span", `${GATE_KINDS[g.kind] || g.kind} · ${g.step_id || "?"}`, "operator-badge operator-badge-waiting"));
+  box.append(head);
+  const goto = g.goto_request || {};
+  const text = g.kind === "goto" ? `'${goto.from || g.step_id}' → '${goto.step}': ${goto.reason || ""}` : (g.prompt || g.title || "");
+  if (text) box.append(node("p", text, "operator-gate-text"));
+  const actions = node("div", null, "operator-gate-actions");
+  const buttons = () => actions.querySelectorAll("button");
+  for (const a of gateActions(g)) {
+    const b = node("button", a.label, a.cls); b.type = "button";
+    if (a.title) b.title = a.title;
+    b.onclick = async () => {
+      if (a.confirm && !confirm(a.confirm)) return;
+      let body = a.body;
+      if (a.reason) {
+        const why = prompt("거절 사유(선택 — 에이전트가 읽습니다):", "");
+        if (why === null) return;
+        body = {...body, reason: why.trim() || undefined};
+      }
+      for (const x of buttons()) x.disabled = true;
+      try { await request(a.path, body); await refresh(); }
+      catch (err) { notice(err.message); for (const x of buttons()) x.disabled = false; }
+    };
+    actions.append(b);
+  }
+  box.append(actions);
+  return box;
 }
 function followupBody(e) {
   if (e.kind === "update") {
@@ -406,6 +514,13 @@ function renderSide(h) {
   const head = node("h2", `관찰 중인 세션 ${(data?.sessions || []).length - pausedCount}` + (pausedCount ? ` · 일시정지 ${pausedCount}` : ""));
   side.append(head);
   if (asks.length) side.append(node("p", `응답을 기다리는 질문 ${asks.length}건`, "operator-pending"));
+  const gates = data?.gates || [];
+  if (gates.length) {
+    side.append(node("h2", `승인을 기다리는 cflow 게이트 ${gates.length}`));
+    const box = node("div", null, "operator-gates");
+    for (const g of gates) box.append(renderGate(g));
+    side.append(box);
+  }
   const list = node("ul", null, "operator-sessions");
   for (const row of data?.sessions || []) {
     const item = node("li");
@@ -560,5 +675,5 @@ badgeTimer = setInterval(() => { if (document.visibilityState === "visible") ref
 
 return {open, stop, openModal, refresh,
         _test: {openAsks, freshUrgent, answerLine, deliveryLabel, sessionBadge, startChoices, startBody, dotClass, progressChips,
-                threadsOf, cardLine}};
+                threadsOf, cardLine, sameUpdate, gateActions}};
 })();

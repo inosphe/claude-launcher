@@ -109,3 +109,14 @@ body.operator-page .operator-fab { display: none; }
 .operator-thread time { color: #8b949e; font-size: 11px; }
 .operator-thread .operator-text p { margin: 2px 0; }
 .operator-flash { outline: 2px solid #58a6ff; outline-offset: 2px; }
+
+/* A daemon restart, written by the daemon itself (operator_bot.announce_boot). */
+.operator-event-daemon_restart { align-self: stretch; max-width: none; background: #2a2412; border: 1px solid #6e5a2a; color: #e3b341; font-size: 12px; padding: 6px 12px; }
+.operator-event-daemon_restart p { white-space: pre-line; margin: 2px 0; }
+/* A cflow gate waiting on the user, with its presses (operator.js renderGate). */
+.operator-gates { display: flex; flex-direction: column; gap: 8px; margin: 0 0 12px; }
+.operator-gate { margin-top: 8px; padding: 8px 10px; border: 1px solid #6e5a2a; border-radius: 8px; background: #1f1c14; }
+.operator-gates .operator-gate { margin-top: 0; }
+.operator-gate-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+.operator-gate-text { margin: 6px 0 0; font-size: 12px; color: #c9d1d9; white-space: pre-line; display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical; overflow: hidden; }
+.operator-gate-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }

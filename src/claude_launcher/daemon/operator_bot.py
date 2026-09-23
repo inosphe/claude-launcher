@@ -35,7 +35,7 @@ from datetime import datetime, timezone
 from aiohttp import web
 
 from .. import atomic, projects
-from . import paths, session_events
+from . import operator_transcript, paths, session_events
 from .session import CATEGORY_PAUSED, CATEGORY_RUNNING, session_category
 
 log = logging.getLogger(__name__)
@@ -104,6 +104,40 @@ TRACK_CARDS = 40
 #: Seconds between two follow-up reads of one project: the view polls every
 #: few seconds, and a board read per poll would be waste.
 TRACK_INTERVAL = 15.0
+#: Seconds a poll, the view or a follow-up read waits for the board or the
+#: run states before answering without them. The operator's MCP client gives
+#: up after 30s; a poll that waits behind a busy board lock past that is one
+#: the operator reads as the daemon being down (2026-09-23 22:52, s739: three
+#: failed polls while the daemon swept exited sessions' issues on restart).
+READ_TIMEOUT = 5.0
+
+
+def _local(stamp):
+    """An ISO stamp as this machine's local time, for a line a person reads."""
+    try:
+        return datetime.fromisoformat(stamp).astimezone().strftime("%m-%d %H:%M:%S")
+    except (TypeError, ValueError):
+        return stamp or "기록 없음"
+
+
+def restart_text(current, previous):
+    """The feed line for a daemon restart: when the new daemon came up, which
+    one it replaced, and whether anything on this machine asked for it (the
+    restart ledger, :mod:`.restart_notice`). A boot nothing asked for is said
+    as such; its cause is not recorded anywhere, so none is guessed."""
+    lines = [f"데몬이 재시작되었습니다. 새 데몬 기동: {_local(current.get('started_at'))}"]
+    if previous:
+        lines.append(f"이전 데몬 기동: {_local(previous.get('started_at'))} (pid {previous.get('pid')})")
+    if current.get("requested"):
+        who = ", ".join(current.get("requested_by") or []) or "사용자 셸 또는 웹 UI"
+        at = current.get("requested_at")
+        via = current.get("requested_via")
+        lines.append(f"재시작 요청: {who}" + (f", 요청 시각 {_local(at)}" if at else "")
+                     + (f" ({via})" if via else ""))
+    else:
+        lines.append("재시작 요청 기록 없음: 이전 데몬이 요청 없이 끝났습니다(원인 미상).")
+    lines.append("중단 구간의 세션 이벤트는 Operator가 이어서 읽습니다.")
+    return "\n".join(lines)
 
 
 def watch_of(category, gate, work):
@@ -243,6 +277,19 @@ class Operators:
         return [s for s in self.sessions()
                 if project_of(s) == project and s.sdef.name != me]
 
+    def watched(self, project):
+        """The members whose events and state the operator reads: running and
+        paused ones. A killed or archived session is gone; reading its
+        history on every poll only buries what is live under what is not."""
+        return [s for s in self.members(project)
+                if session_category(s) in (CATEGORY_RUNNING, CATEGORY_PAUSED)]
+
+    def snapshot_of(self, sessions):
+        """The Observer rows of ``sessions`` only."""
+        if not self.observer or not sessions:
+            return []
+        return self.observer.snapshot(names=[s.sdef.name for s in sessions])["sessions"]
+
     # -- view for the UI ---------------------------------------------------
     def pending(self, project):
         return sum(1 for e in self.state(project)["feed"]
@@ -254,13 +301,12 @@ class Operators:
         listed with its category and never counts its open questions: it is
         stopped on purpose, and nothing in it waits on the user until it is
         resumed."""
-        snapshot = {row["name"]: row for row in (self.observer.snapshot()["sessions"] if self.observer else [])}
+        shown = self.watched(project)
+        snapshot = {row["name"]: row for row in self.snapshot_of(shown)}
         work = work or {}
         rows = []
-        for session in self.members(project):
+        for session in shown:
             category = session_category(session)
-            if category not in (CATEGORY_RUNNING, CATEGORY_PAUSED):
-                continue
             name = session.sdef.name
             row = snapshot.get(name, {})
             open_questions = 0 if category == CATEGORY_PAUSED else sum(
@@ -274,16 +320,86 @@ class Operators:
         rows.sort(key=lambda r: (r["category"] == CATEGORY_PAUSED, -r["questions"], r["name"]))
         return rows
 
+    async def work_read(self, sessions):
+        """``(work, ok)``: ``self.work`` for ``sessions``, and whether it was
+        read. Not wired or nothing to read is ok; a board that fails or takes
+        longer than :data:`READ_TIMEOUT` is not, and gives nothing."""
+        if not self.work or not sessions:
+            return {}, True
+        try:
+            return (await asyncio.wait_for(self.work(sessions), READ_TIMEOUT)) or {}, True
+        except asyncio.TimeoutError:
+            log.info("operator: board read took over %.0fs; answered without it", READ_TIMEOUT)
+            return {}, False
+        except Exception:  # a board read failing must not take the panel down
+            log.debug("operator: work read failed", exc_info=True)
+            return {}, False
+
     async def work_of(self, sessions):
         """``self.work`` for ``sessions``, or nothing when it is not wired or
         the board cannot be read (the panel then shows no progress)."""
-        if not self.work or not sessions:
-            return {}
+        return (await self.work_read(sessions))[0]
+
+    async def gates_read(self, sessions):
+        """``(gates, ok)``: the cflow gates waiting on a person among
+        ``sessions``, read off the loop and bounded like :meth:`work_read`."""
+        if not self.gates or not sessions:
+            return [], True
         try:
-            return await self.work(sessions) or {}
-        except Exception:  # a board read failing must not take the panel down
-            log.debug("operator: work read failed", exc_info=True)
-            return {}
+            return (await asyncio.wait_for(asyncio.to_thread(self.gates, sessions), READ_TIMEOUT)) or [], True
+        except asyncio.TimeoutError:
+            log.info("operator: gate read took over %.0fs; answered without it", READ_TIMEOUT)
+            return [], False
+        except Exception:  # a run-state read failing must not stop the rest
+            log.debug("operator: gate read failed", exc_info=True)
+            return [], False
+
+    # -- daemon restarts ---------------------------------------------------
+    def announce_boot(self, current, previous):
+        """Write a restart entry into every project that has an operator,
+        once per boot: the daemon says it restarted itself rather than leave
+        it to the bot, which only sees that its calls failed for a while. The
+        next poll carries the entry once (``restart``). Returns the entries."""
+        started = (current or {}).get("started_at")
+        if not started:
+            return []
+        out = []
+        for path in sorted(self.root.glob("*.json")) if self.root.is_dir() else []:
+            try:
+                project = json.loads(path.read_text(encoding="utf-8")).get("project")
+            except (OSError, ValueError, AttributeError):
+                continue
+            if not isinstance(project, str):
+                continue
+            data = self.state(project)
+            if not data.get("session") or data.get("boot") == started:
+                continue
+            entry = self.append(project, {
+                "kind": "system", "role": "system", "event": "daemon_restart",
+                "text": restart_text(current, previous),
+                "boot": {"started_at": started, "previous_started_at": (previous or {}).get("started_at"),
+                         "requested": bool(current.get("requested")),
+                         "requested_by": current.get("requested_by") or [],
+                         "requested_at": current.get("requested_at")}})
+            data["boot"] = started
+            data["restart_unpolled"] = entry["id"]
+            self.save(project)
+            out.append(entry)
+        return out
+
+    async def watch_boot(self, *, attempts=60, delay=1.0):
+        """At startup: wait until this boot is in the restart ledger (it is
+        written just after the daemon starts listening), then announce it."""
+        from . import restart_notice, runtime_state
+
+        for _ in range(attempts):
+            started = (runtime_state.read_daemon_json() or {}).get("started_at")
+            boots = restart_notice.read_ledger().get("boots") or []
+            if started and boots and boots[-1].get("started_at") == started:
+                return self.announce_boot(boots[-1], boots[-2] if len(boots) > 1 else None)
+            await asyncio.sleep(delay)
+        log.info("operator: this boot never reached the restart ledger; no restart entry written")
+        return []
 
     async def track(self, project, *, force=False):
         """Follow the sessions each recent card names, and when one of them
@@ -309,12 +425,10 @@ class Operators:
         named = {r for card in cards for r in card["refs"]}
         category = {n: session_category(members[n]) if n in members else None for n in named}
         running = [members[n] for n in named if category[n] == CATEGORY_RUNNING]
-        try:
-            gates = await asyncio.to_thread(self.gates, running) if self.gates and running else []
-        except Exception:  # a run-state read failing must not stop the rest
-            log.debug("operator: gate read failed", exc_info=True)
+        gates, gates_ok = await self.gates_read(running)
+        if not gates_ok:
             gates = None
-        work = await self.work_of([members[n] for n in named if n in members])
+        work, _ = await self.work_read([members[n] for n in named if n in members])
         waiting = {g.get("session"): g.get("step_id") for g in gates or []}
         readings = {}
         for n in named:
@@ -344,7 +458,7 @@ class Operators:
             self.save(project)
         return entries
 
-    def view(self, project, work=None):
+    def view(self, project, work=None, gates=None):
         project = projects.normalize(project)
         data = self.state(project)
         op = self.operator_session(project)
@@ -359,7 +473,8 @@ class Operators:
         elif data.get("session"):
             operator = {"name": data["session"], "running": False, "status": "missing"}
         return {"project": project, "operator": operator, "feed": data["feed"][-200:],
-                "pending": self.pending(project), "sessions": self.panel(project, work)}
+                "pending": self.pending(project), "sessions": self.panel(project, work),
+                "gates": list(gates or [])}
 
     def pending_all(self):
         by_project = {p: self.pending(p) for p in projects.names()}
@@ -558,17 +673,80 @@ class Operators:
         return self.append(project, {"kind": "dispatch", "role": "bot", "target": target, "text": text,
                                      "on_behalf_of": basis["id"], "delivery": delivery})
 
+    # -- observation mode ----------------------------------------------------
+    def mode(self, project):
+        """How the operator observes: ``events`` (Observer events, the
+        default) or ``transcript`` (it reads the conversations itself, see
+        :mod:`operator_transcript`)."""
+        mode = self.state(project).get("mode")
+        return mode if mode in operator_transcript.MODES else operator_transcript.DEFAULT_MODE
+
+    async def set_mode(self, project, mode, *, nudge=True):
+        """Switch a project's operator to ``mode`` while it runs. Switching
+        into ``transcript`` drops the transcript cursors, so every session
+        starts again from its last few records. The feed records the switch
+        and the operator's terminal gets a one-line nudge."""
+        project = projects.normalize(project)
+        if mode not in operator_transcript.MODES:
+            raise ValueError("mode must be one of " + ", ".join(operator_transcript.MODES))
+        data = self.state(project)
+        if self.mode(project) == mode:
+            return {"project": project, "mode": mode, "changed": False}
+        data["mode"] = mode
+        if mode == "transcript":
+            data["transcripts"] = {}
+        entry = self.append(project, {"kind": "system", "role": "system",
+                                      "text": f"관찰 모드: {mode}"})
+        result = {"project": project, "mode": mode, "changed": True, "entry": entry["id"]}
+        session = self.operator_session(project)
+        if nudge and session is not None and not session.exited:
+            try:
+                sent = await asyncio.wait_for(
+                    session.deliver(operator_transcript.MODE_NUDGE.format(mode=mode)), timeout=20)
+                result["nudge"] = "sent" if sent else "pending"
+            except Exception:
+                log.warning("operator mode nudge failed for %s", project, exc_info=True)
+                result["nudge"] = "unknown"
+        else:
+            result["nudge"] = "no-operator"
+        return result
+
+    async def transcripts(self, name):
+        """What the operator reads in ``transcript`` mode: each running
+        session's new conversation records since the daemon-held cursor. In
+        ``events`` mode it answers the mode and nothing else, so the bot can
+        call it every round and branch on ``mode``."""
+        project = self.bound(name)
+        mode = self.mode(project)
+        if mode != "transcript":
+            return {"project": project, "mode": mode, "transcripts": [], "more": False}
+        running = [s for s in self.members(project) if session_category(s) == CATEGORY_RUNNING]
+        data = self.state(project)
+        cursors = {k: v for k, v in (data.get("transcripts") or {}).items()
+                   if isinstance(v, int)}
+        read = await asyncio.to_thread(operator_transcript.read_all, running, cursors)
+        data["transcripts"] = read["cursors"]
+        self.save(project)
+        return {"project": project, "mode": mode, "transcripts": read["transcripts"],
+                "more": read["more"]}
+
     # -- what the operator polls -------------------------------------------
     async def poll(self, name, since=None):
         project = self.bound(name)
-        members = {s.sdef.name: s for s in self.members(project)}
+        # Only running and paused sessions are read. A killed or archived one
+        # is gone: its history would fill every page of events, and its row
+        # is the most expensive part of the snapshot to build.
+        members = {s.sdef.name: s for s in self.watched(project)}
         category = {n: session_category(s) for n, s in members.items()}
         running = [s for n, s in members.items() if category[n] == CATEGORY_RUNNING]
         # The snapshot is read on the loop, as every Observer reader does; the
         # gates are run-state files, so they are read off it.
-        snapshot = self.observer.snapshot()["sessions"] if self.observer else []
-        gates = await asyncio.to_thread(self.gates, running) if self.gates else []
-        work = await self.work_of(running)
+        snapshot = self.snapshot_of(list(members.values()))
+        gates, gates_ok = await self.gates_read(running)
+        work, work_ok = await self.work_read(running)
+        # What this poll could not read in time: it answers without it rather
+        # than run into the client's timeout, and says so.
+        degraded = [what for what, ok in (("gates", gates_ok), ("board", work_ok)) if not ok]
         cutoff = session_events.timestamp(since) if since else None
         events, attention = [], []
         # A paused session is stopped on purpose and a killed or archived one
@@ -609,8 +787,16 @@ class Operators:
         for gate in gates:
             attention.append({"kind": "cflow_gate", **gate})
         events.sort(key=lambda e: session_events.timestamp(e["at"]))
-        more = len(events) > POLL_LIMIT
-        events = events[:POLL_LIMIT]
+        if since:
+            more = len(events) > POLL_LIMIT
+            events = events[:POLL_LIMIT]
+        else:
+            # A first poll starts at the present: paging from the oldest event
+            # of every session would spend the operator's turns on history,
+            # and a poll that never passes its cursor would read the same
+            # oldest page forever.
+            more = False
+            events = events[-POLL_LIMIT:]
         cursor = events[-1]["at"] if events else since
         # Progress (commit, tests, landing request, merge) is compared with
         # what the last poll saw rather than cut by the cursor: it is state,
@@ -630,11 +816,25 @@ class Operators:
         if work:
             self.save(project)
         await self.track(project)
+        restart = None
+        if data.get("restart_unpolled"):
+            restart = next((e for e in data["feed"] if e["id"] == data["restart_unpolled"]), None)
+            data.pop("restart_unpolled")
+            self.save(project)
         sessions = [{"name": n, "running": not s.exited, "category": category[n],
                      "status": s.info().get("status"), **progress_of(work.get(n))}
                     for n, s in members.items()]
+        # A session that was watched and is no longer (killed, archived,
+        # removed) is named once, so the operator can say it ended without
+        # the list of every ended session riding on each poll.
+        before = set(data.get("watched") or ())
+        ended = sorted(before - set(members))
+        if ended or before != set(members):
+            data["watched"] = sorted(members)
+            self.save(project)
         return {"project": project, "cursor": cursor, "more": more, "events": events,
                 "attention": attention, "paused": paused, "progress": progress,
+                "degraded": degraded, "restart": restart, "ended": ended,
                 "sessions": sessions, "unread_user_input": len(self.unread(project))}
 
 
@@ -647,6 +847,17 @@ def install(app, *, create=None, gates=None, work=None):
     ops = Operators(paths.daemon_dir(), app["manager"], app.get("observer"), gates, work)
     app["operators"] = ops
 
+    async def watch_boot(app):
+        ops.boot_task = asyncio.create_task(ops.watch_boot())
+
+    async def stop_boot_watch(app):
+        task = getattr(ops, "boot_task", None)
+        if task is not None:
+            task.cancel()
+
+    app.on_startup.append(watch_boot)
+    app.on_cleanup.append(stop_boot_watch)
+
     def fail(exc):
         return web.json_response({"error": str(exc)}, status=400)
 
@@ -654,7 +865,9 @@ def install(app, *, create=None, gates=None, work=None):
         project = projects.normalize(request.query.get("project") or projects.DEFAULT)
         shown = [s for s in ops.members(project) if session_category(s) in (CATEGORY_RUNNING, CATEGORY_PAUSED)]
         await ops.track(project)
-        return web.json_response(ops.view(project, await ops.work_of(shown)))
+        gates, _ = await ops.gates_read([s for s in shown if session_category(s) == CATEGORY_RUNNING])
+        return web.json_response({**ops.view(project, await ops.work_of(shown), gates),
+                                  "mode": ops.mode(project)})
 
     async def pending(request):
         return web.json_response(ops.pending_all())
@@ -674,6 +887,9 @@ def install(app, *, create=None, gates=None, work=None):
         profile = str(body.get("profile") or "").strip()
         if not profile:
             return fail("profile is required")
+        mode = body.get("mode") or operator_transcript.DEFAULT_MODE
+        if mode not in operator_transcript.MODES:
+            return fail("mode must be one of " + ", ".join(operator_transcript.MODES))
         mesh_mgr = request.app["mesh"]
         mesh = MESH_PREFIX + project
         try:
@@ -696,7 +912,20 @@ def install(app, *, create=None, gates=None, work=None):
         if status >= 300:
             return web.json_response(payload, status=status)
         ops.bind(project, payload["name"])
+        # Set before the bot's first poll, so no nudge: the opening turn has
+        # not started reading yet, and operator_transcripts answers the mode.
+        await ops.set_mode(project, mode, nudge=False)
         return web.json_response(payload, status=201)
+
+    async def mode(request):
+        body = await request.json()
+        if not isinstance(body, dict):
+            return fail("object required")
+        try:
+            project = projects.require(body.get("project") or projects.DEFAULT).name
+            return web.json_response(await ops.set_mode(project, body.get("mode")))
+        except (projects.ProjectError, ValueError) as exc:
+            return fail(exc)
 
     async def message(request):
         try:
@@ -731,6 +960,9 @@ def install(app, *, create=None, gates=None, work=None):
         name = request.match_info["name"]
         return web.json_response(await ops.poll(name, request.query.get("since") or None))
 
+    async def agent_transcripts(request):
+        return web.json_response(await ops.transcripts(request.match_info["name"]))
+
     async def agent_dispatch(request):
         try:
             return web.json_response(await ops.dispatch(request.match_info["name"], await request.json()))
@@ -740,11 +972,13 @@ def install(app, *, create=None, gates=None, work=None):
     app.router.add_get("/api/operator", view)
     app.router.add_get("/api/operator/pending", pending)
     app.router.add_post("/api/operator/start", start)
+    app.router.add_post("/api/operator/mode", mode)
     app.router.add_post("/api/operator/message", message)
     app.router.add_post("/api/operator/asks/{entry}/answer", answer)
     app.router.add_post("/api/operator/agent/{name}/post", agent_post)
     app.router.add_post("/api/operator/agent/{name}/ask", agent_ask)
     app.router.add_get("/api/operator/agent/{name}/inbox", agent_inbox)
     app.router.add_get("/api/operator/agent/{name}/poll", agent_poll)
+    app.router.add_get("/api/operator/agent/{name}/transcripts", agent_transcripts)
     app.router.add_post("/api/operator/agent/{name}/dispatch", agent_dispatch)
     return ops

@@ -40,10 +40,11 @@ function check(label, actual, expected) {
 const ctx = {};
 vm.createContext(ctx);
 for (const name of ["openAsks", "freshUrgent", "answerLine", "deliveryLabel", "sessionBadge", "startChoices", "startBody",
-                    "dotClass", "progressChips", "threadsOf", "cardLine"]) {
+                    "dotClass", "progressChips", "threadsOf", "cardLine", "sameUpdate", "gateActions"]) {
   vm.runInContext(slice(src, name), ctx);
 }
 vm.runInContext(src.match(/^const STAGES = .*$/m)[0].replace("const ", "var "), ctx);
+vm.runInContext(src.match(/^const GATE_KINDS = .*$/m)[0].replace("const ", "var "), ctx);
 
 const feed = [
   { id: "a", kind: "ask", type: "approve", answer: null, text: "merge?" },
@@ -95,8 +96,31 @@ check("follow-ups group under their card, oldest first; an orphan has no thread"
 check("a card reads as its first line without markdown marks", ctx.cardLine(threaded[0]), "w1 waits");
 check("a long card line is cut", ctx.cardLine({ text: "x".repeat(80) }).length, 60);
 check("the feed lists a follow-up in time order and again under its card",
-      [src.includes("if (e.parent) { list.append(renderFollowup(e, byId.get(e.parent))); continue; }"),
+      [src.includes("const follow = renderFollowup(e, byId.get(e.parent));"),
        src.includes("item.append(renderThread(threads.get(e.id)))")], [true, true]);
+
+const u = { kind: "update", session: "w1", text: "게이트 commit 해소", at: "t" };
+check("one pass's update about one session reads as one line in time order",
+      [ctx.sameUpdate(u, { ...u, parent: "c2" }), ctx.sameUpdate(u, { ...u, at: "t2" }),
+       ctx.sameUpdate(u, { ...u, session: "w2" }), ctx.sameUpdate(null, u)], [true, false, false, false]);
+check("same-pass duplicates add a card link to the line already drawn",
+      src.includes("if (sameUpdate(last && last.entry, e)) { parentLink(last.item, byId.get(e.parent)); continue; }"), true);
+const at = { cwd: "F:/r", scope: "s1" };
+check("an approval gate presses the dashboard's approve",
+      ctx.gateActions({ kind: "approval", session: "s1", step_id: "end-gate", ...at }).map((a) => [a.label, a.path, a.body]),
+      [["승인", "api/cflow/approve", at]]);
+check("a selection gate offers each option as a select",
+      ctx.gateActions({ kind: "selection", session: "s1", step_id: "pick", ...at, options: [{ name: "a" }, { name: "b", description: "d" }] })
+        .map((a) => [a.label, a.path, a.body.option, a.title]),
+      [["a", "api/cflow/select", "a", ""], ["b", "api/cflow/select", "b", "d"]]);
+check("a goto request is approved or refused through goto/resolve, the refusal asking for a reason",
+      ctx.gateActions({ kind: "goto", session: "s1", step_id: "end-gate", ...at, goto_request: { step: "intake" } })
+        .map((a) => [a.label, a.body.decision, !!a.reason, !!a.confirm]),
+      [["'intake' 이동 승인", "approve", false, true], ["거절", "deny", true, false]]);
+check("gate presses go under the newest card naming the session, and in the panel",
+      [src.includes("gateCard.set(r, e.id)"), src.includes("if (gateCard.get(r) === e.id) item.append(renderGate(gates.get(r)))"),
+       src.includes("승인을 기다리는 cflow 게이트")], [true, true, true]);
+check("a daemon restart entry gets its own look", src.includes("operator-event-${e.event}"), true);
 
 const options = [{value: "a:claude", harness: "claude"}, {value: "a:pi", harness: "pi"}];
 const caps = {claude: {models: ["sonnet", "opus"], efforts: ["high"]}, pi: {models: [], efforts: []}};
@@ -110,6 +134,13 @@ check("the start body carries the picked model and effort",
 check("a model the harness does not offer is not sent",
       ctx.startBody("p", {model: "opus", effort: ""}, ctx.startChoices(options, caps, "a:pi")),
       {project: "p", profile: "a:pi"});
+check("a transcript mode travels in the start request; the default is not sent",
+      [ctx.startBody("p", {mode: "transcript"}, ctx.startChoices(options, caps, "a:pi")).mode,
+       "mode" in ctx.startBody("p", {mode: "events"}, ctx.startChoices(options, caps, "a:pi"))],
+      ["transcript", false]);
+check("a running operator's header offers the mode switch, which posts to api/operator/mode",
+      [src.includes("start.append(modeSelect(data.mode, switchMode))"), src.includes('request("api/operator/mode"')],
+      [true, true]);
 check("the operator's own session links to its terminal",
       [src.includes('sessionLink(op.name, "operator-self")'), src.includes('a.href = "#/s/" + encodeURIComponent(name)')], [true, true]);
 check("a session link in the modal closes the modal",
