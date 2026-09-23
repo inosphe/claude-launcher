@@ -110,10 +110,76 @@ def test_windows_stdin_transcodes_console_code_page_to_utf8(monkeypatch):
     })(), raising=False)
 
     assert attach_mod._read_stdin_windows() == "웹 데몬".encode("utf-8")
-    first = attach_mod._read_stdin_windows()
-    second = attach_mod._read_stdin_windows()
-    assert first == b""  # the lead byte alone is held back, not mangled
-    assert second == "어\x1b[A".encode("utf-8")
+    # The lead byte alone is held back rather than mangled, and the read
+    # goes around again for the rest instead of returning b"": that value
+    # is this function's EOF, and the caller detaches on it.
+    assert attach_mod._read_stdin_windows() == "어\x1b[A".encode("utf-8")
+    assert payloads == []
+
+
+def _fake_console(monkeypatch, payloads, codepage):
+    """A console whose ReadFile hands back ``payloads`` one call at a time,
+    then reports end of input the way conhost does (ok, zero bytes)."""
+    queue = list(payloads)
+
+    class FakeKernel32:
+        calls = 0
+
+        def GetStdHandle(self, value):
+            return object()
+
+        def GetConsoleCP(self):
+            return codepage
+
+        def ReadFile(self, handle, buf, size, count, overlapped):
+            FakeKernel32.calls += 1
+            if not queue:
+                count._obj.value = 0
+                return 1
+            payload = queue.pop(0)
+            ctypes.memmove(buf, payload, len(payload))
+            count._obj.value = len(payload)
+            return 1
+
+    monkeypatch.setattr(attach_mod.sys, "platform", "win32")
+    monkeypatch.setattr(attach_mod, "_console_decoder", None)
+    monkeypatch.setattr(ctypes, "windll", type("Windll", (), {
+        "kernel32": FakeKernel32(),
+    })(), raising=False)
+    return FakeKernel32
+
+
+def test_a_held_fragment_is_not_reported_as_end_of_input(monkeypatch):
+    """b"" out of this function means one thing to its callers: stdin is
+    closed. ``pump_stdin`` puts None on the queue and returns, ``send_pump``
+    closes the socket and records a detach. A transcode holding the leading
+    bytes of a split character must therefore not produce b"" -- the
+    keyboard is still there. The read goes around again for the rest.
+
+    This is reachable on every Korean console since the transcode stopped
+    passing code page 65001 through untouched: before that, a UTF-8 console
+    never held anything back."""
+    # The chunk that decodes to nothing at all is the one that used to
+    # come back as b"": one lead byte, the other two still to come.
+    raw = "한글".encode("utf-8")
+    _fake_console(monkeypatch, [raw[:1], raw[1:]], attach_mod._CP_UTF8)
+    assert attach_mod._read_stdin_windows() == raw
+
+
+def test_a_closed_console_is_still_end_of_input(monkeypatch):
+    """The other side of the same rule: a real EOF must still read as one,
+    or the attach never ends."""
+    _fake_console(monkeypatch, [], attach_mod._CP_UTF8)
+    assert attach_mod._read_stdin_windows() == b""
+
+
+def test_the_read_does_not_spin_when_there_is_something_to_return(monkeypatch):
+    """One ReadFile per call in the ordinary case: the loop exists for the
+    held fragment alone."""
+    k32 = _fake_console(monkeypatch, ["ls\r".encode("utf-8")], attach_mod._CP_UTF8)
+    k32.calls = 0
+    assert attach_mod._read_stdin_windows() == b"ls\r"
+    assert k32.calls == 1
 
 
 def test_console_input_unknown_code_page_passes_through(monkeypatch):
