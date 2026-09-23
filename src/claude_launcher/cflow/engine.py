@@ -68,7 +68,7 @@ import secrets
 import signal
 import subprocess
 from datetime import datetime, timedelta, timezone
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence, Set, Tuple
 
 from .. import daemon_client, digests
 from . import checkout, model, responders, state as state_mod
@@ -1418,8 +1418,23 @@ def _queue_triggers(workflow: Workflow, state: dict, step_id: Optional[str],
         )
 
 
-def _move_to(workflow: Workflow, state: dict, target: Optional[str], cwd) -> None:
-    """Advance to ``target`` (None = termination)."""
+def _move_to(
+    workflow: Workflow,
+    state: dict,
+    target: Optional[str],
+    cwd,
+    *,
+    honour_skip: bool = True,
+) -> None:
+    """Advance to ``target`` (None = termination).
+
+    A skipped step on the way (``skip``, static or written to the run's
+    state) is passed through here, at arrival -- see :func:`_pass_skipped`.
+    ``honour_skip=False`` is a person's ``goto``: naming a step outright is
+    asking for it, skipped or not.
+    """
+    if honour_skip:
+        target = _pass_skipped(workflow, state, target, cwd)
     # An ask still open here is one nobody answered — a human forced the run
     # somewhere else while it was out. Say so in the journal rather than
     # letting the question evaporate: a responder about to answer it is about
@@ -1903,6 +1918,106 @@ def step_digest(payload: dict) -> str:
 # --------------------------------------------------------------------------- #
 # checklist: a gate written as machine-checked items, moved by the daemon
 # --------------------------------------------------------------------------- #
+# --------------------------------------------------------------------------- #
+# run state: the paths a workflow's ``editable:`` leaves writable while it runs
+# --------------------------------------------------------------------------- #
+def _state_patches(state: dict) -> List[dict]:
+    """The run's writes, oldest first. Each is ``{path, value, by, at, ...}``."""
+    return [p for p in (state.get("patches") or []) if isinstance(p, dict)]
+
+
+def _state_values(workflow: Workflow, state: dict) -> Dict[str, object]:
+    """Every declared path's current value: its default, then each patch in order."""
+    values: Dict[str, object] = {
+        path: spec.default for path, spec in workflow.editable.items()
+    }
+    for patch in _state_patches(state):
+        if patch.get("path") in values:
+            values[patch["path"]] = patch.get("value")
+    return values
+
+
+def _last_patch(state: dict, path: str) -> Optional[dict]:
+    found = None
+    for patch in _state_patches(state):
+        if patch.get("path") == path:
+            found = patch
+    return found
+
+
+def _state_view(workflow: Workflow, state: dict) -> List[dict]:
+    """The payload's ``state``: each declared path, its value, and who last wrote it."""
+    values = _state_values(workflow, state)
+    out: List[dict] = []
+    for path, spec in workflow.editable.items():
+        last = _last_patch(state, path)
+        out.append({
+            "path": path,
+            "type": spec.type,
+            "by": list(spec.by),
+            "value": values[path],
+            **({"describe": spec.describe} if spec.describe else {}),
+            **(
+                {"set_by": last.get("by"), "set_at": last.get("at")}
+                if last else {}
+            ),
+        })
+    return out
+
+
+def _state_env(workflow: Workflow, state: dict) -> Dict[str, str]:
+    """``CFLOW_VAR_<PATH>`` for every declared path, as a command reads it."""
+    env: Dict[str, str] = {}
+    for path, value in _state_values(workflow, state).items():
+        spec = workflow.editable[path]
+        if spec.type == model.EDITABLE_BOOL:
+            env[spec.env_name] = "true" if value else "false"
+        else:
+            env[spec.env_name] = "" if value is None else str(value)
+    return env
+
+
+def _skip_on(workflow: Workflow, state: dict, step: Step) -> bool:
+    """Whether entering ``step`` right now passes straight through it."""
+    path = model.skip_path(step.id)
+    if path in workflow.editable:
+        return bool(_state_values(workflow, state)[path])
+    return step.skip
+
+
+def _pass_skipped(
+    workflow: Workflow, state: dict, target: Optional[str], cwd
+) -> Optional[str]:
+    """Where an arrival at ``target`` really lands, skipping every skipped step.
+
+    Read at the moment of entry and at no other: that is what makes a write
+    never reach back. A step the run is already on, or already passed, is
+    not re-read. A chain of skipped steps is followed; a loop made entirely
+    of skipped steps stops at the first step seen twice rather than spin.
+    """
+    seen: Set[str] = set()
+    while target is not None and target not in seen:
+        step = workflow.steps.get(target)
+        if step is None or not step.skippable or not _skip_on(workflow, state, step):
+            break
+        seen.add(target)
+        path = model.skip_path(step.id)
+        last = _last_patch(state, path) if path in workflow.editable else None
+        state_mod.journal(
+            "step_skipped",
+            {
+                "run": state["run_id"],
+                "step": step.id,
+                "next": step.next or model.END,
+                "by": "state" if last else "workflow",
+                **({"set_by": last.get("by"), "set_at": last.get("at")} if last else {}),
+            },
+            cwd,
+        )
+        target = step.next
+    return target
+
+
 def _checklist_record(state: dict, step: Step) -> dict:
     """The stored measurements for this step AND visit, or an empty record.
 
@@ -1919,7 +2034,9 @@ def _checklist_record(state: dict, step: Step) -> dict:
     return {}
 
 
-def _checklist_items(step: Step, record: dict) -> List[dict]:
+def _checklist_items(
+    step: Step, record: dict, state: Optional[dict] = None
+) -> List[dict]:
     """Every declared item with whatever is known about it right now.
 
     ``ok`` has three values and the third is the load-bearing one: ``True``
@@ -1932,17 +2049,29 @@ def _checklist_items(step: Step, record: dict) -> List[dict]:
     items: List[dict] = []
     for item in step.checklist.items:
         seen = measured.get(item.id) or {}
-        items.append(
-            {
-                "id": item.id,
-                "describe": item.describe,
-                "check": item.check,
-                "ok": seen.get("ok"),
-                "exit_code": seen.get("code"),
-                "output": seen.get("says"),
-                "measured_at": seen.get("at"),
-            }
-        )
+        entry = {
+            "id": item.id,
+            "describe": item.describe,
+            "check": item.check,
+            "ok": seen.get("ok"),
+            "exit_code": seen.get("code"),
+            "output": seen.get("says"),
+            "measured_at": seen.get("at"),
+        }
+        if item.manual:
+            # A ticked item has no command and no exit code: its value IS the
+            # run state, read live so a tick shows the moment it is written
+            # rather than at the clock's next pass. Never unknown -- nobody
+            # having ticked it is a plain "not yet".
+            entry["by"] = list(item.by)
+            if state is not None:
+                path = model.checklist_path(step.id, item.id)
+                last = _last_patch(state, path)
+                entry["ok"] = bool(last.get("value")) if last else False
+                entry["path"] = path
+                entry["measured_at"] = last.get("at") if last else None
+                entry["output"] = f"set by {last.get('by')}" if last else None
+        items.append(entry)
     return items
 
 
@@ -1982,7 +2111,7 @@ def _checklist_expires_at(state: dict, step: Step) -> Optional[datetime]:
 def _checklist_payload(state: dict, step: Step) -> dict:
     """The structured checklist a payload carries: what is true, and what is not."""
     record = _checklist_record(state, step)
-    items = _checklist_items(step, record)
+    items = _checklist_items(step, record, state)
     payload = {
         "prompt": step.checklist.prompt,
         "then": step.checklist.then,
@@ -2039,6 +2168,11 @@ def _payload(workflow: Workflow, state: dict, cwd: Optional[str], *, mutate: boo
     digest = step_digest(payload)
     if digest:
         payload["digest"] = digest
+    # After the digest, deliberately: the digest names the step's TEXT, and a
+    # tick or a note written by a person is not a change of text -- an agent
+    # holding the step must not be told it lost it because a value moved.
+    if workflow.editable:
+        payload["state"] = _state_view(workflow, state)
     if state.get("sub_errors"):
         payload["sub_errors"] = list(state["sub_errors"])
         payload["sub_errors_note"] = (
@@ -3372,6 +3506,8 @@ def _next_step_impl(*, cwd: Optional[str] = None) -> dict:
     # `inputs` only when the run has them: a sub run's values ride into the
     # command's environment, and a main run's call stays the call it was.
     extra = {"inputs": state["inputs"]} if state.get("inputs") else {}
+    if workflow.editable:
+        extra["values"] = _state_env(workflow, state)
     result = _run_verify(step, cwd, scope=verify_scope(cwd), **extra)
 
     with state_mod.run_lock(cwd):
@@ -3472,7 +3608,12 @@ def verify_scope(cwd: Optional[str]) -> str:
 
 
 def _run_verify(
-    step: Step, cwd: Optional[str], *, scope: str, inputs: Optional[dict] = None
+    step: Step,
+    cwd: Optional[str],
+    *,
+    scope: str,
+    inputs: Optional[dict] = None,
+    values: Optional[Dict[str, str]] = None,
 ) -> Optional[dict]:
     """Run the step's verify command; None on success, failure details otherwise.
 
@@ -3491,7 +3632,7 @@ def _run_verify(
             encoding="utf-8",
             errors="replace",
             timeout=verify.timeout,
-            env=probe_env(scope, inputs=inputs),
+            env=probe_env(scope, inputs=inputs, values=values),
         )
     except subprocess.TimeoutExpired:
         return {"exit_code": None, "output": f"timed out after {int(verify.timeout)}s"}
@@ -3504,7 +3645,12 @@ def _run_verify(
     }
 
 
-def probe_env(scope: Optional[str], *, inputs: Optional[dict] = None) -> Dict[str, str]:
+def probe_env(
+    scope: Optional[str],
+    *,
+    inputs: Optional[dict] = None,
+    values: Optional[Dict[str, str]] = None,
+) -> Dict[str, str]:
     """The environment a probe subprocess runs in, given whose run it is for.
 
     A probe is launched by the daemon, and the daemon's own environment is not
@@ -3548,6 +3694,9 @@ def probe_env(scope: Optional[str], *, inputs: Optional[dict] = None) -> Dict[st
     # text (which is snapshotted, and hashed into the step's text id).
     for name, value in (inputs or {}).items():
         env[model.InputSpec(name=str(name)).env_name] = str(value)
+    # The run's writable state rides the same way, as CFLOW_VAR_<PATH>
+    # (already spelled as environment names by `_state_env`).
+    env.update(values or {})
     return env
 
 
@@ -3558,6 +3707,7 @@ def run_probe(
     *,
     scope: Optional[str],
     inputs: Optional[dict] = None,
+    values: Optional[Dict[str, str]] = None,
 ) -> Optional[dict]:
     """Measure a step's awaited condition once. ``None`` = could not measure.
 
@@ -3603,7 +3753,7 @@ def run_probe(
             text=True,
             encoding="utf-8",
             errors="replace",
-            env=probe_env(scope, inputs=inputs),
+            env=probe_env(scope, inputs=inputs, values=values),
             **kwargs,
         )
     except (OSError, ValueError):
@@ -4022,6 +4172,92 @@ def complete_trigger(*, do: str, step_id: Optional[str], visit: Optional[int],
     )
 
 
+@_locked_op
+def set_state(path: str, value, *, by: str, cwd: Optional[str] = None) -> dict:
+    """Write one declared run-state path: a patch, journalled as ``state_set``.
+
+    ``by`` is who is writing -- ``user`` for a person's channel (the CLI),
+    ``agent`` for the driving session's MCP tool -- and the path's
+    ``editable:`` declaration decides whether that writer may. The value is
+    applied from now on only: a skip is read when a step is ENTERED, so a
+    step the run is on or has passed is not changed; a ticked checklist
+    item is read at the checklist's next measurement.
+    """
+    if not state_mod.has_run(cwd):
+        raise CflowError("no active cflow run here")
+    workflow, state = _load(cwd)
+    if state["status"] in ("done", "aborted"):
+        raise CflowError(
+            f"this run is {state['status']}; its state is closed with it"
+        )
+    path = str(path or "").strip()
+    spec = workflow.editable.get(path)
+    if spec is None:
+        declared = ", ".join(sorted(workflow.editable)) or "nothing"
+        raise CflowError(
+            f"{path!r} is not writable in this run -- the workflow's "
+            f"'editable:' (and its ticked checklist items) declare: {declared}"
+        )
+    if by not in spec.by:
+        raise CflowError(
+            f"{path!r} is written by {' or '.join(spec.by)} only, and this "
+            f"call is from {by!r}"
+        )
+    try:
+        new = model.coerce_value(spec, value)
+    except model.WorkflowError as exc:
+        raise CflowError(str(exc)) from None
+    was = _state_values(workflow, state)[path]
+    current = state.get("current")
+    patch = {
+        "path": path,
+        "value": new,
+        "by": by,
+        "at": state_mod.utcnow(),
+        "step": current,
+        "visit": _visits(state, current) if current else 0,
+    }
+    state["patches"] = _state_patches(state) + [patch]
+    state_mod.save_state(state, cwd)
+    state_mod.journal(
+        "state_set",
+        {"run": state["run_id"], "path": path, "value": new, "was": was,
+         "by": by, "step": current},
+        cwd,
+    )
+    if path == model.skip_path(current or ""):
+        applies = (
+            "the run is on this step now; a skip is read on entry, so it "
+            "applies from the next time the run enters it"
+        )
+    elif path.startswith("steps.") and ".checklist." in path:
+        applies = "read by the checklist's next measurement"
+    elif path.startswith("steps."):
+        applies = "read when the run next enters that step"
+    else:
+        applies = "in the payload's 'state' and in commands as " + spec.env_name
+    return {
+        **_base(state),
+        "status": "state_written",
+        "path": path,
+        "value": new,
+        "was": was,
+        "changed": new != was,
+        "by": by,
+        "applies": applies,
+        "state": _state_view(workflow, state),
+    }
+
+
+def nudge_for_state_write(path: str, value) -> str:
+    """What the driving session is told when a person wrote its run state."""
+    return (
+        f"cflow: a person set this run's state {path!r} to {value!r}. Call the "
+        f"cflow 'status' tool -- its 'state' field has the current values -- "
+        f"and continue from where you are"
+    )
+
+
 @_scoped_op
 def check_checklist(*, cwd: Optional[str] = None) -> Optional[dict]:
     """Re-measure a checklist gate's items, and move the run if they are all true.
@@ -4066,15 +4302,20 @@ def check_checklist(*, cwd: Optional[str] = None) -> Optional[dict]:
             return None
         before = {
             entry["id"]: entry["ok"] for entry in _checklist_items(
-                step, _checklist_record(state, step)
+                step, _checklist_record(state, step), state
             )
         }
         fence = _fence(state)
         visit = _visits(state, step.id)
         checklist = step.checklist
+        values = _state_env(workflow, state) if workflow.editable else None
 
     measured: Dict[str, dict] = {}
     for item in checklist.items:
+        if item.manual:
+            # Nothing to run: the value is the run state, read again under
+            # the commit lock below (see `_checklist_items`).
+            continue
         # The scope is read here rather than defaulted inside `run_probe`: the
         # ambient one is right only because `_scoped_op` installed this run's
         # scope for the duration of the call, and that is a fact about THIS
@@ -4085,6 +4326,7 @@ def check_checklist(*, cwd: Optional[str] = None) -> Optional[dict]:
             checklist.timeout,
             scope=state_mod.current_scope(),
             inputs=state.get("inputs"),
+            values=values,
         )
         measured[item.id] = {
             # `run_probe` returns None when the command could not be run at
@@ -4115,7 +4357,7 @@ def check_checklist(*, cwd: Optional[str] = None) -> Optional[dict]:
             "checked_at": _iso(_utc_now()),
         }
         state["checklist"] = record
-        items = _checklist_items(step, record)
+        items = _checklist_items(step, record, state)
         after = {entry["id"]: entry["ok"] for entry in items}
         changed = sorted(k for k in after if before.get(k) is not after[k])
         green = _checklist_green(items)
@@ -4675,7 +4917,7 @@ def _force_position(
         )
     if state["status"] in ("done", "aborted"):
         state["status"] = "running"  # a forced goto can reopen a finished run
-    _move_to(workflow, state, target, cwd)
+    _move_to(workflow, state, target, cwd, honour_skip=False)
     if state["status"] == "done":
         return _done_payload(state, cwd)
     return {

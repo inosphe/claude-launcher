@@ -302,6 +302,63 @@ The rules, and the reason for each:
 A human override is still a human override: `claunch cflow goto <step>`
 moves a run past a gate that will never go green, and is journaled as such.
 
+## Run state — `editable:`, `skip`, ticked checklist items
+
+A run's workflow is fixed when it starts: composed (with any `extends`
+overlay), snapshotted, and read from the snapshot from then on. An overlay
+can change any property, but only before the run exists. `editable:` is the
+one door left open after that, for the paths it names:
+
+At the top of the file, beside `steps:`:
+
+```
+editable:
+  steps.review.skip:          # bool; the step's `skip` property
+    describe: this round goes without peer review
+  notes:                      # a free name
+    type: text                # text is written by a person only
+  fast:
+    type: bool
+    by: [user, agent]         # default: [user]
+```
+
+and in a step, a checklist item a person ticks:
+
+```yaml
+landed:
+  checklist:
+    then: review
+    items:
+      - id: approved
+        describe: the person looked at the result
+        by: user              # ticked, not measured: no `check:`
+      - id: fast-path
+        describe: the flag reaches the command
+        check: 'test "$CFLOW_VAR_FAST" = true'
+  instructions: wait for the landing
+```
+
+- **Who writes.** A person with `claunch cflow set <path> <value>` (the
+  session is nudged to re-read); the driving agent with the `set_state` MCP
+  tool, only on a path whose `by` lists `agent`. A `text` value is `by:
+  [user]` and nothing else: the agent's own record goes on the issue board.
+- **Paths.** `steps.<id>.skip` (a step with one plain `next` exit, never the
+  start step), `steps.<id>.checklist.<item>` (declared by the item's own
+  `by:`, never in `editable:`), or a name (`[a-z][a-z0-9_]*`).
+- **Never backwards.** A skip is read when the run ENTERS the step: writing
+  it while the run stands there, or after the run passed, changes nothing
+  already under way. The passage is journalled `step_skipped`; a person's
+  `goto` to a skipped step still lands on it.
+- **Where values show.** The payload's `state` (and `claunch cflow status`)
+  lists each path, its value and who wrote it last; commands (`verify`,
+  checklist `check`) read `CFLOW_VAR_<PATH>`, e.g. `CFLOW_VAR_NOTES`,
+  `CFLOW_VAR_STEPS_REVIEW_SKIP`. Every write is journalled `state_set`.
+- **Per run.** Values do not carry into a `recur` round: the next round
+  starts from the declared defaults.
+
+A static `skip: true` on a step is the same property without the runtime
+door; an `extends` overlay can set it for one composition.
+
 ## `triggers:` — daemon side effects, declared instead of asked for
 
 Two things this daemon can do to a session have no tool a run can call for

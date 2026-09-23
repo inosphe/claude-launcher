@@ -95,12 +95,17 @@ LEGACY_MCP_NAMES = ("cflow", "mesh")
 #: drift-arresting bump that leaves every human door open, not a security
 #: boundary.
 #:
+#: ``set`` is the same split for a run's writable state: a path declared
+#: ``by: [user]`` is written through that CLI, the agent's door is the
+#: ``set_state`` MCP tool (which writes as ``agent``), and without this rule
+#: an agent could type the CLI and write as the person.
+#:
 #: Both spellings per command (exact and ``:*`` prefix), for both shell
 #: tools this harness may expose; a rule naming a tool a setup lacks is
 #: inert.
 GATE_DENY_RULES = tuple(
     f"{tool}(claunch cflow {cmd}{suffix})"
-    for cmd in ("approve", "select", "goto", "abort")
+    for cmd in ("approve", "select", "goto", "abort", "set")
     for tool in ("Bash", "PowerShell")
     for suffix in ("", ":*")
 )

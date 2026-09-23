@@ -257,6 +257,16 @@ of sampling it, and above the ceiling a checklist item becomes a way to run a
 test suite on a loop. An item is a cheap question about state somebody else
 changed.
 
+Run state — `editable:`
+-----------------------
+A run's workflow is fixed at start; ``editable:`` names the paths that stay
+writable while it runs (``steps.<id>.skip``, a checklist item ticked by
+``by:`` instead of ``check:``, or a free name such as ``notes``), who may
+write each (``user`` through ``claunch cflow set``, ``agent`` through the
+``set_state`` MCP tool), and their defaults. A write is a patch on the run,
+journalled ``state_set``; a skip is read on ENTRY only, so a write never
+reaches back into a visit under way. See :class:`EditableSpec`.
+
 Daemon side effects — `triggers:`
 ---------------------------------
 A step may declare ``triggers:`` — daemon capabilities that exist OUTSIDE
@@ -523,6 +533,24 @@ FILTER_BLACKLIST = "blacklist"
 FILTER_TYPES = (FILTER_WHITELIST, FILTER_BLACKLIST)
 
 
+#: Who may write a run-state path while the run is going (``editable:``).
+#: ``user`` is a person: the ``claunch cflow set`` CLI, which the harness
+#: keeps out of the agent's shell the same way it keeps ``approve`` out.
+#: ``agent`` is the driving session, through the ``set_state`` MCP tool.
+EDITABLE_BY_USER = "user"
+EDITABLE_BY_AGENT = "agent"
+EDITABLE_BY = (EDITABLE_BY_USER, EDITABLE_BY_AGENT)
+
+#: The value types a run-state path takes.
+EDITABLE_BOOL = "bool"
+EDITABLE_TEXT = "text"
+EDITABLE_TYPES = (EDITABLE_BOOL, EDITABLE_TEXT)
+
+#: A free run-state name (``notes``, ``target``): the same spelling as an
+#: input name, so both reach a command as an upper-cased environment name.
+_STATE_NAME_RE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
+
+
 class WorkflowError(Exception):
     """Raised for unreadable or invalid workflow files."""
 
@@ -786,6 +814,56 @@ class Timer:
 
 
 @dataclass(frozen=True)
+class EditableSpec:
+    """One run-state path the workflow lets somebody change while it runs.
+
+    A run's workflow is fixed when it starts: the file is composed (with any
+    ``extends`` overlay), snapshotted, and every later read comes from the
+    snapshot. ``editable:`` is the one door left open after that, and only
+    for the paths it names. A write is a *patch* on the run -- the path, the
+    value, who wrote it and when -- journalled as ``state_set``; the current
+    value of a path is its declared default with the patches laid over it in
+    order. Three path forms exist:
+
+    * ``steps.<id>.skip`` (bool) -- the step's ``skip`` property. When true
+      at the moment the run ENTERS the step, the run passes straight through
+      to its ``next`` (journalled ``step_skipped``). Read at entry only, so a
+      write never reaches back: a visit already under way, and a step
+      already passed, stay what they were.
+    * ``steps.<id>.checklist.<item>`` (bool) -- a checklist item a person (or
+      the agent) ticks instead of a command deciding it. Declared by the
+      item itself (``by:`` in place of ``check:``), never here.
+    * ``<name>`` (bool or text) -- a free value such as ``notes``: shown in
+      the payload, and handed to ``verify``/``check`` commands as
+      ``CFLOW_VAR_<NAME>``.
+
+    ``text`` is writable by a person only: the agent's record of what it
+    did belongs on the issue board, and a note field it could also write
+    would become a second copy of that.
+    """
+
+    path: str
+    type: str
+    by: Tuple[str, ...]
+    default: object = None
+    describe: Optional[str] = None
+    #: Declared by a checklist item's ``by:`` rather than in ``editable:``.
+    implicit: bool = False
+
+    @property
+    def env_name(self) -> str:
+        return "CFLOW_VAR_" + re.sub(r"[^A-Za-z0-9]", "_", self.path).upper()
+
+
+def skip_path(step_id: str) -> str:
+    return f"steps.{step_id}.skip"
+
+
+def checklist_path(step_id: str, item_id: str) -> str:
+    return f"steps.{step_id}.checklist.{item_id}"
+
+
+@dataclass(frozen=True)
 class ChecklistItem:
     """One machine-checked condition of a :class:`Checklist`.
 
@@ -802,7 +880,15 @@ class ChecklistItem:
 
     id: str
     describe: str
-    check: str
+    #: The command whose exit code decides the item. ``None`` exactly when
+    #: :attr:`by` is set: then the item is ticked by a person or the agent
+    #: (run-state path ``steps.<step>.checklist.<id>``) instead of measured.
+    check: Optional[str] = None
+    by: Tuple[str, ...] = ()
+
+    @property
+    def manual(self) -> bool:
+        return bool(self.by)
 
 
 @dataclass(frozen=True)
@@ -943,6 +1029,22 @@ class Step:
     #: ``claunch cflow sub-done <name>``. See :class:`SubflowRef`.
     subflows: Tuple["SubflowRef", ...] = ()
     next: Optional[str] = None  # None = termination (non-select steps)
+    #: Pass straight through this step to :attr:`next` on entry. Static here
+    #: (an ``extends`` overlay can set it for one run's composition); a run
+    #: can flip it while going only when ``editable:`` declares
+    #: ``steps.<id>.skip``. Only a step with a single plain exit may carry
+    #: it -- see :attr:`skippable`.
+    skip: bool = False
+
+    @property
+    def skippable(self) -> bool:
+        """A step whose one exit is ``next``: no choice, no daemon edge.
+
+        A select has no single edge to pass through to, and a checklist or a
+        timer IS a daemon-held condition -- skipping one would be the way
+        past a gate those constructs exist to refuse.
+        """
+        return self.select is None and self.checklist is None and self.timer is None
 
     @property
     def is_select(self) -> bool:
@@ -1294,6 +1396,10 @@ class Workflow:
     #: environment variables and to the agent in the payload's ``inputs`` —
     #: never substituted into instructions, whose text ids must stay stable.
     inputs: Dict[str, "InputSpec"] = field(default_factory=dict)
+    #: Run-state paths writable while a run goes, by path (see
+    #: :class:`EditableSpec`). Includes the implicit ones a manual checklist
+    #: item declares.
+    editable: Dict[str, "EditableSpec"] = field(default_factory=dict)
     warnings: List[str] = field(default_factory=list)
     #: Superseded spellings this file still uses. Kept apart from
     #: :attr:`warnings` on purpose: a warning describes a graph that may
@@ -1493,6 +1599,7 @@ def parse_doc(doc: dict, *, default_name: str = "workflow") -> Workflow:
             f"default nobody may drive; drop one of the two"
         )
 
+    editable = _parse_editable(doc.get("editable"), steps, start)
     workflow = Workflow(
         name=str(doc.get("name") or default_name),
         description=str(doc.get("description") or ""),
@@ -1507,6 +1614,7 @@ def parse_doc(doc: dict, *, default_name: str = "workflow") -> Workflow:
         priority=priority,
         kind=kind,
         inputs=inputs,
+        editable=editable,
         warnings=[],
     )
     _validate_graph(workflow)
@@ -1526,6 +1634,7 @@ def parse_doc(doc: dict, *, default_name: str = "workflow") -> Workflow:
         priority=workflow.priority,
         kind=workflow.kind,
         inputs=workflow.inputs,
+        editable=workflow.editable,
         warnings=_graph_warnings(workflow),
         deprecations=_deprecations(workflow),
         advice=_advice(workflow),
@@ -1915,6 +2024,9 @@ def _parse_step(step_id: str, raw) -> Step:
                 f"step {step_id!r}: a select step routes via its options; "
                 f"'next' is not allowed"
             )
+    skip = raw.get("skip", False)
+    if not isinstance(skip, bool):
+        raise WorkflowError(f"step {step_id!r}: 'skip' must be true or false")
     step = Step(
         id=step_id,
         title=str(raw["title"]) if raw.get("title") else None,
@@ -1932,7 +2044,14 @@ def _parse_step(step_id: str, raw) -> Step:
         escalate=escalate,
         subflows=subflows,
         next=_parse_next(raw.get("next"), step_id),
+        skip=skip,
     )
+    if skip and not step.skippable:
+        raise WorkflowError(
+            f"step {step_id!r}: 'skip' passes the run through to 'next', and "
+            f"this step has no single plain exit (a select, a checklist or a "
+            f"timer) -- it cannot be skipped"
+        )
     if escalate is not None and None not in step.successors():
         # An escalation fires when the run ENDS here, so a step that cannot
         # end is a step whose declaration can never be read. Refused rather
@@ -2500,11 +2619,11 @@ def _parse_checklist(raw, step_id: str) -> Optional["Checklist"]:
             raise WorkflowError(
                 f"{where} must be a mapping {{id, describe, check}}"
             )
-        extra = sorted(set(entry) - {"id", "describe", "check"})
+        extra = sorted(set(entry) - {"id", "describe", "check", "by"})
         if extra:
             raise WorkflowError(
                 f"{where} has unknown key(s): {', '.join(extra)} "
-                f"(allowed: id, describe, check)"
+                f"(allowed: id, describe, check, by)"
             )
         item_id = str(entry.get("id") or "").strip()
         if not item_id:
@@ -2524,12 +2643,24 @@ def _parse_checklist(raw, step_id: str) -> Optional["Checklist"]:
                 f"to know what is not true"
             )
         check = str(entry.get("check") or "").strip()
-        if not check:
+        by: Tuple[str, ...] = ()
+        if entry.get("by") is not None:
+            by = _parse_editable_by(entry.get("by"), f"{where} ({item_id!r})")
+        if check and by:
+            raise WorkflowError(
+                f"{where} ({item_id!r}) has both 'check' and 'by' -- an item "
+                f"is decided by a command's exit code OR ticked by the "
+                f"session(s) 'by' names, not both"
+            )
+        if not check and not by:
             raise WorkflowError(
                 f"{where} ({item_id!r}) needs a 'check' — the command whose "
-                f"exit code decides it (0 = true)"
+                f"exit code decides it (0 = true) -- or 'by: [user]' for an "
+                f"item a person ticks"
             )
-        items.append(ChecklistItem(id=item_id, describe=describe, check=check))
+        items.append(
+            ChecklistItem(id=item_id, describe=describe, check=check or None, by=by)
+        )
     poll = _parse_seconds(
         raw.get("poll"), DEFAULT_CHECKLIST_POLL, step_id, "checklist.poll"
     )
@@ -2581,6 +2712,155 @@ def _parse_checklist_otherwise(raw, step_id: str) -> Optional[ChecklistOtherwise
             f"not opened within 'after' seconds"
         )
     return ChecklistOtherwise(after=after, then=then)
+
+
+def _parse_editable_by(raw, where: str) -> Tuple[str, ...]:
+    """``by:`` -- who may write: a name or a list of ``user`` / ``agent``."""
+    names = [raw] if isinstance(raw, str) else raw
+    if not isinstance(names, list) or not names:
+        raise WorkflowError(
+            f"{where}: 'by' must be one of {', '.join(EDITABLE_BY)} or a "
+            f"non-empty list of them"
+        )
+    out: List[str] = []
+    for name in names:
+        name = str(name).strip().lower()
+        if name not in EDITABLE_BY:
+            raise WorkflowError(
+                f"{where}: 'by' names {name!r} -- allowed: {', '.join(EDITABLE_BY)}"
+            )
+        if name not in out:
+            out.append(name)
+    return tuple(out)
+
+
+def _parse_editable(raw, steps: Dict[str, Step], start: str) -> Dict[str, EditableSpec]:
+    """Parse the top-level ``editable:`` mapping (path -> spec).
+
+    Every path is checked against the steps it names here, at load, so a
+    ``claunch cflow set`` never meets a path that turns out to mean nothing.
+    The implicit paths of manual checklist items are added last; declaring
+    one of those by hand is refused, since the item already says who ticks it.
+    """
+    out: Dict[str, EditableSpec] = {}
+    implicit: Dict[str, EditableSpec] = {}
+    for step in steps.values():
+        if step.checklist is None:
+            continue
+        for item in step.checklist.items:
+            if item.manual:
+                path = checklist_path(step.id, item.id)
+                implicit[path] = EditableSpec(
+                    path=path, type=EDITABLE_BOOL, by=item.by, default=False,
+                    describe=item.describe, implicit=True,
+                )
+    if raw is None:
+        return implicit
+    if not isinstance(raw, dict):
+        raise WorkflowError(
+            "'editable' must be a mapping of run-state path -> "
+            "{type, by, default, describe}"
+        )
+    for path, spec in raw.items():
+        path = str(path).strip()
+        where = f"editable {path!r}"
+        if spec is None:
+            spec = {}
+        if not isinstance(spec, dict):
+            raise WorkflowError(f"{where} must be a mapping {{type, by, default, describe}}")
+        unknown = sorted(set(spec) - {"type", "by", "default", "describe"})
+        if unknown:
+            raise WorkflowError(
+                f"{where} has unknown key(s): {', '.join(unknown)} "
+                f"(allowed: type, by, default, describe)"
+            )
+        parts = path.split(".")
+        forced_type: Optional[str] = None
+        static_default: object = None
+        if parts[0] == "steps":
+            if len(parts) == 4 and parts[2] == "checklist":
+                raise WorkflowError(
+                    f"{where}: a checklist item is made tickable by giving "
+                    f"the item itself 'by:' in place of 'check:', not here"
+                )
+            if len(parts) != 3 or parts[2] != "skip":
+                raise WorkflowError(
+                    f"{where}: the only step property writable while a run "
+                    f"goes is 'steps.<id>.skip'"
+                )
+            step = steps.get(parts[1])
+            if step is None:
+                raise WorkflowError(f"{where}: no step {parts[1]!r} in this workflow")
+            if not step.skippable:
+                raise WorkflowError(
+                    f"{where}: step {step.id!r} has no single plain exit (a "
+                    f"select, a checklist or a timer) and cannot be skipped"
+                )
+            if step.id == start:
+                raise WorkflowError(
+                    f"{where}: {step.id!r} is the start step -- a run is "
+                    f"already standing on it before anything can be written"
+                )
+            forced_type = EDITABLE_BOOL
+            static_default = step.skip
+        elif len(parts) != 1 or not _STATE_NAME_RE.match(path):
+            raise WorkflowError(
+                f"{where}: a path is 'steps.<id>.skip' or a name "
+                f"([a-z][a-z0-9_]*)"
+            )
+        kind = str(spec.get("type") or forced_type or "").strip().lower()
+        if not kind:
+            raise WorkflowError(f"{where} needs a 'type' ({', '.join(EDITABLE_TYPES)})")
+        if kind not in EDITABLE_TYPES:
+            raise WorkflowError(
+                f"{where}: type {kind!r} -- allowed: {', '.join(EDITABLE_TYPES)}"
+            )
+        if forced_type and kind != forced_type:
+            raise WorkflowError(f"{where}: a step's 'skip' is a {forced_type}")
+        by = _parse_editable_by(spec.get("by", [EDITABLE_BY_USER]), where)
+        if kind == EDITABLE_TEXT and by != (EDITABLE_BY_USER,):
+            raise WorkflowError(
+                f"{where}: a text value is written by a person only "
+                f"(by: [user]) -- the agent's own record belongs on the issue "
+                f"board, not in a second note beside it"
+            )
+        default = spec.get("default", static_default)
+        if kind == EDITABLE_BOOL:
+            if default is None:
+                default = False
+            if not isinstance(default, bool):
+                raise WorkflowError(f"{where}: 'default' must be true or false")
+        else:
+            default = "" if default is None else str(default)
+        describe = spec.get("describe")
+        out[path] = EditableSpec(
+            path=path, type=kind, by=by, default=default,
+            describe=str(describe).strip() if describe else None,
+        )
+    out.update(implicit)
+    return out
+
+
+def coerce_value(spec: EditableSpec, value) -> object:
+    """``value`` as the type ``spec`` declares, or a :class:`WorkflowError`.
+
+    A bool accepts the spellings a shell hands over (``true``/``false``,
+    ``yes``/``no``, ``on``/``off``, ``1``/``0``) as well as a real bool.
+    """
+    if spec.type == EDITABLE_BOOL:
+        if isinstance(value, bool):
+            return value
+        text = str(value).strip().lower()
+        if text in ("true", "yes", "on", "1"):
+            return True
+        if text in ("false", "no", "off", "0"):
+            return False
+        raise WorkflowError(
+            f"{spec.path!r} is a bool -- give true or false, not {value!r}"
+        )
+    if value is None:
+        return ""
+    return str(value)
 
 
 def _parse_select(raw, step_id: str) -> Optional[Select]:

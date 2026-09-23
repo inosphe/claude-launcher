@@ -181,6 +181,37 @@ TOOLS = [
         },
     },
     {
+        "name": "set_state",
+        "description": (
+            "Write one of this run's writable state paths -- the ones the "
+            "workflow's 'editable:' declares with 'by: [agent]' (the payload's "
+            "'state' lists every path, its value and who may write it). A "
+            "path written by a person only (every text note, and anything "
+            "declared 'by: [user]') is refused here: that is theirs, through "
+            "'claunch cflow set'. The write applies from now on: a step's "
+            "'skip' is read when the run next ENTERS that step, never for "
+            "the step you are on; a ticked checklist item is read at the "
+            "checklist's next measurement. Journalled as 'state_set'."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": (
+                        "a declared path: 'steps.<id>.skip', "
+                        "'steps.<id>.checklist.<item>', or a name"
+                    ),
+                },
+                "value": {
+                    "type": ["boolean", "string"],
+                    "description": "true/false for a bool path",
+                },
+            },
+            "required": ["path", "value"],
+        },
+    },
+    {
         "name": "status",
         "description": (
             "Current run position and state (read-only). Call after being "
@@ -418,7 +449,7 @@ for _tool in TOOLS:
         )
 
 #: Tools that write to the run, and so must be fenced against a replacement.
-_MUTATING = ("report", "next", "select", "request_goto")
+_MUTATING = ("report", "next", "select", "request_goto", "set_state")
 
 #: Tools that act on ANOTHER session's run. They are outside the fence in
 #: both directions: they are not refused when this slot was replaced (they
@@ -595,6 +626,12 @@ def call_tool(name: str, args: dict) -> dict:
         )
     elif name == "status":
         payload = engine.status(run=run)
+    elif name == "set_state":
+        # Always the agent: this tool is the driving session's door, and a
+        # person's door is the CLI. The path's `by:` decides whether it opens.
+        payload = engine.set_state(
+            str(args.get("path") or ""), args.get("value"), by="agent", run=run
+        )
     elif name == "request_goto":
         if bool(args.get("cancel")):
             payload = engine.cancel_goto_request(by=_session() or "agent", run=run)

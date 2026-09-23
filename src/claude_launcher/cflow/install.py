@@ -105,6 +105,18 @@ workflow to be started here), that is the answer; otherwise list candidates
      runs `claunch cflow checklist --recheck`. Do not poll the conditions by
      hand, and never try to make an item true in order to open the gate — a
      gate you turned green yourself is the one thing it was built to refuse.
+     An item with `by` instead of a command is ticked by whoever `by`
+     names; when that is `user`, it is theirs to tick, not yours.
+   - A payload carrying `state` — the workflow declares run state that
+     stays writable while the run goes (`editable:`): each entry is a path,
+     its value, who may write it (`by`) and who wrote it last. Read it as
+     part of the step: a `notes` value is the person's instruction for this
+     run, and a `steps.<id>.skip` that is true means the run will pass that
+     step when it gets there. You write only a path whose `by` includes
+     `agent`, with the `set_state` tool; a person's path (every text value,
+     anything `by: [user]`) is theirs through `claunch cflow set`. A nudge
+     saying a person set the run's state means: call `status`, read
+     `state`, carry on from where you are.
    - `select` with `chooser: user`, or `waiting_selection` — call `select`
      once to record your RECOMMENDATION with reasoning, then STOP your turn
      and write the decision brief below. Ask them to confirm with `!

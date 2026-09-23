@@ -44,7 +44,9 @@ def _allow(path: Path) -> list:
 
 
 def test_the_rules_cover_every_gate_command_and_both_shells():
-    for cmd in ("approve", "select", "goto", "abort"):
+    # `set` writes a run's state as the person (`by: [user]`); the agent's
+    # door is the `set_state` MCP tool.
+    for cmd in ("approve", "select", "goto", "abort", "set"):
         for tool in ("Bash", "PowerShell"):
             assert f"{tool}(claunch cflow {cmd})" in install_mod.GATE_DENY_RULES
             assert f"{tool}(claunch cflow {cmd}:*)" in install_mod.GATE_DENY_RULES

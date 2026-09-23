@@ -331,7 +331,8 @@ def test_a_profile_with_no_rules_reports_both_halves_missing(home):
     # a second copy is a second thing to forget when a gate verb gains a shell.
     assert row["allow"]["expected"] == list(install.GATE_ALLOW_RULES)
     assert row["deny"]["expected"] == list(install.GATE_DENY_RULES)
-    assert len(row["deny"]["expected"]) == 16
+    # five gate verbs (approve, select, goto, abort, set) x two shells x two spellings
+    assert len(row["deny"]["expected"]) == 20
     assert row["allow"]["value"] == []
     assert row["allow"]["missing"] == ["mcp__claunch"]
     assert row["deny"]["missing"] == list(install.GATE_DENY_RULES)
@@ -432,4 +433,4 @@ def test_two_profiles_are_told_apart(home):
     assert rows["guarded"]["converged"] is True
     assert rows["bare"]["converged"] is False
     assert rows["bare"]["allow"]["missing"] == ["mcp__claunch"]
-    assert len(rows["bare"]["deny"]["missing"]) == 16
+    assert len(rows["bare"]["deny"]["missing"]) == 20
