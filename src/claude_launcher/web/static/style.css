@@ -183,6 +183,10 @@ option:disabled { color: #6b7280; }
 #session-grid .sg-cell.absent {
   color: #444c56; font-size: 11px; font-style: italic; text-overflow: ellipsis;
 }
+#session-grid .sg-cell.picked { border: 1px solid #d29922; background: #2a2414; }
+#session-grid.sg-picking .sg-cell:not(.picked) { border-color: #385273; cursor: copy; }
+/* Hold-to-pick must not open the text selection or the long-press menu. */
+#session-grid .sg-cell { -webkit-touch-callout: none; user-select: none; }
 #session-grid .sg-cell.drop-target { border: 1px solid #58a6ff; background: #1b2a44; }
 #session-grid .sg-cell .dot {
   position: absolute; left: 5px; top: 8px; width: 6px; height: 6px; border-radius: 50%;
