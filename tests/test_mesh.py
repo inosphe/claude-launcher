@@ -1706,7 +1706,7 @@ def test_install_supersedes_the_split_servers(tmp_path, home):
 def test_merged_server_offers_both_toolsets():
     from claude_launcher import (
         mcp_server, mesh_mcp, status_checks_mcp, wait_mcp, window_mcp, observer_mcp,
-        search_mcp,
+        operator_mcp, search_mcp,
     )
     from claude_launcher.cflow import mcp as cflow_mcp
 
@@ -1716,8 +1716,8 @@ def test_merged_server_offers_both_toolsets():
     ] + [t["name"] for t in status_checks_mcp.TOOLS] + [
         t["name"] for t in window_mcp.TOOLS
     ] + [t["name"] for t in wait_mcp.TOOLS] + [t["name"] for t in observer_mcp.TOOLS] + [
-        t["name"] for t in search_mcp.TOOLS
-    ]
+        t["name"] for t in operator_mcp.TOOLS
+    ] + [t["name"] for t in search_mcp.TOOLS]
     assert len(set(names)) == len(names)  # merge() guards this too
     listed = mcp_server.SERVER.handle(
         {"jsonrpc": "2.0", "id": 1, "method": "tools/list"}

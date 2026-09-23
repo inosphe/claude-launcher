@@ -1,0 +1,356 @@
+/* Operator: the project bot's conversation, as a page (#/operator) and as a
+   modal that opens over any page (the floating button, or Alt+O).
+
+   Layout follows the agent consoles people already know (Devin): the
+   conversation on the left — the bot's posts, the user's messages, asks with
+   their buttons, relayed instructions — and on the right the sessions the bot
+   is watching, what each is doing, and which wait on a person. The same view
+   is built into both hosts; one poll feeds whichever is on screen.
+
+   The bot's terminal is never shown here: what the user reads is what it
+   posted with operator_post/operator_ask, and what the user types goes to the
+   daemon (POST /api/operator/message), which nudges the bot to read it with
+   operator_inbox. Every text from the feed is rendered as text or through the
+   app's markdown renderer, never as HTML. */
+globalThis.OperatorPanel = (() => {
+"use strict";
+const node = (tag, text, cls) => { const e = document.createElement(tag); if (text != null) e.textContent = text; if (cls) e.className = cls; return e; };
+async function request(path, body) {
+  const options = body === undefined ? {} : {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)};
+  const response = await api(path, options);
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) throw Error(data.error || `HTTP ${response.status}`);
+  return data;
+}
+
+/* ---- pure helpers (tests/web/operator_check.js) ---- */
+function openAsks(feed) {
+  return (feed || []).filter(e => e.kind === "ask" && !e.answer);
+}
+/* The asks that appeared since the ids already seen and want the user now:
+   what raises a browser notification. */
+function freshUrgent(seen, feed) {
+  return openAsks(feed).concat((feed || []).filter(e => e.kind === "post" && e.level === "urgent"))
+    .filter(e => !seen.has(e.id));
+}
+function answerLine(entry) {
+  const a = entry.answer;
+  if (!a) return "";
+  const decision = entry.type === "approve" ? (a.decision === "approve" ? "승인" : "거절") : a.decision;
+  return [decision, a.text].filter(Boolean).join(" · ");
+}
+function deliveryLabel(value) {
+  return {sent: "전달됨", pending: "전달 대기", unknown: "전달 결과 미확인"}[value] || String(value || "");
+}
+function sessionBadge(row) {
+  if (row.questions) return {label: `질문 ${row.questions}`, kind: "waiting"};
+  if (row.state === "blocked") return {label: "차단", kind: "blocked"};
+  if (row.status === "busy" || row.status === "working") return {label: "동작 중", kind: "working"};
+  if (row.state === "waiting") return {label: "대기", kind: "waiting"};
+  if (row.state === "done") return {label: "완료", kind: "done"};
+  return {label: row.status || "상태 미확인", kind: "idle"};
+}
+
+/* ---- state ---- */
+let project = "", data = null, profiles = [], projectNames = [], timer = null, badgeTimer = null;
+const hosts = new Set();
+const drafts = new Map();          // ask id -> note text, so a poll never eats a half-typed note
+let composer = "";
+const seen = new Set();
+let primed = false;
+
+function chosenProject() {
+  if (project) return project;
+  try { project = localStorage.getItem("claunch-operator-project") || ""; } catch {}
+  if (!project && typeof currentProject === "string") project = currentProject;
+  return project || "default";
+}
+function setProject(name) {
+  project = name;
+  try { localStorage.setItem("claunch-operator-project", name); } catch {}
+  data = null; seen.clear(); primed = false;
+  refresh();
+}
+
+/* ---- building one host ---- */
+function build(root) {
+  root.replaceChildren();
+  root.classList.add("operator-host");
+  const head = node("header", null, "operator-head");
+  const title = node("h1", "Operator");
+  const select = node("select"); select.className = "operator-project"; select.setAttribute("aria-label", "프로젝트");
+  select.onchange = () => setProject(select.value);
+  const status = node("span", "", "operator-status");
+  const start = node("span", null, "operator-start");
+  head.append(title, select, status, start);
+  const body = node("div", null, "operator-body");
+  const feedCol = node("section", null, "operator-conversation");
+  const feed = node("ol", null, "operator-feed"); feed.setAttribute("aria-live", "polite");
+  const form = node("form", null, "operator-composer");
+  const input = node("textarea"); input.rows = 2; input.maxLength = 12000;
+  input.placeholder = "Operator에게 말하기 — 질문, 판단 요청, 다른 세션에 전달할 지시 (Enter 전송, Shift+Enter 줄바꿈)";
+  input.setAttribute("aria-label", "Operator에게 보낼 메시지");
+  input.value = composer;
+  input.oninput = () => { composer = input.value; for (const h of hosts) if (h.parts.input !== input) h.parts.input.value = composer; };
+  input.onkeydown = event => {
+    if (event.key === "Enter" && !event.shiftKey && !event.isComposing) { event.preventDefault(); form.requestSubmit(); }
+  };
+  const send = node("button", "보내기"); send.type = "submit";
+  form.append(input, send);
+  form.onsubmit = async event => {
+    event.preventDefault();
+    const text = composer.trim();
+    if (!text) return;
+    send.disabled = true;
+    try {
+      await request(`api/operator/message?project=${encodeURIComponent(chosenProject())}`, {text});
+      composer = "";
+      for (const h of hosts) h.parts.input.value = "";
+      await refresh();
+    } catch (err) { notice(err.message); } finally { send.disabled = false; }
+  };
+  const note = node("p", "", "operator-notice"); note.setAttribute("role", "status");
+  feedCol.append(feed, note, form);
+  const side = node("aside", null, "operator-side");
+  side.setAttribute("aria-label", "관찰 중인 세션");
+  body.append(feedCol, side);
+  root.append(head, body);
+  return {root, parts: {select, status, start, feed, side, input, note}};
+}
+
+function notice(text) { for (const h of hosts) h.parts.note.textContent = text || ""; }
+
+function renderHead(h) {
+  const {select, status, start} = h.parts;
+  const names = projectNames.length ? projectNames : [chosenProject()];
+  if ([...select.options].map(o => o.value).join("\n") !== names.join("\n")) {
+    select.replaceChildren(...names.map(n => { const o = node("option", n); o.value = n; return o; }));
+  }
+  select.value = chosenProject();
+  const op = data?.operator;
+  status.textContent = !data ? "불러오는 중…" : !op ? "Operator 없음"
+    : op.running ? `${op.name} · ${op.status || "running"}` : `${op.name} · 종료됨`;
+  status.dataset.state = !op ? "none" : op.running ? "running" : "ended";
+  start.replaceChildren();
+  if (data && (!op || !op.running)) {
+    const pick = node("select"); pick.setAttribute("aria-label", "Operator 세션의 프로필");
+    for (const p of profiles) { const o = node("option", p); o.value = p; pick.append(o); }
+    const go = node("button", "Operator 시작"); go.type = "button";
+    go.onclick = async () => {
+      go.disabled = true;
+      try { await request("api/operator/start", {project: chosenProject(), profile: pick.value}); await refresh(); }
+      catch (err) { notice(err.message); } finally { go.disabled = false; }
+    };
+    start.append(pick, go);
+  }
+}
+
+function sessionLink(name) {
+  const a = node("a", name, "operator-ref");
+  a.href = "#/s/" + encodeURIComponent(name);
+  return a;
+}
+
+function renderAsk(item, e) {
+  if (e.answer) {
+    item.append(node("p", `답변: ${answerLine(e)}`, "operator-answer"));
+    return;
+  }
+  const box = node("div", null, "operator-ask-actions");
+  const note = node("textarea"); note.rows = 1; note.maxLength = 12000;
+  note.placeholder = e.type === "text" ? "답변 입력" : "메모 (선택)";
+  note.setAttribute("aria-label", note.placeholder);
+  note.value = drafts.get(e.id) || "";
+  note.oninput = () => drafts.set(e.id, note.value);
+  const answer = async body => {
+    for (const b of box.querySelectorAll("button")) b.disabled = true;
+    try {
+      await request(`api/operator/asks/${encodeURIComponent(e.id)}/answer?project=${encodeURIComponent(chosenProject())}`,
+        {...body, text: note.value.trim() || undefined});
+      drafts.delete(e.id);
+      await refresh();
+    } catch (err) { notice(err.message); for (const b of box.querySelectorAll("button")) b.disabled = false; }
+  };
+  const button = (label, cls, body) => { const b = node("button", label, cls); b.type = "button"; b.onclick = () => answer(body); return b; };
+  if (e.type === "approve") box.append(button("승인", "operator-approve", {decision: "approve"}), button("거절", "operator-deny", {decision: "deny"}));
+  else if (e.type === "choice") for (const c of e.choices || []) box.append(button(c, "operator-choice", {decision: c}));
+  else box.append(button("답변 보내기", "operator-approve", {}));
+  item.append(note, box);
+}
+
+function renderFeed(h) {
+  const list = h.parts.feed;
+  const atBottom = list.scrollHeight - list.scrollTop - list.clientHeight < 40;
+  const focused = list.contains(document.activeElement) ? document.activeElement : null;
+  if (focused) return;  // never rebuild under the reader's cursor
+  list.replaceChildren();
+  const feed = data?.feed || [];
+  if (!feed.length) {
+    list.append(node("li", data?.operator ? "아직 게시된 내용이 없습니다." : "이 프로젝트에는 Operator가 없습니다. 위에서 시작하십시오.", "operator-empty"));
+  }
+  for (const e of feed) {
+    const item = node("li", null, `operator-item operator-${e.kind}` + (e.level ? ` operator-level-${e.level}` : ""));
+    const meta = node("div", null, "operator-meta");
+    const who = e.role === "user" ? "나" : e.role === "system" ? "system" : "Operator";
+    meta.append(node("strong", who));
+    const time = node("time", new Date(e.at).toLocaleTimeString()); time.dateTime = e.at; meta.append(time);
+    if (e.level && e.level !== "info") meta.append(node("span", e.level === "urgent" ? "즉시 조치" : "확인 필요", "operator-level"));
+    item.append(meta);
+    if (e.kind === "dispatch") {
+      const line = node("p");
+      line.append("→ ", sessionLink(e.target), ` 에 전달 (${deliveryLabel(e.delivery)}): `);
+      line.append(node("span", e.text));
+      item.append(line);
+    } else if (e.kind === "user" || e.kind === "system") {
+      item.append(node("p", e.text));
+    } else {
+      const body = node("div", null, "operator-text");
+      if (typeof mdInto === "function") mdInto(body, e.text); else body.textContent = e.text;
+      item.append(body);
+    }
+    if ((e.refs || []).length) {
+      const refs = node("div", null, "operator-refs");
+      for (const r of e.refs) refs.append(sessionLink(r));
+      item.append(refs);
+    }
+    if (e.kind === "ask") renderAsk(item, e);
+    list.append(item);
+  }
+  if (atBottom || !h.scrolled) { list.scrollTop = list.scrollHeight; h.scrolled = true; }
+}
+
+function renderSide(h) {
+  const side = h.parts.side;
+  side.replaceChildren();
+  const asks = openAsks(data?.feed);
+  const head = node("h2", `관찰 중인 세션 ${(data?.sessions || []).length}`);
+  side.append(head);
+  if (asks.length) side.append(node("p", `응답을 기다리는 질문 ${asks.length}건`, "operator-pending"));
+  const list = node("ul", null, "operator-sessions");
+  for (const row of data?.sessions || []) {
+    const item = node("li");
+    const badge = sessionBadge(row);
+    const top = node("div", null, "operator-session-top");
+    top.append(sessionLink(row.name), node("span", badge.label, `operator-badge operator-badge-${badge.kind}`));
+    item.append(top);
+    if (row.summary) item.append(node("p", row.summary, "operator-summary"));
+    list.append(item);
+  }
+  if (!list.children.length) list.append(node("li", "실행 중인 세션이 없습니다.", "operator-empty"));
+  side.append(list);
+  const link = node("a", "Observer에서 자세히 보기"); link.href = "#/observer";
+  side.append(link);
+}
+
+function render() {
+  for (const h of hosts) {
+    if (!h.root.isConnected) continue;
+    renderHead(h); renderFeed(h); renderSide(h);
+  }
+}
+
+/* ---- polling, badge, notification ---- */
+function announce(feed) {
+  const fresh = freshUrgent(seen, feed);
+  for (const e of feed || []) seen.add(e.id);
+  if (!primed) { primed = true; return; }   // the first load is history, not news
+  if (!fresh.length || typeof Notification === "undefined" || Notification.permission !== "granted") return;
+  if (document.visibilityState === "visible" && [...hosts].some(h => h.root.isConnected && h.root.offsetParent)) return;
+  try { new Notification("Operator", {body: fresh[0].text.slice(0, 160), tag: "claunch-operator"}); } catch {}
+}
+function setBadge(total) {
+  for (const id of ["operator-nav-badge", "operator-fab-badge"]) {
+    const badge = document.getElementById(id);
+    if (!badge) continue;
+    badge.textContent = total ? String(total) : "";
+    badge.hidden = !total;
+  }
+  fab.classList.toggle("operator-fab-alert", !!total);
+}
+async function refreshBadge() {
+  try { setBadge((await request("api/operator/pending")).total); } catch {}
+}
+async function refresh() {
+  try {
+    const [view, projectList] = await Promise.all([
+      request(`api/operator?project=${encodeURIComponent(chosenProject())}`),
+      projectNames.length ? null : request("api/projects").catch(() => null),
+    ]);
+    data = view;
+    if (projectList) projectNames = (projectList.projects || []).map(p => p.name);
+    announce(view.feed);
+    render();
+  } catch (err) { notice(err.message); }
+  refreshBadge();
+}
+async function loadProfiles() {
+  if (profiles.length) return;
+  try { profiles = (await request("api/profiles")).profiles || []; } catch {}
+}
+function poll() {
+  clearInterval(timer);
+  timer = setInterval(() => { if (document.visibilityState === "visible") refresh(); }, 4000);
+}
+function attach(root) {
+  for (const h of hosts) if (h.root === root) return h;
+  const h = build(root);
+  hosts.add(h);
+  loadProfiles().then(render);
+  return h;
+}
+/* Hosts are kept for reuse; only the poll stops once neither is on screen.
+   The badge keeps its own slower poll either way. */
+function detachIdle() {
+  if (!pageOpen && !modal.open) { clearInterval(timer); timer = null; }
+}
+
+/* ---- the page ---- */
+let pageOpen = false;
+function open() {
+  pageOpen = true;
+  document.body.classList.add("operator-page");
+  attach(document.getElementById("operator-view"));
+  if (typeof Notification !== "undefined" && Notification.permission === "default") {
+    try { Notification.requestPermission(); } catch {}
+  }
+  refresh(); poll();
+}
+function stop() { pageOpen = false; document.body.classList.remove("operator-page"); detachIdle(); }
+
+/* ---- the modal ---- */
+const modal = document.createElement("dialog");
+modal.className = "operator-modal"; modal.setAttribute("aria-label", "Operator");
+const modalClose = node("button", "×", "operator-modal-close"); modalClose.type = "button";
+modalClose.setAttribute("aria-label", "닫기"); modalClose.title = "닫기 (Esc)";
+modalClose.onclick = () => modal.close();
+const modalRoot = node("div", null, "operator-modal-root");
+modal.append(modalClose, modalRoot);
+modal.addEventListener("close", () => detachIdle());
+document.body.append(modal);
+function openModal() {
+  if (!modal.open) modal.showModal();
+  attach(modalRoot);
+  refresh(); poll();
+  modalRoot.querySelector(".operator-composer textarea")?.focus();
+}
+
+/* The floating button: always there, whatever page is on screen. */
+const fab = node("button", null, "operator-fab"); fab.type = "button";
+fab.title = "Operator 열기 (Alt+O)"; fab.setAttribute("aria-label", "Operator 열기 (Alt+O)");
+fab.append(node("span", "◍", "operator-fab-icon"), node("span", "Operator", "operator-fab-label"));
+const fabBadge = node("span", "", "operator-badge-count"); fabBadge.id = "operator-fab-badge"; fabBadge.hidden = true;
+fab.append(fabBadge);
+fab.onclick = () => modal.open ? modal.close() : openModal();
+document.body.append(fab);
+document.addEventListener("keydown", event => {
+  if (event.altKey && !event.ctrlKey && !event.metaKey && (event.key === "o" || event.key === "O")) {
+    event.preventDefault();
+    modal.open ? modal.close() : openModal();
+  }
+});
+refreshBadge();
+badgeTimer = setInterval(() => { if (document.visibilityState === "visible") refreshBadge(); }, 15000);
+
+return {open, stop, openModal, refresh,
+        _test: {openAsks, freshUrgent, answerLine, deliveryLabel, sessionBadge}};
+})();

@@ -3018,6 +3018,30 @@ form can override it. A child starts at zero independently of its parent's count
 Periodic goal reminders use the machine's `cflow_reminder_interval` (600 seconds
 when unset or zero) and the session reminder pause/skip controls.
 
+**Operator** is a bot session per project that watches the project's other
+sessions for you. Start it from the **Operator** tab next to Observer (pick a
+profile, press **Operator 시작**); the daemon creates one session with role
+`operator` on mesh `operator-<project>`, running the bundled `operator`
+workflow (declare it where the session works — `claunch cflow update`
+refreshes the global layer). The same conversation opens as a modal over any
+page from the floating **Operator** button or **Alt+O**. The bot polls with
+`operator_poll` (Observer events plus cflow gates waiting on a person, open
+`observer_ask` questions and blocked sessions — no LLM call needed for those),
+posts only what changes what you do next with `operator_post`, and asks for
+decisions with `operator_ask` (approve/deny, choices or text; the badge and a
+browser notification say when one waits). What you type in the tab reaches the
+bot through `operator_inbox`, never its terminal, which only gets a one-line
+nudge. It may type into another session of its project with
+`operator_dispatch` only to relay an instruction of yours: the call names the
+message or answered ask it carries, and the relay is recorded in the feed.
+It never approves gates or answers other sessions' questions. HTTP:
+`GET /api/operator?project=P` (feed, bound session, watched sessions),
+`GET /api/operator/pending`, `POST /api/operator/start {project, profile}`,
+`POST /api/operator/message?project=P {text}`,
+`POST /api/operator/asks/{id}/answer?project=P {decision?, text?}`; the bot's
+own calls live under `/api/operator/agent/{session}/…` and are refused to any
+session that is not its project's bound operator.
+
 The daemon doubles as a web server. `claunch web --open` prints/opens the UI:
 a session list (status badges, create/kill) plus a **live xterm.js terminal**
 attached over WebSocket — full input and output, multiple viewers allowed.

@@ -7,6 +7,7 @@
 <link rel="stylesheet" href="static/vendor/xterm.css">
 <link rel="stylesheet" href="static/style.css">
 <link rel="stylesheet" href="static/observer.css">
+<link rel="stylesheet" href="static/operator.css">
 </head>
 <body>
 <div id="auth-overlay" class="hidden">
@@ -185,6 +186,7 @@
     </div>
     <nav id="rail-nav">
       <a href="#/observer" data-page="observer"><span>◎</span>Observer</a>
+      <a href="#/operator" data-page="operator"><span>◍</span>Operator<span id="operator-nav-badge" class="operator-badge-count" hidden></span></a>
       <a href="#/" data-page="home"><span>⌂</span>Home</a>
       <a href="#/new" data-page="new"><span>+</span>New</a>
       <a href="#/mesh" data-page="meshes"><span>◉</span>Mesh</a>
@@ -203,6 +205,9 @@
 
   <main id="main">
     <nav id="session-tabs" class="hidden" aria-label="Recent and pinned sessions"></nav>
+    <!-- The project Operator bot's conversation (operator.js builds it; the
+         same view also opens as a modal over any page). -->
+    <section id="operator-view" class="hidden" aria-label="Operator"></section>
     <section id="observer-view" class="hidden">
       <section id="observer-token-summary" aria-label="관찰 API 토큰 사용량">
         <button id="observer-token-toggle" aria-expanded="false" aria-controls="observer-token-detail"><span>토큰</span><span id="observer-token-compact">조회 중…</span><span id="observer-token-chevron" aria-hidden="true">⌄</span></button>
@@ -982,6 +987,7 @@
 <script src="static/observer.js"></script>
 <script src="static/diagram-viewport.js"></script>
 <script src="static/search-anything.js"></script>
+<script src="static/operator.js"></script>
 <script src="static/session-tabs.js"></script>
 <script src="static/session-grid.js"></script>
 <script src="static/app.js"></script>
