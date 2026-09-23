@@ -243,7 +243,10 @@ option:disabled { color: #6b7280; }
 }
 #session-grid .sg-cell:hover { background: #22262d; }
 #session-grid .sg-cell.active { background: #2b313b; border-color: #385273; }
-#session-grid .sg-cell:focus-visible { outline: 2px solid #58a6ff; outline-offset: -1px; }
+/* The cell that holds the keyboard, and so the card keys (k, p, ...): red,
+   like the list's "⌨ card" chip and ring. A border colour, so the cell does
+   not move when it takes focus. */
+#session-grid .sg-cell:focus { outline: none; border-color: #f85149; }
 #session-grid .sg-cell.session-filtered { opacity: 0.25; }
 #session-grid .sg-cell.dragging { opacity: 0.4; }
 #session-grid .sg-cell.empty {
