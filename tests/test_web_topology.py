@@ -377,6 +377,7 @@ CHECKS = [
         "sendinput_check.js",
         "clipboard_check.js",
         "promptpresets_check.js",
+        "prompter_check.js",
         "holdchip_check.js",
         "backpressure_check.js",
         "seq_check.js",

@@ -50,7 +50,7 @@ from . import handoff as handoff_mod
 from . import notice as notice_mod
 from . import rag as rag_mod
 from . import (
-    briefing, cflow_clock, clipty, ctxsize, loops, onboard, prompt_presets,
+    briefing, cflow_clock, clipty, ctxsize, loops, onboard, prompt_presets, prompter,
     rebrief, session_input, status_checks,
 )
 from . import paths
@@ -467,6 +467,9 @@ def build_app(
     r.add_post("/api/prompt-presets", h_prompt_presets_add)
     r.add_put("/api/prompt-presets/{preset_id}", h_prompt_presets_update)
     r.add_delete("/api/prompt-presets/{preset_id}", h_prompt_presets_remove)
+    r.add_get("/api/prompter", h_prompter_get)
+    r.add_put("/api/prompter", h_prompter_set)
+    r.add_get("/api/prompter/prompts", h_prompter_prompts)
     r.add_get("/api/status-checks", h_status_checks)
     r.add_post("/api/status-checks", h_status_checks_add)
     r.add_put("/api/status-checks/{check_id}", h_status_checks_update)
@@ -2276,6 +2279,45 @@ async def h_prompt_presets_update(request: web.Request) -> web.Response:
                 return json_response({"presets": saved, "preset": incoming})
         return json_error(404, f"no prompt preset named {preset_id!r}")
     except prompt_presets.PromptPresetError as exc:
+        return json_error(500, str(exc))
+
+
+async def h_prompter_get(request: web.Request) -> web.Response:
+    """The prompter server setting: ``{"url": <base URL or null>}``."""
+    try:
+        return json_response({"url": prompter.configured_url()})
+    except store.StoreError as exc:
+        return json_error(500, str(exc))
+
+
+async def h_prompter_set(request: web.Request) -> web.Response:
+    """Set or clear (blank/null ``url``) the prompter server's base URL.
+
+    Answers with the stored URL and a fresh fetch of its prompts, so the
+    settings page can say at once whether the address works.
+    """
+    body = await _json_body(request)
+    try:
+        url = prompter.set_url(body.get("url"))
+        answer = await prompter.prompts(refresh=True)
+        return json_response({"url": url, "status": answer})
+    except prompter.PrompterURLError as exc:
+        return json_error(400, str(exc))
+    except store.StoreError as exc:
+        return json_error(500, str(exc))
+
+
+async def h_prompter_prompts(request: web.Request) -> web.Response:
+    """The prompter server's prompt snippets for the footer.
+
+    Always 200: an unset URL answers ``enabled: false`` and an unreachable
+    server ``connected: false`` — both with an empty list the UI hides.
+    ``?refresh=1`` skips the short cache.
+    """
+    refresh = request.query.get("refresh") in ("1", "true", "yes")
+    try:
+        return json_response(await prompter.prompts(refresh=refresh))
+    except store.StoreError as exc:
         return json_error(500, str(exc))
 
 

@@ -442,6 +442,11 @@
          A click places its message in the current session's field, ready for
          the operator to review or send. -->
     <div id="term-preset-buttons" class="hidden" aria-label="Prompt presets"></div>
+    <!-- Prompt snippets fetched from the prompter server set on the settings
+         page (daemon/prompter.py). One line tall until the toggle expands it;
+         hidden when no server is set or it cannot be reached. A click places
+         the snippet in the field without sending it. -->
+    <div id="term-prompter-row" class="hidden" aria-label="prompter prompts"></div>
     <!-- The native input under the terminal. Everything the terminal's
          own textarea is bad at — an IME composing a syllable, a phone's soft
          keyboard, a pasted block — is what a web <input> IS for, so this is
