@@ -170,6 +170,10 @@ function build(opts) {
     "renderRelayBadge", "refreshProfiles", "refreshHarnesses", "refreshRoles",
     "refreshWorkspaces", "refreshSessions", "refreshMeshList", "refreshCflow",
     "refreshTermQueued", "reconnectNow", "route",
+    // The drain check below runs boot() and pollOnce() whole; these are
+    // other checks' subjects (notice_check lists the same), here they only
+    // have to exist.
+    "refreshNewWorktree", "refreshProjects", "ensureControlSocket",
     code +
     "\nreturn {notify, dismissNotice, noticeClock, setDaemonOnline, " +
     "refreshRestartGate, pollOnce, boot," +
@@ -182,9 +186,10 @@ function build(opts) {
     setTimeoutStub, clearTimeoutStub, FakeDate, apiStub, daemonHealth,
     () => {}, () => {}, () => {}, () => {}, () => {}, () => {}, () => {},
     () => {}, () => {}, () => {}, () => {},
+    () => {}, () => {}, () => {},
   );
 
-  return { api, nodes, clock, gate, apiCalls,
+  return { api, nodes, clock, gate, apiCalls, daemon,
            strip: () => nodes.notices.children,
            said: () => nodes.notices.children.map((c) => c.text()).join(" | ") };
 }
@@ -282,6 +287,80 @@ const clockBase = () => 1700000000000;
     check("and the badge says what is happening",
           w.nodes["daemon-info"].textContent === "restarting…",
           w.nodes["daemon-info"].textContent);
+  })();
+}
+
+/* --- approve, then the drain: the old daemon still answers for a while --
+   The approval POST returns before the old process stops: it finishes the
+   reply, drains its sessions (beads wind-down included), and only then
+   lets go of the port. Polls in that window reach the SAME boot id. They
+   used to read as "the link came back" and posted "daemon back", and the
+   real stop that followed posted "daemon offline" — two cards, in reverse
+   order, about an outage the person had just asked for. The only event in
+   a requested restart is the successor's boot id. */
+{
+  const w = build();
+  (async () => {
+    await w.api.pollOnce();               // first poll seeds the page: booted, boot b1
+    w.gate.rec = pending();
+    await w.api.refreshRestartGate();
+    const actions = w.strip()[0].children.find((c) => c.className.includes("gate-actions"));
+    await actions.children.find((b) => b.textContent === "Approve").click();
+
+    w.gate.rec = pending({ status: "approved" });
+    await w.api.pollOnce();               // old daemon, still draining
+    check("a poll during the drain does not announce the daemon back",
+          !/daemon back/.test(w.said()), w.said());
+    check("the restarting card stays up through the drain",
+          /restarting the daemon/.test(w.said()), w.said());
+    check("and so does the badge",
+          w.nodes["daemon-info"].textContent === "restarting…",
+          w.nodes["daemon-info"].textContent);
+
+    w.daemon.up = false;                  // the old process lets go
+    await w.api.pollOnce();
+    check("the requested stop is not reported as an outage",
+          !/daemon offline/.test(w.said()), w.said());
+    check("the restarting card is still what the strip says",
+          /restarting the daemon/.test(w.said()), w.said());
+
+    w.daemon.up = true;                   // the successor answers
+    w.daemon.boot = "b2";
+    await w.api.pollOnce();
+    check("the successor is announced as a restart",
+          /daemon restarted/.test(w.said()), w.said());
+    check("and the restarting card is gone with the gap it labelled",
+          !/restarting the daemon/.test(w.said()), w.said());
+    check("with no back/offline card left over from the drain",
+          !/daemon back|daemon offline/.test(w.said()), w.said());
+
+    // After the restart the page is an ordinary page again: a real outage
+    // of the successor is an outage and is said as one.
+    w.daemon.up = false;
+    await w.api.pollOnce();
+    check("a later outage is reported again",
+          /daemon offline/.test(w.said()), w.said());
+  })();
+}
+
+/* --- approve, and the old daemon never goes: the wait is bounded --------- */
+{
+  const w = build();
+  (async () => {
+    await w.api.pollOnce();
+    w.gate.rec = pending();
+    await w.api.refreshRestartGate();
+    const actions = w.strip()[0].children.find((c) => c.className.includes("gate-actions"));
+    await actions.children.find((b) => b.textContent === "Approve").click();
+    w.gate.rec = null;
+    await w.api.pollOnce();
+    check("inside the drain window the same daemon is still the drain",
+          /restarting the daemon/.test(w.said()), w.said());
+    w.clock.at += 5 * 60 * 1000;          // the drain bound has passed
+    await w.api.pollOnce();
+    check("past the bound the same daemon is said to be back, unrestarted",
+          /daemon back/.test(w.said()) && /never\s+restarted/.test(w.said()), w.said());
+    check("and the page is online again", w.api.online === true, w.api.online);
   })();
 }
 
