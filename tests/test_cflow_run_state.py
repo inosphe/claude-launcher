@@ -373,3 +373,23 @@ def test_verify_reads_the_run_state(proj):
     engine.set_state("notes", "go", by="user")
     engine.report("did it")
     assert engine.next_step()["step_id"] == "review"
+
+
+def test_the_cli_says_who_ticks_an_item(proj, capsys):
+    """A ticked item has no exit code; 'could not measure' would read as broken."""
+    from claude_launcher import cli_cflow
+
+    engine.start("stated")
+    engine.set_state("steps.review.skip", True, by="user")
+    payload = _advance()
+    cli_cflow._print_checklist(payload["checklist"])
+    out = capsys.readouterr().out
+    assert (
+        "approved: the person looked at the result (waits for user to tick it: "
+        "claunch cflow set steps.landed.checklist.approved true)"
+    ) in out
+    engine.set_state("steps.landed.checklist.approved", True, by="user")
+    cli_cflow._print_checklist(engine.status()["checklist"])
+    out = capsys.readouterr().out
+    assert "approved: the person looked at the result (set by user)" in out
+    assert "could not measure" not in out.split("fast:")[0]

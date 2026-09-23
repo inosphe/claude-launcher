@@ -525,9 +525,18 @@ def _print_checklist(checklist: dict) -> None:
     pad = " " * _LABEL
     for item in checklist.get("items") or []:
         code = item.get("exit_code")
-        detail = "not measured yet" if item.get("measured_at") is None else (
-            f"exit {code}" if code is not None else "could not measure"
-        )
+        if item.get("by"):
+            # Ticked, not measured: there is no exit code to report, and "could
+            # not measure" would read as a broken command.
+            who = "/".join(item["by"])
+            detail = item.get("output") if item.get("ok") else (
+                f"waits for {who} to tick it: claunch cflow set {item.get('path')} true"
+                if "user" in item["by"] and item.get("path") else f"waits for {who}"
+            )
+        else:
+            detail = "not measured yet" if item.get("measured_at") is None else (
+                f"exit {code}" if code is not None else "could not measure"
+            )
         print(f"{pad}{_MARKS.get(item.get('ok'), '[?]')} {item.get('id')}: "
               f"{item.get('describe')} ({detail})")
     then = checklist.get("then")

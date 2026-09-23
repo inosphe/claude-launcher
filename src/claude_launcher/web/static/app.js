@@ -5833,6 +5833,22 @@ function checklistClass(ok) {
    merge this branch, did the live daemon pick the merge up -- used to be
    carried by the step's prose, so the only account of which parts were true
    was the driving agent's, and a person watching had no way to check it. */
+/* What a checklist item's state says, beside its mark. A ticked item (`by` in
+   place of a command) has no exit code, and "could not measure" would read as
+   a broken command -- so it says who ticks it and how. */
+function checklistItemDetail(item) {
+  if (Array.isArray(item.by) && item.by.length) {
+    if (item.ok) return item.output || "ticked";
+    return `waits for ${item.by.join("/")} to tick it` +
+      (item.path && item.by.includes("user")
+        ? ` (claunch cflow set ${item.path} true)` : "");
+  }
+  if (item.exit_code === null || item.exit_code === undefined) {
+    return item.measured_at ? "could not measure" : "not measured yet";
+  }
+  return `exit ${item.exit_code}`;
+}
+
 function checklistLines(checklist) {
   const out = [];
   if (!checklist) return out;
@@ -5846,9 +5862,7 @@ function checklistLines(checklist) {
   for (const item of checklist.items || []) {
     const line = cflowLine(
       `${checklistMark(item.ok)} ${item.id}: ${item.describe}` +
-      (item.exit_code === null || item.exit_code === undefined
-        ? (item.measured_at ? " (could not measure)" : " (not measured yet)")
-        : ` (exit ${item.exit_code})`),
+      ` (${checklistItemDetail(item)})`,
       `checklist-item ${checklistClass(item.ok)}`
     );
     out.push(line);
@@ -18882,10 +18896,7 @@ function wfActions(data, opts = {}) {
       row.appendChild(el("span", "wf-check-mark", checklistMark(item.ok)));
       const body = el("div", "wf-check-body");
       body.appendChild(el("div", "wf-check-what", item.describe || item.id));
-      const detail =
-        item.exit_code === null || item.exit_code === undefined
-          ? (item.measured_at ? "could not measure" : "not measured yet")
-          : `exit ${item.exit_code}`;
+      const detail = checklistItemDetail(item);
       body.appendChild(el(
         "div", "wf-check-meta",
         `${item.id} \u2014 ${detail}` +

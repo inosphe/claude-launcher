@@ -135,6 +135,31 @@ check("an item nobody has measured yet says so", () => {
   }
 });
 
+check("a ticked item says who ticks it, never 'could not measure'", () => {
+  const gate = {
+    ...GATE, total: 2, passed: 1,
+    items: [
+      { id: "approved", describe: "the person looked", ok: false,
+        exit_code: null, measured_at: null, by: ["user"],
+        path: "steps.landed.checklist.approved" },
+      { id: "signed", describe: "signed off", ok: true, exit_code: null,
+        measured_at: "2026-09-23T06:00:00+00:00", by: ["user"],
+        output: "set by user" },
+    ],
+  };
+  const items = scope.checklistLines(gate)
+    .filter((l) => l.classes.has("checklist-item"));
+  if (!items[0].text.includes(
+      "waits for user to tick it (claunch cflow set "
+      + "steps.landed.checklist.approved true)")) {
+    throw new Error(`unticked item reads as: ${items[0].text}`);
+  }
+  if (!items[1].text.includes("set by user")
+      || items[1].text.includes("could not measure")) {
+    throw new Error(`ticked item reads as: ${items[1].text}`);
+  }
+});
+
 check("the head counts what is true and names who moves the run", () => {
   const lines = scope.checklistLines(GATE);
   if (!lines[0].text.includes("1/3")) {
