@@ -82,4 +82,26 @@ const denied = { getItem() { throw Error("denied"); }, setItem() { throw Error("
 const ephemeral = new SessionGridLayout(denied, "grid");
 ephemeral.place([{ name: "q" }]);
 assert.deepEqual(cells(ephemeral), [["alpha", "q"]]);
+// Wrapped rows: whole lines of perLine cells, with room for one more.
+values.delete("wrap");
+const wrap = new SessionGridLayout(storage, "wrap");
+wrap.addRow();
+wrap.place(["a", "b", "c", "d", "e"].map(name => ({ name })));   // bravo: a..e
+assert.equal(wrap.span(0, 4), 4, "an empty row is one line");
+assert.equal(wrap.span(1, 4), 8, "five cells plus one free wrap onto two lines of four");
+assert.equal(wrap.span(1, 3), 6);
+assert.equal(wrap.span(1, 5), 10, "a full line of five still leaves a free cell below");
+// Up/down walk lines inside a row before leaving it, keeping the slot.
+assert.deepEqual(wrap.neighbor(1, 1, 1, 0, 4), { row: 1, col: 5 });
+assert.equal(wrap.neighbor(1, 5, 1, 0, 4), null, "past the last line of the last row");
+assert.deepEqual(wrap.neighbor(1, 5, -1, 0, 4), { row: 1, col: 1 });
+assert.deepEqual(wrap.neighbor(1, 2, -1, 0, 4), { row: 0, col: 2 }, "into the last line of the row above");
+assert.deepEqual(wrap.neighbor(0, 3, 1, 0, 4), { row: 1, col: 3 }, "into the first line of the row below");
+assert.equal(wrap.neighbor(0, 3, -1, 0, 4), null);
+assert.equal(wrap.neighbor(1, 7, 0, 1, 4), null, "right stops at the end of the drawn cells");
+assert.deepEqual(wrap.neighbor(1, 4, 0, -1, 4), { row: 1, col: 3 }, "left runs back along the row");
+// Alt+down from the first line lands one line lower in the same row.
+const wrapPresent = new Set(["a", "b", "c", "d", "e"]);
+assert.ok(wrap.moveBy("b", 1, 0, wrapPresent, 4));
+assert.deepEqual(cells(wrap)[1], ["bravo", "a", null, "c", "d", "e", "b"]);
 console.log("sessiongrid_check: ok");

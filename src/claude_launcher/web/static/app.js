@@ -1481,8 +1481,10 @@ function toggleSessionPin(name) {
    lineage and state, so its place moves whenever the fleet around it does;
    the grid gives each one a fixed cell in a named row (session-grid.js) that
    only a person moves -- by dragging a cell, or Alt+arrow on a focused one.
-   The view choice and the layout are both remembered per browser, like the
-   pins and the folds above. The list is still built on every poll while the
+   A row's cells wrap onto lines of 3, 4 or 5 (the reader's pick) instead of
+   running off the rail's edge, so the grid scrolls only downwards.
+   The view choice, the line width and the layout are all remembered per
+   browser, like the pins and the folds above. The list is still built on every poll while the
    grid is shown, so switching back is instant and nothing the list's own
    helpers expect is missing. */
 const SESSION_VIEW_KEY = `claunch_session_view:${BASE}`;
@@ -1490,6 +1492,15 @@ const SESSION_GRID_KEY = `claunch_session_grid:${BASE}`;
 let sessionView = (() => {
   try { return localStorage.getItem(SESSION_VIEW_KEY) === "grid" ? "grid" : "list"; } catch {}
   return "list";
+})();
+const SESSION_GRID_PER_LINE_KEY = `claunch_session_grid_per_line:${BASE}`;
+const SESSION_GRID_PER_LINE = [3, 4, 5];
+let sessionGridPerLine = (() => {
+  try {
+    const n = Number(localStorage.getItem(SESSION_GRID_PER_LINE_KEY));
+    if (SESSION_GRID_PER_LINE.includes(n)) return n;
+  } catch {}
+  return 4;
 })();
 let sessionGrid = null;
 let sessionGridDragging = null;
@@ -1501,6 +1512,13 @@ let sessionGridPicked = null;
 // is not read as the tap that places it (or as a click that opens it).
 let sessionGridHoldRelease = false;
 const SESSION_GRID_HOLD_MS = 450;
+
+function setSessionGridPerLine(n) {
+  if (!SESSION_GRID_PER_LINE.includes(n)) return;
+  sessionGridPerLine = n;
+  try { localStorage.setItem(SESSION_GRID_PER_LINE_KEY, String(n)); } catch {}
+  renderSessionGrid(true);
+}
 
 function sessionGridLayout() {
   if (!sessionGrid && typeof SessionGridLayout === "function") {
@@ -1553,7 +1571,7 @@ function renderSessionGrid(force = false) {
   const records = new Map(visible.map((s) => [s.name, s]));
   const searching = typeof sessionMatchesSearch === "function";
   const signature = JSON.stringify([
-    layout.rows, currentName,
+    layout.rows, currentName, sessionGridPerLine,
     visible.map((s) => [s.name, s.status, s.paused_at, s.role,
                         handleTag(s.name)?.handle || null,
                         searching ? sessionMatchesSearch(s) : true,
@@ -1563,33 +1581,27 @@ function renderSessionGrid(force = false) {
   host._gridSignature = signature;
   const focusName = host.contains(document.activeElement)
     ? document.activeElement.dataset.name : null;
-  const keptScroll = [host.scrollLeft, host.scrollTop];
+  const keptScroll = host.scrollTop;
   host.replaceChildren();
-  const cols = layout.columns();
-  host.style.setProperty("--sg-cols", String(cols));
+  const perLine = sessionGridPerLine;
+  host.style.setProperty("--sg-per-line", String(perLine));
   if (sessionGridPicked && !records.has(sessionGridPicked)) sessionGridPicked = null;
   host.classList.toggle("sg-picking", !!sessionGridPicked);
-  // Column numbers, so a position can be named -- "bravo 3" -- and found
-  // again the same way.
-  const ruler = document.createElement("div");
-  ruler.className = "sg-row sg-ruler";
-  ruler.append(Object.assign(document.createElement("div"), { className: "sg-row-head" }));
-  for (let c = 0; c < cols; c++) {
-    ruler.append(Object.assign(document.createElement("div"), {
-      className: "sg-col-num", textContent: String(c + 1),
-    }));
-  }
-  host.append(ruler);
+  host.append(sessionGridPerLineControl());
   const present = new Set(records.keys());
   layout.rows.forEach((row, r) => {
-    const line = document.createElement("div");
-    line.className = "sg-row";
-    line.dataset.row = row.id;
-    line.append(sessionGridRowHead(layout, row, present));
-    for (let c = 0; c < cols; c++) {
-      line.append(sessionGridCell(layout, row, r, c, records, present, searching));
+    const block = document.createElement("div");
+    block.className = "sg-row";
+    block.dataset.row = row.id;
+    block.append(sessionGridRowHead(layout, row, present));
+    const body = document.createElement("div");
+    body.className = "sg-cells";
+    const span = layout.span(r, perLine);
+    for (let c = 0; c < span; c++) {
+      body.append(sessionGridCell(layout, row, r, c, records, present, searching));
     }
-    host.append(line);
+    block.append(body);
+    host.append(block);
   });
   const add = document.createElement("button");
   add.type = "button";
@@ -1601,11 +1613,37 @@ function renderSessionGrid(force = false) {
     renderSessionGrid(true);
   });
   host.append(add);
-  [host.scrollLeft, host.scrollTop] = keptScroll;
+  host.scrollTop = keptScroll;
   if (focusName) {
     host.querySelector(`.sg-cell[data-name="${CSS.escape(focusName)}"]`)
       ?.focus({ preventScroll: true });
   }
+}
+
+/* Cells per line: 3, 4 or 5, as one radio group at the top of the grid. */
+function sessionGridPerLineControl() {
+  const box = document.createElement("fieldset");
+  box.className = "sg-per-line";
+  const legend = document.createElement("legend");
+  legend.textContent = "cells per line";
+  box.append(legend);
+  for (const n of SESSION_GRID_PER_LINE) {
+    const label = document.createElement("label");
+    const input = document.createElement("input");
+    input.type = "radio";
+    input.name = "session-grid-per-line";
+    input.value = String(n);
+    input.checked = n === sessionGridPerLine;
+    input.addEventListener("change", () => {
+      if (input.checked) setSessionGridPerLine(n);
+    });
+    const span = document.createElement("span");
+    span.textContent = String(n);
+    label.title = `${n} cells per line`;
+    label.append(input, span);
+    box.append(label);
+  }
+  return box;
 }
 
 function sessionGridRowHead(layout, row, present) {
@@ -1685,16 +1723,23 @@ function sessionGridCell(layout, row, r, c, records, present, searching) {
   const name = row.cells[c] || null;
   const s = name ? records.get(name) : null;
   const where = `${row.name} ${c + 1}`;
+  // The cell's own number, so a position can be named -- "bravo 7" -- and
+  // found again the same way now that a row runs over several lines.
+  const num = document.createElement("span");
+  num.className = "sg-num";
+  num.textContent = String(c + 1);
   if (!s) {
     cell.classList.add("empty");
     if (name) {
       // Out of this view (archived, filtered, cleared): the cell stays its
       // and says whose it is, until something is moved onto it.
       cell.classList.add("absent");
-      cell.textContent = name;
+      cell.append(num, Object.assign(document.createElement("span"),
+        { className: "sg-name", textContent: name }));
       cell.title = `${where} — ${name}, not in this view; its place is kept`;
     } else {
       cell.title = `${where} — empty`;
+      cell.append(num);
     }
   } else {
     cell.dataset.name = s.name;
@@ -1712,7 +1757,7 @@ function sessionGridCell(layout, row, r, c, records, present, searching) {
     sub.className = "sg-sub";
     const hTag = handleTag(s.name);
     sub.textContent = hTag ? hTag.handle : (s.role || "");
-    cell.append(dot, label, sub);
+    cell.append(dot, num, label, sub);
     const brief = typeof briefingTabTooltip === "function"
       ? briefingTabTooltip(s.briefing) : "";
     cell.title = `${where} — ${s.name}${hTag ? ` (${hTag.handle})` : ""} — ${s.status}`
@@ -1739,17 +1784,18 @@ function sessionGridCell(layout, row, r, c, records, present, searching) {
                      ArrowUp: [-1, 0], ArrowDown: [1, 0] }[ev.key];
       if (!step) return;
       ev.preventDefault();
+      const perLine = sessionGridPerLine;
       if (ev.altKey) {
-        if (layout.moveBy(s.name, step[0], step[1], present)) renderSessionGrid(true);
+        if (layout.moveBy(s.name, step[0], step[1], present, perLine)) renderSessionGrid(true);
         return;
       }
-      // Plain arrows walk the occupied cells, the way the eye does.
+      // Plain arrows walk to the next occupied cell in that direction, line
+      // by line, the way the eye does.
       const host = $("session-grid");
-      const rows = [...host.querySelectorAll(".sg-row[data-row]")];
-      for (let rr = r + step[0], cc = c + step[1];
-        rr >= 0 && rr < rows.length && cc >= 0 && cc < layout.columns();
-        rr += step[0], cc += step[1]) {
-        const next = rows[rr].children[cc + 1];
+      for (let at = layout.neighbor(r, c, step[0], step[1], perLine); at;
+        at = layout.neighbor(at.row, at.col, step[0], step[1], perLine)) {
+        const next = host.querySelector(
+          `.sg-cell[data-row="${layout.rows[at.row].id}"][data-col="${at.col}"]`);
         if (next && next.dataset.name) { next.focus(); break; }
       }
     });

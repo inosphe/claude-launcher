@@ -187,14 +187,49 @@ globalThis.SessionGridLayout = class SessionGridLayout {
     return true;
   }
 
-  /* Keyboard form of move: one step in a direction. Refused at the left edge
-     and past the first or last row rather than wrapping. */
-  moveBy(name, dRow, dCol, present = new Set()) {
+  /* How many cells row `rowIndex` is drawn with when its cells wrap onto
+     lines of `perLine`: whole lines, enough to hold every occupied cell and
+     one empty one after them. Cell `col` sits on line floor(col / perLine)
+     at slot col % perLine, so a cell's place on screen follows from its
+     column alone and never from what else is in the row. */
+  span(rowIndex, perLine) {
+    const row = this.rows[rowIndex];
+    const used = (row ? row.cells.length : 0) + 1;
+    return Math.ceil(used / perLine) * perLine;
+  }
+
+  /* The cell one step from (rowIndex, col), or null past an edge. Without
+     `perLine` rows are single lines and up/down keep the column. With it,
+     up/down go line by line: to the next line of the same row while there is
+     one, then to the first line of the next row (or the last line of the
+     previous one), keeping the slot. Left/right stay inside the row. */
+  neighbor(rowIndex, col, dRow, dCol, perLine = 0) {
+    const rows = this.rows.length;
+    if (dCol) {
+      const next = col + dCol;
+      if (next < 0 || (perLine && next >= this.span(rowIndex, perLine))) return null;
+      return { row: rowIndex, col: next };
+    }
+    if (!perLine) {
+      const next = rowIndex + dRow;
+      return next < 0 || next >= rows ? null : { row: next, col };
+    }
+    if (dRow > 0) {
+      if (col + perLine < this.span(rowIndex, perLine)) return { row: rowIndex, col: col + perLine };
+      return rowIndex + 1 < rows ? { row: rowIndex + 1, col: col % perLine } : null;
+    }
+    if (col - perLine >= 0) return { row: rowIndex, col: col - perLine };
+    if (rowIndex === 0) return null;
+    return { row: rowIndex - 1, col: this.span(rowIndex - 1, perLine) - perLine + (col % perLine) };
+  }
+
+  /* Keyboard form of move: one step in a direction (see neighbor). Refused
+     at the edges rather than wrapping. */
+  moveBy(name, dRow, dCol, present = new Set(), perLine = 0) {
     const from = this.positionOf(name);
     if (!from) return false;
-    const row = from.row + dRow;
-    const col = from.col + dCol;
-    if (row < 0 || row >= this.rows.length || col < 0) return false;
-    return this.move(name, this.rows[row].id, col, present);
+    const to = this.neighbor(from.row, from.col, dRow, dCol, perLine);
+    if (!to) return false;
+    return this.move(name, this.rows[to.row].id, to.col, present);
   }
 };
