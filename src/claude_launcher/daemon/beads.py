@@ -83,7 +83,9 @@ from typing import Awaitable, Callable, Dict, List, Optional, Sequence, Tuple
 from .. import (
     beads_db, beads_meta, cli_beads, reports as reports_mod, store, workspaces,
 )
-from .session import STATUS_BUSY, STATUS_IDLE, Session
+from .session import (
+    CATEGORY_PAUSED, STATUS_BUSY, STATUS_IDLE, Session, session_category,
+)
 
 log = logging.getLogger("claude_launcher.daemon.beads")
 
@@ -1803,12 +1805,21 @@ class Board:
         risk of going untracked once it moves on or exits), plus the
         unassigned pool the operator drags from.
 
+        Each lane also carries the session's ``category`` -- running, paused,
+        killed or archived (:func:`session.session_category`, the partition
+        the session list filters on; ``None`` for an assignee the daemon does
+        not know). The page draws the running and paused lanes and folds the
+        rest: ``status`` cannot tell them apart, since a paused session has
+        exited and answers ``exited`` like a killed one.
+
         The lanes are sessions first, in the daemon's order, then any other
         assignee an active issue names (a human, a session on another
         machine) -- a card that could not be dragged back to a lane the page
         does not draw would be stuck. An exited session with nothing assigned
-        and no follow-up of its own draws no lane; one that still holds
-        either does, so what it left behind can be seen and moved.
+        and no follow-up of its own draws no lane -- unless it is paused,
+        since a paused session is one the operator means to resume and so a
+        row to drag work onto; one that still holds either does, so what it
+        left behind can be seen and moved.
         ``cflow_for(name, cwd)`` is the run summary a lane head shows beside
         the session's status (``None`` for none).
         """
@@ -1847,12 +1858,16 @@ class Board:
                 s = by_name.get(name)
                 queue = queue_of(active, name)
                 created = created_of(active, name)
-                if s is not None and s.status() == "exited" and not queue and not created:
+                category = session_category(s) if s is not None else None
+                if (s is not None and s.status() == "exited"
+                        and category != CATEGORY_PAUSED
+                        and not queue and not created):
                     continue
                 lane: dict = {
                     "session": name,
                     "known": s is not None,
                     "status": s.status() if s is not None else None,
+                    "category": category,
                     "issue": s.sdef.issue if s is not None else None,
                     "cflow": None,
                     # The cards carry an excerpt, not the text: every lane on

@@ -15232,7 +15232,7 @@ let beadsRelated = null;   // { id, results, error }
    because the 15s poll rebuilds every node in it: a group opened under the
    reader's hand would fold shut again at the next tick. Keyed by board root,
    and by `<root>|<session>|<status>` for one cell. */
-const beadsQSpentOpen = new Set();   // roots whose ended-session group is drawn
+const beadsQSpentOpen = new Set();   // roots whose not-running-or-paused group is drawn
 const beadsQPoolOpen = new Set();    // roots whose unassigned pool is drawn
 const beadsQCellOpen = new Set();    // cells drawn past BEADS_Q_CELL_CAP
 
@@ -16821,7 +16821,9 @@ function renderQueues(view) {
     "assignee's to move. A worker lands its whole queue as one batch. " +
     "Rows come busiest first: the queues with something in flight " +
     "(in_progress, in_review), then the ones with work waiting, then the " +
-    "idle. Sessions that have ended are folded away, and so is an " +
+    "idle. Only running and paused sessions get a row: killed and archived " +
+    "sessions and assignees that are not a session here are folded away, " +
+    "and so is an " +
     "unassigned pool of more than " + BEADS_Q_CELL_CAP + " — both are still " +
     "drop targets while folded, so taking an issue off a queue never needs " +
     "the fold opened first."));
@@ -16864,7 +16866,7 @@ function beadsQueuesBoard(board, statuses) {
   head.appendChild(el("span", "wf-note",
     lanes.length
       ? `${live.length} live queue${live.length === 1 ? "" : "s"}` +
-        (spent.length ? ` · ${spent.length} ended` : "") +
+        (spent.length ? ` · ${spent.length} hidden` : "") +
         ` · ${pool.length} unassigned`
       : "no queue here"));
   sec.appendChild(head);
@@ -16888,7 +16890,7 @@ function beadsQueuesBoard(board, statuses) {
     const held = spent.reduce((n, l) => n + (l.issues || []).length, 0);
     grid.appendChild(beadsQFoldBar(
       open,
-      `${spent.length} ended session${spent.length === 1 ? "" : "s"}, ` +
+      `${spent.length} not running or paused, ` +
         `holding ${held} issue${held === 1 ? "" : "s"}`,
       () => {
         if (open) beadsQSpentOpen.delete(root);
@@ -16908,14 +16910,20 @@ function beadsQueuesBoard(board, statuses) {
   return sec;
 }
 
-/* A lane nobody is working: a session the daemon knows and has seen exit.
-   Its issues still matter -- they are what it left behind -- so the row is
-   drawn, just not among the ones that are moving. An assignee the daemon
-   does NOT know (a person, a session on another machine) is not spent:
-   nothing here says that queue is over, and folding it away would be a
-   claim the page cannot make. */
+/* A lane the page does not draw among the live rows: anything but a running
+   or a paused session. That is the session list's own partition
+   (session.session_category, sent as `category`), because `status` cannot
+   draw the line -- a paused session has exited and answers "exited" exactly
+   as a killed one does. Killed and archived sessions and assignees the
+   daemon does not know (a person, a session on another machine) go behind
+   the fold; their issues still matter -- they are what was left behind --
+   so the fold is drawn and stays a drop target. A daemon from before
+   `category` is read by status alone: exited is not running. */
 function beadsLaneSpent(lane) {
-  return !!lane.known && lane.status === "exited";
+  if (lane.pool) return false;
+  if (!lane.known) return true;
+  if (lane.category) return lane.category !== "running" && lane.category !== "paused";
+  return lane.status === "exited";
 }
 
 /* Rows in the order a reader wants them: queues with work in flight, then
@@ -16967,7 +16975,9 @@ function beadsQueueLane(grid, lane, root, statuses, opts = {}) {
     head.appendChild(link);
     const state = el("div", "beads-q-state");
     if (lane.known) {
-      state.appendChild(el("span", `beads-sess ${lane.status || ""}`, lane.status || "?"));
+      // A paused session's status is "exited"; the badge says which exit.
+      const shown = lane.category === "paused" ? "paused" : lane.status;
+      state.appendChild(el("span", `beads-sess ${shown || ""}`, shown || "?"));
     } else {
       state.appendChild(el("span", "beads-sess", "not a session here"));
     }
