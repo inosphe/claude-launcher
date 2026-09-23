@@ -43,11 +43,12 @@ function check(label, actual, expected) {
 const ctx = {};
 vm.createContext(ctx);
 for (const name of ["openAsks", "freshUrgent", "answerLine", "deliveryLabel", "sessionBadge", "startChoices", "startBody",
-                    "dotClass", "progressChips", "threadsOf", "cardLine", "sameUpdate", "gateActions", "unseenCount"]) {
+                    "dotClass", "progressChips", "threadsOf", "cardLine", "sameUpdate", "gateActions", "unseenCount", "sessionWords"]) {
   vm.runInContext(slice(src, name), ctx);
 }
 vm.runInContext(src.match(/^const STAGES = .*$/m)[0].replace("const ", "var "), ctx);
 vm.runInContext(src.match(/^const GATE_KINDS = .*$/m)[0].replace("const ", "var "), ctx);
+vm.runInContext(src.match(/^const SESSION_WORD = .*$/m)[0].replace("const ", "var "), ctx);
 
 const feed = [
   { id: "a", kind: "ask", type: "approve", answer: null, text: "merge?" },
@@ -136,6 +137,18 @@ check("the button sits at the feed's newest end; pressing it or scrolling down c
        src.includes("newer.onclick = () => { feed.scrollTop = feed.scrollHeight; markRead(h); };")], [true, true, true]);
 check("sending a message or switching project goes back to following the bottom",
       [src.includes("h.parts.input.value = \"\"; h.scrolled = false;"), src.includes("h.scrolled = false; h.readId = null;")], [true, true]);
+const knownSessions = new Set(["s751", "s469", "s638", "s697"]);
+const words = (t) => ctx.sessionWords(t, (n) => knownSessions.has(n));
+check("a known session name in prose becomes a link, the text around it kept",
+      words("s751의 peer-review는 리더 s469에게 라우팅됐습니다."),
+      [{ session: "s751" }, "의 peer-review는 리더 ", { session: "s469" }, "에게 라우팅됐습니다."]);
+check("a list of sessions links each one",
+      words("end-gate 대기: s638, s697."), ["end-gate 대기: ", { session: "s638" }, ", ", { session: "s697" }, "."]);
+check("an unknown s-number, a longer word and a branch name stay text",
+      [words("s3 버킷, alias9s751, s751-cflow, xs469"), words("")], [["s3 버킷, alias9s751, s751-cflow, xs469"], []]);
+check("every text the feed draws goes through the session linker",
+      (src.match(/linkSessions\(/g) || []).length, 7);
+
 check("a daemon restart entry gets its own look", src.includes("operator-event-${e.event}"), true);
 check("opening or leaving the page or the modal marks the badge seen",
       [src.includes('request("api/operator/seen", {})'),
