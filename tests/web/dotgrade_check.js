@@ -30,13 +30,14 @@ function constLine(name) {
   return m[0] + "\n";
 }
 
-const code = constLine("DOT_BUSY_LEVELS") + constLine("DOT_IDLE_AGES") +
+const code = constLine("DOT_BUSY_LEVELS") + constLine("DOT_TOOL_LEVELS") +
+  constLine("DOT_IDLE_AGES") +
   ["fmtAge", "seenAgo", "dotGrade", "dotClassOf", "dotTitle", "applyDotGrade"]
     .map(slice).join("\n");
 const api = {};
 new Function("exports", `${code}
   Object.assign(exports, { dotGrade, dotClassOf, dotTitle, applyDotGrade,
-                           DOT_BUSY_LEVELS, DOT_IDLE_AGES });`)(api);
+                           DOT_BUSY_LEVELS, DOT_TOOL_LEVELS, DOT_IDLE_AGES });`)(api);
 
 let failures = 0;
 function check(label, ok) {
@@ -56,6 +57,21 @@ check("a streaming reply past the second bound is level 3",
   api.dotGrade({ status: "busy", moved_rows: api.DOT_BUSY_LEVELS[1] + 500 }) === " lvl-3");
 check("a daemon that sends no moved_rows keeps the plain busy dot",
   api.dotGrade({ status: "busy" }) === "");
+
+/* ---- busy: tool calls in the last five minutes, the higher level wins ---- */
+check("a quiet screen with many tool calls is graded by the tool calls",
+  api.dotGrade({ status: "busy", moved_rows: 0, tool_calls: api.DOT_TOOL_LEVELS[1] }) === " lvl-3");
+check("a few tool calls lift a still screen to level 2",
+  api.dotGrade({ status: "busy", moved_rows: 0, tool_calls: api.DOT_TOOL_LEVELS[0] }) === " lvl-2");
+check("tool calls never lower what the screen earned",
+  api.dotGrade({ status: "busy", moved_rows: api.DOT_BUSY_LEVELS[1], tool_calls: 0 }) === " lvl-3");
+check("tool calls alone grade when moved_rows is absent",
+  api.dotGrade({ status: "busy", tool_calls: 1 }) === " lvl-1");
+check("the busy title names both readings",
+  /busy — 5 screen rows moved in the last minute, 9 tool calls in the last 5m/.test(
+    api.dotTitle({ status: "busy", moved_rows: 5, tool_calls: 9 })));
+check("the busy title leaves out a reading the daemon did not send",
+  api.dotTitle({ status: "busy", tool_calls: 2 }) === "busy — 2 tool calls in the last 5m");
 
 /* ---- idle: graded by the age of the last real screen change ---- */
 check("an idle session that moved a minute ago is not aged",
@@ -117,6 +133,8 @@ for (const g of ["busy.lvl-1", "busy.lvl-2", "busy.lvl-3", "idle.age-1", "idle.a
 const render = slice("refreshSessions");
 check("the rail signature leaves moved_rows out (it moves on every poll)",
   /key === "moved_rows"/.test(render));
+check("the rail signature leaves tool_calls out too",
+  /key === "tool_calls"/.test(render));
 check("refreshRailSeen re-shades a kept row's dot",
   /applyDotGrade\(/.test(slice("refreshRailSeen")));
 check("the session grid's signature carries the grade",
