@@ -3678,7 +3678,17 @@ function sessCflowLabel(r) {
     return `'${r.option}' held → ${fmtOpensAt(r.opens_at)}`;
   if (r.status === "done" || r.status === "error" || r.status === "aborted")
     return r.status;
-  return r.title || r.step_id || "running";
+  // Keep the state explicit even when the run supplies a step title.
+  const state = {
+    step: "running",
+    select: "choosing an option",
+    reported: "reported",
+    waiting_timer: "waiting for timer",
+    waiting_checklist: "waiting for checklist",
+    verify_failed: "verification failed",
+  }[r.status] || r.status || "running";
+  const step = r.title || r.step_id;
+  return step ? `${state} · ${step}` : state;
 }
 
 /* The step a human-owed stop is sitting on, for the rail line. The bare

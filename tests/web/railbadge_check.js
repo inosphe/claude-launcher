@@ -121,7 +121,7 @@ ctx.setRuns([{ scope: "s19", cwd: "F:/repo", status: "step", workflow: "ship",
                step_id: "build", title: "Build it", sessions: ["s19"] }]);
 ctx.apply();
 check("a running step is named on its session's row",
-      badgeText(rows.s19), "ship · Build it");
+      badgeText(rows.s19), "ship · running · Build it");
 check("the mark says running by its class...",
       badge(rows.s19).children[0].className, "wf-mark wf-mark-running");
 check("...and by a glyph, which is all it says on its own",
@@ -196,7 +196,7 @@ ctx.setRuns([{ scope: "s19", cwd: "F:/repo", status: "step", workflow: "ship",
 ctx.apply();
 check("a running step is still named once, by its title",
       [badgeText(rows.s19), badge(rows.s19).title],
-      ["ship · Build it", "Build it"]);
+      ["ship · running · Build it", "Build it"]);
 
 /* Delegated to another agent: shown, but deliberately NOT the reader's
    move — it is with a peer, and amber would grow a queue of fake work. */
@@ -219,7 +219,7 @@ ctx.setRuns([
 ]);
 ctx.apply();
 check("the run whose cwd holds the live session wins",
-      badgeText(rows.s19), "ship · New");
+      badgeText(rows.s19), "ship · running · New");
 check("the click key names that run", badge(rows.s19).dataset.wf,
       "s19|F:/fresh");
 const firstBadge = badge(rows.s19);
@@ -304,6 +304,38 @@ check("...and says so in the word the other surfaces use",
       badgeText(rows.s19).startsWith("ship · 'fast' held → "), true);
 check("...and is not flagged as the reader's move — nobody can hurry a clock",
       badge(rows.s19).className, "sess-cflow");
+
+/* State transitions on the same step must change the visible wording even
+   when the API supplies the same title. Polls reuse the clickable badge. */
+const stateBadge = badge(rows.s19);
+for (const [status, label] of [
+  ["step", "running"],
+  ["select", "choosing an option"],
+  ["reported", "reported"],
+  ["waiting_timer", "waiting for timer"],
+  ["waiting_checklist", "waiting for checklist"],
+  ["verify_failed", "verification failed"],
+  ["future_status", "future_status"],
+]) {
+  for (const step of [{ title: "Review", step_id: "review" }, { step_id: "review" }, {}]) {
+    ctx.setRuns([{ scope: "s19", cwd: "F:/repo", workflow: "ship", status,
+                   sessions: ["s19"], ...step }]);
+    ctx.apply();
+    const name = step.title || step.step_id;
+    check(`${status} stays visible with ${JSON.stringify(step)}`,
+          badgeText(rows.s19), `ship · ${label}${name ? " · " + name : ""}`);
+    check(`${status} keeps the existing badge`, badge(rows.s19) === stateBadge, true);
+  }
+}
+for (const status of ["done", "error", "aborted"]) {
+  ctx.setRuns([{ scope: "s19", cwd: "F:/repo", workflow: "ship", status,
+                 title: "Review", sessions: ["s19"] }]);
+  ctx.apply();
+  check(`${status} remains explicit after termination`, badgeText(rows.s19), `ship · ${status}`);
+}
+const textRule = (css.match(/#session-list \.sess-cflow-text \{([^}]*)\}/) || [])[1] || "";
+check("long workflow names wrap so the state is not truncated",
+      /white-space:\s*normal/.test(textRule) && /overflow-wrap:\s*anywhere/.test(textRule), true);
 
 /* ---- one glyph per state, and no colour anywhere ----------------------- */
 /* Every state has to be told from every other by shape alone now, so the
