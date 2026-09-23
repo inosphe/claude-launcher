@@ -128,6 +128,15 @@
       </button>
       <span id="session-search-note" class="session-search-note hidden"></span>
     </div>
+    <!-- List or Grid: two views of the same sessions. The list orders them
+         by lineage and state; the grid keeps each one in a fixed cell of a
+         named row that only a person moves (session-grid.js). Remembered per
+         browser. -->
+    <fieldset id="session-view" class="session-view-tabs">
+      <legend class="sr-only">Session view</legend>
+      <label><input type="radio" name="session-view" value="list" checked><span>List</span></label>
+      <label><input type="radio" name="session-view" value="grid"><span>Grid</span></label>
+    </fieldset>
     <div id="session-filters" class="session-filters" role="group"
          aria-label="Filter sessions by state">
       <!-- The labels are seeded here, not left empty for JS to fill: a poll
@@ -160,6 +169,7 @@
       </label>
     </div>
     <ul id="session-list"></ul>
+    <div id="session-grid" class="hidden" aria-label="Sessions by fixed grid position"></div>
     <!-- The working fleet at once. Each button hides itself when it would act on
          nothing, so what is up is a count of what it would do — the bar is
          empty on an archived-only rail rather than three inactive controls. -->
@@ -968,6 +978,7 @@
 <script src="static/diagram-viewport.js"></script>
 <script src="static/search-anything.js"></script>
 <script src="static/session-tabs.js"></script>
+<script src="static/session-grid.js"></script>
 <script src="static/app.js"></script>
 <script src="static/toolbar.js"></script>
 </body>
