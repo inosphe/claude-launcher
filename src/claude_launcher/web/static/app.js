@@ -6428,6 +6428,7 @@ async function refreshCflow() {
   // drawn from the poll that just landed.
   if (currentPage !== "flows") return;
   renderFlowsTabs();   // the Orphans label carries a count off this answer
+  if (flowsSection === "definitions") return;
   if (flowsSection === "orphans") { renderFlowsOrphans(runs); return; }
   const list = $("cflow-list");
   list.innerHTML = "";
@@ -6605,9 +6606,10 @@ function cflowCard(r) {
 let flowsSection = "runs";
 
 function openFlows(section) {
-  flowsSection = section === "orphans" ? "orphans" : "runs";
+  flowsSection = section === "orphans" || section === "definitions" ? section : "runs";
   showView("flows");
   renderFlowsTabs();
+  if (flowsSection === "definitions") openFlowDefinitions();
   refreshCflow();
 }
 
@@ -6623,6 +6625,7 @@ function renderFlowsTabs() {
   for (const [section, label, href] of [
     ["runs", "Runs", "#/flows"],
     ["orphans", orphans ? `Orphans (${orphans})` : "Orphans", "#/flows/orphans"],
+    ["definitions", "Definitions", "#/flows/definitions"],
   ]) {
     const tab = el("a", "seq-tab" + (flowsSection === section ? " on" : ""), label);
     tab.href = href;
@@ -6630,6 +6633,154 @@ function renderFlowsTabs() {
   }
   $("flows-runs").classList.toggle("hidden", flowsSection !== "runs");
   $("flows-orphans").classList.toggle("hidden", flowsSection !== "orphans");
+  const definitions = $("flows-definitions");
+  if (definitions) definitions.classList.toggle("hidden", flowsSection !== "definitions");
+}
+
+let flowDefinition = null;
+let flowDefinitionsFor = null;
+
+function flowEditorMessage(message, bad = false) {
+  const result = $("flow-editor-result");
+  result.textContent = message;
+  result.classList.toggle("error", bad);
+}
+
+function flowEditorDirty() {
+  const dirty = flowDefinition && $("flow-editor-text").value !== flowDefinition.text;
+  $("flow-editor-dirty").textContent = dirty ? "Unsaved changes" : "";
+  if (dirty) $("flow-editor-effective").textContent = "";
+  return dirty;
+}
+
+async function flowEditorResponse(response) {
+  const body = await response.json();
+  if (!response.ok) throw new Error(body.error || `HTTP ${response.status}`);
+  return body;
+}
+
+function openFlowDefinitions() {
+  const cwd = $("flow-editor-cwd");
+  const choices = $("flow-editor-directories");
+  choices.innerHTML = "";
+  for (const dir of [...new Set(sessionsCache.map(s => s.cwd).filter(Boolean))]) {
+    const option = document.createElement("option");
+    option.value = dir;
+    choices.appendChild(option);
+  }
+  if (!cwd.value) cwd.value = (sessionsCache.find(s => s.name === currentName) ||
+                              sessionsCache[0] || {}).cwd || "";
+  $("flow-editor-open").onclick = () => loadFlowDefinitions();
+  $("flow-editor-choice").onchange = () => loadFlowDefinition();
+  $("flow-editor-text").oninput = flowEditorDirty;
+  $("flow-editor-text").onkeydown = event => {
+    if (event.key === "Tab" && !event.shiftKey) {
+      event.preventDefault();
+      const field = event.currentTarget;
+      field.setRangeText("  ", field.selectionStart, field.selectionEnd, "end");
+      flowEditorDirty();
+    } else if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "s") {
+      event.preventDefault();
+      checkFlowDefinition(true);
+    }
+  };
+  $("flow-editor-validate").onclick = () => checkFlowDefinition(false);
+  $("flow-editor-save").onclick = () => checkFlowDefinition(true);
+  if (flowDefinitionsFor !== cwd.value) loadFlowDefinitions();
+}
+
+async function loadFlowDefinitions() {
+  const cwd = $("flow-editor-cwd").value;
+  if (flowEditorDirty() && !window.confirm("Discard unsaved workflow changes?")) {
+    $("flow-editor-cwd").value = flowDefinitionsFor || cwd;
+    return;
+  }
+  flowDefinitionsFor = null;
+  flowDefinition = null;
+  $("flow-editor-text").value = "";
+  $("flow-editor-effective").textContent = "";
+  flowEditorMessage("Loading definitions…");
+  try {
+    const data = await flowEditorResponse(await api(
+      `/api/cflow/definitions?cwd=${encodeURIComponent(cwd)}`));
+    const choice = $("flow-editor-choice");
+    choice.innerHTML = "";
+    for (const row of data.definitions || []) {
+      const option = document.createElement("option");
+      option.value = JSON.stringify([row.name, row.layer, row.path]);
+      option.textContent = `${row.name} · ${row.layer} · ${row.path.split(/[\\/]/).pop()}` +
+        (row.active ? " · active" : " · shadowed");
+      choice.appendChild(option);
+    }
+    flowDefinitionsFor = cwd;
+    if (choice.options.length) await loadFlowDefinition();
+    else flowEditorMessage("No workflow definitions found in this directory.");
+  } catch (error) {
+    flowEditorMessage(error.message, true);
+  }
+}
+
+async function loadFlowDefinition() {
+  if (flowEditorDirty() && !window.confirm("Discard unsaved workflow changes?")) {
+    $("flow-editor-choice").value = JSON.stringify([
+      flowDefinition.name, flowDefinition.layer, flowDefinition.path]);
+    return;
+  }
+  const choice = $("flow-editor-choice").value;
+  if (!choice) return;
+  const [name, layer, path] = JSON.parse(choice);
+  const cwd = $("flow-editor-cwd").value;
+  flowDefinition = null;
+  $("flow-editor-text").value = "";
+  $("flow-editor-effective").textContent = "";
+  flowEditorMessage("Loading source…");
+  try {
+    const query = new URLSearchParams({ cwd, name, layer, path });
+    flowDefinition = await flowEditorResponse(await api(`/api/cflow/definition?${query}`));
+    $("flow-editor-text").value = flowDefinition.text;
+    $("flow-editor-source").textContent = flowDefinition.path;
+    flowEditorDirty();
+    flowEditorMessage("Source loaded. Validate before saving.");
+    await checkFlowDefinition(false);
+  } catch (error) {
+    flowEditorMessage(error.message, true);
+  }
+}
+
+async function checkFlowDefinition(save) {
+  if (!flowDefinition) return;
+  if (save && !flowEditorDirty()) {
+    flowEditorMessage("No changes to save.");
+    return;
+  }
+  const body = {
+    cwd: $("flow-editor-cwd").value,
+    name: flowDefinition.name, layer: flowDefinition.layer, path: flowDefinition.path,
+    text: $("flow-editor-text").value, revision: flowDefinition.revision,
+  };
+  $("flow-editor-effective").textContent = "";
+  flowEditorMessage(save ? "Validating and saving…" : "Validating…");
+  try {
+    const endpoint = save ? "/api/cflow/definition" : "/api/cflow/definition/validate";
+    const response = await api(endpoint, {
+      method: save ? "PUT" : "POST",
+      headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+    });
+    const result = await flowEditorResponse(response);
+    const validation = result.validation;
+    if (save) { flowDefinition = result; flowEditorDirty(); }
+    $("flow-editor-effective").textContent = validation.effective_yaml;
+    flowEditorMessage([
+      save ? "Saved." : "Valid workflow.",
+      `${validation.steps} steps · start: ${validation.start}`,
+      ...validation.bases.map(base => `Inherited: ${base}`),
+      ...validation.warnings.map(value => `Warning: ${value}`),
+      ...validation.deprecations.map(value => `Deprecated: ${value}`),
+      ...validation.advice.map(value => `Advice: ${value}`),
+    ].join("\n"));
+  } catch (error) {
+    flowEditorMessage(error.message, true);
+  }
 }
 
 /* The runs nobody is driving. The judgment is the daemon's — `orphaned` is
@@ -12834,7 +12985,8 @@ function mobileTitle() {
     case "new": return "new session";
     case "meshes": return "mesh";
     case "flows": return flowsSection === "orphans"
-      ? "workflows · orphans" : "workflows";
+      ? "workflows · orphans" : flowsSection === "definitions"
+      ? "workflows · definitions" : "workflows";
     case "window": return "measurement window";
     case "settings": return "settings";
     case "beads": return beadsSection === "reports" ? "reports"
@@ -13448,6 +13600,7 @@ function wfSplitBar(host, dia, side) {
  *   #/mesh/<name>/flows ...and where each of its agents is in its workflow
  *   #/flows             cflow runs
  *   #/flows/orphans     ...the ones whose driving session has exited
+ *   #/flows/definitions ...the workflow YAML sources
  *   #/window            measurement grants and their FIFO queue
  *   #/wf/<scope|cwd>    one run
  *   #/msg/<name>        what that session has said and been told
@@ -13501,10 +13654,10 @@ function parseHash(h) {
     scope: ["session", "mesh"].includes(parts[1]) ? parts[1] : "global",
     name: parts[2] || "",
   };
-  // #/flows is every run; #/flows/orphans the ones whose driving session
-  // has exited. Same one-section-deep spelling as #/beads/<section>.
+  // Same one-section-deep spelling as #/beads/<section>.
   if (parts[0] === "flows") {
-    return { page: "flows", section: parts[1] === "orphans" ? "orphans" : "" };
+    return { page: "flows", section: ["orphans", "definitions"].includes(parts[1])
+      ? parts[1] : "" };
   }
   if (parts[0] === "window") return { page: "window" };
   // One page, one shell: nothing else about the CLI tab is addressable, so
