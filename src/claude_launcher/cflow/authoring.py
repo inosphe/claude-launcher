@@ -304,6 +304,26 @@ The rules, and the reason for each:
 A human override is still a human override: `claunch cflow goto <step>`
 moves a run past a gate that will never go green, and is journaled as such.
 
+## Landing queue — `landing_queue:`
+
+A parent that integrates its children's branches can keep their landing
+requests as run state instead of in its driver's memory:
+
+```
+landing_queue: {target: master}   # or `landing_queue: true`
+```
+
+Entries (one per issue: branch, tip, who asked, when, status) arrive from a
+child's `enqueue-landing` trigger. The driving agent moves them with the
+`landing_queue` MCP tool (`waiting`, `deferred`, `rejected`, back to
+`requested`); `landed` is the daemon's, set when the tip is an ancestor of
+`target` in the run's own checkout. When the run moves to `end` the engine
+drops landed and rejected entries and carries the rest (a deferred one back
+as requested) into the next run of the same workflow here, which is how a
+`recur` workflow's queue outlives its round. The reset is journalled
+`queue_reset`, shown in the payload's `landing_reset` and in the daemon's
+round-start block, with a warning line where the issue board disagrees.
+
 ## Run state — `editable:`, `skip`, ticked checklist items
 
 A run's workflow is fixed when it starts: composed (with any `extends`
@@ -395,6 +415,12 @@ work:
   is typed into the terminal and the driver spends nothing; the cost is one
   call to the configured endpoint, so put it at the few positions an overseer
   actually reads the rail at.
+- **`enqueue-landing`** — the daemon files this session's landing request on
+  its PARENT's landing queue: the issues it holds `in_review` on the board,
+  and the branch and tip its checkout has. It needs a parent whose workflow
+  declares `landing_queue:` (otherwise it is skipped, journalled with the
+  reason). Put it where the request has just been made, `at: leave` of the
+  step that makes it, so a waiting loop does not file it again.
 
 `at` is `enter` (the default — the run arrived here) or `leave` (the run
 moved off, whichever edge it took). Spell it **`at`**, never `on`: PyYAML

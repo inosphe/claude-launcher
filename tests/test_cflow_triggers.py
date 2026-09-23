@@ -461,7 +461,7 @@ def test_improv_worker_declares_the_triggers_it_stopped_asking_for_in_prose():
     assert declared == {
         "work": {("briefing", "enter")},
         "commit": {("checks", "leave")},
-        "integration-request": {("briefing", "enter")},
+        "integration-request": {("briefing", "enter"), ("enqueue-landing", "leave")},
         "landed": {("checks", "leave")},
         "wrapup": {("briefing", "enter")},
     }

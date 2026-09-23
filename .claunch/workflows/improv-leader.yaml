@@ -69,6 +69,15 @@ default_role: leader
 # workflow를 직접 대거나(덮어쓴다), workflow: '-'로 거절한다.
 default_child_cflow: improv-worker
 
+# 착지 큐(claunch-3u15l): 자식 워커의 착지 요청을 이 런의 상태로 둔다 —
+# 리더의 컨텍스트 기억 대신. 항목은 워커가 integration-request를 떠날 때
+# 데몬이 등록하고(issue·branch·tip·요청자·시각), landed는 데몬이 tip이
+# master의 조상인지 git으로 재어 표시한다. 회차가 end로 전이할 때 엔진이
+# landed·rejected를 버리고 나머지를 다음 회차로 이월한다(deferred는
+# requested로). 무엇을 버리고 이월했는지는 다음 회차의 시작 블록과
+# 페이로드의 landing_reset이 말한다.
+landing_queue: {target: master}
+
 steps:
   intake:
     title: 운영 확인
@@ -398,6 +407,18 @@ steps:
         워커의 `LANDING REQUEST @ <tip>` 코멘트가 표의 행이고 증거 묶음
         (브랜치·tip·해시·수치·양방향 diff·포함 관계·심사 한계)이 그 안에
         있다. 워커 수치는 간소화 스위트 기준이다.
+        **착지 큐**: 표의 행과 짝을 이루는 이 런의 상태다. 워커가 요청을
+        올리면 데몬이 그 이슈를 `landing_queue`에 자동으로 등록하므로(페이로드의
+        `landing_queue`, 도구 `landing_queue`로 목록) 「누가 요청했고 무엇이
+        아직 안 실렸나」를 기억으로 들고 있지 않는다. 판정을 내리면 그
+        자리에서 기록한다: 이번 회차에 태우기로 했으면 `waiting`, 다음
+        회차로 미루면 `deferred`(회차가 끝날 때 requested로 이월된다),
+        거절했으면 `rejected`. landed는 데몬이 git으로 표시한다 — 손으로
+        적지 않는다. 회차 시작 블록이 지난 회차 끝에서 버린 것과 이월한
+        것을 알려 주므로, 이월된 항목은 이번 회차의 표에서 먼저 본다.
+        큐와 보드가 어긋나면(큐에는 requested인데 보드에서는 closed 등)
+        그 블록에 경고 줄이 붙는다 — 보드가 일감의 정본이므로 보드를
+        기준으로 확인하고 큐 항목을 옮긴다.
         **배치 행**: 같은 tip을 가리키는 `LANDING REQUEST @ <tip>` 행이
         여럿이면(주 이슈의 마커에 `batch: <id,...>`, 나머지에 `(batch of
         <주 이슈>)`) 그것은 워커 하나가 큐의 일감 여럿을 한 브랜치에 실은
