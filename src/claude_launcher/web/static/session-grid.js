@@ -317,6 +317,28 @@ globalThis.SessionGridLayout = class SessionGridLayout {
     return Math.ceil(used / perLine) * perLine;
   }
 
+  /* How many of row `rowIndex`'s lines, from the top, can be folded away
+     because the current view shows nothing in them: every line before the
+     first one holding a session in `present`. Only when at least one of
+     those lines holds a session out of view -- a filter is what emptied
+     them; lines that are merely empty keep their place on screen. A row
+     with no session in view keeps its last line, so something can still be
+     dropped into it. */
+  hiddenLead(rowIndex, perLine, present = new Set()) {
+    const row = this.rows[rowIndex];
+    if (!row) return 0;
+    const lines = this.span(rowIndex, perLine) / perLine;
+    let lead = 0;
+    let absent = false;
+    for (; lead < lines; lead++) {
+      const slice = row.cells.slice(lead * perLine, (lead + 1) * perLine);
+      if (slice.some((name) => name && present.has(name))) break;
+      if (slice.some(Boolean)) absent = true;
+    }
+    if (lead === lines) lead = lines - 1;
+    return absent ? lead : 0;
+  }
+
   /* The cell one step from (rowIndex, col), or null past an edge. Without
      `perLine` rows are single lines and up/down keep the column. With it,
      up/down go line by line: to the next line of the same row while there is

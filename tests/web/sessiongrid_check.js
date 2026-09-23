@@ -118,6 +118,17 @@ assert.deepEqual(wrap.neighbor(1, 4, 0, -1, 4), { row: 1, col: 3 }, "left runs b
 const wrapPresent = new Set(["a", "b", "c", "d", "e"]);
 assert.ok(wrap.moveBy("b", 1, 0, wrapPresent, 4));
 assert.deepEqual(cells(wrap)[1], ["bravo", "a", null, "c", "d", "e", "b"]);
+// Leading lines a filter emptied fold away up to the first line in view.
+values.delete("lead");
+const lead = new SessionGridLayout(storage, "lead");
+lead.rows[0].cells = ["x1", "x2", null, "x3", "x4", null, null, null, "v1", "x5"];
+assert.equal(lead.hiddenLead(0, 4, new Set(["v1"])), 2, "two lines before v1's line");
+assert.equal(lead.hiddenLead(0, 4, new Set(["x2", "v1"])), 0, "a session in view on the first line");
+assert.equal(lead.hiddenLead(0, 5, new Set(["v1"])), 1);
+assert.equal(lead.hiddenLead(0, 4, new Set()), 2, "nothing in view: the last line stays");
+lead.rows[0].cells = [null, null, null, null, "v1"];
+assert.equal(lead.hiddenLead(0, 4, new Set(["v1"])), 0, "merely empty lines are not folded");
+
 // Emptying a row sends everything in it, in view or not, to the default row;
 // the default row itself cannot be emptied or removed this way.
 values.delete("ops");

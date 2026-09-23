@@ -207,6 +207,12 @@ option:disabled { color: #6b7280; }
   width: 100%; min-width: 0; padding: 2px 4px; font: inherit; color: #e6edf3;
   background: #0d1117; border: 1px solid #58a6ff; border-radius: 3px;
 }
+#session-grid .sg-fold {
+  display: block; width: 100%; margin: 0 0 3px; padding: 2px 6px; text-align: left;
+  font-size: 10px; color: #6e7681; background: none; cursor: pointer;
+  border: 1px dashed #262c35; border-radius: 4px;
+}
+#session-grid .sg-fold:hover { color: #c9d1d9; border-color: #385273; }
 #session-grid .sg-cells {
   display: grid; gap: 3px;
   grid-template-columns: repeat(var(--sg-per-line, 4), minmax(0, 1fr));
