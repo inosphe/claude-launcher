@@ -89,6 +89,10 @@ function wfTimelinePanel() { return null; }
 function wfReports() { return el("div", "wf-reports"); }
 function wfActions() { return el("div", "wf-actions"); }
 function reminderControl() { return el("div", "wf-reminder"); }
+// The run-state and landing-queue blocks (claunch-w5i81) have their own
+// harness (wfstate_check.js); absent here, as for a run declaring neither.
+function wfStateBlock() { return null; }
+function wfLandingBlock() { return null; }
 function pendingBanner() { return null; }
 function renderWfIdle(view) { view.appendChild(el("div", "wf-start")); }
 function cflowAction() {}
