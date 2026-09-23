@@ -43,6 +43,10 @@ function deliveryLabel(value) {
   return {sent: "전달됨", pending: "전달 대기", unknown: "전달 결과 미확인"}[value] || String(value || "");
 }
 function sessionBadge(row) {
+  // A paused session is stopped on purpose: nothing in it waits on the user
+  // until it is resumed, so it outranks every "needs you" reading.
+  if (row.category === "paused") return {label: "일시정지", kind: "paused"};
+  if (row.category === "killed" || row.category === "archived") return {label: "종료", kind: "idle"};
   if (row.questions) return {label: `질문 ${row.questions}`, kind: "waiting"};
   if (row.state === "blocked") return {label: "차단", kind: "blocked"};
   if (row.status === "busy" || row.status === "working") return {label: "동작 중", kind: "working"};
@@ -67,6 +71,28 @@ function startBody(projectName, choice, offered) {
   if (choice.model && offered.models.includes(choice.model)) body.model = choice.model;
   if (choice.effort && offered.efforts.includes(choice.effort)) body.effort = choice.effort;
   return body;
+}
+/* The status dot's class for a session record, the session list's own
+   `.dot` classes: idle / busy / starting / exited, and exited + paused for a
+   paused record (drawn blue, apart from a kill's grey). */
+function dotClass(record) {
+  if (!record) return "dot exited";
+  const status = record.status || "exited";
+  const paused = record.category === "paused" || (status === "exited" && record.paused_at);
+  return `dot ${paused ? "exited paused" : status}`;
+}
+const STAGES = {open: "열림", in_ready: "준비됨", in_progress: "작업 중", in_review: "머지 요청", blocked: "차단", closed: "닫힘"};
+/* One session's work progress as short labels: its status-check answers
+   (the user's own questions — commit, tests, merge) and its issue's stage. */
+function progressChips(row) {
+  const chips = (row.checks || []).filter(c => c.answer).map(c => ({
+    label: `${c.name} ${c.answer === "yes" ? "✓" : "✗"}`, title: `${c.question || c.name}: ${c.answer}`,
+    kind: c.answer === "yes" ? "yes" : "no"}));
+  if (row.issue && row.issue.id) {
+    chips.push({label: `${row.issue.id} · ${STAGES[row.issue.status] || row.issue.status}`,
+                title: row.issue.title || row.issue.id, kind: `issue-${row.issue.status}`});
+  }
+  return chips;
 }
 function operatorLabel(op) {
   if (!op) return "";
@@ -207,9 +233,26 @@ function renderStart(start) {
   start.append(go);
 }
 
+/* The session record behind a label: the rail's list (every page keeps it
+   current), else the panel row this view already has. */
+function sessionRecord(name) {
+  const list = typeof sessionsCache !== "undefined" && Array.isArray(sessionsCache) ? sessionsCache : [];
+  return list.find(s => s.name === name) || (data?.sessions || []).find(s => s.name === name) || null;
+}
+/* A session label: its status dot, its name, a link to its terminal, and —
+   on mouse hover (after the grid's delay) or keyboard focus — the session
+   list's card for it, the grid view's hover card. */
+let tipAnchor = null;   // the label a hover card is up (or pending) for
 function sessionLink(name, cls = "operator-ref") {
-  const a = node("a", name, cls);
+  const a = node("a", null, cls);
   a.href = "#/s/" + encodeURIComponent(name);
+  a.append(node("span", null, dotClass(sessionRecord(name))), node("span", name));
+  a.setAttribute("aria-label", `${name} 세션 열기`);
+  if (typeof showSessionCardTip === "function") {
+    a.addEventListener("pointerenter", ev => { if (ev.pointerType === "mouse") { tipAnchor = a; scheduleSessionCardTip(a, name); } });
+    a.addEventListener("focus", () => { if (a.matches(":focus-visible")) showSessionCardTip(a, name); });
+    for (const type of ["pointerleave", "blur", "pointerdown"]) a.addEventListener(type, hideSessionGridTip);
+  }
   return a;
 }
 
@@ -285,7 +328,8 @@ function renderSide(h) {
   const side = h.parts.side;
   side.replaceChildren();
   const asks = openAsks(data?.feed);
-  const head = node("h2", `관찰 중인 세션 ${(data?.sessions || []).length}`);
+  const pausedCount = (data?.sessions || []).filter(r => r.category === "paused").length;
+  const head = node("h2", `관찰 중인 세션 ${(data?.sessions || []).length - pausedCount}` + (pausedCount ? ` · 일시정지 ${pausedCount}` : ""));
   side.append(head);
   if (asks.length) side.append(node("p", `응답을 기다리는 질문 ${asks.length}건`, "operator-pending"));
   const list = node("ul", null, "operator-sessions");
@@ -295,6 +339,13 @@ function renderSide(h) {
     const top = node("div", null, "operator-session-top");
     top.append(sessionLink(row.name), node("span", badge.label, `operator-badge operator-badge-${badge.kind}`));
     item.append(top);
+    if (row.category === "paused") item.classList.add("operator-paused");
+    const chips = progressChips(row);
+    if (chips.length) {
+      const line = node("div", null, "operator-progress");
+      for (const c of chips) { const chip = node("span", c.label, `operator-chip operator-chip-${c.kind}`); chip.title = c.title; line.append(chip); }
+      item.append(line);
+    }
     if (row.summary) item.append(node("p", row.summary, "operator-summary"));
     list.append(item);
   }
@@ -309,6 +360,8 @@ function render() {
     if (!h.root.isConnected) continue;
     renderHead(h); renderFeed(h); renderSide(h);
   }
+  // A poll rebuilt the label the card belongs to: the card goes with it.
+  if (tipAnchor && !tipAnchor.isConnected) { tipAnchor = null; if (typeof hideSessionGridTip === "function") hideSessionGridTip(); }
 }
 
 /* ---- polling, badge, notification ---- */
@@ -432,5 +485,5 @@ refreshBadge();
 badgeTimer = setInterval(() => { if (document.visibilityState === "visible") refreshBadge(); }, 15000);
 
 return {open, stop, openModal, refresh,
-        _test: {openAsks, freshUrgent, answerLine, deliveryLabel, sessionBadge, startChoices, startBody}};
+        _test: {openAsks, freshUrgent, answerLine, deliveryLabel, sessionBadge, startChoices, startBody, dotClass, progressChips}};
 })();

@@ -540,7 +540,10 @@ roles:
       what the user does next — a result, a failure, a gate or question that
       waits on them, two sessions colliding — with the session names and ids
       that let them check it; routine progress and message logistics are
-      noise. Mark an item urgent only when it waits on the user now.
+      noise. Mark an item urgent only when it waits on the user now — never
+      for a paused or exited session, which waits on nobody until it is
+      resumed. Report each session's progress (commit, tests, landing
+      request, merge) as the poll's progress changes arrive.
       Read the user's input with operator_inbox whenever you are nudged, and
       answer it in the feed. You may instruct another session of the project
       only by relaying what the user told you: operator_dispatch names the

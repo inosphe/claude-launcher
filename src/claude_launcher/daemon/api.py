@@ -330,7 +330,8 @@ def build_app(
     app["mesh"] = mesh if mesh is not None else MeshManager(manager)
     from . import observer, operator_bot
     observer.install(app)
-    operator_bot.install(app, create=_create_session, gates=_operator_gates)
+    operator_bot.install(app, create=_create_session, gates=_operator_gates,
+                         work=lambda sessions: _operator_work(app, sessions))
     clipboard.install(app)
     app["relay_state"] = relay_state if relay_state is not None else _relay_unconfigured
     app["token"] = token
@@ -2618,6 +2619,39 @@ def _operator_gates(sessions) -> list:
                       "title": entry.get("title"), "reason": entry.get("reason"),
                       "ask": entry.get("ask")})
     return gates
+
+
+async def _operator_work(app, sessions) -> dict:
+    """Each session's work progress, for the operator: the status-check
+    answers it last reported (the user's commit / tests / merge questions) and
+    the board issue it is on — the first open one the board matches to it
+    (the linked one first, in the rail's own order), else the most relevant
+    closed one: a session that closed its opening issue and took the next
+    keeps the old link, so the link alone would report a finished round. The
+    board read is the rail's own (cached, one listing per board), so an
+    operator poll costs no more than a rail refresh."""
+    board = app.get("beads")
+    out = {}
+    for session in sessions:
+        name = session.sdef.name
+        checks = session.info().get("status_checks") or []
+        out[name] = {"checks": [c for c in checks if isinstance(c, dict)], "issue": None}
+        if board is None or not board.available() or not session.sdef.cwd:
+            continue
+        try:
+            root = await board.root_for(session.sdef.cwd)
+            if not board.has_board(root):
+                continue
+            rows = await board.issues(root)
+        except Exception:  # an unreadable board leaves the issue unknown
+            continue
+        found = beads_mod.match(rows, name, issue=session.sdef.issue, task=session.sdef.task)
+        active = [m for m in found if m.get("status") != "closed"]
+        pick = (active or found or [None])[0]
+        if pick:
+            out[name]["issue"] = {"id": pick.get("id"), "status": pick.get("status"),
+                                  "title": pick.get("title")}
+    return out
 
 
 def _session_cwd(session) -> str:

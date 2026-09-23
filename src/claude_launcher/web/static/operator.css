@@ -14,8 +14,7 @@
 .operator-head { flex: none; display: flex; flex-wrap: wrap; align-items: center; gap: 12px; padding: 12px 20px; border-bottom: 1px solid #2a2e36; }
 .operator-head h1 { margin: 0; font-size: 18px; }
 .operator-status { color: #8b949e; font-size: 12px; }
-.operator-status[data-state=running]::before { content: "● "; color: #3fb950; }
-.operator-status[data-state=ended]::before { content: "● "; color: #f85149; }
+/* The operator's own label carries its status dot (operator.js sessionLink). */
 .operator-self { font-weight: 600; }
 .operator-start { display: flex; flex-wrap: wrap; gap: 8px; margin-left: auto; }
 .operator-body { flex: 1; min-height: 0; display: grid; grid-template-columns: minmax(0, 1fr) 300px; }
@@ -86,3 +85,16 @@ body.operator-page .operator-fab { display: none; }
   .operator-fab { bottom: 72px; }
   .operator-modal { width: 100%; height: 100%; max-width: none; max-height: none; margin: 0; border: none; border-radius: 0; }
 }
+
+/* Session labels carry the session list's status dot; the colours are the
+   list's own .dot rules (style.css). */
+.operator-host .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 5px; vertical-align: 0; flex: none; }
+.operator-ref, .operator-self, .operator-session-top > a { display: inline-flex; align-items: center; }
+.operator-badge-paused { background: #16325c; color: #79c0ff; }
+.operator-sessions > li.operator-paused { opacity: .75; }
+.operator-progress { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px; }
+.operator-chip { font-size: 11px; line-height: 16px; padding: 0 6px; border-radius: 8px; background: #21262d; color: #c9d1d9; white-space: nowrap; }
+.operator-chip-yes { background: #173a2a; color: #56d364; }
+.operator-chip-no { background: #2d2a1f; color: #d29922; }
+.operator-chip-issue-in_review { background: #3d2e12; color: #f0b43c; }
+.operator-chip-issue-closed { background: #1f2a37; color: #8dcaff; }

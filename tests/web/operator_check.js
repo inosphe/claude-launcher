@@ -39,9 +39,11 @@ function check(label, actual, expected) {
 
 const ctx = {};
 vm.createContext(ctx);
-for (const name of ["openAsks", "freshUrgent", "answerLine", "deliveryLabel", "sessionBadge", "startChoices", "startBody"]) {
+for (const name of ["openAsks", "freshUrgent", "answerLine", "deliveryLabel", "sessionBadge", "startChoices", "startBody",
+                    "dotClass", "progressChips"]) {
   vm.runInContext(slice(src, name), ctx);
 }
+vm.runInContext(src.match(/^const STAGES = .*$/m)[0].replace("const ", "var "), ctx);
 
 const feed = [
   { id: "a", kind: "ask", type: "approve", answer: null, text: "merge?" },
@@ -65,6 +67,21 @@ check("an open question outranks a busy status",
       ctx.sessionBadge({ questions: 2, status: "busy" }), { label: "질문 2", kind: "waiting" });
 check("blocked outranks busy", ctx.sessionBadge({ state: "blocked", status: "busy" }).kind, "blocked");
 check("busy reads 동작 중", ctx.sessionBadge({ status: "busy" }).label, "동작 중");
+
+check("a paused session reads 일시정지 even with open questions",
+      ctx.sessionBadge({category: "paused", questions: 3, state: "blocked"}), {label: "일시정지", kind: "paused"});
+check("dot classes follow the session list: paused is exited + paused",
+      [ctx.dotClass({status: "idle"}), ctx.dotClass({status: "exited", paused_at: "t"}), ctx.dotClass({category: "paused", status: "exited"}),
+       ctx.dotClass({status: "exited"}), ctx.dotClass(null)],
+      ["dot idle", "dot exited paused", "dot exited paused", "dot exited", "dot exited"]);
+check("progress chips: the answered checks, then the issue's stage",
+      ctx.progressChips({checks: [{name: "C", question: "커밋?", answer: "yes"}, {name: "M", answer: "no"}, {name: "T", answer: null}],
+                         issue: {id: "cl-1", status: "in_review", title: "t"}}).map((c) => [c.label, c.kind]),
+      [["C ✓", "yes"], ["M ✗", "no"], ["cl-1 · 머지 요청", "issue-in_review"]]);
+check("session labels open the list's card on hover and drop it when rebuilt",
+      [src.includes("scheduleSessionCardTip(a, name)"), src.includes("tipAnchor && !tipAnchor.isConnected")], [true, true]);
+check("app.js offers the grid's hover card for any anchor, inside an open dialog too",
+      [app.includes("function showSessionCardTip(anchor, name"), app.includes('anchor.closest("dialog[open]")')], [true, true]);
 
 const options = [{value: "a:claude", harness: "claude"}, {value: "a:pi", harness: "pi"}];
 const caps = {claude: {models: ["sonnet", "opus"], efforts: ["high"]}, pi: {models: [], efforts: []}};

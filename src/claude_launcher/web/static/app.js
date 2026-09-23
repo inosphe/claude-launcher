@@ -2142,16 +2142,74 @@ function hideSessionGridTip() {
   }
 }
 
-function showSessionGridTip(cell, row, col, name, inView) {
-  if (!cell.isConnected || sessionGridDragging || sessionGridPicked) return;
+/* The hover card element, created on first use. It lives in the open modal
+   dialog when the anchor is inside one: a dialog sits in the top layer, and
+   a card appended to the body would be drawn under it. */
+function sessionTipElement(anchor) {
   let tip = document.getElementById("sg-tip");
   if (!tip) {
     sessionGridTipStyles();
     tip = document.createElement("ul");
     tip.id = "sg-tip";
     tip.setAttribute("role", "tooltip");
-    document.body.append(tip);
   }
+  const host = (anchor && anchor.closest && anchor.closest("dialog[open]")) || document.body;
+  if (tip.parentNode !== host) host.append(tip);
+  return tip;
+}
+
+/* A copy of the list's card for ``name``, or null when the list does not
+   hold it (filtered out, or not a session of this page). */
+function sessionCardCopy(name) {
+  const card = document.querySelector(`#session-list li.sess-card[data-name="${CSS.escape(name)}"]`);
+  if (!card) return null;
+  const copy = card.cloneNode(true);
+  copy.removeAttribute("id");
+  copy.removeAttribute("tabindex");
+  copy.classList.remove("active", "goto-flash");
+  copy.querySelectorAll("[id]").forEach((el) => el.removeAttribute("id"));
+  copy.querySelectorAll("[title]").forEach((el) => el.removeAttribute("title"));
+  copy.removeAttribute("title");
+  return copy;
+}
+
+/* Beside the anchor, on whichever side has room, kept inside the window. */
+function placeSessionTip(tip, anchor) {
+  const at = anchor.getBoundingClientRect();
+  const box = tip.getBoundingClientRect();
+  const gap = 8;
+  let left = at.right + gap;
+  if (left + box.width > innerWidth - gap) left = at.left - gap - box.width;
+  left = Math.max(gap, Math.min(left, innerWidth - gap - box.width));
+  const top = Math.max(gap, Math.min(at.top, innerHeight - gap - box.height));
+  tip.style.left = `${Math.round(left)}px`;
+  tip.style.top = `${Math.round(top)}px`;
+}
+
+/* The same hover card for a session named anywhere else on the page (the
+   Operator's session labels): the list's card alone, or a note when the list
+   does not hold that session. */
+function showSessionCardTip(anchor, name, note = "") {
+  if (!anchor.isConnected) return;
+  const tip = sessionTipElement(anchor);
+  const card = sessionCardCopy(name);
+  const parts = [card || Object.assign(document.createElement("li"),
+    { className: "sg-tip-note", textContent: `${name} — not in the session list's current view` })];
+  if (note) parts.push(Object.assign(document.createElement("li"), { className: "sg-tip-note", textContent: note }));
+  tip.replaceChildren(...parts);
+  tip.classList.remove("hidden");
+  placeSessionTip(tip, anchor);
+}
+
+function scheduleSessionCardTip(anchor, name, note = "") {
+  clearTimeout(sessionGridTipTimer);
+  sessionGridTipTimer = setTimeout(
+    () => showSessionCardTip(anchor, name, note), SESSION_GRID_TIP_DELAY_MS);
+}
+
+function showSessionGridTip(cell, row, col, name, inView) {
+  if (!cell.isConnected || sessionGridDragging || sessionGridPicked) return;
+  const tip = sessionTipElement(cell);
   const perLine = sessionGridPerLine;
   const head = document.createElement("li");
   head.className = "sg-tip-head";
@@ -2168,17 +2226,8 @@ function showSessionGridTip(cell, row, col, name, inView) {
   if (!name) {
     note("empty");
   } else {
-    const card = inView
-      ? document.querySelector(`#session-list li.sess-card[data-name="${CSS.escape(name)}"]`)
-      : null;
-    if (card) {
-      const copy = card.cloneNode(true);
-      copy.removeAttribute("id");
-      copy.removeAttribute("tabindex");
-      copy.classList.remove("active", "goto-flash");
-      copy.querySelectorAll("[id]").forEach((el) => el.removeAttribute("id"));
-      copy.querySelectorAll("[title]").forEach((el) => el.removeAttribute("title"));
-      copy.removeAttribute("title");
+    const copy = inView ? sessionCardCopy(name) : null;
+    if (copy) {
       parts.push(copy);
     } else {
       note(inView ? name : `${name} — not in this view; its place is kept`);
@@ -2187,16 +2236,7 @@ function showSessionGridTip(cell, row, col, name, inView) {
   }
   tip.replaceChildren(...parts);
   tip.classList.remove("hidden");
-  // Beside the cell, on whichever side has room, kept inside the window.
-  const at = cell.getBoundingClientRect();
-  const box = tip.getBoundingClientRect();
-  const gap = 8;
-  let left = at.right + gap;
-  if (left + box.width > innerWidth - gap) left = at.left - gap - box.width;
-  left = Math.max(gap, Math.min(left, innerWidth - gap - box.width));
-  const top = Math.max(gap, Math.min(at.top, innerHeight - gap - box.height));
-  tip.style.left = `${Math.round(left)}px`;
-  tip.style.top = `${Math.round(top)}px`;
+  placeSessionTip(tip, cell);
 }
 /* ---- end rail grid view ---------------------------------------------- */
 
