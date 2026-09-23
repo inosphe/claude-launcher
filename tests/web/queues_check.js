@@ -18,10 +18,12 @@
    4. a drop on a cell assigns the dragged issue to that ROW -- a session's
       name, or null for the pool -- and never sends a status;
    5. a refused assignment (409) is said where the drop happened;
-   6. rows come busiest first, not in the daemon's creation order, and a
-      session the daemon has seen EXIT is folded out of that ordering into
-      a group of its own -- with the head still counting what the fold
-      hides;
+   6. rows come busiest first, not in the daemon's creation order, and
+      only running and paused sessions are among them: a killed or archived
+      session, and an assignee that is not a session here, is folded out
+      into a group of its own -- with the head still counting what the fold
+      hides. A paused session has exited too, so the line is drawn by the
+      lane's `category`, not by its status;
    7. an unassigned pool bigger than the cap is one folded cell that is
       still a drop target, and a cell opened past the cap offers the rest
       behind a button rather than drawing three hundred cards;
@@ -169,7 +171,7 @@ const BOARD = {
   error: null,
   lanes: [
     {
-      session: "s1", known: true, status: "busy", issue: "a",
+      session: "s1", known: true, status: "busy", category: "running", issue: "a",
       cflow: { workflow: "improv-worker", step: "work" },
       issues: [
         { id: "a", title: "first", status: "in_progress", priority: 1, assignee: "s1" },
@@ -187,6 +189,9 @@ const BOARD = {
   unassigned: [{ id: "e", title: "pool", status: "open", priority: 0 }],
 };
 
+// the unknown assignee's row sits behind the fold (section 6); open it so
+// these sections see every kind of row
+ctx.spentOpen.add("/repo");
 let sec = ctx.board(BOARD, STATUSES);
 const grid = sec.find("beads-queues")[0];
 check("the grid's columns follow the daemon's status list",
@@ -212,7 +217,7 @@ check("the pool row counts what waits for a queue",
       [true, "1 waiting for a queue"]);
 check("the board head counts queues and the pool",
       sec.find("beads-board-head")[0].find("wf-note")[0].text,
-      "2 live queues · 1 unassigned");
+      "1 live queue · 1 hidden · 1 unassigned");
 
 /* ---- 3. cards ----------------------------------------------------------- */
 const cells = sec.find("beads-q-cell");
@@ -324,6 +329,7 @@ async function drop(card, cell) {
      most of those sessions exited, and 4 issues in flight among the lot. */
   const lane = (session, o = {}) => ({
     session, known: o.known !== false, status: o.status || "idle",
+    category: o.known === false ? null : (o.category || "running"),
     issue: null, cflow: null,
     issues: (o.issues || []).map((id) => ({
       id, title: id, status: o.st || "open", priority: 2, assignee: session,
@@ -337,12 +343,13 @@ async function drop(card, cell) {
   const BUSY = {
     root: "/many", error: null,
     lanes: [
-      lane("s01", { status: "exited", issues: ["x1"] }),
-      lane("s02", { status: "exited", issues: ["x2"] }),
+      lane("s01", { status: "exited", category: "killed", issues: ["x1"] }),
+      lane("s02", { status: "exited", category: "archived", issues: ["x2"] }),
       lane("s03", {}),
       lane("s04", { issues: ["w1", "w2"] }),
       lane("s05", { issues: ["p1"], st: "in_progress", working: 1 }),
       lane("human", { known: false, status: null, issues: ["h1"] }),
+      lane("s06", { status: "exited", category: "paused", issues: ["z1"] }),
     ],
     unassigned: [],
   };
@@ -351,30 +358,38 @@ async function drop(card, cell) {
   ctx.spentOpen.clear(); ctx.poolOpen.clear(); ctx.cellOpen.clear();
   let busy = ctx.board(BUSY, STATUSES);
   check("in flight first, then queues with work waiting (fullest first), "
-        + "then idle — and no ended session among them",
-        rowNames(busy), ["s05", "s04", "human", "s03", "unassigned"]);
-  check("an assignee the daemon does not know is never folded away as ended "
-        + "— nothing here says that queue is over",
-        rowNames(busy).includes("human"), true);
+        + "then idle — running and paused sessions only",
+        rowNames(busy), ["s05", "s04", "s06", "s03", "unassigned"]);
+  check("a paused session is drawn although its status is exited, and its "
+        + "badge says paused",
+        busy.find("beads-q-head")[2].find("beads-sess")[0].text, "paused");
+  check("killed, archived and not-a-session-here rows are all folded away",
+        ["s01", "s02", "human"].some((n) => rowNames(busy).includes(n)), false);
   check("the head counts what the fold hides, so the number a reader opens "
         + "it on is not the number it hid",
         busy.find("beads-board-head")[0].find("wf-note")[0].text,
-        "4 live queues · 2 ended · 0 unassigned");
+        "4 live queues · 3 hidden · 0 unassigned");
   const fold = busy.find("beads-q-fold");
-  check("one toggle stands where the ended rows would stand, saying how "
+  check("one toggle stands where the hidden rows would stand, saying how "
         + "many and how much they hold",
         [fold.length, fold[0].children[0].text],
-        [1, "▸ 2 ended sessions, holding 2 issues"]);
+        [1, "▸ 3 not running or paused, holding 3 issues"]);
   fold[0].children[0].fire("click");
   busy = ctx.board(BUSY, STATUSES);
-  check("opened, the ended rows are drawn after the live ones and before "
+  check("opened, the hidden rows are drawn after the live ones and before "
         + "the pool",
         rowNames(busy),
-        ["s05", "s04", "human", "s03", "s01", "s02", "unassigned"]);
-  check("and their heads are marked as ended",
-        busy.find("beads-q-head").filter((h) => h.classes.has("spent")).length, 2);
+        ["s05", "s04", "s06", "s03", "human", "s01", "s02", "unassigned"]);
+  check("and their heads are marked",
+        busy.find("beads-q-head").filter((h) => h.classes.has("spent")).map((h) => h.find("beads-q-name")[0].text),
+        ["human", "s01", "s02"]);
   check("the toggle now folds them back", busy.find("beads-q-fold")[0]
-        .children[0].text, "▾ 2 ended sessions, holding 2 issues");
+        .children[0].text, "▾ 3 not running or paused, holding 3 issues");
+  check("a daemon without `category` is read by status: exited is folded",
+        rowNames(ctx.board({ root: "/old", error: null, unassigned: [], lanes: [
+          { ...lane("o1", { issues: ["q"] }), category: undefined },
+          { ...lane("o2", { status: "exited", issues: ["r"] }), category: undefined },
+        ] }, STATUSES)), ["o1", "unassigned"]);
 
   /* ---- 7. a pool too tall to draw ------------------------------------- */
   const POOL = {

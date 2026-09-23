@@ -2360,16 +2360,31 @@ def test_the_queues_view_draws_a_lane_per_session_and_the_pool(repo):
         s2 = _Sess(_sdef("s2", repo))
         gone = _Sess(_sdef("gone", repo), status="exited")
         quiet = _Sess(_sdef("quiet", repo), status="exited")
+        # paused with nothing assigned: exited like "gone", but a session the
+        # operator means to resume, so still a row to drag work onto
+        resting = _Sess(_sdef("resting", repo), status="exited")
+        resting.paused_at = "2026-09-24T00:00:00+00:00"
+        # killed with nothing left: no lane, as before
+        done = _Sess(_sdef("done", repo), status="exited")
         steps = {"s1": {"workflow": "improv-worker", "step": "work"}}
         view = await board.queues_view(
-            [s1, s2, gone, quiet], extra_roots=[str(repo)],
+            [s1, s2, gone, quiet, resting, done], extra_roots=[str(repo)],
             cflow_for=lambda name, cwd: steps.get(name),
         )
         assert view["statuses"] == list(beads_mod.ACTIVE_STATUSES)
         assert len(view["boards"]) == 1
         b = view["boards"][0]
         lanes = {l["session"]: l for l in b["lanes"]}
-        assert [l["session"] for l in b["lanes"]] == ["s1", "s2", "gone", "quiet", "lead"]
+        assert [l["session"] for l in b["lanes"]] == [
+            "s1", "s2", "gone", "quiet", "resting", "lead",
+        ]
+        # the partition the page draws by: status alone cannot tell paused
+        # from killed -- both answer "exited"
+        assert {n: l["category"] for n, l in lanes.items()} == {
+            "s1": "running", "s2": "running", "gone": "killed",
+            "quiet": "killed", "resting": "paused", "lead": None,
+        }
+        assert lanes["resting"]["status"] == "exited" and lanes["resting"]["issues"] == []
         assert [i["id"] for i in lanes["s1"]["issues"]] == ["a", "b"]
         assert [i["id"] for i in lanes["s1"]["created"]] == ["h"]
         assert lanes["s1"]["summary"]["next"] == "b"
