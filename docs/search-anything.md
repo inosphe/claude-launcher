@@ -6,7 +6,10 @@ focus. `/` remains ordinary input in text fields, editors and terminals.
 The **검색 범위** radio group defaults to **일반**, which searches the full
 corpus. **활성 세션 + Beads** searches records of currently live sessions
 (including opening tasks, notes, summaries and Observer details), plus all
-Beads issues and comments regardless of issue status or session ownership.
+Beads issues assigned to or created by those live sessions, with their comments.
+Issue status does not affect this ownership filter. A session's issue link or
+task reference alone does not qualify an issue. Unassigned issues with no live
+creator, and issues associated only with killed or archived sessions, are excluded.
 Exited, paused, archived and removed sessions are excluded. Changing the mode
 reruns the current query and cancels the previous response. Both JSON and SSE
 search endpoints accept `kind=all&mode=active`; omitted `mode` or
