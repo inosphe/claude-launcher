@@ -936,3 +936,88 @@ def test_both_endpoints_carry_the_git_branch(home, tmp_path, monkeypatch):
             await mgr.shutdown_all()
 
     asyncio.run(run())
+
+
+# --------------------------------------------------------------------------- #
+# tool calls: how many the session made lately, for the rail's busy grade
+# --------------------------------------------------------------------------- #
+def _iso(epoch: float) -> str:
+    from datetime import datetime, timezone
+    return datetime.fromtimestamp(epoch, timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def claude_tools(n: int, at: float, side: bool = False) -> str:
+    return json.dumps({
+        "type": "assistant", "isSidechain": side, "timestamp": _iso(at),
+        "message": {"role": "assistant", "content": (
+            [{"type": "text", "text": "x"}]
+            + [{"type": "tool_use", "id": f"t{i}", "name": "Bash", "input": {}} for i in range(n)]
+        )},
+    })
+
+
+def test_tool_calls_in_reads_all_three_harnesses():
+    assert ctxsize.tool_calls_in(json.loads(claude_tools(3, 0.0))) == 3
+    # A subagent's calls are the subagent's, as for the context reading.
+    assert ctxsize.tool_calls_in(json.loads(claude_tools(3, 0.0, side=True))) == 0
+    for kind, want in (("function_call", 1), ("custom_tool_call", 1),
+                       ("function_call_output", 0), ("message", 0)):
+        entry = {"timestamp": _iso(0), "type": "response_item", "payload": {"type": kind}}
+        assert ctxsize.tool_calls_in(entry) == want, kind
+    pi = {"type": "message", "timestamp": _iso(0), "message": {
+        "role": "assistant",
+        "content": [{"type": "thinking", "thinking": "."}, {"type": "toolCall", "id": "a"},
+                    {"type": "toolCall", "id": "b"}]}}
+    assert ctxsize.tool_calls_in(pi) == 2
+    # A tool's result is not a call.
+    assert ctxsize.tool_calls_in({"type": "user", "message": {
+        "role": "user", "content": [{"type": "tool_result", "tool_use_id": "t0"}]}}) == 0
+
+
+def test_read_tool_times_stops_at_the_window(tmp_path):
+    now = time.time()
+    path = write_jsonl(
+        tmp_path,
+        claude_tools(5, now - 900),      # before the window
+        claude_tools(2, now - 200),
+        "not json",
+        claude_tools(1, now - 10),
+    )
+    times = ctxsize.read_tool_times(path, now - ctxsize.TOOL_WINDOW)
+    assert len(times) == 3
+
+
+def test_a_session_reports_its_recent_tool_calls(home, tmp_path):
+    now = time.time()
+    sdef = _claude_session(
+        tmp_path,
+        claude_tools(4, now - 1000),
+        claude_tools(2, now - 120),
+        claude_tools(1, now - 5),
+    )
+    assert ctxsize.tool_calls_for_session(sdef, now=now) == 3
+    # Counted against the moment asked, from the cached read: once the
+    # window passes the calls, they stop counting without the file moving.
+    assert ctxsize.tool_calls_for_session(sdef, now=now + ctxsize.TOOL_WINDOW - 60) == 1
+    assert ctxsize.tool_calls_for_session(sdef, now=now + 2 * ctxsize.TOOL_WINDOW) == 0
+
+
+def test_no_transcript_is_no_tool_count_not_zero(home, tmp_path):
+    sdef = SessionDef(name="s1", harness="claude", cwd=str(tmp_path), conversation_id=None)
+    assert ctxsize.tool_calls_for_session(sdef) is None
+
+
+def test_attach_carries_tool_calls_only_when_known(home, tmp_path):
+    now = time.time()
+    sdef = _claude_session(tmp_path, claude_tools(2, now - 30))
+
+    class Fake:
+        def __init__(self, d):
+            self.sdef = d
+
+        def info(self):
+            return {"name": self.sdef.name}
+
+    assert ctxsize.attach(Fake(sdef))["tool_calls"] == 2
+    bare = SessionDef(name="s2", harness="claude", cwd=str(tmp_path), conversation_id=None)
+    assert "tool_calls" not in ctxsize.attach(Fake(bare))

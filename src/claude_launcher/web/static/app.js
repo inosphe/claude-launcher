@@ -2886,7 +2886,7 @@ async function refreshSessions(options) {
       key === "due_in" || key === "fired_ago" ||
       key === "last_visited_at" || key === "last_input_at" ||
       key === "last_activity_at" || key === "last_output_at" ||
-      key === "viewers" || key === "moved_rows"
+      key === "viewers" || key === "moved_rows" || key === "tool_calls"
     ) ? undefined : value,
   );
   // See the hold above: a press in flight keeps the rows it started on, and
@@ -5345,20 +5345,34 @@ function resetRailStale(kind) {
    the rail's "moved" reading, so a session that finished a minute ago and
    one that has sat untouched all afternoon stop looking alike.
 
-   The bounds are lower edges: DOT_BUSY_LEVELS[i] rows lift a busy dot to
-   level i+2, DOT_IDLE_AGES[i] seconds take an idle dot to age i+1. They
-   are first-cut values, not measured ones; the dot's tooltip prints the
-   number each grade came from, so a bound that sorts badly can be seen to. */
+   Busy has a second reading, `tool_calls` — tool calls in the session's
+   transcript over the last five minutes (daemon/ctxsize.py
+   tool_calls_for_session). A turn running tool after tool can repaint
+   little of the screen, so the busy level is the higher of the two.
+
+   The bounds are lower edges: DOT_BUSY_LEVELS[i] rows or DOT_TOOL_LEVELS[i]
+   tool calls lift a busy dot to level i+2, DOT_IDLE_AGES[i] seconds take an
+   idle dot to age i+1. The tool bounds are the p25 and p75 of 2083 active
+   five-minute windows in 60 Claude transcripts on the development machine
+   (median 7); the row and age bounds are first-cut values. The dot's
+   tooltip prints the numbers each grade came from. */
 const DOT_BUSY_LEVELS = [40, 240];
+const DOT_TOOL_LEVELS = [3, 15];
 const DOT_IDLE_AGES = [300, 1800, 7200];
 
 function dotGrade(s) {
   if (!s) return "";
   if (s.status === "busy") {
-    const n = Number(s.moved_rows);
-    // A daemon too old to send the reading: the plain yellow it always had.
-    if (s.moved_rows == null || !Number.isFinite(n)) return "";
-    return ` lvl-${1 + DOT_BUSY_LEVELS.filter((t) => n >= t).length}`;
+    // Each reading grades on its own bounds; a missing one grades nothing.
+    const level = (value, bounds) => {
+      const n = Number(value);
+      return value == null || !Number.isFinite(n)
+        ? 0 : 1 + bounds.filter((t) => n >= t).length;
+    };
+    const lvl = Math.max(level(s.moved_rows, DOT_BUSY_LEVELS),
+                         level(s.tool_calls, DOT_TOOL_LEVELS));
+    // A daemon too old to send either reading: the plain yellow it always had.
+    return lvl ? ` lvl-${lvl}` : "";
   }
   if (s.status === "idle") {
     const ago = seenAgo(s.last_activity_at);
@@ -5384,9 +5398,10 @@ function dotClassOf(s, status) {
 function dotTitle(s) {
   if (!s) return "";
   if (s.status === "busy") {
-    return s.moved_rows == null
-      ? "busy"
-      : `busy — ${s.moved_rows} screen rows moved in the last minute`;
+    const parts = [];
+    if (s.moved_rows != null) parts.push(`${s.moved_rows} screen rows moved in the last minute`);
+    if (s.tool_calls != null) parts.push(`${s.tool_calls} tool calls in the last 5m`);
+    return parts.length ? `busy — ${parts.join(", ")}` : "busy";
   }
   if (s.status === "idle") {
     const ago = seenAgo(s.last_activity_at);
