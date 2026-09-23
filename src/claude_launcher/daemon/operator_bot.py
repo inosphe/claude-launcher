@@ -189,8 +189,12 @@ class Operators:
         op = self.operator_session(project)
         operator = None
         if op is not None:
+            # Harness and model say which bot this is: the same feed reads
+            # differently from a small model than from a large one.
             operator = {"name": op.sdef.name, "running": not op.exited,
-                        "status": op.info().get("status")}
+                        "status": op.info().get("status"),
+                        "harness": getattr(op.sdef, "harness", None),
+                        "model": getattr(op.sdef, "model", None)}
         elif data.get("session"):
             operator = {"name": data["session"], "running": False, "status": "missing"}
         return {"project": project, "operator": operator, "feed": data["feed"][-200:],
@@ -465,6 +469,13 @@ def install(app, *, create=None, gates=None):
                 "beads": False, "name": str(body.get("name") or "").strip(),
                 "task": (f"너는 프로젝트 {project}의 Operator bot이다. stance와 operator 워크플로가 "
                          "규칙이다. 사용자와의 대화는 터미널이 아니라 operator_* 도구로 한다.")}
+        # The model and effort are the new-session form's own fields, checked
+        # by the same create path against the profile's harness; an empty
+        # answer is the harness default and is not sent at all.
+        for key in ("model", "effort"):
+            value = str(body.get(key) or "").strip()
+            if value:
+                spec[key] = value
         status, payload = await create(request, spec)
         if status >= 300:
             return web.json_response(payload, status=status)

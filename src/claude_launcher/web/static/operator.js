@@ -50,9 +50,35 @@ function sessionBadge(row) {
   if (row.state === "done") return {label: "완료", kind: "done"};
   return {label: row.status || "상태 미확인", kind: "idle"};
 }
+/* What the Start row offers for one profile choice: the harness's declared
+   model and effort choices (GET /api/harnesses, the same source the
+   new-session form reads). A harness that declares none gets no picker. */
+function startChoices(options, harnesses, selector) {
+  const option = (options || []).find(o => o.value === selector) || (options || [])[0];
+  const caps = (option && (harnesses || {})[option.harness]) || {};
+  return {profile: option ? option.value : "", harness: option ? option.harness : "",
+          models: (caps.models || []).map(String), efforts: (caps.efforts || []).map(String)};
+}
+/* The start request. A model or effort the chosen harness does not offer is
+   dropped rather than sent, so a choice left over from another profile never
+   reaches the create path. Empty means the harness default. */
+function startBody(projectName, choice, offered) {
+  const body = {project: projectName, profile: offered.profile};
+  if (choice.model && offered.models.includes(choice.model)) body.model = choice.model;
+  if (choice.effort && offered.efforts.includes(choice.effort)) body.effort = choice.effort;
+  return body;
+}
+function operatorLabel(op) {
+  if (!op) return "";
+  return [op.harness, op.model].filter(Boolean).join(" · ");
+}
 
 /* ---- state ---- */
-let project = "", data = null, profiles = [], projectNames = [], timer = null, badgeTimer = null;
+let project = "", data = null, projectNames = [], timer = null, badgeTimer = null;
+/* The Start row's choices. The row is rebuilt on every poll, so what the user
+   picked lives here rather than in the elements. */
+let profileOptions = [], modelIds = {}, harnesses = {};
+const startChoice = {profile: "", model: "", effort: ""};
 const hosts = new Set();
 const drafts = new Map();          // ask id -> note text, so a poll never eats a half-typed note
 let composer = "";
@@ -128,25 +154,61 @@ function renderHead(h) {
   }
   select.value = chosenProject();
   const op = data?.operator;
-  status.textContent = !data ? "불러오는 중…" : !op ? "Operator 없음"
-    : op.running ? `${op.name} · ${op.status || "running"}` : `${op.name} · 종료됨`;
-  status.dataset.state = !op ? "none" : op.running ? "running" : "ended";
-  start.replaceChildren();
-  if (data && (!op || !op.running)) {
-    const pick = node("select"); pick.setAttribute("aria-label", "Operator 세션의 프로필");
-    for (const p of profiles) { const o = node("option", p); o.value = p; pick.append(o); }
-    const go = node("button", "Operator 시작"); go.type = "button";
-    go.onclick = async () => {
-      go.disabled = true;
-      try { await request("api/operator/start", {project: chosenProject(), profile: pick.value}); await refresh(); }
-      catch (err) { notice(err.message); } finally { go.disabled = false; }
-    };
-    start.append(pick, go);
+  // The bot's own session is an ordinary claunch session: its name links to
+  // its terminal (#/s/<name>), the same destination as every session row.
+  status.replaceChildren();
+  if (!data) status.textContent = "불러오는 중…";
+  else if (!op) status.textContent = "Operator 없음";
+  else {
+    const link = sessionLink(op.name, "operator-self");
+    link.title = "Operator 세션의 터미널 열기";
+    const label = operatorLabel(op);
+    status.append(link, ` · ${op.running ? (op.status || "running") : "종료됨"}` + (label ? ` · ${label}` : ""));
   }
+  status.dataset.state = !op ? "none" : op.running ? "running" : "ended";
+  if (start.contains(document.activeElement)) return;  // a picker is open: do not rebuild under it
+  start.replaceChildren();
+  if (data && (!op || !op.running)) renderStart(start);
 }
 
-function sessionLink(name) {
-  const a = node("a", name, "operator-ref");
+function renderStart(start) {
+  const offered = startChoices(profileOptions, harnesses, startChoice.profile);
+  startChoice.profile = offered.profile;
+  const picker = (label, values, current, labelOf, onpick) => {
+    const select = node("select"); select.setAttribute("aria-label", label);
+    for (const v of values) { const o = node("option", labelOf(v)); o.value = v; select.append(o); }
+    select.value = current;
+    select.onchange = () => { onpick(select.value); start.replaceChildren(); renderStart(start); };
+    return select;
+  };
+  start.append(picker("Operator 세션의 프로필", profileOptions.map(o => o.value), offered.profile,
+    v => (profileOptions.find(o => o.value === v) || {}).label || v,
+    v => { startChoice.profile = v; }));
+  const ids = modelIds[offered.profile] || {};
+  if (offered.models.length) {
+    if (!offered.models.includes(startChoice.model)) startChoice.model = "";
+    start.append(picker("Operator 세션의 모델", ["", ...offered.models], startChoice.model,
+      v => !v ? "모델: harness 기본값" : ids[v] ? `${v} (${ids[v]})` : v,
+      v => { startChoice.model = v; }));
+  }
+  if (offered.efforts.length) {
+    if (!offered.efforts.includes(startChoice.effort)) startChoice.effort = "";
+    start.append(picker("Operator 세션의 effort", ["", ...offered.efforts], startChoice.effort,
+      v => v || "effort: 기본값", v => { startChoice.effort = v; }));
+  }
+  const go = node("button", "Operator 시작"); go.type = "button";
+  go.disabled = !offered.profile;
+  go.onclick = async () => {
+    go.disabled = true;
+    const current = startChoices(profileOptions, harnesses, startChoice.profile);
+    try { await request("api/operator/start", startBody(chosenProject(), startChoice, current)); await refresh(); }
+    catch (err) { notice(err.message); } finally { go.disabled = false; }
+  };
+  start.append(go);
+}
+
+function sessionLink(name, cls = "operator-ref") {
+  const a = node("a", name, cls);
   a.href = "#/s/" + encodeURIComponent(name);
   return a;
 }
@@ -283,9 +345,22 @@ async function refresh() {
   } catch (err) { notice(err.message); }
   refreshBadge();
 }
+/* The launchable profile choices (profile:harness selectors, the list the
+   new-session form offers) and each harness's model/effort choices. */
 async function loadProfiles() {
-  if (profiles.length) return;
-  try { profiles = (await request("api/profiles")).profiles || []; } catch {}
+  if (profileOptions.length) return;
+  try {
+    const [profilesDoc, harnessDoc] = await Promise.all([
+      request("api/profiles"), request("api/harnesses").catch(() => ({harnesses: []}))]);
+    profileOptions = (profilesDoc.profile_options || []).map(o => ({value: o.value, label: o.label || o.value, harness: o.harness}));
+    if (!profileOptions.length) profileOptions = (profilesDoc.profiles || []).map(p => ({value: p, label: p, harness: ""}));
+    modelIds = {};
+    for (const d of profilesDoc.profile_details || []) modelIds[d.name] = d.model_ids || {};
+    // A profile's default row is named by the bare profile; its option by profile:harness.
+    for (const o of profilesDoc.profile_options || []) if (o.default && modelIds[o.profile]) modelIds[o.value] = modelIds[o.profile];
+    harnesses = {};
+    for (const h of harnessDoc.harnesses || []) if (h && h.name) harnesses[h.name] = h;
+  } catch {}
 }
 function poll() {
   clearInterval(timer);
@@ -326,6 +401,11 @@ modalClose.onclick = () => modal.close();
 const modalRoot = node("div", null, "operator-modal-root");
 modal.append(modalClose, modalRoot);
 modal.addEventListener("close", () => detachIdle());
+// A session link inside the modal goes to that session's page; the modal
+// would otherwise stay over the terminal it just opened.
+modalRoot.addEventListener("click", event => {
+  if (event.target.closest?.('a[href^="#/"]')) modal.close();
+});
 document.body.append(modal);
 function openModal() {
   if (!modal.open) modal.showModal();
@@ -352,5 +432,5 @@ refreshBadge();
 badgeTimer = setInterval(() => { if (document.visibilityState === "visible") refreshBadge(); }, 15000);
 
 return {open, stop, openModal, refresh,
-        _test: {openAsks, freshUrgent, answerLine, deliveryLabel, sessionBadge}};
+        _test: {openAsks, freshUrgent, answerLine, deliveryLabel, sessionBadge, startChoices, startBody}};
 })();

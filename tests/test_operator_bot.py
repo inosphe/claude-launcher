@@ -236,10 +236,13 @@ def test_start_route_binds_one_operator_per_project(world, monkeypatch):
             assert resp.status == 409
             resp = await client.post("/api/operator/start", json={"project": "other"})
             assert resp.status == 400  # profile required
-            resp = await client.post("/api/operator/start", json={"project": "other", "profile": "p"})
+            resp = await client.post("/api/operator/start",
+                                     json={"project": "other", "profile": "p:claude", "model": " opus ", "effort": ""})
             assert resp.status == 201
             view = await (await client.get("/api/operator?project=other")).json()
             assert view["operator"]["name"] == "op2"
+            # the view names the bot's harness and model, for the header
+            assert {"harness", "model"} <= set(view["operator"])
             resp = await client.post("/api/operator/message?project=other", json={"text": "hi"})
             assert resp.status == 200
             resp = await client.post("/api/operator/agent/w1/post", json={"text": "x", "request_id": "a"})
@@ -250,6 +253,10 @@ def test_start_route_binds_one_operator_per_project(world, monkeypatch):
     asyncio.run(run())
     assert created[0]["role"] == "operator" and created[0]["workflow"] == "operator"
     assert created[0]["mesh"] == "operator-other" and created[0]["beads"] is False
+    # the picked model travels to the create path; an empty effort is the
+    # harness default and is not sent
+    assert created[0]["profile"] == "p:claude" and created[0]["model"] == "opus"
+    assert "effort" not in created[0]
 
 
 def test_mcp_tools_and_workflow_and_stance_agree():

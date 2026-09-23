@@ -39,7 +39,7 @@ function check(label, actual, expected) {
 
 const ctx = {};
 vm.createContext(ctx);
-for (const name of ["openAsks", "freshUrgent", "answerLine", "deliveryLabel", "sessionBadge"]) {
+for (const name of ["openAsks", "freshUrgent", "answerLine", "deliveryLabel", "sessionBadge", "startChoices", "startBody"]) {
   vm.runInContext(slice(src, name), ctx);
 }
 
@@ -65,6 +65,23 @@ check("an open question outranks a busy status",
       ctx.sessionBadge({ questions: 2, status: "busy" }), { label: "질문 2", kind: "waiting" });
 check("blocked outranks busy", ctx.sessionBadge({ state: "blocked", status: "busy" }).kind, "blocked");
 check("busy reads 동작 중", ctx.sessionBadge({ status: "busy" }).label, "동작 중");
+
+const options = [{value: "a:claude", harness: "claude"}, {value: "a:pi", harness: "pi"}];
+const caps = {claude: {models: ["sonnet", "opus"], efforts: ["high"]}, pi: {models: [], efforts: []}};
+check("a harness with model choices offers them",
+      ctx.startChoices(options, caps, "a:claude"), {profile: "a:claude", harness: "claude", models: ["sonnet", "opus"], efforts: ["high"]});
+check("a harness without model choices offers no picker", ctx.startChoices(options, caps, "a:pi").models, []);
+check("an unknown selector falls back to the first profile", ctx.startChoices(options, caps, "gone").profile, "a:claude");
+check("the start body carries the picked model and effort",
+      ctx.startBody("p", {model: "opus", effort: "high"}, ctx.startChoices(options, caps, "a:claude")),
+      {project: "p", profile: "a:claude", model: "opus", effort: "high"});
+check("a model the harness does not offer is not sent",
+      ctx.startBody("p", {model: "opus", effort: ""}, ctx.startChoices(options, caps, "a:pi")),
+      {project: "p", profile: "a:pi"});
+check("the operator's own session links to its terminal",
+      [src.includes('sessionLink(op.name, "operator-self")'), src.includes('a.href = "#/s/" + encodeURIComponent(name)')], [true, true]);
+check("a session link in the modal closes the modal",
+      /modalRoot\.addEventListener\("click"[^\n]*\n[^\n]*a\[href\^="#\/"\][^\n]*modal\.close\(\)/.test(src), true);
 
 check("operator.js never assigns HTML", /innerHTML|outerHTML|insertAdjacentHTML/.test(src), false);
 check("the route parses", app.includes('if (parts[0] === "operator") return { page: "operator" };'), true);

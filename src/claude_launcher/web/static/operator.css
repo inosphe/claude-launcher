@@ -16,7 +16,8 @@
 .operator-status { color: #8b949e; font-size: 12px; }
 .operator-status[data-state=running]::before { content: "● "; color: #3fb950; }
 .operator-status[data-state=ended]::before { content: "● "; color: #f85149; }
-.operator-start { display: flex; gap: 8px; margin-left: auto; }
+.operator-self { font-weight: 600; }
+.operator-start { display: flex; flex-wrap: wrap; gap: 8px; margin-left: auto; }
 .operator-body { flex: 1; min-height: 0; display: grid; grid-template-columns: minmax(0, 1fr) 300px; }
 .operator-conversation { display: flex; flex-direction: column; min-height: 0; min-width: 0; border-right: 1px solid #2a2e36; }
 .operator-feed { flex: 1; min-height: 0; overflow: auto; list-style: none; margin: 0; padding: 16px 20px; display: flex; flex-direction: column; gap: 12px; }
