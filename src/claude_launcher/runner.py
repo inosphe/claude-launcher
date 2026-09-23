@@ -357,8 +357,8 @@ def model_ids(
     backend then answers on is a different string, and how it is reached
     depends on the harness:
 
-    * a builtin (Claude) harness passes the alias through and Claude Code
-      resolves it -- here, out of the profile's own environment
+    * a builtin (Claude) harness applies any configured alias mapping, then
+      Claude Code resolves its built-in names out of the profile's environment
       (:func:`claude_model_env`), which is the only place that resolution is
       written down;
     * a declared harness resolves it itself: ``model_aliases`` is the table
@@ -385,8 +385,10 @@ def model_ids(
                 except (RunnerError, providers.ProviderError):
                     claude_env = {}
             for alias in choices:
-                var = provider_spec.CLAUDE_ALIAS_VARS.get(alias)
+                selected = entry.model_aliases.get(alias, alias)
+                var = provider_spec.CLAUDE_ALIAS_VARS.get(selected)
                 value = str(claude_env.get(var, "")).strip() if var else ""
+                value = value or (selected if selected != alias else "")
                 if value and value != alias:
                     ids[alias] = value
         else:

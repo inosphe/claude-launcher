@@ -44,7 +44,7 @@ import re
 import shutil
 import sys
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from importlib import resources
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -698,6 +698,25 @@ def _builtin() -> Dict[str, Harness]:
     return _BUILTIN
 
 
+def validate_model_choices(value: object) -> Dict[str, str]:
+    """Validate the ordered choice -> model ID mapping edited in Settings.
+
+    ``model_choices: {codex: {gpt6-sol: gpt-6-sol}}`` in ~/.claunch.yaml
+    replaces only models and aliases, leaving the harness declaration live.
+    An empty mapping deliberately offers only the harness default.
+    """
+    if not isinstance(value, dict):
+        raise HarnessConfigError("models must be a mapping of choice names to model IDs")
+    for choice, model_id in value.items():
+        if any(
+            not isinstance(item, str) or not item
+            or any(c.isspace() or not c.isprintable() or c == "=" for c in item)
+            for item in (choice, model_id)
+        ):
+            raise HarnessConfigError("model names and IDs must be non-empty strings without whitespace, control characters or '='")
+    return dict(value)
+
+
 def registry(doc: Optional[dict] = None) -> Dict[str, Harness]:
     """The harnesses in force: the packaged set with the config's on top.
 
@@ -722,6 +741,19 @@ def registry(doc: Optional[dict] = None) -> Dict[str, Harness]:
                 merged[name] = _parse_entry(name, body)
             except HarnessConfigError:
                 continue
+    choices = doc.get("model_choices")
+    if isinstance(choices, dict):
+        for name, value in choices.items():
+            if name not in merged:
+                continue
+            try:
+                aliases = validate_model_choices(value)
+            except HarnessConfigError:
+                continue
+            merged[name] = replace(
+                merged[name], models=list(aliases),
+                model_aliases={key: value for key, value in aliases.items() if key != value},
+            )
     return merged
 
 

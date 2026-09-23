@@ -238,6 +238,8 @@ def test_selected_pi_effort_overrides_provider_default(
     ("terra", "gpt-5.6-terra"),
     ("sol", "gpt-5.6-sol"),
     ("astra", "gpt-6-astra"),
+    ("gpt6-sol", "gpt-6-sol"),
+    ("gpt6-luna", "gpt-6-luna"),
 ])
 def test_declared_codex_model_ids(home, tmp_path, model, model_id):
     """Model aliases may refer to different backend model generations."""

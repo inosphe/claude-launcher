@@ -50,8 +50,8 @@ def test_packaged_set_declares_supported_harnesses(home):
     }
     assert "OPENAI_API_KEY" in reg["codex"].clear_env
     assert reg["codex"].borrowable is False
-    assert reg["codex"].models == ["luna", "terra", "sol", "astra"]
-    assert reg["codex"].to_dict()["models"] == ["luna", "terra", "sol", "astra"]
+    assert reg["codex"].models == ["luna", "terra", "sol", "astra", "gpt6-sol", "gpt6-luna"]
+    assert reg["codex"].to_dict()["models"] == reg["codex"].models
     assert reg["codex"].btw is not None
     assert reg["codex"].btw.to_dict() == {
         "command": "/btw",

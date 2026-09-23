@@ -491,6 +491,7 @@ def build_app(
     r.add_put("/api/status-checks/{check_id}", h_status_checks_update)
     r.add_delete("/api/status-checks/{check_id}", h_status_checks_remove)
     r.add_get("/api/harnesses", h_harnesses)
+    r.add_put("/api/harnesses/{name}/models", h_harness_models_save)
     r.add_get("/api/cflow", h_cflow_runs)
     r.add_get("/api/cflow/run", h_cflow_run_detail)
     r.add_get("/api/cflow/workflows", h_cflow_workflows)
@@ -1924,6 +1925,43 @@ async def h_harnesses(request: web.Request) -> web.Response:
             ]
         }
     )
+
+
+async def h_harness_models_save(request: web.Request) -> web.Response:
+    """Edit only a harness's model choices; null restores its declaration."""
+    name = request.match_info["name"]
+    body = await _json_body(request)
+    if "models" not in body:
+        return json_error(400, "models is required (null restores defaults)")
+    try:
+        models = (
+            None if body["models"] is None
+            else harness_registry.validate_model_choices(body["models"])
+        )
+
+        def mutate(doc: dict) -> None:
+            if harness_registry.get(name, doc) is None:
+                raise KeyError(name)
+            section = doc.get("model_choices", {})
+            if not isinstance(section, dict):
+                raise ValueError("model_choices must be a mapping; repair the config first")
+            if models is None:
+                section.pop(name, None)
+            else:
+                section[name] = models
+            if section:
+                doc["model_choices"] = section
+            else:
+                doc.pop("model_choices", None)
+
+        saved = store.update(mutate)
+    except KeyError:
+        return json_error(404, f"unknown harness: {name}")
+    except (harness_registry.HarnessConfigError, ValueError) as exc:
+        return json_error(400, str(exc))
+    except store.StoreError as exc:
+        return json_error(500, str(exc))
+    return json_response({"harness": harness_registry.get(name, saved).to_dict()})
 
 
 async def h_projects(request: web.Request) -> web.Response:
