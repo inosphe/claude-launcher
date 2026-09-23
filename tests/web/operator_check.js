@@ -6,6 +6,9 @@
                       an answer reads as 승인/거절 for approve asks and as the
                       choice otherwise; the session badge puts an open question
                       ahead of everything else it could say.
+     scroll        -- a poll that arrives while the reader is scrolled up keeps
+                      their place and counts what is new on a button at the
+                      bottom; at the bottom (or after the user sends) it follows.
      text only     -- operator.js never assigns HTML: every string in the feed
                       came from an agent or a user.
      wired         -- the page has a route, a view, a nav entry with the badge,
@@ -40,7 +43,7 @@ function check(label, actual, expected) {
 const ctx = {};
 vm.createContext(ctx);
 for (const name of ["openAsks", "freshUrgent", "answerLine", "deliveryLabel", "sessionBadge", "startChoices", "startBody",
-                    "dotClass", "progressChips", "threadsOf", "cardLine", "sameUpdate", "gateActions"]) {
+                    "dotClass", "progressChips", "threadsOf", "cardLine", "sameUpdate", "gateActions", "unseenCount"]) {
   vm.runInContext(slice(src, name), ctx);
 }
 vm.runInContext(src.match(/^const STAGES = .*$/m)[0].replace("const ", "var "), ctx);
@@ -120,6 +123,19 @@ check("a goto request is approved or refused through goto/resolve, the refusal a
 check("gate presses go under the newest card naming the session, and in the panel",
       [src.includes("gateCard.set(r, e.id)"), src.includes("if (gateCard.get(r) === e.id) item.append(renderGate(gates.get(r)))"),
        src.includes("승인을 기다리는 cflow 게이트")], [true, true, true]);
+check("unseen: entries after the one read at the bottom; none before anything was read; all once it was trimmed",
+      [ctx.unseenCount(feed, "c"), ctx.unseenCount(feed, "e"), ctx.unseenCount(feed, null), ctx.unseenCount(feed, "gone"), ctx.unseenCount(null, "a")],
+      [2, 0, 0, 5, 0]);
+check("scrolled up, the rebuild keeps the reader's entry in place and shows the count instead of jumping",
+      [src.includes("const keep = atBottom || !h.scrolled ? null : {top: list.scrollTop, entry: topEntry(list)};"),
+       src.includes("list.scrollTop = keep.top;"), src.includes("showUnseen(h);"),
+       /if \(atBottom \|\| !h\.scrolled\) \{ list\.scrollTop = list\.scrollHeight/.test(src)],
+      [true, true, true, false]);
+check("the button sits at the feed's newest end; pressing it or scrolling down clears it",
+      [src.includes("feedWrap.append(feed, newer);"), src.includes("if (nearBottom(feed)) markRead(h);"),
+       src.includes("newer.onclick = () => { feed.scrollTop = feed.scrollHeight; markRead(h); };")], [true, true, true]);
+check("sending a message or switching project goes back to following the bottom",
+      [src.includes("h.parts.input.value = \"\"; h.scrolled = false;"), src.includes("h.scrolled = false; h.readId = null;")], [true, true]);
 check("a daemon restart entry gets its own look", src.includes("operator-event-${e.event}"), true);
 
 const options = [{value: "a:claude", harness: "claude"}, {value: "a:pi", harness: "pi"}];
