@@ -393,6 +393,7 @@ CHECKS = [
         "briefmodel_check.js",
         "briefrow_check.js",
         "observerrecord_check.js",
+        "observercompact_check.js",
         "railhold_check.js",
         "railscroll_check.js",
         "railquiet_check.js",

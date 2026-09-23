@@ -258,6 +258,86 @@ async function oneShot(name) {
     refreshing.delete(name);lastSnapshot="";await refresh();
   }
 }
+/* Event text as one compact line with its identifiers drawn as chips.
+   It is done here, at render time, and not by the model or the daemon: stored
+   events keep the text they were written with, so a format decided in the
+   page reaches every event already on the timeline as well as the next one.
+   Only the kinds of identifier these reports are made of are recognised —
+   beads issues, cflow run ids, sessions, commit hashes and test counts — and
+   anything else stays literal text. A backtick span is a code span unless the
+   whole span is one of those identifiers. */
+const CHIP_TITLES = {beads:"beads 이슈",run:"cflow 런",session:"세션",commit:"커밋",pass:"테스트 통과",fail:"테스트 실패",count:"테스트 수치"};
+const CHIP_PATTERN = [
+  "(?<beads>\\bclaunch-[a-z0-9]{3,8}(?:\\.\\d+)*(?![\\w-]))",
+  "(?<run>\\brun-[0-9a-f]{8}\\b)",
+  "(?<session>@?\\bs\\d{3,4}\\b(?![\\w-]))",
+  "(?<tests>\\b\\d+\\s*(?:passed|failed|skipped|errors?|error|xfailed|xpassed)\\b)",
+  "(?<commit>\\b(?=[0-9a-f]*[a-f])(?=[0-9a-f]*\\d)[0-9a-f]{7,40}\\b)",
+  // An all-digit hash is only a hash where the text says so.
+  "(?<=(?:tip|커밋|commit|머지|merge|HEAD|@)\\s?)(?<digits>\\b\\d{7,12}\\b)",
+].join("|");
+function chipKind(groups, text) {
+  if(groups.tests!==undefined) {
+    const n=Number(text.match(/\d+/)[0]);
+    return /fail|error/.test(text)?(n?"fail":"count"):/passed/.test(text)?"pass":"count";
+  }
+  if(groups.digits!==undefined) return "commit";
+  return Object.keys(groups).find(k=>groups[k]!==undefined);
+}
+function chip(kind,text) {
+  const c=node("span",kind==="session"&&!text.startsWith("@")?"@"+text:text,`obs-chip obs-chip-${kind}`);
+  c.title=CHIP_TITLES[kind]||kind;
+  return c;
+}
+function chipsInto(parent,text) {
+  let last=0;
+  for(const m of text.matchAll(new RegExp(CHIP_PATTERN,"g"))) {
+    if(!m[0])continue;
+    if(m.index>last)parent.append(node("span",text.slice(last,m.index)));
+    parent.append(chip(chipKind(m.groups,m[0]),m[0]));
+    last=m.index+m[0].length;
+  }
+  if(last<text.length)parent.append(node("span",text.slice(last)));
+}
+function richLine(text,cls="obs-line") {
+  const line=node("div","",cls), source=String(text??"");
+  let last=0;
+  for(const m of source.matchAll(/`([^`\n]+)`/g)) {
+    if(m.index>last)chipsInto(line,source.slice(last,m.index));
+    const whole=m[1].match(new RegExp(`^(?:${CHIP_PATTERN})$`));
+    line.append(whole?chip(chipKind(whole.groups,m[1]),m[1]):node("code",m[1],"obs-code"));
+    last=m.index+m[0].length;
+  }
+  if(last<source.length)chipsInto(line,source.slice(last));
+  return line;
+}
+/* Runs of the same routine daemon event — a restore after every daemon
+   restart is the common one: s697 carried 20 of them among 31 events — are
+   drawn as one entry with a count and a time span. Only events next to each
+   other in one session's own order are merged, so nothing is moved across
+   an event that happened in between. */
+const ROUTINE = new Set(["resume"]);
+function collapseRoutine(events) {
+  const out=[];
+  for(const e of events) {
+    const prev=out[out.length-1];
+    if(prev&&e.origin==="daemon"&&ROUTINE.has(e.kind)&&prev.origin==="daemon"&&prev.kind===e.kind&&prev.text===e.text) {
+      const first=prev.run?prev.run.first:prev.at;
+      out[out.length-1]={...e,id:prev.id,run:{count:(prev.run?prev.run.count:1)+1,first,last:e.at}};
+      continue;
+    }
+    out.push(e);
+  }
+  return out;
+}
+const clock = value => {
+  const d=new Date(value);
+  if(!Number.isFinite(d.getTime()))return "";
+  const pad=n=>String(n).padStart(2,"0");
+  return `${pad(d.getMonth()+1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+};
+const KIND_LABELS = {cflow:"cflow",commit:"commit",merge:"merge",test:"test",action:"요청",result:"결과",
+  briefing:"브리핑",checks:"체크",create:"생성",resume:"복원",exit:"종료",respawn:"재실행",borrow:"인증",worktree:"워크트리"};
 /* briefing/checks records (search_records.capture, kind "briefing"/"checks")
    carry their payload as e.text = JSON.stringify(payload,null,2) already, so
    the structure is on hand without the lazy /events/{id} fetch below. */
@@ -281,20 +361,26 @@ function briefingSnapshot(payload) {
   }
   if(payload.state) box.append(node("span",payload.state,`sess-brief-state st-${briefingStateClass(payload.state)}`));
   if(payload["one-line-job-description"]) box.append(node("div",payload["one-line-job-description"],"sess-brief-one"));
-  for(const [key,label] of [["goal","목표"],["now","현재"],["progress","진행"]]) {
-    const val=payload[key];
-    if(!val)continue;
-    const row=node("div","","sess-brief-row");
-    row.append(node("span",label,"sess-brief-k"),node("span",String(val),"sess-brief-v"));
-    box.append(row);
-  }
+  // On the timeline a briefing is one post among many, so it shows what the
+  // session is doing now; the goal, progress and FAQ are one click away.
+  const row=(key,label,val,cls="sess-brief-row")=>{
+    const r=node("div","",cls);
+    r.append(node("span",label,"sess-brief-k"),richLine(String(val),"sess-brief-v"));
+    return r;
+  };
+  if(payload.now) box.append(row("now","현재",payload.now));
+  const more=[];
+  for(const [key,label] of [["goal","목표"],["progress","진행"]]) if(payload[key]) more.push(row(key,label,payload[key]));
   if(Array.isArray(payload.faq)) {
     for(const item of payload.faq) {
       if(!item||!item.question||!item.answer)continue;
-      const row=node("div","","sess-brief-row sess-brief-faq");
-      row.append(node("span",String(item.question),"sess-brief-k"),node("span",String(item.answer),"sess-brief-v"));
-      box.append(row);
+      more.push(row("faq",String(item.question),item.answer,"sess-brief-row sess-brief-faq"));
     }
+  }
+  if(more.length) {
+    const rest=node("details","","sess-brief-more");
+    rest.append(node("summary",`브리핑 전체 (${more.length})`),...more);
+    box.append(rest);
   }
   if(!box.children.length) box.append(node("div","빈 브리핑입니다.","sess-brief-note"));
   return box;
@@ -315,15 +401,26 @@ function checksSnapshot(payload) {
   return box;
 }
 function eventItem(s,e) {
-  const item=node("div","",`event${e.needs_action&&!e.acknowledged?" action":""}`);
+  const item=node("div","",`event kind-${e.kind}${e.needs_action&&!e.acknowledged?" action":""}${e.pivot?" pivot":""}${e.origin==="daemon"?" routine":""}`);
   item.dataset.event=e.id;
   const origin=e.origin==="record"?"저장된 기록":e.origin==="daemon"?"세션 이벤트":e.origin==="agent"?"에이전트 직접 보고":"자동 관찰";
-  item.append(node("small",`${s.name} · ${origin} · ${e.kind} · ${new Date(e.at).toLocaleString()}${e.acknowledged?" · 확인됨":""}`));
+  const when=e.run?`${clock(e.run.first)} ~ ${clock(e.run.last)}`:clock(e.at);
+  const meta=node("small",`${s.name} · ${origin} · ${when}${e.acknowledged?" · 확인됨":""}`);
+  meta.title=[new Date(e.at).toLocaleString(),e.observed_at?`관찰 ${new Date(e.observed_at).toLocaleString()}`:""].filter(Boolean).join(" · ");
+  item.append(meta);
   const isRecord=e.origin==="record"&&(e.kind==="briefing"||e.kind==="checks");
   const snapshot=isRecord?recordPayload(e):null;
+  const head=node("div","","obs-head");
+  head.append(node("span",KIND_LABELS[e.kind]||e.kind,`obs-kind obs-kind-${e.kind}`));
+  if(e.pivot) head.append(node("span","판단 변경","obs-pivot"));
+  if(e.needs_action&&!e.acknowledged) head.append(node("span","확인 필요","obs-needs"));
+  item.append(head);
   if(e.kind==="briefing"&&isRecord) item.append(briefingSnapshot(snapshot));
   else if(e.kind==="checks"&&isRecord) item.append(checksSnapshot(snapshot));
-  else item.append(node("div",e.text));
+  else {
+    head.append(richLine(e.text));
+    if(e.run) head.append(node("span",`×${e.run.count}`,"obs-count"));
+  }
   if(e.origin==="daemon") {
     if(e.kind==="borrow") {
       const d=e.details||{}, before=d.previous_null?"인증 없음":d.previous||"자체 프로파일", after=d.null_token?"인증 없음":d.current||"자체 프로파일";
@@ -455,12 +552,16 @@ function usageBlock(s) {
   more.append(node("summary",`관찰 API 사용량${s.usage_totals?" (누적)":" (마지막 관찰)"}`),node("pre",lines.join("\n")));
   return more;
 }
+/* One session's events, oldest first, with routine runs folded. */
+function sessionEvents(s) {
+  return collapseRoutine([...(s.events||[])].sort((a,b)=>timestamp(a.at)-timestamp(b.at)));
+}
 function fillSession(body,s,actionsOnly=false) {
   body.append(node("p",activity(s).duration,"meta"),node("div",(s.meshes||[]).join(" · ")||"메시 없음","meta"));
   for(const r of sessionRuns(s).filter(r=>String(r.status).startsWith("waiting")))addGate(body,s,r);
-  body.append(node("p",s.summary||"아직 관찰 결과가 없습니다."));
+  body.append(s.summary?richLine(s.summary,"obs-summary"):node("p","아직 관찰 결과가 없습니다."));
   if(s.error)body.append(node("p",s.error));
-  const events=[...(s.events||[])].sort((a,b)=>timestamp(b.at)-timestamp(a.at));
+  const events=sessionEvents(s).reverse();
   for(const e of events.filter(e=>!actionsOnly||(e.needs_action&&!e.acknowledged)))body.append(eventItem(s,e));
   // A session the meter never reached and whose last call was never recorded
   // has nothing to report; the block is omitted rather than shown empty.
@@ -527,7 +628,7 @@ function render() {
   if(timeline||grid) {
     const entries=[];
     for(const s of visible) {
-      const events=(s.events||[]).filter(e=>!$("actions-only").checked||(e.needs_action&&!e.acknowledged));
+      const events=sessionEvents(s).filter(e=>!$("actions-only").checked||(e.needs_action&&!e.acknowledged));
       for(const e of events) entries.push({s,e,at:timestamp(e.at),key:s.name+":"+e.id});
       for(const r of sessionRuns(s).filter(r=>String(r.status).startsWith("waiting")))
         entries.push({s,r,at:timestamp(r.updated_at||r.started_at)||latestActivity(s),key:s.name+":gate:"+(r.run||r.step_id)});
@@ -553,7 +654,7 @@ function render() {
       const card=sessionHeader(s,"observer-post");
       if(e)card.append(eventItem(s,e));
       else if(r)addGate(card,s,r);
-      else card.append(node("p",s.summary||"아직 관찰 결과가 없습니다."),node("small",activity(s).duration));
+      else card.append(s.summary?richLine(s.summary,"obs-summary"):node("p","아직 관찰 결과가 없습니다."),node("small",activity(s).duration));
       if(!metered.has(s.name)) {metered.add(s.name);const usage=usageBlock(s);if(usage)card.append(usage);}
       cardActions(card,s);cards.append(card);
     }
