@@ -2342,7 +2342,7 @@ def register(sub) -> None:
     p_new.add_argument(
         "--model",
         help="model alias for the selected profile harness (Claude: "
-        "haiku/sonnet/opus/fable; Codex: luna/terra/sol/astra)",
+        "haiku/sonnet/opus/fable; Codex: luna/terra/sol/astra/gpt6-sol/gpt6-luna)",
     )
     p_new.add_argument("--effort", help="reasoning effort for the selected harness")
     p_new.add_argument(
@@ -2925,7 +2925,7 @@ def register(sub) -> None:
     p_model.add_argument(
         "model", nargs="?",
         help="a model the session's harness declares (Claude: haiku/sonnet/"
-             "opus/fable; Codex: luna/terra/sol/astra)",
+             "opus/fable; Codex: luna/terra/sol/astra/gpt6-sol/gpt6-luna)",
     )
     p_model.add_argument(
         "--clear", action="store_true",

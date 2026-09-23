@@ -391,6 +391,7 @@ CHECKS = [
         "briefcard_check.js",
         "briefingtop_check.js",
         "briefmodel_check.js",
+        "model_settings_check.js",
         "briefrow_check.js",
         "observerrecord_check.js",
         "observercompact_check.js",

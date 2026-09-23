@@ -4612,6 +4612,8 @@ a.window-owner:hover { color: #79c0ff; text-decoration: underline; }
    legible where :disabled greys out a field that is empty anyway. */
 .llm-settings-form input[readonly] { color: #adbac7; background: #161b22; cursor: default; }
 .llm-settings-form .wf-btn { align-self: end; }
+.model-choices-settings .llm-settings-form { grid-template-columns: minmax(0, 1fr); }
+.model-choices-settings textarea { width: 100%; box-sizing: border-box; padding: 8px; border: 1px solid #30363d; border-radius: 4px; background: #0d1117; color: #c9d1d9; resize: vertical; font: 14px monospace; }
 @media (max-width: 600px) {
   .llm-settings-form { grid-template-columns: minmax(0, 1fr); }
   .llm-settings-form input, .llm-settings-form select { font-size: 16px; }

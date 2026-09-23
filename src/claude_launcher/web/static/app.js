@@ -7224,9 +7224,7 @@ async function refreshNewWorktree() {
 let cflowCache = [];
 let cflowRailRendered = null;
 
-/* The declared harnesses. Fetched once: the set is declared in YAML and
-   changes when someone edits config or installs a program, neither of which
-   happens mid-session — a reload is the honest way to pick those up. */
+/* Fetch at startup and after editing the model choices in Settings. */
 async function refreshHarnesses() {
   try {
     const resp = await api("/api/harnesses");
@@ -14254,6 +14252,7 @@ function openSettings(section) {
     refreshInstallOverview();
     return;
   }
+  refreshHarnesses().then(() => { if (wsOpen) renderWorkspaces(); });
   refreshLlmSettings();
   refreshFaq();
   refreshPromptPresets();
@@ -17828,6 +17827,7 @@ function renderWorkspaces() {
   view.appendChild(wsAddCard());
   view.appendChild(projectsCard());
 
+  view.appendChild(modelChoicesCard());
   view.appendChild(llmSettingsCard());
 
   view.appendChild(faqCard());
@@ -18103,6 +18103,124 @@ async function statusCheckRemove(row) {
 /* deletes the block's own endpoint and key. Picking a profile used to      */
 /* change only which credential went out, leaving both boxes on the         */
 /* backend typed in before and the file holding a key nobody called.        */
+let modelChoicesHarness = "codex";
+const modelChoicesDrafts = {};
+let modelChoicesBusy = false;
+let modelChoicesNotice = "";
+let modelChoicesError = "";
+
+function parseModelChoices(text) {
+  const models = Object.create(null);
+  for (const raw of text.split(/\r?\n/)) {
+    const line = raw.trim();
+    if (!line) continue;
+    const parts = line.split("=").map((part) => part.trim());
+    if (parts.length !== 2 || parts.some((part) => !part || /\s/.test(part))) {
+      throw new Error("Use one choice = model-id per line, without spaces inside either value.");
+    }
+    if (Object.hasOwn(models, parts[0])) throw new Error(`Duplicate choice: ${parts[0]}`);
+    models[parts[0]] = parts[1];
+  }
+  return models;
+}
+
+async function saveModelChoices(name, reset = false) {
+  let models;
+  try {
+    models = reset ? null : parseModelChoices(modelChoicesDrafts[name]);
+  } catch (err) {
+    modelChoicesError = err.message;
+    renderWorkspaces();
+    return;
+  }
+  modelChoicesBusy = true;
+  modelChoicesError = "";
+  modelChoicesNotice = "";
+  renderWorkspaces();
+  try {
+    const resp = await api(`/api/harnesses/${encodeURIComponent(name)}/models`, {
+      method: "PUT", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ models }),
+    });
+    const data = await resp.json();
+    if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
+    harnessDetails[name] = data.harness;
+    delete modelChoicesDrafts[name];
+    await refreshProfiles();
+    syncForkAvailability();
+    syncSpawnMode();
+    modelChoicesNotice = reset ? "Default model choices restored." : "Saved. New sessions use these model choices.";
+  } catch (err) {
+    modelChoicesError = String(err);
+  }
+  modelChoicesBusy = false;
+  renderWorkspaces();
+}
+
+function modelChoicesCard() {
+  const card = el("section", "ws-add model-choices-settings");
+  card.appendChild(el("h3", null, "Session models"));
+  card.appendChild(el("p", "wf-note",
+    "Edit the model choices for each harness. One choice = model-id per line. " +
+    "Use the same value on both sides when no alias is needed. " +
+    "Changes apply to new sessions; running sessions keep their current model."));
+  const names = Object.keys(harnessDetails);
+  if (!names.length) {
+    card.appendChild(el("p", "wf-note", "Model choices are unavailable. Reload to try again."));
+    return card;
+  }
+  if (!names.includes(modelChoicesHarness)) modelChoicesHarness = names[0];
+  const name = modelChoicesHarness;
+  const entry = harnessDetails[name];
+  if (!Object.hasOwn(modelChoicesDrafts, name)) {
+    modelChoicesDrafts[name] = (entry.models || []).map(
+      (choice) => `${choice} = ${(entry.model_aliases || {})[choice] || choice}`
+    ).join("\n");
+  }
+  const form = el("form", "llm-settings-form");
+  const label = el("label", null, "Harness");
+  const select = el("select");
+  select.id = "model-choices-harness";
+  for (const key of names) select.appendChild(new Option(key, key));
+  select.value = name;
+  select.disabled = modelChoicesBusy;
+  select.addEventListener("change", () => {
+    modelChoicesHarness = select.value;
+    modelChoicesNotice = modelChoicesError = "";
+    renderWorkspaces();
+  });
+  label.appendChild(select);
+  form.appendChild(label);
+  const modelsLabel = el("label", null, "Model choices");
+  const input = el("textarea");
+  input.id = "model-choices-text";
+  input.rows = 8;
+  input.spellcheck = false;
+  input.value = modelChoicesDrafts[name];
+  input.disabled = modelChoicesBusy;
+  input.addEventListener("input", () => { modelChoicesDrafts[name] = input.value; });
+  modelsLabel.appendChild(input);
+  form.appendChild(modelsLabel);
+  form.appendChild(el("p", "wf-note", "An empty list keeps only the harness default option."));
+  const save = el("button", "wf-btn", "Save models");
+  save.type = "submit";
+  save.disabled = modelChoicesBusy;
+  form.appendChild(save);
+  const reset = el("button", "wf-btn clear", "Restore defaults");
+  reset.type = "button";
+  reset.disabled = modelChoicesBusy;
+  reset.addEventListener("click", () => saveModelChoices(name, true));
+  form.appendChild(reset);
+  form.addEventListener("submit", (event) => {
+    event.preventDefault();
+    saveModelChoices(name);
+  });
+  card.appendChild(form);
+  if (modelChoicesError) card.appendChild(el("p", "error", modelChoicesError));
+  if (modelChoicesNotice) card.appendChild(el("p", "wf-note", modelChoicesNotice));
+  return card;
+}
+
 let llmSettings = null;
 let llmSettingsError = "";
 let llmSettingsNotice = "";
