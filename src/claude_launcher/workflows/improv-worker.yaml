@@ -1865,7 +1865,15 @@ steps:
       다른 머신이거나 부재면 각각 묶음 전송·사용자 안내로 대체). 브랜치는
       동결 상태다. master는 움직이지 않았다.
     # 상위가 세션 레일을 읽는 시점이 바로 여기다 — 요청이 나간 직후.
-    triggers: [briefing]
+    # enqueue-landing: 이 스텝을 떠나는 순간(= await-landing 진입) 데몬이
+    # 이 워커의 in_review 이슈와 tip을 부모 런의 착지 큐(landing_queue:를
+    # 선언한 워크플로, 예: improv-leader)에 등록한다. 재요청으로 다시
+    # 지나가면 같은 이슈 항목의 tip이 갱신된다. 부모가 큐를 선언하지
+    # 않았으면 trigger_skipped로 남고 아무 일도 없다.
+    triggers:
+      - briefing
+      - do: enqueue-landing
+        at: leave
     next: await-landing
 
   await-landing:

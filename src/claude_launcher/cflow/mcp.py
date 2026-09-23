@@ -181,6 +181,43 @@ TOOLS = [
         },
     },
     {
+        "name": "landing_queue",
+        "description": (
+            "This run's landing queue (a workflow that declares "
+            "'landing_queue:'): the landing requests your children made, one "
+            "entry per issue -- branch, frozen tip, who asked, when, and where "
+            "it stands. Entries arrive by themselves (a child's step files "
+            "them when it starts waiting to land); you do not add them. "
+            "Without 'issue' this lists the queue, measured against git first. "
+            "With 'issue' and 'status' it moves one entry: 'waiting' (you "
+            "took it up), 'deferred' (not this round -- it comes back as "
+            "requested when the round ends), 'rejected' (the request is over; "
+            "dropped when the round ends), 'requested' (back to the start). "
+            "'landed' is not yours to set: the daemon marks it when the tip is "
+            "in the target branch. When a round ends, landed and rejected "
+            "entries are dropped and the rest carried into the next round; "
+            "the round-start block and the payload's 'landing_reset' say "
+            "what went where. Journalled as queue_*."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "issue": {
+                    "type": "string",
+                    "description": "the entry to move (its issue id); omit to list",
+                },
+                "status": {
+                    "type": "string",
+                    "enum": ["requested", "waiting", "deferred", "rejected"],
+                },
+                "note": {
+                    "type": "string",
+                    "description": "why, kept on the entry (optional)",
+                },
+            },
+        },
+    },
+    {
         "name": "set_state",
         "description": (
             "Write one of this run's writable state paths -- the ones the "
@@ -449,7 +486,9 @@ for _tool in TOOLS:
         )
 
 #: Tools that write to the run, and so must be fenced against a replacement.
-_MUTATING = ("report", "next", "select", "request_goto", "set_state")
+_MUTATING = (
+    "report", "next", "select", "request_goto", "set_state", "landing_queue",
+)
 
 #: Tools that act on ANOTHER session's run. They are outside the fence in
 #: both directions: they are not refused when this slot was replaced (they
@@ -626,6 +665,18 @@ def call_tool(name: str, args: dict) -> dict:
         )
     elif name == "status":
         payload = engine.status(run=run)
+    elif name == "landing_queue":
+        issue = str(args.get("issue") or "").strip()
+        if issue:
+            status = str(args.get("status") or "").strip()
+            if not status:
+                raise engine.CflowError("moving an entry takes 'status' as well as 'issue'")
+            payload = engine.mark_landing(
+                issue, status, by=_session() or "agent",
+                note=(str(args.get("note") or "").strip() or None), run=run,
+            )
+        else:
+            payload = engine.refresh_landing(run=run)
     elif name == "set_state":
         # Always the agent: this tool is the driving session's door, and a
         # person's door is the CLI. The path's `by:` decides whether it opens.

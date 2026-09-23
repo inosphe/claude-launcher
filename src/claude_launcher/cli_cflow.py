@@ -452,6 +452,7 @@ def _cmd_status(args: argparse.Namespace) -> int:
     if status == "waiting_checklist":
         _print_checklist(payload.get("checklist") or {})
     _print_state(payload.get("state"))
+    _print_landing(payload)
     if status == "waiting_window":
         # The agent chose; the workflow paces that option. Nobody is asked
         # anything — but a person CAN take it now: a confirm from here is not
@@ -672,6 +673,22 @@ def _print_state(entries) -> None:
         if entry.get("set_by"):
             line += f"  (set by {entry['set_by']} at {entry.get('set_at')})"
         print(f"{'state:':<{_LABEL}}{line}")
+
+
+def _print_landing(payload: dict) -> None:
+    """The run's landing queue (``landing_queue:``): one line per entry."""
+    if "landing_queue" not in payload:
+        return
+    queue = payload.get("landing_queue") or []
+    if not queue:
+        print(f"{'landing:':<{_LABEL}}queue empty")
+    for entry in queue:
+        tip = str(entry.get("tip") or "")[:8]
+        line = f"{entry.get('issue')} {entry.get('status')}  {entry.get('branch') or '?'} @ {tip}"
+        line += f"  (by {entry.get('requested_by')})"
+        if entry.get("note"):
+            line += f"  -- {entry['note']}"
+        print(f"{'landing:':<{_LABEL}}{line}")
 
 
 def _cmd_approve(args: argparse.Namespace) -> int:

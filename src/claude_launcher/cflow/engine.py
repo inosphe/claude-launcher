@@ -71,7 +71,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional, Sequence, Set, Tuple
 
 from .. import daemon_client, digests
-from . import checkout, model, responders, state as state_mod
+from . import checkout, landing, model, responders, state as state_mod
 from .model import Delegate, Step, Workflow
 
 #: Kept from a verify command's combined output when reporting failure.
@@ -1510,6 +1510,7 @@ def _move_to(
         escalated = False
         if ended_at is not None and ended_at.escalate is not None:
             escalated = _request_escalation(ended_at, state, cwd)
+        _landing_reset(workflow, state, cwd)
         state["current"] = None
         state["status"] = "done"
         state_mod.save_state(state, cwd)
@@ -1977,6 +1978,155 @@ def _state_env(workflow: Workflow, state: dict) -> Dict[str, str]:
     return env
 
 
+# --------------------------------------------------------------------------- #
+# landing queue (``landing_queue:``)
+# --------------------------------------------------------------------------- #
+#: The fields a queue entry carries, in the order a reader wants them.
+_LANDING_FIELDS = (
+    "issue", "status", "branch", "tip", "requested_by", "requested_at",
+    "set_by", "set_at", "note",
+)
+
+
+def _landing_entries(state: dict) -> List[dict]:
+    return [dict(e) for e in (state.get("landing_queue") or []) if isinstance(e, dict)]
+
+
+def _landing_view(state: dict) -> List[dict]:
+    """The queue as the payload shows it: one line per entry, fixed fields."""
+    return [
+        {k: e[k] for k in _LANDING_FIELDS if e.get(k) not in (None, "")}
+        for e in _landing_entries(state)
+    ]
+
+
+def _landing_mark_landed(
+    workflow: Workflow, state: dict, cwd: Optional[str]
+) -> List[str]:
+    """Mark ``landed`` every unsettled entry whose tip git finds in the target.
+
+    The daemon's word and nobody else's: measured in the run's own checkout,
+    against the branch the workflow declared. An entry git cannot answer for
+    (a tip this checkout has not fetched) stays where it was. Returns the
+    issues newly marked; the caller saves.
+    """
+    spec = workflow.landing_queue
+    if spec is None:
+        return []
+    repo = state_mod.resolve_cwd(cwd)
+    entries = _landing_entries(state)
+    marked: List[str] = []
+    for entry in entries:
+        if entry.get("status") in model.LANDING_SETTLED:
+            continue
+        if landing.landed(repo, str(entry.get("tip") or ""), spec.target):
+            entry.update(
+                status=model.LANDING_LANDED, set_by="daemon",
+                set_at=state_mod.utcnow(),
+            )
+            marked.append(str(entry.get("issue")))
+    if marked:
+        state["landing_queue"] = entries
+        state_mod.journal(
+            "queue_landed", {"issues": marked, "target": spec.target}, cwd
+        )
+    return marked
+
+
+def _landing_carry(entries: List[dict]) -> Tuple[List[dict], List[dict]]:
+    """Split a queue at a round's end: (carried into the next, dropped).
+
+    Settled entries (landed, rejected) are dropped. Everything else is
+    carried -- a deferred one back as ``requested``, since "not this round"
+    has now been honoured -- because an entry nobody settled is a request
+    still standing, and dropping it is the very loss the queue exists for.
+    """
+    carried: List[dict] = []
+    dropped: List[dict] = []
+    for entry in entries:
+        if entry.get("status") in model.LANDING_SETTLED:
+            dropped.append(entry)
+            continue
+        entry = dict(entry)
+        if entry.get("status") == model.LANDING_DEFERRED:
+            entry.update(status=model.LANDING_REQUESTED, carried_from="deferred")
+        carried.append(entry)
+    return carried, dropped
+
+
+def _landing_reset(workflow: Workflow, state: dict, cwd: Optional[str]) -> None:
+    """Reset the queue as the round ends: measure, drop the settled, carry the rest.
+
+    Runs inside the move to ``end`` -- the one moment every round passes
+    through whichever edge it ends by -- so no clock has to catch it before
+    the next round archives this run. What was dropped and what was carried
+    is journalled ``queue_reset`` and kept on the run as ``landing_reset``;
+    the next round starts from the carried entries and the daemon's
+    round-start block reads the summary to the driving session.
+    """
+    if workflow.landing_queue is None:
+        return
+    entries = _landing_entries(state)
+    if not entries and not state.get("landing_queue"):
+        return
+    _landing_mark_landed(workflow, state, cwd)
+    carried, dropped = _landing_carry(_landing_entries(state))
+    repo = state_mod.resolve_cwd(cwd)
+    statuses = landing.board_statuses(repo, [e.get("issue") for e in carried])
+    warnings = (
+        landing.board_warnings(carried, statuses) if statuses is not None
+        else ["the issue board could not be read: queue and board not compared"]
+    )
+    summary = {
+        "at": state_mod.utcnow(),
+        "run": state.get("run_id"),
+        "dropped": [
+            {"issue": e.get("issue"), "status": e.get("status")} for e in dropped
+        ],
+        "carried": [
+            {"issue": e.get("issue"), "status": e.get("status"),
+             **({"was": "deferred"} if e.get("carried_from") else {})}
+            for e in carried
+        ],
+        "warnings": warnings,
+    }
+    for entry in carried:
+        entry.pop("carried_from", None)
+    state["landing_queue"] = carried
+    state["landing_reset"] = summary
+    state_mod.journal("queue_reset", summary, cwd)
+
+
+def _landing_inherit(workflow: Workflow, old: Optional[dict], state: dict) -> None:
+    """Hand the previous run's queue to a new run of the same workflow here.
+
+    A recurring workflow's rounds are separate runs, and the queue is what
+    must outlive one. An old run that ended normally already reset its queue
+    on the way out; one that was aborted or force-archived did not, so the
+    same carry is applied here -- it is idempotent on a reset queue.
+    """
+    if workflow.landing_queue is None or not old:
+        return
+    if old.get("workflow") != workflow.name:
+        return
+    carried, dropped = _landing_carry(_landing_entries(old))
+    for entry in carried:
+        entry.pop("carried_from", None)
+    if carried:
+        state["landing_queue"] = carried
+    reset = old.get("landing_reset")
+    if isinstance(reset, dict) and reset.get("run") == old.get("run_id"):
+        state["landing_reset"] = reset
+    elif carried or dropped:
+        state["landing_reset"] = {
+            "at": state_mod.utcnow(),
+            "run": old.get("run_id"),
+            "dropped": [{"issue": e.get("issue"), "status": e.get("status")} for e in dropped],
+            "carried": [{"issue": e.get("issue"), "status": e.get("status")} for e in carried],
+            "warnings": [],
+        }
+
+
 def _skip_on(workflow: Workflow, state: dict, step: Step) -> bool:
     """Whether entering ``step`` right now passes straight through it."""
     path = model.skip_path(step.id)
@@ -2173,6 +2323,10 @@ def _payload(workflow: Workflow, state: dict, cwd: Optional[str], *, mutate: boo
     # holding the step must not be told it lost it because a value moved.
     if workflow.editable:
         payload["state"] = _state_view(workflow, state)
+    if workflow.landing_queue is not None:
+        payload["landing_queue"] = _landing_view(state)
+        if state.get("landing_reset"):
+            payload["landing_reset"] = state["landing_reset"]
     if state.get("sub_errors"):
         payload["sub_errors"] = list(state["sub_errors"])
         payload["sub_errors_note"] = (
@@ -2965,6 +3119,7 @@ def _start_impl(
     layers, snapshot, journal, and read the first step's payload.
     """
     pending = state_mod.read_request(cwd)
+    old: Optional[dict] = None
     if state_mod.has_run(cwd):
         old = state_mod.load_state(cwd)
         active = old.get("status") not in ("done", "aborted")
@@ -3057,6 +3212,9 @@ def _start_impl(
     # a timed wait (gds-job — a run its driver has no tools to advance) must
     # be armed here, or the daemon has nothing to fire and the run sits at
     # its first step forever. `_move_to` arms every later arrival.
+    # Before the first save: a recurring workflow's queue outlives its round.
+    if not sub:
+        _landing_inherit(workflow, old, state)
     _arrive_timer(workflow, state, workflow.start, None, cwd)
     # And an arrival for `triggers:` for the same reason: `_move_to` records
     # every later one, and a workflow whose FIRST step wants a briefing
@@ -4246,6 +4404,163 @@ def set_state(path: str, value, *, by: str, cwd: Optional[str] = None) -> dict:
         "by": by,
         "applies": applies,
         "state": _state_view(workflow, state),
+    }
+
+
+@_locked_op
+def enqueue_landing(
+    issues: Sequence[str],
+    branch: Optional[str],
+    tip: str,
+    *,
+    by: str,
+    cwd: Optional[str] = None,
+) -> dict:
+    """Put a child's landing request on this run's queue, one entry per issue.
+
+    Called by the daemon for a child's ``enqueue-landing`` trigger, with this
+    run's ``cwd``/``scope``. An entry is keyed by its issue: a second request
+    for the same issue (a re-request after a rebase) replaces the tip and
+    puts the entry back at ``requested``, and says so; one for the same tip
+    changes nothing.
+    """
+    state = state_mod.load_state(cwd)
+    workflow = state_mod.load_snapshot(cwd)
+    if workflow.landing_queue is None:
+        raise CflowError(
+            f"{workflow.name!r} declares no 'landing_queue' -- nothing to enqueue on"
+        )
+    if state.get("status") in ("done", "aborted"):
+        raise CflowError(f"run {state['run_id']} is {state['status']}")
+    keys = [str(i).strip() for i in issues if str(i or "").strip()]
+    if not keys:
+        raise CflowError("a landing request names at least one issue")
+    if not tip:
+        raise CflowError("a landing request names the tip to land")
+    now = state_mod.utcnow()
+    entries = _landing_entries(state)
+    index = {str(e.get("issue")): e for e in entries}
+    added: List[str] = []
+    renewed: List[str] = []
+    for key in keys:
+        entry = index.get(key)
+        if entry is not None and entry.get("tip") == tip:
+            continue
+        fresh = {
+            "issue": key, "status": model.LANDING_REQUESTED,
+            "branch": branch or "", "tip": tip,
+            "requested_by": by, "requested_at": now,
+        }
+        if entry is None:
+            entries.append(fresh)
+            added.append(key)
+        else:
+            entry.clear()
+            entry.update(fresh)
+            renewed.append(key)
+    if added or renewed:
+        state["landing_queue"] = entries
+        state_mod.save_state(state, cwd)
+        state_mod.journal(
+            "queue_enqueued",
+            {"issues": keys, "added": added, "renewed": renewed,
+             "branch": branch, "tip": tip, "by": by},
+            cwd,
+        )
+    return {
+        **_base(state),
+        "status": "landing_enqueued",
+        "added": added,
+        "renewed": renewed,
+        "landing_queue": _landing_view(state),
+    }
+
+
+#: The states the driving agent may put an entry in. ``landed`` is not among
+#: them: that is measured, by the daemon, in git.
+LANDING_AGENT_STATES = (
+    model.LANDING_REQUESTED,
+    model.LANDING_WAITING,
+    model.LANDING_DEFERRED,
+    model.LANDING_REJECTED,
+)
+
+
+@_locked_op
+def mark_landing(
+    issue: str,
+    status: str,
+    *,
+    by: str,
+    note: Optional[str] = None,
+    cwd: Optional[str] = None,
+) -> dict:
+    """Move one queue entry: the driving agent's word on a landing request."""
+    state = state_mod.load_state(cwd)
+    workflow = state_mod.load_snapshot(cwd)
+    if workflow.landing_queue is None:
+        raise CflowError(f"{workflow.name!r} declares no 'landing_queue'")
+    if status not in LANDING_AGENT_STATES:
+        raise CflowError(
+            f"{status!r} is not a state to set: one of "
+            f"{', '.join(LANDING_AGENT_STATES)} ('landed' is measured by the "
+            f"daemon, in git)"
+        )
+    entries = _landing_entries(state)
+    entry = next((e for e in entries if str(e.get("issue")) == str(issue)), None)
+    if entry is None:
+        known = ", ".join(str(e.get("issue")) for e in entries) or "none"
+        raise CflowError(f"no queue entry for {issue!r} (queued: {known})")
+    if entry.get("status") == model.LANDING_LANDED:
+        raise CflowError(
+            f"{issue!r} has landed (measured in git); a landed entry is not moved"
+        )
+    was = entry.get("status")
+    entry.update(status=status, set_by=by, set_at=state_mod.utcnow())
+    if note:
+        entry["note"] = str(note)
+    else:
+        entry.pop("note", None)
+    state["landing_queue"] = entries
+    state_mod.save_state(state, cwd)
+    state_mod.journal(
+        "queue_marked",
+        {"issue": issue, "was": was, "status": status, "by": by,
+         **({"note": note} if note else {})},
+        cwd,
+    )
+    return {
+        **_base(state),
+        "status": "landing_marked",
+        "issue": issue,
+        "was": was,
+        "landing_queue": _landing_view(state),
+    }
+
+
+@_locked_op
+def refresh_landing(*, cwd: Optional[str] = None) -> dict:
+    """Measure the queue against git now: mark the tips that landed.
+
+    What the daemon's clock calls between moves, and what the agent's
+    ``landing_queue`` tool calls before it shows the queue -- so the queue a
+    reader sees is never older than the read.
+    """
+    state = state_mod.load_state(cwd)
+    workflow = state_mod.load_snapshot(cwd)
+    if workflow.landing_queue is None:
+        return {**_base(state), "status": "no_landing_queue", "landed": []}
+    marked: List[str] = []
+    if state.get("status") not in ("done", "aborted"):
+        marked = _landing_mark_landed(workflow, state, cwd)
+        if marked:
+            state_mod.save_state(state, cwd)
+    return {
+        **_base(state),
+        "status": "landing_refreshed",
+        "landed": marked,
+        "landing_queue": _landing_view(state),
+        **({"landing_reset": state["landing_reset"]} if state.get("landing_reset") else {}),
     }
 
 

@@ -115,6 +115,12 @@ workflow to be started here), that is the answer; otherwise list candidates
      anything `by: [user]`) is theirs through `claunch cflow set`. A nudge
      saying a person set the run's state means: call `status`, read
      `state`, carry on from where you are.
+   - A payload carrying `landing_queue` — your children's landing requests,
+     kept for you (the workflow declares `landing_queue:`). Read it instead
+     of remembering who asked; record your decision on each with the
+     `landing_queue` tool (`waiting`, `deferred`, `rejected`). `landed` is
+     the daemon's, measured in git. `landing_reset` says what the last
+     round's end dropped and carried over.
    - `select` with `chooser: user`, or `waiting_selection` — call `select`
      once to record your RECOMMENDATION with reasoning, then STOP your turn
      and write the decision brief below. Ask them to confirm with `!
@@ -202,7 +208,9 @@ workflow to be started here), that is the answer; otherwise list candidates
 7. `triggers` in a `status` payload names daemon side effects this step
    declared — what the daemon does here, not what you do. `{do: briefing}`
    costs you nothing: the daemon recomposes this session's dashboard
-   briefing on its own and types nothing. `{do: checks}` is the one that
+   briefing on its own and types nothing, and `{do: enqueue-landing}` files
+   your landing request on your parent's queue by itself -- nothing for you
+   to send. `{do: checks}` is the one that
    reaches you: at the moment it declares, the daemon types a
    `[claunch status-check refresh]` block into this terminal, and answering
    it — `status_checks`, then `report_status_checks` with every enabled id

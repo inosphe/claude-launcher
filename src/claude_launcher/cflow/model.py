@@ -300,6 +300,10 @@ web dashboard by hand:
   (:func:`..daemon.briefing.compose` with ``refresh=True``). Nothing is typed
   into the terminal and the driver spends nothing; what it costs is one call
   to the configured endpoint.
+* ``enqueue-landing`` — the daemon files the session's landing request (its
+  ``in_review`` issues, branch and tip) on its parent's run, when that run's
+  workflow declares ``landing_queue:`` (:class:`LandingQueueSpec`). The one
+  action whose effect lands in another session's run.
 
 ``at`` takes ``enter`` (the run arrived at this step — the default) or
 ``leave`` (the run moved off it, whichever edge it took). It is spelled
@@ -583,7 +587,12 @@ class Restart:
 #: has no tool a run could call for itself.
 TRIGGER_CHECKS = "checks"
 TRIGGER_BRIEFING = "briefing"
-TRIGGER_ACTIONS = (TRIGGER_CHECKS, TRIGGER_BRIEFING)
+#: Put this session's landing request on its parent's landing queue (a
+#: parent whose workflow declares ``landing_queue:``). Fired by the worker's
+#: step, written into the parent's run: the one trigger whose effect lands in
+#: a run other than the one that asked.
+TRIGGER_ENQUEUE_LANDING = "enqueue-landing"
+TRIGGER_ACTIONS = (TRIGGER_CHECKS, TRIGGER_BRIEFING, TRIGGER_ENQUEUE_LANDING)
 
 #: When in a step's life a trigger fires. Both moments are recorded by the
 #: engine as it performs the move, so neither depends on a clock catching a
@@ -591,6 +600,44 @@ TRIGGER_ACTIONS = (TRIGGER_CHECKS, TRIGGER_BRIEFING)
 TRIGGER_AT_ENTER = "enter"
 TRIGGER_AT_LEAVE = "leave"
 TRIGGER_MOMENTS = (TRIGGER_AT_ENTER, TRIGGER_AT_LEAVE)
+
+
+#: The states an entry on a landing queue passes through. ``requested`` is
+#: where an entry is born (and where a deferred one comes back to at a
+#: round's end); ``waiting`` and ``deferred`` are the driving agent's word;
+#: ``landed`` is the daemon's alone, measured in git; ``rejected`` is the
+#: agent's word that the request is over.
+LANDING_REQUESTED = "requested"
+LANDING_WAITING = "waiting"
+LANDING_DEFERRED = "deferred"
+LANDING_LANDED = "landed"
+LANDING_REJECTED = "rejected"
+LANDING_STATES = (
+    LANDING_REQUESTED,
+    LANDING_WAITING,
+    LANDING_DEFERRED,
+    LANDING_LANDED,
+    LANDING_REJECTED,
+)
+#: Settled: dropped from the queue when the round ends.
+LANDING_SETTLED = (LANDING_LANDED, LANDING_REJECTED)
+
+
+@dataclass(frozen=True)
+class LandingQueueSpec:
+    """A workflow's ``landing_queue:`` declaration.
+
+    The queue itself is run state (``state["landing_queue"]``): entries
+    arrive from children's ``enqueue-landing`` triggers, the driving agent
+    moves them with the ``landing_queue`` MCP tool, the daemon marks one
+    ``landed`` when its tip is an ancestor of :attr:`target`. When a round
+    ends the settled entries (landed, rejected) are dropped and the rest are
+    carried into the next round, a deferred one back as requested.
+    """
+
+    #: The branch a landed tip must be an ancestor of, read in the run's
+    #: own checkout.
+    target: str = "master"
 
 
 @dataclass(frozen=True)
@@ -1323,6 +1370,11 @@ def _validate_subflow(workflow: "Workflow") -> None:
         )
     if workflow.default_role:
         raise WorkflowError(f"{where} may not declare 'default_role'")
+    if workflow.landing_queue is not None:
+        raise WorkflowError(
+            f"{where} may not declare 'landing_queue' (children land on the "
+            f"session's main run)"
+        )
     escalating = sorted(s.id for s in workflow.steps.values() if s.escalate is not None)
     if escalating:
         raise WorkflowError(
@@ -1400,6 +1452,10 @@ class Workflow:
     #: :class:`EditableSpec`). Includes the implicit ones a manual checklist
     #: item declares.
     editable: Dict[str, "EditableSpec"] = field(default_factory=dict)
+    #: ``landing_queue:`` — this workflow keeps its children's landing
+    #: requests as run state (see :class:`LandingQueueSpec`). ``None`` when
+    #: undeclared, and then an ``enqueue-landing`` aimed at it is skipped.
+    landing_queue: Optional["LandingQueueSpec"] = None
     warnings: List[str] = field(default_factory=list)
     #: Superseded spellings this file still uses. Kept apart from
     #: :attr:`warnings` on purpose: a warning describes a graph that may
@@ -1600,6 +1656,7 @@ def parse_doc(doc: dict, *, default_name: str = "workflow") -> Workflow:
         )
 
     editable = _parse_editable(doc.get("editable"), steps, start)
+    landing_queue = _parse_landing_queue(doc.get("landing_queue"))
     workflow = Workflow(
         name=str(doc.get("name") or default_name),
         description=str(doc.get("description") or ""),
@@ -1615,6 +1672,7 @@ def parse_doc(doc: dict, *, default_name: str = "workflow") -> Workflow:
         kind=kind,
         inputs=inputs,
         editable=editable,
+        landing_queue=landing_queue,
         warnings=[],
     )
     _validate_graph(workflow)
@@ -1635,6 +1693,7 @@ def parse_doc(doc: dict, *, default_name: str = "workflow") -> Workflow:
         kind=workflow.kind,
         inputs=workflow.inputs,
         editable=workflow.editable,
+        landing_queue=workflow.landing_queue,
         warnings=_graph_warnings(workflow),
         deprecations=_deprecations(workflow),
         advice=_advice(workflow),
@@ -2712,6 +2771,28 @@ def _parse_checklist_otherwise(raw, step_id: str) -> Optional[ChecklistOtherwise
             f"not opened within 'after' seconds"
         )
     return ChecklistOtherwise(after=after, then=then)
+
+
+def _parse_landing_queue(raw) -> Optional[LandingQueueSpec]:
+    """Parse the top-level ``landing_queue:`` (``true`` or ``{target: <branch>}``)."""
+    if raw is None or raw is False:
+        return None
+    if raw is True:
+        return LandingQueueSpec()
+    if not isinstance(raw, dict):
+        raise WorkflowError(
+            "'landing_queue' must be true or a mapping {target: <branch>}"
+        )
+    unknown = sorted(set(raw) - {"target"})
+    if unknown:
+        raise WorkflowError(
+            f"'landing_queue' has unknown key(s): {', '.join(unknown)} "
+            f"(allowed: target)"
+        )
+    target = str(raw.get("target") or "master").strip()
+    if not target or any(c.isspace() for c in target):
+        raise WorkflowError("'landing_queue.target' must be a branch name")
+    return LandingQueueSpec(target=target)
 
 
 def _parse_editable_by(raw, where: str) -> Tuple[str, ...]:

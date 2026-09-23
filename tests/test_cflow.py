@@ -1302,6 +1302,8 @@ def test_mcp_initialize_and_tools():
         # the run's own writable state -- only the paths its workflow
         # declares 'by: [agent]'; a person's paths refuse this tool
         "set_state",
+        # the children's landing requests a 'landing_queue:' run keeps
+        "landing_queue",
     }
     select_tool = next(t for t in resp["result"]["tools"]
                        if t["name"] == "select")
