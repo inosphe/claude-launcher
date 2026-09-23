@@ -112,7 +112,8 @@ workflow to be started here), that is the answer; otherwise list candidates
      run, and a `steps.<id>.skip` that is true means the run will pass that
      step when it gets there. You write only a path whose `by` includes
      `agent`, with the `set_state` tool; a person's path (every text value,
-     anything `by: [user]`) is theirs through `claunch cflow set`. A nudge
+     anything `by: [user]`) is theirs through `claunch cflow set` or the
+     dashboard's run page. A nudge
      saying a person set the run's state means: call `status`, read
      `state`, carry on from where you are.
    - A payload carrying `landing_queue` — your children's landing requests,

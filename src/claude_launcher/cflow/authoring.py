@@ -360,8 +360,9 @@ landed:
   instructions: wait for the landing
 ```
 
-- **Who writes.** A person with `claunch cflow set <path> <value>` (the
-  session is nudged to re-read); the driving agent with the `set_state` MCP
+- **Who writes.** A person with `claunch cflow set <path> <value>` or the
+  run page's state block on the dashboard (`POST /api/cflow/state`, the same
+  write; the session is nudged to re-read); the driving agent with the `set_state` MCP
   tool, only on a path whose `by` lists `agent`. A `text` value is `by:
   [user]` and nothing else: the agent's own record goes on the issue board.
 - **Paths.** `steps.<id>.skip` (a step with one plain `next` exit, never the
