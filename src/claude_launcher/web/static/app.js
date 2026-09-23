@@ -13854,16 +13854,9 @@ function daemonCard() {
     // From here the daemon goes quiet on purpose; label the gap so the rail
     // does not read as a mystery outage. pollOnce()'s boot_id check does the
     // actual recovery the moment the successor answers.
-    setDaemonOnline(false);
-    $("daemon-info").textContent = "restarting…";
-    // setDaemonOnline just posted "daemon offline", which is true and, here,
-    // alarming for no reason: this outage was asked for. Same key, so the
-    // card is replaced rather than joined by a second one.
-    notify(
-      "restarting the daemon",
+    announceRestartAsked(
       `asked at ${noticeClock()} — it stops answering while it drains, and ` +
-        "this page reconnects on its own once the successor is up",
-      { key: NOTICE_LINK, kind: "warn", sticky: true }
+        "this page reconnects on its own once the successor is up"
     );
   });
   card.appendChild(btn);
@@ -28477,13 +28470,9 @@ async function refreshRestartGate() {
         // The daemon's own door: it finishes the reply, drains, and spawns
         // the successor; label the gap the way the daemon card's button
         // does, so the outage is not read as a mystery.
-        setDaemonOnline(false);
-        $("daemon-info").textContent = "restarting…";
-        notify(
-          "restarting the daemon",
+        announceRestartAsked(
           `approved at ${noticeClock()} — the page reconnects on its own ` +
-            "once the successor is up",
-          { key: NOTICE_LINK, kind: "warn", sticky: true }
+            "once the successor is up"
         );
         dismissNotice(NOTICE_GATE);
       }
@@ -28689,6 +28678,31 @@ let daemonBoot = null;     // which daemon that verdict was about
 let daemonCache = null;    // last /api/daemon payload; the home card reads it
 let daemonStartedAt = null; // ms epoch, derived from that payload's uptime
 
+/* A restart this page asked for (the daemon card's button, the gate's
+   Approve). The POST is answered before the old process stops: it drains
+   its sessions first, and polls in that window reach the same boot id. Read
+   as ordinary link events those polls posted "daemon back" and the real stop
+   after them "daemon offline" — two cards in reverse order about an outage
+   the person had just asked for. So while this is set, the same boot id is
+   the drain and a silent health check is the gap; the one event is the
+   successor's boot id. Bounded: a daemon still answering as itself after
+   RESTART_DRAIN_MS did not restart, and "daemon back — it never restarted"
+   is then the true sentence. */
+const RESTART_DRAIN_MS = 5 * 60 * 1000;
+let restartAsked = null;   // {boot, at} — the daemon asked to go, and when
+
+function announceRestartAsked(sub) {
+  setDaemonOnline(false);
+  $("daemon-info").textContent = "restarting…";
+  // setDaemonOnline just posted "daemon offline", which is true and, here,
+  // alarming for no reason: this outage was asked for. Same key, so the
+  // card is replaced rather than joined by a second one.
+  notify("restarting the daemon", sub, { key: NOTICE_LINK, kind: "warn", sticky: true });
+  // Without a boot id there is nothing to tell the successor apart by, and
+  // the ordinary link events are all this page has.
+  restartAsked = daemonBoot ? { boot: daemonBoot, at: Date.now() } : null;
+}
+
 function authOpen() {
   return !$("auth-overlay").classList.contains("hidden");
 }
@@ -28798,6 +28812,13 @@ async function pollTick() {
 async function pollOnce() {
   const health = await daemonHealth();
   if (!health) { setDaemonOnline(false); return; }
+  if (restartAsked) {
+    if (health.boot_id === restartAsked.boot &&
+        Date.now() - restartAsked.at < RESTART_DRAIN_MS) {
+      return;   // the old daemon, draining: the restarting card says so
+    }
+    restartAsked = null;
+  }
   // A boot id we have not seen means the daemon we were talking to is gone:
   // new cookies, new pids, and every socket we hold bound to nothing.
   const restarted = !!(health.boot_id && daemonBoot && health.boot_id !== daemonBoot);
