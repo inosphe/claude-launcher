@@ -1523,6 +1523,13 @@ let sessionGridPicked = null;
 // is not read as the tap that places it (or as a click that opens it).
 let sessionGridHoldRelease = false;
 const SESSION_GRID_HOLD_MS = 450;
+/* Which card the header's `⇱ card` marked, if any (revealSessionCard). Held
+   here and not on the node because a changed session poll rebuilds the rail
+   and the grid — a class written straight onto the card could be thrown away
+   while the smooth scroll is still running. refreshSessions and
+   sessionGridCell repaint it from this instead. Declared this early because
+   the grid's first draw runs during load. */
+let gotoFlashName = null;
 
 function setSessionGridPerLine(n) {
   if (!SESSION_GRID_PER_LINE.includes(n)) return;
@@ -1921,6 +1928,8 @@ function sessionGridCell(layout, row, r, c, records, present, searching) {
     cell.draggable = true;
     if (name === currentName) cell.classList.add("active");
     if (name === sessionGridPicked) cell.classList.add("picked");
+    // The ⇱ card mark, repainted here because a redraw replaces every cell.
+    if (name === gotoFlashName) cell.classList.add("goto-flash");
   }
   if (name && !s) {
     cell.classList.add("empty", "absent");
@@ -12943,36 +12952,84 @@ function markDetailRow() {
    about a press from a minute ago. */
 const GOTO_FLASH_MS = 1600;
 
-/* Which row is marked, if any. Held here and not on the node because a changed
-   session poll rebuilds the rail — a class written straight onto the row
-   could be thrown away while the smooth scroll is still running.
-   refreshSessions repaints it from this instead. */
-let gotoFlashName = null;
+/* Which card is marked, if any: gotoFlashName, declared with the rail grid
+   state above, because the grid's first draw at load reads it. */
 let gotoFlashTimer = null;
 
-/* Paint the mark onto the rows that exist now. Idempotent, and safe on a rail
-   that has since lost the row (the session exited and was cleared). */
+/* Paint the mark onto the rows and grid cells that exist now. Idempotent, and
+   safe on a rail that has since lost the row (the session exited and was
+   cleared). Both views are painted: the list is built on every poll even
+   while the grid is shown, and an empty grid cell has no name to match. */
 function applyGotoFlash() {
-  document.querySelectorAll("#session-list li").forEach((li) =>
-    li.classList.toggle(
-      "goto-flash", !!gotoFlashName && li.dataset.name === gotoFlashName
+  document.querySelectorAll("#session-list li, #session-grid .sg-cell").forEach((el) =>
+    el.classList.toggle(
+      "goto-flash", !!gotoFlashName && el.dataset.name === gotoFlashName
     )
   );
 }
 
-/* Scroll the rail to `name`'s row and mark it. Answers whether there was a
-   row at all: the rail is a poll behind the terminal, so a session attached a
+/* The list view's half of the press: `name`'s row, with every folded group
+   around it opened first. A row inside a shut group is display:none, and
+   scrollIntoView on it moves nothing -- the press would answer "found" with
+   nothing on screen. The fold is opened for good, as the group jump does:
+   the state lives in sessionGroupCollapsed, so the next rebuild keeps it. */
+function revealSessionListRow(name) {
+  const list = $("session-list");
+  if (!list) return null;
+  let row = null;
+  list.querySelectorAll("li[data-name]").forEach((li) => {
+    if (li.dataset.name === name) row = li;
+  });
+  if (!row) return null;
+  let opened = false;
+  for (let el = row.parentElement; el && el !== list; el = el.parentElement) {
+    if (el.classList.contains("session-group") && el.classList.contains("collapsed")) {
+      setSessionGroupCollapsed(el.dataset.group, el.dataset.value, false);
+      opened = true;
+    }
+  }
+  if (opened) {
+    // Repaints every group from the fold state, and re-measures the sticky
+    // stack, whose height changed with the headings now back in the flow.
+    syncSessionGroupSearch(list);
+    syncSessionGroupStickyOffsets(list);
+  }
+  return row;
+}
+
+/* The grid view's half: `name`'s cell. A cell inside a folded stretch is not
+   drawn at all, so that stretch is opened and the grid redrawn before the
+   cell is looked up. */
+function revealSessionGridCell(name) {
+  const host = $("session-grid");
+  const layout = sessionGridLayout();
+  const pos = layout && layout.positionOf(name);
+  if (!host || !pos) return null;
+  const find = () => host.querySelector(`.sg-cell[data-name="${CSS.escape(name)}"]`);
+  if (!find()) {
+    const perLine = sessionGridPerLine;
+    const line = Math.floor(pos.col / perLine);
+    const present = new Set(sessionGridVisible().map((s) => s.name));
+    const run = layout.foldRuns(pos.row, perLine, present, SESSION_GRID_FOLD_LINES)
+      .find((r) => line >= r.start && line < r.end);
+    if (run) sessionGridUnfolded.add(`${layout.rows[pos.row].id}:${run.start}`);
+    renderSessionGrid(true);
+  }
+  return find();
+}
+
+/* Scroll the rail to `name`'s card in the view on screen -- a row in the
+   list, a cell in the grid -- and mark it. Answers whether there was a card
+   at all: the rail is a poll behind the terminal, so a session attached a
    second ago can legitimately have none yet, and that is a no-op rather than
    an error — the next poll builds it and the reader can press again. */
 function revealSessionCard(name) {
-  let row = null;
-  document.querySelectorAll("#session-list li").forEach((li) => {
-    if (li.dataset.name === name) row = li;
-  });
-  if (!row) return false;
+  const card = sessionView === "grid"
+    ? revealSessionGridCell(name) : revealSessionListRow(name);
+  if (!card) return false;
   // Centred, not merely "into view": a row brought to the very edge of the
   // rail is on screen and still reads as not found.
-  if (row.scrollIntoView) row.scrollIntoView({ block: "center", behavior: "smooth" });
+  if (card.scrollIntoView) card.scrollIntoView({ block: "center", behavior: "smooth" });
   gotoFlashName = name;
   if (gotoFlashTimer) clearTimeout(gotoFlashTimer);
   gotoFlashTimer = setTimeout(() => {
