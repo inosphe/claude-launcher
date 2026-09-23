@@ -473,6 +473,17 @@ class Session:
         #: back exactly the ones that were paused. Cleared the same way
         #: ``archived_at`` is: respawn constructs a fresh Session.
         self.paused_at: Optional[str] = None
+        #: Set by :meth:`SessionManager.respawn` right after this instance is
+        #: constructed: a person explicitly asked for this incarnation, as
+        #: opposed to :meth:`SessionManager.restore_all` starting it back up
+        #: unattended after a daemon restart. In memory only, and
+        #: deliberately not carried across a respawn's own relaunch or a
+        #: restart's — each new incarnation starts False, so the deference
+        #: this buys a session (see ``cflow kill-on-end`` in
+        #: :mod:`cflow_clock`) lasts only until the daemon that saw the
+        #: person's request goes down; the next boot re-judges from
+        #: scratch, same as it always did.
+        self.resumed_by_human = False
         self.exited = False
         self._started_mono = time.monotonic()
         self._subscribers: Set[asyncio.Queue] = set()

@@ -1552,6 +1552,10 @@ class SessionManager:
         except Exception:
             self._sessions[name] = session  # keep the exited record on failure
             raise
+        # A person asked for this incarnation, by name, right now -- unlike
+        # restore_all's unattended relaunch after a daemon restart. See
+        # Session.resumed_by_human for what this buys the session.
+        relaunched.resumed_by_human = True
         action = "resume" if session.paused_at else "respawn"
         self.events.record(relaunched, action,
                            "일시 중지된 세션 재개" if action == "resume" else "세션 재실행")

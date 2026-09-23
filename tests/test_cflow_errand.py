@@ -47,6 +47,7 @@ class _FakeSession:
         self.recorded: list = []
         self.killed = False
         self.status_value = "idle"
+        self.resumed_by_human = False
 
     def status(self, threshold=None):
         return self.status_value
