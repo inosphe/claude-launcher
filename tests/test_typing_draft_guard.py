@@ -55,6 +55,7 @@ def _fake_session(*, bracketed: bool = True):
         _last_human_input = 0.0
         _last_terminal_input = 0.0
         _draft_open = False
+        _draft_uncommitted = False
         paste = session_mod.Session.paste
         deliver = session_mod.Session.deliver
         _deliver = session_mod.Session._deliver
@@ -152,6 +153,46 @@ def test_an_abandoned_draft_stops_holding_the_session_eventually(monkeypatch):
     assert s.draft_open() is True
     time.sleep(0.15)
     assert s.draft_open() is False
+
+
+def test_an_abandoned_composition_stops_holding_soon(monkeypatch):
+    """The leak this guard is for: an IME syllable cancelled in the web
+    terminal's textarea sends no closing bytes — no Enter, no C-c — so the
+    draft the mark opened would hold this session's mail for the full
+    DRAFT_GUARD over a composer that is, in fact, empty. Nothing has
+    reached it, so the hold lapses on the short guard instead."""
+    monkeypatch.setattr(session_mod, "DRAFT_GUARD", 100.0)
+    monkeypatch.setattr(session_mod, "COMPOSING_GUARD", 0.1)
+    s, _ = _fake_session()
+    s.note_human_input(at_terminal=True, composing=True)
+    assert s.draft_open() is True
+    time.sleep(0.15)
+    assert s.draft_open() is False
+
+
+def test_committed_bytes_make_the_draft_a_real_one(monkeypatch):
+    """A composition that does commit lands in the composer as bytes, and
+    from then on it is an ordinary draft — held for DRAFT_GUARD, released
+    by the human's own Enter, not by a timer."""
+    monkeypatch.setattr(session_mod, "DRAFT_GUARD", 0.2)
+    monkeypatch.setattr(session_mod, "COMPOSING_GUARD", 0.05)
+    s, _ = _fake_session()
+    s.note_human_input(at_terminal=True, composing=True)
+    s.note_human_input(at_terminal=True, data="한".encode())
+    time.sleep(0.1)  # past COMPOSING_GUARD, still inside DRAFT_GUARD
+    assert s.draft_open() is True
+    time.sleep(0.15)  # and then it does lapse
+    assert s.draft_open() is False
+
+
+def test_a_live_composition_still_holds_the_delivery():
+    """While marks keep arriving — every keypress inside the syllable —
+    the hold stands: the commit lands after the mark, and a delivery in
+    that gap is the splice the marks exist to prevent."""
+    s, _ = _fake_session()
+    s.note_human_input(at_terminal=True, composing=True)
+    assert s.draft_open() is True
+    assert s.keyboard_busy(terminal_only=True) is True
 
 
 def test_send_keys_does_not_open_a_draft_of_its_own():

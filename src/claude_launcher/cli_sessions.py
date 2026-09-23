@@ -37,6 +37,7 @@ from . import (
     lineage,
     profile as profile_mod,
     projects,
+    stdio,
     store,
     worktree,
 )
@@ -823,7 +824,7 @@ def _report_hook_conversation(client, name: str) -> None:
     if sys.stdin is None or sys.stdin.isatty():
         return  # a human at a terminal: nothing piped, and no hook payload
     try:
-        raw = sys.stdin.read()
+        raw = stdio.read_stdin()
     except OSError:
         return
     if not raw.strip():
@@ -1304,7 +1305,7 @@ def _cmd_send_keys(args: argparse.Namespace) -> int:
     if args.paste:
         # One paste, not per-argument keys: '-' reads stdin (the natural way
         # to hand over genuinely multiline text), else args joined by spaces.
-        text = sys.stdin.read() if keys == ["-"] else " ".join(keys)
+        text = stdio.read_stdin() if keys == ["-"] else " ".join(keys)
         if not text:
             print("error: no text to paste", file=sys.stderr)
             return 1
@@ -1420,7 +1421,7 @@ def _read_text_arg(args: argparse.Namespace) -> str:
     path = getattr(args, "file", None)
     if path:
         if path == "-":
-            return sys.stdin.read()
+            return stdio.read_stdin()
         with open(path, encoding="utf-8") as fh:
             return fh.read()
     return str(getattr(args, "text", None) or "")
