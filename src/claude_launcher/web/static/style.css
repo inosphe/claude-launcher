@@ -545,7 +545,8 @@ option:disabled { color: #6b7280; }
    flex-basis says. */
 #session-list .sess-brief-toggle {
   flex: none; order: 1; background: none; border: none; color: #6e7681;
-  font-size: 11px; line-height: 1; padding: 2px 4px; cursor: pointer;
+  font-size: 14px; line-height: 1; padding: 4px 6px; cursor: pointer;
+  min-width: 26px; min-height: 26px;
 }
 #session-list .sess-brief-toggle:hover:not(:disabled) { color: #58a6ff; }
 /* off (no llm: block): still visible so the feature is discoverable, but
@@ -938,16 +939,17 @@ option:disabled { color: #6b7280; }
   letter-spacing: 0.04em;
 }
 .sess-brief-refresh.spinning { color: #58a6ff; animation: spin 0.7s linear infinite; cursor: default; }
-.sess-brief-row { display: flex; gap: 8px; margin: 3px 0; }
+.sess-brief-row { display: flex; flex-direction: column; gap: 3px; margin: 8px 0; }
 .sess-brief-k {
-  flex: none; width: 52px; color: #7d8590; font-size: 10px;
+  flex: none; min-width: 0; color: #7d8590; font-size: 10px;
+  white-space: normal; overflow-wrap: anywhere;
   text-transform: uppercase; letter-spacing: 0.04em; padding-top: 2px;
 }
 .sess-brief-v {
   min-width: 0; white-space: pre-wrap; overflow-wrap: anywhere;
   line-height: 1.45;
 }
-.sess-brief-check { align-items: center; }
+.sess-brief-check { flex-direction: row; align-items: center; gap: 8px; }
 .status-check-icon {
   flex: none; width: 18px; height: 18px; border-radius: 50%; display: inline-grid;
   place-items: center; font-weight: 700; font-size: 12px; line-height: 1;
@@ -1403,7 +1405,10 @@ a.cflow-scope:hover { background: #1d3559; text-decoration: underline; }
    not destroy), lit while the card under the header is open, inert to a
    greyed load for the two states where there is nothing to open — no current
    session, or no llm: block to summarise with. */
-#term-brief { color: #9ecbff; border-color: #1f4272; }
+#term-brief {
+  color: #9ecbff; border-color: #1f4272;
+  font-size: 13px; padding: 5px 9px; min-height: 28px;
+}
 #term-brief:hover { background: #10203a; color: #c6cdd5; border-color: #388bfd; }
 #term-brief[aria-pressed="true"] {
   background: #10203a; color: #58a6ff; border-color: #1f6feb;

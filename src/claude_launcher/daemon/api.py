@@ -7337,7 +7337,8 @@ async def h_session_briefing(request: web.Request) -> web.Response:
     404 for an unknown session (not the middleware's 400: the web UI keys its
     cards by name and must tell "gone" from "misconfigured"), 400 when the
     ``llm:`` block is absent or incomplete, 502 when the configured endpoint
-    fails. ``?refresh=1`` bypasses the in-memory cache.
+    fails. ``?refresh=1`` bypasses the cache. ``?cached=1`` reads the last
+    saved result regardless of changed evidence, composing only if absent.
     """
     manager: SessionManager = request.app["manager"]
     name = request.match_info["name"]
@@ -7345,10 +7346,14 @@ async def h_session_briefing(request: web.Request) -> web.Response:
         session = manager.get(name)
     except ManagerError:
         return json_error(404, f"no session named {name!r}")
+    refresh = request.query.get("refresh") in ("1", "true")
+    if not refresh and request.query.get("cached") in ("1", "true"):
+        saved = briefing.cached_result(name)
+        if saved is not None:
+            return json_response(saved)
     cfg = briefing.llm_config()
     if not briefing.llm_configured(cfg):
         return json_error(400, "llm not configured")
-    refresh = request.query.get("refresh") in ("1", "true")
     try:
         payload = await briefing.compose(session, cfg, refresh=refresh)
     except briefing.BriefingError as exc:

@@ -5498,7 +5498,7 @@ async function fetchBriefing(name, refresh) {
   let entry;
   try {
     const resp = await api(
-      `/api/sessions/${encodeURIComponent(name)}/briefing${refresh ? "?refresh=1" : ""}`
+      `/api/sessions/${encodeURIComponent(name)}/briefing${refresh ? "?refresh=1" : "?cached=1"}`
     );
     const body = await resp.json().catch(() => null);
     if (resp.ok) {
@@ -14404,6 +14404,7 @@ let faqCache = [];
 let faqError = "";
 let faqDraft = { question: "", answer: "" };
 let faqEdit = null;
+let faqEditDraft = "";
 let promptPresetCache = [];
 let promptPresetError = "";
 let promptPresetDraft = { name: "", text: "" };
@@ -18809,6 +18810,7 @@ function faqCard() {
   ));
   const form = el("form", "faq-add");
   const q = document.createElement("input");
+  q.id = "briefing-faq-question";
   q.placeholder = "Question"; q.value = faqDraft.question;
   q.addEventListener("input", () => { faqDraft.question = q.value; });
   const submit = el("button", "wf-btn approve", "Add question"); submit.type = "submit";
@@ -18835,7 +18837,9 @@ function faqCard() {
     const text = el("div", "faq-text");
     if (faqEdit === row.id) {
       const eq = document.createElement("input");
-      eq.value = row.question; eq.className = "faq-edit-question";
+      eq.id = "briefing-faq-edit-question";
+      eq.value = faqEditDraft; eq.className = "faq-edit-question";
+      eq.addEventListener("input", () => { faqEditDraft = eq.value; });
       text.append(eq);
       const save = el("button", "wf-btn approve", "Save"); save.type = "button";
       save.addEventListener("click", () => faqSave(row, { question: eq.value }));
@@ -18846,7 +18850,9 @@ function faqCard() {
     text.append(el("strong", null, row.question));
     item.appendChild(text);
     const edit = el("button", "wf-btn clear", "Edit");
-    edit.type = "button"; edit.addEventListener("click", () => { faqEdit = row.id; renderWorkspaces(); });
+    edit.type = "button"; edit.addEventListener("click", () => {
+      faqEdit = row.id; faqEditDraft = row.question; renderWorkspaces();
+    });
     const toggle = el("button", "wf-btn clear", row.enabled === false ? "Enable" : "Disable");
     toggle.type = "button";
     toggle.addEventListener("click", () => faqSave(row, { enabled: row.enabled === false }));
