@@ -19807,6 +19807,14 @@ function renderWfInto(view, data, ui) {
     side.appendChild(reminderControl(data, (ui.actions || {}).after, ui.host));
   }
 
+  // The run's own state: what the workflow declared writable (editable:),
+  // and the landing queue a leader's run keeps (landing_queue:). Each block
+  // is absent for a run whose workflow declares nothing of the kind.
+  const stateBox = wfStateBlock(data, ui);
+  if (stateBox) side.appendChild(stateBox);
+  const landingBox = wfLandingBlock(data);
+  if (landingBox) side.appendChild(landingBox);
+
   // drop a stale selection if the workflow changed under us
   if (
     ui.getStep() && ui.getStep() !== "end" &&
@@ -20338,6 +20346,154 @@ function reminderControl(data, after, host = "page") {
         `${Math.round(defs.interval || 0)}s) — set on the Workflows page`
   ));
   wfReminderBoxes[host] = box;
+  return box;
+}
+
+/* The run's writable state (`editable:`, the run payload's `state`): each
+   declared path, its value,
+   who may write it and who last did. A path a person may write is edited
+   here -- the same engine write as `claunch cflow set` (set_by user); an
+   agent-only path is shown read-only (the agent writes it with the
+   set_state MCP tool). A finished run's state is closed with it.
+
+   Cached per host like the reminder box, and redrawn when the values change
+   -- except while a text field in it holds an unsaved edit: the poll must
+   not wipe a half-typed note. Saving clears the cache, so the server's
+   answer is what the next poll draws. */
+let wfStateBoxes = {};
+function wfStateBlock(data, ui) {
+  const run = data.run || {};
+  const entries = run.state;
+  if (!Array.isArray(entries) || !entries.length) return null;
+  const host = ui.host;
+  const slot = `${data.scope}|${data.cwd}`;
+  const key = `${slot}|${JSON.stringify(entries)}`;
+  const kept = wfStateBoxes[host];
+  if (kept && kept.dataset.slot === slot &&
+      (kept.dataset.key === key || kept.dataset.dirty === "1")) {
+    return kept;
+  }
+  const closed = run.status === "done" || run.status === "aborted";
+  const after = (ui.actions || {}).after;
+  const write = (path, value) => {
+    delete wfStateBoxes[host];
+    cflowAction("/api/cflow/state", {
+      cwd: data.cwd, scope: data.scope, path, value,
+    }, after);
+  };
+
+  const box = el("div", "wf-state");
+  box.dataset.slot = slot;
+  box.dataset.key = key;
+  box.appendChild(el("h3", "wf-state-head", "state"));
+  for (const entry of entries) {
+    const row = el("div", "wf-state-row");
+    row.dataset.path = entry.path;
+    const by = entry.by || [];
+    const writable = !closed && by.includes("user");
+    const name = el("span", "wf-state-path mono", entry.path);
+    if (entry.describe) name.title = entry.describe;
+    row.appendChild(name);
+    if (entry.type === "bool") {
+      const cb = document.createElement("input");
+      cb.type = "checkbox";
+      cb.className = "wf-state-bool";
+      cb.checked = !!entry.value;
+      cb.disabled = !writable;
+      cb.addEventListener("change", () => write(entry.path, cb.checked));
+      row.appendChild(cb);
+    } else if (writable) {
+      const text = document.createElement("textarea");
+      text.className = "wf-state-text";
+      text.rows = 2;
+      text.value = entry.value == null ? "" : String(entry.value);
+      text.addEventListener("input", () => { box.dataset.dirty = "1"; });
+      row.appendChild(text);
+      const save = el("button", "wf-btn wf-state-save", "Save");
+      save.addEventListener("click", () => write(entry.path, text.value));
+      row.appendChild(save);
+    } else {
+      const shown = entry.value == null || entry.value === ""
+        ? "(empty)" : String(entry.value);
+      row.appendChild(el("span", "wf-state-value mono", shown));
+    }
+    const who = [`written by ${by.join(" or ") || "?"}`];
+    if (entry.set_by) {
+      who.push(`last set by ${entry.set_by} at ` +
+        `${(entry.set_at || "?").replace("T", " ")}`);
+    }
+    row.appendChild(el("span", "wf-note wf-state-by", who.join(" · ")));
+    if (entry.describe) row.appendChild(el("p", "wf-note wf-state-desc", entry.describe));
+    box.appendChild(row);
+  }
+  box.appendChild(el(
+    "p", "wf-note",
+    closed
+      ? "this run is finished; its state is closed with it"
+      : "a write applies from now on: a step's setting is read when the run " +
+        "next enters that step. Agent-only paths are written by the session."
+  ));
+  wfStateBoxes[host] = box;
+  return box;
+}
+
+/* The run's landing queue (`landing_queue:`): the landing requests its
+   children filed, one row per issue, and what the last round's end dropped
+   and carried. Read-only: the leader moves entries with the landing_queue
+   MCP tool, and `landed` is the daemon's, measured with git. */
+function wfLandingBlock(data) {
+  const run = data.run || {};
+  if (!("landing_queue" in run)) return null;
+  const queue = run.landing_queue || [];
+  const box = el("div", "wf-landing");
+  box.appendChild(el("h3", "wf-landing-head", `landing queue (${queue.length})`));
+  if (!queue.length) {
+    box.appendChild(el(
+      "p", "wf-note",
+      "empty — an entry arrives when a child files its landing request"
+    ));
+  } else {
+    const table = el("table", "wf-landing-table");
+    const head = el("tr");
+    for (const h of ["issue", "status", "branch @ tip", "requested by", "note"]) {
+      head.appendChild(el("th", null, h));
+    }
+    table.appendChild(head);
+    for (const e of queue) {
+      const tr = el("tr", `wf-landing-row st-${e.status || "unknown"}`);
+      tr.appendChild(el("td", "mono", e.issue || "?"));
+      tr.appendChild(el("td", `wf-landing-status st-${e.status || "unknown"}`, e.status || "?"));
+      tr.appendChild(el(
+        "td", "mono",
+        `${e.branch || "?"} @ ${String(e.tip || "").slice(0, 8) || "?"}`
+      ));
+      const asked = e.requested_by || "?";
+      const at = e.requested_at ? ` · ${e.requested_at.replace("T", " ")}` : "";
+      tr.appendChild(el("td", null, asked + at));
+      tr.appendChild(el("td", null, e.note || ""));
+      table.appendChild(tr);
+    }
+    box.appendChild(table);
+  }
+  const reset = run.landing_reset;
+  if (reset) {
+    const ids = (rows) => (rows || []).map((r) =>
+      `${r.issue} (${r.status}${r.was ? ", was " + r.was : ""})`
+    ).join(", ") || "none";
+    const fold = document.createElement("details");
+    fold.className = "wf-landing-reset";
+    fold.appendChild(el(
+      "summary", null,
+      `last reset at a round's end${reset.run ? " (run " + reset.run + ")" : ""}`
+    ));
+    fold.appendChild(el("p", "wf-note", `dropped: ${ids(reset.dropped)}`));
+    fold.appendChild(el("p", "wf-note", `carried: ${ids(reset.carried)}`));
+    for (const w of reset.warnings || []) {
+      fold.appendChild(el("p", "wf-warning", `⚠ ${w}`));
+    }
+    if ((reset.warnings || []).length) fold.open = true;
+    box.appendChild(fold);
+  }
   return box;
 }
 

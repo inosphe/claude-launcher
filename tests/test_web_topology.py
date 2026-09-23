@@ -443,6 +443,7 @@ CHECKS = [
         "wfsplit_check.js",
         "askdoor_check.js",
         "checklist_check.js",
+        "wfstate_check.js",
         "railtimer_check.js",
         "termtimer_check.js",
         "mdrender_check.js",

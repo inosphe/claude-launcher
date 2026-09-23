@@ -3391,6 +3391,35 @@ a.wf-btn { display: inline-block; text-decoration: none; line-height: 1.5; }
   background: #14161a; color: #c6cdd5; border: 1px solid #2a2e36;
   border-radius: 5px; padding: 4px 8px; font-size: 12px; flex: 0 0 90px;
 }
+/* The run's declared state (editable:) and its landing queue, in the run
+   page's text column under the reminder. */
+.wf-state, .wf-landing { margin-top: 10px; padding-top: 8px; border-top: 1px solid #22262d; }
+.wf-state-head, .wf-landing-head { font-size: 13px; font-weight: 600; margin: 0 0 6px; }
+.wf-state-row {
+  display: flex; gap: 8px; align-items: center; flex-wrap: wrap;
+  padding: 4px 0; font-size: 13px;
+}
+.wf-state-path { font-weight: 600; }
+.wf-state-value { color: #c6cdd5; white-space: pre-wrap; }
+.wf-state-text {
+  flex: 1 1 220px; min-width: 0; background: #14161a; color: #c6cdd5;
+  border: 1px solid #2a2e36; border-radius: 5px; padding: 4px 8px;
+  font-family: inherit; font-size: 12px; resize: vertical;
+}
+.wf-state-by { flex-basis: 100%; margin: 0; }
+.wf-state-desc { flex-basis: 100%; margin: 0; }
+.wf-landing-table {
+  border-collapse: collapse; width: 100%; font-size: 12px; display: block;
+  overflow-x: auto;
+}
+.wf-landing-table th, .wf-landing-table td {
+  border: 1px solid #22262d; padding: 3px 6px; text-align: left; vertical-align: top;
+}
+.wf-landing-status.st-landed { color: #7cc48b; }
+.wf-landing-status.st-rejected { color: #d27a7a; }
+.wf-landing-status.st-deferred { color: #c9a45c; }
+.wf-landing-reset { margin-top: 6px; font-size: 12px; }
+.wf-landing-reset > .wf-note, .wf-landing-reset > .wf-warning { margin: 2px 0; }
 .mesh-member {
   display: flex; align-items: center; gap: 10px; padding: 6px 0;
   border-bottom: 1px solid #22262d; font-size: 13px;
