@@ -1507,6 +1507,8 @@ let sessionGridPerLine = (() => {
   return 4;
 })();
 let sessionGrid = null;
+// Rows whose folded leading lines the reader opened, for this page load.
+const sessionGridUnfolded = new Set();
 let sessionGridDragging = null;
 let sessionGridPending = false;
 // The session a long press picked up, waiting for the tap that says where it
@@ -1601,7 +1603,25 @@ function renderSessionGrid(force = false) {
     const body = document.createElement("div");
     body.className = "sg-cells";
     const span = layout.span(r, perLine);
-    for (let c = 0; c < span; c++) {
+    // Lines at the top of the row that the filter left with nothing in view
+    // fold into one bar, so the row starts at its first line in view; the
+    // cells keep their numbers, so what is on screen is still where it sits.
+    const lead = layout.hiddenLead(r, perLine, present);
+    const folded = lead && !sessionGridUnfolded.has(row.id);
+    if (lead) {
+      const last = lead * perLine;
+      const bar = sessionGridButton("sg-fold",
+        folded ? `▸ cells 1–${last} · nothing in this view` : `▾ fold cells 1–${last}`,
+        folded ? `show the ${lead} line${lead === 1 ? "" : "s"} at the top of ${row.name} that hold only sessions out of this view`
+          : `fold the lines at the top of ${row.name} that hold only sessions out of this view`,
+        () => {
+          if (folded) sessionGridUnfolded.add(row.id);
+          else sessionGridUnfolded.delete(row.id);
+          renderSessionGrid(true);
+        });
+      block.append(bar);
+    }
+    for (let c = folded ? lead * perLine : 0; c < span; c++) {
       body.append(sessionGridCell(layout, row, r, c, records, present, searching));
     }
     block.append(body);
@@ -1924,7 +1944,7 @@ function sessionGridCell(layout, row, r, c, records, present, searching) {
         at = layout.neighbor(at.row, at.col, step[0], step[1], perLine)) {
         const next = host.querySelector(
           `.sg-cell[data-row="${layout.rows[at.row].id}"][data-col="${at.col}"]`);
-        if (next && next.dataset.name) { next.focus(); break; }
+        if (next && next.dataset.name) { next.focus(); break; }   // folded cells are not drawn
       }
     });
     // Press and hold picks the session up. Movement before the hold ends is a
