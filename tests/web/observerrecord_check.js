@@ -58,6 +58,22 @@ function sliceConst(source, name) {
   throw new Error(`unbalanced const ${name}`);
 }
 
+// The compact-line helpers (richLine and the chip/clock/label tables it
+// reads) sit together between two comments in observer.js; they are taken as
+// one block because several are `const X = [...]` rather than functions.
+function compactBlock(source) {
+  const start = source.indexOf("/* Event text as one compact line");
+  const end = source.indexOf("/* briefing/checks records");
+  if (start < 0 || end < start) throw new Error("cannot locate the compact-line block");
+  return source.slice(start, end);
+}
+// A stub node's textContent is only what was assigned to it; the text a
+// reader sees is that plus every child's, in order.
+function text(n) {
+  if (typeof n === "string") return n;
+  return n.textContent + n.children.map(text).join("");
+}
+
 /* ---- stub DOM ---- */
 function mkel(tag) {
   const el = {
@@ -120,7 +136,7 @@ const ctx = {};
 new Function(
   "exports", "document", "briefingStateClass", "statusCheckIcon", "statusCheckText",
   "statusCheckName", "api",
-  [sliceConst(observerSrc, "node"), slice(observerSrc, "request"),
+  [sliceConst(observerSrc, "node"), slice(observerSrc, "request"), compactBlock(observerSrc),
    slice(observerSrc, "recordPayload"), slice(observerSrc, "briefingSnapshot"),
    slice(observerSrc, "checksSnapshot"), slice(observerSrc, "eventItem")].join("\n") + `
 exports.eventItem = eventItem;
@@ -144,10 +160,14 @@ const s = { name: "s1" };
 const iso = "2026-09-21T00:00:00.000Z";
 const kv = (box) => {
   const out = {};
-  for (const r of box.children) {
-    if (r.className !== "sess-brief-row" && r.className !== "sess-brief-row sess-brief-faq") continue;
-    out[r.children[0].textContent] = r.children[1].textContent;
-  }
+  const walk = (n) => {
+    for (const r of n.children) {
+      if (r.className === "sess-brief-row" || r.className === "sess-brief-row sess-brief-faq")
+        out[r.children[0].textContent] = text(r.children[1]);
+      else walk(r);
+    }
+  };
+  walk(box);
   return out;
 };
 
@@ -170,8 +190,13 @@ const kv = (box) => {
         box1.querySelector(".sess-brief-state").className, "sess-brief-state st-working");
   check("the one-line job description heads the box",
         box1.querySelector(".sess-brief-one").textContent, "observer 카드를 구조화한다");
+  const more1 = box1.querySelector(".sess-brief-more");
+  check("only 현재 stays open; the rest folds under one summary",
+        [box1.children.filter((c) => c.className === "sess-brief-row").map((c) => c.children[0].textContent),
+         more1.tag, more1.children[0].textContent],
+        [["현재"], "details", "브리핑 전체 (3)"]);
   check("goal/now/progress land as labelled rows", kv(box1),
-        { "목표": "카드 재설계", "현재": "구조화 렌더 작성", "진행": "eventItem 절반",
+        { "현재": "구조화 렌더 작성", "목표": "카드 재설계", "진행": "eventItem 절반",
           "이 세션의 목표는?": "observer UI 재설계" });
 
   /* The raw JSON is still reachable, but demoted to a no-round-trip fallback
@@ -225,8 +250,10 @@ const kv = (box) => {
   const e5 = { id: "e5", kind: "cflow", origin: "observation", source: "commit-a1b2",
                at: iso, text: "커밋 a1b2가 목표를 만족한다" };
   const item5 = ctx.eventItem(s, e5);
-  check("a plain observation keeps its flat text line",
-        item5.children[1].textContent, "커밋 a1b2가 목표를 만족한다");
+  const head5 = item5.querySelector(".obs-head");
+  check("a plain observation reads as a kind badge then its one text line",
+        [head5.children[0].textContent, text(head5.querySelector(".obs-line"))],
+        ["cflow", "커밋 a1b2가 목표를 만족한다"]);
   check("no .sess-brief box grows for it", item5.querySelector(".sess-brief"), null);
   const summary5 = item5.children.find((c) => c.tag === "details");
   check("its fallback keeps the original source label",

@@ -688,3 +688,45 @@ def test_context_rotates_at_the_ceiling_and_keeps_the_summary(setup, monkeypatch
         # for the summary would miss the very text it is looking for.)
         init = json.dumps(row["messages"][1], ensure_ascii=False)
         assert ("이전 요약" in init) == bool(rotations)
+
+
+def test_observed_events_sit_at_the_time_of_the_record_they_cite(setup, monkeypatch):
+    """One pass stamps all its events with one time; the timeline uses the record's.
+
+    On s697 (2026-09-23) five events of one pass all read 07:26:34 while the
+    records they cite ran from 07:17:21 to 07:26:09. The record time is in the
+    stored evidence, so the snapshot places every event — stored before this
+    rule or after — by it, and keeps the pass time as ``observed_at``.
+    """
+    service, session = setup
+    rows = [{"id": "transcript:1", "at": "2026-09-23T07:17:21.332Z", "role": "assistant", "content": "a"},
+            {"id": "transcript:2", "at": "2026-09-23T07:26:09.038Z", "role": "assistant", "content": "b"},
+            {"id": "daemon:state", "content": {"status": "busy"}}]
+    monkeypatch.setattr(service, "evidence", lambda *args: (["path", "c1"], 2, {"status": "busy"}, rows, True))
+
+    async def fake(cfg, messages):
+        return {"summary": "s", "state": "working", "events": [
+            {"kind": "test", "text": "late", "source": "transcript:2"},
+            {"kind": "cflow", "text": "early", "source": "transcript:1", "pivot": True},
+            {"kind": "result", "text": "state", "source": "daemon:state"}]}, {}
+    monkeypatch.setattr(observer, "complete", fake)
+    monkeypatch.setattr(observer, "now", lambda: "2026-09-23T07:26:34+00:00")
+    asyncio.run(service.observe(session, CFG))
+
+    stored = service.data["sessions"]["s1"]["events"]
+    assert [e["at"] for e in stored] == ["2026-09-23T07:26:34+00:00"] * 3
+    assert [e["pivot"] for e in stored] == [False, True, False]
+    shown = [e for e in service.snapshot()["sessions"][0]["events"] if e["kind"] in {"test", "cflow", "result"}]
+    assert [(e["text"], e["at"], e.get("observed_at")) for e in shown] == [
+        ("early", "2026-09-23T07:17:21.332Z", "2026-09-23T07:26:34+00:00"),
+        ("late", "2026-09-23T07:26:09.038Z", "2026-09-23T07:26:34+00:00"),
+        # The state row carries no time, so its event stays at the pass time.
+        ("state", "2026-09-23T07:26:34+00:00", None)]
+    assert all("evidence" not in e for e in shown)
+
+
+def test_the_prompt_asks_for_one_line_chips_and_pivots():
+    """The model is asked for the shape the page draws; the page does not depend on it."""
+    for phrase in ("ONE line of at most 120 characters", "Wrap identifiers in backticks",
+                   "@s123", '"pivot":true', "expected X → observed Y → now Z"):
+        assert phrase in observer.SYSTEM

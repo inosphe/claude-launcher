@@ -117,9 +117,17 @@ with a communication receipt; retain the previous substantive summary when
 there is no new result. Return an empty events array for routine communication.
 Distinguish reported claims from verified tool output; do not
 invent success, approval, or completion. Return ONLY JSON with this shape:
-{"summary":"concise Korean summary of current work", "state":"working|waiting|blocked|done|unknown",
-"events":[{"kind":"cflow|commit|merge|test|action|result", "text":"concise Korean result with concrete evidence",
-"source":"an exact source id from the latest evidence", "needs_action":false}]}.
+{"summary":"at most two short Korean sentences on current work", "state":"working|waiting|blocked|done|unknown",
+"events":[{"kind":"cflow|commit|merge|test|action|result", "text":"one short Korean line with concrete evidence",
+"source":"an exact source id from the latest evidence", "needs_action":false, "pivot":false}]}.
+Write each event text as ONE line of at most 120 characters: the outcome first,
+then the evidence. Wrap identifiers in backticks — commit hashes, branch names,
+issue ids (`claunch-xxxx`), cflow run ids and steps, test ids, paths. Name other
+sessions as @s123. Give test results as `N passed / M failed`. No background,
+no restated context, no narration of what the agent is about to do.
+Set "pivot":true only when an observed result differed from what the agent
+expected and the agent changed its decision or plan because of it; its text is
+then "expected X → observed Y → now Z" in Korean.
 Emit only NEW important events from the latest evidence, at most 12. Earlier
 messages supply context; never repeat their events. An empty events array is
 correct when nothing important changed. Do not interpret an old request as
@@ -130,6 +138,26 @@ the latest evidence. Preserve paths, identifiers and numerical test results.
 
 def now():
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def on_timeline(event):
+    """Place an observed event at the time of the record it cites.
+
+    An event is stamped when the pass that produced it returned, so every event
+    of one pass carries one time, and a pass covers up to 40 records: on s697
+    (2026-09-23) five events read 07:26:34 while their records ran from
+    07:17:21 to 07:26:09, and the daemon's own events and stored records sat
+    between them in the wrong order. The cited record's own ``at`` is kept in
+    the stored evidence, so this is decided when the snapshot is read and
+    applies to every event already stored as well as to new ones. The pass time
+    stays available as ``observed_at``. Evidence without a time (the
+    ``daemon:state`` row) leaves the event where it was.
+    """
+    evidence = event.get("evidence")
+    at = evidence.get("at") if isinstance(evidence, dict) else None
+    if not isinstance(at, str) or not session_events.timestamp(at):
+        return event
+    return {**event, "at": at, "observed_at": event.get("at")}
 
 
 def usage_date():
@@ -520,7 +548,8 @@ class Observer:
             if any(e["id"] == event_id for e in events):
                 continue
             events.append({"id": event_id, "kind": event["kind"], "text": text[:2000],
-                           "needs_action": event.get("needs_action") is True, "source": source,
+                           "needs_action": event.get("needs_action") is True,
+                           "pivot": event.get("pivot") is True, "source": source,
                            "evidence": evidence[source], "at": now(), "acknowledged": False})
             added += 1
         answer_state = answer.get("state")
@@ -552,7 +581,8 @@ class Observer:
             info = session.info()
             direct = [event for event in self.reports.rows(name) if visible(event)]
             recorded = search_records.rows(name, kinds=("briefing", "checks"), limit=200)
-            events = sorted(row.get("events", []) + direct + recorded + self.session_events.rows(session),
+            observed = [on_timeline(event) for event in row.get("events", [])]
+            events = sorted(observed + direct + recorded + self.session_events.rows(session),
                             key=lambda e: session_events.timestamp(e.get("at")))
             events = [event for event in events if visible(event)]
             latest = direct[-1] if direct else None
