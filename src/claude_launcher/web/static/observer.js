@@ -185,13 +185,7 @@ function composerState() {
   toggle.setAttribute("aria-expanded",String(!composerFolded));
   toggle.textContent=`입력 대상 세션 ${composerFolded?"▸":"▾"}`;
 }
-/* Everything a card does to its session is in one row: the three links to what
-   already exists, the action that types at this session, and the one that
-   observes it now. Both buttons used to be bars under the card, where the
-   board's column flex made them as wide as the card and the shared 44px touch
-   target made them the tallest thing on it — the type-at action read as the
-   card's primary action, which it is not.
-   The two act rather than link, so they are chips and the three stay text. */
+/* Destinations and actions share a compact two-row toolbar. */
 function cardActions(card,s) {
   const links=card.querySelector(".observer-links");
   const input=node("button","이 세션에 입력","observer-action");
@@ -206,9 +200,8 @@ function cardActions(card,s) {
   // The same flag the rail's glyph writes, drawn here so the reader can see
   // which sessions the pinned-only scope covers without leaving the page.
   // All four surfaces read it off the session record, so none of them owns
-  // the state. This one wears the card's action chip so the row keeps one
-  // weight, and CSS dims it until it is on — the same rule and the same 👁
-  // the rail uses, so the control is recognisable across both pages.
+  // the state. The card uses the same eye glyph as the rail and marks the
+  // selected state with a contrasting fill, border and aria-pressed.
   // The sentence comes from observePinTitle, which is also where the tab, the
   // rail row and the detail panel's Flags box get theirs. A title written here
   // would be a fourth wording of one flag, and a fixed one would go on saying

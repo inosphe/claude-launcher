@@ -296,7 +296,17 @@ async function fadeCost(page, selector, fade) {
       return {width:e.offsetWidth,height:e.offsetHeight,card:card.offsetWidth};
     });
     assert(action.width < action.card/2, `the action is not a full-width bar (${action.width} of ${action.card}px)`);
-    assert(action.height <= 32, `the action sits in the row (${action.height}px)`);
+    assert(action.height <= 36, `the action sits in the row (${action.height}px)`);
+    const toolbar = await page.locator('.observer-post[data-session="s1"] .observer-links').evaluate(e=>{
+      const boxes=[...e.querySelectorAll('a,button')].map(el=>el.getBoundingClientRect());
+      return {tops:boxes.map(r=>r.top), widths:boxes.map(r=>r.width),
+        fits:[...e.querySelectorAll('a,button')].every(el=>el.scrollWidth<=el.clientWidth)};
+    });
+    assert.equal(new Set(toolbar.tops.slice(0,3)).size,1,"destinations share the first row");
+    assert.equal(new Set(toolbar.tops.slice(3)).size,1,"actions share the second row");
+    assert(toolbar.tops[3]>toolbar.tops[0]);
+    assert(Math.max(...toolbar.widths)-Math.min(...toolbar.widths)<1,"controls use equal columns");
+    assert(toolbar.fits,"labels fit their controls");
     // One press, one pass, and the card says what the pass did — including
     // when it spent no API call because there was nothing new to read.
     await refreshAction.click();
@@ -339,12 +349,12 @@ async function fadeCost(page, selector, fade) {
     // by colour and by the chip's shape, never by erasing the glyph.
     assert.equal(await cardPin("s1").evaluate(e => getComputedStyle(e).opacity), "1",
       "the off chip's glyph is not faded toward the background");
-    // And the chip itself keeps a readable outline when off rather than being
-    // greyed whole, which is what made it read as a disabled button.
-    assert.equal(await cardPin("s1").evaluate(e => getComputedStyle(e).backgroundColor), "rgba(0, 0, 0, 0)",
-      "the off chip is an outline, not a greyed fill");
-    assert.notEqual(await cardPin("s2").evaluate(e => getComputedStyle(e).backgroundColor), "rgba(0, 0, 0, 0)",
-      "the on chip is filled");
+    // The neutral toolbar button gains a contrasting fill and border when on.
+    for (const property of ["backgroundColor", "borderTopColor"]) {
+      assert.notEqual(await cardPin("s1").evaluate((e,p)=>getComputedStyle(e)[p],property),
+        await cardPin("s2").evaluate((e,p)=>getComputedStyle(e)[p],property),
+        `pin state remains visible through ${property}`);
+    }
     // Evidence for the round report: the two cards side by side, one dimmed
     // and one lit, which is the pair the change is about. Captured at the
     // desktop width the board is read at, then put back for the rest.
