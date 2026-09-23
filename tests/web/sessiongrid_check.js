@@ -40,18 +40,22 @@ assert.equal(grid.columns(), 7, "one empty column past the longest row");
 assert.ok(grid.move("e", "r2", 1, present));
 assert.deepEqual(cells(grid)[1], ["bravo", null, "e", "c", "d", "a1", "b"]);
 
-// Moving onto an out-of-view assignment takes the cell; that session is
-// placed afresh when it returns -- into the default row's first empty cell.
+// Moving onto an out-of-view assignment swaps too: no assignment is lost.
 assert.ok(grid.move("b", "r2", 2, present));
-assert.deepEqual(cells(grid)[1], ["bravo", null, "e", "b", "d", "a1"]);
-grid.place([{ name: "c" }]);
-assert.deepEqual(grid.positionOf("c"), { row: 1, col: 0 });
-// Holes outside the default row are never reused.
+assert.deepEqual(cells(grid)[1], ["bravo", null, "e", "b", "d", "a1", "c"]);
+// An out-of-view session can itself be moved.
+assert.ok(grid.move("c", "r2", 0, present));
+assert.deepEqual(cells(grid)[1], ["bravo", "c", "e", "b", "d", "a1"]);
+// Holes outside the default row are never reused; the default row's are.
 assert.ok(grid.move("c", "r1", 5, present));
 grid.place([{ name: "c2" }]);
 assert.deepEqual(cells(grid)[0], ["alpha", null, null, "a", null, null, "c"]);
 assert.deepEqual(grid.positionOf("c2"), { row: 1, col: 0 });
-
+grid.move("c2", "r1", 6, present);                 // onto an empty cell
+grid.move("c", "r2", 0, present);                  // into the hole c2 left
+assert.deepEqual(cells(grid), [["alpha", null, null, "a", null, null, null, "c2"], ["bravo", "c", "e", "b", "d", "a1"]]);
+grid.rows[0].cells[6] = null; SessionGridLayout.trim(grid.rows[0]);   // c2 and c went for good
+grid.rows[1].cells[0] = null;
 // Keyboard steps: refused at the edges, no wrapping.
 assert.equal(grid.moveBy("e", 0, -1, present), true);
 assert.equal(grid.moveBy("e", 0, -1, present), false, "left edge");
@@ -114,6 +118,29 @@ assert.deepEqual(wrap.neighbor(1, 4, 0, -1, 4), { row: 1, col: 3 }, "left runs b
 const wrapPresent = new Set(["a", "b", "c", "d", "e"]);
 assert.ok(wrap.moveBy("b", 1, 0, wrapPresent, 4));
 assert.deepEqual(cells(wrap)[1], ["bravo", "a", null, "c", "d", "e", "b"]);
+// Emptying a row sends everything in it, in view or not, to the default row;
+// the default row itself cannot be emptied or removed this way.
+values.delete("ops");
+const ops = new SessionGridLayout(storage, "ops");            // r1 alpha = default
+const o2 = ops.addRow(), o3 = ops.addRow();
+ops.place([{ name: "x" }, { name: "y" }, { name: "z" }]);
+ops.move("x", o2.id, 1); ops.move("y", o2.id, 3); ops.move("z", o3.id, 0);
+assert.deepEqual(cells(ops), [["alpha"], ["bravo", null, "x", null, "y"], ["charlie", "z"]]);
+assert.equal(ops.clearRow("r1"), -1);
+assert.equal(ops.clearRow(o2.id), 2);
+assert.deepEqual(cells(ops), [["alpha", "x", "y"], ["bravo"], ["charlie", "z"]]);
+ops.rows[0].cells = [null, "x", "y"];
+assert.ok(ops.clearAndRemoveRow(o3.id));
+assert.deepEqual(cells(ops), [["alpha", "z", "x", "y"], ["bravo"]], "the default row's hole is reused first");
+assert.equal(ops.clearAndRemoveRow("r1"), false);
+// Row order.
+const o4 = ops.addRow();
+assert.ok(ops.moveRow(o4.id, -2));
+assert.deepEqual(ops.rows.map(r => r.name), ["charlie", "alpha", "bravo"]);
+assert.equal(ops.moveRow(o4.id, -1), false, "the top row cannot go higher");
+assert.equal(ops.moveRow("r2", 1), false, "the bottom row cannot go lower");
+assert.deepEqual(new SessionGridLayout(storage, "ops").rows.map(r => r.name), ["charlie", "alpha", "bravo"], "order persists");
+
 // Conditions and organize.
 values.delete("org");
 const org = new SessionGridLayout(storage, "org");            // r1 alpha = default

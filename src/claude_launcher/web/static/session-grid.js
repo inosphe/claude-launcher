@@ -11,7 +11,8 @@
    A row holds any number of cells; a cell holds a session name or nothing.
    A cell whose session is not in the current view (archived, filtered out,
    cleared) keeps its assignment -- the placement survives the session going
-   out of view and coming back -- until something is moved onto it.
+   out of view and coming back -- and moves like any other; a move onto an
+   occupied cell always swaps, so no assignment is lost to one.
 
    One row is the default row: every new session lands there. A row may carry
    a condition (a mesh, a workspace, or both); organize() moves the sessions
@@ -162,6 +163,47 @@ globalThis.SessionGridLayout = class SessionGridLayout {
     return true;
   }
 
+  /* Moves every session assigned to row `id` -- in view or not -- into the
+     default row, in column order, each into the default row's first empty
+     cell or onto its end. The row itself stays, empty. Refused for the
+     default row. Returns how many moved, or -1 when refused. */
+  clearRow(id) {
+    const row = this.row(id);
+    const inbox = this.row(this.defaultId);
+    if (!row || row === inbox) return -1;
+    let moved = 0;
+    for (const name of row.cells) {
+      if (!name) continue;
+      const hole = inbox.cells.indexOf(null);
+      if (hole >= 0) inbox.cells[hole] = name;
+      else inbox.cells.push(name);
+      moved++;
+    }
+    row.cells = [];
+    this.save();
+    return moved;
+  }
+
+  /* clearRow, then remove the row. Refused for the default row. */
+  clearAndRemoveRow(id) {
+    if (this.clearRow(id) < 0) return false;
+    this.rows = this.rows.filter((r) => r.id !== id);
+    this.save();
+    return true;
+  }
+
+  /* Moves row `id` up (delta < 0) or down (delta > 0) among the rows. Row
+     order is also the order Auto-organize tries the conditions in. */
+  moveRow(id, delta) {
+    const from = this.rows.findIndex((r) => r.id === id);
+    const to = from + delta;
+    if (from < 0 || to < 0 || to >= this.rows.length || to === from) return false;
+    const [row] = this.rows.splice(from, 1);
+    this.rows.splice(to, 0, row);
+    this.save();
+    return true;
+  }
+
   isDefault(id) {
     return id === this.defaultId;
   }
@@ -244,9 +286,10 @@ globalThis.SessionGridLayout = class SessionGridLayout {
     return changed;
   }
 
-  /* Moves `name` to (rowId, col). A session in `present` already there
-     trades places with it; an out-of-view assignment there is dropped (that
-     session is placed afresh if it comes back). Nothing else moves. */
+  /* Moves `name` to (rowId, col). Whatever session was assigned there --
+     in view or not -- trades places with it, so no assignment is ever lost
+     to a move. Nothing else moves. (`present` is accepted for callers that
+     still pass it and is not needed.) */
   move(name, rowId, col, present = new Set()) {
     const target = this.row(rowId);
     const from = this.positionOf(name);
@@ -255,7 +298,7 @@ globalThis.SessionGridLayout = class SessionGridLayout {
     if (source === target && from.col === col) return false;
     const occupant = target.cells[col] || null;
     while (target.cells.length <= col) target.cells.push(null);
-    source.cells[from.col] = occupant && present.has(occupant) ? occupant : null;
+    source.cells[from.col] = occupant;
     target.cells[col] = name;
     SessionGridLayout.trim(source);
     SessionGridLayout.trim(target);
