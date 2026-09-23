@@ -1589,7 +1589,7 @@ function renderSessionGrid(force = false) {
   host.replaceChildren();
   const perLine = sessionGridPerLine;
   host.style.setProperty("--sg-per-line", String(perLine));
-  if (sessionGridPicked && !records.has(sessionGridPicked)) sessionGridPicked = null;
+  if (sessionGridPicked && !layout.positionOf(sessionGridPicked)) sessionGridPicked = null;
   host.classList.toggle("sg-picking", !!sessionGridPicked);
   host.append(sessionGridPerLineControl());
   const present = new Set(records.keys());
@@ -1718,24 +1718,46 @@ function sessionGridRowHead(layout, row, present) {
   }
   const tools = document.createElement("span");
   tools.className = "sg-row-tools";
-  tools.append(sessionGridButton("sg-row-edit", "✎", `rename row ${row.name}`,
-    () => startSessionGridRename(layout, row, head)));
+  // Up and down: row order is where the rows sit and also the order
+  // Auto-organize tries their conditions in.
+  const index = layout.rows.indexOf(row);
+  const shift = (cls, text, delta, edge) => {
+    const button = sessionGridButton(cls, text,
+      edge ? `${row.name} is already the ${delta < 0 ? "top" : "bottom"} row`
+        : `move row ${row.name} ${delta < 0 ? "up" : "down"}`,
+      () => { if (layout.moveRow(row.id, delta)) renderSessionGrid(true); });
+    if (edge) {
+      button.setAttribute("aria-disabled", "true");
+      button.classList.add("disabled");
+    }
+    return button;
+  };
+  tools.append(
+    shift("sg-row-up", "▲", -1, index === 0),
+    shift("sg-row-down", "▼", 1, index === layout.rows.length - 1),
+    sessionGridButton("sg-row-edit", "✎", `rename row ${row.name}`,
+      () => startSessionGridRename(layout, row, head)));
   if (!layout.isDefault(row.id)) {
+    const held = row.cells.filter(Boolean).length;
     tools.append(
       sessionGridButton("sg-row-rule-edit", "⚙", `set the condition Auto-organize uses for ${row.name}`,
         () => startSessionGridRuleEdit(layout, row, head)),
       sessionGridButton("sg-row-make-default", "★", `make ${row.name} the default row`,
-        () => { if (layout.setDefault(row.id)) renderSessionGrid(true); }));
-    const occupied = row.cells.some((n) => n && present.has(n));
-    const remove = sessionGridButton("sg-row-remove", "×",
-      occupied ? `row ${row.name} still holds sessions — move them out first`
-        : `remove row ${row.name}`,
-      () => { if (!occupied && layout.removeRow(row.id, present)) renderSessionGrid(true); });
-    if (occupied) {
-      remove.setAttribute("aria-disabled", "true");
-      remove.classList.add("disabled");
-    }
-    tools.append(remove);
+        () => { if (layout.setDefault(row.id)) renderSessionGrid(true); }),
+      // Empty: every session assigned here, in view or not, goes to the
+      // default row; the row, its name and its condition stay.
+      sessionGridButton("sg-row-clear", "⤓",
+        `move every session in ${row.name} to the default row`,
+        () => { if (layout.clearRow(row.id) > 0) renderSessionGrid(true); }),
+      // Remove: empty it the same way, then delete the row. Asked first when
+      // there is anything in it, since the arrangement goes with the row.
+      sessionGridButton("sg-row-remove", "×",
+        `move every session in ${row.name} to the default row, then delete the row`,
+        () => {
+          if (held && !confirm(`Move the ${held} session${held === 1 ? "" : "s"} in `
+              + `${row.name} to the default row and delete ${row.name}?`)) return;
+          if (layout.clearAndRemoveRow(row.id)) renderSessionGrid(true);
+        }));
   }
   head.append(tools);
   return head;
@@ -1830,25 +1852,28 @@ function sessionGridCell(layout, row, r, c, records, present, searching) {
   const num = document.createElement("span");
   num.className = "sg-num";
   num.textContent = String(c + 1);
-  if (!s) {
+  const moveHint = "\ndrag, Alt+arrow, or press and hold then tap a cell, to move it";
+  if (!name) {
     cell.classList.add("empty");
-    if (name) {
-      // Out of this view (archived, filtered, cleared): the cell stays its
-      // and says whose it is, until something is moved onto it.
-      cell.classList.add("absent");
-      cell.append(num, Object.assign(document.createElement("span"),
-        { className: "sg-name", textContent: name }));
-      cell.title = `${where} — ${name}, not in this view; its place is kept`;
-    } else {
-      cell.title = `${where} — empty`;
-      cell.append(num);
-    }
+    cell.title = `${where} — empty`;
+    cell.append(num);
   } else {
-    cell.dataset.name = s.name;
+    // A session out of this view (killed or paused under a Running filter,
+    // archived, cleared) keeps its cell, drawn faint, and moves like any
+    // other: its place is the reader's to rearrange whether or not the
+    // current filter shows it.
+    cell.dataset.name = name;
     cell.tabIndex = 0;
     cell.draggable = true;
-    if (s.name === currentName) cell.classList.add("active");
-    if (s.name === sessionGridPicked) cell.classList.add("picked");
+    if (name === currentName) cell.classList.add("active");
+    if (name === sessionGridPicked) cell.classList.add("picked");
+  }
+  if (name && !s) {
+    cell.classList.add("empty", "absent");
+    cell.append(num, Object.assign(document.createElement("span"),
+      { className: "sg-name", textContent: name }));
+    cell.title = `${where} — ${name}, not in this view; its place is kept` + moveHint;
+  } else if (s) {
     if (searching && !sessionMatchesSearch(s)) cell.classList.add("session-filtered");
     const dot = document.createElement("span");
     dot.className = `dot ${s.status}${s.status === "exited" && s.paused_at ? " paused" : ""}`;
@@ -1863,13 +1888,14 @@ function sessionGridCell(layout, row, r, c, records, present, searching) {
     const brief = typeof briefingTabTooltip === "function"
       ? briefingTabTooltip(s.briefing) : "";
     cell.title = `${where} — ${s.name}${hTag ? ` (${hTag.handle})` : ""} — ${s.status}`
-      + (brief ? `\n${brief}` : "")
-      + "\ndrag, Alt+arrow, or press and hold then tap a cell, to move it";
+      + (brief ? `\n${brief}` : "") + moveHint;
+  }
+  if (name) {
     cell.addEventListener("click", () => {
       document.querySelectorAll("#session-grid .sg-cell.active")
         .forEach((el) => el.classList.remove("active"));
       cell.classList.add("active");
-      location.hash = "#/s/" + encodeURIComponent(s.name);
+      location.hash = "#/s/" + encodeURIComponent(name);
     });
     cell.addEventListener("keydown", (ev) => {
       if (ev.key === "Escape" && sessionGridPicked) {
@@ -1888,7 +1914,7 @@ function sessionGridCell(layout, row, r, c, records, present, searching) {
       ev.preventDefault();
       const perLine = sessionGridPerLine;
       if (ev.altKey) {
-        if (layout.moveBy(s.name, step[0], step[1], present, perLine)) renderSessionGrid(true);
+        if (layout.moveBy(name, step[0], step[1], present, perLine)) renderSessionGrid(true);
         return;
       }
       // Plain arrows walk to the next occupied cell in that direction, line
@@ -1916,7 +1942,7 @@ function sessionGridCell(layout, row, r, c, records, present, searching) {
       cancelHold();
       hold = setTimeout(() => {
         hold = null;
-        sessionGridPicked = s.name;
+        sessionGridPicked = name;
         sessionGridHoldRelease = true;
         cell.classList.add("picked");
         $("session-grid")?.classList.add("sg-picking");
@@ -1933,9 +1959,9 @@ function sessionGridCell(layout, row, r, c, records, present, searching) {
     });
     cell.addEventListener("dragstart", (ev) => {
       cancelHold();
-      sessionGridDragging = s.name;
+      sessionGridDragging = name;
       ev.dataTransfer.effectAllowed = "move";
-      ev.dataTransfer.setData("text/plain", s.name);
+      ev.dataTransfer.setData("text/plain", name);
       cell.classList.add("dragging");
     });
     cell.addEventListener("dragend", () => {
