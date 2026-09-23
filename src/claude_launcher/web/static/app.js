@@ -1935,7 +1935,7 @@ function sessionGridCell(layout, row, r, c, records, present, searching) {
     : s ? `${s.name}, ${s.status}` : `${name}, not in this view`}`);
   // The hover card stands in for the browser's title tooltip.
   cell.addEventListener("pointerenter", (ev) => {
-    if (ev.pointerType === "mouse") scheduleSessionGridTip(cell, row, c, name, !!s);
+    if (ev.pointerType === "mouse") showSessionGridTip(cell, row, c, name, !!s);
   });
   cell.addEventListener("pointerleave", hideSessionGridTip);
   cell.addEventListener("focus", () => {
@@ -2066,15 +2066,6 @@ function sessionGridCell(layout, row, r, c, records, present, searching) {
    grid shows everything the list does without a second renderer. A session
    the list does not hold (out of this view) and an empty cell get the header
    alone. */
-const SESSION_GRID_TIP_DELAY_MS = 350;
-let sessionGridTipTimer = null;
-
-function scheduleSessionGridTip(cell, row, col, name, inView) {
-  clearTimeout(sessionGridTipTimer);
-  sessionGridTipTimer = setTimeout(
-    () => showSessionGridTip(cell, row, col, name, inView), SESSION_GRID_TIP_DELAY_MS);
-}
-
 /* The list's card rules are written against #session-list; the copy sits
    in #sg-tip, so the first card shown takes a copy of every rule that styles
    something inside #session-list, re-scoped to #sg-tip. Read from the loaded
@@ -2108,8 +2099,6 @@ function sessionGridTipStyles() {
 }
 
 function hideSessionGridTip() {
-  clearTimeout(sessionGridTipTimer);
-  sessionGridTipTimer = null;
   const tip = document.getElementById("sg-tip");
   if (tip) {
     tip.classList.add("hidden");
