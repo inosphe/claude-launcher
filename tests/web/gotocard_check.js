@@ -39,9 +39,10 @@ const check = (name, cond, extra) => {
 
 /* ---- stub rail ----
    A row is what refreshSessions builds: an <li> carrying the session name in
-   its dataset, plus whatever classes the other painters put on it. */
-function row(name, cls) {
-  const n = { dataset: { name }, classes: new Set(cls || []), scrolls: [] };
+   its dataset, plus whatever classes the other painters put on it. It hangs
+   off the list directly, or off a group's body when grouping is on. */
+function node(dataset, cls, parentElement) {
+  const n = { dataset, classes: new Set(cls || []), scrolls: [], parentElement };
   n.classList = {
     add: (c) => n.classes.add(c),
     remove: (c) => n.classes.delete(c),
@@ -51,11 +52,79 @@ function row(name, cls) {
   n.scrollIntoView = (opts) => n.scrolls.push(opts);
   return n;
 }
+const list = { id: "session-list", parentElement: null,
+               querySelectorAll: (sel) => {
+                 if (sel !== "li[data-name]") throw new Error("unexpected list selector " + sel);
+                 return rail;
+               } };
+const row = (name, cls, parent = list) => node({ name }, cls, parent);
+// A group as refreshSessions builds it: div.session-group > ul.session-group-body > li.
+function group(kind, value, collapsed, parent = list) {
+  const g = node({ group: kind, value }, ["session-group"].concat(collapsed ? ["collapsed"] : []), parent);
+  if (collapsed) folded.add(JSON.stringify([kind, value]));
+  g.body = node({}, ["session-group-body"], g);
+  groups.push(g);
+  return g;
+}
 let rail = [];
+let groups = [];
+let folded = new Set();
+let groupSyncs = 0;
+let stickySyncs = 0;
+// The fold state and its painter, as app.js has them: the set is the truth,
+// syncSessionGroupSearch paints every group from it.
+const setSessionGroupCollapsed = (kind, value, shut) => {
+  const key = JSON.stringify([kind, value]);
+  if (shut) folded.add(key); else folded.delete(key);
+  return shut;
+};
+const syncSessionGroupSearch = () => {
+  groupSyncs++;
+  for (const g of groups) {
+    g.classList.toggle("collapsed", folded.has(JSON.stringify([g.dataset.group, g.dataset.value])));
+  }
+};
+const syncSessionGroupStickyOffsets = () => { stickySyncs++; };
+
+/* ---- stub grid ----
+   The layout answers where a session sits; the drawn cells are what
+   renderSessionGrid put on screen, which leaves out a folded stretch. */
+let sessionView = "list";
+let cells = [];
+let hiddenInFold = new Set();    // sessions whose cell a folded stretch hides
+let renders = 0;
+const sessionGridUnfolded = new Set();
+const layout = {
+  rows: [{ id: "r0" }, { id: "r1" }],
+  place: {},
+  positionOf: (name) => layout.place[name] || null,
+  foldRuns: (r, perLine, present, minLines) =>
+    (r === 1 && perLine === 4 && minLines === 3 && !present.has("s050"))
+      ? [{ start: 0, end: 3 }] : [],
+};
+const sessionGridLayout = () => layout;
+const sessionGridPerLine = 4;
+const SESSION_GRID_FOLD_LINES = 3;
+const sessionGridVisible = () => [{ name: "s193" }, { name: "s127" }];
+const renderSessionGrid = (force) => {
+  renders++;
+  if (sessionGridUnfolded.has("r1:0")) hiddenInFold.clear();
+  cells = cells.filter((c) => !hiddenInFold.has(c.dataset.name));
+};
+const cell = (name) => node({ name }, ["sg-cell"], null);
+const grid = {
+  querySelector: (sel) => {
+    const m = /^\.sg-cell\[data-name="(.*)"\]$/.exec(sel);
+    if (!m) throw new Error("unexpected grid selector " + sel);
+    return cells.find((c) => c.dataset.name === m[1] && !hiddenInFold.has(m[1])) || null;
+  },
+};
+const $ = (id) => (id === "session-list" ? list : id === "session-grid" ? grid : null);
+const CSS = { escape: (s) => s };
 const document = {
   querySelectorAll: (sel) => {
-    if (sel !== "#session-list li") throw new Error("unexpected selector " + sel);
-    return rail;
+    if (sel !== "#session-list li, #session-grid .sg-cell") throw new Error("unexpected selector " + sel);
+    return rail.concat(cells.filter((c) => !hiddenInFold.has(c.dataset.name)));
   },
 };
 
@@ -69,22 +138,28 @@ const fire = (id) => { const t = timers.get(id); timers.delete(id); t.fn(); };
 const only = () => [...timers.keys()][0];
 
 const ctx = {};
+const stubs = {
+  $, CSS, setSessionGroupCollapsed, syncSessionGroupSearch, syncSessionGroupStickyOffsets,
+  sessionGridLayout, sessionGridPerLine, SESSION_GRID_FOLD_LINES, sessionGridVisible,
+  sessionGridUnfolded, renderSessionGrid: (f) => renderSessionGrid(f),
+};
 new Function(
-  "exports", "document", "setTimeout", "clearTimeout",
-  // The module-level state the three functions share, taken from app.js
-  // itself so the window this checks is the shipped one.
+  "exports", "document", "setTimeout", "clearTimeout", "getView", ...Object.keys(stubs),
+  // The module-level state the functions share, taken from app.js itself so
+  // the window this checks is the shipped one.
   `let currentName = "s193";\n` +
   /const GOTO_FLASH_MS = \d+;/.exec(src)[0] + "\n" +
   "let gotoFlashName = null;\nlet gotoFlashTimer = null;\n" +
-  [slice("applyGotoFlash"), slice("revealSessionCard"),
-   slice("gotoSessionCard")].join("\n") +
+  [slice("applyGotoFlash"), slice("revealSessionListRow"), slice("revealSessionGridCell"),
+   slice("revealSessionCard"), slice("gotoSessionCard")].join("\n")
+    .replace(/\bsessionView\b/g, "getView()") +
   `
 Object.assign(exports, {
   applyGotoFlash, revealSessionCard, gotoSessionCard,
   flashMs: () => ${/const GOTO_FLASH_MS = (\d+);/.exec(src)[1]},
   setCur: (n) => { currentName = n; },
 });`
-)(ctx, document, setTimeout_, clearTimeout_);
+)(ctx, document, setTimeout_, clearTimeout_, () => sessionView, ...Object.values(stubs));
 
 const flashed = () => rail.filter((r) => r.classes.has("goto-flash")).map((r) => r.dataset.name);
 const scrolledTo = () => rail.filter((r) => r.scrolls.length).map((r) => r.dataset.name);
@@ -149,6 +224,76 @@ ctx.setCur("s193");
 check("a row that cannot scroll is still marked rather than throwing",
       ctx.gotoSessionCard() === true && flashed().length === 1, flashed());
 
+/* ---- list view: a row inside a folded group is opened, then scrolled ----
+   A shut group's row is display:none; scrolling it moves nothing. */
+{
+  groups = []; folded = new Set(); groupSyncs = 0; stickySyncs = 0;
+  const outer = group("mesh", "mesh-1", true);
+  const inner = group("workspace", "ws-a", true, outer.body);
+  const other = group("mesh", "mesh-2", true);
+  rail = [row("s127", [], other.body), row("s193", [], inner.body)];
+  ctx.setCur("s193");
+  check("a row in a folded group is still found", ctx.gotoSessionCard() === true);
+  check("the group holding it is opened",
+        !inner.classes.has("collapsed") && !folded.has(JSON.stringify(["workspace", "ws-a"])));
+  check("and so is every folded group above it",
+        !outer.classes.has("collapsed") && !folded.has(JSON.stringify(["mesh", "mesh-1"])));
+  check("a folded group it is not in stays folded",
+        other.classes.has("collapsed") && folded.has(JSON.stringify(["mesh", "mesh-2"])));
+  check("groups are repainted and the sticky stack re-measured",
+        groupSyncs === 1 && stickySyncs === 1, [groupSyncs, stickySyncs]);
+  check("then the row is scrolled and marked",
+        JSON.stringify(scrolledTo()) === JSON.stringify(["s193"])
+        && JSON.stringify(flashed()) === JSON.stringify(["s193"]), [scrolledTo(), flashed()]);
+  fire(only());
+  // A row already in view opens nothing and repaints nothing.
+  rail = [row("s193")];
+  groupSyncs = 0;
+  ctx.gotoSessionCard();
+  check("an unfolded rail is not repainted", groupSyncs === 0, groupSyncs);
+  fire(only());
+}
+
+/* ---- grid view: the cell is scrolled to and marked, not the hidden list ---- */
+{
+  sessionView = "grid";
+  rail = [row("s193")];                     // the list is still built behind the grid
+  layout.place = { s193: { row: 0, col: 2 }, s050: { row: 1, col: 5 } };
+  cells = [cell("s127"), cell("s193")];
+  hiddenInFold = new Set();
+  renders = 0;
+  ctx.setCur("s193");
+  check("grid: the press finds the cell", ctx.gotoSessionCard() === true);
+  check("grid: the cell is scrolled to, centred",
+        cells[1].scrolls.length === 1 && cells[1].scrolls[0].block === "center", cells[1].scrolls);
+  check("grid: the hidden list row is not scrolled", rail[0].scrolls.length === 0);
+  check("grid: the cell is highlighted", cells[1].classes.has("goto-flash")
+        && !cells[0].classes.has("goto-flash"));
+  check("grid: a drawn cell needs no redraw", renders === 0, renders);
+  fire(only());
+  check("grid: the highlight expires with the timer", !cells[1].classes.has("goto-flash"));
+
+  // A session whose cell sits in a folded stretch: open it, redraw, then find it.
+  const hidden = cell("s050");
+  cells = [cell("s193"), hidden];
+  hiddenInFold = new Set(["s050"]);
+  sessionGridUnfolded.clear();
+  ctx.setCur("s050");
+  check("grid: a cell in a folded stretch is found", ctx.gotoSessionCard() === true);
+  check("grid: the stretch holding it is opened",
+        sessionGridUnfolded.has("r1:0"), [...sessionGridUnfolded]);
+  check("grid: the grid is redrawn once", renders === 1, renders);
+  check("grid: then scrolled to and highlighted",
+        hidden.scrolls.length === 1 && hidden.classes.has("goto-flash"));
+  fire(only());
+
+  // Not placed in the grid at all: a no-op, like a list with no row.
+  ctx.setCur("s999");
+  check("grid: a session with no cell says so", ctx.gotoSessionCard() === false);
+  check("grid: ...and leaves no timer", timers.size === 0, [...timers.keys()]);
+  sessionView = "list";
+}
+
 /* ---- the markup and the stylesheet ---- */
 const headStart = html.indexOf('id="term-header"');
 const headEnd = html.indexOf('id="term-queued"');
@@ -164,6 +309,15 @@ check("app.js wires the press to it",
 check("refreshSessions repaints the mark after every rebuild",
       /applyBriefingCards\(\);\s*(\/\/[^\n]*\n\s*)*applyGotoFlash\(\);/.test(src));
 check("the stylesheet draws the marked row", /#session-list li\.goto-flash\s*\{/.test(css));
+check("and the marked grid cell, after the cell states it must win over",
+      /#session-grid \.sg-cell\.goto-flash\s*\{/.test(css)
+      && css.indexOf("#session-grid .sg-cell.goto-flash") > css.indexOf("#session-grid .sg-cell.gated {")
+      && css.indexOf("#session-grid .sg-cell.goto-flash") > css.indexOf("#session-grid .sg-cell:focus"));
+check("a grid redraw repaints the mark on the cell",
+      /name === gotoFlashName\) cell\.classList\.add\("goto-flash"\)/.test(slice("sessionGridCell")));
+check("the mark's state is declared before the load-time grid draw reads it",
+      src.indexOf("let gotoFlashName") >= 0
+      && src.indexOf("let gotoFlashName") < src.indexOf("\nsyncSessionView();"));
 check("the chip has a rest and a hover state", /\.goto-chip:hover\s*\{/.test(css));
 
 if (failures) {

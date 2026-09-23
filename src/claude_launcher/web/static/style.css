@@ -269,6 +269,9 @@ option:disabled { color: #6b7280; }
   cursor: pointer; color: #545d68; font-size: 11px; font-style: italic; text-overflow: ellipsis;
 }
 #session-grid .sg-cell.picked { border: 1px solid #d29922; background: #2a2414; }
+/* Where the header's `⇱ card` landed in the grid: the list row's mark, as a
+   border so the cell keeps its size. After .active and .gated so it wins. */
+#session-grid .sg-cell.goto-flash { background: #1b2a44; border-color: #1f6feb; }
 #session-grid.sg-picking .sg-cell:not(.picked) { border-color: #385273; cursor: copy; }
 /* Hold-to-pick must not open the text selection or the long-press menu. */
 #session-grid .sg-cell { -webkit-touch-callout: none; user-select: none; }
