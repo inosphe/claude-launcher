@@ -9797,6 +9797,7 @@ function refreshTermInput() {
    insert at the caret and submit through the footer's normal send path, so a
    preset delivers the text and its Enter in the same request. */
 function renderTermPresetButtons() {
+  if (typeof renderTermPrompterRow === "function") renderTermPrompterRow();
   const box = $("term-preset-buttons");
   if (!box) return;
   box.innerHTML = "";
@@ -9835,6 +9836,77 @@ function sendPromptPreset(text) {
     $("term-input-field"), $("term-input-send"), $("term-input-note")
   );
 }
+
+/* Prompt snippets from the prompter server (GET /api/prompter/prompts, which
+   the daemon proxies because prompter sends no CORS headers). Shown only when
+   a server is configured AND answered; one line of chips until the toggle
+   expands it. A chip inserts its body at the caret without sending: these
+   are longer than presets and meant to be edited before they go out. */
+let prompterState = { connected: false, prompts: [] };
+let prompterExpanded = false;
+try { prompterExpanded = localStorage.getItem("claunch.prompterExpanded") === "1"; } catch { /* storage off */ }
+
+async function refreshPrompterPrompts(refresh) {
+  try {
+    const resp = await api("/api/prompter/prompts" + (refresh ? "?refresh=1" : ""));
+    const data = await resp.json().catch(() => ({}));
+    prompterState = resp.ok ? data : { connected: false, prompts: [] };
+  } catch {
+    prompterState = { connected: false, prompts: [] };
+  }
+  renderTermPrompterRow();
+}
+
+function renderTermPrompterRow() {
+  const box = $("term-prompter-row");
+  if (!box) return;
+  box.innerHTML = "";
+  const rows = (prompterState && prompterState.connected && prompterState.prompts) || [];
+  const visible = !!currentName && !sessionEnded && rows.length > 0;
+  box.classList.toggle("hidden", !visible);
+  if (!visible) return;
+  box.classList.toggle("expanded", prompterExpanded);
+  const label = el("span", "term-prompter-label", "prompter");
+  label.title = prompterState.url || "";
+  box.appendChild(label);
+  const chips = el("div", "term-prompter-chips");
+  for (const row of rows) {
+    const button = el("button", "term-btn", row.title || row.name);
+    button.type = "button";
+    button.title = row.body.length > 600 ? row.body.slice(0, 600) + "…" : row.body;
+    button.addEventListener("click", () => insertPromptPreset(row.body));
+    chips.appendChild(button);
+  }
+  box.appendChild(chips);
+  const toggle = el("button", "term-btn term-prompter-toggle", "");
+  toggle.type = "button";
+  toggle.addEventListener("click", () => {
+    prompterExpanded = !prompterExpanded;
+    try { localStorage.setItem("claunch.prompterExpanded", prompterExpanded ? "1" : "0"); } catch { /* storage off */ }
+    renderTermPrompterRow();
+  });
+  box.appendChild(toggle);
+  syncPrompterToggle();
+}
+
+/* The toggle only earns its place when the chips do not fit one line; that
+   needs layout, so it is measured after paint and again on resize. */
+function syncPrompterToggle() {
+  const box = $("term-prompter-row");
+  const chips = box && box.querySelector(".term-prompter-chips");
+  const toggle = box && box.querySelector(".term-prompter-toggle");
+  if (!chips || !toggle) return;
+  const measure = () => {
+    const overflow = chips.scrollHeight > chips.clientHeight + 1;
+    toggle.classList.toggle("hidden", !prompterExpanded && !overflow);
+    toggle.textContent = prompterExpanded ? "▴ Less" : "▾ More";
+    toggle.setAttribute("aria-expanded", prompterExpanded ? "true" : "false");
+  };
+  measure();
+  if (typeof requestAnimationFrame === "function") requestAnimationFrame(measure);
+}
+if (typeof window !== "undefined" && window.addEventListener)
+  window.addEventListener("resize", () => syncPrompterToggle());
 
 let hostClipboardRequest = 0;
 let hostClipboardSession = null;
@@ -11672,6 +11744,7 @@ function attach(name) {
     if (typeof autogrowTermInput === "function") autogrowTermInput(termInputField);
   }
   if (typeof refreshPromptPresets === "function") refreshPromptPresets();
+  if (typeof refreshPrompterPrompts === "function") refreshPrompterPrompts();
   // The common hop: this session has been up before, so bring its parked
   // terminal back instead of building a new one — no socket, no repaint.
   if (name !== currentName) {
@@ -14074,6 +14147,7 @@ function openSettings(section) {
   refreshLlmSettings();
   refreshFaq();
   refreshPromptPresets();
+  refreshPrompterSettings();
   refreshStatusChecks();
   refreshRagStatus();
   refreshGhStatus();
@@ -17449,6 +17523,7 @@ function renderWorkspaces() {
   view.appendChild(faqCard());
 
   view.appendChild(promptPresetCard());
+  view.appendChild(prompterSettingsCard());
 
   view.appendChild(statusCheckCard());
 
@@ -18058,6 +18133,97 @@ async function faqRemove(row) {
     if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
     faqCache = data.faq || []; renderWorkspaces();
   } catch (err) { faqError = String(err); renderWorkspaces(); }
+}
+
+let prompterSettings = { url: null, draft: null, status: null, error: "", busy: false };
+
+async function refreshPrompterSettings() {
+  try {
+    const resp = await api("/api/prompter");
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
+    prompterSettings.url = data.url || null;
+    prompterSettings.error = "";
+    if (prompterSettings.url) {
+      const st = await api("/api/prompter/prompts");
+      prompterSettings.status = await st.json().catch(() => null);
+    } else {
+      prompterSettings.status = null;
+    }
+  } catch (err) {
+    prompterSettings.error = String(err);
+  }
+  if (wsOpen) renderWorkspaces();
+}
+
+async function savePrompterUrl(url) {
+  prompterSettings.busy = true;
+  if (wsOpen) renderWorkspaces();
+  try {
+    const resp = await api("/api/prompter", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ url }),
+    });
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
+    prompterSettings.url = data.url || null;
+    prompterSettings.status = data.url ? data.status : null;
+    prompterSettings.draft = null;
+    prompterSettings.error = "";
+    prompterState = data.status || { connected: false, prompts: [] };
+    renderTermPrompterRow();
+  } catch (err) {
+    prompterSettings.error = String(err);
+  }
+  prompterSettings.busy = false;
+  if (wsOpen) renderWorkspaces();
+}
+
+/* Where the footer's prompter row gets its server. Blank (or Disable) turns
+   the feature off; the status line is the daemon's own fetch, so it says
+   whether the daemon — not this browser — can reach the address. */
+function prompterSettingsCard() {
+  const card = el("section", "prompt-preset-settings");
+  card.appendChild(el("h3", null, "prompter server"));
+  card.appendChild(el(
+    "p", "wf-note",
+    "Base URL of a prompter server. Its prompt snippets are listed under the " +
+    "footer's prompt presets. Leave blank to turn it off; an unreachable " +
+    "server shows nothing."
+  ));
+  const form = el("form", "prompt-preset-add");
+  const input = document.createElement("input");
+  input.id = "prompter-url";
+  input.type = "url";
+  input.placeholder = "https://prompter.example";
+  input.value = prompterSettings.draft ?? (prompterSettings.url || "");
+  input.addEventListener("input", () => { prompterSettings.draft = input.value; });
+  form.appendChild(input);
+  const save = el("button", "wf-btn", "Save");
+  save.type = "submit";
+  save.disabled = prompterSettings.busy;
+  form.appendChild(save);
+  const clear = el("button", "wf-btn", "Disable");
+  clear.type = "button";
+  clear.disabled = prompterSettings.busy || !prompterSettings.url;
+  clear.addEventListener("click", () => savePrompterUrl(""));
+  form.appendChild(clear);
+  form.addEventListener("submit", (ev) => {
+    ev.preventDefault();
+    savePrompterUrl(input.value);
+  });
+  card.appendChild(form);
+  if (prompterSettings.error) card.appendChild(el("p", "error", prompterSettings.error));
+  const st = prompterSettings.status;
+  if (!prompterSettings.url) {
+    card.appendChild(el("p", "wf-note", "Not in use."));
+  } else if (st && st.connected) {
+    card.appendChild(el("p", "wf-note", `Connected: ${(st.prompts || []).length} prompt(s).`));
+  } else if (st) {
+    card.appendChild(el("p", "error", `Not connected: ${st.error || "no answer"}`));
+  }
+  return card;
 }
 
 function promptPresetCard() {

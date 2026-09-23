@@ -443,6 +443,11 @@ DAEMON_DEFAULTS = {
     # the source that survives, so a timeout is "try again", never "end it
     # anyway". 0 waits without limit.
     "handoff_deliver_timeout": 120.0,
+    # Base URL of a prompter server (daemon/prompter.py) whose prompt
+    # snippets the web UI lists beside the footer's prompt presets. None =
+    # off. Read LIVE on every request, so the settings page's PUT applies
+    # without a restart.
+    "prompter_url": None,
 }
 
 

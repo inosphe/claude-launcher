@@ -1749,6 +1749,29 @@ a.cflow-scope:hover { background: #1d3559; text-decoration: underline; }
   flex: none; max-width: 220px; overflow: hidden; text-overflow: ellipsis;
   white-space: nowrap;
 }
+#term-prompter-row {
+  flex: none; display: flex; align-items: flex-start; gap: 6px; min-width: 0;
+  padding: 4px 12px; background: #1b1e24; border-top: 1px solid #2a2e36;
+}
+#term-prompter-row.hidden { display: none; }
+.term-prompter-label {
+  flex: none; font-size: 11px; color: #9da7b3; line-height: 26px;
+}
+/* Collapsed: exactly one wrapped line of chips shows (max-height is one chip
+   row); expanded: every line, scrolling past a ceiling. */
+.term-prompter-chips {
+  flex: 1; display: flex; flex-wrap: wrap; gap: 6px; min-width: 0;
+  max-height: 26px; overflow: hidden;
+}
+#term-prompter-row.expanded .term-prompter-chips {
+  max-height: 30vh; overflow-y: auto;
+}
+.term-prompter-chips .term-btn {
+  flex: none; max-width: 220px; overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap; height: 26px; box-sizing: border-box;
+}
+.term-prompter-toggle { flex: none; }
+.term-prompter-toggle.hidden { display: none; }
 /* One row tall by default and grown from script (autogrowTermInput) as
    Ctrl+J adds lines, up to a ceiling past which it scrolls rather than
    eating the terminal above it. The manual resize grip is off: the height
