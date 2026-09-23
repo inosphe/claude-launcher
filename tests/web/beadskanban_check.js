@@ -114,6 +114,7 @@ new Function(
       { key: "todo", title: "TODO", note: "taken up, in review, or finished" },
     ]) + ";\n"
   + slice("beadsLanes") + slice("beadsGroupOf") + slice("beadsLaneGroups")
+  + slice("beadsBoardLabel") + slice("beadsBoardWhere")
   + slice("beadsGroupBlock") + slice("beadsLane") + slice("beadsBoardSection")
   + `
 Object.assign(exports, {

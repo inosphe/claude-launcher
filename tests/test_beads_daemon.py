@@ -55,6 +55,9 @@ class FakeBr:
         #: edges by the DEPENDING issue, which is where ``br`` stores them
         self.deps: dict = {}
         self.calls: list = []
+        #: Every ``br init`` this fake was asked for: which database, under
+        #: which issue prefix.
+        self.inits: list = []
         self._n = 0
 
     def link(self, child: str, parent: str, kind: str = "parent-child") -> None:
@@ -179,6 +182,23 @@ class FakeBr:
             i["status"] = "closed"
             i["close_reason"] = _opts(rest[1:]).get("--reason")
             return 0, json.dumps([i]), ""
+        if cmd == "init":
+            # The real `br init` ignores --db and writes <cwd>/.beads/beads.db,
+            # which is the whole reason creating a board is a step with a move
+            # in it rather than another argv. This fake does the same, so a
+            # test of that step reads the layout the real binary produces. The
+            # prefix is recorded so a test can say which name ids would be
+            # minted under.
+            made = Path(cwd) / ".beads" / "beads.db"
+            self.inits.append({
+                "cwd": str(cwd), "prefix": _opts(rest).get("--prefix"),
+                "made": str(made),
+            })
+            if made.is_file():
+                return 1, "", "Error: Already initialized at '.\.beads\beads.db'"
+            made.parent.mkdir(parents=True, exist_ok=True)
+            made.write_bytes(b"")
+            return 0, json.dumps({"ok": True}), ""
         return 1, "", f"unknown command {cmd}"
 
 

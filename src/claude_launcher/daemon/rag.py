@@ -1,7 +1,8 @@
 """Semantic search over the board and the fleet: an embedding index plus an
 optional reranker, behind ``GET /api/search`` and ``claunch search``.
 
-Two corpora are indexed. The **board** (one index per repository board):
+Two corpora are indexed. The **board** (one index per board, and a board is
+a workspace's):
 every issue's title, labels and description, chunked so a long write-up
 matches on any of its parts. The **fleet** (one index per daemon): every
 session's opening task, identity, linked issue and the cached briefing, so
@@ -36,8 +37,8 @@ rather than opening it. Anything else that needs the files (the migration in
 The index follows its corpora rather than waiting for a search. Producers
 call :meth:`RagService.enqueue` when something changed — the daemon's own
 board writes (``Board.br``, through its write hooks), a watcher that stats
-each known board's ``.beads`` files for the writes ``claunch beads`` makes
-without the daemon, and the session registry and briefing cache whenever they
+each known board's database and exported JSONL for the writes ``claunch
+beads`` makes without the daemon, and the session registry and briefing cache whenever they
 persist — and one consumer task drains the queue, one corpus at a time. A key
 already waiting is joined, not queued twice; a key that arrives while its own
 sync is running is queued for one more pass, so a change that landed mid-sync
@@ -71,7 +72,7 @@ from typing import Any, Callable, Dict, Iterable, List, NamedTuple, Optional, Tu
 
 import aiohttp
 
-from .. import atomic, cli_beads, store
+from .. import atomic, beads_db, cli_beads, store
 from . import paths
 
 try:
@@ -799,18 +800,26 @@ KINDS = ("beads", "sessions", "all")
 #: exactly this tick, but it stats nothing until then.
 WATCH_IDLE = 30.0
 
-#: The board files whose mtime/size a CLI write moves. Both are watched:
-#: ``br`` keeps the sqlite db and, when export is on, the jsonl beside it.
-BOARD_FILES = (cli_beads.DB_NAME, cli_beads.JSONL_NAME)
-
-
 def board_stamp(root: Path) -> Tuple:
-    """``(mtime_ns, size)`` per board file under ``root`` — ``None`` for a
-    file that is not there. Equal stamps mean nothing wrote the board."""
+    """``(mtime_ns, size)`` per board file for ``root`` — ``None`` for a file
+    that is not there. Equal stamps mean nothing wrote the board.
+
+    The database is asked for by board rather than assembled from ``root``: a
+    board can be pointed at a ``.db`` anywhere (:mod:`claude_launcher.beads_db`),
+    and a watcher that kept stating ``<root>/.beads/beads.db`` would find
+    nothing there and report the board as never written — the index would
+    then stay at whatever it held when the path was changed. The exported
+    JSONL stays beside the root, which is where ``br`` writes it.
+    """
+    ref = beads_db.ref_for_root(root)
+    paths = [
+        Path(ref.db) if ref is not None else root / cli_beads.BEADS_DIR / cli_beads.DB_NAME,
+        root / cli_beads.BEADS_DIR / cli_beads.JSONL_NAME,
+    ]
     out = []
-    for name in BOARD_FILES:
+    for path in paths:
         try:
-            st = (root / cli_beads.BEADS_DIR / name).stat()
+            st = path.stat()
             out.append((st.st_mtime_ns, st.st_size))
         except OSError:
             out.append(None)

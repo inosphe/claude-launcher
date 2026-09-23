@@ -17,6 +17,7 @@ import json
 import logging
 import os
 import secrets
+import sqlite3
 import time
 from datetime import datetime, timezone
 from dataclasses import replace
@@ -41,7 +42,7 @@ from .. import (
 )
 from .. import install
 from .. import session_commits
-from .. import beads_meta
+from .. import beads_db, beads_meta
 from .. import ghcli, prflow, projects, spawn as spawn_mod, store, workspaces
 from .. import plugins, settings
 from .. import worktree as worktree_mod
@@ -56,6 +57,7 @@ from . import (
 from . import paths
 from . import transcript_view
 from . import window as window_mod
+from .. import cli_beads
 from ..cli_beads import BeadsError
 from ..cflow import engine as cflow_engine, state as cflow_state
 from ..cflow.engine import CflowError
@@ -376,6 +378,15 @@ def build_app(
     board = beads if beads is not None else beads_mod.Board()
     app["beads"] = board
     manager.exit_hooks.append(board.session_exited)
+    # The board a directory in no registered workspace files on. Pinned once,
+    # to the board this daemon was already using, so every issue filed before
+    # workspaces had boards of their own keeps reading as that one's --
+    # nothing is copied and nothing moves. Afterwards it is an ordinary
+    # setting on the Settings page like any other board's.
+    try:
+        beads_db.ensure_default(cli_beads.repo_root(os.getcwd()))
+    except Exception:  # an unwritable config must not stop the daemon
+        log.exception("beads: could not pin the %s board", beads_db.DEFAULT_BOARD)
     # Pending merge/handoff requests (daemon/handoff.py): one per daemon, and
     # runtime-only like the board's wind-downs. An exit of any kind makes a
     # pending request on that session moot, so it rides the same hook.
@@ -671,6 +682,12 @@ def build_app(
     r.add_post("/api/beads", h_beads_create)
     # The boards a create may be filed on, and the workspaces it may record.
     r.add_get("/api/beads/boards", h_beads_boards)
+    # Which database each board is, and the one place that is decided: the
+    # Settings page's Beads boards card. Registered before "/api/beads/{id}"
+    # for the same reason the literal GETs below it are.
+    r.add_get("/api/beads/settings", h_beads_settings)
+    r.add_put("/api/beads/settings/{board}", h_beads_settings_set)
+    r.add_post("/api/beads/settings/{board}/init", h_beads_settings_init)
     # Before the {id} route, which would otherwise swallow it: aiohttp matches
     # in registration order and "candidates" is a perfectly good issue id as
     # far as that pattern is concerned.
@@ -7380,19 +7397,41 @@ async def h_index(request: web.Request) -> web.Response:
     return web.FileResponse(index)
 
 
+def _beads_extra_roots(request: web.Request) -> list:
+    """The directories a Beads view should show a board for beyond the
+    sessions' own.
+
+    The daemon's own directory has always been one, so the page is never
+    empty. Every registered **workspace** is one now as well: a workspace's
+    board is its own (:mod:`claude_launcher.beads_db`), and a board nobody
+    happens to have a session in is exactly the one the operator is about to
+    file the first issue on. Without them the create form could offer only
+    the boards the fleet was already standing in, which is how every issue
+    ended up on the daemon's.
+
+    ``?cwd=`` goes first when it is given, because it is the board the caller
+    asked about and the form uses the first entry as its default.
+    """
+    roots = [os.getcwd()]
+    for ws in workspaces.list_all():
+        if ws.exists():
+            roots.append(ws.path)
+    cwd = request.query.get("cwd")
+    if cwd:
+        roots.insert(0, cwd)
+    return roots
+
+
 async def h_beads_fleet(request: web.Request) -> web.Response:
     """Every board the fleet touches — the Beads page.
 
-    One entry per repository root among the sessions' directories (and the
-    daemon's own), each issue tagged with the sessions it belongs to and why,
-    so the page can draw the session↔issue match the rail draws per session,
-    for everybody at once.
+    One entry per board: every registered workspace's, plus the boards the
+    sessions' own directories resolve to and the daemon's own. Each issue is
+    tagged with the sessions it belongs to and why, so the page can draw the
+    session↔issue match the rail draws per session, for everybody at once.
     """
     manager: SessionManager = request.app["manager"]
-    extra = [os.getcwd()]
-    cwd = request.query.get("cwd")
-    if cwd:
-        extra.insert(0, cwd)
+    extra = _beads_extra_roots(request)
     view = await request.app["beads"].fleet_view(list(manager.list()), extra)
     return json_response(view)
 
@@ -7427,10 +7466,7 @@ async def h_beads_stream(request: web.Request) -> web.Response:
     if priority is not None and not 0 <= priority <= 9:
         return json_error(400, "priority must be 0..9")
     manager: SessionManager = request.app["manager"]
-    extra = [os.getcwd()]
-    cwd = request.query.get("cwd")
-    if cwd:
-        extra.insert(0, cwd)
+    extra = _beads_extra_roots(request)
     statuses = [s for s in request.query.getall("status", []) if s]
     unknown = [s for s in statuses if s not in beads_mod.KNOWN_STATUSES]
     if unknown:
@@ -7453,10 +7489,11 @@ async def h_beads_boards(request: web.Request) -> web.Response:
     """Where an issue can be filed, and where its session can be opened.
 
     Two lists the creation form needs before it can be drawn, and neither is
-    derivable in the browser: ``boards`` -- one entry per repository board
-    the fleet touches, the same grouping :func:`h_beads_fleet` uses, each
-    with the sessions on it so the assignee picker offers names that exist --
-    and ``workspaces``, the registry a recorded workspace is checked against
+    derivable in the browser: ``boards`` -- one entry per board the fleet can
+    file on, the same grouping :func:`h_beads_fleet` uses, each carrying its
+    name and database (:func:`daemon.beads.Board.board_head`) and the sessions
+    on it so the assignee picker offers names that exist -- and
+    ``workspaces``, the registry a recorded workspace is checked against
     (``claunch workspace add <dir>``).
 
     Cheap on purpose: no issue is listed. A form that had to wait for a
@@ -7466,16 +7503,160 @@ async def h_beads_boards(request: web.Request) -> web.Response:
     manager: SessionManager = request.app["manager"]
     board = request.app["beads"]
     sessions = list(manager.list())
-    extra = [os.getcwd()]
-    cwd = request.query.get("cwd")
-    if cwd:
-        extra.insert(0, cwd)
+    extra = _beads_extra_roots(request)
     view = await board.boards_view(sessions, extra)
     return json_response({
         **view,
         "default": view["boards"][0]["root"] if view["boards"] else None,
         "workspaces": [w.to_dict() for w in workspaces.list_all()],
     })
+
+
+async def h_beads_settings(request: web.Request) -> web.Response:
+    """Which database every board is — the Settings page's Beads boards card.
+
+    One row per registered workspace plus ``claunch-default``, each carrying
+    the database in effect, whether that path was set or derived, whether the
+    file is there yet, and the default it would fall back to
+    (:func:`claude_launcher.beads_db.listing`). ``suggestions`` lists the
+    ``.db`` files already sitting where that board would be, so the field can
+    offer them rather than have the operator type a path out.
+
+    ``issues`` is filled per row for a database that exists: a count read
+    straight out of the file, so a board that is about to be repointed can be
+    seen to have (or not have) work on it before the change is made.
+    """
+    rows = await asyncio.to_thread(
+        beads_db.listing, cli_beads.repo_root(os.getcwd())
+    )
+    counts = await asyncio.gather(
+        *(asyncio.to_thread(_beads_issue_count, r["db"]) for r in rows)
+    )
+    for row, count in zip(rows, counts):
+        row["issues"] = count
+    return json_response({
+        "boards": rows,
+        "default_board": beads_db.DEFAULT_BOARD,
+        "available": request.app["beads"].available(),
+    })
+
+
+def _beads_issue_count(db: str) -> Optional[int]:
+    """How many issues a board database holds, or ``None``.
+
+    Read with SQLite directly rather than through ``br``: the card lists
+    every board at once, and forking the binary per row would make opening
+    the Settings page cost what the Beads page costs. ``None`` for a file
+    that is not there, cannot be opened, or does not have the table — the
+    card then says nothing instead of claiming zero, which is a different
+    fact from "no issues".
+    """
+    path = Path(db)
+    if not path.is_file():
+        return None
+    quoted = path.as_posix().replace("?", "%3f").replace("#", "%23")
+    try:
+        conn = sqlite3.connect(f"file:{quoted}?mode=ro", uri=True, timeout=2.0)
+    except Exception:
+        return None
+    try:
+        (count,) = conn.execute("SELECT COUNT(*) FROM issues").fetchone()
+        return int(count)
+    except Exception:
+        return None
+    finally:
+        conn.close()
+
+
+def _beads_board_row(name: str) -> Optional[dict]:
+    """The settings row for one board name, or ``None`` if there is no such
+    board. What the two writes below answer with, so a caller sees the state
+    it has just put the board in without a second request."""
+    rows = beads_db.listing(cli_beads.repo_root(os.getcwd()))
+    for row in rows:
+        if row["board"] == name:
+            row["issues"] = _beads_issue_count(row["db"])
+            return row
+    return None
+
+
+async def h_beads_settings_set(request: web.Request) -> web.Response:
+    """Point one board at a database file, or drop the override.
+
+    Body: ``db``, an **absolute path ending in .db**, or ``null``/``""`` to
+    go back to the default (``<workspace>/.beads/beads.db``). The path names
+    the file itself rather than a directory holding it, and it is checked
+    before it is stored (:func:`claude_launcher.beads_db.check_path`): a
+    relative path, a directory, a name with another suffix, or a parent
+    directory that is not there are all refused with the reason. A path that
+    passes but has no file yet is accepted — the board is created on first
+    use, or now with the ``init`` route below.
+
+    404 for a name that is neither ``claunch-default`` nor a registered
+    workspace, 400 for a path that cannot be stored.
+    """
+    name = request.match_info["board"]
+    if _beads_board_row(name) is None:
+        return json_error(
+            404,
+            f"no board named {name!r} — boards are the registered workspaces "
+            f"plus {beads_db.DEFAULT_BOARD!r}",
+        )
+    body = await _json_body(request)
+    raw = body.get("db")
+    if raw is not None and not isinstance(raw, str):
+        return json_error(400, "'db' must be a path to a .db file, or null")
+    try:
+        if raw is None or not raw.strip():
+            await asyncio.to_thread(beads_db.clear_db, name)
+        else:
+            await asyncio.to_thread(beads_db.set_db, name, raw)
+    except beads_db.BoardPathError as exc:
+        return json_error(400, str(exc))
+    except store.StoreError as exc:
+        return json_error(500, str(exc))
+    # Every directory the daemon had already resolved may now read a
+    # different file, so nothing resolved against the old one survives.
+    request.app["beads"].forget_paths()
+    return json_response({"board": _beads_board_row(name)})
+
+
+async def h_beads_settings_init(request: web.Request) -> web.Response:
+    """Create a board's database now, instead of on its first use.
+
+    ``br init --prefix <board name>`` against the path the board resolves to,
+    so the operator can see the file appear and the issue prefix it will mint
+    under before any session is pointed at it. A database that is already
+    there is left alone and reported back unchanged — this is not a reset.
+
+    404 for a name with no board, 409 for a directory that cannot hold one,
+    503 when ``br`` is not installed on this machine.
+    """
+    name = request.match_info["board"]
+    row = _beads_board_row(name)
+    if row is None:
+        return json_error(
+            404,
+            f"no board named {name!r} — boards are the registered workspaces "
+            f"plus {beads_db.DEFAULT_BOARD!r}",
+        )
+    if row["exists"]:
+        return json_response({"board": row, "created": False})
+    board = request.app["beads"]
+    # Built from the row rather than resolved again, so the database that is
+    # created is exactly the one the card just showed.
+    ref = beads_db.BoardRef(
+        name=row["board"], db=row["db"], root=row["root"],
+        workspace=row["workspace"], configured=row["configured"],
+    )
+    try:
+        await board.create_board(ref)
+    except beads_mod.BeadsUnavailable as exc:
+        return json_error(503, str(exc))
+    except (BeadsError, OSError) as exc:
+        return json_error(409, str(exc))
+    board.forget_paths()
+    return json_response({"board": _beads_board_row(name), "created": True})
 
 
 async def h_beads_create(request: web.Request) -> web.Response:
@@ -7520,10 +7701,7 @@ async def h_beads_queues(request: web.Request) -> web.Response:
     so the operator sees who is doing what next without opening a terminal.
     """
     manager: SessionManager = request.app["manager"]
-    extra = [os.getcwd()]
-    cwd = request.query.get("cwd")
-    if cwd:
-        extra.insert(0, cwd)
+    extra = _beads_extra_roots(request)
     # One summarizer per response: every lane's containment check lists the
     # lane's directory, and lanes share directories heavily (this machine's
     # board: 703 sessions over 132 of them). See cflow_clock.run_summarizer.
@@ -7624,7 +7802,10 @@ async def h_beads_issue(request: web.Request) -> web.Response:
                 "name": sdef.name, "status": session.status(), "via": matches[0]["via"],
             })
     return json_response({
-        "root": str(root),
+        # The board this issue is on, by name as well as by root: an issue id
+        # is unique on its own board and nowhere else, so the panel says which
+        # one rather than leaving it to the tab the reader arrived through.
+        **board.board_head(root),
         "issue": issue,
         "sessions": linked,
         "reports": reports_mod.for_issue(issue_id),

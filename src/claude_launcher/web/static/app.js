@@ -13499,6 +13499,7 @@ function openSettings(section) {
   refreshRagStatus();
   refreshGhStatus();
   refreshRelaySettings();
+  refreshBeadsBoards();
 }
 
 let relaySettingsRows = [];
@@ -13832,7 +13833,7 @@ function ragCard() {
   for (const row of st.indexes || []) {
     const item = el("div", "rag-index-row");
     const text = el("div", "rag-index-text");
-    text.appendChild(el("strong", null, row.kind === "all" ? "Search anything" : row.kind === "sessions" ? "sessions" : `board ${row.root || ""}`.trim()));
+    text.appendChild(el("strong", null, row.kind === "all" ? "Search anything" : row.kind === "sessions" ? "sessions" : `board ${beadsNameOfRoot(row.root)}`.trim()));
     text.appendChild(el("span", "beads-bits", ragIndexLine(row)));
     if (row.error) text.appendChild(el("span", "error", row.error));
     item.appendChild(text);
@@ -14286,9 +14287,20 @@ async function submitNewIssue() {
 function beadsNewBlock() {
   const box = el("div", "beads-new");
   const head = el("div", "beads-new-head");
-  const toggle = el("button", "wf-btn option", beadsNew.open ? "Close" : "+ New issue");
+  // Which board a create lands on is the selected tab, and that used to be
+  // said nowhere: every board's form looked the same, and the fleet had one
+  // board anyway. With a board per workspace the answer changes per tab, so
+  // the button and the note under it both name it.
+  const on = ((beadsCache && beadsCache.boards) || [])
+    .find((b) => b.root === beadsWorkspace);
+  const onName = on ? beadsBoardLabel(on) : "";
+  const toggle = el(
+    "button", "wf-btn option",
+    beadsNew.open ? "Close" : (onName ? `+ New issue on ${onName}` : "+ New issue"));
   toggle.type = "button";
-  toggle.title = "file an issue on this board";
+  toggle.title = on
+    ? `file an issue on ${onName}\n${beadsBoardWhere(on)}`
+    : "file an issue on this board";
   toggle.addEventListener("click", () => {
     beadsNew.open = !beadsNew.open;
     beadsNew.error = "";
@@ -14581,7 +14593,10 @@ function beadsMergeSearch(q, answers) {
   let index = null;
   let reranked = false;
   for (const a of answers) {
-    if (a.error) { errors.push(a.root ? `${a.root}: ${a.error}` : a.error); continue; }
+    if (a.error) {
+      errors.push(a.root ? `${beadsNameOfRoot(a.root)}: ${a.error}` : a.error);
+      continue;
+    }
     const d = a.data || {};
     for (const r of d.results || []) results.push({ ...r, root: a.root || d.root || "" });
     if (d.reranked) reranked = true;
@@ -14935,10 +14950,61 @@ function beadsLane(status, rows) {
   return lane;
 }
 
+/* A board's name. Boards are named after the workspace they belong to, plus
+   'claunch-default' for a directory in no registered workspace; a board
+   resolved from a bare checkout falls back to that directory's name. The page
+   used to print the directory itself, which read the same for every workspace
+   once the fleet had settled on the daemon's own board. */
+function beadsBoardLabel(board) {
+  if (!board) return "?";
+  if (board.board) return board.board;
+  const root = board.root || "";
+  return root.replace(/\\/g, "/").split("/").filter(Boolean).pop() || root || "?";
+}
+
+/* What the name does not say: which file the board reads, and whether that
+   file was chosen in Settings or derived from the workspace. It goes in a
+   title attribute so the label stays short and the path is one hover away. */
+function beadsBoardWhere(board) {
+  if (!board) return "";
+  const lines = [];
+  if (board.db) lines.push(`database: ${board.db}`);
+  if (board.root && board.root !== board.db) lines.push(`directory: ${board.root}`);
+  // Only when the caller knows: a payload that does not carry `configured`
+  // (the session rail's) must not have either answer put in its mouth.
+  if (board.configured !== undefined && board.configured !== null) {
+    lines.push(board.configured
+      ? "path set in Settings ▸ Beads boards"
+      : "default path for this workspace");
+  }
+  if (board.board_exists === false) lines.push("no database yet — made on first use");
+  return lines.join("\n");
+}
+
+/* The board name for a root, from whatever the Beads page last fetched.
+   Rows that come from somewhere else — the search index list, a per-board
+   search answer — carry the root alone, because the root is what the daemon
+   keys boards by. Falls back to the directory's own name when no board
+   listing has been loaded, which is the state the Settings page is in. */
+function beadsNameOfRoot(root) {
+  if (!root) return "";
+  const boards = (beadsCache && beadsCache.boards) || [];
+  const hit = boards.find((b) => b.root === root);
+  if (hit) return beadsBoardLabel(hit);
+  return String(root).replace(/\\/g, "/").split("/").filter(Boolean).pop() || root;
+}
+
 function beadsBoardSection(board) {
   const sec = el("div", "beads-board");
   const head = el("div", "beads-board-head");
-  head.appendChild(el("h3", null, board.root || "?"));
+  const title = el("h3", null, beadsBoardLabel(board));
+  title.title = beadsBoardWhere(board);
+  head.appendChild(title);
+  if (board.db) {
+    const where = el("span", "beads-board-db mono", board.db);
+    where.title = beadsBoardWhere(board);
+    head.appendChild(where);
+  }
   const live = (board.sessions || []).filter((s) => s.status !== "exited");
   head.appendChild(el("span", "wf-note",
     live.length ? live.map((s) => s.name).join(" · ") : "no live session here"));
@@ -15209,6 +15275,20 @@ function beadsDetailPane() {
   if (i.updated_at) facts.push("updated " + String(i.updated_at).replace("T", " ").slice(0, 19));
   meta.appendChild(el("span", "beads-bits", facts.join("  ·  ")));
   pane.appendChild(meta);
+  // Which board this issue is on. One id is unique on its own board and only
+  // there, so with a board per workspace the answer belongs beside the id
+  // rather than being inferred from whichever tab the reader came in on.
+  if (beadsDetail.root) {
+    const onBoard = ((beadsCache && beadsCache.boards) || [])
+      .find((b) => b.root === beadsDetail.root);
+    const line = el(
+      "p", "beads-bits beads-detail-board",
+      "board " + (beadsDetail.board || beadsNameOfRoot(beadsDetail.root)));
+    line.title = onBoard
+      ? beadsBoardWhere(onBoard)
+      : `directory: ${beadsDetail.root}`;
+    pane.appendChild(line);
+  }
   const linked = beadsDetail.sessions || i.sessions ||
     ((beadsCache && beadsCache.boards) || []).flatMap((b) =>
       (b.issues || []).filter((row) => row.id === i.id).flatMap((row) => row.sessions || []));
@@ -15320,8 +15400,9 @@ function renderBeads() {
   canvas.id = "beads-canvas";
   if (!boards.length) {
     canvas.appendChild(el("p", "wf-note",
-      "no board: none of the sessions' directories is a repository with a " +
-      ".beads/ — 'claunch beads init --prefix <name>' at its root starts one"));
+      "no board: no workspace is registered, and none of the sessions' " +
+      "directories is a checkout that already holds one. Register a " +
+      "directory in Settings and give it a board there."));
   }
   for (const b of boards.filter((b) => b.root === beadsWorkspace)) canvas.appendChild(beadsBoardSection(b));
   list.appendChild(canvas);
@@ -15356,12 +15437,16 @@ function beadsWorkspaceTabs(boards) {
   const tabs = el("div", "seq-tabs beads-workspace-tabs");
   for (const board of boards) {
     const root = board.root || "";
-    const label = root.replace(/\\/g, "/").split("/").filter(Boolean).pop() || root;
-    const duplicate = boards.some((b) => b !== board &&
-      (b.root || "").replace(/\\/g, "/").split("/").filter(Boolean).pop() === label);
+    const label = beadsBoardLabel(board);
+    const duplicate = boards.some(
+      (b) => b !== board && beadsBoardLabel(b) === label);
     const tab = el("button", "seq-tab" + (root === beadsWorkspace ? " on" : ""), duplicate ? root : label);
     tab.type = "button";
-    tab.title = root;
+    tab.title = beadsBoardWhere(board);
+    // A board whose database is not there yet is still a board — it is made
+    // the first time anything is read or written on it — so it is offered
+    // rather than hidden, and says which it is.
+    if (board.board_exists === false) tab.classList.add("beads-tab-empty");
     tab.addEventListener("click", () => {
       if (root === beadsWorkspace) return;
       beadsWorkspace = root;
@@ -15427,8 +15512,9 @@ function renderQueues(view) {
   const boards = beadsQueues.boards || [];
   if (!boards.length) {
     view.appendChild(el("p", "wf-note",
-      "no board: none of the sessions' directories is a repository with a " +
-      ".beads/ — 'claunch beads init --prefix <name>' at its root starts one"));
+      "no board: no workspace is registered, and none of the sessions' " +
+      "directories is a checkout that already holds one. Register a " +
+      "directory in Settings and give it a board there."));
   }
   const statuses = beadsQueues.statuses || BEADS_STATUSES.filter((s) => BEADS_ACTIVE.has(s));
   view.appendChild(beadsWorkspaceTabs(boards));
@@ -15439,7 +15525,14 @@ function beadsQueuesBoard(board, statuses) {
   const sec = el("div", "beads-board beads-queues-board");
   const root = board.root || "?";
   const head = el("div", "beads-board-head");
-  head.appendChild(el("h3", null, board.root || "?"));
+  const title = el("h3", null, beadsBoardLabel(board));
+  title.title = beadsBoardWhere(board);
+  head.appendChild(title);
+  if (board.db) {
+    const where = el("span", "beads-board-db mono", board.db);
+    where.title = beadsBoardWhere(board);
+    head.appendChild(where);
+  }
   const lanes = board.lanes || [];
   const pool = board.unassigned || [];
   const live = lanes.filter((l) => !beadsLaneSpent(l)).sort(beadsQueueOrder);
@@ -15699,12 +15792,27 @@ async function beadsAssign(root, id, session, cell) {
 /* ---- the rail's block: one session's slice of its board ---- */
 let sessBeadsBox = null;   // the create form, which holds a typed title
 
+/* Which board a session's directory files on — named, with the database
+   path on hover. A session's board is its workspace's now, so two sessions
+   in one fleet can be reading different files, and a panel that showed only
+   the issues would leave that difference invisible. */
+function sessBeadsBoardLine(b) {
+  if (!b || !b.board) return null;
+  const line = el("p", "beads-bits sess-beads-board", "board " + b.board);
+  line.title = beadsBoardWhere({
+    board: b.board, db: b.db, root: b.root, configured: undefined,
+  });
+  return line;
+}
+
 function sessBeads(data) {
   const s = data.session || {};
   const b = data.beads || {};
   const issues = b.issues || [];
   const box = el("div", "sess-beads");
   box.appendChild(el("h3", null, `Beads (${issues.length})`));
+  const where = sessBeadsBoardLine(b);
+  if (where) box.appendChild(where);
   if (b.winddown) {
     const w = el("p", "wf-warning",
       `winding down since ${String(b.winddown.since || "").replace("T", " ").slice(0, 19)} — ` +
@@ -15763,10 +15871,12 @@ function sessBeadsPanel(data) {
   const box = el("div", "sess-beads sess-beads-kanban");
   box.appendChild(el("h3", null, `Beads (${issues.length})`));
   box.appendChild(el("p", "wf-note",
-    "Every issue on the repository board that names this session — the " +
+    "Every issue on this workspace's board that names this session — the " +
     "recorded link, its assignee, its creator, or an `issue: <id>` in the " +
     "opening task — in a lane per status. Writes are the session's own " +
     "(`claunch beads …`): this panel reads the board, it does not move it."));
+  const panelWhere = sessBeadsBoardLine(b);
+  if (panelWhere) box.appendChild(panelWhere);
   if (b.winddown) {
     box.appendChild(el("p", "wf-warning",
       `winding down since ${String(b.winddown.since || "").replace("T", " ").slice(0, 19)} — ` +
@@ -16864,6 +16974,7 @@ function renderWorkspaces() {
 
   view.appendChild(wsAddCard());
   view.appendChild(projectsCard());
+  view.appendChild(beadsBoardsCard());
 
   view.appendChild(llmSettingsCard());
 
@@ -17726,6 +17837,262 @@ async function projectRemove(p) {
       currentProject === p.name) {
     setCurrentProject("");
   }
+}
+
+/* The Beads boards card: which database each board reads.
+
+   A board is a workspace's, and its database is `<workspace>/.beads/beads.db`
+   until this card points it somewhere else. The field names the .db FILE, not
+   a directory holding it, because a directory leaves the name inside it to be
+   guessed and a wrong guess is silent — what the operator would see is an
+   empty board, not an error. The same check runs here and on the daemon
+   (beads_db.check_path), so a refusal arrives before the round trip and the
+   daemon still refuses what a stale page would have sent.
+
+   'claunch-default' is the row for a directory that belongs to no registered
+   workspace. It is pinned to the board this daemon was already using, which
+   is why every issue filed before workspaces had boards of their own reads as
+   that board's. */
+let beadsBoardsCache = [];
+let beadsBoardsError = "";
+let beadsBoardsNotice = "";
+let beadsBoardsBusy = "";      // the board name a write is in flight for
+let beadsBoardsDraft = {};     // board name -> what is typed in its field
+let beadsDefaultBoardName = "claunch-default";
+
+async function refreshBeadsBoards() {
+  try {
+    const resp = await api("/api/beads/settings");
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
+    beadsBoardsCache = data.boards || [];
+    beadsDefaultBoardName = data.default_board || beadsDefaultBoardName;
+    beadsBoardsError = "";
+  } catch (err) {
+    beadsBoardsError = String(err);
+  }
+  if (wsOpen) renderWorkspaces();
+}
+
+/* The browser's half of the path check. Deliberately the same four refusals
+   the daemon makes, minus the two it alone can answer (is the parent there,
+   is the path a directory) — those need the daemon's filesystem, not this
+   one's. */
+function beadsBoardPathProblem(raw) {
+  const text = (raw || "").trim();
+  if (!text) return "a board needs a path to its .db file";
+  if (!/^([A-Za-z]:[\\/]|\\\\|\/)/.test(text)) {
+    return "the path must be absolute, e.g. D:\\boards\\gds6.db";
+  }
+  if (!/\.db$/i.test(text)) {
+    return "the path must name the .db file itself, not the directory holding it";
+  }
+  return "";
+}
+
+function beadsBoardsCard() {
+  const card = el("section", "ws-add beads-boards-card");
+  card.appendChild(el("h3", null, `Beads boards (${beadsBoardsCache.length})`));
+  card.appendChild(el(
+    "p", "wf-note",
+    "One board per workspace: a session opened there, and every issue filed " +
+    "for it, reads that workspace's own database. The field names the .db " +
+    "file itself — the database is created on first use if it is not there " +
+    "yet, or now with Create. '" + beadsDefaultBoardName + "' is the board " +
+    "for a directory in no registered workspace, and it holds everything " +
+    "filed before workspaces had boards of their own."
+  ));
+  if (beadsBoardsError) card.appendChild(el("p", "error", beadsBoardsError));
+  if (beadsBoardsNotice) card.appendChild(el("p", "wf-note", beadsBoardsNotice));
+  if (!beadsBoardsCache.length) {
+    card.appendChild(el(
+      "p", "wf-note",
+      "no board yet — register a directory below and it gets one."
+    ));
+  }
+  for (const b of beadsBoardsCache) card.appendChild(beadsBoardSettingsRow(b));
+  return card;
+}
+
+function beadsBoardSettingsRow(b) {
+  const row = el("div", "beads-board-row");
+  const head = el("div", "beads-board-row-head");
+  head.appendChild(el("span", "ws-name", b.board));
+  if (b.kind === "default") {
+    const badge = el("span", "badge idle", "default board");
+    badge.title = "used by a directory that is in no registered workspace";
+    head.appendChild(badge);
+  } else {
+    const where = el("span", "ws-path mono", b.path || "");
+    where.title = "the workspace this board belongs to";
+    head.appendChild(where);
+  }
+  if (b.configured) head.appendChild(el("span", "badge idle", "path set"));
+  if (b.exists) {
+    head.appendChild(el(
+      "span", "badge idle",
+      b.issues === null || b.issues === undefined
+        ? "database present"
+        : plural(b.issues, "issue")
+    ));
+  } else {
+    const missing = el("span", "badge exited", "no database yet");
+    missing.title = "made the first time anything reads or writes this board";
+    head.appendChild(missing);
+  }
+  if (b.path_exists === false) {
+    head.appendChild(el("span", "badge exited", "directory missing"));
+  }
+  if ((b.shared_with || []).length) {
+    const shared = el("span", "badge idle", `same file as ${b.shared_with.join(", ")}`);
+    shared.title =
+      "two boards reading one database see one another's issues. That is " +
+      "expected for the default board, which is pinned to a workspace's.";
+    head.appendChild(shared);
+  }
+  row.appendChild(head);
+
+  const current = beadsBoardsDraft[b.board];
+  const field = el("input", "mono beads-board-db-input");
+  field.id = `beads-db-${b.board}`;
+  field.value = current === undefined ? (b.db || "") : current;
+  field.placeholder = b.default_db || "path to the .db file";
+  field.autocomplete = "off";
+  field.spellcheck = false;
+  field.disabled = beadsBoardsBusy === b.board;
+  field.addEventListener("input", () => {
+    beadsBoardsDraft[b.board] = field.value;
+    problem.textContent = beadsBoardPathProblem(field.value);
+  });
+
+  // The .db files already sitting where this board would be. Offered rather
+  // than described: a board that exists under another name is the case this
+  // field is most often pointed at, and typing the path out is where the
+  // mistakes come from.
+  const list = el("datalist");
+  list.id = `beads-db-options-${b.board}`;
+  const options = [b.default_db, ...(b.suggestions || [])].filter(Boolean);
+  for (const path of [...new Set(options)]) {
+    const opt = el("option");
+    opt.value = path;
+    list.appendChild(opt);
+  }
+  field.setAttribute("list", list.id);
+
+  const controls = el("div", "beads-board-row-controls");
+  controls.appendChild(field);
+  controls.appendChild(list);
+
+  const save = el("button", "wf-btn approve", "Save");
+  save.type = "button";
+  save.disabled = beadsBoardsBusy === b.board;
+  save.addEventListener("click", () => beadsBoardSet(b, field.value));
+  controls.appendChild(save);
+
+  if (b.configured) {
+    const reset = el("button", "wf-btn clear", "Use default");
+    reset.type = "button";
+    reset.title = b.default_db || "";
+    reset.disabled = beadsBoardsBusy === b.board;
+    reset.addEventListener("click", () => beadsBoardReset(b));
+    controls.appendChild(reset);
+  }
+
+  if (!b.exists) {
+    const make = el("button", "wf-btn clear", "Create");
+    make.type = "button";
+    make.title = `br init --prefix ${b.board} against ${b.db}`;
+    make.disabled = beadsBoardsBusy === b.board;
+    make.addEventListener("click", () => beadsBoardInit(b));
+    controls.appendChild(make);
+  }
+  row.appendChild(controls);
+
+  const problem = el("p", "error beads-board-row-problem",
+    current === undefined ? "" : beadsBoardPathProblem(current));
+  row.appendChild(problem);
+  return row;
+}
+
+async function beadsBoardWrite(board, run) {
+  beadsBoardsBusy = board;
+  beadsBoardsError = "";
+  beadsBoardsNotice = "";
+  renderWorkspaces();
+  try {
+    const resp = await run();
+    const doc = await resp.json().catch(() => ({}));
+    if (!resp.ok) {
+      // The daemon's refusals already say what to do about them (not
+      // absolute, wrong suffix, no such directory) — passing one through
+      // beats inventing a vaguer sentence here.
+      beadsBoardsError = doc.error || `HTTP ${resp.status}`;
+      return null;
+    }
+    return doc;
+  } catch (err) {
+    beadsBoardsError = String(err);
+    return null;
+  } finally {
+    beadsBoardsBusy = "";
+    await refreshBeadsBoards();
+    renderWorkspaces();
+  }
+}
+
+async function beadsBoardSet(b, raw) {
+  const problem = beadsBoardPathProblem(raw);
+  if (problem) {
+    beadsBoardsError = `${b.board}: ${problem}`;
+    renderWorkspaces();
+    return;
+  }
+  const path = raw.trim();
+  const doc = await beadsBoardWrite(b.board, () =>
+    api(`/api/beads/settings/${encodeURIComponent(b.board)}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ db: path }),
+    }));
+  if (!doc) return;
+  delete beadsBoardsDraft[b.board];
+  const now = doc.board || {};
+  beadsBoardsNotice = now.exists
+    ? `${b.board} now reads ${now.db}.`
+    : `${b.board} now points at ${now.db}; the database is made on first use.`;
+  renderWorkspaces();
+}
+
+async function beadsBoardReset(b) {
+  if (!confirm(
+    `Have '${b.board}' use its default database again?\n\n` +
+    `${b.default_db}\n\nThe file at ${b.db} is not touched — only the ` +
+    "setting goes, so the issues on it stay where they are."
+  )) return;
+  const doc = await beadsBoardWrite(b.board, () =>
+    api(`/api/beads/settings/${encodeURIComponent(b.board)}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ db: null }),
+    }));
+  if (!doc) return;
+  delete beadsBoardsDraft[b.board];
+  beadsBoardsNotice = `${b.board} is back on ${(doc.board || {}).db || b.default_db}.`;
+  renderWorkspaces();
+}
+
+async function beadsBoardInit(b) {
+  const doc = await beadsBoardWrite(b.board, () =>
+    api(`/api/beads/settings/${encodeURIComponent(b.board)}/init`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: "{}",
+    }));
+  if (!doc) return;
+  beadsBoardsNotice = doc.created
+    ? `${b.board}: board created at ${(doc.board || {}).db || b.db}.`
+    : `${b.board} already had a database at ${(doc.board || {}).db || b.db}.`;
+  renderWorkspaces();
 }
 
 function wsRow(w) {

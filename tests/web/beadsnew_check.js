@@ -86,6 +86,8 @@ new Function(
   "let beadsOpen = true, beadsSection = 'board', beadsWorkspace = '/repo';\n"
   + "function renderBeads() {}\n"
   + "function restartBeadsStream() { exports.restarted = true; }\n"
+  + "let beadsCache = null;\n"
+  + slice("beadsBoardLabel") + slice("beadsBoardWhere")
   + slice("loadBeadsNewOptions") + slice("submitNewIssue") + slice("beadsNewBlock")
   + "let beadsNew = { open: false, busy: false, error: '', done: '',"
   + "  boards: null, workspaces: [], loading: false,"

@@ -1,4 +1,4 @@
-"""``claunch beads ...`` — the repository's issue board, reached from any worktree.
+"""``claunch beads ...`` — the workspace's issue board, reached from any worktree.
 
 The board is `beads <https://github.com/steveyegge/beads>`_ driven through its
 ``br`` binary; this module adds nothing to it but *where it is*. ``br`` finds
@@ -6,18 +6,31 @@ its database by looking for ``.beads/*.db`` in the current directory, which
 is right for a checkout and wrong for a fleet: a session working in a git
 worktree has the tracked ``.beads/issues.jsonl`` there but no database, so
 ``br`` would quietly initialise a second, empty board in the worktree and
-the fleet would end up with one board per checkout. One repository has one
-board. It lives at the repository's main checkout, and every call — from
-whichever worktree the caller stands in — names it with ``--db``.
+the fleet would end up with one board per checkout. One workspace has one
+board, and every call — from whichever worktree the caller stands in —
+names it with ``--db``.
 
-That is the whole job here: resolve the repository root through git's
-common dir (a worktree's common dir *is* the main checkout's ``.git``),
-point ``--db`` at ``<root>/.beads/beads.db``, stamp writes with the calling
-session's name as ``--actor`` so the audit trail says which agent did what,
-and hand the rest of the argument list to ``br`` untouched. When the
-database is missing but the tracked JSONL is there — a fresh clone, or the
-main checkout right after the board's first merge — the database is rebuilt
-from the JSONL first, so the caller never has to know that step exists.
+Which board that is comes from :func:`resolve`, and the answer is the
+registered **workspace** the caller's directory lives in (a worktree at
+``<repo>/.claude/worktrees/<name>`` resolves to the repository that was
+registered). Its database is ``<workspace>/.beads/beads.db`` unless the
+settings point that board's name somewhere else
+(:mod:`claude_launcher.beads_db`). A checkout nobody registered keeps the
+board it already holds, and anything else files on
+:data:`claude_launcher.beads_db.DEFAULT_BOARD`, which is the board the
+daemon was using before workspaces had boards of their own.
+
+The rest of the job: stamp writes with the calling session's name as
+``--actor`` so the audit trail says which agent did what, and hand the rest
+of the argument list to ``br`` untouched. Two bootstraps run before the
+caller's command when the database is not there yet. When the tracked JSONL
+is beside it — a fresh clone, or the main checkout right after the board's
+first merge — the database is rebuilt from the JSONL (:func:`plan`). When
+there is nothing to rebuild from and the board belongs to a registered
+workspace or to a database path set by hand, it is created
+(:func:`create_board`) under a prefix made from the board's name. Neither
+step is something the caller has to know about; a directory that is merely
+where someone was standing still gets the refusal it always got.
 
 What this deliberately is not: a wrapper that re-spells ``br``'s commands.
 The improv workflows teach ``claunch beads <br arguments>`` and nothing
@@ -58,13 +71,16 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
-from typing import List, Optional
+from typing import List, NamedTuple, Optional
 
-from . import workspaces
+from . import beads_db, workspaces
 
-#: The board's directory and files, as ``br init`` lays them out.
-BEADS_DIR = ".beads"
-DB_NAME = "beads.db"
+#: The board's directory and files, as ``br init`` lays them out. The
+#: first two come from :mod:`claude_launcher.beads_db`, which composes the
+#: default database path from them; they are re-exported here because
+#: every caller of this module already spells them with this prefix.
+BEADS_DIR = beads_db.BEADS_DIR
+DB_NAME = beads_db.DB_NAME
 JSONL_NAME = "issues.jsonl"
 CONFIG_NAME = "config.yaml"
 
@@ -427,6 +443,190 @@ def repo_root(cwd: Optional[str] = None) -> Optional[Path]:
     return None
 
 
+def resolve(cwd: Optional[str] = None) -> Optional[beads_db.BoardRef]:
+    """The board a directory files its issues on, or ``None``.
+
+    Three rules, in this order:
+
+    1. **The registered workspace the directory lives in.** Its board is
+       ``<workspace>/.beads/beads.db`` unless ``beads.boards.<name>`` says
+       otherwise (:mod:`claude_launcher.beads_db`). This is first, and not
+       git, because a workspace registered *inside* another checkout
+       (``design-projection`` under ``gds5``) is a separate body of work with
+       a board of its own; asking git would hand both of them the outer
+       repository's board. A worktree answers the same way it did before —
+       ``workspaces.owning`` resolves ``<repo>/.claude/worktrees/<name>`` to
+       the repository that was registered.
+    2. **A git repository that already holds a board.** A checkout nobody
+       registered keeps the board it has rather than having its issues filed
+       somewhere else.
+    3. **:data:`claude_launcher.beads_db.DEFAULT_BOARD`, for a directory
+       inside its root.** It is the board the daemon was already using,
+       pinned at startup
+       (:func:`claude_launcher.beads_db.ensure_default`), so a directory in
+       that tree that rules 1 and 2 do not claim keeps filing where it has
+       been filing and nothing that was filed before has moved.
+
+       The containment test is what keeps the rule from reaching further
+       than that. Without it every directory on the machine with no board of
+       its own — a scratch directory, a checkout of an unrelated project,
+       a test's temporary tree — would file its issues into this one board.
+       Refusing those is the answer they got before boards were per
+       workspace, and it is the answer they get now.
+
+    ``None`` means no rule matched: the caller is standing somewhere no
+    board can be derived from. Registering the directory as a workspace is
+    what gives it one.
+    """
+    here = cwd or os.getcwd()
+    owner = workspaces.owning(here)
+    if owner is not None:
+        return beads_db.workspace_ref(owner)
+    root = repo_root(here)
+    if root is not None:
+        beads_dir = root / BEADS_DIR
+        if (beads_dir / DB_NAME).is_file() or (beads_dir / JSONL_NAME).is_file():
+            return beads_db.plain_ref(root)
+    fallback = beads_db.default_ref(root)
+    if fallback is not None and beads_db.within(here, fallback.root):
+        return fallback
+    return None
+
+
+#: What ``br init`` will and will not do, measured against **br 0.2.14**, and
+#: the reason creating a board is a step of its own rather than another argv
+#: in :func:`plan`:
+#:
+#: * ``init`` **ignores** ``--db``. It always writes
+#:   ``<cwd>/.beads/beads.db``, whatever path the option names.
+#: * ``init`` refuses when ``<cwd>/.beads/beads.db`` already **exists**
+#:   ("Already initialized"). A ``.beads/`` directory without the database —
+#:   a fresh clone carrying only the tracked ``issues.jsonl`` — is fine,
+#:   which is what keeps the rebuild path in :func:`plan` working.
+#: * every other subcommand honours ``--db`` for any filename, but still
+#:   needs a ``.beads/`` directory discoverable from ``<cwd>``: without one
+#:   it answers ``NOT_INITIALIZED`` whatever ``--db`` says.
+#:
+#: So a board's root always holds a ``.beads/``, and what the setting moves
+#: is which database file is read. Creating a board that is set to another
+#: path therefore runs ``init`` where ``br`` will accept it and then moves
+#: the file ``br`` wrote onto the path the board is set to.
+class InitPlan(NamedTuple):
+    """How to bring one board's database into being — pure, so a test can
+    read it without a filesystem."""
+
+    #: The ``br init`` to run, and the directory to run it in.
+    argv: List[str]
+    cwd: str
+    #: The file ``br`` will have written, to be moved onto the board's own
+    #: path. ``None`` when ``br`` already writes it where the board is.
+    move_from: Optional[str]
+    #: A directory made only to hold that ``init``, to remove afterwards.
+    discard: Optional[str]
+
+
+#: The directory an ``init`` is staged in when ``br`` would refuse to run it
+#: in the board's own root. Inside the root, so the move onto the board's
+#: path stays on one volume.
+STAGING_DIR = ".claunch-board-init"
+
+#: SQLite's sidecars. A database moved without them loses whatever the
+#: write-ahead log still holds.
+DB_SIDECARS = ("-wal", "-shm", "-journal")
+
+
+def init_plan(ref: beads_db.BoardRef, *, default_db_exists: bool) -> InitPlan:
+    """The steps that create ``ref``'s database. See the note above.
+
+    ``default_db_exists`` is whether ``<root>/.beads/beads.db`` is already a
+    file — the one state ``br init`` refuses, and the only reason this needs
+    a staging directory.
+    """
+    argv = [BINARY, "init", "--prefix", beads_db.prefix_for(ref.name)]
+    root = Path(ref.root)
+    written = root / BEADS_DIR / DB_NAME
+    if not default_db_exists:
+        return InitPlan(
+            argv=argv,
+            cwd=str(root),
+            move_from=None if beads_db.same_path(str(written), ref.db) else str(written),
+            discard=None,
+        )
+    staging = root / STAGING_DIR
+    return InitPlan(
+        argv=argv,
+        cwd=str(staging),
+        move_from=str(staging / BEADS_DIR / DB_NAME),
+        discard=str(staging),
+    )
+
+
+def move_db(src: str, dst: str) -> None:
+    """Move a database and its SQLite sidecars onto ``dst``."""
+    shutil.move(src, dst)
+    for suffix in DB_SIDECARS:
+        beside = Path(src + suffix)
+        if beside.is_file():
+            shutil.move(str(beside), dst + suffix)
+
+
+def _subprocess_runner(argv: List[str], cwd: str):
+    """:func:`create_board`'s runner for the command line — the daemon hands
+    in its own so the board is created through the same code path."""
+    proc = subprocess.run(
+        argv, cwd=cwd, check=False, capture_output=True, text=True
+    )
+    return proc.returncode, proc.stdout, proc.stderr
+
+
+def create_board(ref: beads_db.BoardRef, runner) -> None:
+    """Create ``ref``'s database. ``runner(argv, cwd)`` -> ``(code, out, err)``.
+
+    The filesystem half of :func:`init_plan`: make the directories ``br``
+    and the board need, run the ``init``, move the file into place, and drop
+    the staging directory. A non-zero exit raises :class:`BeadsError` with
+    ``br``'s own words and nothing is moved.
+    """
+    Path(ref.root).mkdir(parents=True, exist_ok=True)
+    Path(ref.db).parent.mkdir(parents=True, exist_ok=True)
+    plan_ = init_plan(
+        ref, default_db_exists=(Path(ref.root) / BEADS_DIR / DB_NAME).is_file()
+    )
+    if plan_.discard:
+        Path(plan_.cwd).mkdir(parents=True, exist_ok=True)
+    try:
+        code, out, err = runner(plan_.argv, plan_.cwd)
+        if code != 0:
+            raise BeadsError(
+                f"creating the board {ref.name} at {ref.db} failed: "
+                f"{(err or out or '').strip()}"
+            )
+        if plan_.move_from:
+            move_db(plan_.move_from, ref.db)
+    finally:
+        if plan_.discard:
+            shutil.rmtree(plan_.discard, ignore_errors=True)
+
+
+def autocreatable(ref: beads_db.BoardRef) -> bool:
+    """Whether a missing database for ``ref`` may be created on the spot.
+
+    Only a registered workspace qualifies. Registering a directory is the
+    operator saying a board belongs there, so the first command that needs
+    one may build it.
+
+    Two kinds of root are left out. A plain repository root is wherever the
+    caller happened to be standing, and a typo there must not grow a board
+    of its own — that refusal is the one :func:`plan` has always given.
+    :data:`claude_launcher.beads_db.DEFAULT_BOARD` is left out for the same
+    reason: every directory in no registered workspace resolves to it, so
+    creating it on the spot would mean any such directory mints issues into
+    a board the operator has not asked for. When its database is genuinely
+    missing, the Settings page's own Create button builds it.
+    """
+    return bool(ref.workspace)
+
+
 def issue_prefix(beads_dir: Path, root: Path) -> str:
     """The prefix issue ids carry, from ``config.yaml`` or the root's name.
 
@@ -452,6 +652,8 @@ def plan(
     actor: Optional[str],
     db_exists: bool,
     jsonl_exists: bool,
+    *,
+    db: Optional[str] = None,
 ) -> List[List[str]]:
     """The ``br`` invocations to run, in order — pure, so a test can read it.
 
@@ -462,6 +664,19 @@ def plan(
     and refuses when nothing is there to rebuild from — a typo'd directory
     must not grow a board of its own. A ``--status`` value that is not a
     status is refused here too, before any ``br`` runs.
+
+    ``db`` is the database file. Left out, it is the one
+    :mod:`claude_launcher.beads_db` resolves for ``root`` — the default
+    ``<root>/.beads/beads.db`` unless this board has been pointed elsewhere
+    in the settings. Callers that already hold a
+    :class:`claude_launcher.beads_db.BoardRef` pass its path rather than
+    having it resolved a second time.
+
+    Creating a board that does not exist yet is NOT here: ``br init``
+    ignores ``--db`` and writes where it stands, so it is a step with a
+    filesystem move in it rather than another argv (:func:`create_board`).
+    The caller runs that first, for a board the operator vouched for, and
+    what reaches this function is a database that exists.
 
     The caller's arguments also go through two rewrites that make free text
     beginning with ``-`` reach ``br`` as text: :func:`bind_text_values` for
@@ -478,7 +693,7 @@ def plan(
     check_statuses(args)
     args = flag_text_positionals(bind_text_values(args))
     beads_dir = root / BEADS_DIR
-    db = str(beads_dir / DB_NAME)
+    db = str(db) if db else str(beads_db.db_for_root(root))
     base = [BINARY, "--db", db]
     if actor and "--actor" not in args:
         base += ["--actor", actor]
@@ -506,17 +721,31 @@ def run(args: List[str], cwd: Optional[str] = None) -> int:
             f"'{BINARY}' is not installed — the board needs the beads CLI "
             f"(cargo install beads-rust, or see https://github.com/steveyegge/beads)"
         )
-    root = repo_root(cwd)
-    if root is None:
+    ref = resolve(cwd)
+    if ref is None:
         raise BeadsError(
-            "not inside a git repository or a registered workspace — "
-            "the board belongs to a repository"
+            "not inside a git repository or a registered workspace, and no "
+            f"'{beads_db.DEFAULT_BOARD}' board is set — register the "
+            "directory with 'claunch workspace add <dir>', or set a board "
+            "for it on the Settings page"
         )
+    root = ref.root_path
     beads_dir = root / BEADS_DIR
+    # A board the operator vouched for is brought into being before anything
+    # is planned against it, because creating one is not an argv: see
+    # InitPlan. A checkout nobody registered still gets plan()'s refusal.
+    if (
+        not ref.exists()
+        and not (beads_dir / JSONL_NAME).is_file()
+        and autocreatable(ref)
+        and (args[:1] != ["init"] if args else True)
+    ):
+        create_board(ref, _subprocess_runner)
     commands = plan(
         list(args), root, os.environ.get(SESSION_ENV) or None,
-        db_exists=(beads_dir / DB_NAME).is_file(),
+        db_exists=ref.exists(),
         jsonl_exists=(beads_dir / JSONL_NAME).is_file(),
+        db=ref.db,
     )
     code = 0
     for i, cmd in enumerate(commands):
@@ -533,9 +762,16 @@ def run(args: List[str], cwd: Optional[str] = None) -> int:
         if code != 0:
             if not last:
                 detail = (proc.stderr or proc.stdout or "").strip()
+                # Two bootstraps share this loop and they fail for different
+                # reasons, so they are named apart: a rebuild reads the
+                # tracked JSONL, a first board reads nothing.
+                what = (
+                    f"rebuilding the board from {JSONL_NAME}"
+                    if (beads_dir / JSONL_NAME).is_file()
+                    else f"creating the board for {ref.name} at {ref.db}"
+                )
                 print(
-                    f"error: rebuilding the board from {JSONL_NAME} failed "
-                    f"at {' '.join(cmd[3:])}: {detail}",
+                    f"error: {what} failed at {' '.join(cmd[3:])}: {detail}",
                     file=sys.stderr,
                 )
             break
@@ -553,13 +789,16 @@ def _cmd(args: argparse.Namespace) -> int:
 def register(sub) -> None:
     p = sub.add_parser(
         "beads",
-        help="the repository's issue board (br), from any worktree",
+        help="the workspace's issue board (br), from any worktree",
         description=(
-            "Run 'br' against this repository's one board: the database at "
-            "<repo root>/.beads/beads.db, found through git's common dir so a "
-            "worktree uses the same board as the main checkout. Writes are "
-            "stamped --actor $CLAUNCH_SESSION. Every argument after 'beads' "
-            "goes to br as-is; 'br --help' lists them."
+            "Run 'br' against this workspace's one board: the database at "
+            "<workspace>/.beads/beads.db, or wherever the Settings page has "
+            "pointed that board, so a worktree uses the same board as the "
+            "main checkout. A directory in no registered workspace uses the "
+            "checkout's own board if it has one, and the 'claunch-default' "
+            "board otherwise. Writes are stamped --actor $CLAUNCH_SESSION. "
+            "Every argument after 'beads' goes to br as-is; 'br --help' "
+            "lists them."
         ),
     )
     p.add_argument(
