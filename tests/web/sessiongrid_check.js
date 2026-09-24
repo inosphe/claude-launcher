@@ -198,4 +198,15 @@ assert.ok(org.setDefault(mesh.id));
 assert.equal(org.row(mesh.id).rule, undefined, "a row made default loses its condition");
 assert.deepEqual(new SessionGridLayout(storage, "org").row(ws.id).rule, { workspace: "/repo" }, "conditions persist");
 assert.equal(new SessionGridLayout(storage, "org").defaultId, mesh.id, "the default row persists");
+
+// The hover/pinned card holds the list's row in its wide layout, so it must
+// be wide enough for that row's first line: at 320px the buttons, the checks
+// refresh and the ▸ wrapped onto a second line on every card (claunch-pua72);
+// measured on the live page, 520px was the first width where none did.
+const css = require("node:fs").readFileSync(
+  require("node:path").join(__dirname, "../../src/claude_launcher/web/static/style.css"), "utf8");
+const tipRule = css.match(/#sg-tip \{[^}]*\}/);
+assert.ok(tipRule, "#sg-tip rule present");
+const tipWidth = Number((tipRule[0].match(/[\s;]width:\s*(\d+)px/) || [])[1]);
+assert.ok(tipWidth >= 520, `#sg-tip is ${tipWidth}px; the card's first line needs at least 520px`);
 console.log("sessiongrid_check: ok");

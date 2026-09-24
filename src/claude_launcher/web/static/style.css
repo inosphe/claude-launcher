@@ -290,10 +290,16 @@ option:disabled { color: #6b7280; }
 #session-grid .sg-add-row:hover { color: #58a6ff; border-color: #58a6ff; }
 /* The grid's hover card: a copy of the list's row for the session, with the
    cell's place on top. The list's card rules are copied onto #sg-tip at
-   run time (sessionGridTipStyles in app.js). */
+   run time (sessionGridTipStyles in app.js).
+   560px because the copy gets the rail's wide layout: sessionGridTipStyles
+   carries @media rules but not the rail's @container rule, so the card's
+   whole first line (name group, meta, + pin eye pencil ⓘ, checks ⟳, the
+   ▸) has to fit in one row. At 320px every card pushed its buttons onto a
+   second line; measured on the live page, 520px was the first width with no
+   such card out of 200, and 560px leaves room for a longer meta. */
 #sg-tip {
   position: fixed; z-index: 1000; pointer-events: none; list-style: none;
-  margin: 0; padding: 0; width: 320px; max-width: calc(100vw - 16px);
+  margin: 0; padding: 0; width: 560px; max-width: calc(100vw - 16px);
   max-height: calc(100vh - 16px); overflow: hidden;
   background: #0d1117; border: 1px solid #30363d; border-radius: 6px;
   box-shadow: 0 6px 20px rgba(0, 0, 0, .5);
