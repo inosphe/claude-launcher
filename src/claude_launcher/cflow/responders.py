@@ -18,13 +18,31 @@ against what was recorded — never a re-resolution. Same rule the mesh applies
 to ``auto_link`` (evaluated at join, stored as an edge): a decision about who
 may act must not change because a session exited or was spawned later.
 
-**A candidate is never something the run made.** The pool excludes the asking
-session and everything below it in the spawn tree, because those are exactly
-what it could have manufactured — it can spawn children, and it can wire itself
-to them (``SessionManager.commands`` runs strictly *down* the tree). It cannot
-spawn a sibling and cannot wire itself to one, so siblings, uncles and roots
-are as safe as ancestors. ``scope: ancestor`` narrows to the chain of command
-for the workflows that want it; it is not what makes this sound.
+**A candidate is never something the run made — unless the workflow says so.**
+The pool excludes the asking session and everything below it in the spawn
+tree, because those are exactly what it could have manufactured — it can spawn
+children, and it can wire itself to them (``SessionManager.commands`` runs
+strictly *down* the tree). It cannot spawn a sibling and cannot wire itself to
+one, so siblings, uncles and roots are as safe as ancestors. ``scope:
+ancestor`` narrows to the chain of command for the workflows that want it; it
+is not what makes this sound. ``scope: descendant`` is the one declared way
+back in: a file a person reviews says that this decision may be staffed by
+the run itself (a review that would otherwise pass unreviewed), and no other
+scope ever reaches below the asking session.
+
+**Hierarchy.** Every other member stands in exactly one relation to the asking
+session, read off the spawn tree the daemon publishes (each member's
+``parent`` is its nearest *enrolled* ancestor):
+
+- *ancestor* — on its parent chain;
+- *descendant* — it is on theirs;
+- *sibling* — same parent. Members with no parent in the mesh are the roots
+  the operator started, and they are siblings of one another: they share the
+  one parent that is not a session;
+- *collateral* — none of those: an uncle, a cousin, a sibling's child. No
+  scope but ``any`` names them. A reviewer another worker spawned for its own
+  work is that worker's, and a narrower scope must never hand it somebody
+  else's question.
 
 **An edge may be made, never widened past the roster.** A candidate that
 declares ``connect: true`` turns "holds the role but is not wired to this run"
@@ -146,10 +164,16 @@ class Pool:
     members: Dict[str, Responder] = field(default_factory=dict)
     #: Handles the asking session may message (its side of the member graph).
     reachable: Set[str] = field(default_factory=set)
-    #: Handles below the asking session in the spawn tree — never candidates.
+    #: Handles below the asking session in the spawn tree — candidates only
+    #: for ``scope: descendant``.
     descendants: Set[str] = field(default_factory=set)
     #: Handles above it, nearest first.
     ancestors: List[str] = field(default_factory=list)
+    #: Handles sharing its parent — or, when it has none, the other roots.
+    siblings: Set[str] = field(default_factory=set)
+    #: Depth below the asking session, per descendant (child = 1), so a
+    #: ``descendant`` group lists its own children before theirs.
+    generation: Dict[str, int] = field(default_factory=dict)
     problem: str = ""
     #: The ``problem`` above is silence rather than a fact — the roster could
     #: not be read this time and may read fine on the next. Callers that spend
@@ -164,14 +188,36 @@ class Pool:
     #: can tell from a deliberate one erases the judgement that made it.
     wired: List[str] = field(default_factory=list)
 
+    def relation(self, handle: str) -> str:
+        """``ancestor`` / ``descendant`` / ``sibling`` / ``collateral`` — how
+        ``handle`` stands to the asking session. See "Hierarchy" above."""
+        if handle in self.ancestors:
+            return "ancestor"
+        if handle in self.descendants:
+            return "descendant"
+        if handle in self.siblings:
+            return "sibling"
+        return "collateral"
+
+    def in_scope(self, scope: str) -> List[str]:
+        """Handles ``scope`` admits, in the order a group lists them."""
+        if scope == model.SCOPE_ANCESTOR:
+            return [h for h in self.ancestors if h in self.members]
+        if scope == model.SCOPE_DESCENDANT:
+            return sorted(
+                (h for h in self.descendants if h in self.members),
+                key=lambda h: (self.generation.get(h, 0), h),
+            )
+        if scope == model.SCOPE_SIBLING:
+            return sorted(h for h in self.siblings if h in self.members)
+        return [h for h in sorted(self.members) if h not in self.descendants]
+
     def eligible(self, candidate: model.Candidate) -> List[Responder]:
         """Members this candidate's role and scope name, reachable or not."""
-        if candidate.scope == model.SCOPE_ANCESTOR:
-            handles = [h for h in self.ancestors if h in self.members]
-        else:
-            handles = [h for h in sorted(self.members) if h not in self.descendants]
         return [
-            self.members[h] for h in handles if self.members[h].holds(candidate.role)
+            self.members[h]
+            for h in self.in_scope(candidate.scope)
+            if self.members[h].holds(candidate.role)
         ]
 
     def match(
@@ -280,16 +326,32 @@ class Pool:
         return wired, failures
 
     def _nobody_holds(self, candidate: model.Candidate) -> str:
-        if candidate.scope == model.SCOPE_ANCESTOR:
-            above = [
-                f"{h} ({self.members[h].role_label()})"
-                for h in self.ancestors
-                if h in self.members
+        if candidate.scope != model.SCOPE_ANY:
+            who = self.me or "this run"
+            where = {
+                model.SCOPE_ANCESTOR: f"no session above {who}",
+                model.SCOPE_SIBLING: f"no sibling of {who}",
+                model.SCOPE_DESCENDANT: f"no session {who} spawned",
+            }[candidate.scope]
+            inside = self.in_scope(candidate.scope)
+            listed = [f"{h} ({self.members[h].role_label()})" for h in inside]
+            found = ", ".join(listed) if listed else "nothing"
+            # Holders in another relation are named with it: "a reviewer
+            # exists but is a cousin" has a different fix (staff your own)
+            # from "nobody holds the role at all".
+            elsewhere = [
+                f"{h} ({self.relation(h)})"
+                for h, m in sorted(self.members.items())
+                if h not in inside and m.holds(candidate.role) and m.answerable
             ]
-            found = ", ".join(above) if above else "nothing"
+            tail = (
+                f"; held outside this scope by {', '.join(elsewhere)}"
+                if elsewhere
+                else ""
+            )
             return (
-                f"no session above {self.me or 'this run'} in mesh "
-                f"{self.mesh!r} holds that role — found {found}"
+                f"{where} in mesh {self.mesh!r} holds that role — found "
+                f"{found}{tail}"
             )
         others = [
             f"{h} ({self.members[h].role_label()})"
@@ -383,6 +445,8 @@ def _pool_from(info: dict, session: str) -> Pool:
         reachable=_reachable(info, me),
         descendants=_descendants(raw, me),
         ancestors=_ancestors(raw, me),
+        siblings=_siblings(raw, me),
+        generation=_generations(raw, me),
         problem="",
     )
 
@@ -462,6 +526,40 @@ def _ancestors(members: Dict[str, dict], me: str) -> List[str]:
     return chain
 
 
+def _parent_of(members: Dict[str, dict], handle: str) -> str:
+    """``handle``'s parent in this roster, or "" for a root.
+
+    A parent that is not a member reads as none — where the upward walk in
+    :func:`_ancestors` stops — so the two never disagree about where a tree
+    begins.
+    """
+    parent = str((members.get(handle) or {}).get("parent") or "")
+    return parent if parent in members and parent != handle else ""
+
+
+def _siblings(members: Dict[str, dict], me: str) -> Set[str]:
+    """Handles sharing ``me``'s parent. Roots share the operator, so a root's
+    siblings are the other roots."""
+    if not me:
+        return set()
+    mine = _parent_of(members, me)
+    return {h for h in members if h != me and _parent_of(members, h) == mine}
+
+
+def _generations(members: Dict[str, dict], me: str) -> Dict[str, int]:
+    """Depth below ``me`` of every descendant: 1 for a child, 2 for its child."""
+    out: Dict[str, int] = {}
+    if not me:
+        return out
+    for handle in members:
+        if handle == me:
+            continue
+        chain = _ancestors(members, handle)
+        if me in chain:
+            out[handle] = chain.index(me) + 1
+    return out
+
+
 def _descendants(members: Dict[str, dict], me: str) -> Set[str]:
     """Every handle below ``me`` in the spawn tree — the excluded set.
 
@@ -501,9 +599,12 @@ def wire(mesh: str, me: str, other: str) -> Optional[str]:
        a file, not a runtime choice, and one a person reviews.
     2. The candidate names a role, and a member of this mesh already holds it.
        Wiring never adds a member, and cannot invent a responder.
-    3. That member is not one this run spawned (``Pool.eligible`` removes its
-       descendants before anything here runs), so a run still cannot
-       manufacture its own approver — the property this module rests on.
+    3. That member is not one this run spawned unless the candidate says
+       ``scope: descendant`` (``Pool.eligible`` removes descendants from every
+       other scope before anything here runs), so a run still cannot
+       manufacture its own approver where the workflow did not allow it — the
+       property this module rests on. A descendant is wired to its parent
+       from birth, so for that scope this bypass has nothing to add.
     4. The member is local and alive, so the edge is one a question can
        actually travel down.
 

@@ -467,9 +467,13 @@ steps:
       # 그 전까지도 사용자의 문은 닫혀 있지 않다: 위 주석대로 병행이다.
       # timeout은 사용자를 기다리는 시계가 아니라 리더가 침묵할 때 질문이
       # 굳지 않게 하는 시계다.
+      # 리더는 [ancestor, sibling] 순서로 찾는다(claunch-zgidu) — 운영자가
+      # 직접 세운 루트 중간 워커에게 리더는 같은 루트인 형제다
+      # (cflow/responders.py Hierarchy). leader는 메시에 하나뿐이다.
       chooser:
         from:
           - {role: leader, scope: ancestor}
+          - {role: leader, scope: sibling}
         otherwise: human
         timeout: 1800
       options:

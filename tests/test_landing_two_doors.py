@@ -40,16 +40,20 @@ def _bundled(name: str) -> Path:
 #: Every copy of a landing that delegates, and who each one delegates to.
 #: The worker ships in two layers (the project one is a regenerated copy, and
 #: a hand-edit to either is how they last drifted); the middle worker ships in
-#: one, and its candidate list is shorter because a middle worker's parent is
-#: always the leader. The pair is checked together on purpose: the two files
+#: one, and its candidate list is shorter because a middle worker answers
+#: to the leader alone — above it, or beside it when the operator started it
+#: as a root (claunch-zgidu). The pair is checked together on purpose: the two files
 #: say of each other that they are the same shape for the same reason, and
 #: that sentence is only true while both carry the rule.
 LAYERS = {
-    "worker/bundled": (lambda: _bundled("improv-worker"), ["worker", "leader"]),
-    "worker/project": (
-        lambda: PROJECT_OVERRIDES / "improv-worker.yaml", ["worker", "leader"]
+    "worker/bundled": (
+        lambda: _bundled("improv-worker"), ["worker", "leader", "leader"]
     ),
-    "mid/bundled": (lambda: _bundled("improv-mid"), ["leader"]),
+    "worker/project": (
+        lambda: PROJECT_OVERRIDES / "improv-worker.yaml",
+        ["worker", "leader", "leader"],
+    ),
+    "mid/bundled": (lambda: _bundled("improv-mid"), ["leader", "leader"]),
 }
 
 
@@ -72,7 +76,12 @@ def test_the_landing_is_still_delegated_upward(landing):
     delegate = step.select.delegate
     assert delegate is not None, "landing stopped delegating"
     assert [c.role for c in delegate.candidates] == roles
-    assert all(c.scope == "ancestor" for c in delegate.candidates)
+    # The chain of command only: an ancestor, or the mesh's one leader
+    # standing beside a root. Never a descendant, never collateral.
+    assert all(
+        c.scope == "ancestor" or (c.role, c.scope) == ("leader", "sibling")
+        for c in delegate.candidates
+    )
     assert delegate.otherwise == model.OTHERWISE_HUMAN
     assert delegate.timeout == 1800
 

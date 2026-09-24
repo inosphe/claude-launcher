@@ -253,7 +253,9 @@ def test_the_worker_rebases_onto_the_target_before_a_request():
     there: the reviewer must read the tree that gets merged, not the one
     before the rebase resolved its conflicts. What this pins is that nothing
     between them commits — the review's only other exit is back to ``work``,
-    which reaches the request through ``rebase`` again.
+    which reaches the request through ``rebase`` again. ``reviewer-ensure``
+    between them staffs the review (claunch-zgidu) and commits nothing: its
+    one exit is ``peer-review``.
     """
     bundled = dict(state_mod.bundled_workflows())
     wf = model.load(bundled["improv-worker"])
@@ -262,7 +264,8 @@ def test_the_worker_rebases_onto_the_target_before_a_request():
     assert request.next == "rebase"
 
     rebase = wf.steps["rebase"]
-    assert rebase.next == "peer-review"
+    assert rebase.next == "reviewer-ensure"
+    assert wf.steps["reviewer-ensure"].next == "peer-review"
     review = wf.steps["peer-review"].select.options
     assert review["pass"].next == "integration-request"
     assert review["changes"].next == "work"
@@ -292,28 +295,37 @@ def _peer_review_candidates(path_or_text):
     return model.load(path_or_text).steps["peer-review"].select.delegate.candidates
 
 
+#: peer-review's groups, in order (claunch-zgidu): reviewer by
+#: [descendant, sibling, ancestor], then leader by [ancestor, sibling].
+PEER_REVIEW_ORDER = [
+    ("reviewer", model.SCOPE_DESCENDANT, False),
+    ("reviewer", model.SCOPE_SIBLING, True),
+    ("reviewer", model.SCOPE_ANCESTOR, False),
+    ("leader", model.SCOPE_ANCESTOR, False),
+    ("leader", model.SCOPE_SIBLING, False),
+]
+
+
 def test_peer_review_wires_itself_to_the_reviewer_it_cannot_reach():
-    """The reviewer group must not be empty by default.
+    """The review is asked by relation, nearest-trusted first, and never of a
+    collateral reviewer.
 
-    A spawned session is wired to its parent and to nobody else, so a worker
-    cannot reach a sibling reviewer: the first group is skipped for want of an
-    edge and the decision falls to the leader — the same session that receives
-    the landing request, which is what this door exists to happen before. The
-    declaration makes the edge rather than skipping the group.
+    The worker's own reviewer comes first — ``reviewer-ensure`` spawns one
+    when nobody else is there. A sibling reviewer is next, and only that group
+    wires: a spawned session is wired to its parent and to nobody else, so
+    without ``connect`` a sibling reviewer is skipped for want of an edge and
+    the decision falls to the leader — the same session that receives the
+    landing request, which is what this door exists to happen before.
 
-    The second group must NOT carry it. Landing is an authority decision and
-    is held to `scope: ancestor`; building a path out of the run's own chain
-    of command is the thing that scope refuses.
+    The leader groups must NOT carry it. The leader is the chain of command
+    landing is held to; building a path to it is the thing that scope refuses.
+    No group is ``any``: that scope used to hand one worker's question to a
+    reviewer another worker had spawned for its own work (mesh-0826
+    msg-682c7d7e9b77).
     """
     bundled = dict(state_mod.bundled_workflows())
-    reviewer, leader = _peer_review_candidates(bundled["improv-worker"])
-
-    assert (reviewer.role, reviewer.connect) == ("reviewer", True)
-    assert (leader.role, leader.scope) == ("leader", "ancestor")
-    assert leader.connect is False, (
-        "a decision reserved for the chain of command must not manufacture a "
-        "path to somebody outside it"
-    )
+    groups = _peer_review_candidates(bundled["improv-worker"])
+    assert [(c.role, c.scope, c.connect) for c in groups] == PEER_REVIEW_ORDER
 
     prose = model.load(bundled["improv-worker"]).steps["peer-review"].select.prompt
     assert prose, "the peer-review prompt is what the responder reads"
@@ -323,9 +335,8 @@ def test_the_project_override_carries_the_peer_review_wiring():
     """This repository's override shadows the bundled worker, so a run here
     follows the project file — the declaration has to survive the layer or the
     fix is only true for repositories that have no override."""
-    reviewer, leader = _peer_review_candidates(PROJECT_OVERRIDES / "improv-worker.yaml")
-    assert (reviewer.role, reviewer.connect) == ("reviewer", True)
-    assert leader.connect is False
+    groups = _peer_review_candidates(PROJECT_OVERRIDES / "improv-worker.yaml")
+    assert [(c.role, c.scope, c.connect) for c in groups] == PEER_REVIEW_ORDER
 
 
 def test_the_project_override_worker_requests_through_a_rebase():
@@ -336,7 +347,8 @@ def test_the_project_override_worker_requests_through_a_rebase():
 
     request = wf.steps["landing"].select.options["request"]
     assert request.next == "rebase"
-    assert wf.steps["rebase"].next == "peer-review"
+    assert wf.steps["rebase"].next == "reviewer-ensure"
+    assert wf.steps["reviewer-ensure"].next == "peer-review"
     assert (
         wf.steps["peer-review"].select.options["pass"].next == "integration-request"
     )
@@ -1527,11 +1539,16 @@ def _landing_route(wf):
     [
         # A worker's parent is a mid worker (role ``worker``) in a stacked
         # formation and the leader in a flat one; the groups are tried in
-        # order, so the same file covers both shapes.
+        # order, so the same file covers both shapes. A root the operator
+        # started has no parent, and the leader is its sibling — the leader
+        # is found by [ancestor, sibling] (claunch-zgidu).
         ("improv-worker", [("worker", model.SCOPE_ANCESTOR),
-                           ("leader", model.SCOPE_ANCESTOR)]),
-        # A mid worker is only ever spawned by the leader.
-        ("improv-mid", [("leader", model.SCOPE_ANCESTOR)]),
+                           ("leader", model.SCOPE_ANCESTOR),
+                           ("leader", model.SCOPE_SIBLING)]),
+        # A mid worker is spawned by the leader, or started by the operator
+        # as a root beside it.
+        ("improv-mid", [("leader", model.SCOPE_ANCESTOR),
+                        ("leader", model.SCOPE_SIBLING)]),
     ],
 )
 def test_landing_is_decided_by_the_session_above_not_by_a_person(name, roles):
@@ -1550,8 +1567,8 @@ def test_landing_is_decided_by_the_session_above_not_by_a_person(name, roles):
 
     It is not ``chooser: agent`` either: ``hold`` skips the rebase and the
     evidence bundle, so chooser and beneficiary would be the same party.
-    ``scope: ancestor`` keeps it that way from the other side — a run cannot
-    stand up a descendant to approve itself.
+    ``scope: ancestor``/``sibling`` keep it that way from the other side — a
+    run cannot stand up a descendant to approve itself.
     """
     wf = model.load(dict(state_mod.bundled_workflows())[name])
     candidates, otherwise, timeout = _landing_route(wf)
@@ -1575,6 +1592,7 @@ def test_the_project_override_worker_lands_through_the_same_delegation():
     assert candidates == [
         ("worker", model.SCOPE_ANCESTOR),
         ("leader", model.SCOPE_ANCESTOR),
+        ("leader", model.SCOPE_SIBLING),
     ]
     assert otherwise == model.OTHERWISE_HUMAN
 

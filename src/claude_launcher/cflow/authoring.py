@@ -138,16 +138,32 @@ meant to be paged.
 
 - **`role` is required.** A delegation is to a function. "Whoever I happen to
   be wired to" would make the answer depend on topology alone.
-- **`scope: ancestor`** narrows to the asking session's own chain of command.
-  Use it for authority decisions (shipping, spending, releasing); leave the
-  default `any` for competence decisions (reviewing), where a sibling is the
-  normal and best answer.
+- **`scope` names a relation in the spawn tree.** Every other member is the
+  asking session's *ancestor* (on its parent chain), *descendant* (below it),
+  *sibling* (same parent — parentless roots of one mesh are siblings of each
+  other) or *collateral* (none of those: an uncle, a cousin, a sibling's
+  child). `scope: ancestor`, `sibling` and `descendant` each admit one
+  relation; the default `any` admits everything but descendants, collateral
+  included. Order the relations with groups, nearest-trusted first:
+  `from: [{role: reviewer, scope: descendant}, {role: reviewer, scope:
+  sibling}, {role: reviewer, scope: ancestor}, {role: leader, scope:
+  ancestor}, {role: leader, scope: sibling}]`. Use `ancestor` (and, for a
+  mesh's single leader, `sibling`) for authority decisions — shipping,
+  spending, releasing. Prefer named relations over `any` for competence
+  decisions too: `any` hands a question to a reviewer some other session
+  spawned for its own work.
 - **A human is never an entry in `from`.** Nothing resolves or notifies them.
   An `ask:` with no `from` at all is exactly a human gate — which is what the
   deprecated `gate:` becomes.
 - **Nobody can approve their own run**, and a session's own descendants are
-  never candidates, so spawning a `reviewer1` to pass your own work does not
-  work. Do not try to design around this; design with it.
+  candidates only where a group says `scope: descendant`. Write that only on a
+  competence decision the run may staff itself — a review that would pass
+  unreviewed without it (`otherwise: self:pass`) — never on one that grants
+  authority, where spawning a `reviewer1` to pass your own work is exactly
+  what the exclusion stops. `claunch cflow responders <step> [--role R]`
+  reads, mid-run, whether a step's groups would reach anybody: a step before
+  the question (improv-worker's `reviewer-ensure`) uses its exit code to
+  decide whether to spawn that reviewer.
 - **Reach is deliberate.** A spawned session is wired to its parent and nobody
   else, so a sibling reviewer is reachable only once somebody connects them
   (`claunch mesh connect dev1 rev1`). Write the workflow for the shape you

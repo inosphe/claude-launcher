@@ -108,7 +108,13 @@ def test_the_escalation_still_carries_the_full_delegation(layer):
     assert review.chooser == "delegate", f"{label}: landing-review stopped delegating"
     assert review.delegate.otherwise == model.OTHERWISE_HUMAN
     assert review.delegate.timeout == 1800
-    assert all(c.scope == model.SCOPE_ANCESTOR for c in review.delegate.candidates)
+    # The chain of command only: an ancestor, or the mesh's one leader beside
+    # a root (claunch-zgidu). Never a descendant, never collateral.
+    assert all(
+        c.scope == model.SCOPE_ANCESTOR
+        or (c.role, c.scope) == ("leader", model.SCOPE_SIBLING)
+        for c in review.delegate.candidates
+    )
     assert review.options["request"].next == request_next
     assert review.options["hold"].next == "wrapup"
 
