@@ -200,8 +200,12 @@ DIRTY_CHECKOUT = 4
 #: an issue left ``in_progress`` missed it, and one merged a round earlier
 #: but not yet closed read the next round's notice as a re-measure request
 #: (claunch-dlq0o; s753 re-ran rebase and peer review on landed work).
-#: Opt-in, for the reason ``4`` is: the leader's preflight and the rebase
-#: gate read ``0`` as "nothing blocks", and a landed branch is that.
+#: Opt-in, for the reason ``4`` is: callers that ask only "does anything
+#: block this merge" -- the leader's preflight, ``merge.yaml`` -- read ``0``
+#: as that, and for them a landed branch is that. The worker's rebase gate
+#: turns it on as well, because this repository's project layer holds that
+#: gate and the await-landing probe to one command; there ``5`` refuses the
+#: step, and the step's instructions say where a landed branch goes instead.
 LANDED = 5
 
 #: The target a branch integrates into when nothing says otherwise. A nested

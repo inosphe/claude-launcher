@@ -1656,6 +1656,12 @@ def test_a_landing_reaches_the_worker_whatever_its_board_state():
         prompt = worker.steps["await-landing"].select.prompt
         assert "merge-base --is-ancestor" in prompt
         assert "착지(landed)로" in prompt
+        # The rebase gate answers 5 for a landed tip in this repository, and
+        # that step has no branch to `landed` -- so its instructions have to
+        # name the way out, or a worker that arrives there stands still.
+        rebase = worker.steps["rebase"].instructions
+        assert "landed(5)" in rebase
+        assert "request_goto" in rebase
     for leader in (
         model.load(bundled["improv-leader"]),
         model.load(PROJECT_OVERRIDES / "improv-leader.yaml"),
@@ -1663,3 +1669,7 @@ def test_a_landing_reaches_the_worker_whatever_its_board_state():
         integrate = leader.steps["integrate"].instructions
         assert "자기 tip이 이미 master에 있으면" in integrate
         assert "in_review가 아닌 것" in integrate
+        # The notice says "already in master -> landed"; the transition after
+        # it has to agree, or the leader files REMEASURE REQUESTED on an issue
+        # that landed a round earlier and moves it back to in_progress.
+        assert "MERGED 코멘트가 이미 달린 이슈는 목록 밖이어도" in integrate
