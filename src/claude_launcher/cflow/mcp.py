@@ -443,8 +443,11 @@ TOOLS = [
 #: ``run`` argument: absent (or "main") they are about the main run, exactly
 #: as before sub runs existed; a sub run's name makes the same call about
 #: that side track. The schema property is grafted here rather than typed
-#: into seven tool definitions, so the eight cannot drift apart.
-_RUN_TOOLS = ("start", "report", "next", "select", "status", "recall", "request_goto")
+#: into each tool definition, so they cannot drift apart.
+_RUN_TOOLS = (
+    "start", "report", "next", "select", "status", "recall", "request_goto",
+    "set_state", "landing_queue",
+)
 
 _RUN_PROPERTY = {
     "type": "string",

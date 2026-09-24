@@ -702,9 +702,32 @@ class Awaits:
     #: cannot get the command wrong and so the payload can say what is
     #: awaited in the run's own terms.
     sub: Optional[str] = None
+    #: ``awaits: {sub: <name>, at: <milestone>}`` — wait for that sub run to
+    #: PUBLISH ``milestone`` (a step's ``publishes:``) again, rather than to
+    #: finish. "Again" is measured against what this step consumed: the
+    #: milestone's publication count is recorded when the step is left, and
+    #: the wait is over when the count has moved past that record. So a
+    #: publication made while the step was being approached, or while it was
+    #: left and not yet re-entered, still counts — a handshake cannot be
+    #: missed by arriving late.
+    at: Optional[str] = None
+    #: ``awaits: {main: <milestone>}`` — a SUB run's step waits for its main
+    #: run to publish ``milestone`` again, under the same consumed rule. The
+    #: one direction a sub run may wait: it reads the main run, it never
+    #: holds it (a main run's gates do not read this).
+    main: Optional[str] = None
+
+    @property
+    def milestone(self) -> Optional[str]:
+        """The milestone this await is for, whichever direction."""
+        return self.at or self.main
 
     def command(self, step: "Step") -> Optional[str]:
         """The command to actually run, resolving the reserved spellings."""
+        if self.main is not None:
+            return f"claunch cflow published {MAIN_RUN_NAME} {self.main} --step {step.id}"
+        if self.at is not None:
+            return f"claunch cflow published {self.sub} {self.at} --step {step.id}"
         if self.sub is not None:
             if self.sub == SUB_ALL:
                 return "claunch cflow sub-done --all"
@@ -1075,6 +1098,14 @@ class Step:
     #: back is ``awaits: {sub: <name>}`` or a checklist item running
     #: ``claunch cflow sub-done <name>``. See :class:`SubflowRef`.
     subflows: Tuple["SubflowRef", ...] = ()
+    #: Milestones this step PUBLISHES when it is left by the run's own
+    #: progress (a person's ``goto`` away publishes nothing): each name's
+    #: publication count goes up by one. The other run of the same scope
+    #: reads it with ``awaits: {sub: <name>, at: <milestone>}`` (main reading
+    #: a sub run) or ``awaits: {main: <milestone>}`` (a sub run reading its
+    #: main run), and a checklist can ask the same with
+    #: ``claunch cflow published``.
+    publishes: Tuple[str, ...] = ()
     next: Optional[str] = None  # None = termination (non-select steps)
     #: Pass straight through this step to :attr:`next` on entry. Static here
     #: (an ``extends`` overlay can set it for one run's composition); a run
@@ -1370,11 +1401,10 @@ def _validate_subflow(workflow: "Workflow") -> None:
         )
     if workflow.default_role:
         raise WorkflowError(f"{where} may not declare 'default_role'")
-    if workflow.landing_queue is not None:
-        raise WorkflowError(
-            f"{where} may not declare 'landing_queue' (children land on the "
-            f"session's main run)"
-        )
+    # `landing_queue` is allowed: a sub run that manages the session's
+    # children (a stack) is where their landing requests belong. Only one run
+    # of a scope may hold the queue — refused at start, when both definitions
+    # are known (engine.start_sub).
     escalating = sorted(s.id for s in workflow.steps.values() if s.escalate is not None)
     if escalating:
         raise WorkflowError(
@@ -1678,6 +1708,16 @@ def parse_doc(doc: dict, *, default_name: str = "workflow") -> Workflow:
     _validate_graph(workflow)
     if kind == KIND_SUBFLOW:
         _validate_subflow(workflow)
+    else:
+        reading_main = sorted(
+            s.id for s in workflow.steps.values() if s.awaits is not None and s.awaits.main
+        )
+        if reading_main:
+            raise WorkflowError(
+                f"step(s) {', '.join(reading_main)}: 'awaits: {{main}}' reads the "
+                f"main run from a sub run — only a 'kind: {KIND_SUBFLOW}' "
+                f"definition has a main run to read"
+            )
     return Workflow(
         name=workflow.name,
         description=workflow.description,
@@ -1993,6 +2033,7 @@ def _parse_step(step_id: str, raw) -> Step:
     select = _parse_select(raw.get("select"), step_id)
     escalate = _parse_escalate(raw.get("escalate"), step_id)
     subflows = _parse_subflows(raw.get("subflows"), step_id)
+    publishes = _parse_publishes(raw.get("publishes"), step_id)
     if checklist is not None:
         # Every one of these is the same refusal: a checklist step's exit is
         # its items going green, and a second way out is a way past a
@@ -2050,6 +2091,7 @@ def _parse_step(step_id: str, raw) -> Step:
         awaits is not None
         and awaits.probe is None
         and awaits.sub is None
+        and awaits.main is None
         and verify is None
         and select is None  # a select step gets the sharper message below
     ):
@@ -2072,7 +2114,10 @@ def _parse_step(step_id: str, raw) -> Step:
                 f"step {step_id!r}: 'done_when' is not allowed on a select "
                 f"step — its completion is the choice itself"
             )
-        if awaits is not None and awaits.probe is None and awaits.sub is None:
+        if (
+            awaits is not None and awaits.probe is None and awaits.sub is None
+            and awaits.main is None
+        ):
             raise WorkflowError(
                 f"step {step_id!r}: 'awaits: {AWAITS_VERIFY}' has nothing to "
                 f"re-measure on a select step — a select step takes no "
@@ -2102,6 +2147,7 @@ def _parse_step(step_id: str, raw) -> Step:
         select=select,
         escalate=escalate,
         subflows=subflows,
+        publishes=publishes,
         next=_parse_next(raw.get("next"), step_id),
         skip=skip,
     )
@@ -2423,6 +2469,34 @@ def _parse_verify(raw, step_id: str) -> Optional[Verify]:
     )
 
 
+def _parse_milestone_name(raw, step_id: str, where: str) -> Optional[str]:
+    """A milestone name (``publishes:``, ``awaits.at``, ``awaits.main``):
+    spelled like a run name, so it is one token in a probe command line."""
+    if raw is None:
+        return None
+    name = str(raw).strip()
+    if not _SUB_NAME_RE.match(name):
+        raise WorkflowError(
+            f"step {step_id!r}: {where!r} must be a milestone name (letters, "
+            f"digits, '.', '_', '-'), got {raw!r}"
+        )
+    return name
+
+
+def _parse_publishes(raw, step_id: str) -> Tuple[str, ...]:
+    """``publishes: <name>`` or a list of names."""
+    if raw is None:
+        return ()
+    items = raw if isinstance(raw, list) else [raw]
+    out: List[str] = []
+    for item in items:
+        name = _parse_milestone_name(item, step_id, "publishes")
+        if name in out:
+            raise WorkflowError(f"step {step_id!r}: 'publishes' names {name!r} twice")
+        out.append(name)
+    return tuple(out)
+
+
 def _parse_awaits(raw, step_id: str) -> Optional[Awaits]:
     """Parse a step's ``awaits``: the reserved word, or a mapping.
 
@@ -2449,15 +2523,29 @@ def _parse_awaits(raw, step_id: str) -> Optional[Awaits]:
         raise WorkflowError(
             f"step {step_id!r}: 'awaits' must be the word {AWAITS_VERIFY!r} "
             f"(re-measure this step's own verify) or a mapping "
-            f"{{probe, poll, timeout, describe}} or {{sub, poll, timeout, "
-            f"describe}} — got {raw!r}. A command is written as "
+            f"{{probe, poll, timeout, describe}}, {{sub, at?, poll, timeout, "
+            f"describe}} or {{main, poll, timeout, describe}} — got {raw!r}. "
+            f"A command is written as "
             f"{{probe: '<command>'}}, never as a bare string"
         )
-    unknown = sorted(set(raw) - {"probe", "sub", "poll", "timeout", "describe"})
+    unknown = sorted(set(raw) - {"probe", "sub", "at", "main", "poll", "timeout", "describe"})
     if unknown:
         raise WorkflowError(
             f"step {step_id!r}: 'awaits' has unknown key(s): "
-            f"{', '.join(unknown)} (allowed: probe, sub, poll, timeout, describe)"
+            f"{', '.join(unknown)} (allowed: probe, sub, at, main, poll, "
+            f"timeout, describe)"
+        )
+    at = _parse_milestone_name(raw.get("at"), step_id, "awaits.at")
+    main = _parse_milestone_name(raw.get("main"), step_id, "awaits.main")
+    if main is not None and ("sub" in raw or "probe" in raw):
+        raise WorkflowError(
+            f"step {step_id!r}: 'awaits.main' waits on the main run's "
+            f"milestone and takes neither 'sub' nor 'probe'"
+        )
+    if at is not None and raw.get("sub") is None:
+        raise WorkflowError(
+            f"step {step_id!r}: 'awaits.at' names a milestone of a sub run — "
+            f"give the run as 'sub'"
         )
     sub = raw.get("sub")
     if sub is not None:
@@ -2471,6 +2559,11 @@ def _parse_awaits(raw, step_id: str) -> Optional[Awaits]:
             raise WorkflowError(
                 f"step {step_id!r}: 'awaits.sub' must be a sub run name or the "
                 f"word {SUB_ALL!r}, got {sub!r}"
+            )
+        if at is not None and sub == SUB_ALL:
+            raise WorkflowError(
+                f"step {step_id!r}: 'awaits.at' reads ONE sub run's milestone — "
+                f"name the run, not {SUB_ALL!r}"
             )
     probe = raw.get("probe")
     if probe is None or (isinstance(probe, str) and probe.strip() == AWAITS_VERIFY):
@@ -2522,6 +2615,8 @@ def _parse_awaits(raw, step_id: str) -> Optional[Awaits]:
     return Awaits(
         probe=probe,
         sub=sub,
+        at=at,
+        main=main,
         poll=poll,
         timeout=timeout,
         describe=describe.strip() if describe else None,

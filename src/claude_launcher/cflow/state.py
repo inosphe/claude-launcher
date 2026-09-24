@@ -80,6 +80,11 @@ LAYER_FILE = "file"
 
 #: Environment variable the daemon sets in every managed session.
 SESSION_ENV = "CLAUNCH_SESSION"
+#: Which run of the session a daemon-launched probe or check is for, when it
+#: is a SUB run's (unset for the main run). Read by ``claunch cflow
+#: published`` so a sub run's ``awaits: {main}`` probe consumes against the
+#: sub run's own record.
+RUN_ENV = "CLAUNCH_CFLOW_RUN"
 
 #: Scope used outside any managed session (and for pre-scope layouts).
 DEFAULT_SCOPE = "default"
@@ -355,6 +360,18 @@ def known_sub_runs() -> List[Tuple[str, str, str]]:
     """Registered ``(cwd, scope, run)`` triples of sub runs still holding
     run state (pruned on read)."""
     return [(e["cwd"], e["scope"], e["run"]) for e in _alive_entries() if e.get("run")]
+
+
+def known_slots() -> List[Tuple[str, str, Optional[str]]]:
+    """Every registered run slot as ``(cwd, scope, run)``: main runs first
+    with ``run`` None, then sub runs by name. The daemon clocks that act on
+    a run's own position (an ask's expiry, a held window, a timer, a
+    checklist gate, a queued trigger) walk this, so a sub run's delegated
+    decision times out and its gate opens exactly as a main run's does."""
+    alive = _alive_entries()
+    return [(e["cwd"], e["scope"], None) for e in alive if not e.get("run")] + [
+        (e["cwd"], e["scope"], e["run"]) for e in alive if e.get("run")
+    ]
 
 
 def _read_registry() -> List[Dict[str, str]]:

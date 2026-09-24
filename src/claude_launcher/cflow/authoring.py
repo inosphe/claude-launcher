@@ -632,6 +632,59 @@ or was aborted, 2 when no such sub run stands — the third answer is kept
 apart so a gate waiting on a run nobody started does not wait forever.
 `--all` exits 0 when nothing is still running (none, or all finished).
 
+### Sync points — `publishes:` and `awaits: {sub, at}` / `awaits: {main}`
+
+When the two runs must meet more than once (a sub run that lives for the
+whole session and hands the main run a result every round), wait on a
+MILESTONE instead of on the end. A step `publishes: <name>` (or a list) when
+the run leaves it by its own progress — a person's `goto` away publishes
+nothing. The other run reads it:
+
+```yaml
+# the main workflow
+request:
+  instructions: ask the stack for a cut
+  publishes: cut-wanted
+  next: land
+land:
+  instructions: land what the cut holds
+  awaits: {sub: stack, at: cut}
+  next: review
+```
+
+```yml
+# the sub definition (kind: subflow, started as sub run `stack`)
+standby:
+  instructions: keep the stack
+  awaits: {main: cut-wanted}
+  next: cut
+cut:
+  instructions: split the table into what lands now and what waits
+  publishes: cut
+  next: standby
+```
+
+A wait is counted, not timed: leaving an awaiting step records how many
+publications it has seen, and the wait is over when the count moves past
+that record — so a publication made before the reader got there is still
+waiting for it. The probe is `claunch cflow published <main|sub> <milestone>
+--step <step>`: exit 0 = something new, 1 = not yet, 2 = that run does not
+stand; a checklist item can run the same command. `awaits: {main}` is only
+for a `kind: subflow` definition, and a sub run still never waits on another
+sub run. When each side's current step waits on the other and neither has
+anything new, the daemon reports a **sync deadlock** once (journal
+`sync_deadlock` in both runs) and moves nothing.
+
+The daemon drives a sub run's own position like a main run's: an ask's
+expiry, a held window, a timer, a checklist gate, its triggers, and its
+`awaits` signal (every notice names the run: `run: <name>`). What it does
+not do is restate a sub run's step on the reminder clock — the terminal is
+shared, and the main run's reminder is the one it gives. A sub definition
+may declare `landing_queue:` (a sub run that manages the session's children
+is where their landing requests belong); one run per scope may hold it,
+refused at start, and a child's `enqueue-landing` goes to whichever run
+holds it.
+
 ### What the main run's end does to them
 
 Finishing, aborting or archiving the main run — and a forced restart of it —
