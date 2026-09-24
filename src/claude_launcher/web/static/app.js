@@ -17918,7 +17918,7 @@ function sessBeadsPanel(data) {
   box.appendChild(el("p", "wf-note",
     "Every issue on this workspace's board that names this session — the " +
     "recorded link, its assignee, its creator, or an `issue: <id>` in the " +
-    "opening task — in a lane per status. Writes are the session's own " +
+    "opening task — one status group per line. Writes are the session's own " +
     "(`claunch beads …`): this panel moves nothing on the board. Its one " +
     "write is the form below, which files a new issue as yours and assigns " +
     "it to this session."));
