@@ -111,6 +111,10 @@ function ctxSentence() { return ""; }
 function ctxBreakdown() { return ""; }
 function sessHead() { return el("div", "sess-head"); }
 function sessRailTabs() { return el("div", "sess-rail-tabs"); }
+/* The Details sub-tabs and their group heads — sesslayout_check and
+   sesssubtabs_check are their harnesses; here they only have to resolve. */
+function sessDetailTabs() { return el("div", "sess-subtabs"); }
+function sessGroupHead(g) { return el("h2", "sess-group-head", g); }
 function sessWorkflow() { return el("div", "sess-wf"); }
 function sessBeadsPanel() { return el("div", "sess-beads-panel"); }
 function sessBriefSection() { return el("div", "sess-brief"); }

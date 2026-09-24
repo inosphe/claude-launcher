@@ -358,7 +358,7 @@ check("...and a disabled one that still shows its value",
 check("the row wraps rather than shrinking the labels",
       /\.sess-flag-row \{[^}]*flex-wrap: wrap/.test(css), true);
 check("the box is one of the panel's cards",
-      /\.sess-flags \{/.test(css), true);
+      /\.sess-flags[,\s][^{]*\{[^}]*border-radius/.test(css), true);
 
 if (failures) process.exit(1);
 console.log("sessflags_check: ok");

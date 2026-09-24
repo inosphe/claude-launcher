@@ -12107,6 +12107,19 @@ const SPLIT_DEFAULT = 0.6;   // the terminal's share of the column
 const SPLIT_MIN = 0.2;       // past either end the loser is too short to read
 const SPLIT_MAX = 0.8;
 
+/* The Details panel's sub-tabs: `all` draws every section in one column,
+   grouped under the other four's names; each of the four draws its group
+   alone. Order here is the order of the bar and of the groups under `all`.
+   Which sections belong to which group is renderSession's to say. */
+const DETAIL_SUBTABS = [
+  ["all", "All", "every section, grouped"],
+  ["overview", "Overview", "what this session is: metadata, flags, note, task, briefing"],
+  ["messages", "Messages", "speaking to it: input journal, hand off, send, queue, meshes"],
+  ["work", "Work", "what it did: beads, commits, and its role's panels"],
+  ["settings", "Settings", "changing how it runs: auth, permissions, worktree"],
+];
+const DETAIL_SUBTAB_IDS = new Set(DETAIL_SUBTABS.map(([id]) => id));
+
 function clampSplitRatio(x) {
   if (!Number.isFinite(x)) return SPLIT_DEFAULT;
   return Math.min(SPLIT_MAX, Math.max(SPLIT_MIN, Math.round(x * 1000) / 1000));
@@ -12129,6 +12142,7 @@ function sessLayoutFor(name) {
   const raw = (name && loadSessLayouts()[name]) || {};
   return {
     rail: raw.rail === "wf" || raw.rail === "beads" ? raw.rail : "detail",
+    sub: DETAIL_SUBTAB_IDS.has(raw.sub) ? raw.sub : "all",
     split: !!raw.split,
     ratio: clampSplitRatio(Number(raw.ratio)),
   };
@@ -23236,6 +23250,38 @@ function sessRailTabs(name) {
   return bar;
 }
 
+/* The Details panel's second radio: All, or one group of its sections.
+   Drawn under the panel radio, smaller, so the two read as a level and the
+   level under it. Same lit-and-dead rule as the bar above; the choice is the
+   session's, remembered with its layout (sessLayoutFor). */
+function sessDetailTabs(name) {
+  const bar = el("div", "seq-tabs sess-subtabs");
+  bar.setAttribute("role", "tablist");
+  const cur = sessLayoutFor(name).sub;
+  for (const [id, label, title] of DETAIL_SUBTABS) {
+    const on = cur === id;
+    const tab = el("button", "seq-tab" + (on ? " on" : ""), label);
+    tab.setAttribute("role", "tab");
+    tab.setAttribute("aria-selected", on ? "true" : "false");
+    tab.title = title;
+    if (!on) {
+      tab.addEventListener("click", () => {
+        setSessLayout(name, { sub: id });
+        refreshSession();   // redraw now, not at the poll's leisure
+      });
+    }
+    bar.appendChild(tab);
+  }
+  return bar;
+}
+
+/* A group's name, drawn above its sections under the All sub-tab only — in a
+   single group's tab the lit sub-tab already says it. */
+function sessGroupHead(id) {
+  const row = DETAIL_SUBTABS.find(([k]) => k === id);
+  return el("h2", "sess-group-head", row ? row[1] : id);
+}
+
 /* What this session was asked to do, in the words it was asked in.
 
    The record was always there — `SessionDef.task`, kept so a re-briefing can
@@ -23500,200 +23546,225 @@ function renderSession(data) {
     return;
   }
 
-  const dl = el("dl", "sess-meta");
-  metaRow(
-    dl, "profile / harness", profileHarnessLabel(s.profile, s.harness),
-    (data.harness || {}).description
-  );
-  // Whose token it actually runs on, when that is not the profile's own —
-  // invisible from the terminal, and reapplied on every restore.
-  metaRow(dl, "borrow", s.borrow, "another profile's token; the config stays this profile's");
-  if (s.null_token) metaRow(dl, "auth", "--null (no OAuth token injected)");
-  // Whose this session is. Near the top because it changes how everything
-  // below it reads: an inherited mesh and a scoped run are the parent's
-  // arrangement, not choices this session made.
-  metaRow(dl, "spawned by", s.parent, "the session that created this one");
-  // A quick-fork is a child with one more fact: whose conversation it is a
-  // copy of, which is also where its merge goes.
-  metaRow(
-    dl, "quick-fork of", s.quick_fork_of,
-    "this session is a copy of that session's conversation, marked 'forked " +
-    "from here'; merge sends its wrap-up back there"
-  );
-  metaRow(
-    dl, "role", data.role ? data.role.name : (s.role || "free-role"),
-    data.role ? data.role.stance : ""
-  );
-  // Beside the role, because the two are one fact between them: what this
-  // session is on a mesh, and what it is called there. Spelt out as a row
-  // rather than left to the head's chip so it can say WHICH room each name
-  // belongs to — the chip has room for one word and a count.
-  const handles = sessHandles(s.name || "");
-  if (handles.length) {
+  // The Details panel is four groups of sections under one more radio: All
+  // draws the four in order, each under its name; any other sub-tab draws its
+  // group alone. A group not on screen is not built at all — its sections'
+  // fetches are for a reader who is looking at them.
+  view.appendChild(sessDetailTabs(name));
+  const sub = sessLayoutFor(name).sub || "all";
+  const show = (group) => {
+    if (sub !== "all" && sub !== group) return false;
+    if (sub === "all") view.appendChild(sessGroupHead(group));
+    return true;
+  };
+
+  if (show("overview")) {
+    const dl = el("dl", "sess-meta");
     metaRow(
-      dl, "mesh handle",
-      handles.map((h) => `${h.handle} (in ${h.mesh})`).join(", "),
-      "the name this session joined its mesh under — messages to it are " +
-      "addressed to this, not to the session name"
+      dl, "profile / harness", profileHarnessLabel(s.profile, s.harness),
+      (data.harness || {}).description
     );
-  }
-  // A `--worktree` session sits inside its workspace rather than at its root,
-  // so say which of the two it is: "workspace X" and "in X / wt-name" are
-  // different facts, and reading the second as the first would have the
-  // operator looking for their branch in the wrong checkout.
-  metaRow(
-    dl, "directory",
-    data.workspace
-      ? data.workspace_subpath
-        ? `${s.cwd}  (in workspace ${data.workspace.name} / ${data.workspace_subpath})`
-        : `${s.cwd}  (workspace ${data.workspace.name})`
-      : s.cwd,
-    s.cwd
-  );
-  // The checkout's branch, beside the directory — the one thing the
-  // directory's tail cannot say: two sessions from one worktree share the
-  // same path, and only the branch tells them apart.
-  metaRow(
-    dl, "branch", s.branch,
-    "the git branch checked out in the session's directory"
-  );
-  metaRow(dl, "conversation", s.conversation_id, "claude --session-id");
-  // Which model is answering in it — above the size for the same reason the
-  // gauge line leads with it: the count means different things on different
-  // models, and this is the only place outside the terminal that says. Its
-  // own row rather than a clause inside the context sentence, because it is
-  // the fact people open this panel to check, and a full dated id has no
-  // business being read out of the middle of a sentence about tokens.
-  metaRow(
-    dl, "model", modelSentence(s),
-    "the model of the latest context reading — claude's transcript or " +
-    "codex's rollout; a /model switch shows here once the next turn finishes"
-  );
-  // Under the conversation, because it is a fact about the conversation and
-  // not about the process: how much of it the harness last carried.
-  metaRow(dl, "context", ctxSentence(s), ctxBreakdown(s.context));
-  if (s.resume !== null && s.resume !== undefined) {
+    // Whose token it actually runs on, when that is not the profile's own —
+    // invisible from the terminal, and reapplied on every restore.
+    metaRow(dl, "borrow", s.borrow, "another profile's token; the config stays this profile's");
+    if (s.null_token) metaRow(dl, "auth", "--null (no OAuth token injected)");
+    // Whose this session is. Near the top because it changes how everything
+    // below it reads: an inherited mesh and a scoped run are the parent's
+    // arrangement, not choices this session made.
+    metaRow(dl, "spawned by", s.parent, "the session that created this one");
+    // A quick-fork is a child with one more fact: whose conversation it is a
+    // copy of, which is also where its merge goes.
     metaRow(
-      dl, "opened",
-      (s.resume === "" ? "conversation picker" : `resume ${s.resume}`) +
-      (s.fork_session ? " (forked)" : "")
+      dl, "quick-fork of", s.quick_fork_of,
+      "this session is a copy of that session's conversation, marked 'forked " +
+      "from here'; merge sends its wrap-up back there"
     );
-  }
-  if ((s.args || []).length) metaRow(dl, "args", s.args.join(" "));
-  const envKeys = Object.keys(s.env || {});
-  if (envKeys.length) metaRow(dl, "env", envKeys.join(", "));
-  metaRow(dl, "size", `${s.cols}×${s.rows}`);
-  metaRow(dl, "restore", s.restore ? "yes (relaunched with the daemon)" : "no");
-  // `keep-alive` used to be the row under this one, and the two are still the
-  // same question asked at the two ends of a session's life: `restore` is
-  // whether it comes back after a daemon restart, and keep-alive is whether
-  // it is allowed to stay after its run ends. It moved into the Flags box
-  // below, where it can be changed as well as read — one fact drawn twice
-  // inside one panel is a fact that gets read twice and believed once.
-  metaRow(dl, "pid", s.pid);
-  metaRow(dl, "created", (s.created_at || "").replace("T", " "));
-  metaRow(dl, "last output", (s.last_output_at || "").replace("T", " "));
-  if (s.status === "exited") {
-    metaRow(dl, "exited", `${(s.exited_at || "").replace("T", " ")} (code ${s.exit_code ?? "?"})`);
-  }
-  if (s.paused_at) {
-    metaRow(dl, "paused", (s.paused_at || "").replace("T", " "));
-  }
-  view.appendChild(dl);
-
-  // The levers on the facts above, directly under them: the marks a reader
-  // can set on this session while reading it.
-  if (s.name) view.appendChild(sessFlags(s));
-
-  // The reader's own note, above everything the session itself supplies: it
-  // is the one line in this panel written for the person, by the person, and
-  // its whole reason for existing is to be read before the rest.
-  if (s.name) view.appendChild(sessNote(s));
-
-  // What it was asked to do, in the words it was asked in. Above the
-  // briefing because the briefing is a reading OF this — the summary says
-  // what the session has made of the job, and comparing the two is only
-  // possible with the original in front of you.
-  view.appendChild(sessTask(s));
-  view.appendChild(sessInputJournal(s.name || sessName));
-
-  // What this session is DOING, next to the facts above: the llm summary,
-  // fetched on first open and repainted by the 2s poll, with the card's own
-  // ⟳ for a fresh read. Here, high up, because it is the reason the panel
-  // gets opened more often than the metadata is.
-  if (s.name) view.appendChild(sessBriefSection(s.name));
-
-  // Above the memberships, because it is what they are FOR: the list says
-  // which rooms this session can be spoken to in, this says something in one.
-  view.appendChild(sessHandoff(data));
-  view.appendChild(sessSend(data));
-
-  // And directly under the send box, what became of messages like it: the
-  // backlog the daemon has accepted but not yet typed in, with the reason.
-  // "Send" answering with a quiet terminal is exactly when this is read.
-  const queued = sessQueued(data);
-  if (queued) view.appendChild(queued);
-
-  // And under THAT, what never became a backlog at all: the senders the
-  // mesh turned away because this one had stopped reading. Drawn even with
-  // an empty queue above it — a refusal leaves no message to list, so an
-  // empty panel is exactly the wrong answer to "why has nobody written".
-  const bpBox = sessBackpressure(data);
-  if (bpBox) view.appendChild(bpBox);
-
-  const meshes = data.meshes || [];
-  const meshBox = el("div", "sess-meshes");
-  meshBox.appendChild(el("h3", null, `Meshes (${meshes.length})`));
-  if (!meshes.length) {
-    meshBox.appendChild(el("p", "wf-note", "not a member of any mesh"));
-  }
-  for (const m of meshes) {
-    const chip = el("a", "sess-mesh", `${m.mesh} · ${m.handle} (${m.role})`);
-    chip.href = "#/mesh/" + encodeURIComponent(m.mesh);
-    chip.title = `${m.members} member(s); joined ${(m.joined_at || "").replace("T", " ")}`;
-    meshBox.appendChild(chip);
-  }
-  // The chips above say which rooms this session is in; this reads what was
-  // actually said in them, as a sequence. Only offered when there is a room:
-  // a session in no mesh has no traffic to draw, and the note above already
-  // says why. Not a chip, because it is not another membership — it is the
-  // way out of this panel into a page, like the run's button below.
-  if (meshes.length) {
-    const trace = el("button", "wf-btn option", "Message trace");
-    trace.title =
-      "who this session has spoken to, and been asked by, in order — " +
-      "with what has not been answered";
-    trace.addEventListener(
-      "click", () => go("#/msg/" + encodeURIComponent(s.name))
+    metaRow(
+      dl, "role", data.role ? data.role.name : (s.role || "free-role"),
+      data.role ? data.role.stance : ""
     );
-    meshBox.appendChild(trace);
+    // Beside the role, because the two are one fact between them: what this
+    // session is on a mesh, and what it is called there. Spelt out as a row
+    // rather than left to the head's chip so it can say WHICH room each name
+    // belongs to — the chip has room for one word and a count.
+    const handles = sessHandles(s.name || "");
+    if (handles.length) {
+      metaRow(
+        dl, "mesh handle",
+        handles.map((h) => `${h.handle} (in ${h.mesh})`).join(", "),
+        "the name this session joined its mesh under — messages to it are " +
+        "addressed to this, not to the session name"
+      );
+    }
+    // A `--worktree` session sits inside its workspace rather than at its root,
+    // so say which of the two it is: "workspace X" and "in X / wt-name" are
+    // different facts, and reading the second as the first would have the
+    // operator looking for their branch in the wrong checkout.
+    metaRow(
+      dl, "directory",
+      data.workspace
+        ? data.workspace_subpath
+          ? `${s.cwd}  (in workspace ${data.workspace.name} / ${data.workspace_subpath})`
+          : `${s.cwd}  (workspace ${data.workspace.name})`
+        : s.cwd,
+      s.cwd
+    );
+    // The checkout's branch, beside the directory — the one thing the
+    // directory's tail cannot say: two sessions from one worktree share the
+    // same path, and only the branch tells them apart.
+    metaRow(
+      dl, "branch", s.branch,
+      "the git branch checked out in the session's directory"
+    );
+    metaRow(dl, "conversation", s.conversation_id, "claude --session-id");
+    // Which model is answering in it — above the size for the same reason the
+    // gauge line leads with it: the count means different things on different
+    // models, and this is the only place outside the terminal that says. Its
+    // own row rather than a clause inside the context sentence, because it is
+    // the fact people open this panel to check, and a full dated id has no
+    // business being read out of the middle of a sentence about tokens.
+    metaRow(
+      dl, "model", modelSentence(s),
+      "the model of the latest context reading — claude's transcript or " +
+      "codex's rollout; a /model switch shows here once the next turn finishes"
+    );
+    // Under the conversation, because it is a fact about the conversation and
+    // not about the process: how much of it the harness last carried.
+    metaRow(dl, "context", ctxSentence(s), ctxBreakdown(s.context));
+    if (s.resume !== null && s.resume !== undefined) {
+      metaRow(
+        dl, "opened",
+        (s.resume === "" ? "conversation picker" : `resume ${s.resume}`) +
+        (s.fork_session ? " (forked)" : "")
+      );
+    }
+    if ((s.args || []).length) metaRow(dl, "args", s.args.join(" "));
+    const envKeys = Object.keys(s.env || {});
+    if (envKeys.length) metaRow(dl, "env", envKeys.join(", "));
+    metaRow(dl, "size", `${s.cols}×${s.rows}`);
+    metaRow(dl, "restore", s.restore ? "yes (relaunched with the daemon)" : "no");
+    // `keep-alive` used to be the row under this one, and the two are still the
+    // same question asked at the two ends of a session's life: `restore` is
+    // whether it comes back after a daemon restart, and keep-alive is whether
+    // it is allowed to stay after its run ends. It moved into the Flags box
+    // below, where it can be changed as well as read — one fact drawn twice
+    // inside one panel is a fact that gets read twice and believed once.
+    metaRow(dl, "pid", s.pid);
+    metaRow(dl, "created", (s.created_at || "").replace("T", " "));
+    metaRow(dl, "last output", (s.last_output_at || "").replace("T", " "));
+    if (s.status === "exited") {
+      metaRow(dl, "exited", `${(s.exited_at || "").replace("T", " ")} (code ${s.exit_code ?? "?"})`);
+    }
+    if (s.paused_at) {
+      metaRow(dl, "paused", (s.paused_at || "").replace("T", " "));
+    }
+    view.appendChild(dl);
+
+    // The levers on the facts above, directly under them: the marks a reader
+    // can set on this session while reading it.
+    if (s.name) view.appendChild(sessFlags(s));
+
+    // The reader's own note, above everything the session itself supplies: it
+    // is the one line in this panel written for the person, by the person, and
+    // its whole reason for existing is to be read before the rest.
+    if (s.name) view.appendChild(sessNote(s));
+
+    // What it was asked to do, in the words it was asked in. Above the
+    // briefing because the briefing is a reading OF this — the summary says
+    // what the session has made of the job, and comparing the two is only
+    // possible with the original in front of you.
+    view.appendChild(sessTask(s));
+
+    // What this session is DOING, next to the facts above: the llm summary,
+    // fetched on first open and repainted by the 2s poll, with the card's own
+    // ⟳ for a fresh read. Here, high up, because it is the reason the panel
+    // gets opened more often than the metadata is.
+    if (s.name) view.appendChild(sessBriefSection(s.name));
   }
-  // The chips above are read; this is the one write the section offers —
-  // putting this session into another mesh without leaving the panel that
-  // names it. Under the chips because it answers what the list cannot: a
-  // membership that does not exist yet.
-  meshBox.appendChild(sessMeshJoin(data));
-  view.appendChild(meshBox);
 
-  // Its work, as the board records it: the issue it was created for and
-  // every issue that names it. Right after the memberships because the two
-  // answer the same question from two registries — where it belongs, and
-  // what it is on.
-  view.appendChild(sessBeads(data));
-  // And what it actually left in the repository. Beside the board and the
-  // round reports because the three are one answer read from three places:
-  // what it was asked to do, what it wrote up, what it committed.
-  view.appendChild(sessCommits(data));
+  if (show("messages")) {
+    // What has been typed into it, first of the ways to speak to it: the
+    // record of the speaking already done.
+    view.appendChild(sessInputJournal(s.name || sessName));
 
-  // What this session is FOR, by role: a leader gets its dispatch and reaping
-  // panels here, other roles whatever ROLE_PANELS declares for them. Between
-  // the memberships (identity) and the migrate form (plumbing), because these
-  // are the panel's verbs.
-  for (const build of rolePanels(data)) view.appendChild(build(data));
+    // Above the memberships, because it is what they are FOR: the list says
+    // which rooms this session can be spoken to in, this says something in one.
+    view.appendChild(sessHandoff(data));
+    view.appendChild(sessSend(data));
 
-  view.appendChild(sessReborrow(data));
-  view.appendChild(sessPerms(data));
-  view.appendChild(sessMigrate(data));
+    // And directly under the send box, what became of messages like it: the
+    // backlog the daemon has accepted but not yet typed in, with the reason.
+    // "Send" answering with a quiet terminal is exactly when this is read.
+    const queued = sessQueued(data);
+    if (queued) view.appendChild(queued);
+
+    // And under THAT, what never became a backlog at all: the senders the
+    // mesh turned away because this one had stopped reading. Drawn even with
+    // an empty queue above it — a refusal leaves no message to list, so an
+    // empty panel is exactly the wrong answer to "why has nobody written".
+    const bpBox = sessBackpressure(data);
+    if (bpBox) view.appendChild(bpBox);
+
+    const meshes = data.meshes || [];
+    const meshBox = el("div", "sess-meshes");
+    meshBox.appendChild(el("h3", null, `Meshes (${meshes.length})`));
+    if (!meshes.length) {
+      meshBox.appendChild(el("p", "wf-note", "not a member of any mesh"));
+    }
+    for (const m of meshes) {
+      const chip = el("a", "sess-mesh", `${m.mesh} · ${m.handle} (${m.role})`);
+      chip.href = "#/mesh/" + encodeURIComponent(m.mesh);
+      chip.title = `${m.members} member(s); joined ${(m.joined_at || "").replace("T", " ")}`;
+      meshBox.appendChild(chip);
+    }
+    // The chips above say which rooms this session is in; this reads what was
+    // actually said in them, as a sequence. Only offered when there is a room:
+    // a session in no mesh has no traffic to draw, and the note above already
+    // says why. Not a chip, because it is not another membership — it is the
+    // way out of this panel into a page, like the run's button below.
+    if (meshes.length) {
+      const trace = el("button", "wf-btn option", "Message trace");
+      trace.title =
+        "who this session has spoken to, and been asked by, in order — " +
+        "with what has not been answered";
+      trace.addEventListener(
+        "click", () => go("#/msg/" + encodeURIComponent(s.name))
+      );
+      meshBox.appendChild(trace);
+    }
+    // The chips above are read; this is the one write the section offers —
+    // putting this session into another mesh without leaving the panel that
+    // names it. Under the chips because it answers what the list cannot: a
+    // membership that does not exist yet.
+    meshBox.appendChild(sessMeshJoin(data));
+    view.appendChild(meshBox);
+  }
+
+  if (show("work")) {
+    // Its work, as the board records it: the issue it was created for and
+    // every issue that names it. Right after the memberships because the two
+    // answer the same question from two registries — where it belongs, and
+    // what it is on.
+    view.appendChild(sessBeads(data));
+    // And what it actually left in the repository. Beside the board and the
+    // round reports because the three are one answer read from three places:
+    // what it was asked to do, what it wrote up, what it committed.
+    view.appendChild(sessCommits(data));
+
+    // What this session is FOR, by role: a leader gets its dispatch and reaping
+    // panels here, other roles whatever ROLE_PANELS declares for them. Between
+    // the memberships (identity) and the migrate form (plumbing), because these
+    // are the panel's verbs.
+    for (const build of rolePanels(data)) view.appendChild(build(data));
+  }
+
+  // The plumbing last: each of these restarts or moves the session, so they
+  // sit furthest from the reading above and have a tab of their own.
+  if (show("settings")) {
+    view.appendChild(sessReborrow(data));
+    view.appendChild(sessPerms(data));
+    view.appendChild(sessMigrate(data));
+  }
   keepScroll();
 }
 

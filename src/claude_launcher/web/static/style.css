@@ -2079,6 +2079,31 @@ body.term-split #terminal { flex: var(--split-term, 0.6) 1 0; min-height: 80px; 
    equal halves read as a switch, a pair of pills reads as a menu. */
 .sess-tabs { margin: 12px 0 0; }
 .sess-tabs .seq-tab { flex: 1 1 0; max-width: 160px; text-align: center; }
+/* The Details panel's sub-tabs: the level under the radio above, so smaller
+   and quieter — an underline for the lit one instead of a filled pill, and
+   one row that scrolls sideways in a narrow rail instead of wrapping.
+   Doubled class, because the shared `.seq-tabs` rule comes later in this
+   file and would otherwise put the wrap back. */
+.seq-tabs.sess-subtabs {
+  flex-wrap: nowrap; overflow-x: auto; gap: 2px; margin: 8px 0 4px;
+  border-bottom: 1px solid #2a2e36;
+}
+.sess-subtabs .seq-tab {
+  flex: 1 0 auto; background: none; border: none; border-radius: 0;
+  border-bottom: 2px solid transparent; margin-bottom: -1px;
+  padding: 5px 6px; font-size: 12px; color: #8b949e; text-align: center;
+}
+.sess-subtabs .seq-tab:hover { color: #d8dbe0; border-bottom-color: #4d5566; }
+.sess-subtabs .seq-tab.on {
+  background: none; color: #cfe2ff; border-bottom-color: #58a6ff;
+}
+/* A group's name under the All sub-tab: the divider between groups, drawn
+   above the first card of its group. */
+.sess-group-head {
+  margin: 22px 0 0; max-width: 760px; font-size: 11px; font-weight: 600;
+  letter-spacing: .06em; text-transform: uppercase; color: #58a6ff;
+}
+.sess-subtabs + .sess-group-head { margin-top: 12px; }
 /* The details head's copy of the rail's handle pill — same green, same
    meaning, laid out for a head rather than a 260px row, so nothing here
    shrinks or clips. */
@@ -2098,21 +2123,33 @@ body.term-split #terminal { flex: var(--split-term, 0.6) 1 0; min-height: 80px; 
 .sess-close:hover { color: #ff7b72; }
 .sess-meta {
   display: grid; grid-template-columns: max-content minmax(0, 1fr);
-  gap: 4px 16px; margin: 14px 0; max-width: 760px; font-size: 13px;
+  gap: 4px 16px; font-size: 13px;
 }
 .sess-meta dt { color: #7d8590; }
 .sess-meta dd { color: #c6cdd5; overflow-wrap: anywhere; }
-.sess-meshes, .sess-wf, .sess-send, .sess-queued, .sess-bp, .sess-migrate,
-.sess-reborrow, .sess-perms, .sess-brief-section, .sess-task, .sess-note,
-.sess-flags {
-  margin: 14px 0; padding: 12px 16px; background: #1b1e24;
+/* Every section of the panel is the same card with the same heading, so
+   the list is one selector: a section missing from it is the one that looks
+   out of place. The input journal's heading is its fold's summary. */
+.sess-meta, .sess-meshes, .sess-wf, .sess-send, .sess-queued, .sess-bp,
+.sess-migrate, .sess-reborrow, .sess-perms, .sess-brief-section, .sess-task,
+.sess-note, .sess-flags, .sess-input-journal, .sess-beads, .sess-commits,
+.sess-quickjob, .sess-kids {
+  margin: 12px 0; padding: 12px 16px; background: #1b1e24;
   border: 1px solid #2a2e36; border-radius: 8px; max-width: 760px;
 }
 .sess-meshes h3, .sess-wf h3, .sess-send h3, .sess-queued h3, .sess-bp h3,
 .sess-migrate h3, .sess-reborrow h3, .sess-perms h3, .sess-brief-section h3,
-.sess-task h3, .sess-note h3, .sess-flags h3 {
-  font-size: 12px; text-transform: uppercase; color: #7d8590; margin-bottom: 10px;
+.sess-task h3, .sess-note h3, .sess-flags h3, .sess-beads h3,
+.sess-commits h3, .sess-quickjob h3, .sess-kids h3,
+.sess-input-journal > summary {
+  font-size: 12px; font-weight: 600; text-transform: uppercase;
+  color: #7d8590; margin-bottom: 10px;
 }
+/* A section that has nothing to say returns its box empty (sessCommits with
+   no `commits` served); as a card that would be a blank frame. */
+.sess-commits:empty { display: none; }
+.sess-input-journal > summary { cursor: pointer; margin-bottom: 0; }
+.sess-input-journal[open] > summary { margin-bottom: 10px; }
 /* the reader's own note on this session. One field, on the panel's input
    colours, and resizable because a note is however long the person needs it
    to be — three rows is a starting height, not a limit. */
@@ -2154,6 +2191,8 @@ body.term-split #terminal { flex: var(--split-term, 0.6) 1 0; min-height: 80px; 
 .sess-brief-section .sess-brief, .sess-brief-section .sess-brief-note {
   margin: 0;
 }
+/* the card's placeholder lines at the size every other card's notes use */
+.sess-brief-section .sess-brief-note { font-size: 13px; line-height: 1.5; }
 /* the backlog box wears the hold's color when the hold is a human's keyboard
    — the case the reader caused and can end */
 .sess-queued.held { border-color: #4d3800; }
@@ -2232,13 +2271,6 @@ body.term-split #terminal { flex: var(--split-term, 0.6) 1 0; min-height: 80px; 
 }
 /* role-specific panels: the leader's dispatch form and its children roster.
    Same card as the panel's other boxes, same field skin as the send box. */
-.sess-quickjob, .sess-kids {
-  margin: 14px 0; padding: 12px 16px; background: #1b1e24;
-  border: 1px solid #2a2e36; border-radius: 8px; max-width: 760px;
-}
-.sess-quickjob h3, .sess-kids h3 {
-  font-size: 12px; text-transform: uppercase; color: #7d8590; margin-bottom: 10px;
-}
 .sess-quickjob select, .sess-quickjob input:not([type="checkbox"]),
 .sess-quickjob textarea {
   background: #14161a; color: #c6cdd5; border: 1px solid #2a2e36;
@@ -2279,13 +2311,6 @@ body.term-split #terminal { flex: var(--split-term, 0.6) 1 0; min-height: 80px; 
 .sess-mesh:hover { background: #1f3660; }
 
 /* ---- beads: the board, on the page and in the rail ---- */
-.sess-beads {
-  margin: 14px 0; padding: 12px 16px; background: #1b1e24;
-  border: 1px solid #2a2e36; border-radius: 8px; max-width: 760px;
-}
-.sess-beads h3 {
-  font-size: 12px; text-transform: uppercase; color: #7d8590; margin-bottom: 10px;
-}
 .sess-beads > .wf-note, .sess-beads > .wf-warning { margin: 0 0 8px; line-height: 1.5; }
 .sess-beads .wf-btn.option { margin-top: 8px; }
 /* A round report, in the rail and in an issue's pane — the same block, and
@@ -2351,7 +2376,6 @@ body.term-split #terminal { flex: var(--split-term, 0.6) 1 0; min-height: 80px; 
    the thing a reader copies out — so it is monospace, first, and the full sha
    is the row's title. Wraps rather than truncates, because a subject cut at
    the rail's width is a subject that says nothing. */
-.sess-commits { margin: 14px 0 16px; }
 .sess-commit {
   display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap;
   padding: 5px 6px; margin: 0 -4px; border-radius: 5px;
@@ -2887,15 +2911,17 @@ a.beads-q-name:hover { color: #79c0ff; text-decoration: underline; }
 .docked .wf-btn { margin-right: 0; padding: 3px 9px; font-size: 11px; }
 /* label over value: two columns in this width leaves neither readable */
 .docked .sess-meta {
-  grid-template-columns: minmax(0, 1fr); gap: 0; margin: 10px 0;
-  max-width: none; font-size: 12px;
+  grid-template-columns: minmax(0, 1fr); gap: 0; font-size: 12px;
 }
 .docked .sess-meta dt { margin-top: 7px; font-size: 11px; }
-.docked .sess-meshes, .docked .sess-wf, .docked .sess-send, .docked .sess-queued,
-.docked .sess-bp,
+.docked .sess-meta dt:first-child { margin-top: 0; }
+.docked .sess-group-head { max-width: none; }
+.docked .sess-meta, .docked .sess-meshes, .docked .sess-wf, .docked .sess-send,
+.docked .sess-queued, .docked .sess-bp,
 .docked .sess-migrate, .docked .sess-reborrow, .docked .sess-perms,
 .docked .sess-quickjob, .docked .sess-kids, .docked .sess-task,
-.docked .sess-note, .docked .sess-flags {
+.docked .sess-note, .docked .sess-flags, .docked .sess-brief-section,
+.docked .sess-input-journal, .docked .sess-beads, .docked .sess-commits {
   margin: 10px 0; padding: 10px 12px; max-width: none; background: #16181d;
 }
 /* a rail column has no room for two controls side by side */
