@@ -2058,7 +2058,7 @@ A workspace has **one issue board**, and the board is a SQLite file:
 That is the default, and it is the file `br` and `claunch beads` were already
 using for a workspace that is a git checkout — nothing moves when you upgrade.
 What is new is that the choice is per workspace and can be changed:
-**Settings ▸ Beads boards** lists one row per registered workspace and lets you
+**Settings ▸ Workspaces ▸ Beads boards** lists one row per registered workspace and lets you
 point any of them at a different database.
 
 The field names **the `.db` file itself**, not a directory holding it. A
@@ -3165,8 +3165,8 @@ harness and is available in the create form and both Spawn forms.
 The create form's **Directory** is a picker over your
 [workspaces](#workspaces-where-a-session-may-be-spawned) — free-text paths are
 deliberately not accepted here, since a mistyped one is both easy and
-expensive. The **manage** link beside the field opens `#/workspaces`, the page
-that edits that registry: register a directory (checked against the *daemon's*
+expensive. The **manage** link beside the field opens `#/workspaces`, the
+Settings page's **Workspaces** section, which edits that registry: register a directory (checked against the *daemon's*
 filesystem before it is stored, so a bad path is refused with the reason
 instead of failing later at spawn), see which entries are missing right now
 and how many sessions are running in each, and unregister one — the directory
@@ -3174,7 +3174,10 @@ itself is never touched, and sessions already in it keep running. The list
 refreshes in place, so a `claunch workspace add` in a terminal shows up here
 too, and `(daemon cwd)` is always available in the picker.
 
-The Settings page has two sections. **General** is everything above.
+The Settings page has four sections. **General** is the machine's own
+settings. **Workspaces** (`#/settings/workspaces`; `#/workspaces` opens it
+too) is the registry described above, together with the two things keyed by
+it: projects and each workspace's beads board.
 **Profiles** (`#/settings/profiles`) is the profile manager: one row per
 profile with its harness, provider, config directory and permission mode, and
 the control for that mode — which is the one profile setting every session

@@ -13758,7 +13758,11 @@ function parseHash(h) {
   // manager beside it. One shell, one section deep — the same spelling
   // #/beads/<section> already uses, so a section is linkable and the Back
   // button keeps meaning "out of Settings".
-  if (parts[0] === "settings" || parts[0] === "workspaces") {
+  // #/workspaces predates the section and is what every "manage" link beside
+  // a Project or Directory field still says, so it opens the section those
+  // links mean rather than the General one.
+  if (parts[0] === "workspaces") return { page: "settings", section: "workspaces" };
+  if (parts[0] === "settings") {
     return { page: "settings", section: parts[1] || "" };
   }
   return { page: "home" };   // an unknown link is a wrong turn, not an error
@@ -14862,6 +14866,13 @@ function openSettings(section) {
     refreshInstallOverview();
     return;
   }
+  if (wsSection === "workspaces") {
+    // The registry itself came with openWorkspaces above; these are the two
+    // cards keyed by it.
+    refreshProjects().then(() => { if (wsOpen) renderWorkspaces(); });
+    refreshBeadsBoards();
+    return;
+  }
   refreshHarnesses().then(() => { if (wsOpen) renderWorkspaces(); });
   refreshLlmSettings();
   refreshFaq();
@@ -14871,7 +14882,6 @@ function openSettings(section) {
   refreshRagStatus();
   refreshGhStatus();
   refreshRelaySettings();
-  refreshBeadsBoards();
 }
 
 let relaySettingsRows = [];
@@ -16349,7 +16359,7 @@ function beadsBoardWhere(board) {
   // (the session rail's) must not have either answer put in its mouth.
   if (board.configured !== undefined && board.configured !== null) {
     lines.push(board.configured
-      ? "path set in Settings ▸ Beads boards"
+      ? "path set in Settings ▸ Workspaces ▸ Beads boards"
       : "default path for this workspace");
   }
   if (board.board_exists === false) lines.push("no database yet — made on first use");
@@ -16780,7 +16790,7 @@ function renderBeads() {
     canvas.appendChild(el("p", "wf-note",
       "no board: no workspace is registered, and none of the sessions' " +
       "directories is a checkout that already holds one. Register a " +
-      "directory in Settings and give it a board there."));
+      "directory in Settings ▸ Workspaces and give it a board there."));
   }
   for (const b of boards.filter((b) => b.root === beadsWorkspace)) canvas.appendChild(beadsBoardSection(b));
   list.appendChild(canvas);
@@ -16894,7 +16904,7 @@ function renderQueues(view) {
     view.appendChild(el("p", "wf-note",
       "no board: no workspace is registered, and none of the sessions' " +
       "directories is a checkout that already holds one. Register a " +
-      "directory in Settings and give it a board there."));
+      "directory in Settings ▸ Workspaces and give it a board there."));
   }
   const statuses = beadsQueues.statuses || BEADS_STATUSES.filter((s) => BEADS_ACTIVE.has(s));
   if (boards.length) view.appendChild(beadsWorkspaceTabs(boards));
@@ -17978,6 +17988,7 @@ function settingsTabs() {
   const tabs = el("div", "seq-tabs settings-tabs");
   for (const [section, label, href] of [
     ["", "General", "#/settings"],
+    ["workspaces", "Workspaces", "#/settings/workspaces"],
     ["profiles", "Profiles", "#/settings/profiles"],
     ["install", "Install", "#/settings/install"],
   ]) {
@@ -18548,22 +18559,16 @@ function renderWorkspaces() {
     }
     return;
   }
-
-  view.appendChild(el(
-    "p", "wf-note",
-    "The directories a session may be spawned in. The create form's " +
-    "Directory field is exactly this list — and so is where an agent may " +
-    "send a session it spawns, unless spawn.allow_workspace is turned off."
-  ));
+  if (wsSection === "workspaces") {
+    workspacesPanel(view);
+    refocusSettingsField(focused);
+    return;
+  }
 
   view.appendChild(keyHelpCard());
   view.appendChild(scoreGoalSettingsCard());
 
   view.appendChild(railStaleCard());
-
-  view.appendChild(wsAddCard());
-  view.appendChild(projectsCard());
-  view.appendChild(beadsBoardsCard());
 
   view.appendChild(modelChoicesCard());
   view.appendChild(llmSettingsCard());
@@ -18581,6 +18586,24 @@ function renderWorkspaces() {
   view.appendChild(ghCard());
   view.appendChild(relaySettingsCard());
 
+  refocusSettingsField(focused);
+}
+
+/* The Workspaces section (#/settings/workspaces, and the older #/workspaces):
+   the directory registry and the two things keyed by it — the projects that
+   group sessions, and each workspace's beads board. They sat among the
+   machine settings on General, where a card about where sessions run was
+   between the keyboard help and the model list. */
+function workspacesPanel(view) {
+  view.appendChild(el(
+    "p", "wf-note",
+    "The directories a session may be spawned in. The create form's " +
+    "Directory field is exactly this list — and so is where an agent may " +
+    "send a session it spawns, unless spawn.allow_workspace is turned off."
+  ));
+
+  view.appendChild(wsAddCard());
+
   const list = el("div", "ws-list");
   list.appendChild(el("h3", null, `Registered (${workspacesCache.length})`));
   if (!workspacesCache.length) {
@@ -18593,15 +18616,20 @@ function renderWorkspaces() {
   for (const w of workspacesCache) list.appendChild(wsRow(w));
   view.appendChild(list);
 
-  if (focused) {
-    const again = $(focused);
-    if (again) {
-      again.focus();
-      if (again.setSelectionRange) {
-        const end = again.value.length;
-        again.setSelectionRange(end, end);
-      }
-    }
+  view.appendChild(projectsCard());
+  view.appendChild(beadsBoardsCard());
+}
+
+/* A re-render replaces every input, so the one that had focus gets it back,
+   caret at the end — a poll landing mid-typing must not steal the field. */
+function refocusSettingsField(focused) {
+  if (!focused) return;
+  const again = $(focused);
+  if (!again) return;
+  again.focus();
+  if (again.setSelectionRange) {
+    const end = again.value.length;
+    again.setSelectionRange(end, end);
   }
 }
 
