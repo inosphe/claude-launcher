@@ -1671,5 +1671,9 @@ def test_a_landing_reaches_the_worker_whatever_its_board_state():
         assert "in_review가 아닌 것" in integrate
         # The notice says "already in master -> landed"; the transition after
         # it has to agree, or the leader files REMEASURE REQUESTED on an issue
-        # that landed a round earlier and moves it back to in_progress.
-        assert "MERGED 코멘트가 이미 달린 이슈는 목록 밖이어도" in integrate
+        # that landed a round earlier and moves it back to in_progress. The
+        # test is the latest request's tip, not a MERGED comment: an issue can
+        # land, be re-requested at a new tip, and need re-measuring again.
+        assert "최신 요청 tip이 이미 새 master에 있는 이슈는" in integrate
+        assert "MERGED 코멘트가 있다는
+것만으로는 빼지 않는다" in integrate

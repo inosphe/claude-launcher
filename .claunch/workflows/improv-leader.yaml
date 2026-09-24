@@ -932,10 +932,15 @@ steps:
       밖의 in_review 이슈마다 `REMEASURE REQUESTED @ <새 tip>` 코멘트를
       남기고 in_progress로 옮긴다(공통 규칙의 in_review→in_progress) —
       옮기는 것은 보낸 **뒤**다, 먼저 옮기면 선택자가 그 세션을 풀지
-      못한다. **MERGED 코멘트가 이미 달린 이슈는 목록 밖이어도 이
-      처리에서 뺀다**: 앞 회차에 머지됐고 assignee가 아직 닫지 않은
+      못한다. **최신 요청 tip이 이미 새 master에 있는 이슈는 목록
+      밖이어도 이 처리에서 뺀다**: 그 이슈의 마지막 `LANDING REQUEST @
+      <tip>` 코멘트의 tip에 `git merge-base --is-ancestor <tip> <새
+      master>`가 0을 내면, 앞 회차에 머지됐고 assignee가 아직 닫지 않은
       이슈다. 재측정할 것이 없고, in_progress로 옮기면 착지한 일이 보드에서
-      다시 구현 중으로 보인다(claunch-dlq0o).
+      다시 구현 중으로 보인다(claunch-dlq0o). MERGED 코멘트가 있다는
+      것만으로는 빼지 않는다 — 한 이슈가 두 번 착지할 수 있다:
+      claunch-hik25는 MERGED 052f46ab 뒤 새 tip으로 다시 요청했고,
+      그 요청은 재측정 대상이었다(REMEASURE REQUESTED @ b23c525a).
       `@in_review`가 아무도 풀지 못하면(착지 대기가 없다) 데몬이 발송을
       거절한다 — 그것이 답이고, 보낼 곳이 없다는 사실을 보고에 적는다.
       **구현 중인 세션, 착지를 마치고 종료를 기다리는 세션에게는 보내지
@@ -965,9 +970,10 @@ steps:
       재측정」만 실었다(diffstat·내역은 코멘트에 두고 싣지 않았다).
       머지된 이슈 중 in_review가 아니던 것의 assignee에게는 핸들을
       명시한 착지 통지가 따로 나갔다(없었으면 없었다고 보고에 있다).
-      목록 밖의 in_review 이슈 가운데 MERGED 코멘트가 없는 것마다
-      `REMEASURE REQUESTED @ <새 tip>` 코멘트가 발송 뒤에 남았고, MERGED
-      코멘트가 있는 것은 in_review 그대로다.
+      목록 밖의 in_review 이슈 가운데 최신 LANDING REQUEST tip이 새
+      master의 조상이 아닌 것마다 `REMEASURE REQUESTED @ <새 tip>`
+      코멘트가 발송 뒤에 남았고, 그 tip이 이미 master에 있는 것은
+      in_review 그대로다.
       선택자가 아무도 풀지 못해 거절됐으면 그 사실이 보고에 있다.
       그 알림에 **재정렬 요구가 실리지 않았다**
       (claunch-no-premature-rebase-lhcz).
