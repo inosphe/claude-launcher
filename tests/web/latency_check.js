@@ -18,7 +18,11 @@
      - with the socket down the badge says so instead of a stale number;
      - the daemon's event loop lag rides the pong and is named in the
        tooltip, so a busy daemon is told apart from a slow network
-       (claunch-y9ax9).
+       (claunch-y9ax9);
+     - the tooltip splits the last round trip: the time the ping spent in
+       the daemon (the pong's `daemon_ms`), and through the tunnel the
+       relay's round trip and what is left for browser <-> relay
+       (claunch-iss86).
 
    The real functions are sliced out of the shipped app.js. */
 const assert = require("assert");
@@ -75,6 +79,7 @@ function build({ base = "/" } = {}) {
     "let latencySamples = [];",
     "let latencyRelay = null;",
     "let latencyLoop = null;",
+    "let latencyDaemon = null;",
     "function latencyNow() { return S.clock; }",
     slice("latencyStart"),
     slice("latencyStop"),
@@ -84,6 +89,7 @@ function build({ base = "/" } = {}) {
     slice("latencyWeb"),
     slice("latencyRelayWorst"),
     slice("latencyGrade"),
+    slice("latencySplit"),
     slice("renderLatencyBadge"),
     "return { latencyStart, latencyStop, latencyTick, latencyPong, fmtLatency,"
     + " samples: () => latencySamples, inFlight: () => latencySentAt };",
@@ -250,6 +256,47 @@ function loopLag() {
   assert.strictEqual(app.badge.textContent, "web 480ms", "the badge text is unchanged");
 }
 
+/* ---- 7. where the round trip went ------------------------------------- */
+function splitOfTheRoundTrip() {
+  const direct = build();
+  direct.latencyStart();
+  direct.clock += 12;
+  direct.latencyPong({ type: "pong", t: 1000, daemon_ms: 3.4 });
+  assert.match(direct.badge.title, /\n  daemon: 3ms \(ping read → pong written, queue included\)/);
+  assert.doesNotMatch(direct.badge.title, /browser ↔ relay/, "direct: no relay leg");
+
+  const tunnel = build({ base: "/t/d09/" });
+  tunnel.latencyStart();
+  tunnel.clock += 689;
+  const relay = { configured: true, connected: true,
+    relays: [{ id: "relay1", connected: true, rtt_ms: 228, rtt_age: 2, pending_ms: null }] };
+  tunnel.latencyPong({ type: "pong", t: 1000, relay, daemon_ms: 11 });
+  const title = tunnel.badge.title;
+  assert.match(title, /  daemon: 11ms/);
+  assert.match(title, /  relay ↔ daemon: 228ms/);
+  assert.match(title, /  browser ↔ relay: ≈450ms \(what is left; not measured on its own\)/);
+  assert.ok(title.indexOf("daemon: 11ms") > title.indexOf("browser ↔ daemon"),
+            "the split sits under the round trip it splits");
+
+  // A relay sample older than the round trip is no base to subtract from.
+  tunnel.clock += 5000;
+  tunnel.latencyTick();
+  tunnel.clock += 100;
+  relay.relays[0] = { ...relay.relays[0], pending_ms: 900 };
+  tunnel.latencyPong({ type: "pong", t: pings(tunnel).at(-1).t, relay, daemon_ms: 2 });
+  assert.doesNotMatch(tunnel.badge.title, /  relay ↔ daemon:/);
+  assert.match(tunnel.badge.title, /  browser ↔ relay: ≈98ms/);
+
+  // An older daemon sends no daemon_ms: nothing is invented for it.
+  tunnel.clock += 5000;
+  tunnel.latencyTick();
+  tunnel.clock += 300;
+  relay.relays[0] = { ...relay.relays[0], pending_ms: null, rtt_ms: 100 };
+  tunnel.latencyPong({ type: "pong", t: pings(tunnel).at(-1).t, relay });
+  assert.doesNotMatch(tunnel.badge.title, /  daemon:/);
+  assert.match(tunnel.badge.title, /  browser ↔ relay: ≈200ms/);
+}
+
 function formats() {
   const app = build();
   assert.strictEqual(app.fmtLatency(null), "—");
@@ -264,5 +311,6 @@ stallShowsItsAge();
 relayHalf();
 socketDown();
 loopLag();
+splitOfTheRoundTrip();
 formats();
 console.log("latency_check ok");

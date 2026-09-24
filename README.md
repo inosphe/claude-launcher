@@ -1834,6 +1834,26 @@ event loop's longest stall in the last 30s (`loop` in the pong and in
 terminal waits on that loop, so a large value there means the daemon was
 busy rather than the network slow.
 
+Under the `web` line the tooltip splits the last round trip. `daemon` is how
+long the ping was inside the daemon, from its frame being read to its answer
+being written, queue included (`daemon_ms` in the pong). Through the tunnel,
+`relay ↔ daemon` is the uplink's round trip and `browser ↔ relay` is what is
+left: `web` minus the other two, shown with `≈` because nothing times that
+path on its own (the relay answers PINGs only on its own room legs). A relay
+behind a proxy such as Cloudflare adds its hop to both relay legs, so the
+tunnel's round trip is at least twice the `relay` value.
+
+The daemon keeps its small frames ahead of its large ones on both shared
+connections. The page's control socket writes read answers in a lane behind
+terminal output and pongs; a page that sends `"parts": true` on its reads
+gets a large answer as `read_part` frames it acknowledges with `read_ack`,
+and at most 256K characters of parts are unacknowledged at a time, so a
+1.2MB rail listing no longer holds a keystroke's echo for the time it takes
+to cross the tunnel. The relay uplink writes control frames (PING/PONG,
+stream open/end) before stream data and takes stream data one frame per
+stream in turn. Both hold bulk back while their socket has more than 64KB
+buffered (`daemon/sendq.py`).
+
 ### Idle detection
 
 Raw output never goes quiet under a TUI (claude animates a spinner and a

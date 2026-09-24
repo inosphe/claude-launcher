@@ -31,9 +31,12 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from collections import deque
 from typing import Any, Optional
 
 from aiohttp import WSMsgType
+
+from . import sendq
 
 log = logging.getLogger(__name__)
 
@@ -185,7 +188,11 @@ class Carrier:
         self._request = request
         self._channels: dict[int, ChannelSocket] = {}
         self._tasks: dict[int, asyncio.Task] = {}
-        self._out: asyncio.Queue = asyncio.Queue()
+        self._urgent: deque = deque()
+        self._bulk: deque = deque()
+        self._wake = asyncio.Event()
+        self._unacked: dict = {}  # (read id, seq) -> characters
+        self._in_window = 0
         self._writer: Optional[asyncio.Task] = None
         self._unwaited = 0
         self._gone = False
@@ -197,18 +204,32 @@ class Carrier:
 
     # -- the one writer ----------------------------------------------------
     #
-    # Every frame leaves through one queue and one task. The queue is what
-    # keeps two terminals from interleaving a frame, which is what the lock
-    # here used to do, and the task is what keeps a parked write off the
-    # caller that asked for it.
+    # Every frame leaves through one task. What waits for it sits in two
+    # lanes, and the order between the lanes is what the page feels:
     #
-    # The difference matters because the callers are not alike. A terminal's
-    # pump awaits its send and must go on waiting: that wait is the whole of
-    # the backpressure between a fast PTY and a page slow to read it. The
-    # socket's receive loop must never wait, because it is the lane every
-    # terminal's keystrokes arrive in -- a browser with a full send buffer
-    # parked one write, and with it the ping, the attach and every keystroke
-    # on every channel (see tests/test_control_write_offloop.py).
+    # - the urgent lane: terminal output, pongs, attach/detach bookkeeping --
+    #   everything but read answers. In arrival order, as before; a
+    #   terminal's pump awaits its send and must go on waiting, because that
+    #   wait is the whole of the backpressure between a fast PTY and a page
+    #   slow to read it.
+    # - the bulk lane: read answers (send_bulk). A rail listing all sessions
+    #   is 1.2MB and the Beads queues 1.4MB; written in arrival order, a pong
+    #   or a keystroke's echo queued behind one waited for all of it to
+    #   reach the page -- through the relay tunnel, seconds (claunch-iss86).
+    #   A bulk frame goes only when the urgent lane is empty.
+    #
+    # A frame handed to the socket goes out behind whatever the transport
+    # already buffered, so bulk also waits while the transport holds more than
+    # sendq.LOW_WATER. On a direct connection that is enough. Through the
+    # relay, the transport is a loopback socket that never fills; the queue
+    # builds up at the far end of the tunnel instead. So a page that says it
+    # can take a read in parts (``"parts": true`` on the read) gets it in
+    # parts of PART_CHARS, acknowledges each (``read_ack``), and no more than
+    # BULK_WINDOW characters of parts are unacknowledged at once: that is the
+    # most a pong can find ahead of it, wherever the queue is.
+    #
+    # The receive loop must never wait on any of this: it is the lane every
+    # terminal's keystrokes arrive in (see tests/test_control_write_offloop.py).
 
     #: Frames asked for without waiting that may be outstanding at once.
     #: They are small bookkeeping frames (pong, attached, detached), so this
@@ -216,22 +237,59 @@ class Carrier:
     #: make the daemon hold an unbounded queue for it.
     UNWAITED_MAX = 64
 
+    #: Characters of one read answer per part, for a page that takes parts.
+    PART_CHARS = 32 * 1024
+
+    #: Characters of parts that may be unacknowledged at once. A pong queued
+    #: behind them waits for at most this much to cross the slowest hop; a
+    #: read crosses it at BULK_WINDOW per round trip, which over a 700ms
+    #: tunnel is a 1.2MB rail in about three seconds.
+    BULK_WINDOW = 256 * 1024
+
     async def send_str(self, data: str) -> None:
         await self._put(("str", data), wait=True)
 
     async def send_bytes(self, data: bytes) -> None:
         await self._put(("bytes", data), wait=True)
 
-    async def send_soon(self, data: str) -> None:
+    async def send_soon(self, data) -> None:
         """Queue a frame and return, without waiting for the socket.
 
         For the receive loop and anything else that must keep reading. The
-        frame keeps its place in the queue, so ordering against an awaited
-        send is the order they were asked in.
+        frame keeps its place in the urgent lane, so ordering against an
+        awaited send is the order they were asked in. ``data`` may be a
+        function returning the text, called as the frame is written: for a
+        frame that reports how long it waited (the pong).
         """
         await self._put(("str", data), wait=False)
 
-    async def _put(self, payload: tuple, *, wait: bool) -> None:
+    async def send_bulk(self, frame: dict, *, parts: bool = False, key: Any = None) -> None:
+        """Queue a read answer in the bulk lane and wait until it is written.
+
+        ``parts`` splits its JSON into ``read_part`` frames the page puts back
+        together, each held to the window above; ``key`` is the read's id,
+        which every part carries.
+        """
+        text = json.dumps(frame)
+        if not parts or len(text) <= self.PART_CHARS:
+            await self._put(("str", text), wait=True, bulk=True)
+            return
+        pieces = [text[i:i + self.PART_CHARS] for i in range(0, len(text), self.PART_CHARS)]
+        last = len(pieces) - 1
+        for seq, piece in enumerate(pieces):
+            part = json.dumps({"type": "read_part", "id": key, "seq": seq,
+                               "more": seq < last, "data": piece})
+            await self._put(("part", part, (key, seq), len(piece)), wait=True, bulk=True)
+
+    def ack(self, frame: dict) -> None:
+        """The page has the part ``(id, seq)``: its characters leave the
+        window, and the writer may send the next."""
+        size = self._unacked.pop((frame.get("id"), frame.get("seq")), None)
+        if size is not None:
+            self._in_window -= size
+            self._wake.set()
+
+    async def _put(self, payload: tuple, *, wait: bool, bulk: bool = False) -> None:
         if self._gone or self._ws.closed:
             return
         if not wait and self._unwaited >= self.UNWAITED_MAX:
@@ -243,25 +301,48 @@ class Carrier:
         done = asyncio.get_running_loop().create_future() if wait else None
         if done is None:
             self._unwaited += 1
-        self._out.put_nowait((payload, done))
+        (self._bulk if bulk else self._urgent).append((payload, done))
+        self._wake.set()
         if done is not None:
             await done
+
+    def _bulk_may_go(self) -> bool:
+        if not self._bulk:
+            return False
+        head = self._bulk[0][0]
+        return head[0] != "part" or self._in_window < self.BULK_WINDOW
 
     async def _pump(self) -> None:
         """Write queued frames, one at a time, for as long as the socket is
         open. A frame that fails is reported to whoever waited for it; the
         socket's own end is handled by the loop that owns it."""
         while True:
-            (kind, data), done = await self._out.get()
+            if not self._urgent and self._bulk_may_go():
+                if not await sendq.below_low_water(self._ws, lambda: bool(self._urgent)):
+                    continue
+            if self._urgent:
+                payload, done = self._urgent.popleft()
+            elif self._bulk_may_go():
+                payload, done = self._bulk.popleft()
+            else:
+                self._wake.clear()
+                await self._wake.wait()
+                continue
             if done is None:
                 self._unwaited -= 1
+            kind, data = payload[0], payload[1]
             try:
                 if self._gone or self._ws.closed:
                     raise ConnectionResetError("the shared socket is gone")
-                if kind == "str":
-                    await self._ws.send_str(data)
-                else:
+                if kind == "bytes":
                     await self._ws.send_bytes(data)
+                else:
+                    if callable(data):
+                        data = data()
+                    if kind == "part":
+                        self._unacked[payload[2]] = payload[3]
+                        self._in_window += payload[3]
+                    await self._ws.send_str(data)
             except asyncio.CancelledError:
                 if done is not None and not done.done():
                     done.cancel()
@@ -397,8 +478,10 @@ class Carrier:
                 pass
         # Whoever was waiting on a frame that will now never be written is
         # told so, rather than left awaiting a future nothing will finish.
-        while not self._out.empty():
-            _, done = self._out.get_nowait()
+        pending = list(self._urgent) + list(self._bulk)
+        self._urgent.clear()
+        self._bulk.clear()
+        for _, done in pending:
             if done is not None and not done.done():
                 done.set_exception(ConnectionResetError("the shared socket is gone"))
         self._unwaited = 0
