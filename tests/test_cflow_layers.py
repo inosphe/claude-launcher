@@ -1675,5 +1675,4 @@ def test_a_landing_reaches_the_worker_whatever_its_board_state():
         # test is the latest request's tip, not a MERGED comment: an issue can
         # land, be re-requested at a new tip, and need re-measuring again.
         assert "최신 요청 tip이 이미 새 master에 있는 이슈는" in integrate
-        assert "MERGED 코멘트가 있다는
-것만으로는 빼지 않는다" in integrate
+        assert "것만으로는 빼지 않는다 — 한 이슈가 두 번 착지할 수 있다" in integrate
