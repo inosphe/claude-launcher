@@ -2150,7 +2150,14 @@ function sessionGridTipStyles() {
   document.head.append(style);
 }
 
+/* The Operator's session labels open the same card after a short wait
+   (scheduleSessionCardTip); the grid's cells open it at once. */
+const SESSION_GRID_TIP_DELAY_MS = 350;
+let sessionGridTipTimer = null;
+
 function hideSessionGridTip() {
+  clearTimeout(sessionGridTipTimer);
+  sessionGridTipTimer = null;
   const tip = document.getElementById("sg-tip");
   if (tip) {
     tip.classList.add("hidden");
