@@ -306,13 +306,13 @@ option:disabled { color: #6b7280; }
 #sg-tip .sg-tip-where { color: #e6edf3; font-weight: 600; }
 #sg-tip .sg-tip-pos { color: #7d8590; }
 #sg-tip .sg-tip-note { padding: 4px 10px; color: #7d8590; font-size: 10px; }
-/* Pinned by a right-click: it takes the pointer (to reach x and to select
-   text) and scrolls when taller than the window. The copied card's own
-   buttons have no handlers in the copy, so they do not take the pointer. */
+/* Pinned by a right-click: it takes the pointer -- x, text selection, and
+   the card's own controls, whose clicks app.js replays on the list's card
+   (replaySessionGridTipClick) -- and scrolls when taller than the window. */
 #sg-tip.pinned {
   pointer-events: auto; overflow: auto; border-color: #58a6ff; user-select: text;
 }
-#sg-tip.pinned li.sess-card button { pointer-events: none; }
+#sg-tip.pinned li.sess-card { cursor: pointer; }
 #sg-tip .sg-tip-close {
   margin-left: auto; padding: 0 6px; font-size: 14px; line-height: 1;
   background: none; border: 0; border-radius: 3px; color: #8b949e; cursor: pointer;
