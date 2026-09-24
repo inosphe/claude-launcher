@@ -280,6 +280,22 @@ def test_a_sub_definition_may_hold_the_landing_queue(proj):
     assert engine.landing_queue_run() == "stack"
 
 
+def test_the_mcp_tools_that_take_a_run_advertise_it(proj):
+    """A sub run may hold the queue, so the queue tool must say it takes
+    `run` (s763's review of claunch-u8wjx.1); set_state reads it the same way."""
+    schemas = {t["name"]: t["inputSchema"]["properties"] for t in mcp.TOOLS}
+    for name in ("landing_queue", "set_state"):
+        assert "run" in schemas[name], name
+    engine.start("main")
+    engine.start("queued", run="stack")
+    engine.enqueue_landing(["x-1"], "w1-feature", "0" * 40, by="w1", run="stack")
+    listed = mcp.call_tool("landing_queue", {"run": "stack"})
+    assert [e["issue"] for e in listed["landing_queue"]] == ["x-1"]
+    moved = mcp.call_tool("landing_queue", {"run": "stack", "issue": "x-1", "status": "rejected"})
+    assert moved["status"] == "landing_marked"
+    assert not mcp.call_tool("landing_queue", {}).get("landing_queue")  # main holds none
+
+
 def test_only_one_run_of_a_scope_holds_the_landing_queue(proj):
     engine.start("qmain")
     assert engine.landing_queue_run() == state_mod.MAIN_RUN
