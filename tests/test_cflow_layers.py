@@ -1244,6 +1244,90 @@ def test_seed_writes_a_record_loaded_by_update(project, home, tmp_path, monkeypa
     assert "tiny.yaml" in record and len(record["tiny.yaml"]) == 64
 
 
+def _drop_from_bundle(pkg, name):
+    """The package stops shipping ``name`` — the removal a release makes."""
+    (pkg / name).unlink()
+
+
+def test_update_retires_an_unedited_copy_the_package_dropped(project, home, tmp_path, monkeypatch):
+    """A workflow deleted from the package must stop resolving through the
+    global layer; the seeded copy holds nothing a human wrote, so it goes."""
+    pkg = _fake_bundle(tmp_path, monkeypatch, {
+        "tiny.yaml": TINY.format(name="tiny", desc="v1"),
+        "gone.yaml": TINY.format(name="gone", desc="v1"),
+    })
+    cflow_install.seed_global_workflows()
+    _drop_from_bundle(pkg, "gone.yaml")
+
+    outcomes = cflow_install.update_global_workflows([], can_ask=False)
+    states = {name: (outcome, applied) for name, outcome, applied, _ in outcomes}
+    assert states["gone"] == (cflow_install.RETIRED, True)
+    assert states["tiny"] == (cflow_install.UNCHANGED, False)
+    assert not (home / "workflows" / "gone.yaml").exists()
+    assert not (home / "workflows" / "gone.yaml.bak").exists()
+    record = cflow_install.seed_record(home / "workflows")
+    assert "gone.yaml" not in record and "tiny.yaml" in record
+
+
+def test_update_keeps_an_edited_dropped_copy_without_force(project, home, tmp_path, monkeypatch):
+    pkg = _fake_bundle(tmp_path, monkeypatch, {"gone.yaml": TINY.format(name="gone", desc="v1")})
+    cflow_install.seed_global_workflows()
+    (home / "workflows" / "gone.yaml").write_text(
+        TINY.format(name="gone", desc="mine"), encoding="utf-8"
+    )
+    _drop_from_bundle(pkg, "gone.yaml")
+
+    outcomes = cflow_install.update_global_workflows([], can_ask=False)
+    states = {name: (outcome, applied) for name, outcome, applied, _ in outcomes}
+    assert states["gone"] == (cflow_install.RETIRED, False)
+    assert "mine" in (home / "workflows" / "gone.yaml").read_text("utf-8")
+    # Still remembered, so the next --force can prove it was ours.
+    assert "gone.yaml" in cflow_install.seed_record(home / "workflows")
+
+    outcomes = cflow_install.update_global_workflows([], force=True, can_ask=False)
+    states = {name: (outcome, applied) for name, outcome, applied, _ in outcomes}
+    assert states["gone"] == (cflow_install.RETIRED, True)
+    assert not (home / "workflows" / "gone.yaml").exists()
+    assert "mine" in (home / "workflows" / "gone.yaml.bak").read_text("utf-8")
+
+
+def test_update_never_retires_a_file_it_did_not_seed(project, home, tmp_path, monkeypatch):
+    """No record entry = a person put it there; update has no claim on it."""
+    _fake_bundle(tmp_path, monkeypatch, {"tiny.yaml": TINY.format(name="tiny", desc="v1")})
+    cflow_install.seed_global_workflows()
+    mine = home / "workflows" / "mine.yaml"
+    mine.write_text(TINY.format(name="mine", desc="hand-written"), encoding="utf-8")
+
+    outcomes = cflow_install.update_global_workflows([], force=True, can_ask=False)
+    assert "mine" not in {name for name, *_ in outcomes}
+    assert mine.is_file()
+
+
+def test_update_retire_honours_the_name_filter(project, home, tmp_path, monkeypatch):
+    pkg = _fake_bundle(tmp_path, monkeypatch, {
+        "tiny.yaml": TINY.format(name="tiny", desc="v1"),
+        "gone.yaml": TINY.format(name="gone", desc="v1"),
+    })
+    cflow_install.seed_global_workflows()
+    _drop_from_bundle(pkg, "gone.yaml")
+
+    cflow_install.update_global_workflows(["tiny"], can_ask=False)
+    assert (home / "workflows" / "gone.yaml").is_file()
+    cflow_install.update_global_workflows(["gone"], can_ask=False)
+    assert not (home / "workflows" / "gone.yaml").exists()
+
+
+def test_update_forgets_a_dropped_copy_already_removed_by_hand(project, home, tmp_path, monkeypatch):
+    pkg = _fake_bundle(tmp_path, monkeypatch, {"gone.yaml": TINY.format(name="gone", desc="v1")})
+    cflow_install.seed_global_workflows()
+    _drop_from_bundle(pkg, "gone.yaml")
+    (home / "workflows" / "gone.yaml").unlink()
+
+    outcomes = cflow_install.update_global_workflows([], can_ask=False)
+    assert "gone" not in {name for name, *_ in outcomes}
+    assert "gone.yaml" not in cflow_install.seed_record(home / "workflows")
+
+
 def test_both_leader_layers_teach_the_topology_skills():
     """The lead re-draws its own team — wires two peers who keep needing each
     other through it, and puts a crowded area under a nested worker it moves

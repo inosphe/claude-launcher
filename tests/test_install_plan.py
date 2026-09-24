@@ -15,6 +15,7 @@ What is pinned here:
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import subprocess
 import sys
@@ -23,6 +24,7 @@ from pathlib import Path
 import pytest
 
 from claude_launcher import defender, fsplan, install, install_plan, profile, workspaces
+from claude_launcher.cflow import install as cflow_install
 from claude_launcher.cflow import state as cflow_state
 from claude_launcher.daemon import api
 
@@ -199,3 +201,28 @@ def test_the_apply_route_runs_the_install(roots):
     assert any(line.startswith("mcp server") for line in body["lines"])
     for change in body["changes"]:
         assert Path(change["path"]).is_file()
+
+
+def test_cflow_update_previews_a_retired_copy_as_a_delete(roots):
+    """A workflow the package dropped is removed by update; the dry run must
+    show that removal and leave the file where it is."""
+    install.install_into_user()
+    layer = cflow_state.global_workflows_dir()
+    retired = layer / "retired-flow.yaml"
+    retired.write_text("name: retired-flow\nsteps:\n  a: {instructions: x}\n", encoding="utf-8")
+    record = cflow_install.seed_record(layer)
+    record[retired.name] = hashlib.sha256(retired.read_bytes()).hexdigest()
+    cflow_install.write_seed_record(layer, record)
+
+    before = snapshot(*roots)
+    report = install_plan.plan("cflow-update")
+    by_path = {c["path"]: c for c in report["changes"]}
+    assert by_path[str(retired)]["kind"] == fsplan.DELETE
+    assert by_path[str(retired)]["bytes_after"] is None
+    assert report["summary"][fsplan.DELETE] == 1
+    assert any("retired-flow" in line and "updated" in line for line in report["lines"])
+    assert snapshot(*roots) == before
+
+    install_plan.apply("cflow-update")
+    assert not retired.exists()
+    assert retired.name not in cflow_install.seed_record(layer)

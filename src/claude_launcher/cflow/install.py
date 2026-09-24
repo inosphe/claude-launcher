@@ -496,6 +496,7 @@ KEPT = "kept"  #: something different is there, and it was left alone
 STALE = "stale"  #: exactly the bytes we seeded; the packaged copy has moved on
 EDITED = "edited"  #: differs from both the packaged copy and what we seeded
 UNKNOWN = "unknown"  #: no seed record, so stale and edited are indistinguishable
+RETIRED = "retired"  #: we seeded it, and the package no longer ships it
 
 #: The sidecar that remembers, per global workflow file, the sha256 of the
 #: packaged bytes it was seeded from. File *names*, not workflow names — a
@@ -641,6 +642,10 @@ def update_global_workflows(
     (which sets ``$CLAUNCH_SESSION``) cannot be asked, and must pass
     ``--force`` explicitly. That is the whole distinction — an agent's "yes"
     is not the operator's.
+
+    A copy the record says we seeded but the package no longer ships comes
+    back ``RETIRED`` and is removed under the same rule
+    (:func:`_retire_unpackaged`).
     """
     dest_dir = state.global_workflows_dir()
     sources = list(state.bundled_workflows()) + [
@@ -688,8 +693,73 @@ def update_global_workflows(
                 detail = f"{detail}; pass --force to replace (kept as .bak)"
         outcomes.append((name, outcome, applied, detail))
 
+    outcomes += _retire_unpackaged(
+        dest_dir, record, {src.name for _, src in sources}, names, force, can_ask
+    )
     write_seed_record(dest_dir, record)
     return outcomes
+
+
+def _retire_unpackaged(
+    dest_dir: Path,
+    record: Dict[str, str],
+    packaged: set,
+    names: List[str],
+    force: bool,
+    can_ask: bool,
+) -> List[Tuple[str, str, bool, str]]:
+    """Remove global copies the package no longer ships — ``RETIRED``.
+
+    Only a file the seed record names is a candidate: the record is the proof
+    that the package put it there, so a workflow a person wrote into the
+    layer (no record entry) is never touched. The same stale/edited rule as a
+    refresh applies — an unedited copy is removed outright (nothing a human
+    wrote is lost), an edited one only with ``--force`` or a live yes, after
+    the one ``.bak`` copy. Without this a workflow deleted from the package
+    stays resolvable forever through the global layer.
+    """
+    outcomes = []
+    for file_name in sorted(record):
+        if file_name in packaged:
+            continue
+        name = Path(file_name).stem
+        if names and name not in names:
+            continue
+        dest = dest_dir / file_name
+        if not fsplan.is_file(dest):
+            # Gone already (removed by hand): the memory of it goes too.
+            del record[file_name]
+            continue
+        applied = False
+        if _sha256(dest) == record[file_name]:
+            detail = "no longer packaged; removed the unedited seeded copy"
+            applied = True
+        elif force or (can_ask and _confirm_remove(name)):
+            _backup_one(dest)
+            detail = "no longer packaged; removed (edited copy kept as .bak)"
+            applied = True
+        else:
+            detail = (
+                "no longer packaged, but edited since seeding; "
+                "pass --force to remove it (kept as .bak)"
+            )
+        if applied:
+            fsplan.remove(dest)
+            del record[file_name]
+        outcomes.append((name, RETIRED, applied, detail))
+    return outcomes
+
+
+def _confirm_remove(name: str) -> bool:
+    """Ask the person at the terminal whether an edited, unpackaged copy may
+    go. Same contract as :func:`_confirm_replace`: only an explicit yes."""
+    try:
+        answer = input(
+            f"remove edited workflow {name!r} (no longer packaged)? [y/N]: "
+        ).strip().lower()
+    except EOFError:
+        return False
+    return answer in ("y", "yes")
 
 
 def _confirm_replace(name: str) -> bool:
