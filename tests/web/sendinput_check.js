@@ -137,6 +137,8 @@ new Function(
   `let currentName = null;
 let sessionEnded = false;
 let sessionsCache = [];
+let sessJournalBox = null;
+function sessInputJournalFill() {}
 ${kindsDecl[0]}
 ` + slice("termInputNote") + `
 ` + slice("sendKeyLine") + `
@@ -144,7 +146,7 @@ ${kindsDecl[0]}
 ` + slice("renderScoreGoal") + `
 ` + slice("setScoreFeedbackChoice") + `
 ` + slice("setScoreFeedbackDisabled") + `
-` + slice("termInputBlock") + `
+` + slice("termInputQueueNote") + `
 ` + slice("autogrowTermInput") + `
 ` + slice("insertTermInputText") + `
 ` + slice("uploadPastedImage") + `
@@ -156,7 +158,7 @@ ${kindsDecl[0]}
 ` + slice("onWindowCtrlJ") + `
 Object.assign(exports, {
   sendKeyLine,
-  termInputBlock,
+  termInputQueueNote,
   termInputNote,
   renderScoreGoal,
   currentScoreFeedback,
@@ -222,17 +224,26 @@ async function main() {
   await ctx.sendKeyLine(b.field, b.btn, b.note);
   check("no attached session sends nothing", sent.length === 0, sent);
 
-  /* ---- an ended session has the box closed, not a live one ---- */
-  const live = ctx.termInputBlock(false);
-  const dead = ctx.termInputBlock(true);
-  check("a live session is open", live === "");
-  check("an ended session has a reason", dead !== "", dead);
+  /* ---- an ended session queues the line instead of refusing it ---- */
+  const live = ctx.termInputQueueNote(false);
+  const dead = ctx.termInputQueueNote(true);
+  check("a live session has no queue note", live === "");
+  check("an ended session says lines are queued", /queued/.test(dead), dead);
   sent = [];
+  reply = { ok: true, status: 202,
+            doc: { ok: true, queued: true, position: 2, input_id: "x" } };
   ctx.setSession("coder4", true);
   b.field.value = "anything";
-  const blocked = await ctx.sendKeyLine(b.field, b.btn, b.note);
-  check("an ended session blocks the send", sent.length === 0 && blocked === false, sent);
-  check("...and shows the reason", NOTE.textContent === dead, NOTE.textContent);
+  const queued = await ctx.sendKeyLine(b.field, b.btn, b.note);
+  check("an ended session still sends — the daemon queues it",
+        sent.length === 1 && queued === true, sent);
+  check("...with the durable input id the queue is keyed on",
+        typeof sent[0].body.input_id === "string" && sent[0].body.input_id,
+        sent[0].body);
+  check("...and the field empties", b.field.value === "");
+  check("...and the note says it is queued, not typed",
+        /queued \(2 waiting\)/.test(NOTE.textContent), NOTE.textContent);
+  reply = { ok: true, doc: {} };
 
   /* ---- the live send: ONE call, text and Enter together ---- */
   sent = [];

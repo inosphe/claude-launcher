@@ -10746,8 +10746,15 @@ function endSession() {
    `claunch send-keys --paste` and every delivery already use, and the reason
    the newline survives whatever harness is running in the session. */
 
-function termInputBlock(ended) {
-  if (ended) return "this session has ended — nothing to send keys to";
+/* An ended session keeps the box open: a line sent there is queued in the
+   session's input journal and typed, oldest first, when the session is
+   resumed (daemon/session_input.py). This is the standing note that says so,
+   so nobody reads a queued line as one the agent has already seen. */
+function termInputQueueNote(ended) {
+  if (ended) {
+    return "this session has ended — a line sent now is queued and typed " +
+      "when the session is resumed";
+  }
   return "";
 }
 
@@ -10762,11 +10769,6 @@ function termInputNote(note, message, warn = false) {
 async function sendKeyLine(field, btn, note) {
   const text = field.value.trim();
   if (!text || !currentName) return false;
-  const blocked = termInputBlock(sessionEnded);
-  if (blocked) {
-    termInputNote(note, blocked);
-    return false;
-  }
   note.classList.add("hidden");
   note.classList.remove("wf-warning");
   const wasField = field.disabled, wasBtn = btn.disabled;
@@ -10792,6 +10794,21 @@ async function sendKeyLine(field, btn, note) {
         body: JSON.stringify(body) }
     );
     const doc = await resp.json().catch(() => ({}));
+    if (resp.ok && doc.queued) {
+      // Nothing was typed: the session has ended, and the daemon holds the
+      // line until it is resumed. Said on the spot, because the box empties
+      // exactly as it does for a line that landed.
+      field.value = "";
+      autogrowTermInput(field);
+      termInputNote(note,
+        `queued (${doc.position || 1} waiting) — typed when this session ` +
+        "is resumed; withdraw it from the session input journal");
+      if (typeof sessJournalBox !== "undefined" && sessJournalBox &&
+          sessJournalBox.dataset.session === currentName) {
+        sessInputJournalFill(sessJournalBox, currentName);
+      }
+      return true;
+    }
     if (resp.ok) {
       field.value = "";
       autogrowTermInput(field);
@@ -10817,10 +10834,9 @@ async function sendKeyLine(field, btn, note) {
   }
 }
 
-/* The field's live-ness follows the session it types to. An ended session has
-   no PTY any send-keys could reach, so the box is closed with the reason
-   shown; a live one is open, and whatever this tab's badge says the daemon
-   answers for. */
+/* The field stays open whatever the session's state. A live session takes
+   the line now; an ended one has no PTY, so the daemon queues the line and
+   the note under the box says so (termInputQueueNote). */
 function renderScoreGoal() {
   const box = $("term-score-goal");
   if (!box) return;
@@ -10930,11 +10946,11 @@ function refreshTermInput() {
   const note = $("term-input-note");
   const btn = $("term-input-send");
   if (!field || !btn) return;
-  const blocked = termInputBlock(sessionEnded);
-  field.disabled = !!blocked;
-  btn.disabled = !!blocked;
-  if (blocked) {
-    termInputNote(note, blocked);
+  const queueNote = termInputQueueNote(sessionEnded);
+  field.disabled = false;
+  btn.disabled = false;
+  if (queueNote) {
+    termInputNote(note, queueNote);
   } else {
     note.classList.add("hidden");
     note.textContent = "";
@@ -23872,20 +23888,59 @@ function sessInputJournalFill(box, name, quiet) {
       const doc = await resp.json().catch(() => ({}));
       if (quiet && box.open) return;
       box.innerHTML = "";
+      // One row per submitted line with its current status. `entries` (the
+      // raw event log) is the fallback for a daemon that predates `requests`.
+      const rows = doc.requests || doc.entries || [];
+      const queued = doc.queued || 0;
       box.appendChild(el("summary", null,
-        `Session input journal (${(doc.entries || []).length})`));
-      if (!resp.ok || !(doc.entries || []).length) {
+        `Session input journal (${rows.length})` +
+        (queued ? ` · ${queued} queued` : "")));
+      if (!resp.ok || !rows.length) {
         box.appendChild(el("p", resp.ok ? "no submitted lines" :
           (doc.error || "journal unavailable"), "wf-note"));
         return;
       }
-      for (const entry of (doc.entries || []).slice().reverse()) {
-        const row = el("div", "wf-journal-line mono");
-        row.textContent = `${(entry.at || "").replace("T", " ")}  ` +
-          `${entry.status || entry.event || "?"}  ${entry.text || ""}`;
-        box.appendChild(row);
+      for (const entry of rows.slice().reverse()) {
+        box.appendChild(sessInputJournalRow(box, name, entry));
       }
     }).catch(() => {});
+}
+
+/* What each status tells the reader, as the badge's hover text. "sent" is
+   the one that means the line reached the terminal; "queued" means it has
+   not, and is waiting for the session to be resumed. */
+const SESS_INPUT_STATUS_TITLE = {
+  queued: "not typed yet — waiting for this session to be resumed",
+  accepted: "being typed into the terminal now",
+  sent: "typed into the terminal",
+  failed: "the terminal did not take it — nothing more will be tried",
+  cancelled: "withdrawn before it was typed",
+};
+
+function sessInputJournalRow(box, name, entry) {
+  const status = entry.status || entry.event || "?";
+  const row = el("div", "wf-journal-line mono sess-input-row");
+  row.appendChild(el("span", "sess-input-at",
+    `${(entry.at || "").replace("T", " ")}  `));
+  const badge = el("span", `sess-input-status sess-input-${status}`, status);
+  badge.title = SESS_INPUT_STATUS_TITLE[status] || status;
+  row.appendChild(badge);
+  row.appendChild(el("span", "sess-input-text", `  ${entry.text || ""}`));
+  if (status === "queued" && entry.request_id) {
+    const cancel = el("button", "term-btn sess-input-cancel", "withdraw");
+    cancel.type = "button";
+    cancel.title = "remove this line from the queue — it will not be typed";
+    cancel.addEventListener("click", async () => {
+      cancel.disabled = true;
+      try {
+        await api(`/api/sessions/${encodeURIComponent(name)}/input-journal/` +
+          encodeURIComponent(entry.request_id), { method: "DELETE" });
+      } catch { /* the refill below shows whatever the daemon holds */ }
+      sessInputJournalFill(box, name);
+    });
+    row.appendChild(cancel);
+  }
+  return row;
 }
 
 /* The fold itself, kept alive across polls the way the send box and the

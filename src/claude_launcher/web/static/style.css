@@ -4968,3 +4968,17 @@ a.window-owner:hover { color: #79c0ff; text-decoration: underline; }
   padding: .8rem;
   font: 13px/1.5 ui-monospace, SFMono-Regular, Consolas, monospace;
 }
+
+/* Session input journal: one row per submitted line, with where it stands.
+   "queued" is the state a reader must not mistake for delivered, so it is the
+   one that stands out; "sent" is the quiet default. */
+.sess-input-status {
+  display: inline-block; padding: 0 5px; border-radius: 3px;
+  border: 1px solid #30363d; font-size: 11px; line-height: 16px;
+}
+.sess-input-sent { color: #3fb950; border-color: #238636; }
+.sess-input-queued { color: #d29922; border-color: #9e6a03; font-weight: 600; }
+.sess-input-accepted { color: #58a6ff; border-color: #1f6feb; }
+.sess-input-failed { color: #f85149; border-color: #da3633; }
+.sess-input-cancelled { color: #6e7681; text-decoration: line-through; }
+.sess-input-cancel { margin-left: 8px; padding: 0 6px; font-size: 11px; }
