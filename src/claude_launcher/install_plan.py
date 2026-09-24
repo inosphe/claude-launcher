@@ -181,7 +181,7 @@ def _under(path: Path, root: Path) -> bool:
 
 
 def _summary(changes: List[fsplan.Change]) -> Dict[str, int]:
-    counts = {fsplan.CREATE: 0, fsplan.UPDATE: 0, fsplan.UNCHANGED: 0}
+    counts = {fsplan.CREATE: 0, fsplan.UPDATE: 0, fsplan.UNCHANGED: 0, fsplan.DELETE: 0}
     for c in changes:
         counts[c.kind] += 1
     return counts

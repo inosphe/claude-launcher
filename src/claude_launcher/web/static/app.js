@@ -18538,10 +18538,10 @@ async function previewInstall(targetId) {
 
 async function runInstall(row) {
   const s = row.summary || {};
-  const writes = (s.create || 0) + (s.update || 0);
+  const writes = (s.create || 0) + (s.update || 0) + (s.delete || 0);
   if (!confirm(`Run "${row.command}" from the daemon now?\n\n` +
-      `The dry run says it creates ${s.create || 0} and updates ${s.update || 0} ` +
-      `file(s)${writes ? "" : " (nothing to change)"}.`)) return;
+      `The dry run says it creates ${s.create || 0}, updates ${s.update || 0} ` +
+      `and deletes ${s.delete || 0} file(s)${writes ? "" : " (nothing to change)"}.`)) return;
   installBusy = row.id;
   if (wsOpen) renderWorkspaces();
   try {
@@ -18579,7 +18579,7 @@ function installDetailCard(d) {
   card.appendChild(el("p", "wf-note", t.command || ""));
   const s = d.summary || {};
   card.appendChild(el("p", null,
-    `create ${s.create || 0} · update ${s.update || 0} · unchanged ${s.unchanged || 0}`));
+    `create ${s.create || 0} · update ${s.update || 0} · delete ${s.delete || 0} · unchanged ${s.unchanged || 0}`));
 
   const effects = Object.entries(d.effects || {});
   if (effects.length) {
@@ -18656,7 +18656,7 @@ function installPanel() {
 
   const table = el("table", "md-table install-table");
   const head = el("tr", null);
-  for (const h of ["Target", "Command", "Create", "Update", "Unchanged", ""]) {
+  for (const h of ["Target", "Command", "Create", "Update", "Delete", "Unchanged", ""]) {
     head.appendChild(el("th", null, h));
   }
   table.appendChild(head);
@@ -18666,12 +18666,13 @@ function installPanel() {
     tr.appendChild(el("td", "install-cmd", row.command));
     if (row.error) {
       const td = el("td", "wf-error", row.error);
-      td.colSpan = 3;
+      td.colSpan = 4;
       tr.appendChild(td);
     } else {
       const s = row.summary || {};
       tr.appendChild(el("td", s.create ? "install-pending" : null, String(s.create || 0)));
       tr.appendChild(el("td", s.update ? "install-pending" : null, String(s.update || 0)));
+      tr.appendChild(el("td", s.delete ? "install-pending" : null, String(s.delete || 0)));
       tr.appendChild(el("td", null, String(s.unchanged || 0)));
     }
     const act = el("td", "install-actions");

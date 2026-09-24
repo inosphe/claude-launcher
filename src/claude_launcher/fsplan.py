@@ -34,6 +34,7 @@ from typing import Dict, Iterator, List, Optional
 CREATE = "create"  #: nothing is there; the write creates the file
 UPDATE = "update"  #: a file is there and the write changes its bytes
 UNCHANGED = "unchanged"  #: a file is there and the write leaves the same bytes
+DELETE = "delete"  #: a file is there and the plan removes it
 
 
 @dataclass
@@ -42,10 +43,13 @@ class Change:
 
     path: Path
     before: Optional[bytes]
-    after: bytes
+    #: None when the plan removes the file.
+    after: Optional[bytes]
 
     @property
     def kind(self) -> str:
+        if self.after is None:
+            return DELETE
         if self.before is None:
             return CREATE
         return UNCHANGED if self.before == self.after else UPDATE
@@ -55,7 +59,7 @@ class Change:
             "path": str(self.path),
             "kind": self.kind,
             "bytes_before": None if self.before is None else len(self.before),
-            "bytes_after": len(self.after),
+            "bytes_after": None if self.after is None else len(self.after),
         }
         if with_text:
             out["before"] = _text(self.before)
@@ -79,7 +83,7 @@ class Plan:
     #: plans every target at once cannot afford per target.
     skip_defender: bool = False
 
-    def record(self, path: Path, data: bytes) -> None:
+    def record(self, path: Path, data: Optional[bytes]) -> None:
         key = _key(path)
         prior = self._changes.get(key)
         if prior is not None:
@@ -93,6 +97,11 @@ class Plan:
     def overlay(self, path: Path) -> Optional[bytes]:
         change = self._changes.get(_key(path))
         return None if change is None else change.after
+
+    def removed(self, path: Path) -> bool:
+        """Whether this plan's last word on ``path`` is a removal."""
+        change = self._changes.get(_key(path))
+        return change is not None and change.after is None
 
     @property
     def changes(self) -> List[Change]:
@@ -158,6 +167,19 @@ def copyfile(src: Path, dest: Path) -> None:
     shutil.copyfile(src, dest)
 
 
+def remove(path: Path) -> None:
+    """``unlink`` (a missing file is not an error), or its record in a dry run."""
+    plan = active()
+    if plan is not None:
+        if is_file(path):
+            plan.record(path, None)
+        return
+    try:
+        Path(path).unlink()
+    except FileNotFoundError:
+        pass
+
+
 def mkdir(path: Path) -> None:
     """``mkdir -p``, skipped in a dry run (a directory is not a change)."""
     if active() is None:
@@ -168,6 +190,8 @@ def read_bytes(path: Path) -> Optional[bytes]:
     """The file's bytes as this plan would leave them; None when absent."""
     plan = active()
     if plan is not None:
+        if plan.removed(path):
+            return None
         data = plan.overlay(path)
         if data is not None:
             return data
@@ -186,6 +210,9 @@ def read_text(path: Path, encoding: str = "utf-8") -> Optional[str]:
 def is_file(path: Path) -> bool:
     """Whether the file exists, counting files this plan would create."""
     plan = active()
-    if plan is not None and plan.overlay(path) is not None:
-        return True
+    if plan is not None:
+        if plan.removed(path):
+            return False
+        if plan.overlay(path) is not None:
+            return True
     return Path(path).is_file()

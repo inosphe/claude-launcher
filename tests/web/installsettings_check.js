@@ -29,7 +29,7 @@ const overview = {
     { id: "install:global", label: "Global", command: "claunch install --global",
       summary: { create: 2, update: 1, unchanged: 5 }, pending: [] },
     { id: "cflow-update", label: "Workflows", command: "claunch cflow update",
-      summary: { create: 0, update: 0, unchanged: 9 }, pending: [] },
+      summary: { create: 0, update: 0, delete: 1, unchanged: 9 }, pending: [] },
     { id: "install:profile:bad", label: "Profile: bad", command: "x",
       error: "ProfileError: nope" },
   ],
@@ -84,11 +84,14 @@ vm.runInContext(
   const table = find(panel, (n) => n.tag === "table");
   const rows = table.children.slice(1);
   assert.equal(rows.length, 3);
-  assert.deepEqual(rows[0].children.slice(0, 5).map((c) => c.text),
-    ["Global", "claunch install --global", "2", "1", "5"]);
+  assert.deepEqual(rows[0].children.slice(0, 6).map((c) => c.text),
+    ["Global", "claunch install --global", "2", "1", "0", "5"]);
   // A count that means "Run would write something" is marked.
   assert.equal(rows[0].children[2].cls, "install-pending");
   assert.equal(rows[1].children[2].cls, null);
+  // A retired workflow the update would remove counts as a pending change.
+  assert.deepEqual(rows[1].children.slice(2, 6).map((c) => c.text), ["0", "0", "1", "9"]);
+  assert.equal(rows[1].children[4].cls, "install-pending");
   // A target that could not be planned says why and cannot be run.
   assert.match(textOf(rows[2]), /ProfileError: nope/);
   const badRun = find(rows[2], (n) => n.tag === "button" && n.text === "Run");
