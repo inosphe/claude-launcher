@@ -2377,10 +2377,100 @@ function hideSessionGridTip() {
   }
 }
 
+/* A pinned card is operable. The card in it is a copy, and a copy carries
+   no listeners, so a click on it is replayed on the node at the same place
+   in the list's own card -- the ⓘ, +, pin, the briefing ▸ and its ⟳, the
+   checks' refresh, the cflow line, the row itself -- and whatever that
+   changes in the list's card is copied back in. The list stays the one
+   place these controls are built and wired. */
+let sessionGridTipObserver = null;
+let sessionGridTipSource = "";
+
+function sessionGridListCard(name) {
+  return document.querySelector(`#session-list li.sess-card[data-name="${CSS.escape(name)}"]`);
+}
+
+/* Child indices from `root` down to `node`, and back again. */
+function sessionGridNodePath(root, node) {
+  const path = [];
+  for (let n = node; n && n !== root; n = n.parentElement) {
+    if (!n.parentElement) return null;
+    path.unshift(Array.prototype.indexOf.call(n.parentElement.children, n));
+  }
+  return path;
+}
+
+function sessionGridNodeAt(root, path) {
+  let n = root;
+  for (const i of path || []) {
+    n = n && n.children[i];
+  }
+  return n || null;
+}
+
+function replaySessionGridTipClick(ev) {
+  if (!sessionGridTipPinned) return;
+  const copy = ev.target.closest && ev.target.closest("#sg-tip li.sess-card");
+  if (!copy) return;
+  // A drag that selected text ends in a click too; that one is reading.
+  const selected = typeof getSelection === "function" ? String(getSelection()) : "";
+  if (selected) return;
+  const original = sessionGridListCard(copy.dataset.name);
+  const path = sessionGridNodePath(copy, ev.target);
+  const twin = original && path ? sessionGridNodeAt(original, path) : null;
+  if (!twin || twin.tagName !== ev.target.tagName
+      || (twin.classList[0] || "") !== (ev.target.classList[0] || "")) return;
+  ev.preventDefault();
+  ev.stopPropagation();
+  twin.click();
+  refreshPinnedSessionCard();
+}
+
+/* Copy the list's card into the pinned card again when it changed, keeping
+   the scroll and the focused control. */
+function refreshPinnedSessionCard() {
+  const pinned = sessionGridTipPinned;
+  const tip = document.getElementById("sg-tip");
+  if (!pinned || !tip) return;
+  const original = sessionGridListCard(pinned.name);
+  const old = tip.querySelector(":scope > li.sess-card");
+  if (!original || !old || original.outerHTML === sessionGridTipSource) return;
+  const fresh = sessionCardCopy(pinned.name);
+  if (!fresh) return;
+  const focusPath = old.contains(document.activeElement)
+    ? sessionGridNodePath(old, document.activeElement) : null;
+  const scroll = tip.scrollTop;
+  sessionGridTipSource = original.outerHTML;
+  old.replaceWith(fresh);
+  tip.scrollTop = scroll;
+  if (focusPath) sessionGridNodeAt(fresh, focusPath)?.focus?.({ preventScroll: true });
+  const cell = document.querySelector(`#session-grid .sg-cell[data-row="${CSS.escape(pinned.rowId)}"][data-col="${pinned.col}"]`);
+  if (cell) placeSessionTip(tip, cell);
+}
+
+function watchPinnedSessionCard() {
+  const list = document.getElementById("session-list");
+  if (sessionGridTipObserver || !list || typeof MutationObserver !== "function") return;
+  let queued = false;
+  sessionGridTipObserver = new MutationObserver(() => {
+    if (queued) return;
+    queued = true;
+    requestAnimationFrame(() => {
+      queued = false;
+      refreshPinnedSessionCard();
+    });
+  });
+  sessionGridTipObserver.observe(list,
+    { subtree: true, childList: true, attributes: true, characterData: true });
+}
+
 /* Unpin and hide: the x button, Esc, and a press or focus anywhere else. */
 function closeSessionGridTip() {
   if (!sessionGridTipPinned) return;
   sessionGridTipPinned = null;
+  sessionGridTipObserver?.disconnect();
+  sessionGridTipObserver = null;
+  sessionGridTipSource = "";
   const tip = document.getElementById("sg-tip");
   if (tip) {
     tip.classList.remove("pinned");
@@ -2422,6 +2512,7 @@ function sessionTipElement(anchor) {
     tip = document.createElement("ul");
     tip.id = "sg-tip";
     tip.setAttribute("role", "tooltip");
+    tip.addEventListener("click", replaySessionGridTipClick);
   }
   const host = (anchor && anchor.closest && anchor.closest("dialog[open]")) || document.body;
   if (tip.parentNode !== host) host.append(tip);
@@ -2515,6 +2606,8 @@ function showSessionGridTip(cell, row, col, name, inView, pin = false) {
     close.addEventListener("click", () => closeSessionGridTip());
     head.append(close);
     sessionGridTipPinned = { rowId: row.id, col, name };
+    sessionGridTipSource = sessionGridListCard(name)?.outerHTML || "";
+    watchPinnedSessionCard();
     tip.setAttribute("role", "dialog");
     tip.setAttribute("aria-label", `${row.name} ${col + 1}: ${name}`);
   }
