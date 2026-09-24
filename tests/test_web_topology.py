@@ -318,6 +318,13 @@ surface; the rest hold that no second copy of the sentence is left in
 ``observer.js`` and that the two files still share one document, which is
 what lets the card reach that function at all.
 
+``beadsstill_check`` holds the Beads page to the same rule. ``renderBeads``
+empties ``#beads-view`` on every poll of all three tabs and had kept only the
+board canvas's scroll; the page scroll (``#beads-view`` is the scroll
+container), the detail pane's own scroll and the Queues grid's sideways scroll
+were rebuilt at 0, and a text selection was dropped with the nodes it was in.
+The harness drives the real ``renderBeads`` through each of its exits.
+
 Skipped, not failed, where node is unavailable: node is a convenience for
 testing this project, never a requirement for using it.
 """
@@ -470,6 +477,7 @@ CHECKS = [
         "floworphans_check.js",
         "sessflags_check.js",
         "sessstill_check.js",
+        "beadsstill_check.js",
         "observerpin_check.js",
         "operator_check.js",
 ]

@@ -15262,6 +15262,7 @@ let beadsDirection = "desc";
 let beadsWorkspace = "";
 let beadsStreamVersion = 0;
 let beadsRenderedPage = 0; // which page the last render drew, for the scroll
+let beadsRenderedFocus = ""; // which issue the last render's detail pane held
 /* The board's own create form (POST /api/beads). Folded until it is asked
    for, because the page is read far more often than it is written to, and
    its option sets (the boards, the workspace registry) are fetched once on
@@ -16722,11 +16723,42 @@ function beadsDetailPane() {
 function renderBeads() {
   const view = $("beads-view");
   if (formInUse(view)) return;
+  // A reader copying an issue's text holds the page the way a focused field
+  // does: the lines being dragged across are plain divs, so formInUse sees
+  // nothing, and the rebuild would take the selection with them.
+  if (selectionInUse(view)) return;
   const previousCanvas = view.querySelector("#beads-canvas");
   const previousCanvasTop = previousCanvas ? previousCanvas.scrollTop : 0;
   const previousCanvasPage = beadsRenderedPage;
   beadsRenderedPage = beadsPage;
+  // The canvas was the only scroll this function kept, and it is not the
+  // only one on the page. `#beads-view` is itself the page's scroll
+  // container (style.css: overflow-y: auto), so emptying it clamped its
+  // scrollTop to 0 and every poll -- 15 s on Board and Queues, 30 s on
+  // Reports, all three drawn from here -- threw the reader back to the top.
+  // The detail pane scrolls on its own too, and the Queues grid scrolls
+  // sideways; both were rebuilt at 0 (claunch-t80om). Each is read before
+  // the wipe and written back after the rebuild, at every exit below.
+  const previousTop = view.scrollTop;
+  const previousDetail = view.querySelector(".beads-detail");
+  const previousDetailTop = previousDetail ? previousDetail.scrollTop : 0;
+  const previousDetailFocus = beadsRenderedFocus;
+  beadsRenderedFocus = beadsFocus;
+  const previousQueues = view.querySelector(".beads-queues");
+  const previousQueuesLeft = previousQueues ? previousQueues.scrollLeft : 0;
   view.innerHTML = "";
+  const keepScroll = () => {
+    if (previousTop) view.scrollTop = previousTop;
+    // Another issue opened in the pane starts at its own top, for the same
+    // reason another page of the board does: what was under the reader is
+    // not there any more.
+    const detail = view.querySelector(".beads-detail");
+    if (detail && previousDetailTop && previousDetailFocus === beadsFocus) {
+      detail.scrollTop = previousDetailTop;
+    }
+    const queues = view.querySelector(".beads-queues");
+    if (queues && previousQueuesLeft) queues.scrollLeft = previousQueuesLeft;
+  };
   const head = el("div", "wf-head");
   head.appendChild(el("h2", null, "Beads"));
   const back = el("button", "wf-btn clear", "Back");
@@ -16736,10 +16768,12 @@ function renderBeads() {
   view.appendChild(beadsPageTabs());
   if (beadsSection === "reports") {
     renderReports(view, false);
+    keepScroll();
     return;
   }
   if (beadsSection === "queues") {
     renderQueues(view);
+    keepScroll();
     return;
   }
   view.appendChild(el("p", "wf-note beads-intro",
@@ -16762,6 +16796,7 @@ function renderBeads() {
   view.appendChild(beadsFilterBar());
   if (!beadsCache) {
     if (!beadsError) view.appendChild(el("p", "wf-note", "loading…"));
+    keepScroll();
     return;
   }
   view.appendChild(beadsNewBlock());
@@ -16772,6 +16807,7 @@ function renderBeads() {
     body.appendChild(list);
     if (beadsFocus) body.appendChild(beadsDetailPane());
     view.appendChild(body);
+    keepScroll();
     return;
   }
   const canvas = el("div", "beads-canvas");
@@ -16794,6 +16830,7 @@ function renderBeads() {
   if (previousCanvasTop && previousCanvasPage === beadsPage) {
     requestAnimationFrame(() => { canvas.scrollTop = previousCanvasTop; });
   }
+  keepScroll();
 }
 
 function beadsPageTabs() {
