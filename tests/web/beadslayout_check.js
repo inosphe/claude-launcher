@@ -70,7 +70,7 @@ const stubs = `
 const view = el("div");
 function $(id) { return id === "beads-view" ? view : null; }
 function formInUse() { return false; }
-let beadsRenderedPage = 0, beadsPage = 0, beadsSection = "board";
+let beadsRenderedPage = 0, beadsRenderedFocus = "", beadsPage = 0, beadsSection = "board";
 let beadsError = "", beadsCache = null, beadsSession = "", beadsWorkspace = "";
 let beadsFocus = "", beadsSearch = { q: "" }, beadsQueues = null, beadsQueuesError = "";
 let reportsError = "", reportsCache = null;
@@ -103,7 +103,7 @@ const ctx = {};
 new Function(
   "exports", "document", "el",
   stubs
-  + slice("renderBeads") + slice("beadsPageTabs") + slice("beadsWorkspaceTabs")
+  + slice("selectionInUse") + slice("renderBeads") + slice("beadsPageTabs") + slice("beadsWorkspaceTabs")
   // The workspace row names each board and titles it with its database path
   // (claunch-4aesv); real helpers, so the row reads as the page draws it.
   + slice("beadsBoardLabel") + slice("beadsBoardWhere")
