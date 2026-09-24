@@ -2413,6 +2413,98 @@ def test_the_queues_view_draws_a_lane_per_session_and_the_pool(repo):
     asyncio.run(run())
 
 
+def test_the_queues_view_folds_what_the_page_folds_into_counts(repo):
+    """``fold`` leaves out the cards of the rows the Queues tab draws folded
+    -- lanes that are not running or paused, a pool past the cap -- and
+    answers their counts; ``open_folds`` brings a fold the reader opened
+    back in full; without ``fold`` (the rail) nothing changes
+    (claunch-fa1xk: 1.1 MB of a 1.35 MB answer was those cards)."""
+    br = FakeBr()
+    br.add(id="a", assignee="s1", status="open")
+    br.add(id="b", assignee="gone", status="open")
+    br.add(id="c", assignee="gone", status="in_progress", created_by="gone")
+    br.add(id="d", assignee="lead", status="open")
+    for n in range(beads_mod.QUEUES_POOL_CAP + 1):
+        br.add(id=f"u{n}", status="open")
+    board = _board(br, repo)
+    s1 = _Sess(_sdef("s1", repo), status="busy")
+    gone = _Sess(_sdef("gone", repo), status="exited")
+
+    async def view(**kw):
+        v = await board.queues_view([s1, gone], extra_roots=[str(repo)], **kw)
+        return v["boards"][0]
+
+    async def run():
+        b = await view(fold=True)
+        lanes = {l["session"]: l for l in b["lanes"]}
+        assert [i["id"] for i in lanes["s1"]["issues"]] == ["a"]
+        assert "folded" not in lanes["s1"]
+        for name, count in (("gone", 2), ("lead", 1)):
+            assert lanes[name]["folded"] is True
+            assert lanes[name]["count"] == count
+            assert lanes[name]["issues"] == [] and lanes[name]["created"] == []
+        # the head still says what is there
+        assert lanes["gone"]["summary"]["working"] == 1
+        assert b["unassigned"] == []
+        assert b["unassigned_count"] == beads_mod.QUEUES_POOL_CAP + 1
+
+        b = await view(fold=True, open_folds=["spent", "pool"])
+        lanes = {l["session"]: l for l in b["lanes"]}
+        assert [i["id"] for i in lanes["gone"]["issues"]] == ["b", "c"]
+        assert "folded" not in lanes["gone"]
+        assert len(b["unassigned"]) == beads_mod.QUEUES_POOL_CAP + 1
+        assert "unassigned_count" not in b
+
+        full = await view()
+        assert not any(l.get("folded") for l in full["lanes"])
+        assert len(full["unassigned"]) == beads_mod.QUEUES_POOL_CAP + 1
+
+    asyncio.run(run())
+
+
+def test_the_queues_view_answers_a_stale_listing_and_rereads_it_behind(repo):
+    """Past ``CACHE_TTL`` and within ``STALE_TTL`` the Queues view answers the
+    listing it has and reads a fresh one in the background, once -- the rail
+    polls every 5 s, so without it nearly every open of the tab waited on a
+    ``br`` fork (claunch-fa1xk). Past ``STALE_TTL``, or after a write, it
+    reads before it answers."""
+    br = FakeBr()
+    br.add(id="a", assignee="s1", status="open")
+    now = [100.0]
+    board = beads_mod.Board(br, root_for=lambda cwd: repo if cwd else None,
+                            clock=lambda: now[0])
+    s1 = _Sess(_sdef("s1", repo), status="busy")
+
+    def lists():
+        return sum(1 for c in br.calls if "list" in c)
+
+    async def ids():
+        v = await board.queues_view([s1], extra_roots=[str(repo)])
+        return [i["id"] for i in v["boards"][0]["lanes"][0]["issues"]]
+
+    async def run():
+        assert await ids() == ["a"] and lists() == 1
+        br.add(id="b", assignee="s1", status="open")
+        now[0] += beads_mod.CACHE_TTL + 1
+        # answered from what it had, and one read started behind it
+        assert await ids() == ["a"]
+        assert await ids() == ["a"]
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        assert lists() == 2
+        assert await ids() == ["a", "b"]
+        # too old to answer with: read first
+        br.add(id="c", assignee="s1", status="open")
+        now[0] += beads_mod.STALE_TTL + 1
+        assert await ids() == ["a", "b", "c"] and lists() == 3
+        # a write drops it outright
+        br.add(id="d", assignee="s1", status="open")
+        board.invalidate(repo)
+        assert await ids() == ["a", "b", "c", "d"] and lists() == 4
+
+    asyncio.run(run())
+
+
 class _Fleet:
     """A manager as ``adoption`` reads it: which names are running here."""
 

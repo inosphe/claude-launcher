@@ -8133,14 +8133,21 @@ async def h_beads_queues(request: web.Request) -> web.Response:
     the daemon's own, or ``?cwd=``); each lane carries the session's issues in
     the order its worker takes them, its status, and the cflow step it is on,
     so the operator sees who is doing what next without opening a terminal.
+
+    ``?fold=1`` answers the rows the tab draws folded as counts, and
+    ``?open=spent`` / ``?open=pool`` (repeatable) the folds the reader has
+    opened in full -- see :meth:`daemon.beads.Board.queues_view`.
     """
     manager: SessionManager = request.app["manager"]
     extra = _beads_extra_roots(request)
+    fold = request.query.get("fold", "") in ("1", "true")
+    opened = request.query.getall("open", [])
     # One summarizer per response: every lane's containment check lists the
     # lane's directory, and lanes share directories heavily (this machine's
     # board: 703 sessions over 132 of them). See cflow_clock.run_summarizer.
     view = await request.app["beads"].queues_view(
         list(manager.list()), extra, cflow_for=cflow_clock.run_summarizer(),
+        fold=fold, open_folds=opened,
     )
     return json_response(view)
 

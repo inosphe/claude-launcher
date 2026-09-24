@@ -84,7 +84,8 @@ from .. import (
     beads_db, beads_meta, cli_beads, reports as reports_mod, store, workspaces,
 )
 from .session import (
-    CATEGORY_PAUSED, STATUS_BUSY, STATUS_IDLE, Session, session_category,
+    CATEGORY_PAUSED, CATEGORY_RUNNING, STATUS_BUSY, STATUS_IDLE, Session,
+    session_category,
 )
 
 log = logging.getLogger("claude_launcher.daemon.beads")
@@ -142,6 +143,18 @@ BOARD_SENDER = "beads"
 #: How long a board listing is trusted before it is read again. The web UI
 #: polls every 2 s; without this each open rail would fork ``br`` at that rate.
 CACHE_TTL = 2.0
+
+#: How old a listing the Queues view may still answer with while a fresh one
+#: is read behind it (:meth:`Board.issues_or_stale`). The rail asks for the
+#: queues every 5 s, which is past :data:`CACHE_TTL`, so without this nearly
+#: every Queues open waited on a ``br`` fork -- 0.3 s alone, 0.85 s in a busy
+#: daemon (claunch-fa1xk). A write through this daemon drops the listing
+#: (:meth:`Board.invalidate`), so a drag is never answered from before itself.
+STALE_TTL = 30.0
+
+#: The unassigned pool the Queues page draws folded (its ``BEADS_Q_CELL_CAP``):
+#: past this many cards a folded view answers the count and not the cards.
+QUEUES_POOL_CAP = 24
 
 #: The most issues an edge read will ask ``br dep list`` about in one pass.
 #: The listing already says which issues have outgoing edges at all
@@ -1038,6 +1051,8 @@ class Board:
         #: Sessions mid wind-down, by name: what was typed and when.
         self.winddowns: Dict[str, dict] = {}
         self._tasks: set = set()
+        #: Boards with a background re-read in flight (:meth:`issues_or_stale`).
+        self._refreshing: set = set()
         #: Called with the root after every ``br`` write that succeeded —
         #: create, update, close, comments add, dep add, all of them go
         #: through :meth:`br`. The search index's producer hangs here
@@ -1287,6 +1302,33 @@ class Board:
         rows = [r for r in (rows or []) if isinstance(r, dict)]
         self._cache[key] = (now, rows)
         return rows
+
+    async def issues_or_stale(self, root: Path) -> List[dict]:
+        """:meth:`issues`, except that a listing past :data:`CACHE_TTL` but
+        within :data:`STALE_TTL` is answered at once while a fresh one is read
+        in the background for the next caller. For views polled on a clock
+        (the Queues tab, the rail's pills), where one poll of lag costs
+        nothing and a ``br`` fork on every open is the wait the page showed
+        as "loading…"."""
+        key = str(root)
+        hit = self._cache.get(key)
+        if hit is None or self._clock() - hit[0] >= STALE_TTL:
+            return await self.issues(root)
+        if self._clock() - hit[0] >= CACHE_TTL and key not in self._refreshing:
+            self._refreshing.add(key)
+
+            async def refresh() -> None:
+                try:
+                    await self.issues(root)
+                except Exception as exc:  # the next caller reads it itself
+                    log.debug("beads: background listing of %s failed: %s", root, exc)
+                finally:
+                    self._refreshing.discard(key)
+
+            task = asyncio.ensure_future(refresh())
+            self._tasks.add(task)
+            task.add_done_callback(self._tasks.discard)
+        return hit[1]
 
     async def issue_page(
         self, root: Path, *, offset: int = 0, limit: int = 50,
@@ -1796,6 +1838,8 @@ class Board:
         extra_roots: Sequence[str] = (),
         *,
         cflow_for: Optional[Callable[[str, str], Optional[dict]]] = None,
+        fold: bool = False,
+        open_folds: Sequence[str] = (),
     ) -> dict:
         """Every board's queues -- the Queues tab (and the session rail's
         pills): one lane per session (and per assignee the daemon does not
@@ -1822,7 +1866,20 @@ class Board:
         left behind can be seen and moved.
         ``cflow_for(name, cwd)`` is the run summary a lane head shows beside
         the session's status (``None`` for none).
+
+        ``fold`` answers the parts the page draws folded as counts: a lane
+        the page folds (not running or paused) carries ``folded: true`` and
+        ``count`` with empty ``issues``/``created``, and a pool of more than
+        :data:`QUEUES_POOL_CAP` carries ``unassigned_count`` with an empty
+        ``unassigned``. On this machine's board those cards were 1.1 MB of a
+        1.35 MB answer, for rows nobody had opened (claunch-fa1xk).
+        ``open_folds`` names the folds the reader has opened -- ``"spent"``,
+        ``"pool"`` -- which come in full. Without ``fold`` (the rail's pills,
+        which draw killed sessions' issues too) everything comes in full.
+        The listing may be up to :data:`STALE_TTL` old
+        (:meth:`issues_or_stale`).
         """
+        opened = set(open_folds)
         result = {
             "available": self.available(),
             "statuses": list(ACTIVE_STATUSES),
@@ -1839,7 +1896,7 @@ class Board:
             }
             members = by_root[str(root)]
             try:
-                rows = await self.issues(root)
+                rows = await self.issues_or_stale(root)
             except cli_beads.BeadsError as exc:
                 entry["error"] = str(exc)
                 result["boards"].append(entry)
@@ -1882,10 +1939,18 @@ class Board:
                         lane["cflow"] = cflow_for(name, s.sdef.cwd or "")
                     except Exception as exc:  # a run state that cannot be read
                         log.debug("beads: no cflow summary for %r: %s", name, exc)
+                # The page's own fold rule (app.js beadsLaneSpent).
+                if (fold and "spent" not in opened
+                        and category not in (CATEGORY_RUNNING, CATEGORY_PAUSED)):
+                    lane.update(folded=True, count=len(queue), issues=[], created=[])
                 entry["lanes"].append(lane)
             pool = [r for r in active if not r.get("assignee")]
             pool.sort(key=_queue_rank)
-            entry["unassigned"] = preview_rows(pool)
+            if fold and "pool" not in opened and len(pool) > QUEUES_POOL_CAP:
+                entry["unassigned"] = []
+                entry["unassigned_count"] = len(pool)
+            else:
+                entry["unassigned"] = preview_rows(pool)
             result["boards"].append(entry)
         return result
 

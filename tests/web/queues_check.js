@@ -110,6 +110,7 @@ const beadsQPoolOpen = new Set();
 const beadsQCellOpen = new Set();
 const BEADS_Q_CELL_CAP = 24;
 function setSection(s) { beadsSection = s; }
+function setWorkspace(w) { beadsWorkspace = w; }
 function setQueues(q) { beadsQueues = q; }
 function setError(e) { beadsQueuesError = e; }
 const calls = [];
@@ -134,13 +135,13 @@ new Function(
   + slice("beadsBoardLabel") + slice("beadsBoardWhere")
   + slice("beadsPageTabs") + slice("beadsWorkspaceTabs")
   + slice("renderQueues") + slice("beadsQueuesBoard") + slice("beadsQueueLane")
-  + slice("beadsLaneSpent") + slice("beadsQueueOrder") + slice("beadsQFoldBar")
+  + slice("beadsLaneCount") + slice("beadsLaneSpent") + slice("beadsQueueOrder") + slice("beadsQFoldBar")
   + slice("beadsQueueSummaryText") + slice("beadsQueueCell") + slice("beadsQueueCard")
-  + slice("beadsAssign") + slice("refreshQueues")
+  + slice("beadsAssign") + slice("beadsQueuesUrl") + slice("refreshQueues")
   + `
 Object.assign(exports, {
   tabs: beadsPageTabs, render: renderQueues, board: beadsQueuesBoard,
-  setSection, setQueues, setError, setAnswer, calls,
+  setSection, setWorkspace, setQueues, setError, setAnswer, calls,
   refreshed: () => refreshed,
   spentOpen: beadsQSpentOpen, poolOpen: beadsQPoolOpen,
   cellOpen: beadsQCellOpen, CAP: BEADS_Q_CELL_CAP,
@@ -270,7 +271,7 @@ async function drop(card, cell) {
         + "and sends no status",
         writes(), [["/api/beads/e/assign", { session: "s1", cwd: "/repo" }]]);
   check("the board is read again after a write",
-        ctx.calls.length >= 2 && ctx.calls[1].path, "/api/beads/queues");
+        ctx.calls.length >= 2 && ctx.calls[1].path, "/api/beads/queues?fold=1");
   ctx.calls.length = 0;
 
   over = await drop(cardB, cellOf(2, "in_progress"));
@@ -461,6 +462,56 @@ async function drop(card, cell) {
         [/flex:\s*1 1 100%/.test(rule(".beads-q-note")),
          /flex:\s*1 1 100%/.test(rule(".beads-q-more"))],
         [true, true]);
+
+  /* ---- 9. folded rows come as counts (claunch-fa1xk) -------------------
+     The daemon answers `fold=1` with the folded lanes' and the tall pool's
+     cards left out: a count per lane, `unassigned_count` for the pool. The
+     page must count them the same as cards it holds, ask for the cards when
+     a fold is opened, and not draw an opened fold empty meanwhile. */
+  const SLIM = {
+    root: "/slim", error: null,
+    lanes: [
+      lane("s1", { issues: ["a"] }),
+      { ...lane("s9", { status: "exited", issues: [] }), category: "killed",
+        folded: true, count: 4 },
+    ],
+    unassigned: [], unassigned_count: 30,
+  };
+  ctx.spentOpen.clear(); ctx.poolOpen.clear(); ctx.cellOpen.clear();
+  ctx.setWorkspace("/slim");
+  let slim = ctx.board(SLIM, STATUSES);
+  check("the head counts what the answer only counted",
+        slim.find("beads-board-head")[0].children.at(-1).text,
+        "1 live queue · 1 hidden · 30 unassigned");
+  check("so does the fold",
+        slim.find("beads-q-fold")[0].children[0].text,
+        "▸ 1 not running or paused, holding 4 issues");
+  const slimPool = slim.find("beads-q-cell").filter((c) => !c.dataset.session)[0];
+  check("and the folded pool",
+        [slimPool.classes.has("folded"), slimPool.children[0].text],
+        [true, "▸ 30 unassigned issues — open the pool"]);
+  ctx.calls.length = 0;
+  ctx.setAnswer({ ok: true, status: 200, body: { boards: [] } });
+  slim.find("beads-q-fold")[0].children[0].fire("click");
+  check("opening the fold asks for its cards",
+        ctx.calls.map((c) => c.path), ["/api/beads/queues?fold=1&open=spent"]);
+  slim = ctx.board(SLIM, STATUSES);
+  check("and until they come the fold says so rather than drawing rows "
+        + "with nothing in them",
+        [slim.find("beads-q-fold")[0].children[0].text, rowNames(slim)],
+        ["▾ 1 not running or paused, holding 4 issues — loading…",
+         ["s1", "unassigned"]]);
+  ctx.calls.length = 0;
+  slimPool.children[0].fire("click");
+  check("opening the pool asks for it too",
+        ctx.calls.map((c) => c.path), ["/api/beads/queues?fold=1&open=spent&open=pool"]);
+  slim = ctx.board(SLIM, STATUSES);
+  const waiting = slim.find("beads-q-cell").filter((c) => !c.dataset.session);
+  check("and the pool stays one cell saying it is loading",
+        [waiting.length, waiting[0].children[0].text],
+        [1, "30 unassigned issues — loading…"]);
+  ctx.spentOpen.clear(); ctx.poolOpen.clear(); ctx.cellOpen.clear();
+  ctx.setWorkspace("");
 
   if (failures) process.exit(1);
   console.log("queues_check ok");

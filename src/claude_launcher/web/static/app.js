@@ -16967,6 +16967,9 @@ function beadsWorkspaceTabs(boards) {
       clearBeadsSearch();
       const canvas = $("beads-canvas");
       if (canvas) canvas.scrollTop = 0;
+      // A fold left open on this board was answered folded (beadsQueuesUrl).
+      if (beadsSection === "queues" &&
+          (beadsQSpentOpen.has(root) || beadsQPoolOpen.has(root))) refreshQueues();
     });
     tabs.appendChild(tab);
   }
@@ -16985,9 +16988,21 @@ function beadsWorkspaceTabs(boards) {
    behalf. The status column a card sits in is never something this page
    moves -- taking work up, asking for a landing and closing stay the
    assignee's, which is what the workflows' shared rule says. */
+/* The rows this page draws folded come as counts (`fold=1`): on a board with
+   a few hundred unassigned issues and a hundred ended sessions their cards
+   were 1.1 MB of a 1.35 MB answer, for rows nobody had opened (claunch-fa1xk).
+   A fold the reader opens is asked for in full (`open=`), for the board on
+   screen. */
+function beadsQueuesUrl() {
+  const q = ["fold=1"];
+  if (beadsQSpentOpen.has(beadsWorkspace)) q.push("open=spent");
+  if (beadsQPoolOpen.has(beadsWorkspace)) q.push("open=pool");
+  return "/api/beads/queues?" + q.join("&");
+}
+
 async function refreshQueues() {
   try {
-    const resp = await api("/api/beads/queues");
+    const resp = await api(beadsQueuesUrl());
     if (resp.status === 404) {
       beadsQueuesError = "this daemon predates the Queues tab — 'claunch " +
         "daemon restart' to pick up this version";
@@ -17048,6 +17063,8 @@ function beadsQueuesBoard(board, statuses) {
   }
   const lanes = board.lanes || [];
   const pool = board.unassigned || [];
+  // A folded pool comes as its count alone (beadsQueuesUrl).
+  const poolCount = board.unassigned_count ?? pool.length;
   const live = lanes.filter((l) => !beadsLaneSpent(l)).sort(beadsQueueOrder);
   const spent = lanes.filter(beadsLaneSpent).sort(beadsQueueOrder);
   // The head counts the folds too. "23 queues" over a grid drawing six rows
@@ -17057,7 +17074,7 @@ function beadsQueuesBoard(board, statuses) {
     lanes.length
       ? `${live.length} live queue${live.length === 1 ? "" : "s"}` +
         (spent.length ? ` · ${spent.length} hidden` : "") +
-        ` · ${pool.length} unassigned`
+        ` · ${poolCount} unassigned`
       : "no queue here"));
   sec.appendChild(head);
   if (board.error) {
@@ -17077,24 +17094,31 @@ function beadsQueuesBoard(board, statuses) {
   // stopped being read.
   if (spent.length) {
     const open = beadsQSpentOpen.has(root);
-    const held = spent.reduce((n, l) => n + (l.issues || []).length, 0);
+    const held = spent.reduce((n, l) => n + beadsLaneCount(l), 0);
+    // Opened, but the answer on hand was asked for folded: the cards are on
+    // their way (the toggle asked), so the rows are not drawn empty.
+    const pending = open && spent.some((l) => l.folded);
     grid.appendChild(beadsQFoldBar(
       open,
       `${spent.length} not running or paused, ` +
-        `holding ${held} issue${held === 1 ? "" : "s"}`,
+        `holding ${held} issue${held === 1 ? "" : "s"}` +
+        (pending ? " — loading…" : ""),
       () => {
         if (open) beadsQSpentOpen.delete(root);
         else beadsQSpentOpen.add(root);
         renderBeads();
+        if (!open) refreshQueues();
       }
     ));
-    if (open) for (const lane of spent) beadsQueueLane(grid, lane, root, statuses);
+    if (open && !pending) for (const lane of spent) beadsQueueLane(grid, lane, root, statuses);
   }
+  const poolPending = beadsQPoolOpen.has(root) && board.unassigned_count != null;
   beadsQueueLane(grid, {
-    session: "", pool: true, issues: pool,
-    summary: { waiting: pool.length },
+    session: "", pool: true, issues: pool, count: poolCount,
+    summary: { waiting: poolCount },
   }, root, statuses, {
-    folded: pool.length > BEADS_Q_CELL_CAP && !beadsQPoolOpen.has(root),
+    folded: poolCount > BEADS_Q_CELL_CAP && (!beadsQPoolOpen.has(root) || poolPending),
+    pending: poolPending,
   });
   sec.appendChild(grid);
   return sec;
@@ -17109,6 +17133,13 @@ function beadsQueuesBoard(board, statuses) {
    the fold; their issues still matter -- they are what was left behind --
    so the fold is drawn and stays a drop target. A daemon from before
    `category` is read by status alone: exited is not running. */
+/* How many issues a lane holds: a folded lane comes with its count and no
+   cards (beadsQueuesUrl). */
+function beadsLaneCount(lane) {
+  if (lane.folded || lane.pool) return lane.count ?? (lane.issues || []).length;
+  return (lane.issues || []).length;
+}
+
 function beadsLaneSpent(lane) {
   if (lane.pool) return false;
   if (!lane.known) return true;
@@ -17125,13 +17156,13 @@ function beadsQueueOrder(a, b) {
   const rank = (l) => {
     const s = l.summary || {};
     if ((s.working || 0) + (s.review || 0) > 0) return 0;
-    if ((l.issues || []).length) return 1;
+    if (beadsLaneCount(l)) return 1;
     return 2;
   };
   const ra = rank(a);
   const rb = rank(b);
   if (ra !== rb) return ra - rb;
-  const n = (l) => (l.issues || []).length;
+  const n = beadsLaneCount;
   if (n(a) !== n(b)) return n(b) - n(a);
   return String(a.session || "").localeCompare(String(b.session || ""));
 }
@@ -17158,7 +17189,7 @@ function beadsQueueLane(grid, lane, root, statuses, opts = {}) {
   if (lane.pool) {
     head.appendChild(el("span", "beads-q-name", "unassigned"));
     head.appendChild(el("span", "beads-q-sum",
-      `${lane.issues.length} waiting for a queue`));
+      `${beadsLaneCount(lane)} waiting for a queue`));
   } else {
     const link = el("a", "beads-q-name", name);
     link.href = "#/s/" + encodeURIComponent(name);
@@ -17186,7 +17217,8 @@ function beadsQueueLane(grid, lane, root, statuses, opts = {}) {
   // drop target, so taking an issue off a session's queue does not first
   // need the reader to open a pool of three hundred cards.
   if (opts.folded) {
-    const cell = beadsQueueCell("", lane.issues || [], lane, root, { fold: true });
+    const cell = beadsQueueCell("", lane.issues || [], lane, root,
+                                { fold: true, pending: opts.pending });
     cell.style.gridColumn = `span ${statuses.length}`;
     grid.appendChild(cell);
     return;
@@ -17215,12 +17247,18 @@ function beadsQueueCell(status, issues, lane, root, opts = {}) {
   cell.dataset.session = lane.session || "";
   const list = issues || [];
   if (opts.fold) {
+    const n = beadsLaneCount(lane);
     const btn = el("button", "wf-btn option",
-      `▸ ${list.length} unassigned issue${list.length === 1 ? "" : "s"} — open the pool`);
+      opts.pending ? `${n} unassigned issue${n === 1 ? "" : "s"} — loading…`
+        : `▸ ${n} unassigned issue${n === 1 ? "" : "s"} — open the pool`);
     btn.title = "folded because a cell this tall sets the height of every " +
                 "other cell in its row; drop a card here to unassign it " +
                 "without opening it";
-    btn.addEventListener("click", () => { beadsQPoolOpen.add(root); renderBeads(); });
+    btn.addEventListener("click", () => {
+      beadsQPoolOpen.add(root);
+      renderBeads();
+      refreshQueues();
+    });
     cell.appendChild(btn);
   } else {
     // Even an opened pool is capped: `align-items: stretch` charges one tall
