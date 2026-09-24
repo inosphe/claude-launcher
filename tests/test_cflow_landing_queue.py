@@ -507,3 +507,10 @@ def test_the_leader_tells_the_landed_before_every_round_end(layer):
         assert anchor in text, f"landed-notice lost its {anchor!r} rule"
     assert "`'*'`와 `@in_review`는 쓰지 않는다" in text
     assert "통지하지 않는다" in text  # carried entries are not told
+    # Only MCP send splits a comma list (mesh_mcp.py); the CLI sends `to` as
+    # one handle, so the text must not offer `claunch mesh send ... s1,s2`.
+    assert "claunch mesh send <메시> s1,s2" not in text
+    assert "핸들마다" in text
+    # The daemon refuses the whole list when one handle is unknown or cut
+    # (daemon/mesh.py _resolve_recipients, strict) -- say what to do then.
+    assert "목록은 통째로 거절될 수 있다" in text
