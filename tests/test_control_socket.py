@@ -182,6 +182,27 @@ def test_a_ping_is_answered_and_a_malformed_frame_is_ignored(home, tmp_path):
     asyncio.run(run())
 
 
+def test_a_timed_ping_gets_its_clock_back_with_the_relay_status(home, tmp_path):
+    """The page's latency probe (claunch-8ufey): ``t`` comes back untouched,
+    so the page measures its own round trip, and the relay status rides
+    along -- that is where the daemon<->relay round trip lives."""
+
+    async def run():
+        client = await _serve(tmp_path)
+        try:
+            async with client.ws_connect("/api/control/ws", headers=BEARER) as ws:
+                await ws.receive_json()
+                await ws.send_json({"type": "ping", "t": 1234.5})
+                pong = await asyncio.wait_for(ws.receive_json(), 5)
+                assert pong["type"] == "pong" and pong["t"] == 1234.5
+                assert pong["relay"]["configured"] is False
+                assert pong["relay"]["relays"] == []
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
 def test_the_socket_is_counted_as_a_connection_the_page_holds(home, tmp_path):
     """It is one of the six, so it must appear where the six are counted.
     A connection this daemon cannot see is how the original failure hid."""

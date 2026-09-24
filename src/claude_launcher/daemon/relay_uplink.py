@@ -28,7 +28,14 @@ from . import relay_wire as w
 
 log = logging.getLogger("claunch.daemon.relay")
 
-PING_INTERVAL = 20.0
+#: Keepalive cadence, which is also how often the relay round-trip is
+#: sampled for the web UI's latency badge (claunch-8ufey). A PING is 33 bytes;
+#: every 5s keeps the number shown no older than one beat, and a relay that
+#: slows down shows up within seconds rather than after a 20s gap.
+PING_INTERVAL = 5.0
+#: Unanswered PINGs remembered at once. A PONG older than this many beats is
+#: not worth a number: the one after it already said more.
+_PINGS_KEPT = 8
 RECV_WATCHDOG = 60.0
 CONNECT_TIMEOUT = 10.0
 BACKOFF_BASE = 2.0
@@ -100,6 +107,11 @@ class RelayUplink:
         self._peer_streams: Dict[int, _PeerStream] = {}
         self._peer_waiters: Dict[int, asyncio.Future] = {}
         self._next_req = 1
+        #: token -> monotonic send time of each PING still waiting on a PONG.
+        self._pings: Dict[int, float] = {}
+        #: Last measured round trip to the relay, in ms, and when it landed.
+        self.rtt_ms: Optional[float] = None
+        self._rtt_at = 0.0
 
     async def run(self) -> None:
         """Reconnect loop. Runs until :meth:`stop` is called."""
@@ -142,6 +154,12 @@ class RelayUplink:
             ) as ws:
                 self._ws = ws
                 self._streams = {}
+                # A number from the previous connection describes a path that
+                # no longer exists; the badge reads "measuring" until the
+                # first PONG of this one.
+                self._pings = {}
+                self.rtt_ms = None
+                self._rtt_at = 0.0
                 self._last_recv = time.monotonic()
                 await self._raw_send(w.register(self._room, self.name, self.token))
                 if not await self._await_register_ok(ws):
@@ -242,6 +260,46 @@ class RelayUplink:
             await self._drop_stream(m.sid, notify=False)
         elif m.kind == w.PING:
             await self._raw_send(w.pong(self._room, m.token))
+        elif m.kind == w.PONG:
+            self._pong(m.token)
+
+    def _pong(self, token: int) -> None:
+        """Turn the relay's echo of one of our PINGs into a round trip.
+
+        Only a token this uplink sent counts: the relay echoes the token
+        verbatim, so an unknown one measures nothing. PINGs sent before the
+        answered one are dropped with it -- their PONGs, if they ever come,
+        would describe a moment the newer sample already covers.
+        """
+        sent = self._pings.pop(token, None)
+        if sent is None:
+            return
+        now = time.monotonic()
+        self._pings = {t: at for t, at in self._pings.items() if at > sent}
+        self.rtt_ms = (now - sent) * 1000.0
+        self._rtt_at = now
+
+    def latency(self) -> dict:
+        """The relay round trip as the status API reports it.
+
+        ``rtt_ms`` is the last completed sample and ``rtt_age`` how many
+        seconds ago it landed. ``pending_ms`` is the age of the oldest PING
+        still unanswered, when there is one older than the last round trip:
+        a relay that has gone slow answers late, and until it does the last
+        completed sample still looks healthy -- this is the number that does
+        not.
+        """
+        now = time.monotonic()
+        pending = None
+        if self._pings:
+            waited = (now - min(self._pings.values())) * 1000.0
+            if self.rtt_ms is None or waited > self.rtt_ms:
+                pending = round(waited, 1)
+        return {
+            "rtt_ms": None if self.rtt_ms is None else round(self.rtt_ms, 1),
+            "rtt_age": None if self.rtt_ms is None else round(now - self._rtt_at, 1),
+            "pending_ms": pending,
+        }
 
     async def _open_stream(self, sid: int) -> None:
         try:
@@ -373,10 +431,22 @@ class RelayUplink:
         self._peer_streams.clear()
 
     async def _keepalive(self) -> None:
+        # The first PING goes out at once, so the latency badge has a number
+        # right after registration instead of one beat later.
         while True:
+            await self._raw_send(w.ping(self._room, self._next_ping_token()))
             await asyncio.sleep(PING_INTERVAL)
-            token = int(time.monotonic() * 1000) & 0xFFFFFFFFFFFFFFFF
-            await self._raw_send(w.ping(self._room, token))
+
+    def _next_ping_token(self) -> int:
+        """Pick the next PING token and remember when it was sent."""
+        now = time.monotonic()
+        token = int(now * 1000) & 0xFFFFFFFFFFFFFFFF
+        while token in self._pings:
+            token = (token + 1) & 0xFFFFFFFFFFFFFFFF
+        if len(self._pings) >= _PINGS_KEPT:
+            self._pings.pop(min(self._pings, key=self._pings.get))
+        self._pings[token] = now
+        return token
 
     async def _watchdog(self) -> None:
         while True:
@@ -398,6 +468,18 @@ class RelayUplink:
                 await ws.send_bytes(frame)
             except (ConnectionError, OSError, RuntimeError, aiohttp.ClientError):
                 pass
+
+
+def _latency_of(up) -> dict:
+    """An uplink's relay round trip, or the empty reading of one.
+
+    Every row carries the three keys so a reader never has to ask whether
+    they are there; a disconnected uplink reports no sample.
+    """
+    read = getattr(up, "latency", None)
+    if not up.connected or read is None:
+        return {"rtt_ms": None, "rtt_age": None, "pending_ms": None}
+    return read()
 
 
 def unconfigured_state() -> dict:
@@ -481,6 +563,7 @@ class RelayPool:
                 "connected": up.connected,
                 "peering": up.peering,
                 "listing": up.listing,
+                **_latency_of(up),
             }
             for up in self.uplinks
         ]

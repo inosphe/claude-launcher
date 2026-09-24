@@ -423,6 +423,21 @@ def test_pool_state_keeps_the_single_uplink_shape():
     assert [r["connected"] for r in state["relays"]] == [True, False]
 
 
+def test_pool_state_rows_carry_each_relays_round_trip():
+    """The web badge's daemon<->relay half (claunch-8ufey). Every row has the
+    three keys; a disconnected relay, or an uplink that cannot measure,
+    reports none rather than a stale number."""
+    live = _StubUplink("work", [], connected=True)
+    live.latency = lambda: {"rtt_ms": 41.5, "rtt_age": 3.0, "pending_ms": None}
+    gone = _StubUplink("home", [], connected=False)
+    gone.latency = lambda: {"rtt_ms": 9.0, "rtt_age": 99.0, "pending_ms": None}
+    bare = _StubUplink("lab", [], connected=True)
+    rows = RelayPool([live, gone, bare]).state()["relays"]
+    assert rows[0]["rtt_ms"] == 41.5 and rows[0]["rtt_age"] == 3.0
+    for row in rows[1:]:
+        assert (row["rtt_ms"], row["rtt_age"], row["pending_ms"]) == (None, None, None)
+
+
 def test_unconfigured_state_has_the_same_keys_as_a_pools():
     """A reader takes the same keys whether or not a relay is configured.
 

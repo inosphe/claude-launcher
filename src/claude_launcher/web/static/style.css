@@ -3280,10 +3280,21 @@ a.wf-btn { display: inline-block; text-decoration: none; line-height: 1.5; }
 /* relay badge (header): permanent connectivity indicator. It owns a row of
    its own, so it keeps to one line — a name too long for the rail is cut
    short rather than allowed to grow the header; the title has the full one. */
+#link-row {
+  width: 100%; display: flex; flex-wrap: wrap; align-items: center; gap: 6px;
+}
 #relay-badge {
   max-width: 100%; display: inline-block; white-space: nowrap;
-  overflow: hidden; text-overflow: ellipsis;
+  overflow: hidden; text-overflow: ellipsis; min-width: 0; flex: 0 1 auto;
 }
+/* Link latency (claunch-8ufey): browser<->daemon and daemon<->relay round
+   trips. It never shrinks -- the numbers are the point -- and wraps under
+   the relay badge instead when the rail is narrow. */
+#latency-badge { flex: none; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.badge.latency-ok { background: #1f4428; color: #3fb950; }
+.badge.latency-idle { background: #30363d; color: #8b949e; }
+.badge.latency-slow { background: #46350f; color: #e3b341; }
+.badge.latency-bad { background: #442022; color: #ff7b72; }
 .badge.relay-on { background: #1f4428; color: #3fb950; }
 .badge.relay-off { background: #30363d; color: #8b949e; }
 .badge.relay-down { background: #442022; color: #ff7b72; }

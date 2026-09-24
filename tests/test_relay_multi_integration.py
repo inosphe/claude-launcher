@@ -178,6 +178,14 @@ def test_one_daemon_spans_two_relays(tmp_path):
             assert state["count"] == 2 and state["connected_count"] == 2
             assert [r["id"] for r in state["relays"]] == ["work", "home"]
 
+            # The real relay echoes the uplink's PING, and each row turns
+            # that echo into its round trip (claunch-8ufey).
+            await _wait(
+                lambda: all(r["rtt_ms"] is not None for r in pca.state()["relays"]),
+                "both relays to answer a PING",
+            )
+            assert all(0 <= r["rtt_ms"] < 5000 for r in pca.state()["relays"])
+
             # The directory pca sees is the union of the two relays'.
             peers = await pca.peer_list()
             assert "pcb" in peers, peers  # only relay B knows this one
