@@ -84,6 +84,7 @@ function box(id) {
 }
 for (const id of ["new-worktree", "new-worktree-name-row",
                   "new-worktree-existing-row", "new-worktree-rebase-row",
+                  "new-worktree-session-row",
                   "worktree-hint", "worktree-rebase-trunk", "cwd-hint"]) {
   box_[id] = box(id);
 }
@@ -98,6 +99,7 @@ const form = {
   worktree_name: control(""),
   worktree_filter: control(""),
   worktree_existing: picker(),
+  worktree_session: picker(),
   worktree_rebase: control(""),
 };
 
@@ -131,6 +133,10 @@ new Function(
    slice("spawnParent"), slice("newSessionCwd"), slice("newWorktreeMode"),
    slice("worktreeTrunkBranch"), slice("syncWorktreeTrunkButton"),
    slice("renderWorktreeOptions"), slice("worktreeRowUsable"),
+   `const PARENT_WORKTREE = "@parent";`,
+   slice("worktreePathKey"), slice("worktreeParentOffer"),
+   slice("worktreeSessions"), slice("worktreeOfSession"),
+   slice("renderWorktreeSessionOptions"), slice("pickWorktreeSession"),
    slice("syncNewWorktree"),
    slice("refreshNewWorktree"),
    // The registry poll, which rebuilds the Directory row behind the form's
@@ -144,6 +150,7 @@ new Function(
     exports.render = renderWorktreeOptions;
     exports.sync = syncNewWorktree;
     exports.trunk = worktreeTrunkBranch;
+    exports.pickSession = pickWorktreeSession;
     exports.trunkSync = syncWorktreeTrunkButton;
     exports.setSessions = (s) => { sessionsCache = s; };
     exports.filter = (q) => { newWorktreeFilter = q; };
@@ -188,8 +195,13 @@ function check(what, got, want) {
     failures++;
   }
 }
+/* The checkouts on the picker. The entry at the top -- "(pick a worktree)"
+   for a session of its own, the parent's checkout for a child -- is read
+   apart, by `head()`. */
 const names = () => form.worktree_existing.options
-  .map((o) => o.value).filter((v) => v !== "");
+  .map((o) => o.value).filter((v) => v !== "" && v !== "@parent");
+const head = () => form.worktree_existing.options[0] &&
+  form.worktree_existing.options[0].value;
 /* The poll reaches the pickers through applySessionCwdChange, which calls
    refreshNewWorktree without awaiting it — one macrotask turn lets the fetch
    it started settle, the way it would on a live page before the next frame. */
@@ -247,8 +259,10 @@ async function main() {
   form.worktree_filter.value = "beta";
   ctx.render();
   check("the box narrows the same list", names(), ["w-beta"]);
+  // A child's picker falls back to the parent's checkout, which is where
+  // an untouched picker stands -- never to a hidden row.
   check("a pick the narrowing hides does not stay selected",
-        form.worktree_existing.value, "");
+        form.worktree_existing.value, "@parent");
 
   ctx.filter("");
   ctx.render();
@@ -389,6 +403,114 @@ async function main() {
   ctx.sync();
   check("...and is taken where the directory has one to name",
         form.worktree_mode.value, "existing");
+
+  /* -- the parent's own checkout is an entry, picked and read back ------ */
+  // The parent stands in one of the repository's worktrees. The session
+  // record spells the path the way Windows hands it back (backslashes, a
+  // different case), and git spells it with slashes: the join must not care.
+  const WT = "F:/repo/.claude/worktrees";
+  const inRepo = { ...REPOS["F:/repo"],
+    paths: { "w-alpha": `${WT}/w-alpha`, "w-beta": `${WT}/w-beta` } };
+  REPOS["F:/repo"] = inRepo;
+  REPOS[`${WT}/w-alpha`] = inRepo;
+  ctx.setSessions([
+    { name: "lead", status: "idle", cwd: "f:\\repo\\.claude\\worktrees\\w-alpha" },
+    { name: "s9", status: "exited", cwd: `${WT}/w-beta` },
+    { name: "s11", status: "exited", cwd: `${WT}/w-beta`, archived_at: "x" },
+    { name: "s10", status: "idle", cwd: "F:/other/.claude/worktrees/o-one" },
+    { name: "s12", status: "idle", cwd: "F:/repo" },
+  ]);
+  form.parent.value = "lead";
+  form.cwd.value = `${WT}/w-alpha`;       // where the parent stands
+  ctx.policy("lead", { may_choose: ["worktree"] });
+  await ctx.refresh();
+  form.worktree_mode.value = "existing";
+  ctx.sync();
+  check("a child's picker leads with the parent's checkout, picked",
+        [head(), form.worktree_existing.value], ["@parent", "@parent"]);
+  check("...named after the worktree and the parent",
+        form.worktree_existing.options[0].label,
+        "parent's checkout — w-alpha (lead)");
+  check("...and the parent's worktree is not offered a second time by name",
+        names(), ["w-beta"]);
+  check("the parent's checkout takes no rebase: row hidden, box greyed",
+        [box_["new-worktree-rebase-row"].classes.has("hidden"),
+         form.worktree_rebase.disabled], [true, true]);
+  check("the hint says the child shares the parent's checkout",
+        box_["worktree-hint"].textContent.endsWith(
+          "the child works in lead's checkout; no worktree is sent"), true);
+
+  /* -- the From session row: this repository's checkouts, by session ----- */
+  const sessionRows = () => form.worktree_session.options
+    .map((o) => o.value).filter((v) => v !== "");
+  check("only sessions in this repository's worktrees are offered " +
+        "(not another repository, not the main checkout, not archived)",
+        sessionRows(), ["lead", "s9"]);
+  check("...labelled with the worktree, and an exited one says so",
+        form.worktree_session.options.map((o) => o.label).slice(1),
+        ["lead — w-alpha", "s9 — w-beta, exited"]);
+  check("...and the row is on screen with the picker",
+        box_["new-worktree-session-row"].classes.has("hidden"), false);
+
+  ctx.pickSession("s9");
+  check("picking a session puts its checkout on the picker",
+        [form.worktree_existing.value, form.worktree_session.value],
+        ["w-beta", "s9"]);
+  check("...and a reused checkout takes a rebase again",
+        [box_["new-worktree-rebase-row"].classes.has("hidden"),
+         form.worktree_rebase.disabled], [false, false]);
+  check("an exited session's checkout is not called in use",
+        box_["worktree-hint"].textContent.includes("in use"), false);
+
+  ctx.pickSession("lead");
+  check("picking the parent is picking the parent's checkout",
+        form.worktree_existing.value, "@parent");
+
+  // The box above the picker matches session names too.
+  ctx.filter("s9");
+  form.worktree_filter.value = "s9";
+  ctx.render();
+  check("the box finds a checkout by the session standing in it",
+        names(), ["w-beta"]);
+  ctx.filter("zzz");
+  form.worktree_filter.value = "zzz";
+  ctx.render();
+  ctx.pickSession("s9");
+  check("a session pick the narrowing would hide clears the narrowing",
+        [form.worktree_filter.value, form.worktree_existing.value],
+        ["", "w-beta"]);
+
+  // A live session in the checkout is named, since reusing it shares files.
+  ctx.setSessions([
+    { name: "lead", status: "idle", cwd: `${WT}/w-alpha` },
+    { name: "s13", status: "busy", cwd: `${WT}/w-beta` },
+  ]);
+  ctx.render();
+  form.worktree_existing.value = "w-beta";
+  ctx.sync();
+  check("a checkout a live session stands in is named in the hint",
+        box_["worktree-hint"].textContent.endsWith("w-beta is in use by s13"),
+        true);
+  // A manual pick on the picker drops a session pick naming another one.
+  form.worktree_session.value = "lead";
+  ctx.render();
+  check("the session row never names another checkout than the picker",
+        form.worktree_session.value, "");
+
+  /* -- the same directory without a parent has no parent's entry --------- */
+  form.parent.value = "";
+  ctx.policy("", null);
+  await ctx.refresh();                    // same directory: no fetch
+  check("a session of its own gets no parent's entry, only the prompt",
+        [head(), names()], ["", ["w-alpha", "w-beta"]]);
+
+  /* -- another directory than the parent's has no parent's entry --------- */
+  form.parent.value = "lead";
+  ctx.policy("lead", { may_choose: ["worktree"] });
+  form.cwd.value = "F:/other";
+  await ctx.refresh();
+  check("a child sent elsewhere has no parent's checkout on offer",
+        [head(), names()], ["", ["o-one"]]);
 
   if (failures) process.exit(1);
   console.log("worktreepicker_check: ok");

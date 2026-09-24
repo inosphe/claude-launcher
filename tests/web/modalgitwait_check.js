@@ -85,7 +85,9 @@ check("a failure in it degrades its own field only",
 // await and before anything is drawn.
 const awaitAt = refresh.indexOf("await api(");
 const guardAt = refresh.indexOf("if (cwd !== newWorktreeFor) return;");
-const paintAt = refresh.indexOf("renderWorktreeOptions()");
+// The paint after the fetch: the same-directory early return repaints from
+// the memo it already holds, before any fetch, and is not this one.
+const paintAt = refresh.indexOf("renderWorktreeOptions()", awaitAt);
 check("the stale answer is dropped", guardAt >= 0, true);
 check("the check happens after the fetch", guardAt > awaitAt, true);
 check("and before anything is drawn", guardAt < paintAt, true);
@@ -93,7 +95,7 @@ check("and before anything is drawn", guardAt < paintAt, true);
 // The memo the rows are read from is only written past that check, so a
 // dropped answer leaves the previous directory's list standing rather than
 // half-replacing it.
-const assignAt = refresh.indexOf("newWorktreeGit = git;");
+const assignAt = refresh.indexOf("newWorktreeGit = { ...git, for: cwd };");
 check("the payload is stored only past the check",
       assignAt > guardAt && assignAt < paintAt, true);
 
