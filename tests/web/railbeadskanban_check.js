@@ -152,9 +152,18 @@ check("and the panel says what a card in it is, which is wider than a queue",
 const laneNames = (b) => b.find("sess-beads-lane-name").map((n) => n.text);
 check("the five active statuses are lanes, and closed is not one here",
       laneNames(box), ["open", "in_ready", "in_progress", "in_review", "blocked"]);
-check("the lanes are one grid row wide, sized from the lane count",
-      box.find("sess-beads-lanes")[0].style.gridTemplateColumns,
-      "repeat(5, minmax(150px, 1fr))");
+check("the groups stack down the column instead of sharing a grid row " +
+      "(side by side, each card got a fifth of the rail and wrapped every word)",
+      box.find("sess-beads-lanes")[0].style.gridTemplateColumns || "", "");
+{
+  const css = fs.readFileSync(
+    path.join(__dirname, "..", "..", "src", "claude_launcher", "web", "static",
+              "style.css"), "utf8");
+  const rule = (css.match(/\n\.sess-beads-lanes \{([^}]*)\}/) || [])[1] || "";
+  check("...and the stylesheet lays them out as a column, not a grid",
+        [/flex-direction:\s*column/.test(rule), /display:\s*grid/.test(rule)],
+        [true, false]);
+}
 
 const WITHCLOSED = {
   session: { name: "s9", status: "running" },

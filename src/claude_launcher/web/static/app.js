@@ -17939,10 +17939,11 @@ function sessBeadsPanel(data) {
   } else {
     const lanes = BEADS_STATUSES.filter(
       (st) => BEADS_ACTIVE.has(st) || issues.some((i) => i.status === st));
-    const grid = el("div", "sess-beads-lanes");
-    grid.style.gridTemplateColumns = `repeat(${lanes.length}, minmax(150px, 1fr))`;
-    for (const st of lanes) grid.appendChild(sessBeadsLane(st, issues, b.issue));
-    box.appendChild(grid);
+    // One status per line, down the column (style.css .sess-beads-lanes):
+    // side-by-side lanes left each card a fifth of a narrow rail.
+    const stack = el("div", "sess-beads-lanes");
+    for (const st of lanes) stack.appendChild(sessBeadsLane(st, issues, b.issue));
+    box.appendChild(stack);
   }
   if (s.name && s.status !== "exited") {
     box.appendChild(sessBeadsCreate(s.name, !!b.issue));
@@ -17977,7 +17978,10 @@ function sessBeadsLane(status, issues, primary) {
     // that difference is most of why the panel gets opened.
     if (issue.id && issue.id === primary) {
       card.classList.add("primary");
-      card.appendChild(el("span", "sess-beads-primary", "primary"));
+      // On the id's line (beadsCard's first child), so the card stays the
+      // one line its title allows instead of growing a line for the mark.
+      (card.children[0] || card).appendChild(
+        el("span", "sess-beads-primary", "primary"));
     }
     body.appendChild(card);
   }
@@ -23237,7 +23241,7 @@ function sessRailTabs(name) {
     tab.title = id === "wf"
       ? "this session's workflow run, at full height"
       : id === "beads"
-      ? "this session's issues on the board, as a kanban, at full height"
+      ? "this session's issues on the board, one status group per line, at full height"
       : "what this session is: metadata, messages, meshes";
     if (!on) {
       tab.addEventListener("click", () => {

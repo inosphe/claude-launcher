@@ -2390,22 +2390,20 @@ body.term-split #terminal { flex: var(--split-term, 0.6) 1 0; min-height: 80px; 
   color: #7d8590; font-size: 11px; margin-left: auto;
   font-variant-numeric: tabular-nums;
 }
-/* the rail's Beads panel: this session's slice of the board as lanes, at the
-   level the cflow run sits at. The panel owns a column rather than a section
-   of one, so the lanes get real width; when there are more statuses than the
-   column can hold they scroll sideways rather than squeezing every card to
-   an unreadable strip. */
+/* the rail's Beads panel: this session's slice of the board, one status
+   group per line, stacked down the column the way the briefing card stacks
+   its rows (.sess-brief-row): a small label, then the cards at the column's
+   full width. It used to be a grid of side-by-side lanes, and the rail's
+   column is narrow enough that five of them left each card ~150px -- a title
+   broke every word or two, and the ids and badges under it wrapped too. */
 .sess-beads-lanes {
-  display: grid; gap: 6px; align-items: start;
-  overflow-x: auto; padding-bottom: 6px; margin: 4px 0 4px;
+  display: flex; flex-direction: column; gap: 10px; margin: 6px 0 4px;
+  min-width: 0;
 }
-.sess-beads-lane {
-  background: #11151b; border: 1px solid #1f242c; border-radius: 6px;
-  min-width: 0; display: flex; flex-direction: column;
-}
+.sess-beads-lane { min-width: 0; display: flex; flex-direction: column; gap: 4px; }
 .sess-beads-lane-head {
-  display: flex; justify-content: space-between; gap: 6px; padding: 5px 8px;
-  border-bottom: 1px solid #2a2e36; font-size: 11px;
+  display: flex; align-items: baseline; gap: 6px; padding: 0 0 3px;
+  border-bottom: 1px solid #22262d; font-size: 10px;
   text-transform: uppercase; letter-spacing: .04em; color: #8b949e;
 }
 /* the same five colours the Queues columns and the Board lanes use, so a
@@ -2417,11 +2415,32 @@ body.term-split #terminal { flex: var(--split-term, 0.6) 1 0; min-height: 80px; 
 .sess-beads-lane.blocked .sess-beads-lane-name { color: #ff7b72; }
 .sess-beads-lane-n { color: #7d8590; font-variant-numeric: tabular-nums; }
 .sess-beads-lane-body {
-  padding: 6px; display: flex; flex-direction: column; gap: 6px; min-width: 0;
+  display: flex; flex-direction: column; gap: 6px; min-width: 0;
 }
+/* an empty group is one quiet dash under its label, left-aligned like the
+   text of a briefing row rather than centred in a lane that is not there */
+.sess-beads-lane-body .beads-lane-empty { text-align: left; margin: 0; }
 .sess-beads-kanban .beads-card.primary { border-color: #3d5a86; }
+/* The card itself reads as a line here: id, priority and title side by side,
+   the title taking what is left and wrapping only when it runs past the
+   column. What follows the title on the Board tab's card (family links,
+   badges, session chips) keeps a line of its own under it. */
+.sess-beads-lane .beads-card {
+  flex-direction: row; flex-wrap: wrap; align-items: baseline;
+  column-gap: 8px; row-gap: 3px;
+}
+.sess-beads-lane .beads-card > .beads-card-top { flex: none; }
+/* keep-all: a Korean title breaks between words, not inside one; a single
+   unbroken token (a path) still falls back to the card's overflow-wrap */
+.sess-beads-lane .beads-card > .beads-card-title {
+  flex: 1 1 12em; min-width: 0; word-break: keep-all;
+}
+.sess-beads-lane .beads-card > :not(.beads-card-top):not(.beads-card-title) {
+  flex-basis: 100%;
+}
+.sess-beads-lane .beads-card > .beads-card-badges:empty { display: none; }
 .sess-beads-primary {
-  align-self: flex-start; font-size: 10px; padding: 1px 6px; border-radius: 9px;
+  align-self: center; font-size: 10px; padding: 1px 6px; border-radius: 9px;
   background: #172947; color: #79c0ff; text-transform: uppercase; letter-spacing: .04em;
 }
 .sess-beads-create { display: flex; gap: 8px; align-items: center; margin-top: 8px; flex-wrap: wrap; }
