@@ -15,7 +15,10 @@
      - the relay half is the worst connected uplink, and a relay with an
        unanswered PING shows that wait;
      - the colour follows the worse of the two;
-     - with the socket down the badge says so instead of a stale number.
+     - with the socket down the badge says so instead of a stale number;
+     - the daemon's event loop lag rides the pong and is named in the
+       tooltip, so a busy daemon is told apart from a slow network
+       (claunch-y9ax9).
 
    The real functions are sliced out of the shipped app.js. */
 const assert = require("assert");
@@ -71,6 +74,7 @@ function build({ base = "/" } = {}) {
     "let latencyLastPing = -Infinity;",
     "let latencySamples = [];",
     "let latencyRelay = null;",
+    "let latencyLoop = null;",
     "function latencyNow() { return S.clock; }",
     slice("latencyStart"),
     slice("latencyStop"),
@@ -229,6 +233,23 @@ function socketDown() {
   assert.match(app.badge.title, /control socket is down/);
 }
 
+/* ---- 6. the daemon's loop lag is named in the tooltip ------------------- */
+function loopLag() {
+  const app = build();
+  app.latencyStart();
+  app.clock += 20;
+  app.latencyPong({ type: "pong", t: 1000 });
+  assert.doesNotMatch(app.badge.title, /event loop/, "an older daemon sends none");
+  app.clock += 5000;
+  app.latencyTick();
+  app.clock += 480;
+  app.latencyPong({ type: "pong", t: pings(app).at(-1).t,
+                    loop: { lag_ms: 1.2, max_ms: 470, window_s: 30 } });
+  assert.match(app.badge.title,
+    /daemon event loop: stalled up to 470ms in the last 30s \(last wake-up 1ms late\)/);
+  assert.strictEqual(app.badge.textContent, "web 480ms", "the badge text is unchanged");
+}
+
 function formats() {
   const app = build();
   assert.strictEqual(app.fmtLatency(null), "—");
@@ -242,5 +263,6 @@ echoesBecomeSamples();
 stallShowsItsAge();
 relayHalf();
 socketDown();
+loopLag();
 formats();
 console.log("latency_check ok");

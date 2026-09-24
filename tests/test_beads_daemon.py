@@ -2743,3 +2743,40 @@ def test_the_queues_route_and_the_assign_route(home, tmp_path, repo):
             await client.close()
 
     asyncio.run(run())
+
+
+def test_the_default_runner_forks_off_the_event_loop_thread(tmp_path):
+    """``br`` is started from a worker thread (claunch-y9ax9): on Windows the
+    asyncio subprocess transport ran Popen -- pipe setup and CreateProcess --
+    on the loop thread, which stalled every request for the length of each
+    spawn. The answer still comes back decoded, exit code and both streams."""
+    import subprocess
+    import sys
+    import threading
+
+    seen = []
+    real = subprocess.run
+
+    def watched(*a, **kw):
+        seen.append(threading.get_ident())
+        return real(*a, **kw)
+
+    async def go():
+        loop_thread = threading.get_ident()
+        board = beads_mod.Board(root_for=lambda cwd: None)
+        subprocess.run = watched
+        try:
+            got = await board._run(
+                [sys.executable, "-c",
+                 "import sys; print('out'); print('err', file=sys.stderr); sys.exit(3)"],
+                str(tmp_path),
+            )
+        finally:
+            subprocess.run = real
+        return loop_thread, got
+
+    loop_thread, (code, out, err) = asyncio.run(go())
+    assert seen and seen[0] != loop_thread
+    assert code == 3
+    assert out.strip() == "out"
+    assert err.strip() == "err"

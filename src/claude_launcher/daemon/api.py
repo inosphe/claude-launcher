@@ -50,6 +50,7 @@ from .. import plugins, settings
 from .. import worktree as worktree_mod
 from . import beads as beads_mod, channel, clipboard, connections
 from . import handoff as handoff_mod
+from . import loop_lag as loop_lag_mod
 from . import notice as notice_mod
 from . import rag as rag_mod
 from . import (
@@ -437,6 +438,11 @@ def build_app(
     search_anything.install(app)
     app.on_startup.append(_start_rag)
     app.on_shutdown.append(_stop_rag)
+    # How late the loop runs its callbacks: the part of the page's round
+    # trip that is the daemon being busy (claunch-y9ax9).
+    app["loop_lag"] = loop_lag_mod.LoopLag()
+    app.on_startup.append(_start_loop_lag)
+    app.on_shutdown.append(_stop_loop_lag)
     # The measurement window: one per daemon, injected for tests. Its
     # session_exited rides the same exit funnel as the board's, for the same
     # reason: a holder that dies must release without a human noticing.
@@ -796,6 +802,14 @@ async def _stop_rag(app: web.Application) -> None:
     await service.shutdown()
 
 
+async def _start_loop_lag(app: web.Application) -> None:
+    app["loop_lag"].start()
+
+
+async def _stop_loop_lag(app: web.Application) -> None:
+    await app["loop_lag"].stop()
+
+
 async def _close_cli_shell(app: web.Application) -> None:
     """Kill the CLI tab's shell child. A raw shell restores nothing across a
     daemon restart — the daemon dies, the shell dies with it, and the tab's
@@ -1130,6 +1144,9 @@ def _control_pong(request: web.Request, frame: dict) -> dict:
     the delay a person actually waits on. The relay status rides along,
     because that is where the uplink's round trip to the relay lives and
     the page would otherwise need another read to show the two together.
+    So does the event loop's own lag (claunch-y9ax9): the page's round trip
+    includes however long the loop was busy before it read the ping, and
+    only the daemon can say how much of it that was.
     """
     if "t" not in frame:
         return {"type": "pong"}
@@ -1137,6 +1154,7 @@ def _control_pong(request: web.Request, frame: dict) -> dict:
         "type": "pong",
         "t": frame.get("t"),
         "relay": request.app["relay_state"](),
+        "loop": request.app["loop_lag"].snapshot(),
     }
 
 
@@ -1296,6 +1314,7 @@ async def h_daemon_info(request: web.Request) -> web.Response:
             "sessions": len(sessions),
             "running": sum(1 for s in sessions if not s.exited),
             "relay": request.app["relay_state"](),
+            "loop": request.app["loop_lag"].snapshot(),
         }
     )
 

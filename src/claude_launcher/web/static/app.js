@@ -315,6 +315,7 @@ let latencySentAt = null;     // latencyNow() of the ping in flight
 let latencyLastPing = -Infinity;
 let latencySamples = [];      // recent browser<->daemon round trips, ms
 let latencyRelay = null;      // the relay status the last pong carried
+let latencyLoop = null;       // the daemon event loop's lag, same pong (claunch-y9ax9)
 
 function latencyNow() {
   return (typeof performance !== "undefined" && performance.now)
@@ -362,6 +363,7 @@ function latencyPong(msg) {
     latencyRelay = msg.relay;
     renderRelayBadge(msg.relay);
   }
+  if (msg.loop) latencyLoop = msg.loop;
   renderLatencyBadge();
 }
 
@@ -439,6 +441,13 @@ function renderLatencyBadge() {
       `over ${sorted.length} ping(s)`);
   } else {
     lines.push(`browser ↔ daemon (${via}): measuring…`);
+  }
+  // How much of that round trip was the daemon's event loop being busy with
+  // something else: a stall there delays every request and terminal at once.
+  if (up && latencyLoop && typeof latencyLoop.max_ms === "number") {
+    lines.push(`daemon event loop: stalled up to ${fmtLatency(latencyLoop.max_ms)} ` +
+      `in the last ${Math.round(latencyLoop.window_s)}s ` +
+      `(last wake-up ${fmtLatency(latencyLoop.lag_ms)} late)`);
   }
   if (!relayOn) {
     lines.push("daemon ↔ relay: no relay configured");

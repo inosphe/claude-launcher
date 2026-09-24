@@ -74,6 +74,7 @@ import logging
 import re
 import shutil
 import sqlite3
+import subprocess
 import time
 from dataclasses import replace
 from datetime import datetime, timezone
@@ -1242,17 +1243,19 @@ class Board:
     async def _run(self, argv: List[str], cwd: str) -> Tuple[int, str, str]:
         if self._runner is not None:
             return await self._runner(argv, cwd)
-        proc = await asyncio.create_subprocess_exec(
-            *argv,
-            cwd=cwd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
+        # In a worker thread, not asyncio.create_subprocess_exec: on Windows
+        # the Proactor loop's transport calls Popen -- pipe setup and
+        # CreateProcess -- on the loop thread itself. py-spy put 106 of 1167
+        # loop samples there (40s, live daemon, claunch-y9ax9), every one a
+        # stall of every HTTP request and terminal socket. CreateProcess
+        # releases the GIL, so the loop runs while the thread waits on it.
+        proc = await asyncio.to_thread(
+            subprocess.run, argv, cwd=cwd, capture_output=True
         )
-        out, err = await proc.communicate()
         return (
             proc.returncode or 0,
-            out.decode("utf-8", "replace"),
-            err.decode("utf-8", "replace"),
+            proc.stdout.decode("utf-8", "replace"),
+            proc.stderr.decode("utf-8", "replace"),
         )
 
     async def create_board(self, ref: beads_db.BoardRef) -> None:

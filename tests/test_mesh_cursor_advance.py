@@ -111,6 +111,7 @@ def test_the_scan_after_that_reads_only_what_arrived(tmp_path):
                                     "bystander": _Terminal()})
         await _chatter(mm, 50)
         await mm._deliver_to(mesh, mesh.members["bystander"])
+        before = len(mesh.messages)
 
         looked = []
         real = type(mesh).addressed_to
@@ -125,7 +126,14 @@ def test_the_scan_after_that_reads_only_what_arrived(tmp_path):
             await mm._deliver_to(mesh, mesh.members["bystander"])
         finally:
             type(mesh).addressed_to = real
-        assert len(looked) == 3, f"re-read {len(looked)} messages"
+        # At most the three that arrived. The log's address index (see
+        # mesh._LogIndex) skips the ones sent to other members without
+        # asking, so fewer is the expected answer, not a weaker one.
+        arrived = {m.get("id") for m in mesh.messages[before:]}
+        assert len(arrived) == 3
+        assert set(looked) <= arrived and len(looked) <= 3, (
+            f"re-read {len(looked)} messages"
+        )
 
     asyncio.run(run())
 
