@@ -138,15 +138,37 @@ def find(session, event_id):
     return json.loads(row[0]) if row else None
 
 
+def kinds_present(pairs):
+    """Which ``(session, kind)`` pairs already have a record.
+
+    Asked one pair at a time through the ``(session, id)`` key: a record
+    :func:`capture` wrote has the id ``<kind>-<hash>``, so the key narrows
+    each lookup to that prefix and the payload is decoded only for the rows
+    in it. :func:`import_current` used to answer this by reading every record
+    and decoding every payload -- 20610 rows and 22 MB on this machine, 0.6 s
+    of event loop on the first Observer snapshot after a daemon start
+    (claunch-fh8u1).
+    """
+    found = set()
+    with database() as db:
+        for session, kind in dict.fromkeys(pairs):
+            if db.execute("SELECT 1 FROM records WHERE session=? AND id>=? AND id<? AND json_extract(payload,'$.kind')=? LIMIT 1",
+                          (session, kind + "-", kind + ".", kind)).fetchone():
+                found.add((session, kind))
+    return found
+
+
 def import_current():
     """Import surviving pre-upgrade briefing/check snapshots once per source."""
     from . import briefing, status_checks
     briefing._restore_cache()
-    existing = {(row["session"], row.get("kind")) for row in rows()}
-    for name, (_, result) in list(briefing._cache.items()):
+    briefings = list(briefing._cache.items())
+    data = status_checks._read()
+    existing = kinds_present([(name, "briefing") for name, _ in briefings]
+                             + [(name, "checks") for name in data["reports"]])
+    for name, (_, result) in briefings:
         if (name, "briefing") not in existing:
             capture(name, "briefing", result.get("briefing") or {"raw": result.get("raw")}, result.get("generated_at", ""))
-    data = status_checks._read()
     presets = {p["id"]: p for p in data["presets"]}
     for name, reports in data["reports"].items():
         if (name, "checks") not in existing:
