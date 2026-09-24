@@ -683,6 +683,36 @@ option:disabled { color: #6b7280; }
   font-size: 11px; color: #9fb4cb; line-height: 1.45; font-style: italic;
   white-space: pre-wrap; overflow-wrap: anywhere;
 }
+/* The note line is also the way into editing it (openRailNoteEditor), so it
+   answers the pointer as a text field would. */
+#session-list .rail-note { cursor: text; }
+#session-list .rail-note:hover { color: #c3d4e6; border-left-color: #3b6ea5; }
+/* The box that replaces the note line while it is being edited: the same
+   place and the same indent, so opening it does not move the row's other
+   lines, and the same border colour the panel's note box takes on focus. */
+#session-list .rail-note-editor {
+  flex-basis: 100%; order: 2; min-width: 0; margin-left: 12px;
+  display: flex; flex-direction: column; gap: 4px; cursor: default;
+}
+#session-list .rail-note-area {
+  width: 100%; box-sizing: border-box; resize: vertical; min-height: 38px;
+  padding: 4px 6px; border: 1px solid #3b6ea5; border-radius: 4px;
+  background: #0d1117; color: #c9d1d9; font: inherit; font-size: 11.5px;
+  line-height: 1.4;
+}
+#session-list .rail-note-area:focus { outline: none; border-color: #58a6ff; }
+#session-list .rail-note-actions { display: flex; align-items: center; gap: 6px; }
+#session-list .rail-note-actions button {
+  background: #21262d; border: 1px solid #30363d; border-radius: 4px;
+  color: #c9d1d9; font-size: 11px; line-height: 1; padding: 3px 8px; cursor: pointer;
+}
+#session-list .rail-note-actions button:hover { border-color: #8b949e; }
+#session-list .rail-note-actions .rail-note-save { border-color: #238636; color: #3fb950; }
+#session-list .rail-note-actions button:disabled { opacity: 0.5; cursor: default; }
+#session-list .rail-note-status {
+  min-width: 0; font-size: 10.5px; color: #8b949e; overflow-wrap: anywhere;
+}
+#session-list .rail-note-status.warn { color: #ff7b72; }
 #session-list .rail-status-checks {
   flex-basis: 100%; order: 2; display: flex; flex-wrap: wrap; gap: 3px 5px;
   padding: 2px 0 0 16px;
@@ -4523,6 +4553,17 @@ body.embed #main { width: 100%; }
   font-size: 15px; line-height: 1; padding: 1px 6px; cursor: pointer;
 }
 #session-list .sess-plus:hover { color: #3fb950; }
+
+/* The rail's ✎, the one-click way into a row's note (openRailNoteEditor).
+   Dim like the 📌 until the row has a note, so a rail of unannotated
+   sessions does not read as a column of lit buttons. */
+#session-list .sess-note-edit {
+  flex: none; background: none; border: none; color: #6e7681;
+  font-size: 13px; line-height: 1; padding: 2px 4px; cursor: pointer;
+  opacity: 0.55;
+}
+#session-list .sess-note-edit:hover { color: #9fb4cb; opacity: 1; }
+#session-list .sess-note-edit.on { color: #9fb4cb; opacity: 1; }
 
 /* The rail's 📌, third of the row actions. Dim until pinned; lit in the
    warning amber once it is, because a pinned row is one the reader asked to

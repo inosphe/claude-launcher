@@ -932,7 +932,15 @@ const RAIL_HOLD_MS = 1200;
 let railHeldUntil = 0;
 let railRedrawPending = false;
 
-function railHeld() { return Date.now() < railHeldUntil; }
+/* A note being typed on a rail row holds the rail the same way, for as long
+   as its box has the keyboard (see railNoteFocused): the teardown would take
+   the caret out of the box mid-word, and with an IME that also throws away
+   the syllable being composed. No deadline here, because nothing can be
+   lost -- leaving the box is itself the release. */
+function railHeld() {
+  return Date.now() < railHeldUntil
+    || (typeof railNoteFocused === "function" && railNoteFocused());
+}
 
 function holdRail() { railHeldUntil = Date.now() + RAIL_HOLD_MS; }
 
@@ -6000,6 +6008,15 @@ function applyBriefingTop() {
    which is part of the signature that decides the rebuild. */
 function decorateNoteRow(li, s) {
   const text = String(s.note || "").trim();
+  railNoteButton(li, s, text);
+  // A row whose note is open for editing shows the box in the note's place,
+  // and the box is the one already being typed in (see railNoteEditor).
+  if (railNoteEditor && railNoteEditor.name === s.name) {
+    const stale = li.querySelector(".rail-note");
+    if (stale) stale.remove();
+    railNotePlace(li, railNoteEditor.form);
+    return;
+  }
   const line = li.querySelector(".rail-note");
   if (!text) {
     if (line) line.remove();
@@ -6012,14 +6029,192 @@ function decorateNoteRow(li, s) {
   }
   const fresh = el("div", "rail-note", text);
   fresh.title = text;  // the column clips it; hover still gives the whole note
-  // Directly under the name, ahead of the path and context lines: this is the
-  // one line about the session that the reader wrote themselves, and putting
-  // it last would bury it under the facts the daemon reports. Same insertion
-  // as the beads line's — anchor on a line that is always present, because
-  // the ones between here and there come and go with the session's state.
+  // One click on the note is the way into editing it, so a click here is not
+  // the row's "attach" -- the ✎ beside the ⓘ is the same door for a row that
+  // has no note line to click.
+  if (typeof fresh.addEventListener === "function") {
+    fresh.addEventListener("click", (e) => {
+      e.stopPropagation();
+      openRailNoteEditor(li, s.name);
+    });
+  }
+  railNotePlace(li, fresh);
+}
+
+/* Directly under the name, ahead of the path and context lines: this is the
+   one line about the session that the reader wrote themselves, and putting
+   it last would bury it under the facts the daemon reports. Same insertion
+   as the beads line's — anchor on a line that is always present, because
+   the ones between here and there come and go with the session's state. The
+   editor takes the same place, so opening it does not move the rest. */
+function railNotePlace(li, node) {
   const cwd = li.querySelector(".rail-cwd");
-  if (cwd) li.insertBefore(fresh, cwd);
-  else li.appendChild(fresh);
+  if (cwd) li.insertBefore(node, cwd);
+  else li.appendChild(node);
+}
+
+/* The row's ✎, among the row actions just ahead of the ⓘ: the one-click way
+   to write or change this session's note without opening the detail panel.
+   Drawn on every row, because a session with no note yet is the one most
+   likely to need one, and it is written in place like the note line itself
+   so a repeat decorate does not stack a second one. */
+function railNoteButton(li, s, text) {
+  let btn = li.querySelector(".sess-note-edit");
+  if (!btn) {
+    btn = document.createElement("button");
+    btn.className = "sess-note-edit";
+    btn.type = "button";
+    btn.textContent = "✎";
+    if (btn.dataset) btn.dataset.name = s.name;
+    if (typeof btn.addEventListener === "function") {
+      btn.addEventListener("click", (e) => {
+        e.stopPropagation();   // the row itself attaches; this button does not
+        openRailNoteEditor(li, s.name);
+      });
+    }
+    const info = li.querySelector(".sess-info");
+    if (info) li.insertBefore(btn, info);
+    else li.appendChild(btn);
+  }
+  btn.classList.toggle("on", !!text);
+  btn.title = text ? "edit this session's note" : "add a note to this session";
+}
+
+/* ---- the note, edited on its rail row --------------------------------
+   The detail panel's note box (sessNote) is the full editor; this is the
+   quick one: a click on the row's ✎ or on the note line opens a box in the
+   note's place, Enter saves, Shift+Enter is a newline, Esc puts the note
+   back as it was. It writes through the same endpoint the panel does, so
+   the two cannot disagree about what a note is.
+
+   One box at a time, kept here rather than on the row: every poll that
+   changes the fleet rebuilds the rail, and decorateNoteRow moves this node
+   into the rebuilt row so an unsaved note survives it. While the box has the
+   keyboard the rebuild does not happen at all (railHeld). */
+let railNoteEditor = null;   // { name, form, area }
+
+function railNoteFocused() {
+  if (!railNoteEditor || typeof document === "undefined") return false;
+  const active = document.activeElement;
+  return !!(active && typeof railNoteEditor.form.contains === "function"
+            && railNoteEditor.form.contains(active));
+}
+
+function closeRailNoteEditor() {
+  const open = railNoteEditor;
+  if (!open) return;
+  railNoteEditor = null;
+  const li = open.form.parentNode;
+  open.form.remove();
+  // Put the saved note's line back, from the list the rail was built from.
+  const s = (typeof sessionsCache === "undefined" ? [] : sessionsCache || [])
+    .find((x) => x.name === open.name);
+  if (li && s) decorateNoteRow(li, s);
+  // A rebuild the box held back is owed now that it has closed.
+  if (typeof railRedrawPending !== "undefined" && railRedrawPending) {
+    setTimeout(refreshSessions, 0);
+  }
+}
+
+function openRailNoteEditor(li, name) {
+  if (railNoteEditor) {
+    if (railNoteEditor.name === name) { railNoteEditor.area.focus(); return; }
+    closeRailNoteEditor();
+  }
+  const s = (typeof sessionsCache === "undefined" ? [] : sessionsCache || [])
+    .find((x) => x.name === name) || { name };
+  const saved = String(s.note || "");
+  const form = el("div", "rail-note-editor");
+  const area = document.createElement("textarea");
+  area.className = "rail-note-area";
+  area.rows = 2;
+  area.maxLength = SESSION_NOTE_MAX;
+  area.value = saved;
+  area.placeholder = "why this session is being kept…";
+  if (typeof area.setAttribute === "function") area.setAttribute("aria-label", `note for ${name}`);
+  const save = el("button", "rail-note-save", "Save");
+  save.type = "button";
+  save.title = "keep this note (Enter) — Shift+Enter starts a new line";
+  const cancel = el("button", "rail-note-cancel", "Cancel");
+  cancel.type = "button";
+  cancel.title = "leave the note as it was (Esc)";
+  const status = el("span", "rail-note-status");
+  const actions = el("div", "rail-note-actions");
+  actions.append(save, cancel, status);
+  form.append(area, actions);
+  railNoteEditor = { name, form, area };
+
+  // Nothing typed or pressed in the box is the row's: a click would attach
+  // the session and a key would reach the card's shortcuts.
+  form.addEventListener("click", (e) => e.stopPropagation());
+
+  async function write() {
+    if (save.disabled) return;
+    save.disabled = cancel.disabled = true;
+    status.className = "rail-note-status";
+    status.textContent = "saving…";
+    let doc = {};
+    let resp;
+    try {
+      resp = await api(`/api/sessions/${encodeURIComponent(name)}/note`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ note: area.value }),
+      });
+      doc = await resp.json().catch(() => ({}));
+    } catch {
+      resp = null;
+    }
+    save.disabled = cancel.disabled = false;
+    if (!resp || !resp.ok) {
+      // The box stays open with what was typed: nothing was saved, and
+      // closing it would throw the reader's words away with the error.
+      status.className = "rail-note-status warn";
+      status.textContent = resp
+        ? (doc.error || `HTTP ${resp.status}`)
+        : "could not reach the daemon — nothing was changed";
+      return;
+    }
+    // The daemon trims and caps what it stores; its answer is the note now.
+    const cached = (typeof sessionsCache === "undefined" ? [] : sessionsCache || [])
+      .find((x) => x.name === name);
+    if (cached) cached.note = String(doc.note || "");
+    if (railNoteEditor && railNoteEditor.form === form) closeRailNoteEditor();
+    if (typeof refreshSessions === "function") await refreshSessions();
+  }
+
+  save.addEventListener("click", () => write());
+  cancel.addEventListener("click", () => closeRailNoteEditor());
+  form.addEventListener("keydown", (ev) => {
+    ev.stopPropagation();
+    // An IME's Enter commits the syllable being composed; it is not a save.
+    if (ev.isComposing || ev.keyCode === 229) return;
+    if (ev.key === "Escape") {
+      ev.preventDefault();
+      closeRailNoteEditor();
+    } else if (ev.key === "Enter" && !ev.shiftKey) {
+      ev.preventDefault();
+      write();
+    }
+  });
+  // Leaving the box releases the rail's hold; a rebuild it held back runs
+  // now rather than at the next poll. The box itself stays open.
+  form.addEventListener("focusout", (ev) => {
+    const next = ev.relatedTarget;
+    if (next && form.contains(next)) return;
+    if (typeof railRedrawPending !== "undefined" && railRedrawPending) {
+      setTimeout(refreshSessions, 0);
+    }
+  });
+
+  const line = li.querySelector(".rail-note");
+  if (line) line.remove();
+  railNotePlace(li, form);
+  if (typeof area.focus === "function") {
+    area.focus();
+    const end = area.value.length;
+    if (typeof area.setSelectionRange === "function") area.setSelectionRange(end, end);
+  }
 }
 
 /* What a rail row says whether folded or open: the briefing's one-line job
