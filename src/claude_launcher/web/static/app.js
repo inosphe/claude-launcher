@@ -1666,6 +1666,19 @@ function renderSessionGrid(force = false) {
     host.querySelector(`.sg-cell[data-name="${CSS.escape(focusName)}"]`)
       ?.focus({ preventScroll: true });
   }
+  // A pinned card outlives the redraw: it follows its session to the new
+  // node and takes the new content, and closes if the session left the cell.
+  const pinned = sessionGridTipPinned;
+  if (pinned) {
+    const row = layout.rows.find((x) => x.id === pinned.rowId);
+    const cell = host.querySelector(
+      `.sg-cell[data-row="${CSS.escape(pinned.rowId)}"][data-col="${pinned.col}"]`);
+    if (row && cell && cell.dataset.name === pinned.name) {
+      showSessionGridTip(cell, row, pinned.col, pinned.name, present.has(pinned.name), true);
+    } else {
+      closeSessionGridTip();
+    }
+  }
 }
 
 /* The marker a folded stretch leaves: a wavy break across the full width
@@ -2028,6 +2041,7 @@ function sessionGridCell(layout, row, r, c, records, present, searching) {
     let origin = null;
     const cancelHold = () => { clearTimeout(hold); hold = null; };
     cell.addEventListener("pointerdown", (ev) => {
+      sessionGridLastPointer = ev.pointerType;
       if (ev.button !== 0 || sessionGridPicked) return;
       sessionGridHoldRelease = false;
       origin = [ev.clientX, ev.clientY];
@@ -2048,6 +2062,14 @@ function sessionGridCell(layout, row, r, c, records, present, searching) {
     cell.addEventListener("pointercancel", cancelHold);
     cell.addEventListener("contextmenu", (ev) => {
       if (hold || sessionGridPicked) ev.preventDefault();
+      // The context menu of a cell is its hover card, pinned: it stays until
+      // x, Esc or a press anywhere else. Touch keeps its long press for
+      // picking the session up (the two guards above), so only a mouse or
+      // the keyboard's menu key pins.
+      else if (sessionGridLastPointer !== "touch") {
+        ev.preventDefault();
+        showSessionGridTip(cell, row, c, name, !!s, true);
+      }
     });
     cell.addEventListener("dragstart", (ev) => {
       cancelHold();
@@ -2150,12 +2172,61 @@ function sessionGridTipStyles() {
   document.head.append(style);
 }
 
+/* The Operator's session labels open the same card after a short wait
+   (scheduleSessionCardTip); the grid's cells open it at once. */
+const SESSION_GRID_TIP_DELAY_MS = 350;
+let sessionGridTipTimer = null;
+/* The pinned card's cell, { rowId, col, name }, or null. While it is set,
+   hovering and leaving cells neither replaces nor hides the card. */
+let sessionGridTipPinned = null;
+let sessionGridLastPointer = "";
+
+/* Hide the hover card -- unless it is pinned, which only closeSessionGridTip
+   undoes. Every pointerleave, blur and redraw comes through here. */
 function hideSessionGridTip() {
+  clearTimeout(sessionGridTipTimer);
+  sessionGridTipTimer = null;
+  if (sessionGridTipPinned) return;
   const tip = document.getElementById("sg-tip");
   if (tip) {
     tip.classList.add("hidden");
     tip.replaceChildren();
   }
+}
+
+/* Unpin and hide: the x button, Esc, and a press or focus anywhere else. */
+function closeSessionGridTip() {
+  if (!sessionGridTipPinned) return;
+  sessionGridTipPinned = null;
+  const tip = document.getElementById("sg-tip");
+  if (tip) {
+    tip.classList.remove("pinned");
+    tip.setAttribute("role", "tooltip");
+    tip.removeAttribute("aria-label");
+  }
+  hideSessionGridTip();
+}
+
+if (typeof document !== "undefined" && document.addEventListener) {
+  document.addEventListener("keydown", (ev) => {
+    if (ev.key !== "Escape" || !sessionGridTipPinned) return;
+    ev.preventDefault();
+    ev.stopPropagation();
+    closeSessionGridTip();
+  }, true);
+  const outside = (ev) => {
+    if (!sessionGridTipPinned) return;
+    const tip = document.getElementById("sg-tip");
+    if (tip && tip.contains(ev.target)) return;
+    // Focus coming back to the pinned cell itself (a right-click focuses it
+    // before the menu event) is not somewhere else.
+    if (ev.type === "focusin" && ev.target.matches?.(".sg-cell")
+        && ev.target.dataset.row === sessionGridTipPinned.rowId
+        && ev.target.dataset.col === String(sessionGridTipPinned.col)) return;
+    closeSessionGridTip();
+  };
+  document.addEventListener("pointerdown", outside, true);
+  document.addEventListener("focusin", outside, true);
 }
 
 /* The hover card element, created on first use. It lives in the open modal
@@ -2206,7 +2277,7 @@ function placeSessionTip(tip, anchor) {
    Operator's session labels): the list's card alone, or a note when the list
    does not hold that session. */
 function showSessionCardTip(anchor, name, note = "") {
-  if (!anchor.isConnected) return;
+  if (!anchor.isConnected || sessionGridTipPinned) return;
   const tip = sessionTipElement(anchor);
   const card = sessionCardCopy(name);
   const parts = [card || Object.assign(document.createElement("li"),
@@ -2223,8 +2294,9 @@ function scheduleSessionCardTip(anchor, name, note = "") {
     () => showSessionCardTip(anchor, name, note), SESSION_GRID_TIP_DELAY_MS);
 }
 
-function showSessionGridTip(cell, row, col, name, inView) {
+function showSessionGridTip(cell, row, col, name, inView, pin = false) {
   if (!cell.isConnected || sessionGridDragging || sessionGridPicked) return;
+  if (sessionGridTipPinned && !pin) return;
   const tip = sessionTipElement(cell);
   const perLine = sessionGridPerLine;
   const head = document.createElement("li");
@@ -2248,8 +2320,22 @@ function showSessionGridTip(cell, row, col, name, inView) {
     } else {
       note(inView ? name : `${name} — not in this view; its place is kept`);
     }
-    note("drag, Alt+arrow, or press and hold then tap a cell, to move it");
+    note(pin ? "drag, Alt+arrow, or press and hold then tap a cell, to move it"
+      : "drag, Alt+arrow, or press and hold then tap a cell, to move it · right-click to pin this card");
   }
+  if (pin) {
+    const close = Object.assign(document.createElement("button"), {
+      type: "button", className: "sg-tip-close", textContent: "×",
+    });
+    close.setAttribute("aria-label", "close");
+    close.title = "close (Esc)";
+    close.addEventListener("click", () => closeSessionGridTip());
+    head.append(close);
+    sessionGridTipPinned = { rowId: row.id, col, name };
+    tip.setAttribute("role", "dialog");
+    tip.setAttribute("aria-label", `${row.name} ${col + 1}: ${name}`);
+  }
+  tip.classList.toggle("pinned", pin);
   tip.replaceChildren(...parts);
   tip.classList.remove("hidden");
   placeSessionTip(tip, cell);
