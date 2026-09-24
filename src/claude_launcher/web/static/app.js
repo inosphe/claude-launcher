@@ -17588,8 +17588,8 @@ function sessBeads(data) {
     box.appendChild(el("p", "wf-note", "no issue on the board names this session"));
   }
   for (const i of issues) box.appendChild(beadsIssueRow(i, { compact: true }));
-  if (!b.issue && s.name && s.status !== "exited") {
-    box.appendChild(sessBeadsCreate(s.name));
+  if (s.name && s.status !== "exited") {
+    box.appendChild(sessBeadsCreate(s.name, !!b.issue));
   }
   const open = el("button", "wf-btn option", "Open board");
   open.title = "the Beads page, filtered to this session";
@@ -17628,7 +17628,9 @@ function sessBeadsPanel(data) {
     "Every issue on this workspace's board that names this session — the " +
     "recorded link, its assignee, its creator, or an `issue: <id>` in the " +
     "opening task — in a lane per status. Writes are the session's own " +
-    "(`claunch beads …`): this panel reads the board, it does not move it."));
+    "(`claunch beads …`): this panel moves nothing on the board. Its one " +
+    "write is the form below, which files a new issue as yours and assigns " +
+    "it to this session."));
   const panelWhere = sessBeadsBoardLine(b);
   if (panelWhere) box.appendChild(panelWhere);
   if (b.winddown) {
@@ -17651,8 +17653,8 @@ function sessBeadsPanel(data) {
     for (const st of lanes) grid.appendChild(sessBeadsLane(st, issues, b.issue));
     box.appendChild(grid);
   }
-  if (!b.issue && s.name && s.status !== "exited") {
-    box.appendChild(sessBeadsCreate(s.name));
+  if (s.name && s.status !== "exited") {
+    box.appendChild(sessBeadsCreate(s.name, !!b.issue));
   }
   const open = el("button", "wf-btn option", "Open board");
   open.title = "the Beads page, filtered to this session";
@@ -17773,22 +17775,64 @@ function sessReportRow(r, bySession) {
   return row;
 }
 
-/* An issue for a session that has none — the one write this panel makes.
-   Hoisted across renders (the poll rebuilds the panel every 2 s) and rebuilt
-   only when the rail points at another session. */
-function sessBeadsCreate(name) {
-  if (sessBeadsBox && sessBeadsBox.dataset.session === name) return sessBeadsBox;
+/* The panel's one write: an issue the person at the panel files for this
+   session and assigns to it in the same request (claunch-4g76d). The daemon
+   stamps it as the user's (created_by "user", label user-direct) with the
+   session as assignee and status open -- the exact listing the worker's
+   queue steps read -- and types a short block into the session so the loop
+   meets it now rather than at its next board read.
+
+   Offered to every live session, not only one without an issue: a session
+   that already has one gets the new issue on its queue, which is the case
+   "run this next" is asked for. `hasIssue` only changes what the form says it
+   will do. Hoisted across renders (the poll rebuilds the panel every 2 s) and
+   rebuilt only when the rail points at another session, so a half-typed
+   title survives the poll. */
+function sessBeadsCreate(name, hasIssue) {
+  let form = sessBeadsBox;
+  if (!form || form.dataset.session !== name) {
+    form = sessBeadsCreateForm(name);
+    sessBeadsBox = form;
+  }
+  const what = hasIssue
+    ? "queue an issue for this session — title"
+    : "give this session an issue — title";
+  form.titleInput.placeholder = what;
+  form.title = hasIssue
+    ? `filed as yours and assigned to ${name}; it goes on ${name}'s queue ` +
+      "behind the issue it is on, and the session is told"
+    : `filed as yours and assigned to ${name} as its issue; the session is told`;
+  return form;
+}
+
+function sessBeadsCreateForm(name) {
   const form = el("form", "sess-beads-create");
   form.dataset.session = name;
   const input = document.createElement("input");
   input.type = "text";
-  input.placeholder = "register an issue for this session — title";
   input.maxLength = 140;
   form.appendChild(input);
-  const btn = el("button", "wf-btn", "Create");
+  form.titleInput = input;  // the placeholder is re-said per render
+  const pri = document.createElement("select");
+  pri.className = "sess-beads-create-pri";
+  pri.title = "priority";
+  for (const n of [0, 1, 2, 3, 4]) {
+    const opt = document.createElement("option");
+    opt.value = String(n);
+    opt.textContent = `P${n}`;
+    if (n === 2) opt.selected = true;
+    pri.appendChild(opt);
+  }
+  form.appendChild(pri);
+  const btn = el("button", "wf-btn", "Create & assign");
   btn.type = "submit";
   form.appendChild(btn);
-  const note = el("span", "wf-note", "");
+  const details = document.createElement("textarea");
+  details.className = "sess-beads-create-details";
+  details.rows = 2;
+  details.placeholder = "details (optional) — becomes the goal under the title";
+  form.appendChild(details);
+  const note = el("span", "wf-note sess-beads-create-note", "");
   form.appendChild(note);
   form.addEventListener("submit", async (ev) => {
     ev.preventDefault();
@@ -17800,16 +17844,33 @@ function sessBeadsCreate(name) {
       const resp = await api(`/api/sessions/${encodeURIComponent(name)}/beads`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ title }),
+        body: JSON.stringify({
+          title, description: details.value.trim(), priority: Number(pri.value),
+        }),
       });
       const doc = await resp.json().catch(() => ({}));
       if (!resp.ok) note.textContent = doc.error || `HTTP ${resp.status}`;
-      else { input.value = ""; sessBeadsBox = null; refreshSession(); }
+      else {
+        input.value = "";
+        details.value = "";
+        note.textContent = sessBeadsFiledNote(name, doc);
+        refreshSession();
+      }
     } catch { /* auth overlay is up */ }
     finally { btn.disabled = false; }
   });
-  sessBeadsBox = form;
   return form;
+}
+
+/* What the create answered, in one line: which issue, where it went, and
+   whether the session was told -- the last is the part a reader cannot see
+   from the board. */
+function sessBeadsFiledNote(name, doc) {
+  const where = doc.primary ? `as ${name}'s issue` : `on ${name}'s queue`;
+  // Accepted for delivery, not a receipt: the daemon types it in once the
+  // session's input line is free, and says nothing more about it here.
+  const told = doc.notified ? "notice queued to the session" : "no notice sent";
+  return `${doc.issue} filed by user, assigned ${where} · ${told}`;
 }
 
 /* ---- the rail's block: what this session committed ---- */

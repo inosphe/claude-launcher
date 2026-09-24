@@ -106,6 +106,7 @@ new Function(
   + slice("beadsBoardLabel") + slice("beadsBoardWhere")
   + slice("beadsNameOfRoot") + slice("sessBeadsBoardLine")
   + slice("sessBeads") + slice("sessBeadsCreate")
+  + slice("sessBeadsCreateForm") + slice("sessBeadsFiledNote")
   + slice("url")
   + slice("sessReports") + slice("sessReportRow")
   + slice("fmtReportSize") + slice("reportWhen")
@@ -120,7 +121,7 @@ new Function(
 Object.assign(exports, {
   filter: beadsFilterIssues, sort: beadsSortIssues, row: beadsIssueRow,
   rail: sessBeads, reports: sessReports, pane: beadsDetailPane,
-  tabs: beadsPageTabs, setDetail, setFocus, setSection, setBoards, gone, setBase,
+  tabs: beadsPageTabs, filedNote: sessBeadsFiledNote, setDetail, setFocus, setSection, setBoards, gone, setBase,
 });`)(ctx, document, el);
 
 let failures = 0;
@@ -218,8 +219,21 @@ check("but rebuilt for another session",
 
 box = railOf({ name: "s1", status: "idle" },
              { issue: "b", issues: [{ ...issues[1], via: ["link"] }] });
-check("a linked issue: rows, no create form",
-      [box.find("beads-row").length, box.find("sess-beads-create").length], [1, 0]);
+check("a linked issue: rows, and the form still offered -- it queues",
+      [box.find("beads-row").length, box.find("sess-beads-create").length], [1, 1]);
+check("which the form says: it queues behind the issue the session is on",
+      box.find("sess-beads-create")[0].kids[0].placeholder,
+      "queue an issue for this session — title");
+check("the form carries a priority and a details box, and says it assigns",
+      [box.find("sess-beads-create-pri").length,
+       box.find("sess-beads-create-details").length,
+       box.find("sess-beads-create")[0].kids.find((k) => k.tag === "button").text],
+      [1, 1, "Create & assign"]);
+check("the answer line names the issue, where it went, and whether the session was told",
+      [ctx.filedNote("s1", { issue: "t-1", primary: true, notified: true }),
+       ctx.filedNote("s1", { issue: "t-2", primary: false, notified: false })],
+      ["t-1 filed by user, assigned as s1's issue · notice queued to the session",
+       "t-2 filed by user, assigned on s1's queue · no notice sent"]);
 check("the heading counts", box.kids[0].text, "Beads (1)");
 
 box = railOf({ name: "s1", status: "exited" }, { issues: [] });

@@ -2243,6 +2243,7 @@ def test_the_rail_can_register_an_issue_after_the_fact(home, tmp_path, repo):
             doc = await resp.json()
             assert resp.status == 201, doc
             assert doc["issue"] == "t-1" and doc["beads"]["issue"] == "t-1"
+            assert doc["primary"] is True
             assert mgr.get("s1").sdef.issue == "t-1"
             assert br.issues["t-1"]["assignee"] == "s1"
             await mgr.shutdown_all()
@@ -2250,6 +2251,101 @@ def test_the_rail_can_register_an_issue_after_the_fact(home, tmp_path, repo):
             await client.close()
 
     asyncio.run(run())
+
+
+def test_a_detail_panel_issue_is_the_users_and_assigned_on_the_spot(
+    home, tmp_path, repo
+):
+    """claunch-4g76d. The panel's inline create files the issue as the
+    person's (``created_by`` user, label ``user-direct``) with the session as
+    assignee and status ``open`` -- the listing the worker's queue steps read.
+    A session that already has its issue keeps it and gets the new one on its
+    queue; either way a block is queued into the session, and an exited
+    session is refused."""
+    _register_py_harness()
+    br = FakeBr()
+    board = _board(br, repo)
+
+    async def run():
+        mgr = SessionManager(idle_threshold=0.5, scrollback=200, restore_default=True)
+        mm = MeshManager(mgr, root=tmp_path / "mesh")
+        client = await _serve(mgr, mm, board)
+        try:
+            mgr.create(SessionDef(name="s1", harness="py", cwd=str(repo)))
+            sent = []
+            mgr.get("s1").queue_delivery = lambda text: sent.append(text) or True
+
+            resp = await client.post(
+                "/api/sessions/s1/beads",
+                json={"title": "Do the thing", "description": "and do it well",
+                      "priority": "P1"},
+                headers=BEARER,
+            )
+            first = await resp.json()
+            assert resp.status == 201, first
+            row = br.issues[first["issue"]]
+            assert row["created_by"] == beads_mod.USER_ACTOR == "user"
+            assert row["assignee"] == "s1"
+            assert row["status"] == "open" and row["priority"] == 1
+            assert row["labels"] == ["user-direct"]
+            assert beads_mod.SESSION_LABEL not in row["labels"]
+            assert "Do the thing\n\nand do it well" in row["description"]
+            assert "filed for and assigned to session s1" in row["description"]
+            # The assignee is written last, as every create here writes it.
+            create = next(c for c in br.calls if "create" in c)
+            flags = [a for a in create if a != "--json"]
+            assert flags[-2:] == ["--assignee", "s1"]
+            assert any(
+                c.get("text", "").startswith("QUEUED by user:")
+                for c in br.comments[first["issue"]]
+            )
+            assert first["primary"] is True and first["notified"] is True
+            assert f"issue: {first['issue']} -- Do the thing" in sent[0]
+            assert "this session's issue" in sent[0]
+
+            # A second one: queued, the primary link left where it was.
+            resp = await client.post(
+                "/api/sessions/s1/beads", json={"title": "Then this"}, headers=BEARER
+            )
+            second = await resp.json()
+            assert resp.status == 201, second
+            assert second["primary"] is False
+            assert mgr.get("s1").sdef.issue == first["issue"]
+            assert br.issues[second["issue"]]["assignee"] == "s1"
+            assert "queued behind your current work" in sent[1]
+            assert "--assignee s1 --status open --status in_ready" in sent[1]
+
+            # notify: false files it and types nothing.
+            resp = await client.post(
+                "/api/sessions/s1/beads",
+                json={"title": "Quietly", "notify": False}, headers=BEARER,
+            )
+            assert (await resp.json())["notified"] is False and len(sent) == 2
+
+            resp = await client.post(
+                "/api/sessions/s1/beads",
+                json={"title": "x", "priority": 9}, headers=BEARER,
+            )
+            assert resp.status == 400
+
+            await mgr.shutdown_all()
+            resp = await client.post(
+                "/api/sessions/s1/beads", json={"title": "Too late"}, headers=BEARER
+            )
+            assert resp.status == 409
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_an_exit_leaves_a_users_queued_issue_alone():
+    """The reason the creator is the user: stamped with the session, the
+    sweep closed (``session`` label) or released (self-queued) work a person
+    queued the moment the session exited."""
+    rows = [{"id": "u-1", "status": "open", "assignee": "s1",
+             "created_by": beads_mod.USER_ACTOR, "labels": ["user-direct"]}]
+    assert beads_mod.sweep_plan(rows, "s1", exit_code=0) == []
 
 
 def test_a_rebriefing_restates_the_issue(home, tmp_path):
