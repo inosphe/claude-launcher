@@ -26,7 +26,15 @@
      that repeats itself buys a re-measure of the whole bar every poll.
    - Both the rail line and the chip are in the stylesheet the way a
      full-width rail line and a hover-label have to be. raillayout_check
-     pins the breaker budget; this pins these entries. */
+     pins the breaker budget; this pins these entries.
+   - It is editable on the row. One click on the row's ✎ or on the note
+     line opens a box in the note's place; Enter saves through the same
+     endpoint the detail panel uses, Shift+Enter is a newline, Esc puts the
+     note back, and an IME's Enter (composition) is never a save — the
+     person typing Korean would otherwise save half a syllable. A failed
+     save keeps the box and what was typed. The box survives a rail rebuild
+     (the same node moves into the new row) and, while it has the keyboard,
+     holds the rail so no rebuild happens at all. */
 const fs = require("fs");
 const path = require("path");
 const src = fs.readFileSync(
@@ -56,9 +64,15 @@ if (!capLine) throw new Error("cannot locate RAIL_MESH_TAGS in app.js");
 function node(tag) {
   const n = {
     tag, kids: [], parent: null, text: "", classes: new Set(), dataset: {}, style: {},
-    title: "", type: "",
-    appendChild(c) { c.parent = n; n.kids.push(c); return c; },
+    title: "", type: "", value: "", listeners: {},
+    get parentNode() { return n.parent; },
+    contains(x) { for (let c = x; c; c = c.parent) if (c === n) return true; return false; },
+    focus() { document.activeElement = n; },
+    setSelectionRange(a, b) { n.selection = [a, b]; },
+    setAttribute(k, v) { n.attrs = Object.assign(n.attrs || {}, { [k]: String(v) }); },
+    appendChild(c) { if (c.parent) c.remove(); c.parent = n; n.kids.push(c); return c; },
     insertBefore(c, ref) {
+      if (c.parent) c.remove();
       const at = n.kids.indexOf(ref);
       c.parent = n;
       n.kids.splice(at < 0 ? n.kids.length : at, 0, c);
@@ -71,7 +85,7 @@ function node(tag) {
       if (at >= 0) n.parent.kids.splice(at, 1);
       n.parent = null;
     },
-    addEventListener() {},
+    addEventListener(type, fn) { (n.listeners[type] = n.listeners[type] || []).push(fn); },
     /* decorateNoteRow finds its own line through this, so it has to be a
        real lookup rather than a per-test override: the "repaint, do not
        stack" and "a cleared note takes its line off" checks are exactly
@@ -109,7 +123,19 @@ function descendants(n, out = []) {
   for (const k of n.kids) { out.push(k); descendants(k, out); }
   return out;
 }
-const document = { createElement: node };
+const document = { createElement: node, activeElement: null };
+/* One event, delivered to one node's own listeners (no bubbling: what the
+   checks want to know is whether a handler STOPPED it from bubbling). */
+function fire(target, type, init = {}) {
+  const ev = Object.assign({
+    type, target, key: "", shiftKey: false, isComposing: false, keyCode: 0,
+    relatedTarget: null, stopped: false, prevented: false,
+    stopPropagation() { ev.stopped = true; },
+    preventDefault() { ev.prevented = true; },
+  }, init);
+  for (const fn of target.listeners[type] || []) fn(ev);
+  return ev;
+}
 function el(tag, cls, text) {
   const n = node(tag);
   if (cls) n.className = cls;
@@ -123,7 +149,15 @@ const list = node("ul");
 const chip = node("span");
 chip.className = "term-note hidden";
 let served = { sessions: [] };
-const api = async () => ({ ok: true, json: async () => served });
+/* The note endpoint answers from `noteReply` and every call is kept, so a
+   check can say both "it saved this" and "it saved nothing". */
+const calls = [];
+let noteReply = null;
+const api = async (url, opts) => {
+  calls.push({ url, opts });
+  if (/\/note$/.test(url)) return noteReply(JSON.parse(opts.body));
+  return { ok: true, json: async () => served };
+};
 
 /* Everything refreshSessions and renderTermNote lean on that is not this
    feature. The other rail lines are the same fixed/no-op stubs railcwd_check
@@ -157,6 +191,7 @@ const MOBILE_MQ = { get matches() { return false; } };
 function openSpawnModal() {}
 function go() {}
 function closeDetail() {}
+function openDetail() {}
 `;
 
 const ctx = {};
@@ -169,7 +204,11 @@ new Function(
   + slice("shortenPath") + slice("cwdSplit") + slice("cwdShort")
   + slice("cwdLine") + slice("railCwdLine")
   + slice("profileHarnessLabel") + slice("railMetaText")
-  + slice("decorateNoteRow")
+  + src.match(/^const SESSION_NOTE_MAX = .+$/m)[0] + "\n"
+  + src.match(/^let railNoteEditor = .+$/m)[0] + "\n"
+  + slice("decorateNoteRow") + slice("railNotePlace") + slice("railNoteButton")
+  + slice("railNoteFocused") + slice("closeRailNoteEditor")
+  + slice("openRailNoteEditor")
   + slice("renderTermNote")
   + slice("refreshSessions")
   + `
@@ -179,6 +218,9 @@ Object.assign(exports, {
   termNote: renderTermNote,
   setSessions: (rows) => { sessionsCache = rows; served = { sessions: rows }; },
   setCurrent: (name) => { currentName = name; },
+  editor: () => railNoteEditor,
+  focused: railNoteFocused,
+  cache: () => sessionsCache,
 });`)(ctx, document, el, api, list, [], true, chip);
 
 let failures = 0;
@@ -217,14 +259,14 @@ const placed = el("li", "sess-card");
 placed.appendChild(el("div", "rail-cwd"));
 ctx.decorate(placed, { name: "s1", note: NOTE });
 check("the line lands before the directory line",
-      placed.kids.map((k) => k.className), ["rail-note", "rail-cwd"]);
+      placed.kids.map((k) => k.className), ["rail-note", "rail-cwd", "sess-note-edit on"]);
 /* A row's cwd line is always drawn (railCwdLine returns one for a session
    with no directory of its own too), but the fallback has to append rather
    than throw if one is ever missing. */
 const orphan = el("li", "sess-card");
 ctx.decorate(orphan, { name: "s1", note: NOTE });
 check("with no directory line to sit before it still draws",
-      orphan.kids.map((k) => k.className), ["rail-note"]);
+      orphan.kids.map((k) => k.className), ["sess-note-edit on", "rail-note"]);
 
 /* ---- repaint, don't duplicate ------------------------------------------ */
 const again = el("li", "sess-card");
@@ -237,7 +279,7 @@ check("...and a changed note is what the line then says",
       again.kids.filter((k) => k.classes.has("rail-note")).map((k) => k.text),
       ["something else now"]);
 ctx.decorate(again, { name: "s1", note: "" });
-check("a cleared note takes its line off the row", again.kids.length, 0);
+check("a cleared note takes its line off the row", noteIn(again).length, 0);
 
 /* ---- the page never parses it ------------------------------------------ */
 /* A note is arbitrary user input. The row is built with createElement, so a
@@ -315,8 +357,159 @@ check("the header chip has a rule of its own", chipRule.length > 0, true);
 check("...and says with the pointer that hovering is the point",
       /cursor:\s*help/.test(chipRule), true);
 
-if (failures) {
-  console.error(`${failures} check(s) failed`);
-  process.exit(1);
-}
-console.log("railnote_check: all checks passed");
+const editRule = (css.match(/#session-list \.sess-note-edit \{([^}]*)\}/) || [])[1] || "";
+check("the row's ✎ has a rule of its own", editRule.length > 0, true);
+check("...and never takes a line of its own", /flex:\s*none/.test(editRule), true);
+
+/* ---- editing on the row ------------------------------------------------ */
+const kidClass = (li) => li.kids.map((k) => [...k.classes][0]);
+const editorIn = (li) => descendants(li).filter((k) => k.classes.has("rail-note-editor"));
+const areaIn = (li) => descendants(li).find((k) => k.classes.has("rail-note-area"));
+const btnIn = (li, cls) => descendants(li).find((k) => k.classes.has(cls));
+/* A row as the rail builds it: the ⓘ is there, and the directory line. */
+const fullRow = (s) => {
+  const li = el("li", "sess-card");
+  li.appendChild(el("button", "sess-info"));
+  li.appendChild(el("div", "rail-cwd"));
+  ctx.decorate(li, s);
+  return li;
+};
+const tick = () => new Promise((r) => setTimeout(r, 0));
+
+(async () => {
+  /* The door. */
+  const bare = fullRow({ name: "s1" });
+  check("every row gets a ✎, a row with no note too — that one needs it most",
+        kidClass(bare), ["sess-note-edit", "sess-info", "rail-cwd"]);
+  check("...dim, and saying it adds a note",
+        [btnIn(bare, "sess-note-edit").classes.has("on"), btnIn(bare, "sess-note-edit").title],
+        [false, "add a note to this session"]);
+  ctx.decorate(bare, { name: "s1" });
+  check("...one ✎, however often the row is decorated",
+        bare.kids.filter((k) => k.classes.has("sess-note-edit")).length, 1);
+  const noted = fullRow({ name: "s1", note: NOTE });
+  check("a row with a note has its ✎ lit, saying it edits",
+        [btnIn(noted, "sess-note-edit").classes.has("on"), btnIn(noted, "sess-note-edit").title],
+        [true, "edit this session's note"]);
+
+  /* One click on the ✎ opens the box in the note's place, holding the note. */
+  ctx.setSessions([{ name: "s1", note: NOTE }]);
+  const r1 = fullRow({ name: "s1", note: NOTE });
+  const click = fire(btnIn(r1, "sess-note-edit"), "click");
+  check("the ✎'s click is not the row's attach", click.stopped, true);
+  check("...and opens the box where the note line was",
+        kidClass(r1), ["sess-note-edit", "sess-info", "rail-note-editor", "rail-cwd"]);
+  check("...holding the saved note", areaIn(r1).value, NOTE);
+  check("...with the caret in it, at the end",
+        [document.activeElement === areaIn(r1), areaIn(r1).selection], [true, [NOTE.length, NOTE.length]]);
+  check("...which is what holds the rail", ctx.focused(), true);
+  const inBox = fire(editorIn(r1)[0], "click");
+  check("a click inside the box does not attach the session", inBox.stopped, true);
+
+  /* Esc puts the note back as it was, and saves nothing. */
+  areaIn(r1).value = "typed and then abandoned";
+  let before = calls.length;
+  fire(editorIn(r1)[0], "keydown", { key: "Escape" });
+  check("Esc closes the box", editorIn(r1).length, 0);
+  check("...puts the saved note's line back", noteIn(r1).map((k) => k.text), [NOTE]);
+  check("...and writes nothing", calls.length, before);
+  check("...and the rail is no longer held", ctx.focused(), false);
+
+  /* One click on the note line itself is the other door. */
+  const lineClick = fire(noteIn(r1)[0], "click");
+  check("a click on the note line opens the box too", editorIn(r1).length, 1);
+  check("...and does not attach the session", lineClick.stopped, true);
+
+  /* Keys that are not a save. */
+  before = calls.length;
+  const box = editorIn(r1)[0];
+  const shifted = fire(box, "keydown", { key: "Enter", shiftKey: true });
+  check("Shift+Enter is a newline, not a save", [calls.length, shifted.prevented], [before, false]);
+  fire(box, "keydown", { key: "Enter", isComposing: true });
+  fire(box, "keydown", { key: "Enter", keyCode: 229 });
+  check("an IME's Enter commits the syllable and saves nothing", calls.length, before);
+  const letter = fire(box, "keydown", { key: "k" });
+  check("a key typed in the box does not reach the card's shortcuts", letter.stopped, true);
+
+  /* Enter saves through the note endpoint, and the daemon's answer is kept. */
+  noteReply = (body) => ({ ok: true, json: async () => ({ note: body.note.trim() }) });
+  areaIn(r1).value = "  rewritten on the row  ";
+  fire(box, "keydown", { key: "Enter" });
+  await tick(); await tick(); await tick();
+  const post = calls.filter((c) => /\/note$/.test(c.url)).pop();
+  check("Enter saves to the session's note endpoint",
+        [post && post.url, post && post.opts.method], ["/api/sessions/s1/note", "POST"]);
+  check("...what was typed", post && JSON.parse(post.opts.body), { note: "  rewritten on the row  " });
+  check("...then closes the box", [editorIn(r1).length, ctx.editor()], [0, null]);
+  check("...and the row says what the daemon kept",
+        noteIn(r1).map((k) => k.text), ["rewritten on the row"]);
+  check("...and the rail is refetched so the header and panel follow",
+        calls[calls.length - 1].url.startsWith("/api/sessions?"), true);
+
+  /* A failed save keeps the box and the words. */
+  ctx.setSessions([{ name: "s1", note: NOTE }]);
+  const r2 = fullRow({ name: "s1", note: NOTE });
+  fire(btnIn(r2, "sess-note-edit"), "click");
+  noteReply = () => ({ ok: false, status: 400, json: async () => ({ error: "note too long" }) });
+  areaIn(r2).value = "not saved";
+  fire(btnIn(r2, "rail-note-save"), "click");
+  await tick(); await tick();
+  check("a refused save keeps the box open", editorIn(r2).length, 1);
+  check("...with what was typed", areaIn(r2).value, "not saved");
+  check("...and says why", btnIn(r2, "rail-note-status").text, "note too long");
+  noteReply = () => { throw new Error("offline"); };
+  fire(btnIn(r2, "rail-note-save"), "click");
+  await tick(); await tick();
+  check("an unreachable daemon keeps it open as well",
+        [editorIn(r2).length, btnIn(r2, "rail-note-status").text],
+        [1, "could not reach the daemon — nothing was changed"]);
+
+  /* Opening another row's box closes this one: one box at a time. */
+  ctx.setSessions([{ name: "s1", note: NOTE }, { name: "s2" }]);
+  const r3 = fullRow({ name: "s2" });
+  fire(btnIn(r3, "sess-note-edit"), "click");
+  check("opening a second row's box closes the first",
+        [editorIn(r2).length, noteIn(r2).map((k) => k.text), editorIn(r3).length],
+        [0, [NOTE], 1]);
+  check("...and a row with no note opens an empty box", areaIn(r3).value, "");
+
+  /* A rebuild moves the open box into the new row, with its unsaved words. */
+  const openBox = ctx.editor().form;
+  areaIn(r3).value = "half written";
+  document.activeElement = null;    // the reader has left the box
+  ctx.setSessions([{ name: "s1", note: NOTE }, { name: "s2", status: "running" }]);
+  list._sessionsSignature = "stale";
+  // setSessions' `served` is the sliced code's global, not this module's
+  // `served` the api stub answers from, so the poll's answer is set here.
+  served = { sessions: ctx.cache() };
+  await ctx.refresh();
+  const rebuilt = list.kids.find((k) => descendants(k).includes(openBox));
+  check("a rebuild carries the open box into the new row",
+        !!rebuilt && rebuilt !== r3, true);
+  check("...into s2's row", rebuilt && rebuilt.dataset.name, "s2");
+  check("...with the words that were not saved yet", areaIn(rebuilt || list).value, "half written");
+  check("...and only that row has one",
+        list.kids.filter((k) => editorIn(k).length).length, 1);
+  fire(openBox, "keydown", { key: "Escape" });
+
+  /* The rail's own hold: the real railHeld, with the box focused and not. */
+  const hold = {};
+  new Function("exports", "document",
+    "let railHeldUntil = 0;\nlet railNoteEditor = null;\n"
+    + slice("railHeld") + slice("railNoteFocused")
+    + "\nexports.held = railHeld; exports.set = (e) => { railNoteEditor = e; };")(hold, document);
+  const f = el("div", "rail-note-editor"); const a = el("textarea"); f.appendChild(a);
+  hold.set({ name: "s1", form: f, area: a });
+  document.activeElement = null;
+  check("an open box nobody is typing in does not hold the rail", hold.held(), false);
+  a.focus();
+  check("...a box with the keyboard does", hold.held(), true);
+  hold.set(null);
+  check("...and with no box there is nothing to hold", hold.held(), false);
+
+  if (failures) {
+    console.error(`${failures} check(s) failed`);
+    process.exit(1);
+  }
+  console.log("railnote_check: all checks passed");
+})().catch((e) => { console.error(e); process.exit(1); });
