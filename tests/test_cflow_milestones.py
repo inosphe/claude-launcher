@@ -285,3 +285,114 @@ def test_only_one_run_of_a_scope_holds_the_landing_queue(proj):
     assert engine.landing_queue_run() == state_mod.MAIN_RUN
     with pytest.raises(CflowError, match="already holds one"):
         engine.start("queued", run="stack")
+
+
+# --------------------------------------------------------------------------- #
+# the daemon drives sub runs
+# --------------------------------------------------------------------------- #
+GATED = """
+name: gated
+kind: subflow
+steps:
+  hold:
+    instructions: wait for the flag
+    checklist:
+      prompt: is the flag there?
+      then: after
+      poll: 30
+      items:
+        - id: flag
+          describe: the flag file exists
+          check: 'python -c "import os,sys; sys.exit(0 if os.path.exists(\\"flag\\") else 1)"'
+  after:
+    instructions: carry on
+"""
+
+
+class _FakeManager:
+    def get(self, name):
+        raise KeyError(name)
+
+
+def test_known_slots_lists_main_runs_then_sub_runs(proj):
+    engine.start("main")
+    engine.start("stack", run="stack")
+    slots = [(scope, run) for _, scope, run in state_mod.known_slots()]
+    assert slots == [("s1", None), ("s1", "stack")]
+
+
+def test_for_run_names_the_sub_run_under_the_header():
+    from claude_launcher.daemon import cflow_clock
+
+    block = "---\n# claunch cflow: x\nstep: a\n---"
+    assert cflow_clock.for_run(block, None) == block
+    lines = cflow_clock.for_run(block, "stack").splitlines()
+    assert lines[2].startswith("run: stack")
+
+
+def test_a_sub_run_hears_its_awaits_signal_and_no_step_reminders(proj, monkeypatch):
+    from claude_launcher.daemon import cflow_clock
+
+    engine.start("main")
+    engine.start("stack", run="stack")
+    calls = []
+    codes = {"code": 1}
+
+    def fake_probe(command, cwd, timeout, *, scope, inputs=None, values=None, run=None):
+        calls.append((command, scope, run))
+        return {"code": codes["code"], "says": "probe"}
+
+    monkeypatch.setattr(cflow_clock.cflow_engine, "run_probe", fake_probe)
+    monkeypatch.setattr(cflow_clock.store, "daemon_config", lambda: {})
+    clock = cflow_clock.ReminderClock(_FakeManager())
+    assert clock.scan(1000.0) == []                  # baselines only
+    codes["code"] = 0
+    due = clock.scan(1100.0)
+    signals = [d for d in due if d[3] == "signal"]
+    assert len(signals) == 1
+    assert "run: stack" in signals[0][2] and "exit 1 -> exit 0" in signals[0][2]
+    probed = {run for command, scope, run in calls if "cut-wanted" in command}
+    assert probed == {"stack"}
+    # past any reminder interval the sub run is still never restated
+    later = clock.scan(100000.0)
+    assert not [d for d in later if "run: stack" in d[2] and d[3] == "reminder"]
+
+
+def test_the_checklist_clock_opens_a_sub_runs_gate(proj):
+    from claude_launcher.daemon import cflow_clock
+
+    (proj / ".claunch" / "workflows" / "gated.yaml").write_text(GATED, encoding="utf-8")
+    engine.start("main")
+    engine.start("gated", run="gate")
+    engine.report("waiting for the flag", run="gate")
+    assert engine.status(run="gate")["status"] == "waiting_checklist"
+    clock = cflow_clock.ChecklistClock(_FakeManager())
+    assert clock.scan(now=1000.0) == []
+    (proj / "flag").touch()
+    moved = clock.scan(now=1040.0)
+    assert len(moved) == 1 and "run: gate" in moved[0][2]
+    assert engine.status(run="gate")["step_id"] == "after"
+    assert engine.status()["step_id"] == "work"     # the main run never moved
+
+
+def test_a_mutual_wait_is_reported_once_per_pair_of_positions(proj):
+    engine.start("main")
+    engine.start("stack", run="stack")
+    assert engine.sync_deadlock(run="stack") is None      # main is at work
+    _step()                                                # at request
+    engine.goto("land", by="user", reason="skip the request")  # publishes nothing
+    stuck = engine.sync_deadlock(run="stack")
+    assert stuck == {
+        "sub": "stack",
+        "main_step": "land", "main_waits_for": "stack.cut",
+        "sub_step": "standby", "sub_waits_for": "main.cut-wanted",
+    }
+    assert engine.sync_deadlock(run="stack") is None      # said once
+    events = [e["event"] for e in state_mod.read_journal(str(proj), "s1")]
+    assert events.count("sync_deadlock") == 1
+    # a move that unsticks it clears the record; getting stuck again reports again
+    engine.goto("request", by="user", reason="ask properly")
+    assert engine.sync_deadlock(run="stack") is None
+    engine.next_step()                                     # a goto's step is fetched first
+    _step()                                                # request -> land, publishes
+    assert engine.sync_deadlock(run="stack") is None      # the sub has something new

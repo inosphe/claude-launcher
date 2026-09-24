@@ -362,6 +362,18 @@ def known_sub_runs() -> List[Tuple[str, str, str]]:
     return [(e["cwd"], e["scope"], e["run"]) for e in _alive_entries() if e.get("run")]
 
 
+def known_slots() -> List[Tuple[str, str, Optional[str]]]:
+    """Every registered run slot as ``(cwd, scope, run)``: main runs first
+    with ``run`` None, then sub runs by name. The daemon clocks that act on
+    a run's own position (an ask's expiry, a held window, a timer, a
+    checklist gate, a queued trigger) walk this, so a sub run's delegated
+    decision times out and its gate opens exactly as a main run's does."""
+    alive = _alive_entries()
+    return [(e["cwd"], e["scope"], None) for e in alive if not e.get("run")] + [
+        (e["cwd"], e["scope"], e["run"]) for e in alive if e.get("run")
+    ]
+
+
 def _read_registry() -> List[Dict[str, str]]:
     try:
         entries = json.loads(runs_registry_path().read_text(encoding="utf-8"))

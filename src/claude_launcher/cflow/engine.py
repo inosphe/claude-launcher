@@ -1629,6 +1629,59 @@ def published(
     return {**_published_view(awaits, state, step_id, cwd), "step": step_id}
 
 
+@_locked_op
+def sync_deadlock(cwd: Optional[str] = None) -> Optional[dict]:
+    """The ambient SUB run and its main run waiting on each other, or None.
+
+    Each side's current step awaits a milestone of the other, and neither
+    has anything new to consume — so neither will move to publish what the
+    other waits for. Journaled once per pair of positions (in both journals)
+    and returned only that first time, so the daemon says it once; a pair
+    that is not stuck clears the record.
+    """
+    if not state_mod.has_run(cwd):
+        return None
+    sub_state = state_mod.load_state(cwd)
+    name = sub_state.get("sub")
+    if not name or sub_state.get("status") in ("done", "aborted"):
+        return None
+    main_state = _main_state(cwd)
+    if not main_state or main_state.get("status") in ("done", "aborted"):
+        return None
+    sub_wf = state_mod.load_snapshot(cwd)
+    main_wf = _in_main(lambda c: state_mod.load_snapshot(c), cwd)
+    sub_step = sub_wf.steps.get(sub_state.get("current") or "")
+    main_step = main_wf.steps.get(main_state.get("current") or "")
+    sub_wait = sub_step.awaits if sub_step else None
+    main_wait = main_step.awaits if main_step else None
+    stuck = (
+        sub_wait is not None and sub_wait.main is not None
+        and main_wait is not None and main_wait.at is not None and main_wait.sub == name
+        and not _published_view(sub_wait, sub_state, sub_step.id, cwd)["new"]
+        and not _published_view(main_wait, main_state, main_step.id, cwd)["new"]
+    )
+    pos = [main_step.id if main_step else None, _visits(main_state, main_state.get("current") or ""),
+           sub_step.id if sub_step else None, _visits(sub_state, sub_state.get("current") or "")]
+    if not stuck:
+        if sub_state.get("deadlock"):
+            sub_state["deadlock"] = None
+            state_mod.save_state(sub_state, cwd)
+        return None
+    if sub_state.get("deadlock") == pos:
+        return None
+    sub_state["deadlock"] = pos
+    state_mod.save_state(sub_state, cwd)
+    found = {
+        "sub": name,
+        "main_step": main_step.id, "main_waits_for": f"{name}.{main_wait.at}",
+        "sub_step": sub_step.id, "sub_waits_for": f"main.{sub_wait.main}",
+    }
+    state_mod.journal("sync_deadlock", {"run": sub_state["run_id"], **found}, cwd)
+    _in_main(lambda c: state_mod.journal(
+        "sync_deadlock", {"run": main_state["run_id"], **found}, c), cwd)
+    return found
+
+
 def _note_run_end(state: dict, cwd: Optional[str], *, status: str, by: str) -> None:
     """A run reached done/aborted: a sub run reports it into the main
     journal; a main run ends whatever sub runs it still owns."""

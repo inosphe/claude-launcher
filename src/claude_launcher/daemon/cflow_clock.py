@@ -122,9 +122,9 @@ class AskClock:
 def tick() -> List[dict]:
     """One pass over the registry. Blocking; call it in a thread."""
     moved: List[dict] = []
-    for cwd, scope in cflow_state.known_runs():
+    for cwd, scope, run in cflow_state.known_slots():
         try:
-            result = cflow_engine.expire_ask(cwd=cwd, scope=scope)
+            result = cflow_engine.expire_ask(cwd=cwd, scope=scope, run=run)
         except Exception as exc:
             # Includes the slot being locked by the agent mid-transition: the
             # deadline is already past, so the next tick is soon enough.
@@ -690,13 +690,61 @@ class CflowReminderSource:
                     if len(pointer) < len(block):
                         block = pointer
                 due.append((cwd, scope, block, "reminder"))
+        for cwd, scope, run in cflow_state.known_sub_runs():
+            key = (cwd, scope, run)
+            live.add(key)
+            self._scan_sub(cwd, scope, run, key, now, due)
         for key in list(self._seen):
             if key not in live:
                 del self._seen[key]
         return due
 
+    def _scan_sub(
+        self, cwd: str, scope: str, run: str, key: tuple, now: float, due: list
+    ) -> None:
+        """A sub run's share of the scan: its ``awaits`` signal, and nothing
+        else. A sub run shares its terminal with the main run, and the step
+        reminder is the main run's to give — a second reminder stream for a
+        side track (a stack that stands for the whole session) would double
+        the restatements this clock works to keep down. What a sub run does
+        need is to be told when what it waits for arrives — the other half of
+        a milestone handshake (``awaits: {main}``) is the case in point."""
+        try:
+            payload = cflow_engine.status(cwd, scope=scope, run=run)
+        except Exception as exc:
+            log.debug("cflow signal skipped %s/%s/%s: %s", cwd, scope, run, exc)
+            return
+        awaits = payload.get("awaits") or {}
+        if not _actionable(payload) or not awaits.get("probe"):
+            self._seen.pop(key, None)
+            return
+        pos = (payload.get("run"), payload.get("status"),
+               payload.get("step_id"), payload.get("visit"))
+        entry = self._seen.get(key)
+        if entry is None or entry["pos"] != pos:
+            # A new position's first sample is its baseline, never a signal.
+            entry = {"pos": pos, "at": now, "probed_at": None, "probe": None}
+            self._seen[key] = entry
+        before = entry["probe"]
+        after = self._measure(cwd, scope, awaits, entry, now, run=run)
+        if after is None:
+            return
+        entry["probe"] = after
+        if before is not None and before["code"] != after["code"]:
+            entry["at"] = now
+            due.append((cwd, scope, signal_block(payload, before, after), "signal"))
+        try:
+            stuck = cflow_engine.sync_deadlock(cwd=cwd, scope=scope, run=run)
+        except Exception as exc:
+            log.debug("cflow deadlock check skipped %s/%s/%s: %s", cwd, scope, run, exc)
+            stuck = None
+        if stuck:
+            log.warning("cflow sync deadlock %s/%s: %s", cwd, scope, stuck)
+            due.append((cwd, scope, deadlock_block(stuck), "signal"))
+
     def _measure(
-        self, cwd: str, scope: str, awaits: dict, entry: dict, now: float
+        self, cwd: str, scope: str, awaits: dict, entry: dict, now: float,
+        run: Optional[str] = None,
     ) -> Optional[dict]:
         """This position's standing measurement, re-taken when due.
 
@@ -736,6 +784,9 @@ class CflowReminderSource:
             # session's checkout for every run on the machine
             # (:func:`cflow.engine.probe_env`).
             scope=scope,
+            # And which of its runs: a sub run's `awaits: {main}` probe reads
+            # its own consumption record through this.
+            run=run,
         )
 
     @staticmethod
@@ -1027,6 +1078,42 @@ def repeat_block(payload: dict, interval: float, stalled_for: float) -> str:
     return "\n".join(lines)
 
 
+#: Where a claimed trigger carries the sub run that queued it.
+RUN_KEY = "_run"
+
+
+def for_run(block: str, run: Optional[str]) -> str:
+    """Name the sub run a notice is about, right under its header line.
+
+    A notice about a sub run lands in the same terminal as the main run's,
+    and without the name its reader would call the cflow tools on the main
+    run. The main run's notices are returned unchanged.
+    """
+    if not run:
+        return block
+    lines = block.split("\n")
+    at = next((i for i, line in enumerate(lines) if line.startswith("# ")), 0)
+    lines.insert(at + 1, f"run: {run} (a sub run -- pass run: {run} to the cflow tools)")
+    return "\n".join(lines)
+
+
+def deadlock_block(stuck: dict) -> str:
+    """The text a session hears when its main run and a sub run wait on
+    each other's milestones and neither can move."""
+    return "\n".join([
+        "---",
+        "# claunch cflow: sync deadlock -- machine-generated, not typed by the user",
+        f"main run: step '{stuck['main_step']}' waits for {stuck['main_waits_for']}",
+        f"sub run {stuck['sub']}: step '{stuck['sub_step']}' waits for {stuck['sub_waits_for']}",
+        "protocol: neither side has anything new to consume, so neither will "
+        "publish what the other waits for. Nothing was moved for you. Read "
+        "both positions (cflow 'status', and 'status' with run: "
+        f"{stuck['sub']}), decide which side should act first, and move it; "
+        "if the workflows themselves are wrong, say so to whoever owns them.",
+        "---",
+    ])
+
+
 def signal_block(payload: dict, before: dict, after: dict) -> str:
     """The text a waiting run hears when its awaited condition MOVED.
 
@@ -1053,6 +1140,8 @@ def signal_block(payload: dict, before: dict, after: dict) -> str:
         "---",
         "# claunch cflow: signal -- machine-generated, not typed by the user",
         f"workflow: {payload.get('workflow')}",
+        *([f"run: {payload['sub']} (a sub run -- pass run: {payload['sub']} to the cflow tools)"]
+          if payload.get("sub") else []),
         f"position: {position}",
         f"awaiting: {awaits.get('describe') or awaits.get('probe')}",
         f"changed: exit {before.get('code')} -> exit {after.get('code')}",
@@ -1379,9 +1468,9 @@ class WindowClock:
         """Release every due hold on the machine. Blocking (it writes run
         state); call it in a thread. Public for the tests."""
         released: List[Tuple[str, str, str]] = []
-        for cwd, scope in cflow_state.known_runs():
+        for cwd, scope, run in cflow_state.known_slots():
             try:
-                moved = cflow_engine.release_window(cwd=cwd, scope=scope)
+                moved = cflow_engine.release_window(cwd=cwd, scope=scope, run=run)
             except Exception as exc:
                 # Includes the slot being locked by the agent mid-transition:
                 # the window stays open, so the next tick is soon enough.
@@ -1393,7 +1482,7 @@ class WindowClock:
                     cwd, scope, moved.get("option"), moved.get("step"),
                     moved.get("now_at") or moved.get("status"),
                 )
-                released.append((cwd, scope, window_block(moved)))
+                released.append((cwd, scope, for_run(window_block(moved), run)))
         return released
 
     async def _deliver(self, cwd: str, scope: str, block: str) -> None:
@@ -1495,9 +1584,9 @@ class TimerClock:
         """Fire every due timer on the machine. Blocking (it writes run
         state); call it in a thread. Public for the tests."""
         fired: List[Tuple[str, str, str]] = []
-        for cwd, scope in cflow_state.known_runs():
+        for cwd, scope, run in cflow_state.known_slots():
             try:
-                payload = cflow_engine.status(cwd, scope=scope)
+                payload = cflow_engine.status(cwd, scope=scope, run=run)
             except Exception as exc:
                 # Includes the slot being locked by the agent mid-transition:
                 # the fire stays armed, so the next tick is soon enough.
@@ -1505,7 +1594,7 @@ class TimerClock:
                 continue
             if payload.get("status") != "waiting_timer":
                 continue
-            moved = cflow_engine.fire_timer(cwd=cwd, scope=scope)
+            moved = cflow_engine.fire_timer(cwd=cwd, scope=scope, run=run)
             if not moved:
                 continue
             log.info(
@@ -1513,7 +1602,7 @@ class TimerClock:
                 cwd, scope, moved.get("step"), moved.get("fires"),
                 moved.get("max"), moved.get("moved_to"),
             )
-            fired.append((cwd, scope, timer_block(moved)))
+            fired.append((cwd, scope, for_run(timer_block(moved), run)))
         return fired
 
     async def _deliver(self, cwd: str, scope: str, block: str) -> None:
@@ -1635,11 +1724,11 @@ class ChecklistClock:
         now = time.time() if now is None else now
         moved_runs: List[Tuple[str, str, str]] = []
         live = set()
-        for cwd, scope in cflow_state.known_runs():
-            key = (cwd, scope)
+        for cwd, scope, run in cflow_state.known_slots():
+            key = (cwd, scope, run)
             live.add(key)
             try:
-                payload = cflow_engine.status(cwd, scope=scope)
+                payload = cflow_engine.status(cwd, scope=scope, run=run)
             except Exception as exc:
                 # Includes the slot being locked by the agent mid-transition:
                 # the gate is unchanged, so the next tick is soon enough.
@@ -1657,7 +1746,7 @@ class ChecklistClock:
                 continue
             self._checked[key] = now
             try:
-                result = cflow_engine.check_checklist(cwd=cwd, scope=scope)
+                result = cflow_engine.check_checklist(cwd=cwd, scope=scope, run=run)
             except Exception as exc:
                 log.debug("cflow checklist measure failed %s/%s: %s", cwd, scope, exc)
                 continue
@@ -1675,7 +1764,7 @@ class ChecklistClock:
                 "expired" if result.get("expired") else "passed",
                 cwd, scope, result.get("step"), result.get("moved_to"),
             )
-            moved_runs.append((cwd, scope, checklist_block(result)))
+            moved_runs.append((cwd, scope, for_run(checklist_block(result), run)))
         for stale in set(self._checked) - live:
             self._checked.pop(stale, None)
         return moved_runs
@@ -1942,7 +2031,7 @@ class TriggerClock:
         self.manager = manager
         self.poll = poll
         self._task: Optional[asyncio.Task] = None
-        self._landing_checked: Dict[Tuple[str, str], float] = {}
+        self._landing_checked: Dict[Tuple[str, str, Optional[str]], float] = {}
 
     def start(self) -> None:
         if self._task is None:
@@ -1969,7 +2058,7 @@ class TriggerClock:
                     performed, detail = await self._perform(cwd, scope, action)
                     await asyncio.to_thread(
                         cflow_engine.complete_trigger,
-                        cwd=cwd, scope=scope, do=action["do"],
+                        cwd=cwd, scope=scope, run=action.get(RUN_KEY), do=action["do"],
                         step_id=action.get("step"), visit=action.get("visit"),
                         performed=performed, detail=detail,
                     )
@@ -1983,14 +2072,16 @@ class TriggerClock:
         Blocking (every run's state); call it in a thread. Public for the
         tests, like the other clocks' scans."""
         out: List[Tuple[str, str, dict]] = []
-        for cwd, scope in cflow_state.known_runs():
+        for cwd, scope, run in cflow_state.known_slots():
             try:
-                claimed = cflow_engine.claim_triggers(cwd=cwd, scope=scope)
+                claimed = cflow_engine.claim_triggers(cwd=cwd, scope=scope, run=run)
             except Exception as exc:
                 log.debug("cflow trigger scan skipped %s/%s: %s", cwd, scope, exc)
                 continue
             for action in claimed or []:
-                out.append((cwd, scope, action))
+                # The run rides on the action so its completion is written
+                # back to the slot that queued it.
+                out.append((cwd, scope, {**action, RUN_KEY: run} if run else action))
         return out
 
     def refresh_landing(self, now: Optional[float] = None) -> List[Tuple[str, str, List[str]]]:
@@ -2001,23 +2092,25 @@ class TriggerClock:
         """
         now = time.monotonic() if now is None else now
         moved: List[Tuple[str, str, List[str]]] = []
-        for cwd, scope in cflow_state.known_runs():
-            key = (cwd, scope)
+        for cwd, scope, run in cflow_state.known_slots():
+            key = (cwd, scope, run)
             if now - self._landing_checked.get(key, float("-inf")) < self.LANDING_REFRESH:
                 continue
             self._landing_checked[key] = now
             try:
                 token = cflow_state.push_scope(scope)
+                run_token = cflow_state.push_run(run)
                 try:
                     state = cflow_state.load_state(cwd)
                 finally:
+                    cflow_state.pop_run(run_token)
                     cflow_state.pop_scope(token)
             except Exception:
                 continue
             if not state.get("landing_queue") or state.get("status") in ("done", "aborted"):
                 continue
             try:
-                result = cflow_engine.refresh_landing(cwd=cwd, scope=scope)
+                result = cflow_engine.refresh_landing(cwd=cwd, scope=scope, run=run)
             except Exception as exc:
                 log.debug("landing refresh skipped %s/%s: %s", cwd, scope, exc)
                 continue
@@ -2065,10 +2158,20 @@ class TriggerClock:
             return False, "the issue board could not be read"
         if not issues:
             return False, f"{scope} holds no issue in_review (no landing request on the board)"
+        # The parent's queue may live on one of its SUB runs (a stack that
+        # manages the children); the main run is asked first, and with no
+        # holder at all the main run answers "declares no landing_queue".
+        try:
+            holder = await asyncio.to_thread(
+                cflow_engine.landing_queue_run, cwd=pcwd, scope=parent
+            )
+        except Exception:
+            holder = None
         try:
             result = await asyncio.to_thread(
                 cflow_engine.enqueue_landing, issues, branch, tip,
                 by=scope, cwd=pcwd, scope=parent,
+                run=None if holder in (None, cflow_state.MAIN_RUN) else holder,
             )
         except cflow_engine.CflowError as exc:
             return False, f"parent {parent!r}: {exc}"
@@ -2087,6 +2190,10 @@ class TriggerClock:
         """Do one claimed action. Returns (performed, why/what)."""
         do = action.get("do")
         if do == cflow_model.TRIGGER_ENQUEUE_LANDING:
+            if action.get(RUN_KEY):
+                # A landing request is the SESSION's (its branch, its
+                # in_review issues), and the session's main run files it.
+                return False, "a sub run does not file the session's landing request"
             return await self._enqueue_landing(cwd, scope)
         session = session_for(self.manager, cwd, scope)
         if session is None:

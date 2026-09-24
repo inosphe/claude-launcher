@@ -346,6 +346,14 @@ A position payload carrying `sub_errors` means a declared sub run could
 not be started — the main run moved anyway; start it by hand or report
 the definition problem.
 
+Some steps meet the other run halfway: an `awaits` payload carrying
+`milestone` and `from` is waiting for that run to publish the milestone
+again (a step's `publishes:`, recorded when that step is left). The
+daemon signals you when it arrives — do not poll it. A notice with a
+`run: <name>` line is about that sub run: act on it with `run: <name>`.
+A `sync deadlock` notice means your main run and a sub run wait on each
+other; nothing was moved — decide which side acts first.
+
 ## When the graph has no route
 
 Sometimes the run has to go somewhere the workflow declares no transition

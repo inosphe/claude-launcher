@@ -145,10 +145,12 @@ def test_declaration_refusals(value, match):
         model.parse(LEADER.replace("landing_queue: {target: master}", value))
 
 
-def test_a_sub_definition_may_not_keep_a_queue():
+def test_a_sub_definition_may_keep_the_queue():
+    """A sub run that manages the session's children (a stack) is where
+    their landing requests belong (claunch-u8wjx.1). One holder per scope is
+    enforced at start — test_cflow_milestones.py pins that refusal."""
     text = "name: side\nkind: subflow\nlanding_queue: true\nsteps:\n  a:\n    instructions: x\n"
-    with pytest.raises(WorkflowError, match="landing_queue"):
-        model.parse(text)
+    assert model.parse(text).landing_queue is not None
 
 
 def test_enqueue_landing_is_a_trigger_action():
