@@ -25,8 +25,9 @@
       is most of why the panel gets opened;
    5. a board that could not be read says so and draws no lanes; a session
       with no issue at all says that, and is still offered the create form;
-   6. the create form is offered only where `sessBeads` offers it (no
-      primary issue, session not exited), and never to an ended session.
+   6. the create form is offered where `sessBeads` offers it -- every live
+      session, told whether it already has its issue (then the new one is
+      queued, claunch-4g76d) -- and never to an ended session.
 
    Slice the real functions out of app.js and drive them against a stub
    DOM. */
@@ -96,7 +97,7 @@ let beadsSession = "";
 const went = [];
 function go(h) { went.push(h); }
 const created = [];
-function sessBeadsCreate(name) { created.push(name); return el("div", "sess-beads-create"); }
+function sessBeadsCreate(name, hasIssue) { created.push([name, hasIssue]); return el("div", "sess-beads-create"); }
 `;
 
 const ctx = {};
@@ -214,10 +215,11 @@ check("a session no issue names says that, and draws no lanes",
 /* ---- 6. the create form, and the way out ------------------------------ */
 ctx.created.length = 0;
 ctx.panel(EMPTY);
-check("a live session with no issue is offered the form", ctx.created, ["s9"]);
+check("a live session with no issue is offered the form", ctx.created, [["s9", false]]);
 ctx.created.length = 0;
 ctx.panel(DATA);
-check("a session that already has its issue is not", ctx.created, []);
+check("a session that already has its issue is offered it too, to queue",
+      ctx.created, [["s9", true]]);
 ctx.created.length = 0;
 ctx.panel({ session: { name: "s9", status: "exited" }, beads: { issues: [] } });
 check("and an ended session is never asked to open one", ctx.created, []);

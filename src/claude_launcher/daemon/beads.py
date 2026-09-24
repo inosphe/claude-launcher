@@ -190,6 +190,15 @@ DEFAULT_TITLE_LIMIT = 100
 #: the session it was moved TO would read as that session claiming the work.
 DASHBOARD_ACTOR = "dashboard"
 
+#: The actor an issue filed from a session's detail panel is stamped with --
+#: its ``created_by`` (claunch-4g76d). The person at the panel wrote it, so the
+#: board must say so: stamped with the session instead, the issue reads as the
+#: session's own follow-up (:func:`created_of`), and :func:`sweep_plan` treats
+#: it as one when that session exits -- releasing or closing work a person
+#: queued. The source label is the workflows' own for a person's direct order.
+USER_ACTOR = "user"
+USER_DIRECT_LABEL = "user-direct"
+
 #: The issue types the workflows use, and what a create coming in over the
 #: API is checked against. ``br`` itself takes any word; the check is here so
 #: a typed type does not quietly become a category nothing filters on.
@@ -543,6 +552,75 @@ def compose_board_description(title: str, *, workspace: str = "") -> str:
         source=f"operator (dashboard board form), {_utcnow()}",
         workspace=workspace,
     )
+
+
+def compose_user_description(
+    title: str, *, name: str, details: str = "", workspace: str = "",
+) -> str:
+    """The description of an issue a person filed from a session's detail
+    panel, assigned to that session on the spot (claunch-4g76d).
+
+    The goal is the title, then whatever the person typed under it -- the
+    words the worker's intake reads as the round's goal. The 출처 line names
+    the person and the session, because the two are different facts here:
+    who asked (``created_by``) and who was told to do it (``assignee``).
+    """
+    goal = title.strip()
+    if details.strip():
+        goal = f"{goal}\n\n{details.strip()}"
+    return render_spec(
+        goal,
+        scope=(
+            "(filed from the session's detail panel -- the assignee fills "
+            "this in at intake)"
+        ),
+        source=(
+            f"user (dashboard detail panel), {_utcnow()}, "
+            f"filed for and assigned to session {name}"
+        ),
+        workspace=workspace,
+    )
+
+
+def compose_filed_notice(
+    name: str, issue_id: str, title: str, *, priority: int, primary: bool,
+) -> str:
+    """The block typed into a session a person just filed an issue for.
+
+    The issue is on the board either way; this is what makes it "right away"
+    for a session that would otherwise meet it only at its next board read.
+    ``primary`` is whether it became the session's own issue (the session had
+    none): then it carries the same ``issue: <id>`` line an opening task does,
+    so an intake waiting for a goal reads it exactly as one. Otherwise it is
+    one more item on the queue, and a round in progress is not interrupted --
+    ``queue-next``/``queue-recheck`` read the same listing named here.
+    """
+    lines = [
+        "---",
+        "# claunch: the user filed an issue for you -- machine-generated",
+        f"issue: {issue_id} -- {title}".rstrip(),
+        f"filed by: {USER_ACTOR} (dashboard detail panel); assignee: {name}; "
+        f"status: open; priority: P{priority}",
+        f"read: claunch beads show {issue_id} --json -- its description is the goal",
+    ]
+    if primary:
+        lines.append(
+            "role: this is now this session's issue. If your cflow run is "
+            "waiting for a goal, take it as this round's goal now (intake: "
+            "move it to in_progress with the run id)."
+        )
+    else:
+        lines.append(
+            "role: it is queued behind your current work. Do not drop the "
+            "item you are on: your queue step (`claunch beads list --assignee "
+            f"{name} --status open --status in_ready --limit 0 --json`) picks "
+            "it up. If your run is idle waiting for a goal, take it now."
+        )
+    lines += [
+        "reply: none -- the board is the record.",
+        "---",
+    ]
+    return "\n".join(lines)
 
 
 def check_new_issue(body: dict) -> dict:
@@ -2269,31 +2347,64 @@ class Board:
             })
         return view
 
-    async def create_for(self, session, *, title: str, description: str = "") -> dict:
-        """The rail's manual create: an issue for a session that has none."""
+    async def create_for(
+        self, session, *, title: str, description: str = "", priority: int = 2,
+    ) -> dict:
+        """The detail panel's inline create: an issue a person files for a
+        session and assigns to it in the same write (claunch-4g76d).
+
+        Stamped :data:`USER_ACTOR`, never the session: the person filed it,
+        and ``created_by == <session>`` would make it the session's own
+        follow-up -- drawn as such on the rail, and released or closed by
+        :func:`sweep_plan` when the session exits. For the same reason it
+        carries no :data:`SESSION_LABEL`, which marks the daemon's own
+        placeholder. Status stays ``open`` with the session as assignee: that
+        is exactly the listing the worker's queue steps read, and taking it
+        up (``in_progress``) remains the assignee's own transition.
+
+        ``description`` is what the person typed under the title; it becomes
+        part of the goal section rather than replacing the four-section spec
+        the intake reads.
+        """
         root = await self.root_for(session.sdef.cwd)
         if not self.has_board(root):
             raise BeadsUnavailable("no board for this session's directory")
         name = session.sdef.name
-        desc = description.strip() or compose_description(
-            title, name=name, parent=session.sdef.parent,
+        desc = compose_user_description(
+            title, name=name, details=description,
             workspace=workspace_for(session.sdef.cwd),
         )
+        # The assignee last, as every create here writes it: a board that
+        # failed halfway should not leave work assigned with no goal in it.
         data = await self.br(
             root,
             [
-                "create", title, "--type", "task", "--priority", "2",
-                "--labels", f"{SESSION_LABEL},user", "--assignee", name,
-                "--description", desc,
+                "create", title, "--type", "task", "--priority", str(priority),
+                "--labels", USER_DIRECT_LABEL, "--description", desc,
+                "--assignee", name,
             ],
-            actor=name,
+            actor=USER_ACTOR,
         )
         iid = data.get("id") if isinstance(data, dict) else None
         if not iid and isinstance(data, list) and data:
             iid = data[0].get("id")
         if not iid:
             raise cli_beads.BeadsError("br create answered without an id")
-        return {"issue": str(iid), "created": True}
+        iid = str(iid)
+        # The same marker the Queues tab's drag leaves, so a reader grepping
+        # the board for how work reached a queue finds this path too.
+        try:
+            await self.br(
+                root,
+                ["comments", "add", iid,
+                 f"QUEUED by {USER_ACTOR}: filed from the detail panel and "
+                 f"assigned to {name}"],
+                actor=USER_ACTOR,
+            )
+        except cli_beads.BeadsError as exc:
+            log.warning("beads: QUEUED comment on %s failed: %s", iid, exc)
+        return {"issue": iid, "created": True, "assignee": name,
+                "priority": priority, "root": str(root)}
 
     async def create_issue(self, root: Path, spec: dict) -> dict:
         """File an issue on ``root``'s board from the dashboard's form.

@@ -8553,23 +8553,57 @@ async def h_session_beads(request: web.Request) -> web.Response:
 
 
 async def h_session_beads_create(request: web.Request) -> web.Response:
-    """Give a session an issue after the fact — for one created without a
-    task, which the daemon minted nothing for. Body: ``title`` (required),
-    ``description`` (optional; the workflows' template when omitted). The
-    new issue is linked to the session the way a creation-time one is."""
+    """File an issue for a session from its detail panel and assign it there
+    and then (claunch-4g76d). Body: ``title`` (required), ``description``
+    (optional; added under the title in the goal section), ``priority``
+    (0..4 or ``P2``; 2 by default), ``notify`` (default true).
+
+    The creator is the person (:data:`daemon.beads.USER_ACTOR`), the assignee
+    the session, the status ``open`` -- the listing the worker's queue steps
+    read. A session with no issue yet takes it as its own (linked the way a
+    creation-time one is); a session that has one gets it on its queue. A
+    running session is also told, with a block typed into it, so the loop
+    picks it up without waiting for its next board read. 409 for an exited
+    session: nothing would ever take the work up.
+    """
     manager: SessionManager = request.app["manager"]
     session = manager.get(request.match_info["name"])
     body = await _json_body(request)
-    title = str(body.get("title") or "").strip()
-    if not title:
-        return json_error(400, "an issue needs a title")
-    made = await request.app["beads"].create_for(
-        session, title=title, description=str(body.get("description") or "")
-    )
-    beads_mod.link_issue(session, made["issue"])
-    manager.persist()
+    try:
+        spec = beads_mod.check_new_issue(
+            {"title": body.get("title"), "priority": body.get("priority", 2)}
+        )
+    except beads_mod.BoardRequestError as exc:
+        return json_error(400, str(exc))
+    if session.exited:
+        return json_error(
+            409, f"{session.sdef.name} has exited -- file it on the board "
+            "and queue it to a running session instead"
+        )
+    board = request.app["beads"]
+    try:
+        made = await board.create_for(
+            session, title=spec["title"],
+            description=str(body.get("description") or ""),
+            priority=spec["priority"],
+        )
+    except beads_mod.BeadsUnavailable as exc:
+        return json_error(503, str(exc))
+    except BeadsError as exc:
+        return json_error(400, str(exc))
+    primary = not session.sdef.issue
+    if primary:
+        beads_mod.link_issue(session, made["issue"])
+        manager.persist()
+    notified = False
+    if body.get("notify", True) is not False:
+        notified = session.queue_delivery(beads_mod.compose_filed_notice(
+            session.sdef.name, made["issue"], spec["title"],
+            priority=spec["priority"], primary=primary,
+        ))
     return json_response(
-        {**made, "beads": await request.app["beads"].session_view(session)},
+        {**made, "primary": primary, "notified": bool(notified),
+         "beads": await board.session_view(session)},
         status=201,
     )
 
