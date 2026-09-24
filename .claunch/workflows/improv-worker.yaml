@@ -2146,8 +2146,10 @@ steps:
     # 착지를 리더의 통지로만 알았다 — 보드 상태로 주소를 잡는 통지는
     # in_progress로 남은 이슈를 놓치고, 앞 회차에 머지됐는데 아직 닫지 않은
     # 이슈에게는 다음 회차 통지가 재측정 요청으로 읽혔다(claunch-dlq0o).
-    # 정렬 게이트(rebase의 verify)는 이 플래그 없이 돈다: 게이트에게 착지한
-    # 브랜치는 막을 것이 없는 ready다.
+    # 정렬 게이트(rebase의 verify)도 같은 플래그로 돈다 — 이 프로브와 그
+    # 게이트는 한 명령이어야 한다(tests/test_project_layer_override.py). 그
+    # 게이트에서 5는 거절이고, 그때 갈 곳은 rebase 스텝의 landed(5) 갈래가
+    # 적는다. 플래그를 켜지 않는 호출자는 리더 preflight와 merge.yaml이다.
     # poll 60/timeout 25 — MAX_AWAITS_TIMEOUT(30)과 timeout<=poll 규칙 안이다.
     awaits:
       probe: 'uv run --no-sync python tools/merge_ready.py --landed-exit'
