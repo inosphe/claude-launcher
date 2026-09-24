@@ -13734,13 +13734,18 @@ MOBILE_MQ.addEventListener("change", () => {
   // Except the detail, which is the one thing that is a page on one side of
   // the breakpoint and not on the other. Narrowing: the right rail has
   // nowhere to go on a phone that isn't the page the user is already on, so
-  // it closes (ⓘ brings it back). Widening: it stops being a page and
-  // becomes a rail, so the slot it was borrowing has to be handed back —
-  // otherwise #main is left showing nothing at all.
+  // it closes (ⓘ brings it back) — taken out of the address too, in place,
+  // so the URL does not go on claiming a panel nobody can see. Widening: it
+  // stops being a page and becomes a rail, so the slot it was borrowing is
+  // handed back to the page the address names — routing again does exactly
+  // that, and keeps the rail.
   if (MOBILE_MQ.matches) {
-    if (sessName && currentPage !== "session") dropDetail();
+    if (sessName && currentPage !== "session") {
+      history.replaceState(history.state, "", hashWithDetail(location.hash, null));
+      dropDetail();
+    }
   } else if (currentPage === "session") {
-    go(currentName ? "#/s/" + encodeURIComponent(currentName) : "#/");
+    route();
   }
   syncLayout();
   refitSoon();
@@ -13817,9 +13822,8 @@ function showView(name) {
   for (const [page, id] of Object.entries(VIEWS)) {
     $(id).classList.toggle("hidden", name !== page);
   }
-  // On a phone the detail occupies the page slot, so leaving that page is
-  // closing it. As a rail it is not a page and survives every navigation.
-  if (name !== "session" && MOBILE_MQ.matches) dropDetail();
+  // Whether the detail is up is the router's (the address's `?detail=`), on
+  // either side of the breakpoint — not a side effect of which page is shown.
   syncLayout();          // rail mode, nav highlight, and the bars' titles
   if (showTerm) refitSoon(60);
   syncTerminalFocus();
@@ -14239,9 +14243,37 @@ function wfSplitBar(host, dia, side) {
  *   #/msg/<name>        what that session has said and been told
  *   #/msg/<name>/<mesh> ...in the mesh named, rather than its first
  *   #/workspaces        the workspace registry
+ *
+ * Any of them may carry `?detail=<name>`: the session detail rail, open
+ * beside that page. It is in the URL because it is on the screen — held only
+ * in memory it outlived every tab change (the Operator page with some
+ * session's rail still docked beside it) and then vanished on reload, so the
+ * address and the screen disagreed in both directions. A link to another
+ * page carries no `detail`, which is what closes it.
  */
+function hashQuery(h) {
+  const s = h || "";
+  const q = s.indexOf("?");
+  return new URLSearchParams(q < 0 ? "" : s.slice(q + 1));
+}
+
+/* The session the address opens the detail rail on ("" = closed). */
+function hashDetail(h) {
+  return hashQuery(h).get("detail") || "";
+}
+
+/* The same address with the detail rail aimed at `name`, or closed (null). */
+function hashWithDetail(h, name) {
+  const params = hashQuery(h);
+  if (name) params.set("detail", name);
+  else params.delete("detail");
+  const q = params.toString();
+  return ((h || "").split("?")[0] || "#/") + (q ? "?" + q : "");
+}
+
+/* Which page the address names; the query after `?` is not part of it. */
 function parseHash(h) {
-  const raw = (h || "").replace(/^#\/?/, "");
+  const raw = (h || "").split("?")[0].replace(/^#\/?/, "");
   if (!raw) return { page: "home" };
   const parts = raw.split("/").map(decodeURIComponent);
   // A session has one destination: its terminal. What it *is* is a panel
@@ -14319,6 +14351,32 @@ function parseHash(h) {
 
 function route() {
   const r = parseHash(location.hash);
+  r.detail = hashDetail(location.hash);
+  // An open rail follows the terminal: the rail describes the session on
+  // screen, and one left pointing at the session we came *from* quietly
+  // mislabels everything in it, its cflow run most of all. The links that
+  // switch terminals (a rail row, a tab) do not know about the rail, so the
+  // address they land on is completed here — replaced, not pushed, so Back
+  // still means the terminal before. Never *opened* here: only a rail that
+  // was already up. And only for a link just followed — a history entry this
+  // router has not seen yet. Back and Forward land on entries it has (see
+  // the stamp below), and those say exactly what they said the first time:
+  // Back past the ⓘ closes the rail, on the terminal it describes as much as
+  // anywhere. On a phone the detail is a page, and a terminal taking the
+  // slot back closes it.
+  const fresh = !(history.state && history.state.routed);
+  const stamp = { ...(history.state || {}), routed: true };
+  if (r.page === "terminal" && !r.detail && sessName && fresh &&
+      !MOBILE_MQ.matches) {
+    r.detail = r.name;
+    history.replaceState(stamp, "", hashWithDetail(location.hash, r.name));
+  } else if (fresh) {
+    history.replaceState(stamp, "");
+  }
+  // On a phone the detail is not beside the page but instead of it: the page
+  // slot is the only place it has. The page under it is still the address's,
+  // and closing the detail (dropping `?detail=`) routes back to it.
+  if (r.detail && MOBILE_MQ.matches) r.page = "session";
   // Leaving a page stops what it was polling. Done centrally so a page's
   // open function never has to know which other pages exist.
   if (r.page !== "observer") globalThis.ObserverPage?.stop();
@@ -14346,13 +14404,8 @@ function route() {
         // relied on — that is the link's job now.
         reconnectNow();
       } else attach(r.name);
-      // An open rail follows the terminal. Never *opened* here — a panel
-      // moving to the session the user just went to is one thing, one
-      // springing up because they changed terminals is another. On a phone
-      // this does nothing: showView above has already closed the detail,
-      // whose home there is the page slot the terminal just took.
-      if (sessName && sessName !== r.name) repointDetail(r.name);
       break;
+    case "session": showView("session"); break;
     case "observer": showView("observer"); globalThis.ObserverPage.open(r.scope, r.name); break;
     case "operator": showView("operator"); globalThis.OperatorPanel.open(); break;
     case "wf": openWorkflow(r.cwd, r.scope); break;
@@ -14370,13 +14423,17 @@ function route() {
     case "beads": openBeads(r.id, r.section); break;
     default: openHome();
   }
+  // The rail is the address's `?detail=`, and nothing else opens or closes
+  // it: the buttons that do (openDetail, closeDetail) only edit the address.
+  if (!r.detail) { if (sessName) dropDetail(); }
+  else if (r.detail !== sessName) repointDetail(r.detail);
+  syncLayout();
 }
 window.addEventListener("hashchange", route);
 
-/* Navigate, even when the URL already says where we are. The detail panel
-   can be up over the very route the URL names (a phone shows it in the page
-   slot), so "go to the terminal" has to mean re-entering the route rather
-   than assigning a hash the browser will discard as a no-op. */
+/* Navigate, even when the URL already says where we are: assigning the hash
+   the browser already has is discarded as a no-op, and the callers here mean
+   "put the screen back to what this address says" either way. */
 function go(hash) {
   if ((location.hash || "#/") === hash) route();
   else location.hash = hash;
@@ -22983,9 +23040,11 @@ function wfTimelinePanel(data, ui) {
    read a session's definition *while* watching it work, and a route made
    that a trip away from the terminal and back. It is a rail now — open down
    the right-hand side, beside the thing it describes, closed by the same
-   button that opened it, and not in the URL at all. Where it goes is the
-   layout's business (syncDetailPanel), the one place that knows how wide the
-   screen is. */
+   button that opened it. It is not a route of its own but a modifier on
+   whichever route is up (`?detail=<name>`, see parseHash): whether it is open
+   is the address's, and only the router opens or drops it. Where it goes is
+   the layout's business (syncDetailPanel), the one place that knows how wide
+   the screen is. */
 let sessName = null;      // the session whose detail is open (null = closed)
 let sessPollTimer = null;
 let sessStartBox = null;  // reused across polls: it holds the user's typing
@@ -23027,15 +23086,14 @@ function dropDetail() {
 }
 
 /* ⓘ, and the terminal header's `details`. Same button both ways: pressing it
-   on the session already showing closes the panel. */
+   on the session already showing closes the panel. Both only write the
+   address — the page stays what it was and gains `?detail=` — and the router
+   does the rest: on a desktop the right rail opens beside the page, on a
+   phone the detail takes the page slot. Pushed, so Back closes it. */
 function openDetail(name) {
   if (!name) return;
   if (name === sessName) { closeDetail(); return; }
-  repointDetail(name);
-  // On a phone the detail is the page; on a desktop the page does not change
-  // at all — the right rail opens beside it.
-  if (MOBILE_MQ.matches) showView("session");
-  else syncLayout();
+  go(hashWithDetail(location.hash, name));
 }
 
 /* Aim the panel at a session, without deciding where it goes. Opening does
@@ -23066,13 +23124,12 @@ function repointDetail(name) {
   sessPollTimer = setInterval(refreshSession, 5000);
 }
 
+/* The same address without `?detail=`. On a phone that hands the page slot
+   back to the page the detail was opened over. Dropped first, so the router
+   does not read the new entry as a terminal link to carry the rail across. */
 function closeDetail() {
-  const wasPage = currentPage === "session";
   dropDetail();
-  // On a phone the detail *was* the page, so closing it has to leave
-  // something behind: the terminal it describes, or home if none is open.
-  if (wasPage) go(currentName ? "#/s/" + encodeURIComponent(currentName) : "#/");
-  else syncLayout();
+  go(hashWithDetail(location.hash, null));
 }
 
 async function refreshSession() {
@@ -23181,9 +23238,9 @@ function sessHead(s) {
   pr.addEventListener("click", () => openPrModal(s.name));
   head.appendChild(pr);
 
-  // Through the router, so the terminal it opens is the one the URL names —
-  // and via go(), because on a phone this panel is laid over the very route
-  // that terminal lives at, where assigning the same hash would do nothing.
+  // Through the router, so the terminal it opens is the one the URL names.
+  // On a desktop the router keeps the rail up beside it (the rail follows
+  // the terminal); on a phone the terminal takes the page slot back.
   const open = el("button", "wf-btn", "Open terminal");
   open.addEventListener("click", () => go("#/s/" + encodeURIComponent(s.name)));
   head.appendChild(open);
