@@ -126,3 +126,14 @@ def test_the_project_layer_asks_this_checkout(worker):
         cmd = stack.steps[step].awaits.command(stack.steps[step])
         assert cmd.startswith("uv run --no-sync python tools/published.py main "), step
         assert cmd.endswith(f"--step {step}"), step
+
+
+def test_peer_review_asks_the_parent_before_the_leader(worker):
+    """A stack child's direct parent is the session that lands its branch,
+    and the one member a grandchild is wired to (user decision 2026-09-24)."""
+    groups = [(c.role, c.scope) for c in worker.steps["peer-review"].select.delegate.candidates]
+    assert groups == [
+        ("reviewer", "descendant"), ("reviewer", "sibling"), ("reviewer", "ancestor"),
+        ("worker", "ancestor"),
+        ("leader", "ancestor"), ("leader", "sibling"),
+    ]

@@ -136,7 +136,7 @@ def test_queue_recheck_loops_the_run_back_to_intake(worker_run):
     before = engine.status()["run"]
     payload = _at("queue-recheck")
     assert payload["status"] == "select"
-    assert {o["name"] for o in payload["options"]} == {"next-round", "done"}
+    assert {o["name"] for o in payload["options"]} == {"next-round", "done", "stack-round"}
     with pytest.raises(CflowError, match="requires a reason"):
         engine.select("next-round")
     payload = engine.select("next-round", "queue: claunch-x1 open, assignable")

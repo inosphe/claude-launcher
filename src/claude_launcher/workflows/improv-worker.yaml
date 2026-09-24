@@ -1964,11 +1964,18 @@ steps:
         근거를 못 읽었으면 추측하지 말고 abstain으로 넘긴다. 기권은 다음
         그룹으로 넘어가고, 아무도 답하지 않으면 리뷰 없이 통과한다 — 그
         경우 방어선은 리더의 통합 후 전체 스윕이다.
+      # 리뷰어 그룹들 다음은 직속 부모다(부모가 워커인 편성 — stack 자식). 부모는
+      # 뒤에서 이 브랜치를 스택에 착지시키며 심사할 세션이라 판정을 그
+      # 심사에 다시 쓸 수 있고, 스폰 배선이 부모와만 있으므로 리더 그룹이
+      # 배선 부재로 skip되는 손자 세션에서도 닿는다. 평면 편성(부모가 리더)
+      # 에서는 이 그룹이 아무도 못 맞춰 skip되고 리더 그룹이 받는다.
+      # (사용자 결정 2026-09-24, claunch-u8wjx.2)
       chooser:
         from:
           - {role: reviewer, scope: descendant}
           - {role: reviewer, scope: sibling, connect: true}
           - {role: reviewer, scope: ancestor}
+          - {role: worker, scope: ancestor}
           - {role: leader, scope: ancestor}
           - {role: leader, scope: sibling}
         otherwise: self:pass
