@@ -201,6 +201,17 @@ def test_the_improv_workflows_carry_no_repo_specific_verify():
     for name in ("improv-worker", "improv-leader", "improv-mid"):
         wf = model.load(bundled[name])
         for step_id, step in wf.steps.items():
+            if (
+                step.verify is not None and step.awaits is not None
+                and step.awaits.milestone is not None
+                and step.verify.command == step.awaits.command(step)
+            ):
+                # The one exception: a verify that asks exactly what the
+                # step's own milestone await asks (`claunch cflow published`)
+                # is claunch's question, the same in every repository — it
+                # stops the run leaving before the milestone arrives
+                # (stack-merge, claunch-u8wjx.2).
+                continue
             assert step.verify is None, (
                 f"{name}:{step_id} carries a verify — repo-specific commands "
                 "belong in the project layer"
