@@ -446,3 +446,64 @@ def test_the_cli_status_shows_the_queue(proj, feature, capsys):
     out = capsys.readouterr().out
     assert "x-1 requested  w1-feature @ " + feature.tip[:8] in out
     assert "(by w1)" in out
+
+
+# --------------------------------------------------------------------------- #
+# telling the landed before the reset drops them (claunch-w9dvz)
+# --------------------------------------------------------------------------- #
+def test_the_last_step_before_end_still_sees_who_landed(proj, feature):
+    """The notice step's premise: landed entries are listed, with their
+    requester and tip, on the step that leads to ``end`` -- and are gone once
+    the run takes that edge. A notice placed after ``end`` has nothing left
+    to read, which is why improv-leader's landed-notice stands before it."""
+    engine.start("lead")
+    engine.enqueue_landing(["x-1"], feature.branch, feature.tip, by="w1")
+    _git(proj, "merge", "-q", "--no-ff", "-m", "land", "w1-feature")
+    engine.report("standing by")
+    engine.next_step()
+    assert engine.status()["step_id"] == "reflect"
+    listed = {e["issue"]: e for e in mcp.call_tool("landing_queue", {})["landing_queue"]}
+    assert listed["x-1"]["status"] == "landed"
+    assert listed["x-1"]["requested_by"] == "w1"
+    assert listed["x-1"]["tip"] == feature.tip
+    engine.report("reflected")
+    engine.next_step()
+    assert [r["issue"] for r in _events("queue_reset")[-1]["dropped"]] == ["x-1"]
+    assert not engine.status().get("landing_queue")
+
+
+@pytest.mark.parametrize("layer", ["bundled", "project"])
+def test_the_leader_tells_the_landed_before_every_round_end(layer):
+    """Both edges that end an improv-leader round -- reflect's deploy gate
+    passing and reflect-pregate's close -- pass through landed-notice, and
+    only landed-notice goes to ``end`` from there. Before it existed both
+    went straight to ``end``: in s469's round 8 (run-b29a7986) the only
+    landing notice was integrate's, sent before the restart and missing the
+    out-of-band merges, and the reset then dropped four landed entries with
+    nobody told whether their work was being served."""
+    import pathlib
+
+    if layer == "bundled":
+        wf = model.load(dict(state_mod.bundled_workflows())["improv-leader"])
+    else:
+        root = pathlib.Path(__file__).resolve().parents[1]
+        wf = model.load(root / ".claunch" / "workflows" / "improv-leader.yaml")
+
+    assert wf.landing_queue is not None
+    assert wf.steps["reflect"].checklist.then == "landed-notice"
+    assert wf.steps["reflect-pregate"].select.options["close"].next == "landed-notice"
+    notice = wf.steps["landed-notice"]
+    assert notice.next is None  # `end`
+    text = notice.instructions
+    for anchor in (
+        "landing_queue",       # read from the queue, not from memory
+        "requested_by",        # addressed to who asked to land
+        "checklist_passed",    # deployed: the edge it came by is the verdict
+        "checklist_expired",   # not deployed
+        "DEPLOYED @",
+        "NOT DEPLOYED:",
+        "out-of-band",         # merges the integrate notice never carried
+    ):
+        assert anchor in text, f"landed-notice lost its {anchor!r} rule"
+    assert "`'*'`와 `@in_review`는 쓰지 않는다" in text
+    assert "통지하지 않는다" in text  # carried entries are not told
