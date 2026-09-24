@@ -387,13 +387,26 @@ def build_app(
         _mesh_audience, manager, board
     )
     manager.exit_hooks.append(board.session_exited)
-    # The board a directory in no registered workspace files on. Pinned once,
-    # to the board this daemon was already using, so every issue filed before
-    # workspaces had boards of their own keeps reading as that one's --
-    # nothing is copied and nothing moves. Afterwards it is an ordinary
-    # setting on the Settings page like any other board's.
+    # The reserved default board. Pinned once, to the board this daemon was
+    # already using, so every issue filed before workspaces had boards of
+    # their own keeps reading as that one's -- nothing is copied and nothing
+    # moves. Afterwards it is an ordinary setting on the Settings page like
+    # any other board's.
+    #
+    # Two candidates, because the daemon's working directory alone is not
+    # enough: a daemon launched from the home directory has no checkout
+    # there, and pinned nothing at all. The checkout this code runs from is
+    # the second answer -- in an editable install it is the repository whose
+    # board every session was filing into. It goes through repo_root like the
+    # first, so a daemon running out of a linked worktree names the main
+    # checkout's board (a worktree holds no database of its own). Only a root
+    # that already holds a database is pinned.
     try:
-        beads_db.ensure_default(cli_beads.repo_root(os.getcwd()))
+        source = beads_db.source_checkout()
+        beads_db.ensure_default(beads_db.pick_default_root([
+            cli_beads.repo_root(os.getcwd()),
+            cli_beads.repo_root(str(source)) if source is not None else None,
+        ]))
     except Exception:  # an unwritable config must not stop the daemon
         log.exception("beads: could not pin the %s board", beads_db.DEFAULT_BOARD)
     # Pending merge/handoff requests (daemon/handoff.py): one per daemon, and

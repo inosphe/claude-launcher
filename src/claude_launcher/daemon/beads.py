@@ -1548,8 +1548,8 @@ class Board:
             view["error"] = (
                 "no board: this directory is in no registered workspace "
                 "and in no checkout that already holds one — register it "
-                "with 'claunch workspace add <dir>', or give it a board on "
-                "the Settings page"
+                "with 'claunch workspace add <dir>', or in Settings ▸ "
+                "Workspaces"
             )
             return view
         view["root"] = str(root)
@@ -2167,8 +2167,8 @@ class Board:
             view["error"] = (
                 "no board: this directory is in no registered workspace "
                 "and in no checkout that already holds one — register it "
-                "with 'claunch workspace add <dir>', or give it a board on "
-                "the Settings page"
+                "with 'claunch workspace add <dir>', or in Settings ▸ "
+                "Workspaces"
             )
             return view
         view["root"] = str(root)
