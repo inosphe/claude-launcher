@@ -1480,6 +1480,12 @@ def _move_to(
     from_step = state.get("current")
     # Before the visit counter moves below: the leaving step's `visit` is
     # still the one that was being left.
+    _consume_milestone(workflow, state, from_step, cwd)
+    if honour_skip:
+        # A person's goto away is not the step being done: it publishes
+        # nothing, or a run moved by hand would tell the other run a fact
+        # (a cut made, a request frozen) that never happened.
+        _publish_milestones(workflow, state, from_step, cwd)
     _queue_triggers(workflow, state, from_step, model.TRIGGER_AT_LEAVE, cwd)
     _settle_timers(workflow, state, target, cwd)
     if target is None:
@@ -1526,6 +1532,101 @@ def _move_to(
     _arrive_timer(workflow, state, target, from_step, cwd)
     state_mod.save_state(state, cwd)
     _start_declared_subs(workflow, state, cwd)
+
+
+# --------------------------------------------------------------------------- #
+# milestones — `publishes:` and `awaits: {sub, at}` / `awaits: {main}`
+# --------------------------------------------------------------------------- #
+def _milestone_count(state: Optional[dict], name: str) -> int:
+    if not state:
+        return 0
+    entry = (state.get("milestones") or {}).get(name) or {}
+    return int(entry.get("count") or 0)
+
+
+def _publish_milestones(workflow: Workflow, state: dict, step_id: Optional[str], cwd) -> None:
+    """The leaving step's ``publishes:`` — one more publication of each."""
+    step = workflow.steps.get(step_id) if step_id else None
+    if step is None or not step.publishes:
+        return
+    marks = state.setdefault("milestones", {})
+    for name in step.publishes:
+        count = _milestone_count(state, name) + 1
+        marks[name] = {
+            "count": count,
+            "at": state_mod.utcnow(),
+            "step": step_id,
+            "visit": _visits(state, step_id),
+        }
+        state_mod.journal(
+            "published",
+            {"run": state["run_id"], "milestone": name, "count": count,
+             "step": step_id, **({"sub": state["sub"]} if state.get("sub") else {})},
+            cwd,
+        )
+
+
+def _milestone_source(awaits: "model.Awaits", state: dict, cwd) -> Optional[dict]:
+    """The state of the run an ``at``/``main`` await reads, or None when that
+    run does not stand (no such sub run; a sub run read without a main)."""
+    def read(c):
+        return state_mod.load_state(c) if state_mod.has_run(c) else None
+    if awaits.main is not None:
+        return _in_main(read, cwd)
+    return _in_sub(awaits.sub, read, cwd)
+
+
+def _consume_milestone(workflow: Workflow, state: dict, step_id: Optional[str], cwd) -> None:
+    """Leaving a step that awaits a milestone records how many publications
+    it has now seen, so the next visit waits for a NEW one."""
+    step = workflow.steps.get(step_id) if step_id else None
+    awaits = step.awaits if step is not None else None
+    if awaits is None or awaits.milestone is None:
+        return
+    count = _milestone_count(_milestone_source(awaits, state, cwd), awaits.milestone)
+    state.setdefault("consumed", {})[step_id] = count
+
+
+def _published_view(awaits: "model.Awaits", state: dict, step_id: str, cwd) -> dict:
+    source = _milestone_source(awaits, state, cwd)
+    seen = int((state.get("consumed") or {}).get(step_id) or 0)
+    count = _milestone_count(source, awaits.milestone)
+    out = {
+        "milestone": awaits.milestone,
+        "from": model.MAIN_RUN_NAME if awaits.main is not None else awaits.sub,
+        "stands": source is not None,
+        "count": count,
+        "consumed": seen,
+        "new": count > seen,
+    }
+    last = ((source or {}).get("milestones") or {}).get(awaits.milestone)
+    if last:
+        out["last"] = last
+    return out
+
+
+@_scoped_op
+def published(
+    source: str, milestone: str, *, step: Optional[str] = None, cwd: Optional[str] = None
+) -> dict:
+    """Has run ``source`` (``main`` or a sub run's name) published
+    ``milestone`` since ``step`` of the ambient run last consumed it?
+
+    The read behind ``claunch cflow published`` and so behind every
+    ``awaits: {sub, at}`` / ``awaits: {main}`` probe. ``step`` defaults to
+    the ambient run's current step. ``stands`` False means the source run is
+    not there at all — kept apart from "not yet" for the same reason
+    ``sub-done`` keeps it apart: a wait on a run nobody started is not a wait.
+    """
+    if not state_mod.has_run(cwd):
+        raise CflowError("no run stands here to ask for")
+    state = state_mod.load_state(cwd)
+    step_id = step or state.get("current")
+    if source == model.MAIN_RUN_NAME:
+        awaits = model.Awaits(main=milestone)
+    else:
+        awaits = model.Awaits(sub=source, at=milestone)
+    return {**_published_view(awaits, state, step_id, cwd), "step": step_id}
 
 
 def _note_run_end(state: dict, cwd: Optional[str], *, status: str, by: str) -> None:
@@ -2810,6 +2911,11 @@ def _awaits_payload(step: Step) -> Optional[dict]:
         # Say it in the run's own terms too: the command is how the daemon
         # measures it, the name is what the agent is waiting for.
         out["sub"] = step.awaits.sub
+    if step.awaits.milestone:
+        out["milestone"] = step.awaits.milestone
+        out["from"] = (
+            model.MAIN_RUN_NAME if step.awaits.main is not None else step.awaits.sub
+        )
     if step.awaits.describe:
         out["describe"] = step.awaits.describe
     return out
@@ -3098,7 +3204,42 @@ def _sub_start_checks(workflow: Workflow, sub: str, cwd: Optional[str]) -> dict:
             f"({', '.join(others)}); the limit is {MAX_SUBFLOWS} — finish and "
             f"archive one, or hand the work to a child session"
         )
+    if workflow.landing_queue is not None:
+        holder = _landing_queue_holder(cwd, exclude=sub)
+        if holder is not None:
+            raise CflowError(
+                f"{workflow.name!r} declares 'landing_queue', and this scope's "
+                f"{holder} run already holds one — a child's landing request "
+                f"has to have exactly one place to go"
+            )
     return main
+
+
+def _landing_queue_holder(cwd: Optional[str], *, exclude: Optional[str] = None) -> Optional[str]:
+    """Which active run of the scope declares ``landing_queue:`` — ``main``,
+    a sub run's name, or None. The main run is asked first."""
+    def declares(c) -> bool:
+        if not state_mod.has_run(c):
+            return False
+        if state_mod.load_state(c).get("status") in ("done", "aborted"):
+            return False
+        try:
+            return state_mod.load_snapshot(c).landing_queue is not None
+        except state_mod.StateError:
+            return False
+    if _in_main(declares, cwd):
+        return state_mod.MAIN_RUN
+    for name in state_mod.sub_runs(cwd):
+        if name != exclude and _in_sub(name, declares, cwd):
+            return name
+    return None
+
+
+@_scoped_op
+def landing_queue_run(cwd: Optional[str] = None) -> Optional[str]:
+    """The run of this scope that holds the landing queue (``main``, a sub
+    run's name) or None — where a child's ``enqueue-landing`` goes."""
+    return _landing_queue_holder(cwd)
 
 
 def _start_impl(
@@ -3808,6 +3949,7 @@ def probe_env(
     *,
     inputs: Optional[dict] = None,
     values: Optional[Dict[str, str]] = None,
+    run: Optional[str] = None,
 ) -> Dict[str, str]:
     """The environment a probe subprocess runs in, given whose run it is for.
 
@@ -3847,6 +3989,17 @@ def probe_env(
         env[state_mod.SESSION_ENV] = who
     else:
         env.pop(state_mod.SESSION_ENV, None)
+    # Which run of the session this is for: set for a sub run (its name),
+    # removed for the main run -- the same reasoning as the session above, a
+    # value inherited from the daemon's own environment would be a guess.
+    # ``run`` None means the ambient run (verify and checks run inside the
+    # run's own engine call); the daemon's probe clock passes it explicitly.
+    which = run if run is not None else state_mod.current_run()
+    which = state_mod.normalize_run(which) if which else None
+    if which:
+        env[state_mod.RUN_ENV] = which
+    else:
+        env.pop(state_mod.RUN_ENV, None)
     # A sub run's inputs ride as CFLOW_IN_<NAME>: the one channel a command
     # can read a value from without the value being pasted into the command
     # text (which is snapshotted, and hashed into the step's text id).
@@ -3866,6 +4019,7 @@ def run_probe(
     scope: Optional[str],
     inputs: Optional[dict] = None,
     values: Optional[Dict[str, str]] = None,
+    run: Optional[str] = None,
 ) -> Optional[dict]:
     """Measure a step's awaited condition once. ``None`` = could not measure.
 
@@ -3911,7 +4065,7 @@ def run_probe(
             text=True,
             encoding="utf-8",
             errors="replace",
-            env=probe_env(scope, inputs=inputs, values=values),
+            env=probe_env(scope, inputs=inputs, values=values, run=run or ""),
             **kwargs,
         )
     except (OSError, ValueError):

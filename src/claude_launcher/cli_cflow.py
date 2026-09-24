@@ -820,6 +820,35 @@ def _cmd_sub_done(args: argparse.Namespace) -> int:
     return 0 if status == "done" else 1
 
 
+def _cmd_published(args: argparse.Namespace) -> int:
+    """Answer 'has SOURCE published MILESTONE since STEP consumed it?'.
+
+    The probe behind ``awaits: {sub, at}`` / ``awaits: {main}``. The asking
+    run is ``--run``, else ``$CLAUNCH_CFLOW_RUN`` (the daemon sets it when the
+    probe is a sub run's), else the main run. Exit 0 = a publication the step
+    has not consumed, 1 = none yet, 2 = the source run does not stand.
+    """
+    if not getattr(args, "run", None) and os.environ.get(state_mod.RUN_ENV):
+        args.run = os.environ[state_mod.RUN_ENV]
+    scope, cwd = _resolve_run(args, required=False)
+    try:
+        view = engine.published(
+            args.source, args.milestone, step=args.step, cwd=cwd, scope=scope
+        )
+    except (engine.CflowError, state_mod.StateError) as exc:
+        print(f"published: {exc}")
+        return 2
+    if not view["stands"]:
+        print(f"run {view['from']!r}: not running in this scope")
+        return 2
+    print(
+        f"{view['from']} {view['milestone']}: published {view['count']}x, "
+        f"step {view['step']} consumed {view['consumed']} — "
+        + ("new" if view["new"] else "nothing new")
+    )
+    return 0 if view["new"] else 1
+
+
 def _cmd_abort(args: argparse.Namespace) -> int:
     scope, cwd = _resolve_run(args)
     payload = engine.abort(by="user", scope=scope, cwd=cwd)
@@ -1213,6 +1242,32 @@ def register(sub) -> None:
         help="whose sub run (default: $CLAUNCH_SESSION, or the nearest run)",
     )
     q.set_defaults(func=_cmd_sub_done)
+
+    q = csub.add_parser(
+        "published",
+        help="exit 0 when run SOURCE ('main' or a sub run's name) has "
+        "published MILESTONE since the asking step last consumed it, 1 when "
+        "not, 2 when SOURCE does not stand — the probe of 'awaits: {sub, at}' "
+        "and 'awaits: {main}'",
+    )
+    q.add_argument("source", help="'main', or the sub run's name")
+    q.add_argument("milestone", help="the milestone a step 'publishes:'")
+    q.add_argument(
+        "--step",
+        help="the asking run's step whose consumption counts (default: its "
+        "current step)",
+    )
+    q.add_argument(
+        "--run",
+        help="the asking run: a sub run's name (default: $CLAUNCH_CFLOW_RUN, "
+        "else the main run)",
+    )
+    q.add_argument(
+        "-t",
+        "--session",
+        help="whose runs (default: $CLAUNCH_SESSION, or the nearest run)",
+    )
+    q.set_defaults(func=_cmd_published)
 
     q = _scoped(csub.add_parser(
         "archive",

@@ -80,6 +80,11 @@ LAYER_FILE = "file"
 
 #: Environment variable the daemon sets in every managed session.
 SESSION_ENV = "CLAUNCH_SESSION"
+#: Which run of the session a daemon-launched probe or check is for, when it
+#: is a SUB run's (unset for the main run). Read by ``claunch cflow
+#: published`` so a sub run's ``awaits: {main}`` probe consumes against the
+#: sub run's own record.
+RUN_ENV = "CLAUNCH_CFLOW_RUN"
 
 #: Scope used outside any managed session (and for pre-scope layouts).
 DEFAULT_SCOPE = "default"
