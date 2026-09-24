@@ -198,6 +198,7 @@ function openControlSocket() {
   sock.onopen = () => {
     if (sock !== controlSock) return;
     controlTry = 0;
+    latencyStart();
   };
 
   sock.onmessage = (ev) => {
@@ -206,6 +207,7 @@ function openControlSocket() {
     let msg;
     try { msg = JSON.parse(ev.data); } catch { return; }
     if (typeof msg.ch === "number") { channelFrame(msg); return; }
+    if (msg.type === "pong") { latencyPong(msg); return; }
     if (msg.type !== "read_result") return;
     const waiter = controlWaiting.get(msg.id);
     if (!waiter) return;                 // timed out already, and re-sent
@@ -222,6 +224,7 @@ function openControlSocket() {
     if (sock !== controlSock) return;
     controlSock = null;
     controlAbort("control socket closed");
+    latencyStop();
     channelsCarrierGone();
     scheduleControlReopen();
   };
@@ -283,6 +286,178 @@ function controlSay(frame) {
   } catch {
     return false;
   }
+}
+
+/* ---- link latency (claunch-8ufey) ----
+
+   "Talking to a session is slow" has two places to be slow, and a person
+   cannot tell them apart from the page: the path from this browser to the
+   daemon (which, reached as /t/<name>/, runs through the relay tunnel), and
+   the daemon's own uplink to the relay, which every cross-machine mesh
+   message rides. Both are measured and shown together in the rail header.
+
+   The first is a ping on the control socket carrying the page's clock; the
+   daemon echoes it, so the number includes whatever the socket is queued
+   behind -- the delay a keystroke or a read actually waits. The second is
+   the uplink's own PING/PONG to the relay, which the daemon keeps and hands
+   back in the same pong (`relay.relays[].rtt_ms`).
+
+   One ping in flight at a time: while it is unanswered its age is the
+   number shown, so a link that has stalled reads as stalled at once rather
+   than as the last good sample. */
+const LATENCY_PING_MS = 5000;
+const LATENCY_TICK_MS = 1000;
+const LATENCY_KEEP = 12;
+const LATENCY_SLOW_MS = 150;
+const LATENCY_BAD_MS = 500;
+let latencyTimer = null;
+let latencySentAt = null;     // latencyNow() of the ping in flight
+let latencyLastPing = -Infinity;
+let latencySamples = [];      // recent browser<->daemon round trips, ms
+let latencyRelay = null;      // the relay status the last pong carried
+
+function latencyNow() {
+  return (typeof performance !== "undefined" && performance.now)
+    ? performance.now() : Date.now();
+}
+
+function latencyStart() {
+  clearInterval(latencyTimer);
+  latencySentAt = null;
+  latencyLastPing = -Infinity;
+  latencySamples = [];
+  latencyTick();
+  latencyTimer = setInterval(latencyTick, LATENCY_TICK_MS);
+}
+
+function latencyStop() {
+  clearInterval(latencyTimer);
+  latencyTimer = null;
+  latencySentAt = null;
+  renderLatencyBadge();
+}
+
+/* Once a second: send the next ping when one is due and none is in flight,
+   and repaint, so an unanswered ping's age climbs on screen. */
+function latencyTick() {
+  const now = latencyNow();
+  if (latencySentAt === null && now - latencyLastPing >= LATENCY_PING_MS) {
+    if (controlSay({ type: "ping", t: now })) {
+      latencySentAt = now;
+      latencyLastPing = now;
+    }
+  }
+  renderLatencyBadge();
+}
+
+function latencyPong(msg) {
+  // A bare pong answers nobody's probe (a daemon that predates the echo);
+  // one whose `t` is not the ping in flight belongs to a socket since
+  // replaced.
+  if (typeof msg.t !== "number" || msg.t !== latencySentAt) return;
+  latencySentAt = null;
+  latencySamples.push(latencyNow() - msg.t);
+  if (latencySamples.length > LATENCY_KEEP) latencySamples.shift();
+  if (msg.relay) {
+    latencyRelay = msg.relay;
+    renderRelayBadge(msg.relay);
+  }
+  renderLatencyBadge();
+}
+
+function fmtLatency(ms) {
+  if (ms == null) return "—";
+  if (ms >= 1000) return (ms / 1000).toFixed(ms >= 10000 ? 0 : 1) + "s";
+  return Math.round(ms) + "ms";
+}
+
+/* The browser<->daemon reading: the unanswered ping's age once it has
+   outgrown the last sample, else the last sample. `stalled` says which. */
+function latencyWeb() {
+  const last = latencySamples.length ? latencySamples[latencySamples.length - 1] : null;
+  if (latencySentAt !== null) {
+    const waited = latencyNow() - latencySentAt;
+    if (last === null ? waited >= LATENCY_BAD_MS : waited > last) {
+      return { ms: waited, stalled: true };
+    }
+  }
+  return { ms: last, stalled: false };
+}
+
+/* The relay reading is the worst connected uplink: the slow relay is the
+   one a message may be routed through. */
+function latencyRelayWorst(relay) {
+  const rows = relay && Array.isArray(relay.relays) ? relay.relays : [];
+  let worst = null;
+  for (const r of rows) {
+    if (!r.connected) continue;
+    const pending = typeof r.pending_ms === "number" ? r.pending_ms : null;
+    const ms = pending !== null ? pending : r.rtt_ms;
+    if (typeof ms !== "number") continue;
+    if (!worst || ms > worst.ms) worst = { ms, stalled: pending !== null, id: r.id };
+  }
+  return worst;
+}
+
+function latencyGrade(ms) {
+  if (ms == null) return "latency-idle";
+  if (ms >= LATENCY_BAD_MS) return "latency-bad";
+  if (ms >= LATENCY_SLOW_MS) return "latency-slow";
+  return "latency-ok";
+}
+
+function renderLatencyBadge() {
+  const badge = $("latency-badge");
+  if (!badge) return;
+  const up = controlUp();
+  if (!up && !latencySamples.length) {
+    badge.classList.add("hidden");
+    return;
+  }
+  const web = up ? latencyWeb() : { ms: null, stalled: false };
+  const relayOn = !!(latencyRelay && latencyRelay.configured);
+  const relay = relayOn ? latencyRelayWorst(latencyRelay) : null;
+  const mark = (r) => (r && r.stalled ? "≥" : "") + fmtLatency(r && r.ms);
+  let text = `web ${up ? mark(web) : "down"}`;
+  if (relayOn) text += ` · relay ${mark(relay)}`;
+  badge.textContent = text;
+  const known = [web.ms, relay && relay.ms].filter((v) => typeof v === "number");
+  badge.className = "badge " +
+    (up ? latencyGrade(known.length ? Math.max(...known) : null) : "latency-bad");
+
+  const lines = [];
+  const via = /^\/t\/[^/]+\/$/.test(BASE) ? "through the relay tunnel" : "direct";
+  if (!up) {
+    lines.push("browser ↔ daemon: control socket is down (reconnecting)");
+  } else if (latencySamples.length) {
+    const sorted = [...latencySamples].sort((a, b) => a - b);
+    const median = sorted[Math.floor(sorted.length / 2)];
+    lines.push(`browser ↔ daemon (${via}): ` +
+      (web.stalled ? `waiting ${fmtLatency(web.ms)} for an answer; ` : "") +
+      `last ${fmtLatency(latencySamples[latencySamples.length - 1])}, ` +
+      `median ${fmtLatency(median)}, max ${fmtLatency(sorted[sorted.length - 1])} ` +
+      `over ${sorted.length} ping(s)`);
+  } else {
+    lines.push(`browser ↔ daemon (${via}): measuring…`);
+  }
+  if (!relayOn) {
+    lines.push("daemon ↔ relay: no relay configured");
+  } else {
+    for (const r of latencyRelay.relays || []) {
+      let v;
+      if (!r.connected) v = "disconnected";
+      else if (typeof r.pending_ms === "number") {
+        v = `no answer for ${fmtLatency(r.pending_ms)}` +
+          (typeof r.rtt_ms === "number" ? ` (last ${fmtLatency(r.rtt_ms)})` : "");
+      } else if (typeof r.rtt_ms === "number") {
+        v = fmtLatency(r.rtt_ms) +
+          (typeof r.rtt_age === "number" ? `, ${Math.round(r.rtt_age)}s ago` : "");
+      } else v = "measuring…";
+      lines.push(`daemon ↔ relay ${r.id}: ${v}`);
+    }
+  }
+  lines.push(`round trips; amber ≥ ${LATENCY_SLOW_MS}ms, red ≥ ${LATENCY_BAD_MS}ms`);
+  badge.title = lines.join("\n");
 }
 
 /* ---- terminals on the control socket ----

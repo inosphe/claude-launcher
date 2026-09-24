@@ -137,6 +137,12 @@ function build() {
     slice("channelFrame"),
     slice("channelsCarrierGone"),
     slice("daemonHealth"),
+    // The socket's open/close/pong also drive the latency badge
+    // (claunch-8ufey). Stubbed so the frames counted here are the reads';
+    // latency_check.js exercises that machine.
+    "function latencyStart() {}",
+    "function latencyStop() {}",
+    "function latencyPong() {}",
     "return { controlUp, openControlSocket, ensureControlSocket, controlRead,"
     + " controlSay, daemonHealth, waiting: () => controlWaiting.size,"
     + " get sock() { return controlSock; } };",

@@ -221,6 +221,81 @@ def test_uplink_answers_ping_with_pong():
     asyncio.run(run())
 
 
+def test_keepalive_pings_at_once_and_the_relays_pong_is_a_round_trip(monkeypatch):
+    """The relay echoes our PING token (psmux-relay ``uplink_frame``); that
+    echo is the daemon<->relay round trip the web badge shows
+    (claunch-8ufey). The first PING goes at registration, not a beat later."""
+    from claude_launcher.daemon import relay_uplink as ru
+
+    async def run():
+        room = bytes([3] * 16)
+        up = RelayUplink(url="ws://x", token="t", name="pc",
+                         local_host="127.0.0.1", local_port=1)
+        up._room = room
+        up._ws = _FakeWS()
+        clock = [100.0]
+        monkeypatch.setattr(ru.time, "monotonic", lambda: clock[0])
+
+        assert up.latency() == {"rtt_ms": None, "rtt_age": None, "pending_ms": None}
+        keep = asyncio.ensure_future(up._keepalive())
+        _r, m = await up._ws.next_sent()
+        assert m.kind == w.PING
+
+        # Unanswered and no sample yet: the wait is what there is to show.
+        clock[0] = 100.4
+        assert up.latency()["pending_ms"] == 400.0
+
+        # Some other token (not ours) measures nothing.
+        await up._handle(_payload(w.pong(room, m.token + 99)))
+        assert up.rtt_ms is None
+
+        clock[0] = 100.045 + 0.4
+        await up._handle(_payload(w.pong(room, m.token)))
+        clock[0] = 102.445
+        got = up.latency()
+        keep.cancel()
+        up.stop()
+        assert got["rtt_ms"] == 445.0
+        assert got["rtt_age"] == 2.0
+        assert got["pending_ms"] is None
+
+    asyncio.run(run())
+
+
+def test_a_ping_waiting_longer_than_the_last_round_trip_is_reported():
+    up = RelayUplink(url="ws://x", token="t", name="pc",
+                     local_host="127.0.0.1", local_port=1)
+    import time as _t
+    now = _t.monotonic()
+    up.rtt_ms, up._rtt_at = 50.0, now
+    up._pings = {1: now - 0.01}
+    assert up.latency()["pending_ms"] is None, "younger than the last sample"
+    up._pings = {1: now - 3.0}
+    assert up.latency()["pending_ms"] >= 3000.0
+
+
+def test_an_answered_ping_drops_the_older_unanswered_ones():
+    up = RelayUplink(url="ws://x", token="t", name="pc",
+                     local_host="127.0.0.1", local_port=1)
+    old, new = up._next_ping_token(), None
+    up._pings[old] -= 5.0
+    new = up._next_ping_token()
+    assert new != old
+    up._pong(new)
+    assert up._pings == {}
+    assert up.rtt_ms is not None and up.rtt_ms < 1000.0
+
+
+def test_unanswered_pings_are_bounded():
+    from claude_launcher.daemon import relay_uplink as ru
+
+    up = RelayUplink(url="ws://x", token="t", name="pc",
+                     local_host="127.0.0.1", local_port=1)
+    for _ in range(ru._PINGS_KEPT * 3):
+        up._next_ping_token()
+    assert len(up._pings) == ru._PINGS_KEPT
+
+
 def test_uplink_closes_stream_on_local_connect_failure():
     async def run():
         room = bytes([2] * 16)

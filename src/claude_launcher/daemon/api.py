@@ -1021,7 +1021,9 @@ async def h_control_ws(request: web.Request) -> web.WebSocketResponse:
     - ``{"type":"link_failed", ...}`` -> recorded, not answered. What the page
       reports when it could not open a terminal socket at all; see
       :meth:`connections.Registry.link_failed`.
-    - ``{"type":"ping"}`` -> ``{"type":"pong"}``.
+    - ``{"type":"ping"}`` -> ``{"type":"pong"}``. A ping carrying ``t``
+      gets it back, with the relay status beside it -- see
+      :func:`_control_pong`.
 
     The socket being open is itself the liveness answer, which is what
     retires the probe the page used to spend a connection on.
@@ -1079,7 +1081,7 @@ async def h_control_ws(request: web.Request) -> web.WebSocketResponse:
                 # terminal's keystrokes arrive in, and a page that has
                 # stopped draining parks a write for as long as it
                 # stays stopped (test_control_write_offloop).
-                await carrier.send_soon(json.dumps({"type": "pong"}))
+                await carrier.send_soon(json.dumps(_control_pong(request, frame)))
             elif kind == "link_failed":
                 conns.link_failed(request, frame)
             elif kind == "read":
@@ -1115,6 +1117,27 @@ async def h_control_ws(request: web.Request) -> web.WebSocketResponse:
             await ws.close()
         conns.closed(record, ws.close_code, ws.exception())
     return ws
+
+
+def _control_pong(request: web.Request, frame: dict) -> dict:
+    """The answer to a control-socket ping.
+
+    A bare ping gets a bare pong: that is the liveness answer older pages
+    wait for. A ping that carries ``t`` (the page's own clock, opaque here)
+    is a latency probe (claunch-8ufey): ``t`` comes back untouched so the
+    page measures its own round trip -- through whatever sits between, a
+    relay tunnel included, and through this socket's send queue, which is
+    the delay a person actually waits on. The relay status rides along,
+    because that is where the uplink's round trip to the relay lives and
+    the page would otherwise need another read to show the two together.
+    """
+    if "t" not in frame:
+        return {"type": "pong"}
+    return {
+        "type": "pong",
+        "t": frame.get("t"),
+        "relay": request.app["relay_state"](),
+    }
 
 
 async def _control_read(template: web.Request, paths) -> tuple[dict, dict, dict]:
