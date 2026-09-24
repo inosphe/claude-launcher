@@ -501,6 +501,7 @@ BROWSER_CHECKS = [
         "toolbar_browser.cjs",
         "observer_browser.cjs",
         "search_anything_browser.cjs",
+        "sessiongridtip_browser.cjs",
 ]
 
 
