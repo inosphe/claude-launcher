@@ -453,8 +453,7 @@ def build_app(
     # retires what it does not relaunch before this board exists, so each
     # retired record's in_progress issues would keep claiming a dead session
     # is working. Sweep the board for them here, where board and loop exist.
-    for dead in manager.take_retired_for_sweep():
-        board.session_exited(dead)
+    board.sessions_exited(manager.take_retired_for_sweep())
 
     r = app.router
     r.add_get("/api/health", h_health)

@@ -1458,6 +1458,39 @@ def test_the_sweep_acts_on_what_the_session_was_assigned(repo):
     asyncio.run(run())
 
 
+def test_a_restart_sweeps_every_retired_record_from_one_listing(repo):
+    """Each retired record used to re-read the whole board, and a restart
+    retires dozens -- 6.2 s of listing decoded on the loop in the first two
+    minutes (claunch-fh8u1). The writes are the ones separate sweeps made."""
+    br = FakeBr()
+    names = [f"s{i}" for i in range(6)]
+    for n in names:
+        br.add(id=f"w-{n}", assignee=n, status="in_progress")
+    br.add(id="o", assignee="alive", status="in_progress")
+    board = _board(br, repo)
+
+    async def run():
+        br.calls.clear()
+        done = await board.sweep_many(
+            [_Sess(_sdef(n, repo), status="exited", exit_code=0) for n in names]
+        )
+        assert sorted(done) == names and all(len(w) == 2 for w in done.values())
+        assert sum(1 for c in br.calls if "list" in c) == 1
+        for n in names:
+            assert br.issues[f"w-{n}"]["status"] == "open"
+        assert br.issues["o"]["status"] == "in_progress"
+
+        # The boot hook schedules one such task.
+        br.add(id="w-late", assignee="late", status="in_progress")
+        br.calls.clear()
+        board.sessions_exited([_Sess(_sdef("late", repo), status="exited")])
+        await asyncio.gather(*board._tasks)
+        assert br.issues["w-late"]["status"] == "open"
+        assert sum(1 for c in br.calls if "list" in c) == 1
+
+    asyncio.run(run())
+
+
 # --------------------------------------------------------------------------- #
 # through the API, over real sessions
 # --------------------------------------------------------------------------- #
