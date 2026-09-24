@@ -1760,8 +1760,13 @@ steps:
     # 합쳐서 빨갰다. 그래서 「충돌 없음」은 통과 조건이 아니다.
     # 읽기 전용이고 git만 부른다 — awaits로 다시 재도 안전한 드문 verify라
     # await-landing이 같은 명령을 프로브로 쓴다.
-    # tests/test_merge_ready.py가 여섯 갈래를 못박는다.
-    verify: 'uv run --no-sync python tools/merge_ready.py'
+    # --landed-exit는 그 프로브를 위한 것이고(착지를 5로 답해야 대기 중인
+    # 워커가 착지를 듣는다), 여기서는 5가 곧 거절이다: 이미 대상에 실린
+    # tip으로 정렬을 다시 밟는 것은 착지한 일을 재측정으로 오인한 경우뿐이다
+    # (143회차 s753, claunch-dlq0o). 출력이 「landed」를 말하므로 되돌아갈
+    # 자리는 landed다.
+    # tests/test_merge_ready.py가 갈래들을 못박는다.
+    verify: 'uv run --no-sync python tools/merge_ready.py --landed-exit'
     next: peer-review
 
   peer-review:
@@ -2015,9 +2020,17 @@ steps:
       prompt: |
         상위 세션의 답이 왔는가?
 
-        · 머지됐다는 통지(머지 커밋 해시)가 왔으면 landed — 다음 스텝의
-          기계 확인으로 넘어간다. 통지 없이 짐작으로 고르지 마라: 다음
-          스텝이 git으로 다시 보므로 안 실렸으면 거기서 막힌다.
+        · 머지됐다는 통지(머지 커밋 해시)가 왔거나, 프로브가 착지로
+          뒤집혔으면 landed — 다음 스텝의 기계 확인으로 넘어간다. 통지도
+          프로브도 없이 짐작으로 고르지 마라: 다음 스텝이 git으로 다시
+          보므로 안 실렸으면 거기서 막힌다.
+        · **rebase·remeasure를 고르기 전에 착지부터 확인한다**: `git
+          merge-base --is-ancestor <동결 tip> <통합 대상>`. 참이면 무엇이
+          왔든 landed다. 상위의 기준선 통지는 보드 상태(in_review)로
+          주소를 잡으므로, 앞 회차에 이미 머지됐는데 아직 닫지 않은
+          이슈에게도 가고, 그 통지의 머지 목록에는 내 이슈가 없다 — 그걸
+          재측정 요청으로 읽으면 착지한 일을 정렬·리뷰부터 다시 돈다
+          (claunch-dlq0o, 143회차 s753).
         · rebase 재요청이 왔으면(미리 병합이 텍스트로 충돌한다) rebase —
           동결을 해제하고 정렬 단계로 돌아가 최신 대상 위로 재정렬한 뒤
           갱신된 묶음으로 재요청한다.
@@ -2062,10 +2075,15 @@ steps:
         뒤집히면 그것을 말해 준다. 상위의 거절을 기다려서 알게 되던 것을
         기계가 먼저 말하는 자리가 여기다. 프로브가 re-measure/rebase로
         뒤집혔다고 말하면 상위의 재요청을 기다리지 말고 그 갈래를 고른다 —
-        그편이 상위의 턴 하나와 왕복 하나를 아낀다.
+        그편이 상위의 턴 하나와 왕복 하나를 아낀다. 착지(landed)로
+        뒤집혔다고 말하면 상위의 통지를 기다리지 말고 landed를 고른다 —
+        상위의 착지 통지가 이 세션에 닿지 않는 경우가 실제로 있었다(이슈가
+        in_progress로 남아 in_review 대상 통지에서 빠졌다, claunch-dlq0o).
+        프로브가 착지를 따로 답하는지는 이 저장소의 프로브가 정한다 —
+        답하지 않는 프로브라면 위의 조상 확인이 그 자리를 채운다.
       options:
         landed:
-          description: 상위가 머지했다는 통지를 받았다(머지 해시) — 기계 확인으로
+          description: 상위가 머지했다는 통지를 받았거나 프로브·조상 확인이 착지를 말한다 — 기계 확인으로
           next: landed
         rebase:
           description: rebase 재요청을 받았다(미리 병합 충돌) — 동결 해제, 재정렬 후 재요청
@@ -2113,12 +2131,19 @@ steps:
     # 읽히지 않는 것이 여기서 특히 중요하다: --no-ff 착지 뒤에는 대상이
     # 내 tip보다 앞서므로, 순진한 「대상이 앞섰나」 프로브는 일이 성공한
     # 바로 그 순간 뒤집힌다. merge_ready.py가 조상 관계를 먼저 보는 이유다.
+    # --landed-exit: 착지를 0이 아닌 5로 답하게 한다. 없으면 착지 전의
+    # ready와 착지 후의 landed가 둘 다 0이라 프로브가 뒤집히지 않고, 워커는
+    # 착지를 리더의 통지로만 알았다 — 보드 상태로 주소를 잡는 통지는
+    # in_progress로 남은 이슈를 놓치고, 앞 회차에 머지됐는데 아직 닫지 않은
+    # 이슈에게는 다음 회차 통지가 재측정 요청으로 읽혔다(claunch-dlq0o).
+    # 정렬 게이트(rebase의 verify)는 이 플래그 없이 돈다: 게이트에게 착지한
+    # 브랜치는 막을 것이 없는 ready다.
     # poll 60/timeout 25 — MAX_AWAITS_TIMEOUT(30)과 timeout<=poll 규칙 안이다.
     awaits:
-      probe: 'uv run --no-sync python tools/merge_ready.py'
+      probe: 'uv run --no-sync python tools/merge_ready.py --landed-exit'
       poll: 60
       timeout: 25
-      describe: '통합 대상이 움직여 이 브랜치의 판정이 뒤집혔는지 (0 ready / 1 재측정 / 3 rebase)'
+      describe: '통합 대상이 움직여 이 브랜치의 판정이 뒤집혔는지 (0 ready / 1 재측정 / 3 rebase / 5 착지)'
 
   landing-nudge:
     title: 착지 재촉 (대기 자리로 되돌아온다)

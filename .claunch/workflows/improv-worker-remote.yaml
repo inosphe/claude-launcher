@@ -192,10 +192,10 @@ steps:
     # 붙인다(대상 upstream이 추적하는 원격을 재기 전에 fetch한다 —
     # remote-setup이 <remote>/<base>로 둔 것). 판정 스크립트는 정본과 같다.
     awaits:
-      probe: 'uv run --no-sync python tools/merge_ready.py --fetch'
+      probe: 'uv run --no-sync python tools/merge_ready.py --fetch --landed-exit'
       poll: 120
       timeout: 30
-      describe: '원격 base가 움직여 이 브랜치의 판정이 뒤집혔는지 (fetch 후 0 ready / 1 재측정 / 3 rebase)'
+      describe: '원격 base가 움직여 이 브랜치의 판정이 뒤집혔는지 (fetch 후 0 ready / 1 재측정 / 3 rebase / 5 착지)'
 
   landed:
     checklist:
