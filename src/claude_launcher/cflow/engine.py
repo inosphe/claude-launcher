@@ -2168,12 +2168,13 @@ def _landing_mark_landed(
     if spec is None:
         return []
     repo = state_mod.resolve_cwd(cwd)
+    target = spec.branch(state_mod.normalize_scope(state_mod.current_scope()))
     entries = _landing_entries(state)
     marked: List[str] = []
     for entry in entries:
         if entry.get("status") in model.LANDING_SETTLED:
             continue
-        if landing.landed(repo, str(entry.get("tip") or ""), spec.target):
+        if landing.landed(repo, str(entry.get("tip") or ""), target):
             entry.update(
                 status=model.LANDING_LANDED, set_by="daemon",
                 set_at=state_mod.utcnow(),
@@ -2182,7 +2183,7 @@ def _landing_mark_landed(
     if marked:
         state["landing_queue"] = entries
         state_mod.journal(
-            "queue_landed", {"issues": marked, "target": spec.target}, cwd
+            "queue_landed", {"issues": marked, "target": target}, cwd
         )
     return marked
 

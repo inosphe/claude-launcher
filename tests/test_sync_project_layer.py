@@ -225,3 +225,33 @@ def test_a_block_on_the_last_step_lands_before_the_end_of_the_file(sync):
     out = sync.graft(SELECT_BUNDLED, sync.field_blocks(project))
     assert out.endswith("    # the receipt this repository reads\n    verify: 'check it'\n")
     assert sync.graft(SELECT_BUNDLED, sync.field_blocks(out)) == out
+
+
+REPLACED_BUNDLED = """name: t
+steps:
+  merge:
+    title: merge the cut
+    instructions: |
+      merge it
+    awaits:
+      sub: stack
+      at: cut
+    next: done
+  done:
+    instructions: done
+"""
+
+
+def test_a_grafted_field_replaces_the_packaged_field_of_the_same_name(sync):
+    """The package spells the generic await (a bare `claunch` command); the
+    project layer the same await with this checkout's probe. One key survives."""
+    project = REPLACED_BUNDLED.replace(
+        "    awaits:\n      sub: stack\n      at: cut\n",
+        "    # this repository's twin of claunch cflow published\n"
+        "    awaits:\n      sub: stack\n      at: cut\n      probe: 'twin stack cut'\n",
+    )
+    out = sync.graft(REPLACED_BUNDLED, sync.field_blocks(project))
+    assert out.count("awaits:") == 1
+    assert "      probe: 'twin stack cut'\n" in out
+    assert out.index("probe:") < out.index("    next: done")
+    assert sync.graft(REPLACED_BUNDLED, sync.field_blocks(out)) == out

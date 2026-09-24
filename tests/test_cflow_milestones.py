@@ -21,6 +21,10 @@ What this file pins:
 from __future__ import annotations
 
 import argparse
+import os
+import subprocess
+import sys
+from pathlib import Path
 
 import pytest
 
@@ -132,6 +136,25 @@ def test_publishes_and_milestone_awaits_parse():
     assert listed.steps["a"].publishes == ("p", "q")
 
 
+def test_a_milestone_await_may_name_its_own_probe():
+    """The repository picks the command; the milestone still names what is
+    consumed on the way out."""
+    sub = model.parse(
+        "kind: subflow\nsteps:\n  a:\n    instructions: x\n"
+        "    awaits: {main: m, probe: 'twin main m --step a'}\n"
+    )
+    a = sub.steps["a"]
+    assert (a.awaits.milestone, a.awaits.command(a)) == ("m", "twin main m --step a")
+    main = model.parse(
+        "steps:\n  a:\n    instructions: x\n"
+        "    awaits: {sub: s, at: m, probe: 'twin s m --step a'}\n"
+    )
+    a = main.steps["a"]
+    assert (a.awaits.sub, a.awaits.milestone, a.awaits.command(a)) == ("s", "m", "twin s m --step a")
+    with pytest.raises(model.WorkflowError, match="not both"):
+        model.parse("steps:\n  a:\n    instructions: x\n    awaits: {sub: s, probe: 'x'}\n")
+
+
 @pytest.mark.parametrize(
     "text, refused",
     [
@@ -140,8 +163,8 @@ def test_publishes_and_milestone_awaits_parse():
         # a milestone belongs to one named sub run
         ("steps:\n  a:\n    instructions: x\n    awaits: {sub: all, at: m}\n", "name the run"),
         ("steps:\n  a:\n    instructions: x\n    awaits: {at: m}\n", "give the run as 'sub'"),
-        ("kind: subflow\nsteps:\n  a:\n    instructions: x\n    awaits: {main: m, probe: 'true'}\n",
-         "takes neither"),
+        ("kind: subflow\nsteps:\n  a:\n    instructions: x\n    awaits: {main: m, sub: s}\n",
+         "takes no 'sub'"),
         ("steps:\n  a:\n    instructions: x\n    publishes: 'a b'\n", "milestone name"),
         ("steps:\n  a:\n    instructions: x\n    publishes: [p, p]\n", "twice"),
         # still one level: a sub run does not wait on another sub run
@@ -255,6 +278,54 @@ def test_cli_published_answers_with_exit_codes(proj, capsys, monkeypatch):
     state_mod._run_override.set(None)
     out = capsys.readouterr().out
     assert "not running" in out and "new" in out
+
+
+PUBLISHED = Path(__file__).resolve().parents[1] / "tools" / "published.py"
+SUB_DONE = Path(__file__).resolve().parents[1] / "tools" / "sub_done.py"
+
+
+def _tool(script, where, *args, run=None):
+    env = {k: v for k, v in os.environ.items() if k != state_mod.RUN_ENV}
+    env[state_mod.SESSION_ENV] = "s1"
+    if run:
+        env[state_mod.RUN_ENV] = run
+    return subprocess.run(
+        [sys.executable, str(script), *args], cwd=str(where), env=env,
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
+    ).returncode
+
+
+def _engine_code(source, milestone, step, run=None):
+    view = engine.published(source, milestone, step=step, run=run)
+    return 2 if not view["stands"] else (0 if view["new"] else 1)
+
+
+def test_the_gate_twin_answers_as_the_engine_does(proj):
+    """tools/published.py is this repository's probe for a milestone await
+    (the project layer names it); it must read the same two fields."""
+    engine.start("main")
+    asks = [("stack", "cut", "land", None), ("main", "cut-wanted", "standby", "stack")]
+    assert _tool(PUBLISHED, proj, "stack", "cut", "--step", "land") == 2
+    engine.start("stack", run="stack")
+    below = proj / "deeper"
+    below.mkdir()
+    for moves in ([], [None, None], ["stack", "stack"], [None]):
+        for run in moves:
+            _step(run=run)
+        for source, milestone, step, run in asks:
+            want = _engine_code(source, milestone, step, run)
+            got = _tool(PUBLISHED, below, source, milestone, "--step", step, run=run)
+            assert got == want, (moves, source, milestone)
+    assert _tool(PUBLISHED, proj, "stack", "cut", "-t", "nobody") == 2
+
+
+def test_sub_done_all_may_leave_a_session_long_sub_run_out(proj, capsys):
+    engine.start("main")
+    engine.start("stack", run="stack")
+    assert cli_cflow._cmd_sub_done(_ns(name=None, all=True)) == 1
+    assert cli_cflow._cmd_sub_done(_ns(name=None, all=True, excluded=["stack"])) == 0
+    assert _tool(SUB_DONE, proj, "--all") == 1
+    assert _tool(SUB_DONE, proj, "--all", "--except", "stack") == 0
 
 
 def test_probe_env_names_the_asking_run(monkeypatch):

@@ -788,16 +788,18 @@ def _cmd_sub_done(args: argparse.Namespace) -> int:
         # step's `awaits: {sub: all}` and a wrap-up gate ask. Aborted counts
         # as finished here — the question is "is anything still going",
         # and an aborted side track is not.
+        # `--except NAME` leaves a sub run out: one a session keeps for its
+        # whole life (improv-worker's `stack`) would otherwise hold "every
+        # side track finished" false forever.
+        excluded = set(getattr(args, "excluded", None) or ())
         main = engine.status(cwd=cwd, scope=scope)
-        running = [
-            s for s in (main.get("subs") or [])
-            if s.get("status") not in ("done", "aborted")
-        ]
+        subs = [s for s in (main.get("subs") or []) if s.get("sub") not in excluded]
+        running = [s for s in subs if s.get("status") not in ("done", "aborted")]
         if running:
             for s in running:
                 print(f"sub run {s['sub']!r}: {s.get('status')} (step {s.get('step_id')})  run: {s.get('run')}")
             return 1
-        print(f"sub runs: none active ({len(main.get('subs') or [])} finished)")
+        print(f"sub runs: none active ({len(subs)} finished)")
         return 0
     if not args.name:
         print("sub-done: give a sub run NAME, or --all")
@@ -1268,6 +1270,15 @@ def register(sub) -> None:
         help="exit 0 when NO sub run of the session is still running (none, "
         "or all finished/aborted), 1 while any is — the shape a step's "
         "'awaits: {sub: all}' measures",
+    )
+    q.add_argument(
+        "--except",
+        dest="excluded",
+        action="append",
+        default=[],
+        metavar="NAME",
+        help="with --all: leave this sub run out (repeatable) — a sub run the "
+        "session keeps for its whole life, such as improv-worker's 'stack'",
     )
     q.add_argument(
         "-t",
