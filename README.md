@@ -1828,7 +1828,11 @@ reported per relay in the `rtt_ms` / `rtt_age` / `pending_ms` fields of the
 `relay` status rows (the badge shows the slowest connected one). Amber is
 ≥150ms, red ≥500ms, and a probe still unanswered shows as `≥` its age, so a
 stalled link reads as stalled before its answer arrives. The tooltip has the
-last/median/max of recent samples and each relay's value.
+last/median/max of recent samples and each relay's value, and the daemon
+event loop's longest stall in the last 30s (`loop` in the pong and in
+`GET /api/daemon`: `lag_ms`, `max_ms`, `window_s`) -- every request and
+terminal waits on that loop, so a large value there means the daemon was
+busy rather than the network slow.
 
 ### Idle detection
 

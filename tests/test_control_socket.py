@@ -197,6 +197,8 @@ def test_a_timed_ping_gets_its_clock_back_with_the_relay_status(home, tmp_path):
                 assert pong["type"] == "pong" and pong["t"] == 1234.5
                 assert pong["relay"]["configured"] is False
                 assert pong["relay"]["relays"] == []
+                # The loop's own lag rides along too (claunch-y9ax9).
+                assert set(pong["loop"]) == {"lag_ms", "max_ms", "window_s"}
         finally:
             await client.close()
 
