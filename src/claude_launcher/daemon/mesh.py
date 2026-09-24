@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import bisect
 import contextlib
 import json
 import logging
@@ -659,6 +660,75 @@ def _dedupe_roles(names: Sequence[str], *, skip: str = "") -> List[str]:
     return out
 
 
+class _LogIndex:
+    """Who each log entry is addressed to and who sent it, by log position.
+
+    ``pending`` and ``owed_all`` used to walk the log member by member, and
+    almost every entry they visited was addressed to someone else: on
+    mesh-0826 (382 members, 29697 messages) one pass over every member read
+    4.3 million entries to find the few thousand that concerned anyone, 4.1s
+    of event loop per full roster (measured 2026-09-24). This keeps the
+    positions that can concern a handle -- sent to it by name, or to ``"*"``
+    -- so those walks visit only them.
+
+    It indexes the ADDRESS, never the answer: whether an entry reaches a
+    member still goes through :meth:`Mesh.addressed_to`, so the member graph
+    stays current exactly as before. The log is append-only and its entries
+    are never re-addressed, so the index only ever extends; a log that was
+    replaced or shortened (a reload, a test) is noticed by its identity and
+    its last entry, and rebuilt.
+    """
+
+    __slots__ = ("log", "size", "last", "to", "everyone", "last_from")
+
+    def __init__(self) -> None:
+        self.log: Optional[list] = None
+        self.size = 0
+        self.last: Optional[dict] = None
+        #: handle -> ascending positions naming it in ``to``.
+        self.to: Dict[str, List[int]] = {}
+        #: ascending positions addressed to ``"*"``.
+        self.everyone: List[int] = []
+        #: handle -> the last position it sent.
+        self.last_from: Dict[str, int] = {}
+
+    def sync(self, log: list) -> None:
+        n = len(log)
+        if (
+            log is not self.log
+            or n < self.size
+            or (self.size and log[self.size - 1] is not self.last)
+        ):
+            self.__init__()
+            self.log = log
+        for k in range(self.size, n):
+            m = log[k]
+            sender = m.get("from")
+            if isinstance(sender, str):
+                self.last_from[sender] = k
+            to = m.get("to")
+            if to == "*":
+                self.everyone.append(k)
+            elif isinstance(to, list):
+                for h in {h for h in to if isinstance(h, str)}:
+                    self.to.setdefault(h, []).append(k)
+            elif isinstance(to, str):
+                self.to.setdefault(to, []).append(k)
+        self.size = n
+        self.last = log[n - 1] if n else None
+
+    def candidates(self, handle: str, lo: int) -> List[int]:
+        """Ascending positions ``>= lo`` that may be addressed to ``handle``."""
+        mine = self.to.get(handle) or []
+        a = mine[bisect.bisect_left(mine, lo):]
+        b = self.everyone[bisect.bisect_left(self.everyone, lo):]
+        if not b:
+            return a
+        if not a:
+            return b
+        return sorted(a + b)
+
+
 class Mesh:
     """One mesh: membership, its message log, and per-member delivery state."""
 
@@ -674,6 +744,7 @@ class Mesh:
         self.project: str = "" if projects.normalize(project) == projects.DEFAULT else projects.normalize(project)
         self.members: Dict[str, Member] = {}
         self.messages: List[dict] = []  # in-memory mirror of log.jsonl
+        self._log_index = _LogIndex()  # see _indexed()
         self.cursors: Dict[str, int] = {}  # handle -> delivered log index
         #: This daemon's relay name, mirrored from MeshManager.machine so the
         #: mesh can work out its own rank. "" = no relay identity yet.
@@ -1057,8 +1128,9 @@ class Mesh:
         anything the fast path parked in ``provisional``."""
         start = self.cursors.get(handle, 0)
         done = self.delivered_ids.get(handle) or frozenset()
+        log = self.messages
         out = [
-            m for m in self.messages[start:]
+            m for m in (log[k] for k in self._indexed().candidates(handle, start))
             if self.addressed_to(m, handle) and m.get("id") not in done
         ]
         out.extend(
@@ -1186,7 +1258,6 @@ class Mesh:
         """
         start = self.cursors.get(handle, 0)
         done = self.delivered_ids.get(handle) or frozenset()
-        n = len(self.messages)
         out: List[dict] = []
         # A joining member's cursor jumps to the end of the log (see
         # ``MeshManager.join``), which makes every earlier message read as
@@ -1206,27 +1277,55 @@ class Mesh:
             else None
         )
         # Backwards from the newest, stopping at this member's own last send —
-        # the log is walked by index rather than sliced because mesh_info calls
-        # this for every member on every web poll.
-        for k in range(n + len(self.provisional) - 1, -1, -1):
-            if k < n:
-                m = self.messages[k]
-                delivered = k < start or m.get("id") in done
-            else:
-                m = self.provisional[k - n]
-                delivered = m.get("id") in done
+        # the unsequenced tail first, then the log. mesh_info calls this for
+        # every member on every roster read, so the log half visits only the
+        # positions that can be addressed to this member (see _LogIndex):
+        # an entry sent to someone else can be neither owed nor, by the
+        # message order the join floor relies on, the first to predate it.
+        index = self._indexed()
+        walk = [(m, m.get("id") in done) for m in reversed(self.provisional)]
+        stop = False
+        for m, delivered in walk:
             if m.get("from") == handle:
+                stop = True
                 break
             if joined_ago is not None:
                 age = _age_secs(m.get("ts"), now_wall)
                 if age is not None and age > joined_ago:
+                    stop = True
                     break  # predates this member's join — never its debt
-            if not delivered or not self.addressed_to(m, handle):
-                continue
-            if expects_reply(msg_type_for(m, handle)):
+            if delivered and self.addressed_to(m, handle) and expects_reply(
+                msg_type_for(m, handle)
+            ):
                 out.append(m)
+        if not stop:
+            floor = index.last_from.get(handle, -1) + 1
+            for k in reversed(index.candidates(handle, floor)):
+                m = self.messages[k]
+                if joined_ago is not None:
+                    age = _age_secs(m.get("ts"), now_wall)
+                    if age is not None and age > joined_ago:
+                        break  # predates this member's join — never its debt
+                if not (k < start or m.get("id") in done):
+                    continue
+                if not self.addressed_to(m, handle):
+                    continue
+                if expects_reply(msg_type_for(m, handle)):
+                    out.append(m)
         out.reverse()
         return out
+
+    def _indexed(self) -> _LogIndex:
+        """The address index, caught up with the log (see :class:`_LogIndex`)."""
+        index = self._log_index
+        log = self.messages
+        if (
+            index.log is not log
+            or index.size != len(log)
+            or (log and log[-1] is not index.last)
+        ):
+            index.sync(log)
+        return index
 
 
 class MeshManager:
