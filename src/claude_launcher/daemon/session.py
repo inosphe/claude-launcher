@@ -605,9 +605,32 @@ class Session:
         """Spawn the child and begin reading it. Called once, by the manager."""
         self.argv = argv
         self._started_mono = time.monotonic()
-        self.pty = pty_backend.spawn(
+        self._attach(pty_backend.spawn(
             argv, env=env, cwd=cwd, cols=self.sdef.cols, rows=self.sdef.rows
-        )
+        ))
+
+    async def start_async(
+        self, argv: List[str], env: Dict[str, str], cwd: str
+    ) -> None:
+        """:meth:`start`, with the spawn on a worker thread.
+
+        Creating the process and its pseudo console took 250-350 ms per
+        session on this machine, all of it on the event loop and so every
+        socket's (claunch-y9ax9.1). The native part of that releases the GIL
+        -- measured: a busy thread beside the spawn never waited longer than
+        16 ms -- so a thread is enough to take it off the loop. Callers
+        already see a staged session with no ``pty`` while an HTTP handler
+        awaits between staging and launch, and every writer checks for it.
+        """
+        self.argv = argv
+        self._started_mono = time.monotonic()
+        self._attach(await asyncio.to_thread(
+            pty_backend.spawn,
+            argv, env=env, cwd=cwd, cols=self.sdef.cols, rows=self.sdef.rows,
+        ))
+
+    def _attach(self, pty) -> None:
+        self.pty = pty
         self.pid = self.pty.pid
         self._apply_cpu_priority()
 

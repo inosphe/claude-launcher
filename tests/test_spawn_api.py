@@ -51,14 +51,16 @@ def test_score_goal_defaults_creation_children_and_user_rating(home, tmp_path, m
         mgr = _manager()
         mm = MeshManager(mgr, root=tmp_path / "mesh")
         client = await _serve(mgr, mm)
-        launch = mgr.launch
+        # The HTTP routes launch through launch_async (the spawn runs off the
+        # loop, claunch-y9ax9.1).
+        launch = mgr.launch_async
         openings = []
 
-        def record_launch(session, **kwargs):
+        async def record_launch(session, **kwargs):
             openings.append(kwargs.get("opening"))
-            return launch(session, **kwargs)
+            return await launch(session, **kwargs)
 
-        monkeypatch.setattr(mgr, "launch", record_launch)
+        monkeypatch.setattr(mgr, "launch_async", record_launch)
         try:
             resp = await client.get("/api/score-goal/defaults", headers=BEARER)
             assert await resp.json() == {"enabled": False}

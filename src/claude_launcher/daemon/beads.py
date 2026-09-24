@@ -2570,20 +2570,62 @@ class Board:
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
 
+    def sessions_exited(self, sessions) -> None:
+        """:meth:`session_exited` for many sessions at once -- the records a
+        restart retired. One task reads each board once for all of them
+        (:meth:`sweep_many`)."""
+        sessions = list(sessions)
+        if not sessions:
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        task = loop.create_task(self.sweep_many(sessions))
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
+
     async def sweep(self, session) -> List[List[str]]:
         """Apply :func:`sweep_plan` to the board; the writes made, for the log."""
-        name = session.sdef.name
+        return (await self.sweep_many([session])).get(session.sdef.name, [])
+
+    async def sweep_many(self, sessions) -> Dict[str, List[List[str]]]:
+        """:meth:`sweep` for several sessions, reading each board once.
+
+        A restart retires every record it does not relaunch, and each used to
+        get a sweep of its own: a fresh ``br list --all`` of the whole board
+        (1284 issues, 3.4 MB here) decoded on the event loop, once per record
+        -- 6.2 s of loop in the first two minutes after a restart, measured
+        by py-spy (claunch-fh8u1). Every write below touches an issue whose
+        assignee or creator is the one session planned for, so plans made
+        from one listing do not overlap.
+        """
+        done_by: Dict[str, List[List[str]]] = {}
         if not self.available():
-            return []
-        try:
-            root = await self.root_for(session.sdef.cwd)
-            if not self.has_board(root):
-                return []
-            self._cache.pop(str(root), None)
-            rows = await self.issues(root)
-        except Exception as exc:
-            log.debug("beads: no sweep for %r: %s", name, exc)
-            return []
+            return done_by
+        by_root: Dict[str, Tuple[Path, list]] = {}
+        for session in sessions:
+            try:
+                root = await self.root_for(session.sdef.cwd)
+            except Exception as exc:
+                log.debug("beads: no sweep for %r: %s", session.sdef.name, exc)
+                continue
+            if root is None or not self.has_board(root):
+                continue
+            by_root.setdefault(str(root), (root, []))[1].append(session)
+        for root, group in by_root.values():
+            try:
+                self._cache.pop(str(root), None)
+                rows = await self.issues(root)
+            except Exception as exc:
+                log.debug("beads: no sweep of %s: %s", root, exc)
+                continue
+            for session in group:
+                done_by[session.sdef.name] = await self._sweep_rows(root, rows, session)
+        return done_by
+
+    async def _sweep_rows(self, root: Path, rows: List[dict], session) -> List[List[str]]:
+        name = session.sdef.name
         mine = match(rows, name, issue=session.sdef.issue, task=session.sdef.task)
         plan = sweep_plan(mine, name, exit_code=session.exit_code)
         done: List[List[str]] = []

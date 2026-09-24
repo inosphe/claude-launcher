@@ -453,8 +453,7 @@ def build_app(
     # retires what it does not relaunch before this board exists, so each
     # retired record's in_progress issues would keep claiming a dead session
     # is working. Sweep the board for them here, where board and loop exist.
-    for dead in manager.take_retired_for_sweep():
-        board.session_exited(dead)
+    board.sessions_exited(manager.take_retired_for_sweep())
 
     r = app.router
     r.add_get("/api/health", h_health)
@@ -5470,7 +5469,7 @@ async def _onboard_and_launch(
             "\n\n" + opening if opening else ""
         )
     try:
-        manager.launch(session, opening=opening)
+        await manager.launch_async(session, opening=opening)
     except Exception:
         manager.discard(name)
         await onboard.unwind(report, name=name, cwd=cwd, mesh_mgr=_mesh_mgr(request))
@@ -5828,7 +5827,7 @@ async def h_sessions_resume_all(request: web.Request) -> web.Response:
             continue
         name = session.sdef.name
         try:
-            manager.respawn(name)
+            await manager.respawn_async(name)
         except Exception as exc:
             failed.append({"name": name, "error": str(exc)})
         else:
@@ -5868,7 +5867,7 @@ async def h_sessions_respawn_all(request: web.Request) -> web.Response:
             continue
         name = session.sdef.name
         try:
-            manager.respawn(name)
+            await manager.respawn_async(name)
         except Exception as exc:
             failed.append({"name": name, "error": str(exc)})
         else:
@@ -6830,7 +6829,7 @@ async def h_session_child_kill(request: web.Request) -> web.Response:
 
 async def h_session_respawn(request: web.Request) -> web.Response:
     manager: SessionManager = request.app["manager"]
-    session = manager.respawn(request.match_info["name"])
+    session = await manager.respawn_async(request.match_info["name"])
     return json_response(session.info())
 
 

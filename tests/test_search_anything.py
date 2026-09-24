@@ -733,3 +733,37 @@ def test_search_stream_route_speaks_server_sent_events(tmp_path):
             await client.close()
             await server.close()
     asyncio.run(run())
+
+
+def test_import_current_reads_only_the_sessions_it_imports(monkeypatch):
+    """The first Observer snapshot after a start ran ``import_current``,
+    which read and decoded every record to learn which sessions already had
+    a briefing or checks row -- 0.6 s of event loop on this machine
+    (claunch-fh8u1). It asks the key for those sessions alone now."""
+    from claude_launcher.daemon import briefing
+    search_records.remember_many([
+        (f"other{i}", [{"id": str(j), "kind": "observer", "text": "x", "at": str(j)} for j in range(50)])
+        for i in range(20)
+    ])
+    status_checks.set_entries([{"id": "c1", "name": "tests", "question": "Tests pass?"}])
+    status_checks.report("s1", [{"id": "c1", "answer": "yes"}])
+    status_checks.report("s2", [{"id": "c1", "answer": "no"}])
+    search_records.capture("s2", "checks", {"id": "c1", "answer": "old"}, "0")
+    monkeypatch.setattr(briefing, "_restore_cache", lambda: None)
+    monkeypatch.setattr(briefing, "_cache", {"s3": ((), {"briefing": {"goal": "g"}, "generated_at": "5"})})
+
+    decoded = []
+    real_loads = search_records.json.loads
+    monkeypatch.setattr(search_records.json, "loads", lambda s, *a, **k: decoded.append(s) or real_loads(s, *a, **k))
+    monkeypatch.setattr(search_records, "rows", lambda *a, **k: pytest.fail("import_current read every row"))
+
+    search_records.import_current()
+    # The status-check file is decoded too; no record payload is.
+    assert not [s for s in decoded if '"origin": "record"' in s]
+    assert search_records.kinds_present([("s1", "checks"), ("s2", "checks"), ("s3", "briefing"),
+                                         ("s3", "checks"), ("other1", "checks")]) == {
+        ("s1", "checks"), ("s2", "checks"), ("s3", "briefing")}
+
+    # A second pass finds them all and writes nothing.
+    monkeypatch.setattr(search_records, "capture", lambda *a, **k: pytest.fail("imported twice"))
+    search_records.import_current()

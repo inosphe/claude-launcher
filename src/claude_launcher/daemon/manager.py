@@ -553,6 +553,22 @@ class SessionManager:
         """Start a staged session. ``opening`` is a first user message for the
         harnesses that take one on their command line (see
         :func:`harness.takes_opening_argv`)."""
+        prepared = self._prepare_launch(session, restoring=restoring, opening=opening)
+        session.start(*prepared[:3])
+        return self._launched(session, restoring, *prepared[2:])
+
+    async def launch_async(
+        self, session: Session, *, restoring: bool = False, opening: str = ""
+    ) -> Session:
+        """:meth:`launch` with the process spawn off the event loop (see
+        :meth:`Session.start_async`); what the HTTP handlers call."""
+        prepared = self._prepare_launch(session, restoring=restoring, opening=opening)
+        await session.start_async(*prepared[:3])
+        return self._launched(session, restoring, *prepared[2:])
+
+    def _prepare_launch(self, session: Session, *, restoring: bool, opening: str):
+        """Everything :meth:`launch` does before the spawn: returns
+        ``(argv, env, cwd, codex_home, known_codex_sessions)``."""
         codex_home = None
         known_codex_sessions = None
         if session.sdef.harness == "codex":
@@ -604,7 +620,12 @@ class SessionManager:
             # the previous run's log into it before the new child writes a
             # byte, or the restart silently costs every viewer their wheel.
             session.seed_screen_from_log()
-        session.start(argv, env, cwd)
+        return argv, env, cwd, codex_home, known_codex_sessions
+
+    def _launched(
+        self, session: Session, restoring: bool, cwd: str, codex_home, known_codex_sessions
+    ) -> Session:
+        """Everything :meth:`launch` does after the spawn."""
         if not restoring:
             self.events.record(session, "create", "세션 생성", cwd=cwd,
                                borrow=session.sdef.borrow)
@@ -869,6 +890,18 @@ class SessionManager:
         )
         try:
             return self.launch(session, restoring=restoring, opening=opening)
+        except Exception:
+            self.discard(session.sdef.name)
+            raise
+
+    async def create_async(
+        self, sdef: SessionDef, *, restoring: bool = False, opening: str = "", **stamps
+    ) -> Session:
+        """:meth:`create` with the process spawn off the event loop;
+        ``stamps`` are :meth:`stage`'s keywords."""
+        session = self.stage(sdef, restoring=restoring, **stamps)
+        try:
+            return await self.launch_async(session, restoring=restoring, opening=opening)
         except Exception:
             self.discard(session.sdef.name)
             raise
@@ -1558,24 +1591,45 @@ class SessionManager:
         — same conversation, same session name. Works just as well on a record
         that outlived the daemon that spawned it.
         """
+        session = self._respawn_take(name)
+        try:
+            relaunched = self.create(**self._respawn_args(session))
+        except Exception:
+            self._sessions[name] = session  # keep the exited record on failure
+            raise
+        return self._respawned(session, relaunched)
+
+    async def respawn_async(self, name: str) -> Session:
+        """:meth:`respawn` with the process spawn off the event loop."""
+        session = self._respawn_take(name)
+        try:
+            relaunched = await self.create_async(**self._respawn_args(session))
+        except Exception:
+            self._sessions[name] = session  # keep the exited record on failure
+            raise
+        return self._respawned(session, relaunched)
+
+    def _respawn_take(self, name: str) -> AnySession:
         session = self.get(name)
         if not session.exited:
             raise ManagerError(
                 f"session {name!r} is still running (attach to it, or kill it first)"
             )
         del self._sessions[name]
-        try:
-            relaunched = self.create(
-                session.sdef,
-                restoring=True,
-                created_at=session.created_at,
-                last_visited_at=session.last_visited_at,
-                last_input_at=session.last_input_at,
-                delivery_hold=session.delivery_held(),
-            )
-        except Exception:
-            self._sessions[name] = session  # keep the exited record on failure
-            raise
+        return session
+
+    @staticmethod
+    def _respawn_args(session: AnySession) -> dict:
+        return dict(
+            sdef=session.sdef,
+            restoring=True,
+            created_at=session.created_at,
+            last_visited_at=session.last_visited_at,
+            last_input_at=session.last_input_at,
+            delivery_hold=session.delivery_held(),
+        )
+
+    def _respawned(self, session: AnySession, relaunched: Session) -> Session:
         # A person asked for this incarnation, by name, right now -- unlike
         # restore_all's unattended relaunch after a daemon restart. See
         # Session.resumed_by_human for what this buys the session.
