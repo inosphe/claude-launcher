@@ -521,3 +521,80 @@ def test_a_mutual_wait_is_reported_once_per_pair_of_positions(proj):
     engine.next_step()                                     # a goto's step is fetched first
     _step()                                                # request -> land, publishes
     assert engine.sync_deadlock(run="stack") is None      # the sub has something new
+
+
+def _guarded_main():
+    twin = f'"{sys.executable}" "{PUBLISHED}"'
+    return f"""
+name: guarded
+steps:
+  request:
+    instructions: ask for a cut
+    publishes: cut-wanted
+    next: merge
+  merge:
+    instructions: merge the cut
+    awaits: {{sub: stack, at: cut}}
+    verify: '{twin} stack cut --step merge'
+    next: again
+  again:
+    select:
+      prompt: again?
+      chooser: agent
+      options:
+        again: {{description: again, next: request}}
+        stop: {{description: stop}}
+"""
+
+
+def test_a_verify_on_the_waiting_step_keeps_consumption_in_step(proj):
+    """s763's review of claunch-u8wjx.2: an await does not stop the run
+    leaving, so leaving `merge` before the cut records the OLD count and the
+    late cut reads as new one round later. The same question as a verify
+    refuses the early leave (it runs before the move, against the old record)."""
+    (proj / ".claunch" / "workflows" / "guarded.yaml").write_text(_guarded_main(), encoding="utf-8")
+    engine.start("guarded")
+    engine.start("stack", run="stack")
+    _step()                                              # request -> merge
+    engine.report("merged nothing yet")
+    assert engine.next_step()["status"] == "verify_failed"
+    assert engine.status()["step_id"] == "merge"
+    _step(run="stack"); _step(run="stack")               # standby -> cut -> standby: cut #1
+    engine.report("merged cut 1")
+    assert engine.next_step()["step_id"] == "again"
+    assert not engine.published("stack", "cut", step="merge")["new"]
+    engine.select("again", "round 2")
+    _step()                                              # request -> merge, round 2
+    engine.report("early")
+    assert engine.next_step()["status"] == "verify_failed"   # cut #1 is not round 2's
+
+
+def test_a_sub_run_s_verify_reads_its_own_consumption(proj):
+    """The stack's own guarded steps ask `published main ...` from the sub
+    run; the verify must see the sub run's record, not the main run's."""
+    twin = f'"{sys.executable}" "{PUBLISHED}"'
+    sub = f"""
+name: gstack
+kind: subflow
+steps:
+  standby:
+    instructions: keep the stack
+    next: cut
+  cut:
+    instructions: split the table
+    awaits: {{main: cut-wanted}}
+    verify: '{twin} main cut-wanted --step cut'
+    publishes: cut
+    next: seal
+  seal:
+    instructions: done
+"""
+    (proj / ".claunch" / "workflows" / "gstack.yaml").write_text(sub, encoding="utf-8")
+    engine.start("main")
+    engine.start("gstack", run="stack")
+    _step(run="stack")                                   # standby -> cut
+    engine.report("too early", run="stack")
+    assert engine.next_step(run="stack")["status"] == "verify_failed"
+    _step(); _step()                                     # main: work -> request -> land (cut-wanted #1)
+    engine.report("cut 1", run="stack")
+    assert engine.next_step(run="stack")["step_id"] == "seal"

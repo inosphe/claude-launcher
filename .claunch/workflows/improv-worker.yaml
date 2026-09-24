@@ -1549,6 +1549,15 @@ steps:
       컷 번호와 컷 tip, 만든 머지 커밋 해시(또는 실린 것이 없어 머지하지
       않았다는 사실), 실린 자식(세션·이슈·스택 머지 해시)과 표적 테스트
       수치가 보고에 있다.
+    # 대기(awaits)는 떠나는 것을 막지 않는다. 컷이 오기 전에 이 스텝을
+    # 떠나면 그때의 게시 횟수가 소비로 적히고, 늦게 온 이번 컷은 다음
+    # 착지에서 「새 것」으로 읽힌다 — 소비가 한 회차 어긋난다(s763 리뷰,
+    # claunch-u8wjx.2). 그래서 같은 질문을 verify로도 건다: 새 컷이 없으면
+    # 이 스텝을 떠날 수 없다. verify는 이동 전에 돌므로 소비 기록은 아직
+    # 옛 값이다.
+    # 이 저장소의 그 verify: tools/published.py는 같은 질문을 이 체크아웃에서
+    # 묻는다(게이트 규칙, tests/test_gates_run_this_checkout.py).
+    verify: 'uv run --no-sync python tools/published.py stack cut --step stack-merge'
     # 이 저장소의 그 probe: tools/published.py는 `claunch cflow published`와
     # 같은 종료 코드를 내되 이 체크아웃에서 돈다(게이트 규칙,
     # tests/test_gates_run_this_checkout.py). 무엇을 소비하는지는 여전히

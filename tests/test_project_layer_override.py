@@ -96,7 +96,8 @@ def _graft_fields() -> tuple:
 #: done. 세션 종료한다" and exited, and a request that was rejected, or asked
 #: for a rebase, or quietly dropped from a batch, had nobody left to notice.
 ARMED = {
-    "improv-worker": ("workspace-ok", "review", "rebase", "wrapup", "end-hold"),
+    # stack-merge: the cut must be new to leave (tools/published.py)
+    "improv-worker": ("workspace-ok", "review", "stack-merge", "rebase", "wrapup", "end-hold"),
     "improv-leader": ("sweep",),
 }
 

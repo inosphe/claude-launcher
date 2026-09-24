@@ -192,6 +192,10 @@ def graft(bundled_text: str, blocks: Dict[str, List[str]]) -> str:
             step = m.group(1)
         f = FIELD_NAME_RE.match(line)
         if f and f.group(1) in replaced.get(step, ()):
+            # The comment run directly above a field is that field's (the
+            # rule field_blocks reads by); the grafted block carries its own.
+            while out and COMMENT_RE.match(out[-1]):
+                out.pop()
             dropping = True
             continue
         if NEXT_RE.match(line) and step in pending:

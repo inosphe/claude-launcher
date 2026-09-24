@@ -137,3 +137,17 @@ def test_peer_review_asks_the_parent_before_the_leader(worker):
         ("worker", "ancestor"),
         ("leader", "ancestor"), ("leader", "sibling"),
     ]
+
+
+def test_every_milestone_wait_is_also_a_verify(stack, worker):
+    """An await does not stop the run leaving; the verify does, so an early
+    leave cannot record a stale count (s763's review of claunch-u8wjx.2)."""
+    guarded = [("stack", s) for s in stack.steps.values() if s.awaits and s.awaits.milestone]
+    guarded += [("worker", s) for s in worker.steps.values() if s.awaits and s.awaits.milestone]
+    assert {s.id for _, s in guarded} == {"cut", "submitted", "restack", "stack-merge"}
+    for _, s in guarded:
+        assert s.verify is not None and "published" in s.verify.command, s.id
+        assert f"--step {s.id}" in s.verify.command, s.id
+    for name, step in (("stack", "cut"), ("improv-worker", "stack-merge")):
+        cmd = _project(name).steps[step].verify.command
+        assert cmd.startswith("uv run --no-sync python tools/published.py "), (name, step)

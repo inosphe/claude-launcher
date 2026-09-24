@@ -255,3 +255,17 @@ def test_a_grafted_field_replaces_the_packaged_field_of_the_same_name(sync):
     assert "      probe: 'twin stack cut'\n" in out
     assert out.index("probe:") < out.index("    next: done")
     assert sync.graft(REPLACED_BUNDLED, sync.field_blocks(out)) == out
+
+
+def test_a_replaced_field_takes_its_comment_run_with_it(sync):
+    """Otherwise the packaged reason stays behind and the block brings its
+    own copy: two runs of the same comment, stable but doubled."""
+    bundled = REPLACED_BUNDLED.replace(
+        "    awaits:\n", "    # why the step waits\n    awaits:\n"
+    )
+    project = bundled.replace(
+        "      at: cut\n", "      at: cut\n      probe: 'twin stack cut'\n"
+    )
+    out = sync.graft(bundled, sync.field_blocks(project))
+    assert out.count("    # why the step waits\n") == 1
+    assert sync.graft(bundled, sync.field_blocks(out)) == out

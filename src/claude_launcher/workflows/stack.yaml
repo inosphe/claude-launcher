@@ -206,6 +206,10 @@ steps:
       컷 번호와 컷 tip, 실림/넘어감 두 목록(세션·이슈·머지 해시 또는 사유)이
       보고에 있고, 메인 런의 회차 이슈에 `CUT <n> @ <컷 tip>` 코멘트가 있다.
     publishes: [cut]
+    # 대기는 떠나는 것을 막지 않으므로 같은 질문을 verify로도 건다 —
+    # 새 cut-wanted 없이 떠나면 소비가 한 회차 어긋난다(improv-worker
+    # stack-merge의 주석과 같은 이유).
+    verify: 'claunch cflow published main cut-wanted --step cut --run stack'
     # 이 스텝의 대기는 소비를 기록하는 자리다: 떠날 때 본 cut-wanted의
     # 횟수가 적히므로, 다음 cut-wanted가 새 것으로 보인다. 관제(standby)가
     # 이미 새 것임을 확인하고 들어오므로 대기 자체가 울릴 일은 없다.
@@ -225,6 +229,10 @@ steps:
     done_when: |
       요청된 회차 브랜치·tip·회차 이슈와 알린 자식(또는 재요청이라 알리지
       않았다는 사실)이 보고에 있다.
+    # 대기는 떠나는 것을 막지 않으므로 같은 질문을 verify로도 건다 —
+    # 새 frozen 없이 떠나면 소비가 한 회차 어긋난다(improv-worker
+    # stack-merge의 주석과 같은 이유).
+    verify: 'claunch cflow published main frozen --step submitted --run stack'
     awaits:
       main: frozen
       describe: 메인 런이 컷을 실은 브랜치로 통합을 요청했다
@@ -250,6 +258,10 @@ steps:
       옛 스택 tip과 새 스택 tip, 옮긴 머지 수(0일 수 있다), 공지한 자식,
       `STACK @ <새 tip>` 코멘트가 보고에 있다. 충돌로 멈췄으면 그 사실과
       충돌 지점이 있다.
+    # 대기는 떠나는 것을 막지 않으므로 같은 질문을 verify로도 건다 —
+    # 새 landed 없이 떠나면 소비가 한 회차 어긋난다(improv-worker
+    # stack-merge의 주석과 같은 이유).
+    verify: 'claunch cflow published main landed --step restack --run stack'
     awaits:
       main: landed
       describe: 메인 런의 회차가 master에 착지했다
