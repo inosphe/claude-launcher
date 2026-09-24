@@ -49,6 +49,12 @@ steps:
     instructions: wait for the landing
     checklist:
       then: wrapup
+      # The ceiling, not the 10s default: the 'fast' item starts a Python
+      # interpreter, and under a parallel run that start can outlast 10s. A
+      # probe that times out is unmeasured (None), nothing changes, and
+      # check_checklist() answers None -- a red here that says nothing about
+      # the run state this module checks (claunch-5wmv4.1).
+      timeout: 30
       items:
         - id: approved
           describe: the person looked at the result
