@@ -644,6 +644,8 @@ def build_app(
     r.add_get("/api/sessions/{name}", h_session_get)
     r.add_get("/api/sessions/{name}/meta", h_session_meta)
     r.add_get("/api/sessions/{name}/input-journal", h_session_input_journal)
+    r.add_delete("/api/sessions/{name}/input-journal/{request_id}",
+                 h_session_input_cancel)
     r.add_get("/api/sessions/{name}/status-checks", h_session_status_checks)
     r.add_post("/api/sessions/{name}/status-checks/reports", h_session_status_checks_report)
     r.add_post("/api/sessions/{name}/status-checks/refresh", h_session_status_checks_refresh)
@@ -7149,6 +7151,9 @@ async def h_session_keys(request: web.Request) -> web.Response:
         return json_error(400, str(exc))
     if feedback != "none" and not session.sdef.score_goal:
         return json_error(409, "score goal is not enabled for this session")
+    if session.exited and request_id is not None:
+        return _queue_session_input(request, session, body, request_id,
+                                    feedback)
     paste = body.get("paste")
     if paste is not None:
         if not isinstance(paste, str):
@@ -7227,17 +7232,92 @@ async def h_session_keys(request: web.Request) -> web.Response:
     return json_response(_keys_payload(session, len(data)))
 
 
+def _queue_session_input(request, session, body: dict, request_id: str,
+                         feedback: str) -> web.Response:
+    """The session-line send for a session that has exited: record the line
+    as ``queued`` in its input journal and answer 202. The manager types it
+    when the session is launched again (``session_input.flush``).
+
+    Only the operator's session line queues (it always carries ``input_id``);
+    a bare keys call to an exited session still fails, because a caller with
+    no durable id has nothing to see the queued line by.
+    """
+    name = session.sdef.name
+    if getattr(session, "archived_at", None):
+        return json_error(
+            409, f"session {name!r} is archived — nothing was queued; "
+                 f"resume it first")
+    if feedback != "none":
+        return json_error(
+            409, "a reward/penalty point cannot ride a queued line — it applies "
+                 "only to input that lands; nothing was queued")
+    paste = body.get("paste")
+    if paste is not None:
+        if not isinstance(paste, str):
+            return json_error(400, "'paste' must be a string")
+        text = paste
+    else:
+        keys = body.get("keys")
+        if not (isinstance(keys, list) and len(keys) == 2
+                and isinstance(keys[0], str) and keys[1] == "Enter"):
+            return json_error(400, "'input_id' requires [text, 'Enter'] keys")
+        text = keys[0]
+    prior = session_input.latest(name, request_id)
+    if prior:
+        return json_response({"ok": True, "bytes": 0, "duplicate": True,
+                              "status": prior.get("status")})
+    session_input.queue(name, request_id=request_id, text=text)
+    waiting = session_input.pending(name)
+    # A respawn can land between reading the record and writing the line:
+    # the new incarnation's launch-time flush found nothing, so start one.
+    manager = request.app["manager"]
+    try:
+        current = manager.get(name)
+    except Exception:  # noqa: BLE001 — cleared meanwhile; stays queued
+        current = None
+    if current is not None and not current.exited:
+        manager.flush_queued_input(current)
+    return json_response({
+        "ok": True, "bytes": 0, "queued": True, "input_id": request_id,
+        "position": len(waiting),
+    }, status=202)
+
+
 async def h_session_input_journal(request: web.Request) -> web.Response:
-    """Recent durable submissions made through the session-line control."""
+    """Recent durable submissions made through the session-line control.
+
+    ``entries`` is the raw event log; ``requests`` folds it to one row per
+    submitted line with its current status (queued / accepted / sent /
+    failed / cancelled), which is what the panel shows.
+    """
     session = _session(request)
     try:
         limit = int(request.query.get("limit", "50"))
     except ValueError:
         return json_error(400, "'limit' must be an integer")
+    name = session.sdef.name
     return json_response({
-        "session": session.sdef.name,
-        "entries": session_input.read(session.sdef.name, limit=limit),
+        "session": name,
+        "entries": session_input.read(name, limit=limit),
+        "requests": session_input.requests(name, limit=limit),
+        "queued": len(session_input.pending(name)),
     })
+
+
+async def h_session_input_cancel(request: web.Request) -> web.Response:
+    """Withdraw a line that is still queued for an exited session."""
+    session = _session(request)
+    name = session.sdef.name
+    request_id = request.match_info["request_id"]
+    entry = session_input.cancel(name, request_id)
+    if entry is None:
+        prior = session_input.latest(name, request_id)
+        if prior is None:
+            return json_error(404, f"no input {request_id!r} for {name!r}")
+        return json_error(
+            409, f"input {request_id!r} is {prior.get('status')!r}, not "
+                 f"queued — only a queued line can be withdrawn")
+    return json_response({"ok": True, "entry": entry})
 
 
 async def h_session_deliver(request: web.Request) -> web.Response:

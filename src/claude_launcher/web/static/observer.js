@@ -734,8 +734,10 @@ async function send(interrupt) {
   pending=true;controls();
   try {
     const inputId = typeof crypto.randomUUID === "function" ? crypto.randomUUID() : `observer-${Date.now()}-${Array.from(crypto.getRandomValues(new Uint32Array(3))).join("-")}`;
-    await request(`api/sessions/${encodeURIComponent(target)}/keys`, interrupt?{keys:["Escape"]}:{keys:[text,"Enter"],input_id:inputId});
-    $("input-status").textContent=interrupt?`${target}: Esc 전송됨. 실제 상태를 확인하십시오.`:`${target}: 지시 전송됨`;
+    const sent=await request(`api/sessions/${encodeURIComponent(target)}/keys`, interrupt?{keys:["Escape"]}:{keys:[text,"Enter"],input_id:inputId});
+    // An exited target answers 202 queued: nothing was typed yet, and the
+    // line waits in the session's input journal until it is resumed.
+    $("input-status").textContent=interrupt?`${target}: Esc 전송됨. 실제 상태를 확인하십시오.`:sent&&sent.queued?`${target}: 세션이 종료되어 지시를 대기열에 넣었습니다(${sent.position||1}번째). 세션을 재개하면 입력됩니다.`:`${target}: 지시 전송됨`;
     if(!interrupt&&$("target").value===target&&$("prompt").value===text){$("prompt").value="";drafts.delete(target);}
   }catch(err){$("input-status").textContent=err.message;}finally{pending=false;controls();}
 }

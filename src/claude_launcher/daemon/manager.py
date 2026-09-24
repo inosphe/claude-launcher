@@ -32,7 +32,7 @@ from .. import borrowing, harnesses as harness_registry, profile as profile_mod
 from .. import spawn as spawn_mod
 from .. import transcripts
 from . import codex_sessions, ctxsize, db, harness as harness_mod, pi_sessions
-from . import paths, search_records, session_events
+from . import paths, search_records, session_events, session_input
 from .harness import SessionDef
 from .screen import BACKGROUND_RENDER_BUDGET, RenderBudget
 from .session import STATUS_BUSY, DeadSession, Session
@@ -209,6 +209,9 @@ class SessionManager:
         #: cannot be confused by a cwd-wide "latest" lookup.
         self._codex_switch_tasks: Dict[str, asyncio.Task] = {}
         self._codex_launch_tasks: Dict[str, asyncio.Task] = {}
+        #: Background flushes of operator lines queued while a session was
+        #: exited (see :meth:`flush_queued_input`); held so none is collected.
+        self._input_flush_tasks: Set[asyncio.Task] = set()
 
     @property
     def _pending_codex_claims(self) -> Dict[str, "_PendingClaim"]:
@@ -675,8 +678,27 @@ class SessionManager:
                 task.add_done_callback(
                     functools.partial(self._codex_launch_finished, session.sdef.name)
                 )
+        self.flush_queued_input(session)
         self.persist()
         return session
+
+    def flush_queued_input(self, session: Session) -> bool:
+        """Type the operator lines queued while ``session`` was exited.
+
+        Scheduled, not awaited: the flush waits for the program to take
+        input, which is seconds after launch. Returns whether a flush was
+        scheduled (there was something queued and a loop to run it on).
+        """
+        if not session_input.pending(session.sdef.name):
+            return False
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return False
+        task = loop.create_task(session_input.flush(session))
+        self._input_flush_tasks.add(task)
+        task.add_done_callback(self._input_flush_tasks.discard)
+        return True
 
     async def _claim_in_thread(self, session: Session, *, timeout: float) -> None:
         """Wait off-loop, up to ``timeout``, for a pending claim to settle.

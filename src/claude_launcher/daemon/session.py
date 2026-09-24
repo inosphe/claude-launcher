@@ -1219,6 +1219,21 @@ class Session:
         task.add_done_callback(self._deferred_deliveries.discard)
         return True
 
+    async def await_input_ready(self) -> None:
+        """Public face of :meth:`_await_readable`, for the operator lines a
+        session queued while it was exited (``session_input.flush``)."""
+        await self._await_readable()
+
+    async def prepare_operator_input(self) -> None:
+        """Clear the way for one operator line the way a forced web send
+        does: wait out the short typing grace and, if a human's line is still
+        in the composer, submit it first rather than typing into it."""
+        quiet = await self.await_keyboard_quiet(
+            terminal_only=True, timeout=FORCE_TYPING_GRACE
+        )
+        if not quiet and self.draft_open():
+            await self.submit_open_draft()
+
     async def _await_readable(self) -> None:
         """Block until a starting TUI can actually take a message.
 
