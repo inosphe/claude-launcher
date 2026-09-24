@@ -1819,6 +1819,17 @@ means **at least one** relay is up, so the CLI line and the web badge add a
 count (`1/2`) and the per-relay state, and the badge turns amber when some but
 not all of them are registered.
 
+Beside the relay badge the web UI shows the two round trips a slow reply can
+be spent in: `web 12ms · relay 45ms`. `web` is this browser to the daemon,
+measured every 5s as a ping on the page's control socket (through the relay
+tunnel when the page is opened as `/t/<name>/`); `relay` is the daemon's
+uplink to the relay, measured by the uplink's own keepalive PING/PONG and
+reported per relay in the `rtt_ms` / `rtt_age` / `pending_ms` fields of the
+`relay` status rows (the badge shows the slowest connected one). Amber is
+≥150ms, red ≥500ms, and a probe still unanswered shows as `≥` its age, so a
+stalled link reads as stalled before its answer arrives. The tooltip has the
+last/median/max of recent samples and each relay's value.
+
 ### Idle detection
 
 Raw output never goes quiet under a TUI (claude animates a spinner and a
