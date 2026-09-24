@@ -663,6 +663,13 @@ class LandingQueueSpec:
     #: ``{session}-stack``).
     target: str = "master"
 
+    #: A step whose leaving (by the run's own progress) resets the queue the
+    #: way the move to ``end`` does: settled entries dropped, the rest kept.
+    #: For a run that never ends between rounds — the session-long ``stack``
+    #: sub run, which cuts over and over — ``end`` would come once, at the
+    #: session's end, and settled entries would pile up until then.
+    reset_at: Optional[str] = None
+
     def branch(self, session: str) -> str:
         """:attr:`target` with ``{session}`` filled in."""
         return self.target.replace(SESSION_PLACEHOLDER, session)
@@ -1726,6 +1733,12 @@ def parse_doc(doc: dict, *, default_name: str = "workflow") -> Workflow:
 
     editable = _parse_editable(doc.get("editable"), steps, start)
     landing_queue = _parse_landing_queue(doc.get("landing_queue"))
+    if landing_queue is not None and landing_queue.reset_at is not None:
+        if landing_queue.reset_at not in steps:
+            raise WorkflowError(
+                f"'landing_queue.reset_at' names {landing_queue.reset_at!r}, "
+                f"which is not a step of this workflow"
+            )
     workflow = Workflow(
         name=str(doc.get("name") or default_name),
         description=str(doc.get("description") or ""),
@@ -2919,11 +2932,11 @@ def _parse_landing_queue(raw) -> Optional[LandingQueueSpec]:
         raise WorkflowError(
             "'landing_queue' must be true or a mapping {target: <branch>}"
         )
-    unknown = sorted(set(raw) - {"target"})
+    unknown = sorted(set(raw) - {"target", "reset_at"})
     if unknown:
         raise WorkflowError(
             f"'landing_queue' has unknown key(s): {', '.join(unknown)} "
-            f"(allowed: target)"
+            f"(allowed: target, reset_at)"
         )
     target = str(raw.get("target") or "master").strip()
     bare = target.replace(SESSION_PLACEHOLDER, "s")
@@ -2932,7 +2945,12 @@ def _parse_landing_queue(raw) -> Optional[LandingQueueSpec]:
             "'landing_queue.target' must be a branch name (it may use "
             f"{SESSION_PLACEHOLDER} for the driving session's name)"
         )
-    return LandingQueueSpec(target=target)
+    reset_at = raw.get("reset_at")
+    if reset_at is not None:
+        reset_at = str(reset_at).strip()
+        if not reset_at:
+            raise WorkflowError("'landing_queue.reset_at' must name a step")
+    return LandingQueueSpec(target=target, reset_at=reset_at)
 
 
 def _parse_editable_by(raw, where: str) -> Tuple[str, ...]:

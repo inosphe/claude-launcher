@@ -125,8 +125,9 @@ CHECKED = {
 #: which is the shape ``await-landing`` has.
 WATCHED = {
     # `work` waits on the found-issue sub runs it opened (tools/sub_done.py,
-    # this repository's spelling of `awaits: {sub: all}`).
-    "improv-worker": ("work", "await-landing"),
+    # this repository's spelling of `awaits: {sub: all}`, minus the stack);
+    # `stack-merge` on the stack sub run's cut (tools/published.py).
+    "improv-worker": ("work", "stack-merge", "await-landing"),
     "improv-leader": (),
 }
 

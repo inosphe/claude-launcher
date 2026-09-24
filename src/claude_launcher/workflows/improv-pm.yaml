@@ -119,7 +119,8 @@ steps:
       --external-ref에 run id; 터미널 사용자 직접 지시는 open에서 시작할 수 있음) /
       in_ready→open은 리더(규격·우선순위 재검토 필요) /
       in_progress→in_review는 assignee 워커
-      (landing request) / in_review→in_progress는 리더(rebase·재측정 재요청) /
+      (landing request) / in_review→in_progress는 리더(rebase·재측정 재요청)
+      또는 요청을 철회하는 assignee 워커(`WITHDRAWN @ <tip>` 코멘트와 함께) /
       in_review→closed는 assignee 세션이다 — 누가 배정했든 그 이슈를 끝까지
       관리하는 것은 assignee다. assignee 세션이 종료돼도 in_ready는 검토 결과를 유지하고,
       다음 adoption이 종료된 assignee를 교체한다. 닫는 자리는 wrapup 하나, 닫을 자격은 landed가

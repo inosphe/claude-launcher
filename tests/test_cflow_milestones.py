@@ -367,6 +367,44 @@ def test_the_mcp_tools_that_take_a_run_advertise_it(proj):
     assert not mcp.call_tool("landing_queue", {}).get("landing_queue")  # main holds none
 
 
+RESETTING = """
+name: resetting
+kind: subflow
+landing_queue: {target: base, reset_at: cut}
+steps:
+  hold:
+    instructions: hold
+    next: cut
+  cut:
+    instructions: cut
+    select:
+      prompt: again?
+      chooser: agent
+      options:
+        again: {description: again, next: hold}
+        seal: {description: stop}
+"""
+
+
+def test_reset_at_empties_the_settled_entries_at_each_cut(proj):
+    """A session-long sub run never reaches `end` between rounds, so the
+    declared step is its round boundary (s763's review note on claunch-u8wjx.1)."""
+    (proj / ".claunch" / "workflows" / "resetting.yaml").write_text(RESETTING, encoding="utf-8")
+    with pytest.raises(model.WorkflowError, match="not a step"):
+        model.parse(RESETTING.replace("reset_at: cut", "reset_at: nowhere"))
+    engine.start("main")
+    engine.start("resetting", run="stack")
+    engine.enqueue_landing(["x-1", "x-2"], "w1-f", "0" * 40, by="w1", run="stack")
+    engine.mark_landing("x-1", "rejected", by="s1", run="stack")
+    _step(run="stack")                      # hold -> cut: not the boundary
+    queued = {e["issue"] for e in engine.status(run="stack")["landing_queue"]}
+    assert queued == {"x-1", "x-2"}
+    _step(run="stack")                      # leaving cut resets
+    status = engine.status(run="stack")
+    assert [e["issue"] for e in status["landing_queue"]] == ["x-2"]
+    assert status["landing_reset"]["dropped"] == [{"issue": "x-1", "status": "rejected"}]
+
+
 def test_only_one_run_of_a_scope_holds_the_landing_queue(proj):
     engine.start("qmain")
     assert engine.landing_queue_run() == state_mod.MAIN_RUN
