@@ -102,6 +102,20 @@ def peer_list(room_id: bytes, req_id: int) -> bytes:
     )
 
 
+def kind_and_sid(frame: bytes) -> Tuple[Optional[int], Optional[int]]:
+    """The type byte of one encoded frame, and its stream id for the stream
+    messages (DATA/EOF/CLOSE/OPEN) -- ``None`` where the frame has none.
+
+    For the uplink's sender, which orders frames without decoding them.
+    """
+    if len(frame) <= HEADER_LEN:
+        return None, None
+    kind = frame[HEADER_LEN]
+    if kind in (STREAM_OPEN, STREAM_DATA, STREAM_EOF, STREAM_CLOSE) and len(frame) >= HEADER_LEN + 5:
+        return kind, struct.unpack(">I", frame[HEADER_LEN + 1 : HEADER_LEN + 5])[0]
+    return kind, None
+
+
 def pong(room_id: bytes, token: int) -> bytes:
     return _frame(room_id, _CH_CONTROL, bytes([PONG]) + struct.pack(">Q", token))
 

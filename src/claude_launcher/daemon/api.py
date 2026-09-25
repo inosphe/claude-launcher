@@ -1039,6 +1039,9 @@ async def h_control_ws(request: web.Request) -> web.WebSocketResponse:
     - ``{"type":"ping"}`` -> ``{"type":"pong"}``. A ping carrying ``t``
       gets it back, with the relay status beside it -- see
       :func:`_control_pong`.
+    - A read carrying ``"parts": true`` may be answered in ``read_part``
+      frames; the page acknowledges each with ``{"type":"read_ack","id":N,
+      "seq":K}`` -> not answered. See :class:`channel.Carrier`.
 
     The socket being open is itself the liveness answer, which is what
     retires the probe the page used to spend a connection on.
@@ -1064,13 +1067,16 @@ async def h_control_ws(request: web.Request) -> web.WebSocketResponse:
         except Exception as exc:  # noqa: BLE001 -- one read, not the socket
             log.debug("control read failed", exc_info=True)
             answers, errors, statuses = {}, {"": repr(exc)}, {}
-        await carrier.send_str(json.dumps({
+        # The bulk lane: a pong or a terminal's output queued after this goes
+        # ahead of it, and a page that takes parts gets it in parts
+        # (claunch-iss86, see channel.Carrier).
+        await carrier.send_bulk({
             "type": "read_result",
             "id": frame.get("id"),
             "answers": answers,
             "errors": errors,
             "statuses": statuses,
-        }))
+        }, parts=frame.get("parts") is True, key=frame.get("id"))
 
     try:
         await carrier.send_str(json.dumps({"type": "init"}))
@@ -1082,6 +1088,7 @@ async def h_control_ws(request: web.Request) -> web.WebSocketResponse:
                 if msg.type in (WSMsgType.CLOSE, WSMsgType.ERROR):
                     break
                 continue
+            received = time.monotonic()
             try:
                 frame = json.loads(msg.data)
             except (ValueError, TypeError):
@@ -1096,7 +1103,12 @@ async def h_control_ws(request: web.Request) -> web.WebSocketResponse:
                 # terminal's keystrokes arrive in, and a page that has
                 # stopped draining parks a write for as long as it
                 # stays stopped (test_control_write_offloop).
-                await carrier.send_soon(json.dumps(_control_pong(request, frame)))
+                # Built as it is written, so the time it spent here -- the
+                # queue included -- is measured, not guessed (claunch-iss86).
+                await carrier.send_soon(functools.partial(
+                    _control_pong_text, request, frame, received))
+            elif kind == "read_ack":
+                carrier.ack(frame)
             elif kind == "link_failed":
                 conns.link_failed(request, frame)
             elif kind == "read":
@@ -1157,6 +1169,19 @@ def _control_pong(request: web.Request, frame: dict) -> dict:
         "relay": request.app["relay_state"](),
         "loop": request.app["loop_lag"].snapshot(),
     }
+
+
+def _control_pong_text(request: web.Request, frame: dict, received: float) -> str:
+    """:func:`_control_pong` as the writer puts it on the socket, with
+    ``daemon_ms``: how long the ping was in this daemon, from its frame being
+    read to its answer being written -- the socket's queue included. The page
+    subtracts it, and the relay's round trip, from its own round trip to show
+    what is left for the path between the browser and the relay
+    (claunch-iss86)."""
+    pong = _control_pong(request, frame)
+    if "t" in pong:
+        pong["daemon_ms"] = round((time.monotonic() - received) * 1000.0, 1)
+    return json.dumps(pong)
 
 
 async def _control_read(template: web.Request, paths) -> tuple[dict, dict, dict]:

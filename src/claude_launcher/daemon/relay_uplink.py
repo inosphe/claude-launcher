@@ -20,11 +20,13 @@ import logging
 import os
 import secrets
 import time
-from typing import Dict, Optional
+from collections import deque
+from typing import Deque, Dict, Optional, Tuple
 
 import aiohttp
 
 from . import relay_wire as w
+from . import sendq
 
 log = logging.getLogger("claunch.daemon.relay")
 
@@ -92,7 +94,14 @@ class RelayUplink:
         self._room = secrets.token_bytes(w.ROOM_ID_LEN)
         self._ws: Optional[aiohttp.ClientWebSocketResponse] = None
         self._streams: Dict[int, _Stream] = {}
-        self._send_lock = asyncio.Lock()
+        # The sender (see _raw_send): frames waiting to go out, and the one
+        # task that writes them.
+        self._urgent: Deque[Tuple[bytes, asyncio.Future]] = deque()
+        self._bulk: Dict[int, Deque[Tuple[bytes, asyncio.Future]]] = {}
+        self._turns: Deque[int] = deque()  # sids with data queued, in turn
+        self._wake: Optional[asyncio.Event] = None
+        self._sender: Optional[asyncio.Task] = None
+        self._sender_ws = None
         self._last_recv = 0.0
         self._stop = asyncio.Event()
         #: True while registered with the relay (surfaced as relay status in
@@ -181,6 +190,7 @@ class RelayUplink:
                     await self._close_all_streams()
                     self._fail_peer_state()
                     self._ws = None
+                    self._stop_sender()
 
     async def _await_register_ok(self, ws) -> bool:
         decoder = w.FrameDecoder()
@@ -459,15 +469,127 @@ class RelayUplink:
                     await ws.close()
                 return
 
+    # --------------------------------------------------------------------- #
+    # the sender
+    # --------------------------------------------------------------------- #
+    # Every stream the relay opens -- each browser request, the page's
+    # control socket, a peer bridge -- and the keepalive share this one
+    # connection. Written in arrival order, a PING or the control socket's
+    # next frame queued behind a 1.3MB read waited for all of it to cross the
+    # link (claunch-iss86: the round trip to the relay measured 80ms at its
+    # floor and 100-408ms at other times, cause not separated). So frames
+    # are sorted as they come in:
+    #
+    # - anything that is not stream data (PING/PONG, OPEN/EOF/CLOSE, peer
+    #   requests) goes first, in arrival order;
+    # - stream data goes one frame per stream in turn, so a large response
+    #   takes its share of the link, not all of it;
+    # - and stream data waits while the socket already holds more than
+    #   sendq.LOW_WATER, since a frame handed over behind a full buffer would
+    #   lose its place anyway.
+    #
+    # EOF and CLOSE of a stream that still has data queued go behind that
+    # data, not ahead of it: ahead, the relay would end the response before
+    # its tail arrived.
+
     async def _raw_send(self, frame: bytes) -> None:
+        """Queue ``frame`` and return once it is written (or dropped with the
+        connection). Callers keep waiting on their own frames, which is the
+        backpressure between a local stream and a slow link."""
         ws = self._ws
         if ws is None:
             return
-        async with self._send_lock:
+        if self._sender is None or self._sender.done() or self._sender_ws is not ws:
+            self._start_sender(ws)
+        done = asyncio.get_running_loop().create_future()
+        kind, sid = w.kind_and_sid(frame)
+        if sid is not None and (kind == w.STREAM_DATA or sid in self._bulk):
+            lane = self._bulk.get(sid)
+            if lane is None:
+                lane = self._bulk[sid] = deque()
+                self._turns.append(sid)
+            lane.append((frame, done))
+        else:
+            self._urgent.append((frame, done))
+        self._wake.set()
+        try:
+            await done
+        except (ConnectionError, OSError, RuntimeError, aiohttp.ClientError):
+            pass
+
+    def _start_sender(self, ws) -> None:
+        old = self._sender
+        if old is not None and not old.done():
+            old.cancel()
+        self._fail_queued(ConnectionResetError("relay connection replaced"))
+        self._wake = asyncio.Event()
+        self._sender_ws = ws
+        self._sender = asyncio.ensure_future(self._send_loop(ws))
+
+    def _next_frame(self) -> Optional[Tuple[bytes, asyncio.Future, bool]]:
+        if self._urgent:
+            frame, done = self._urgent.popleft()
+            return frame, done, False
+        while self._turns:
+            sid = self._turns.popleft()
+            lane = self._bulk.get(sid)
+            if not lane:
+                self._bulk.pop(sid, None)
+                continue
+            frame, done = lane.popleft()
+            if lane:
+                self._turns.append(sid)
+            else:
+                del self._bulk[sid]
+            return frame, done, True
+        return None
+
+    async def _send_loop(self, ws) -> None:
+        wake = self._wake
+        while True:
+            if not self._urgent and self._turns:
+                # Stream data is next: hold it while the socket is full, but
+                # let a control frame that arrives meanwhile through first.
+                if not await sendq.below_low_water(ws, lambda: bool(self._urgent)):
+                    continue
+            item = self._next_frame()
+            if item is None:
+                wake.clear()
+                await wake.wait()
+                continue
+            frame, done, _data = item
             try:
                 await ws.send_bytes(frame)
-            except (ConnectionError, OSError, RuntimeError, aiohttp.ClientError):
-                pass
+            except asyncio.CancelledError:
+                # Whoever waits on it hears a dropped connection, the thing
+                # _raw_send already absorbs -- not a cancellation of its own.
+                if not done.done():
+                    done.set_exception(ConnectionResetError("relay sender stopped"))
+                raise
+            except Exception as exc:  # noqa: BLE001 -- told to whoever waits
+                if not done.done():
+                    done.set_exception(exc)
+            else:
+                if not done.done():
+                    done.set_result(None)
+
+    def _fail_queued(self, exc: BaseException) -> None:
+        """Tell everyone waiting on a queued frame that it will not go out."""
+        pending = list(self._urgent)
+        for lane in self._bulk.values():
+            pending.extend(lane)
+        self._urgent.clear()
+        self._bulk.clear()
+        self._turns.clear()
+        for _frame, done in pending:
+            if not done.done():
+                done.set_exception(exc)
+
+    def _stop_sender(self) -> None:
+        sender, self._sender, self._sender_ws = self._sender, None, None
+        if sender is not None and not sender.done():
+            sender.cancel()
+        self._fail_queued(ConnectionResetError("relay uplink disconnected"))
 
 
 def _latency_of(up) -> dict:

@@ -126,6 +126,8 @@ function build() {
     slice("scheduleControlReopen"),
     slice("ensureControlSocket"),
     slice("controlRead"),
+    slice("controlAnswer"),
+    slice("controlPart"),
     slice("controlSay"),
     // The terminals now ride this socket too (daemon/channel.py), so its
     // own machine reaches for the channel routing. Sliced in as it stands:
@@ -429,8 +431,52 @@ async function flushPrefersSocketThenFallsBack() {
   assert.deepStrictEqual(await unconfigured.json(), { error: "llm not configured" });
 }
 
+/* ---- 9. a large answer in parts (claunch-iss86) ------------------------ */
+/* The daemon sends a large read in parts, so a pong or a terminal's output
+   is not stuck behind all of it, and sends no more than a window of parts
+   ahead of the acknowledgements. So: every read says it takes parts, every
+   part is acknowledged at once -- even for a read nobody waits on any more,
+   or the window would stay full -- the parts are put back together into the
+   answer, and a missing part voids the read instead of parsing a hole. */
+async function readsInParts() {
+  const app = build();
+  app.ensureControlSocket();
+  const sock = app.sockets[0];
+  sock.opened();
+  const reading = app.controlRead(["/api/sessions"]);
+  assert.strictEqual(sock.sent[0].parts, true, "the read says it takes parts");
+  const id = sock.sent[0].id;
+  const whole = JSON.stringify({ type: "read_result", id,
+    answers: { "/api/sessions": { rows: ["a", "b"] } }, errors: {}, statuses: {} });
+  const cut = [whole.slice(0, 10), whole.slice(10, 25), whole.slice(25)];
+  const armed = app.pending().length;
+  sock.say({ type: "read_part", id, seq: 0, more: true, data: cut[0] });
+  sock.say({ type: "read_part", id, seq: 1, more: true, data: cut[1] });
+  assert.deepStrictEqual(sock.sent.slice(1),
+    [{ type: "read_ack", id, seq: 0 }, { type: "read_ack", id, seq: 1 }],
+    "each part is acknowledged as it lands");
+  assert.strictEqual(app.pending().length, armed, "a part restarts the wait, not adds one");
+  assert.strictEqual(app.waiting(), 1, "not settled before the last part");
+  sock.say({ type: "read_part", id, seq: 2, more: false, data: cut[2] });
+  const got = await reading;
+  assert.deepStrictEqual(got.answers, { "/api/sessions": { rows: ["a", "b"] } });
+  assert.strictEqual(app.waiting(), 0);
+
+  // Parts for a read already given up on are still acknowledged.
+  sock.say({ type: "read_part", id: 999, seq: 0, more: true, data: "{" });
+  assert.deepStrictEqual(sock.sent.at(-1), { type: "read_ack", id: 999, seq: 0 });
+
+  // A hole in the sequence voids the read.
+  const holed = app.controlRead(["/api/cflow"]);
+  const hid = sock.sent.at(-1).id;
+  sock.say({ type: "read_part", id: hid, seq: 1, more: false, data: "}" });
+  await assert.rejects(holed, /lost a part/);
+  assert.strictEqual(app.waiting(), 0);
+}
+
 (async () => {
   await readsRideTheSocket();
+  await readsInParts();
   await downSocketRejects();
   await deathHandsReadsBack();
   await retryNeverGivesUp();

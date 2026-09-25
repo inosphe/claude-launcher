@@ -208,16 +208,8 @@ function openControlSocket() {
     try { msg = JSON.parse(ev.data); } catch { return; }
     if (typeof msg.ch === "number") { channelFrame(msg); return; }
     if (msg.type === "pong") { latencyPong(msg); return; }
-    if (msg.type !== "read_result") return;
-    const waiter = controlWaiting.get(msg.id);
-    if (!waiter) return;                 // timed out already, and re-sent
-    controlWaiting.delete(msg.id);
-    clearTimeout(waiter.timer);
-    waiter.resolve({
-      answers: msg.answers || {},
-      errors: msg.errors || {},
-      statuses: msg.statuses || {},
-    });
+    if (msg.type === "read_part") { controlPart(sock, msg); return; }
+    if (msg.type === "read_result") controlAnswer(msg);
   };
 
   sock.onclose = () => {
@@ -260,19 +252,72 @@ function controlRead(paths) {
   const id = ++controlSeq;
   const sock = controlSock;
   return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => {
-      controlWaiting.delete(id);
-      reject(new Error("control read timed out"));
-    }, CONTROL_READ_TIMEOUT_MS);
-    controlWaiting.set(id, { resolve, reject, timer });
+    const waiter = { resolve, reject, timer: null, parts: [] };
+    waiter.arm = () => {
+      clearTimeout(waiter.timer);
+      waiter.timer = setTimeout(() => {
+        controlWaiting.delete(id);
+        reject(new Error("control read timed out"));
+      }, CONTROL_READ_TIMEOUT_MS);
+    };
+    waiter.arm();
+    controlWaiting.set(id, waiter);
     try {
-      sock.send(JSON.stringify({ type: "read", id, paths }));
+      // `parts`: this page puts a large answer back together (controlPart).
+      sock.send(JSON.stringify({ type: "read", id, paths, parts: true }));
     } catch (err) {
       controlWaiting.delete(id);
-      clearTimeout(timer);
+      clearTimeout(waiter.timer);
       reject(err);
     }
   });
+}
+
+/* One answered read, whole: settle whoever is waiting on it. */
+function controlAnswer(msg) {
+  const waiter = controlWaiting.get(msg.id);
+  if (!waiter) return;                 // timed out already, and re-sent
+  controlWaiting.delete(msg.id);
+  clearTimeout(waiter.timer);
+  waiter.resolve({
+    answers: msg.answers || {},
+    errors: msg.errors || {},
+    statuses: msg.statuses || {},
+  });
+}
+
+/* One part of a large answer (claunch-iss86). The daemon sends a large
+   read in parts so a pong or a terminal's output is not stuck behind all of
+   it, and holds the next parts until these are acknowledged -- so each is
+   acknowledged at once, even for a read this page has stopped waiting for:
+   an unacknowledged part holds every later read back. A part is also proof
+   the read is moving, so it restarts the wait. */
+function controlPart(sock, msg) {
+  try {
+    sock.send(JSON.stringify({ type: "read_ack", id: msg.id, seq: msg.seq }));
+  } catch { /* the socket is closing; its reads fail with it */ }
+  const waiter = controlWaiting.get(msg.id);
+  if (!waiter) return;
+  if (msg.seq !== waiter.parts.length) {
+    // A part missing: the socket dropped one, and the whole read is void.
+    controlWaiting.delete(msg.id);
+    clearTimeout(waiter.timer);
+    waiter.reject(new Error("control read lost a part"));
+    return;
+  }
+  waiter.parts.push(typeof msg.data === "string" ? msg.data : "");
+  waiter.arm();
+  if (msg.more) return;
+  let whole;
+  try {
+    whole = JSON.parse(waiter.parts.join(""));
+  } catch (err) {
+    controlWaiting.delete(msg.id);
+    clearTimeout(waiter.timer);
+    waiter.reject(err);
+    return;
+  }
+  controlAnswer(whole);
 }
 
 /* Say something the daemon should write down, with no answer expected.
@@ -316,6 +361,7 @@ let latencyLastPing = -Infinity;
 let latencySamples = [];      // recent browser<->daemon round trips, ms
 let latencyRelay = null;      // the relay status the last pong carried
 let latencyLoop = null;       // the daemon event loop's lag, same pong (claunch-y9ax9)
+let latencyDaemon = null;     // ms the last ping spent inside the daemon (claunch-iss86)
 
 function latencyNow() {
   return (typeof performance !== "undefined" && performance.now)
@@ -364,7 +410,31 @@ function latencyPong(msg) {
     renderRelayBadge(msg.relay);
   }
   if (msg.loop) latencyLoop = msg.loop;
+  latencyDaemon = typeof msg.daemon_ms === "number" ? msg.daemon_ms : null;
   renderLatencyBadge();
+}
+
+/* Where the last round trip went (claunch-iss86). The daemon says how long
+   the ping was inside it; through the tunnel, the relay's round trip to the
+   daemon is measured by the daemon's own PINGs; what neither accounts for is
+   the path between this browser and the relay -- the part nothing here can
+   time directly (the relay answers its own PINGs only to its room members),
+   so it is shown as what is left, with a ≈. */
+function latencySplit(total, tunnel, relayRtt) {
+  if (typeof total !== "number") return [];
+  const out = [];
+  const inDaemon = typeof latencyDaemon === "number" ? latencyDaemon : null;
+  if (inDaemon !== null) {
+    out.push(`  daemon: ${fmtLatency(inDaemon)} (ping read → pong written, queue included)`);
+  }
+  if (!tunnel) return out;
+  if (typeof relayRtt === "number") {
+    out.push(`  relay ↔ daemon: ${fmtLatency(relayRtt)} (the daemon's PING to the relay)`);
+  }
+  const rest = total - (inDaemon || 0) - (typeof relayRtt === "number" ? relayRtt : 0);
+  out.push(`  browser ↔ relay: ≈${fmtLatency(Math.max(0, rest))} (what is left; ` +
+    `not measured on its own)`);
+  return out;
 }
 
 function fmtLatency(ms) {
@@ -428,7 +498,8 @@ function renderLatencyBadge() {
     (up ? latencyGrade(known.length ? Math.max(...known) : null) : "latency-bad");
 
   const lines = [];
-  const via = /^\/t\/[^/]+\/$/.test(BASE) ? "through the relay tunnel" : "direct";
+  const tunnel = /^\/t\/[^/]+\/$/.test(BASE);
+  const via = tunnel ? "through the relay tunnel" : "direct";
   if (!up) {
     lines.push("browser ↔ daemon: control socket is down (reconnecting)");
   } else if (latencySamples.length) {
@@ -439,6 +510,11 @@ function renderLatencyBadge() {
       `last ${fmtLatency(latencySamples[latencySamples.length - 1])}, ` +
       `median ${fmtLatency(median)}, max ${fmtLatency(sorted[sorted.length - 1])} ` +
       `over ${sorted.length} ping(s)`);
+    // The split is of the last completed round trip, against the relay
+    // sample the same pong carried.
+    const lastRelay = relayOn ? latencyRelayWorst(latencyRelay) : null;
+    lines.push(...latencySplit(latencySamples[latencySamples.length - 1], tunnel,
+      lastRelay && !lastRelay.stalled ? lastRelay.ms : null));
   } else {
     lines.push(`browser ↔ daemon (${via}): measuring…`);
   }
