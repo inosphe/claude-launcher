@@ -262,7 +262,9 @@
     document.querySelectorAll(selector).forEach((svg) => {
       const host = svg.closest("[id]");
       const kind = ["wfd", "mesh-ring", "flow-ring"].find((c) => svg.classList.contains(c));
-      const prefix = `${location.hash}|${host ? host.id : "page"}|${kind}`;
+      // The page's address without its `?detail=` rail: opening the rail
+      // beside a diagram must not re-key (and so reset) that diagram.
+      const prefix = `${location.hash.split("?")[0]}|${host ? host.id : "page"}|${kind}`;
       const slot = slots.get(prefix) || 0;
       slots.set(prefix, slot + 1);
       if (!svg.closest(".diagram-viewer")) {

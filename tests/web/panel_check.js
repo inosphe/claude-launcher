@@ -85,8 +85,9 @@ const terminalOnScreen = () => termUp;
 
 /* The parts not under test, defined in the same scope as the sliced code so
    they share its state. showView and syncLayout mirror the real ones: both
-   end in syncDetailPanel, and showView drops the detail when a phone
-   navigates off the page it was borrowing. attach() mirrors the real one only
+   end in syncDetailPanel, and neither decides whether the detail is up — the
+   router does, from the address. go() stands in for the browser: assigning
+   the hash fires hashchange, which routes. attach() mirrors the real one only
    in what route() depends on — that it takes the terminal to the named
    session, through showView, and re-marks the detail button, which is how
    walking into the terminal an open panel already describes lights it. */
@@ -102,16 +103,26 @@ let sessQuickJobBox = null, sessKidsBox = null, sessKidsStops = 0;
 function stopSessKids() { sessKidsStops++; }
 let detailWasUp = false;
 let refreshes = 0, gone = null, fits = 0;
-let term = {}, location = { hash: "#/" };
+let term = {}, location = { hash: "#/s/coder2" };
+// One history entry per assignment, as the browser keeps them: a link
+// followed is a new entry with no state; Back (goBack) returns to an entry
+// the router has already stamped.
+const history = {
+  state: null,
+  replaceState(st, _t, h) { this.state = st; if (h !== undefined) location.hash = h; },
+};
 function refreshSession() { refreshes++; }
 function refitSoon() { fits++; }
 function showView(name) {
   currentPage = name;
-  if (name !== "session" && MOBILE_MQ.matches) dropDetail();
   syncLayout();
 }
 function syncLayout() { syncDetailPanel(); }
-function go(hash) { gone = hash; }
+function go(hash) {
+  gone = hash;
+  if (location.hash === hash) { route(); return; }
+  location.hash = hash; history.state = null; route();
+}
 function attach(name) {
   currentName = name; term = {}; showView("terminal"); markDetailRow();
 }
@@ -134,7 +145,13 @@ function openFlowTopology() {}
 function openWorkspaces() {}
 function openWindowPage() {}
 function openReports() {}
-function openHome() {}
+function openHome() { showView("home"); }
+function openFlows() { showView("flows"); }
+function openBeads() { showView("beads"); }
+function openSettings() { showView("settings"); }
+function openCli() {}
+function openTranscript() {}
+function openNewSession() {}
 /* The mesh handle a row/head wears when it differs from the session name
    (sesshandle_check's subject); here it is only a call that has to
    resolve. */
@@ -144,12 +161,16 @@ function refreshWorkflowChoices() {}
 function refreshCflow() {}
 `;
 
+// The two pages that are objects rather than functions; route() calls them.
+globalThis.ObserverPage = { open() {}, stop() {} };
+globalThis.OperatorPanel = { open() {}, stop() {} };
 const ctx = {};
 new Function(
   "exports", "$", "document", "MOBILE_MQ", "setInterval", "clearInterval",
   "el", "terminalOnScreen",
   stubs +
-  [slice("parseHash"), slice("syncDetailPanel"), slice("markDetailRow"),
+  [slice("parseHash"), slice("hashQuery"), slice("hashDetail"),
+   slice("hashWithDetail"), slice("syncDetailPanel"), slice("markDetailRow"),
    slice("dropDetail"), slice("openDetail"), slice("repointDetail"),
    slice("closeDetail"), slice("route"),
    // The head now carries the session's directory line (railcwd_check's
@@ -163,7 +184,9 @@ Object.assign(exports, {
   page: () => currentPage, open: () => sessName, polls: () => refreshes,
   went: () => gone, fits: () => fits, cur: () => currentName,
   setPage: (p) => { currentPage = p; }, setCur: (c) => { currentName = c; },
-  goto: (h) => { location.hash = h; route(); },
+  goto: (h) => { location.hash = h; history.state = null; route(); },
+  goBack: (h) => { location.hash = h; history.state = { routed: true }; route(); },
+  hash: () => location.hash,
   runFold: () => sessRunFold, runStops: () => sessRunStops,
   holdRun: () => { sessRunFold = "the open fold"; },
   kidsBox: () => sessKidsBox, kidsStops: () => sessKidsStops,
@@ -190,6 +213,10 @@ check("info link lands on the terminal",
       ctx.parseHash("#/s/coder2/info"));
 check("plain session link still attaches",
       ctx.parseHash("#/s/coder2").page === "terminal");
+check("the detail query is not part of the page",
+      ctx.parseHash("#/operator?detail=coder2").page === "operator" &&
+      ctx.parseHash("#/s/coder2?detail=coder3").name === "coder2",
+      ctx.parseHash("#/s/coder2?detail=coder3"));
 check("no session page in the router",
       !["#/s/a/info", "#/s/a", "#/", "#/flows"].some((h) => ctx.parseHash(h).page === "session"));
 
@@ -206,8 +233,10 @@ check("wide: carries .docked", view.classes.has("docked"));
 check("wide: the resize handle is down with it",
       !handleUp() && split.parentNode === ids.layout);
 
+ctx.goto("#/s/coder2");
 const fitsBefore = ctx.fits();
 ctx.openDetail("coder2");
+check("wide: opening writes the address", ctx.hash() === "#/s/coder2?detail=coder2", ctx.hash());
 check("wide: opening does not change the page", ctx.page() === "terminal", ctx.page());
 check("wide: the rail is up", up() && where() === "layout");
 check("wide: it polls", ctx.polls() === 1, ctx.polls());
@@ -215,16 +244,51 @@ check("wide: it polls", ctx.polls() === 1, ctx.polls());
 check("wide: opening re-fits the terminal", ctx.fits() === fitsBefore + 1);
 check("wide: the handle is up beside it", handleUp() && split.parentNode === ids.layout);
 
-ctx.setPage("flows"); ctx.syncDetailPanel();   // navigating away must not close it
-check("wide: survives navigation", up() && ctx.open() === "coder2");
-check("wide: and does not re-fit for nothing", ctx.fits() === fitsBefore + 1);
-ctx.setPage("terminal");
-
 const fitsOpen = ctx.fits();
 ctx.openDetail("coder2");                      // the same button closes it
 check("wide: the button toggles it off", !up() && ctx.open() === null);
+check("wide: ...and takes it out of the address", ctx.hash() === "#/s/coder2", ctx.hash());
 check("wide: closing gives the width back", ctx.fits() === fitsOpen + 1);
 check("wide: the handle goes down with it", !handleUp());
+
+/* ---- wide: the rail is the address's, on every page ---- */
+/* It used to live only in memory: a link to another page (the Operator tab,
+   say) left some session's rail docked beside that page, and a reload of the
+   same address then showed no rail at all. Every page link carries no
+   `detail`, so following one closes it; an address that carries one opens
+   it, reload or not. */
+for (const page of ["#/operator", "#/observer", "#/beads", "#/flows",
+                    "#/settings", "#/", "#/wf/default|C:/w", "#/mesh/m1"]) {
+  ctx.goto("#/s/coder2");
+  ctx.openDetail("coder2");
+  const fitsAt = ctx.fits();
+  ctx.goto(page);
+  check(`wide: a link to ${page} closes the rail`, !up() && ctx.open() === null,
+        { open: ctx.open(), up: up() });
+  check(`wide: ...and gives ${page} the width back`, ctx.fits() === fitsAt + 1);
+}
+for (const page of ["#/operator", "#/observer", "#/beads", "#/"]) {
+  ctx.dropDetail();                            // a fresh load: nothing in memory
+  ctx.goto(page + "?detail=coder3");
+  check(`wide: ${page}?detail= opens the rail beside that page`,
+        up() && ctx.open() === "coder3" && where() === "layout",
+        { open: ctx.open(), up: up(), where: where() });
+}
+ctx.goto("#/operator?detail=coder3");
+ctx.goBack("#/operator");                      // Back, from the ⓘ that opened it
+check("wide: Back past the ⓘ closes it again", !up() && ctx.open() === null);
+ctx.goto("#/s/coder2");
+ctx.openDetail("coder2");
+ctx.goBack("#/s/coder2");                      // ...and on the terminal it describes
+check("wide: Back past the ⓘ on a terminal closes it too (it is not a terminal switch)",
+      !up() && ctx.open() === null && ctx.hash() === "#/s/coder2",
+      { open: ctx.open(), hash: ctx.hash() });
+ctx.goto("#/?detail=coder3");                  // opened over home, then a rail row
+ctx.goto("#/s/coder2");
+check("wide: walking from a page into a terminal carries the open rail along",
+      up() && ctx.open() === "coder2" && ctx.hash() === "#/s/coder2?detail=coder2",
+      { open: ctx.open(), hash: ctx.hash() });
+ctx.closeDetail();
 
 /* ---- wide: the rail describes the session on screen ---- */
 /* The rail is not in the URL, so nothing re-aims it when the terminal
@@ -236,11 +300,14 @@ ctx.openDetail("coder2");
 ctx.goto("#/s/coder3");
 check("the terminal moved", ctx.cur() === "coder3", ctx.cur());
 check("the open rail follows it", ctx.open() === "coder3", ctx.open());
+check("...and the address says so, in place",
+      ctx.hash() === "#/s/coder3?detail=coder3", ctx.hash());
 check("and is still up", up() && where() === "layout");
 check("re-aiming re-polls at once", ctx.polls() > 0);
 
 ctx.goto("#/s/coder3");
 check("re-entering the same terminal keeps it", ctx.open() === "coder3");
+check("...in the address too", ctx.hash() === "#/s/coder3?detail=coder3", ctx.hash());
 
 ctx.closeDetail();
 ctx.goto("#/s/coder2");
@@ -292,7 +359,7 @@ ctx.goto("#/s/coder3");                        // ...until we walk into it
 check("walking into that terminal lights it", pressed() === "true", pressed());
 ctx.closeDetail();
 check("closing puts it out", pressed() === "false");
-ctx.setCur("coder2");
+ctx.goto("#/s/coder2");
 check("and it says which press it is offering",
       $("term-details").title.includes("metadata"), $("term-details").title);
 ctx.openDetail("coder2");
@@ -334,6 +401,7 @@ ctx.setCur("coder2");
 
 /* ---- narrow: the page slot ---- */
 narrow = true;
+ctx.goto("#/s/coder2");
 ctx.openDetail("coder2");
 check("narrow: it moves into the page slot", where() === "main", where());
 check("narrow: and takes the page", ctx.page() === "session", ctx.page());
@@ -341,9 +409,16 @@ check("narrow: it is up", up());
 check("narrow: drops .docked", !view.classes.has("docked"));
 check("narrow: the handle is a page sign, not a column", !handleUp());
 
-ctx.showView("home");                          // leaving the page closes it
+ctx.goto("#/");                                // leaving the page closes it
 check("narrow: leaving the page closes it", ctx.open() === null && !up());
 
+ctx.dropDetail();
+ctx.goto("#/s/coder2?detail=coder2");         // a reload of the detail page
+check("narrow: the address alone brings the page back",
+      ctx.page() === "session" && ctx.open() === "coder2" && up(),
+      { page: ctx.page(), open: ctx.open() });
+
+ctx.goto("#/s/coder2");
 ctx.openDetail("coder2");
 ctx.goto("#/s/coder3");                        // ...and so does another terminal
 check("narrow: a terminal takes the slot back rather than re-aiming the rail",
@@ -351,18 +426,20 @@ check("narrow: a terminal takes the slot back rather than re-aiming the rail",
       { open: ctx.open(), page: ctx.page() });
 ctx.setCur("coder2");                          // that navigation really moved
 
+ctx.goto("#/s/coder2");
 ctx.openDetail("coder2");
 ctx.closeDetail();
 check("narrow: close hands the slot back", ctx.went() === "#/s/coder2", ctx.went());
-ctx.setCur(null);
+check("...to the terminal", ctx.page() === "terminal", ctx.page());
+ctx.goto("#/");
 ctx.openDetail("coder2");
 ctx.closeDetail();
-check("narrow: with nothing attached it falls back to home",
-      ctx.went() === "#/", ctx.went());
+check("narrow: opened over home, it closes back to home",
+      ctx.went() === "#/" && ctx.page() === "home", { went: ctx.went(), page: ctx.page() });
 
 /* ---- back to wide: the node moves, nothing is duplicated ---- */
 narrow = false;
-ctx.setCur("coder2");
+ctx.goto("#/s/coder2");
 ctx.openDetail("coder2");
 check("re-widening puts it back on the right, once",
       where() === "layout" && ids.main.kids.length === 0 &&
