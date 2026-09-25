@@ -307,6 +307,14 @@ function's exits, the selection guard including the text-node case a real drag
 produces, and the journal node's reuse, its reread on reopen and its
 background refresh while shut.
 
+``sessdetailtabs_check`` holds the Details panel's sub-tabs. The panel's
+sections are four groups (Overview, Messages, Work, Settings) under a second
+radio, and All draws the four in order under their names. The harness drives
+the real ``renderSession`` with every section stubbed to a named box and checks
+what each sub-tab draws and in which order, that a group off screen is not
+built, that the choice is stored per session and junk falls back to All, and
+that one card rule in the stylesheet dresses every section box.
+
 ``observerpin_check`` holds the sentence that names what pressing the
 observe-pin will do, and the rule that all four surfaces drawing that flag
 read it from one function. The observer card used to write its own fixed
@@ -479,6 +487,7 @@ CHECKS = [
         "floworphans_check.js",
         "sessflags_check.js",
         "sessstill_check.js",
+        "sessdetailtabs_check.js",
         "beadsstill_check.js",
         "observerpin_check.js",
         "operator_check.js",
