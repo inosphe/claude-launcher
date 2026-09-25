@@ -3786,6 +3786,8 @@ async function refreshSessions(options) {
   refreshParentChoices();  // ...and the same sessions, as parents to spawn from
   // the queues, on a slower clock than this poll (guarded for the same reason)
   if (typeof refreshRailBeads === "function") refreshRailBeads();
+  // ...and the Queues tab's lane dots, off the record this poll just brought
+  if (typeof refreshQueueDots === "function") refreshQueueDots();
   if (rebuild && currentPage === "home") renderHome();
   if (rebuild) syncBulkActions(sessionsCache);
   // Some embedded consumers reuse refreshSessions with a reduced rail DOM;
@@ -17679,9 +17681,21 @@ function beadsQueueLane(grid, lane, root, statuses, opts = {}) {
     head.appendChild(el("span", "beads-q-sum",
       `${beadsLaneCount(lane)} waiting for a queue`));
   } else {
+    // The session's status dot, the one the rail draws, before the name as
+    // on a rail row (beadsQueueDotRecord). A name that is not a session here
+    // has nothing to grade.
+    const title = el("div", "beads-q-title");
+    if (lane.known) {
+      const rec = beadsQueueDotRecord(lane);
+      const dot = el("span", dotClassOf(rec));
+      dot.title = dotTitle(rec);
+      dot.dataset.session = name;
+      title.appendChild(dot);
+    }
     const link = el("a", "beads-q-name", name);
     link.href = "#/s/" + encodeURIComponent(name);
-    head.appendChild(link);
+    title.appendChild(link);
+    head.appendChild(title);
     const state = el("div", "beads-q-state");
     if (lane.known) {
       // A paused session's status is "exited"; the badge says which exit.
@@ -17717,6 +17731,32 @@ function beadsQueueLane(grid, lane, root, statuses, opts = {}) {
   }
   for (const s of statuses) {
     grid.appendChild(beadsQueueCell(s, byStatus.get(s), lane, root));
+  }
+}
+
+/* What a lane's dot is graded by: the rail's record of the session when the
+   list poll holds one -- it is two seconds old at most, where this page's own
+   answer is up to fifteen -- else the lane itself, which the daemon fills
+   with the same readings (moved_rows, tool_calls, last_activity_at,
+   paused_at) for a session the rail's state filter left out (claunch-t76lb). */
+function beadsQueueDotRecord(lane) {
+  const cached = (typeof sessionsCache !== "undefined" && sessionsCache || [])
+    .find((x) => x && x.name === lane.session);
+  return cached || lane;
+}
+
+/* The lane dots again, on every list poll: the grid itself is redrawn on
+   this page's fifteen-second clock, and a dot that waited for it would read
+   a busy session as idle for most of that. */
+function refreshQueueDots() {
+  if (!beadsOpen || beadsSection !== "queues" || !beadsQueues) return;
+  const lanes = new Map();
+  for (const b of beadsQueues.boards || []) {
+    for (const l of b.lanes || []) if (l.known) lanes.set(l.session, l);
+  }
+  for (const dot of document.querySelectorAll(".beads-q-head .dot[data-session]")) {
+    const lane = lanes.get(dot.dataset.session);
+    if (lane) applyDotGrade(dot, beadsQueueDotRecord(lane));
   }
 }
 

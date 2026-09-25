@@ -2591,6 +2591,86 @@ def test_the_queues_view_folds_what_the_page_folds_into_counts(repo):
     asyncio.run(run())
 
 
+def test_the_queues_view_carries_the_dot_readings_on_drawn_lanes(repo):
+    """``activity_for`` is merged into every lane whose head is drawn -- the
+    readings the page grades the session's status dot by when the rail holds
+    no record of it (claunch-t76lb). A folded lane has no head to grade, a
+    name that is not a session here has nothing to read, and a reader that
+    fails costs the lane its dot rather than the page."""
+    br = FakeBr()
+    br.add(id="a", assignee="s1", status="open")
+    br.add(id="b", assignee="gone", status="open")
+    br.add(id="c", assignee="lead", status="open")
+    board = _board(br, repo)
+    s1 = _Sess(_sdef("s1", repo), status="busy")
+    gone = _Sess(_sdef("gone", repo), status="exited")
+    asked = []
+
+    def activity(s):
+        asked.append(s.sdef.name)
+        return {"moved_rows": 7, "tool_calls": 3, "last_activity_at": "t"}
+
+    async def run():
+        v = await board.queues_view([s1, gone], extra_roots=[str(repo)],
+                                    activity_for=activity, fold=True)
+        lanes = {l["session"]: l for l in v["boards"][0]["lanes"]}
+        assert lanes["s1"]["moved_rows"] == 7 and lanes["s1"]["tool_calls"] == 3
+        assert lanes["s1"]["last_activity_at"] == "t"
+        assert "moved_rows" not in lanes["gone"]   # folded: no head drawn
+        assert "moved_rows" not in lanes["lead"]   # not a session here
+        assert asked == ["s1"]
+        v = await board.queues_view([s1, gone], extra_roots=[str(repo)],
+                                    activity_for=activity)
+        assert {l["session"] for l in v["boards"][0]["lanes"]
+                if "moved_rows" in l} == {"s1", "gone"}
+
+        def boom(s):
+            raise OSError("no transcript")
+
+        v = await board.queues_view([s1], extra_roots=[str(repo)], activity_for=boom)
+        assert "moved_rows" not in v["boards"][0]["lanes"][0]
+
+    asyncio.run(run())
+
+
+def test_the_queues_route_reads_the_dot_readings_off_the_session(monkeypatch):
+    """The route's reader takes the four readings the rail's dot is graded
+    by straight off the session -- not through ``ctxsize.attach``, which
+    also reads the context window and is kept off the loop for that."""
+    from claude_launcher.daemon import api as api_mod
+
+    class _Tracker:
+        def moved_rows(self, now):
+            return 42
+
+    class _Live:
+        sdef = object()
+        paused_at = None
+        tracker = _Tracker()
+
+        def last_activity_at(self):
+            return "2026-09-26T00:00:00Z"
+
+    class _Dead:
+        sdef = object()
+        paused_at = "2026-09-25T00:00:00Z"
+
+        def last_activity_at(self):
+            return None
+
+    monkeypatch.setattr(api_mod.ctxsize, "tool_calls_for_session",
+                        lambda sdef: 5 if sdef is _Live.sdef else None)
+    monkeypatch.setattr(api_mod.ctxsize, "attach",
+                        lambda s: (_ for _ in ()).throw(AssertionError("attach")))
+    assert api_mod._lane_activity(_Live()) == {
+        "last_activity_at": "2026-09-26T00:00:00Z", "paused_at": None,
+        "moved_rows": 42, "tool_calls": 5,
+    }
+    assert api_mod._lane_activity(_Dead()) == {
+        "last_activity_at": None, "paused_at": "2026-09-25T00:00:00Z",
+    }
+
+
 def test_the_queues_view_answers_a_stale_listing_and_rereads_it_behind(repo):
     """Past ``CACHE_TTL`` and within ``STALE_TTL`` the Queues view answers the
     listing it has and reads a fresh one in the background, once -- the rail

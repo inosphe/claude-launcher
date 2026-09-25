@@ -8248,6 +8248,27 @@ async def h_beads_create(request: web.Request) -> web.Response:
     return json_response(made, status=201)
 
 
+def _lane_activity(session) -> dict:
+    """The status dot's readings for one Queues lane -- the fields the rail's
+    dot is graded by (``rail_fields`` in h_sessions_list), read off the session
+    directly rather than through ``ctxsize.attach``: attach also reads the
+    context window, and the rail runs it in a worker for that reason. Here it
+    is one lane head per drawn session, on the loop, so only the four cheap
+    readings are taken (``tool_calls_for_session`` is cached on the
+    transcript's stat)."""
+    out: dict = {
+        "last_activity_at": session.last_activity_at(),
+        "paused_at": getattr(session, "paused_at", None),
+    }
+    tracker = getattr(session, "tracker", None)
+    if tracker is not None:  # a DeadSession has no screen to have moved
+        out["moved_rows"] = tracker.moved_rows(time.monotonic())
+    calls = ctxsize.tool_calls_for_session(getattr(session, "sdef", None))
+    if calls is not None:
+        out["tool_calls"] = calls
+    return out
+
+
 async def h_beads_queues(request: web.Request) -> web.Response:
     """Every board's queues, one lane per session — the Beads page's Queues
     tab. Same boards as :func:`h_beads_fleet` (the sessions' directories and
@@ -8268,6 +8289,8 @@ async def h_beads_queues(request: web.Request) -> web.Response:
     # board: 703 sessions over 132 of them). See cflow_clock.run_summarizer.
     view = await request.app["beads"].queues_view(
         list(manager.list()), extra, cflow_for=cflow_clock.run_summarizer(),
+        # Only the tab draws lane dots; the rail's pills (no fold) read none.
+        activity_for=_lane_activity if fold else None,
         fold=fold, open_folds=opened,
     )
     return json_response(view)

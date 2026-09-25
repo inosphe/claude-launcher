@@ -6,7 +6,7 @@
    columns are statuses, and a card dragged to another row is ONE write, the
    assignment; the column is the assignee's to move and this page never does.
 
-   Eight things must hold, and they are what this file checks:
+   Ten things must hold, and they are what this file checks:
 
    1. the page has the third tab, between Board and Reports, on its own
       route;
@@ -30,7 +30,12 @@
    8. the stylesheet lays a cell's cards out as a wrapping row -- the case
       of two or more issues in one status, which stacked one per line makes
       the row as tall as its fullest cell and (align-items: stretch) charges
-      that height to every other cell in the row.
+      that height to every other cell in the row;
+   9. rows the page draws folded come as counts (`fold=1`), are counted as
+      such, and are asked for in full when a fold is opened;
+   10. a session's lane head carries the rail's status dot, graded off the
+      rail's record of the session when there is one and the lane's own
+      readings when not, and re-graded on every list poll.
 
    Slice the real functions out of app.js and drive them against a stub
    DOM. */
@@ -85,7 +90,19 @@ function node(tag) {
   };
   return n;
 }
-const document = { createElement: (t) => node(t) };
+const document = {
+  createElement: (t) => node(t),
+  root: null,   // what querySelectorAll searches (refreshQueueDots)
+  querySelectorAll(sel) {
+    if (sel !== ".beads-q-head .dot[data-session]" || !this.root) return [];
+    return this.root.find("beads-q-head").flatMap((h) => h.find("dot"))
+      .filter((d) => d.dataset.session);
+  },
+};
+// The dot's grading bounds, lifted from app.js so the check grades as the
+// page does.
+const dotConsts = ["DOT_BUSY_LEVELS", "DOT_TOOL_LEVELS", "DOT_IDLE_AGES"]
+  .map((k) => src.match(new RegExp(`const ${k} = \\[[^\\]]*\\];`))[0]).join("\n");
 function el(tag, cls, text) {
   const n = node(tag);
   if (cls) n.className = cls;
@@ -103,6 +120,8 @@ function $() { return null; }
 let beadsSection = "queues";
 let beadsQueues = null;
 let beadsQueuesError = "";
+let sessionsCache = [];
+function setSessions(list) { sessionsCache = list; }
 let beadsDragging = "";
 let beadsOpen = true;
 const beadsQSpentOpen = new Set();
@@ -138,10 +157,14 @@ new Function(
   + slice("beadsLaneCount") + slice("beadsLaneSpent") + slice("beadsQueueOrder") + slice("beadsQFoldBar")
   + slice("beadsQueueSummaryText") + slice("beadsQueueCell") + slice("beadsQueueCard")
   + slice("beadsAssign") + slice("beadsQueuesUrl") + slice("refreshQueues")
+  + dotConsts + "\n" + slice("fmtAge") + slice("seenAgo") + slice("dotGrade")
+  + slice("dotClassOf") + slice("dotTitle") + slice("applyDotGrade")
+  + slice("beadsQueueDotRecord") + slice("refreshQueueDots")
   + `
 Object.assign(exports, {
   tabs: beadsPageTabs, render: renderQueues, board: beadsQueuesBoard,
   setSection, setWorkspace, setQueues, setError, setAnswer, calls,
+  setSessions, refreshQueueDots,
   refreshed: () => refreshed,
   spentOpen: beadsQSpentOpen, poolOpen: beadsQPoolOpen,
   cellOpen: beadsQCellOpen, CAP: BEADS_Q_CELL_CAP,
@@ -512,6 +535,66 @@ async function drop(card, cell) {
         [1, "30 unassigned issues — loading…"]);
   ctx.spentOpen.clear(); ctx.poolOpen.clear(); ctx.cellOpen.clear();
   ctx.setWorkspace("");
+
+  /* ---- 10. the session's status dot on the lane head (claunch-t76lb) ---
+     The rail's own dot (dotClassOf / dotTitle), before the name. Graded
+     off the rail's record of the session when the list poll holds one, and
+     off the lane's own readings when it does not; nothing for a name that
+     is not a session here, or for the pool. */
+  const nowIso = new Date().toISOString();
+  const DOTS = {
+    root: "/dots", error: null, unassigned: [],
+    lanes: [
+      { ...lane("d1", { status: "busy", issues: ["a"] }), moved_rows: 300, tool_calls: 2 },
+      { ...lane("d2", { status: "exited", category: "paused", issues: ["b"] }),
+        paused_at: nowIso },
+      { ...lane("d3", { issues: ["c"] }), last_activity_at: nowIso },
+      lane("human", { known: false, issues: ["d"] }),
+    ],
+  };
+  ctx.spentOpen.add("/dots");
+  ctx.setSessions([]);
+  const headOf = (sec, name) => sec.find("beads-q-head").find((h) =>
+    h.find("beads-q-name").some((n) => n.text === name));
+  const dotOf = (sec, name) => {
+    const h = headOf(sec, name);
+    return h ? h.find("dot")[0] : undefined;
+  };
+  let dots = ctx.board(DOTS, STATUSES);
+  check("a busy lane's dot is graded by its own readings when the rail "
+        + "holds no record of it",
+        [dotOf(dots, "d1").className, dotOf(dots, "d1").title],
+        ["dot busy lvl-3",
+         "busy — 300 screen rows moved in the last minute, 2 tool calls in the last 5m"]);
+  check("a paused lane's dot is the paused one",
+        dotOf(dots, "d2").className, "dot exited paused");
+  check("an idle one that just moved is plain green",
+        dotOf(dots, "d3").className, "dot idle");
+  check("the dot comes before the name, on the name's line",
+        headOf(dots, "d1").find("beads-q-title")[0].children.map((n) => n.className),
+        ["dot busy lvl-3", "beads-q-name"]);
+  check("a name that is not a session here has no dot, and neither does "
+        + "the pool",
+        [dotOf(dots, "human"), dots.find("pool").flatMap((h) => h.find("dot")).length],
+        [undefined, 0]);
+  check("the text badge stays beside it",
+        headOf(dots, "d2").find("beads-sess")[0].text, "paused");
+  // The rail's record is fresher than the lane: it wins.
+  ctx.setSessions([{ name: "d1", status: "idle", last_activity_at: nowIso }]);
+  dots = ctx.board(DOTS, STATUSES);
+  check("the rail's record of the session wins over the lane's readings",
+        dotOf(dots, "d1").className, "dot idle");
+  // ...and the list poll moves the dot on without redrawing the grid.
+  ctx.setQueues({ boards: [DOTS] });
+  document.root = dots;
+  ctx.setSessions([{ name: "d1", status: "busy", moved_rows: 50 }]);
+  ctx.refreshQueueDots();
+  check("each list poll re-grades the drawn dots in place",
+        dotOf(dots, "d1").className, "dot busy lvl-2");
+  document.root = null;
+  ctx.setQueues(null);
+  ctx.setSessions([]);
+  ctx.spentOpen.clear();
 
   if (failures) process.exit(1);
   console.log("queues_check ok");

@@ -1919,6 +1919,7 @@ class Board:
         extra_roots: Sequence[str] = (),
         *,
         cflow_for: Optional[Callable[[str, str], Optional[dict]]] = None,
+        activity_for: Optional[Callable[[Session], dict]] = None,
         fold: bool = False,
         open_folds: Sequence[str] = (),
     ) -> dict:
@@ -1947,6 +1948,13 @@ class Board:
         left behind can be seen and moved.
         ``cflow_for(name, cwd)`` is the run summary a lane head shows beside
         the session's status (``None`` for none).
+
+        ``activity_for(session)`` is what the lane head's status dot is graded
+        by -- the readings the rail's own dot reads (``moved_rows``,
+        ``tool_calls``, ``last_activity_at``, ``paused_at``), merged into the
+        lane. The page prefers the rail's fresher record of the same session
+        and falls back to these for one the rail's filter left out
+        (claunch-t76lb).
 
         ``fold`` answers the parts the page draws folded as counts: a lane
         the page folds (not running or paused) carries ``folded: true`` and
@@ -2024,6 +2032,12 @@ class Board:
                 if (fold and "spent" not in opened
                         and category not in (CATEGORY_RUNNING, CATEGORY_PAUSED)):
                     lane.update(folded=True, count=len(queue), issues=[], created=[])
+                elif s is not None and activity_for is not None:
+                    # Only for a head that is drawn: a folded lane has none.
+                    try:
+                        lane.update(activity_for(s))
+                    except Exception as exc:  # a dot is not worth the page
+                        log.debug("beads: no activity for %r: %s", name, exc)
                 entry["lanes"].append(lane)
             pool = [r for r in active if not r.get("assignee")]
             pool.sort(key=_queue_rank)

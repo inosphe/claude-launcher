@@ -2723,6 +2723,10 @@ body.term-split #terminal { flex: var(--split-term, 0.6) 1 0; min-height: 80px; 
   text-decoration: none; overflow-wrap: anywhere;
 }
 a.beads-q-name:hover { color: #79c0ff; text-decoration: underline; }
+/* the name line: the session's status dot (the rail's, graded the same way)
+   and then the name */
+.beads-q-title { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.beads-q-title .dot { width: 8px; height: 8px; border-radius: 50%; flex: none; }
 .beads-q-state { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
 .beads-q-step { color: #8b949e; font-size: 11px; overflow-wrap: anywhere; }
 .beads-q-sum { color: #7d8590; font-size: 11px; font-variant-numeric: tabular-nums; }
