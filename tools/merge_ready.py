@@ -124,7 +124,8 @@ on either, and the report keeps the two apart, because a reader told that a
 file blocks the merge will go looking for it in the merge's diff.
 
 Exit codes -- ``0`` ready, ``1`` re-measure, ``2`` could not tell, ``3``
-rebase, ``4`` dirty checkout. Separate codes rather than one because
+rebase, ``4`` dirty checkout, ``5`` landed (only with ``--landed-exit``;
+see :data:`LANDED`). Separate codes rather than one because
 ``awaits.probe`` compares **exit codes only** and deliberately ignores output
 (``cflow/model.py``, :class:`Awaits`): folded together, a branch that went
 from stale to conflicted would flip nothing and the daemon would say nothing.
@@ -187,6 +188,25 @@ REBASE = 3
 #: here is neither a rebase nor a re-measurement -- nothing the branch's owner
 #: can do fixes it. Only reachable with ``--checkout``.
 DIRTY_CHECKOUT = 4
+
+#: The target already contains this tip: the work landed. Without
+#: ``--landed-exit`` that is ``0`` like every other ready answer, which is
+#: right for a gate (nothing blocks) and wrong for a probe: ``await-landing``
+#: runs this under ``awaits``, which speaks only when the exit code changes,
+#: and a branch that was ready before the merge and is landed after it
+#: answered ``0`` both times -- so the daemon said nothing at the one moment
+#: the waiting worker needed to hear. The worker learned of its landing only
+#: from the leader's notice, and the notice was addressed by board state:
+#: an issue left ``in_progress`` missed it, and one merged a round earlier
+#: but not yet closed read the next round's notice as a re-measure request
+#: (claunch-dlq0o; s753 re-ran rebase and peer review on landed work).
+#: Opt-in, for the reason ``4`` is: callers that ask only "does anything
+#: block this merge" -- the leader's preflight, ``merge.yaml`` -- read ``0``
+#: as that, and for them a landed branch is that. The worker's rebase gate
+#: turns it on as well, because this repository's project layer holds that
+#: gate and the await-landing probe to one command; there ``5`` refuses the
+#: step, and the step's instructions say where a landed branch goes instead.
+LANDED = 5
 
 #: The target a branch integrates into when nothing says otherwise. A nested
 #: worker's target is its parent's branch, not this -- see :func:`_target`.
@@ -980,6 +1000,16 @@ def main(argv: Optional[List[str]] = None) -> int:
         ),
     )
     parser.add_argument(
+        "--landed-exit",
+        action="store_true",
+        help=(
+            f"answer {LANDED} instead of {READY} when the target already "
+            "contains this tip (the work landed). For the await-landing "
+            "probe, which is only heard when its exit code changes; off by "
+            "default because a gate reads a landed branch as ready"
+        ),
+    )
+    parser.add_argument(
         "--max-behind",
         type=int,
         default=None,
@@ -1067,6 +1097,10 @@ def main(argv: Optional[List[str]] = None) -> int:
             print(f"ready: nothing to land -- {args.branch} is {target} ({tip[:12]})")
         else:
             print(f"ready: landed -- {target} already contains {tip[:12]}")
+            if args.landed_exit:
+                # Nothing is merged, so the working-tree question has no
+                # write set to ask about; the answer is the landing itself.
+                return LANDED
         # Both of these merge nothing, so the tree check runs against an
         # empty write set and says so with the denominator rather than being
         # special-cased out. "0 of 0" is a value.

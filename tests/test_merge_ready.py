@@ -263,6 +263,28 @@ def test_a_landed_branch_is_not_a_moved_baseline(repo, capsys):
     assert "landed" in out
 
 
+def test_landed_exit_gives_the_landing_its_own_code(repo, capsys):
+    """Under ``awaits`` only a changed exit code is heard (claunch-dlq0o).
+
+    Ready before the merge and landed after it were both ``0``, so the
+    await-landing probe never told the waiting worker that it had landed.
+    With ``--landed-exit`` the landing is ``5``; a branch not yet in its
+    target keeps answering what it answered before.
+    """
+    code, out = _verdict(
+        repo, capsys, "--landed-exit",
+        "--branch", "landed-branch", "--target", "landed-target",
+    )
+    assert code == merge_ready.LANDED, out
+    assert "landed" in out
+
+    code, out = _verdict(
+        repo, capsys, "--landed-exit",
+        "--branch", "aligned-branch", "--target", "aligned-target",
+    )
+    assert code == merge_ready.READY, out
+
+
 # --------------------------------------------------------------------------- #
 # the split: conflict vs moved baseline
 # --------------------------------------------------------------------------- #

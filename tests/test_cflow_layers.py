@@ -1627,3 +1627,52 @@ def test_both_sides_judge_a_landing_with_the_same_command():
     for worker, leader in pairs:
         assert "merge_ready.py" in worker.steps["rebase"].instructions
         assert "merge_ready.py" in leader.steps["integrate-preflight"].instructions
+
+
+def test_a_landing_reaches_the_worker_whatever_its_board_state():
+    """The leader's baseline notice is addressed by board state (@in_review).
+
+    Two sessions it mis-served in round 143 (claunch-dlq0o): one whose merged
+    issue sat in_progress never heard it had landed, and one whose issue had
+    landed a round earlier but was still in_review read the next notice as a
+    re-measure request and re-ran rebase and peer review. So the landing gets
+    a channel that does not go through the board: the waiting worker's probe
+    answers a landing with its own exit code, the worker checks ancestry
+    before it picks a rework branch, and the leader addresses merged issues
+    that are not in_review by handle.
+    """
+    bundled = dict(state_mod.bundled_workflows())
+    worker = model.load(PROJECT_OVERRIDES / "improv-worker.yaml")
+    wait = worker.steps["await-landing"]
+    assert "--landed-exit" in wait.awaits.command(wait)
+    remote = model.compose(
+        PROJECT_OVERRIDES / "improv-worker-remote.yaml",
+        resolve=state_mod.base_resolver(str(PROJECT_OVERRIDES.parents[1])),
+    ).workflow
+    assert "--landed-exit" in remote.steps["await-landing"].awaits.command(
+        remote.steps["await-landing"]
+    )
+    for worker in (model.load(bundled["improv-worker"]), worker):
+        prompt = worker.steps["await-landing"].select.prompt
+        assert "merge-base --is-ancestor" in prompt
+        assert "착지(landed)로" in prompt
+        # The rebase gate answers 5 for a landed tip in this repository, and
+        # that step has no branch to `landed` -- so its instructions have to
+        # name the way out, or a worker that arrives there stands still.
+        rebase = worker.steps["rebase"].instructions
+        assert "landed(5)" in rebase
+        assert "request_goto" in rebase
+    for leader in (
+        model.load(bundled["improv-leader"]),
+        model.load(PROJECT_OVERRIDES / "improv-leader.yaml"),
+    ):
+        integrate = leader.steps["integrate"].instructions
+        assert "자기 tip이 이미 master에 있으면" in integrate
+        assert "in_review가 아닌 것" in integrate
+        # The notice says "already in master -> landed"; the transition after
+        # it has to agree, or the leader files REMEASURE REQUESTED on an issue
+        # that landed a round earlier and moves it back to in_progress. The
+        # test is the latest request's tip, not a MERGED comment: an issue can
+        # land, be re-requested at a new tip, and need re-measuring again.
+        assert "최신 요청 tip이 이미 새 master에 있는 이슈는" in integrate
+        assert "것만으로는 빼지 않는다 — 한 이슈가 두 번 착지할 수 있다" in integrate
