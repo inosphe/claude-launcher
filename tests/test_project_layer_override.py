@@ -375,8 +375,12 @@ def test_the_leader_override_gates_the_deploy_on_a_real_restart():
     assert any("--branch master" in c for c in commands), commands
     # And now it does more than refuse a green nobody earned: the daemon ends
     # the round on it, so the leader no longer sits collecting reminders while
-    # the restart it is waiting for has already happened.
-    assert step.checklist.then == "end"
+    # the restart it is waiting for has already happened. The move goes by
+    # landed-notice, which tells the landed sessions before the end
+    # transition drops them from the queue (claunch-w9dvz).
+    assert step.checklist.then == "landed-notice"
+    notice = model.load(OVERRIDES / "improv-leader.yaml").steps["landed-notice"]
+    assert notice.next is None  # `end`
 
 
 def test_no_gate_calls_a_binary_off_PATH():

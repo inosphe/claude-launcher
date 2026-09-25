@@ -371,7 +371,7 @@ def test_checklist_clock_leaves_other_runs_alone(proj):
     "workflow, step, then, items",
     [
         ("improv-worker", "landed", "wrapup", ["merged", "frozen"]),
-        ("improv-leader", "reflect", "end", ["deployed"]),
+        ("improv-leader", "reflect", "landed-notice", ["deployed"]),
     ],
 )
 def test_the_shipped_gates_are_checklists(workflow, step, then, items):
@@ -609,7 +609,8 @@ def test_the_leader_bounds_its_deploy_gate_with_a_retry_step():
     """The double gate that came out of the 2026-09-11 deadlock: reflect's
     deploy checklist expires into reflect-pregate, whose one option is back
     into reflect (a fresh visit, so the restart runs again) and whose other
-    ends the round."""
+    ends the round -- by way of landed-notice, which tells the sessions that
+    landed before the end transition drops their queue entries."""
     import pathlib
 
     wf = model.load(pathlib.Path("src/claude_launcher/workflows/improv-leader.yaml"))
@@ -620,5 +621,6 @@ def test_the_leader_bounds_its_deploy_gate_with_a_retry_step():
     pregate = wf.steps["reflect-pregate"]
     assert pregate.select is not None and pregate.select.chooser == "agent"
     assert pregate.select.options["retry"].next == "reflect"
-    assert pregate.select.options["close"].next is None  # `end`
+    assert pregate.select.options["close"].next == "landed-notice"
+    assert wf.steps["landed-notice"].next is None  # `end`
     assert pregate.select.require_reason
