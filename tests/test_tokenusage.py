@@ -391,3 +391,133 @@ def test_attach_survives_a_reader_that_raises(home, tmp_path, monkeypatch):
 
     monkeypatch.setattr(tokenusage, "for_session", lambda s: boom(s))
     assert tokenusage.attach({"name": "s1"}, sdef) == {"name": "s1"}
+
+
+# --------------------------------------------------------------------------- #
+# one request, one budget
+# --------------------------------------------------------------------------- #
+def test_a_list_request_reads_at_most_one_budget_over_all_its_sessions(
+        tmp_path, monkeypatch):
+    """The first list request after a daemon restart asks about every
+    session at once. The inline budget is the request's, not each
+    session's: over N transcripts each larger than the budget, the request
+    reads at most the budget in total, and every reading is partial until
+    the catch-up thread has read the rest (claunch-l6d70 review, s764)."""
+    monkeypatch.setattr(tokenusage, "CHUNK", 512)
+    monkeypatch.setattr(tokenusage, "INLINE_BUDGET", 4096)
+    paths = []
+    for n in range(6):
+        lines = [claude_line(mid=f"s{n}m{i}", read=100, out=1) for i in range(80)]
+        path = write(tmp_path / f"s{n}.jsonl", *lines)
+        assert path.stat().st_size > tokenusage.INLINE_BUDGET
+        paths.append(path)
+
+    read = []
+    orig = tokenusage._Follower.refresh
+
+    def counting(self, budget=None):
+        result = orig(self, budget)
+        if budget is not None:
+            read.append(self.spent)
+        return result
+
+    monkeypatch.setattr(tokenusage._Follower, "refresh", counting)
+    spend = tokenusage.budget()
+    first = [tokenusage.read_file(p, "claude", spend) for p in paths]
+
+    assert sum(read) <= tokenusage.INLINE_BUDGET
+    assert all(r["partial"] is True for r in first)
+    # Nothing goes to the catch-up thread while the request is still asking:
+    # a thread parsing beside it takes the GIL off the request.
+    assert not any(f.queued for f in tokenusage._followers.values())
+    assert spend.late
+
+    spend.release()
+    assert spend.late == {}
+    tokenusage.drain(timeout=10)
+    done = [tokenusage.read_file(p, "claude", tokenusage.budget()) for p in paths]
+    assert all("partial" not in r for r in done)
+    assert [r["requests"] for r in done] == [80] * 6
+
+
+def test_a_call_without_a_budget_gets_one_of_its_own(tmp_path, monkeypatch):
+    monkeypatch.setattr(tokenusage, "INLINE_BUDGET", 1 << 20)
+    path = write(tmp_path / "c.jsonl", claude_line(mid="a", out=3))
+    assert tokenusage.read_file(path, "claude")["output"] == 3
+
+
+def test_followers_nobody_asks_about_are_dropped(tmp_path):
+    path = write(tmp_path / "c.jsonl", claude_line(mid="a", out=1))
+    tokenusage.read_file(path, "claude")
+    assert str(path) in tokenusage._followers
+
+    now = tokenusage._followers[str(path)].used
+    assert tokenusage.prune(now + tokenusage.FOLLOWER_TTL - 1) == 0
+    assert tokenusage.prune(now + tokenusage.FOLLOWER_TTL + 1) == 1
+    assert str(path) not in tokenusage._followers
+
+    # asked again, it is read again from the start
+    assert tokenusage.read_file(path, "claude")["output"] == 1
+
+
+# --------------------------------------------------------------------------- #
+# the endpoints
+# --------------------------------------------------------------------------- #
+def test_the_list_and_the_meta_carry_the_reading_but_the_list_skips_archived(
+        home, tmp_path):
+    """The rail reads the list and the details panel reads the meta; both
+    carry the same reading. An archived record is left out of the list's
+    reading (hundreds of retired transcripts would spend the shared budget),
+    and its details panel still reads it when opened."""
+    import asyncio
+    import time
+
+    from aiohttp.test_utils import TestClient, TestServer
+
+    from claude_launcher.daemon.api import build_app
+    from claude_launcher.daemon.manager import SessionManager
+    from claude_launcher.daemon.mesh import MeshManager
+    from claude_launcher.daemon.session import DeadSession
+
+    cwd = tmp_path / "work"
+    cwd.mkdir()
+    prof = profile_mod.create("codex-list")
+    entry = harnesses.get("codex")
+    rollout = (entry.profile_home(prof.config_dir) / "sessions" / "2026" / "09"
+               / "27" / f"rollout-2026-09-27T00-00-00-{CID}.jsonl")
+    meta = json.dumps({"timestamp": "2026-09-27T00:00:00Z", "type": "session_meta",
+                       "payload": {"id": CID, "cwd": str(cwd)}})
+    write(rollout, meta, codex_context(),
+          codex_total(input_tokens=500, cached=400, out=9))
+    sdef = SessionDef(name="cx", profile="codex-list:codex", harness="codex",
+                      cwd=str(cwd), conversation_id=CID)
+    bearer = {"Authorization": "Bearer sekrit"}
+
+    async def run():
+        mgr = SessionManager(idle_threshold=0.5, scrollback=200, restore_default=True)
+        mgr._sessions["cx"] = DeadSession(sdef, exit_code=0)
+        app = build_app(mgr, "sekrit", started_at=time.monotonic(), mesh=MeshManager(mgr))
+        client = TestClient(TestServer(app))
+        await client.start_server()
+        try:
+            listed = (await (await client.get("/api/sessions", headers=bearer))
+                      .json())["sessions"][0]
+            assert listed["token_usage"]["total"] == 509
+            assert listed["token_usage"]["cache_read"] == 400
+            detail = (await (await client.get("/api/sessions/cx/meta", headers=bearer))
+                      .json())["session"]
+            assert detail["token_usage"] == listed["token_usage"]
+
+            mgr._sessions["cx"] = DeadSession(
+                sdef, exit_code=0, archived_at="2026-09-27T00:00:00+00:00")
+            listed = (await (await client.get("/api/sessions", headers=bearer))
+                      .json())["sessions"][0]
+            assert listed["name"] == "cx" and "token_usage" not in listed
+            detail = (await (await client.get("/api/sessions/cx/meta", headers=bearer))
+                      .json())["session"]
+            assert detail["token_usage"]["total"] == 509
+        finally:
+            await client.close()
+            await mgr.shutdown_all()
+
+    asyncio.run(run())

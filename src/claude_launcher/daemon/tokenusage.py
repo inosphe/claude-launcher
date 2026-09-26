@@ -55,6 +55,7 @@ from __future__ import annotations
 
 import json
 import threading
+import time
 from collections import deque
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
@@ -76,12 +77,57 @@ COMPONENTS = ("input", "cache_read", "cache_write", "output")
 #: no read holds the whole file in memory.
 CHUNK = 1024 * 1024
 
-#: How much one poll reads itself, over all of one session's files. The session list is assembled
-#: for every session on each poll, and the first read of a long transcript
-#: is slow (a 248 MB Claude transcript took 9.6 s on this machine,
-#: 2026-09-27); past this budget the rest is left to a background thread and
-#: the reading is published as ``partial`` meanwhile.
+#: How much one request reads itself, over every file of every session it
+#: asks about. The session list is assembled for every session on each poll,
+#: and the first read of a long transcript is slow (a 248 MB Claude
+#: transcript took 9.6 s on this machine, 2026-09-27); past this budget the
+#: rest is left to a background thread and the reading is published as
+#: ``partial`` meanwhile. The budget is per request, not per session: the
+#: first list request after a daemon restart asks about every record, and a
+#: per-session budget let it read 4 MB x 385 sessions inline -- 10.5 s before
+#: it answered (claunch-l6d70 review, s764).
 INLINE_BUDGET = 4 * 1024 * 1024
+
+#: A follower not asked about for this long is dropped. It holds the counts
+#: of a file and a window of recent ids; a session that is asked about again
+#: after that is read again from the start, in the background.
+FOLLOWER_TTL = 30 * 60.0
+
+#: How often the idle followers are looked for.
+PRUNE_EVERY = 60.0
+
+
+class Budget:
+    """What one request may still read inline, and what it leaves for later.
+
+    Make one per request (:func:`budget`), hand it to every :func:`attach`
+    of that request, and call :meth:`release` once the request has asked
+    about everything. ``left`` is shared by every file of every session the
+    request asks about; ``late`` collects the files it could not finish,
+    which :meth:`release` hands to the catch-up thread as one job.
+
+    The hand-over waits for the end of the request on purpose: a catch-up
+    thread already parsing while the request still walks its sessions takes
+    the GIL off it. Measured over 400 real transcripts (2278 MB): 1.06 s for
+    the request with the thread started as it went, 0.06 s with it started
+    at the end.
+    """
+
+    def __init__(self, left: int) -> None:
+        self.left = left
+        #: path -> follower, so a request over thousands of subagent files
+        #: asks "is this one late" in constant time.
+        self.late: Dict[str, "_Follower"] = {}
+
+    def release(self) -> None:
+        """Hand what the request left unread to the catch-up thread."""
+        late, self.late = list(self.late.values()), {}
+        _queue(late)
+
+
+def budget() -> Budget:
+    """A fresh per-request budget of :data:`INLINE_BUDGET` bytes."""
+    return Budget(INLINE_BUDGET)
 
 
 def _int(value) -> int:
@@ -216,7 +262,7 @@ class ClaudeReader(UsageReader):
 
     def __init__(self, *, all_side: bool = False) -> None:
         super().__init__()
-        self._seen = _RecentIds()
+        self._seen = _RecentIds(256)
         #: A subagent's own file: every entry there is subagent spend.
         self._all_side = all_side
 
@@ -318,7 +364,7 @@ class PiReader(UsageReader):
 
     def __init__(self) -> None:
         super().__init__()
-        self._seen = _RecentIds()
+        self._seen = _RecentIds(256)
         self.cost = 0.0
 
     def feed(self, entry: dict) -> None:
@@ -386,6 +432,8 @@ class _Follower:
         self.size = 0
         #: Bytes the last :meth:`refresh` read.
         self.spent = 0
+        #: When a request last asked about this file (monotonic).
+        self.used = time.monotonic()
         self._identity: Optional[Tuple[float, int]] = None
 
     @property
@@ -420,7 +468,7 @@ class _Follower:
                 fh.seek(self.offset)
                 carry = b""
                 while budget is None or spent < budget:
-                    blob = fh.read(CHUNK)
+                    blob = fh.read(CHUNK if budget is None else min(CHUNK, budget - spent))
                     if not blob:
                         reached_end = True
                         break
@@ -472,10 +520,34 @@ _pending: List[Future] = []
 _catchup_lock = threading.Lock()
 
 
+_last_prune = 0.0
+
+
 def forget() -> None:
     """Drop every follower. For tests."""
+    global _last_prune
     drain()
     _followers.clear()
+    _last_prune = 0.0
+
+
+def prune(now: Optional[float] = None) -> int:
+    """Drop the followers nobody asked about for :data:`FOLLOWER_TTL`.
+    Returns how many were dropped."""
+    now = time.monotonic() if now is None else now
+    stale = [key for key, f in list(_followers.items())
+             if not f.queued and now - f.used > FOLLOWER_TTL]
+    for key in stale:
+        _followers.pop(key, None)
+    return len(stale)
+
+
+def _maybe_prune() -> None:
+    global _last_prune
+    now = time.monotonic()
+    if now - _last_prune >= PRUNE_EVERY:
+        _last_prune = now
+        prune(now)
 
 
 def drain(timeout: Optional[float] = None) -> None:
@@ -520,40 +592,43 @@ def _queue(late: List[_Follower]) -> None:
 
 
 def _follow(path: Path, make: Callable[[], UsageReader],
-            budget: List[int], late: List[_Follower]) -> Optional[_Follower]:
+            budget: Budget) -> Optional[_Follower]:
     """The follower of ``path``, brought up to date as far as a poll may.
 
-    ``budget`` is the one-element count of bytes this poll may still read,
-    shared by every file of one session and spent here. What is left of a
+    ``budget`` is what the request may still read inline, shared by every
+    file of every session it asks about, and spent here. What is left of a
     long file (the first read after a daemon restart, typically) goes to the
-    catch-up thread (the caller submits ``late`` once it is done), and until
-    that has finished the follower reports ``behind``.
+    catch-up thread once the request releases its budget, and until that has
+    finished the follower reports ``behind``.
     """
+    late = budget.late
     key = str(path)
     follower = _followers.get(key)
     if follower is None:
         follower = _followers.setdefault(key, _Follower(path, make))
+    follower.used = time.monotonic()
     if follower.queued or not follower.lock.acquire(blocking=False):
         return follower
-    if budget[0] <= 0 and follower.behind:
+    if budget.left <= 0 and follower.behind:
         # Nothing left to spend and never read: no stat, straight to later.
         follower.lock.release()
-        late.append(follower)
+        late[key] = follower
         return follower
     try:
-        done = follower.refresh(max(0, budget[0]))
-        budget[0] -= follower.spent
+        done = follower.refresh(max(0, budget.left))
+        budget.left -= follower.spent
     finally:
         follower.lock.release()
     if done is None:
         _followers.pop(key, None)
         return None
     if not done:
-        late.append(follower)
+        late[key] = follower
     return follower
 
 
-def read_file(path: Path, harness: str = CLAUDE_HARNESS) -> Optional[dict]:
+def read_file(path: Path, harness: str = CLAUDE_HARNESS,
+              spend: Optional[Budget] = None) -> Optional[dict]:
     """The usage reading of one transcript file (and, for a harness that
     writes them, its subagent files). ``None`` when nothing was spent yet or
     the harness has no reader.
@@ -566,24 +641,34 @@ def read_file(path: Path, harness: str = CLAUDE_HARNESS) -> Optional[dict]:
     cls = READERS.get(harness)
     if cls is None:
         return None
-    budget = [INLINE_BUDGET]
-    late: List[_Follower] = []
-    main = _follow(path, cls, budget, late)
+    own = spend is None
+    if own:
+        spend = budget()
+    try:
+        return _read(path, cls, harness, spend)
+    finally:
+        if own:
+            spend.release()
+
+
+def _read(path: Path, cls: Type[UsageReader], harness: str,
+          spend: Budget) -> Optional[dict]:
+    _maybe_prune()
+    main = _follow(path, cls, spend)
     if main is None:
         return None
     followers = [main]
     side = Tally()
     side.merge(main.reader.side)
     for sub in cls.subagent_files(path):
-        other = _follow(sub, cls.for_subagent, budget, late)
+        other = _follow(sub, cls.for_subagent, spend)
         if other is not None:
             followers.append(other)
             side.merge(other.reader.side)
             side.merge(other.reader.tally)
-    partial = bool(late) or any(f.behind for f in followers)
+    partial = any(f.behind or str(f.path) in spend.late for f in followers)
     tally = main.reader.tally
     if not tally.requests and not side.requests and not partial:
-        _queue(late)
         return None
     out = {"harness": harness, **tally.as_dict(),
            "model": tally.model, **main.reader.extra()}
@@ -591,31 +676,35 @@ def read_file(path: Path, harness: str = CLAUDE_HARNESS) -> Optional[dict]:
         out["subagents"] = side.as_dict()
     if partial:
         out["partial"] = True
-    _queue(late)
     return out
 
 
-def for_session(sdef) -> Optional[dict]:
-    """This session's usage reading, or ``None`` when it has none to give."""
+def for_session(sdef, spend: Optional[Budget] = None) -> Optional[dict]:
+    """This session's usage reading, or ``None`` when it has none to give.
+    ``spend`` is the request's :class:`Budget`; without one the call gets a
+    budget of its own."""
     harness = str(getattr(sdef, "harness", None) or CLAUDE_HARNESS)
     if harness not in READERS:
         return None
     path = ctxsize.transcript_of(sdef)
     if path is None:
         return None
-    return read_file(path, harness)
+    return read_file(path, harness, spend)
 
 
-def attach(info: dict, sdef) -> dict:
+def attach(info: dict, sdef, spend: Optional[Budget] = None) -> dict:
     """``info`` with a :data:`INFO_KEY` reading when there is one.
 
     Absent rather than zero when unknown, the same rule as the ``context``
     and ``tps`` keys beside it. A failure to read is absence too: this rides
     the session list, which must not fail because one transcript could not
     be opened.
+
+    A request that attaches many sessions passes one ``spend`` to all of
+    them and releases it at the end (see :class:`Budget`).
     """
     try:
-        reading = for_session(sdef)
+        reading = for_session(sdef, spend)
     except Exception:
         reading = None
     if reading:
