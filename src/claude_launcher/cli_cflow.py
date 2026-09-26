@@ -849,6 +849,39 @@ def _cmd_published(args: argparse.Namespace) -> int:
     return 0 if view["new"] else 1
 
 
+def _cmd_responders(args: argparse.Namespace) -> int:
+    """Who a delegated step of this run would ask right now, group by group.
+
+    Exit 0 when some group would reach an answerable member, 1 when none
+    would, 2 when it cannot be told (no run, no such step, the roster did not
+    answer). The check a step runs before a question is opened — a worker that
+    finds no reviewer spawns its own before ``peer-review`` resolves.
+    """
+    scope, cwd = _resolve_run(args)
+    try:
+        payload = engine.who_answers(
+            args.step, role=args.role or "", cwd=cwd, scope=scope
+        )
+    except (engine.CflowError, state_mod.StateError) as exc:
+        print(f"responders: {exc}")
+        return 2
+    if args.json:
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+    else:
+        label = f"step {payload['step']!r}" + (
+            f", role {payload['role']!r}" if payload["role"] else ""
+        )
+        print(f"{label} as {payload['me'] or '?'} in mesh {payload['mesh'] or '?'}:")
+        for group in payload["groups"]:
+            asks = ", ".join(
+                f"{h} ({group['relations'].get(h, '?')})" for h in group["asks"]
+            )
+            print(f"  {group['candidate']}: " + (asks or f"nobody — {group.get('reason')}"))
+    if payload["unreadable"]:
+        return 2
+    return 0 if payload["resolves"] else 1
+
+
 def _cmd_abort(args: argparse.Namespace) -> int:
     scope, cwd = _resolve_run(args)
     payload = engine.abort(by="user", scope=scope, cwd=cwd)
@@ -1268,6 +1301,27 @@ def register(sub) -> None:
         help="whose runs (default: $CLAUNCH_SESSION, or the nearest run)",
     )
     q.set_defaults(func=_cmd_published)
+
+    q = csub.add_parser(
+        "responders",
+        help="who a delegated step of this run would ask right now, one line "
+        "per candidate group (read-only, wires nothing): exit 0 when some "
+        "group reaches an answerable member, 1 when none does, 2 when it "
+        "cannot be told",
+    )
+    q.add_argument("step", help="the step whose ask/chooser to resolve")
+    q.add_argument(
+        "--role",
+        help="only the groups naming this role — e.g. 'reviewer', so a "
+        "leader fallback does not answer 'is there a reviewer'",
+    )
+    q.add_argument(
+        "-t",
+        "--session",
+        help="whose run (default: $CLAUNCH_SESSION, or the nearest run)",
+    )
+    q.add_argument("--json", action="store_true", help="print raw JSON")
+    q.set_defaults(func=_cmd_responders)
 
     q = _scoped(csub.add_parser(
         "archive",

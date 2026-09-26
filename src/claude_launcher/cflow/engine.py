@@ -5848,6 +5848,80 @@ def status(cwd: Optional[str] = None) -> dict:
 
 
 @_scoped_op
+def who_answers(step_id: str, *, role: str = "", cwd: Optional[str] = None) -> dict:
+    """Who step ``step_id`` of this run would put its question to right now,
+    one line per candidate group (read-only).
+
+    ``delegation_check`` answers the same question for a whole workflow at
+    start time, stopping at the first group that resolves. This is the
+    in-run reading a step uses to decide something *before* the question is
+    opened — the case it exists for is a worker that finds no reviewer and
+    spawns its own, which it can only do before ``peer-review`` resolves
+    its pool. So every group is reported, not only the first that answers,
+    and ``role`` restricts the groups to one role: "does any *reviewer*
+    group resolve" must not be answered yes by the leader fallback below it.
+
+    Nothing is wired. Each group reports ``asks``: the members an opened
+    question would reach — answerable ones that are already wired, plus, for
+    a ``connect: true`` group, the answerable ones it would wire first (the
+    same members ``Pool._wire_to`` would take). ``reason`` is the skip line
+    the question would journal, and ``relations`` says how each member the
+    group names stands to this session, so a reader can see *why* a holder
+    of the role is or is not in it.
+    """
+    workflow, state = _load(cwd)
+    step = workflow.steps.get(step_id)
+    if step is None:
+        raise CflowError(f"workflow {workflow.name!r} has no step {step_id!r}")
+    delegate = None
+    kind = ""
+    if step.ask and step.ask.delegate.candidates:
+        delegate, kind = step.ask.delegate, "approval"
+    elif step.is_select and step.select.delegate is not None:
+        delegate, kind = step.select.delegate, "branch"
+    if delegate is None or not delegate.candidates:
+        raise CflowError(
+            f"step {step_id!r} delegates no decision — there is nobody to resolve"
+        )
+    session = state_mod.current_scope()
+    if session == state_mod.DEFAULT_SCOPE:
+        session = ""
+    reach = responders.pool(session=session, mesh=state.get("mesh") or "", cwd=cwd)
+    wanted = role.strip().lower()
+    groups = []
+    for candidate in delegate.candidates:
+        if wanted and candidate.role != wanted:
+            continue
+        _, reason = reach.match(candidate)
+        named = reach.eligible(candidate)
+        asks = [
+            m.handle for m in named
+            if m.answerable and (m.handle in reach.reachable or candidate.connect)
+        ]
+        entry = {
+            "candidate": candidate.describe(),
+            "asks": asks,
+            "relations": {
+                m.handle: reach.relation(m.handle) for m in named if m.answerable
+            },
+        }
+        if reason and not asks:
+            entry["reason"] = reason
+        groups.append(entry)
+    return {
+        "step": step_id,
+        "decision": kind,
+        "role": wanted,
+        "me": reach.me,
+        "mesh": reach.mesh,
+        "groups": groups,
+        "resolves": any(g["asks"] for g in groups),
+        "unreadable": reach.unreadable,
+        "problem": reach.problem,
+    }
+
+
+@_scoped_op
 def recall(digest: str = "", cwd: Optional[str] = None) -> dict:
     """The instructional text behind a content id, for an agent that lost it.
 

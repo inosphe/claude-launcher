@@ -435,14 +435,28 @@ with a name that is not declared in the directory a child ends up standing
 in, and only the spawn knows that directory.
 
 A candidate needs a ``role`` — a delegation is to a *function*, and "whoever
-happens to be connected" is not one. ``scope`` narrows further: ``any``
-(default) is anything the asking session can reach over the mesh that is not
-itself or something it spawned, ``ancestor`` is the chain of command only.
-Descendants are excluded either way, and that exclusion is what makes a
-delegated approval mean anything: an agent can spawn children and wire itself
-to them, so an unfiltered pool would let a run manufacture its own approver.
-It cannot spawn a sibling or wire itself to one, so siblings, uncles and roots
-are as safe as ancestors — and a sibling reviewer is the common shape here.
+happens to be connected" is not one. ``scope`` names which relatives of the
+asking session in the spawn tree it may match (see "Hierarchy" in
+:mod:`.responders` for the relations themselves):
+
+- ``any`` (default) — anything the asking session can reach over the mesh
+  that is not itself or something it spawned;
+- ``ancestor`` — the chain of command only, nearest first;
+- ``sibling`` — the sessions that share its parent (parentless roots of one
+  mesh are siblings of each other: the operator made them all);
+- ``descendant`` — what it spawned, and theirs.
+
+Descendants are excluded from every scope but their own, and that exclusion
+is what makes an *authority* decision mean anything: an agent can spawn
+children and wire itself to them, so an unfiltered pool would let a run
+manufacture its own approver. ``scope: descendant`` is the explicit opt-out,
+for competence decisions a run may staff for itself — a review whose default
+is to pass unreviewed anyway (``otherwise: self:pass``), where a reviewer the
+worker spawned is strictly more review than none. Never write it on a decision
+that grants authority (landing, shipping, spending). Collateral relatives —
+cousins, uncles, a sibling's children — are matched by ``any`` alone: nothing
+narrower names them, because a session another session spawned for its own
+work is that session's, not a pool for its relatives.
 """
 
 from __future__ import annotations
@@ -526,9 +540,13 @@ OTHERWISE = (OTHERWISE_HUMAN, OTHERWISE_SELF)
 #: ``scope``: which part of the reachable mesh a candidate may match.
 #: Anything the asking session can reach that it did not spawn...
 SCOPE_ANY = "any"
-#: ...or its own chain of command only.
+#: ...or its own chain of command only...
 SCOPE_ANCESTOR = "ancestor"
-SCOPES = (SCOPE_ANY, SCOPE_ANCESTOR)
+#: ...or the sessions sharing its parent (roots of one mesh share the operator)...
+SCOPE_SIBLING = "sibling"
+#: ...or what it spawned itself — the one scope that admits descendants.
+SCOPE_DESCENDANT = "descendant"
+SCOPES = (SCOPE_ANY, SCOPE_ANCESTOR, SCOPE_SIBLING, SCOPE_DESCENDANT)
 
 #: ``filter_roles.type``: admit only the listed roles...
 FILTER_WHITELIST = "whitelist"
@@ -754,8 +772,9 @@ class Candidate:
 
     A role, matched against the mesh members the asking session can reach,
     minus itself and everything below it in the spawn tree. ``scope`` narrows
-    that pool to the session's own ancestors when only the chain of command
-    will do.
+    that pool to one relation — the session's own ancestors when only the
+    chain of command will do, its siblings — or, for ``descendant`` alone,
+    turns it to the sessions below it instead.
 
     ``connect`` says what to do when the role is held by somebody this run is
     not wired to. Off (the default), the group is skipped with that as its
@@ -2345,7 +2364,9 @@ def _parse_candidate(raw, where: str) -> Candidate:
         raise WorkflowError(
             f"{where}: 'scope' must be one of {', '.join(SCOPES)}, got {scope!r} "
             f"({SCOPE_ANY} = anyone reachable that this run did not spawn, "
-            f"{SCOPE_ANCESTOR} = its own chain of command only)"
+            f"{SCOPE_ANCESTOR} = its own chain of command only, "
+            f"{SCOPE_SIBLING} = the sessions sharing its parent, "
+            f"{SCOPE_DESCENDANT} = the sessions it spawned)"
         )
     connect = raw.get("connect", False)
     if not isinstance(connect, bool):

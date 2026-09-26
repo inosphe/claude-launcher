@@ -1525,6 +1525,211 @@ def test_scope_ancestor_narrows_to_the_chain_of_command(monkeypatch):
     assert "rev1 (reviewer), lead1 (leader)" in reason
 
 
+#: The shape mesh-0826 had when claunch-zgidu was filed. Three roots the
+#: operator started (the leader and two workers); the leader spawned a worker
+#: and a reviewer; one root worker spawned a reviewer for its own work; the
+#: other root worker (me) spawned one too. Everybody is wired to everybody, so
+#: reach decides nothing here and the relation alone has to.
+FAMILY = {
+    "name": "fam",
+    "members": [
+        _member("lead", "lead", "leader"),
+        _member("me", "me", "worker"),
+        _member("w749", "w749", "worker"),
+        _member("w752", "w752", "worker", parent="lead"),
+        _member("rev764", "rev764", "reviewer", parent="lead"),
+        _member("rev763", "rev763", "reviewer", parent="w749"),
+        _member("kid", "kid", "worker", parent="me"),
+        _member("myrev", "myrev", "reviewer", parent="me"),
+        _member("grandrev", "grandrev", "reviewer", parent="kid"),
+    ],
+    "member_links": _links(
+        *[
+            (a, b, True)
+            for i, a in enumerate(
+                ["lead", "me", "w749", "w752", "rev764", "rev763", "kid",
+                 "myrev", "grandrev"]
+            )
+            for b in ["lead", "me", "w749", "w752", "rev764", "rev763", "kid",
+                      "myrev", "grandrev"][i + 1:]
+        ]
+    ),
+}
+
+
+def test_every_member_stands_in_one_relation(monkeypatch):
+    """Roots share the operator, so they are siblings; a sibling's child, a
+    parent's sibling and a cousin are all collateral."""
+    _roster(monkeypatch, FAMILY)
+    mine = responders.pool(session="me")
+    assert mine.siblings == {"lead", "w749"}
+    assert mine.descendants == {"kid", "myrev", "grandrev"}
+    assert mine.generation == {"kid": 1, "myrev": 1, "grandrev": 2}
+    assert {h: mine.relation(h) for h in mine.members} == {
+        "lead": "sibling",
+        "w749": "sibling",
+        "w752": "collateral",
+        "rev764": "collateral",
+        "rev763": "collateral",
+        "kid": "descendant",
+        "myrev": "descendant",
+        "grandrev": "descendant",
+    }
+    theirs = responders.pool(session="w752")
+    assert theirs.ancestors == ["lead"]
+    assert theirs.siblings == {"rev764"}
+    assert theirs.relation("me") == "collateral"  # a parent's sibling
+    assert theirs.relation("rev763") == "collateral"  # a cousin
+
+
+def test_a_sibling_scope_never_reaches_another_workers_reviewer(monkeypatch):
+    """The misroute that filed claunch-zgidu: w752's review went to rev763,
+    which w749 had spawned for its own work."""
+    _roster(monkeypatch, FAMILY)
+    hit, reason = responders.pool(session="w752").match(
+        _candidate("reviewer", model.SCOPE_SIBLING)
+    )
+    assert reason is None and [r.handle for r in hit] == ["rev764"]
+
+    # a root with no reviewer among the roots finds none, and is told where
+    # the role does exist and why that does not count
+    _, reason = responders.pool(session="me").match(
+        _candidate("reviewer", model.SCOPE_SIBLING)
+    )
+    assert "no sibling of me in mesh 'fam' holds that role" in reason
+    assert "found lead (leader), w749 (worker)" in reason
+    assert "rev763 (collateral)" in reason and "rev764 (collateral)" in reason
+    assert "myrev (descendant)" in reason
+
+
+def test_a_descendant_answers_only_where_the_scope_says_so(monkeypatch):
+    _roster(monkeypatch, FAMILY)
+    found = responders.pool(session="me")
+    # nearest generation first
+    hit, reason = found.match(_candidate("reviewer", model.SCOPE_DESCENDANT))
+    assert reason is None
+    assert [r.handle for r in hit] == ["myrev", "grandrev"]
+    # every other scope still excludes them
+    for scope in (model.SCOPE_ANY, model.SCOPE_SIBLING, model.SCOPE_ANCESTOR):
+        hit, _ = found.match(_candidate("reviewer", scope))
+        assert not {r.handle for r in hit} & found.descendants, scope
+
+    # and a run that spawned nothing is told so
+    _, reason = responders.pool(session="w749").match(
+        _candidate("worker", model.SCOPE_DESCENDANT)
+    )
+    assert "no session w749 spawned in mesh 'fam' holds that role" in reason
+    assert "found rev763 (reviewer)" in reason
+
+
+def test_the_leader_is_an_ancestor_or_a_sibling(monkeypatch):
+    """leader: [ancestor, sibling] — a root worker finds the mesh's leader
+    among the roots; a worker the leader spawned finds it above."""
+    _roster(monkeypatch, FAMILY)
+    root = responders.pool(session="me")
+    hit, reason = root.match(_candidate("leader", model.SCOPE_ANCESTOR))
+    assert hit == [] and "no session above me" in reason
+    hit, _ = root.match(_candidate("leader", model.SCOPE_SIBLING))
+    assert [r.handle for r in hit] == ["lead"]
+
+    spawned = responders.pool(session="w752")
+    hit, _ = spawned.match(_candidate("leader", model.SCOPE_ANCESTOR))
+    assert [r.handle for r in hit] == ["lead"]
+    hit, _ = spawned.match(_candidate("leader", model.SCOPE_SIBLING))
+    assert hit == []  # its sibling is a reviewer, and the leader is above it
+
+
+def test_the_new_scopes_parse():
+    for scope in ("sibling", "descendant"):
+        cand = model._parse_candidate({"role": "reviewer", "scope": scope}, "x")
+        assert cand.scope == scope
+        assert cand.describe() == f"reviewer ({scope})"
+    with pytest.raises(model.WorkflowError) as err:
+        model._parse_candidate({"role": "reviewer", "scope": "cousin"}, "x")
+    assert "sibling = the sessions sharing its parent" in str(err.value)
+
+
+#: improv-worker's peer-review order, on a flow small enough to read: the
+#: question opens on `ship`, so `impl` is where a worker reads who it would
+#: reach and spawns a reviewer of its own when nobody is there.
+ASK_HIERARCHY = """
+steps:
+  impl:
+    instructions: implement
+    next: ship
+  ship:
+    ask:
+      prompt: ship it?
+      from:
+        - {role: reviewer, scope: descendant}
+        - {role: reviewer, scope: sibling, connect: true}
+        - {role: reviewer, scope: ancestor}
+        - {role: leader, scope: ancestor}
+        - {role: leader, scope: sibling}
+      otherwise: self
+    instructions: ship it
+"""
+
+
+def test_who_answers_reads_a_step_before_its_question_opens(
+    flow_dir, monkeypatch, capsys
+):
+    """No reviewer but another worker's: the reviewer groups reach nobody
+    (exit 1), and the leader fallback is not allowed to say otherwise."""
+    _driving_session(monkeypatch)
+    _mesh(
+        monkeypatch,
+        ("leader", "boss"),
+        ("worker", "w9"),
+        ("reviewer", "r9", "worker-w9"),
+    )
+    _write(flow_dir, "askflow", ASK_HIERARCHY)
+    engine.start("askflow")
+
+    only_reviewers = engine.who_answers("ship", role="reviewer")
+    assert only_reviewers["resolves"] is False
+    assert [g["candidate"] for g in only_reviewers["groups"]] == [
+        "reviewer (descendant)", "reviewer (sibling, connect)", "reviewer (ancestor)",
+    ]
+    assert all(g["asks"] == [] for g in only_reviewers["groups"])
+    assert "reviewer-r9 (collateral)" in only_reviewers["groups"][1]["reason"]
+
+    everyone = engine.who_answers("ship")
+    assert everyone["resolves"] is True
+    leader = everyone["groups"][-1]
+    assert leader["asks"] == ["leader-boss"]
+    assert leader["relations"] == {"leader-boss": "sibling"}  # both are roots
+
+    assert cli.main(["cflow", "responders", "ship", "--role", "reviewer"]) == 1
+    assert "reviewer (sibling, connect): nobody" in capsys.readouterr().out
+    assert cli.main(["cflow", "responders", "ship"]) == 0
+    assert cli.main(["cflow", "responders", "impl"]) == 2  # delegates nothing
+
+
+def test_a_reviewer_the_run_spawned_is_asked_first(flow_dir, monkeypatch):
+    """The worker spawned its own reviewer: it resolves, and the opened
+    question goes to it — not to the collateral reviewer, not to the leader."""
+    _driving_session(monkeypatch)
+    _mesh(
+        monkeypatch,
+        ("leader", "boss"),
+        ("worker", "w9"),
+        ("reviewer", "r9", "worker-w9"),
+        ("reviewer", "mine", "dev1"),
+    )
+    _write(flow_dir, "askflow", ASK_HIERARCHY)
+    engine.start("askflow")
+    found = engine.who_answers("ship", role="reviewer")
+    assert found["resolves"] is True
+    assert found["groups"][0]["asks"] == ["reviewer-mine"]
+    assert found["groups"][0]["relations"] == {"reviewer-mine": "descendant"}
+
+    _advance("implemented")
+    ask = engine.status()["ask"]
+    assert [e["handle"] for e in ask["asked"]] == ["reviewer-mine"]
+    assert ask["group"] == 0
+
+
 def test_an_unwired_member_is_named_with_the_command_that_fixes_it(monkeypatch):
     """A spawned member is wired to its parent alone — that is the default."""
     _roster(
@@ -3078,7 +3283,8 @@ def test_the_authoring_skill_states_the_rule_it_exists_for():
     assert "whose answer lets it skip work" in text
     # ...and the mechanics that make a delegation worth anything, since an
     # author who does not know them will design around them
-    assert "descendants are never candidates" in text
+    assert "descendants are candidates only where a group says `scope: descendant`" in text
+    assert "never on one that grants authority" in text
     assert "never as an approval" in text  # what `otherwise: self` records
     assert "never receives the asking step's instructions" in text
 

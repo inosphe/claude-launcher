@@ -1639,7 +1639,13 @@ steps:
       # 부모가 중간 워커(improv-mid)면 그 역할도 worker이므로 첫 그룹이
       # 받고(scope: ancestor + 스폰 시 wired라 닿는 상위는 직속 부모뿐이다),
       # 평면 편성이면 첫 그룹이 아무도 못 맞춰 skip되고 리더가 받는다 —
-      # skip 사유는 저널에 남는다. chooser: agent는 여기 쓰지 않는다: hold가
+      # skip 사유는 저널에 남는다. 리더는 [ancestor, sibling] 순서로 찾는다
+      # (claunch-zgidu): 리더가 스폰한 워커에게는 조상이고, 운영자가 직접
+      # 세운 루트 워커에게는 같은 루트인 형제다 — 부모 없는 루트끼리는
+      # 운영자를 공통 부모로 둔 형제이고(cflow/responders.py Hierarchy),
+      # leader는 메시에 하나뿐이라 형제 그룹이 다른 리더를 고를 일이 없다.
+      # 루트 워커의 착지 결정이 사람에게 먼저 서던 것이 이 둘째 그룹으로
+      # 리더에게 간다. chooser: agent는 여기 쓰지 않는다: hold가
       # rebase와 증거 묶음을 건너뛰므로 고르는 자와 득 보는 자가 같아진다.
       # (앞 스텝 landing이 chooser: agent인 것은 모순이 아니다 — 거기서
       # agent가 닿을 수 있는 것은 request뿐이고, hold는 이 문에만 있다.)
@@ -1652,6 +1658,7 @@ steps:
         from:
           - {role: worker, scope: ancestor}
           - {role: leader, scope: ancestor}
+          - {role: leader, scope: sibling}
         otherwise: human
         timeout: 1800
       options:
@@ -1777,6 +1784,78 @@ steps:
     # 적는다(landed(5) 갈래 — request_goto로 landed).
     # tests/test_merge_ready.py가 갈래들을 못박는다.
     verify: 'uv run --no-sync python tools/merge_ready.py --landed-exit'
+    next: reviewer-ensure
+
+  reviewer-ensure:
+    title: 리뷰어 확보 (없으면 자식 리뷰어를 세운다)
+    # 다음 스텝 peer-review가 질문을 여는 순간 후보가 확정된다(한 번의
+    # roster 읽기로 동결 — cflow/responders.py). 그래서 리뷰어를 세울
+    # 자리는 그 앞이다. 판정은 명령의 종료 코드로 한다:
+    # `claunch cflow responders peer-review --role reviewer`가 peer-review
+    # chooser의 reviewer 그룹들(descendant → sibling → ancestor)만 풀어
+    # 본다 — 리더 폴백 그룹이 「리뷰어가 있다」로 답하지 않게 하는 것이
+    # --role이다(claunch-zgidu).
+    #
+    # 왜 자식인가. 공용 리뷰어가 없는 편성에서 워커가 찾던 것은 「어딘가의
+    # reviewer」였고, 그 결과 다른 워커가 자기 일을 위해 세운 자식
+    # 리뷰어(방계)에게 질문이 갔다(mesh-0826 msg-682c7d7e9b77). 이제
+    # 방계는 어느 그룹에도 들지 않고, 리뷰어가 없으면 워커가 제 리뷰어를
+    # 제 아래에 세운다. 자손을 후보로 받는 것은 scope: descendant를 적은
+    # 그룹 하나뿐이고, 그 문은 응답이 없으면 어차피 리뷰 없이 통과하는
+    # (otherwise: self:pass) competence 결정이다 — 워커가 세운 리뷰어는
+    # 리뷰 없음보다 엄격하게 많은 리뷰다. 착지(authority) 결정은 계속
+    # 조상·리더만 받는다.
+    instructions: |
+      다음 스텝(peer-review)의 질문이 리뷰어에게 갈 수 있는지 먼저 잰다:
+
+          claunch cflow responders peer-review --role reviewer
+
+      종료 코드가 판정이다 — 0이면 reviewer 그룹 중 하나가 답할 세션에
+      닿는다(자식 리뷰어, 형제 리뷰어, 조상 리뷰어 순서), 1이면 아무
+      그룹도 닿지 않는다, 2이면 재지 못했다(roster 무응답 등).
+
+      · 0 — 할 일이 없다. 출력(어느 그룹이 누구에게 닿는지와 그 관계)을
+        보고에 옮기고 넘어간다. 이 런이 앞 회차에 세운 자식 리뷰어가
+        살아 있으면 여기서 0이 나오고, 그 리뷰어를 그대로 다시 쓴다.
+      · 1 — 자식 리뷰어를 세운다. `children`으로 남은 슬롯을 본 뒤
+        MCP `spawn`(또는 `claunch spawn`)에:
+          handle: <내 세션>-rev  (이미 있으면 -rev2처럼 순번)
+          role: reviewer
+          workflow: '-'   (내 짝 default_child_cflow는 improv-worker이고
+                          그 filter_roles가 reviewer를 받지 않는다)
+          no_issue: true  (리뷰어는 일감을 갖지 않는다 — 보드의 산출물을
+                          만들지 않는 세션이다)
+          fork 없음, worktree 없음 (내 대화를 물려받은 리뷰어는 독립된
+                          눈이 아니다; 읽기만 하므로 체크아웃도 필요 없다)
+          task: 아래 문안
+        task 문안(그대로 쓰되 <> 안을 채운다):
+          너는 <내 세션>의 리뷰어다 — 이 세션이 너를 세운 이유는 리뷰
+          하나다. <내 세션>의 cflow 런이 peer-review에서 질문(decide)을
+          보내면 `asks`로 열어 보고, 보드(`claunch beads comments <이슈>`)와
+          브랜치(`git log/diff <base>..<tip>`)를 직접 읽어 판정한다 —
+          목표 달성, 범위 이탈, 표적 테스트가 목표를 덮는가. 판정은 보드에
+          `REVIEWED: pass @ <tip>` 또는 `CHANGES REQUESTED: <무엇을>`으로
+          남기고 `answer`로 답한다. 코드 수정·커밋·머지·이슈 생성은 하지
+          않는다; 테스트를 돌려야 하면 `$CLAUNCH_SCRATCH` 아래에 detached
+          worktree를 만들어 거기서 돌린다. 질문이 없을 때는 기다린다 —
+          같은 런의 다음 리뷰도 네게 온다.
+        스폰 뒤 같은 명령을 다시 돌려 0을 확인한다(자식은 부모와 연결된
+        채 태어나므로 배선할 것이 없다). 스폰이 정책으로 거절되면
+        (`spawn.<키>`) 재시도하지 않는다 — 거절 문구를 보고에 옮기고
+        넘어간다: peer-review는 리더에게 가거나 리뷰 없이 통과한다.
+      · 2 — 재지 못한 것은 없는 것이 아니다. 한 번 더 재고, 그래도 2면
+        출력 그대로 보고에 남기고 스폰 없이 넘어간다.
+
+      이 런이 세운 자식 리뷰어는 런이 끝날 때까지 산다 — 재리뷰(changes
+      → work → … → peer-review)와 다음 회차의 리뷰에 다시 쓴다. 끝내는
+      자리는 settle-check다(queue-recheck가 done을 낸 뒤라 남은 리뷰가
+      없다). 메시에 속해 있지 않은 단독
+      세션이면 1이 나오고, 스폰이 너와 자식 둘만의 메시를 연다 — 그
+      리뷰어에게도 질문은 그대로 닿는다.
+    done_when: |
+      `claunch cflow responders peer-review --role reviewer`의 출력과 종료
+      코드가 보고에 있다. 1이었으면 스폰한 자식 리뷰어의 세션·핸들과
+      스폰 뒤 다시 잰 출력(0)이, 또는 스폰 거절 문구가 함께 있다.
     next: peer-review
 
   peer-review:
@@ -1802,9 +1881,21 @@ steps:
       않는다. 그리고 기다리지 않는다 — 질문이 누구에게 나가 있는지 한
       줄만 보고에 남기고 턴을 끝낸다.
     select:
-      # 누가 답하는가 — 리뷰는 competence 결정이라 형제가 정상 답변자다.
-      # 그래서 첫 그룹에 scope를 두지 않는다(기본 any). 착지 결정은
-      # authority 결정이라 scope: ancestor로 묶여 있다 — 두 문의 종류가
+      # 누가 답하는가 — 위계 순서로 찾는다(claunch-zgidu, 사용자 지시):
+      # reviewer는 [descendant, sibling, ancestor], 그다음 leader는
+      # [ancestor, sibling]. 관계의 정의는 cflow/responders.py의
+      # Hierarchy 절이다 — 부모 없는 루트끼리는 형제이고, 직계도 형제도
+      # 아닌 방계(collateral: 부모의 형제, 사촌, 형제의 자식)는 어느
+      # 그룹에도 들지 않는다. 예전 첫 그룹은 scope 없이(any) 메시의 모든
+      # reviewer를 받았고, 그래서 다른 워커가 자기 일에 쓰려고 세운 자식
+      # 리뷰어가 남의 질문을 받았다(mesh-0826 msg-682c7d7e9b77).
+      #
+      # 첫 그룹이 descendant인 것은 앞 스텝 reviewer-ensure가 리뷰어가
+      # 없을 때 자식 리뷰어를 세우기 때문이다. 한 번 세우면 그 런이 끝날
+      # 때까지 가장 먼저 색인된다. 자손은 이 그룹 하나에서만 후보가 된다
+      # (다른 scope는 여전히 자손을 뺀다). 리뷰는 competence 결정이고 응답이
+      # 없으면 어차피 리뷰 없이 통과하는 문이라 워커가 세운 리뷰어로 충분하다.
+      # 착지 결정은 authority 결정이라 조상·리더만 받는다 — 두 문의 종류가
       # 다르고, 그래서 한 문에 합치지 않았다: 합치면 리뷰어가 통합
       # 순서까지 정하게 된다.
       #
@@ -1819,14 +1910,15 @@ steps:
       # (표는 in_review 이슈로 채워지고 그 전이는 다음 단계다) 리뷰가
       # 되돌려도 상위가 잃는 것은 이미 쓴 턴 하나뿐이다.
       #
-      # 리뷰어가 없는 편성이 정상이다. 그때 첫 그룹은 아무도 못 맞춰
-      # skip되고(사유는 저널에 남는다) 상위 리더가 받는다. 데몬이
+      # 공용 리뷰어가 없는 편성이 정상이다. 그때는 reviewer-ensure가 세운
+      # 자식 리뷰어가 받고, 그것도 세우지 못했으면 reviewer 그룹이 전부
+      # skip되고(사유는 저널에 남는다) 리더가 받는다. 데몬이
       # 역할·배선·생존을 그 순서로 보고 각각 다른 사유를 적는다
       # (cflow/responders.py Pool.match) — 역할이 없는 것과, 있는데 안
       # 닿는 것과, 닿는데 죽은 것은 고치는 방법이 서로 다르기 때문이다.
       # 선언 하나가 편성에 따라 리뷰어 게이트도 되고 리더 부담도 된다.
       #
-      # 첫 그룹의 connect: true — 이 셋 중 「있는데 안 닿는 것」에만
+      # 형제 그룹의 connect: true — 이 셋 중 「있는데 안 닿는 것」에만
       # 걸린다. 배선이 없는 것은 사고가 아니라 이 편성의 기본값이다:
       # 스폰된 세션은 부모하고만 연결된 채 태어나고 그 밖의 간선은 상위가
       # 명시적으로 긋는다. 즉 워커가 형제 리뷰어에 닿지 못하는 것이 정상
@@ -1835,18 +1927,19 @@ steps:
       # 간선을 만들고 후보를 다시 맞춘다(cflow/responders.py wire).
       #
       # 무엇을 안 하는가가 범위다. 역할을 든 멤버가 아예 없으면 이어 줄
-      # 것이 없어 사유가 그대로고, remote·exited도 그대로 skip된다. 이
-      # 런이 스폰한 세션은 애초에 후보에서 빠져 있으므로(Pool.eligible)
-      # 워커가 자기 승인자를 만들어 낼 수 없다는 성질은 그대로다. 간선은
+      # 것이 없어 사유가 그대로고, remote·exited도 그대로 skip된다. 형제
+      # 범위 밖(방계)으로는 간선을 긋지 않는다 — 배선은 scope가 고른 멤버에만
+      # 걸린다. 자식 리뷰어는 부모와 연결된 채 태어나므로 descendant
+      # 그룹에는 배선이 필요 없다. 간선은
       # 워커–리뷰어 한 쌍뿐이라 리뷰어끼리는 여전히 떨어져 있다 — 두
       # 리뷰어를 떼어 두는 것이 두 의견을 얻는 방법이고, 이 선언은 그
       # 판정에 손대지 않는다. 만들어진 간선은 ask 레코드의 wired와 저널의
       # ask_wired에 남아, 사람이 판정으로 그은 간선과 구별된다.
       #
-      # 둘째 그룹에는 붙이지 않았다. 착지 결정은 authority 결정이라
-      # scope: ancestor로 묶여 있고, 자기 지휘 계통 밖으로 길을 만드는
-      # 것은 그 묶음이 막으려던 바로 그것이다. 리뷰는 competence
-      # 결정이라 「누구든 그 역할을 든 형제」가 정상 답변자다.
+      # 리더 그룹에는 붙이지 않았다. 리더는 착지 결정에서도 같은 순서로
+      # 찾는 지휘 계통이고, 거기로 없는 길을 만드는 것은 그 묶음이
+      # 막으려던 바로 그것이다. 리뷰는 competence 결정이라 형제
+      # 리뷰어에게는 길을 만들어도 된다.
       #
       # 이 선언이 덮지 못하는 구멍이 하나 남는다: 배선이 있어도 responder가
       # 죽거나 마감을 넘기면 otherwise: self:pass로 같은 자리에 온다. 그 통과가
@@ -1900,8 +1993,11 @@ steps:
         경우 방어선은 리더의 통합 후 전체 스윕이다.
       chooser:
         from:
-          - {role: reviewer, connect: true}
+          - {role: reviewer, scope: descendant}
+          - {role: reviewer, scope: sibling, connect: true}
+          - {role: reviewer, scope: ancestor}
           - {role: leader, scope: ancestor}
+          - {role: leader, scope: sibling}
         otherwise: self:pass
         timeout: 900
       options:
@@ -2894,6 +2990,13 @@ steps:
         `UNQUEUED:` 코멘트, 이 세션이 만든 것이면 pool ask 한 통) — 그러지
         않으면 settle-wait는 재요청을 하지 않으므로 아무도 처분을 요청받지
         못한 채 settle-stall까지 간다. 한 일을 reason에 적는다.
+        판정 전에 reviewer-ensure가 이 런에서 세운 자식 리뷰어부터
+        정리한다: 이 자리는 queue-recheck가 done을 낸 뒤라 이 런에 남은
+        리뷰가 없다. 그 리뷰어가 답하지 않은 질문을 들고 있지 않은지
+        `claunch cflow asks --session <리뷰어>`로 보고, MCP `kill`로
+        끝낸다 — 세션의 종료는 자식에게 번지지 않고(자식은 한 단계 위로
+        올라가 살아남는다), 남겨 두면 아래 판정이 그것을 adopt 안 된
+        자식으로 센다. 한 일을 reason에 적는다.
         살아 있는 자식(`children`)이 있고 리더의 adopt(reparent)가
         확인되지 않으면 그것도 미정산이다 — commit 단계에서 adopt ask를
         보냈으면 그 답을 `claunch cflow asks`나 mesh 기록에서 확인한다.

@@ -405,8 +405,11 @@ never the human's `claunch cflow goto -t <session>` retyped by you.
 
 ## Answering for someone else
 
-Other sessions' runs may delegate a decision to your role — anything you are
-wired to in the mesh except your own descendants. That is independent of
+Other sessions' runs may delegate a decision to your role — a run asks the
+relatives its workflow names in the spawn tree: its ancestors, its siblings,
+and its own descendants only where the workflow says so (a worker's review
+goes first to a reviewer the worker spawned for it). If you were spawned as
+somebody's reviewer, their questions are yours. That is independent of
 whether you are running a workflow yourself. A `decide` message on the mesh
 is the doorbell; `asks` is where the question actually lives.
 
