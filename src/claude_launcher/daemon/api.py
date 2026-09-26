@@ -58,6 +58,7 @@ from . import (
     rebrief, session_input, status_checks,
 )
 from . import paths
+from . import tokenusage
 from . import transcript_view
 from . import window as window_mod
 from .. import cli_beads
@@ -5174,6 +5175,18 @@ async def h_sessions_list(request: web.Request) -> web.Response:
         # transcript tail whenever its file grew, and ten busy sessions grow
         # theirs continuously, so this loop was 30-150ms of the event loop
         # per poll -- time no terminal socket could be served in.
+        # One inline read budget for the whole list: after a daemon restart
+        # every transcript is unread, and whatever this request cannot read
+        # within it is finished in the background and shown as partial. The
+        # background work is handed over after the loop (``release``), so it
+        # does not compete with the loop for the GIL.
+        usage_budget = tokenusage.budget()
+        try:
+            return _collect(usage_budget)
+        finally:
+            usage_budget.release()
+
+    def _collect(usage_budget) -> list:
         out = []
         for s in sessions:
             info = ctxsize.attach(s)
@@ -5181,6 +5194,15 @@ async def h_sessions_list(request: web.Request) -> web.Response:
             # (``tps``), read off the record file tails; absent when the
             # session never went through a shim (the OAuth routes).
             metering.attach(info)
+            # What the conversation has spent so far (``token_usage``), read
+            # incrementally off the same transcript; absent where the harness
+            # has no reader. Not for an archived record: the list carries
+            # hundreds of them, and reading their retired transcripts would
+            # spend the shared budget and the background thread on sessions
+            # nobody is watching, so an archived row goes without the line.
+            # Its detail panel still reads it when opened.
+            if session_mod.session_category(s) != session_mod.CATEGORY_ARCHIVED:
+                tokenusage.attach(info, s.sdef, usage_budget)
             # The cached briefing's one-liner, when it exists — rides the list
             # the UI already polls so a row can show it without an open card or
             # an LLM call, and so a browser refresh repaints it from the
@@ -6034,6 +6056,7 @@ async def h_session_meta(request: web.Request) -> web.Response:
         # every two seconds. Inline it was 80ms of loop per poll, at p90.
         info = ctxsize.attach(session)
         metering.attach(info)
+        tokenusage.attach(info, getattr(session, "sdef", None))
         # A model id the harness registry cannot read back into one of its
         # aliases. Reconciliation deliberately leaves the saved model alone in
         # that case rather than guess, so the disagreement would otherwise be

@@ -40,6 +40,8 @@ const coldLine = src.match(/^const RAIL_STALE_DEFAULT = .+$/m);
 if (!coldLine) throw new Error("cannot locate RAIL_STALE_DEFAULT in app.js");
 const staleLine = src.match(/^const railStale = .+$/m);
 if (!staleLine) throw new Error("cannot locate railStale in app.js");
+const usagePartsLine = src.match(/^const USAGE_PARTS = \[[\s\S]*?\];/m);
+if (!usagePartsLine) throw new Error("cannot locate USAGE_PARTS in app.js");
 
 /* ---- stub DOM: nested nodes, because the note may be hung on a child ---- */
 function node(tag) {
@@ -160,6 +162,13 @@ new Function(
   + slice("seenAgo") + slice("seenPair")
   + slice("railSeenLine")
   + slice("ctxRailLine") + slice("profileHarnessLabel")
+  // ...and a line saying what the conversation has spent (usage_check's
+  // subject); sliced so this harness can see it land on the row.
+  + usagePartsLine[0] + "\n"
+  + slice("usageShort") + slice("usageTotalOf") + slice("usageRequestsOf")
+  + slice("usageText") + slice("usageCost") + slice("usageShare")
+  + slice("usageLines") + slice("usageTooltip") + slice("usageBar")
+  + slice("usageRailLine")
   + slice("railMetaText")
   + slice("refreshSessions")
   + `
@@ -184,6 +193,8 @@ const FULL = {
   context: { tokens: 154706, input: 2, cache_read: 154073, cache_write: 631,
              output: 210, model: "claude-opus-5", at: AT,
              compact_window: 200_000 },
+  token_usage: { harness: "claude", input: 12, cache_read: 2100, cache_write: 50,
+                 output: 10, total: 2172, requests: 2 },
 };
 const QUIET = { name: "quiet", status: "idle", harness: "claude",
                 profile: "nc", parent: null };
@@ -343,6 +354,13 @@ served = { sessions: [FULL, QUIET, CODEX, PI, OTHER] };
     context: { ...FULL.context, tokens: 1_200_000 } });
   check("a count past the domain clamps at full rather than overrunning",
         fillOf(past).style.width, "100.0%");
+
+  const usageLine = (name) =>
+    descendants(row(name)).find((k) => k.className === "rail-usage-line");
+  check("a session with a usage reading gets its usage line on the row",
+        !!usageLine("full"), true);
+  check("...and one without a reading gets none",
+        usageLine("quiet"), undefined);
 
   check("no row claims a percentage — there is no denominator to make one",
         rows.concat(rows.flatMap((r) => descendants(r)))

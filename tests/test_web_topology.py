@@ -424,6 +424,7 @@ CHECKS = [
         "flowrender_check.js",
         "ctxsize_check.js",
         "tps_check.js",
+        "usage_check.js",
         "railctx_check.js",
         "railmodel_check.js",
         "railcwd_check.js",
