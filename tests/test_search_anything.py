@@ -312,10 +312,10 @@ def test_all_search_uses_reranker_and_rebuilds_for_endpoint_change(tmp_path):
             fallback = await service.search("all", "relay", wait=10)
             assert fallback["results"] and not fallback["reranked"]
             assert fallback["warnings"]
-            index = service._index("all", None, cfg)
+            index = await service._index("all", None, cfg)
             assert index.dims == 8 and index.entries
             cfg["base_url"] += "/changed"
-            assert not service._index("all", None, cfg).entries
+            assert not (await service._index("all", None, cfg)).entries
         finally:
             await service.shutdown()
             await server.close()
