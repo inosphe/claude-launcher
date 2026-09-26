@@ -771,6 +771,13 @@ class VectorIndex:
         return hits
 
 
+def _index_fits(index: Optional[VectorIndex], model: str, dims: int, signature: str) -> bool:
+    """Whether an open index was made under the settings now configured."""
+    if index is None:
+        return False
+    return index.model == model and index.signature == signature and not (dims and index.dims != dims)
+
+
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
@@ -866,6 +873,9 @@ class RagService:
         self._briefing_for = briefing_for or _cached_briefing
         self.all_docs = None
         self._indexes: Dict[str, VectorIndex] = {}
+        #: Corpus key -> the task opening that key's index in a worker thread,
+        #: while it runs (see ``_index``).
+        self._loading: Dict[str, asyncio.Task] = {}
         self._progress: Dict[str, Progress] = {}
         #: Query text -> its embedding, newest last (see ``QUERY_CACHE``). The
         #: endpoint and model are part of the key, so changed settings answer
@@ -916,23 +926,59 @@ class RagService:
             return f"beads-{digest}"
         return kind
 
-    def _index(self, kind: str, root: Optional[Path], cfg: dict) -> VectorIndex:
+    async def _index(self, kind: str, root: Optional[Path], cfg: dict) -> VectorIndex:
+        """The corpus's index, opened and loaded in a worker thread.
+
+        Opening a collection is ``zvec.open`` plus one pass over its fields.
+        On the live daemon's corpora that held the event loop for 3.8 s after
+        a restart (claunch-fh8u1.1, py-spy of pid 67196), and every terminal
+        socket waits on that loop. zvec releases the GIL while it opens: on a
+        copy of the live ``sessions`` collection the open took 0.6-0.9 s in a
+        thread and the main thread's longest gap meanwhile was 3.3 ms.
+
+        One key is opened once: a second caller waits for the first open
+        rather than opening the directory again, which its exclusive lock
+        would refuse. The open runs as its own task, so a caller cancelled
+        while it waits does not leave a loaded collection nobody registered.
+        """
         key = self._key(kind, root)
         model = str(cfg.get("embedding_model") or "")
         dims = int(cfg.get("dimensions") or 0)
         signature = content_hash(str(cfg.get("base_url") or ""), model, str(dims))
-        index = self._indexes.get(key)
-        if index is None or index.model != model or index.signature != signature or (dims and index.dims != dims):
-            if index is not None:
+        self._roots[key] = root
+        while True:
+            index = self._indexes.get(key)
+            if _index_fits(index, model, dims, signature):
+                return index
+            task = self._loading.get(key)
+            if task is None:
+                base = self._root_dir if self._root_dir is not None else paths.rag_dir()
+                fresh = VectorIndex(base / f"{key}.zvec", model=model, dims=dims, signature=signature)
+                # Out of the table before the thread starts: the old
+                # collection is closed there, and nothing should pick it up
+                # meanwhile.
+                self._indexes.pop(key, None)
+                task = asyncio.ensure_future(self._swap_index(key, index, fresh))
+                self._loading[key] = task
+                task.add_done_callback(lambda done, key=key: self._loading.pop(key, None))
+            # An open started under other settings is waited for and then
+            # checked again, like the table above.
+            await asyncio.shield(task)
+
+    async def _swap_index(self, key: str, old: Optional[VectorIndex], fresh: VectorIndex) -> VectorIndex:
+        def work() -> None:
+            if old is not None:
                 # The collection locks its directory, so the replacement
                 # cannot open it until this one lets go.
-                index.close()
-            base = self._root_dir if self._root_dir is not None else paths.rag_dir()
-            index = VectorIndex(base / f"{key}.zvec", model=model, dims=dims, signature=signature)
-            index.load()
-            self._indexes[key] = index
-        self._roots[key] = root
-        return index
+                old.close()
+            fresh.load()
+
+        await asyncio.to_thread(work)
+        if self._closed:
+            fresh.close()
+            raise RagError("rag: service is shutting down")
+        self._indexes[key] = fresh
+        return fresh
 
     def _progress_of(self, key: str) -> Progress:
         prog = self._progress.get(key)
@@ -999,7 +1045,7 @@ class RagService:
         prog.finished_at = None
         prog.runs += 1
         try:
-            index = self._index(kind, root, cfg)
+            index = await self._index(kind, root, cfg)
             docs = await self._docs(kind, root)
             if force:
                 index.clear()
@@ -1206,6 +1252,12 @@ class RagService:
             if task is not None:
                 with contextlib.suppress(asyncio.CancelledError, Exception):
                     await task
+        # An open in a worker thread cannot be stopped, and cancelling the
+        # task waiting on it would leave the collection it opens unclosed.
+        # Seeing ``_closed``, it closes that collection itself.
+        for task in list(self._loading.values()):
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await task
         self._pending.clear()
         while not self._queue.empty():
             self._queue.get_nowait()
@@ -1398,14 +1450,14 @@ class RagService:
         if not query:
             raise ValueError("empty query")
         prog = self.ensure_sync(kind, root)
-        index = self._index(kind, root, cfg)
+        index = await self._index(kind, root, cfg)
         # An index that already holds documents answers now. Waiting on the
         # running sync would add up to ``wait`` seconds to every search for a
         # coverage the answer reports anyway (``index`` below). An empty index
         # has nothing to answer from, so that case still waits.
         if not index.entries:
             await self.wait_sync(prog, wait)
-            index = self._index(kind, root, cfg)
+            index = await self._index(kind, root, cfg)
         client = self._client(cfg)
         started = time.monotonic()
         qvec, embed_cached = await self._query_vector(client, cfg, query)
@@ -1627,7 +1679,7 @@ class RagService:
             raise RagError("rag: block not configured (base_url, api_key, embedding_model)")
         prog = self.ensure_sync("beads", root)
         await self.wait_sync(prog, wait)
-        index = self._index("beads", root, cfg)
+        index = await self._index("beads", root, cfg)
         if issue_id not in index.entries:
             # Not indexed yet (a sync in flight, or a brand-new issue): embed it
             # now from the board rather than answering nothing.

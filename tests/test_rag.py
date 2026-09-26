@@ -602,7 +602,7 @@ def test_queue_reruns_a_key_enqueued_mid_sync(tmp_path, repo):
             await svc.drain()
             prog = svc._progress_of(svc._key("beads", repo))
             assert prog.runs == 2
-            index = svc._index("beads", repo, cfg)
+            index = await svc._index("beads", repo, cfg)
             assert "x-4" in index.entries
             # one key never syncs twice at once: the second pass started after the first ended
             assert svc.queue_view()["consumed"] == 2
@@ -687,7 +687,7 @@ def test_watcher_catches_a_cli_write_by_mtime(tmp_path, repo):
                 if index is not None and "x-9" in index.entries and not svc._pending:
                     break
             elapsed = time.monotonic() - started
-            assert "x-9" in svc._index("beads", repo, cfg).entries
+            assert "x-9" in (await svc._index("beads", repo, cfg)).entries
             assert elapsed < 2.0
             assert prog.runs > runs_before and prog.total == 4
             # only the new issue was embedded
@@ -736,11 +736,11 @@ def test_sessions_producers_follow_the_registry_and_briefing_cache(tmp_path):
                 svc.on_sessions_changed()          # the registry's change hook
                 await svc.drain()
                 assert svc._progress_of("sessions").runs == 1
-                assert "s1" in svc._index("sessions", None, cfg).entries
+                assert "s1" in (await svc._index("sessions", None, cfg)).entries
                 mgr.sessions.append(Sess("s2"))
                 svc.on_sessions_changed(mgr.sessions[-1])  # the exit hook's signature
                 await svc.drain()
-                assert "s2" in svc._index("sessions", None, cfg).entries
+                assert "s2" in (await svc._index("sessions", None, cfg)).entries
                 before = svc._progress_of("sessions").runs
                 briefing._persist_cache()          # the briefing cache's hook
                 await svc.drain()
