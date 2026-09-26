@@ -402,3 +402,19 @@ def test_the_registry_lives_under_one_section(ws, tmp_path):
     beads_db.set_db("outer", str(tmp_path / "o.db"))
     doc = store.load()
     assert doc[beads_db.SECTION][beads_db.BOARDS_KEY]["outer"] == str(tmp_path / "o.db")
+
+
+def test_the_command_line_runner_reads_utf8_output_whole():
+    """br writes UTF-8. Read with the locale codec (cp949 on this machine),
+    the first Korean byte kills subprocess.run's reader thread and
+    create_board would judge a partial stdout
+    (claunch-gds6-subprocess-decode-cp949-ja5ih)."""
+    import sys
+
+    code = "import sys; sys.stdout.buffer.write('보드를 만들었다'.encode('utf-8'))"
+    rc, out, _err = cli_beads._subprocess_runner(
+        [sys.executable, "-c", code], cwd=os.getcwd()
+    )
+
+    assert rc == 0
+    assert out == "보드를 만들었다"

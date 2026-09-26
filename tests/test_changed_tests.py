@@ -1902,3 +1902,22 @@ def test_the_stub_command_in_these_tests_is_never_called_foreign(repo, gate):
     _write(repo, "src/pkg/mesh.py", "x = 2\n")
     assert gate() == 0
     assert gate.runs() == 1
+
+
+# --------------------------------------------------------------------------- #
+# git's output is read as UTF-8 (claunch-gds6-subprocess-decode-cp949-ja5ih)
+# --------------------------------------------------------------------------- #
+def test_a_korean_subject_is_read_whole(tmp_path):
+    """git writes UTF-8. Read with the locale codec (cp949 on this machine),
+    the first Korean byte kills subprocess.run's reader thread and the gate
+    selects from whatever part of the output survived."""
+    repo = tmp_path / "ko"
+    repo.mkdir()
+    _git(repo, "init", "-b", "master")
+    _write(repo, "a.py")
+    _git(repo, "add", "a.py")
+    _git(repo, "commit", "-m", "표적 선택이 한글 제목을 읽는다")
+
+    out = changed_tests._git(repo, "log", "-1", "--format=%s")
+
+    assert out.strip() == "표적 선택이 한글 제목을 읽는다"
