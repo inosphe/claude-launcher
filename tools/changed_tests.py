@@ -345,8 +345,13 @@ MIN_STEM = 4
 
 
 def _git(repo: Path, *args: str, env: Optional[dict] = None) -> str:
+    # git writes UTF-8; the locale codec (cp949 here) would kill the reader
+    # thread on a Korean path or subject and return partial output
+    # (claunch-gds6-subprocess-decode-cp949-ja5ih). The two direct git calls
+    # below read the same way.
     proc = subprocess.run(
-        ["git", "-C", str(repo), *args], capture_output=True, text=True, env=env
+        ["git", "-C", str(repo), *args], capture_output=True, text=True,
+        encoding="utf-8", errors="replace", env=env,
     )
     if proc.returncode != 0:
         raise LookupError(
@@ -467,6 +472,8 @@ def resolve_base(repo: Path, base: str) -> tuple:
         ],
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
     )
     if proc.returncode == 0 and proc.stdout.strip():
         # Same reason: a branch with no ``merge`` configured is an ordinary
@@ -475,6 +482,8 @@ def resolve_base(repo: Path, base: str) -> tuple:
             ["git", "-C", str(repo), "config", f"branch.{branch}.merge"],
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
         )
         if paired.stdout.strip() == f"refs/heads/{branch}":
             return DEFAULT_BASE, "self-tracking"

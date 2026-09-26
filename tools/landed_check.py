@@ -97,8 +97,12 @@ def _resolve_repo(explicit: Optional[str]) -> Tuple[Path, str]:
 
 
 def _git(repo: Path, *args: str) -> subprocess.CompletedProcess:
+    # git writes UTF-8 (Korean subjects on this board); the locale codec would
+    # kill the reader thread and leave partial output behind an exit code of 0
+    # (claunch-gds6-subprocess-decode-cp949-ja5ih).
     return subprocess.run(
-        ["git", "-C", str(repo), *args], capture_output=True, text=True
+        ["git", "-C", str(repo), *args], capture_output=True, text=True,
+        encoding="utf-8", errors="replace",
     )
 
 

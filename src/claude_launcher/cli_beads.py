@@ -574,8 +574,12 @@ def move_db(src: str, dst: str) -> None:
 def _subprocess_runner(argv: List[str], cwd: str):
     """:func:`create_board`'s runner for the command line — the daemon hands
     in its own so the board is created through the same code path."""
+    # br writes UTF-8; the locale codec (cp949 here) would kill the reader
+    # thread on the first Korean byte and hand back partial output
+    # (claunch-gds6-subprocess-decode-cp949-ja5ih).
     proc = subprocess.run(
-        argv, cwd=cwd, check=False, capture_output=True, text=True
+        argv, cwd=cwd, check=False, capture_output=True, text=True,
+        encoding="utf-8", errors="replace",
     )
     return proc.returncode, proc.stdout, proc.stderr
 

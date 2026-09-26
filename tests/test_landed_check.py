@@ -351,3 +351,23 @@ def test_fetch_of_a_local_only_target_cannot_tell(base, capsys):
 def test_fetch_without_a_target_cannot_tell(base, capsys):
     assert _run(base, "--fetch") == landed_check.CANNOT_TELL
     assert "--target" in capsys.readouterr().err
+
+
+# --------------------------------------------------------------------------- #
+# git's output is read as UTF-8 (claunch-gds6-subprocess-decode-cp949-ja5ih)
+# --------------------------------------------------------------------------- #
+def test_a_korean_subject_is_read_whole(tmp_path):
+    """git writes UTF-8. Read with the locale codec (cp949 on this machine),
+    the first Korean byte kills subprocess.run's reader thread: stdout comes
+    back ``None`` or cut short while the exit code stays 0."""
+    repo = tmp_path / "ko"
+    repo.mkdir()
+    _git(repo, "init", "-b", "master")
+    (repo / "a").write_text("a", encoding="utf-8")
+    _git(repo, "add", "a")
+    _git(repo, "commit", "-m", "착지 게이트가 한글 제목을 읽는다")
+
+    proc = landed_check._git(repo, "log", "-1", "--format=%s")
+
+    assert proc.returncode == 0
+    assert proc.stdout.strip() == "착지 게이트가 한글 제목을 읽는다"
