@@ -1137,6 +1137,12 @@ class Board:
         #: through :meth:`br`. The search index's producer hangs here
         #: (:meth:`daemon.rag.RagService.on_board_write`).
         self.write_hooks: List[Callable[[Path], None]] = []
+        #: Called, with nothing, after a sweep stamped ``swept_at`` on at
+        #: least one session. The daemon hangs the manager's ``persist`` here,
+        #: so the stamp reaches the registry now rather than at whatever
+        #: persist happens to come next -- a restart before that one would
+        #: sweep the same ending again (claunch-fh8u1.2).
+        self.swept_hooks: List[Callable[[], None]] = []
         #: ``br`` was found on PATH (sticky), and when PATH was last walked.
         self._which_found = False
         self._which_checked = 0.0
@@ -2623,13 +2629,14 @@ class Board:
         from the state it wrote would release its own in_progress issue on
         top of returning it to open.
 
-        A session whose sweep ran to the end is stamped ``swept_at``; the
-        manager persists that with the record, and a later restart does not
-        sweep the same ending again (claunch-fh8u1.2).
+        A session whose sweep ran to the end is stamped ``swept_at``, and
+        :attr:`swept_hooks` (the manager's persist) write it down at once; a
+        later restart does not sweep the same ending again (claunch-fh8u1.2).
         """
         done_by: Dict[str, List[List[str]]] = {}
         if not self.available():
             return done_by
+        stamped = False
         by_root: Dict[str, Tuple[Path, list]] = {}
         for session in sessions:
             try:
@@ -2639,6 +2646,7 @@ class Board:
                 continue
             if root is None or not self.has_board(root):
                 _mark_swept(session)  # no board, nothing this ending owes
+                stamped = True
                 continue
             by_root.setdefault(str(root), (root, []))[1].append(session)
         for root, group in by_root.values():
@@ -2655,7 +2663,7 @@ class Board:
             # Every session of a pass plans from the same rows; the pass's
             # writes are mirrored only once it is over, so nobody reads a row
             # half-way through a pass and is then asked about it again.
-            last: Optional[Dict[str, str]] = None  # issue id -> who wrote it
+            last: Optional[Dict[str, set]] = None  # issue id -> who wrote it
             for _ in range(len(group) + 1):
                 writes: List[Tuple[str, List[List[str]]]] = []
                 for session in group:
@@ -2663,7 +2671,7 @@ class Board:
                     if last is None:
                         subset = rows
                     else:
-                        subset = [by_id[i] for i, who in last.items() if who != name]
+                        subset = [by_id[i] for i, who in last.items() if name not in who]
                         if not subset:
                             continue
                     done, ok = await self._sweep_rows(root, subset, session)
@@ -2673,12 +2681,20 @@ class Board:
                     writes.append((name, done))
                 last = {}
                 for name, done in writes:
-                    last.update(dict.fromkeys(_mirror(by_id, done), name))
+                    for iid in _mirror(by_id, done):
+                        last.setdefault(iid, set()).add(name)
                 if not last:
                     break
             for session in group:
                 if session.sdef.name not in failed:
                     _mark_swept(session)
+                    stamped = True
+        if stamped:
+            for hook in list(self.swept_hooks):
+                try:
+                    hook()
+                except Exception:  # the sweep itself is done; log and go on
+                    log.exception("beads: swept hook %r failed", hook)
         return done_by
 
     async def _sweep_rows(

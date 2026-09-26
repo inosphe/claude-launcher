@@ -1566,6 +1566,33 @@ def test_a_finished_sweep_stamps_the_ending(repo):
     asyncio.run(run())
 
 
+def test_a_stamp_is_handed_to_the_swept_hooks_once(repo):
+    """The stamp lives on the session object; the hook is what writes it to
+    the registry. Called once per sweep that stamped anything, and not for a
+    sweep whose every session had a write fail."""
+    br = FakeBr()
+    br.add(id="w", assignee="s1", status="in_progress")
+    board = _board(br, repo)
+    calls = []
+    board.swept_hooks.append(lambda: calls.append(1))
+
+    async def run():
+        await board.sweep_many(
+            [_Sess(_sdef(n, repo), status="exited", exit_code=0) for n in ("s1", "s2")]
+        )
+        assert calls == [1]
+
+        async def broken(root, args, actor=None):
+            raise beads_mod.cli_beads.BeadsError("locked")
+
+        br.add(id="v", assignee="s3", status="in_progress")
+        board.br = broken
+        await board.sweep_many([_Sess(_sdef("s3", repo), status="exited")])
+        assert calls == [1]
+
+    asyncio.run(run())
+
+
 # --------------------------------------------------------------------------- #
 # through the API, over real sessions
 # --------------------------------------------------------------------------- #
@@ -2278,6 +2305,39 @@ def test_a_restart_sweeps_what_retiring_leaves_behind(home, tmp_path, repo):
                 "SESSION ENDED" in " ".join(c) and "comments" in c
                 for c in br.calls
             )
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_a_boot_sweep_is_written_down_before_the_next_restart(home, tmp_path, repo):
+    """claunch-fh8u1.2, end to end. The boot sweep stamps the retired record
+    and the daemon persists the stamp itself -- nothing else persists here --
+    so the restart after it does not owe that ending a sweep any more."""
+    _register_py_harness()
+    br = FakeBr()
+    br.add(id="w", assignee="w1", status="in_progress")
+    board = _board(br, repo)
+
+    async def run():
+        old = SessionManager(idle_threshold=0.5, scrollback=200, restore_default=True)
+        old.create(SessionDef(name="w1", harness="py", cwd=str(repo), restore=False))
+        await old.shutdown_all()
+
+        fresh = SessionManager(idle_threshold=0.5, scrollback=200, restore_default=True)
+        fresh.restore_all()
+        mm = MeshManager(fresh, root=tmp_path / "mesh")
+        client = await _serve(fresh, mm, board)
+        try:
+            await _wait_for(
+                lambda: getattr(fresh.get("w1"), "swept_at", None), "the stamp"
+            )
+            # The next boot reads the registry as it stands now.
+            later = SessionManager(idle_threshold=0.5, scrollback=200, restore_default=True)
+            later.restore_all()
+            assert later.get("w1").swept_at
+            assert "w1" not in {d.sdef.name for d in later.take_retired_for_sweep()}
         finally:
             await client.close()
 
