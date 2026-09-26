@@ -2733,8 +2733,9 @@ class RunEventClock:
 
         Runs on the loop, so it only records; reading the run's state is disk
         work and belongs to the scan's thread. An ending somebody asked for
-        -- :meth:`Session.kill`, which every kill verb, the beads wind-down,
-        kill-on-end and pause go through -- is not recorded: whoever asked
+        -- :meth:`Session.kill` (every kill verb, the beads wind-down,
+        kill-on-end, pause) or :meth:`Session.shutdown` (redefine, migrate,
+        archive, clear --running) -- is not recorded: whoever asked
         already knows, and in the live fleet those were almost every orphaned
         report the overseer got (s773 on claunch-4i1n2: 3 of 69 runs' first
         reports led to any action, all three a worker that crashed mid-work).
@@ -2758,6 +2759,9 @@ class RunEventClock:
         while self._exits:
             name, cwd, parent = self._exits.popleft()
             if not enabled:
+                continue
+            if self._live(name) is not None:
+                # Back already (redefine, respawn): the run has a driver.
                 continue
             try:
                 resolved = cflow_state.resolve_cwd(cwd)

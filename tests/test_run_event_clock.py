@@ -327,6 +327,68 @@ def test_a_crash_heard_while_disabled_is_not_replayed(proj):
     assert clock.scan() == []
 
 
+def test_a_crash_whose_session_is_back_already_is_not_reported(proj):
+    """Respawned (or redefined) under the same name before the next pass:
+    the run has a driver again, so there is nothing to tell."""
+    cwd = str(proj)
+    cflow_engine.start("linear", cwd=cwd, scope="w1")
+    old = _FakeSession("w1", cwd, parent="lead")
+    lead = _FakeSession("lead", cwd)
+    manager = _FakeManager({"w1": old, "lead": lead})
+    clock = cflow_clock.RunEventClock(manager)
+    _crash(old)
+    clock.session_exited(old)
+    manager._sessions["w1"] = _FakeSession("w1", cwd, parent="lead")
+    assert clock.scan() == []
+
+
+def test_session_shutdown_marks_the_ending_as_requested():
+    """redefine, migrate, archive and clear --running end a session through
+    Session.shutdown, not Session.kill."""
+    from claude_launcher.daemon.session import Session
+
+    fake = SimpleNamespace(exited=False, kill_requested=False, _deferred_deliveries=set())
+
+    def terminate(force=False):
+        fake.exited = True
+
+    fake.pty = SimpleNamespace(terminate=terminate)
+    asyncio.run(Session.shutdown(fake, grace=0.1))
+    assert fake.kill_requested is True
+
+
+def test_a_redefine_is_not_reported(proj):
+    """The most common of the shutdown-path endings, end to end through a
+    real manager: the old incarnation's exit is not recorded at all."""
+    import sys
+
+    from claude_launcher import lineage, profile
+    from claude_launcher.daemon.manager import SessionManager
+
+    store.update(lambda doc: doc.update({"harnesses": {"py": {"command": [
+        sys.executable, "-u", "-c", "import sys\nprint('READY')\nsys.stdin.read()\n",
+    ]}}}))
+    if not profile.resolve("py").exists():
+        lineage.set_harness(profile.create("py"), "py")
+    cwd = str(proj)
+
+    async def run():
+        mgr = SessionManager(idle_threshold=0.5, scrollback=200, restore_default=True)
+        clock = cflow_clock.RunEventClock(mgr)
+        mgr.exit_hooks.append(clock.session_exited)
+        try:
+            mgr.create(SessionDef(name="lead", harness="py", cwd=cwd))
+            mgr.create(SessionDef(name="w1", harness="py", cwd=cwd, parent="lead"))
+            cflow_engine.start("linear", cwd=cwd, scope="w1")
+            await mgr.redefine("w1", cols=100)
+            assert list(clock._exits) == []
+            assert [e for e in clock.scan() if e["kind"] == "orphaned"] == []
+        finally:
+            await mgr.shutdown_all()
+
+    asyncio.run(run())
+
+
 def test_session_kill_marks_the_ending_as_requested():
     """Every kill verb, the beads wind-down, kill-on-end and pause end a
     session through Session.kill, so the marker is set in one place."""

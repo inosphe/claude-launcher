@@ -486,9 +486,9 @@ class Session:
         #: restart that retires it does not sweep the same ending again
         #: (claunch-fh8u1.2); a respawn starts a new incarnation at None.
         self.swept_at: Optional[str] = None
-        #: Set by :meth:`kill` just before the child is signalled: somebody
-        #: asked for this ending (a person, a parent, the beads wind-down,
-        #: kill-on-end, a pause). The exit code cannot say so -- a signalled
+        #: Set by :meth:`kill` and :meth:`shutdown` just before the child is
+        #: signalled: somebody asked for this ending (a person, a parent, the
+        #: beads wind-down, kill-on-end, a pause, a redefine or migrate). The exit code cannot say so -- a signalled
         #: harness and one that crashed both leave 2 on Windows -- and the
         #: run event clock tells a parent only about the endings nobody
         #: asked for. In memory only; a respawn constructs a fresh Session.
@@ -1777,6 +1777,9 @@ class Session:
             await asyncio.gather(*pending, return_exceptions=True)
         if self.exited or self.pty is None:
             return
+        # An asked-for ending like kill(): redefine, migrate, archive and
+        # clear --running end sessions through here, not through kill().
+        self.kill_requested = True
         self.pty.terminate(force=False)
         deadline = time.monotonic() + grace
         while not self.exited and time.monotonic() < deadline:
