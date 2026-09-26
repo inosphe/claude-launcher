@@ -58,6 +58,7 @@ from . import (
     rebrief, session_input, status_checks,
 )
 from . import paths
+from . import tokenusage
 from . import transcript_view
 from . import window as window_mod
 from .. import cli_beads
@@ -5181,6 +5182,10 @@ async def h_sessions_list(request: web.Request) -> web.Response:
             # (``tps``), read off the record file tails; absent when the
             # session never went through a shim (the OAuth routes).
             metering.attach(info)
+            # What the conversation has spent so far (``token_usage``), read
+            # incrementally off the same transcript; absent where the harness
+            # has no reader.
+            tokenusage.attach(info, s.sdef)
             # The cached briefing's one-liner, when it exists — rides the list
             # the UI already polls so a row can show it without an open card or
             # an LLM call, and so a browser refresh repaints it from the
@@ -6034,6 +6039,7 @@ async def h_session_meta(request: web.Request) -> web.Response:
         # every two seconds. Inline it was 80ms of loop per poll, at p90.
         info = ctxsize.attach(session)
         metering.attach(info)
+        tokenusage.attach(info, getattr(session, "sdef", None))
         # A model id the harness registry cannot read back into one of its
         # aliases. Reconciliation deliberately leaves the saved model alone in
         # that case rather than guess, so the disagreement would otherwise be
