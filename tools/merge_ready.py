@@ -189,7 +189,10 @@ REBASE = 3
 #: can do fixes it. Only reachable with ``--checkout``.
 DIRTY_CHECKOUT = 4
 
-#: The target already contains this tip: the work landed. Without
+#: The target already contains this tip, brought in by a merge: the work
+#: landed. A tip on the target's own first-parent line is contained too, and
+#: that is a branch never committed on, not a landing -- it stays ``0``,
+#: "nothing to land" (claunch-gzi50; :func:`_on_first_parent`). Without
 #: ``--landed-exit`` that is ``0`` like every other ready answer, which is
 #: right for a gate (nothing blocks) and wrong for a probe: ``await-landing``
 #: runs this under ``awaits``, which speaks only when the exit code changes,
@@ -261,6 +264,22 @@ def _git(repo: Path, *args: str) -> subprocess.CompletedProcess:
     return subprocess.run(
         ["git", "-C", str(repo), *args], capture_output=True, text=True
     )
+
+
+def _on_first_parent(repo: Path, tip: str, target_tip: str) -> bool:
+    """Whether ``tip`` is a commit on ``target_tip``'s own first-parent line.
+
+    Only asked of a tip the target already contains. Walking the target's
+    first parents down to the tip ends on a commit whose first parent *is*
+    the tip exactly when the tip is on that line; a tip a --no-ff merge
+    brought in is that merge's second parent, and the walk passes it by.
+    """
+    walk = _git(repo, "rev-list", "--first-parent", f"{tip}..{target_tip}")
+    if walk.returncode != 0 or not walk.stdout.split():
+        return False
+    last = walk.stdout.split()[-1]
+    first_parent = _git(repo, "rev-parse", f"{last}^1")
+    return first_parent.returncode == 0 and first_parent.stdout.strip() == tip
 
 
 def _target(repo: Path, branch: str) -> Tuple[str, str]:
@@ -1095,6 +1114,20 @@ def main(argv: Optional[List[str]] = None) -> int:
             # calling that "landed" would be a gate telling a lie -- the thing
             # these scripts exist not to do.
             print(f"ready: nothing to land -- {args.branch} is {target} ({tip[:12]})")
+        elif _on_first_parent(repo, tip, target_tip):
+            # The same branch after the target moved on: still no commit of
+            # its own, and the tip is now a commit the target made itself.
+            # A --no-ff landing puts the tip on the merge's second-parent
+            # side, never on the target's first-parent line, so this is the
+            # line between "nothing was ever here" and "it landed"
+            # (claunch-gzi50). A fast-forward landing also sits on that line
+            # and reads as this; that is the tip == target_tip case above,
+            # one merge later.
+            print(
+                f"ready: nothing to land -- {tip[:12]} is on {target}'s own "
+                f"first-parent line, so {args.branch} holds no commit that "
+                f"{target} did not make itself"
+            )
         else:
             print(f"ready: landed -- {target} already contains {tip[:12]}")
             if args.landed_exit:

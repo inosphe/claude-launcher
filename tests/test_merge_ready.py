@@ -151,6 +151,10 @@ def repo(tmp_path_factory):
     _git(path, "checkout", "-q", "landed-target")
     _git(path, "merge", "-q", "--no-ff", "-m", "landed: merged", "landed-branch")
 
+    # Cut and never committed on, and the target moved: the tip is an ancestor
+    # of the target exactly as a landed one is, and nothing ever landed.
+    _scenario(path, "empty", target_adds={"theirs.py": "y = 2\n"}, branch_adds={})
+
     # A distance big enough for --max-behind to have something to exceed.
     _scenario(
         path,
@@ -283,6 +287,30 @@ def test_landed_exit_gives_the_landing_its_own_code(repo, capsys):
         "--branch", "aligned-branch", "--target", "aligned-target",
     )
     assert code == merge_ready.READY, out
+
+
+def test_a_branch_with_nothing_on_it_is_not_a_landing(repo, capsys):
+    """Ancestry alone cannot tell a landing from a branch never committed on.
+
+    Both leave the tip inside the target once the target moves (claunch-gzi50).
+    Calling the second one landed sent the worker's rebase gate to 5 and its
+    instructions to ``request_goto landed`` for work that never existed. The
+    landed tip came in through a merge's second parent; this one is on the
+    target's own first-parent line.
+    """
+    code, out = _verdict(
+        repo, capsys, "--landed-exit",
+        "--branch", "empty-branch", "--target", "empty-target",
+    )
+    assert code == merge_ready.READY, out
+    assert "nothing to land" in out
+    assert "landed --" not in out
+
+    code, out = _verdict(
+        repo, capsys, "--landed-exit",
+        "--branch", "landed-branch", "--target", "landed-target",
+    )
+    assert code == merge_ready.LANDED, out
 
 
 # --------------------------------------------------------------------------- #
