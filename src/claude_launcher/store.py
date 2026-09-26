@@ -373,7 +373,8 @@ DAEMON_DEFAULTS = {
     # The run event clock's machine switch: whether an overseer session (the
     # driver's spawn parent, else its mesh leader) is told when a run it
     # oversees hits a human gate, finishes a recurring round, or loses its
-    # driver. Read LIVE like the reminder keys.
+    # driver to a crash (told once, at the exit, to the live parent only).
+    # Read LIVE like the reminder keys.
     "cflow_events": True,
     # Kill-on-end: when the same clock sees a finished ONE-SHOT run (status
     # done, no recur, no pending next start), the daemon records a final

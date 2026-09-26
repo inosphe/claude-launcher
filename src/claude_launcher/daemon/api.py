@@ -3049,9 +3049,10 @@ async def h_cflow_runs(request: web.Request) -> web.Response:
     ``?cwd=`` (reported even when idle). A run's ``scope`` is the managed
     session it belongs to (``default`` = started outside any session).
 
-    A run nobody is driving carries ``orphaned: true`` — the same judgment
-    :class:`cflow_clock.RunEventClock` pushes at the overseeing session, so
-    the dashboard's Orphans tab and that notification name one set of runs.
+    A run nobody is driving carries ``orphaned: true``
+    (:func:`cflow_clock.run_orphaned`), which the dashboard's Orphans tab
+    lists. That tab is the standing view of the set; the run event clock
+    pushes only a crash, once, at the exit.
     """
     manager: SessionManager = request.app["manager"]
     # Resolve the session registry once for the whole sweep.  The old path
@@ -3135,10 +3136,8 @@ async def h_cflow_runs(request: web.Request) -> web.Response:
                     manager, snaps, cfg, cwd, scope, entry,
                     live_sessions=live_sessions,
                 )
-                # The same judgment the run event clock pushes its `orphaned`
-                # fyi off, carried on the entry so the Flows page can list
-                # those runs without re-deriving it (and without disagreeing
-                # with the notification that sent the reader there). Skipped
+                # Carried on the entry so the Flows page can list the runs
+                # nobody is driving without re-deriving the rule. Skipped
                 # on the rail poll, whose keys are already filtered down to
                 # sessions that are alive, so the answer is always False.
                 if not rail_view and cflow_clock.run_orphaned(

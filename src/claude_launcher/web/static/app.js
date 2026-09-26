@@ -7473,9 +7473,9 @@ async function checkFlowDefinition(save) {
 }
 
 /* The runs nobody is driving. The judgment is the daemon's — `orphaned` is
-   set by /api/cflow from the same predicate the run event clock fires on
-   (cflow_clock.run_orphaned) — so this tab cannot list a different set from
-   the one the notification reported. Deriving it here from `sessions` being
+   set by /api/cflow (cflow_clock.run_orphaned) — and this tab is the one
+   place the whole set is shown: the daemon no longer pushes it into the
+   overseer's terminal. Deriving it here from `sessions` being
    empty would have been a second rule: a run started from the CLI has no
    session at all and is nobody's to resume. */
 function cflowOrphans(runs) {

@@ -57,6 +57,7 @@ import platform as platform_mod
 import subprocess
 import tempfile
 import time
+from collections import deque
 from typing import Callable, Dict, List, Optional, Set, Tuple
 
 from .. import store
@@ -2456,11 +2457,13 @@ def driver_gone(manager, cwd: str, scope: str) -> bool:
 def run_orphaned(manager, cwd: str, scope: str, payload: dict) -> bool:
     """The run at ``(cwd, scope)`` is unfinished and nobody is driving it.
 
-    One rule with two readers: :class:`RunEventClock` pushes the ``orphaned``
-    fyi off it, and ``/api/cflow`` marks the same runs so the dashboard's
-    Orphans tab lists exactly what the clock reported. Written in one place
-    because the two would otherwise drift, and a tab that disagrees with the
-    notification that sent the reader to it is worse than no tab.
+    Read by ``/api/cflow``, which marks these runs so the dashboard's Orphans
+    tab lists them. That tab is the whole view of the set: the run event
+    clock no longer pushes it (it tells a parent only about the one exit
+    nobody asked for, at the moment of the exit -- see
+    :meth:`RunEventClock.session_exited`), because re-reporting the set on
+    every daemon boot cost the overseer a turn per run per restart and
+    changed nothing it did.
     """
     return bool(
         payload.get("run")
@@ -2487,8 +2490,12 @@ class RunEventClock:
       blocked on a person, and the overseer may need to surface that to one.
     * **round-done** — a recurring run finished its round and filed the next
       one: the driver is out of work until somebody gives it a goal.
-    * **orphaned** — the run is active but its driving session has exited:
-      nobody is driving, and no transition will ever come.
+    * **orphaned** — the driving session exited while its run was
+      unfinished, and nobody asked for that exit (no kill, no pause): a
+      crash. Pushed once, at the exit itself, to the live spawn parent only
+      (:meth:`session_exited`). Runs left behind by a deliberate kill are not
+      pushed at all -- whoever killed the session knows -- and the standing
+      set lives on the dashboard's Orphans tab (:func:`run_orphaned`).
     * **session-ended** — kill-on-end (below) reaped a finished one-shot
       run's session. Sent after the kill lands, and NOT gated on
       ``cflow_events``: the peers still messaging that session have no
@@ -2504,8 +2511,10 @@ class RunEventClock:
     the first sight of a run only arms it — a daemon restart does not replay
     events, and one that happens while a run sits at a gate misses that
     entry (the overseer's pull channel, ``claunch cflow status -t``, is the
-    safety net; ``orphaned`` is state, not a transition, so it alone still
-    fires after a restart). Delivery is a debt like the reminder's: a failed
+    safety net). ``orphaned`` comes from the exit hook instead of the scan,
+    so a restart does not replay it either -- it used to be read off state on
+    sight, and the same few dead runs were re-sent after every boot (one run
+    244 times in ten days, s773 on claunch-4i1n2). Delivery is a debt like the reminder's: a failed
     type-in is retried every poll until it lands. Unlike the reminder there
     is no busy-only hold — the point is to WAKE an idle overseer, not to
     steer a working one.
@@ -2546,8 +2555,8 @@ class RunEventClock:
 
     Scan-budget note (six clocks already share one sequential pass over
     ``known_runs()``): this detection adds no pass of its own and no per-run
-    cost beyond the orphaned branch's own two lookups — one dict get for the
-    run state, one ``manager.get(scope)``. The idle-wait runs once per
+    cost; an exit costs one status read, on the next pass after it. The
+    idle-wait runs once per
     finished run as one bounded task, at most ``cflow_kill_on_end_grace``.
     """
 
@@ -2559,10 +2568,12 @@ class RunEventClock:
         #: (cwd, scope) -> last observed position key. In memory only, same
         #: trade as the reminder's timers.
         self._seen: Dict[Tuple[str, str], tuple] = {}
-        #: (cwd, scope, run) whose orphaning was already reported.
-        self._orphaned: Set[Tuple[str, str, str]] = set()
-        #: (cwd, scope, run) whose ending was already recorded. Like the
-        #: orphaned set: state fires on sight, once per run — a daemon restart
+        #: Sessions that exited without being asked to, as (name, cwd,
+        #: parent): filled by :meth:`session_exited` on the loop, drained by
+        #: :meth:`scan` in its thread (a deque, so the two need no lock).
+        self._exits: deque = deque()
+        #: (cwd, scope, run) whose ending was already recorded. State that
+        #: fires on sight, once per run — a daemon restart
         #: that first-sees a done run still mops it up, and one that was in
         #: the middle of an ending does not re-record it. The switch off is
         #: still tracked (the ledger below gets the mark) so toggling it back
@@ -2690,14 +2701,6 @@ class RunEventClock:
                                  str(payload.get("workflow") or "?"))
                             )
                 continue
-            if (
-                enabled
-                and (cwd, scope, run_id) not in self._orphaned
-                and run_orphaned(self.manager, cwd, scope, payload)
-            ):
-                # State, not a transition — fires on sight, once per run.
-                self._orphaned.add((cwd, scope, run_id))
-                events.append(self._event(cwd, scope, "orphaned", payload))
             if prev is None or prev == pos or not enabled:
                 continue
             if (
@@ -2718,9 +2721,61 @@ class RunEventClock:
                 and prev[1] in _RUNNING
             ):
                 events.append(self._event(cwd, scope, "round-done", payload))
+        events.extend(self._exit_events(enabled))
         for key in list(self._seen):
             if key not in live:
                 del self._seen[key]
+        return events
+
+    def session_exited(self, session) -> None:
+        """Exit hook (``SessionManager.exit_hooks``): note an ending nobody
+        asked for, for the next :meth:`scan` to judge.
+
+        Runs on the loop, so it only records; reading the run's state is disk
+        work and belongs to the scan's thread. An ending somebody asked for
+        -- :meth:`Session.kill` (every kill verb, the beads wind-down,
+        kill-on-end, pause) or :meth:`Session.shutdown` (redefine, migrate,
+        archive, clear --running) -- is not recorded: whoever asked
+        already knows, and in the live fleet those were almost every orphaned
+        report the overseer got (s773 on claunch-4i1n2: 3 of 69 runs' first
+        reports led to any action, all three a worker that crashed mid-work).
+        A session with no parent has nobody this push is for.
+        """
+        if getattr(session, "kill_requested", False):
+            return
+        if getattr(session, "paused_at", None):
+            return
+        sdef = session.sdef
+        if not sdef.parent or not sdef.cwd:
+            return
+        self._exits.append((sdef.name, sdef.cwd, sdef.parent))
+
+    def _exit_events(self, enabled: bool) -> List[dict]:
+        """The ``orphaned`` events for the exits :meth:`session_exited`
+        recorded since the last pass: one per exit whose run was left
+        unfinished. Drained whether or not the switch is on -- off is quiet,
+        and an exit heard in the dark is not replayed when it comes back."""
+        events: List[dict] = []
+        while self._exits:
+            name, cwd, parent = self._exits.popleft()
+            if not enabled:
+                continue
+            if self._live(name) is not None:
+                # Back already (redefine, respawn): the run has a driver.
+                continue
+            try:
+                resolved = cflow_state.resolve_cwd(cwd)
+                if name not in cflow_state.scopes_in(resolved):
+                    continue
+                payload = cflow_engine.status(resolved, scope=name)
+            except Exception as exc:
+                log.debug("cflow run events: exit of %r unreadable: %s", name, exc)
+                continue
+            if not payload.get("run") or payload.get("status") in _SETTLED:
+                continue
+            event = self._event(resolved, name, "orphaned", payload)
+            event["to"] = parent
+            events.append(event)
         return events
 
     def _event(self, cwd: str, scope: str, kind: str, payload: dict) -> dict:
@@ -2840,7 +2895,13 @@ class RunEventClock:
     async def _deliver(self, event: dict) -> bool:
         """Type the event into its overseer. True = settled (delivered, or
         dropped for want of anyone to tell); False keeps the debt."""
-        target = self._recipient(event["cwd"], event["scope"])
+        if "to" in event:
+            # Addressed at the exit: that parent, alive, or nobody -- no
+            # mesh-leader fallback, which is where the reports about other
+            # trees' dead runs used to come from.
+            target = self._live(event["to"])
+        else:
+            target = self._recipient(event["cwd"], event["scope"])
         if target is None:
             log.info(
                 "cflow run event (%s) about %r dropped: no overseer to tell",
@@ -2860,6 +2921,13 @@ class RunEventClock:
                 event["kind"], event["scope"], target.sdef.name,
             )
         return bool(delivered)
+
+    def _live(self, name: str):
+        try:
+            candidate = self.manager.get(name)
+        except Exception:
+            return None
+        return None if candidate.exited else candidate
 
     def _recipient(self, cwd: str, scope: str):
         """The live session to tell: spawn parent first, mesh leader after.
@@ -3053,8 +3121,14 @@ def event_block(scope: str, kind: str, payload: dict) -> str:
         )
     elif kind == "orphaned":
         lines.append(
-            f"event: run {payload.get('run')} of {workflow} is active at "
-            f"step '{step}' but its session has exited -- nobody is driving"
+            f"event: session exited without a kill request while run "
+            f"{payload.get('run')} of {workflow} was at step '{step}' -- "
+            "nobody is driving it"
+        )
+        lines.append(
+            "note: sent once, at the exit. Its branch and its beads issue "
+            "outlive the session; `claunch respawn " + scope + "` resumes "
+            "it where it stopped."
         )
     lines.append(
         f"read it yourself: claunch cflow status -t {scope} --json "
