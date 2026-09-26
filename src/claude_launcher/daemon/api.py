@@ -49,6 +49,7 @@ from .. import ghcli, prflow, projects, spawn as spawn_mod, store, workspaces
 from .. import plugins, settings
 from .. import worktree as worktree_mod
 from . import beads as beads_mod, channel, clipboard, connections
+from . import p2p
 from . import handoff as handoff_mod
 from . import loop_lag as loop_lag_mod
 from . import notice as notice_mod
@@ -1062,6 +1063,16 @@ async def h_control_ws(request: web.Request) -> web.WebSocketResponse:
     record = conns.opened("control", "(control)", request, ws=ws)
     carrier = channel.Carrier(ws, request.app, request)
     reads: set[asyncio.Task] = set()
+    # P2P signalling (claunch-mhzt4): offered only on a socket that is not
+    # itself a P2P bridge, and only when the daemon has a hub.
+    hub = request.app.get("p2p")
+    if hub is not None and p2p.via_p2p(request, hub):
+        hub = None
+    owner = f"c{id(ws):x}"
+    negotiating: set[asyncio.Task] = set()
+
+    async def p2p_send(frame: dict) -> None:
+        await carrier.send_soon(json.dumps(frame))
 
     async def answer_read(frame: dict) -> None:
         try:
@@ -1085,7 +1096,10 @@ async def h_control_ws(request: web.Request) -> web.WebSocketResponse:
         }, parts=frame.get("parts") is True, key=frame.get("id"))
 
     try:
-        await carrier.send_str(json.dumps({"type": "init"}))
+        init = {"type": "init"}
+        if hub is not None and p2p.available():
+            init["p2p"] = hub.browser_info()
+        await carrier.send_str(json.dumps(init))
         async for msg in ws:
             if msg.type == WSMsgType.BINARY:
                 carrier.deliver_binary(msg.data)
@@ -1117,6 +1131,22 @@ async def h_control_ws(request: web.Request) -> web.WebSocketResponse:
                 carrier.ack(frame)
             elif kind == "link_failed":
                 conns.link_failed(request, frame)
+            elif kind in ("p2p_offer", "p2p_ice", "p2p_bye"):
+                if hub is None:
+                    if kind == "p2p_offer":
+                        await p2p_send({"type": "p2p_error", "id": frame.get("id"),
+                                        "error": "p2p unavailable"})
+                    continue
+                if kind == "p2p_offer":
+                    # Answering gathers candidates (about a second with
+                    # STUN), so it runs beside this loop like a read does.
+                    task = asyncio.ensure_future(hub.offer(owner, frame, p2p_send))
+                    negotiating.add(task)
+                    task.add_done_callback(negotiating.discard)
+                elif kind == "p2p_ice":
+                    await hub.ice(owner, frame)
+                else:
+                    await hub.bye(owner, frame)
             elif kind == "read":
                 # Off this loop, on a task of its own. A read is a router
                 # dispatch per path and some of them are slow -- /api/mesh
@@ -1142,8 +1172,10 @@ async def h_control_ws(request: web.Request) -> web.WebSocketResponse:
     except ConnectionResetError:
         pass
     finally:
-        for task in list(reads):
+        for task in list(reads) + list(negotiating):
             task.cancel()
+        if hub is not None:
+            await hub.socket_gone(owner)
         await carrier.shutdown(ws.exception())
         request.app["websockets"].discard(ws)
         if not ws.closed:
@@ -1169,12 +1201,17 @@ def _control_pong(request: web.Request, frame: dict) -> dict:
     """
     if "t" not in frame:
         return {"type": "pong"}
-    return {
+    pong = {
         "type": "pong",
         "t": frame.get("t"),
         "relay": request.app["relay_state"](),
         "loop": request.app["loop_lag"].snapshot(),
     }
+    # Carried over a DataChannel (claunch-mhzt4): the relay's round trip is
+    # not on this socket's path, and the page must not subtract it.
+    if p2p.via_p2p(request, request.app.get("p2p")):
+        pong["via"] = "p2p"
+    return pong
 
 
 def _control_pong_text(request: web.Request, frame: dict, received: float) -> str:

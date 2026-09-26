@@ -356,6 +356,7 @@ CHECKS = [
         "layout_check.js",
         "batchpoll_check.js",
         "controlsocket_check.js",
+        "p2p_check.js",
         "latency_check.js",
         "channels_check.js",
         "render_check.js",

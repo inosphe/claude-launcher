@@ -449,6 +449,23 @@ DAEMON_DEFAULTS = {
     # off. Read LIVE on every request, so the settings page's PUT applies
     # without a restart.
     "prompter_url": None,
+    # Pages reached through a relay try to move their control socket onto a
+    # WebRTC DataChannel straight to this daemon (claunch-mhzt4), falling
+    # back to the relay when it does not connect. Needs aiortc
+    # (``claude-launcher[p2p]``); without it these do nothing. p2p_stun is
+    # what both ends ask for their public address (the browser too, so a
+    # server the page's network cannot reach costs it a gather timeout);
+    # p2p_probe_stun is what the daemon measures its NAT's port rule
+    # against (two or more servers); p2p_predict is how many predicted ports
+    # to offer (0 = none). Read at daemon start.
+    "p2p_enabled": True,
+    "p2p_stun": ["stun:stun.cloudflare.com:3478"],
+    "p2p_probe_stun": [
+        "stun:stun.cloudflare.com:3478",
+        "stun:stun.l.google.com:19302",
+        "stun:global.stun.twilio.com:3478",
+    ],
+    "p2p_predict": 16,
 }
 
 

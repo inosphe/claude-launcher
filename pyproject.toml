@@ -21,6 +21,9 @@ claunch = "claude_launcher.cli:main"
 
 [project.optional-dependencies]
 test = ["pytest>=7", "pytest-xdist>=3"]
+# WebRTC DataChannel for relay-tunnelled pages (claunch-mhzt4). Optional:
+# pulls PyAV (~65MB) and cryptography; the daemon runs unchanged without it.
+p2p = ["aiortc>=1.9"]
 
 [build-system]
 requires = ["hatchling"]

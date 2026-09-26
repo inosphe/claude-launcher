@@ -200,26 +200,161 @@ function openControlSocket() {
     controlTry = 0;
     latencyStart();
   };
+  sock.onmessage = (ev) => controlMessage(sock, ev);
+  sock.onclose = () => controlClosed(sock);
+}
 
-  sock.onmessage = (ev) => {
-    if (sock !== controlSock) return;
-    if (typeof ev.data !== "string") { channelBinary(ev.data); return; }
-    let msg;
-    try { msg = JSON.parse(ev.data); } catch { return; }
-    if (typeof msg.ch === "number") { channelFrame(msg); return; }
-    if (msg.type === "pong") { latencyPong(msg); return; }
-    if (msg.type === "read_part") { controlPart(sock, msg); return; }
-    if (msg.type === "read_result") controlAnswer(msg);
-  };
+/* Everything the control socket delivers, from whichever road it is on.
+   A socket this page has moved off (controlRetire) still hands over the
+   answers to reads it was carrying; nothing else from it counts. */
+function controlMessage(sock, ev) {
+  if (sock !== controlSock) {
+    if (controlRetired.has(sock)) controlRetiredMessage(sock, ev);
+    return;
+  }
+  if (typeof ev.data !== "string") { channelBinary(ev.data); return; }
+  let msg;
+  try { msg = JSON.parse(ev.data); } catch { return; }
+  if (typeof msg.ch === "number") { channelFrame(msg); return; }
+  if (msg.type === "pong") { latencyPong(msg); return; }
+  if (msg.type === "read_part") { controlPart(sock, msg); return; }
+  if (msg.type === "read_result") { controlAnswer(msg); return; }
+  if (msg.type === "init") { p2pInit(sock, msg); return; }
+  if (msg.type === "p2p_answer" || msg.type === "p2p_error") p2pSignal(msg);
+}
 
-  sock.onclose = () => {
-    if (sock !== controlSock) return;
-    controlSock = null;
-    controlAbort("control socket closed");
-    latencyStop();
-    channelsCarrierGone();
-    scheduleControlReopen();
+function controlClosed(sock) {
+  if (sock !== controlSock) return;
+  controlSock = null;
+  controlAbort("control socket closed");
+  latencyStop();
+  channelsCarrierGone();
+  if (sock.transport === "p2p") {
+    // The DataChannel went: straight back to the relay, which is where the
+    // page was before, and the next try at P2P waits its backoff.
+    controlTry = 0;
+    p2pFailed("channel closed");
+  }
+  scheduleControlReopen();
+}
+
+/* ---- the control socket over a WebRTC DataChannel (claunch-mhzt4) ----
+
+   Through the relay every read and keystroke crosses the Cloudflare edge
+   (454-761ms per round trip from the user's network); a DataChannel to the
+   daemon host answered in 11-13ms. When the daemon's init says it can
+   (`p2p` in the init frame: aiortc installed) and this page is reached
+   through the tunnel, the page negotiates one over the relay socket
+   (static/p2p.js) and moves onto it once the daemon's init arrives there.
+
+   The relay socket stays the fallback at every step: a failed or late
+   negotiation leaves the page where it was, and a DataChannel that closes
+   is a control socket that closed -- reads fail over to HTTP, terminals get
+   their 1006 and reattach, and the socket reopens through the relay. */
+const P2P_FIRST_MS = 1000;
+const P2P_RETRY = [10000, 20000, 40000, 80000, 120000];
+let p2pLink = null;           // the negotiation in flight, or the live link
+let p2pConfig = null;         // the daemon's `p2p` block from its init
+let p2pTry = 0;
+let p2pTimer = null;
+const controlRetired = new Set();
+
+function p2pTunnel() {
+  return /^\/t\/[^/]+\/$/.test(BASE);
+}
+
+function p2pInit(sock, msg) {
+  if (!msg.p2p || sock.transport === "p2p" || !p2pTunnel()) return;
+  if (typeof RTCPeerConnection !== "function" || !globalThis.ClaunchP2P) return;
+  p2pConfig = msg.p2p;
+  if (p2pLink || p2pTimer) return;
+  p2pSchedule(p2pTry ? P2P_RETRY[Math.min(p2pTry - 1, P2P_RETRY.length - 1)] : P2P_FIRST_MS);
+}
+
+function p2pSchedule(wait) {
+  clearTimeout(p2pTimer);
+  p2pTimer = setTimeout(() => { p2pTimer = null; p2pAttempt(); }, wait);
+}
+
+function p2pAttempt() {
+  if (p2pLink || !p2pConfig || !controlUp() || controlSock.transport === "p2p") return;
+  const relay = controlSock;
+  const link = new globalThis.ClaunchP2P.Link({
+    stun: p2pConfig.stun,
+    signal: (frame) => {
+      if (relay !== controlSock || relay.readyState !== WebSocket.OPEN) return false;
+      try { relay.send(JSON.stringify(frame)); return true; } catch { return false; }
+    },
+    onReady: (sock) => controlAdopt(sock, link),
+    onFail: (reason) => { if (p2pLink === link) p2pFailed(reason); },
+  });
+  p2pLink = link;
+  link.start();
+}
+
+function p2pSignal(msg) {
+  if (p2pLink) p2pLink.handle(msg);
+}
+
+function p2pFailed(reason) {
+  const link = p2pLink;
+  p2pLink = null;
+  if (link) link.close();
+  p2pTry += 1;
+  console.info("claunch: P2P control socket not in use (" + reason + "); relay continues");
+  p2pSchedule(P2P_RETRY[Math.min(p2pTry - 1, P2P_RETRY.length - 1)]);
+}
+
+/* Move the page onto `direct`: it becomes the control socket, terminals
+   reattach on it (channelsCarrierGone -> 1006 -> the retry machine, whose
+   input queue holds what is typed meanwhile), and the relay socket is
+   retired -- kept only until the reads it is carrying are answered. */
+function controlAdopt(direct, link) {
+  const old = controlSock;
+  if (p2pLink !== link || !old || old.transport === "p2p" || !controlUp()) {
+    link.close();
+    return;
+  }
+  controlSock = direct;
+  direct.onmessage = (ev) => controlMessage(direct, ev);
+  direct.onclose = () => controlClosed(direct);
+  p2pTry = 0;
+  controlRetire(old);
+  latencyStart();
+  channelsCarrierGone();
+}
+
+function controlRetire(old) {
+  controlRetired.add(old);
+  old.onclose = () => {
+    controlRetired.delete(old);
+    for (const [id, waiter] of [...controlWaiting]) {
+      if (waiter.sock !== old) continue;
+      controlWaiting.delete(id);
+      clearTimeout(waiter.timer);
+      waiter.reject(new Error("control socket retired"));
+    }
   };
+  controlRetireCheck(old);
+  setTimeout(() => { try { old.close(); } catch { /* gone */ } }, CONTROL_READ_TIMEOUT_MS);
+}
+
+function controlRetiredMessage(sock, ev) {
+  if (typeof ev.data === "string") {
+    let msg = null;
+    try { msg = JSON.parse(ev.data); } catch { /* not a read */ }
+    if (msg && msg.type === "read_part") controlPart(sock, msg);
+    else if (msg && msg.type === "read_result") controlAnswer(msg);
+  }
+  controlRetireCheck(sock);
+}
+
+/* Close a retired socket once no read is waiting on it. */
+function controlRetireCheck(sock) {
+  for (const waiter of controlWaiting.values()) {
+    if (waiter.sock === sock) return;
+  }
+  try { sock.close(); } catch { /* gone */ }
 }
 
 /* Unlike the terminal's retry, this one never gives up. The terminal stops
@@ -252,7 +387,7 @@ function controlRead(paths) {
   const id = ++controlSeq;
   const sock = controlSock;
   return new Promise((resolve, reject) => {
-    const waiter = { resolve, reject, timer: null, parts: [] };
+    const waiter = { resolve, reject, timer: null, parts: [], sock };
     waiter.arm = () => {
       clearTimeout(waiter.timer);
       waiter.timer = setTimeout(() => {
@@ -362,6 +497,7 @@ let latencySamples = [];      // recent browser<->daemon round trips, ms
 let latencyRelay = null;      // the relay status the last pong carried
 let latencyLoop = null;       // the daemon event loop's lag, same pong (claunch-y9ax9)
 let latencyDaemon = null;     // ms the last ping spent inside the daemon (claunch-iss86)
+let latencyVia = null;        // "p2p" when the last pong came over a DataChannel (claunch-mhzt4)
 
 function latencyNow() {
   return (typeof performance !== "undefined" && performance.now)
@@ -373,6 +509,7 @@ function latencyStart() {
   latencySentAt = null;
   latencyLastPing = -Infinity;
   latencySamples = [];
+  latencyVia = null;
   latencyTick();
   latencyTimer = setInterval(latencyTick, LATENCY_TICK_MS);
 }
@@ -411,6 +548,7 @@ function latencyPong(msg) {
   }
   if (msg.loop) latencyLoop = msg.loop;
   latencyDaemon = typeof msg.daemon_ms === "number" ? msg.daemon_ms : null;
+  latencyVia = msg.via === "p2p" ? "p2p" : null;
   renderLatencyBadge();
 }
 
@@ -446,6 +584,9 @@ function latencySplit(total, tunnel, relayRtt) {
    went. Needs a completed round trip and an answered relay PING; without them
    the badge keeps the plain round trip and the relay's own reading. */
 function latencyTunnelSides(web, relay) {
+  // Over a DataChannel the relay is not on the path at all (claunch-mhzt4):
+  // subtracting its round trip would invent a browser side.
+  if (latencyVia === "p2p") return null;
   if (!latencySamples.length || web.stalled) return null;
   if (!relay || relay.stalled || typeof relay.ms !== "number") return null;
   const total = latencySamples[latencySamples.length - 1];
@@ -514,7 +655,7 @@ function renderLatencyBadge() {
     text = `web ${fmtLatency(split.daemonSide)} · relay ≈${fmtLatency(split.browserSide)}`;
     known = [split.daemonSide, split.browserSide];
   } else {
-    text = `web ${up ? mark(web) : "down"}`;
+    text = `web ${up ? mark(web) : "down"}` + (up && latencyVia === "p2p" ? " p2p" : "");
     if (relayOn) text += ` · relay ${mark(relay)}`;
     known = [web.ms, relay && relay.ms].filter((v) => typeof v === "number");
   }
@@ -523,7 +664,9 @@ function renderLatencyBadge() {
     (up ? latencyGrade(known.length ? Math.max(...known) : null) : "latency-bad");
 
   const lines = [];
-  const via = tunnel ? "through the relay tunnel" : "direct";
+  const p2pPath = latencyVia === "p2p";
+  const via = p2pPath ? "peer to peer, WebRTC DataChannel"
+    : tunnel ? "through the relay tunnel" : "direct";
   if (!up) {
     lines.push("browser ↔ daemon: control socket is down (reconnecting)");
   } else if (latencySamples.length) {
@@ -537,7 +680,7 @@ function renderLatencyBadge() {
     // The split is of the last completed round trip, against the relay
     // sample the same pong carried.
     const lastRelay = relayOn ? latencyRelayWorst(latencyRelay) : null;
-    lines.push(...latencySplit(latencySamples[latencySamples.length - 1], tunnel,
+    lines.push(...latencySplit(latencySamples[latencySamples.length - 1], tunnel && !p2pPath,
       lastRelay && !lastRelay.stalled ? lastRelay.ms : null));
   } else {
     lines.push(`browser ↔ daemon (${via}): measuring…`);

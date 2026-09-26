@@ -187,6 +187,8 @@ async def _serve(host: str, port: int, cfg: dict, bound: Optional[dict] = None) 
     await relay_settings.start()
     relay_state["uplink"] = relay_settings.pool
     app["relay_settings"] = relay_settings
+    p2p_hub = _start_p2p(cfg, actual_port, token)
+    app["p2p"] = p2p_hub
     mesh_manager.start()
     ask_clock = cflow_clock.AskClock()
     ask_clock.start()
@@ -267,6 +269,8 @@ async def _serve(host: str, port: int, cfg: dict, bound: Optional[dict] = None) 
         # their sessions look like programs that exited on their own.
         await notify_shutdown(app)
         await relay_settings.close()
+        if p2p_hub is not None:
+            await p2p_hub.stop()
         listener_task.cancel()
         try:
             await listener_task
@@ -455,6 +459,29 @@ def _start_uplink(actual_port: int):
         log.info("starting relay uplink %s → %s (backend %r)",
                  up.id, up.url, up.name)
     return pool, asyncio.ensure_future(pool.run())
+
+
+def _start_p2p(cfg: dict, port: int, token: str):
+    """The WebRTC hub for pages reached through a relay (claunch-mhzt4), or
+    None when it is switched off or aiortc (``claunch[p2p]``) is absent --
+    then the control socket never mentions P2P and nothing else changes."""
+    from . import p2p
+
+    if not cfg.get("p2p_enabled", True):
+        return None
+    if not p2p.available():
+        log.info("P2P off: aiortc not installed (pip install 'claude-launcher[p2p]')")
+        return None
+    hub = p2p.Hub(
+        local_port=port,
+        token=token,
+        stun=list(cfg.get("p2p_stun") or []),
+        probe_stun=list(cfg.get("p2p_probe_stun") or []),
+        predict=int(cfg.get("p2p_predict") or 0),
+    )
+    hub.warm()
+    log.info("P2P on: stun %s, port prediction window %d", hub.stun, hub.predict)
+    return hub
 
 
 def _wire_federation(mesh_manager: MeshManager, uplink) -> None:
