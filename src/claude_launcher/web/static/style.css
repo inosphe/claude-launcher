@@ -461,8 +461,8 @@ option:disabled { color: #6b7280; }
    The invariant the rest of this rail depends on: everything that belongs on
    the name's line keeps the default `order: 0` and declares no
    `flex-basis: 100%`. Only the deliberate line-breakers below
-   (.rail-cwd, .rail-ctx-line, .rail-seen, .rail-quiet, .rail-note,
-   .rail-status-checks, .sess-cflow, .sess-brief) are full-width, and they
+   (.rail-cwd, .rail-ctx-line, .rail-usage-line, .rail-seen, .rail-quiet,
+   .rail-note, .rail-status-checks, .sess-cflow, .sess-brief) are full-width, and they
    carry an `order` above the ▸ toggle's so the toggle still lands at the end
    of the name line. A full-width child at order 0 would break the line
    before the toggle got there.
@@ -898,6 +898,48 @@ option:disabled { color: #6b7280; }
 .sess-brief-tps.idle,
 .badge.tps.idle,
 #term-tps-overlay.idle { color: #6e7681; }
+/* The token-usage line under the throughput line: a stacked bar of the four
+   components (fresh input, cache read, cache write, output) beside the
+   conversation's total. Same indent and order as the lines above it. The
+   bar's segments are shares of the total, so its fill is always full; the
+   colours are what carry the reading. `partial` dims the line while the
+   daemon is still reading a long transcript in the background. */
+#session-list .rail-usage-line {
+  flex-basis: 100%; order: 2; display: flex; align-items: center; gap: 6px;
+  min-width: 0; padding-left: 16px; margin-top: 1px; line-height: 16px;
+}
+#session-list .rail-usage-bar {
+  flex: 1 1 48px; min-width: 12px; max-width: 64px; height: 5px;
+  border-radius: 2px; overflow: hidden; display: flex; background: #21262d;
+}
+#session-list .rail-usage {
+  flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap; font-family: SFMono-Regular, Consolas, monospace;
+  font-size: 11px; color: #c9d1d9;
+}
+#session-list .rail-usage-line.partial .rail-usage { color: #7d8590; }
+.usage-seg { display: block; height: 100%; }
+.usage-in { background: #db6d28; }
+.usage-cr { background: #316dca; }
+.usage-cw { background: #a371f7; }
+.usage-out { background: #3fb950; }
+/* The detail panel's row: the same glance, a full-width bar, a legend with
+   each component's count, and the full breakdown as plain lines. */
+.usage-detail-text {
+  font-family: SFMono-Regular, Consolas, monospace; font-size: 12px;
+}
+.usage-detail.partial .usage-detail-text { color: #7d8590; }
+.usage-detail-bar {
+  display: flex; height: 8px; border-radius: 3px; overflow: hidden;
+  background: #21262d; margin: 4px 0; max-width: 360px;
+}
+.usage-legend { display: flex; flex-wrap: wrap; gap: 4px 12px; font-size: 11px; color: #8b949e; }
+.usage-legend-item { display: inline-flex; align-items: center; gap: 4px; }
+.usage-swatch { display: inline-block; width: 8px; height: 8px; border-radius: 2px; }
+.usage-lines {
+  margin: 6px 0 0; white-space: pre-wrap; font-size: 11px; color: #8b949e;
+  font-family: SFMono-Regular, Consolas, monospace;
+}
 /* Where the session runs, the line right under its name: a path in the
    same monospace as the count, dimmer than the name, and a full-width
    line-breaker like the gauge beneath it (order 2, and it is appended before

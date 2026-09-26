@@ -3742,6 +3742,10 @@ async function refreshSessions(options) {
     // reconciler below: the node checks boot this row builder with only
     // the helpers they stub.
     const railTps = typeof tpsRailLine === "function" ? tpsRailLine(s) : null;
+    // And what its conversation has spent so far, per component, for a
+    // harness whose transcript the daemon can total -- absent otherwise.
+    // Guarded the same way as the tps line.
+    const railUsage = typeof usageRailLine === "function" ? usageRailLine(s) : null;
     // And where it runs — the checkout, which on this rail is usually a
     // worktree, and is the one fact that tells two sessions doing the same
     // job apart. A full-width line like the gauge below it; always drawn,
@@ -3859,6 +3863,7 @@ async function refreshSessions(options) {
     const railSeen = railSeenLine(s);
     li.append(dot, head, meta, railCwd, ...(railCtx ? [railCtx] : []),
               ...(railTps ? [railTps] : []),
+              ...(railUsage ? [railUsage] : []),
               railSeen, ...(plus ? [plus] : []), ...(pin ? [pin] : []),
               ...(observePin ? [observePin] : []), info);
     li.addEventListener("click", () => {
@@ -5489,6 +5494,181 @@ function renderTermTps() {
       overlay.title = tpsTooltip(t);
     }
   }
+}
+
+/* ------------------------------------------------------------------ */
+/* token usage (what the conversation has spent so far)               */
+/* ------------------------------------------------------------------ */
+/* The daemon totals every model request of the session's current
+   conversation off the harness's own transcript (daemon/tokenusage.py) and
+   hangs it on the session as `token_usage`: four components, their `total`,
+   the request count, and per harness what else it records (`subagents` for
+   claude, `reasoning` for codex, `cost` for pi). Absent where the harness
+   has no reader or nothing has been spent -- drawn as nothing, never as 0.
+
+   The four components are kept apart everywhere they are drawn. A long
+   session sends most of its input as cache reads, so the total is dominated
+   by the cheapest part; naming each part is what stops "3.6B" reading as
+   3.6B tokens of fresh input (the confusion claunch-ha2s9 recorded on the
+   observer page, where one word "input" meant two different quantities). */
+
+/* The components in drawing order, with the label and the bar class each
+   one uses. */
+const USAGE_PARTS = [
+  ["input", "fresh input", "in"],
+  ["cache_read", "cache read", "cr"],
+  ["cache_write", "cache write", "cw"],
+  ["output", "output", "out"],
+];
+
+/* 999, 1.2k, 45k, 1.2M, 3.66B: three significant figures at most, so a
+   column of rows reads at the same width. */
+function usageShort(n) {
+  if (!Number.isFinite(n) || n < 0) return "?";
+  if (n < 1000) return String(Math.round(n));
+  const units = [[1e9, "B"], [1e6, "M"], [1e3, "k"]];
+  for (const [size, unit] of units) {
+    if (n >= size) {
+      const v = n / size;
+      return (v < 10 ? v.toFixed(2) : v < 100 ? v.toFixed(1) : String(Math.round(v))) + unit;
+    }
+  }
+  return String(n);
+}
+
+/* The conversation's own spend plus its subagents': what the session cost.
+   Each part is still listed separately wherever there is room. */
+function usageTotalOf(u) {
+  if (!u) return 0;
+  return (u.total || 0) + ((u.subagents && u.subagents.total) || 0);
+}
+
+function usageRequestsOf(u) {
+  if (!u) return 0;
+  return (u.requests || 0) + ((u.subagents && u.subagents.requests) || 0);
+}
+
+/* The glance: "Σ 3.66B · out 6.7M · 15.2k req". The output figure is the
+   one component named on the line: it is the part the model generated, and
+   the one that does not grow just because the conversation is long.
+   `compact` drops the spaces around the separators, which is what lets the
+   whole line fit a 260px rail row without cutting the request count. */
+function usageText(u, compact = false) {
+  if (!u) return "";
+  const out = (u.output || 0) + ((u.subagents && u.subagents.output) || 0);
+  const parts = [`Σ ${usageShort(usageTotalOf(u))}`, `out ${usageShort(out)}`,
+                 `${usageShort(usageRequestsOf(u))} req`];
+  if (Number.isFinite(u.cost) && u.cost > 0) parts.push(`$${usageCost(u.cost)}`);
+  return parts.join(compact ? "·" : " · ") + (u.partial ? " …" : "");
+}
+
+function usageCost(v) {
+  return v >= 100 ? v.toFixed(0) : v >= 1 ? v.toFixed(2) : v.toFixed(4);
+}
+
+function usageShare(part, total) {
+  return total > 0 ? `${((part / total) * 100).toFixed(1)}%` : "";
+}
+
+/* The full story, for a tooltip or the detail panel: every component, with
+   its share of the total where `shares` is on, then what the harness adds.
+   The rail's tooltip leaves the shares out: a rail row claims no
+   percentage anywhere (railctx_check holds that for the context gauge), and
+   the bar beside the number already shows the proportions. */
+function usageLines(u, shares = true) {
+  if (!u) return [];
+  const lines = [];
+  const total = u.total || 0;
+  lines.push(`conversation: ${total.toLocaleString()} tokens over ` +
+             `${(u.requests || 0).toLocaleString()} requests` +
+             (u.model ? ` (latest on ${u.model})` : ""));
+  for (const [key, label] of USAGE_PARTS) {
+    const v = u[key] || 0;
+    lines.push(`  ${label} ${v.toLocaleString()}` +
+               (shares && total ? ` (${usageShare(v, total)})` : ""));
+  }
+  if (Number.isFinite(u.reasoning) && u.reasoning > 0) {
+    lines.push(`  of the output, reasoning ${u.reasoning.toLocaleString()}`);
+  }
+  const sub = u.subagents;
+  if (sub && sub.requests) {
+    lines.push(`subagents: ${(sub.total || 0).toLocaleString()} tokens over ` +
+               `${sub.requests.toLocaleString()} requests`);
+    for (const [key, label] of USAGE_PARTS) {
+      lines.push(`  ${label} ${(sub[key] || 0).toLocaleString()}`);
+    }
+  }
+  if (Number.isFinite(u.cost) && u.cost > 0) {
+    lines.push(`cost recorded by the harness: $${usageCost(u.cost)}`);
+  }
+  const since = (u.since || "").replace("T", " ").replace(/\.\d+Z?$|Z$/, "");
+  if (since) lines.push(`since ${since} UTC (this conversation; a /clear starts a new one)`);
+  if (u.partial) {
+    lines.push("still counting: the transcript is being read in the background");
+  }
+  return lines;
+}
+
+function usageTooltip(u) {
+  return usageLines(u, false).join("\n");
+}
+
+/* A stacked bar of the four components, each segment as wide as its share
+   of the conversation's total. The shares say where the tokens went (a
+   healthy long session is mostly cache read); the absolute size is in the
+   number beside it. */
+function usageBar(u, cls) {
+  const bar = el("span", cls || "usage-bar");
+  const total = (u && u.total) || 0;
+  if (!total) return bar;
+  for (const [key, label, short] of USAGE_PARTS) {
+    const v = u[key] || 0;
+    if (!v) continue;
+    const seg = el("span", `usage-seg usage-${short}`);
+    seg.style.width = ((v / total) * 100).toFixed(2) + "%";
+    seg.title = `${label} ${v.toLocaleString()}`;
+    bar.appendChild(seg);
+  }
+  return bar;
+}
+
+/* The rail row's line: the glance, then the stacked bar in whatever width
+   is left. Indented like the context gauge above it and a full-width
+   line-breaker like it; nothing at all where the session carries no
+   reading. The text goes first and never shrinks: the bar is the part that
+   can give up width. */
+function usageRailLine(s) {
+  const u = s && s.token_usage;
+  if (!u) return null;
+  const line = el("span", "rail-usage-line" + (u.partial ? " partial" : ""));
+  line.append(el("span", "rail-usage", usageText(u, true)),
+              usageBar(u, "rail-usage-bar"));
+  line.title = usageTooltip(u) + "\nbar: fresh input · cache read · cache write · output";
+  return line;
+}
+
+/* The detail panel's row: the glance, the bar and the breakdown as visible
+   lines -- the panel has the room the rail does not, so nothing here waits
+   behind a hover. */
+function usageDetailRow(dl, s) {
+  const u = s && s.token_usage;
+  if (!u) return;
+  dl.appendChild(el("dt", null, "token usage"));
+  const dd = el("dd", "usage-detail" + (u.partial ? " partial" : ""));
+  const head = el("div", "usage-detail-head");
+  head.append(el("span", "usage-detail-text", usageText(u)));
+  dd.appendChild(head);
+  dd.appendChild(usageBar(u, "usage-detail-bar"));
+  const legend = el("div", "usage-legend");
+  for (const [key, label, short] of USAGE_PARTS) {
+    const item = el("span", "usage-legend-item");
+    item.append(el("span", `usage-swatch usage-${short}`),
+                el("span", null, `${label} ${usageShort(u[key] || 0)}`));
+    legend.appendChild(item);
+  }
+  dd.appendChild(legend);
+  dd.appendChild(el("pre", "usage-lines", usageLines(u).join("\n")));
+  dl.appendChild(dd);
 }
 
 /* Where a session runs: the checkout its harness was started in.
@@ -23868,6 +24048,10 @@ function renderSession(data) {
     // Under the conversation, because it is a fact about the conversation and
     // not about the process: how much of it the harness last carried.
     metaRow(dl, "context", ctxSentence(s), ctxBreakdown(s.context));
+    // Beside the size, what the same conversation has spent in total: the
+    // size is the last request, this is all of them. Guarded like the rail's
+    // late helpers: the node harnesses slice this renderer without it.
+    if (typeof usageDetailRow === "function") usageDetailRow(dl, s);
     if (s.resume !== null && s.resume !== undefined) {
       metaRow(
         dl, "opened",

@@ -347,7 +347,9 @@ ctx.setMeshes([
      settings that silence the daemon is set — see railquiet_check;
      .rail-beads only when the board assigns the session something — see
      railbeads_check; .rail-tps-line only for a session whose calls go
-     through the metering shim — see tpsRailLine in app.js; .rail-note only
+     through the metering shim — see tpsRailLine in app.js;
+     .rail-usage-line only for a session whose transcript the daemon can
+     total — see usage_check; .rail-note only
      for a session the reader annotated, and .rail-note-editor in its place
      while that note is being edited on the row — see railnote_check.) */
   const BREAKERS = [
@@ -355,6 +357,7 @@ ctx.setMeshes([
     "#session-list .rail-brief", "#session-list .rail-ctx-line",
     "#session-list .rail-seen", "#session-list .rail-quiet",
     "#session-list .rail-status-checks", "#session-list .rail-tps-line",
+    "#session-list .rail-usage-line",
     "#session-list .rail-note", "#session-list .rail-note-editor",
     "#session-list .sess-cflow", "#session-list .sess-brief",
   ];
@@ -362,7 +365,7 @@ ctx.setMeshes([
     sel.startsWith("#session-list") &&
     (d["flex-basis"] === "100%" || /(^|\s)100%$/.test(d.flex || ""))
   ).map(([sel]) => sel);
-  check("only the directory line, the beads line, the one-line, the context line, the throughput line, the attention line, the quiet line, the note line (or its editor), the status-check line, the cflow line and the briefing card break the row",
+  check("only the directory line, the beads line, the one-line, the context line, the throughput line, the usage line, the attention line, the quiet line, the note line (or its editor), the status-check line, the cflow line and the briefing card break the row",
         fullWidth.sort(), [...BREAKERS].sort());
 
   /* The one-line summary is the exception to this rail's ellipsis habit: it
