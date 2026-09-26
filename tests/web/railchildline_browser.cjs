@@ -12,7 +12,12 @@
    fixture daemon at the default 260px rail, with the tick forced to a full
    em so the check does not depend on the machine's fonts, and asserts the
    tick, the dot and the name share one line on the parent and on children
-   at depth 1 and 4. */
+   at depth 1 and 4.
+
+   The same rows also keep the ▸ toggle on the buttons' line. The meta text
+   there was based on its own width, and a flex line breaks before anything
+   shrinks, so once a child row's indent grew at depth 2 the ▸ took a line of
+   its own (claunch-gge34.1). */
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const http = require("node:http");
@@ -72,12 +77,15 @@ const server = http.createServer((req, res) => {
         rows: [...document.querySelectorAll("#session-list li.sess-card")].map((li) => {
           const name = li.querySelector(".rail-name").getBoundingClientRect();
           const dot = li.querySelector(".dot").getBoundingClientRect();
+          const info = li.querySelector(".sess-info").getBoundingClientRect();
+          const toggle = li.querySelector(".sess-brief-toggle").getBoundingClientRect();
           const tick = getComputedStyle(li, "::before");
           const liBox = li.getBoundingClientRect();
           const padTop = parseFloat(getComputedStyle(li).paddingTop);
           return {
             name: li.dataset.name, child: li.classList.contains("child"),
             nameMid: mid(name), dotMid: mid(dot), nameWidth: name.width,
+            infoMid: mid(info), toggleMid: mid(toggle),
             // The pseudo-element has no box of its own to measure; the name
             // leaving the row's first line is how its wrap shows.
             firstLine: liBox.top + padTop, nameTop: name.top,
@@ -98,6 +106,8 @@ const server = http.createServer((req, res) => {
         assert.ok(r.nameTop - r.firstLine <= 8,
           `${where}: the name sits on the row's first line (${r.nameTop - r.firstLine}px below it)`);
         assert.ok(r.nameWidth >= 20, `${where}: the name keeps some width (${r.nameWidth}px)`);
+        assert.ok(Math.abs(r.toggleMid - r.infoMid) <= 4,
+          `${where}: the ▸ shares the buttons' line (▸ ${r.toggleMid}, ⓘ ${r.infoMid})`);
       }
     }
     assert.deepEqual(errors, []);

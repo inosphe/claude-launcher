@@ -1103,7 +1103,15 @@ option:disabled { color: #6b7280; }
   }
   #session-list li.child > .rail-head { flex-basis: calc(100% - 29px); }
   #session-list .rail-name { flex-shrink: 0; max-width: 50%; }
-  #session-list .meta { margin-left: 0; margin-right: auto; }
+  /* The meta line shares its line with the row's buttons and the ▸, and a
+     line is broken on base sizes before anything shrinks: based on its text,
+     the meta pushed the ▸ onto a line of its own once a child row's indent
+     took 10px more (depth 2 and deeper, claunch-gge34.1). Based at 0 it
+     takes only what the buttons leave and ellipses there; the full text
+     is on its title. */
+  #session-list .meta {
+    margin-left: 0; margin-right: auto; flex: 1 1 0; min-width: 0;
+  }
 }
 
 /* ---- the pages that live in #main ---- */
