@@ -2118,6 +2118,12 @@ class SessionManager:
                     # record that came back from a restart as a plain kill
                     # would drop out of the bulk resume it was paused for.
                     "paused_at": getattr(session, "paused_at", None),
+                    # Whether this ending's board sweep was made. Without it
+                    # every boot swept every exited record again, and the one
+                    # write a sweep makes that does not change state -- the
+                    # ORPHANED FOLLOW-UP comment -- piled up once per restart
+                    # (claunch-fh8u1.2: 29 copies on one issue).
+                    "swept_at": getattr(session, "swept_at", None),
                     # A person's standing "type nothing in here". Written
                     # here so it survives the restart that has nothing to do
                     # with them; an exited record always reports False (see
@@ -2265,6 +2271,7 @@ class SessionManager:
             exited_at=entry.get("exited_at"),
             archived_at=entry.get("archived_at"),
             paused_at=entry.get("paused_at"),
+            swept_at=entry.get("swept_at"),
             scrollback=self.scrollback,
             idle_threshold=self.idle_threshold,
         )
@@ -2280,7 +2287,11 @@ class SessionManager:
         # archive scale (hundreds of records) it is a slow boot for nothing.
         # A filed-away record is inert: it stays browsable, and the daemon
         # stops processing it.
-        if not dead.archived_at:
+        #
+        # So is one whose sweep was already made (``swept_at``): the sweep is
+        # owed once per ending, and the only records still owing it are the
+        # ones that ended across the restart or whose sweep never finished.
+        if not dead.archived_at and not dead.swept_at:
             self._retired_for_sweep.append(dead)
         return dead
 
