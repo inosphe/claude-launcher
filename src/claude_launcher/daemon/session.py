@@ -486,6 +486,13 @@ class Session:
         #: restart that retires it does not sweep the same ending again
         #: (claunch-fh8u1.2); a respawn starts a new incarnation at None.
         self.swept_at: Optional[str] = None
+        #: Set by :meth:`kill` just before the child is signalled: somebody
+        #: asked for this ending (a person, a parent, the beads wind-down,
+        #: kill-on-end, a pause). The exit code cannot say so -- a signalled
+        #: harness and one that crashed both leave 2 on Windows -- and the
+        #: run event clock tells a parent only about the endings nobody
+        #: asked for. In memory only; a respawn constructs a fresh Session.
+        self.kill_requested = False
         #: Set by :meth:`SessionManager.respawn` right after this instance is
         #: constructed: a person explicitly asked for this incarnation, as
         #: opposed to :meth:`SessionManager.restore_all` starting it back up
@@ -1743,6 +1750,7 @@ class Session:
     def kill(self, *, force: bool = False) -> None:
         if self.exited or self.pty is None:
             return
+        self.kill_requested = True
         self.pty.terminate(force=force)
 
     def pause(self, *, force: bool = False) -> None:

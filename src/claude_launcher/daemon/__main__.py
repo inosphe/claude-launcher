@@ -209,6 +209,9 @@ async def _serve(host: str, port: int, cfg: dict, bound: Optional[dict] = None) 
     round_clock = cflow_clock.RoundStartClock(manager)
     round_clock.start()
     event_clock = cflow_clock.RunEventClock(manager, mesh_manager)
+    # A crashed driver is reported to its parent from the exit itself, once
+    # -- never re-read off state, which re-sent every dead run at each boot.
+    manager.exit_hooks.append(event_clock.session_exited)
     event_clock.start()
     # Published so the dashboard can report what these two are holding. Only
     # the two that type into a driving session on a timer: those are the ones

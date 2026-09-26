@@ -1,15 +1,11 @@
 """The Flows page's Orphans tab reads the daemon's own judgment.
 
-A run whose driving session has exited is already reported: the run event
-clock types "nobody is driving" into the session that oversees it. That
-notification names a CLI command and lands in an agent's terminal, so the
-person who actually decides what to do about the run had no list to read.
-``/api/cflow`` now marks those runs, and the dashboard lists them.
-
-What these tests hold is that the mark and the notification come from ONE
-rule (``cflow_clock.run_orphaned``). A tab that listed a different set from
-the fyi that sent the reader to it would be worse than no tab: two rules
-under one name, disagreeing quietly.
+A run whose driving session has exited used to be reported by typing
+"nobody is driving" into the session that oversees it -- re-read off state,
+so every dead run was re-sent at every daemon boot (claunch-4i1n2). The
+person who decides what to do about such a run reads this list instead:
+``/api/cflow`` marks those runs (``cflow_clock.run_orphaned``), and the
+dashboard lists them. The clock now pushes only a crash, once, at the exit.
 """
 
 from __future__ import annotations
@@ -148,8 +144,9 @@ def test_the_rail_poll_does_not_pay_for_the_mark(proj):
     assert "gone" not in _runs(mgr, "?view=rail")
 
 
-def test_the_tab_and_the_notification_list_the_same_run(proj):
-    """The endpoint's mark and the clock's fyi come from one predicate."""
+def test_the_tab_lists_what_the_clock_no_longer_pushes(proj):
+    """The standing set is the tab's alone: the endpoint marks the dead
+    driver's run, and the clock's scan says nothing about it."""
     cwd = str(proj)
     mgr = SessionManager(idle_threshold=0.5, scrollback=200, restore_default=True)
     _add_dead(mgr, "gone", cwd)
@@ -160,9 +157,6 @@ def test_the_tab_and_the_notification_list_the_same_run(proj):
     marked = {scope for scope, run in _runs(mgr).items() if run.get("orphaned")}
 
     events = cflow_clock.RunEventClock(mgr).scan()
-    reported = {e["scope"] for e in events if e["kind"] == "orphaned"}
 
-    assert marked == reported == {"gone"}
-    assert "nobody is driving" in next(
-        e["block"] for e in events if e["kind"] == "orphaned"
-    )
+    assert marked == {"gone"}
+    assert [e for e in events if e["kind"] == "orphaned"] == []

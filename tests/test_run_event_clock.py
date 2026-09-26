@@ -4,8 +4,9 @@ The clock's contract is *transition, then one fyi*: entering a human gate,
 finishing a recurring round, or losing the driving session gets one block
 typed into the overseer (spawn parent first, mesh leader after), and a run
 that merely sits — or moves between agent-actionable steps — is silence.
-First sight arms rather than fires, so a daemon restart replays nothing;
-``orphaned`` is state rather than a transition and is the one exception.
+First sight arms rather than fires, so a daemon restart replays nothing.
+``orphaned`` comes from the exit hook instead: a driver that exits with no
+kill asked for, its run unfinished, is reported once to its live parent.
 """
 
 from __future__ import annotations
@@ -207,25 +208,140 @@ def test_a_finished_nonrecurring_run_is_not_an_event(proj):
     assert clock.scan() == []
 
 
-def test_orphaned_fires_on_sight_once(proj):
+def _crash(session) -> None:
+    """The process went away on its own: exited, with no kill asked for."""
+    session.exited = True
+
+
+def test_orphaned_is_never_read_off_state(proj):
+    """A dead driver's run sitting in the registry is silence to the scan,
+    first sight or not: re-reading it off state re-sent every dead run at
+    every daemon boot (claunch-4i1n2). The Orphans tab is where it shows."""
     cwd = str(proj)
     cflow_engine.start("linear", cwd=cwd, scope="w1")
-    gone = _FakeSession("w1", cwd)
+    gone = _FakeSession("w1", cwd, parent="lead")
     gone.exited = True
-    clock = cflow_clock.RunEventClock(_FakeManager({"w1": gone}))
-    events = clock.scan()                           # state, not a transition
-    assert [e["kind"] for e in events] == ["orphaned"]
-    assert "nobody is driving" in events[0]["block"]
-    assert clock.scan() == []                       # once per run
-
-    # a scope no manager knows is a standalone run — never orphaned
-    assert cflow_clock.RunEventClock(_FakeManager({})).scan() == []
-    # the same name in another directory is somebody else's session
-    elsewhere = _FakeSession("w1", str(proj.parent))
-    elsewhere.exited = True
-    assert (
-        cflow_clock.RunEventClock(_FakeManager({"w1": elsewhere})).scan() == []
+    lead = _FakeSession("lead", cwd)
+    clock = cflow_clock.RunEventClock(_FakeManager({"w1": gone, "lead": lead}))
+    assert clock.scan() == []
+    assert cflow_clock.run_orphaned(
+        clock.manager, cwd, "w1", cflow_engine.status(cwd, scope="w1")
     )
+
+
+def test_a_crash_mid_run_tells_the_parent_once(proj):
+    cwd = str(proj)
+    cflow_engine.start("linear", cwd=cwd, scope="w1")
+    child = _FakeSession("w1", cwd, parent="lead")
+    lead = _FakeSession("lead", cwd)
+    clock = cflow_clock.RunEventClock(_FakeManager({"w1": child, "lead": lead}))
+    clock.scan()
+    _crash(child)
+    clock.session_exited(child)
+    events = clock.scan()
+    assert [e["kind"] for e in events] == ["orphaned"]
+    assert events[0]["to"] == "lead"
+    assert "without a kill request" in events[0]["block"]
+    assert "linear" in events[0]["block"] and "'one'" in events[0]["block"]
+    assert "respawn w1" in events[0]["block"]
+    assert clock.scan() == []                       # once: the exit, not state
+    assert asyncio.run(clock._deliver(events[0])) is True
+    assert lead.delivered == [events[0]["block"]]
+
+
+def test_a_requested_ending_is_not_reported(proj):
+    """Kill, pause: somebody asked, so somebody knows."""
+    cwd = str(proj)
+    cflow_engine.start("linear", cwd=cwd, scope="w1")
+    lead = _FakeSession("lead", cwd)
+    killed = _FakeSession("w1", cwd, parent="lead")
+    killed.kill_requested = True
+    paused = _FakeSession("w1", cwd, parent="lead")
+    paused.paused_at = "2026-09-27T00:00:00Z"
+    clock = cflow_clock.RunEventClock(_FakeManager({"w1": killed, "lead": lead}))
+    for session in (killed, paused):
+        _crash(session)
+        clock.session_exited(session)
+    assert clock.scan() == []
+
+
+def test_a_crash_after_the_run_or_without_one_is_not_reported(proj):
+    cwd = str(proj)
+    lead = _FakeSession("lead", cwd)
+    norun = _FakeSession("w0", cwd, parent="lead")
+    cflow_engine.start("linear", cwd=cwd, scope="w1")
+    for summary in ("did one", "did two"):
+        cflow_engine.report(summary, cwd=cwd, scope="w1")
+        cflow_engine.next_step(cwd=cwd, scope="w1")
+    assert cflow_engine.status(cwd, scope="w1")["status"] == "done"
+    finished = _FakeSession("w1", cwd, parent="lead")
+    clock = cflow_clock.RunEventClock(
+        _FakeManager({"w0": norun, "w1": finished, "lead": lead})
+    )
+    clock.scan()
+    for session in (norun, finished):
+        _crash(session)
+        clock.session_exited(session)
+    assert [e for e in clock.scan() if e["kind"] == "orphaned"] == []
+
+
+def test_a_crash_goes_to_the_parent_or_nobody(proj):
+    """No mesh-leader fallback for this one: that fallback is where the
+    reports about other trees' dead runs came from."""
+    cwd = str(proj)
+    cflow_engine.start("linear", cwd=cwd, scope="w1")
+    cflow_engine.start("linear", cwd=cwd, scope="w2")
+    orphan = _FakeSession("w1", cwd)                # no parent: not recorded
+    child = _FakeSession("w2", cwd, parent="lead")
+    lead = _FakeSession("lead", cwd)
+    leader = _FakeSession("boss", cwd)
+    mesh = _FakeMesh(
+        {"w2": [{"mesh": "m"}]},
+        {"m": SimpleNamespace(members={
+            "boss": Member("boss", "boss", role="leader"),
+        })},
+    )
+    manager = _FakeManager({"w1": orphan, "w2": child, "lead": lead, "boss": leader})
+    clock = cflow_clock.RunEventClock(manager, mesh)
+    for session in (orphan, child):
+        _crash(session)
+        clock.session_exited(session)
+    lead.exited = True                              # the parent is gone too
+    events = clock.scan()
+    assert [e["scope"] for e in events] == ["w2"]
+    assert asyncio.run(clock._deliver(events[0])) is True   # settled: dropped
+    assert leader.delivered == [] and lead.delivered == []
+
+
+def test_a_crash_heard_while_disabled_is_not_replayed(proj):
+    cwd = str(proj)
+    cflow_engine.start("linear", cwd=cwd, scope="w1")
+    child = _FakeSession("w1", cwd, parent="lead")
+    lead = _FakeSession("lead", cwd)
+    clock = cflow_clock.RunEventClock(_FakeManager({"w1": child, "lead": lead}))
+    store.set_daemon_field("cflow_events", False)
+    _crash(child)
+    clock.session_exited(child)
+    assert clock.scan() == []
+    store.set_daemon_field("cflow_events", True)
+    assert clock.scan() == []
+
+
+def test_session_kill_marks_the_ending_as_requested():
+    """Every kill verb, the beads wind-down, kill-on-end and pause end a
+    session through Session.kill, so the marker is set in one place."""
+    from claude_launcher.daemon.session import Session
+
+    terminated = []
+    fake = SimpleNamespace(
+        exited=False, kill_requested=False,
+        pty=SimpleNamespace(terminate=lambda force=False: terminated.append(force)),
+    )
+    Session.kill(fake)
+    assert fake.kill_requested is True and terminated == [False]
+    already = SimpleNamespace(exited=True, kill_requested=False, pty=None)
+    Session.kill(already)
+    assert already.kill_requested is False
 
 
 def test_disabled_tracks_silently(proj):
