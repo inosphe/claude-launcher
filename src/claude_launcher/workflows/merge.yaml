@@ -228,7 +228,10 @@ steps:
           다시 얹지 않는다. 정상 분기다. 누가 얹었는지를 `Claunch-Session`
           트레일러로 확인해 보고에 적고, 지금 tip 의 트리가 그 단계의 기대
           트리와 같은지 대조한다(대조는 건너뛰지 않는다).
-        - `ready: nothing to land -- <후보> is <대상>` → 후보 지정이 잘못됐다.
+        - `ready: nothing to land -- <후보> is <대상>` 또는
+          `ready: nothing to land -- <tip> is on <대상>'s own first-parent line`
+          → 후보 지정이 잘못됐거나 커밋 없이 자른 브랜치다(뒤의 것은 대상이
+          앞서 나간 뒤의 같은 경우다, claunch-gzi50). 얹을 것이 없다.
           멈추고 보고한다.
       - 1 — `re-measure: baseline moved, merge is clean`.
         **프리뷰를 쓰는 배치에서 1 은 예외 상황이 아니라 정상 경로다.** 후보들의
