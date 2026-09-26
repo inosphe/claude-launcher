@@ -1083,14 +1083,25 @@ option:disabled { color: #6b7280; }
 #rail-nav a.active { color: #d8dbe0; border-top-color: #58a6ff; }
 
 /* The rail can be resized independently of the window. Give identity its
-   own line before the fixed-width actions consume the name's space. */
+   own line before the fixed-width actions consume the name's space.
+
+   The name group's basis is what ends that line, so it is the line minus
+   what sits before it: the dot and a gap (8 + 5), and on a child row the
+   tick and a gap too (11 - 2 + 5). The tick's width is fixed here because
+   the └ comes from whatever fallback font the platform has: left at its
+   glyph width it drew wider than the old `calc(100% - 24px)` allowed, the
+   name group wrapped, and the tick and the dot sat alone on a line above
+   the name (claunch-gge34, tests/web/railchildline_browser.cjs). 11px is a
+   full em of its 11px font, the widest a CJK face draws it. The 2px of
+   slack keeps sub-pixel rounding from wrapping the name, and stays under
+   the 5px gap so nothing that follows can squeeze into it. */
 @container session-rail (max-width: 420px) {
   #session-list li[data-name] > .dot { order: -1; }
-  #session-list li.child::before { order: -1; }
+  #session-list li.child::before { order: -1; width: 11px; overflow: hidden; }
   #session-list li[data-name] > .rail-head {
-    order: -1; flex: 1 1 calc(100% - 13px);
+    order: -1; flex: 1 1 calc(100% - 15px);
   }
-  #session-list li.child > .rail-head { flex-basis: calc(100% - 24px); }
+  #session-list li.child > .rail-head { flex-basis: calc(100% - 29px); }
   #session-list .rail-name { flex-shrink: 0; max-width: 50%; }
   #session-list .meta { margin-left: 0; margin-right: auto; }
 }

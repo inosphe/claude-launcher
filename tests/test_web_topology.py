@@ -512,6 +512,7 @@ BROWSER_CHECKS = [
         "search_anything_browser.cjs",
         "detailroute_browser.cjs",
         "sessiongridtip_browser.cjs",
+        "railchildline_browser.cjs",
 ]
 
 
