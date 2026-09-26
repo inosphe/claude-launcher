@@ -388,6 +388,12 @@ def build_app(
         _mesh_audience, manager, board
     )
     manager.exit_hooks.append(board.session_exited)
+    # A finished sweep stamps ``swept_at`` on the session; persisting right
+    # after is what keeps the next restart from sweeping that ending again.
+    # Tests hand in registries without persist.
+    persist = getattr(manager, "persist", None)
+    if persist is not None:
+        board.swept_hooks.append(persist)
     # The reserved default board. Pinned once, to the board this daemon was
     # already using, so every issue filed before workspaces had boards of
     # their own keeps reading as that one's -- nothing is copied and nothing

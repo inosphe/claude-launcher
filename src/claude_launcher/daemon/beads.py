@@ -1137,6 +1137,12 @@ class Board:
         #: through :meth:`br`. The search index's producer hangs here
         #: (:meth:`daemon.rag.RagService.on_board_write`).
         self.write_hooks: List[Callable[[Path], None]] = []
+        #: Called, with nothing, after a sweep stamped ``swept_at`` on at
+        #: least one session. The daemon hangs the manager's ``persist`` here,
+        #: so the stamp reaches the registry now rather than at whatever
+        #: persist happens to come next -- a restart before that one would
+        #: sweep the same ending again (claunch-fh8u1.2).
+        self.swept_hooks: List[Callable[[], None]] = []
         #: ``br`` was found on PATH (sticky), and when PATH was last walked.
         self._which_found = False
         self._which_checked = 0.0
@@ -2610,13 +2616,27 @@ class Board:
         get a sweep of its own: a fresh ``br list --all`` of the whole board
         (1284 issues, 3.4 MB here) decoded on the event loop, once per record
         -- 6.2 s of loop in the first two minutes after a restart, measured
-        by py-spy (claunch-fh8u1). Every write below touches an issue whose
-        assignee or creator is the one session planned for, so plans made
-        from one listing do not overlap.
+        by py-spy (claunch-fh8u1).
+
+        Plans made from one listing can depend on each other: a delegate's
+        release clears an assignee, and the issue it releases is then an
+        unassigned follow-up of its creator -- who, retired in the same
+        restart, planned from the listing where the delegate still held it
+        and wrote nothing (claunch-aakcb). So each write is mirrored into the
+        listing, and the rows it changed are planned again for the *other*
+        sessions of the group until a pass changes nothing. The writer is
+        left out: its own plan already saw the row, and planning it again
+        from the state it wrote would release its own in_progress issue on
+        top of returning it to open.
+
+        A session whose sweep ran to the end is stamped ``swept_at``, and
+        :attr:`swept_hooks` (the manager's persist) write it down at once; a
+        later restart does not sweep the same ending again (claunch-fh8u1.2).
         """
         done_by: Dict[str, List[List[str]]] = {}
         if not self.available():
             return done_by
+        stamped = False
         by_root: Dict[str, Tuple[Path, list]] = {}
         for session in sessions:
             try:
@@ -2625,20 +2645,63 @@ class Board:
                 log.debug("beads: no sweep for %r: %s", session.sdef.name, exc)
                 continue
             if root is None or not self.has_board(root):
+                _mark_swept(session)  # no board, nothing this ending owes
+                stamped = True
                 continue
             by_root.setdefault(str(root), (root, []))[1].append(session)
         for root, group in by_root.values():
             try:
                 self._cache.pop(str(root), None)
-                rows = await self.issues(root)
+                listed = await self.issues(root)
             except Exception as exc:
                 log.debug("beads: no sweep of %s: %s", root, exc)
                 continue
+            # Copies: the writes are mirrored into these, not into the cache.
+            rows = [dict(r) for r in listed]
+            by_id = {str(r.get("id") or ""): r for r in rows}
+            failed: set = set()
+            # Every session of a pass plans from the same rows; the pass's
+            # writes are mirrored only once it is over, so nobody reads a row
+            # half-way through a pass and is then asked about it again.
+            last: Optional[Dict[str, set]] = None  # issue id -> who wrote it
+            for _ in range(len(group) + 1):
+                writes: List[Tuple[str, List[List[str]]]] = []
+                for session in group:
+                    name = session.sdef.name
+                    if last is None:
+                        subset = rows
+                    else:
+                        subset = [by_id[i] for i, who in last.items() if name not in who]
+                        if not subset:
+                            continue
+                    done, ok = await self._sweep_rows(root, subset, session)
+                    done_by.setdefault(name, []).extend(done)
+                    if not ok:
+                        failed.add(name)
+                    writes.append((name, done))
+                last = {}
+                for name, done in writes:
+                    for iid in _mirror(by_id, done):
+                        last.setdefault(iid, set()).add(name)
+                if not last:
+                    break
             for session in group:
-                done_by[session.sdef.name] = await self._sweep_rows(root, rows, session)
+                if session.sdef.name not in failed:
+                    _mark_swept(session)
+                    stamped = True
+        if stamped:
+            for hook in list(self.swept_hooks):
+                try:
+                    hook()
+                except Exception:  # the sweep itself is done; log and go on
+                    log.exception("beads: swept hook %r failed", hook)
         return done_by
 
-    async def _sweep_rows(self, root: Path, rows: List[dict], session) -> List[List[str]]:
+    async def _sweep_rows(
+        self, root: Path, rows: List[dict], session
+    ) -> Tuple[List[List[str]], bool]:
+        """Plan and apply one session's sweep over ``rows``: the writes made,
+        and whether every planned write went through."""
         name = session.sdef.name
         mine = match(rows, name, issue=session.sdef.issue, task=session.sdef.task)
         plan = sweep_plan(mine, name, exit_code=session.exit_code)
@@ -2651,7 +2714,37 @@ class Board:
                 log.warning("beads: sweep of %r: %s", name, exc)
         if done:
             log.info("beads: swept %d issue write(s) for exited %r", len(done), name)
-        return done
+        return done, len(done) == len(plan)
+
+
+def _mirror(by_id: Dict[str, dict], writes: Sequence[List[str]]) -> List[str]:
+    """Apply :func:`sweep_plan`'s state writes to listed rows in place; the ids
+    whose status or assignee they changed. Comments change neither."""
+    changed: List[str] = []
+    for args in writes:
+        if len(args) < 2 or args[0] not in ("update", "close"):
+            continue
+        row = by_id.get(args[1])
+        if row is None:
+            continue
+        if args[0] == "close":
+            row["status"] = "closed"
+        else:
+            opts = args[2:]
+            for flag, value in zip(opts[::2], opts[1::2]):
+                if flag == "--status":
+                    row["status"] = value
+                elif flag == "--assignee":
+                    row["assignee"] = value or None
+                elif flag == "--remove-label":
+                    row["labels"] = [x for x in (row.get("labels") or []) if x != value]
+        changed.append(args[1])
+    return changed
+
+
+def _mark_swept(session) -> None:
+    """Stamp the ending's sweep as made (see :meth:`Board.sweep_many`)."""
+    session.swept_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
 def link_issue(session, issue: str) -> None:

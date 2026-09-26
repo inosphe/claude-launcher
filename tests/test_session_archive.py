@@ -112,6 +112,24 @@ def test_archived_records_are_not_swept_at_boot(home):
     assert swept == {"killed"}
 
 
+def test_a_swept_ending_is_not_swept_again_at_boot(home):
+    # claunch-fh8u1.2. Every boot used to sweep every exited record again,
+    # and the one sweep write that changes no state -- the ORPHANED
+    # FOLLOW-UP comment -- piled up once per restart (29 copies on one
+    # issue). The sweep stamps ``swept_at``, persist carries it, and the
+    # stamped record is not owed a sweep any more.
+    mgr = manager()
+    add_dead(mgr, "fresh")
+    add_dead(mgr, "swept").swept_at = "2026-09-24T07:51:00+00:00"
+    mgr.persist()
+
+    restarted = manager()
+    assert restarted.restore_all() == []
+    assert restarted.get("swept").swept_at == "2026-09-24T07:51:00+00:00"
+    swept = {d.sdef.name for d in restarted.take_retired_for_sweep()}
+    assert swept == {"fresh"}
+
+
 def test_archive_alone_refuses_a_running_session_and_names_the_verb(home):
     # The filing half on its own still refuses: a record written as archived
     # while its program runs would say something that is not true yet. The

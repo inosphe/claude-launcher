@@ -481,6 +481,11 @@ class Session:
         #: back exactly the ones that were paused. Cleared the same way
         #: ``archived_at`` is: respawn constructs a fresh Session.
         self.paused_at: Optional[str] = None
+        #: When the board sweep this incarnation's ending owed was made
+        #: (:meth:`beads.Board.sweep_many`). Persisted with the record, so a
+        #: restart that retires it does not sweep the same ending again
+        #: (claunch-fh8u1.2); a respawn starts a new incarnation at None.
+        self.swept_at: Optional[str] = None
         #: Set by :meth:`SessionManager.respawn` right after this instance is
         #: constructed: a person explicitly asked for this incarnation, as
         #: opposed to :meth:`SessionManager.restore_all` starting it back up
@@ -2025,6 +2030,7 @@ class DeadSession:
         exited_at: Optional[str] = None,
         archived_at: Optional[str] = None,
         paused_at: Optional[str] = None,
+        swept_at: Optional[str] = None,
         scrollback: int = 5000,
         idle_threshold: float = 2.0,
     ) -> None:
@@ -2041,6 +2047,7 @@ class DeadSession:
         self.exited_at = exited_at
         self.archived_at = archived_at
         self.paused_at = paused_at
+        self.swept_at = swept_at
         #: A retired record was not ended by the OS in this daemon's lifetime,
         #: whatever its exit code says; see Session.ended_by_os.
         self.ended_by_os = False

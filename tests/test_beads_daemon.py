@@ -1491,6 +1491,108 @@ def test_a_restart_sweeps_every_retired_record_from_one_listing(repo):
     asyncio.run(run())
 
 
+def test_a_delegate_and_its_creator_retired_together_leave_the_orphan_marked(repo):
+    """claunch-aakcb. B filed a follow-up and delegated it to A; a restart
+    retires both. A's sweep releases it -- and then it is an unassigned
+    follow-up of B, which B's sweep has to mark. B planned from the listing
+    where A still held it, so it used to write nothing. Either order."""
+    for order in (["a", "b"], ["b", "a"]):
+        br = FakeBr()
+        br.add(id="x", assignee="a", created_by="b", labels=["delegated"])
+        board = _board(br, repo)
+
+        async def run():
+            done = await board.sweep_many(
+                [_Sess(_sdef(n, repo), status="exited", exit_code=0) for n in order]
+            )
+            texts = [c["text"] for c in br.comments.get("x", [])]
+            assert br.issues["x"]["assignee"] in (None, "")
+            assert sum("DELEGATION RELEASED" in t for t in texts) == 1
+            assert sum("ORPHANED FOLLOW-UP" in t for t in texts) == 1, (order, texts)
+            assert [c["author"] for c in br.comments["x"]] == ["a", "b"]
+            assert sum(1 for c in br.calls if "list" in c) == 1
+            assert len(done["b"]) == 1
+
+        asyncio.run(run())
+
+
+def test_replanning_a_changed_row_leaves_the_writer_out(repo):
+    """The rows a write changed are planned again for the other sessions,
+    never for the one that wrote them: a returned-to-open issue of its own is
+    still its own, where a second look would release it to the pool."""
+    br = FakeBr()
+    br.add(id="w", assignee="a", created_by="a", status="in_progress")
+    board = _board(br, repo)
+
+    async def run():
+        done = await board.sweep_many(
+            [_Sess(_sdef(n, repo), status="exited", exit_code=0) for n in ("a", "b")]
+        )
+        assert br.issues["w"]["status"] == "open"
+        assert br.issues["w"]["assignee"] == "a"
+        assert len(done["a"]) == 2 and done["b"] == []
+
+    asyncio.run(run())
+
+
+def test_a_finished_sweep_stamps_the_ending(repo):
+    """claunch-fh8u1.2. A sweep that ran to the end stamps ``swept_at`` on
+    the session; the manager persists it, and the next restart does not
+    queue that ending again (tests/test_session_archive.py). A sweep with a
+    write that failed is not stamped, so the next boot tries again."""
+    br = FakeBr()
+    br.add(id="o", created_by="done")
+    br.add(id="gone", assignee="broken", status="in_progress")
+    board = _board(br, repo)
+    done_s = _Sess(_sdef("done", repo), status="exited", exit_code=0)
+    broken = _Sess(_sdef("broken", repo), status="exited", exit_code=0)
+    nowhere = _Sess(_sdef("nowhere", ""), status="exited", exit_code=0)
+
+    async def run():
+        del br.issues["gone"]  # listed below, then missing when written
+        rows = [{"id": "gone", "assignee": "broken", "status": "in_progress"},
+                dict(br.issues["o"])]
+
+        async def listing(root):
+            return rows
+
+        board.issues = listing
+        await board.sweep_many([done_s, broken, nowhere])
+        assert getattr(done_s, "swept_at", None)
+        assert getattr(nowhere, "swept_at", None), "no board: nothing owed"
+        assert not getattr(broken, "swept_at", None)
+        assert sum("ORPHANED FOLLOW-UP" in c["text"] for c in br.comments["o"]) == 1
+
+    asyncio.run(run())
+
+
+def test_a_stamp_is_handed_to_the_swept_hooks_once(repo):
+    """The stamp lives on the session object; the hook is what writes it to
+    the registry. Called once per sweep that stamped anything, and not for a
+    sweep whose every session had a write fail."""
+    br = FakeBr()
+    br.add(id="w", assignee="s1", status="in_progress")
+    board = _board(br, repo)
+    calls = []
+    board.swept_hooks.append(lambda: calls.append(1))
+
+    async def run():
+        await board.sweep_many(
+            [_Sess(_sdef(n, repo), status="exited", exit_code=0) for n in ("s1", "s2")]
+        )
+        assert calls == [1]
+
+        async def broken(root, args, actor=None):
+            raise beads_mod.cli_beads.BeadsError("locked")
+
+        br.add(id="v", assignee="s3", status="in_progress")
+        board.br = broken
+        await board.sweep_many([_Sess(_sdef("s3", repo), status="exited")])
+        assert calls == [1]
+
+    asyncio.run(run())
+
+
 # --------------------------------------------------------------------------- #
 # through the API, over real sessions
 # --------------------------------------------------------------------------- #
@@ -2203,6 +2305,39 @@ def test_a_restart_sweeps_what_retiring_leaves_behind(home, tmp_path, repo):
                 "SESSION ENDED" in " ".join(c) and "comments" in c
                 for c in br.calls
             )
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_a_boot_sweep_is_written_down_before_the_next_restart(home, tmp_path, repo):
+    """claunch-fh8u1.2, end to end. The boot sweep stamps the retired record
+    and the daemon persists the stamp itself -- nothing else persists here --
+    so the restart after it does not owe that ending a sweep any more."""
+    _register_py_harness()
+    br = FakeBr()
+    br.add(id="w", assignee="w1", status="in_progress")
+    board = _board(br, repo)
+
+    async def run():
+        old = SessionManager(idle_threshold=0.5, scrollback=200, restore_default=True)
+        old.create(SessionDef(name="w1", harness="py", cwd=str(repo), restore=False))
+        await old.shutdown_all()
+
+        fresh = SessionManager(idle_threshold=0.5, scrollback=200, restore_default=True)
+        fresh.restore_all()
+        mm = MeshManager(fresh, root=tmp_path / "mesh")
+        client = await _serve(fresh, mm, board)
+        try:
+            await _wait_for(
+                lambda: getattr(fresh.get("w1"), "swept_at", None), "the stamp"
+            )
+            # The next boot reads the registry as it stands now.
+            later = SessionManager(idle_threshold=0.5, scrollback=200, restore_default=True)
+            later.restore_all()
+            assert later.get("w1").swept_at
+            assert "w1" not in {d.sdef.name for d in later.take_retired_for_sweep()}
         finally:
             await client.close()
 
