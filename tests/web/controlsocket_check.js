@@ -337,7 +337,7 @@ async function livenessComesFromTheSocket() {
 /* The seam itself: the same paths, two transports, one decision. Driven
    through the real batchFlush with both a working socket and a broken one. */
 async function flushPrefersSocketThenFallsBack() {
-  function buildFlush(controlRead) {
+  function buildFlush(controlRead, httpAnswers = null) {
     const calls = [];
     const scope = {
       calls,
@@ -347,8 +347,10 @@ async function flushPrefersSocketThenFallsBack() {
       showAuth: () => {},
       fetch: async (u, opts = {}) => {
         calls.push({ url: u, body: opts.body ? JSON.parse(opts.body) : null });
-        const answers = {};
-        for (const p of JSON.parse(opts.body).paths) answers[p] = { via: "http", path: p };
+        const paths = JSON.parse(opts.body).paths;
+        let answers = {};
+        if (httpAnswers) answers = httpAnswers(paths);
+        else for (const p of paths) answers[p] = { via: "http", path: p };
         return { ok: true, status: 200, json: async () => ({ answers, errors: {} }) };
       },
     };
@@ -429,6 +431,38 @@ async function flushPrefersSocketThenFallsBack() {
   const unconfigured = await refused.api("/api/sessions/s1/briefing");
   assert.strictEqual(unconfigured.status, 400);
   assert.deepStrictEqual(await unconfigured.json(), { error: "llm not configured" });
+
+  // A refusal of the whole read ("" keyed, no path answered or named) is the
+  // transport saying no: the same paths go out over HTTP, instead of each
+  // reading "not answered" (claunch-yty47).
+  const busy = buildFlush(async () => ({
+    answers: {}, errors: { "": "too many reads in flight" },
+  }));
+  const [s1, s2] = await Promise.all([
+    busy.api("/api/sessions"),
+    busy.api("/api/cflow"),
+  ]);
+  assert.strictEqual(busy.calls.length, 1, "the refused read went out over HTTP");
+  assert.deepStrictEqual(busy.calls[0].body.paths, ["/api/sessions", "/api/cflow"]);
+  assert.strictEqual(s1.ok, true);
+  assert.deepStrictEqual(await s2.json(), { via: "http", path: "/api/cflow" });
+
+  // If HTTP leaves a path unanswered too, the refusal is what it shows.
+  const silent = buildFlush(async () => ({
+    answers: {}, errors: { "": "too many reads in flight" },
+  }), () => ({}));
+  const unanswered = await silent.api("/api/sessions");
+  assert.strictEqual(unanswered.ok, false);
+  assert.deepStrictEqual(await unanswered.json(), { error: "too many reads in flight" });
+
+  // A "" beside answers for the paths is not a refusal of the read: the
+  // answers stand, and nothing is re-sent.
+  const mixed = buildFlush(async (paths) => ({
+    answers: { [paths[0]]: { ok: 1 } }, errors: { "": "late note" },
+  }));
+  const kept = await mixed.api("/api/sessions");
+  assert.deepStrictEqual(await kept.json(), { ok: 1 });
+  assert.strictEqual(mixed.calls.length, 0);
 }
 
 /* ---- 9. a large answer in parts (claunch-iss86) ------------------------ */

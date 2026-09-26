@@ -817,11 +817,25 @@ async function batchFlush() {
   // The socket first, because it costs no connection. Its rejection is not a
   // failed read: it says this transport is not available right now, and the
   // same paths go out over HTTP below exactly as they did before it existed.
+  // A refusal of the whole read -- the daemon's "too many reads in flight",
+  // or a frame it would not take -- carries its reason under "" and speaks
+  // for none of the paths. That is the transport saying no, the same as a
+  // rejection, so the paths go out over HTTP; read per path, it showed as
+  // "not answered" on every one of them (claunch-yty47).
+  let refused = null;
   try {
     const carried = await controlRead(paths);
     answers = carried.answers;
     errors = carried.errors;
     statuses = carried.statuses || {};
+    const has = (obj, path) => Object.prototype.hasOwnProperty.call(obj, path);
+    if (typeof errors[""] === "string" &&
+        !paths.some((path) => has(answers, path) || has(errors, path))) {
+      refused = errors[""];
+      answers = null;
+      errors = {};
+      statuses = {};
+    }
   } catch {
     answers = null;
   }
@@ -831,7 +845,7 @@ async function batchFlush() {
         settle(path, batchResponse(answers[path], true));
       } else {
         settle(path, batchResponse(
-          { error: errors[path] || "not answered" }, false, statuses[path]
+          { error: errors[path] || errors[""] || "not answered" }, false, statuses[path]
         ));
       }
     }
@@ -873,7 +887,8 @@ async function batchFlush() {
       settle(path, batchResponse(answers[path], true));
     } else {
       settle(path, batchResponse(
-        { error: errors[path] || "not answered" }, false, statuses[path]
+        { error: errors[path] || errors[""] || refused || "not answered" }, false,
+        statuses[path]
       ));
     }
   }
