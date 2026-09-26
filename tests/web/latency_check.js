@@ -22,7 +22,11 @@
      - the tooltip splits the last round trip: the time the ping spent in
        the daemon (the pong's `daemon_ms`), and through the tunnel the
        relay's round trip and what is left for browser <-> relay
-       (claunch-iss86).
+       (claunch-iss86);
+     - through the tunnel the badge itself names the two sides of that
+       round trip: web is the daemon's side (relay <-> daemon + daemon),
+       relay the browser's side (what is left, with a ≈); direct, it is
+       the round trip and the relay's own reading (claunch-62vq3).
 
    The real functions are sliced out of the shipped app.js. */
 const assert = require("assert");
@@ -90,6 +94,7 @@ function build({ base = "/" } = {}) {
     slice("latencyRelayWorst"),
     slice("latencyGrade"),
     slice("latencySplit"),
+    slice("latencyTunnelSides"),
     slice("renderLatencyBadge"),
     "return { latencyStart, latencyStop, latencyTick, latencyPong, fmtLatency,"
     + " samples: () => latencySamples, inFlight: () => latencySentAt };",
@@ -196,8 +201,8 @@ function relayHalf() {
   };
   app.latencyPong({ type: "pong", t: 1000, relay });
   assert.strictEqual(app.relayBadges.length, 1, "the relay badge is refreshed too");
-  assert.strictEqual(app.badge.textContent, "web 20ms · relay 180ms",
-                     "the worst connected relay");
+  assert.strictEqual(app.badge.textContent, "web 180ms · relay ≈0ms",
+                     "the worst connected relay, as the daemon's side");
   assert.match(app.badge.className, /latency-slow/, "the worse half colours it");
   assert.match(app.badge.title, /through the relay tunnel/);
   assert.match(app.badge.title, /daemon ↔ relay work: 180ms, 2s ago/);
@@ -297,6 +302,41 @@ function splitOfTheRoundTrip() {
   assert.match(tunnel.badge.title, /  browser ↔ relay: ≈200ms/);
 }
 
+/* ---- 8. through the tunnel the badge names the two sides -------------- */
+function tunnelSides() {
+  const relay = { configured: true, connected: true,
+    relays: [{ id: "relay1", connected: true, rtt_ms: 73, rtt_age: 2, pending_ms: null }] };
+
+  // The reading that started claunch-62vq3: 874ms in all, 73ms of it the
+  // relay's round trip to the daemon, the rest browser <-> relay.
+  const tunnel = build({ base: "/t/d09/" });
+  tunnel.latencyStart();
+  tunnel.clock += 874;
+  tunnel.latencyPong({ type: "pong", t: 1000, relay, daemon_ms: 0.4 });
+  assert.strictEqual(tunnel.badge.textContent, "web 73ms · relay ≈801ms");
+  assert.match(tunnel.badge.className, /latency-bad/, "the slow side colours it");
+  assert.match(tunnel.badge.title, /browser ↔ daemon \(through the relay tunnel\): last 874ms/,
+               "the whole round trip stays the first line");
+  assert.match(tunnel.badge.title,
+    /badge: web = relay ↔ daemon \+ daemon \(73ms\), relay = browser ↔ relay \(≈801ms, what is left of 874ms\)/);
+
+  // A ping outgrowing the last sample has no sides yet: it shows as a stall.
+  tunnel.clock += 5000;
+  tunnel.latencyTick();
+  tunnel.clock += 2000;
+  tunnel.latencyTick();
+  assert.strictEqual(tunnel.badge.textContent, "web ≥2.0s · relay 73ms");
+  assert.doesNotMatch(tunnel.badge.title, /badge: web =/);
+
+  // Direct, the badge is what it was: the round trip, and the relay's own.
+  const direct = build();
+  direct.latencyStart();
+  direct.clock += 12;
+  direct.latencyPong({ type: "pong", t: 1000, relay, daemon_ms: 1 });
+  assert.strictEqual(direct.badge.textContent, "web 12ms · relay 73ms");
+  assert.doesNotMatch(direct.badge.title, /badge: web =/);
+}
+
 function formats() {
   const app = build();
   assert.strictEqual(app.fmtLatency(null), "—");
@@ -312,5 +352,6 @@ relayHalf();
 socketDown();
 loopLag();
 splitOfTheRoundTrip();
+tunnelSides();
 formats();
 console.log("latency_check ok");

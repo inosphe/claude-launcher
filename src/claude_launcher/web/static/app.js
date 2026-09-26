@@ -437,6 +437,22 @@ function latencySplit(total, tunnel, relayRtt) {
   return out;
 }
 
+/* Through the tunnel the badge names the two halves of the last round trip
+   (claunch-62vq3): web is the daemon's side -- the relay's round trip to the
+   daemon plus the time the ping spent in the daemon -- and relay is the
+   browser's side, what is left of the round trip, with a ≈. Read as "web =
+   the whole round trip, relay = daemon <-> relay", a slow browser <-> relay
+   path showed as a slow web and a fast relay, the opposite of where the time
+   went. Needs a completed round trip and an answered relay PING; without them
+   the badge keeps the plain round trip and the relay's own reading. */
+function latencyTunnelSides(web, relay) {
+  if (!latencySamples.length || web.stalled) return null;
+  if (!relay || relay.stalled || typeof relay.ms !== "number") return null;
+  const total = latencySamples[latencySamples.length - 1];
+  const daemonSide = relay.ms + (typeof latencyDaemon === "number" ? latencyDaemon : 0);
+  return { total, daemonSide, browserSide: Math.max(0, total - daemonSide) };
+}
+
 function fmtLatency(ms) {
   if (ms == null) return "—";
   if (ms >= 1000) return (ms / 1000).toFixed(ms >= 10000 ? 0 : 1) + "s";
@@ -489,16 +505,24 @@ function renderLatencyBadge() {
   const web = up ? latencyWeb() : { ms: null, stalled: false };
   const relayOn = !!(latencyRelay && latencyRelay.configured);
   const relay = relayOn ? latencyRelayWorst(latencyRelay) : null;
+  const tunnel = /^\/t\/[^/]+\/$/.test(BASE);
+  const split = up && tunnel ? latencyTunnelSides(web, relay) : null;
   const mark = (r) => (r && r.stalled ? "≥" : "") + fmtLatency(r && r.ms);
-  let text = `web ${up ? mark(web) : "down"}`;
-  if (relayOn) text += ` · relay ${mark(relay)}`;
+  let text;
+  let known;
+  if (split) {
+    text = `web ${fmtLatency(split.daemonSide)} · relay ≈${fmtLatency(split.browserSide)}`;
+    known = [split.daemonSide, split.browserSide];
+  } else {
+    text = `web ${up ? mark(web) : "down"}`;
+    if (relayOn) text += ` · relay ${mark(relay)}`;
+    known = [web.ms, relay && relay.ms].filter((v) => typeof v === "number");
+  }
   badge.textContent = text;
-  const known = [web.ms, relay && relay.ms].filter((v) => typeof v === "number");
   badge.className = "badge " +
     (up ? latencyGrade(known.length ? Math.max(...known) : null) : "latency-bad");
 
   const lines = [];
-  const tunnel = /^\/t\/[^/]+\/$/.test(BASE);
   const via = tunnel ? "through the relay tunnel" : "direct";
   if (!up) {
     lines.push("browser ↔ daemon: control socket is down (reconnecting)");
@@ -540,6 +564,11 @@ function renderLatencyBadge() {
       } else v = "measuring…";
       lines.push(`daemon ↔ relay ${r.id}: ${v}`);
     }
+  }
+  if (split) {
+    lines.push(`badge: web = relay ↔ daemon + daemon (${fmtLatency(split.daemonSide)}), ` +
+      `relay = browser ↔ relay (≈${fmtLatency(split.browserSide)}, what is left of ` +
+      `${fmtLatency(split.total)})`);
   }
   lines.push(`round trips; amber ≥ ${LATENCY_SLOW_MS}ms, red ≥ ${LATENCY_BAD_MS}ms`);
   badge.title = lines.join("\n");
