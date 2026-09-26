@@ -471,6 +471,89 @@ def test_an_interacting_target_advance_still_requires_a_rebase(repo, capsys):
     assert code == merge_ready.REBASE, out
 
 
+def _fresh_repo(tmp_path, name: str):
+    path = tmp_path / name
+    path.mkdir()
+    _git(path, "init", "-q", "-b", "master")
+    _git(path, "config", "user.email", "t@example.com")
+    _git(path, "config", "user.name", "t")
+    _write(path, "README", "root\n")
+    _commit(path, "root")
+    return path
+
+
+def _korean_advance(tmp_path, *, target_text: str):
+    """A green preview of a branch with Korean in it, then a target advance
+    that also carries Korean -- the shape of every board write here."""
+    repo = _fresh_repo(tmp_path, "korean")
+    _scenario(
+        repo,
+        "ko",
+        target_adds={"theirs.md": "상대 쪽 첫 변경\n"},
+        branch_adds={"mine.md": "이 브랜치의 변경 — 한글\n"},
+    )
+    ref = "refs/claunch/preview/ko-branch"
+    _preview(repo, "ko-branch", "ko-target", ref)
+    _git(repo, "checkout", "-q", "ko-target")
+    _write(repo, "board.jsonl", target_text)
+    _commit(repo, "ko: target moved again")
+    _git(repo, "checkout", "-q", "master")
+    return repo, ref
+
+
+def test_a_korean_diff_has_a_patch_id(tmp_path):
+    """claunch-xuzcw. The diff was decoded with the locale (cp949 here), the
+    reader thread died on the first Korean byte, and the id came back None."""
+    repo = _fresh_repo(tmp_path, "ids")
+    before = _git(repo, "rev-parse", "HEAD^{tree}").strip()
+    _write(repo, "note.md", "이슈 본문 — 한글과 em dash\n")
+    _commit(repo, "ko")
+    after = _git(repo, "rev-parse", "HEAD^{tree}").strip()
+    pid = merge_ready._patch_id(repo, before, after)
+    assert pid and len(pid) == 40 and int(pid, 16) >= 0
+
+
+def test_two_diffs_that_differ_in_undecodable_bytes_hash_apart(tmp_path):
+    """The diff reaches patch-id as bytes. Any decoding on the way -- the
+    locale's, or a UTF-8 that replaces what it cannot read -- folds 0xfe and
+    0xff into one character, and two different diffs would hash alike."""
+    repo = _fresh_repo(tmp_path, "bytes")
+    root = _git(repo, "rev-parse", "HEAD^{tree}").strip()
+    ids = []
+    for byte in (b"\xfe", b"\xff"):
+        (repo / "raw.txt").write_bytes(b"value " + byte + b"\n")
+        _commit(repo, f"raw {byte!r}")
+        tree = _git(repo, "rev-parse", "HEAD^{tree}").strip()
+        ids.append(merge_ready._patch_id(repo, root, tree))
+    assert None not in ids
+    assert ids[0] != ids[1]
+
+
+def test_a_korean_additive_advance_is_still_recognised(tmp_path, capsys):
+    repo, ref = _korean_advance(tmp_path, target_text='{"title": "보드 쓰기"}\n')
+    code, out = _verdict(
+        repo, capsys,
+        "--branch", "ko-branch", "--target", "ko-target",
+        "--preview-ref", ref, "--allow-target-advance",
+    )
+    assert code == merge_ready.READY, out
+    assert "target advance is additive" in out
+
+
+def test_ids_that_could_not_be_computed_are_not_equal_ids(tmp_path, capsys, monkeypatch):
+    """claunch-xuzcw. Both sides failing to hash used to compare equal, and
+    the gate answered 'additive' for an advance it never compared."""
+    repo, ref = _korean_advance(tmp_path, target_text='{"title": "보드 쓰기"}\n')
+    monkeypatch.setattr(merge_ready, "_patch_id", lambda *a, **k: None)
+    code, out = _verdict(
+        repo, capsys,
+        "--branch", "ko-branch", "--target", "ko-target",
+        "--preview-ref", ref, "--allow-target-advance",
+    )
+    assert code == merge_ready.REMEASURE, out
+    assert "additive" not in out
+
+
 def test_a_ref_that_is_not_a_merge_of_the_pair_is_ignored(repo, capsys):
     """A gate satisfied by any ref at the right name would be no gate at all."""
     ref = "refs/claunch/preview/decoy"

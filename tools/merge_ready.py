@@ -261,8 +261,16 @@ def _resolve_repo(explicit: Optional[str]) -> Tuple[Path, str]:
 
 
 def _git(repo: Path, *args: str) -> subprocess.CompletedProcess:
+    # UTF-8, not the locale: git writes paths, subjects and diffs as UTF-8,
+    # and on a Windows console the locale is cp949. Decoding with it killed
+    # the reader thread on the first Korean byte and left stdout empty, with
+    # the exit code still 0 (claunch-xuzcw, claunch-gds6-...-ja5ih).
     return subprocess.run(
-        ["git", "-C", str(repo), *args], capture_output=True, text=True
+        ["git", "-C", str(repo), *args],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
     )
 
 
@@ -421,16 +429,25 @@ def _patch_id(repo: Path, before: str, after: str) -> Optional[str]:
     ``patch-id --stable`` deliberately ignores hunk line numbers.  A candidate
     can edit a different part of a file whose line numbers moved in the
     target advance; hashing raw diff text would reject that additive case.
+
+    The diff goes to ``patch-id`` as bytes. Decoding it first -- with the
+    locale, as this did, or with a lossy UTF-8 -- either loses the text or
+    folds two different byte strings into the same replacement character,
+    and then two different diffs hash alike.
     """
-    diff = _git(repo, "diff", "--no-ext-diff", "--binary", before, after)
+    diff = subprocess.run(
+        ["git", "-C", str(repo), "diff", "--no-ext-diff", "--binary", before, after],
+        capture_output=True,
+    )
     if diff.returncode:
         return None
     proc = subprocess.run(
-        ["git", "patch-id", "--stable"], input=diff.stdout, capture_output=True, text=True
+        ["git", "patch-id", "--stable"], input=diff.stdout, capture_output=True
     )
-    if proc.returncode or not proc.stdout.split():
+    fields = proc.stdout.split()
+    if proc.returncode or not fields:
         return None
-    return proc.stdout.split()[0]
+    return fields[0].decode("ascii", "replace")
 
 
 def _advanced_target_is_covered(
@@ -464,7 +481,12 @@ def _advanced_target_is_covered(
     paths_b = _git(repo, "diff", "--name-status", old_target_tree, target_tree)
     if paths_a.returncode or paths_b.returncode or paths_a.stdout != paths_b.stdout:
         return None
-    if _patch_id(repo, preview_tree, landing_tree) != _patch_id(repo, old_target_tree, target_tree):
+    # Two ids that could not be computed are not two equal ids: an empty
+    # diff and a failed read both come back None, and None == None passed
+    # an advance nobody had compared (claunch-xuzcw).
+    ours = _patch_id(repo, preview_tree, landing_tree)
+    theirs = _patch_id(repo, old_target_tree, target_tree)
+    if ours is None or theirs is None or ours != theirs:
         return None
     return preview
 
