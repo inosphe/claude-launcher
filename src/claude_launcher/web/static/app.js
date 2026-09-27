@@ -343,10 +343,14 @@ function p2pStop() {
   p2pRemember(true);
   clearTimeout(p2pTimer);
   p2pTimer = null;
+  // The live socket first: Link.close() drops the socket's onclose before
+  // closing it, so closing the link first would leave controlClosed unrun
+  // and the page on a dead socket. controlClosed -> p2pFailed closes the
+  // link and, stopped, schedules no retry.
+  if (controlSock && controlSock.transport === "p2p") controlSock.close();
   const link = p2pLink;
   p2pLink = null;
   if (link) link.close();
-  if (controlSock && controlSock.transport === "p2p") controlSock.close();
   p2pRender();
 }
 

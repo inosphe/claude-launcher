@@ -325,7 +325,12 @@ function build(opts = {}) {
     constructor(o) { this.o = o; this.handled = []; this.closed = false; links.push(this); }
     start() { this.started = true; this.o.signal({ type: "p2p_offer", id: "X", sdp: "s" }); }
     handle(msg) { this.handled.push(msg); }
-    close() { this.closed = true; }
+    // As the real Link.close(): the socket's onclose is dropped before it is
+    // closed, so a page that closes the link first never hears the socket go.
+    close() {
+      this.closed = true;
+      if (this.sock) { this.sock.onclose = null; this.sock.close(); }
+    }
     // -- what the negotiation does --
     ready() {
       const dc = new FakeDC("claunch-control", {});
@@ -682,6 +687,7 @@ function badgeControls() {
   h.app.p2pStop();
   assert.strictEqual(direct.readyState, 3, "the DataChannel socket is closed");
   assert.strictEqual(h.app.sock, null, "the control socket goes the way a dropped channel does");
+  assert.ok(h.links[3].closed, "the live link is closed too");
   assert.strictEqual(live(h, 10000).length, 0, "no P2P retry after a stop");
   const reopen = h.t.pending().find((x) => x.ms === JSON.parse(constOf("CONTROL_BACKOFF").replace(/\s+/g, ""))[0]);
   h.t.fire(reopen);
