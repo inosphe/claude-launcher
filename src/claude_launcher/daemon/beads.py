@@ -75,6 +75,7 @@ import re
 import shutil
 import sqlite3
 import subprocess
+import threading
 import time
 from dataclasses import replace
 from datetime import datetime, timezone
@@ -152,6 +153,14 @@ CACHE_TTL = 2.0
 #: daemon (claunch-fa1xk). A write through this daemon drops the listing
 #: (:meth:`Board.invalidate`), so a drag is never answered from before itself.
 STALE_TTL = 30.0
+
+#: How long one ``br`` command may run before the daemon stops waiting on it.
+#: :meth:`Board.br` holds the board's lock while ``br`` runs, so a ``br`` that
+#: never ends held every later read of that board: a ``br show`` left in a
+#: process that could not finish terminating stalled every session's meta and
+#: beads read for hours, and the page's HTTP fallback timed out at the relay
+#: (524) behind it (claunch-9urxl). A normal read is well under 5 s.
+BR_DEADLINE = 60.0
 
 #: The unassigned pool the Queues page draws folded (its ``BEADS_Q_CELL_CAP``):
 #: past this many cards a folded view answers the count and not the cards.
@@ -1084,6 +1093,73 @@ def _board_root(cwd: str) -> Optional[Path]:
     return ref.root_path if ref is not None else None
 
 
+async def _run_with_deadline(
+    argv: List[str], cwd: str, deadline: float
+) -> Tuple[int, str, str]:
+    """Fork ``argv`` off the event loop thread and wait at most ``deadline``.
+
+    Off the loop thread because on Windows the Proactor loop's transport calls
+    Popen -- pipe setup and CreateProcess -- on the loop thread itself. py-spy
+    put 106 of 1167 loop samples there (40s, live daemon, claunch-y9ax9),
+    every one a stall of every HTTP request and terminal socket.
+
+    Not ``subprocess.run(timeout=)``: after it kills the child it calls
+    ``communicate()`` again with no limit, and the ``br`` this guards against
+    had been killed and still never finished terminating (claunch-9urxl).
+    On the deadline the child is killed and left behind, and so is the
+    thread waiting on it -- a daemon thread, so it does not hold the
+    process's exit either.
+    """
+    loop = asyncio.get_running_loop()
+    done = loop.create_future()
+    started: Dict[str, subprocess.Popen] = {}
+
+    def settle(result, exc) -> None:
+        if done.done():
+            return
+        if exc is not None:
+            done.set_exception(exc)
+        else:
+            done.set_result(result)
+
+    def work() -> None:
+        result, error = None, None
+        try:
+            proc = subprocess.Popen(
+                argv, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.PIPE
+            )
+            started["proc"] = proc
+            out, err = proc.communicate()
+            result = (proc.returncode, out, err)
+        except BaseException as exc:  # noqa: BLE001 -- handed to the awaiting caller
+            error = exc
+        try:
+            loop.call_soon_threadsafe(settle, result, error)
+        except RuntimeError:  # the loop closed while br ran
+            pass
+
+    threading.Thread(target=work, name="br", daemon=True).start()
+    try:
+        code, out, err = await asyncio.wait_for(asyncio.shield(done), deadline)
+    except asyncio.TimeoutError:
+        proc = started.get("proc")
+        if proc is not None:
+            log.warning(
+                "beads: br pid %s ran past %.0fs, killed and no longer waited on: %s",
+                proc.pid, deadline, " ".join(argv[3:])[:120],
+            )
+            try:
+                proc.kill()
+            except OSError:
+                pass
+        raise
+    return (
+        code or 0,
+        out.decode("utf-8", "replace"),
+        err.decode("utf-8", "replace"),
+    )
+
+
 class Board:
     """One daemon's access to every repository board its sessions live in.
 
@@ -1100,8 +1176,10 @@ class Board:
         *,
         root_for: Optional[Callable[[str], Optional[Path]]] = None,
         clock: Callable[[], float] = time.monotonic,
+        deadline: float = BR_DEADLINE,
     ) -> None:
         self._runner = runner
+        self._deadline = deadline
         self._root_for = root_for or _board_root
         self._clock = clock
         self._roots: Dict[str, Optional[Path]] = {}
@@ -1247,22 +1325,18 @@ class Board:
 
     # ---- running br ----------------------------------------------------- #
     async def _run(self, argv: List[str], cwd: str) -> Tuple[int, str, str]:
-        if self._runner is not None:
-            return await self._runner(argv, cwd)
-        # In a worker thread, not asyncio.create_subprocess_exec: on Windows
-        # the Proactor loop's transport calls Popen -- pipe setup and
-        # CreateProcess -- on the loop thread itself. py-spy put 106 of 1167
-        # loop samples there (40s, live daemon, claunch-y9ax9), every one a
-        # stall of every HTTP request and terminal socket. CreateProcess
-        # releases the GIL, so the loop runs while the thread waits on it.
-        proc = await asyncio.to_thread(
-            subprocess.run, argv, cwd=cwd, capture_output=True
-        )
-        return (
-            proc.returncode or 0,
-            proc.stdout.decode("utf-8", "replace"),
-            proc.stderr.decode("utf-8", "replace"),
-        )
+        """Run ``argv`` and answer ``(code, stdout, stderr)``, or raise
+        :class:`cli_beads.BeadsError` once it has run past the deadline --
+        so the caller's board lock is released (claunch-9urxl)."""
+        try:
+            if self._runner is not None:
+                return await asyncio.wait_for(self._runner(argv, cwd), self._deadline)
+            return await _run_with_deadline(argv, cwd, self._deadline)
+        except asyncio.TimeoutError:
+            raise cli_beads.BeadsError(
+                f"br {' '.join(argv[3:])[:80]} did not finish in "
+                f"{self._deadline:.0f}s"
+            ) from None
 
     async def create_board(self, ref: beads_db.BoardRef) -> None:
         """Bring ``ref``'s database into being — the daemon's side of

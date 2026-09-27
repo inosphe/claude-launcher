@@ -3003,16 +3003,17 @@ def test_the_default_runner_forks_off_the_event_loop_thread(tmp_path):
     import threading
 
     seen = []
-    real = subprocess.run
+    real = subprocess.Popen
 
-    def watched(*a, **kw):
-        seen.append(threading.get_ident())
-        return real(*a, **kw)
+    class Watched(real):
+        def __init__(self, *a, **kw):
+            seen.append(threading.get_ident())
+            super().__init__(*a, **kw)
 
     async def go():
         loop_thread = threading.get_ident()
         board = beads_mod.Board(root_for=lambda cwd: None)
-        subprocess.run = watched
+        subprocess.Popen = Watched
         try:
             got = await board._run(
                 [sys.executable, "-c",
@@ -3020,7 +3021,7 @@ def test_the_default_runner_forks_off_the_event_loop_thread(tmp_path):
                 str(tmp_path),
             )
         finally:
-            subprocess.run = real
+            subprocess.Popen = real
         return loop_thread, got
 
     loop_thread, (code, out, err) = asyncio.run(go())
@@ -3028,3 +3029,48 @@ def test_the_default_runner_forks_off_the_event_loop_thread(tmp_path):
     assert code == 3
     assert out.strip() == "out"
     assert err.strip() == "err"
+
+
+def test_a_br_past_its_deadline_is_killed_and_answered_as_an_error(tmp_path):
+    """A ``br`` that does not end is killed and stops being waited on at the
+    deadline (claunch-9urxl): the live one had been killed and still never
+    finished terminating, so waiting for it after the kill held the board's
+    lock -- every meta and beads read -- for hours."""
+    import sys
+
+    async def go():
+        board = beads_mod.Board(root_for=lambda cwd: None, deadline=0.5)
+        start = time.monotonic()
+        with pytest.raises(beads_mod.cli_beads.BeadsError, match="did not finish"):
+            await board._run(
+                [sys.executable, "-c", "import time; time.sleep(30)"], str(tmp_path)
+            )
+        return time.monotonic() - start
+
+    assert asyncio.run(go()) < 10
+
+
+def test_a_hung_br_does_not_hold_the_board_for_the_next_read(repo):
+    """The lock :meth:`Board.br` takes is released when a command runs past
+    the deadline, so the read queued behind it is answered (claunch-9urxl)."""
+    calls = []
+
+    async def runner(argv, cwd):
+        calls.append(argv)
+        if len(calls) == 1:
+            await asyncio.sleep(3600)  # the br that never ends
+        return 0, json.dumps([{"id": "t-1", "title": "x"}]), ""
+
+    async def go():
+        board = beads_mod.Board(
+            runner, root_for=lambda cwd: repo if cwd else None, deadline=0.2
+        )
+        first = asyncio.ensure_future(board.br(repo, ["show", "t-1"]))
+        await asyncio.sleep(0)
+        second = await asyncio.wait_for(board.br(repo, ["show", "t-1"]), 5)
+        with pytest.raises(beads_mod.cli_beads.BeadsError, match="did not finish"):
+            await first
+        return second
+
+    assert asyncio.run(go()) == [{"id": "t-1", "title": "x"}]
+    assert len(calls) == 2
