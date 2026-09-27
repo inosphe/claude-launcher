@@ -10,11 +10,15 @@ acks and pongs served by the code that serves the relay socket.
 
 The loopback tests run two aiortc peers in this process, the "browser" one
 offering exactly as the page does (offer first, candidates trickled after).
+aiortc is an optional extra (`.[p2p]`), so those tests -- and the one that
+needs the daemon to be able to do p2p -- skip where it is not installed; the
+framing, NAT and refusal tests run everywhere.
 """
 
 from __future__ import annotations
 
 import asyncio
+import importlib.util
 import json
 import time
 
@@ -27,6 +31,11 @@ from claude_launcher.daemon.manager import SessionManager
 from claude_launcher.daemon.mesh import MeshManager
 
 BEARER = {"Authorization": "Bearer sekrit"}
+
+needs_aiortc = pytest.mark.skipif(
+    importlib.util.find_spec("aiortc") is None,
+    reason="aiortc not installed (optional extra: .[p2p])",
+)
 
 
 # --------------------------------------------------------------- framing
@@ -215,6 +224,7 @@ async def _next(ws, kind):
             return frame
 
 
+@needs_aiortc
 def test_the_init_frame_names_p2p_only_when_the_daemon_can_do_it(home, tmp_path, monkeypatch):
     async def run():
         client, hub = await _serve(tmp_path)
@@ -347,6 +357,7 @@ async def _gone(hub, timeout=10):
     return False
 
 
+@needs_aiortc
 def test_the_datachannel_is_the_control_socket(home, tmp_path, monkeypatch):
     """After the nonce the channel serves init, pongs marked p2p, and reads
     in parts with their acks -- through a bridge made to wait on a full
@@ -402,6 +413,7 @@ def test_the_datachannel_is_the_control_socket(home, tmp_path, monkeypatch):
     asyncio.run(run())
 
 
+@needs_aiortc
 def test_a_wrong_nonce_closes_the_peer_and_not_the_relay_socket(home, tmp_path):
     async def run():
         client, hub = await _serve(tmp_path)
@@ -424,6 +436,7 @@ def test_a_wrong_nonce_closes_the_peer_and_not_the_relay_socket(home, tmp_path):
     asyncio.run(run())
 
 
+@needs_aiortc
 def test_a_nonce_opens_one_channel_once(home, tmp_path):
     """A second peer presenting the first peer's (spent) nonce is closed,
     and the first peer keeps working (DESIGN CHECK 3: reuse)."""
@@ -458,6 +471,7 @@ def test_a_nonce_opens_one_channel_once(home, tmp_path):
     asyncio.run(run())
 
 
+@needs_aiortc
 def test_a_nonce_that_arrives_late_finds_the_peer_gone(home, tmp_path, monkeypatch):
     """DESIGN CHECK 3: late. The peer is closed at AUTH_TIMEOUT and the
     relay socket goes on answering."""
@@ -485,6 +499,7 @@ def test_a_nonce_that_arrives_late_finds_the_peer_gone(home, tmp_path, monkeypat
     asyncio.run(run())
 
 
+@needs_aiortc
 def test_a_negotiating_peer_dies_with_its_signalling_socket(home, tmp_path):
     async def run():
         client, hub = await _serve(tmp_path)
@@ -504,6 +519,7 @@ def test_a_negotiating_peer_dies_with_its_signalling_socket(home, tmp_path):
     asyncio.run(run())
 
 
+@needs_aiortc
 def test_predicted_candidates_ride_the_answer(home, tmp_path, monkeypatch):
     async def fake_probe(servers):
         return {"stun:a:1": [("203.0.113.9", 20000), ("203.0.113.9", 20001)]}
