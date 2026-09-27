@@ -36,6 +36,12 @@ uv tool install .
 
 This puts `claunch` on your PATH. The `claude` CLI must already be installed.
 
+Optional: `uv tool install ".[p2p]"` adds aiortc (about 88 MB). With it, a web
+page reached through the relay tunnel moves its control socket onto a WebRTC
+DataChannel straight to the daemon host when one can be negotiated, and stays
+on the relay when not. Without it nothing changes. `daemon.p2p_enabled: false`
+turns it off; `p2p_stun`, `p2p_probe_stun` and `p2p_predict` are the other keys.
+
 ### Development / live patching
 
 Install editable so the tool imports straight from this repo instead of a copy:

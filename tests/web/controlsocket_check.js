@@ -123,6 +123,17 @@ function build() {
     slice("controlUp"),
     slice("controlAbort"),
     slice("openControlSocket"),
+    // Its frames and its closing are routed by these two, which the P2P
+    // road shares (claunch-mhzt4); p2p_check.js exercises that road, so its
+    // own entry points are stubbed here.
+    slice("controlMessage"),
+    slice("controlClosed"),
+    "const controlRetired = new Set();",
+    slice("controlRetiredMessage"),
+    slice("controlRetireCheck"),
+    "function p2pInit() {}",
+    "function p2pSignal() {}",
+    "function p2pFailed() {}",
     slice("scheduleControlReopen"),
     slice("ensureControlSocket"),
     slice("controlRead"),
