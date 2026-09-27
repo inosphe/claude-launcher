@@ -257,6 +257,9 @@ let p2pLink = null;           // the negotiation in flight, or the live link
 let p2pConfig = null;         // the daemon's `p2p` block from its init
 let p2pTry = 0;
 let p2pTimer = null;
+let p2pOff = null;            // why P2P is not tried here, or null
+let p2pLastFail = null;       // the last failed attempt's reason
+let p2pNextAt = 0;            // Date.now() of the next scheduled try
 const controlRetired = new Set();
 
 function p2pTunnel() {
@@ -264,16 +267,22 @@ function p2pTunnel() {
 }
 
 function p2pInit(sock, msg) {
-  if (!msg.p2p || sock.transport === "p2p" || !p2pTunnel()) return;
-  if (typeof RTCPeerConnection !== "function" || !globalThis.ClaunchP2P) return;
+  if (sock.transport === "p2p" || !p2pTunnel()) return;
+  p2pOff = !msg.p2p ? "the daemon offers no P2P (aiortc is not installed there, or daemon.p2p_enabled is false)"
+    : typeof RTCPeerConnection !== "function" ? "this browser has no RTCPeerConnection"
+    : !globalThis.ClaunchP2P ? "static/p2p.js did not load"
+    : null;
+  if (p2pOff) { p2pRender(); return; }
   p2pConfig = msg.p2p;
-  if (p2pLink || p2pTimer) return;
+  if (p2pLink || p2pTimer) { p2pRender(); return; }
   p2pSchedule(p2pTry ? P2P_RETRY[Math.min(p2pTry - 1, P2P_RETRY.length - 1)] : P2P_FIRST_MS);
 }
 
 function p2pSchedule(wait) {
   clearTimeout(p2pTimer);
+  p2pNextAt = Date.now() + wait;
   p2pTimer = setTimeout(() => { p2pTimer = null; p2pAttempt(); }, wait);
+  p2pRender();
 }
 
 function p2pAttempt() {
@@ -289,6 +298,7 @@ function p2pAttempt() {
     onFail: (reason) => { if (p2pLink === link) p2pFailed(reason); },
   });
   p2pLink = link;
+  p2pRender();
   link.start();
 }
 
@@ -301,6 +311,7 @@ function p2pFailed(reason) {
   p2pLink = null;
   if (link) link.close();
   p2pTry += 1;
+  p2pLastFail = reason;
   console.info("claunch: P2P control socket not in use (" + reason + "); relay continues");
   p2pSchedule(P2P_RETRY[Math.min(p2pTry - 1, P2P_RETRY.length - 1)]);
 }
@@ -319,9 +330,43 @@ function controlAdopt(direct, link) {
   direct.onmessage = (ev) => controlMessage(direct, ev);
   direct.onclose = () => controlClosed(direct);
   p2pTry = 0;
+  p2pLastFail = null;
   controlRetire(old);
   latencyStart();
   channelsCarrierGone();
+  p2pRender();
+}
+
+/* Which road the control socket is on, for the badge beside the latency
+   one: P2P (on the DataChannel), connecting (a negotiation in flight),
+   relay (tried and not in use: why, and when the next try is) or off (not
+   tried here, and why). Null on a page reached directly -- the relay is
+   not on its path, so there is nothing to choose between. */
+function p2pStatus() {
+  if (!p2pTunnel()) return null;
+  if (controlSock && controlSock.transport === "p2p") {
+    return { state: "P2P", tip: "control socket on a WebRTC DataChannel straight to the daemon" };
+  }
+  if (p2pLink) return { state: "connecting", tip: "negotiating a WebRTC DataChannel over the relay" };
+  if (p2pOff) return { state: "off", tip: "P2P not tried: " + p2pOff };
+  if (!p2pConfig) return null;               // the daemon's init has not said yet
+  const next = p2pTimer !== null ? `next try at ${new Date(p2pNextAt).toLocaleTimeString()}`
+    : "next try when the relay socket is back";
+  if (p2pLastFail) {
+    return { state: "relay",
+      tip: `P2P not in use: ${p2pLastFail} (${p2pTry} failed tr${p2pTry === 1 ? "y" : "ies"}); ${next}` };
+  }
+  return { state: "relay", tip: `on the relay; P2P ${next}` };
+}
+
+function p2pRender() {
+  const badge = $("p2p-badge");
+  if (!badge) return;
+  const s = p2pStatus();
+  if (!s) { badge.classList.add("hidden"); return; }
+  badge.textContent = s.state;
+  badge.title = s.tip;
+  badge.className = "badge p2p-" + (s.state === "P2P" ? "on" : s.state);
 }
 
 function controlRetire(old) {

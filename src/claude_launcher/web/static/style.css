@@ -3386,6 +3386,12 @@ a.wf-btn { display: inline-block; text-decoration: none; line-height: 1.5; }
 .badge.latency-idle { background: #30363d; color: #8b949e; }
 .badge.latency-slow { background: #46350f; color: #e3b341; }
 .badge.latency-bad { background: #442022; color: #ff7b72; }
+/* Which road the control socket is on through the tunnel (claunch-mhzt4). */
+#p2p-badge { flex: none; white-space: nowrap; }
+.badge.p2p-on { background: #1f4428; color: #3fb950; }
+.badge.p2p-connecting { background: #46350f; color: #e3b341; }
+.badge.p2p-relay { background: #30363d; color: #c9d1d9; }
+.badge.p2p-off { background: #30363d; color: #8b949e; }
 .badge.relay-on { background: #1f4428; color: #3fb950; }
 .badge.relay-off { background: #30363d; color: #8b949e; }
 .badge.relay-down { background: #442022; color: #ff7b72; }

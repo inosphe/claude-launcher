@@ -355,13 +355,16 @@ function build(opts = {}) {
     "let p2pConfig = null;",
     "let p2pTry = 0;",
     "let p2pTimer = null;",
+    "let p2pOff = null;",
+    "let p2pLastFail = null;",
+    "let p2pNextAt = 0;",
     "const controlRetired = new Set();",
     "const channelLinks = new Map();",
     ...["controlUp", "controlAbort", "openControlSocket", "controlMessage", "controlClosed",
         "p2pTunnel", "p2pInit", "p2pSchedule", "p2pAttempt", "p2pSignal", "p2pFailed",
         "controlAdopt", "controlRetire", "controlRetiredMessage", "controlRetireCheck",
         "scheduleControlReopen", "ensureControlSocket", "controlRead", "controlAnswer",
-        "controlPart", "channelsCarrierGone"].map(slice),
+        "controlPart", "channelsCarrierGone", "p2pStatus", "p2pRender"].map(slice),
     "let latencyStarts = 0;",
     "function latencyStart() { latencyStarts++; }",
     "function latencyStop() {}",
@@ -375,9 +378,16 @@ function build(opts = {}) {
     + " retired: () => controlRetired.size, waiting: () => controlWaiting.size };",
   ].join("\n");
 
+  // The badge beside the latency one: what p2pRender writes.
+  const badge = {
+    textContent: "", title: "", className: "badge hidden",
+    classList: { add: (c) => { if (!badge.className.split(" ").includes(c)) badge.className += " " + c; } },
+    get hidden() { return badge.className.split(" ").includes("hidden"); },
+  };
+
   const make = new Function(
     "WebSocket", "RTCPeerConnection", "globalThis", "url", "location",
-    "setTimeout", "clearTimeout", "console", code);
+    "setTimeout", "clearTimeout", "console", "$", code);
   const app = make(
     FakeWebSocket,
     opts.noRTC ? undefined : function RTCPeerConnection() {},
@@ -385,8 +395,9 @@ function build(opts = {}) {
     (p) => p,
     { protocol: "https:", host: "relay.example" },
     t.setTimeout, t.clearTimeout,
-    { info: (m) => logs.push(m) });
-  return { app, t, sockets, links, channelEnds, logs };
+    { info: (m) => logs.push(m) },
+    (id) => (id === "p2p-badge" ? badge : null));
+  return { app, t, sockets, links, channelEnds, logs, badge };
 }
 
 const INIT = { type: "init", p2p: { stun: ["stun:stun.example:3478"] } };
@@ -570,6 +581,69 @@ function badgeSplitOff() {
   assert.match(slice("latencyPong"), /msg\.via === "p2p" \? "p2p" : null/);
 }
 
+/* ---- 10. the badge says which road, and why ---------------------------- */
+function badgeStates() {
+  // Before the daemon's init there is nothing to say.
+  const h = build();
+  h.app.ensureControlSocket();
+  h.sockets[0].opened();
+  assert.ok(h.badge.hidden, "hidden until the init says whether P2P is on offer");
+
+  // Offered: relay, with the first try's time; then connecting while in flight.
+  h.sockets[0].say(INIT);
+  assert.strictEqual(h.badge.textContent, "relay");
+  assert.match(h.badge.title, /^on the relay; P2P next try at /);
+  assert.ok(!h.badge.hidden);
+  h.t.fire(h.t.pending().find((x) => x.ms === 1000));
+  assert.strictEqual(h.badge.textContent, "connecting");
+  assert.strictEqual(h.badge.className, "badge p2p-connecting");
+
+  // Failed: relay, the reason, how many tries, and when the next one is.
+  h.links[0].fail("ice failed");
+  assert.strictEqual(h.badge.textContent, "relay");
+  assert.strictEqual(h.badge.className, "badge p2p-relay");
+  assert.match(h.badge.title, /^P2P not in use: ice failed \(1 failed try\); next try at /);
+  h.t.fire(h.t.pending().find((x) => x.ms === 10000));
+  h.links[1].fail("no answer in 15s");
+  assert.match(h.badge.title, /no answer in 15s \(2 failed tries\)/);
+
+  // On the channel: P2P; the failure is forgotten.
+  h.t.fire(h.t.pending().find((x) => x.ms === 20000));
+  h.links[2].ready();
+  assert.strictEqual(h.badge.textContent, "P2P");
+  assert.strictEqual(h.badge.className, "badge p2p-on");
+  assert.match(h.badge.title, /DataChannel/);
+
+  // The channel closes: back to relay, with that as the reason.
+  h.links[2].dc.close();
+  assert.strictEqual(h.badge.textContent, "relay");
+  assert.match(h.badge.title, /^P2P not in use: channel closed \(1 failed try\); next try at /);
+
+  // Off, each with its reason.
+  const offs = [
+    [{}, { type: "init" }, /aiortc is not installed there, or daemon\.p2p_enabled is false/],
+    [{ noRTC: true }, INIT, /this browser has no RTCPeerConnection/],
+  ];
+  for (const [opts, init, why] of offs) {
+    const o = build(opts);
+    o.app.ensureControlSocket();
+    o.sockets[0].opened();
+    o.sockets[0].say(init);
+    assert.strictEqual(o.badge.textContent, "off", JSON.stringify(opts));
+    assert.strictEqual(o.badge.className, "badge p2p-off");
+    assert.match(o.badge.title, /^P2P not tried: /);
+    assert.match(o.badge.title, why);
+  }
+
+  // A page reached directly: nothing new, whatever the daemon offers.
+  const d = build({ base: "/" });
+  d.app.ensureControlSocket();
+  d.sockets[0].opened();
+  d.sockets[0].say(INIT);
+  assert.ok(d.badge.hidden, "no P2P badge on a direct page");
+  assert.strictEqual(d.badge.textContent, "");
+}
+
 (async () => {
   framingRoundTrip();
   await linkNegotiates();
@@ -580,5 +654,6 @@ function badgeSplitOff() {
   await fallbackWhenChannelCloses();
   failedNegotiation();
   badgeSplitOff();
+  badgeStates();
   console.log("p2p_check ok");
 })().catch((err) => { console.error(err); process.exit(1); });
