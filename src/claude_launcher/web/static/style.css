@@ -2325,6 +2325,11 @@ body.term-split #terminal { flex: var(--split-term, 0.6) 1 0; min-height: 80px; 
   font-size: 13px; color: #c6cdd5;
 }
 .sess-migrate label.check input { width: auto; margin-top: 3px; }
+.sess-reborrow-artifact {
+  display: flex; align-items: center; gap: 7px; margin: 2px 0 8px;
+  color: #c6cdd5; font-size: 13px;
+}
+.sess-reborrow-artifact input { margin: 0; }
 .sess-migrate .wf-btn, .sess-reborrow .wf-btn, .sess-perms .wf-btn { margin-right: 0; }
 .sess-migrate .wf-note, .sess-migrate .wf-warning,
 .sess-reborrow .wf-note, .sess-reborrow .wf-warning,

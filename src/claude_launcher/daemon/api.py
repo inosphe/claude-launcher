@@ -7021,9 +7021,13 @@ async def h_session_reborrow(request: web.Request) -> web.Response:
 
     Body: ``{"borrow": "NAME"}`` to borrow that profile's token (and
     provider), ``{"borrow": null}`` (or ``""``) for its own profile's, and
-    ``{"null_token": true}`` for none at all (``--null``). They are one
+    ``{"null_token": true}`` for none at all (``--null``). These are one
     choice — picking any clears the others, so a borrow set on a ``--null``
-    session turns the token back on. The restart is
+    session turns the token back on. Claude sessions may also pass
+    ``disable_artifact_tool: true|false`` to disable or restore the Artifact
+    tool in the same restart. When auth fields are omitted, their current
+    choice is retained, allowing the tool setting to be changed by itself.
+    The restart is
     :meth:`SessionManager.reborrow` — stop, relaunch under the definition
     with the auth swapped. The directory does not move, so the conversation
     stays filed where it always was and there is nothing to carry.
@@ -7034,11 +7038,18 @@ async def h_session_reborrow(request: web.Request) -> web.Response:
     """
     manager: SessionManager = request.app["manager"]
     body = await _json_body(request)
-    if "borrow" not in body and "null_token" not in body:
+    disable_artifact_tool = body.get("disable_artifact_tool")
+    if "disable_artifact_tool" in body and not isinstance(
+        disable_artifact_tool, bool
+    ):
+        return json_error(400, "'disable_artifact_tool' must be a boolean")
+    if (
+        "borrow" not in body and "null_token" not in body
+        and "disable_artifact_tool" not in body
+    ):
         return json_error(
             400,
-            "pass 'borrow' (a profile name, or null) and/or 'null_token' — "
-            "one answer to whose token it runs on",
+            "pass 'borrow', 'null_token', or 'disable_artifact_tool'",
         )
     borrow = body.get("borrow")
     if borrow is not None and not isinstance(borrow, str):
@@ -7046,8 +7057,14 @@ async def h_session_reborrow(request: web.Request) -> web.Response:
     null_token = body.get("null_token", False)
     if not isinstance(null_token, bool):
         return json_error(400, "'null_token' must be a boolean")
+    current = manager.get(request.match_info["name"])
+    has_auth_choice = "borrow" in body or "null_token" in body
+    if not has_auth_choice:
+        borrow = current.sdef.borrow
+        null_token = current.sdef.null_token
     session = await manager.reborrow(
-        request.match_info["name"], borrow, null_token=null_token
+        request.match_info["name"], borrow, null_token=null_token,
+        disable_artifact_tool=disable_artifact_tool,
     )
     return json_response(session.info())
 

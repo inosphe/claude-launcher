@@ -24780,7 +24780,7 @@ function sessReborrow(data) {
   const s = data.session || {};
   const harness = data.harness || {};
   const box = el("div", "sess-reborrow");
-  box.appendChild(el("h3", null, "Borrowed auth"));
+  box.appendChild(el("h3", null, "Restart settings"));
 
   // Borrowability comes from the packaged/custom harness auth contract. Keep
   // Claude as the old-daemon fallback, but do not infer every other harness is
@@ -24804,7 +24804,8 @@ function sessReborrow(data) {
   const validationKey = validation
     ? `${validation.status || ""}:${validation.ready ? 1 : 0}:${validation.message || ""}`
     : "own";
-  const key = `${s.name}|${s.borrow || ""}|${s.null_token ? 1 : 0}|${validationKey}`;
+  const key = `${s.name}|${s.borrow || ""}|${s.null_token ? 1 : 0}|` +
+    `${s.disable_artifact_tool ? 1 : 0}|${validationKey}`;
   if (sessReborrowBox && sessReborrowBox.dataset.slot === key) {
     box.appendChild(sessReborrowBox);   // appending moves the live node here
     return box;
@@ -24846,6 +24847,20 @@ function sessReborrow(data) {
   goBtn.disabled = true;
   goBtn.title = "stop the session and relaunch it on the picked auth";
   const status = el("p", "wf-note hidden");
+
+  let artifactToggle = null;
+  if (s.harness === "claude") {
+    const label = el("label", "sess-reborrow-artifact");
+    artifactToggle = document.createElement("input");
+    artifactToggle.type = "checkbox";
+    artifactToggle.checked = !!s.disable_artifact_tool;
+    label.append(artifactToggle, el("span", null, "Disable Claude Code's Artifact tool"));
+    const note = el(
+      "p", "wf-note",
+      "Changing this option restarts the session. It can be combined with an auth change."
+    );
+    form.append(label, note);
+  }
   form.append(row, goBtn, status);
 
   const say = (msg, cls) => {
@@ -24909,9 +24924,14 @@ function sessReborrow(data) {
     dest.value = currentChoice;
     const sync = () => {
       const selected = [...dest.options].find((o) => o.value === dest.value);
-      goBtn.disabled = dest.value === currentChoice || !!(selected && selected.disabled);
+      const authChanged = dest.value !== currentChoice;
+      const artifactChanged = !!artifactToggle &&
+        artifactToggle.checked !== !!s.disable_artifact_tool;
+      goBtn.disabled = (!authChanged && !artifactChanged) ||
+        (authChanged && !!(selected && selected.disabled));
     };
     dest.addEventListener("change", sync);
+    if (artifactToggle) artifactToggle.addEventListener("change", sync);
     dest.disabled = false;
     sync();
   })();
@@ -24924,6 +24944,7 @@ function sessReborrow(data) {
       choice === "own" ? { borrow: null }
       : choice === "null" ? { borrow: null, null_token: true }
       : { borrow: choice.slice(2) };
+    if (artifactToggle) body.disable_artifact_tool = artifactToggle.checked;
     goBtn.disabled = true;
     say("restarting… (stopping it, relaunching on the picked auth)");
     let doc = {};
@@ -24945,13 +24966,15 @@ function sessReborrow(data) {
       say(doc.error || `HTTP ${resp.status}`, "wf-warning");
       return;
     }
-    say(
+    const authResult =
       doc.borrow
         ? `restarted — now borrowing ${doc.borrow}`
         : doc.null_token
           ? "restarted — now running with no token (--null)"
-          : `restarted — back on ${baseProfileName(doc.profile)}'s own token`
-    );
+          : `restarted — back on ${baseProfileName(doc.profile)}'s own token`;
+    say(artifactToggle
+      ? `${authResult}; Artifact tool ${doc.disable_artifact_tool ? "disabled" : "enabled"}`
+      : authResult);
     // The restart relaunched a fresh PTY under the same name; a terminal
     // attached to the old one is watching a socket that just died.
     if (currentName === name) {

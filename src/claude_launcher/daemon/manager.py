@@ -1784,7 +1784,8 @@ class SessionManager:
             raise
 
     async def reborrow(
-        self, name: str, borrow: Optional[str], *, null_token: bool = False
+        self, name: str, borrow: Optional[str], *, null_token: bool = False,
+        disable_artifact_tool: Optional[bool] = None,
     ) -> Session:
         """Restart a session on another answer to "whose token".
 
@@ -1798,8 +1799,9 @@ class SessionManager:
         ``--null`` session turns the token back on, and a token asked back
         on a borrowed session turns the borrow off. The new choice is the
         definition's, so it holds across daemon restarts exactly like one
-        made at creation — and the token is still looked up fresh at every
-        relaunch.
+        made at creation. Claude's Artifact-tool setting is persisted in the
+        same definition and can be changed in the same restart; the token is
+        still looked up fresh at every relaunch.
 
         Refused while nothing has been stopped: a harness with no shared-token
         route, a borrow paired with ``--null`` (creation's own refusal — the
@@ -1809,7 +1811,19 @@ class SessionManager:
         session = self.get(name)
         old = session.sdef
         entry = harness_registry.get(old.harness)
-        if entry is None or not entry.borrowable:
+        if entry is None:
+            raise ManagerError(f"unknown harness {old.harness!r}")
+        artifact_tool = (
+            old.disable_artifact_tool
+            if disable_artifact_tool is None else disable_artifact_tool
+        )
+        if artifact_tool and old.harness != harness_mod.CLAUDE_HARNESS:
+            raise ManagerError(
+                "the Artifact tool setting only applies to the claude harness"
+            )
+        auth_changed = borrow != old.borrow or null_token != old.null_token
+        artifact_changed = artifact_tool != old.disable_artifact_tool
+        if auth_changed and not entry.borrowable:
             raise ManagerError(
                 f"--borrow is not supported by harness {old.harness!r}; "
                 "OAuth harnesses use their profile's own namespaced login"
@@ -1837,7 +1851,7 @@ class SessionManager:
                 lender = resolved.name
             except (profile_mod.ProfileError, borrowing.BorrowError) as exc:
                 raise ManagerError(str(exc)) from exc
-        if lender == old.borrow and null_token == old.null_token:
+        if not auth_changed and not artifact_changed:
             if lender:
                 raise ManagerError(
                     f"session {name!r} already borrows {lender!r}"
@@ -1849,11 +1863,28 @@ class SessionManager:
                      f"{old.profile!r}'s own token — nothing to clear"
             )
         relaunched = await self.redefine(
-            name, borrow=lender, null_token=null_token
+            name, borrow=lender, null_token=null_token,
+            disable_artifact_tool=artifact_tool,
         )
-        self.events.record(relaunched, "borrow", "세션 인증 프로파일 변경",
-                           previous=old.borrow, current=lender,
-                           previous_null=old.null_token, null_token=null_token)
+        if auth_changed:
+            details = {
+                "previous": old.borrow, "current": lender,
+                "previous_null": old.null_token, "null_token": null_token,
+            }
+            if artifact_changed:
+                details.update({
+                    "previous_disable_artifact_tool": old.disable_artifact_tool,
+                    "disable_artifact_tool": artifact_tool,
+                })
+            self.events.record(
+                relaunched, "borrow", "세션 인증 프로파일 변경", **details
+            )
+        if artifact_changed:
+            self.events.record(
+                relaunched, "restart-settings", "Artifact 도구 설정 변경",
+                previous_disable_artifact_tool=old.disable_artifact_tool,
+                disable_artifact_tool=artifact_tool,
+            )
         return relaunched
 
     async def skip_permissions(self, name: str, skip: bool) -> Session:
