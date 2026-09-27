@@ -69,6 +69,20 @@ REBRIEF_HOOK_SETTINGS = {
     }
 }
 
+# Claude Code's ``--tools`` option takes the complete built-in tool allowlist.
+# This snapshot is the documented built-in set (Claude Code tools reference,
+# checked against CLI 2.1.283) with Artifact omitted. ``--disallowedTools`` is
+# permission policy and does not express that a tool is absent from the set.
+CLAUDE_TOOLS_WITHOUT_ARTIFACT = (
+    "Agent,AskUserQuestion,Bash,CronCreate,CronDelete,CronList,Edit,"
+    "EndConversation,EnterPlanMode,EnterWorktree,ExitPlanMode,ExitWorktree,"
+    "Glob,Grep,ListAgents,ListMcpResourcesTool,LSP,Monitor,NotebookEdit,"
+    "PowerShell,PushNotification,Read,ReadMcpResourceTool,ReportFindings,"
+    "ScheduleWakeup,SendMessage,SendUserFile,ShareOnboardingGuide,Skill,"
+    "TaskCreate,TaskGet,TaskList,TaskOutput,TaskStop,TaskUpdate,TodoWrite,"
+    "ToolSearch,WaitForMcpServers,WebFetch,WebSearch,Workflow,Write"
+)
+
 
 class HarnessError(Exception):
     """Raised for unknown harnesses or invalid session definitions."""
@@ -148,6 +162,10 @@ class SessionDef:
     #: any inherited ``CLAUDE_CODE_OAUTH_TOKEN`` is cleared, so claude starts
     #: unauthenticated (log in with /login). claude harness only.
     null_token: bool = False
+    #: Hide Claude Code's built-in Artifact tool for this session. Persisted
+    #: in the definition so both daemon restore and an operator reborrow keep
+    #: the same tool surface.
+    disable_artifact_tool: bool = False
     #: The opening task, kept as a *record*. The live copy went in exactly
     #: once, on the first spawn (:func:`build_command`'s ``opening``), and is
     #: never replayed — this field changes nothing about that. It exists so a
@@ -266,6 +284,8 @@ class SessionDef:
         # is byte-for-byte what it was — and reads as the default either way.
         if self.project:
             out["project"] = self.project
+        if self.disable_artifact_tool:
+            out["disable_artifact_tool"] = True
         return out
 
     @classmethod
@@ -293,6 +313,7 @@ class SessionDef:
             identity=str(data.get("identity") or "").strip() or None,
             borrow=str(data.get("borrow") or "").strip() or None,
             null_token=bool(data.get("null_token")),
+            disable_artifact_tool=bool(data.get("disable_artifact_tool")),
             task=str(data.get("task") or "").strip() or None,
             issue=str(data.get("issue") or "").strip() or None,
             keep_alive=bool(data.get("keep_alive")),
@@ -524,6 +545,10 @@ def normalize(sdef: SessionDef, *, restoring: bool = False) -> SessionDef:
         raise HarnessError(
             f"unknown harness {sdef.harness!r} (known: {known}); "
             f"declare it under 'harnesses:' in {store.path()}"
+        )
+    if sdef.disable_artifact_tool and sdef.harness != CLAUDE_HARNESS:
+        raise HarnessError(
+            "the Artifact tool setting only applies to the claude harness"
         )
     if sdef.model:
         if not entry.models:
@@ -948,6 +973,8 @@ def build_command(
         # moved to the harness-independent opening/rebrief/reminder path.
         if sdef.identity:
             argv.extend(["--append-system-prompt", sdef.identity])
+        if sdef.disable_artifact_tool:
+            argv.extend(["--tools", CLAUDE_TOOLS_WITHOUT_ARTIFACT])
         if sdef.model:
             entry = harness_registry.get(sdef.harness)
             model_id = entry.model_aliases.get(sdef.model, sdef.model)
