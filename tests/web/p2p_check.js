@@ -325,7 +325,12 @@ function build(opts = {}) {
     constructor(o) { this.o = o; this.handled = []; this.closed = false; links.push(this); }
     start() { this.started = true; this.o.signal({ type: "p2p_offer", id: "X", sdp: "s" }); }
     handle(msg) { this.handled.push(msg); }
-    close() { this.closed = true; }
+    // As the real Link.close(): the socket's onclose is dropped before it is
+    // closed, so a page that closes the link first never hears the socket go.
+    close() {
+      this.closed = true;
+      if (this.sock) { this.sock.onclose = null; this.sock.close(); }
+    }
     // -- what the negotiation does --
     ready() {
       const dc = new FakeDC("claunch-control", {});
@@ -358,13 +363,18 @@ function build(opts = {}) {
     "let p2pOff = null;",
     "let p2pLastFail = null;",
     "let p2pNextAt = 0;",
+    `const P2P_STOP_KEY = ${constOf("P2P_STOP_KEY")};`,
+    "let p2pStopped = false;",
+    `const P2P_ACTION = ${constOf("P2P_ACTION")};`,
     "const controlRetired = new Set();",
     "const channelLinks = new Map();",
     ...["controlUp", "controlAbort", "openControlSocket", "controlMessage", "controlClosed",
         "p2pTunnel", "p2pInit", "p2pSchedule", "p2pAttempt", "p2pSignal", "p2pFailed",
         "controlAdopt", "controlRetire", "controlRetiredMessage", "controlRetireCheck",
         "scheduleControlReopen", "ensureControlSocket", "controlRead", "controlAnswer",
-        "controlPart", "channelsCarrierGone", "p2pStatus", "p2pRender"].map(slice),
+        "controlPart", "channelsCarrierGone", "p2pStatus", "p2pRender",
+        "p2pRemember", "p2pStop", "p2pStart", "p2pRetry", "p2pActions",
+        "p2pMenuToggle", "p2pMenuFill"].map(slice),
     "let latencyStarts = 0;",
     "function latencyStart() { latencyStarts++; }",
     "function latencyStop() {}",
@@ -375,6 +385,8 @@ function build(opts = {}) {
     + " get sock() { return controlSock; }, get link() { return p2pLink; },"
     + " get p2pTry() { return p2pTry; }, get controlTry() { return controlTry; },"
     + " get latencyStarts() { return latencyStarts; },"
+    + " get stopped() { return p2pStopped; },"
+    + " p2pStop, p2pStart, p2pRetry, actions: () => p2pActions(p2pStatus()),"
     + " retired: () => controlRetired.size, waiting: () => controlWaiting.size };",
   ].join("\n");
 
@@ -581,6 +593,123 @@ function badgeSplitOff() {
   assert.match(slice("latencyPong"), /msg\.via === "p2p" \? "p2p" : null/);
 }
 
+/* ---- 11. the browser's own timers (claunch-k1z4z) ----------------------
+   window.setTimeout called on another object throws "Illegal invocation";
+   Node's does not, so every other check here passes its own timers. This
+   one loads p2p.js with timers that refuse a foreign `this`, as a browser's
+   do, and builds the Link without timer options -- the way app.js builds
+   it. Before the fix start() threw before the offer and onFail was never
+   called: the badge sat on "connecting" and nothing retried. */
+async function browserTimers() {
+  const strict = (fn) => function (...a) {
+    if (this !== undefined && this !== globalThis) throw new TypeError("Illegal invocation");
+    return fn(...a);
+  };
+  const g = {};
+  new Function("globalThis", "setTimeout", "clearTimeout", p2pSrc)(
+    g, strict(setTimeout), strict(clearTimeout));
+  const { FakePC } = fakeRTC();
+
+  // The offer goes out.
+  const sent = [];
+  const fails = [];
+  const link = new g.ClaunchP2P.Link({
+    RTC: FakePC, stun: [], signal: (f) => { sent.push(f); return true; },
+    onFail: (r) => fails.push(r), gatherCapMs: 1,
+  });
+  await link.start();
+  assert.deepStrictEqual(fails, [], "no failure on the way to the offer");
+  assert.strictEqual(sent[0] && sent[0].type, "p2p_offer", "the offer was signalled");
+
+  // And a failure reaches onFail (it cleared the browser timer on the way).
+  link.fail("test");
+  assert.deepStrictEqual(fails, ["test"]);
+
+  // An offer that cannot be made fails through onFail too.
+  class Broken extends FakePC { async createOffer() { throw new Error("no offer"); } }
+  const bad = [];
+  await new g.ClaunchP2P.Link({ RTC: Broken, signal: () => true, onFail: (r) => bad.push(r) }).start();
+  assert.deepStrictEqual(bad, ["offer failed: no offer"]);
+}
+
+/* ---- 12. the badge menu: stop, start, retry (claunch-k1z4z) ------------ */
+function badgeControls() {
+  const live = (h, ms) => h.t.pending().filter((x) => x.ms === ms);
+
+  // Connecting: retry and stop on offer.
+  const h = relayWithLink();
+  assert.deepStrictEqual(h.app.actions(), ["retry", "stop"]);
+
+  // Retry restarts a negotiation that is taking too long.
+  h.app.p2pRetry();
+  assert.ok(h.links[0].closed, "the slow negotiation is dropped");
+  assert.strictEqual(h.links.length, 2, "and a new one starts at once");
+  assert.strictEqual(h.badge.textContent, "connecting");
+
+  // Stop: the negotiation is dropped, nothing is scheduled, the badge says so.
+  h.app.p2pStop();
+  assert.ok(h.links[1].closed);
+  assert.strictEqual(h.app.link, null);
+  assert.strictEqual(h.app.stopped, true);
+  assert.strictEqual(h.badge.textContent, "off");
+  assert.match(h.badge.title, /stopped from this page/);
+  assert.deepStrictEqual(h.app.actions(), ["start"]);
+  for (const ms of [1000, 10000, 20000]) assert.strictEqual(live(h, ms).length, 0, "no retry at " + ms);
+  // A late failure of the dropped link, and the relay reconnecting, start nothing.
+  h.links[1].fail("late");
+  h.relay.say(INIT);
+  assert.strictEqual(h.links.length, 2);
+  assert.strictEqual(live(h, 1000).length + live(h, 10000).length, 0);
+  assert.strictEqual(h.app.sock, h.relay, "the page stays on the relay");
+
+  // Start: a try at once, counters reset.
+  h.app.p2pStart();
+  assert.strictEqual(h.app.stopped, false);
+  assert.strictEqual(h.links.length, 3);
+  assert.strictEqual(h.badge.textContent, "connecting");
+
+  // Relay after a failure: retry skips the backoff wait.
+  h.links[2].fail("ice failed");
+  assert.strictEqual(h.badge.textContent, "relay");
+  assert.deepStrictEqual(h.app.actions(), ["retry", "stop"]);
+  const waiting = live(h, 10000);
+  assert.strictEqual(waiting.length, 1);
+  h.app.p2pRetry();
+  assert.ok(waiting[0].cancelled, "the backoff wait is cancelled");
+  assert.strictEqual(h.links.length, 4, "the try happens now");
+
+  // On P2P: stop closes the channel and the page falls back to the relay
+  // without a retry scheduled.
+  const direct = h.links[3].ready();
+  assert.strictEqual(h.app.sock, direct);
+  assert.deepStrictEqual(h.app.actions(), ["stop"]);
+  const before = h.sockets.length;
+  h.app.p2pStop();
+  assert.strictEqual(direct.readyState, 3, "the DataChannel socket is closed");
+  assert.strictEqual(h.app.sock, null, "the control socket goes the way a dropped channel does");
+  assert.ok(h.links[3].closed, "the live link is closed too");
+  assert.strictEqual(live(h, 10000).length, 0, "no P2P retry after a stop");
+  const reopen = h.t.pending().find((x) => x.ms === JSON.parse(constOf("CONTROL_BACKOFF").replace(/\s+/g, ""))[0]);
+  h.t.fire(reopen);
+  assert.strictEqual(h.sockets.length, before + 1, "the relay reopens");
+  const relay2 = h.sockets[h.sockets.length - 1];
+  relay2.opened();
+  relay2.say(INIT);
+  assert.strictEqual(live(h, 1000).length + live(h, 10000).length, 0, "still stopped after the reopen");
+  assert.strictEqual(h.badge.textContent, "off");
+
+  // Where P2P cannot run, the menu offers nothing.
+  const o = build({ noRTC: true });
+  o.app.ensureControlSocket();
+  o.sockets[0].opened();
+  o.sockets[0].say(INIT);
+  assert.deepStrictEqual(o.app.actions(), []);
+  o.app.p2pRetry();
+  o.app.p2pStart();
+  assert.strictEqual(o.links.length, 0, "start does nothing without RTCPeerConnection");
+  assert.strictEqual(o.badge.textContent, "off");
+}
+
 /* ---- 10. the badge says which road, and why ---------------------------- */
 function badgeStates() {
   // Before the daemon's init there is nothing to say.
@@ -655,5 +784,7 @@ function badgeStates() {
   failedNegotiation();
   badgeSplitOff();
   badgeStates();
+  await browserTimers();
+  badgeControls();
   console.log("p2p_check ok");
 })().catch((err) => { console.error(err); process.exit(1); });

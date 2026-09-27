@@ -150,8 +150,11 @@
       this.onReady = opts.onReady || (() => {});
       this.onFail = opts.onFail || (() => {});
       this.RTC = opts.RTC || globalThis.RTCPeerConnection;
-      this.setTimer = opts.setTimeout || setTimeout;
-      this.clearTimer = opts.clearTimeout || clearTimeout;
+      // Called as this.setTimer(...), so the browser's own timers are wrapped:
+      // window.setTimeout called on another object throws "Illegal
+      // invocation", which left every negotiation stuck (claunch-k1z4z).
+      this.setTimer = opts.setTimeout || ((fn, ms) => setTimeout(fn, ms));
+      this.clearTimer = opts.clearTimeout || ((t) => clearTimeout(t));
       this.gatherCap = opts.gatherCapMs != null ? opts.gatherCapMs : GATHER_CAP_MS;
       this.readyTimeout = opts.readyTimeoutMs != null ? opts.readyTimeoutMs : READY_TIMEOUT_MS;
       this.pc = null;
@@ -275,8 +278,10 @@
     fail(reason) {
       if (this.done) return;
       this.done = true;
-      this.clearTimer(this.timer);
-      this.close();
+      // Nothing on the way may keep onFail from being called: without it
+      // the page waits on this link for good and never tries again.
+      try { this.clearTimer(this.timer); } catch { /* the timer is moot */ }
+      try { this.close(); } catch { /* best effort */ }
       this.onFail(reason, this);
     }
 

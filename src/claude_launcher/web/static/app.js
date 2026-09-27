@@ -260,7 +260,22 @@ let p2pTimer = null;
 let p2pOff = null;            // why P2P is not tried here, or null
 let p2pLastFail = null;       // the last failed attempt's reason
 let p2pNextAt = 0;            // Date.now() of the next scheduled try
+const P2P_STOP_KEY = "claunch.p2p.stopped";
+let p2pStopped = p2pRemembered();   // stopped from the badge menu (per browser)
 const controlRetired = new Set();
+
+/* A stop from the badge menu outlives a reload in this browser: someone who
+   turned P2P off did it for a reason the next page load does not know. */
+function p2pRemembered() {
+  try { return localStorage.getItem(P2P_STOP_KEY) === "1"; } catch { return false; }
+}
+
+function p2pRemember(stopped) {
+  try {
+    if (stopped) localStorage.setItem(P2P_STOP_KEY, "1");
+    else localStorage.removeItem(P2P_STOP_KEY);
+  } catch { /* storage blocked: the stop lasts for this page only */ }
+}
 
 function p2pTunnel() {
   return /^\/t\/[^/]+\/$/.test(BASE);
@@ -274,7 +289,7 @@ function p2pInit(sock, msg) {
     : null;
   if (p2pOff) { p2pRender(); return; }
   p2pConfig = msg.p2p;
-  if (p2pLink || p2pTimer) { p2pRender(); return; }
+  if (p2pStopped || p2pLink || p2pTimer) { p2pRender(); return; }
   p2pSchedule(p2pTry ? P2P_RETRY[Math.min(p2pTry - 1, P2P_RETRY.length - 1)] : P2P_FIRST_MS);
 }
 
@@ -310,11 +325,110 @@ function p2pFailed(reason) {
   const link = p2pLink;
   p2pLink = null;
   if (link) link.close();
+  if (p2pStopped) { p2pRender(); return; }   // the stop closed it: no retry
   p2pTry += 1;
   p2pLastFail = reason;
   console.info("claunch: P2P control socket not in use (" + reason + "); relay continues");
   p2pSchedule(P2P_RETRY[Math.min(p2pTry - 1, P2P_RETRY.length - 1)]);
 }
+
+/* ---- the badge menu: stop, start, retry (claunch-k1z4z) ----
+   Stop drops P2P for this browser until Start: a negotiation in flight is
+   abandoned, a live DataChannel is closed -- the same fallback as a channel
+   that drops (reads to HTTP, terminals reattach, the relay reopens) -- and
+   no retry is scheduled. Retry now skips the backoff wait, or restarts a
+   negotiation that is taking too long. */
+function p2pStop() {
+  p2pStopped = true;
+  p2pRemember(true);
+  clearTimeout(p2pTimer);
+  p2pTimer = null;
+  // The live socket first: Link.close() drops the socket's onclose before
+  // closing it, so closing the link first would leave controlClosed unrun
+  // and the page on a dead socket. controlClosed -> p2pFailed closes the
+  // link and, stopped, schedules no retry.
+  if (controlSock && controlSock.transport === "p2p") controlSock.close();
+  const link = p2pLink;
+  p2pLink = null;
+  if (link) link.close();
+  p2pRender();
+}
+
+function p2pStart() {
+  p2pStopped = false;
+  p2pRemember(false);
+  p2pTry = 0;
+  p2pLastFail = null;
+  p2pRetry();
+}
+
+function p2pRetry() {
+  if (p2pStopped || p2pOff || !p2pConfig) { p2pRender(); return; }
+  if (controlSock && controlSock.transport === "p2p") { p2pRender(); return; }
+  clearTimeout(p2pTimer);
+  p2pTimer = null;
+  const link = p2pLink;
+  p2pLink = null;
+  if (link) link.close();
+  // With the relay down the reopen's init schedules the next try.
+  if (controlUp()) p2pAttempt();
+  else p2pRender();
+}
+
+/* What the menu offers in a state: nothing where P2P cannot run here. */
+function p2pActions(s) {
+  if (!s) return [];
+  if (s.state === "P2P") return ["stop"];
+  if (s.state === "connecting" || s.state === "relay") return ["retry", "stop"];
+  if (s.stopped) return ["start"];
+  return [];
+}
+
+const P2P_ACTION = {
+  stop: ["Stop P2P", () => p2pStop()],
+  start: ["Start P2P", () => p2pStart()],
+  retry: ["Retry now", () => p2pRetry()],
+};
+
+function p2pMenuToggle() {
+  const menu = $("p2p-menu");
+  if (!menu) return;
+  if (menu.classList.contains("hidden")) {
+    menu.classList.remove("hidden");
+    p2pMenuFill();
+  } else {
+    menu.classList.add("hidden");
+  }
+}
+
+function p2pMenuFill() {
+  const menu = $("p2p-menu");
+  if (!menu || menu.classList.contains("hidden")) return;
+  const s = p2pStatus();
+  menu.replaceChildren();
+  const why = document.createElement("div");
+  why.className = "p2p-menu-why";
+  why.textContent = s ? s.tip : "P2P is not tried on this page";
+  menu.appendChild(why);
+  for (const act of p2pActions(s)) {
+    const [label, run] = P2P_ACTION[act];
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.dataset.act = act;
+    btn.textContent = label;
+    btn.addEventListener("click", (e) => { e.stopPropagation(); run(); });
+    menu.appendChild(btn);
+  }
+}
+
+$("p2p-badge").addEventListener("click", (e) => { e.stopPropagation(); p2pMenuToggle(); });
+$("p2p-badge").addEventListener("keydown", (e) => {
+  if (e.key === "Enter" || e.key === " ") { e.preventDefault(); p2pMenuToggle(); }
+});
+document.addEventListener("click", (e) => {
+  const menu = $("p2p-menu");
+  if (menu && !menu.classList.contains("hidden") && !menu.contains(e.target)) menu.classList.add("hidden");
+});
 
 /* Move the page onto `direct`: it becomes the control socket, terminals
    reattach on it (channelsCarrierGone -> 1006 -> the retry machine, whose
@@ -349,6 +463,9 @@ function p2pStatus() {
   }
   if (p2pLink) return { state: "connecting", tip: "negotiating a WebRTC DataChannel over the relay" };
   if (p2pOff) return { state: "off", tip: "P2P not tried: " + p2pOff };
+  if (p2pStopped) {
+    return { state: "off", stopped: true, tip: "P2P stopped from this page; click to start it again" };
+  }
   if (!p2pConfig) return null;               // the daemon's init has not said yet
   const next = p2pTimer !== null ? `next try at ${new Date(p2pNextAt).toLocaleTimeString()}`
     : "next try when the relay socket is back";
@@ -365,8 +482,9 @@ function p2pRender() {
   const s = p2pStatus();
   if (!s) { badge.classList.add("hidden"); return; }
   badge.textContent = s.state;
-  badge.title = s.tip;
+  badge.title = s.tip + (p2pActions(s).length ? " (click for controls)" : "");
   badge.className = "badge p2p-" + (s.state === "P2P" ? "on" : s.state);
+  p2pMenuFill();
 }
 
 function controlRetire(old) {
