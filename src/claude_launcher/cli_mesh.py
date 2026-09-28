@@ -15,7 +15,7 @@ import sys
 from typing import Optional
 from urllib.parse import quote
 
-from . import daemon_client, stdio
+from . import daemon_client, projects, stdio
 
 #: The roster partitions ``--state`` accepts, spelled here rather than
 #: imported: ``daemon.mesh`` pulls aiohttp in, and this module is loaded by
@@ -112,10 +112,22 @@ def _cmd_ls(_args: argparse.Namespace) -> int:
             return 1
         print(f"{daemon_client.unreachable_reason(why)}; no meshes")
         return 0
-    project_filter = getattr(_args, "project", None) or ""
-    query = f"?project={quote(project_filter)}" if project_filter else ""
+    # Same narrowing as ``claunch sessions``: inside a managed session the
+    # list is that session's project unless --project says otherwise.
+    scope = projects.listing_scope(
+        getattr(_args, "project", None),
+        environ=os.environ,
+        fetch_own=lambda name: client.get(f"/api/sessions/{name}").get("project"),
+    )
+    project_filter = scope.project
+    query = "" if scope.own or not project_filter else f"?project={quote(project_filter)}"
     payload = client.get(f"/api/mesh{query}")
-    meshes = payload.get("meshes", [])
+    everything = payload.get("meshes", [])
+    meshes = [m for m in everything if projects.matches(m.get("project"), project_filter)]
+    footer = projects.scope_footer(
+        scope, hidden=len(everything) - len(meshes),
+        noun="mesh", command="claunch mesh ls",
+    )
     if not meshes:
         if project_filter:
             print(f"no meshes in project {project_filter!r}")
@@ -131,6 +143,8 @@ def _cmd_ls(_args: argparse.Namespace) -> int:
             f"{m['messages']} message(s)"
             + tag
         )
+    if footer:
+        print(footer)
     _print_relay(payload.get("relay"))
     return 0
 
@@ -1149,7 +1163,9 @@ def register(sub) -> None:
     p = msub.add_parser("ls", aliases=["list"], help="list meshes")
     p.add_argument(
         "--project", "-P", metavar="NAME",
-        help="only the meshes filed under this project",
+        help="only the meshes filed under this project; inside a managed "
+             "session the list is that session's project unless this says "
+             "otherwise, and 'all' lists every project",
     )
     p.set_defaults(func=_cmd_ls)
 

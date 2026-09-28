@@ -2488,6 +2488,7 @@ class MeshManager:
             "# claunch mesh: join briefing -- machine-generated, not typed by the user\n"
             f"mesh: {mesh.name}\n"
             f"you: {member.handle} (role: {member.role})\n"
+            + self._project_line(mesh, member)
             + (
                 f"subroles: {', '.join(member.subroles)} — you also answer "
                 "for these roles when a workflow or a peer looks one up\n"
@@ -2505,6 +2506,32 @@ class MeshManager:
             "'claunch install' first and retry\n"
             f"note: incoming mesh messages will be typed into this terminal\n"
             "---"
+        )
+
+    def _project_line(self, mesh: Mesh, member: Member) -> str:
+        """The ``project:`` line of the briefing, or ``""`` for a member whose
+        record this daemon does not hold (remote, or gone).
+
+        The session's own project, not the mesh's: they usually agree, but
+        the line answers "which project am I filed under" — the scope
+        ``claunch sessions`` and ``claunch mesh ls`` narrow to inside the
+        session — and that is a fact about the session. The hint about
+        ``--project all`` rides here because the briefing is the one block a
+        member is guaranteed to read; s769 (2026-09-24) listed every
+        default-project session because nothing had ever told it there was
+        a project to be in.
+        """
+        if not self._is_local(mesh, member):
+            return ""
+        try:
+            sdef = self.manager.get(member.session).sdef
+        except ManagerError:
+            return ""
+        project = projects.normalize(getattr(sdef, "project", None))
+        return (
+            f"project: {project} -- 'claunch sessions' and 'claunch mesh ls' "
+            f"show this project only; add '--project {projects.ALL}' for every "
+            "project\n"
         )
 
     async def _brief(self, mesh: Mesh, member: Member, *, hold: float = 30.0) -> None:

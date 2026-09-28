@@ -260,3 +260,84 @@ def matches(record_project, wanted) -> bool:
     if not str(wanted or "").strip():
         return True
     return normalize(record_project) == normalize(wanted)
+
+
+# --------------------------------------------------------------------------- #
+# the project a managed session stands in, and the scope its listings take
+# --------------------------------------------------------------------------- #
+
+#: Exported into every managed session's environment next to
+#: ``CLAUNCH_SESSION``: the project the session is filed under (always a
+#: name — the default project is spelled out, never left blank).
+SESSION_ENV = "CLAUNCH_PROJECT"
+
+#: The ``--project`` value that means "every project" on a listing. Inside
+#: a managed session a listing narrows itself to the session's own project,
+#: and this word is how an agent widens it on purpose.
+ALL = "all"
+
+
+@dataclass(frozen=True)
+class ListingScope:
+    """What a session/mesh listing shows, and why.
+
+    ``project`` is the filter to apply (blank = every project). ``own`` is
+    true when the filter was not asked for but taken from the calling managed
+    session — the case that earns a footer telling the reader what was hidden
+    and how to widen the view, because that reader is an agent that would
+    otherwise take the narrowed list for the whole roster (or, before this
+    existed, the whole roster for its own project: 2026-09-24, s769).
+    """
+
+    project: str
+    own: bool = False
+
+
+def listing_scope(asked, *, environ, fetch_own=None) -> ListingScope:
+    """The project a listing narrows to.
+
+    - ``asked`` (the ``--project`` flag) wins: a name narrows to it,
+      :data:`ALL` widens to every project.
+    - Otherwise, inside a managed session (``CLAUNCH_SESSION`` set) the
+      scope is the session's own project: :data:`SESSION_ENV` when the
+      daemon exported it, else ``fetch_own(session_name)`` — a lookup of
+      the session's record, for sessions launched by a daemon older than
+      the variable. A lookup that fails or answers nothing leaves the
+      scope at the default project rather than at everything: a session
+      whose record cannot be read is filed under the default, and widening
+      silently is the failure this exists to prevent.
+    - Outside a managed session nothing narrows, as the listings always
+      behaved for a person at their own shell.
+    """
+    text = str(asked or "").strip()
+    if text:
+        return ListingScope("" if text == ALL else text)
+    session = str(environ.get("CLAUNCH_SESSION") or "").strip()
+    if not session:
+        return ListingScope("")
+    own = str(environ.get(SESSION_ENV) or "").strip()
+    if not own and fetch_own is not None:
+        try:
+            own = str(fetch_own(session) or "").strip()
+        except Exception:  # noqa: BLE001 — the lookup is a convenience, not a gate
+            own = ""
+    return ListingScope(normalize(own), own=True)
+
+
+def scope_footer(scope: ListingScope, *, hidden: int, noun: str, command: str) -> str:
+    """The one line a session-scoped listing ends with, or ``""``.
+
+    Always printed when the scope came from the session, hidden rows or not:
+    the reader has to learn the list was narrowed even when nothing was
+    left out, or a later read with rows hidden looks the same as this one.
+    """
+    if not scope.own:
+        return ""
+    tail = (
+        f"{hidden} {noun}(s) in other projects not shown"
+        if hidden else f"no {noun}s in other projects"
+    )
+    return (
+        f"project: {scope.project} (this session's) -- {tail}; "
+        f"'{command} --project {ALL}' lists every project"
+    )

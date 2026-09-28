@@ -1100,13 +1100,29 @@ def _cmd_sessions(_args: argparse.Namespace) -> int:
             return 1
         print(f"{daemon_client.unreachable_reason(why)}; no sessions")
         return 0
-    query = f"?project={quote(project_filter)}" if project_filter else ""
-    sessions = client.get(f"/api/sessions{query}").get("sessions", [])
+    # Inside a managed session the list narrows to that session's project
+    # unless --project says otherwise; the full roster is read so the footer
+    # can say how many rows the narrowing hid (see projects.listing_scope).
+    scope = projects.listing_scope(
+        project_filter,
+        environ=os.environ,
+        fetch_own=lambda name: client.get(f"/api/sessions/{name}").get("project"),
+    )
+    project_filter = scope.project
+    query = "" if scope.own or not project_filter else f"?project={quote(project_filter)}"
+    everything = client.get(f"/api/sessions{query}").get("sessions", [])
+    sessions = [s for s in everything if projects.matches(s.get("project"), project_filter)]
+    footer = projects.scope_footer(
+        scope, hidden=len(everything) - len(sessions),
+        noun="session", command="claunch sessions",
+    )
     if not sessions:
         if project_filter:
             print(f"no sessions in project {project_filter!r}")
         else:
             print("no sessions; create one with 'claunch new-session --profile <name>'")
+        if footer:
+            print(footer)
         return 0
     for s, depth in _by_lineage(sessions):
         state = s["status"]
@@ -1131,6 +1147,8 @@ def _cmd_sessions(_args: argparse.Namespace) -> int:
             f"'claunch respawn {dead[0]}' revives one, "
             f"'claunch clear-sessions' drops them all"
         )
+    if footer:
+        print(footer)
     _print_relay_status(client)
     return 0
 
@@ -2787,7 +2805,9 @@ def register(sub) -> None:
     p_ls = sub.add_parser("sessions", aliases=["lss"], help="list daemon-managed sessions")
     p_ls.add_argument(
         "--project", "-P", metavar="NAME",
-        help="only the sessions filed under this project",
+        help="only the sessions filed under this project; inside a managed "
+             "session the list is that session's project unless this says "
+             "otherwise, and 'all' lists every project",
     )
     p_ls.set_defaults(func=_cmd_sessions)
 
