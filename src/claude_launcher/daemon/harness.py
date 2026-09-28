@@ -24,7 +24,7 @@ from dataclasses import dataclass, field, replace
 from typing import Dict, Iterable, List, Optional, Tuple
 
 from .. import borrowing, harnesses as harness_registry
-from .. import lineage, metering, pi_provider, profile as profile_mod, routing, runner
+from .. import lineage, metering, pi_provider, profile as profile_mod, projects, routing, runner
 from .. import store, transcripts
 from .. import config as launcher_config
 from . import mesh_roles, paths, pty_backend
@@ -1100,6 +1100,13 @@ def build_command(
     # its MCP servers, `!` shells) inherit it — cflow keys its run state by
     # it, mapping each session 1:1 to its own workflow run.
     env["CLAUNCH_SESSION"] = sdef.name
+    # The project the session is filed under, spelled out even for the
+    # default one. ``claunch sessions`` / ``claunch mesh ls`` read it to
+    # narrow themselves to the caller's project: without it a session in
+    # project 'gds6' listed every default-project session as if it were its
+    # own roster (s769, 2026-09-24) — the record knew the project, the
+    # session had no way to.
+    env[projects.SESSION_ENV] = projects.normalize(sdef.project)
     # Where this session writes intermediate files, so that two sessions
     # picking the same file name do not overwrite each other. ``/tmp`` is one
     # machine-wide directory here and cannot be moved per session (MSYS mounts

@@ -2095,6 +2095,12 @@ claunch mesh ls --project launcher
 - Every session and mesh belongs to exactly one project. The `default`
   project always exists and cannot be removed: every record written before
   projects existed reads as its, so nothing on disk is migrated.
+- A managed session is told its project: `CLAUNCH_PROJECT` is exported next
+  to `CLAUNCH_SESSION`, and the mesh join briefing carries a `project:` line.
+  Inside such a session `claunch sessions` and `claunch mesh ls` show that
+  project only and end with a line saying how many rows other projects hold;
+  `--project all` widens them, `--project NAME` picks another. At a person's
+  own shell nothing narrows.
 - A project's **default workspace** is a registered [workspace](#workspaces-where-a-session-may-be-spawned)
   name. A session created in the project with no directory of its own starts
   there — a default only; `-c`, `--workspace`, `--worktree` and the form's
