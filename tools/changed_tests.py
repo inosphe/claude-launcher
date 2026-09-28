@@ -1657,10 +1657,15 @@ def main(argv: Optional[list] = None) -> int:
         print(stranger, file=sys.stderr)
         return CANNOT_TELL
 
+    # Ask for the width the run will use, so the machine's worker budget is
+    # charged what this selection spends (claunch-8kald): one module runs
+    # serially and costs one worker, not the class ceiling.
+    wanted = min(MAX_WORKERS, len(files)) if len(files) > 1 else 1
     try:
         grant = test_window.acquire(
             test_window.TARGETED,
             label=f"changed_tests.py ({len(files)} modules)",
+            workers=wanted,
         )
     except test_window.WindowUnavailable as exc:
         print(f"cannot run selected tests: {exc}", file=sys.stderr)

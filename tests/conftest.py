@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import os
 import shutil
+import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -12,6 +14,10 @@ from claude_launcher import test_window
 
 
 _test_window_grant = None
+#: The grant this pytest reports its result into, and when it started
+#: (claunch-8kald: the window's run history).
+_report_grant_id = None
+_session_started = 0.0
 
 
 def _pytest_window_class(args) -> str:
@@ -22,11 +28,31 @@ def _pytest_window_class(args) -> str:
     return test_window.TARGETED
 
 
+def _spend_only_the_grant(config, grant) -> None:
+    """Hold the run to the granted xdist width (claunch-8kald).
+
+    The grant's width used to be advice that only the wrapper tools applied;
+    a hand-typed ``-n 16`` spent sixteen workers whatever the arbiter said.
+    """
+    clamped = test_window.clamp_xdist_width(config.option, grant.advisory_n)
+    if clamped:
+        before, after = clamped
+        print(
+            f"claunch window: -n {before} cut to the granted width {after} "
+            f"({grant.cls} grant {grant.grant_id})",
+            file=sys.stderr,
+        )
+
+
 def pytest_sessionstart(session):
     """Guard every direct pytest entry point, including unwrapped commands."""
-    global _test_window_grant
+    global _test_window_grant, _report_grant_id, _session_started
     if os.environ.get("PYTEST_XDIST_WORKER"):
         return
+    _session_started = time.monotonic()
+    # Only the direct child of a grant owner reports into that grant; a
+    # pytest started by a test inside this run must not overwrite it.
+    reporter = os.environ.pop(test_window.WINDOW_REPORT_ENV, None) == "1"
     cls = _pytest_window_class(session.config.args)
     inherited = test_window.inherited_grant()
     if inherited is not None:
@@ -34,13 +60,36 @@ def pytest_sessionstart(session):
             raise pytest.UsageError(
                 "a targeted parent grant cannot cover an exclusive sweep"
             )
+        _spend_only_the_grant(session.config, inherited)
+        _report_grant_id = inherited.grant_id if reporter else None
         return
     label = "pytest " + " ".join(str(arg) for arg in session.config.args)
     try:
-        _test_window_grant = test_window.acquire(cls, label=label)
+        _test_window_grant = test_window.acquire(
+            cls,
+            label=label,
+            workers=test_window.requested_xdist_width(session.config.option),
+        )
     except test_window.WindowUnavailable as exc:
         raise pytest.UsageError(str(exc)) from exc
     _test_window_grant.install_environment()
+    _spend_only_the_grant(session.config, _test_window_grant)
+    _report_grant_id = _test_window_grant.grant_id
+
+
+def _report_to_the_window(session, exitstatus) -> None:
+    global _report_grant_id
+    grant_id, _report_grant_id = _report_grant_id, None
+    if not test_window.reportable(grant_id):
+        return
+    reporter = session.config.pluginmanager.get_plugin("terminalreporter")
+    result = test_window.pytest_result(
+        exitstatus,
+        getattr(reporter, "stats", {}) or {},
+        getattr(session, "testscollected", 0),
+        time.monotonic() - _session_started,
+    )
+    test_window.report_result(grant_id, result)
 
 
 def _release_test_window() -> None:
@@ -57,6 +106,8 @@ def _release_test_window() -> None:
 
 
 def pytest_sessionfinish(session, exitstatus):
+    if not os.environ.get("PYTEST_XDIST_WORKER"):
+        _report_to_the_window(session, exitstatus)
     _release_test_window()
 
 

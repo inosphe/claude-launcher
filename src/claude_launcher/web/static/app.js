@@ -19285,8 +19285,13 @@ function sessCommits(data) {
 /* A grant belongs to the process that acquired it, so releasing one from an
    unrelated browser tab would let tests overlap while the original process
    was still running. Waiting requests are different: cancelling one only
-   removes it from the FIFO queue, so the page can safely offer that action. */
+   removes it from the FIFO queue, so the page can safely offer that action.
+   The page is also the operator's seat for the two queue overrides
+   (claunch-8kald): Top moves a waiting request ahead of the rest, and Force
+   grants it now past every cap, budget and exclusivity rule — after a
+   confirmation, because a forced grant runs next to whatever is running. */
 let windowCache = null;
+let windowHistory = null;   // GET /api/window/history: 7 days of runs + stats
 let windowError = "";
 let windowTimer = null;
 let windowPageOpen = false;
@@ -19325,12 +19330,87 @@ async function refreshWindow() {
           reminder_interval: data.reminder_interval,
           cores: data.cores,
           advisory_n_now: data.advisory_n_now,
+          limits: data.limits || {},
+          workers_in_use: data.workers_in_use,
         };
         windowError = "";
       }
     }
+    // The history is a second read; a daemon that predates it answers 404
+    // and the page simply goes without the section.
+    const hist = await api("/api/window/history?limit=20");
+    if (hist.ok) {
+      const data = await hist.json().catch(() => null);
+      windowHistory = data && data.stats ? data : null;
+    }
   } catch { return; }   // api() owns auth and connection recovery
   if (windowPageOpen) renderWindow();
+}
+
+function windowSeconds(value) {
+  if (value === null || value === undefined || !Number.isFinite(Number(value))) return "-";
+  return fmtAge(Number(value));
+}
+
+function windowResultText(result) {
+  if (!result) return "unreported";
+  const parts = ["passed", "failed", "errors", "skipped"]
+    .filter((k) => Number(result[k]) > 0)
+    .map((k) => `${Number(result[k])} ${k}`);
+  return (result.outcome || "?") + (parts.length ? ` (${parts.join(", ")})` : "");
+}
+
+/* Seven days of finished grants and abandoned waits, as the daemon recorded
+   them, with per-class statistics over the same span. */
+function windowHistorySection(history) {
+  const box = el("section", "window-section window-history");
+  const head = el("div", "window-section-head");
+  head.appendChild(el("h3", null, `Run history (last ${history.days || 7} days)`));
+  head.appendChild(el("span", "window-count", String(history.total || 0)));
+  box.appendChild(head);
+  box.appendChild(el("p", "wf-note",
+    `The daemon records every grant's wait and hold itself; pytest reports ` +
+    `the result when it finishes. The log keeps ${history.retention_days || 7} ` +
+    "days and drops older entries."));
+  const stats = el("div", "window-summary");
+  const classes = (history.stats && history.stats.classes) || {};
+  for (const cls of ["targeted", "sweep"]) {
+    const st = classes[cls];
+    if (!st) continue;
+    const outcomes = st.outcomes || {};
+    const failed = (Number(outcomes.failed) || 0) + (Number(outcomes.error) || 0);
+    const wait = st.wait_seconds || {};
+    const held = st.held_seconds || {};
+    stats.appendChild(windowSummary(
+      `${cls} runs`, Number(st.runs) || 0, null,
+      `${failed} failed · ${Number(st.gave_up_waiting) || 0} gave up waiting`));
+    stats.appendChild(windowSummary(
+      `${cls} wait p50 / p90`, `${windowSeconds(wait.p50)} / ${windowSeconds(wait.p90)}`,
+      null, `max ${windowSeconds(wait.max)}`));
+    stats.appendChild(windowSummary(
+      `${cls} hold p50 / p90`, `${windowSeconds(held.p50)} / ${windowSeconds(held.p90)}`,
+      null, `max ${windowSeconds(held.max)}`));
+  }
+  box.appendChild(stats);
+  const entries = history.entries || [];
+  if (!entries.length) box.appendChild(el("p", "wf-note", "no runs in the kept days"));
+  for (const entry of entries) {
+    const row = el("div", "window-row window-history-row " + (entry.cls || "unknown"));
+    row.appendChild(el("span", "window-rank", entry.end || "?"));
+    row.appendChild(el("span", "window-class", entry.cls || "unknown class"));
+    row.appendChild(el("span", "window-owner", windowOwner(entry)));
+    const label = row.appendChild(el("span", "window-label", entry.label || "no label"));
+    label.appendChild(el("span", "window-tag window-result",
+      windowResultText(entry.result)));
+    if (entry.forced) label.appendChild(el("span", "window-tag window-forced", "forced"));
+    const timing = el("span", "window-age",
+      `wait ${windowSeconds(entry.wait_seconds)} · held ${windowSeconds(entry.held_seconds)}`);
+    timing.title = entry.ended_at || "";
+    row.appendChild(timing);
+    row.appendChild(el("span", "window-age", windowAge({ acquired_at: entry.ended_at })));
+    box.appendChild(row);
+  }
+  return box;
 }
 
 function windowOwner(entry) {
@@ -19360,42 +19440,65 @@ function windowEntry(entry, position = null, queued = false) {
       row.appendChild(link);
     } else row.appendChild(owner);
   } else row.appendChild(owner);
-  row.appendChild(el("span", "window-label", entry.label || "no label"));
+  // The tags ride inside the label cell so the row keeps its grid columns.
+  const label = row.appendChild(el("span", "window-label", entry.label || "no label"));
+  if (!queued && Number(entry.workers) > 0) {
+    label.appendChild(el("span", "window-tag window-workers", `-n ${Number(entry.workers)}`));
+  }
+  if (entry.forced) label.appendChild(el("span", "window-tag window-forced", "forced"));
+  if (queued && Number(entry.priority)) {
+    label.appendChild(el("span", "window-tag window-priority",
+      `priority ${Number(entry.priority)}`));
+  }
   const age = el("span", "window-age", windowAge(entry));
   age.title = entry.acquired_at || entry.enqueued_at || "timestamp unavailable";
   row.appendChild(age);
   if (queued) {
-    const cancel = el("button", "wf-btn clear window-cancel", "Cancel");
-    cancel.type = "button";
-    cancel.disabled = windowCancelBusy.has(entry.grant_id);
-    cancel.addEventListener("click", () => cancelWindow(entry, cancel));
-    row.appendChild(cancel);
+    const busy = windowCancelBusy.has(entry.grant_id);
+    const actions = row.appendChild(el("span", "window-actions"));
+    for (const [action, text] of [
+      ["prioritize", "Top"], ["force", "Force"], ["cancel", "Cancel"],
+    ]) {
+      const button = el("button", `wf-btn clear window-${action}`, text);
+      button.type = "button";
+      button.disabled = busy;
+      button.addEventListener("click", () => windowAction(action, entry, button));
+      actions.appendChild(button);
+    }
   }
   return row;
 }
 
-async function cancelWindow(entry, button) {
+/* One queued request, one operator action: cancel, prioritize (to the top)
+   or force. The daemon answers 404 for a request that was granted or
+   withdrawn in the meantime, and the page says so instead of guessing. */
+async function windowAction(action, entry, button) {
   const grantId = entry && entry.grant_id;
   if (!grantId || windowCancelBusy.has(grantId)) return;
+  if (action === "force" && !confirm(
+    `Grant ${entry.cls || "this"} request ${grantId} now? It runs next to ` +
+    "every current holder, past the caps and the worker budget.")) return;
   windowCancelBusy.add(grantId);
   if (button) button.disabled = true;
   try {
-    const resp = await api("/api/window/cancel", {
+    const resp = await api(`/api/window/${action}`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ grant_id: grantId }),
     });
     const data = await resp.json().catch(() => ({}));
     if (!resp.ok) {
-      windowError = data.error || `HTTP ${resp.status}`;
-    } else if (!data.cancelled) {
+      windowError = resp.status === 404
+        ? "the waiting request was already cancelled or granted"
+        : data.error || `HTTP ${resp.status}`;
+    } else if (action === "cancel" && !data.cancelled) {
       windowError = "the waiting request was already cancelled or granted";
     } else {
       windowError = "";
       await refreshWindow();
     }
   } catch { /* api() owns auth and connection recovery */
-    windowError = "unable to cancel the waiting request";
+    windowError = `unable to ${action} the waiting request`;
   } finally {
     windowCancelBusy.delete(grantId);
   }
@@ -19421,9 +19524,10 @@ function renderWindow() {
   head.appendChild(back);
   view.appendChild(head);
   view.appendChild(el("p", "wf-note",
-    "Test grants currently held by this daemon and the FIFO queue waiting " +
-    "behind them. Waiting requests can be cancelled here; the process that " +
-    "acquired a grant is responsible for releasing it."));
+    "Test grants currently held by this daemon and the queue waiting " +
+    "behind them (priority first, then FIFO). Waiting requests can be moved " +
+    "to the top, forced or cancelled here; the process that acquired a " +
+    "grant is responsible for releasing it."));
   if (windowError) view.appendChild(el("p", "wf-warning", windowError));
   if (!windowCache) {
     if (!windowError) view.appendChild(el("p", "wf-note", "loading…"));
@@ -19450,6 +19554,14 @@ function renderWindow() {
   summary.appendChild(windowSummary(
     "Recommended workers", Number.isFinite(advisory) ? advisory : "?", null,
     "pytest -n for the next grant"));
+  const limits = windowCache.limits || {};
+  const budget = Number(limits.worker_budget);
+  const inUse = Number(windowCache.workers_in_use);
+  if (Number.isFinite(budget) && Number.isFinite(inUse)) {
+    summary.appendChild(windowSummary(
+      "Worker budget", inUse, budget > 0 ? budget : null,
+      budget > 0 ? "xdist workers granted machine-wide" : "budget off"));
+  }
   const cores = windowCache.cores === null || windowCache.cores === undefined
     ? null : Number(windowCache.cores);
   summary.appendChild(windowSummary(
@@ -19478,6 +19590,7 @@ function renderWindow() {
   };
   view.appendChild(section("Holders", holders, "no grants are held", false));
   view.appendChild(section("Queue", queue, "nothing is waiting", true));
+  if (windowHistory) view.appendChild(windowHistorySection(windowHistory));
   view.appendChild(el("p", "window-footnote",
     "Entries are the arbiter's recorded state. Process liveness is checked " +
     "when a new acquisition is decided."));

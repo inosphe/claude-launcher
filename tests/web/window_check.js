@@ -69,6 +69,7 @@ let answer = { ok: true, status: 200, body: {} };
 
 const stubs = `
 let windowCache = null;
+let windowHistory = null;
 let windowError = "";
 let windowTimer = null;
 let windowPageOpen = false;
@@ -92,6 +93,7 @@ function fmtAge(secs) {
 function plural(n, one, many) { return n + " " + (n === 1 ? one : many || one + "s"); }
 function setAnswer(next) { answer = next; }
 function setCache(next) { windowCache = next; windowError = ""; }
+function setHistory(next) { windowHistory = next; }
 function state() {
   return { cache: windowCache, error: windowError, open: windowPageOpen };
 }
@@ -105,12 +107,13 @@ new Function(
   + slice("openWindowPage") + slice("stopWindowPoll")
   + slice("refreshWindow") + slice("windowOwner") + slice("windowAge")
   + slice("windowEntry") + slice("windowSummary") + slice("renderWindow")
+  + slice("windowSeconds") + slice("windowResultText") + slice("windowHistorySection")
   + slice("parseHash")
   + `
 Object.assign(exports, {
   open: openWindowPage, stop: stopWindowPoll, refresh: refreshWindow,
   owner: windowOwner, age: windowAge, entry: windowEntry, render: renderWindow,
-  parseHash, setAnswer, setCache, state,
+  parseHash, setAnswer, setCache, setHistory, state,
 });`
 )(ctx, document, el, view, fetched, shown, timers, answer);
 
@@ -126,17 +129,21 @@ const snapshot = {
   holders: [
     { grant_id: "g1", cls: "targeted", session: "s1", pid: 11,
       label: "pytest tests/test_one.py", acquired_at: "2026-08-31T06:00:00Z" },
-    { grant_id: "g2", cls: "sweep", session: null, pid: 44,
+    { grant_id: "g2", cls: "sweep", session: null, pid: 44, workers: 8,
+      forced: true,
       label: "full suite", acquired_at: "2026-08-31T06:01:00Z" },
   ],
   queue: [
-    { grant_id: "q1", cls: "targeted", session: "s2", pid: 22,
+    { grant_id: "q1", cls: "targeted", session: "s2", pid: 22, priority: 2,
       label: "changed tests", enqueued_at: "2026-08-31T06:02:00Z" },
     { grant_id: "q2", cls: "sweep", session: null, pid: 55,
       label: "release sweep", enqueued_at: "2026-08-31T06:03:00Z" },
   ],
   caps: { targeted: 5, sweep: 1 }, max_wait: 1800, reminder_interval: 180,
   cores: 32, advisory_n_now: 6,
+  limits: { worker_budget: 12, targeted_width: 4, sweep_width: 8,
+            targeted_per_session: 1 },
+  workers_in_use: 9,
 };
 
 (async () => {
@@ -151,6 +158,10 @@ const snapshot = {
   await new Promise((resolve) => setImmediate(resolve));
   check("opening shows the page", shown.at(-1) === "window", shown);
   check("opening reads the arbiter endpoint", fetched.includes("/api/window"), fetched);
+  check("opening reads the run history too",
+        fetched.includes("/api/window/history?limit=20"), fetched);
+  check("a history answer without stats draws no history section",
+        !view.words().includes("Run history"), view.words());
   check("the active page polls every five seconds",
         timers.length === 1 && timers[0].ms === 5000, timers.map((t) => t.ms));
 
@@ -158,6 +169,19 @@ const snapshot = {
         withClass("window-row").length === 4, withClass("window-row").length);
   check("queued requests have cancellation controls",
         withClass("window-cancel").length === 2, withClass("window-cancel").length);
+  check("queued requests have the operator's Top and Force controls",
+        withClass("window-prioritize").length === 2 &&
+        withClass("window-force").length === 2,
+        [withClass("window-prioritize").length, withClass("window-force").length]);
+  check("holders carry no queue controls",
+        withClass("window-actions").length === 2, withClass("window-actions").length);
+  check("a forced holder, its width and a raised priority are tagged",
+        withClass("window-forced").length === 1 &&
+        view.words().includes("-n 8") && view.words().includes("priority 2"),
+        view.words());
+  check("the worker budget is visible",
+        view.words().includes("Worker budget") && view.words().includes("9 / 12"),
+        view.words());
   check("holder and FIFO positions are explicit",
         view.words().includes("held") && view.words().includes("#1") &&
         view.words().includes("#2"), view.words());
@@ -206,6 +230,40 @@ const snapshot = {
   check("an idle arbiter states both empty sections",
         view.words().includes("no grants are held") &&
         view.words().includes("nothing is waiting"), view.words());
+
+  ctx.setHistory({
+    retention_days: 7, days: 7, total: 2,
+    stats: { classes: {
+      targeted: { runs: 2, gave_up_waiting: 1, forced: 0,
+                  outcomes: { passed: 1, failed: 1 },
+                  wait_seconds: { p50: 12, p90: 90, max: 90 },
+                  held_seconds: { p50: 65, p90: 200, max: 200 } },
+      sweep: { runs: 0, gave_up_waiting: 0, forced: 0, outcomes: {},
+               wait_seconds: {}, held_seconds: {} },
+    } },
+    entries: [
+      { grant_id: "h1", cls: "targeted", session: "s1", label: "pytest tests/test_a.py",
+        end: "released", wait_seconds: 12, held_seconds: 65, workers: 2,
+        ended_at: "2026-09-28T08:00:00Z",
+        result: { outcome: "failed", passed: 30, failed: 2 } },
+      { grant_id: "h2", cls: "targeted", session: null, pid: 9, label: "",
+        end: "timeout", wait_seconds: 1800, held_seconds: null,
+        ended_at: "2026-09-28T07:00:00Z", result: null },
+    ],
+  });
+  ctx.render();
+  check("the history states its 7-day retention",
+        view.words().includes("Run history (last 7 days)") &&
+        view.words().includes("keeps 7 days and drops older entries"), view.words());
+  check("history statistics show runs, failures and wait/hold spreads",
+        view.words().includes("targeted runs") && view.words().includes("1 failed") &&
+        view.words().includes("12s / 1m") && view.words().includes("1m / 3m"),
+        view.words());
+  check("each history row shows how it ended and its result",
+        withClass("window-history-row").length === 2 &&
+        view.words().includes("failed (30 passed, 2 failed)") &&
+        view.words().includes("timeout") && view.words().includes("unreported"),
+        view.words());
 
   if (failures) process.exit(1);
   console.log("window_check ok");
