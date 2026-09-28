@@ -72,7 +72,7 @@ function $(id) { return id === "beads-view" ? view : null; }
 function formInUse() { return false; }
 let beadsLayout = "board";
 let beadsRenderedPage = 0, beadsRenderedFocus = "", beadsPage = 0, beadsSection = "board";
-let beadsError = "", beadsCache = null, beadsSession = "", beadsWorkspace = "";
+let beadsError = "", beadsCache = null, beadsSession = "", beadsWorkspace = "", beadsLoadedWorkspace = "";
 let beadsFocus = "", beadsSearch = { q: "" }, beadsQueues = null, beadsQueuesError = "";
 let reportsError = "", reportsCache = null;
 const BEADS_Q_CELL_CAP = 24;
@@ -181,12 +181,19 @@ ctx.open("", "board");
 check("opening Board does not read the queues",
       ctx.asked.includes("refreshQueues"), false);
 ctx.set("beadsCache", { boards: [{ root: "/a" }] });
+ctx.set("beadsLoadedWorkspace", "/a");
+ctx.set("beadsWorkspace", "/a");
 ctx.asked.length = 0;
 ctx.open("issue-on-page-3", "board");
 check("opening an issue preserves the board's current pages",
       ctx.asked.includes("restartBeadsStream"), false);
 check("opening an issue refreshes its detail",
       ctx.asked.includes("refreshBeadsDetail"), true);
+ctx.asked.length = 0;
+ctx.set("beadsWorkspace", "/b");
+ctx.open("issue-from-search", "board");
+check("a search link into a different workspace reloads that board",
+      ctx.asked.includes("restartBeadsStream"), true);
 
 /* ---- 4. the rules that make the rows read alike ----------------------- */
 const rule = (sel) => {

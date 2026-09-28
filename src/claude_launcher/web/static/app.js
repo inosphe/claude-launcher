@@ -16768,6 +16768,7 @@ let beadsLayout = "board"; // "board" = status lanes, "tree" = the forest
 let beadsSort = "updated_at";
 let beadsDirection = "desc";
 let beadsWorkspace = "";
+let beadsLoadedWorkspace = "";
 let beadsStreamVersion = 0;
 let beadsRenderedPage = 0; // which page the last render drew, for the scroll
 let beadsRenderedFocus = ""; // which issue the last render's detail pane held
@@ -16819,7 +16820,8 @@ const BEADS_LANE_SIZE = 12;
 const BEADS_PAGER_SPAN = 2;
 
 function openBeads(id, section) {
-  const keepBoard = beadsOpen && beadsSection === "board" && beadsCache;
+  const keepBoard = beadsOpen && beadsSection === "board" && beadsCache
+    && beadsLoadedWorkspace === beadsWorkspace;
   beadsSection = section === "reports" ? "reports"
     : section === "queues" ? "queues" : "board";
   const focus = id || "";
@@ -16972,6 +16974,7 @@ async function loadBeadsPage(opts = {}) {
     const boards = data.boards || [];
     if (!boards.some((b) => b.root === beadsWorkspace)) beadsWorkspace = boards[0]?.root || "";
     const selected = boards.find((b) => b.root === beadsWorkspace);
+    beadsLoadedWorkspace = beadsWorkspace;
     beadsCache = data;
     beadsPage = page;
     beadsError = data.error || "";
