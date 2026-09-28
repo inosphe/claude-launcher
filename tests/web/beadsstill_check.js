@@ -113,6 +113,8 @@ let selection = null;
 const stubs = `
 function $(id) { return id === "beads-view" ? view : null; }
 function formInUse() { return false; }
+let beadsLayout = "board";
+const BEADS_STATUSES = ["open", "in_ready", "in_progress", "in_review", "blocked", "closed"];
 let beadsRenderedPage = 0, beadsRenderedFocus = "", beadsPage = 0;
 let beadsSection = "board", beadsError = "", beadsSession = "";
 let beadsWorkspace = "/repo", beadsFocus = "", beadsSearch = { q: "" };

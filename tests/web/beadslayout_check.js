@@ -70,6 +70,7 @@ const stubs = `
 const view = el("div");
 function $(id) { return id === "beads-view" ? view : null; }
 function formInUse() { return false; }
+let beadsLayout = "board";
 let beadsRenderedPage = 0, beadsRenderedFocus = "", beadsPage = 0, beadsSection = "board";
 let beadsError = "", beadsCache = null, beadsSession = "", beadsWorkspace = "";
 let beadsFocus = "", beadsSearch = { q: "" }, beadsQueues = null, beadsQueuesError = "";
@@ -79,6 +80,7 @@ const BEADS_STATUSES = ["open", "in_ready", "in_progress", "in_review", "blocked
 const BEADS_ACTIVE = new Set(["open", "in_ready", "in_progress", "in_review", "blocked"]);
 function beadsFilterBar() { return el("div", "seq-tabs beads-filters"); }
 function beadsNewBlock() { return el("div", "beads-new"); }
+function beadsDetailPane() { return el("div", "beads-detail"); }
 function beadsBoardSection() { return el("div", "beads-board"); }
 function beadsQueuesBoard() { return el("div", "beads-board beads-queues-board"); }
 function beadsPager() { return el("div", "beads-pager"); }
@@ -94,6 +96,8 @@ function stopBeadsPoll() {}
 function stopReportsPoll() {}
 function openReports() { asked.push("openReports"); }
 function restartBeadsStream() { asked.push("restartBeadsStream"); }
+async function refreshBeadsDetail() { asked.push("refreshBeadsDetail"); }
+function refreshBeadsRelated() {}
 function refreshQueues() { asked.push("refreshQueues"); }
 function refreshBeads() {}
 function setInterval() { return 1; }
@@ -176,6 +180,13 @@ ctx.asked.length = 0;
 ctx.open("", "board");
 check("opening Board does not read the queues",
       ctx.asked.includes("refreshQueues"), false);
+ctx.set("beadsCache", { boards: [{ root: "/a" }] });
+ctx.asked.length = 0;
+ctx.open("issue-on-page-3", "board");
+check("opening an issue preserves the board's current pages",
+      ctx.asked.includes("restartBeadsStream"), false);
+check("opening an issue refreshes its detail",
+      ctx.asked.includes("refreshBeadsDetail"), true);
 
 /* ---- 4. the rules that make the rows read alike ----------------------- */
 const rule = (sel) => {
