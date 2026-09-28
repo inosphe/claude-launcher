@@ -1612,7 +1612,8 @@ function sessionMatchesSearch(s, search = sessionSearch) {
   return q.split(/\s+/).filter(Boolean).every((t) => hay.includes(t));
 }
 
-function sessionSearchNote(search = sessionSearch, sessions = sessionsCache) {
+function sessionSearchNote(search = sessionSearch,
+    sessions = typeof railSessions === "function" ? railSessions() : sessionsCache) {
   if (!search.q) return "";
   if (search.pending) return "searching by meaning…";
   if (search.error) return `search failed: ${search.error}`;
@@ -1635,7 +1636,7 @@ function syncSessionSearchNote() {
 function setSessionSearch(q) {
   sessionSearch = { q: String(q || ""), hits: null, pending: false, error: "", index: null };
   syncSessionSearchNote();
-  syncSessionFilters(sessionsCache);
+  syncSessionFilters(typeof railSessions === "function" ? railSessions() : sessionsCache);
 }
 
 /* The box's own clear button (index.html #session-search-clear). It is shown
@@ -1688,7 +1689,7 @@ async function runSessionSearch(q) {
   if (sessionSearch.q !== q) return;  // the box moved on while we waited
   sessionSearch = next;
   syncSessionSearchNote();
-  syncSessionFilters(sessionsCache);
+  syncSessionFilters(typeof railSessions === "function" ? railSessions() : sessionsCache);
 }
 
 /* One mutually exclusive state filter for the rail. "Current" is the normal
@@ -1896,6 +1897,16 @@ function briefingTabTooltip(brief) {
   return [`briefing${state ? ` · ${state}` : ""}`, ...lines].join("\n");
 }
 
+/* The project a tab's session belongs to when the rail is narrowed to a
+   different one, or "" when the rail shows it (or shows every project, or
+   the record is unknown). The tab bar is not narrowed -- a tab is the
+   reader's own shortcut -- so this is how it says the session is elsewhere. */
+function sessionTabOtherProject(rec) {
+  if (!rec || typeof currentProject !== "string" || !currentProject) return "";
+  if (typeof sessionInCurrentProject !== "function" || sessionInCurrentProject(rec)) return "";
+  return recordProject(rec);
+}
+
 function renderSessionTabs() {
   const bar = $("session-tabs");
   if (!bar || !sessionTabHistory) return;
@@ -1910,7 +1921,7 @@ function renderSessionTabs() {
     // fields above move.
     return [name, isSessionPinned(name), name === active, rec?.status, rec?.paused_at,
             typeof dotGrade === "function" ? dotGrade(rec) : "",
-            rec?.observe_pin, rec?.briefing];
+            rec?.observe_pin, rec?.briefing, sessionTabOtherProject(rec)];
   }));
   // Polls update state in place only when it changed, preserving keyboard focus.
   if (bar._signature === signature) return;
@@ -1923,8 +1934,10 @@ function renderSessionTabs() {
   for (const name of names) {
     const pinned = isSessionPinned(name);
     const rec = records.get(name);
+    const elsewhere = sessionTabOtherProject(rec);
     const tab = document.createElement("span");
-    tab.className = "session-tab" + (pinned ? " pinned" : "") + (name === active ? " active" : "");
+    tab.className = "session-tab" + (pinned ? " pinned" : "") + (name === active ? " active" : "")
+      + (elsewhere ? " other-project" : "");
     tab.dataset.name = name;
     const open = document.createElement("a");
     open.className = "session-tab-open";
@@ -1939,6 +1952,7 @@ function renderSessionTabs() {
     // that stopped on a button.
     const brief = briefingTabTooltip(rec && rec.briefing);
     open.title = `${name}${pinned ? " — pinned" : ""}${rec ? " — " + rec.status : ""}`
+      + (elsewhere ? ` — project ${elsewhere} (the rail shows ${currentProject})` : "")
       + (brief ? `\n${brief}` : "");
     tab.title = open.title;
     if (name === active) open.setAttribute("aria-current", "page");
@@ -1951,6 +1965,15 @@ function renderSessionTabs() {
     label.className = "session-tab-name";
     label.textContent = name;
     open.append(dot, label);
+    // A session of another project than the rail's is still drawn with its
+    // real state (the dot above); what sets it apart is this chip naming
+    // the project it belongs to, and the tab's dashed outline.
+    if (elsewhere) {
+      const chip = document.createElement("span");
+      chip.className = "session-tab-project";
+      chip.textContent = elsewhere;
+      open.append(chip);
+    }
     const pin = document.createElement("button");
     pin.type = "button";
     pin.className = "session-tab-pin";
@@ -2188,7 +2211,8 @@ function syncSessionView() {
 /* The sessions the grid draws: those the rail's state filter admits. A
    placed session outside that set keeps its cell and is drawn faint. */
 function sessionGridVisible() {
-  return sessionsCache.filter((s) => sessionMatchesFilter(s));
+  const list = typeof railSessions === "function" ? railSessions() : sessionsCache;
+  return list.filter((s) => sessionMatchesFilter(s));
 }
 
 function renderSessionGrid(force = false) {
@@ -3275,7 +3299,7 @@ function setSessionFilter(filter, remember = true) {
   if (!SESSION_FILTERS.includes(filter)) return;
   sessionFilter = filter;
   if (remember) localStorage.setItem(SESSION_FILTER_KEY, filter);
-  syncSessionFilters(sessionsCache);
+  syncSessionFilters(typeof railSessions === "function" ? railSessions() : sessionsCache);
   // Archived records are not part of the recurring rail poll. Selecting a
   // filter is an explicit request for one fresh snapshot of its category.
   const state = filter === "archived" ? "archived"
@@ -3634,41 +3658,55 @@ async function refreshSessions(options) {
     if (state === "current") return !session.archived_at;
     return sessionCategory(session) === state;
   };
-  let data;
-  try {
-    // The project filter is spelled inline rather than through a helper so
-    // the poll stands on its own: the rail harnesses run this function
-    // against a stub page that declares none of the project state, and a
-    // helper they never defined would throw here and empty the rail.
-    const resp = await api(
-      `/api/sessions?view=rail&state=${encodeURIComponent(state)}${typeof currentProject === "string" && currentProject ? "&project=" + encodeURIComponent(currentProject) : ""}`);
-    // An error response carries a JSON body of its own, so `resp.json()`
-    // succeeds and `data.sessions` is simply absent -- which used to read as
-    // "this daemon has no sessions" and empty the rail, drop every parked
-    // terminal and forget every briefing (forgetDeadSessions works off this
-    // very list). A failed poll must leave the page as it was.
-    if (!resp.ok) return;
-    data = await resp.json();
-  } catch {
-    return;
+  // `cached`: redraw from the records already in hand, with no request --
+  // what a project pick asks for, since every project is in the cache.
+  const cached = !!(options && options.cached);
+  if (!cached) {
+    let data;
+    try {
+      // Every project, always: the rail narrows what it draws itself
+      // (railSessions), so a project pick redraws without a round trip and
+      // a session of another project open in a tab keeps a real record.
+      const resp = await api(
+        `/api/sessions?view=rail&state=${encodeURIComponent(state)}`);
+      // An error response carries a JSON body of its own, so `resp.json()`
+      // succeeds and `data.sessions` is simply absent -- which used to read as
+      // "this daemon has no sessions" and empty the rail, drop every parked
+      // terminal and forget every briefing (forgetDeadSessions works off this
+      // very list). A failed poll must leave the page as it was.
+      if (!resp.ok) return;
+      data = await resp.json();
+    } catch {
+      return;
+    }
+    const incoming = data.sessions || [];
+    const incomingNames = new Set(incoming.map((s) => s.name));
+    // A request answers for one category of records. Keep every cached record
+    // outside that category (the archived ones an operator explicitly opened,
+    // while the poll runs on "current"), while replacing the category this
+    // request owns and any record that has just returned inside it.
+    sessionsCache = [
+      ...incoming,
+      ...sessionsCache.filter((s) =>
+        !incomingNames.has(s.name) && !matchesPollState(s)),
+    ];
+    // Reduced embedded consumers execute this poll in isolation.  Keep that
+    // contract while the full page reconciles the kill controls here.
+    if (typeof reconcileKillUiState === "function") reconcileKillUiState(sessionsCache);
+    briefingLLM = data.llm_configured !== false;
+    ragConfigured = data.rag_configured === true;
+    forgetDeadSessions();
+    // A session opened before its record arrived (a reload on its address)
+    // moves the rail to its project now that the record is here.
+    if (typeof projectFollowPending === "string" && projectFollowPending &&
+        typeof followSessionProject === "function") {
+      followSessionProject(projectFollowPending);
+    }
   }
-  const incoming = data.sessions || [];
-  const incomingNames = new Set(incoming.map((s) => s.name));
-  // A request answers for one category of records. Keep every cached record
-  // outside that category (the archived ones an operator explicitly opened,
-  // while the poll runs on "current"), while replacing the category this
-  // request owns and any record that has just returned inside it.
-  sessionsCache = [
-    ...incoming,
-    ...sessionsCache.filter((s) =>
-      !incomingNames.has(s.name) && !matchesPollState(s)),
-  ];
-  // Reduced embedded consumers execute this poll in isolation.  Keep that
-  // contract while the full page reconciles the kill controls here.
-  if (typeof reconcileKillUiState === "function") reconcileKillUiState(sessionsCache);
-  briefingLLM = data.llm_configured !== false;
-  ragConfigured = data.rag_configured === true;
-  forgetDeadSessions();
+  // What the rail draws: the cache narrowed to the picked project. Reduced
+  // harnesses define no project state and draw the whole cache.
+  const railList = typeof railSessions === "function"
+    ? railSessions(sessionsCache) : sessionsCache;
   // Pins and recent tabs may refer to records outside this poll category.
   if (typeof renderSessionTabs === "function") renderSessionTabs();
   const list = $("session-list");
@@ -3687,7 +3725,10 @@ async function refreshSessions(options) {
   // Pin controls reflect the same state as the main session tabs.
   const pins = typeof sessionPinnedNames === "function" ? sessionPinnedNames() : [];
   const signature = JSON.stringify(
-    [briefingLLM, sessionsCache, groupOrder, meshCache, pins],
+    // The project is outside the old tuple so the tuple keeps its shape;
+    // a pick changes what the rail draws out of the same cache.
+    [[briefingLLM, sessionsCache, groupOrder, meshCache, pins],
+     typeof currentProject === "string" ? currentProject : ""],
     (key, value) => (
       key === "due_in" || key === "fired_ago" ||
       key === "last_visited_at" || key === "last_input_at" ||
@@ -3726,8 +3767,8 @@ async function refreshSessions(options) {
   // one only when the argument is absent. Handed an index it matches
   // nothing, the visible set comes back empty, and every row is laid out
   // as a root with no indent.
-  const visibleSessions = sessionsCache.filter((s) => sessionMatchesFilter(s));
-  const entries = rebuild ? byLineage(sessionsCache, visibleSessions) : [];
+  const visibleSessions = railList.filter((s) => sessionMatchesFilter(s));
+  const entries = rebuild ? byLineage(railList, visibleSessions) : [];
   // Isolated web harnesses retain the old mesh-only variable. The fallback
   // keeps those consumers compatible while the page uses the ordered setting.
   const rows = !rebuild ? [] : typeof sessionGroupRows !== "undefined"
@@ -4220,7 +4261,7 @@ async function refreshSessions(options) {
   // ...and the Queues tab's lane dots, off the record this poll just brought
   if (typeof refreshQueueDots === "function") refreshQueueDots();
   if (rebuild && currentPage === "home") renderHome();
-  if (rebuild) syncBulkActions(sessionsCache);
+  if (rebuild) syncBulkActions(railList);
   // Some embedded consumers reuse refreshSessions with a reduced rail DOM;
   // the shipped page has the control, while those consumers keep the list
   // behaviour they had before this optional view was added.
@@ -4233,7 +4274,7 @@ async function refreshSessions(options) {
   // paint no longer waits on this at all — index.html seeds them — so the
   // blank strip a daemon reset used to open is closed before this runs.
   if (changed && typeof syncSessionFilters === "function") {
-    syncSessionFilters(sessionsCache);
+    syncSessionFilters(railList);
   }
 
   const cur = currentName && sessionsCache.find((s) => s.name === currentName);
@@ -8564,22 +8605,74 @@ let rolesRequest = 0;
 let workspacesRendered = null;
 
 /* Projects: the tier above meshes and sessions (see projects.py). The rail's
-   selector picks one, or "" for every project; the choice narrows the
-   session and mesh polls (the daemon filters, ?project=) and seeds the
-   create form's Project row. Remembered per browser, like the state filter,
-   because "the project I am working in" outlives a reload. */
+   selector picks one, or "" for every project; the choice narrows the rail's
+   session and mesh lists and seeds the create form's Project row.
+
+   The choice is part of the address (`?project=<name>` beside `?detail=`),
+   so a reload, a bookmark and Back all land on the project they were taken
+   in; localStorage keeps the last pick for an address that names none (a
+   bare `#/` typed by hand). "All projects" is the address with no
+   `project` at all.
+
+   The narrowing is done here, not by the daemon: both polls fetch every
+   project and the rail filters what it draws (sessionInCurrentProject,
+   meshInCurrentProject). A pick then redraws from what is already in hand
+   instead of waiting for a round trip, and a session of another project
+   that is open in a tab stays a real record — its tab shows its real state
+   instead of the "unknown" a filtered poll left it with. */
 const PROJECT_KEY = `claunch_project:${BASE}`;
 let projectsCache = [];
 let projectsRendered = null;
 let currentProject = (() => {
+  // The address first: it is what a reload or a shared link carries.
+  try {
+    const h = typeof location !== "undefined" ? location.hash || "" : "";
+    const q = h.indexOf("?");
+    const params = new URLSearchParams(q < 0 ? "" : h.slice(q + 1));
+    if (params.has("project")) return params.get("project") || "";
+  } catch {}
   try { return localStorage.getItem(PROJECT_KEY) || ""; } catch { return ""; }
 })();
 
-/* The query-string fragment the polls append for the picked project — one
-   spelling, so the session list and the mesh list can never disagree about
-   which project the page is showing. */
-function projectQuery(prefix) {
-  return currentProject ? `${prefix}project=${encodeURIComponent(currentProject)}` : "";
+/* The project a session or mesh record is filed under. The daemon spells a
+   record that never named one as "default" on some rows and leaves it out
+   on others; both mean the default project (projects.normalize). */
+function recordProject(rec) {
+  return String((rec && rec.project) || "").trim() || "default";
+}
+
+/* Whether the rail, as it is narrowed now, draws this session. */
+function sessionInCurrentProject(s) {
+  return !currentProject || recordProject(s) === currentProject;
+}
+
+/* The same question for a mesh in the rail's mesh list. */
+function meshInCurrentProject(m) {
+  return !currentProject || recordProject(m) === currentProject;
+}
+
+/* The sessions the rail draws: the cache, narrowed to the picked project. */
+function railSessions(list = sessionsCache) {
+  return (list || []).filter(sessionInCurrentProject);
+}
+
+/* The same address with the project set to `name`, or taken out ("" = all). */
+function hashWithProject(h, name) {
+  const s = h || "";
+  const q = s.indexOf("?");
+  const params = new URLSearchParams(q < 0 ? "" : s.slice(q + 1));
+  if (name) params.set("project", name);
+  else params.delete("project");
+  const qs = params.toString();
+  return (s.split("?")[0] || "#/") + (qs ? "?" + qs : "");
+}
+
+/* Write the picked project into the address in place — replaced, not
+   pushed: a pick narrows the page, it is not a place to go Back to. */
+function syncProjectHash() {
+  if (typeof location === "undefined" || typeof history === "undefined") return;
+  const want = hashWithProject(location.hash, currentProject);
+  if ((location.hash || "#/") !== want) history.replaceState(history.state, "", want);
 }
 
 function setCurrentProject(name) {
@@ -8587,6 +8680,7 @@ function setCurrentProject(name) {
   if (next === currentProject) return;
   currentProject = next;
   try { localStorage.setItem(PROJECT_KEY, next); } catch {}
+  syncProjectHash();
   const rail = $("project-select");
   if (rail && rail.value !== next) rail.value = next;
   // The form files a new session where the rail is looking, unless the
@@ -8596,11 +8690,38 @@ function setCurrentProject(name) {
     form.value = next;
     applyProjectDefaultCwd(form);
   }
-  // Both lists redraw on the next poll anyway; asking now spares the
-  // two-second wait after a pick, the way the state filter does.
-  refreshSessions();
-  refreshMeshList();
+  // Both lists hold every project already: redraw them from the cache now,
+  // with no request, so the pick shows the moment it is made.
+  refreshSessions({ cached: true });
+  refreshMeshList({ cached: true });
   if (currentPage === "home") renderHome();
+}
+
+/* The rail's project rides the address as `?project=`. An address that
+   names one is obeyed -- a reload, a bookmark, Back -- and one that names
+   none (every link inside the page is written without it) is given the
+   current pick back, in place. Called by route() before anything else. */
+function syncRouteProject() {
+  const named = hashQuery(location.hash);
+  if (named.has("project")) {
+    const want = named.get("project") || "";
+    if (want !== currentProject) setCurrentProject(want);
+  } else if (currentProject) syncProjectHash();
+}
+
+/* Opening a session while the rail is narrowed to another project moves the
+   rail to the session's project, so the row being worked in is on the list
+   beside it. "All projects" already shows it and is left alone. A session
+   the cache has not seen yet (the first load) is answered by the first poll
+   that brings it (projectFollowPending). */
+let projectFollowPending = "";
+function followSessionProject(name) {
+  projectFollowPending = "";
+  if (!name || !currentProject) return;
+  const rec = (sessionsCache || []).find((s) => s.name === name);
+  if (!rec) { projectFollowPending = name; return; }
+  const theirs = recordProject(rec);
+  if (theirs !== currentProject) setCurrentProject(theirs);
 }
 
 /* Fill the Directory row from the picked project's default workspace. A
@@ -8660,8 +8781,12 @@ async function refreshProjects() {
     projectSelectOptions(rail, true);
     // A remembered project that was removed since falls back to "all",
     // and the memory is corrected so the next load does not ask for it.
-    if (currentProject && rail.value !== currentProject) setCurrentProject("");
-    else rail.value = currentProject;
+    // Asked of the options, not of the select's value: on the first build
+    // the select had no value to keep, so it reads "" whatever the page
+    // remembered, and comparing that dropped every reload's pick.
+    if (currentProject && ![...rail.options].some((o) => o.value === currentProject)) {
+      setCurrentProject("");
+    } else rail.value = currentProject;
   }
   const form = document.querySelector("#new-session select[name=project]");
   if (form) {
@@ -15014,6 +15139,8 @@ function parseHash(h) {
 function route() {
   const r = parseHash(location.hash);
   r.detail = hashDetail(location.hash);
+  // Guarded: reduced harnesses slice route() without the project state.
+  if (typeof syncRouteProject === "function") syncRouteProject();
   // An open rail follows the terminal: the rail describes the session on
   // screen, and one left pointing at the session we came *from* quietly
   // mislabels everything in it, its cflow run most of all. The links that
@@ -15055,6 +15182,9 @@ function route() {
 
   switch (r.page) {
     case "terminal":
+      // Opening a session the narrowed rail does not list moves the rail to
+      // the session's project; "All projects" lists it already.
+      if (typeof followSessionProject === "function") followSessionProject(r.name);
       // Re-entering the route we are already attached to must not tear the
       // socket down and build it again — coming back from another page is
       // the common case, and it would cost the scrollback every time.
@@ -15925,7 +16055,8 @@ function renderHome() {
 
   // Sessions. The rail already lists them on a wide screen, but this page is
   // the menu on a narrow one, where the rail is all there is.
-  const live = sessionsCache.filter((s) => s.status !== "exited");
+  // The rail's project, like the rail beside it on a wide screen.
+  const live = railSessions().filter((s) => s.status !== "exited");
   const busy = live.filter((s) => s.status === "busy").length;
   const sessions = homeCard(
     "Sessions",
@@ -28431,6 +28562,7 @@ function renderSessKids(bodyEl, doc) {
 let meshName = null;      // mesh open in the detail view
 let meshPollTimer = null;
 let meshCache = [];       // sidebar list payload
+let meshPollData = null;  // the last /api/mesh?view=rail answer, every project
 let meshListRendered = null;
 let meshInviteCodes = {}; // mesh -> last minted invite code (survives rerenders)
 const MESH_MESSAGE_PAGE_SIZE = 25;
@@ -28493,20 +28625,28 @@ function renderRelayBadge(relay) {
   }
 }
 
-async function refreshMeshList() {
-  let data;
-  try {
-    // Inline for the same reason as the session poll's filter.
-    const resp = await api(`/api/mesh?view=rail${typeof currentProject === "string" && currentProject ? "&project=" + encodeURIComponent(currentProject) : ""}`);
-    data = await resp.json();
-  } catch {
-    return;
+async function refreshMeshList(options) {
+  // `cached`: redraw from the last answer, with no request -- a project
+  // pick, which only changes which of the meshes in hand are drawn.
+  let data = options && options.cached ? meshPollData : null;
+  if (!data) {
+    try {
+      // Every project, like the session poll: the list narrows itself below.
+      const resp = await api("/api/mesh?view=rail");
+      data = await resp.json();
+    } catch {
+      return;
+    }
+    meshPollData = data;
   }
   renderRelayBadge(data.relay);
   const oldMeshSignature = JSON.stringify(meshCache);
-  meshCache = data.meshes || [];
+  // meshCache stays what it has always been to its readers -- the meshes of
+  // the project the rail shows -- and is re-derived from the full answer.
+  meshCache = (data.meshes || []).filter((m) =>
+    typeof meshInCurrentProject !== "function" || meshInCurrentProject(m));
   if (sessionGroupByMesh && oldMeshSignature !== JSON.stringify(meshCache)) {
-    refreshSessions();
+    refreshSessions(options && options.cached ? { cached: true } : undefined);
   }
   const outgoing = data.outgoing || [];
   const signature = JSON.stringify([meshName, meshCache, outgoing]);

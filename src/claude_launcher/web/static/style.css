@@ -1611,6 +1611,15 @@ a.cflow-scope:hover { background: #1d3559; text-decoration: underline; }
 }
 .session-tab.pinned { border-color: #66501e; }
 .session-tab.active { background: #10203a; border-color: #58a6ff; }
+/* A tab whose session belongs to another project than the rail shows. The
+   dot keeps the session's real state; the dashed outline and the chip say
+   where it is filed. */
+.session-tab.other-project { border-style: dashed; }
+.session-tab-project {
+  flex: none; max-width: 90px; overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap; padding: 0 5px; border-radius: 8px; font-size: 10px;
+  line-height: 15px; color: #d2a8ff; background: #2a1f3d; border: 1px solid #4b3470;
+}
 .session-tab-open {
   display: flex; align-items: center; gap: 5px; padding: 5px 7px;
   min-width: 0; color: #c9d1d9; text-decoration: none; font-size: 12px;

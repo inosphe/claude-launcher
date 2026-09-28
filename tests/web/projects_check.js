@@ -1,14 +1,21 @@
 /* Projects on the page: the tier above meshes and sessions, run against the
    real functions from app.js on a stub DOM.
 
-   The daemon does the filing (a session's and a mesh's `project` field, the
-   `?project=` filter on both lists); what the page owns is four things, and
-   each is pinned here because each fails silently:
+   The daemon does the filing (a session's and a mesh's `project` field); what
+   the page owns is the following, and each is pinned here because each fails
+   silently:
 
-   - One spelling of the filter. The session poll and the mesh poll must ask
-     for the SAME project, or the rail shows one project's sessions beside
-     another project's meshes and nothing says so. Both go through
-     projectQuery, and the query is empty when the selector says "all".
+   - The polls carry no filter; the page narrows. Both polls fetch every
+     project and the rail draws the picked one out of the cache
+     (railSessions, meshInCurrentProject), so a pick redraws at once with no
+     request, and a tab of another project's session keeps a real record:
+     its tab shows the session's state and a chip naming its project instead
+     of the "unknown" dot a filtered poll left it with.
+   - The pick is in the address (`?project=`), so a reload keeps it. The
+     first build of the rail's <select> has no value to keep, and comparing
+     that "" against the remembered pick used to drop it on every reload.
+   - Opening a session while the rail is narrowed to another project moves
+     the rail to the session's project; "All projects" is left alone.
    - The rail's selector stands above the search, and the create form's
      Project row stands above the Directory row it answers — in the markup,
      where a reorder done by moving HTML would drop it.
@@ -18,10 +25,9 @@
      project's default; a directory the operator picked by hand is never
      overwritten, because that is exactly the "created in the wrong tree"
      mistake the row exists to prevent.
-   - A remembered project that no longer exists falls back to "all". The
-     choice lives in localStorage; a project removed from another window
-     must not leave the rail asking for a name the daemon will answer with
-     an empty list. */
+   - A remembered project that no longer exists falls back to "all". A
+     project removed from another window must not leave the rail narrowed to
+     a name nothing is filed under. */
 const fs = require("fs");
 const path = require("path");
 const STATIC = path.join(__dirname, "..", "..", "src", "claude_launcher",
@@ -64,23 +70,31 @@ check("the create form asks the project", formProject >= 0, true);
 check("...before the directory it answers", formProject < formCwd, true);
 check("the rail selector has its own rule", /#project-select \{/.test(css), true);
 check("...and the row it sits in", /\.project-row \{/.test(css), true);
+check("a tab of another project has its own look",
+      [/\.session-tab\.other-project \{/.test(css), /\.session-tab-project \{/.test(css)],
+      [true, true]);
 
-/* ---- the polls agree on one filter -------------------------------------- */
-/* Spelled inline in both polls, and identically: a helper would be undefined
-   in the rail harnesses' sandboxes (they slice refreshSessions alone) and
-   the poll would throw and draw nothing — which is how this was first
-   found. The exact text is pinned so the two polls cannot drift apart. */
-const FILTER = '${typeof currentProject === "string" && currentProject ? ' +
-  '"&project=" + encodeURIComponent(currentProject) : ""}';
-check("the session poll carries the filter",
+/* ---- the polls carry every project -------------------------------------- */
+check("the session poll asks for every project",
       slice("refreshSessions").includes(
-        "`/api/sessions?view=rail&state=${encodeURIComponent(state)}" + FILTER + "`"),
+        "`/api/sessions?view=rail&state=${encodeURIComponent(state)}`"), true);
+check("...and so does the mesh poll",
+      slice("refreshMeshList").includes('api("/api/mesh?view=rail")'), true);
+check("neither poll spells a project filter any more",
+      [/project=/.test(slice("refreshSessions")),
+       /project=/.test(slice("refreshMeshList"))], [false, false]);
+check("the session poll can redraw from the cache alone",
+      /const cached = !!\(options && options\.cached\);\s*if \(!cached\) \{/.test(
+        slice("refreshSessions")), true);
+check("...and the rail draws the narrowed list",
+      /byLineage\(railList, visibleSessions\)/.test(slice("refreshSessions")), true);
+check("the mesh poll keeps its last answer for the same redraw",
+      /options && options\.cached \? meshPollData : null/.test(slice("refreshMeshList")),
       true);
-check("...and so does the mesh poll, spelled the same way",
-      slice("refreshMeshList").includes("`/api/mesh?view=rail" + FILTER + "`"), true);
-check("neither poll leans on a helper the rail harnesses do not define",
-      [/projectQuery\(/.test(slice("refreshSessions")),
-       /projectQuery\(/.test(slice("refreshMeshList"))], [false, false]);
+check("the router hands the address's project over first",
+      /syncRouteProject\(\);/.test(slice("route")), true);
+check("...and a session opened from anywhere follows its project",
+      /followSessionProject\(r\.name\)/.test(slice("route")), true);
 check("a mesh created from the page is filed where the rail is looking",
       /currentProject \? \{ name, project: currentProject \} : \{ name \}/.test(src), true);
 check("the create form sends the project on both shapes",
@@ -139,14 +153,22 @@ const api = async (url) => {
   apiCalls.push(url);
   return { ok: true, json: async () => served };
 };
-const memory = {};
+/* A reload on a terminal whose address names a project, in a browser that
+   remembers a different one: the address is what the page opens on. */
+let hash = "#/s/x?project=hq";
+const location = { get hash() { return hash; } };
+const history = {
+  state: { routed: true },
+  replaceState(st, _title, url) { history.state = st; if (url !== undefined) hash = url; },
+};
+const memory = { "claunch_project:/t": "solo" };
 const localStorage = {
   getItem: (k) => (k in memory ? memory[k] : null),
   setItem: (k, v) => { memory[k] = String(v); },
 };
-let sessionsPolls = 0, meshPolls = 0;
-const refreshSessions = () => { sessionsPolls++; };
-const refreshMeshList = () => { meshPolls++; };
+let sessionsPolls = 0, meshPolls = 0, cachedRedraws = 0;
+const refreshSessions = (o) => { if (o && o.cached) cachedRedraws++; else sessionsPolls++; };
+const refreshMeshList = (o) => { if (o && o.cached) cachedRedraws++; else meshPolls++; };
 const renderHome = () => {};
 const renderWorkspaces = () => {};
 let wsOpen = false;
@@ -163,28 +185,34 @@ const syncSpawnMode = () => { spawnResyncs++; };
 const ctx = {
   Option, document, $, api, localStorage, refreshSessions, refreshMeshList,
   renderHome, renderWorkspaces, wsOpen, currentPage, BASE,
-  spawnParent, syncSpawnMode,
+  spawnParent, syncSpawnMode, location, history,
 };
 const stateBlock = src.slice(
   src.indexOf("const PROJECT_KEY = "),
-  src.indexOf("function projectQuery("));
+  src.indexOf("function recordProject("));
 const code = [
+  "let sessionsCache = [];",
   stateBlock,
-  slice("projectQuery"), slice("setCurrentProject"),
+  slice("recordProject"), slice("sessionInCurrentProject"),
+  slice("meshInCurrentProject"), slice("railSessions"),
+  slice("hashWithProject"), slice("syncProjectHash"),
+  slice("setCurrentProject"), slice("syncRouteProject"),
+  "let projectFollowPending = '';", slice("followSessionProject"),
+  slice("sessionTabOtherProject"), slice("hashQuery"),
   slice("applyProjectDefaultCwd"), slice("projectSelectOptions"),
   slice("refreshProjects"),
-  "return { projectQuery, setCurrentProject, applyProjectDefaultCwd, " +
+  "return { setCurrentProject, applyProjectDefaultCwd, railSessions, " +
+  "meshInCurrentProject, hashWithProject, syncRouteProject, followSessionProject, " +
+  "sessionTabOtherProject, setSessions: (l) => { sessionsCache = l; }, " +
+  "pending: () => projectFollowPending, " +
   "projectSelectOptions, refreshProjects, current: () => currentProject, " +
   "cache: () => projectsCache };",
 ].join("\n");
 const fns = new Function(...Object.keys(ctx), code)(...Object.values(ctx));
 
 (async () => {
-  /* the empty selector asks for nothing */
-  check("no project = no filter", fns.projectQuery("&"), "");
-  /* a page that never declared the project state asks for everything */
-  const bare = new Function("return `" + FILTER + "`;")();
-  check("...and so does a page without the state at all", bare, "");
+  /* the address outranks the browser's memory */
+  check("the pick is read off the address first", fns.current(), "hq");
 
   /* the registry lands in both pickers */
   served = { projects: [
@@ -197,6 +225,8 @@ const fns = new Function(...Object.keys(ctx), code)(...Object.values(ctx));
   form.form.cwd.appendChild(Option("other", "E:\\other"));
   form.form.cwd.value = "";
   await fns.refreshProjects();
+  check("a reload keeps the picked project on the freshly built selector",
+        [fns.current(), rail.value, hash], ["hq", "hq", "#/s/x?project=hq"]);
   check("the rail offers every project behind 'all'",
         rail.options.map((o) => o.value), ["", "default", "hq", "solo"]);
   check("...with the default workspace on the label",
@@ -205,13 +235,17 @@ const fns = new Function(...Object.keys(ctx), code)(...Object.values(ctx));
   check("the form offers every project and no 'all'",
         form.options.map((o) => o.value), ["default", "hq", "solo"]);
 
-  /* picking on the rail narrows both polls with one spelling */
+  /* picking on the rail redraws both lists from the cache */
+  fns.setCurrentProject("");
+  check("'all' is the address with no project", hash, "#/s/x");
+  cachedRedraws = 0;
+  form.value = "default";
+  form._lastProject = "default";
   fns.setCurrentProject("hq");
-  check("the pick is the filter", fns.projectQuery("&"), "&project=hq");
-  check("...as the inline spelling reads it",
-        new Function("currentProject", "return `" + FILTER + "`;")("hq"), "&project=hq");
+  check("the pick is written into the address", hash, "#/s/x?project=hq");
   check("...remembered", memory["claunch_project:/t"], "hq");
-  check("...and both lists are asked again at once", [sessionsPolls, meshPolls], [1, 1]);
+  check("...and both lists redraw from the cache, with no request",
+        [cachedRedraws, sessionsPolls, meshPolls], [2, 0, 0]);
   check("the form follows the rail", form.value, "hq");
   check("...and the directory took the project's default", form.form.cwd.value, "D:\\hq");
 
@@ -229,12 +263,63 @@ const fns = new Function(...Object.keys(ctx), code)(...Object.values(ctx));
   check("the previous default is released when the new project has none",
         form.form.cwd.value, "");
 
+  /* the rail narrows the cache it holds; "default" is the unnamed project */
+  fns.setSessions([
+    { name: "a", project: "hq", status: "busy" },
+    { name: "b", status: "idle" },
+    { name: "c", project: "default", status: "idle" },
+    { name: "d", project: "solo", status: "busy" },
+  ]);
+  check("the rail draws the picked project only",
+        fns.railSessions().map((s) => s.name), ["a"]);
+  fns.setCurrentProject("default");
+  check("...and a record naming no project is the default one",
+        fns.railSessions().map((s) => s.name), ["b", "c"]);
+  check("a mesh is narrowed by the same rule",
+        [fns.meshInCurrentProject({ project: "default" }),
+         fns.meshInCurrentProject({ project: "hq" })], [true, false]);
+
+  /* a tab of another project keeps its record and names the project */
+  check("a tab of another project names it",
+        fns.sessionTabOtherProject({ name: "d", project: "solo", status: "busy" }), "solo");
+  check("...and one of the rail's project names nothing",
+        fns.sessionTabOtherProject({ name: "b", status: "idle" }), "");
+  check("...nor does a tab whose record is unknown", fns.sessionTabOtherProject(undefined), "");
+
+  /* opening a session of another project moves the rail there */
+  fns.followSessionProject("d");
+  check("opening a session moves the rail to its project",
+        [fns.current(), rail.value, hash], ["solo", "solo", "#/s/x?project=solo"]);
+  fns.followSessionProject("a");
+  check("...every time the project differs", fns.current(), "hq");
+  fns.setCurrentProject("");
+  fns.followSessionProject("d");
+  check("\"All projects\" is left alone", fns.current(), "");
+  check("...and shows every tab as its own",
+        fns.sessionTabOtherProject({ name: "d", project: "solo" }), "");
+  fns.setCurrentProject("hq");
+  fns.followSessionProject("zz");
+  check("a session not polled yet waits for the poll that brings it",
+        [fns.current(), fns.pending()], ["hq", "zz"]);
+
+  /* the router: an address with a project obeys it, one without is given it */
+  hash = "#/s/d?project=solo";
+  fns.syncRouteProject();
+  check("an address naming a project picks it", fns.current(), "solo");
+  hash = "#/mesh/m1";
+  fns.syncRouteProject();
+  check("an address naming none is given the pick back", hash, "#/mesh/m1?project=solo");
+  check("...beside the detail rail's own parameter",
+        fns.hashWithProject("#/s/a?detail=a", "hq"), "#/s/a?detail=a&project=hq");
+  check("...and 'all' takes it out again",
+        fns.hashWithProject("#/s/a?detail=a&project=hq", ""), "#/s/a?detail=a");
+
   /* a remembered project that vanished falls back to all */
-  fns.setCurrentProject("solo");
   served = { projects: served.projects.filter((p) => p.name !== "solo") };
   await fns.refreshProjects();
   check("a removed project is forgotten", [fns.current(), rail.value], ["", ""]);
   check("...in memory too", memory["claunch_project:/t"], "");
+  check("...and in the address", hash, "#/mesh/m1");
 
   /* an older daemon without the route leaves the page as it was */
   apiCalls = [];
