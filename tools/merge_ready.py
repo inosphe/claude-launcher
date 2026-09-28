@@ -614,8 +614,8 @@ def _dirty(checkout: Path) -> Tuple[Optional[set], Optional[set], int]:
 
     The exception, and it does not apply here: a *fast-forward* merge checks
     only the paths it updates, so the staged unrelated file goes through. This
-    repository lands with ``--no-ff`` every time (``improv-leader`` and
-    ``improv-mid`` both require it), so the strict rule is the one that holds.
+    repository lands with ``--no-ff`` every time (``improv-leader`` and the
+    ``stack`` sub run both require it), so the strict rule is the one that holds.
 
     The last number is the board's output convention (``claunch-peyn``, rule
     4): a gate says how much it could not read. An unparsed status entry is a

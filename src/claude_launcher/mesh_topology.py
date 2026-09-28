@@ -19,8 +19,8 @@ rules for re-drawing the team, and the lead who does needs them whole.
 ``mesh-wire`` — open an edge between two members who keep needing each
 other through you.  ``mesh-delegate`` — spawn a nested worker for a crowded
 area and move that area's workers under it, so their branches land on its
-branch as a stacked pull request (the ``improv-mid`` workflow) and you
-integrate once.  ``mesh-retopology`` — every other re-drawing of the tree
+stack as a stacked pull request (the nested worker's ``stack`` sub run, beside
+its ``improv-worker`` run) and you integrate one branch per landing.  ``mesh-retopology`` — every other re-drawing of the tree
 that ``reparent`` does: take a finished tier's workers back, adopt the
 children of a parent that exited, move a worker to the tier its work
 belongs to, undo a delegation — and the briefing that has to follow each
@@ -106,13 +106,14 @@ A team spawned by one session is a star: every worker reports to you, every
 branch merges through you. That is right for three workers on three areas and
 wrong for six on one file — you end up arbitrating hunks between siblings and
 running the full sweep once per branch. The fix is a tier: one nested worker
-owns the area, the area's workers report to it, and it hands you ONE branch.
-The nested worker runs the `improv-mid` workflow — still a `worker` on the
-mesh (you stay the only leader), but its run is a small control loop, not a
-one-goal round: it lands the area's branches on its own branch as a
-**stacked pull request** and requests integration from you once (see "The
-stack" below). This skill is how you put an existing flat team into that
-shape without respawning anybody.
+owns the area, the area's workers report to it, and it hands you ONE branch
+per landing. The nested worker is an ordinary worker — role `worker`, run
+`improv-worker` (your pairing; you stay the only leader) — that stands a
+`stack` **sub run** beside its main run: the sub run lands the area's
+branches on a session-long stack branch as a **stacked pull request**, and
+each time the worker lands, its round branch carries the stack cut so far
+(see "The stack" below). This skill is how you put an existing flat team
+into that shape without respawning anybody.
 
 ## Triggers (any one)
 
@@ -136,14 +137,18 @@ roster: a nested worker is another terminal and another landing gate.
    move that would put any of them past `spawn.max_depth`. With the default
    (3, root at 0) a lead at depth 0 can insert one tier for workers that have
    no children of their own.
-3. **Spawn the nested worker** with `spawn`: role `worker`,
-   `workflow: improv-mid`, its own `worktree` (prefixed with a session
-   name, e.g. `<your session>-web-batch` — that branch becomes the stack
-   base), and a `task` that names: the sessions it is about to receive; the
-   shared area; that it runs the area as a stack (its branch is the base,
-   each child branch lands on it with `--no-ff` in order, the rest restack
-   after each landing), runs the reduced suite per landing, and requests
-   integration from YOU once with the whole stack; and that it never
+3. **Spawn the nested worker** with `spawn`: role `worker`, no `workflow`
+   (your pairing, `improv-worker`, is what it runs), its own `worktree`
+   (prefixed with a session name, e.g. `<your session>-web-batch`), an
+   issue for the area (`claunch beads create "area stack: <area>" ...`, then
+   `issue: <id>`), and a `task` that names: the sessions it is about to
+   receive; the shared area; that its round is a delegation round (its own
+   feature commits may be zero — the area's code lives in the children);
+   that in `work` it stands the `stack` sub run BEFORE you move anyone (the
+   `start` tool with `workflow: stack`, `sub: stack`, `inputs: {issue,
+   base}`), and that it lands each child on `<its session>-stack` with
+   `--no-ff`, restacks the rest after each landing, and requests
+   integration from YOU with the cut on its round branch; and that it never
    touches master. A nested worker that has to ask what it exists for has
    already cost you a turn.
 4. **Move each worker:** `reparent` (MCP: `{session: CHILD, parent: MID}`),
@@ -152,13 +157,14 @@ roster: a nested worker is another terminal and another landing gate.
    edge as it was. The worker keeps its terminal, conversation, handle,
    worktree and cflow run — only who it answers to changes.
 5. **Brief, in ONE batch send** with a section each: to every moved worker
-   ("your parent is now MID and your integration target is MID's branch
-   `<stack base>`, not master: send completion reports and integration
-   requests to it, not to me; measure your diff against that branch; a
-   restack notice from MID means rebase onto it and re-request"), and to
-   MID the roster it now owns. This step is not optional — a moved worker's
-   own briefing still names you as its parent, and its `rebrief` will only
-   show the new one from now on.
+   ("your parent is now MID and your integration target is MID's stack
+   branch `<MID>-stack`, not master: send completion reports and
+   integration requests to it, not to me; measure your diff against that
+   branch; a restack notice from MID means rebase onto it and re-request"),
+   and to MID the roster it now owns (its `stack` run's open step then
+   tells each of them the base in its own words). This step is not
+   optional — a moved worker's own briefing still names you as its parent,
+   and its `rebrief` will only show the new one from now on.
 6. Optional: `disconnect` yourself from the moved workers once the handover
    has settled, if you want their traffic to stop reaching you. Keep the edge
    while it settles.
@@ -166,40 +172,46 @@ roster: a nested worker is another terminal and another landing gate.
 
 ## The stack
 
-What MID runs is a stacked pull request with MID's branch as the base:
+What MID's `stack` sub run keeps is a stacked pull request on a
+session-long branch, cut into MID's round branch at each of MID's landings:
 
 ```
-master ← MID branch (stack base; merge commits only)
-             ↑ --no-ff, in order          landing order: bottom-up
-             ├── w1 branch   (base: MID)
-             ├── w2 branch   (base: MID)         ← independent: a fan
-             └── w3 branch   (base: w2)          ← depends on w2: a chain
+master ← MID round branch ← --no-ff the cut (stack-merge, once per landing)
+                                 ↑
+                           MID-stack (merge commits only)
+                                 ↑ --no-ff, in order     landing order: bottom-up
+                                 ├── w1 branch   (base: MID-stack)
+                                 ├── w2 branch   (base: MID-stack)  ← a fan
+                                 └── w3 branch   (base: w2)         ← a chain
 ```
 
-- Every child branch has a declared **base**: MID's branch, or a sibling's
+- Every child branch has a declared **base**: `<MID>-stack`, or a sibling's
   branch when it builds on that sibling's work. A child's request is
   measured against its base (two-way diff, `merge-tree`), not master, and
   goes to MID, not you.
-- MID lands one child at a time with `--no-ff`, then sends the rest a
-  **restack notice**: `git rebase <base>` — commits already on the base
-  are skipped, so only the child's own commits replay. A chained child
+- MID's stack run lands one child at a time with `--no-ff`, then sends the
+  rest a **restack notice**: `git rebase <base>` — commits already on the
+  base are skipped, so only the child's own commits replay. A chained child
   lands only after the branch it stands on.
 - Children MID spawns itself start on the stack: `spawn` with
-  `rebase_onto: <MID branch>` cuts a new worktree from that branch instead
-  of the trunk. Workers you moved were cut from master — MID asks them to
-  rebase onto the base if it has moved since.
-- MID's base takes merge commits only; the area's code lives in children.
-  When it hands off, it aligns the base on master with
-  `git rebase --rebase-merges master` (a plain rebase would flatten the
-  stack) and sends you ONE request carrying the stack table.
+  `rebase_onto: <MID>-stack` cuts a new worktree from that branch instead
+  of the trunk. Workers you moved were cut from master — the stack run's
+  open step asks them to rebase onto the base.
+- The stack branch takes merge commits only; the area's code lives in
+  children. When MID lands, its run asks the stack for a **cut** (what has
+  landed so far; children still working go to the next cut) and merges it
+  once into its round branch — that branch is the ONE request you get,
+  carrying the stack table. After MID lands on master the stack moves onto
+  the new master with `git rebase --rebase-merges` (a plain rebase would
+  flatten it).
 
 ## After
 
-- Integration: MID's branch arrives as ONE candidate carrying the stack
-  table (order, child branch, base, merge commit, numbers) — review it like
-  any other (two-way diff, `merge-tree`, one full sweep) and merge it with
-  ONE `--no-ff`; never merge its children separately. A rebase re-request
-  to MID is a restack: it re-aligns with `--rebase-merges` and re-requests.
+- Integration: MID's round branch arrives as ONE candidate carrying the
+  stack table (order, child branch, base, merge commit, numbers) — review
+  it like any other (two-way diff, `merge-tree`, one full sweep) and merge
+  it with ONE `--no-ff`; never merge its children separately. A rebase
+  re-request to MID re-aligns with `--rebase-merges` and re-requests.
 - Landing decisions are unchanged: a moved worker's `landing` is its own
   when the machine checks are clean (it picks `request` and goes), and only
   an `escalate` puts `landing-review` (request/hold) in front of its parent
@@ -207,7 +219,8 @@ master ← MID branch (stack base; merge commits only)
   same way and escalates to you. What MID decides alone is landing a child
   on ITS OWN branch (the way you decide master alone).
 - Undo: `reparent` a worker back to yourself; `kill` MID once its branch has
-  landed and its report is in (it kills itself at the end of its run).
+  landed and its report is in (its `settle-check` waits for the stack to be
+  sealed, then its run ends).
 
 ## Refusals
 
@@ -253,8 +266,8 @@ follow each move.
 
 ## Triggers (any one)
 
-- **A tier is done.** A mid-worker's stack landed on master (you merged its
-  ONE branch) but `children` still shows members under it — they finished
+- **A tier is done.** A mid-worker's stack is sealed and its last cut landed
+  on master (you merged its branch) but `children` still shows members under it — they finished
   and are wrapping up, or they hold frozen branches. Take them back so their
   next round (if any) reports to you and their hold-branches sit in your
   queue, not a retired tier's.
@@ -263,7 +276,7 @@ follow each move.
   was killed). Those children are orphans: their requests go to a terminal
   nobody reads. Adopt them.
 - **Wrong tier.** A worker's branch belongs to an area a mid owns (it edits
-  the same surface, or was cut from that mid's stack base), but it reports
+  the same surface, or was cut from that mid's stack branch), but it reports
   to you — or the reverse. Move it to where its integration target is.
 - **Undo.** A delegation that did not pay off — the mid is idle, the area
   thinned out to one worker, or the stack is blocking more than it batches.
@@ -301,7 +314,7 @@ landing finish, then move. And do not move to "tidy" — every move costs a brie
    that makes the move real:
    - to the moved session: "your parent is now TARGET; send completion
      reports and integration requests to it; your integration target is
-     `<branch>` (master when TARGET is the lead; TARGET's stack base when
+     `<branch>` (master when TARGET is the lead; `<TARGET>-stack` when
      it is a mid); if your branch was cut from the old base, rebase onto
      the new one before requesting" — and, when it is mid-flight, what to
      do with the request it already sent;
@@ -325,8 +338,8 @@ landing finish, then move. And do not move to "tidy" — every move costs a brie
 | move | reparent to | integration target after | extra |
 |---|---|---|---|
 | tier done | you | master (via you) | `kill` the mid once its report is in |
-| parent died | you (or a live mid) | master / that mid's base | check each orphan's run first — one may be at a human gate nobody is watching; surface it |
-| wrong tier | the mid | the mid's stack base | the worker rebases onto the base (`spawn`'s `rebase_onto` did this for children the mid spawned; a moved one does it by hand) |
+| parent died | you (or a live mid) | master / that mid's stack branch | check each orphan's run first — one may be at a human gate nobody is watching; surface it |
+| wrong tier | the mid | the mid's stack branch | the worker rebases onto the base (`spawn`'s `rebase_onto` did this for children the mid spawned; a moved one does it by hand) |
 | undo delegate | you | master | the mid's landed stack is already on master; unlanded child branches come back as your queue |
 
 ## Refusals (the daemon's words)

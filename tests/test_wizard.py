@@ -2548,7 +2548,7 @@ def test_the_bundled_leader_flow_pairs_its_children_with_the_worker_flow():
         for path in sorted(bundled.glob("improv-*.yaml"))
     }
     assert paired["improv-leader"] == "improv-worker"
-    assert paired["improv-mid"] == "improv-worker"
+    assert "improv-mid" not in paired  # retired for the stack sub run (claunch-u8wjx.3)
     assert paired["improv-worker"] == "improv-worker"
 
 

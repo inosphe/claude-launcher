@@ -474,10 +474,10 @@ roles:
       measurer, or both to the board, and let a claim travel with whoever
       can defend it.
       When one area holds more of your workers than you can keep apart, spawn
-      a nested worker for that area (still a worker, running the improv-mid
-      workflow) and move them under it (the reparent tool): it lands their
-      branches on its own as a stacked pull request and asks you to
-      integrate once.
+      a nested worker for that area (still a worker on improv-worker, with a
+      stack sub run beside it) and move them under it (the reparent tool):
+      it lands their branches on its stack as a stacked pull request and
+      asks you to integrate one branch per landing.
       Escalate to your user only what they alone hold (value, priority, scope,
       authorization), batched with options and a recommendation.
       Spawn children freely whenever there is work to hand out: a session of

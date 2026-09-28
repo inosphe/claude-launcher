@@ -198,7 +198,7 @@ def test_the_improv_workflows_carry_no_repo_specific_verify():
     check overrides in its project layer (``.claunch/workflows/``).
     """
     bundled = dict(state_mod.bundled_workflows())
-    for name in ("improv-worker", "improv-leader", "improv-mid"):
+    for name in ("improv-worker", "improv-leader"):
         wf = model.load(bundled[name])
         for step_id, step in wf.steps.items():
             if (
@@ -1373,38 +1373,26 @@ def test_both_leader_layers_teach_the_topology_skills():
 
 
 # --------------------------------------------------------------------------- #
-# the nested worker's own workflow: an area run as a stacked pull request
+# a worker's children: an area run as a stacked pull request, in a sub run
 # --------------------------------------------------------------------------- #
-def test_the_bundled_improv_mid_runs_an_area_as_a_stack():
-    """A nested worker is still a worker on the mesh but its run is a small
-    control loop, not a one-goal round: it opens a stack on its own branch,
-    lands its children's branches on it one at a time (``--no-ff``, in
-    order, a restack notice to the rest after each), and hands the lead ONE
-    branch. The shape below is what ``mesh-delegate`` and both improv
-    layers point at, so it is pinned here."""
-    wf = _bundled("improv-mid")
-    assert wf.filter_roles is not None
-    assert wf.filter_roles.type == model.FILTER_WHITELIST
-    assert wf.filter_roles.roles == ("worker",)
-    # never the wizard's default for a worker — improv-worker keeps that
-    assert wf.default_role is None
-    assert wf.max_visits > model.DEFAULT_MAX_VISITS  # standby <-> land loops
-    assert set(wf.steps) == {
-        "intake", "standby", "land", "landing", "landing-review", "handoff",
-        "await-landing", "wrapup",
-    }
+def test_the_stack_sub_run_lands_an_area_as_a_stack():
+    """A worker that keeps children runs no second workflow for them any
+    more: ``improv-mid`` is gone (claunch-u8wjx.3) and its control loop is
+    the ``stack`` sub run beside the worker's own round. It opens a stack
+    branch, lands the children on it one at a time (``--no-ff``, a restack
+    notice to the rest after each), and never merges master or the round
+    branch. ``mesh-delegate`` and both improv layers point at this shape,
+    so it is pinned here."""
+    assert "improv-mid" not in dict(state_mod.bundled_workflows())
+    wf = _bundled("stack")
+    assert wf.kind == model.KIND_SUBFLOW
 
-    intake = _prose(wf.steps["intake"].instructions)
-    for anchor in ("스택 베이스", "rebase_onto", "스택 표", "기준", "batch send"):
-        assert anchor in intake, f"intake lost its {anchor!r} rule"
-    assert "머지 커밋만" in intake  # the base takes merges, not feature work
+    opening = _prose(wf.steps["open"].instructions)
+    for anchor in ("rebase_onto", "스택 표", "기준", "batch send", "넘겨받은 자식"):
+        assert anchor in opening, f"open lost its {anchor!r} rule"
+    assert "머지 커밋만" in opening  # the stack takes merges, not feature work
 
-    standby = wf.steps["standby"]
-    assert standby.select is not None and standby.select.chooser == "agent"
-    assert set(standby.select.options) == {"land", "complete"}
-    assert standby.select.options["land"].next == "land"
-    assert standby.select.options["complete"].next == "landing"
-    standby_rules = _prose(standby.instructions)
+    standby_rules = _prose(wf.steps["standby"].instructions)
     assert "merge-tree" in standby_rules
     assert "master 대비가 아니다" in standby_rules
 
@@ -1413,45 +1401,7 @@ def test_the_bundled_improv_mid_runs_an_area_as_a_stack():
     land_rules = _prose(land.instructions)
     for anchor in ("--no-ff", "merge-tree", "restack", "rebase <네 기준>"):
         assert anchor in land_rules, f"land lost its {anchor!r} rule"
-    assert "master는 어떤 경우에도 머지 대상이 아니다" in land_rules
-
-    landing = wf.steps["landing"].select
-    # The fast path: a clean stack is offered up without asking the leader.
-    # ``hold`` is not reachable from here -- it lives on ``landing-review``,
-    # which is where the delegation went. Both are pinned in
-    # test_landing_fast_path.py.
-    assert landing.chooser == "agent"
-    assert set(landing.options) == {"request", "escalate"}
-    assert landing.options["request"].next == "handoff"
-    assert landing.options["escalate"].next == "landing-review"
-
-    review = wf.steps["landing-review"].select
-    # Delegated to the leader, as for every worker -- the route itself is
-    # pinned in test_landing_is_decided_by_the_session_above_not_by_a_person.
-    assert review.chooser == "delegate"
-    assert review.options["request"].next == "handoff"
-    assert review.options["hold"].next == "wrapup"
-
-    handoff = wf.steps["handoff"]
-    assert handoff.next == "await-landing"
-    handoff_rules = _prose(handoff.instructions)
-    for anchor in ("--rebase-merges", "git branch --merged", "스택 표",
-                   "master를 직접 머지하지 않는다"):
-        assert anchor in handoff_rules, f"handoff lost its {anchor!r} rule"
-
-    waiting = wf.steps["await-landing"].select
-    assert waiting.chooser == "agent"
-    assert waiting.options["landed"].next == "wrapup"
-    assert waiting.options["restack"].next == "handoff"
-
-    # The mechanical end: the daemon records and terminates a finished
-    # one-shot run's session, so the wrap-up no longer carries the kill
-    # instruction (the most common incompletion it replaces); only the
-    # keep-alive exception stays in prose.
-    wrapup = _prose(wf.steps["wrapup"].instructions)
-    assert "claunch kill-session $CLAUNCH_SESSION" not in wrapup
-    assert "keep-alive" in wrapup
-    assert wf.steps["wrapup"].next is None
+    assert "master도 내 회차 브랜치도 머지 대상이 아니다" in land_rules
 
 
 def test_a_rule_survives_the_column_its_line_was_broken_at():
@@ -1470,7 +1420,7 @@ def test_a_rule_survives_the_column_its_line_was_broken_at():
     is "land lost its rule" -- which is the sentence that sent the last
     reader looking in the wrong file.
     """
-    land = _prose(_bundled("improv-mid").steps["land"].instructions)
+    land = _prose(_bundled("stack").steps["land"].instructions)
     anchor = "rebase <네 기준>"
     assert anchor in land
     # Every space the phrase could be broken at, one at a time -- and only the
@@ -1500,13 +1450,13 @@ def test_both_worker_layers_know_their_place_on_a_stack():
         _bundled("improv-worker"),
         model.load(PROJECT_OVERRIDES / "improv-worker.yaml"),
     ):
-        intake = wf.steps["intake"].instructions
-        assert "improv-mid" in intake and "스택 베이스" in intake
+        intake = _prose(wf.steps["intake"].instructions)
+        assert "stack 서브 런을 둔 워커" in intake and "<부모 세션>-stack" in intake
         assert "git rebase" in intake and "<기준>" in intake
-        rebase = wf.steps["rebase"].instructions
+        rebase = _prose(wf.steps["rebase"].instructions)
         assert "restack" in rebase and "upstream에 있으므로" in rebase
-        request = wf.steps["integration-request"].instructions
-        assert "merge-tree" in request and "improv-mid" in request
+        request = _prose(wf.steps["integration-request"].instructions)
+        assert "merge-tree" in request and "stack 정의의 land" in request
         # a worker that spawned children of its own no longer merges them
         # at commit: the stack sub run lands them and stack-merge takes one
         # cut per landing (claunch-u8wjx.2)
@@ -1514,20 +1464,21 @@ def test_both_worker_layers_know_their_place_on_a_stack():
         assert "stack-merge" in commit and "adopt(reparent)를 청하지 않는다" in commit
 
 
-def test_both_leader_layers_route_a_crowded_area_through_improv_mid():
-    """The lead spawns the nested worker with ``workflow: improv-mid``,
-    tells moved workers their integration target changed, and merges the
-    stack as ONE candidate — re-requests to it mean ``--rebase-merges``."""
+def test_both_leader_layers_route_a_crowded_area_through_a_stack():
+    """The lead spawns the area's worker on its pairing (no ``workflow``),
+    that worker stands a ``stack`` sub run, the lead tells moved workers
+    their integration target changed, and merges the worker's branch with
+    its cut as ONE candidate — re-requests to it mean ``--rebase-merges``."""
     for wf in (
         _bundled("improv-leader"),
         model.load(PROJECT_OVERRIDES / "improv-leader.yaml"),
     ):
-        assert "improv-mid" in wf.steps["intake"].instructions
-        standby = wf.steps["standby"].instructions
-        assert "improv-mid" in standby and "stacked pull request" in standby
+        assert "stack 서브 런" in _prose(wf.steps["intake"].instructions)
+        standby = _prose(wf.steps["standby"].instructions)
+        assert "stack 서브 런" in standby and "stacked pull request" in standby
         assert "restack" in standby
-        integrate = wf.steps["integrate"].instructions
-        assert "improv-mid" in integrate
+        integrate = _prose(wf.steps["integrate"].instructions)
+        assert "스택 컷을 실은 워커 브랜치" in integrate
         assert "--rebase-merges" in integrate
         assert "--merged" in integrate
 
@@ -1552,18 +1503,14 @@ def _landing_route(wf):
 @pytest.mark.parametrize(
     "name, roles",
     [
-        # A worker's parent is a mid worker (role ``worker``) in a stacked
-        # formation and the leader in a flat one; the groups are tried in
+        # A worker's parent is a worker with a stack (role ``worker``) in a
+        # stacked formation and the leader in a flat one; the groups are tried in
         # order, so the same file covers both shapes. A root the operator
         # started has no parent, and the leader is its sibling — the leader
         # is found by [ancestor, sibling] (claunch-zgidu).
         ("improv-worker", [("worker", model.SCOPE_ANCESTOR),
                            ("leader", model.SCOPE_ANCESTOR),
                            ("leader", model.SCOPE_SIBLING)]),
-        # A mid worker is spawned by the leader, or started by the operator
-        # as a root beside it.
-        ("improv-mid", [("leader", model.SCOPE_ANCESTOR),
-                        ("leader", model.SCOPE_SIBLING)]),
     ],
 )
 def test_landing_is_decided_by_the_session_above_not_by_a_person(name, roles):

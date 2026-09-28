@@ -971,7 +971,7 @@ def test_a_staged_change_to_an_untouched_file_stops_the_merge_all_the_same(
     and ``git merge`` refused on exactly those two.
 
     A ``--no-ff`` merge is what this repository lands with (``improv-leader``
-    and ``improv-mid`` both spell it out), and it requires the whole index to
+    and the ``stack`` sub run both spell it out), and it requires the whole index to
     match ``HEAD`` before it will begin. So a staged entry blocks whatever
     path it sits on.
     """

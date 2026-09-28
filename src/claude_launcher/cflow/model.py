@@ -73,7 +73,7 @@ and loops need no duplicated content::
           on_decline: impl
         instructions: ...
         escalate:               # optional: ending HERE hands the slot to
-          workflow: improv-mid  # another run instead of going quiet. See
+          workflow: feature-dev # another run instead of going quiet. See
           context: ...          # "Escalation" below
         # no 'next' (or 'next: end') = termination
 
@@ -2342,7 +2342,7 @@ def _parse_escalate(raw, step_id: str) -> Optional["Escalate"]:
     if not isinstance(raw, dict):
         raise WorkflowError(
             f"step {step_id!r}: 'escalate' must be a workflow name, or a "
-            f"mapping like {{workflow: improv-mid, context: '...'}}, got "
+            f"mapping like {{workflow: feature-dev, context: '...'}}, got "
             f"{raw!r}"
         )
     unknown = sorted(set(raw) - {"workflow", "context"})

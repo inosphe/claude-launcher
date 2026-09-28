@@ -125,13 +125,10 @@ steps:
       관리하는 것은 assignee다. assignee 세션이 종료돼도 in_ready는 검토 결과를 유지하고,
       다음 adoption이 종료된 assignee를 교체한다. 닫는 자리는 wrapup 하나, 닫을 자격은 landed가
       git으로 증명한 머지 커밋 해시다(`claunch beads close <id> --reason
-      "merged <머지 해시>"`; 중간 워커는 자기 --parent 자식을 같은 방식으로
-      닫는다). 리더가 닫는 것은 둘뿐이다: assignee가 비었거나 그 세션이
-      exited인 고아와, 중간 워커 자신의 스택 이슈 — improv-mid에는 landed에
-      해당하는 게이트가 없어 자기 착지를 git으로 증명할 수단이 없고, 증명
-      없이 닫는 것은 이 규칙이 막으려던 바로 그것이다(중간 워커가 닫는 것은
-      landed 증거가 있는 자기 --parent 자식뿐이다). 그 둘에 한해 리더가
-      닫고, 사유에 스윕 수치를 붙일 수 있으면 붙인다 / 아무
+      "merged <머지 해시>"`; 스택을 둔 워커는 자기 스택에 착지시킨 자식
+      이슈를 stack 런의 land에서 그 스택 머지 해시로 닫는다). 리더가 닫는
+      것은 하나뿐이다: assignee가 비었거나 그 세션이 exited인 고아. 그
+      경우에 한해 리더가 닫고, 사유에 스윕 수치를 붙일 수 있으면 붙인다 / 아무
       상태→blocked는 그 게이트에 걸린 세션(`BLOCKED: <스텝>`), 해소되면
       같은 세션이 되돌린다 / reopen은 리더만. update --status closed는
       없다 — close뿐이다.

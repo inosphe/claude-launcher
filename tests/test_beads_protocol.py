@@ -48,14 +48,13 @@ def _without_block(text: str) -> str:
 # one block, five files
 # --------------------------------------------------------------------------- #
 def test_the_improv_workflows_share_one_beads_rule_block():
-    """Five files, one rule. A block edited in one place would teach two
+    """Every copy, one rule. A block edited in one place would teach two
     protocols under one name — the leader would wait for a transition the
     worker was never told to make."""
     reference = _block(_bundled("improv-worker"))
     assert "claunch beads" in reference and "close뿐이다" in reference
     for path in (
         _bundled("improv-leader"),
-        _bundled("improv-mid"),
         _bundled("improv-pm"),
         PROJECT_OVERRIDES / "improv-worker.yaml",
         PROJECT_OVERRIDES / "improv-leader.yaml",
@@ -93,7 +92,7 @@ def test_the_shared_block_defines_the_in_ready_transition_owners():
 
 def test_the_block_sits_in_every_intake():
     """The block is read where a round begins, in each workflow."""
-    for name in ("improv-worker", "improv-leader", "improv-mid"):
+    for name in ("improv-worker", "improv-leader"):
         wf = model.load(_bundled(name))
         assert BLOCK_START in wf.steps["intake"].instructions, name
 
@@ -269,29 +268,24 @@ def test_the_worker_closes_only_its_own_landed_issue(layer):
     assert "hold" in tidy  # ...and the frozen branch is still not closed
 
 
-def test_every_role_can_reach_the_close_gate_the_block_names():
+def test_every_close_the_block_names_has_its_gate():
     """The rule may not name a gate a workflow does not have.
 
     The shared block hands closing to the assignee and names the gate that
-    qualifies it: ``landed``, which proves the merge from git. That is only
-    a rule a session can obey if its own workflow has that step — and
-    ``improv-mid`` does not: a stack worker goes ``handoff ->
-    await-landing -> wrapup`` with no mechanical proof of its own landing.
-
-    A live mid worker is therefore neither qualified (no gate) nor an
-    orphan (not exited), so the block has to name it as the leader's or its
-    stack issue belongs to nobody. It said "orphans only" for one commit;
-    this is the pin that keeps the two halves in step.
+    qualifies it: ``landed``, which proves the merge from git. A child that
+    landed on a worker's stack is closed by that worker's ``stack`` run, in
+    its ``land`` step, on the stack merge hash — the same kind of proof. The
+    mid worker that once had no such gate (``improv-mid``) is gone
+    (claunch-u8wjx.3), and with it the leader's exception for its stack
+    issue: the block names orphans only.
     """
-    block = _block(_bundled("improv-worker"))
-    for name in ("improv-worker", "improv-leader", "improv-mid"):
-        wf = model.load(_bundled(name))
-        if "landed" in wf.steps:
-            continue
-        assert "중간 워커" in block and "스택 이슈" in block, (
-            f"{name} has no 'landed' step, so the block must name who closes "
-            f"its own issue — it currently does not"
-        )
+    block = _flat(_block(_bundled("improv-worker")))
+    assert "landed" in model.load(_bundled("improv-worker")).steps
+    assert "stack 런의 land" in block
+    assert "리더가 닫는 것은 하나뿐이다" in block
+    assert "중간 워커" not in block and "스택 이슈" not in block
+    land = model.load(_bundled("stack")).steps["land"].instructions
+    assert "claunch beads close <자식 이슈>" in land
 
 
 # --------------------------------------------------------------------------- #
@@ -336,17 +330,15 @@ def test_the_leader_no_longer_keeps_the_table_in_a_select_reason():
 
 
 # --------------------------------------------------------------------------- #
-# the mid-worker: parents its children, closes only them
+# the stack run: parents its children, closes only them
 # --------------------------------------------------------------------------- #
-def test_the_mid_worker_parents_children_and_closes_only_those():
-    wf = model.load(_bundled("improv-mid"))
-    assert "--parent <내 이슈>" in wf.steps["intake"].instructions
+def test_the_stack_run_parents_children_and_closes_only_those():
+    wf = model.load(_bundled("stack"))
+    assert "--parent <회차 이슈>" in _flat(wf.steps["open"].instructions)
     assert "claunch beads close <자식 이슈>" in wf.steps["land"].instructions
-    assert "--status in_review" in wf.steps["handoff"].instructions
-    own = _without_block(_bundled("improv-mid").read_text(encoding="utf-8"))
-    # The only close a mid runs is on its own children, in the landing step.
+    own = _bundled("stack").read_text(encoding="utf-8")  # carries no shared block
+    # The only close a stack runs is on its own children, in the landing step.
     assert own.count("claunch beads close") == 1
-    assert "부모 이슈는 닫지 않는다" in wf.steps["wrapup"].instructions
 
 
 # --------------------------------------------------------------------------- #
@@ -454,21 +446,17 @@ def test_the_leader_moves_triaged_work_into_in_ready_before_assignment(layer):
     )
 
 
-def test_the_mid_worker_keeps_the_stack_table_on_the_board():
+def test_the_stack_run_keeps_the_stack_table_on_the_board():
     """The stack table changes on every landing. Sent as a message it is the
-    same table re-typed into the leader's terminal once per child."""
-    wf = model.load(_bundled("improv-mid"))
-    assert "STACK @ <베이스 tip>" in wf.steps["intake"].instructions
-    land = wf.steps["land"].instructions
+    same table re-typed into the parent's terminal once per child."""
+    wf = model.load(_bundled("stack"))
+    assert "STACK @ <스택 tip>" in _flat(wf.steps["open"].instructions)
+    assert "메시지로 돌리지 않는다" in _flat(wf.steps["open"].instructions)
+    land = _flat(wf.steps["land"].instructions)
     assert "STACK @ <새 tip>" in land
-    assert "STACK @ <새 tip>" in wf.steps["land"].done_when
-    handoff = wf.steps["handoff"].instructions
-    assert "LANDING REQUEST @ <tip>" in handoff
-    assert "묶음을 메시지 본문에 다시 싣지 않는다" in _flat(handoff)
-    # restack is an event, not a record, so it stays on the wire — and the step
-    # says why, or the next edit moves it to the board along with the rest
-    assert "restack 공지" in _flat(land)
-    assert "사건이라 메시가 맞는 자리다" in _flat(land)
+    assert "STACK @ <새 tip>" in _flat(wf.steps["land"].done_when)
+    # restack is an event, not a record, so it goes to the children directly
+    assert "restack 공지" in land
 
 
 # --------------------------------------------------------------------------- #
@@ -497,7 +485,7 @@ def test_every_layer_forbids_editing_the_export_file(layer):
     sentence sits in the shared block, so it reaches every role in both
     layers; the installer plants the matching deny rule
     (tests/test_board_guard.py) for the sessions that read no workflow."""
-    for name in ("improv-worker", "improv-leader", "improv-mid", "improv-pm"):
+    for name in ("improv-worker", "improv-leader", "improv-pm"):
         path = _bundled(name) if layer == "bundled" else PROJECT_OVERRIDES / f"{name}.yaml"
         if layer == "project" and not path.exists():
             continue

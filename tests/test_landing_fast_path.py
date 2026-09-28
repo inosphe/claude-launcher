@@ -49,13 +49,12 @@ def _bundled(name: str) -> Path:
 
 
 #: Every copy of the landing pair, and where its ``request`` goes. A worker
-#: requests through ``rebase``; a middle worker hands its stack over through
-#: ``handoff``. The project layer is a regenerated copy of the bundled
+#: requests through ``rebase`` (a worker with a stack too: its cut is already
+#: on the round branch). The project layer is a regenerated copy of the bundled
 #: worker and drifts by hand-edit, so it is checked as its own layer.
 LAYERS = {
     "worker/bundled": (lambda: _bundled("improv-worker"), "rebase"),
     "worker/project": (lambda: PROJECT_OVERRIDES / "improv-worker.yaml", "rebase"),
-    "mid/bundled": (lambda: _bundled("improv-mid"), "handoff"),
 }
 
 
