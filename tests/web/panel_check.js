@@ -136,6 +136,7 @@ function stopMeshPoll() {}
 function stopFlowPoll() {}
 function closeWorkspaces() {}
 function stopWindowPoll() {}
+function stopStatsPoll() {}
 function stopBeadsPoll() {}
 function stopReportsPoll() {}
 function closeTranscript() {}
@@ -144,6 +145,7 @@ function openMesh() {}
 function openFlowTopology() {}
 function openWorkspaces() {}
 function openWindowPage() {}
+function openStatsPage() {}
 function openReports() {}
 function openHome() { showView("home"); }
 function openFlows() { showView("flows"); }
