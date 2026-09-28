@@ -168,6 +168,16 @@ def test_the_session_list_filters_by_project(home, tmp_path):
             assert rows["s-a"]["project"] == "a"
             assert "project" not in rows["s-none"]
 
+            # The page polls the rail view unfiltered and narrows by this
+            # key itself, and the rail view answers from an allow-list: a
+            # row that lost the key would be drawn under the default project
+            # and vanish from its own (claunch-20c0v).
+            resp = await client.get("/api/sessions?view=rail", headers=BEARER)
+            rail = {s["name"]: s for s in (await resp.json())["sessions"]}
+            assert rail["s-a"]["project"] == "a"
+            assert rail["s-b"]["project"] == "b"
+            assert "project" not in rail["s-none"]
+
             await mgr.shutdown_all()
         finally:
             await client.close()
