@@ -79,8 +79,10 @@ def test_the_footer_always_says_the_list_was_narrowed():
     )
     assert "'claunch mesh ls --project all'" in with_hidden
     none_hidden = projects.scope_footer(own, hidden=0, noun="mesh", command="claunch mesh ls")
-    assert none_hidden.startswith("project: gds6 (this session's) -- no meshs in other projects")
+    assert none_hidden.startswith("project: gds6 (this session's) -- no meshes in other projects")
     assert "'claunch mesh ls --project all'" in none_hidden
+    no_sessions = projects.scope_footer(own, hidden=0, noun="session", command="claunch sessions")
+    assert "-- no sessions in other projects;" in no_sessions
 
 
 # --------------------------------------------------------------------------- #

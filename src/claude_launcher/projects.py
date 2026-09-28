@@ -324,6 +324,12 @@ def listing_scope(asked, *, environ, fetch_own=None) -> ListingScope:
     return ListingScope(normalize(own), own=True)
 
 
+def _plural(noun: str) -> str:
+    """'session' -> 'sessions', 'mesh' -> 'meshes' (the two nouns the
+    listings use; a sibilant ending takes -es)."""
+    return noun + ("es" if noun.endswith(("s", "x", "z", "sh", "ch")) else "s")
+
+
 def scope_footer(scope: ListingScope, *, hidden: int, noun: str, command: str) -> str:
     """The one line a session-scoped listing ends with, or ``""``.
 
@@ -335,7 +341,7 @@ def scope_footer(scope: ListingScope, *, hidden: int, noun: str, command: str) -
         return ""
     tail = (
         f"{hidden} {noun}(s) in other projects not shown"
-        if hidden else f"no {noun}s in other projects"
+        if hidden else f"no {_plural(noun)} in other projects"
     )
     return (
         f"project: {scope.project} (this session's) -- {tail}; "
