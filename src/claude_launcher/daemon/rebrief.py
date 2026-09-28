@@ -125,6 +125,16 @@ def addressable(name: str, *, manager, mesh_mgr) -> Dict[str, dict]:
         # Always given: the opening task is typed into the terminal at spawn
         # and restated by this module at every reset.
         out[block_digest(task)] = {"kind": "task", "text": task, "given": True}
+    for pack in getattr(sdef, "prompt_packs", ()) or ():
+        # Recorded at creation like the task, and handed beside its id in the
+        # opening (prompt_packs.opening_block uses this same digest).
+        text = (pack.get("text") or "").strip()
+        if text:
+            out[block_digest(text)] = {
+                "kind": f"prompt pack ({pack.get('id')})",
+                "text": text,
+                "given": True,
+            }
     stance_found = False
     if mesh_mgr is not None:
         try:

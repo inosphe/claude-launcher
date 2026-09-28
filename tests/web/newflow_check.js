@@ -109,6 +109,9 @@ new Function(
    sliceLet("pendingNewMesh"),
    slice("spawnWorkflowEntry"), slice("spawnWorkflowAdmits"),
    slice("spawnRankWorkflows"), slice("spawnParent"), slice("newSessionCwd"),
+   // The Subroles/Prompt packs rows syncOnboardPickers redraws last; they
+   // are prompt_packs_check.js's subject, not this file's.
+   `function renderSubroles() {}`,
    slice("refreshWorkflowChoices"), slice("syncOnboardPickers")].join("\n") + `
 exports.refresh = refreshWorkflowChoices;
 exports.sync = syncOnboardPickers;

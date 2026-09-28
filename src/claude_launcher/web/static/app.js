@@ -9120,6 +9120,9 @@ function syncNewWorktree() {
 async function refreshNewWorktree() {
   const f = $("new-session");
   if (!f || !f.worktree_mode) return;
+  // The packs are the workspace's, and every edge that moves the directory
+  // lands here; not awaited, like the worktree list itself.
+  Promise.resolve(refreshPromptPackOffer()).catch(() => {});
   const cwd = newSessionCwd();
   if (cwd === newWorktreeFor) {
     // Same directory, so nothing to fetch -- but the rows are not only the
@@ -9288,6 +9291,150 @@ function renderRoleStance() {
   const role = rolesByName[select.value];
   box.textContent = role ? (role.stance || "(this role declares no stance)") : "";
   box.classList.toggle("hidden", !role);
+  renderSubroles();
+}
+
+/* Subroles: roles held beside the primary one (a worker that is also the
+   Unreal hand-off desk). Offered from the same vocabulary as the Role row,
+   and only once a mesh is in play — the daemon refuses a subrole with no
+   mesh to join. The ticks are kept by name across a vocabulary rebuild. */
+let newSubroleTicks = new Set();
+
+function newSubrolesMeshless(f) {
+  const mesh = f.mesh.value || "";
+  return mesh === "-" || (!mesh && !spawnParent());
+}
+
+function renderSubroles() {
+  const f = $("new-session");
+  const row = $("new-subroles-row");
+  if (!f || !row) return;
+  const primary = f.role.value || "";
+  const names = Object.keys(rolesByName).filter((n) => n !== primary).sort();
+  row.innerHTML = "";
+  const hidden = newSubrolesMeshless(f) || !names.length;
+  row.classList.toggle("hidden", hidden);
+  if (!hidden) {
+    row.appendChild(el("span", "new-check-label", "Subroles"));
+    const list = el("span", "new-check-list");
+    for (const name of names) {
+      const label = el("label", "check");
+      const box = document.createElement("input");
+      box.type = "checkbox";
+      box.name = `subrole_${name}`;
+      box.value = name;
+      box.checked = newSubroleTicks.has(name);
+      box.addEventListener("change", () => {
+        if (box.checked) newSubroleTicks.add(name);
+        else newSubroleTicks.delete(name);
+        renderPromptPackRow();
+      });
+      label.appendChild(box);
+      label.appendChild(el("span", null, name));
+      list.appendChild(label);
+    }
+    row.appendChild(list);
+  }
+  renderPromptPackRow();
+}
+
+/* The subroles the form would send: ticked, still offered, mesh in play. */
+function newSubroles(f) {
+  if (newSubrolesMeshless(f)) return [];
+  const primary = f.role.value || "";
+  return [...newSubroleTicks].filter((n) => n !== primary && rolesByName[n]).sort();
+}
+
+/* Prompt packs: the ones installed in the workspace the session will stand
+   in (Settings ▸ Install puts them there), one checkbox each. A pack the
+   chosen role or a ticked subrole requires is ticked and locked, with the
+   role named beside it; one that is required but not installed is said out
+   loud, because the daemon will refuse the create over it. */
+let newPackOffer = null;       // /api/prompt-packs/offer's answer
+let newPackOfferFor = null;    // the directory it answers for
+let newPackTicks = new Map();  // pack id -> the operator's own tick
+
+async function refreshPromptPackOffer() {
+  const cwd = newSessionCwd();
+  if (cwd === newPackOfferFor && newPackOffer) { renderPromptPackRow(); return; }
+  newPackOfferFor = cwd;
+  let offer = null;
+  try {
+    const resp = await api(`/api/prompt-packs/offer?cwd=${encodeURIComponent(cwd)}`);
+    offer = resp.ok ? await resp.json() : null;
+  } catch { offer = null; }
+  if (cwd !== newPackOfferFor) return;
+  if (!offer) newPackOfferFor = null;   // no answer is not "no packs"
+  const before = newPackOffer && (newPackOffer.workspace || {}).path;
+  const after = offer && (offer.workspace || {}).path;
+  // Another workspace's packs are another list: ticks start from its
+  // defaults again rather than carrying ids across.
+  if (before !== after) newPackTicks = new Map();
+  newPackOffer = offer;
+  renderPromptPackRow();
+}
+
+/* {pack id: [roles]} for the role row and the ticked subroles. */
+function newRequiredPacks(f) {
+  const mapping = (newPackOffer && newPackOffer.role_packs) || {};
+  const roles = [f.role.value || "", ...newSubroles(f)].filter(Boolean);
+  const out = {};
+  for (const role of roles) {
+    for (const id of mapping[role] || []) (out[id] = out[id] || []).push(role);
+  }
+  return out;
+}
+
+function newPackTicked(id) {
+  if (newPackTicks.has(id)) return newPackTicks.get(id);
+  return ((newPackOffer && newPackOffer.default_packs) || []).includes(id);
+}
+
+function renderPromptPackRow() {
+  const f = $("new-session");
+  const row = $("new-packs-row");
+  if (!f || !row) return;
+  row.innerHTML = "";
+  const offer = newPackOffer;
+  const required = newRequiredPacks(f);
+  const packs = (offer && offer.packs) || [];
+  const have = new Set(packs.map((p) => p.id));
+  const missing = Object.keys(required).filter((id) => !have.has(id));
+  row.classList.toggle("hidden", !packs.length && !missing.length);
+  if (!packs.length && !missing.length) return;
+  row.appendChild(el("span", "new-check-label", "Prompt packs"));
+  const list = el("span", "new-check-list");
+  for (const p of packs) {
+    const label = el("label", "check");
+    label.title = p.description || "";
+    const box = document.createElement("input");
+    box.type = "checkbox";
+    box.name = `prompt_pack_${p.id}`;
+    box.value = p.id;
+    const by = required[p.id];
+    box.checked = by ? true : newPackTicked(p.id);
+    box.disabled = !!by;
+    box.addEventListener("change", () => newPackTicks.set(p.id, box.checked));
+    label.appendChild(box);
+    label.appendChild(el("span", null, p.title || p.id));
+    if (by) label.appendChild(el("span", "wf-note", ` (required by ${by.join(", ")})`));
+    list.appendChild(label);
+  }
+  row.appendChild(list);
+  if (missing.length) {
+    row.appendChild(el("p", "wf-error",
+      missing.map((id) => `${id} is required by ${required[id].join(", ")}`).join("; ") +
+      ` but is not installed in ${offer && offer.workspace ? offer.workspace.name : "this directory's workspace"}` +
+      " — install it in Settings ▸ Install, or the create will be refused."));
+  }
+}
+
+/* The ids the form sends: ticked, installed. Required ones are added by the
+   daemon itself, so a locked box is sent too but needs no special case. */
+function newPromptPacks(f) {
+  const packs = (newPackOffer && newPackOffer.packs) || [];
+  const required = newRequiredPacks(f);
+  return packs.map((p) => p.id).filter((id) => required[id] || newPackTicked(id));
 }
 
 /* The resume picker: claude's own interactive picker, or the conversation of
@@ -10399,6 +10546,11 @@ $("new-session").addEventListener("submit", async (e) => {
       f.worktree_rebase.value.trim())
     body.rebase_onto = f.worktree_rebase.value.trim();
   if (f.role.value) body.role = f.role.value;
+  const subroles = newSubroles(f);
+  if (subroles.length) body.subroles = subroles;
+  // Sent even when empty once an offer was read: an empty list is "none of
+  // the defaults", and the daemon still adds what the roles require.
+  if (newPackOffer) body.prompt_packs = newPromptPacks(f);
   if (!parent && f.borrow.value) body.borrow = f.borrow.value;
   if (!parent && f.null_token.checked) body.null_token = true;
   // Onboarding: only sent when chosen. The daemon checks each before it
@@ -15512,6 +15664,7 @@ function syncOnboardPickers() {
   }
   wf.value = [...wf.options].some((o) => o.value === keptWf) ? keptWf : "";
   $("new-context-row").classList.toggle("hidden", !wf.value);
+  renderSubroles();
 }
 
 /* Workflows are declared per directory, so the list follows the Directory
@@ -16459,6 +16612,7 @@ function openSettings(section) {
   }
   if (wsSection === "install") {
     refreshInstallOverview();
+    refreshPromptPacks();
     return;
   }
   if (wsSection === "workspaces") {
@@ -21104,6 +21258,263 @@ function installPanel() {
   return panel;
 }
 
+/* Prompt packs (Settings ▸ Install): the guidance claunch ships as Markdown,
+   copied into a workspace's .claunch/prompts/ from here — per workspace and
+   never per profile, since a pack describes one repository's working rules.
+   Below the matrix, the two settings the create form reads: which packs
+   start ticked, and which packs a role or subrole forces on. */
+let promptPacksDoc = null;
+let promptPacksError = "";
+let promptPacksBusy = "";
+let promptPacksDraft = null;   // {role_packs, default_packs} being edited
+
+async function refreshPromptPacks() {
+  try {
+    const resp = await api("/api/prompt-packs");
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
+    promptPacksDoc = data;
+    promptPacksError = "";
+  } catch (err) { promptPacksError = String(err); }
+  if (wsOpen) renderWorkspaces();
+}
+
+async function promptPackCall(method, path, payload, busy) {
+  promptPacksBusy = busy;
+  if (wsOpen) renderWorkspaces();
+  try {
+    const resp = await api(path, {
+      method,
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
+    promptPacksDoc = data;
+    promptPacksError = "";
+    return true;
+  } catch (err) {
+    promptPacksError = String(err);
+    return false;
+  } finally {
+    promptPacksBusy = "";
+    // The create form's offer came from the same files; re-read it on its
+    // next open rather than trusting a list this just changed.
+    newPackOfferFor = null;
+    if (wsOpen) renderWorkspaces();
+  }
+}
+
+function promptPackAction(ws, row, verb) {
+  const force = row.status === "edited" || row.status === "local";
+  if (force) {
+    const what = row.status === "edited"
+      ? `The copy of "${row.id}" in ${ws.name} was edited there.`
+      : `"${row.id}" exists only in ${ws.name} (it was written there).`;
+    const doing = verb === "remove" ? "Delete it" : "Replace it with the shipped text";
+    if (!confirm(`${what}\n\n${doing}? The workspace's version is lost.`)) return;
+  }
+  promptPackCall("POST", `/api/prompt-packs/${verb}`,
+    { workspace: ws.name, pack: row.id, force }, `${ws.name}/${row.id}`);
+}
+
+const PROMPT_PACK_STATUS = {
+  missing: "not installed",
+  current: "installed",
+  stale: "update available",
+  edited: "edited here",
+  local: "local pack",
+};
+
+function promptPacksCard() {
+  const card = el("section", "ws-add prompt-packs");
+  card.appendChild(el("h3", null, "Prompt packs"));
+  card.appendChild(el("p", "wf-note",
+    "Guidance that ships with claunch as Markdown. Installing copies it into " +
+    "the workspace's .claunch/prompts/ (profiles are never a target). The " +
+    "create form then offers every pack installed in the session's " +
+    "workspace as a checkbox, and the ticked ones open the session. A copy " +
+    "edited in the workspace is kept on update unless you confirm; a .md " +
+    "file you add to that directory yourself is offered too."));
+  if (promptPacksError) card.appendChild(el("p", "wf-error", promptPacksError));
+  const doc = promptPacksDoc;
+  if (!doc) {
+    card.appendChild(el("p", "wf-note", "Reading the prompt packs…"));
+    return card;
+  }
+  const catalog = doc.catalog || [];
+  const shippedIds = catalog.map((p) => p.id);
+  const localIds = [];
+  for (const ws of doc.workspaces || []) {
+    for (const r of ws.packs || []) {
+      if (r.status === "local" && !localIds.includes(r.id)) localIds.push(r.id);
+    }
+  }
+  const ids = [...shippedIds, ...localIds];
+  const titles = Object.fromEntries(catalog.map((p) => [p.id, p]));
+
+  const about = el("ul", "prompt-pack-catalog");
+  for (const p of catalog) {
+    const li = el("li", null);
+    li.appendChild(el("b", null, p.title || p.id));
+    li.appendChild(document.createTextNode(` (${p.id}) — ${p.description || ""}`));
+    about.appendChild(li);
+  }
+  card.appendChild(about);
+
+  if (!(doc.workspaces || []).length) {
+    card.appendChild(el("p", "wf-note",
+      "No workspace is registered yet. Add one under Settings ▸ Workspaces first."));
+  } else {
+    const table = el("table", "md-table prompt-pack-table");
+    const head = el("tr", null);
+    head.appendChild(el("th", null, "Workspace"));
+    for (const id of ids) head.appendChild(el("th", null, (titles[id] || {}).title || id));
+    table.appendChild(head);
+    for (const ws of doc.workspaces) {
+      const tr = el("tr", null);
+      const name = el("td", null);
+      name.appendChild(el("b", null, ws.name));
+      name.appendChild(el("div", "wf-note", ws.path));
+      tr.appendChild(name);
+      const rows = Object.fromEntries((ws.packs || []).map((r) => [r.id, r]));
+      for (const id of ids) {
+        const row = rows[id] || { id, status: "missing", local: true };
+        const td = el("td", `prompt-pack-${row.status}`);
+        const busy = promptPacksBusy === `${ws.name}/${id}`;
+        if (!rows[id] && localIds.includes(id)) {
+          td.appendChild(el("span", "wf-note", "—"));
+          tr.appendChild(td);
+          continue;
+        }
+        td.appendChild(el("div", null, busy ? "…" : (PROMPT_PACK_STATUS[row.status] || row.status)));
+        const act = el("div", "install-actions");
+        const add = (label, verb) => {
+          const b = el("button", "wf-btn", label);
+          b.disabled = !!promptPacksBusy;
+          b.addEventListener("click", () => promptPackAction(ws, row, verb));
+          act.appendChild(b);
+        };
+        if (row.status === "missing") add("Install", "install");
+        if (row.status === "stale") add("Update", "install");
+        if (row.status === "edited") add("Overwrite", "install");
+        if (row.status !== "missing") add("Remove", "remove");
+        td.appendChild(act);
+        tr.appendChild(td);
+      }
+      table.appendChild(tr);
+    }
+    card.appendChild(table);
+  }
+  card.appendChild(promptPackSettings(doc, ids));
+  return card;
+}
+
+/* The two settings, edited as one draft and saved together. */
+function promptPackSettings(doc, ids) {
+  const box = el("div", "prompt-pack-settings");
+  if (!promptPacksDraft) {
+    promptPacksDraft = {
+      role_packs: JSON.parse(JSON.stringify(doc.role_packs || {})),
+      default_packs: [...(doc.default_packs || [])],
+    };
+  }
+  const draft = promptPacksDraft;
+  const check = (checked, onChange) => {
+    const input = document.createElement("input");
+    input.type = "checkbox";
+    input.checked = checked;
+    input.addEventListener("change", () => onChange(input.checked));
+    return input;
+  };
+  const toggle = (list, id, on) => {
+    const at = list.indexOf(id);
+    if (on && at < 0) list.push(id);
+    if (!on && at >= 0) list.splice(at, 1);
+  };
+
+  box.appendChild(el("h4", null, "Ticked by default"));
+  box.appendChild(el("p", "wf-note",
+    "Packs the create form ticks before anyone touches it (when the " +
+    "workspace has them installed). \"common\" is the shipped default."));
+  const defaults = el("div", "new-check-list");
+  for (const id of ids) {
+    const label = el("label", "check");
+    label.appendChild(check(draft.default_packs.includes(id),
+      (on) => toggle(draft.default_packs, id, on)));
+    label.appendChild(el("span", null, id));
+    defaults.appendChild(label);
+  }
+  box.appendChild(defaults);
+
+  box.appendChild(el("h4", null, "Required by role"));
+  box.appendChild(el("p", "wf-note",
+    "A session whose role or one of whose subroles is listed here gets these " +
+    "packs whether ticked or not; the create form shows them locked on, and " +
+    "a create in a workspace that has not installed them is refused."));
+  const table = el("table", "md-table prompt-pack-roles");
+  const head = el("tr", null);
+  head.appendChild(el("th", null, "Role"));
+  for (const id of ids) head.appendChild(el("th", null, id));
+  head.appendChild(el("th", null, ""));
+  table.appendChild(head);
+  for (const role of Object.keys(draft.role_packs).sort()) {
+    const tr = el("tr", null);
+    tr.appendChild(el("td", null, role));
+    for (const id of ids) {
+      const td = el("td", null);
+      td.appendChild(check((draft.role_packs[role] || []).includes(id),
+        (on) => toggle(draft.role_packs[role], id, on)));
+      tr.appendChild(td);
+    }
+    const td = el("td", null);
+    const rm = el("button", "wf-btn clear", "Remove");
+    rm.addEventListener("click", () => { delete draft.role_packs[role]; renderWorkspaces(); });
+    td.appendChild(rm);
+    tr.appendChild(td);
+    table.appendChild(tr);
+  }
+  box.appendChild(table);
+  const addRow = el("div", "prompt-pack-add-role");
+  const pick = document.createElement("select");
+  pick.id = "prompt-pack-role-pick";
+  pick.appendChild(new Option("(add a role)", ""));
+  for (const r of doc.roles || []) {
+    if (!draft.role_packs[r]) pick.appendChild(new Option(r, r));
+  }
+  pick.addEventListener("change", () => {
+    if (!pick.value) return;
+    draft.role_packs[pick.value] = [];
+    renderWorkspaces();
+  });
+  addRow.appendChild(pick);
+  box.appendChild(addRow);
+
+  const actions = el("div", "install-actions");
+  const save = el("button", "wf-btn", promptPacksBusy === "settings" ? "Saving…" : "Save");
+  save.disabled = !!promptPacksBusy;
+  save.addEventListener("click", async () => {
+    const ok = await promptPackCall("PUT", "/api/prompt-packs/role-packs",
+      draft, "settings");
+    if (ok) { promptPacksDraft = null; renderWorkspaces(); }
+  });
+  actions.appendChild(save);
+  const reset = el("button", "wf-btn clear", "Restore defaults");
+  reset.disabled = !!promptPacksBusy;
+  reset.addEventListener("click", async () => {
+    if (!confirm("Restore the shipped defaults for both settings?")) return;
+    const ok = await promptPackCall("PUT", "/api/prompt-packs/role-packs",
+      { role_packs: null, default_packs: null }, "settings");
+    if (ok) { promptPacksDraft = null; renderWorkspaces(); }
+  });
+  actions.appendChild(reset);
+  const discard = el("button", "wf-btn clear", "Discard changes");
+  discard.addEventListener("click", () => { promptPacksDraft = null; renderWorkspaces(); });
+  actions.appendChild(discard);
+  box.appendChild(actions);
+  return box;
+}
+
 function renderWorkspaces() {
   const view = $("ws-view");
   const focused = document.activeElement && document.activeElement.id;
@@ -21121,6 +21532,7 @@ function renderWorkspaces() {
   // below: they are machine settings, this is the list of storage roots.
   if (wsSection === "install") {
     view.appendChild(installPanel());
+    view.appendChild(promptPacksCard());
     return;
   }
   if (wsSection === "profiles") {
@@ -27676,17 +28088,20 @@ function sessionFormConfig(mode) {
     "mesh", "handle", "role", "workflow", "context", "borrow", "null_token",
     "resume", "fork", "skip_permissions", "codex_yolo", "codex_sandbox", "args",
     "worktree_mode", "worktree_name", "worktree_existing", "worktree_session",
-    "worktree_rebase", "task", "score_goal", "beads", "issue_text", "issue_filter", "issue", "pi_tool_*"];
+    "worktree_rebase", "task", "score_goal", "beads", "issue_text", "issue_filter", "issue", "pi_tool_*",
+    "subrole_*", "prompt_pack_*"];
   const modes = {
     new: { title: "New session", submit: "Create", sections, editable,
       payload: ["name", "profile", "project", "cwd", "args", "model", "effort", "tools", "worktree",
-        "rebase_onto", "role", "borrow", "null_token", "mesh", "handle", "workflow",
-        "context", "task", "score_goal", "beads", "issue", "issue_text", "resume", "fork_session"] },
+        "rebase_onto", "role", "subroles", "borrow", "null_token", "mesh", "handle", "workflow",
+        "context", "task", "score_goal", "beads", "issue", "issue_text", "prompt_packs",
+        "resume", "fork_session"] },
     spawn: { title: "Spawn child", submit: "Spawn child", sections,
       editable: [...editable, "parent", "fork_parent", "over_limit"],
       payload: ["name", "profile", "project", "workspace", "cwd", "args", "model", "effort", "tools", "worktree",
-        "rebase_onto", "role", "borrow", "null_token", "mesh", "handle", "workflow",
-        "context", "task", "score_goal", "beads", "issue", "issue_text", "fork", "connect", "over_limit"] },
+        "rebase_onto", "role", "subroles", "borrow", "null_token", "mesh", "handle", "workflow",
+        "context", "task", "score_goal", "beads", "issue", "issue_text", "prompt_packs",
+        "fork", "connect", "over_limit"] },
     fork: { title: "Quick fork", submit: "Fork", sections: ["new-quick-fork"],
       editable: ["quick_fork_carry", "quick_fork_task"], payload: ["task", "mesh", "workflow"] },
   };

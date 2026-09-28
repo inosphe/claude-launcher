@@ -239,6 +239,8 @@ def _cmd_new_session(args: argparse.Namespace) -> int:
         body["role"] = args.role
     if getattr(args, "subroles", None):
         body["subroles"] = list(args.subroles)
+    if getattr(args, "prompt_packs", None):
+        body["prompt_packs"] = list(args.prompt_packs)
     if args.borrow:
         body["borrow"] = args.borrow
     if args.null_token:
@@ -593,6 +595,7 @@ def _cmd_spawn(args: argparse.Namespace) -> int:
             ("handle", args.handle),
             ("role", args.role),
             ("subroles", getattr(args, "subroles", None)),
+            ("prompt_packs", getattr(args, "prompt_packs", None)),
             ("connect", args.connect),
             ("workflow", args.workflow),
             ("context", args.context),
@@ -2566,6 +2569,12 @@ def register(sub) -> None:
         "requires --mesh; e.g. --role leader --subrole reviewer",
     )
     p_new.add_argument(
+        "--prompt-pack", dest="prompt_packs", action="append", metavar="ID",
+        help="a prompt pack installed in the session's workspace to put into "
+        "its opening (repeatable; see Settings > Install). Packs the role or "
+        "a subrole requires are added without being named",
+    )
+    p_new.add_argument(
         "--resume", nargs="?", const="", metavar="SESSION|UUID",
         help="open an existing conversation instead of a new one: another "
         "session's name, a conversation uuid, or bare for claude's picker",
@@ -2691,6 +2700,12 @@ def register(sub) -> None:
     p_spawn.add_argument(
         "--subrole", dest="subroles", action="append", metavar="ROLE",
         help="a further role the child also answers for (repeatable)",
+    )
+    p_spawn.add_argument(
+        "--prompt-pack", dest="prompt_packs", action="append", metavar="ID",
+        help="a prompt pack installed in the session's workspace to put into "
+        "its opening (repeatable; see Settings > Install). Packs the role or "
+        "a subrole requires are added without being named",
     )
     p_spawn.add_argument(
         "--connect", action="append", metavar="HANDLE",

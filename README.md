@@ -2234,6 +2234,64 @@ The registry lives under `beads.boards` in `~/.claunch.yaml` (board name →
 `.db` path) and is machine-local for the same reason `workspaces` is: the
 values are absolute paths.
 
+### Prompt packs (guidance installed per workspace, chosen per session)
+
+claunch ships agent guidance as Markdown files under
+`src/claude_launcher/prompt_packs/` — one file per pack, with a small YAML
+header (`title`, `description`, optionally `default: true`). Shipped today:
+
+| Pack | Content |
+|---|---|
+| `common` | A workspace's common working rules (scratch files, daemon restarts, reporting). Ticked by default; meant to be edited after install. |
+| `beads` | Driving the board through `claunch beads`, issue writing rules, and picking work with `bv --robot-*` (never the bare TUI). Agent Mail is not covered. |
+| `unreal-operator` | Handing Unreal editor-only work (assets, Blueprint wiring, Project Settings, PIE checks) to a person as `--assignee operator` issues. |
+
+A new pack is a new `.md` file in that directory; nothing else lists them.
+
+The workflow has two steps:
+
+1. **Install into a workspace.** Settings ▸ Install ▸ *Prompt packs* shows one
+   cell per workspace × pack. Install copies the pack to
+   `<workspace>/.claunch/prompts/<id>.md`. A profile is never a target: a pack
+   describes one repository's working rules. Each copy is compared with the
+   package and with what was last written (`.seeded.json` beside the copies):
+   *installed*, *update available* (the package moved on and the copy is
+   untouched), *edited here* (Overwrite/Remove ask first), and *local pack*
+   (a `.md` the workspace wrote itself, which is offered at creation too).
+2. **Choose at session creation.** The create and spawn forms offer every pack
+   installed in the session's workspace as a checkbox. The ticked packs go
+   into the opening, after the score goal and before the mesh/workflow
+   briefing, so the opening still ends with the task. The workspace's copy is
+   what is read, so a workspace that edited its copy gets its edit. The text
+   is recorded in the session definition, and each block carries a `text id`
+   that `rebrief` answers after a compaction.
+
+From the CLI: `claunch new-session --prompt-pack beads --prompt-pack common`
+(also on `claunch spawn`), and `prompt_packs` on the MCP `spawn` tool. A pack
+that is not installed in the session's workspace refuses the create with a 400
+and nothing is staged.
+
+Two settings sit under the matrix, stored in `~/.claunch.yaml` under
+`prompt_packs`:
+
+- **Ticked by default** (`default_packs`): packs the create form ticks before
+  anyone touches it. Until saved, every pack whose header says
+  `default: true` (`common`).
+- **Required by role** (`role_packs`): role → packs. A session whose primary
+  role or one of whose subroles is listed gets those packs whether ticked or
+  not; the form shows them ticked and locked with "required by <role>", and a
+  create in a workspace that has not installed them is refused with the role
+  named. Roles are matched by canonical name on the joined mesh, so aliases and
+  a role inferred from the handle count too. The default maps the `unreal`
+  role (a domain subrole in the packaged role set, held beside a primary role:
+  `--role worker --subrole unreal`) to `unreal-operator`.
+
+HTTP: `GET /api/prompt-packs` (catalog, per-workspace status, both settings),
+`GET /api/prompt-packs/offer?cwd=` (what the form offers there),
+`POST /api/prompt-packs/install|remove` (`{workspace, pack, force}`),
+`PUT /api/prompt-packs/role-packs` (`{role_packs?, default_packs?}`; `null`
+restores a default).
+
 ### Joining with a role, or opening another session's conversation
 
 Two creation-time choices sit beside each other in the form. A **role** is the

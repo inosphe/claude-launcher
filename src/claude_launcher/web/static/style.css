@@ -4237,6 +4237,22 @@ a.wf-btn { display: inline-block; text-decoration: none; line-height: 1.5; }
 .install-files tr.install-unchanged td { color: #7d8590; }
 .install-diff, .install-lines { max-height: 320px; overflow: auto; white-space: pre-wrap; font-size: 12px; }
 .install-effects li { margin: 2px 0; }
+.prompt-packs { margin-top: 18px; }
+.prompt-pack-table, .prompt-pack-roles { width: 100%; }
+.prompt-pack-table td { vertical-align: top; }
+.prompt-pack-table td .wf-note { overflow-wrap: anywhere; }
+.prompt-pack-table td.prompt-pack-current > div:first-child { color: #7ee787; }
+.prompt-pack-table td.prompt-pack-stale > div:first-child { color: #e3b341; }
+.prompt-pack-table td.prompt-pack-edited > div:first-child { color: #d29922; }
+.prompt-pack-table td.prompt-pack-missing > div:first-child { color: #7d8590; }
+.prompt-pack-catalog li { margin: 2px 0; }
+.prompt-pack-add-role { margin: 6px 0; }
+/* The create form's Subroles and Prompt packs rows: a label, then boxes. */
+.new-check-row { display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; margin: 4px 0; font-size: 12px; }
+.new-check-row .new-check-label { min-width: 90px; }
+.new-check-list { display: flex; flex-wrap: wrap; gap: 4px 14px; }
+.new-check-list label.check { display: inline-flex; gap: 4px; align-items: baseline; margin: 0; }
+.new-check-row .wf-error { flex-basis: 100%; margin: 2px 0; font-size: 12px; }
 .profile-ok { color: #7ee787; }
 .profile-pending { color: #e3b341; }
 .profile-muted { color: #6e7681; }
