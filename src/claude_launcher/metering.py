@@ -862,7 +862,11 @@ def session_summary(
     return out
 
 
-def attach(info: dict, index: Optional[Dict[str, List[dict]]] = None) -> dict:
+def attach(
+    info: dict,
+    index: Optional[Dict[str, List[dict]]] = None,
+    max_age: Optional[float] = None,
+) -> dict:
     """``info`` (a session record) with a ``tps`` key when there is one to give.
 
     The same shape of hook as ``daemon/ctxsize.attach``: the key is absent
@@ -876,10 +880,12 @@ def attach(info: dict, index: Optional[Dict[str, List[dict]]] = None) -> dict:
     of the last call for one that has gone quiet.
 
     ``index``: a :func:`snapshot` shared by every row of one list build.
+    ``max_age``: :func:`summary_max_age`, read once by that build -- each read
+    is a copy of the whole config document (claunch-2t37a).
     """
     name = info.get("name")
     if name:
-        summary = session_summary(str(name), index=index)
+        summary = session_summary(str(name), index=index, max_age=max_age)
         if summary:
             info[INFO_KEY] = summary
     return info
