@@ -663,22 +663,27 @@ _tail_cache: Dict[str, tuple] = {}
 _tail_lock = threading.Lock()
 
 
-def _tail_records(path: Path) -> List[dict]:
-    """The records at the end of one file, re-read only when the file changed.
+def _tail(path: Path) -> tuple:
+    """``(key, records, by_session)`` for the end of one file, re-read only
+    when the file changed.
 
     Keyed on (mtime, size): the daemon polls the session list every few
     seconds for every session, and an unchanged file must cost a ``stat``,
-    not a parse.
+    not a parse. ``by_session`` is built with the parse, once per change:
+    filtering the records per session instead was one pass over every
+    record for every row of the list -- 850 rows by 2,824 records, about
+    160ms of pure Python holding the GIL on each list build while the
+    daemon's event loop waited for it (claunch-vyw9s).
     """
     try:
         st = path.stat()
     except OSError:
-        return []
+        return (None, [], {})
     key = (st.st_mtime_ns, st.st_size)
     with _tail_lock:
         hit = _tail_cache.get(str(path))
         if hit and hit[0] == key:
-            return hit[1]
+            return hit
     out: List[dict] = []
     try:
         with open(path, "rb") as fh:
@@ -687,7 +692,8 @@ def _tail_records(path: Path) -> List[dict]:
                 fh.readline()  # drop the partial line the seek landed in
             data = fh.read()
     except OSError:
-        return out
+        return (None, out, {})
+    by_session: Dict[str, List[dict]] = {}
     for raw in data.decode("utf-8", "replace").splitlines():
         try:
             rec = json.loads(raw)
@@ -695,22 +701,52 @@ def _tail_records(path: Path) -> List[dict]:
             continue
         if isinstance(rec, dict):
             out.append(rec)
+            by_session.setdefault(rec.get("session"), []).append(rec)
+    entry = (key, out, by_session)
     with _tail_lock:
-        _tail_cache[str(path)] = (key, out)
-    return out
+        _tail_cache[str(path)] = entry
+    return entry
 
 
-def recent(session: str, *, limit: int = SUMMARY_WINDOW) -> List[dict]:
-    """The last ``limit`` records ``session`` made, oldest first."""
-    out: List[dict] = []
+def _tail_records(path: Path) -> List[dict]:
+    """The records at the end of one file (see :func:`_tail`)."""
+    return _tail(path)[1]
+
+
+def snapshot() -> Dict[str, List[dict]]:
+    """Every session's tail records across all record files, oldest first.
+
+    One directory listing and one ``stat`` per file, however many sessions
+    are then looked up in it: a caller answering many sessions at once (the
+    session list) takes one snapshot and hands it to :func:`attach` for
+    each row, rather than listing the directory once per row.
+    """
+    merged: Dict[str, List[dict]] = {}
     try:
         files = sorted(records_dir().glob("*.jsonl"))
     except OSError:
-        return out
+        return merged
     for path in files:
-        out.extend(r for r in _tail_records(path) if r.get("session") == session)
-    out.sort(key=lambda r: str(r.get("ts") or ""))
-    return out[-limit:] if limit else out
+        for session, recs in _tail(path)[2].items():
+            merged.setdefault(session, []).extend(recs)
+    for recs in merged.values():
+        recs.sort(key=lambda r: str(r.get("ts") or ""))
+    return merged
+
+
+def recent(
+    session: str,
+    *,
+    limit: int = SUMMARY_WINDOW,
+    index: Optional[Dict[str, List[dict]]] = None,
+) -> List[dict]:
+    """The last ``limit`` records ``session`` made, oldest first.
+
+    ``index`` is a :func:`snapshot` already taken; left out, one is taken
+    here.
+    """
+    recs = (snapshot() if index is None else index).get(session) or []
+    return recs[-limit:] if limit else list(recs)
 
 
 def record_age(record: dict, *, now: Optional[datetime] = None) -> Optional[float]:
@@ -750,6 +786,7 @@ def session_summary(
     *,
     now: Optional[datetime] = None,
     max_age: Optional[float] = None,
+    index: Optional[Dict[str, List[dict]]] = None,
 ) -> Optional[dict]:
     """What a session row shows: its latest call and a short rolling median.
 
@@ -778,8 +815,9 @@ def session_summary(
 
     ``now`` and ``max_age`` are injection points for tests and for a caller
     that already knows both; left out, the clock and the config file answer.
+    ``index`` is a :func:`snapshot` the caller already took.
     """
-    recs = recent(session, limit=SUMMARY_WINDOW)
+    recs = recent(session, limit=SUMMARY_WINDOW, index=index)
     if not recs:
         return None
     max_age = summary_max_age() if max_age is None else max(0.0, float(max_age))
@@ -824,7 +862,7 @@ def session_summary(
     return out
 
 
-def attach(info: dict) -> dict:
+def attach(info: dict, index: Optional[Dict[str, List[dict]]] = None) -> dict:
     """``info`` (a session record) with a ``tps`` key when there is one to give.
 
     The same shape of hook as ``daemon/ctxsize.attach``: the key is absent
@@ -836,10 +874,12 @@ def attach(info: dict) -> dict:
     rate. The two are different facts and the UI draws them differently:
     nothing at all for a session that was never measured, "none" plus the age
     of the last call for one that has gone quiet.
+
+    ``index``: a :func:`snapshot` shared by every row of one list build.
     """
     name = info.get("name")
     if name:
-        summary = session_summary(str(name))
+        summary = session_summary(str(name), index=index)
         if summary:
             info[INFO_KEY] = summary
     return info
