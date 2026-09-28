@@ -5209,7 +5209,7 @@ async def h_sessions_list(request: web.Request) -> web.Response:
     winddowns = request.app["beads"].winddowns
     handoffs = request.app["handoff"].pending
 
-    def collect() -> list:
+    def collect() -> tuple:
         # The per-session assembly, in a worker: ``attach`` re-reads a
         # transcript tail whenever its file grew, and ten busy sessions grow
         # theirs continuously, so this loop was 30-150ms of the event loop
@@ -5221,15 +5221,30 @@ async def h_sessions_list(request: web.Request) -> web.Response:
         # does not compete with the loop for the GIL.
         usage_budget = tokenusage.budget()
         try:
-            return _collect(usage_budget)
+            rows = _collect(usage_budget)
         finally:
             usage_budget.release()
+        # The status-check answers for every row, read here rather than on
+        # the loop: the file read and the cleaning of every session's reports
+        # held the GIL on the thread that pumps every terminal
+        # (claunch-2t37a).
+        try:
+            checks = status_checks.digests([info.get("name") or "" for info in rows])
+        except status_checks.StatusCheckError:
+            checks = {}
+        return rows, checks
 
     def _collect(usage_budget) -> list:
         out = []
         # One look at the metering files for the whole list, however many
-        # rows read it (claunch-vyw9s).
+        # rows read it (claunch-vyw9s), and one read of its age bound
+        # (claunch-2t37a).
         meter = metering.snapshot()
+        try:
+            meter_age = metering.summary_max_age()
+        except store.StoreError:
+            # Each row reads it for itself, as before, and answers as before.
+            meter_age = None
         for s in sessions:
             # An archived record carries none of the per-row reads below
             # (context, tool calls, ``tps``, ``token_usage``): the list holds
@@ -5245,7 +5260,7 @@ async def h_sessions_list(request: web.Request) -> web.Response:
                 # The session's latest throughput through the metering shim
                 # (``tps``), read off the record file tails; absent when the
                 # session never went through a shim (the OAuth routes).
-                metering.attach(info, meter)
+                metering.attach(info, meter, meter_age)
                 # What the conversation has spent so far (``token_usage``),
                 # read incrementally off the same transcript; absent where the
                 # harness has no reader.
@@ -5275,7 +5290,7 @@ async def h_sessions_list(request: web.Request) -> web.Response:
             out.append(info)
         return out
 
-    attached = await asyncio.to_thread(collect)
+    attached, check_digests = await asyncio.to_thread(collect)
     for s, info in zip(sessions, attached):
         # Which git branch the session's checkout is on — one fact that tells
         # two sessions in the same worktree apart without opening either. On
@@ -5301,10 +5316,6 @@ async def h_sessions_list(request: web.Request) -> web.Response:
     # search is on offer is one toggle, not a reason to lose the list.
     rag_service = request.app.get("rag")
     rag_ok = bool(rag_service is not None and rag_service.configured())
-    try:
-        check_digests = status_checks.digests([info.get("name") or "" for info in attached])
-    except status_checks.StatusCheckError:
-        check_digests = {}
     for info in attached:
         checks = check_digests.get(info.get("name") or "")
         if checks:

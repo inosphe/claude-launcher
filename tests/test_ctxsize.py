@@ -656,6 +656,34 @@ def test_a_pi_row_draws_the_specs_compact_point_and_window(home, tmp_path, monke
     assert info["context"]["model_context_window"] == 1_000_000
 
 
+def test_the_declared_window_is_resolved_once_per_backend_within_the_ttl(home, tmp_path, monkeypatch):
+    """Every row of a poll asked the profile chain and the provider registry
+    for the same ceiling again, through the config store -- the largest share
+    of the GIL the session list's worker held (claunch-2t37a). It is held for
+    ``WINDOW_TTL`` per (profile, borrow), as the compact window already was;
+    ``forget`` drops it and the clock ages it out."""
+    from claude_launcher import providers
+
+    sdef = _pi_session(tmp_path, pi_turn(fresh=1_988, read=12_160, out=128))
+    _pi_spec_profile()
+    calls = []
+    real = providers.spec_for
+    monkeypatch.setattr(providers, "spec_for", lambda *a, **k: calls.append(1) or real(*a, **k))
+
+    assert ctxsize.declared_context_window(sdef) == 1_000_000
+    assert ctxsize.declared_context_window(sdef) == 1_000_000
+    assert len(calls) == 1
+
+    clock = [time.monotonic()]
+    monkeypatch.setattr(ctxsize.time, "monotonic", lambda: clock[0])
+    clock[0] += ctxsize.WINDOW_TTL + 1
+    assert ctxsize.declared_context_window(sdef) == 1_000_000
+    assert len(calls) == 2
+    ctxsize.forget()
+    assert ctxsize.declared_context_window(sdef) == 1_000_000
+    assert len(calls) == 3
+
+
 def test_a_pi_row_without_declared_thresholds_draws_none(home, tmp_path, monkeypatch):
     monkeypatch.setenv(ctxsize.COMPACT_WINDOW_ENV, "111000")
     sdef = _pi_session(tmp_path, pi_turn(fresh=1_988, read=12_160))

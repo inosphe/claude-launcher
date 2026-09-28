@@ -99,6 +99,10 @@ WINDOW_TTL = 15.0
 #: (profile, borrow, null_token) -> (window or None, when it was resolved).
 _windows: Dict[Tuple[str, str, bool], Tuple[Optional[int], float]] = {}
 
+#: (profile, borrow) -> (the spec's context_window or None, when it was
+#: resolved) -- :func:`declared_context_window`, held for ``WINDOW_TTL`` too.
+_declared: Dict[Tuple[str, str], Tuple[Optional[int], float]] = {}
+
 
 def forget() -> None:
     """Drop the caches. For tests, and for anything that moves a transcript."""
@@ -106,6 +110,7 @@ def forget() -> None:
     _tool_reads.clear()
     _located.clear()
     _windows.clear()
+    _declared.clear()
 
 
 def _int(value) -> int:
@@ -602,16 +607,29 @@ def lineage_env_of(sdef) -> dict:
 
 
 def declared_context_window(sdef) -> Optional[int]:
-    """The spec's ``context_window`` for this session's backend, if any."""
+    """The spec's ``context_window`` for this session's backend, if any.
+
+    Remembered for ``WINDOW_TTL`` per (profile, borrow), as
+    :func:`compact_window_of` is: the resolution walks the profile chain and
+    the provider registry through the config store, and the session list asked
+    it again for every row on every poll -- the largest share of the GIL that
+    list's worker held while the event loop waited (claunch-2t37a).
+    """
+    key = (str(getattr(sdef, "profile", "") or ""),
+           str(getattr(sdef, "borrow", "") or ""))
+    hit = _declared.get(key)
+    now = time.monotonic()
+    if hit is not None and now - hit[1] < WINDOW_TTL:
+        return hit[0]
     try:
-        prof = profile_mod.require_selector(
-            str(getattr(sdef, "profile", "") or "")
-        )
+        prof = profile_mod.require_selector(key[0])
         borrow = getattr(sdef, "borrow", None)
         auth = profile_mod.require(str(borrow)) if borrow else prof
-        return providers.spec_for(prof, providers.resolve_name(auth)).context_window
+        value = providers.spec_for(prof, providers.resolve_name(auth)).context_window
     except Exception:
-        return None
+        value = None
+    _declared[key] = (value, now)
+    return value
 
 
 def attach(session) -> dict:

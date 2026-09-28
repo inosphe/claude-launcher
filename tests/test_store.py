@@ -234,6 +234,37 @@ def test_load_parses_once_per_text_and_hands_out_copies(config_file, monkeypatch
         store.load()
 
 
+def test_load_copies_a_plain_document_without_deepcopy(config_file, monkeypatch):
+    """Each ``load`` still hands out its own copy, but a document of dicts and
+    lists over scalars is copied by walking it, not by ``copy.deepcopy``: its
+    memo bookkeeping was a quarter of a millisecond per call, and the daemon's
+    session list calls ``load`` several times per row (claunch-2t37a). What the
+    safe loader can build beyond that (a ``!!set``) still goes through
+    ``deepcopy`` and still comes out as its own object."""
+    store.save({"profiles": {"a": {"env": {"X": "1"}, "tools": ["t1", "t2"]}}})
+    store.load()
+    real_deepcopy = store.copy.deepcopy
+
+    def no_deepcopy(value, memo=None):
+        raise AssertionError("a plain document must not go through copy.deepcopy")
+
+    monkeypatch.setattr(store.copy, "deepcopy", no_deepcopy)
+    first = store.load()
+    first["profiles"]["a"]["env"]["X"] = "mutated"
+    first["profiles"]["a"]["tools"].append("t3")
+    again = store.load()
+    assert again["profiles"]["a"] == {"env": {"X": "1"}, "tools": ["t1", "t2"]}
+    monkeypatch.setattr(store.copy, "deepcopy", real_deepcopy)
+
+    monkeypatch.setattr(store, "_DISK_TTL", 0.0)
+    config_file.write_text(
+        "version: 2\nextra: !!set {a: null, b: null}\n", encoding="utf-8"
+    )
+    one = store.load()
+    one["extra"].add("c")
+    assert store.load()["extra"] == {"a", "b"}
+
+
 def test_load_disk_ttl_collapses_a_same_instant_burst(config_file, monkeypatch):
     """Board claunch-snhl: a daemon request handler calling load() many times
     to answer one poll used to reopen the file every time. Within the TTL

@@ -1092,6 +1092,66 @@ def test_the_session_list_skips_the_per_row_reads_for_an_archived_record(home, t
     asyncio.run(run())
 
 
+def test_the_session_list_reads_checks_and_the_age_bound_off_the_loop_once(home, tmp_path, monkeypatch):
+    """The status-check digests were read on the event loop -- a file read and
+    a pass over every session's reports on the thread that pumps every
+    terminal -- and each metering row read ``summary_max_age`` for itself, a
+    copy of the whole config document per row (claunch-2t37a). Both now happen
+    once per list, in the list's worker; the rows answer as before."""
+    import asyncio
+    import sys
+    import threading
+
+    from claude_launcher.daemon import status_checks
+    from claude_launcher.daemon.api import build_app
+    from claude_launcher.daemon.harness import SessionDef
+    from claude_launcher.daemon.manager import SessionManager
+    from claude_launcher.daemon.mesh import MeshManager
+
+    store.update(lambda doc: doc.update({
+        "harnesses": {"py": {"command": [sys.executable, "-u", "-c", "import time; time.sleep(60)"]}}
+    }))
+    rows = status_checks.set_entries([{"name": "T", "question": "Tests passed?"}])
+    status_checks.report("a", [{"id": rows[0]["id"], "answer": "yes"}])
+    for name, rate in (("a", 11.0), ("b", 22.0), ("c", 33.0)):
+        metering.append("fp1", _rec(session=name, tps=rate, tps_total=rate, ts=_ago(6)))
+    bearer = {"Authorization": "Bearer sekrit"}
+
+    digest_threads = []
+    real_digests = status_checks.digests
+    monkeypatch.setattr(status_checks, "digests", lambda names: (
+        digest_threads.append(threading.current_thread()) or real_digests(names)
+    ))
+    age_reads = []
+    real_age = metering.summary_max_age
+    monkeypatch.setattr(metering, "summary_max_age", lambda *a, **k: (
+        age_reads.append(1) or real_age(*a, **k)
+    ))
+
+    async def run():
+        from aiohttp.test_utils import TestClient, TestServer
+
+        mgr = SessionManager(idle_threshold=0.5, scrollback=200, restore_default=True)
+        client = TestClient(TestServer(build_app(
+            mgr, "sekrit", started_at=time.monotonic(), mesh=MeshManager(mgr)
+        )))
+        await client.start_server()
+        try:
+            for name in ("a", "b", "c"):
+                mgr.create(SessionDef(name=name, harness="py", cwd=str(tmp_path)))
+            resp = await client.get("/api/sessions?view=rail&state=current", headers=bearer)
+            got = {s["name"]: s for s in (await resp.json())["sessions"]}
+            assert {n: got[n]["tps"]["tps"] for n in "abc"} == {"a": 11.0, "b": 22.0, "c": 33.0}
+            assert got["a"]["status_checks"][0]["answer"] == "yes"
+            assert digest_threads and threading.main_thread() not in digest_threads
+            assert len(age_reads) == 1
+        finally:
+            await mgr.shutdown_all()
+            await client.close()
+
+    asyncio.run(run())
+
+
 def test_web_page_draws_tps_in_the_rail_the_card_the_header_and_over_the_pty():
     from pathlib import Path
 

@@ -61,6 +61,7 @@ nothing else stores these settings, so there is no separate "export" step.
 from __future__ import annotations
 
 import copy
+import datetime
 import time
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Tuple
@@ -98,6 +99,33 @@ _parsed: Optional[Tuple[str, dict]] = None
 _DISK_TTL = 0.1
 _disk_read_at: Optional[float] = None
 _disk_read_path: Optional[Path] = None
+
+
+#: Leaf types a YAML document shares safely between copies: nothing can change
+#: them in place.
+_IMMUTABLE = (str, int, float, bool, type(None), bytes, datetime.date)
+
+
+def _copy_doc(value):
+    """A deep copy of a parsed YAML document, for what :func:`load` hands out.
+
+    The document is dicts and lists over immutable scalars, which is what this
+    walks; anything else the safe loader can produce (a ``!!set``, the tuples of
+    an ``!!omap``) goes through ``copy.deepcopy`` as before. ``copy.deepcopy``
+    on the whole document was a quarter of a millisecond per :func:`load` --
+    its memo bookkeeping, not the copying -- and the daemon's session list calls
+    :func:`load` several times per row, hundreds of rows per poll, in a worker
+    holding the GIL while the event loop waits (claunch-2t37a). This is about
+    four times cheaper and hands out the same thing.
+    """
+    kind = type(value)
+    if kind is dict:
+        return {key: _copy_doc(item) for key, item in value.items()}
+    if kind is list:
+        return [_copy_doc(item) for item in value]
+    if isinstance(value, _IMMUTABLE):
+        return value
+    return copy.deepcopy(value)
 
 
 class StoreError(Exception):
@@ -149,7 +177,7 @@ def load() -> dict:
         and _disk_read_path == p
         and now - _disk_read_at < _DISK_TTL
     ):
-        return copy.deepcopy(_parsed[1]) if _parsed is not None else {"version": VERSION}
+        return _copy_doc(_parsed[1]) if _parsed is not None else {"version": VERSION}
     if not p.is_file():
         _parsed = None
         _disk_read_at = now
@@ -163,7 +191,7 @@ def load() -> dict:
     _disk_read_path = p
     hit = _parsed
     if hit is not None and hit[0] == text:
-        return copy.deepcopy(hit[1])
+        return _copy_doc(hit[1])
     try:
         data = yaml.load(text, Loader=_LOADER)
     except yaml.YAMLError as exc:
@@ -182,7 +210,7 @@ def load() -> dict:
             f"up to {VERSION} -- upgrade claunch"
         )
     data.setdefault("version", VERSION)
-    _parsed = (text, copy.deepcopy(data))
+    _parsed = (text, _copy_doc(data))
     return data
 
 
@@ -240,7 +268,7 @@ def save(doc: dict) -> None:
                 f"and could not be updated ({exc}); this is not a broken "
                 "config -- run the command again"
             ) from exc
-    _parsed = (text, copy.deepcopy(doc))
+    _parsed = (text, _copy_doc(doc))
     _disk_read_at = time.monotonic()
     _disk_read_path = p
 
