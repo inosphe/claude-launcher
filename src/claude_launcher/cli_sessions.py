@@ -32,6 +32,7 @@ from urllib.parse import quote
 
 from . import (
     cli_mesh,
+    config as config_mod,
     daemon_client,
     harnesses,
     lineage,
@@ -42,6 +43,7 @@ from . import (
     worktree,
 )
 from .daemon import harness as harness_def
+from .daemon import instance_manifest
 from .daemon import paths as daemon_paths
 from .daemon import restart_notice
 from .daemon import runtime_state
@@ -2051,7 +2053,12 @@ def _restart_all_instances() -> int:
     if not instances:
         print("no daemon instances found")
         return 0
-    saved = os.environ.get(daemon_paths.INSTANCE_ENV)
+    # Swapping the instance also swaps its manifest (home, config, port), so
+    # every variable that can move is saved and put back afterwards.
+    saved = {
+        var: os.environ.get(var)
+        for var in (daemon_paths.INSTANCE_ENV, *instance_manifest.ENV_VARS)
+    }
     restarted = 0
     try:
         for name in instances:
@@ -2060,6 +2067,11 @@ def _restart_all_instances() -> int:
             else:
                 os.environ.pop(daemon_paths.INSTANCE_ENV, None)
             label = name or "default"
+            try:
+                instance_manifest.apply()
+            except instance_manifest.InstanceManifestError as exc:
+                print(f"{label}: {exc} -- skipped")
+                continue
             if daemon_client.connect() is None:
                 print(f"{label}: not running -- skipped")
                 continue
@@ -2073,10 +2085,11 @@ def _restart_all_instances() -> int:
             restarted += 1
             print(f"{label}: restarted at {client.base_url}")
     finally:
-        if saved is None:
-            os.environ.pop(daemon_paths.INSTANCE_ENV, None)
-        else:
-            os.environ[daemon_paths.INSTANCE_ENV] = saved
+        for var, value in saved.items():
+            if value is None:
+                os.environ.pop(var, None)
+            else:
+                os.environ[var] = value
     print(f"{restarted} daemon(s) restarted")
     return 0
 
@@ -2176,6 +2189,119 @@ def _print_relay_entry(cfg: dict, *, prefix: str = "") -> None:
     print(f"{prefix}  token:      "
           f"{'set' if _relay_token_set(cfg, ident) else '(unset)'}")
     print(f"{prefix}  verify_tls: {cfg.get('verify_tls', True)}")
+
+
+def _instance_rows(m) -> List[tuple]:
+    """(item, value) lines saying what instance ``m`` shares and what it owns."""
+    def shared(what):
+        return f"shared ({what})"
+    return [
+        ("state", str(daemon_paths.base_home() / "daemons" / m.name)),
+        ("home", str(m.home) if m.home else shared(str(daemon_paths.base_home()))),
+        ("config", str(m.config) if m.config else shared("the default daemon's config file")),
+        ("port", str(m.port) if m.port else "ephemeral (see its daemon.json)"),
+    ]
+
+
+def _cmd_daemon_instance_create(args: argparse.Namespace) -> int:
+    try:
+        name = daemon_paths.validate_instance(args.name)
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    path = instance_manifest.manifest_path(name)
+    if path.exists() and not args.force:
+        print(f"error: {path} already exists (--force replaces it)", file=sys.stderr)
+        return 1
+    if args.seed and not args.config:
+        print("error: --seed needs --config (it seeds that new config file)", file=sys.stderr)
+        return 2
+    try:
+        m = instance_manifest.parse(name, path, {
+            "home": args.home, "config": args.config, "port": args.port,
+        })
+        instance_manifest.check_conflicts(m)
+    except instance_manifest.InstanceManifestError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    if args.seed:
+        seeded = _seed_instance_config(m.config)
+        if seeded is not None:
+            print(seeded)
+    if m.home is not None:
+        m.home.mkdir(parents=True, exist_ok=True)
+    instance_manifest.write(m)
+    print(f"wrote {path}")
+    for item, value in _instance_rows(m):
+        print(f"  {item:<7} {value}")
+    print(f"use it with: claunch -L {name} ...")
+    return 0
+
+
+def _seed_instance_config(target) -> Optional[str]:
+    """Copy the config file this command reads to ``target``, minus ``sync:``.
+
+    The ``sync:`` block is left out on purpose: the merge base is kept per
+    launcher home, so a second home pushing to the same namespace would merge
+    against a base it never agreed on. Never overwrites an existing file.
+    """
+    import yaml
+
+    if target.exists():
+        return f"not seeded: {target} already exists (left as it is)"
+    source = config_mod.sync_file()
+    doc = {}
+    if source.is_file():
+        doc = yaml.safe_load(source.read_text(encoding="utf-8")) or {}
+    doc.pop("sync", None)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(
+        yaml.safe_dump(doc, sort_keys=False, allow_unicode=True), encoding="utf-8",
+    )
+    return (f"seeded {target} from {source} (without sync:; profile logins "
+            "are not copied -- log in again under the new home)")
+
+
+def _cmd_daemon_instance_show(args: argparse.Namespace) -> int:
+    name = args.name or daemon_paths.instance()
+    if not name:
+        print("error: name an instance (or use -L NAME); the default instance "
+              "has no manifest", file=sys.stderr)
+        return 2
+    try:
+        m = instance_manifest.load(name)
+    except (ValueError, instance_manifest.InstanceManifestError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    if m is None:
+        print(f"instance {name!r} has no manifest: it shares the home, config "
+              f"file and profiles of {daemon_paths.base_home()}")
+        print(f"  create one with: claunch daemon instance create {name} --home ... --config ...")
+        return 0
+    print(f"instance {name!r} ({m.path})")
+    for item, value in _instance_rows(m):
+        print(f"  {item:<7} {value}")
+    return 0
+
+
+def _cmd_daemon_instance_ls(args: argparse.Namespace) -> int:
+    names = [n for n in daemon_paths.known_instances() if n]
+    if not names:
+        print("no named instances")
+        return 0
+    for name in names:
+        try:
+            m = instance_manifest.load(name)
+        except instance_manifest.InstanceManifestError as exc:
+            print(f"{name}: bad manifest -- {exc}")
+            continue
+        if m is None:
+            print(f"{name}: no manifest (shares home and config)")
+            continue
+        parts = [f"home={m.home or 'shared'}", f"config={m.config or 'shared'}",
+                 f"port={m.port or 'ephemeral'}"]
+        print(f"{name}: " + " ".join(parts))
+    return 0
 
 
 def _cmd_daemon_relay(args: argparse.Namespace) -> int:
@@ -3040,6 +3166,36 @@ def register(sub) -> None:
         help="delete the relay uplink with this handle",
     )
     p_relay.set_defaults(func=_cmd_daemon_relay)
+
+    p_inst = dsub.add_parser(
+        "instance",
+        help="declare what a named -L instance shares (home, config file, port)",
+        description=(
+            "A named instance (claunch -L NAME) always has its own daemon "
+            "state, but shares the launcher home (profiles) and the config "
+            "file with the default daemon unless its manifest "
+            "(<home>/daemons/NAME/instance.yaml) says otherwise. Once written, "
+            "'claunch -L NAME ...' applies it on its own."
+        ),
+    )
+    isub = p_inst.add_subparsers(dest="instance_command", required=True)
+    p_ic = isub.add_parser("create", help="write an instance's manifest")
+    p_ic.add_argument("name", help="the instance name, as given to -L")
+    p_ic.add_argument("--home", help="its own launcher home (profiles, workflows, "
+                      "sync merge base); omitted = shared")
+    p_ic.add_argument("--config", help="its own config file (in place of "
+                      "~/.claunch.yaml); omitted = shared")
+    p_ic.add_argument("--port", type=int, help="a fixed port; omitted = ephemeral")
+    p_ic.add_argument("--seed", action="store_true",
+                      help="copy the current config file into --config (without "
+                      "its sync: block; never overwrites)")
+    p_ic.add_argument("--force", action="store_true", help="replace an existing manifest")
+    p_ic.set_defaults(func=_cmd_daemon_instance_create)
+    p_is = isub.add_parser("show", help="print what an instance shares and owns")
+    p_is.add_argument("name", nargs="?", help="instance name (default: the -L instance)")
+    p_is.set_defaults(func=_cmd_daemon_instance_show)
+    p_il = isub.add_parser("ls", help="list named instances and their manifests")
+    p_il.set_defaults(func=_cmd_daemon_instance_ls)
 
     p_web = sub.add_parser("web", help="print the web UI URL")
     p_web.add_argument("--open", action="store_true", help="also open it in the browser")
