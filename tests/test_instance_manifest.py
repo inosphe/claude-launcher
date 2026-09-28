@@ -15,19 +15,46 @@ from claude_launcher.daemon import instance_manifest as im
 from claude_launcher.daemon import paths
 
 
+#: Every variable ``apply()`` or ``claunch -L`` may write.
+_ENV_VARS = (paths.INSTANCE_ENV, *im.ENV_VARS)
+#: The two of them the ``home`` fixture owns (set per test, restored by it).
+_HOME_VARS = (config.LAUNCHER_HOME_ENV, config.LAUNCHER_SYNC_ENV)
+#: What the instance variables held when this module was imported. Every
+#: test checks, before touching anything, that the test before it left them
+#: that way -- a leak shows up at the very next test, in this module, instead
+#: of as an unrelated failure in whichever module is collected after it.
+_ENV_AT_IMPORT = {v: os.environ.get(v) for v in _ENV_VARS if v not in _HOME_VARS}
+
+
 @pytest.fixture(autouse=True)
-def clean_env(home, monkeypatch):
-    # apply() writes os.environ directly; registering every variable it may
-    # touch makes monkeypatch put each one back after the test. The home and
-    # config variables the `home` fixture points at a temp dir are re-set to
-    # the same value, never deleted: deleting them sends the test to the
-    # developer's real ~/.claude-launcher.
-    for var in (paths.INSTANCE_ENV, *im.ENV_VARS):
-        if var in (config.LAUNCHER_HOME_ENV, config.LAUNCHER_SYNC_ENV):
-            monkeypatch.setenv(var, os.environ[var])
-        else:
-            monkeypatch.delenv(var, raising=False)
+def clean_env(home):
+    """Start each test with no instance selected and no manifest applied, and
+    put every variable back exactly as it was when the test ends -- present
+    values restored, absent ones deleted.
+
+    This is a snapshot and restore, not monkeypatch, on purpose:
+    ``monkeypatch.delenv(var, raising=False)`` on a variable that is ABSENT
+    records nothing, so a value the code under test then writes into
+    ``os.environ`` directly (``apply()`` sets CLAUNCH_INSTANCE_APPLIED, the
+    CLI's ``-L`` sets CLAUNCH_DAEMON) outlives the test. That is how this
+    module leaked an instance into ``test_loops.py`` and broke seven of its
+    tests in the same process (claunch-50qrv). The home and config variables
+    the ``home`` fixture set are kept, never deleted: deleting them sends the
+    test to the developer's real ~/.claude-launcher.
+    """
+    before = {v: os.environ.get(v) for v in _ENV_VARS}
+    left_over = {v: before[v] for v in _ENV_AT_IMPORT if before[v] != _ENV_AT_IMPORT[v]}
+    assert not left_over, f"a previous test left instance state in os.environ: {left_over}"
+    for var in _ENV_VARS:
+        if var not in _HOME_VARS:
+            os.environ.pop(var, None)
     assert config.launcher_home() == home
+    yield
+    for var, value in before.items():
+        if value is None:
+            os.environ.pop(var, None)
+        else:
+            os.environ[var] = value
 
 
 def _manifest(base: Path, name: str, doc: dict) -> Path:
@@ -279,3 +306,4 @@ def test_real_daemon_process_runs_under_its_manifest(home, tmp_path):
         if proc.poll() is None:
             proc.kill()
             proc.wait(timeout=10)
+
