@@ -90,8 +90,8 @@ check("the form drops its page column width inside the box",
       true);
 
 /* ---- the three ways in, and the one way to #/new ---------------------- */
-check("the rail's + and the detail panel's Spawn button both open it",
-      (src.match(/openSpawnModal\((?:target|s)\.name\)/g) || []).length, 3);
+check("the session row's + and the detail panel's Spawn button both open it",
+      (src.match(/openSpawnModal\((?:target|s)\.name\)/g) || []).length, 2);
 check("the leader's quick job opens it with its pickers as the seed",
       /openSpawnModal\(s\.name, \{ seed: \{[\s\S]{0,200}quick: true/.test(src),
       true);
