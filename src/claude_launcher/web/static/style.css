@@ -4953,6 +4953,52 @@ a.window-owner:hover { color: #79c0ff; text-decoration: underline; }
   .stats-session { flex: 1 1 100%; }
   .stats-chart { height: 120px; }
 }
+/* Compare mode: the session picker, the figures table with z-scores, the
+   origin share bars and the shared timeline. */
+.stats-picks { display: flex; flex-wrap: wrap; gap: 4px; flex: 1 1 100%; }
+.stats-pick {
+  padding: 3px 9px; color: #8b949e; background: #1b1e24; font-size: 12px;
+  border: 1px solid #2a2e36; border-radius: 12px; cursor: pointer;
+}
+.stats-pick.active { color: #e6edf3; background: #2d333b; border-width: 2px; }
+.stats-compare td.num span { display: block; }
+.stats-z { color: #6e7681; font-size: 10px; }
+.stats-z.high { color: #f0883e; }
+.stats-z.low { color: #58a6ff; }
+.stats-compare th.stats-spread, .stats-compare td.stats-spread {
+  color: #8b949e; background: #15181d;
+}
+.stats-shares { padding: 12px; display: flex; flex-direction: column; gap: 6px; }
+.stats-shares-title { margin: 6px 0 0; color: #8b949e; font-size: 11px; font-weight: normal; }
+.stats-share-row { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.stats-share-name {
+  flex: 0 0 110px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  color: #c6cdd5; font-size: 12px;
+}
+.stats-share-bar {
+  flex: 1 1 auto; display: flex; height: 14px; min-width: 0;
+  background: #22262d; border-radius: 3px; overflow: hidden;
+}
+.stats-share-seg { display: block; height: 100%; }
+.stats-origin-human { background: #3fb950; }
+.stats-origin-daemon { background: #f0883e; }
+.stats-origin-mesh { background: #a371f7; }
+.stats-origin-opening { background: #58a6ff; }
+.stats-origin-harness { background: #6e7681; }
+.stats-lines-box { padding: 12px; display: flex; flex-direction: column; gap: 6px; }
+.stats-log { align-self: flex-end; }
+.stats-log.active { color: #e6edf3; background: #2d333b; border-color: #444c56; }
+.stats-lines {
+  width: 100%; height: 160px; background: #15181d; border-radius: 4px;
+}
+.stats-lines-axis {
+  display: flex; justify-content: space-between; gap: 8px;
+  color: #6e7681; font-size: 10px;
+}
+@media (max-width: 700px) {
+  .stats-share-name { flex-basis: 72px; }
+  .stats-lines { height: 120px; }
+}
 
 /* ------------------------------------------------------------------ */
 /* the Reports tab in the Beads page: every round report on this machine */
