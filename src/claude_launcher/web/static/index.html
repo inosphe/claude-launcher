@@ -778,6 +778,11 @@
                    placeholder="filter the checkouts — name"
                    autocomplete="off">
             <select name="worktree_existing"></select></label>
+          <!-- The same checkouts reached by who works in them: sessions
+               standing in a worktree of the listed repository, and no
+               other. A pick here moves the Reuse picker above. -->
+          <label id="new-worktree-session-row">From session
+            <select name="worktree_session"></select></label>
           <!-- A div rather than a label: the trunk button is a control of its
                own, and a button inside a label forwards the click to the
                label's control as well, so pressing it would both fill the

@@ -8888,13 +8888,144 @@ function renderWorktreeOptions() {
   const sel = f && f.worktree_existing;
   if (!sel) return;
   const q = (newWorktreeFilter || "").trim().toLowerCase();
-  const all = newWorktreeGit.worktrees || [];
-  const shown = q ? all.filter((n) => n.toLowerCase().includes(q)) : all;
+  const offer = worktreeParentOffer();
+  const owners = worktreeSessions();
+  // The box matches a checkout's name and the names of the sessions standing
+  // in it, so typing "s123" finds s123's worktree.
+  const matches = (n) => !q || n.toLowerCase().includes(q) ||
+    (owners[n] || []).some((s) => s.name.toLowerCase().includes(q));
+  // The parent's worktree is the entry at the top and not a row of the list
+  // as well: two rows reaching one directory by two roads is the confusion
+  // the entry is there to end.
+  const all = (newWorktreeGit.worktrees || [])
+    .filter((n) => !offer || n !== offer.name);
+  const shown = all.filter(matches);
   const kept = sel.value;
   sel.innerHTML = "";
-  sel.appendChild(new Option("(pick a worktree)", ""));
-  for (const name of shown) sel.appendChild(new Option(name, name));
-  sel.value = shown.includes(kept) ? kept : "";
+  sel.appendChild(offer
+    ? new Option(
+        `parent's checkout — ${offer.name || cwdShort(offer.cwd)} (${offer.parent})`,
+        PARENT_WORKTREE)
+    : new Option("(pick a worktree)", ""));
+  for (const name of shown) {
+    const who = (owners[name] || []).map((s) => s.name);
+    sel.appendChild(
+      new Option(who.length ? `${name} — ${who.join(", ")}` : name, name));
+  }
+  // The parent's checkout is where an untouched picker stands, so the row
+  // reads back what the launch will do instead of an empty "(pick ...)".
+  const keep = shown.includes(kept) || (!!offer && kept === PARENT_WORKTREE);
+  sel.value = keep ? kept : (offer ? PARENT_WORKTREE : "");
+  renderWorktreeSessionOptions();
+}
+
+/* The Reuse picker's value for "the checkout the parent is in". Never a
+   worktree name (validate_name refuses "@"), and never sent: a child left in
+   its parent's directory is a child sent no worktree at all, which is what
+   the daemon already does with it. The entry exists so that answer is one
+   the operator picks and reads back, rather than the side effect of leaving
+   the picker on an empty row. Sending the parent's worktree by name instead
+   would reach the same directory by another road -- one that 'fork' refuses
+   (spawn._MOVES_THE_CHILD) and that would rebase the checkout the parent is
+   editing. */
+const PARENT_WORKTREE = "@parent";
+
+/* A directory spelled for comparison: separators, a trailing slash and case
+   are how one Windows path comes back different from git and from a session
+   record. */
+function worktreePathKey(p) {
+  return String(p || "").replace(/[\\/]+/g, "/").replace(/\/$/, "").toLowerCase();
+}
+
+/* The parent's own checkout, when the list on the picker was read from the
+   parent's directory -- a child sent to another workspace has no parent's
+   checkout among the ones offered. `name` is the launcher worktree the parent
+   stands in, or "" when it stands in the repository's main checkout. */
+function worktreeParentOffer() {
+  const parent = spawnParent();
+  if (!parent || !parent.cwd || !newWorktreeGit.repo) return null;
+  const key = worktreePathKey(parent.cwd);
+  if (worktreePathKey(newWorktreeGit.for) !== key) return null;
+  const paths = newWorktreeGit.paths || {};
+  const name = Object.keys(paths)
+    .find((n) => worktreePathKey(paths[n]) === key) || "";
+  return { parent: parent.name, name, cwd: parent.cwd };
+}
+
+/* Which sessions stand in each checkout of the listed repository, by
+   worktree name. Joined on the path, because a session record carries its
+   directory and not the worktree name -- and that join is also the
+   repository check: a session in any other repository matches none of these
+   paths, so it is never offered as a way into this one's checkouts. */
+function worktreeSessions() {
+  const paths = newWorktreeGit.paths || {};
+  const byKey = new Map(
+    Object.entries(paths).map(([name, p]) => [worktreePathKey(p), name]));
+  const out = {};
+  for (const s of sessionsCache || []) {
+    if (!s || s.archived_at) continue;
+    const name = byKey.get(worktreePathKey(s.cwd));
+    if (name) (out[name] ||= []).push(s);
+  }
+  return out;
+}
+
+/* The Reuse picker's value that reaches the checkout `session` stands in:
+   PARENT_WORKTREE for the parent's own, the worktree name otherwise, "" for
+   a session in none of the listed checkouts. */
+function worktreeOfSession(session) {
+  if (!session) return "";
+  const owners = worktreeSessions();
+  const name = Object.keys(owners)
+    .find((n) => owners[n].some((s) => s.name === session)) || "";
+  const offer = worktreeParentOffer();
+  return name && offer && name === offer.name ? PARENT_WORKTREE : name;
+}
+
+/* The "From session" row: the same checkouts, reached by who works in them.
+   Only sessions standing in a worktree of the listed repository are offered
+   (see worktreeSessions), exited ones included -- going back to a finished
+   session's checkout to carry its work on is the common reason to reach for
+   one by name. The row keeps a pick only while it names the checkout the
+   Reuse picker holds, so the two rows never point at different checkouts. */
+function renderWorktreeSessionOptions() {
+  const f = $("new-session");
+  const sel = f && f.worktree_session;
+  if (!sel) return;
+  const rows = [];
+  for (const [name, list] of Object.entries(worktreeSessions())) {
+    for (const s of list) rows.push([s, name]);
+  }
+  rows.sort((a, b) =>
+    a[0].name.localeCompare(b[0].name, undefined, { numeric: true }));
+  const kept = sel.value;
+  sel.innerHTML = "";
+  sel.appendChild(new Option(
+    rows.length ? "(pick a session)" : "(no session stands in these checkouts)",
+    ""));
+  for (const [s, name] of rows) {
+    const state = s.status === "exited" ? ", exited" : "";
+    sel.appendChild(new Option(`${s.name} — ${name}${state}`, s.name));
+  }
+  const target = worktreeOfSession(kept);
+  sel.value = target && target === f.worktree_existing.value ? kept : "";
+}
+
+/* One pick on the From session row: put that session's checkout on the Reuse
+   picker, dropping a narrowing that would hide it. */
+function pickWorktreeSession(session) {
+  const f = $("new-session");
+  const target = worktreeOfSession(session);
+  if (!target) return;
+  if (target !== PARENT_WORKTREE &&
+      ![...f.worktree_existing.options].some((o) => o.value === target)) {
+    newWorktreeFilter = "";
+    if (f.worktree_filter) f.worktree_filter.value = "";
+  }
+  f.worktree_existing.value = target;
+  renderWorktreeOptions();
+  f.worktree_session.value = session;
+  syncNewWorktree();
 }
 
 /* Whether the Worktree row is the operator's to answer at all: the picked
@@ -8926,20 +9057,29 @@ function syncNewWorktree() {
     // would leave the row reading "existing" while the launch sends no
     // worktree, so that answer falls back to the row's default.
     if (pendingWorktreeMode !== "existing" ||
-        (newWorktreeGit.worktrees || []).length) {
+        (newWorktreeGit.worktrees || []).length || worktreeParentOffer()) {
       f.worktree_mode.value = pendingWorktreeMode;
     }
     pendingWorktreeMode = "";
   }
   const mode = newWorktreeMode();
+  // The parent's own checkout takes no rebase: nothing is cut or reused by
+  // name, and the checkout is the one the parent is editing right now.
+  const inParent = mode === "existing" &&
+    f.worktree_existing.value === PARENT_WORKTREE;
   box.disabled = !usable;
   for (const radio of f.worktree_mode || []) radio.disabled = !usable;
   f.worktree_name.disabled = !usable || mode !== "new";
   f.worktree_existing.disabled = !usable || mode !== "existing";
-  f.worktree_rebase.disabled = !usable || mode === "";
+  if (f.worktree_session) {
+    f.worktree_session.disabled = !usable || mode !== "existing";
+  }
+  f.worktree_rebase.disabled = !usable || mode === "" || inParent;
   $("new-worktree-name-row").classList.toggle("hidden", mode !== "new");
   $("new-worktree-existing-row").classList.toggle("hidden", mode !== "existing");
-  $("new-worktree-rebase-row").classList.toggle("hidden", mode === "");
+  const sessionRow = $("new-worktree-session-row");
+  if (sessionRow) sessionRow.classList.toggle("hidden", mode !== "existing");
+  $("new-worktree-rebase-row").classList.toggle("hidden", mode === "" || inParent);
   // Which directory the list was read from, said out loud. The picker is the
   // daemon's answer about ONE directory and it is not always the one the row
   // above names — a policy report still in flight leaves the row on
@@ -8947,14 +9087,30 @@ function syncNewWorktree() {
   // carried yet is no directory at all. A picker showing another repository's
   // checkouts silently is the failure this row exists to prevent, and the
   // only defence is to name the repository the names came from.
+  //
+  // A checkout another live session stands in is named too: reusing it puts
+  // two sessions on the same files, which is sometimes the point and never
+  // something to find out afterwards.
   const hint = $("worktree-hint");
   const locked = !usable;
+  let shared = "";
+  if (!locked && mode === "existing") {
+    const picked = f.worktree_existing.value;
+    if (inParent) {
+      shared = ` — the child works in ${parent.name}'s checkout; ` +
+        "no worktree is sent";
+    } else if (picked) {
+      const who = (worktreeSessions()[picked] || [])
+        .filter((s) => s.status !== "exited").map((s) => s.name);
+      if (who.length) shared = ` — ${picked} is in use by ${who.join(", ")}`;
+    }
+  }
   hint.textContent = locked
     ? (parent
         ? "worktree selection is locked by spawn.allow_worktree"
         : "the selected directory is not a git repository")
     : (mode === "existing" && newWorktreeFor
-        ? `checkouts of ${cwdShort(newWorktreeFor)}`
+        ? `checkouts of ${cwdShort(newWorktreeFor)}${shared}`
         : "");
   hint.classList.toggle("info", !locked);
   hint.classList.toggle("hidden", !hint.textContent);
@@ -8965,7 +9121,14 @@ async function refreshNewWorktree() {
   const f = $("new-session");
   if (!f || !f.worktree_mode) return;
   const cwd = newSessionCwd();
-  if (cwd === newWorktreeFor) return;
+  if (cwd === newWorktreeFor) {
+    // Same directory, so nothing to fetch -- but the rows are not only the
+    // directory's: a different parent is a different "parent's checkout"
+    // entry, and a new session is none at all.
+    renderWorktreeOptions();
+    syncNewWorktree();
+    return;
+  }
   newWorktreeFor = cwd;
   // A narrowing written against one repository's checkouts means nothing
   // against another's — the same rule the board's search follows when the
@@ -8985,7 +9148,10 @@ async function refreshNewWorktree() {
   // this one anyway would put another repository's checkouts on screen --
   // the failure the "checkouts of ..." hint exists to prevent.
   if (cwd !== newWorktreeFor) return;
-  newWorktreeGit = git;
+  // Stamped with the directory it describes: while a later fetch is in
+  // flight `newWorktreeFor` has already moved on, and the parent's entry must
+  // be judged against the list on screen, not the one still coming.
+  newWorktreeGit = { ...git, for: cwd };
   renderWorktreeOptions();
   syncNewWorktree();
 }
@@ -10214,9 +10380,23 @@ $("new-session").addEventListener("submit", async (e) => {
     // refused outright — `validate_name` calls it an empty worktree name.
     body.worktree = typed || (parent ? true : "");
   }
-  else if (worktreeMode === "existing" && f.worktree_existing.value)
-    body.worktree = f.worktree_existing.value;
-  if (worktreeMode !== "" && f.worktree_rebase.value.trim())
+  else if (worktreeMode === "existing") {
+    const picked = f.worktree_existing.value;
+    // An empty pick used to launch as "no worktree" without a word, which is
+    // not what a row reading "existing worktree" says. The parent's checkout
+    // is an entry of its own (PARENT_WORKTREE), so an empty pick is a
+    // question left unanswered, and it is sent back rather than guessed.
+    if (!picked) {
+      $("create-error").textContent =
+        'Pick the worktree to reuse, or choose "no worktree".';
+      $("create-error").classList.remove("hidden");
+      return;
+    }
+    if (picked !== PARENT_WORKTREE) body.worktree = picked;
+  }
+  // A greyed rebase box is no answer (the parent's checkout greys it).
+  if (worktreeMode !== "" && !f.worktree_rebase.disabled &&
+      f.worktree_rebase.value.trim())
     body.rebase_onto = f.worktree_rebase.value.trim();
   if (f.role.value) body.role = f.role.value;
   if (!parent && f.borrow.value) body.borrow = f.borrow.value;
@@ -15693,6 +15873,20 @@ for (const radio of document.querySelectorAll('#new-worktree input[name="worktre
    but an older markup without it must still boot — a missing filter field is
    a missing search, not a reason the form dies (the board's own box is
    guarded the same way). */
+/* The Reuse picker and the From session row name one checkout between them:
+   a pick on the picker drops a session pick that no longer matches it, and a
+   pick on the session row moves the picker (pickWorktreeSession). */
+$("new-session").worktree_existing.addEventListener("change", () => {
+  renderWorktreeSessionOptions();
+  syncNewWorktree();
+});
+const worktreeBySession = $("new-session").worktree_session;
+if (worktreeBySession) {
+  worktreeBySession.addEventListener("change", () => {
+    if (worktreeBySession.value) pickWorktreeSession(worktreeBySession.value);
+  });
+}
+
 const worktreeSearch = $("new-session").worktree_filter;
 if (worktreeSearch) {
   worktreeSearch.addEventListener("input", () => {
@@ -27368,8 +27562,8 @@ function sessionFormConfig(mode) {
   const editable = ["project", "cwd", "name", "profile", "harness", "model", "effort",
     "mesh", "handle", "role", "workflow", "context", "borrow", "null_token",
     "resume", "fork", "skip_permissions", "codex_yolo", "codex_sandbox", "args",
-    "worktree_mode", "worktree_name", "worktree_existing", "worktree_rebase",
-    "task", "score_goal", "beads", "issue_text", "issue_filter", "issue", "pi_tool_*"];
+    "worktree_mode", "worktree_name", "worktree_existing", "worktree_session",
+    "worktree_rebase", "task", "score_goal", "beads", "issue_text", "issue_filter", "issue", "pi_tool_*"];
   const modes = {
     new: { title: "New session", submit: "Create", sections, editable,
       payload: ["name", "profile", "project", "cwd", "args", "model", "effort", "tools", "worktree",

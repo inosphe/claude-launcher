@@ -883,8 +883,17 @@ def test_info_reads_the_repository_in_one_answer(repo):
     assert info["branch"] == base_branch(repo)
     assert set(info["branches"]) >= {base_branch(repo), "review"}
     assert info["worktrees"] == ["review"]
+    # each name carries its path, which is what joins a session's cwd to the
+    # checkout it sits in -- read from inside that checkout the answer is the
+    # same, since the list is the repository's, not the directory's
+    wt_path = worktree.worktrees_dir(repo) / "review"
+    assert list(info["paths"]) == ["review"]
+    assert os.path.normcase(info["paths"]["review"]) == os.path.normcase(
+        str(wt_path.resolve()))
+    assert worktree.info(str(wt_path))["paths"] == info["paths"]
     # a directory that is no repository says so rather than half-answering
     assert worktree.info(str(repo.parent))["repo"] is False
+    assert worktree.info(str(repo.parent))["paths"] == {}
 
 
 def test_a_reused_worktree_is_brought_up_to_date(repo, capsys):

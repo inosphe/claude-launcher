@@ -448,13 +448,21 @@ def existing(cwd: str) -> List[str]:
     which names are taken is exactly what a list is for.
     """
     root = repo_root(cwd)
-    if root is None:
-        return []
+    return [name for name, _ in _existing_paths(root)] if root else []
+
+
+def _existing_paths(root: Path) -> List[tuple]:
+    """``(name, absolute path)`` of every launcher worktree of ``root``.
+
+    The path is what lets a picker say which *session* sits in a checkout:
+    a session record carries its directory, not the worktree name, so the
+    two are joined on the path.
+    """
     base = worktrees_dir(root)
     done = _git(["worktree", "list", "--porcelain"], cwd=str(root))
     if done.returncode != 0:
         return []
-    names: List[str] = []
+    pairs: List[tuple] = []
     for line in (done.stdout or "").splitlines():
         if not line.startswith("worktree "):
             continue
@@ -465,8 +473,8 @@ def existing(cwd: str) -> List[str]:
             continue
         if rel.startswith("..") or rel == ".":
             continue
-        names.append(rel.replace(os.sep, "/"))
-    return names
+        pairs.append((rel.replace(os.sep, "/"), path))
+    return pairs
 
 
 def info(cwd: str) -> dict:
@@ -479,13 +487,18 @@ def info(cwd: str) -> dict:
     """
     root = repo_root(cwd)
     if root is None:
-        return {"repo": False, "root": "", "branch": "", "branches": [], "worktrees": []}
+        return {"repo": False, "root": "", "branch": "", "branches": [],
+                "worktrees": [], "paths": {}}
+    pairs = _existing_paths(root)
     return {
         "repo": True,
         "root": str(root),
         "branch": current_branch(Path(cwd)),
         "branches": branches(cwd),
-        "worktrees": existing(cwd),
+        "worktrees": [name for name, _ in pairs],
+        # name -> absolute path, so a picker can join a session's cwd to the
+        # checkout it sits in ("reuse s123's worktree").
+        "paths": dict(pairs),
     }
 
 

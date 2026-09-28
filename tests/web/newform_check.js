@@ -146,7 +146,7 @@ check("the form's controls read in the new order", named(form.text), [
   // sits between the mode's radio and the list it narrows, the way the
   // board's own box sits between its radio and its picker.
   "worktree_mode", "worktree_mode", "worktree_name", "worktree_mode",
-  "worktree_filter", "worktree_existing", "worktree_rebase",
+  "worktree_filter", "worktree_existing", "worktree_session", "worktree_rebase",
   // what it is told first
   "task",
   // where that job is written down — four radios sharing one name, then
