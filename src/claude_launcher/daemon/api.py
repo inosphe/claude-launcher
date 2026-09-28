@@ -5354,6 +5354,12 @@ async def h_sessions_list(request: web.Request) -> web.Response:
             # the copy — the fork button's guard is the same absent field.
             "quick_fork_of", "handoff",
             "status_checks", "tps",
+            # The project a session is filed under. The page polls every
+            # project and narrows the rail itself (``railSessions`` in
+            # app.js), so a row without this key reads as the default
+            # project's: with it left out, picking any other project drew an
+            # empty rail while "All projects" still listed them.
+            "project",
         }
         attached = [
             {key: value for key, value in info.items() if key in rail_fields}
