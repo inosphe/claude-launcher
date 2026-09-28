@@ -92,7 +92,7 @@ function requestAnimationFrame() {}
 const asked = [];
 let beadsDetail = null, beadsOpen = false, beadsTimer = null;
 function showView() {}
-function stopBeadsPoll() {}
+function clearInterval() {}
 function stopReportsPoll() {}
 function openReports() { asked.push("openReports"); }
 function restartBeadsStream() { asked.push("restartBeadsStream"); }
@@ -115,6 +115,7 @@ new Function(
   // (claunch-4aesv); real helpers, so the row reads as the page draws it.
   + slice("beadsBoardLabel") + slice("beadsBoardWhere")
   + slice("renderQueues") + slice("renderReports") + slice("openBeads")
+  + slice("stopBeadsPoll")
   + slice("sessBeads") + slice("sessBeadsPanel")
   + `
 Object.assign(exports, {
@@ -202,9 +203,12 @@ check("a search link into a different workspace reloads that board",
       ctx.asked.includes("restartBeadsStream"), true);
 
 for (const panel of ctx.panels) {
+ for (const priorWorkspace of ["/a", "/b"]) {
   ctx.set("beadsCache", { boards: [{ root: "/a" }, { root: "/b" }] });
-  ctx.set("beadsWorkspace", "/a");
-  ctx.set("beadsLoadedWorkspace", "/a");
+  ctx.set("beadsWorkspace", priorWorkspace);
+  ctx.set("beadsLoadedWorkspace", priorWorkspace);
+  ctx.set("beadsOpen", true);
+  ctx.set("beadsSession", "s-a");
   ctx.asked.length = 0;
   const box = panel({ session: { name: "s-b", status: "exited" },
     beads: { root: "/b", issues: [] } });
@@ -212,12 +216,13 @@ for (const panel of ctx.panels) {
   button.handlers.click[0]();
   check(panel.name + " selects the session's board and assignee",
         ctx.filters(), ["/b", "s-b"]);
-  check(panel.name + " reloads after switching repositories",
+  check(panel.name + " reloads after session navigation from " + priorWorkspace,
         ctx.asked.includes("restartBeadsStream"), true);
   const tab = ctx.view.find("beads-workspace-tabs")[0].children[0];
   tab.handlers.click[0]();
   check(panel.name + " still lets a workspace tab clear the session filter",
         ctx.filters(), ["/a", ""]);
+ }
 }
 
 /* ---- 4. the rules that make the rows read alike ----------------------- */

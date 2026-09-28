@@ -97,6 +97,7 @@ let beadsSession = "";
 let beadsWorkspace = "";
 const went = [];
 function go(h) { went.push(h); }
+function stopBeadsPoll() {}
 const created = [];
 function sessBeadsCreate(name, hasIssue) { created.push([name, hasIssue]); return el("div", "sess-beads-create"); }
 `;

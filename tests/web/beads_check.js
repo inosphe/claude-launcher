@@ -86,6 +86,7 @@ let beadsCache = null;
 function setBoards(b) { beadsCache = b; }
 const gone = [];
 function go(h) { gone.push(h); }
+function stopBeadsPoll() {}
 async function api() { return { ok: true, json: async () => ({}) }; }
 function refreshSession() {}
 /* The page's base path. Real in app.js (derived from location.pathname);

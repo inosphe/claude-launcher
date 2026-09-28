@@ -18941,6 +18941,7 @@ function sessBeads(data) {
   open.addEventListener("click", () => {
     beadsSession = s.name || "";
     beadsWorkspace = b.root || "";
+    stopBeadsPoll();
     go("#/beads");
   });
   box.appendChild(open);
@@ -19008,6 +19009,7 @@ function sessBeadsPanel(data) {
   open.addEventListener("click", () => {
     beadsSession = s.name || "";
     beadsWorkspace = b.root || "";
+    stopBeadsPoll();
     go("#/beads");
   });
   box.appendChild(open);
