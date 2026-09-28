@@ -5225,20 +5225,28 @@ async def h_sessions_list(request: web.Request) -> web.Response:
 
     def _collect(usage_budget) -> list:
         out = []
+        # One look at the metering files for the whole list, however many
+        # rows read it (claunch-vyw9s).
+        meter = metering.snapshot()
         for s in sessions:
-            info = ctxsize.attach(s)
-            # The session's latest throughput through the metering shim
-            # (``tps``), read off the record file tails; absent when the
-            # session never went through a shim (the OAuth routes).
-            metering.attach(info)
-            # What the conversation has spent so far (``token_usage``), read
-            # incrementally off the same transcript; absent where the harness
-            # has no reader. Not for an archived record: the list carries
-            # hundreds of them, and reading their retired transcripts would
-            # spend the shared budget and the background thread on sessions
-            # nobody is watching, so an archived row goes without the line.
-            # Its detail panel still reads it when opened.
-            if session_mod.session_category(s) != session_mod.CATEGORY_ARCHIVED:
+            # An archived record carries none of the per-row reads below
+            # (context, tool calls, ``tps``, ``token_usage``): the list holds
+            # hundreds of them, and each read is work in this worker that
+            # holds the GIL while the event loop -- every terminal and
+            # control socket -- waits (claunch-vyw9s). Nobody is watching a
+            # retired session's numbers move; its detail panel still reads
+            # them all when opened (``h_session_meta``).
+            if session_mod.session_category(s) == session_mod.CATEGORY_ARCHIVED:
+                info = s.info()
+            else:
+                info = ctxsize.attach(s)
+                # The session's latest throughput through the metering shim
+                # (``tps``), read off the record file tails; absent when the
+                # session never went through a shim (the OAuth routes).
+                metering.attach(info, meter)
+                # What the conversation has spent so far (``token_usage``),
+                # read incrementally off the same transcript; absent where the
+                # harness has no reader.
                 tokenusage.attach(info, s.sdef, usage_budget)
             # The cached briefing's one-liner, when it exists — rides the list
             # the UI already polls so a row can show it without an open card or

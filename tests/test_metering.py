@@ -1006,6 +1006,92 @@ def test_metering_api_serves_a_sessions_records_and_the_session_list_carries_the
     asyncio.run(run())
 
 
+def test_one_snapshot_answers_every_row_without_rereading_the_files(home, monkeypatch):
+    """claunch-vyw9s: the session list asked once per row, and each ask walked
+    every cached record of every file -- 850 rows by 2,824 records held the
+    GIL for about 160ms per list build. The index is built with the parse,
+    and a row given a snapshot touches no file at all."""
+    for i in range(3):
+        metering.append("fp1", _rec(session="s1", tps_total=10.0 + i, ts=_ago(30 - i)))
+    metering.append("fp2", _rec(session="s1", tps_total=99.0, ts=_ago(5)))  # newest, other shim
+    metering.append("fp1", _rec(session="s2", tps_total=5.0, ts=_ago(20)))
+    snap = metering.snapshot()
+    assert [r["tps_total"] for r in snap["s1"]] == [10.0, 11.0, 12.0, 99.0]  # merged, oldest first
+    assert [r["tps_total"] for r in snap["s2"]] == [5.0]
+    # The same answers as the reader that takes its own look.
+    assert metering.recent("s1", limit=2, index=snap) == metering.recent("s1", limit=2)
+    assert metering.session_summary("s1", index=snap) == metering.session_summary("s1")
+
+    reads = []
+    real = metering._tail
+    monkeypatch.setattr(metering, "_tail", lambda p: reads.append(p) or real(p))
+    rows = [metering.attach({"name": n}, snap) for n in ("s1", "s2", "never")]
+    assert reads == []  # the rows are answered off the snapshot
+    assert rows[0]["tps"]["tps"] == 99.0 and rows[1]["tps"]["tps"] == 5.0
+    assert "tps" not in rows[2]
+    # A slice handed out is the caller's: trimming it leaves the snapshot whole.
+    metering.recent("s1", limit=0, index=snap).clear()
+    assert len(snap["s1"]) == 4
+
+
+def test_the_per_session_index_is_rebuilt_only_when_a_file_changes(home):
+    metering.append("fp1", _rec(session="s1", tps_total=1.0, ts=_ago(10)))
+    path = metering.record_file("fp1")
+    first = metering._tail(path)
+    assert metering._tail(path) is first  # unchanged file: same parse, same index
+    metering.append("fp1", _rec(session="s2", tps_total=2.0, ts=_ago(5)))
+    again = metering._tail(path)
+    assert again is not first and set(again[2]) == {"s1", "s2"}
+
+
+def test_the_session_list_skips_the_per_row_reads_for_an_archived_record(home, tmp_path):
+    """An archived row carries no ``tps`` or ``context`` in the list: the reads
+    are worker time holding the GIL on every poll, for sessions nobody is
+    watching (claunch-vyw9s). Its detail panel still reads them."""
+    import asyncio
+    import sys
+
+    from claude_launcher.daemon.api import build_app
+    from claude_launcher.daemon.harness import SessionDef
+    from claude_launcher.daemon.manager import SessionManager
+    from claude_launcher.daemon.mesh import MeshManager
+
+    store.update(lambda doc: doc.update({
+        "harnesses": {"py": {"command": [sys.executable, "-u", "-c", "import time; time.sleep(60)"]}}
+    }))
+    metering.append("fp1", _rec(session="live", tps=42.5, tps_total=42.5, ts=_ago(6)))
+    metering.append("fp1", _rec(session="old", tps=7.0, tps_total=7.0, ts=_ago(6)))
+    bearer = {"Authorization": "Bearer sekrit"}
+
+    async def run():
+        from aiohttp.test_utils import TestClient, TestServer
+
+        mgr = SessionManager(idle_threshold=0.5, scrollback=200, restore_default=True)
+        client = TestClient(TestServer(build_app(
+            mgr, "sekrit", started_at=time.monotonic(), mesh=MeshManager(mgr)
+        )))
+        await client.start_server()
+        try:
+            mgr.create(SessionDef(name="live", harness="py", cwd=str(tmp_path)))
+            mgr.create(SessionDef(name="old", harness="py", cwd=str(tmp_path)))
+            mgr.get("old").archived_at = "2026-09-28T00:00:00+00:00"
+            live = await client.get("/api/sessions?view=rail&state=current", headers=bearer)
+            rows = {s["name"]: s for s in (await live.json())["sessions"]}
+            assert rows["live"]["tps"]["tps"] == 42.5
+            archived = await client.get("/api/sessions?view=rail&state=archived", headers=bearer)
+            rows = {s["name"]: s for s in (await archived.json())["sessions"]}
+            assert "old" in rows
+            assert "tps" not in rows["old"] and "context" not in rows["old"]
+            assert "tool_calls" not in rows["old"]
+            detail = await client.get("/api/sessions/old/meta", headers=bearer)
+            assert (await detail.json())["session"]["tps"]["tps"] == 7.0
+        finally:
+            await mgr.shutdown_all()
+            await client.close()
+
+    asyncio.run(run())
+
+
 def test_web_page_draws_tps_in_the_rail_the_card_the_header_and_over_the_pty():
     from pathlib import Path
 
