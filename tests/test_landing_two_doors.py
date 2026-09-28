@@ -1,4 +1,4 @@
-"""improv-worker/improv-mid landing-review: delegated upward, open to the user.
+"""improv-worker landing-review: delegated upward, open to the user.
 
 The landing decision moved from a human gate to the session above it because
 that session — not the person — knows the state of the integration queue, and
@@ -53,7 +53,6 @@ LAYERS = {
         lambda: PROJECT_OVERRIDES / "improv-worker.yaml",
         ["worker", "leader", "leader"],
     ),
-    "mid/bundled": (lambda: _bundled("improv-mid"), ["leader", "leader"]),
 }
 
 

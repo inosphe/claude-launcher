@@ -16,7 +16,7 @@
 # 지금 이 머신의 실측(2026-08-28): recur 를 선언한 것은 improv-leader·poll·
 # brief 셋이고 — 상주 서비스 루프라 의도된 것이다 — 스텝 필드 `escalate:` 를
 # 선언한 워크플로는 패키지·프로젝트·전역 어느 레이어에도 없다. 그러므로
-# improv-worker·improv-mid 로 도는 일회성 세션이 남아 있다면 원인은 조건
+# improv-worker 로 도는 일회성 세션이 남아 있다면 원인은 조건
 # 1·2 가 아니라 조건 3(런이 done 에 닿지 못했다)이거나 조건 4(keep_alive)다.
 # improv-worker 의 end-hold 스텝은 조건 4 를 의도적으로 거는 자리다
 # (tools/keepalive_check.py 가 그 플래그를 확인한다).

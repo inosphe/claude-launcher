@@ -772,8 +772,8 @@ continues under other rules":
     wrapup:
       instructions: ...
       escalate:
-        workflow: improv-mid          # or the shorthand: escalate: improv-mid
-        context: the follow-up needs a stack   # optional
+        workflow: feature-dev         # or the shorthand: escalate: feature-dev
+        context: the follow-up needs a design pass   # optional
 
 Ending the run through that step files an ordinary start request for the
 named workflow (`by: escalate`). Nothing else is new — that request is the
@@ -792,7 +792,7 @@ in the journal says so with the waiting request's `by`. That is the same rule
 forced `goto` reopens a finished run and ends it at the same step again.
 
 Use it where a round's ending is a change of procedure rather than a stop: a
-worker round whose remaining work is stack management, an intake run that
+worker round whose remaining work needs a design pass, an intake run that
 turns out to need a review flow. Do not use it as a loop — that is `recur`,
 and if two rounds of the same procedure are what you want, the graph should
 say so.
@@ -806,12 +806,11 @@ together when you write either:
     escalate               what THIS session starts next, after this run ends
 
 `improv-worker` declares `default_child_cflow: improv-worker` — a worker's
-sub-workers are workers. An `escalate: improv-mid` on that same file would
+sub-workers are workers. An `escalate: feature-dev` on that same file would
 say something else entirely: this session stops being a worker round and
-becomes the stack's manager. Note that `improv-mid.yaml` states in its own
-comments that it is started only by a `mesh-delegate` spawn naming it; an
-escalation is a second door into that workflow, so a file that gains one must
-have that sentence corrected in the same change.
+starts a different procedure. A side track that runs *beside* the round —
+the `stack` a worker with children keeps — is neither: that is a sub run
+(`start` with `sub:`), and the main run never ends for it.
 
 ### The three checks, and what each does NOT cover
 
@@ -837,7 +836,7 @@ interchangeable:
 
 What the table is for, read row by row:
 
-- The parser cannot know whether `improv-mid` exists — it has no layer search
+- The parser cannot know whether `feature-dev` exists — it has no layer search
   in reach (`model.py` imports nothing from this package). A file that parses
   is not a file whose escalation will work.
 - `escalation_check` resolves the target with no daemon in reach, so its

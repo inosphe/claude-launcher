@@ -21,7 +21,7 @@
   (`claunch cflow add --project --force`는 패키지 바이트로 덮어 `verify:`를 잃고,
   `claunch cflow update`는 전역 레이어만 본다 — 프로젝트 레이어에는 이 스크립트다.)
 - 정본을 바꾼 머지가 master에 오르면 리더가 `claunch cflow update --force`로 전역
-  레이어도 맞춘다 — 프로젝트 레이어가 없는 워크플로(예: improv-mid)는 전역 사본이
+  레이어도 맞춘다 — 프로젝트 레이어가 없는 워크플로(예: improv-pm)는 전역 사본이
   실제로 도는 파일이다.
 
 ## 일감의 정본은 beads다
