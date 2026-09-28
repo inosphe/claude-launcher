@@ -150,6 +150,57 @@ def test_a_managed_session_cannot_switch_the_window_off(monkeypatch, capsys):
     grant.release()
 
 
+def test_the_direct_child_is_told_to_report_into_the_grant():
+    grant = test_window.WindowGrant("targeted", "g-9", 2, "daemon", 0.0, "s1")
+    env = grant.child_env({})
+    assert env[test_window.WINDOW_REPORT_ENV] == "1"
+    assert env[test_window.WINDOW_GRANT_ENV] == "g-9"
+
+
+def test_a_result_is_reported_only_for_a_daemon_grant(monkeypatch):
+    client = _Client()
+    client_calls = client.calls
+
+    def post(path, body, **kwargs):
+        client_calls.append((path, body, kwargs))
+        return {"reported": True}
+
+    client.post = post
+    monkeypatch.setattr(test_window.daemon_client, "connect", lambda: client)
+    for skipped in ("disabled", "sweep-fallback", "targeted-fallback", ""):
+        assert not test_window.report_result(skipped, {"outcome": "passed"})
+    assert client_calls == []
+    assert test_window.report_result("g-1", {"outcome": "passed"})
+    assert client_calls[0][:2] == (
+        "/api/window/report", {"grant_id": "g-1", "result": {"outcome": "passed"}}
+    )
+
+
+def test_a_report_that_cannot_reach_the_daemon_costs_nothing(monkeypatch):
+    monkeypatch.setattr(test_window.daemon_client, "connect", lambda: None)
+    assert not test_window.report_result("g-1", {"outcome": "passed"})
+
+    class _Old(_Client):
+        def post(self, path, body, **kwargs):
+            raise test_window.daemon_client.DaemonClientError("404")
+
+    monkeypatch.setattr(test_window.daemon_client, "connect", lambda: _Old())
+    assert not test_window.report_result("g-1", {"outcome": "passed"})
+
+
+def test_a_pytest_session_maps_to_the_result_fields():
+    stats = {"passed": [1, 2, 3], "failed": [1], "error": [], "skipped": [1, 2]}
+    result = test_window.pytest_result(1, stats, 6, 12.34)
+    assert result == {
+        "outcome": "failed", "exit_code": 1, "passed": 3, "failed": 1,
+        "errors": 0, "skipped": 2, "collected": 6, "duration": 12.3,
+    }
+    assert test_window.pytest_result(0, {}, 0, 0)["outcome"] == "passed"
+    assert test_window.pytest_result(2, {}, 0, 0)["outcome"] == "interrupted"
+    assert test_window.pytest_result(5, {}, 0, 0)["outcome"] == "no_tests"
+    assert test_window.pytest_result(4, {}, 0, 0)["outcome"] == "error"
+
+
 def test_xdist_width_is_read_and_cut_to_the_grant():
     from types import SimpleNamespace
 

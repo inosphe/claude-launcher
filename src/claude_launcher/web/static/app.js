@@ -19097,6 +19097,7 @@ function sessCommits(data) {
    grants it now past every cap, budget and exclusivity rule — after a
    confirmation, because a forced grant runs next to whatever is running. */
 let windowCache = null;
+let windowHistory = null;   // GET /api/window/history: 7 days of runs + stats
 let windowError = "";
 let windowTimer = null;
 let windowPageOpen = false;
@@ -19141,8 +19142,81 @@ async function refreshWindow() {
         windowError = "";
       }
     }
+    // The history is a second read; a daemon that predates it answers 404
+    // and the page simply goes without the section.
+    const hist = await api("/api/window/history?limit=20");
+    if (hist.ok) {
+      const data = await hist.json().catch(() => null);
+      windowHistory = data && data.stats ? data : null;
+    }
   } catch { return; }   // api() owns auth and connection recovery
   if (windowPageOpen) renderWindow();
+}
+
+function windowSeconds(value) {
+  if (value === null || value === undefined || !Number.isFinite(Number(value))) return "-";
+  return fmtAge(Number(value));
+}
+
+function windowResultText(result) {
+  if (!result) return "unreported";
+  const parts = ["passed", "failed", "errors", "skipped"]
+    .filter((k) => Number(result[k]) > 0)
+    .map((k) => `${Number(result[k])} ${k}`);
+  return (result.outcome || "?") + (parts.length ? ` (${parts.join(", ")})` : "");
+}
+
+/* Seven days of finished grants and abandoned waits, as the daemon recorded
+   them, with per-class statistics over the same span. */
+function windowHistorySection(history) {
+  const box = el("section", "window-section window-history");
+  const head = el("div", "window-section-head");
+  head.appendChild(el("h3", null, `Run history (last ${history.days || 7} days)`));
+  head.appendChild(el("span", "window-count", String(history.total || 0)));
+  box.appendChild(head);
+  box.appendChild(el("p", "wf-note",
+    `The daemon records every grant's wait and hold itself; pytest reports ` +
+    `the result when it finishes. The log keeps ${history.retention_days || 7} ` +
+    "days and drops older entries."));
+  const stats = el("div", "window-summary");
+  const classes = (history.stats && history.stats.classes) || {};
+  for (const cls of ["targeted", "sweep"]) {
+    const st = classes[cls];
+    if (!st) continue;
+    const outcomes = st.outcomes || {};
+    const failed = (Number(outcomes.failed) || 0) + (Number(outcomes.error) || 0);
+    const wait = st.wait_seconds || {};
+    const held = st.held_seconds || {};
+    stats.appendChild(windowSummary(
+      `${cls} runs`, Number(st.runs) || 0, null,
+      `${failed} failed · ${Number(st.gave_up_waiting) || 0} gave up waiting`));
+    stats.appendChild(windowSummary(
+      `${cls} wait p50 / p90`, `${windowSeconds(wait.p50)} / ${windowSeconds(wait.p90)}`,
+      null, `max ${windowSeconds(wait.max)}`));
+    stats.appendChild(windowSummary(
+      `${cls} hold p50 / p90`, `${windowSeconds(held.p50)} / ${windowSeconds(held.p90)}`,
+      null, `max ${windowSeconds(held.max)}`));
+  }
+  box.appendChild(stats);
+  const entries = history.entries || [];
+  if (!entries.length) box.appendChild(el("p", "wf-note", "no runs in the kept days"));
+  for (const entry of entries) {
+    const row = el("div", "window-row window-history-row " + (entry.cls || "unknown"));
+    row.appendChild(el("span", "window-rank", entry.end || "?"));
+    row.appendChild(el("span", "window-class", entry.cls || "unknown class"));
+    row.appendChild(el("span", "window-owner", windowOwner(entry)));
+    const label = row.appendChild(el("span", "window-label", entry.label || "no label"));
+    label.appendChild(el("span", "window-tag window-result",
+      windowResultText(entry.result)));
+    if (entry.forced) label.appendChild(el("span", "window-tag window-forced", "forced"));
+    const timing = el("span", "window-age",
+      `wait ${windowSeconds(entry.wait_seconds)} · held ${windowSeconds(entry.held_seconds)}`);
+    timing.title = entry.ended_at || "";
+    row.appendChild(timing);
+    row.appendChild(el("span", "window-age", windowAge({ acquired_at: entry.ended_at })));
+    box.appendChild(row);
+  }
+  return box;
 }
 
 function windowOwner(entry) {
@@ -19322,6 +19396,7 @@ function renderWindow() {
   };
   view.appendChild(section("Holders", holders, "no grants are held", false));
   view.appendChild(section("Queue", queue, "nothing is waiting", true));
+  if (windowHistory) view.appendChild(windowHistorySection(windowHistory));
   view.appendChild(el("p", "window-footnote",
     "Entries are the arbiter's recorded state. Process liveness is checked " +
     "when a new acquisition is decided."));

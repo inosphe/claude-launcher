@@ -10,6 +10,7 @@ measured holes it closes (``claunch-rwq``'s blind spot, s286's stale slot,
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import subprocess
 import sys
@@ -752,6 +753,175 @@ def test_window_api_prioritize_and_force(home, tmp_path):
                 headers=headers,
             )
             assert refused.status == 400
+        finally:
+            await client.close()
+            await manager.shutdown_all()
+
+    asyncio.run(run())
+
+
+# --------------------------------------------------------------------------- #
+# run history (claunch-8kald): the daemon's own record, kept 7 days
+# --------------------------------------------------------------------------- #
+def test_a_released_grant_leaves_one_history_line_with_its_result(tmp_path):
+    async def run():
+        w = _make(tmp_path)
+        grant = await w.acquire(
+            "targeted", session="a", pid=os.getpid(), label="pytest x", workers=2
+        )
+        assert w.report_result(grant["grant_id"], {
+            "outcome": "failed", "passed": 10, "failed": 2, "exit_code": 1,
+            "duration": 3.25, "junk": "dropped",
+        })
+        assert w.release(grant["grant_id"])
+        history = w.history()
+        assert history["retention_days"] == 7 and history["total"] == 1
+        line = history["entries"][0]
+        assert line["end"] == "released" and line["workers"] == 2
+        assert line["label"] == "pytest x" and line["held_seconds"] is not None
+        assert line["result"] == {
+            "outcome": "failed", "passed": 10, "failed": 2, "exit_code": 1,
+            "duration": 3.25,
+        }  # the unknown "junk" field is dropped
+        stats = history["stats"]["classes"]["targeted"]
+        assert stats["runs"] == 1 and stats["outcomes"] == {"failed": 1}
+        # The file carries the line across a restart.
+        assert _make(tmp_path).history()["total"] == 1
+
+    asyncio.run(run())
+
+
+def test_a_result_needs_a_live_grant_and_known_fields(tmp_path):
+    async def run():
+        w = _make(tmp_path)
+        assert not w.report_result("nope", {"outcome": "passed"})
+        grant = await w.acquire("targeted", session="a", pid=os.getpid())
+        assert not w.report_result(grant["grant_id"], {"colour": "green"})
+        assert not w.report_result(grant["grant_id"], "passed")
+        assert w.report_result(grant["grant_id"], {"outcome": "sideways", "passed": "4"})
+        assert w.status()["holders"][0]["result"] == {"passed": 4}
+
+    asyncio.run(run())
+
+
+def test_every_way_a_request_ends_is_recorded(tmp_path):
+    async def run():
+        manager = _Manager()
+        for name in ("h", "gone", "w1", "w2"):
+            manager.set(name, exited=False)
+        w = _make(tmp_path, manager=manager)
+        await w.acquire("sweep", session="h", pid=os.getpid())
+        timed_out = await w.acquire("sweep", session="w1", pid=os.getpid(), wait=0.05)
+        assert timed_out.get("timeout")
+        waiting = asyncio.create_task(
+            w.acquire("sweep", session="w2", pid=os.getpid(), wait=5)
+        )
+        await asyncio.sleep(0.05)
+        assert w.cancel_session("w2") == 1
+        waiting.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await waiting
+        w.session_exited(_session("h"))
+        manager.set("gone", exited=False)
+        held = await w.acquire("sweep", session="gone", pid=os.getpid())
+        assert held["granted"]
+        manager.set("gone", exited=True)
+        await w.acquire("targeted", session=None, pid=os.getpid())  # reaps "gone"
+        ends = [e["end"] for e in reversed(w.history()["entries"])]
+        assert ends == ["timeout", "cancelled", "session_exited", "reaped"]
+        stats = w.history()["stats"]["classes"]["sweep"]
+        assert stats["runs"] == 2 and stats["gave_up_waiting"] == 2
+
+    asyncio.run(run())
+
+
+def test_the_history_keeps_seven_days_and_drops_the_rest(tmp_path):
+    from datetime import datetime, timedelta, timezone
+
+    path = tmp_path / "window-history.jsonl"
+    now = datetime.now(timezone.utc)
+    lines = [
+        {"grant_id": "old", "cls": "targeted", "acquired_at": "x",
+         "ended_at": (now - timedelta(days=8)).isoformat()},
+        {"grant_id": "new", "cls": "targeted", "acquired_at": "x",
+         "ended_at": (now - timedelta(days=6)).isoformat()},
+    ]
+    path.write_text("".join(json.dumps(l) + "\n" for l in lines), encoding="utf-8")
+    w = _make(tmp_path)
+    assert [e["grant_id"] for e in w.history()["entries"]] == ["new"]
+    # Dropped from the file too, not only from the answer.
+    assert "old" not in path.read_text(encoding="utf-8")
+    # A look-back never exceeds the retention, and can be narrower.
+    assert w.history(days=30)["days"] == 7
+    assert w.history(days=1)["total"] == 0
+
+
+def test_history_statistics_and_filters(tmp_path):
+    async def run():
+        w = _make(tmp_path, targeted_per_session=0)
+        for i in range(4):
+            g = await w.acquire("targeted", session="a" if i < 3 else "b",
+                                pid=os.getpid(), workers=1)
+            w.report_result(g["grant_id"], {"outcome": "passed" if i else "failed"})
+            w.release(g["grant_id"])
+        both = w.history()
+        assert both["stats"]["classes"]["targeted"]["outcomes"] == {"failed": 1, "passed": 3}
+        assert both["stats"]["top_sessions"][0] == {"holder": "a", "runs": 3}
+        assert w.history(session="b")["total"] == 1
+        assert w.history(cls="sweep")["total"] == 0
+        assert len(w.history(limit=2)["entries"]) == 2
+        assert window_mod._quantile([1, 2, 3, 4, 100], 0.9) == 100
+        assert window_mod._quantile([], 0.5) is None
+
+    asyncio.run(run())
+
+
+def test_window_api_report_and_history(home, tmp_path):
+    from aiohttp.test_utils import TestClient, TestServer
+
+    from claude_launcher.daemon.api import build_app
+    from claude_launcher.daemon.manager import SessionManager
+
+    async def run():
+        manager = SessionManager(
+            idle_threshold=0.5, scrollback=100, restore_default=False
+        )
+        app = build_app(
+            manager, "secret", started_at=time.monotonic(), window=_make(tmp_path)
+        )
+        client = TestClient(TestServer(app))
+        await client.start_server()
+        headers = {"Authorization": "Bearer secret"}
+        try:
+            grant = await app["window"].acquire("targeted", session="s", pid=os.getpid())
+            ok = await client.post(
+                "/api/window/report",
+                json={"grant_id": grant["grant_id"], "result": {"outcome": "passed"}},
+                headers=headers,
+            )
+            assert ok.status == 200
+            missing = await client.post(
+                "/api/window/report",
+                json={"grant_id": "nope", "result": {"outcome": "passed"}},
+                headers=headers,
+            )
+            assert missing.status == 404
+            released = await (
+                await client.post(
+                    "/api/window/release",
+                    json={"grant_id": grant["grant_id"], "result": {"passed": 5}},
+                    headers=headers,
+                )
+            ).json()
+            assert released == {"released": 1}
+            history = await (
+                await client.get("/api/window/history?class=targeted&limit=5",
+                                 headers=headers)
+            ).json()
+            assert history["retention_days"] == 7
+            assert history["entries"][0]["result"] == {"passed": 5}
+            bad = await client.get("/api/window/history?days=soon", headers=headers)
+            assert bad.status == 400
         finally:
             await client.close()
             await manager.shutdown_all()

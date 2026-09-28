@@ -63,6 +63,18 @@ the daemon config:
 ``tests/conftest.py`` clamps the xdist worker count to the granted width, so
 a ``-n 16`` typed by hand spends what the arbiter granted and no more.
 
+Run history (claunch-8kald): every grant that ends -- released, reaped, or
+ended with its session -- and every request that gave up waiting leaves one
+line in ``window-history.jsonl`` next to the state file: class, holder,
+label, width, the wait and the hold in seconds, and how it ended. The daemon
+records the timing itself, from its own grant state; the *result* (passed /
+failed counts, exit status) comes from ``tests/conftest.py``, which reports
+it to the window API when pytest finishes, so no session has to remember to.
+**The log keeps at most 7 days** (``HISTORY_RETENTION_DAYS``): older lines
+are dropped on load and whenever the file is appended to. It is an operating
+record for "how long do runs wait and hold, and how often do they fail", not
+an archive; the evidence a round cites stays in its receipts.
+
 What is deliberately NOT here:
 
 * a wall-clock TTL. The repository has already paid for that confusion once
@@ -141,9 +153,77 @@ REMINDER_POLL = 15.0
 
 _STATE_VERSION = 1
 
+#: How long the run history is kept. Stated to the user in the CLI help, the
+#: web Window page and the API answer; change all of them together.
+HISTORY_RETENTION_DAYS = 7
+HISTORY_RETENTION = HISTORY_RETENTION_DAYS * 86400.0
+#: How often an append also rewrites the file without its expired lines.
+HISTORY_PRUNE_EVERY = 3600.0
+
+#: The result fields a reporter may attach to a grant, and their types.
+RESULT_FIELDS = {
+    "outcome": str,
+    "exit_code": int,
+    "passed": int,
+    "failed": int,
+    "errors": int,
+    "skipped": int,
+    "collected": int,
+    "duration": float,
+}
+OUTCOMES = ("passed", "failed", "error", "interrupted", "no_tests")
+
 
 def _utcnow() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def _parse_ts(value) -> Optional[float]:
+    try:
+        return datetime.fromisoformat(str(value)).timestamp()
+    except (TypeError, ValueError):
+        return None
+
+
+def _seconds_between(start, end) -> Optional[float]:
+    a, b = _parse_ts(start), _parse_ts(end)
+    if a is None or b is None:
+        return None
+    return round(max(0.0, b - a), 1)
+
+
+def clean_result(raw) -> Optional[dict]:
+    """The reported result, reduced to known fields of the right type."""
+    if not isinstance(raw, dict):
+        return None
+    out = {}
+    for key, kind in RESULT_FIELDS.items():
+        if key not in raw or raw[key] is None:
+            continue
+        try:
+            out[key] = kind(raw[key])
+        except (TypeError, ValueError):
+            continue
+    if "outcome" in out and out["outcome"] not in OUTCOMES:
+        out.pop("outcome")
+    return out or None
+
+
+def _quantile(values: List[float], q: float) -> Optional[float]:
+    if not values:
+        return None
+    ordered = sorted(values)
+    index = min(len(ordered) - 1, max(0, int(round(q * (len(ordered) - 1)))))
+    return round(ordered[index], 1)
+
+
+def _spread(values: List[float]) -> dict:
+    return {
+        "p50": _quantile(values, 0.5),
+        "p90": _quantile(values, 0.9),
+        "max": round(max(values), 1) if values else None,
+        "total": round(sum(values), 1),
+    }
 
 
 def pid_alive(pid: int) -> bool:
@@ -221,7 +301,11 @@ class WindowManager:
         self._holders: List[dict] = []
         self._queue: List[dict] = []
         self._granted_events: Dict[str, asyncio.Event] = {}
+        self._history_path = self._state_path.parent / "window-history.jsonl"
+        self._history: List[dict] = []
+        self._history_pruned_at = 0.0
         self._load()
+        self._load_history()
 
     # ---- configuration --------------------------------------------------- #
 
@@ -313,6 +397,159 @@ class WindowManager:
             # A failed save must not fail the grant it was recording.
             log.warning("window: state not saved: %s", exc)
 
+    # ---- run history (7 days) ------------------------------------------- #
+
+    def _history_cutoff(self, now: Optional[float] = None) -> float:
+        return (time.time() if now is None else now) - HISTORY_RETENTION
+
+    def _load_history(self) -> None:
+        """Read the kept days of the log; expired lines are dropped here."""
+        try:
+            lines = self._history_path.read_text(encoding="utf-8").splitlines()
+        except OSError:
+            return
+        cutoff = self._history_cutoff()
+        kept = []
+        for line in lines:
+            try:
+                entry = json.loads(line)
+            except ValueError:
+                continue
+            if (_parse_ts(entry.get("ended_at")) or 0) >= cutoff:
+                kept.append(entry)
+        self._history = kept
+        if len(kept) != len(lines):
+            self._rewrite_history()
+
+    def _rewrite_history(self) -> None:
+        try:
+            self._history_path.parent.mkdir(parents=True, exist_ok=True)
+            with atomic.scratch(self._history_path) as tmp:
+                tmp.write_text(
+                    "".join(
+                        json.dumps(e, ensure_ascii=False) + "\n" for e in self._history
+                    ),
+                    encoding="utf-8",
+                )
+                atomic.replace(tmp, self._history_path)
+        except OSError as exc:
+            log.warning("window: history not rewritten: %s", exc)
+        self._history_pruned_at = time.monotonic()
+
+    def _prune_history(self) -> bool:
+        cutoff = self._history_cutoff()
+        before = len(self._history)
+        self._history = [
+            e for e in self._history if (_parse_ts(e.get("ended_at")) or 0) >= cutoff
+        ]
+        return len(self._history) != before
+
+    def _record(self, entry: dict, end: str) -> None:
+        """One finished grant or abandoned wait, into the 7-day log."""
+        ended_at = _utcnow()
+        requested = entry.get("requested_at") or entry.get("enqueued_at")
+        acquired = entry.get("acquired_at")
+        line = {
+            "grant_id": entry.get("grant_id"),
+            "cls": entry.get("cls"),
+            "session": entry.get("session"),
+            "pid": entry.get("pid"),
+            "label": entry.get("label") or "",
+            "workers": entry.get("workers"),
+            "forced": bool(entry.get("forced")),
+            "requested_at": requested,
+            "acquired_at": acquired,
+            "ended_at": ended_at,
+            "wait_seconds": _seconds_between(requested, acquired or ended_at),
+            "held_seconds": _seconds_between(acquired, ended_at) if acquired else None,
+            "end": end,
+            "result": entry.get("result"),
+        }
+        self._history.append(line)
+        if (
+            self._prune_history()
+            or time.monotonic() - self._history_pruned_at > HISTORY_PRUNE_EVERY
+        ):
+            self._rewrite_history()
+            return
+        try:
+            self._history_path.parent.mkdir(parents=True, exist_ok=True)
+            with self._history_path.open("a", encoding="utf-8") as fh:
+                fh.write(json.dumps(line, ensure_ascii=False) + "\n")
+        except OSError as exc:
+            log.warning("window: history line not written: %s", exc)
+
+    def report_result(self, grant_id: str, result) -> bool:
+        """Attach a run's result to a live grant. False = no such holder.
+
+        The reporter is the pytest that ran under the grant (``tests/
+        conftest.py``); a nested pytest reports into its parent's grant, so
+        the owner that releases it later carries the result into the log.
+        """
+        cleaned = clean_result(result)
+        holder = next((h for h in self._holders if h["grant_id"] == grant_id), None)
+        if holder is None or cleaned is None:
+            return False
+        holder["result"] = cleaned
+        self._save()
+        return True
+
+    def history(
+        self,
+        *,
+        days: Optional[float] = None,
+        cls: Optional[str] = None,
+        session: Optional[str] = None,
+        limit: int = 50,
+    ) -> dict:
+        """The kept log, newest first, with statistics over the same filter."""
+        span = HISTORY_RETENTION_DAYS if not days else min(float(days), HISTORY_RETENTION_DAYS)
+        cutoff = time.time() - span * 86400.0
+        rows = [
+            e
+            for e in self._history
+            if (_parse_ts(e.get("ended_at")) or 0) >= cutoff
+            and (not cls or e.get("cls") == cls)
+            and (not session or e.get("session") == session)
+        ]
+        return {
+            "retention_days": HISTORY_RETENTION_DAYS,
+            "days": span,
+            "stats": self._stats(rows),
+            "entries": list(reversed(rows))[: max(0, int(limit))],
+            "total": len(rows),
+        }
+
+    @staticmethod
+    def _stats(rows: List[dict]) -> dict:
+        by_class = {}
+        for cls in CLASSES:
+            mine = [r for r in rows if r.get("cls") == cls]
+            runs = [r for r in mine if r.get("acquired_at")]
+            outcomes: Dict[str, int] = {}
+            for r in runs:
+                outcome = (r.get("result") or {}).get("outcome") or "unreported"
+                outcomes[outcome] = outcomes.get(outcome, 0) + 1
+            by_class[cls] = {
+                "runs": len(runs),
+                "gave_up_waiting": len(mine) - len(runs),
+                "forced": sum(1 for r in runs if r.get("forced")),
+                "outcomes": outcomes,
+                "wait_seconds": _spread(
+                    [r["wait_seconds"] for r in runs if r.get("wait_seconds") is not None]
+                ),
+                "held_seconds": _spread(
+                    [r["held_seconds"] for r in runs if r.get("held_seconds") is not None]
+                ),
+            }
+        sessions: Dict[str, int] = {}
+        for r in rows:
+            if r.get("acquired_at"):
+                who = r.get("session") or f"pid {r.get('pid')}"
+                sessions[who] = sessions.get(who, 0) + 1
+        top = sorted(sessions.items(), key=lambda kv: (-kv[1], kv[0]))[:10]
+        return {"classes": by_class, "top_sessions": [{"holder": k, "runs": v} for k, v in top]}
+
     # ---- reaping ------------------------------------------------------------ #
 
     def _session_gone(self, name: str) -> bool:
@@ -337,7 +574,10 @@ class WindowManager:
         """Drop dead holders and waiters. Returns True if anything changed."""
         before_h = len(self._holders)
         before_q = len(self._queue)
-        self._holders = [h for h in self._holders if not self._dead(h)]
+        dead = [h for h in self._holders if self._dead(h)]
+        for holder in dead:
+            self._record(holder, "reaped")
+        self._holders = [h for h in self._holders if h not in dead]
         self._queue = [q for q in self._queue if not self._dead(q)]
         dropped = before_h - len(self._holders) + before_q - len(self._queue)
         if dropped:
@@ -404,7 +644,8 @@ class WindowManager:
         else:
             holder["workers"] = self._width(holder["cls"], requested)
         holder["acquired_at"] = _utcnow()
-        holder.pop("enqueued_at", None)
+        # Kept for the history's wait time; the queue field name goes.
+        holder["requested_at"] = holder.pop("enqueued_at", None) or holder["acquired_at"]
         holder.pop("priority", None)
         self._holders.append(holder)
         event = self._granted_events.pop(entry["grant_id"], None)
@@ -544,6 +785,7 @@ class WindowManager:
         except asyncio.TimeoutError:
             if entry in self._queue:
                 self._queue.remove(entry)
+                self._record(entry, "timeout")
                 self._save()
             return {
                 "granted": False,
@@ -555,6 +797,7 @@ class WindowManager:
             # granted later without a client to receive the grant id.
             if entry in self._queue:
                 self._queue.remove(entry)
+                self._record(entry, "disconnected")
                 self._save()
             raise
         finally:
@@ -577,6 +820,7 @@ class WindowManager:
         if holder is None:
             return False
         self._holders.remove(holder)
+        self._record(holder, "released")
         self._process_queue()
         self._save()
         return True
@@ -593,6 +837,7 @@ class WindowManager:
             return False
         self._queue.remove(entry)
         self._granted_events.pop(grant_id, None)
+        self._record(entry, "cancelled")
         self._save()
         return True
 
@@ -602,6 +847,7 @@ class WindowManager:
         for entry in entries:
             self._queue.remove(entry)
             self._granted_events.pop(entry["grant_id"], None)
+            self._record(entry, "cancelled")
         if entries:
             self._save()
         return len(entries)
@@ -671,6 +917,7 @@ class WindowManager:
             "advisory_n_now": self._width(TARGETED, None),
             "limits": dict(self._limits()),
             "workers_in_use": self.workers_in_use(),
+            "history_retention_days": HISTORY_RETENTION_DAYS,
         }
 
     # ---- the exit hook -------------------------------------------------------- #
@@ -690,6 +937,8 @@ class WindowManager:
         queued = [q for q in self._queue if q.get("session") == name]
         if not held and not queued:
             return
+        for entry in held + queued:
+            self._record(entry, "session_exited")
         self._holders = [h for h in self._holders if h.get("session") != name]
         self._queue = [q for q in self._queue if q.get("session") != name]
         self._process_queue()

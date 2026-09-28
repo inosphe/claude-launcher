@@ -1102,10 +1102,28 @@ def test_the_worker_review_does_not_ship_the_retired_bare_probe():
 
 
 def test_the_worker_review_names_the_fallback_limit():
-    """A deployment fallback reports the capacity it cannot enforce."""
+    """A deployment fallback still caps both classes (claunch-8kald): the
+    targeted fallback used to run unguarded, and the text said so."""
     review = _bundled("improv-worker").steps["review"]
     assert "데몬 또는 창 API를 사용할 수 없으면" in review.instructions
-    assert "targeted는 용량 제한을 적용할 수 없다는" in review.instructions
+    assert "슬롯 잠금" in review.instructions
+    assert "targeted는 용량 제한을 적용할 수 없다는" not in review.instructions
+
+
+def test_the_worker_review_states_the_targeted_concurrency_rules():
+    """claunch-8kald: one targeted grant per session, the granted width is a
+    ceiling, and the queue overrides belong to the operator."""
+    review = _bundled("improv-worker").steps["review"]
+    for anchor in (
+        "targeted 실행의 동시성 규칙",
+        "window_targeted_per_session",
+        "window_worker_budget",
+        "claunch window prioritize",
+        "claunch window force",
+        "claunch window history",
+        "최대 7일",
+    ):
+        assert anchor in review.instructions, f"review lost its {anchor!r} rule"
 
 
 def test_the_leader_checks_who_else_stands_in_the_tree_before_merging():

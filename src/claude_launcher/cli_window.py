@@ -251,6 +251,74 @@ def _cmd_force(args) -> int:
     return 0
 
 
+def _fmt_seconds(value) -> str:
+    if value is None:
+        return "-"
+    value = float(value)
+    if value < 60:
+        return f"{value:.0f}s"
+    if value < 3600:
+        return f"{value / 60:.1f}m"
+    return f"{value / 3600:.1f}h"
+
+
+def _fmt_result(result) -> str:
+    if not result:
+        return "unreported"
+    counts = ", ".join(
+        f"{result[k]} {k}" for k in ("passed", "failed", "errors", "skipped") if result.get(k)
+    )
+    return f"{result.get('outcome', '?')}" + (f" ({counts})" if counts else "")
+
+
+def _cmd_history(args) -> int:
+    client = _client()
+    if client is None:
+        return 2
+    query = [f"limit={args.limit}"]
+    if args.days:
+        query.append(f"days={args.days}")
+    if args.cls:
+        query.append(f"class={args.cls}")
+    if args.session:
+        query.append(f"session={args.session}")
+    try:
+        answer = client.get("/api/window/history?" + "&".join(query))
+    except daemon_client.DaemonClientError as exc:
+        print(f"cannot read the window history: {exc}", file=sys.stderr)
+        return 2
+    if args.json:
+        import json
+
+        print(json.dumps(answer, indent=1, ensure_ascii=False))
+        return 0
+    print(
+        f"window history: last {answer.get('days')} day(s), {answer.get('total', 0)} "
+        f"entr(ies) (the log keeps {answer.get('retention_days', 7)} days, then drops them)"
+    )
+    for cls, st in ((answer.get("stats") or {}).get("classes") or {}).items():
+        wait, held = st.get("wait_seconds") or {}, st.get("held_seconds") or {}
+        outcomes = ", ".join(f"{v} {k}" for k, v in sorted((st.get("outcomes") or {}).items()))
+        print(
+            f"  {cls}: {st.get('runs', 0)} run(s) [{outcomes or 'none'}]; "
+            f"wait p50 {_fmt_seconds(wait.get('p50'))} p90 {_fmt_seconds(wait.get('p90'))} "
+            f"max {_fmt_seconds(wait.get('max'))}; held p50 {_fmt_seconds(held.get('p50'))} "
+            f"p90 {_fmt_seconds(held.get('p90'))} max {_fmt_seconds(held.get('max'))}; "
+            f"gave up waiting {st.get('gave_up_waiting', 0)}, forced {st.get('forced', 0)}"
+        )
+    for entry in answer.get("entries") or []:
+        who = entry.get("session") or f"pid {entry.get('pid')}"
+        print(
+            f"  {entry.get('ended_at', '?')} {entry.get('cls', '?')}:{who} "
+            f"{entry.get('end', '?')} wait {_fmt_seconds(entry.get('wait_seconds'))} "
+            f"held {_fmt_seconds(entry.get('held_seconds'))} -n {entry.get('workers') or '-'} "
+            f"{_fmt_result(entry.get('result'))}"
+            + (" forced" if entry.get("forced") else "")
+            + (f" -- {entry['label']}" if entry.get("label") else "")
+        )
+    return 0
+
+
 def register(sub) -> None:
     p_window = sub.add_parser(
         "window",
@@ -336,3 +404,15 @@ def register(sub) -> None:
     )
     p.add_argument("grant_id", help="the waiting request (ids: `claunch window status`)")
     p.set_defaults(func=_cmd_force)
+
+    p = wsub.add_parser(
+        "history",
+        help="test runs the window granted: wait, hold, result, and statistics "
+        "(the daemon keeps 7 days of this log and drops older entries)",
+    )
+    p.add_argument("--days", type=float, help="look back this many days (at most 7)")
+    p.add_argument("--class", dest="cls", choices=["sweep", "targeted"])
+    p.add_argument("--session", help="only this holder session")
+    p.add_argument("--limit", type=int, default=20, help="entries to list (default 20)")
+    p.add_argument("--json", action="store_true", help="the API answer as JSON")
+    p.set_defaults(func=_cmd_history)

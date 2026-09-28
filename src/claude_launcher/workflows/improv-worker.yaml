@@ -1209,6 +1209,11 @@ steps:
       · 현재 상태는 `claunch window status`로 읽는다. 보유자·대기열·획득
         시각·용량·작업자 예산 사용량이 데몬 상태로 출력된다. 이 출력은 진단과
         보고에 사용하며, 획득 판정은 실행 도구가 수행한다.
+      · 끝난 실행의 대기·보유 시간과 결과는 `claunch window history`(MCP
+        `window_history`, 웹 Window 페이지)로 읽는다. 시간은 데몬이 창 상태에서
+        직접 기록하고, 결과는 `tests/conftest.py`가 pytest 종료 시 자동으로
+        보고하므로 세션이 따로 보고할 것은 없다. 이 로그는 최대 7일만 보관되고
+        그보다 오래된 줄은 삭제된다 — 회차가 인용할 근거는 여전히 영수증이다.
       · 창 부여 응답의 `advisory_n`은 그 실행이 쓸 수 있는 xdist 작업자
         수다. 클래스별 상한(targeted 4, sweep 8), 요청한 폭, 머신 전체 작업자
         예산(`window_worker_budget` 12)의 남은 양 가운데 가장 작은 값이다.

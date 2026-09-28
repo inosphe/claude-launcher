@@ -94,6 +94,38 @@ def test_the_operator_parser_knows_the_new_subcommands():
     assert (args.workers, args.force) == (2, False)
 
 
+def test_window_history_prints_the_retention_statistics_and_rows(monkeypatch, capsys):
+    class _Reader(_Client):
+        def get(self, path):
+            self.posts.append(("get", path))
+            return {
+                "retention_days": 7, "days": 7, "total": 1,
+                "stats": {"classes": {"targeted": {
+                    "runs": 1, "gave_up_waiting": 0, "forced": 0,
+                    "outcomes": {"passed": 1},
+                    "wait_seconds": {"p50": 5, "p90": 5, "max": 5},
+                    "held_seconds": {"p50": 90, "p90": 90, "max": 90},
+                }}},
+                "entries": [{
+                    "ended_at": "2026-09-28T08:00:00+00:00", "cls": "targeted",
+                    "session": "s1", "end": "released", "wait_seconds": 5,
+                    "held_seconds": 90, "workers": 2, "label": "pytest x",
+                    "result": {"outcome": "passed", "passed": 12},
+                }],
+            }
+
+    client = _Reader(None)
+    monkeypatch.setattr(cli_window, "_client", lambda: client)
+    args = argparse.Namespace(days=None, cls="targeted", session=None, limit=20, json=False)
+    assert cli_window._cmd_history(args) == 0
+    assert client.posts == [("get", "/api/window/history?limit=20&class=targeted")]
+    out = capsys.readouterr().out
+    assert "keeps 7 days, then drops them" in out
+    assert "targeted: 1 run(s) [1 passed]; wait p50 5s" in out
+    assert "held p50 1.5m" in out
+    assert "released wait 5s held 1.5m -n 2 passed (12 passed) -- pytest x" in out
+
+
 def test_window_cancel_reports_an_empty_match(monkeypatch, capsys):
     client = _Client({"cancelled": 0})
     monkeypatch.setenv("CLAUNCH_SESSION", "s1")

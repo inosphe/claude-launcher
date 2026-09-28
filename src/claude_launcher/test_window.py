@@ -38,6 +38,10 @@ WINDOW_MODE_ENV = "CLAUNCH_WINDOW"
 WINDOW_GRANT_ENV = "CLAUNCH_WINDOW_GRANT_ID"
 WINDOW_CLASS_ENV = "CLAUNCH_WINDOW_CLASS"
 WINDOW_WORKERS_ENV = "CLAUNCH_WINDOW_ADVISORY_N"
+#: Set only in the environment a grant owner hands its *direct* child pytest
+#: (``child_env``): that pytest reports its result into the grant, and pops
+#: the variable so a pytest a test spawns does not overwrite it.
+WINDOW_REPORT_ENV = "CLAUNCH_WINDOW_REPORT"
 
 DEFAULT_WAIT = 1800.0
 DEFAULT_SWEEP_WORKERS = 8
@@ -70,6 +74,7 @@ class WindowGrant:
         env[WINDOW_GRANT_ENV] = self.grant_id
         env[WINDOW_CLASS_ENV] = self.cls
         env[WINDOW_WORKERS_ENV] = str(self.advisory_n)
+        env[WINDOW_REPORT_ENV] = "1"
         return env
 
     def install_environment(self) -> None:
@@ -345,6 +350,48 @@ def _unlock(handle: BinaryIO) -> None:
         import fcntl
 
         fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
+def reportable(grant_id: Optional[str]) -> bool:
+    """Only a daemon grant has a history line to carry a result."""
+    return bool(grant_id) and grant_id != "disabled" and not grant_id.endswith("-fallback")
+
+
+def report_result(grant_id: str, result: dict) -> bool:
+    """Attach a finished run's result to its grant in the daemon's history.
+
+    Best effort by design: a daemon that is down, or predates the endpoint,
+    costs the history one result and costs the test run nothing.
+    """
+    if not reportable(grant_id):
+        return False
+    client = daemon_client.connect()
+    if client is None:
+        return False
+    try:
+        answer = client.post(
+            "/api/window/report", {"grant_id": grant_id, "result": result}, timeout=3.0
+        )
+    except daemon_client.DaemonClientError:
+        return False
+    return bool(answer.get("reported"))
+
+
+def pytest_result(exitstatus: int, stats: Mapping, collected: int, duration: float) -> dict:
+    """A pytest session's end state in the window's result fields."""
+    outcome = {0: "passed", 1: "failed", 2: "interrupted", 5: "no_tests"}.get(
+        int(exitstatus), "error"
+    )
+    return {
+        "outcome": outcome,
+        "exit_code": int(exitstatus),
+        "passed": len(stats.get("passed", ())),
+        "failed": len(stats.get("failed", ())),
+        "errors": len(stats.get("error", ())),
+        "skipped": len(stats.get("skipped", ())),
+        "collected": int(collected or 0),
+        "duration": round(float(duration), 1),
+    }
 
 
 def _expand_tx(tx) -> list:

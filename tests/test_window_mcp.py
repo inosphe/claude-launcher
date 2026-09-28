@@ -29,6 +29,19 @@ def test_window_mcp_reads_status_and_cancels_only_the_callers_waits(monkeypatch)
     ]
 
 
+def test_window_mcp_reads_the_history_with_its_filters(monkeypatch):
+    client = _Client()
+    monkeypatch.setattr(window_mcp, "_client", lambda: client)
+    window_mcp.call_tool("window_history", {"days": 2, "class": "sweep", "limit": 5})
+    window_mcp.call_tool("window_history", {})
+    assert client.calls == [
+        ("get", "/api/window/history?limit=5&days=2&class=sweep", None),
+        ("get", "/api/window/history?limit=20", None),
+    ]
+    tool = next(t for t in window_mcp.TOOLS if t["name"] == "window_history")
+    assert "7 days" in tool["description"]
+
+
 def test_window_mcp_refuses_cancellation_without_a_managed_session(monkeypatch):
     monkeypatch.delenv("CLAUNCH_SESSION", raising=False)
     response = window_mcp.SERVER.handle(
