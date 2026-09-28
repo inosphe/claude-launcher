@@ -1718,6 +1718,85 @@ claunch daemon restart --all             # restart every RUNNING instance
 is currently serving (stopped instances are skipped, not started) — the "pick
 up new code everywhere" verb after an upgrade.
 
+#### What an instance shares
+
+Out of the box a named instance separates only its **daemon state**. Everything
+else is shared with the default daemon:
+
+| Item | Default for a named instance | Where it lives |
+| --- | --- | --- |
+| Daemon state (sessions, meshes, token, lock, log) | Own | `~/.claude-launcher/daemons/NAME/` |
+| Port | Own (ephemeral) | its `daemon.json` |
+| Relay identity | Own | `<hostname>-NAME` |
+| Config file | **Shared** | `~/.claunch.yaml` |
+| Profiles (logins, settings, plugins), global workflows, sync merge base | **Shared** | `~/.claude-launcher/` |
+
+So `claunch -L test new-session --profile work` runs the *same* `work` profile, with
+the same login, as the default daemon does.
+
+#### Giving an instance its own home and config
+
+To separate the rest, write the instance a **manifest** once:
+
+```bash
+claunch daemon instance create team \
+    --home ~/.claude-launcher-team \
+    --config ~/.claunch-team.yaml \
+    --seed            # optional: start the new config as a copy of the current one
+```
+
+This writes `~/.claude-launcher/daemons/team/instance.yaml`:
+
+```yaml
+home: C:\Users\me\.claude-launcher-team   # omitted = shared launcher home
+config: C:\Users\me\.claunch-team.yaml    # omitted = shared ~/.claunch.yaml
+port: 8390                                # omitted = ephemeral port
+```
+
+From then on `-L team` alone is enough. Every command run as `claunch -L team
+...` (or with `CLAUNCH_DAEMON=team`), the daemon it starts, and every session
+that daemon launches use the manifest's home, config file and port. Nothing has
+to be exported in your shell:
+
+```bash
+claunch -L team create work        # a 'work' profile inside the team home
+claunch -L team login work         # its own login
+claunch -L team new-session --profile work
+claunch daemon instance show team  # what it shares and what it owns
+claunch daemon instance ls         # every named instance at a glance
+```
+
+Details:
+
+- **Each key is independent.** Give only `--config` to keep the profiles
+  shared but use a different config file. Give only `--port` to pin the port.
+- **The daemon state does not move.** It stays in
+  `~/.claude-launcher/daemons/NAME/` next to the manifest, even when `home:`
+  points elsewhere. That way `daemon restart --all` and `daemon instance ls`
+  still see every instance from a plain shell.
+- **`--seed`** copies the config file you are currently using to `--config`.
+  It leaves out the `sync:` block, because the sync merge base is kept per
+  launcher home, and it never overwrites an existing file. Profiles declared
+  in the copy are created empty in the new home on first use. Logins are
+  **not** copied: log in again under `-L NAME`.
+- **The manifest wins over the environment.** The manifest is read from the
+  home in effect before it applies (normally `~/.claude-launcher`, or
+  `CLAUDE_LAUNCHER_HOME` if you set one). Its values then replace
+  `CLAUDE_LAUNCHER_HOME`, `CLAUDE_LAUNCHER_SYNC_FILE` and `CLAUNCH_DAEMON_PORT`
+  for that instance. To change an instance's home, edit its manifest or run
+  `create --force`.
+- **Two instances cannot share one home.** A manifest whose `home:` is
+  already another instance's home is refused, both at `create` and when the
+  instance starts. Such a pair would silently share profiles and the merge
+  base.
+- **Paths must be absolute** (`~` is allowed). The only keys are `home`,
+  `config` and `port`. Any other key is an error, so a typo does not silently
+  fall back to sharing.
+- A bad manifest stops every `claunch -L NAME` command with an error. It does
+  not fall back to the shared home.
+- A manifest changes nothing for a daemon that is **already running**. The
+  daemon picks it up the next time it starts.
+
 ### Who may restart or stop the daemon
 
 `claunch daemon restart` and `claunch daemon stop` are **operator commands**.
@@ -3993,6 +4072,12 @@ A profile directory typically holds:
 | `CLAUNCH_SYNC_TOKEN`        | Sync auth token, overriding `sync.token` (the preferred place for it). |
 | `CLAUNCH_SYNC_NAMESPACE`    | Synced document's namespace, overriding `sync.namespace`. |
 | `CLAUNCH_SYNC_SERVER_DIR`   | Server side: documents + accounts (default `<launcher home>/sync-server`). |
+| `CLAUNCH_DAEMON`            | The [named daemon instance](#named-daemon-instances-tmux--l) to target (same as `-L NAME`). |
+| `CLAUNCH_DAEMON_PORT`       | Pin a named instance's port (default ephemeral; an instance manifest's `port:` sets it). |
+
+An [instance manifest](#giving-an-instance-its-own-home-and-config) sets
+`CLAUDE_LAUNCHER_HOME`, `CLAUDE_LAUNCHER_SYNC_FILE` and `CLAUNCH_DAEMON_PORT`
+for everything run under `-L NAME`, over any value already in the environment.
 
 ## License
 

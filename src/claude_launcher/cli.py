@@ -67,6 +67,7 @@ from .cflow.model import WorkflowError
 from .cflow.state import StateError as CflowStateError
 from .daemon import harness as harness_def
 from .daemon import paths as daemon_paths
+from .daemon import instance_manifest
 from .daemon_client import DaemonClientError
 from .credentials import CredentialsError
 from .lineage import LineageError
@@ -1679,6 +1680,13 @@ def main(argv: Optional[List[str]] = None) -> int:
         except ValueError as exc:
             print(f"error: {exc}", file=sys.stderr)
             return 2
+    try:
+        # Before anything resolves a path: an instance manifest may move the
+        # launcher home, the config file and the port for this process tree.
+        instance_manifest.apply()
+    except (ValueError, instance_manifest.InstanceManifestError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
     try:
         # Read the source of truth and reconcile local state (migrate any legacy
         # config, materialize declared-but-missing profile dirs) before running.

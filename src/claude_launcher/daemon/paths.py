@@ -25,6 +25,11 @@ from .. import config
 #: means the default instance.
 INSTANCE_ENV = "CLAUNCH_DAEMON"
 
+#: Set by :mod:`instance_manifest` when an instance's manifest moved the
+#: launcher home: the home it replaced, which is where every instance's state
+#: directory (and manifest) lives.
+INSTANCE_BASE_ENV = "CLAUNCH_INSTANCE_BASE"
+
 _INSTANCE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
 
 
@@ -48,6 +53,18 @@ def instance() -> str:
     return validate_instance(name) if name else ""
 
 
+def base_home() -> Path:
+    """The launcher home instances are anchored in.
+
+    Normally :func:`config.launcher_home`. When an instance manifest gave the
+    instance its own home (``home:`` in ``instance.yaml``), the home that was
+    in effect before it -- so named instances' state and manifests stay in one
+    place however many homes the instances use.
+    """
+    base = os.environ.get(INSTANCE_BASE_ENV, "").strip()
+    return Path(base) if base else config.launcher_home()
+
+
 def known_instances() -> list:
     """Every instance with runtime state on disk: ``''`` (the default) first
     when its directory exists, then named instances sorted.
@@ -56,9 +73,9 @@ def known_instances() -> list:
     callers who care probe each instance's ``daemon.json``/health themselves.
     """
     names = []
-    if (config.launcher_home() / "daemon").is_dir():
+    if (base_home() / "daemon").is_dir():
         names.append("")
-    root = config.launcher_home() / "daemons"
+    root = base_home() / "daemons"
     if root.is_dir():
         names.extend(sorted(
             p.name for p in root.iterdir()
@@ -72,7 +89,7 @@ def daemon_dir() -> Path:
     or ``~/.claude-launcher/daemons/<name>`` for a named instance)."""
     name = instance()
     if name:
-        return config.launcher_home() / "daemons" / name
+        return base_home() / "daemons" / name
     return config.launcher_home() / "daemon"
 
 

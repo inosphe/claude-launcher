@@ -19,7 +19,7 @@ from aiohttp import web
 
 from .. import daemon_client, store
 from . import cflow_clock, paths, restart_notice, resume, runtime_state, window as window_mod
-from . import session_reminder
+from . import instance_manifest, session_reminder
 from .api import build_app, notify_shutdown
 from .manager import SessionManager
 from .mesh import MeshError, MeshManager
@@ -539,6 +539,14 @@ def main(argv=None) -> int:
         # Into the environment (not a variable) so every paths.instance()
         # call — and any child process — sees the same instance.
         os.environ[paths.INSTANCE_ENV] = paths.validate_instance(args.name)
+    # A daemon started straight from a shell (``--name``/``CLAUNCH_DAEMON``
+    # without the CLI) still gets its instance's home, config and port. One
+    # the CLI auto-started inherited them already; apply() leaves that as is.
+    try:
+        instance_manifest.apply()
+    except instance_manifest.InstanceManifestError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
     _setup_logging(args.foreground)
 
     lock = runtime_state.SingletonLock()
