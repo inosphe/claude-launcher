@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import sys
 from pathlib import Path
 
 import pytest
@@ -22,6 +23,22 @@ def _pytest_window_class(args) -> str:
     return test_window.TARGETED
 
 
+def _spend_only_the_grant(config, grant) -> None:
+    """Hold the run to the granted xdist width (claunch-8kald).
+
+    The grant's width used to be advice that only the wrapper tools applied;
+    a hand-typed ``-n 16`` spent sixteen workers whatever the arbiter said.
+    """
+    clamped = test_window.clamp_xdist_width(config.option, grant.advisory_n)
+    if clamped:
+        before, after = clamped
+        print(
+            f"claunch window: -n {before} cut to the granted width {after} "
+            f"({grant.cls} grant {grant.grant_id})",
+            file=sys.stderr,
+        )
+
+
 def pytest_sessionstart(session):
     """Guard every direct pytest entry point, including unwrapped commands."""
     global _test_window_grant
@@ -34,13 +51,19 @@ def pytest_sessionstart(session):
             raise pytest.UsageError(
                 "a targeted parent grant cannot cover an exclusive sweep"
             )
+        _spend_only_the_grant(session.config, inherited)
         return
     label = "pytest " + " ".join(str(arg) for arg in session.config.args)
     try:
-        _test_window_grant = test_window.acquire(cls, label=label)
+        _test_window_grant = test_window.acquire(
+            cls,
+            label=label,
+            workers=test_window.requested_xdist_width(session.config.option),
+        )
     except test_window.WindowUnavailable as exc:
         raise pytest.UsageError(str(exc)) from exc
     _test_window_grant.install_environment()
+    _spend_only_the_grant(session.config, _test_window_grant)
 
 
 def _release_test_window() -> None:

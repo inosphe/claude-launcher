@@ -126,17 +126,21 @@ const snapshot = {
   holders: [
     { grant_id: "g1", cls: "targeted", session: "s1", pid: 11,
       label: "pytest tests/test_one.py", acquired_at: "2026-08-31T06:00:00Z" },
-    { grant_id: "g2", cls: "sweep", session: null, pid: 44,
+    { grant_id: "g2", cls: "sweep", session: null, pid: 44, workers: 8,
+      forced: true,
       label: "full suite", acquired_at: "2026-08-31T06:01:00Z" },
   ],
   queue: [
-    { grant_id: "q1", cls: "targeted", session: "s2", pid: 22,
+    { grant_id: "q1", cls: "targeted", session: "s2", pid: 22, priority: 2,
       label: "changed tests", enqueued_at: "2026-08-31T06:02:00Z" },
     { grant_id: "q2", cls: "sweep", session: null, pid: 55,
       label: "release sweep", enqueued_at: "2026-08-31T06:03:00Z" },
   ],
   caps: { targeted: 5, sweep: 1 }, max_wait: 1800, reminder_interval: 180,
   cores: 32, advisory_n_now: 6,
+  limits: { worker_budget: 12, targeted_width: 4, sweep_width: 8,
+            targeted_per_session: 1 },
+  workers_in_use: 9,
 };
 
 (async () => {
@@ -158,6 +162,19 @@ const snapshot = {
         withClass("window-row").length === 4, withClass("window-row").length);
   check("queued requests have cancellation controls",
         withClass("window-cancel").length === 2, withClass("window-cancel").length);
+  check("queued requests have the operator's Top and Force controls",
+        withClass("window-prioritize").length === 2 &&
+        withClass("window-force").length === 2,
+        [withClass("window-prioritize").length, withClass("window-force").length]);
+  check("holders carry no queue controls",
+        withClass("window-actions").length === 2, withClass("window-actions").length);
+  check("a forced holder, its width and a raised priority are tagged",
+        withClass("window-forced").length === 1 &&
+        view.words().includes("-n 8") && view.words().includes("priority 2"),
+        view.words());
+  check("the worker budget is visible",
+        view.words().includes("Worker budget") && view.words().includes("9 / 12"),
+        view.words());
   check("holder and FIFO positions are explicit",
         view.words().includes("held") && view.words().includes("#1") &&
         view.words().includes("#2"), view.words());

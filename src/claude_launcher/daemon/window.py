@@ -31,11 +31,11 @@ Two classes, because the resource has two shapes (operator-set values,
   sweep flipped red to green in 78 seconds on an identical tree (the
   ``claunch-1dre`` table, 2026-08-27), so a grant that admitted the pair would
   be minting measurements nobody may cite.
-* ``targeted`` -- a nodeid-selected run. Capacity 5, shared. The cap is
-  enforced by *not granting*, which is what ``claunch-95fa``'s third fix asked
-  for: the per-session scan becomes the arbiter's knowledge, and eight
-  concurrent targeted runs (where s155/s148 met xdist node-down) cannot
-  assemble.
+* ``targeted`` -- a nodeid-selected run. Capacity 3 (5 until claunch-8kald),
+  shared. The cap is enforced by *not granting*, which is what
+  ``claunch-95fa``'s third fix asked for: the per-session scan becomes the
+  arbiter's knowledge, and eight concurrent targeted runs (where s155/s148
+  met xdist node-down) cannot assemble.
 
 The caps are deliberately NOT derived from the CPU count: this suite is not
 CPU-bound (32 cores at 15% under 22 pytest processes -- s159's measurement in
@@ -45,6 +45,24 @@ the CPU count does govern is the width of *one* run, so each grant carries
 scheduling the arbiter is the only component positioned to do, because the
 arbiter is the one that knows how many runs are active.
 
+Since claunch-8kald (2026-09-28, user-direct) the width is also *spent*, not
+only advised. Three limits bind a grant besides the caps, all read live from
+the daemon config:
+
+* a per-class width ceiling (``window_sweep_width`` 8,
+  ``window_targeted_width`` 4) -- a targeted run selects a few modules and
+  gains nothing from eight workers;
+* a machine worker budget (``window_worker_budget`` 12): each holder records
+  the width it was granted, and a targeted request waits while the budget is
+  spent. The requester states the width it wants (``workers``), so a
+  one-module run costs one worker, not four;
+* one targeted grant per session at a time (``window_targeted_per_session``).
+  A session's subagents run under the same ``CLAUNCH_SESSION``, and parallel
+  subagent pytest runs were the uncounted load behind several flaky rounds.
+
+``tests/conftest.py`` clamps the xdist worker count to the granted width, so
+a ``-n 16`` typed by hand spends what the arbiter granted and no more.
+
 What is deliberately NOT here:
 
 * a wall-clock TTL. The repository has already paid for that confusion once
@@ -52,8 +70,18 @@ What is deliberately NOT here:
   tell a stuck holder from a slow legitimate run, and the honest reapers --
   the session exit hook and pid liveness -- already cover death. A holder
   whose session lives and whose pid lives is holding.
-* strict fairness policy beyond FIFO + writer preference. No preemption, no
-  priorities.
+* preemption. A forced grant (below) is added next to the running holders;
+  nothing running is stopped.
+
+Operator overrides (claunch-8kald): the queue is FIFO with writer preference
+until the operator says otherwise. ``prioritize`` gives a waiting request a
+priority (higher first, FIFO within a priority; the default is 0), and
+``force`` grants a waiting request -- or a fresh operator acquisition --
+immediately, past every cap, budget and exclusivity rule. A forced holder
+still counts against the caps and the budget for everyone after it. Both are
+operator actions: the CLI refuses them inside a managed session (the
+``claunch daemon restart`` gate's rule), and the API refuses to force a grant
+that names a session.
 * enforcement against a process that never asks. That half lives at the point
   of consumption: ``tools/sweep.py run`` acquires before it runs, and
   ``tests/conftest.py`` holds the window for any full-suite pytest however
@@ -90,6 +118,15 @@ CLASSES = (SWEEP, TARGETED)
 #: spawn and PTY/daemon waits, not cores).
 ADVISORY_MIN = 2
 ADVISORY_MAX = 8
+
+#: The spending limits (see the module docstring), used when no daemon config
+#: is consulted -- tests that inject ``caps`` get these, not the machine's.
+DEFAULT_LIMITS = {
+    "sweep_width": 8,
+    "targeted_width": 4,
+    "worker_budget": 12,
+    "targeted_per_session": 1,
+}
 
 #: Server-side ceiling on an acquire's wait.  A client may choose a shorter
 #: wait at assignment time, but no request may keep a daemon connection open
@@ -164,11 +201,21 @@ class WindowManager:
         manager=None,
         *,
         caps: Optional[Callable[[], Tuple[int, int]]] = None,
+        limits: Optional[Callable[[], dict]] = None,
         state_path: Optional[Path] = None,
         cores: Optional[int] = None,
     ) -> None:
         self._manager = manager
         self._caps = caps or self._caps_from_config
+        if limits is not None:
+            self._limits = limits
+        elif caps is not None:
+            # A caller that injects its caps is a test fixing the window's
+            # shape; reading the machine's config under it would make the
+            # test depend on whoever runs it.
+            self._limits = lambda: dict(DEFAULT_LIMITS)
+        else:
+            self._limits = self._limits_from_config
         self._state_path = state_path or (paths.daemon_dir() / "window.json")
         self._cores = cores or (os.cpu_count() or 4)
         self._holders: List[dict] = []
@@ -183,12 +230,54 @@ class WindowManager:
         cfg = store.daemon_config()
         return (
             int(cfg.get("window_sweep_cap", 1)),
-            int(cfg.get("window_targeted_cap", 5)),
+            int(cfg.get("window_targeted_cap", 3)),
         )
+
+    @staticmethod
+    def _limits_from_config() -> dict:
+        cfg = store.daemon_config()
+        return {
+            key: int(cfg.get(f"window_{key}", default))
+            for key, default in DEFAULT_LIMITS.items()
+        }
 
     def _cap(self, cls: str) -> int:
         sweep_cap, targeted_cap = self._caps()
         return max(1, sweep_cap if cls == SWEEP else targeted_cap)
+
+    def _class_width(self, cls: str) -> int:
+        key = "sweep_width" if cls == SWEEP else "targeted_width"
+        return max(1, int(self._limits().get(key, DEFAULT_LIMITS[key])))
+
+    def _held_width(self, holder: dict) -> int:
+        # A holder persisted before widths were recorded is charged its
+        # class ceiling: over-counting delays a grant, under-counting
+        # overloads the machine.
+        workers = holder.get("workers")
+        return int(workers) if workers else self._class_width(holder.get("cls", TARGETED))
+
+    def workers_in_use(self) -> int:
+        return sum(self._held_width(h) for h in self._holders)
+
+    def _budget(self) -> int:
+        return int(self._limits().get("worker_budget", DEFAULT_LIMITS["worker_budget"]))
+
+    def _budget_left(self) -> Optional[int]:
+        """Workers the budget still allows; None when the budget is off."""
+        budget = self._budget()
+        if budget <= 0:
+            return None
+        return budget - self.workers_in_use()
+
+    def _width(self, cls: str, requested: Optional[int]) -> int:
+        """The xdist width a grant made now would carry."""
+        width = min(self._class_width(cls), self.advisory_n(extra=1))
+        if requested:
+            width = min(width, max(1, int(requested)))
+        left = self._budget_left()
+        if left is not None:
+            width = min(width, max(1, left))
+        return max(1, width)
 
     # ---- persistence ------------------------------------------------------ #
 
@@ -257,35 +346,100 @@ class WindowManager:
 
     # ---- granting ----------------------------------------------------------- #
 
-    def _grantable(self, cls: str) -> bool:
-        if cls == SWEEP:
-            return not self._holders
-        return (
-            sum(1 for h in self._holders if h["cls"] == TARGETED) < self._cap(TARGETED)
-            and not any(h["cls"] == SWEEP for h in self._holders)
-            and not any(q["cls"] == SWEEP for q in self._queue)
-        )
+    def _blocker(
+        self, cls: str, session: Optional[str], ahead: List[dict]
+    ) -> Optional[str]:
+        """Why a request of this class cannot be granted now, or None.
 
-    def _grant(self, entry: dict) -> dict:
+        ``ahead`` is the part of the queue that outranks the request. The
+        reason is returned to the requester, so a refused caller learns which
+        rule it met instead of guessing from the holder list.
+        """
+        if cls == SWEEP:
+            if self._holders:
+                return "the window is held and a sweep is exclusive"
+            return None
+        if any(h["cls"] == SWEEP for h in self._holders):
+            return "a sweep holds the window"
+        if any(q["cls"] == SWEEP for q in ahead):
+            return "a sweep is queued ahead (writer preference)"
+        cap = self._cap(TARGETED)
+        if sum(1 for h in self._holders if h["cls"] == TARGETED) >= cap:
+            return f"the targeted cap ({cap}) is reached"
+        per_session = int(
+            self._limits().get(
+                "targeted_per_session", DEFAULT_LIMITS["targeted_per_session"]
+            )
+        )
+        if session and per_session > 0:
+            mine = sum(
+                1
+                for h in self._holders
+                if h["cls"] == TARGETED and h.get("session") == session
+            )
+            if mine >= per_session:
+                return (
+                    f"session {session} already holds {mine} targeted grant(s); "
+                    f"the limit is {per_session} per session"
+                )
+        left = self._budget_left()
+        if left is not None and left < 1:
+            return f"the worker budget ({self._budget()}) is spent"
+        return None
+
+    def _grantable(
+        self, cls: str, session: Optional[str] = None, ahead: Optional[List[dict]] = None
+    ) -> bool:
+        return self._blocker(cls, session, self._queue if ahead is None else ahead) is None
+
+    def _grant(self, entry: dict, *, forced: bool = False) -> dict:
         holder = dict(entry)
+        requested = holder.pop("requested", None)
+        if forced:
+            # Past every limit by definition; the width still honours the
+            # class ceiling and the requester's own ask.
+            width = self._class_width(holder["cls"])
+            holder["workers"] = min(width, int(requested)) if requested else width
+            holder["forced"] = True
+        else:
+            holder["workers"] = self._width(holder["cls"], requested)
         holder["acquired_at"] = _utcnow()
         holder.pop("enqueued_at", None)
+        holder.pop("priority", None)
         self._holders.append(holder)
         event = self._granted_events.pop(entry["grant_id"], None)
         if event is not None:
             event.set()
         return holder
 
-    def _process_queue(self) -> List[dict]:
-        """Grant everything the head of the queue allows, in order.
+    @staticmethod
+    def _priority(entry: dict) -> int:
+        try:
+            return int(entry.get("priority") or 0)
+        except (TypeError, ValueError):
+            return 0
 
-        FIFO with writer preference falls out of the predicates: a queued
-        sweep makes every later targeted entry ungrantable, and a sweep grants
-        only into an empty window.
+    def _sort_queue(self) -> None:
+        # Stable: FIFO order survives inside each priority.
+        self._queue.sort(key=lambda q: -self._priority(q))
+
+    def _ahead_of(self, priority: int) -> List[dict]:
+        """The waiting entries a new request of this priority queues behind."""
+        return [q for q in self._queue if self._priority(q) >= priority]
+
+    def _process_queue(self) -> List[dict]:
+        """Grant everything the queue allows, in priority-then-FIFO order.
+
+        Writer preference falls out of the predicates: a queued sweep makes
+        every targeted entry behind it ungrantable, and a sweep grants only
+        into an empty window. An entry that stays blocked joins ``ahead`` for
+        the entries after it.
         """
         granted = []
+        ahead: List[dict] = []
         for entry in list(self._queue):
-            if not self._grantable(entry["cls"]):
+            if self._blocker(entry["cls"], entry.get("session"), ahead) is not None:
+                ahead.append(entry)
                 continue
             self._queue.remove(entry)
             granted.append(self._grant(entry))
@@ -311,15 +465,27 @@ class WindowManager:
         pid: int = 0,
         label: str = "",
         wait: float = 0.0,
+        workers: int = 0,
+        force: bool = False,
     ) -> dict:
         """Grant the window, or queue for it up to ``wait`` seconds.
 
         A ``wait`` of 0 asks without queueing and jumps nobody: with a
         non-empty queue the answer is ``granted: False`` even into a grantable
         slot, because the slot belongs to the queue's head.
+
+        ``workers`` is the xdist width the requester wants (0 = the class
+        ceiling); the grant's ``advisory_n`` never exceeds it. ``force`` is the
+        operator's immediate grant, and is refused for a session-held request.
         """
         if cls not in CLASSES:
             return {"granted": False, "error": f"unknown window class {cls!r}"}
+        if force and session:
+            return {
+                "granted": False,
+                "error": "force is an operator action; a session-held request "
+                "cannot be forced (ask the operator to run `claunch window force`)",
+            }
         changed = self._reap()
         if changed:
             self._process_queue()
@@ -331,26 +497,47 @@ class WindowManager:
             "pid": pid,
             "label": label,
             "enqueued_at": _utcnow(),
+            "priority": 0,
         }
-        if not self._queue and self._grantable(cls):
+        if workers:
+            entry["requested"] = max(1, int(workers))
+        if force:
+            holder = self._grant(entry, forced=True)
+            self._save()
+            log.info("window: operator forced a %s grant (%s)", cls, holder["grant_id"])
+            return {
+                "granted": True,
+                "grant_id": holder["grant_id"],
+                "advisory_n": holder["workers"],
+                "forced": True,
+            }
+        ahead = self._ahead_of(0)
+        blocker = self._blocker(cls, session, ahead)
+        if not ahead and blocker is None:
             holder = self._grant(entry)
             self._save()
             return {
                 "granted": True,
                 "grant_id": holder["grant_id"],
-                "advisory_n": self.advisory_n(),
+                "advisory_n": holder["workers"],
             }
+        reason = blocker or f"{len(ahead)} request(s) are queued ahead"
         if wait <= 0:
             if changed:
                 self._save()
             return {
                 "granted": False,
-                "position": len(self._queue) + 1,
+                "position": len(ahead) + 1,
+                "reason": reason,
                 "window": self.status(),
             }
         event = asyncio.Event()
         self._granted_events[entry["grant_id"]] = event
         self._queue.append(entry)
+        self._sort_queue()
+        # Entries ahead may be blocked by a rule that does not bind this one
+        # (another session's per-session limit); the queue decides, in order.
+        self._process_queue()
         self._save()
         try:
             await asyncio.wait_for(event.wait(), timeout=min(wait, MAX_WAIT))
@@ -372,11 +559,17 @@ class WindowManager:
             raise
         finally:
             self._granted_events.pop(entry["grant_id"], None)
-        return {
+        holder = next(
+            (h for h in self._holders if h["grant_id"] == entry["grant_id"]), {}
+        )
+        result = {
             "granted": True,
             "grant_id": entry["grant_id"],
-            "advisory_n": self.advisory_n(),
+            "advisory_n": holder.get("workers") or self._width(cls, workers or None),
         }
+        if holder.get("forced"):
+            result["forced"] = True
+        return result
 
     def release(self, grant_id: str) -> bool:
         """Hand the window back. False = no such grant (already reaped?)."""
@@ -413,6 +606,52 @@ class WindowManager:
             self._save()
         return len(entries)
 
+    # ---- operator overrides (claunch-8kald) ------------------------------------ #
+
+    def prioritize(self, grant_id: str, priority: Optional[int] = None) -> Optional[dict]:
+        """Give one waiting request a priority; None = move it to the top.
+
+        Higher priorities are granted first and FIFO holds inside a priority.
+        The queue is processed right away, so a request moved above a queued
+        sweep may be granted on the spot. Returns None for no such request.
+        """
+        entry = next((q for q in self._queue if q["grant_id"] == grant_id), None)
+        if entry is None:
+            return None
+        if priority is None:
+            others = [self._priority(q) for q in self._queue if q is not entry]
+            priority = max(others + [self._priority(entry) - 1]) + 1
+        entry["priority"] = int(priority)
+        self._sort_queue()
+        self._process_queue()
+        self._save()
+        granted = any(h["grant_id"] == grant_id for h in self._holders)
+        position = (
+            None
+            if granted
+            else next(i for i, q in enumerate(self._queue, 1) if q["grant_id"] == grant_id)
+        )
+        log.info(
+            "window: operator set priority %d on %s (%s)",
+            entry["priority"], grant_id, "granted" if granted else f"position {position}",
+        )
+        return {"priority": entry["priority"], "granted": granted, "position": position}
+
+    def force(self, grant_id: str) -> Optional[dict]:
+        """Grant one waiting request now, past every limit. None = no such request.
+
+        The running holders keep running; the forced holder is added next to
+        them and counts against the caps and the budget for everyone after.
+        """
+        entry = next((q for q in self._queue if q["grant_id"] == grant_id), None)
+        if entry is None:
+            return None
+        self._queue.remove(entry)
+        holder = self._grant(entry, forced=True)
+        self._save()
+        log.info("window: operator forced %s (%s)", grant_id, holder["cls"])
+        return holder
+
     def status(self) -> dict:
         """The window as state anyone can read -- the whole point.
 
@@ -428,7 +667,10 @@ class WindowManager:
             "max_wait": MAX_WAIT,
             "reminder_interval": REMINDER_INTERVAL,
             "cores": self._cores,
-            "advisory_n_now": self.advisory_n(extra=1),
+            # The width a targeted request made now would be granted.
+            "advisory_n_now": self._width(TARGETED, None),
+            "limits": dict(self._limits()),
+            "workers_in_use": self.workers_in_use(),
         }
 
     # ---- the exit hook -------------------------------------------------------- #

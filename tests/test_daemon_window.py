@@ -72,10 +72,12 @@ class _ReminderManager(_Manager):
         return self.session
 
 
-def _make(tmp_path, manager=None, caps=(1, 5), cores=32) -> WindowManager:
+def _make(tmp_path, manager=None, caps=(1, 5), cores=32, **limits) -> WindowManager:
+    shape = dict(window_mod.DEFAULT_LIMITS, **limits)
     return WindowManager(
         manager,
         caps=lambda: caps,
+        limits=lambda: shape,
         state_path=tmp_path / "window.json",
         cores=cores,
     )
@@ -118,14 +120,17 @@ def test_a_sweep_excludes_everything(tmp_path):
 def test_targeted_runs_share_up_to_the_cap(tmp_path):
     async def run():
         w = _make(tmp_path)
+        # Two workers each keeps five runs inside the budget of twelve, so
+        # the cap is the rule that binds the sixth.
         grants = [
-            await w.acquire("targeted", session=f"t{i}", pid=os.getpid())
+            await w.acquire("targeted", session=f"t{i}", pid=os.getpid(), workers=2)
             for i in range(5)
         ]
         assert all(g["granted"] for g in grants)
-        sixth = await w.acquire("targeted", session="t5", pid=os.getpid())
+        sixth = await w.acquire("targeted", session="t5", pid=os.getpid(), workers=2)
         assert not sixth["granted"]
         assert sixth["position"] == 1
+        assert "targeted cap (5)" in sixth["reason"]
 
     asyncio.run(run())
 
@@ -261,7 +266,8 @@ def test_a_cancelled_long_poll_leaves_no_orphan_queue_entry(tmp_path):
 # --------------------------------------------------------------------------- #
 def test_advisory_n_splits_cores_over_active_runs(tmp_path):
     async def run():
-        w = _make(tmp_path, cores=32)
+        # Budget off and a wide targeted ceiling isolate the core share.
+        w = _make(tmp_path, cores=32, worker_budget=0, targeted_width=8)
         first = await w.acquire("targeted", session="t0", pid=os.getpid())
         assert first["advisory_n"] == 8  # 32 // 1, capped
         for i in range(1, 5):
@@ -269,10 +275,233 @@ def test_advisory_n_splits_cores_over_active_runs(tmp_path):
         assert w.advisory_n(extra=1) == 5  # 32 // 6
         # The floor binds when the share drops below it: 4 cores over 4
         # active runs is 1, and the answer stays 2.
-        w2 = _make(tmp_path / "other", cores=4)
+        w2 = _make(tmp_path / "other", cores=4, worker_budget=0)
         for i in range(3):
             await w2.acquire("targeted", session=f"u{i}", pid=os.getpid())
         assert w2.advisory_n(extra=1) == window_mod.ADVISORY_MIN
+
+    asyncio.run(run())
+
+
+# --------------------------------------------------------------------------- #
+# spending limits (claunch-8kald): class width, worker budget, per session
+# --------------------------------------------------------------------------- #
+def test_a_targeted_grant_is_capped_at_the_class_width(tmp_path):
+    async def run():
+        w = _make(tmp_path, cores=32)
+        targeted = await w.acquire("targeted", session="t0", pid=os.getpid())
+        assert targeted["advisory_n"] == 4
+        w.release(targeted["grant_id"])
+        sweep = await w.acquire("sweep", session="s", pid=os.getpid())
+        assert sweep["advisory_n"] == 8
+
+    asyncio.run(run())
+
+
+def test_the_grant_never_exceeds_the_requested_width(tmp_path):
+    async def run():
+        w = _make(tmp_path)
+        one = await w.acquire("targeted", session="t0", pid=os.getpid(), workers=1)
+        assert one["advisory_n"] == 1
+        assert w.status()["workers_in_use"] == 1
+        assert w.status()["holders"][0]["workers"] == 1
+
+    asyncio.run(run())
+
+
+def test_the_worker_budget_narrows_then_refuses_targeted_grants(tmp_path):
+    async def run():
+        w = _make(tmp_path, worker_budget=6)
+        first = await w.acquire("targeted", session="a", pid=os.getpid())
+        second = await w.acquire("targeted", session="b", pid=os.getpid())
+        assert (first["advisory_n"], second["advisory_n"]) == (4, 2)
+        third = await w.acquire("targeted", session="c", pid=os.getpid())
+        assert not third["granted"]
+        assert "worker budget (6)" in third["reason"]
+        waiter = asyncio.create_task(
+            w.acquire("targeted", session="c", pid=os.getpid(), wait=5)
+        )
+        await asyncio.sleep(0.05)
+        w.release(first["grant_id"])
+        granted = await waiter
+        assert granted["granted"] and granted["advisory_n"] == 4
+
+    asyncio.run(run())
+
+
+def test_one_session_holds_one_targeted_grant_at_a_time(tmp_path):
+    async def run():
+        w = _make(tmp_path)
+        mine = await w.acquire("targeted", session="a", pid=os.getpid(), workers=1)
+        assert mine["granted"]
+        again = await w.acquire("targeted", session="a", pid=os.getpid(), workers=1)
+        assert not again["granted"]
+        assert "session a already holds 1 targeted grant" in again["reason"]
+        other = await w.acquire("targeted", session="b", pid=os.getpid(), workers=1)
+        assert other["granted"]
+        # A manual, sessionless hold is not a session and is not limited.
+        manual = [
+            await w.acquire("targeted", session=None, pid=os.getpid(), workers=1)
+            for _ in range(2)
+        ]
+        assert all(m["granted"] for m in manual)
+
+    asyncio.run(run())
+
+
+def test_a_queued_same_session_request_does_not_block_other_sessions(tmp_path):
+    async def run():
+        w = _make(tmp_path)
+        await w.acquire("targeted", session="a", pid=os.getpid(), workers=1)
+        blocked = asyncio.create_task(
+            w.acquire("targeted", session="a", pid=os.getpid(), workers=1, wait=5)
+        )
+        await asyncio.sleep(0.05)
+        other = asyncio.create_task(
+            w.acquire("targeted", session="b", pid=os.getpid(), workers=1, wait=5)
+        )
+        assert (await asyncio.wait_for(other, 1))["granted"]
+        w.release_session("a")
+        assert (await blocked)["granted"]
+
+    asyncio.run(run())
+
+
+def test_the_per_session_limit_can_be_switched_off(tmp_path):
+    async def run():
+        w = _make(tmp_path, targeted_per_session=0)
+        for _ in range(2):
+            got = await w.acquire("targeted", session="a", pid=os.getpid(), workers=1)
+            assert got["granted"]
+
+    asyncio.run(run())
+
+
+def test_limits_default_from_the_daemon_config(home, tmp_path):
+    from claude_launcher import store
+
+    w = WindowManager(None, state_path=tmp_path / "window.json", cores=32)
+    status = w.status()
+    assert status["caps"] == {"sweep": 1, "targeted": 3}
+    assert status["limits"] == window_mod.DEFAULT_LIMITS
+    assert store.DAEMON_DEFAULTS["window_targeted_cap"] == 3
+    for key, value in window_mod.DEFAULT_LIMITS.items():
+        assert store.DAEMON_DEFAULTS[f"window_{key}"] == value
+
+
+# --------------------------------------------------------------------------- #
+# operator overrides (claunch-8kald): priority and force
+# --------------------------------------------------------------------------- #
+def test_prioritize_moves_a_waiting_request_to_the_top(tmp_path):
+    async def run():
+        w = _make(tmp_path)
+        await w.acquire("sweep", session="holder", pid=os.getpid())
+        first = asyncio.create_task(
+            w.acquire("sweep", session="b", pid=os.getpid(), wait=5)
+        )
+        await asyncio.sleep(0.02)
+        second = asyncio.create_task(
+            w.acquire("sweep", session="c", pid=os.getpid(), wait=5)
+        )
+        await asyncio.sleep(0.05)
+        queued = w.status()["queue"]
+        assert [q["session"] for q in queued] == ["b", "c"]
+        moved = w.prioritize(queued[1]["grant_id"])
+        assert moved == {"priority": 1, "granted": False, "position": 1}
+        assert [q["session"] for q in w.status()["queue"]] == ["c", "b"]
+        w.release_session("holder")
+        assert (await second)["granted"]
+        assert not first.done()
+        w.release_session("c")
+        assert (await first)["granted"]
+
+    asyncio.run(run())
+
+
+def test_a_newcomer_queues_behind_priority_and_ahead_of_demoted_requests(tmp_path):
+    async def run():
+        w = _make(tmp_path)
+        await w.acquire("sweep", session="holder", pid=os.getpid())
+        demoted = asyncio.create_task(
+            w.acquire("sweep", session="low", pid=os.getpid(), wait=5)
+        )
+        await asyncio.sleep(0.05)
+        low = w.status()["queue"][0]["grant_id"]
+        assert w.prioritize(low, -1)["position"] == 1
+        poll = await w.acquire("sweep", session="new", pid=os.getpid())
+        assert poll["position"] == 1  # nobody at priority >= 0 is waiting
+        demoted.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await demoted
+
+    asyncio.run(run())
+
+
+def test_prioritizing_past_a_queued_sweep_can_grant_on_the_spot(tmp_path):
+    """Writer preference yields to the operator's order."""
+    async def run():
+        w = _make(tmp_path)
+        await w.acquire("targeted", session="t0", pid=os.getpid(), workers=1)
+        sweep = asyncio.create_task(
+            w.acquire("sweep", session="s", pid=os.getpid(), wait=5)
+        )
+        await asyncio.sleep(0.02)
+        targeted = asyncio.create_task(
+            w.acquire("targeted", session="t1", pid=os.getpid(), workers=1, wait=5)
+        )
+        await asyncio.sleep(0.05)
+        waiting = [q for q in w.status()["queue"] if q["session"] == "t1"][0]
+        result = w.prioritize(waiting["grant_id"])
+        assert result["granted"] and result["position"] is None
+        assert (await targeted)["granted"]
+        sweep.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await sweep
+
+    asyncio.run(run())
+
+
+def test_force_grants_a_waiting_request_next_to_the_holders(tmp_path):
+    async def run():
+        w = _make(tmp_path)
+        await w.acquire("sweep", session="holder", pid=os.getpid())
+        waiter = asyncio.create_task(
+            w.acquire("sweep", session="urgent", pid=os.getpid(), wait=5)
+        )
+        await asyncio.sleep(0.05)
+        grant_id = w.status()["queue"][0]["grant_id"]
+        holder = w.force(grant_id)
+        assert holder["forced"] and holder["workers"] == 8
+        granted = await waiter
+        assert granted["granted"] and granted["forced"]
+        assert len(w.status()["holders"]) == 2
+        assert w.force(grant_id) is None  # no longer waiting
+        # A forced holder counts: nothing else enters past it.
+        late = await w.acquire("targeted", session="late", pid=os.getpid())
+        assert not late["granted"]
+
+    asyncio.run(run())
+
+
+def test_an_operator_acquisition_can_be_forced_but_a_session_cannot(tmp_path):
+    async def run():
+        w = _make(tmp_path)
+        await w.acquire("sweep", session="holder", pid=os.getpid())
+        refused = await w.acquire("sweep", session="agent", pid=os.getpid(), force=True)
+        assert not refused["granted"]
+        assert "operator action" in refused["error"]
+        forced = await w.acquire("targeted", session=None, pid=os.getpid(), force=True)
+        assert forced["granted"] and forced["forced"]
+
+    asyncio.run(run())
+
+
+def test_priority_and_force_survive_a_restart_as_recorded_state(tmp_path):
+    async def run():
+        w = _make(tmp_path)
+        await w.acquire("sweep", session=None, pid=os.getpid(), force=True)
+        w2 = _make(tmp_path)
+        assert w2.status()["holders"][0]["forced"] is True
 
     asyncio.run(run())
 
@@ -455,6 +684,74 @@ def test_window_api_status_acquire_release_and_cancel(home, tmp_path):
             waiting.cancel()
             with pytest.raises(asyncio.CancelledError):
                 await waiting
+        finally:
+            await client.close()
+            await manager.shutdown_all()
+
+    asyncio.run(run())
+
+
+def test_window_api_prioritize_and_force(home, tmp_path):
+    from aiohttp.test_utils import TestClient, TestServer
+
+    from claude_launcher.daemon.api import build_app
+    from claude_launcher.daemon.manager import SessionManager
+
+    async def run():
+        manager = SessionManager(
+            idle_threshold=0.5, scrollback=100, restore_default=False
+        )
+        app = build_app(
+            manager, "secret", started_at=time.monotonic(), window=_make(tmp_path)
+        )
+        client = TestClient(TestServer(app))
+        await client.start_server()
+        headers = {"Authorization": "Bearer secret"}
+        try:
+            await app["window"].acquire("sweep", session="holder", pid=os.getpid())
+            waiting = asyncio.create_task(
+                app["window"].acquire("sweep", session="waiter", pid=os.getpid(), wait=5)
+            )
+            await asyncio.sleep(0.05)
+            grant_id = app["window"].status()["queue"][0]["grant_id"]
+
+            missing = await client.post(
+                "/api/window/prioritize", json={"grant_id": "nope"}, headers=headers
+            )
+            assert missing.status == 404
+            bad = await client.post(
+                "/api/window/prioritize",
+                json={"grant_id": grant_id, "priority": "high"},
+                headers=headers,
+            )
+            assert bad.status == 400
+            moved = await (
+                await client.post(
+                    "/api/window/prioritize",
+                    json={"grant_id": grant_id, "priority": 7},
+                    headers=headers,
+                )
+            ).json()
+            assert moved == {"priority": 7, "granted": False, "position": 1}
+
+            forced = await (
+                await client.post(
+                    "/api/window/force", json={"grant_id": grant_id}, headers=headers
+                )
+            ).json()
+            assert forced["forced"] and forced["holder"]["grant_id"] == grant_id
+            assert (await waiting)["granted"]
+            gone = await client.post(
+                "/api/window/force", json={"grant_id": grant_id}, headers=headers
+            )
+            assert gone.status == 404
+
+            refused = await client.post(
+                "/api/window/acquire",
+                json={"class": "sweep", "session": "agent", "force": True},
+                headers=headers,
+            )
+            assert refused.status == 400
         finally:
             await client.close()
             await manager.shutdown_all()

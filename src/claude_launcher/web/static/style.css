@@ -4855,7 +4855,7 @@ body.embed #main { width: 100%; }
 .window-section > .wf-note { margin: 0; padding: 12px; }
 .window-row {
   display: grid;
-  grid-template-columns: 45px 72px minmax(90px, 140px) minmax(150px, 1fr) 70px 68px;
+  grid-template-columns: 45px 72px minmax(90px, 140px) minmax(150px, 1fr) 70px auto;
   gap: 10px; align-items: baseline; padding: 8px 11px;
   border-top: 1px solid #22262d; font-size: 12px;
 }
@@ -4880,13 +4880,21 @@ a.window-owner:hover { color: #79c0ff; text-decoration: underline; }
   color: #9da5b0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .window-age { text-align: right; }
-.window-cancel { justify-self: end; padding: 3px 8px; font-size: 11px; }
+.window-actions { justify-self: end; display: flex; gap: 4px; }
+.window-actions .wf-btn { padding: 3px 8px; font-size: 11px; }
+.window-actions .window-force { color: #f0883e; }
+.window-tag {
+  margin-left: 6px; padding: 0 6px; border-radius: 8px; font-size: 10px;
+  color: #8b949e; background: #272c33;
+}
+.window-tag.window-forced { color: #f0883e; background: #3d2412; }
+.window-tag.window-priority { color: #d2a8ff; background: #2b1d4d; }
 .window-footnote {
   max-width: 980px; color: #6e7681; font-size: 11px; margin-top: -4px;
 }
 @media (max-width: 700px) {
   .window-row {
-    grid-template-columns: 40px 68px minmax(80px, 1fr) 58px 62px;
+    grid-template-columns: 40px 68px minmax(80px, 1fr) 58px auto;
     gap: 7px; padding: 8px;
   }
   .window-label {

@@ -483,6 +483,8 @@ def build_app(
     r.add_post("/api/window/acquire", h_window_acquire)
     r.add_post("/api/window/release", h_window_release)
     r.add_post("/api/window/cancel", h_window_cancel)
+    r.add_post("/api/window/prioritize", h_window_prioritize)
+    r.add_post("/api/window/force", h_window_force)
     r.add_post("/api/auth/session", h_auth_session)
     r.add_get("/api/daemon", h_daemon_info)
     r.add_post("/api/daemon/shutdown", h_daemon_shutdown)
@@ -1341,10 +1343,46 @@ async def h_window_acquire(request: web.Request) -> web.Response:
         pid=int(body.get("pid") or 0),
         label=str(body.get("label") or ""),
         wait=float(body.get("wait") or 0),
+        workers=int(body.get("workers") or 0),
+        force=bool(body.get("force")),
     )
     if result.get("error"):
         return json_response(result, status=400)
     return json_response(result)
+
+
+async def h_window_prioritize(request: web.Request) -> web.Response:
+    """Operator override: set a waiting request's priority (claunch-8kald).
+
+    ``priority`` omitted moves the request to the top. The CLI refuses this
+    inside a managed session; the daemon, as with restart, does not tell
+    callers apart.
+    """
+    body = await _json_body(request)
+    grant_id = body.get("grant_id")
+    if not grant_id:
+        return json_response({"error": "prioritize wants a grant_id"}, status=400)
+    raw = body.get("priority")
+    try:
+        priority = None if raw is None or raw == "" else int(raw)
+    except (TypeError, ValueError):
+        return json_response({"error": f"priority must be an integer, not {raw!r}"}, status=400)
+    result = request.app["window"].prioritize(str(grant_id), priority)
+    if result is None:
+        return json_response({"error": f"no waiting request {grant_id}"}, status=404)
+    return json_response(result)
+
+
+async def h_window_force(request: web.Request) -> web.Response:
+    """Operator override: grant a waiting request now, past every limit."""
+    body = await _json_body(request)
+    grant_id = body.get("grant_id")
+    if not grant_id:
+        return json_response({"error": "force wants a grant_id"}, status=400)
+    holder = request.app["window"].force(str(grant_id))
+    if holder is None:
+        return json_response({"error": f"no waiting request {grant_id}"}, status=404)
+    return json_response({"forced": True, "holder": holder})
 
 
 async def h_window_release(request: web.Request) -> web.Response:

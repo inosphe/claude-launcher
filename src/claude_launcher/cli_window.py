@@ -12,6 +12,12 @@ release), ``2`` the daemon could not be asked. A caller that cannot tell
 apart "the daemon said no" from "the daemon could not be asked" would plan
 its retry wrong, so the two do not share a code -- the same discipline
 ``tools/merge_ready.py`` gives its verdicts.
+
+``prioritize``, ``force`` and ``acquire --force`` are the operator's queue
+overrides (claunch-8kald). They are refused inside a managed session
+(``$CLAUNCH_SESSION`` set), the rule ``claunch daemon restart`` already
+applies: an agent that could reorder or force the machine's test queue
+could always put itself first, and the queue would stop meaning anything.
 """
 
 from __future__ import annotations
@@ -33,12 +39,36 @@ def _client():
     return client
 
 
+def _operator_only(what: str) -> bool:
+    """True (and a refusal printed) when this shell is a managed session."""
+    session = os.environ.get("CLAUNCH_SESSION")
+    if not session:
+        return False
+    print(
+        f"refused: `claunch window {what}` is an operator command and this shell "
+        f"is managed session {session!r}. Ask the operator to run it, or to use "
+        "the Window page of the web UI.",
+        file=sys.stderr,
+    )
+    return True
+
+
 def _fmt_holder(entry: dict) -> str:
     who = entry.get("session") or f"pid {entry.get('pid')}"
     since = entry.get("acquired_at") or entry.get("enqueued_at") or "?"
     label = entry.get("label") or ""
-    return f"{entry.get('cls', '?')}:{who} since {since}" + (
-        f" -- {label}" if label else ""
+    extra = []
+    if entry.get("workers"):
+        extra.append(f"-n {entry['workers']}")
+    if entry.get("forced"):
+        extra.append("forced")
+    if entry.get("priority"):
+        extra.append(f"priority {entry['priority']}")
+    tags = f" [{', '.join(extra)}]" if extra else ""
+    return (
+        f"{entry.get('grant_id', '?')} {entry.get('cls', '?')}:{who} since {since}"
+        + tags
+        + (f" -- {label}" if label else "")
     )
 
 
@@ -56,6 +86,15 @@ def _cmd_status(args) -> int:
         f"advisory -n {status.get('advisory_n_now', '?')}; "
         f"max wait {status.get('max_wait', '?')}s)"
     )
+    limits = status.get("limits") or {}
+    if limits:
+        budget = limits.get("worker_budget", "?")
+        print(
+            f"workers: {status.get('workers_in_use', '?')} of budget "
+            f"{budget if budget else 'off'}; targeted width {limits.get('targeted_width', '?')}, "
+            f"sweep width {limits.get('sweep_width', '?')}; "
+            f"targeted per session {limits.get('targeted_per_session', '?') or 'unlimited'}"
+        )
     for entry in holders:
         print(f"  held: {_fmt_holder(entry)}")
     for i, entry in enumerate(queue, 1):
@@ -66,6 +105,16 @@ def _cmd_status(args) -> int:
 
 
 def _cmd_acquire(args) -> int:
+    force = bool(getattr(args, "force", False))
+    if force and _operator_only("acquire --force"):
+        return 2
+    if force and args.session:
+        print(
+            "refused: a forced grant is the operator's own, pid-tracked hold; "
+            "drop --session",
+            file=sys.stderr,
+        )
+        return 2
     client = _client()
     if client is None:
         return 2
@@ -76,12 +125,17 @@ def _cmd_acquire(args) -> int:
         "label": args.label or "",
         "wait": args.wait,
     }
+    if getattr(args, "workers", None):
+        body["workers"] = args.workers
+    if force:
+        body["force"] = True
     result = client.post(
         "/api/window/acquire", body, timeout=max(5.0, float(args.wait) + 5.0)
     )
     if result.get("granted"):
         print(
             f"granted: {result['grant_id']} (advisory -n {result.get('advisory_n', '?')})"
+            + (" -- forced" if result.get("forced") else "")
         )
         return 0
     if result.get("error"):
@@ -96,9 +150,11 @@ def _cmd_acquire(args) -> int:
             file=sys.stderr,
         )
     else:
+        reason = result.get("reason")
         print(
-            f"not granted: position {result.get('position', '?')}; "
-            f"held by {', '.join(holders) or '(unknown)'}",
+            f"not granted: position {result.get('position', '?')}"
+            + (f" ({reason})" if reason else "")
+            + f"; held by {', '.join(holders) or '(unknown)'}",
             file=sys.stderr,
         )
     return 1
@@ -154,6 +210,47 @@ def _cmd_cancel(args) -> int:
     return 1
 
 
+def _cmd_prioritize(args) -> int:
+    if _operator_only("prioritize"):
+        return 2
+    client = _client()
+    if client is None:
+        return 2
+    body = {"grant_id": args.grant_id}
+    if args.priority is not None:
+        body["priority"] = args.priority
+    try:
+        result = client.post("/api/window/prioritize", body)
+    except daemon_client.DaemonClientError as exc:
+        print(f"not prioritized: {exc}", file=sys.stderr)
+        return 1
+    if result.get("error"):
+        print(f"not prioritized: {result['error']}", file=sys.stderr)
+        return 1
+    where = "granted now" if result.get("granted") else f"position {result.get('position')}"
+    print(f"priority {result.get('priority')}: {args.grant_id} ({where})")
+    return 0
+
+
+def _cmd_force(args) -> int:
+    if _operator_only("force"):
+        return 2
+    client = _client()
+    if client is None:
+        return 2
+    try:
+        result = client.post("/api/window/force", {"grant_id": args.grant_id})
+    except daemon_client.DaemonClientError as exc:
+        print(f"not forced: {exc}", file=sys.stderr)
+        return 1
+    if result.get("error") or not result.get("forced"):
+        print(f"not forced: {result.get('error') or 'no such waiting request'}", file=sys.stderr)
+        return 1
+    holder = result.get("holder") or {}
+    print(f"forced: {_fmt_holder(holder)}")
+    return 0
+
+
 def register(sub) -> None:
     p_window = sub.add_parser(
         "window",
@@ -191,6 +288,19 @@ def register(sub) -> None:
         help="holder name (default: $CLAUNCH_SESSION; empty = a manual, "
         "pid-tracked hold)",
     )
+    p.add_argument(
+        "--workers",
+        type=int,
+        metavar="N",
+        help="the xdist width this run wants; the grant never exceeds it "
+        "(default: the class ceiling)",
+    )
+    p.add_argument(
+        "--force",
+        action="store_true",
+        help="operator only: grant now, past every cap, budget and "
+        "exclusivity rule (refused inside a managed session)",
+    )
     p.set_defaults(func=_cmd_acquire)
 
     p = wsub.add_parser("release", help="hand a grant back")
@@ -204,3 +314,25 @@ def register(sub) -> None:
                                       "all of this session's)")
     p.add_argument("--session", help="whose waiting requests (default: $CLAUNCH_SESSION)")
     p.set_defaults(func=_cmd_cancel)
+
+    p = wsub.add_parser(
+        "prioritize",
+        help="operator only: move a waiting request up the queue (refused "
+        "inside a managed session)",
+    )
+    p.add_argument("grant_id", help="the waiting request (ids: `claunch window status`)")
+    p.add_argument(
+        "--priority",
+        type=int,
+        help="explicit priority; higher goes first, 0 is the default, negative "
+        "demotes (omitted: to the top)",
+    )
+    p.set_defaults(func=_cmd_prioritize)
+
+    p = wsub.add_parser(
+        "force",
+        help="operator only: grant a waiting request now, past every limit "
+        "(refused inside a managed session)",
+    )
+    p.add_argument("grant_id", help="the waiting request (ids: `claunch window status`)")
+    p.set_defaults(func=_cmd_force)

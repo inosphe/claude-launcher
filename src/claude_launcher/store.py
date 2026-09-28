@@ -440,8 +440,22 @@ DAEMON_DEFAULTS = {
     # to claunch-bl0e. Deliberately not CPU-derived — this suite's cost axes
     # are process spawn and PTY/daemon waits, not cores (claunch-95fa, s159:
     # 32 cores at 15% under 22 pytest processes). Read LIVE on every acquire.
+    # The targeted cap came down from 5 to 3 on 2026-09-28 (claunch-8kald,
+    # user-direct): flaky failures kept arriving from machines with twenty
+    # sessions and several preview worktrees running at once.
     "window_sweep_cap": 1,
-    "window_targeted_cap": 5,
+    "window_targeted_cap": 3,
+    # What one grant may spend, and what the machine may spend in total
+    # (claunch-8kald). A grant's xdist width is the smallest of its class
+    # ceiling, the requester's own ask and what is left of the budget; the
+    # budget counts granted workers across every holder, so eight targeted
+    # runs cannot each take four. ``window_targeted_per_session`` keeps one
+    # session to one targeted run at a time (subagents share the session).
+    # 0 disables the budget / the per-session limit.
+    "window_sweep_width": 8,
+    "window_targeted_width": 4,
+    "window_worker_budget": 12,
+    "window_targeted_per_session": 1,
     # The resume nudge's machine switch: after a daemon restart, whether the
     # sessions that were mid-turn when it went down are told to carry on.
     # Restored sessions come back alive but idle — nothing is driving them —

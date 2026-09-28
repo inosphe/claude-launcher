@@ -19091,7 +19091,11 @@ function sessCommits(data) {
 /* A grant belongs to the process that acquired it, so releasing one from an
    unrelated browser tab would let tests overlap while the original process
    was still running. Waiting requests are different: cancelling one only
-   removes it from the FIFO queue, so the page can safely offer that action. */
+   removes it from the FIFO queue, so the page can safely offer that action.
+   The page is also the operator's seat for the two queue overrides
+   (claunch-8kald): Top moves a waiting request ahead of the rest, and Force
+   grants it now past every cap, budget and exclusivity rule — after a
+   confirmation, because a forced grant runs next to whatever is running. */
 let windowCache = null;
 let windowError = "";
 let windowTimer = null;
@@ -19131,6 +19135,8 @@ async function refreshWindow() {
           reminder_interval: data.reminder_interval,
           cores: data.cores,
           advisory_n_now: data.advisory_n_now,
+          limits: data.limits || {},
+          workers_in_use: data.workers_in_use,
         };
         windowError = "";
       }
@@ -19166,42 +19172,65 @@ function windowEntry(entry, position = null, queued = false) {
       row.appendChild(link);
     } else row.appendChild(owner);
   } else row.appendChild(owner);
-  row.appendChild(el("span", "window-label", entry.label || "no label"));
+  // The tags ride inside the label cell so the row keeps its grid columns.
+  const label = row.appendChild(el("span", "window-label", entry.label || "no label"));
+  if (!queued && Number(entry.workers) > 0) {
+    label.appendChild(el("span", "window-tag window-workers", `-n ${Number(entry.workers)}`));
+  }
+  if (entry.forced) label.appendChild(el("span", "window-tag window-forced", "forced"));
+  if (queued && Number(entry.priority)) {
+    label.appendChild(el("span", "window-tag window-priority",
+      `priority ${Number(entry.priority)}`));
+  }
   const age = el("span", "window-age", windowAge(entry));
   age.title = entry.acquired_at || entry.enqueued_at || "timestamp unavailable";
   row.appendChild(age);
   if (queued) {
-    const cancel = el("button", "wf-btn clear window-cancel", "Cancel");
-    cancel.type = "button";
-    cancel.disabled = windowCancelBusy.has(entry.grant_id);
-    cancel.addEventListener("click", () => cancelWindow(entry, cancel));
-    row.appendChild(cancel);
+    const busy = windowCancelBusy.has(entry.grant_id);
+    const actions = row.appendChild(el("span", "window-actions"));
+    for (const [action, text] of [
+      ["prioritize", "Top"], ["force", "Force"], ["cancel", "Cancel"],
+    ]) {
+      const button = el("button", `wf-btn clear window-${action}`, text);
+      button.type = "button";
+      button.disabled = busy;
+      button.addEventListener("click", () => windowAction(action, entry, button));
+      actions.appendChild(button);
+    }
   }
   return row;
 }
 
-async function cancelWindow(entry, button) {
+/* One queued request, one operator action: cancel, prioritize (to the top)
+   or force. The daemon answers 404 for a request that was granted or
+   withdrawn in the meantime, and the page says so instead of guessing. */
+async function windowAction(action, entry, button) {
   const grantId = entry && entry.grant_id;
   if (!grantId || windowCancelBusy.has(grantId)) return;
+  if (action === "force" && !confirm(
+    `Grant ${entry.cls || "this"} request ${grantId} now? It runs next to ` +
+    "every current holder, past the caps and the worker budget.")) return;
   windowCancelBusy.add(grantId);
   if (button) button.disabled = true;
   try {
-    const resp = await api("/api/window/cancel", {
+    const resp = await api(`/api/window/${action}`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ grant_id: grantId }),
     });
     const data = await resp.json().catch(() => ({}));
     if (!resp.ok) {
-      windowError = data.error || `HTTP ${resp.status}`;
-    } else if (!data.cancelled) {
+      windowError = resp.status === 404
+        ? "the waiting request was already cancelled or granted"
+        : data.error || `HTTP ${resp.status}`;
+    } else if (action === "cancel" && !data.cancelled) {
       windowError = "the waiting request was already cancelled or granted";
     } else {
       windowError = "";
       await refreshWindow();
     }
   } catch { /* api() owns auth and connection recovery */
-    windowError = "unable to cancel the waiting request";
+    windowError = `unable to ${action} the waiting request`;
   } finally {
     windowCancelBusy.delete(grantId);
   }
@@ -19227,9 +19256,10 @@ function renderWindow() {
   head.appendChild(back);
   view.appendChild(head);
   view.appendChild(el("p", "wf-note",
-    "Test grants currently held by this daemon and the FIFO queue waiting " +
-    "behind them. Waiting requests can be cancelled here; the process that " +
-    "acquired a grant is responsible for releasing it."));
+    "Test grants currently held by this daemon and the queue waiting " +
+    "behind them (priority first, then FIFO). Waiting requests can be moved " +
+    "to the top, forced or cancelled here; the process that acquired a " +
+    "grant is responsible for releasing it."));
   if (windowError) view.appendChild(el("p", "wf-warning", windowError));
   if (!windowCache) {
     if (!windowError) view.appendChild(el("p", "wf-note", "loading…"));
@@ -19256,6 +19286,14 @@ function renderWindow() {
   summary.appendChild(windowSummary(
     "Recommended workers", Number.isFinite(advisory) ? advisory : "?", null,
     "pytest -n for the next grant"));
+  const limits = windowCache.limits || {};
+  const budget = Number(limits.worker_budget);
+  const inUse = Number(windowCache.workers_in_use);
+  if (Number.isFinite(budget) && Number.isFinite(inUse)) {
+    summary.appendChild(windowSummary(
+      "Worker budget", inUse, budget > 0 ? budget : null,
+      budget > 0 ? "xdist workers granted machine-wide" : "budget off"));
+  }
   const cores = windowCache.cores === null || windowCache.cores === undefined
     ? null : Number(windowCache.cores);
   summary.appendChild(windowSummary(
