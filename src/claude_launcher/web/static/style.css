@@ -4887,6 +4887,74 @@ a.window-owner:hover { color: #79c0ff; text-decoration: underline; }
 }
 
 /* ------------------------------------------------------------------ */
+/* the Stats page: one session's usage over time and input by origin  */
+/* ------------------------------------------------------------------ */
+.stats-controls {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 10px;
+  max-width: 980px; margin: 10px 0 4px;
+}
+.stats-session {
+  min-width: 180px; max-width: 100%; padding: 5px 8px; color: #e6edf3;
+  background: #1b1e24; border: 1px solid #2a2e36; border-radius: 6px;
+}
+.stats-units { display: inline-flex; gap: 4px; }
+.stats-units .wf-btn.active { color: #e6edf3; background: #2d333b; border-color: #444c56; }
+.stats-partial { color: #d29922; }
+.stats-usage { padding: 12px; display: flex; flex-direction: column; gap: 10px; }
+.stats-chart {
+  display: flex; align-items: flex-end; gap: 2px; height: 160px;
+  overflow-x: auto; padding-bottom: 18px; position: relative;
+}
+.stats-col {
+  flex: 1 0 10px; max-width: 34px; height: 100%; position: relative;
+  display: flex; flex-direction: column; justify-content: flex-end;
+}
+.stats-bar {
+  display: flex; flex-direction: column-reverse; min-height: 1px;
+  background: #22262d; border-radius: 2px 2px 0 0; overflow: hidden;
+}
+.stats-seg { display: block; width: 100%; }
+.stats-col-label {
+  position: absolute; bottom: -17px; left: 0;
+  color: #6e7681; font-size: 9px; white-space: nowrap;
+}
+/* Every label would overlap on a long run of narrow columns: show every
+   fourth, and the hover title carries each bucket's own. */
+.stats-col:not(:nth-child(4n+1)) .stats-col-label { display: none; }
+.stats-table {
+  width: 100%; border-collapse: collapse; font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+.stats-table th {
+  padding: 6px 9px; color: #8b949e; font-weight: normal; text-align: right;
+  font-size: 11px; border-bottom: 1px solid #22262d; white-space: nowrap;
+}
+.stats-table th:first-child, .stats-table td:first-child { text-align: left; }
+.stats-table td {
+  padding: 5px 9px; color: #c6cdd5; border-top: 1px solid #1f232a;
+  text-align: right;
+}
+.stats-table td.num { white-space: nowrap; }
+.stats-table tr.stats-cat td { color: #e6edf3; }
+.stats-table a { color: #58a6ff; }
+.stats-table tr.stats-kind td { color: #8b949e; font-size: 11px; }
+.stats-table tr.stats-kind td:first-child { padding-left: 24px; }
+/* Tables scroll inside their box on a narrow screen instead of widening
+   the page; the bucket table also stops growing past a screenful. */
+.stats-scroll { overflow-x: auto; }
+.stats-usage .stats-scroll { max-height: 320px; overflow-y: auto; }
+.stats-method {
+  margin: 0; padding: 10px 12px 12px 28px; color: #8b949e; font-size: 11px;
+  line-height: 1.5;
+}
+.usage-detail-head { display: flex; align-items: baseline; gap: 8px; }
+.usage-stats-link { margin-left: auto; font-size: 11px; }
+@media (max-width: 700px) {
+  .stats-session { flex: 1 1 100%; }
+  .stats-chart { height: 120px; }
+}
+
+/* ------------------------------------------------------------------ */
 /* the Reports tab in the Beads page: every round report on this machine */
 /* ------------------------------------------------------------------ */
 /* Its own prefix, deliberately. The page borrows the dashboard's shared

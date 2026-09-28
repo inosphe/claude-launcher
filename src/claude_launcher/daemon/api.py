@@ -59,6 +59,7 @@ from . import (
     rebrief, session_input, status_checks,
 )
 from . import paths
+from . import sessionstats
 from . import tokenusage
 from . import transcript_view
 from . import window as window_mod
@@ -651,6 +652,7 @@ def build_app(
     r.add_post("/api/sessions/archive", h_sessions_archive_all)
     r.add_get("/api/sessions/{name}", h_session_get)
     r.add_get("/api/sessions/{name}/meta", h_session_meta)
+    r.add_get("/api/sessions/{name}/stats", h_session_stats)
     r.add_get("/api/sessions/{name}/input-journal", h_session_input_journal)
     r.add_delete("/api/sessions/{name}/input-journal/{request_id}",
                  h_session_input_cancel)
@@ -6077,6 +6079,21 @@ async def h_session_reminder_skip(request: web.Request) -> web.Response:
             "sources": sources,
         }
     )
+
+
+async def h_session_stats(request: web.Request) -> web.Response:
+    """One session's usage over time and the origin of its input, for the
+    dashboard's Stats page (``?unit=hour|day|week``, default day). See
+    :mod:`sessionstats` for what each figure means and how it is estimated."""
+    manager: SessionManager = request.app["manager"]
+    session = manager.get(request.match_info["name"])
+    unit = request.query.get("unit", "day")
+    if unit not in sessionstats.UNITS:
+        return json_error(400, f"unit must be one of: {', '.join(sessionstats.UNITS)}")
+    sdef = getattr(session, "sdef", None)
+    # A first read of a long transcript is disk-bound: off the loop.
+    reading = await asyncio.to_thread(sessionstats.for_session, sdef, unit)
+    return json_response(reading)
 
 
 async def h_session_meta(request: web.Request) -> web.Response:

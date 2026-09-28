@@ -5963,6 +5963,12 @@ function usageDetailRow(dl, s) {
   const dd = el("dd", "usage-detail" + (u.partial ? " partial" : ""));
   const head = el("div", "usage-detail-head");
   head.append(el("span", "usage-detail-text", usageText(u)));
+  if (s.name) {
+    const link = el("a", "usage-stats-link", "statistics");
+    link.href = `#/stats/${encodeURIComponent(s.name)}`;
+    link.title = "usage over time and the origin of this session's input";
+    head.append(link);
+  }
   dd.appendChild(head);
   dd.appendChild(usageBar(u, "usage-detail-bar"));
   const legend = el("div", "usage-legend");
@@ -14268,6 +14274,7 @@ function mobileTitle() {
       ? "workflows · orphans" : flowsSection === "definitions"
       ? "workflows · definitions" : "workflows";
     case "window": return "measurement window";
+    case "stats": return "session statistics";
     case "settings": return "settings";
     case "beads": return beadsSection === "reports" ? "reports"
       : beadsSection === "queues" ? "queues" : "beads";
@@ -14419,6 +14426,7 @@ const VIEWS = {
   meshes: "meshes-view",
   flows: "flows-view",
   window: "window-view",
+  stats: "stats-view",
   cli: "cli-view",
   beads: "beads-view",
   wf: "wf-view",
@@ -14972,6 +14980,8 @@ function parseHash(h) {
       ? parts[1] : "" };
   }
   if (parts[0] === "window") return { page: "window" };
+  // #/stats opens on a default session; #/stats/<name> names one.
+  if (parts[0] === "stats") return { page: "stats", name: parts[1] || "" };
   // One page, one shell: nothing else about the CLI tab is addressable, so
   // anything past "#/cli" is still the same terminal.
   if (parts[0] === "cli") return { page: "cli" };
@@ -15034,6 +15044,7 @@ function route() {
   if (r.page !== "flow") stopFlowPoll();
   if (r.page !== "settings") closeWorkspaces();
   if (r.page !== "window") stopWindowPoll();
+  if (r.page !== "stats") stopStatsPoll();
   if (r.page !== "beads") { stopBeadsPoll(); stopReportsPoll(); }
   if (r.page !== "log") closeTranscript();
 
@@ -15065,6 +15076,7 @@ function route() {
     case "new": showView("new"); openNewSession(r.mesh); break;
     case "flows": openFlows(r.section); break;
     case "window": openWindowPage(); break;
+    case "stats": openStatsPage(r.name); break;
     case "cli": openCli(); break;
     case "settings": openSettings(r.section); break;
     case "beads": openBeads(r.id, r.section); break;
@@ -19139,6 +19151,383 @@ function renderWindow() {
   view.appendChild(el("p", "window-footnote",
     "Entries are the arbiter's recorded state. Process liveness is checked " +
     "when a new acquisition is decided."));
+}
+
+/* ------------------------------------------------------------------ */
+/* session statistics (#/stats[/<session>]) — usage over time, and    */
+/* where the session's input came from                                */
+/* ------------------------------------------------------------------ */
+/* The rail and the detail panel say what a session has spent in total. This
+   page spreads the same transcript over hours, days or weeks, and sorts
+   every input the conversation received by origin: a person, a claunch
+   notice (reminders, cflow nudges, ...), another agent over the mesh, the
+   opening task, or the harness itself. The origin figures are estimates;
+   the page says how each one is made (daemon/sessionstats.py). */
+let statsCache = null;
+let statsError = "";
+let statsTimer = null;
+let statsPageOpen = false;
+let statsSession = "";
+let statsUnit = "day";
+let statsSeq = 0;
+
+const STATS_UNITS = [["hour", "Hourly"], ["day", "Daily"], ["week", "Weekly"]];
+const STATS_CATEGORIES = [
+  ["human", "human", "typed at the terminal"],
+  ["daemon", "claunch notices", "reminders, cflow nudges, status checks, ..."],
+  ["mesh", "mesh messages", "other agents, one per batch entry"],
+  ["opening", "opening task", "the first claunch delivery"],
+  ["harness", "harness", "task notifications, skill bodies, summaries"],
+];
+
+function openStatsPage(name) {
+  statsPageOpen = true;
+  if (name && name !== statsSession) { statsSession = name; statsCache = null; }
+  if (!statsSession) statsSession = statsDefaultSession();
+  showView("stats");
+  renderStats();
+  refreshStats();
+}
+
+function stopStatsPoll() {
+  if (statsTimer) { clearTimeout(statsTimer); statsTimer = null; }
+  statsPageOpen = false;
+}
+
+/* The session to show when the link names none: the one on screen last,
+   else the first live one. */
+function statsDefaultSession() {
+  const names = (sessionsCache || []).map((s) => s.name);
+  if (currentName && names.includes(currentName)) return currentName;
+  return names[0] || "";
+}
+
+/* Fast while the transcript is still being read, slow after. */
+function statsSchedule(partial) {
+  if (statsTimer) clearTimeout(statsTimer);
+  statsTimer = statsPageOpen
+    ? setTimeout(refreshStats, partial ? 2000 : 30000) : null;
+}
+
+async function refreshStats() {
+  if (!statsPageOpen) return;
+  if (!statsSession) { statsSchedule(false); renderStats(); return; }
+  const seq = ++statsSeq;
+  const name = statsSession, unit = statsUnit;
+  try {
+    const resp = await api(
+      `/api/sessions/${encodeURIComponent(name)}/stats?unit=${unit}`);
+    if (seq !== statsSeq) return;   // the session or unit changed meanwhile
+    const data = await resp.json().catch(() => ({}));
+    if (resp.status === 404 && !data.error) {
+      statsError = "this daemon predates the Stats page — ask the operator " +
+        "to restart the daemon to pick up this version";
+      statsCache = null;
+    } else if (!resp.ok) {
+      statsError = data.error || `HTTP ${resp.status}`;
+      statsCache = null;
+    } else { statsCache = data; statsError = ""; }
+  } catch { statsSchedule(false); return; }   // api() owns auth and recovery
+  statsSchedule(!!(statsCache && statsCache.partial));
+  if (statsPageOpen) renderStats();
+}
+
+function statsPct(v) {
+  return Number.isFinite(v) ? `${(v * 100).toFixed(1)}%` : "";
+}
+
+/* A bucket's label: the hour, the date, or the week's Monday. */
+function statsBucketLabel(start, unit) {
+  const s = String(start || "");
+  if (unit === "hour") return s.slice(5, 13).replace("T", " ") + "h";
+  if (unit === "week") return "wk " + s.slice(5, 10);
+  return s.slice(5, 10);
+}
+
+function statsCard(title, value, detail) {
+  const card = el("div", "window-stat");
+  card.appendChild(el("span", "window-stat-title", title));
+  card.appendChild(el("strong", "window-stat-value", String(value)));
+  if (detail) card.appendChild(el("span", "window-stat-detail", detail));
+  return card;
+}
+
+/* Bars per bucket, each as tall as its total against the busiest bucket,
+   split into the four usage components. */
+function statsChart(buckets, unit) {
+  const box = el("div", "stats-chart");
+  const peak = Math.max(1, ...buckets.map((b) => b.total || 0));
+  for (const b of buckets) {
+    const col = el("div", "stats-col");
+    const bar = el("div", "stats-bar");
+    bar.style.height = (((b.total || 0) / peak) * 100).toFixed(2) + "%";
+    for (const [key, , short] of USAGE_PARTS) {
+      const v = b[key] || 0;
+      if (!v) continue;
+      const seg = el("span", `stats-seg usage-${short}`);
+      seg.style.height = ((v / (b.total || 1)) * 100).toFixed(2) + "%";
+      bar.appendChild(seg);
+    }
+    col.appendChild(bar);
+    col.appendChild(el("span", "stats-col-label", statsBucketLabel(b.start, unit)));
+    const inputs = b.inputs || {};
+    col.title = `${b.start}\n${(b.total || 0).toLocaleString()} tokens over ` +
+      `${(b.requests || 0).toLocaleString()} requests\n` +
+      USAGE_PARTS.map(([k, label]) => `  ${label} ${(b[k] || 0).toLocaleString()}`).join("\n") +
+      "\ninputs: " + STATS_CATEGORIES.map(([k, label]) => `${label} ${inputs[k] || 0}`).join(", ");
+    box.appendChild(col);
+  }
+  return box;
+}
+
+/* The bucket table: the chart's numbers, newest first, empty periods left
+   out (the chart already shows them as gaps). */
+function statsBucketTable(buckets, unit) {
+  const table = el("table", "stats-table");
+  const head = el("tr");
+  for (const h of ["period", "total", "requests", "output",
+                   ...STATS_CATEGORIES.map(([, label]) => label)]) {
+    head.appendChild(el("th", null, h));
+  }
+  table.appendChild(head);
+  for (const b of buckets.slice().reverse()) {
+    if (!b.total && !Object.values(b.inputs || {}).some(Boolean)) continue;
+    const row = el("tr");
+    row.appendChild(el("td", null, statsBucketLabel(b.start, unit)));
+    row.appendChild(el("td", "num", usageShort(b.total || 0)));
+    row.appendChild(el("td", "num", (b.requests || 0).toLocaleString()));
+    row.appendChild(el("td", "num", usageShort(b.output || 0)));
+    for (const [key] of STATS_CATEGORIES) {
+      row.appendChild(el("td", "num", String((b.inputs || {})[key] || 0)));
+    }
+    table.appendChild(row);
+  }
+  return table;
+}
+
+/* The four figures of an origin row. `shares` adds a share column after
+   each: "yes" fills it, "blank" leaves it empty (a kind row under its
+   category, whose shares would read against a different whole). */
+function statsFigures(row, r, shares) {
+  const share = r.share || {};
+  const cell = (v) => row.appendChild(el("td", "num", v));
+  const pct = (v) => {
+    if (shares === "yes") cell(statsPct(v));
+    else if (shares === "blank") cell("");
+  };
+  cell((r.messages || 0).toLocaleString());
+  pct(share.messages);
+  cell(usageShort(r.tokens || 0));
+  pct(share.tokens);
+  cell(usageShort((r.triggered || {}).total || 0));
+  pct(share.triggered);
+  cell(usageShort(r.carry || 0));
+  pct(share.carry);
+}
+
+/* Origins: one row per category with its shares, then the kinds under it
+   (the notice header for claunch notices, message and envelope for the
+   mesh). */
+function statsSourceTable(sources) {
+  const table = el("table", "stats-table stats-sources");
+  const head = el("tr");
+  for (const h of ["origin", "inputs", "share", "est. tokens", "share",
+                   "triggered", "share", "carry", "share"]) {
+    head.appendChild(el("th", null, h));
+  }
+  table.appendChild(head);
+  for (const [key, label, hint] of STATS_CATEGORIES) {
+    const r = (sources || []).find((s) => s.category === key);
+    if (!r) continue;
+    const row = el("tr", "stats-cat stats-cat-" + key);
+    const name = el("td", null, label);
+    name.title = hint;
+    row.appendChild(name);
+    statsFigures(row, r, "yes");
+    table.appendChild(row);
+    for (const k of r.kinds || []) {
+      const sub = el("tr", "stats-kind");
+      sub.appendChild(el("td", null, k.kind));
+      statsFigures(sub, k, "blank");
+      table.appendChild(sub);
+    }
+  }
+  return table;
+}
+
+function statsSenderTable(senders) {
+  const table = el("table", "stats-table");
+  const head = el("tr");
+  for (const h of ["sender", "messages", "est. tokens", "triggered", "carry"]) {
+    head.appendChild(el("th", null, h));
+  }
+  table.appendChild(head);
+  for (const r of senders) {
+    const row = el("tr");
+    const cell = el("td");
+    if ((sessionsCache || []).some((s) => s.name === r.sender)) {
+      const link = el("a", null, r.sender);
+      link.href = `#/stats/${encodeURIComponent(r.sender)}`;
+      cell.appendChild(link);
+    } else cell.textContent = r.sender;
+    row.appendChild(cell);
+    statsFigures(row, r, "no");
+    table.appendChild(row);
+  }
+  return table;
+}
+
+function statsScroll(table) {
+  const box = el("div", "stats-scroll");
+  box.appendChild(table);
+  return box;
+}
+
+function statsSection(title, count, body) {
+  const box = el("section", "window-section stats-section");
+  const head = el("div", "window-section-head");
+  head.appendChild(el("h3", null, title));
+  if (count !== null) head.appendChild(el("span", "window-count", String(count)));
+  box.appendChild(head);
+  box.appendChild(body);
+  return box;
+}
+
+function statsControls() {
+  const bar = el("div", "stats-controls");
+  const pick = el("select", "stats-session");
+  const names = (sessionsCache || []).map((s) => s.name).sort();
+  if (statsSession && !names.includes(statsSession)) names.unshift(statsSession);
+  if (!names.length) pick.appendChild(el("option", null, "no sessions"));
+  for (const n of names) {
+    const opt = el("option", null, n);
+    opt.value = n;
+    if (n === statsSession) opt.selected = true;
+    pick.appendChild(opt);
+  }
+  pick.addEventListener("change", () => {
+    location.hash = `#/stats/${encodeURIComponent(pick.value)}`;
+  });
+  bar.appendChild(pick);
+  const tabs = el("div", "stats-units");
+  for (const [unit, label] of STATS_UNITS) {
+    const b = el("button", "wf-btn clear" + (unit === statsUnit ? " active" : ""), label);
+    b.type = "button";
+    b.dataset.unit = unit;
+    b.addEventListener("click", () => {
+      if (statsUnit === unit) return;
+      statsUnit = unit;
+      statsCache = null;
+      renderStats();
+      refreshStats();
+    });
+    tabs.appendChild(b);
+  }
+  bar.appendChild(tabs);
+  return bar;
+}
+
+const STATS_METHOD = [
+  "inputs: a mesh delivery counts once per message in its batch; its " +
+    "envelope (mesh name, protocol note) is a kind of its own with no inputs.",
+  "est. tokens: the injected text's size, about four ASCII characters or one " +
+    "other character per token. No tokenizer is run.",
+  "triggered: every request is credited to the newest input that started a " +
+    "turn before it. A delivery queued into a running turn, a skill body and " +
+    "a compaction summary start none. Work that a notice resumes after an " +
+    "interruption is credited to the notice.",
+  "carry: est. tokens times the main-conversation requests that followed, " +
+    "up to the next compaction: how often the text was sent again as " +
+    "context, mostly as cache reads.",
+  "Tool results are not inputs and are not counted. Subagent requests are in " +
+    "the totals and are credited like the parent's.",
+];
+
+function renderStats() {
+  const view = $("stats-view");
+  if (!view) return;
+  view.innerHTML = "";
+  const head = el("div", "wf-head");
+  head.appendChild(el("h2", null, "Session statistics"));
+  const back = el("button", "wf-btn clear", "Back");
+  back.addEventListener("click", () => {
+    location.hash = statsSession ? `#/s/${encodeURIComponent(statsSession)}` : "#";
+  });
+  head.appendChild(back);
+  view.appendChild(head);
+  view.appendChild(statsControls());
+  view.appendChild(el("p", "wf-note",
+    "Token usage of one session's current conversation over time, read from " +
+    "its transcript, and the origin of every input it received. Buckets use " +
+    "the daemon's local time."));
+  if (statsError) view.appendChild(el("p", "wf-warning", statsError));
+  const d = statsCache;
+  if (!d) {
+    if (!statsError) {
+      view.appendChild(el("p", "wf-note",
+        statsSession ? "loading…" : "no session to show"));
+    }
+    return;
+  }
+  if (!d.available) {
+    view.appendChild(el("p", "wf-note",
+      `no statistics for ${d.session || statsSession}: ${d.reason || "unavailable"}`));
+    return;
+  }
+  if (d.partial) {
+    view.appendChild(el("p", "wf-note stats-partial",
+      "still reading: the transcript is being read in the background, and " +
+      "the figures will grow"));
+  }
+  const t = d.totals || {};
+  const sources = d.sources || [];
+  const machine = { messages: 0, triggered: 0, carry: 0 };
+  for (const s of sources) {
+    if (s.category !== "daemon" && s.category !== "mesh") continue;
+    for (const k of Object.keys(machine)) machine[k] += (s.share || {})[k] || 0;
+  }
+  const summary = el("div", "window-summary");
+  summary.appendChild(statsCard("Tokens", usageShort(t.total || 0),
+    `${(t.requests || 0).toLocaleString()} requests` +
+    (t.subagent_requests ? `, ${t.subagent_requests.toLocaleString()} by subagents` : "")));
+  summary.appendChild(statsCard("Output", usageShort(t.output || 0),
+    `cache read ${usageShort(t.cache_read || 0)}`));
+  summary.appendChild(statsCard("Notices + mesh", statsPct(machine.messages),
+    "of inputs, by count"));
+  summary.appendChild(statsCard("Triggered by them", statsPct(machine.triggered),
+    "of tokens, by the input that started the turn"));
+  summary.appendChild(statsCard("Their carried text", statsPct(machine.carry),
+    "of all input text re-sent as context"));
+  summary.appendChild(statsCard("Compactions", d.compactions || 0,
+    d.since ? `since ${String(d.since).slice(0, 16).replace("T", " ")} UTC` : ""));
+  view.appendChild(summary);
+
+  const buckets = d.buckets || [];
+  const unit = d.unit || statsUnit;
+  const usage = el("div", "stats-usage");
+  if (buckets.length) {
+    usage.appendChild(statsChart(buckets, unit));
+    const legend = el("div", "usage-legend");
+    for (const [, label, short] of USAGE_PARTS) {
+      const item = el("span", "usage-legend-item");
+      item.append(el("span", `usage-swatch usage-${short}`), el("span", null, label));
+      legend.appendChild(item);
+    }
+    usage.appendChild(legend);
+    usage.appendChild(statsScroll(statsBucketTable(buckets, unit)));
+  } else usage.appendChild(el("p", "wf-note", "no requests recorded yet"));
+  view.appendChild(statsSection(
+    `Usage by ${unit} (UTC${d.utc_offset || ""})`, buckets.length, usage));
+
+  view.appendChild(statsSection("Input by origin", null,
+    statsScroll(statsSourceTable(sources))));
+  if ((d.senders || []).length) {
+    view.appendChild(statsSection("Mesh senders", d.senders.length,
+      statsScroll(statsSenderTable(d.senders))));
+  }
+  const notes = el("ul", "stats-method");
+  for (const line of STATS_METHOD) notes.appendChild(el("li", null, line));
+  view.appendChild(statsSection("Method", null, notes));
 }
 
 /* ------------------------------------------------------------------ */
