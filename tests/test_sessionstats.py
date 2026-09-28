@@ -158,6 +158,26 @@ def test_a_turn_holding_several_deliveries_counts_each():
     assert [g.kind for g in got] == ["session: reminder", "cflow nudge"]
 
 
+def test_the_classifier_reads_what_the_daemon_actually_types():
+    """The stamp and the mesh block are written in session.py and mesh.py;
+    the classifier matches them as text. Build both with the real functions
+    (the same join as Session.deliver) so a change of either format fails
+    here instead of silently counting mesh mail as notices."""
+    from claude_launcher.daemon import mesh, session
+
+    block = mesh.format_delivery("m1", "s1", [
+        {"id": "msg-1", "from": "s2", "body": "first line\nsecond line"},
+        {"id": "msg-2", "from": "s3", "body": "hi", "type": "ack"},
+    ])
+    got = sessionstats.classify(f"{session.delivery_stamp()}\n{block}", 0.0, False)
+    assert [(g.category, g.kind, g.sender) for g in got] == [
+        ("mesh", "message", "s2"), ("mesh", "message", "s3"),
+        ("mesh", "envelope", None)]
+    body = REMINDER.split("\n", 1)[1]       # the notice without its test stamp
+    [notice] = sessionstats.classify(f"{session.delivery_stamp()}\n{body}", 0.0, False)
+    assert notice.kind == "session: reminder"
+
+
 def test_hangul_is_estimated_denser_than_ascii():
     assert sessionstats.estimate_tokens("abcd" * 10) == 10
     assert sessionstats.estimate_tokens("세션별통계") == 5
