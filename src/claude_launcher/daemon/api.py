@@ -59,7 +59,7 @@ from . import (
     rebrief, session_input, status_checks,
 )
 from . import paths
-from . import sessionstats
+from . import sessionstats, statscompare, statsworker
 from . import tokenusage
 from . import transcript_view
 from . import window as window_mod
@@ -452,6 +452,10 @@ def build_app(
     app["loop_lag"] = loop_lag_mod.LoopLag()
     app.on_startup.append(_start_loop_lag)
     app.on_shutdown.append(_stop_loop_lag)
+    # The Stats page reads transcripts in a child process, off this loop's
+    # GIL (claunch-3r94d); started on first use.
+    app["stats_worker"] = statsworker.StatsWorker()
+    app.on_shutdown.append(_stop_stats_worker)
     # The measurement window: one per daemon, injected for tests. Its
     # session_exited rides the same exit funnel as the board's, for the same
     # reason: a holder that dies must release without a human noticing.
@@ -653,6 +657,7 @@ def build_app(
     r.add_get("/api/sessions/{name}", h_session_get)
     r.add_get("/api/sessions/{name}/meta", h_session_meta)
     r.add_get("/api/sessions/{name}/stats", h_session_stats)
+    r.add_get("/api/stats/compare", h_stats_compare)
     r.add_get("/api/sessions/{name}/input-journal", h_session_input_journal)
     r.add_delete("/api/sessions/{name}/input-journal/{request_id}",
                  h_session_input_cancel)
@@ -811,6 +816,10 @@ async def _stop_rag(app: web.Application) -> None:
     with contextlib.suppress(ValueError):
         briefing.persist_hooks.remove(service.on_sessions_changed)
     await service.shutdown()
+
+
+async def _stop_stats_worker(app: web.Application) -> None:
+    await app["stats_worker"].close()
 
 
 async def _start_loop_lag(app: web.Application) -> None:
@@ -6092,19 +6101,69 @@ async def h_session_reminder_skip(request: web.Request) -> web.Response:
     )
 
 
+async def _stats_call(app: web.Application, request: dict):
+    """``(result, reader)`` for one stats request: answered by the stats
+    worker process, or -- when it cannot answer -- read in a thread here.
+    ``reader`` says which, so the page and a probe can tell."""
+    worker = app.get("stats_worker")
+    request = {**request, "offset": statsworker.zone_offset()}
+    if worker is not None:
+        try:
+            return await worker.call(request), "worker"
+        except statsworker.WorkerUnavailable as exc:
+            log.warning("stats: %s; reading in the daemon", exc)
+    return await asyncio.to_thread(statsworker.handle, request), "thread"
+
+
 async def h_session_stats(request: web.Request) -> web.Response:
     """One session's usage over time and the origin of its input, for the
     dashboard's Stats page (``?unit=hour|day|week``, default day). See
-    :mod:`sessionstats` for what each figure means and how it is estimated."""
+    :mod:`sessionstats` for what each figure means and how it is estimated;
+    the reading runs in the stats worker process (:mod:`statsworker`)."""
     manager: SessionManager = request.app["manager"]
     session = manager.get(request.match_info["name"])
     unit = request.query.get("unit", "day")
     if unit not in sessionstats.UNITS:
         return json_error(400, f"unit must be one of: {', '.join(sessionstats.UNITS)}")
     sdef = getattr(session, "sdef", None)
-    # A first read of a long transcript is disk-bound: off the loop.
-    reading = await asyncio.to_thread(sessionstats.for_session, sdef, unit)
-    return json_response(reading)
+    head, path = await asyncio.to_thread(sessionstats.locate, sdef)
+    try:
+        reading, reader = await _stats_call(request.app, {
+            "op": "read", "head": head,
+            "path": str(path) if path is not None else None, "unit": unit})
+    except statsworker.WorkerError as exc:
+        return json_error(500, f"reading the transcript failed: {exc}")
+    return json_response({**reading, "reader": reader})
+
+
+async def h_stats_compare(request: web.Request) -> web.Response:
+    """Several sessions side by side (``?sessions=a,b,c&unit=day``): each
+    one's figures and their spread across the set -- mean, median, standard
+    deviation, z-score and rank per session (:mod:`statscompare`)."""
+    manager: SessionManager = request.app["manager"]
+    unit = request.query.get("unit", "day")
+    if unit not in sessionstats.UNITS:
+        return json_error(400, f"unit must be one of: {', '.join(sessionstats.UNITS)}")
+    names: list = []
+    for name in request.query.get("sessions", "").split(","):
+        name = name.strip()
+        if name and name not in names:
+            names.append(name)
+    if not names:
+        return json_error(400, "sessions: give at least one session name")
+    if len(names) > statscompare.MAX_SESSIONS:
+        return json_error(
+            400, f"sessions: at most {statscompare.MAX_SESSIONS} at a time")
+    sdefs = [getattr(manager.get(n), "sdef", None) for n in names]
+    located = await asyncio.to_thread(lambda: [sessionstats.locate(d) for d in sdefs])
+    items = [{"head": head, "path": str(path) if path is not None else None}
+             for head, path in located]
+    try:
+        result, reader = await _stats_call(
+            request.app, {"op": "compare", "items": items, "unit": unit})
+    except statsworker.WorkerError as exc:
+        return json_error(500, f"reading the transcripts failed: {exc}")
+    return json_response({**result, "reader": reader})
 
 
 async def h_session_meta(request: web.Request) -> web.Response:

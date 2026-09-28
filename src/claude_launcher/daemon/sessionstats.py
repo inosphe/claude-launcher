@@ -627,20 +627,38 @@ def read_file(path: Path, harness: str, unit: str = "day",
             spend.release()
 
 
+def locate(sdef) -> Tuple[dict, Optional[Path]]:
+    """``(head, path)`` for one session: ``head`` names it and, when there is
+    nothing to read, already carries ``available: false`` and the ``reason``
+    (``path`` is then ``None``). Cheap -- the path lookup is cached -- so the
+    daemon does it and hands only the path to the stats worker."""
+    name = str(getattr(sdef, "name", "") or "")
+    harness = str(getattr(sdef, "harness", None) or CLAUDE_HARNESS)
+    head = {"session": name, "harness": harness}
+    if harness not in READERS:
+        return {**head, "available": False,
+                "reason": f"no statistics reader for the {harness} harness"}, None
+    path = ctxsize.transcript_of(sdef)
+    if path is None:
+        return {**head, "available": False,
+                "reason": "no transcript found for this session's conversation"}, None
+    return head, path
+
+
+def read_located(head: dict, path: Optional[Path], unit: str = "day",
+                 zone: Optional[tzinfo] = None) -> dict:
+    """The Stats page's answer for a session :func:`locate` has found."""
+    if path is None:
+        return dict(head)
+    reading = read_file(Path(path), head["harness"], unit, zone)
+    if reading is None:
+        return {**head, "available": False,
+                "reason": "the transcript could not be read"}
+    return {"session": head["session"], "available": True, **reading}
+
+
 def for_session(sdef, unit: str = "day", zone: Optional[tzinfo] = None) -> dict:
     """The Stats page's answer for one session. ``available`` is false, with
     a ``reason``, when there is nothing to read."""
-    name = str(getattr(sdef, "name", "") or "")
-    harness = str(getattr(sdef, "harness", None) or CLAUDE_HARNESS)
-    if harness not in READERS:
-        return {"session": name, "harness": harness, "available": False,
-                "reason": f"no statistics reader for the {harness} harness"}
-    path = ctxsize.transcript_of(sdef)
-    if path is None:
-        return {"session": name, "harness": harness, "available": False,
-                "reason": "no transcript found for this session's conversation"}
-    reading = read_file(path, harness, unit, zone)
-    if reading is None:
-        return {"session": name, "harness": harness, "available": False,
-                "reason": "the transcript could not be read"}
-    return {"session": name, "available": True, **reading}
+    head, path = locate(sdef)
+    return read_located(head, path, unit, zone)
