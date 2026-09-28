@@ -52,7 +52,7 @@ function slice(name) {
 function node(tag) {
   const n = {
     tag, children: [], text: "", classes: new Set(), handlers: {},
-    title: "", href: "", type: "",
+    title: "", href: "", type: "", dataset: {},
     appendChild(c) { this.children.push(c); return c; },
     addEventListener(k, fn) { (this.handlers[k] ||= []).push(fn); },
     get textContent() { return this.text; },
@@ -108,14 +108,9 @@ new Function(
   + slice("beadsFilterIssues") + slice("beadsSortIssues") + slice("beadsStatusBadge")
   + slice("beadsPriBadge")
   + slice("beadsHierarchy") + slice("beadsLaneRows") + slice("beadsCard")
-  + "const BEADS_BACKLOG = new Set([\"open\"]);\n"
-  + "const BEADS_GROUPS = " + JSON.stringify([
-      { key: "backlog", title: "backlog", note: "nobody has taken these up" },
-      { key: "todo", title: "TODO", note: "taken up, in review, or finished" },
-    ]) + ";\n"
-  + slice("beadsLanes") + slice("beadsGroupOf") + slice("beadsLaneGroups")
+  + slice("beadsLanes") + slice("beadsStatusName") + slice("beadsStatusNote")
   + slice("beadsBoardLabel") + slice("beadsBoardWhere")
-  + slice("beadsGroupBlock") + slice("beadsLane") + slice("beadsBoardSection")
+  + slice("beadsLane") + slice("beadsBoardSection")
   + `
 Object.assign(exports, {
   tree: beadsHierarchy, rows: beadsLaneRows, card: beadsCard,
@@ -136,7 +131,7 @@ function check(what, got, want) {
    the child, which is the direction `br dep add <child> <parent>` stores. */
 const FAMILY = [
   { id: "epic", status: "open", priority: 1, updated_at: "2026-01-01" },
-  { id: "kid-a", status: "in_progress", priority: 1, updated_at: "2026-01-05",
+  { id: "kid-a", assignee: "s9", status: "in_progress", priority: 1, updated_at: "2026-01-05",
     sessions: [{ name: "s9", via: ["assignee"], status: "busy" }] },
   { id: "kid-b", status: "open", priority: 2, updated_at: "2026-01-04" },
   { id: "grand", status: "open", priority: 1, updated_at: "2026-01-03" },
@@ -299,7 +294,7 @@ check("in_ready is a board of one lane",
 const lane = ctx.lane("open", ctx.rows(FAMILY.filter((i) => i.status === "open"), t));
 check("a lane is headed by its status and its count",
       [lane.find("beads-lane-name")[0].text, lane.find("beads-lane-count")[0].text],
-      ["open", "4"]);
+      ["Open", "4"]);
 check("an empty lane still stands, and says it is empty",
       ctx.lane("blocked", []).find("beads-lane-empty").length, 1);
 
@@ -311,7 +306,7 @@ ctx.setView({ filter: "active", session: "", layout: "board", focus: "" });
 let sec = ctx.section(BOARD);
 check("the board draws one lane per active status",
       sec.find("beads-lane").map((l) => l.find("beads-lane-name")[0].text),
-      ["open", "in_ready", "in_progress", "in_review", "blocked"]);
+      ["Open", "Ready", "In progress", "In review", "Blocked"]);
 check("every issue lands in the lane its status names",
       sec.find("beads-lane").map((l) => l.find("beads-card").length),
       [4, 1, 1, 0, 0]);
@@ -343,8 +338,8 @@ sec = ctx.section(BOARD);
 check("the priority filter narrows the cards, not the lanes",
       [sec.find("beads-lane").length, sec.find("beads-card").length], [5, 3]);
 ctx.setView({ pri: 0 });
-check("a priority that leaves nothing names itself in the note",
-      ctx.section(BOARD).find("wf-note")[1].text, "nothing active here at P0");
+check("an empty priority filter retains the status columns",
+      ctx.section(BOARD).find("beads-lane-empty").length, 5);
 ctx.setView({ pri: null });
 
 ctx.setView({ filter: "active", session: "" });
@@ -355,10 +350,10 @@ check("a board that could not be read says why instead of drawing lanes",
          .find("wf-warning")[0].text],
       [0, "br is not installed"]);
 ctx.setView({ filter: "closed" });
-check("a filter that leaves nothing says so rather than drawing an empty lane",
+check("an empty closed filter keeps a named empty lane",
       [ctx.section(BOARD).find("beads-lane").length,
-       ctx.section(BOARD).find("wf-note")[1].text],
-      [0, "nothing closed here"]);
+       ctx.section(BOARD).find("beads-lane-name")[0].text],
+      [1, "Closed"]);
 
 /* ---- the tree reading -------------------------------------------------- */
 ctx.setView({ filter: "active", layout: "tree" });

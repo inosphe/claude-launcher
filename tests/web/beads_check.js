@@ -86,6 +86,7 @@ let beadsCache = null;
 function setBoards(b) { beadsCache = b; }
 const gone = [];
 function go(h) { gone.push(h); }
+function stopBeadsPoll() {}
 async function api() { return { ok: true, json: async () => ({}) }; }
 function refreshSession() {}
 /* The page's base path. Real in app.js (derived from location.pathname);
@@ -159,7 +160,7 @@ check("the reports reading becomes selected", tabs.kids.map((n) => n.classes.has
 
 /* ---- filters ---------------------------------------------------------- */
 const issues = [
-  { id: "a", status: "open", priority: 3, updated_at: "2026-01-01", sessions: [{ name: "s1", via: ["assignee"], status: "idle" }] },
+  { id: "a", assignee: "s1", status: "open", priority: 3, updated_at: "2026-01-01", sessions: [{ name: "s1", via: ["assignee"], status: "idle" }] },
   { id: "b", status: "in_progress", priority: 2, updated_at: "2026-01-02", sessions: [{ name: "s2", via: ["link"], status: "busy" }] },
   { id: "c", status: "closed", priority: 1, updated_at: "2026-01-03", sessions: [{ name: "s1", via: ["created_by"], status: "idle" }] },
   { id: "d", status: "in_progress", priority: 1, updated_at: "2026-01-04", sessions: [] },
@@ -169,8 +170,8 @@ check("active hides closed", ctx.filter(issues, "active", "").map((i) => i.id), 
 check("all shows everything", ctx.filter(issues, "all", "").map((i) => i.id), ["a", "b", "c", "d", "e"]);
 check("one status", ctx.filter(issues, "closed", "").map((i) => i.id), ["c"]);
 check("in_ready is independently filterable", ctx.filter(issues, "in_ready", "").map((i) => i.id), ["e"]);
-check("session filter follows the tags, whichever link",
-      ctx.filter(issues, "all", "s1").map((i) => i.id), ["a", "c"]);
+check("assignee filter excludes issues merely created by the session",
+      ctx.filter(issues, "all", "s1").map((i) => i.id), ["a"]);
 check("session filter + status", ctx.filter(issues, "active", "s1").map((i) => i.id), ["a"]);
 check("priority filter narrows to one rank",
       ctx.filter(issues, "all", "", 1).map((i) => i.id), ["c", "d", "e"]);

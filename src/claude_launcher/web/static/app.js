@@ -16747,14 +16747,9 @@ function closeWorkspaces() {
 /* ------------------------------------------------------------------ */
 /* the Beads page: the board, drawn against the fleet                 */
 /* ------------------------------------------------------------------ */
-/* One page, every board the fleet's sessions live in (one per repository,
-   found through git's common dir so worktrees share it). The daemon tags
-   each issue with the sessions it belongs to — the same match the rail
-   draws for one session (`beads.match`: the recorded link, assignee,
-   created_by, an `issue: <id>` in the task) — so the page answers "who is
-   on what" without a shell. Read-only by design: the writes are the
-   agents' (`claunch beads ...`) and the daemon's (creation, wind-down,
-   the exit sweep). Polled at 5 s, not 2: `br` forks per board per read. */
+/* Select one repository board. Status columns page independently; the
+   hierarchy view pages across statuses. Poll every 15 seconds, retaining
+   the selected pages, detail and scroll positions. */
 let beadsOpen = false;
 let beadsTimer = null;
 let beadsCache = null;     // the last /api/beads payload
@@ -16762,7 +16757,8 @@ let beadsError = "";
 let beadsLoading = false;  // one page request at a time
 let beadsMore = false;     // whether a page follows the one being shown
 let beadsPage = 0;         // which page is being shown, from 0
-let beadsTotal = null;     // how many issues match the filter, or null
+let beadsTotal = null;     // selected board total in the tree view
+let beadsLanePages = {};   // independent page per status; reset with filters
 let beadsFocus = "";       // the issue opened in the detail pane, by id
 let beadsDetail = null;    // its /api/beads/<id> payload
 let beadsFilter = "active";  // status filter: active | <status> | all
@@ -16772,6 +16768,7 @@ let beadsLayout = "board"; // "board" = status lanes, "tree" = the forest
 let beadsSort = "updated_at";
 let beadsDirection = "desc";
 let beadsWorkspace = "";
+let beadsLoadedWorkspace = "";
 let beadsStreamVersion = 0;
 let beadsRenderedPage = 0; // which page the last render drew, for the scroll
 let beadsRenderedFocus = ""; // which issue the last render's detail pane held
@@ -16814,15 +16811,17 @@ const BEADS_Q_CELL_CAP = 24;
 
 const BEADS_STATUSES = ["open", "in_ready", "in_progress", "in_review", "blocked", "closed"];
 const BEADS_ACTIVE = new Set(["open", "in_ready", "in_progress", "in_review", "blocked"]);
-/* One page of the board. The reader moves between pages with the control
-   under the list; the board is not scrolled into. */
+/* Bounded pages: one across statuses in Hierarchy, one per column in Board. */
 const BEADS_PAGE_SIZE = 48;
+const BEADS_LANE_SIZE = 12;
 /* How many numbered buttons the pager draws around the current page before
    it gives up and writes an ellipsis. A board of 1051 issues is 22 pages at
    this size, and 22 buttons is a second filter bar nobody asked for. */
 const BEADS_PAGER_SPAN = 2;
 
 function openBeads(id, section) {
+  const keepBoard = beadsOpen && beadsSection === "board" && beadsCache
+    && beadsLoadedWorkspace === beadsWorkspace;
   beadsSection = section === "reports" ? "reports"
     : section === "queues" ? "queues" : "board";
   const focus = id || "";
@@ -16836,7 +16835,15 @@ function openBeads(id, section) {
     stopReportsPoll();
     beadsOpen = true;
     renderBeads();
-    restartBeadsStream();
+    if (beadsSection === "board" && keepBoard) {
+      refreshBeadsDetail().then(() => {
+        if (!beadsOpen || beadsSection !== "board") return;
+        refreshBeadsRelated();
+        renderBeads();
+      });
+    } else {
+      restartBeadsStream();
+    }
     // The Queues tab reads its own endpoint; without this first read it sat
     // on "loading…" until the 15 s poll came round.
     if (beadsSection === "queues") refreshQueues();
@@ -16865,6 +16872,7 @@ function restartBeadsStream() {
   beadsError = "";
   beadsMore = false;
   beadsPage = 0;
+  beadsLanePages = {};
   beadsTotal = null;
   renderBeads();
   loadBeadsPage({ page: 0 });
@@ -16872,10 +16880,10 @@ function restartBeadsStream() {
 
 /* Show page `n` (0-based), clamped to what the board has. */
 function beadsGoToPage(n) {
+  if (beadsLoading) return;
   const last = beadsPageCount() - 1;
   const want = Math.max(0, last >= 0 ? Math.min(n, last) : n);
   if (want === beadsPage && beadsCache) return;
-  beadsPage = want;
   loadBeadsPage({ page: want });
   renderBeads();
 }
@@ -16915,47 +16923,105 @@ async function refreshBeadsDetail() {
   } catch { /* preserve the last detail while the connection is unavailable */ }
 }
 
-/* Read one page and show it. The page REPLACES what was on screen -- there
-   is no accumulated window any more, so a reader on page 9 of a board of
-   1051 issues holds 48 rows rather than 480. */
+/* A board has a separate bounded page for each status. The tree has one
+   page for its selected workspace. Filters are applied before either cut. */
+async function beadsReadPage(statuses, page, limit) {
+  const q = new URLSearchParams({ offset: String(page * limit), limit: String(limit) });
+  q.set("board", beadsWorkspace);
+  q.set("sort", beadsSort);
+  q.set("direction", beadsDirection);
+  if (beadsPri !== null) q.set("priority", String(beadsPri));
+  if (beadsSession) q.set("assignee", beadsSession);
+  for (const status of statuses) q.append("status", status);
+  const resp = await api(`/api/beads/stream?${q}`);
+  const data = await resp.json().catch(() => ({}));
+  if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
+  return data;
+}
+
 async function loadBeadsPage(opts = {}) {
   if (!beadsOpen || beadsSection !== "board" || beadsLoading) return;
   const page = Math.max(0, opts.page === undefined ? beadsPage : opts.page);
-  const offset = page * BEADS_PAGE_SIZE;
   const version = beadsStreamVersion;
+  const boardMode = beadsLayout === "board";
   beadsLoading = true;
   try {
-    const q = new URLSearchParams({ offset: String(offset), limit: String(BEADS_PAGE_SIZE) });
-    q.set("sort", beadsSort);
-    q.set("direction", beadsDirection);
-    if (beadsPri !== null) q.set("priority", String(beadsPri));
-    for (const status of beadsStatusQuery()) q.append("status", status);
-    const resp = await api(`/api/beads/stream?${q}`);
-    if (version !== beadsStreamVersion) return;
-    if (resp.status === 404) {
-      beadsError = "this daemon predates the paged Beads board — restart the daemon";
-      return;
+    let data;
+    if (boardMode) {
+      const statuses = beadsLanes(beadsFilter);
+      const pages = { ...beadsLanePages };
+      const answers = await Promise.all(statuses.map(async (status) => {
+        let n = pages[status] || 0;
+        let answer = await beadsReadPage([status], n, BEADS_LANE_SIZE);
+        if (version !== beadsStreamVersion) return null;
+        const selected = answer.boards.find((b) => b.root === beadsWorkspace);
+        if (selected && typeof selected.total === "number") {
+          const last = Math.max(0, Math.ceil(selected.total / BEADS_LANE_SIZE) - 1);
+          if (n > last) {
+            n = last;
+            answer = await beadsReadPage([status], n, BEADS_LANE_SIZE);
+          }
+        }
+        return { status, page: n, data: answer };
+      }));
+      if (version !== beadsStreamVersion) return;
+      data = beadsMergeLanes(answers);
+      for (const a of answers) beadsLanePages[a.status] = a.page;
+    } else {
+      data = await beadsReadPage(beadsStatusQuery(), page, BEADS_PAGE_SIZE);
     }
-    const data = await resp.json().catch(() => ({}));
     if (version !== beadsStreamVersion) return;
-    if (!resp.ok) { beadsError = data.error || `HTTP ${resp.status}`; return; }
+    const boards = data.boards || [];
+    if (!boards.some((b) => b.root === beadsWorkspace)) beadsWorkspace = boards[0]?.root || "";
+    const selected = boards.find((b) => b.root === beadsWorkspace);
+    beadsLoadedWorkspace = beadsWorkspace;
     beadsCache = data;
     beadsPage = page;
     beadsError = data.error || "";
-    beadsMore = !!data.has_more;
-    // A daemon that does not report a total leaves the pager with next and
-    // previous alone, which is still navigation -- it just cannot say how
-    // many pages there are.
-    beadsTotal = typeof data.total === "number" ? data.total : null;
+    beadsMore = !!selected?.has_more;
+    beadsTotal = typeof selected?.total === "number" ? selected.total : null;
+    if (!boardMode && beadsTotal !== null && page >= beadsPageCount()) {
+      // A closed/deleted last row can remove the page during a poll.
+      beadsLoading = false;
+      return await loadBeadsPage({ page: beadsPageCount() - 1 });
+    }
     await refreshBeadsDetail();
     refreshBeadsRelated();
-  } catch { return; }   // auth overlay is up, or the daemon is away
-  finally {
+  } catch (err) {
+    if (version === beadsStreamVersion) beadsError = String(err.message || err);
+  } finally {
     if (version === beadsStreamVersion) {
       beadsLoading = false;
       if (beadsOpen && beadsSection === "board") renderBeads();
     }
   }
+}
+
+function beadsMergeLanes(answers) {
+  const boards = new Map();
+  for (const { status, page, data } of answers) {
+    if (data.error) throw new Error(data.error);
+    for (const b of data.boards || []) {
+      if (!boards.has(b.root)) boards.set(b.root, { ...b, issues: [], deps: [], lanes: {} });
+      const merged = boards.get(b.root);
+      merged.issues.push(...(b.issues || []));
+      merged.deps.push(...(b.deps || []));
+      if (b.error) merged.error = b.error;
+      merged.lanes[status] = { page, total: b.total, more: !!b.has_more };
+    }
+  }
+  for (const b of boards.values()) {
+    // Every status query may carry the same dependency edges.
+    b.deps = [...new Map(b.deps.map((d) => [JSON.stringify(d), d])).values()];
+  }
+  return { boards: [...boards.values()] };
+}
+
+function beadsGoToLanePage(status, page) {
+  if (beadsLoading) return;
+  beadsLanePages[status] = Math.max(0, page);
+  loadBeadsPage();
+  renderBeads();
 }
 
 /* The control under the list: first / previous / a few numbered pages /
@@ -16968,8 +17034,9 @@ function beadsPager() {
     const b = el("button", "wf-btn" + (opts.on ? " option on" : " clear"), label);
     b.type = "button";
     if (opts.title) b.title = opts.title;
-    if (opts.disabled) b.disabled = true;
-    else b.addEventListener("click", () => beadsGoToPage(target));
+    if (opts.disabled || beadsLoading) b.disabled = true;
+    if (opts.on) b.setAttribute("aria-current", "page");
+    if (!b.disabled) b.addEventListener("click", () => beadsGoToPage(target));
     return b;
   };
   bar.appendChild(mk("« First", 0, { disabled: beadsPage === 0, title: "the first page" }));
@@ -17014,16 +17081,13 @@ function beadsRootOf(id) {
   return beadsWorkspace;
 }
 
-/* The rows a board shows under the current filters. `active` is the default
-   because a board is read for what is still to do; `all` is the audit view.
-   The session filter matches the daemon's tags, so "s12" shows every issue
-   the daemon says is s12's — by whichever of the four links. `pri` narrows
-   to one priority; null (and an omitted argument) is every priority. */
+/* The board's filters also run in the database before pagination. Session
+   means assignee here; creator and historical links still appear on cards. */
 function beadsFilterIssues(issues, filter, session, pri) {
   return (issues || []).filter((i) => {
     if (filter === "active" ? !BEADS_ACTIVE.has(i.status)
         : filter !== "all" && i.status !== filter) return false;
-    if (session && !(i.sessions || []).some((s) => s.name === session)) return false;
+    if (session && i.assignee !== session) return false;
     if (pri !== null && pri !== undefined && (i.priority ?? null) !== pri) return false;
     return true;
   });
@@ -17326,8 +17390,10 @@ function beadsNewBlock() {
 
 function beadsFilterBar() {
   const bar = el("div", "seq-tabs beads-filters");
+  const states = el("div", "seq-tabs beads-status-filters");
   for (const f of ["active", ...BEADS_STATUSES, "all"]) {
-    const b = el("button", "seq-tab" + (beadsFilter === f ? " on" : ""), f);
+    const b = el("button", "seq-tab" + (beadsFilter === f ? " on" : ""),
+      f === "active" ? "Unfinished" : f === "all" ? "All statuses" : beadsStatusName(f));
     b.type = "button";
     b.addEventListener("click", () => {
       if (beadsFilter === f) return;
@@ -17336,13 +17402,12 @@ function beadsFilterBar() {
       beadsFilter = f;
       restartBeadsStream();
     });
-    bar.appendChild(b);
+    states.appendChild(b);
   }
-  // The fixed priority set is visible before its first page lands and maps
-  // directly to a backend query.  It bounds both transfer and card creation
-  // for a large board; All restores the complete incremental stream.
+  bar.appendChild(states);
+  // Priority filtering applies in the database before pagination.
   const grp = el("div", "seq-tabs beads-pri-filter");
-  for (const [priority, label] of [[null, "All"], [0, "P0"], [1, "P1"], [2, "P2"], [3, "P3"], [4, "P4"]]) {
+  for (const [priority, label] of [[null, "All priorities"], [0, "P0"], [1, "P1"], [2, "P2"], [3, "P3"], [4, "P4"]]) {
     const b = el("button", "seq-tab" + (beadsPri === priority ? " on" : ""), label);
     b.type = "button";
     b.title = priority === null ? "every priority" : `only ${label} issues`;
@@ -17356,11 +17421,12 @@ function beadsFilterBar() {
   bar.appendChild(grp);
   const sel = document.createElement("select");
   sel.className = "beads-session-pick";
-  sel.title = "only the issues the daemon ties to this session";
+  sel.title = "Filter by assigned session";
+  sel.setAttribute("aria-label", "Assignee");
   const any = document.createElement("option");
-  any.value = ""; any.textContent = "every session";
+  any.value = ""; any.textContent = "All assignees";
   sel.appendChild(any);
-  const names = new Set();
+  const names = new Set(beadsSession ? [beadsSession] : []);
   for (const b of (beadsCache && beadsCache.boards) || []) {
     for (const s of b.sessions || []) names.add(s.name);
   }
@@ -17371,7 +17437,7 @@ function beadsFilterBar() {
     if (n === beadsSession) o.selected = true;
     sel.appendChild(o);
   }
-  sel.addEventListener("change", () => { beadsSession = sel.value; renderBeads(); });
+  sel.addEventListener("change", () => { beadsSession = sel.value; restartBeadsStream(); });
   bar.appendChild(sel);
   const sortLabel = el("label", "beads-sort", "Sort ");
   const sortPick = document.createElement("select");
@@ -17403,13 +17469,16 @@ function beadsFilterBar() {
      column: the lanes say what state everything is in, and the tree says
      what hangs off what across every state at once. */
   const lay = el("div", "seq-tabs beads-layout");
-  for (const [key, label] of [["board", "lanes"], ["tree", "tree"]]) {
+  for (const [key, label] of [["board", "Board"], ["tree", "Hierarchy"]]) {
     const b = el("button", "seq-tab" + (beadsLayout === key ? " on" : ""), label);
     b.type = "button";
     b.title = key === "board"
       ? "one lane per status"
       : "the parent-child forest, every status together";
-    b.addEventListener("click", () => { beadsLayout = key; renderBeads(); });
+    b.addEventListener("click", () => {
+      if (beadsLayout === key) return;
+      beadsLayout = key; restartBeadsStream();
+    });
     lay.appendChild(b);
   }
   bar.appendChild(lay);
@@ -17775,67 +17844,77 @@ function beadsLanes(filter) {
   return BEADS_STATUSES.includes(filter) ? [filter] : BEADS_STATUSES;
 }
 
-/* The two halves of a board, and the reason the lanes are grouped at all.
-
-   A board read at a glance answers one question first: what has nobody taken
-   up yet. That is `open` — an issue exists and no assignee has moved it — and
-   every other status means somebody is already carrying it or has finished.
-   Drawn as six equal lanes those two readings looked alike, so the operator
-   counted lanes to find the pile that needed handing out.
-
-   `backlog` is `open` alone. `TODO` is in_ready onwards, closed included: the
-   work that is spoken for. A group with no visible lane is not drawn, so a
-   filter narrowed to one status still draws one lane under the group it
-   belongs to rather than an empty header beside it. */
-const BEADS_BACKLOG = new Set(["open"]);
-
-const BEADS_GROUPS = [
-  { key: "backlog", title: "backlog", note: "nobody has taken these up" },
-  { key: "todo", title: "TODO", note: "taken up, in review, or finished" },
-];
-
-function beadsGroupOf(status) {
-  return BEADS_BACKLOG.has(status) ? "backlog" : "todo";
+/* Display names describe stored statuses; assignment is a separate filter. */
+function beadsStatusName(status) {
+  return { open: "Open", in_ready: "Ready", in_progress: "In progress",
+           in_review: "In review", blocked: "Blocked", closed: "Closed" }[status] || status;
 }
 
-/* The visible lanes, split into the groups above and paired with the rows
-   each lane draws. Groups with no lane are dropped here rather than rendered
-   empty, so the caller lays out what it is given. */
-function beadsLaneGroups(lanes, rowsFor) {
-  return BEADS_GROUPS
-    .map((group) => ({
-      ...group,
-      lanes: lanes.filter((status) => beadsGroupOf(status) === group.key)
-        .map((status) => ({ status, rows: rowsFor(status) })),
-    }))
-    .filter((group) => group.lanes.length);
+function beadsStatusNote(status) {
+  return { open: "Awaiting triage", in_ready: "Reviewed and ready to start",
+           in_progress: "Work in progress", in_review: "Awaiting review or integration",
+           blocked: "Waiting on a dependency or decision", closed: "Completed" }[status] || "";
 }
 
-function beadsGroupBlock(group) {
-  const box = el("div", `beads-group ${group.key}`);
-  const head = el("div", "beads-group-head");
-  head.appendChild(el("h4", "beads-group-name", group.title));
-  const count = group.lanes.reduce((n, lane) => n + lane.rows.length, 0);
-  head.appendChild(el("span", "beads-group-count", String(count)));
-  head.appendChild(el("span", "wf-note beads-group-note", group.note));
-  box.appendChild(head);
-  const grid = el("div", "beads-lanes");
-  for (const lane of group.lanes) grid.appendChild(beadsLane(lane.status, lane.rows));
-  box.appendChild(grid);
-  return box;
-}
-
-function beadsLane(status, rows) {
+function beadsLane(status, rows, paging) {
   const lane = el("div", `beads-lane ${status}`);
+  lane.dataset.page = String(paging?.page || 0);
   const head = el("div", "beads-lane-head");
-  head.appendChild(el("span", "beads-lane-name", status));
-  head.appendChild(el("span", "beads-lane-count", String(rows.length)));
+  head.appendChild(el("span", "beads-lane-name", beadsStatusName(status)));
+  head.title = beadsStatusNote(status);
+  head.appendChild(el("span", "beads-lane-count",
+    String(typeof paging?.total === "number" ? paging.total : rows.length)));
   lane.appendChild(head);
+  lane.appendChild(el("p", "beads-lane-note", beadsStatusNote(status)));
+  if (paging) lane.appendChild(beadsLanePager(status, rows.length, paging));
   const body = el("div", "beads-lane-body");
   if (!rows.length) body.appendChild(el("p", "beads-lane-empty", "—"));
   for (const r of rows) body.appendChild(beadsCard(r));
   lane.appendChild(body);
   return lane;
+}
+
+function beadsLanePager(status, count, paging) {
+  const bar = el("div", "beads-lane-pager");
+  const page = paging.page || 0;
+  const known = typeof paging.total === "number";
+  const first = page * BEADS_LANE_SIZE + 1;
+  const text = count ? `${first}–${first + count - 1}${known ? ` of ${paging.total}` : ""}` : "No issues";
+  bar.appendChild(el("span", "wf-note", text));
+  if (page === 0 && !paging.more) return bar;
+  for (const [label, target, disabled] of [
+    ["Previous", page - 1, page === 0], ["Next", page + 1, !paging.more],
+  ]) {
+    const button = el("button", "wf-btn clear", label);
+    button.type = "button";
+    button.disabled = disabled || beadsLoading;
+    button.title = `${label} ${beadsStatusName(status)} issues`;
+    button.addEventListener("click", () => beadsGoToLanePage(status, target));
+    bar.appendChild(button);
+    if (label === "Previous" && known) {
+      const pages = Math.max(1, Math.ceil(paging.total / BEADS_LANE_SIZE));
+      const input = el("input", "beads-lane-page");
+      input.type = "number";
+      input.min = "1";
+      input.max = String(pages);
+      input.value = String(page + 1);
+      input.disabled = beadsLoading;
+      input.setAttribute("aria-label", `${beadsStatusName(status)} page`);
+      input.title = `Page 1–${pages}`;
+      input.addEventListener("change", () => {
+        const n = Number(input.value);
+        if (!Number.isInteger(n) || n < 1 || n > pages) {
+          input.value = String(page + 1);
+          return;
+        }
+        input.blur();
+        beadsGoToLanePage(status, n - 1);
+      });
+      bar.appendChild(input);
+      bar.appendChild(el("small", "beads-lane-pages", `/ ${pages}`));
+    }
+  }
+  return bar;
 }
 
 /* A board's name. Boards are named after the workspace they belong to, plus
@@ -17888,14 +17967,9 @@ function beadsBoardSection(board) {
   const title = el("h3", null, beadsBoardLabel(board));
   title.title = beadsBoardWhere(board);
   head.appendChild(title);
-  if (board.db) {
-    const where = el("span", "beads-board-db mono", board.db);
-    where.title = beadsBoardWhere(board);
-    head.appendChild(where);
-  }
   const live = (board.sessions || []).filter((s) => s.status !== "exited");
   head.appendChild(el("span", "wf-note",
-    live.length ? live.map((s) => s.name).join(" · ") : "no live session here"));
+    `${live.length} active session${live.length === 1 ? "" : "s"}`));
   sec.appendChild(head);
   if (board.error) {
     sec.appendChild(el("p", "wf-warning", board.error));
@@ -17907,7 +17981,7 @@ function beadsBoardSection(board) {
   // a root.
   const tree = beadsHierarchy(board.issues, board.deps);
   const shown = beadsFilterIssues(board.issues, beadsFilter, beadsSession, beadsPri);
-  if (!shown.length) {
+  if (!shown.length && beadsLayout === "tree") {
     sec.appendChild(el("p", "wf-note",
       `nothing ${beadsFilter === "all" ? "" : beadsFilter + " "}here` +
       (beadsPri !== null ? ` at P${beadsPri}` : "") +
@@ -17923,10 +17997,12 @@ function beadsBoardSection(board) {
     sec.appendChild(list);
     return sec;
   }
-  const groups = beadsLaneGroups(
-    beadsLanes(beadsFilter),
-    (status) => beadsLaneRows(shown.filter((i) => i.status === status), tree));
-  for (const group of groups) sec.appendChild(beadsGroupBlock(group));
+  const grid = el("div", "beads-lanes");
+  for (const status of beadsLanes(beadsFilter)) {
+    const rows = beadsLaneRows(shown.filter((i) => i.status === status), tree);
+    grid.appendChild(beadsLane(status, rows, board.lanes?.[status]));
+  }
+  sec.appendChild(grid);
   return sec;
 }
 
@@ -18258,6 +18334,15 @@ function renderBeads() {
   beadsRenderedFocus = beadsFocus;
   const previousQueues = view.querySelector(".beads-queues");
   const previousQueuesLeft = previousQueues ? previousQueues.scrollLeft : 0;
+  const previousGrid = view.querySelector(".beads-lanes");
+  const previousGridLeft = previousGrid ? previousGrid.scrollLeft : 0;
+  const previousLanes = new Map();
+  for (const status of BEADS_STATUSES) {
+    const lane = view.querySelector(`.beads-lane.${status}`);
+    if (lane) previousLanes.set(status, {
+      page: lane.dataset.page, top: lane.querySelector(".beads-lane-body").scrollTop,
+    });
+  }
   view.innerHTML = "";
   const keepScroll = () => {
     if (previousTop) view.scrollTop = previousTop;
@@ -18270,6 +18355,14 @@ function renderBeads() {
     }
     const queues = view.querySelector(".beads-queues");
     if (queues && previousQueuesLeft) queues.scrollLeft = previousQueuesLeft;
+    const grid = view.querySelector(".beads-lanes");
+    if (grid) grid.scrollLeft = previousGridLeft;
+    for (const [status, saved] of previousLanes) {
+      const lane = view.querySelector(`.beads-lane.${status}`);
+      if (lane && lane.dataset.page === saved.page) {
+        lane.querySelector(".beads-lane-body").scrollTop = saved.top;
+      }
+    }
   };
   const head = el("div", "wf-head");
   head.appendChild(el("h2", null, "Beads"));
@@ -18289,21 +18382,13 @@ function renderBeads() {
     return;
   }
   view.appendChild(el("p", "wf-note beads-intro",
-    "The repository board (beads), by session: each issue carries the " +
-    "sessions the daemon ties it to — the recorded link, assignee, " +
-    "creator, or an `issue: <id>` in the session's task. Writes are the " +
-    "agents' (`claunch beads …`); the daemon registers an issue at " +
-    "creation, winds a session down before a kill, and returns what it " +
-    "was working on to open when it exits."));
+    "Browse issues by status. Each column has its own page; use Hierarchy to browse parent–child relationships. " +
+    "Filter by assignee to see a session's assigned work."));
   if (beadsError) view.appendChild(el("p", "wf-warning", beadsError));
   // The three tabs share one order -- intro, workspace, filters, content --
   // so the workspace row sits above the filters here as it does on Queues:
   // it chooses the board, and the filters narrow what that board shows.
   const boards = (beadsCache && beadsCache.boards) || [];
-  if (beadsSession) {
-    const owner = boards.find((b) => (b.sessions || []).some((s) => s.name === beadsSession));
-    if (owner) beadsWorkspace = owner.root;
-  }
   if (boards.length) view.appendChild(beadsWorkspaceTabs(boards));
   view.appendChild(beadsFilterBar());
   if (!beadsCache) {
@@ -18331,8 +18416,8 @@ function renderBeads() {
       "directory in Settings ▸ Workspaces and give it a board there."));
   }
   for (const b of boards.filter((b) => b.root === beadsWorkspace)) canvas.appendChild(beadsBoardSection(b));
+  if (boards.length && beadsLayout === "tree") list.appendChild(beadsPager());
   list.appendChild(canvas);
-  if (boards.length) list.appendChild(beadsPager());
   body.appendChild(list);
   if (beadsFocus) body.appendChild(beadsDetailPane());
   view.appendChild(body);
@@ -18380,6 +18465,7 @@ function beadsWorkspaceTabs(boards) {
       beadsFocus = "";
       beadsDetail = null;
       beadsSession = "";
+      if (beadsSection === "board") restartBeadsStream();
       clearBeadsSearch();
       const canvas = $("beads-canvas");
       if (canvas) canvas.scrollTop = 0;
@@ -18854,6 +18940,8 @@ function sessBeads(data) {
   open.title = "the Beads page, filtered to this session";
   open.addEventListener("click", () => {
     beadsSession = s.name || "";
+    beadsWorkspace = b.root || "";
+    stopBeadsPoll();
     go("#/beads");
   });
   box.appendChild(open);
@@ -18920,6 +19008,8 @@ function sessBeadsPanel(data) {
   open.title = "the Beads page, filtered to this session";
   open.addEventListener("click", () => {
     beadsSession = s.name || "";
+    beadsWorkspace = b.root || "";
+    stopBeadsPoll();
     go("#/beads");
   });
   box.appendChild(open);

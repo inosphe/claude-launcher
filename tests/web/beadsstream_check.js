@@ -25,7 +25,8 @@ vm.runInContext(`
 let beadsOpen = true, beadsSection = "board", beadsLoading = false, beadsMore = false;
 let beadsPage = 0, beadsTotal = null, beadsStreamVersion = 0, beadsPri = null;
 let beadsCache = null, beadsError = "", beadsSort = "updated_at", beadsDirection = "desc";
-let beadsFilter = "active";
+let beadsFilter = "active", beadsLayout = "tree", beadsSession = "", beadsWorkspace = "/repo";
+let beadsLanePages = {};
 const BEADS_PAGE_SIZE = 48;
 const BEADS_ACTIVE = new Set(["open", "in_ready", "in_progress", "in_review", "blocked"]);
 function renderBeads() { shown.push(beadsCache && beadsCache.marker); }
@@ -33,12 +34,12 @@ async function refreshBeadsDetail() {}
 function refreshBeadsRelated() {}
 function api(url) { return new Promise(resolve => requests.push({ url, resolve })); }
 ` + slice("loadBeadsPage") + slice("restartBeadsStream")
-  + slice("beadsGoToPage") + slice("beadsPageCount") + slice("beadsStatusQuery"), ctx);
+  + slice("beadsReadPage") + slice("beadsGoToPage") + slice("beadsPageCount") + slice("beadsStatusQuery"), ctx);
 
 function reply(n, marker, { more = true, total = 200 } = {}) {
   ctx.requests[n].resolve({
     ok: true, status: 200,
-    json: async () => ({ marker, has_more: more, total,
+    json: async () => ({ marker, boards: [{ root: "/repo", has_more: more, total }], has_more: more, total,
                          next_offset: more ? undefined : null }),
   });
 }
@@ -85,7 +86,7 @@ const flush = () => new Promise(resolve => setImmediate(resolve));
   const before = ctx.requests.length;
   vm.runInContext("beadsGoToPage(99)", ctx);
   assert(ctx.requests[before].url.includes(`offset=${4 * 48}`), ctx.requests[before].url);
-  assert.strictEqual(vm.runInContext("beadsPage", ctx), 4);
+  assert.strictEqual(vm.runInContext("beadsPage", ctx), 1); // old rows until the response arrives
   reply(before, "page-5", { more: false, total: 200 });
   await flush();
 
@@ -93,7 +94,7 @@ const flush = () => new Promise(resolve => setImmediate(resolve));
   // count unknown, rather than the control refusing to draw.
   vm.runInContext("beadsGoToPage(0)", ctx);
   ctx.requests[ctx.requests.length - 1].resolve({
-    ok: true, status: 200, json: async () => ({ marker: "no-total", has_more: true }),
+    ok: true, status: 200, json: async () => ({ marker: "no-total", boards: [{ root: "/repo", has_more: true }], has_more: true }),
   });
   await flush();
   assert.strictEqual(vm.runInContext("beadsTotal", ctx), null);

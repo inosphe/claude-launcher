@@ -8322,6 +8322,8 @@ async def h_beads_stream(request: web.Request) -> web.Response:
     view = await request.app["beads"].stream_view(
         list(manager.list()), extra, offset=offset, limit=limit, priority=priority,
         sort=sort, direction=direction, statuses=statuses,
+        assignee=request.query.get("assignee", ""),
+        board_root=request.query.get("board"),
     )
     return json_response(view)
 

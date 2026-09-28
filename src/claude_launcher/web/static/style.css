@@ -2756,25 +2756,6 @@ body.term-split #terminal { flex: var(--split-term, 0.6) 1 0; min-height: 80px; 
 .beads-start-row { display: flex; gap: 8px; flex-wrap: wrap; margin: 4px 0 6px; }
 .beads-detail-start .wf-note { margin: 0 0 2px; }
 
-/* The two halves of a board (app.js: BEADS_GROUPS). backlog is what nobody
-   has taken up; TODO is everything already spoken for. The header carries the
-   count so the pile that needs handing out is readable without counting
-   lanes, which is what it took before the split. */
-.beads-group + .beads-group { margin-top: 14px; }
-.beads-group-head {
-  display: flex; align-items: baseline; gap: 8px; margin: 0 0 6px;
-  padding-bottom: 4px; border-bottom: 1px solid #22262d;
-}
-.beads-group-name {
-  margin: 0; font-size: 12px; text-transform: uppercase; letter-spacing: .06em;
-  color: #c6cdd5;
-}
-.beads-group.backlog .beads-group-name { color: #79c0ff; }
-.beads-group-count {
-  font-size: 12px; color: #8b949e; font-variant-numeric: tabular-nums;
-}
-.beads-group-note { margin-left: auto; font-size: 11px; }
-
 /* the kanban: one lane per status, cards nested by parent-child.
    The lanes scroll sideways rather than reflowing -- a board is read by
    comparing lanes, and a lane that wrapped under another is no longer beside
@@ -2799,7 +2780,15 @@ body.term-split #terminal { flex: var(--split-term, 0.6) 1 0; min-height: 80px; 
 .beads-lane.in_review .beads-lane-name { color: #d2a8ff; }
 .beads-lane.blocked .beads-lane-name { color: #ff7b72; }
 .beads-lane.closed .beads-lane-name { color: #6e7681; }
-.beads-lane-body { padding: 8px; display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.beads-lane-note { margin: 6px 10px; min-height: 28px; color: #8b949e; font-size: 11px; }
+.beads-lane-pager { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; padding: 0 8px 8px; }
+.beads-lane-pager > span { flex-basis: 100%; font-size: 11px; white-space: nowrap; }
+.beads-lane-pager .wf-btn { font-size: 11px; padding: 3px 6px; }
+.beads-lane-pager .wf-btn:disabled { opacity: .4; cursor: default; }
+.beads-lane-page { width: 42px; min-width: 0; font-size: 11px; padding: 2px; background: #0d1117; color: #c6cdd5; border: 1px solid #30363d; border-radius: 4px; }
+.beads-lane-pages { margin-right: auto; color: #8b949e; }
+.seq-tabs.beads-status-filters { flex-basis: 100%; margin: 0; }
+.beads-lane-body { max-height: 65vh; overflow-y: auto; padding: 8px; display: flex; flex-direction: column; gap: 6px; min-width: 0; }
 .beads-lane-empty { color: #4d545c; font-size: 12px; margin: 2px 0 4px; text-align: center; }
 
 /* the tree reading: the same cards, one column, nested across every status */

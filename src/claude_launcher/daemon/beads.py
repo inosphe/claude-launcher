@@ -1496,6 +1496,7 @@ class Board:
         priority: Optional[int] = None,
         sort: str = "updated_at", direction: str = "desc",
         statuses: Optional[Sequence[str]] = None,
+        assignee: str = "",
     ) -> Tuple[List[dict], bool, Optional[int]]:
         """One bounded page of a board in the requested order.
 
@@ -1517,6 +1518,9 @@ class Board:
         match the filter on the whole board, which is what a page control
         needs to say how many pages there are; it is ``None`` when ``br``
         does not report one.
+
+        ``assignee`` is an exact assignment filter applied before pagination;
+        a creator or historical session link does not count as assignment.
         """
         offset = max(0, offset)
         limit = max(1, limit)
@@ -1525,7 +1529,7 @@ class Board:
         if direction not in {"asc", "desc"}:
             raise ValueError("unsupported sort direction")
         wanted = tuple(dict.fromkeys(statuses or ()))
-        key = (str(root), offset, limit, priority, sort, direction, wanted)
+        key = (str(root), offset, limit, priority, sort, direction, wanted, assignee)
         now = self._clock()
         hit = self._page_cache.get(key)
         if hit and now - hit[0] < CACHE_TTL:
@@ -1539,6 +1543,8 @@ class Board:
             args.append("--reverse")
         if priority is not None:
             args.extend(["--priority", str(priority)])
+        if assignee:
+            args.extend(["--assignee", assignee])
         for status in wanted:
             # Repeated, never comma-joined: a comma list is accepted and
             # matches nothing (claunch-beads-list-comma-status-tmh).
@@ -1553,6 +1559,8 @@ class Board:
             rows = [r for r in rows if r.get("priority") == priority]
         if wanted:
             rows = [r for r in rows if r.get("status") in wanted]
+        if assignee:
+            rows = [r for r in rows if r.get("assignee") == assignee]
         # A compatible but pre-pagination ``br`` can return the full list.
         # Its response is larger than the requested extra row, which is an
         # unambiguous signal to apply the requested window locally -- and
@@ -1915,6 +1923,8 @@ class Board:
         offset: int = 0, limit: int = 50, priority: Optional[int] = None,
         sort: str = "updated_at", direction: str = "desc",
         statuses: Optional[Sequence[str]] = None,
+        assignee: str = "",
+        board_root: Optional[str] = None,
     ) -> dict:
         """One bounded page of each board on the Beads screen.
 
@@ -1933,6 +1943,10 @@ class Board:
         Descriptions are cut to :data:`PREVIEW_CHARS` (see
         :func:`preview_row`): a listing draws an excerpt, and the full text
         is one request away at ``/api/beads/<id>``.
+
+        ``board_root`` selects which board's issues to read while keeping all
+        board headers for workspace navigation. ``None`` preserves the legacy
+        all-board response; an empty or unknown root selects the first board.
         """
         result = {
             "available": self.available(), "boards": [], "offset": offset,
@@ -1945,6 +1959,12 @@ class Board:
             result["error"] = f"'{cli_beads.BINARY}' is not installed on the daemon machine"
             return result
         by_root, order = await self._group_by_root(sessions, extra_roots)
+        # New clients select a workspace before paging. Retain every header
+        # for workspace tabs, but only read issues from the selected board.
+        # An empty or removed selection falls back to the first known board.
+        selected = None
+        if board_root is not None and order:
+            selected = next((root for root in order if str(root) == board_root), order[0])
         for root in order:
             entry: dict = {
                 **self.board_head(root),
@@ -1956,10 +1976,13 @@ class Board:
                 {"name": s.sdef.name, "status": s.status(), "issue": s.sdef.issue}
                 for s in members
             ]
+            if selected is not None and root != selected:
+                result["boards"].append(entry)
+                continue
             try:
                 rows, entry["has_more"], entry["total"] = await self.issue_page(
                     root, offset=offset, limit=limit, priority=priority,
-                    sort=sort, direction=direction, statuses=statuses,
+                    sort=sort, direction=direction, statuses=statuses, assignee=assignee,
                 )
             except cli_beads.BeadsError as exc:
                 entry["error"] = str(exc)
@@ -1980,7 +2003,7 @@ class Board:
                     root, rows,
                     cache_key=(
                         str(root), offset, limit, priority, sort, direction,
-                        tuple(statuses or ()),
+                        tuple(statuses or ()), assignee,
                     ),
                 )
             except cli_beads.BeadsError as exc:

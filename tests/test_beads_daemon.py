@@ -120,6 +120,8 @@ class FakeBr:
                 rows = [r for r in rows if r.get("status") in wanted]
             elif "--all" not in rest:
                 rows = [r for r in rows if r.get("status") != "closed"]
+            if "--assignee" in opts:
+                rows = [r for r in rows if r.get("assignee") == opts["--assignee"]]
             # The count br reports is of every MATCHING issue, taken before
             # the window -- it is what a page control counts pages with.
             total = len(rows)
@@ -1152,8 +1154,8 @@ def test_every_status_is_the_page_when_none_is_asked_for(repo):
 
 def test_the_stream_route_takes_repeated_status_and_refuses_a_typo(home, tmp_path, repo):
     br = FakeBr()
-    br.add(id="a", status="open")
-    br.add(id="b", status="in_review")
+    br.add(id="a", status="open", assignee="worker-a")
+    br.add(id="b", status="in_review", assignee="worker-b")
     br.add(id="c", status="closed")
     board = _board(br, repo)
 
@@ -1172,6 +1174,13 @@ def test_the_stream_route_takes_repeated_status_and_refuses_a_typo(home, tmp_pat
             assert [i["id"] for i in entry["issues"]] == ["a", "b"]
             assert entry["total"] == 2
             assert doc["statuses"] == ["open", "in_review"]
+            mine = await client.get(
+                f"/api/beads/stream?cwd={repo}&assignee=worker-b&limit=1",
+                headers=BEARER,
+            )
+            filtered = next(b for b in (await mine.json())["boards"] if b["root"] == str(repo))
+            assert [i["id"] for i in filtered["issues"]] == ["b"]
+            assert filtered["total"] == 1 and not filtered["has_more"]
             # A status the board cannot hold is a typo, and a typo that
             # silently lists nothing reads as an empty board.
             bad = await client.get(
@@ -3074,3 +3083,52 @@ def test_a_hung_br_does_not_hold_the_board_for_the_next_read(repo):
 
     assert asyncio.run(go()) == [{"id": "t-1", "title": "x"}]
     assert len(calls) == 2
+
+
+def test_assignee_filter_precedes_pagination_and_has_its_own_cache(repo):
+    br = FakeBr()
+    for n in range(8):
+        br.add(id=f"other-{n}", assignee="s2", status="open")
+    for n in range(3):
+        br.add(id=f"mine-{n}", assignee="s1", status="open")
+    board = _board(br, repo)
+
+    async def run():
+        page = await board.stream_view([], [str(repo)], limit=2, assignee="s1")
+        entry = page["boards"][0]
+        assert [r["id"] for r in entry["issues"]] == ["mine-0", "mine-1"]
+        assert entry["total"] == 3 and entry["has_more"]
+        tail = await board.stream_view([], [str(repo)], limit=2, offset=2, assignee="s1")
+        assert [r["id"] for r in tail["boards"][0]["issues"]] == ["mine-2"]
+        assert not tail["has_more"]
+        other = await board.stream_view([], [str(repo)], limit=2, assignee="s2")
+        assert other["total"] == 8
+        assert other["boards"][0]["issues"][0]["id"] == "other-0"
+
+    asyncio.run(run())
+
+
+def test_selected_board_reads_only_its_issues_but_keeps_workspace_headers(repo, tmp_path):
+    other = tmp_path / "other-board"
+    (other / ".beads").mkdir(parents=True)
+    (other / ".beads" / "beads.db").write_bytes(b"")
+    br = FakeBr()
+    br.add(id="a", status="open")
+    board = beads_mod.Board(br, root_for=lambda cwd: Path(cwd))
+
+    async def run():
+        for selection, expected in [(str(other), other), ("", repo), ("removed", repo)]:
+            board.invalidate(repo)
+            board.invalidate(other)
+            br.calls.clear()
+            view = await board.stream_view([], [str(repo), str(other)], board_root=selection)
+            assert [b["root"] for b in view["boards"]] == [str(repo), str(other)]
+            for entry in view["boards"]:
+                assert entry["issues"] == ([] if entry["root"] != str(expected) else [
+                    {**br.issues["a"], "sessions": []},
+                ])
+            listings = [c for c in br.calls if "list" in c and "dep" not in c]
+            assert len(listings) == 1
+            assert str(expected) in listings[0][listings[0].index("--db") + 1]
+
+    asyncio.run(run())

@@ -70,8 +70,9 @@ const stubs = `
 const view = el("div");
 function $(id) { return id === "beads-view" ? view : null; }
 function formInUse() { return false; }
+let beadsLayout = "board";
 let beadsRenderedPage = 0, beadsRenderedFocus = "", beadsPage = 0, beadsSection = "board";
-let beadsError = "", beadsCache = null, beadsSession = "", beadsWorkspace = "";
+let beadsError = "", beadsCache = null, beadsSession = "", beadsWorkspace = "", beadsLoadedWorkspace = "";
 let beadsFocus = "", beadsSearch = { q: "" }, beadsQueues = null, beadsQueuesError = "";
 let reportsError = "", reportsCache = null;
 const BEADS_Q_CELL_CAP = 24;
@@ -79,6 +80,7 @@ const BEADS_STATUSES = ["open", "in_ready", "in_progress", "in_review", "blocked
 const BEADS_ACTIVE = new Set(["open", "in_ready", "in_progress", "in_review", "blocked"]);
 function beadsFilterBar() { return el("div", "seq-tabs beads-filters"); }
 function beadsNewBlock() { return el("div", "beads-new"); }
+function beadsDetailPane() { return el("div", "beads-detail"); }
 function beadsBoardSection() { return el("div", "beads-board"); }
 function beadsQueuesBoard() { return el("div", "beads-board beads-queues-board"); }
 function beadsPager() { return el("div", "beads-pager"); }
@@ -90,13 +92,18 @@ function requestAnimationFrame() {}
 const asked = [];
 let beadsDetail = null, beadsOpen = false, beadsTimer = null;
 function showView() {}
-function stopBeadsPoll() {}
+function clearInterval() {}
 function stopReportsPoll() {}
 function openReports() { asked.push("openReports"); }
 function restartBeadsStream() { asked.push("restartBeadsStream"); }
+async function refreshBeadsDetail() { asked.push("refreshBeadsDetail"); }
+function refreshBeadsRelated() {}
 function refreshQueues() { asked.push("refreshQueues"); }
 function refreshBeads() {}
 function setInterval() { return 1; }
+function go() { openBeads("", "board"); }
+function sessBeadsBoardLine() { return null; }
+function clearBeadsSearch() { beadsSearch = { q: "" }; }
 `;
 
 const ctx = {};
@@ -108,9 +115,13 @@ new Function(
   // (claunch-4aesv); real helpers, so the row reads as the page draws it.
   + slice("beadsBoardLabel") + slice("beadsBoardWhere")
   + slice("renderQueues") + slice("renderReports") + slice("openBeads")
+  + slice("stopBeadsPoll")
+  + slice("sessBeads") + slice("sessBeadsPanel")
   + `
 Object.assign(exports, {
   view, render: renderBeads, open: openBeads, asked,
+  panels: [sessBeads, sessBeadsPanel],
+  filters: () => [beadsWorkspace, beadsSession],
   set(k, v) { eval(k + " = v"); },
 });`)(ctx, document, el);
 
@@ -176,6 +187,43 @@ ctx.asked.length = 0;
 ctx.open("", "board");
 check("opening Board does not read the queues",
       ctx.asked.includes("refreshQueues"), false);
+ctx.set("beadsCache", { boards: [{ root: "/a" }] });
+ctx.set("beadsLoadedWorkspace", "/a");
+ctx.set("beadsWorkspace", "/a");
+ctx.asked.length = 0;
+ctx.open("issue-on-page-3", "board");
+check("opening an issue preserves the board's current pages",
+      ctx.asked.includes("restartBeadsStream"), false);
+check("opening an issue refreshes its detail",
+      ctx.asked.includes("refreshBeadsDetail"), true);
+ctx.asked.length = 0;
+ctx.set("beadsWorkspace", "/b");
+ctx.open("issue-from-search", "board");
+check("a search link into a different workspace reloads that board",
+      ctx.asked.includes("restartBeadsStream"), true);
+
+for (const panel of ctx.panels) {
+ for (const priorWorkspace of ["/a", "/b"]) {
+  ctx.set("beadsCache", { boards: [{ root: "/a" }, { root: "/b" }] });
+  ctx.set("beadsWorkspace", priorWorkspace);
+  ctx.set("beadsLoadedWorkspace", priorWorkspace);
+  ctx.set("beadsOpen", true);
+  ctx.set("beadsSession", "s-a");
+  ctx.asked.length = 0;
+  const box = panel({ session: { name: "s-b", status: "exited" },
+    beads: { root: "/b", issues: [] } });
+  const button = box.all().find(n => n.text === "Open board");
+  button.handlers.click[0]();
+  check(panel.name + " selects the session's board and assignee",
+        ctx.filters(), ["/b", "s-b"]);
+  check(panel.name + " reloads after session navigation from " + priorWorkspace,
+        ctx.asked.includes("restartBeadsStream"), true);
+  const tab = ctx.view.find("beads-workspace-tabs")[0].children[0];
+  tab.handlers.click[0]();
+  check(panel.name + " still lets a workspace tab clear the session filter",
+        ctx.filters(), ["/a", ""]);
+ }
+}
 
 /* ---- 4. the rules that make the rows read alike ----------------------- */
 const rule = (sel) => {
