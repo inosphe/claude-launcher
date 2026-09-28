@@ -151,3 +151,12 @@ def test_every_milestone_wait_is_also_a_verify(stack, worker):
     for name, step in (("stack", "cut"), ("improv-worker", "stack-merge")):
         cmd = _project(name).steps[step].verify.command
         assert cmd.startswith("uv run --no-sync python tools/published.py "), (name, step)
+
+
+def test_a_child_reviewer_is_not_a_stack_child(worker):
+    """reviewer-ensure's child reviewer lives until the run ends; counted as a
+    live child it would hold stack-round's release forever (claunch-zgidu
+    meets claunch-u8wjx.2)."""
+    recheck = worker.steps["queue-recheck"].select.prompt
+    assert "role이 worker인 자식만 센다" in recheck
+    assert "자식 리뷰어는" in worker.steps["stack-round"].select.prompt
