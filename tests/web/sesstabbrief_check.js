@@ -161,4 +161,50 @@ assert.equal(anchor("s2").title, "s2 — pinned — idle\nbriefing · idle\n두 
 assert(anchor("s1").title.includes("briefing · blocked"),
   "and so does a state that moved");
 assert.deepEqual(calls, [], "the tooltip costs no request");
+
+/* ---- a tab of another project than the rail shows ----
+   The rail narrows to one project; the tab bar does not. Such a tab keeps
+   the session's real state on its dot (the session is running, not gone)
+   and says where it belongs with a chip and a line in its tooltip. The
+   project helpers are the page's own, sliced from app.js. */
+function fn(name) {
+  const start = src.indexOf(`function ${name}(`);
+  if (start < 0) throw new Error(`cannot locate ${name} in app.js`);
+  let depth = 0;
+  for (let j = src.indexOf("{", start); j < src.length; j++) {
+    if (src[j] === "{") depth++;
+    else if (src[j] === "}") { depth--; if (!depth) return src.slice(start, j + 1); }
+  }
+  throw new Error(`unbalanced ${name}`);
+}
+bar.kids = [];
+bar._signature = undefined;
+const proj = {};
+new Function("exports", "document", "$", "localStorage", "BASE", "api",
+  stubs + `let currentProject = "hq";\n` + fn("recordProject") + "\n" +
+  fn("sessionInCurrentProject") + "\n" + pinsBlock() + `
+Object.assign(exports, {
+  render: renderSessionTabs,
+  setCache: (rows) => { sessionsCache = rows; },
+  pick: (p) => { currentProject = p; },
+});`)(proj, document, $, localStorage, "/", api);
+proj.setCache([
+  { name: "s1", status: "busy", project: "hq" },
+  { name: "s2", status: "busy", project: "solo" },
+]);
+proj.render();
+const chip = (name) => anchor(name).kids.find((k) => k.classes.has("session-tab-project"));
+assert(!tab("s1").classes.has("other-project"), "a tab of the rail's project is plain");
+assert.equal(chip("s1"), undefined, "...and carries no project chip");
+assert(tab("s2").classes.has("other-project"), "a tab of another project is marked");
+assert.equal(chip("s2").textContent, "solo", "...with a chip naming its project");
+const dot2 = anchor("s2").kids.find((k) => k.classes.has("dot"));
+assert(dot2.classes.has("busy") && !dot2.classes.has("unknown"),
+  "...and a dot drawn from its real state");
+assert.equal(anchor("s2").title,
+  "s2 — pinned — busy — project solo (the rail shows hq)",
+  "...and a tooltip that says which project it is in");
+proj.pick("");
+proj.render();
+assert(!tab("s2").classes.has("other-project"), "'All projects' marks no tab");
 console.log("session tab briefing tooltip checks passed");

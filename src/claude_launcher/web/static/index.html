@@ -105,9 +105,10 @@
     </header>
     <!-- The tier above the rail: which project's sessions and meshes the
          page shows. "All projects" is the flat roster the rail always drew;
-         a project narrows both lists (the daemon filters, ?project=) and is
-         what the create form files a new session under. Remembered per
-         browser, like the state filter below it. -->
+         a project narrows both lists (filtered in the page, off polls that
+         carry every project, so a pick redraws at once) and is what the
+         create form files a new session under. Carried in the address as
+         ?project=, so a reload keeps it. -->
     <div id="project-row" class="project-row">
       <label for="project-select">Project <a href="#/workspaces" title="manage projects">manage</a></label>
       <select id="project-select" aria-label="Project"></select>
