@@ -35,7 +35,10 @@ function slice(name) {
 function constant(name) {
   const start = src.indexOf(`const ${name} = `);
   if (start < 0) throw new Error("missing " + name);
-  return src.slice(start, src.indexOf("];\n", start) + 3);
+  // A checkout may carry either line ending (core.autocrlf).
+  const end = src.slice(start).search(/\];\r?\n/);
+  if (end < 0) throw new Error("unterminated " + name);
+  return src.slice(start, start + end + 2);
 }
 
 function node(tag) {
