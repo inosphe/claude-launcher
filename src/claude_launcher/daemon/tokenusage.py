@@ -22,7 +22,8 @@ Each harness writes its own format, so the reading is split in two layers:
   transcript's location is not the reader's concern -- it comes from
   :func:`ctxsize.transcript_of`, which already knows where each harness keeps
   it.
-* :class:`_Follower` -- the file side, shared by all readers. Transcripts are
+* :class:`_Follower` -- the file side, shared by all readers (and by
+  :mod:`sessionstats`, which follows the same files with readers of its own). Transcripts are
   append-only JSONL, so a file is read once from the start and afterwards
   only from where the previous read stopped. A file that shrank or was
   replaced starts over with a fresh reader.
@@ -220,6 +221,12 @@ class UsageReader:
     def extra(self) -> dict:
         """Harness-specific keys added to the published reading."""
         return {}
+
+    def skip(self, raw: bytes) -> bool:
+        """Whether a line that passed :attr:`markers` is still not worth
+        parsing. A second, finer filter for a reader whose markers match
+        more than it wants."""
+        return False
 
     @classmethod
     def subagent_files(cls, transcript: Path) -> List[Path]:
@@ -420,8 +427,12 @@ class _Follower:
     the two never interleave on one file.
     """
 
-    def __init__(self, path: Path, make: Callable[[], UsageReader]) -> None:
+    def __init__(self, path: Path, make: Callable[[], UsageReader],
+                 key: Optional[str] = None) -> None:
         self.path = path
+        #: Where :data:`_followers` keeps it: the path, prefixed by the
+        #: namespace of a reader other than this module's own.
+        self.key = key or str(path)
         self._make = make
         self.reader = make()
         self.lock = threading.Lock()
@@ -497,6 +508,8 @@ class _Follower:
         for raw in lines:
             if markers and not any(m in raw for m in markers):
                 continue
+            if self.reader.skip(raw):
+                continue
             raw = raw.strip()
             if not raw:
                 continue
@@ -563,7 +576,7 @@ def _catch_up(late: List[_Follower]) -> None:
         try:
             with follower.lock:
                 done = follower.refresh(None)
-            key = str(follower.path)
+            key = follower.key
             if done is None and _followers.get(key) is follower:
                 _followers.pop(key, None)
         finally:
@@ -592,7 +605,7 @@ def _queue(late: List[_Follower]) -> None:
 
 
 def _follow(path: Path, make: Callable[[], UsageReader],
-            budget: Budget) -> Optional[_Follower]:
+            budget: Budget, namespace: str = "") -> Optional[_Follower]:
     """The follower of ``path``, brought up to date as far as a poll may.
 
     ``budget`` is what the request may still read inline, shared by every
@@ -600,12 +613,16 @@ def _follow(path: Path, make: Callable[[], UsageReader],
     long file (the first read after a daemon restart, typically) goes to the
     catch-up thread once the request releases its budget, and until that has
     finished the follower reports ``behind``.
+
+    ``namespace`` keeps apart the followers of one file read by different
+    readers (:mod:`sessionstats` reads the same transcripts for another
+    purpose); this module's own readers use the bare path.
     """
     late = budget.late
-    key = str(path)
+    key = f"{namespace}:{path}" if namespace else str(path)
     follower = _followers.get(key)
     if follower is None:
-        follower = _followers.setdefault(key, _Follower(path, make))
+        follower = _followers.setdefault(key, _Follower(path, make, key))
     follower.used = time.monotonic()
     if follower.queued or not follower.lock.acquire(blocking=False):
         return follower
@@ -666,7 +683,7 @@ def _read(path: Path, cls: Type[UsageReader], harness: str,
             followers.append(other)
             side.merge(other.reader.side)
             side.merge(other.reader.tally)
-    partial = any(f.behind or str(f.path) in spend.late for f in followers)
+    partial = any(f.behind or f.key in spend.late for f in followers)
     tally = main.reader.tally
     if not tally.requests and not side.requests and not partial:
         return None
