@@ -846,7 +846,8 @@ def _role_label(member: dict) -> str:
 
 
 def _cmd_subroles(args: argparse.Namespace) -> int:
-    """Show or change a member's subroles."""
+    """Show or change a member's roles: its subroles, and with ``--primary``
+    the primary role too."""
     client = daemon_client.ensure_running()
     handle = args.handle or _own_session(args)
     if not handle:
@@ -855,16 +856,23 @@ def _cmd_subroles(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return 1
-    if args.set is not None or args.add or args.remove:
+    primary = getattr(args, "primary", None)
+    if args.set is not None or args.add or args.remove or primary:
         body: dict = {}
+        if primary:
+            body["role"] = primary
         if args.set is not None:
             body["set"] = [s for s in args.set.split(",") if s.strip()]
         if args.add:
             body["add"] = list(args.add)
         if args.remove:
             body["remove"] = list(args.remove)
+        # `/roles` takes the primary too; `/subroles` is kept for a daemon
+        # that predates it, and refuses a primary.
         member = client.patch(
-            f"/api/mesh/{args.mesh}/members/{handle}/subroles", body
+            f"/api/mesh/{args.mesh}/members/{handle}/"
+            + ("roles" if primary else "subroles"),
+            body,
         )
     else:
         info = client.get(f"/api/mesh/{args.mesh}")
@@ -1469,8 +1477,9 @@ def register(sub) -> None:
 
     p = msub.add_parser(
         "subroles",
-        help="show or change a member's subroles — the roles it answers for "
-             "besides its primary one (e.g. a leader that is also a reviewer)",
+        help="show or change a member's roles — its subroles (the roles it "
+             "answers for besides its primary one, e.g. a leader that is also "
+             "a reviewer) and, with --primary, the primary role itself",
     )
     p.add_argument("mesh")
     p.add_argument("handle", nargs="?",
@@ -1481,6 +1490,9 @@ def register(sub) -> None:
                    help="drop this subrole (repeatable)")
     p.add_argument("--set", metavar="ROLE[,ROLE...]",
                    help="replace the whole subrole list ('' clears it)")
+    p.add_argument("--primary", metavar="ROLE",
+                   help="change the primary role; the member is typed a "
+                        "notice with the new role's stance")
     p.add_argument("--session", help=argparse.SUPPRESS)
     p.set_defaults(func=_cmd_subroles)
 

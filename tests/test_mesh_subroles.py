@@ -295,7 +295,7 @@ def test_the_http_surface_carries_subroles(home, tmp_path):
                 json={"role": "leader"}, headers=BEARER,
             )
             assert resp.status == 400
-            assert "settled at join" in (await resp.json())["error"]
+            assert "/roles changes it" in (await resp.json())["error"]
             resp = await client.patch(
                 "/api/mesh/web/members/w1/subroles",
                 json={"add": ["ghost"]}, headers=BEARER,

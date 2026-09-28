@@ -71,6 +71,10 @@ def role_entries(name: str, manager, mesh_mgr, *, session=None) -> List[dict]:
                     {
                         "mesh": mesh.name,
                         "name": role.name,
+                        # Held beside the primary: a lookup by role finds the
+                        # member under these too, so the reminder says so --
+                        # and a change to them is a change of position.
+                        "subroles": list(getattr(member, "subroles", None) or ()),
                         "stance": stance,
                         "digest": digests.text_digest(stance),
                         "cflow_reminder": (role.cflow_reminder or "").strip(),
@@ -103,7 +107,10 @@ def role_entries(name: str, manager, mesh_mgr, *, session=None) -> List[dict]:
 
 def role_key(entries: List[dict]) -> tuple:
     """The role source's stable position key."""
-    return tuple((e["mesh"], e["name"], e["digest"]) for e in entries)
+    return tuple(
+        (e["mesh"], e["name"], e["digest"], tuple(e.get("subroles") or ()))
+        for e in entries
+    )
 
 
 def role_section(entries: List[dict], *, cflow_guidance: bool) -> List[str]:
@@ -114,6 +121,11 @@ def role_section(entries: List[dict], *, cflow_guidance: bool) -> List[str]:
             lines.append("")
         where = f" on {entry['mesh']}" if entry["mesh"] else ""
         lines.append(f"role: {entry['name']}{where}")
+        if entry.get("subroles"):
+            lines.append(
+                f"subroles: {', '.join(entry['subroles'])} (you also answer "
+                "for these when a workflow or a peer looks one up)"
+            )
         ident = entry.get("digest") or ""
         if ident:
             lines.extend(

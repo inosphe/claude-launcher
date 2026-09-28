@@ -340,6 +340,11 @@ The primary role is still what sets its stance; a subrole is where a
 workflow's delegated decision (`from: [{role: reviewer}]`), a `filter_roles`
 check or the policy engine also finds it. The roster spells the set as
 `leader+reviewer`, and the join briefing lists yours on a `subroles:` line.
+Roles are not fixed at the join: `claunch mesh subroles MESH HANDLE
+--primary ROLE` (or the Roles editor in the dashboard's session panel)
+changes the primary too. When yours change, a `role change` block is typed
+into your terminal — for a new primary it carries the new stance with its
+text id, and that stance replaces the one you joined with.
 
 A mesh may define its own vocabulary, so do not assume the names above:
 `claunch mesh roles MESH` lists the roles this mesh actually has, and
