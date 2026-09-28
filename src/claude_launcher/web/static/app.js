@@ -3873,16 +3873,9 @@ async function refreshSessions(options) {
         list.scrollTop += sessionGroupJumpOffset(list, heading, first);
       });
       heading.appendChild(jump);
-      // A mesh heading spawns from that mesh's leader, which is what the
-      // leader row's own + does. Drawn even when it cannot: the refusal and
-      // its reason are the answer to "why is there no + here".
       if (row.group === "mesh") {
-        // The plain create form, arriving with this mesh already picked. It
-        // is the other half of the question the + answers: the + hangs a
-        // child off the leader and inherits its lineage, worktree base and
-        // enrolment, which is wrong for a session that is only meant to join
-        // the room. This one has no parent to borrow from, so it needs no
-        // leader and is refused only where there is no mesh to join.
+        // Open the plain create form with this mesh already picked. It needs
+        // no leader and is refused only where there is no mesh to join.
         const joinable = row.value && row.value !== "(no mesh)";
         const add = document.createElement("button");
         add.className = "session-group-new";
@@ -3905,27 +3898,6 @@ async function refreshSessions(options) {
           add.addEventListener("click", (e) => e.stopPropagation());
         }
         heading.appendChild(add);
-        const target = meshGroupSpawnTarget(row.value);
-        const plus = document.createElement("button");
-        plus.className = "session-group-plus";
-        plus.type = "button";
-        plus.textContent = "+";
-        if (target.name) {
-          plus.title = target.title;
-          plus.addEventListener("click", (e) => {
-            e.stopPropagation();   // the heading itself folds; this does not
-            openSpawnModal(target.name);
-          });
-        } else {
-          // `aria-disabled`, not the `disabled` property: a disabled control
-          // takes no pointer events, and a tooltip nobody can hover is not a
-          // reason anybody reads.
-          plus.setAttribute("aria-disabled", "true");
-          plus.classList.add("disabled");
-          plus.title = target.reason;
-          plus.addEventListener("click", (e) => e.stopPropagation());
-        }
-        heading.appendChild(plus);
       }
       const collapsed = isSessionGroupCollapsed(row.group, row.value);
       const paintFold = (shut) => {
@@ -4378,71 +4350,6 @@ function sessMeshes(name) {
     }
   }
   return out.sort((a, b) => a.mesh.localeCompare(b.mesh));
-}
-
-/* The session a mesh's + spawns from.
-
-   A mesh heading has no session of its own, so the + has to borrow one, and
-   the room already says which: the leader is the session a new worker is
-   meant to hang off, and spawning from it is what gives the child the
-   leader's lineage, worktree base and mesh enrolment. The heading's + is
-   therefore the leader row's + under another name, and it refuses in exactly
-   the cases that one would.
-
-   Returns {name, title} when a spawn is possible and {reason} when it is
-   not; the reason is what the disabled + says on hover, so it names the
-   mesh and the session rather than saying "unavailable". */
-function meshGroupLeader(meshName) {
-  // A roster keeps every leader it ever had: a dead holder is never
-  // rewritten out (successions add, they do not erase), so after two
-  // hand-overs the first local leader in roster order is an exited session
-  // and the + refused to spawn from mesh-0826 while its live leader sat one
-  // row down. Same rule the daemon's own succession check applies: a local
-  // holder counts only while its session is alive, a remote one always.
-  let stale = null;
-  let remote = null;
-  for (const m of meshCache || []) {
-    if (m.name !== meshName) continue;
-    for (const mem of m.members || []) {
-      if ((mem.role || "") !== "leader") continue;
-      if (!mem.local || !mem.session) {
-        // Kept only as the reason: a leader on another machine is a real
-        // leader, and "this mesh has no leader" would be the wrong answer.
-        if (!remote) remote = mem;
-        continue;
-      }
-      const sess = (sessionsCache || []).find((s) => s.name === mem.session);
-      if (sess && sess.status !== "exited") return mem;
-      // Exited or not on the rail: only the reason when no live one exists.
-      if (!stale) stale = mem;
-    }
-  }
-  return stale || remote;
-}
-
-function meshGroupSpawnTarget(meshName) {
-  if (!meshName || meshName === "(no mesh)") {
-    return { reason: "these sessions are in no mesh, so there is no leader to spawn from" };
-  }
-  const leader = meshGroupLeader(meshName);
-  if (!leader) {
-    return { reason: `no member of mesh ${meshName} holds the leader role, and the + spawns a child of the leader` };
-  }
-  if (!leader.local || !leader.session) {
-    return { reason: `the leader of mesh ${meshName} ('${leader.handle || leader.session || "?"}') runs on another machine, which this daemon cannot spawn from` };
-  }
-  const sess = (sessionsCache || []).find((s) => s.name === leader.session);
-  if (!sess) {
-    return { reason: `the leader of mesh ${meshName} is session '${leader.session}', which is not in the rail's current list` };
-  }
-  if (sess.status === "exited") {
-    return { reason: `the leader of mesh ${meshName}, session '${leader.session}', has exited, and an exited session cannot spawn children` };
-  }
-  return {
-    name: leader.session,
-    title: `spawn a child of '${leader.session}', the leader of mesh ${meshName}` +
-           " — the same wizard that session's row + opens",
-  };
 }
 
 /* What the row actually draws: the first few rooms, then a count for the

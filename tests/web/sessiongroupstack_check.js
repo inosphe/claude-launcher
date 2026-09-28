@@ -5,16 +5,13 @@
    reader is inside and nothing else. This file covers what replaced it at
    the outermost level — every group heading on screen at every scroll
    position, piled at the top once passed and waiting at the bottom before
-   it arrives — plus the two controls that stack carries: the fold each group
-   remembers across the rail's two-second rebuild, and the + that spawns from
-   the mesh's leader.
+   it arrives — plus the fold each group remembers across the rail's
+   two-second rebuild.
 
-   Three things are held here. The offsets, because a stack that reserves the
+   Two things are held here. The offsets, because a stack that reserves the
    wrong height either overlaps its own headings or leaves a gap under them.
    The fold's storage round-trip, because a fold that does not survive the
-   rebuild is a fold nobody can use. And the spawn target's refusals, because
-   the + is drawn even when it cannot spawn and the reason on it is the only
-   answer the reader gets. */
+   rebuild is a fold nobody can use. */
 const fs = require("fs");
 const path = require("path");
 
@@ -205,91 +202,11 @@ check("the two groupings do not share a fold",
       false);
 
 /* ---------------------------------------------------------------- */
-/* the + on a mesh heading                                          */
+/* the create button on a mesh heading                              */
 /* ---------------------------------------------------------------- */
 
-function spawn(meshes, sessions) {
-  const ctx = {};
-  new Function("exports", "meshCache", "sessionsCache",
-    slice("function meshGroupLeader(", "/* What the row actually draws") +
-    "\nexports.leader = meshGroupLeader;" +
-    "\nexports.target = meshGroupSpawnTarget;")(ctx, meshes, sessions);
-  return ctx;
-}
-
-const room = (members) => [{ name: "mesh-0826", members }];
-const leaderMember = { session: "s469", handle: "s469", role: "leader", local: true };
-const workerMember = { session: "s522", handle: "s522", role: "worker", local: true };
-
-check("a live local leader is the parent the + spawns from",
-      spawn(room([workerMember, leaderMember]),
-            [{ name: "s469", status: "idle" }]).target("mesh-0826").name,
-      "s469");
-
-const noLeader = spawn(room([workerMember]), [{ name: "s522", status: "idle" }])
-  .target("mesh-0826");
-check("a mesh with no leader refuses and says which role is missing",
-      [noLeader.name, /leader role/.test(noLeader.reason || "")],
-      [undefined, true]);
-
-const exited = spawn(room([leaderMember]), [{ name: "s469", status: "exited" }])
-  .target("mesh-0826");
-check("an exited leader refuses and names the session",
-      [exited.name, /'s469'/.test(exited.reason || ""),
-       /exited/.test(exited.reason || "")],
-      [undefined, true, true]);
-
-const remote = spawn(room([{ ...leaderMember, local: false }]), [])
-  .target("mesh-0826");
-check("a leader on another machine refuses and says so",
-      [remote.name, /another machine/.test(remote.reason || "")],
-      [undefined, true]);
-
-const unknown = spawn(room([leaderMember]), []).target("mesh-0826");
-check("a leader the rail does not list refuses rather than spawning blind",
-      [unknown.name, /not in the rail/.test(unknown.reason || "")],
-      [undefined, true]);
-
-const homeless = spawn(room([leaderMember]), [{ name: "s469", status: "idle" }])
-  .target("(no mesh)");
-check("the catch-all group has no leader to borrow",
-      [homeless.name, /no mesh/.test(homeless.reason || "")],
-      [undefined, true]);
-
-check("a local leader wins over one on another machine",
-      spawn(room([{ ...leaderMember, session: "s900", local: false },
-                  leaderMember]),
-            [{ name: "s469", status: "idle" }]).leader("mesh-0826").session,
-      "s469");
-
-// The roster never forgets a leader: after a hand-over the exited one still
-// sits first in roster order, and the + used to refuse on it while the live
-// leader sat one row down (mesh-0826 with s127 exited, s469 idle).
-const exitedFirst = { ...leaderMember, session: "s127", handle: "s127" };
-check("a live leader is chosen over an exited one that precedes it",
-      spawn(room([exitedFirst, leaderMember]),
-            [{ name: "s127", status: "exited" }, { name: "s469", status: "idle" }])
-        .target("mesh-0826").name,
-      "s469");
-check("a live leader is chosen over one the rail no longer lists",
-      spawn(room([exitedFirst, leaderMember]),
-            [{ name: "s469", status: "idle" }]).target("mesh-0826").name,
-      "s469");
-const bothDead = spawn(room([exitedFirst, leaderMember]),
-                       [{ name: "s127", status: "exited" }, { name: "s469", status: "exited" }])
-  .target("mesh-0826");
-check("with no live leader the refusal still names a leader",
-      [bothDead.name, /exited/.test(bothDead.reason || "")], [undefined, true]);
-
-/* ---------------------------------------------------------------- */
-/* the create button beside the +                                   */
-/* ---------------------------------------------------------------- */
-
-/* The + hangs a child off the leader; this one opens the plain create form
-   with the mesh already picked, which is the only way to put a session in a
-   room without giving it the leader's lineage. It needs no leader, so the
-   only refusal it has is the catch-all group, and the route has to carry the
-   mesh for the picker to arrive on it. */
+/* This opens the create form with the mesh already picked. It needs no
+   leader, so the only refusal is the catch-all group. */
 
 const hash = {};
 new Function("exports", slice("function parseHash(", "function route()") +
@@ -308,7 +225,7 @@ check("the heading's create button links to that route rather than spawning",
 check("the catch-all group's create button is refused with a reason",
       /const joinable = row\.value && row\.value !== "\(no mesh\)"/.test(src) &&
       /add\.setAttribute\("aria-disabled", "true"\)/.test(src), true);
-check("the refused create button keeps its pointer events, like the +",
+check("the refused create button keeps its pointer events for its tooltip",
       /#session-list \.session-group-new\.disabled\s*\{/.test(css) &&
       !/add\.disabled = true/.test(src), true);
 check("the create button is drawn and styled",
@@ -340,13 +257,8 @@ check("headings carry the bottom half of the stack too",
 check("a shut group hides its rows",
       /#session-list \.session-group\.collapsed > \.session-group-body\s*\{[^}]*display:\s*none/
         .test(css), true);
-check("the refused + keeps its pointer events so its reason can be read",
-      /#session-list \.session-group-plus\.disabled\s*\{/.test(css) &&
-      /plus\.setAttribute\("aria-disabled", "true"\)/.test(src) &&
-      !/plus\.disabled = true/.test(src.slice(src.indexOf("meshGroupSpawnTarget(row.value)"),
-                                              src.indexOf("const collapsed ="))), true);
-check("the heading opens the same modal the leader's own row + opens",
-      /openSpawnModal\(target\.name\)/.test(src), true);
+check("the mesh heading has no leader child spawn button or resolver",
+      !/session-group-plus|meshGroupSpawnTarget|meshGroupLeader/.test(src + css), true);
 check("a fold re-measures the stack it just changed",
       /setSessionGroupCollapsed\(row\.group, row\.value, shut\)/.test(src) &&
       /paintFold\(shut\);/.test(src), true);
@@ -363,7 +275,7 @@ check("the jump moves the rail by the measured offset",
       true);
 check("every grouping gets a jump, not only mesh",
       src.indexOf("heading.appendChild(jump);") <
-      src.indexOf("meshGroupSpawnTarget(row.value)"), true);
+      src.indexOf('if (row.group === "mesh")'), true);
 check("the jump is styled as a heading control",
       /#session-list \.session-group-jump\s*\{/.test(css), true);
 

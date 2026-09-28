@@ -171,7 +171,6 @@ function terminalOnScreen() { return false; }
 function attach() {}
 function setStatusBadge() {}
 function reconcileKillUiState() {}
-function meshGroupSpawnTarget() { return { name: null, reason: "no leader" }; }
 function openSpawnModal() {}
 function openDetail() {}
 function sessionWorkspaceLabel(v) { return v; }
