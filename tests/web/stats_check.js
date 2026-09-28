@@ -2,7 +2,10 @@
    or week buckets and its input sorted by origin. Slice the shipped
    functions out of app.js so this check covers the page the browser runs:
    the route, the endpoint it asks, the unit switch, the poll that speeds up
-   while the transcript is still being read, and what the page draws. */
+   while the transcript is still being read, and what the page draws. Then
+   compare mode (#/compare/<a,b,c>): the set it asks for, the figures table
+   with z-scores and ranks, the origin share bars, the shared timeline, and
+   the picker and mode switch that move between the two. */
 const fs = require("fs");
 const path = require("path");
 const root = path.join(__dirname, "..", "..");
@@ -45,7 +48,8 @@ function node(tag) {
   const n = {
     tag, kids: [], text: "", classes: new Set(), handlers: {},
     href: "", title: "", type: "", value: "", selected: false,
-    style: {}, dataset: {},
+    style: {}, dataset: {}, attrs: {},
+    setAttribute(k, v) { this.attrs[k] = String(v); },
     appendChild(c) { this.kids.push(c); return c; },
     append(...cs) { this.kids.push(...cs); },
     addEventListener(k, fn) { (this.handlers[k] ||= []).push(fn); },
@@ -87,6 +91,11 @@ let statsPageOpen = false;
 let statsSession = "";
 let statsUnit = "day";
 let statsSeq = 0;
+let statsCompare = null;
+let statsCompareCache = null;
+let statsLogScale = false;
+const STATS_COMPARE_MAX = 12;
+const document = { createElementNS: (_ns, tag) => el(tag) };
 let currentName = "s1";
 let sessionsCache = [{ name: "s1" }, { name: "s2" }];
 const location = { hash: "" };
@@ -102,7 +111,8 @@ function clearTimeout(t) { const i = timers.indexOf(t); if (i >= 0) timers.splic
 function setAnswer(next) { answer = next; }
 function state() {
   return { cache: statsCache, error: statsError, open: statsPageOpen,
-           session: statsSession, unit: statsUnit, hash: location.hash };
+           session: statsSession, unit: statsUnit, hash: location.hash,
+           compare: statsCompare, compareCache: statsCompareCache };
 }
 `;
 
@@ -112,11 +122,15 @@ new Function(
   stubs
   + constant("USAGE_PARTS") + constant("STATS_UNITS")
   + constant("STATS_CATEGORIES") + constant("STATS_METHOD")
+  + constant("STATS_PALETTE")
   + slice("usageShort")
   + ["openStatsPage", "stopStatsPoll", "statsDefaultSession", "statsSchedule",
      "refreshStats", "statsPct", "statsBucketLabel", "statsCard", "statsChart",
      "statsBucketTable", "statsFigures", "statsSourceTable", "statsSenderTable",
-     "statsScroll", "statsSection", "statsControls", "renderStats", "parseHash"]
+     "statsScroll", "statsSection", "statsControls", "renderStats", "parseHash",
+     "refreshStatsCompare", "statsUnitTabs", "statsCompareHash", "statsValue",
+     "statsZ", "statsColor", "statsCompareChoices", "statsComparePicker", "statsCompareTable",
+     "statsShareBars", "statsTimelineChart", "renderStatsCompare"]
     .map(slice).join("\n")
   + `
 Object.assign(exports, {
@@ -262,6 +276,121 @@ const reading = {
   await ctx.refresh();
   check("a daemon without the endpoint is named as outdated",
         ctx.state().error.includes("predates the Stats page"), ctx.state());
+
+  // ---- compare mode ------------------------------------------------------
+  check("#/compare/<a,b> is the Stats page comparing those sessions",
+        JSON.stringify(ctx.parseHash("#/compare/s1,s%202")) ===
+          '{"page":"stats","name":"","compare":["s1","s 2"]}',
+        ctx.parseHash("#/compare/s1,s%202"));
+  const shares = (h, d) => ({ human: { messages: h, tokens: h, triggered: h },
+                              daemon: { messages: d, tokens: d, triggered: d },
+                              mesh: { messages: 0, tokens: 0, triggered: 0 },
+                              opening: { messages: 0, tokens: 0, triggered: 0 },
+                              harness: { messages: 0, tokens: 0, triggered: 0 } });
+  const compared = {
+    unit: "week", compared: ["s1", "s2"], reader: "worker",
+    sessions: [{ session: "s1", available: true }, { session: "s2", available: true },
+               { session: "old", available: false, reason: "no transcript found" }],
+    metrics: [
+      { key: "requests", label: "requests", kind: "count", values: [10, 30],
+        mean: 20, median: 20, stdev: 14.142, min: 10, max: 30,
+        z: [-0.7071, 0.7071], rank: [2, 1] },
+      { key: "machine_messages_share", label: "daemon + mesh input share",
+        kind: "share", values: [0.25, null], mean: 0.25, median: 0.25, stdev: null,
+        min: 0.25, max: 0.25, z: [null, null], rank: [1, null] },
+    ],
+    shares: [{ session: "s1", ...shares(0.75, 0.25) },
+             { session: "s2", ...shares(0.5, 0.5) }],
+    timeline: { starts: ["2026-09-14T00:00:00+09:00", "2026-09-21T00:00:00+09:00",
+                         "2026-09-28T00:00:00+09:00"],
+                series: [{ session: "s1", tokens: [100, 0, 50], requests: [1, 0, 1] },
+                         { session: "s2", tokens: [null, 200, 300], requests: [null, 2, 3] }] },
+  };
+  ctx.setAnswer({ ok: true, status: 200, body: compared });
+  ctx.open("", ["s1", "s2"]);
+  await tick();
+  check("compare mode asks the compare endpoint for the set and the unit",
+        fetched.at(-1) === "/api/stats/compare?sessions=s1,s2&unit=week", fetched.at(-1));
+  const table = withClass("stats-compare")[0];
+  check("the figures table has a row per figure and a column per session plus spread",
+        table && table.kids.length === 3 && table.kids[0].kids.length === 1 + 2 + 5,
+        table && table.kids.map((r) => r.kids.length));
+  const req = table.kids[1].kids;
+  check("a value carries its z-score and rank",
+        req[1].words().includes("10") && req[1].words().includes("−0.71 · #2") &&
+        req[2].words().includes("+0.71 · #1"), [req[1].words(), req[2].words()]);
+  check("the spread columns print mean, median, std dev, min, max",
+        req.slice(3).map((c) => c.text).join() === "20,20,14,10,30",
+        req.slice(3).map((c) => c.text));
+  const share = table.kids[2].kids;
+  check("a share prints as a percentage, a missing value and an undefined " +
+        "deviation as a dash",
+        share[1].words().includes("25.0%") && share[2].words().includes("–") &&
+        share[5].text === "–", share.map((c) => c.words()));
+  check("no z-score is drawn where the spread is undefined",
+        withClass("stats-z").length === 2, withClass("stats-z").length);
+  const segs = withClass("stats-share-seg");
+  check("origin bars: one segment per non-zero origin, as wide as its share",
+        segs.length === 8 && segs[0].style.width === "75.00%" &&
+        segs[1].style.width === "25.00%", segs.map((x) => x.style.width));
+  const lines = view.all().filter((n) => n.tag === "polyline");
+  check("the timeline draws a line per session and leaves the unread bucket out",
+        lines.length === 2 && lines[0].attrs.points.split(" ").length === 3 &&
+        lines[1].attrs.points.split(" ").length === 2,
+        lines.map((l) => l.attrs.points));
+  const heads = table.kids[0].kids.slice(1, 3).map((th) => th.style.color);
+  check("a session keeps one colour in the table and the lines",
+        heads[0] === lines[0].attrs.stroke && heads[1] === lines[1].attrs.stroke &&
+        heads[0] !== heads[1], [heads, lines.map((l) => l.attrs.stroke)]);
+  const flat = lines[0].attrs.points;
+  withClass("stats-log")[0].handlers.click[0]();
+  const logged = view.all().filter((n) => n.tag === "polyline")[0].attrs.points;
+  check("the log scale redraws the lines and says so",
+        logged !== flat && view.words().includes("log scale") &&
+        withClass("stats-log")[0].classes.has("active"), [flat, logged]);
+  withClass("stats-log")[0].handlers.click[0]();
+  check("a session with nothing to read is named with its reason",
+        view.words().includes("old: not compared — no transcript found"), view.words());
+  check("a finished comparison polls slowly",
+        timers.length === 1 && timers[0].ms === 30000, timers.map((t) => t.ms));
+
+  const picks = withClass("stats-pick");
+  check("the picker lists every session, the compared ones pressed",
+        picks.map((b) => b.text + ":" + b.attrs["aria-pressed"]).join() ===
+          "s1:true,s2:true", picks.map((b) => b.text));
+  picks[0].handlers.click[0]();
+  check("unpressing a session drops it from the link",
+        ctx.state().hash === "#/compare/s2", ctx.state().hash);
+  withClass("wf-btn").find((b) => b.dataset.mode === "one").handlers.click[0]();
+  check("One session goes to the first compared session's page",
+        ctx.state().hash === "#/stats/s1", ctx.state().hash);
+
+  ctx.setAnswer({ ok: true, status: 200, body: { ...compared, partial: true } });
+  ctx.open("", ["s1", "s2", "s3"]);
+  await tick();
+  check("a changed set is asked afresh, and a partial answer polls fast",
+        fetched.at(-1) === "/api/stats/compare?sessions=s1,s2,s3&unit=week" &&
+        timers.length === 1 && timers[0].ms === 2000,
+        [fetched.at(-1), timers.map((t) => t.ms)]);
+
+  const asked = fetched.length;
+  ctx.open("", []);
+  await tick();
+  check("an empty set asks nothing and says to pick",
+        fetched.length === asked && view.words().includes("pick sessions above"),
+        view.words());
+  check("the Compare button is the pressed one in compare mode",
+        withClass("wf-btn").find((b) => b.dataset.mode === "compare").classes.has("active"));
+
+  ctx.setAnswer({ ok: true, status: 200, body: reading });
+  ctx.open("s1");
+  await tick();
+  check("a one-session link leaves compare mode",
+        ctx.state().compare === null &&
+        fetched.at(-1) === "/api/sessions/s1/stats?unit=week", fetched.at(-1));
+  withClass("wf-btn").find((b) => b.dataset.mode === "compare").handlers.click[0]();
+  check("Compare starts from the session on screen",
+        ctx.state().hash === "#/compare/s1", ctx.state().hash);
 
   const before = fetched.length;
   ctx.stop();

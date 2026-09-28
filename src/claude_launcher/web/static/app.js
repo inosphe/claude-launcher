@@ -14982,6 +14982,11 @@ function parseHash(h) {
   if (parts[0] === "window") return { page: "window" };
   // #/stats opens on a default session; #/stats/<name> names one.
   if (parts[0] === "stats") return { page: "stats", name: parts[1] || "" };
+  // #/compare/<a,b,c>: the same page comparing sessions (names hold no comma).
+  if (parts[0] === "compare") {
+    return { page: "stats", name: "",
+      compare: (parts[1] || "").split(",").filter(Boolean) };
+  }
   // One page, one shell: nothing else about the CLI tab is addressable, so
   // anything past "#/cli" is still the same terminal.
   if (parts[0] === "cli") return { page: "cli" };
@@ -15076,7 +15081,7 @@ function route() {
     case "new": showView("new"); openNewSession(r.mesh); break;
     case "flows": openFlows(r.section); break;
     case "window": openWindowPage(); break;
-    case "stats": openStatsPage(r.name); break;
+    case "stats": openStatsPage(r.name, r.compare); break;
     case "cli": openCli(); break;
     case "settings": openSettings(r.section); break;
     case "beads": openBeads(r.id, r.section); break;
@@ -19170,6 +19175,11 @@ let statsPageOpen = false;
 let statsSession = "";
 let statsUnit = "day";
 let statsSeq = 0;
+let statsCompare = null;        // the compared names, or null in one-session mode
+let statsCompareCache = null;
+let statsLogScale = false;      // the compare timeline's y axis
+/* The API's own cap (statscompare.MAX_SESSIONS). */
+const STATS_COMPARE_MAX = 12;
 
 const STATS_UNITS = [["hour", "Hourly"], ["day", "Daily"], ["week", "Weekly"]];
 const STATS_CATEGORIES = [
@@ -19180,9 +19190,20 @@ const STATS_CATEGORIES = [
   ["harness", "harness", "task notifications, skill bodies, summaries"],
 ];
 
-function openStatsPage(name) {
+function openStatsPage(name, compare) {
   statsPageOpen = true;
-  if (name && name !== statsSession) { statsSession = name; statsCache = null; }
+  if (compare) {
+    const list = compare.slice(0, STATS_COMPARE_MAX);
+    if (!statsCompare || list.join(",") !== statsCompare.join(",")) {
+      statsCompare = list;
+      statsCompareCache = null;
+      statsError = "";
+    }
+  } else {
+    if (statsCompare) statsError = "";
+    statsCompare = null;
+    if (name && name !== statsSession) { statsSession = name; statsCache = null; }
+  }
   if (!statsSession) statsSession = statsDefaultSession();
   showView("stats");
   renderStats();
@@ -19211,6 +19232,7 @@ function statsSchedule(partial) {
 
 async function refreshStats() {
   if (!statsPageOpen) return;
+  if (statsCompare) return refreshStatsCompare();
   if (!statsSession) { statsSchedule(false); renderStats(); return; }
   const seq = ++statsSeq;
   const name = statsSession, unit = statsUnit;
@@ -19229,6 +19251,29 @@ async function refreshStats() {
     } else { statsCache = data; statsError = ""; }
   } catch { statsSchedule(false); return; }   // api() owns auth and recovery
   statsSchedule(!!(statsCache && statsCache.partial));
+  if (statsPageOpen) renderStats();
+}
+
+async function refreshStatsCompare() {
+  const names = statsCompare.slice();
+  if (!names.length) { statsSchedule(false); renderStats(); return; }
+  const seq = ++statsSeq;
+  const unit = statsUnit;
+  try {
+    const resp = await api(`/api/stats/compare?sessions=${
+      names.map(encodeURIComponent).join(",")}&unit=${unit}`);
+    if (seq !== statsSeq) return;   // the set or unit changed meanwhile
+    const data = await resp.json().catch(() => ({}));
+    if (resp.status === 404 && !data.error) {
+      statsError = "this daemon predates the compare mode — ask the operator " +
+        "to restart the daemon to pick up this version";
+      statsCompareCache = null;
+    } else if (!resp.ok) {
+      statsError = data.error || `HTTP ${resp.status}`;
+      statsCompareCache = null;
+    } else { statsCompareCache = data; statsError = ""; }
+  } catch { statsSchedule(false); return; }   // api() owns auth and recovery
+  statsSchedule(!!(statsCompareCache && statsCompareCache.partial));
   if (statsPageOpen) renderStats();
 }
 
@@ -19395,6 +19440,26 @@ function statsSection(title, count, body) {
 
 function statsControls() {
   const bar = el("div", "stats-controls");
+  const modes = el("div", "stats-units stats-modes");
+  for (const [mode, label] of [["one", "One session"], ["compare", "Compare"]]) {
+    const on = (mode === "compare") === !!statsCompare;
+    const b = el("button", "wf-btn clear" + (on ? " active" : ""), label);
+    b.type = "button";
+    b.dataset.mode = mode;
+    b.addEventListener("click", () => {
+      if (on) return;
+      location.hash = mode === "compare"
+        ? statsCompareHash(statsSession ? [statsSession] : [])
+        : `#/stats/${encodeURIComponent((statsCompare || [])[0] || statsSession)}`;
+    });
+    modes.appendChild(b);
+  }
+  bar.appendChild(modes);
+  if (statsCompare) {
+    bar.appendChild(statsUnitTabs());
+    bar.appendChild(statsComparePicker());
+    return bar;
+  }
   const pick = el("select", "stats-session");
   const names = (sessionsCache || []).map((s) => s.name).sort();
   if (statsSession && !names.includes(statsSession)) names.unshift(statsSession);
@@ -19409,6 +19474,11 @@ function statsControls() {
     location.hash = `#/stats/${encodeURIComponent(pick.value)}`;
   });
   bar.appendChild(pick);
+  bar.appendChild(statsUnitTabs());
+  return bar;
+}
+
+function statsUnitTabs() {
   const tabs = el("div", "stats-units");
   for (const [unit, label] of STATS_UNITS) {
     const b = el("button", "wf-btn clear" + (unit === statsUnit ? " active" : ""), label);
@@ -19418,13 +19488,13 @@ function statsControls() {
       if (statsUnit === unit) return;
       statsUnit = unit;
       statsCache = null;
+      statsCompareCache = null;
       renderStats();
       refreshStats();
     });
     tabs.appendChild(b);
   }
-  bar.appendChild(tabs);
-  return bar;
+  return tabs;
 }
 
 const STATS_METHOD = [
@@ -19443,6 +19513,247 @@ const STATS_METHOD = [
     "the totals and are credited like the parent's.",
 ];
 
+/* Compare mode (#/compare/<a,b,c>): several sessions side by side. One
+   fetch (/api/stats/compare) answers every figure for every session and,
+   per figure, its spread across them — mean, median, standard deviation —
+   with each session's z-score and rank (daemon/statscompare.py). The
+   statistics are descriptive: a handful of sessions is a small sample. */
+
+const STATS_PALETTE = ["#58a6ff", "#f78166", "#3fb950", "#d2a8ff", "#e3b341",
+  "#79c0ff", "#ff7b72", "#56d364", "#bc8cff", "#d29922", "#a5d6ff", "#ffa198"];
+
+function statsCompareHash(names) {
+  return "#/compare/" + names.map(encodeURIComponent).join(",");
+}
+
+/* One figure, printed the way its kind reads. */
+function statsValue(v, kind) {
+  if (v === null || v === undefined || !Number.isFinite(v)) return "–";
+  if (kind === "share") return statsPct(v);
+  if (kind === "tokens") return usageShort(Math.round(v));
+  if (kind === "ratio") return v.toFixed(1);
+  return Math.round(v).toLocaleString();
+}
+
+function statsZ(z) {
+  if (z === null || z === undefined || !Number.isFinite(z)) return "";
+  return (z >= 0 ? "+" : "−") + Math.abs(z).toFixed(2);
+}
+
+/* Session names to pick from: every known session, the compared ones first
+   in case the registry no longer has them. */
+function statsCompareChoices() {
+  const names = (sessionsCache || []).map((s) => s.name).sort();
+  for (const n of (statsCompare || []).slice().reverse()) {
+    if (!names.includes(n)) names.unshift(n);
+  }
+  return names;
+}
+
+/* A compared session's colour, by its place in the asked-for set, so the
+   picker, the table and the lines agree even when one of them could not be
+   read. */
+function statsColor(name) {
+  const i = Math.max(0, (statsCompare || []).indexOf(name));
+  return STATS_PALETTE[i % STATS_PALETTE.length];
+}
+
+function statsComparePicker() {
+  const box = el("div", "stats-picks");
+  const chosen = statsCompare || [];
+  for (const name of statsCompareChoices()) {
+    const on = chosen.includes(name);
+    const b = el("button", "stats-pick" + (on ? " active" : ""), name);
+    b.type = "button";
+    b.setAttribute("aria-pressed", on ? "true" : "false");
+    if (on) b.style.borderColor = statsColor(name);
+    b.addEventListener("click", () => {
+      const next = on ? chosen.filter((n) => n !== name) : chosen.concat([name]);
+      if (next.length > STATS_COMPARE_MAX) return;
+      location.hash = statsCompareHash(next);
+    });
+    box.appendChild(b);
+  }
+  return box;
+}
+
+/* Rows = figures; a column per session (value, z-score, rank), then the
+   figure's spread across the sessions. */
+function statsCompareTable(d) {
+  const table = el("table", "stats-table stats-compare");
+  const head = el("tr");
+  head.appendChild(el("th", null, "figure"));
+  d.compared.forEach((name) => {
+    const th = el("th", "stats-compare-name", name);
+    th.style.color = statsColor(name);
+    head.appendChild(th);
+  });
+  for (const h of ["mean", "median", "std dev", "min", "max"]) {
+    head.appendChild(el("th", "stats-spread", h));
+  }
+  table.appendChild(head);
+  for (const m of d.metrics || []) {
+    const row = el("tr");
+    row.appendChild(el("td", null, m.label));
+    (m.values || []).forEach((v, i) => {
+      const td = el("td", "num");
+      td.appendChild(el("span", null, statsValue(v, m.kind)));
+      const z = (m.z || [])[i];
+      if (z !== null && z !== undefined) {
+        const mark = el("span", "stats-z" + (z >= 1 ? " high" : z <= -1 ? " low" : ""),
+          `${statsZ(z)} · #${m.rank[i]}`);
+        mark.title = "z-score against the compared sessions, and rank (1 = largest)";
+        td.appendChild(mark);
+      }
+      row.appendChild(td);
+    });
+    for (const k of ["mean", "median", "stdev", "min", "max"]) {
+      row.appendChild(el("td", "num stats-spread",
+        k === "stdev" && m.kind === "share" && Number.isFinite(m[k])
+          ? `${(m[k] * 100).toFixed(1)} pt` : statsValue(m[k], m.kind)));
+    }
+    table.appendChild(row);
+  }
+  return table;
+}
+
+/* A bar per session, split by the share of each input origin: once by count
+   of inputs, once by the tokens of the turns they started. */
+function statsShareBars(d) {
+  const box = el("div", "stats-shares");
+  for (const [field, title] of [["messages", "inputs, by count"],
+    ["triggered", "triggered tokens, by the input that started the turn"]]) {
+    box.appendChild(el("h4", "stats-shares-title", title));
+    for (const row of d.shares || []) {
+      const line = el("div", "stats-share-row");
+      line.appendChild(el("span", "stats-share-name", row.session));
+      const bar = el("div", "stats-share-bar");
+      for (const [key, label] of STATS_CATEGORIES) {
+        const v = ((row[key] || {})[field]) || 0;
+        if (v <= 0) continue;
+        const seg = el("span", `stats-share-seg stats-origin-${key}`);
+        seg.style.width = `${(v * 100).toFixed(2)}%`;
+        seg.title = `${label}: ${statsPct(v)}`;
+        bar.appendChild(seg);
+      }
+      line.appendChild(bar);
+      box.appendChild(line);
+    }
+  }
+  const legend = el("div", "usage-legend");
+  for (const [key, label] of STATS_CATEGORIES) {
+    const item = el("span", "usage-legend-item");
+    item.append(el("span", `usage-swatch stats-origin-${key}`), el("span", null, label));
+    legend.appendChild(item);
+  }
+  box.appendChild(legend);
+  return box;
+}
+
+/* One line per session over the shared buckets; a gap where a session's
+   own reading does not reach. On a log scale (log10 of 1 + tokens) a
+   session a hundred times busier than the rest no longer flattens them. */
+function statsTimelineChart(t, unit) {
+  const starts = t.starts || [];
+  const W = 640, H = 160, P = 4;
+  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
+  svg.setAttribute("preserveAspectRatio", "none");
+  svg.setAttribute("class", "stats-lines");
+  const peak = Math.max(1, ...(t.series || []).flatMap((s) =>
+    s.tokens.filter((v) => Number.isFinite(v))));
+  const scale = statsLogScale ? (v) => Math.log10(1 + v) : (v) => v;
+  const top = scale(peak);
+  const x = (i) => starts.length < 2 ? W / 2 : P + (i * (W - 2 * P)) / (starts.length - 1);
+  const y = (v) => H - P - (scale(v) / top) * (H - 2 * P);
+  (t.series || []).forEach((s) => {
+    let points = [];
+    const flush = () => {
+      if (!points.length) return;
+      const line = document.createElementNS("http://www.w3.org/2000/svg", "polyline");
+      line.setAttribute("points", points.join(" "));
+      line.setAttribute("fill", "none");
+      line.setAttribute("stroke", statsColor(s.session));
+      line.setAttribute("stroke-width", "2");
+      line.setAttribute("vector-effect", "non-scaling-stroke");
+      svg.appendChild(line);
+      points = [];
+    };
+    s.tokens.forEach((v, i) => {
+      if (Number.isFinite(v)) points.push(`${x(i).toFixed(1)},${y(v).toFixed(1)}`);
+      else flush();
+    });
+    flush();
+  });
+  const box = el("div", "stats-lines-box");
+  const toggle = el("button", "wf-btn clear stats-log" + (statsLogScale ? " active" : ""),
+    "log scale");
+  toggle.type = "button";
+  toggle.setAttribute("aria-pressed", statsLogScale ? "true" : "false");
+  toggle.addEventListener("click", () => { statsLogScale = !statsLogScale; renderStats(); });
+  box.appendChild(toggle);
+  box.appendChild(svg);
+  if (starts.length) {
+    const axis = el("div", "stats-lines-axis");
+    axis.appendChild(el("span", null, statsBucketLabel(starts[0], unit)));
+    axis.appendChild(el("span", null,
+      `peak ${usageShort(peak)} per ${unit}${statsLogScale ? ", log scale" : ""}`));
+    axis.appendChild(el("span", null, statsBucketLabel(starts[starts.length - 1], unit)));
+    box.appendChild(axis);
+  }
+  const legend = el("div", "usage-legend");
+  (t.series || []).forEach((s) => {
+    const item = el("span", "usage-legend-item");
+    const sw = el("span", "usage-swatch");
+    sw.style.background = statsColor(s.session);
+    item.append(sw, el("span", null, s.session));
+    legend.appendChild(item);
+  });
+  box.appendChild(legend);
+  return box;
+}
+
+function renderStatsCompare(view) {
+  const names = statsCompare || [];
+  view.appendChild(el("p", "wf-note",
+    "Several sessions' current conversations side by side. For each figure: " +
+    "every session's value, its z-score (how far it sits from the others' " +
+    "mean, in standard deviations) and rank, and the spread across the set. " +
+    "Descriptive only: no difference is tested for significance."));
+  if (statsError) view.appendChild(el("p", "wf-warning", statsError));
+  if (!names.length) {
+    view.appendChild(el("p", "wf-note", "pick sessions above to compare"));
+    return;
+  }
+  const d = statsCompareCache;
+  if (!d) {
+    if (!statsError) view.appendChild(el("p", "wf-note", "loading…"));
+    return;
+  }
+  if (d.partial) {
+    view.appendChild(el("p", "wf-note stats-partial",
+      "still reading: some transcripts are being read in the background, and " +
+      "the figures will grow"));
+  }
+  const missing = (d.sessions || []).filter((s) => !s.available);
+  for (const s of missing) {
+    view.appendChild(el("p", "wf-note",
+      `${s.session}: not compared — ${s.reason || "unavailable"}`));
+  }
+  if (!(d.compared || []).length) return;
+  if (d.compared.length < 2) {
+    view.appendChild(el("p", "wf-note",
+      "one session has no spread: add another for z-scores and deviation"));
+  }
+  view.appendChild(statsSection("Figures", d.compared.length,
+    statsScroll(statsCompareTable(d))));
+  view.appendChild(statsSection("Input origin shares", null, statsShareBars(d)));
+  const unit = d.unit || statsUnit;
+  view.appendChild(statsSection(`Tokens by ${unit}`,
+    (d.timeline && d.timeline.starts || []).length,
+    statsTimelineChart(d.timeline || {}, unit)));
+}
+
 function renderStats() {
   const view = $("stats-view");
   if (!view) return;
@@ -19451,11 +19762,13 @@ function renderStats() {
   head.appendChild(el("h2", null, "Session statistics"));
   const back = el("button", "wf-btn clear", "Back");
   back.addEventListener("click", () => {
-    location.hash = statsSession ? `#/s/${encodeURIComponent(statsSession)}` : "#";
+    const target = statsCompare ? (statsCompare[0] || "") : statsSession;
+    location.hash = target ? `#/s/${encodeURIComponent(target)}` : "#";
   });
   head.appendChild(back);
   view.appendChild(head);
   view.appendChild(statsControls());
+  if (statsCompare) { renderStatsCompare(view); return; }
   view.appendChild(el("p", "wf-note",
     "Token usage of one session's current conversation over time, read from " +
     "its transcript, and the origin of every input it received. Buckets use " +
