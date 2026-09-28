@@ -4435,6 +4435,20 @@ async function refreshSessions(options) {
   if (typeof renderSessionGrid === "function") renderSessionGrid();
 }
 
+/* Every role a roster row holds — the primary first, then its subroles —
+   and the roster's one-word spelling of them (`leader+reviewer`). A row from
+   a daemon that predates subroles carries no `roles` and reads as its
+   primary alone. */
+function memberRoles(m) {
+  const held = m && Array.isArray(m.roles) && m.roles.length
+    ? m.roles : [(m && m.role) || ""];
+  return held.filter(Boolean);
+}
+
+function memberRoleLabel(m) {
+  return memberRoles(m).join("+");
+}
+
 /* The meshes a rail row speaks for — the rooms that session is in.
 
    Derived from the mesh poll rather than the session poll: /api/sessions
@@ -26489,9 +26503,18 @@ function renderSession(data) {
       "this session is a copy of that session's conversation, marked 'forked " +
       "from here'; merge sends its wrap-up back there"
     );
+    // The memberships are where a role lives now (a new session's definition
+    // carries none), so they answer first: every role held, per mesh. The
+    // definition's role is the fallback for a legacy record in no mesh.
+    const heldIn = (data.meshes || [])
+      .map((m) => `${memberRoleLabel(m)} (in ${m.mesh})`);
     metaRow(
-      dl, "role", data.role ? data.role.name : (s.role || "free-role"),
-      data.role ? data.role.stance : ""
+      dl, "role",
+      heldIn.length ? heldIn.join(", ")
+        : (data.role ? data.role.name : (s.role || "free-role")),
+      heldIn.length
+        ? "change these under Meshes → Roles"
+        : (data.role ? data.role.stance : "")
     );
     // Beside the role, because the two are one fact between them: what this
     // session is on a mesh, and what it is called there. Spelt out as a row
@@ -26626,11 +26649,15 @@ function renderSession(data) {
       meshBox.appendChild(el("p", "wf-note", "not a member of any mesh"));
     }
     for (const m of meshes) {
-      const chip = el("a", "sess-mesh", `${m.mesh} · ${m.handle} (${m.role})`);
+      const chip = el("a", "sess-mesh", `${m.mesh} · ${m.handle} (${memberRoleLabel(m)})`);
       chip.href = "#/mesh/" + encodeURIComponent(m.mesh);
       chip.title = `${m.members} member(s); joined ${(m.joined_at || "").replace("T", " ")}`;
       meshBox.appendChild(chip);
     }
+    // One role editor per membership, under the chips that name them: the
+    // roles are a property of each membership, and a session in two meshes
+    // may hold different ones in each.
+    for (const m of meshes) meshBox.appendChild(sessRoleEditor(data, m));
     // The chips above say which rooms this session is in; this reads what was
     // actually said in them, as a sequence. Only offered when there is a room:
     // a session in no mesh has no traffic to draw, and the note above already
@@ -26846,6 +26873,166 @@ function sessMeshJoin(data) {
 
   sessJoinBox.append(row, btn, status);
   return box;
+}
+
+/* The role editor of one membership: its primary role and its subroles.
+
+   Built once per (session, mesh, handle) and moved into each repaint, like the
+   join form above: the panel repaints every two seconds, and a choice half
+   made must survive that. A kept editor is rebuilt only when the roster's
+   roles for it moved AND the reader has not touched it — someone else's edit
+   then shows, and a pending edit of the reader's is never thrown away.
+
+   Apply sends one PATCH of the whole set. The daemon types the member a notice
+   of the change, with the new role's stance when the primary moved, so what
+   the reader picks here is what the session is told it now is. */
+const sessRoleEditors = new Map();
+
+function sessRoleEditor(data, m) {
+  const s = data.session || {};
+  const key = `${s.name || ""}|${m.mesh}|${m.handle}`;
+  const current = [m.role || "", ...(m.subroles || [])].join(",");
+  const kept = sessRoleEditors.get(key);
+  if (kept && (kept.dirty || kept.baseline === current)) return kept.node;
+
+  const node = el("details", "sess-role-edit");
+  if (kept && kept.node.open) node.open = true;
+  const state = { node, baseline: current, dirty: false };
+  sessRoleEditors.set(key, state);
+  node.appendChild(el(
+    "summary", null, `Roles in ${m.mesh}: ${memberRoleLabel(m)}`
+  ));
+  if (s.status === "exited") {
+    node.appendChild(el(
+      "p", "wf-note", "this session has exited — its roles can no longer change"
+    ));
+    return node;
+  }
+
+  const body = el("div", "sess-role-edit-body");
+  node.appendChild(body);
+  const primaryRow = el("label", "sess-role-edit-primary");
+  primaryRow.appendChild(el("span", null, "primary"));
+  const primary = document.createElement("select");
+  primary.title =
+    "what this member IS on the mesh: its stance, and the role the roster " +
+    "names first";
+  primaryRow.appendChild(primary);
+  const subs = el("div", "sess-role-edit-subs");
+  subs.title =
+    "further roles it answers for: a workflow or a peer looking one of these " +
+    "up finds this member too";
+  const status = el("p", "wf-note hidden");
+  const btn = el("button", "wf-btn approve", "Apply roles");
+  btn.disabled = true;
+  body.append(
+    primaryRow, el("span", "sess-role-edit-label", "subroles"), subs, btn, status
+  );
+  const say = (msg, cls) => {
+    status.className = cls || "wf-note";
+    status.textContent = msg;
+  };
+
+  let vocab = [];
+  const chosen = () => ({
+    role: primary.value,
+    subroles: [...subs.querySelectorAll("input:checked")]
+      .map((i) => i.value).filter((r) => r !== primary.value),
+  });
+  const touched = () => {
+    const pick = chosen();
+    state.dirty = [pick.role, ...pick.subroles].join(",") !== state.baseline;
+    btn.disabled = !state.dirty;
+  };
+  const drawSubs = () => {
+    // Redrawn when the primary moves: the new primary leaves the list, the
+    // old one joins it unticked, and every other tick is carried over.
+    const held = new Set(
+      subs.childElementCount ? chosen().subroles : (m.subroles || [])
+    );
+    subs.innerHTML = "";
+    for (const r of vocab) {
+      if (r.name === primary.value) continue;
+      const lab = el("label", "sess-role-edit-sub");
+      const box = document.createElement("input");
+      box.type = "checkbox";
+      box.value = r.name;
+      box.checked = held.has(r.name);
+      box.addEventListener("change", touched);
+      lab.title = (r.stance || "").slice(0, 300);
+      lab.append(box, document.createTextNode(
+        r.exclusive ? `${r.name} (exclusive)` : r.name
+      ));
+      subs.appendChild(lab);
+    }
+  };
+  primary.addEventListener("change", () => { drawSubs(); touched(); });
+
+  (async () => {
+    let doc = null;
+    try {
+      const resp = await api(`/api/mesh/${encodeURIComponent(m.mesh)}/roles`);
+      doc = resp.ok ? await resp.json().catch(() => null) : null;
+    } catch { doc = null; }
+    vocab = ((doc && doc.roles) || []).filter((r) => r && r.name);
+    if (!vocab.length) {
+      say("could not read this mesh's roles — nothing can be picked", "wf-warning");
+      return;
+    }
+    // A role the member holds that the vocabulary has since dropped is still
+    // offered, so opening the editor never silently strips it.
+    for (const r of [m.role, ...(m.subroles || [])]) {
+      if (r && !vocab.some((v) => v.name === r)) vocab.push({ name: r, stance: "" });
+    }
+    for (const r of vocab) {
+      const opt = document.createElement("option");
+      opt.value = r.name;
+      opt.textContent = r.exclusive ? `${r.name} (exclusive)` : r.name;
+      if (r.name === m.role) opt.selected = true;
+      primary.appendChild(opt);
+    }
+    drawSubs();
+  })();
+
+  btn.addEventListener("click", async () => {
+    if (btn.disabled) return;
+    const pick = chosen();
+    btn.disabled = true;
+    say("applying…");
+    let resp;
+    let doc = {};
+    try {
+      resp = await api(
+        `/api/mesh/${encodeURIComponent(m.mesh)}/members/` +
+        `${encodeURIComponent(m.handle)}/roles`,
+        {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ role: pick.role, set: pick.subroles }),
+        },
+      );
+      doc = await resp.json().catch(() => ({}));
+    } catch {
+      btn.disabled = false;
+      say("could not reach the daemon — nothing was changed", "wf-warning");
+      return;
+    }
+    if (!resp.ok) {
+      btn.disabled = false;
+      say(doc.error || `HTTP ${resp.status}`, "wf-warning");
+      return;
+    }
+    // Settled: the next repaint may replace this editor with one drawn from
+    // the roster, which now says what was just applied.
+    const now = [doc.role || pick.role, ...(doc.subroles || [])];
+    state.baseline = now.join(",");
+    state.dirty = false;
+    say(`now ${now.filter(Boolean).join("+")} — the session was sent a ` +
+      "notice of the change");
+    refreshMeshList();
+    refreshSession();
+  });
+  return node;
 }
 
 /* Durable history for the native session-line control.  This is separate
@@ -31545,7 +31732,7 @@ function renderTopology(info) {
     ));
     const owed = m.owed ? `${m.owed} unanswered` : null;
     g.appendChild(svg("title", {}, [
-      `${m.handle} (${m.role})`, m.session, m.reachability,
+      `${m.handle} (${memberRoleLabel(m)})`, m.session, m.reachability,
       m.parent ? `spawned by ${m.parent}` : "not spawned by a member",
       owed,
     ].filter(Boolean).join(" · ")));
@@ -31623,7 +31810,7 @@ function renderWiring(info) {
   blank.value = "";
   pick.appendChild(blank);
   for (const m of members) {
-    const opt = el("option", null, `${m.handle} (${m.role})`);
+    const opt = el("option", null, `${m.handle} (${memberRoleLabel(m)})`);
     opt.value = m.handle;
     if (m.handle === meshFocus) opt.selected = true;
     pick.appendChild(opt);
@@ -31716,7 +31903,7 @@ function renderWiring(info) {
     linkDot.title = (typeof meshDotTitle === "function" ? meshDotTitle(m) : "") || m.reachability || "";
     row.appendChild(linkDot);
     row.appendChild(el("span", "mesh-handle", m.handle));
-    row.appendChild(el("span", "mesh-role", m.role));
+    row.appendChild(el("span", "mesh-role", memberRoleLabel(m)));
     // Lineage, where there is any. Cutting the edge along a spawn is the one
     // disconnect with a second consequence: the briefing a child was given
     // tells it to report to its parent, and a report it cannot send is a run
@@ -32029,7 +32216,7 @@ function renderMesh(info, history, force, owed, historyPage) {
       + (category === "paused" ? " paused" : "") + (typeof meshDotGrade === "function" ? meshDotGrade(m) : ""));
     dot.title = (typeof meshDotTitle === "function" ? meshDotTitle(m) : "") || m.reachability || "";
     const name = el("span", "mesh-handle", m.handle);
-    const role = el("span", "mesh-role", m.role);
+    const role = el("span", "mesh-role", memberRoleLabel(m));
     const machineLabel = m.machine || (isMirror ? info.primary : "");
     const where = el(
       "span", "mesh-session mono",
@@ -32803,7 +32990,11 @@ function renderMeshRoles(info) {
   ));
   const chips = el("div", "mesh-role-chips");
   const held = {};
-  for (const m of info.members || []) held[m.role] = (held[m.role] || 0) + 1;
+  for (const m of info.members || []) {
+    // Every role a member holds counts toward that role's chip: a leader
+    // holding `reviewer` is one of the reviewers a lookup finds.
+    for (const r of memberRoles(m)) held[r] = (held[r] || 0) + 1;
+  }
   for (const name of roles.names || []) {
     const chip = el("span", "mesh-role-chip", `${name} · ${held[name] || 0}`);
     if (held[name]) chip.classList.add("held");
@@ -33242,7 +33433,7 @@ function flowCardSvg(member, f, wf, m) {
     ));
   }
   g.appendChild(svg("title", {}, [
-    `${member.handle} (${member.role})`,
+    `${member.handle} (${memberRoleLabel(member)})`,
     member.session,
     wfName ? `workflow ${wfName}` : "no workflow run",
     flowStateWord(state, f),
@@ -33441,7 +33632,7 @@ function flowWaitingRow(member, f) {
   who.addEventListener("click", () => {
     location.hash = "#/s/" + encodeURIComponent(f.session || member.session);
   });
-  row.append(who, el("span", "mesh-role", member.role));
+  row.append(who, el("span", "mesh-role", memberRoleLabel(member)));
   row.appendChild(el("span", "flow-waiting-what",
     f.gate || f.prompt || `step ${f.step_id || "?"}`));
   const act = el("span", "flow-waiting-acts");
@@ -33476,7 +33667,7 @@ function flowWaitingRow(member, f) {
 function flowDetail(info, member, f, wf) {
   const box = el("div", "flow-detail");
   const head = el("div", "flow-detail-head");
-  head.appendChild(el("h3", null, `${member.handle} · ${member.role}`));
+  head.appendChild(el("h3", null, `${member.handle} · ${memberRoleLabel(member)}`));
   const close = el("button", "wf-btn clear", "Close");
   close.addEventListener("click", () => {
     flowPick = null;
