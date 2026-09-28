@@ -18940,6 +18940,7 @@ function sessBeads(data) {
   open.title = "the Beads page, filtered to this session";
   open.addEventListener("click", () => {
     beadsSession = s.name || "";
+    beadsWorkspace = b.root || "";
     go("#/beads");
   });
   box.appendChild(open);
@@ -19006,6 +19007,7 @@ function sessBeadsPanel(data) {
   open.title = "the Beads page, filtered to this session";
   open.addEventListener("click", () => {
     beadsSession = s.name || "";
+    beadsWorkspace = b.root || "";
     go("#/beads");
   });
   box.appendChild(open);

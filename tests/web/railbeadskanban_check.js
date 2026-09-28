@@ -94,6 +94,7 @@ function el(tag, cls, text) {
 const stubs = `
 let beadsFocus = "";
 let beadsSession = "";
+let beadsWorkspace = "";
 const went = [];
 function go(h) { went.push(h); }
 const created = [];
