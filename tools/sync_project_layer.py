@@ -68,6 +68,8 @@ STEP_RE = re.compile(r"^  ([A-Za-z0-9_.-]+):\s*$")
 GRAFT_FIELDS = ("verify", "awaits")
 GRAFT_RE = re.compile(r"^    (?:" + "|".join(GRAFT_FIELDS) + r"):")
 COMMENT_RE = re.compile(r"^    #")
+#: A grafted field's own line, capturing its name.
+FIELD_NAME_RE = re.compile(r"^    (" + "|".join(GRAFT_FIELDS) + r"):")
 NEXT_RE = re.compile(r"^    next:")
 #: A continuation of a grafted field: indented deeper than the field itself.
 CONTINUATION_RE = re.compile(r"^     +\S")
@@ -143,10 +145,22 @@ def graft(bundled_text: str, blocks: Dict[str, List[str]]) -> str:
     The packaged copy may already end a step with a one-line pointer comment
     ("the verify lives in the project layer"); a block that begins with the
     same lines replaces them rather than stacking on top.
+
+    A grafted field REPLACES the packaged step's field of the same name. The
+    packaged copy may spell a generic form of the field — ``awaits: {sub:
+    stack, at: cut}``, whose command is a bare ``claunch cflow published``
+    — and the project layer the same field with this repository's probe;
+    two ``awaits:`` keys in one step would leave the answer to whichever the
+    YAML loader keeps.
     """
     pending = dict(blocks)
+    replaced = {
+        step_id: {m.group(1) for line in block if (m := FIELD_NAME_RE.match(line))}
+        for step_id, block in blocks.items()
+    }
     out: List[str] = []
     step = None
+    dropping = False
 
     def close(step_id) -> None:
         """Place a block for a step that had no ``next:`` to hang it on."""
@@ -168,10 +182,22 @@ def graft(bundled_text: str, blocks: Dict[str, List[str]]) -> str:
         out[end:end] = block
 
     for line in bundled_text.splitlines(keepends=True):
+        if dropping:
+            if CONTINUATION_RE.match(line):
+                continue
+            dropping = False
         m = STEP_RE.match(line)
         if m:
             close(step)
             step = m.group(1)
+        f = FIELD_NAME_RE.match(line)
+        if f and f.group(1) in replaced.get(step, ()):
+            # The comment run directly above a field is that field's (the
+            # rule field_blocks reads by); the grafted block carries its own.
+            while out and COMMENT_RE.match(out[-1]):
+                out.pop()
+            dropping = True
+            continue
         if NEXT_RE.match(line) and step in pending:
             block = pending.pop(step)
             k = len(out)

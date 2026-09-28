@@ -758,7 +758,7 @@ def test_the_worker_work_step_points_at_found_issue_and_waits_on_its_sub_runs():
     # the wait itself is this repository's probe, grafted by the project layer
     project = model.load(ROOT / ".claunch" / "workflows" / "improv-worker.yaml")
     probe = project.steps["work"].awaits.command(project.steps["work"])
-    assert probe == "uv run --no-sync python tools/sub_done.py --all"
+    assert probe == "uv run --no-sync python tools/sub_done.py --all --except stack"
 
 
 def test_a_found_issue_sub_run_walks_its_branches(proj):

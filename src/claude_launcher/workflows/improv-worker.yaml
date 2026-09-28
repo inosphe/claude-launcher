@@ -59,6 +59,20 @@ default_role: worker
 # 자식에게 런을 주고 싶지 않으면 spawn에 workflow: '-'를 댄다.
 default_child_cflow: improv-worker
 
+# 자식 스택과 만나는 두 스텝(stack-cut, stack-merge)은 스택이 선 세션에서만
+# 돈다. 두 스텝은 `skip: true`로 선언돼 있고, work 스텝에서 첫 자식을 spawn하며
+# stack 서브 런을 세운 에이전트가 두 값을 false로 쓴다(set_state). 자식이 없는
+# 세션의 회차에는 두 스텝이 나타나지 않는다. 다시 true로 쓰는 것은 stack이
+# 봉인(seal)된 뒤뿐이다 — 스택이 도는 동안 건너뛰면 착지한 자식이 부모의
+# 착지에 실리지 않는다.
+editable:
+  steps.stack-cut.skip:
+    by: [agent]
+    describe: 이 세션에 자식 스택(stack 서브 런)이 없다 — 컷 요청을 건너뛴다
+  steps.stack-merge.skip:
+    by: [agent]
+    describe: 이 세션에 자식 스택(stack 서브 런)이 없다 — 컷 머지를 건너뛴다
+
 steps:
   intake:
     title: 목표 수립
@@ -219,7 +233,8 @@ steps:
       --external-ref에 run id; 터미널 사용자 직접 지시는 open에서 시작할 수 있음) /
       in_ready→open은 리더(규격·우선순위 재검토 필요) /
       in_progress→in_review는 assignee 워커
-      (landing request) / in_review→in_progress는 리더(rebase·재측정 재요청) /
+      (landing request) / in_review→in_progress는 리더(rebase·재측정 재요청)
+      또는 요청을 철회하는 assignee 워커(`WITHDRAWN @ <tip>` 코멘트와 함께) /
       in_review→closed는 assignee 세션이다 — 누가 배정했든 그 이슈를 끝까지
       관리하는 것은 assignee다. assignee 세션이 종료돼도 in_ready는 검토 결과를 유지하고,
       다음 adoption이 종료된 assignee를 교체한다. 닫는 자리는 wrapup 하나, 닫을 자격은 landed가
@@ -403,9 +418,12 @@ steps:
       목표 요지>"`로 참가만 한다.
       고를 것이 없으면 지어내지 않는다: 「후보 없음」과 그 근거를 보고에
       적고 이슈 없이 오프닝 태스크만 가지고 진행한다.
-      메시에 속해 있으면 무엇을 잡았는지 이슈 id와 함께 리더에게 fyi로
-      남긴다 — 리더가 배정하지 않은 이슈를 이 세션이 가져간 것이므로,
-      그 사실이 리더에게 닿지 않으면 같은 이슈가 두 번 배정된다.
+      메시에 속해 있으면 무엇을 잡았는지 이슈 id와 함께 상위 세션(나를
+      스폰한 부모, 부모가 없으면 리더)에게 fyi로 남긴다 — 상위가 배정하지
+      않은 이슈를 이 세션이 가져간 것이므로, 그 사실이 상위에게 닿지 않으면
+      같은 이슈가 두 번 배정된다. 부모가 워커면(stack 자식) 리더에게 따로
+      보내지 않는다: 이 브랜치를 올리는 것은 부모이고, 리더는 부모의 착지
+      요청에서 이 이슈를 본다.
     done_when: |
       고른 이슈 id 하나와 그 판정 근거(상태·assignee·그 세션의 생존
       여부·take인가 join인가), 잡기 명령의 결과(take면 in_progress 전이,
@@ -499,8 +517,8 @@ steps:
       세션의 것이므로 하지 않는다.
       그 이슈의 본문과 이번 목표가 정확히 같지 않으면 본문을 덮지 말고 이
       회차가 맡는 범위를 코멘트로 남긴다.
-      메시에 속해 있으면 목표 요지를 이슈 id와 함께 리더에게 fyi로 남긴다
-      (intake에서 미뤄 둔 그 fyi다).
+      메시에 속해 있으면 목표 요지를 이슈 id와 함께 상위 세션(부모, 부모가
+      없으면 리더)에게 fyi로 남긴다(intake에서 미뤄 둔 그 fyi다).
     done_when: |
       확정된 이슈 id가 보고에 있고, assignee가 자신이면 in_progress 전이가
       함께 기록되어 있다(join이면 JOINED 코멘트와 참가 사실).
@@ -517,8 +535,8 @@ steps:
       $CLAUNCH_SESSION이 마지막.
       만든 뒤 `claunch beads update <id> --status in_progress --external-ref
       <run id>`로 회차를 시작 상태로 만든다.
-      메시에 속해 있으면 목표 요지를 이슈 id와 함께 리더에게 fyi로 남긴다
-      (intake에서 미뤄 둔 그 fyi다).
+      메시에 속해 있으면 목표 요지를 이슈 id와 함께 상위 세션(부모, 부모가
+      없으면 리더)에게 fyi로 남긴다(intake에서 미뤄 둔 그 fyi다).
     done_when: |
       새 이슈 id가 보고에 있고, in_progress 전이와 external-ref가 함께
       기록되어 있다.
@@ -770,7 +788,8 @@ steps:
       sub-done --all`, 0 = 도는 서브 런 없음). 판정·이슈 id·자식 세션은
       서브 런의 저널에 남고, 아래 보고에는 그 id들만 옮겨 적는다. 이
       스텝을 떠나기 전에 세운 서브 런은 전부 끝나 있어야 한다 — wrapup의
-      생성 이슈 정산이 그 판정을 읽는다.
+      생성 이슈 정산이 그 판정을 읽는다. (stack 서브 런은 예외다 — 세션
+      수명이라 이 스텝의 대기에서 빠진다.)
 
       ── 발견 즉시 가르는 것 하나: 위임(child) ──
       만든 이슈가 다음 넷을 전부 만족하면 지금 자식 세션에 넘긴다 — spawn
@@ -782,12 +801,27 @@ steps:
       생성 이슈 정산이 self/spawn/pool로 가른다. 위임을 일찍 정하는 이유는
       병렬 시간이고, 직접 처리를 늦게 정하는 이유는 그것이 다음 회차의
       일이기 때문이다.
-      자식의 태스크에 반드시 적는 세 줄: **기준 브랜치 = 내 브랜치 @
-      <tip>, 통합 대상 = 그 브랜치(master 아님 — 내 commit 스텝이 --no-ff로
-      모은다), 완료 보고·착지 요청 수신자 = 나**. intake의 스택 절은 중간
-      워커(improv-mid)를 부모로 상정해 쓰여 있어, 일반 워커의 자식은 이 세
-      줄이 없으면 master를 대상으로 읽는다. 스폰은 `worktree: <내 세션>-
-      <요지>`와 `rebase_onto: <내 브랜치>`로 내 브랜치 위에 자른다.
+
+      ── 자식을 두면: stack 서브 런 ──
+      자식(하위 워커)의 브랜치는 내 회차 브랜치에 직접 모으지 않고, 세션
+      수명의 스택 브랜치 `<내 세션>-stack`에 모은다. 그 관제는 `stack`
+      정의의 서브 런이 맡는다(improv-mid를 대체한다). **첫 자식을 spawn할
+      때 한 번** 세운다: cflow `start` 툴에 `workflow: stack`, `sub: stack`,
+      `inputs: {issue: <이 회차 이슈 id>, base: <내 회차 브랜치의 지금
+      tip>}`. 그리고 `set_state`로 `steps.stack-cut.skip`과
+      `steps.stack-merge.skip`을 false로 쓴다 — 그래야 이 런이 착지 전에
+      컷을 요청하고 받는다. 이미 서 있으면(`claunch cflow sub-done stack`이
+      1) 다시 세우지 않는다. 자식 spawn의 세부(기준 브랜치, task의 세 줄,
+      rebase_onto)는 stack 런의 open 스텝이 적고, 자식의 요청 심사·착지는
+      그 런의 standby·land가 한다 — 그 런의 호출에는 `run: stack`을 준다.
+      두 런이 만나는 자리는 마일스톤이다: 이 런의 stack-cut이 컷을
+      요청하고(cut-wanted), stack-merge가 컷(cut)을 기다려 스택 브랜치를
+      --no-ff로 한 번 머지하며, integration-request와 landed가 제출(frozen)과
+      착지(landed)를 알린다.
+      자식의 태스크에 반드시 적는 세 줄: **기준 브랜치 = `<내 세션>-stack`
+      @ <tip>, 통합 대상 = 그 브랜치(master도 내 회차 브랜치도 아님),
+      완료 보고·착지 요청 수신자 = 나**. 스폰은 `worktree: <내 세션>-
+      <요지>`와 `rebase_onto: <내 세션>-stack`으로 스택 위에 자른다.
       보고에는 바꾼 파일과 접근 방식 요지, 발견 이슈 id, 위임한 자식
       (세션·이슈 id)을 남긴다.
     done_when: |
@@ -798,7 +832,8 @@ steps:
     # 이 스텝에서 세운 found-issue 서브 런이 끝나면 데몬이 알린다 — 그
     # awaits는 프로젝트 레이어가 접붙인다(이 저장소의 게이트 규칙: 명령은
     # 이 체크아웃의 tools/ 스크립트를 uv run으로 부른다). 다른 저장소는
-    # `awaits: {sub: all}`로 같은 것을 적는다(claunch cflow sub-done --all).
+    # `awaits: {probe: 'claunch cflow sub-done --all --except stack'}`로 같은
+    # 것을 적는다 — 세션 수명의 stack 서브 런은 이 대기에서 빠진다.
 
     # 회차의 목표·범위·브랜치가 여기서 처음 전부 서 있다. 대시보드의 세션
     # 요약을 여기서 다시 쓰게 해 두면, 밖에서 보는 사람이 읽는 답이 이번
@@ -1278,20 +1313,15 @@ steps:
       두 경우 모두 접지 않은 이유를 보고에 적는다. 회차가 여러 번 도는
       워크트리에서는 워크트리 브랜치가 여러 목표가 쌓인 곳이 되므로,
       무관한 목표를 한 갈래에 얹지 않는 것이 상한 규칙보다 우선한다.
-      하위 워커를 둔 회차면 완료 보고가 온 자식 브랜치를 각각 자신의
-      워크트리 브랜치에 --no-ff로 머지해 모은다 — 자식 하나당 머지 커밋
-      하나, fast-forward로 뭉개지 않아 브랜치 이력이 트리 구조로 남게
-      한다(자식이 손자 브랜치를 같은 방식으로 모았으면 그 트리가 통째로
-      실린다). 아직 작업 중인 자식 브랜치는 모으지 않고 그 사실을 보고에
-      남긴다 — 그리고 그 자식이 고아가 되지 않게 착지 요청 전에 리더에게
-      adopt(reparent) ask를 보낸다: 내가 착지·종료하면 자식의 통합
-      대상(내 브랜치)은 동결·은퇴 상태가 되고, reparent는 리더의 스킬
-      (mesh-retopology)이라 워커는 요청만 할 수 있다. 그 자식의 세션·이슈
-      id는 증거 묶음의 심사 한계에 적는다(settle-check가 같은 것을 다시
-      본다). 단, 리더가 mesh-delegate로 세운 전담 중간 워커는 이
-      워크플로가 아니라 improv-mid로 돌며 자식 착지는 거기 스택 착지
-      절차(순서·restack 공지 포함)가 맡는다 — 여기 규칙은 한 회차 안에서
-      스스로 자식을 둔 워커의 것이다.
+      하위 워커를 둔 회차면 자식 브랜치를 여기서 모으지 않는다 — 자식은
+      stack 서브 런이 스택 브랜치 `<세션>-stack`에 착지시키고, 이 회차에는
+      착지 전에 stack-merge가 컷 하나를 --no-ff로 한 번 싣는다(work의
+      「자식을 두면」 절). 자식이 손자 브랜치를 같은 방식으로 모았으면 그
+      트리가 통째로 실린다. 아직 작업 중인 자식은 컷에서 다음 착지로
+      넘어가고 이 세션에 그대로 남는다 — 그래서 착지 요청 전에 리더에게
+      adopt(reparent)를 청하지 않는다. 자식이 남았는데 세션이 끝나야 할
+      때만(settle-check) 리더에게 adopt ask를 보낸다. reparent는 리더의
+      스킬(mesh-retopology)이라 워커는 요청만 할 수 있다.
       master는 어떤 경우에도 머지 대상이 아니다(머지는 리더 전권).
       그리고 완료 보고를 만든다: 목표, 브랜치, 기능 커밋·머지 커밋 해시,
       테스트 수치. 이 묶음이 가는 곳은 이슈 코멘트다 —
@@ -1355,7 +1385,7 @@ steps:
           next: item-intake
         drained:
           description: 큐가 비었거나 배치 상한·무관 일감으로 여기서 끊는다 — 배치 전체를 착지 절차로 넘긴다
-          next: landing
+          next: stack-cut
 
   item-intake:
     title: 다음 일감 착수
@@ -1375,6 +1405,63 @@ steps:
       다음 일감의 id가 in_progress로 전이됐고(--external-ref에 run id),
       배치 순번·범위·완료 증거 기준이 보고에 있다.
     next: work
+
+  stack-cut:
+    title: 컷 요청 (자식 스택에서 이번 착지에 실을 것을 받는다)
+    # 자식 스택(stack 서브 런)이 선 세션에서만 돈다 — 기본은 건너뛰기이고,
+    # work에서 stack을 세운 에이전트가 false로 쓴다(editable). 이 스텝은
+    # 요청만 한다: 떠날 때 cut-wanted가 게시되고, stack 런이 그것을 보고
+    # 컷을 낸다. 받는 것은 다음 스텝이다 — 게시는 스텝을 떠날 때 일어나므로
+    # 한 스텝이 게시와 그 답의 대기를 함께 할 수 없다.
+    skip: true
+    instructions: |
+      이번 착지에 자식 스택을 싣는다. 이 스텝을 떠나면 stack 런에 컷
+      요청(cut-wanted)이 게시된다. 컷 규칙은 stack 런이 지킨다: 착지를 이미
+      요청한 자식은 기다리고, 작업 중인 자식은 다음 컷으로 넘긴다. 작업
+      중인 자식을 이번 착지에 싣는 것은 사용자가 지시했을 때만이다 —
+      그런 지시가 있으면 그 자식과 지시의 출처를 보고에 적는다(stack 런의
+      standby가 그 자식의 착지까지 컷을 미룬다).
+      지금 스택 표의 상태(요청됨·작업 중 자식 수)를 보고에 적는다.
+    done_when: |
+      컷 요청 시점의 스택 tip과 자식별 상태(요청됨·작업 중), 사용자가
+      포함을 지시한 자식이 있으면 그 지시의 출처가 보고에 있다.
+    publishes: [cut-wanted]
+    next: stack-merge
+
+  stack-merge:
+    title: 컷 머지 (스택 브랜치 -> 내 회차 브랜치, --no-ff 1회)
+    # 컷(cut)이 게시될 때까지 이 자리에서 기다린다 — stack 런이 먼저
+    # 착지를 요청한 자식들을 스택에 싣고 컷을 낸다. 대기는 개수로 센다:
+    # 이 스텝을 떠날 때 본 cut 게시 횟수가 기록되고, 다음 착지에서는 그
+    # 뒤의 컷만 새 것이다. 양쪽이 서로를 기다리면 데몬이 교착 통지를
+    # 한 번 보낸다(engine.sync_deadlock).
+    skip: true
+    instructions: |
+      stack 런이 컷을 냈다. 이 회차 이슈의 `CUT <n> @ <컷 tip>` 코멘트를
+      읽고, 내 회차 워크트리에서 컷 tip을 한 번 머지한다:
+        git merge --no-ff <컷 tip> -m "merge: <세션>-stack cut <n>"
+      컷 tip이 이미 내 브랜치의 조상이면(실린 것이 없는 컷) 머지하지 않고
+      그 사실을 적는다. 머지 뒤 바꾼 영역의 표적 테스트를 돌린다(review
+      절과 같은 창·표기). 이 머지 커밋은 착지 요청의 증거 묶음에 「어느
+      자식이 어떤 머지로 실렸는가」의 트리로 들어간다.
+      스택 머지는 컷 하나당 이 한 번뿐이다 — 자식 브랜치를 내 회차
+      브랜치에 하나씩 직접 머지하지 않는다.
+    done_when: |
+      컷 번호와 컷 tip, 만든 머지 커밋 해시(또는 실린 것이 없어 머지하지
+      않았다는 사실), 실린 자식(세션·이슈·스택 머지 해시)과 표적 테스트
+      수치가 보고에 있다.
+    # 대기(awaits)는 떠나는 것을 막지 않는다. 컷이 오기 전에 이 스텝을
+    # 떠나면 그때의 게시 횟수가 소비로 적히고, 늦게 온 이번 컷은 다음
+    # 착지에서 「새 것」으로 읽힌다 — 소비가 한 회차 어긋난다(s763 리뷰,
+    # claunch-u8wjx.2). 그래서 같은 질문을 verify로도 건다: 새 컷이 없으면
+    # 이 스텝을 떠날 수 없다. verify는 이동 전에 돌므로 소비 기록은 아직
+    # 옛 값이다.
+    verify: 'claunch cflow published stack cut --step stack-merge'
+    awaits:
+      sub: stack
+      at: cut
+      describe: 자식 스택이 이번 착지의 컷을 냈다
+    next: landing
 
   landing:
     title: 착지 결정 (깨끗하면 스스로 요청한다)
@@ -1663,6 +1750,13 @@ steps:
       --no-ff로 이미 실린 커밋은 upstream에 있으므로 rebase가 건너뛰고 내
       커밋만 다시 얹힌다. 재확인 후 요청을 이미 올렸으면 갱신된 묶음으로
       재요청하고, 아직이면 새 기준 tip을 보고에 적어 둔다.
+
+      ── 스택 컷을 실은 브랜치 ──
+      이 회차 브랜치에 stack-merge의 머지 커밋이 있으면 재정렬은 `git
+      rebase --rebase-merges <대상>`으로 한다. 옵션 없는 rebase는 머지
+      커밋을 펼쳐 자식들의 커밋을 한 줄로 늘어놓는다 — 트리가 사라지고,
+      stack 런이 착지 뒤 스택을 옮길 때 기준으로 쓰는 컷 tip도 더는 이
+      브랜치에서 찾을 수 없다.
     done_when: |
       tools/merge_ready.py가 ready(0)라고 답하고, 그 답에 이르기까지 한
       일이 보고에 있다: 처음부터 ready였으면 그 사실 한 줄, 충돌이었으면
@@ -1877,11 +1971,18 @@ steps:
         근거를 못 읽었으면 추측하지 말고 abstain으로 넘긴다. 기권은 다음
         그룹으로 넘어가고, 아무도 답하지 않으면 리뷰 없이 통과한다 — 그
         경우 방어선은 리더의 통합 후 전체 스윕이다.
+      # 리뷰어 그룹들 다음은 직속 부모다(부모가 워커인 편성 — stack 자식). 부모는
+      # 뒤에서 이 브랜치를 스택에 착지시키며 심사할 세션이라 판정을 그
+      # 심사에 다시 쓸 수 있고, 스폰 배선이 부모와만 있으므로 리더 그룹이
+      # 배선 부재로 skip되는 손자 세션에서도 닿는다. 평면 편성(부모가 리더)
+      # 에서는 이 그룹이 아무도 못 맞춰 skip되고 리더 그룹이 받는다.
+      # (사용자 결정 2026-09-24, claunch-u8wjx.2)
       chooser:
         from:
           - {role: reviewer, scope: descendant}
           - {role: reviewer, scope: sibling, connect: true}
           - {role: reviewer, scope: ancestor}
+          - {role: worker, scope: ancestor}
           - {role: leader, scope: ancestor}
           - {role: leader, scope: sibling}
         otherwise: self:pass
@@ -1985,6 +2086,10 @@ steps:
       - briefing
       - do: enqueue-landing
         at: leave
+    # 자식 스택이 있으면 stack 런이 이 게시를 보고 컷에 실린 자식들에게
+    # 「부모 브랜치로 통합 요청됐다」를 알린다(stack.submitted). 스택이
+    # 없으면 아무도 읽지 않는다.
+    publishes: [frozen]
     next: await-landing
 
   await-landing:
@@ -2036,7 +2141,10 @@ steps:
           그것도 답이므로 계속 기다리지 않는다. rebase·remeasure와 섞지
           마라 — 그 둘은 「고쳐서 다시 올려라」이고, declined는 「이 요청은
           여기서 끝났다」다.
-        · 넷 다 아니면 nudge. 답이 아직 없다는 것 자체가 상태이고, 이
+        · 이쪽 사정으로 요청을 거둬야 하면 reopen — 사용자가 넘어간 자식을
+          이번 착지에 싣으라고 지시했거나, 상위가 머지하기 전에 이 브랜치에
+          더 실어야 할 것이 생겼다. 상위의 답을 기다리는 갈래가 아니다.
+        · 다섯 다 아니면 nudge. 답이 아직 없다는 것 자체가 상태이고, 이
           스텝의 기본 동작이다.
 
         ── 답이 없을 때: nudge ──
@@ -2108,6 +2216,40 @@ steps:
         declined:
           description: 상위가 이 회차에 싣지 않기로 했다(HOLD / CHANGES REQUESTED) — 거절을 정산하고 사용자 승인을 거쳐 재작업으로
           next: landing-declined
+        # 요청을 낸 쪽이 스스로 거두는 갈래. 상위의 답(rebase·remeasure·
+        # declined)이 아니라 이쪽의 사정이다: 사용자가 넘어간 자식을 이번
+        # 착지에 싣으라고 지시했거나, 상위가 머지하기 전에 이 브랜치에 더
+        # 실어야 할 것이 생겼다. 전에는 선언된 길이 없어 사람의 goto로
+        # work에 되돌렸다(s733). chooser는 agent다(사용자 결정 2026-09-24,
+        # claunch-u8wjx) — 철회는 일을 늘리는 쪽이라 일을 건너뛰는 경로가
+        # 되지 않는다.
+        reopen:
+          description: 요청을 철회하고 브랜치를 다시 연다(넘어간 자식을 싣거나 더 실을 것이 생겼다) — 철회를 정산한 뒤 작업으로
+          next: landing-withdraw
+
+  landing-withdraw:
+    title: 착지 요청 철회 (브랜치를 다시 연다)
+    instructions: |
+      착지 요청을 스스로 거둔다. 상위가 이미 머지를 시작했을 수 있으므로
+      순서가 중요하다:
+      1. 상위의 표를 먼저 본다 — `claunch beads comments <id>`에 `merged
+         <해시>`가 있거나 landed 판정(`tools/landed_check.py`)이 0이면
+         철회할 것이 없다. 그 사실을 보고에 적고 사람에게 알린다(`claunch
+         cflow goto await-landing`으로 돌아가 landed를 고르는 것은 사람의
+         몫이다).
+      2. 이슈(배치면 실린 이슈 전부)를 `claunch beads update <id> --status
+         in_progress`로 되돌리고 `WITHDRAWN @ <tip>: <이유>` 코멘트를
+         남긴다 — 이유는 사용자 지시(원문 인용)나 더 실을 것의 id다.
+      3. 상위에게 nudge 한 줄: `<id> WITHDRAWN @ <tip> — 다시 요청한다`.
+         상위의 착지 큐 항목은 재요청 때 같은 이슈의 tip으로 갱신된다.
+      4. 브랜치 동결을 해제한다.
+      넘어간 자식을 싣는 철회면, 다음 착지의 stack-cut에서 그 자식을
+      포함 대상으로 적는다(컷 규칙: 사용자 지시가 있을 때만 포함).
+    done_when: |
+      철회한 이슈 id와 tip, `WITHDRAWN @ <tip>` 코멘트, 상위에 보낸 nudge의
+      메시지 id, 철회 이유(사용자 지시 원문 또는 더 실을 것의 id)가 보고에
+      있다. 이미 머지돼 철회하지 않았으면 그 사실과 머지 해시가 있다.
+    next: work
 
   landing-nudge:
     title: 착지 재촉 (대기 자리로 되돌아온다)
@@ -2392,6 +2534,10 @@ steps:
     triggers:
       - do: checks
         at: leave
+    # 데몬이 이 게이트를 열어 런을 옮기는 순간 게시된다 — 자식 스택이
+    # 있으면 stack 런이 이것을 보고 스택을 새 master 위로 옮긴다
+    # (stack.restack). 사람의 goto로 떠나면 게시되지 않는다.
+    publishes: [landed]
 
   wrapup:
     title: 회차 마감·정리
@@ -2787,12 +2933,71 @@ steps:
         backlog에 쌓이는 원래의 결함이 그대로 돌아온다.
         그 밖에 모호하면 done이다 — 세션 하나가 더 뜨는 쪽이, 규격 없는
         일감에 회차 하나가 도는 쪽보다 싸다.
+        · 착수할 일감은 없지만 stack 서브 런이 서 있고 살아 있는 스택
+          자식이 있으면(`claunch cflow sub-done stack`이 1, `children`에
+          살아 있는 role worker 자식) **stack-round**다 — 컷에서 넘어간
+          자식의 작업이 이 세션의
+          다음 착지다. done으로 끝내면 그 자식들의 통합 대상이 사라진다.
+          next-round가 있으면 next-round가 먼저다: 그 회차의 착지에도
+          stack-cut이 컷을 받는다.
+          스택 자식은 role이 worker인 자식만 센다. reviewer-ensure가 세운
+          자식 리뷰어(role reviewer)는 런이 끝날 때까지 살아 있으므로, 그것을
+          세면 stack-round의 release가 영영 서지 않는다.
+        · done은 stack이 없거나, 살아 있는 스택 자식이 없을 때다 — stack이
+          서 있으면 done을 고르기 전에 stack 런에서 seal을 고른다.
       options:
         next-round:
           description: 배정 큐가 남았다 — 같은 런 안에서 intake로 돌아가 다음 회차(새 목표·새 브랜치·새 착지)를 시작한다
           next: intake
+        stack-round:
+          description: 배정 큐는 비었지만 자식 스택에 넘어간 자식이 남았다 — 자기 코드 없이 스택만 싣는 위임 전용 회차로 간다
+          next: stack-round
         done:
           description: 큐가 비었거나 남은 것이 전부 착수 불가다(풀에 되돌렸다) — 생성 이슈 정산 확인으로 간다
+          next: settle-check
+
+  stack-round:
+    title: 위임 전용 회차 (넘어간 자식만 남았다)
+    # improv-mid가 맡던 자리다. 배정 큐가 비었는데 자식이 아직 작업 중이면,
+    # 이 세션의 다음 착지는 자기 코드가 아니라 그 자식들의 스택이다. 전에는
+    # 이 경우 회차를 열 길이 없었다: intake -> work -> commit이 커밋을
+    # 요구하므로 커밋 0 회차는 착지로 갈 수 없었다(claunch-4iw7과 같은
+    # 공백). 이 스텝은 commit을 거치지 않고 stack-cut으로 간다.
+    # chooser: agent인 이유 — 판정 재료가 전부 git과 보드에 있고, 두 갈래
+    # 모두 일을 건너뛰지 않는다(cut은 착지 절차 전체, release는
+    # settle-check의 게이트).
+    select:
+      chooser: agent
+      require_reason: true
+      prompt: |
+        이 세션에 배정된 일감은 없고, stack 서브 런에 넘어간 자식(작업 중)이
+        남아 있다. 이 회차는 자기 코드 없이 스택만 착지시킨다. 처음
+        들어왔으면 준비한다(다시 들어온 것이면 이미 있다):
+        (1) 회차 이슈: `claunch beads create "stack round: <자식 이슈
+            id들>" --priority 2 --labels handoff --parent <스택을 연 회차
+            이슈> --description "<규격>"` 후 `update <id> --assignee
+            $CLAUNCH_SESSION --status in_progress --external-ref <run id>`.
+            이 이슈가 착지 요청의 주 이슈이고 `CUT` 코멘트가 붙는 자리다.
+        (2) 회차 브랜치: master에서 `<세션>-stack-round-<n>`을 자른다
+            (intake의 branch-setup과 같은 규칙).
+        고를 것:
+        · **cut** — 마지막 컷 뒤 스택 브랜치에 착지한 것이 있거나(`git
+          rev-list --count <마지막 컷 tip>..<세션>-stack`이 1 이상), 착지를
+          요청한 자식이 있다(컷 규칙이 그 자식을 기다린다). stack-cut으로
+          간다.
+        · **release** — 살아 있는 스택 자식(role worker; 자식 리뷰어는
+          세지 않는다)이 없고 컷 안 된 착지도 없다. stack
+          런에서 seal을 고른 뒤 이 갈래로 간다. 회차 이슈를 만들었으면
+          `HOLD: stack round 착지할 것 없음` 코멘트를 남긴다.
+        · 둘 다 아니면 고르지 않고 머문다 — 자식의 착지 요청이 이 세션을
+          깨운다.
+        무엇을 보고 골랐는지(자식별 상태, rev-list 값)를 reason에 적는다.
+      options:
+        cut:
+          description: 스택에 실을 것이 생겼다(또는 요청한 자식이 있다) — 컷 요청으로
+          next: stack-cut
+        release:
+          description: 자식도 실을 것도 없다 — stack을 봉인했고 세션 정산으로
           next: settle-check
 
   settle-check:
@@ -2832,16 +3037,20 @@ steps:
         끝낸다 — 세션의 종료는 자식에게 번지지 않고(자식은 한 단계 위로
         올라가 살아남는다), 남겨 두면 아래 판정이 그것을 adopt 안 된
         자식으로 센다. 한 일을 reason에 적는다.
+        stack 서브 런이 아직 서 있으면(`claunch cflow sub-done stack`이 1)
+        미정산이다 — 살아 있는 스택 자식이 있으면 queue-recheck가 stack-round를
+        냈어야 했고, 없으면 stack 런에서 seal을 먼저 고른다. stack 없이
         살아 있는 자식(`children`)이 있고 리더의 adopt(reparent)가
-        확인되지 않으면 그것도 미정산이다 — commit 단계에서 adopt ask를
-        보냈으면 그 답을 `claunch cflow asks`나 mesh 기록에서 확인한다.
+        확인되지 않으면 그것도 미정산이다 — 그 adopt ask는 자식을 남긴 채
+        세션이 끝나야 할 때 여기서 보내고, 답은 `claunch cflow asks`나 mesh
+        기록에서 확인한다.
         무엇을 확인해 무엇이 나왔는지(이슈마다 판정, 자식 유무)를
         reason에 적는다.
         모호하면 unsettled다 — 리더에게 한 번 더 묻는 쪽이, 유실된 채
         세션이 사라지는 쪽보다 싸다.
       options:
         settled:
-          description: 생성 이슈 전부 정산됐고 살아 있는 자식도 없다(또는 adopt 완료) — 세션 종료 승인으로 간다
+          description: 생성 이슈 전부 정산됐고 stack은 봉인됐으며 살아 있는 자식도 없다(또는 adopt 완료) — 세션 종료 승인으로 간다
           next: end-gate
         unsettled:
           description: 미정산 항목이 있다 — 상위(리더)에게 정산을 요청하고 대기한다

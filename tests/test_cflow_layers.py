@@ -201,6 +201,17 @@ def test_the_improv_workflows_carry_no_repo_specific_verify():
     for name in ("improv-worker", "improv-leader", "improv-mid"):
         wf = model.load(bundled[name])
         for step_id, step in wf.steps.items():
+            if (
+                step.verify is not None and step.awaits is not None
+                and step.awaits.milestone is not None
+                and step.verify.command == step.awaits.command(step)
+            ):
+                # The one exception: a verify that asks exactly what the
+                # step's own milestone await asks (`claunch cflow published`)
+                # is claunch's question, the same in every repository — it
+                # stops the run leaving before the milestone arrives
+                # (stack-merge, claunch-u8wjx.2).
+                continue
             assert step.verify is None, (
                 f"{name}:{step_id} carries a verify — repo-specific commands "
                 "belong in the project layer"
@@ -301,6 +312,8 @@ PEER_REVIEW_ORDER = [
     ("reviewer", model.SCOPE_DESCENDANT, False),
     ("reviewer", model.SCOPE_SIBLING, True),
     ("reviewer", model.SCOPE_ANCESTOR, False),
+    # a worker parent (a stack child) before the leader (claunch-u8wjx.2)
+    ("worker", model.SCOPE_ANCESTOR, False),
     ("leader", model.SCOPE_ANCESTOR, False),
     ("leader", model.SCOPE_SIBLING, False),
 ]
@@ -1494,9 +1507,11 @@ def test_both_worker_layers_know_their_place_on_a_stack():
         assert "restack" in rebase and "upstream에 있으므로" in rebase
         request = wf.steps["integration-request"].instructions
         assert "merge-tree" in request and "improv-mid" in request
-        # the general nested-merge rule survives for a worker that spawned
-        # helpers of its own; the dedicated nested worker is sent elsewhere
-        assert "improv-mid" in wf.steps["commit"].instructions
+        # a worker that spawned children of its own no longer merges them
+        # at commit: the stack sub run lands them and stack-merge takes one
+        # cut per landing (claunch-u8wjx.2)
+        commit = wf.steps["commit"].instructions
+        assert "stack-merge" in commit and "adopt(reparent)를 청하지 않는다" in commit
 
 
 def test_both_leader_layers_route_a_crowded_area_through_improv_mid():

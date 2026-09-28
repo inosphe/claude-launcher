@@ -574,7 +574,8 @@ def test_the_shared_block_defines_the_queue_and_the_batch():
 
 @pytest.mark.parametrize("layer", ["bundled", "project"])
 def test_the_worker_loops_over_its_queue_before_it_lands(layer):
-    """commit -> queue-next -> (item-intake -> work ...)* -> landing.
+    """commit -> queue-next -> (item-intake -> work ...)* -> stack-cut -> landing
+    (stack-cut and stack-merge are skipped unless a stack sub run stands).
 
     The loop is closed by a select whose material is the board (one listing),
     whose ``next`` branch requires an issue to transition, and whose
@@ -590,7 +591,7 @@ def test_the_worker_loops_over_its_queue_before_it_lands(layer):
     assert gate.select is not None and gate.select.chooser == "agent"
     assert gate.select.require_reason is True
     assert {k: o.next for k, o in gate.select.options.items()} == {
-        "next": "item-intake", "drained": "landing",
+        "next": "item-intake", "drained": "stack-cut",
     }
     prompt = " ".join(gate.select.prompt.split())
     assert "--assignee $CLAUNCH_SESSION --status open --status in_ready --limit 0 --json" in prompt
@@ -669,7 +670,7 @@ def test_the_worker_rechecks_its_queue_after_landing_and_loops(layer):
     assert gate.select is not None and gate.select.chooser == "agent"
     assert gate.select.require_reason is True
     assert {k: o.next for k, o in gate.select.options.items()} == {
-        "next-round": "intake", "done": "settle-check",
+        "next-round": "intake", "done": "settle-check", "stack-round": "stack-round",
     }
     prompt = " ".join(gate.select.prompt.split())
     assert "--assignee $CLAUNCH_SESSION --status open --status in_ready --status in_progress --limit 0 --json" in prompt

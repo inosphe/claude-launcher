@@ -21,6 +21,10 @@ What this file pins:
 from __future__ import annotations
 
 import argparse
+import os
+import subprocess
+import sys
+from pathlib import Path
 
 import pytest
 
@@ -132,6 +136,25 @@ def test_publishes_and_milestone_awaits_parse():
     assert listed.steps["a"].publishes == ("p", "q")
 
 
+def test_a_milestone_await_may_name_its_own_probe():
+    """The repository picks the command; the milestone still names what is
+    consumed on the way out."""
+    sub = model.parse(
+        "kind: subflow\nsteps:\n  a:\n    instructions: x\n"
+        "    awaits: {main: m, probe: 'twin main m --step a'}\n"
+    )
+    a = sub.steps["a"]
+    assert (a.awaits.milestone, a.awaits.command(a)) == ("m", "twin main m --step a")
+    main = model.parse(
+        "steps:\n  a:\n    instructions: x\n"
+        "    awaits: {sub: s, at: m, probe: 'twin s m --step a'}\n"
+    )
+    a = main.steps["a"]
+    assert (a.awaits.sub, a.awaits.milestone, a.awaits.command(a)) == ("s", "m", "twin s m --step a")
+    with pytest.raises(model.WorkflowError, match="not both"):
+        model.parse("steps:\n  a:\n    instructions: x\n    awaits: {sub: s, probe: 'x'}\n")
+
+
 @pytest.mark.parametrize(
     "text, refused",
     [
@@ -140,8 +163,8 @@ def test_publishes_and_milestone_awaits_parse():
         # a milestone belongs to one named sub run
         ("steps:\n  a:\n    instructions: x\n    awaits: {sub: all, at: m}\n", "name the run"),
         ("steps:\n  a:\n    instructions: x\n    awaits: {at: m}\n", "give the run as 'sub'"),
-        ("kind: subflow\nsteps:\n  a:\n    instructions: x\n    awaits: {main: m, probe: 'true'}\n",
-         "takes neither"),
+        ("kind: subflow\nsteps:\n  a:\n    instructions: x\n    awaits: {main: m, sub: s}\n",
+         "takes no 'sub'"),
         ("steps:\n  a:\n    instructions: x\n    publishes: 'a b'\n", "milestone name"),
         ("steps:\n  a:\n    instructions: x\n    publishes: [p, p]\n", "twice"),
         # still one level: a sub run does not wait on another sub run
@@ -257,6 +280,54 @@ def test_cli_published_answers_with_exit_codes(proj, capsys, monkeypatch):
     assert "not running" in out and "new" in out
 
 
+PUBLISHED = Path(__file__).resolve().parents[1] / "tools" / "published.py"
+SUB_DONE = Path(__file__).resolve().parents[1] / "tools" / "sub_done.py"
+
+
+def _tool(script, where, *args, run=None):
+    env = {k: v for k, v in os.environ.items() if k != state_mod.RUN_ENV}
+    env[state_mod.SESSION_ENV] = "s1"
+    if run:
+        env[state_mod.RUN_ENV] = run
+    return subprocess.run(
+        [sys.executable, str(script), *args], cwd=str(where), env=env,
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
+    ).returncode
+
+
+def _engine_code(source, milestone, step, run=None):
+    view = engine.published(source, milestone, step=step, run=run)
+    return 2 if not view["stands"] else (0 if view["new"] else 1)
+
+
+def test_the_gate_twin_answers_as_the_engine_does(proj):
+    """tools/published.py is this repository's probe for a milestone await
+    (the project layer names it); it must read the same two fields."""
+    engine.start("main")
+    asks = [("stack", "cut", "land", None), ("main", "cut-wanted", "standby", "stack")]
+    assert _tool(PUBLISHED, proj, "stack", "cut", "--step", "land") == 2
+    engine.start("stack", run="stack")
+    below = proj / "deeper"
+    below.mkdir()
+    for moves in ([], [None, None], ["stack", "stack"], [None]):
+        for run in moves:
+            _step(run=run)
+        for source, milestone, step, run in asks:
+            want = _engine_code(source, milestone, step, run)
+            got = _tool(PUBLISHED, below, source, milestone, "--step", step, run=run)
+            assert got == want, (moves, source, milestone)
+    assert _tool(PUBLISHED, proj, "stack", "cut", "-t", "nobody") == 2
+
+
+def test_sub_done_all_may_leave_a_session_long_sub_run_out(proj, capsys):
+    engine.start("main")
+    engine.start("stack", run="stack")
+    assert cli_cflow._cmd_sub_done(_ns(name=None, all=True)) == 1
+    assert cli_cflow._cmd_sub_done(_ns(name=None, all=True, excluded=["stack"])) == 0
+    assert _tool(SUB_DONE, proj, "--all") == 1
+    assert _tool(SUB_DONE, proj, "--all", "--except", "stack") == 0
+
+
 def test_probe_env_names_the_asking_run(monkeypatch):
     monkeypatch.setenv(state_mod.RUN_ENV, "leaked")
     assert engine.probe_env("s1", run="stack")[state_mod.RUN_ENV] == "stack"
@@ -294,6 +365,44 @@ def test_the_mcp_tools_that_take_a_run_advertise_it(proj):
     moved = mcp.call_tool("landing_queue", {"run": "stack", "issue": "x-1", "status": "rejected"})
     assert moved["status"] == "landing_marked"
     assert not mcp.call_tool("landing_queue", {}).get("landing_queue")  # main holds none
+
+
+RESETTING = """
+name: resetting
+kind: subflow
+landing_queue: {target: base, reset_at: cut}
+steps:
+  hold:
+    instructions: hold
+    next: cut
+  cut:
+    instructions: cut
+    select:
+      prompt: again?
+      chooser: agent
+      options:
+        again: {description: again, next: hold}
+        seal: {description: stop}
+"""
+
+
+def test_reset_at_empties_the_settled_entries_at_each_cut(proj):
+    """A session-long sub run never reaches `end` between rounds, so the
+    declared step is its round boundary (s763's review note on claunch-u8wjx.1)."""
+    (proj / ".claunch" / "workflows" / "resetting.yaml").write_text(RESETTING, encoding="utf-8")
+    with pytest.raises(model.WorkflowError, match="not a step"):
+        model.parse(RESETTING.replace("reset_at: cut", "reset_at: nowhere"))
+    engine.start("main")
+    engine.start("resetting", run="stack")
+    engine.enqueue_landing(["x-1", "x-2"], "w1-f", "0" * 40, by="w1", run="stack")
+    engine.mark_landing("x-1", "rejected", by="s1", run="stack")
+    _step(run="stack")                      # hold -> cut: not the boundary
+    queued = {e["issue"] for e in engine.status(run="stack")["landing_queue"]}
+    assert queued == {"x-1", "x-2"}
+    _step(run="stack")                      # leaving cut resets
+    status = engine.status(run="stack")
+    assert [e["issue"] for e in status["landing_queue"]] == ["x-2"]
+    assert status["landing_reset"]["dropped"] == [{"issue": "x-1", "status": "rejected"}]
 
 
 def test_only_one_run_of_a_scope_holds_the_landing_queue(proj):
@@ -412,3 +521,80 @@ def test_a_mutual_wait_is_reported_once_per_pair_of_positions(proj):
     engine.next_step()                                     # a goto's step is fetched first
     _step()                                                # request -> land, publishes
     assert engine.sync_deadlock(run="stack") is None      # the sub has something new
+
+
+def _guarded_main():
+    twin = f'"{sys.executable}" "{PUBLISHED}"'
+    return f"""
+name: guarded
+steps:
+  request:
+    instructions: ask for a cut
+    publishes: cut-wanted
+    next: merge
+  merge:
+    instructions: merge the cut
+    awaits: {{sub: stack, at: cut}}
+    verify: '{twin} stack cut --step merge'
+    next: again
+  again:
+    select:
+      prompt: again?
+      chooser: agent
+      options:
+        again: {{description: again, next: request}}
+        stop: {{description: stop}}
+"""
+
+
+def test_a_verify_on_the_waiting_step_keeps_consumption_in_step(proj):
+    """s763's review of claunch-u8wjx.2: an await does not stop the run
+    leaving, so leaving `merge` before the cut records the OLD count and the
+    late cut reads as new one round later. The same question as a verify
+    refuses the early leave (it runs before the move, against the old record)."""
+    (proj / ".claunch" / "workflows" / "guarded.yaml").write_text(_guarded_main(), encoding="utf-8")
+    engine.start("guarded")
+    engine.start("stack", run="stack")
+    _step()                                              # request -> merge
+    engine.report("merged nothing yet")
+    assert engine.next_step()["status"] == "verify_failed"
+    assert engine.status()["step_id"] == "merge"
+    _step(run="stack"); _step(run="stack")               # standby -> cut -> standby: cut #1
+    engine.report("merged cut 1")
+    assert engine.next_step()["step_id"] == "again"
+    assert not engine.published("stack", "cut", step="merge")["new"]
+    engine.select("again", "round 2")
+    _step()                                              # request -> merge, round 2
+    engine.report("early")
+    assert engine.next_step()["status"] == "verify_failed"   # cut #1 is not round 2's
+
+
+def test_a_sub_run_s_verify_reads_its_own_consumption(proj):
+    """The stack's own guarded steps ask `published main ...` from the sub
+    run; the verify must see the sub run's record, not the main run's."""
+    twin = f'"{sys.executable}" "{PUBLISHED}"'
+    sub = f"""
+name: gstack
+kind: subflow
+steps:
+  standby:
+    instructions: keep the stack
+    next: cut
+  cut:
+    instructions: split the table
+    awaits: {{main: cut-wanted}}
+    verify: '{twin} main cut-wanted --step cut'
+    publishes: cut
+    next: seal
+  seal:
+    instructions: done
+"""
+    (proj / ".claunch" / "workflows" / "gstack.yaml").write_text(sub, encoding="utf-8")
+    engine.start("main")
+    engine.start("gstack", run="stack")
+    _step(run="stack")                                   # standby -> cut
+    engine.report("too early", run="stack")
+    assert engine.next_step(run="stack")["status"] == "verify_failed"
+    _step(); _step()                                     # main: work -> request -> land (cut-wanted #1)
+    engine.report("cut 1", run="stack")
+    assert engine.next_step(run="stack")["step_id"] == "seal"

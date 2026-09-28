@@ -1486,6 +1486,11 @@ def _move_to(
         # nothing, or a run moved by hand would tell the other run a fact
         # (a cut made, a request frozen) that never happened.
         _publish_milestones(workflow, state, from_step, cwd)
+        spec = workflow.landing_queue
+        if spec is not None and spec.reset_at is not None and from_step == spec.reset_at:
+            # The declared round boundary of a run that does not end between
+            # rounds; a person's goto away is not one, as it publishes nothing.
+            _landing_reset(workflow, state, cwd)
     _queue_triggers(workflow, state, from_step, model.TRIGGER_AT_LEAVE, cwd)
     _settle_timers(workflow, state, target, cwd)
     if target is None:
@@ -2168,12 +2173,13 @@ def _landing_mark_landed(
     if spec is None:
         return []
     repo = state_mod.resolve_cwd(cwd)
+    target = spec.branch(state_mod.normalize_scope(state_mod.current_scope()))
     entries = _landing_entries(state)
     marked: List[str] = []
     for entry in entries:
         if entry.get("status") in model.LANDING_SETTLED:
             continue
-        if landing.landed(repo, str(entry.get("tip") or ""), spec.target):
+        if landing.landed(repo, str(entry.get("tip") or ""), target):
             entry.update(
                 status=model.LANDING_LANDED, set_by="daemon",
                 set_at=state_mod.utcnow(),
@@ -2182,7 +2188,7 @@ def _landing_mark_landed(
     if marked:
         state["landing_queue"] = entries
         state_mod.journal(
-            "queue_landed", {"issues": marked, "target": spec.target}, cwd
+            "queue_landed", {"issues": marked, "target": target}, cwd
         )
     return marked
 

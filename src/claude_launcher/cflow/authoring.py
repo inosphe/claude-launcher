@@ -340,6 +340,12 @@ as requested) into the next run of the same workflow here, which is how a
 `queue_reset`, shown in the payload's `landing_reset` and in the daemon's
 round-start block, with a warning line where the issue board disagrees.
 
+Two more keys, for a run that does not end between rounds (a session-long
+sub run): `target` may use `{session}` for the driving session's name
+(`target: '{session}-stack'`), and `reset_at: <step>` runs the same reset
+whenever the run leaves that step by its own progress, so settled entries do
+not pile up until the session's end.
+
 ## Run state — `editable:`, `skip`, ticked checklist items
 
 A run's workflow is fixed when it starts: composed (with any `extends`
@@ -646,7 +652,9 @@ describe apply as usual, and the daemon speaks once when the exit code
 changes. `sub-done NAME` exits 0 when that sub run is done, 1 while it runs
 or was aborted, 2 when no such sub run stands — the third answer is kept
 apart so a gate waiting on a run nobody started does not wait forever.
-`--all` exits 0 when nothing is still running (none, or all finished).
+`--all` exits 0 when nothing is still running (none, or all finished);
+`--except NAME` (repeatable) leaves out a sub run the session keeps for its
+whole life, which would otherwise hold "every side track finished" false.
 
 ### Sync points — `publishes:` and `awaits: {sub, at}` / `awaits: {main}`
 
@@ -685,7 +693,10 @@ publications it has seen, and the wait is over when the count moves past
 that record — so a publication made before the reader got there is still
 waiting for it. The probe is `claunch cflow published <main|sub> <milestone>
 --step <step>`: exit 0 = something new, 1 = not yet, 2 = that run does not
-stand; a checklist item can run the same command. `awaits: {main}` is only
+stand; a checklist item can run the same command. A milestone await may
+also name its own `probe:` (a repository that pins its gates to checkout
+scripts); the probe replaces the command and the milestone still decides
+what leaving the step consumes. `awaits: {main}` is only
 for a `kind: subflow` definition, and a sub run still never waits on another
 sub run. When each side's current step waits on the other and neither has
 anything new, the daemon reports a **sync deadlock** once (journal

@@ -514,3 +514,32 @@ def test_the_leader_tells_the_landed_before_every_round_end(layer):
     # The daemon refuses the whole list when one handle is unknown or cut
     # (daemon/mesh.py _resolve_recipients, strict) -- say what to do then.
     assert "목록은 통째로 거절될 수 있다" in text
+
+
+STACKED = """
+name: stacked
+landing_queue: {target: '{session}-stack'}
+steps:
+  hold:
+    instructions: hold the children's requests
+"""
+
+
+def test_a_target_may_name_the_session_s_own_branch(proj, feature, monkeypatch):
+    """`{session}` is the driving session: a stack branch exists once per
+    session, so its name cannot be written into a shared definition."""
+    assert model.parse(STACKED).landing_queue.branch("s9") == "s9-stack"
+    with pytest.raises(model.WorkflowError, match="branch name"):
+        model.parse(STACKED.replace("'{session}-stack'", "'{sess}-stack'"))
+    (proj / ".claunch" / "workflows" / "stacked.yaml").write_text(STACKED, encoding="utf-8")
+    monkeypatch.setenv(state_mod.SESSION_ENV, "s9")
+    _git(proj, "branch", "s9-stack", "master")
+    engine.start("stacked")
+    engine.enqueue_landing(["x-1"], feature.branch, feature.tip, by="w1")
+    _git(proj, "merge", "-q", "--no-ff", "-m", "land", "w1-feature")  # master, not the stack
+    assert engine.refresh_landing()["landed"] == []
+    wt = proj.parent / "stack-wt"
+    _git(proj, "worktree", "add", "-q", str(wt), "s9-stack")
+    _git(wt, "merge", "-q", "--no-ff", "-m", "stack", "w1-feature")
+    assert engine.refresh_landing()["landed"] == ["x-1"]
+    assert _events("queue_landed")[-1]["target"] == "s9-stack"

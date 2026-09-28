@@ -641,6 +641,10 @@ LANDING_STATES = (
 LANDING_SETTLED = (LANDING_LANDED, LANDING_REJECTED)
 
 
+#: The one placeholder ``landing_queue.target`` knows.
+SESSION_PLACEHOLDER = "{session}"
+
+
 @dataclass(frozen=True)
 class LandingQueueSpec:
     """A workflow's ``landing_queue:`` declaration.
@@ -654,8 +658,21 @@ class LandingQueueSpec:
     """
 
     #: The branch a landed tip must be an ancestor of, read in the run's
-    #: own checkout.
+    #: own checkout. ``{session}`` stands for the driving session's name,
+    #: for a branch that exists once per session (the ``stack`` sub run's
+    #: ``{session}-stack``).
     target: str = "master"
+
+    #: A step whose leaving (by the run's own progress) resets the queue the
+    #: way the move to ``end`` does: settled entries dropped, the rest kept.
+    #: For a run that never ends between rounds — the session-long ``stack``
+    #: sub run, which cuts over and over — ``end`` would come once, at the
+    #: session's end, and settled entries would pile up until then.
+    reset_at: Optional[str] = None
+
+    def branch(self, session: str) -> str:
+        """:attr:`target` with ``{session}`` filled in."""
+        return self.target.replace(SESSION_PLACEHOLDER, session)
 
 
 @dataclass(frozen=True)
@@ -734,6 +751,8 @@ class Awaits:
     #: one direction a sub run may wait: it reads the main run, it never
     #: holds it (a main run's gates do not read this).
     main: Optional[str] = None
+    #: (With ``at`` or ``main``, ``probe`` may still be given: it replaces
+    #: the ``claunch cflow published`` command and nothing else.)
 
     @property
     def milestone(self) -> Optional[str]:
@@ -741,7 +760,15 @@ class Awaits:
         return self.at or self.main
 
     def command(self, step: "Step") -> Optional[str]:
-        """The command to actually run, resolving the reserved spellings."""
+        """The command to actually run, resolving the reserved spellings.
+
+        A milestone await may name its own ``probe``: the same question
+        asked through a command the repository chooses (a checkout-pinned
+        twin of ``claunch cflow published``). The milestone still decides
+        what leaving the step consumes; only the command is replaced.
+        """
+        if self.milestone is not None and self.probe is not None:
+            return self.probe
         if self.main is not None:
             return f"claunch cflow published {MAIN_RUN_NAME} {self.main} --step {step.id}"
         if self.at is not None:
@@ -1706,6 +1733,12 @@ def parse_doc(doc: dict, *, default_name: str = "workflow") -> Workflow:
 
     editable = _parse_editable(doc.get("editable"), steps, start)
     landing_queue = _parse_landing_queue(doc.get("landing_queue"))
+    if landing_queue is not None and landing_queue.reset_at is not None:
+        if landing_queue.reset_at not in steps:
+            raise WorkflowError(
+                f"'landing_queue.reset_at' names {landing_queue.reset_at!r}, "
+                f"which is not a step of this workflow"
+            )
     workflow = Workflow(
         name=str(doc.get("name") or default_name),
         description=str(doc.get("description") or ""),
@@ -2558,10 +2591,10 @@ def _parse_awaits(raw, step_id: str) -> Optional[Awaits]:
         )
     at = _parse_milestone_name(raw.get("at"), step_id, "awaits.at")
     main = _parse_milestone_name(raw.get("main"), step_id, "awaits.main")
-    if main is not None and ("sub" in raw or "probe" in raw):
+    if main is not None and "sub" in raw:
         raise WorkflowError(
             f"step {step_id!r}: 'awaits.main' waits on the main run's "
-            f"milestone and takes neither 'sub' nor 'probe'"
+            f"milestone and takes no 'sub'"
         )
     if at is not None and raw.get("sub") is None:
         raise WorkflowError(
@@ -2570,7 +2603,7 @@ def _parse_awaits(raw, step_id: str) -> Optional[Awaits]:
         )
     sub = raw.get("sub")
     if sub is not None:
-        if "probe" in raw:
+        if "probe" in raw and at is None:
             raise WorkflowError(
                 f"step {step_id!r}: 'awaits' takes 'sub' or 'probe', not both — "
                 f"a sub run's end IS the probe"
@@ -2899,16 +2932,25 @@ def _parse_landing_queue(raw) -> Optional[LandingQueueSpec]:
         raise WorkflowError(
             "'landing_queue' must be true or a mapping {target: <branch>}"
         )
-    unknown = sorted(set(raw) - {"target"})
+    unknown = sorted(set(raw) - {"target", "reset_at"})
     if unknown:
         raise WorkflowError(
             f"'landing_queue' has unknown key(s): {', '.join(unknown)} "
-            f"(allowed: target)"
+            f"(allowed: target, reset_at)"
         )
     target = str(raw.get("target") or "master").strip()
-    if not target or any(c.isspace() for c in target):
-        raise WorkflowError("'landing_queue.target' must be a branch name")
-    return LandingQueueSpec(target=target)
+    bare = target.replace(SESSION_PLACEHOLDER, "s")
+    if not bare or any(c.isspace() or c in "{}" for c in bare):
+        raise WorkflowError(
+            "'landing_queue.target' must be a branch name (it may use "
+            f"{SESSION_PLACEHOLDER} for the driving session's name)"
+        )
+    reset_at = raw.get("reset_at")
+    if reset_at is not None:
+        reset_at = str(reset_at).strip()
+        if not reset_at:
+            raise WorkflowError("'landing_queue.reset_at' must name a step")
+    return LandingQueueSpec(target=target, reset_at=reset_at)
 
 
 def _parse_editable_by(raw, where: str) -> Tuple[str, ...]:

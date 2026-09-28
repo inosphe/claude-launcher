@@ -20,6 +20,13 @@ pins that this script and the engine read the same directory.
     uv run --no-sync python tools/sub_done.py --all         # $CLAUNCH_SESSION
     uv run --no-sync python tools/sub_done.py <name>
     uv run --no-sync python tools/sub_done.py --all -t <session>
+    uv run --no-sync python tools/sub_done.py --all --except stack
+
+``--except NAME`` (repeatable) leaves a sub run out of ``--all``. A session
+may keep a sub run for its whole life — improv-worker's ``stack``, which
+holds the child stack — and a wait on "every side track finished" would never
+end with that one counted; the ``found-issue`` runs the wait is for are the
+rest.
 
 Exit codes, the shape ``claunch cflow sub-done`` uses:
 
@@ -77,6 +84,8 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="has this session's sub run finished? (exit code is the answer)")
     ap.add_argument("name", nargs="?", help="the sub run's name")
     ap.add_argument("--all", action="store_true", help="every sub run finished?")
+    ap.add_argument("--except", dest="excluded", action="append", default=[], metavar="NAME",
+                    help="with --all: leave this sub run out (repeatable)")
     ap.add_argument("-t", "--session", help="whose sub runs (default: $CLAUNCH_SESSION)")
     ap.add_argument("--cwd", help="where to look for .cflow (default: here, then upward)")
     args = ap.parse_args(argv)
@@ -93,6 +102,8 @@ def main(argv: list[str] | None = None) -> int:
         print("cannot tell: no .cflow directory here or above")
         return 2
     states = _sub_states(root / "runs" / scope)
+    if args.all:
+        states = {n: s for n, s in states.items() if n not in args.excluded}
 
     if args.all:
         running = {n: s for n, s in states.items() if s.get("status") not in FINISHED}
