@@ -248,3 +248,39 @@ def test_route_lists_the_worktrees_with_their_sessions(repo, monkeypatch):
     assert entry["name"] == "listed" and entry["state"] == inv.STATE_ACTIVE
     assert entry["sessions"][0]["name"] == "s9"
     assert entry["sessions"][0]["category"] == "killed"
+
+
+def test_a_refused_removal_leaves_the_links_in_place(repo, tmp_path):
+    """claunch-0n31r: without force, a dirty checkout is refused before any
+    link inside it is touched."""
+    target = tmp_path / "shared"
+    target.mkdir()
+    wt = worktree.create(repo, "keeps-links")
+    _link(target, wt.path / "node_modules")
+    (wt.path / "note.txt").write_text("untracked\n", encoding="utf-8")
+
+    with pytest.raises(inv.RemoveError, match="--force"):
+        inv.remove(str(repo), str(wt.path))
+    assert (wt.path / "node_modules").exists()
+    assert os.path.samefile(wt.path / "node_modules", target)
+
+
+def test_route_reports_sessions_archived_before_a_later_one_failed(repo, monkeypatch):
+    wt = worktree.create(repo, "half")
+    manager = _Manager([
+        _Session("first", str(wt.path), "killed"),
+        _Session("second", str(wt.path), "running"),
+    ])
+
+    async def refuse(name, force=False):
+        raise RuntimeError("will not stop")
+
+    manager.stop_and_archive = refuse
+    status, body = _call(
+        manager, {"paths": [str(wt.path)], "archive": True}, monkeypatch, repo
+    )
+    assert status == 200 and body["removed"] == []
+    assert body["archived"] == ["first"]
+    assert body["failed"][0]["sessions"] == ["second"]
+    assert "second" in body["failed"][0]["error"]
+    assert wt.path.is_dir()

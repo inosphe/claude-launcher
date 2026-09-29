@@ -2381,6 +2381,7 @@ async def h_worktrees_remove(request: web.Request) -> web.Response:
                 "sessions": [s["name"] for s in live],
             })
             continue
+        name = ""
         try:
             for s in live:
                 name = s["name"]
@@ -2391,9 +2392,14 @@ async def h_worktrees_remove(request: web.Request) -> web.Response:
                     request.app["handoff"].forget(name)
                     request.app["beads"].winddowns.pop(name, None)
                     await manager.stop_and_archive(name)
+                # Recorded per session as it lands, so a failure further
+                # down the list still reports the ones already archived.
                 archived.append(name)
         except Exception as exc:
-            failed.append({"path": path, "error": f"archive failed: {exc}"})
+            failed.append({
+                "path": path, "error": f"archive of {name} failed: {exc}",
+                "sessions": [name],
+            })
             continue
         try:
             done = await asyncio.to_thread(
