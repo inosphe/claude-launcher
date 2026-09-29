@@ -664,3 +664,100 @@ def test_the_option_tables_match_the_installed_br():
             f"br {' '.join(subcommand)} has options the tables do not name: "
             f"{sorted(missing)}"
         )
+
+
+# --------------------------------------------------------------------------- #
+# br 0.7: the custom statuses are declared in the board's policy.yaml
+# --------------------------------------------------------------------------- #
+def test_the_custom_statuses_are_the_protocol_ones_br_does_not_know():
+    assert cli_beads.CUSTOM_STATUSES == ("in_ready", "in_review")
+    assert not set(cli_beads.CUSTOM_STATUSES) & set(cli_beads.BR_BUILTIN_STATUSES)
+
+
+def test_a_board_with_no_policy_gets_one_declaring_them():
+    import yaml
+
+    text = cli_beads.policy_text(None)
+    assert text.startswith(cli_beads.POLICY_HEADER)
+    assert yaml.safe_load(text) == {"workflow": {"statuses": ["in_ready", "in_review"]}}
+
+
+def test_a_policy_without_a_workflow_section_keeps_its_text():
+    """The operator's file is appended to, not re-emitted: comments stay."""
+    import yaml
+
+    mine = "# ours\nclose_reason_min_length: 3  # keep\n"
+    text = cli_beads.policy_text(mine)
+    assert text.startswith(mine)
+    assert yaml.safe_load(text)["workflow"]["statuses"] == ["in_ready", "in_review"]
+    assert yaml.safe_load(text)["close_reason_min_length"] == 3
+
+
+def test_a_declared_list_is_extended_and_nothing_else_moves():
+    import yaml
+
+    mine = "workflow:\n  strict: false\n  statuses: [rework, in_review]\n"
+    doc = yaml.safe_load(cli_beads.policy_text(mine))
+    assert doc["workflow"]["statuses"] == ["rework", "in_review", "in_ready"]
+    assert doc["workflow"]["strict"] is False
+
+
+@pytest.mark.parametrize("text", [
+    "workflow:\n  statuses: [in_ready, in_review, rework]\n",
+    ": : not yaml [\n",
+    "- a list\n",
+    "workflow: [not, a, mapping]\n",
+    "workflow:\n  statuses: in_review\n",
+])
+def test_a_policy_that_is_complete_or_not_ours_to_fix_is_left_alone(text):
+    assert cli_beads.policy_text(text) is None
+
+
+def test_ensure_policy_writes_once_and_leaves_a_missing_board_alone(tmp_path):
+    assert cli_beads.ensure_policy(tmp_path / "nowhere") is False
+    assert not (tmp_path / "nowhere").exists()
+    beads = tmp_path / ".beads"
+    beads.mkdir()
+    assert cli_beads.ensure_policy(beads) is True
+    first = (beads / cli_beads.POLICY_NAME).read_text(encoding="utf-8")
+    assert cli_beads.ensure_policy(beads) is False
+    assert (beads / cli_beads.POLICY_NAME).read_text(encoding="utf-8") == first
+    assert [p.name for p in beads.iterdir()] == [cli_beads.POLICY_NAME]
+
+
+def test_br_itself_answers_a_custom_status_filter_once_it_is_declared(tmp_path):
+    """The failure the declaration is for, against the real binary: a filter
+    on a status no issue is in is refused (br 0.7) until the policy says the
+    status exists. An older br that never refused skips the first half."""
+    import shutil as _shutil
+
+    if _shutil.which(cli_beads.BINARY) is None:
+        pytest.skip(f"{cli_beads.BINARY} is not installed on this machine")
+    root = tmp_path / "board"
+    root.mkdir()
+    db = str(root / ".beads" / "beads.db")
+
+    def br(args):
+        return REAL_RUN([cli_beads.BINARY, "--db", db, *args], cwd=str(root),
+                        capture_output=True, text=True, encoding="utf-8")
+
+    assert br(["init", "--prefix", "t"]).returncode == 0
+    ask = ["list", "--status", "open", "--status", "in_ready",
+           "--status", "in_review", "--json"]
+    before = br(ask)
+    assert cli_beads.ensure_policy(root / ".beads") is True
+    after = br(ask)
+    assert after.returncode == 0, after.stdout + after.stderr
+    if before.returncode != 0:
+        assert "unknown status" in before.stdout + before.stderr
+
+
+def test_the_board_is_given_its_policy_before_the_callers_command(repo, fake_br):
+    """A board made before br 0.7 has no policy; the first command through
+    here declares the statuses, in the board's own .beads/."""
+    beads = repo / ".beads"
+    beads.mkdir()
+    (beads / "beads.db").write_bytes(b"")
+    assert cli_beads.run(["list", "--status", "in_review"], cwd=str(repo)) == 0
+    assert (beads / cli_beads.POLICY_NAME).is_file()
+    assert "in_review" in (beads / cli_beads.POLICY_NAME).read_text(encoding="utf-8")

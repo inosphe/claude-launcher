@@ -73,7 +73,9 @@ import sys
 from pathlib import Path
 from typing import List, NamedTuple, Optional
 
-from . import beads_db, workspaces
+import yaml
+
+from . import atomic, beads_db, workspaces
 
 #: The board's directory and files, as ``br init`` lays them out. The
 #: first two come from :mod:`claude_launcher.beads_db`, which composes the
@@ -145,6 +147,116 @@ UNUSED_BR_STATUSES = (
 
 #: What ``--status`` is allowed to carry.
 STATUSES = PROTOCOL_STATUSES + UNUSED_BR_STATUSES
+
+#: The statuses ``br`` knows without being told — the list its own
+#: ``unknown status`` refusal prints, read off **br 0.7.1**.
+BR_BUILTIN_STATUSES = (
+    "open", "in_progress", "blocked", "deferred",
+    "draft", "closed", "tombstone", "pinned",
+)
+
+#: The protocol's statuses ``br`` does not know by itself: ``in_ready`` and
+#: ``in_review``. br 0.7 refuses a ``--status`` filter naming one of them
+#: (``VALIDATION_FAILED``, exit 4) unless the board's policy declares it or
+#: some issue happens to be in it right now. The second condition is what
+#: made the refusal look random: the Beads page's ``in_review`` column and
+#: the leader's landing queue worked while a landing request stood and
+#: failed the moment the last one closed, and the improv queue command
+#: (``--status open --status in_ready``) failed on every board with nothing
+#: triaged. Writing a custom status never needed the declaration, so the
+#: board never looked wrong. :func:`ensure_policy` writes the declaration.
+CUSTOM_STATUSES = tuple(s for s in PROTOCOL_STATUSES if s not in BR_BUILTIN_STATUSES)
+
+#: ``br``'s own project policy file, beside the database in ``.beads/``.
+#: br reads it from the ``.beads/`` directory it resolves — the database's
+#: own directory when that is a ``.beads/``, which is the default layout.
+#: ``br init`` does not write one and no ``br`` command edits it.
+POLICY_NAME = "policy.yaml"
+
+#: What a policy file this module creates opens with, so the reader of a
+#: repository that suddenly carries one knows who wrote it and why.
+POLICY_HEADER = (
+    "# br project policy. claunch declares the statuses its workflows use\n"
+    "# beyond br's built-in ones, so a '--status' filter naming one is\n"
+    "# accepted even while no issue is in it (br 0.7+). Anything else here is\n"
+    "# yours; claunch only ever adds to workflow.statuses.\n"
+)
+
+
+def policy_text(current: Optional[str]) -> Optional[str]:
+    """``policy.yaml`` with :data:`CUSTOM_STATUSES` declared, or ``None``.
+
+    ``current`` is the file's text, ``None`` when there is no file. ``None``
+    back means leave the file as it is: either every custom status is already
+    declared, or the file is not a policy this can extend without guessing
+    (malformed YAML, a top level or a ``workflow`` that is not a mapping, a
+    ``statuses`` that is not a list). ``br`` refuses such a file itself, with
+    its own words, and rewriting someone's broken file into a working one of
+    our own is not this function's call.
+
+    A file with no ``workflow`` key keeps its text byte for byte and gets the
+    block appended. Otherwise the document is re-emitted — which keeps every
+    key and value but not the comments, a cost paid only when the file
+    already had a ``workflow`` section missing one of these statuses.
+    """
+    wanted = list(CUSTOM_STATUSES)
+    block = yaml.safe_dump(
+        {"workflow": {"statuses": wanted}}, sort_keys=False,
+        default_flow_style=False,
+    )
+    if current is None or not current.strip():
+        return POLICY_HEADER + block
+    try:
+        doc = yaml.safe_load(current)
+    except yaml.YAMLError:
+        return None
+    if doc is None:
+        doc = {}
+    if not isinstance(doc, dict):
+        return None
+    if "workflow" not in doc:
+        return current + ("" if current.endswith("\n") else "\n") + block
+    workflow = doc["workflow"]
+    if workflow is None:
+        workflow = doc["workflow"] = {}
+    if not isinstance(workflow, dict):
+        return None
+    declared = workflow.get("statuses")
+    if declared is None:
+        declared = []
+    if not isinstance(declared, list):
+        return None
+    missing = [s for s in wanted if s not in declared]
+    if not missing:
+        return None
+    workflow["statuses"] = declared + missing
+    return POLICY_HEADER + yaml.safe_dump(
+        doc, sort_keys=False, default_flow_style=False, allow_unicode=True
+    )
+
+
+def ensure_policy(beads_dir: Path) -> bool:
+    """Declare :data:`CUSTOM_STATUSES` in ``beads_dir``'s ``policy.yaml``.
+
+    Answers whether the file was written. A missing ``beads_dir`` is left
+    missing — a board that is not there yet gets its policy when it is
+    created (:func:`create_board`). The write is atomic, so a ``br``
+    reading the file while two writers race sees one whole document.
+    """
+    if not beads_dir.is_dir():
+        return False
+    target = beads_dir / POLICY_NAME
+    try:
+        current = target.read_text(encoding="utf-8") if target.is_file() else None
+    except OSError:
+        return False
+    text = policy_text(current)
+    if text is None:
+        return False
+    with atomic.scratch(target) as tmp:
+        tmp.write_text(text, encoding="utf-8")
+        atomic.replace(tmp, target)
+    return True
 
 
 def status_values(args: List[str]) -> List[str]:
@@ -611,6 +723,9 @@ def create_board(ref: beads_db.BoardRef, runner) -> None:
     finally:
         if plan_.discard:
             shutil.rmtree(plan_.discard, ignore_errors=True)
+    # A board this tool made answers its own workflows' status filters from
+    # its first command: see CUSTOM_STATUSES.
+    ensure_policy(Path(ref.root) / BEADS_DIR)
 
 
 def autocreatable(ref: beads_db.BoardRef) -> bool:
@@ -746,6 +861,17 @@ def run(args: List[str], cwd: Optional[str] = None) -> int:
         and (args[:1] != ["init"] if args else True)
     ):
         create_board(ref, _subprocess_runner)
+    # Every call, not only a board's first: a board made before br 0.7, or
+    # by 'br init' itself, has no policy, and the refusal it earns names a
+    # file nobody told the caller about (CUSTOM_STATUSES).
+    try:
+        ensure_policy(beads_dir)
+    except OSError as exc:
+        print(
+            f"warning: could not declare {', '.join(CUSTOM_STATUSES)} in "
+            f"{beads_dir / POLICY_NAME}: {exc}",
+            file=sys.stderr,
+        )
     commands = plan(
         list(args), root, os.environ.get(SESSION_ENV) or None,
         db_exists=ref.exists(),

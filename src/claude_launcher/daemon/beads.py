@@ -1224,6 +1224,9 @@ class Board:
         #: ``br`` was found on PATH (sticky), and when PATH was last walked.
         self._which_found = False
         self._which_checked = 0.0
+        #: Per board directory, how its ``policy.yaml`` looked when the custom
+        #: statuses were last made sure of (:meth:`_ensure_policy`).
+        self._policy_seen: Dict[str, tuple] = {}
 
     # ---- availability -------------------------------------------------- #
     #: How long a "``br`` is not on PATH" answer is reused before PATH is
@@ -1364,6 +1367,33 @@ class Board:
         await asyncio.to_thread(cli_beads.create_board, ref, runner)
         self._refs.pop(str(ref.root), None)
 
+    def _ensure_policy(self, beads_dir: Path) -> None:
+        """Make sure ``beads_dir``'s policy declares the custom statuses.
+
+        :func:`cli_beads.ensure_policy`, looked at again only when the file or
+        the directory changed since the last look -- every ``br`` call comes
+        through here and the dashboard makes one every two seconds. A write
+        that fails is logged, not raised: the call it sits in front of still
+        runs, and a status filter it breaks answers with ``br``'s own words.
+        """
+        target = beads_dir / cli_beads.POLICY_NAME
+
+        def stamp() -> tuple:
+            try:
+                return (beads_dir.is_dir(), target.stat().st_mtime_ns)
+            except OSError:
+                return (beads_dir.is_dir(), None)
+
+        key = str(beads_dir)
+        now = stamp()
+        if self._policy_seen.get(key) == now:
+            return
+        try:
+            cli_beads.ensure_policy(beads_dir)
+        except OSError as exc:
+            log.warning("beads: could not declare statuses in %s: %s", target, exc)
+        self._policy_seen[key] = stamp()
+
     async def br(
         self, root: Path, args: List[str], *, actor: Optional[str] = None
     ):
@@ -1392,6 +1422,7 @@ class Board:
                 and args[:1] != ["init"]
             ):
                 await self.create_board(ref)
+            self._ensure_policy(beads_dir)
             commands = cli_beads.plan(
                 list(args) + (["--json"] if "--json" not in args else []),
                 Path(ref.root),

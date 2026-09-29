@@ -24,7 +24,7 @@ from pathlib import Path
 
 import pytest
 
-from claude_launcher import beads_meta, lineage, profile, store
+from claude_launcher import beads_meta, cli_beads, lineage, profile, store
 from claude_launcher.daemon import beads as beads_mod
 from claude_launcher.daemon import db, paths
 from claude_launcher.daemon.api import build_app
@@ -3130,5 +3130,26 @@ def test_selected_board_reads_only_its_issues_but_keeps_workspace_headers(repo, 
             listings = [c for c in br.calls if "list" in c and "dep" not in c]
             assert len(listings) == 1
             assert str(expected) in listings[0][listings[0].index("--db") + 1]
+
+    asyncio.run(run())
+
+
+def test_the_daemon_declares_the_custom_statuses_and_notices_a_lost_policy(repo):
+    """br 0.7 refuses an ``in_review`` filter on a board whose policy does not
+    declare it, which is the Beads page's own column. The daemon declares it
+    before its first call, looks again only when the file changed, and puts
+    it back when it went away."""
+    board = _board(FakeBr(), repo)
+    policy = repo / ".beads" / cli_beads.POLICY_NAME
+
+    async def run():
+        await board.br(repo, ["list", "--status", "in_review"])
+        assert "in_review" in policy.read_text(encoding="utf-8")
+        seen = policy.stat().st_mtime_ns
+        await board.br(repo, ["list"])
+        assert policy.stat().st_mtime_ns == seen
+        policy.unlink()
+        await board.br(repo, ["list"])
+        assert policy.is_file()
 
     asyncio.run(run())
