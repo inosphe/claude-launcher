@@ -35,15 +35,21 @@ line it produces so a reader knows why a file is there:
     workflow and its project-layer copy, and a gate script and the workflow
     file that arms it.
 ``test``
-    test modules whose source names the changed file, by the same
-    :func:`changed_tests.mentioning` rule the gate uses (a test that pins a
-    file by string is a reader of it, and a contract change has to reach it).
+    test modules whose source names the changed file, by the gate's own
+    function for it (:func:`changed_tests.named_by`, rules 2c and 3a: a test
+    that pins a file by string is a reader of it, and a contract change has
+    to reach it; a dunder file's stem names nothing, so it has none).
+``test:unselected``
+    the same, for a module the gate's selection of this change
+    (:func:`changed_tests.select`) does not contain. The case that produces
+    it is a changed test module: rule 1 runs the module itself and not the
+    tests that name it.
 
 Each surface is then marked **touched** (also in this branch's change),
-**gate** (a naming test -- the targeted gate selects and runs it by the
-same rule, so it is listed for the record and not counted) or **check**
-(a source mirror nobody will run for you). The last line is the sentence
-the review step reports:
+**gate** (a naming test the gate's selection contains, so it is listed for
+the record and not counted) or **check** (a source mirror, or a naming test
+the gate does not select -- nobody will run it for you). The last line is
+the sentence the review step reports:
 
     related surfaces: N to check, M touched by this diff, T naming tests (the gate runs them)
 
@@ -143,8 +149,9 @@ _HASH_RE = re.compile(r"^[0-9a-f]{40}$")
 
 
 def _load_changed_tests():
-    """``tools/changed_tests.py`` by path -- for the base, the changed set
-    and rule 3a, so this tool and the gate read the same change."""
+    """``tools/changed_tests.py`` by path -- for the base, the changed set,
+    the naming rule and the selection, so this tool and the gate read the
+    same change and agree on what the gate runs."""
     spec = importlib.util.spec_from_file_location(
         "changed_tests", Path(__file__).resolve().parent / "changed_tests.py"
     )
@@ -251,6 +258,9 @@ def surfaces(
     if commits is None:
         commits = history(repo)
     changed_set = set(changed)
+    selected = set()
+    if changed_tests is not None:
+        selected = set(changed_tests.select(repo, [rel for rel in changed if _is_code(rel)]))
     found: Dict[str, dict] = {}
 
     def add(path: str, reason: str, source: str) -> None:
@@ -283,8 +293,8 @@ def surfaces(
         for wf in gate_arming_workflows(repo, rel):
             add(wf, "guard:gate-arming", rel)
         if changed_tests is not None:
-            for test in changed_tests.mentioning(repo, Path(rel).name):
-                add(test, "test", rel)
+            for test in changed_tests.named_by(repo, rel):
+                add(test, "test" if test in selected else "test:unselected", rel)
 
     out = []
     for path in sorted(found):
@@ -301,9 +311,10 @@ def _reason_rank(reason: str) -> tuple:
 
 
 def is_naming_test(surface: dict) -> bool:
-    """A test module that names the changed file -- listed, but not counted
-    among the surfaces to check: the gate selects it by the same rule
-    (``changed_tests`` rule 3a) and runs it."""
+    """A test module that names the changed file and that the gate's
+    selection contains -- listed, but not counted among the surfaces to
+    check, because the gate runs it. One the selection does not contain is
+    ``test:unselected`` and is counted."""
     return surface["reasons"] == ["test"]
 
 

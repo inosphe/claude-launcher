@@ -162,6 +162,128 @@ def test_a_test_that_names_the_file_is_a_surface_and_one_that_does_not_is_not(re
     assert "tests/test_other.py" not in found
 
 
+def _seed_on_base(repo: Path, files: dict) -> None:
+    """Put files in the base commit, so only what a case writes afterwards is
+    the branch's change (a test module written by the round is selected by
+    rule 1 whatever it contains)."""
+    _git(repo, "checkout", "-q", "master")
+    _commit(repo, "seed", files)
+    _git(repo, "checkout", "-q", "feature")
+    _git(repo, "rebase", "-q", "master")
+
+
+#: A diff of the shape ``claunch-wt12o.1.2`` measured: a changed test module
+#: that another test names, and a ``__main__.py`` that tests mention.
+_TEST_MODULE_AND_DUNDER = {
+    "tests/test_edited.py": "def test_it():\n    assert True\n",
+    "tests/test_reads_edited.py": '"""Where ``test_edited`` drives the app, this drives the CLI."""\n',
+    "tests/test_node_id.py": 'NODE = "tests/test_edited.py::test_it"\n',
+    "src/pkg/__main__.py": "x = 1\n",
+    "tests/test_says_main.py": 'if __name__ == "__main__":\n    pass\n',
+}
+
+
+def _edit_test_module_and_dunder(repo: Path) -> list:
+    _seed_on_base(repo, _TEST_MODULE_AND_DUNDER)
+    _write(repo, "tests/test_edited.py", "def test_it():\n    assert 1\n")
+    _write(repo, "src/pkg/__main__.py", "x = 2\n")
+    return ["src/pkg/__main__.py", "tests/test_edited.py"]
+
+
+def test_a_test_naming_a_changed_test_module_is_to_check_because_the_gate_runs_only_the_module(repo):
+    """Rule 1 selects a changed test module and stops: the tests that name it
+    are not in the gate's selection, so they are not "the gate runs them"."""
+    changed = _edit_test_module_and_dunder(repo)
+    found = _surfaces(repo, changed)
+    by = _by_path(found)
+    assert by["tests/test_reads_edited.py"]["reasons"] == ["test:unselected"]
+    assert by["tests/test_node_id.py"]["reasons"] == ["test:unselected"]
+    assert not rs.is_naming_test(by["tests/test_node_id.py"])
+    assert rs.summary_line(found) == (
+        "related surfaces: 2 to check, 0 touched by this diff, 0 naming tests (the gate runs them)"
+    )
+
+
+def test_a_dunder_file_has_no_naming_tests_because_its_stem_names_nothing(repo):
+    """``__main__`` in a test is ``if __name__ == "__main__"``, not a reference
+    to ``src/pkg/__main__.py`` -- the gate's rule 2c does not search for it,
+    and neither does this tool."""
+    changed = _edit_test_module_and_dunder(repo)
+    assert "tests/test_says_main.py" not in _by_path(_surfaces(repo, changed))
+
+
+def test_a_naming_test_the_gate_selects_by_another_rule_is_still_gate(repo):
+    """``gate`` means the gate's selection contains the module, whatever rule
+    put it there: here rule 2b selects the reader because it imports a
+    changed module."""
+    _seed_on_base(repo, {
+        "tests/test_edited.py": "def test_it():\n    assert True\n",
+        "tests/test_reads_edited.py": "from pkg import b\n# see test_edited\n",
+    })
+    _write(repo, "tests/test_edited.py", "def test_it():\n    assert 1\n")
+    _write(repo, "src/pkg/b.py", "x = 50\n")
+    found = _by_path(_surfaces(repo, ["src/pkg/b.py", "tests/test_edited.py"]))
+    assert found["tests/test_reads_edited.py"]["reasons"] == ["test"]
+
+
+@pytest.mark.parametrize(
+    "changed",
+    [
+        ["src/pkg/a.py"],
+        ["tools/gate.py"],
+        [".claunch/workflows/flow-one.yaml"],
+        ["tests/test_edited.py"],
+        ["src/pkg/__main__.py"],
+        ["src/pkg/__main__.py", "tests/test_edited.py", "src/pkg/a.py", "tools/gate.py"],
+    ],
+)
+def test_every_gate_row_is_in_the_gates_selection(repo, changed):
+    """The property ``claunch-wt12o.1.2`` asked for, across every kind of
+    changed path the gate's rules tell apart (source, tools script, non-python,
+    test module, dunder): no row says "the gate runs it" unless
+    :func:`changed_tests.select` contains it."""
+    _edit_test_module_and_dunder(repo)
+    ct = _ct()
+    found = rs.surfaces(repo, changed, changed_tests=ct, groups=())
+    gate = {s["path"] for s in found if rs.is_naming_test(s)}
+    assert gate <= set(ct.select(repo, changed))
+
+
+def _list_selection(stdout: str) -> set:
+    """The modules ``changed_tests.py --list`` prints under its "selected" line."""
+    lines = stdout.splitlines()
+    start = next(i for i, line in enumerate(lines) if "test module(s) selected" in line)
+    out = set()
+    for line in lines[start + 1:]:
+        if not line.startswith("  tests/"):
+            break
+        out.add(line.strip())
+    return out
+
+
+def test_the_scripts_gate_rows_are_a_subset_of_what_changed_tests_list_selects(repo):
+    """The completion criterion of ``claunch-wt12o.1.2``, end to end: both
+    scripts read the same branch change from git, and every ``gate`` row
+    ``related_surfaces.py`` prints is a module ``changed_tests.py --list``
+    selects."""
+    _edit_test_module_and_dunder(repo)
+    listed = subprocess.run(
+        [sys.executable, str(ROOT / "tools" / "changed_tests.py"), "--repo", str(repo), "--list"],
+        cwd=str(repo), capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120,
+    )
+    assert listed.returncode == 0, listed.stdout + listed.stderr
+    selected = _list_selection(listed.stdout)
+    assert "tests/test_edited.py" in selected
+    out = _run("--repo", str(repo), cwd=repo)
+    assert out.returncode == 0, out.stderr
+    rows = [line.split() for line in out.stdout.splitlines() if line.startswith(("gate", "CHECK", "touched"))]
+    gate = {row[1] for row in rows if row[0] == "gate"}
+    assert gate <= selected, gate - selected
+    check = {row[1] for row in rows if row[0] == "CHECK"}
+    assert {"tests/test_reads_edited.py", "tests/test_node_id.py"} <= check
+    assert "tests/test_says_main.py" not in {row[1] for row in rows}
+
+
 def test_tests_edited_alongside_a_module_are_not_cochange_partners(repo):
     _commit(repo, "with test", {"src/pkg/b.py": "x = 20\n", "tests/test_other.py": "def test_it():\n    assert 1\n"})
     _commit(repo, "with test 2", {"src/pkg/b.py": "x = 21\n", "tests/test_other.py": "def test_it():\n    assert 2\n"})
