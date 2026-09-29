@@ -111,12 +111,55 @@ harnesses:
 
   agent:
     command: agent
+    # CURSOR_CONFIG_DIR relocates cli-config.json (permissions, approval
+    # mode, sandbox) and nothing else. Measured 2026-09-29 on win32 against
+    # agent 2026.07.01 and re-read in 2026.09.28: `agent status` stays
+    # signed in under a fresh CURSOR_CONFIG_DIR, and `agent mcp list` keeps
+    # listing ~/.cursor/mcp.json while ignoring an mcp.json placed in the
+    # relocated directory -- the bundle reads that file and the user skills
+    # through os.homedir()/.cursor. So the profile home isolates the CLI
+    # config only; install.py targets the machine-wide ~/.cursor for MCP
+    # and skills, as it does for devin.
     home_env: CURSOR_CONFIG_DIR
     auth: oauth
     clear_env: [CURSOR_API_KEY]
     login_args: [login]
+    # An unattended session cannot answer the two start-up prompts: the
+    # workspace-trust question (no directory is trusted by default) and the
+    # MCP-server approval that follows it. `--trust` is documented as
+    # print-mode only, but the interactive start path honours it as well
+    # (read from the 2026.09.28 bundle), and `--approve-mcps` skips the
+    # approval so the claunch server is live from the first turn.
+    args: [--trust, --approve-mcps]
+    # Print mode runs once and exits: `agent --trust --approve-mcps -p <prompt>`.
     heartbeat_args: [-p]
-    description: Cursor Agent CLI.
+    # `--continue` reopens the previous chat; `--resume` without an id opens
+    # a picker instead.
+    restore_args: [--continue]
+    # Short names for ids listed by `agent models` on 2026-09-29. The list is
+    # account-dependent; a choice outside it is passed through unchanged.
+    models: [auto, composer, opus, sonnet, fable, sol, luna, gemini, grok]
+    model_aliases:
+      composer: composer-2.5
+      opus: claude-opus-5-5-high
+      sonnet: claude-sonnet-5-thinking-high
+      fable: claude-fable-5-thinking-high
+      sol: gpt-5.6-sol-high
+      luna: gpt-5.6-luna-high
+      gemini: gemini-3.7-flash-high
+      grok: grok-4.7-high
+    skip_permissions_args: [--force]
+    # `--sandbox enabled|disabled` is not declared for the full-access group:
+    # its behaviour on win32 is unmeasured.
+    # The TUI enables DECSET 2004 at start-up, and the npm-style .cmd shim
+    # (agent.cmd -> powershell -> node) would cut a multi-line argv prompt
+    # at its first newline, so the opening goes through the terminal.
+    opening_transport: pty
+    input_readiness: bracketed-paste
+    description: >-
+      Cursor Agent CLI, signed in with the account's own login. Credentials,
+      MCP servers and skills are machine-wide (~/.cursor); the profile home
+      isolates only cli-config.json.
 
   devin:
     command: devin
