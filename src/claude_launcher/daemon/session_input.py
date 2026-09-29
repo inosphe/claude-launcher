@@ -50,18 +50,22 @@ def path(name: str):
 
 
 def _write(name: str, event: str, *, request_id: str, text: str,
-           status: str, pid: Optional[int] = None) -> dict:
+           status: str, pid: Optional[int] = None, origin: str = "") -> dict:
     data = {"request_id": request_id, "text": text, "status": status}
     if pid is not None:
         data["pid"] = pid
+    if origin:
+        # Who typed it, when it was not this daemon's own operator: a
+        # linked peer's session line (daemon/shadow.py) is ``peer:<machine>``.
+        data["origin"] = origin
     return journal.append(path(name), event, data, at=_now())
 
 
 def write(name: str, event: str, *, request_id: str, text: str,
-          status: str, pid: Optional[int] = None) -> dict:
+          status: str, pid: Optional[int] = None, origin: str = "") -> dict:
     with _lock:
         return _write(name, event, request_id=request_id, text=text,
-                      status=status, pid=pid)
+                      status=status, pid=pid, origin=origin)
 
 
 def read(name: str, *, limit: int = 50) -> List[dict]:

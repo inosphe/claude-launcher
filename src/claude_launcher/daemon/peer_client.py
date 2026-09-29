@@ -65,6 +65,90 @@ def parse_response(raw: bytes) -> Tuple[int, dict]:
     return status, doc if isinstance(doc, dict) else {}
 
 
+class ResponseStream:
+    """Incremental reader for a peer response that is not read to EOF.
+
+    ``parse_response`` needs the whole answer; a streamed one (the shadow
+    terminal, ``/peer/shadow/stream``) never ends while the viewer watches.
+    Feed it the bridge's chunks as they come: ``status``/``headers`` are set
+    once the head is complete, and :meth:`feed` returns the body bytes each
+    chunk completed, chunked transfer-encoding removed.
+    """
+
+    def __init__(self) -> None:
+        self.status: int = 0
+        self.headers: dict = {}
+        self._buf = bytearray()
+        self._head_done = False
+        self._chunked = False
+        self._chunk_left = 0  # bytes of the current chunk still to come
+        self._chunk_crlf = 0  # bytes of the CRLF after a chunk still to skip
+        self.finished = False  # the terminating zero-size chunk was read
+
+    @property
+    def head_done(self) -> bool:
+        return self._head_done
+
+    def feed(self, data: bytes) -> bytes:
+        self._buf += data
+        if not self._head_done:
+            sep = self._buf.find(b"\r\n\r\n")
+            if sep < 0:
+                if len(self._buf) > 64 * 1024:
+                    raise PeerHttpError("peer response head too large")
+                return b""
+            head = bytes(self._buf[:sep]).decode("latin-1")
+            del self._buf[: sep + 4]
+            lines = head.split("\r\n")
+            parts = lines[0].split(" ", 2)
+            if len(parts) < 2 or not parts[1].isdigit():
+                raise PeerHttpError(f"bad peer status line: {lines[0]!r}")
+            self.status = int(parts[1])
+            for line in lines[1:]:
+                if ":" in line:
+                    k, v = line.split(":", 1)
+                    self.headers[k.strip().lower()] = v.strip()
+            self._chunked = (
+                self.headers.get("transfer-encoding", "").lower() == "chunked"
+            )
+            self._head_done = True
+        if not self._chunked:
+            out = bytes(self._buf)
+            self._buf.clear()
+            return out
+        return self._dechunk()
+
+    def _dechunk(self) -> bytes:
+        out = bytearray()
+        while self._buf and not self.finished:
+            if self._chunk_crlf:
+                drop = min(self._chunk_crlf, len(self._buf))
+                del self._buf[:drop]
+                self._chunk_crlf -= drop
+                continue
+            if self._chunk_left:
+                take = min(self._chunk_left, len(self._buf))
+                out += self._buf[:take]
+                del self._buf[:take]
+                self._chunk_left -= take
+                if not self._chunk_left:
+                    self._chunk_crlf = 2
+                continue
+            eol = self._buf.find(b"\r\n")
+            if eol < 0:
+                break
+            try:
+                size = int(bytes(self._buf[:eol]).split(b";")[0], 16)
+            except ValueError:
+                raise PeerHttpError("bad chunk size in peer response") from None
+            del self._buf[: eol + 2]
+            if size == 0:
+                self.finished = True
+                break
+            self._chunk_left = size
+        return bytes(out)
+
+
 def _unchunk(body: bytes) -> bytes:
     out = bytearray()
     pos = 0

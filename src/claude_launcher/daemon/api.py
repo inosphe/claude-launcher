@@ -83,6 +83,7 @@ from .mesh import MeshBusy, MeshConflict, MeshError, MeshManager
 from .session import STATUS_IDLE, KeyboardHeld, SessionGone
 from . import session as session_mod
 from . import ws as ws_mod
+from . import shadow as shadow_mod
 
 COOKIE_NAME = "claunch_session"
 
@@ -371,6 +372,9 @@ def build_app(
     app["cflow_nudge_tasks"] = set()
     app.on_shutdown.append(_close_cflow_nudges)
     app["websockets"] = set()
+    # The remote-shadow directory (daemon/shadow.py), built on first read:
+    # a holder rather than a key set later, because the app is frozen by then.
+    app["shadow"] = {}
     # Who is holding a socket right now, and the last hundred that closed
     # (daemon/connections.py). The close log alone could not answer whether
     # new sockets were being refused, because a refused one writes nothing.
@@ -668,6 +672,19 @@ def build_app(
     r.add_post("/peer/ops/file", h_peer_ops_file)
     r.add_post("/peer/ops/git", h_peer_ops_git)
     r.add_post("/peer/ops/lease", h_peer_ops_lease)
+    # Remote-shadow sessions (daemon/shadow.py): a linked peer's operator
+    # LOOKS at this daemon's members of the mesh that link belongs to -- a
+    # card, an output-only terminal, the session line. Link-token
+    # authenticated and member-scoped; nothing else a local card can do
+    # (kill, pause, note, raw keys, resize, paste-image) has a peer route.
+    r.add_post("/peer/shadow/cards", h_peer_shadow_cards)
+    r.add_post("/peer/shadow/stream", h_peer_shadow_stream)
+    r.add_post("/peer/shadow/keys", h_peer_shadow_keys)
+    # ...and this daemon's side of it: the other daemons' members, kept out
+    # of /api/sessions (keyed by bare name) and addressed by machine too.
+    r.add_get("/api/shadows", h_shadows_list)
+    r.add_get("/api/shadows/{machine}/{session}/ws", h_shadow_ws)
+    r.add_post("/api/shadows/{machine}/{session}/keys", h_shadow_keys)
     r.add_get("/api/sessions", h_sessions_list)
     r.add_get("/api/transcripts", h_transcripts_list)
     r.add_post("/api/sessions", h_sessions_create)
@@ -5456,6 +5473,149 @@ async def h_peer_ops_file(request: web.Request) -> web.Response:
         str(body.get("path") or ""),
         body.get("max_bytes"),
     )
+    return json_response(result)
+
+
+def _peer_shadow_member(request: web.Request, body: dict):
+    """The (session, member) a ``/peer/shadow/*`` call names, or the refusal.
+
+    Token and membership are checked by the mesh (``peer_shadow_member``);
+    a refusal is 403 here, where peer ops say 400, because nothing about
+    the request is malformed -- the caller is not allowed to see it.
+    """
+    mm = _mesh_mgr(request)
+    session_name = str(body.get("session") or "")
+    try:
+        member = mm.peer_shadow_member(
+            str(body.get("mesh") or ""),
+            str(body.get("machine") or ""),
+            str(body.get("token") or ""),
+            session_name,
+        )
+    except MeshError as exc:
+        raise web.HTTPForbidden(
+            text=json.dumps({"error": str(exc)}), content_type="application/json"
+        ) from None
+    manager: SessionManager = request.app["manager"]
+    try:
+        session = manager.get(session_name)
+    except ManagerError:
+        raise web.HTTPNotFound(
+            text=json.dumps({"error": f"session {session_name!r} is gone"}),
+            content_type="application/json",
+        ) from None
+    return session, member
+
+
+async def h_peer_shadow_cards(request: web.Request) -> web.Response:
+    body = await _json_body(request)
+    mm = _mesh_mgr(request)
+    try:
+        members = mm.peer_shadow_members(
+            str(body.get("mesh") or ""),
+            str(body.get("machine") or ""),
+            str(body.get("token") or ""),
+        )
+    except MeshError as exc:
+        return json_error(403, str(exc))
+    manager: SessionManager = request.app["manager"]
+
+    def build() -> list:
+        cards = []
+        for member in members:
+            try:
+                session = manager.get(member.session)
+            except ManagerError:
+                continue
+            cwd = _session_cwd(session)
+            flow = (
+                _cflow_entry(manager, cwd, session.sdef.name, reports=False, slim=True)
+                if cwd else None
+            )
+            cards.append(shadow_mod.card(session, member, cflow=flow))
+        return cards
+
+    return json_response({"cards": await asyncio.to_thread(build)})
+
+
+async def h_peer_shadow_stream(request: web.Request) -> web.StreamResponse:
+    body = await _json_body(request)
+    session, _member = _peer_shadow_member(request, body)
+    return await shadow_mod.serve_stream(request, session, request.app)
+
+
+async def h_peer_shadow_keys(request: web.Request) -> web.Response:
+    body = await _json_body(request)
+    session, _member = _peer_shadow_member(request, body)
+    try:
+        cfg = store.daemon_config()
+    except store.StoreError:
+        cfg = None
+    if not shadow_mod.input_enabled(cfg):
+        return json_error(
+            403, "this daemon does not take the session line from peers "
+                 "(daemon.shadow_input is off)")
+    machine = str(body.get("machine") or "")
+    try:
+        result = await shadow_mod.type_line(
+            session, body.get("text"), body.get("input_id"),
+            origin=f"peer:{machine}",
+        )
+    except shadow_mod.ShadowRefused as exc:
+        return json_error(exc.status, str(exc))
+    return json_response(result)
+
+
+async def h_shadows_list(request: web.Request) -> web.Response:
+    """Every other daemon's member of every mesh held here, with its card."""
+    holder = request.app["shadow"]
+    mm = _mesh_mgr(request)
+    directory = holder.get("directory")
+    if directory is None or holder.get("mesh") is not mm:
+        directory = holder["directory"] = shadow_mod.Directory(mm)
+        holder["mesh"] = mm
+    return json_response({
+        "machine": mm.machine or None,
+        "relay_connected": bool(mm.relay_connected()),
+        "shadows": await directory.list(),
+    })
+
+
+async def h_shadow_ws(request: web.Request) -> web.WebSocketResponse:
+    """A shadow's terminal for this page: output only, relayed from its host."""
+    machine = request.match_info["machine"]
+    session = request.match_info["session"]
+    ws = web.WebSocketResponse(heartbeat=ws_mod.HEARTBEAT)
+    await ws.prepare(request)
+    request.app["websockets"].add(ws)
+    conns = connections.install(request.app)
+    record = conns.opened("shadow", f"{machine}/{session}", request, ws=ws)
+    try:
+        await shadow_mod.bridge_to_viewer(ws, _mesh_mgr(request), machine, session)
+    finally:
+        request.app["websockets"].discard(ws)
+        if not ws.closed:
+            await ws.close()
+        conns.closed(record, ws.close_code, ws.exception())
+    return ws
+
+
+async def h_shadow_keys(request: web.Request) -> web.Response:
+    """The session line, typed into another daemon's member via its host."""
+    body = await _json_body(request)
+    text = body.get("text")
+    input_id = body.get("input_id")
+    if not isinstance(text, str) or not text.strip():
+        return json_error(400, "'text' must be a non-empty string")
+    if not isinstance(input_id, str) or not input_id.strip():
+        return json_error(400, "'input_id' must be a non-empty string")
+    try:
+        result = await _mesh_mgr(request).shadow_call(
+            request.match_info["machine"], request.match_info["session"],
+            "/peer/shadow/keys", {"text": text, "input_id": input_id},
+        )
+    except mesh_mod.PeerUnreachable as exc:
+        return json_error(502, str(exc))
     return json_response(result)
 
 
