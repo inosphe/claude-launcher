@@ -48,7 +48,9 @@ Selection, in two rules, both checkable by eye:
       applied to python too. It is what catches a guard that pins a file by
       string rather than importing it -- ``test_delivery_contract`` keys a
       table on ``("cli_sessions.py", "_cmd_send_keys")`` and imports nothing.
-      Dunder files are excluded, see :func:`_is_dunder`.
+      Dunder files are excluded, see :func:`_is_dunder`. 2c and 3a are one
+      function, :func:`named_by`, which ``tools/related_surfaces.py`` asks
+      as well.
 3. **A changed file that is not python pulls in whatever guards it.** Rules 2
    and 2b need a python module to follow, so without this a round that edits
    only workflow yaml selects nothing -- even though several test modules
@@ -546,6 +548,11 @@ def _is_test_module(p: Path) -> bool:
     )
 
 
+def _is_source(p: Path) -> bool:
+    """``src/**.py`` / ``tools/*.py`` -- the paths rules 2, 2b and 2c speak for."""
+    return p.suffix == ".py" and p.parts[:1] in (("src",), ("tools",))
+
+
 def map_one(repo: Path, rel: str) -> List[str]:
     """The test modules **one** changed path maps to, by the rules above.
 
@@ -578,19 +585,16 @@ def map_one(repo: Path, rel: str) -> List[str]:
     p = Path(rel)
     if _is_test_module(p):                                # 1
         return [rel] if (repo / rel).is_file() else []    # deleted: not runnable
-    picked = set()
-    if p.suffix == ".py" and p.parts[:1] in (("src",), ("tools",)):
+    picked = set(named_by(repo, rel))                     # 2c / 3a
+    if _is_source(p):
         twin = Path("tests") / f"test_{p.stem}.py"
         if (repo / twin).is_file():                       # 2
             picked.add(twin.as_posix())
         mod = module_name(rel)                            # 2b
         if mod:
             picked.update(importers(repo, mod))
-        if not _is_dunder(p):                             # 2c
-            picked.update(mentioning(repo, p.name))
         return sorted(picked)
     posix = p.as_posix()
-    picked.update(mentioning(repo, p.name))               # 3a
     for prefixes, guards in EXPLICIT_GUARDS:              # 3b
         if posix.startswith(prefixes):
             picked.update(g for g in guards if (repo / g).is_file())
@@ -672,6 +676,26 @@ def mentioning(repo: Path, name: str) -> List[str]:
     """
     term = needle(name)
     return [rel for rel, text in test_texts(repo).items() if term in text]
+
+
+def named_by(repo: Path, rel: str) -> List[str]:
+    """Rules 2c and 3a for one changed path: the test modules that name it.
+
+    Empty for a dunder source file (2c, :func:`_is_dunder` -- its stem names
+    nothing). :func:`map_one` selects these for every path except a test
+    module, where rule 1 runs the module itself and stops.
+
+    One function because two tools ask it. ``tools/related_surfaces.py``
+    lists the tests that name a changed file and says of them "the gate runs
+    them"; while it called :func:`mentioning` directly it also searched for
+    changed test modules and dunder files, which the gate does not. On
+    2026-09-30 it marked four modules as run by the gate that this file's
+    selection did not contain (``claunch-wt12o.1.2``).
+    """
+    p = Path(rel)
+    if _is_source(p) and _is_dunder(p):
+        return []
+    return mentioning(repo, p.name)
 
 
 def module_name(rel: str) -> Optional[str]:
@@ -1405,7 +1429,7 @@ def relations_tried(rel: str) -> str:
     carries the ruling.
     """
     p = Path(rel)
-    if p.suffix == ".py" and p.parts[:1] in (("src",), ("tools",)):
+    if _is_source(p):
         tried = [f"same-named test (tests/test_{p.stem}.py)"]
         if module_name(rel):
             tried.append("direct import by a test")
