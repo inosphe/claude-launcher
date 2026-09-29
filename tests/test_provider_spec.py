@@ -427,6 +427,24 @@ def test_pi_reasoning_extension_contract():
     assert result.returncode == 0, result.stdout + result.stderr
 
 
+def test_pi_api_key_reference_extension_contract():
+    import shutil
+    import subprocess
+    from pathlib import Path
+
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("Node.js is required for the Pi extension contract")
+    result = subprocess.run(
+        [node, "--test", str(Path(__file__).with_name("pi_api_key.test.mjs"))],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
 # --- migration -----------------------------------------------------------------------
 
 

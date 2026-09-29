@@ -1,6 +1,9 @@
 // Register one process-local Pi provider from non-secret values assembled by
 // claunch. The API key remains in the harness's declared environment variable;
-// this extension stores only that variable's name.
+// this extension stores only a reference to that variable.
+
+import fs from "node:fs";
+import path from "node:path";
 
 const provider = process.env.CLAUNCH_PI_PROVIDER;
 const baseUrl = process.env.CLAUNCH_PI_BASE_URL;
@@ -32,6 +35,61 @@ function parseHeaders(raw) {
     throw new Error("CLAUNCH_PI_HEADERS must be a JSON object");
   }
   return Object.keys(parsed).length > 0 ? parsed : undefined;
+}
+
+// Pi 0.77.0 changed how a provider's apiKey string is read: a plain string is
+// now the key itself, and an environment variable is referenced as $NAME
+// (0.77.0-0.79.3 still accepted a bare uppercase name for custom providers;
+// 0.79.4 dropped that). Before 0.77.0 only the bare name was resolved, and
+// "$NAME" would be sent literally. Sending the bare name to 0.79.4+ makes the
+// backend receive the variable's name as the key (401).
+const ENV_REFERENCE_SINCE = [0, 77, 0];
+
+// The running Pi's version, from its package.json: PI_PACKAGE_DIR (Pi's own
+// override), next to the executable (Bun binary), or above the entry script
+// (npm and managed installs). undefined when none of them says.
+export function piVersion(env = process.env, argv = process.argv, execPath = process.execPath) {
+  const candidates = [];
+  if (env.PI_PACKAGE_DIR) candidates.push(env.PI_PACKAGE_DIR);
+  if (execPath) candidates.push(path.dirname(execPath));
+  if (argv[1]) {
+    let dir;
+    try {
+      dir = path.dirname(fs.realpathSync(argv[1]));
+    } catch {
+      dir = undefined;
+    }
+    while (dir) {
+      candidates.push(dir);
+      const parent = path.dirname(dir);
+      if (parent === dir) break;
+      dir = parent;
+    }
+  }
+  for (const dir of candidates) {
+    let pkg;
+    try {
+      pkg = JSON.parse(fs.readFileSync(path.join(dir, "package.json"), "utf8"));
+    } catch {
+      continue;
+    }
+    if (typeof pkg?.name === "string" && pkg.name.endsWith("/pi-coding-agent") && typeof pkg.version === "string") {
+      return pkg.version;
+    }
+  }
+  return undefined;
+}
+
+// The apiKey string that makes `version` read `name` from the environment. An
+// unknown version gets the $NAME form, which every current Pi requires.
+export function apiKeyReference(name, version) {
+  const parts = /^(\d+)\.(\d+)\.(\d+)/.exec(version ?? "");
+  if (!parts) return `$${name}`;
+  for (let i = 0; i < 3; i++) {
+    const diff = Number(parts[i + 1]) - ENV_REFERENCE_SINCE[i];
+    if (diff !== 0) return diff > 0 ? `$${name}` : name;
+  }
+  return `$${name}`;
 }
 
 export default function (pi) {
@@ -80,7 +138,7 @@ export default function (pi) {
 
   pi.registerProvider(provider, {
     baseUrl,
-    apiKey: tokenEnv,
+    apiKey: apiKeyReference(tokenEnv, piVersion()),
     api,
     authHeader: process.env.CLAUNCH_PI_AUTH_HEADER === "1",
     ...(headers ? { headers } : {}),
