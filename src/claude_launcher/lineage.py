@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from typing import Dict, List, Optional, Tuple
 
-from . import credentials, harnesses, profile as profile_mod, settings, store
+from . import credentials, harnesses, profile as profile_mod, store, template
 from .profile import Profile
 
 
@@ -139,11 +139,20 @@ def clear_parent(profile: Profile) -> None:
     store.set_profile_field(profile.name, "parent", None)
 
 
-def effective_env(profile: Profile) -> Dict[str, str]:
-    """Env vars merged from root ancestor down to the profile (child wins)."""
+def effective_env(profile: Profile, doc: Optional[dict] = None) -> Dict[str, str]:
+    """Env vars merged from the template, then root ancestor down to the profile.
+
+    The template's ``env`` is the bottom layer and the profile itself the top
+    (child wins). A key written with no value clears what the layers below
+    would give (see :func:`template.resolve_layers`).
+    """
+    doc = store.load() if doc is None else doc
+    layers = [template.live_env(doc)] + [
+        store.profile_entry(p.name, doc).get("env") for p in chain(profile, doc)
+    ]
     env: Dict[str, str] = {}
-    for p in chain(profile):
-        env.update(settings.get_env(p))
+    for layer in template.resolve_layers(layers):
+        env.update({str(k): str(v) for k, v in layer.items()})
     return env
 
 

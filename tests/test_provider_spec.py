@@ -595,32 +595,71 @@ def test_providers_listing_shows_the_spec(home, capsys):
 # --- template ----------------------------------------------------------------------
 
 
-def test_template_layer_is_copied_into_new_profiles_and_keeps_own_fields(home):
-    from claude_launcher import template
-
+def test_template_layer_applies_under_every_profile_without_copying(home, capsys):
     store.update(lambda doc: doc.update({"template": {
         "auto_compact_at": 400_000,
         "harness_options": {"claude": {"env": {"CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "0"}}},
     }}))
-    p = profile.create("fresh")
-    template.apply_to(p)
+    assert cli_main(["create", "fresh", "--no-seed"]) == 0
+    assert "applied template" not in capsys.readouterr().out
+    # The new entry stays clean; the template is read at launch instead.
     entry = store.profile_entry("fresh")
-    assert entry["auto_compact_at"] == 400_000
-    assert entry["harness_options"]["claude"]["env"]["CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS"] == "0"
+    assert "auto_compact_at" not in entry and "harness_options" not in entry
+    p = profile.require("fresh")
     env = runner.child_env(p, with_token=True, base_env={})
     assert env["CLAUDE_CODE_AUTO_COMPACT_WINDOW"] == "400000"
     assert env["CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS"] == "0"
-    # A field the profile already sets is kept; option maps merge.
-    q = profile.create("own")
-    store.set_profile_field("own", "auto_compact_at", 100_000)
-    store.set_profile_field("own", "harness_options", {"claude": {"env": {"MINE": "1"}}})
-    template.apply_to(q)
-    entry = store.profile_entry("own")
-    assert entry["auto_compact_at"] == 100_000
-    assert entry["harness_options"]["claude"]["env"] == {
-        "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "0",
-        "MINE": "1",
-    }
+    # A field the profile sets wins; option maps merge key by key.
+    store.set_profile_field("fresh", "auto_compact_at", 100_000)
+    store.set_profile_field("fresh", "harness_options", {"claude": {"env": {"MINE": "1"}}})
+    env = runner.child_env(p, with_token=True, base_env={})
+    assert env["CLAUDE_CODE_AUTO_COMPACT_WINDOW"] == "100000"
+    assert env["CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS"] == "0"
+    assert env["MINE"] == "1"
+
+
+def test_a_key_with_no_value_clears_the_template_and_parent(home):
+    store.update(lambda doc: doc.update({"template": {
+        "auto_compact_at": 400_000,
+        "harness_options": {"claude": {"env": {"CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "0"}}},
+        "env": {"GIT_CONFIG_GLOBAL": "/x/tpl", "KEEP": "1"},
+    }}))
+    root = profile.create("root")
+    kid = profile.create("kid")
+    lineage.set_parent(kid, "root")
+    store.set_profile_field("root", "env", {"PARENT_ONLY": "p"})
+    # As written by hand in the YAML (``auto_compact_at:``); the field setter
+    # treats None as "remove the key".
+    store.update(lambda doc: doc["profiles"]["kid"].update({"auto_compact_at": None}))
+    store.set_profile_field("kid", "harness_options", {"claude": {"env": {
+        "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": None,
+    }}})
+    store.set_profile_field("kid", "env", {"GIT_CONFIG_GLOBAL": None, "PARENT_ONLY": None})
+    env = runner.child_env(kid, with_token=True, base_env={})
+    assert "CLAUDE_CODE_AUTO_COMPACT_WINDOW" not in env
+    assert "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS" not in env
+    assert "GIT_CONFIG_GLOBAL" not in env and "PARENT_ONLY" not in env
+    assert env["KEEP"] == "1"
+    # The parent itself still gets both.
+    env = runner.child_env(root, with_token=True, base_env={})
+    assert env["GIT_CONFIG_GLOBAL"] == "/x/tpl" and env["PARENT_ONLY"] == "p"
+    assert env["CLAUDE_CODE_AUTO_COMPACT_WINDOW"] == "400000"
+
+
+def test_env_clear_cli_writes_a_key_with_no_value(home, capsys):
+    store.update(lambda doc: doc.update({"template": {"env": {"G": "t"}}}))
+    profile.create("w")
+    assert cli_main(["env", "w", "OTHER=1"]) == 0
+    assert cli_main(["env", "w", "--clear", "G"]) == 0
+    assert store.profile_entry("w")["env"] == {"OTHER": "1", "G": None}
+    assert "G  (cleared" in capsys.readouterr().out
+    # A later set keeps the clear of another key.
+    assert cli_main(["env", "w", "MORE=2"]) == 0
+    assert store.profile_entry("w")["env"]["G"] is None
+    capsys.readouterr()
+    assert cli_main(["env", "w", "--effective"]) == 0
+    out = capsys.readouterr().out
+    assert "G=" not in out and "OTHER=1" in out
 
 
 def test_migrate_converts_the_template_env_block(home):
@@ -651,17 +690,17 @@ def test_migrate_keeps_a_common_template_env(home):
 
 
 def test_common_env_reaches_every_harness_along_the_parent_chain(home):
-    from claude_launcher import template
-
     store.update(lambda doc: doc.update({"template": {"env": {"GIT_CONFIG_GLOBAL": "/x/root"}}}))
     root = profile.create("root")
-    template.apply_to(root)
-    assert store.profile_entry("root")["env"] == {"GIT_CONFIG_GLOBAL": "/x/root"}
+    assert settings.get_env(root) == {}
     child = profile.create("kid")
     lineage.set_parent(child, "root")
     for name in ("claude", "pi"):
         env = runner.harness_child_env(child, harnesses.get(name), base_env={})
         assert env["GIT_CONFIG_GLOBAL"] == "/x/root", name
+    store.set_profile_field("root", "env", {"GIT_CONFIG_GLOBAL": "/x/parent"})
+    env = runner.harness_child_env(child, harnesses.get("pi"), base_env={})
+    assert env["GIT_CONFIG_GLOBAL"] == "/x/parent"
     store.set_profile_field("kid", "env", {"GIT_CONFIG_GLOBAL": "/x/kid"})
     env = runner.harness_child_env(child, harnesses.get("pi"), base_env={})
     assert env["GIT_CONFIG_GLOBAL"] == "/x/kid"
