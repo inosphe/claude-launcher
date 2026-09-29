@@ -34,6 +34,41 @@ from . import daemon_client, mcp_rpc
 
 TOOLS = [
     {
+        "name": "urgent_send",
+        "description": (
+            "EXCEPTION path: send ONE message to ONE member you are not "
+            "connected to (a handle in `mesh`, or a session name in any mesh "
+            "on this daemon). Only a leader may call it; anyone else is "
+            "refused. A reason (12+ characters) is required and is written "
+            "into the audit record of both meshes, along with who sent it. "
+            "It opens no connection, files no wire request, and takes no "
+            "'*', selector or list; 3 per hour per sender, 1 per target per "
+            "10 minutes. Use it only when the normal rules cannot serve and "
+            "waiting would cost more than the exception: for a normal need, "
+            "ask for a connection ('connect', 'wire_requests') instead."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "mesh": {"type": "string", "description": "your own mesh"},
+                "to": {
+                    "type": "string",
+                    "description": "ONE member handle, or a session name",
+                },
+                "body": {"type": "string", "description": "message text"},
+                "reason": {
+                    "type": "string",
+                    "description": "why the normal connection rules cannot serve",
+                },
+                "target_mesh": {
+                    "type": "string",
+                    "description": "only if the target session is in several meshes",
+                },
+            },
+            "required": ["mesh", "to", "body", "reason"],
+        },
+    },
+    {
         "name": "send",
         "description": (
             "Send a message to mesh members. '*' broadcasts to every other "
@@ -889,6 +924,20 @@ def call_tool(name: str, args: dict) -> dict:
         return _client().get(
             f"/api/mesh/{mesh}/wire-requests" + (f"?state={state}" if state else "")
         )
+    if name == "urgent_send":
+        result = _client().post(
+            f"/api/mesh/{mesh}/urgent",
+            {
+                "from": _session(),
+                "to": str(args.get("to") or ""),
+                "body": str(args.get("body") or ""),
+                "reason": str(args.get("reason") or ""),
+                "target_mesh": str(args.get("target_mesh") or ""),
+            },
+        )
+        relay = result.pop("relay", None)
+        result["relay"] = _relay_summary(relay)
+        return result
     if name == "send":
         sender = _session()
         to_raw = str(args.get("to") or "")

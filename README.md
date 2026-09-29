@@ -2880,6 +2880,16 @@ claunch mesh connect dev worker_1 worker_2      # let two MEMBERS talk directly
 claunch mesh disconnect dev worker_1 worker_2   # ...or stop them (send refused)
 claunch mesh wire-requests dev    # ...who was refused a peer and is waiting on
                                   # you; 'connect' grants one, --decline says no
+claunch mesh urgent dev s26-qf1 "build is red, stop pushing" --reason "release freeze, no shared mesh"
+                                  # EXCEPTION: one message to one member you are
+                                  # not connected to, in this mesh or any other
+                                  # mesh on this daemon. Leader or operator only;
+                                  # --reason (12+ chars) is required and written
+                                  # into both meshes' logs (ref.urgent). Opens no
+                                  # connection, files no wire request, takes no
+                                  # '*'/@selector/list. Agents: 3/hour/sender and
+                                  # 1 per target per 10 min (MCP 'urgent_send').
+                                  # A target on another machine is refused.
 claunch mesh invite dev           # optional ticket that pre-approves one join
 claunch mesh join dev@work-pc --code <ticket>   # ...admitted without waiting
 claunch mesh revoke dev other-pc  # unlink a guest machine (persistent until then)

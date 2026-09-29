@@ -586,6 +586,7 @@ def build_app(
     r.add_delete("/api/mesh/{mesh}/members/{handle}", h_mesh_leave)
     r.add_patch("/api/mesh/{mesh}/members/{handle}/subroles", h_mesh_member_subroles)
     r.add_post("/api/mesh/{mesh}/messages", h_mesh_send)
+    r.add_post("/api/mesh/{mesh}/urgent", h_mesh_urgent)
     r.add_get("/api/mesh/{mesh}/messages", h_mesh_history)
     r.add_get("/api/mesh/{mesh}/owed", h_mesh_owed)
     r.add_get("/api/mesh/{mesh}/flows", h_mesh_flows)
@@ -4639,6 +4640,30 @@ async def h_mesh_send(request: web.Request) -> web.Response:
         reply_to=str(body.get("reply_to") or "") or None,
         sections=sections if isinstance(sections, dict) else None,
         ref=ref if isinstance(ref, dict) else None,
+    )
+    return json_response({**result, "relay": request.app["relay_state"]()})
+
+
+async def h_mesh_urgent(request: web.Request) -> web.Response:
+    """The exception path to a member the sender is not connected to.
+
+    ``from`` is the caller's own session (empty: the human operator). A body
+    ``external`` flag is not read — see :meth:`MeshManager.urgent_send`.
+    """
+    body = await _json_body(request)
+    to = body.get("to")
+    text = body.get("body")
+    if not isinstance(to, str) or not to:
+        return json_error(400, "'to' must be one handle or session name")
+    if not isinstance(text, str):
+        return json_error(400, "'body' must be a string")
+    result = _mesh_mgr(request).urgent_send(
+        request.match_info["mesh"],
+        str(body.get("from") or ""),
+        to,
+        text,
+        reason=str(body.get("reason") or ""),
+        target_mesh=str(body.get("target_mesh") or ""),
     )
     return json_response({**result, "relay": request.app["relay_state"]()})
 

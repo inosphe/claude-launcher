@@ -115,6 +115,12 @@ INTENT_TYPES = frozenset({"say", "ask", "decide"}) | REPLY_OPTIONAL_TYPES
 #: to whatever it is about. The mesh stores and relays it verbatim: knowing its
 #: shape would mean the mesh learning every schema that ever rides on it.
 REF_KEY = "ref"
+#: Key under ``ref`` that marks an urgent one-shot send and carries its record.
+URGENT_REF_KEY = "urgent"
+URGENT_MIN_REASON = 12
+URGENT_PER_SENDER = 3
+URGENT_SENDER_WINDOW = 3600.0
+URGENT_PAIR_GAP = 600.0
 
 
 def expects_reply(message_type) -> bool:
@@ -1381,6 +1387,9 @@ class MeshManager:
         # None = the daemon's global mesh directory.
         self._root = root
         self._meshes: Dict[str, Mesh] = {}
+        #: urgent-send rate limits (monotonic stamps); a daemon restart resets them.
+        self._urgent_sent: Dict[str, List[float]] = {}
+        self._urgent_pair: Dict[Tuple[str, str], float] = {}
         self._workers: Dict[str, asyncio.Task] = {}
         #: Sessions whose join briefing the onboarding path is folding into a
         #: single opening block. Held only for the length of one join call.
@@ -3322,6 +3331,194 @@ class MeshManager:
             prior = result.get("notice")
             result = {**result, "notice": f"{prior} {note}" if prior else note}
         return result
+
+    # ------------------------------------------------------------------ #
+    # urgent one-shot send
+    # ------------------------------------------------------------------ #
+    def _urgent_target(
+        self, home: Mesh, to: str, target_mesh: str
+    ) -> Tuple[Mesh, Member]:
+        """Which member of which mesh ``to`` names, on THIS daemon.
+
+        ``to`` is a handle in the sender's own mesh, or a session name in any
+        mesh here. A member whose session lives on another machine, or whose
+        mesh this daemon only mirrors, is refused by name: the urgent path
+        types into a terminal this daemon owns and appends to a log this
+        daemon is the authority for, and it has neither for those.
+        """
+        meshes = [self.get(target_mesh)] if target_mesh else list(self._meshes.values())
+        hits: List[Tuple[Mesh, Member]] = []
+        elsewhere: List[str] = []
+        for mesh in meshes:
+            for member in mesh.members.values():
+                if not (member.session == to or (mesh is home and member.handle == to)):
+                    continue
+                if mesh.primary or not self._is_local(mesh, member):
+                    elsewhere.append(f"{member.handle} in {mesh.name}")
+                else:
+                    hits.append((mesh, member))
+        if not hits:
+            if elsewhere:
+                raise MeshError(
+                    f"{to!r} lives on another machine ({', '.join(elsewhere)}): "
+                    "an urgent send is delivered on this daemon only, with no "
+                    "relay hop — ask the operator to reach it"
+                )
+            raise MeshError(
+                f"no member named {to!r} in any mesh on this daemon (a handle "
+                f"in {home.name!r}, or a session name)"
+            )
+        own = [h for h in hits if h[0] is home]
+        if len(own) == 1:
+            return own[0]
+        if len(hits) > 1:
+            raise MeshError(
+                f"{to!r} is a member of {len(hits)} meshes here "
+                f"({', '.join(sorted(m.name for m, _ in hits))}) — name one "
+                "with target_mesh"
+            )
+        return hits[0]
+
+    def _urgent_rate_check(self, sender: str, to_key: str) -> None:
+        """3 sends per sender per hour, 1 per sender/target pair per 10 min."""
+        now = time.monotonic()
+        recent = [t for t in self._urgent_sent.get(sender, []) if now - t < URGENT_SENDER_WINDOW]
+        self._urgent_sent[sender] = recent
+        if len(recent) >= URGENT_PER_SENDER:
+            wait = int(URGENT_SENDER_WINDOW - (now - recent[0]))
+            raise MeshError(
+                f"urgent send limit: {URGENT_PER_SENDER} per hour per sender "
+                f"already used — next one allowed in {wait}s"
+            )
+        last = self._urgent_pair.get((sender, to_key))
+        if last is not None and now - last < URGENT_PAIR_GAP:
+            raise MeshError(
+                f"urgent send limit: {sender!r} already sent {to_key!r} one "
+                f"{int(now - last)}s ago — one per pair per "
+                f"{int(URGENT_PAIR_GAP // 60)} minutes"
+            )
+
+    def urgent_send(
+        self,
+        name: str,
+        sender: str,
+        to: str,
+        body: str,
+        *,
+        reason: str,
+        target_mesh: str = "",
+    ) -> dict:
+        """One message to one member the sender is not connected to.
+
+        The exception path for a refusal the member graph would otherwise
+        stand on (``_resolve_recipients``): the sender says why, once, and
+        the message is delivered and recorded. What it deliberately does not
+        do: change ``member_edges``, file or grant a wire request, take a
+        list or ``*`` or a selector, or read any caller-supplied
+        ``external`` claim — authority comes from ``sender``, the caller's
+        own session, and that member's role in mesh ``name``.
+
+        ``sender`` empty means the human operator (the CLI sends no session
+        outside a claunch session); an agent sender must hold ``leader`` in
+        ``name``. Operators are not rate limited.
+
+        Delivery is an append to the TARGET mesh's log from a non-member
+        label ``urgent:<sender>``, which ``Mesh.connected`` waves through the
+        way it does any external sender. The sender's mesh gets an audit
+        entry addressed to nobody when the target is in another mesh; the
+        target mesh's copy is the message itself, and both carry
+        ``ref.urgent``.
+        """
+        home = self.get(name)
+        if not isinstance(to, str) or not to.strip() or to.strip() == "*" or to.startswith("@"):
+            raise MeshError(
+                "an urgent send names exactly one member (a handle or a "
+                "session) — no '*', selector or list"
+            )
+        to = to.strip()
+        reason = str(reason or "").strip()
+        if len(reason) < URGENT_MIN_REASON:
+            raise MeshError(
+                f"an urgent send needs a reason of at least {URGENT_MIN_REASON} "
+                "characters — it is written into both meshes' logs"
+            )
+        text = _CTRL_RE.sub("", str(body or "")).strip()
+        if not text:
+            raise MeshError("empty message body")
+        if sender:
+            member = self.resolve_sender(name, sender)
+            if member is None or not self._is_local(home, member):
+                raise MeshError(
+                    f"{sender!r} is not a local member of mesh {name!r}: an "
+                    "urgent send is an operator or leader act"
+                )
+            if not member.holds("leader"):
+                raise MeshError(
+                    f"{member.handle!r} is a {member.role_label()} in mesh "
+                    f"{name!r}: only a leader or the operator may send an "
+                    "urgent message — ask your leader to send it"
+                )
+            who, authority, own_session = member.handle, "leader", member.session
+        else:
+            who, authority, own_session = "operator", "operator", ""
+        tmesh, target = self._urgent_target(home, to, target_mesh)
+        if target.session == own_session and own_session:
+            raise MeshError("an urgent send cannot address yourself")
+        to_key = f"{tmesh.name}/{target.handle}"
+        if authority != "operator":
+            self._urgent_rate_check(who, to_key)
+        record = {
+            "from": who,
+            "from_mesh": home.name,
+            "to": target.handle,
+            "to_session": target.session,
+            "to_mesh": tmesh.name,
+            "authority": authority,
+            "reason": reason,
+            "connected": bool(tmesh is home and home.connected(who, target.handle)),
+        }
+        head = (
+            f"[URGENT one-shot from {who} ({authority}, mesh {home.name}) — "
+            f"reason: {reason}]"
+        )
+        foot = (
+            "(No channel was opened. This sender is not connected to you, so "
+            "a reply to it is refused: answer through your own leader.)"
+        )
+        result = self._send_core(
+            tmesh, f"urgent:{who}", target.handle, f"{head}\n{text}\n{foot}",
+            external=True, type="fyi", ref={URGENT_REF_KEY: record},
+        )
+        self._flush_guests_soon(tmesh)
+        now = time.monotonic()
+        if authority != "operator":
+            self._urgent_sent.setdefault(who, []).append(now)
+            self._urgent_pair[(who, to_key)] = now
+        audited = [tmesh.name]
+        if tmesh is not home:
+            audit = {
+                "id": "msg-" + uuid.uuid4().hex[:12],
+                "ts": utcnow(),
+                "from": f"urgent:{who}",
+                "to": [],
+                "type": "fyi",
+                "epoch": home.authority_epoch,
+                "seq": home.next_seq,
+                "body": (
+                    f"URGENT SEND audit: {who} ({authority}) -> {target.handle} "
+                    f"in mesh {tmesh.name} ({target.session}), message "
+                    f"{result['id']}. Reason: {reason}"
+                ),
+                REF_KEY: {URGENT_REF_KEY: {**record, "delivered_id": result["id"]}},
+            }
+            home.next_seq += 1
+            home.messages.append(audit)
+            home.seen_ids.add(audit["id"])
+            home.last_append = time.monotonic()
+            self._append_log(home, audit)
+            self._flush_guests_soon(home)
+            audited.append(home.name)
+        return {**result, "urgent": record, "audited_in": audited}
 
     async def _resolve_audience(
         self, mesh: Mesh, sender: str, to: Union[str, List[str]]
