@@ -10,10 +10,14 @@ from __future__ import annotations
 
 import json
 from typing import Tuple
+from urllib.parse import quote
 
 
 def build_request(path: str, body: dict, *, host: str = "peer") -> bytes:
     payload = json.dumps(body, ensure_ascii=False).encode("utf-8")
+    # The head must be ASCII, but ``host`` is a relay machine name and those
+    # are free text; the peer routes on the bridge, never on this header.
+    host = quote(host, safe="-._~:")
     head = (
         f"POST {path} HTTP/1.1\r\n"
         f"Host: {host}\r\n"

@@ -29355,9 +29355,13 @@ function renderInviteWizard(info, fed, members) {
 
   if (st.open) {
     const machineSel = document.createElement("select");
-    machineSel.appendChild(el(
+    // The placeholders carry an explicit empty value: an <option> without
+    // one submits its label, and "machine…" then went out as a peer name.
+    const machineHint = el(
       "option", null, st.peers === null ? "loading…" : "machine…"
-    ));
+    );
+    machineHint.value = "";
+    machineSel.appendChild(machineHint);
     for (const p of st.peers || []) {
       const opt = el("option", null, p);
       opt.value = p;
@@ -29375,9 +29379,11 @@ function renderInviteWizard(info, fed, members) {
     );
     const free = (st.sessions || []).filter((s) => !taken.has(s.name));
     const sessionSel = document.createElement("select");
-    sessionSel.appendChild(el("option", null,
+    const sessionHint = el("option", null,
       !st.machine ? "pick a machine first"
-        : (st.sessions === null ? "loading…" : "session…")));
+        : (st.sessions === null ? "loading…" : "session…"));
+    sessionHint.value = "";
+    sessionSel.appendChild(sessionHint);
     for (const s of free) {
       const opt = el("option", null, `${s.name} · ${s.status}`);
       opt.value = s.name;
