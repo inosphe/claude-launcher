@@ -29621,6 +29621,27 @@ function renderRemoteMeshes() {
       li.addEventListener("click", () => {
         location.hash = "#/mesh/" + encodeURIComponent(r.mesh);
       });
+    } else if (r.state === "name_taken") {
+      // A mirror here is keyed by the mesh's own name, so this one cannot be
+      // attached while another mesh holds it. Say which one and what frees
+      // the name, and open it from here.
+      const local = r.local || {};
+      const what = local.primary
+        ? `a mirror of ${local.primary}`
+        : "a mesh owned by this daemon";
+      const free = local.primary
+        ? "detach it (its page, Detach…) to free the name"
+        : "remove it (its page, Remove mesh) to free the name — its " +
+          "history is kept on disk";
+      li.appendChild(el("span", "mesh-remote-why",
+        `'${r.mesh}' here is ${what} (project ${local.project || "default"}, ` +
+        `${local.members ?? "?"} member${local.members === 1 ? "" : "s"}, ` +
+        `${local.messages ?? "?"} msg); ${free}, then attach`));
+      const open = el("button", "wf-btn option", `Open local ${r.mesh}`);
+      open.addEventListener("click", () => {
+        location.hash = "#/mesh/" + encodeURIComponent(r.mesh);
+      });
+      li.appendChild(open);
     }
     list.appendChild(li);
   }

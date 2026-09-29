@@ -2585,6 +2585,15 @@ class MeshManager:
                 row["state"] = "attached"
             elif local is not None:
                 row["state"] = "name_taken"
+                # What occupies the name, so the reader can decide what to do
+                # with it (open it, detach it, or remove it) — a bare "taken"
+                # names no next step.
+                row["local"] = {
+                    "primary": local.primary or None,
+                    "project": local.project or projects.DEFAULT,
+                    "members": len(local.members),
+                    "messages": len(local.messages),
+                }
             elif (row["mesh"], row["machine"]) in pending:
                 row["state"] = "pending"
                 row["request_id"] = pending[(row["mesh"], row["machine"])]

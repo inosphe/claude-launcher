@@ -105,7 +105,8 @@ const DISCOVERED = {
     { mesh: "old", machine: "pcB", state: "attached", access: "approval",
       members: 2, sources: ["public"] },
     { mesh: "web", machine: "pcC", state: "name_taken", access: "approval",
-      members: 0, sources: ["public"] },
+      members: 0, sources: ["public"],
+      local: { primary: null, project: "gds", members: 4, messages: 12 } },
     { mesh: "q", machine: "pcC", state: "pending", access: "approval",
       members: 0, sources: ["public"] },
   ],
@@ -148,11 +149,19 @@ const DISCOVERED = {
   const list = nodes["mesh-remote-list"];
   assert.strictEqual(list.kids.length, 5);
   const buttons = all(list, (n) => n.tag === "button");
-  assert.deepStrictEqual(buttons.map((b) => b.text), ["Attach", "Attach"],
-    "only the two available rows are attachable");
+  assert.deepStrictEqual(buttons.map((b) => b.text),
+    ["Attach", "Attach", "Open local web"],
+    "the two available rows attach; a taken name opens what holds it");
   assert.ok(/offered/.test(textOf(list.kids[0])), textOf(list.kids[0]));
   assert.ok(/needs approval/.test(textOf(list.kids[1])), textOf(list.kids[1]));
   assert.ok(/name taken/.test(textOf(list.kids[3])), textOf(list.kids[3]));
+  // ...and says what holds the name and what frees it
+  assert.ok(/owned by this daemon/.test(textOf(list.kids[3])), textOf(list.kids[3]));
+  assert.ok(/project gds, 4 members, 12 msg/.test(textOf(list.kids[3])),
+    textOf(list.kids[3]));
+  assert.ok(/Remove mesh/.test(textOf(list.kids[3])), textOf(list.kids[3]));
+  buttons[2].handlers.click();
+  assert.strictEqual(location.hash, "#/mesh/web");
   // an attached row opens the mesh instead
   assert.ok(list.kids[2].classes.has("clickable"));
   list.kids[2].handlers.click();

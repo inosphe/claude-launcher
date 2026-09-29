@@ -177,6 +177,14 @@ def test_offered_attach_is_one_call_and_sessions_join_freely(home, tmp_path):
         mm_b.create("own")
         with pytest.raises(MeshConflict):
             await mm_b.attach("own@pcA")
+        # discovery says what holds a taken name
+        mm_a.create("own")
+        await mm_a.set_visibility("own", "public")
+        rows = {r["mesh"]: r for r in (await mm_b.discover())["meshes"]}
+        assert rows["own"]["state"] == "name_taken"
+        assert rows["own"]["local"] == {
+            "primary": None, "project": "default", "members": 0, "messages": 0,
+        }
         with pytest.raises(MeshError):
             await mm_b.attach("m")  # no machine: not an address
 

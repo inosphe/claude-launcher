@@ -3507,6 +3507,7 @@ a.wf-btn { display: inline-block; text-decoration: none; line-height: 1.5; }
 }
 #mesh-remote-list .meta { margin-left: auto; color: #7d8590; font-size: 11px; }
 #mesh-remote-note { padding: 0 16px; font-size: 11px; color: #7d8590; margin: 4px 0; }
+#mesh-remote-list .mesh-remote-why { flex: 1 1 100%; font-size: 11px; color: #d29922; }
 #mesh-remote-note.error { color: #f85149; }
 #mesh-remote-note.hidden { display: none; }
 #new-mesh { display: flex; gap: 6px; padding: 8px 16px 12px; flex-wrap: wrap; }
