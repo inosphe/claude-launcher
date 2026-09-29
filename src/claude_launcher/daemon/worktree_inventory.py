@@ -281,16 +281,33 @@ class RemoveError(Exception):
     """A checkout that was not removed, and why."""
 
 
-def find(roots: Iterable[str], path: str) -> Optional[Tuple[str, dict]]:
-    """``(root, porcelain entry)`` of the launcher worktree at ``path``."""
-    want = _key(path)
+def index(roots: Iterable[str]) -> Dict[str, Tuple[str, dict]]:
+    """``normalised path -> (root, porcelain entry)`` of every launcher
+    worktree of ``roots`` -- one ``git worktree list`` per repository, read
+    once for a whole batch rather than once per path in it."""
+    out: Dict[str, Tuple[str, dict]] = {}
     for root in roots:
         base_dir = str(worktree_mod.worktrees_dir(Path(root)))
         for entry in _porcelain(root):
             p = os.path.abspath(str(entry.get("worktree", "")))
-            if _key(p) == want and _inside(p, base_dir) and _key(p) != _key(base_dir):
-                return root, entry
-    return None
+            if _inside(p, base_dir) and _key(p) != _key(base_dir):
+                out[_key(p)] = (root, entry)
+    return out
+
+
+def find(roots: Iterable[str], path: str) -> Optional[Tuple[str, dict]]:
+    """``(root, porcelain entry)`` of the launcher worktree at ``path``."""
+    return index(roots).get(_key(path))
+
+
+def path_key(path: str) -> str:
+    """The form two spellings of one path compare equal in."""
+    return _key(path)
+
+
+def inside(child: str, parent: str) -> bool:
+    """Whether ``child`` is the directory ``parent`` or below it."""
+    return _inside(child, parent)
 
 
 def _is_link(entry: os.DirEntry) -> bool:

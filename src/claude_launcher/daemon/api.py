@@ -2360,9 +2360,11 @@ async def h_worktrees_remove(request: web.Request) -> web.Response:
     failed: List[dict] = []
     archived: List[str] = []
     sessions = _worktree_sessions(manager)
-    roots = await asyncio.to_thread(_worktree_roots, sessions)
+    known = await asyncio.to_thread(
+        lambda: worktree_inventory.index(_worktree_roots(sessions))
+    )
     for path in paths:
-        found = await asyncio.to_thread(worktree_inventory.find, roots, path)
+        found = known.get(worktree_inventory.path_key(path))
         if found is None:
             failed.append({"path": path, "error": "not a launcher worktree"})
             continue
@@ -2370,7 +2372,7 @@ async def h_worktrees_remove(request: web.Request) -> web.Response:
         live = [
             s for s in _worktree_sessions(manager)
             if s["category"] != session_mod.CATEGORY_ARCHIVED
-            and s["cwd"] and worktree_inventory._inside(s["cwd"], path)
+            and s["cwd"] and worktree_inventory.inside(s["cwd"], path)
         ]
         if live and not archive:
             failed.append({
