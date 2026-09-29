@@ -619,6 +619,36 @@ def test_migrate_converts_the_template_env_block(home):
     assert again == doc and not rep2.changed
 
 
+def test_migrate_keeps_a_common_template_env(home):
+    # No backend key: the block is the common env and stays where every
+    # harness reads it, like a profile's env does.
+    store.update(lambda doc: doc.update({"version": 2, "template": {
+        "auto_compact_at": 400_000,
+        "env": {"GIT_CONFIG_GLOBAL": "/x/gitconfig"},
+    }}))
+    doc, report = migrate_config.convert(store.load())
+    assert doc["template"]["env"] == {"GIT_CONFIG_GLOBAL": "/x/gitconfig"}
+    assert "harness_options" not in doc["template"]
+    assert not report.changed
+
+
+def test_common_env_reaches_every_harness_along_the_parent_chain(home):
+    from claude_launcher import template
+
+    store.update(lambda doc: doc.update({"template": {"env": {"GIT_CONFIG_GLOBAL": "/x/root"}}}))
+    root = profile.create("root")
+    template.apply_to(root)
+    assert store.profile_entry("root")["env"] == {"GIT_CONFIG_GLOBAL": "/x/root"}
+    child = profile.create("kid")
+    lineage.set_parent(child, "root")
+    for name in ("claude", "pi"):
+        env = runner.harness_child_env(child, harnesses.get(name), base_env={})
+        assert env["GIT_CONFIG_GLOBAL"] == "/x/root", name
+    store.set_profile_field("kid", "env", {"GIT_CONFIG_GLOBAL": "/x/kid"})
+    env = runner.harness_child_env(child, harnesses.get("pi"), base_env={})
+    assert env["GIT_CONFIG_GLOBAL"] == "/x/kid"
+
+
 # --- pi builtin tools --------------------------------------------------------------
 
 

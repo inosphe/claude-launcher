@@ -347,12 +347,18 @@ def convert_template(entry: dict, report: Report) -> dict:
     what = "template"
     entry = dict(entry)
     legacy_env = {str(k): str(v) for k, v in entry["env"].items()}
-    report.changed = True
-    report.say(f"{what}:")
     backend_keys = set(CLAUDE_MODEL_KEYS) | {
         CLAUDE_COMPACT_WINDOW,
         CLAUDE_REASONING_EFFORT,
     }
+    # Same test as convert_profile: an env with no backend key is the
+    # harness-neutral common env (GIT_CONFIG_GLOBAL, ...), copied into new
+    # profiles' ``env`` as it is. Moving it under harness_options.claude.env
+    # would take it away from every other harness.
+    if not any(k in backend_keys for k in legacy_env):
+        return entry
+    report.changed = True
+    report.say(f"{what}:")
     layer = _profile_layer(entry, what)
     layer = replace(layer, harness_options={
         h: {c: v for c, v in b.items() if c != "env"} for h, b in layer.harness_options.items()

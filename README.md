@@ -408,10 +408,18 @@ claunch create work --reinit        # finish or redo work's setup in place
 
 ## Per-profile environment variables
 
-Each profile can set Claude Code environment variables. They live in the central
-config file (`~/.claunch.yaml`, the launcher's [source of truth](#configuration-source-of-truth)),
-and `claunch run` exports them into claude's process, so they take effect
-immediately and **override** any value inherited from your shell.
+Each profile can set environment variables in its `env` block. They live in the
+central config file (`~/.claunch.yaml`, the launcher's [source of truth](#configuration-source-of-truth)),
+and `claunch run` and the daemon export them into the session's process, so they
+take effect immediately and **override** any value inherited from your shell.
+
+This `env` block is the **common env**: it applies to every harness the profile
+runs (Claude, Pi, Codex, ...) and is inherited along the
+[parent chain](#inheritance-parent-profiles), with a child's key overriding its
+parent's. For a harness other than Claude, `CLAUDE_CODE_*` and `ANTHROPIC_*`
+keys are removed before launch (and, for an API-key harness such as Pi, any
+other `*API_KEY` key). A value meant for one harness only goes under
+`harness_options.<harness>.env` instead.
 
 ```bash
 claunch env work                                  # list this profile's env vars
@@ -441,8 +449,11 @@ template:
         CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: "0"
 ```
 
-A pre-schema `template.env` block still works (it is merged into a new
-profile's raw `env`) and `claunch migrate-config` converts it.
+A `template.env` block is merged into a new root Claude profile's common
+`env` (a child created with `--parent` inherits from its parent instead). `claunch
+migrate-config` converts the block only when it holds backend keys (model
+pins, `CLAUDE_CODE_AUTO_COMPACT_WINDOW`, `CLAUDE_CODE_EFFORT_LEVEL`); a block
+of other keys, such as `GIT_CONFIG_GLOBAL`, is left as it is.
 
 `template.yaml` only *seeds* `~/.claunch.yaml` the first time; afterwards the
 live `template` block in `~/.claunch.yaml` is authoritative (edit it directly, or
@@ -1802,7 +1813,8 @@ Details:
 Sessions run `git` with the environment of their profile. An instance that has
 its own config file can therefore commit under its own author. Point git's
 global config at a per-instance file with `GIT_CONFIG_GLOBAL` (git 2.32 or
-later), set on every profile of that instance:
+later), set in the profile's common `env` (see
+[Per-profile environment variables](#per-profile-environment-variables)):
 
 ```ini
 # ~/.gitconfig-team — the team instance's global git config
@@ -1819,23 +1831,27 @@ later), set on every profile of that instance:
 # ~/.claunch-team.yaml (the instance's config file)
 profiles:
   work:
-    harness_options:
-      claude:
-        env:
-          GIT_CONFIG_GLOBAL: /home/me/.gitconfig-team
-      pi:                        # one entry per harness the profile runs
-        env:
-          GIT_CONFIG_GLOBAL: /home/me/.gitconfig-team
+    env:
+      GIT_CONFIG_GLOBAL: /home/me/.gitconfig-team
+template:
+  env:                           # copied into each new root Claude profile
+    GIT_CONFIG_GLOBAL: /home/me/.gitconfig-team
 ```
 
+The same from the CLI: `claunch -L team env work GIT_CONFIG_GLOBAL=/home/me/.gitconfig-team`.
 Do the same in the default config file with its own file (for example
 `~/.gitconfig-main`) when the default daemon's sessions should also commit
 under a fixed identity.
 
-- `harness_options.<harness>.env` is keyed by harness. A profile that runs
-  sessions under several harnesses needs the variable under each of them.
-- A profile added later does not get the variable automatically. Add it to the
-  new profile as well.
+- The profile `env` reaches every harness the profile runs (Claude, Pi,
+  Codex, ...), so one entry per profile is enough.
+- It is inherited along the parent chain. Set it on a root profile and every
+  child gets it; a child that sets the same key overrides it.
+- `template.env` is copied into a new root Claude profile when it is
+  created (`claunch create`); like the rest of the template, it is not applied
+  to a profile created for another harness. A child created with `--parent` does not receive the copy
+  and inherits the value from its parent instead. Existing profiles are not
+  changed; add the key to them, or run `claunch env <name> --apply-template`.
 - The value is read when a session starts. Sessions that are already running
   keep their old environment until they are restarted. A daemon restart is not
   needed.
