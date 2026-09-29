@@ -26,3 +26,8 @@ Thumbs.db
 
 # bv (beads viewer) local config and caches
 .bv/
+
+# Per-machine MCP entry: cmd /c on Windows, plain `claunch mcp` elsewhere.
+# `claunch install` writes it (install.mcp_server_def); a tracked copy is
+# wrong on one of the two OSes (claunch-393jv).
+/.mcp.json
