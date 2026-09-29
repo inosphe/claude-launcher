@@ -73,7 +73,6 @@ import json
 import logging
 import re
 import shutil
-import sqlite3
 import subprocess
 import threading
 import time
@@ -1395,18 +1394,22 @@ class Board:
         self._policy_seen[key] = stamp()
 
     async def br(
-        self, root: Path, args: List[str], *, actor: Optional[str] = None
+        self, root: Path, args: List[str], *, actor: Optional[str] = None,
+        ref: Optional[beads_db.BoardRef] = None,
     ):
         """Run one ``br`` command against ``root``'s board; parsed JSON back.
 
         Writes invalidate the listing cache for that board. A non-zero exit
         is a :class:`cli_beads.BeadsError` carrying ``br``'s own words.
+        ``ref`` names the board outright instead of resolving it from
+        ``root`` -- for a caller holding a row that already says which
+        database it means (the Settings page's boards card).
         """
         if not self.available():
             raise BeadsUnavailable(
                 f"'{cli_beads.BINARY}' is not installed on the daemon machine"
             )
-        ref = self.ref_for(root)
+        ref = ref or self.ref_for(root)
         assert ref is not None  # root is not None here; ref_for only nulls on that
         beads_dir = Path(ref.root) / cli_beads.BEADS_DIR
         key = str(root)
@@ -1604,59 +1607,6 @@ class Board:
         self._page_cache[key] = (now, page, has_more, total)
         return page, has_more, total
 
-    async def _edges_from_db(self, root: Path) -> Optional[List[dict]]:
-        """Every dependency edge on ``root``'s board in one read, or ``None``.
-
-        The per-issue path in :meth:`edges` forks ``br dep list`` once for
-        each issue that has any, and this board's lock serialises them. One
-        fork costs about 0.6 s on this machine, so a board with 59 such
-        issues spent most of a page load on edges: ``/api/beads`` measured
-        13.5 s and ``/api/beads/stream?limit=50`` 7.8 s, against 0.66 s for
-        the listing itself.
-
-        ``br`` stores those edges in a SQLite table, so the same answer is
-        one query. The file is opened read-only and never written.
-
-        Answers ``None`` rather than raising for every reason this reading
-        can be unavailable -- a JSONL board with no database, a schema
-        without this table, a locked file -- and the caller falls back to
-        ``br``. The edges are an ornament over a listing that is already
-        useful, and a board that could not be drawn as a forest is still a
-        board.
-        """
-        ref = self.ref_for(root)
-        if ref is None:
-            return None
-        db = ref.db_path
-        if not db.is_file():
-            return None
-
-        def read() -> List[dict]:
-            # A URI so the connection can be read-only; the path is quoted
-            # because a '?' or '#' in it would otherwise start the query
-            # part of the URI.
-            quoted = db.as_posix().replace("?", "%3f").replace("#", "%23")
-            conn = sqlite3.connect(f"file:{quoted}?mode=ro", uri=True, timeout=2.0)
-            try:
-                rows = conn.execute(
-                    "SELECT issue_id, depends_on_id, type FROM dependencies"
-                ).fetchall()
-            finally:
-                conn.close()
-            # Direction is ``br``'s own and matches the per-issue path: the
-            # depending issue is stored as ``issue_id``, which for a
-            # parent-child edge is the CHILD.
-            return [
-                {"from": str(src), "to": str(dst), "type": str(kind or "")}
-                for src, dst, kind in rows if src and dst
-            ]
-
-        try:
-            return await asyncio.to_thread(read)
-        except Exception as exc:  # no such table, locked, unreadable
-            log.debug("beads: no bulk edge read for %s: %s", root, exc)
-            return None
-
     async def edges(
         self, root: Path, rows: Sequence[dict], *, cache_key: Optional[tuple] = None,
     ) -> List[dict]:
@@ -1687,17 +1637,13 @@ class Board:
         hit = cache.get(key)
         if hit and now - hit[0] < CACHE_TTL:
             return hit[1]
-        # One read of the board's database answers for every issue at once.
-        # When it does, the page-scoped cache key stops mattering: the result
-        # is the whole graph rather than one page's slice of it, so it is
-        # cached under the board and every page shares it.
-        whole = self._deps.get(str(root))
-        if whole and now - whole[0] < CACHE_TTL:
-            return whole[1]
-        bulk = await self._edges_from_db(root)
-        if bulk is not None:
-            self._deps[str(root)] = (now, bulk)
-            return bulk
+        # Read through br, never out of the database file: br 0.7's engine
+        # (frankensqlite) keeps its own WAL index, and a SQLite reader that
+        # opened the file made br's next call set that index aside as
+        # poisoned and leave a .br-wal-index-*/ directory behind -- one per
+        # read, and this read ran on every Beads page load. One fork per
+        # issue with edges is slower; making it fast again without opening
+        # the file is its own piece of work.
         wanted = [
             r.get("id") for r in rows
             if r.get("id") and (r.get("dependency_count") or 0)

@@ -17,7 +17,6 @@ import json
 import logging
 import os
 import secrets
-import sqlite3
 import time
 from datetime import datetime, timezone
 from dataclasses import replace
@@ -8633,16 +8632,16 @@ async def h_beads_settings(request: web.Request) -> web.Response:
     ``.db`` files already sitting where that board would be, so the field can
     offer them rather than have the operator type a path out.
 
-    ``issues`` is filled per row for a database that exists: a count read
-    straight out of the file, so a board that is about to be repointed can be
-    seen to have (or not have) work on it before the change is made.
+    ``issues`` is filled per row for a database that exists: a count asked
+    of ``br`` (:func:`_beads_issue_count`), so a board that is about to be
+    repointed can be seen to have (or not have) work on it before the change
+    is made.
     """
     rows = await asyncio.to_thread(
         beads_db.listing, cli_beads.repo_root(os.getcwd())
     )
-    counts = await asyncio.gather(
-        *(asyncio.to_thread(_beads_issue_count, r["db"]) for r in rows)
-    )
+    board = request.app["beads"]
+    counts = await asyncio.gather(*(_beads_issue_count(board, r) for r in rows))
     for row, count in zip(rows, counts):
         row["issues"] = count
     return json_response({
@@ -8652,41 +8651,52 @@ async def h_beads_settings(request: web.Request) -> web.Response:
     })
 
 
-def _beads_issue_count(db: str) -> Optional[int]:
-    """How many issues a board database holds, or ``None``.
+def _beads_row_ref(row: dict) -> beads_db.BoardRef:
+    """The board a settings row describes, exactly as the card showed it."""
+    return beads_db.BoardRef(
+        name=row["board"], db=row["db"], root=row["root"],
+        workspace=row["workspace"], configured=row["configured"],
+    )
 
-    Read with SQLite directly rather than through ``br``: the card lists
-    every board at once, and forking the binary per row would make opening
-    the Settings page cost what the Beads page costs. ``None`` for a file
-    that is not there, cannot be opened, or does not have the table — the
-    card then says nothing instead of claiming zero, which is a different
-    fact from "no issues".
+
+async def _beads_issue_count(board, row: dict) -> Optional[int]:
+    """How many issues a board holds, or ``None``.
+
+    Asked of ``br`` -- ``list --all --limit 1`` reports the total -- and not
+    read out of the database file. It used to be read with SQLite directly,
+    to spare the Settings page a fork per board, but br 0.7's engine keeps
+    its own WAL index and treats one a SQLite reader initialised as
+    poisoned: every such read left a ``.beads/.br-wal-index-*/`` directory
+    behind and made br's next call rebuild the index. Deleted issues
+    (tombstones) are not in ``--all`` and are not counted.
+
+    ``None`` for a board whose database is not there, when ``br`` is not
+    installed, or when it cannot answer -- the card then says nothing instead
+    of claiming zero, which is a different fact from "no issues".
     """
-    path = Path(db)
-    if not path.is_file():
+    if not row.get("exists") or not board.available():
         return None
-    quoted = path.as_posix().replace("?", "%3f").replace("#", "%23")
+    ref = _beads_row_ref(row)
     try:
-        conn = sqlite3.connect(f"file:{quoted}?mode=ro", uri=True, timeout=2.0)
-    except Exception:
+        data = await board.br(
+            Path(ref.root), ["list", "--all", "--limit", "1"], ref=ref
+        )
+    except (BeadsError, beads_mod.BeadsUnavailable, OSError):
         return None
-    try:
-        (count,) = conn.execute("SELECT COUNT(*) FROM issues").fetchone()
-        return int(count)
-    except Exception:
-        return None
-    finally:
-        conn.close()
+    total = data.get("total") if isinstance(data, dict) else None
+    return total if isinstance(total, int) else None
 
 
-def _beads_board_row(name: str) -> Optional[dict]:
+async def _beads_board_row(request: web.Request, name: str) -> Optional[dict]:
     """The settings row for one board name, or ``None`` if there is no such
     board. What the two writes below answer with, so a caller sees the state
     it has just put the board in without a second request."""
-    rows = beads_db.listing(cli_beads.repo_root(os.getcwd()))
+    rows = await asyncio.to_thread(
+        beads_db.listing, cli_beads.repo_root(os.getcwd())
+    )
     for row in rows:
         if row["board"] == name:
-            row["issues"] = _beads_issue_count(row["db"])
+            row["issues"] = await _beads_issue_count(request.app["beads"], row)
             return row
     return None
 
@@ -8707,7 +8717,7 @@ async def h_beads_settings_set(request: web.Request) -> web.Response:
     workspace, 400 for a path that cannot be stored.
     """
     name = request.match_info["board"]
-    if _beads_board_row(name) is None:
+    if await _beads_board_row(request, name) is None:
         return json_error(
             404,
             f"no board named {name!r} — boards are the registered workspaces "
@@ -8729,7 +8739,7 @@ async def h_beads_settings_set(request: web.Request) -> web.Response:
     # Every directory the daemon had already resolved may now read a
     # different file, so nothing resolved against the old one survives.
     request.app["beads"].forget_paths()
-    return json_response({"board": _beads_board_row(name)})
+    return json_response({"board": await _beads_board_row(request, name)})
 
 
 async def h_beads_settings_init(request: web.Request) -> web.Response:
@@ -8744,7 +8754,7 @@ async def h_beads_settings_init(request: web.Request) -> web.Response:
     503 when ``br`` is not installed on this machine.
     """
     name = request.match_info["board"]
-    row = _beads_board_row(name)
+    row = await _beads_board_row(request, name)
     if row is None:
         return json_error(
             404,
@@ -8756,10 +8766,7 @@ async def h_beads_settings_init(request: web.Request) -> web.Response:
     board = request.app["beads"]
     # Built from the row rather than resolved again, so the database that is
     # created is exactly the one the card just showed.
-    ref = beads_db.BoardRef(
-        name=row["board"], db=row["db"], root=row["root"],
-        workspace=row["workspace"], configured=row["configured"],
-    )
+    ref = _beads_row_ref(row)
     try:
         await board.create_board(ref)
     except beads_mod.BeadsUnavailable as exc:
@@ -8767,7 +8774,7 @@ async def h_beads_settings_init(request: web.Request) -> web.Response:
     except (BeadsError, OSError) as exc:
         return json_error(409, str(exc))
     board.forget_paths()
-    return json_response({"board": _beads_board_row(name), "created": True})
+    return json_response({"board": await _beads_board_row(request, name), "created": True})
 
 
 async def h_beads_create(request: web.Request) -> web.Response:

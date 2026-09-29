@@ -1231,62 +1231,36 @@ def test_a_listing_carries_an_excerpt_and_the_detail_carries_the_text(repo):
     asyncio.run(run())
 
 
-def test_edges_come_from_one_read_of_the_board_database(tmp_path):
-    """``br dep list`` per issue is one process each; the same answer is one
-    query of the file br already keeps them in."""
+def test_edges_are_read_through_br_and_never_out_of_the_database_file(repo, monkeypatch):
+    """br 0.7's engine keeps its own WAL index, and a SQLite reader opening
+    the board's file made br's next call quarantine that index -- one
+    ``.beads/.br-wal-index-*/`` directory per Beads page load. So the edges
+    come from ``br dep list``, one call per issue that has any, and nothing
+    in the daemon opens the database."""
     import sqlite3
 
-    root = tmp_path / "repo"
-    (root / ".beads").mkdir(parents=True)
-    conn = sqlite3.connect(root / ".beads" / "beads.db")
-    conn.execute(
-        "CREATE TABLE dependencies (issue_id TEXT, depends_on_id TEXT, type TEXT)"
-    )
-    conn.executemany(
-        "INSERT INTO dependencies VALUES (?, ?, ?)",
-        [("kid", "epic", "parent-child"), ("kid", "epic", "blocks")],
-    )
-    conn.commit()
-    conn.close()
+    def refuse(*args, **kwargs):
+        raise AssertionError("the daemon opened the board database directly")
 
+    monkeypatch.setattr(sqlite3, "connect", refuse)
     br = FakeBr()
     br.add(id="epic")
     br.add(id="kid")
+    br.add(id="loose")
     br.link("kid", "epic")
     br.link("kid", "epic", kind="blocks")
-    board = _board(br, root)
-
-    async def run():
-        view = await board.fleet_view([], extra_roots=[str(root)])
-        entry = next(b for b in view["boards"] if b["root"] == str(root))
-        assert entry["deps"] == [
-            {"from": "kid", "to": "epic", "type": "parent-child"},
-            {"from": "kid", "to": "epic", "type": "blocks"},
-        ]
-        # and not one fork of `br dep list`
-        assert [c for c in br.calls if "dep" in c] == []
-
-    asyncio.run(run())
-
-
-def test_a_board_without_that_table_still_draws_its_edges(repo):
-    """The ``repo`` fixture's database is an empty file: no table to read.
-    The edges are an ornament over a listing that is already useful, so the
-    reading falls back to ``br`` rather than the page losing them."""
-    br = FakeBr()
-    br.add(id="epic")
-    br.add(id="kid")
-    br.link("kid", "epic")
     board = _board(br, repo)
 
     async def run():
-        assert await board._edges_from_db(repo) is None
         view = await board.fleet_view([], extra_roots=[str(repo)])
         entry = next(b for b in view["boards"] if b["root"] == str(repo))
         assert entry["deps"] == [
             {"from": "kid", "to": "epic", "type": "parent-child"},
+            {"from": "kid", "to": "epic", "type": "blocks"},
         ]
-        assert sum(1 for c in br.calls if "dep" in c) == 1
+        # only the issue the listing says has edges is asked
+        assert [c[c.index("dep"):c.index("dep") + 3] for c in br.calls if "dep" in c] == [
+            ["dep", "list", "kid"]]
 
     asyncio.run(run())
 

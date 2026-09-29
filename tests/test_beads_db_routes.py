@@ -84,18 +84,31 @@ def test_every_workspace_is_a_board_the_card_can_point(tmp_path, ws, repo):
     _run(run)
 
 
-def test_a_database_that_is_there_is_counted(tmp_path, ws, repo):
-    """A board about to be repointed can be seen to have work on it first."""
+def test_a_database_that_is_there_is_counted(tmp_path, ws, repo, monkeypatch):
+    """A board about to be repointed can be seen to have work on it first.
+
+    The count is br's (``list --all``: closed issues in, deleted ones out),
+    for the database the row names -- and the file is never opened by the
+    daemon itself: br 0.7's engine quarantines the WAL index a SQLite reader
+    touched, leaving a ``.br-wal-index-*/`` directory per read."""
     import sqlite3
 
+    connect = sqlite3.connect
+
+    def refuse(database, *args, **kwargs):
+        # The daemon's own state database is SQLite too; only the board's is off limits.
+        if Path(str(database)).name == "beads.db":
+            raise AssertionError("the daemon opened a board database directly")
+        return connect(database, *args, **kwargs)
+
+    monkeypatch.setattr(sqlite3, "connect", refuse)
     db_path = Path(ws.path) / ".beads" / "beads.db"
     db_path.parent.mkdir(parents=True)
-    conn = sqlite3.connect(str(db_path))
-    conn.execute("CREATE TABLE issues (id TEXT)")
-    conn.executemany("INSERT INTO issues VALUES (?)", [("a",), ("b",)])
-    conn.commit()
-    conn.close()
-    board = _board(FakeBr(), repo)
+    db_path.write_bytes(b"")
+    br = FakeBr()
+    br.add(id="a")
+    br.add(id="b", status="closed")
+    board = _board(br, repo)
 
     async def run():
         client = await _serve(tmp_path, board)
@@ -104,6 +117,8 @@ def test_a_database_that_is_there_is_counted(tmp_path, ws, repo):
             rows = {r["board"]: r for r in (await resp.json())["boards"]}
             assert rows["alpha"]["exists"] is True
             assert rows["alpha"]["issues"] == 2
+            dbs = {Path(c[c.index("--db") + 1]) for c in br.calls if "list" in c}
+            assert db_path in dbs
         finally:
             await client.close()
 
