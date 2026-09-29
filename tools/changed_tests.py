@@ -678,12 +678,30 @@ def mentioning(repo: Path, name: str) -> List[str]:
     return [rel for rel, text in test_texts(repo).items() if term in text]
 
 
+def naming_module(repo: Path, stem: str) -> List[str]:
+    """Test modules that name the test module ``stem`` as a whole word.
+
+    :func:`needle` searches a compound stem as a substring, and every test
+    module's stem is compound, so ``test_mesh`` also matched the modules that
+    name ``test_mesh_v2``, ``test_mesh_ops`` and nine more. On the change
+    ``8b57829c`` made to ``tests/test_mesh.py`` 12 of the 15 modules
+    ``tools/related_surfaces.py`` listed had no ``test_mesh`` of their own
+    (``claunch-6w2az``). ``\\b`` treats ``_`` and digits as part of the word,
+    so ``test_mesh.py``, ``from test_mesh import`` and ``test_mesh::`` match
+    and ``test_mesh_v2`` does not.
+    """
+    word = re.compile(rf"\b{re.escape(stem)}\b")
+    return [rel for rel, text in test_texts(repo).items() if word.search(text)]
+
+
 def named_by(repo: Path, rel: str) -> List[str]:
     """Rules 2c and 3a for one changed path: the test modules that name it.
 
     Empty for a dunder source file (2c, :func:`_is_dunder` -- its stem names
     nothing). :func:`map_one` selects these for every path except a test
-    module, where rule 1 runs the module itself and stops.
+    module, where rule 1 runs the module itself and stops; for a test module
+    the answer is read only by ``tools/related_surfaces.py``, and the search
+    is :func:`naming_module`, on the module name as a whole word.
 
     One function because two tools ask it. ``tools/related_surfaces.py``
     lists the tests that name a changed file and says of them "the gate runs
@@ -695,6 +713,8 @@ def named_by(repo: Path, rel: str) -> List[str]:
     p = Path(rel)
     if _is_source(p) and _is_dunder(p):
         return []
+    if _is_test_module(p):
+        return naming_module(repo, p.stem)
     return mentioning(repo, p.name)
 
 
