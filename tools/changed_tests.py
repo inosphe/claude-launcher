@@ -689,8 +689,14 @@ def naming_module(repo: Path, stem: str) -> List[str]:
     (``claunch-6w2az``). ``\\b`` treats ``_`` and digits as part of the word,
     so ``test_mesh.py``, ``from test_mesh import`` and ``test_mesh::`` match
     and ``test_mesh_v2`` does not.
+
+    The boundary is ASCII (``re.ASCII``). A str pattern's ``\\w`` is Unicode,
+    where Hangul is a word character too, so ``test_mesh를`` -- a module name
+    with a particle attached, as prose in this repository writes it -- had no
+    boundary after the name and was not found, though the substring search it
+    replaced found it (``claunch-nupin``).
     """
-    word = re.compile(rf"\b{re.escape(stem)}\b")
+    word = re.compile(rf"\b{re.escape(stem)}\b", re.ASCII)
     return [rel for rel, text in test_texts(repo).items() if word.search(text)]
 
 
