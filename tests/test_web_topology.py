@@ -500,6 +500,7 @@ CHECKS = [
         "observerpin_check.js",
         "operator_check.js",
         "worktreespage_check.js",
+        "shadowcard_check.js",
 ]
 
 

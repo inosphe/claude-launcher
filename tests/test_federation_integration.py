@@ -437,3 +437,88 @@ def test_renamed_daemon_migrates_its_peers_over_real_relay(home, tmp_path):
                 relay.kill()
 
     asyncio.run(run())
+
+
+def test_remote_shadow_over_real_relay(home, tmp_path):
+    """Daemon B looks at daemon A's mesh member through the real relay: the
+    card, the output-only terminal on a live PEER_OPEN bridge, and the
+    session line (daemon/shadow.py)."""
+    import json
+
+    import aiohttp
+
+    store.update(
+        lambda doc: doc.update(
+            {"harnesses": {"py": {"command": [sys.executable, "-u", "-c", CHILD]}}}
+        )
+    )
+
+    async def run():
+        relay_port = _free_port()
+        relay = _start_relay(tmp_path, relay_port)
+        a = _Daemon("pca", relay_port, tmp_path / "meshA")
+        b = _Daemon("pcb", relay_port, tmp_path / "meshB")
+        try:
+            await a.start()
+            await b.start()
+            await _wait(
+                lambda: a.uplink.connected and b.uplink.connected,
+                "both uplinks to register",
+            )
+            if not a.uplink.peering:
+                pytest.skip("relay binary lacks CAP_PEERING — rebuild mux-relay")
+            a.manager.create(SessionDef(name="sa", harness="py", cwd=str(tmp_path)))
+            a.mesh.create("fedmesh")
+            await a.mesh.join("fedmesh", "sa", handle="alice")
+            a.manager.set_note("sa", "seen from pcb")
+            b.manager.create(SessionDef(name="sb", harness="py", cwd=str(tmp_path)))
+            await b.mesh.join(
+                "fedmesh@pca", "sb", handle="bob", code=a.mesh.invite("fedmesh")["code"]
+            )
+            session_a = a.manager.get("sa")
+            await _wait(lambda: "READY" in _terminal_text(session_a), "sa to start")
+
+            base = f"http://127.0.0.1:{b.port}"
+            auth = {"Authorization": "Bearer token-pcb"}
+            async with aiohttp.ClientSession(headers=auth) as http:
+                async with http.get(base + "/api/shadows") as resp:
+                    doc = await resp.json()
+                rows = doc["shadows"]
+                assert [(r["machine"], r["session"]) for r in rows] == [("pca", "sa")]
+                assert rows[0]["card"]["note"] == "seen from pcb"
+                assert rows[0]["card"]["handle"] == "alice"
+
+                async with http.ws_connect(base + "/api/shadows/pca/sa/ws") as ws:
+                    init = json.loads((await asyncio.wait_for(ws.receive(), 15)).data)
+                    assert init["type"] == "init"
+                    repaint = await asyncio.wait_for(ws.receive(), 15)
+                    assert b"READY" in repaint.data
+                    # more output than one relay frame (64 KiB) carries: 25
+                    # lines of ~3000 characters (under a tty's 4095-byte
+                    # canonical line), each typed and echoed back
+                    for i in range(25):
+                        async with http.post(
+                            base + "/api/shadows/pca/sa/line",
+                            json={"text": f"line{i:02d}-" + "x" * 3000,
+                                  "input_id": f"relay-{i}"},
+                        ) as resp:
+                            assert resp.status == 200, await resp.text()
+                    seen = b""
+                    deadline = time.monotonic() + 30
+                    while b"echo:line24-" not in seen and time.monotonic() < deadline:
+                        msg = await asyncio.wait_for(ws.receive(), 30)
+                        if msg.type == aiohttp.WSMsgType.BINARY:
+                            seen += msg.data
+                    assert len(seen) > 2 * 65536
+                    for i in range(25):
+                        assert f"echo:line{i:02d}-".encode() in seen, i
+        finally:
+            await b.stop()
+            await a.stop()
+            relay.terminate()
+            try:
+                relay.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                relay.kill()
+
+    asyncio.run(run())

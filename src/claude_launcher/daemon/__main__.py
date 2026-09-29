@@ -515,8 +515,19 @@ def _wire_federation(mesh_manager: MeshManager, uplink) -> None:
             raise MeshError(f"peer {machine!r} rejected {path}: {detail}")
         return payload
 
+    async def peer_stream(machine: str, path: str, body: dict):
+        """The same request, answered by a response that is read live —
+        the shadow terminal (``daemon/shadow.py``). Returns the open
+        :class:`~.relay_uplink.PeerBridge`; the caller parses and closes it."""
+        raw = peer_client.build_request(path, body, host=machine)
+        try:
+            return await uplink.peer_open(machine, raw)
+        except relay_uplink.PeerError as exc:
+            raise PeerUnreachable(str(exc)) from None
+
     mesh_manager.machine = uplink.name
     mesh_manager.peer_transport = peer_call
+    mesh_manager.peer_streamer = peer_stream
     mesh_manager.relay_connected = lambda: uplink.connected
     mesh_manager.peer_lister = uplink.peer_list
 

@@ -1404,6 +1404,10 @@ class MeshManager:
         #: async (machine, path, body) -> dict; raises PeerUnreachable on
         #: transport failure, MeshError on an application-level rejection.
         self.peer_transport: Optional[Callable] = None
+        #: async (machine, path, body) -> PeerBridge: the same authenticated
+        #: request with a response read live (the shadow terminal,
+        #: daemon/shadow.py); raises PeerUnreachable like peer_transport.
+        self.peer_streamer: Optional[Callable] = None
         self.relay_connected: Callable[[], bool] = lambda: False
         #: async () -> [machine names] — the other backends on our relay
         #: (RelayUplink.peer_list); None when no uplink or an old relay.
@@ -6918,6 +6922,130 @@ class MeshManager:
                 f"{holder!r} is not a member from daemon {machine!r}"
             )
         return self._lease_apply(mesh, op, key, holder, ttl, note)
+
+    # -- remote-shadow sessions (daemon/shadow.py) ---------------------- #
+    # Another daemon's operator may LOOK at this daemon's mesh members: a
+    # card, a terminal that only outputs, and the session line. The link
+    # token authenticates the viewing daemon; membership in the mesh that
+    # link belongs to scopes it -- exactly the rule peer ops read by.
+    def peer_shadow_members(self, name: str, machine: str, token: str) -> List[Member]:
+        """This daemon's own members of mesh ``name``, for linked ``machine``."""
+        mesh = self._inbound(name, machine, token)
+        self._check_link_token(mesh, machine, token)
+        return [
+            mesh.members[h] for h in sorted(mesh.members)
+            if self._is_local(mesh, mesh.members[h])
+        ]
+
+    def peer_shadow_member(
+        self, name: str, machine: str, token: str, session: str,
+    ) -> Member:
+        """The member ``session`` wears in mesh ``name`` here, or refused."""
+        mesh = self._inbound(name, machine, token)
+        self._check_link_token(mesh, machine, token)
+        member = self.member_for_session(mesh, session)
+        if member is None:
+            raise MeshError(
+                f"session {session!r} is not a member of mesh {mesh.name!r} here"
+            )
+        return member
+
+    def host_machine(self, mesh: Mesh, member: Member) -> str:
+        """The daemon ``member``'s session runs on — "" when it is this one.
+
+        Unlike :meth:`machine_name` this never answers blank for a remote
+        member: an unstamped row on a mirror is the authority's own.
+        """
+        if self._is_local(mesh, member):
+            return ""
+        return member.machine or mesh.authority
+
+    def shadow_targets(self) -> List[dict]:
+        """Every other daemon's member of every mesh held here, grouped per
+        (machine, session) — one session in two meshes is one shadow.
+
+        Each row: ``{machine, session, meshes: [{mesh, wire, handle, role,
+        roles, linked}]}``. ``linked`` says whether this daemon holds a link
+        to that machine in that mesh — without one there is nobody to ask.
+        """
+        rows: Dict[Tuple[str, str], dict] = {}
+        for mesh in self.list():
+            for handle in sorted(mesh.members):
+                member = mesh.members[handle]
+                host = self.host_machine(mesh, member)
+                if not host or not member.session:
+                    continue
+                row = rows.setdefault(
+                    (host, member.session),
+                    {"machine": host, "session": member.session, "meshes": []},
+                )
+                row["meshes"].append({
+                    "mesh": mesh.name,
+                    "wire": mesh.wire_name,
+                    "handle": member.handle,
+                    "role": member.role,
+                    "roles": list(member.roles),
+                    "linked": host in mesh.links,
+                })
+        return [rows[k] for k in sorted(rows)]
+
+    def shadow_route(self, machine: str, session: str) -> Tuple[Mesh, Member]:
+        """The mesh (and member row) to reach ``machine``'s ``session`` through.
+
+        Refused unless that session is a member of a mesh held here and this
+        daemon holds a link to its machine in that mesh: a shadow is only
+        ever of a mesh member, never of an arbitrary session on a peer.
+        """
+        unlinked = False
+        for mesh in self.list():
+            for member in mesh.members.values():
+                if member.session != session:
+                    continue
+                if self.host_machine(mesh, member) != machine:
+                    continue
+                if machine in mesh.links:
+                    return mesh, member
+                unlinked = True
+        if unlinked:
+            raise MeshError(
+                f"no link to daemon {machine!r} in any mesh {session!r} is in"
+            )
+        raise MeshError(
+            f"{machine}/{session} is not a member of any mesh on this daemon"
+        )
+
+    async def shadow_call(self, machine: str, session: str, path: str,
+                          body: dict) -> dict:
+        """One ``/peer/shadow/*`` request about ``machine``'s ``session``."""
+        mesh, _member = self.shadow_route(machine, session)
+        return await self._peer_call(mesh, machine, path, {"session": session, **body})
+
+    async def shadow_cards(self, mesh_name: str, machine: str) -> dict:
+        """``/peer/shadow/cards`` for mesh ``mesh_name``'s members on ``machine``."""
+        mesh = self.get(mesh_name)
+        if machine not in mesh.links:
+            raise MeshError(f"no link to daemon {machine!r} in mesh {mesh.name!r}")
+        return await self._peer_call(mesh, machine, "/peer/shadow/cards", {})
+
+    async def shadow_stream(self, machine: str, session: str):
+        """Open ``/peer/shadow/stream`` for ``machine``'s ``session``: the
+        live bridge, unparsed (``shadow.open_stream`` reads it)."""
+        mesh, _member = self.shadow_route(machine, session)
+        if self.peer_streamer is None:
+            raise PeerUnreachable(
+                f"relay uplink is not running — cannot reach {machine!r}"
+            )
+        link = mesh.links.get(machine) or {}
+        return await self.peer_streamer(
+            machine,
+            "/peer/shadow/stream",
+            {
+                "mesh": mesh.wire_name,
+                "machine": self._require_machine(),
+                "token": str(link.get("token_out") or ""),
+                "session": session,
+            },
+        )
 
     # -- peer-side handlers --------------------------------------------- #
     def _ingest_message(self, m: dict, origin: str) -> Optional[dict]:
