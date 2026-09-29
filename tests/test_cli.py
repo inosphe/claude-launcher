@@ -15,6 +15,7 @@ from claude_launcher import (
     harnesses,
     lineage,
     profile,
+    providers,
     runner,
     store,
 )
@@ -241,15 +242,15 @@ def test_a_project_install_hints_at_the_empty_global_layer(home, capsys, tmp_pat
     assert "claunch install --global" not in capsys.readouterr().out
 
 
-def test_create_registers_and_applies_template(home, capsys):
+def test_create_registers_and_the_template_applies_without_a_copy(home, capsys):
     assert run("create", "work", "--no-seed") == 0
     assert "work" in store.profiles()
-    # The default template layer was applied into the store.
+    # Nothing is copied into the entry; the template is read at launch.
     entry = store.profile_entry("work")
-    assert entry["auto_compact_at"] == 400000
-    assert entry["harness_options"]["claude"]["env"] == {
-        "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "0"
-    }
+    assert "auto_compact_at" not in entry and "harness_options" not in entry
+    spec = providers.profile_overlay(profile.require("work"))
+    assert spec.auto_compact_at == 400000
+    assert spec.option_env("claude") == {"CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "0"}
 
 
 def _tree(root: Path) -> dict:
@@ -289,10 +290,11 @@ def test_create_reinit_finishes_a_directory_left_by_a_failed_store_write(home, c
     assert run("create", "work") == 1
     assert "already exists" in capsys.readouterr().err
 
+    capsys.readouterr()
     assert run("create", "work", "--reinit") == 0
     assert "work" in store.profiles()
     # The tail ran too, not just the registration.
-    assert store.profile_entry("work")["auto_compact_at"] == 400000
+    assert "applied shared" in capsys.readouterr().out
 
 
 def test_create_names_reinit_when_the_directory_is_already_there(home, capsys):
