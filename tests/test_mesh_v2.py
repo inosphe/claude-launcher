@@ -6,7 +6,7 @@ A. Link & roles
    A1 only the primary mints invites (a mirror refuses)
    A2 the first join from a machine creates a mirror with a roster+log+
       policy snapshot and an asymmetric credential pair
-   A3 a join address is refused when a local mesh of that name exists
+   A3 a join address lands beside a local mesh of that name (addresses)
    A4 a mirror refuses policy edits; its name is occupied (create conflicts)
    A5 primary and mirror state survive a reload (guests/cursors; primary/
       link/roster/log/outbox)
@@ -269,7 +269,7 @@ def test_link_creates_mirror_with_snapshot(home, tmp_path):
     asyncio.run(run())
 
 
-def test_join_address_refused_on_name_collision(home, tmp_path):
+def test_join_address_beside_a_same_named_local_mesh(home, tmp_path):
     _register_py_harness()
 
     async def run():
@@ -277,13 +277,15 @@ def test_join_address_refused_on_name_collision(home, tmp_path):
         mm_a = MeshManager(mgr, settle=0.05, root=tmp_path / "meshA")
         mm_b = MeshManager(mgr, settle=0.05, root=tmp_path / "meshB")
         _wire({"pcA": mm_a, "pcB": mm_b})
+        mgr.create(SessionDef(name="sb", harness="py", cwd=str(tmp_path), rows=80))
         mm_a.create("m")
         code = mm_a.invite("m")["code"]
         mm_b.create("m")  # a pre-existing local mesh of the same name
-        with pytest.raises(MeshConflict):
-            await mm_b.join("m@pcA", "sb", handle="bob", code=code)
-        # A3: never merged — B's mesh is still its own, unlinked
-        assert mm_b.get("m").primary == ""
+        await mm_b.join("m@pcA", "sb", handle="bob", code=code)
+        # A3: never merged — B's mesh is still its own, unlinked, and the
+        # mirror sits beside it under its address
+        assert mm_b.get("m").primary == "" and mm_b.get("m").links == {}
+        assert mm_b.get("m@pcA").primary == "pcA"
         await mgr.shutdown_all()
 
     asyncio.run(run())
@@ -636,7 +638,7 @@ def test_outbox_queues_durably_and_preserves_order(home, tmp_path):
         assert q1["queued"] and q2["queued"]
         assert [e["body"] for e in mesh_b.outbox] == ["first", "second"]
         # D1: the outbox is on disk (survives a daemon restart)
-        outbox_path = tmp_path / "meshB" / "m" / "outbox.jsonl"
+        outbox_path = tmp_path / "meshB" / "m@pcA" / "outbox.jsonl"
         assert outbox_path.is_file()
         # D3: the mirror is still readable offline
         assert mm_b.history("m") is not None

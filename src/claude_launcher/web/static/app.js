@@ -10331,7 +10331,7 @@ $("new-session").addEventListener("submit", async (e) => {
       }
       // Still pending (the offer was withdrawn meanwhile): ask as a session
       // join instead, which the owner's approval completes.
-      body.mesh = doc.pending ? addr : addr.split("@")[0];
+      body.mesh = doc.pending ? addr : (doc.mesh || addr);
       refreshMeshList();
       loadRemoteMeshes();
     }
@@ -29164,7 +29164,9 @@ $("new-mesh").addEventListener("submit", async (e) => {
     $("mesh-join-extra").classList.add("hidden");
     f.querySelector("button").textContent = "Create";
     await refreshMeshList();
-    if (!doc.pending) location.hash = "#/mesh/" + encodeURIComponent(addr.split("@")[0]);
+    // The mirror is keyed by its address here (a local mesh may share the
+    // name), so that is where it opens.
+    if (!doc.pending) location.hash = "#/mesh/" + encodeURIComponent(addr);
     return;
   }
   // Filed where the rail is looking: a mesh created while one project is
@@ -29496,6 +29498,38 @@ function renderPublishPanel(info, fed) {
   if (st.note) fed.appendChild(el("p", st.bad ? "wf-warning" : "wf-note", st.note));
 }
 
+/* A daemon on the relay was renamed: every mesh here that names it is
+   migrated at once (a mirror of a mesh it created moves to name@new).
+   The renamed daemon tells its linked peers itself when it reconnects;
+   this is the operator's way when it could not. */
+function renamePeerButton(info, machine) {
+  const btn = el("button", "wf-btn option", "Rename…");
+  btn.title = `${machine} was renamed on the relay — migrate every reference to it here`;
+  btn.addEventListener("click", async () => {
+    const renamed = (prompt(
+      `New relay name of '${machine}'?\n\nEvery mesh on this daemon that ` +
+      "names it is migrated; mirrors of its meshes move to name@<new>.",
+      machine
+    ) || "").trim();
+    if (!renamed || renamed === machine) return;
+    const resp = await api(
+      `/api/relay/peers/${encodeURIComponent(machine)}/rename`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ new: renamed }),
+      }
+    );
+    const doc = await resp.json().catch(() => ({}));
+    if (!resp.ok) { alert(doc.error || `HTTP ${resp.status}`); return; }
+    const moved = (doc.rekeyed || []).find((r) => r.from === info.name);
+    await refreshMeshList();
+    if (moved) location.hash = "#/mesh/" + encodeURIComponent(moved.to);
+    else refreshMeshView(true);
+  });
+  return btn;
+}
+
 /* A mirror is let go of as a whole: the owner drops this daemon and every
    member it hosts, and the mirror here is removed. When the owner cannot be
    told, the operator may drop the mirror here only (the owner keeps a stale
@@ -29613,35 +29647,16 @@ function renderRemoteMeshes() {
         }
         await refreshMeshList();
         await loadRemoteMeshes();
-        if (!doc.pending) location.hash = "#/mesh/" + encodeURIComponent(r.mesh);
+        if (!doc.pending) location.hash = "#/mesh/" + encodeURIComponent(doc.mesh || addr);
       });
       li.appendChild(btn);
     } else if (r.state === "attached") {
+      // what this daemon calls it: its address, since a local mesh may
+      // share the name
       li.classList.add("clickable");
       li.addEventListener("click", () => {
-        location.hash = "#/mesh/" + encodeURIComponent(r.mesh);
+        location.hash = "#/mesh/" + encodeURIComponent(r.key || addr);
       });
-    } else if (r.state === "name_taken") {
-      // A mirror here is keyed by the mesh's own name, so this one cannot be
-      // attached while another mesh holds it. Say which one and what frees
-      // the name, and open it from here.
-      const local = r.local || {};
-      const what = local.primary
-        ? `a mirror of ${local.primary}`
-        : "a mesh owned by this daemon";
-      const free = local.primary
-        ? "detach it (its page, Detach…) to free the name"
-        : "remove it (its page, Remove mesh) to free the name — its " +
-          "history is kept on disk";
-      li.appendChild(el("span", "mesh-remote-why",
-        `'${r.mesh}' here is ${what} (project ${local.project || "default"}, ` +
-        `${local.members ?? "?"} member${local.members === 1 ? "" : "s"}, ` +
-        `${local.messages ?? "?"} msg); ${free}, then attach`));
-      const open = el("button", "wf-btn option", `Open local ${r.mesh}`);
-      open.addEventListener("click", () => {
-        location.hash = "#/mesh/" + encodeURIComponent(r.mesh);
-      });
-      li.appendChild(open);
     }
     list.appendChild(li);
   }
@@ -30860,6 +30875,13 @@ function renderMesh(info, history, force, owed, historyPage) {
 
   const head = el("div", "wf-head");
   head.appendChild(el("h2", null, `mesh: ${info.name}`));
+  // The global address (name@creator): what another daemon joins or
+  // attaches, and what tells two same-named meshes here apart.
+  if (info.address && info.address !== info.name) {
+    const addr = el("span", "mesh-address mono", info.address);
+    addr.title = "this mesh's address — other daemons join it by this";
+    head.appendChild(addr);
+  }
   if (isMirror) {
     head.appendChild(el("span", "mesh-mirror-badge", `mirror of ${info.primary}`));
   }
@@ -31046,6 +31068,7 @@ function renderMesh(info, history, force, owed, historyPage) {
     row.appendChild(el("span", "mesh-handle mono", p.machine));
     row.appendChild(el("span", "mesh-role", `rank ${p.rank} · ${p.role || ""}`));
     row.appendChild(el("span", "meta", state + (p.queued ? ` · ${p.queued} queued` : "")));
+    row.appendChild(renamePeerButton(info, p.machine));
     if (!isMirror) {
       const revoke = el("button", "mesh-kick", "×");
       revoke.title = `unlink ${p.machine}: drop its members and its mirror`;

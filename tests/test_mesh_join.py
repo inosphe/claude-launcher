@@ -12,7 +12,8 @@ J. Establishment — join is the only verb
    J4 deny → the guest's outgoing record clears; nothing is created
    J5 approve while the guest is unreachable → the grant retries and
       lands once the transport returns
-   J6 an address that collides with an existing local mesh is refused
+   J6 meshes of one name coexist by address (name@origin); a bare name
+      is the local one, else the only mirror, else ambiguous
    J7 later members from an already-linked machine join with no ceremony
    J8 a machine whose mirror was lost re-requests and is auto-granted
       (already trusted), reclaiming its existing member
@@ -336,31 +337,64 @@ def test_grant_retries_until_guest_reachable(home, tmp_path):
 # --------------------------------------------------------------------------- #
 # J6: address collisions are refused
 # --------------------------------------------------------------------------- #
-def test_join_address_collisions(home, tmp_path):
+def test_same_named_meshes_coexist_by_address(home, tmp_path):
+    """J6 since addresses (docs/mesh-design.md "Mesh addresses"): a mesh is
+    keyed by ``name@origin``, so a local ``m`` and mirrors of ``m`` from two
+    other daemons live side by side; a bare ``m`` means the local one, and
+    without one it is ambiguous rather than guessed."""
     _register_py_harness()
 
     async def run():
         mgr = _manager()
         mm_a, mm_b = await _primary_with_alice(mgr, tmp_path)
+        mm_c = MeshManager(mgr, settle=0.05, root=tmp_path / "meshC")
+        _wire({"pcA": mm_a, "pcB": mm_b, "pcC": mm_c})
         mgr.create(SessionDef(name="sx", harness="py", cwd=str(tmp_path), rows=80))
+        mgr.create(SessionDef(name="sy", harness="py", cwd=str(tmp_path), rows=80))
 
-        # a local mesh of the same name blocks an establishment join
+        # a local mesh of the same name no longer blocks the join
         mm_b.create("m")
-        with pytest.raises(MeshConflict):
-            await mm_b.join("m@pcA", "sb", handle="bob")
-        mm_b.delete("m")
-
-        # linked to pcA, then addressed to a different primary → conflict
         code = mm_a.invite("m")["code"]
-        await mm_b.join("m@pcA", "sb", handle="bob", code=code)
-        with pytest.raises(MeshConflict):
-            await mm_b.join("m@pcX", "sx", handle="bee")
+        member = await mm_b.join("m@pcA", "sb", handle="bob", code=code)
+        assert isinstance(member, Member)
+        assert mm_b.get("m").origin == "" and mm_b.get("m").primary == ""
+        assert mm_b.get("m@local") is mm_b.get("m")
+        assert mm_b.get("m@pcB") is mm_b.get("m")
+        mirror = mm_b.get("m@pcA")
+        assert mirror.primary == "pcA" and mirror.name == "m@pcA"
+        assert "bob" in mirror.members and "bob" not in mm_b.get("m").members
+        # the owner sees the guest under the mesh's own (wire) name
+        assert mm_a.get("m").members["bob"].machine == "pcB"
+        # on disk, beside each other
+        assert (tmp_path / "meshB" / "m").is_dir()
+        assert (tmp_path / "meshB" / "m@pcA").is_dir()
+
+        # peer calls pick the mirror by its link, not the local mesh: a send
+        # from the mirror's member reaches the owner and fans back out
+        await mm_b.send("m@pcA", "bob", "alice", "via the mirror")
+        assert [x["body"] for x in mm_a.get("m").messages] == ["via the mirror"]
+        assert mm_b.get("m").messages == []
+
+        # a second mirror of another daemon's "m"
+        mm_c.create("m")
+        code_c = mm_c.invite("m")["code"]
+        await mm_b.join("m@pcC", "sx", handle="carl", code=code_c)
+        assert mm_b.get("m@pcC").primary == "pcC"
+        # the bare name still means the local one...
+        assert mm_b.get("m") is mm_b.get("m@local")
+        # ...and with no local one it is ambiguous, not guessed
+        mm_b.delete("m")
+        with pytest.raises(MeshError, match="say which"):
+            mm_b.get("m")
+        # removing one mirror makes the bare name unique again
+        mm_b.delete("m@pcC")
+        assert mm_b.get("m") is mm_b.get("m@pcA")
 
         # joining the primary's own address locally still works — and the
-        # mesh federated on the line above, so the new member is stamped
-        # rather than left blank: on a federated roster every entry is
-        # absolute, or a mirror reads the blank as one of its own.
-        member = await mm_a.join("m@pcA", "sx", handle="amy")
+        # mesh federated above, so the new member is stamped rather than left
+        # blank: on a federated roster every entry is absolute, or a mirror
+        # reads the blank as one of its own.
+        member = await mm_a.join("m@pcA", "sy", handle="amy")
         assert isinstance(member, Member) and member.machine == "pcA"
 
         await mgr.shutdown_all()

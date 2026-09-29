@@ -14,8 +14,8 @@ A. Attach
    A2 a public mesh attach without an offer pends; approve delivers the
       grant, deny clears it
    A3 once attached, a local session joins by the bare name with no approval
-   A4 attaching an already-mirrored mesh is a no-op; a name owned locally
-      conflicts
+   A4 attaching an already-mirrored mesh is a no-op; a local mesh of the
+      same name coexists with the mirror (addresses)
    A5 detach removes the link and the daemon's members on the owner and
       drops the mirror here
    A6 received offers and a pending attach survive a reload
@@ -28,7 +28,7 @@ import asyncio
 import pytest
 
 from claude_launcher.daemon.harness import SessionDef
-from claude_launcher.daemon.mesh import MeshConflict, MeshError, MeshManager
+from claude_launcher.daemon.mesh import MeshError, MeshManager
 
 from test_mesh_join import (
     _dispatch_peer as _dispatch_join_peer,
@@ -174,17 +174,19 @@ def test_offered_attach_is_one_call_and_sessions_join_freely(home, tmp_path):
         # A4: attaching again is a no-op; a locally owned name conflicts
         again = await mm_b.attach("m@pcA")
         assert again["already"] is True
+        # a local mesh of the same name is another mesh: both live here
         mm_b.create("own")
-        with pytest.raises(MeshConflict):
-            await mm_b.attach("own@pcA")
-        # discovery says what holds a taken name
         mm_a.create("own")
         await mm_a.set_visibility("own", "public")
-        rows = {r["mesh"]: r for r in (await mm_b.discover())["meshes"]}
-        assert rows["own"]["state"] == "name_taken"
-        assert rows["own"]["local"] == {
-            "primary": None, "project": "default", "members": 0, "messages": 0,
-        }
+        await mm_a.offer_mesh("own", "pcB")
+        res = await mm_b.attach("own@pcA")
+        assert res["mesh"] == "own@pcA" and res["name"] == "own"
+        assert mm_b.get("own").origin == "" and mm_b.get("own@pcA").origin == "pcA"
+        rows = {r["address"]: r for r in (await mm_b.discover())["meshes"]}
+        assert rows["own@pcA"]["state"] == "attached"
+        assert rows["own@pcA"]["key"] == "own@pcA"
+        with pytest.raises(MeshError):
+            await mm_b.attach("own@local")  # our own: nothing to attach
         with pytest.raises(MeshError):
             await mm_b.attach("m")  # no machine: not an address
 

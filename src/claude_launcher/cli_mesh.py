@@ -785,6 +785,22 @@ def _cmd_offer(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_rename_peer(args: argparse.Namespace) -> int:
+    """A relay daemon was renamed: migrate every reference to it here."""
+    client = daemon_client.ensure_running()
+    result = client.post(
+        f"/api/relay/peers/{args.old}/rename", {"new": args.new}
+    )
+    meshes = result.get("meshes") or []
+    print(
+        f"renamed daemon {result['old']!r} -> {result['new']!r} in "
+        f"{len(meshes)} mesh(es): {', '.join(meshes) or '-'}"
+    )
+    for r in result.get("rekeyed") or []:
+        print(f"mirror {r['from']} is now {r['to']}")
+    return 0
+
+
 def _role_label(member: dict) -> str:
     """``leader+reviewer`` — a member's primary role and its subroles."""
     roles = member.get("roles")
@@ -1540,6 +1556,17 @@ def register(sub) -> None:
     p.add_argument("--force", action="store_true",
                    help="drop the mirror even when the owner cannot be told")
     p.set_defaults(func=_cmd_detach)
+
+    p = msub.add_parser(
+        "rename-peer",
+        help="a relay daemon was renamed: rewrite every mesh reference to "
+             "it here (mirrors dev@OLD become dev@NEW). A renamed daemon "
+             "tells its peers itself when it reconnects; this is for when "
+             "it could not",
+    )
+    p.add_argument("old")
+    p.add_argument("new")
+    p.set_defaults(func=_cmd_rename_peer)
 
     p = msub.add_parser(
         "discover",
