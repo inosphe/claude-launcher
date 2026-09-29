@@ -139,6 +139,23 @@ def test_set_workspace_clears_with_an_empty_name(registered, repo):
     assert beads_meta.workspace_of(br.issues[issue_id]) == ""
 
 
+def test_clearing_the_workspace_off_a_short_spec_gets_past_br_s_guard(registered, repo):
+    """br 0.7 refuses to cut a description below half its length without
+    --force. The front matter can be most of a short spec, so clearing it
+    trips that guard -- the daemon says --force for a write that shortens,
+    and only for that."""
+    br = FakeBr()
+    board = _board(br, repo)
+    issue_id = _seed(br, "---\nworkspace: alpha\n---\nshort")
+    asyncio.run(board.set_workspace(repo, issue_id, ""))
+    assert br.issues[issue_id]["description"] == "short"
+    (clear,) = [c for c in br.calls if "update" in c]
+    assert "--force" in clear
+    asyncio.run(board.set_workspace(repo, issue_id, "alpha"))
+    add = [c for c in br.calls if "update" in c][-1]
+    assert "--force" not in add
+
+
 def test_set_workspace_to_the_same_name_writes_nothing(registered, repo):
     br = FakeBr()
     board = _board(br, repo)

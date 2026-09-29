@@ -2269,15 +2269,17 @@ class Board:
             return {
                 "issue": issue_id, "workspace": target, "was": was, "changed": False,
             }
-        updated = beads_meta.set_key(
-            issue.get("description"), beads_meta.WORKSPACE, target
-        )
+        before = issue.get("description") or ""
+        updated = beads_meta.set_key(before, beads_meta.WORKSPACE, target)
+        args = ["update", issue_id, "--description", updated]
+        # br 0.7 refuses to shorten a description below half its length
+        # without --force (a guard against an agent wiping a spec). Clearing
+        # the front matter off a short spec trips it, and what goes is only
+        # the key this method owns -- beads_meta keeps the prose.
+        if len(updated) < len(before):
+            args.append("--force")
         self._cache.pop(str(root), None)
-        await self.br(
-            root,
-            ["update", issue_id, "--description", updated],
-            actor=DASHBOARD_ACTOR,
-        )
+        await self.br(root, args, actor=DASHBOARD_ACTOR)
         return {"issue": issue_id, "workspace": target, "was": was, "changed": True}
 
     # ---- creation ------------------------------------------------------- #

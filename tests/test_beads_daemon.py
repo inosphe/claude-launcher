@@ -175,7 +175,16 @@ class FakeBr:
             if "--assignee" in opts:
                 i["assignee"] = opts["--assignee"]
             if "--description" in opts:
-                i["description"] = opts["--description"]
+                # br 0.7's guard: a non-empty description is not cleared or
+                # cut below half its length without --force.
+                old, new = i.get("description") or "", opts["--description"]
+                if old and len(new) * 2 < len(old) and "--force" not in rest:
+                    return 4, json.dumps({"error": {
+                        "code": "VALIDATION_FAILED",
+                        "message": "refusing to overwrite non-empty "
+                                   "'description' without --force",
+                    }}), ""
+                i["description"] = new
             return 0, json.dumps([i]), ""
         if cmd == "close":
             i = self.issues.get(rest[0])
