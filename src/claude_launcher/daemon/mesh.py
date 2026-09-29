@@ -3422,6 +3422,14 @@ class MeshManager:
         outside a claunch session); an agent sender must hold ``leader`` in
         ``name``. Operators are not rate limited.
 
+        KNOWN LIMIT, not enforced: the daemon cannot tell an agent's HTTP call
+        from the operator's, so an agent that omits ``sender`` is treated as
+        the unlimited operator. Agents are forbidden from doing that (the CLI
+        and the MCP tool always send ``$CLAUNCH_SESSION``); the only
+        safeguard is that ``authority: operator`` is written into both audit
+        records, so misuse is visible. Same class as the restart gate (see
+        CLAUDE.md).
+
         Delivery is an append to the TARGET mesh's log from a non-member
         label ``urgent:<sender>``, which ``Mesh.connected`` waves through the
         way it does any external sender. The sender's mesh gets an audit

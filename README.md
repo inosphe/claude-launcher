@@ -2890,6 +2890,12 @@ claunch mesh urgent dev s26-qf1 "build is red, stop pushing" --reason "release f
                                   # '*'/@selector/list. Agents: 3/hour/sender and
                                   # 1 per target per 10 min (MCP 'urgent_send').
                                   # A target on another machine is refused.
+                                  # Limit, not enforced: the daemon cannot tell an
+                                  # agent's HTTP call from the operator's, so a
+                                  # call with no session is the unlimited
+                                  # operator. Agents must never do that; the CLI
+                                  # sends $CLAUNCH_SESSION, and the audit records
+                                  # authority: operator so misuse is visible.
 claunch mesh invite dev           # optional ticket that pre-approves one join
 claunch mesh join dev@work-pc --code <ticket>   # ...admitted without waiting
 claunch mesh revoke dev other-pc  # unlink a guest machine (persistent until then)

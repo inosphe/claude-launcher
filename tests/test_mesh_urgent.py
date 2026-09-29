@@ -179,3 +179,36 @@ def test_mcp_exposes_urgent_send_with_required_reason():
 
     tool = next(t for t in mesh_mcp.TOOLS if t["name"] == "urgent_send")
     assert "reason" in tool["inputSchema"]["required"]
+
+
+def test_operator_authority_is_written_into_both_audit_records():
+    mm, home, other = _two_meshes()
+    mm.urgent_send("home", "", "s26-qf1", "x", reason="operator override")
+    assert other.messages[-1]["ref"]["urgent"]["authority"] == "operator"
+    assert home.messages[-1]["ref"]["urgent"]["authority"] == "operator"
+
+
+def test_cli_sends_the_managed_session_as_from(monkeypatch):
+    """Inside a session the CLI never sends an empty `from` (= operator)."""
+    import argparse
+
+    from claude_launcher import cli_mesh
+
+    sent = {}
+
+    class FakeClient:
+        def post(self, path, body, **kw):
+            sent.update(path=path, body=body)
+            return {"id": "m1", "urgent": {}, "audited_in": []}
+
+    monkeypatch.setattr(cli_mesh.daemon_client, "ensure_running", lambda: FakeClient())
+    monkeypatch.setenv("CLAUNCH_SESSION", "s29")
+    args = argparse.Namespace(
+        mesh="home", to="x", text=["hi"], reason="a valid long reason",
+        target_mesh=None, session="",
+    )
+    assert cli_mesh._cmd_urgent(args) == 0
+    assert sent["body"]["from"] == "s29"
+    monkeypatch.delenv("CLAUNCH_SESSION")
+    assert cli_mesh._cmd_urgent(args) == 0
+    assert sent["body"]["from"] == ""
