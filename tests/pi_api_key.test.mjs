@@ -44,7 +44,13 @@ test('the version comes from above the entry script, following symlinks', (t) =>
   const binDir = fs.mkdtempSync(path.join(os.tmpdir(), 'claunch-pi-bin-'));
   t.after(() => fs.rmSync(binDir, { recursive: true, force: true }));
   const link = path.join(binDir, 'pi');
-  fs.symlinkSync(cli, link);
+  try {
+    fs.symlinkSync(cli, link);
+  } catch (err) {
+    // Windows grants file symlinks only with Developer Mode or elevation.
+    if (err.code === 'EPERM') return t.skip('creating a symlink needs Developer Mode or elevation on Windows');
+    throw err;
+  }
   assert.equal(piVersion({}, ['node', link], ''), '0.76.0');
 });
 
