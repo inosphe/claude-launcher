@@ -910,6 +910,48 @@ def test_check_abstains_when_no_receipt_answers(repo, gate, capsys):
     assert "abstain" not in captured.err
 
 
+@pytest.mark.parametrize(
+    "rel",
+    [
+        "src/pkg/cli_sessions.py",                 # 2c
+        "tools/merge_ready.py",                    # 2c, no module path
+        "src/claude_launcher/workflows/flow-x.yaml",  # 3a
+        "src/pkg/__main__.py",                     # 2c skips a dunder
+        "tests/test_mesh.py",                      # 1: the module, not its readers
+    ],
+)
+def test_map_one_selects_the_naming_tests_named_by_finds_except_for_a_test_module(repo, rel):
+    """Rules 2c and 3a are :func:`changed_tests.named_by`, and
+    ``tools/related_surfaces.py`` lists its answer as tests "the gate runs".
+    While that tool searched with :func:`changed_tests.mentioning` on its own
+    it also searched where the gate does not, and marked four modules the
+    gate never selected (``claunch-wt12o.1.2``). This pins the one relation
+    both depend on: every path but a test module selects all of
+    :func:`named_by`, and a test module selects itself alone."""
+    _seed_on_base(
+        repo,
+        {
+            "src/pkg/__main__.py": "x = 1\n",
+            "src/claude_launcher/workflows/flow-x.yaml": "name: flow-x\n",
+            "tests/test_names_all.py": (
+                'PINS = ["cli_sessions.py", "tools/merge_ready.py", "flow-x", "test_mesh"]\n'
+                'if __name__ == "__main__":\n    pass\n'
+            ),
+        },
+    )
+    named = set(changed_tests.named_by(repo, rel))
+    picked = set(changed_tests.map_one(repo, rel))
+    if rel == "tests/test_mesh.py":
+        assert named == {"tests/test_names_all.py"}
+        assert picked == {rel}
+    elif rel == "src/pkg/__main__.py":
+        assert named == set()
+        assert "tests/test_names_all.py" not in picked
+    else:
+        assert named == {"tests/test_names_all.py"}
+        assert named <= picked
+
+
 def test_the_selection_only_grows_as_changed_paths_are_added(repo):
     """Adding a changed path can never remove a test module from the selection.
 
