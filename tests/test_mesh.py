@@ -742,6 +742,7 @@ def test_mesh_api(home, tmp_path):
                     "local": True,
                 }],
                 "member_count": 1, "messages": 0, "requests": 0,
+                "visibility": "private",
             }]
 
             resp = await client.get(

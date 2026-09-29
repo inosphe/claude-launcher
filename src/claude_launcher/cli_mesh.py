@@ -10,6 +10,7 @@ status line so it is always visible whether the mesh can span machines.
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
 from typing import Optional
@@ -616,6 +617,12 @@ def _cmd_requests(args: argparse.Namespace) -> int:
             continue
         for r in m.get("requests") or []:
             shown += 1
+            if r.get("attach"):
+                print(
+                    f"in   {m['name']:<12} {r['id']:<10} daemon attach "
+                    f"from {r['machine']}  {r['requested_at']}"
+                )
+                continue
             print(
                 f"in   {m['name']:<12} {r['id']:<10} {r['handle']!r} "
                 f"({r['role']}) from {r['machine']}/{r['session']}  "
@@ -625,8 +632,9 @@ def _cmd_requests(args: argparse.Namespace) -> int:
         if args.mesh and r["mesh"] != args.mesh:
             continue
         shown += 1
+        who = "daemon attach" if r.get("attach") else f"as {r['handle']!r}"
         print(
-            f"out  {r['mesh']:<12} {r['request_id']:<10} as {r['handle']!r} "
+            f"out  {r['mesh']:<12} {r['request_id']:<10} {who} "
             f"-> {r['primary']}  {r['requested_at']}"
         )
     if not shown:
@@ -668,6 +676,112 @@ def _cmd_revoke(args: argparse.Namespace) -> int:
         f"({len(removed)} member(s) removed: {', '.join(removed) or '-'})"
     )
     print("its mirror is dropped as soon as that daemon is reachable")
+    return 0
+
+
+def _cmd_attach(args: argparse.Namespace) -> int:
+    """Daemon-level join: this daemon attaches mesh@machine, no member."""
+    client = daemon_client.ensure_running()
+    body = {"code": args.code} if args.code else {}
+    result = client.post(f"/api/mesh/{args.mesh}/attach", body)
+    if result.get("pending"):
+        print(
+            f"requested to attach mesh {result['mesh']!r} on "
+            f"{result['primary']!r} -- waiting for approval (request "
+            f"{result['request_id']})"
+        )
+        print(
+            "the operator there approves with: claunch mesh approve "
+            f"{result['mesh']} <id>   |   track: claunch mesh requests"
+        )
+        _print_relay(client.get("/api/daemon").get("relay"))
+        return 0
+    name = result["mesh"]
+    print(
+        f"mesh {name!r} is {'already ' if result.get('already') else ''}"
+        f"attached here (mirror of {result['primary']!r}, "
+        f"{result['members']} member(s))"
+    )
+    print(f"sessions here join it with: claunch mesh join {name}")
+    return 0
+
+
+def _cmd_detach(args: argparse.Namespace) -> int:
+    client = daemon_client.ensure_running()
+    q = "?force=1" if args.force else ""
+    result = client.delete(f"/api/mesh/{args.mesh}/attach{q}")
+    print(f"detached mesh {result['mesh']!r} from {result['primary']!r}")
+    if not result.get("notified"):
+        print(
+            f"note: {result['primary']!r} was not told -- its operator can "
+            "revoke this daemon there",
+            file=sys.stderr,
+        )
+    return 0
+
+
+def _cmd_discover(args: argparse.Namespace) -> int:
+    """Meshes this daemon could attach (one relay hop, all relays)."""
+    client = daemon_client.ensure_running()
+    doc = client.get("/api/relay/meshes")
+    rows = doc.get("meshes") or []
+    if args.json:
+        print(json.dumps(doc, indent=2))
+        return 0
+    for r in rows:
+        members = r.get("members")
+        print(
+            f"{r['mesh'] + '@' + r['machine']:<32} {r['state']:<10} "
+            f"{r['access']:<8} "
+            f"{'-' if members is None else members:>3} member(s)  "
+            f"{r.get('project') or ''}"
+        )
+    if not rows:
+        print("no mesh is published to this daemon")
+    for where, why in sorted((doc.get("errors") or {}).items()):
+        print(f"note: {where}: {why}", file=sys.stderr)
+    if rows:
+        print(
+            "attach one with: claunch mesh attach MESH@MACHINE "
+            "(access 'offer' is pre-approved; 'approval' waits for its owner)",
+            file=sys.stderr,
+        )
+    return 0
+
+
+def _cmd_visibility(args: argparse.Namespace) -> int:
+    client = daemon_client.ensure_running()
+    if not args.visibility:
+        info = client.get(f"/api/mesh/{args.mesh}?state=running")
+        if info.get("primary"):
+            print(f"mesh {args.mesh!r} is a mirror -- its owner publishes it")
+            return 0
+        print(info.get("visibility") or "private")
+        for machine in info.get("offers") or []:
+            print(f"offered to: {machine}")
+        return 0
+    result = client.put(
+        f"/api/mesh/{args.mesh}/visibility", {"visibility": args.visibility}
+    )
+    print(f"mesh {result['mesh']!r} is now {result['visibility']}")
+    for machine in result.get("withdrawn") or []:
+        print(f"withdrew the offer to {machine}")
+    return 0
+
+
+def _cmd_offer(args: argparse.Namespace) -> int:
+    client = daemon_client.ensure_running()
+    if args.cancel:
+        result = client.delete(f"/api/mesh/{args.mesh}/offers/{args.machine}")
+        print(f"withdrew the offer of {result['mesh']!r} to {result['machine']!r}")
+        return 0
+    result = client.post(
+        f"/api/mesh/{args.mesh}/offers", {"machine": args.machine}
+    )
+    print(
+        f"offered mesh {result['mesh']!r} to {result['machine']!r} "
+        f"(visibility: {result['visibility']}) -- it attaches with no approval"
+    )
     return 0
 
 
@@ -1406,6 +1520,53 @@ def register(sub) -> None:
     p.add_argument("mesh")
     p.add_argument("machine")
     p.set_defaults(func=_cmd_revoke)
+
+    p = msub.add_parser(
+        "attach",
+        help="attach THIS DAEMON to a remote mesh with no member of its own; "
+             "its sessions then join by the bare name without approval",
+    )
+    p.add_argument("mesh", metavar="MESH@MACHINE")
+    p.add_argument("--code", help="invite ticket from 'claunch mesh invite' "
+                                  "(an offer pushed to this daemon needs none)")
+    p.set_defaults(func=_cmd_attach)
+
+    p = msub.add_parser(
+        "detach",
+        help="undo 'attach': the owner drops this daemon and its members, "
+             "and the mirror here is removed",
+    )
+    p.add_argument("mesh")
+    p.add_argument("--force", action="store_true",
+                   help="drop the mirror even when the owner cannot be told")
+    p.set_defaults(func=_cmd_detach)
+
+    p = msub.add_parser(
+        "discover",
+        help="meshes this daemon could attach: public ones owned by daemons "
+             "on every connected relay, plus offers pushed here (one hop)",
+    )
+    p.add_argument("--json", action="store_true", help="raw JSON")
+    p.set_defaults(func=_cmd_discover)
+
+    p = msub.add_parser(
+        "visibility",
+        help="show or set who may discover a mesh you own: private | "
+             "public (every relay daemon) | invited (offered daemons only)",
+    )
+    p.add_argument("mesh")
+    p.add_argument("visibility", nargs="?", choices=("private", "public", "invited"))
+    p.set_defaults(func=_cmd_visibility)
+
+    p = msub.add_parser(
+        "offer",
+        help="offer a mesh you own to one relay daemon: it is listed there "
+             "and attaches with no approval",
+    )
+    p.add_argument("mesh")
+    p.add_argument("machine")
+    p.add_argument("--cancel", action="store_true", help="withdraw the offer")
+    p.set_defaults(func=_cmd_offer)
 
     p = msub.add_parser("members", help="list a mesh's members and reachability")
     p.add_argument("mesh")
