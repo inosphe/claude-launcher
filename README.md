@@ -111,7 +111,7 @@ claunch run work:claude                  # explicit Claude selector
 | `run <name[:harness]> [args...]` | Launch the profile default or an explicit harness. `--borrow BASE_PROFILE` works for Claude and declared API-key harnesses; `--null`, `--provider` and `--add-prompt` are Claude-only. Other args pass through untouched. |
 | `env <name> [...]`     | View/edit the profile's env vars (`--effective` for merged). |
 | `parent <name> [p]`    | Show, set, or `--clear` a profile's parent. |
-| `template [--init]`    | Show or write the default env template. |
+| `template [--init]`    | Show the profile template (the layer under every profile) or write its bootstrap file. |
 | `migrate <name> [src]` | Copy skills/MCP servers from a global or local path. |
 | `plugin [list\|install\|uninstall\|marketplace]` | Declare [plugins and marketplaces](#plugins--shared-settings-every-profile) for every profile, and install them. |
 | `shared [KEY=VALUE ...]` | Show the `settings.json` keys every profile carries (`--unset KEY`). A dotted `KEY` writes inside a nested object, e.g. `shared permissions.defaultMode=auto` — the value claunch ships as a default. |
@@ -382,7 +382,7 @@ into the new profile — carrying over the onboarding flags
 (`hasCompletedOnboarding` etc.), UI preferences and `settings.json`, while
 **stripping** account- and project-specific data (`oauthAccount`, `projects`,
 cached API-key responses) so profiles stay isolated. The `settings.json` `env`
-block is also stripped — launcher env is owned by `~/.claunch.yaml`, and new
+block is also stripped — launcher env is owned by `~/.claunch.yaml`, and
 profiles get their defaults from the [template](#default-template), not from your
 global env. Each profile still logs in with its own setup-token.
 
@@ -398,8 +398,7 @@ conflict can refuse the rename: "run the command again") leaves the directory
 behind with no entry and no seeded config. Running `create` again then reports
 `profile 'work' already exists`. `--reinit` finishes that setup in place:
 it registers the directory, seeds only what is missing (a profile that already
-ran keeps its own config), and re-applies the template and the shared
-declaration. It is idempotent, so it is also how you converge an existing
+ran keeps its own config), and re-applies the shared declaration. It is idempotent, so it is also how you converge an existing
 profile after the shared declaration changes.
 
 ```bash
@@ -416,7 +415,8 @@ take effect immediately and **override** any value inherited from your shell.
 This `env` block is the **common env**: it applies to every harness the profile
 runs (Claude, Pi, Codex, ...) and is inherited along the
 [parent chain](#inheritance-parent-profiles), with a child's key overriding its
-parent's. For a harness other than Claude, `CLAUDE_CODE_*` and `ANTHROPIC_*`
+parent's. The template's `env` sits under the root of every chain (see
+[Default template](#default-template)). For a harness other than Claude, `CLAUDE_CODE_*` and `ANTHROPIC_*`
 keys are removed before launch (and, for an API-key harness such as Pi, any
 other `*API_KEY` key). A value meant for one harness only goes under
 `harness_options.<harness>.env` instead.
@@ -425,20 +425,62 @@ other `*API_KEY` key). A value meant for one harness only goes under
 claunch env work                                  # list this profile's env vars
 claunch env work CLAUDE_CODE_AUTO_COMPACT_WINDOW=200000   # set one or more
 claunch env work --unset FOO BAR                  # remove vars
-claunch env work --apply-template                 # merge the template defaults
+claunch env work --clear GIT_CONFIG_GLOBAL        # do not use the template's/parent's value
+claunch env work --effective                      # template + parent chain + own, merged
 ```
 
 ### Default template
 
-New profiles get their defaults from the `template` section of
-`~/.claunch.yaml`. The template is a profile *layer*: the same fields a
-profile entry may carry (`models`, `context_window`, `auto_compact_at`,
-`reasoning_effort`, `harness_options`; see
-[API providers](#api-providers-third-party-backends)),
-copied into each new Claude profile at `create` (a field the profile already
-sets is kept, option maps merge). On a brand-new install the file is created
-from a bootstrap seed, `<launcher home>/template.yaml`, whose built-in
-defaults are:
+The `template` section of `~/.claunch.yaml` is a profile *layer* that applies
+**under every profile**. It holds the same fields a profile entry may carry
+(`models`, `context_window`, `auto_compact_at`, `reasoning_effort`,
+`harness_options`; see [API providers](#api-providers-third-party-backends))
+plus the common `env`. At launch it is read as the bottom of each profile's
+[parent chain](#inheritance-parent-profiles):
+
+    provider  <  template  <  root ancestor  <  ...  <  the profile itself
+
+A field that no profile in the chain sets takes the template's value, and one
+that a profile or an ancestor sets wins. Maps merge key by key, so a profile's
+`harness_options.claude.env` adds to the template's instead of replacing it.
+This holds for every profile: existing ones, children created with `--parent`,
+and profiles of any harness.
+
+Nothing is copied at `create`: a new profile's entry stays empty, and a change
+to the template reaches every profile that does not override the field on the
+next launch.
+
+**Clearing a template value.** Write the key with no value (`KEY:`, which is
+`null` in YAML). It removes the value that the template and the profile's
+ancestors would give; the provider's own values are not affected. It works at
+any depth, and only the key named is removed:
+
+```yaml
+template:
+  auto_compact_at: 400000
+  env:
+    GIT_CONFIG_GLOBAL: /home/me/.gitconfig-main
+  harness_options:
+    claude:
+      env:
+        CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: "0"
+profiles:
+  scratch:
+    auto_compact_at:                  # no compaction threshold from the template
+    env:
+      GIT_CONFIG_GLOBAL:              # use ~/.gitconfig
+    harness_options:
+      claude:
+        env:
+          CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS:   # this one key only
+```
+
+`claunch env <name> --clear KEY` writes such a key into the profile's `env`.
+In an `env` map an empty string (`KEY: ""`) is a value: the variable is
+exported empty. Only a key with no value clears.
+
+On a brand-new install the `template` section is created from a bootstrap
+seed, `<launcher home>/template.yaml`, whose built-in defaults are:
 
 ```yaml
 template:
@@ -449,20 +491,15 @@ template:
         CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: "0"
 ```
 
-A `template.env` block is merged into a new root Claude profile's common
-`env` (a child created with `--parent` inherits from its parent instead). `claunch
-migrate-config` converts the block only when it holds backend keys (model
-pins, `CLAUDE_CODE_AUTO_COMPACT_WINDOW`, `CLAUDE_CODE_EFFORT_LEVEL`); a block
-of other keys, such as `GIT_CONFIG_GLOBAL`, is left as it is.
-
 `template.yaml` only *seeds* `~/.claunch.yaml` the first time; afterwards the
 live `template` block in `~/.claunch.yaml` is authoritative (edit it directly, or
-run `claunch template --init` to write the bootstrap seed). **Existing profiles
-are not changed automatically** — apply the current defaults to one with:
+run `claunch template --init` to write the bootstrap seed). `claunch template`
+shows the live block.
 
-```bash
-claunch env <name> --apply-template
-```
+`claunch migrate-config` converts a `template.env` block only when it holds
+backend keys (model pins, `CLAUDE_CODE_AUTO_COMPACT_WINDOW`,
+`CLAUDE_CODE_EFFORT_LEVEL`); a block of other keys, such as
+`GIT_CONFIG_GLOBAL`, is left as it is.
 
 ## Inheritance (parent profiles)
 
@@ -1829,29 +1866,20 @@ later), set in the profile's common `env` (see
 
 ```yaml
 # ~/.claunch-team.yaml (the instance's config file)
-profiles:
-  work:
-    env:
-      GIT_CONFIG_GLOBAL: /home/me/.gitconfig-team
 template:
-  env:                           # copied into each new root Claude profile
+  env:
     GIT_CONFIG_GLOBAL: /home/me/.gitconfig-team
 ```
 
-The same from the CLI: `claunch -L team env work GIT_CONFIG_GLOBAL=/home/me/.gitconfig-team`.
 Do the same in the default config file with its own file (for example
 `~/.gitconfig-main`) when the default daemon's sessions should also commit
 under a fixed identity.
 
-- The profile `env` reaches every harness the profile runs (Claude, Pi,
-  Codex, ...), so one entry per profile is enough.
-- It is inherited along the parent chain. Set it on a root profile and every
-  child gets it; a child that sets the same key overrides it.
-- `template.env` is copied into a new root Claude profile when it is
-  created (`claunch create`); like the rest of the template, it is not applied
-  to a profile created for another harness. A child created with `--parent` does not receive the copy
-  and inherits the value from its parent instead. Existing profiles are not
-  changed; add the key to them, or run `claunch env <name> --apply-template`.
+- The template's `env` applies under every profile of that config file and
+  reaches every harness (Claude, Pi, Codex, ...), so this one entry is enough.
+- A profile that should not use it writes the key with no value
+  (`claunch -L team env work --clear GIT_CONFIG_GLOBAL`); one that needs
+  another identity sets its own value.
 - The value is read when a session starts. Sessions that are already running
   keep their old environment until they are restarted. A daemon restart is not
   needed.
