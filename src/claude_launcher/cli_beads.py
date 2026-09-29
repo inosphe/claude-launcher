@@ -65,6 +65,7 @@ that case is ``br``'s own refusal rather than a rewritten command.
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import re
 import shutil
@@ -740,14 +741,18 @@ def ensure_gitignore(beads_dir: Path) -> bool:
     return True
 
 
-def init_plan(ref: beads_db.BoardRef, *, default_db_exists: bool) -> InitPlan:
+def init_plan(
+    ref: beads_db.BoardRef, *, default_db_exists: bool,
+    prefix: Optional[str] = None,
+) -> InitPlan:
     """The steps that create ``ref``'s database. See the note above.
 
     ``default_db_exists`` is whether ``<root>/.beads/beads.db`` is already a
     file — the one state ``br init`` refuses, and the only reason this needs
-    a staging directory.
+    a staging directory. ``prefix`` is the issue prefix to mint under; left
+    out, it is the board's own name.
     """
-    argv = [BINARY, "init", "--prefix", beads_db.prefix_for(ref.name)]
+    argv = [BINARY, "init", "--prefix", prefix or beads_db.prefix_for(ref.name)]
     root = Path(ref.root)
     written = root / BEADS_DIR / DB_NAME
     if not default_db_exists:
@@ -788,7 +793,9 @@ def _subprocess_runner(argv: List[str], cwd: str):
     return proc.returncode, proc.stdout, proc.stderr
 
 
-def create_board(ref: beads_db.BoardRef, runner) -> None:
+def create_board(
+    ref: beads_db.BoardRef, runner, *, prefix: Optional[str] = None
+) -> None:
     """Create ``ref``'s database. ``runner(argv, cwd)`` -> ``(code, out, err)``.
 
     The filesystem half of :func:`init_plan`: make the directories ``br``
@@ -799,7 +806,8 @@ def create_board(ref: beads_db.BoardRef, runner) -> None:
     Path(ref.root).mkdir(parents=True, exist_ok=True)
     Path(ref.db).parent.mkdir(parents=True, exist_ok=True)
     plan_ = init_plan(
-        ref, default_db_exists=(Path(ref.root) / BEADS_DIR / DB_NAME).is_file()
+        ref, default_db_exists=(Path(ref.root) / BEADS_DIR / DB_NAME).is_file(),
+        prefix=prefix,
     )
     if plan_.discard:
         Path(plan_.cwd).mkdir(parents=True, exist_ok=True)
@@ -818,6 +826,156 @@ def create_board(ref: beads_db.BoardRef, runner) -> None:
     # A board this tool made answers its own workflows' status filters from
     # its first command: see CUSTOM_STATUSES.
     ensure_policy(Path(ref.root) / BEADS_DIR)
+
+
+#: What :func:`policy_state` answers for a board's ``policy.yaml``.
+POLICY_DECLARED = "declared"
+POLICY_MISSING = "missing"
+POLICY_UNREADABLE = "unreadable"
+
+
+def policy_state(beads_dir: Path) -> str:
+    """Whether ``beads_dir``'s policy declares :data:`CUSTOM_STATUSES`.
+
+    :data:`POLICY_DECLARED` when it does; :data:`POLICY_MISSING` when
+    :func:`ensure_policy` would write it (no file, or a file without them);
+    :data:`POLICY_UNREADABLE` for a file this module leaves alone — one that
+    cannot be read or that :func:`policy_text` will not extend. ``br`` refuses
+    the last kind with its own words, so the page says so rather than offer a
+    button that would do nothing.
+    """
+    target = beads_dir / POLICY_NAME
+    try:
+        current = target.read_text(encoding="utf-8") if target.is_file() else None
+    except OSError:
+        return POLICY_UNREADABLE
+    if policy_text(current) is not None:
+        return POLICY_MISSING
+    # policy_text leaves both a complete file and one it cannot extend alone;
+    # only the first declares anything.
+    try:
+        doc = yaml.safe_load(current or "")
+    except yaml.YAMLError:
+        return POLICY_UNREADABLE
+    workflow = doc.get("workflow") if isinstance(doc, dict) else None
+    statuses = workflow.get("statuses") if isinstance(workflow, dict) else None
+    if isinstance(statuses, list) and all(s in statuses for s in CUSTOM_STATUSES):
+        return POLICY_DECLARED
+    return POLICY_UNREADABLE
+
+
+def gitignore_complete(beads_dir: Path) -> bool:
+    """Whether ``beads_dir``'s ``.gitignore`` has every :data:`GITIGNORE_LINES`."""
+    target = beads_dir / GITIGNORE_NAME
+    try:
+        current = target.read_text(encoding="utf-8") if target.is_file() else None
+    except OSError:
+        return False
+    return gitignore_text(current) is None
+
+
+def setup_state(ref: beads_db.BoardRef) -> dict:
+    """How much of :func:`init_board` ``ref``'s board already has.
+
+    ``database`` is whether the file is there, ``policy`` a
+    :func:`policy_state` value, ``gitignore`` whether the ``.gitignore``
+    lines are all present. ``complete`` is true when there is nothing left
+    for ``claunch beads init --workspace`` (or the Settings page's button) to
+    do — an unreadable policy counts as nothing to do, since neither will
+    touch it.
+    """
+    beads_dir = Path(ref.root) / BEADS_DIR
+    state = {
+        "database": ref.exists(),
+        "policy": policy_state(beads_dir),
+        "gitignore": gitignore_complete(beads_dir),
+    }
+    state["complete"] = bool(
+        state["database"] and state["gitignore"]
+        and state["policy"] != POLICY_MISSING
+    )
+    return state
+
+
+def init_board(ref: beads_db.BoardRef, runner) -> dict:
+    """Set ``ref``'s board up in full; what changed comes back.
+
+    ``claunch beads init --workspace <name>`` and the Settings page's button
+    both land here, so a board set up either way is the same board:
+
+    1. the database, made with ``br init`` (:func:`create_board`) when the file
+       is not there. A checkout that carries ``issues.jsonl`` without a
+       database — a fresh clone — is rebuilt from it rather than started
+       empty, under the prefix its ids already carry (:func:`issue_prefix`),
+       the same rebuild :func:`plan` runs;
+    2. the ``policy.yaml`` declaring :data:`CUSTOM_STATUSES`
+       (:func:`ensure_policy`);
+    3. the ``.gitignore`` lines for br 0.7's files (:func:`ensure_gitignore`).
+
+    Each step is skipped when its part is already there, so running it on a
+    set-up board changes nothing — this is not a reset, and an existing
+    database is never touched. The answer has ``created`` (the database was
+    made now), ``imported`` (and filled from the JSONL), ``prefix`` (the one
+    ``br init`` was given, ``None`` when it did not run), ``policy`` and
+    ``gitignore`` (that file was written now), and ``state``, the
+    :func:`setup_state` after.
+    """
+    root = Path(ref.root)
+    beads_dir = root / BEADS_DIR
+    before = setup_state(ref)
+    imported = False
+    prefix = None
+    if not before["database"]:
+        if (beads_dir / JSONL_NAME).is_file():
+            prefix = issue_prefix(beads_dir, root)
+            create_board(ref, runner, prefix=prefix)
+            code, out, err = runner(
+                [BINARY, "--db", ref.db, "sync", "--import-only"], str(root)
+            )
+            if code != 0:
+                raise BeadsError(
+                    f"rebuilding the board {ref.name} from {JSONL_NAME} failed: "
+                    f"{(err or out or '').strip()}"
+                )
+            imported = True
+        else:
+            prefix = beads_db.prefix_for(ref.name)
+            create_board(ref, runner, prefix=prefix)
+    ensure_policy(beads_dir)
+    ensure_gitignore(beads_dir)
+    after = setup_state(ref)
+    return {
+        "created": not before["database"] and after["database"],
+        "imported": imported,
+        "prefix": prefix,
+        "policy": before["policy"] != after["policy"],
+        "gitignore": before["gitignore"] != after["gitignore"],
+        "state": after,
+    }
+
+
+def board_named(name: str, cwd: Optional[str] = None) -> Optional[beads_db.BoardRef]:
+    """The board called ``name`` — a registered workspace's, or
+    :data:`claude_launcher.beads_db.DEFAULT_BOARD` — or ``None``.
+
+    The same boards, resolved the same way, as the Settings page's list
+    (:func:`claude_launcher.beads_db.listing`), so the command line and the
+    page can never set up two different files under one name. A workspace
+    may also be named by the directory it points at, as
+    :func:`claude_launcher.workspaces.find` accepts.
+    """
+    rows = beads_db.listing(repo_root(cwd))
+    if not any(row["board"] == name for row in rows):
+        ws = workspaces.find(name)
+        if ws is not None:
+            name = ws.name
+    for row in rows:
+        if row["board"] == name:
+            return beads_db.BoardRef(
+                name=row["board"], db=row["db"], root=row["root"],
+                workspace=row["workspace"], configured=row["configured"],
+            )
+    return None
 
 
 def autocreatable(ref: beads_db.BoardRef) -> bool:
@@ -926,13 +1084,101 @@ def plan(
     )
 
 
-def run(args: List[str], cwd: Optional[str] = None) -> int:
-    """Resolve the board for ``cwd`` and run ``br`` with ``args`` against it."""
+def _require_br() -> None:
     if shutil.which(BINARY) is None:
         raise BeadsError(
             f"'{BINARY}' is not installed — the board needs the beads CLI "
             f"(cargo install beads-rust, or see https://github.com/steveyegge/beads)"
         )
+
+
+#: ``claunch beads init --workspace <name>`` — the one ``init`` this tool
+#: answers itself instead of passing to ``br``: ``br init`` has no such
+#: option, and on its own it neither knows the board's path nor writes the
+#: files br 0.7 needs next to it (:func:`init_board`).
+WORKSPACE_OPTION = "--workspace"
+
+
+def wants_workspace_init(args: List[str]) -> bool:
+    """Whether ``args`` is ``init`` with :data:`WORKSPACE_OPTION`."""
+    return bool(args) and args[0] == "init" and any(
+        a == WORKSPACE_OPTION or a.startswith(WORKSPACE_OPTION + "=")
+        for a in args[1:]
+    )
+
+
+def init_workspace(args: List[str], cwd: Optional[str] = None) -> int:
+    """``claunch beads init --workspace <name> [--json]``: :func:`init_board`
+    for the named board, and a report of what it found and did."""
+    parser = argparse.ArgumentParser(
+        prog="claunch beads init",
+        description=(
+            "Set a board up in full: its database (br init, or a rebuild "
+            "from a tracked issues.jsonl), the policy.yaml declaring "
+            f"{', '.join(CUSTOM_STATUSES)}, and the .gitignore lines for "
+            "br 0.7's files. Parts already there are left alone. Without "
+            "--workspace, 'init' is br's own."
+        ),
+    )
+    parser.add_argument(
+        WORKSPACE_OPTION, required=True, metavar="NAME",
+        help=(
+            "a registered workspace (its name or directory), or "
+            f"{beads_db.DEFAULT_BOARD}"
+        ),
+    )
+    parser.add_argument("--json", action="store_true", help="answer in JSON")
+    ns, rest = parser.parse_known_args(args[1:])
+    if rest:
+        raise BeadsError(
+            f"init --workspace takes no other options (got {' '.join(rest)}) — "
+            "the issue prefix is the board's name; 'claunch beads init "
+            "--prefix <p>' without --workspace is br's own init"
+        )
+    _require_br()
+    ref = board_named(ns.workspace, cwd)
+    if ref is None:
+        names = [row["board"] for row in beads_db.listing(repo_root(cwd))]
+        raise BeadsError(
+            f"no board named {ns.workspace!r} — boards are the registered "
+            f"workspaces plus {beads_db.DEFAULT_BOARD!r} "
+            f"({', '.join(names) or 'none yet'}); register a directory with "
+            "'claunch workspace add <dir>'"
+        )
+    result = init_board(ref, _subprocess_runner)
+    if ns.json:
+        print(json.dumps({"board": ref.to_dict(), **result}, ensure_ascii=False))
+        return 0
+    state = result["state"]
+    beads_dir = Path(ref.root) / BEADS_DIR
+    if result["imported"]:
+        database = f"rebuilt from {JSONL_NAME} (prefix {result['prefix']})"
+    elif result["created"]:
+        database = f"created (prefix {result['prefix']})"
+    else:
+        database = "already there"
+    if state["policy"] == POLICY_UNREADABLE:
+        policy = (
+            "left alone — not a policy claunch can extend; br refuses it "
+            "too, so fix it by hand"
+        )
+    else:
+        policy = f"declares {', '.join(CUSTOM_STATUSES)}" + (
+            " (written)" if result["policy"] else ""
+        )
+    gitignore = "br 0.7 lines " + ("added" if result["gitignore"] else "present")
+    print(f"board {ref.name}: {ref.db}")
+    print(f"  database     {database}")
+    print(f"  policy.yaml  {policy}  [{beads_dir / POLICY_NAME}]")
+    print(f"  .gitignore   {gitignore}  [{beads_dir / GITIGNORE_NAME}]")
+    return 0
+
+
+def run(args: List[str], cwd: Optional[str] = None) -> int:
+    """Resolve the board for ``cwd`` and run ``br`` with ``args`` against it."""
+    if wants_workspace_init(args):
+        return init_workspace(list(args), cwd)
+    _require_br()
     ref = resolve(cwd)
     if ref is None:
         raise BeadsError(
@@ -1022,7 +1268,10 @@ def register(sub) -> None:
             "checkout's own board if it has one, and the 'claunch-default' "
             "board otherwise. Writes are stamped --actor $CLAUNCH_SESSION. "
             "Every argument after 'beads' goes to br as-is; 'br --help' "
-            "lists them."
+            "lists them. The one exception is 'init --workspace <name>', "
+            "which sets that board up in full: br init, the policy.yaml "
+            "declaring the statuses claunch uses, and .gitignore lines for "
+            "br 0.7's files."
         ),
     )
     p.add_argument(

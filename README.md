@@ -2286,6 +2286,27 @@ parent directory that does not exist. A path with no file at it yet is
 accepted: the board is created on first use, or now with the row's **Create**
 button (`br init`, under the workspace's name as the issue prefix).
 
+`br` 0.7 needs two files beside the database that `br init` does not write.
+`.beads/policy.yaml` has to declare the statuses claunch's workflows use
+beyond br's own (`in_ready`, `in_review`); without it, br refuses a
+`--status` filter naming one of them while no issue is in it. `.beads/.gitignore`
+has to list the files br 0.7's engine writes next to the database, or they
+turn up untracked in `git status`. Setting a board up makes all three,
+each only if it is missing, and never touches an existing database:
+
+```bash
+claunch beads init --workspace gds6          # or the workspace's directory
+claunch beads init --workspace gds6 --json   # what was made, for a script
+```
+
+The row's **Create** button runs the same thing. A board made before br 0.7
+shows *not set up for br 0.7* and a **Set up** button that adds what it lacks.
+A checkout that carries `issues.jsonl` but no database, such as a fresh clone,
+is rebuilt from the JSONL under the prefix its ids already use. The daemon and
+`claunch beads` also declare the statuses on their own on a board's next call.
+The `.gitignore` is a tracked file, so it changes only when someone asks. Plain
+`claunch beads init`, without `--workspace`, is still br's own `init`.
+
 | Row | What it is |
 | --- | --- |
 | a workspace's name | the board sessions in that directory file on, and the board its issues are listed under on the Beads page |

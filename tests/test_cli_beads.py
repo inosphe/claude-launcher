@@ -823,3 +823,45 @@ def test_a_moved_database_takes_the_engines_sidecars_with_it(tmp_path):
     assert list(src.parent.iterdir()) == []
     for suffix in cli_beads.DB_SIDECARS:
         assert Path(str(dst) + suffix).read_text(encoding="utf-8") == suffix
+
+
+def test_init_with_a_workspace_makes_a_board_br_itself_filters_on(
+    tmp_path, monkeypatch, capsys
+):
+    """End to end against the installed ``br``: ``claunch beads init
+    --workspace`` on a registered workspace with no board yet leaves one that
+    answers a filter on each custom status (the refusal br 0.7 gives a board
+    ``br init`` made alone), with the engine's files ignored, and a second
+    run changes nothing."""
+    import json
+    import shutil as _shutil
+
+    if _shutil.which(cli_beads.BINARY) is None:
+        pytest.skip(f"{cli_beads.BINARY} is not installed on this machine")
+    root = tmp_path / "trees" / "alpha"
+    root.mkdir(parents=True)
+    git("init", "-q", cwd=root)
+    row = workspaces.Workspace(name="alpha", path=str(root))
+    monkeypatch.setattr(workspaces, "list_all", lambda doc=None: [row])
+    monkeypatch.setattr(workspaces, "get", lambda name, doc=None: row if name == "alpha" else None)
+    monkeypatch.setattr(workspaces, "owning", lambda path, doc=None: row)
+
+    assert cli_beads.run(["init", "--workspace", "alpha"], cwd=str(root)) == 0
+    assert "created (prefix alpha)" in capsys.readouterr().out
+    db = root / ".beads" / "beads.db"
+    for status in cli_beads.CUSTOM_STATUSES:
+        out = REAL_RUN(
+            [cli_beads.BINARY, "--db", str(db), "list", "--status", status, "--json"],
+            cwd=str(root), capture_output=True, text=True, encoding="utf-8",
+        )
+        assert out.returncode == 0, out.stdout + out.stderr
+        assert json.loads(out.stdout)["total"] == 0
+    ignored = REAL_RUN(
+        ["git", "check-ignore", "-q", str(db) + "-wal-cert"], cwd=str(root),
+    )
+    assert ignored.returncode == 0
+
+    assert cli_beads.run(["init", "--workspace", "alpha", "--json"], cwd=str(root)) == 0
+    doc = json.loads(capsys.readouterr().out)
+    assert (doc["created"], doc["policy"], doc["gitignore"]) == (False, False, False)
+    assert doc["state"]["complete"] is True

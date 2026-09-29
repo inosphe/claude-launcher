@@ -388,6 +388,204 @@ def test_only_a_vouched_board_may_be_created(ws, tmp_path, monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
+# setting a board up in full: claunch beads init --workspace / the Settings button
+# --------------------------------------------------------------------------- #
+def _making_runner(seen=None):
+    """A runner standing in for ``br``: ``init`` writes ``<cwd>/.beads/beads.db``
+    as the real one does, anything else succeeds silently."""
+
+    def runner(argv, cwd):
+        if seen is not None:
+            seen.append((list(argv), cwd))
+        if "init" in argv:
+            made = Path(cwd) / ".beads" / "beads.db"
+            made.parent.mkdir(parents=True, exist_ok=True)
+            made.write_bytes(b"new board")
+        return 0, "", ""
+
+    return runner
+
+
+def test_setting_a_board_up_makes_the_database_the_policy_and_the_gitignore(ws):
+    """What br 0.7 needs beside a board comes with it: without the policy a
+    status filter on in_ready/in_review is refused, without the .gitignore
+    lines the engine's files show up for 'git add .'."""
+    ref = beads_db.workspace_ref(ws["inner"])
+    beads = Path(ref.root) / ".beads"
+    seen = []
+    result = cli_beads.init_board(ref, _making_runner(seen))
+    assert [argv for argv, _cwd in seen] == [["br", "init", "--prefix", "inner"]]
+    assert result["created"] is True and result["imported"] is False
+    assert result["prefix"] == "inner"
+    assert result["policy"] is True and result["gitignore"] is True
+    assert result["state"] == {
+        "database": True, "policy": cli_beads.POLICY_DECLARED,
+        "gitignore": True, "complete": True,
+    }
+    assert cli_beads.policy_state(beads) == cli_beads.POLICY_DECLARED
+    assert ".br-wal-index-*/" in (beads / ".gitignore").read_text(encoding="utf-8")
+
+
+def test_setting_up_a_board_that_is_there_finishes_it_and_leaves_the_database(ws):
+    """A board made before br 0.7 has its database and neither file. Setting
+    it up adds the two and never runs br init, which would refuse anyway."""
+    ref = beads_db.workspace_ref(ws["outer"])
+    beads = Path(ref.root) / ".beads"
+    beads.mkdir(parents=True)
+    (beads / "beads.db").write_bytes(b"mine")
+    (beads / ".gitignore").write_text("*.db\n", encoding="utf-8")
+
+    def refuse(argv, cwd):
+        raise AssertionError(f"br ran on a board that exists: {argv}")
+
+    assert cli_beads.setup_state(ref)["complete"] is False
+    result = cli_beads.init_board(ref, refuse)
+    assert result["created"] is False and result["prefix"] is None
+    assert result["policy"] is True and result["gitignore"] is True
+    assert (beads / "beads.db").read_bytes() == b"mine"
+    assert (beads / ".gitignore").read_text(encoding="utf-8").startswith("*.db\n")
+    # Once set up, doing it again changes nothing.
+    again = cli_beads.init_board(ref, refuse)
+    assert (again["created"], again["policy"], again["gitignore"]) == (False, False, False)
+    assert again["state"]["complete"] is True
+
+
+def test_a_clone_with_a_tracked_jsonl_is_rebuilt_under_its_own_prefix(ws):
+    """A fresh clone carries issues.jsonl and no database. Its board is filled
+    from the JSONL, and new ids continue the prefix the old ones carry rather
+    than switching to the board's name -- the rebuild plan() runs."""
+    ref = beads_db.workspace_ref(ws["outer"])
+    beads = Path(ref.root) / ".beads"
+    beads.mkdir(parents=True)
+    (beads / "issues.jsonl").write_text('{"id":"legacy-1"}\n', encoding="utf-8")
+    (beads / "config.yaml").write_text("issue_prefix: legacy\n", encoding="utf-8")
+    seen = []
+    result = cli_beads.init_board(ref, _making_runner(seen))
+    assert [argv for argv, _cwd in seen] == [
+        ["br", "init", "--prefix", "legacy"],
+        ["br", "--db", ref.db, "sync", "--import-only"],
+    ]
+    assert result["created"] is True and result["imported"] is True
+    assert result["prefix"] == "legacy"
+
+
+def test_a_failed_import_is_reported_in_br_s_words(ws):
+    ref = beads_db.workspace_ref(ws["outer"])
+    beads = Path(ref.root) / ".beads"
+    beads.mkdir(parents=True)
+    (beads / "issues.jsonl").write_text("{}\n", encoding="utf-8")
+    making = _making_runner()
+
+    def runner(argv, cwd):
+        return (1, "", "bad line 1") if "sync" in argv else making(argv, cwd)
+
+    with pytest.raises(cli_beads.BeadsError, match="bad line 1"):
+        cli_beads.init_board(ref, runner)
+
+
+def test_a_policy_claunch_cannot_extend_is_reported_and_left_alone(ws):
+    """A policy.yaml that is not a mapping is br's to refuse; setting the
+    board up neither rewrites it nor calls the board unfinished for it."""
+    ref = beads_db.workspace_ref(ws["outer"])
+    beads = Path(ref.root) / ".beads"
+    beads.mkdir(parents=True)
+    (beads / "beads.db").write_bytes(b"")
+    (beads / "policy.yaml").write_text("workflow: [a, b]\n", encoding="utf-8")
+    assert cli_beads.policy_state(beads) == cli_beads.POLICY_UNREADABLE
+    result = cli_beads.init_board(ref, _making_runner())
+    assert result["policy"] is False
+    assert (beads / "policy.yaml").read_text(encoding="utf-8") == "workflow: [a, b]\n"
+    assert result["state"]["complete"] is True
+
+
+@pytest.mark.parametrize("text, state", [
+    (None, cli_beads.POLICY_MISSING),
+    ("", cli_beads.POLICY_MISSING),
+    ("other: 1\n", cli_beads.POLICY_MISSING),
+    ("workflow:\n  statuses: [in_ready]\n", cli_beads.POLICY_MISSING),
+    ("workflow:\n  statuses: [in_ready, in_review, x]\n", cli_beads.POLICY_DECLARED),
+    ("workflow:\n  statuses: in_review\n", cli_beads.POLICY_UNREADABLE),
+    ("[1, 2]\n", cli_beads.POLICY_UNREADABLE),
+    ("workflow: {statuses: [\n", cli_beads.POLICY_UNREADABLE),
+])
+def test_the_policy_state_the_card_shows(tmp_path, text, state):
+    if text is not None:
+        (tmp_path / "policy.yaml").write_text(text, encoding="utf-8")
+    assert cli_beads.policy_state(tmp_path) == state
+
+
+def test_a_board_is_named_as_the_settings_page_names_it(ws, monkeypatch):
+    """By its workspace's name, by that workspace's directory, and not at all
+    for a name no board has."""
+    assert cli_beads.board_named("inner").root == ws["inner"].path
+    monkeypatch.setattr(
+        workspaces, "find",
+        lambda token, doc=None: ws["outer"] if token == ws["outer"].path else None,
+    )
+    assert cli_beads.board_named(ws["outer"].path).name == "outer"
+    assert cli_beads.board_named("ghost") is None
+
+
+@pytest.mark.parametrize("args, wanted", [
+    (["init", "--workspace", "inner"], True),
+    (["init", "--workspace=inner"], True),
+    (["init", "--prefix", "x"], False),
+    (["init"], False),
+    (["list", "--workspace", "inner"], False),
+    ([], False),
+])
+def test_only_init_with_a_workspace_is_claunch_s_own(args, wanted):
+    assert cli_beads.wants_workspace_init(args) is wanted
+
+
+@pytest.fixture
+def fake_br(monkeypatch):
+    """``br`` installed, and every command it would run answered in-process."""
+    seen = []
+    monkeypatch.setattr(cli_beads.shutil, "which", lambda name: "/usr/bin/" + name)
+    monkeypatch.setattr(cli_beads, "_subprocess_runner", _making_runner(seen))
+    return seen
+
+
+def test_claunch_beads_init_with_a_workspace_sets_that_board_up(ws, fake_br, capsys):
+    assert cli_beads.run(["init", "--workspace", "inner"]) == 0
+    out = capsys.readouterr().out
+    assert "board inner:" in out
+    assert "created (prefix inner)" in out
+    assert "declares in_ready, in_review (written)" in out
+    assert "br 0.7 lines added" in out
+    assert [argv for argv, _cwd in fake_br] == [["br", "init", "--prefix", "inner"]]
+    # A second run finds everything there and says so.
+    assert cli_beads.run(["init", "--workspace=inner"]) == 0
+    out = capsys.readouterr().out
+    assert "already there" in out and "(written)" not in out
+    assert len(fake_br) == 1
+
+
+def test_claunch_beads_init_with_a_workspace_answers_json(ws, fake_br, capsys):
+    import json
+
+    assert cli_beads.run(["init", "--workspace", "outer", "--json"]) == 0
+    doc = json.loads(capsys.readouterr().out)
+    assert doc["board"]["board"] == "outer"
+    assert doc["created"] is True and doc["state"]["complete"] is True
+
+
+def test_claunch_beads_init_names_the_boards_there_are(ws, fake_br):
+    with pytest.raises(cli_beads.BeadsError, match="no board named 'ghost'.*inner"):
+        cli_beads.run(["init", "--workspace", "ghost"])
+    assert fake_br == []
+
+
+def test_claunch_beads_init_with_a_workspace_takes_no_prefix(ws, fake_br):
+    """The prefix is the board's name, as on the Settings page; br's own
+    init, without --workspace, is where a prefix is chosen."""
+    with pytest.raises(cli_beads.BeadsError, match="no other options.*--prefix"):
+        cli_beads.run(["init", "--workspace", "inner", "--prefix", "x"])
+    assert fake_br == []
+
+
+# --------------------------------------------------------------------------- #
 # the setting is machine-local
 # --------------------------------------------------------------------------- #
 def test_the_section_is_not_synced_between_machines():

@@ -452,6 +452,7 @@ CHECKS = [
         "relaysettings_check.js",
         "profilesettings_check.js",
         "settingsworkspaces_check.js",
+        "beadsboardsetup_check.js",
         "installsettings_check.js",
         "beadskanban_check.js",
         "beadsgroups_check.js",

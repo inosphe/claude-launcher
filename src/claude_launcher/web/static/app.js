@@ -22577,7 +22577,11 @@ function beadsBoardsCard() {
     "One board per workspace: a session opened there, and every issue filed " +
     "for it, reads that workspace's own database. The field names the .db " +
     "file itself — the database is created on first use if it is not there " +
-    "yet, or now with Create. '" + beadsDefaultBoardName + "' is the board " +
+    "yet, or now with Create, which also writes the policy.yaml and " +
+    ".gitignore lines br 0.7 needs beside it (the same as 'claunch beads " +
+    "init --workspace <name>'). A board made before those shows Set up, " +
+    "which adds them and leaves its database as it is. '" +
+    beadsDefaultBoardName + "' is the board " +
     "the daemon was already using: it holds everything filed before " +
     "workspaces had boards of their own, and a directory inside its " +
     "checkout that no workspace claims files there. A directory outside " +
@@ -22623,6 +22627,19 @@ function beadsBoardSettingsRow(b) {
     const missing = el("span", "badge exited", "no database yet");
     missing.title = "made the first time anything reads or writes this board";
     head.appendChild(missing);
+  }
+  const setup = b.setup || null;
+  if (b.exists && setup && setup.policy === "unreadable") {
+    const bad = el("span", "badge exited", "policy.yaml unreadable");
+    bad.title = "br refuses a .beads/policy.yaml it cannot read, and claunch " +
+      "will not rewrite someone's file — fix it by hand";
+    head.appendChild(bad);
+  }
+  const lacking = beadsBoardSetupMissing(b);
+  if (b.exists && lacking.length) {
+    const partial = el("span", "badge busy", "not set up for br 0.7");
+    partial.title = "missing: " + lacking.join("; ");
+    head.appendChild(partial);
   }
   if (b.path_exists === false) {
     head.appendChild(el("span", "badge exited", "directory missing"));
@@ -22682,10 +22699,15 @@ function beadsBoardSettingsRow(b) {
     controls.appendChild(reset);
   }
 
-  if (!b.exists) {
-    const make = el("button", "wf-btn clear", "Create");
+  // One route behind both labels: it makes only what is missing, so on a
+  // board that exists it never touches the database.
+  if (!b.exists || lacking.length) {
+    const make = el("button", "wf-btn clear", b.exists ? "Set up" : "Create");
     make.type = "button";
-    make.title = `br init --prefix ${b.board} against ${b.db}`;
+    make.title = b.exists
+      ? `adds ${lacking.join(" and ")} — the database is not touched`
+      : `br init --prefix ${b.board} against ${b.db}, then policy.yaml and ` +
+        ".gitignore (claunch beads init --workspace " + b.board + ")";
     make.disabled = beadsBoardsBusy === b.board;
     make.addEventListener("click", () => beadsBoardInit(b));
     controls.appendChild(make);
@@ -22765,6 +22787,32 @@ async function beadsBoardReset(b) {
   renderWorkspaces();
 }
 
+/* What a board that has a database still lacks for br 0.7, as the parts
+   the Set up button would add. Empty when the row carries no setup state
+   (an older daemon) or nothing is missing; an unreadable policy.yaml is not
+   listed, since the button leaves that file alone. */
+function beadsBoardSetupMissing(b) {
+  const setup = b.setup;
+  if (!setup || setup.complete) return [];
+  const out = [];
+  if (setup.policy === "missing") out.push("policy.yaml declaring in_ready, in_review");
+  if (!setup.gitignore) out.push(".gitignore lines for br 0.7's files");
+  return out;
+}
+
+/* The line the card shows after Create / Set up: what the daemon made now,
+   from the answer's created / imported / policy / gitignore. */
+function beadsBoardInitNotice(b, doc) {
+  const db = (doc.board || {}).db || b.db;
+  const made = [];
+  if (doc.imported) made.push(`database rebuilt from issues.jsonl at ${db}`);
+  else if (doc.created) made.push(`database created at ${db}`);
+  if (doc.policy) made.push("policy.yaml written");
+  if (doc.gitignore) made.push(".gitignore lines added");
+  if (!made.length) return `${b.board} was already set up — nothing changed.`;
+  return `${b.board}: ${made.join(", ")}.`;
+}
+
 async function beadsBoardInit(b) {
   const doc = await beadsBoardWrite(b.board, () =>
     api(`/api/beads/settings/${encodeURIComponent(b.board)}/init`, {
@@ -22773,9 +22821,7 @@ async function beadsBoardInit(b) {
       body: "{}",
     }));
   if (!doc) return;
-  beadsBoardsNotice = doc.created
-    ? `${b.board}: board created at ${(doc.board || {}).db || b.db}.`
-    : `${b.board} already had a database at ${(doc.board || {}).db || b.db}.`;
+  beadsBoardsNotice = beadsBoardInitNotice(b, doc);
   renderWorkspaces();
 }
 

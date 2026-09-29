@@ -8635,20 +8635,28 @@ async def h_beads_settings(request: web.Request) -> web.Response:
     ``issues`` is filled per row for a database that exists: a count asked
     of ``br`` (:func:`_beads_issue_count`), so a board that is about to be
     repointed can be seen to have (or not have) work on it before the change
-    is made.
+    is made. ``setup`` is :func:`cli_beads.setup_state` -- whether the
+    board's ``policy.yaml`` and ``.gitignore`` are what br 0.7 needs, so the
+    card can offer to finish a board that exists but was made before them.
     """
     rows = await asyncio.to_thread(
         beads_db.listing, cli_beads.repo_root(os.getcwd())
     )
     board = request.app["beads"]
-    counts = await asyncio.gather(*(_beads_issue_count(board, r) for r in rows))
-    for row, count in zip(rows, counts):
-        row["issues"] = count
+    await asyncio.gather(*(_beads_fill_row(board, r) for r in rows))
     return json_response({
         "boards": rows,
         "default_board": beads_db.DEFAULT_BOARD,
         "available": request.app["beads"].available(),
     })
+
+
+async def _beads_fill_row(board, row: dict) -> None:
+    """Add what the card shows beyond the listing: ``issues`` and ``setup``."""
+    row["issues"] = await _beads_issue_count(board, row)
+    row["setup"] = await asyncio.to_thread(
+        cli_beads.setup_state, _beads_row_ref(row)
+    )
 
 
 def _beads_row_ref(row: dict) -> beads_db.BoardRef:
@@ -8696,7 +8704,7 @@ async def _beads_board_row(request: web.Request, name: str) -> Optional[dict]:
     )
     for row in rows:
         if row["board"] == name:
-            row["issues"] = await _beads_issue_count(request.app["beads"], row)
+            await _beads_fill_row(request.app["beads"], row)
             return row
     return None
 
@@ -8743,12 +8751,18 @@ async def h_beads_settings_set(request: web.Request) -> web.Response:
 
 
 async def h_beads_settings_init(request: web.Request) -> web.Response:
-    """Create a board's database now, instead of on its first use.
+    """Set a board up now, instead of on its first use.
 
-    ``br init --prefix <board name>`` against the path the board resolves to,
-    so the operator can see the file appear and the issue prefix it will mint
-    under before any session is pointed at it. A database that is already
-    there is left alone and reported back unchanged — this is not a reset.
+    What ``claunch beads init --workspace <board>`` does
+    (:func:`cli_beads.init_board`): the database, with ``br init --prefix
+    <board name>`` against the path the board resolves to (or rebuilt from a
+    tracked ``issues.jsonl``), so the operator can see the file appear and
+    the issue prefix it will mint under before any session is pointed at it;
+    then the ``policy.yaml`` and ``.gitignore`` br 0.7 needs beside it. Each
+    part already there is left alone — a database that exists is never
+    touched; this is not a reset. The answer says which parts were made now
+    (``created``, ``imported``, ``policy``, ``gitignore``) and carries the
+    row as it stands after.
 
     404 for a name with no board, 409 for a directory that cannot hold one,
     503 when ``br`` is not installed on this machine.
@@ -8761,20 +8775,19 @@ async def h_beads_settings_init(request: web.Request) -> web.Response:
             f"no board named {name!r} — boards are the registered workspaces "
             f"plus {beads_db.DEFAULT_BOARD!r}",
         )
-    if row["exists"]:
-        return json_response({"board": row, "created": False})
     board = request.app["beads"]
-    # Built from the row rather than resolved again, so the database that is
-    # created is exactly the one the card just showed.
+    # Built from the row rather than resolved again, so the board that is set
+    # up is exactly the one the card just showed.
     ref = _beads_row_ref(row)
     try:
-        await board.create_board(ref)
+        result = await board.init_board(ref)
     except beads_mod.BeadsUnavailable as exc:
         return json_error(503, str(exc))
     except (BeadsError, OSError) as exc:
         return json_error(409, str(exc))
     board.forget_paths()
-    return json_response({"board": await _beads_board_row(request, name), "created": True})
+    result.pop("state", None)
+    return json_response({"board": await _beads_board_row(request, name), **result})
 
 
 async def h_beads_create(request: web.Request) -> web.Response:

@@ -19,7 +19,7 @@ from pathlib import Path
 
 import pytest
 
-from claude_launcher import beads_db, workspaces
+from claude_launcher import beads_db, cli_beads, workspaces
 from claude_launcher.daemon.api import build_app
 from claude_launcher.daemon.manager import SessionManager
 from claude_launcher.daemon.mesh import MeshManager
@@ -261,29 +261,55 @@ def test_create_runs_init_under_the_boards_own_name(tmp_path, ws, repo):
             # root and the file lands at the board's own path with no move.
             assert Path(br.inits[0]["cwd"]) == Path(ws.path)
             assert Path(br.inits[0]["made"]) == Path(ws.path) / ".beads" / "beads.db"
-            # The row that comes back says the board is there now.
+            # The row that comes back says the board is there now, set up
+            # with the files br 0.7 needs beside it.
             assert doc["board"]["exists"] is True
+            assert doc["policy"] is True and doc["gitignore"] is True
+            assert doc["board"]["setup"]["complete"] is True
+            beads = Path(ws.path) / ".beads"
+            assert cli_beads.policy_state(beads) == cli_beads.POLICY_DECLARED
+            assert cli_beads.gitignore_complete(beads)
         finally:
             await client.close()
 
     _run(run)
 
 
-def test_create_on_a_board_that_exists_changes_nothing(tmp_path, ws, repo):
+def test_setting_up_a_board_that_exists_finishes_it_and_leaves_the_database(
+    tmp_path, ws, repo
+):
+    """A board made before br 0.7 has a database and neither the policy nor
+    the .gitignore lines. The daemon declares the policy on its first br call
+    to the board -- here the card's own issue count -- so what the row still
+    lacks is the .gitignore, a tracked file changed only when asked. The
+    button adds it and never runs br init (the database is not reset), and a
+    second press changes nothing."""
     br = FakeBr()
     board = _board(br, repo)
     db_path = Path(ws.path) / ".beads" / "beads.db"
     db_path.parent.mkdir(parents=True)
-    db_path.write_bytes(b"")
+    db_path.write_bytes(b"mine")
 
     async def run():
         client = await _serve(tmp_path, board)
         try:
+            resp = await client.get("/api/beads/settings", headers=BEARER)
+            rows = {r["board"]: r for r in (await resp.json())["boards"]}
+            assert rows["alpha"]["setup"] == {
+                "database": True, "policy": cli_beads.POLICY_DECLARED,
+                "gitignore": False, "complete": False,
+            }
             resp = await client.post("/api/beads/settings/alpha/init", headers=BEARER)
             doc = await resp.json()
             assert resp.status == 200, doc
             assert doc["created"] is False
+            assert doc["policy"] is False and doc["gitignore"] is True
+            assert doc["board"]["setup"]["complete"] is True
             assert br.inits == []
+            assert db_path.read_bytes() == b"mine"
+            resp = await client.post("/api/beads/settings/alpha/init", headers=BEARER)
+            doc = await resp.json()
+            assert (doc["created"], doc["policy"], doc["gitignore"]) == (False, False, False)
         finally:
             await client.close()
 

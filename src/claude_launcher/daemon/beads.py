@@ -1366,6 +1366,34 @@ class Board:
         await asyncio.to_thread(cli_beads.create_board, ref, runner)
         self._refs.pop(str(ref.root), None)
 
+    async def init_board(self, ref: beads_db.BoardRef) -> dict:
+        """Set ``ref``'s board up in full -- the Settings page's button, and
+        the daemon's side of :func:`cli_beads.init_board` (what ``claunch
+        beads init --workspace`` runs), whose answer this returns.
+
+        Taken under the board's lock, so it cannot race the first ``br``
+        call that would create the same database on its own.
+        """
+        if not self.available():
+            raise BeadsUnavailable(
+                f"'{cli_beads.BINARY}' is not installed on the daemon machine"
+            )
+        loop = asyncio.get_running_loop()
+
+        def runner(argv: List[str], cwd: str):
+            # As in create_board: the async runner, called from the thread.
+            future = asyncio.run_coroutine_threadsafe(self._run(argv, cwd), loop)
+            return future.result()
+
+        root = Path(ref.root)
+        lock = self._locks.setdefault(str(root), asyncio.Lock())
+        async with lock:
+            result = await asyncio.to_thread(cli_beads.init_board, ref, runner)
+        self._refs.pop(str(ref.root), None)
+        self._policy_seen.pop(str(root / cli_beads.BEADS_DIR), None)
+        self.invalidate(root)
+        return result
+
     def _ensure_policy(self, beads_dir: Path) -> None:
         """Make sure ``beads_dir``'s policy declares the custom statuses.
 
