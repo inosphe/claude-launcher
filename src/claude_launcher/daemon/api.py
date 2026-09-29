@@ -654,10 +654,12 @@ def build_app(
     # pushing an invitation. Session names only — no capture, no control.
     r.add_post("/peer/sessions", h_peer_sessions)
     # Daemon attach: the public meshes this daemon owns (one hop — never a
-    # mirror), an owner's offer pushed to us, and a guest detaching itself
-    # (link-token authenticated).
+    # mirror), an owner's offer pushed to us and the question we ask the
+    # owner back before storing it (the relay does not say who sent it),
+    # and a guest detaching itself (link-token authenticated).
     r.add_post("/peer/meshes", h_peer_meshes)
     r.add_post("/peer/mesh/offer", h_peer_mesh_offer)
+    r.add_post("/peer/mesh/offer/check", h_peer_mesh_offer_check)
     r.add_post("/peer/mesh/detach", h_peer_detach)
     # A linked peer announces its new relay name (link-token authenticated).
     r.add_post("/peer/mesh/renamed", h_peer_renamed)
@@ -5206,7 +5208,7 @@ async def h_peer_meshes(request: web.Request) -> web.Response:
 
 async def h_peer_mesh_offer(request: web.Request) -> web.Response:
     body = await _json_body(request)
-    result = _mesh_mgr(request).peer_offer_accept(
+    result = await _mesh_mgr(request).peer_offer_accept(
         str(body.get("mesh") or ""),
         str(body.get("machine") or ""),
         str(body.get("token") or ""),
@@ -5215,6 +5217,16 @@ async def h_peer_mesh_offer(request: web.Request) -> web.Response:
         members=body.get("members") or 0,
     )
     return json_response(result)
+
+
+async def h_peer_mesh_offer_check(request: web.Request) -> web.Response:
+    """The owner's half of an offer: the daemon it was pushed to asks back."""
+    body = await _json_body(request)
+    return json_response(_mesh_mgr(request).peer_offer_check(
+        str(body.get("mesh") or ""),
+        str(body.get("machine") or ""),
+        str(body.get("token") or ""),
+    ))
 
 
 async def h_peer_renamed(request: web.Request) -> web.Response:

@@ -559,7 +559,15 @@ class PeerUnreachable(MeshError):
     Distinct from an application-level rejection: an unreachable primary means
     a send may be queued durably, while a rejection (bad handle, bad token)
     must surface immediately and never queue.
+
+    ``status`` is the HTTP status when the peer did answer, but with a body
+    that is not JSON — an older daemon's plain 404 for a route it does not
+    have yet — and None for every failure below HTTP.
     """
+
+    def __init__(self, message: str = "", *, status: Optional[int] = None):
+        super().__init__(message)
+        self.status = status
 
 
 class Member:
@@ -2705,28 +2713,50 @@ class MeshManager:
         log.info("mesh %r: detached from %r", name, primary)
         return {"mesh": name, "primary": primary, "notified": told}
 
-    def peer_offer_accept(
+    async def peer_offer_accept(
         self, name: str, machine: str, token: str, *,
         cancel: bool = False, project: str = "", members: int = 0,
     ) -> dict:
         """An owner offers (or withdraws) one of its meshes to this daemon.
 
-        The offer arrives over the relay addressed to *our* registered name,
-        so only this daemon can hold the token; the claimed sender is not
-        verified, but a forged offer carries a token its named owner will
-        refuse, so it costs one refused attach and nothing more.
+        Nothing on the relay says who sent it: the target of a bridged
+        stream is told only a stream id, and a browser logged in to the
+        relay reaches ``/peer/*`` as well as a daemon does. So the claimed
+        owner is asked — over the relay, which routes by *registered* name,
+        so the daemon that answers is the one holding that name — whether
+        the token is one it offered this daemon (:meth:`_offer_check`). An
+        offer is stored only when it says yes. A withdrawal drops the row
+        when it carries the stored token, or when the owner no longer
+        reports that token live; otherwise it is refused and the row kept.
         """
         if not _NAME_RE.match(name or "") or not _NAME_RE.match(machine or ""):
             raise MeshError("invalid mesh offer")
+        if self._is_me(machine):
+            raise MeshError("a daemon does not offer its meshes to itself")
         key = f"{name}@{machine}"
         if cancel:
-            self._offers.pop(key, None)
-            self._persist_offers()
+            held = self._offers.get(key)
+            if held is None:
+                return {"ok": True, "cancelled": True}
+            stored = str(held.get("token") or "")
+            if not (token and secrets.compare_digest(
+                str(token).encode("utf-8"), stored.encode("utf-8"),
+            )) and await self._offer_check(name, machine, stored) is True:
+                raise MeshError(
+                    f"{machine!r} reports its offer of mesh {name!r} as "
+                    "still live — withdrawal refused"
+                )
+            self._drop_offer(name, machine)
             return {"ok": True, "cancelled": True}
         if not token:
             raise MeshError("mesh offer carries no token")
         if self._find(key) is not None:
             return {"ok": True, "attached": True}
+        if await self._offer_check(name, machine, token) is False:
+            raise MeshError(
+                f"{machine!r} does not confirm an offer of mesh {name!r} "
+                "to this daemon — not stored"
+            )
         try:
             count = int(members)
         except (TypeError, ValueError):
@@ -2742,6 +2772,62 @@ class MeshManager:
         self._persist_offers()
         log.info("mesh %r: offered to this daemon by %r", name, machine)
         return {"ok": True}
+
+    async def _offer_check(
+        self, name: str, machine: str, token: str,
+    ) -> Optional[bool]:
+        """Ask ``machine`` whether ``token`` is a live offer of its mesh
+        ``name`` to this daemon (``/peer/mesh/offer/check``).
+
+        True or False is the owner's answer. None means the owner predates
+        the check — it answers the route with a plain 404 — and the caller
+        then does what it did before there was one; that is logged, since
+        the offer went unverified. Anything else that stops the question
+        from being asked raises :class:`MeshError`: an offer nobody could
+        confirm is not stored.
+        """
+        if self.peer_transport is None:
+            raise MeshError(
+                "relay uplink is not running — cannot confirm the offer "
+                "with its owner"
+            )
+        body = {"mesh": name, "machine": self._require_machine(),
+                "token": token}
+        try:
+            resp = await self.peer_transport(
+                machine, "/peer/mesh/offer/check", body,
+            )
+        except PeerUnreachable as exc:
+            if exc.status == 404:
+                log.warning(
+                    "mesh %r: %r cannot confirm offers (no "
+                    "/peer/mesh/offer/check) — taken unverified",
+                    name, machine,
+                )
+                return None
+            raise MeshError(
+                f"cannot confirm the offer of mesh {name!r} with "
+                f"{machine!r}: {exc}"
+            ) from None
+        return (resp or {}).get("live") is True
+
+    def peer_offer_check(self, name: str, machine: str, token: str) -> dict:
+        """``/peer/mesh/offer/check``: is ``token`` a live offer of this
+        daemon's mesh ``name`` to ``machine``?
+
+        Asked by the daemon an offer or a withdrawal names as its target,
+        before it acts on one (:meth:`peer_offer_accept`). Unauthenticated
+        like the offer itself: the caller must already hold the token, and
+        the answer says only whether it is still good. An unknown mesh, a
+        mirror, or a malformed request answers ``live: false`` rather than
+        an error, so the route does not tell a caller which meshes exist.
+        """
+        live = bool(token) and _NAME_RE.match(machine or "") is not None and any(
+            self._offer_matches(mesh, machine, token)
+            for mesh in self._meshes.values()
+            if mesh.wire_name == name and not mesh.primary
+        )
+        return {"live": live}
 
     def offers_received(self) -> List[dict]:
         """Offers pushed to this daemon, without their tokens."""
@@ -2777,6 +2863,12 @@ class MeshManager:
         Only meshes this daemon is the authority of — never a mirror, never
         an offer received from elsewhere — so discovery reaches exactly one
         relay hop and a mesh is listed only by the daemon that owns it.
+
+        Unauthenticated by design: every daemon on the relay asks it, and so
+        can any browser logged in to the relay (``/t/<name>/peer/meshes``),
+        since the relay does not tell a backend who opened a stream. That is
+        why a row is what ``public`` already publishes — name, project and
+        counts — and never a token, a link or a member's identity.
         """
         return [
             {
@@ -5901,15 +5993,18 @@ class MeshManager:
                 f"visibility must be one of {', '.join(VISIBILITIES)}"
             )
         mesh.visibility = visibility
-        withdrawn = []
+        withdrawn: Dict[str, dict] = {}
         if visibility == "private":
-            withdrawn = sorted(mesh.offers)
+            withdrawn = dict(mesh.offers)
             mesh.offers.clear()
         self._persist_def(mesh)
-        for machine in withdrawn:
-            await self._push_offer_cancel(mesh.wire_name, machine)
+        for machine in sorted(withdrawn):
+            await self._push_offer_cancel(
+                mesh.wire_name, machine,
+                str(withdrawn[machine].get("token") or ""),
+            )
         return {"mesh": mesh.name, "visibility": visibility,
-                "withdrawn": withdrawn}
+                "withdrawn": sorted(withdrawn)}
 
     async def offer_mesh(self, name: str, machine: str) -> dict:
         """Push an offer of this mesh to ``machine`` (the ``invited`` path).
@@ -5917,6 +6012,11 @@ class MeshManager:
         The offer carries a token only that daemon receives — the relay
         routes by registered name — and the token lets it attach without
         approval. A private mesh becomes ``invited`` by being offered.
+
+        The offer is recorded before it is pushed: the receiving daemon
+        asks back (``/peer/mesh/offer/check``) while the push is still
+        waiting for its answer, and that question must find it. A push that
+        fails puts the previous record back.
         """
         mesh = self.get(name)
         self._require_authority(mesh, "publishing")
@@ -5930,17 +6030,24 @@ class MeshManager:
             raise MeshError("relay uplink is not running — cannot reach peers")
         previous = mesh.offers.get(machine)
         token = str((previous or {}).get("token") or secrets.token_urlsafe(18))
-        await self.peer_transport(machine, "/peer/mesh/offer", {
-            "mesh": mesh.wire_name,
-            "machine": me,
-            "token": token,
-            "project": mesh.project,
-            "members": len(mesh.members),
-        })
         mesh.offers[machine] = {
             "token": token,
             "created_at": str((previous or {}).get("created_at") or utcnow()),
         }
+        try:
+            await self.peer_transport(machine, "/peer/mesh/offer", {
+                "mesh": mesh.wire_name,
+                "machine": me,
+                "token": token,
+                "project": mesh.project,
+                "members": len(mesh.members),
+            })
+        except BaseException:
+            if previous is None:
+                mesh.offers.pop(machine, None)
+            else:
+                mesh.offers[machine] = previous
+            raise
         if mesh.visibility == "private":
             mesh.visibility = "invited"
         self._persist_def(mesh)
@@ -5951,21 +6058,30 @@ class MeshManager:
     async def cancel_offer(self, name: str, machine: str) -> dict:
         mesh = self.get(name)
         self._require_authority(mesh, "publishing")
-        if mesh.offers.pop(machine, None) is None:
+        offer = mesh.offers.pop(machine, None)
+        if offer is None:
             raise MeshError(f"mesh {name!r} has no offer to {machine!r}")
         self._persist_def(mesh)
-        notified = await self._push_offer_cancel(mesh.wire_name, machine)
+        notified = await self._push_offer_cancel(
+            mesh.wire_name, machine, str(offer.get("token") or ""),
+        )
         return {"mesh": mesh.name, "machine": machine, "notified": notified}
 
-    async def _push_offer_cancel(self, name: str, machine: str) -> bool:
+    async def _push_offer_cancel(
+        self, name: str, machine: str, token: str,
+    ) -> bool:
         """Best-effort: a daemon that misses it keeps a stale row whose
-        token its owner now refuses."""
+        token its owner now refuses.
+
+        The withdrawal carries the token it withdraws — the receiver drops
+        its row on that, or when the owner no longer reports the token
+        live, and on nothing else (:meth:`peer_offer_accept`)."""
         if self.peer_transport is None:
             return False
         try:
             await self.peer_transport(machine, "/peer/mesh/offer", {
                 "mesh": name, "machine": self._require_machine(),
-                "cancel": True,
+                "token": token, "cancel": True,
             })
         except Exception:  # noqa: BLE001 — best-effort notification
             return False
