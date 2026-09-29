@@ -26,6 +26,8 @@ C. through HTTP (two apps, raw request/response bytes like the relay's)
    C4 the host refuses the session line when daemon.shadow_input is off,
       and refuses a bad token with 403
    C5 the peer route table has exactly the three shadow routes
+   C6 a viewer that leaves releases the host's attachment within seconds,
+      also when the session writes nothing after it left
 """
 
 from __future__ import annotations
@@ -464,7 +466,10 @@ def test_shadow_list_stream_and_session_line(home, tmp_path):
             assert await _wait_for(
                 lambda: "echo:Escape" in "\n".join(sa.capture())
             )
+            # C6: the viewer leaving releases the host's attachment
+            assert sa.viewers() >= 1
             await ws.close()
+            assert await _wait_for(lambda: sa.viewers() == 0, timeout=5.0)
 
             # a session in no shared mesh is not reachable at all
             resp = await client_b.post(
@@ -547,3 +552,34 @@ def test_peer_shadow_routes_are_exactly_three(home):
         ("HEAD", "/api/shadows/{machine}/{session}/ws"),
         ("POST", "/api/shadows/{machine}/{session}/keys"),
     ]
+
+
+def test_quiet_session_releases_a_viewer_that_left(home, tmp_path):
+    """Nothing is written to a quiet session's stream, so a write failing is
+    not how the host learns the viewer left -- the connection watch is."""
+    _register_py_harness()
+    calls = []
+
+    async def run():
+        mgr = _manager()
+        mm_a, mm_b = await _linked_pair(mgr, tmp_path, calls)
+        client_a, client_b = await _two_apps(mgr, mm_a, mm_b)
+        bearer = {"Authorization": "Bearer tokB"}
+        try:
+            sa = mgr.get("sa")
+            assert await _wait_for(lambda: "READY" in "\n".join(sa.capture()))
+            ws = await client_b.ws_connect("/api/shadows/pcA/sa/ws", headers=bearer)
+            await asyncio.wait_for(ws.receive(), 10)  # init
+            await asyncio.wait_for(ws.receive(), 10)  # repaint
+            await asyncio.sleep(1.5)  # let the session settle: no more output
+            assert sa.viewers() == 1
+            await ws.close()
+            assert await _wait_for(lambda: sa.viewers() == 0, timeout=4.0)
+        finally:
+            await client_a.close()
+            await client_b.close()
+            await mm_a.shutdown()
+            await mm_b.shutdown()
+            await mgr.shutdown_all()
+
+    asyncio.run(run())

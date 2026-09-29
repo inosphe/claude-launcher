@@ -69,6 +69,15 @@ _HEAD = struct.Struct(">BI")
 MAX_FRAME = 8 * 1024 * 1024
 #: How often the host writes a keepalive frame on an otherwise quiet stream.
 KEEPALIVE = 15.0
+#: How often the host checks whether the viewer's connection is still there.
+#: A viewer that leaves closes its bridge, and the loopback connection under
+#: the request closes with it. On aiohttp 3.14 that alone cancels this
+#: handler (measured: 0.3ms after the close, tests/test_shadow.py
+#: test_quiet_session_releases_a_viewer_that_left). This check is the second
+#: way out, for a server that does not cancel: the attachment -- a
+#: subscription to the session -- is then released within this long rather
+#: than at the next write, which a quiet session may never make.
+WATCH_INTERVAL = 1.0
 
 
 def pack(kind: int, payload: bytes = b"") -> bytes:
@@ -222,13 +231,17 @@ async def serve_stream(request: web.Request, session, app) -> web.StreamResponse
     sock = HostSocket(resp)
 
     async def keepalive() -> None:
+        quiet = 0.0
         while not sock.closed:
-            await asyncio.sleep(KEEPALIVE)
+            await asyncio.sleep(WATCH_INTERVAL)
             transport = request.transport
             if transport is None or transport.is_closing():
                 await sock.close(code=1006)
                 return
-            await sock.keepalive()
+            quiet += WATCH_INTERVAL
+            if quiet >= KEEPALIVE:
+                quiet = 0.0
+                await sock.keepalive()
 
     app["websockets"].add(sock)
     beat = asyncio.ensure_future(keepalive())
