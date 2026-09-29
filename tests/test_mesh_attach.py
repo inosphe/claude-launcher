@@ -19,6 +19,10 @@ A. Attach
    A5 detach removes the link and the daemon's members on the owner and
       drops the mirror here
    A6 received offers and a pending attach survive a reload
+   A8 an attach and a session join pending side by side: both approvals
+      land in one mirror, and the link both sides hold is the same one;
+      a grant the guest rejects puts the guest's earlier link back and
+      undoes only the member and its wiring
    A7 a mirror is filed under a project here: the one attach names (also
       through a pending approval), else the joining session's; it can be
       moved later, and an unknown project is refused
@@ -448,6 +452,73 @@ def test_mirror_is_filed_under_a_project(home, tmp_path):
         assert mm_a.get("m").project == ""
         with pytest.raises(MeshError):
             mm_b.set_project("m", "nosuch")
+        await mgr.shutdown_all()
+
+    asyncio.run(run())
+
+
+# --------------------------------------------------------------------------- #
+# A8
+# --------------------------------------------------------------------------- #
+def _link_agrees(mm_a, mm_b, key="m@pcA"):
+    owner, mirror = mm_a.get("m"), mm_b.get(key)
+    return (owner.links["pcB"]["token_in"] == mirror.links["pcA"]["token_out"]
+            and owner.links["pcB"]["token_out"] == mirror.links["pcA"]["token_in"])
+
+
+def test_attach_and_session_join_pending_together(home, tmp_path):
+    _register_py_harness()
+
+    async def run():
+        mgr = _manager()
+        mm_a, mm_b = await _primary_with_alice(mgr, tmp_path)
+        _wire({"pcA": mm_a, "pcB": mm_b})
+        await mm_a.set_visibility("m", "public")
+        rid_attach = (await mm_b.attach("m@pcA"))["request_id"]
+        rid_join = (await mm_b.join("m@pcA", "sb", handle="bob"))["request_id"]
+
+        await mm_a.approve_request("m", rid_attach)
+        assert _link_agrees(mm_a, mm_b)
+        out = await mm_a.approve_request("m", rid_join)
+        # the second grant is merged into the mirror the first one built
+        assert out["delivered"] is True
+        mirror = mm_b.get("m@pcA")
+        assert set(mirror.members) == {"alice", "bob"}
+        assert mm_a.get("m").members["bob"].machine == "pcB"
+        assert "pcB" in mm_a.get("m").peers
+        assert _link_agrees(mm_a, mm_b)
+        assert mm_b.outgoing_list() == []
+        # and the re-minted link carries traffic both ways
+        await mm_b.send("m@pcA", "bob", "alice", "hi from bob")
+        assert [x["body"] for x in mm_a.get("m").messages][-1] == "hi from bob"
+        await mgr.shutdown_all()
+
+    asyncio.run(run())
+
+
+def test_rejected_grant_keeps_the_attach_link(home, tmp_path):
+    _register_py_harness()
+
+    async def run():
+        mgr = _manager()
+        mm_a, mm_b = await _primary_with_alice(mgr, tmp_path)
+        _wire({"pcA": mm_a, "pcB": mm_b})
+        await mm_a.set_visibility("m", "public")
+        rid = (await mm_b.join("m@pcA", "sb", handle="bob"))["request_id"]
+        await mm_a.offer_mesh("m", "pcB")
+        await mm_b.attach("m@pcA")
+        # pcB forgets its request; the owner approves it anyway, and pcB
+        # rejects the grant as an unknown request
+        mm_b.cancel_request(rid)
+        await mm_a.approve_request("m", rid)
+        owner = mm_a.get("m")
+        assert "bob" not in owner.members
+        assert not any("bob" in k.split("|") for k in owner.member_edges)
+        # the attach link is intact on both sides, and still carries traffic
+        assert "pcB" in owner.peers and _link_agrees(mm_a, mm_b)
+        mgr.create(SessionDef(name="sb2", harness="py", cwd=str(tmp_path), rows=80))
+        await mm_b.join("m", "sb2", handle="ben")
+        assert owner.members["ben"].machine == "pcB"
         await mgr.shutdown_all()
 
     asyncio.run(run())
