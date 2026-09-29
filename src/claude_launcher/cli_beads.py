@@ -125,7 +125,8 @@ PROTOCOL_STATUSES = (
 #: stored, and a real one being unaskable.
 #:
 #: Where each comes from, checked against **br 0.2.14** (``br <cmd>
-#: --help``, ``br schema issue``):
+#: --help``, ``br schema issue``); br 0.7.1 names the same eight built-in
+#: statuses (:data:`BR_BUILTIN_STATUSES`):
 #:
 #: ==========  ============================================================
 #: deferred    ``br defer`` (``br undefer`` takes it back)
@@ -325,9 +326,11 @@ def check_statuses(args: List[str]) -> None:
 #:
 #: Every spelling of each option is listed, aliases and short forms
 #: included, because the pair is recognised by an exact match. Read against
-#: **br 0.2.14** (``br create|update|close|comments add --help``). An option
-#: missing from this tuple is not broken — it only keeps the behaviour it
-#: had, which is a refusal when its value begins with ``-``.
+#: **br 0.2.14** and again against **br 0.7.1** (``br create|update|close|
+#: comments add --help``), which added the text options from
+#: ``--prerequisites`` on and ``comments add -m``. An option missing from
+#: this tuple is not broken — it only keeps the behaviour it had, which is a
+#: refusal when its value begins with ``-``.
 TEXT_OPTIONS = (
     "--description", "-d", "--body",
     "--title",
@@ -336,7 +339,11 @@ TEXT_OPTIONS = (
     "--notes",
     "--reason", "-r",
     "--bypass-reason",
-    "--message",
+    "--message", "-m",
+    "--prerequisites",
+    "--add-acceptance", "--check-acceptance", "--uncheck-acceptance",
+    "--append-notes",
+    "--transition-comment",
 )
 
 
@@ -378,7 +385,7 @@ def bind_text_values(args: List[str]) -> List[str]:
 #: they consume the token after them, because that is the only thing
 #: :func:`_positional_slots` needs from them: an option that takes a value
 #: hides the token behind it, and reading that token as a positional is how
-#: a scan goes wrong. Read against **br 0.2.14**.
+#: a scan goes wrong. Read against **br 0.2.14**; unchanged in **br 0.7.1**.
 GLOBAL_VALUE_OPTIONS = ("--db", "--actor", "--lock-timeout")
 GLOBAL_FLAGS = (
     "--json", "--no-daemon", "--no-auto-flush", "--no-auto-import",
@@ -386,7 +393,8 @@ GLOBAL_FLAGS = (
     "--no-color", "--help", "-h",
 )
 
-#: The same split for ``br create`` (``br create --help``, br 0.2.14).
+#: The same split for ``br create`` (``br create --help``, br 0.2.14; the
+#: options from ``--description-file`` on are br 0.7.1's).
 CREATE_VALUE_OPTIONS = GLOBAL_VALUE_OPTIONS + (
     "--title",
     "--type", "-t",
@@ -404,14 +412,23 @@ CREATE_VALUE_OPTIONS = GLOBAL_VALUE_OPTIONS + (
     "--external-ref",
     "--status", "-s",
     "--file", "-f",
+    "--description-file",
+    "--acceptance-criteria",
+    "--prerequisites",
+    "--agent-context",
+    "--agent-name", "--harness", "--model",
 )
 CREATE_FLAGS = GLOBAL_FLAGS + ("--ephemeral", "--dry-run", "--silent")
 
-#: And for ``br comments add`` (``br comments add --help``, br 0.2.14).
+#: And for ``br comments add`` (``br comments add --help``, br 0.2.14;
+#: ``-m`` is br 0.7.1's short form of ``--message``). A missing ``-m`` was
+#: not a refusal but a corruption: ``comments add <id> -m hello`` read
+#: ``-m`` as the first word of a positional body and was rewritten to
+#: ``--message=-m hello``.
 COMMENTS_ADD_VALUE_OPTIONS = GLOBAL_VALUE_OPTIONS + (
     "--file", "-f",
     "--author",
-    "--message",
+    "--message", "-m",
 )
 COMMENTS_ADD_FLAGS = GLOBAL_FLAGS
 

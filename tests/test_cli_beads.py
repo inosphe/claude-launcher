@@ -442,10 +442,15 @@ def test_the_daemon_composed_description_is_the_shape_that_needs_binding():
     assert description not in cmd
 
 
-def test_br_itself_accepts_the_bound_form_and_refuses_the_unbound_one(tmp_path):
+def test_br_itself_accepts_the_bound_form(tmp_path):
     """The claim the unit tests above cannot make: that the spelling ``plan``
     produces is the one ``br``'s parser takes. Run against a throwaway board,
-    so it touches nothing this repository tracks."""
+    so it touches nothing this repository tracks.
+
+    The unbound form is what made the binding necessary: br 0.2.14 refused
+    it with ``unexpected argument``. br 0.7.1 takes it, so whether it is
+    refused depends on the installed version and is only checked for the
+    words when it is. The bound form is the one that must work on both."""
     import shutil as _shutil
 
     if _shutil.which(cli_beads.BINARY) is None:
@@ -467,8 +472,8 @@ def test_br_itself_accepts_the_bound_form_and_refuses_the_unbound_one(tmp_path):
 
     unbound = br(["create", "unbound", "--type", "task", "--priority", "2",
                   "--description", FENCED])
-    assert unbound.returncode != 0
-    assert "unexpected argument" in (unbound.stderr + unbound.stdout)
+    if unbound.returncode != 0:
+        assert "unexpected argument" in (unbound.stderr + unbound.stdout)
 
     bound = br(["create", "bound", "--type", "task", "--priority", "2",
                 f"--description={FENCED}", "--json"])
@@ -761,3 +766,15 @@ def test_the_board_is_given_its_policy_before_the_callers_command(repo, fake_br)
     assert cli_beads.run(["list", "--status", "in_review"], cwd=str(repo)) == 0
     assert (beads / cli_beads.POLICY_NAME).is_file()
     assert "in_review" in (beads / cli_beads.POLICY_NAME).read_text(encoding="utf-8")
+
+
+def test_the_short_message_flag_is_an_option_not_the_start_of_a_body():
+    """br 0.7.1 spells ``--message`` as ``-m`` too. Before the tables knew it,
+    ``-m`` was read as the first word of a positional body and the comment
+    was stored as ``-m hello``."""
+    assert cli_beads.flag_text_positionals(
+        cli_beads.bind_text_values(["comments", "add", "x-1", "-m", "hello"])
+    ) == ["comments", "add", "x-1", "-m", "hello"]
+    assert cli_beads.bind_text_values(
+        ["comments", "add", "x-1", "-m", "- branch: x"]
+    ) == ["comments", "add", "x-1", "-m=- branch: x"]
