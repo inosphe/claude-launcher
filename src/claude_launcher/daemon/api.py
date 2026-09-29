@@ -616,6 +616,7 @@ def build_app(
     r.add_post("/api/mesh/{mesh}/attach", h_mesh_attach)
     r.add_delete("/api/mesh/{mesh}/attach", h_mesh_detach)
     r.add_put("/api/mesh/{mesh}/visibility", h_mesh_visibility)
+    r.add_put("/api/mesh/{mesh}/project", h_mesh_project)
     r.add_post("/api/mesh/{mesh}/offers", h_mesh_offer)
     r.add_delete("/api/mesh/{mesh}/offers/{machine}", h_mesh_offer_cancel)
     # Peer operations: read another member's checkout, coordinate on keys
@@ -4840,7 +4841,8 @@ async def h_relay_meshes(request: web.Request) -> web.Response:
 async def h_mesh_attach(request: web.Request) -> web.Response:
     body = await _json_body(request)
     result = await _mesh_mgr(request).attach(
-        request.match_info["mesh"], code=str(body.get("code") or "") or None
+        request.match_info["mesh"], code=str(body.get("code") or "") or None,
+        project=str(body.get("project") or ""),
     )
     return json_response(result, status=202 if result.get("pending") else 201)
 
@@ -4849,6 +4851,14 @@ async def h_mesh_detach(request: web.Request) -> web.Response:
     force = request.query.get("force", "") in ("1", "true", "yes")
     result = await _mesh_mgr(request).detach(
         request.match_info["mesh"], force=force
+    )
+    return json_response(result)
+
+
+async def h_mesh_project(request: web.Request) -> web.Response:
+    body = await _json_body(request)
+    result = _mesh_mgr(request).set_project(
+        request.match_info["mesh"], str(body.get("project") or "")
     )
     return json_response(result)
 

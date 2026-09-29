@@ -19,6 +19,9 @@ A. Attach
    A5 detach removes the link and the daemon's members on the owner and
       drops the mirror here
    A6 received offers and a pending attach survive a reload
+   A7 a mirror is filed under a project here: the one attach names (also
+      through a pending approval), else the joining session's; it can be
+      moved later, and an unknown project is refused
 """
 
 from __future__ import annotations
@@ -27,6 +30,7 @@ import asyncio
 
 import pytest
 
+from claude_launcher import projects
 from claude_launcher.daemon.harness import SessionDef
 from claude_launcher.daemon.mesh import MeshError, MeshManager
 
@@ -350,6 +354,18 @@ def test_attach_http_surface(home, tmp_path):
             assert resp.status == 400
             resp = await client.get("/api/mesh/web", headers=bearer)
             assert (await resp.json())["visibility"] == "public"
+            # the project a mesh is filed under here; unknown is refused
+            resp = await client.put(
+                "/api/mesh/web/project", json={"project": "nosuch"},
+                headers=bearer,
+            )
+            assert resp.status == 400
+            resp = await client.put(
+                "/api/mesh/web/project", json={"project": "default"},
+                headers=bearer,
+            )
+            assert resp.status == 200
+            assert (await resp.json()) == {"mesh": "web", "project": "default"}
 
             # /peer/meshes needs no daemon token: it lists public names only
             resp = await client.post("/peer/meshes", json={})
@@ -381,5 +397,57 @@ def test_attach_http_surface(home, tmp_path):
         finally:
             await mgr.shutdown_all()
             await client.close()
+
+    asyncio.run(run())
+
+
+# --------------------------------------------------------------------------- #
+# A7
+# --------------------------------------------------------------------------- #
+def test_mirror_is_filed_under_a_project(home, tmp_path):
+    _register_py_harness()
+    projects.add("gds6")
+
+    async def run():
+        mgr = _manager()
+        mm_a, mm_b = await _primary_with_alice(mgr, tmp_path)
+        mm_c = MeshManager(mgr, settle=0.05, root=tmp_path / "meshC")
+        mm_d = MeshManager(mgr, settle=0.05, root=tmp_path / "meshD")
+        _wire({"pcA": mm_a, "pcB": mm_b, "pcC": mm_c, "pcD": mm_d})
+
+        # offered: filed in the one call
+        await mm_a.offer_mesh("m", "pcB")
+        with pytest.raises(MeshError):
+            await mm_b.attach("m@pcA", project="nosuch")
+        res = await mm_b.attach("m@pcA", project="gds6")
+        assert res["project"] == "gds6"
+        assert mm_b.get("m@pcA").project == "gds6"
+        again = MeshManager(mgr, settle=0.05, root=tmp_path / "meshB")
+        again.load_all()
+        assert again.get("m@pcA").project == "gds6"
+
+        # pending: the project rides the request until the grant lands
+        await mm_a.set_visibility("m", "public")
+        rid = (await mm_c.attach("m@pcA", project="gds6"))["request_id"]
+        await mm_a.approve_request("m", rid)
+        assert mm_c.get("m@pcA").project == "gds6"
+
+        # a session join files the mirror where the session is
+        mgr.create(SessionDef(name="sd", harness="py", cwd=str(tmp_path),
+                              rows=80, project="gds6"))
+        await mm_d.join("m@pcA", "sd", handle="dora",
+                        code=mm_a.invite("m")["code"])
+        assert mm_d.get("m@pcA").project == "gds6"
+
+        # moved by hand, both ways; the peers are not told
+        mirror = mm_b.get("m@pcA")
+        assert mm_b.set_project("m@pcA", "") == {"mesh": "m@pcA", "project": "default"}
+        assert mirror.project == ""
+        mm_b.set_project("m", "gds6")
+        assert mirror.project == "gds6"
+        assert mm_a.get("m").project == ""
+        with pytest.raises(MeshError):
+            mm_b.set_project("m", "nosuch")
+        await mgr.shutdown_all()
 
     asyncio.run(run())
