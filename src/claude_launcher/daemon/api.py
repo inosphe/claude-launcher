@@ -611,6 +611,13 @@ def build_app(
     r.add_get("/api/mesh/{mesh}/roles", h_mesh_roles_get)
     r.add_put("/api/mesh/{mesh}/roles", h_mesh_roles_set)
     r.add_post("/api/mesh/{mesh}/invitations", h_mesh_invitation)
+    # Daemon attach (docs/mesh-design.md "Daemon attach"): the daemon joins
+    # a remote mesh with no member; the owner publishes or offers it.
+    r.add_post("/api/mesh/{mesh}/attach", h_mesh_attach)
+    r.add_delete("/api/mesh/{mesh}/attach", h_mesh_detach)
+    r.add_put("/api/mesh/{mesh}/visibility", h_mesh_visibility)
+    r.add_post("/api/mesh/{mesh}/offers", h_mesh_offer)
+    r.add_delete("/api/mesh/{mesh}/offers/{machine}", h_mesh_offer_cancel)
     # Peer operations: read another member's checkout, coordinate on keys
     # (docs/mesh-design.md "Peer operations"). The caller names itself by
     # session; the target by handle; the member graph is the ACL.
@@ -622,6 +629,7 @@ def build_app(
     r.add_post("/api/relays", h_relay_save)
     r.add_get("/api/relay/peers", h_relay_peers)
     r.add_get("/api/relay/peers/{machine}/sessions", h_relay_peer_sessions)
+    r.add_get("/api/relay/meshes", h_relay_meshes)
     # Peer federation endpoints. Deliberately outside /api/: the auth
     # middleware only guards /api/*, and these are called by *other daemons*
     # (via the relay's backend bridge) that hold mesh-scoped link tokens,
@@ -635,6 +643,12 @@ def build_app(
     # lets a mesh owner's wizard enumerate a peer daemon's sessions before
     # pushing an invitation. Session names only — no capture, no control.
     r.add_post("/peer/sessions", h_peer_sessions)
+    # Daemon attach: the public meshes this daemon owns (one hop — never a
+    # mirror), an owner's offer pushed to us, and a guest detaching itself
+    # (link-token authenticated).
+    r.add_post("/peer/meshes", h_peer_meshes)
+    r.add_post("/peer/mesh/offer", h_peer_mesh_offer)
+    r.add_post("/peer/mesh/detach", h_peer_detach)
     r.add_post("/peer/mesh/join", h_peer_join)
     r.add_post("/peer/mesh/leave", h_peer_leave)
     r.add_post("/peer/mesh/link", h_peer_link)
@@ -4810,6 +4824,54 @@ async def h_relay_peer_sessions(request: web.Request) -> web.Response:
     )
 
 
+async def h_relay_meshes(request: web.Request) -> web.Response:
+    """Meshes this daemon could attach: public ones owned by any daemon on
+    any connected relay, plus offers pushed here (one hop, deduplicated)."""
+    mm = _mesh_mgr(request)
+    result = await mm.discover()
+    result["offers"] = mm.offers_received()
+    return json_response(result)
+
+
+async def h_mesh_attach(request: web.Request) -> web.Response:
+    body = await _json_body(request)
+    result = await _mesh_mgr(request).attach(
+        request.match_info["mesh"], code=str(body.get("code") or "") or None
+    )
+    return json_response(result, status=202 if result.get("pending") else 201)
+
+
+async def h_mesh_detach(request: web.Request) -> web.Response:
+    force = request.query.get("force", "") in ("1", "true", "yes")
+    result = await _mesh_mgr(request).detach(
+        request.match_info["mesh"], force=force
+    )
+    return json_response(result)
+
+
+async def h_mesh_visibility(request: web.Request) -> web.Response:
+    body = await _json_body(request)
+    result = await _mesh_mgr(request).set_visibility(
+        request.match_info["mesh"], str(body.get("visibility") or "")
+    )
+    return json_response(result)
+
+
+async def h_mesh_offer(request: web.Request) -> web.Response:
+    body = await _json_body(request)
+    result = await _mesh_mgr(request).offer_mesh(
+        request.match_info["mesh"], str(body.get("machine") or "")
+    )
+    return json_response(result, status=201)
+
+
+async def h_mesh_offer_cancel(request: web.Request) -> web.Response:
+    result = await _mesh_mgr(request).cancel_offer(
+        request.match_info["mesh"], request.match_info["machine"]
+    )
+    return json_response(result)
+
+
 async def h_mesh_outgoing_cancel(request: web.Request) -> web.Response:
     result = _mesh_mgr(request).cancel_request(request.match_info["rid"])
     return json_response(result)
@@ -4954,6 +5016,34 @@ async def h_peer_join_request(request: web.Request) -> web.Response:
         str(body.get("reply_token") or ""),
         str(body.get("code") or ""),
         subroles=_subroles_in(body),
+        offer=str(body.get("offer") or ""),
+    )
+    return json_response(result)
+
+
+async def h_peer_meshes(request: web.Request) -> web.Response:
+    return json_response({"meshes": _mesh_mgr(request).peer_meshes_list()})
+
+
+async def h_peer_mesh_offer(request: web.Request) -> web.Response:
+    body = await _json_body(request)
+    result = _mesh_mgr(request).peer_offer_accept(
+        str(body.get("mesh") or ""),
+        str(body.get("machine") or ""),
+        str(body.get("token") or ""),
+        cancel=bool(body.get("cancel")),
+        project=str(body.get("project") or ""),
+        members=body.get("members") or 0,
+    )
+    return json_response(result)
+
+
+async def h_peer_detach(request: web.Request) -> web.Response:
+    body = await _json_body(request)
+    result = _mesh_mgr(request).peer_detach_accept(
+        str(body.get("mesh") or ""),
+        str(body.get("machine") or ""),
+        str(body.get("token") or ""),
     )
     return json_response(result)
 

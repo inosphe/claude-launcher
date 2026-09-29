@@ -405,6 +405,67 @@ daemons, then that daemon's live sessions (minus the ones already enrolled),
 and POSTs the invitation — so the owner-side path needs no code, no CLI and
 no second machine. Ticket minting stays beside it for unattended joins.
 
+## Daemon attach (phase 14 — implemented)
+
+Phase 6 removed daemon pairing as a user-facing step because it exposed
+plumbing: the invite targeted a daemon while the user meant a session, a
+link produced an empty mirror with no lifecycle, and codes were carried by
+hand between machines that already share a relay. Phase 14 brings the
+daemon-level join back as a second verb *beside* the session join (which
+is unchanged), on top of what phase 6 added since:
+
+- **Attach is membership of the daemon, not pairing.** `claunch mesh attach
+  dev@pca` sends the ordinary `/peer/mesh/join_request` with an empty
+  `session`. The owner registers the guest link (rank, credentials, pair
+  links) and grants a payload whose `member` is null; the guest builds the
+  mirror and nothing else. A mirror with no local member was already a
+  valid state (the last member leaving never unlinked a daemon), so the
+  rest of the federation needs no special case. Sessions there then join by
+  the bare name through `_join_local` — the link is what the owner approved.
+- **Lifecycle is phase 6's.** An attach pends for the operator like a
+  codeless join (one pending entry per daemon, re-asking refreshes its
+  reply token), is admitted by a ticket, and ends with `revoke` on the
+  owner or `claunch mesh detach` on the guest (`/peer/mesh/detach`,
+  link-token authenticated: the owner drops the daemon's rank, credentials
+  and members, the guest drops its mirror; `--force` drops it locally when
+  the owner is unreachable).
+- **Discovery replaces carrying codes.** Each mesh has a `visibility`:
+  `private` (default; listed nowhere), `public` (listed by `/peer/meshes`
+  to any daemon that asks), or `invited`. Offers are *pushed*:
+  `claunch mesh offer dev <machine>` sends `/peer/mesh/offer` with a token
+  kept in `Mesh.offers`; the guest stores it in `mesh_offers.json` and
+  presents it as `offer` on its attach, which is then granted without
+  approval. Offering a private mesh makes it `invited`; setting a mesh
+  `private` withdraws every offer.
+- **Why invited is a push, not a filtered pull.** A bridged relay stream
+  does not tell the callee who opened it (`StreamOpen` carries only an
+  id), so a `/peer/meshes` answer filtered by the caller's self-declared
+  name would be readable by anyone claiming that name. A push is routed by
+  the relay to the *registered* name — the same property the grant
+  delivery already relies on — so only the named daemon holds the token.
+  A forged offer carries a token its claimed owner refuses; it costs one
+  refused attach.
+- **One hop, union over relays.** `claunch mesh discover` (API
+  `GET /api/relay/meshes`) takes PEER_LIST over every connected relay
+  (names deduplicated, as `RelayPool.peer_list` already does), asks each
+  daemon's `/peer/meshes`, and adds the offers received. `/peer/meshes`
+  lists only meshes the answering daemon is the authority of — never a
+  mirror, never an offer it received — and each row is keyed by the daemon
+  that answered, so nothing propagates beyond the relays this daemon is on.
+  Each row carries `state` (available / pending / attached / name_taken)
+  and `access` (`offer` = pre-approved, `approval` = waits for the owner).
+
+**Shipped surface.** CLI `mesh attach|detach|discover|visibility|offer`;
+API `POST|DELETE /api/mesh/{mesh}/attach`, `PUT /api/mesh/{mesh}/visibility`,
+`POST /api/mesh/{mesh}/offers`, `DELETE /api/mesh/{mesh}/offers/{machine}`,
+`GET /api/relay/meshes`; peer `/peer/meshes`, `/peer/mesh/offer`,
+`/peer/mesh/detach`. Web: a visibility selector and offer list in the owner's
+"Peer daemons" box, attach requests in its join-request rows, a
+"Detach this daemon" button on a mirror, and a **Remote meshes** list in the
+mesh sidebar. Durability: `visibility`/`offers` in `mesh.json` (absent while
+unset), received offers in `mesh_offers.json`, pending attaches in
+`outgoing_joins.json` with `attach: true`.
+
 ## Ranked peer graph (phase 7 — implemented)
 
 Phases 5–6 gave the mesh a clear owner, but they also hard-wired a **star**:

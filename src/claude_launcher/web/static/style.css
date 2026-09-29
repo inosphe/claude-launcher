@@ -3488,6 +3488,27 @@ a.wf-btn { display: inline-block; text-decoration: none; line-height: 1.5; }
   display: flex; align-items: center; gap: 8px;
 }
 #mesh-outgoing .mesh-kick { margin-left: auto; }
+#mesh-remote { padding: 4px 0 12px; border-top: 1px solid #22262d; }
+.mesh-remote-head {
+  display: flex; align-items: center; gap: 8px; padding: 6px 16px;
+  font-size: 12px; color: #7d8590;
+}
+.mesh-remote-head button { margin-left: auto; }
+#mesh-remote-list { list-style: none; }
+#mesh-remote-list li {
+  padding: 6px 16px; font-size: 12px; display: flex; align-items: center;
+  gap: 8px; flex-wrap: wrap;
+}
+#mesh-remote-list li.clickable { cursor: pointer; }
+#mesh-remote-list li.clickable:hover { background: #22262d; }
+#mesh-remote-list .mesh-tag {
+  font-size: 10px; padding: 1px 6px; border-radius: 8px;
+  background: #2d2308; color: #d29922; border: 1px solid #4d3c10;
+}
+#mesh-remote-list .meta { margin-left: auto; color: #7d8590; font-size: 11px; }
+#mesh-remote-note { padding: 0 16px; font-size: 11px; color: #7d8590; margin: 4px 0; }
+#mesh-remote-note.error { color: #f85149; }
+#mesh-remote-note.hidden { display: none; }
 #new-mesh { display: flex; gap: 6px; padding: 8px 16px 12px; flex-wrap: wrap; }
 #new-mesh input, #new-mesh select {
   flex: 1; min-width: 0; padding: 5px 8px; font-size: 13px;

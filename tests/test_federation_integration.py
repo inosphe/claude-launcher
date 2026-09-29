@@ -103,6 +103,7 @@ class _Daemon:
         self.runner = web.AppRunner(self.app, access_log=None)
         await self.runner.setup()
         port = _free_port()
+        self.port = port
         site = web.TCPSite(self.runner, "127.0.0.1", port)
         await site.start()
         self.uplink = RelayUplink(
@@ -234,6 +235,130 @@ def test_mesh_federation_over_real_relay(home, tmp_path):
         finally:
             await b.stop()
             await a.stop()
+            relay.terminate()
+            try:
+                relay.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                relay.kill()
+
+    asyncio.run(run())
+
+
+def _start_relay(tmp_path: Path, relay_port: int) -> subprocess.Popen:
+    cfg_dir = tmp_path / "relay"
+    cfg_dir.mkdir()
+    return subprocess.Popen(
+        [
+            str(RELAY_EXE),
+            "--ws-plain",
+            "--ws-addr", f"127.0.0.1:{relay_port}",
+            "--config", str(cfg_dir / "relay.toml"),
+            "--password", PASSWORD,
+            "--backend-token", BACKEND_TOKEN,
+            "--allow-backend-peering",
+            "--web-dir", str(cfg_dir / "noweb"),
+        ],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+
+
+def test_daemon_attach_over_real_relay_through_the_web_api(home, tmp_path):
+    """Daemon attach end to end, driven through the HTTP routes the web UI
+    calls: publish and offer on the owners, discover and attach on a guest,
+    a session join with no approval, an approved public attach, detach."""
+    import aiohttp
+
+    store.update(
+        lambda doc: doc.update(
+            {"harnesses": {"py": {"command": [sys.executable, "-u", "-c", CHILD]}}}
+        )
+    )
+
+    async def run():
+        relay_port = _free_port()
+        relay = _start_relay(tmp_path, relay_port)
+        a = _Daemon("pca", relay_port, tmp_path / "meshA")
+        b = _Daemon("pcb", relay_port, tmp_path / "meshB")
+        c = _Daemon("pcc", relay_port, tmp_path / "meshC")
+        http = aiohttp.ClientSession()
+
+        async def call(d, method, path, body=None):
+            async with http.request(
+                method, f"http://127.0.0.1:{d.port}{path}", json=body,
+                headers={"Authorization": f"Bearer token-{d.name}"},
+            ) as resp:
+                return resp.status, await resp.json()
+
+        try:
+            for d in (a, b, c):
+                await d.start()
+            await _wait(
+                lambda: all(d.uplink.connected for d in (a, b, c)),
+                "three uplinks to register",
+            )
+            if not a.uplink.listing:
+                pytest.skip("relay binary lacks CAP_PEER_LIST — rebuild mux-relay")
+
+            a.mesh.create("pub")
+            a.mesh.create("hidden")
+            c.mesh.create("inv")
+            status, doc = await call(a, "PUT", "/api/mesh/pub/visibility",
+                                     {"visibility": "public"})
+            assert status == 200, doc
+            status, doc = await call(c, "POST", "/api/mesh/inv/offers",
+                                     {"machine": "pcb"})
+            assert status == 201 and doc["visibility"] == "invited", doc
+
+            # B sees the union over the relay: A's public mesh, C's offer
+            status, doc = await call(b, "GET", "/api/relay/meshes")
+            assert status == 200, doc
+            rows = {(r["mesh"], r["machine"]): r for r in doc["meshes"]}
+            assert set(rows) == {("pub", "pca"), ("inv", "pcc")}, doc
+            assert rows[("inv", "pcc")]["access"] == "offer"
+            assert rows[("pub", "pca")]["access"] == "approval"
+            assert doc["errors"] == {}, doc
+
+            # the offered mesh attaches in one call, no approval
+            status, doc = await call(b, "POST", "/api/mesh/inv@pcc/attach", {})
+            assert status == 201 and doc["attached"], doc
+            assert b.mesh.get("inv").primary == "pcc"
+            assert "pcb" in c.mesh.get("inv").links
+
+            # a session on B then joins by the bare name, no approval
+            b.manager.create(SessionDef(name="sb", harness="py", cwd=str(tmp_path)))
+            status, doc = await call(b, "POST", "/api/mesh/inv/members",
+                                     {"session": "sb", "handle": "bob"})
+            assert status == 201, doc
+            assert c.mesh.get("inv").members["bob"].machine == "pcb"
+
+            # one hop: A does not see C's mesh through B's mirror
+            status, doc = await call(a, "GET", "/api/relay/meshes")
+            assert [(r["mesh"], r["machine"]) for r in doc["meshes"]] == [], doc
+
+            # the public mesh waits for its owner
+            status, doc = await call(b, "POST", "/api/mesh/pub@pca/attach", {})
+            assert status == 202 and doc["pending"], doc
+            rid = doc["request_id"]
+            status, info = await call(a, "GET", "/api/mesh/pub")
+            assert [r["attach"] for r in info["requests"]] == [True], info
+            status, doc = await call(
+                a, "POST", f"/api/mesh/pub/requests/{rid}/approve", {}
+            )
+            assert status == 200 and doc["delivered"], doc
+            await _wait(lambda: "pub" in [m.name for m in b.mesh.list()],
+                        "the grant to land on B")
+
+            # detach: the owner drops B and its member, the mirror goes
+            status, doc = await call(b, "DELETE", "/api/mesh/inv/attach")
+            assert status == 200 and doc["notified"], doc
+            assert "pcb" not in c.mesh.get("inv").links
+            assert "bob" not in c.mesh.get("inv").members
+            assert "inv" not in [m.name for m in b.mesh.list()]
+        finally:
+            await http.close()
+            for d in (c, b, a):
+                await d.stop()
             relay.terminate()
             try:
                 relay.wait(timeout=5)

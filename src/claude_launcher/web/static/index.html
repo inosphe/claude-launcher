@@ -666,6 +666,7 @@
           <legend><span class="sess-spawn-step">4</span> Start it working</legend>
           <p class="sess-spawn-group-blurb">what it joins, and what it drives</p>
           <label>Mesh <select name="mesh"></select></label>
+          <p id="new-mesh-note" class="wf-note hidden"></p>
           <label id="new-handle-row" class="hidden">
             Handle <input name="handle" placeholder="(session name)">
           </label>
@@ -898,6 +899,16 @@
         <p id="mesh-join-hint" class="hidden"></p>
         <p id="mesh-error" class="error hidden"></p>
       </form>
+      <!-- Daemon attach: meshes other daemons publish or offer to this one
+           (one relay hop, every connected relay). -->
+      <div id="mesh-remote">
+        <div class="mesh-remote-head">
+          <span>Remote meshes</span>
+          <button id="mesh-remote-find" type="button" class="wf-btn option">Find</button>
+        </div>
+        <ul id="mesh-remote-list"></ul>
+        <p id="mesh-remote-note" class="hidden"></p>
+      </div>
     </div>
 
     <div id="flows-view" class="hidden">

@@ -2769,6 +2769,12 @@ claunch mesh wire-requests dev    # ...who was refused a peer and is waiting on
 claunch mesh invite dev           # optional ticket that pre-approves one join
 claunch mesh join dev@work-pc --code <ticket>   # ...admitted without waiting
 claunch mesh revoke dev other-pc  # unlink a guest machine (persistent until then)
+claunch mesh visibility dev public # list it to every daemon on the relays
+claunch mesh offer dev other-pc   # ...or offer it to one daemon (no approval)
+claunch mesh discover             # meshes published/offered to THIS daemon
+claunch mesh attach dev@work-pc   # attach this whole daemon (no member yet);
+claunch mesh join dev             #   its sessions then join by the bare name
+claunch mesh detach dev           # ...leave with every session hosted here
 claunch install                   # MCP tools + the /mesh and /cflow skills
                                   # (and /cflow-author, for writing workflows)
 ```
@@ -2918,6 +2924,21 @@ claunch install                   # MCP tools + the /mesh and /cflow skills
   (a single backend token), so the remote side does not re-confirm. On the
   web, pasting an invite code into the sidebar's mesh field decodes it in
   place and turns the form into a ready-made join.
+- **Daemon attach** (`claunch mesh attach dev@work-pc`): a daemon can join a
+  remote mesh *as a daemon*, with no member of its own — the mirror and the
+  link are made, and every session there then joins by the bare name
+  (`claunch mesh join dev`) with no further approval. The owner decides who
+  sees the mesh per mesh with `claunch mesh visibility dev
+  private|public|invited`: `public` lists it to every daemon on every relay
+  the owner is connected to (attaching still waits for approval), and
+  `claunch mesh offer dev <machine>` pushes it to one named daemon with a
+  token that attaches it without approval (a private mesh becomes
+  `invited` by being offered). `claunch mesh discover` — and the sidebar's
+  **Remote meshes** list — shows the union over all of this daemon's relays
+  of what their daemons publish or offer here, one hop only: a daemon lists
+  the meshes it owns, never a mirror it holds. `claunch mesh detach dev`
+  leaves with every session hosted here. The session-level
+  `join dev@work-pc` is unchanged.
 
 ### Agents that build their own team (spawn · hierarchy · member graph)
 

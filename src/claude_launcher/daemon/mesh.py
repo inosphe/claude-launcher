@@ -51,6 +51,12 @@ log = logging.getLogger("claunch.daemon.mesh")
 
 _NAME_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 
+#: Who may see a mesh in another daemon's discovery list (daemon-level
+#: attach, docs/mesh-design.md "Daemon attach"). ``private`` lists it
+#: nowhere; ``public`` answers every relay peer's ``/peer/meshes``;
+#: ``invited`` is pushed only to the daemons named in ``Mesh.offers``.
+VISIBILITIES = ("private", "public", "invited")
+
 #: Directory suffix `_drop_mesh` renames a deleted mesh to. History is kept
 #: on disk deliberately, but such a directory must never be mounted again —
 #: `.` is legal in a mesh name, so the suffix has to be matched exactly.
@@ -836,6 +842,12 @@ class Mesh:
         #: join request): token -> minted-at ISO timestamp. TTL-checked at
         #: redemption (MeshManager.invite_ttl).
         self.invites: Dict[str, str] = {}
+        #: Authority side: who may discover this mesh (see VISIBILITIES).
+        self.visibility: str = "private"
+        #: Authority side: daemons this mesh was offered to, machine ->
+        #: {token, created_at}. The token lets that machine attach without
+        #: approval; it lives until the offer is cancelled or redeemed.
+        self.offers: Dict[str, dict] = {}
         #: Primary side: codeless join requests awaiting operator approval,
         #: id -> {id, machine, session, handle, role, reply_token,
         #: requested_at}. Persisted so approvals survive a restart.
@@ -1381,6 +1393,11 @@ class MeshManager:
         #: handle, role, requested_at}. Durable (outgoing_joins.json) so a
         #: grant that arrives after a restart still finds its request.
         self._outgoing: Dict[str, dict] = {}
+        #: Meshes other daemons offered to this one (``invited`` visibility),
+        #: "mesh@machine" -> {mesh, machine, token, project, offered_at}.
+        #: Durable (mesh_offers.json): an offer is pushed once, and a daemon
+        #: that restarts must still list it.
+        self._offers: Dict[str, dict] = {}
 
     @property
     def machine(self) -> str:
@@ -1927,6 +1944,15 @@ class MeshManager:
             for rec in records if isinstance(records, list) else []:
                 if isinstance(rec, dict) and rec.get("request_id"):
                     self._outgoing[str(rec["request_id"])] = rec
+        offers_path = root / "mesh_offers.json"
+        if offers_path.is_file():
+            try:
+                offers = json.loads(offers_path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                offers = []
+            for rec in offers if isinstance(offers, list) else []:
+                if isinstance(rec, dict) and rec.get("mesh") and rec.get("machine"):
+                    self._offers[f"{rec['mesh']}@{rec['machine']}"] = rec
 
     def start(self) -> None:
         """Spawn delivery workers (requires a running event loop)."""
@@ -2200,9 +2226,15 @@ class MeshManager:
         raise MeshError("unexpected response from the primary")
 
     def _adopt_grant(
-        self, mesh_name: str, primary: str, reply_token: str, grant: dict
-    ) -> Member:
-        """Build the mirror + our member from a primary's grant payload."""
+        self, mesh_name: str, primary: str, reply_token: str, grant: dict,
+        *, attach: bool = False,
+    ) -> Optional[Member]:
+        """Build the mirror + our member from a primary's grant payload.
+
+        ``attach`` is the daemon-level join: the grant carries no member of
+        ours, so only the mirror is built and None is returned. Sessions here
+        then join it like any mesh already present (``_join_local``).
+        """
         if mesh_name in self._meshes:
             raise MeshConflict(
                 f"a mesh named {mesh_name!r} appeared locally while the join "
@@ -2253,6 +2285,14 @@ class MeshManager:
                 mesh_roles.load_override(grant_roles.get("doc")),
                 version=grant_roles.get("version"),
             )
+        if attach:
+            self._meshes[mesh_name] = mesh
+            self._persist_def(mesh)
+            self._persist_cursors(mesh)
+            self._ensure_worker(mesh_name)
+            self._drop_offer(mesh_name, primary)
+            log.info("mesh %r: attached (mirror of %r)", mesh_name, primary)
+            return None
         member_doc = grant.get("member") or {}
         member = mesh.members.get(str(member_doc.get("handle") or ""))
         if member is None:
@@ -2272,6 +2312,294 @@ class MeshManager:
             mesh_name, member.handle, primary,
         )
         return member
+
+    # -- daemon attach: a daemon joins a mesh with no member of its own --- #
+    async def attach(self, address: str, *, code: Optional[str] = None) -> dict:
+        """Daemon-level join of ``mesh@machine`` (docs/mesh-design.md
+        "Daemon attach").
+
+        Builds the mirror and the link, and no member. Once attached, every
+        session here joins by the bare mesh name without another approval —
+        the link is what the owner approved. Pre-approval comes from ``code``
+        (an invite ticket) or from an offer the owner pushed to this daemon;
+        without either the request pends on the owner like a session join.
+        Attaching a mesh that is already mirrored here is a no-op.
+        """
+        mesh_name, primary, invite_token = self._parse_addr(address, code)
+        if not primary:
+            raise MeshError(
+                f"attach takes a remote address 'mesh@machine', not {address!r}"
+            )
+        existing = self._meshes.get(mesh_name)
+        if existing is not None:
+            if existing.primary and existing.primary == primary:
+                return self._attach_view(existing, already=True)
+            raise MeshConflict(
+                f"mesh {mesh_name!r} on this daemon "
+                + (f"is a mirror of {existing.primary!r}" if existing.primary
+                   else "is owned locally")
+                + f" — it cannot also attach {mesh_name}@{primary}"
+            )
+        machine = self._require_machine()
+        if primary == machine:
+            raise MeshError(f"this daemon is {primary!r} — it owns its meshes")
+        if self.peer_transport is None:
+            raise MeshError("relay uplink is not running — cannot reach peers")
+        for rec in self._outgoing.values():
+            if (rec.get("attach") and rec.get("mesh") == mesh_name
+                    and rec.get("primary") == primary):
+                return {
+                    "pending": True, "request_id": rec["request_id"],
+                    "mesh": mesh_name, "primary": primary,
+                }
+        reply_token = secrets.token_urlsafe(18)
+        body = {
+            "mesh": mesh_name,
+            "machine": machine,
+            "session": "",
+            "handle": "",
+            "role": "",
+            "reply_token": reply_token,
+        }
+        if invite_token:
+            body["code"] = invite_token
+        offer = self._offers.get(f"{mesh_name}@{primary}")
+        if offer:
+            body["offer"] = str(offer.get("token") or "")
+        resp = await self.peer_transport(primary, "/peer/mesh/join_request", body)
+        if not isinstance(resp, dict):
+            raise MeshError("unexpected response from the primary")
+        if resp.get("granted"):
+            self._adopt_grant(
+                mesh_name, primary, reply_token, resp.get("grant") or {},
+                attach=True,
+            )
+            return self._attach_view(self._meshes[mesh_name])
+        if resp.get("pending"):
+            rid = str(resp.get("id") or "")
+            self._outgoing[rid] = {
+                "request_id": rid,
+                "mesh": mesh_name,
+                "primary": primary,
+                "reply_token": reply_token,
+                "attach": True,
+                "session": "",
+                "handle": "",
+                "role": "",
+                "requested_at": utcnow(),
+            }
+            self._persist_outgoing()
+            return {
+                "pending": True, "request_id": rid,
+                "mesh": mesh_name, "primary": primary,
+            }
+        raise MeshError("unexpected response from the primary")
+
+    @staticmethod
+    def _attach_view(mesh: Mesh, *, already: bool = False) -> dict:
+        return {
+            "attached": True,
+            "already": already,
+            "mesh": mesh.name,
+            "primary": mesh.primary,
+            "members": len(mesh.members),
+        }
+
+    async def detach(self, name: str, *, force: bool = False) -> dict:
+        """Undo :meth:`attach`: tell the owner, then drop the mirror.
+
+        The owner removes this daemon's link and every member it hosts, so
+        the local sessions leave with it. ``force`` drops the mirror even
+        when the owner cannot be told (it keeps a stale guest entry that its
+        operator can revoke).
+        """
+        mesh = self.get(name)
+        if not mesh.primary:
+            raise MeshError(
+                f"mesh {name!r} is owned by this daemon — delete it instead"
+            )
+        told = True
+        try:
+            await self._peer_call_primary(mesh, "/peer/mesh/detach", {})
+        except PeerUnreachable as exc:
+            if not force:
+                raise MeshError(
+                    f"cannot reach {mesh.primary!r} to detach ({exc}) — "
+                    "retry, or force it to drop the mirror here only"
+                ) from None
+            told = False
+        primary = mesh.primary
+        self._drop_mesh(name)
+        log.info("mesh %r: detached from %r", name, primary)
+        return {"mesh": name, "primary": primary, "notified": told}
+
+    def peer_offer_accept(
+        self, name: str, machine: str, token: str, *,
+        cancel: bool = False, project: str = "", members: int = 0,
+    ) -> dict:
+        """An owner offers (or withdraws) one of its meshes to this daemon.
+
+        The offer arrives over the relay addressed to *our* registered name,
+        so only this daemon can hold the token; the claimed sender is not
+        verified, but a forged offer carries a token its named owner will
+        refuse, so it costs one refused attach and nothing more.
+        """
+        if not _NAME_RE.match(name or "") or not _NAME_RE.match(machine or ""):
+            raise MeshError("invalid mesh offer")
+        key = f"{name}@{machine}"
+        if cancel:
+            self._offers.pop(key, None)
+            self._persist_offers()
+            return {"ok": True, "cancelled": True}
+        if not token:
+            raise MeshError("mesh offer carries no token")
+        local = self._meshes.get(name)
+        if local is not None and local.primary == machine:
+            return {"ok": True, "attached": True}
+        try:
+            count = int(members)
+        except (TypeError, ValueError):
+            count = 0
+        self._offers[key] = {
+            "mesh": name,
+            "machine": machine,
+            "token": str(token),
+            "project": str(project or ""),
+            "members": count,
+            "offered_at": utcnow(),
+        }
+        self._persist_offers()
+        log.info("mesh %r: offered to this daemon by %r", name, machine)
+        return {"ok": True}
+
+    def offers_received(self) -> List[dict]:
+        """Offers pushed to this daemon, without their tokens."""
+        return [
+            {k: v for k, v in rec.items() if k != "token"}
+            for rec in sorted(
+                self._offers.values(),
+                key=lambda r: (r.get("machine", ""), r.get("mesh", "")),
+            )
+        ]
+
+    def _drop_offer(self, name: str, machine: str) -> None:
+        if self._offers.pop(f"{name}@{machine}", None) is not None:
+            self._persist_offers()
+
+    def _persist_offers(self) -> None:
+        root = self._mesh_root()
+        try:
+            root.mkdir(parents=True, exist_ok=True)
+            path = root / "mesh_offers.json"
+            with atomic.scratch(path) as tmp:
+                tmp.write_text(
+                    json.dumps(list(self._offers.values()), indent=2),
+                    encoding="utf-8",
+                )
+                atomic.replace(tmp, path)
+        except OSError as exc:
+            log.warning("cannot persist mesh offers: %s", exc)
+
+    def peer_meshes_list(self) -> List[dict]:
+        """``/peer/meshes``: the public meshes this daemon owns.
+
+        Only meshes this daemon is the authority of — never a mirror, never
+        an offer received from elsewhere — so discovery reaches exactly one
+        relay hop and a mesh is listed only by the daemon that owns it.
+        """
+        return [
+            {
+                "mesh": mesh.name,
+                "project": mesh.project,
+                "members": len(mesh.members),
+                "peers": max(len(mesh.peers), 1),
+                "created_at": mesh.created_at,
+            }
+            for mesh in sorted(self._meshes.values(), key=lambda m: m.name)
+            if not mesh.primary and mesh.visibility == "public"
+        ]
+
+    async def discover(self, *, timeout: float = 8.0) -> dict:
+        """Meshes this daemon could attach: the union, over every daemon on
+        every connected relay, of the public meshes it owns, plus the offers
+        pushed here.
+
+        One hop only: each row is keyed by the daemon that answered, which
+        lists only what it owns, so nothing is relayed onward.
+        """
+        rows: Dict[str, dict] = {}
+        errors: Dict[str, str] = {}
+        names: List[str] = []
+        if self.peer_lister is None:
+            errors["relay"] = "relay uplink is not running"
+        else:
+            try:
+                names = list(await self.peer_lister())
+            except Exception as exc:  # noqa: BLE001 — surface as a row error
+                errors["relay"] = str(exc) or type(exc).__name__
+
+        async def ask(peer: str):
+            try:
+                return peer, await asyncio.wait_for(
+                    self.peer_transport(peer, "/peer/meshes", {}), timeout
+                )
+            except Exception as exc:  # noqa: BLE001 — one peer, one error
+                return peer, exc
+
+        if names and self.peer_transport is not None:
+            for peer, res in await asyncio.gather(*(ask(p) for p in names)):
+                if isinstance(res, BaseException):
+                    errors[peer] = str(res) or type(res).__name__
+                    continue
+                for entry in (res or {}).get("meshes") or []:
+                    if not isinstance(entry, dict):
+                        continue
+                    name = str(entry.get("mesh") or "")
+                    if not _NAME_RE.match(name):
+                        continue
+                    rows[f"{name}@{peer}"] = {
+                        "mesh": name,
+                        "machine": peer,
+                        "project": str(entry.get("project") or ""),
+                        "members": entry.get("members"),
+                        "peers": entry.get("peers"),
+                        "sources": ["public"],
+                    }
+        for key, offer in self._offers.items():
+            row = rows.setdefault(key, {
+                "mesh": offer["mesh"],
+                "machine": offer["machine"],
+                "project": str(offer.get("project") or ""),
+                "members": offer.get("members"),
+                "peers": None,
+                "sources": [],
+            })
+            row["sources"].append("offer")
+        pending = {
+            (r.get("mesh"), r.get("primary")): r.get("request_id")
+            for r in self._outgoing.values() if r.get("attach")
+        }
+        for row in rows.values():
+            local = self._meshes.get(row["mesh"])
+            if local is not None and local.primary == row["machine"]:
+                row["state"] = "attached"
+            elif local is not None:
+                row["state"] = "name_taken"
+            elif (row["mesh"], row["machine"]) in pending:
+                row["state"] = "pending"
+                row["request_id"] = pending[(row["mesh"], row["machine"])]
+            else:
+                row["state"] = "available"
+            # An offer carries its own pre-approval; a public listing does
+            # not, so attaching from it waits for the owner's approval.
+            row["access"] = "offer" if "offer" in row["sources"] else "approval"
+        return {
+            "meshes": sorted(
+                rows.values(), key=lambda r: (r["machine"], r["mesh"])
+            ),
+            "peers": sorted(names),
+            "errors": errors,
+        }
 
     async def _join_local(
         self,
@@ -4886,8 +5214,11 @@ class MeshManager:
         }
         self._ensure_pair_links(mesh)
 
-    def _grant_payload(self, mesh: Mesh, machine: str, member: Member) -> dict:
-        """Everything a peer needs to build its mirror + member.
+    def _grant_payload(
+        self, mesh: Mesh, machine: str, member: Optional[Member]
+    ) -> dict:
+        """Everything a peer needs to build its mirror + member (no member
+        for a daemon attach).
 
         ``peers`` carries the whole rank list, so the newcomer knows which
         other daemons to open direct links with (phase 7's complete graph)
@@ -4910,7 +5241,7 @@ class MeshManager:
             "messages": list(mesh.messages),
             "policy": mesh.policy,
             "roles": {"doc": mesh.roles_doc, "version": mesh.roles_version},
-            "member": member.to_dict(),
+            "member": member.to_dict() if member is not None else None,
             "cursor": len(mesh.messages),
             "peers": list(mesh.peers),
             "epoch": mesh.authority_epoch,
@@ -4927,8 +5258,10 @@ class MeshManager:
         reply_token: str,
         code: str,
         subroles: Sequence[str] = (),
+        offer: str = "",
     ) -> dict:
-        """A remote daemon asks to enrol one of its sessions.
+        """A remote daemon asks to enrol one of its sessions — or, with no
+        ``session``, to attach itself with no member (daemon attach).
 
         Three outcomes: an already-trusted machine is auto-granted (mirror
         recovery); a valid invite ticket grants synchronously; anything else
@@ -4944,9 +5277,14 @@ class MeshManager:
             raise MeshError("missing reply token")
         if machine == self._require_machine():
             raise MeshError("a daemon cannot join itself as a guest")
-        if machine in mesh.links or code:
+        offered = self._offer_matches(mesh, machine, offer)
+        if not str(session or "").strip():
+            return self._attach_request(mesh, machine, reply_token, code, offered)
+        if machine in mesh.links or code or offered:
             if code:
                 self._redeem_invite(mesh, code)
+            if offered:
+                mesh.offers.pop(machine, None)
             member, created = self._admit_member(
                 mesh, machine, session, handle, role, subroles=subroles
             )
@@ -4992,6 +5330,151 @@ class MeshManager:
         )
         return {"pending": True, "id": rid}
 
+    @staticmethod
+    def _offer_matches(mesh: Mesh, machine: str, token: str) -> bool:
+        offer = mesh.offers.get(machine)
+        if not offer or not token:
+            return False
+        return secrets.compare_digest(
+            str(token).encode("utf-8"),
+            str(offer.get("token") or "").encode("utf-8"),
+        )
+
+    def _attach_request(
+        self, mesh: Mesh, machine: str, reply_token: str, code: str,
+        offered: bool,
+    ) -> dict:
+        """The daemon-attach arm of :meth:`peer_join_request_accept`.
+
+        Granted at once for an already-linked machine (a lost mirror asking
+        again), a ticket, or the offer this daemon pushed to it; pended for
+        the operator otherwise — a public listing advertises a mesh, it does
+        not admit anyone.
+        """
+        if machine in mesh.links or code or offered:
+            if code:
+                self._redeem_invite(mesh, code)
+            if machine not in mesh.links:
+                mesh.roster_version += 1
+            self._register_guest(mesh, machine, reply_token)
+            mesh.offers.pop(machine, None)
+            self._persist_def(mesh)
+            self._persist_cursors(mesh)
+            self._flush_guests_soon(mesh)
+            log.info(
+                "mesh %r: daemon %r attached (%s)", mesh.name, machine,
+                "ticket" if code else "offer" if offered else "trusted machine",
+            )
+            return {
+                "granted": True,
+                "grant": self._grant_payload(mesh, machine, None),
+            }
+        for req in mesh.pending_requests.values():
+            if req.get("machine") == machine and not req.get("session"):
+                # the same daemon asking again: one entry, the newest token
+                req["reply_token"] = str(reply_token)
+                self._persist_def(mesh)
+                return {"pending": True, "id": req["id"]}
+        rid = "req-" + uuid.uuid4().hex[:10]
+        mesh.pending_requests[rid] = {
+            "id": rid,
+            "machine": machine,
+            "session": "",
+            "handle": "",
+            "role": "",
+            "subroles": [],
+            "reply_token": str(reply_token),
+            "requested_at": utcnow(),
+        }
+        self._persist_def(mesh)
+        log.info(
+            "mesh %r: attach request %s from daemon %r awaits approval",
+            mesh.name, rid, machine,
+        )
+        return {"pending": True, "id": rid}
+
+    # -- owner side: who may discover a mesh ----------------------------- #
+    async def set_visibility(self, name: str, visibility: str) -> dict:
+        """Publish a mesh to the relay (``public``), to named daemons only
+        (``invited``), or to nobody (``private`` — withdraws every offer)."""
+        mesh = self.get(name)
+        self._require_authority(mesh, "publishing")
+        visibility = str(visibility or "").strip().lower()
+        if visibility not in VISIBILITIES:
+            raise MeshError(
+                f"visibility must be one of {', '.join(VISIBILITIES)}"
+            )
+        mesh.visibility = visibility
+        withdrawn = []
+        if visibility == "private":
+            withdrawn = sorted(mesh.offers)
+            mesh.offers.clear()
+        self._persist_def(mesh)
+        for machine in withdrawn:
+            await self._push_offer_cancel(mesh.name, machine)
+        return {"mesh": mesh.name, "visibility": visibility,
+                "withdrawn": withdrawn}
+
+    async def offer_mesh(self, name: str, machine: str) -> dict:
+        """Push an offer of this mesh to ``machine`` (the ``invited`` path).
+
+        The offer carries a token only that daemon receives — the relay
+        routes by registered name — and the token lets it attach without
+        approval. A private mesh becomes ``invited`` by being offered.
+        """
+        mesh = self.get(name)
+        self._require_authority(mesh, "publishing")
+        me = self._require_machine()
+        machine = str(machine or "").strip()
+        if not _NAME_RE.match(machine) or machine == me:
+            raise MeshError("pick another daemon on the relay to offer it to")
+        if machine in mesh.links:
+            raise MeshError(f"{machine!r} is already attached to mesh {name!r}")
+        if self.peer_transport is None:
+            raise MeshError("relay uplink is not running — cannot reach peers")
+        previous = mesh.offers.get(machine)
+        token = str((previous or {}).get("token") or secrets.token_urlsafe(18))
+        await self.peer_transport(machine, "/peer/mesh/offer", {
+            "mesh": mesh.name,
+            "machine": me,
+            "token": token,
+            "project": mesh.project,
+            "members": len(mesh.members),
+        })
+        mesh.offers[machine] = {
+            "token": token,
+            "created_at": str((previous or {}).get("created_at") or utcnow()),
+        }
+        if mesh.visibility == "private":
+            mesh.visibility = "invited"
+        self._persist_def(mesh)
+        log.info("mesh %r: offered to %r", mesh.name, machine)
+        return {"mesh": mesh.name, "machine": machine,
+                "visibility": mesh.visibility}
+
+    async def cancel_offer(self, name: str, machine: str) -> dict:
+        mesh = self.get(name)
+        self._require_authority(mesh, "publishing")
+        if mesh.offers.pop(machine, None) is None:
+            raise MeshError(f"mesh {name!r} has no offer to {machine!r}")
+        self._persist_def(mesh)
+        notified = await self._push_offer_cancel(mesh.name, machine)
+        return {"mesh": mesh.name, "machine": machine, "notified": notified}
+
+    async def _push_offer_cancel(self, name: str, machine: str) -> bool:
+        """Best-effort: a daemon that misses it keeps a stale row whose
+        token its owner now refuses."""
+        if self.peer_transport is None:
+            return False
+        try:
+            await self.peer_transport(machine, "/peer/mesh/offer", {
+                "mesh": name, "machine": self._require_machine(),
+                "cancel": True,
+            })
+        except Exception:  # noqa: BLE001 — best-effort notification
+            return False
+        return True
+
     def request_list(self, name: str) -> List[dict]:
         """Pending inbound join requests, oldest first (primary only)."""
         mesh = self.get(name)
@@ -5001,7 +5484,7 @@ class MeshManager:
                 k: r.get(k)
                 for k in ("id", "machine", "session", "handle", "role",
                           "requested_at")
-            }
+            } | {"attach": not r.get("session")}
             for r in sorted(
                 mesh.pending_requests.values(),
                 key=lambda r: r.get("requested_at", ""),
@@ -5015,6 +5498,27 @@ class MeshManager:
         req = mesh.pending_requests.pop(rid, None)
         if req is None:
             raise MeshError(f"no pending join request {rid!r} in mesh {name!r}")
+        if not req.get("session"):  # a daemon attach: the link, no member
+            if req["machine"] not in mesh.links:
+                mesh.roster_version += 1
+            self._register_guest(mesh, req["machine"], req["reply_token"])
+            mesh.offers.pop(req["machine"], None)
+            mesh.pending_grants[rid] = {
+                "machine": req["machine"],
+                "handle": "",
+                "reply_token": req["reply_token"],
+            }
+            self._persist_def(mesh)
+            self._persist_cursors(mesh)
+            self._flush_guests_soon(mesh)
+            await self._flush_grants(mesh)
+            return {
+                "id": rid,
+                "handle": "",
+                "machine": req["machine"],
+                "attach": True,
+                "delivered": rid not in mesh.pending_grants,
+            }
         member, created = self._admit_member(
             mesh, req["machine"], req["session"], req["handle"], req["role"],
             subroles=_read_subroles(req.get("subroles")),
@@ -5068,8 +5572,9 @@ class MeshManager:
             return
         for rid, g in list(mesh.pending_grants.items()):
             machine = g["machine"]
-            member = mesh.members.get(g["handle"])
-            if member is None or machine not in mesh.links:
+            handle = str(g.get("handle") or "")  # "" = a daemon attach
+            member = mesh.members.get(handle) if handle else None
+            if (handle and member is None) or machine not in mesh.links:
                 mesh.pending_grants.pop(rid, None)  # revoked meanwhile
                 self._persist_def(mesh)
                 continue
@@ -5100,10 +5605,13 @@ class MeshManager:
                 # name appeared there): roll the admission back
                 log.warning(
                     "mesh %r: guest %r rejected the grant for %r: %s",
-                    mesh.name, machine, g["handle"], exc,
+                    mesh.name, machine, handle or "(attach)", exc,
                 )
                 mesh.pending_grants.pop(rid, None)
-                self._rollback_admission(mesh, machine, g["handle"])
+                if handle:
+                    self._rollback_admission(mesh, machine, handle)
+                elif not any(m.machine == machine for m in mesh.members.values()):
+                    self._remove_guest(mesh, machine)
                 continue
             mesh.pending_grants.pop(rid, None)
             status.update({"ok": True, "error": None, "retry_at": 0.0,
@@ -5138,13 +5646,11 @@ class MeshManager:
         self._persist_cursors(mesh)
         self._flush_guests_soon(mesh)
 
-    async def revoke_guest(self, name: str, machine: str) -> dict:
-        """Unlink a guest machine: drop its members, credentials and mirror."""
-        mesh = self.get(name)
-        self._require_authority(mesh, "guest management")
-        guest = mesh.links.get(machine)
-        if guest is None:
-            raise MeshError(f"no guest {machine!r} linked to mesh {name!r}")
+    def _remove_guest(self, mesh: Mesh, machine: str) -> List[str]:
+        """Authority side: drop a guest's rank, credentials and members.
+
+        Shared by an operator's revoke and a guest's own detach; the caller
+        decides whether the guest is told."""
         self._unrank(mesh, machine)
         for rid in [
             r for r, g in mesh.pending_grants.items() if g["machine"] == machine
@@ -5155,10 +5661,33 @@ class MeshManager:
             mesh.members.pop(h, None)
             mesh.remote_activity.pop(h, None)
             mesh.remote_lineage.pop(h, None)
+            self._drop_leases(mesh, h)
         mesh.roster_version += 1
         self._persist_def(mesh)
         self._persist_cursors(mesh)
         self._flush_guests_soon(mesh)
+        return removed
+
+    def peer_detach_accept(self, name: str, machine: str, token: str) -> dict:
+        """A guest daemon detaches itself (and every member it hosts)."""
+        mesh = self.get(name)
+        self._require_authority(mesh, "guest management")
+        self._check_link_token(mesh, machine, token)
+        removed = self._remove_guest(mesh, machine)
+        log.info(
+            "mesh %r: guest %r detached (%d member(s) removed)",
+            mesh.name, machine, len(removed),
+        )
+        return {"ok": True, "removed_members": removed}
+
+    async def revoke_guest(self, name: str, machine: str) -> dict:
+        """Unlink a guest machine: drop its members, credentials and mirror."""
+        mesh = self.get(name)
+        self._require_authority(mesh, "guest management")
+        guest = mesh.links.get(machine)
+        if guest is None:
+            raise MeshError(f"no guest {machine!r} linked to mesh {name!r}")
+        removed = self._remove_guest(mesh, machine)
         if self.peer_transport is not None:
             try:
                 await self.peer_transport(
@@ -5212,7 +5741,10 @@ class MeshManager:
         member = self._adopt_grant(
             name, machine, str(rec.get("reply_token") or ""),
             grant if isinstance(grant, dict) else {},
+            attach=bool(rec.get("attach")),
         )
+        if member is None:
+            return {"ok": True, "attached": True}
         return {"ok": True, "handle": member.handle}
 
     async def peer_invite_accept(
@@ -5264,7 +5796,7 @@ class MeshManager:
             {
                 k: r.get(k)
                 for k in ("request_id", "mesh", "primary", "session", "handle",
-                          "role", "requested_at")
+                          "role", "requested_at", "attach")
             }
             for r in sorted(
                 self._outgoing.values(),
@@ -6667,6 +7199,7 @@ class MeshManager:
             "member_count": len(mesh.members),
             "messages": len(mesh.messages),
             "requests": len(mesh.pending_requests) if not mesh.primary else 0,
+            "visibility": mesh.visibility if not mesh.primary else None,
         }
 
     def mesh_info(
@@ -6796,7 +7329,7 @@ class MeshManager:
                         k: r.get(k)
                         for k in ("id", "machine", "session", "handle", "role",
                                   "requested_at")
-                    }
+                    } | {"attach": not r.get("session")}
                 )
         # Who the asking session is, resolved here rather than guessed by the
         # reader. `None` is a real answer — "this daemon has no member for
@@ -6828,6 +7361,10 @@ class MeshManager:
                 None if state == "all" else [m["handle"] for m in members]
             ),
             "requests": requests,
+            # Who may discover it: owner side only (a mirror publishes
+            # nothing — discovery is one hop from the owner).
+            "visibility": mesh.visibility if not mesh.primary else None,
+            "offers": sorted(mesh.offers) if not mesh.primary else [],
             "policy": mesh.policy,
             # A summary only — the stance prose is fetched on demand from
             # /api/mesh/<name>/roles, so the 2s dashboard poll stays cheap.
@@ -7295,6 +7832,12 @@ class MeshManager:
         mesh.invites = {
             str(k): str(v) for k, v in (doc.get("invites") or {}).items()
         }
+        visibility = str(doc.get("visibility") or "private")
+        mesh.visibility = visibility if visibility in VISIBILITIES else "private"
+        mesh.offers = {
+            str(k): dict(v) for k, v in (doc.get("offers") or {}).items()
+            if isinstance(v, dict) and v.get("token")
+        }
         mesh.pending_requests = {
             str(k): dict(v) for k, v in (doc.get("requests") or {}).items()
             if isinstance(v, dict)
@@ -7413,6 +7956,11 @@ class MeshManager:
                 ),
                 "members": {h: m.to_dict() for h, m in sorted(mesh.members.items())},
                 "invites": mesh.invites,
+                # Both absent for a mesh nobody published, so an unpublished
+                # mesh writes exactly the file it always did.
+                **({"visibility": mesh.visibility}
+                   if mesh.visibility != "private" else {}),
+                **({"offers": mesh.offers} if mesh.offers else {}),
                 "requests": mesh.pending_requests,
                 "grants": mesh.pending_grants,
                 "policy": mesh.policy,

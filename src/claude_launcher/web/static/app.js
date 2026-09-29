@@ -9157,8 +9157,11 @@ async function refreshRoles(meshName = "") {
   const previous = select.value;
   const request = ++rolesRequest;
   try {
-    const resp = await api(meshName
-      ? `/api/mesh/${encodeURIComponent(meshName)}/roles`
+    // A remote pick (mesh@machine, or an attach) has no vocabulary here
+    // until its grant lands; the packaged one is the preview until then.
+    const local = meshName && !meshName.includes("@") ? meshName : "";
+    const resp = await api(local
+      ? `/api/mesh/${encodeURIComponent(local)}/roles`
       : "/api/roles");
     if (!resp.ok) throw new Error(String(resp.status));
     const data = await resp.json();
@@ -10313,6 +10316,25 @@ $("new-session").addEventListener("submit", async (e) => {
   // left behind.
   if (f.mesh.value) {
     body.mesh = f.mesh.value;
+    if (body.mesh.startsWith(ATTACH_PREFIX)) {
+      // An offered remote mesh: attach this daemon (pre-approved), then the
+      // session joins the mirror by its bare name like any local mesh.
+      const addr = body.mesh.slice(ATTACH_PREFIX.length);
+      const resp = await api(`/api/mesh/${encodeURIComponent(addr)}/attach`, {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: "{}",
+      });
+      const doc = await resp.json().catch(() => ({}));
+      if (!resp.ok) {
+        $("create-error").textContent = `attach ${addr}: ${doc.error || `HTTP ${resp.status}`}`;
+        $("create-error").classList.remove("hidden");
+        return;
+      }
+      // Still pending (the offer was withdrawn meanwhile): ask as a session
+      // join instead, which the owner's approval completes.
+      body.mesh = doc.pending ? addr : addr.split("@")[0];
+      refreshMeshList();
+      loadRemoteMeshes();
+    }
     if (f.handle.value.trim()) body.handle = f.handle.value.trim();
   }
   if (f.workflow.value) {
@@ -14694,6 +14716,9 @@ function showView(name) {
   syncLayout();          // rail mode, nav highlight, and the bars' titles
   if (showTerm) refitSoon(60);
   syncTerminalFocus();
+  if (name === "meshes" && typeof maybeLoadRemoteMeshes === "function") {
+    maybeLoadRemoteMeshes();
+  }
 }
 
 function stopWfPoll() {
@@ -15349,6 +15374,7 @@ async function openNewSession(mesh) {
     const form = $("new-session");
     if (form.mesh.value) await refreshRoles(form.mesh.value);
   }
+  if (typeof maybeLoadRemoteMeshes === "function") maybeLoadRemoteMeshes();
   await Promise.all([
     Promise.resolve(refreshWorkspaces()).catch(() => {}),
     Promise.resolve(refreshWorkflowChoices()).catch(() => {}),
@@ -15371,6 +15397,18 @@ function syncOnboardPickers() {
   // parent's room for a child.
   mesh.appendChild(new Option(child ? "(inherit the parent's mesh)" : "(none)", ""));
   for (const m of meshCache) mesh.appendChild(new Option(m.name, m.name));
+  // Meshes other daemons publish or offer to this one (daemon attach). An
+  // offered one attaches this daemon first and joins by the bare name; one
+  // that needs its owner's approval is asked for as this session's join,
+  // which the grant completes later. A mesh already attached is local above.
+  // Guarded: harnesses that slice this function alone do not carry it.
+  const remote = typeof remoteMeshChoices === "function" ? remoteMeshChoices() : [];
+  if (remote.length) {
+    const group = document.createElement("optgroup");
+    group.label = "Remote meshes";
+    for (const r of remote) group.appendChild(new Option(r.label, r.value));
+    mesh.appendChild(group);
+  }
   // Only a child has an inheritance to REFUSE. "-" is the API's own spelling
   // for "none at all"; on a session of its own the empty answer already
   // means that, and a second row saying it would be two spellings of one
@@ -15391,6 +15429,12 @@ function syncOnboardPickers() {
   // collecting values nothing will send.
   const noMesh = !mesh.value || mesh.value === "-";
   $("new-handle-row").classList.toggle("hidden", noMesh);
+  const remoteNote = $("new-mesh-note");
+  if (remoteNote) {
+    const picked = remote.find((r) => r.value === mesh.value);
+    remoteNote.textContent = picked ? picked.note : "";
+    remoteNote.classList.toggle("hidden", !picked);
+  }
   if ($("new-connect-row")) {
     $("new-connect-row").classList.toggle(
       "hidden", noMesh || !sessionConnectHandles.length);
@@ -27877,6 +27921,8 @@ function sessionMeshNow(parentMeta) {
   const f = $("new-session");
   const picked = f.mesh.value || "";
   if (picked === "-") return "";
+  // A remote pick has no members here to wire to until its grant lands.
+  if (picked.includes("@")) return "";
   if (picked) return picked;
   const rooms = (parentMeta && parentMeta.meshes) || [];
   return rooms.length === 1 ? rooms[0] : "";
@@ -28867,6 +28913,11 @@ let meshName = null;      // mesh open in the detail view
 let meshPollTimer = null;
 let meshCache = [];       // sidebar list payload
 let meshPollData = null;  // the last /api/mesh?view=rail answer, every project
+// The last daemon-attach discovery answer (/api/relay/meshes) and when it
+// was asked; a session-form mesh value with this prefix attaches first.
+let remoteMeshes = null;
+let remoteMeshesAt = 0;
+const ATTACH_PREFIX = "attach:";
 let meshListRendered = null;
 let meshInviteCodes = {}; // mesh -> last minted invite code (survives rerenders)
 const MESH_MESSAGE_PAGE_SIZE = 25;
@@ -29015,7 +29066,9 @@ function renderOutgoingJoins(outgoing) {
     const li = document.createElement("li");
     li.append(
       el("span", null, `${r.mesh}@${r.primary}`),
-      el("span", "meta", `awaiting approval as '${r.handle}'`)
+      el("span", "meta", r.attach
+        ? "attach awaiting approval"
+        : `awaiting approval as '${r.handle}'`)
     );
     const cancel = el("button", "mesh-kick", "×");
     cancel.title = "forget this request locally (the owner still sees it)";
@@ -29333,6 +29386,254 @@ async function loadInviteSessions(mesh, machine) {
   }
   refreshMeshView(true);
 }
+
+/* Who may discover this mesh (daemon attach): private, public to every
+   daemon on our relays, or invited — offered to named daemons, which then
+   attach with no approval. Primary-only; per-mesh state survives the 2s
+   rebuild in meshPublishPanels. */
+const meshPublishPanels = {};
+
+function renderPublishPanel(info, fed) {
+  const st = meshPublishPanels[info.name] ||
+    (meshPublishPanels[info.name] = { peers: null, machine: "", note: "", bad: false });
+  const offers = info.offers || [];
+  const row = el("div", "mesh-add");
+  row.appendChild(el("span", "mesh-role", "visibility"));
+  const vis = document.createElement("select");
+  for (const [value, label] of [
+    ["private", "private — listed nowhere"],
+    ["public", "public — every daemon on the relays"],
+    ["invited", "invited — offered daemons only"],
+  ]) {
+    const opt = el("option", null, label);
+    opt.value = value;
+    vis.appendChild(opt);
+  }
+  vis.value = info.visibility || "private";
+  vis.addEventListener("change", async () => {
+    if (vis.value === "private" && offers.length && !confirm(
+      `Withdraw the offer${offers.length === 1 ? "" : "s"} to ` +
+      `${offers.join(", ")} as well?`
+    )) { vis.value = info.visibility || "private"; return; }
+    const resp = await api(`/api/mesh/${encodeURIComponent(info.name)}/visibility`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ visibility: vis.value }),
+    });
+    const doc = await resp.json().catch(() => ({}));
+    st.bad = !resp.ok;
+    st.note = resp.ok ? "" : (doc.error || `HTTP ${resp.status}`);
+    refreshMeshView(true);
+  });
+  row.appendChild(vis);
+  fed.appendChild(row);
+
+  for (const machine of offers) {
+    const orow = el("div", "mesh-member");
+    orow.appendChild(el("span", "dot starting"));
+    orow.appendChild(el("span", "mesh-handle mono", machine));
+    orow.appendChild(el("span", "meta", "offered — attaches with no approval"));
+    const cancel = el("button", "mesh-kick", "×");
+    cancel.title = `withdraw the offer to ${machine}`;
+    cancel.addEventListener("click", async () => {
+      const resp = await api(
+        `/api/mesh/${encodeURIComponent(info.name)}/offers/${encodeURIComponent(machine)}`,
+        { method: "DELETE" }
+      );
+      const doc = await resp.json().catch(() => ({}));
+      st.bad = !resp.ok;
+      st.note = resp.ok ? "" : (doc.error || `HTTP ${resp.status}`);
+      refreshMeshView(true);
+    });
+    orow.appendChild(cancel);
+    fed.appendChild(orow);
+  }
+
+  const offerRow = el("div", "mesh-add");
+  const pick = document.createElement("select");
+  const hint = el("option", null, st.peers === null ? "offer to a daemon…" : "daemon…");
+  hint.value = "";
+  pick.appendChild(hint);
+  const linked = new Set((info.peers || []).map((p) => p.machine));
+  for (const p of (st.peers || []).filter((p) => !linked.has(p) && !offers.includes(p))) {
+    const opt = el("option", null, p);
+    opt.value = p;
+    pick.appendChild(opt);
+  }
+  pick.value = st.machine;
+  // The relay roster is listed on first focus, not on every rebuild: it is
+  // a PEER_LIST round trip per relay.
+  pick.addEventListener("focus", async () => {
+    if (st.peers !== null) return;
+    st.peers = [];
+    const resp = await api("/api/relay/peers");
+    const doc = await resp.json().catch(() => ({}));
+    st.peers = doc.peers || [];
+    st.bad = !resp.ok;
+    st.note = resp.ok
+      ? (st.peers.length ? "" : "no other daemon is registered on the relay")
+      : (doc.error || `HTTP ${resp.status}`);
+    refreshMeshView(true);
+  });
+  pick.addEventListener("change", () => { st.machine = pick.value; refreshMeshView(true); });
+  const go = el("button", "wf-btn approve", "Offer");
+  go.disabled = !st.machine;
+  go.addEventListener("click", async () => {
+    const machine = st.machine;
+    const resp = await api(`/api/mesh/${encodeURIComponent(info.name)}/offers`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ machine }),
+    });
+    const doc = await resp.json().catch(() => ({}));
+    st.bad = !resp.ok;
+    st.note = resp.ok ? `offered to ${machine}` : (doc.error || `HTTP ${resp.status}`);
+    if (resp.ok) st.machine = "";
+    refreshMeshView(true);
+  });
+  offerRow.append(pick, go);
+  fed.appendChild(offerRow);
+  if (st.note) fed.appendChild(el("p", st.bad ? "wf-warning" : "wf-note", st.note));
+}
+
+/* A mirror is let go of as a whole: the owner drops this daemon and every
+   member it hosts, and the mirror here is removed. When the owner cannot be
+   told, the operator may drop the mirror here only (the owner keeps a stale
+   guest entry its operator can revoke). */
+async function detachMirror(info) {
+  const mine = (info.members || []).filter((m) => m.local).map((m) => m.handle);
+  if (!confirm(
+    `Detach this daemon from '${info.name}' (owned by ${info.primary})?` +
+    (mine.length ? `\n\nThese members leave with it: ${mine.join(", ")}` : "") +
+    "\n\nThe mirror here is removed."
+  )) return;
+  let resp = await api(`/api/mesh/${encodeURIComponent(info.name)}/attach`,
+                       { method: "DELETE" });
+  let doc = await resp.json().catch(() => ({}));
+  if (!resp.ok) {
+    if (!confirm(
+      `${doc.error || `HTTP ${resp.status}`}\n\nDrop the mirror here anyway?`
+    )) return;
+    resp = await api(`/api/mesh/${encodeURIComponent(info.name)}/attach?force=1`,
+                     { method: "DELETE" });
+    doc = await resp.json().catch(() => ({}));
+    if (!resp.ok) { alert(doc.error || `HTTP ${resp.status}`); return; }
+  }
+  location.hash = "#/mesh";
+  refreshMeshList();
+  maybeLoadRemoteMeshes();
+}
+
+/* On a mirror the box says what the link means here: every session on this
+   daemon may join without asking again. */
+function renderDetachRow(info, fed) {
+  fed.appendChild(el(
+    "p", "wf-note",
+    `this daemon is attached to ${info.primary} — any session here joins ` +
+    `with "Add to mesh" above or 'claunch mesh join ${info.name}', ` +
+    "with no further approval. Detach (top) leaves with all of them."
+  ));
+}
+
+/* Sidebar: meshes this daemon could attach — the public ones owned by any
+   daemon on any of our relays, plus offers pushed here. Fetched on demand:
+   it asks every relay peer. */
+
+/* The session form's remote rows, from the last discovery answer. */
+function remoteMeshChoices() {
+  const out = [];
+  for (const r of (remoteMeshes && remoteMeshes.meshes) || []) {
+    if (r.state !== "available" && r.state !== "pending") continue;
+    const addr = `${r.mesh}@${r.machine}`;
+    if (r.access === "offer" && r.state === "available") {
+      out.push({
+        value: ATTACH_PREFIX + addr,
+        label: `${addr} — offered: attach this daemon`,
+        note: `attaches this daemon to ${addr} (offered, no approval), then ` +
+              "the session joins it; later sessions here join it directly",
+      });
+    } else {
+      out.push({
+        value: addr,
+        label: `${addr} — needs ${r.machine}'s approval`,
+        note: `asks ${r.machine} to admit this session; it joins once the ` +
+              "owner approves (the session starts now either way)",
+      });
+    }
+  }
+  return out;
+}
+
+/* Discovery asks every daemon on every relay, so it is not polled: the Mesh
+   page and the create form ask when they open, at most once a minute. */
+function maybeLoadRemoteMeshes() {
+  if (Date.now() - remoteMeshesAt < 60000) return;
+  loadRemoteMeshes();
+}
+
+async function loadRemoteMeshes() {
+  remoteMeshesAt = Date.now();
+  const note = $("mesh-remote-note");
+  note.textContent = "asking the daemons on the relays…";
+  note.classList.remove("hidden", "error");
+  const resp = await api("/api/relay/meshes");
+  const doc = await resp.json().catch(() => ({}));
+  remoteMeshes = resp.ok ? doc : { meshes: [], errors: { relay: doc.error || `HTTP ${resp.status}` } };
+  renderRemoteMeshes();
+  if (typeof syncOnboardPickers === "function") syncOnboardPickers();
+}
+
+function renderRemoteMeshes() {
+  const list = $("mesh-remote-list");
+  const note = $("mesh-remote-note");
+  list.innerHTML = "";
+  if (!remoteMeshes) return;
+  for (const r of remoteMeshes.meshes || []) {
+    const li = document.createElement("li");
+    const addr = `${r.mesh}@${r.machine}`;
+    li.appendChild(el("span", "mono", addr));
+    li.appendChild(el("span", "mesh-tag",
+      r.access === "offer" ? "offered" : "needs approval"));
+    const members = r.members == null ? "" : ` · ${r.members} member${r.members === 1 ? "" : "s"}`;
+    li.appendChild(el("span", "meta", `${r.state.replace("_", " ")}${members}`));
+    if (r.state === "available") {
+      const btn = el("button", "wf-btn approve", "Attach");
+      btn.addEventListener("click", async () => {
+        btn.disabled = true;
+        const resp = await api(`/api/mesh/${encodeURIComponent(addr)}/attach`, {
+          method: "POST", headers: { "Content-Type": "application/json" }, body: "{}",
+        });
+        const doc = await resp.json().catch(() => ({}));
+        if (!resp.ok) {
+          note.textContent = doc.error || `HTTP ${resp.status}`;
+          note.classList.remove("hidden");
+          note.classList.add("error");
+          btn.disabled = false;
+          return;
+        }
+        await refreshMeshList();
+        await loadRemoteMeshes();
+        if (!doc.pending) location.hash = "#/mesh/" + encodeURIComponent(r.mesh);
+      });
+      li.appendChild(btn);
+    } else if (r.state === "attached") {
+      li.classList.add("clickable");
+      li.addEventListener("click", () => {
+        location.hash = "#/mesh/" + encodeURIComponent(r.mesh);
+      });
+    }
+    list.appendChild(li);
+  }
+  const errors = Object.entries(remoteMeshes.errors || {})
+    .map(([where, why]) => `${where}: ${why}`);
+  const empty = !(remoteMeshes.meshes || []).length;
+  note.textContent = [empty ? "no mesh is published to this daemon" : "", ...errors]
+    .filter(Boolean).join(" · ");
+  note.classList.toggle("hidden", !note.textContent);
+  note.classList.toggle("error", errors.length > 0);
+}
+
+$("mesh-remote-find").addEventListener("click", () => loadRemoteMeshes());
 
 /* Renders into the "Guest daemons" box; primary-only (a mirror owns nothing
    to invite anyone into). `members` filters out sessions already enrolled. */
@@ -30551,8 +30852,12 @@ function renderMesh(info, history, force, owed, historyPage) {
   const observerLink = el("a", "wf-btn option", "observer");
   observerLink.href = "#/observer/mesh/" + encodeURIComponent(info.name);
   head.appendChild(observerLink);
-  const rm = el("button", "wf-btn archive", "Remove mesh");
+  // A mirror is left, not removed: deleting it here alone would keep this
+  // daemon linked on the owner (see detachMirror).
+  const rm = el("button", "wf-btn archive", isMirror ? "Detach…" : "Remove mesh");
+  if (isMirror) rm.title = "leave the mesh with every session on this daemon";
   rm.addEventListener("click", async () => {
+    if (isMirror) return detachMirror(info);
     if (!confirm(`Remove mesh '${info.name}'? Its history is retired on disk.`)) return;
     await api(`/api/mesh/${encodeURIComponent(info.name)}`, { method: "DELETE" });
     location.hash = "#";
@@ -30704,7 +31009,8 @@ function renderMesh(info, history, force, owed, historyPage) {
       "p", "wf-note",
       "no other machine has joined yet — invite one below, or let it ask with " +
       `'claunch mesh join ${info.name}@${selfMachine || "<this-machine>"}' ` +
-      "and approve it here (both daemons need a relay uplink)"
+      `(one session) or 'claunch mesh attach ${info.name}@${selfMachine || "<this-machine>"}' ` +
+      "(its whole daemon) and approve it here (both daemons need a relay uplink)"
     ));
   }
   for (const p of peers) {
@@ -30749,10 +31055,18 @@ function renderMesh(info, history, force, owed, historyPage) {
     for (const r of info.requests || []) {
       const row = el("div", "mesh-member");
       row.appendChild(el("span", "dot starting"));
-      row.appendChild(el("span", "mesh-handle", r.handle));
-      row.appendChild(el("span", "mesh-role", r.role || ""));
-      row.appendChild(el("span", "mesh-session mono", `${r.machine}/${r.session}`));
-      row.appendChild(el("span", "meta", "wants to join"));
+      if (r.attach) {
+        // a daemon attach: no member yet — approving links the whole daemon
+        row.appendChild(el("span", "mesh-handle mono", r.machine));
+        row.appendChild(el("span", "mesh-role", "daemon"));
+        row.appendChild(el("span", "meta",
+          "wants to attach — its sessions then join without approval"));
+      } else {
+        row.appendChild(el("span", "mesh-handle", r.handle));
+        row.appendChild(el("span", "mesh-role", r.role || ""));
+        row.appendChild(el("span", "mesh-session mono", `${r.machine}/${r.session}`));
+        row.appendChild(el("span", "meta", "wants to join"));
+      }
       for (const [label, verb, cls] of [
         ["Approve", "approve", "approve"], ["Deny", "deny", "archive"],
       ]) {
@@ -30766,7 +31080,8 @@ function renderMesh(info, history, force, owed, historyPage) {
           const doc = await resp.json().catch(() => ({}));
           if (!resp.ok) { alert(doc.error || `HTTP ${resp.status}`); return; }
           if (verb === "approve" && doc.delivered === false) {
-            alert(`admitted '${doc.handle}' — ${doc.machine} is unreachable, ` +
+            const who = doc.attach ? `daemon ${doc.machine}` : `'${doc.handle}'`;
+            alert(`admitted ${who} — ${doc.machine} is unreachable, ` +
                   "the grant is queued and retried");
           }
           refreshMeshView();
@@ -30777,6 +31092,7 @@ function renderMesh(info, history, force, owed, historyPage) {
       fed.appendChild(row);
     }
     renderInviteWizard(info, fed, members);
+    renderPublishPanel(info, fed);
     const fedRow = el("div", "mesh-add");
     const inviteBtn = el("button", "wf-btn option", "Mint invite ticket…");
     const codeOut = document.createElement("input");
@@ -30826,6 +31142,8 @@ function renderMesh(info, history, force, owed, historyPage) {
         "p", "wf-note", `redeemed there with: ${cmdBase} <ticket>`
       ));
     }
+  } else {
+    renderDetachRow(info, fed);
   }
   view.appendChild(fed);
   const polBox = renderMeshPolicy(info);
