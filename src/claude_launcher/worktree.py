@@ -315,6 +315,67 @@ def worktrees_dir(root: Path) -> Path:
     return root / WORKTREES_SUBDIR
 
 
+def exclude_pattern(root: Path, directory: Path) -> Optional[str]:
+    """The ``info/exclude`` line that hides ``directory``, or ``None``.
+
+    Anchored to the repository root (leading ``/``) and written with forward
+    slashes on every platform, since git patterns never use backslashes.
+    ``None`` when the directory is not inside ``root``: there is no
+    root-relative pattern for it, and it cannot show up as untracked anyway.
+    """
+    for base, target in ((root, directory), (root.resolve(), directory.resolve())):
+        try:
+            rel = Path(os.path.abspath(target)).relative_to(os.path.abspath(base))
+        except ValueError:
+            continue
+        text = rel.as_posix().strip("/")
+        return f"/{text}/" if text and text != "." else None
+    return None
+
+
+def hide_worktrees(root: Path) -> bool:
+    """Add the worktrees directory to the repository's ``info/exclude``.
+
+    A launcher worktree is an untracked directory of the main checkout, so
+    ``git ls-files --others --exclude-standard`` lists it and
+    ``daemon.runtime_state._dirty_paths`` counts it as code in no commit
+    (claunch-6pcyo). ``info/exclude`` is repository-local and untracked: the
+    user's ``.gitignore`` and tracked files stay as they are. Appending is
+    idempotent, and a directory that already holds worktrees is covered too
+    because this runs on every :func:`create`, including the reuse path.
+
+    Best effort: returns whether the line is present afterwards, and never
+    raises, because failing to hide a directory must not stop a launch.
+    """
+    pattern = exclude_pattern(root, worktrees_dir(root))
+    if pattern is None:
+        return False
+    try:
+        done = _git(
+            ["rev-parse", "--git-path", "info/exclude"],
+            cwd=str(root),
+            timeout=_READ_TIMEOUT,
+        )
+        out = (done.stdout or "").strip()
+        if done.returncode != 0 or not out:
+            return False
+        target = Path(out)
+        if not target.is_absolute():
+            target = root / target
+        try:
+            text = target.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            text = ""
+        if pattern in (line.strip() for line in text.splitlines()):
+            return True
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with open(target, "a", encoding="utf-8", newline="\n") as fh:
+            fh.write(("\n" if text and not text.endswith("\n") else "") + pattern + "\n")
+        return True
+    except (OSError, WorktreeError):
+        return False
+
+
 def create(root: Path, name: str, *, start: str = "") -> Worktree:
     """Create -- or reuse -- the worktree ``name`` of the repository at ``root``.
 
@@ -331,6 +392,7 @@ def create(root: Path, name: str, *, start: str = "") -> Worktree:
     """
     name = validate_name(name)
     path = worktrees_dir(root) / name
+    hide_worktrees(root)
     if path.exists():
         if not _registered(root, path):
             raise WorktreeError(
