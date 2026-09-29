@@ -778,3 +778,48 @@ def test_the_short_message_flag_is_an_option_not_the_start_of_a_body():
     assert cli_beads.bind_text_values(
         ["comments", "add", "x-1", "-m", "- branch: x"]
     ) == ["comments", "add", "x-1", "-m=- branch: x"]
+
+
+# --------------------------------------------------------------------------- #
+# br 0.7's engine writes files beside the database
+# --------------------------------------------------------------------------- #
+def test_the_gitignore_gains_only_the_missing_lines_once():
+    old = "# Database\n*.db\n*.db-wal\n*-fsqlite-ns-use\n"
+    text = cli_beads.gitignore_text(old)
+    assert text.startswith(old)
+    lines = text.splitlines()
+    for pattern, _ in cli_beads.GITIGNORE_LINES:
+        assert lines.count(pattern) == 1, pattern
+    assert cli_beads.gitignore_text(text) is None
+    assert cli_beads.gitignore_text(None).splitlines()[0].startswith("# br 0.7+")
+
+
+def test_the_repositorys_own_board_ignores_what_br_0_7_writes():
+    """The tracked .beads/.gitignore of this repository, read by git itself:
+    the engine's files stay out of 'git status', the policy stays in."""
+    root = Path(__file__).resolve().parents[1]
+    if not (root / ".beads" / ".gitignore").is_file():
+        pytest.skip("no tracked board in this checkout")
+    names = [
+        "beads.db-fsqlite-ns-gate", "beads.db-fsqlite-ns-use",
+        "beads.db-wal-cert", "beads.db-wal-cert-head",
+        "beads.db.fsqlite-migration-state", ".br-wal-index-x/prepared.json",
+    ]
+    for name in names:
+        done = REAL_RUN(["git", "check-ignore", "-q", f".beads/{name}"], cwd=str(root))
+        assert done.returncode == 0, name
+    kept = REAL_RUN(["git", "check-ignore", "-q", ".beads/policy.yaml"], cwd=str(root))
+    assert kept.returncode == 1
+
+
+def test_a_moved_database_takes_the_engines_sidecars_with_it(tmp_path):
+    src = tmp_path / "stage" / "beads.db"
+    src.parent.mkdir()
+    for suffix in ("",) + cli_beads.DB_SIDECARS:
+        Path(str(src) + suffix).write_text(suffix or "db", encoding="utf-8")
+    dst = tmp_path / "boards" / "alpha.db"
+    dst.parent.mkdir()
+    cli_beads.move_db(str(src), str(dst))
+    assert list(src.parent.iterdir()) == []
+    for suffix in cli_beads.DB_SIDECARS:
+        assert Path(str(dst) + suffix).read_text(encoding="utf-8") == suffix

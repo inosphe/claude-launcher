@@ -660,9 +660,84 @@ class InitPlan(NamedTuple):
 #: path stays on one volume.
 STAGING_DIR = ".claunch-board-init"
 
-#: SQLite's sidecars. A database moved without them loses whatever the
-#: write-ahead log still holds.
-DB_SIDECARS = ("-wal", "-shm", "-journal")
+#: The files that belong to a database and move with it. SQLite's own three
+#: first: a database moved without them loses whatever the write-ahead log
+#: still holds. Then br 0.7's engine (frankensqlite): the WAL's durability
+#: certificates and the multi-process namespace pair are written beside the
+#: database from its first open, and the migration bookkeeping beside that.
+#: A move that left those behind would leave orphans next to where ``br
+#: init`` ran — in the board's own ``.beads/`` when the path is set elsewhere.
+DB_SIDECARS = (
+    "-wal", "-shm", "-journal",
+    "-wal-cert", "-wal-cert-head",
+    "-fsqlite-ns-gate", "-fsqlite-ns-use",
+    ".fsqlite-migration-state",
+)
+
+#: ``.gitignore`` lines a board's ``.beads/`` needs for what br 0.7 writes
+#: there, each with the reason a reader will look for. A board made before
+#: br 0.7 carries the ``.gitignore`` its ``br init`` wrote then, which covers
+#: SQLite's sidecars and none of these, so every one of them shows up as
+#: untracked in ``git status`` — where committing them is one ``git add .``
+#: away. The first five are what br 0.7.1's own ``init`` writes; the last is
+#: the directory br leaves when it sets aside a shared-memory index another
+#: SQLite reader initialised (``.br-wal-index-*/``), which it does not list.
+GITIGNORE_LINES = (
+    ("*.db-wal*", "WAL plus the engine's -wal-cert / -wal-cert-head"),
+    ("*-fsqlite-ns-gate", "engine multi-process namespace sidecars"),
+    ("*-fsqlite-ns-use", None),
+    ("*.vacuum-wal-cert*", None),
+    ("*.fsqlite-migration-state", "engine-upgrade bookkeeping"),
+    (".write-waiters.lock/", "br's write-lock queue"),
+    (".br-wal-index-*/", "WAL indexes br quarantined"),
+)
+GITIGNORE_NAME = ".gitignore"
+
+
+def gitignore_text(current: Optional[str]) -> Optional[str]:
+    """``current`` with :data:`GITIGNORE_LINES` appended, or ``None``.
+
+    ``None`` when every pattern is already a line of its own. Nothing is
+    reordered or removed — only a block of the missing lines is added at
+    the end, under one comment saying where they come from.
+    """
+    present = {
+        line.strip() for line in (current or "").splitlines() if line.strip()
+    }
+    missing = [(p, why) for p, why in GITIGNORE_LINES if p not in present]
+    if not missing:
+        return None
+    out = [] if not current else [current.rstrip("\n"), ""]
+    out.append("# br 0.7+ (frankensqlite) files — added by claunch beads init")
+    for pattern, why in missing:
+        if why:
+            out.append(f"# {why}")
+        out.append(pattern)
+    return "\n".join(out) + "\n"
+
+
+def ensure_gitignore(beads_dir: Path) -> bool:
+    """Add :data:`GITIGNORE_LINES` to ``beads_dir``'s ``.gitignore``.
+
+    Answers whether the file was written; a missing ``beads_dir`` is left
+    alone. Unlike the policy this is not done on every command: it is a
+    file the repository tracks, so it changes only when someone asks for the
+    board to be set up (``claunch beads init``, the Settings page's button).
+    """
+    if not beads_dir.is_dir():
+        return False
+    target = beads_dir / GITIGNORE_NAME
+    try:
+        current = target.read_text(encoding="utf-8") if target.is_file() else None
+    except OSError:
+        return False
+    text = gitignore_text(current)
+    if text is None:
+        return False
+    with atomic.scratch(target) as tmp:
+        tmp.write_text(text, encoding="utf-8")
+        atomic.replace(tmp, target)
+    return True
 
 
 def init_plan(ref: beads_db.BoardRef, *, default_db_exists: bool) -> InitPlan:

@@ -1,0 +1,8 @@
+# br project policy. claunch declares the statuses its workflows use
+# beyond br's built-in ones, so a '--status' filter naming one is
+# accepted even while no issue is in it (br 0.7+). Anything else here is
+# yours; claunch only ever adds to workflow.statuses.
+workflow:
+  statuses:
+  - in_ready
+  - in_review

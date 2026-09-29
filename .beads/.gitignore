@@ -55,3 +55,17 @@ redirect
 *.tmp-journal*
 *.tmp-lock-*
 .beads.vacuum.*
+
+# br 0.7+ (frankensqlite) files — added by claunch beads init
+# WAL plus the engine's -wal-cert / -wal-cert-head
+*.db-wal*
+# engine multi-process namespace sidecars
+*-fsqlite-ns-gate
+*-fsqlite-ns-use
+*.vacuum-wal-cert*
+# engine-upgrade bookkeeping
+*.fsqlite-migration-state
+# br's write-lock queue
+.write-waiters.lock/
+# WAL indexes br quarantined
+.br-wal-index-*/
