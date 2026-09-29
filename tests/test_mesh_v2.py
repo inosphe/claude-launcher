@@ -867,14 +867,45 @@ def test_tick_is_noop_on_mirror(home, tmp_path):
         # even with an (accidentally) enabled synced policy, the mirror's
         # tick must do nothing — the engine lives on the primary
         mesh_b.policy["heartbeat"]["enabled"] = True
+        # ...and with a member who is due one: bob owes an answer, the message
+        # as well as the watermark, seeded the way the remote-heartbeat test
+        # above does. The watermark alone is not `unanswered` since the
+        # engine confirms it against the ledger (``Mesh.owed``), and without
+        # a debt the tick would type nothing whether or not it ran.
+        mesh_b.messages.append({
+            "id": "msg-owedbybob", "ts": utcnow(), "from": "alice",
+            "to": "bob", "type": "ask", "body": "answer me",
+            "epoch": mesh_b.authority_epoch, "seq": mesh_b.next_seq,
+        })
+        mesh_b.next_seq += 1
+        mesh_b.cursors["bob"] = len(mesh_b.messages)   # as delivery would
+        assert mesh_b.owed("bob"), "setup: bob must actually owe an answer"
         mesh_b.activity["bob"] = {
             "anchor": 0.0, "last_asked": 1.0, "last_sent": 0.0, "hb_next": 0.0,
         }
-        before = _screen_text(mgr.get("sb"))
+        # bob's screen is still moving when the join returns: the child prints
+        # READY as it starts, and once the session goes idle the join briefing
+        # is typed in (MeshManager._brief) and echoed back line by line. The
+        # paste pauses long enough to read as idle half-way, so idleness is
+        # no sign it is over; the echo of its closing "---", after the echo
+        # of the line before it, is. Snapshot any earlier and the comparison
+        # below measures the briefing rather than the tick.
+        session = mgr.get("sb")
+
+        def briefed() -> bool:
+            text = _screen_text(session)
+            lines = [line for line in text.splitlines() if line.strip()]
+            return ("echo:note: incoming mesh messages" in text
+                    and lines[-1] == "echo:---")
+
+        await _wait_for(briefed, "bob's join briefing echoed to its end")
+        # the heartbeat also waits for an idle member; be one
+        await _wait_for(lambda: session.status() == "idle", "bob's session idle")
+        before = _screen_text(session)
         await mesh_policy.tick(mm_b, mesh_b)
         await asyncio.sleep(0.3)
-        assert "kind: heartbeat" not in _screen_text(mgr.get("sb"))
-        assert _screen_text(mgr.get("sb")) == before
+        assert "kind: heartbeat" not in _screen_text(session)
+        assert _screen_text(session) == before
 
         await mgr.shutdown_all()
 
