@@ -89,7 +89,9 @@ function scroller() {
   const maxTop = () => Math.max(0, n.scrollHeight - n.clientHeight);
   Object.defineProperties(n, {
     clientHeight: { value: VIEW_H, writable: true },
-    scrollHeight: { get: () => n.kids.length * ROW_H },
+    /* A row's height is ROW_H until a painter grows it (`_h`, see the
+       decorated rail below). */
+    scrollHeight: { get: () => n.kids.reduce((h, k) => h + (k._h || ROW_H), 0) },
     scrollTop: {
       get: () => Math.min(top, maxTop()),
       set: (v) => { top = Math.max(0, Math.min(Number(v) || 0, maxTop())); },
@@ -116,7 +118,14 @@ function renderTermHandle() {}
 function applyCflowBadges() {}
 function applyGotoFlash() {}
 function applyRailQuiet() {}
-function applyBriefingCards() {}
+/* The painters that run after a rebuild put lines back on the rows -- the
+   cflow badge, the beads line, the briefing card -- and so make them taller.
+   Modelled on the briefing card: with \`decor.grow\` set, every row it paints
+   is \`decor.grow\` high. */
+function applyBriefingCards() {
+  if (!decor.grow) return;
+  for (const li of list.kids) if (li.dataset && li.dataset.name) li._h = decor.grow;
+}
 /* The reader's own note line, stubbed for the same reason as the briefing
    decoration below: its wording and its stylesheet contract are
    railnote_check's subject, not this harness's. */
@@ -139,10 +148,10 @@ function $(id) { return list; }
 
 /* One module instance per list, so the scroll-less DOM below gets a page of
    its own instead of inheriting this one's caches. */
-function build(list, api) {
+function build(list, api, decor = {}) {
   const ctx = {};
   new Function(
-    "exports", "document", "el", "api", "list", "setTimeout", "meshCache", "sessionGroupByMesh",
+    "exports", "document", "el", "api", "list", "setTimeout", "meshCache", "sessionGroupByMesh", "decor",
     stubs
     + holdMs[0] + "\n" + heldUntil[0] + "\n" + pending[0] + "\n"
     + slice("railHeld") + slice("holdRail") + slice("releaseRail")
@@ -156,7 +165,7 @@ Object.assign(exports, {
   release: releaseRail,
   expire: () => { railHeldUntil = Date.now() - 1; },
   owed: () => railRedrawPending,
-});`)(ctx, document, el, api, list, setTimeout, [], false);
+});`)(ctx, document, el, api, list, setTimeout, [], false, decor);
   return ctx;
 }
 
@@ -220,6 +229,29 @@ const names = () => list.kids.filter((li) => li.dataset.name).map((li) => li.dat
   await ctx.refresh({ state: "current" });
   check("a rail at the top redraws", names().length, 7);
   check("...and is still at the top", list.scrollTop, 0);
+
+  /* ---- a rail whose rows the painters make taller --------------------- */
+  /* The rebuilt rows are bare until the painters after the row loop put
+     their lines back. Restoring the position on the bare rows clamps it to
+     their shorter height, and the reader in the lower part of the rail comes
+     back higher than they left it -- the rail sliding up by a few rows at
+     every poll that changes a session's state. */
+  const tall = scroller();
+  let tallServed = { sessions: fleet(8), llm_configured: true };
+  const tallCtx = build(tall, async () => ({ ok: true, json: async () => tallServed }),
+                        { grow: 2 * ROW_H });
+  await tallCtx.refresh({ state: "current" });
+  /* 8 rows of 48 in a 120-high viewport: 264 of scroll. The bare rows alone
+     would allow only 72, so 250 is a position the early restore cannot hold. */
+  check("the painted rows are taller", tall.scrollHeight - tall.clientHeight, 264);
+  tall.scrollTop = 250;
+  check("the reader scrolls near the bottom of the painted rail", tall.scrollTop, 250);
+  tallServed = { sessions: fleet(8, "busy"), llm_configured: true };
+  await tallCtx.refresh({ state: "current" });
+  check("a state change redraws the painted rail",
+        tall.kids.filter((li) => li.dataset.name).length, 8);
+  check("...and the reader is where they left it, not clamped to the bare rows",
+        tall.scrollTop, 250);
 
   /* ---- a DOM with no scroll geometry still draws ---------------------- */
   const plain = node("ul");
