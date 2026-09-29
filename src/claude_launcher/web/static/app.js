@@ -31108,6 +31108,26 @@ function meshMemberFilterBar(members, given) {
   return bar;
 }
 
+/* Where a roster row's session name leads. A member this daemon runs opens
+   its terminal; another daemon's member opens its read-only shadow, never
+   #/s/ -- that address is the LOCAL session of the same name, if there is
+   one. The server's `local` decides where it has one: the page's own guess
+   (isLocal) reads the relay name, which is blank on a daemon with no relay,
+   and a row this daemon runs must never be addressed as some other
+   daemon's. A row without the field keeps the guess for its terminal link
+   and gets no shadow link. */
+function meshRosterLink(m, isLocal, machineLabel) {
+  if (typeof m.local === "boolean" ? m.local : isLocal) {
+    return { hash: "#/s/" + encodeURIComponent(m.session),
+             title: "attach this session's terminal" };
+  }
+  if (machineLabel && m.local === false) {
+    return { hash: shadowHash(machineLabel, m.session),
+             title: "view this remote session (read-only)" };
+  }
+  return null;
+}
+
 function renderMesh(info, history, force, owed, historyPage) {
   const view = $("mesh-view");
   if (!force && formInUse(view)) return; // don't wipe in-progress input
@@ -31217,20 +31237,11 @@ function renderMesh(info, history, force, owed, historyPage) {
       "span", "mesh-session mono",
       (machineLabel ? machineLabel + "/" : "") + m.session
     );
-    if (isLocalMember(m)) {
+    const link = meshRosterLink(m, isLocalMember(m), machineLabel);
+    if (link) {
       where.classList.add("linkish");
-      where.title = "attach this session's terminal";
-      where.addEventListener("click", () => {
-        location.hash = "#/s/" + encodeURIComponent(m.session);
-      });
-    } else if (machineLabel) {
-      // Another daemon's member: its read-only shadow, never #/s/ -- that
-      // address is the local session of the same name, if there is one.
-      where.classList.add("linkish");
-      where.title = "view this remote session (read-only)";
-      where.addEventListener("click", () => {
-        location.hash = shadowHash(machineLabel, m.session);
-      });
+      where.title = link.title;
+      where.addEventListener("click", () => { location.hash = link.hash; });
     }
     // 'pending' is mail the daemon has not managed to deliver; 'owed' is mail
     // it delivered that the agent never answered. Different faults, so the

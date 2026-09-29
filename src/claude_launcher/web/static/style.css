@@ -5366,12 +5366,21 @@ div.shadow-card:hover { background: none; }
 .shadow-dot-idle { background: #3fb950; }
 .shadow-dot-busy { background: #d29922; }
 .shadow-dot-exited { background: #484f58; }
-.shadow-name { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* In a narrow rail the machine name gives way first: the session name is
+   what the row is about, and the rail's group heading repeats the machine. */
+.shadow-name {
+  font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  flex: 0 1 auto; min-width: 3ch;
+}
 .shadow-machine, .shadow-handle, .shadow-role {
   font-size: 11px; color: #8b93a1; white-space: nowrap;
 }
-.shadow-machine { font-family: Cascadia Mono, Consolas, Menlo, monospace; color: #79c0ff; }
-.shadow-role { padding: 0 5px; border: 1px solid #30363d; border-radius: 8px; }
+.shadow-machine {
+  font-family: Cascadia Mono, Consolas, Menlo, monospace; color: #79c0ff;
+  flex: 0 100 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis;
+}
+.shadow-handle { flex: 0 10 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.shadow-role { padding: 0 5px; border: 1px solid #30363d; border-radius: 8px; flex: none; }
 .shadow-line {
   font-size: 12px; color: #aeb5c0; overflow: hidden; text-overflow: ellipsis;
   white-space: nowrap; min-width: 0;

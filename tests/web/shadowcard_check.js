@@ -4,7 +4,9 @@
    What has to hold: a shadow card is state only -- name, @machine, role,
    note, briefing, cflow position, the host's error -- with no control of any
    kind inside it; clicking it goes to the shadow's own address and never to
-   #/s/<name>, which is the LOCAL session of that name; the shadow list lives
+   #/s/<name>, which is the LOCAL session of that name; the mesh roster links
+   a row as a shadow only on the server's word that it is remote, so this
+   daemon's own member is never addressed as another's; the shadow list lives
    apart from sessionsCache, so no local control can ever find a remote row;
    the shadow terminal is built with stdin off and never given an onData
    handler; and the host's refusal stops the reconnect loop. */
@@ -81,7 +83,7 @@ const names = [
   "el", "shadowKey", "shadowHash", "shadowRow", "refreshShadows", "shadowStatus",
   "shadowCflowGated", "shadowCflowText", "renderShadowCard", "renderShadowRail",
   "renderShadowHead", "setShadowStatus", "openShadow", "connectShadow",
-  "shadowFrame", "closeShadow", "parseHash",
+  "shadowFrame", "closeShadow", "parseHash", "meshRosterLink",
 ];
 const pollLine = src.match(/^const SHADOW_POLL_MS = .+$/m);
 if (!pollLine) throw new Error("cannot locate SHADOW_POLL_MS in app.js");
@@ -99,6 +101,7 @@ exports.render = renderShadowCard;
 exports.renderRail = renderShadowRail;
 exports.refresh = refreshShadows;
 exports.parseHash = parseHash;
+exports.rosterLink = meshRosterLink;
 exports.open = (m, n) => { currentPage = 'shadow'; openShadow(m, n); };
 exports.frame = shadowFrame;
 exports.close = closeShadow;
@@ -165,6 +168,27 @@ check("#/r/<machine>/<name> is the shadow page",
       { page: "shadow", machine: "shared-daemon-kimyori", name: "s4" });
 check("#/s/<name> is still the local terminal",
       ctx.parseHash("#/s/s4"), { page: "terminal", name: "s4" });
+
+/* The mesh roster's link. The page's own idea of locality reads the relay
+   name, which is blank on a daemon with no relay; the server's `local` is
+   the deciding word for the shadow link. */
+check("this daemon's member, even when the page misreads it, opens its terminal",
+      ctx.rosterLink({ session: "s25", machine: "shared-daemon-main", local: true },
+                     false, "shared-daemon-main"),
+      { hash: "#/s/s25", title: "attach this session's terminal" });
+check("this daemon's member, read right, opens its terminal",
+      ctx.rosterLink({ session: "s25", machine: "", local: true }, true, ""),
+      { hash: "#/s/s25", title: "attach this session's terminal" });
+check("another daemon's member opens its shadow",
+      ctx.rosterLink({ session: "s4", machine: "shared-daemon-kimyori", local: false },
+                     false, "shared-daemon-kimyori"),
+      { hash: "#/r/shared-daemon-kimyori/s4", title: "view this remote session (read-only)" });
+check("a row without the field is not guessed remote",
+      ctx.rosterLink({ session: "s4", machine: "shared-daemon-kimyori" },
+                     false, "shared-daemon-kimyori"), null);
+check("and keeps the page's guess for its terminal link",
+      ctx.rosterLink({ session: "s4", machine: "" }, true, ""),
+      { hash: "#/s/s4", title: "attach this session's terminal" });
 
 /* The list lives apart from sessionsCache. */
 byId["shadow-rail"] = new Node("section");
