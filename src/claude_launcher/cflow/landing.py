@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import shutil
 import subprocess
+from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence
 
 from . import model
@@ -89,6 +90,14 @@ def _board_rows(repo: str, args: Sequence[str]) -> Optional[List[dict]]:
         return None
     if ref is None or not ref.exists():
         return None
+    # br 0.7 refuses a filter on a status the board's policy does not declare
+    # while no issue is in it -- in_review_of's own `--status in_review` on a
+    # board with nothing in review -- which would read here as "the board
+    # could not answer" rather than "nothing". See cli_beads.CUSTOM_STATUSES.
+    try:
+        cli_beads.ensure_policy(Path(ref.root) / cli_beads.BEADS_DIR)
+    except OSError:
+        pass
     try:
         proc = subprocess.run(
             [cli_beads.BINARY, "--db", str(ref.db), *args, "--json"],

@@ -543,3 +543,26 @@ def test_a_target_may_name_the_session_s_own_branch(proj, feature, monkeypatch):
     _git(wt, "merge", "-q", "--no-ff", "-m", "stack", "w1-feature")
     assert engine.refresh_landing()["landed"] == ["x-1"]
     assert _events("queue_landed")[-1]["target"] == "s9-stack"
+
+
+def test_nothing_in_review_reads_as_nothing_on_a_board_without_a_policy(
+    home, tmp_path
+):
+    """br 0.7 refuses `--status in_review` on a board whose policy does not
+    declare it while no issue is in review -- exactly when a worker has
+    nothing waiting. Read through the refusal, the landing request would say
+    the board could not answer (None) instead of "no issues" ([]). Against
+    the installed br, on a board `br init` made alone (no policy.yaml)."""
+    import shutil
+
+    from claude_launcher import cli_beads
+
+    if shutil.which(cli_beads.BINARY) is None:
+        pytest.skip(f"{cli_beads.BINARY} is not installed on this machine")
+    repo = tmp_path / "board"
+    repo.mkdir()
+    _git(repo, "init", "-q", "-b", "master")
+    subprocess.run([cli_beads.BINARY, "init", "--prefix", "t"], cwd=str(repo),
+                   capture_output=True, check=True)
+    assert not (repo / ".beads" / cli_beads.POLICY_NAME).exists()
+    assert landing.in_review_of(str(repo), "w1") == []
