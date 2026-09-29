@@ -981,6 +981,22 @@ def test_a_test_module_is_named_as_a_whole_word_and_the_selection_does_not_move(
     assert "tests/test_other_flow.py" in changed_tests.map_one(repo, flow)
 
 
+def test_a_test_module_name_with_a_hangul_particle_attached_is_still_named(repo):
+    """The whole-word search is ASCII: ``test_mesh를`` names ``test_mesh``
+    (Hangul is not an ASCII word character, so the name ends before it), and
+    ``test_mesh_v2를`` still does not (``claunch-nupin``)."""
+    _seed_on_base(
+        repo,
+        {
+            "tests/test_says_it.py": '"""test_mesh를 고치면 이 테스트도 본다."""\n',
+            "tests/test_says_longer.py": '"""test_mesh_v2를 고치면 이 테스트도 본다."""\n',
+        },
+    )
+    named = set(changed_tests.named_by(repo, "tests/test_mesh.py"))
+    assert "tests/test_says_it.py" in named
+    assert "tests/test_says_longer.py" not in named
+
+
 def test_the_selection_only_grows_as_changed_paths_are_added(repo):
     """Adding a changed path can never remove a test module from the selection.
 
