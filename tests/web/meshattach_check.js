@@ -103,9 +103,9 @@ const DISCOVERED = {
     { mesh: "ops", machine: "pcA", state: "available", access: "approval",
       members: 1, sources: ["public"] },
     { mesh: "old", machine: "pcB", state: "attached", access: "approval",
-      members: 2, sources: ["public"] },
-    { mesh: "web", machine: "pcC", state: "name_taken", access: "approval",
-      members: 0, sources: ["public"] },
+      members: 2, sources: ["public"], key: "old@pcB" },
+    { mesh: "web", machine: "pcC", state: "attached", access: "approval",
+      members: 0, sources: ["public"], key: "web@pcC" },
     { mesh: "q", machine: "pcC", state: "pending", access: "approval",
       members: 0, sources: ["public"] },
   ],
@@ -120,6 +120,7 @@ const DISCOVERED = {
   )(DISCOVERED, "attach:")();
   assert.deepStrictEqual(choices.map((c) => c.value),
     ["attach:dev@pcA", "ops@pcA", "q@pcC"]);
+  // attached rows are local meshes already: not offered again
   assert.ok(/offered/.test(choices[0].label), choices[0].label);
   assert.ok(/approval/.test(choices[1].label), choices[1].label);
   assert.ok(/admit this session/.test(choices[1].note), choices[1].note);
@@ -152,25 +153,23 @@ const DISCOVERED = {
     "only the two available rows are attachable");
   assert.ok(/offered/.test(textOf(list.kids[0])), textOf(list.kids[0]));
   assert.ok(/needs approval/.test(textOf(list.kids[1])), textOf(list.kids[1]));
-  assert.ok(/name taken/.test(textOf(list.kids[3])), textOf(list.kids[3]));
-  // an attached row opens the mesh instead
-  assert.ok(list.kids[2].classes.has("clickable"));
-  list.kids[2].handlers.click();
-  assert.strictEqual(location.hash, "#/mesh/old");
+  // an attached mesh opens under its address, beside any local namesake
+  list.kids[3].handlers.click();
+  assert.strictEqual(location.hash, "#/mesh/web%40pcC");
   // a relay peer that failed is reported, not hidden
   const note = nodes["mesh-remote-note"];
   assert.ok(/pcD: peer backend is unreachable/.test(note.text), note.text);
   assert.ok(note.classes.has("error"));
 
   calls = [];
-  reply = { ok: true, status: 201, doc: { attached: true, mesh: "dev" } };
+  reply = { ok: true, status: 201, doc: { attached: true, mesh: "dev@pcA" } };
   await buttons[0].handlers.click();
   await settle();
   assert.strictEqual(calls[0].url, "/api/mesh/dev%40pcA/attach");
   assert.strictEqual(calls[0].opts.method, "POST");
   assert.strictEqual(meshListRefreshed, 1);
   assert.strictEqual(reloaded, 1);
-  assert.strictEqual(location.hash, "#/mesh/dev");
+  assert.strictEqual(location.hash, "#/mesh/dev%40pcA");
 
   // a refusal is shown and the button comes back
   reply = { ok: false, status: 400, doc: { error: "bad offer" } };
@@ -253,6 +252,37 @@ const DISCOVERED = {
   ]);
   assert.ok(/attach awaiting approval/.test(textOf(box.kids[0])), textOf(box.kids[0]));
   assert.ok(/as 'bob'/.test(textOf(box.kids[1])), textOf(box.kids[1]));
+
+  /* ---- renamePeerButton ------------------------------------------------ */
+  {
+    const loc = { hash: "" };
+    let answer = "pcA2";
+    let listed = 0;
+    const make = new Function(
+      "el", "api", "prompt", "alert", "refreshMeshList", "refreshMeshView",
+      "location",
+      `${slice("renamePeerButton")}; return renamePeerButton;`
+    )(el, api, () => answer, (m) => { throw new Error("alert: " + m); },
+      async () => { listed++; }, () => {}, loc);
+    const btn = make({ name: "m@pcA" }, "pcA");
+    calls = [];
+    reply = { ok: true, status: 200, doc: {
+      old: "pcA", new: "pcA2", meshes: ["m@pcA"],
+      rekeyed: [{ from: "m@pcA", to: "m@pcA2" }],
+    } };
+    await btn.handlers.click();
+    await settle();
+    assert.strictEqual(calls[0].url, "/api/relay/peers/pcA/rename");
+    assert.deepStrictEqual(JSON.parse(calls[0].opts.body), { new: "pcA2" });
+    assert.strictEqual(listed, 1);
+    // the mesh on screen moved: follow it to its new key
+    assert.strictEqual(loc.hash, "#/mesh/m%40pcA2");
+    // an unchanged answer sends nothing
+    calls = [];
+    answer = "pcA";
+    await btn.handlers.click();
+    assert.strictEqual(calls.length, 0);
+  }
 
   console.log("meshattach_check: ok");
 })().catch((err) => { console.error(err); process.exit(1); });

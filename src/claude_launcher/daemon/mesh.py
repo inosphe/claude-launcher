@@ -57,6 +57,11 @@ _NAME_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 #: ``invited`` is pushed only to the daemons named in ``Mesh.offers``.
 VISIBILITIES = ("private", "public", "invited")
 
+#: The host part of an address that means "this daemon" (``dev@local``).
+#: Reserved: a relay name spelled like it would make every address to that
+#: daemon read as local.
+LOCAL_HOST = "local"
+
 #: Directory suffix `_drop_mesh` renames a deleted mesh to. History is kept
 #: on disk deliberately, but such a directory must never be mounted again —
 #: `.` is legal in a mesh name, so the suffix has to be matched exactly.
@@ -738,10 +743,24 @@ class _LogIndex:
 class Mesh:
     """One mesh: membership, its message log, and per-member delivery state."""
 
+    @property
+    def name(self) -> str:
+        """The local key: the bare name for a mesh this daemon created (the
+        ``@local`` that may be left off), ``name@origin`` for one created
+        elsewhere — so a local ``dev`` and ``dev@pca`` can both live here.
+        See docs/mesh-design.md "Mesh addresses"."""
+        return f"{self.wire_name}@{self.origin}" if self.origin else self.wire_name
+
     def __init__(
-        self, name: str, *, created_at: str = "", me: str = "", project: str = ""
+        self, name: str, *, created_at: str = "", me: str = "", project: str = "",
+        origin: str = "",
     ) -> None:
-        self.name = name
+        #: The mesh's name as every daemon knows it — what peer calls carry.
+        self.wire_name = name
+        #: The daemon that created the mesh (its relay name), "" when that is
+        #: this daemon. Fixed for the mesh's life: authority may move (phase
+        #: 7) but the address ``wire_name@origin`` does not.
+        self.origin: str = origin
         self.created_at = created_at or utcnow()
         #: The project this mesh is filed under (see
         #: :mod:`claude_launcher.projects`). ``""`` = the default project,
@@ -848,6 +867,10 @@ class Mesh:
         #: {token, created_at}. The token lets that machine attach without
         #: approval; it lives until the offer is cancelled or redeemed.
         self.offers: Dict[str, dict] = {}
+        #: This daemon's relay name changed: ``{old, pending: [machines]}``
+        #: — the peers not told yet (``/peer/mesh/renamed``). Persisted so a
+        #: restart before every peer heard it keeps telling them.
+        self.rename_notice: Optional[dict] = None
         #: Primary side: codeless join requests awaiting operator approval,
         #: id -> {id, machine, session, handle, role, reply_token,
         #: requested_at}. Persisted so approvals survive a restart.
@@ -1398,6 +1421,9 @@ class MeshManager:
         #: Durable (mesh_offers.json): an offer is pushed once, and a daemon
         #: that restarts must still list it.
         self._offers: Dict[str, dict] = {}
+        #: Local key -> directory, for a mesh whose directory is not its key
+        #: (see _mesh_dir).
+        self._dirs: Dict[str, Path] = {}
 
     @property
     def machine(self) -> str:
@@ -1408,11 +1434,25 @@ class MeshManager:
         """Our relay name. The uplink resolves it *after* ``load_all``, so
         every mesh's ``me`` (and with it its rank) is refreshed here."""
         self._machine = str(value or "")
+        if self._machine == LOCAL_HOST:
+            log.warning(
+                "relay name %r is reserved for addresses (mesh@local means "
+                "this daemon) — peers cannot address this daemon's meshes",
+                LOCAL_HOST,
+            )
         for mesh in self._meshes.values():
             # An empty relay name never *erases* a remembered identity: a
             # federated mesh keeps the rank it was written with until the
             # uplink offers a real name (possibly a renamed one).
             if self._machine:
+                if mesh.me and mesh.me != self._machine and mesh.peers:
+                    try:
+                        self._renamed_self(mesh, mesh.me, self._machine)
+                    except MeshError as exc:
+                        log.error(
+                            "mesh %r: cannot take the new relay name %r: %s",
+                            mesh.name, self._machine, exc,
+                        )
                 mesh.me = self._machine
             self._migrate_v2(mesh)
 
@@ -1908,7 +1948,11 @@ class MeshManager:
         return self._root if self._root is not None else paths.mesh_root()
 
     def _mesh_dir(self, name: str) -> Path:
-        return self._mesh_root() / name
+        """Where mesh ``name`` (its local key) lives on disk. Normally the
+        key itself; a mirror whose directory could not be moved to its
+        address key keeps the directory it was loaded from."""
+        pinned = self._dirs.get(name)
+        return pinned if pinned is not None else self._mesh_root() / name
 
     def load_all(self) -> None:
         root = self._mesh_root()
@@ -1935,6 +1979,22 @@ class MeshManager:
                 )
                 continue
             self._meshes[mesh.name] = mesh
+            if entry.name != mesh.name:
+                # A mirror written before addresses lives under its bare
+                # name; its key is now name@origin. Move it so a local mesh
+                # of the same name can be created beside it.
+                target = self._mesh_dir(mesh.name)
+                try:
+                    if target.exists():
+                        raise OSError(f"{target} already exists")
+                    entry.rename(target)
+                    log.info("mesh %r: moved %s -> %s", mesh.name, entry.name,
+                             target.name)
+                except OSError as exc:
+                    log.warning("mesh %r: keeping %s (%s)", mesh.name, entry, exc)
+                    self._dirs[mesh.name] = entry
+            if getattr(mesh, "_origin_migrated", False):
+                self._persist_def(mesh)
         outgoing_path = root / "outgoing_joins.json"
         if outgoing_path.is_file():
             try:
@@ -1999,10 +2059,101 @@ class MeshManager:
         return mesh
 
     def get(self, name: str) -> Mesh:
-        try:
-            return self._meshes[name]
-        except KeyError:
-            raise MeshError(f"no mesh named {name!r}") from None
+        """Resolve a mesh reference (docs/mesh-design.md "Mesh addresses").
+
+        ``dev@pca`` is the mesh ``dev`` created on ``pca``; ``dev@local`` (or
+        ``dev@<this daemon>``) is ours. The ``@local`` may be left off, which
+        is every reference written before addresses existed: a bare ``dev``
+        is ours if we have one, else the one mirror named ``dev`` — and an
+        error naming the candidates when there are several, rather than a
+        guess.
+        """
+        ref = (name or "").strip()
+        hit = self._find(ref)
+        if hit is None:
+            raise MeshError(f"no mesh named {ref!r}")
+        return hit
+
+    def address(self, mesh: Mesh) -> str:
+        """The mesh's global address, ``name@creator`` — ours spelled with
+        our relay name (``@local`` before we have one)."""
+        return f"{mesh.wire_name}@{mesh.origin or self.machine or LOCAL_HOST}"
+
+    def _is_me(self, host: str) -> bool:
+        return host == LOCAL_HOST or (bool(self.machine) and host == self.machine)
+
+    def _find(self, ref: str) -> Optional[Mesh]:
+        """:meth:`get` without the not-found error (an ambiguous bare name
+        still raises: answering None there would read as "absent")."""
+        hit = self._meshes.get(ref)
+        if hit is not None:
+            return hit
+        base, sep, host = ref.partition("@")
+        if sep:
+            if self._is_me(host):
+                hit = self._meshes.get(base)
+                return hit if hit is not None and not hit.origin else None
+            # Addressed by the daemon holding authority now rather than the
+            # one that created it (phase 7 moves authority).
+            moved = [
+                m for m in self._meshes.values()
+                if m.wire_name == base and m.origin and host in m.peers
+            ]
+            return moved[0] if len(moved) == 1 else None
+        same = [m for m in self._meshes.values() if m.wire_name == ref]
+        if len(same) == 1:
+            return same[0]
+        if same:
+            raise MeshError(
+                f"{len(same)} meshes are named {ref!r} here — say which: "
+                + ", ".join(sorted(m.name for m in same))
+            )
+        return None
+
+    def _inbound(
+        self, name: str, machine: str, token: str = "", *,
+        authority: bool = False,
+    ) -> Mesh:
+        """The local mesh a peer call names by its wire name.
+
+        Peers speak bare names (the protocol predates addresses), so with a
+        local ``dev`` and a mirror ``dev@pca`` the caller picks by the link
+        it authenticates on: the mesh whose link to ``machine`` expects
+        ``token``. The token check that follows in every handler is what
+        admits the call; this only chooses which mesh to check it against.
+        ``authority`` prefers a mesh we are the authority of (a join request
+        from a daemon not linked yet).
+        """
+        cands = [m for m in self._meshes.values() if m.wire_name == name]
+        if not cands:
+            raise MeshError(f"no mesh named {name!r}")
+        if len(cands) == 1:
+            return cands[0]
+        if token:
+            for m in cands:
+                link = m.links.get(machine)
+                if link and secrets.compare_digest(
+                    str(token).encode("utf-8"),
+                    str(link.get("token_in") or "").encode("utf-8"),
+                ):
+                    return m
+        linked = [m for m in cands if machine in m.links]
+        if len(linked) == 1:
+            return linked[0]
+        if authority:
+            for m in cands:
+                if not m.primary and not m.origin:
+                    return m
+            for m in cands:
+                if not m.primary:
+                    return m
+        for m in cands:
+            if m.origin == machine:
+                return m
+        for m in cands:
+            if not m.origin:
+                return m
+        return cands[0]
 
     def list(self) -> List[Mesh]:
         return [self._meshes[k] for k in sorted(self._meshes)]
@@ -2014,20 +2165,21 @@ class MeshManager:
         # it can remove locally).
         if not mesh.primary and mesh.links:
             self._notify_unlink_soon(
-                mesh.name,
+                mesh.wire_name,
                 {m: str(g.get("token_out") or "") for m, g in mesh.links.items()},
             )
-        self._drop_mesh(name)
+        self._drop_mesh(mesh.name)
 
     def _drop_mesh(self, name: str) -> None:
         mesh = self.get(name)
-        task = self._workers.pop(name, None)
+        task = self._workers.pop(mesh.name, None)
         if task is not None:
             task.cancel()
-        del self._meshes[name]
+        del self._meshes[mesh.name]
         # Retire the directory rather than deleting history: rename with a
         # timestamp suffix so a recreated mesh starts clean.
         d = self._mesh_dir(mesh.name)
+        self._dirs.pop(mesh.name, None)
         if d.is_dir():
             stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
             try:
@@ -2083,24 +2235,14 @@ class MeshManager:
         is returned (the grant arrives later over the relay).
         """
         mesh_name, primary, invite_token = self._parse_addr(name, code)
-        if mesh_name in self._meshes:
-            mesh = self._meshes[mesh_name]
-            if primary:
-                ours = mesh.primary or self.machine
-                if primary != ours:
-                    raise MeshConflict(
-                        f"mesh {mesh_name!r} on this daemon "
-                        + (
-                            f"is a mirror of {mesh.primary!r}"
-                            if mesh.primary
-                            else "is owned locally"
-                        )
-                        + f" — it cannot also join {mesh_name}@{primary}"
-                    )
+        # An address names one mesh whichever others share its name: a local
+        # ``dev`` and a mirror ``dev@pca`` are two meshes, not a conflict.
+        local = self._find(f"{mesh_name}@{primary}" if primary else mesh_name)
+        if local is not None:
             return await self._join_local(
-                mesh_name, session, handle=handle, role=role, subroles=subroles
+                local.name, session, handle=handle, role=role, subroles=subroles
             )
-        if not primary:
+        if not primary or self._is_me(primary):
             raise MeshError(
                 f"no mesh named {mesh_name!r} on this daemon — join a remote "
                 f"mesh with '{mesh_name}@<machine>', or create it first "
@@ -2235,12 +2377,22 @@ class MeshManager:
         ours, so only the mirror is built and None is returned. Sessions here
         then join it like any mesh already present (``_join_local``).
         """
-        if mesh_name in self._meshes:
+        # The mesh's address, as its creator named it: a daemon that took
+        # authority over from the creator still grants under the creator's
+        # name, so every daemon keys the mirror the same way. A granter that
+        # predates addresses sends none — it is the creator as far as we know.
+        origin = str(grant.get("origin") or primary)
+        if self._is_me(origin):
             raise MeshConflict(
-                f"a mesh named {mesh_name!r} appeared locally while the join "
-                "was pending — remove it and re-join"
+                f"mesh {mesh_name!r} was created on this daemon — it cannot "
+                "be mirrored here as well"
             )
-        mesh = Mesh(mesh_name, me=self.machine)
+        if f"{mesh_name}@{origin}" in self._meshes:
+            raise MeshConflict(
+                f"mesh {mesh_name}@{origin} appeared here while the join was "
+                "pending — remove it and re-join"
+            )
+        mesh = Mesh(mesh_name, me=self.machine, origin=origin)
         # The authority's rank list is authoritative; fall back to a plain
         # two-node order when talking to a daemon that predates phase 7.
         peers = [str(p) for p in (grant.get("peers") or []) if p]
@@ -2286,10 +2438,10 @@ class MeshManager:
                 version=grant_roles.get("version"),
             )
         if attach:
-            self._meshes[mesh_name] = mesh
+            self._meshes[mesh.name] = mesh
             self._persist_def(mesh)
             self._persist_cursors(mesh)
-            self._ensure_worker(mesh_name)
+            self._ensure_worker(mesh.name)
             self._drop_offer(mesh_name, primary)
             log.info("mesh %r: attached (mirror of %r)", mesh_name, primary)
             return None
@@ -2302,10 +2454,10 @@ class MeshManager:
         except (TypeError, ValueError):
             cursor = len(mesh.messages)
         mesh.cursors[member.handle] = cursor
-        self._meshes[mesh_name] = mesh
+        self._meshes[mesh.name] = mesh
         self._persist_def(mesh)
         self._persist_cursors(mesh)
-        self._ensure_worker(mesh_name)
+        self._ensure_worker(mesh.name)
         self._brief_soon(mesh, member)
         log.info(
             "mesh %r: joined as %r (mirror of %r)",
@@ -2330,19 +2482,15 @@ class MeshManager:
             raise MeshError(
                 f"attach takes a remote address 'mesh@machine', not {address!r}"
             )
-        existing = self._meshes.get(mesh_name)
-        if existing is not None:
-            if existing.primary and existing.primary == primary:
-                return self._attach_view(existing, already=True)
-            raise MeshConflict(
-                f"mesh {mesh_name!r} on this daemon "
-                + (f"is a mirror of {existing.primary!r}" if existing.primary
-                   else "is owned locally")
-                + f" — it cannot also attach {mesh_name}@{primary}"
+        if self._is_me(primary):
+            raise MeshError(
+                f"{mesh_name}@{primary} is this daemon's own — it owns its meshes"
             )
+        # A local mesh of the same name is another mesh, not a conflict.
+        existing = self._find(f"{mesh_name}@{primary}")
+        if existing is not None:
+            return self._attach_view(existing, already=True)
         machine = self._require_machine()
-        if primary == machine:
-            raise MeshError(f"this daemon is {primary!r} — it owns its meshes")
         if self.peer_transport is None:
             raise MeshError("relay uplink is not running — cannot reach peers")
         for rec in self._outgoing.values():
@@ -2374,7 +2522,7 @@ class MeshManager:
                 mesh_name, primary, reply_token, resp.get("grant") or {},
                 attach=True,
             )
-            return self._attach_view(self._meshes[mesh_name])
+            return self._attach_view(self.get(f"{mesh_name}@{primary}"))
         if resp.get("pending"):
             rid = str(resp.get("id") or "")
             self._outgoing[rid] = {
@@ -2401,6 +2549,8 @@ class MeshManager:
             "attached": True,
             "already": already,
             "mesh": mesh.name,
+            "name": mesh.wire_name,
+            "origin": mesh.origin,
             "primary": mesh.primary,
             "members": len(mesh.members),
         }
@@ -2453,8 +2603,7 @@ class MeshManager:
             return {"ok": True, "cancelled": True}
         if not token:
             raise MeshError("mesh offer carries no token")
-        local = self._meshes.get(name)
-        if local is not None and local.primary == machine:
+        if self._find(key) is not None:
             return {"ok": True, "attached": True}
         try:
             count = int(members)
@@ -2509,14 +2658,14 @@ class MeshManager:
         """
         return [
             {
-                "mesh": mesh.name,
+                "mesh": mesh.wire_name,
                 "project": mesh.project,
                 "members": len(mesh.members),
                 "peers": max(len(mesh.peers), 1),
                 "created_at": mesh.created_at,
             }
             for mesh in sorted(self._meshes.values(), key=lambda m: m.name)
-            if not mesh.primary and mesh.visibility == "public"
+            if not mesh.origin and not mesh.primary and mesh.visibility == "public"
         ]
 
     async def discover(self, *, timeout: float = 8.0) -> dict:
@@ -2580,11 +2729,13 @@ class MeshManager:
             for r in self._outgoing.values() if r.get("attach")
         }
         for row in rows.values():
-            local = self._meshes.get(row["mesh"])
-            if local is not None and local.primary == row["machine"]:
+            row["address"] = f"{row['mesh']}@{row['machine']}"
+            # Keyed by address, a local mesh of the same name is a different
+            # mesh: nothing here can be "taken".
+            local = self._find(row["address"])
+            if local is not None:
                 row["state"] = "attached"
-            elif local is not None:
-                row["state"] = "name_taken"
+                row["key"] = local.name  # what this daemon calls it
             elif (row["mesh"], row["machine"]) in pending:
                 row["state"] = "pending"
                 row["request_id"] = pending[(row["mesh"], row["machine"])]
@@ -3968,7 +4119,7 @@ class MeshManager:
         self, name: str, machine: str, token: str, doc
     ) -> dict:
         """A peer asks us, the authority, to change the mesh's role set."""
-        mesh = self.get(name)
+        mesh = self._inbound(name, machine, token)
         self._require_authority(mesh, "the role set")
         self._check_link_token(mesh, machine, token)
         parsed = None
@@ -4151,7 +4302,7 @@ class MeshManager:
         self, name: str, machine: str, token: str, a: str, b: str, enabled: bool
     ) -> dict:
         """A peer asks us, the authority, to cut or restore its own edge."""
-        mesh = self.get(name)
+        mesh = self._inbound(name, machine, token)
         self._require_authority(mesh, "link state")
         self._check_link_token(mesh, machine, token)
         if machine not in (a, b):
@@ -4687,7 +4838,7 @@ class MeshManager:
         self, name: str, machine: str, token: str, a: str, b: str, enabled: bool
     ) -> dict:
         """Authority side: apply a member-edge edit forwarded by a peer."""
-        mesh = self.get(name)
+        mesh = self._inbound(name, machine, token)
         self._check_link_token(mesh, machine, token)
         self._require_authority(mesh, "the member graph")
         self._validate_member_edge(mesh, a, b)
@@ -4794,7 +4945,7 @@ class MeshManager:
             machine,
             path,
             {
-                "mesh": mesh.name,
+                "mesh": mesh.wire_name,
                 "machine": self._require_machine(),
                 "token": str(link.get("token_out") or ""),
                 **body,
@@ -4820,7 +4971,7 @@ class MeshManager:
         self._persist_def(mesh)
         code = base64.urlsafe_b64encode(
             json.dumps(
-                {"v": 2, "mesh": mesh.name, "machine": machine, "token": token}
+                {"v": 2, "mesh": mesh.wire_name, "machine": machine, "token": token}
             ).encode("utf-8")
         ).decode("ascii")
         return {
@@ -4895,7 +5046,7 @@ class MeshManager:
         if self.peer_transport is None:
             raise MeshError("relay uplink is not running — cannot reach peers")
         body = {
-            "mesh": mesh.name,
+            "mesh": mesh.wire_name,
             "machine": me,
             "session": session,
             "handle": handle,
@@ -5246,6 +5397,8 @@ class MeshManager:
             "peers": list(mesh.peers),
             "epoch": mesh.authority_epoch,
             "links": self._link_grants_for(mesh, machine),
+            # Who created the mesh — the guest keys its mirror by it.
+            "origin": mesh.origin or self._require_machine(),
         }
 
     def peer_join_request_accept(
@@ -5269,7 +5422,7 @@ class MeshManager:
         verified here — but the grant travels via the relay to the *claimed*
         name, so only the daemon really registered under it can finish.
         """
-        mesh = self.get(name)
+        mesh = self._inbound(name, machine, authority=True)
         self._require_authority(mesh, "membership")
         if not _NAME_RE.match(machine or ""):
             raise MeshError("invalid peer machine name")
@@ -5411,7 +5564,7 @@ class MeshManager:
             mesh.offers.clear()
         self._persist_def(mesh)
         for machine in withdrawn:
-            await self._push_offer_cancel(mesh.name, machine)
+            await self._push_offer_cancel(mesh.wire_name, machine)
         return {"mesh": mesh.name, "visibility": visibility,
                 "withdrawn": withdrawn}
 
@@ -5435,7 +5588,7 @@ class MeshManager:
         previous = mesh.offers.get(machine)
         token = str((previous or {}).get("token") or secrets.token_urlsafe(18))
         await self.peer_transport(machine, "/peer/mesh/offer", {
-            "mesh": mesh.name,
+            "mesh": mesh.wire_name,
             "machine": me,
             "token": token,
             "project": mesh.project,
@@ -5458,7 +5611,7 @@ class MeshManager:
         if mesh.offers.pop(machine, None) is None:
             raise MeshError(f"mesh {name!r} has no offer to {machine!r}")
         self._persist_def(mesh)
-        notified = await self._push_offer_cancel(mesh.name, machine)
+        notified = await self._push_offer_cancel(mesh.wire_name, machine)
         return {"mesh": mesh.name, "machine": machine, "notified": notified}
 
     async def _push_offer_cancel(self, name: str, machine: str) -> bool:
@@ -5555,7 +5708,7 @@ class MeshManager:
                     req["machine"],
                     "/peer/mesh/grant",
                     {
-                        "mesh": mesh.name,
+                        "mesh": mesh.wire_name,
                         "machine": self._require_machine(),
                         "request_id": rid,
                         "token": req["reply_token"],
@@ -5590,7 +5743,7 @@ class MeshManager:
                     machine,
                     "/peer/mesh/grant",
                     {
-                        "mesh": mesh.name,
+                        "mesh": mesh.wire_name,
                         "machine": self.machine,
                         "request_id": rid,
                         "token": g["reply_token"],
@@ -5621,6 +5774,241 @@ class MeshManager:
                 "mesh %r: grant delivered to %r (%r)",
                 mesh.name, machine, g["handle"],
             )
+
+    # -- renamed daemons: rewrite every reference to a relay name ----- #
+    def _rename_in_mesh(self, mesh: Mesh, old: str, new: str) -> bool:
+        """Rewrite machine ``old`` as ``new`` everywhere ``mesh`` names it.
+
+        The rank list, the link credentials and their cursors and status,
+        the brokered pair credentials and cut edges, the roster's machine
+        stamps, pending requests/grants and offers. The message log is left
+        alone: it records who sent what under the name they had then.
+        Returns whether anything changed. Re-keying a mirror created on
+        ``old`` is the caller's (it moves the mesh's directory).
+        """
+        changed = False
+        if old in mesh.peers:
+            if new in mesh.peers:
+                raise MeshConflict(
+                    f"mesh {mesh.name!r} already has a peer named {new!r}"
+                )
+            mesh.peers = [new if p == old else p for p in mesh.peers]
+            changed = True
+        for table in (mesh.links, mesh.link_cursors, mesh.peer_status,
+                      mesh.pending_nudges, mesh.offers):
+            if old in table:
+                table[new] = table.pop(old)
+                changed = True
+        for key in list(mesh.pair_links):
+            a, b = key.split("|")
+            if old not in (a, b):
+                continue
+            pair = mesh.pair_links.pop(key)
+            if f"token_{old}" in pair:
+                pair[f"token_{new}"] = pair.pop(f"token_{old}")
+            renamed = self._pair_key(new if a == old else a, new if b == old else b)
+            mesh.pair_links[renamed] = pair
+            changed = True
+        for key in list(mesh.edges):
+            a, b = key.split("|")
+            if old in (a, b):
+                mesh.edges[
+                    self._pair_key(new if a == old else a, new if b == old else b)
+                ] = mesh.edges.pop(key)
+                changed = True
+        for member in mesh.members.values():
+            if member.machine == old:
+                member.machine = new
+                changed = True
+        for rec in (list(mesh.pending_requests.values())
+                    + list(mesh.pending_grants.values())):
+            if rec.get("machine") == old:
+                rec["machine"] = new
+                changed = True
+        if mesh.origin == old:
+            changed = True
+        return changed
+
+    def _rekey(self, mesh: Mesh, old_key: str) -> None:
+        """Move ``mesh`` (whose ``origin`` just changed) to its new key."""
+        new_key = mesh.name
+        if new_key == old_key:
+            return
+        self._meshes[new_key] = self._meshes.pop(old_key)
+        task = self._workers.pop(old_key, None)
+        if task is not None:
+            self._workers[new_key] = task
+        old_dir = self._mesh_dir(old_key)
+        self._dirs.pop(old_key, None)
+        new_dir = self._mesh_root() / new_key
+        try:
+            if old_dir.is_dir() and not new_dir.exists():
+                old_dir.rename(new_dir)
+        except OSError as exc:
+            log.warning("mesh %r: keeping %s (%s)", new_key, old_dir, exc)
+            self._dirs[new_key] = old_dir
+
+    def _apply_rename(self, mesh: Mesh, old: str, new: str) -> Optional[str]:
+        """Rename in one mesh, persist, fan out; returns the new key when
+        the mesh itself was re-keyed (a mirror of the renamed daemon)."""
+        if not self._rename_in_mesh(mesh, old, new):
+            return None
+        old_key = mesh.name
+        rekeyed = None
+        if mesh.origin == old:
+            if f"{mesh.wire_name}@{new}" in self._meshes:
+                raise MeshConflict(
+                    f"mesh {mesh.wire_name}@{new} already exists here"
+                )
+            mesh.origin = new
+            self._rekey(mesh, old_key)
+            rekeyed = mesh.name
+        if not mesh.primary:
+            # The authority's rank list and roster changed: every other peer
+            # learns the new name on its next sync.
+            mesh.roster_version += 1
+            self._ensure_pair_links(mesh)
+            self._flush_guests_soon(mesh)
+        self._persist_def(mesh)
+        self._persist_cursors(mesh)
+        return rekeyed
+
+    def _rename_records(self, old: str, new: str) -> None:
+        """Offers received and outgoing requests name daemons too."""
+        moved = False
+        for key in list(self._offers):
+            rec = self._offers[key]
+            if rec.get("machine") == old:
+                rec["machine"] = new
+                self._offers.pop(key)
+                self._offers[f"{rec['mesh']}@{new}"] = rec
+                moved = True
+        if moved:
+            self._persist_offers()
+        touched = False
+        for rec in self._outgoing.values():
+            if rec.get("primary") == old:
+                rec["primary"] = new
+                touched = True
+        if touched:
+            self._persist_outgoing()
+
+    def rename_peer(self, old: str, new: str) -> dict:
+        """An operator's migration: daemon ``old`` is now called ``new``.
+
+        Rewrites every mesh here that names it (and re-keys mirrors of the
+        meshes it created, ``dev@old`` -> ``dev@new``). A renamed daemon
+        tells its peers itself (``/peer/mesh/renamed``) once it is back on
+        the relay; this is for when it could not — it was offline, or this
+        daemon was.
+        """
+        old = str(old or "").strip()
+        new = str(new or "").strip()
+        for n in (old, new):
+            if not _NAME_RE.match(n):
+                raise MeshError(f"invalid daemon name {n!r}")
+        if old == new:
+            raise MeshError("old and new names are the same")
+        if new == LOCAL_HOST:
+            raise MeshError(f"{LOCAL_HOST!r} is reserved for this daemon")
+        if self._is_me(old) or self._is_me(new):
+            raise MeshError(
+                "that is this daemon's own name — change the relay name "
+                "instead; peers are told on the next connection"
+            )
+        changed, rekeyed = [], []
+        for mesh in list(self._meshes.values()):
+            before = mesh.name
+            if not self._rename_in_mesh_dry(mesh, old, new):
+                continue
+            key = self._apply_rename(mesh, old, new)
+            changed.append(before)
+            if key:
+                rekeyed.append({"from": before, "to": key})
+        self._rename_records(old, new)
+        log.info("renamed peer %r -> %r in %d mesh(es)", old, new, len(changed))
+        return {"old": old, "new": new, "meshes": changed, "rekeyed": rekeyed}
+
+    @staticmethod
+    def _rename_in_mesh_dry(mesh: Mesh, old: str, new: str) -> bool:
+        """Does ``mesh`` name ``old`` at all? (Checked before any write, so
+        a conflict on one mesh does not leave another half-renamed.)"""
+        if new in mesh.peers and old in mesh.peers:
+            raise MeshConflict(
+                f"mesh {mesh.name!r} has both {old!r} and {new!r} as peers"
+            )
+        return (
+            old in mesh.peers or old in mesh.links or old in mesh.offers
+            or mesh.origin == old
+            or any(m.machine == old for m in mesh.members.values())
+            or any(r.get("machine") == old for r in mesh.pending_requests.values())
+        )
+
+    def _renamed_self(self, mesh: Mesh, old: str, new: str) -> None:
+        """Our own relay name changed from ``old`` (the name this mesh was
+        last written with): restamp our side and queue a notice to every
+        linked peer, which is how they learn it — the relay routes to the
+        new name, and the link token proves it is still us."""
+        self._rename_in_mesh(mesh, old, new)
+        pending = [p for p in mesh.links if p != new]
+        if pending:
+            previous = (mesh.rename_notice or {}).get("old")
+            mesh.rename_notice = {
+                # a second rename before the first reached everyone: peers
+                # still know us by the FIRST name
+                "old": previous or old,
+                "pending": pending,
+            }
+        if not mesh.primary:
+            mesh.roster_version += 1
+            self._ensure_pair_links(mesh)
+        log.info("mesh %r: this daemon was renamed %r -> %r", mesh.name, old, new)
+        mesh.me = new
+        self._persist_def(mesh)
+
+    async def _flush_rename_notice(self, mesh: Mesh) -> None:
+        notice = mesh.rename_notice or {}
+        old = str(notice.get("old") or "")
+        for machine in list(notice.get("pending") or []):
+            if machine not in mesh.links:
+                notice["pending"].remove(machine)
+                continue
+            try:
+                await self._peer_call(
+                    mesh, machine, "/peer/mesh/renamed", {"old": old}
+                )
+            except PeerUnreachable:
+                continue  # the worker's next pass retries
+            except MeshError as exc:
+                log.warning(
+                    "mesh %r: %r refused our rename notice: %s",
+                    mesh.name, machine, exc,
+                )
+            notice["pending"].remove(machine)
+        if not notice.get("pending"):
+            mesh.rename_notice = None
+        self._persist_def(mesh)
+
+    def peer_renamed_accept(
+        self, name: str, machine: str, token: str, old: str
+    ) -> dict:
+        """A linked peer tells us it is now ``machine``, formerly ``old``.
+
+        Authenticated on the link we hold for ``old``: only the daemon that
+        holds that link's credentials can move it to a new name.
+        """
+        if not _NAME_RE.match(old or "") or not _NAME_RE.match(machine or ""):
+            raise MeshError("invalid rename notice")
+        if old == machine:
+            return {"ok": True}
+        mesh = self._inbound(name, old, token)
+        self._check_link_token(mesh, old, token)
+        rekeyed = self._apply_rename(mesh, old, machine)
+        self._rename_records(old, machine)
+        log.info(
+            "mesh %r: peer %r is now %r", mesh.name, old, machine,
+        )
+        return {"ok": True, "mesh": rekeyed or mesh.name}
 
     def _unrank(self, mesh: Mesh, machine: str) -> None:
         """Drop every trace of a departed peer: rank, edges, brokered pairs."""
@@ -5670,7 +6058,7 @@ class MeshManager:
 
     def peer_detach_accept(self, name: str, machine: str, token: str) -> dict:
         """A guest daemon detaches itself (and every member it hosts)."""
-        mesh = self.get(name)
+        mesh = self._inbound(name, machine, token)
         self._require_authority(mesh, "guest management")
         self._check_link_token(mesh, machine, token)
         removed = self._remove_guest(mesh, machine)
@@ -5694,7 +6082,7 @@ class MeshManager:
                     machine,
                     "/peer/mesh/unlink",
                     {
-                        "mesh": mesh.name,
+                        "mesh": mesh.wire_name,
                         "machine": self._require_machine(),
                         "token": str(guest.get("token_out") or ""),
                     },
@@ -5782,7 +6170,7 @@ class MeshManager:
 
     def peer_unlink_accept(self, name: str, machine: str, token: str) -> dict:
         """The primary revoked us (or deleted the mesh): drop the mirror."""
-        mesh = self.get(name)
+        mesh = self._inbound(name, machine, token)
         if not mesh.primary:
             raise MeshError("not a mirror")
         self._check_primary_token(mesh, machine, token)
@@ -5833,7 +6221,7 @@ class MeshManager:
         subroles: Sequence[str] = (),
     ) -> dict:
         """A guest daemon asks to enrol one of its sessions as a member."""
-        mesh = self.get(name)
+        mesh = self._inbound(name, machine, token)
         self._require_authority(mesh, "membership")
         self._check_link_token(mesh, machine, token)
         handle = (handle or session).strip()
@@ -5870,7 +6258,7 @@ class MeshManager:
         self, name: str, machine: str, token: str, handle: str
     ) -> dict:
         """A guest daemon withdraws one of its OWN members."""
-        mesh = self.get(name)
+        mesh = self._inbound(name, machine, token)
         self._require_authority(mesh, "membership")
         self._check_link_token(mesh, machine, token)
         member = mesh.members.get(handle)
@@ -5891,7 +6279,7 @@ class MeshManager:
         self, name: str, machine: str, token: str, message: dict
     ) -> dict:
         """A guest daemon forwards a member's send for sequencing."""
-        mesh = self.get(name)
+        mesh = self._inbound(name, machine, token)
         self._require_authority(mesh, "sequencing")
         self._check_link_token(mesh, machine, token)
         if not isinstance(message, dict):
@@ -6133,7 +6521,7 @@ class MeshManager:
         self, name: str, machine: str, token: str, session: str, path: str,
         max_bytes=None,
     ) -> dict:
-        mesh = self.get(name)
+        mesh = self._inbound(name, machine, token)
         self._check_link_token(mesh, machine, token)
         cwd = self._peer_ops_session(mesh, session)
         try:
@@ -6145,7 +6533,7 @@ class MeshManager:
         self, name: str, machine: str, token: str, session: str, op: str,
         args: Optional[dict] = None,
     ) -> dict:
-        mesh = self.get(name)
+        mesh = self._inbound(name, machine, token)
         self._check_link_token(mesh, machine, token)
         cwd = self._peer_ops_session(mesh, session)
         try:
@@ -6158,7 +6546,7 @@ class MeshManager:
         holder: str, ttl=None, note: str = "",
     ) -> dict:
         """A peer forwards one of its members' lease operations to us."""
-        mesh = self.get(name)
+        mesh = self._inbound(name, machine, token)
         self._require_authority(mesh, "leasing")
         self._check_link_token(mesh, machine, token)
         member = mesh.members.get(holder)
@@ -6243,7 +6631,7 @@ class MeshManager:
         into ``provisional`` and reaches local terminals right away, and the
         authoritative copy folds over it whenever the authority comes back.
         """
-        mesh = self.get(name)
+        mesh = self._inbound(name, machine, token)
         self._check_link_token(mesh, machine, token)
         if not mesh.linked(machine):
             raise MeshError(f"link to {machine!r} is cut")
@@ -6306,7 +6694,7 @@ class MeshManager:
         cursor for us is stale, so we answer with ``resync`` and our true
         position instead of applying anything out of order.
         """
-        mesh = self.get(name)
+        mesh = self._inbound(name, machine, token)
         self._check_primary_token(mesh, machine, token)
         if int(base) != len(mesh.messages):
             return {"resync": len(mesh.messages)}
@@ -6666,7 +7054,7 @@ class MeshManager:
                 machine,
                 "/peer/mesh/sync",
                 {
-                    "mesh": mesh.name,
+                    "mesh": mesh.wire_name,
                     "machine": self.machine,
                     "token": guest["token_out"],
                     "base": cursor,
@@ -7193,6 +7581,7 @@ class MeshManager:
         ]
         return {
             "name": mesh.name,
+            "address": self.address(mesh),
             "project": mesh.project or projects.DEFAULT,
             "primary": mesh.primary or None,
             "members": members,
@@ -7338,6 +7727,9 @@ class MeshManager:
         you = self.member_for_session(mesh, session) if session else None
         return {
             "name": mesh.name,
+            "address": self.address(mesh),
+            "wire_name": mesh.wire_name,
+            "origin": mesh.origin or None,
             "project": mesh.project or projects.DEFAULT,
             "created_at": mesh.created_at,
             "primary": mesh.primary or None,
@@ -7449,6 +7841,11 @@ class MeshManager:
                         log.exception(
                             "mesh %r: delivery to %r failed", mesh.name, handle
                         )
+                if mesh.rename_notice and self.peer_transport is not None:
+                    try:
+                        await self._flush_rename_notice(mesh)
+                    except Exception:  # noqa: BLE001
+                        log.exception("mesh %r: rename notice failed", mesh.name)
                 if mesh.primary:
                     # Peer duties: drain the outbox toward the authority and,
                     # while that is stuck, keep retrying the direct pushes.
@@ -7829,6 +8226,16 @@ class MeshManager:
         except (TypeError, ValueError):
             mesh.authority_epoch = 0
         self._migrate_v2(mesh, doc)
+        if "origin" in doc:
+            mesh.origin = str(doc.get("origin") or "")
+        elif mesh.primary:
+            # Written before addresses: a mirror knew only its primary, which
+            # is its creator unless authority has moved since — the best
+            # name there is, and the one a peer addresses it by.
+            mesh.origin = mesh.primary
+            mesh._origin_migrated = True
+        if mesh.origin and (self._is_me(mesh.origin) or mesh.origin == mesh.me):
+            mesh.origin = ""
         mesh.invites = {
             str(k): str(v) for k, v in (doc.get("invites") or {}).items()
         }
@@ -7838,6 +8245,12 @@ class MeshManager:
             str(k): dict(v) for k, v in (doc.get("offers") or {}).items()
             if isinstance(v, dict) and v.get("token")
         }
+        notice = doc.get("rename_notice")
+        if isinstance(notice, dict) and notice.get("old") and notice.get("pending"):
+            mesh.rename_notice = {
+                "old": str(notice["old"]),
+                "pending": [str(p) for p in notice["pending"] if p],
+            }
         mesh.pending_requests = {
             str(k): dict(v) for k, v in (doc.get("requests") or {}).items()
             if isinstance(v, dict)
@@ -7934,7 +8347,9 @@ class MeshManager:
         try:
             d.mkdir(parents=True, exist_ok=True)
             doc = {
-                "name": mesh.name,
+                "name": mesh.wire_name,
+                # Absent for a mesh created here, so its file is unchanged.
+                **({"origin": mesh.origin} if mesh.origin else {}),
                 "created_at": mesh.created_at,
                 "self": mesh.me,
                 # Absent for the default project, so a mesh that was never
@@ -7961,6 +8376,8 @@ class MeshManager:
                 **({"visibility": mesh.visibility}
                    if mesh.visibility != "private" else {}),
                 **({"offers": mesh.offers} if mesh.offers else {}),
+                **({"rename_notice": mesh.rename_notice}
+                   if mesh.rename_notice else {}),
                 "requests": mesh.pending_requests,
                 "grants": mesh.pending_grants,
                 "policy": mesh.policy,

@@ -2775,6 +2775,8 @@ claunch mesh discover             # meshes published/offered to THIS daemon
 claunch mesh attach dev@work-pc   # attach this whole daemon (no member yet);
 claunch mesh join dev             #   its sessions then join by the bare name
 claunch mesh detach dev           # ...leave with every session hosted here
+claunch mesh rename-peer pc-b pc-b2  # a relay daemon was renamed: migrate
+                                  #   every reference (dev@pc-b -> dev@pc-b2)
 claunch install                   # MCP tools + the /mesh and /cflow skills
                                   # (and /cflow-author, for writing workflows)
 ```
@@ -2939,6 +2941,15 @@ claunch install                   # MCP tools + the /mesh and /cflow skills
   the meshes it owns, never a mirror it holds. `claunch mesh detach dev`
   leaves with every session hosted here. The session-level
   `join dev@work-pc` is unchanged.
+- **Mesh addresses**: a mesh is `name@creator`. Your own meshes keep their
+  bare names (`dev` is `dev@local`); a mirror is keyed by its address, so a
+  local `dev` and `dev@work-pc` (and `dev@other-pc`) live side by side. A
+  bare name means your own mesh, else the only mirror of that name, else an
+  error listing the candidates — every name written before addresses still
+  works. When a daemon's relay name changes it tells its linked peers
+  itself on reconnect (they re-key `dev@old` to `dev@new`); if it could
+  not, `claunch mesh rename-peer OLD NEW` (or **Rename…** on the mesh
+  page) migrates by hand.
 
 ### Agents that build their own team (spawn · hierarchy · member graph)
 

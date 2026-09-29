@@ -3489,6 +3489,10 @@ a.wf-btn { display: inline-block; text-decoration: none; line-height: 1.5; }
 }
 #mesh-outgoing .mesh-kick { margin-left: auto; }
 #mesh-remote { padding: 4px 0 12px; border-top: 1px solid #22262d; }
+.wf-head .mesh-address {
+  font-size: 11px; color: #7d8590; padding: 1px 6px; border: 1px solid #30363d;
+  border-radius: 8px;
+}
 .mesh-remote-head {
   display: flex; align-items: center; gap: 8px; padding: 6px 16px;
   font-size: 12px; color: #7d8590;

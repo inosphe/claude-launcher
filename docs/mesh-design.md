@@ -452,8 +452,10 @@ is unchanged), on top of what phase 6 added since:
   lists only meshes the answering daemon is the authority of — never a
   mirror, never an offer it received — and each row is keyed by the daemon
   that answered, so nothing propagates beyond the relays this daemon is on.
-  Each row carries `state` (available / pending / attached / name_taken)
-  and `access` (`offer` = pre-approved, `approval` = waits for the owner).
+  Each row carries `state` (available / pending / attached — with the
+  local `key`) and `access` (`offer` = pre-approved, `approval` = waits for
+  the owner). Mirrors are keyed by address (phase 15), so a local mesh of
+  the same name never blocks an attach.
 
 **Shipped surface.** CLI `mesh attach|detach|discover|visibility|offer`;
 API `POST|DELETE /api/mesh/{mesh}/attach`, `PUT /api/mesh/{mesh}/visibility`,
@@ -465,6 +467,60 @@ API `POST|DELETE /api/mesh/{mesh}/attach`, `PUT /api/mesh/{mesh}/visibility`,
 mesh sidebar. Durability: `visibility`/`offers` in `mesh.json` (absent while
 unset), received offers in `mesh_offers.json`, pending attaches in
 `outgoing_joins.json` with `attach: true`.
+
+## Mesh addresses and renamed daemons (phase 15 — implemented)
+
+Every mesh has one global address, `name@origin`, where `origin` is the
+relay name of the daemon that **created** it. The address is fixed for the
+mesh's life: phase 7 may move authority to another daemon, but the address
+does not follow it (an address naming the current authority still resolves,
+via the mirror's rank list).
+
+- **Local keys.** A daemon keys a mesh it created by the bare name — the
+  `@local` that may be left off — and a mirror by its address. So a local
+  `dev`, a mirror `dev@pca` and a mirror `dev@pcb` coexist on one daemon;
+  phase 6's "a local mesh of that name blocks the join" conflict is gone.
+  Directories follow the key (`<mesh root>/dev@pca`), and `mesh.json`
+  records `name` (the wire name) and `origin` (absent for one's own).
+- **Resolving a reference** (CLI, API, web, every stored name): `dev@local`
+  and `dev@<this daemon>` are ours; `dev@host` is the mirror of host's
+  `dev`; a bare `dev` is ours if we have one, else the only mirror named
+  `dev`, and an error naming the candidates when there are several. That
+  last rule is what keeps every reference written before addresses working.
+- **The wire is unchanged.** Peer calls still carry the bare name; a daemon
+  receiving one picks the local mesh by the link it authenticates on (the
+  mesh whose link to the caller expects the presented token), so no
+  protocol version is needed and older daemons keep talking. Grants add an
+  `origin` field so a guest keys the mirror by the creator even when a
+  later authority granted it.
+- **Migration.** A mirror written before addresses has no `origin`; on load
+  its primary is taken as the origin, the directory is moved to the
+  address key, and the file is rewritten.
+- **`local` is reserved** as the host part meaning "this daemon"; a daemon
+  registered under that relay name logs a warning, since peers could not
+  address its meshes.
+
+**Renamed daemons.** Relay names are the identity every link, rank list,
+roster stamp and mirror key is written with, so renaming a daemon has to
+move all of them:
+
+- *Automatic.* A daemon remembers the name each mesh was written with
+  (`self` in `mesh.json`). When the uplink hands it a different one, it
+  restamps its own side and queues a `rename_notice` (persisted) for every
+  linked peer; the mesh worker sends `/peer/mesh/renamed {old}` from the
+  new name, authenticated with the link token the peer holds **for the old
+  name** — so only the daemon that held that link can move it. The peer
+  rewrites the rank list, links and cursors, pair credentials and cut
+  edges, the roster's machine stamps, pending requests and grants, offers,
+  and re-keys a mirror of a mesh the renamed daemon created
+  (`dev@old` -> `dev@new`); an authority then fans the roster out to its
+  other peers. The message log is left as written.
+- *By hand.* `claunch mesh rename-peer OLD NEW` (API
+  `POST /api/relay/peers/{old}/rename`, the web's **Rename…** on a peer
+  row) does the same rewrite on this daemon, for when the renamed daemon
+  could not tell it. It refuses this daemon's own name, `local`, and a
+  rename that would merge two peers of one mesh — checked across every
+  mesh before anything is written.
 
 ## Ranked peer graph (phase 7 — implemented)
 

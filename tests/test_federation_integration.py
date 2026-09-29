@@ -322,12 +322,13 @@ def test_daemon_attach_over_real_relay_through_the_web_api(home, tmp_path):
             # the offered mesh attaches in one call, no approval
             status, doc = await call(b, "POST", "/api/mesh/inv@pcc/attach", {})
             assert status == 201 and doc["attached"], doc
-            assert b.mesh.get("inv").primary == "pcc"
+            assert b.mesh.get("inv@pcc").primary == "pcc"
+            assert doc["mesh"] == "inv@pcc"
             assert "pcb" in c.mesh.get("inv").links
 
             # a session on B then joins by the bare name, no approval
             b.manager.create(SessionDef(name="sb", harness="py", cwd=str(tmp_path)))
-            status, doc = await call(b, "POST", "/api/mesh/inv/members",
+            status, doc = await call(b, "POST", "/api/mesh/inv@pcc/members",
                                      {"session": "sb", "handle": "bob"})
             assert status == 201, doc
             assert c.mesh.get("inv").members["bob"].machine == "pcb"
@@ -346,19 +347,89 @@ def test_daemon_attach_over_real_relay_through_the_web_api(home, tmp_path):
                 a, "POST", f"/api/mesh/pub/requests/{rid}/approve", {}
             )
             assert status == 200 and doc["delivered"], doc
-            await _wait(lambda: "pub" in [m.name for m in b.mesh.list()],
+            await _wait(lambda: "pub@pca" in [m.name for m in b.mesh.list()],
                         "the grant to land on B")
 
             # detach: the owner drops B and its member, the mirror goes
-            status, doc = await call(b, "DELETE", "/api/mesh/inv/attach")
+            status, doc = await call(b, "DELETE", "/api/mesh/inv@pcc/attach")
             assert status == 200 and doc["notified"], doc
             assert "pcb" not in c.mesh.get("inv").links
             assert "bob" not in c.mesh.get("inv").members
-            assert "inv" not in [m.name for m in b.mesh.list()]
+            assert "inv@pcc" not in [m.name for m in b.mesh.list()]
         finally:
             await http.close()
             for d in (c, b, a):
                 await d.stop()
+            relay.terminate()
+            try:
+                relay.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                relay.kill()
+
+    asyncio.run(run())
+
+
+def test_renamed_daemon_migrates_its_peers_over_real_relay(home, tmp_path):
+    """A guest daemon re-registers on the relay under a new name: the owner
+    learns it from the guest's rename notice (sent over the link it holds
+    for the old name) and moves the link and the guest's member."""
+    store.update(
+        lambda doc: doc.update(
+            {"harnesses": {"py": {"command": [sys.executable, "-u", "-c", CHILD]}}}
+        )
+    )
+
+    async def run():
+        relay_port = _free_port()
+        relay = _start_relay(tmp_path, relay_port)
+        a = _Daemon("pca", relay_port, tmp_path / "meshA")
+        b = _Daemon("pcb", relay_port, tmp_path / "meshB")
+        try:
+            await a.start()
+            await b.start()
+            await _wait(lambda: a.uplink.connected and b.uplink.connected,
+                        "both uplinks to register")
+            if not a.uplink.peering:
+                pytest.skip("relay binary lacks CAP_PEERING — rebuild mux-relay")
+            a.mesh.create("m")
+            await a.mesh.offer_mesh("m", "pcb")
+            await b.mesh.attach("m@pca")
+            b.manager.create(SessionDef(name="sb", harness="py", cwd=str(tmp_path)))
+            await b.mesh.join("m@pca", "sb", handle="bob")
+            assert a.mesh.get("m").members["bob"].machine == "pcb"
+
+            # B comes back under a new relay name
+            b.pool.stop()
+            b.uplink_task.cancel()
+            try:
+                await b.uplink_task
+            except (asyncio.CancelledError, Exception):
+                pass
+            b.uplink = RelayUplink(
+                url=f"ws://127.0.0.1:{relay_port}/", token=BACKEND_TOKEN,
+                name="pcb2", local_host="127.0.0.1", local_port=b.port,
+            )
+            b.pool = RelayPool([b.uplink])
+            b.uplink_task = asyncio.ensure_future(b.pool.run())
+            _wire_federation(b.mesh, b.pool)  # sets mesh.machine = "pcb2"
+            await _wait(lambda: b.uplink.connected, "B to re-register")
+
+            mesh_a = a.mesh.get("m")
+            await _wait(lambda: "pcb2" in mesh_a.links,
+                        "the owner to move the link to the new name",
+                        timeout=25.0)
+            assert "pcb" not in mesh_a.links
+            assert mesh_a.members["bob"].machine == "pcb2"
+            assert b.mesh.get("m@pca").rename_notice is None
+            # and the link works under the new name: another session there
+            # joins with no approval
+            b.manager.create(SessionDef(name="sb2", harness="py", cwd=str(tmp_path)))
+            member = await b.mesh.join("m@pca", "sb2", handle="bee")
+            assert member.handle == "bee"
+            assert mesh_a.members["bee"].machine == "pcb2"
+        finally:
+            await b.stop()
+            await a.stop()
             relay.terminate()
             try:
                 relay.wait(timeout=5)

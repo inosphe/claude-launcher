@@ -630,6 +630,8 @@ def build_app(
     r.add_get("/api/relay/peers", h_relay_peers)
     r.add_get("/api/relay/peers/{machine}/sessions", h_relay_peer_sessions)
     r.add_get("/api/relay/meshes", h_relay_meshes)
+    # A relay daemon was renamed: rewrite every mesh reference to it here.
+    r.add_post("/api/relay/peers/{machine}/rename", h_relay_peer_rename)
     # Peer federation endpoints. Deliberately outside /api/: the auth
     # middleware only guards /api/*, and these are called by *other daemons*
     # (via the relay's backend bridge) that hold mesh-scoped link tokens,
@@ -649,6 +651,8 @@ def build_app(
     r.add_post("/peer/meshes", h_peer_meshes)
     r.add_post("/peer/mesh/offer", h_peer_mesh_offer)
     r.add_post("/peer/mesh/detach", h_peer_detach)
+    # A linked peer announces its new relay name (link-token authenticated).
+    r.add_post("/peer/mesh/renamed", h_peer_renamed)
     r.add_post("/peer/mesh/join", h_peer_join)
     r.add_post("/peer/mesh/leave", h_peer_leave)
     r.add_post("/peer/mesh/link", h_peer_link)
@@ -5034,6 +5038,25 @@ async def h_peer_mesh_offer(request: web.Request) -> web.Response:
         cancel=bool(body.get("cancel")),
         project=str(body.get("project") or ""),
         members=body.get("members") or 0,
+    )
+    return json_response(result)
+
+
+async def h_peer_renamed(request: web.Request) -> web.Response:
+    body = await _json_body(request)
+    result = _mesh_mgr(request).peer_renamed_accept(
+        str(body.get("mesh") or ""),
+        str(body.get("machine") or ""),
+        str(body.get("token") or ""),
+        str(body.get("old") or ""),
+    )
+    return json_response(result)
+
+
+async def h_relay_peer_rename(request: web.Request) -> web.Response:
+    body = await _json_body(request)
+    result = _mesh_mgr(request).rename_peer(
+        request.match_info["machine"], str(body.get("new") or "")
     )
     return json_response(result)
 
