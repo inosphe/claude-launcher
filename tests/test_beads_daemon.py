@@ -206,7 +206,7 @@ class FakeBr:
                 "made": str(made),
             })
             if made.is_file():
-                return 1, "", "Error: Already initialized at '.\.beads\beads.db'"
+                return 1, "", r"Error: Already initialized at '.\.beads\beads.db'"
             made.parent.mkdir(parents=True, exist_ok=True)
             made.write_bytes(b"")
             return 0, json.dumps({"ok": True}), ""
