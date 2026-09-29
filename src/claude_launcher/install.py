@@ -249,9 +249,9 @@ def _json_mcp_lines(home: Path) -> List[str]:
     """Register the merged server in a harness-owned JSON home.
 
     Kimi Code and Cursor Agent both use the Claude-compatible ``mcpServers``
-    document, while keeping it under their own profile home.  Their native
-    permission files are different, so this helper deliberately touches only
-    the MCP file.
+    document -- Kimi under its profile home, Cursor under the machine-wide
+    :func:`cursor_home`.  Their native permission files are different, so
+    this helper deliberately touches only the MCP file.
     """
     path = home / "mcp.json"
     settings.merge_mcp_servers_into(
@@ -292,6 +292,26 @@ def devin_home() -> Path:
         if roaming:
             return Path(roaming) / "devin"
     return Path.home() / ".config" / "devin"
+
+
+def cursor_home() -> Path:
+    """Where Cursor Agent reads user MCP servers and skills: ``~/.cursor``.
+
+    The ``agent`` harness does declare a ``home_env`` (``CURSOR_CONFIG_DIR``),
+    but that variable moves only ``cli-config.json``. The CLI resolves the
+    user ``mcp.json`` and the user skill directories from ``os.homedir()``
+    directly (measured -- see the ``agent`` entry in ``harnesses.yaml``), so
+    an MCP registration written into the profile home is one it never opens.
+    A profile install therefore writes here, and says ``machine-wide``, for
+    the same reason :func:`devin_home` does.
+
+    ``CLAUNCH_CURSOR_HOME`` overrides it so the test fixture keeps installs
+    out of the developer's real ``~/.cursor``.
+    """
+    override = os.environ.get("CLAUNCH_CURSOR_HOME")
+    if override:
+        return Path(override)
+    return Path.home() / ".cursor"
 
 
 def _devin_mcp_lines() -> List[str]:
@@ -404,8 +424,17 @@ def _profile_lines(profile: Profile) -> List[str]:
     if harness_name == "codex":
         mcp_lines = _codex_mcp_lines(home)
         guard_lines: List[str] = []
-    elif harness_name in {"kimi", "agent"}:
+    elif harness_name == "kimi":
         mcp_lines = _json_mcp_lines(home)
+        guard_lines = []
+    elif harness_name == "agent":
+        # Cursor Agent's profile home holds cli-config.json only; MCP servers
+        # and user skills are read from ~/.cursor whatever CURSOR_CONFIG_DIR
+        # says, so both go there.
+        skills_home = cursor_home()
+        mcp_lines = [
+            f"{line} (machine-wide)" for line in _json_mcp_lines(skills_home)
+        ]
         guard_lines = []
     elif harness_name == "devin":
         # Devin reads neither a profile child nor Claude Code's files, so the

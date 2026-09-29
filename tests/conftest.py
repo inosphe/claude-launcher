@@ -148,6 +148,9 @@ def home(tmp_path, monkeypatch):
     # registration and five skill trees into the developer's real devin
     # config — and pass. Same reasoning as the two lines above it.
     monkeypatch.setenv("CLAUNCH_DEVIN_HOME", str(tmp_path / ".devin-home"))
+    # Cursor Agent reads MCP servers and skills from ~/.cursor regardless of
+    # its profile home (see install.cursor_home) -- the same exposure.
+    monkeypatch.setenv("CLAUNCH_CURSOR_HOME", str(tmp_path / ".cursor-home"))
     # Metering fronts every API-key provider with a real proxy process; the
     # env-assembly tests would each start one against a made-up upstream.
     # Off by default here — the tests of the feature set it back to "1".

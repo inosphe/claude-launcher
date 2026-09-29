@@ -124,7 +124,33 @@ def test_install_all_routes_each_profile_to_its_harness_home(home, capsys):
     assert (root / "codex-work" / "codex" / "config.toml").is_file()
 
 
-@pytest.mark.parametrize("harness", ["pi", "kimi"])  # agent = kimi's path
+def test_install_agent_profile_targets_the_machine_wide_cursor_home(home, capsys):
+    """Cursor Agent reads MCP servers and skills from ~/.cursor only.
+
+    ``CURSOR_CONFIG_DIR`` (its declared home_env) relocates cli-config.json
+    and nothing else, so an ``mcp.json`` in the profile child is never opened
+    -- which is where installs went while ``agent`` shared kimi's branch.
+    """
+    import json
+    from claude_launcher import install
+
+    run("create", "work", "--no-seed", "--harness", "agent")
+    capsys.readouterr()
+    assert run("install", "--profile", "work") == 0
+    out = capsys.readouterr().out
+
+    chome = install.cursor_home()
+    assert not (config.profiles_dir() / "work" / "agent" / "mcp.json").exists()
+    assert (chome / "skills" / "cflow" / "SKILL.md").is_file()
+    assert (chome / "skills" / "mesh" / "SKILL.md").is_file()
+    servers = json.loads((chome / "mcp.json").read_text(encoding="utf-8"))[
+        "mcpServers"
+    ]
+    assert servers["claunch"] == install.mcp_server_def()
+    assert "machine-wide" in out
+
+
+@pytest.mark.parametrize("harness", ["pi", "kimi"])
 def test_install_other_harnesses_use_their_native_home(home, capsys, harness):
     run("create", "work", "--no-seed", "--harness", harness)
     capsys.readouterr()

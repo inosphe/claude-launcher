@@ -103,6 +103,35 @@ def test_devin_declaration_pins_its_measured_launch_contract(home):
     assert devin.input_readiness == "bracketed-paste"
 
 
+def test_agent_declaration_pins_its_measured_launch_contract(home):
+    """Cursor Agent is declared from measurements against the installed CLI.
+
+    Measured on win32 against ``agent 2026.07.01-41b2de7`` and re-read in the
+    ``2026.09.28-64d2043`` bundle it auto-updated to during the measurement.
+    """
+    agent = harnesses.registry()["agent"]
+    assert agent.command == ["agent"]
+    assert agent.auth == "oauth"
+    assert agent.token_env == ""
+    assert agent.borrowable is False
+    assert agent.clear_env == ["CURSOR_API_KEY"]
+    assert agent.login_args == ["login"]
+    # Without these an unattended session stops on the workspace-trust
+    # question and then on the MCP-server approval.
+    assert agent.args == ["--trust", "--approve-mcps"]
+    assert agent.heartbeat_args == ["-p"]
+    assert agent.restore_args == ["--continue"]
+    assert agent.skip_permissions_args == ["--force"]
+    # Moves cli-config.json only; MCP and skills stay under ~/.cursor, which
+    # is why install.py targets install.cursor_home() instead of this home.
+    assert agent.home_env == "CURSOR_CONFIG_DIR"
+    assert agent.opening_transport == "pty"
+    assert agent.input_readiness == "bracketed-paste"
+    # Every short name either maps to an `agent models` id or is one itself.
+    assert set(agent.model_aliases) <= set(agent.models)
+    assert "auto" in agent.models and "auto" not in agent.model_aliases
+
+
 @pytest.mark.parametrize("aliases", [[], None, {"astra": ""}, {"astra": 6}, {1: "model"}])
 def test_model_aliases_reject_invalid_mappings(home, aliases):
     with pytest.raises(HarnessConfigError, match="model_aliases must map"):
