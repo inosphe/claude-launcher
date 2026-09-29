@@ -54,6 +54,7 @@ from . import handoff as handoff_mod
 from . import loop_lag as loop_lag_mod
 from . import notice as notice_mod
 from . import rag as rag_mod
+from . import worktree_inventory
 from . import (
     briefing, cflow_clock, clipty, ctxsize, loops, onboard, prompt_presets, prompter,
     rebrief, session_input, status_checks,
@@ -513,6 +514,8 @@ def build_app(
     r.add_delete("/api/projects/{name}", h_project_remove)
     r.add_get("/api/workspaces", h_workspaces)
     r.add_get("/api/git", h_git)
+    r.add_get("/api/worktrees", h_worktrees)
+    r.add_post("/api/worktrees/remove", h_worktrees_remove)
     r.add_post("/api/workspaces", h_workspace_add)
     r.add_delete("/api/workspaces/{name}", h_workspace_remove)
     r.add_get("/api/briefing/llm", h_briefing_llm)
@@ -2288,6 +2291,119 @@ async def h_git(request: web.Request) -> web.Response:
     # at 450-800ms of loop stall per call on a busy checkout).
     info = await asyncio.to_thread(worktree_mod.info, cwd)
     return json_response({"cwd": cwd, **info})
+
+
+def _worktree_sessions(manager: "SessionManager") -> List[dict]:
+    """Every session record reduced to what the worktree join reads."""
+    out: List[dict] = []
+    for session in manager.list():
+        out.append({
+            "name": session.sdef.name,
+            "cwd": session.sdef.cwd or "",
+            "category": session_mod.session_category(session),
+            "status": session.status() if not session.exited else "exited",
+            "created_at": session.created_at,
+        })
+    return out
+
+
+def _worktree_roots(sessions: List[dict]) -> List[str]:
+    return worktree_inventory.repo_roots(
+        [w.path for w in workspaces.list_all()] + [s["cwd"] for s in sessions]
+    )
+
+
+async def h_worktrees(request: web.Request) -> web.Response:
+    """The launcher worktrees of every repository the fleet has touched.
+
+    Each carries its branch, whether that branch is merged into the trunk,
+    when it was made, and the sessions whose directory is inside it -- the
+    reading the web UI's Worktrees page is drawn from. See
+    :mod:`claude_launcher.daemon.worktree_inventory` for the three states.
+    """
+    manager: SessionManager = request.app["manager"]
+    sessions = _worktree_sessions(manager)
+    answer = await asyncio.to_thread(
+        lambda: worktree_inventory.inventory(_worktree_roots(sessions), sessions)
+    )
+    return json_response(answer)
+
+
+async def h_worktrees_remove(request: web.Request) -> web.Response:
+    """Remove launcher worktrees, one or a batch; the branches stay.
+
+    Body: ``{"paths": [...], "archive": false, "force": false}``.
+
+    A checkout is refused while any session joined to it is not archived
+    (running, paused or killed): such a session can come back into that
+    directory. ``archive: true`` archives those sessions first -- ending the
+    running ones, as the session archive route does -- and then removes the
+    checkout. ``force`` discards modified and untracked files, which git
+    otherwise refuses to delete.
+
+    Partial results are reported rather than raised: one checkout that
+    cannot go is no reason to keep the rest of a batch.
+    """
+    manager: SessionManager = request.app["manager"]
+    try:
+        body = await request.json()
+    except Exception:
+        return json_error(400, "body must be JSON")
+    paths = body.get("paths") if isinstance(body, dict) else None
+    if not isinstance(paths, list) or not paths or not all(
+        isinstance(p, str) and p for p in paths
+    ):
+        return json_error(400, "'paths' must be a non-empty list of paths")
+    archive = bool(body.get("archive"))
+    force = bool(body.get("force"))
+    removed: List[dict] = []
+    failed: List[dict] = []
+    archived: List[str] = []
+    sessions = _worktree_sessions(manager)
+    roots = await asyncio.to_thread(_worktree_roots, sessions)
+    for path in paths:
+        found = await asyncio.to_thread(worktree_inventory.find, roots, path)
+        if found is None:
+            failed.append({"path": path, "error": "not a launcher worktree"})
+            continue
+        root, _ = found
+        live = [
+            s for s in _worktree_sessions(manager)
+            if s["category"] != session_mod.CATEGORY_ARCHIVED
+            and s["cwd"] and worktree_inventory._inside(s["cwd"], path)
+        ]
+        if live and not archive:
+            failed.append({
+                "path": path,
+                "error": "sessions that are not archived use this worktree",
+                "sessions": [s["name"] for s in live],
+            })
+            continue
+        try:
+            for s in live:
+                name = s["name"]
+                session = manager.get(name)
+                if session.exited:
+                    manager.archive(name)
+                else:
+                    request.app["handoff"].forget(name)
+                    request.app["beads"].winddowns.pop(name, None)
+                    await manager.stop_and_archive(name)
+                archived.append(name)
+        except Exception as exc:
+            failed.append({"path": path, "error": f"archive failed: {exc}"})
+            continue
+        try:
+            done = await asyncio.to_thread(
+                worktree_inventory.remove, root, path, force=force
+            )
+        except (worktree_inventory.RemoveError, worktree_mod.WorktreeError) as exc:
+            failed.append({"path": path, "error": str(exc)})
+            continue
+        removed.append(done)
+    return json_response(
+        {"removed": removed, "failed": failed, "archived": archived}
+    )
 
 
 async def h_workspace_add(request: web.Request) -> web.Response:

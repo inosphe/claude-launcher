@@ -498,6 +498,7 @@ CHECKS = [
         "beadsstill_check.js",
         "observerpin_check.js",
         "operator_check.js",
+        "worktreespage_check.js",
 ]
 
 

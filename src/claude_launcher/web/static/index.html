@@ -203,6 +203,7 @@
       <a href="#/window" data-page="window"><span>▦</span>Window</a>
       <a href="#/stats" data-page="stats"><span>▤</span>Stats</a>
       <a href="#/beads" data-page="beads"><span>◈</span>Beads</a>
+      <a href="#/worktrees" data-page="worktrees"><span>⑂</span>Worktrees</a>
       <a href="#/cli" data-page="cli"><span>&gt;_</span>CLI</a>
       <a href="#/settings" data-page="settings"><span>⚙</span>Settings</a>
     </nav>
@@ -1013,6 +1014,9 @@
          tagged with the sessions it belongs to. Data only — the writes stay
          with `claunch beads`, except the one the rail offers. -->
     <div id="beads-view" class="hidden"></div>
+    <!-- The launcher worktrees (<repo>/.claude/worktrees/*), grouped by age,
+         with the sessions in them; drawn by worktrees-page.js. -->
+    <div id="worktrees-view" class="hidden"></div>
     <!-- The CLI tab: a raw, unmanaged shell on the daemon machine. Not a
          session — nothing to name, arrange or restore, just a terminal you
          can stand in. One per daemon, so its xterm (like the session
@@ -1050,6 +1054,7 @@
 <script src="static/observer.js"></script>
 <script src="static/diagram-viewport.js"></script>
 <script src="static/search-anything.js"></script>
+<script src="static/worktrees-page.js"></script>
 <script src="static/operator.js"></script>
 <script src="static/session-tabs.js"></script>
 <script src="static/session-grid.js"></script>
