@@ -1576,7 +1576,8 @@ def register(sub) -> None:
     )
     p.add_argument("mesh")
     p.add_argument("--force", action="store_true",
-                   help="drop the mirror even when the owner cannot be told")
+                   help="drop the mirror even when the owner cannot be told "
+                        "(unreachable, or refusing a link it no longer knows)")
     p.set_defaults(func=_cmd_detach)
 
     p = msub.add_parser(

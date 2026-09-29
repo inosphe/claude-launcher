@@ -2678,6 +2678,15 @@ class MeshManager:
                     "retry, or force it to drop the mirror here only"
                 ) from None
             told = False
+        except MeshError as exc:
+            # The owner answered and refused — typically it no longer knows
+            # this daemon's link, so there is nothing left there to undo.
+            if not force:
+                raise MeshError(
+                    f"{mesh.primary!r} refused the detach ({exc}) — force "
+                    "it to drop the mirror here only"
+                ) from None
+            told = False
         primary = mesh.primary
         self._drop_mesh(name)
         log.info("mesh %r: detached from %r", name, primary)

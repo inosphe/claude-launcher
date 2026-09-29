@@ -269,6 +269,18 @@ def test_detach_removes_link_and_members(home, tmp_path):
         assert "bob" not in mesh_a.members
         assert [x.name for x in mm_b.list()] == []
 
+        # the owner no longer knows the link (it was dropped there): a plain
+        # detach reports the refusal, --force drops the mirror here anyway
+        await mm_a.offer_mesh("m", "pcB")
+        await mm_b.attach("m@pcA")
+        mm_a._remove_guest(mm_a.get("m"), "pcB")
+        with pytest.raises(MeshError, match="refused the detach"):
+            await mm_b.detach("m@pcA")
+        assert [x.name for x in mm_b.list()] == ["m@pcA"]
+        res = await mm_b.detach("m@pcA", force=True)
+        assert res["notified"] is False
+        assert [x.name for x in mm_b.list()] == []
+
         await mgr.shutdown_all()
 
     asyncio.run(run())
