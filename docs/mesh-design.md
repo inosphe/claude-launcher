@@ -443,8 +443,20 @@ is unchanged), on top of what phase 6 added since:
   name would be readable by anyone claiming that name. A push is routed by
   the relay to the *registered* name — the same property the grant
   delivery already relies on — so only the named daemon holds the token.
-  A forged offer carries a token its claimed owner refuses; it costs one
-  refused attach.
+- **The receiver asks the owner back.** The same missing sender identity
+  means anyone reaching `/peer/mesh/offer` (a daemon on the relay, or a
+  browser logged in to it) could claim to be the owner. So before storing
+  an offer the receiver asks the claimed owner, routed by its registered
+  name, `/peer/mesh/offer/check {mesh, machine, token}` — is this a live
+  offer of that mesh to me? — and stores it only on `live: true`. The
+  owner records the offer before pushing it (and rolls back if the push
+  fails), so the question finds it while the push is still waiting. A
+  withdrawal carries the token it withdraws; one that does not is honoured
+  only when the owner no longer reports the stored token live, so a
+  forged withdrawal cannot drop a live offer. An owner from before the
+  check answers its route with a plain 404: the receiver then takes the
+  offer or withdrawal unverified, as before, and logs it. No relay, or an
+  owner that cannot be asked, stores nothing.
 - **One hop, union over relays.** `claunch mesh discover` (API
   `GET /api/relay/meshes`) takes PEER_LIST over every connected relay
   (names deduplicated, as `RelayPool.peer_list` already does), asks each
@@ -461,7 +473,7 @@ is unchanged), on top of what phase 6 added since:
 API `POST|DELETE /api/mesh/{mesh}/attach`, `PUT /api/mesh/{mesh}/visibility`,
 `POST /api/mesh/{mesh}/offers`, `DELETE /api/mesh/{mesh}/offers/{machine}`,
 `GET /api/relay/meshes`; peer `/peer/meshes`, `/peer/mesh/offer`,
-`/peer/mesh/detach`. Web: a visibility selector and offer list in the owner's
+`/peer/mesh/offer/check`, `/peer/mesh/detach`. Web: a visibility selector and offer list in the owner's
 "Peer daemons" box, attach requests in its join-request rows, a
 "Detach this daemon" button on a mirror, and a **Remote meshes** list in the
 mesh sidebar. Durability: `visibility`/`offers` in `mesh.json` (absent while

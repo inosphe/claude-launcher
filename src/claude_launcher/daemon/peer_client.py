@@ -9,7 +9,7 @@ relay ingress connection, and the response is read to EOF.
 from __future__ import annotations
 
 import json
-from typing import Tuple
+from typing import Optional, Tuple
 from urllib.parse import quote
 
 
@@ -30,7 +30,12 @@ def build_request(path: str, body: dict, *, host: str = "peer") -> bytes:
 
 
 class PeerHttpError(Exception):
-    pass
+    """A peer response that could not be read. ``status`` is set when the
+    status line was, and the body was what failed."""
+
+    def __init__(self, message: str, *, status: Optional[int] = None):
+        super().__init__(message)
+        self.status = status
 
 
 def parse_response(raw: bytes) -> Tuple[int, dict]:
@@ -60,7 +65,7 @@ def parse_response(raw: bytes) -> Tuple[int, dict]:
         doc = json.loads(body.decode("utf-8")) if body else {}
     except (ValueError, UnicodeDecodeError):
         raise PeerHttpError(
-            f"peer returned non-JSON body (status {status})"
+            f"peer returned non-JSON body (status {status})", status=status
         ) from None
     return status, doc if isinstance(doc, dict) else {}
 

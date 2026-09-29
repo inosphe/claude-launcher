@@ -509,7 +509,9 @@ def _wire_federation(mesh_manager: MeshManager, uplink) -> None:
         try:
             status, payload = peer_client.parse_response(resp)
         except peer_client.PeerHttpError as exc:
-            raise PeerUnreachable(f"peer {machine!r}: {exc}") from None
+            raise PeerUnreachable(
+                f"peer {machine!r}: {exc}", status=exc.status
+            ) from None
         if status >= 400:
             detail = payload.get("error") or f"HTTP {status}"
             raise MeshError(f"peer {machine!r} rejected {path}: {detail}")

@@ -27,7 +27,7 @@ from claude_launcher.daemon.__main__ import _wire_federation
 from claude_launcher.daemon.api import build_app
 from claude_launcher.daemon.harness import SessionDef
 from claude_launcher.daemon.manager import SessionManager
-from claude_launcher.daemon.mesh import MeshManager
+from claude_launcher.daemon.mesh import MeshManager, PeerUnreachable
 from claude_launcher.daemon.relay_uplink import RelayPool, RelayUplink
 
 PASSWORD = "fed-pw"
@@ -392,7 +392,15 @@ def test_renamed_daemon_migrates_its_peers_over_real_relay(home, tmp_path):
             if not a.uplink.peering:
                 pytest.skip("relay binary lacks CAP_PEERING — rebuild mux-relay")
             a.mesh.create("m")
+            # pcb asks pca back (/peer/mesh/offer/check) while pca's push is
+            # still waiting on the relay, and stores the offer on its yes
             await a.mesh.offer_mesh("m", "pcb")
+            assert [o["mesh"] for o in b.mesh.offers_received()] == ["m"]
+            # what a daemon from before the check answers for its route: a
+            # plain 404, which reaches the transport as status 404
+            with pytest.raises(PeerUnreachable) as old:
+                await b.mesh.peer_transport("pca", "/peer/mesh/nosuch", {})
+            assert old.value.status == 404
             await b.mesh.attach("m@pca")
             b.manager.create(SessionDef(name="sb", harness="py", cwd=str(tmp_path)))
             await b.mesh.join("m@pca", "sb", handle="bob")
