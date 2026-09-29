@@ -426,16 +426,28 @@ def test_the_review_step_asks_for_the_sentence_and_names_the_tool():
 def test_the_review_step_counts_a_naming_test_the_gate_does_not_select():
     """The step's gloss on the summary line follows the tool: a naming test
     outside the gate's selection is ``test:unselected`` and counted in N, so
-    the step no longer says every naming test is left out (claunch-8tl8i)."""
+    the step no longer says every naming test is left out (claunch-8tl8i).
+
+    The two lines it quotes are the ones :func:`rs.render` prints, placeholders
+    and spacing included, so a reader who greps the output for them finds
+    them; one that is also in the diff is ``touched`` (claunch-gvfob)."""
     sys.path.insert(0, str(ROOT / "src"))
     from claude_launcher.cflow import model
 
-    assert '"test:unselected"' in (ROOT / "tools" / "related_surfaces.py").read_text(encoding="utf-8")
+    found = [
+        {"path": "<경로>", "reasons": [reason], "for": ["<파일>"], "touched": False}
+        for reason in ("test", "test:unselected")
+    ]
+    printed = rs.render([], found, "").splitlines()
+    gate_line = next(line for line in printed if line.startswith("gate"))
+    check_line = next(line for line in printed if line.startswith("CHECK"))
     for path in (
         ROOT / "src" / "claude_launcher" / "workflows" / "improv-worker.yaml",
         ROOT / ".claunch" / "workflows" / "improv-worker.yaml",
     ):
         review = model.load(path).steps["review"]
-        assert "CHECK [test:unselected]" in review.instructions
+        assert f"`{gate_line}`" in review.instructions
+        assert f"`{check_line}`" in review.instructions
+        assert "`touched`" in review.instructions
         assert "tools/changed_tests.py --list" in review.instructions
         assert "세지 않고 기록만 한다" not in review.instructions
