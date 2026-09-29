@@ -101,13 +101,19 @@ def test_clearing_the_path_puts_the_board_back_on_its_default(ws, tmp_path):
     assert ref.configured is False
 
 
+# Absolute on whichever platform runs this (C:\ on Windows, / elsewhere): a
+# drive-letter path is relative on POSIX and would be refused for that before
+# its suffix was read.
+_ROOT = Path(os.path.abspath(os.sep))
+
+
 @pytest.mark.parametrize(
     "bad, says",
     [
         ("", "needs a path"),
         ("boards/x.db", "absolute"),
-        (r"C:\boards", "does not end in"),
-        (r"C:\boards\x.sqlite", "does not end in"),
+        (str(_ROOT / "boards"), "does not end in"),
+        (str(_ROOT / "boards" / "x.sqlite"), "does not end in"),
     ],
 )
 def test_a_path_that_is_not_a_db_file_is_refused(bad, says):
