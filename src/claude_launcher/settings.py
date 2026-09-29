@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Dict, Iterable, List, Mapping
+from typing import Dict, Iterable, List, Mapping, Optional
 
 from . import fsplan, store
 from .profile import Profile
@@ -73,28 +73,48 @@ def save(profile: Profile, data: dict) -> None:
     fsplan.write_text(_path(profile), json.dumps(data, indent=2) + "\n")
 
 
-def get_env(profile: Profile) -> Dict[str, str]:
-    """The profile's own launcher env (from the central store)."""
+def _env_value(value) -> Optional[str]:
+    # ``None`` is kept as it is: a key written with no value (``KEY:``) clears
+    # the value the template or a parent would give it (see
+    # ``template.resolve_layers``), and must survive a read-modify-write.
+    return None if value is None else str(value)
+
+
+def get_env(profile: Profile) -> Dict[str, Optional[str]]:
+    """The profile's own launcher env (from the central store).
+
+    A value of ``None`` is a clear: the key is removed from what the template
+    and the parent chain give this profile.
+    """
     env = store.profile_entry(profile.name).get("env")
-    return {str(k): str(v) for k, v in env.items()} if isinstance(env, dict) else {}
+    return (
+        {str(k): _env_value(v) for k, v in env.items()} if isinstance(env, dict) else {}
+    )
 
 
-def set_env(profile: Profile, updates: Mapping[str, str]) -> Dict[str, str]:
-    """Merge ``updates`` into the profile's env and persist to the store."""
+def set_env(
+    profile: Profile, updates: Mapping[str, Optional[str]]
+) -> Dict[str, Optional[str]]:
+    """Merge ``updates`` into the profile's env and persist to the store.
+
+    A ``None`` value records a clear (see :func:`get_env`).
+    """
     env = get_env(profile)
-    env.update({str(k): str(v) for k, v in updates.items()})
+    env.update({str(k): _env_value(v) for k, v in updates.items()})
     store.set_profile_field(profile.name, "env", env)
     return env
 
 
-def replace_env(profile: Profile, env: Mapping[str, str]) -> Dict[str, str]:
+def replace_env(
+    profile: Profile, env: Mapping[str, Optional[str]]
+) -> Dict[str, Optional[str]]:
     """Set the profile's env to exactly ``env`` (authoritative sync)."""
-    new = {str(k): str(v) for k, v in env.items()}
+    new = {str(k): _env_value(v) for k, v in env.items()}
     store.set_profile_field(profile.name, "env", new)
     return new
 
 
-def unset_env(profile: Profile, keys: Iterable[str]) -> Dict[str, str]:
+def unset_env(profile: Profile, keys: Iterable[str]) -> Dict[str, Optional[str]]:
     """Remove ``keys`` from the profile's env and persist to the store."""
     env = get_env(profile)
     for key in keys:

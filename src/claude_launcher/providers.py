@@ -42,7 +42,7 @@ from __future__ import annotations
 
 from typing import Dict, Optional, Tuple
 
-from . import lineage, profile as profile_mod, provider_spec, store, translators
+from . import lineage, profile as profile_mod, provider_spec, store, template, translators
 from .profile import Profile
 from .provider_spec import ProviderSpec, SpecError
 
@@ -90,15 +90,23 @@ def spec(name: str, doc: Optional[dict] = None) -> ProviderSpec:
 def profile_layers(
     profile: Profile, doc: Optional[dict] = None, *, overlay_models: bool = True
 ) -> list:
-    """The spec layer of each profile in the chain, root ancestor first."""
+    """The spec layer of the template, then each profile in the chain.
+
+    Root ancestor first, the profile itself last; the template sits under the
+    root, so a field no profile in the chain sets takes the template's value.
+    A key written with no value clears what the layers below would give (see
+    :func:`template.resolve_layers`).
+    """
     doc = store.load() if doc is None else doc
+    raw = [("template", template.live_layer(doc))] + [
+        (f"profiles.{p.name}", store.profile_entry(p.name, doc))
+        for p in lineage.chain(profile, doc)
+    ]
+    resolved = template.resolve_layers([entry for _, entry in raw])
     layers = []
-    for p in lineage.chain(profile, doc):
-        entry = store.profile_entry(p.name, doc)
+    for (what, _), entry in zip(raw, resolved):
         try:
-            layer = provider_spec.from_entry(
-                entry, f"profiles.{p.name}", profile=True
-            )
+            layer = provider_spec.from_entry(entry, what, profile=True)
         except SpecError as exc:
             raise ProviderError(str(exc)) from exc
         if not overlay_models:

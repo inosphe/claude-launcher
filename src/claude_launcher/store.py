@@ -889,11 +889,16 @@ def template_block(doc: Optional[dict] = None) -> dict:
 
 
 def template_env(doc: Optional[dict] = None) -> Dict[str, str]:
-    """The default env applied to new profiles (live ``template.env`` block)."""
+    """The template's common env, applied under every profile (``template.env``).
+
+    A key written with no value has nothing below it to clear and is left out.
+    """
     doc = load() if doc is None else doc
     tmpl = doc.get("template")
     block = tmpl.get("env") if isinstance(tmpl, dict) else None
-    return {str(k): str(v) for k, v in block.items()} if isinstance(block, dict) else {}
+    if not isinstance(block, dict):
+        return {}
+    return {str(k): str(v) for k, v in block.items() if v is not None}
 
 
 def set_template_env(env: Dict[str, str]) -> None:
