@@ -683,6 +683,8 @@ def _cmd_attach(args: argparse.Namespace) -> int:
     """Daemon-level join: this daemon attaches mesh@machine, no member."""
     client = daemon_client.ensure_running()
     body = {"code": args.code} if args.code else {}
+    if args.project:
+        body["project"] = args.project
     result = client.post(f"/api/mesh/{args.mesh}/attach", body)
     if result.get("pending"):
         print(
@@ -700,7 +702,7 @@ def _cmd_attach(args: argparse.Namespace) -> int:
     print(
         f"mesh {name!r} is {'already ' if result.get('already') else ''}"
         f"attached here (mirror of {result['primary']!r}, "
-        f"{result['members']} member(s))"
+        f"{result['members']} member(s), project {result.get('project') or 'default'!r})"
     )
     print(f"sessions here join it with: claunch mesh join {name}")
     return 0
@@ -746,6 +748,18 @@ def _cmd_discover(args: argparse.Namespace) -> int:
             "(access 'offer' is pre-approved; 'approval' waits for its owner)",
             file=sys.stderr,
         )
+    return 0
+
+
+def _cmd_project(args: argparse.Namespace) -> int:
+    """Show or change the project a mesh is filed under here."""
+    client = daemon_client.ensure_running()
+    if args.project is None:
+        info = client.get(f"/api/mesh/{args.mesh}?state=running")
+        print(info.get("project") or "default")
+        return 0
+    result = client.put(f"/api/mesh/{args.mesh}/project", {"project": args.project})
+    print(f"mesh {result['mesh']!r} is now filed under project {result['project']!r}")
     return 0
 
 
@@ -1545,6 +1559,9 @@ def register(sub) -> None:
     p.add_argument("mesh", metavar="MESH@MACHINE")
     p.add_argument("--code", help="invite ticket from 'claunch mesh invite' "
                                   "(an offer pushed to this daemon needs none)")
+    p.add_argument("--project", "-P", metavar="NAME",
+                   help="file the mirror here under this project (default: "
+                        "the 'default' project; 'claunch mesh project' moves it)")
     p.set_defaults(func=_cmd_attach)
 
     p = msub.add_parser(
@@ -1575,6 +1592,15 @@ def register(sub) -> None:
     )
     p.add_argument("--json", action="store_true", help="raw JSON")
     p.set_defaults(func=_cmd_discover)
+
+    p = msub.add_parser(
+        "project",
+        help="show or change the project a mesh (own or mirrored) is filed "
+             "under on this daemon; the peers are not affected",
+    )
+    p.add_argument("mesh")
+    p.add_argument("project", nargs="?")
+    p.set_defaults(func=_cmd_project)
 
     p = msub.add_parser(
         "visibility",

@@ -10320,8 +10320,10 @@ $("new-session").addEventListener("submit", async (e) => {
       // An offered remote mesh: attach this daemon (pre-approved), then the
       // session joins the mirror by its bare name like any local mesh.
       const addr = body.mesh.slice(ATTACH_PREFIX.length);
+      // Filed where the session is, so the mirror is listed beside it.
       const resp = await api(`/api/mesh/${encodeURIComponent(addr)}/attach`, {
-        method: "POST", headers: { "Content-Type": "application/json" }, body: "{}",
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body.project ? { project: body.project } : {}),
       });
       const doc = await resp.json().catch(() => ({}));
       if (!resp.ok) {
@@ -29534,6 +29536,43 @@ function renamePeerButton(info, machine) {
    member it hosts, and the mirror here is removed. When the owner cannot be
    told, the operator may drop the mirror here only (the owner keeps a stale
    guest entry its operator can revoke). */
+/* Which project this daemon files the mesh under: a local listing choice
+   (the rail and the create form show one project's meshes), allowed on a
+   mirror as well, and never sent to the peers. A mirror attached before
+   it could be given one lands in the default project, and this is how it
+   is moved to the project its sessions are in. */
+function meshProjectPicker(info) {
+  if (!projectsCache.length) return null;
+  const current = info.project || "default";
+  const select = document.createElement("select");
+  select.className = "mesh-project";
+  select.title = "the project this daemon lists the mesh under";
+  for (const p of projectsCache) select.appendChild(new Option(`project: ${p.name}`, p.name));
+  if (![...select.options].some((o) => o.value === current)) {
+    select.appendChild(new Option(`project: ${current}`, current));
+  }
+  select.value = current;
+  select.addEventListener("change", async () => {
+    const wanted = select.value;
+    select.disabled = true;
+    const resp = await api(`/api/mesh/${encodeURIComponent(info.name)}/project`, {
+      method: "PUT", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ project: wanted }),
+    });
+    const doc = await resp.json().catch(() => ({}));
+    select.disabled = false;
+    if (!resp.ok) {
+      select.value = current;
+      alert(doc.error || `HTTP ${resp.status}`);
+      return;
+    }
+    info.project = doc.project;
+    await refreshMeshList();
+    refreshMeshView(true);
+  });
+  return select;
+}
+
 async function detachMirror(info) {
   const mine = (info.members || []).filter((m) => m.local).map((m) => m.handle);
   if (!confirm(
@@ -29634,8 +29673,10 @@ function renderRemoteMeshes() {
       const btn = el("button", "wf-btn approve", "Attach");
       btn.addEventListener("click", async () => {
         btn.disabled = true;
+        // Filed under the project the rail shows, so it appears in that list.
         const resp = await api(`/api/mesh/${encodeURIComponent(addr)}/attach`, {
-          method: "POST", headers: { "Content-Type": "application/json" }, body: "{}",
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(currentProject ? { project: currentProject } : {}),
         });
         const doc = await resp.json().catch(() => ({}));
         if (!resp.ok) {
@@ -30884,6 +30925,11 @@ function renderMesh(info, history, force, owed, historyPage) {
   }
   if (isMirror) {
     head.appendChild(el("span", "mesh-mirror-badge", `mirror of ${info.primary}`));
+  }
+  // Guarded: harnesses that slice renderMesh alone do not carry it.
+  if (typeof meshProjectPicker === "function") {
+    const picker = meshProjectPicker(info);
+    if (picker) head.appendChild(picker);
   }
   // The same mesh with the runs drawn in. A link rather than a section: the
   // roster answers "who is here", and adding "how far along is each of them"

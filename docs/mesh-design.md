@@ -496,6 +496,14 @@ via the mirror's rank list).
 - **Migration.** A mirror written before addresses has no `origin`; on load
   its primary is taken as the origin, the directory is moved to the
   address key, and the file is rewritten.
+- **Project filing is local.** A mirror is filed under a project on this
+  daemon: the one `attach --project` (the web: the project the rail or the
+  create form shows) names, else the joining session's project; a pending
+  request carries it until the grant lands. `claunch mesh project MESH
+  [PROJECT]` (`PUT /api/mesh/{mesh}/project`, the project picker in the
+  mesh page's header) moves any mesh, own or mirrored; peers are not told.
+  A mirror attached before this sits in the default project, so a project-
+  narrowed rail or create form does not list it until it is moved.
 - **`local` is reserved** as the host part meaning "this daemon"; a daemon
   registered under that relay name logs a warning, since peers could not
   address its meshes.

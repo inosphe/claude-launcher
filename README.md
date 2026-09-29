@@ -2775,6 +2775,7 @@ claunch mesh discover             # meshes published/offered to THIS daemon
 claunch mesh attach dev@work-pc   # attach this whole daemon (no member yet);
 claunch mesh join dev             #   its sessions then join by the bare name
 claunch mesh detach dev           # ...leave with every session hosted here
+claunch mesh project dev@work-pc gds6  # file a mesh under a project here
 claunch mesh rename-peer pc-b pc-b2  # a relay daemon was renamed: migrate
                                   #   every reference (dev@pc-b -> dev@pc-b2)
 claunch install                   # MCP tools + the /mesh and /cflow skills

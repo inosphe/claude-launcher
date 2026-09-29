@@ -141,10 +141,10 @@ const DISCOVERED = {
   const location = { hash: "" };
   const render = new Function(
     "$", "el", "document", "api", "remoteMeshes", "refreshMeshList",
-    "loadRemoteMeshes", "location",
+    "loadRemoteMeshes", "location", "currentProject",
     `${slice("renderRemoteMeshes")}; return renderRemoteMeshes;`
   )($, el, document, api, DISCOVERED, () => { meshListRefreshed++; },
-    () => { reloaded++; }, location);
+    () => { reloaded++; }, location, "gds6");
   render();
   const list = nodes["mesh-remote-list"];
   assert.strictEqual(list.kids.length, 5);
@@ -167,6 +167,8 @@ const DISCOVERED = {
   await settle();
   assert.strictEqual(calls[0].url, "/api/mesh/dev%40pcA/attach");
   assert.strictEqual(calls[0].opts.method, "POST");
+  // the mirror is filed under the project the rail shows, so it is listed
+  assert.deepStrictEqual(JSON.parse(calls[0].opts.body), { project: "gds6" });
   assert.strictEqual(meshListRefreshed, 1);
   assert.strictEqual(reloaded, 1);
   assert.strictEqual(location.hash, "#/mesh/dev%40pcA");
@@ -282,6 +284,45 @@ const DISCOVERED = {
     answer = "pcA";
     await btn.handlers.click();
     assert.strictEqual(calls.length, 0);
+  }
+
+  /* ---- meshProjectPicker ---------------------------------------------- */
+  {
+    function Option(label, value) {
+      const o = node("option"); o.text = label; o.value = value; return o;
+    }
+    const selectNode = () => {
+      const n = node("select");
+      Object.defineProperty(n, "options", { get() { return this.kids; } });
+      return n;
+    };
+    const doc = { createElement: (tag) => (tag === "select" ? selectNode() : node(tag)) };
+    let listed = 0;
+    let redrawn = 0;
+    const make = (projects) => new Function(
+      "document", "Option", "api", "alert", "projectsCache",
+      "refreshMeshList", "refreshMeshView",
+      `${slice("meshProjectPicker")}; return meshProjectPicker;`
+    )(doc, Option, api, (m) => { throw new Error("alert: " + m); }, projects,
+      async () => { listed++; }, () => { redrawn++; });
+    const picker = make([{ name: "default" }, { name: "gds6" }]);
+    // a mirror attached before it had a project sits in the default one
+    const info = { name: "gds6@shared", project: "default" };
+    const sel = picker(info);
+    assert.deepStrictEqual(sel.kids.map((o) => o.value), ["default", "gds6"]);
+    assert.strictEqual(sel.value, "default");
+    calls = [];
+    reply = { ok: true, status: 200, doc: { mesh: "gds6@shared", project: "gds6" } };
+    sel.value = "gds6";
+    await sel.handlers.change();
+    assert.strictEqual(calls[0].url, "/api/mesh/gds6%40shared/project");
+    assert.strictEqual(calls[0].opts.method, "PUT");
+    assert.deepStrictEqual(JSON.parse(calls[0].opts.body), { project: "gds6" });
+    assert.strictEqual(info.project, "gds6");
+    assert.strictEqual(listed, 1);
+    assert.strictEqual(redrawn, 1);
+    // a daemon without projects draws no picker
+    assert.strictEqual(make([])(info), null);
   }
 
   console.log("meshattach_check: ok");

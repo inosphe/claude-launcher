@@ -2325,6 +2325,8 @@ class MeshManager:
             raise MeshError(
                 f"invalid handle {handle!r}: use letters, digits, '.', '_' or '-'"
             )
+        # The mirror this join builds is filed where the session is.
+        project = self._session_project(session)
         reply_token = secrets.token_urlsafe(18)
         body = {
             "mesh": mesh_name,
@@ -2342,7 +2344,8 @@ class MeshManager:
             raise MeshError("unexpected response from the primary")
         if resp.get("granted"):
             return self._adopt_grant(
-                mesh_name, primary, reply_token, resp.get("grant") or {}
+                mesh_name, primary, reply_token, resp.get("grant") or {},
+                project=project,
             )
         if resp.get("pending"):
             rid = str(resp.get("id") or "")
@@ -2355,6 +2358,7 @@ class MeshManager:
                 "handle": handle,
                 "role": role,
                 "subroles": list(subroles),
+                "project": project,
                 "requested_at": utcnow(),
             }
             self._outgoing[rid] = rec
@@ -2369,13 +2373,18 @@ class MeshManager:
 
     def _adopt_grant(
         self, mesh_name: str, primary: str, reply_token: str, grant: dict,
-        *, attach: bool = False,
+        *, attach: bool = False, project: str = "",
     ) -> Optional[Member]:
         """Build the mirror + our member from a primary's grant payload.
 
         ``attach`` is the daemon-level join: the grant carries no member of
         ours, so only the mirror is built and None is returned. Sessions here
         then join it like any mesh already present (``_join_local``).
+
+        ``project`` files the mirror locally (the joining session's project,
+        or the one the attach named); the owner's filing is its own business.
+        A project deleted while the request pended falls back to the default
+        rather than refusing a grant the owner already gave.
         """
         # The mesh's address, as its creator named it: a daemon that took
         # authority over from the creator still grants under the creator's
@@ -2392,7 +2401,11 @@ class MeshManager:
                 f"mesh {mesh_name}@{origin} appeared here while the join was "
                 "pending — remove it and re-join"
             )
-        mesh = Mesh(mesh_name, me=self.machine, origin=origin)
+        try:
+            project = projects.require(project).name
+        except projects.ProjectError:
+            project = ""
+        mesh = Mesh(mesh_name, me=self.machine, origin=origin, project=project)
         # The authority's rank list is authoritative; fall back to a plain
         # two-node order when talking to a daemon that predates phase 7.
         peers = [str(p) for p in (grant.get("peers") or []) if p]
@@ -2466,7 +2479,9 @@ class MeshManager:
         return member
 
     # -- daemon attach: a daemon joins a mesh with no member of its own --- #
-    async def attach(self, address: str, *, code: Optional[str] = None) -> dict:
+    async def attach(
+        self, address: str, *, code: Optional[str] = None, project: str = "",
+    ) -> dict:
         """Daemon-level join of ``mesh@machine`` (docs/mesh-design.md
         "Daemon attach").
 
@@ -2476,8 +2491,15 @@ class MeshManager:
         (an invite ticket) or from an offer the owner pushed to this daemon;
         without either the request pends on the owner like a session join.
         Attaching a mesh that is already mirrored here is a no-op.
+
+        ``project`` files the mirror here (blank = the default); an unknown
+        project is refused, as :meth:`create` refuses one.
         """
         mesh_name, primary, invite_token = self._parse_addr(address, code)
+        try:
+            project = projects.require(project).name
+        except projects.ProjectError as exc:
+            raise MeshError(str(exc)) from None
         if not primary:
             raise MeshError(
                 f"attach takes a remote address 'mesh@machine', not {address!r}"
@@ -2520,7 +2542,7 @@ class MeshManager:
         if resp.get("granted"):
             self._adopt_grant(
                 mesh_name, primary, reply_token, resp.get("grant") or {},
-                attach=True,
+                attach=True, project=project,
             )
             return self._attach_view(self.get(f"{mesh_name}@{primary}"))
         if resp.get("pending"):
@@ -2534,6 +2556,7 @@ class MeshManager:
                 "session": "",
                 "handle": "",
                 "role": "",
+                "project": project,
                 "requested_at": utcnow(),
             }
             self._persist_outgoing()
@@ -2552,6 +2575,7 @@ class MeshManager:
             "name": mesh.wire_name,
             "origin": mesh.origin,
             "primary": mesh.primary,
+            "project": mesh.project or projects.DEFAULT,
             "members": len(mesh.members),
         }
 
@@ -5547,6 +5571,31 @@ class MeshManager:
         return {"pending": True, "id": rid}
 
     # -- owner side: who may discover a mesh ----------------------------- #
+    def set_project(self, name: str, project: str) -> dict:
+        """File a mesh under another project (blank = the default).
+
+        Local bookkeeping only — the project is which of this daemon's
+        listings shows the mesh, so it is allowed on a mirror as well and
+        nothing is sent to the peers. An unknown project is refused.
+        """
+        mesh = self.get(name)
+        try:
+            project = projects.require(project).name
+        except projects.ProjectError as exc:
+            raise MeshError(str(exc)) from None
+        mesh.project = "" if project == projects.DEFAULT else project
+        self._persist_def(mesh)
+        return {"mesh": mesh.name, "project": mesh.project or projects.DEFAULT}
+
+    def _session_project(self, session: str) -> str:
+        """The project ``session`` is filed under, "" when unknown."""
+        try:
+            sdef = self.manager.get(session).sdef
+        except Exception:
+            return ""
+        name = projects.normalize(getattr(sdef, "project", None))
+        return "" if name == projects.DEFAULT else name
+
     async def set_visibility(self, name: str, visibility: str) -> dict:
         """Publish a mesh to the relay (``public``), to named daemons only
         (``invited``), or to nobody (``private`` — withdraws every offer)."""
@@ -6130,6 +6179,7 @@ class MeshManager:
             name, machine, str(rec.get("reply_token") or ""),
             grant if isinstance(grant, dict) else {},
             attach=bool(rec.get("attach")),
+            project=str(rec.get("project") or ""),
         )
         if member is None:
             return {"ok": True, "attached": True}
