@@ -2396,10 +2396,18 @@ class MeshManager:
                 f"mesh {mesh_name!r} was created on this daemon — it cannot "
                 "be mirrored here as well"
             )
-        if f"{mesh_name}@{origin}" in self._meshes:
-            raise MeshConflict(
-                f"mesh {mesh_name}@{origin} appeared here while the join was "
-                "pending — remove it and re-join"
+        existing = self._meshes.get(f"{mesh_name}@{origin}")
+        if existing is not None:
+            # Two requests pended side by side (an attach and a session join,
+            # or two session joins) and the other grant built the mirror
+            # first. Same mesh, same authority: this grant is merged into it.
+            if primary not in existing.peers:
+                raise MeshConflict(
+                    f"mesh {mesh_name}@{origin} appeared here while the join "
+                    "was pending — remove it and re-join"
+                )
+            return self._merge_grant(
+                existing, primary, reply_token, grant, attach=attach
             )
         try:
             project = projects.require(project).name
@@ -2475,6 +2483,74 @@ class MeshManager:
         log.info(
             "mesh %r: joined as %r (mirror of %r)",
             mesh_name, member.handle, primary,
+        )
+        return member
+
+    def _merge_grant(
+        self, mesh: Mesh, primary: str, reply_token: str, grant: dict,
+        *, attach: bool,
+    ) -> Optional[Member]:
+        """A grant for a mirror that is already here (see _adopt_grant).
+
+        The authority re-minted the link when it approved this request, so
+        the grant's credentials replace the ones the mirror holds; keeping
+        the old pair would leave both sides believing in a link neither can
+        authenticate on. The roster, rank list and edges are the grant's,
+        as a sync would carry them.
+        """
+        previous = mesh.links.get(primary) or {}
+        mesh.links[primary] = {
+            "token_out": str(grant.get("token") or ""),
+            "token_in": reply_token,
+            "created_at": utcnow(),
+            "enabled": bool(previous.get("enabled", True)),
+        }
+        peers = [str(p) for p in (grant.get("peers") or []) if p]
+        if peers:
+            mesh.peers = peers
+            if primary not in mesh.peers:
+                mesh.peers.insert(0, primary)
+            if mesh.me and mesh.me not in mesh.peers:
+                mesh.peers.append(mesh.me)
+        self._apply_link_grants(mesh, grant.get("links") or [], sender=primary)
+        members = [
+            Member.from_dict(e) for e in grant.get("members") or []
+            if isinstance(e, dict) and e.get("handle")
+        ]
+        if members:
+            mesh.members = {m.handle: m for m in members}
+        grant_edges = grant.get("member_edges")
+        if isinstance(grant_edges, dict):
+            mesh.member_edges = {str(k): bool(v) for k, v in grant_edges.items()}
+        for m in grant.get("messages") or []:
+            if not isinstance(m, dict) or not m.get("id"):
+                continue
+            if str(m["id"]) in mesh.seen_ids:
+                continue
+            mesh.messages.append(m)
+            mesh.seen_ids.add(str(m["id"]))
+            self._append_log(mesh, m)
+        if attach:
+            self._persist_def(mesh)
+            self._persist_cursors(mesh)
+            self._drop_offer(mesh.wire_name, primary)
+            log.info("mesh %r: attach grant merged (already mirrored)", mesh.name)
+            return None
+        member_doc = grant.get("member") or {}
+        member = mesh.members.get(str(member_doc.get("handle") or ""))
+        if member is None:
+            raise MeshError("grant is missing our member record")
+        try:
+            cursor = int(grant.get("cursor"))
+        except (TypeError, ValueError):
+            cursor = len(mesh.messages)
+        mesh.cursors[member.handle] = cursor
+        self._persist_def(mesh)
+        self._persist_cursors(mesh)
+        self._brief_soon(mesh, member)
+        log.info(
+            "mesh %r: joined as %r (grant merged into the mirror here)",
+            mesh.name, member.handle,
         )
         return member
 
@@ -5700,6 +5776,9 @@ class MeshManager:
         req = mesh.pending_requests.pop(rid, None)
         if req is None:
             raise MeshError(f"no pending join request {rid!r} in mesh {name!r}")
+        # The link this approval re-mints, kept so a guest that rejects the
+        # grant is put back as it was (see _flush_grants).
+        prior = dict(mesh.links.get(req["machine"]) or {})
         if not req.get("session"):  # a daemon attach: the link, no member
             if req["machine"] not in mesh.links:
                 mesh.roster_version += 1
@@ -5709,6 +5788,7 @@ class MeshManager:
                 "machine": req["machine"],
                 "handle": "",
                 "reply_token": req["reply_token"],
+                **({"prior_link": prior} if prior else {}),
             }
             self._persist_def(mesh)
             self._persist_cursors(mesh)
@@ -5732,6 +5812,7 @@ class MeshManager:
             "machine": req["machine"],
             "handle": member.handle,
             "reply_token": req["reply_token"],
+            **({"prior_link": prior} if prior else {}),
         }
         self._persist_def(mesh)
         self._persist_cursors(mesh)
@@ -5810,7 +5891,18 @@ class MeshManager:
                     mesh.name, machine, handle or "(attach)", exc,
                 )
                 mesh.pending_grants.pop(rid, None)
-                if handle:
+                prior = g.get("prior_link")
+                if isinstance(prior, dict) and prior.get("token_in"):
+                    # The guest was linked before this approval (an attach,
+                    # or an earlier member): it keeps that link, and only
+                    # what this grant added is undone.
+                    mesh.links[machine] = prior
+                    if handle:
+                        self._rollback_admission(mesh, machine, handle,
+                                                 keep_link=True)
+                    else:
+                        self._persist_def(mesh)
+                elif handle:
                     self._rollback_admission(mesh, machine, handle)
                 elif not any(m.machine == machine for m in mesh.members.values()):
                     self._remove_guest(mesh, machine)
@@ -6072,11 +6164,18 @@ class MeshManager:
             mesh.peers = []
         self._ensure_pair_links(mesh)
 
-    def _rollback_admission(self, mesh: Mesh, machine: str, handle: str) -> None:
+    def _rollback_admission(
+        self, mesh: Mesh, machine: str, handle: str, *, keep_link: bool = False,
+    ) -> None:
         mesh.members.pop(handle, None)
         mesh.remote_activity.pop(handle, None)
         mesh.remote_lineage.pop(handle, None)
-        if not any(m.machine == machine for m in mesh.members.values()):
+        # The wiring the admission made goes with it.
+        for key in [k for k in mesh.member_edges if handle in k.split("|")]:
+            mesh.member_edges.pop(key, None)
+        if not keep_link and not any(
+            m.machine == machine for m in mesh.members.values()
+        ):
             self._unrank(mesh, machine)
         mesh.roster_version += 1
         self._persist_def(mesh)

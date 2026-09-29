@@ -894,6 +894,8 @@ def _cmd_members(args: argparse.Namespace) -> int:
         for edge in links:
             print(f"  {edge['a']} <-> {edge['b']}")
     for p in info.get("peers", []):
+        if p.get("self"):
+            continue  # this daemon: its members are the rows above
         if p.get("ok") is False:
             state = f"unreachable ({p.get('error')})"
         elif p.get("ok"):
@@ -901,7 +903,10 @@ def _cmd_members(args: argparse.Namespace) -> int:
         else:
             state = "linked (no traffic yet)"
         queued = f" -- {p['queued']} message(s) queued" if p.get("queued") else ""
-        label = "primary daemon" if p.get("role") == "primary" else "guest daemon"
+        label = (
+            "authority daemon" if p.get("role") in ("authority", "primary")
+            else "peer daemon"
+        )
         print(f"{label} {p['machine']:<12} [{state}]{queued}")
     _print_relay(info.get("relay"))
     return 0
