@@ -679,12 +679,12 @@ def build_app(
     # (kill, pause, note, raw keys, resize, paste-image) has a peer route.
     r.add_post("/peer/shadow/cards", h_peer_shadow_cards)
     r.add_post("/peer/shadow/stream", h_peer_shadow_stream)
-    r.add_post("/peer/shadow/keys", h_peer_shadow_keys)
+    r.add_post("/peer/shadow/line", h_peer_shadow_line)
     # ...and this daemon's side of it: the other daemons' members, kept out
     # of /api/sessions (keyed by bare name) and addressed by machine too.
     r.add_get("/api/shadows", h_shadows_list)
     r.add_get("/api/shadows/{machine}/{session}/ws", h_shadow_ws)
-    r.add_post("/api/shadows/{machine}/{session}/keys", h_shadow_keys)
+    r.add_post("/api/shadows/{machine}/{session}/line", h_shadow_line)
     r.add_get("/api/sessions", h_sessions_list)
     r.add_get("/api/transcripts", h_transcripts_list)
     r.add_post("/api/sessions", h_sessions_create)
@@ -5544,7 +5544,7 @@ async def h_peer_shadow_stream(request: web.Request) -> web.StreamResponse:
     return await shadow_mod.serve_stream(request, session, request.app)
 
 
-async def h_peer_shadow_keys(request: web.Request) -> web.Response:
+async def h_peer_shadow_line(request: web.Request) -> web.Response:
     body = await _json_body(request)
     session, _member = _peer_shadow_member(request, body)
     try:
@@ -5600,7 +5600,7 @@ async def h_shadow_ws(request: web.Request) -> web.WebSocketResponse:
     return ws
 
 
-async def h_shadow_keys(request: web.Request) -> web.Response:
+async def h_shadow_line(request: web.Request) -> web.Response:
     """The session line, typed into another daemon's member via its host."""
     body = await _json_body(request)
     text = body.get("text")
@@ -5612,7 +5612,7 @@ async def h_shadow_keys(request: web.Request) -> web.Response:
     try:
         result = await _mesh_mgr(request).shadow_call(
             request.match_info["machine"], request.match_info["session"],
-            "/peer/shadow/keys", {"text": text, "input_id": input_id},
+            "/peer/shadow/line", {"text": text, "input_id": input_id},
         )
     except mesh_mod.PeerUnreachable as exc:
         return json_error(502, str(exc))

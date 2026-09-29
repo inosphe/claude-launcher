@@ -34456,7 +34456,7 @@ async function sendShadowLine() {
   try {
     const inputId = `shadow-${Date.now()}-${Math.random().toString(36).slice(2)}`;
     const resp = await api(
-      `/api/shadows/${encodeURIComponent(machine)}/${encodeURIComponent(name)}/keys`,
+      `/api/shadows/${encodeURIComponent(machine)}/${encodeURIComponent(name)}/line`,
       {
         method: "POST",
         headers: { "Content-Type": "application/json" },

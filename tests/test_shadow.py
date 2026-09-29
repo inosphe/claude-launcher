@@ -301,7 +301,7 @@ def test_viewer_routes_only_to_mesh_members(home, tmp_path):
             mm_b.shadow_route("pcZ", "sa")
         n = len(calls)
         with pytest.raises(MeshError):
-            await mm_b.shadow_call("pcA", "sx", "/peer/shadow/keys", {})
+            await mm_b.shadow_call("pcA", "sx", "/peer/shadow/line", {})
         assert len(calls) == n  # refused before anything went out
         # without a link to the host there is nobody to ask
         del mesh.links["pcA"]
@@ -433,7 +433,7 @@ def test_shadow_list_stream_and_session_line(home, tmp_path):
 
             # C3: the session line reaches it, and its echo comes back
             resp = await client_b.post(
-                "/api/shadows/pcA/sa/keys",
+                "/api/shadows/pcA/sa/line",
                 json={"text": "hello", "input_id": "in-1"},
                 headers=bearer,
             )
@@ -451,14 +451,14 @@ def test_shadow_list_stream_and_session_line(home, tmp_path):
             assert sent[-1]["status"] == "sent"
             # a replay of the same line is a duplicate, not a second line
             resp = await client_b.post(
-                "/api/shadows/pcA/sa/keys",
+                "/api/shadows/pcA/sa/line",
                 json={"text": "hello", "input_id": "in-1"},
                 headers=bearer,
             )
             assert (await resp.json()).get("duplicate") is True
             # a key name is typed as the word, not pressed
             resp = await client_b.post(
-                "/api/shadows/pcA/sa/keys",
+                "/api/shadows/pcA/sa/line",
                 json={"text": "Escape", "input_id": "in-2"},
                 headers=bearer,
             )
@@ -473,7 +473,7 @@ def test_shadow_list_stream_and_session_line(home, tmp_path):
 
             # a session in no shared mesh is not reachable at all
             resp = await client_b.post(
-                "/api/shadows/pcA/sx/keys",
+                "/api/shadows/pcA/sx/line",
                 json={"text": "x", "input_id": "in-3"},
                 headers=bearer,
             )
@@ -505,7 +505,7 @@ def test_host_refuses_input_when_off_and_bad_tokens(home, tmp_path):
         try:
             store.update(lambda doc: doc.update({"daemon": {"shadow_input": False}}))
             resp = await client_b.post(
-                "/api/shadows/pcA/sa/keys",
+                "/api/shadows/pcA/sa/line",
                 json={"text": "hello", "input_id": "off-1"},
                 headers=bearer,
             )
@@ -514,7 +514,7 @@ def test_host_refuses_input_when_off_and_bad_tokens(home, tmp_path):
             assert session_input.latest("sa", "off-1") is None
             # straight at the host: a wrong token is 403 on every shadow route
             for path in ("/peer/shadow/cards", "/peer/shadow/stream",
-                         "/peer/shadow/keys"):
+                         "/peer/shadow/line"):
                 resp = await client_a.post(path, json={
                     "mesh": "m", "machine": "pcB", "token": "nope",
                     "session": "sa", "text": "x", "input_id": "t",
@@ -540,7 +540,7 @@ def test_peer_shadow_routes_are_exactly_three(home):
         {r.resource.canonical for r in app.router.routes()
          if r.resource is not None and r.resource.canonical.startswith("/peer/shadow")}
     )
-    assert paths == ["/peer/shadow/cards", "/peer/shadow/keys", "/peer/shadow/stream"]
+    assert paths == ["/peer/shadow/cards", "/peer/shadow/line", "/peer/shadow/stream"]
     api = sorted(
         (r.method, r.resource.canonical) for r in app.router.routes()
         if r.resource is not None and r.resource.canonical.startswith("/api/shadows")
@@ -550,7 +550,7 @@ def test_peer_shadow_routes_are_exactly_three(home):
         ("GET", "/api/shadows/{machine}/{session}/ws"),
         ("HEAD", "/api/shadows"),
         ("HEAD", "/api/shadows/{machine}/{session}/ws"),
-        ("POST", "/api/shadows/{machine}/{session}/keys"),
+        ("POST", "/api/shadows/{machine}/{session}/line"),
     ]
 
 

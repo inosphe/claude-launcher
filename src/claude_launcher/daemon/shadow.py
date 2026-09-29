@@ -46,7 +46,7 @@ from typing import AsyncIterator, Dict, List, Optional, Tuple
 
 from aiohttp import WSMsgType, web
 
-from . import briefing, keys as keys_mod
+from . import briefing
 from . import session_input
 from .mesh import MeshError, PeerUnreachable
 from .peer_client import PeerHttpError, ResponseStream
@@ -314,12 +314,8 @@ async def type_line(session, text, input_id, *, origin: str) -> dict:
         )
     session_input.write(name, "input_accepted", request_id=input_id, text=text,
                         status="accepted", pid=session.pid, origin=origin)
-    single = "\n" not in text and "\r" not in text
     try:
-        if single and keys_mod.has_text([text]):
-            data = await session.send_keys([text, "Enter"])
-        else:
-            data = await session.paste(text, enter=True)
+        data = await session_input.type_line(session, text, keys=False, force=False)
     except (KeyboardHeld, SessionGone) as exc:
         session_input.write(name, "input_failed", request_id=input_id, text=text,
                             status="failed", pid=session.pid, origin=origin)

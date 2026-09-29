@@ -498,7 +498,7 @@ def test_remote_shadow_over_real_relay(home, tmp_path):
                     # canonical line), each typed and echoed back
                     for i in range(25):
                         async with http.post(
-                            base + "/api/shadows/pca/sa/keys",
+                            base + "/api/shadows/pca/sa/line",
                             json={"text": f"line{i:02d}-" + "x" * 3000,
                                   "input_id": f"relay-{i}"},
                         ) as resp:
