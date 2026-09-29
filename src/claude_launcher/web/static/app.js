@@ -4210,15 +4210,9 @@ async function refreshSessions(options) {
   }
   if (typeof syncRailKeys === "function") syncRailKeys();
   if (rebuild && typeof syncSessionPinUi === "function") syncSessionPinUi();
-  // Back to where the teardown found the reader. Written after the sticky
-  // offsets, which change the headings' sizes and so the scrollable height,
-  // and after the focus restore above: that one asks for `preventScroll`, so
-  // it should move nothing, but where a browser ignores the option the last
-  // write is the one that decides where the rail sits. Assigning past the
-  // content's height is not an error -- the browser clamps it -- so a poll
-  // that drops rows lands at the new bottom rather than refusing to move, and
-  // a rail too short to scroll takes the 0 it already had.
-  if (rebuild && keptScrollTop) list.scrollTop = keptScrollTop;
+  // The scroll position the teardown took is put back further down, after
+  // the rows get their cflow badges, beads line and briefing card again --
+  // see the restore below the `if (rebuild)` painters.
   // The rows this poll kept still get their seen line moved on (see the
   // signature above for why the stamps are not a reason to rebuild). Not
   // while a press is in flight: swapping the node under the pointer is the
@@ -4319,6 +4313,21 @@ async function refreshSessions(options) {
     // puts it back, so the mark outlives the poll that lands mid-scroll.
     applyGotoFlash();
   }
+  // Back to where the teardown found the reader. Written after every painter
+  // that adds lines to the rebuilt rows (the cflow badge, the beads line, the
+  // briefing card above) and after the sticky offsets and the focus restore,
+  // so the rail is back at its full height when the position is set:
+  //  - set any earlier, on the bare rows, the browser clamps it to the
+  //    shorter content, and a reader in the lower part of the rail came back
+  //    higher than they left it;
+  //  - and the lines appended after the write sit above the reader, so the
+  //    browser's scroll anchoring (`overflow-anchor: auto`, the default)
+  //    moved the position again by their height. Either way the rail slid
+  //    on each poll that changed a session's state.
+  // Assigning past the content's height is not an error -- the browser clamps
+  // it -- so a poll that drops rows lands at the new bottom rather than
+  // refusing to move, and a rail too short to scroll takes the 0 it had.
+  if (rebuild && keptScrollTop) list.scrollTop = keptScrollTop;
   // The grid keeps its own signature, so it follows every poll whether or
   // not the list above was rebuilt.
   if (typeof renderSessionGrid === "function") renderSessionGrid();
