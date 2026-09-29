@@ -380,7 +380,20 @@ def remove(root: str, path: str, *, force: bool = False) -> dict:
         if done.returncode != 0:
             raise RemoveError((done.stderr or "git worktree prune failed").strip())
         return {"path": path, "root": root, "unlinked": [], "pruned": True}
-    links = unlink_links(path) if os.path.isdir(path) else []
+    if not force:
+        # Ask the question git would refuse on *before* touching the tree:
+        # unlinking first and then being refused would leave the checkout
+        # standing with its links gone (claunch-0n31r).
+        status = _git(["status", "--porcelain"], cwd=path)
+        if status.returncode != 0:
+            detail = (status.stderr or "").strip()
+            raise RemoveError(detail or "git status failed")
+        if (status.stdout or "").strip():
+            raise RemoveError(
+                f"'{path}' contains modified or untracked files, "
+                "use --force to delete it"
+            )
+    links = unlink_links(path)
     args = ["worktree", "remove", *(["--force"] if force else []), path]
     done = _git(args, cwd=root, timeout=None)
     if done.returncode != 0 and os.path.isdir(path):
