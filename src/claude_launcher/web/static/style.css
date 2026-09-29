@@ -1849,8 +1849,17 @@ a.cflow-scope:hover { background: #1d3559; text-decoration: underline; }
 }
 /* overflow hidden is the backstop for fitView (app.js): the grid is kept
    inside the box by shrinking glyphs, and whatever a mid-adjustment frame
-   still hangs over the edge must clip, not become a scrollbar. */
-#terminal { flex: 1; padding: 6px; min-height: 0; overflow: hidden; position: relative; }
+   still hangs over the edge must clip, not become a scrollbar.
+   content-box, against the page-wide border-box: FitAddon sizes the grid
+   from this element's computed height and width, and under border-box those
+   include the padding. The addon then counted 12px of padding as room and,
+   whenever that tipped the remainder past one cell, claimed a row or column
+   that overflow clipped -- the session's last line cut off at some window
+   and text sizes only (claunch-pgz2j, tests/web/termfit_browser.cjs). */
+#terminal {
+  flex: 1; padding: 6px; min-height: 0; overflow: hidden; position: relative;
+  box-sizing: content-box;
+}
 /* The throughput overlay on the PTY's top-right corner: the number big
    enough to read from the screen, the rest small under it. It floats
    above xterm's layers (which stack up to z-index 10 or so), takes no
@@ -2066,7 +2075,11 @@ a.cflow-scope:hover { background: #1d3559; text-decoration: underline; }
 }
 #cli-title { color: #c6cdd5; }
 .cli-actions { margin-left: auto; }
-#cli-term { flex: 1; padding: 6px; min-height: 0; overflow: hidden; }
+/* content-box for the same reason as #terminal: the fit addon reads this
+   element's computed size as the grid's room. */
+#cli-term {
+  flex: 1; padding: 6px; min-height: 0; overflow: hidden; box-sizing: content-box;
+}
 #cli-term .xterm { height: 100%; }
 #cli-term .xterm-viewport {
   overscroll-behavior: contain; -webkit-overflow-scrolling: touch;

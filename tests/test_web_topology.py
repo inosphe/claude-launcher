@@ -521,6 +521,7 @@ BROWSER_CHECKS = [
         "detailroute_browser.cjs",
         "sessiongridtip_browser.cjs",
         "railchildline_browser.cjs",
+        "termfit_browser.cjs",
 ]
 
 
