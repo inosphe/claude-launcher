@@ -173,11 +173,6 @@ def _cmd_create(args: argparse.Namespace) -> int:
             bits.append(f"mcp: {', '.join(copied.mcp_servers)}")
         if bits:
             print(f"copied from parent ({'; '.join(bits)})")
-    elif is_claude:
-        template.ensure_file()
-        applied = template.apply_to(p)
-        if applied:
-            print(f"applied template: {', '.join(sorted(applied))}")
     if is_claude:
         # A new profile is one more copy of the harness-global state, so it
         # starts at whatever the shared declaration says -- otherwise it is
@@ -293,10 +288,12 @@ def _cmd_login(args: argparse.Namespace) -> int:
 
 def _cmd_env(args: argparse.Namespace) -> int:
     p = profile.require(args.name)
-    if args.apply_template:
-        template.apply_to(p)
     if args.unset:
         settings.unset_env(p, args.unset)
+    if args.clear:
+        # A key with no value takes it away from what the template and the
+        # parent chain would give this profile.
+        settings.set_env(p, {key: None for key in args.clear})
     if args.assignments:
         updates = {}
         for item in args.assignments:
@@ -315,7 +312,10 @@ def _cmd_env(args: argparse.Namespace) -> int:
         print(f"profile {p.name!r} has no {scope} env vars set")
         return 0
     for key in sorted(env):
-        print(f"{key}={env[key]}")
+        if env[key] is None:
+            print(f"{key}  (cleared: the template's or a parent's value is not used)")
+        else:
+            print(f"{key}={env[key]}")
     return 0
 
 
@@ -349,11 +349,11 @@ def _cmd_template(args: argparse.Namespace) -> int:
     fields = template.layer()
     env = template.env()
     if fields:
-        print("defaults applied to new profiles:")
+        print("defaults under every profile (a profile or parent that sets the field wins):")
         for key in sorted(fields):
             print(f"  {key}: {fields[key]}")
     if env:
-        print("default raw env (pre-schema; run `claunch migrate-config`):")
+        print("common env under every profile:")
         for key in sorted(env):
             print(f"  {key}={env[key]}")
     if not fields and not env:
@@ -1419,7 +1419,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_run.set_defaults(func=_cmd_run)
 
     p_env = sub.add_parser(
-        "env", help="view or edit a profile's claude env vars (settings.json)"
+        "env",
+        help="view or edit a profile's common env vars (every harness, "
+        "inherited along the parent chain, over the template's env)",
     )
     p_env.add_argument("name")
     p_env.add_argument(
@@ -1429,9 +1431,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--unset", nargs="+", metavar="KEY", help="env vars to remove"
     )
     p_env.add_argument(
-        "--apply-template",
-        action="store_true",
-        help="merge the template's default env into the profile",
+        "--clear",
+        nargs="+",
+        metavar="KEY",
+        help="write KEY with no value, so the template's or a parent's value "
+        "is not used",
     )
     p_env.add_argument(
         "--effective",
@@ -1451,7 +1455,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_parent.set_defaults(func=_cmd_parent)
 
     p_tpl = sub.add_parser(
-        "template", help="show or initialize the default profile template"
+        "template",
+        help="show the profile template (the layer under every profile) or "
+        "initialize its bootstrap file",
     )
     p_tpl.add_argument(
         "--init", action="store_true", help="write the default template file"

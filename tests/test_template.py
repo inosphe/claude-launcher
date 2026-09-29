@@ -1,10 +1,10 @@
-"""Template: live default-env in the store; template.yaml seeds a fresh store."""
+"""Template: the live layer under every profile; template.yaml seeds a fresh store."""
 
 from __future__ import annotations
 
 import yaml
 
-from claude_launcher import profile, settings, store, template
+from claude_launcher import lineage, profile, settings, store, template
 
 
 def test_env_reads_live_store(home):
@@ -17,11 +17,24 @@ def test_set_env_writes_store(home):
     assert store.template_env() == {"A": "1"}
 
 
-def test_apply_to_merges_template_into_profile(home):
+def test_template_env_applies_without_copying_it(home):
     template.set_env({"D": "1"})
     p = profile.create("work")
-    template.apply_to(p)
-    assert settings.get_env(p)["D"] == "1"
+    assert settings.get_env(p) == {}
+    assert lineage.effective_env(p) == {"D": "1"}
+    # A later change reaches the profile: nothing was copied at create.
+    template.set_env({"D": "2"})
+    assert lineage.effective_env(p) == {"D": "2"}
+
+
+def test_resolve_layers_clears_downward_only():
+    bottom = {"a": "1", "b": "1", "o": {"x": "1", "y": "1"}}
+    middle = {"b": None, "o": {"x": None}}
+    top = {"a": "3"}
+    out = template.resolve_layers([bottom, middle, top])
+    assert out == [{"a": "1", "o": {"y": "1"}}, {"o": {}}, {"a": "3"}]
+    # The caller's documents are left as they were.
+    assert middle == {"b": None, "o": {"x": None}}
 
 
 def test_ensure_file_writes_template_yaml(home):
