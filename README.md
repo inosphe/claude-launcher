@@ -1797,6 +1797,52 @@ Details:
 - A manifest changes nothing for a daemon that is **already running**. The
   daemon picks it up the next time it starts.
 
+#### A separate git identity per instance
+
+Sessions run `git` with the environment of their profile. An instance that has
+its own config file can therefore commit under its own author. Point git's
+global config at a per-instance file with `GIT_CONFIG_GLOBAL` (git 2.32 or
+later), set on every profile of that instance:
+
+```ini
+# ~/.gitconfig-team — the team instance's global git config
+[include]
+	path = ~/.gitconfig          # keep the shared settings (aliases, credentials)
+[user]
+	name = team-bot
+	email = team-bot@example.com
+# [core]
+# 	sshCommand = ssh -i ~/.ssh/id_team -o IdentitiesOnly=yes   # separate push key
+```
+
+```yaml
+# ~/.claunch-team.yaml (the instance's config file)
+profiles:
+  work:
+    harness_options:
+      claude:
+        env:
+          GIT_CONFIG_GLOBAL: /home/me/.gitconfig-team
+      pi:                        # one entry per harness the profile runs
+        env:
+          GIT_CONFIG_GLOBAL: /home/me/.gitconfig-team
+```
+
+Do the same in the default config file with its own file (for example
+`~/.gitconfig-main`) when the default daemon's sessions should also commit
+under a fixed identity.
+
+- `harness_options.<harness>.env` is keyed by harness. A profile that runs
+  sessions under several harnesses needs the variable under each of them.
+- A profile added later does not get the variable automatically. Add it to the
+  new profile as well.
+- The value is read when a session starts. Sessions that are already running
+  keep their old environment until they are restarted. A daemon restart is not
+  needed.
+- Commands you run in your own shell are unaffected and keep using
+  `~/.gitconfig`.
+- Check the result from inside a session with `git config user.email`.
+
 ### Who may restart or stop the daemon
 
 `claunch daemon restart` and `claunch daemon stop` are **operator commands**.
