@@ -34,6 +34,7 @@ from claude_launcher.daemon.mesh import (
 )
 from claude_launcher.daemon.screen import ScreenState
 
+from _tty_echo import NO_TTY_ECHO
 from test_daemon_wedge import _stub_connect
 
 CHILD = (
@@ -48,10 +49,10 @@ CHILD = (
 )
 
 
-def _register_py_harness():
+def _register_py_harness(child=CHILD):
     store.update(
         lambda doc: doc.update(
-            {"harnesses": {"py": {"command": [sys.executable, "-u", "-c", CHILD]}}}
+            {"harnesses": {"py": {"command": [sys.executable, "-u", "-c", child]}}}
         )
     )
 
@@ -1551,7 +1552,12 @@ def test_policy_engine_polls_warns_and_chases(home, tmp_path):
 # join briefing + MCP wrapper
 # --------------------------------------------------------------------------- #
 def test_join_briefing_lands_in_terminal(home, tmp_path):
-    _register_py_harness()
+    # the wait below is on the block's last line, which proves the lines above
+    # it are on screen only if one writer prints them in order. With the
+    # terminal's echo on, its copy of the last line can arrive while the
+    # child is still answering the lines above (tests/_tty_echo.py,
+    # claunch-wt12o.5.2)
+    _register_py_harness(NO_TTY_ECHO + CHILD)
 
     async def run():
         mgr = _manager()
