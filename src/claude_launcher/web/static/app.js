@@ -11953,28 +11953,42 @@ function refreshTermInput() {
 
 /* Prompt presets are daemon-local operator shortcuts. They deliberately
    insert at the caret and submit through the footer's normal send path, so a
-   preset delivers the text and its Enter in the same request. */
+   preset delivers the text and its Enter in the same request.
+
+   Two strips, one per page that has a session line: the terminal page's sits
+   above its footer and sends to the attached local session; the shadow
+   page's sits above #shadow-input and sends to the remote session on screen.
+   Each is shown only on its own page -- `currentName` outlives a navigation
+   (the attached terminal survives every page), so a strip gated on it alone
+   showed on every page and sent to a session that was not on screen. */
 function renderTermPresetButtons() {
   if (typeof renderTermPrompterRow === "function") renderTermPrompterRow();
-  const box = $("term-preset-buttons");
-  if (!box) return;
-  box.innerHTML = "";
   const rows = (typeof promptPresetCache === "undefined" ? [] : promptPresetCache)
     .filter((row) => row.enabled !== false);
-  const visible = !!currentName && !sessionEnded && rows.length > 0;
+  const page = typeof currentPage === "undefined" ? "terminal" : currentPage;
+  fillPresetStrip($("term-preset-buttons"), rows,
+    page === "terminal" && !!currentName && !sessionEnded, sendPromptPreset);
+  fillPresetStrip($("shadow-preset-buttons"), rows,
+    page === "shadow", sendShadowPreset);
+}
+
+function fillPresetStrip(box, rows, onPage, send) {
+  if (!box) return;
+  box.innerHTML = "";
+  const visible = onPage && rows.length > 0;
   box.classList.toggle("hidden", !visible);
   if (!visible) return;
   for (const row of rows) {
     const button = el("button", "term-btn term-preset-button", row.name);
     button.type = "button";
     button.title = row.text;
-    button.addEventListener("click", () => sendPromptPreset(row.text));
+    button.addEventListener("click", () => send(row.text));
     box.appendChild(button);
   }
 }
 
-function insertPromptPreset(text) {
-  const field = $("term-input-field");
+function insertPromptPreset(text, fieldId = "term-input-field") {
+  const field = $(fieldId);
   if (!field || field.disabled) return false;
   const start = Number.isInteger(field.selectionStart) ? field.selectionStart : field.value.length;
   const end = Number.isInteger(field.selectionEnd) ? field.selectionEnd : start;
@@ -11993,6 +12007,13 @@ function sendPromptPreset(text) {
   return sendKeyLine(
     $("term-input-field"), $("term-input-send"), $("term-input-note")
   );
+}
+
+/* The shadow page's preset: into the shadow line at its caret, then sent the
+   one way that line reaches the remote session (its host's /line). */
+function sendShadowPreset(text) {
+  if (!insertPromptPreset(text, "shadow-input-field")) return false;
+  return sendShadowLine();
 }
 
 /* Prompt snippets from the prompter server (GET /api/prompter/prompts, which
@@ -12020,7 +12041,10 @@ function renderTermPrompterRow() {
   if (!box) return;
   box.innerHTML = "";
   const rows = (prompterState && prompterState.connected && prompterState.prompts) || [];
-  const visible = !!currentName && !sessionEnded && rows.length > 0;
+  // The terminal page's row only, like its preset strip: its chips insert
+  // into that page's footer field.
+  const onTerminal = typeof currentPage === "undefined" || currentPage === "terminal";
+  const visible = onTerminal && !!currentName && !sessionEnded && rows.length > 0;
   box.classList.toggle("hidden", !visible);
   if (!visible) return;
   box.classList.toggle("expanded", prompterExpanded);
