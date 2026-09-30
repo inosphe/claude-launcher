@@ -4,7 +4,9 @@
 it to the daemon's terminal WebSocket — the same endpoint the web dashboard
 uses — mirroring the session 1:1: keystrokes go to the PTY, PTY output paints
 locally, and the session is resized to the attaching terminal (and follows it
-while attached). ``Ctrl+]`` detaches; the session keeps running in the daemon,
+while attached). Attaching takes the session's size from whichever viewer
+held it; if another viewer takes it later, this terminal stops sizing the
+session until it is detached and attached again. ``Ctrl+]`` detaches; the session keeps running in the daemon,
 exactly like detaching from tmux.
 
 Kept import-light for the CLI: aiohttp is only imported once an attach starts.
@@ -110,17 +112,40 @@ def focus_control_frames(
     return frames
 
 
-def ws_url(base_url: str, name: str, *, overlay: bool = False) -> str:
+def ws_url(
+    base_url: str, name: str, *, overlay: bool = False, steal: bool = False
+) -> str:
     """The session's terminal socket; ``overlay`` asks the daemon to compose
     notices into the byte stream (this is a real terminal, with nowhere else
-    to draw them -- see ``daemon/notice.py``)."""
+    to draw them -- see ``daemon/notice.py``), ``steal`` takes the session's
+    size as the socket opens (see "Who sizes the session" in ``daemon/ws.py``)."""
     base = base_url.rstrip("/")
     if base.startswith("https://"):
         base = "wss://" + base[len("https://"):]
     elif base.startswith("http://"):
         base = "ws://" + base[len("http://"):]
     url = f"{base}/api/sessions/{name}/ws"
-    return url + "?overlay=1" if overlay else url
+    query = [q for q, on in (("overlay=1", overlay), ("steal=1", steal)) if on]
+    return url + ("?" + "&".join(query) if query else "")
+
+
+#: Shown over the top row when another viewer takes the size away: the grid
+#: now follows their window, and this terminal only mirrors it.
+SIZE_LOST_NOTICE = (
+    f"another viewer took this session's size -- detach ({DETACH_LABEL}) "
+    "and attach again to take it back"
+)
+
+
+def size_owner_update(ctrl: dict, owner: bool) -> Tuple[bool, bool]:
+    """Apply a ``size_owner`` frame: (owner now, whether it was just lost).
+
+    ``held: false`` means the holder left and nobody sizes the session; this
+    terminal claims it back with its next resize, so it counts as the owner
+    again. Losing it to someone else is the one change the person is told.
+    """
+    now = bool(ctrl.get("owner")) or not ctrl.get("held", True)
+    return now, owner and not now
 
 
 # --------------------------------------------------------------------------- #
@@ -347,6 +372,10 @@ async def _attach_async(
     stdin_q: asyncio.Queue = asyncio.Queue()
     stop = threading.Event()
     outcome = {"reason": "closed"}
+    # Whether this terminal holds the session's size. It takes it as it
+    # attaches (``?steal=1``); once another viewer takes it, this terminal
+    # stops sending sizes, and taking it back is a detach and a re-attach.
+    sizing = {"owner": True, "last": None}
 
     def pump_stdin() -> None:  # runs on a daemon thread; blocking reads
         while not stop.is_set():
@@ -370,6 +399,8 @@ async def _attach_async(
             for frame in focus_control_frames(
                 focus_in, focus_out, shutil.get_terminal_size()
             ):
+                if not sizing["owner"] and '"resize"' in frame:
+                    continue  # the size is another viewer's now
                 await ws.send_str(frame)
             if payload:
                 await ws.send_bytes(payload)
@@ -379,12 +410,11 @@ async def _attach_async(
                 return
 
     async def resize_pump(ws) -> None:
-        last = None
         while True:
             size = shutil.get_terminal_size()
             cur = (size.columns, size.lines)
-            if cur != last:
-                last = cur
+            if sizing["owner"] and cur != sizing["last"]:
+                sizing["last"] = cur
                 await ws.send_str(
                     json.dumps({"type": "resize", "cols": cur[0], "rows": cur[1]})
                 )
@@ -393,7 +423,7 @@ async def _attach_async(
     decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
     async with aiohttp.ClientSession() as http:
         async with http.ws_connect(
-            ws_url(base_url, name, overlay=True),
+            ws_url(base_url, name, overlay=True, steal=True),
             headers={"Authorization": f"Bearer {token}"},
             heartbeat=30,
             max_msg_size=0,
@@ -427,6 +457,23 @@ async def _attach_async(
                         except ValueError:
                             continue
                         if not isinstance(ctrl, dict):
+                            continue
+                        if ctrl.get("type") == "size_owner":
+                            now, lost = size_owner_update(ctrl, sizing["owner"])
+                            if now and not sizing["owner"]:
+                                sizing["last"] = None  # free again: resend
+                            sizing["owner"] = now
+                            if lost:
+                                await ws.send_str(
+                                    json.dumps(
+                                        {
+                                            "type": "notice",
+                                            "text": SIZE_LOST_NOTICE,
+                                            "ttl": 10,
+                                            "level": "warn",
+                                        }
+                                    )
+                                )
                             continue
                         if ctrl.get("type") == "exit":
                             outcome["reason"] = "exit"

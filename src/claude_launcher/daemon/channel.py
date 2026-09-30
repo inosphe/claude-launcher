@@ -412,11 +412,18 @@ class Carrier:
             json.dumps({"type": "attached", "ch": ch, "session": name})
         )
         self._tasks[ch] = asyncio.create_task(
-            self._serve(chan, session, bool(frame.get("scrollback")), bool(frame.get("overlay"))),
+            self._serve(
+                chan, session,
+                bool(frame.get("scrollback")), bool(frame.get("overlay")),
+                bool(frame.get("steal")),
+            ),
             name=f"channel-{ch}-{name}",
         )
 
-    async def _serve(self, chan: ChannelSocket, session, scrollback: bool, overlay: bool) -> None:
+    async def _serve(
+        self, chan: ChannelSocket, session, scrollback: bool, overlay: bool,
+        steal: bool = False,
+    ) -> None:
         from . import ws as ws_mod  # local: ws.py knows nothing of this file
 
         try:
@@ -424,6 +431,7 @@ class Carrier:
                 chan, session, self._app,
                 want_scrollback=scrollback,
                 overlay=overlay,
+                steal=steal,
             )
         except asyncio.CancelledError:
             raise

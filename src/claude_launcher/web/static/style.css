@@ -1717,6 +1717,7 @@ a.cflow-scope:hover { background: #1d3559; text-decoration: underline; }
 /* A viewer scrolled back into history (virtual scroll). Informational, so a
    quiet blue like the resume button — it explains why the grid is frozen. */
 .scroll-chip { color: #9ecbff; border-color: #1f4272; cursor: default; }
+.size-chip { color: #d29922; border-color: #4d3800; }
 /* Delivery chip: would a message arriving now be typed in or queued, and by
    what. Filled rather than outlined exactly when something would stand in
    the way — the link chip's rule ("only ever up when something is wrong")

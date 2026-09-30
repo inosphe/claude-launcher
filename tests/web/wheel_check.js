@@ -44,7 +44,7 @@ function check(name, cond, extra) {
 function build(opts) {
   const o = opts || {};
   const nodes = {};
-  for (const id of ["term-link", "m-link", "term-scroll"]) {
+  for (const id of ["term-link", "m-link", "term-scroll", "term-size", "m-size"]) {
     nodes[id] = {
       id, textContent: "", title: "", className: "", on: {},
       addEventListener: (ev, fn) => { nodes[id].on[ev] = fn; },
@@ -123,6 +123,11 @@ function build(opts) {
     "ws", "term", "fitAddon", "attachedPid", "applyingRemoteResize",
     "setStatusBadge", "refitSoon", "setTimeout", "clearTimeout", "Math", "Date",
     "fitView", "resyncTerminal", "terminalOnScreen",
+    // Size ownership (daemon/ws.py, "Who sizes the session"): the state
+    // lives at the top of app.js and its helpers past the text-size
+    // section, outside this slice, so they are declared here.
+    "let sizeOwner = true, sizeHeld = false;\n" +
+    "function renderSizeChip() {}\nfunction stealSize() {}\n" +
     "let altScreen = false;\n" +
     "let mouseTracking = false;\n" +
     "let scrollOffset = 0;\n" +
