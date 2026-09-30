@@ -5,8 +5,9 @@ mesh's roster names sessions that run on the other daemon. This module lets
 the operator of one daemon *look at* those sessions without being given the
 other daemon's control surface:
 
-* a **card** -- name, handle, role, note, the cached briefing digest, the
-  cflow position and the session's status, and nothing else;
+* a **card** -- name, handle, role, note, the spawning parent's name, the
+  cached briefing digest, the cflow position and the session's status, and
+  nothing else;
 * a **terminal** that only outputs -- the same init/repaint/PTY-bytes
   protocol the local terminal speaks (``daemon/ws.py``), carried over a live
   relay bridge (``RelayUplink.peer_open``);
