@@ -43,7 +43,9 @@ line it produces so a reader knows why a file is there:
     the same, for a module the gate's selection of this change
     (:func:`changed_tests.select`) does not contain. The case that produces
     it is a changed test module: rule 1 runs the module itself and not the
-    tests that name it.
+    tests that name it. Its name is searched as a whole word
+    (:func:`changed_tests.naming_module`), so ``test_mesh`` does not list
+    the tests that name ``test_mesh_v2``.
 
 Each surface is then marked **touched** (also in this branch's change),
 **gate** (a naming test the gate's selection contains, so it is listed for
