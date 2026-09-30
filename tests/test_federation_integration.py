@@ -455,6 +455,8 @@ def test_remote_shadow_over_real_relay(home, tmp_path):
 
     import aiohttp
 
+    from claude_launcher.daemon import shadow as shadow_mod
+
     store.update(
         lambda doc: doc.update(
             {"harnesses": {"py": {"command": [sys.executable, "-u", "-c", CHILD]}}}
@@ -520,6 +522,27 @@ def test_remote_shadow_over_real_relay(home, tmp_path):
                     assert len(seen) > 2 * 65536
                     for i in range(25):
                         assert f"echo:line{i:02d}-".encode() in seen, i
+
+                    # one line near shadow.MAX_LINE (claunch-an4fd): the host
+                    # types all of it -- ``bytes`` is what it wrote, the text
+                    # and its Enter -- and the child's answer comes back on
+                    # the stream. The child reads only what fits a tty's
+                    # canonical line, so the answer is checked by its head.
+                    long_line = "long-" + "y" * 18000
+                    assert len(long_line) <= shadow_mod.MAX_LINE
+                    async with http.post(
+                        base + "/api/shadows/pca/sa/line",
+                        json={"text": long_line, "input_id": "relay-long"},
+                    ) as resp:
+                        assert resp.status == 200, await resp.text()
+                        assert (await resp.json())["bytes"] == len(long_line) + 1
+                    seen = b""
+                    deadline = time.monotonic() + 30
+                    while b"echo:long-" not in seen and time.monotonic() < deadline:
+                        msg = await asyncio.wait_for(ws.receive(), 30)
+                        if msg.type == aiohttp.WSMsgType.BINARY:
+                            seen += msg.data
+                    assert b"echo:long-yyyy" in seen
         finally:
             await b.stop()
             await a.stop()
