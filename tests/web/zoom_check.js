@@ -54,6 +54,9 @@ function build(opts) {
   const code = slice("const FONT_KEY =", "/* Bind the terminal to a session");
   const api = new Function(
     "$", "BASE", "localStorage", "term", "fitAddon", "canFit",
+    // Size ownership's state is declared at the top of app.js, outside
+    // this slice: this viewer holds the size, as a lone viewer does.
+    "let sizeOwner = true, sizeHeld = false;\n" +
     code + "\nreturn {clampFont, setFontSize, syncZoomControls," +
     " get fontSize() { return fontSize; }," +
     " FONT_DEFAULT, FONT_MIN, FONT_MAX};"

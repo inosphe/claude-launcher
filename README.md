@@ -1508,6 +1508,11 @@ claunch kill-session work
 to (and follows) your terminal. `Ctrl+]` detaches; the session keeps running
 in the daemon, and you can reattach later from any terminal (or watch the same
 session in the browser at the same time — viewers are just subscribers).
+One viewer at a time sizes the session: `attach` takes the size as it
+attaches, and a browser tab that opens the session afterwards mirrors that
+grid and shows a **take size** button in the terminal header instead of
+resizing it. If another viewer takes the size while you are attached, your
+terminal stops resizing the session; detach and attach again to take it back.
 `new-session --attach` (`-a`) creates a session and drops you straight into
 it, so `claunch new -a --profile work` feels like plain `claude` — except the
 session survives closing the terminal.

@@ -180,6 +180,10 @@ let mouseTracking = false;
 let linkState = "idle", linkName = null, linkTry = 0, linkTimer = null;
 let linkTicket = 0, linkQueue = [], lastLocalKey = 0;
 let wheelTimer = null, wheelAccum = 0, applyingRemoteResize = false;
+/* size ownership: the state a parked terminal keeps (the chip is the
+   header's, drawn elsewhere) */
+let sizeOwner = true, sizeHeld = false;
+function renderSizeChip() {}
 let sessionsCache = [];
 let harnessDetails = {};
 /* where the page's Alt+V goes: the browser's clipboard, uploaded (the

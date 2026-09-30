@@ -76,7 +76,8 @@ message trace's event list — the order a mesh's traffic is read in, and what
 the picture is allowed to claim about where each message got to —
 ``seqrender_check`` on the sequence that list is drawn into, ``zoom_check`` on
 the header's text-size knob — which sizes the session's grid and not merely
-this tab's view — ``reconnect_check`` on the terminal's link, the one thing
+this tab's view — ``sizeowner_check`` on who sizes a session two viewers
+share, so they stop resizing each other — ``reconnect_check`` on the terminal's link, the one thing
 here that is not a poll and so has to repair itself deliberately,
 ``notice_check`` on the corner strip that is the page's only voice — the
 daemon restart that used to be repaired in complete silence, told apart
@@ -405,6 +406,7 @@ CHECKS = [
         "seq_check.js",
         "seqrender_check.js",
         "zoom_check.js",
+        "sizeowner_check.js",
         "reconnect_check.js",
         "snapshot_check.js",
         "notice_check.js",
