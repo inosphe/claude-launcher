@@ -87,17 +87,15 @@ def spec(name: str, doc: Optional[dict] = None) -> ProviderSpec:
         raise ProviderError(str(exc)) from exc
 
 
-def profile_layers(
-    profile: Profile, doc: Optional[dict] = None, *, overlay_models: bool = True
-) -> list:
-    """The spec layer of the template, then each profile in the chain.
+def _layers(
+    profile: Profile, doc: dict, *, overlay_models: bool = True
+) -> Tuple[ProviderSpec, list]:
+    """The template's spec layer and each chain profile's, clears applied.
 
-    Root ancestor first, the profile itself last; the template sits under the
-    root, so a field no profile in the chain sets takes the template's value.
-    A key written with no value clears what the layers below would give (see
-    :func:`template.resolve_layers`).
+    The chain is root ancestor first, the profile itself last. A key written
+    with no value in a chain entry clears what the template and the
+    ancestors would give (see :func:`template.resolve_layers`).
     """
-    doc = store.load() if doc is None else doc
     raw = [("template", template.live_layer(doc))] + [
         (f"profiles.{p.name}", store.profile_entry(p.name, doc))
         for p in lineage.chain(profile, doc)
@@ -109,10 +107,42 @@ def profile_layers(
             layer = provider_spec.from_entry(entry, what, profile=True)
         except SpecError as exc:
             raise ProviderError(str(exc)) from exc
-        if not overlay_models:
+        if not overlay_models and what != "template":
             layer = provider_spec.replace(layer, models={})
         layers.append(layer)
-    return layers
+    return layers[0], layers[1:]
+
+
+def profile_layers(
+    profile: Profile, doc: Optional[dict] = None, *, overlay_models: bool = True
+) -> list:
+    """The spec layer of each profile in the chain, root ancestor first.
+
+    The template is not among them: it sits *under* the provider (see
+    :func:`base_spec`).
+    """
+    doc = store.load() if doc is None else doc
+    return _layers(profile, doc, overlay_models=overlay_models)[1]
+
+
+def template_layer(profile: Profile, doc: Optional[dict] = None) -> ProviderSpec:
+    """The template's spec layer as ``profile`` sees it (its clears applied)."""
+    doc = store.load() if doc is None else doc
+    return _layers(profile, doc)[0]
+
+
+def base_spec(
+    profile: Profile, name: Optional[str] = None, doc: Optional[dict] = None
+) -> ProviderSpec:
+    """The provider's spec over the template: what the profile chain sits on.
+
+    Order, lowest first: template < provider < root ancestor < ... < profile.
+    The template is the general default and fills only what the provider
+    leaves unset; a provider describes one backend and its values win.
+    """
+    doc = store.load() if doc is None else doc
+    provider = spec(resolve_name(profile, doc) if name is None else name, doc)
+    return provider_spec.overlay(template_layer(profile, doc), provider)
 
 
 def profile_overlay(profile: Profile, doc: Optional[dict] = None) -> ProviderSpec:
@@ -130,7 +160,7 @@ def spec_for(
     *,
     overlay_models: bool = True,
 ) -> ProviderSpec:
-    """Provider spec with the profile chain's overlay applied.
+    """Provider spec with the template under it and the profile chain over it.
 
     ``name`` defaults to the profile's resolved provider. ``overlay_models``
     is switched off by the runner when the backend in play is not the
@@ -139,10 +169,65 @@ def spec_for(
     of another one, while its context/compaction values still apply.
     """
     doc = store.load() if doc is None else doc
-    merged = spec(resolve_name(profile, doc) if name is None else name, doc)
+    merged = base_spec(profile, name, doc)
     for layer in profile_layers(profile, doc, overlay_models=overlay_models):
         merged = provider_spec.overlay(merged, layer)
     return merged
+
+
+def compact_problem(
+    profile: Profile, name: Optional[str] = None, doc: Optional[dict] = None
+) -> Optional[str]:
+    """Why ``profile`` on provider ``name`` cannot compact where it is told to.
+
+    ``None`` when ``auto_compact_at`` fits in ``context_window`` (or either is
+    not set). Otherwise one sentence naming both values and the layer each
+    came from, so the fix is obvious: the threshold would never be reached,
+    or reached only after the backend has already run out of context.
+    """
+    doc = store.load() if doc is None else doc
+    provider = resolve_name(profile, doc) if name is None else name
+    merged = spec_for(profile, provider, doc)
+    window, at = merged.context_window, merged.auto_compact_at
+    if not (window and at and at > window):
+        return None
+    chain = lineage.chain(profile, doc)
+    tmpl, layers = _layers(profile, doc)
+    named = [("the template", tmpl), (f"provider {provider!r}", spec(provider, doc))] + [
+        (f"profile {p.name!r}", layer) for p, layer in zip(chain, layers)
+    ]
+
+    def source(field: str) -> str:
+        for what, layer in reversed(named):
+            if getattr(layer, field):
+                return what
+        return "unknown"
+
+    return (
+        f"profile {profile.name!r}: auto_compact_at {at} (from "
+        f"{source('auto_compact_at')}) exceeds context_window {window} (from "
+        f"{source('context_window')}); lower auto_compact_at, or write "
+        "'auto_compact_at:' with no value on the profile to drop the "
+        "template's"
+    )
+
+
+def compact_problems(doc: Optional[dict] = None) -> Dict[str, str]:
+    """:func:`compact_problem` for every profile, keyed by profile name.
+
+    A profile whose configuration cannot be read at all is reported by the
+    commands that use it; it is left out here.
+    """
+    doc = store.load() if doc is None else doc
+    out: Dict[str, str] = {}
+    for p in profile_mod.list_all():
+        try:
+            problem = compact_problem(p, doc=doc)
+        except (ProviderError, lineage.LineageError):
+            continue
+        if problem:
+            out[p.name] = problem
+    return out
 
 
 def claude_env(
@@ -154,12 +239,11 @@ def claude_env(
 ) -> Dict[str, str]:
     """What the Claude harness receives for ``profile`` on provider ``name``.
 
-    The provider's translation, then each profile layer's additions
-    (:func:`translators.claude_layered`). On the built-in ``default``
-    provider only the profile layers contribute (compaction, model pins).
+    The translation of the provider over the template, then each profile
+    layer's additions (:func:`translators.claude_layered`).
     """
     doc = store.load() if doc is None else doc
-    base = spec(resolve_name(profile, doc) if name is None else name, doc)
+    base = base_spec(profile, name, doc)
     return translators.claude_layered(
         base, profile_layers(profile, doc, overlay_models=overlay_models)
     )

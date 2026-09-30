@@ -17,7 +17,7 @@ from typing import Optional
 
 from aiohttp import web
 
-from .. import daemon_client, store
+from .. import daemon_client, providers, store
 from . import cflow_clock, paths, restart_notice, resume, runtime_state, window as window_mod
 from . import instance_manifest, session_reminder
 from .api import build_app, notify_shutdown
@@ -160,6 +160,13 @@ async def _serve(host: str, port: int, cfg: dict, bound: Optional[dict] = None) 
     if bound is not None:
         bound["port"] = actual_port
     log.info("listening on http://%s:%s", host, actual_port)
+    # The same check `claunch daemon start/restart` prints: this daemon keeps
+    # serving, and refuses sessions on these profiles with the same message.
+    try:
+        for problem in providers.compact_problems().values():
+            log.error("%s -- sessions on this profile are refused", problem)
+    except Exception:
+        log.exception("could not check profiles for auto_compact_at")
     # Now that this daemon is announced, settle the account of the boot: read
     # (and clear) whatever asked for it, append this boot to the ledger the
     # next one will compare against, and turn both into debts. Done here

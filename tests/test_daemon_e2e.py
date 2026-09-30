@@ -2189,6 +2189,7 @@ def test_api_harnesses_report_declared_and_installed_separately(home, tmp_path):
             assert profile_doc["profiles"] == [
                 "codex-only", "pi-profile", "restricted"
             ]
+            assert profile_doc["compact_problems"] == {}
             assert "codex-only:codex" in profile_doc["profile_selectors"]
             assert "codex-only:claude" not in profile_doc["profile_selectors"]
             assert "pi-profile:claude" in profile_doc["profile_selectors"]

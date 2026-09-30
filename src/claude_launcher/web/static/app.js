@@ -8128,6 +8128,10 @@ function cflowOrphanActions(r) {
 }
 
 let profileDetails = {};
+/* profile name -> why its auto_compact_at does not fit its context_window
+   (/api/profiles compact_problems). The daemon refuses a session on such a
+   profile; the form says so before Create is pressed. */
+let profileCompactProblems = {};
 let newProfileOptions = [];
 let newHarnessFor = null;
 let newBorrowFor = null;
@@ -8553,6 +8557,7 @@ async function refreshProfiles() {
     for (const item of data.profile_details || []) {
       if (item && item.name) profileDetails[item.name] = item;
     }
+    profileCompactProblems = data.compact_problems || {};
     const optionDefs = data.profile_options ||
       (data.profile_selectors || data.profiles || []).map(
         (name) => ({ value: name, label: name })
@@ -8580,6 +8585,7 @@ async function refreshProfiles() {
       child ? "(inherit the parent's profile)" : null,
       wantedProfile
     );
+    markCompactProblems(select);
     newHarnessFor = null;
     refillNewHarnessOptions(
       f, child && !select.value ? "" : previousHarness, true
@@ -9683,6 +9689,18 @@ function renderRuntimeSummary() {
    nobody reads, and this one has to be legible on the one launch in fifty
    where it matters. On a child, a row the spawn policy locked is the
    parent's and says nothing here — same rule as the summary line's. */
+/* Name the profiles the daemon will refuse, in the list itself: the option
+   stays selectable (the hint below says why), and its tooltip carries the
+   whole sentence. */
+function markCompactProblems(select) {
+  for (const o of select.options) {
+    const problem = profileCompactProblems[o.value];
+    if (!problem) continue;
+    o.textContent = `${o.textContent} (config error)`;
+    o.title = problem;
+  }
+}
+
 function renderProfileHint() {
   const box = $("profile-hint");
   if (!box) return;  // a page that predates the row still runs
@@ -9698,8 +9716,13 @@ function renderProfileHint() {
   const choseOverride = !!f.profile.value || !!(f.harness && f.harness.value);
   const whose = (shown && (!parent || choseOverride))
     ? shown : (parent ? `${parent.name}'s profile` : "this profile");
+  const base = baseProfileName(picked || "") ||
+    (detail && detail.profile) || "";
+  const compact = profileCompactProblems[base];
   let text = "";
-  if (speaks("null_token") && f.null_token && f.null_token.checked) {
+  if (compact) {
+    text = `A session on this profile will be refused: ${compact}`;
+  } else if (speaks("null_token") && f.null_token && f.null_token.checked) {
     text = `--null: it boots with no token at all — ${whose}'s config and ` +
            `skills, but somebody has to run /login inside before it works.`;
   } else if (speaks("borrow") && f.borrow && f.borrow.value &&

@@ -1951,8 +1951,19 @@ async def h_profiles(request: web.Request) -> web.Response:
             "profile_selectors": selectors,
             "profile_options": profile_options,
             "profile_details": items,
+            # Profiles whose auto_compact_at exceeds their context_window:
+            # a session on one is refused (harness.normalize), and the form
+            # says so next to the profile picker before Create is pressed.
+            "compact_problems": _compact_problems(doc),
         }
     )
+
+
+def _compact_problems(doc: dict) -> dict:
+    try:
+        return providers.compact_problems(doc)
+    except (providers.ProviderError, store.StoreError):
+        return {}
 
 
 async def h_profiles_permission_mode(request: web.Request) -> web.Response:
