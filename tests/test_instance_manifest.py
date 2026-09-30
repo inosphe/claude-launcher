@@ -155,6 +155,52 @@ def test_a_session_of_an_instance_reaches_it_without_L(home, tmp_path, monkeypat
         os.environ.update(saved)
 
 
+@pytest.mark.parametrize("origin", ["handoff", "manifest"])
+def test_a_session_does_not_carry_its_daemons_port(home, tmp_path, monkeypatch, origin):
+    """The port is the daemon's setting, whatever put it in the daemon's
+    environment, and a session launched without it cannot hand it to the
+    other instance its ``claunch -L other`` auto-starts (claunch-d55af).
+
+    ``handoff`` is the transition: a named instance restarted by code from
+    before ``SUCCESSOR_PORT_ENV`` hands its successor CLAUNCH_DAEMON_PORT,
+    and the successor, now running this code, cannot tell that from a pin --
+    so it keeps it through every later restart, and only the session side
+    can drop it.
+    """
+    from claude_launcher import profile
+    from claude_launcher.daemon import harness
+
+    monkeypatch.setenv(paths.INSTANCE_ENV, "team")
+    if origin == "handoff":
+        monkeypatch.setenv(im.PORT_ENV, "45671")
+    else:
+        _manifest(home, "team", {"port": 45671})
+        im.apply()
+    assert os.environ[im.PORT_ENV] == "45671"
+    profile.create("work")
+
+    sdef = harness.normalize(
+        harness.SessionDef(name="sx", profile="work", cwd=str(tmp_path))
+    )
+    _, env, _ = harness.build_command(sdef)
+
+    assert env[paths.INSTANCE_ENV] == "team"
+    assert im.PORT_ENV not in env
+
+    # The session's `claunch -L other ...`: what cli.main does before the
+    # command auto-starts the other instance with this environment.
+    saved = os.environ.copy()
+    os.environ.clear()
+    os.environ.update(env)
+    try:
+        os.environ[paths.INSTANCE_ENV] = "other"
+        im.apply()
+        assert im.PORT_ENV not in os.environ
+    finally:
+        os.environ.clear()
+        os.environ.update(saved)
+
+
 def test_switching_instance_undoes_the_previous_manifest(home, tmp_path, monkeypatch):
     _manifest(home, "team", {"home": str(tmp_path / "t"), "config": str(tmp_path / "t.yaml")})
     monkeypatch.setenv(paths.INSTANCE_ENV, "team")

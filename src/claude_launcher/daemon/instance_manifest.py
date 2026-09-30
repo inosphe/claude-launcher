@@ -56,12 +56,15 @@ BASE_ENV = paths.INSTANCE_BASE_ENV
 #: (``restart --all``, ``claunch -L other`` from inside an instance's session)
 #: can put the environment back before applying the next manifest.
 PREV_ENV = "CLAUNCH_INSTANCE_PREV"
+#: The port a named instance binds. Read by the daemon only; its sessions are
+#: launched without it (see ``daemon.harness``).
+PORT_ENV = "CLAUNCH_DAEMON_PORT"
 
 #: Manifest key -> the environment variable it sets.
 _KEY_ENV = {
     "home": config.LAUNCHER_HOME_ENV,
     "config": config.LAUNCHER_SYNC_ENV,
-    "port": "CLAUNCH_DAEMON_PORT",
+    "port": PORT_ENV,
 }
 
 #: Every variable :func:`apply` may set -- what a caller that switches

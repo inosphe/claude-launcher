@@ -27,7 +27,7 @@ from .. import borrowing, harnesses as harness_registry
 from .. import lineage, metering, pi_provider, profile as profile_mod, projects, providers, routing, runner
 from .. import store, transcripts
 from .. import config as launcher_config
-from . import mesh_roles, paths, pty_backend
+from . import instance_manifest, mesh_roles, paths, pty_backend
 
 log = logging.getLogger("claunch.daemon.harness")
 
@@ -44,6 +44,17 @@ _NESTED_SESSION_MARKERS = (
     "CLAUDE_CODE_ENTRYPOINT",
     "CLAUDE_CODE_SSE_PORT",
 )
+
+#: The daemon's own settings, which a session has no use for and must not
+#: pass on. A named instance's port is the one here: it is in the daemon's
+#: environment because the daemon binds it (pinned by the operator, by the
+#: instance manifest, or handed over by a predecessor whose code predates
+#: ``daemon.__main__.SUCCESSOR_PORT_ENV``), and a session that inherited it
+#: handed it to any
+#: daemon its ``claunch -L other`` auto-started, which then tried to bind this
+#: instance's port (claunch-d55af). Where it came from cannot be told apart
+#: from inside the daemon, so it is dropped here whatever its origin.
+_DAEMON_ONLY_ENV = (instance_manifest.PORT_ENV,)
 
 #: Injected on every claude spawn (``--settings``): a SessionStart hook that
 #: fires on ``compact`` and ``clear`` — the two moments the transcript-carried
@@ -906,9 +917,11 @@ def build_command(
     # parent leaves behind that are wrong for a PTY child: the nested-session
     # markers above, and the "do not colour your output" ones the daemon
     # inherits when it is started from an agent's tool shell (see
-    # pty_backend.strip_inherited_color_answers).
+    # pty_backend.strip_inherited_color_answers) -- and minus the daemon's
+    # own settings (_DAEMON_ONLY_ENV).
     base = pty_backend.strip_inherited_color_answers({
-        k: v for k, v in os.environ.items() if k not in _NESTED_SESSION_MARKERS
+        k: v for k, v in os.environ.items()
+        if k not in _NESTED_SESSION_MARKERS and k not in _DAEMON_ONLY_ENV
     })
     entry = harness_registry.get(sdef.harness)
     borrow_prof = None
