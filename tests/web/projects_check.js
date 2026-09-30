@@ -5,9 +5,12 @@
    the page owns is the following, and each is pinned here because each fails
    silently:
 
+   - The mesh list is not narrowed at all (claunch-6deos): a mesh may hold
+     members of several projects, so the rail lists every mesh whatever
+     project is picked.
    - The polls carry no filter; the page narrows. Both polls fetch every
      project and the rail draws the picked one out of the cache
-     (railSessions, meshInCurrentProject), so a pick redraws at once with no
+     (railSessions), so a pick redraws at once with no
      request, and a tab of another project's session keeps a real record:
      its tab shows the session's state and a chip naming its project instead
      of the "unknown" dot a filtered poll left it with.
@@ -194,7 +197,7 @@ const code = [
   "let sessionsCache = [];",
   stateBlock,
   slice("recordProject"), slice("sessionInCurrentProject"),
-  slice("meshInCurrentProject"), slice("railSessions"),
+  slice("railSessions"),
   slice("hashWithProject"), slice("syncProjectHash"),
   slice("setCurrentProject"), slice("syncRouteProject"),
   "let projectFollowPending = '';", slice("followSessionProject"),
@@ -202,7 +205,7 @@ const code = [
   slice("applyProjectDefaultCwd"), slice("projectSelectOptions"),
   slice("refreshProjects"),
   "return { setCurrentProject, applyProjectDefaultCwd, railSessions, " +
-  "meshInCurrentProject, hashWithProject, syncRouteProject, followSessionProject, " +
+  "hashWithProject, syncRouteProject, followSessionProject, " +
   "sessionTabOtherProject, setSessions: (l) => { sessionsCache = l; }, " +
   "pending: () => projectFollowPending, " +
   "projectSelectOptions, refreshProjects, current: () => currentProject, " +
@@ -275,9 +278,9 @@ const fns = new Function(...Object.keys(ctx), code)(...Object.values(ctx));
   fns.setCurrentProject("default");
   check("...and a record naming no project is the default one",
         fns.railSessions().map((s) => s.name), ["b", "c"]);
-  check("a mesh is narrowed by the same rule",
-        [fns.meshInCurrentProject({ project: "default" }),
-         fns.meshInCurrentProject({ project: "hq" })], [true, false]);
+  check("the mesh list is never narrowed to the picked project",
+        [src.includes("function meshInCurrentProject("),
+         /meshCache = \(data\.meshes \|\| \[\]\)\.filter/.test(src)], [false, false]);
 
   /* a tab of another project keeps its record and names the project */
   check("a tab of another project names it",

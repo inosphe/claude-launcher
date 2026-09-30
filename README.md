@@ -2192,19 +2192,24 @@ claunch mesh ls --project launcher
   projects existed reads as its, so nothing on disk is migrated.
 - A managed session is told its project: `CLAUNCH_PROJECT` is exported next
   to `CLAUNCH_SESSION`, and the mesh join briefing carries a `project:` line.
-  Inside such a session `claunch sessions` and `claunch mesh ls` show that
-  project only and end with a line saying how many rows other projects hold;
-  `--project all` widens them, `--project NAME` picks another. At a person's
-  own shell nothing narrows.
+  Inside such a session `claunch sessions` shows that project only and ends
+  with a line saying how many rows other projects hold; `--project all`
+  widens it, `--project NAME` picks another. At a person's own shell nothing
+  narrows.
+- Meshes span projects. A mesh's project is a filing tag, not a boundary:
+  sessions of any project join the same mesh and message each other, and
+  `claunch mesh ls` lists every mesh inside a session too (`--project NAME`
+  still picks one when asked).
 - A project's **default workspace** is a registered [workspace](#workspaces-where-a-session-may-be-spawned)
   name. A session created in the project with no directory of its own starts
   there — a default only; `-c`, `--workspace`, `--worktree` and the form's
   Directory row still win, and a session in the project may sit anywhere.
 - Workspaces are not filed under projects: two projects may point at the
   same directory.
-- The web UI's rail has a **Project** selector that narrows both the
-  session list and the mesh list (`?project=` on `/api/sessions` and
-  `/api/mesh`) and files what the create form and the mesh form make. The
+- The web UI's rail has a **Project** selector that narrows the session
+  list and files what the create form and the mesh form make. The mesh list
+  shows every project's meshes, tagging those outside the default project.
+  `?project=` on `/api/sessions` and `/api/mesh` narrows an API read. The
   registry itself is `/api/projects` and the Projects card on the settings
   page. Config lives under `projects:` in `~/.claunch.yaml`, machine-local
   like `workspaces`.

@@ -3205,14 +3205,18 @@ class MeshManager:
         """The ``project:`` line of the briefing, or ``""`` for a member whose
         record this daemon does not hold (remote, or gone).
 
-        The session's own project, not the mesh's: they usually agree, but
-        the line answers "which project am I filed under" — the scope
-        ``claunch sessions`` and ``claunch mesh ls`` narrow to inside the
-        session — and that is a fact about the session. The hint about
-        ``--project all`` rides here because the briefing is the one block a
-        member is guaranteed to read; s769 (2026-09-24) listed every
+        The session's own project, not the mesh's: the line answers "which
+        project am I filed under" — the scope ``claunch sessions`` narrows to
+        inside the session — and that is a fact about the session. The hint
+        about ``--project all`` rides here because the briefing is the one
+        block a member is guaranteed to read; s769 (2026-09-24) listed every
         default-project session because nothing had ever told it there was
         a project to be in.
+
+        The mesh is not narrowed, and the line says so: members of other
+        projects are on the roster above and are messaged like any other
+        (claunch-6deos). Without that clause a member reads "this project
+        only" as a limit on who it may talk to.
         """
         if not self._is_local(mesh, member):
             return ""
@@ -3222,9 +3226,10 @@ class MeshManager:
             return ""
         project = projects.normalize(getattr(sdef, "project", None))
         return (
-            f"project: {project} -- 'claunch sessions' and 'claunch mesh ls' "
-            f"show this project only; add '--project {projects.ALL}' for every "
-            "project\n"
+            f"project: {project} -- 'claunch sessions' shows this project only; "
+            f"add '--project {projects.ALL}' for every project. The mesh spans "
+            "projects: members of any project are on its roster and can be "
+            "messaged\n"
         )
 
     async def _brief(self, mesh: Mesh, member: Member, *, hold: float = 30.0) -> None:

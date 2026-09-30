@@ -6,6 +6,9 @@ default-project rows as its own roster. Three things were missing and are
 tested here one by one: the project in the session's environment, the
 listings narrowing to it inside a managed session, and the join briefing
 saying which project the member is in.
+
+Meshes are the exception (claunch-6deos): ``claunch mesh ls`` is not
+narrowed, and members of different projects share a mesh like any other.
 """
 
 from __future__ import annotations
@@ -14,7 +17,7 @@ from claude_launcher import cli, daemon_client, profile, projects
 from claude_launcher.daemon import harness
 from claude_launcher.daemon.harness import SessionDef
 
-from test_mesh_wire import _Manager, _member, _mesh
+from test_mesh_wire import _Manager, _connect, _member, _mesh, _sent
 
 
 # --------------------------------------------------------------------------- #
@@ -169,17 +172,22 @@ def test_claunch_sessions_falls_back_to_the_record_when_the_variable_is_missing(
     assert "s127" not in out and "project: gds6 (this session's)" in out
 
 
-def test_claunch_mesh_ls_inside_a_session_shows_its_project_only(monkeypatch, capsys):
-    out, _ = _run(monkeypatch, capsys, "mesh", "ls", env=INSIDE)
+def test_claunch_mesh_ls_is_not_narrowed_to_the_sessions_project(monkeypatch, capsys):
+    """Meshes span projects (claunch-6deos): a session in 'gds6' sees the
+    default project's mesh too, because it may hold members it can talk to.
+    Only an explicit --project narrows."""
+    for env, argv in ((INSIDE, ["mesh", "ls"]),
+                      (INSIDE, ["mesh", "ls", "--project", "all"]),
+                      ({}, ["mesh", "ls"])):
+        out, client = _run(monkeypatch, capsys, *argv, env=env)
+        assert "gds6-main" in out and "mesh0" in out
+        assert "this session's" not in out and "not shown" not in out
+        # no lookup of the session's own record: nothing narrows to it
+        assert not any(c.startswith("/api/sessions") for c in client.calls)
+
+    out, client = _run(monkeypatch, capsys, "mesh", "ls", "--project", "gds6", env=INSIDE)
     assert "gds6-main" in out and "mesh0" not in out
-    assert "project: gds6 (this session's) -- 1 mesh(s) in other projects not shown" in out
-    assert "'claunch mesh ls --project all'" in out
-
-    out, _ = _run(monkeypatch, capsys, "mesh", "ls", "--project", "all", env=INSIDE)
-    assert "gds6-main" in out and "mesh0" in out and "this session's" not in out
-
-    out, _ = _run(monkeypatch, capsys, "mesh", "ls", env={})
-    assert "gds6-main" in out and "mesh0" in out and "this session's" not in out
+    assert client.calls[0] == "/api/mesh?project=gds6"
 
 
 # --------------------------------------------------------------------------- #
@@ -193,8 +201,9 @@ def test_the_join_briefing_carries_the_members_project(home):
     block = mm.briefing_block(mesh, me)
     assert (
         "you: me (role: worker)\n"
-        "project: gds6 -- 'claunch sessions' and 'claunch mesh ls' show this "
-        "project only; add '--project all' for every project\n"
+        "project: gds6 -- 'claunch sessions' shows this project only; add "
+        "'--project all' for every project. The mesh spans projects: members "
+        "of any project are on its roster and can be messaged\n"
     ) in block
 
     # a record that never named one is in the default project, spelled out
@@ -204,3 +213,28 @@ def test_the_join_briefing_carries_the_members_project(home):
     # a member whose session this daemon does not hold gets no line
     ghost = _member(mesh, "ghost", "gone", role="worker")
     assert "\nproject:" not in mm.briefing_block(mesh, ghost)
+
+
+# --------------------------------------------------------------------------- #
+# 5. a mesh spans projects (claunch-6deos)
+# --------------------------------------------------------------------------- #
+def test_members_of_different_projects_see_and_message_each_other(home):
+    """The project is a filing tag, never a gate: two members of one mesh
+    whose sessions sit in different projects are on each other's roster and
+    a send between them is delivered like any other."""
+    mgr = _Manager()
+    mm, mesh = _mesh(mgr)
+    mesh.project = "gds6"
+    a = _member(mesh, "a", mgr.add("sa"), role="worker")
+    b = _member(mesh, "b", mgr.add("sb"), role="worker")
+    mgr.get("sa").sdef.project = "gds6"
+    mgr.get("sb").sdef.project = None          # the default project
+    _connect(mesh, "a", "b")
+
+    assert "members: b (" in mm.briefing_block(mesh, a)
+    assert "members: a (" in mm.briefing_block(mesh, b)
+
+    mm._send_core(mesh, "a", "b", "from gds6 to default")
+    mm._send_core(mesh, "b", "a", "and back")
+    assert [m["body"] for m in _sent(mesh, "b")] == ["from gds6 to default"]
+    assert [m["body"] for m in _sent(mesh, "a")] == ["and back"]
