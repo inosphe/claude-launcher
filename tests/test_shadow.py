@@ -158,6 +158,22 @@ def test_cflow_position():
     }
 
 
+def test_relay_link():
+    link = shadow.relay_link
+    assert link("wss://relay.example.com/agent", "pcA", "s4") == (
+        "https://relay.example.com/t/pcA/#/s/s4"
+    )
+    # plain ws is plain http; a port carries over, the uplink's path does not
+    assert link("ws://10.0.0.5:8443/x/y", "pcA", "s4") == "http://10.0.0.5:8443/t/pcA/#/s/s4"
+    assert link("wss://[::1]:9/agent", "pcA", "s4") == "https://[::1]:9/t/pcA/#/s/s4"
+    # names are escaped into their path and hash segments
+    assert link("wss://r", "pc b/2", "s#1") == "https://r/t/pc%20b%2F2/#/s/s%231"
+    # nothing to put in front: no link
+    for url in ("", "https://relay.example.com", "wss://", "not a url", "wss://r:99999"):
+        assert link(url, "pcA", "s4") == "", url
+    assert link("wss://r", "", "s4") == "" and link("wss://r", "pcA", "") == ""
+
+
 def test_input_enabled():
     assert shadow.input_enabled(None) is True
     assert shadow.input_enabled({}) is True
@@ -517,6 +533,14 @@ def test_shadow_list_stream_and_session_line(home, tmp_path):
             # ...with the project that mesh is filed under here, which the
             # rail narrows by (a mirror joined with no project: the default)
             assert rows[0]["meshes"][0]["project"] == "default"
+            # no relay in front of pcA here: no link to its own page
+            assert rows[0]["link"] is None
+            # with one, the row links sa on pcA's own dashboard through it
+            mm_b.relay_url_for = (
+                lambda machine: "wss://relay.example.com/agent" if machine == "pcA" else ""
+            )
+            doc = await (await client_b.get("/api/shadows", headers=bearer)).json()
+            assert doc["shadows"][0]["link"] == "https://relay.example.com/t/pcA/#/s/sa"
             # the list is behind the daemon's own auth like everything else
             assert (await client_b.get("/api/shadows")).status == 401
 

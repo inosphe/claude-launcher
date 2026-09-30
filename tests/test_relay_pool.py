@@ -324,6 +324,25 @@ def test_peer_http_caches_the_route():
     asyncio.run(run())
 
 
+def test_carrier_url_names_the_relay_that_carries_the_peer():
+    async def run():
+        work = _StubUplink("work", ["alice"])
+        home = _StubUplink("home", ["bob"])
+        pool = RelayPool([work, home])
+        # no route learned yet: the relay peer_http would try first
+        assert pool.carrier_url("bob") == "wss://work/agent"
+        await pool.peer_http("bob", b"x")
+        assert pool.carrier_url("bob") == "wss://home/agent"
+        # a disconnected relay is not offered as the way in
+        work.connected = False
+        assert pool.carrier_url("alice") == "wss://home/agent"
+        home.connected = False
+        assert pool.carrier_url("alice") == ""
+        assert RelayPool([]).carrier_url("alice") == ""
+
+    asyncio.run(run())
+
+
 def test_peer_http_refinds_a_backend_that_moved_relays():
     async def run():
         work = _StubUplink("work", ["bob"])
@@ -465,8 +484,9 @@ def test_real_uplink_satisfies_the_pool_surface():
     up = RelayUplink(url="ws://x", token="t", name="pc",
                      local_host="127.0.0.1", local_port=1, id="work")
     for attr in ("id", "name", "url", "connected", "peering", "listing",
-                 "peer_http", "peer_list"):
+                 "peer_http", "peer_list", "carrier_url"):
         assert hasattr(up, attr)
+    assert up.carrier_url("anyone") == "ws://x"
     # An uplink with no explicit handle falls back to its backend name.
     assert RelayUplink(url="ws://x", token="t", name="pc",
                        local_host="127.0.0.1", local_port=1).id == "pc"

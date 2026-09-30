@@ -5392,6 +5392,7 @@ div.shadow-card .shadow-line { white-space: normal; overflow-wrap: anywhere; }
 .shadow-cflow { color: #8b93a1; }
 .shadow-cflow.gated { color: #d29922; }
 .shadow-error { color: #f85149; }
+.shadow-relay-link { color: #79c0ff; font-family: Cascadia Mono, Consolas, Menlo, monospace; }
 #shadow-view { flex: 1; min-height: 0; display: flex; flex-direction: column; }
 #shadow-view.hidden { display: none; }
 #shadow-head { padding: 14px 16px 0; }

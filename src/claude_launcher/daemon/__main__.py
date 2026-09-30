@@ -504,8 +504,8 @@ def _wire_federation(mesh_manager: MeshManager, uplink) -> None:
 
     ``uplink`` is a :class:`~.relay_uplink.RelayPool` in the daemon and a lone
     :class:`~.relay_uplink.RelayUplink` in the tests that drive one directly;
-    both expose ``name``/``connected``/``peer_http``/``peer_list``, which is
-    all this wiring needs.
+    both expose ``name``/``connected``/``peer_http``/``peer_list``/
+    ``carrier_url``, which is all this wiring needs.
 
     The transport is one JSON POST per call, bridged to the peer daemon's
     ``/peer/*`` endpoint through the relay (PEER_OPEN). Transport-level
@@ -546,6 +546,7 @@ def _wire_federation(mesh_manager: MeshManager, uplink) -> None:
     mesh_manager.peer_transport = peer_call
     mesh_manager.peer_streamer = peer_stream
     mesh_manager.relay_connected = lambda: uplink.connected
+    mesh_manager.relay_url_for = uplink.carrier_url
     mesh_manager.peer_lister = uplink.peer_list
 
 
