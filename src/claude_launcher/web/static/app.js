@@ -12062,7 +12062,7 @@ function onTermInputKeydown(ev) {
   if (!field || field.disabled) return;
   if (ev.isComposing || ev.keyCode === 229) return;
   const key = ev.key;
-  if (ev.altKey && !ev.ctrlKey && !ev.metaKey && (key === "v" || key === "V")) {
+  if (isAltV(ev)) {
     ev.preventDefault();
     pasteClipboardImage($("term-input-note"));
     return;
@@ -12125,12 +12125,23 @@ function insertTermInputText(field, text) {
   autogrowTermInput(field);
 }
 
-/* ---- Alt+V: a clipboard image goes to the harness --------------------
+/* ---- images for the session: Alt+V, a pasted file, the file picker ----
    The program in the PTY reads bytes, so there is no way to hand it an
    attachment from here. What it does accept is an image off the clipboard —
    so the image is uploaded, the daemon stores it, puts it on the clipboard
    of the machine it runs on, and sends the keystroke that harness reads an
    image with. Nothing is typed into the composer.
+
+   The image always travels from THIS browser, as bytes in an upload. That is
+   what makes the result the same wherever the browser is: on the daemon's
+   own PC, on another PC on the LAN, or behind the relay (`/t/<name>/`, which
+   passes the body through untouched). What must never happen is the harness
+   reading a clipboard on its own — that is the daemon machine's clipboard,
+   which is this browser's clipboard only when the two share a PC. So Alt+V
+   is taken from the terminal as well as from the composer (onTermKeyEvent):
+   passed through, xterm would type ESC v into the PTY and the harness would
+   paste whatever the daemon's PC last copied, which from another PC is
+   nothing, or somebody else's screenshot.
 
    This used to put the daemon's path to the file into the line instead.
    That only worked for a browser on the daemon's own machine: from another
@@ -12140,48 +12151,123 @@ function insertTermInputText(field, text) {
    not when it did not (`reason`) — the file is stored either way, so the
    two are separate answers and the line shows which one it got.
 
-   Two ways in, because the browsers differ on which one a page may use:
+   Three ways in, because the browsers differ on which one a page may use:
    Alt+V reads the clipboard itself (navigator.clipboard.read, which needs
-   the permission and a secure context), and an ordinary Ctrl+V carrying an
-   image file is handled on the paste event, which needs neither. */
+   the permission and a secure context — an http:// page opened from another
+   PC is not one), an ordinary Ctrl+V carrying image files is handled on the
+   paste event, which needs neither, and the image button opens a file
+   picker that takes several images at once. */
 
-async function uploadPastedImage(blob, note) {
-  if (!currentName) return false;
-  const kind = (blob.type || "").toLowerCase();
+/* The media types the daemon's route stores (PASTE_IMAGE_TYPES in api.py),
+   by file extension, for a picked file whose browser left `type` empty. */
+const PASTE_IMAGE_KINDS = {
+  png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg",
+  gif: "image/gif", webp: "image/webp",
+};
+
+function imageKindOf(file) {
+  const kind = String((file && file.type) || "").toLowerCase();
+  if (kind) return kind;
+  const m = /\.([a-z0-9]+)$/i.exec(String((file && file.name) || ""));
+  return (m && PASTE_IMAGE_KINDS[m[1].toLowerCase()]) || "";
+}
+
+/* Alt+V by the physical key as well as by the character: with a Hangul IME
+   on, or a layout that puts another letter there, `key` is not "v" but the
+   key the person pressed is the same one; on a Mac, Option+V is "√". */
+function isAltV(ev) {
+  if (!ev || !ev.altKey || ev.ctrlKey || ev.metaKey) return false;
+  return ev.key === "v" || ev.key === "V" || ev.code === "KeyV";
+}
+
+/* One upload, answered as {ok, message}: the caller decides where the words
+   go, because a batch reports once for all of its files. */
+async function uploadImage(blob) {
+  if (!currentName) return { ok: false, message: "no session is attached" };
+  const kind = imageKindOf(blob);
+  let resp;
   try {
-    const resp = await api(
+    resp = await api(
       `/api/sessions/${encodeURIComponent(currentName)}/paste-image`,
       { method: "POST", headers: { "Content-Type": kind }, body: blob }
     );
-    const doc = await resp.json().catch(() => ({}));
-    if (!resp.ok || !doc.path) {
-      if (note) termInputNote(note, doc.error || "the image was not stored", true);
-      return false;
-    }
-    if (!doc.delivered) {
-      // Stored but not handed over. The daemon's reason is shown as it came:
-      // it names the thing that has to change (an undeclared harness, a
-      // missing clipboard tool), and a rewrite here would lose that.
-      if (note) {
-        termInputNote(note, doc.reason || "the image was stored but not delivered", true);
-      }
-      return false;
-    }
-    if (note) termInputNote(note, "image sent to the session");
-    return true;
   } catch {
-    if (note) termInputNote(note, "nothing was stored — the daemon is unreachable", true);
-    return false;
+    return { ok: false, message: "nothing was stored — the daemon is unreachable" };
   }
+  const doc = await resp.json().catch(() => null);
+  if (!doc) {
+    // Not the route's answer at all. Through the relay that is what an
+    // expired relay login looks like: the relay answers the POST with a
+    // redirect to its login page, and fetch follows it to HTML.
+    return {
+      ok: false,
+      message: resp.redirected
+        ? "the relay sent the upload to its login page — reload the page and sign in again"
+        : `the upload was answered with HTTP ${resp.status} and no answer from the daemon`,
+    };
+  }
+  if (!resp.ok || !doc.path) {
+    return { ok: false, message: doc.error || "the image was not stored" };
+  }
+  if (!doc.delivered) {
+    // Stored but not handed over. The daemon's reason is shown as it came:
+    // it names the thing that has to change (an undeclared harness, a
+    // missing clipboard tool), and a rewrite here would lose that.
+    return { ok: false, message: doc.reason || "the image was stored but not delivered" };
+  }
+  return { ok: true, message: "image sent to the session" };
 }
 
-/* The image on the clipboard right now, or null. Reading the clipboard can
-   be refused (no permission, an insecure origin, a browser that has no
-   read()), and a refusal is not an image — the caller says so rather than
-   leaving the reader looking at a box that did nothing. */
+async function uploadPastedImage(blob, note) {
+  const res = await uploadImage(blob);
+  if (note) termInputNote(note, res.message, !res.ok);
+  return res.ok;
+}
+
+/* Several images, one after another and in the order given. The daemon holds
+   its clipboard between two of them until the harness has had time to read
+   the first (PASTE_SETTLE_SECONDS), so they are sent in sequence rather
+   than all at once — in parallel they would only queue there. Files that
+   are not images are left out and counted, not uploaded to be refused. */
+async function sendImageFiles(files, note) {
+  const list = Array.from(files || []);
+  const images = list.filter((f) => imageKindOf(f).startsWith("image/"));
+  const skipped = list.length - images.length;
+  if (!images.length) {
+    if (note) termInputNote(note, list.length
+      ? "none of those files is an image" : "no image was given", true);
+    return 0;
+  }
+  if (images.length === 1 && !skipped) return (await uploadPastedImage(images[0], note)) ? 1 : 0;
+  let sentCount = 0;
+  let firstFailure = "";
+  for (let i = 0; i < images.length; i++) {
+    if (note) termInputNote(note, `sending image ${i + 1} of ${images.length}…`);
+    const res = await uploadImage(images[i]);
+    if (res.ok) sentCount++;
+    else if (!firstFailure) {
+      const label = images[i].name ? `${images[i].name}: ` : "";
+      firstFailure = label + res.message;
+    }
+  }
+  let message = `${sentCount} of ${images.length} images sent to the session`;
+  if (skipped) message += ` (${skipped} file${skipped === 1 ? "" : "s"} not an image, left out)`;
+  if (firstFailure) message += ` — ${firstFailure}`;
+  if (note) termInputNote(note, message, sentCount !== images.length || skipped > 0);
+  return sentCount;
+}
+
+/* The image on the clipboard right now, or null. A browser that cannot read
+   the clipboard at all throws ClipboardUnavailable: that is not "no image",
+   and saying "no image" to someone looking at one on their clipboard sends
+   them looking for the wrong fault. */
 async function clipboardImage() {
   const clip = navigator.clipboard;
-  if (!clip || typeof clip.read !== "function") return null;
+  if (!clip || typeof clip.read !== "function") {
+    const err = new Error("this page cannot read the clipboard");
+    err.name = "ClipboardUnavailable";
+    throw err;
+  }
   const items = await clip.read();
   for (const item of items) {
     const kind = (item.types || []).find((t) => t.startsWith("image/"));
@@ -12190,40 +12276,125 @@ async function clipboardImage() {
   return null;
 }
 
+/* Why the clipboard could not be read, in terms of what to do instead. An
+   http:// page opened from another PC is the common case: only https and
+   localhost are secure origins, and outside one the browser gives the page
+   no clipboard reader at all. The paste event and the file picker need
+   neither, so they are the way through. */
+function clipboardRefusal(err) {
+  const insecure = typeof isSecureContext !== "undefined" && isSecureContext === false;
+  let why;
+  if (err && err.name === "ClipboardUnavailable") {
+    why = insecure
+      ? "this page is not a secure origin (http:// from another PC), so the browser keeps its clipboard from it"
+      : "this browser gives the page no clipboard reader";
+  } else {
+    why = "the browser would not hand over the clipboard";
+  }
+  return `${why} — use Ctrl+V in this line to paste the image, or the image button to pick files`;
+}
+
 async function pasteClipboardImage(note) {
   let blob = null;
   try {
     blob = await clipboardImage();
-  } catch {
-    if (note) {
-      termInputNote(note, "the browser would not hand over the clipboard — "
-        + "use Ctrl+V to paste the image instead", true);
-    }
+  } catch (err) {
+    if (note) termInputNote(note, clipboardRefusal(err), true);
     return false;
   }
   if (!blob) {
-    if (note) termInputNote(note, "there is no image on the clipboard", true);
+    if (note) termInputNote(note, "there is no image on this browser's clipboard", true);
     return false;
   }
   return uploadPastedImage(blob, note);
 }
 
-/* An ordinary paste carrying an image file. The text of a mixed paste is
-   left to the browser; only the image is taken, and only then is the event
-   taken from it. */
+/* The image files a paste carries. `items` is where a screenshot arrives;
+   `files` is where some browsers put files copied in a file manager, and it
+   is read only when `items` had none, because the two can list the same
+   file twice. */
+function pastedImageFiles(data) {
+  if (!data) return [];
+  const out = [];
+  for (const it of Array.from(data.items || [])) {
+    if (it.kind !== "file" || !(it.type || "").startsWith("image/")) continue;
+    const f = it.getAsFile();
+    if (f) out.push(f);
+  }
+  if (out.length) return out;
+  return Array.from(data.files || []).filter((f) => imageKindOf(f).startsWith("image/"));
+}
+
+/* An ordinary paste carrying images. The text of a mixed paste is left to
+   the browser; only the images are taken, and only then is the event taken
+   from it. */
 function onTermInputPaste(ev) {
   const field = ev.currentTarget || ev.target;
   if (!field || field.disabled) return;
-  const data = ev.clipboardData;
-  if (!data) return;
-  const items = Array.from(data.items || []);
-  const image = items.find((it) => it.kind === "file"
-    && (it.type || "").startsWith("image/"));
-  if (!image) return;
-  const blob = image.getAsFile();
-  if (!blob) return;
+  const files = pastedImageFiles(ev.clipboardData);
+  if (!files.length) return;
   ev.preventDefault();
-  uploadPastedImage(blob, $("term-input-note"));
+  sendImageFiles(files, $("term-input-note"));
+}
+
+/* The same paste, landing on the terminal instead of the line. Taken in the
+   capture phase on the terminal's container, ahead of xterm's own listener
+   on its textarea: xterm would read the text of the paste and drop the
+   image without a word. */
+function onTerminalPaste(ev) {
+  if (!currentName) return;
+  const files = pastedImageFiles(ev.clipboardData);
+  if (!files.length) return;
+  ev.preventDefault();
+  if (ev.stopImmediatePropagation) ev.stopImmediatePropagation();
+  else if (ev.stopPropagation) ev.stopPropagation();
+  sendImageFiles(files, $("term-input-note"));
+}
+
+/* Whether the attached session's harness takes an image off the clipboard
+   (its declaration names `image_paste_keys`). Unknown counts as yes — the
+   daemon then answers for itself, with a reason if it cannot. */
+function sessionTakesImages(name) {
+  const rec = (sessionsCache || []).find((s) => s.name === name);
+  const harness = (rec && rec.harness) || "claude";
+  const detail = (typeof harnessDetails === "object" && harnessDetails)
+    ? harnessDetails[harness] : null;
+  if (!detail || !Array.isArray(detail.image_paste_keys)) return true;
+  return detail.image_paste_keys.length > 0;
+}
+
+/* xterm's key hook (attachCustomKeyEventHandler): false keeps the event from
+   becoming bytes. Alt+V is taken on every phase xterm asks about, and acted
+   on once, on keydown. A harness that declares no image key keeps its Alt+V
+   — to it the chord is an ordinary Meta-v, and this page has no image to
+   give it anyway. */
+function onTermKeyEvent(ev) {
+  if (!isAltV(ev)) return true;
+  if (!sessionTakesImages(currentName)) return true;
+  if (ev.type === "keydown") {
+    if (ev.preventDefault) ev.preventDefault();
+    pasteClipboardImage($("term-input-note"));
+  }
+  return false;
+}
+
+/* The image button: a file picker that takes several images at once. The
+   picker's value is cleared after each choice, so choosing the same file
+   twice in a row still fires `change`. */
+function openImagePicker() {
+  const input = $("term-image-file");
+  if (!input || !currentName) return;
+  input.value = "";
+  input.click();
+}
+
+function onImagePickerChange(ev) {
+  const input = ev.currentTarget || ev.target;
+  if (!input) return;
+  const files = Array.from(input.files || []);
+  input.value = "";
+  if (!files.length) return;
+  sendImageFiles(files, $("term-input-note"));
 }
 
 // Wired at load, like every other listener this page mounts — guarded like
@@ -12232,6 +12403,10 @@ function onTermInputPaste(ev) {
 // block under test touches, and #term-input is not one of them.
 if ($("term-input"))
   $("term-input").addEventListener("submit", onTermInputSubmit);
+if ($("term-image-pick"))
+  $("term-image-pick").addEventListener("click", openImagePicker);
+if ($("term-image-file"))
+  $("term-image-file").addEventListener("change", onImagePickerChange);
 if ($("term-input-field")) {
   $("term-input-field").addEventListener("keydown", onTermInputKeydown);
   // Capture phase, on the window: the browser's own Ctrl+J wins against a
@@ -12241,6 +12416,9 @@ if ($("term-input-field")) {
   $("term-input-field").addEventListener("input", (ev) =>
     autogrowTermInput(ev.currentTarget || ev.target));
 }
+// Capture phase: ahead of xterm's own paste listener on its textarea.
+if ($("terminal"))
+  $("terminal").addEventListener("paste", onTerminalPaste, true);
 
 /* ---- typing marks ----
    Keystrokes that reach the daemon as bytes mark its keyboard busy on
@@ -13770,6 +13948,9 @@ function freshAttach(name) {
   // builds a new one every time, and the parked copy it replaced keeps its
   // own, hidden with it.
   term.attachCustomWheelEventHandler(handleWheel);
+  // Alt+V is the page's, not the PTY's: see onTermKeyEvent. Guarded for the
+  // whole-block harnesses that boot this function without that block.
+  if (typeof onTermKeyEvent === "function") term.attachCustomKeyEventHandler(onTermKeyEvent);
 
   openSocket(name);
 }

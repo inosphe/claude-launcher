@@ -24,6 +24,8 @@ import sys
 import time
 from pathlib import Path
 
+import pytest
+
 from claude_launcher import store
 from claude_launcher.daemon import api as api_mod
 from claude_launcher.daemon import paths
@@ -42,6 +44,14 @@ CHILD = (
 )
 
 PNG = bytes.fromhex("89504e470d0a1a0a") + b"a pretend png body"
+
+
+@pytest.fixture(autouse=True)
+def _no_settle_carryover(monkeypatch):
+    """Each test starts with the clipboard free: the settle window is module
+    state, and one test's last paste must not make the next one wait."""
+    monkeypatch.setitem(api_mod._paste_settle, "until", 0.0)
+    monkeypatch.setattr(api_mod, "PASTE_SETTLE_SECONDS", 0.0)
 
 
 def _harness(image_paste_keys=None):
@@ -368,3 +378,168 @@ def test_the_key_the_harness_declares_is_the_key_that_is_sent(home, tmp_path,
         assert sent == [["C-v", "Enter"]]
 
     _run(tmp_path, body, image_paste_keys=["C-v", "Enter"])
+
+
+# ---- the same upload, wherever the browser is ------------------------------
+#
+# The browser always sends the image's bytes; the daemon always puts them on
+# its own clipboard and sends the key. So the only thing that differs between
+# a browser on the daemon's PC and one on another PC behind the relay is the
+# transport the bytes ride. The relay (mux-relay, `/t/<name>/`) passes a
+# request body through untouched once it carries Content-Length; what is
+# pinned here is the daemon's own leg of that tunnel -- the uplink splitting
+# the body into STREAM_DATA frames and piping them to this route.
+
+
+def _fake_delivery(monkeypatch, log):
+    async def fake_put(path, media_type, **kw):
+        log.append(("put", Path(path).read_bytes(),
+                    asyncio.get_running_loop().time()))
+
+    async def fake_send(self, keys, **kw):
+        log.append(("key", list(keys), asyncio.get_running_loop().time()))
+        return b""
+
+    monkeypatch.setattr(api_mod.clipboard, "put_image", fake_put)
+    monkeypatch.setattr(session_mod.Session, "send_keys", fake_send)
+
+
+def test_an_image_through_the_relay_tunnel_arrives_byte_for_byte_and_is_delivered(
+    home, tmp_path, monkeypatch
+):
+    """A body many relay frames long -- the uplink cuts at MAX_STREAM_DATA --
+    is reassembled into the same file and handed over the same way as a
+    direct upload."""
+    import json
+    import os
+
+    from claude_launcher.daemon import relay_wire as w
+    from claude_launcher.daemon.relay_uplink import RelayUplink
+
+    log = []
+    _fake_delivery(monkeypatch, log)
+    image = bytes.fromhex("89504e470d0a1a0a") + os.urandom(300 * 1024)
+    assert len(image) > 4 * w.MAX_STREAM_DATA
+
+    class FakeWS:
+        def __init__(self):
+            self.sent = asyncio.Queue()
+            self._dec = w.FrameDecoder()
+
+        async def send_bytes(self, data):
+            for _room, payload in self._dec.feed(data):
+                m = w.decode_payload(payload)
+                if m is not None:
+                    await self.sent.put(m)
+
+        async def close(self):
+            pass
+
+    async def body(client):
+        room = bytes([7] * 16)
+        up = RelayUplink(url="ws://relay", token="t", name="pc",
+                         local_host="127.0.0.1", local_port=client.server.port)
+        up._room = room
+        up._ws = FakeWS()
+        # the head as mux-relay forwards it: prefix stripped, Connection:
+        # close and X-Forwarded-Prefix added, everything else as sent
+        head = (
+            "POST /api/sessions/s1/paste-image HTTP/1.1\r\n"
+            "Host: relay\r\n"
+            "Authorization: Bearer sekrit\r\n"
+            "Content-Type: image/png\r\n"
+            f"Content-Length: {len(image)}\r\n"
+            "Connection: close\r\n"
+            "X-Forwarded-Prefix: /t/pc\r\n"
+            "\r\n"
+        ).encode()
+        await up._handle(w.stream_open(room, 5)[w.HEADER_LEN:])
+        for frame in w.iter_stream_data(room, 5, head + image):
+            await up._handle(frame[w.HEADER_LEN:])
+        await up._handle(w.stream_eof(room, 5)[w.HEADER_LEN:])
+
+        raw = b""
+        while True:
+            m = await asyncio.wait_for(up._ws.sent.get(), 15.0)
+            if m.sid != 5:
+                continue
+            if m.kind == w.STREAM_DATA:
+                raw += m.data
+            elif m.kind in (w.STREAM_EOF, w.STREAM_CLOSE):
+                break
+        up.stop()
+        status_line = raw.split(b"\r\n", 1)[0]
+        assert b" 200 " in status_line, raw[:300]
+        doc = json.loads(raw.split(b"\r\n\r\n", 1)[1])
+        assert doc["delivered"] is True, doc
+        assert doc["bytes"] == len(image)
+        assert Path(doc["path"]).read_bytes() == image
+        assert [entry[0] for entry in log] == ["put", "key"]
+        assert log[0][1] == image
+
+    _run(tmp_path, body, image_paste_keys=["M-v"])
+
+
+def test_back_to_back_images_leave_the_clipboard_to_the_harness_in_between(
+    home, tmp_path, monkeypatch
+):
+    """Several images in a row (the file picker takes many) must not overwrite
+    the clipboard before the harness has read the one its key asked for: the
+    next write waits out the settle window after the previous key."""
+    monkeypatch.setattr(api_mod, "PASTE_SETTLE_SECONDS", 0.4)
+    log = []
+    _fake_delivery(monkeypatch, log)
+
+    async def body(client):
+        for _ in range(3):
+            resp = await client.post("/api/sessions/s1/paste-image", data=PNG,
+                                     headers={**BEARER, "Content-Type": "image/png"})
+            assert (await resp.json())["delivered"] is True
+
+    _run(tmp_path, body, image_paste_keys=["M-v"])
+    assert [e[0] for e in log] == ["put", "key"] * 3
+    keys = [e[2] for e in log if e[0] == "key"]
+    puts = [e[2] for e in log if e[0] == "put"]
+    assert puts[1] - keys[0] >= 0.39
+    assert puts[2] - keys[1] >= 0.39
+
+
+def test_a_lone_image_is_not_made_to_wait(home, tmp_path, monkeypatch):
+    """The settle window is paid by the paste that follows another one; a
+    paste with nothing before it is handed over at once."""
+    monkeypatch.setattr(api_mod, "PASTE_SETTLE_SECONDS", 30.0)
+    log = []
+    _fake_delivery(monkeypatch, log)
+
+    async def body(client):
+        started = asyncio.get_running_loop().time()
+        resp = await client.post("/api/sessions/s1/paste-image", data=PNG,
+                                 headers={**BEARER, "Content-Type": "image/png"})
+        assert (await resp.json())["delivered"] is True
+        assert asyncio.get_running_loop().time() - started < 10.0
+
+    _run(tmp_path, body, image_paste_keys=["M-v"])
+
+
+def test_an_undelivered_paste_does_not_hold_the_clipboard(home, tmp_path,
+                                                          monkeypatch):
+    """Only a key that was actually sent opens the settle window: a paste
+    whose clipboard write failed left nothing for a harness to read."""
+    monkeypatch.setattr(api_mod, "PASTE_SETTLE_SECONDS", 30.0)
+
+    async def failing_put(path, media_type, **kw):
+        raise api_mod.clipboard.ClipboardError("no clipboard here")
+
+    monkeypatch.setattr(api_mod.clipboard, "put_image", failing_put)
+
+    async def body(client):
+        for _ in range(2):
+            started = asyncio.get_running_loop().time()
+            resp = await client.post("/api/sessions/s1/paste-image", data=PNG,
+                                     headers={**BEARER, "Content-Type": "image/png"})
+            doc = await resp.json()
+            assert doc["delivered"] is False
+            assert "no clipboard here" in doc["reason"]
+            assert asyncio.get_running_loop().time() - started < 10.0
+
+    _run(tmp_path, body, image_paste_keys=["M-v"])

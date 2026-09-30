@@ -7615,6 +7615,22 @@ async def h_session_paste_image(request: web.Request) -> web.Response:
 #: one failure of this route that produces a wrong result instead of an error.
 _paste_image_lock = asyncio.Lock()
 
+#: How long the clipboard is left alone after a paste key was sent, before
+#: the next image may overwrite it. Sending the key is not the harness reading
+#: the clipboard: Claude Code on Windows starts a PowerShell to do that, which
+#: takes the better part of a second, so an image written right behind the key
+#: can be the one it reads -- the second of two pictures pasted twice, the
+#: first never. Several images in a row (the web file picker takes many at
+#: once) are exactly that case. The wait is paid by the NEXT paste, and only
+#: when it follows within this window; a single paste answers at once. It is
+#: machine-wide on purpose, like the lock: a paste into another session
+#: overwrites the same clipboard, so it waits too.
+PASTE_SETTLE_SECONDS = 3.0
+
+#: ``loop.time()`` before which the clipboard is still being read. Guarded by
+#: ``_paste_image_lock``.
+_paste_settle = {"until": 0.0}
+
 
 async def _deliver_pasted_image(session, path, media_type: str):
     """Put a stored image on this machine's clipboard and let the harness read it.
@@ -7637,7 +7653,11 @@ async def _deliver_pasted_image(session, path, media_type: str):
             f"harness {session.sdef.harness or 'unknown'!r} has no image paste "
             f"key declared, so the image was stored but not handed over"
         )
+    loop = asyncio.get_running_loop()
     async with _paste_image_lock:
+        wait = _paste_settle["until"] - loop.time()
+        if wait > 0:
+            await asyncio.sleep(wait)
         try:
             await clipboard.put_image(path, media_type)
         except clipboard.ClipboardError as exc:
@@ -7646,6 +7666,7 @@ async def _deliver_pasted_image(session, path, media_type: str):
             await session.send_keys(keys, force=True)
         except Exception as exc:  # the PTY is gone, or the session refused
             return False, keys, f"the keystroke did not reach the session: {exc}"
+        _paste_settle["until"] = loop.time() + PASTE_SETTLE_SECONDS
     return True, keys, ""
 
 

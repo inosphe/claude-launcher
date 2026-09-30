@@ -503,9 +503,17 @@
       </section>
       <textarea id="term-input-field" rows="1"
              placeholder="type for this session — Enter to send, Ctrl+J for a newline"
-             title="Enter sends · Ctrl+J inserts a newline · Alt+V hands the clipboard image to the session"
+             title="Enter sends · Ctrl+J inserts a newline · Alt+V or Ctrl+V hands the clipboard image to the session · 🖼 attaches image files"
              autocomplete="off" spellcheck="false"
              aria-label="type text and send it to this session"></textarea>
+      <!-- Image files, several at once: each goes the same way as an Alt+V
+           image (uploaded, put on the daemon's clipboard, handed over with the
+           harness's key), one after another. -->
+      <button id="term-image-pick" class="term-btn" type="button"
+              title="attach image files to this session (several at once)"
+              aria-label="attach image files to this session">🖼</button>
+      <input id="term-image-file" type="file" hidden multiple
+             accept="image/png,image/jpeg,image/gif,image/webp,.png,.jpg,.jpeg,.gif,.webp">
       <span id="term-input-note" class="wf-note hidden"></span>
       <span id="term-score-goal" class="hidden">
         <span class="term-score-label">Feedback</span>

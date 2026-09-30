@@ -69,7 +69,12 @@ function node(tag) {
 /* the daemon: every call recorded, every answer scripted by the test */
 let sent = [];
 let reply = { ok: true, doc: {} };
+let inFlight = 0;
+let maxInFlight = 0;
 const api = async (p, opts) => {
+  inFlight++;
+  maxInFlight = Math.max(maxInFlight, inFlight);
+  try { await new Promise((r) => setImmediate(r)); } finally { inFlight--; }
   const type = opts.headers["Content-Type"];
   // A key line posts JSON; an image posts the blob itself, so only the
   // former is parsed — parsing the latter would be the test inventing a
@@ -77,7 +82,14 @@ const api = async (p, opts) => {
   const body = String(type).startsWith("image/") ? opts.body : JSON.parse(opts.body);
   sent.push({ path: p, method: opts.method, contentType: type, body });
   if (reply.throw) throw new Error("offline");
-  return { ok: reply.ok, status: reply.status || 200, json: async () => reply.doc };
+  if (reply.html) {
+    // what fetch hands back after following the relay's redirect to its
+    // login page: a page, not the route's JSON
+    return { ok: true, status: 200, redirected: true,
+             json: async () => { throw new SyntaxError("Unexpected token <"); } };
+  }
+  const doc = typeof reply.doc === "function" ? reply.doc(sent.length) : reply.doc;
+  return { ok: reply.ok, status: reply.status || 200, json: async () => doc };
 };
 
 const FIELD = node("textarea");
@@ -111,7 +123,12 @@ SCORE_NONE.checked = true;
 const SCORE_REWARD = node("input");
 const SCORE_PENALTY = node("input");
 const SCORE_COUNTS = node("span");
+const PICKER = node("input");
+PICKER.files = [];
+PICKER.clicked = 0;
+PICKER.click = () => { PICKER.clicked++; };
 const $ = (id) => ({
+  "term-image-file": PICKER,
   "term-input-field": FIELD,
   "term-input-send": BTN,
   "term-input-note": NOTE,
@@ -132,14 +149,18 @@ const ctx = {};
    source instead of copying its values here, so the two cannot drift */
 const kindsDecl = src.match(/const SCORE_FEEDBACK_KINDS = \[[^\]]*\];/);
 if (!kindsDecl) throw new Error("missing SCORE_FEEDBACK_KINDS");
+const imageKindsDecl = src.match(/const PASTE_IMAGE_KINDS = \{[^}]*\};/);
+if (!imageKindsDecl) throw new Error("missing PASTE_IMAGE_KINDS");
 new Function(
   "exports", "api", "$", "navigator", "document",
   `let currentName = null;
 let sessionEnded = false;
 let sessionsCache = [];
+let harnessDetails = {};
 let sessJournalBox = null;
 function sessInputJournalFill() {}
 ${kindsDecl[0]}
+${imageKindsDecl[0]}
 ` + slice("termInputNote") + `
 ` + slice("sendKeyLine") + `
 ` + slice("currentScoreFeedback") + `
@@ -149,10 +170,21 @@ ${kindsDecl[0]}
 ` + slice("termInputQueueNote") + `
 ` + slice("autogrowTermInput") + `
 ` + slice("insertTermInputText") + `
+` + slice("imageKindOf") + `
+` + slice("isAltV") + `
+` + slice("uploadImage") + `
 ` + slice("uploadPastedImage") + `
+` + slice("sendImageFiles") + `
 ` + slice("clipboardImage") + `
+` + slice("clipboardRefusal") + `
 ` + slice("pasteClipboardImage") + `
+` + slice("pastedImageFiles") + `
 ` + slice("onTermInputPaste") + `
+` + slice("onTerminalPaste") + `
+` + slice("sessionTakesImages") + `
+` + slice("onTermKeyEvent") + `
+` + slice("openImagePicker") + `
+` + slice("onImagePickerChange") + `
 ` + slice("isCtrlJ") + `
 ` + slice("onTermInputKeydown") + `
 ` + slice("onWindowCtrlJ") + `
@@ -165,7 +197,13 @@ Object.assign(exports, {
   onTermInputKeydown,
   onWindowCtrlJ,
   onTermInputPaste,
+  onTerminalPaste,
+  onTermKeyEvent,
+  openImagePicker,
+  onImagePickerChange,
+  sendImageFiles,
   pasteClipboardImage,
+  setHarnesses: (h) => { harnessDetails = h; },
   setSession: (name, ended) => { currentName = name; sessionEnded = !!ended; },
   setSessions: (rows) => { sessionsCache = rows; },
 });`
@@ -201,7 +239,9 @@ function capture(key, mods = {}) {
 }
 
 /* let every pending await in the code under test run to the end */
-const settle = () => new Promise((r) => setImmediate(r));
+const settle = async () => {
+  for (let i = 0; i < 20; i++) await new Promise((r) => setImmediate(r));
+};
 
 let failures = 0;
 const check = (name, cond, extra) => {
@@ -563,6 +603,223 @@ async function main() {
   check("...and the daemon's reason is shown, not a rewrite of it",
         NOTE.textContent.includes("no image paste key declared"), NOTE.textContent);
   check("...as a warning", NOTE.classes.has("wf-warning"));
+
+  /* ==== the same result wherever the browser is ==========================
+     Same PC or another PC, direct or through the relay: the image always
+     leaves THIS browser as bytes, and the harness is never left to read a
+     clipboard on its own — that would be the daemon PC's clipboard. */
+  const OK_DOC = { ok: true, path: "C:/state/sessions/coder4/pastes/z.png",
+                   bytes: 12, delivered: true, keys: ["M-v"], reason: "" };
+
+  /* ---- Alt+V by the physical key: a Hangul IME reports another letter ---- */
+  sent = [];
+  reply = { ok: true, doc: OK_DOC };
+  clipboard = { items: [imageItem("image/png", blob)] };
+  const hangul = press("ㅍ", { altKey: true, code: "KeyV" });
+  await settle();
+  check("Alt+V with a Hangul IME on is still Alt+V",
+        hangul.prevented === true && sent.length === 1, sent);
+
+  /* ---- a page that cannot read the clipboard is not told "no image" ---- */
+  const realClip = navigator.clipboard;
+  navigator.clipboard = undefined;
+  globalThis.isSecureContext = false;
+  sent = [];
+  await ctx.pasteClipboardImage(NOTE);
+  check("no clipboard reader uploads nothing", sent.length === 0, sent);
+  check("...and does not claim the clipboard holds no image",
+        !NOTE.textContent.includes("no image"), NOTE.textContent);
+  check("...it names the insecure origin (http:// from another PC)",
+        NOTE.textContent.includes("secure origin"), NOTE.textContent);
+  check("...and the two ways that still work",
+        NOTE.textContent.includes("Ctrl+V") && NOTE.textContent.includes("image button"),
+        NOTE.textContent);
+  globalThis.isSecureContext = true;
+  await ctx.pasteClipboardImage(NOTE);
+  check("a secure page without a reader says the browser has none",
+        NOTE.textContent.includes("no clipboard reader"), NOTE.textContent);
+  delete globalThis.isSecureContext;
+  navigator.clipboard = realClip;
+
+  /* ---- xterm's key hook: Alt+V never reaches the PTY as ESC v ---- */
+  ctx.setSessions([{ name: "coder4", harness: "claude" }]);
+  ctx.setHarnesses({ claude: { name: "claude", image_paste_keys: ["M-v"] },
+                     sh: { name: "sh", image_paste_keys: [] } });
+  sent = [];
+  clipboard = { items: [imageItem("image/png", blob)] };
+  const termKey = (type, mods) => {
+    const ev = { type, key: "v", code: "KeyV", altKey: false, ctrlKey: false,
+                 metaKey: false, prevented: false,
+                 preventDefault() { ev.prevented = true; }, ...mods };
+    return { ev, pass: ctx.onTermKeyEvent(ev) };
+  };
+  const down = termKey("keydown", { altKey: true });
+  const press2 = termKey("keypress", { altKey: true });
+  const up = termKey("keyup", { altKey: true });
+  await settle();
+  check("the terminal keeps Alt+V from xterm on every phase",
+        down.pass === false && press2.pass === false && up.pass === false);
+  check("...and uploads the browser's image once, on keydown",
+        sent.length === 1 && sent[0].path === "/api/sessions/coder4/paste-image", sent);
+  check("...with the browser's own default taken", down.ev.prevented === true);
+  const plainV = termKey("keydown", {});
+  check("a plain v goes to the terminal", plainV.pass === true);
+  const ctrlAltV = termKey("keydown", { altKey: true, ctrlKey: true });
+  check("Ctrl+Alt+V goes to the terminal", ctrlAltV.pass === true);
+  ctx.setSessions([{ name: "coder4", harness: "sh" }]);
+  sent = [];
+  const shell = termKey("keydown", { altKey: true });
+  await settle();
+  check("a harness with no image key keeps its Alt+V (Meta-v)",
+        shell.pass === true && sent.length === 0, sent);
+  ctx.setSessions([{ name: "coder4", harness: "unknown-to-the-page" }]);
+  sent = [];
+  const unknown = termKey("keydown", { altKey: true });
+  await settle();
+  check("a harness the page has no record of goes through the route, "
+        + "and the daemon answers for it",
+        unknown.pass === false && sent.length === 1, sent);
+  ctx.setSessions([{ name: "coder4", harness: "claude" }]);
+
+  /* ---- an image pasted onto the terminal is taken ahead of xterm ---- */
+  sent = [];
+  const shots = [{ type: "image/png", size: 3, name: "a.png" },
+                 { type: "image/jpeg", size: 4, name: "b.jpg" }];
+  const tev = {
+    prevented: false, stopped: false,
+    preventDefault() { tev.prevented = true; },
+    stopImmediatePropagation() { tev.stopped = true; },
+    clipboardData: { items: shots.map((f) => ({ kind: "file", type: f.type,
+                                                getAsFile: () => f })) },
+  };
+  ctx.onTerminalPaste(tev);
+  await settle();
+  check("images pasted on the terminal are uploaded, all of them",
+        sent.length === 2 && sent[0].body === shots[0] && sent[1].body === shots[1], sent);
+  check("...and xterm never sees that paste", tev.prevented && tev.stopped);
+  const textOnTerm = {
+    prevented: false, preventDefault() { textOnTerm.prevented = true; },
+    clipboardData: { items: [{ kind: "string", type: "text/plain" }] },
+  };
+  sent = [];
+  ctx.onTerminalPaste(textOnTerm);
+  check("a text paste on the terminal is xterm's", !textOnTerm.prevented && sent.length === 0);
+
+  /* ---- files copied in a file manager arrive on `files`, not `items` ---- */
+  sent = [];
+  const copied = { type: "", size: 5, name: "shot.PNG" };
+  const fev = {
+    currentTarget: FIELD, target: FIELD, prevented: false,
+    preventDefault() { fev.prevented = true; },
+    clipboardData: { items: [], files: [copied] },
+  };
+  ctx.onTermInputPaste(fev);
+  await settle();
+  check("a copied image file is taken from `files`",
+        sent.length === 1 && fev.prevented, sent);
+  check("...typed from its extension when the browser gave it no type",
+        sent[0] && sent[0].contentType === "image/png", sent[0]);
+
+  /* ---- the image button: several files, one after another ---- */
+  sent = [];
+  maxInFlight = 0;
+  reply = { ok: true, doc: OK_DOC };
+  ctx.openImagePicker();
+  check("the image button opens the file picker", PICKER.clicked === 1);
+  const picked = [
+    { type: "image/png", size: 1, name: "one.png" },
+    { type: "text/plain", size: 1, name: "notes.txt" },
+    { type: "image/webp", size: 1, name: "two.webp" },
+    { type: "", size: 1, name: "three.jpeg" },
+  ];
+  PICKER.files = picked;
+  PICKER.value = "C:\\fakepath\\one.png";
+  ctx.onImagePickerChange({ currentTarget: PICKER });
+  await settle();
+  check("every picked image is uploaded, in the order picked",
+        sent.length === 3 && sent[0].body === picked[0]
+        && sent[1].body === picked[2] && sent[2].body === picked[3], sent);
+  check("...one at a time", maxInFlight === 1, maxInFlight);
+  check("...each typed as the image it is",
+        sent.map((r) => r.contentType).join() === "image/png,image/webp,image/jpeg",
+        sent.map((r) => r.contentType));
+  check("...the file that is not an image is left out and said so",
+        NOTE.textContent.includes("3 of 3") && NOTE.textContent.includes("not an image"),
+        NOTE.textContent);
+  check("...and the picker is cleared so the same file can be picked again",
+        PICKER.value === "", PICKER.value);
+
+  /* ---- one failure in a batch does not stop the rest, and is named ---- */
+  sent = [];
+  reply = { ok: true, doc: (n) => n === 2
+    ? { ok: true, path: "p", delivered: false, reason: "powershell.exe: clipboard busy" }
+    : OK_DOC };
+  await ctx.sendImageFiles([picked[0], picked[2], picked[3]], NOTE);
+  check("a batch goes on past a failed image", sent.length === 3, sent);
+  check("...and reports the count and the first failure by name",
+        NOTE.textContent.includes("2 of 3")
+        && NOTE.textContent.includes("two.webp: powershell.exe: clipboard busy"),
+        NOTE.textContent);
+  check("...as a warning", NOTE.classes.has("wf-warning"));
+
+  /* ---- nothing but non-images ---- */
+  sent = [];
+  await ctx.sendImageFiles([picked[1]], NOTE);
+  check("no image among the files uploads nothing and says so",
+        sent.length === 0 && NOTE.textContent.includes("none of those files is an image"),
+        NOTE.textContent);
+
+  /* ---- the relay's login page answering the upload ---- */
+  sent = [];
+  reply = { html: true };
+  const viaLogin = await ctx.sendImageFiles([picked[0]], NOTE);
+  check("a relay login page is not taken for a stored image",
+        viaLogin === 0 && NOTE.textContent.includes("login"), NOTE.textContent);
+
+  /* ---- the wiring itself: the handlers above do nothing unless the page
+     hands them to the elements. The load-time block is run as it is in
+     app.js, against elements that record what they are given. */
+  const wiringStart = src.indexOf("// Wired at load, like every other listener this page mounts");
+  const wiringEnd = src.indexOf("/* ---- typing marks ----", wiringStart);
+  check("the load-time wiring block is where this check looks for it",
+        wiringStart > 0 && wiringEnd > wiringStart, [wiringStart, wiringEnd]);
+  const listeners = [];
+  const recorder = (id) => ({
+    addEventListener(type, fn, capture) { listeners.push({ id, type, fn, capture }); },
+  });
+  const wireEls = {};
+  for (const id of ["term-input", "term-image-pick", "term-image-file",
+                    "term-input-field", "terminal"]) wireEls[id] = recorder(id);
+  const handlers = {};
+  for (const name of ["onTermInputSubmit", "openImagePicker", "onImagePickerChange",
+                      "onTermInputKeydown", "onWindowCtrlJ", "onTermInputPaste",
+                      "onTerminalPaste", "autogrowTermInput"]) {
+    handlers[name] = function () {};
+  }
+  new Function("$", "window", ...Object.keys(handlers), src.slice(wiringStart, wiringEnd))(
+    (id) => wireEls[id] || null, recorder("window"), ...Object.values(handlers));
+  const wired = (id, type) => listeners.filter((l) => l.id === id && l.type === type);
+  const termPaste = wired("terminal", "paste");
+  check("the terminal's paste listener is onTerminalPaste",
+        termPaste.length === 1 && termPaste[0].fn === handlers.onTerminalPaste, termPaste);
+  check("...in the capture phase, ahead of xterm's own",
+        termPaste.length === 1 && termPaste[0].capture === true, termPaste);
+  const pickChange = wired("term-image-file", "change");
+  check("the file picker's change is onImagePickerChange",
+        pickChange.length === 1 && pickChange[0].fn === handlers.onImagePickerChange, pickChange);
+  const pickClick = wired("term-image-pick", "click");
+  check("the image button's click is openImagePicker",
+        pickClick.length === 1 && pickClick[0].fn === handlers.openImagePicker, pickClick);
+  const linePaste = wired("term-input-field", "paste");
+  check("the line's paste is onTermInputPaste",
+        linePaste.length === 1 && linePaste[0].fn === handlers.onTermInputPaste, linePaste);
+  // the terminal's listener does not hang on the line being there
+  listeners.length = 0;
+  new Function("$", "window", ...Object.keys(handlers), src.slice(wiringStart, wiringEnd))(
+    (id) => (id === "terminal" ? wireEls.terminal : null), recorder("window"),
+    ...Object.values(handlers));
+  check("the terminal's paste listener is wired without the line",
+        wired("terminal", "paste").length === 1, listeners);
 
   console.log(failures ? `\n${failures} failure(s)` : "all send-input checks passed");
   process.exit(failures ? 1 : 0);

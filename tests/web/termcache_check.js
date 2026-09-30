@@ -76,6 +76,10 @@ function slice(name) {
 const keepAliveSrc = cutFrom("const TERM_CACHE_MAX = 3;", "attach");
 const openSocketSrc = slice("openSocket");
 const focusSrc = slice("setTerminalFocus");
+/* Alt+V's hook on xterm, real: the fix for "Alt+V from another PC pastes the
+   daemon PC's clipboard" is that freshAttach hands xterm this function. */
+const altvSrc = [slice("isAltV"), slice("sessionTakesImages"),
+                 slice("onTermKeyEvent")].join("\n");
 
 /* ---- stub world -------------------------------------------------------- */
 function node() {
@@ -130,6 +134,7 @@ function build() {
   FakeTerminal.prototype.onData = function (fn) { this.onData = fn; };
   FakeTerminal.prototype.onResize = function (fn) { this.onResize = fn; };
   FakeTerminal.prototype.attachCustomWheelEventHandler = function (fn) { this.wheel = fn; };
+  FakeTerminal.prototype.attachCustomKeyEventHandler = function (fn) { this.keys = fn; };
   FakeTerminal.prototype.dispose = function () {
     this.disposed = true;
     if (this.element.parentNode) this.element.parentNode.removeChild(this.element);
@@ -176,6 +181,10 @@ let linkState = "idle", linkName = null, linkTry = 0, linkTimer = null;
 let linkTicket = 0, linkQueue = [], lastLocalKey = 0;
 let wheelTimer = null, wheelAccum = 0, applyingRemoteResize = false;
 let sessionsCache = [];
+let harnessDetails = {};
+/* where the page's Alt+V goes: the browser's clipboard, uploaded (the
+   upload itself is sendinput_check.js's subject) */
+function pasteClipboardImage() { __record("altv-upload", true); }
 let snapshotName = null;   // the real removeSnapshot (sliced in) assigns this
 function setLink(s) { linkState = s; __record("link", s); }
 function setStatusBadge(s) { __record("status", s); }
@@ -217,10 +226,12 @@ function syncTerminalFocus() {}
     // fallback: a socket of the terminal's own. The channel path is
     // checked in channels_check.js.
     "function openChannel() { return null; }\n" +
-    stubs + focusSrc + "\n" + keepAliveSrc + "\n" + openSocketSrc + "\n"
+    stubs + focusSrc + "\n" + altvSrc + "\n" + keepAliveSrc + "\n" + openSocketSrc + "\n"
     + `
 return {
   attach, suspendActive, dropKept, shimFrame,
+  keyHook: onTermKeyEvent,
+  setSessions: (rows, harnesses) => { sessionsCache = rows; harnessDetails = harnesses; },
   keep: () => [...keptTerms.keys()],
   kept: (n) => keptTerms.get(n) || null,
   cap: TERM_CACHE_MAX,
@@ -492,6 +503,33 @@ return {
   check("still one socket held after the hop",
         w.sockets.filter((s) => s.readyState !== 3).length === 1,
         w.sockets.filter((s) => s.readyState !== 3).length);
+}
+
+/* --- Alt+V on the terminal is the page's, never the PTY's ------------------
+   Passed through, xterm types ESC v and the harness reads the clipboard of
+   the daemon's PC -- the browser's clipboard only when both share a PC. */
+{
+  const w = build();
+  w.api.setSessions([{ name: "a", harness: "claude" }],
+                    { claude: { name: "claude", image_paste_keys: ["M-v"] } });
+  w.api.attach("a");
+  const t = w.api.term;
+  check("a fresh terminal is given the page's key hook",
+        typeof t.keys === "function" && t.keys === w.api.keyHook, typeof t.keys);
+  const ev = (type, mods) => ({ type, key: "v", code: "KeyV", altKey: false,
+                                ctrlKey: false, metaKey: false,
+                                preventDefault() {}, ...mods });
+  // xterm with no hook passes every key through, which is what `true` says
+  const hook = typeof t.keys === "function" ? t.keys : () => true;
+  check("...which keeps an Alt+V keydown from becoming bytes",
+        hook(ev("keydown", { altKey: true })) === false);
+  check("...and hands the browser's image over instead",
+        w.rec("altv-upload").length === 1, w.rec("altv-upload"));
+  check("...while a plain v still types", hook(ev("keydown", {})) === true);
+  w.api.attach("b");
+  w.api.attach("a");
+  check("a terminal brought back from the cache keeps the hook",
+        w.api.term === t && t.keys === w.api.keyHook);
 }
 
 /* --- the budget is the thing under test, so it is read, not assumed ----- */
