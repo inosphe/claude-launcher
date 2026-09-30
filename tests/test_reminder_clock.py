@@ -1355,11 +1355,16 @@ def test_role_source_advances_only_after_successful_delivery(proj):
     assert due
     armed = service._roles["w1"]["at"]
 
+    # Deliveries read the same clock as the scans above.  Left to its own
+    # time.monotonic(), a delivery stamps the seconds since the host booted,
+    # which is below 1000.0 for the first seventeen minutes of uptime.
     async def refuse(_text):
         return False
 
     sess.deliver = refuse
-    asyncio.run(service._deliver_session("w1", roles=due[0][1], role_due=True))
+    asyncio.run(
+        service._deliver_session("w1", roles=due[0][1], role_due=True, now=1601.0)
+    )
     assert service._roles["w1"]["at"] == armed
 
     async def accept(text):
@@ -1367,8 +1372,10 @@ def test_role_source_advances_only_after_successful_delivery(proj):
         return True
 
     sess.deliver = accept
-    asyncio.run(service._deliver_session("w1", roles=due[0][1], role_due=True))
-    assert service._roles["w1"]["at"] > armed
+    asyncio.run(
+        service._deliver_session("w1", roles=due[0][1], role_due=True, now=1602.0)
+    )
+    assert service._roles["w1"]["at"] == 1602.0 > armed
 
 
 def test_role_source_reads_mesh_then_legacy_compatibility_data(proj):

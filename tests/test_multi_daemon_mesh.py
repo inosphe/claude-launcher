@@ -12,7 +12,8 @@ invite/link across processes, member fan-out, and *bidirectional* message
 delivery into the recipient terminals.
 
 Skipped unless a peering-capable psmux-relay binary is available (build
-mux-relay master, or point ``PSMUX_RELAY_EXE`` at one).
+mux-relay master where ``_relay_exe.relay_roots`` looks, or point
+``PSMUX_RELAY_EXE`` at one).
 """
 
 from __future__ import annotations
@@ -31,6 +32,8 @@ import claude_launcher
 from claude_launcher import lineage, profile, store
 from claude_launcher.daemon_client import DaemonClient
 
+from _relay_exe import find_relay_exe, skip_reason
+
 PASSWORD = "md-pw"
 BACKEND_TOKEN = "md-backend-token"
 
@@ -42,27 +45,8 @@ CHILD = (
 )
 
 
-def _find_relay_exe() -> Path | None:
-    env = os.environ.get("PSMUX_RELAY_EXE")
-    if env and Path(env).is_file():
-        return Path(env)
-    exe = "psmux-relay.exe" if os.name == "nt" else "psmux-relay"
-    roots = [
-        Path("F:/works/mux-relay/target"),
-        Path("F:/works/mux-relay/.claude/worktrees/relay-tunnel/target"),
-    ]
-    for root in roots:
-        for prof in ("debug", "release"):
-            p = root / prof / exe
-            if p.is_file():
-                return p
-    return None
-
-
-RELAY_EXE = _find_relay_exe()
-pytestmark = pytest.mark.skipif(
-    RELAY_EXE is None, reason="psmux-relay binary not found"
-)
+RELAY_EXE = find_relay_exe()
+pytestmark = pytest.mark.skipif(RELAY_EXE is None, reason=skip_reason())
 
 
 def _free_port() -> int:

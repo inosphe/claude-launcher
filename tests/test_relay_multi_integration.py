@@ -11,13 +11,13 @@ stub. This covers it against relay processes and real WebSocket frames, so a
 protocol-level mistake in the multi-uplink path cannot pass unseen.
 
 Skipped unless a peering-capable psmux-relay binary is available (build the
-mux-relay ``backend-peering`` branch, or point ``PSMUX_RELAY_EXE`` at one).
+mux-relay ``backend-peering`` branch where ``_relay_exe.relay_roots`` looks,
+or point ``PSMUX_RELAY_EXE`` at one).
 """
 
 from __future__ import annotations
 
 import asyncio
-import os
 import subprocess
 import time
 from pathlib import Path
@@ -27,31 +27,14 @@ from aiohttp import web
 
 from claude_launcher.daemon.relay_uplink import PeerError, RelayPool, RelayUplink
 
+from _relay_exe import find_relay_exe, skip_reason
+
 PASSWORD = "multi-pw"
 BACKEND_TOKEN = "multi-backend-token"
 
 
-def _find_relay_exe() -> Path | None:
-    env = os.environ.get("PSMUX_RELAY_EXE")
-    if env and Path(env).is_file():
-        return Path(env)
-    exe = "psmux-relay.exe" if os.name == "nt" else "psmux-relay"
-    roots = [
-        Path("F:/works/mux-relay/target"),
-        Path("F:/works/mux-relay/.claude/worktrees/relay-tunnel/target"),
-    ]
-    for root in roots:
-        for prof in ("debug", "release"):
-            p = root / prof / exe
-            if p.is_file():
-                return p
-    return None
-
-
-RELAY_EXE = _find_relay_exe()
-pytestmark = pytest.mark.skipif(
-    RELAY_EXE is None, reason="psmux-relay binary not found"
-)
+RELAY_EXE = find_relay_exe()
+pytestmark = pytest.mark.skipif(RELAY_EXE is None, reason=skip_reason())
 
 
 def _free_port() -> int:
