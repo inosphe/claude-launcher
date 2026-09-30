@@ -109,6 +109,52 @@ def test_apply_is_idempotent_within_a_process_tree(home, tmp_path, monkeypatch):
     assert config.launcher_home() == tmp_path / "t"
 
 
+def test_a_session_of_an_instance_reaches_it_without_L(home, tmp_path, monkeypatch):
+    """An agent in a session of ``claunch -L team`` runs ``claunch cflow ...``
+    with no ``-L``, and the command still resolves the team instance
+    (claunch-d55af).
+
+    The chain is environment inheritance: the daemon holds CLAUNCH_DAEMON and
+    the manifest's variables in ``os.environ``, :func:`harness.build_command`
+    starts the session's env from it, and the CLI started from that env finds
+    the manifest already applied. This pins the middle link; the two ends are
+    ``test_apply_is_idempotent_within_a_process_tree`` and
+    ``test_real_daemon_process_runs_under_its_manifest``.
+    """
+    from claude_launcher import profile
+    from claude_launcher.daemon import harness
+
+    team_home = tmp_path / "team-home"
+    _manifest(home, "team", {"home": str(team_home), "port": 8394})
+    # What `claunch -L team` / `claunch-daemon --name team` do to the daemon.
+    monkeypatch.setenv(paths.INSTANCE_ENV, "team")
+    im.apply()
+    profile.create("work")
+
+    sdef = harness.normalize(
+        harness.SessionDef(name="sx", profile="work", cwd=str(tmp_path))
+    )
+    _, env, _ = harness.build_command(sdef)
+
+    assert env[paths.INSTANCE_ENV] == "team"
+    assert env[im.APPLIED_ENV] == "team"
+    assert env[config.LAUNCHER_HOME_ENV] == str(team_home)
+
+    # The session's own `claunch ...`: a process whose environment is the
+    # session's and nothing else, going through what cli.main does first.
+    saved = os.environ.copy()
+    os.environ.clear()
+    os.environ.update(env)
+    try:
+        assert im.apply() is None
+        assert paths.instance() == "team"
+        assert paths.daemon_dir() == home / "daemons" / "team"
+        assert config.launcher_home() == team_home
+    finally:
+        os.environ.clear()
+        os.environ.update(saved)
+
+
 def test_switching_instance_undoes_the_previous_manifest(home, tmp_path, monkeypatch):
     _manifest(home, "team", {"home": str(tmp_path / "t"), "config": str(tmp_path / "t.yaml")})
     monkeypatch.setenv(paths.INSTANCE_ENV, "team")
