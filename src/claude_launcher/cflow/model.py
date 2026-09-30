@@ -749,7 +749,9 @@ class Awaits:
     #: ``awaits: {main: <milestone>}`` — a SUB run's step waits for its main
     #: run to publish ``milestone`` again, under the same consumed rule. The
     #: one direction a sub run may wait: it reads the main run, it never
-    #: holds it (a main run's gates do not read this).
+    #: holds it (a main run's gates do not read this). A sub run starts with
+    #: the main run's count at that moment as consumed, so what the main run
+    #: published before the sub run existed is not new to it.
     main: Optional[str] = None
     #: (With ``at`` or ``main``, ``probe`` may still be given: it replaces
     #: the ``claunch cflow published`` command and nothing else.)

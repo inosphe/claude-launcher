@@ -12,7 +12,8 @@ What this file pins:
 
 * parsing: ``publishes``, ``awaits.at`` / ``awaits.main`` and their refusals;
 * the handshake: request -> cut -> consumed, both directions, and a
-  publication made before the reader arrives still counts;
+  publication made before the reader arrives still counts — while one made
+  before a sub run existed does not;
 * a person's goto away publishes nothing;
 * the probe command, the CLI's exit codes and the probe environment's run;
 * ``landing_queue`` on a sub definition, one holder per scope.
@@ -317,6 +318,28 @@ def test_the_gate_twin_answers_as_the_engine_does(proj):
             got = _tool(PUBLISHED, below, source, milestone, "--step", step, run=run)
             assert got == want, (moves, source, milestone)
     assert _tool(PUBLISHED, proj, "stack", "cut", "-t", "nobody") == 2
+
+
+def test_a_sub_run_started_late_has_consumed_what_came_before_it(proj):
+    """A main run's publications from before a sub run started are not new
+    to it: a stack started in a session's second round was told the first
+    round had just landed (claunch-wt12o.1.3). Only a publication made after
+    the start is — in the engine and in the gate twin alike."""
+    engine.start("main")
+    _step(); _step()                   # main at land, cut-wanted #1
+    engine.start("stack", run="stack")
+    asked = engine.published("main", "cut-wanted", step="standby", run="stack")
+    assert not asked["new"] and (asked["count"], asked["consumed"]) == (1, 1)
+    assert _tool(PUBLISHED, proj, "main", "cut-wanted", "--step", "standby", run="stack") == 1
+
+    engine.select("again", "loop", by="agent")   # main -> work
+    _step(); _step()                   # main at land again, cut-wanted #2
+    asked = engine.published("main", "cut-wanted", step="standby", run="stack")
+    assert asked["new"] and (asked["count"], asked["consumed"]) == (2, 1)
+    assert _tool(PUBLISHED, proj, "main", "cut-wanted", "--step", "standby", run="stack") == 0
+    # and the sub run acts on it as it would on any request
+    assert _step(run="stack")["step_id"] == "cut"
+    assert not engine.published("main", "cut-wanted", step="standby", run="stack")["new"]
 
 
 def test_sub_done_all_may_leave_a_session_long_sub_run_out(proj, capsys):

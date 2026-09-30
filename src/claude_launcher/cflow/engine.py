@@ -1592,6 +1592,27 @@ def _consume_milestone(workflow: Workflow, state: dict, step_id: Optional[str], 
     state.setdefault("consumed", {})[step_id] = count
 
 
+def _consume_from_start(workflow: Workflow, state: dict, main: dict) -> None:
+    """A sub run starts having consumed what its main run already published.
+
+    With no record a step reads ``consumed`` as 0, so every publication the
+    main run ever made would be new to a sub run started late — including
+    the ones from before it existed. A stack started in a session's second
+    round was told the first round had just landed, and its standby rule
+    ("restack first") would have moved a stack that had nothing to move
+    (claunch-wt12o.1.3, claunch-lni18). Each step that awaits a main-run
+    milestone therefore starts at the count the main run holds now: only a
+    publication made after the start is new to it.
+    """
+    for step_id, step in workflow.steps.items():
+        awaits = step.awaits
+        if awaits is None or awaits.main is None:
+            continue
+        count = _milestone_count(main, awaits.main)
+        if count:
+            state.setdefault("consumed", {})[step_id] = count
+
+
 def _published_view(awaits: "model.Awaits", state: dict, step_id: str, cwd) -> dict:
     source = _milestone_source(awaits, state, cwd)
     seen = int((state.get("consumed") or {}).get(step_id) or 0)
@@ -3415,6 +3436,8 @@ def _start_impl(
     # Before the first save: a recurring workflow's queue outlives its round.
     if not sub:
         _landing_inherit(workflow, old, state)
+    else:
+        _consume_from_start(workflow, state, main)
     _arrive_timer(workflow, state, workflow.start, None, cwd)
     # And an arrival for `triggers:` for the same reason: `_move_to` records
     # every later one, and a workflow whose FIRST step wants a briefing
