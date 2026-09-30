@@ -11,7 +11,9 @@ one long-lived PowerShell; on other Linux it is wl-paste or xclip/xsel.
 be handed an attachment, but a harness does take an image off the clipboard --
 so the web session line's image paste stores the file, fills this machine's
 clipboard with it, and sends the keystroke that harness reads an image with
-(the key comes from the harness declaration, ``image_paste_keys``).
+(the key comes from the harness declaration, ``image_paste_keys``). Under WSL
+"this machine's clipboard" is the Windows one, reached through powershell.exe
+as the reading side does.
 
 Writing overwrites whatever the person at this keyboard had copied, and every
 session on this machine shares the one clipboard. That cost does not go away;
@@ -41,6 +43,12 @@ from aiohttp import web
 
 MAX_TEXT = 100_000
 MAX_ITEMS = 30
+#: The most UTF-16 code units a text of MAX_TEXT characters can take: one
+#: outside the Basic Multilingual Plane (an emoji, say) is a surrogate pair.
+#: The Windows clipboard counts in these units, so the checks made on the
+#: Windows side refuse only above this and leave the character count to
+#: :meth:`History.sample`, the one place that decides, as the UTF-8 routes do.
+MAX_UTF16 = 2 * MAX_TEXT
 
 TOO_LONG = "Clipboard text exceeds the 100,000 character limit"
 
@@ -51,6 +59,15 @@ def read_text(platform: str = sys.platform) -> str:
         return _read_windows()
     if not platform.startswith("linux"):
         raise OSError(f"Host clipboard is not supported on {platform}")
+    return _read_linux()
+
+
+def _read_linux() -> str:
+    """The Linux half of :func:`read_text`: the WSL bridge, else a tool.
+
+    Looked up by name when a read runs, so the test suite replaces this one
+    name to keep every app it serves off the developer's clipboard.
+    """
     bridge = _wsl_bridge()
     if bridge is not None:
         return bridge.read()
@@ -79,7 +96,7 @@ def _read_windows():
         if not handle:
             return ""
         size = kernel.GlobalSize(handle)
-        if size > (MAX_TEXT + 1) * 2:
+        if size > (MAX_UTF16 + 1) * 2:  # bytes, with the terminating NUL
             raise OSError(TOO_LONG)
         pointer = kernel.GlobalLock(handle)
         if not pointer:
@@ -166,6 +183,8 @@ def wsl_powershell(
 #: PowerShell prints on its own is never taken for an answer. ``same`` spares
 #: the pipe a copy of text the reader already holds; its twin is
 #: :attr:`PowerShellBridge._last`, and both start empty with the process.
+#: ``long`` counts ``$text.Length``, which is UTF-16 code units, against
+#: :data:`MAX_UTF16`.
 _BRIDGE_SCRIPT = """\
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
@@ -197,7 +216,7 @@ while ($null -ne [Console]::In.ReadLine()) {
 
 def bridge_command(powershell: str) -> List[str]:
     """The argv that starts the Windows side of the bridge."""
-    script = _BRIDGE_SCRIPT % {"limit": MAX_TEXT}
+    script = _BRIDGE_SCRIPT % {"limit": MAX_UTF16}
     # -EncodedCommand, because WSL rebuilds a Windows command line from the
     # argv and a script full of quotes and $ does not survive that intact.
     # -STA because the clipboard API is single-threaded-apartment only.
@@ -470,6 +489,7 @@ def install(app):
 #
 #   Windows  Windows PowerShell in STA mode, Clipboard::SetImage
 #   macOS    osascript, `set the clipboard to (read ... as <class>)`
+#   WSL      the Windows command, run from WSL with the image on stdin
 #   Linux    wl-copy under Wayland, otherwise xclip
 #
 # None of them is guaranteed to be installed, and the Windows one converts the
@@ -540,6 +560,45 @@ def _macos_image(path: Path, media_type: str) -> ClipboardCommand:
     )
 
 
+#: The Windows side of the WSL image route. The image comes in on stdin, so
+#: no path has to be translated into one Windows can open (a file under the
+#: Linux side is only reachable as a ``\\wsl.localhost`` share). The failure
+#: goes out as UTF-8 bytes on stderr, where :func:`put_image` reads it: the
+#: console code page is not UTF-8 on every Windows, and PowerShell's own error
+#: output under -EncodedCommand is a CLIXML document rather than a line.
+_WSL_IMAGE_SCRIPT = """\
+$ErrorActionPreference = 'Stop'
+$ProgressPreference = 'SilentlyContinue'
+try {
+  Add-Type -AssemblyName System.Windows.Forms,System.Drawing
+  $ms = New-Object System.IO.MemoryStream
+  [Console]::OpenStandardInput().CopyTo($ms)
+  $ms.Position = 0
+  $img = [System.Drawing.Image]::FromStream($ms)
+  [System.Windows.Forms.Clipboard]::SetImage($img)
+  $img.Dispose()
+} catch {
+  $b = (New-Object System.Text.UTF8Encoding $false).GetBytes($_.Exception.GetBaseException().Message)
+  $err = [Console]::OpenStandardError()
+  $err.Write($b, 0, $b.Length)
+  $err.Flush()
+  exit 1
+}
+"""
+
+
+def _wsl_image(powershell: str, path: Path) -> ClipboardCommand:
+    # The same SetImage as on Windows, run from WSL. -EncodedCommand for the
+    # reason bridge_command gives: WSL rebuilds a Windows command line from
+    # the argv, and a script full of quotes and $ does not survive that.
+    encoded = base64.b64encode(_WSL_IMAGE_SCRIPT.encode("utf-16-le")).decode("ascii")
+    return ClipboardCommand(
+        [powershell, "-NoLogo", "-NoProfile", "-NonInteractive", "-STA",
+         "-EncodedCommand", encoded],
+        stdin_path=path,
+    )
+
+
 def _linux_image(path: Path, media_type: str) -> ClipboardCommand:
     if os.environ.get("WAYLAND_DISPLAY") and shutil.which("wl-copy"):
         return ClipboardCommand(["wl-copy", "--type", media_type], stdin_path=path)
@@ -569,6 +628,13 @@ def image_command(
     if platform == "darwin":
         return _macos_image(path, media_type)
     if platform.startswith("linux"):
+        # Under WSL the harness's clipboard is the Windows one: Claude Code
+        # there reads an image with powershell.exe once xclip and wl-paste
+        # have none. It is also the clipboard the person at this keyboard
+        # copies into.
+        powershell = wsl_powershell()
+        if powershell:
+            return _wsl_image(powershell, path)
         return _linux_image(path, media_type)
     raise ClipboardError(f"no clipboard route is known for platform {platform!r}")
 

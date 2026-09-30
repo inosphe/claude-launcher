@@ -159,16 +159,20 @@ def home(tmp_path, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
-def no_wsl_clipboard_bridge(monkeypatch):
-    """Keep the daemon's clipboard history off the Windows side under WSL.
+def no_linux_clipboard_reads(monkeypatch):
+    """Keep the daemon's clipboard history off the developer's clipboard on Linux.
 
     Every app ``build_app`` makes samples the host clipboard once a second
-    while it is served, and under WSL a sample is a real powershell.exe on the
-    Windows side (``daemon/clipboard.PowerShellBridge``). A hundred and more
-    tests serve an app; each would start one and read the developer's
-    clipboard. The bridge's own tests build a :class:`PowerShellBridge` with a
-    fake process and never go through this lookup.
+    while it is served. On Linux a sample is a real process: powershell.exe on
+    the Windows side under WSL (``daemon/clipboard.PowerShellBridge``), or
+    wl-paste/xclip/xsel on a machine with a display. A hundred and more tests
+    serve an app; each would start one and read the developer's clipboard.
+    ``_read_linux`` is the one name every such sample goes through, so it
+    reads nothing here. The bridge lookup answers None as well, for the tests
+    that put the real ``_read_linux`` back to pin which route it takes.
+    Windows reads in-process and is left as it was (claunch-lxwwf).
     """
+    monkeypatch.setattr("claude_launcher.daemon.clipboard._read_linux", lambda: "")
     monkeypatch.setattr("claude_launcher.daemon.clipboard._wsl_bridge", lambda: None)
 
 

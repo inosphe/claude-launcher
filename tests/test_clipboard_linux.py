@@ -15,6 +15,7 @@ machine, and what is on it is not the suite's to know.
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import queue
 import subprocess
@@ -26,8 +27,19 @@ import pytest
 from claude_launcher.daemon import clipboard
 
 
+#: The real Linux route, taken before conftest swaps it for one that reads
+#: nothing (the suite must not sample the developer's clipboard). The route
+#: tests below put it back; everything they read is faked under it.
+_READ_LINUX = clipboard._read_linux
+
+
 def _b64(text: str) -> str:
     return base64.b64encode(text.encode("utf-8")).decode("ascii")
+
+
+@pytest.fixture
+def linux_route(monkeypatch):
+    monkeypatch.setattr(clipboard, "_read_linux", _READ_LINUX)
 
 
 # ---- which route --------------------------------------------------------
@@ -39,7 +51,7 @@ def test_a_platform_with_no_reader_names_itself():
     assert "darwin" in str(exc.value)
 
 
-def test_linux_under_wsl_reads_through_the_bridge(monkeypatch):
+def test_linux_under_wsl_reads_through_the_bridge(monkeypatch, linux_route):
     class Bridge:
         def read(self):
             return "from windows"
@@ -49,11 +61,26 @@ def test_linux_under_wsl_reads_through_the_bridge(monkeypatch):
     assert clipboard.read_text("linux") == "from windows"
 
 
-def test_linux_without_wsl_runs_the_display_servers_tool(monkeypatch):
+def test_linux_without_wsl_runs_the_display_servers_tool(monkeypatch, linux_route):
     # conftest already answers None for the bridge.
     monkeypatch.setattr(clipboard, "native_text_command", lambda: ["xclip", "-o"])
     monkeypatch.setattr(clipboard, "read_command", lambda argv: f"via {argv[0]}")
     assert clipboard.read_text("linux") == "via xclip"
+
+
+def test_the_suite_reads_no_clipboard_on_a_developers_linux_machine(monkeypatch):
+    # A desktop with a display and every tool installed, and a WSL bridge
+    # that would answer: under the conftest guard none of them is reached.
+    class Bridge:
+        def read(self):
+            pytest.fail("read the Windows clipboard")
+
+    monkeypatch.setenv("DISPLAY", ":0")
+    monkeypatch.setenv("WAYLAND_DISPLAY", "wayland-0")
+    monkeypatch.setattr(clipboard.shutil, "which", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr(clipboard, "read_command", lambda argv: pytest.fail("ran a tool"))
+    monkeypatch.setattr(clipboard, "_wsl_bridge", lambda: Bridge())
+    assert clipboard.read_text("linux") == ""
 
 
 def _which(*present):
@@ -158,7 +185,9 @@ def test_the_bridge_script_goes_in_encoded_and_single_threaded():
     # the script's quotes and $ would not survive it.
     script = base64.b64decode(argv[argv.index("-EncodedCommand") + 1]).decode("utf-16-le")
     assert "[System.Windows.Forms.Clipboard]::GetText" in script
-    assert f"-gt {clipboard.MAX_TEXT}" in script
+    # $text.Length is UTF-16 code units, so the Windows side refuses only
+    # what no count could fit, and History.sample counts the characters.
+    assert f"-gt {clipboard.MAX_UTF16}" in script
     for kind in ("text", "same", "long", "error"):
         assert f"'{kind}'" in script
     # A progress record would reach the pipe as serialized XML.
@@ -468,6 +497,26 @@ def test_a_tool_that_hangs_or_is_missing_is_a_reason():
     with pytest.raises(OSError) as exc:
         clipboard.read_command(["xclip"], run=missing)
     assert "could not be started" in str(exc.value)
+
+
+def test_the_limit_is_characters_whichever_route_carried_the_text():
+    # Every character here is a surrogate pair on the Windows side: the
+    # bridge's own count is twice the limit, and the text is still inside it.
+    at_limit = "\U0001F600" * clipboard.MAX_TEXT
+    over = at_limit + "x"
+    assert len(at_limit.encode("utf-16-le")) // 2 == clipboard.MAX_UTF16
+    replies = {1: [b"clip:text:" + _b64(at_limit).encode() + b"\r\n"],
+               2: [b"clip:text:" + _b64(over).encode() + b"\r\n"]}
+    bridge, _, _ = _bridge(_FakePowerShell(lambda n: replies[n]))
+
+    async def run():
+        history = clipboard.History(bridge.read)
+        await history.sample()
+        assert history.error is None and history.items[0]["text"] == at_limit
+        await history.sample()
+        assert history.error == clipboard.TOO_LONG
+
+    asyncio.run(run())
 
 
 def test_output_past_the_limit_is_refused_before_it_is_decoded():
