@@ -9132,7 +9132,10 @@ async def h_beads_candidates(request: web.Request) -> web.Response:
 async def h_beads_issue(request: web.Request) -> web.Response:
     """One issue in full, comments included, with the round reports written
     for it. ``?cwd=`` says which board — any directory inside the repository —
-    and defaults to the daemon's.
+    and defaults to the daemon's. An id that board does not have is looked
+    for on the fleet's other boards (:meth:`daemon.beads.Board.show_on_any`),
+    and the answer's ``root`` names the board it was found on: most links to
+    an issue carry no board, and the page asks with the one it is showing.
 
     The reports ride along rather than sitting behind a second call because
     they are the same answer: the issue says what the round was for, and the
@@ -9148,7 +9151,10 @@ async def h_beads_issue(request: web.Request) -> web.Response:
         return json_error(404, f"no board for {cwd}")
     issue_id = request.match_info["id"]
     try:
-        issue = await board.show(root, issue_id)
+        root, issue = await board.show_on_any(
+            root, issue_id, list(request.app["manager"].list()),
+            _beads_extra_roots(request),
+        )
     except BeadsError as exc:
         return json_error(404, str(exc))
     linked = []

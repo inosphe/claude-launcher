@@ -246,6 +246,17 @@ class BeadsUnavailable(cli_beads.BeadsError):
     """The board cannot be reached for this session — no ``br``, no board."""
 
 
+def _not_found(exc: Exception) -> bool:
+    """Whether a failed read says the board has no such issue.
+
+    ``br show`` answers an unknown id with its error code on stdout
+    (``{"error": {"code": "ISSUE_NOT_FOUND", ...}}``), and :meth:`Board.show`
+    raises ``no issue <id>`` for an answer that holds no issue.
+    """
+    text = str(exc)
+    return "ISSUE_NOT_FOUND" in text or "no issue" in text
+
+
 def _utcnow() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
@@ -1723,6 +1734,55 @@ class Board:
         if isinstance(comments, dict):
             comments = comments.get("comments") or []
         return {**issue, "comments": comments if isinstance(comments, list) else []}
+
+    async def show_on_any(
+        self, root: Path, issue_id: str, sessions: Sequence,
+        extra_roots: Sequence[str] = (),
+    ) -> Tuple[Path, dict]:
+        """:meth:`show` on ``root``'s board first, then on the fleet's other
+        boards when that one does not have the id; ``(the board's root, the
+        issue)`` back.
+
+        An id is unique on its own board and nowhere else, and most links to
+        one carry no board: the rail's issue pills, a report's "issue ↗", a
+        parent or a search row, an address typed by hand. The page asked with
+        the board it was showing, so an issue of another board answered
+        ``ISSUE_NOT_FOUND`` from ``br`` while the issue was one board over
+        (claunch-ob8sz, gds6-8pq). The other boards are the ones the Beads
+        page lists (:meth:`_group_by_root`), and one whose database does not
+        exist yet is skipped: reading it would create it (:meth:`br`), and a
+        board with no database has no issue to find.
+
+        Only a not-found answer moves on; any other failure of ``root``'s
+        board is raised as it is. Found nowhere, the first board's own error
+        is raised, so an unknown id reads as it always did.
+        """
+        try:
+            return root, await self.show(root, issue_id)
+        except BeadsUnavailable:
+            raise
+        except cli_beads.BeadsError as exc:
+            if not _not_found(exc):
+                raise
+            missing = exc
+        first = self.ref_for(root)
+        _, order = await self._group_by_root(sessions, extra_roots)
+        for other in order:
+            ref = self.ref_for(other)
+            if ref is None or (first is not None and ref.db == first.db):
+                continue
+            if not ref.exists() and not (
+                Path(ref.root) / cli_beads.BEADS_DIR / cli_beads.JSONL_NAME
+            ).is_file():
+                continue
+            try:
+                return other, await self.show(other, issue_id)
+            except BeadsUnavailable:
+                raise
+            except cli_beads.BeadsError as exc:
+                if not _not_found(exc):
+                    log.debug("beads: %s not read on %s: %s", issue_id, other, exc)
+        raise missing
 
     # ---- per-session views ---------------------------------------------- #
     async def session_view(self, session) -> dict:

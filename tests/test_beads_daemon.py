@@ -1429,6 +1429,135 @@ def test_the_form_learns_its_boards_without_listing_a_single_issue(home, tmp_pat
     asyncio.run(run())
 
 
+class _Boards:
+    """Several boards, one :class:`FakeBr` each, told apart by the directory
+    ``br`` runs in. A ``show`` of an id the board does not have answers the
+    way the real ``br`` does: exit 3 and ``ISSUE_NOT_FOUND`` on stdout."""
+
+    def __init__(self, boards: dict):
+        self.boards = {str(root): br for root, br in boards.items()}
+        #: every ``(cwd, argv)`` asked for, including of a board not listed
+        self.calls: list = []
+
+    async def __call__(self, argv, cwd):
+        self.calls.append((str(cwd), list(argv)))
+        br = self.boards.get(str(cwd))
+        if br is None:
+            return 1, "", f"no board at {cwd}"
+        code, out, err = await br(argv, cwd)
+        if code and "show" in argv and err.startswith("no issue"):
+            iid = err.split()[-1]
+            return 3, json.dumps({"error": {
+                "code": "ISSUE_NOT_FOUND",
+                "message": f"Issue not found: {iid}",
+                "retryable": False, "context": {"searched_id": iid},
+            }}), ""
+        return code, out, err
+
+
+def test_an_issue_of_another_board_opens_on_the_board_it_is_on(home, tmp_path, repo):
+    """The detail pane asks with the board it is showing, and most links to an
+    issue carry no board -- a rail pill, a report's "issue ↗", an address typed
+    by hand. With the gds6 board selected, `claunch-kg3oe.1.1` answered
+    `br show ... failed (3): ISSUE_NOT_FOUND` while the issue sat on the
+    claunch board (claunch-ob8sz). The daemon now looks on the fleet's other
+    boards and says which one it found it on; an id no board has is still a
+    404, and a board with no database is not created by looking in it."""
+    from claude_launcher import workspaces
+
+    other = tmp_path / "other"
+    (other / ".beads").mkdir(parents=True)
+    (other / ".beads" / "beads.db").write_bytes(b"")
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    workspaces.add(str(other), "other")
+    workspaces.add(str(empty), "empty")
+    here, there = FakeBr(), FakeBr()
+    here.add(id="gds6-wt1.2", title="on the selected board")
+    there.add(id="claunch-kg3oe.1.1", title="one board over")
+    runner = _Boards({repo: here, other: there})
+    roots = [repo, other, empty]
+    board = beads_mod.Board(
+        runner,
+        root_for=lambda cwd: next(
+            (r for r in roots if cwd and Path(cwd).is_relative_to(r)), None),
+    )
+
+    def shows(root):
+        return [argv for cwd, argv in runner.calls if cwd == str(root) and "show" in argv]
+
+    async def run():
+        mgr = SessionManager(idle_threshold=0.5, scrollback=200, restore_default=True)
+        mm = MeshManager(mgr, root=tmp_path / "mesh")
+        client = await _serve(mgr, mm, board)
+        try:
+            resp = await client.get(
+                f"/api/beads/claunch-kg3oe.1.1?cwd={repo}", headers=BEARER)
+            doc = await resp.json()
+            assert resp.status == 200, doc
+            assert doc["root"] == str(other)
+            assert doc["board"] == "other"
+            assert doc["issue"]["title"] == "one board over"
+            assert shows(repo) and shows(other)
+
+            # An id on the board asked about never reads another board.
+            runner.calls.clear()
+            resp = await client.get(f"/api/beads/gds6-wt1.2?cwd={repo}", headers=BEARER)
+            doc = await resp.json()
+            assert resp.status == 200, doc
+            assert doc["root"] == str(repo)
+            assert shows(other) == []
+
+            # No board has it: the asked board's own error, as before.
+            resp = await client.get(f"/api/beads/nowhere-1?cwd={repo}", headers=BEARER)
+            doc = await resp.json()
+            assert resp.status == 404, doc
+            assert "ISSUE_NOT_FOUND" in doc["error"]
+
+            # The workspace with no database was not read, so not created.
+            assert [c for c, _ in runner.calls if c == str(empty)] == []
+            assert not (empty / ".beads" / "beads.db").exists()
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_only_a_missing_issue_is_looked_for_on_another_board(tmp_path, repo):
+    """A board that failed for another reason (a lock, a broken database) is
+    reported as it failed. Answering from a second board there would hide the
+    failure behind an issue that happens to share the id."""
+    other = tmp_path / "other"
+    (other / ".beads").mkdir(parents=True)
+    (other / ".beads" / "beads.db").write_bytes(b"")
+    there = FakeBr()
+    there.add(id="x-1")
+    calls = []
+
+    async def runner(argv, cwd):
+        calls.append(str(cwd))
+        if str(cwd) == str(repo):
+            return 1, "", "database is locked"
+        return await there(argv, cwd)
+
+    roots = [repo, other]
+
+    def root_for(cwd):
+        return next((r for r in roots if cwd and Path(cwd).is_relative_to(r)), None)
+
+    async def run():
+        locked = beads_mod.Board(runner, root_for=root_for)
+        with pytest.raises(cli_beads.BeadsError, match="database is locked"):
+            await locked.show_on_any(repo, "x-1", [], [str(other)])
+        assert str(other) not in calls
+        # the same lookup against a board that merely lacks the id finds it
+        missing = beads_mod.Board(_Boards({repo: FakeBr(), other: there}), root_for=root_for)
+        root, issue = await missing.show_on_any(repo, "x-1", [], [str(other)])
+        assert (root, issue["id"]) == (other, "x-1")
+
+    asyncio.run(run())
+
+
 def test_the_sweep_acts_on_what_the_session_was_assigned(repo):
     br = FakeBr()
     br.add(id="w", assignee="s1", status="in_progress")

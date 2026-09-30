@@ -17302,7 +17302,17 @@ async function refreshBeadsDetail() {
     const data = await resp.json().catch(() => ({}));
     if (beadsFocus === detailWanted) {
       beadsDetail = resp.ok ? data : { error: data.error || `HTTP ${resp.status}` };
-      if (resp.ok && data.root) beadsWorkspace = data.root;
+      // The daemon answers from the board the issue is on, which is not
+      // always the one asked about: a link to an issue carries no board, so
+      // an id not on the loaded page was asked for on the selected one
+      // (claunch-ob8sz). The tabs and lanes follow it to that board. Only a
+      // board the listing has: one it lacks would be reset to the first tab
+      // by the next page read, and that read would come back here again.
+      if (resp.ok && data.root && data.root !== beadsWorkspace
+          && ((beadsCache && beadsCache.boards) || []).some((b) => b.root === data.root)) {
+        beadsWorkspace = data.root;
+        if (beadsOpen && beadsSection === "board") restartBeadsStream();
+      }
     }
   } catch { /* preserve the last detail while the connection is unavailable */ }
 }
