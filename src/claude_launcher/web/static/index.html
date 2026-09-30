@@ -1033,6 +1033,10 @@
       <div id="shadow-head"></div>
       <p id="shadow-status" class="wf-note" role="status"></p>
       <div id="shadow-term" aria-label="remote terminal, read-only"></div>
+      <!-- The same prompt presets as the terminal page's strip, above this
+           page's session line: a click sends to the remote session on
+           screen (renderTermPresetButtons). -->
+      <div id="shadow-preset-buttons" class="hidden" aria-label="Prompt presets"></div>
       <form id="shadow-input" autocomplete="off">
         <textarea id="shadow-input-field" rows="1"
                   placeholder="type for this session — Enter to send, Ctrl+J for a newline"

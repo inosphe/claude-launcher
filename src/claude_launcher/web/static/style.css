@@ -1934,7 +1934,7 @@ a.cflow-scope:hover { background: #1d3559; text-decoration: underline; }
   overflow: auto; user-select: text; font-size: 12px;
 }
 .clipboard-entry time { display: block; color: #9da7b3; font-size: 11px; }
-#term-preset-buttons {
+#term-preset-buttons, #shadow-preset-buttons {
   flex: none; display: flex; gap: 6px; overflow-x: auto; min-width: 0;
   padding: 6px 12px; background: #1b1e24; border-top: 1px solid #2a2e36;
 }
