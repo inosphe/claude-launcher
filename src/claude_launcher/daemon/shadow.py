@@ -11,7 +11,12 @@ other daemon's control surface:
   protocol the local terminal speaks (``daemon/ws.py``), carried over a live
   relay bridge (``RelayUplink.peer_open``);
 * the **session line** ("type for this session") -- one line of text,
-  journaled with the viewing daemon as its origin.
+  journaled with the viewing daemon as its origin;
+* the **transcript** -- the conversation the harness keeps on disk, in the
+  pages the local transcript page reads (``daemon/transcript_view.py``).
+  The terminal cannot stand in for it: a claude session repaints the
+  alternate screen instead of scrolling it, so nothing it said earlier
+  reaches any scrollback, and the shadow terminal takes no scroll anyway.
 
 The permissions are the point, and they are enforced where the session is
 (the *host*), not where it is viewed:
@@ -26,6 +31,10 @@ The permissions are the point, and they are enforced where the session is
 * The session line refuses key names (``Escape``, ``C-c``), never submits a
   person's half-typed line on the host, never queues into an exited session,
   and can be switched off by the host (``daemon.shadow_input: false``).
+* The transcript is read-only by nature, leaves out where the conversation
+  is filed on the host (the path names a home directory and a cwd, which
+  the card withholds too), and can be switched off by the host
+  (``daemon.shadow_transcript: false``).
 * Kill, pause, note editing, raw keys, image paste and every other control a
   local card has are simply absent: there is no endpoint to call.
 
@@ -48,6 +57,7 @@ from aiohttp import WSMsgType, web
 
 from . import briefing
 from . import session_input
+from . import transcript_view
 from .mesh import MeshError, PeerUnreachable
 from .peer_client import PeerHttpError, ResponseStream
 from .session import KeyboardHeld, SessionGone
@@ -273,13 +283,23 @@ class ShadowRefused(Exception):
         self.status = status
 
 
+def _switch_on(cfg: Optional[dict], key: str) -> bool:
+    if not isinstance(cfg, dict):
+        return True
+    value = cfg.get(key, True)
+    return value is not False and str(value).lower() not in ("0", "false", "no", "off")
+
+
 def input_enabled(cfg: Optional[dict]) -> bool:
     """Whether this daemon takes the session line from peers
     (``daemon.shadow_input``, on unless set false)."""
-    if not isinstance(cfg, dict):
-        return True
-    value = cfg.get("shadow_input", True)
-    return value is not False and str(value).lower() not in ("0", "false", "no", "off")
+    return _switch_on(cfg, "shadow_input")
+
+
+def transcript_enabled(cfg: Optional[dict]) -> bool:
+    """Whether this daemon shows its members' transcripts to peers
+    (``daemon.shadow_transcript``, on unless set false)."""
+    return _switch_on(cfg, "shadow_transcript")
 
 
 async def type_line(session, text, input_id, *, origin: str) -> dict:
@@ -327,6 +347,99 @@ async def type_line(session, text, input_id, *, origin: str) -> dict:
     session_input.write(name, "input_sent", request_id=input_id, text=text,
                         status="sent", pid=session.pid, origin=origin)
     return {"ok": True, "bytes": len(data)}
+
+
+# --------------------------------------------------------------------------- #
+# the transcript, as it crosses between daemons
+# --------------------------------------------------------------------------- #
+#: The block kinds a transcript page carries (``transcript_view._blocks``).
+TRANSCRIPT_BLOCKS = frozenset(("text", "thinking", "tool_use", "tool_result"))
+
+
+def page_args(before, limit) -> Tuple[Optional[int], int]:
+    """A page request's ``before`` and ``limit``, as integers.
+
+    ``before`` absent (None or "") asks for the tail. ``transcript_view.page``
+    clamps ``limit`` itself; this only refuses what is not a number.
+    """
+    try:
+        cursor = None if before in (None, "") else int(before)
+        size = transcript_view.PAGE_DEFAULT if limit in (None, "") else int(limit)
+    except (TypeError, ValueError):
+        raise ShadowRefused(400, "'before' and 'limit' must be integers") from None
+    if cursor is not None and cursor < 0:
+        raise ShadowRefused(400, "'before' must not be negative")
+    return cursor, size
+
+
+def _int(value) -> Optional[int]:
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
+def _cut_block(block) -> Optional[dict]:
+    if not isinstance(block, dict) or block.get("type") not in TRANSCRIPT_BLOCKS:
+        return None
+    out: dict = {"type": block["type"]}
+    for key in ("text", "name", "id"):
+        if isinstance(block.get(key), str):
+            out[key] = block[key]
+    for key in ("clipped", "error"):
+        if key in block:
+            out[key] = block[key] is True
+    full = _int(block.get("full"))
+    if full is not None:
+        out["full"] = full
+    return out
+
+
+def _cut_record(record) -> Optional[dict]:
+    if not isinstance(record, dict) or _int(record.get("seq")) is None:
+        return None
+    blocks = [b for b in map(_cut_block, record.get("blocks") or []) if b]
+    if not blocks:
+        return None
+    return {
+        "seq": record["seq"],
+        "role": record["role"] if isinstance(record.get("role"), str) else "?",
+        "ts": record["ts"] if isinstance(record.get("ts"), str) else "",
+        "sidechain": record.get("sidechain") is True,
+        "blocks": blocks,
+    }
+
+
+def transcript_cut(page: dict, *, available: bool) -> dict:
+    """One transcript page cut to what crosses between daemons.
+
+    The host cuts ``transcript_view.page``'s answer with it, and the viewer
+    cuts the host's answer again, for the reason it re-cuts a card: a peer
+    running other code must not put anything else on this daemon's page.
+    ``source`` -- the host's path to the file -- never leaves the host;
+    ``available`` says whether there is a conversation on file at all,
+    which is the one thing the page read the path for.
+    """
+    records = page.get("records") if isinstance(page, dict) else None
+    out: dict = {
+        "records": [r for r in map(_cut_record, records or []) if r],
+        "has_more": isinstance(page, dict) and page.get("has_more") is True,
+        "available": bool(available),
+    }
+    for key in ("cursor", "total"):
+        value = _int(page.get(key)) if isinstance(page, dict) else None
+        if value is not None:
+            out[key] = value
+    return out
+
+
+def transcript_page(session, before: Optional[int], limit: int) -> dict:
+    """``session``'s conversation, one page, as a linked peer is shown it.
+
+    Blocking (the index scan reads the file); the handler runs it in a
+    thread, as the local transcript route does.
+    """
+    page = transcript_view.page(
+        session.sdef.name, session.sdef, before=before, limit=limit,
+    )
+    return transcript_cut(page, available=bool(page.get("source")))
 
 
 # --------------------------------------------------------------------------- #

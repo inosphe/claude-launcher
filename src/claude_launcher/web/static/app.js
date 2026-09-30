@@ -14368,12 +14368,20 @@ document.addEventListener("visibilitychange", () => {
    momentum, a touch drag, PgUp/Home/End, find-in-page and selection across
    the whole conversation all come for free and none of them cost a frame of
    daemon time. Older pages are fetched as the reader nears the top; while
-   they sit at the bottom the poll follows the session forward. */
+   they sit at the bottom the poll follows the session forward.
+
+   The same page reads another daemon's session (#/rlog/<machine>/<name>):
+   a remote shadow's terminal takes no scroll, so this is the only place
+   what it said earlier can be read. Only where the pages come from changes
+   (its host, through /api/shadows/...) and where Back goes; the session
+   info tab is hidden, because what it looks up is a LOCAL session and a
+   remote `s1` is not the local one. */
 const TRANSCRIPT_PAGE = 40;
 const TRANSCRIPT_FOLLOW_MAX = 200;
 const TRANSCRIPT_NEAR_TOP = 400;   // px from the top that triggers an older page
 const TRANSCRIPT_NEAR_END = 40;    // px from the bottom that still counts as "live"
 let transcriptName = null;         // the session whose conversation this page is
+let transcriptMachine = null;      // its daemon when it is a remote shadow, else null
 let transcriptCursor = null;       // oldest seq loaded; the next page ends here
 let transcriptSeen = -1;           // newest seq loaded, for the follow-forward
 let transcriptMore = false;        // is there anything above what is loaded
@@ -14425,19 +14433,32 @@ document.querySelectorAll('input[name="log-format"]').forEach((input) =>
   }));
 setTranscriptFormat(transcriptFormat, false);
 
+/* Where a session's pages are served: this daemon's route for its own
+   sessions, the shadow route (relayed to the host) for another's. */
+function transcriptPath(name, machine) {
+  return machine
+    ? `/api/shadows/${encodeURIComponent(machine)}/${encodeURIComponent(name)}/transcript`
+    : `/api/sessions/${encodeURIComponent(name)}/transcript`;
+}
+
 /* Open the page for a session — the route's entry point. Re-entering the one
    already on screen is a no-op rather than a reload: coming back from the
    terminal is the common case, and re-reading would throw away where the
-   reader had scrolled to. */
-function openTranscript(name) {
+   reader had scrolled to. `machine` names the daemon of a remote shadow;
+   omitted, the session is this daemon's own. */
+function openTranscript(name, machine = null) {
+  machine = machine || null;
   showView("log");
-  $("log-title").textContent = name;
+  $("log-title").textContent = machine ? `${name} @${machine}` : name;
   const back = $("log-back");
-  if (back) back.href = `#/s/${encodeURIComponent(name)}`;
-  if (transcriptName === name) return;
+  if (back) back.href = machine ? shadowHash(machine, name) : `#/s/${encodeURIComponent(name)}`;
+  const info = $("log-info-tab");
+  if (info) info.hidden = !!machine;
+  if (transcriptName === name && transcriptMachine === machine) return;
   transcriptGeneration += 1;
   transcriptBusy = false;
   transcriptName = name;
+  transcriptMachine = machine;
   globalThis.TranscriptTabs?.select("transcript");
   transcriptCursor = null;
   transcriptSeen = -1;
@@ -14464,6 +14485,7 @@ function closeTranscript() {
   stopTranscriptPoll();
   transcriptGeneration += 1;
   transcriptName = null;
+  transcriptMachine = null;
   transcriptBusy = false;
   const pane = $("term-log-pane");
   if (pane) pane.innerHTML = "";
@@ -14497,6 +14519,7 @@ function transcriptAtEnd(pane) {
 async function loadTranscriptPage(opts) {
   const older = !!(opts && opts.older);
   const name = transcriptName;
+  const machine = transcriptMachine;
   const generation = transcriptGeneration;
   if (!name || transcriptBusy) return;
   transcriptBusy = true;
@@ -14507,8 +14530,14 @@ async function loadTranscriptPage(opts) {
   try {
     const q = `limit=${TRANSCRIPT_PAGE}`
       + (older && transcriptCursor !== null ? `&before=${transcriptCursor}` : "");
-    const res = await api(`/api/sessions/${encodeURIComponent(name)}/transcript?${q}`);
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const res = await api(`${transcriptPath(name, machine)}?${q}`);
+    if (!res.ok) {
+      // The daemon's own words when it has them: for a remote shadow the
+      // reason is the host's (transcripts switched off, an older daemon, a
+      // relay that is down), and a bare status explains none of those.
+      const doc = await res.json().catch(() => ({}));
+      throw new Error(doc.error || `HTTP ${res.status}`);
+    }
     const data = await res.json();
     // The reader may have closed it, or walked to another session, while this
     // was in flight; its answer is not theirs any more.
@@ -14553,7 +14582,9 @@ function renderTranscriptPage(data, older) {
 
   if (!records.length) {
     if (!pane.querySelector(".log-rec")) {
-      pane.appendChild(el("div", "log-note", data.source
+      // A shadow's host says `available` where this daemon says `source`:
+      // the path to the file stays on the host (daemon/shadow.py).
+      pane.appendChild(el("div", "log-note", data.source || data.available
         ? "this conversation has nothing to show yet"
         : "no conversation on file for this session"));
     }
@@ -14976,7 +15007,8 @@ function mobileTitle() {
     case "wf": return `workflow · ${
       wfScope && wfScope !== "default" ? wfScope + " · " : ""
     }${shortenPath(wfCwd || "")}`;
-    case "log": return `transcript · ${transcriptName || ""}`;
+    case "log": return `transcript · ${transcriptName || ""}${
+      transcriptMachine ? " @" + transcriptMachine : ""}`;
     case "msg": return `messages · ${traceSession}`;
     case "session": return `session · ${sessName}`;
     case "shadow": return `remote · ${shadowOpen ? shadowKey(shadowOpen.machine, shadowOpen.name) : ""}`;
@@ -15652,6 +15684,10 @@ function parseHash(h) {
   // not need the session to be alive: it comes off claude's jsonl on disk,
   // so an exited record reads exactly like a running one.
   if (parts[0] === "log" && parts[1]) return { page: "log", name: parts[1] };
+  // A remote shadow's transcript: the same page, its pages read from the host.
+  if (parts[0] === "rlog" && parts[1] && parts[2]) {
+    return { page: "log", machine: parts[1], name: parts[2] };
+  }
   // The session's traffic, not the session — a third reading of it, beside
   // the terminal (what it is doing) and the run page (where it has got to).
   // The mesh is in the URL because a session is a different handle in each
@@ -15786,7 +15822,7 @@ function route() {
     case "observer": showView("observer"); globalThis.ObserverPage.open(r.scope, r.name); break;
     case "operator": showView("operator"); globalThis.OperatorPanel.open(); break;
     case "wf": openWorkflow(r.cwd, r.scope); break;
-    case "log": openTranscript(r.name); break;
+    case "log": openTranscript(r.name, r.machine); break;
     case "msg": openTrace(r.name, r.mesh); break;
     case "mesh": openMesh(r.name); break;
     case "flow": openFlowTopology(r.name); break;
@@ -34522,6 +34558,12 @@ function shadowHash(machine, name) {
   return `#/r/${encodeURIComponent(machine)}/${encodeURIComponent(name)}`;
 }
 
+/* The shadow's transcript page: the local transcript page, read from the
+   host (openTranscript with a machine). */
+function shadowLogHash(machine, name) {
+  return `#/rlog/${encodeURIComponent(machine)}/${encodeURIComponent(name)}`;
+}
+
 function shadowRow(machine, name) {
   return shadowRows.find((r) => r.machine === machine && r.session === name) || null;
 }
@@ -34706,6 +34748,75 @@ let shadowSock = null;
 let shadowTicket = 0;
 let shadowRetry = null;
 
+/* How the host's grid is drawn: "scroll" at the normal font, scrolling when
+   the page is smaller than the grid, or "fit", the font changed until the
+   whole grid fits the area. A shadow cannot resize the grid -- that is the
+   host's -- so the font is the only thing there is to fit. Remembered per
+   browser. */
+// Guarded: reduced harnesses evaluate this tail of the file without BASE.
+const SHADOW_FIT_KEY = `claunch_shadow_fit:${typeof BASE === "string" ? BASE : "/"}`;
+const SHADOW_FONT = 15;         // xterm's own default: what "scroll" draws at
+const SHADOW_FONT_MIN = 5;
+const SHADOW_FONT_MAX = 28;
+let shadowFit = (() => {
+  try { return localStorage.getItem(SHADOW_FIT_KEY) === "fit" ? "fit" : "scroll"; } catch {}
+  return "scroll";
+})();
+let shadowFitWatch = null;
+
+function setShadowFit(mode, remember = true) {
+  shadowFit = mode === "fit" ? "fit" : "scroll";
+  if (remember) {
+    try { localStorage.setItem(SHADOW_FIT_KEY, shadowFit); } catch {}
+  }
+  document.querySelectorAll('input[name="shadow-fit"]').forEach((input) => {
+    input.checked = input.value === shadowFit;
+  });
+  fitShadowTerm();
+}
+
+/* Size the font for the mode. In "fit", the grid's drawn size is measured
+   and the font scaled by the ratio the area allows; glyph widths round, so
+   it is measured again after each change (three passes settle it) and the
+   last step only ever shrinks, so the grid never ends a pixel too wide. */
+function fitShadowTerm() {
+  const host = $("shadow-term");
+  if (!host) return;
+  host.classList.toggle("shadow-fit", shadowFit === "fit");
+  if (!shadowTerm) return;
+  if (shadowFit !== "fit") {
+    if (shadowTerm.options.fontSize !== SHADOW_FONT) shadowTerm.options.fontSize = SHADOW_FONT;
+    return;
+  }
+  const screen = host.querySelector(".xterm-screen");
+  const style = getComputedStyle(host);
+  const width = host.clientWidth - parseFloat(style.paddingLeft || 0) - parseFloat(style.paddingRight || 0);
+  const height = host.clientHeight - parseFloat(style.paddingTop || 0) - parseFloat(style.paddingBottom || 0);
+  if (!screen || width <= 0 || height <= 0) return;
+  for (let pass = 0; pass < 3; pass += 1) {
+    const w = screen.offsetWidth, h = screen.offsetHeight;
+    if (!w || !h) return;
+    const size = shadowTerm.options.fontSize;
+    const ratio = Math.min(width / w, height / h);
+    if (ratio >= 1 && ratio < 1.02) return;   // fits, and nothing worth growing into
+    let next = Math.floor(size * ratio * 10) / 10;
+    next = Math.min(SHADOW_FONT_MAX, Math.max(SHADOW_FONT_MIN, next));
+    if (next === size) return;
+    shadowTerm.options.fontSize = next;
+  }
+  if ((screen.offsetWidth > width || screen.offsetHeight > height)
+      && shadowTerm.options.fontSize > SHADOW_FONT_MIN) {
+    shadowTerm.options.fontSize = Math.max(SHADOW_FONT_MIN, shadowTerm.options.fontSize - 0.5);
+  }
+}
+
+if (typeof document !== "undefined" && document.querySelectorAll) {
+  document.querySelectorAll('input[name="shadow-fit"]').forEach((input) =>
+    input.addEventListener("change", () => {
+      if (input.checked) setShadowFit(input.value);
+    }));
+}
+
 function renderShadowHead() {
   const head = $("shadow-head");
   if (!head || !shadowOpen) return;
@@ -34724,6 +34835,8 @@ function setShadowStatus(text, warn) {
 
 function openShadow(machine, name) {
   showView("shadow");
+  const log = $("shadow-log");
+  if (log) log.href = shadowLogHash(machine, name);
   const same = shadowOpen && shadowOpen.machine === machine && shadowOpen.name === name;
   if (same && shadowSock) { renderShadowHead(); return; }
   closeShadow();
@@ -34735,8 +34848,17 @@ function openShadow(machine, name) {
   host.replaceChildren();
   // No onData handler is ever attached, and stdin is off: nothing typed at
   // this terminal goes anywhere. The session line below is the one way in.
-  shadowTerm = new Terminal({ scrollback: 2000, disableStdin: true, cursorBlink: false });
+  shadowTerm = new Terminal({
+    scrollback: 2000, disableStdin: true, cursorBlink: false, fontSize: SHADOW_FONT,
+  });
   shadowTerm.open(host);
+  setShadowFit(shadowFit, false);
+  // "fit" follows the area: a window resize, the rail opening, a phone
+  // turning. The host's grid changing is the frames' job (shadowFrame).
+  if (typeof ResizeObserver === "function") {
+    shadowFitWatch = new ResizeObserver(() => fitShadowTerm());
+    shadowFitWatch.observe(host);
+  }
   connectShadow();
 }
 
@@ -34778,10 +34900,12 @@ function shadowFrame(frame) {
     case "init":
       if (frame.cols && frame.rows) shadowTerm.resize(frame.cols, frame.rows);
       shadowTerm.reset();
+      fitShadowTerm();
       setShadowStatus(frame.exited ? "the session has exited — final screen" : "live · read-only");
       return false;
     case "resize":
       if (frame.cols && frame.rows) shadowTerm.resize(frame.cols, frame.rows);
+      fitShadowTerm();
       return false;
     case "exit":
       setShadowStatus("the session exited", true);
@@ -34806,6 +34930,7 @@ function closeShadow() {
   shadowTicket++;
   if (shadowRetry) { clearTimeout(shadowRetry); shadowRetry = null; }
   if (shadowSock) { try { shadowSock.close(); } catch {} shadowSock = null; }
+  if (shadowFitWatch) { shadowFitWatch.disconnect(); shadowFitWatch = null; }
   if (shadowTerm) { try { shadowTerm.dispose(); } catch {} shadowTerm = null; }
   shadowOpen = null;
   syncShadowActive();

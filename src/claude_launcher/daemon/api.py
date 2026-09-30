@@ -676,17 +676,20 @@ def build_app(
     r.add_post("/peer/ops/lease", h_peer_ops_lease)
     # Remote-shadow sessions (daemon/shadow.py): a linked peer's operator
     # LOOKS at this daemon's members of the mesh that link belongs to -- a
-    # card, an output-only terminal, the session line. Link-token
-    # authenticated and member-scoped; nothing else a local card can do
-    # (kill, pause, note, raw keys, resize, paste-image) has a peer route.
+    # card, an output-only terminal, the session line, the transcript.
+    # Link-token authenticated and member-scoped; nothing else a local card
+    # can do (kill, pause, note, raw keys, resize, paste-image) has a peer
+    # route.
     r.add_post("/peer/shadow/cards", h_peer_shadow_cards)
     r.add_post("/peer/shadow/stream", h_peer_shadow_stream)
     r.add_post("/peer/shadow/line", h_peer_shadow_line)
+    r.add_post("/peer/shadow/transcript", h_peer_shadow_transcript)
     # ...and this daemon's side of it: the other daemons' members, kept out
     # of /api/sessions (keyed by bare name) and addressed by machine too.
     r.add_get("/api/shadows", h_shadows_list)
     r.add_get("/api/shadows/{machine}/{session}/ws", h_shadow_ws)
     r.add_post("/api/shadows/{machine}/{session}/line", h_shadow_line)
+    r.add_get("/api/shadows/{machine}/{session}/transcript", h_shadow_transcript)
     r.add_get("/api/sessions", h_sessions_list)
     r.add_get("/api/transcripts", h_transcripts_list)
     r.add_post("/api/sessions", h_sessions_create)
@@ -5613,6 +5616,31 @@ async def h_peer_shadow_line(request: web.Request) -> web.Response:
     return json_response(result)
 
 
+async def h_peer_shadow_transcript(request: web.Request) -> web.Response:
+    """One page of a member's conversation, for a linked peer's reader.
+
+    The page the local transcript route serves (h_session_transcript), cut
+    to what leaves this daemon (``shadow.transcript_cut``). In a thread for
+    the same reason: the first page of a large transcript builds its index.
+    """
+    body = await _json_body(request)
+    session, _member = _peer_shadow_member(request, body)
+    try:
+        cfg = store.daemon_config()
+    except store.StoreError:
+        cfg = None
+    if not shadow_mod.transcript_enabled(cfg):
+        return json_error(
+            403, "this daemon does not show its sessions' transcripts to peers "
+                 "(daemon.shadow_transcript is off)")
+    try:
+        before, limit = shadow_mod.page_args(body.get("before"), body.get("limit"))
+    except shadow_mod.ShadowRefused as exc:
+        return json_error(exc.status, str(exc))
+    page = await asyncio.to_thread(shadow_mod.transcript_page, session, before, limit)
+    return json_response(page)
+
+
 async def h_shadows_list(request: web.Request) -> web.Response:
     """Every other daemon's member of every mesh held here, with its card."""
     holder = request.app["shadow"]
@@ -5664,6 +5692,37 @@ async def h_shadow_line(request: web.Request) -> web.Response:
     except mesh_mod.PeerUnreachable as exc:
         return json_error(502, str(exc))
     return json_response(result)
+
+
+async def h_shadow_transcript(request: web.Request) -> web.Response:
+    """A page of another daemon's member's conversation, via its host.
+
+    ``before``/``limit`` as the local route takes them. The host's answer is
+    cut again here (``shadow.transcript_cut``), as a card is. A host that
+    answers the route with a plain 404 predates it: said so, rather than
+    passed on as a bare status the page cannot explain.
+    """
+    machine = request.match_info["machine"]
+    try:
+        before, limit = shadow_mod.page_args(
+            request.query.get("before"), request.query.get("limit"))
+    except shadow_mod.ShadowRefused as exc:
+        return json_error(exc.status, str(exc))
+    body: dict = {"limit": limit}
+    if before is not None:
+        body["before"] = before
+    try:
+        result = await _mesh_mgr(request).shadow_call(
+            machine, request.match_info["session"], "/peer/shadow/transcript", body,
+        )
+    except mesh_mod.PeerUnreachable as exc:
+        if exc.status == 404:
+            return json_error(
+                502, f"daemon {machine!r} serves no transcripts to peers — "
+                     f"it runs a claunch older than the shadow transcript")
+        return json_error(502, str(exc))
+    available = isinstance(result, dict) and result.get("available") is True
+    return json_response(shadow_mod.transcript_cut(result, available=available))
 
 
 async def h_peer_ops_git(request: web.Request) -> web.Response:

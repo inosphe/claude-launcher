@@ -514,6 +514,12 @@ DAEMON_DEFAULTS = {
     # is not switchable: it is what sharing a mesh with that daemon means.
     # Read LIVE on every request.
     "shadow_input": True,
+    # Whether that operator may read those members' transcripts -- the
+    # conversation on disk, paged (daemon/transcript_view.py). Switchable
+    # where the terminal is not, because it carries more than the terminal
+    # ever showed: the whole history, thinking blocks the TUI folds away,
+    # and tool results the screen cut short. Read LIVE on every request.
+    "shadow_transcript": True,
 }
 
 
