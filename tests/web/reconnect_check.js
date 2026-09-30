@@ -37,7 +37,7 @@ function check(name, cond, extra) {
 function build(opts) {
   const o = opts || {};
   const nodes = {};
-  for (const id of ["term-link", "m-link"]) {
+  for (const id of ["term-link", "m-link", "term-size", "m-size"]) {
     nodes[id] = {
       id, textContent: "", title: "", className: "", on: {},
       addEventListener: (ev, fn) => { nodes[id].on[ev] = fn; },
@@ -143,6 +143,11 @@ function build(opts) {
     // No control socket in this world, so openSocket takes its
     // fallback: a socket of the terminal's own. The channel path is
     // checked in channels_check.js.
+    // Size ownership (daemon/ws.py, "Who sizes the session"): the state
+    // lives at the top of app.js and its helpers past the text-size
+    // section, outside this slice, so they are declared here.
+    "let sizeOwner = true, sizeHeld = false;\n" +
+    "function renderSizeChip() {}\nfunction stealSize() {}\n" +
     "function openChannel() { return null; }\n" +
     code +
     "\nreturn {openSocket, closeLink, detach, reconnectNow, tryReconnect," +

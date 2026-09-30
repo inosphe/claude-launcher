@@ -11,6 +11,11 @@ let sessionsCache = [];
 let attachedPid = null;           // pid of the incarnation this socket is bound to
 let snapshotName = null;          // the ended session drawn as a static snapshot (no xterm, no socket)
 let applyingRemoteResize = false; // guards against echoing a server-driven resize
+// Who sizes the session (daemon/ws.py, "Who sizes the session"): only the
+// size owner's resizes reach the PTY; every other viewer mirrors its grid and
+// is offered the header's `take size` button instead of refitting on its own.
+let sizeOwner = true;             // this viewer's resizes reach the PTY
+let sizeHeld = false;             // some viewer holds the size
 let fitTimer = null;              // debounces viewport-driven fit() calls
 let altScreen = false;      // the program is drawing the alternate screen
 let mouseTracking = false;  // the program asked for the mouse — the wheel is its own
@@ -11480,6 +11485,11 @@ function handleFrame(msg) {
       && (!msg.boot_id || !attachedBoot || msg.boot_id === attachedBoot);
     attachedPid = msg.pid || null;
     attachedBoot = msg.boot_id || null;
+    // A daemon from before size ownership sends no `owner`: every viewer
+    // sized the session then, so this one does too.
+    sizeOwner = msg.owner !== false;
+    sizeHeld = true;
+    renderSizeChip();
     setStatusBadge(msg.status);
     refreshTermInput();
     flushInput(same);
@@ -11526,16 +11536,24 @@ function handleFrame(msg) {
   } else if (msg.type === "state") {
     setStatusBadge(msg.status);
     refreshTermInput();
+  } else if (msg.type === "size_owner") {
+    // The size changed hands. Losing it needs nothing more here: the new
+    // owner's grid arrives as the `resize` frame below, and is mirrored.
+    sizeOwner = !!msg.owner;
+    sizeHeld = !!msg.held;
+    renderSizeChip();
+    // The owner left and nobody sizes the session: the viewer on screen
+    // claims it with its own size.
+    if (!sizeHeld && terminalOnScreen() && !document.hidden) refitSoon(50);
   } else if (msg.type === "resize") {
     if (term.cols === msg.cols && term.rows === msg.rows) {
       // This viewer's own claim echoing back, or no news. Filtering on the
       // dims (rather than on visibility, as this used to) is also what keeps
       // a stale echo over the relay from churning the grid.
-    } else if (document.hasFocus() && terminalOnScreen()) {
-      // Another viewer claimed the size out from under the one actually
-      // being looked at (an attach entering, a daemon restart): take it
-      // back. No ping-pong hides here — the other side re-asserts only on
-      // its own focus events, and it cannot be focused while this is.
+    } else if (sizeOwner && document.hasFocus() && terminalOnScreen()) {
+      // This viewer holds the size and something else set it (the REST
+      // resize, a daemon restart): take it back. Only the owner does this,
+      // and only one viewer is the owner, so nothing answers back.
       resyncTerminal();
     } else {
       // Not the viewer in use: mirror the claimed grid — it is the daemon's
@@ -11580,6 +11598,7 @@ function handleFrame(msg) {
 function endSession() {
   if (sessionEnded) return;
   sessionEnded = true;
+  renderSizeChip();
   linkQueue = [];
   setLink("idle");
   setStatusBadge("exited");
@@ -12656,6 +12675,8 @@ function detach() {
 }
 
 $("term-link").addEventListener("click", () => reconnectNow(true));
+$("term-size").addEventListener("click", stealSize);
+$("m-size").addEventListener("click", stealSize);
 $("m-link").addEventListener("click", () => $("term-link").click());
 
 /* ---- queued deliveries ----
@@ -13115,11 +13136,57 @@ function fitView() {
 /* The opposite move: size the SESSION to this box, at the reader's chosen
    font size. Every fit() must pass through here — a fit measured while
    fitView has the glyphs shrunk would claim a grid far wider than the
-   reader can read. */
+   reader can read.
+
+   A viewer that does not hold the size leaves its grid alone (it mirrors
+   the owner's) and only asks for the size with this box's dimensions: the
+   daemon grants it when nobody holds it or the holder is not being looked
+   at, and otherwise answers that someone else holds it. Refitting the
+   local grid anyway is what used to make two viewers resize each other
+   without end. */
 function localFit() {
   if (!canFit()) return;
+  if (!sizeOwner) {
+    requestSize();
+    fitView();
+    return;
+  }
   setRenderFont(fontSize);
   fitAddon.fit();
+}
+
+/* Ask the daemon for the session's size, at this box's dimensions, without
+   touching the local grid: if it is granted, the `size_owner` and `resize`
+   frames that follow make this viewer the owner and fit it. */
+function requestSize() {
+  if (!ws || ws.readyState !== WebSocket.OPEN || !fitAddon) return;
+  setRenderFont(fontSize);
+  const p = fitAddon.proposeDimensions();
+  if (!p || !(p.cols > 0) || !(p.rows > 0)) return;
+  ws.send(JSON.stringify({ type: "resize", cols: p.cols, rows: p.rows }));
+}
+
+/* The header's `take size` button: up only while another viewer holds the
+   size, so this terminal mirrors a grid it did not choose. */
+function renderSizeChip() {
+  const hide = !term || sizeOwner || !sizeHeld || sessionEnded;
+  for (const id of ["term-size", "m-size"]) {
+    const chip = $(id);
+    if (chip) chip.classList.toggle("hidden", hide);
+  }
+}
+
+/* Take the size from whoever holds it: the session is resized to this
+   window, and the other viewers mirror it from now on. */
+function stealSize() {
+  if (!term || !ws || ws.readyState !== WebSocket.OPEN) return;
+  ws.send(JSON.stringify({ type: "steal" }));
+  sizeOwner = true;
+  sizeHeld = true;
+  renderSizeChip();
+  localFit();
+  ws.send(JSON.stringify({ type: "resize", cols: term.cols, rows: term.rows }));
+  ws.send(JSON.stringify({ type: "repaint" }));
 }
 
 function syncZoomControls() {
@@ -13409,6 +13476,7 @@ function suspendActive() {
     alt: altScreen, mouse: mouseTracking,
     scroll: scrollOffset, exited: sessionEnded,
     retries: linkTry,
+    owner: sizeOwner, held: sizeHeld,
   };
   if (ws) {
     setTerminalFocus(false);
@@ -13446,12 +13514,15 @@ function resetLive() {
   altScreen = false;
   mouseTracking = false;
   applyingRemoteResize = false;
+  sizeOwner = true;
+  sizeHeld = false;
   currentName = null;
   term = null;
   fitAddon = null;
   ws = null;
   setLink("idle");
   updateScrollChip();
+  renderSizeChip();
 }
 
 /* Dispose a parked terminal for good. The party it belonged to has gone
@@ -13489,6 +13560,8 @@ function shimFrame(b, ev) {
       b.boot = msg.boot_id || null;
       b.alt = !!msg.alt;
       b.mouse = !!msg.mouse;
+      b.owner = msg.owner !== false;
+      b.held = true;
       // The same flag the live machine reads, for the same reason:
       // restoreTerminal opens a fresh socket for a parked terminal whose
       // session has not ended, and doing that to one that has is where the
@@ -13501,6 +13574,9 @@ function shimFrame(b, ev) {
       if (b.mouse) b.scroll = 0;
     } else if (msg.type === "scrolled") {
       b.scroll = msg.offset || 0;
+    } else if (msg.type === "size_owner") {
+      b.owner = !!msg.owner;
+      b.held = !!msg.held;
     } else if (msg.type === "resize") {
       if (b.term) b.term.resize(msg.cols, msg.rows);
     } else if (msg.type === "exit") {
@@ -13572,6 +13648,11 @@ function restoreTerminal(b) {
   mouseTracking = !!b.mouse;
   sessionEnded = b.exited;
   linkTry = b.retries || 0;
+  // A parked socket keeps its place: the refit below asks for the size
+  // again if it lost it meanwhile, and gets it unless someone is looking.
+  sizeOwner = b.owner !== false;
+  sizeHeld = !!b.held;
+  renderSizeChip();
   // The same header seeding a fresh attach does, so the previous session's
   // controls never linger on this one.
   showView("terminal");
@@ -13939,6 +14020,8 @@ function freshAttach(name) {
     // A resize we applied from a server broadcast must not be echoed back, or
     // two viewers (or a stale echo over a high-latency relay) ping-pong forever.
     if (applyingRemoteResize) return;
+    // Only the size owner sizes the session (see localFit).
+    if (!sizeOwner) return;
     if (ws && ws.readyState === WebSocket.OPEN) {
       ws.send(JSON.stringify({ type: "resize", cols, rows }));
     }
@@ -14047,7 +14130,11 @@ function resyncTerminal() {
   if (linkState === "reconnecting" || linkState === "lost") { reconnectNow(); return; }
   if (!term || !ws || ws.readyState !== WebSocket.OPEN) return;
   localFit(); // fires term.onResize -> server resize when dims changed
-  ws.send(JSON.stringify({ type: "resize", cols: term.cols, rows: term.rows }));
+  // A viewer without the size has just asked for it inside localFit; its
+  // grid is the owner's, and sending that back would claim the owner's size.
+  if (sizeOwner) {
+    ws.send(JSON.stringify({ type: "resize", cols: term.cols, rows: term.rows }));
+  }
   ws.send(JSON.stringify({ type: "repaint" }));
 }
 window.addEventListener("focus", resyncTerminal);

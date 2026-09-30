@@ -507,6 +507,8 @@ class Session:
         self.exited = False
         self._started_mono = time.monotonic()
         self._subscribers: Set[asyncio.Queue] = set()
+        #: The viewer whose resizes reach the PTY (see :meth:`claim_size`).
+        self._size_owner: Optional[object] = None
         self._loop = asyncio.get_running_loop()
         #: One writer into the PTY at a time; see :meth:`write_bytes`.
         self._write_lock = asyncio.Lock()
@@ -1804,6 +1806,58 @@ class Session:
     def unsubscribe(self, q: asyncio.Queue) -> None:
         self._subscribers.discard(q)
         self.set_viewer_focused(q, False)
+        self.release_size(q)
+
+    # ------------------------------------------------------------------ #
+    # size ownership: whose window the PTY is sized to
+    # ------------------------------------------------------------------ #
+    def size_owner(self) -> Optional[object]:
+        """The viewer whose resizes reach the PTY, or None when nobody holds it."""
+        return getattr(self, "_size_owner", None)
+
+    def claim_size(self, viewer: object, *, force: bool = False) -> bool:
+        """Make ``viewer`` the one whose resizes reach the PTY; whether it is.
+
+        Every viewer used to size the session to its own window, so two people
+        looking at one session from windows of different sizes took the size
+        back from each other on every focus and refit, and both screens
+        redrew over and over (claunch-tre55). Now one viewer holds the size
+        and the others mirror its grid. The claim succeeds when:
+
+        - ``force`` -- an explicit steal (the web header's button, or
+          ``claunch attach``, which takes the size as it attaches);
+        - nobody holds it, or the holder has gone;
+        - the holder is not focused: a terminal parked behind another
+          session, a hidden tab, an attach whose terminal lost focus. Nobody
+          is looking at that one, so there is no conflict to protect.
+
+        A focused holder is never displaced without ``force``. A change is
+        announced to every viewer as a ``size_owner`` event carrying the new
+        holder, so each one learns whether it is the holder now.
+        """
+        owner = self.size_owner()
+        if owner is viewer:
+            return True
+        if (
+            not force
+            and owner is not None
+            and owner in self._subscribers
+            and owner in self._focused_subscribers
+        ):
+            return False
+        self._size_owner = viewer
+        self._broadcast(("size_owner", viewer))
+        return True
+
+    def release_size(self, viewer: object) -> None:
+        """``viewer`` has gone: if it held the size, nobody does now.
+
+        Announced as a ``size_owner`` event with no holder, so a viewer still
+        on screen can claim it with its next resize.
+        """
+        if self.size_owner() is viewer and viewer is not None:
+            self._size_owner = None
+            self._broadcast(("size_owner", None))
 
     def is_focused(self) -> bool:
         """Whether at least one terminal viewer is actively using this session."""
@@ -1931,6 +1985,7 @@ class Session:
         for q in dead:
             self._subscribers.discard(q)
             self.set_viewer_focused(q, False)
+            self.release_size(q)
 
     # ------------------------------------------------------------------ #
     # views
@@ -2184,6 +2239,18 @@ class DeadSession:
         return None
 
     def set_viewer_focused(self, viewer: object, focused: bool) -> None:
+        return None
+
+    def size_owner(self) -> Optional[object]:
+        return None
+
+    def claim_size(self, viewer: object, *, force: bool = False) -> bool:
+        # Nothing to contest: there is no PTY left to size, and a resize sent
+        # here goes on to be dropped as it always was (resize raises
+        # SessionGone), without an answer the viewer never used to get.
+        return True
+
+    def release_size(self, viewer: object) -> None:
         return None
 
     def note_visit(self) -> None:

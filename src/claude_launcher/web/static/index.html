@@ -61,6 +61,10 @@
          which the badge beside it cannot: that one reports the session, and
          the session runs on happily while this phone cannot see it. -->
     <button id="m-link" class="m-act link-chip hidden" type="button"></button>
+    <!-- Mirror of the header's take-size button: the header goes down on a
+         phone, and a phone is as likely as any window to be the second
+         viewer of a session. -->
+    <button id="m-size" class="m-act size-chip hidden" type="button">take size</button>
     <!-- The header's text-size knob goes down with the header on a phone, and
          it is the control a small screen needs most. Two of its three parts
          come along: the readout that doubles as a reset is what a bar this
@@ -371,6 +375,11 @@
            is still running underneath, and this is the reason its terminal is
            not advancing. -->
       <span id="term-scroll" class="term-btn scroll-chip hidden"></span>
+      <!-- Up only while another viewer holds this session's size: the grid
+           here mirrors theirs rather than fitting this window. Pressing it
+           takes the size (daemon/ws.py, "Who sizes the session"). -->
+      <button id="term-size" class="term-btn size-chip hidden" type="button"
+              title="Another viewer sets this session's size, so this terminal mirrors their grid. Press to resize the session to this window instead.">take size</button>
       <!-- The two that change the session keep to the left, in with the name
            and the badge they act on. `details` stays at the right edge of
            the terminal header and also closes the detail panel when open.

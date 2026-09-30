@@ -2,7 +2,8 @@
 
 Protocol (matches the SPA's app.js and any non-browser client):
 
-Query parameters: ``?scrollback=1`` asks to be seeded with the daemon's
+Query parameters: ``?steal=1`` takes the session's size as the socket opens
+(see "Who sizes the session" below). ``?scrollback=1`` asks to be seeded with the daemon's
 scrollback (one binary frame, before the repaint, main buffer only) so the
 client's own terminal can serve the wheel natively. Off by default — the seed
 is up to five thousand lines, which a browser has somewhere to put and a
@@ -20,7 +21,9 @@ nothing gets what it always got.
   at all — see "Landing on a session that already finished" below.
 - client -> server, binary: keystrokes/paste, written verbatim to the PTY.
 - text frames are JSON control messages:
-  client: ``{"type":"resize","cols":..,"rows":..}``, ``{"type":"repaint"}``
+  client: ``{"type":"resize","cols":..,"rows":..}`` (applied only for the
+  size owner -- see "Who sizes the session" below), ``{"type":"steal"}``
+  (become the size owner), ``{"type":"repaint"}``
   (resend the current screen — used by viewers on focus regain, since another
   viewer may have resized the session meanwhile),
   ``{"type":"scroll","lines":N}`` (view history held by the daemon: N>0 moves
@@ -28,7 +31,8 @@ nothing gets what it always got.
   ``-999999`` snaps to live), ``{"type":"focus","focused":bool}`` (whether
   this retained viewer is currently on screen), and ``{"type":"ping"}``.
   server: ``{"type":"state","status":...}``, ``{"type":"exit","code":...}``,
-  ``{"type":"resize","cols":..,"rows":..}``, ``{"type":"buffer","alt":..}``
+  ``{"type":"resize","cols":..,"rows":..}``,
+  ``{"type":"size_owner","owner":bool,"held":bool}``, ``{"type":"buffer","alt":..}``
   (the program entered or left the alternate screen — the client learns the
   mode it may not have been connected for),
   ``{"type":"mouse","tracking":bool}`` (the program took the mouse, or gave
@@ -77,6 +81,24 @@ viewer can browse history while another watches live. A grid-shape change
 (resize), the TUI leaving the alternate screen, or the session exiting all
 make the frozen snapshot stale, so the pump unfreezes (repaints at offset 0)
 before announcing such a frame.
+
+Who sizes the session: one viewer at a time -- the *size owner* -- has its
+``resize`` frames applied to the PTY; every other viewer mirrors the grid the
+owner set. With every viewer sizing the session to its own window, two people
+on one session took the size back from each other on each focus and refit and
+both screens redrew without end (claunch-tre55). ``Session.claim_size`` holds
+the rule: a viewer becomes the owner when nobody holds the size, when the
+holder has gone or is not focused (parked, hidden, blurred), or when it says
+so explicitly -- the ``{"type":"steal"}`` control frame (the web header's
+button) or ``?steal=1`` at the open (``claunch attach``, which always takes
+the size as it attaches). A focused owner is never displaced otherwise: a
+``resize`` from anyone else is not applied, and that socket is answered with
+``{"type":"size_owner","owner":false,"held":true}`` and the grid's actual
+``resize`` so it can mirror it. ``init.owner`` says whether the socket opened
+as the owner, and every change of hands reaches every viewer as a
+``size_owner`` frame -- ``owner`` for "this socket holds it now", ``held``
+for "some socket does"; ``held: false`` (the owner left) is the cue for a
+viewer on screen to claim the size with its next ``resize``.
 
 Landing on a session that already finished: a viewer may attach to a record
 whose child is long gone (the web UI's ``#/s/<name>`` for a killed session,
@@ -164,6 +186,28 @@ def _wants_overlay(request: web.Request) -> bool:
     that says nothing must keep getting exactly the program's bytes.
     """
     return request.query.get("overlay") in ("1", "true")
+
+
+def _wants_steal(request: web.Request) -> bool:
+    """Whether this client takes the session's size as it opens.
+
+    ``claunch attach`` does: a person attaching a terminal means to work in
+    it at that terminal's size, and taking the size back is a detach and a
+    re-attach (``Session.claim_size``). A browser opens without it and is
+    offered the header's button instead.
+    """
+    return request.query.get("steal") in ("1", "true")
+
+
+def _size_owner_frame(state: "ViewerState", owner: object) -> str:
+    """The ``size_owner`` frame for this viewer, given who holds the size."""
+    return json.dumps(
+        {
+            "type": "size_owner",
+            "owner": owner is not None and owner is state.focus_token,
+            "held": owner is not None,
+        }
+    )
 
 
 def _wants_scrollback(request: web.Request) -> bool:
@@ -372,6 +416,7 @@ async def terminal_ws(request: web.Request) -> web.WebSocketResponse:
             request.app,
             want_scrollback=_wants_scrollback(request),
             overlay=_wants_overlay(request),
+            steal=_wants_steal(request),
         )
     finally:
         request.app["websockets"].discard(ws)
@@ -393,6 +438,7 @@ async def attach_terminal(
     *,
     want_scrollback: bool,
     overlay: bool,
+    steal: bool = False,
 ) -> None:
     """Attach ``ws`` to ``session`` and serve it until one of them ends.
 
@@ -412,6 +458,10 @@ async def attach_terminal(
     # the socket's two edges rather than on a timer.
     session.note_visit()
     state = ViewerState(focus_token=queue, overlay_bytes=overlay)
+    # Whose window the PTY follows: this one when it asked (attach), when
+    # nobody holds the size, or when the holder is not being looked at.
+    # Otherwise this viewer mirrors the owner's grid until it steals it.
+    owner = session.claim_size(queue, force=steal)
     boot_id = app["boot_id"]
     # Set once the frames a fresh socket opens with have all been written.
     # The controls that answer with a snapshot wait for it, so nothing is
@@ -470,6 +520,9 @@ async def attach_terminal(
                     # ``cli_ws`` puts on a dead shell's init.
                     "exited": bool(getattr(session, "exited", False)),
                     "exit_code": getattr(session, "exit_code", None),
+                    # Whether this socket's resizes reach the PTY. A viewer
+                    # that does not hold the size mirrors the grid instead.
+                    "owner": owner,
                 }
             )
         )
@@ -790,6 +843,8 @@ async def _pump_to_client(
             await ws.send_str(json.dumps({"type": "mouse", "tracking": payload}))
         elif kind == "state":
             await ws.send_str(json.dumps({"type": "state", "status": payload}))
+        elif kind == "size_owner":
+            await ws.send_str(_size_owner_frame(state, payload))
         elif kind == "resize":
             cols, rows = payload
             if state.offset > 0:
@@ -877,9 +932,32 @@ async def _handle_control(
     kind = msg.get("type")
     if kind == "resize":
         try:
-            session.resize(int(msg["cols"]), int(msg["rows"]))
-        except (KeyError, ValueError, TypeError, SessionGone):
+            cols, rows = int(msg["cols"]), int(msg["rows"])
+        except (KeyError, ValueError, TypeError):
+            return
+        viewer = state.focus_token
+        if viewer is not None and not session.claim_size(viewer):
+            # Someone who is looking at this session holds its size. Not
+            # applied -- that is what used to make two viewers resize each
+            # other without end -- and the sender is told who holds it and
+            # what the grid is, so a client that fitted itself on a stale
+            # belief can go back to mirroring.
+            await ws.send_str(_size_owner_frame(state, session.size_owner()))
+            await ws.send_str(
+                json.dumps(
+                    {"type": "resize", "cols": session.sdef.cols, "rows": session.sdef.rows}
+                )
+            )
+            return
+        try:
+            session.resize(cols, rows)
+        except SessionGone:
             pass
+    elif kind == "steal":
+        # The explicit take: this viewer's window sizes the session from now
+        # on, whoever held it. The client follows with its own resize.
+        if state.focus_token is not None:
+            session.claim_size(state.focus_token, force=True)
     elif kind == "repaint":
         # Focus-regain repaints keep this viewer's scroll position — a real
         # resize would already have unfrozen it through the pump.
