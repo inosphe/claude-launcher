@@ -34,6 +34,12 @@ import tempfile
 import time
 from pathlib import Path
 
+# This checkout's ``src`` in front of any installed copy, as the gate tools do
+# (tests/test_gates_run_this_checkout.py has the reasons).
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+
+from claude_launcher import pytest_basetemp
+
 #: pytest's summary line, e.g. "942 passed, 1 skipped, 105 deselected in 178.42s".
 _COUNT = re.compile(r"(\d+) (passed|failed|skipped|deselected|error|xfailed|xpassed)")
 _ELAPSED = re.compile(r"in ([\d.]+)s")
@@ -189,7 +195,11 @@ def build_parser() -> argparse.ArgumentParser:
     # so a temp path does not mean a lost file.
     ap.add_argument("--out", default=str(
         Path(tempfile.gettempdir()) / "gate_bench.jsonl"))
-    ap.add_argument("--basetemp-root", default="C:/t/s24b")
+    # A name prefix, not a directory: each run appends its phase and index.
+    # Under the host's basetemp root -- C:/t on Windows, the launcher home's
+    # basetemp directory on POSIX, where C:/t would land in the checkout.
+    ap.add_argument("--basetemp-root",
+                    default=f"{pytest_basetemp.root().as_posix()}/s24b")
     # The default used to be the worker's gate, back when that gate ran
     # `-m "not worktree" -n 8` on leaving every review step. It does not any
     # more -- workers select the tests their own change can affect
@@ -206,6 +216,8 @@ def main() -> int:
 
     cwd = Path(__file__).resolve().parents[1]
     cmd = gate_argv(args.gate)
+    # pytest creates each run's basetemp but not the directory it sits in.
+    pytest_basetemp.ensure(Path(args.basetemp_root).parent)
 
     burners = []
     load_desc = {"emulate": 0, "burners": 0}

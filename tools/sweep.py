@@ -155,7 +155,7 @@ from typing import Optional
 # Pinned by tests/test_gates_run_this_checkout.py.
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from claude_launcher import test_window
+from claude_launcher import pytest_basetemp, test_window
 
 CANNOT_TELL = 2
 
@@ -180,6 +180,10 @@ CANNOT_TELL = 2
 #: 260 chars (MAX_PATH) is a FileNotFoundError. Measured: 48 chars passes at
 #: 258, 49 fails at 260. And pytest empties its basetemp at startup, so two
 #: concurrent runs sharing one path delete each other's temp trees mid-run.
+#: ``{root}`` is ``C:/t`` on Windows, where both limits apply. On POSIX
+#: ``C:/t`` is a relative path that lands inside the checkout, so there the
+#: root is the launcher home's ``basetemp`` directory
+#: (``src/claude_launcher/pytest_basetemp.py``, claunch-wt12o.5).
 #:
 #: ``--deselect ...test_mesh_federation_over_real_relay``: the one named
 #: exception to "no marker filter" above, and it stays a single ``--deselect``
@@ -202,14 +206,16 @@ CANNOT_TELL = 2
 #: test_the_sweep_covers_the_whole_suite`` for the test that pins this to
 #: exactly one exception.
 DEFAULT_COMMAND = (
-    'uv run --no-sync pytest tests -q -n 8 --basetemp="C:/t/{session}w" '
+    'uv run --no-sync pytest tests -q -n 8 --basetemp="{root}/{session}w" '
     "--deselect tests/test_federation_integration.py::test_mesh_federation_over_real_relay"
 )
 
 
 def default_command(session: str, workers: int = 8) -> str:
     """The repository sweep command at the width granted by the arbiter."""
-    command = DEFAULT_COMMAND.format(session=session)
+    command = DEFAULT_COMMAND.format(
+        session=session, root=pytest_basetemp.root().as_posix()
+    )
     return re.sub(r"(?<!\S)-n\s+8(?=\s|$)", f"-n {max(1, workers)}", command, count=1)
 
 #: ``123 passed``, ``2 failed``, ``1 skipped`` ... from pytest's summary line.
@@ -682,6 +688,9 @@ def cmd_run(args) -> int:
         return CANNOT_TELL
 
     command = args.command or default_command(session, grant.advisory_n)
+    if not args.command:
+        # pytest creates the basetemp but not the root it sits in.
+        pytest_basetemp.ensure(pytest_basetemp.root())
 
     started = datetime.now(timezone.utc)
     print(f"sweep: {command}\n  repo={repo}\n  {args.branch}={commit}", flush=True)
