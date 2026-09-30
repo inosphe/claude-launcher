@@ -7622,7 +7622,9 @@ _paste_image_lock = asyncio.Lock()
 #: can be the one it reads -- the second of two pictures pasted twice, the
 #: first never. Several images in a row (the web file picker takes many at
 #: once) are exactly that case. The wait is paid by the NEXT paste, and only
-#: when it follows within this window; a single paste answers at once.
+#: when it follows within this window; a single paste answers at once. It is
+#: machine-wide on purpose, like the lock: a paste into another session
+#: overwrites the same clipboard, so it waits too.
 PASTE_SETTLE_SECONDS = 3.0
 
 #: ``loop.time()`` before which the clipboard is still being read. Guarded by

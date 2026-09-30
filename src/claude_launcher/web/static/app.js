@@ -12413,11 +12413,12 @@ if ($("term-input-field")) {
   // listener that only sees the event on its way back up.
   window.addEventListener("keydown", onWindowCtrlJ, true);
   $("term-input-field").addEventListener("paste", onTermInputPaste);
-  // Capture phase: ahead of xterm's own paste listener on its textarea.
-  if ($("terminal")) $("terminal").addEventListener("paste", onTerminalPaste, true);
   $("term-input-field").addEventListener("input", (ev) =>
     autogrowTermInput(ev.currentTarget || ev.target));
 }
+// Capture phase: ahead of xterm's own paste listener on its textarea.
+if ($("terminal"))
+  $("terminal").addEventListener("paste", onTerminalPaste, true);
 
 /* ---- typing marks ----
    Keystrokes that reach the daemon as bytes mark its keyboard busy on

@@ -776,6 +776,51 @@ async function main() {
   check("a relay login page is not taken for a stored image",
         viaLogin === 0 && NOTE.textContent.includes("login"), NOTE.textContent);
 
+  /* ---- the wiring itself: the handlers above do nothing unless the page
+     hands them to the elements. The load-time block is run as it is in
+     app.js, against elements that record what they are given. */
+  const wiringStart = src.indexOf("// Wired at load, like every other listener this page mounts");
+  const wiringEnd = src.indexOf("/* ---- typing marks ----", wiringStart);
+  check("the load-time wiring block is where this check looks for it",
+        wiringStart > 0 && wiringEnd > wiringStart, [wiringStart, wiringEnd]);
+  const listeners = [];
+  const recorder = (id) => ({
+    addEventListener(type, fn, capture) { listeners.push({ id, type, fn, capture }); },
+  });
+  const wireEls = {};
+  for (const id of ["term-input", "term-image-pick", "term-image-file",
+                    "term-input-field", "terminal"]) wireEls[id] = recorder(id);
+  const handlers = {};
+  for (const name of ["onTermInputSubmit", "openImagePicker", "onImagePickerChange",
+                      "onTermInputKeydown", "onWindowCtrlJ", "onTermInputPaste",
+                      "onTerminalPaste", "autogrowTermInput"]) {
+    handlers[name] = function () {};
+  }
+  new Function("$", "window", ...Object.keys(handlers), src.slice(wiringStart, wiringEnd))(
+    (id) => wireEls[id] || null, recorder("window"), ...Object.values(handlers));
+  const wired = (id, type) => listeners.filter((l) => l.id === id && l.type === type);
+  const termPaste = wired("terminal", "paste");
+  check("the terminal's paste listener is onTerminalPaste",
+        termPaste.length === 1 && termPaste[0].fn === handlers.onTerminalPaste, termPaste);
+  check("...in the capture phase, ahead of xterm's own",
+        termPaste.length === 1 && termPaste[0].capture === true, termPaste);
+  const pickChange = wired("term-image-file", "change");
+  check("the file picker's change is onImagePickerChange",
+        pickChange.length === 1 && pickChange[0].fn === handlers.onImagePickerChange, pickChange);
+  const pickClick = wired("term-image-pick", "click");
+  check("the image button's click is openImagePicker",
+        pickClick.length === 1 && pickClick[0].fn === handlers.openImagePicker, pickClick);
+  const linePaste = wired("term-input-field", "paste");
+  check("the line's paste is onTermInputPaste",
+        linePaste.length === 1 && linePaste[0].fn === handlers.onTermInputPaste, linePaste);
+  // the terminal's listener does not hang on the line being there
+  listeners.length = 0;
+  new Function("$", "window", ...Object.keys(handlers), src.slice(wiringStart, wiringEnd))(
+    (id) => (id === "terminal" ? wireEls.terminal : null), recorder("window"),
+    ...Object.values(handlers));
+  check("the terminal's paste listener is wired without the line",
+        wired("terminal", "paste").length === 1, listeners);
+
   console.log(failures ? `\n${failures} failure(s)` : "all send-input checks passed");
   process.exit(failures ? 1 : 0);
 }
