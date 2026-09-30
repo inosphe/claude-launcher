@@ -415,7 +415,8 @@ class Directory:
                 "machine": t["machine"],
                 "session": t["session"],
                 "meshes": [
-                    {k: m[k] for k in ("mesh", "handle", "role", "roles", "linked")}
+                    {k: m[k] for k in ("mesh", "project", "handle", "role", "roles",
+                                       "linked")}
                     for m in t["meshes"]
                 ],
                 "card": _sanitize_card(card_row),

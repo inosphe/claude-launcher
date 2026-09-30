@@ -1740,6 +1740,25 @@ function sessionGroupValue(group, s) {
   return group === "mesh" ? sessionMeshGroup(s) : sessionWorkspaceGroup(s);
 }
 
+/* The same two questions for another daemon's session (a remote-shadow row,
+   daemon/shadow.py), which the rail files among the local ones.
+
+   Its mesh is chosen by the rule a local row follows (`sessMeshes`): the
+   alphabetically first of its meshes -- counting only the meshes the picked
+   project owns (shadowMeshes), so a shadow never opens a heading for a mesh
+   of another project.
+   It has no workspace on this machine -- its checkout is on its own host --
+   so under a workspace grouping it is filed under `@<machine>`. */
+function shadowMeshGroup(row) {
+  const names = shadowMeshes(row).map((m) => m.mesh);
+  if (!names.length) return "(no mesh)";
+  return [...names].sort((a, b) => a.localeCompare(b))[0];
+}
+
+function shadowGroupValue(group, row) {
+  return group === "mesh" ? shadowMeshGroup(row) : `@${row.machine}`;
+}
+
 /* Which groups the reader has folded shut, remembered per browser.
 
    The rail is a poll: it rebuilds its rows whenever the fleet changes, which
@@ -3114,17 +3133,29 @@ function regroupDepths(entries) {
 }
 
 /* Convert lineage-ordered rows into headings and rows. Each selected group
-   occupies one level, so selection order is also nesting priority. */
-function sessionGroupRows(entries, groups, level = 0, meshGroup = null) {
-  if (level >= groups.length) return regroupDepths(entries).map(([session, depth]) =>
-    ({ type: "session", session, depth, meshGroup }));
+   occupies one level, so selection order is also nesting priority.
+
+   `shadows` are other daemons' sessions (remote-shadow rows). They are filed
+   into the same buckets as the local rows -- a mesh heading holds every
+   member of that mesh the rail can show, wherever it runs -- but they stay a
+   kind of their own to the end: a `shadow` item, never a `session` one, so
+   nothing that acts on a local row (keyed by its bare name) is handed one.
+   Inside a bucket they follow the local rows, which keep their lineage
+   order and indent. */
+function sessionGroupRows(entries, groups, level = 0, meshGroup = null, shadows = []) {
+  if (level >= groups.length) return [
+    ...regroupDepths(entries).map(([session, depth]) =>
+      ({ type: "session", session, depth, meshGroup })),
+    ...shadows.map((shadow) => ({ type: "shadow", shadow, meshGroup })),
+  ];
   const group = groups[level];
   const buckets = new Map();
-  for (const entry of entries) {
-    const value = sessionGroupValue(group, entry[0]);
-    if (!buckets.has(value)) buckets.set(value, []);
-    buckets.get(value).push(entry);
-  }
+  const bucket = (value) => {
+    if (!buckets.has(value)) buckets.set(value, { entries: [], shadows: [] });
+    return buckets.get(value);
+  };
+  for (const entry of entries) bucket(sessionGroupValue(group, entry[0])).entries.push(entry);
+  for (const row of shadows) bucket(shadowGroupValue(group, row)).shadows.push(row);
   const out = [];
   for (const value of [...buckets.keys()].sort((a, b) =>
     a.localeCompare(b, undefined, { sensitivity: "base" }))) {
@@ -3135,7 +3166,25 @@ function sessionGroupRows(entries, groups, level = 0, meshGroup = null) {
     // `(no mesh)` is a bucket of sessions that joined nothing, not a mesh,
     // and nothing is suppressed under it.
     const under = group === "mesh" && value !== "(no mesh)" ? value : meshGroup;
-    out.push(...sessionGroupRows(buckets.get(value), groups, level + 1, under));
+    const { entries: inside, shadows: remote } = buckets.get(value);
+    out.push(...sessionGroupRows(inside, groups, level + 1, under, remote));
+  }
+  return out;
+}
+
+/* An ungrouped rail has no heading for another daemon's session to sit
+   under, so those rows trail the local ones, one heading per daemon. They
+   are still in the one list: what the reader scrolls, filters and searches
+   is every session this rail can show. */
+function remoteRailRows(shadows) {
+  const out = [];
+  const machines = [...new Set(shadows.map((row) => row.machine))]
+    .sort((a, b) => a.localeCompare(b, undefined, { sensitivity: "base" }));
+  for (const machine of machines) {
+    out.push({ type: "group", group: "remote", value: machine, level: 0 });
+    for (const shadow of shadows) {
+      if (shadow.machine === machine) out.push({ type: "shadow", shadow, meshGroup: null });
+    }
   }
   return out;
 }
@@ -3312,7 +3361,8 @@ function syncSessionGroupSearch(list) {
   const active = typeof sessionSearch !== "undefined" && !!String(sessionSearch.q || "").trim();
   let changed = false;
   for (const group of list.querySelectorAll(".session-group")) {
-    const match = active && !!group.querySelector("li[data-name]:not(.session-filtered)");
+    const match = active && !!group.querySelector(
+      "li[data-name]:not(.session-filtered), li.shadow-card:not(.session-filtered)");
     const shut = !match && isSessionGroupCollapsed(group.dataset.group, group.dataset.value);
     changed = changed || group.classList.contains("collapsed") !== shut;
     group.classList.toggle("collapsed", shut);
@@ -3353,6 +3403,16 @@ function syncSessionFilters(sessions) {
     row.classList.toggle("session-filtered", !session
       || !sessionMatchesFilter(session)
       || (searching && !sessionMatchesSearch(session)));
+  }
+  // Other daemons' sessions, drawn in the same list: the same filter and the
+  // same search, asked of their own record (they are not in `sessions`).
+  if (typeof shadowRow === "function") {
+    for (const card of list.querySelectorAll("li.shadow-card")) {
+      const row = shadowRow(card.dataset.machine, card.dataset.session);
+      card.classList.toggle("session-filtered", !row
+        || !shadowMatchesFilter(row)
+        || (searching && !shadowMatchesSearch(row)));
+    }
   }
   // Search can change without rebuilding the rail. Open every ancestor of
   // a visible match while preserving the reader's stored fold preferences.
@@ -3707,6 +3767,10 @@ async function refreshSessions(options) {
   // harnesses define no project state and draw the whole cache.
   const railList = typeof railSessions === "function"
     ? railSessions(sessionsCache) : sessionsCache;
+  // Other daemons' sessions the rail files among these (remote-shadow rows,
+  // refreshShadows). They are drawn in this same list but never enter
+  // sessionsCache: every reader of that cache keys on the bare name.
+  const shadowList = typeof railShadows === "function" ? railShadows() : [];
   // Pins and recent tabs may refer to records outside this poll category.
   if (typeof renderSessionTabs === "function") renderSessionTabs();
   const list = $("session-list");
@@ -3728,7 +3792,7 @@ async function refreshSessions(options) {
     // The project is outside the old tuple so the tuple keeps its shape;
     // a pick changes what the rail draws out of the same cache.
     [[briefingLLM, sessionsCache, groupOrder, meshCache, pins],
-     typeof currentProject === "string" ? currentProject : ""],
+     typeof currentProject === "string" ? currentProject : "", shadowList],
     (key, value) => (
       key === "due_in" || key === "fired_ago" ||
       key === "last_visited_at" || key === "last_input_at" ||
@@ -3772,7 +3836,10 @@ async function refreshSessions(options) {
   // Isolated web harnesses retain the old mesh-only variable. The fallback
   // keeps those consumers compatible while the page uses the ordered setting.
   const rows = !rebuild ? [] : typeof sessionGroupRows !== "undefined"
-    ? sessionGroupRows(entries, groupOrder)
+    ? (groupOrder.length
+      ? sessionGroupRows(entries, groupOrder, 0, null, shadowList)
+      : [...sessionGroupRows(entries, groupOrder),
+         ...(shadowList.length ? remoteRailRows(shadowList) : [])])
     // Older isolated rail harnesses provide the former mesh-only helpers.
     // Keep their equivalent flat grouping here while the shipped page uses
     // the ordered, nested helper above.
@@ -3805,6 +3872,14 @@ async function refreshSessions(options) {
   // The count each open heading shows, one per level, kept alongside the
   // bodies so a row appended at any depth raises every heading above it.
   const groupCounts = [];
+  // A row raises the count of every heading it sits under.
+  const countRow = () => {
+    for (const box of groupCounts) {
+      if (!box) continue;
+      box._sessionCount = (box._sessionCount || 0) + 1;
+      box.textContent = String(box._sessionCount);
+    }
+  };
   for (const row of rows) {
     if (row.type === "ungroup") {
       groupBodies.length = 0;
@@ -3861,7 +3936,7 @@ async function refreshSessions(options) {
       jump.title = `jump to the first session in ${row.group} ${row.value}`;
       jump.addEventListener("click", (e) => {
         e.stopPropagation();   // the heading itself folds; this does not
-        const first = body.querySelector("li[data-name]");
+        const first = body.querySelector("li[data-name], li.shadow-card");
         if (!first) return;
         // A shut group has nothing on screen to scroll to, so opening it is
         // part of the jump rather than a second thing to ask of the reader.
@@ -3925,6 +4000,17 @@ async function refreshSessions(options) {
       groupBodies[row.level] = body;
       groupCounts.length = row.level;
       groupCounts[row.level] = count;
+      continue;
+    }
+    if (row.type === "shadow") {
+      // Another daemon's session: its own card (renderShadowCard), which
+      // carries no data-name and no buttons, so nothing below that acts on a
+      // local row by name -- kill, pin, the keyboard card, the filters'
+      // record lookup -- can be handed it.
+      const parent = nestedGroupContainers
+        ? (groupBodies[groupBodies.length - 1] || list) : list;
+      parent.appendChild(renderShadowCard(row.shadow));
+      countRow();
       continue;
     }
     const { session: s, depth } = row;
@@ -4196,12 +4282,9 @@ async function refreshSessions(options) {
     const parent = nestedGroupContainers
       ? (groupBodies[groupBodies.length - 1] || list) : list;
     parent.appendChild(li);
-    for (const box of groupCounts) {
-      if (!box) continue;
-      box._sessionCount = (box._sessionCount || 0) + 1;
-      box.textContent = String(box._sessionCount);
-    }
+    countRow();
   }
+  if (rebuild && typeof syncShadowActive === "function") syncShadowActive();
   if (rebuild && nestedGroupContainers && typeof syncSessionGroupStickyOffsets === "function") {
     syncSessionGroupStickyOffsets(list);
   }
@@ -34278,10 +34361,11 @@ async function pollTick() {
    local cache and route here is keyed by the bare session name, so a remote
    `s1` let into sessionsCache would be the local `s1` to the kill button,
    the rail keys, the tabs and the grid. So: its own list (`shadowRows`), its
-   own rail section, its own address (#/r/<machine>/<name>), its own
-   terminal, and a card with no buttons. What a shadow can be asked for is
-   exactly what its host daemon serves: the card, an output-only terminal,
-   and the session line. */
+   own kind of rail item (a `shadow` row, drawn in the session list beside
+   the local ones but never keyed by name), its own address
+   (#/r/<machine>/<name>), its own terminal, and a card with no buttons.
+   What a shadow can be asked for is exactly what its host daemon serves:
+   the card, an output-only terminal, and the session line. */
 const SHADOW_POLL_MS = 5000;
 let shadowRows = [];
 let shadowPolledAt = 0;
@@ -34297,6 +34381,74 @@ function shadowHash(machine, name) {
 
 function shadowRow(machine, name) {
   return shadowRows.find((r) => r.machine === machine && r.session === name) || null;
+}
+
+/* The meshes through which the picked project owns this shadow.
+
+   A remote session has no project on this daemon -- the project is a fact
+   of the records kept here -- but every mesh it sits in does: each entry
+   carries the project that mesh is filed under here (daemon/shadow.py). So
+   the shadow belongs to exactly the projects of its meshes, and to no other.
+   "All projects" owns every mesh. */
+function shadowMeshes(row) {
+  return (row && Array.isArray(row.meshes) ? row.meshes : []).filter((m) =>
+    m && m.mesh
+    && (typeof meshInCurrentProject !== "function" || meshInCurrentProject(m)));
+}
+
+/* The shadows the rail draws: those the picked project owns through at
+   least one of their meshes. A shadow whose meshes all belong to other
+   projects is left out, the way a session of another project is. */
+function railShadows(list = shadowRows) {
+  return (list || []).filter((row) => shadowMeshes(row).length > 0);
+}
+
+/* The status filter's word for a shadow. What the host serves is running or
+   exited; paused and archived are states of this daemon's own records, so a
+   shadow is never one. A host that did not answer is not a dead session: its
+   row stays running. */
+function shadowCategory(row) {
+  return row && row.card && row.card.exited ? "killed" : "running";
+}
+
+function shadowMatchesFilter(row, filter = sessionFilter) {
+  const category = shadowCategory(row);
+  if (filter === "running-paused") return category === "running";
+  return filter === "current" ? true : category === filter;
+}
+
+function shadowSearchText(row) {
+  const card = (row && row.card) || {};
+  return [
+    row.session, row.machine, card.handle, card.role, card.note,
+    card.briefing && card.briefing.one_line,
+    ...shadowMeshes(row).flatMap((m) => [m.mesh, m.handle, m.role]),
+  ].filter(Boolean).join(" ").toLowerCase();
+}
+
+/* The rail's search, for a shadow. Substring only: the search by meaning
+   ranks this daemon's sessions, its hits are keyed by bare name, and a
+   remote `s1` must not ride on a hit for the local one -- so while the
+   rail shows meaning hits, no shadow matches. */
+function shadowMatchesSearch(row, search = sessionSearch) {
+  const q = String(search.q || "").trim().toLowerCase();
+  if (!q) return true;
+  if (search.hits) return false;
+  const hay = shadowSearchText(row);
+  return q.split(/\s+/).filter(Boolean).every((t) => hay.includes(t));
+}
+
+/* Which shadow card is the one on screen. Kept off the rail's signature
+   (opening a shadow is not a change to the fleet), so it is painted over
+   whatever rows the last rebuild left. */
+function syncShadowActive() {
+  const list = $("session-list");
+  if (!list) return;
+  for (const card of list.querySelectorAll("li.shadow-card")) {
+    card.classList.toggle("active", currentPage === "shadow" && !!shadowOpen
+      && shadowOpen.machine === card.dataset.machine
+      && shadowOpen.name === card.dataset.session);
+  }
 }
 
 async function refreshShadows(force) {
@@ -34315,7 +34467,9 @@ async function refreshShadows(force) {
   const sig = JSON.stringify(shadowRows);
   if (sig === shadowSig) return;
   shadowSig = sig;
-  renderShadowRail();
+  // Drawn in the session list, among the local rows: a redraw from the
+  // records in hand, no request.
+  refreshSessions({ cached: true });
   if (currentPage === "shadow") renderShadowHead();
 }
 
@@ -34402,28 +34556,6 @@ function renderShadowCard(row, opts) {
   return node;
 }
 
-/* The rail's Remote section: one group per daemon, below the local list. */
-function renderShadowRail() {
-  const box = $("shadow-rail");
-  const list = $("shadow-list");
-  if (!box || !list) return;
-  list.replaceChildren();
-  box.classList.toggle("hidden", !shadowRows.length);
-  const count = $("shadow-rail-count");
-  if (count) count.textContent = String(shadowRows.length);
-  const machines = [...new Set(shadowRows.map((r) => r.machine))].sort();
-  for (const machine of machines) {
-    const group = el("li", "shadow-group");
-    group.appendChild(el("div", "shadow-group-head", machine));
-    const inner = el("ul", "shadow-group-list");
-    for (const row of shadowRows.filter((r) => r.machine === machine)) {
-      inner.appendChild(renderShadowCard(row));
-    }
-    group.appendChild(inner);
-    list.appendChild(group);
-  }
-}
-
 /* ---- the shadow view (#/r/<machine>/<name>) ---- */
 let shadowOpen = null;      // {machine, name}
 let shadowTerm = null;
@@ -34454,7 +34586,7 @@ function openShadow(machine, name) {
   closeShadow();
   shadowOpen = { machine, name };
   renderShadowHead();
-  renderShadowRail();
+  syncShadowActive();
   refreshShadows(true);
   const host = $("shadow-term");
   host.replaceChildren();
@@ -34533,6 +34665,7 @@ function closeShadow() {
   if (shadowSock) { try { shadowSock.close(); } catch {} shadowSock = null; }
   if (shadowTerm) { try { shadowTerm.dispose(); } catch {} shadowTerm = null; }
   shadowOpen = null;
+  syncShadowActive();
 }
 
 /* The session line, typed into the remote session through its host. Text

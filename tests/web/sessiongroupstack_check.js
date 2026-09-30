@@ -265,8 +265,11 @@ check("a fold re-measures the stack it just changed",
 check("the rail re-measures the stack when the window height changes",
       /syncSessionGroupStickyOffsets\(railList\)/.test(src), true);
 
+// A session here is either kind of rail item: a local row or another
+// daemon's shadow card, which a group can hold with no local row at all.
 check("the jump reads the group's first session out of the group's own body",
-      /const first = body\.querySelector\("li\[data-name\]"\);/.test(src), true);
+      /const first = body\.querySelector\("li\[data-name\], li\.shadow-card"\);/
+        .test(src), true);
 check("the jump opens a shut group rather than scrolling to hidden rows",
       /if \(group\.classList\.contains\("collapsed"\)\) \{[\s\S]{0,240}?paintFold\(false\);/
         .test(src), true);

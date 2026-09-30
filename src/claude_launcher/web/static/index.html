@@ -178,17 +178,14 @@
         <span>Group by workspace</span>
       </label>
     </div>
+    <!-- Every session the rail can show: this daemon's rows (li[data-name],
+         keyed by bare name, with their controls) and other daemons' members
+         of the meshes held here (li.shadow-card, GET /api/shadows,
+         daemon/shadow.py) -- state-only cards with no name key and no
+         buttons, filed under the same group headings. Clicking one opens
+         #/r/<machine>/<name>. -->
     <ul id="session-list"></ul>
     <div id="session-grid" class="hidden" aria-label="Sessions by fixed grid position"></div>
-    <!-- Remote-shadow sessions: other daemons' members of the meshes this
-         daemon holds (GET /api/shadows, daemon/shadow.py). A list of its own,
-         never merged into #session-list: those rows are keyed by bare name and
-         carry every local control, and a remote session has none of them.
-         Each card is state only; clicking it opens #/r/<machine>/<name>. -->
-    <section id="shadow-rail" class="hidden" aria-label="Sessions on other daemons">
-      <div class="shadow-rail-head">Remote <span id="shadow-rail-count" class="session-filter-count">0</span></div>
-      <ul id="shadow-list"></ul>
-    </section>
     <!-- The working fleet at once. Each button hides itself when it would act on
          nothing, so what is up is a count of what it would do — the bar is
          empty on an archived-only rail rather than three inactive controls. -->

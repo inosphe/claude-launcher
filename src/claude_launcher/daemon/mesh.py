@@ -7080,9 +7080,13 @@ class MeshManager:
         """Every other daemon's member of every mesh held here, grouped per
         (machine, session) — one session in two meshes is one shadow.
 
-        Each row: ``{machine, session, meshes: [{mesh, wire, handle, role,
-        roles, linked}]}``. ``linked`` says whether this daemon holds a link
-        to that machine in that mesh — without one there is nobody to ask.
+        Each row: ``{machine, session, meshes: [{mesh, wire, project,
+        handle, role, roles, linked}]}``. ``linked`` says whether this daemon
+        holds a link to that machine in that mesh — without one there is
+        nobody to ask. ``project`` is the project the mesh is filed under
+        here (the default spelled out, as the mesh list spells it): a remote
+        session has no project on this daemon, so the meshes it sits in are
+        what decide which project's rail shows it.
         """
         rows: Dict[Tuple[str, str], dict] = {}
         for mesh in self.list():
@@ -7098,6 +7102,7 @@ class MeshManager:
                 row["meshes"].append({
                     "mesh": mesh.name,
                     "wire": mesh.wire_name,
+                    "project": mesh.project or projects.DEFAULT,
                     "handle": member.handle,
                     "role": member.role,
                     "roles": list(member.roles),

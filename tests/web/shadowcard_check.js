@@ -7,7 +7,9 @@
    #/s/<name>, which is the LOCAL session of that name; the mesh roster links
    a row as a shadow only on the server's word that it is remote, so this
    daemon's own member is never addressed as another's; the shadow list lives
-   apart from sessionsCache, so no local control can ever find a remote row;
+   apart from sessionsCache, so no local control can ever find a remote row
+   (the rail draws it among the local rows -- railshadowmix_check -- but from
+   this list, redrawn from the records in hand);
    the shadow terminal is built with stdin off and never given an onData
    handler; and the host's refusal stops the reconnect loop. */
 const fs = require("fs");
@@ -81,7 +83,7 @@ class FakeTerminal {
 
 const names = [
   "el", "shadowKey", "shadowHash", "shadowRow", "refreshShadows", "shadowStatus",
-  "shadowCflowGated", "shadowCflowText", "renderShadowCard", "renderShadowRail",
+  "shadowCflowGated", "shadowCflowText", "renderShadowCard", "syncShadowActive",
   "renderShadowHead", "setShadowStatus", "openShadow", "connectShadow",
   "shadowFrame", "closeShadow", "parseHash", "meshRosterLink",
 ];
@@ -96,9 +98,12 @@ new Function(
    "let shadowRows = [], shadowPolledAt = 0, shadowSig = '';",
    "let shadowOpen = null, shadowTerm = null, shadowSock = null, shadowTicket = 0, shadowRetry = null;",
    "let currentPage = 'home';",
+   // The rail itself is railshadowmix_check's subject; here only the ask
+   // to redraw it is recorded.
+   "function refreshSessions(opts) { exports.redraws.push(opts); }",
    ...names.map(slice)].join("\n") + `
+exports.redraws = [];
 exports.render = renderShadowCard;
-exports.renderRail = renderShadowRail;
 exports.refresh = refreshShadows;
 exports.parseHash = parseHash;
 exports.rosterLink = meshRosterLink;
@@ -190,23 +195,20 @@ check("and keeps the page's guess for its terminal link",
       ctx.rosterLink({ session: "s4", machine: "" }, true, ""),
       { hash: "#/s/s4", title: "attach this session's terminal" });
 
-/* The list lives apart from sessionsCache. */
-byId["shadow-rail"] = new Node("section");
-byId["shadow-list"] = new Node("ul");
-byId["shadow-rail-count"] = new Node("span");
+/* The list lives apart from sessionsCache. A change to it redraws the
+   session list from the records in hand -- no second request -- and an
+   unchanged answer redraws nothing. */
 (async () => {
   ctx.nextDoc = { shadows: [row] };
   await ctx.refresh(true);
   check("the shadow list holds the remote row", ctx.rows().length, 1);
   check("sessionsCache is untouched", ctx.sessionsCache.size, 0);
-  check("the rail section shows, counted",
-        [byId["shadow-rail"].has("hidden"), byId["shadow-rail-count"].textContent],
-        [false, "1"]);
-  check("grouped under its daemon",
-        byId["shadow-list"].children[0].children[0].textContent, "shared-daemon-kimyori");
+  check("a changed list redraws the rail from the cache", ctx.redraws, [{ cached: true }]);
+  await ctx.refresh(true);
+  check("the same list again redraws nothing", ctx.redraws.length, 1);
   ctx.nextDoc = { shadows: [] };
   await ctx.refresh(true);
-  check("an empty list hides the section", byId["shadow-rail"].has("hidden"), true);
+  check("an emptied list redraws it once more", ctx.redraws.length, 2);
 
   /* The shadow terminal: stdin off, no onData, sized by the host. */
   byId["shadow-term"] = new Node("div");

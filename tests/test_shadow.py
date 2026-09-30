@@ -248,6 +248,12 @@ def test_targets_are_the_other_daemons_members(home, tmp_path):
         assert [(t["machine"], t["session"]) for t in b] == [("pcA", "sa")]
         assert a[0]["meshes"][0]["handle"] == "bob"
         assert a[0]["meshes"][0]["linked"] is True
+        # A remote session has no project here; the mesh it sits in does, and
+        # that is what decides which project's rail shows it. The default is
+        # spelled out, as the mesh list spells it.
+        assert a[0]["meshes"][0]["project"] == "default"
+        mm_a.get("m").project = "p1"
+        assert mm_a.shadow_targets()[0]["meshes"][0]["project"] == "p1"
         # the authority's own member on the mirror resolves to the authority
         mesh_b = mm_b.get("m@pcA")
         assert mm_b.host_machine(mesh_b, mesh_b.members["alice"]) == "pcA"
@@ -410,6 +416,9 @@ def test_shadow_list_stream_and_session_line(home, tmp_path):
             assert card["exited"] is False
             assert "cwd" not in card and "args" not in card
             assert rows[0]["meshes"][0]["mesh"] == "m@pcA"
+            # ...with the project that mesh is filed under here, which the
+            # rail narrows by (a mirror joined with no project: the default)
+            assert rows[0]["meshes"][0]["project"] == "default"
             # the list is behind the daemon's own auth like everything else
             assert (await client_b.get("/api/shadows")).status == 401
 
