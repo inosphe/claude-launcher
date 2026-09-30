@@ -73,7 +73,6 @@ import json
 import logging
 import re
 import shutil
-import sqlite3
 import subprocess
 import threading
 import time
@@ -1224,6 +1223,9 @@ class Board:
         #: ``br`` was found on PATH (sticky), and when PATH was last walked.
         self._which_found = False
         self._which_checked = 0.0
+        #: Per board directory, how its ``policy.yaml`` looked when the custom
+        #: statuses were last made sure of (:meth:`_ensure_policy`).
+        self._policy_seen: Dict[str, tuple] = {}
 
     # ---- availability -------------------------------------------------- #
     #: How long a "``br`` is not on PATH" answer is reused before PATH is
@@ -1364,19 +1366,78 @@ class Board:
         await asyncio.to_thread(cli_beads.create_board, ref, runner)
         self._refs.pop(str(ref.root), None)
 
-    async def br(
-        self, root: Path, args: List[str], *, actor: Optional[str] = None
-    ):
-        """Run one ``br`` command against ``root``'s board; parsed JSON back.
+    async def init_board(self, ref: beads_db.BoardRef) -> dict:
+        """Set ``ref``'s board up in full -- the Settings page's button, and
+        the daemon's side of :func:`cli_beads.init_board` (what ``claunch
+        beads init --workspace`` runs), whose answer this returns.
 
-        Writes invalidate the listing cache for that board. A non-zero exit
-        is a :class:`cli_beads.BeadsError` carrying ``br``'s own words.
+        Taken under the board's lock, so it cannot race the first ``br``
+        call that would create the same database on its own.
         """
         if not self.available():
             raise BeadsUnavailable(
                 f"'{cli_beads.BINARY}' is not installed on the daemon machine"
             )
-        ref = self.ref_for(root)
+        loop = asyncio.get_running_loop()
+
+        def runner(argv: List[str], cwd: str):
+            # As in create_board: the async runner, called from the thread.
+            future = asyncio.run_coroutine_threadsafe(self._run(argv, cwd), loop)
+            return future.result()
+
+        root = Path(ref.root)
+        lock = self._locks.setdefault(str(root), asyncio.Lock())
+        async with lock:
+            result = await asyncio.to_thread(cli_beads.init_board, ref, runner)
+        self._refs.pop(str(ref.root), None)
+        self._policy_seen.pop(str(root / cli_beads.BEADS_DIR), None)
+        self.invalidate(root)
+        return result
+
+    def _ensure_policy(self, beads_dir: Path) -> None:
+        """Make sure ``beads_dir``'s policy declares the custom statuses.
+
+        :func:`cli_beads.ensure_policy`, looked at again only when the file or
+        the directory changed since the last look -- every ``br`` call comes
+        through here and the dashboard makes one every two seconds. A write
+        that fails is logged, not raised: the call it sits in front of still
+        runs, and a status filter it breaks answers with ``br``'s own words.
+        """
+        target = beads_dir / cli_beads.POLICY_NAME
+
+        def stamp() -> tuple:
+            try:
+                return (beads_dir.is_dir(), target.stat().st_mtime_ns)
+            except OSError:
+                return (beads_dir.is_dir(), None)
+
+        key = str(beads_dir)
+        now = stamp()
+        if self._policy_seen.get(key) == now:
+            return
+        try:
+            cli_beads.ensure_policy(beads_dir)
+        except OSError as exc:
+            log.warning("beads: could not declare statuses in %s: %s", target, exc)
+        self._policy_seen[key] = stamp()
+
+    async def br(
+        self, root: Path, args: List[str], *, actor: Optional[str] = None,
+        ref: Optional[beads_db.BoardRef] = None,
+    ):
+        """Run one ``br`` command against ``root``'s board; parsed JSON back.
+
+        Writes invalidate the listing cache for that board. A non-zero exit
+        is a :class:`cli_beads.BeadsError` carrying ``br``'s own words.
+        ``ref`` names the board outright instead of resolving it from
+        ``root`` -- for a caller holding a row that already says which
+        database it means (the Settings page's boards card).
+        """
+        if not self.available():
+            raise BeadsUnavailable(
+                f"'{cli_beads.BINARY}' is not installed on the daemon machine"
+            )
+        ref = ref or self.ref_for(root)
         assert ref is not None  # root is not None here; ref_for only nulls on that
         beads_dir = Path(ref.root) / cli_beads.BEADS_DIR
         key = str(root)
@@ -1392,6 +1453,7 @@ class Board:
                 and args[:1] != ["init"]
             ):
                 await self.create_board(ref)
+            self._ensure_policy(beads_dir)
             commands = cli_beads.plan(
                 list(args) + (["--json"] if "--json" not in args else []),
                 Path(ref.root),
@@ -1573,59 +1635,6 @@ class Board:
         self._page_cache[key] = (now, page, has_more, total)
         return page, has_more, total
 
-    async def _edges_from_db(self, root: Path) -> Optional[List[dict]]:
-        """Every dependency edge on ``root``'s board in one read, or ``None``.
-
-        The per-issue path in :meth:`edges` forks ``br dep list`` once for
-        each issue that has any, and this board's lock serialises them. One
-        fork costs about 0.6 s on this machine, so a board with 59 such
-        issues spent most of a page load on edges: ``/api/beads`` measured
-        13.5 s and ``/api/beads/stream?limit=50`` 7.8 s, against 0.66 s for
-        the listing itself.
-
-        ``br`` stores those edges in a SQLite table, so the same answer is
-        one query. The file is opened read-only and never written.
-
-        Answers ``None`` rather than raising for every reason this reading
-        can be unavailable -- a JSONL board with no database, a schema
-        without this table, a locked file -- and the caller falls back to
-        ``br``. The edges are an ornament over a listing that is already
-        useful, and a board that could not be drawn as a forest is still a
-        board.
-        """
-        ref = self.ref_for(root)
-        if ref is None:
-            return None
-        db = ref.db_path
-        if not db.is_file():
-            return None
-
-        def read() -> List[dict]:
-            # A URI so the connection can be read-only; the path is quoted
-            # because a '?' or '#' in it would otherwise start the query
-            # part of the URI.
-            quoted = db.as_posix().replace("?", "%3f").replace("#", "%23")
-            conn = sqlite3.connect(f"file:{quoted}?mode=ro", uri=True, timeout=2.0)
-            try:
-                rows = conn.execute(
-                    "SELECT issue_id, depends_on_id, type FROM dependencies"
-                ).fetchall()
-            finally:
-                conn.close()
-            # Direction is ``br``'s own and matches the per-issue path: the
-            # depending issue is stored as ``issue_id``, which for a
-            # parent-child edge is the CHILD.
-            return [
-                {"from": str(src), "to": str(dst), "type": str(kind or "")}
-                for src, dst, kind in rows if src and dst
-            ]
-
-        try:
-            return await asyncio.to_thread(read)
-        except Exception as exc:  # no such table, locked, unreadable
-            log.debug("beads: no bulk edge read for %s: %s", root, exc)
-            return None
-
     async def edges(
         self, root: Path, rows: Sequence[dict], *, cache_key: Optional[tuple] = None,
     ) -> List[dict]:
@@ -1656,17 +1665,13 @@ class Board:
         hit = cache.get(key)
         if hit and now - hit[0] < CACHE_TTL:
             return hit[1]
-        # One read of the board's database answers for every issue at once.
-        # When it does, the page-scoped cache key stops mattering: the result
-        # is the whole graph rather than one page's slice of it, so it is
-        # cached under the board and every page shares it.
-        whole = self._deps.get(str(root))
-        if whole and now - whole[0] < CACHE_TTL:
-            return whole[1]
-        bulk = await self._edges_from_db(root)
-        if bulk is not None:
-            self._deps[str(root)] = (now, bulk)
-            return bulk
+        # Read through br, never out of the database file: br 0.7's engine
+        # (frankensqlite) keeps its own WAL index, and a SQLite reader that
+        # opened the file made br's next call set that index aside as
+        # poisoned and leave a .br-wal-index-*/ directory behind -- one per
+        # read, and this read ran on every Beads page load. One fork per
+        # issue with edges is slower; making it fast again without opening
+        # the file is its own piece of work.
         wanted = [
             r.get("id") for r in rows
             if r.get("id") and (r.get("dependency_count") or 0)
@@ -2238,15 +2243,17 @@ class Board:
             return {
                 "issue": issue_id, "workspace": target, "was": was, "changed": False,
             }
-        updated = beads_meta.set_key(
-            issue.get("description"), beads_meta.WORKSPACE, target
-        )
+        before = issue.get("description") or ""
+        updated = beads_meta.set_key(before, beads_meta.WORKSPACE, target)
+        args = ["update", issue_id, "--description", updated]
+        # br 0.7 refuses to shorten a description below half its length
+        # without --force (a guard against an agent wiping a spec). Clearing
+        # the front matter off a short spec trips it, and what goes is only
+        # the key this method owns -- beads_meta keeps the prose.
+        if len(updated) < len(before):
+            args.append("--force")
         self._cache.pop(str(root), None)
-        await self.br(
-            root,
-            ["update", issue_id, "--description", updated],
-            actor=DASHBOARD_ACTOR,
-        )
+        await self.br(root, args, actor=DASHBOARD_ACTOR)
         return {"issue": issue_id, "workspace": target, "was": was, "changed": True}
 
     # ---- creation ------------------------------------------------------- #

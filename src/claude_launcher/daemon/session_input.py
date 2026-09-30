@@ -28,7 +28,7 @@ import threading
 from datetime import datetime, timezone
 from typing import Dict, List, Optional
 
-from . import paths
+from . import keys as keys_mod, paths
 from .. import journal
 
 log = logging.getLogger(__name__)
@@ -50,18 +50,22 @@ def path(name: str):
 
 
 def _write(name: str, event: str, *, request_id: str, text: str,
-           status: str, pid: Optional[int] = None) -> dict:
+           status: str, pid: Optional[int] = None, origin: str = "") -> dict:
     data = {"request_id": request_id, "text": text, "status": status}
     if pid is not None:
         data["pid"] = pid
+    if origin:
+        # Who typed it, when it was not this daemon's own operator: a
+        # linked peer's session line (daemon/shadow.py) is ``peer:<machine>``.
+        data["origin"] = origin
     return journal.append(path(name), event, data, at=_now())
 
 
 def write(name: str, event: str, *, request_id: str, text: str,
-          status: str, pid: Optional[int] = None) -> dict:
+          status: str, pid: Optional[int] = None, origin: str = "") -> dict:
     with _lock:
         return _write(name, event, request_id=request_id, text=text,
-                      status=status, pid=pid)
+                      status=status, pid=pid, origin=origin)
 
 
 def read(name: str, *, limit: int = 50) -> List[dict]:
@@ -145,14 +149,26 @@ def cancel(name: str, request_id: str) -> Optional[dict]:
     return _transition(name, request_id, "input_cancelled", "cancelled")
 
 
-async def type_line(session, text: str) -> None:
+async def type_line(session, text: str, *, keys: bool = True,
+                    force: bool = True) -> bytes:
     """Type one operator line into a live session, the way the web session
     line does: one paste when it carries a newline, otherwise text and Enter
-    as one keys call (see ``h_session_keys``)."""
-    if "\n" in text:
-        await session.paste(text, enter=True)
-    else:
-        await session.send_keys([text, "Enter"], force=True)
+    as one keys call (see ``h_session_keys``).
+
+    The remote session line (``daemon/shadow.py``) types through here too,
+    with both switches off. ``keys=False``: a line that is only key names
+    (``Escape``, ``C-c``, ``Up``) is pasted as the words it spells, never
+    pressed -- a peer may type text into the composer and nothing else.
+    ``force=False``: an unsent draft on the terminal is never submitted to
+    make room; ``send_keys`` holds and then refuses with
+    :class:`~claude_launcher.daemon.session.KeyboardHeld`.
+    """
+    single = "\n" not in text
+    if not keys:
+        single = single and "\r" not in text and keys_mod.has_text([text])
+    if single:
+        return await session.send_keys([text, "Enter"], force=force)
+    return await session.paste(text, enter=True)
 
 
 async def flush(session) -> int:

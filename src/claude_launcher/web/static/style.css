@@ -5337,3 +5337,74 @@ a.window-owner:hover { color: #79c0ff; text-decoration: underline; }
 .wt-check { display: block; font-size: 13px; margin: 8px 0 2px; }
 .wt-dialog-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14px; }
 .wt-dialog-actions .wf-btn { margin-right: 0; }
+
+/* ---- remote-shadow sessions (daemon/shadow.py) ----
+   Another daemon's mesh members. Styled apart from #session-list on purpose
+   (a dashed left edge and the @machine chip): the reader must never take a
+   remote card for a local one, whose row carries controls this one lacks. */
+#shadow-rail { border-top: 1px solid #30363d; max-height: 40vh; overflow-y: auto; flex: none; }
+#shadow-rail.hidden { display: none; }
+.shadow-rail-head {
+  padding: 8px 10px 4px 16px; font-size: 11px; font-weight: 600;
+  letter-spacing: 0.04em; text-transform: uppercase; color: #8b93a1;
+}
+#shadow-list, .shadow-group-list { list-style: none; margin: 0; padding: 0; }
+.shadow-group-head {
+  padding: 4px 10px 2px 16px; font-size: 11px; color: #6e7681;
+  font-family: Cascadia Mono, Consolas, Menlo, monospace;
+}
+.shadow-card {
+  padding: 8px 10px 8px 14px; font-size: 13px; cursor: pointer;
+  border-bottom: 1px solid #22262d; border-left: 2px dashed #3a3f4a;
+  display: flex; flex-direction: column; gap: 2px; min-width: 0;
+}
+.shadow-card:hover, .shadow-card:focus-visible { background: #22262d; outline: none; }
+.shadow-card.active { background: #2b313b; }
+div.shadow-card { cursor: default; border-bottom: none; padding: 0 0 8px 12px; }
+div.shadow-card:hover { background: none; }
+.shadow-card-head { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.shadow-dot { width: 8px; height: 8px; border-radius: 50%; flex: none; background: #6e7681; }
+.shadow-dot-idle { background: #3fb950; }
+.shadow-dot-busy { background: #d29922; }
+.shadow-dot-exited { background: #484f58; }
+/* In a narrow rail the machine name gives way first: the session name is
+   what the row is about, and the rail's group heading repeats the machine. */
+.shadow-name {
+  font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  flex: 0 1 auto; min-width: 3ch;
+}
+.shadow-machine, .shadow-handle, .shadow-role {
+  font-size: 11px; color: #8b93a1; white-space: nowrap;
+}
+.shadow-machine {
+  font-family: Cascadia Mono, Consolas, Menlo, monospace; color: #79c0ff;
+  flex: 0 100 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis;
+}
+.shadow-handle { flex: 0 10 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.shadow-role { padding: 0 5px; border: 1px solid #30363d; border-radius: 8px; flex: none; }
+.shadow-line {
+  font-size: 12px; color: #aeb5c0; overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap; min-width: 0;
+}
+div.shadow-card .shadow-line { white-space: normal; overflow-wrap: anywhere; }
+.shadow-note { color: #d8dbe0; }
+.shadow-cflow { color: #8b93a1; }
+.shadow-cflow.gated { color: #d29922; }
+.shadow-error { color: #f85149; }
+#shadow-view { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+#shadow-view.hidden { display: none; }
+#shadow-head { padding: 14px 16px 0; }
+#shadow-status { margin: 0; padding: 0 16px 6px; }
+#shadow-term { flex: 1; min-height: 0; overflow: auto; padding: 6px; background: #0d1117; }
+#shadow-input {
+  flex: none; display: flex; align-items: flex-end; gap: 8px; min-width: 0;
+  padding: 8px 12px; background: #1b1e24; border-top: 1px solid #2a2e36;
+}
+#shadow-input-field {
+  flex: 1; min-width: 0; padding: 5px 10px; font-size: 13px; line-height: 1.5;
+  color: #d8dbe0; background: #14161a; border: 1px solid #30363d;
+  border-radius: 5px; font-family: inherit; resize: none; overflow-y: auto;
+  max-height: 30vh; white-space: pre-wrap; word-break: break-word;
+}
+#shadow-input-field:focus { outline: none; border-color: #1f6feb; }
+#shadow-input-field:disabled { opacity: 0.5; cursor: not-allowed; }

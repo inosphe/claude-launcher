@@ -2291,6 +2291,27 @@ parent directory that does not exist. A path with no file at it yet is
 accepted: the board is created on first use, or now with the row's **Create**
 button (`br init`, under the workspace's name as the issue prefix).
 
+`br` 0.7 needs two files beside the database that `br init` does not write.
+`.beads/policy.yaml` has to declare the statuses claunch's workflows use
+beyond br's own (`in_ready`, `in_review`); without it, br refuses a
+`--status` filter naming one of them while no issue is in it. `.beads/.gitignore`
+has to list the files br 0.7's engine writes next to the database, or they
+turn up untracked in `git status`. Setting a board up makes all three,
+each only if it is missing, and never touches an existing database:
+
+```bash
+claunch beads init --workspace gds6          # or the workspace's directory
+claunch beads init --workspace gds6 --json   # what was made, for a script
+```
+
+The row's **Create** button runs the same thing. A board made before br 0.7
+shows *not set up for br 0.7* and a **Set up** button that adds what it lacks.
+A checkout that carries `issues.jsonl` but no database, such as a fresh clone,
+is rebuilt from the JSONL under the prefix its ids already use. The daemon and
+`claunch beads` also declare the statuses on their own on a board's next call.
+The `.gitignore` is a tracked file, so it changes only when someone asks. Plain
+`claunch beads init`, without `--workspace`, is still br's own `init`.
+
 | Row | What it is |
 | --- | --- |
 | a workspace's name | the board sessions in that directory file on, and the board its issues are listed under on the Beads page |
@@ -2864,6 +2885,22 @@ claunch mesh connect dev worker_1 worker_2      # let two MEMBERS talk directly
 claunch mesh disconnect dev worker_1 worker_2   # ...or stop them (send refused)
 claunch mesh wire-requests dev    # ...who was refused a peer and is waiting on
                                   # you; 'connect' grants one, --decline says no
+claunch mesh urgent dev s26-qf1 "build is red, stop pushing" --reason "release freeze, no shared mesh"
+                                  # EXCEPTION: one message to one member you are
+                                  # not connected to, in this mesh or any other
+                                  # mesh on this daemon. Leader or operator only;
+                                  # --reason (12+ chars) is required and written
+                                  # into both meshes' logs (ref.urgent). Opens no
+                                  # connection, files no wire request, takes no
+                                  # '*'/@selector/list. Agents: 3/hour/sender and
+                                  # 1 per target per 10 min (MCP 'urgent_send').
+                                  # A target on another machine is refused.
+                                  # Limit, not enforced: the daemon cannot tell an
+                                  # agent's HTTP call from the operator's, so a
+                                  # call with no session is the unlimited
+                                  # operator. Agents must never do that; the CLI
+                                  # sends $CLAUNCH_SESSION, and the audit records
+                                  # authority: operator so misuse is visible.
 claunch mesh invite dev           # optional ticket that pre-approves one join
 claunch mesh join dev@work-pc --code <ticket>   # ...admitted without waiting
 claunch mesh revoke dev other-pc  # unlink a guest machine (persistent until then)

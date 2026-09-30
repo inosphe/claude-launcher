@@ -442,10 +442,15 @@ def test_the_daemon_composed_description_is_the_shape_that_needs_binding():
     assert description not in cmd
 
 
-def test_br_itself_accepts_the_bound_form_and_refuses_the_unbound_one(tmp_path):
+def test_br_itself_accepts_the_bound_form(tmp_path):
     """The claim the unit tests above cannot make: that the spelling ``plan``
     produces is the one ``br``'s parser takes. Run against a throwaway board,
-    so it touches nothing this repository tracks."""
+    so it touches nothing this repository tracks.
+
+    The unbound form is what made the binding necessary: br 0.2.14 refused
+    it with ``unexpected argument``. br 0.7.1 takes it, so whether it is
+    refused depends on the installed version and is only checked for the
+    words when it is. The bound form is the one that must work on both."""
     import shutil as _shutil
 
     if _shutil.which(cli_beads.BINARY) is None:
@@ -467,8 +472,8 @@ def test_br_itself_accepts_the_bound_form_and_refuses_the_unbound_one(tmp_path):
 
     unbound = br(["create", "unbound", "--type", "task", "--priority", "2",
                   "--description", FENCED])
-    assert unbound.returncode != 0
-    assert "unexpected argument" in (unbound.stderr + unbound.stdout)
+    if unbound.returncode != 0:
+        assert "unexpected argument" in (unbound.stderr + unbound.stdout)
 
     bound = br(["create", "bound", "--type", "task", "--priority", "2",
                 f"--description={FENCED}", "--json"])
@@ -664,3 +669,199 @@ def test_the_option_tables_match_the_installed_br():
             f"br {' '.join(subcommand)} has options the tables do not name: "
             f"{sorted(missing)}"
         )
+
+
+# --------------------------------------------------------------------------- #
+# br 0.7: the custom statuses are declared in the board's policy.yaml
+# --------------------------------------------------------------------------- #
+def test_the_custom_statuses_are_the_protocol_ones_br_does_not_know():
+    assert cli_beads.CUSTOM_STATUSES == ("in_ready", "in_review")
+    assert not set(cli_beads.CUSTOM_STATUSES) & set(cli_beads.BR_BUILTIN_STATUSES)
+
+
+def test_a_board_with_no_policy_gets_one_declaring_them():
+    import yaml
+
+    text = cli_beads.policy_text(None)
+    assert text.startswith(cli_beads.POLICY_HEADER)
+    assert yaml.safe_load(text) == {"workflow": {"statuses": ["in_ready", "in_review"]}}
+
+
+def test_a_policy_without_a_workflow_section_keeps_its_text():
+    """The operator's file is appended to, not re-emitted: comments stay."""
+    import yaml
+
+    mine = "# ours\nclose_reason_min_length: 3  # keep\n"
+    text = cli_beads.policy_text(mine)
+    assert text.startswith(mine)
+    assert yaml.safe_load(text)["workflow"]["statuses"] == ["in_ready", "in_review"]
+    assert yaml.safe_load(text)["close_reason_min_length"] == 3
+
+
+def test_a_declared_list_is_extended_and_nothing_else_moves():
+    import yaml
+
+    mine = "workflow:\n  strict: false\n  statuses: [rework, in_review]\n"
+    doc = yaml.safe_load(cli_beads.policy_text(mine))
+    assert doc["workflow"]["statuses"] == ["rework", "in_review", "in_ready"]
+    assert doc["workflow"]["strict"] is False
+
+
+@pytest.mark.parametrize("text", [
+    "workflow:\n  statuses: [in_ready, in_review, rework]\n",
+    ": : not yaml [\n",
+    "- a list\n",
+    "workflow: [not, a, mapping]\n",
+    "workflow:\n  statuses: in_review\n",
+])
+def test_a_policy_that_is_complete_or_not_ours_to_fix_is_left_alone(text):
+    assert cli_beads.policy_text(text) is None
+
+
+def test_ensure_policy_writes_once_and_leaves_a_missing_board_alone(tmp_path):
+    assert cli_beads.ensure_policy(tmp_path / "nowhere") is False
+    assert not (tmp_path / "nowhere").exists()
+    beads = tmp_path / ".beads"
+    beads.mkdir()
+    assert cli_beads.ensure_policy(beads) is True
+    first = (beads / cli_beads.POLICY_NAME).read_text(encoding="utf-8")
+    assert cli_beads.ensure_policy(beads) is False
+    assert (beads / cli_beads.POLICY_NAME).read_text(encoding="utf-8") == first
+    assert [p.name for p in beads.iterdir()] == [cli_beads.POLICY_NAME]
+
+
+def test_br_itself_answers_a_custom_status_filter_once_it_is_declared(tmp_path):
+    """The failure the declaration is for, against the real binary: a filter
+    on a status no issue is in is refused (br 0.7) until the policy says the
+    status exists. An older br that never refused skips the first half."""
+    import shutil as _shutil
+
+    if _shutil.which(cli_beads.BINARY) is None:
+        pytest.skip(f"{cli_beads.BINARY} is not installed on this machine")
+    root = tmp_path / "board"
+    root.mkdir()
+    db = str(root / ".beads" / "beads.db")
+
+    def br(args):
+        return REAL_RUN([cli_beads.BINARY, "--db", db, *args], cwd=str(root),
+                        capture_output=True, text=True, encoding="utf-8")
+
+    assert br(["init", "--prefix", "t"]).returncode == 0
+    ask = ["list", "--status", "open", "--status", "in_ready",
+           "--status", "in_review", "--json"]
+    before = br(ask)
+    assert cli_beads.ensure_policy(root / ".beads") is True
+    after = br(ask)
+    assert after.returncode == 0, after.stdout + after.stderr
+    if before.returncode != 0:
+        assert "unknown status" in before.stdout + before.stderr
+
+
+def test_the_board_is_given_its_policy_before_the_callers_command(repo, fake_br):
+    """A board made before br 0.7 has no policy; the first command through
+    here declares the statuses, in the board's own .beads/."""
+    beads = repo / ".beads"
+    beads.mkdir()
+    (beads / "beads.db").write_bytes(b"")
+    assert cli_beads.run(["list", "--status", "in_review"], cwd=str(repo)) == 0
+    assert (beads / cli_beads.POLICY_NAME).is_file()
+    assert "in_review" in (beads / cli_beads.POLICY_NAME).read_text(encoding="utf-8")
+
+
+def test_the_short_message_flag_is_an_option_not_the_start_of_a_body():
+    """br 0.7.1 spells ``--message`` as ``-m`` too. Before the tables knew it,
+    ``-m`` was read as the first word of a positional body and the comment
+    was stored as ``-m hello``."""
+    assert cli_beads.flag_text_positionals(
+        cli_beads.bind_text_values(["comments", "add", "x-1", "-m", "hello"])
+    ) == ["comments", "add", "x-1", "-m", "hello"]
+    assert cli_beads.bind_text_values(
+        ["comments", "add", "x-1", "-m", "- branch: x"]
+    ) == ["comments", "add", "x-1", "-m=- branch: x"]
+
+
+# --------------------------------------------------------------------------- #
+# br 0.7's engine writes files beside the database
+# --------------------------------------------------------------------------- #
+def test_the_gitignore_gains_only_the_missing_lines_once():
+    old = "# Database\n*.db\n*.db-wal\n*-fsqlite-ns-use\n"
+    text = cli_beads.gitignore_text(old)
+    assert text.startswith(old)
+    lines = text.splitlines()
+    for pattern, _ in cli_beads.GITIGNORE_LINES:
+        assert lines.count(pattern) == 1, pattern
+    assert cli_beads.gitignore_text(text) is None
+    assert cli_beads.gitignore_text(None).splitlines()[0].startswith("# br 0.7+")
+
+
+def test_the_repositorys_own_board_ignores_what_br_0_7_writes():
+    """The tracked .beads/.gitignore of this repository, read by git itself:
+    the engine's files stay out of 'git status', the policy stays in."""
+    root = Path(__file__).resolve().parents[1]
+    if not (root / ".beads" / ".gitignore").is_file():
+        pytest.skip("no tracked board in this checkout")
+    names = [
+        "beads.db-fsqlite-ns-gate", "beads.db-fsqlite-ns-use",
+        "beads.db-wal-cert", "beads.db-wal-cert-head",
+        "beads.db.fsqlite-migration-state", ".br-wal-index-x/prepared.json",
+    ]
+    for name in names:
+        done = REAL_RUN(["git", "check-ignore", "-q", f".beads/{name}"], cwd=str(root))
+        assert done.returncode == 0, name
+    kept = REAL_RUN(["git", "check-ignore", "-q", ".beads/policy.yaml"], cwd=str(root))
+    assert kept.returncode == 1
+
+
+def test_a_moved_database_takes_the_engines_sidecars_with_it(tmp_path):
+    src = tmp_path / "stage" / "beads.db"
+    src.parent.mkdir()
+    for suffix in ("",) + cli_beads.DB_SIDECARS:
+        Path(str(src) + suffix).write_text(suffix or "db", encoding="utf-8")
+    dst = tmp_path / "boards" / "alpha.db"
+    dst.parent.mkdir()
+    cli_beads.move_db(str(src), str(dst))
+    assert list(src.parent.iterdir()) == []
+    for suffix in cli_beads.DB_SIDECARS:
+        assert Path(str(dst) + suffix).read_text(encoding="utf-8") == suffix
+
+
+def test_init_with_a_workspace_makes_a_board_br_itself_filters_on(
+    tmp_path, monkeypatch, capsys
+):
+    """End to end against the installed ``br``: ``claunch beads init
+    --workspace`` on a registered workspace with no board yet leaves one that
+    answers a filter on each custom status (the refusal br 0.7 gives a board
+    ``br init`` made alone), with the engine's files ignored, and a second
+    run changes nothing."""
+    import json
+    import shutil as _shutil
+
+    if _shutil.which(cli_beads.BINARY) is None:
+        pytest.skip(f"{cli_beads.BINARY} is not installed on this machine")
+    root = tmp_path / "trees" / "alpha"
+    root.mkdir(parents=True)
+    git("init", "-q", cwd=root)
+    row = workspaces.Workspace(name="alpha", path=str(root))
+    monkeypatch.setattr(workspaces, "list_all", lambda doc=None: [row])
+    monkeypatch.setattr(workspaces, "get", lambda name, doc=None: row if name == "alpha" else None)
+    monkeypatch.setattr(workspaces, "owning", lambda path, doc=None: row)
+
+    assert cli_beads.run(["init", "--workspace", "alpha"], cwd=str(root)) == 0
+    assert "created (prefix alpha)" in capsys.readouterr().out
+    db = root / ".beads" / "beads.db"
+    for status in cli_beads.CUSTOM_STATUSES:
+        out = REAL_RUN(
+            [cli_beads.BINARY, "--db", str(db), "list", "--status", status, "--json"],
+            cwd=str(root), capture_output=True, text=True, encoding="utf-8",
+        )
+        assert out.returncode == 0, out.stdout + out.stderr
+        assert json.loads(out.stdout)["total"] == 0
+    ignored = REAL_RUN(
+        ["git", "check-ignore", "-q", str(db) + "-wal-cert"], cwd=str(root),
+    )
+    assert ignored.returncode == 0
+
+    assert cli_beads.run(["init", "--workspace", "alpha", "--json"], cwd=str(root)) == 0
+    doc = json.loads(capsys.readouterr().out)
+    assert (doc["created"], doc["policy"], doc["gitignore"]) == (False, False, False)
+    assert doc["state"]["complete"] is True

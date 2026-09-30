@@ -1824,6 +1824,8 @@ def test_mesh_mcp_tools(home, monkeypatch):
     assert init["result"]["serverInfo"]["name"] == "claunch-mesh"
     tools = mesh_mcp._handle({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
     assert [t["name"] for t in tools["result"]["tools"]] == [
+        # the exception to talking (leader-only, audited) ...
+        "urgent_send",
         # talking ...
         "send", "members", "history",
         # ... reading a peer's checkout and coordinating on shared keys

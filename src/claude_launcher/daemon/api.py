@@ -17,7 +17,6 @@ import json
 import logging
 import os
 import secrets
-import sqlite3
 import time
 from datetime import datetime, timezone
 from dataclasses import replace
@@ -83,6 +82,7 @@ from .mesh import MeshBusy, MeshConflict, MeshError, MeshManager
 from .session import STATUS_IDLE, KeyboardHeld, SessionGone
 from . import session as session_mod
 from . import ws as ws_mod
+from . import shadow as shadow_mod
 
 COOKIE_NAME = "claunch_session"
 
@@ -371,6 +371,9 @@ def build_app(
     app["cflow_nudge_tasks"] = set()
     app.on_shutdown.append(_close_cflow_nudges)
     app["websockets"] = set()
+    # The remote-shadow directory (daemon/shadow.py), built on first read:
+    # a holder rather than a key set later, because the app is frozen by then.
+    app["shadow"] = {}
     # Who is holding a socket right now, and the last hundred that closed
     # (daemon/connections.py). The close log alone could not answer whether
     # new sockets were being refused, because a refused one writes nothing.
@@ -587,6 +590,7 @@ def build_app(
     r.add_delete("/api/mesh/{mesh}/members/{handle}", h_mesh_leave)
     r.add_patch("/api/mesh/{mesh}/members/{handle}/subroles", h_mesh_member_subroles)
     r.add_post("/api/mesh/{mesh}/messages", h_mesh_send)
+    r.add_post("/api/mesh/{mesh}/urgent", h_mesh_urgent)
     r.add_get("/api/mesh/{mesh}/messages", h_mesh_history)
     r.add_get("/api/mesh/{mesh}/owed", h_mesh_owed)
     r.add_get("/api/mesh/{mesh}/flows", h_mesh_flows)
@@ -650,10 +654,12 @@ def build_app(
     # pushing an invitation. Session names only — no capture, no control.
     r.add_post("/peer/sessions", h_peer_sessions)
     # Daemon attach: the public meshes this daemon owns (one hop — never a
-    # mirror), an owner's offer pushed to us, and a guest detaching itself
-    # (link-token authenticated).
+    # mirror), an owner's offer pushed to us and the question we ask the
+    # owner back before storing it (the relay does not say who sent it),
+    # and a guest detaching itself (link-token authenticated).
     r.add_post("/peer/meshes", h_peer_meshes)
     r.add_post("/peer/mesh/offer", h_peer_mesh_offer)
+    r.add_post("/peer/mesh/offer/check", h_peer_mesh_offer_check)
     r.add_post("/peer/mesh/detach", h_peer_detach)
     # A linked peer announces its new relay name (link-token authenticated).
     r.add_post("/peer/mesh/renamed", h_peer_renamed)
@@ -668,6 +674,19 @@ def build_app(
     r.add_post("/peer/ops/file", h_peer_ops_file)
     r.add_post("/peer/ops/git", h_peer_ops_git)
     r.add_post("/peer/ops/lease", h_peer_ops_lease)
+    # Remote-shadow sessions (daemon/shadow.py): a linked peer's operator
+    # LOOKS at this daemon's members of the mesh that link belongs to -- a
+    # card, an output-only terminal, the session line. Link-token
+    # authenticated and member-scoped; nothing else a local card can do
+    # (kill, pause, note, raw keys, resize, paste-image) has a peer route.
+    r.add_post("/peer/shadow/cards", h_peer_shadow_cards)
+    r.add_post("/peer/shadow/stream", h_peer_shadow_stream)
+    r.add_post("/peer/shadow/line", h_peer_shadow_line)
+    # ...and this daemon's side of it: the other daemons' members, kept out
+    # of /api/sessions (keyed by bare name) and addressed by machine too.
+    r.add_get("/api/shadows", h_shadows_list)
+    r.add_get("/api/shadows/{machine}/{session}/ws", h_shadow_ws)
+    r.add_post("/api/shadows/{machine}/{session}/line", h_shadow_line)
     r.add_get("/api/sessions", h_sessions_list)
     r.add_get("/api/transcripts", h_transcripts_list)
     r.add_post("/api/sessions", h_sessions_create)
@@ -4644,6 +4663,30 @@ async def h_mesh_send(request: web.Request) -> web.Response:
     return json_response({**result, "relay": request.app["relay_state"]()})
 
 
+async def h_mesh_urgent(request: web.Request) -> web.Response:
+    """The exception path to a member the sender is not connected to.
+
+    ``from`` is the caller's own session (empty: the human operator). A body
+    ``external`` flag is not read — see :meth:`MeshManager.urgent_send`.
+    """
+    body = await _json_body(request)
+    to = body.get("to")
+    text = body.get("body")
+    if not isinstance(to, str) or not to:
+        return json_error(400, "'to' must be one handle or session name")
+    if not isinstance(text, str):
+        return json_error(400, "'body' must be a string")
+    result = _mesh_mgr(request).urgent_send(
+        request.match_info["mesh"],
+        str(body.get("from") or ""),
+        to,
+        text,
+        reason=str(body.get("reason") or ""),
+        target_mesh=str(body.get("target_mesh") or ""),
+    )
+    return json_response({**result, "relay": request.app["relay_state"]()})
+
+
 async def h_mesh_history(request: web.Request) -> web.Response:
     try:
         limit = int(request.query.get("limit", 50))
@@ -5165,7 +5208,7 @@ async def h_peer_meshes(request: web.Request) -> web.Response:
 
 async def h_peer_mesh_offer(request: web.Request) -> web.Response:
     body = await _json_body(request)
-    result = _mesh_mgr(request).peer_offer_accept(
+    result = await _mesh_mgr(request).peer_offer_accept(
         str(body.get("mesh") or ""),
         str(body.get("machine") or ""),
         str(body.get("token") or ""),
@@ -5174,6 +5217,16 @@ async def h_peer_mesh_offer(request: web.Request) -> web.Response:
         members=body.get("members") or 0,
     )
     return json_response(result)
+
+
+async def h_peer_mesh_offer_check(request: web.Request) -> web.Response:
+    """The owner's half of an offer: the daemon it was pushed to asks back."""
+    body = await _json_body(request)
+    return json_response(_mesh_mgr(request).peer_offer_check(
+        str(body.get("mesh") or ""),
+        str(body.get("machine") or ""),
+        str(body.get("token") or ""),
+    ))
 
 
 async def h_peer_renamed(request: web.Request) -> web.Response:
@@ -5456,6 +5509,149 @@ async def h_peer_ops_file(request: web.Request) -> web.Response:
         str(body.get("path") or ""),
         body.get("max_bytes"),
     )
+    return json_response(result)
+
+
+def _peer_shadow_member(request: web.Request, body: dict):
+    """The (session, member) a ``/peer/shadow/*`` call names, or the refusal.
+
+    Token and membership are checked by the mesh (``peer_shadow_member``);
+    a refusal is 403 here, where peer ops say 400, because nothing about
+    the request is malformed -- the caller is not allowed to see it.
+    """
+    mm = _mesh_mgr(request)
+    session_name = str(body.get("session") or "")
+    try:
+        member = mm.peer_shadow_member(
+            str(body.get("mesh") or ""),
+            str(body.get("machine") or ""),
+            str(body.get("token") or ""),
+            session_name,
+        )
+    except MeshError as exc:
+        raise web.HTTPForbidden(
+            text=json.dumps({"error": str(exc)}), content_type="application/json"
+        ) from None
+    manager: SessionManager = request.app["manager"]
+    try:
+        session = manager.get(session_name)
+    except ManagerError:
+        raise web.HTTPNotFound(
+            text=json.dumps({"error": f"session {session_name!r} is gone"}),
+            content_type="application/json",
+        ) from None
+    return session, member
+
+
+async def h_peer_shadow_cards(request: web.Request) -> web.Response:
+    body = await _json_body(request)
+    mm = _mesh_mgr(request)
+    try:
+        members = mm.peer_shadow_members(
+            str(body.get("mesh") or ""),
+            str(body.get("machine") or ""),
+            str(body.get("token") or ""),
+        )
+    except MeshError as exc:
+        return json_error(403, str(exc))
+    manager: SessionManager = request.app["manager"]
+
+    def build() -> list:
+        cards = []
+        for member in members:
+            try:
+                session = manager.get(member.session)
+            except ManagerError:
+                continue
+            cwd = _session_cwd(session)
+            flow = (
+                _cflow_entry(manager, cwd, session.sdef.name, reports=False, slim=True)
+                if cwd else None
+            )
+            cards.append(shadow_mod.card(session, member, cflow=flow))
+        return cards
+
+    return json_response({"cards": await asyncio.to_thread(build)})
+
+
+async def h_peer_shadow_stream(request: web.Request) -> web.StreamResponse:
+    body = await _json_body(request)
+    session, _member = _peer_shadow_member(request, body)
+    return await shadow_mod.serve_stream(request, session, request.app)
+
+
+async def h_peer_shadow_line(request: web.Request) -> web.Response:
+    body = await _json_body(request)
+    session, _member = _peer_shadow_member(request, body)
+    try:
+        cfg = store.daemon_config()
+    except store.StoreError:
+        cfg = None
+    if not shadow_mod.input_enabled(cfg):
+        return json_error(
+            403, "this daemon does not take the session line from peers "
+                 "(daemon.shadow_input is off)")
+    machine = str(body.get("machine") or "")
+    try:
+        result = await shadow_mod.type_line(
+            session, body.get("text"), body.get("input_id"),
+            origin=f"peer:{machine}",
+        )
+    except shadow_mod.ShadowRefused as exc:
+        return json_error(exc.status, str(exc))
+    return json_response(result)
+
+
+async def h_shadows_list(request: web.Request) -> web.Response:
+    """Every other daemon's member of every mesh held here, with its card."""
+    holder = request.app["shadow"]
+    mm = _mesh_mgr(request)
+    directory = holder.get("directory")
+    if directory is None or holder.get("mesh") is not mm:
+        directory = holder["directory"] = shadow_mod.Directory(mm)
+        holder["mesh"] = mm
+    return json_response({
+        "machine": mm.machine or None,
+        "relay_connected": bool(mm.relay_connected()),
+        "shadows": await directory.list(),
+    })
+
+
+async def h_shadow_ws(request: web.Request) -> web.WebSocketResponse:
+    """A shadow's terminal for this page: output only, relayed from its host."""
+    machine = request.match_info["machine"]
+    session = request.match_info["session"]
+    ws = web.WebSocketResponse(heartbeat=ws_mod.HEARTBEAT)
+    await ws.prepare(request)
+    request.app["websockets"].add(ws)
+    conns = connections.install(request.app)
+    record = conns.opened("shadow", f"{machine}/{session}", request, ws=ws)
+    try:
+        await shadow_mod.bridge_to_viewer(ws, _mesh_mgr(request), machine, session)
+    finally:
+        request.app["websockets"].discard(ws)
+        if not ws.closed:
+            await ws.close()
+        conns.closed(record, ws.close_code, ws.exception())
+    return ws
+
+
+async def h_shadow_line(request: web.Request) -> web.Response:
+    """The session line, typed into another daemon's member via its host."""
+    body = await _json_body(request)
+    text = body.get("text")
+    input_id = body.get("input_id")
+    if not isinstance(text, str) or not text.strip():
+        return json_error(400, "'text' must be a non-empty string")
+    if not isinstance(input_id, str) or not input_id.strip():
+        return json_error(400, "'input_id' must be a non-empty string")
+    try:
+        result = await _mesh_mgr(request).shadow_call(
+            request.match_info["machine"], request.match_info["session"],
+            "/peer/shadow/line", {"text": text, "input_id": input_id},
+        )
+    except mesh_mod.PeerUnreachable as exc:
+        return json_error(502, str(exc))
     return json_response(result)
 
 
@@ -8633,18 +8829,18 @@ async def h_beads_settings(request: web.Request) -> web.Response:
     ``.db`` files already sitting where that board would be, so the field can
     offer them rather than have the operator type a path out.
 
-    ``issues`` is filled per row for a database that exists: a count read
-    straight out of the file, so a board that is about to be repointed can be
-    seen to have (or not have) work on it before the change is made.
+    ``issues`` is filled per row for a database that exists: a count asked
+    of ``br`` (:func:`_beads_issue_count`), so a board that is about to be
+    repointed can be seen to have (or not have) work on it before the change
+    is made. ``setup`` is :func:`cli_beads.setup_state` -- whether the
+    board's ``policy.yaml`` and ``.gitignore`` are what br 0.7 needs, so the
+    card can offer to finish a board that exists but was made before them.
     """
     rows = await asyncio.to_thread(
         beads_db.listing, cli_beads.repo_root(os.getcwd())
     )
-    counts = await asyncio.gather(
-        *(asyncio.to_thread(_beads_issue_count, r["db"]) for r in rows)
-    )
-    for row, count in zip(rows, counts):
-        row["issues"] = count
+    board = request.app["beads"]
+    await asyncio.gather(*(_beads_fill_row(board, r) for r in rows))
     return json_response({
         "boards": rows,
         "default_board": beads_db.DEFAULT_BOARD,
@@ -8652,41 +8848,60 @@ async def h_beads_settings(request: web.Request) -> web.Response:
     })
 
 
-def _beads_issue_count(db: str) -> Optional[int]:
-    """How many issues a board database holds, or ``None``.
+async def _beads_fill_row(board, row: dict) -> None:
+    """Add what the card shows beyond the listing: ``issues`` and ``setup``."""
+    row["issues"] = await _beads_issue_count(board, row)
+    row["setup"] = await asyncio.to_thread(
+        cli_beads.setup_state, _beads_row_ref(row)
+    )
 
-    Read with SQLite directly rather than through ``br``: the card lists
-    every board at once, and forking the binary per row would make opening
-    the Settings page cost what the Beads page costs. ``None`` for a file
-    that is not there, cannot be opened, or does not have the table — the
-    card then says nothing instead of claiming zero, which is a different
-    fact from "no issues".
+
+def _beads_row_ref(row: dict) -> beads_db.BoardRef:
+    """The board a settings row describes, exactly as the card showed it."""
+    return beads_db.BoardRef(
+        name=row["board"], db=row["db"], root=row["root"],
+        workspace=row["workspace"], configured=row["configured"],
+    )
+
+
+async def _beads_issue_count(board, row: dict) -> Optional[int]:
+    """How many issues a board holds, or ``None``.
+
+    Asked of ``br`` -- ``list --all --limit 1`` reports the total -- and not
+    read out of the database file. It used to be read with SQLite directly,
+    to spare the Settings page a fork per board, but br 0.7's engine keeps
+    its own WAL index and treats one a SQLite reader initialised as
+    poisoned: every such read left a ``.beads/.br-wal-index-*/`` directory
+    behind and made br's next call rebuild the index. Deleted issues
+    (tombstones) are not in ``--all`` and are not counted.
+
+    ``None`` for a board whose database is not there, when ``br`` is not
+    installed, or when it cannot answer -- the card then says nothing instead
+    of claiming zero, which is a different fact from "no issues".
     """
-    path = Path(db)
-    if not path.is_file():
+    if not row.get("exists") or not board.available():
         return None
-    quoted = path.as_posix().replace("?", "%3f").replace("#", "%23")
+    ref = _beads_row_ref(row)
     try:
-        conn = sqlite3.connect(f"file:{quoted}?mode=ro", uri=True, timeout=2.0)
-    except Exception:
+        data = await board.br(
+            Path(ref.root), ["list", "--all", "--limit", "1"], ref=ref
+        )
+    except (BeadsError, beads_mod.BeadsUnavailable, OSError):
         return None
-    try:
-        (count,) = conn.execute("SELECT COUNT(*) FROM issues").fetchone()
-        return int(count)
-    except Exception:
-        return None
-    finally:
-        conn.close()
+    total = data.get("total") if isinstance(data, dict) else None
+    return total if isinstance(total, int) else None
 
 
-def _beads_board_row(name: str) -> Optional[dict]:
+async def _beads_board_row(request: web.Request, name: str) -> Optional[dict]:
     """The settings row for one board name, or ``None`` if there is no such
     board. What the two writes below answer with, so a caller sees the state
     it has just put the board in without a second request."""
-    rows = beads_db.listing(cli_beads.repo_root(os.getcwd()))
+    rows = await asyncio.to_thread(
+        beads_db.listing, cli_beads.repo_root(os.getcwd())
+    )
     for row in rows:
         if row["board"] == name:
-            row["issues"] = _beads_issue_count(row["db"])
+            await _beads_fill_row(request.app["beads"], row)
             return row
     return None
 
@@ -8707,7 +8922,7 @@ async def h_beads_settings_set(request: web.Request) -> web.Response:
     workspace, 400 for a path that cannot be stored.
     """
     name = request.match_info["board"]
-    if _beads_board_row(name) is None:
+    if await _beads_board_row(request, name) is None:
         return json_error(
             404,
             f"no board named {name!r} — boards are the registered workspaces "
@@ -8729,45 +8944,47 @@ async def h_beads_settings_set(request: web.Request) -> web.Response:
     # Every directory the daemon had already resolved may now read a
     # different file, so nothing resolved against the old one survives.
     request.app["beads"].forget_paths()
-    return json_response({"board": _beads_board_row(name)})
+    return json_response({"board": await _beads_board_row(request, name)})
 
 
 async def h_beads_settings_init(request: web.Request) -> web.Response:
-    """Create a board's database now, instead of on its first use.
+    """Set a board up now, instead of on its first use.
 
-    ``br init --prefix <board name>`` against the path the board resolves to,
-    so the operator can see the file appear and the issue prefix it will mint
-    under before any session is pointed at it. A database that is already
-    there is left alone and reported back unchanged — this is not a reset.
+    What ``claunch beads init --workspace <board>`` does
+    (:func:`cli_beads.init_board`): the database, with ``br init --prefix
+    <board name>`` against the path the board resolves to (or rebuilt from a
+    tracked ``issues.jsonl``), so the operator can see the file appear and
+    the issue prefix it will mint under before any session is pointed at it;
+    then the ``policy.yaml`` and ``.gitignore`` br 0.7 needs beside it. Each
+    part already there is left alone — a database that exists is never
+    touched; this is not a reset. The answer says which parts were made now
+    (``created``, ``imported``, ``policy``, ``gitignore``) and carries the
+    row as it stands after.
 
     404 for a name with no board, 409 for a directory that cannot hold one,
     503 when ``br`` is not installed on this machine.
     """
     name = request.match_info["board"]
-    row = _beads_board_row(name)
+    row = await _beads_board_row(request, name)
     if row is None:
         return json_error(
             404,
             f"no board named {name!r} — boards are the registered workspaces "
             f"plus {beads_db.DEFAULT_BOARD!r}",
         )
-    if row["exists"]:
-        return json_response({"board": row, "created": False})
     board = request.app["beads"]
-    # Built from the row rather than resolved again, so the database that is
-    # created is exactly the one the card just showed.
-    ref = beads_db.BoardRef(
-        name=row["board"], db=row["db"], root=row["root"],
-        workspace=row["workspace"], configured=row["configured"],
-    )
+    # Built from the row rather than resolved again, so the board that is set
+    # up is exactly the one the card just showed.
+    ref = _beads_row_ref(row)
     try:
-        await board.create_board(ref)
+        result = await board.init_board(ref)
     except beads_mod.BeadsUnavailable as exc:
         return json_error(503, str(exc))
     except (BeadsError, OSError) as exc:
         return json_error(409, str(exc))
     board.forget_paths()
-    return json_response({"board": _beads_board_row(name), "created": True})
+    result.pop("state", None)
+    return json_response({"board": await _beads_board_row(request, name), **result})
 
 
 async def h_beads_create(request: web.Request) -> web.Response:

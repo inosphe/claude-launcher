@@ -184,6 +184,15 @@
     </div>
     <ul id="session-list"></ul>
     <div id="session-grid" class="hidden" aria-label="Sessions by fixed grid position"></div>
+    <!-- Remote-shadow sessions: other daemons' members of the meshes this
+         daemon holds (GET /api/shadows, daemon/shadow.py). A list of its own,
+         never merged into #session-list: those rows are keyed by bare name and
+         carry every local control, and a remote session has none of them.
+         Each card is state only; clicking it opens #/r/<machine>/<name>. -->
+    <section id="shadow-rail" class="hidden" aria-label="Sessions on other daemons">
+      <div class="shadow-rail-head">Remote <span id="shadow-rail-count" class="session-filter-count">0</span></div>
+      <ul id="shadow-list"></ul>
+    </section>
     <!-- The working fleet at once. Each button hides itself when it would act on
          nothing, so what is up is a count of what it would do — the bar is
          empty on an archived-only rail rather than three inactive controls. -->
@@ -1020,6 +1029,24 @@
     </div>
     <div id="msg-view" class="hidden"></div>
     <div id="mesh-view" class="hidden"></div>
+    <!-- One remote-shadow session: its card, its terminal (output only --
+         the host serves no keystroke path, and this xterm has no input
+         handler), and the session line, which the host types as text. -->
+    <div id="shadow-view" class="hidden">
+      <div id="shadow-head"></div>
+      <p id="shadow-status" class="wf-note" role="status"></p>
+      <div id="shadow-term" aria-label="remote terminal, read-only"></div>
+      <form id="shadow-input" autocomplete="off">
+        <textarea id="shadow-input-field" rows="1"
+                  placeholder="type for this session — Enter to send, Ctrl+J for a newline"
+                  title="Enter sends · Ctrl+J inserts a newline · typed on the other daemon as text"
+                  autocomplete="off" spellcheck="false"
+                  aria-label="type text and send it to this remote session"></textarea>
+        <span id="shadow-input-note" class="wf-note wf-warning hidden"></span>
+        <button id="shadow-input-send" class="term-btn" type="submit"
+                title="send this line to the remote session">⏎</button>
+      </form>
+    </div>
     <div id="flow-view" class="hidden"></div>
     <div id="ws-view" class="hidden"></div>
     <!-- The daemon-owned measurement window: active test grants and the

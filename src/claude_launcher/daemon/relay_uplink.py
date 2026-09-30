@@ -57,13 +57,83 @@ class _Stream:
         self.writer = writer
 
 
-class _PeerStream:
-    """An outbound bridged stream (this daemon → relay → peer backend)."""
+#: How many response bytes a live bridge (:meth:`RelayUplink.peer_open`) may
+#: hold that its reader has not taken yet. Past it the bridge is ended rather
+#: than grown: the reader is a viewer that stopped keeping up, and the shadow
+#: terminal it feeds repaints from scratch on its next stream anyway.
+LIVE_BUFFER_MAX = 4 * 1024 * 1024
 
-    def __init__(self, sid: int) -> None:
+
+class _PeerStream:
+    """An outbound bridged stream (this daemon → relay → peer backend).
+
+    Collected whole by default (:meth:`RelayUplink.peer_http`, a response read
+    to EOF). ``live`` hands each chunk to a queue instead, for a response that
+    does not end while someone reads it (:meth:`RelayUplink.peer_open`).
+    """
+
+    def __init__(self, sid: int, *, live: bool = False) -> None:
         self.sid = sid
         self.chunks: list = []
         self.done = asyncio.Event()  # set on EOF/CLOSE (response complete)
+        self.queue: Optional[asyncio.Queue] = asyncio.Queue() if live else None
+        self.queued = 0  # live: bytes in the queue not yet read
+        self.overflowed = False
+
+    def feed(self, data: bytes) -> None:
+        if self.queue is None:
+            self.chunks.append(data)
+            return
+        if self.done.is_set():
+            return
+        self.queued += len(data)
+        if self.queued > LIVE_BUFFER_MAX:
+            self.overflowed = True
+            self.finish()
+            return
+        self.queue.put_nowait(data)
+
+    def finish(self) -> None:
+        if self.done.is_set():
+            return
+        self.done.set()
+        if self.queue is not None:
+            self.queue.put_nowait(None)
+
+
+class PeerBridge:
+    """A live bridge to a peer backend: read the response as it arrives.
+
+    Returned by :meth:`RelayUplink.peer_open`. :meth:`read` answers the next
+    chunk of raw response bytes, or ``None`` once the peer ended the stream
+    (or the reader fell :data:`LIVE_BUFFER_MAX` behind, or the uplink died).
+    :meth:`close` ends it from this side; call it whichever way the reading
+    stopped.
+    """
+
+    def __init__(self, uplink: "RelayUplink", ps: _PeerStream) -> None:
+        self._uplink = uplink
+        self._ps = ps
+        self._closed = False
+
+    @property
+    def overflowed(self) -> bool:
+        return self._ps.overflowed
+
+    async def read(self) -> Optional[bytes]:
+        if self._ps.queue is None:
+            return None
+        chunk = await self._ps.queue.get()
+        if chunk is not None:
+            self._ps.queued -= len(chunk)
+        return chunk
+
+    async def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        self._ps.finish()
+        await self._uplink._end_peer_stream(self._ps.sid)
 
 
 class RelayUplink:
@@ -244,9 +314,9 @@ class RelayUplink:
         peer = self._peer_streams.get(m.sid) if m.sid else None
         if peer is not None and m.kind in (w.STREAM_DATA, w.STREAM_EOF, w.STREAM_CLOSE):
             if m.kind == w.STREAM_DATA:
-                peer.chunks.append(m.data)
+                peer.feed(m.data)
             else:
-                peer.done.set()
+                peer.finish()
             return
         if m.kind == w.STREAM_OPEN:
             await self._open_stream(m.sid)
@@ -371,23 +441,7 @@ class RelayUplink:
         (no CAP_PEERING), the peer is unknown/unreachable, or the bridge
         dies before the response completes.
         """
-        if self._ws is None or not self.connected:
-            raise PeerError("relay uplink is not connected")
-        if not self.peering:
-            raise PeerError(
-                "relay does not allow backend peering "
-                "(enable allow_backend_peering in relay.toml, or upgrade the relay)"
-            )
-        req_id = self._next_req
-        self._next_req = ((self._next_req + 1) & 0xFFFFFFFF) or 1
-        fut: asyncio.Future = asyncio.get_running_loop().create_future()
-        self._peer_waiters[req_id] = fut
-        await self._raw_send(w.peer_open(self._room, req_id, peer))
-        try:
-            sid = await asyncio.wait_for(fut, timeout=CONNECT_TIMEOUT)
-        except asyncio.TimeoutError:
-            self._peer_waiters.pop(req_id, None)
-            raise PeerError(f"PEER_OPEN to {peer!r} timed out") from None
+        sid = await self._peer_handshake(peer)
         ps = _PeerStream(sid)
         self._peer_streams[sid] = ps
         try:
@@ -403,8 +457,56 @@ class RelayUplink:
                 raise PeerError(f"peer {peer!r} closed the bridge without a response")
             return resp
         finally:
-            self._peer_streams.pop(sid, None)
+            await self._end_peer_stream(sid)
+
+    async def peer_open(self, peer: str, request: bytes) -> PeerBridge:
+        """Open a bridge to backend ``peer`` whose response is read live.
+
+        The same PEER_OPEN and request as :meth:`peer_http`, but nothing
+        waits for the response to end: the returned :class:`PeerBridge`
+        hands out its bytes as they arrive, for as long as the peer keeps
+        the stream open and the caller keeps reading. Raises
+        :class:`PeerError` for the same reasons ``peer_http`` does, all of
+        them before any response byte.
+        """
+        sid = await self._peer_handshake(peer)
+        ps = _PeerStream(sid, live=True)
+        self._peer_streams[sid] = ps
+        try:
+            for frame in w.iter_stream_data(self._room, sid, request):
+                await self._raw_send(frame)
+        except BaseException:
+            await self._end_peer_stream(sid)
+            raise
+        return PeerBridge(self, ps)
+
+    async def _peer_handshake(self, peer: str) -> int:
+        """PEER_OPEN to ``peer``; the stream id the relay granted."""
+        if self._ws is None or not self.connected:
+            raise PeerError("relay uplink is not connected")
+        if not self.peering:
+            raise PeerError(
+                "relay does not allow backend peering "
+                "(enable allow_backend_peering in relay.toml, or upgrade the relay)"
+            )
+        req_id = self._next_req
+        self._next_req = ((self._next_req + 1) & 0xFFFFFFFF) or 1
+        fut: asyncio.Future = asyncio.get_running_loop().create_future()
+        self._peer_waiters[req_id] = fut
+        await self._raw_send(w.peer_open(self._room, req_id, peer))
+        try:
+            return await asyncio.wait_for(fut, timeout=CONNECT_TIMEOUT)
+        except asyncio.TimeoutError:
+            self._peer_waiters.pop(req_id, None)
+            raise PeerError(f"PEER_OPEN to {peer!r} timed out") from None
+
+    async def _end_peer_stream(self, sid: int) -> None:
+        """Forget an outbound bridge and tell the relay it is closed."""
+        self._peer_streams.pop(sid, None)
+        try:
             await self._raw_send(w.stream_close(self._room, sid))
+        except Exception:  # noqa: BLE001 — the uplink is going; nothing to tell
+            log.debug("stream %d: close not sent", sid, exc_info=True)
 
     async def peer_list(self, *, timeout: float = 10.0) -> list:
         """Names of the other backends registered on this relay.
@@ -437,7 +539,7 @@ class RelayUplink:
                 fut.set_exception(PeerError("relay uplink disconnected"))
         self._peer_waiters.clear()
         for ps in self._peer_streams.values():
-            ps.done.set()
+            ps.finish()
         self._peer_streams.clear()
 
     async def _keepalive(self) -> None:
@@ -778,6 +880,35 @@ class RelayPool:
                 continue
             self._routes[peer] = up
             return resp
+        raise PeerError(
+            f"peer {peer!r} unreachable on any relay -- " + "; ".join(errors)
+        )
+
+    async def peer_open(self, peer: str, request: bytes) -> PeerBridge:
+        """A live bridge (:meth:`RelayUplink.peer_open`) over whichever relay
+        carries ``peer``. Only the opening is retried across relays: once
+        bytes flow, the bridge is bound to the relay it opened on."""
+        candidates = self._live("peering")
+        if not candidates:
+            raise PeerError(self._why_no_peering("peering"))
+        order = self._order_for(peer, candidates)
+        if len(order) > 1:
+            try:
+                await self.peer_list()
+            except PeerError:
+                pass
+            order = self._order_for(peer, candidates)
+        errors = []
+        for up in order:
+            try:
+                bridge = await up.peer_open(peer, request)
+            except PeerError as exc:
+                errors.append(f"{up.id}: {exc}")
+                if self._routes.get(peer) is up:
+                    del self._routes[peer]
+                continue
+            self._routes[peer] = up
+            return bridge
         raise PeerError(
             f"peer {peer!r} unreachable on any relay -- " + "; ".join(errors)
         )

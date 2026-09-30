@@ -26,3 +26,13 @@ Thumbs.db
 
 # bv (beads viewer) local config and caches
 .bv/
+
+# Per-machine MCP entry: cmd /c on Windows, plain `claunch mcp` elsewhere.
+# `claunch install` writes it (install.mcp_server_def); a tracked copy is
+# wrong on one of the two OSes (claunch-393jv).
+/.mcp.json
+
+# Launcher worktrees (worktree.WORKTREES_SUBDIR). Each holds a `.git` file, so
+# git lists the directory as untracked and daemon/runtime_state counts it as
+# code in no commit -- tools/deploy_check.py then exits 3 (claunch-6pcyo).
+/.claude/worktrees/

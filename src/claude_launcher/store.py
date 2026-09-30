@@ -508,6 +508,12 @@ DAEMON_DEFAULTS = {
         "stun:global.stun.twilio.com:3478",
     ],
     "p2p_predict": 16,
+    # Whether a linked peer daemon's operator may type the session line into
+    # this daemon's mesh members from their remote-shadow view
+    # (daemon/shadow.py). Viewing -- the card and the output-only terminal --
+    # is not switchable: it is what sharing a mesh with that daemon means.
+    # Read LIVE on every request.
+    "shadow_input": True,
 }
 
 

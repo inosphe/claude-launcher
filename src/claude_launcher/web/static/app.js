@@ -11980,7 +11980,9 @@ async function loadHostClipboard() {
     if (!response.ok) throw new Error(doc.error || "Clipboard could not be loaded");
     const box = $("term-clipboard-items");
     box.replaceChildren();
-    status.textContent = doc.error || (doc.items.length ? "Select Paste to insert text." : "No text history yet.");
+    status.textContent = doc.error || (doc.items.length
+      ? "Paste inserts into the session line · Copy puts it on this computer's clipboard."
+      : "No text history yet.");
     for (const item of doc.items) {
       const row = el("div", "clipboard-entry");
       row.appendChild(el("time", "", new Date(item.copied_at).toLocaleString()));
@@ -11994,15 +11996,60 @@ async function loadHostClipboard() {
         }
         if (insertPromptPreset(item.text)) closeHostClipboard();
       });
+      const copy = el("button", "term-btn", "Copy");
+      copy.type = "button";
+      copy.title = "Copy to the clipboard of the computer this browser runs on";
+      copy.addEventListener("click", async () => {
+        status.textContent = await copyToBrowserClipboard(item.text, row)
+          ? "Copied to this computer's clipboard."
+          : "This browser would not allow the copy — select the text and copy it by hand.";
+      });
       const remove = el("button", "term-btn", "Delete");
       remove.type = "button";
       remove.addEventListener("click", () => deleteHostClipboard(item.id));
       row.appendChild(paste);
+      row.appendChild(copy);
       row.appendChild(remove);
       box.appendChild(row);
     }
   } catch (error) {
     if (request === hostClipboardRequest) status.textContent = error.message;
+  }
+}
+
+/* Puts text on the clipboard of the machine the browser runs on — the other
+   direction from the history above, which is the daemon's machine.
+   navigator.clipboard exists only in a secure context (https or localhost),
+   and the dashboard is often reached over plain http from another machine,
+   so a selected off-screen textarea and execCommand("copy") stand in. The
+   textarea goes inside the menu so the focus it takes does not land
+   outside it. Resolves to whether either route reported success. */
+async function copyToBrowserClipboard(text, host) {
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text);
+      return true;
+    }
+  } catch {
+    // denied or not focused: the fallback below may still be allowed
+  }
+  const before = document.activeElement;
+  const area = document.createElement("textarea");
+  area.value = text;
+  area.readOnly = true;
+  area.setAttribute("aria-hidden", "true");
+  area.style.position = "fixed";
+  area.style.left = "-9999px";
+  host.appendChild(area);
+  try {
+    area.select();
+    area.setSelectionRange(0, text.length);
+    return document.execCommand("copy");
+  } catch {
+    return false;
+  } finally {
+    area.remove();
+    before?.focus?.();
   }
 }
 
@@ -14802,6 +14849,7 @@ function mobileTitle() {
     case "log": return `transcript · ${transcriptName || ""}`;
     case "msg": return `messages · ${traceSession}`;
     case "session": return `session · ${sessName}`;
+    case "shadow": return `remote · ${shadowOpen ? shadowKey(shadowOpen.machine, shadowOpen.name) : ""}`;
     default: return currentName || "no session";
   }
 }
@@ -14953,6 +15001,10 @@ const VIEWS = {
   mesh: "mesh-view",
   flow: "flow-view",
   settings: "ws-view",
+  // Another daemon's mesh member, looked at from here (#/r/<machine>/<name>).
+  // A page of its own, never the terminal page: that one is the local
+  // session's, keyed by bare name, with every control a local session has.
+  shadow: "shadow-view",
 };
 
 /* The page on screen. Read by the layout and the mobile bars; written only
@@ -15452,6 +15504,11 @@ function parseHash(h) {
   // beside that (see openDetail), not a place you can be — so an old
   // /info link lands on the session rather than on nothing.
   if (parts[0] === "s" && parts[1]) return { page: "terminal", name: parts[1] };
+  // A remote shadow is addressed by its daemon AND its name: the same name
+  // on two daemons is two sessions, and neither is the local one.
+  if (parts[0] === "r" && parts[1] && parts[2]) {
+    return { page: "shadow", machine: parts[1], name: parts[2] };
+  }
   if (parts[0] === "wf" && parts[1]) {
     // The scope is glued to the cwd with '|' because a Windows path is full
     // of the separators a path segment would otherwise be split on.
@@ -15573,6 +15630,8 @@ function route() {
   if (r.page !== "beads") { stopBeadsPoll(); stopReportsPoll(); }
   if (r.page !== "worktrees") globalThis.WorktreesPage?.stop();
   if (r.page !== "log") closeTranscript();
+  // Guarded like syncRouteProject: reduced harnesses slice route() alone.
+  if (r.page !== "shadow" && typeof closeShadow === "function") closeShadow();
 
   switch (r.page) {
     case "terminal":
@@ -15593,6 +15652,7 @@ function route() {
       } else attach(r.name);
       break;
     case "session": showView("session"); break;
+    case "shadow": openShadow(r.machine, r.name); break;
     case "observer": showView("observer"); globalThis.ObserverPage.open(r.scope, r.name); break;
     case "operator": showView("operator"); globalThis.OperatorPanel.open(); break;
     case "wf": openWorkflow(r.cwd, r.scope); break;
@@ -22663,7 +22723,11 @@ function beadsBoardsCard() {
     "One board per workspace: a session opened there, and every issue filed " +
     "for it, reads that workspace's own database. The field names the .db " +
     "file itself — the database is created on first use if it is not there " +
-    "yet, or now with Create. '" + beadsDefaultBoardName + "' is the board " +
+    "yet, or now with Create, which also writes the policy.yaml and " +
+    ".gitignore lines br 0.7 needs beside it (the same as 'claunch beads " +
+    "init --workspace <name>'). A board made before those shows Set up, " +
+    "which adds them and leaves its database as it is. '" +
+    beadsDefaultBoardName + "' is the board " +
     "the daemon was already using: it holds everything filed before " +
     "workspaces had boards of their own, and a directory inside its " +
     "checkout that no workspace claims files there. A directory outside " +
@@ -22709,6 +22773,19 @@ function beadsBoardSettingsRow(b) {
     const missing = el("span", "badge exited", "no database yet");
     missing.title = "made the first time anything reads or writes this board";
     head.appendChild(missing);
+  }
+  const setup = b.setup || null;
+  if (b.exists && setup && setup.policy === "unreadable") {
+    const bad = el("span", "badge exited", "policy.yaml unreadable");
+    bad.title = "br refuses a .beads/policy.yaml it cannot read, and claunch " +
+      "will not rewrite someone's file — fix it by hand";
+    head.appendChild(bad);
+  }
+  const lacking = beadsBoardSetupMissing(b);
+  if (b.exists && lacking.length) {
+    const partial = el("span", "badge busy", "not set up for br 0.7");
+    partial.title = "missing: " + lacking.join("; ");
+    head.appendChild(partial);
   }
   if (b.path_exists === false) {
     head.appendChild(el("span", "badge exited", "directory missing"));
@@ -22768,10 +22845,15 @@ function beadsBoardSettingsRow(b) {
     controls.appendChild(reset);
   }
 
-  if (!b.exists) {
-    const make = el("button", "wf-btn clear", "Create");
+  // One route behind both labels: it makes only what is missing, so on a
+  // board that exists it never touches the database.
+  if (!b.exists || lacking.length) {
+    const make = el("button", "wf-btn clear", b.exists ? "Set up" : "Create");
     make.type = "button";
-    make.title = `br init --prefix ${b.board} against ${b.db}`;
+    make.title = b.exists
+      ? `adds ${lacking.join(" and ")} — the database is not touched`
+      : `br init --prefix ${b.board} against ${b.db}, then policy.yaml and ` +
+        ".gitignore (claunch beads init --workspace " + b.board + ")";
     make.disabled = beadsBoardsBusy === b.board;
     make.addEventListener("click", () => beadsBoardInit(b));
     controls.appendChild(make);
@@ -22851,6 +22933,32 @@ async function beadsBoardReset(b) {
   renderWorkspaces();
 }
 
+/* What a board that has a database still lacks for br 0.7, as the parts
+   the Set up button would add. Empty when the row carries no setup state
+   (an older daemon) or nothing is missing; an unreadable policy.yaml is not
+   listed, since the button leaves that file alone. */
+function beadsBoardSetupMissing(b) {
+  const setup = b.setup;
+  if (!setup || setup.complete) return [];
+  const out = [];
+  if (setup.policy === "missing") out.push("policy.yaml declaring in_ready, in_review");
+  if (!setup.gitignore) out.push(".gitignore lines for br 0.7's files");
+  return out;
+}
+
+/* The line the card shows after Create / Set up: what the daemon made now,
+   from the answer's created / imported / policy / gitignore. */
+function beadsBoardInitNotice(b, doc) {
+  const db = (doc.board || {}).db || b.db;
+  const made = [];
+  if (doc.imported) made.push(`database rebuilt from issues.jsonl at ${db}`);
+  else if (doc.created) made.push(`database created at ${db}`);
+  if (doc.policy) made.push("policy.yaml written");
+  if (doc.gitignore) made.push(".gitignore lines added");
+  if (!made.length) return `${b.board} was already set up — nothing changed.`;
+  return `${b.board}: ${made.join(", ")}.`;
+}
+
 async function beadsBoardInit(b) {
   const doc = await beadsBoardWrite(b.board, () =>
     api(`/api/beads/settings/${encodeURIComponent(b.board)}/init`, {
@@ -22859,9 +22967,7 @@ async function beadsBoardInit(b) {
       body: "{}",
     }));
   if (!doc) return;
-  beadsBoardsNotice = doc.created
-    ? `${b.board}: board created at ${(doc.board || {}).db || b.db}.`
-    : `${b.board} already had a database at ${(doc.board || {}).db || b.db}.`;
+  beadsBoardsNotice = beadsBoardInitNotice(b, doc);
   renderWorkspaces();
 }
 
@@ -31181,6 +31287,26 @@ function meshMemberFilterBar(members, given) {
   return bar;
 }
 
+/* Where a roster row's session name leads. A member this daemon runs opens
+   its terminal; another daemon's member opens its read-only shadow, never
+   #/s/ -- that address is the LOCAL session of the same name, if there is
+   one. The server's `local` decides where it has one: the page's own guess
+   (isLocal) reads the relay name, which is blank on a daemon with no relay,
+   and a row this daemon runs must never be addressed as some other
+   daemon's. A row without the field keeps the guess for its terminal link
+   and gets no shadow link. */
+function meshRosterLink(m, isLocal, machineLabel) {
+  if (typeof m.local === "boolean" ? m.local : isLocal) {
+    return { hash: "#/s/" + encodeURIComponent(m.session),
+             title: "attach this session's terminal" };
+  }
+  if (machineLabel && m.local === false) {
+    return { hash: shadowHash(machineLabel, m.session),
+             title: "view this remote session (read-only)" };
+  }
+  return null;
+}
+
 function renderMesh(info, history, force, owed, historyPage) {
   const view = $("mesh-view");
   if (!force && formInUse(view)) return; // don't wipe in-progress input
@@ -31290,12 +31416,11 @@ function renderMesh(info, history, force, owed, historyPage) {
       "span", "mesh-session mono",
       (machineLabel ? machineLabel + "/" : "") + m.session
     );
-    if (isLocalMember(m)) {
+    const link = meshRosterLink(m, isLocalMember(m), machineLabel);
+    if (link) {
       where.classList.add("linkish");
-      where.title = "attach this session's terminal";
-      where.addEventListener("click", () => {
-        location.hash = "#/s/" + encodeURIComponent(m.session);
-      });
+      where.title = link.title;
+      where.addEventListener("click", () => { location.hash = link.hash; });
     }
     // 'pending' is mail the daemon has not managed to deliver; 'owed' is mail
     // it delivered that the agent never answered. Different faults, so the
@@ -34231,6 +34356,332 @@ async function pollTick() {
   try { await pollOnce(); } finally { polling = false; }
 }
 
+/* ------------------------------------------------------------------ */
+/* remote-shadow sessions                                               */
+/* ------------------------------------------------------------------ */
+/* Another daemon's members of a mesh this daemon holds (daemon/shadow.py).
+   Kept apart from local sessions on purpose, and all the way down: every
+   local cache and route here is keyed by the bare session name, so a remote
+   `s1` let into sessionsCache would be the local `s1` to the kill button,
+   the rail keys, the tabs and the grid. So: its own list (`shadowRows`), its
+   own rail section, its own address (#/r/<machine>/<name>), its own
+   terminal, and a card with no buttons. What a shadow can be asked for is
+   exactly what its host daemon serves: the card, an output-only terminal,
+   and the session line. */
+const SHADOW_POLL_MS = 5000;
+let shadowRows = [];
+let shadowPolledAt = 0;
+let shadowSig = "";
+
+function shadowKey(machine, name) {
+  return `${machine}/${name}`;
+}
+
+function shadowHash(machine, name) {
+  return `#/r/${encodeURIComponent(machine)}/${encodeURIComponent(name)}`;
+}
+
+function shadowRow(machine, name) {
+  return shadowRows.find((r) => r.machine === machine && r.session === name) || null;
+}
+
+async function refreshShadows(force) {
+  const now = Date.now();
+  if (!force && now - shadowPolledAt < SHADOW_POLL_MS) return;
+  shadowPolledAt = now;
+  let doc;
+  try {
+    const resp = await api("/api/shadows");
+    if (!resp.ok) return;
+    doc = await resp.json();
+  } catch {
+    return;
+  }
+  shadowRows = Array.isArray(doc.shadows) ? doc.shadows : [];
+  const sig = JSON.stringify(shadowRows);
+  if (sig === shadowSig) return;
+  shadowSig = sig;
+  renderShadowRail();
+  if (currentPage === "shadow") renderShadowHead();
+}
+
+/* The dot's word: the host's status when it answered, "unknown" when it
+   did not (an unreachable host is not a dead session). */
+function shadowStatus(row) {
+  const card = row && row.card;
+  if (!card) return "unknown";
+  if (card.exited) return "exited";
+  return card.status || "unknown";
+}
+
+/* Positions a person has to press something for, as the local rail reads
+   them (sessCflowGated): the card turns amber the same way. */
+function shadowCflowGated(flow) {
+  if (!flow) return false;
+  return ["waiting_approval", "waiting_selection", "waiting_goto"].includes(flow.status)
+    || (flow.status === "select" && flow.chooser === "user");
+}
+
+function shadowCflowText(flow) {
+  if (!flow) return "";
+  const parts = [flow.workflow, flow.step_id || flow.title, flow.status].filter(Boolean);
+  if (flow.visit && flow.visit > 1) parts.push(`visit ${flow.visit}`);
+  return "⇶ " + parts.join(" · ");
+}
+
+/* One remote session's card: state only. Nothing on it is a control -- the
+   whole card is a link to the shadow view, and that is all it does. */
+function renderShadowCard(row, opts) {
+  opts = opts || {};
+  const card = row.card || {};
+  const meshes = Array.isArray(row.meshes) ? row.meshes : [];
+  const first = meshes[0] || {};
+  const node = el(opts.full ? "div" : "li", "shadow-card");
+  node.dataset.machine = row.machine;
+  node.dataset.session = row.session;
+  const head = el("div", "shadow-card-head");
+  const status = shadowStatus(row);
+  const dot = el("span", `shadow-dot shadow-dot-${status.replace(/[^a-z_-]/gi, "")}`);
+  dot.title = status;
+  head.append(dot, el("span", "shadow-name", row.session),
+    el("span", "shadow-machine", "@" + row.machine));
+  const handle = card.handle || first.handle;
+  if (handle && handle !== row.session) head.appendChild(el("span", "shadow-handle", handle));
+  const role = card.role || first.role;
+  if (role) head.appendChild(el("span", "shadow-role", role));
+  node.appendChild(head);
+  if (card.note) node.appendChild(el("div", "shadow-line shadow-note", card.note));
+  const brief = card.briefing || null;
+  const briefText = brief && (brief.one_line || brief.now || brief.goal);
+  if (briefText) node.appendChild(el("div", "shadow-line shadow-brief", briefText));
+  if (opts.full && brief) {
+    for (const key of ["goal", "now", "progress"]) {
+      if (brief[key] && brief[key] !== briefText) {
+        node.appendChild(el("div", "shadow-line shadow-brief-" + key, `${key}: ${brief[key]}`));
+      }
+    }
+  }
+  if (card.cflow) {
+    const flow = el("div", "shadow-line shadow-cflow", shadowCflowText(card.cflow));
+    if (shadowCflowGated(card.cflow)) flow.classList.add("gated");
+    node.appendChild(flow);
+  }
+  if (opts.full && meshes.length) {
+    node.appendChild(el("div", "shadow-line shadow-meshes",
+      "mesh: " + meshes.map((m) => `${m.mesh} as ${m.handle}`).join(", ")));
+  }
+  if (row.error) node.appendChild(el("div", "shadow-line shadow-error", row.error));
+  if (!opts.full) {
+    node.tabIndex = 0;
+    node.setAttribute("role", "link");
+    node.title = `${shadowKey(row.machine, row.session)} — another daemon's session, read-only`;
+    const open = () => { location.hash = shadowHash(row.machine, row.session); };
+    node.addEventListener("click", open);
+    node.addEventListener("keydown", (ev) => {
+      if (ev.key === "Enter") { ev.preventDefault(); open(); }
+    });
+    if (currentPage === "shadow" && shadowOpen &&
+        shadowOpen.machine === row.machine && shadowOpen.name === row.session) {
+      node.classList.add("active");
+    }
+  }
+  return node;
+}
+
+/* The rail's Remote section: one group per daemon, below the local list. */
+function renderShadowRail() {
+  const box = $("shadow-rail");
+  const list = $("shadow-list");
+  if (!box || !list) return;
+  list.replaceChildren();
+  box.classList.toggle("hidden", !shadowRows.length);
+  const count = $("shadow-rail-count");
+  if (count) count.textContent = String(shadowRows.length);
+  const machines = [...new Set(shadowRows.map((r) => r.machine))].sort();
+  for (const machine of machines) {
+    const group = el("li", "shadow-group");
+    group.appendChild(el("div", "shadow-group-head", machine));
+    const inner = el("ul", "shadow-group-list");
+    for (const row of shadowRows.filter((r) => r.machine === machine)) {
+      inner.appendChild(renderShadowCard(row));
+    }
+    group.appendChild(inner);
+    list.appendChild(group);
+  }
+}
+
+/* ---- the shadow view (#/r/<machine>/<name>) ---- */
+let shadowOpen = null;      // {machine, name}
+let shadowTerm = null;
+let shadowSock = null;
+let shadowTicket = 0;
+let shadowRetry = null;
+
+function renderShadowHead() {
+  const head = $("shadow-head");
+  if (!head || !shadowOpen) return;
+  const row = shadowRow(shadowOpen.machine, shadowOpen.name)
+    || { machine: shadowOpen.machine, session: shadowOpen.name, meshes: [], card: null,
+         error: shadowRows.length ? "not a member of any mesh on this daemon" : null };
+  head.replaceChildren(renderShadowCard(row, { full: true }));
+}
+
+function setShadowStatus(text, warn) {
+  const note = $("shadow-status");
+  if (!note) return;
+  note.textContent = text || "";
+  note.classList.toggle("wf-warning", !!warn);
+}
+
+function openShadow(machine, name) {
+  showView("shadow");
+  const same = shadowOpen && shadowOpen.machine === machine && shadowOpen.name === name;
+  if (same && shadowSock) { renderShadowHead(); return; }
+  closeShadow();
+  shadowOpen = { machine, name };
+  renderShadowHead();
+  renderShadowRail();
+  refreshShadows(true);
+  const host = $("shadow-term");
+  host.replaceChildren();
+  // No onData handler is ever attached, and stdin is off: nothing typed at
+  // this terminal goes anywhere. The session line below is the one way in.
+  shadowTerm = new Terminal({ scrollback: 2000, disableStdin: true, cursorBlink: false });
+  shadowTerm.open(host);
+  connectShadow();
+}
+
+function connectShadow() {
+  if (!shadowOpen) return;
+  const ticket = ++shadowTicket;
+  const { machine, name } = shadowOpen;
+  const proto = location.protocol === "https:" ? "wss" : "ws";
+  const sock = new WebSocket(`${proto}://${location.host}` + url(
+    `/api/shadows/${encodeURIComponent(machine)}/${encodeURIComponent(name)}/ws`
+  ));
+  sock.binaryType = "arraybuffer";
+  shadowSock = sock;
+  setShadowStatus("connecting…");
+  let refused = false;
+  sock.onmessage = (ev) => {
+    if (ticket !== shadowTicket || !shadowTerm) return;
+    if (typeof ev.data !== "string") {
+      shadowTerm.write(new Uint8Array(ev.data));
+      return;
+    }
+    let frame;
+    try { frame = JSON.parse(ev.data); } catch { return; }
+    refused = shadowFrame(frame) || refused;
+  };
+  sock.onclose = () => {
+    if (ticket !== shadowTicket) return;
+    shadowSock = null;
+    if (!shadowOpen || refused) return;
+    setShadowStatus("stream closed — reconnecting…", true);
+    shadowRetry = setTimeout(() => { shadowRetry = null; connectShadow(); }, 3000);
+  };
+}
+
+/* One control frame from the host; true when it refused the stream (no
+   reconnect: asking again gets the same answer). */
+function shadowFrame(frame) {
+  switch (frame.type) {
+    case "init":
+      if (frame.cols && frame.rows) shadowTerm.resize(frame.cols, frame.rows);
+      shadowTerm.reset();
+      setShadowStatus(frame.exited ? "the session has exited — final screen" : "live · read-only");
+      return false;
+    case "resize":
+      if (frame.cols && frame.rows) shadowTerm.resize(frame.cols, frame.rows);
+      return false;
+    case "exit":
+      setShadowStatus("the session exited", true);
+      return false;
+    case "shutdown":
+      setShadowStatus("the host daemon is shutting down", true);
+      return false;
+    case "shadow_error":
+      setShadowStatus(frame.error || "the host refused the stream", true);
+      return true;
+    case "shadow_ended":
+      setShadowStatus(frame.overflowed
+        ? "this page fell behind the stream — reconnecting…"
+        : "stream ended — reconnecting…", true);
+      return false;
+    default:
+      return false;
+  }
+}
+
+function closeShadow() {
+  shadowTicket++;
+  if (shadowRetry) { clearTimeout(shadowRetry); shadowRetry = null; }
+  if (shadowSock) { try { shadowSock.close(); } catch {} shadowSock = null; }
+  if (shadowTerm) { try { shadowTerm.dispose(); } catch {} shadowTerm = null; }
+  shadowOpen = null;
+}
+
+/* The session line, typed into the remote session through its host. Text
+   only -- the host refuses anything else -- and never forced over a person
+   typing there: a busy keyboard comes back as an error to retry. */
+async function sendShadowLine() {
+  const field = $("shadow-input-field");
+  const note = $("shadow-input-note");
+  const text = field.value.trim();
+  if (!text || !shadowOpen) return false;
+  const { machine, name } = shadowOpen;
+  note.classList.add("hidden");
+  field.disabled = true;
+  try {
+    const inputId = `shadow-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    const resp = await api(
+      `/api/shadows/${encodeURIComponent(machine)}/${encodeURIComponent(name)}/line`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text, input_id: inputId }),
+      }
+    );
+    if (!resp.ok) {
+      const doc = await resp.json().catch(() => ({}));
+      note.textContent = doc.error || `HTTP ${resp.status}`;
+      note.classList.remove("hidden");
+      return false;
+    }
+    field.value = "";
+    return true;
+  } catch (err) {
+    note.textContent = String(err && err.message || err);
+    note.classList.remove("hidden");
+    return false;
+  } finally {
+    field.disabled = false;
+    field.focus();
+  }
+}
+
+function onShadowInputKeydown(ev) {
+  if (ev.isComposing) return;
+  if (ev.key === "Enter" && ev.ctrlKey) {
+    ev.preventDefault();
+    const f = ev.target;
+    const at = f.selectionStart;
+    f.value = f.value.slice(0, at) + "\n" + f.value.slice(f.selectionEnd);
+    f.selectionStart = f.selectionEnd = at + 1;
+    return;
+  }
+  if (ev.key === "Enter" && !ev.shiftKey && !ev.altKey && !ev.metaKey) {
+    ev.preventDefault();
+    sendShadowLine();
+  }
+}
+
+if (typeof document !== "undefined" && $("shadow-input")) {
+  $("shadow-input").addEventListener("submit", (ev) => { ev.preventDefault(); sendShadowLine(); });
+  $("shadow-input-field").addEventListener("keydown", onShadowInputKeydown);
+}
+
+
 async function pollOnce() {
   const health = await daemonHealth();
   if (!health) { setDaemonOnline(false); return; }
@@ -34294,6 +34745,8 @@ async function pollOnce() {
   refreshes.push(refreshWorkspaces());
   refreshes.push(refreshProjects());
   refreshes.push(refreshNewWorktree());
+  // Other daemons' mesh members: a list of its own, at its own pace.
+  refreshes.push(refreshShadows());
   // The restart gate can be opened from any session's terminal, so the card
   // is fed by the same heartbeat as the registry — and the goto gate beside
   // it: a leader files from its own terminal, the person answers here.

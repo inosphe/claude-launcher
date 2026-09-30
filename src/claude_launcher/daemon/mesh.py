@@ -115,6 +115,12 @@ INTENT_TYPES = frozenset({"say", "ask", "decide"}) | REPLY_OPTIONAL_TYPES
 #: to whatever it is about. The mesh stores and relays it verbatim: knowing its
 #: shape would mean the mesh learning every schema that ever rides on it.
 REF_KEY = "ref"
+#: Key under ``ref`` that marks an urgent one-shot send and carries its record.
+URGENT_REF_KEY = "urgent"
+URGENT_MIN_REASON = 12
+URGENT_PER_SENDER = 3
+URGENT_SENDER_WINDOW = 3600.0
+URGENT_PAIR_GAP = 600.0
 
 
 def expects_reply(message_type) -> bool:
@@ -553,7 +559,15 @@ class PeerUnreachable(MeshError):
     Distinct from an application-level rejection: an unreachable primary means
     a send may be queued durably, while a rejection (bad handle, bad token)
     must surface immediately and never queue.
+
+    ``status`` is the HTTP status when the peer did answer, but with a body
+    that is not JSON — an older daemon's plain 404 for a route it does not
+    have yet — and None for every failure below HTTP.
     """
+
+    def __init__(self, message: str = "", *, status: Optional[int] = None):
+        super().__init__(message)
+        self.status = status
 
 
 class Member:
@@ -1381,6 +1395,9 @@ class MeshManager:
         # None = the daemon's global mesh directory.
         self._root = root
         self._meshes: Dict[str, Mesh] = {}
+        #: urgent-send rate limits (monotonic stamps); a daemon restart resets them.
+        self._urgent_sent: Dict[str, List[float]] = {}
+        self._urgent_pair: Dict[Tuple[str, str], float] = {}
         self._workers: Dict[str, asyncio.Task] = {}
         #: Sessions whose join briefing the onboarding path is folding into a
         #: single opening block. Held only for the length of one join call.
@@ -1395,6 +1412,10 @@ class MeshManager:
         #: async (machine, path, body) -> dict; raises PeerUnreachable on
         #: transport failure, MeshError on an application-level rejection.
         self.peer_transport: Optional[Callable] = None
+        #: async (machine, path, body) -> PeerBridge: the same authenticated
+        #: request with a response read live (the shadow terminal,
+        #: daemon/shadow.py); raises PeerUnreachable like peer_transport.
+        self.peer_streamer: Optional[Callable] = None
         self.relay_connected: Callable[[], bool] = lambda: False
         #: async () -> [machine names] — the other backends on our relay
         #: (RelayUplink.peer_list); None when no uplink or an old relay.
@@ -2692,28 +2713,50 @@ class MeshManager:
         log.info("mesh %r: detached from %r", name, primary)
         return {"mesh": name, "primary": primary, "notified": told}
 
-    def peer_offer_accept(
+    async def peer_offer_accept(
         self, name: str, machine: str, token: str, *,
         cancel: bool = False, project: str = "", members: int = 0,
     ) -> dict:
         """An owner offers (or withdraws) one of its meshes to this daemon.
 
-        The offer arrives over the relay addressed to *our* registered name,
-        so only this daemon can hold the token; the claimed sender is not
-        verified, but a forged offer carries a token its named owner will
-        refuse, so it costs one refused attach and nothing more.
+        Nothing on the relay says who sent it: the target of a bridged
+        stream is told only a stream id, and a browser logged in to the
+        relay reaches ``/peer/*`` as well as a daemon does. So the claimed
+        owner is asked — over the relay, which routes by *registered* name,
+        so the daemon that answers is the one holding that name — whether
+        the token is one it offered this daemon (:meth:`_offer_check`). An
+        offer is stored only when it says yes. A withdrawal drops the row
+        when it carries the stored token, or when the owner no longer
+        reports that token live; otherwise it is refused and the row kept.
         """
         if not _NAME_RE.match(name or "") or not _NAME_RE.match(machine or ""):
             raise MeshError("invalid mesh offer")
+        if self._is_me(machine):
+            raise MeshError("a daemon does not offer its meshes to itself")
         key = f"{name}@{machine}"
         if cancel:
-            self._offers.pop(key, None)
-            self._persist_offers()
+            held = self._offers.get(key)
+            if held is None:
+                return {"ok": True, "cancelled": True}
+            stored = str(held.get("token") or "")
+            if not (token and secrets.compare_digest(
+                str(token).encode("utf-8"), stored.encode("utf-8"),
+            )) and await self._offer_check(name, machine, stored) is True:
+                raise MeshError(
+                    f"{machine!r} reports its offer of mesh {name!r} as "
+                    "still live — withdrawal refused"
+                )
+            self._drop_offer(name, machine)
             return {"ok": True, "cancelled": True}
         if not token:
             raise MeshError("mesh offer carries no token")
         if self._find(key) is not None:
             return {"ok": True, "attached": True}
+        if await self._offer_check(name, machine, token) is False:
+            raise MeshError(
+                f"{machine!r} does not confirm an offer of mesh {name!r} "
+                "to this daemon — not stored"
+            )
         try:
             count = int(members)
         except (TypeError, ValueError):
@@ -2729,6 +2772,62 @@ class MeshManager:
         self._persist_offers()
         log.info("mesh %r: offered to this daemon by %r", name, machine)
         return {"ok": True}
+
+    async def _offer_check(
+        self, name: str, machine: str, token: str,
+    ) -> Optional[bool]:
+        """Ask ``machine`` whether ``token`` is a live offer of its mesh
+        ``name`` to this daemon (``/peer/mesh/offer/check``).
+
+        True or False is the owner's answer. None means the owner predates
+        the check — it answers the route with a plain 404 — and the caller
+        then does what it did before there was one; that is logged, since
+        the offer went unverified. Anything else that stops the question
+        from being asked raises :class:`MeshError`: an offer nobody could
+        confirm is not stored.
+        """
+        if self.peer_transport is None:
+            raise MeshError(
+                "relay uplink is not running — cannot confirm the offer "
+                "with its owner"
+            )
+        body = {"mesh": name, "machine": self._require_machine(),
+                "token": token}
+        try:
+            resp = await self.peer_transport(
+                machine, "/peer/mesh/offer/check", body,
+            )
+        except PeerUnreachable as exc:
+            if exc.status == 404:
+                log.warning(
+                    "mesh %r: %r cannot confirm offers (no "
+                    "/peer/mesh/offer/check) — taken unverified",
+                    name, machine,
+                )
+                return None
+            raise MeshError(
+                f"cannot confirm the offer of mesh {name!r} with "
+                f"{machine!r}: {exc}"
+            ) from None
+        return (resp or {}).get("live") is True
+
+    def peer_offer_check(self, name: str, machine: str, token: str) -> dict:
+        """``/peer/mesh/offer/check``: is ``token`` a live offer of this
+        daemon's mesh ``name`` to ``machine``?
+
+        Asked by the daemon an offer or a withdrawal names as its target,
+        before it acts on one (:meth:`peer_offer_accept`). Unauthenticated
+        like the offer itself: the caller must already hold the token, and
+        the answer says only whether it is still good. An unknown mesh, a
+        mirror, or a malformed request answers ``live: false`` rather than
+        an error, so the route does not tell a caller which meshes exist.
+        """
+        live = bool(token) and _NAME_RE.match(machine or "") is not None and any(
+            self._offer_matches(mesh, machine, token)
+            for mesh in self._meshes.values()
+            if mesh.wire_name == name and not mesh.primary
+        )
+        return {"live": live}
 
     def offers_received(self) -> List[dict]:
         """Offers pushed to this daemon, without their tokens."""
@@ -2764,6 +2863,12 @@ class MeshManager:
         Only meshes this daemon is the authority of — never a mirror, never
         an offer received from elsewhere — so discovery reaches exactly one
         relay hop and a mesh is listed only by the daemon that owns it.
+
+        Unauthenticated by design: every daemon on the relay asks it, and so
+        can any browser logged in to the relay (``/t/<name>/peer/meshes``),
+        since the relay does not tell a backend who opened a stream. That is
+        why a row is what ``public`` already publishes — name, project and
+        counts — and never a token, a link or a member's identity.
         """
         return [
             {
@@ -3322,6 +3427,202 @@ class MeshManager:
             prior = result.get("notice")
             result = {**result, "notice": f"{prior} {note}" if prior else note}
         return result
+
+    # ------------------------------------------------------------------ #
+    # urgent one-shot send
+    # ------------------------------------------------------------------ #
+    def _urgent_target(
+        self, home: Mesh, to: str, target_mesh: str
+    ) -> Tuple[Mesh, Member]:
+        """Which member of which mesh ``to`` names, on THIS daemon.
+
+        ``to`` is a handle in the sender's own mesh, or a session name in any
+        mesh here. A member whose session lives on another machine, or whose
+        mesh this daemon only mirrors, is refused by name: the urgent path
+        types into a terminal this daemon owns and appends to a log this
+        daemon is the authority for, and it has neither for those.
+        """
+        meshes = [self.get(target_mesh)] if target_mesh else list(self._meshes.values())
+        hits: List[Tuple[Mesh, Member]] = []
+        elsewhere: List[str] = []
+        for mesh in meshes:
+            for member in mesh.members.values():
+                if not (member.session == to or (mesh is home and member.handle == to)):
+                    continue
+                if mesh.primary or not self._is_local(mesh, member):
+                    elsewhere.append(f"{member.handle} in {mesh.name}")
+                else:
+                    hits.append((mesh, member))
+        if not hits:
+            if elsewhere:
+                raise MeshError(
+                    f"{to!r} lives on another machine ({', '.join(elsewhere)}): "
+                    "an urgent send is delivered on this daemon only, with no "
+                    "relay hop — ask the operator to reach it"
+                )
+            raise MeshError(
+                f"no member named {to!r} in any mesh on this daemon (a handle "
+                f"in {home.name!r}, or a session name)"
+            )
+        own = [h for h in hits if h[0] is home]
+        if len(own) == 1:
+            return own[0]
+        if len(hits) > 1:
+            raise MeshError(
+                f"{to!r} is a member of {len(hits)} meshes here "
+                f"({', '.join(sorted(m.name for m, _ in hits))}) — name one "
+                "with target_mesh"
+            )
+        return hits[0]
+
+    def _urgent_rate_check(self, sender: str, to_key: str) -> None:
+        """3 sends per sender per hour, 1 per sender/target pair per 10 min."""
+        now = time.monotonic()
+        recent = [t for t in self._urgent_sent.get(sender, []) if now - t < URGENT_SENDER_WINDOW]
+        self._urgent_sent[sender] = recent
+        if len(recent) >= URGENT_PER_SENDER:
+            wait = int(URGENT_SENDER_WINDOW - (now - recent[0]))
+            raise MeshError(
+                f"urgent send limit: {URGENT_PER_SENDER} per hour per sender "
+                f"already used — next one allowed in {wait}s"
+            )
+        last = self._urgent_pair.get((sender, to_key))
+        if last is not None and now - last < URGENT_PAIR_GAP:
+            raise MeshError(
+                f"urgent send limit: {sender!r} already sent {to_key!r} one "
+                f"{int(now - last)}s ago — one per pair per "
+                f"{int(URGENT_PAIR_GAP // 60)} minutes"
+            )
+
+    def urgent_send(
+        self,
+        name: str,
+        sender: str,
+        to: str,
+        body: str,
+        *,
+        reason: str,
+        target_mesh: str = "",
+    ) -> dict:
+        """One message to one member the sender is not connected to.
+
+        The exception path for a refusal the member graph would otherwise
+        stand on (``_resolve_recipients``): the sender says why, once, and
+        the message is delivered and recorded. What it deliberately does not
+        do: change ``member_edges``, file or grant a wire request, take a
+        list or ``*`` or a selector, or read any caller-supplied
+        ``external`` claim — authority comes from ``sender``, the caller's
+        own session, and that member's role in mesh ``name``.
+
+        ``sender`` empty means the human operator (the CLI sends no session
+        outside a claunch session); an agent sender must hold ``leader`` in
+        ``name``. Operators are not rate limited.
+
+        KNOWN LIMIT, not enforced: the daemon cannot tell an agent's HTTP call
+        from the operator's, so an agent that omits ``sender`` is treated as
+        the unlimited operator. Agents are forbidden from doing that (the CLI
+        and the MCP tool always send ``$CLAUNCH_SESSION``); the only
+        safeguard is that ``authority: operator`` is written into both audit
+        records, so misuse is visible. Same class as the restart gate (see
+        CLAUDE.md).
+
+        Delivery is an append to the TARGET mesh's log from a non-member
+        label ``urgent:<sender>``, which ``Mesh.connected`` waves through the
+        way it does any external sender. The sender's mesh gets an audit
+        entry addressed to nobody when the target is in another mesh; the
+        target mesh's copy is the message itself, and both carry
+        ``ref.urgent``.
+        """
+        home = self.get(name)
+        if not isinstance(to, str) or not to.strip() or to.strip() == "*" or to.startswith("@"):
+            raise MeshError(
+                "an urgent send names exactly one member (a handle or a "
+                "session) — no '*', selector or list"
+            )
+        to = to.strip()
+        reason = str(reason or "").strip()
+        if len(reason) < URGENT_MIN_REASON:
+            raise MeshError(
+                f"an urgent send needs a reason of at least {URGENT_MIN_REASON} "
+                "characters — it is written into both meshes' logs"
+            )
+        text = _CTRL_RE.sub("", str(body or "")).strip()
+        if not text:
+            raise MeshError("empty message body")
+        if sender:
+            member = self.resolve_sender(name, sender)
+            if member is None or not self._is_local(home, member):
+                raise MeshError(
+                    f"{sender!r} is not a local member of mesh {name!r}: an "
+                    "urgent send is an operator or leader act"
+                )
+            if not member.holds("leader"):
+                raise MeshError(
+                    f"{member.handle!r} is a {member.role_label()} in mesh "
+                    f"{name!r}: only a leader or the operator may send an "
+                    "urgent message — ask your leader to send it"
+                )
+            who, authority, own_session = member.handle, "leader", member.session
+        else:
+            who, authority, own_session = "operator", "operator", ""
+        tmesh, target = self._urgent_target(home, to, target_mesh)
+        if target.session == own_session and own_session:
+            raise MeshError("an urgent send cannot address yourself")
+        to_key = f"{tmesh.name}/{target.handle}"
+        if authority != "operator":
+            self._urgent_rate_check(who, to_key)
+        record = {
+            "from": who,
+            "from_mesh": home.name,
+            "to": target.handle,
+            "to_session": target.session,
+            "to_mesh": tmesh.name,
+            "authority": authority,
+            "reason": reason,
+            "connected": bool(tmesh is home and home.connected(who, target.handle)),
+        }
+        head = (
+            f"[URGENT one-shot from {who} ({authority}, mesh {home.name}) — "
+            f"reason: {reason}]"
+        )
+        foot = (
+            "(No channel was opened. This sender is not connected to you, so "
+            "a reply to it is refused: answer through your own leader.)"
+        )
+        result = self._send_core(
+            tmesh, f"urgent:{who}", target.handle, f"{head}\n{text}\n{foot}",
+            external=True, type="fyi", ref={URGENT_REF_KEY: record},
+        )
+        self._flush_guests_soon(tmesh)
+        now = time.monotonic()
+        if authority != "operator":
+            self._urgent_sent.setdefault(who, []).append(now)
+            self._urgent_pair[(who, to_key)] = now
+        audited = [tmesh.name]
+        if tmesh is not home:
+            audit = {
+                "id": "msg-" + uuid.uuid4().hex[:12],
+                "ts": utcnow(),
+                "from": f"urgent:{who}",
+                "to": [],
+                "type": "fyi",
+                "epoch": home.authority_epoch,
+                "seq": home.next_seq,
+                "body": (
+                    f"URGENT SEND audit: {who} ({authority}) -> {target.handle} "
+                    f"in mesh {tmesh.name} ({target.session}), message "
+                    f"{result['id']}. Reason: {reason}"
+                ),
+                REF_KEY: {URGENT_REF_KEY: {**record, "delivered_id": result["id"]}},
+            }
+            home.next_seq += 1
+            home.messages.append(audit)
+            home.seen_ids.add(audit["id"])
+            home.last_append = time.monotonic()
+            self._append_log(home, audit)
+            self._flush_guests_soon(home)
+            audited.append(home.name)
+        return {**result, "urgent": record, "audited_in": audited}
 
     async def _resolve_audience(
         self, mesh: Mesh, sender: str, to: Union[str, List[str]]
@@ -5692,15 +5993,18 @@ class MeshManager:
                 f"visibility must be one of {', '.join(VISIBILITIES)}"
             )
         mesh.visibility = visibility
-        withdrawn = []
+        withdrawn: Dict[str, dict] = {}
         if visibility == "private":
-            withdrawn = sorted(mesh.offers)
+            withdrawn = dict(mesh.offers)
             mesh.offers.clear()
         self._persist_def(mesh)
-        for machine in withdrawn:
-            await self._push_offer_cancel(mesh.wire_name, machine)
+        for machine in sorted(withdrawn):
+            await self._push_offer_cancel(
+                mesh.wire_name, machine,
+                str(withdrawn[machine].get("token") or ""),
+            )
         return {"mesh": mesh.name, "visibility": visibility,
-                "withdrawn": withdrawn}
+                "withdrawn": sorted(withdrawn)}
 
     async def offer_mesh(self, name: str, machine: str) -> dict:
         """Push an offer of this mesh to ``machine`` (the ``invited`` path).
@@ -5708,6 +6012,11 @@ class MeshManager:
         The offer carries a token only that daemon receives — the relay
         routes by registered name — and the token lets it attach without
         approval. A private mesh becomes ``invited`` by being offered.
+
+        The offer is recorded before it is pushed: the receiving daemon
+        asks back (``/peer/mesh/offer/check``) while the push is still
+        waiting for its answer, and that question must find it. A push that
+        fails puts the previous record back.
         """
         mesh = self.get(name)
         self._require_authority(mesh, "publishing")
@@ -5721,17 +6030,24 @@ class MeshManager:
             raise MeshError("relay uplink is not running — cannot reach peers")
         previous = mesh.offers.get(machine)
         token = str((previous or {}).get("token") or secrets.token_urlsafe(18))
-        await self.peer_transport(machine, "/peer/mesh/offer", {
-            "mesh": mesh.wire_name,
-            "machine": me,
-            "token": token,
-            "project": mesh.project,
-            "members": len(mesh.members),
-        })
         mesh.offers[machine] = {
             "token": token,
             "created_at": str((previous or {}).get("created_at") or utcnow()),
         }
+        try:
+            await self.peer_transport(machine, "/peer/mesh/offer", {
+                "mesh": mesh.wire_name,
+                "machine": me,
+                "token": token,
+                "project": mesh.project,
+                "members": len(mesh.members),
+            })
+        except BaseException:
+            if previous is None:
+                mesh.offers.pop(machine, None)
+            else:
+                mesh.offers[machine] = previous
+            raise
         if mesh.visibility == "private":
             mesh.visibility = "invited"
         self._persist_def(mesh)
@@ -5742,21 +6058,30 @@ class MeshManager:
     async def cancel_offer(self, name: str, machine: str) -> dict:
         mesh = self.get(name)
         self._require_authority(mesh, "publishing")
-        if mesh.offers.pop(machine, None) is None:
+        offer = mesh.offers.pop(machine, None)
+        if offer is None:
             raise MeshError(f"mesh {name!r} has no offer to {machine!r}")
         self._persist_def(mesh)
-        notified = await self._push_offer_cancel(mesh.wire_name, machine)
+        notified = await self._push_offer_cancel(
+            mesh.wire_name, machine, str(offer.get("token") or ""),
+        )
         return {"mesh": mesh.name, "machine": machine, "notified": notified}
 
-    async def _push_offer_cancel(self, name: str, machine: str) -> bool:
+    async def _push_offer_cancel(
+        self, name: str, machine: str, token: str,
+    ) -> bool:
         """Best-effort: a daemon that misses it keeps a stale row whose
-        token its owner now refuses."""
+        token its owner now refuses.
+
+        The withdrawal carries the token it withdraws — the receiver drops
+        its row on that, or when the owner no longer reports the token
+        live, and on nothing else (:meth:`peer_offer_accept`)."""
         if self.peer_transport is None:
             return False
         try:
             await self.peer_transport(machine, "/peer/mesh/offer", {
                 "mesh": name, "machine": self._require_machine(),
-                "cancel": True,
+                "token": token, "cancel": True,
             })
         except Exception:  # noqa: BLE001 — best-effort notification
             return False
@@ -6713,6 +7038,130 @@ class MeshManager:
                 f"{holder!r} is not a member from daemon {machine!r}"
             )
         return self._lease_apply(mesh, op, key, holder, ttl, note)
+
+    # -- remote-shadow sessions (daemon/shadow.py) ---------------------- #
+    # Another daemon's operator may LOOK at this daemon's mesh members: a
+    # card, a terminal that only outputs, and the session line. The link
+    # token authenticates the viewing daemon; membership in the mesh that
+    # link belongs to scopes it -- exactly the rule peer ops read by.
+    def peer_shadow_members(self, name: str, machine: str, token: str) -> List[Member]:
+        """This daemon's own members of mesh ``name``, for linked ``machine``."""
+        mesh = self._inbound(name, machine, token)
+        self._check_link_token(mesh, machine, token)
+        return [
+            mesh.members[h] for h in sorted(mesh.members)
+            if self._is_local(mesh, mesh.members[h])
+        ]
+
+    def peer_shadow_member(
+        self, name: str, machine: str, token: str, session: str,
+    ) -> Member:
+        """The member ``session`` wears in mesh ``name`` here, or refused."""
+        mesh = self._inbound(name, machine, token)
+        self._check_link_token(mesh, machine, token)
+        member = self.member_for_session(mesh, session)
+        if member is None:
+            raise MeshError(
+                f"session {session!r} is not a member of mesh {mesh.name!r} here"
+            )
+        return member
+
+    def host_machine(self, mesh: Mesh, member: Member) -> str:
+        """The daemon ``member``'s session runs on — "" when it is this one.
+
+        Unlike :meth:`machine_name` this never answers blank for a remote
+        member: an unstamped row on a mirror is the authority's own.
+        """
+        if self._is_local(mesh, member):
+            return ""
+        return member.machine or mesh.authority
+
+    def shadow_targets(self) -> List[dict]:
+        """Every other daemon's member of every mesh held here, grouped per
+        (machine, session) — one session in two meshes is one shadow.
+
+        Each row: ``{machine, session, meshes: [{mesh, wire, handle, role,
+        roles, linked}]}``. ``linked`` says whether this daemon holds a link
+        to that machine in that mesh — without one there is nobody to ask.
+        """
+        rows: Dict[Tuple[str, str], dict] = {}
+        for mesh in self.list():
+            for handle in sorted(mesh.members):
+                member = mesh.members[handle]
+                host = self.host_machine(mesh, member)
+                if not host or not member.session:
+                    continue
+                row = rows.setdefault(
+                    (host, member.session),
+                    {"machine": host, "session": member.session, "meshes": []},
+                )
+                row["meshes"].append({
+                    "mesh": mesh.name,
+                    "wire": mesh.wire_name,
+                    "handle": member.handle,
+                    "role": member.role,
+                    "roles": list(member.roles),
+                    "linked": host in mesh.links,
+                })
+        return [rows[k] for k in sorted(rows)]
+
+    def shadow_route(self, machine: str, session: str) -> Tuple[Mesh, Member]:
+        """The mesh (and member row) to reach ``machine``'s ``session`` through.
+
+        Refused unless that session is a member of a mesh held here and this
+        daemon holds a link to its machine in that mesh: a shadow is only
+        ever of a mesh member, never of an arbitrary session on a peer.
+        """
+        unlinked = False
+        for mesh in self.list():
+            for member in mesh.members.values():
+                if member.session != session:
+                    continue
+                if self.host_machine(mesh, member) != machine:
+                    continue
+                if machine in mesh.links:
+                    return mesh, member
+                unlinked = True
+        if unlinked:
+            raise MeshError(
+                f"no link to daemon {machine!r} in any mesh {session!r} is in"
+            )
+        raise MeshError(
+            f"{machine}/{session} is not a member of any mesh on this daemon"
+        )
+
+    async def shadow_call(self, machine: str, session: str, path: str,
+                          body: dict) -> dict:
+        """One ``/peer/shadow/*`` request about ``machine``'s ``session``."""
+        mesh, _member = self.shadow_route(machine, session)
+        return await self._peer_call(mesh, machine, path, {"session": session, **body})
+
+    async def shadow_cards(self, mesh_name: str, machine: str) -> dict:
+        """``/peer/shadow/cards`` for mesh ``mesh_name``'s members on ``machine``."""
+        mesh = self.get(mesh_name)
+        if machine not in mesh.links:
+            raise MeshError(f"no link to daemon {machine!r} in mesh {mesh.name!r}")
+        return await self._peer_call(mesh, machine, "/peer/shadow/cards", {})
+
+    async def shadow_stream(self, machine: str, session: str):
+        """Open ``/peer/shadow/stream`` for ``machine``'s ``session``: the
+        live bridge, unparsed (``shadow.open_stream`` reads it)."""
+        mesh, _member = self.shadow_route(machine, session)
+        if self.peer_streamer is None:
+            raise PeerUnreachable(
+                f"relay uplink is not running — cannot reach {machine!r}"
+            )
+        link = mesh.links.get(machine) or {}
+        return await self.peer_streamer(
+            machine,
+            "/peer/shadow/stream",
+            {
+                "mesh": mesh.wire_name,
+                "machine": self._require_machine(),
+                "token": str(link.get("token_out") or ""),
+                "session": session,
+            },
+        )
 
     # -- peer-side handlers --------------------------------------------- #
     def _ingest_message(self, m: dict, origin: str) -> Optional[dict]:

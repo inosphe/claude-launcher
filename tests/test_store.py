@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import sys
 
 import pytest
 import yaml
@@ -168,10 +169,15 @@ def test_a_save_that_cannot_land_keeps_the_old_document_and_cleans_up(
 # a transient Windows sharing conflict that outlasts atomic's retry budget
 # --------------------------------------------------------------------------- #
 def _perm(winerror: int) -> OSError:
-    """The exception ``os.replace`` raises when a holder blocks the delete."""
+    """The exception ``os.replace`` raises when a holder blocks the delete.
+
+    Only Windows keeps the fourth argument as ``winerror``; elsewhere the
+    exception has none, so no stub built here is ever transient there.
+    """
     return OSError(13, "Access is denied", None, winerror)
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="WinError 5 is Windows-only")
 def test_save_wraps_an_unrelenting_sharing_conflict(config_file, monkeypatch):
     """A holder that never lets go raises TransientStoreError, not the bare
     OSError -- worded as "try again", not "broken" -- and the previous

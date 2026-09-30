@@ -24,7 +24,7 @@ from pathlib import Path
 
 import pytest
 
-from claude_launcher import beads_meta, lineage, profile, store
+from claude_launcher import beads_meta, cli_beads, lineage, profile, store
 from claude_launcher.daemon import beads as beads_mod
 from claude_launcher.daemon import db, paths
 from claude_launcher.daemon.api import build_app
@@ -175,7 +175,16 @@ class FakeBr:
             if "--assignee" in opts:
                 i["assignee"] = opts["--assignee"]
             if "--description" in opts:
-                i["description"] = opts["--description"]
+                # br 0.7's guard: a non-empty description is not cleared or
+                # cut below half its length without --force.
+                old, new = i.get("description") or "", opts["--description"]
+                if old and len(new) * 2 < len(old) and "--force" not in rest:
+                    return 4, json.dumps({"error": {
+                        "code": "VALIDATION_FAILED",
+                        "message": "refusing to overwrite non-empty "
+                                   "'description' without --force",
+                    }}), ""
+                i["description"] = new
             return 0, json.dumps([i]), ""
         if cmd == "close":
             i = self.issues.get(rest[0])
@@ -1222,62 +1231,36 @@ def test_a_listing_carries_an_excerpt_and_the_detail_carries_the_text(repo):
     asyncio.run(run())
 
 
-def test_edges_come_from_one_read_of_the_board_database(tmp_path):
-    """``br dep list`` per issue is one process each; the same answer is one
-    query of the file br already keeps them in."""
+def test_edges_are_read_through_br_and_never_out_of_the_database_file(repo, monkeypatch):
+    """br 0.7's engine keeps its own WAL index, and a SQLite reader opening
+    the board's file made br's next call quarantine that index -- one
+    ``.beads/.br-wal-index-*/`` directory per Beads page load. So the edges
+    come from ``br dep list``, one call per issue that has any, and nothing
+    in the daemon opens the database."""
     import sqlite3
 
-    root = tmp_path / "repo"
-    (root / ".beads").mkdir(parents=True)
-    conn = sqlite3.connect(root / ".beads" / "beads.db")
-    conn.execute(
-        "CREATE TABLE dependencies (issue_id TEXT, depends_on_id TEXT, type TEXT)"
-    )
-    conn.executemany(
-        "INSERT INTO dependencies VALUES (?, ?, ?)",
-        [("kid", "epic", "parent-child"), ("kid", "epic", "blocks")],
-    )
-    conn.commit()
-    conn.close()
+    def refuse(*args, **kwargs):
+        raise AssertionError("the daemon opened the board database directly")
 
+    monkeypatch.setattr(sqlite3, "connect", refuse)
     br = FakeBr()
     br.add(id="epic")
     br.add(id="kid")
+    br.add(id="loose")
     br.link("kid", "epic")
     br.link("kid", "epic", kind="blocks")
-    board = _board(br, root)
-
-    async def run():
-        view = await board.fleet_view([], extra_roots=[str(root)])
-        entry = next(b for b in view["boards"] if b["root"] == str(root))
-        assert entry["deps"] == [
-            {"from": "kid", "to": "epic", "type": "parent-child"},
-            {"from": "kid", "to": "epic", "type": "blocks"},
-        ]
-        # and not one fork of `br dep list`
-        assert [c for c in br.calls if "dep" in c] == []
-
-    asyncio.run(run())
-
-
-def test_a_board_without_that_table_still_draws_its_edges(repo):
-    """The ``repo`` fixture's database is an empty file: no table to read.
-    The edges are an ornament over a listing that is already useful, so the
-    reading falls back to ``br`` rather than the page losing them."""
-    br = FakeBr()
-    br.add(id="epic")
-    br.add(id="kid")
-    br.link("kid", "epic")
     board = _board(br, repo)
 
     async def run():
-        assert await board._edges_from_db(repo) is None
         view = await board.fleet_view([], extra_roots=[str(repo)])
         entry = next(b for b in view["boards"] if b["root"] == str(repo))
         assert entry["deps"] == [
             {"from": "kid", "to": "epic", "type": "parent-child"},
+            {"from": "kid", "to": "epic", "type": "blocks"},
         ]
-        assert sum(1 for c in br.calls if "dep" in c) == 1
+        # only the issue the listing says has edges is asked
+        assert [c[c.index("dep"):c.index("dep") + 3] for c in br.calls if "dep" in c] == [
+            ["dep", "list", "kid"]]
 
     asyncio.run(run())
 
@@ -3130,5 +3113,26 @@ def test_selected_board_reads_only_its_issues_but_keeps_workspace_headers(repo, 
             listings = [c for c in br.calls if "list" in c and "dep" not in c]
             assert len(listings) == 1
             assert str(expected) in listings[0][listings[0].index("--db") + 1]
+
+    asyncio.run(run())
+
+
+def test_the_daemon_declares_the_custom_statuses_and_notices_a_lost_policy(repo):
+    """br 0.7 refuses an ``in_review`` filter on a board whose policy does not
+    declare it, which is the Beads page's own column. The daemon declares it
+    before its first call, looks again only when the file changed, and puts
+    it back when it went away."""
+    board = _board(FakeBr(), repo)
+    policy = repo / ".beads" / cli_beads.POLICY_NAME
+
+    async def run():
+        await board.br(repo, ["list", "--status", "in_review"])
+        assert "in_review" in policy.read_text(encoding="utf-8")
+        seen = policy.stat().st_mtime_ns
+        await board.br(repo, ["list"])
+        assert policy.stat().st_mtime_ns == seen
+        policy.unlink()
+        await board.br(repo, ["list"])
+        assert policy.is_file()
 
     asyncio.run(run())

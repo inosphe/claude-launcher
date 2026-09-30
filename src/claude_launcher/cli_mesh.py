@@ -292,6 +292,34 @@ def _cmd_send(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_urgent(args: argparse.Namespace) -> int:
+    """One-shot send to a member you are not connected to (leader/operator)."""
+    text = stdio.read_stdin() if args.text == ["-"] else " ".join(args.text)
+    if not text.strip():
+        print("error: empty message", file=sys.stderr)
+        return 1
+    # Inside a session the sender is that session (the daemon then requires
+    # it to be a leader). Outside one, the sender is empty: the operator.
+    payload = {
+        "from": _own_session(args) or "",
+        "to": args.to,
+        "body": text,
+        "reason": args.reason,
+    }
+    if args.target_mesh:
+        payload["target_mesh"] = args.target_mesh
+    client = daemon_client.ensure_running()
+    result = client.post(f"/api/mesh/{args.mesh}/urgent", payload)
+    u = result.get("urgent") or {}
+    print(
+        f"urgent {result.get('id')} delivered to {u.get('to')} "
+        f"({u.get('to_session')}) in mesh {u.get('to_mesh')}; audited in: "
+        f"{', '.join(result.get('audited_in') or [])}; no connection was created"
+    )
+    _print_notice(result)
+    return 0
+
+
 def _print_notice(result: dict) -> None:
     if result.get("notice"):
         print(f"notice: {result['notice']}", file=sys.stderr)
@@ -1397,6 +1425,23 @@ def register(sub) -> None:
                         "the preamble a message that stands on its own, or "
                         "leave those handles out of the address")
     p.set_defaults(func=_cmd_send)
+
+    p = msub.add_parser(
+        "urgent",
+        help="EXCEPTION: one message to a member you are not connected to "
+        "(leader or operator; reason required; recorded in both meshes)",
+    )
+    p.add_argument("mesh", help="your own mesh (the audit is written here)")
+    p.add_argument("to", help="ONE handle in MESH, or a session name in any "
+                   "mesh on this daemon")
+    p.add_argument("text", nargs="+", help="message text ('-' reads stdin)")
+    p.add_argument("--reason", required=True,
+                   help="why the normal connection rules cannot serve "
+                   "(at least 12 characters; stored in the audit record)")
+    p.add_argument("--target-mesh", dest="target_mesh", metavar="MESH",
+                   help="when the target session is in several meshes")
+    p.add_argument("--session", help="sender session (default: $CLAUNCH_SESSION)")
+    p.set_defaults(func=_cmd_urgent)
 
     p = msub.add_parser(
         "invite",

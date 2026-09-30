@@ -3,7 +3,8 @@
 Scenario matrix, derived from docs/mesh-design.md "Daemon attach":
 
 V. Visibility & discovery
-   V1 only public meshes answer /peer/meshes, and never a mirror
+   V1 only public meshes answer /peer/meshes, and never a mirror; a row
+      carries name, project and counts only (the route is unauthenticated)
    V2 discover() is the union over every relay peer plus received offers;
       each row is keyed by the daemon that answered (one hop)
    V3 a private visibility withdraws every outstanding offer
@@ -26,6 +27,17 @@ A. Attach
    A7 a mirror is filed under a project here: the one attach names (also
       through a pending approval), else the joining session's; it can be
       moved later, and an unknown project is refused
+
+O. Offer authenticity (the relay does not say who sent a request)
+   O1 an offer is stored only when its claimed owner confirms the token
+      was offered to this daemon (/peer/mesh/offer/check)
+   O2 a withdrawal drops the row on the stored token, or when the owner no
+      longer reports that token live; otherwise it is refused, row kept
+   O3 an owner with no check route (plain 404) gets the old behaviour
+   O4 no relay, an unreachable owner or another failure: nothing stored,
+      nothing dropped without the token
+   O5 the owner records an offer before pushing it, and rolls back on a
+      failed push
 """
 
 from __future__ import annotations
@@ -62,6 +74,10 @@ def _dispatch_peer(mm: MeshManager, path: str, body: dict):
             cancel=bool(body.get("cancel")),
             project=body.get("project") or "",
             members=body.get("members") or 0,
+        )
+    if path == "/peer/mesh/offer/check":
+        return mm.peer_offer_check(
+            body["mesh"], body["machine"], body.get("token") or ""
         )
     if path == "/peer/mesh/detach":
         return mm.peer_detach_accept(
@@ -107,6 +123,9 @@ def test_discovery_is_public_owned_meshes_plus_offers(home, tmp_path):
         await mm_a.set_visibility("pub", "public")
         await mm_c.set_visibility("cmesh", "invited")
         assert [m["mesh"] for m in mm_a.peer_meshes_list()] == ["pub"]
+        # unauthenticated: a row is what public publishes, nothing more
+        assert set(mm_a.peer_meshes_list()[0]) == {
+            "mesh", "project", "members", "peers", "created_at"}
         with pytest.raises(MeshError):
             await mm_a.set_visibility("pub", "everyone")
 
@@ -322,6 +341,181 @@ def test_offers_and_pending_attach_survive_reload(home, tmp_path):
     asyncio.run(run())
 
 
+# --------------------------------------------------------------------------- #
+# O1-O5
+# --------------------------------------------------------------------------- #
+def test_an_offer_is_stored_only_when_its_owner_confirms_it(home, tmp_path):
+    """O1: the relay does not say who sent an offer, so the receiver asks
+    the claimed owner back; a token the owner did not offer *this* daemon
+    is refused and nothing is stored."""
+    _register_py_harness()
+
+    async def run():
+        mgr = _manager()
+        mm_a, mm_b = await _primary_with_alice(mgr, tmp_path)
+        mm_c = MeshManager(mgr, settle=0.05, root=tmp_path / "meshC")
+        _wire({"pcA": mm_a, "pcB": mm_b, "pcC": mm_c})
+
+        # a token pcA never issued
+        with pytest.raises(MeshError, match="does not confirm"):
+            await mm_b.peer_offer_accept("m", "pcA", "forged", members=9)
+        assert mm_b.offers_received() == []
+
+        # a real token, offered to pcC, replayed at pcB by pcC
+        await mm_a.offer_mesh("m", "pcC")
+        stolen = mm_a.get("m").offers["pcC"]["token"]
+        with pytest.raises(MeshError, match="does not confirm"):
+            await mm_b.peer_offer_accept("m", "pcA", stolen)
+        assert mm_b.offers_received() == []
+
+        # a daemon naming itself as the owner is refused without asking
+        with pytest.raises(MeshError):
+            await mm_b.peer_offer_accept("x", "pcB", "t")
+
+        # the real offer is confirmed while the push is still in flight
+        await mm_a.offer_mesh("m", "pcB")
+        assert [o["mesh"] for o in mm_b.offers_received()] == ["m"]
+        assert (await mm_b.attach("m@pcA"))["attached"] is True
+
+        # only the authority answers for a mesh: a mirror says no, whatever
+        # its record holds
+        mm_b.get("m@pcA").offers["pcC"] = {"token": "k", "created_at": ""}
+        assert mm_b.peer_offer_check("m", "pcC", "k") == {"live": False}
+
+        await mgr.shutdown_all()
+
+    asyncio.run(run())
+
+
+def test_a_withdrawal_needs_the_token_or_the_owner(home, tmp_path):
+    """O2: a withdrawal that does not carry the stored token is refused
+    while the owner still reports the offer live; the owner's own
+    withdrawal carries it; a row its owner dropped goes on any withdrawal."""
+    _register_py_harness()
+
+    async def run():
+        mgr = _manager()
+        mm_a, mm_b = await _primary_with_alice(mgr, tmp_path)
+        _wire({"pcA": mm_a, "pcB": mm_b})
+        await mm_a.offer_mesh("m", "pcB")
+        held = mm_b._offers["m@pcA"]["token"]
+
+        for token in ("", "other"):
+            with pytest.raises(MeshError, match="still live"):
+                await mm_b.peer_offer_accept("m", "pcA", token, cancel=True)
+            assert [o["mesh"] for o in mm_b.offers_received()] == ["m"]
+            assert mm_b._offers["m@pcA"]["token"] == held
+
+        # a second offer under the same key cannot swap the token either
+        with pytest.raises(MeshError, match="does not confirm"):
+            await mm_b.peer_offer_accept("m", "pcA", "other")
+        assert mm_b._offers["m@pcA"]["token"] == held
+
+        # the owner withdraws: the push carries the token and the row goes
+        res = await mm_a.cancel_offer("m", "pcB")
+        assert res["notified"] is True
+        assert mm_b.offers_received() == []
+        # withdrawing a row that is gone is not an error
+        assert (await mm_b.peer_offer_accept("m", "pcA", "", cancel=True))[
+            "cancelled"] is True
+
+        # the owner lost its record without telling us (a missed push):
+        # the owner now reports the stored token as not live
+        await mm_a.offer_mesh("m", "pcB")
+        mm_a.get("m").offers.clear()
+        await mm_b.peer_offer_accept("m", "pcA", "", cancel=True)
+        assert mm_b.offers_received() == []
+
+        await mgr.shutdown_all()
+
+    asyncio.run(run())
+
+
+def test_an_owner_without_the_check_and_an_owner_out_of_reach(home, tmp_path):
+    """O3: an owner that predates the check (a plain 404 on its route)
+    gets the old behaviour, logged; O4: an owner that cannot be asked, or
+    no relay at all, stores nothing and keeps what is stored."""
+    from claude_launcher.daemon.mesh import PeerUnreachable
+
+    _register_py_harness()
+
+    async def run():
+        mgr = _manager()
+        mm_b = MeshManager(mgr, settle=0.05, root=tmp_path / "meshB")
+        mm_b.machine = "pcB"
+        failure = {}
+
+        async def call(machine, path, body):
+            assert (machine, path) == ("pcOld", "/peer/mesh/offer/check")
+            raise failure["exc"]
+
+        # O4: no relay to ask through
+        with pytest.raises(MeshError, match="relay uplink"):
+            await mm_b.peer_offer_accept("m", "pcOld", "t1")
+
+        mm_b.peer_transport = call
+        # O3: 404 — stored unverified, and a tokenless withdrawal drops it
+        failure["exc"] = PeerUnreachable("non-JSON body (status 404)",
+                                         status=404)
+        await mm_b.peer_offer_accept("m", "pcOld", "t1")
+        assert [o["mesh"] for o in mm_b.offers_received()] == ["m"]
+        await mm_b.peer_offer_accept("m", "pcOld", "", cancel=True)
+        assert mm_b.offers_received() == []
+
+        # O4: unreachable, or another HTTP status — nothing stored
+        await mm_b.peer_offer_accept("m", "pcOld", "t1")  # 404 again
+        for exc in (PeerUnreachable("relay down"),
+                    PeerUnreachable("non-JSON body (status 500)", status=500)):
+            failure["exc"] = exc
+            with pytest.raises(MeshError, match="cannot confirm"):
+                await mm_b.peer_offer_accept("n", "pcOld", "t2")
+            # and a withdrawal without the token keeps the stored row
+            with pytest.raises(MeshError, match="cannot confirm"):
+                await mm_b.peer_offer_accept("m", "pcOld", "", cancel=True)
+            assert [o["mesh"] for o in mm_b.offers_received()] == ["m"]
+        # the stored token still withdraws it without asking anyone
+        await mm_b.peer_offer_accept("m", "pcOld", "t1", cancel=True)
+        assert mm_b.offers_received() == []
+
+    asyncio.run(run())
+
+
+def test_owner_records_before_the_push_and_rolls_back(home, tmp_path):
+    """O5: the owner's record exists while the push is in flight (the
+    receiver's check finds it) and is put back as it was when the push
+    fails."""
+    _register_py_harness()
+
+    async def run():
+        mgr = _manager()
+        mm_a = MeshManager(mgr, settle=0.05, root=tmp_path / "meshA")
+        mm_a.machine = "pcA"
+        mm_a.create("m")
+        seen = {}
+
+        async def call(machine, path, body):
+            seen["during"] = dict(mm_a.get("m").offers.get(machine) or {})
+            seen["check"] = mm_a.peer_offer_check("m", machine, body["token"])
+            raise MeshError("peer 'pcB' rejected /peer/mesh/offer: no")
+
+        mm_a.peer_transport = call
+        with pytest.raises(MeshError):
+            await mm_a.offer_mesh("m", "pcB")
+        assert seen["check"] == {"live": True}
+        assert mm_a.get("m").offers == {}
+        assert mm_a.get("m").visibility == "private"
+
+        # a re-offer that fails keeps the earlier offer and its token
+        mm_a.get("m").offers["pcB"] = {"token": "kept", "created_at": "t0"}
+        with pytest.raises(MeshError):
+            await mm_a.offer_mesh("m", "pcB")
+        assert seen["during"]["token"] == "kept"
+        assert mm_a.get("m").offers == {
+            "pcB": {"token": "kept", "created_at": "t0"}}
+
+    asyncio.run(run())
+
+
 def test_session_join_still_pends_without_an_offer(home, tmp_path):
     """The session-level join (A in the design) is unchanged by attach."""
     _register_py_harness()
@@ -388,17 +582,48 @@ def test_attach_http_surface(home, tmp_path):
             assert resp.status == 200
             assert [m["mesh"] for m in (await resp.json())["meshes"]] == ["web"]
 
+            # /peer/mesh/offer/check needs none either, and says only yes/no
+            mm.get("web").offers["pcQ"] = {"token": "live1", "created_at": ""}
+            for body, live in (
+                ({"mesh": "web", "machine": "pcQ", "token": "live1"}, True),
+                ({"mesh": "web", "machine": "pcQ", "token": "nope"}, False),
+                ({"mesh": "web", "machine": "pcR", "token": "live1"}, False),
+                ({"mesh": "nosuch", "machine": "pcQ", "token": "live1"}, False),
+                ({}, False),
+            ):
+                resp = await client.post("/peer/mesh/offer/check", json=body)
+                assert resp.status == 200
+                assert await resp.json() == {"live": live}, body
+            mm.get("web").offers.clear()
+
             # no relay here: discovery answers with the reason, not a 500
             resp = await client.get("/api/relay/meshes", headers=bearer)
             assert resp.status == 200
             doc = await resp.json()
             assert doc["meshes"] == [] and "relay" in doc["errors"]
 
-            # an offer arrives over /peer and is listed without its token
-            resp = await client.post("/peer/mesh/offer", json={
-                "mesh": "far", "machine": "pcZ", "token": "t0k", "members": 2,
-            })
+            # an offer nobody can confirm is not stored: no relay here
+            offer = {"mesh": "far", "machine": "pcZ", "token": "t0k",
+                     "members": 2}
+            resp = await client.post("/peer/mesh/offer", json=offer)
+            assert resp.status == 400
+            assert mm.offers_received() == []
+
+            # an offer arrives over /peer, its owner confirms it, and it is
+            # listed without its token
+            asked = []
+
+            async def owner(machine, path, body):
+                asked.append((machine, path, body))
+                return {"live": body["token"] == "t0k"}
+
+            mm.machine = "pcA"
+            mm.peer_transport = owner
+            resp = await client.post("/peer/mesh/offer", json=offer)
             assert resp.status == 200
+            assert asked == [("pcZ", "/peer/mesh/offer/check",
+                              {"mesh": "far", "machine": "pcA",
+                               "token": "t0k"})]
             resp = await client.get("/api/relay/meshes", headers=bearer)
             doc = await resp.json()
             assert [(r["mesh"], r["machine"], r["access"]) for r in doc["meshes"]] \
