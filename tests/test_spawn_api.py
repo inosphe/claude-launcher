@@ -22,6 +22,8 @@ from claude_launcher.daemon.harness import SessionDef
 from claude_launcher.daemon.manager import SessionManager
 from claude_launcher.daemon.mesh import MeshManager
 
+from _tty_echo import NO_TTY_ECHO
+
 CHILD = (
     "import sys\n"
     "print('READY')\n"
@@ -32,10 +34,10 @@ CHILD = (
 BEARER = {"Authorization": "Bearer sekrit"}
 
 
-def _register_py_harness():
+def _register_py_harness(child=CHILD):
     store.update(
         lambda doc: doc.update(
-            {"harnesses": {"py": {"command": [sys.executable, "-u", "-c", CHILD]}}}
+            {"harnesses": {"py": {"command": [sys.executable, "-u", "-c", child]}}}
         )
     )
     if not profile.resolve("py").exists():
@@ -801,7 +803,10 @@ def test_a_spawn_role_becomes_the_members_role_in_the_mesh(home, tmp_path):
 # request is known to be honourable, and the briefing arrives as ONE block.
 # --------------------------------------------------------------------------- #
 def test_create_joins_a_mesh_and_starts_a_run_in_one_call(home, tmp_path):
-    _register_py_harness()
+    # the opening is long and the child answers each of its lines: with the
+    # terminal's echo on too, the two copies interleave and the stance line
+    # can come out split (tests/_tty_echo.py, claunch-fepnp)
+    _register_py_harness(NO_TTY_ECHO + CHILD)
     _declare_review_workflow(tmp_path)
 
     async def run():
@@ -833,9 +838,12 @@ def test_create_joins_a_mesh_and_starts_a_run_in_one_call(home, tmp_path):
             assert body["task"]["ok"] is True
             assert mm.get("team").members["worker_1"].session == "w1"
             assert mgr.get("w1").sdef.role is None
+            # history holds only the lines that scrolled off; the one copy
+            # left may still be on the visible grid
+            session = mgr.get("w1")
             await _wait_for(
                 lambda: "stance (worker), binding [text id:" in
-                "\n".join(mgr.get("w1").capture(history=True)),
+                "\n".join(session.capture(history=True) + session.capture()),
                 "the harness-neutral role stance opening",
             )
 
