@@ -34791,6 +34791,19 @@ function renderShadowCard(row, opts) {
     node.appendChild(el("div", "shadow-line shadow-meshes",
       "mesh: " + meshes.map((m) => `${m.mesh} as ${m.handle}`).join(", ")));
   }
+  // The same session on its own daemon, through the relay that carries it
+  // (daemon/shadow.relay_link). Opening it takes that daemon's token.
+  if (opts.full && typeof row.link === "string" && /^https?:\/\//.test(row.link)) {
+    const line = el("div", "shadow-line shadow-relay");
+    line.appendChild(document.createTextNode("host: "));
+    const a = el("a", "shadow-relay-link", row.link);
+    a.href = row.link;
+    a.target = "_blank";
+    a.rel = "noopener";
+    a.title = `${row.session} on ${row.machine}'s own dashboard, through the relay`;
+    line.appendChild(a);
+    node.appendChild(line);
+  }
   if (row.error) node.appendChild(el("div", "shadow-line shadow-error", row.error));
   if (!opts.full) {
     node.tabIndex = 0;

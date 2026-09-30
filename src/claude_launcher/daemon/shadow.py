@@ -13,6 +13,10 @@ other daemon's control surface:
   relay bridge (``RelayUplink.peer_open``);
 * the **session line** ("type for this session") -- one line of text,
   journaled with the viewing daemon as its origin;
+* a **link** to the session on its own daemon -- ``/t/<machine>/#/s/<session>``
+  on the relay that carries that daemon (:func:`relay_link`). Opening it
+  takes that daemon's own token, as any page under ``/t/`` does; the link
+  gives nothing a relay login and the token would not;
 * the **transcript** -- the conversation the harness keeps on disk, in the
   pages the local transcript page reads (``daemon/transcript_view.py``).
   The terminal cannot stand in for it: a claude session repaints the
@@ -53,10 +57,12 @@ import logging
 import struct
 import time
 from typing import AsyncIterator, Dict, List, Optional, Tuple
+from urllib.parse import quote
 
 from aiohttp import WSMsgType, web
 
 from . import briefing
+from . import relay_uplink
 from . import session_input
 from . import transcript_view
 from .mesh import MeshError, PeerUnreachable
@@ -458,6 +464,20 @@ CARD_TTL = 5.0
 CARD_TIMEOUT = 8.0
 
 
+def relay_link(relay_url: str, machine: str, session: str) -> str:
+    """The address of ``machine``'s ``session`` on its own daemon's web UI,
+    reached through the relay at ``relay_url`` (the uplink's ws(s) URL).
+
+    ``/t/<machine>/`` is the host daemon's dashboard on that relay (the mesh
+    machine name is the name the host registered there) and ``#/s/<name>``
+    its session page. "" when there is no relay to put in front.
+    """
+    origin = relay_uplink.browser_origin(relay_url)
+    if not origin or not machine or not session:
+        return ""
+    return f"{origin}/t/{quote(machine, safe='')}/#/s/{quote(session, safe='')}"
+
+
 class Directory:
     """The viewer's list of shadows, with each host's cards cached.
 
@@ -538,6 +558,9 @@ class Directory:
                     for m in t["meshes"]
                 ],
                 "card": _sanitize_card(card_row),
+                "link": relay_link(
+                    self._mm.relay_url_for(t["machine"]), t["machine"], t["session"]
+                ) or None,
                 "error": None if card_row is not None else (
                     "; ".join(dict.fromkeys(errors))
                     or "the host did not list this session"

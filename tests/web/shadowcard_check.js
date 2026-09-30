@@ -63,6 +63,7 @@ class Node {
 const radios = ["scroll", "fit"].map((value) => ({ value, checked: false }));
 const document = {
   createElement: (t) => new Node(t),
+  createTextNode: (t) => { const n = new Node("#text"); n.textContent = t; return n; },
   querySelectorAll: (sel) => (sel === 'input[name="shadow-fit"]' ? radios : []),
 };
 const stored = {};
@@ -199,6 +200,24 @@ check("an unanswered row shows the host's error",
       lost.text().includes("daemon did not answer"), true);
 check("and its dot reads unknown",
       lost.all().some((n) => n.has("shadow-dot-unknown")), true);
+
+/* The host's own page for the session, through the relay: on the page's
+   header card only, opened in a new tab; the rail's card stays free of any
+   link, and a row without one (no relay) draws none. */
+const LINK = "https://relay.example.com/t/shared-daemon-kimyori/#/s/s4";
+const linked = { ...row, link: LINK };
+const full = ctx.render(linked, { full: true });
+const anchors = full.all().filter((n) => n.tagName === "A");
+check("the header card links the session on its host daemon",
+      anchors.map((a) => [a.href, a.textContent, a.target, a.rel]),
+      [[LINK, LINK, "_blank", "noopener"]]);
+check("the rail card carries no link, even with one in the row",
+      ctx.render(linked).all().filter((n) => n.tagName === "A").length, 0);
+check("no relay, no link line",
+      ctx.render(row, { full: true }).all().some((n) => n.has("shadow-relay")), false);
+check("a link that is not http(s) is not drawn",
+      ctx.render({ ...row, link: "javascript:alert(1)" }, { full: true })
+        .all().some((n) => n.tagName === "A"), false);
 
 /* The address. */
 check("#/r/<machine>/<name> is the shadow page",

@@ -1417,6 +1417,10 @@ class MeshManager:
         #: daemon/shadow.py); raises PeerUnreachable like peer_transport.
         self.peer_streamer: Optional[Callable] = None
         self.relay_connected: Callable[[], bool] = lambda: False
+        #: (machine) -> the ws(s) URL of the relay that carries that machine,
+        #: "" when there is none (RelayPool.carrier_url) — the shadow card's
+        #: link to the session on its own daemon (daemon/shadow.py).
+        self.relay_url_for: Callable[[str], str] = lambda machine: ""
         #: async () -> [machine names] — the other backends on our relay
         #: (RelayUplink.peer_list); None when no uplink or an old relay.
         self.peer_lister: Optional[Callable] = None

@@ -22,6 +22,7 @@ import secrets
 import time
 from collections import deque
 from typing import Deque, Dict, Optional, Tuple
+from urllib.parse import urlsplit
 
 import aiohttp
 
@@ -43,6 +44,29 @@ CONNECT_TIMEOUT = 10.0
 BACKOFF_BASE = 2.0
 BACKOFF_MAX = 30.0
 _STABLE_AFTER = 30.0  # a connection alive this long resets backoff
+
+
+def browser_origin(url: str) -> str:
+    """The address a browser opens for relay ``url`` (``ws(s)://`` -> ``http(s)://``).
+
+    The uplink dials the relay's WebSocket; a person reaches the same relay
+    over HTTP at the same host, where ``/t/<name>/`` is a backend's web UI.
+    Only scheme and host carry over: the uplink's path is the relay's
+    registration endpoint, not a page. "" for anything that is not a
+    ws/wss address.
+    """
+    try:
+        parts = urlsplit(str(url or "").strip())
+        scheme = {"ws": "http", "wss": "https"}.get(parts.scheme.lower())
+        host = parts.hostname
+        port = parts.port
+    except ValueError:
+        return ""
+    if not scheme or not host:
+        return ""
+    if ":" in host:  # IPv6 literal
+        host = f"[{host}]"
+    return f"{scheme}://{host}" + (f":{port}" if port else "")
 
 
 class PeerError(Exception):
@@ -508,6 +532,10 @@ class RelayUplink:
         except Exception:  # noqa: BLE001 — the uplink is going; nothing to tell
             log.debug("stream %d: close not sent", sid, exc_info=True)
 
+    def carrier_url(self, peer: str) -> str:
+        """The relay ``peer`` is reached through: the one this uplink dials."""
+        return self.url
+
     async def peer_list(self, *, timeout: float = 10.0) -> list:
         """Names of the other backends registered on this relay.
 
@@ -814,6 +842,16 @@ class RelayPool:
     # --------------------------------------------------------------------- #
     def _live(self, attr: str) -> list:
         return [up for up in self.uplinks if up.connected and getattr(up, attr)]
+
+    def carrier_url(self, peer: str) -> str:
+        """The URL of the relay that carries ``peer``, "" when none is known.
+
+        The relay :meth:`peer_http` would try first: the route PEER_LIST or
+        the last bridged call learned, while that relay is still up, else
+        the first connected relay that allows peering.
+        """
+        order = self._order_for(peer, self._live("peering"))
+        return order[0].url if order else ""
 
     async def peer_list(self, *, timeout: float = 10.0) -> list:
         """Union of the backends registered on any of this daemon's relays.
