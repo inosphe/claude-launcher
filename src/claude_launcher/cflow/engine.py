@@ -1587,6 +1587,34 @@ def _milestone_source(awaits: "model.Awaits", state: dict, cwd) -> Optional[dict
     return _in_sub(awaits.sub, read, cwd)
 
 
+def _record_consumed(state: dict, step_id: str, count: int, source: Optional[dict]) -> None:
+    """Write ``consumed.<step>`` and, beside it, which run instance the count
+    was read from (``consumed_from.<step>``, that run's ``run_id``)."""
+    state.setdefault("consumed", {})[step_id] = count
+    taken_from = state.setdefault("consumed_from", {})
+    if source and source.get("run_id"):
+        taken_from[step_id] = source["run_id"]
+    else:
+        taken_from.pop(step_id, None)
+
+
+def _consumed_count(state: dict, step_id: str, source: Optional[dict]) -> int:
+    """How many of ``source``'s publications ``step_id`` has consumed.
+
+    A count read from another instance of the source run counts for nothing:
+    a sub run archived and started again under the same name counts its
+    publications from one again, and the main run's record of the old
+    instance's seven cuts would hide the new one's first seven
+    (claunch-wt12o.1.3.1). A record with no instance written beside it (a
+    state from before ``consumed_from``) is taken as it stands.
+    """
+    seen = int((state.get("consumed") or {}).get(step_id) or 0)
+    taken_from = (state.get("consumed_from") or {}).get(step_id)
+    if taken_from and source is not None and source.get("run_id") != taken_from:
+        return 0
+    return seen
+
+
 def _consume_milestone(workflow: Workflow, state: dict, step_id: Optional[str], cwd) -> None:
     """Leaving a step that awaits a milestone records how many publications
     it has now seen, so the next visit waits for a NEW one."""
@@ -1594,8 +1622,8 @@ def _consume_milestone(workflow: Workflow, state: dict, step_id: Optional[str], 
     awaits = step.awaits if step is not None else None
     if awaits is None or awaits.milestone is None:
         return
-    count = _milestone_count(_milestone_source(awaits, state, cwd), awaits.milestone)
-    state.setdefault("consumed", {})[step_id] = count
+    source = _milestone_source(awaits, state, cwd)
+    _record_consumed(state, step_id, _milestone_count(source, awaits.milestone), source)
 
 
 def _pending_requests(sub: str, main: dict, cwd) -> frozenset:
@@ -1648,12 +1676,12 @@ def _consume_from_start(
         if awaits.main in pending:
             count -= 1
         if count > 0:
-            state.setdefault("consumed", {})[step_id] = count
+            _record_consumed(state, step_id, count, main)
 
 
 def _published_view(awaits: "model.Awaits", state: dict, step_id: str, cwd) -> dict:
     source = _milestone_source(awaits, state, cwd)
-    seen = int((state.get("consumed") or {}).get(step_id) or 0)
+    seen = _consumed_count(state, step_id, source)
     count = _milestone_count(source, awaits.milestone)
     out = {
         "milestone": awaits.milestone,

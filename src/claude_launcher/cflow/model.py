@@ -744,7 +744,9 @@ class Awaits:
     #: the wait is over when the count has moved past that record. So a
     #: publication made while the step was being approached, or while it was
     #: left and not yet re-entered, still counts — a handshake cannot be
-    #: missed by arriving late.
+    #: missed by arriving late. The record names the sub run instance it was
+    #: read from: a sub run started again under the same name is read from
+    #: its first publication, not against the old instance's count.
     at: Optional[str] = None
     #: ``awaits: {main: <milestone>}`` — a SUB run's step waits for its main
     #: run to publish ``milestone`` again, under the same consumed rule. The

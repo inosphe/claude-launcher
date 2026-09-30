@@ -698,7 +698,9 @@ new. One publication is left new: when the main run is waiting on that sub
 run by name (`awaits: {sub: <name>}`), what it published on its way into
 that step is a request the sub run is there to answer, and a sub run started
 then — a stack archived and started again while the main run waits at
-`land` — answers it. The probe is `claunch cflow published <main|sub> <milestone>
+`land` — answers it. The record also names the run instance it was counted
+against, so the main run reads a sub run started again under the same name
+from its first publication. The probe is `claunch cflow published <main|sub> <milestone>
 --step <step>`: exit 0 = something new, 1 = not yet, 2 = that run does not
 stand; a checklist item can run the same command. A milestone await may
 also name its own `probe:` (a repository that pins its gates to checkout
