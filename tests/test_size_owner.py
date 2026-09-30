@@ -6,9 +6,9 @@ size back from each other on each focus and refit, and both screens redrew
 without end. The daemon now keeps a size owner per session
 (``Session.claim_size``): only the owner's ``resize`` reaches the PTY, the
 others mirror its grid, and the size changes hands only when the owner has
-gone or is not being looked at, or when a viewer takes it explicitly -- the
-``steal`` control frame (the web header's button) or ``?steal=1`` at the
-open (``claunch attach``).
+gone or when a viewer takes it explicitly -- the ``steal`` control frame
+(the web header's button) or ``?steal=1`` at the open (``claunch attach``).
+Window focus does not move it: two windows blur each other on every click.
 """
 
 from __future__ import annotations
