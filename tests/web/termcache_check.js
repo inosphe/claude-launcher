@@ -130,6 +130,7 @@ function build() {
   FakeTerminal.prototype.onData = function (fn) { this.onData = fn; };
   FakeTerminal.prototype.onResize = function (fn) { this.onResize = fn; };
   FakeTerminal.prototype.attachCustomWheelEventHandler = function (fn) { this.wheel = fn; };
+  FakeTerminal.prototype.attachCustomKeyEventHandler = function (fn) { this.keys = fn; };
   FakeTerminal.prototype.dispose = function () {
     this.disposed = true;
     if (this.element.parentNode) this.element.parentNode.removeChild(this.element);

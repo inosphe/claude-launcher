@@ -440,6 +440,7 @@ class FakeTerminal {
   onData() {}
   onResize() {}
   attachCustomWheelEventHandler() {}
+  attachCustomKeyEventHandler() {}
   write() {}
   resize(c, r) { this.cols = c; this.rows = r; }
   focus() {}
