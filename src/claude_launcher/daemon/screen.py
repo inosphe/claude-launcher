@@ -831,17 +831,28 @@ class ScreenFeeder:
                 # rather than being held in a local, so pending_bytes always
                 # answers "how much has not reached the grid yet" -- mid-chunk
                 # included. That is the number worth watching in an outage.
-                head = self._pending[0]
-                if len(head) <= self._slice:
-                    self._pending.popleft()
-                    self._pending_size -= len(head)
-                    rendered = len(head)
-                    self._render(head)
-                else:
-                    self._pending[0] = head[self._slice :]
-                    self._pending_size -= self._slice
-                    rendered = self._slice
-                    self._render(head[: self._slice])
+                #
+                # A slice is up to SLICE bytes of the queue, however many
+                # chunks that spans. The background pacing below is paid
+                # once per slice, so a slice of one small chunk made it a
+                # wait per chunk: an 18000-character echo arrives as ~200
+                # small reads, and at 0.05 s each it reached the grid ~10 s
+                # late where 22 KB should take ~0.3 s (claunch-an4fd.1).
+                parts = []
+                room = self._slice
+                while self._pending and room:
+                    head = self._pending[0]
+                    if len(head) <= room:
+                        self._pending.popleft()
+                        parts.append(head)
+                        room -= len(head)
+                    else:
+                        self._pending[0] = head[room:]
+                        parts.append(head[:room])
+                        room = 0
+                rendered = self._slice - room
+                self._pending_size -= rendered
+                self._render(parts[0] if len(parts) == 1 else b"".join(parts))
                 # The whole point: hand the loop back between slices, so an
                 # accept or a delivery queued behind us gets its turn.
                 # Clear first, then recheck focus. A focus notification
