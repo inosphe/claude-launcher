@@ -111,6 +111,7 @@ const names = [
   "renderShadowHead", "setShadowStatus", "openShadow", "connectShadow",
   "shadowFrame", "closeShadow", "parseHash", "meshRosterLink",
   "setShadowFit", "fitShadowTerm",
+  "statusCheckText", "statusCheckIcon", "statusCheckName",
 ];
 const fitLines = ["SHADOW_FIT_KEY", "SHADOW_FONT", "SHADOW_FONT_MIN", "SHADOW_FONT_MAX"]
   .map((name) => {
@@ -186,6 +187,36 @@ check("a gated position is marked like the local rail's",
       card.all().some((n) => n.has("shadow-cflow") && n.has("gated")), true);
 check("the card is addressed by machine and name",
       [card.dataset.machine, card.dataset.session], ["shared-daemon-kimyori", "s4"]);
+
+/* The host's status checks and this session's answers (claunch-wxp16):
+   one chip each, coloured by the answer the way a local row's are, with the
+   question on hover -- and still nothing to press. A card without them (an
+   older host, nothing configured) draws no checks line at all. */
+const checked = ctx.render({ ...row, card: { ...row.card, status_checks: [
+  { name: "C", question: "커밋 되었는가?", answer: "yes" },
+  { name: "M", question: "master에 머지 되었는가?", answer: "no" },
+  { name: "T", question: "테스트 통과 되었는가?" },
+] } });
+const chips = checked.all().filter((n) => n.has("rail-status-check"));
+check("each status check is a chip with its answer's class and mark",
+      chips.map((n) => [n.className, n.textContent, n.title]),
+      [["rail-status-check check-yes", "✓ C", "커밋 되었는가?"],
+       ["rail-status-check check-no", "× M", "master에 머지 되었는가?"],
+       ["rail-status-check check-unknown", "• T", "테스트 통과 되었는가?"]]);
+check("the chips sit on one checks line",
+      checked.all().filter((n) => n.has("shadow-checks")).length, 1);
+check("the note is still on the card beside them",
+      checked.all().some((n) => n.has("shadow-note")
+        && n.textContent === "reviewing the parser"), true);
+check("a card with checks still carries no control",
+      checked.all().filter((n) => ["BUTTON", "INPUT", "TEXTAREA", "SELECT", "A", "FORM"]
+        .includes(n.tagName)).length, 0);
+check("a card without status_checks draws no checks line",
+      card.all().some((n) => n.has("shadow-checks")), false);
+check("the page's header card shows them too",
+      ctx.render({ ...row, card: { ...row.card,
+        status_checks: [{ name: "C", question: "q", answer: "yes" }] } }, { full: true })
+        .all().some((n) => n.has("shadow-checks")), true);
 
 /* Clicking goes to the shadow, never to the local #/s/ of the same name. */
 card.fire("click");

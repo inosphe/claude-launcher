@@ -6,8 +6,8 @@ the operator of one daemon *look at* those sessions without being given the
 other daemon's control surface:
 
 * a **card** -- name, handle, role, note, the spawning parent's name, the
-  cached briefing digest, the cflow position and the session's status, and
-  nothing else;
+  cached briefing digest, the cflow position, the session's answers to the
+  status checks and the session's status, and nothing else;
 * a **terminal** that only outputs -- the same init/repaint/PTY-bytes
   protocol the local terminal speaks (``daemon/ws.py``), carried over a live
   relay bridge (``RelayUplink.peer_open``);
@@ -133,6 +133,31 @@ CFLOW_FIELDS = (
 )
 #: The briefing digest fields a card carries (``briefing.digest``).
 BRIEFING_FIELDS = ("one_line", "state", "goal", "now", "progress")
+#: The fields of one status check a card carries (``status_checks.digests``):
+#: the check as the host's user named and asked it, and this session's
+#: answer. The preset id and the report's source stay on the host.
+CHECK_FIELDS = ("name", "question", "answer", "reported_at")
+
+
+def check_rows(rows) -> Optional[List[dict]]:
+    """Status checks cut to the card's fields; None when there are none.
+
+    Used on both sides: the host cuts its own digests with it, and the
+    viewer cuts whatever a peer sent. An answer other than yes/no is
+    dropped, which the page draws as "not reported".
+    """
+    if not isinstance(rows, list):
+        return None
+    out = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        kept = {k: row[k] for k in CHECK_FIELDS if isinstance(row.get(k), str)}
+        if kept.get("answer") not in ("yes", "no"):
+            kept.pop("answer", None)
+        if kept.get("name") or kept.get("question"):
+            out.append(kept)
+    return out or None
 
 
 def cflow_position(entry: Optional[dict]) -> Optional[dict]:
@@ -145,7 +170,8 @@ def cflow_position(entry: Optional[dict]) -> Optional[dict]:
     return {k: entry[k] for k in CFLOW_FIELDS if entry.get(k) is not None}
 
 
-def card(session, member, *, cflow: Optional[dict] = None) -> dict:
+def card(session, member, *, cflow: Optional[dict] = None,
+         checks: Optional[list] = None) -> dict:
     """The card of one of our members, as a peer is shown it.
 
     A whitelist, deliberately: anything not named here (cwd, args, profile,
@@ -170,6 +196,9 @@ def card(session, member, *, cflow: Optional[dict] = None) -> dict:
         "parent": getattr(sdef, "parent", None) or None,
         "briefing": digest or None,
         "cflow": cflow_position(cflow),
+        # The enabled status checks of THIS daemon with this session's
+        # answers (``status_checks.digests``); the viewer's card draws them.
+        "status_checks": check_rows(checks),
     }
 
 
@@ -597,6 +626,9 @@ def _sanitize_card(row: Optional[dict]) -> Optional[dict]:
             if isinstance(flow.get(k), (str, int)) and not isinstance(flow.get(k), bool)
         }
         out["cflow"] = kept or None
+    checks = check_rows(row.get("status_checks"))
+    if checks:
+        out["status_checks"] = checks
     return out
 
 

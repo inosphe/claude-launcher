@@ -41,7 +41,7 @@ import pytest
 from aiohttp import WSMsgType
 
 from claude_launcher import store
-from claude_launcher.daemon import peer_client, session_input, shadow
+from claude_launcher.daemon import peer_client, session_input, shadow, status_checks
 from claude_launcher.daemon import relay_uplink
 from claude_launcher.daemon.api import build_app
 from claude_launcher.daemon.mesh import MeshError, MeshManager, PeerUnreachable
@@ -119,6 +119,24 @@ def test_viewer_recuts_the_card():
         "briefing": {"one_line": "does x", "state": "busy"},
         "cflow": {"workflow": "w", "step_id": "work", "visit": 2},
     }
+    # `status_checks` is optional too (claunch-wxp16): kept cut to the
+    # card's fields, an answer other than yes/no dropped, a row with neither
+    # name nor question dropped; absent, empty or not a list -> no key.
+    cut = shadow._sanitize_card({"session": "s1", "status_checks": [
+        {"id": "p1", "name": "C", "question": "q?", "answer": "yes",
+         "reported_at": "2026-09-30T07:00:00+00:00", "source": "agent"},
+        {"name": "M", "question": "m?", "answer": "maybe"},
+        {"answer": "no"}, "junk", 7,
+    ]})
+    assert cut["status_checks"] == [
+        {"name": "C", "question": "q?", "answer": "yes",
+         "reported_at": "2026-09-30T07:00:00+00:00"},
+        {"name": "M", "question": "m?"},
+    ]
+    for bad in (None, [], "C", {"name": "C"}, [{"answer": "yes"}]):
+        assert "status_checks" not in shadow._sanitize_card(
+            {"session": "s1", "status_checks": bad})
+    assert "status_checks" not in shadow._sanitize_card({"session": "s1"})
     # `parent` is optional: an older host's card without it, or one with a
     # non-string value, comes out with no `parent` key at all.
     assert "parent" not in shadow._sanitize_card({"session": "s1"})
@@ -141,6 +159,28 @@ def test_host_card_names_the_spawning_parent(monkeypatch):
     assert shadow.card(session("s1"), member)["parent"] == "s1"
     assert shadow.card(session(None), member)["parent"] is None
     assert shadow._sanitize_card(shadow.card(session("s1"), member))["parent"] == "s1"
+
+
+def test_host_card_carries_the_status_checks(monkeypatch):
+    """The host's enabled status checks with this session's answers ride on
+    its card (claunch-wxp16), cut to name/question/answer/reported_at; a host
+    with none configured sends None, which the viewer drops."""
+    monkeypatch.setattr(shadow.briefing, "digest", lambda name: None)
+    member = SimpleNamespace(handle="h", role="worker", roles=("worker",))
+    sdef = SimpleNamespace(name="s2", harness="claude", note="n", parent=None)
+    sess = SimpleNamespace(sdef=sdef, status=lambda: "idle", exited=False)
+    digests = [{"id": "p1", "name": "C", "question": "q?", "answer": "no",
+                "reported_at": "2026-09-30T07:00:00+00:00", "source": "agent"},
+               {"id": "p2", "name": "T", "question": "t?"}]
+    got = shadow.card(sess, member, checks=digests)
+    assert got["status_checks"] == [
+        {"name": "C", "question": "q?", "answer": "no",
+         "reported_at": "2026-09-30T07:00:00+00:00"},
+        {"name": "T", "question": "t?"},
+    ]
+    assert got["note"] == "n"
+    assert shadow.card(sess, member)["status_checks"] is None
+    assert "status_checks" not in shadow._sanitize_card(shadow.card(sess, member))
 
 
 def test_cflow_position():
@@ -509,6 +549,10 @@ def test_shadow_list_stream_and_session_line(home, tmp_path):
         mgr = _manager()
         mm_a, mm_b = await _linked_pair(mgr, tmp_path, calls)
         mgr.set_note("sa", "watching the build")
+        # a status check configured on the host, answered by sa
+        status_checks.set_entries([{"id": "p1", "name": "C", "question": "q?",
+                                    "enabled": True}])
+        status_checks.report("sa", [{"id": "p1", "answer": "yes"}])
         client_a, client_b = await _two_apps(mgr, mm_a, mm_b)
         bearer = {"Authorization": "Bearer tokB"}
         try:
@@ -527,6 +571,10 @@ def test_shadow_list_stream_and_session_line(home, tmp_path):
             assert card["note"] == "watching the build"
             # sa was not spawned by anyone: no parent crosses the wire
             assert "parent" not in card
+            # the host's status check and sa's answer do (claunch-wxp16)
+            assert [(c["name"], c["question"], c["answer"])
+                    for c in card["status_checks"]] == [("C", "q?", "yes")]
+            assert "id" not in card["status_checks"][0]
             assert card["exited"] is False
             assert "cwd" not in card and "args" not in card
             assert rows[0]["meshes"][0]["mesh"] == "m@pcA"

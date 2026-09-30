@@ -5572,6 +5572,9 @@ async def h_peer_shadow_cards(request: web.Request) -> web.Response:
 
     def build() -> list:
         cards = []
+        # One read of the status-check file for every card, as the rail's
+        # session poll does it.
+        checks = status_checks.digests([m.session for m in members])
         for member in members:
             try:
                 session = manager.get(member.session)
@@ -5582,7 +5585,9 @@ async def h_peer_shadow_cards(request: web.Request) -> web.Response:
                 _cflow_entry(manager, cwd, session.sdef.name, reports=False, slim=True)
                 if cwd else None
             )
-            cards.append(shadow_mod.card(session, member, cflow=flow))
+            cards.append(shadow_mod.card(
+                session, member, cflow=flow, checks=checks.get(member.session),
+            ))
         return cards
 
     return json_response({"cards": await asyncio.to_thread(build)})
