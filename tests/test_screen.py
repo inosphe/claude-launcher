@@ -787,6 +787,53 @@ def test_a_foreground_feeder_ignores_the_budget():
     assert asyncio.run(run()) < 2.0
 
 
+def _paced_background_drain(chunks, *, delay):
+    """Feed ``chunks`` to a background feeder paced at ``delay`` per slice;
+    return (seconds to drain, the slices pyte was handed)."""
+    import time as _t
+
+    renders = []
+
+    class Counting(ScreenState):
+        def feed_render(self, data):
+            renders.append(len(data))
+            super().feed_render(data)
+
+    async def run():
+        feeder = ScreenFeeder(Counting(120, 30), foreground=lambda: False,
+                              background_delay=delay)
+        t0 = _t.monotonic()
+        for chunk in chunks:                       # all queued before the pump runs
+            feeder.submit(chunk)
+        await feeder.drained()
+        feeder.close()
+        return _t.monotonic() - t0
+
+    return asyncio.run(run()), renders
+
+
+def test_background_pacing_is_per_slice_of_bytes_not_per_chunk():
+    """claunch-an4fd.1: the pacing wait came once per queued chunk, so an
+    18000-character echo -- ~200 small reads off the PTY -- reached a
+    viewerless session's grid ~10 s late at the default 0.05 s. Small chunks
+    are taken together into one slice, and 200 x 100 bytes is 5 slices."""
+    _, renders = _paced_background_drain([b"x" * 100] * 200, delay=0.0)
+    assert renders == [4096] * 4 + [20_000 - 4 * 4096]
+
+
+def test_small_and_large_chunks_drain_at_the_same_byte_rate():
+    """The ceiling is bytes per second whatever the chunking: 20 KB as 200
+    small chunks takes as long as 20 KB in one, ~5 slices x delay."""
+    delay = 0.05
+    small, _ = _paced_background_drain([b"x" * 100] * 200, delay=delay)
+    large, _ = _paced_background_drain([b"x" * 20_000], delay=delay)
+    # Per chunk it was 200 x 0.05 = 10 s; per slice it is 5 x 0.05 = 0.25 s.
+    assert small < 1.0
+    assert large < 1.0
+    assert small < large + 0.2
+    assert small >= 4 * delay                      # still paced, not unpaced
+
+
 def test_an_attached_only_feeder_parks_its_tail_until_a_viewer_arrives():
     """``background_render: false``: nothing is rendered unattended, only the
     last ``background_max_pending`` bytes are kept, and ``wake()`` (a viewer

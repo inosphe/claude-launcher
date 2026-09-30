@@ -8,17 +8,16 @@ lands in A's recipient terminal via paste injection.
 
 The relay tests are skipped unless a peering-capable psmux-relay binary is
 available (build the mux-relay ``backend-peering`` branch where
-``_relay_roots`` looks, or point ``PSMUX_RELAY_EXE`` at one).
+``_relay_exe.relay_roots`` looks, or point ``PSMUX_RELAY_EXE`` at one).
 """
 
 from __future__ import annotations
 
 import asyncio
-import os
 import subprocess
 import sys
 import time
-from pathlib import Path, PurePath, PurePosixPath, PureWindowsPath
+from pathlib import Path
 
 import pytest
 from aiohttp import web
@@ -31,6 +30,8 @@ from claude_launcher.daemon.manager import SessionManager
 from claude_launcher.daemon.mesh import MeshManager, PeerUnreachable
 from claude_launcher.daemon.relay_uplink import RelayPool, RelayUplink
 
+from _relay_exe import find_relay_exe, skip_reason
+
 PASSWORD = "fed-pw"
 BACKEND_TOKEN = "fed-backend-token"
 
@@ -42,83 +43,8 @@ CHILD = (
 )
 
 
-def _relay_roots(
-    os_name: str | None = None, home: PurePath | None = None
-) -> list[PurePath]:
-    """The ``target`` directories a local mux-relay build is looked for in.
-
-    The main mux-relay checkout first: peering landed on its backend-peering
-    branch, so older worktree builds may predate PEER_OPEN (we still check
-    CAP_PEERING at runtime and skip if the binary is too old). ``F:/...`` is
-    where that checkout sits on the Windows host; on POSIX it would be a
-    path relative to the cwd, and the checkout sits under the home directory
-    instead (claunch-wt12o.1.1).
-
-    ``os_name`` and ``home`` default to this host's. They are arguments, and
-    the result is pure paths of the named host's flavour, so a test can ask
-    for the other host's roots: patching ``os.name`` instead makes ``Path``
-    build the other flavour's concrete class, which reads this host's HOME
-    with the other host's rules (and on Python < 3.12 cannot be built at all).
-    """
-    if (os.name if os_name is None else os_name) == "nt":
-        checkout = PureWindowsPath("F:/works/mux-relay")
-    else:
-        checkout = PurePosixPath(Path.home() if home is None else home)
-        checkout = checkout / "works" / "mux-relay"
-    return [
-        checkout / "target",
-        checkout / ".claude" / "worktrees" / "relay-tunnel" / "target",
-    ]
-
-
-def _find_relay_exe() -> Path | None:
-    env = os.environ.get("PSMUX_RELAY_EXE")
-    if env and Path(env).is_file():
-        return Path(env)
-    exe = "psmux-relay.exe" if os.name == "nt" else "psmux-relay"
-    for root in _relay_roots():
-        for prof in ("debug", "release"):
-            p = Path(root) / prof / exe
-            if p.is_file():
-                return p
-    return None
-
-
-RELAY_EXE = _find_relay_exe()
-#: On the tests that start a relay, not on the module: the lookup's own tests
-#: below must run on exactly the hosts where it finds nothing.
-requires_relay = pytest.mark.skipif(
-    RELAY_EXE is None,
-    reason="psmux-relay binary not found (set PSMUX_RELAY_EXE, or build it "
-    "under one of: " + ", ".join(str(root) for root in _relay_roots()) + ")",
-)
-
-
-def test_posix_looks_for_the_relay_under_the_home_directory():
-    """claunch-wt12o.1.1: only ``F:/`` roots were searched, which on POSIX
-    are cwd-relative paths, so every relay test here skipped on Linux."""
-    roots = _relay_roots("posix", home=PurePosixPath("/home/u"))
-    assert roots == [
-        PurePosixPath("/home/u/works/mux-relay/target"),
-        PurePosixPath("/home/u/works/mux-relay/.claude/worktrees/relay-tunnel/target"),
-    ]
-    assert all(root.is_absolute() for root in roots)
-
-
-def test_windows_keeps_its_relay_roots():
-    roots = _relay_roots("nt", home=PurePosixPath("/home/u"))
-    assert roots == [
-        PureWindowsPath("F:/works/mux-relay/target"),
-        PureWindowsPath("F:/works/mux-relay/.claude/worktrees/relay-tunnel/target"),
-    ]
-    assert all(root.is_absolute() for root in roots)
-
-
-def test_the_skip_reason_names_where_it_looked():
-    reason = requires_relay.kwargs["reason"]
-    for root in _relay_roots():
-        assert str(root) in reason
-    assert "PSMUX_RELAY_EXE" in reason
+RELAY_EXE = find_relay_exe()
+requires_relay = pytest.mark.skipif(RELAY_EXE is None, reason=skip_reason())
 
 
 def _free_port() -> int:
