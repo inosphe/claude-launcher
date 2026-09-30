@@ -19,12 +19,31 @@ person using it.
 from __future__ import annotations
 
 import asyncio
+import base64
 import sys
 from pathlib import Path
 
 import pytest
 
 from claude_launcher.daemon import clipboard
+
+POWERSHELL = "/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe"
+
+
+@pytest.fixture(autouse=True)
+def not_wsl(monkeypatch):
+    """Answer "not WSL" unless a test says otherwise.
+
+    The Linux route asks :func:`clipboard.wsl_powershell` first, and on a WSL
+    host the real one finds powershell.exe, so the native-Linux tests below
+    would get the Windows route instead.
+    """
+    monkeypatch.setattr(clipboard, "wsl_powershell", lambda: None)
+
+
+def _script(argv):
+    assert argv[-2] == "-EncodedCommand"
+    return base64.b64decode(argv[-1]).decode("utf-16-le")
 
 
 def test_windows_runs_powershell_in_an_sta_with_the_path_quoted():
@@ -95,6 +114,44 @@ def test_linux_with_neither_tool_says_so_rather_than_failing_at_exec(monkeypatch
     with pytest.raises(clipboard.ClipboardError) as exc:
         clipboard.image_command(Path("/tmp/a.png"), "image/png", platform="linux")
     assert "wl-copy" in str(exc.value) and "xclip" in str(exc.value)
+
+
+def test_wsl_puts_the_image_on_the_windows_clipboard_through_stdin(monkeypatch):
+    monkeypatch.setattr(clipboard, "wsl_powershell", lambda: POWERSHELL)
+    target = Path("/home/u/it's a.png")
+    cmd = clipboard.image_command(target, "image/png", platform="linux")
+    assert cmd.argv[0] == POWERSHELL
+    assert "-STA" in cmd.argv
+    # The file goes in on stdin, so no Windows path is built for it and the
+    # name never appears in the script.
+    assert cmd.stdin_path == target
+    script = _script(cmd.argv)
+    assert "[System.Drawing.Image]::FromStream(" in script
+    assert "[System.Windows.Forms.Clipboard]::SetImage($img)" in script
+    assert str(target) not in script and "it's" not in script
+
+
+def test_wsl_is_chosen_over_the_display_server_tools(monkeypatch):
+    # The harness under WSL falls back to the Windows clipboard, and the
+    # Windows clipboard is the one the operator copies into; a WSLg session
+    # with wl-copy installed does not change which one that is.
+    monkeypatch.setattr(clipboard, "wsl_powershell", lambda: POWERSHELL)
+    monkeypatch.setenv("WAYLAND_DISPLAY", "wayland-0")
+    monkeypatch.setattr(clipboard.shutil, "which", lambda name: f"/usr/bin/{name}")
+    cmd = clipboard.image_command(Path("/tmp/a.png"), "image/png", platform="linux")
+    assert cmd.argv[0] == POWERSHELL
+
+
+def test_wsl_script_reports_a_failure_as_one_utf8_line_on_stderr(monkeypatch):
+    # put_image shows the last stderr line, decoded as UTF-8. PowerShell's own
+    # error output under -EncodedCommand is CLIXML in the console code page,
+    # so the script has to write the reason itself.
+    monkeypatch.setattr(clipboard, "wsl_powershell", lambda: POWERSHELL)
+    cmd = clipboard.image_command(Path("/tmp/a.png"), "image/png", platform="linux")
+    script = _script(cmd.argv)
+    assert "$ErrorActionPreference = 'Stop'" in script
+    assert "UTF8Encoding" in script and "OpenStandardError()" in script
+    assert "exit 1" in script
 
 
 def test_an_unknown_platform_is_a_reason_not_a_crash():

@@ -11,7 +11,9 @@ one long-lived PowerShell; on other Linux it is wl-paste or xclip/xsel.
 be handed an attachment, but a harness does take an image off the clipboard --
 so the web session line's image paste stores the file, fills this machine's
 clipboard with it, and sends the keystroke that harness reads an image with
-(the key comes from the harness declaration, ``image_paste_keys``).
+(the key comes from the harness declaration, ``image_paste_keys``). Under WSL
+"this machine's clipboard" is the Windows one, reached through powershell.exe
+as the reading side does.
 
 Writing overwrites whatever the person at this keyboard had copied, and every
 session on this machine shares the one clipboard. That cost does not go away;
@@ -540,6 +542,45 @@ def _macos_image(path: Path, media_type: str) -> ClipboardCommand:
     )
 
 
+#: The Windows side of the WSL image route. The image comes in on stdin, so
+#: no path has to be translated into one Windows can open (a file under the
+#: Linux side is only reachable as a ``\\wsl.localhost`` share). The failure
+#: goes out as UTF-8 bytes on stderr, where :func:`put_image` reads it: the
+#: console code page is not UTF-8 on every Windows, and PowerShell's own error
+#: output under -EncodedCommand is a CLIXML document rather than a line.
+_WSL_IMAGE_SCRIPT = """\
+$ErrorActionPreference = 'Stop'
+$ProgressPreference = 'SilentlyContinue'
+try {
+  Add-Type -AssemblyName System.Windows.Forms,System.Drawing
+  $ms = New-Object System.IO.MemoryStream
+  [Console]::OpenStandardInput().CopyTo($ms)
+  $ms.Position = 0
+  $img = [System.Drawing.Image]::FromStream($ms)
+  [System.Windows.Forms.Clipboard]::SetImage($img)
+  $img.Dispose()
+} catch {
+  $b = (New-Object System.Text.UTF8Encoding $false).GetBytes($_.Exception.GetBaseException().Message)
+  $err = [Console]::OpenStandardError()
+  $err.Write($b, 0, $b.Length)
+  $err.Flush()
+  exit 1
+}
+"""
+
+
+def _wsl_image(powershell: str, path: Path) -> ClipboardCommand:
+    # The same SetImage as on Windows, run from WSL. -EncodedCommand for the
+    # reason bridge_command gives: WSL rebuilds a Windows command line from
+    # the argv, and a script full of quotes and $ does not survive that.
+    encoded = base64.b64encode(_WSL_IMAGE_SCRIPT.encode("utf-16-le")).decode("ascii")
+    return ClipboardCommand(
+        [powershell, "-NoLogo", "-NoProfile", "-NonInteractive", "-STA",
+         "-EncodedCommand", encoded],
+        stdin_path=path,
+    )
+
+
 def _linux_image(path: Path, media_type: str) -> ClipboardCommand:
     if os.environ.get("WAYLAND_DISPLAY") and shutil.which("wl-copy"):
         return ClipboardCommand(["wl-copy", "--type", media_type], stdin_path=path)
@@ -569,6 +610,13 @@ def image_command(
     if platform == "darwin":
         return _macos_image(path, media_type)
     if platform.startswith("linux"):
+        # Under WSL the harness's clipboard is the Windows one: Claude Code
+        # there reads an image with powershell.exe once xclip and wl-paste
+        # have none. It is also the clipboard the person at this keyboard
+        # copies into.
+        powershell = wsl_powershell()
+        if powershell:
+            return _wsl_image(powershell, path)
         return _linux_image(path, media_type)
     raise ClipboardError(f"no clipboard route is known for platform {platform!r}")
 
