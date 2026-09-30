@@ -4285,6 +4285,8 @@ The instance's sessions inherit these variables and `CLAUNCH_DAEMON`, so a
 exception is `CLAUNCH_DAEMON_PORT`: the daemon keeps it and starts its sessions
 without it, so a daemon started from one of those shells (a test daemon,
 another instance) does not try to bind the port the running instance holds.
+The instance's own daemon started from such a shell reads the port from its
+manifest.
 
 ## License
 

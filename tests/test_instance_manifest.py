@@ -201,6 +201,50 @@ def test_a_session_does_not_carry_its_daemons_port(home, tmp_path, monkeypatch, 
         os.environ.update(saved)
 
 
+def test_a_daemon_started_from_a_session_binds_its_manifests_port(
+    home, tmp_path, monkeypatch
+):
+    """The port a session's shell lacks is still the one its own instance
+    binds when that shell starts the daemon (``claunch daemon restart --all``
+    typed in a session). The shell has the manifest applied, so ``apply()``
+    skips it, and the daemon reads the port from the manifest instead
+    (claunch-d55af).
+    """
+    from claude_launcher import profile
+    from claude_launcher.daemon import __main__ as daemon_main
+    from claude_launcher.daemon import harness
+
+    _manifest(home, "team", {"port": 45671})
+    monkeypatch.setenv(paths.INSTANCE_ENV, "team")
+    im.apply()
+    profile.create("work")
+    sdef = harness.normalize(
+        harness.SessionDef(name="sx", profile="work", cwd=str(tmp_path))
+    )
+    _, env, _ = harness.build_command(sdef)
+    assert im.PORT_ENV not in env
+
+    seen = {}
+
+    async def fake_serve(host, port, cfg, bound=None):
+        seen["port"] = port
+        return 0
+
+    monkeypatch.setattr(daemon_main, "_setup_logging", lambda foreground: None)
+    monkeypatch.setattr(daemon_main, "_serve", fake_serve)
+    saved = os.environ.copy()
+    os.environ.clear()
+    os.environ.update(env)
+    try:
+        assert daemon_main.main([]) == 0
+        assert im.PORT_ENV not in os.environ
+    finally:
+        os.environ.clear()
+        os.environ.update(saved)
+
+    assert seen["port"] == 45671
+
+
 def test_switching_instance_undoes_the_previous_manifest(home, tmp_path, monkeypatch):
     _manifest(home, "team", {"home": str(tmp_path / "t"), "config": str(tmp_path / "t.yaml")})
     monkeypatch.setenv(paths.INSTANCE_ENV, "team")

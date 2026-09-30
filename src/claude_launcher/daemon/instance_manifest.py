@@ -248,6 +248,20 @@ def apply() -> Optional[Manifest]:
     return m
 
 
+def pinned_port() -> Optional[int]:
+    """The port the active instance's manifest pins, read from the file.
+
+    The daemon's fallback when :data:`PORT_ENV` is missing although the
+    manifest names a port. :func:`apply` skips a process tree that already
+    applied this instance, and a session's shell is such a tree started
+    without the port (``daemon.harness``) -- so a daemon started from it
+    (``claunch daemon restart --all`` typed in a session) would otherwise
+    come up on an ephemeral port.
+    """
+    m = load(paths.instance())
+    return m.port if m is not None else None
+
+
 def write(m: Manifest) -> None:
     m.path.parent.mkdir(parents=True, exist_ok=True)
     text = yaml.safe_dump(m.to_doc(), sort_keys=False, allow_unicode=True) if m.to_doc() else "{}\n"

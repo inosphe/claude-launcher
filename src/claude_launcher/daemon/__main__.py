@@ -572,8 +572,11 @@ def main(argv=None) -> int:
     # A daemon started straight from a shell (``--name``/``CLAUNCH_DAEMON``
     # without the CLI) still gets its instance's home, config and port. One
     # the CLI auto-started inherited them already; apply() leaves that as is.
+    # The port is the exception: a session's shell inherits the rest but not
+    # the port, so the manifest's port is read again for the bind below.
     try:
         instance_manifest.apply()
+        manifest_port = instance_manifest.pinned_port()
     except instance_manifest.InstanceManifestError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
@@ -594,7 +597,9 @@ def main(argv=None) -> int:
         # Named instances share the config file with the default daemon, so
         # its fixed port would collide. They bind an ephemeral port instead
         # (their daemon.json is the discovery channel) unless one is pinned.
-        port = int(os.environ.get("CLAUNCH_DAEMON_PORT") or successor_port or 0)
+        port = int(
+            os.environ.get("CLAUNCH_DAEMON_PORT") or successor_port or manifest_port or 0
+        )
         log.info("daemon instance %r (state: %s)", paths.instance(), paths.daemon_dir())
     bound: dict = {}
     # asyncio.run() would release nothing until its close() has joined the
