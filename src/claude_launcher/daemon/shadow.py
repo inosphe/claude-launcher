@@ -147,6 +147,10 @@ def card(session, member, *, cflow: Optional[dict] = None) -> dict:
         "status": session.status(),
         "exited": bool(getattr(session, "exited", False)),
         "note": getattr(sdef, "note", None) or None,
+        # The session that spawned this one, by its name on this daemon. The
+        # viewer's rail uses it to nest this card under its parent's card when
+        # both are on its list (shadowLineage in app.js).
+        "parent": getattr(sdef, "parent", None) or None,
         "briefing": digest or None,
         "cflow": cflow_position(cflow),
     }
@@ -437,7 +441,7 @@ def _sanitize_card(row: Optional[dict]) -> Optional[dict]:
     if not isinstance(row, dict):
         return None
     out: dict = {}
-    for key in ("session", "handle", "role", "harness", "status", "note"):
+    for key in ("session", "handle", "role", "harness", "status", "note", "parent"):
         value = row.get(key)
         if isinstance(value, str):
             out[key] = value
