@@ -8,8 +8,10 @@
 
      - the owner fits the session to its box, as before;
      - a viewer without the size never refits its grid — it mirrors the
-       owner's — and only asks for the size with its box's dimensions,
-       which the daemon grants when nobody else is looking;
+       owner's. It asks for the size only while nobody holds it; while
+       another viewer does, a refit or a window focus asks nothing, since a
+       claim on focus is what handed the size between two windows on every
+       click;
      - the header's `take size` button is up only while another viewer
        holds the size, and pressing it steals the size, then resizes the
        session to this window;
@@ -62,14 +64,15 @@ function build(o) {
   };
   const ws = { readyState: 1, send: (s) => sent.push(JSON.parse(s)) };
   const code = ["setRenderFont", "fitView", "localFit", "requestSize",
-    "renderSizeChip", "stealSize"].map(slice).join("\n");
+    "renderSizeChip", "stealSize", "resyncTerminal"].map(slice).join("\n");
   const api = new Function(
     "$", "WebSocket", "term", "fitAddon", "ws", "canFit", "terminalOnScreen",
     `let sizeOwner = ${o.owner}, sizeHeld = ${o.held};\n` +
     "let sessionEnded = false;\n" +
+    "let linkState = \"live\";\nfunction reconnectNow() {}\n" +
     "const fontSize = 14;\nconst VIEW_FONT_MIN = 4;\n" +
     code +
-    "\nreturn {localFit, renderSizeChip, stealSize," +
+    "\nreturn {localFit, renderSizeChip, stealSize, resyncTerminal," +
     " get owner() { return sizeOwner; } };"
   )((id) => (id === "term-size" ? chip : null), { OPEN: 1 }, term, fitAddon, ws,
     () => true, () => true);
@@ -86,18 +89,25 @@ function build(o) {
   check("the owner is offered no take-size button", w.chip.hidden === true);
 }
 
-/* --- a viewer without the size mirrors, and only asks ------------------ */
+/* --- a viewer without the size mirrors, and asks nothing -------------- */
 {
   const w = build({ owner: false, held: true });
   w.api.localFit();
   check("a viewer without the size does not refit its grid", w.fits.length === 0, w.fits);
   check("its grid stays the owner's", w.term.cols === 80 && w.term.rows === 24,
     [w.term.cols, w.term.rows]);
-  check("it asks for the size with its box's dimensions",
-    JSON.stringify(w.sent) === JSON.stringify([{ type: "resize", cols: 120, rows: 40 }]),
-    w.sent);
+  check("and does not ask for a size another viewer holds", w.sent.length === 0, w.sent);
   w.api.renderSizeChip();
-  check("and is offered the take-size button", w.chip.hidden === false);
+  check("it is offered the take-size button instead", w.chip.hidden === false);
+}
+
+/* --- the focus-switch path: window focus on a non-owner is not a claim -- */
+{
+  const w = build({ owner: false, held: true });
+  w.api.resyncTerminal();   // what window "focus" runs
+  check("a focused window without the size only asks for a repaint",
+    JSON.stringify(w.sent) === JSON.stringify([{ type: "repaint" }]), w.sent);
+  check("and keeps mirroring", w.fits.length === 0 && w.term.cols === 80, w.fits);
 }
 
 /* --- nobody holds it: no button, the next fit is the claim ------------- */
@@ -105,6 +115,11 @@ function build(o) {
   const w = build({ owner: false, held: false });
   w.api.renderSizeChip();
   check("no button while nobody holds the size", w.chip.hidden === true);
+  w.api.localFit();
+  check("the fit claims it with this box's dimensions",
+    JSON.stringify(w.sent) === JSON.stringify([{ type: "resize", cols: 120, rows: 40 }]),
+    w.sent);
+  check("without refitting before the daemon grants it", w.fits.length === 0, w.fits);
 }
 
 /* --- the steal ---------------------------------------------------------- */

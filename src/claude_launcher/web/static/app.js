@@ -13139,15 +13139,14 @@ function fitView() {
    reader can read.
 
    A viewer that does not hold the size leaves its grid alone (it mirrors
-   the owner's) and only asks for the size with this box's dimensions: the
-   daemon grants it when nobody holds it or the holder is not being looked
-   at, and otherwise answers that someone else holds it. Refitting the
-   local grid anyway is what used to make two viewers resize each other
-   without end. */
+   the owner's). While nobody holds it, this box's dimensions are the claim;
+   while another viewer does, nothing is asked at all — a focus or a refit
+   is not a steal, and treating it as one handed the size back and forth
+   between two windows on every click. Taking it is the header's button. */
 function localFit() {
   if (!canFit()) return;
   if (!sizeOwner) {
-    requestSize();
+    if (!sizeHeld) requestSize();
     fitView();
     return;
   }
@@ -13648,8 +13647,8 @@ function restoreTerminal(b) {
   mouseTracking = !!b.mouse;
   sessionEnded = b.exited;
   linkTry = b.retries || 0;
-  // A parked socket keeps its place: the refit below asks for the size
-  // again if it lost it meanwhile, and gets it unless someone is looking.
+  // A parked socket keeps its place: the refit below claims the size if
+  // nobody holds it, and otherwise the header offers to take it.
   sizeOwner = b.owner !== false;
   sizeHeld = !!b.held;
   renderSizeChip();

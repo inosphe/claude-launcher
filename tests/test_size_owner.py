@@ -77,15 +77,18 @@ def test_a_steal_takes_it_from_a_focused_owner():
     assert s.events[-1] == ("size_owner", b)
 
 
-def test_an_owner_nobody_is_looking_at_yields_without_a_steal():
-    """A parked terminal, a hidden tab, an attach whose window lost focus:
-    there is no conflict to protect, so the viewer in use gets the size."""
+def test_an_owner_whose_window_lost_focus_keeps_the_size():
+    """Two windows on one desktop blur each other on every click. A claim
+    granted on blur handed the size to whichever was clicked last, and back
+    again on the next click -- the redraw claunch-tre55 exists to stop.
+    Only a steal, or the holder leaving, moves it."""
     s = _bare_session()
     a, b = _viewer(s), _viewer(s)
     s.claim_size(a)
-    s._focused_subscribers.discard(a)
-    assert s.claim_size(b) is True
-    assert s.size_owner() is b
+    s._focused_subscribers.discard(a)  # focus:false, as a blurred window sends
+    assert s.claim_size(b) is False
+    assert s.size_owner() is a
+    assert s.claim_size(b, force=True) is True
 
 
 def test_the_size_is_released_when_its_owner_leaves():

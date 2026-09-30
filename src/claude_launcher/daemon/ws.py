@@ -88,10 +88,10 @@ owner set. With every viewer sizing the session to its own window, two people
 on one session took the size back from each other on each focus and refit and
 both screens redrew without end (claunch-tre55). ``Session.claim_size`` holds
 the rule: a viewer becomes the owner when nobody holds the size, when the
-holder has gone or is not focused (parked, hidden, blurred), or when it says
-so explicitly -- the ``{"type":"steal"}`` control frame (the web header's
-button) or ``?steal=1`` at the open (``claunch attach``, which always takes
-the size as it attaches). A focused owner is never displaced otherwise: a
+holder has gone, or when it says so explicitly -- the ``{"type":"steal"}``
+control frame (the web header's button) or ``?steal=1`` at the open
+(``claunch attach``, which always takes the size as it attaches). An
+attached owner is never displaced otherwise, focused or not: a
 ``resize`` from anyone else is not applied, and that socket is answered with
 ``{"type":"size_owner","owner":false,"held":true}`` and the grid's actual
 ``resize`` so it can mirror it. ``init.owner`` says whether the socket opened
@@ -458,9 +458,9 @@ async def attach_terminal(
     # the socket's two edges rather than on a timer.
     session.note_visit()
     state = ViewerState(focus_token=queue, overlay_bytes=overlay)
-    # Whose window the PTY follows: this one when it asked (attach), when
-    # nobody holds the size, or when the holder is not being looked at.
-    # Otherwise this viewer mirrors the owner's grid until it steals it.
+    # Whose window the PTY follows: this one when it asked (attach) or when
+    # nobody holds the size. Otherwise this viewer mirrors the owner's grid
+    # until it steals it.
     owner = session.claim_size(queue, force=steal)
     boot_id = app["boot_id"]
     # Set once the frames a fresh socket opens with have all been written.
@@ -937,7 +937,7 @@ async def _handle_control(
             return
         viewer = state.focus_token
         if viewer is not None and not session.claim_size(viewer):
-            # Someone who is looking at this session holds its size. Not
+            # Another attached viewer holds this session's size. Not
             # applied -- that is what used to make two viewers resize each
             # other without end -- and the sender is told who holds it and
             # what the grid is, so a client that fitted itself on a stale

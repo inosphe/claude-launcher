@@ -1826,24 +1826,22 @@ class Session:
 
         - ``force`` -- an explicit steal (the web header's button, or
           ``claunch attach``, which takes the size as it attaches);
-        - nobody holds it, or the holder has gone;
-        - the holder is not focused: a terminal parked behind another
-          session, a hidden tab, an attach whose terminal lost focus. Nobody
-          is looking at that one, so there is no conflict to protect.
+        - nobody holds it, or the holder has gone.
 
-        A focused holder is never displaced without ``force``. A change is
+        A holder that is still attached is never displaced without ``force``
+        -- focused or not. Window focus is not a signal of who is looking:
+        two windows on one desktop blur each other on every click, and a
+        claim granted on blur handed the size back and forth on each click,
+        the very redraw this exists to stop. A web terminal parked behind
+        another session closes its socket (``PARKED_SOCKET_MAX`` is 0 in
+        app.js), so it has gone and frees the size by leaving. A change is
         announced to every viewer as a ``size_owner`` event carrying the new
         holder, so each one learns whether it is the holder now.
         """
         owner = self.size_owner()
         if owner is viewer:
             return True
-        if (
-            not force
-            and owner is not None
-            and owner in self._subscribers
-            and owner in self._focused_subscribers
-        ):
+        if not force and owner is not None and owner in self._subscribers:
             return False
         self._size_owner = viewer
         self._broadcast(("size_owner", viewer))
