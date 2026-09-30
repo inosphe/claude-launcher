@@ -52,7 +52,11 @@ only when *none* of them produced one.
    share a working tree and a checked-out branch: the second one's
    ``git switch -c`` moves the first one's files under it. The main checkout is
    deliberately excluded -- sessions share it all the time, and
-   ``branch-setup`` resolves that case itself by cutting a worktree.
+   ``branch-setup`` resolves that case itself by cutting a worktree. So is the
+   checking session's own reviewer child: ``reviewer-ensure`` spawns it with
+   no worktree of its own, it reads and does not write, and it lives until the
+   run ends -- counted, it failed every round after the first
+   (claunch-kg3oe.1.1).
 
 Everything here reaches the daemon through :mod:`claude_launcher.daemon_client`
 and git through ``subprocess``. Nothing else is imported, and that is a
@@ -87,6 +91,11 @@ from claude_launcher import daemon_client  # noqa: E402
 #: through git or the daemon has no prefix, so the two never compare equal
 #: until it is taken off.
 LONG_PATH_PREFIX = "\\\\?\\"
+
+#: The mesh role ``reviewer-ensure`` spawns its child reviewer with. A live
+#: child of the checking session holding it as its primary role does not
+#: occupy the worktree (see :func:`occupancy_axis`).
+REVIEWER = "reviewer"
 
 
 def _norm(path: str) -> str:
@@ -270,6 +279,21 @@ def occupancy_axis(client, session: str, here: str):
     the workflow already handles. A linked worktree is different: it was cut
     for one session, it holds one checked-out branch, and a second session's
     ``git switch -c`` moves the first one's working tree under it.
+
+    One kind of second session is not a second writer: this session's own
+    reviewer child. ``reviewer-ensure`` spawns it with no worktree, so it
+    stands here, and it stays alive for the rest of the run. It is left out
+    when both hold: the session list names this session as its ``parent``
+    (the spawn edge -- a grandchild or another session's reviewer is still
+    counted), and the mesh roster gives it ``reviewer`` as its *primary* role.
+    The primary role, because that is the one that sets a member's stance; a
+    worker carrying ``reviewer`` as a subrole is still a worker and writes.
+
+    The weak point is that this trusts the role label. A reviewer is read-only
+    by its stance, not by anything this tool can see: a session labelled
+    ``reviewer`` that does write in this worktree is missed here. When the
+    roster cannot be read, nobody is left out -- the axis falls back to
+    counting every live session, which is the answer it gave before.
     """
     if not is_linked_worktree(here):
         return Axis("occupancy", None, "this is the main checkout, not a linked worktree -- branch-setup handles sharing")
@@ -281,22 +305,60 @@ def occupancy_axis(client, session: str, here: str):
     if not isinstance(rows, list):
         return Axis("occupancy", None, "the daemon's session list is not a list")
     mine = _norm(here)
-    others = [
-        str(r.get("name"))
+    live = [
+        r
         for r in rows
         if isinstance(r, dict)
         and r.get("name") != session
         and r.get("status") != "exited"
         and _norm(str(r.get("cwd") or "")) == mine
     ]
+    children = {str(r.get("name")) for r in live if session and r.get("parent") == session}
+    reviewers, unread = set(), ""
+    if children:
+        # Only asked when a child is standing here, so a round with none reads
+        # exactly the one route it read before.
+        reviewers, unread = _reviewer_sessions(client)
+    spared = sorted(children & reviewers)
+    others = sorted(str(r.get("name")) for r in live if str(r.get("name")) not in spared)
+    note = f" (not excluding reviewer children: {unread})" if unread else ""
     if others:
         return Axis(
             "occupancy",
             False,
-            f"{len(others)} other live session(s) stand in this worktree ({', '.join(sorted(others))}) "
-            f"-- one working tree, one checked-out branch, two writers",
+            f"{len(others)} other live session(s) stand in this worktree ({', '.join(others)}) "
+            f"-- one working tree, one checked-out branch, two writers{note}",
+        )
+    if spared:
+        return Axis(
+            "occupancy",
+            True,
+            f"only this session's reviewer child ({', '.join(spared)}) stands in this linked "
+            f"worktree -- it reads and does not write",
         )
     return Axis("occupancy", True, "no other live session stands in this linked worktree")
+
+
+def _reviewer_sessions(client):
+    """Local sessions whose primary mesh role is ``reviewer``, and why not if unread.
+
+    Returns ``(sessions, problem)``. ``problem`` is "" when the roster was
+    read; otherwise the set is empty and the caller counts everyone.
+    ``local`` is required because a mirrored mesh lists members on other
+    machines, and a session name is only unique on one machine.
+    """
+    try:
+        doc = client.get("/api/mesh")
+    except daemon_client.DaemonClientError as exc:
+        return set(), f"cannot read the mesh roster: {_oneline(exc)}"
+    if not isinstance(doc, dict):
+        return set(), "the daemon's mesh roster is not an object"
+    found = set()
+    for info in doc.get("meshes") or []:
+        for member in (info.get("members") or []) if isinstance(info, dict) else []:
+            if isinstance(member, dict) and member.get("local") and member.get("role") == REVIEWER:
+                found.add(str(member.get("session") or ""))
+    return found, ""
 
 
 def main(argv: list[str]) -> int:
