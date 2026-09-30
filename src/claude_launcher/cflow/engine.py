@@ -1481,11 +1481,15 @@ def _move_to(
     # Before the visit counter moves below: the leaving step's `visit` is
     # still the one that was being left.
     _consume_milestone(workflow, state, from_step, cwd)
+    # What this move published, kept with the position it arrives at: a sub
+    # run started while the run waits here reads it as still unanswered
+    # (see _pending_requests).
+    state["arrived_with"] = []
     if honour_skip:
         # A person's goto away is not the step being done: it publishes
         # nothing, or a run moved by hand would tell the other run a fact
         # (a cut made, a request frozen) that never happened.
-        _publish_milestones(workflow, state, from_step, cwd)
+        state["arrived_with"] = _publish_milestones(workflow, state, from_step, cwd)
         spec = workflow.landing_queue
         if spec is not None and spec.reset_at is not None and from_step == spec.reset_at:
             # The declared round boundary of a run that does not end between
@@ -1549,11 +1553,12 @@ def _milestone_count(state: Optional[dict], name: str) -> int:
     return int(entry.get("count") or 0)
 
 
-def _publish_milestones(workflow: Workflow, state: dict, step_id: Optional[str], cwd) -> None:
-    """The leaving step's ``publishes:`` — one more publication of each."""
+def _publish_milestones(workflow: Workflow, state: dict, step_id: Optional[str], cwd) -> List[str]:
+    """The leaving step's ``publishes:`` — one more publication of each.
+    Returns the names published."""
     step = workflow.steps.get(step_id) if step_id else None
     if step is None or not step.publishes:
-        return
+        return []
     marks = state.setdefault("milestones", {})
     for name in step.publishes:
         count = _milestone_count(state, name) + 1
@@ -1569,6 +1574,7 @@ def _publish_milestones(workflow: Workflow, state: dict, step_id: Optional[str],
              "step": step_id, **({"sub": state["sub"]} if state.get("sub") else {})},
             cwd,
         )
+    return list(step.publishes)
 
 
 def _milestone_source(awaits: "model.Awaits", state: dict, cwd) -> Optional[dict]:
@@ -1581,6 +1587,34 @@ def _milestone_source(awaits: "model.Awaits", state: dict, cwd) -> Optional[dict
     return _in_sub(awaits.sub, read, cwd)
 
 
+def _record_consumed(state: dict, step_id: str, count: int, source: Optional[dict]) -> None:
+    """Write ``consumed.<step>`` and, beside it, which run instance the count
+    was read from (``consumed_from.<step>``, that run's ``run_id``)."""
+    state.setdefault("consumed", {})[step_id] = count
+    taken_from = state.setdefault("consumed_from", {})
+    if source and source.get("run_id"):
+        taken_from[step_id] = source["run_id"]
+    else:
+        taken_from.pop(step_id, None)
+
+
+def _consumed_count(state: dict, step_id: str, source: Optional[dict]) -> int:
+    """How many of ``source``'s publications ``step_id`` has consumed.
+
+    A count read from another instance of the source run counts for nothing:
+    a sub run archived and started again under the same name counts its
+    publications from one again, and the main run's record of the old
+    instance's seven cuts would hide the new one's first seven
+    (claunch-wt12o.1.3.1). A record with no instance written beside it (a
+    state from before ``consumed_from``) is taken as it stands.
+    """
+    seen = int((state.get("consumed") or {}).get(step_id) or 0)
+    taken_from = (state.get("consumed_from") or {}).get(step_id)
+    if taken_from and source is not None and source.get("run_id") != taken_from:
+        return 0
+    return seen
+
+
 def _consume_milestone(workflow: Workflow, state: dict, step_id: Optional[str], cwd) -> None:
     """Leaving a step that awaits a milestone records how many publications
     it has now seen, so the next visit waits for a NEW one."""
@@ -1588,11 +1622,37 @@ def _consume_milestone(workflow: Workflow, state: dict, step_id: Optional[str], 
     awaits = step.awaits if step is not None else None
     if awaits is None or awaits.milestone is None:
         return
-    count = _milestone_count(_milestone_source(awaits, state, cwd), awaits.milestone)
-    state.setdefault("consumed", {})[step_id] = count
+    source = _milestone_source(awaits, state, cwd)
+    _record_consumed(state, step_id, _milestone_count(source, awaits.milestone), source)
 
 
-def _consume_from_start(workflow: Workflow, state: dict, main: dict) -> None:
+def _pending_requests(sub: str, main: dict, cwd) -> frozenset:
+    """The milestones the main run published on its way into a step that
+    waits on sub run ``sub`` by name — a request the sub run is there to
+    answer, whether or not it existed when the request was made.
+
+    A stack archived and started again while the main run waits at
+    stack-merge is the case: the ``cut-wanted`` it waits on an answer to was
+    published before this instance started, and reading it as consumed left
+    both runs waiting on each other (claunch-wt12o.1.3.2).
+    """
+    current = main.get("current")
+    if not current:
+        return frozenset()
+    try:
+        main_workflow = _in_main(state_mod.load_snapshot, cwd)
+    except Exception:  # noqa: BLE001 — no readable snapshot: no known wait
+        return frozenset()
+    step = main_workflow.steps.get(current)
+    awaits = step.awaits if step is not None else None
+    if awaits is None or awaits.sub != sub:
+        return frozenset()
+    return frozenset(main.get("arrived_with") or ())
+
+
+def _consume_from_start(
+    workflow: Workflow, state: dict, main: dict, pending: frozenset = frozenset()
+) -> None:
     """A sub run starts having consumed what its main run already published.
 
     With no record a step reads ``consumed`` as 0, so every publication the
@@ -1603,19 +1663,25 @@ def _consume_from_start(workflow: Workflow, state: dict, main: dict) -> None:
     (claunch-wt12o.1.3, claunch-lni18). Each step that awaits a main-run
     milestone therefore starts at the count the main run holds now: only a
     publication made after the start is new to it.
+
+    The exception is ``pending`` (:func:`_pending_requests`): the latest
+    publication of each of those is still waiting for this run, so it
+    starts one short of the count.
     """
     for step_id, step in workflow.steps.items():
         awaits = step.awaits
         if awaits is None or awaits.main is None:
             continue
         count = _milestone_count(main, awaits.main)
-        if count:
-            state.setdefault("consumed", {})[step_id] = count
+        if awaits.main in pending:
+            count -= 1
+        if count > 0:
+            _record_consumed(state, step_id, count, main)
 
 
 def _published_view(awaits: "model.Awaits", state: dict, step_id: str, cwd) -> dict:
     source = _milestone_source(awaits, state, cwd)
-    seen = int((state.get("consumed") or {}).get(step_id) or 0)
+    seen = _consumed_count(state, step_id, source)
     count = _milestone_count(source, awaits.milestone)
     out = {
         "milestone": awaits.milestone,
@@ -3437,7 +3503,7 @@ def _start_impl(
     if not sub:
         _landing_inherit(workflow, old, state)
     else:
-        _consume_from_start(workflow, state, main)
+        _consume_from_start(workflow, state, main, _pending_requests(sub, main, cwd))
     _arrive_timer(workflow, state, workflow.start, None, cwd)
     # And an arrival for `triggers:` for the same reason: `_move_to` records
     # every later one, and a workflow whose FIRST step wants a briefing

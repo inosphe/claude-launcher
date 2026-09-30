@@ -13,7 +13,9 @@ What this file pins:
 * parsing: ``publishes``, ``awaits.at`` / ``awaits.main`` and their refusals;
 * the handshake: request -> cut -> consumed, both directions, and a
   publication made before the reader arrives still counts — while one made
-  before a sub run existed does not;
+  before a sub run existed does not, unless the main run made it on its way
+  into a step that waits on that sub run; a count consumed from one instance
+  of a sub run does not hide the publications of the next;
 * a person's goto away publishes nothing;
 * the probe command, the CLI's exit codes and the probe environment's run;
 * ``landing_queue`` on a sub definition, one holder per scope.
@@ -303,7 +305,7 @@ def _engine_code(source, milestone, step, run=None):
 
 def test_the_gate_twin_answers_as_the_engine_does(proj):
     """tools/published.py is this repository's probe for a milestone await
-    (the project layer names it); it must read the same two fields."""
+    (the project layer names it); it must read the same fields."""
     engine.start("main")
     asks = [("stack", "cut", "land", None), ("main", "cut-wanted", "standby", "stack")]
     assert _tool(PUBLISHED, proj, "stack", "cut", "--step", "land") == 2
@@ -327,12 +329,12 @@ def test_a_sub_run_started_late_has_consumed_what_came_before_it(proj):
     the start is — in the engine and in the gate twin alike."""
     engine.start("main")
     _step(); _step()                   # main at land, cut-wanted #1
+    engine.select("again", "loop", by="agent")   # main -> work: round two
     engine.start("stack", run="stack")
     asked = engine.published("main", "cut-wanted", step="standby", run="stack")
     assert not asked["new"] and (asked["count"], asked["consumed"]) == (1, 1)
     assert _tool(PUBLISHED, proj, "main", "cut-wanted", "--step", "standby", run="stack") == 1
 
-    engine.select("again", "loop", by="agent")   # main -> work
     _step(); _step()                   # main at land again, cut-wanted #2
     asked = engine.published("main", "cut-wanted", step="standby", run="stack")
     assert asked["new"] and (asked["count"], asked["consumed"]) == (2, 1)
@@ -340,6 +342,119 @@ def test_a_sub_run_started_late_has_consumed_what_came_before_it(proj):
     # and the sub run acts on it as it would on any request
     assert _step(run="stack")["step_id"] == "cut"
     assert not engine.published("main", "cut-wanted", step="standby", run="stack")["new"]
+
+
+def test_a_sub_run_started_while_the_main_run_waits_on_it_answers_the_request(proj):
+    """The one publication a late start does not take as consumed: the
+    request the main run made on its way into a step that waits on this sub
+    run. A stack archived and started again while the main run waits at
+    land read that cut-wanted as consumed, and both runs waited on each
+    other (claunch-wt12o.1.3.2). Earlier rounds' requests stay consumed."""
+    engine.start("main")
+    engine.start("stack", run="stack")
+    _step(); _step()                   # main at land, cut-wanted #1
+    _step(run="stack")                 # stack -> cut
+    engine.select("again", "loop", by="agent", run="stack")   # cut #1, stack -> standby
+    engine.select("again", "loop", by="agent")                # main -> work
+    _step(); _step()                   # main at land, cut-wanted #2, waiting on stack
+    engine.archive(by="user", run="stack")
+    engine.start("stack", run="stack")
+    asked = engine.published("main", "cut-wanted", step="standby", run="stack")
+    assert asked["new"] and (asked["count"], asked["consumed"]) == (2, 1)
+    assert _tool(PUBLISHED, proj, "main", "cut-wanted", "--step", "standby", run="stack") == 0
+    assert _step(run="stack")["step_id"] == "cut"
+
+    # started with the main run somewhere that does not wait on it, the
+    # same request is consumed as before
+    engine.archive(by="user", run="stack")
+    engine.select("again", "loop", by="agent")                # main -> work
+    engine.start("stack", run="stack")
+    asked = engine.published("main", "cut-wanted", step="standby", run="stack")
+    assert not asked["new"] and (asked["count"], asked["consumed"]) == (2, 2)
+
+
+def test_a_sub_run_started_again_is_read_from_its_first_publication(proj):
+    """The main run's count of what it consumed belongs to the sub run
+    instance it was read from. A stack sealed and started again under the
+    same name counts its cuts from one again, and the main run's record of
+    the old stack's cut hid the new stack's first one (claunch-wt12o.1.3.1)
+    — in the engine and in the gate twin alike."""
+    engine.start("main")
+    engine.start("stack", run="stack")
+    _step(); _step()                   # main at land, cut-wanted #1
+    _step(run="stack")                 # stack -> cut
+    engine.select("again", "loop", by="agent", run="stack")   # cut #1, stack -> standby
+    engine.select("again", "loop", by="agent")                # main consumes cut #1
+    _step(run="stack")                 # stack at cut again (no new request yet)
+    engine.select("seal", "done", by="agent", run="stack")    # old stack ends
+    assert engine.status(run="stack")["status"] == "done"
+    engine.start("stack", run="stack")
+    view = engine.published("stack", "cut", step="land")
+    assert not view["new"] and (view["count"], view["consumed"]) == (0, 0)
+    _step(); _step()                   # main at land again, cut-wanted #2
+    _step(run="stack")                 # new stack -> cut
+    engine.select("again", "loop", by="agent", run="stack")   # the new stack's cut #1
+    view = engine.published("stack", "cut", step="land")
+    assert view["new"] and (view["count"], view["consumed"]) == (1, 0)
+    assert _tool(PUBLISHED, proj, "stack", "cut", "--step", "land") == 0
+    # consuming it records the new instance, and the wait works as before
+    engine.select("again", "loop", by="agent")
+    view = engine.published("stack", "cut", step="land")
+    assert not view["new"] and (view["count"], view["consumed"]) == (1, 1)
+    assert _tool(PUBLISHED, proj, "stack", "cut", "--step", "land") == 1
+
+
+def test_a_stack_restarted_while_the_main_run_waits_releases_both_sides(proj):
+    """claunch-wt12o.1.3.2 and .1.3.1 together: a stack archived and started
+    again while the main run waits at land takes the pending request, cuts,
+    and the main run takes that cut — neither side waits on the other."""
+    engine.start("main")
+    engine.start("stack", run="stack")
+    for _ in range(3):                 # three rounds on the first stack
+        _step(); _step()               # main at land, cut-wanted #n
+        _step(run="stack")             # stack -> cut
+        engine.select("again", "loop", by="agent", run="stack")   # cut #n
+        engine.select("again", "loop", by="agent")                # main consumes cut #n
+    _step(); _step()                   # main at land, cut-wanted #4, waiting
+    engine.archive(by="user", run="stack")
+    engine.start("stack", run="stack")
+    assert engine.published("main", "cut-wanted", step="standby", run="stack")["new"]
+    assert engine.sync_deadlock(run="stack") is None
+    assert _step(run="stack")["step_id"] == "cut"
+    engine.select("again", "loop", by="agent", run="stack")   # the new stack's cut #1
+    view = engine.published("stack", "cut", step="land")
+    assert view["new"] and (view["count"], view["consumed"]) == (1, 0)
+    assert _tool(PUBLISHED, proj, "stack", "cut", "--step", "land") == 0
+    assert engine.sync_deadlock(run="stack") is None
+
+
+def test_a_consumed_record_with_no_instance_is_taken_as_it_stands(proj):
+    """A state written before ``consumed_from`` existed has counts and no
+    instance beside them; those counts read as they always did."""
+    engine.start("main")
+    engine.start("stack", run="stack")
+    _step(); _step()                   # main at land, cut-wanted #1
+    _step(run="stack")
+    engine.select("again", "loop", by="agent", run="stack")   # cut #1
+    engine.select("again", "loop", by="agent")                # main consumes cut #1
+    state = state_mod.load_state(str(proj))
+    assert state["consumed_from"]["land"] == engine.status(run="stack")["run"]
+    del state["consumed_from"]
+    state_mod.save_state(state, str(proj))
+    view = engine.published("stack", "cut", step="land")
+    assert not view["new"] and (view["count"], view["consumed"]) == (1, 1)
+    assert _tool(PUBLISHED, proj, "stack", "cut", "--step", "land") == 1
+
+
+def test_a_goto_carries_no_request_into_the_step(proj):
+    """A person's goto publishes nothing, so a step reached by one holds no
+    request for a sub run started there to answer."""
+    engine.start("main")
+    _step(); _step()                   # main at land, cut-wanted #1
+    engine.goto("land", by="user", reason="re-enter by hand")
+    engine.start("stack", run="stack")
+    asked = engine.published("main", "cut-wanted", step="standby", run="stack")
+    assert not asked["new"] and (asked["count"], asked["consumed"]) == (1, 1)
 
 
 def test_sub_done_all_may_leave_a_session_long_sub_run_out(proj, capsys):

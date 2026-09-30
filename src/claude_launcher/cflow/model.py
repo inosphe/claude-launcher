@@ -744,14 +744,18 @@ class Awaits:
     #: the wait is over when the count has moved past that record. So a
     #: publication made while the step was being approached, or while it was
     #: left and not yet re-entered, still counts — a handshake cannot be
-    #: missed by arriving late.
+    #: missed by arriving late. The record names the sub run instance it was
+    #: read from: a sub run started again under the same name is read from
+    #: its first publication, not against the old instance's count.
     at: Optional[str] = None
     #: ``awaits: {main: <milestone>}`` — a SUB run's step waits for its main
     #: run to publish ``milestone`` again, under the same consumed rule. The
     #: one direction a sub run may wait: it reads the main run, it never
     #: holds it (a main run's gates do not read this). A sub run starts with
     #: the main run's count at that moment as consumed, so what the main run
-    #: published before the sub run existed is not new to it.
+    #: published before the sub run existed is not new to it — except the
+    #: request the main run published on its way into a step that waits on
+    #: this sub run by name, which is still new.
     main: Optional[str] = None
     #: (With ``at`` or ``main``, ``probe`` may still be given: it replaces
     #: the ``claunch cflow published`` command and nothing else.)

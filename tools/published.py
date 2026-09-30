@@ -12,14 +12,17 @@ milestone still decides what leaving the step consumes.
 
 It reads the run state directly rather than importing the engine, for the
 reason ``tools/sub_done.py`` gives: a gate must hold on the standard library
-alone. The facts are two JSON fields — the source run's
-``milestones.<name>.count`` and the asking run's ``consumed.<step>`` — in the
-slot layout of ``cflow/state.py`` (``runs/<session>/state.json`` for the main
-run, ``runs/<session>/sub/<name>/state.json`` for a sub run).
+alone. The facts are JSON fields — the source run's
+``milestones.<name>.count`` and the asking run's ``consumed.<step>``, which
+counts only while the asking run's ``consumed_from.<step>`` names the source
+run's ``run_id`` (``engine._consumed_count``) — in the slot layout of
+``cflow/state.py`` (``runs/<session>/state.json`` for the main run,
+``runs/<session>/sub/<name>/state.json`` for a sub run).
 ``tests/test_cflow_milestones.py`` pins that this script and
 ``engine.published`` answer alike. A sub run's ``consumed`` does not start
 empty: the engine writes the main run's counts into it when the sub run
-starts (``engine._consume_from_start``), so a publication from before the
+starts (``engine._consume_from_start`` — one short for a request the main
+run is waiting on that sub run to answer), so a publication from before the
 sub run existed reads as consumed here with nothing extra to compute.
 
     uv run --no-sync python tools/published.py stack cut --step stack-merge
@@ -101,6 +104,11 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     step = args.step or asking.get("current")
     consumed = int((asking.get("consumed") or {}).get(step) or 0)
+    # A count taken from another instance of the source run (a sub run
+    # archived and started again under its name) counts for nothing.
+    taken_from = (asking.get("consumed_from") or {}).get(step)
+    if taken_from and source.get("run_id") != taken_from:
+        consumed = 0
     count = int(((source.get("milestones") or {}).get(args.milestone) or {}).get("count") or 0)
     new = count > consumed
     print(
