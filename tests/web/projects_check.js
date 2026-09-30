@@ -195,9 +195,10 @@ const stateBlock = src.slice(
   src.indexOf("function recordProject("));
 const code = [
   "let sessionsCache = [];",
+  "let meshCache = [];",
   stateBlock,
   slice("recordProject"), slice("sessionInCurrentProject"),
-  slice("railSessions"),
+  slice("railSessions"), slice("sessMeshes"), slice("railSessionsWithMeshPeers"),
   slice("hashWithProject"), slice("syncProjectHash"),
   slice("setCurrentProject"), slice("syncRouteProject"),
   "let projectFollowPending = '';", slice("followSessionProject"),
@@ -207,6 +208,7 @@ const code = [
   "return { setCurrentProject, applyProjectDefaultCwd, railSessions, " +
   "hashWithProject, syncRouteProject, followSessionProject, " +
   "sessionTabOtherProject, setSessions: (l) => { sessionsCache = l; }, " +
+  "railSessionsWithMeshPeers, setMeshes: (l) => { meshCache = l; }, " +
   "pending: () => projectFollowPending, " +
   "projectSelectOptions, refreshProjects, current: () => currentProject, " +
   "cache: () => projectsCache };",
@@ -281,6 +283,29 @@ const fns = new Function(...Object.keys(ctx), code)(...Object.values(ctx));
   check("the mesh list is never narrowed to the picked project",
         [src.includes("function meshInCurrentProject("),
          /meshCache = \(data\.meshes \|\| \[\]\)\.filter/.test(src)], [false, false]);
+
+  /* grouped by mesh, a mesh group draws its members from other projects */
+  fns.setMeshes([
+    { name: "room", members: [
+      { local: true, session: "b", handle: "b" },
+      { local: true, session: "d", handle: "d" },
+    ] },
+    { name: "elsewhere", members: [{ local: true, session: "a", handle: "a" }] },
+  ]);
+  check("a mesh group adds the other projects' members of its meshes",
+        fns.railSessionsWithMeshPeers().map((s) => s.name), ["b", "c", "d"]);
+  fns.setCurrentProject("");
+  check("...and 'all projects' draws everything as before",
+        fns.railSessionsWithMeshPeers().map((s) => s.name), ["a", "b", "c", "d"]);
+  fns.setCurrentProject("solo");
+  check("...from either side of the mesh",
+        fns.railSessionsWithMeshPeers().map((s) => s.name), ["b", "d"]);
+  fns.setMeshes([]);
+  check("...and with no mesh the grouped rail is the project's own",
+        fns.railSessionsWithMeshPeers().map((s) => s.name), ["d"]);
+  check("the rail uses it only when grouped by mesh",
+        /meshGrouped && typeof railSessionsWithMeshPeers === "function"/.test(src), true);
+  fns.setCurrentProject("default");
 
   /* a tab of another project keeps its record and names the project */
   check("a tab of another project names it",
