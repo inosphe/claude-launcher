@@ -43,6 +43,12 @@ from aiohttp import web
 
 MAX_TEXT = 100_000
 MAX_ITEMS = 30
+#: The most UTF-16 code units a text of MAX_TEXT characters can take: one
+#: outside the Basic Multilingual Plane (an emoji, say) is a surrogate pair.
+#: The Windows clipboard counts in these units, so the checks made on the
+#: Windows side refuse only above this and leave the character count to
+#: :meth:`History.sample`, the one place that decides, as the UTF-8 routes do.
+MAX_UTF16 = 2 * MAX_TEXT
 
 TOO_LONG = "Clipboard text exceeds the 100,000 character limit"
 
@@ -53,6 +59,15 @@ def read_text(platform: str = sys.platform) -> str:
         return _read_windows()
     if not platform.startswith("linux"):
         raise OSError(f"Host clipboard is not supported on {platform}")
+    return _read_linux()
+
+
+def _read_linux() -> str:
+    """The Linux half of :func:`read_text`: the WSL bridge, else a tool.
+
+    Looked up by name when a read runs, so the test suite replaces this one
+    name to keep every app it serves off the developer's clipboard.
+    """
     bridge = _wsl_bridge()
     if bridge is not None:
         return bridge.read()
@@ -81,7 +96,7 @@ def _read_windows():
         if not handle:
             return ""
         size = kernel.GlobalSize(handle)
-        if size > (MAX_TEXT + 1) * 2:
+        if size > (MAX_UTF16 + 1) * 2:  # bytes, with the terminating NUL
             raise OSError(TOO_LONG)
         pointer = kernel.GlobalLock(handle)
         if not pointer:
@@ -168,6 +183,8 @@ def wsl_powershell(
 #: PowerShell prints on its own is never taken for an answer. ``same`` spares
 #: the pipe a copy of text the reader already holds; its twin is
 #: :attr:`PowerShellBridge._last`, and both start empty with the process.
+#: ``long`` counts ``$text.Length``, which is UTF-16 code units, against
+#: :data:`MAX_UTF16`.
 _BRIDGE_SCRIPT = """\
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
@@ -199,7 +216,7 @@ while ($null -ne [Console]::In.ReadLine()) {
 
 def bridge_command(powershell: str) -> List[str]:
     """The argv that starts the Windows side of the bridge."""
-    script = _BRIDGE_SCRIPT % {"limit": MAX_TEXT}
+    script = _BRIDGE_SCRIPT % {"limit": MAX_UTF16}
     # -EncodedCommand, because WSL rebuilds a Windows command line from the
     # argv and a script full of quotes and $ does not survive that intact.
     # -STA because the clipboard API is single-threaded-apartment only.

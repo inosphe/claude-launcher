@@ -1,7 +1,9 @@
 """Host text history is bounded, authenticated and never sends terminal input."""
 import asyncio
+import sys
 import time
 
+import pytest
 from aiohttp.test_utils import TestClient, TestServer
 
 from claude_launcher.daemon import clipboard
@@ -64,5 +66,24 @@ def test_authenticated_history_delete_and_clear(home):
             await history.sample()
             assert (await client.delete("/api/clipboard", headers=headers)).status == 200
             assert (await (await client.get("/api/clipboard", headers=headers)).json())["items"] == []
+        await mgr.shutdown_all()
+    asyncio.run(run())
+
+
+@pytest.mark.skipif(sys.platform == "win32",
+                    reason="Windows reads in-process, outside this guard (claunch-lxwwf)")
+def test_a_served_app_reads_no_clipboard_under_the_suite(home, monkeypatch):
+    # The history an app samples every second while it is served reaches the
+    # Linux route through read_text; conftest has made that route read nothing.
+    monkeypatch.setattr(clipboard, "read_command", lambda argv: pytest.fail("ran a tool"))
+    monkeypatch.setattr(clipboard, "_wsl_bridge",
+                        lambda: pytest.fail("started powershell.exe"))
+
+    async def run():
+        mgr = SessionManager(idle_threshold=0.5, scrollback=200, restore_default=True)
+        app = build_app(mgr, "secret", started_at=time.monotonic())
+        history = app["clipboard"]
+        await history.sample()
+        assert history.items == [] and history.error is None
         await mgr.shutdown_all()
     asyncio.run(run())
