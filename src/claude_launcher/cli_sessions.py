@@ -38,6 +38,7 @@ from . import (
     lineage,
     profile as profile_mod,
     projects,
+    providers,
     stdio,
     store,
     worktree,
@@ -1657,8 +1658,31 @@ def _cmd_resize(args: argparse.Namespace) -> int:
 # --------------------------------------------------------------------------- #
 # daemon commands
 # --------------------------------------------------------------------------- #
+def _report_compact_problems() -> None:
+    """Print every profile whose auto_compact_at exceeds its context_window.
+
+    The daemon starts anyway -- the other profiles are fine -- and refuses to
+    create or restore a session on a listed profile with the same message.
+    """
+    try:
+        problems = providers.compact_problems()
+    except (providers.ProviderError, store.StoreError) as exc:
+        print(f"error: could not check profiles: {exc}", file=sys.stderr)
+        return
+    for problem in problems.values():
+        print(f"error: {problem}", file=sys.stderr)
+    if problems:
+        print(
+            f"error: sessions on {', '.join(sorted(problems))} will be refused "
+            "until this is fixed",
+            file=sys.stderr,
+        )
+
+
 def _cmd_daemon(args: argparse.Namespace) -> int:
     action = args.action
+    if action in ("start", "restart"):
+        _report_compact_problems()
     if action == "start":
         if daemon_client.connect() is not None:
             print("daemon is already running")

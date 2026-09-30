@@ -662,6 +662,95 @@ def test_env_clear_cli_writes_a_key_with_no_value(home, capsys):
     assert "G=" not in out and "OTHER=1" in out
 
 
+def test_the_provider_wins_over_the_template(home):
+    # Order, lowest first: template < provider < profile chain.
+    _provider("ds", {**DEEPSEEK, "harness_options": {"claude": {"env": {"SHARED": "provider"}}}})
+    store.update(lambda doc: doc.update({"template": {
+        "auto_compact_at": 400_000,
+        "reasoning_effort": "low",
+        "harness_options": {"claude": {"env": {"SHARED": "template", "TPL_ONLY": "t"}}},
+        "env": {"COMMON": "template"},
+    }}))
+    p = _profile_on("work", "ds")
+    spec = providers.spec_for(p)
+    assert spec.auto_compact_at == 900_000          # the provider's
+    assert spec.reasoning_effort == "low"           # the provider leaves it unset
+    env = runner.child_env(p, with_token=True, base_env={})
+    assert env["CLAUDE_CODE_AUTO_COMPACT_WINDOW"] == "900000"
+    assert env["SHARED"] == "provider" and env["TPL_ONLY"] == "t"
+    assert env["COMMON"] == "template"
+    # The profile chain is over both.
+    store.set_profile_field("work", "auto_compact_at", 800_000)
+    store.set_profile_field("work", "harness_options", {"claude": {"env": {"SHARED": "own"}}})
+    env = runner.child_env(p, with_token=True, base_env={})
+    assert env["CLAUDE_CODE_AUTO_COMPACT_WINDOW"] == "800000"
+    assert env["SHARED"] == "own"
+
+
+def test_the_provider_env_wins_over_the_template_env(home):
+    _provider("old", {"env": {"ANTHROPIC_BASE_URL": "https://x", "PICK": "provider"}})
+    store.update(lambda doc: doc.update({"template": {"env": {"PICK": "template"}}}))
+    p = _profile_on("work", "old")
+    env = runner.child_env(p, with_token=True, base_env={})
+    assert env["PICK"] == "provider"
+    store.set_profile_field("work", "env", {"PICK": "own"})
+    assert runner.child_env(p, with_token=True, base_env={})["PICK"] == "own"
+
+
+def test_compact_problem_names_both_values_and_their_layers(home):
+    _provider("small", {"context_window": 128_000})
+    store.update(lambda doc: doc.update({"template": {"auto_compact_at": 400_000}}))
+    p = _profile_on("work", "small")
+    problem = providers.compact_problem(p)
+    assert "auto_compact_at 400000 (from the template)" in problem
+    assert "context_window 128000 (from provider 'small')" in problem
+    assert providers.compact_problems() == {"work": problem}
+    # `claunch run` refuses before launching anything.
+    with pytest.raises(runner.RunnerError, match="exceeds context_window"):
+        runner.run(p, [])
+    # A key with no value on the profile drops the template's threshold.
+    store.update(lambda doc: doc["profiles"]["work"].update({"auto_compact_at": None}))
+    assert providers.compact_problem(p) is None
+    # A threshold that fits is fine.
+    store.set_profile_field("work", "auto_compact_at", 100_000)
+    assert providers.compact_problem(p) is None
+    assert providers.compact_problems() == {}
+
+
+def test_daemon_start_prints_the_problems(home, capsys, monkeypatch):
+    from claude_launcher import cli_sessions, daemon_client
+
+    _provider("small", {"context_window": 128_000})
+    store.update(lambda doc: doc.update({"template": {"auto_compact_at": 400_000}}))
+    _profile_on("work", "small")
+    monkeypatch.setattr(daemon_client, "connect", lambda *a, **k: object())
+    assert cli_main(["daemon", "start"]) == 0
+    err = capsys.readouterr().err
+    assert "error: profile 'work': auto_compact_at 400000" in err
+    assert "sessions on work will be refused" in err
+
+
+def test_profiles_api_lists_the_problems(home):
+    from claude_launcher.daemon import api
+
+    _provider("small", {"context_window": 128_000})
+    store.update(lambda doc: doc.update({"template": {"auto_compact_at": 400_000}}))
+    _profile_on("work", "small")
+    problems = api._compact_problems(store.load())
+    assert list(problems) == ["work"] and "exceeds context_window" in problems["work"]
+
+
+def test_session_on_a_mismatched_profile_is_refused(home):
+    from claude_launcher.daemon import harness as harness_mod
+
+    _provider("small", {"context_window": 128_000})
+    store.update(lambda doc: doc.update({"template": {"auto_compact_at": 400_000}}))
+    _profile_on("work", "small")
+    sdef = harness_mod.SessionDef(name="s", harness="claude", profile="work", cwd=str(home))
+    with pytest.raises(harness_mod.HarnessError, match="exceeds context_window"):
+        harness_mod.normalize(sdef)
+
+
 def test_migrate_converts_the_template_env_block(home):
     store.update(lambda doc: doc.update({"template": {"env": {
         "CLAUDE_CODE_AUTO_COMPACT_WINDOW": "400000",

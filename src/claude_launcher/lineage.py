@@ -139,21 +139,37 @@ def clear_parent(profile: Profile) -> None:
     store.set_profile_field(profile.name, "parent", None)
 
 
-def effective_env(profile: Profile, doc: Optional[dict] = None) -> Dict[str, str]:
-    """Env vars merged from the template, then root ancestor down to the profile.
+def env_layers(
+    profile: Profile, doc: Optional[dict] = None
+) -> Tuple[Dict[str, str], Dict[str, str]]:
+    """The template's env and the chain's env, as ``profile`` sees them.
 
-    The template's ``env`` is the bottom layer and the profile itself the top
-    (child wins). A key written with no value clears what the layers below
-    would give (see :func:`template.resolve_layers`).
+    The chain's is merged root ancestor first (child wins). A key written with
+    no value in a chain entry clears what the template and the ancestors would
+    give (see :func:`template.resolve_layers`). The two are kept apart because
+    they sit on either side of a provider's env: template < provider < chain.
     """
     doc = store.load() if doc is None else doc
     layers = [template.live_env(doc)] + [
         store.profile_entry(p.name, doc).get("env") for p in chain(profile, doc)
     ]
-    env: Dict[str, str] = {}
-    for layer in template.resolve_layers(layers):
-        env.update({str(k): str(v) for k, v in layer.items()})
-    return env
+    resolved = template.resolve_layers(layers)
+    base = {str(k): str(v) for k, v in resolved[0].items()}
+    own: Dict[str, str] = {}
+    for layer in resolved[1:]:
+        own.update({str(k): str(v) for k, v in layer.items()})
+    return base, own
+
+
+def chain_env(profile: Profile, doc: Optional[dict] = None) -> Dict[str, str]:
+    """Env vars merged from root ancestor down to the profile, without the template."""
+    return env_layers(profile, doc)[1]
+
+
+def effective_env(profile: Profile, doc: Optional[dict] = None) -> Dict[str, str]:
+    """Env vars merged from the template, then root ancestor down to the profile."""
+    base, own = env_layers(profile, doc)
+    return {**base, **own}
 
 
 def effective_harness(profile: Profile, doc: Optional[dict] = None) -> str:

@@ -274,7 +274,7 @@ def test_create_registers_and_the_template_applies_without_a_copy(home, capsys):
     # Nothing is copied into the entry; the template is read at launch.
     entry = store.profile_entry("work")
     assert "auto_compact_at" not in entry and "harness_options" not in entry
-    spec = providers.profile_overlay(profile.require("work"))
+    spec = providers.spec_for(profile.require("work"))
     assert spec.auto_compact_at == 400000
     assert spec.option_env("claude") == {"CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "0"}
 

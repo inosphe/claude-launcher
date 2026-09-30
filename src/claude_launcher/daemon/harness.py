@@ -24,7 +24,7 @@ from dataclasses import dataclass, field, replace
 from typing import Dict, Iterable, List, Optional, Tuple
 
 from .. import borrowing, harnesses as harness_registry
-from .. import lineage, metering, pi_provider, profile as profile_mod, projects, routing, runner
+from .. import lineage, metering, pi_provider, profile as profile_mod, projects, providers, routing, runner
 from .. import store, transcripts
 from .. import config as launcher_config
 from . import mesh_roles, paths, pty_backend
@@ -605,6 +605,16 @@ def normalize(sdef: SessionDef, *, restoring: bool = False) -> SessionDef:
         # Persist only the base profile identity. A lender's harness setting is
         # irrelevant and a qualified selector was rejected above.
         sdef = replace(sdef, borrow=lender.name)
+    if prof is not None:
+        # The same refusal `claunch run` makes, before anything is staged:
+        # a compaction threshold past the backend's context window is a
+        # configuration mistake the session cannot work around. The web form
+        # shows this message as the create request's error.
+        auth = profile_mod.require_selector(sdef.borrow) if sdef.borrow else prof
+        try:
+            runner.require_compact_fits(prof, providers.resolve_name(auth))
+        except runner.RunnerError as exc:
+            raise HarnessError(str(exc)) from exc
     if sdef.harness == CLAUDE_HARNESS:
         if not sdef.profile:
             raise HarnessError(

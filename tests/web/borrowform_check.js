@@ -121,6 +121,7 @@ async function checkProfilePicker() {
         { name: "codex", harness: "codex" },
         { name: "codex:claude", harness: "claude", harness_allowed: false },
       ],
+      compact_problems: { work: "profile 'work': auto_compact_at 400000 exceeds" },
     }),
   });
   const picker = {};
@@ -128,13 +129,14 @@ async function checkProfilePicker() {
     "exports", "api", "document", "form", "syncNewBorrowOptions",
     "syncForkAvailability",
     `let profileDetails = {}, newProfileOptions = [], newHarnessFor = null;
+let profileCompactProblems = {};
 function $(id) { return id === "new-session" ? form : null; }
 function spawnParent() { return null; }
 ` + slice("baseProfileName") + slice("normalizeSpawnProfileOptions") +
 slice("spawnProfileSelector") + slice("newProfileUi") +
 slice("newProfileSelector") + slice("refillSpawnHarnesses") +
 slice("refillNewHarnessOptions") + slice("fillSpawnSelect") +
-slice("refreshProfiles") + `
+slice("markCompactProblems") + slice("refreshProfiles") + `
 exports.refresh = refreshProfiles;
 exports.refill = () => refillNewHarnessOptions(form, undefined, true);
 exports.selector = () => newProfileSelector(form);
@@ -146,6 +148,11 @@ exports.details = () => profileDetails;`
   check("the create Profile picker lists each base profile once",
     profileSelect.options.map((o) => o.value).join(",") === "codex,work",
     profileSelect.options.map((o) => o.value));
+  const workOption = profileSelect.options.find((o) => o.value === "work");
+  check("a profile the daemon will refuse is marked in the picker",
+    workOption && workOption.textContent === "work (config error)" &&
+      workOption.title.includes("auto_compact_at 400000"),
+    workOption && [workOption.textContent, workOption.title]);
   check("the first profile starts on its policy-filtered default harness",
     profileSelect.value === "codex" && harnessSelect.value === "codex",
     [profileSelect.value, harnessSelect.value]);
