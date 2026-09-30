@@ -113,22 +113,18 @@ def _cmd_ls(_args: argparse.Namespace) -> int:
             return 1
         print(f"{daemon_client.unreachable_reason(why)}; no meshes")
         return 0
-    # Same narrowing as ``claunch sessions``: inside a managed session the
-    # list is that session's project unless --project says otherwise.
-    scope = projects.listing_scope(
-        getattr(_args, "project", None),
-        environ=os.environ,
-        fetch_own=lambda name: client.get(f"/api/sessions/{name}").get("project"),
-    )
-    project_filter = scope.project
-    query = "" if scope.own or not project_filter else f"?project={quote(project_filter)}"
+    # Meshes are not narrowed to the caller's project, inside a managed
+    # session or not: a mesh may hold members of several projects, and a
+    # session that cannot see the mesh it could talk in never tries to
+    # (claunch-6deos). --project NAME still picks one project when asked.
+    asked = str(getattr(_args, "project", None) or "").strip()
+    project_filter = "" if asked == projects.ALL else asked
+    query = f"?project={quote(project_filter)}" if project_filter else ""
     payload = client.get(f"/api/mesh{query}")
-    everything = payload.get("meshes", [])
-    meshes = [m for m in everything if projects.matches(m.get("project"), project_filter)]
-    footer = projects.scope_footer(
-        scope, hidden=len(everything) - len(meshes),
-        noun="mesh", command="claunch mesh ls",
-    )
+    meshes = [
+        m for m in payload.get("meshes", [])
+        if projects.matches(m.get("project"), project_filter)
+    ]
     if not meshes:
         if project_filter:
             print(f"no meshes in project {project_filter!r}")
@@ -144,8 +140,6 @@ def _cmd_ls(_args: argparse.Namespace) -> int:
             f"{m['messages']} message(s)"
             + tag
         )
-    if footer:
-        print(footer)
     _print_relay(payload.get("relay"))
     return 0
 
@@ -1340,9 +1334,8 @@ def register(sub) -> None:
     p = msub.add_parser("ls", aliases=["list"], help="list meshes")
     p.add_argument(
         "--project", "-P", metavar="NAME",
-        help="only the meshes filed under this project; inside a managed "
-             "session the list is that session's project unless this says "
-             "otherwise, and 'all' lists every project",
+        help="only the meshes filed under this project ('all', or leaving "
+             "it out, lists every project -- inside a managed session too)",
     )
     p.set_defaults(func=_cmd_ls)
 

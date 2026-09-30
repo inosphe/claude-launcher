@@ -5,7 +5,7 @@ because one daemon now carries dozens of meshes and hundreds of sessions,
 and a flat roster stops answering the question a person actually asks of
 it — "the sessions for *this* piece of work". A project is that grouping:
 every session and every mesh belongs to exactly one, and the listings
-(``claunch sessions``, ``claunch mesh ls``, the web rail) can be narrowed to
+(``claunch sessions``, ``claunch mesh ls --project``, the web rail) can be narrowed to
 one project.
 
 Workspaces are **not** filed under projects. A workspace is metadata about a

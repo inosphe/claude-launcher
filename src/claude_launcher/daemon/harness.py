@@ -1101,8 +1101,9 @@ def build_command(
     # it, mapping each session 1:1 to its own workflow run.
     env["CLAUNCH_SESSION"] = sdef.name
     # The project the session is filed under, spelled out even for the
-    # default one. ``claunch sessions`` / ``claunch mesh ls`` read it to
-    # narrow themselves to the caller's project: without it a session in
+    # default one. ``claunch sessions`` reads it to narrow itself to the
+    # caller's project (meshes span projects and are not narrowed,
+    # claunch-6deos): without it a session in
     # project 'gds6' listed every default-project session as if it were its
     # own roster (s769, 2026-09-24) — the record knew the project, the
     # session had no way to.

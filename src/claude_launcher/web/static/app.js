@@ -3709,9 +3709,15 @@ async function refreshSessions(options) {
     }
   }
   // What the rail draws: the cache narrowed to the picked project. Reduced
-  // harnesses define no project state and draw the whole cache.
-  const railList = typeof railSessions === "function"
-    ? railSessions(sessionsCache) : sessionsCache;
+  // harnesses define no project state and draw the whole cache. Grouped by
+  // mesh, a mesh group also draws its members from other projects: meshes
+  // span projects (claunch-6deos), and a group missing half its roster
+  // reads as if those members were not there to talk to.
+  const meshGrouped = typeof sessionGroupOrder === "undefined"
+    ? sessionGroupByMesh : sessionGroupOrder.includes("mesh");
+  const railList = typeof railSessions !== "function" ? sessionsCache
+    : meshGrouped && typeof railSessionsWithMeshPeers === "function"
+      ? railSessionsWithMeshPeers(sessionsCache) : railSessions(sessionsCache);
   // Pins and recent tabs may refer to records outside this poll category.
   if (typeof renderSessionTabs === "function") renderSessionTabs();
   const list = $("session-list");
@@ -8527,7 +8533,10 @@ let workspacesRendered = null;
 
 /* Projects: the tier above meshes and sessions (see projects.py). The rail's
    selector picks one, or "" for every project; the choice narrows the rail's
-   session and mesh lists and seeds the create form's Project row.
+   session list and seeds the create form's Project row. The mesh list is
+   not narrowed: a mesh may hold members of several projects, and one the
+   rail hid is one nobody in the other project would think to talk in
+   (claunch-6deos). A mesh's project is shown as a tag instead.
 
    The choice is part of the address (`?project=<name>` beside `?detail=`),
    so a reload, a bookmark and Back all land on the project they were taken
@@ -8535,9 +8544,9 @@ let workspacesRendered = null;
    bare `#/` typed by hand). "All projects" is the address with no
    `project` at all.
 
-   The narrowing is done here, not by the daemon: both polls fetch every
-   project and the rail filters what it draws (sessionInCurrentProject,
-   meshInCurrentProject). A pick then redraws from what is already in hand
+   The narrowing is done here, not by the daemon: the session poll fetches
+   every project and the rail filters what it draws
+   (sessionInCurrentProject). A pick then redraws from what is already in hand
    instead of waiting for a round trip, and a session of another project
    that is open in a tab stays a real record — its tab shows its real state
    instead of the "unknown" a filtered poll left it with. */
@@ -8567,14 +8576,26 @@ function sessionInCurrentProject(s) {
   return !currentProject || recordProject(s) === currentProject;
 }
 
-/* The same question for a mesh in the rail's mesh list. */
-function meshInCurrentProject(m) {
-  return !currentProject || recordProject(m) === currentProject;
-}
-
 /* The sessions the rail draws: the cache, narrowed to the picked project. */
 function railSessions(list = sessionsCache) {
   return (list || []).filter(sessionInCurrentProject);
+}
+
+/* The rail grouped by mesh: the picked project's sessions, plus every session
+   of another project that shares a mesh with one of them. A mesh spans
+   projects (claunch-6deos), so its group shows its whole local roster; a
+   mesh with no member in the picked project stays out, or picking a project
+   would narrow nothing on a daemon where most sessions are in some mesh.
+   Needs sessMeshes (the mesh poll); without it the rail is railSessions. */
+function railSessionsWithMeshPeers(list = sessionsCache) {
+  const own = railSessions(list);
+  if (!currentProject || typeof sessMeshes !== "function") return own;
+  const meshes = new Set();
+  for (const s of own) for (const m of sessMeshes(s.name)) meshes.add(m.mesh);
+  if (!meshes.size) return own;
+  const shown = new Set(own.map((s) => s.name));
+  return (list || []).filter((s) => shown.has(s.name) ||
+    sessMeshes(s.name).some((m) => meshes.has(m.mesh)));
 }
 
 /* The same address with the project set to `name`, or taken out ("" = all). */
@@ -29385,10 +29406,9 @@ async function refreshMeshList(options) {
   }
   renderRelayBadge(data.relay);
   const oldMeshSignature = JSON.stringify(meshCache);
-  // meshCache stays what it has always been to its readers -- the meshes of
-  // the project the rail shows -- and is re-derived from the full answer.
-  meshCache = (data.meshes || []).filter((m) =>
-    typeof meshInCurrentProject !== "function" || meshInCurrentProject(m));
+  // Every mesh, whatever project the rail shows: meshes span projects
+  // (claunch-6deos), so the list is not narrowed with the sessions.
+  meshCache = data.meshes || [];
   if (sessionGroupByMesh && oldMeshSignature !== JSON.stringify(meshCache)) {
     refreshSessions(options && options.cached ? { cached: true } : undefined);
   }
@@ -29411,10 +29431,10 @@ async function refreshMeshList(options) {
     // a mirror is somebody else's mesh: say so before the counts, since what
     // you can do here (no invites, no policy edits) depends on it
     if (m.primary) li.appendChild(el("span", "mesh-tag", `mirror · ${m.primary}`));
-    // Which project the mesh is filed under, only on the unfiltered list
-    // (one project picked = every row is that project) and only off the
-    // default (the unfiled majority would tag every row the same).
-    if (!currentProject && m.project && m.project !== "default") {
+    // Which project the mesh is filed under, only off the default (the
+    // unfiled majority would tag every row the same). Drawn whatever the
+    // rail shows, since the list is never narrowed to one project.
+    if (m.project && m.project !== "default") {
       li.appendChild(el("span", "mesh-tag", `project · ${m.project}`));
     }
     const inbound = Array.isArray(m.requests)
@@ -29559,7 +29579,7 @@ $("new-mesh").addEventListener("submit", async (e) => {
     return;
   }
   // Filed where the rail is looking: a mesh created while one project is
-  // picked belongs to it, or the list that just gained it could not show it.
+  // picked is tagged with it (the list shows every project's meshes).
   const meshBody = currentProject ? { name, project: currentProject } : { name };
   const resp = await api("/api/mesh", {
     method: "POST",
@@ -29923,8 +29943,8 @@ function renamePeerButton(info, machine) {
    member it hosts, and the mirror here is removed. When the owner cannot be
    told, the operator may drop the mirror here only (the owner keeps a stale
    guest entry its operator can revoke). */
-/* Which project this daemon files the mesh under: a local listing choice
-   (the rail and the create form show one project's meshes), allowed on a
+/* Which project this daemon files the mesh under: a local tag (the rail's
+   mesh list shows every project and names this one), allowed on a
    mirror as well, and never sent to the peers. A mirror attached before
    it could be given one lands in the default project, and this is how it
    is moved to the project its sessions are in. */
@@ -30060,7 +30080,7 @@ function renderRemoteMeshes() {
       const btn = el("button", "wf-btn approve", "Attach");
       btn.addEventListener("click", async () => {
         btn.disabled = true;
-        // Filed under the project the rail shows, so it appears in that list.
+        // Filed under the project the rail shows (a tag on the mesh list).
         const resp = await api(`/api/mesh/${encodeURIComponent(addr)}/attach`, {
           method: "POST", headers: { "Content-Type": "application/json" },
           body: JSON.stringify(currentProject ? { project: currentProject } : {}),
