@@ -18,7 +18,7 @@ import os
 import subprocess
 import sys
 import time
-from pathlib import Path
+from pathlib import Path, PurePath, PurePosixPath, PureWindowsPath
 
 import pytest
 from aiohttp import web
@@ -42,7 +42,9 @@ CHILD = (
 )
 
 
-def _relay_roots() -> list[Path]:
+def _relay_roots(
+    os_name: str | None = None, home: PurePath | None = None
+) -> list[PurePath]:
     """The ``target`` directories a local mux-relay build is looked for in.
 
     The main mux-relay checkout first: peering landed on its backend-peering
@@ -51,13 +53,18 @@ def _relay_roots() -> list[Path]:
     where that checkout sits on the Windows host; on POSIX it would be a
     path relative to the cwd, and the checkout sits under the home directory
     instead (claunch-wt12o.1.1).
+
+    ``os_name`` and ``home`` default to this host's. They are arguments, and
+    the result is pure paths of the named host's flavour, so a test can ask
+    for the other host's roots: patching ``os.name`` instead makes ``Path``
+    build the other flavour's concrete class, which reads this host's HOME
+    with the other host's rules (and on Python < 3.12 cannot be built at all).
     """
-    if os.name == "nt":
-        return [
-            Path("F:/works/mux-relay/target"),
-            Path("F:/works/mux-relay/.claude/worktrees/relay-tunnel/target"),
-        ]
-    checkout = Path.home() / "works" / "mux-relay"
+    if (os.name if os_name is None else os_name) == "nt":
+        checkout = PureWindowsPath("F:/works/mux-relay")
+    else:
+        checkout = PurePosixPath(Path.home() if home is None else home)
+        checkout = checkout / "works" / "mux-relay"
     return [
         checkout / "target",
         checkout / ".claude" / "worktrees" / "relay-tunnel" / "target",
@@ -71,7 +78,7 @@ def _find_relay_exe() -> Path | None:
     exe = "psmux-relay.exe" if os.name == "nt" else "psmux-relay"
     for root in _relay_roots():
         for prof in ("debug", "release"):
-            p = root / prof / exe
+            p = Path(root) / prof / exe
             if p.is_file():
                 return p
     return None
@@ -87,24 +94,24 @@ requires_relay = pytest.mark.skipif(
 )
 
 
-def test_posix_looks_for_the_relay_under_the_home_directory(monkeypatch):
+def test_posix_looks_for_the_relay_under_the_home_directory():
     """claunch-wt12o.1.1: only ``F:/`` roots were searched, which on POSIX
     are cwd-relative paths, so every relay test here skipped on Linux."""
-    monkeypatch.setattr(os, "name", "posix")
-    checkout = Path.home() / "works" / "mux-relay"
-    assert _relay_roots() == [
-        checkout / "target",
-        checkout / ".claude" / "worktrees" / "relay-tunnel" / "target",
+    roots = _relay_roots("posix", home=PurePosixPath("/home/u"))
+    assert roots == [
+        PurePosixPath("/home/u/works/mux-relay/target"),
+        PurePosixPath("/home/u/works/mux-relay/.claude/worktrees/relay-tunnel/target"),
     ]
-    assert all(root.is_absolute() for root in _relay_roots())
+    assert all(root.is_absolute() for root in roots)
 
 
-def test_windows_keeps_its_relay_roots(monkeypatch):
-    monkeypatch.setattr(os, "name", "nt")
-    assert [str(root).replace("\\", "/") for root in _relay_roots()] == [
-        "F:/works/mux-relay/target",
-        "F:/works/mux-relay/.claude/worktrees/relay-tunnel/target",
+def test_windows_keeps_its_relay_roots():
+    roots = _relay_roots("nt", home=PurePosixPath("/home/u"))
+    assert roots == [
+        PureWindowsPath("F:/works/mux-relay/target"),
+        PureWindowsPath("F:/works/mux-relay/.claude/worktrees/relay-tunnel/target"),
     ]
+    assert all(root.is_absolute() for root in roots)
 
 
 def test_the_skip_reason_names_where_it_looked():
