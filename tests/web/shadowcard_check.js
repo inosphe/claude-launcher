@@ -60,7 +60,17 @@ class Node {
   all() { return [this, ...this.children.flatMap((c) => c.all())]; }
   text() { return this.all().map((n) => n.textContent).join("|"); }
 }
-const document = { createElement: (t) => new Node(t) };
+const radios = ["scroll", "fit"].map((value) => ({ value, checked: false }));
+const document = {
+  createElement: (t) => new Node(t),
+  querySelectorAll: (sel) => (sel === 'input[name="shadow-fit"]' ? radios : []),
+};
+const stored = {};
+const localStorage = {
+  getItem: (k) => (k in stored ? stored[k] : null),
+  setItem: (k, v) => { stored[k] = String(v); },
+};
+const getComputedStyle = () => ({ paddingLeft: "6", paddingRight: "6", paddingTop: "6", paddingBottom: "6" });
 const byId = {};
 const $ = (id) => byId[id] || null;
 
@@ -71,9 +81,22 @@ class FakeSocket {
   close() { this.closed = true; }
 }
 const terms = [];
+/* A glyph is 0.6 of the font wide and 1.2 tall, so the drawn grid -- what
+   fit mode measures -- is arithmetic the checks can do by hand. */
 class FakeTerminal {
-  constructor(opts) { this.opts = opts; this.onDataCalls = 0; this.writes = []; terms.push(this); }
-  open(host) { this.host = host; }
+  constructor(opts) {
+    this.opts = opts; this.options = { ...opts }; this.onDataCalls = 0; this.writes = [];
+    this.size = [80, 24]; terms.push(this);
+  }
+  open(host) {
+    this.host = host;
+    const term = this;
+    host.screen = {
+      get offsetWidth() { return Math.floor(term.size[0] * term.options.fontSize * 0.6); },
+      get offsetHeight() { return Math.floor(term.size[1] * term.options.fontSize * 1.2); },
+    };
+    host.querySelector = (sel) => (sel === ".xterm-screen" ? host.screen : null);
+  }
   onData() { this.onDataCalls++; }
   resize(c, r) { this.size = [c, r]; }
   reset() { this.wasReset = true; }
@@ -82,11 +105,18 @@ class FakeTerminal {
 }
 
 const names = [
-  "el", "shadowKey", "shadowHash", "shadowRow", "refreshShadows", "shadowStatus",
+  "el", "shadowKey", "shadowHash", "shadowLogHash", "shadowRow", "refreshShadows", "shadowStatus",
   "shadowCflowGated", "shadowCflowText", "renderShadowCard", "syncShadowActive",
   "renderShadowHead", "setShadowStatus", "openShadow", "connectShadow",
   "shadowFrame", "closeShadow", "parseHash", "meshRosterLink",
+  "setShadowFit", "fitShadowTerm",
 ];
+const fitLines = ["SHADOW_FIT_KEY", "SHADOW_FONT", "SHADOW_FONT_MIN", "SHADOW_FONT_MAX"]
+  .map((name) => {
+    const line = src.match(new RegExp(`^const ${name} = .+$`, "m"));
+    if (!line) throw new Error(`cannot locate ${name} in app.js`);
+    return line[0];
+  });
 const pollLine = src.match(/^const SHADOW_POLL_MS = .+$/m);
 if (!pollLine) throw new Error("cannot locate SHADOW_POLL_MS in app.js");
 
@@ -94,7 +124,9 @@ const ctx = {};
 new Function(
   "exports", "document", "$", "location", "WebSocket", "Terminal", "api", "url",
   "sessionsCache", "showView", "setTimeout", "clearTimeout",
-  [pollLine[0],
+  "localStorage", "getComputedStyle",
+  [pollLine[0], "const BASE = '/';", ...fitLines,
+   "let shadowFit = 'scroll', shadowFitWatch = null;",
    "let shadowRows = [], shadowPolledAt = 0, shadowSig = '';",
    "let shadowOpen = null, shadowTerm = null, shadowSock = null, shadowTicket = 0, shadowRetry = null;",
    "let currentPage = 'home';",
@@ -112,10 +144,11 @@ exports.frame = shadowFrame;
 exports.close = closeShadow;
 exports.rows = () => shadowRows;
 exports.state = () => ({ shadowOpen, shadowTerm, shadowSock });
+exports.setFit = setShadowFit;
 `)(ctx, document, $, location, FakeSocket, FakeTerminal,
    async () => ({ ok: true, json: async () => ctx.nextDoc }),
    (p) => p, ctx.sessionsCache = new Map(), () => {},
-   (fn) => { ctx.retry = fn; return 1; }, () => {});
+   (fn) => { ctx.retry = fn; return 1; }, () => {}, localStorage, getComputedStyle);
 
 let failures = 0;
 function check(what, got, want) {
@@ -173,6 +206,11 @@ check("#/r/<machine>/<name> is the shadow page",
       { page: "shadow", machine: "shared-daemon-kimyori", name: "s4" });
 check("#/s/<name> is still the local terminal",
       ctx.parseHash("#/s/s4"), { page: "terminal", name: "s4" });
+check("#/rlog/<machine>/<name> is the transcript page, for that daemon's session",
+      ctx.parseHash("#/rlog/shared-daemon-kimyori/s4"),
+      { page: "log", machine: "shared-daemon-kimyori", name: "s4" });
+check("#/log/<name> is still the local session's transcript",
+      ctx.parseHash("#/log/s4"), { page: "log", name: "s4" });
 
 /* The mesh roster's link. The page's own idea of locality reads the relay
    name, which is blank on a daemon with no relay; the server's `local` is
@@ -214,14 +252,52 @@ check("and keeps the page's guess for its terminal link",
   byId["shadow-term"] = new Node("div");
   byId["shadow-head"] = new Node("div");
   byId["shadow-status"] = new Node("p");
+  byId["shadow-log"] = new Node("a");
   ctx.open("shared-daemon-kimyori", "s4");
   const t = terms[terms.length - 1];
+  /* What the terminal cannot scroll back to is read on the transcript
+     page: the view links it, beside the status and outside the card. */
+  check("the view links this session's transcript page",
+        byId["shadow-log"].href, "#/rlog/shared-daemon-kimyori/s4");
+  check("and the card itself still carries no control",
+        byId["shadow-head"].all().some((n) => n.tagName === "A" || n.tagName === "BUTTON"),
+        false);
   check("the terminal is built with stdin off", t.opts.disableStdin, true);
   check("and nothing listens for its input", t.onDataCalls, 0);
   check("one socket, to the shadow route",
         sockets[sockets.length - 1].url, "ws://h/api/shadows/shared-daemon-kimyori/s4/ws");
   ctx.frame({ type: "init", cols: 120, rows: 40, exited: false });
   check("init sizes the terminal to the host's grid", t.size, [120, 40]);
+
+  /* Host size | Fit. The grid is the host's; only the font is ours. */
+  const area = byId["shadow-term"];
+  const fits = () => area.screen.offsetWidth <= area.clientWidth - 12
+    && area.screen.offsetHeight <= area.clientHeight - 12;
+  area.clientWidth = 700; area.clientHeight = 500;
+  check("the terminal starts at the normal font", t.options.fontSize, 15);
+  check("host size draws the grid at that font, larger than the area (it scrolls)",
+        [fits(), area.has("shadow-fit")], [false, false]);
+  ctx.setFit("fit");
+  check("fit shrinks the font until the whole grid fits", fits(), true);
+  check("and not further than it has to",
+        t.options.fontSize > 15 * Math.min(688 / (120 * 15 * 0.6), 488 / (40 * 15 * 1.2)) - 1,
+        true);
+  check("the area drops its scrollbar in fit mode", area.has("shadow-fit"), true);
+  check("the choice is remembered, and the radios follow it",
+        [stored["claunch_shadow_fit:/"], radios.map((r) => r.checked)], ["fit", [false, true]]);
+  area.clientWidth = 2400; area.clientHeight = 1400;
+  ctx.frame({ type: "resize", cols: 100, rows: 30 });
+  check("a bigger area or a smaller grid grows it again, still fitting",
+        [t.options.fontSize > 15, fits()], [true, true]);
+  area.clientWidth = 300; area.clientHeight = 200;
+  ctx.frame({ type: "resize", cols: 200, rows: 60 });
+  check("and never below the smallest readable font",
+        t.options.fontSize >= 5, true);
+  ctx.setFit("scroll");
+  check("host size puts the normal font back",
+        [t.options.fontSize, area.has("shadow-fit"), stored["claunch_shadow_fit:/"]],
+        [15, false, "scroll"]);
+  ctx.frame({ type: "resize", cols: 120, rows: 40 });
   check("a refusal ends the reconnect loop",
         ctx.frame({ type: "shadow_error", error: "not a member" }), true);
   check("and says why", byId["shadow-status"].textContent, "not a member");

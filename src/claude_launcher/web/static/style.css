@@ -5392,7 +5392,16 @@ div.shadow-card .shadow-line { white-space: normal; overflow-wrap: anywhere; }
 #shadow-view { flex: 1; min-height: 0; display: flex; flex-direction: column; }
 #shadow-view.hidden { display: none; }
 #shadow-head { padding: 14px 16px 0; }
-#shadow-status { margin: 0; padding: 0 16px 6px; }
+#shadow-bar { display: flex; align-items: center; gap: 8px; padding: 0 16px 6px; }
+#shadow-status { flex: 1; min-width: 0; margin: 0; }
+#shadow-log { flex: none; text-decoration: none; }
+#shadow-view .shadow-fit-tabs { padding: 0; background: none; }
+#shadow-view .shadow-fit-tabs label { flex: none; }
+#shadow-view .shadow-fit-tabs span { padding: 4px 12px; }
+/* Fit: the font is sized so the grid fits (setShadowFit); nothing is left
+   to scroll, so no scrollbar is drawn even when rounding leaves a pixel. */
+#shadow-term.shadow-fit { overflow: hidden; }
+#shadow-term.shadow-fit .xterm-viewport { overflow-y: hidden; }
 #shadow-term { flex: 1; min-height: 0; overflow: auto; padding: 6px; background: #0d1117; }
 #shadow-input {
   flex: none; display: flex; align-items: flex-end; gap: 8px; min-width: 0;

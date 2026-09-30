@@ -1028,10 +1028,28 @@
     <div id="mesh-view" class="hidden"></div>
     <!-- One remote-shadow session: its card, its terminal (output only --
          the host serves no keystroke path, and this xterm has no input
-         handler), and the session line, which the host types as text. -->
+         handler), and the session line, which the host types as text.
+         The terminal takes no scroll and a claude session keeps nothing in
+         scrollback anyway, so what it said earlier is read on its
+         transcript page (#/rlog/<machine>/<name>), linked beside the
+         status. -->
     <div id="shadow-view" class="hidden">
       <div id="shadow-head"></div>
-      <p id="shadow-status" class="wf-note" role="status"></p>
+      <div id="shadow-bar">
+        <p id="shadow-status" class="wf-note" role="status"></p>
+        <!-- How the host's grid is drawn here. The grid is the host's size
+             (a shadow cannot resize it), so "Host size" draws it at the
+             normal font and scrolls when the page is smaller, and "Fit"
+             changes the font until the whole grid fits the area with no
+             scrollbar. Remembered per browser (setShadowFit). -->
+        <fieldset id="shadow-fit" class="session-view-tabs shadow-fit-tabs">
+          <legend class="sr-only">Terminal size</legend>
+          <label><input type="radio" name="shadow-fit" value="scroll" checked><span>Host size</span></label>
+          <label><input type="radio" name="shadow-fit" value="fit"><span>Fit</span></label>
+        </fieldset>
+        <a id="shadow-log" class="term-btn" href="#/"
+           title="read this session's whole conversation — the terminal only shows the current screen">transcript</a>
+      </div>
       <div id="shadow-term" aria-label="remote terminal, read-only"></div>
       <!-- The same prompt presets as the terminal page's strip, above this
            page's session line: a click sends to the remote session on

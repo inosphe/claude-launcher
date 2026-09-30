@@ -772,7 +772,8 @@ globalThis.TranscriptTabs = (() => {
   const transcript=document.getElementById("term-log-pane"), info=document.getElementById("log-info-pane");
   const tabs=[document.getElementById("log-transcript-tab"),document.getElementById("log-info-tab")];
   function select(value) {
-    const showInfo=value==="info";
+    // A hidden info tab (a remote shadow's transcript: it would look up the LOCAL session of that name) is never selected, arrow keys included.
+    const showInfo=value==="info"&&!tabs[1].hidden;
     transcript.hidden=showInfo;info.hidden=!showInfo;
     const format=document.getElementById("log-format");if(format)format.hidden=showInfo;
     tabs.forEach((tab,index)=>{const active=(index===1)===showInfo;tab.setAttribute("aria-selected",String(active));tab.tabIndex=active?0:-1;});
