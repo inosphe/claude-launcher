@@ -68,10 +68,12 @@ from . import (
     lineage,
     mesh_install,
     mesh_topology,
+    projects,
     settings,
 )
 from .cflow import authoring as cflow_authoring, install as cflow_install
 from .cflow import state as cflow_state
+from .daemon import instance_manifest, paths as daemon_paths
 from .profile import Profile
 
 #: The server's key in ``.claude.json`` / ``.mcp.json`` — the name the agent
@@ -163,6 +165,28 @@ BOARD_DENY_RULES = ("Edit(//**/.beads/issues.jsonl)",)
 #: MCP server; measured in ``claunch-1o3o``.
 GATE_ALLOW_RULES = (f"mcp__{MCP_NAME}",)
 
+#: The session variables ``claunch mcp`` has to see, for a harness that hands
+#: its stdio MCP servers only an allow-list of its own environment.
+#:
+#: Claude Code starts the server with its whole environment, so the server
+#: resolves everything the session's shell does. Codex passes a fixed base set
+#: plus the names in ``env_vars``: on a live codex session (claunch-d55af,
+#: 2026-09-30) its ``claunch mcp`` held CLAUNCH_SESSION HOME LANG LOGNAME PATH
+#: SHELL TERM USER, while the codex process above it also held CLAUNCH_PROJECT
+#: and CLAUNCH_SCRATCH. So every variable the daemon sets for claunch's own use
+#: is named here: the session's identity, project and scratch directory
+#: (:func:`daemon.harness.build_command`), and the daemon instance with every
+#: variable its manifest may set. Without the instance, a session of a
+#: ``claunch -L NAME`` daemon resolves the default instance's ``daemon.json``,
+#: and its mesh and spawn tools act on the default daemon's sessions.
+MCP_SESSION_ENV = (
+    cflow_state.SESSION_ENV,
+    projects.SESSION_ENV,
+    "CLAUNCH_SCRATCH",
+    daemon_paths.INSTANCE_ENV,
+    *instance_manifest.ENV_VARS,
+)
+
 
 def mcp_server_def() -> dict:
     """The stdio server entry for the merged MCP bridge.
@@ -236,9 +260,9 @@ def _codex_mcp_lines(home: Path) -> List[str]:
         f"command = {json.dumps(server['command'])}\n"
         f"args = {json.dumps(server.get('args', []))}\n"
         # Codex passes explicitly allow-listed parent variables to stdio MCP
-        # processes.  The session id keeps CLI and MCP calls on the same
-        # cflow/mesh scope.
-        f"env_vars = {json.dumps([cflow_state.SESSION_ENV])}\n"
+        # processes.  These keep CLI and MCP calls on the same session scope
+        # and the same daemon instance (see MCP_SESSION_ENV).
+        f"env_vars = {json.dumps(list(MCP_SESSION_ENV))}\n"
     )
     text = text.rstrip()
     fsplan.write_text(path, f"{text}\n\n{block}" if text else block)

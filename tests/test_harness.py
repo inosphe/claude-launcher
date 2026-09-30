@@ -309,6 +309,28 @@ def test_session_identity_env_exported(home, tmp_path):
     assert env["CLAUNCH_SESSION"] == "hx"
 
 
+def test_codex_mcp_allow_list_names_every_claunch_variable_of_the_session(
+    home, monkeypatch, tmp_path
+):
+    """Codex hands its MCP server only the parent variables install names in
+    ``env_vars``. A CLAUNCH_ variable the daemon starts setting in sessions
+    and install does not name reaches the agent's shell but not its MCP
+    tools, and the two then disagree about the session (claunch-d55af)."""
+    from claude_launcher import harnesses, install
+
+    monkeypatch.setattr(harnesses.Harness, "available", lambda self: True)
+    _profile_for("cx", "codex")
+    sdef = harness.normalize(SessionDef(name="cx1", profile="cx", cwd=str(tmp_path)))
+    _, env, _ = harness.build_command(sdef)
+
+    added = {
+        k for k in env
+        if k.startswith("CLAUNCH_") and os.environ.get(k) != env[k]
+    }
+    assert "CLAUNCH_SESSION" in added
+    assert added <= set(install.MCP_SESSION_ENV)
+
+
 def test_inherited_no_colour_answers_do_not_reach_the_session(
     home, monkeypatch, tmp_path
 ):

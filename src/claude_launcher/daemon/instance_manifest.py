@@ -56,12 +56,15 @@ BASE_ENV = paths.INSTANCE_BASE_ENV
 #: (``restart --all``, ``claunch -L other`` from inside an instance's session)
 #: can put the environment back before applying the next manifest.
 PREV_ENV = "CLAUNCH_INSTANCE_PREV"
+#: The port a named instance binds. Read by the daemon only; its sessions are
+#: launched without it (see ``daemon.harness``).
+PORT_ENV = "CLAUNCH_DAEMON_PORT"
 
 #: Manifest key -> the environment variable it sets.
 _KEY_ENV = {
     "home": config.LAUNCHER_HOME_ENV,
     "config": config.LAUNCHER_SYNC_ENV,
-    "port": "CLAUNCH_DAEMON_PORT",
+    "port": PORT_ENV,
 }
 
 #: Every variable :func:`apply` may set -- what a caller that switches
@@ -243,6 +246,20 @@ def apply() -> Optional[Manifest]:
     os.environ[BASE_ENV] = base
     os.environ[APPLIED_ENV] = name
     return m
+
+
+def pinned_port() -> Optional[int]:
+    """The port the active instance's manifest pins, read from the file.
+
+    The daemon's fallback when :data:`PORT_ENV` is missing although the
+    manifest names a port. :func:`apply` skips a process tree that already
+    applied this instance, and a session's shell is such a tree started
+    without the port (``daemon.harness``) -- so a daemon started from it
+    (``claunch daemon restart --all`` typed in a session) would otherwise
+    come up on an ephemeral port.
+    """
+    m = load(paths.instance())
+    return m.port if m is not None else None
 
 
 def write(m: Manifest) -> None:

@@ -80,7 +80,20 @@ def test_install_codex_profile_targets_codex_home(home, capsys):
     assert not (pdir / "skills").exists()
     config_text = (codex_home / "config.toml").read_text(encoding="utf-8")
     assert "[mcp_servers.claunch]" in config_text
-    assert 'env_vars = ["CLAUNCH_SESSION"]' in config_text
+    import json
+    import re
+
+    line = re.search(r"^env_vars = (.*)$", config_text, re.M)
+    env_vars = set(json.loads(line.group(1)))
+    # The session's identity, project and scratch directory, and the daemon
+    # instance with what its manifest sets: codex hands its MCP server only
+    # these, so a session of `claunch -L team` would otherwise have its tools
+    # talk to the default daemon (claunch-d55af).
+    assert {
+        "CLAUNCH_SESSION", "CLAUNCH_PROJECT", "CLAUNCH_SCRATCH",
+        "CLAUNCH_DAEMON", "CLAUDE_LAUNCHER_HOME", "CLAUDE_LAUNCHER_SYNC_FILE",
+        "CLAUNCH_INSTANCE_APPLIED", "CLAUNCH_INSTANCE_BASE",
+    } <= env_vars
     assert "restart active agent sessions" in out
 
 

@@ -2832,8 +2832,12 @@ claunch install --all-profile      # every existing profile (alias: --all)
 Profile installation follows the selected harness. Claude uses the profile
 root, Codex uses `codex/config.toml`, Kimi Code uses `kimi/mcp.json`, and
 Cursor Agent uses `agent/mcp.json`; skills are written below each harness
-home. Pi receives the skills, but its install reports that MCP is unavailable
-because Pi does not provide an MCP client. A one-off harness selection is also
+home. Codex hands an MCP server only a base environment plus the variables its
+entry lists in `env_vars`, so the Codex entry lists the session and instance
+variables (`CLAUNCH_SESSION`, `CLAUNCH_DAEMON`, …); a Codex profile installed
+by an earlier version needs `claunch install --profile P` again, and its
+running sessions need a restart. Pi receives the skills, but its install
+reports that MCP is unavailable because Pi does not provide an MCP client. A one-off harness selection is also
 supported, for example `claunch install --profile work:kimi`.
 
 | Command | Description |
@@ -4276,6 +4280,13 @@ A profile directory typically holds:
 An [instance manifest](#giving-an-instance-its-own-home-and-config) sets
 `CLAUDE_LAUNCHER_HOME`, `CLAUDE_LAUNCHER_SYNC_FILE` and `CLAUNCH_DAEMON_PORT`
 for everything run under `-L NAME`, over any value already in the environment.
+The instance's sessions inherit these variables and `CLAUNCH_DAEMON`, so a
+`claunch` command run inside one reaches its own instance without `-L`. The
+exception is `CLAUNCH_DAEMON_PORT`: the daemon keeps it and starts its sessions
+without it, so a daemon started from one of those shells (a test daemon,
+another instance) does not try to bind the port the running instance holds.
+The instance's own daemon started from such a shell reads the port from its
+manifest.
 
 ## License
 

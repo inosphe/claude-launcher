@@ -33,6 +33,14 @@ log = logging.getLogger("claunch.daemon")
 #: code — the restarting daemon itself still exits 0.
 RESTART_CODE = 75
 
+#: The port a restarting named instance hands its successor (see
+#: :func:`_successor_env`). A variable of its own that the successor removes
+#: as it starts: handed over as ``CLAUNCH_DAEMON_PORT`` it stayed in the
+#: successor's environment, reached every session it launched, and a session's
+#: ``claunch -L other`` then auto-started the other instance on this one's
+#: port (claunch-d55af).
+SUCCESSOR_PORT_ENV = "CLAUNCH_SUCCESSOR_PORT"
+
 
 def _setup_logging(foreground: bool) -> None:
     handlers = [logging.StreamHandler(sys.stderr)]
@@ -555,6 +563,8 @@ def main(argv=None) -> int:
         "via the CLAUNCH_DAEMON env var)",
     )
     args = parser.parse_args(argv)
+    # Out of the environment before anything can inherit it.
+    successor_port = os.environ.pop(SUCCESSOR_PORT_ENV, "")
     if args.name:
         # Into the environment (not a variable) so every paths.instance()
         # call — and any child process — sees the same instance.
@@ -562,8 +572,11 @@ def main(argv=None) -> int:
     # A daemon started straight from a shell (``--name``/``CLAUNCH_DAEMON``
     # without the CLI) still gets its instance's home, config and port. One
     # the CLI auto-started inherited them already; apply() leaves that as is.
+    # The port is the exception: a session's shell inherits the rest but not
+    # the port, so the manifest's port is read again for the bind below.
     try:
         instance_manifest.apply()
+        manifest_port = instance_manifest.pinned_port()
     except instance_manifest.InstanceManifestError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
@@ -584,7 +597,9 @@ def main(argv=None) -> int:
         # Named instances share the config file with the default daemon, so
         # its fixed port would collide. They bind an ephemeral port instead
         # (their daemon.json is the discovery channel) unless one is pinned.
-        port = int(os.environ.get("CLAUNCH_DAEMON_PORT") or 0)
+        port = int(
+            os.environ.get("CLAUNCH_DAEMON_PORT") or successor_port or manifest_port or 0
+        )
         log.info("daemon instance %r (state: %s)", paths.instance(), paths.daemon_dir())
     bound: dict = {}
     # asyncio.run() would release nothing until its close() has joined the
@@ -653,13 +668,16 @@ def _successor_env(actual_port: Optional[int]) -> Optional[dict]:
 
     Returned as a copy rather than set on ``os.environ``: a variable poked
     into this process on the way out is still there for everything else
-    sharing it, which in a test run is every later test.
+    sharing it, which in a test run is every later test. And carried in
+    :data:`SUCCESSOR_PORT_ENV`, which the successor removes as it starts,
+    rather than in ``CLAUNCH_DAEMON_PORT``, which would stay in the
+    successor's environment and pass to its sessions.
     """
     if not actual_port or not paths.instance():
         return None
     if os.environ.get("CLAUNCH_DAEMON_PORT"):
         return None
-    return {**os.environ, "CLAUNCH_DAEMON_PORT": str(actual_port)}
+    return {**os.environ, SUCCESSOR_PORT_ENV: str(actual_port)}
 
 
 if __name__ == "__main__":
