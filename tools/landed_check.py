@@ -27,23 +27,38 @@ stacked on the tip adds an ordinary single-parent commit and is excluded.
 
     git rev-list --parents --merges <my tip>..<B>   ->  a parent == <my tip>?
 
+A leader does still fast-forward now and then (``8337cd2e`` was landed that
+way), and a fast-forward leaves no merge commit. So the same no-argument form
+also reads the one landing a stacked child cannot fake: the local
+``master`` (:data:`DEFAULT_TARGET`) contains the tip. A child stacked on the
+tip is on its own branch, not on master, so it stays "not yet"; a nested
+worker's landing is a ``--no-ff`` merge on its parent's branch and is found by
+the scan. The target is not pinned, so this does not reintroduce the
+master-only reading ``merge_ready.py`` was cured of.
+
 Exit code 0 = landed, 1 = not yet, 2 = could not tell.
 
 ``--target`` narrows the question to one branch and asks plain ancestry
 instead, which is what a nested worker wants (its target is the parent's
-branch, not master) and what answers a fast-forward landing. Left off, the
-merge-parent scan runs over every other local branch: the check has to be
-correct from a static ``verify`` string that cannot know whether this
+branch, not master). Left off, the merge-parent scan runs over every other
+local branch and the fast-forward check runs against master: the check has to
+be correct from a static ``verify`` string that cannot know whether this
 particular run reports to the leader or to a middle worker.
+
+A branch that never got a commit of its own has its tip inside master from the
+start, which is indistinguishable in the graph from a fast-forward landing.
+The reflog tells them apart: if the branch has never moved off the commit it
+was created at, the fast-forward reading is refused (exit 2). Where the reflog
+is gone (a fresh clone, an expired log) that guard cannot run and a tip
+contained in master reads as landed -- the exposure is a round with no
+commits, which ``rebase`` already ends with "nothing to land".
 
 What this does NOT prove, kept honest in the same spirit as
 ``deploy_check.py``: that what landed is what was *reviewed*. A leader who
 merges and then reverts still leaves the merge in history. A squash or a
 rewrite lands the same change under a different sha and reads here as "not
 yet" -- the worker then has a rewritten history to explain, which is exactly
-the case the step's ``done_when`` asks it to spell out by hand. A landing
-fast-forwarded instead of merged (which the contract forbids) leaves no merge
-commit and also reads as "not yet"; ``--target`` is the escape. What this
+the case the step's ``done_when`` asks it to spell out by hand. What this
 closes is the cheaper failure, the one that kept happening: the round ends
 with the branch nowhere.
 """
@@ -148,6 +163,20 @@ def _merged_by(repo: Path, tip: str, branch: str) -> bool:
         if tip in line.split()[1:]:
             return True
     return False
+
+
+def _never_advanced(repo: Path, branch: str, tip: str) -> bool:
+    """True when ``branch`` still stands on the commit it was created at.
+
+    The oldest reflog entry is the branch's creation point; if it is the tip,
+    the branch has no commit of its own. An unreadable or empty reflog is
+    "not known", answered False so the caller falls back to the plain reading.
+    """
+    proc = _git(repo, "reflog", "show", "--format=%H", f"refs/heads/{branch}")
+    if proc.returncode != 0:
+        return False
+    hashes = [h.strip() for h in proc.stdout.splitlines() if h.strip()]
+    return bool(hashes) and hashes[-1] == tip
 
 
 def _fetch_target(repo: Path, target: str) -> Tuple[Optional[str], str]:
@@ -281,6 +310,19 @@ def main(argv: Optional[List[str]] = None) -> int:
     except LookupError as exc:
         print(str(exc), file=sys.stderr)
         return CANNOT_TELL
+
+    if not holders and _git(repo, "rev-parse", "--verify", "--quiet", DEFAULT_TARGET).returncode == 0:
+        if _git(repo, "merge-base", "--is-ancestor", tip, DEFAULT_TARGET).returncode == 0:
+            if mine is not None and _never_advanced(repo, mine, tip):
+                print(
+                    f"cannot tell: {mine} has no commit of its own -- {tip[:12]} "
+                    f"is in {DEFAULT_TARGET} because the branch was cut from it, "
+                    f"which is not a landing",
+                    file=sys.stderr,
+                )
+                return CANNOT_TELL
+            print(f"landed: {DEFAULT_TARGET} contains {tip[:12]} (fast-forward)")
+            return 0
 
     if holders:
         # Every branch rebased onto the landing carries that merge too, so the
