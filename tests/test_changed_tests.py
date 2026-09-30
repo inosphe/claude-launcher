@@ -661,13 +661,30 @@ def test_basetemp_still_says_whose_run_it_is(monkeypatch):
     assert path.startswith(changed_tests.basetemp_root().as_posix())
 
 
-def test_basetemp_stays_under_the_measured_path_ceiling():
+def test_basetemp_stays_under_the_measured_path_ceiling(monkeypatch):
     """48 characters, measured, not guessed: xdist nests ``popen-gwN/`` under
     it and the transcript tests fold an absolute cwd back into a filename, so
     the path is ``2*basetemp+162`` against MAX_PATH -- 48 passes at 258, 49
-    fails at 260. The generation suffix has to be spent out of that budget."""
+    fails at 260. The generation suffix has to be spent out of that budget.
+    MAX_PATH is Windows', so this is the Windows root, taken on any host."""
+    monkeypatch.setattr(changed_tests.pytest_basetemp, "_windows", lambda: True)
     path = changed_tests.session_basetemp("s1234567890", now=1_000_000)
+    assert path.startswith("C:/t/s1234567890c"), path
     assert len(path) <= 48, path
+
+
+def test_the_posix_basetemp_is_absolute_and_outside_the_checkout(monkeypatch):
+    """claunch-wt12o.5: on POSIX ``C:/t`` is a *relative* path, so pytest
+    resolved it against the cwd -- the checkout under test -- and either made
+    ``C:/t/...`` there or died in INTERNALERROR with no ``C:`` to put it in.
+    Off Windows the root is the launcher home's ``basetemp`` directory."""
+    from claude_launcher import config
+
+    monkeypatch.setattr(changed_tests.pytest_basetemp, "_windows", lambda: False)
+    path = Path(changed_tests.session_basetemp("s99", now=1_000_000))
+    assert path.is_absolute(), path
+    assert path.parent == config.launcher_home() / "basetemp"
+    assert SCRIPT.parents[1] not in path.parents, path
 
 
 def test_a_pinned_basetemp_reaches_the_command():
@@ -723,6 +740,34 @@ def test_pruning_survives_a_locked_directory(tmp_path, monkeypatch):
 
     monkeypatch.setattr(changed_tests.shutil, "rmtree", boom)
     assert changed_tests.prune_basetemps("s99", keep=1) == []
+
+
+def test_the_gate_makes_the_default_root_before_it_runs(
+    repo, gate, tmp_path, monkeypatch
+):
+    """pytest creates the basetemp but not the directory it sits in
+    (``getbasetemp``'s ``mkdir`` has no ``parents``). On a host that never
+    had the root, the first gate died in INTERNALERROR with
+    ``FileNotFoundError`` and ran nothing -- measured on Linux, claunch-wt12o.5."""
+    root = tmp_path / "never" / "made"
+    monkeypatch.setattr(changed_tests, "basetemp_root", lambda: root)
+    _write(repo, "src/pkg/mesh.py", "x = 2\n")
+
+    assert gate() == 0
+    assert root.is_dir()
+
+
+def test_a_pinned_basetemp_leaves_the_default_root_alone(
+    repo, gate, tmp_path, monkeypatch
+):
+    """A pinned ``--basetemp`` names its own parent; the default root is not
+    this run's to make."""
+    root = tmp_path / "never" / "made"
+    monkeypatch.setattr(changed_tests, "basetemp_root", lambda: root)
+    _write(repo, "src/pkg/mesh.py", "x = 2\n")
+
+    assert gate("--basetemp", str(tmp_path / "pinned")) == 0
+    assert not root.exists()
 
 
 def test_the_script_runs_as_a_script_and_its_exit_status_reaches_the_shell():

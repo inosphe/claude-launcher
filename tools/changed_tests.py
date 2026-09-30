@@ -211,7 +211,7 @@ from typing import List, Optional
 # Pinned by tests/test_gates_run_this_checkout.py.
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from claude_launcher import test_window
+from claude_launcher import pytest_basetemp, test_window
 
 
 def _load_sweep():
@@ -982,13 +982,16 @@ KEEP_BASETEMPS = 8
 
 
 def basetemp_root() -> Path:
-    """Where the per-run scratch trees live. Short on purpose -- see below."""
-    return Path("C:/t")
+    """Where the per-run scratch trees live: ``C:/t`` on Windows, short on
+    purpose (see below), and a directory of the launcher home elsewhere,
+    where ``C:/t`` would resolve inside the checkout under test
+    (``claude_launcher.pytest_basetemp``)."""
+    return pytest_basetemp.root()
 
 
 def session_basetemp(session: str, *, now: Optional[float] = None) -> str:
-    """``C:/t/<session>c<MMDDHHMMSS>`` -- identity in the prefix, generation
-    in the suffix.
+    """``<root>/<session>c<MMDDHHMMSS>`` -- identity in the prefix, generation
+    in the suffix. ``<root>`` is :func:`basetemp_root`, ``C:/t`` on Windows.
 
     The string does three jobs at once and the split is what makes them fit:
 
@@ -1014,12 +1017,13 @@ def session_basetemp(session: str, *, now: Optional[float] = None) -> str:
     silently broke the third against consecutive ones. A generation suffix
     settles both, and costs the second nothing.
 
-    Length: measured ceiling is 48 characters (xdist nests ``popen-gwN/`` and
-    the transcript tests fold an absolute cwd back into a filename, so the
-    path is ``2*basetemp+162`` against MAX_PATH). ``C:/t/`` + session + ``c``
-    + ten digits is 21 for a five-character session, against the old fixed
-    name's 11 -- the generation spends ten of the 37 characters that were
-    spare, and pinned tests hold both numbers.
+    Length (Windows): measured ceiling is 48 characters (xdist nests
+    ``popen-gwN/`` and the transcript tests fold an absolute cwd back into a
+    filename, so the path is ``2*basetemp+162`` against MAX_PATH). ``C:/t/``
+    + session + ``c`` + ten digits is 21 for a five-character session,
+    against the old fixed name's 11 -- the generation spends ten of the 37
+    characters that were spare, and pinned tests hold both numbers. POSIX
+    has no such ceiling, which is what lets its root be a long absolute path.
     """
     stamp = time.strftime("%m%d%H%M%S", time.localtime(now))
     return f"{basetemp_root().as_posix()}/{session}c{stamp}"
@@ -1513,7 +1517,8 @@ def main(argv: Optional[list] = None) -> int:
         default=None,
         help=(
             "pytest scratch root for this run (default: a fresh "
-            "C:/t/<session>c<MMDDHHMMSS>). Pass one to pin a run's timeline "
+            "<root>/<session>c<MMDDHHMMSS>, <root> being C:/t on Windows and "
+            "<launcher home>/basetemp elsewhere). Pass one to pin a run's timeline "
             "to a name you chose; it must not be a path another run is using, "
             "because pytest empties it at startup"
         ),
@@ -1699,6 +1704,10 @@ def main(argv: Optional[list] = None) -> int:
     session = os.environ.get("CLAUNCH_SESSION", "worker")
     for gone in prune_basetemps(session):
         print(f"pruned old basetemp: {gone}", file=sys.stderr)
+    # pytest creates the basetemp but not the root it sits in. A pinned
+    # --basetemp names its own parent, so only the default root is made here.
+    if args.basetemp is None:
+        pytest_basetemp.ensure(basetemp_root())
 
     # Before the window, not after: a refusal here starts no run, so it must
     # not hold a slot other sessions are queueing for.
