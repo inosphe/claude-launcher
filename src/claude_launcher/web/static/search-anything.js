@@ -5,7 +5,7 @@ globalThis.SearchAnything = (() => {
     const response = await api(path, body === undefined ? {signal} : {
       method, headers: {"Content-Type": "application/json"}, body: JSON.stringify(body), signal,
     });
-    const data = await response.json();
+    const data = await response.json().catch(() => ({}));
     if (!response.ok) throw Error(data.error || `HTTP ${response.status}`);
     return data;
   }

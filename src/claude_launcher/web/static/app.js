@@ -7807,7 +7807,7 @@ function flowEditorDirty() {
 }
 
 async function flowEditorResponse(response) {
-  const body = await response.json();
+  const body = await response.json().catch(() => ({}));
   if (!response.ok) throw new Error(body.error || `HTTP ${response.status}`);
   return body;
 }
@@ -11956,7 +11956,7 @@ async function loadHostClipboard() {
   status.textContent = "Loading…";
   try {
     const response = await api("/api/clipboard");
-    const doc = await response.json();
+    const doc = await response.json().catch(() => ({}));
     if (request !== hostClipboardRequest) return;
     if (!response.ok) throw new Error(doc.error || "Clipboard could not be loaded");
     const box = $("term-clipboard-items");
@@ -16696,7 +16696,7 @@ let relaySettingsDraft = { id: "", url: "", name: "", token: "", verify_tls: tru
 async function refreshRelaySettings() {
   try {
     const resp = await api("/api/relays");
-    const data = await resp.json();
+    const data = await resp.json().catch(() => ({}));
     if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
     relaySettingsRows = data.relays || [];
     relaySettingsError = "";
@@ -16783,7 +16783,7 @@ function relaySettingsCard() {
     renderWorkspaces();
     try {
       const resp = await api("/api/relays", { method: "POST", body: JSON.stringify(body) });
-      const data = await resp.json();
+      const data = await resp.json().catch(() => ({}));
       if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
       relaySettingsRows = data.relays || [];
       relaySettingsDraft = { id: "", url: "", name: "", token: "", verify_tls: true };
@@ -21778,7 +21778,7 @@ async function saveModelChoices(name, reset = false) {
       method: "PUT", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ models }),
     });
-    const data = await resp.json();
+    const data = await resp.json().catch(() => ({}));
     if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
     harnessDetails[name] = data.harness;
     delete modelChoicesDrafts[name];
