@@ -472,6 +472,7 @@ def install(app):
 #
 #   Windows  Windows PowerShell in STA mode, Clipboard::SetImage
 #   macOS    osascript, `set the clipboard to (read ... as <class>)`
+#   WSL      the Windows command, run from WSL with the image on stdin
 #   Linux    wl-copy under Wayland, otherwise xclip
 #
 # None of them is guaranteed to be installed, and the Windows one converts the
