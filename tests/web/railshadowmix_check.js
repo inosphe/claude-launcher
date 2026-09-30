@@ -21,7 +21,13 @@
    - ungrouped, the shadows trail the local rows under `remote · <machine>`;
      grouped by workspace, they file under `@<machine>`;
    - the status filter and the search apply to them, a search by meaning
-     never matches one, and a group jump can land on one. */
+     never matches one, and a group jump can land on one;
+   - a shadow whose card names a parent (the spawning session, on its own
+     daemon) sits right under that parent's card, indented with the └ tick,
+     when the parent is a shadow of the same machine in the same bucket; a
+     card without `parent` (an older host, a host that did not answer), a
+     parent on another machine, under another heading or hidden by the
+     filter leaves it a root (claunch-7u8nm). */
 const fs = require("fs");
 const path = require("path");
 const STATIC = path.join(__dirname, "..", "..", "src", "claude_launcher",
@@ -176,7 +182,7 @@ const names = [
   "recordProject", "sessionInCurrentProject", "meshInCurrentProject", "railSessions",
   "sessMeshes", "sessionMeshGroup", "sessionWorkspaceGroup", "sessionWorkspaceLabel",
   "sessionGroupValue", "shadowMeshGroup", "shadowGroupValue",
-  "regroupDepths", "sessionGroupRows", "remoteRailRows",
+  "regroupDepths", "sessionGroupRows", "remoteRailRows", "shadowLineage",
   "railMeshTags", "sessHandles", "handleTag", "profileHarnessLabel", "railMetaText",
   "refreshSessions",
   "shadowKey", "shadowHash", "shadowRow", "shadowMeshes", "railShadows",
@@ -401,6 +407,78 @@ const shown = () => items(list).filter((n) => !n.classes.has("session-filtered")
   await ctx.refresh({ cached: true });
   check("a rebuild keeps it", walk(list).filter((n) => n.classes.has("active")).map(who),
         ["s1@m2"]);
+
+  /* ---- lineage among the shadows (claunch-7u8nm) ---------------------- */
+  ctx.set("page", "home");
+  ctx.set("open", null);
+  ctx.set("filter", "current");
+  ctx.set("search", { q: "" });
+  // Arrival order puts children before their parents; the rail must not.
+  const LINEAGE = [
+    { machine: "m4", session: "k2", meshes: [via("alpha", "default", "k2")],
+      card: card("k2", { parent: "k1" }), error: null },
+    { machine: "m4", session: "k0", meshes: [via("alpha", "default", "k0")],
+      card: card("k0"), error: null },
+    // No `parent` at all: an older host's card.
+    { machine: "m4", session: "k3", meshes: [via("alpha", "default", "k3")],
+      card: card("k3"), error: null },
+    { machine: "m4", session: "k1", meshes: [via("alpha", "default", "k1")],
+      card: card("k1", { parent: "k0", status: "exited", exited: true }), error: null },
+    // Same parent name, other machine: m5's k0 is not m4's k0.
+    { machine: "m5", session: "q1", meshes: [via("alpha", "default", "q1")],
+      card: card("q1", { parent: "k0" }), error: null },
+    // Its parent is filed under another heading (bravo).
+    { machine: "m4", session: "k4", meshes: [via("gamma", "default", "k4")],
+      card: card("k4", { parent: "k0" }), error: null },
+    // The host did not answer: no card, so no parent.
+    { machine: "m4", session: "k5", meshes: [via("alpha", "default", "k5")],
+      card: null, error: "daemon did not answer" },
+    // A card naming itself.
+    { machine: "m4", session: "k6", meshes: [via("alpha", "default", "k6")],
+      card: card("k6", { parent: "k6" }), error: null },
+  ];
+  ctx.set("groups", ["mesh"]);
+  ctx.set("shadows", LINEAGE);
+  await ctx.refresh({ cached: true });
+  const alphaCards = () => items(bodyOf(groupOf("alpha"))).filter((n) => !n.dataset.name);
+  const depthOf = (n) => (n.classes.has("shadow-child")
+    ? walk(n).filter((k) => k.classes.has("shadow-tick")).length && n.style.paddingLeft
+    : 0);
+  check("a spawned shadow follows its parent, a grandchild follows the child",
+        alphaCards().map((n) => [who(n), depthOf(n)]),
+        [["k0@m4", 0], ["k1@m4", "24px"], ["k2@m4", "34px"], ["k3@m4", 0],
+         ["q1@m5", 0], ["k5@m4", 0], ["k6@m4", 0]]);
+  check("the child card names its parent in its title",
+        shadowCard("k2@m4").title.endsWith(" · spawned by k1"), true);
+  check("a root card's title names no parent",
+        shadowCard("k0@m4").title.includes("spawned by"), false);
+  check("a parent under another heading leaves the child a root there",
+        items(bodyOf(groupOf("gamma"))).map((n) => [who(n), depthOf(n)]),
+        [["k4@m4", 0]]);
+  check("the local rows keep their place ahead of the shadows",
+        items(bodyOf(groupOf("alpha"))).filter((n) => n.dataset.name).map(who), ["s1"]);
+
+  ctx.set("groups", []);
+  await ctx.refresh({ cached: true });
+  check("ungrouped, the machine group orders by lineage too",
+        items(bodyOf(groupOf("m4"))).map((n) => [who(n), depthOf(n)]),
+        [["k0@m4", 0], ["k1@m4", "24px"], ["k2@m4", "34px"], ["k4@m4", "24px"],
+         ["k3@m4", 0], ["k5@m4", 0], ["k6@m4", 0]]);
+
+  // The filter hides the exited k1: its child is not drawn under a card the
+  // reader cannot see, and becomes a root where it arrived (first). A
+  // changed card makes this poll a rebuild.
+  ctx.set("groups", ["mesh"]);
+  ctx.set("filter", "running");
+  ctx.set("shadows", LINEAGE.map((r) => (r.session === "k3"
+    ? { ...r, card: card("k3", { note: "rebuild" }) } : r)));
+  await ctx.refresh({ cached: true });
+  check("a parent hidden by the filter leaves its child a root",
+        alphaCards().filter((n) => !n.classes.has("session-filtered"))
+          .map((n) => [who(n), depthOf(n)]),
+        [["k2@m4", 0], ["k0@m4", 0], ["k3@m4", 0], ["q1@m5", 0], ["k5@m4", 0],
+         ["k6@m4", 0]]);
+  ctx.set("filter", "current");
 
   if (failures) {
     console.error(`${failures} check(s) failed`);

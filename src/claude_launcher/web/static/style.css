@@ -5361,6 +5361,9 @@ a.window-owner:hover { color: #79c0ff; text-decoration: underline; }
 div.shadow-card { cursor: default; border-bottom: none; padding: 0 0 8px 12px; }
 div.shadow-card:hover { background: none; }
 .shadow-card-head { display: flex; align-items: center; gap: 6px; min-width: 0; }
+/* A spawned remote session's tick (shadowLineage in app.js), drawn like the
+   local child row's └ so the two read as the same fact. */
+.shadow-tick { color: #6e7681; font-size: 11px; flex: none; margin-right: -2px; }
 .shadow-dot { width: 8px; height: 8px; border-radius: 50%; flex: none; background: #6e7681; }
 .shadow-dot-idle { background: #3fb950; }
 .shadow-dot-busy { background: #d29922; }

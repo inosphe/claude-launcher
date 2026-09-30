@@ -3146,12 +3146,17 @@ function regroupDepths(entries) {
    kind of their own to the end: a `shadow` item, never a `session` one, so
    nothing that acts on a local row (keyed by its bare name) is handed one.
    Inside a bucket they follow the local rows, which keep their lineage
-   order and indent. */
+   order and indent; the shadows take their own lineage order and indent
+   (shadowLineage) among the shadows of that bucket. */
 function sessionGroupRows(entries, groups, level = 0, meshGroup = null, shadows = []) {
   if (level >= groups.length) return [
     ...regroupDepths(entries).map(([session, depth]) =>
       ({ type: "session", session, depth, meshGroup })),
-    ...shadows.map((shadow) => ({ type: "shadow", shadow, meshGroup })),
+    // Guarded like the other late-defined helpers: a harness that lifts only
+    // this function gets the shadows flat, in the order they came.
+    ...(typeof shadowLineage === "function"
+      ? shadowLineage(shadows) : shadows.map((row) => [row, 0])).map(([shadow, depth]) =>
+      ({ type: "shadow", shadow, depth, meshGroup })),
   ];
   const group = groups[level];
   const buckets = new Map();
@@ -3187,12 +3192,15 @@ function remoteRailRows(shadows) {
     .sort((a, b) => a.localeCompare(b, undefined, { sensitivity: "base" }));
   for (const machine of machines) {
     out.push({ type: "group", group: "remote", value: machine, level: 0 });
-    for (const shadow of shadows) {
-      if (shadow.machine === machine) out.push({ type: "shadow", shadow, meshGroup: null });
+    const own = shadows.filter((row) => row.machine === machine);
+    for (const [shadow, depth] of typeof shadowLineage === "function"
+      ? shadowLineage(own) : own.map((row) => [row, 0])) {
+      out.push({ type: "shadow", shadow, depth, meshGroup: null });
     }
   }
   return out;
 }
+
 
 /* Sticky headings need the height of every outer heading as their offset.
    The heading styles intentionally differ by level, so a fixed multiplier
@@ -4014,7 +4022,7 @@ async function refreshSessions(options) {
       // record lookup -- can be handed it.
       const parent = nestedGroupContainers
         ? (groupBodies[groupBodies.length - 1] || list) : list;
-      parent.appendChild(renderShadowCard(row.shadow));
+      parent.appendChild(renderShadowCard(row.shadow, { depth: row.depth || 0 }));
       countRow();
       continue;
     }
@@ -34623,6 +34631,56 @@ function shadowMatchesSearch(row, search = sessionSearch) {
   return q.split(/\s+/).filter(Boolean).every((t) => hay.includes(t));
 }
 
+/* Other daemons' sessions in lineage order: [row, depth] pairs, a spawned
+   session right under the one that spawned it, the way byLineage lays out
+   the local rows.
+
+   The link is the card's `parent`, the spawning session's name on the host
+   daemon (daemon/shadow.py card). A name is only a name on its own daemon,
+   so a parent is looked for among the shadows of the SAME machine -- never
+   among the local rows, and never on another host, where the same name is
+   somebody else. Only the rows handed in count: the caller passes one rail
+   bucket, and a parent filed under another heading (or not on the rail at
+   all) leaves its child a root there, as regroupDepths does for local rows.
+   A parent the status filter hides does the same, as in byLineage.
+
+   `parent` is optional. A card from a host that does not send it, a host
+   that did not answer (no card), or a parent that is the row itself leaves
+   the row a root. Roots and siblings keep the order they came in. */
+function shadowLineage(shadows) {
+  const rows = shadows || [];
+  const key = (row) => shadowKey(row.machine, row.session);
+  const byKey = new Map(rows.map((row) => [key(row), row]));
+  const visible = (row) => typeof shadowMatchesFilter !== "function"
+    || shadowMatchesFilter(row);
+  const kids = new Map();
+  const roots = [];
+  for (const row of rows) {
+    const parent = row.card && typeof row.card.parent === "string"
+      ? row.card.parent : "";
+    const parentKey = parent ? shadowKey(row.machine, parent) : "";
+    if (parent && parent !== row.session && byKey.has(parentKey) &&
+        visible(row) && visible(byKey.get(parentKey))) {
+      if (!kids.has(parentKey)) kids.set(parentKey, []);
+      kids.get(parentKey).push(row);
+    } else {
+      roots.push(row);
+    }
+  }
+  const out = [];
+  const seen = new Set();
+  const walk = (row, depth) => {
+    const k = key(row);
+    if (seen.has(k)) return;   // cycle guard
+    seen.add(k);
+    out.push([row, depth]);
+    for (const kid of kids.get(k) || []) walk(kid, depth + 1);
+  };
+  for (const root of roots) walk(root, 0);
+  for (const row of rows) if (!seen.has(key(row))) out.push([row, 0]);
+  return out;
+}
+
 /* Which shadow card is the one on screen. Kept off the rail's signature
    (opening a shadow is not a change to the fleet), so it is painted over
    whatever rows the last rebuild left. */
@@ -34693,6 +34751,16 @@ function renderShadowCard(row, opts) {
   node.dataset.machine = row.machine;
   node.dataset.session = row.session;
   const head = el("div", "shadow-card-head");
+  // A spawned session sits under the one that spawned it (shadowLineage):
+  // the same indent step and └ tick as a local child row. The tick goes in
+  // the head, because the card is a column and a ::before would be a line
+  // of its own.
+  const depth = opts.full ? 0 : Math.max(0, Number(opts.depth) || 0);
+  if (depth) {
+    node.classList.add("shadow-child");
+    node.style.paddingLeft = `${14 + Math.min(depth, 4) * 10}px`;
+    head.appendChild(el("span", "shadow-tick", "└"));
+  }
   const status = shadowStatus(row);
   const dot = el("span", `shadow-dot shadow-dot-${status.replace(/[^a-z_-]/gi, "")}`);
   dot.title = status;
@@ -34727,7 +34795,8 @@ function renderShadowCard(row, opts) {
   if (!opts.full) {
     node.tabIndex = 0;
     node.setAttribute("role", "link");
-    node.title = `${shadowKey(row.machine, row.session)} — another daemon's session, read-only`;
+    node.title = `${shadowKey(row.machine, row.session)} — another daemon's session, read-only`
+      + (depth && card.parent ? ` · spawned by ${card.parent}` : "");
     const open = () => { location.hash = shadowHash(row.machine, row.session); };
     node.addEventListener("click", open);
     node.addEventListener("keydown", (ev) => {

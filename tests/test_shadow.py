@@ -35,6 +35,7 @@ from __future__ import annotations
 import asyncio
 import json
 import time
+from types import SimpleNamespace
 
 import pytest
 from aiohttp import WSMsgType
@@ -105,7 +106,7 @@ def test_viewer_recuts_the_card():
     row = {
         "session": "s1", "handle": "s1", "role": "worker", "roles": ["worker", 3],
         "harness": "claude", "status": "idle", "exited": 0, "note": "hi",
-        "cwd": "/secret", "args": ["--x"], "pid": 42,
+        "parent": "s0", "cwd": "/secret", "args": ["--x"], "pid": 42,
         "briefing": {"one_line": "does x", "state": "busy", "evil": "y", "goal": 5},
         "cflow": {"workflow": "w", "step_id": "work", "visit": 2,
                   "journal": ["..."], "instructions": "long", "reason": True},
@@ -113,12 +114,33 @@ def test_viewer_recuts_the_card():
     card = shadow._sanitize_card(row)
     assert card == {
         "session": "s1", "handle": "s1", "role": "worker", "harness": "claude",
-        "status": "idle", "note": "hi", "roles": ["worker"], "exited": False,
+        "status": "idle", "note": "hi", "parent": "s0", "roles": ["worker"],
+        "exited": False,
         "briefing": {"one_line": "does x", "state": "busy"},
         "cflow": {"workflow": "w", "step_id": "work", "visit": 2},
     }
+    # `parent` is optional: an older host's card without it, or one with a
+    # non-string value, comes out with no `parent` key at all.
+    assert "parent" not in shadow._sanitize_card({"session": "s1"})
+    assert "parent" not in shadow._sanitize_card({"session": "s1", "parent": 7})
     assert shadow._sanitize_card(None) is None
     assert shadow._sanitize_card("x") is None
+
+
+def test_host_card_names_the_spawning_parent(monkeypatch):
+    """The rail nests a shadow under its parent's card (claunch-7u8nm), so
+    the host's card carries the spawning session's name -- and None for a
+    session nobody spawned."""
+    monkeypatch.setattr(shadow.briefing, "digest", lambda name: None)
+    member = SimpleNamespace(handle="h", role="worker", roles=("worker",))
+
+    def session(parent):
+        sdef = SimpleNamespace(name="s2", harness="claude", note=None, parent=parent)
+        return SimpleNamespace(sdef=sdef, status=lambda: "idle", exited=False)
+
+    assert shadow.card(session("s1"), member)["parent"] == "s1"
+    assert shadow.card(session(None), member)["parent"] is None
+    assert shadow._sanitize_card(shadow.card(session("s1"), member))["parent"] == "s1"
 
 
 def test_cflow_position():
@@ -487,6 +509,8 @@ def test_shadow_list_stream_and_session_line(home, tmp_path):
             assert rows[0]["error"] is None
             assert card["session"] == "sa" and card["handle"] == "alice"
             assert card["note"] == "watching the build"
+            # sa was not spawned by anyone: no parent crosses the wire
+            assert "parent" not in card
             assert card["exited"] is False
             assert "cwd" not in card and "args" not in card
             assert rows[0]["meshes"][0]["mesh"] == "m@pcA"

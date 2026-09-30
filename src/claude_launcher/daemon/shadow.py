@@ -5,8 +5,9 @@ mesh's roster names sessions that run on the other daemon. This module lets
 the operator of one daemon *look at* those sessions without being given the
 other daemon's control surface:
 
-* a **card** -- name, handle, role, note, the cached briefing digest, the
-  cflow position and the session's status, and nothing else;
+* a **card** -- name, handle, role, note, the spawning parent's name, the
+  cached briefing digest, the cflow position and the session's status, and
+  nothing else;
 * a **terminal** that only outputs -- the same init/repaint/PTY-bytes
   protocol the local terminal speaks (``daemon/ws.py``), carried over a live
   relay bridge (``RelayUplink.peer_open``);
@@ -157,6 +158,10 @@ def card(session, member, *, cflow: Optional[dict] = None) -> dict:
         "status": session.status(),
         "exited": bool(getattr(session, "exited", False)),
         "note": getattr(sdef, "note", None) or None,
+        # The session that spawned this one, by its name on this daemon. The
+        # viewer's rail uses it to nest this card under its parent's card when
+        # both are on its list (shadowLineage in app.js).
+        "parent": getattr(sdef, "parent", None) or None,
         "briefing": digest or None,
         "cflow": cflow_position(cflow),
     }
@@ -550,7 +555,7 @@ def _sanitize_card(row: Optional[dict]) -> Optional[dict]:
     if not isinstance(row, dict):
         return None
     out: dict = {}
-    for key in ("session", "handle", "role", "harness", "status", "note"):
+    for key in ("session", "handle", "role", "harness", "status", "note", "parent"):
         value = row.get(key)
         if isinstance(value, str):
             out[key] = value
