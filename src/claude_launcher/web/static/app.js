@@ -34782,6 +34782,21 @@ function renderShadowCard(row, opts) {
       }
     }
   }
+  // The host's status checks with this session's answers, as the chips a
+  // local row draws (decorateBriefingRow). Read-only: asking the agent to
+  // report again is a control, and a shadow card carries none.
+  const checks = Array.isArray(card.status_checks) ? card.status_checks : [];
+  if (checks.length) {
+    const line = el("div", "shadow-line shadow-checks");
+    for (const check of checks) {
+      const answer = statusCheckText(check);
+      const chip = el("span", `rail-status-check check-${answer}`,
+        `${statusCheckIcon(check)} ${statusCheckName(check)}`);
+      chip.title = String(check.question || "");
+      line.appendChild(chip);
+    }
+    node.appendChild(line);
+  }
   if (card.cflow) {
     const flow = el("div", "shadow-line shadow-cflow", shadowCflowText(card.cflow));
     if (shadowCflowGated(card.cflow)) flow.classList.add("gated");

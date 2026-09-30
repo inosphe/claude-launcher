@@ -5389,6 +5389,9 @@ div.shadow-card:hover { background: none; }
 }
 div.shadow-card .shadow-line { white-space: normal; overflow-wrap: anywhere; }
 .shadow-note { color: #d8dbe0; }
+/* The status-check chips (.rail-status-check) on a remote card: one wrapping
+   line, the way a local row lays them out. */
+.shadow-checks { display: flex; flex-wrap: wrap; gap: 3px 5px; white-space: normal; }
 .shadow-cflow { color: #8b93a1; }
 .shadow-cflow.gated { color: #d29922; }
 .shadow-error { color: #f85149; }
