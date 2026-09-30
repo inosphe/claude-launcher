@@ -6,8 +6,9 @@ redeemed on daemon B — the link handshake, member push and message forward all
 travel as raw HTTP over relay-bridged streams — and the message physically
 lands in A's recipient terminal via paste injection.
 
-Skipped unless a peering-capable psmux-relay binary is available (build the
-mux-relay ``backend-peering`` branch, or point ``PSMUX_RELAY_EXE`` at one).
+The relay tests are skipped unless a peering-capable psmux-relay binary is
+available (build the mux-relay ``backend-peering`` branch where
+``_relay_roots`` looks, or point ``PSMUX_RELAY_EXE`` at one).
 """
 
 from __future__ import annotations
@@ -17,7 +18,7 @@ import os
 import subprocess
 import sys
 import time
-from pathlib import Path
+from pathlib import Path, PurePath, PurePosixPath, PureWindowsPath
 
 import pytest
 from aiohttp import web
@@ -41,30 +42,83 @@ CHILD = (
 )
 
 
+def _relay_roots(
+    os_name: str | None = None, home: PurePath | None = None
+) -> list[PurePath]:
+    """The ``target`` directories a local mux-relay build is looked for in.
+
+    The main mux-relay checkout first: peering landed on its backend-peering
+    branch, so older worktree builds may predate PEER_OPEN (we still check
+    CAP_PEERING at runtime and skip if the binary is too old). ``F:/...`` is
+    where that checkout sits on the Windows host; on POSIX it would be a
+    path relative to the cwd, and the checkout sits under the home directory
+    instead (claunch-wt12o.1.1).
+
+    ``os_name`` and ``home`` default to this host's. They are arguments, and
+    the result is pure paths of the named host's flavour, so a test can ask
+    for the other host's roots: patching ``os.name`` instead makes ``Path``
+    build the other flavour's concrete class, which reads this host's HOME
+    with the other host's rules (and on Python < 3.12 cannot be built at all).
+    """
+    if (os.name if os_name is None else os_name) == "nt":
+        checkout = PureWindowsPath("F:/works/mux-relay")
+    else:
+        checkout = PurePosixPath(Path.home() if home is None else home)
+        checkout = checkout / "works" / "mux-relay"
+    return [
+        checkout / "target",
+        checkout / ".claude" / "worktrees" / "relay-tunnel" / "target",
+    ]
+
+
 def _find_relay_exe() -> Path | None:
     env = os.environ.get("PSMUX_RELAY_EXE")
     if env and Path(env).is_file():
         return Path(env)
     exe = "psmux-relay.exe" if os.name == "nt" else "psmux-relay"
-    # the main mux-relay checkout first: peering landed on its backend-peering
-    # branch, so older worktree builds may predate PEER_OPEN (we still check
-    # CAP_PEERING at runtime and skip if the binary is too old)
-    roots = [
-        Path("F:/works/mux-relay/target"),
-        Path("F:/works/mux-relay/.claude/worktrees/relay-tunnel/target"),
-    ]
-    for root in roots:
+    for root in _relay_roots():
         for prof in ("debug", "release"):
-            p = root / prof / exe
+            p = Path(root) / prof / exe
             if p.is_file():
                 return p
     return None
 
 
 RELAY_EXE = _find_relay_exe()
-pytestmark = pytest.mark.skipif(
-    RELAY_EXE is None, reason="psmux-relay binary not found"
+#: On the tests that start a relay, not on the module: the lookup's own tests
+#: below must run on exactly the hosts where it finds nothing.
+requires_relay = pytest.mark.skipif(
+    RELAY_EXE is None,
+    reason="psmux-relay binary not found (set PSMUX_RELAY_EXE, or build it "
+    "under one of: " + ", ".join(str(root) for root in _relay_roots()) + ")",
 )
+
+
+def test_posix_looks_for_the_relay_under_the_home_directory():
+    """claunch-wt12o.1.1: only ``F:/`` roots were searched, which on POSIX
+    are cwd-relative paths, so every relay test here skipped on Linux."""
+    roots = _relay_roots("posix", home=PurePosixPath("/home/u"))
+    assert roots == [
+        PurePosixPath("/home/u/works/mux-relay/target"),
+        PurePosixPath("/home/u/works/mux-relay/.claude/worktrees/relay-tunnel/target"),
+    ]
+    assert all(root.is_absolute() for root in roots)
+
+
+def test_windows_keeps_its_relay_roots():
+    roots = _relay_roots("nt", home=PurePosixPath("/home/u"))
+    assert roots == [
+        PureWindowsPath("F:/works/mux-relay/target"),
+        PureWindowsPath("F:/works/mux-relay/.claude/worktrees/relay-tunnel/target"),
+    ]
+    assert all(root.is_absolute() for root in roots)
+
+
+def test_the_skip_reason_names_where_it_looked():
+    reason = requires_relay.kwargs["reason"]
+    for root in _relay_roots():
+        assert str(root) in reason
+    assert "PSMUX_RELAY_EXE" in reason
 
 
 def _free_port() -> int:
@@ -157,6 +211,7 @@ async def _wait(cond, what: str, timeout: float = 15.0) -> None:
     raise AssertionError(f"timed out waiting for {what}")
 
 
+@requires_relay
 def test_mesh_federation_over_real_relay(home, tmp_path):
     store.update(
         lambda doc: doc.update(
@@ -263,6 +318,7 @@ def _start_relay(tmp_path: Path, relay_port: int) -> subprocess.Popen:
     )
 
 
+@requires_relay
 def test_daemon_attach_over_real_relay_through_the_web_api(home, tmp_path):
     """Daemon attach end to end, driven through the HTTP routes the web UI
     calls: publish and offer on the owners, discover and attach on a guest,
@@ -369,6 +425,7 @@ def test_daemon_attach_over_real_relay_through_the_web_api(home, tmp_path):
     asyncio.run(run())
 
 
+@requires_relay
 def test_renamed_daemon_migrates_its_peers_over_real_relay(home, tmp_path):
     """A guest daemon re-registers on the relay under a new name: the owner
     learns it from the guest's rename notice (sent over the link it holds
@@ -447,6 +504,7 @@ def test_renamed_daemon_migrates_its_peers_over_real_relay(home, tmp_path):
     asyncio.run(run())
 
 
+@requires_relay
 def test_remote_shadow_over_real_relay(home, tmp_path):
     """Daemon B looks at daemon A's mesh member through the real relay: the
     card, the output-only terminal on a live PEER_OPEN bridge, and the
@@ -454,6 +512,8 @@ def test_remote_shadow_over_real_relay(home, tmp_path):
     import json
 
     import aiohttp
+
+    from claude_launcher.daemon import shadow as shadow_mod
 
     store.update(
         lambda doc: doc.update(
@@ -520,6 +580,27 @@ def test_remote_shadow_over_real_relay(home, tmp_path):
                     assert len(seen) > 2 * 65536
                     for i in range(25):
                         assert f"echo:line{i:02d}-".encode() in seen, i
+
+                    # one line near shadow.MAX_LINE (claunch-an4fd): the host
+                    # types all of it -- ``bytes`` is what it wrote, the text
+                    # and its Enter -- and the child's answer comes back on
+                    # the stream. The child reads only what fits a tty's
+                    # canonical line, so the answer is checked by its head.
+                    long_line = "long-" + "y" * 18000
+                    assert len(long_line) <= shadow_mod.MAX_LINE
+                    async with http.post(
+                        base + "/api/shadows/pca/sa/line",
+                        json={"text": long_line, "input_id": "relay-long"},
+                    ) as resp:
+                        assert resp.status == 200, await resp.text()
+                        assert (await resp.json())["bytes"] == len(long_line) + 1
+                    seen = b""
+                    deadline = time.monotonic() + 30
+                    while b"echo:long-" not in seen and time.monotonic() < deadline:
+                        msg = await asyncio.wait_for(ws.receive(), 30)
+                        if msg.type == aiohttp.WSMsgType.BINARY:
+                            seen += msg.data
+                    assert b"echo:long-yyyy" in seen
         finally:
             await b.stop()
             await a.stop()
