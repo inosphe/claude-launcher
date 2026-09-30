@@ -952,6 +952,51 @@ def test_map_one_selects_the_naming_tests_named_by_finds_except_for_a_test_modul
         assert named <= picked
 
 
+def test_a_test_module_is_named_as_a_whole_word_and_the_selection_does_not_move(repo):
+    """``test_mesh`` is a substring of ``test_mesh_v2``, and on ``8b57829c``'s
+    change to ``tests/test_mesh.py`` 12 of the 15 modules listed as naming it
+    only named a longer module (``claunch-6w2az``). A test module's name is
+    now searched as a whole word. The gate's selection does not read that
+    answer -- rule 1 runs the module alone -- and a source path is still
+    searched by :func:`changed_tests.needle`, so neither selection moves."""
+    _seed_on_base(
+        repo,
+        {
+            "src/claude_launcher/workflows/flow-x.yaml": "name: flow-x\n",
+            "tests/test_imports_it.py": "from test_mesh import helper\n",
+            "tests/test_node_id.py": 'NODE = "tests/test_mesh.py::test_it"\n',
+            "tests/test_longer_name.py": 'NODE = "tests/test_mesh_v2.py::test_it"\n',
+            "tests/test_other_flow.py": 'load("flow-x-remote.yaml")\n',
+        },
+    )
+    rel = "tests/test_mesh.py"
+    assert set(changed_tests.named_by(repo, rel)) == {
+        "tests/test_imports_it.py",
+        "tests/test_node_id.py",
+    }
+    assert changed_tests.map_one(repo, rel) == [rel]
+    assert changed_tests.select(repo, [rel]) == [rel]
+    flow = "src/claude_launcher/workflows/flow-x.yaml"
+    assert "tests/test_other_flow.py" in changed_tests.named_by(repo, flow)
+    assert "tests/test_other_flow.py" in changed_tests.map_one(repo, flow)
+
+
+def test_a_test_module_name_with_a_hangul_particle_attached_is_still_named(repo):
+    """The whole-word search is ASCII: ``test_mesh를`` names ``test_mesh``
+    (Hangul is not an ASCII word character, so the name ends before it), and
+    ``test_mesh_v2를`` still does not (``claunch-nupin``)."""
+    _seed_on_base(
+        repo,
+        {
+            "tests/test_says_it.py": '"""test_mesh를 고치면 이 테스트도 본다."""\n',
+            "tests/test_says_longer.py": '"""test_mesh_v2를 고치면 이 테스트도 본다."""\n',
+        },
+    )
+    named = set(changed_tests.named_by(repo, "tests/test_mesh.py"))
+    assert "tests/test_says_it.py" in named
+    assert "tests/test_says_longer.py" not in named
+
+
 def test_the_selection_only_grows_as_changed_paths_are_added(repo):
     """Adding a changed path can never remove a test module from the selection.
 

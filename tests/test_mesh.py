@@ -452,10 +452,12 @@ def test_delivery_waits_for_respawn(home, tmp_path):
         # lands the moment the child is up, and the block is long enough to
         # scroll the harness banner out of the viewport before a 0.1s poll
         # can see it. What matters is that the message arrives, which the
-        # next two assertions establish.
+        # next two waits establish. The cursor is waited on, not asserted:
+        # it advances only after the delayed submitting Enter, a beat after
+        # the text is on screen (measured 0.08s after it; claunch-wt12o.3).
         await revived.wait_for("idle", timeout=20.0, threshold=0.5)
         await _wait_screen(revived, "are you there")
-        assert mm.get("m2").pending("bob") == []
+        await _wait_drained(mm.get("m2"), "bob")
 
         await mm.shutdown()
         await mgr.shutdown_all()

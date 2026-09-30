@@ -204,6 +204,19 @@ def test_a_test_naming_a_changed_test_module_is_to_check_because_the_gate_runs_o
     )
 
 
+def test_a_test_naming_a_longer_module_does_not_name_the_changed_one(repo):
+    """``test_edited`` is a substring of ``test_edited_v2``: a test that names
+    only the longer module is not a reader of the changed one and is not a
+    row. On ``8b57829c``'s change to ``tests/test_mesh.py`` 12 of 15
+    ``test:unselected`` rows were that (``claunch-6w2az``)."""
+    _seed_on_base(repo, {"tests/test_names_v2.py": 'NODE = "tests/test_edited_v2.py::test_it"\n'})
+    changed = _edit_test_module_and_dunder(repo)
+    by = _by_path(_surfaces(repo, changed))
+    assert "tests/test_names_v2.py" not in by
+    assert by["tests/test_reads_edited.py"]["reasons"] == ["test:unselected"]
+    assert by["tests/test_node_id.py"]["reasons"] == ["test:unselected"]
+
+
 def test_a_dunder_file_has_no_naming_tests_because_its_stem_names_nothing(repo):
     """``__main__`` in a test is ``if __name__ == "__main__"``, not a reference
     to ``src/pkg/__main__.py`` -- the gate's rule 2c does not search for it,
@@ -421,3 +434,33 @@ def test_the_review_step_asks_for_the_sentence_and_names_the_tool():
         assert "tools/related_surfaces.py --base auto" in review.instructions
         assert "관련 표면 N개 중 M개 점검" in review.instructions
         assert "관련 표면 N개 중 M개 점검" in review.done_when
+
+
+def test_the_review_step_counts_a_naming_test_the_gate_does_not_select():
+    """The step's gloss on the summary line follows the tool: a naming test
+    outside the gate's selection is ``test:unselected`` and counted in N, so
+    the step no longer says every naming test is left out (claunch-8tl8i).
+
+    The two lines it quotes are the ones :func:`rs.render` prints, placeholders
+    and spacing included, so a reader who greps the output for them finds
+    them; one that is also in the diff is ``touched`` (claunch-gvfob)."""
+    sys.path.insert(0, str(ROOT / "src"))
+    from claude_launcher.cflow import model
+
+    found = [
+        {"path": "<경로>", "reasons": [reason], "for": ["<파일>"], "touched": False}
+        for reason in ("test", "test:unselected")
+    ]
+    printed = rs.render([], found, "").splitlines()
+    gate_line = next(line for line in printed if line.startswith("gate"))
+    check_line = next(line for line in printed if line.startswith("CHECK"))
+    for path in (
+        ROOT / "src" / "claude_launcher" / "workflows" / "improv-worker.yaml",
+        ROOT / ".claunch" / "workflows" / "improv-worker.yaml",
+    ):
+        review = model.load(path).steps["review"]
+        assert f"`{gate_line}`" in review.instructions
+        assert f"`{check_line}`" in review.instructions
+        assert "`touched`" in review.instructions
+        assert "tools/changed_tests.py --list" in review.instructions
+        assert "세지 않고 기록만 한다" not in review.instructions
