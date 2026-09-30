@@ -11961,7 +11961,9 @@ async function loadHostClipboard() {
     if (!response.ok) throw new Error(doc.error || "Clipboard could not be loaded");
     const box = $("term-clipboard-items");
     box.replaceChildren();
-    status.textContent = doc.error || (doc.items.length ? "Select Paste to insert text." : "No text history yet.");
+    status.textContent = doc.error || (doc.items.length
+      ? "Paste inserts into the session line · Copy puts it on this computer's clipboard."
+      : "No text history yet.");
     for (const item of doc.items) {
       const row = el("div", "clipboard-entry");
       row.appendChild(el("time", "", new Date(item.copied_at).toLocaleString()));
@@ -11975,15 +11977,60 @@ async function loadHostClipboard() {
         }
         if (insertPromptPreset(item.text)) closeHostClipboard();
       });
+      const copy = el("button", "term-btn", "Copy");
+      copy.type = "button";
+      copy.title = "Copy to the clipboard of the computer this browser runs on";
+      copy.addEventListener("click", async () => {
+        status.textContent = await copyToBrowserClipboard(item.text, row)
+          ? "Copied to this computer's clipboard."
+          : "This browser would not allow the copy — select the text and copy it by hand.";
+      });
       const remove = el("button", "term-btn", "Delete");
       remove.type = "button";
       remove.addEventListener("click", () => deleteHostClipboard(item.id));
       row.appendChild(paste);
+      row.appendChild(copy);
       row.appendChild(remove);
       box.appendChild(row);
     }
   } catch (error) {
     if (request === hostClipboardRequest) status.textContent = error.message;
+  }
+}
+
+/* Puts text on the clipboard of the machine the browser runs on — the other
+   direction from the history above, which is the daemon's machine.
+   navigator.clipboard exists only in a secure context (https or localhost),
+   and the dashboard is often reached over plain http from another machine,
+   so a selected off-screen textarea and execCommand("copy") stand in. The
+   textarea goes inside the menu so the focus it takes does not land
+   outside it. Resolves to whether either route reported success. */
+async function copyToBrowserClipboard(text, host) {
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text);
+      return true;
+    }
+  } catch {
+    // denied or not focused: the fallback below may still be allowed
+  }
+  const before = document.activeElement;
+  const area = document.createElement("textarea");
+  area.value = text;
+  area.readOnly = true;
+  area.setAttribute("aria-hidden", "true");
+  area.style.position = "fixed";
+  area.style.left = "-9999px";
+  host.appendChild(area);
+  try {
+    area.select();
+    area.setSelectionRange(0, text.length);
+    return document.execCommand("copy");
+  } catch {
+    return false;
+  } finally {
+    area.remove();
+    before?.focus?.();
   }
 }
 

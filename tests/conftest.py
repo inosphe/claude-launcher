@@ -158,6 +158,20 @@ def home(tmp_path, monkeypatch):
     return h
 
 
+@pytest.fixture(autouse=True)
+def no_wsl_clipboard_bridge(monkeypatch):
+    """Keep the daemon's clipboard history off the Windows side under WSL.
+
+    Every app ``build_app`` makes samples the host clipboard once a second
+    while it is served, and under WSL a sample is a real powershell.exe on the
+    Windows side (``daemon/clipboard.PowerShellBridge``). A hundred and more
+    tests serve an app; each would start one and read the developer's
+    clipboard. The bridge's own tests build a :class:`PowerShellBridge` with a
+    fake process and never go through this lookup.
+    """
+    monkeypatch.setattr("claude_launcher.daemon.clipboard._wsl_bridge", lambda: None)
+
+
 @pytest.fixture(scope="session")
 def repo_template(tmp_path_factory):
     """Build a git repository once per worker, then copy it per test.
