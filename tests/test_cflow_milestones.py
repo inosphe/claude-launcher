@@ -13,7 +13,8 @@ What this file pins:
 * parsing: ``publishes``, ``awaits.at`` / ``awaits.main`` and their refusals;
 * the handshake: request -> cut -> consumed, both directions, and a
   publication made before the reader arrives still counts — while one made
-  before a sub run existed does not;
+  before a sub run existed does not, unless the main run made it on its way
+  into a step that waits on that sub run;
 * a person's goto away publishes nothing;
 * the probe command, the CLI's exit codes and the probe environment's run;
 * ``landing_queue`` on a sub definition, one holder per scope.
@@ -327,12 +328,12 @@ def test_a_sub_run_started_late_has_consumed_what_came_before_it(proj):
     the start is — in the engine and in the gate twin alike."""
     engine.start("main")
     _step(); _step()                   # main at land, cut-wanted #1
+    engine.select("again", "loop", by="agent")   # main -> work: round two
     engine.start("stack", run="stack")
     asked = engine.published("main", "cut-wanted", step="standby", run="stack")
     assert not asked["new"] and (asked["count"], asked["consumed"]) == (1, 1)
     assert _tool(PUBLISHED, proj, "main", "cut-wanted", "--step", "standby", run="stack") == 1
 
-    engine.select("again", "loop", by="agent")   # main -> work
     _step(); _step()                   # main at land again, cut-wanted #2
     asked = engine.published("main", "cut-wanted", step="standby", run="stack")
     assert asked["new"] and (asked["count"], asked["consumed"]) == (2, 1)
@@ -340,6 +341,46 @@ def test_a_sub_run_started_late_has_consumed_what_came_before_it(proj):
     # and the sub run acts on it as it would on any request
     assert _step(run="stack")["step_id"] == "cut"
     assert not engine.published("main", "cut-wanted", step="standby", run="stack")["new"]
+
+
+def test_a_sub_run_started_while_the_main_run_waits_on_it_answers_the_request(proj):
+    """The one publication a late start does not take as consumed: the
+    request the main run made on its way into a step that waits on this sub
+    run. A stack archived and started again while the main run waits at
+    land read that cut-wanted as consumed, and both runs waited on each
+    other (claunch-wt12o.1.3.2). Earlier rounds' requests stay consumed."""
+    engine.start("main")
+    engine.start("stack", run="stack")
+    _step(); _step()                   # main at land, cut-wanted #1
+    _step(run="stack")                 # stack -> cut
+    engine.select("again", "loop", by="agent", run="stack")   # cut #1, stack -> standby
+    engine.select("again", "loop", by="agent")                # main -> work
+    _step(); _step()                   # main at land, cut-wanted #2, waiting on stack
+    engine.archive(by="user", run="stack")
+    engine.start("stack", run="stack")
+    asked = engine.published("main", "cut-wanted", step="standby", run="stack")
+    assert asked["new"] and (asked["count"], asked["consumed"]) == (2, 1)
+    assert _tool(PUBLISHED, proj, "main", "cut-wanted", "--step", "standby", run="stack") == 0
+    assert _step(run="stack")["step_id"] == "cut"
+
+    # started with the main run somewhere that does not wait on it, the
+    # same request is consumed as before
+    engine.archive(by="user", run="stack")
+    engine.select("again", "loop", by="agent")                # main -> work
+    engine.start("stack", run="stack")
+    asked = engine.published("main", "cut-wanted", step="standby", run="stack")
+    assert not asked["new"] and (asked["count"], asked["consumed"]) == (2, 2)
+
+
+def test_a_goto_carries_no_request_into_the_step(proj):
+    """A person's goto publishes nothing, so a step reached by one holds no
+    request for a sub run started there to answer."""
+    engine.start("main")
+    _step(); _step()                   # main at land, cut-wanted #1
+    engine.goto("land", by="user", reason="re-enter by hand")
+    engine.start("stack", run="stack")
+    asked = engine.published("main", "cut-wanted", step="standby", run="stack")
+    assert not asked["new"] and (asked["count"], asked["consumed"]) == (1, 1)
 
 
 def test_sub_done_all_may_leave_a_session_long_sub_run_out(proj, capsys):

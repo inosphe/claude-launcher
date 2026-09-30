@@ -751,7 +751,9 @@ class Awaits:
     #: one direction a sub run may wait: it reads the main run, it never
     #: holds it (a main run's gates do not read this). A sub run starts with
     #: the main run's count at that moment as consumed, so what the main run
-    #: published before the sub run existed is not new to it.
+    #: published before the sub run existed is not new to it — except the
+    #: request the main run published on its way into a step that waits on
+    #: this sub run by name, which is still new.
     main: Optional[str] = None
     #: (With ``at`` or ``main``, ``probe`` may still be given: it replaces
     #: the ``claunch cflow published`` command and nothing else.)

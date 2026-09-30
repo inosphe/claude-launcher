@@ -694,8 +694,11 @@ that record — so a publication made before the reader got there is still
 waiting for it. The record starts at zero for a main run, and for a sub run
 at the count its main run had published when the sub run started: a sub run
 started in round five does not take rounds one to four's `cut-wanted` as
-new. Start a sub run before the step that publishes what it waits for: one
-started after that publication waits for the next one. The probe is `claunch cflow published <main|sub> <milestone>
+new. One publication is left new: when the main run is waiting on that sub
+run by name (`awaits: {sub: <name>}`), what it published on its way into
+that step is a request the sub run is there to answer, and a sub run started
+then — a stack archived and started again while the main run waits at
+`land` — answers it. The probe is `claunch cflow published <main|sub> <milestone>
 --step <step>`: exit 0 = something new, 1 = not yet, 2 = that run does not
 stand; a checklist item can run the same command. A milestone await may
 also name its own `probe:` (a repository that pins its gates to checkout

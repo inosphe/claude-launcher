@@ -19,7 +19,8 @@ run, ``runs/<session>/sub/<name>/state.json`` for a sub run).
 ``tests/test_cflow_milestones.py`` pins that this script and
 ``engine.published`` answer alike. A sub run's ``consumed`` does not start
 empty: the engine writes the main run's counts into it when the sub run
-starts (``engine._consume_from_start``), so a publication from before the
+starts (``engine._consume_from_start`` — one short for a request the main
+run is waiting on that sub run to answer), so a publication from before the
 sub run existed reads as consumed here with nothing extra to compute.
 
     uv run --no-sync python tools/published.py stack cut --step stack-merge
