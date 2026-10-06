@@ -45,6 +45,10 @@ class SpecImportError(Exception):
 class Backend:
     """The writes an import performs. :class:`DaemonBackend` is the real one."""
 
+    #: The directory the board lives in and ``file`` references resolve
+    #: against ("" = the current directory).
+    board_cwd: str = ""
+
     # board
     def find_issues(self, label: str) -> Dict[str, dict]:
         """external_ref -> issue (``id``, ``assignee``) for every issue with
@@ -577,6 +581,18 @@ def _what(act: dict) -> str:
         if act.get(key):
             return str(act[key])
     return ""
+
+
+def board_dir(doc: dict, default: str = "") -> str:
+    """Where the board lives and ``file`` references resolve: the spec's
+    registered workspace, else ``default`` (the current directory)."""
+    if doc.get("workspace"):
+        from .spawn import SpawnDenied, resolve_workspace
+        try:
+            return resolve_workspace(str(doc["workspace"]))
+        except SpawnDenied as exc:
+            raise workspec.SpecError(str(exc)) from None
+    return default or os.getcwd()
 
 
 def describe(act: dict) -> str:

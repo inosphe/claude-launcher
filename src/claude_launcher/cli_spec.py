@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import sys
 from pathlib import Path
 
@@ -22,18 +21,6 @@ def _load(path: str) -> dict:
     except OSError as exc:
         raise workspec.SpecError(f"cannot read {path}: {exc}") from None
     return workspec.load(text)
-
-
-def _base_dir(doc: dict) -> str:
-    """Where the board lives and ``file`` references resolve: the spec's
-    registered workspace, else the current directory."""
-    if doc.get("workspace"):
-        from .spawn import SpawnDenied, resolve_workspace
-        try:
-            return resolve_workspace(str(doc["workspace"]))
-        except SpawnDenied as exc:
-            raise workspec.SpecError(str(exc)) from None
-    return os.getcwd()
 
 
 def _cmd_check(args: argparse.Namespace) -> int:
@@ -67,7 +54,7 @@ def _cmd_import(args: argparse.Namespace) -> int:
     try:
         doc = _load(args.file)
         workspec.plan(doc, args.leader or "")  # refuse before connecting
-        base = _base_dir(doc)
+        base = workspec_import.board_dir(doc)
     except workspec.SpecError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2

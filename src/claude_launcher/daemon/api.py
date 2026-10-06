@@ -466,6 +466,8 @@ def build_app(
     search_anything.install(app)
     from . import glossary_api
     glossary_api.install(app)
+    from . import spec_api
+    spec_api.install(app)
     app.on_startup.append(_start_rag)
     app.on_shutdown.append(_stop_rag)
     # How late the loop runs its callbacks: the part of the page's round
