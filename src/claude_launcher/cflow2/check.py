@@ -22,6 +22,42 @@ Every check reads only the IR. Codes:
                         that has a ``never_effect`` invariant or a rule
                         ``effect``: the never-effect check cannot see it
 
+Collections and triggers (docs/cflow-v2.md 2.7, 2.8; :func:`_collection_checks`):
+
+- ``unknown-collection``  a ``do:`` entry, a ``wait`` ``until``/``consume``,
+                        an expression (``items``/``count``/``fresh``/``exists``
+                        with a literal address) or a prompt ``${col.<name>}``
+                        names a ``self`` collection the chart does not declare;
+                        also a ``lifecycle.reset_at`` entry that is not a node
+- ``side-runs-unavailable`` a ``main:`` or ``side:<run>:`` address (side runs
+                        are phase 2)
+- ``parent-outside-trigger`` a ``parent:`` address anywhere but a trigger
+- ``trigger-target``    a trigger ``push`` whose ``to`` is not ``parent:``
+- ``facts-outside-trigger`` ``$facts`` or ``$each`` in an expression that is
+                        not a trigger ``push`` (a foreach ``as: each`` binding
+                        in scope excepted)
+- ``collection-read-in-delegation`` a collection read (``items``/``count``/
+                        ``fresh``/``exists``, a ``wait`` ``consume``, a prompt
+                        ``${col.<name>}``) on a node strictly inside a delegated
+                        subtree: the nested run's chart has no collections
+- ``trigger-collection-read`` a collection function (``items``/``count``/
+                        ``fresh``/``exists``) in a trigger ``push`` expression
+                        (the daemon evaluates it with only ``$facts`` and ``$each``)
+- ``effect-in-delegation`` a ``do:`` on a node strictly inside a subtree
+                        delegated to a non-inline executor (the delegation
+                        root itself may carry it)
+- ``trigger-in-delegation`` a ``push`` or ``enqueue-landing`` trigger there
+- ``collection-op-kind`` ``set``/``remove`` on a log, ``consume`` on a queue
+- ``collection-field``  a ``push`` item or ``set`` fields naming a field the
+                        declaration lacks, or a ``push`` missing a required one
+- ``undeclared-status`` a ``set`` of ``status`` to a literal value the
+                        declaration does not list (or a collection without
+                        ``status``)
+- ``do-access``         a ``do:`` operation whose ``access`` excludes
+                        ``driver`` (node effects run as the driver)
+- ``unpushable-collection`` (warning) an expression reads a collection
+                        whose ``access.push`` is empty
+
 Effects may carry a target: ``git.merge:master`` or ``git.merge(master)``.
 An effect without a target may hit any target.
 
@@ -52,7 +88,17 @@ from collections import deque
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Set, Tuple
 
+from . import collections as _collections
+from . import expr as _expr
 from . import ir
+
+#: Expression roots the daemon sets only while it evaluates a trigger
+#: ``push`` (docs/cflow-v2.md 2.8).
+TRIGGER_ROOTS = ("facts", "each")
+
+#: A ``wait`` with ``until`` whose expression reads a run that is gone
+#: (docs/cflow-v2.md 2.7 「wait until」).
+OUTCOME_ABSENT = "absent"
 
 START = "START"
 END = "END"
@@ -130,6 +176,8 @@ def _possible_outcomes(node: ir.Node) -> Set[str]:
         outs.add(ir.OUTCOME_OK)
         if node.type == ir.T_WAIT and node.get("probe"):
             outs.add(ir.OUTCOME_UNDECIDABLE)
+        if node.type == ir.T_WAIT and node.get("until"):
+            outs.add(OUTCOME_ABSENT)
     return outs
 
 
@@ -697,6 +745,8 @@ def check(chart: ir.Chart) -> List[Finding]:
                                        f"paths {hit[0]!r} / {hit[1]!r}; the runtime will isolate or "
                                        f"serialize them", n.id))
 
+    out.extend(_collection_checks(chart, nodes))
+
     graph = _build(chart)
     if _path(chart, graph, {END}, set()) is None:
         out.append(Finding(ERROR, "no-end", "no path from the start reaches completion", chart.root))
@@ -717,6 +767,298 @@ def check(chart: ir.Chart) -> List[Finding]:
                 out.append(Finding(ERROR, "must-pass",
                                    f"path {name}: {' -> '.join(witness)} reaches {to} without passing "
                                    f"{label}", witness[-1] if witness[-1] != END else None))
+    return out
+
+
+_COL_PROMPT_RE = re.compile(r"\$\{col\.([A-Za-z_][A-Za-z0-9_-]*)")
+
+
+def _delegated_above(chart: ir.Chart, node: ir.Node) -> List[str]:
+    """Non-inline executors of the node's ancestors: the node sits strictly
+    inside a delegated subtree (its own executor does not count -- the
+    delegation root's effects run in the delegating run)."""
+    out: List[str] = []
+    for nid in chart.ancestors(node.id):
+        for e in chart.node(nid).executor:
+            if e != ir.EXEC_INLINE and e not in out:
+                out.append(e)
+    return out
+
+
+def _literal(text: Optional[str]) -> Tuple[bool, object]:
+    """``(True, value)`` when an expression is a plain literal."""
+    if not isinstance(text, str):
+        return False, None
+    try:
+        ast = _expr.parse(text).ast
+    except _expr.ExprError:
+        return False, None
+    if ast and ast[0] == "lit":
+        return True, ast[1]
+    return False, None
+
+
+def _node_exprs(chart: ir.Chart, node: ir.Node) -> List[Tuple[str, str, bool]]:
+    """``(what, expression text, inside a trigger)`` for every expression the
+    node holds."""
+    out: List[Tuple[str, str, bool]] = []
+
+    def add(what: str, text: object, trig: bool = False) -> None:
+        if isinstance(text, str) and text:
+            out.append((what, text, trig))
+
+    if node.type == ir.T_COND:
+        for i, br in enumerate(node.get("branches") or []):
+            add(f"cond branch {i}", (br or {}).get("guard"))
+    elif node.type == ir.T_CHOOSE:
+        for opt in node.get("options") or []:
+            add(f"option {opt.get('name')} when", (opt or {}).get("guard"))
+    elif node.type == ir.T_LOOP:
+        add("loop guard", node.get("guard"))
+        add("foreach in", node.get("items"))
+    elif node.type == ir.T_SCOPE:
+        for k, v in (node.get("with_") or {}).items():
+            if isinstance(v, dict):
+                add(f"with {k}", v.get("expr"))
+    elif node.type == ir.T_CONTROL:
+        for k, v in (node.get("value") or {}).items():
+            if isinstance(v, dict):
+                add(f"return value {k}", v.get("expr"))
+    elif node.type == ir.T_WAIT:
+        add("wait until", node.get("until"))
+    for i, op in enumerate(node.get("do") or []):
+        what = f"do[{i}] {op.get('op')}"
+        add(f"{what} when", op.get("when"))
+        add(f"{what} key", op.get("key"))
+        for f, t in (op.get("item") or {}).items():
+            add(f"{what} item.{f}", t)
+        for f, t in (op.get("fields") or {}).items():
+            add(f"{what} fields.{f}", t)
+    for i, trig in enumerate(node.get("triggers") or []):
+        push = trig.get("push") or {}
+        add(f"trigger[{i}] push each", push.get("each"), True)
+        for f, t in (push.get("item") or {}).items():
+            add(f"trigger[{i}] push item.{f}", t, True)
+    return out
+
+
+def _collection_checks(chart: ir.Chart, nodes: List[ir.Node]) -> List[Finding]:
+    out: List[Finding] = []
+    cols: Dict[str, dict] = (chart.meta or {}).get("collections") or {}
+    read: Set[str] = set()
+
+    def resolve(addr: object, where: str, nid: Optional[str], *,
+                reading: bool = False) -> Optional[dict]:
+        """The self collection an address names (None when it is not a
+        self address or does not resolve; findings are added)."""
+        try:
+            target, name = _collections.parse_address(addr)
+        except _collections.CollectionError as exc:
+            out.append(Finding(ERROR, "unknown-collection", f"{where}: {exc}", nid))
+            return None
+        if target == "main" or target.startswith("side:"):
+            out.append(Finding(ERROR, "side-runs-unavailable",
+                               f"{where}: address {addr!r} names a side run; side runs are not "
+                               f"available yet (docs/cflow-v2.md 2.9)", nid))
+            return None
+        if target == "parent":
+            out.append(Finding(ERROR, "parent-outside-trigger",
+                               f"{where}: address {addr!r}: parent: is only for triggers", nid))
+            return None
+        spec = cols.get(name)
+        if spec is None:
+            known = ", ".join(sorted(cols)) or "none declared"
+            out.append(Finding(ERROR, "unknown-collection",
+                               f"{where}: no collection {name!r} (known: {known})", nid))
+            return None
+        if reading:
+            read.add(name)
+        return spec
+
+    def field_check(spec: dict, fields: Dict[str, str], where: str, nid: str, push: bool) -> None:
+        for f in fields:
+            if f == "status" and not push:
+                continue
+            if f not in spec["item"]:
+                out.append(Finding(ERROR, "collection-field",
+                                   f"{where}: {spec['name']} has no field {f!r} "
+                                   f"(fields: {', '.join(spec['item'])})", nid))
+            elif not push and f == spec.get("key"):
+                out.append(Finding(ERROR, "collection-field",
+                                   f"{where}: the key field {f!r} cannot be set", nid))
+        if push:
+            missing = [f for f, d in spec["item"].items() if not d["optional"] and f not in fields]
+            if missing:
+                out.append(Finding(ERROR, "collection-field",
+                                   f"{where}: push to {spec['name']} is missing required "
+                                   f"field(s) {', '.join(missing)}", nid))
+
+    for n in nodes:
+        for i, op in enumerate(n.get("do") or []):
+            kind = op.get("op")
+            where = f"node {n.id} do[{i}] {kind}"
+            remote = _delegated_above(chart, n)
+            if remote:
+                out.append(Finding(ERROR, "effect-in-delegation",
+                                   f"{where}: the node is inside a subtree delegated to "
+                                   f"{', '.join(remote)}; put collection effects on the "
+                                   f"delegation root", n.id))
+            spec = resolve(op.get("addr"), where, n.id)
+            if spec is None:
+                continue
+            if kind in ("set", "remove") and spec["kind"] != "queue":
+                out.append(Finding(ERROR, "collection-op-kind",
+                                   f"{where}: {spec['name']} is a log; {kind} is only for a queue",
+                                   n.id))
+                continue
+            if kind == "consume":
+                if spec["kind"] != "log":
+                    out.append(Finding(ERROR, "collection-op-kind",
+                                       f"{where}: {spec['name']} is a queue; consume is only for "
+                                       f"a log", n.id))
+                continue
+            status = None
+            if kind == "push":
+                field_check(spec, op.get("item") or {}, where, n.id, True)
+                if "status" in (op.get("item") or {}):
+                    out.append(Finding(ERROR, "collection-field",
+                                       f"{where}: push cannot set status (it starts at the "
+                                       f"declared initial value)", n.id))
+            elif kind == "set":
+                fields = op.get("fields") or {}
+                field_check(spec, fields, where, n.id, False)
+                if "status" in fields:
+                    st = spec.get("status")
+                    is_lit, value = _literal(fields["status"])
+                    if st is None:
+                        out.append(Finding(ERROR, "undeclared-status",
+                                           f"{where}: {spec['name']} declares no status", n.id))
+                    elif is_lit and value not in st["values"]:
+                        out.append(Finding(ERROR, "undeclared-status",
+                                           f"{where}: status {value!r} is not one of "
+                                           f"{', '.join(st['values'])}", n.id))
+                    elif is_lit:
+                        status = value
+            allowed = _collections.access_ok(spec, kind, "driver", status)
+            if kind == "set" and status is None and "status" in (op.get("fields") or {}) \
+                    and spec.get("status"):
+                # a computed status: denied only when no value is open to the driver
+                allowed = allowed or any(_collections.access_ok(spec, "set", "driver", v)
+                                         for v in spec["status"]["values"])
+            if not allowed:
+                rule = (f"set.{status}" if status is not None
+                        and f"set.{status}" in spec["access"] else kind)
+                out.append(Finding(ERROR, "do-access",
+                                   f"{where}: access.{rule} of {spec['name']} excludes driver "
+                                   f"(node effects run as the driver): "
+                                   f"{spec['access'].get(rule) or 'nobody'}", n.id))
+
+        remote = _delegated_above(chart, n)
+        for i, trig in enumerate(n.get("triggers") or []):
+            do = trig.get("do")
+            where = f"node {n.id} trigger[{i}] {do}"
+            if do in ("push", "enqueue-landing") and remote:
+                out.append(Finding(ERROR, "trigger-in-delegation",
+                                   f"{where}: the node is inside a subtree delegated to "
+                                   f"{', '.join(remote)}; {do} triggers cannot run there", n.id))
+            if do == "push":
+                to = (trig.get("push") or {}).get("to")
+                try:
+                    target, _ = _collections.parse_address(to)
+                except _collections.CollectionError as exc:
+                    out.append(Finding(ERROR, "trigger-target", f"{where}: {exc}", n.id))
+                    continue
+                if target != "parent":
+                    out.append(Finding(ERROR, "trigger-target",
+                                       f"{where}: a trigger push goes to another run's collection; "
+                                       f"to must be parent:<name>, got {to!r}", n.id))
+
+        def read_in_delegation(what: str) -> None:
+            # a nested delegated run's chart carries no collections, so a
+            # read there is an expression error at run time
+            out.append(Finding(ERROR, "collection-read-in-delegation",
+                               f"node {n.id} {what}: the node is inside a subtree delegated to "
+                               f"{', '.join(remote)}, whose run has no collections; read them on "
+                               f"the delegation root or outside the subtree", n.id))
+
+        if n.type == ir.T_WAIT:
+            for addr in n.get("consume") or []:
+                if remote:
+                    read_in_delegation(f"wait consume {addr}")
+                spec = resolve(addr, f"wait {n.id} consume", n.id)
+                if spec is not None and spec["kind"] != "log":
+                    out.append(Finding(ERROR, "collection-op-kind",
+                                       f"wait {n.id} consume: {spec['name']} is a queue; consume "
+                                       f"is only for a log", n.id))
+
+        bound = {chart.node(a).get("as_name") for a in chart.ancestors(n.id)
+                 if chart.node(a).type == ir.T_LOOP}
+        for what, text, trig in _node_exprs(chart, n):
+            try:
+                calls = _expr.collection_calls(text)
+                roots = _expr.references(text)
+            except _expr.ExprError:
+                continue
+            if not trig:
+                for root in sorted((roots & set(TRIGGER_ROOTS)) - bound):
+                    out.append(Finding(ERROR, "facts-outside-trigger",
+                                       f"node {n.id} {what}: ${root} is only set in a trigger "
+                                       f"push expression", n.id))
+            for fn, addr in calls:
+                if trig:
+                    # the daemon evaluates a trigger push with only $facts
+                    # and $each (docs/cflow-v2.md 2.8); a collection read
+                    # there fails at run time and the trigger is skipped
+                    out.append(Finding(ERROR, "trigger-collection-read",
+                                       f"node {n.id} {what}: {fn}() reads a collection; a "
+                                       f"trigger push expression reads only $facts and $each",
+                                       n.id))
+                else:
+                    if remote:
+                        read_in_delegation(f"{what}: {fn}()")
+                    if addr is not None:
+                        resolve(addr, f"node {n.id} {what}", n.id, reading=True)
+
+        if n.type == ir.T_TASK:
+            for name in _COL_PROMPT_RE.findall(n.get("prompt") or ""):
+                if remote:
+                    read_in_delegation(f"prompt ${{col.{name}}}")
+                if name not in cols:
+                    out.append(Finding(ERROR, "unknown-collection",
+                                       f"task {n.id} prompt: ${{col.{name}}} names no declared "
+                                       f"collection", n.id))
+                else:
+                    read.add(name)
+
+    spec_exprs: List[Tuple[str, str]] = []
+    for key, text in ((chart.spec or {}).get("ensures") or {}).items():
+        spec_exprs.append((f"ensures {key}", text))
+    for name, mon in ((chart.spec or {}).get("monitors") or {}).items():
+        if isinstance(mon, dict) and isinstance(mon.get("always"), str):
+            spec_exprs.append((f"monitor {name}", mon["always"]))
+    for what, text in spec_exprs:
+        try:
+            calls = _expr.collection_calls(text)
+            roots = _expr.references(text)
+        except _expr.ExprError:
+            continue
+        for root in sorted(roots & set(TRIGGER_ROOTS)):
+            out.append(Finding(ERROR, "facts-outside-trigger",
+                               f"{what}: ${root} is only set in a trigger push expression"))
+        for _fn, addr in calls:
+            if addr is not None:
+                resolve(addr, what, None, reading=True)
+
+    for name, spec in cols.items():
+        for entry in (spec.get("lifecycle") or {}).get("reset_at") or []:
+            if entry != "finish" and not any(m.id == entry or m.label == entry for m in nodes):
+                out.append(Finding(ERROR, "unknown-collection",
+                                   f"collection {name} lifecycle.reset_at: no node {entry!r} "
+                                   f"(use a node id or label, or finish)"))
+        if name in read and not (spec.get("access") or {}).get("push"):
+            out.append(Finding(WARNING, "unpushable-collection",
+                               f"collection {name} is read but its access.push is empty: "
+                               f"nothing can ever add a record"))
     return out
 
 

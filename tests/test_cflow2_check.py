@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import textwrap
 
+import pytest
+
 from claude_launcher.cflow2 import check, ir
 from claude_launcher.cflow2.frontend import compile_text
 
@@ -491,3 +493,235 @@ spec:
     assert not ir.subtree_is_flat(chart, "nested")
     assert not ir.subtree_is_flat(chart, "ctl")
     assert not ir.subtree_is_flat(chart, "ens")
+
+
+# -- collections and triggers (docs/cflow-v2.md 2.7, 2.8) ----------------------------
+
+COLS = """
+collections:
+  todo:
+    kind: queue
+    key: id
+    item: {id: str, text: "str?"}
+    status: {values: [open, done], initial: open, settled: [done]}
+    access: {push: [driver, child], set: [driver], set.done: [daemon], remove: [person]}
+  sig:
+    kind: log
+    item: {name: str}
+  sealed:
+    kind: log
+    item: {name: str}
+    access: {push: []}
+"""
+
+
+def CC(nodes: str, body: str = "body: a\n", extra: str = "") -> ir.Chart:
+    return C(COLS + extra + "nodes:\n" + textwrap.indent(textwrap.dedent(nodes), "  ") + body)
+
+
+def test_collections_clean():
+    chart = CC("""
+a:
+  prompt: "items: ${col.todo}"
+  do:
+    - push: {to: todo, item: {id: "'x'"}}
+    - set: {in: todo, key: "'x'", fields: {text: "'t'", status: "'open'"}}
+    - consume: sig
+  triggers: [briefing, {do: enqueue-landing, at: leave},
+             {at: leave, push: {to: "parent:landing", item: {issue: "$each"}, each: "$facts.in_review"}}]
+""", body="body:\n  - a\n  - wait: {until: \"fresh('sig') or count('todo', 'open') > 0\", consume: [sig]}\n")
+    assert check.check(chart) == []
+
+
+@pytest.mark.parametrize("do,code", [
+    ("[{push: {to: nope, item: {name: \"'x'\"}}}]", "unknown-collection"),
+    ("[{push: {to: 'main:sig', item: {name: \"'x'\"}}}]", "side-runs-unavailable"),
+    ("[{push: {to: 'side:stack:sig', item: {name: \"'x'\"}}}]", "side-runs-unavailable"),
+    ("[{push: {to: 'parent:sig', item: {name: \"'x'\"}}}]", "parent-outside-trigger"),
+    ("[{set: {in: sig, key: '1', fields: {name: \"'y'\"}}}]", "collection-op-kind"),
+    ("[{remove: {in: sig, key: '1'}}]", "collection-op-kind"),
+    ("[{consume: todo}]", "collection-op-kind"),
+    ("[{set: {in: todo, key: \"'x'\", fields: {status: \"'gone'\"}}}]", "undeclared-status"),
+    ("[{set: {in: todo, key: \"'x'\", fields: {status: \"'done'\"}}}]", "do-access"),
+    ("[{remove: {in: todo, key: \"'x'\"}}]", "do-access"),
+    ("[{push: {to: sealed, item: {name: \"'x'\"}}}]", "do-access"),
+    ("[{push: {to: todo, item: {text: \"'x'\"}}}]", "collection-field"),
+    ("[{push: {to: todo, item: {id: \"'x'\", other: '1'}}}]", "collection-field"),
+    ("[{set: {in: todo, key: \"'x'\", fields: {id: \"'y'\"}}}]", "collection-field"),
+    ("[{push: {to: todo, item: {id: \"'x'\"}}, when: \"count('nope') > 0\"}]", "unknown-collection"),
+])
+def test_do_findings(do, code):
+    chart = CC(f"a: {{prompt: a, do: {do}}}\n")
+    assert code in codes(chart, "error"), check.check(chart)
+
+
+def test_computed_status_set_is_allowed_when_some_value_is_open():
+    chart = CC("a: {prompt: a, do: [{set: {in: todo, key: \"'x'\", fields: {status: '$data.s'}}}]}\n")
+    assert "do-access" not in codes(chart)
+
+
+def test_undeclared_status_on_collection_without_status():
+    chart = C("""
+collections:
+  q: {kind: queue, key: k, item: {k: str}}
+nodes:
+  a: {prompt: a, do: [{set: {in: q, key: "'x'", fields: {status: "'x'"}}}]}
+body: a
+""")
+    assert "undeclared-status" in codes(chart)
+
+
+def test_expression_reads_are_checked_everywhere():
+    chart = CC("a: {prompt: a}\n", body="""
+body:
+  - cond:
+      - {if: "count('nope') > 0", then: a}
+      - {else: a}
+  - wait: {until: "fresh('main:sig')"}
+  - wait: {until: "exists('parent:sig')"}
+  - wait: {until: "true", consume: [todo]}
+  - wait: {until: "true", consume: [ghost]}
+""")
+    found = codes(chart, "error")
+    assert found.count("unknown-collection") == 2
+    assert "side-runs-unavailable" in found and "parent-outside-trigger" in found
+    assert "collection-op-kind" in found
+
+
+def test_prompt_col_reference_must_exist():
+    chart = CC("a: {prompt: '${col.ghost}'}\n")
+    assert [f.code for f in check.errors(chart)] == ["unknown-collection"]
+
+
+def test_reset_at_must_name_a_node():
+    chart = C("""
+collections:
+  q: {kind: queue, key: k, item: {k: str}, lifecycle: {reset_at: [finish, a, ghost]}}
+nodes:
+  a: {prompt: a}
+body: a
+""")
+    found = findings(chart, "unknown-collection")
+    assert len(found) == 1 and "ghost" in found[0].message
+
+
+def test_unpushable_collection_warning():
+    chart = CC("a: {prompt: a}\n", body="body:\n  - wait: {until: \"fresh('sealed')\"}\n  - a\n")
+    found = findings(chart, "unpushable-collection")
+    assert len(found) == 1 and found[0].level == "warning"
+    assert findings(CC("a: {prompt: a}\n", body="body:\n  - wait: {until: \"fresh('sig')\"}\n  - a\n"),
+                    "unpushable-collection") == []
+
+
+def test_trigger_target_must_be_parent():
+    chart = CC("a: {prompt: a, triggers: [{push: {to: todo, item: {id: '$each'}}}]}\n")
+    assert "trigger-target" in codes(chart)
+
+
+@pytest.mark.parametrize("expr", [
+    "count('todo')", "fresh('parent:sig')", "exists('parent:landing')", "items($facts.q)",
+])
+def test_trigger_push_expression_cannot_read_collections(expr):
+    for where in (f"each: \"{expr}\", item: {{id: '$each'}}", f"item: {{id: \"{expr}\"}}"):
+        chart = CC(f"a: {{prompt: a, triggers: [{{push: {{to: 'parent:todo', {where}}}}}]}}\n")
+        assert codes(chart, "error") == ["trigger-collection-read"], check.check(chart)
+
+
+@pytest.mark.parametrize("nodes,body", [
+    ("a: {prompt: a, do: [{push: {to: todo, item: {id: '$facts.head'}}}]}\n", "body: a\n"),
+    ("a: {prompt: a, do: [{push: {to: sig, item: {name: \"'x'\"}}, when: '$each'}]}\n", "body: a\n"),
+    ("a: {prompt: a}\n", "body:\n  - wait: {until: \"$facts.branch == 'x'\"}\n  - a\n"),
+    ("a: {prompt: a}\n", "body:\n  cond:\n    - {if: '$each', then: a}\n    - {else: a}\n"),
+    ("a: {prompt: a}\n", "body: a\nspec:\n  ensures: {a.ok: \"$facts.head != ''\"}\n"),
+])
+def test_facts_and_each_outside_a_trigger_push(nodes, body):
+    assert "facts-outside-trigger" in codes(CC(nodes, body=body), "error")
+
+
+def test_foreach_as_each_binds_each():
+    chart = CC("a: {prompt: a, do: [{push: {to: sig, item: {name: '$each'}}}]}\n",
+               body="body:\n  foreach: {in: \"['x']\", as: each, do: a}\n")
+    assert "facts-outside-trigger" not in codes(chart)
+    clean = CC("a: {prompt: a, triggers: [{push: {to: 'parent:todo', each: '$facts.in_review',"
+               " item: {id: '$each', h: '$facts.head'}}}]}\n")
+    assert "facts-outside-trigger" not in codes(clean)
+
+
+DELEGATED = """
+a: {prompt: a}
+b:
+  prompt: b
+  do: [{push: {to: todo, item: {id: "'x'"}}}]
+  triggers: [briefing, checks, {do: enqueue-landing, at: leave}]
+"""
+
+
+def test_effects_and_landing_triggers_inside_a_delegation():
+    chart = CC(DELEGATED, body="body:\n  id: d\n  executor: [subagent]\n  seq: [a, b]\n")
+    found = codes(chart, "error")
+    assert found.count("effect-in-delegation") == 1
+    assert found.count("trigger-in-delegation") == 1  # briefing/checks are allowed
+
+
+def test_push_trigger_inside_a_delegation():
+    nodes = ("a: {prompt: a}\n"
+             "b:\n  prompt: b\n"
+             "  triggers: [{at: leave, push: {to: 'parent:landing', each: '$facts.in_review',"
+             " item: {issue: '$each'}}}]\n")
+    chart = CC(nodes, body="body:\n  id: d\n  executor: [subagent]\n  seq: [a, b]\n")
+    assert codes(chart, "error").count("trigger-in-delegation") == 1
+
+
+@pytest.mark.parametrize("inner", [
+    "{prompt: '${col.todo}'}",
+    "{prompt: b, do: [{push: {to: sig, item: {name: \"'x'\"}}, when: \"count('todo') > 0\"}]}",
+    "{prompt: b, do: [{push: {to: sig, item: {name: \"'x'\"}}, when: \"fresh($data.a)\"}]}",
+])
+def test_collection_read_inside_a_delegation(inner):
+    chart = CC(f"a: {{prompt: a}}\nb: {inner}\n",
+               body="body:\n  id: d\n  executor: [subagent]\n  seq: [a, b]\n")
+    assert codes(chart, "error").count("collection-read-in-delegation") == 1, check.check(chart)
+
+
+def test_wait_reads_inside_a_delegation():
+    chart = CC("a: {prompt: a}\n",
+               body="body:\n  id: d\n  executor: [subagent]\n  seq:\n    - a\n"
+                    "    - wait: {until: \"fresh('sig')\", consume: [sig]}\n")
+    assert codes(chart, "error").count("collection-read-in-delegation") == 2
+
+
+def test_collection_reads_on_the_delegation_root_or_inline_subtree_are_allowed():
+    root = CC("a: {prompt: '${col.todo}'}\n",
+              body="body:\n  id: d\n  executor: [subagent]\n  seq: [a]\n"
+                   "  do: [{push: {to: sig, item: {name: \"'x'\"}}, when: \"count('todo') > 0\"}]\n")
+    # the root's own do: is evaluated by the delegating run; only the task
+    # inside the subtree is reported
+    flagged = [f.node for f in check.check(root) if f.code == "collection-read-in-delegation"]
+    assert len(flagged) == 1 and flagged[0] != "d"
+    task_root = CC("a: {prompt: '${col.todo}', executor: [subagent]}\n")
+    assert "collection-read-in-delegation" not in codes(task_root)
+    inline = CC("a: {prompt: '${col.todo}'}\n",
+                body="body:\n  executor: [inline]\n  seq: [a]\n")
+    assert "collection-read-in-delegation" not in codes(inline)
+
+
+def test_the_delegation_root_may_carry_effects_and_triggers():
+    chart = CC(DELEGATED, body="body:\n  id: d\n  executor: [subagent]\n  seq: [a]\n"
+                               "  do: [{push: {to: todo, item: {id: \"'x'\"}}}]\n"
+                               "  triggers: [{do: enqueue-landing, at: leave}]\n")
+    assert "effect-in-delegation" not in codes(chart)
+    assert "trigger-in-delegation" not in codes(chart)
+    inline = CC(DELEGATED, body="body:\n  executor: [inline]\n  seq: [a, b]\n")
+    assert "effect-in-delegation" not in codes(inline)
+
+
+def test_wait_until_may_end_absent():
+    chart = C("""
+nodes:
+  a: {prompt: a}
+body:
+  - wait: {until: "true"}
+  - a
+returns: {absent: {}}
+""")
+    assert check.check(chart) == []

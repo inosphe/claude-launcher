@@ -18,6 +18,15 @@ Grammar (lowest precedence first)::
     list     := "[" (expr ("," expr)*)? ","? "]"
     ref      := "$" name ("." field | "[" expr "]")*
     call     := ("len" | "empty") "(" expr ")"
+              | ("items" | "count" | "fresh") "(" expr ("," expr)? ")"
+              | "exists" "(" expr ")"
+
+The collection functions (``docs/cflow-v2.md`` 2.7, 「읽기」) read records
+through a resolver the runtime puts in the environment under
+:data:`COLLECTIONS_KEY` (an object with ``items(addr, status)``,
+``fresh(addr, name)`` and ``exists(addr)``); this module stays free of run
+state. Without a resolver they raise :class:`ExprError`. Root names that
+start with ``__`` are never readable as references.
 
 A reference whose root or path does not exist evaluates to ``null``. Ordering
 comparisons need two numbers or two strings; anything else (``1 < "a"``,
@@ -37,7 +46,12 @@ from dataclasses import dataclass
 from functools import lru_cache
 from typing import Any, Dict, List, Optional, Set, Tuple, Union
 
-__all__ = ["ExprError", "Expr", "parse", "evaluate", "references", "truthy"]
+__all__ = ["ExprError", "Expr", "parse", "evaluate", "references", "truthy",
+           "COLLECTIONS_KEY", "COLLECTION_FUNCTIONS", "collection_calls"]
+
+#: Where the runtime puts its collection resolver in an evaluation
+#: environment. A ``$__...`` reference never reads it.
+COLLECTIONS_KEY = "__collections__"
 
 
 class ExprError(Exception):
@@ -78,7 +92,9 @@ MAX_LENGTH = 20000
 _INTERNAL = (TypeError, ValueError, RecursionError, OverflowError, MemoryError)
 
 _KEYWORDS = {"and", "or", "not", "in", "true", "false", "null"}
-_FUNCTIONS = {"len", "empty"}
+_FUNCTIONS = {"len", "empty", "items", "count", "fresh", "exists"}
+#: Functions over a collection address; name -> (min args, max args).
+COLLECTION_FUNCTIONS = {"items": (1, 2), "count": (1, 2), "fresh": (1, 2), "exists": (1, 1)}
 _CMP_OPS = ("==", "!=", "<=", ">=", "<", ">")
 _PUNCT = "()[],."
 
@@ -186,7 +202,8 @@ def _tokenize(text: str) -> List[_Tok]:
 #   ("ref", root, (seg, ...))     seg: ("field", name) | ("index", node)
 #   ("not", node)                 ("and", a, b)   ("or", a, b)
 #   ("cmp", op, a, b, col)        op in _CMP_OPS + ("in", "not in")
-#   ("call", name, arg, col)
+#   ("call", name, arg, col)       len/empty: one argument
+#   ("ccall", name, (arg, ...), col)  a collection function
 
 
 class _Parser:
@@ -319,6 +336,19 @@ class _Parser:
             if word == "null":
                 self.next()
                 return ("lit", None)
+            if word in COLLECTION_FUNCTIONS:
+                self.next()
+                self.expect_punct("(")
+                lo, hi = COLLECTION_FUNCTIONS[word]
+                args = [self.parse_or()]
+                while self.is_punct(","):
+                    self.next()
+                    args.append(self.parse_or())
+                if not lo <= len(args) <= hi:
+                    raise self.error(f"{word}() takes " + (
+                        f"{lo} argument" if lo == hi else f"{lo} or {hi} arguments"), tok)
+                self.expect_punct(")")
+                return ("ccall", word, tuple(args), tok.col)
             if word in _FUNCTIONS:
                 self.next()
                 self.expect_punct("(")
@@ -461,6 +491,8 @@ class _Eval:
         if kind == "list":
             return [self.run(item) for item in node[1]]
         if kind == "ref":
+            if str(node[1]).startswith("__"):
+                return None
             value = self.env.get(node[1]) if isinstance(self.env, dict) else None
             for seg in node[2]:
                 if value is None:
@@ -478,6 +510,8 @@ class _Eval:
             return self.compare(node[1], self.run(node[2]), self.run(node[3]), node[4])
         if kind == "call":
             return self.call(node[1], self.run(node[2]), node[3])
+        if kind == "ccall":
+            return self.collection_call(node[1], [self.run(a) for a in node[2]], node[3])
         raise self.fail(f"internal: unknown node {kind!r}")
 
     def compare(self, op: str, a: Any, b: Any, col: int) -> bool:
@@ -523,6 +557,31 @@ class _Eval:
             return value is None or (isinstance(value, (str, list, tuple, dict)) and len(value) == 0)
         raise self.fail(f"unknown function {name!r}", col)
 
+    def collection_call(self, name: str, args: List[Any], col: int) -> Any:
+        resolver = self.env.get(COLLECTIONS_KEY) if isinstance(self.env, dict) else None
+        if resolver is None:
+            raise self.fail(f"{name}() reads a run's collections; none are available here", col)
+        addr = args[0]
+        if not isinstance(addr, str) or not addr:
+            raise self.fail(f"{name}() needs a collection address string, got "
+                            f"{_type_name(addr)}", col)
+        extra = args[1] if len(args) > 1 else None
+        if extra is not None and not isinstance(extra, str):
+            raise self.fail(f"{name}() second argument must be a string, got "
+                            f"{_type_name(extra)}", col)
+        try:
+            if name == "items":
+                return list(resolver.items(addr, extra))
+            if name == "count":
+                return len(resolver.items(addr, extra))
+            if name == "fresh":
+                return bool(resolver.fresh(addr, extra))
+            return bool(resolver.exists(addr))
+        except ExprError as exc:
+            raise self.fail(exc.message, col)
+        except (LookupError, ValueError) as exc:
+            raise self.fail(f"{name}({addr!r}): {exc}", col)
+
 
 def evaluate(expr_or_text: Union[Expr, str], env: Dict[str, Any]) -> Any:
     """Evaluate against ``env`` (root names without ``$``: ``{"data": ...}``).
@@ -556,6 +615,43 @@ def references(expr_or_text: Union[Expr, str]) -> Set[str]:
         if node[0] == "list":
             for item in node[1]:
                 walk(item)
+            return
+        if node[0] == "ccall":
+            for item in node[2]:
+                walk(item)
+            return
+        for item in node[1:]:
+            walk(item)
+
+    walk(expr.ast)
+    return out
+
+
+def collection_calls(expr_or_text: Union[Expr, str]) -> List[Tuple[str, Any]]:
+    """``(function, address)`` for every collection function call in the
+    expression; the address is the literal string when the first argument
+    is one, else ``None`` (computed at run time)."""
+    expr = parse(expr_or_text)
+    out: List[Tuple[str, Any]] = []
+
+    def walk(node: Any) -> None:
+        if not isinstance(node, tuple) or not node:
+            return
+        if node[0] == "ccall":
+            first = node[2][0]
+            out.append((node[1], first[1] if first[0] == "lit" and isinstance(first[1], str)
+                        else None))
+            for item in node[2]:
+                walk(item)
+            return
+        if node[0] == "list":
+            for item in node[1]:
+                walk(item)
+            return
+        if node[0] == "ref":
+            for seg in node[2]:
+                if seg[0] == "index":
+                    walk(seg[1])
             return
         for item in node[1:]:
             walk(item)

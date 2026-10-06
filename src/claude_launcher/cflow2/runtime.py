@@ -74,6 +74,7 @@ report that introduced it):
 
 from __future__ import annotations
 
+import copy
 import json
 import os
 import re
@@ -95,6 +96,7 @@ try:  # sibling modules; the runtime degrades without them
 except ImportError:  # pragma: no cover
     caps_mod = None  # type: ignore
 from . import expr as expr_mod
+from . import collections as col_mod
 
 ST_RUNNING = "running"
 ST_WAITING = "waiting_approval"
@@ -272,6 +274,11 @@ class Run:
             "caps": {k: _cap_on(v) for k, v in self.caps.items()},
             "probe": self.state.get("probe", {}),
         })
+        if _col_specs(self):
+            # ``${col.<name>}`` (prompts) and items()/count()/fresh()/exists()
+            out["col"] = {name: col_mod.items(cs)
+                          for name, cs in (self.state.get("collections") or {}).items()}
+            out[expr_mod.COLLECTIONS_KEY] = _ColResolver(self)
         return out
 
 
@@ -497,6 +504,12 @@ def _enter(r: Run, node_id: str, parent: Optional[str], role: str,
 
 
 def _enter_body(r: Run, iid: str, node: ir.Node) -> None:
+    # doc 4.5: do (at enter) -> triggers (at enter) -> the body
+    err = _apply_effects(r, iid, node, AT_ENTER)
+    if err:
+        _complete(r, iid, ir.OUTCOME_FAIL, {"reason": err})
+        return
+    _queue_triggers(r, iid, node, AT_ENTER)
     if node.type == ir.T_SCOPE and not _scope_params(r, iid, node):
         return
     if node.executor and node.executor != [ir.EXEC_INLINE] and _delegate(r, iid):
@@ -1022,11 +1035,17 @@ def _complete(r: Run, iid: str, outcome: str, value: Any, handled: bool = False)
             # keeps the shape the node returns
             r.state.setdefault("data", {})[node.bind] = own
             r.emit("bound", node=node.id, instance=iid, var=node.bind)
+        # doc 4.5: the outcome is final -> do (at leave). A failing effect
+        # turns it to 'fail', which the node's own 'on' handles like any other
+        outcome, value = _leave_effects(r, iid, node, outcome, value)
         handler = node.on.get(outcome) if node.on else None
         if handler:
             inst["frame"]["on"] = outcome
             _enter_child(r, iid, handler, "on")
             return
+    # doc 4.5: ... -> triggers (at leave) -> lifecycle.reset_at -> the parent
+    _queue_triggers(r, iid, node, AT_LEAVE)
+    _reset_at(r, node)
     r.emit("left", node=node.id, instance=iid, outcome=outcome)
     parent = inst.get("parent")
     role = inst.get("role")
@@ -1244,6 +1263,7 @@ def _finish_final(r: Run, outcome: str, value: Any, how: Optional[str] = None) -
     r.state["value"] = value
     r.state["finished"] = store_mod.utcnow()
     r.emit("done", outcome=outcome, value=value, how=how, status=r.state["status"])
+    _reset_at(r, None)
 
 
 # -- acceptance (typed start inputs, doc 2.6) ---------------------------------------
@@ -1469,7 +1489,10 @@ def nested_scope(scope: str, did: str) -> str:
 def _nested_chart(r: Run, node: ir.Node) -> ir.Chart:
     """The delegation node's subtree as a chart of its own: the root keeps
     its body but not its executor, ``on``, ``bind`` or ensures (the
-    delegating run applies those when the result comes back)."""
+    delegating run applies those when the result comes back). Nor does it
+    keep the root's ``do:`` and ``triggers`` (the delegating run applies them
+    when it enters and leaves the node, doc 2.7/2.8) or the collections:
+    they live in the delegating run only."""
     nodes: Dict[str, ir.Node] = {}
     for n in _subtree(r.chart, node.id):
         nodes[n.id] = ir.Node.from_dict(n.to_dict())
@@ -1478,6 +1501,8 @@ def _nested_chart(r: Run, node: ir.Node) -> ir.Chart:
     root.executor = []
     root.on = {}
     root.bind = None
+    root.props.pop("do", None)
+    root.props.pop("triggers", None)
     labels = {x for n in nodes.values() if n.id != node.id for x in (n.id, n.label) if x}
     spec = json.loads(json.dumps(r.chart.spec or {}))
     spec.pop("monitors", None)  # run-wide: the delegating run watches them
@@ -1486,7 +1511,8 @@ def _nested_chart(r: Run, node: ir.Node) -> ir.Chart:
     return ir.Chart(
         name=f"{r.chart.name}~{node.label or node.id}", nodes=nodes, root=node.id,
         kind=ir.KIND_WORKFLOW, description=f"nested delegation run of {node.label or node.id}",
-        meta=dict(r.chart.meta or {}), params={}, returns=returns_of(node), data={},
+        meta={k: v for k, v in (r.chart.meta or {}).items() if k != "collections"},
+        params={}, returns=returns_of(node), data={},
         rules=dict(r.chart.rules or {}), spec=spec, source=r.chart.source,
     )
 
@@ -1730,6 +1756,8 @@ def _mutate(cwd: Optional[str], scope: Optional[str], now: Optional[float],
         if r.status in LIVE_STATUSES:
             _tick_time(r)
         out = fn(r)  # a refusal raises before save: nothing is written
+        if r.status in LIVE_STATUSES:
+            _tick_until(r)  # a change may have made a 'wait: until' hold
         r.save()
     r.run_after()
     if r.deferred_error:
@@ -1799,7 +1827,7 @@ def _data_env_name(name: str) -> str:
 #: these (or with a ``.``/``[`` path) is a cflow value reference. Anything
 #: else -- ``${HOME}``, ``${CFLOW_IN_X}``, ``${VAR:-x}`` -- is the shell's own.
 _VALUE_ROOTS = ("params", "data", "prev", "item", "result", "visits", "caps", "probe",
-                "inputs")
+                "inputs", "col")
 
 
 def _is_value_ref(inner: str) -> bool:
@@ -1912,7 +1940,8 @@ def check_shell_refs(chart: ir.Chart) -> List[str]:
 def _new_run(st: RunStore, chart: ir.Chart, *, params: Dict[str, Any], data: Any,
              caps: Any, driver: str, now: Optional[float],
              parent: Optional[Dict[str, Any]] = None,
-             inputs: Optional[Dict[str, Any]] = None) -> Run:
+             inputs: Optional[Dict[str, Any]] = None,
+             previous: Optional[Dict[str, Any]] = None) -> Run:
     """A fresh run in ``st`` (lock held, slot empty): snapshot, state, root
     entered. The caller saves."""
     run_id = time.strftime("%Y%m%d-%H%M%S", time.gmtime(now if now is not None else None)) \
@@ -1933,6 +1962,7 @@ def _new_run(st: RunStore, chart: ir.Chart, *, params: Dict[str, Any], data: Any
     r = Run(st, chart, state, now)
     r.emit("started", run=run_id, workflow=chart.name, source=chart.source or None,
            params=params, driver=driver or None, parent=parent, inputs=inputs)
+    _init_collections(r, previous)
     _enter(r, chart.root, None, "root")
     _tick_time(r)
     return r
@@ -2071,12 +2101,14 @@ def start(chart: ir.Chart, *, cwd: Optional[str] = None, scope: Optional[str] = 
     values = _validate_params(chart, params)
     st = RunStore(cwd, scope)
     who = default_driver(st.scope) if driver is None else str(driver or "")
+    previous: Optional[Dict[str, Any]] = None
     with st.lock():
         if st.exists():
             try:
                 old = st.load_state()
             except StoreError:
                 old = {}
+            previous = old
             if old.get("status") in LIVE_STATUSES:
                 if not force:
                     raise FlowError(
@@ -2092,11 +2124,14 @@ def start(chart: ir.Chart, *, cwd: Optional[str] = None, scope: Optional[str] = 
                         f"abort the run themselves ('claunch cflow2 abort')")
                 _abort(old_run, "replaced by a forced start")
                 old_run.save()
+                previous = old_run.state
             st.archive(old.get("run_id"))
         elif st.chart_path.exists():
             st.chart_path.unlink()
         r = _new_run(st, chart, params=values, data=chart.data, caps=_caps_to_json(caps),
-                     driver=who, now=now, inputs=input_values)
+                     driver=who, now=now, inputs=input_values,
+                     previous=previous if (previous or {}).get("workflow") == chart.name
+                     else None)
         r.save()
     r.run_after()
     return status(cwd=cwd, scope=scope, now=now, tick=False)
@@ -2135,6 +2170,25 @@ def _assignee(state: Dict[str, Any], rec: Dict[str, Any]) -> str:
     if rec.get("executor") == ir.EXEC_SESSION:
         return str(rec.get("assignee") or rec.get("child") or "")
     return ""
+
+
+def acting_session(state: Dict[str, Any]) -> str:
+    """The session a run's triggers act on (doc 2.7, principal ``driver``):
+    the run's driver, or -- a nested delegation run -- the session that
+    carries out that delegation (read now: a session delegation's child may
+    be spawned after the nested run opened). ``""`` when there is none."""
+    drv = driver_of(state)
+    if drv:
+        return drv
+    link = state.get("parent")
+    if not link:
+        return ""
+    try:
+        pstate = RunStore(link["cwd"], link["scope"]).load_state()
+    except (StoreError, KeyError, TypeError):
+        return ""
+    rec = (pstate.get("delegations") or {}).get(link.get("delegation"))
+    return _assignee(pstate, rec) if isinstance(rec, dict) else ""
 
 
 def may_drive(state: Dict[str, Any], session: str) -> bool:
@@ -3061,6 +3115,7 @@ def _abort(r: Run, reason: str) -> None:
     r.state.update({"status": ST_ABORTED, "reason": reason, "approvals": [],
                     "finished": store_mod.utcnow()})
     r.emit("aborted", reason=reason)
+    _reset_at(r, None)
 
 
 def abort(reason: str, *, cwd: Optional[str] = None, scope: Optional[str] = None,
@@ -3238,6 +3293,11 @@ def _tick_time(r: Run, probe_runner: Optional[ProbeRunner] = None,
                     _complete(r, iid, ir.OUTCOME_TIMEOUT, {"seconds": node.get("seconds")})
                 fired = True
                 break
+            if inst.get("await") == AW_WAIT and node.get("until") is not None:
+                if _until_step(r, iid, node):
+                    fired = True
+                    break
+                continue
             if inst.get("await") == AW_WAIT:
                 due = frame.get("due")
                 if due is not None and r.now >= due:
@@ -3618,6 +3678,10 @@ def describe(r: Run) -> Dict[str, Any]:
     acc = s.get("acceptance")
     if acc:
         out["acceptance"] = {k: acc.get(k) for k in ("status", "failed", "checked_at")}
+    if _col_specs(r):
+        out["collections"] = _col_summary(r)
+    if _col_specs(r) or s.get("triggers"):
+        out["pending_triggers"] = len(s.get("triggers") or [])
     if s.get("status") in FINISHED_STATUSES:
         out["outcome"] = s.get("outcome")
         out["value"] = s.get("value")
@@ -4296,6 +4360,653 @@ def answer(ask_id: str, decision: str, reason: Optional[str] = None, *,
 def open_asks(r: Run) -> List[Dict[str, Any]]:
     return [dict(rec) for rec in (r.state.get("asks") or {}).values()
             if rec.get("status") == "open"]
+
+
+# ---------------------------------------------------------------------------
+# collections, node effects ('do:'), triggers, 'wait: until' (doc 2.7, 2.8, 4.5)
+#
+# State (``state.json``):
+#   collections: {name: {kind, items: [...], seq}}   (col_mod owns the shape)
+#   cursors:     {address: seq}   -- a log's read position for this run; the
+#                address is the collection name for this run's own log
+#   triggers:    [{id, node, label, instance, at, do, push?, queued_at}]
+#   trigger_seq: the last trigger id's number
+#   watch_checked: {name: {str(key): epoch}} -- the last watch probe of a record
+
+AT_ENTER = "enter"
+AT_LEAVE = "leave"
+#: The finish point of ``lifecycle.reset_at``.
+RESET_FINISH = "finish"
+#: ``wait: until`` read an address whose run is gone (doc 2.7).
+OUTCOME_ABSENT = "absent"
+
+PR_DRIVER = "driver"
+PR_DAEMON = "daemon"
+PR_CHILD = "child"
+PR_PEER = "peer"
+PR_PERSON = "person"
+
+COLLECTION_OPS = ("push", "set", "remove")
+EFFECT_OPS = ("push", "set", "remove", "consume")
+#: A watch probe's time limit (doc 2.7, watch).
+WATCH_TIMEOUT = 30
+
+
+def _col_specs(r: "Run") -> Dict[str, Dict[str, Any]]:
+    return dict((r.chart.meta or {}).get("collections") or {})
+
+
+def _chart_col_specs(chart: ir.Chart) -> Dict[str, Dict[str, Any]]:
+    return dict((chart.meta or {}).get("collections") or {})
+
+
+def _col_state(r: "Run", name: str) -> Dict[str, Any]:
+    specs = _col_specs(r)
+    if name not in specs:
+        raise col_mod.CollectionError(
+            f"no collection {name!r} in this run (declared: {', '.join(specs) or 'none'})")
+    cols = r.state.setdefault("collections", {})
+    if not isinstance(cols.get(name), dict):
+        cols[name] = col_mod.empty(specs[name])
+    return cols[name]
+
+
+def _self_name(r: "Run", addr: Any) -> str:
+    """The collection an effect or a function names; only this run's own
+    collections are reachable from inside a run in this version."""
+    target, name = col_mod.parse_address(addr)
+    if target != "self":
+        raise col_mod.CollectionError(
+            f"collection address {addr!r}: only this run's own collections (self) can be "
+            f"used here")
+    _col_state(r, name)
+    return name
+
+
+class _ColResolver:
+    """What :mod:`.expr` reads collections through (``items``, ``count``,
+    ``fresh``, ``exists``). ``strict`` (guards, effects): an address of
+    another run is an error. Not strict (``wait: until``): such an address
+    reads as empty and is noted in ``absent`` -- the wait ends ``absent``."""
+
+    def __init__(self, r: "Run", strict: bool = True) -> None:
+        self.r = r
+        self.strict = strict
+        self.absent: List[str] = []
+
+    def _name(self, addr: str) -> Optional[str]:
+        target, name = col_mod.parse_address(addr)
+        if target != "self":
+            if self.strict:
+                raise expr_mod.ExprError(
+                    f"collection address {addr!r}: only this run's own collections can be "
+                    f"read here")
+            if addr not in self.absent:
+                self.absent.append(addr)
+            return None
+        specs = _col_specs(self.r)
+        if name not in specs:
+            raise expr_mod.ExprError(
+                f"no collection {name!r} in this run (declared: {', '.join(specs) or 'none'})")
+        return name
+
+    def items(self, addr: str, status: Optional[str] = None) -> List[Dict[str, Any]]:
+        name = self._name(addr)
+        if name is None:
+            return []
+        return col_mod.items((self.r.state.get("collections") or {}).get(name), status)
+
+    def fresh(self, addr: str, field: Optional[str] = None) -> bool:
+        name = self._name(addr)
+        if name is None:
+            return False
+        cursor = (self.r.state.get("cursors") or {}).get(name)
+        return col_mod.fresh((self.r.state.get("collections") or {}).get(name), cursor, field)
+
+    def exists(self, addr: str) -> bool:
+        target, name = col_mod.parse_address(addr)
+        # phase 1: other runs (main, side, parent) are not resolvable yet
+        return target == "self" and name in _col_specs(self.r)
+
+
+def _init_collections(r: "Run", previous: Optional[Dict[str, Any]]) -> None:
+    """A new run's collections: empty, or -- ``lifecycle.inherit`` -- the
+    previous run's in this slot (same workflow name), cleaned up, with this
+    run's cursors on them."""
+    specs = _col_specs(r)
+    if not specs:
+        return
+    cols = r.state.setdefault("collections", {})
+    cursors = r.state.setdefault("cursors", {})
+    old_cols = (previous or {}).get("collections") or {}
+    old_cursors = (previous or {}).get("cursors") or {}
+    for name, spec in specs.items():
+        if previous is not None and spec["lifecycle"].get("inherit"):
+            cols[name], summary = col_mod.inherit_report(old_cols.get(name), spec)
+            if summary.get("inherited"):
+                if name in old_cursors:
+                    cursors[name] = old_cursors[name]
+                ev = dict(summary)
+                ev.pop("event", None)
+                r.emit("collection_inherited", run_from=previous.get("run_id"),
+                       cursor=cursors.get(name), **ev)
+            continue
+        cols[name] = col_mod.empty(spec)
+    r.state.setdefault("triggers", [])
+
+
+def _col_apply(r: "Run", op: str, name: str, *, principal: str, by: str, key: Any = None,
+               item: Any = None, fields: Any = None) -> Dict[str, Any]:
+    """One push/set/remove on this run's collection ``name`` (journaled);
+    :class:`.collections.CollectionError` when refused."""
+    cs = _col_state(r, name)
+    spec = _col_specs(r)[name]
+    if op == "push":
+        ev = col_mod.apply_push(cs, spec, item, principal=principal, by=by, now=r.now)
+    elif op == "set":
+        ev = col_mod.apply_set(cs, spec, key, fields, principal=principal, by=by, now=r.now)
+    elif op == "remove":
+        ev = col_mod.apply_remove(cs, spec, key, principal=principal, by=by, now=r.now)
+    else:
+        raise col_mod.CollectionError(f"unknown collection operation {op!r} "
+                                      f"(push, set, remove)")
+    ev = dict(ev)
+    r.emit(str(ev.pop("event")), **ev)
+    return ev
+
+
+def _consume(r: "Run", addr: Any, by: str) -> None:
+    name = _self_name(r, addr)
+    cs = _col_state(r, name)
+    if cs.get("kind") != "log":
+        raise col_mod.CollectionError(f"consume {addr!r}: only a log has a cursor")
+    cursors = r.state.setdefault("cursors", {})
+    before = cursors.get(name)
+    cursors[name] = col_mod.end_cursor(cs)
+    r.emit("cursor_moved", address=name, before=before, after=cursors[name], by=by)
+
+
+# -- node effects ('do:') ------------------------------------------------------------
+
+
+def _effect_parts(raw: Any) -> Tuple[str, Any, str, Any]:
+    """``(op, body, at, when)`` of one ``do:`` entry. The compiled shape is
+    flat (``{op, addr, at, when, item | key, fields}``, frontend
+    ``_do_list``); the surface form ``{push: {to, item}, at?, when?}``
+    (``{consume: ADDR}``) is read as well."""
+    if not isinstance(raw, dict):
+        raise col_mod.CollectionError(f"a do: entry must be a mapping, got {raw!r}")
+    op = raw.get("op")
+    if op is None:
+        found = [k for k in EFFECT_OPS if k in raw]
+        if len(found) != 1:
+            raise col_mod.CollectionError(
+                f"a do: entry names one of {', '.join(EFFECT_OPS)}: {raw!r}")
+        op = found[0]
+    body = raw[op] if op in raw else raw
+    return str(op), body, str(raw.get("at") or AT_LEAVE), raw.get("when")
+
+
+def _effect_value(r: "Run", iid: Optional[str], value: Any, env: Dict[str, Any]) -> Any:
+    """A field value of an effect: an expression (doc 2.7: string constants
+    are quoted), or the compiler's ``{expr}``/``{lit}`` wrapping."""
+    if isinstance(value, dict) and "expr" in value and len(value) == 1:
+        return expr_mod.evaluate(value["expr"], env)
+    if isinstance(value, dict) and "lit" in value and len(value) == 1:
+        return value["lit"]
+    if isinstance(value, str):
+        return expr_mod.evaluate(value, env)
+    return value
+
+
+def _effect_env(r: "Run", iid: str, outcome: Optional[str]) -> Dict[str, Any]:
+    env = r.env(iid)
+    if outcome is not None:
+        env["outcome"] = outcome
+    return env
+
+
+def _apply_effects(r: "Run", iid: str, node: ir.Node, at: str,
+                   outcome: Optional[str] = None) -> Optional[str]:
+    """Apply the node's ``do:`` entries for ``at``, all or nothing; the
+    reason when one fails (refused access, a bad field, an expression
+    error), ``None`` otherwise. The principal is the driver."""
+    entries = node.get("do") or []
+    if not entries or not isinstance(entries, list):
+        return None
+    saved = (copy.deepcopy(r.state.get("collections")), copy.deepcopy(r.state.get("cursors")))
+    mark = len(r.events)
+    by = driver_of(r.state) or PR_DRIVER
+    try:
+        for raw in entries:
+            op, body, when_at, when = _effect_parts(raw)
+            if when_at != at:
+                continue
+            env = _effect_env(r, iid, outcome if at == AT_LEAVE else None)
+            if when is not None and not expr_mod.truthy(_effect_value(r, iid, when, env)):
+                continue
+            if op == "consume":
+                addrs = body.get("addr") if isinstance(body, dict) else body
+                for addr in (addrs if isinstance(addrs, list) else [addrs]):
+                    _consume(r, addr, by)
+                continue
+            if not isinstance(body, dict):
+                raise col_mod.CollectionError(f"{op}: needs a mapping, got {body!r}")
+            addr = body.get("addr") or (body.get("to") if op == "push" else body.get("in"))
+            name = _self_name(r, addr)
+            if op == "push":
+                raw_item = body.get("item")
+                if not isinstance(raw_item, dict):
+                    raise col_mod.CollectionError(f"push to {addr!r}: 'item' must be a mapping")
+                item = {k: _effect_value(r, iid, v, env) for k, v in raw_item.items()}
+                _col_apply(r, "push", name, principal=PR_DRIVER, by=by, item=item)
+                continue
+            key = _effect_value(r, iid, body.get("key"), env)
+            if op == "set":
+                raw_fields = body.get("fields")
+                if not isinstance(raw_fields, dict):
+                    raise col_mod.CollectionError(f"set in {addr!r}: 'fields' must be a mapping")
+                fields = {k: _effect_value(r, iid, v, env) for k, v in raw_fields.items()}
+                _col_apply(r, "set", name, principal=PR_DRIVER, by=by, key=key, fields=fields)
+            else:
+                _col_apply(r, "remove", name, principal=PR_DRIVER, by=by, key=key)
+    except (col_mod.CollectionError, expr_mod.ExprError) as exc:
+        r.state["collections"], r.state["cursors"] = saved
+        del r.events[mark:]
+        return f"do ({at}) on {node.label or node.id}: {exc}"
+    return None
+
+
+def _leave_effects(r: "Run", iid: str, node: ir.Node, outcome: str,
+                   value: Any) -> Tuple[str, Any]:
+    """``do`` at leave; a failing effect turns the outcome to ``fail``."""
+    err = _apply_effects(r, iid, node, AT_LEAVE, outcome)
+    if not err:
+        return outcome, value
+    value = {"reason": err, "original": {"outcome": outcome, "value": value}}
+    r.state.setdefault("result", {})[node_key(node)] = {"outcome": ir.OUTCOME_FAIL,
+                                                        "value": value}
+    return ir.OUTCOME_FAIL, value
+
+
+# -- triggers --------------------------------------------------------------------------
+
+
+def _trigger_parts(raw: Any) -> Tuple[Optional[str], str, Optional[Dict[str, Any]]]:
+    """``(do, at, push)``: ``briefing`` (at enter), ``{do, at}``, ``{at, push}``."""
+    if isinstance(raw, str):
+        return raw, AT_ENTER, None
+    if not isinstance(raw, dict):
+        return None, AT_ENTER, None
+    push = raw.get("push") if isinstance(raw.get("push"), dict) else None
+    do = raw.get("do") or ("push" if push is not None else None)
+    return (str(do) if do else None), str(raw.get("at") or AT_ENTER), push
+
+
+def _queue_triggers(r: "Run", iid: str, node: ir.Node, at: str) -> None:
+    """Record the node's triggers for ``at`` (``trigger_queued``); the daemon
+    clock claims and performs them (doc 2.8). Every pass records again."""
+    for raw in node.get("triggers") or []:
+        do, when_at, push = _trigger_parts(raw)
+        if not do or when_at != at:
+            continue
+        r.state["trigger_seq"] = int(r.state.get("trigger_seq") or 0) + 1
+        tid = f"t{r.state['trigger_seq']}"
+        rec: Dict[str, Any] = {"id": tid, "node": node.id, "label": node.label or None,
+                               "instance": iid, "at": at, "do": do,
+                               "queued_at": store_mod.utcnow()}
+        if push is not None:
+            rec["push"] = copy.deepcopy(push)
+        r.state.setdefault("triggers", []).append(rec)
+        r.emit("trigger_queued", trigger=tid, node=node.id, label=node.label or None,
+               instance=iid, at=at, do=do)
+
+
+def claim_triggers(cwd: Optional[str] = None, scope: Optional[str] = None) -> List[Dict[str, Any]]:
+    """Take the recorded triggers (single use: they are removed under the
+    lock, so a second claim gets none). A run in any status is claimable --
+    the last node's leave triggers are recorded as the run finishes."""
+    st = RunStore(cwd, scope)
+    if not st.exists():
+        return []
+    with st.lock():
+        try:
+            state = st.load_state()
+        except StoreError:
+            return []
+        taken = list(state.get("triggers") or [])
+        if not taken:
+            return []
+        state["triggers"] = []
+        st.save_state(state)
+    return taken
+
+
+def complete_trigger(cwd: Optional[str], scope: Optional[str], tid: str, performed: bool,
+                     detail: Any = None) -> bool:
+    """Journal a claimed trigger's end: ``trigger_done`` (``detail``) or
+    ``trigger_skipped`` (``reason``). False when the slot holds no run."""
+    st = RunStore(cwd, scope)
+    if not st.exists():
+        return False
+    ev: Dict[str, Any] = {"ts": store_mod.utcnow(),
+                          "event": "trigger_done" if performed else "trigger_skipped",
+                          "trigger": tid}
+    if detail is not None:
+        ev["detail" if performed else "reason"] = detail
+    with st.lock():
+        st.append([ev])
+    return True
+
+
+# -- lifecycle.reset_at ----------------------------------------------------------------
+
+
+def _reset_at(r: "Run", node: Optional[ir.Node]) -> None:
+    """Clean up the collections whose ``reset_at`` names ``node`` (its id or
+    label), or ``finish`` when ``node`` is None (the run ended, any status)."""
+    specs = _col_specs(r)
+    if not specs:
+        return
+    names = (RESET_FINISH,) if node is None else tuple(x for x in (node.id, node.label) if x)
+    for name, spec in specs.items():
+        points = spec.get("lifecycle", {}).get("reset_at") or []
+        hit = next((p for p in names if p in points), None)
+        if hit is None:
+            continue
+        summary = dict(col_mod.reset(_col_state(r, name), spec))
+        summary.pop("event", None)
+        r.emit("collection_reset", at=hit, **summary)
+
+
+# -- wait: until ------------------------------------------------------------------------
+
+
+def _until_step(r: "Run", iid: str, node: ir.Node) -> bool:
+    """Evaluate a ``wait: until`` instance: ``ok`` (and consume) when the
+    expression holds, ``absent`` when it read another run that is not there,
+    ``timeout`` past ``seconds``; an expression error fails it. True when
+    the wait finished."""
+    resolver = _ColResolver(r, strict=False)
+    env = r.env(iid)
+    env[expr_mod.COLLECTIONS_KEY] = resolver
+    try:
+        held = expr_mod.truthy(expr_mod.evaluate(node.get("until"), env))
+    except expr_mod.ExprError as exc:
+        _complete(r, iid, ir.OUTCOME_FAIL, {"reason": f"until: {exc}"})
+        return True
+    if resolver.absent:
+        _complete(r, iid, OUTCOME_ABSENT, {"absent": resolver.absent})
+        return True
+    if held:
+        by = driver_of(r.state) or PR_DRIVER
+        try:
+            for addr in node.get("consume") or []:
+                _consume(r, addr, by)
+        except col_mod.CollectionError as exc:
+            _complete(r, iid, ir.OUTCOME_FAIL, {"reason": f"consume: {exc}"})
+            return True
+        _complete(r, iid, ir.OUTCOME_OK, {"until": node.get("until")})
+        return True
+    due = r.inst[iid]["frame"].get("due")
+    if due is not None and r.now >= due:
+        _complete(r, iid, ir.OUTCOME_TIMEOUT, {"seconds": node.get("seconds")})
+        return True
+    return False
+
+
+def _tick_until(r: "Run") -> int:
+    """Re-evaluate every ``wait: until`` after a change to the run."""
+    if _halted(r):
+        return 0
+    moved = 0
+    for _ in range(100):
+        fired = False
+        for iid in sorted(r.inst, key=lambda k: int(k.rsplit("@", 1)[1])):
+            inst = r.inst.get(iid)
+            if not inst or inst.get("await") != AW_WAIT:
+                continue
+            node = r.chart.node(inst["node"])
+            if node.get("until") is not None and _until_step(r, iid, node):
+                fired = True
+                break
+        if not fired:
+            break
+        moved += 1
+    return moved
+
+
+# -- external operations (daemon, MCP, CLI) ---------------------------------------------
+
+
+def _col_summary(r: "Run") -> Dict[str, Any]:
+    out: Dict[str, Any] = {}
+    cols = r.state.get("collections") or {}
+    cursors = r.state.get("cursors") or {}
+    for name, spec in _col_specs(r).items():
+        cs = cols.get(name) or col_mod.empty(spec)
+        recs = col_mod.items(cs)
+        entry: Dict[str, Any] = {"kind": spec["kind"], "count": len(recs), "seq": cs.get("seq", 0),
+                                 "items": recs}
+        if spec.get("key"):
+            entry["key"] = spec["key"]
+        if spec.get("status"):
+            counts: Dict[str, int] = {}
+            for rec in recs:
+                counts[str(rec.get("status"))] = counts.get(str(rec.get("status")), 0) + 1
+            entry["statuses"] = counts
+        if spec["kind"] == "log":
+            entry["cursor"] = cursors.get(name)
+            entry["fresh"] = sum(1 for rec in recs
+                                 if int(rec.get("seq") or 0) > int(cursors.get(name) or 0))
+        out[name] = entry
+    return out
+
+
+def collection_view(cwd: Optional[str] = None, scope: Optional[str] = None) -> Dict[str, Any]:
+    """The run's collections (records, counts, cursors) and how many
+    triggers wait for the daemon -- for the web UI, MCP and status."""
+    st = RunStore(cwd, scope)
+    if not st.exists():
+        return {"status": "idle", "scope": st.scope, "cwd": str(st.cwd), "collections": {},
+                "pending_triggers": 0}
+    r = Run.load(st)
+    return {"run": r.state.get("run_id"), "workflow": r.state.get("workflow"),
+            "status": r.status, "scope": st.scope, "cwd": str(st.cwd),
+            "driver": driver_of(r.state) or None, "collections": _col_summary(r),
+            "pending_triggers": len(r.state.get("triggers") or [])}
+
+
+def collection_op(op: str, name: str, *, cwd: Optional[str] = None,
+                  scope: Optional[str] = None, principal: str, session: str = "",
+                  key: Any = None, item: Any = None, fields: Any = None,
+                  now: Optional[float] = None) -> Dict[str, Any]:
+    """push/set/remove on the run's collection ``name`` from outside the run
+    (the daemon, an agent's MCP call, a person's CLI): under the run lock,
+    after the time tick, with ``access`` enforced for ``principal``. A
+    ``wait: until`` the change satisfies finishes in the same call. Returns
+    :func:`status` with ``applied`` (the journaled event)."""
+    if op not in COLLECTION_OPS:
+        raise FlowError(f"unknown collection operation {op!r} ({', '.join(COLLECTION_OPS)})")
+    by = str(session or "").strip() or principal
+
+    def fn(r: Run) -> Dict[str, Any]:
+        _require_live(r)
+        try:
+            return _col_apply(r, op, name, principal=principal, by=by,
+                              key=_typed_key(r, name, key), item=item, fields=fields)
+        except col_mod.CollectionError as exc:
+            raise FlowError(str(exc)) from None
+
+    ev = _mutate(cwd, scope, now, fn)
+    out = status(cwd=cwd, scope=scope, now=now, tick=False)
+    out["applied"] = ev
+    return out
+
+
+def _typed_key(r: "Run", name: str, key: Any) -> Any:
+    """A key from outside (a CLI argument is text) read as the declared key
+    field's type: ``"12"`` for an ``int`` key is 12, 12 for a ``str`` key is
+    ``"12"``."""
+    spec = _col_specs(r).get(name) or {}
+    kfield = spec.get("key")
+    if key is None or not kfield:
+        return key
+    ktype = ((spec.get("item") or {}).get(kfield) or {}).get("type")
+    if ktype == "int" and isinstance(key, str):
+        try:
+            return int(key.strip())
+        except ValueError:
+            return key
+    if ktype == "str" and isinstance(key, int) and not isinstance(key, bool):
+        return str(key)
+    return key
+
+
+def _env_value(value: Any) -> str:
+    if isinstance(value, str):
+        return value
+    return json.dumps(value, ensure_ascii=False)
+
+
+def watch_due(cwd: Optional[str] = None, scope: Optional[str] = None,
+              now: Optional[float] = None) -> List[Dict[str, Any]]:
+    """The watch probes to run now: one per unsettled record of each watched
+    queue whose last check is ``every`` seconds old or more. Each check is
+    recorded as made (``watch_checked``) when it is handed out. Entries:
+    ``{collection, key, probe, env, on, timeout, cwd}``; ``env`` carries
+    ``CFLOW_ITEM_<FIELD>``, ``CFLOW_<NAME>`` and ``CFLOW_SESSION``."""
+    st = RunStore(cwd, scope)
+    if not st.exists():
+        return []
+    out: List[Dict[str, Any]] = []
+    with st.lock():
+        r = Run.load(st, now)
+        if r.status not in LIVE_STATUSES:
+            return []
+        session = driver_of(r.state)
+        checked = r.state.setdefault("watch_checked", {})
+        for name, spec in _col_specs(r).items():
+            watch = spec.get("watch")
+            if not watch or spec["kind"] != "queue":
+                continue
+            every = max(int(watch.get("every") or col_mod.WATCH_DEFAULT_EVERY),
+                        col_mod.WATCH_MIN_EVERY)
+            seen = checked.setdefault(name, {})
+            cs = (r.state.get("collections") or {}).get(name)
+            live_keys = set()
+            for rec in col_mod.unsettled(cs, spec):
+                key = rec.get(spec["key"])
+                live_keys.add(str(key))
+                last = seen.get(str(key))
+                if last is not None and r.now - float(last) < every:
+                    continue
+                seen[str(key)] = r.now
+                env = {"CFLOW_SESSION": session}
+                for ename, evalue in (spec.get("env") or {}).items():
+                    if evalue is not None:
+                        # upper case, like CFLOW_IN_*/CFLOW_DATA_* (doc 2.3)
+                        env["CFLOW_" + str(ename).upper()] = \
+                            str(evalue).replace("{session}", session)
+                for field, value in rec.items():
+                    if field in ("seq", "at", "by"):
+                        continue
+                    env["CFLOW_ITEM_" + re.sub(r"[^A-Za-z0-9]", "_", field).upper()] = \
+                        _env_value(value)
+                out.append({"collection": name, "key": key, "probe": watch.get("probe"),
+                            "env": env, "on": copy.deepcopy(watch.get("on") or {}),
+                            "timeout": WATCH_TIMEOUT, "cwd": str(st.cwd)})
+            for k in [k for k in seen if k not in live_keys]:
+                seen.pop(k, None)  # settled or removed records
+        if out:
+            r.save()
+    return out
+
+
+def watch_apply(cwd: Optional[str], scope: Optional[str], name: str, key: Any, code: int,
+                now: Optional[float] = None) -> Dict[str, Any]:
+    """Apply a watch probe's exit ``code`` to record ``key`` by the
+    collection's ``watch.on`` (principal ``daemon``); ``collection_watch``
+    records it. A code without an entry changes nothing and is not
+    journaled; nor is a record that settled or went away meanwhile."""
+    out: Dict[str, Any] = {"collection": name, "key": key, "code": code, "applied": False}
+
+    def fn(r: Run) -> None:
+        if r.status not in LIVE_STATUSES:
+            out["reason"] = f"run is {r.status}"
+            return
+        specs = _col_specs(r)
+        spec = specs.get(name)
+        if not spec:
+            out["reason"] = f"no collection {name!r}"
+            return
+        try:
+            action = col_mod.watch_action(spec, int(code))
+        except (TypeError, ValueError):
+            action = None
+        if not action:
+            out["reason"] = "no action for this exit code"
+            return
+        live = [rec for rec in col_mod.unsettled((r.state.get("collections") or {}).get(name),
+                                                 spec) if rec.get(spec["key"]) == key]
+        if not live:
+            out["reason"] = "the record settled or went away"
+            return
+        try:
+            if action.get("remove"):
+                _col_apply(r, "remove", name, principal=PR_DAEMON, by=PR_DAEMON, key=key)
+                r.emit("collection_watch", collection=name, key=key, code=int(code),
+                       removed=True)
+            else:
+                fields = dict(action.get("set") or {})
+                _col_apply(r, "set", name, principal=PR_DAEMON, by=PR_DAEMON, key=key,
+                           fields=fields)
+                r.emit("collection_watch", collection=name, key=key, code=int(code),
+                       fields=fields)
+                out["fields"] = fields
+            out["applied"] = True
+        except col_mod.CollectionError as exc:
+            r.emit("collection_watch", collection=name, key=key, code=int(code),
+                   error=str(exc))
+            out["reason"] = str(exc)
+
+    _mutate(cwd, scope, now, fn)
+    return out
+
+
+def holders(name: str, session: str, cwds: List[str]) -> List[Tuple[str, str]]:
+    """``(cwd, scope)`` of every live v2 run in ``cwds`` whose driver is
+    ``session`` and whose chart declares collection ``name``."""
+    session = str(session or "").strip()
+    out: List[Tuple[str, str]] = []
+    if not session:
+        return out
+    seen = set()
+    for cwd in cwds or []:
+        try:
+            base = str(store_mod.resolve_cwd(cwd))
+        except (OSError, ValueError):
+            continue
+        if base in seen:
+            continue
+        seen.add(base)
+        for scope in store_mod.list_scopes(base):
+            st = RunStore(base, scope)
+            try:
+                state = st.load_state()
+            except StoreError:
+                continue
+            if state.get("parent"):
+                continue  # a nested delegation run holds no collections
+            if state.get("status") not in LIVE_STATUSES or driver_of(state) != session:
+                continue
+            try:
+                chart = st.load_chart()
+            except StoreError:
+                continue
+            if name in _chart_col_specs(chart):
+                out.append((base, scope))
+    return out
 
 
 _ENTER: Dict[str, Callable[[Run, str, ir.Node], None]] = {

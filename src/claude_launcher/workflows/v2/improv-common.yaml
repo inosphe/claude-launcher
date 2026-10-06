@@ -204,6 +204,46 @@ rules:
       improv-worker work 스텝, found-issue 서브 런 도입 회차).
     deliver: [work, item-intake]
 
+# ── 컬렉션 형식(docs/cflow-v2.md 2.7 「재사용」) ─────────────────────────
+# 이 파일을 include한 정의가 `collections: {<이름>: {type: <형식>, ...}}`로
+# 가져온다. 형식의 env 값 null은 「쓰는 쪽이 정해야 한다」는 뜻이다 —
+# landing-queue를 TARGET 없이 쓰면 컴파일 오류다. 쓰는 쪽의 env는 이름별로
+# 합쳐진다.
+collection_types:
+  # 자식 워커의 착지 요청을 받는 큐(v1 landing_queue:의 v2 형태). 자식의
+  # enqueue-landing trigger가 넣고(주체 child), 드라이버가 상태를 옮기며,
+  # landed는 데몬의 watch만 쓴다 — tip이 TARGET에 들어갔는지를 git이 잰다.
+  landing-queue:
+    kind: queue
+    key: issue
+    item: {issue: str, branch: str, tip: str, requested_by: str, note: "str?"}
+    status:
+      values: [requested, waiting, deferred, landed, rejected]
+      initial: requested
+      settled: [landed, rejected]
+    access:
+      push: [child, daemon]
+      set: [driver]
+      set.landed: [daemon]
+      remove: [driver]
+    env: {TARGET: null}
+    watch:
+      every: 60
+      probe: [git, merge-base, --is-ancestor, "$CFLOW_ITEM_TIP", "$CFLOW_TARGET"]
+      on: {0: {set: {status: landed}}}
+    lifecycle:
+      reset_at: [finish]
+      drop: settled
+      remap: {deferred: requested}
+      inherit: true
+  # 런 사이 신호(v1 publishes/awaits의 v2 형태). 읽는 런은 fresh()로 보고
+  # consume으로 처리 위치를 옮긴다.
+  signals:
+    kind: log
+    item: {name: str}
+    access: {push: [driver, peer]}
+    lifecycle: {inherit: true}
+
 procedures:
   found-issue:
     description: >-

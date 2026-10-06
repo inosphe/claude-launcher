@@ -4,10 +4,11 @@
 ``start``/``status``/``journal``/``abort`` operate the run in this directory;
 ``select``, ``extend`` and ``approve`` are the person's side of a run (a
 ``chooser: user`` choice, a loop that reached its ``max``, a task's ``ask``),
-which the agent's tools refuse.
+which the agent's tools refuse. ``collection push|set|remove`` change a
+collection as the principal ``person`` (``ls`` only reads).
 
 The person's commands (``approve``, ``select``, ``extend``, ``resume``,
-``abort``, ``start --force`` over a live run) refuse to run in a shell whose
+``abort``, ``collection push|set|remove``, ``start --force`` over a live run) refuse to run in a shell whose
 ``$CLAUNCH_SESSION`` is the session that drives the run (or carries out its
 nested delegation): that shell is the agent's. A person answers from another
 terminal or the web UI. This is the check that holds; the harness deny rules
@@ -431,6 +432,87 @@ def _cmd_resume(args: argparse.Namespace) -> int:
     return 0
 
 
+def _parse_fields(items: List[str]) -> Dict[str, Any]:
+    """``FIELD=VALUE`` pairs; a value is JSON when it parses as JSON, else
+    the text itself (``status=landed``, ``count=3``, ``note="a b"``)."""
+    out: Dict[str, Any] = {}
+    for item in items or []:
+        if "=" not in item:
+            raise SystemExit(f"error: a field needs FIELD=VALUE, got {item!r}")
+        key, _, raw = item.partition("=")
+        try:
+            out[key.strip()] = json.loads(raw)
+        except ValueError:
+            out[key.strip()] = raw
+    return out
+
+
+def _print_collections(view: Dict[str, Any], only: Optional[str], as_json: bool) -> None:
+    cols = view.get("collections") or {}
+    if only:
+        if only not in cols:
+            from .cflow2 import runtime
+
+            raise runtime.FlowError(f"no collection {only!r} in this run "
+                                    f"(declared: {', '.join(cols) or 'none'})")
+        cols = {only: cols[only]}
+    if as_json:
+        print(json.dumps({**view, "collections": cols}, ensure_ascii=False, indent=2))
+        return
+    if view.get("status") == "idle":
+        print("no cflow2 run here")
+        return
+    if not cols:
+        print(f"{view.get('workflow')} [{view.get('run')}] declares no collections")
+    for name, c in cols.items():
+        extra = ""
+        if c.get("statuses"):
+            extra = "  " + ", ".join(f"{k}={v}" for k, v in c["statuses"].items())
+        if c.get("kind") == "log":
+            extra += f"  cursor={c.get('cursor')} fresh={c.get('fresh')}"
+        print(f"{name} ({c.get('kind')}, {c.get('count')} records){extra}")
+        for rec in c.get("items") or []:
+            fields = {k: v for k, v in rec.items() if k not in ("seq", "at", "by")}
+            print(f"  #{rec.get('seq')} {json.dumps(fields, ensure_ascii=False)}  "
+                  f"by {rec.get('by')}")
+    if view.get("pending_triggers"):
+        print(f"pending triggers: {view['pending_triggers']}")
+
+
+def _cmd_collection(args: argparse.Namespace) -> int:
+    from .cflow2 import runtime, store
+
+    op = args.collection_command
+    if op == "ls":
+        _print_collections(runtime.collection_view(os.getcwd(), args.scope), args.name,
+                           args.json)
+        return 0
+    _refuse_own_session(args.scope, f"collection {op}")
+    kw: Dict[str, Any] = {}
+    if op == "push":
+        try:
+            item = json.loads(args.item)
+        except ValueError as exc:
+            raise SystemExit(f"error: ITEM must be a JSON object: {exc}")
+        if not isinstance(item, dict):
+            raise SystemExit("error: ITEM must be a JSON object")
+        kw["item"] = item
+    else:
+        kw["key"] = args.key  # the runtime reads it as the key field's type
+        if op == "set":
+            kw["fields"] = _parse_fields(args.field)
+            if not kw["fields"]:
+                raise SystemExit("error: set needs at least one FIELD=VALUE")
+    payload = runtime.collection_op(op, args.name, cwd=os.getcwd(), scope=args.scope,
+                                    principal=runtime.PR_PERSON,
+                                    session=os.environ.get(store.SESSION_ENV, "").strip(), **kw)
+    ev = payload.get("applied") or {}
+    print(f"{op} {args.name}" + (f" {ev.get('key')}" if ev.get("key") is not None else "")
+          + f" (seq {ev.get('seq')})" * (op == "push"))
+    _print_collections(runtime.collection_view(os.getcwd(), args.scope), args.name, False)
+    return 0
+
+
 def register(sub) -> None:
     p = sub.add_parser(
         "cflow2",
@@ -524,6 +606,30 @@ def register(sub) -> None:
     g.add_argument("--option", help="the answer of an ask that declares options")
     q.add_argument("--reason")
     q.set_defaults(func=_guarded(_cmd_approve))
+
+    q = csub.add_parser("collection", help="the run's collections: list them, or change "
+                        "one as a person (push, set, remove)")
+    colsub = q.add_subparsers(dest="collection_command", required=True)
+    _col_add = colsub.add_parser
+    colsub.add_parser = lambda *a, **k: _col_add(*a, **{"allow_abbrev": False, **k})
+    r = scoped(colsub.add_parser("ls", help="collections with their records"))
+    r.add_argument("name", nargs="?", help="only this collection")
+    r.add_argument("--json", action="store_true")
+    r.set_defaults(func=_guarded(_cmd_collection))
+    r = scoped(colsub.add_parser("push", help="add a record (a queue replaces the record "
+                                 "with the same key)"))
+    r.add_argument("name")
+    r.add_argument("item", metavar="ITEM", help="the record as a JSON object")
+    r.set_defaults(func=_guarded(_cmd_collection))
+    r = scoped(colsub.add_parser("set", help="change fields (or status) of a queue record"))
+    r.add_argument("name")
+    r.add_argument("key")
+    r.add_argument("field", nargs="+", metavar="FIELD=VALUE")
+    r.set_defaults(func=_guarded(_cmd_collection))
+    r = scoped(colsub.add_parser("remove", help="delete a queue record"))
+    r.add_argument("name")
+    r.add_argument("key")
+    r.set_defaults(func=_guarded(_cmd_collection))
 
     q = scoped(csub.add_parser("resume", help="resume a run a 'halt' monitor stopped "
                                "(waiting_approval, reason monitor_violation)"))

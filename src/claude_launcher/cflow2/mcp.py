@@ -247,6 +247,33 @@ TOOLS = [
         "inputSchema": {"type": "object", "properties": {}},
     },
     {
+        "name": "flow_collection",
+        "description": (
+            "Read or change the run's collections (records the workflow declares under "
+            "'collections:', e.g. a landing queue or a signal log). action 'list' returns "
+            "every collection with its records, counts and cursors. 'push' adds 'item' "
+            "(a queue replaces the record with the same key and resets its status), "
+            "'set' changes 'fields' of the queue record 'key' (status included), "
+            "'remove' deletes record 'key'. You act as the run's driver: the "
+            "collection's 'access' decides what the driver may do (a status reserved "
+            "for the daemon, such as 'landed', is refused). Fields must match the "
+            "declared item types."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "action": {"type": "string", "enum": ["list", "push", "set", "remove"]},
+                "collection": {"type": "string", "description": "collection name "
+                               "(push/set/remove; list: optional filter)"},
+                "key": {"description": "the queue record's key (set, remove)"},
+                "item": {"type": "object", "description": "the record to push"},
+                "fields": {"type": "object", "description": "fields to change (set)"},
+                "scope": _SCOPE, "cwd": _CWD,
+            },
+            "required": ["action"],
+        },
+    },
+    {
         "name": "flow_rule",
         "description": (
             "Read one of the run's rules: its text, and 'why' (the incident or "
@@ -295,7 +322,7 @@ def _route(cwd: str, scope: Any, payload: Dict[str, Any]) -> Dict[str, Any]:
 def call_tool(name: str, args: dict) -> Dict[str, Any]:
     out = _call(name, args)
     if name in ("flow_start", "flow_status", "flow_report", "flow_select", "flow_fork",
-                "flow_approve", "flow_delegate") and isinstance(out, dict) and "run" in out:
+                "flow_approve", "flow_delegate", "flow_collection") and isinstance(out, dict) and "run" in out:
         cwd = str(args.get("cwd") or "").strip() or os.getcwd()
         out = _route(cwd, _scope(args), out)
     return out
@@ -387,6 +414,33 @@ def _call(name: str, args: dict) -> Dict[str, Any]:
         from . import asks
 
         return {"session": session or None, "asks": asks.pending_for(session)}
+    if name == "flow_collection":
+        cwd, scope = _where(args)
+        action = str(args.get("action") or "list").strip()
+        col = str(args.get("collection") or "").strip()
+        if action == "list":
+            view = runtime.collection_view(cwd, scope)
+            if col:
+                cols = view.get("collections") or {}
+                if col not in cols:
+                    raise runtime.FlowError(f"no collection {col!r} in this run "
+                                            f"(declared: {', '.join(cols) or 'none'})")
+                view["collections"] = {col: cols[col]}
+            return view
+        if action not in runtime.COLLECTION_OPS:
+            raise runtime.FlowError(f"unknown action {action!r} (list, push, set, remove)")
+        if not col:
+            raise runtime.FlowError(f"{action} needs 'collection'")
+        if action == "push" and not isinstance(args.get("item"), dict):
+            raise runtime.FlowError("push needs 'item' (an object)")
+        if action == "set" and not isinstance(args.get("fields"), dict):
+            raise runtime.FlowError("set needs 'fields' (an object)")
+        if action in ("set", "remove") and args.get("key") is None:
+            raise runtime.FlowError(f"{action} needs 'key'")
+        return runtime.collection_op(action, col, cwd=cwd, scope=scope,
+                                     principal=runtime.PR_DRIVER, session=session,
+                                     key=args.get("key"), item=args.get("item"),
+                                     fields=args.get("fields"))
     if name == "flow_rule":
         cwd, scope = _where(args)
         return runtime.rule(str(args.get("name") or ""), cwd=cwd, scope=scope)

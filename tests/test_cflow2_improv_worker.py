@@ -244,3 +244,53 @@ def test_beads_common_loaded_value_is_the_v1_block():
     intake_issue = next(n for n in chart.nodes.values() if n.label == "intake-issue")
     assert _block(intake_issue.props["prompt"]) == v1_block
     assert "${frag:beads-common}" in V2.read_text(encoding="utf-8")
+
+
+# -- triggers (docs/cflow-v2.md 2.8) -----------------------------------------
+
+
+def _v1_triggers() -> dict:
+    """v1 step id -> [(do, at)] as v1's model reads them (bare name = enter)."""
+    v1 = yaml.safe_load(V1.read_text(encoding="utf-8"))
+    out = {}
+    for sid, step in v1["steps"].items():
+        raw = (step or {}).get("triggers")
+        if not raw:
+            continue
+        out[sid] = sorted(
+            (e, "enter") if isinstance(e, str) else (e["do"], e.get("at", "enter")) for e in raw
+        )
+    return out
+
+
+def test_triggers_mirror_v1_at_the_corresponding_tasks():
+    v1 = _v1_triggers()
+    assert set(v1) == {"work", "commit", "integration-request", "landed", "wrapup"}
+    chart = _chart()
+    seen = set()
+    for node in chart.nodes.values():
+        trig = node.get("triggers")
+        if not trig:
+            continue
+        assert node.label in v1, node.id
+        assert sorted((t["do"], t["at"]) for t in trig) == v1[node.label], node.id
+        seen.add(node.label)
+    assert seen == set(v1)
+
+
+def test_landing_queue_and_signals_types():
+    from claude_launcher.cflow2.frontend import FrontendError
+    import pytest
+
+    head = "cflow: 2\nname: t\ninclude: [improv-common]\nnodes:\n  a: {prompt: a}\nbody: a\n"
+    resolve = layers.resolver(None)
+    chart = compile_text(head + "collections:\n  landing: {type: landing-queue, env: {TARGET: master}}\n"
+                         "  signals: {type: signals}\n", source="t.yaml", resolve_include=resolve)
+    landing = chart.meta["collections"]["landing"]
+    assert landing["kind"] == "queue" and landing["env"] == {"TARGET": "master"}
+    assert landing["access"]["set.landed"] == ["daemon"]
+    assert landing["watch"]["on"] == {"0": {"set": {"status": "landed"}}}
+    assert chart.meta["collections"]["signals"]["kind"] == "log"
+    with pytest.raises(FrontendError, match="env.TARGET is required"):
+        compile_text(head + "collections:\n  landing: {type: landing-queue}\n",
+                     source="t.yaml", resolve_include=resolve)

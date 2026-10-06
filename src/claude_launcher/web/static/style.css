@@ -5515,6 +5515,16 @@ div.shadow-card .shadow-line { white-space: normal; overflow-wrap: anywhere; }
 .cf2-receipt { color: #6e7681; }
 .cf2-fallback { margin: 0 0 2px 12px; font-size: 12px; }
 .cf2-v1-note { margin-top: 4px; }
+/* cflow v2 collections and trigger lines (run view) */
+.cf2-collection { margin: 6px 0; overflow-x: auto; }
+.cf2-col-table { border-collapse: collapse; font-size: 12px; width: 100%; }
+.cf2-col-table th, .cf2-col-table td { text-align: left; padding: 2px 6px; border-bottom: 1px solid #30363d; vertical-align: top; }
+.cf2-col-fields { overflow-wrap: anywhere; color: #8b949e; }
+.cf2-col-status.landed { color: #3fb950; }
+.cf2-col-status.rejected { color: #f85149; }
+.cf2-col-actions { white-space: nowrap; }
+.cf2-trigger { font-size: 12px; margin: 0; }
+.cf2-trigger.skipped { color: #d29922; }
 /* cflow v2 start inputs (new-session / spawn form) and the run's inputs */
 .cf2-inputs { border: 1px solid #30363d; border-radius: 6px; padding: 6px 8px; margin: 6px 0; }
 .cf2-input { margin: 6px 0; }

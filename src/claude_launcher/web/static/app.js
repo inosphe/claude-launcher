@@ -25807,6 +25807,17 @@ function renderCflow2Into(box, data, ui) {
     }
   }
 
+  for (const [name, col] of Object.entries(data.collections || {})) {
+    box.appendChild(cflow2CollectionTable(name, col, post));
+  }
+  const trig = cflow2TriggerLines(data.trigger_events || []);
+  if (trig.length) {
+    box.appendChild(el("h4", null, `Triggers (${trig.length})`));
+    for (const t of trig) {
+      box.appendChild(el("p", "wf-note mono cf2-trigger " + t.cls, t.text));
+    }
+  }
+
   const events = (data.journal || []).slice().reverse();
   const journal = document.createElement("details");
   journal.className = "wf-journal";
@@ -25819,6 +25830,114 @@ function renderCflow2Into(box, data, ui) {
       `${String(e.ts || "").replace("T", " ")}  ${e.event || ""}  ${rest}`));
   }
   box.appendChild(journal);
+}
+
+/* One collection of a v2 run (docs/cflow-v2.md 2.7) as rows: key, status
+   and the other fields as `name=value`. A queue is keyed by its `key`
+   field, a log by its sequence number. */
+function cflow2CollectionRows(col) {
+  col = col || {};
+  const keyField = col.key || null;
+  const skip = new Set(["status", "seq", "at", "by"]);
+  if (keyField) skip.add(keyField);
+  return (col.items || []).map((it) => {
+    it = it || {};
+    const key = keyField ? it[keyField] : (it.seq !== undefined ? `#${it.seq}` : "");
+    const fields = Object.keys(it).filter((k) => !skip.has(k) && it[k] !== null && it[k] !== "")
+      .map((k) => `${k}=${typeof it[k] === "object" ? JSON.stringify(it[k]) : it[k]}`);
+    if (!keyField && it.by) fields.unshift(`by=${it.by}`);
+    return { key: key === undefined || key === null ? "" : String(key),
+             status: it.status === undefined || it.status === null ? "" : String(it.status),
+             fields: fields.join("  ") };
+  });
+}
+
+/* The status values a person may pick for a queue record (the collection's
+   declared `status.values`), or none. */
+function cflow2StatusValues(col) {
+  const st = (col || {}).status;
+  if (Array.isArray(col && col.status_values)) return col.status_values;
+  if (st && Array.isArray(st.values)) return st.values;
+  return [];
+}
+
+/* The trigger journal lines (trigger_queued/done/skipped), oldest first.
+   A done/skipped event names only its trigger id; what and where come
+   from that id's trigger_queued event when it is in the list. */
+function cflow2TriggerLines(events) {
+  const queued = {};
+  for (const e of events || []) {
+    if (e && e.event === "trigger_queued" && e.trigger) queued[e.trigger] = e;
+  }
+  return (events || []).filter((e) => e && /^trigger_/.test(e.event || "")).map((e) => {
+    const id = e.trigger || e.id || "";
+    const q = queued[id] || {};
+    const what = e.do || q.do || (e.push ? "push" : "?");
+    const node = e.label || e.node || q.label || q.node;
+    const where = node ? ` ${node}` : "";
+    const whenAt = e.at || q.at;
+    const at = whenAt ? ` (${whenAt})` : "";
+    const kind = String(e.event).slice("trigger_".length);
+    const detail = e.detail || e.reason || "";
+    return {
+      cls: kind,
+      text: `${String(e.ts || "").replace("T", " ")}  ${kind}  ${what}${where}${at}` +
+        (id ? ` [${id}]` : "") + (detail ? ` — ${detail}` : ""),
+    };
+  });
+}
+
+/* A collection's table, with a person's set/remove on queue rows
+   (POST /api/cflow2/collection; the collection's access decides). */
+function cflow2CollectionTable(name, col, post) {
+  col = col || {};
+  const rows = cflow2CollectionRows(col);
+  const wrap = el("div", "cf2-collection");
+  wrap.appendChild(el("h4", null, `Collection ${name} (${col.kind || "?"}, ${rows.length})`));
+  if (!rows.length) {
+    wrap.appendChild(el("p", "wf-note", "empty"));
+    return wrap;
+  }
+  const queue = col.kind === "queue";
+  const values = queue ? cflow2StatusValues(col) : [];
+  const table = el("table", "cf2-col-table");
+  const head = el("tr");
+  for (const h of ["key", "status", "fields"].concat(queue ? [""] : [])) head.appendChild(el("th", null, h));
+  table.appendChild(head);
+  for (const r of rows) {
+    const tr = el("tr");
+    tr.appendChild(el("td", "mono", r.key));
+    tr.appendChild(el("td", "cf2-col-status " + r.status, r.status));
+    tr.appendChild(el("td", "mono cf2-col-fields", r.fields));
+    if (queue) {
+      const td = el("td", "cf2-col-actions");
+      if (values.length) {
+        const sel = el("select");
+        sel.appendChild(el("option", null, "set status…")).value = "";
+        for (const v of values) sel.appendChild(el("option", null, v)).value = v;
+        sel.addEventListener("change", async () => {
+          if (!sel.value) return;
+          sel.disabled = true;
+          await post("/api/cflow2/collection",
+            { op: "set", collection: name, key: r.key, fields: { status: sel.value } });
+          sel.disabled = false;
+        });
+        td.appendChild(sel);
+      }
+      const rm = el("button", "wf-btn", "remove");
+      rm.addEventListener("click", async () => {
+        if (!confirm(`Remove ${r.key} from ${name}?`)) return;
+        rm.disabled = true;
+        await post("/api/cflow2/collection", { op: "remove", collection: name, key: r.key });
+        rm.disabled = false;
+      });
+      td.appendChild(rm);
+      tr.appendChild(td);
+    }
+    table.appendChild(tr);
+  }
+  wrap.appendChild(table);
+  return wrap;
 }
 
 /* The run's start inputs (data.inputs), folded shut. */

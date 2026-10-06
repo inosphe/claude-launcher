@@ -85,7 +85,8 @@ LEGACY_MCP_NAMES = ("cflow", "mesh")
 
 #: Harness permission rules that keep the AGENT's hands off the human gate
 #: commands (``claunch cflow approve|select|goto|abort``, ``claunch cflow2
-#: approve|select|extend|resume``).
+#: approve|select|extend|resume|abort``, ``claunch cflow2 collection
+#: push|set|remove``).
 #:
 #: The cflow split is channels: the MCP tools are the agent's and carry no
 #: approve, the CLI is the human's — but an agent with a shell tool holds
@@ -116,7 +117,13 @@ LEGACY_MCP_NAMES = ("cflow", "mesh")
 #: a start command line. They are still a convenience: the v2 CLI itself
 #: refuses these commands in the shell of the session that drives the run
 #: (``cli_cflow2._refuse_own_session``), which is the check that holds.
-CFLOW2_HUMAN_COMMANDS = ("approve", "select", "extend", "resume", "abort")
+#:
+#: ``collection push|set|remove`` change a run's collection as the principal
+#: ``person`` (an agent's door is the ``flow_collection`` MCP tool, which acts
+#: as ``driver`` under the collection's ``access``); ``collection ls`` reads
+#: and stays open.
+CFLOW2_HUMAN_COMMANDS = ("approve", "select", "extend", "resume", "abort",
+                         "collection push", "collection set", "collection remove")
 
 GATE_DENY_RULES = tuple(
     f"{tool}(claunch {cmd}{suffix})"

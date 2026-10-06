@@ -633,6 +633,7 @@ def build_app(
     r.add_post("/api/cflow2/extend", h_cflow2_extend)
     r.add_post("/api/cflow2/approve", h_cflow2_approve)
     r.add_get("/api/cflow2/asks", h_cflow2_asks)
+    r.add_post("/api/cflow2/collection", h_cflow2_collection)
     r.add_get("/api/mesh", h_mesh_list)
     r.add_post("/api/mesh", h_mesh_create)
     r.add_delete("/api/mesh/outgoing/{rid}", h_mesh_outgoing_cancel)
@@ -4370,7 +4371,76 @@ async def h_cflow2_run(request: web.Request) -> web.Response:
     prompts = request.query.get("prompts") in ("1", "true", "yes")
     data = await asyncio.to_thread(cflow2_web.run_detail, cwd, scope, prompts)
     data["sessions"] = _scope_sessions(request.app["manager"], cwd, scope)
+    data["collections"] = (
+        await asyncio.to_thread(_cflow2_collections, cwd, scope) if data.get("run") else {}
+    )
+    data["trigger_events"] = [
+        e for e in data.get("journal") or [] if str(e.get("event") or "") in CFLOW2_TRIGGER_EVENTS
+    ][-CFLOW2_TRIGGER_TAIL:]
     return json_response(data)
+
+
+#: Journal events the v2 run view lists under "Triggers" (docs 4.5).
+CFLOW2_TRIGGER_EVENTS = ("trigger_queued", "trigger_done", "trigger_skipped")
+CFLOW2_TRIGGER_TAIL = 50
+
+
+def _cflow2_collections(cwd: str, scope: str) -> dict:
+    """``runtime.collection_view`` for the run payload: ``{name: {kind,
+    items, ...}}``; ``{}`` when the run declares none or it cannot be read."""
+    view_fn = getattr(cflow2_runtime, "collection_view", None)
+    if view_fn is None:
+        return {}
+    try:
+        view = view_fn(cwd, scope)
+    except _CFLOW2_ERRORS:
+        return {}
+    except Exception:  # noqa: BLE001 - the run view must still render
+        log.exception("cflow2 collection view of %s/%s failed", cwd, scope)
+        return {}
+    if isinstance(view, dict) and isinstance(view.get("collections"), dict):
+        view = view["collections"]
+    if not isinstance(view, dict):
+        return {}
+    # The declared status values, for the person's "set status" control.
+    try:
+        specs = (cflow2_store.RunStore(cwd, scope).load_chart().meta or {}).get("collections") or {}
+    except Exception:  # noqa: BLE001 - the table renders without them
+        specs = {}
+    for name, entry in view.items():
+        status = (specs.get(name) or {}).get("status") if isinstance(specs, dict) else None
+        if isinstance(entry, dict) and isinstance(status, dict) and status.get("values"):
+            entry.setdefault("status_values", list(status["values"]))
+    return view
+
+
+async def h_cflow2_collection(request: web.Request) -> web.Response:
+    """A person's change to a v2 run's collection (principal ``person``,
+    docs 2.7): ``op`` ``set`` (``key``, ``fields``) or ``remove`` (``key``).
+    The collection's ``access`` decides. Body: cwd, scope, op, collection,
+    key, fields. Answers the run's collections after the change."""
+    resolved, err = await _cflow_action_cwd(request)
+    if err:
+        return err
+    cwd, scope, body = resolved
+    op = str(body.get("op") or "")
+    if op not in ("set", "remove"):
+        return json_error(400, "'op' must be 'set' or 'remove'")
+    name = str(body.get("collection") or "").strip()
+    key = body.get("key")
+    if not name or key in (None, ""):
+        return json_error(400, "'collection' and 'key' are required")
+    fields = body.get("fields")
+    if op == "set" and (not isinstance(fields, dict) or not fields):
+        return json_error(400, "'set' takes 'fields' (an object of field -> value)")
+    await asyncio.to_thread(
+        cflow2_runtime.collection_op, op, name, cwd=cwd, scope=scope,
+        principal="person", session=cflow2_runtime.CALLER_USER, key=key,
+        fields=fields if op == "set" else None,
+    )
+    collections = await asyncio.to_thread(_cflow2_collections, cwd, scope)
+    return json_response({"status": "ok", "op": op, "collection": name, "key": key,
+                          "collections": collections})
 
 
 async def h_cflow2_runs(request: web.Request) -> web.Response:

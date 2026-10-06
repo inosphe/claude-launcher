@@ -47,6 +47,20 @@ Decisions this module makes where the spec leaves room:
   :func:`inputs.schema` and kept in ``chart.meta['inputs']``.
 - Top-level ``max_visits`` (integer >= 1, default
   :data:`ir.DEFAULT_MAX_VISITS`) lands in ``chart.meta['max_visits']``.
+- Top-level ``collections`` are normalized by :func:`collections.normalize`
+  into ``chart.meta['collections']`` (always present, ``{}`` when none).
+  ``type:`` names a ``collection_types`` entry of this file or of an
+  included file (found by name through the layers, like everything else
+  ``include`` brings in). ``sides`` (phase 2) is kept as declared in
+  ``chart.meta['sides']`` when present.
+- A task or combinator mapping may carry ``do:`` (collection effects) and
+  ``triggers:`` (daemon side requests). They land in the node's ``do`` and
+  ``triggers`` props, only when declared (see :func:`_do_list` and
+  :func:`_triggers` for the stored shapes). Values in them are expression
+  strings (2.4), parsed here and evaluated by the runtime; a non-string
+  scalar becomes its expression text (``3``, ``true``, ``null``).
+- ``wait: {until, seconds, consume}`` stores ``until`` (expression text) and
+  ``consume`` (address list) on the wait node, only when ``until`` is given.
 """
 
 from __future__ import annotations
@@ -58,6 +72,7 @@ from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 import yaml
 
+from . import collections as _collections
 from . import ir
 
 ResolveInclude = Callable[[str], Optional[Path]]
@@ -168,13 +183,22 @@ TOP_KEYS = (
     "cflow", "name", "description", "kind", "default_role", "filter_roles",
     "default_child_cflow", "priority", "params", "returns", "data", "include",
     "fragments", "rules", "procedures", "nodes", "body", "spec", "max_visits",
-    "inputs",
+    "inputs", "collections", "collection_types", "sides",
 )
 TASK_KEYS = (
     "title", "prompt", "done_when", "verify", "ask", "executor", "needs",
     "returns", "effects", "paths", "budget", "rules", "strict_budget",
+    "do", "triggers",
 )
-COMMON_KEYS = ("id", "executor", "needs", "budget", "bind", "on")
+COMMON_KEYS = ("id", "executor", "needs", "budget", "bind", "on", "do", "triggers")
+#: ``do:`` operations (docs/cflow-v2.md 2.7) and the moments they run at.
+DO_OPS = ("push", "set", "remove", "consume")
+MOMENT_ENTER = "enter"
+MOMENT_LEAVE = "leave"
+MOMENTS = (MOMENT_ENTER, MOMENT_LEAVE)
+#: ``triggers:`` actions (2.8). ``push`` is spelled as a ``push:`` key.
+TRIGGER_ACTIONS = ("briefing", "checks", "enqueue-landing")
+TRIGGER_PUSH = "push"
 COMBINATORS = (
     "seq", "waterfall", "cond", "choose", "foreach", "loop", "par", "retry",
     "timeout", "try", "call", "wait", "group",
@@ -251,6 +275,8 @@ class _Ctx:
     author_ids: Set[str] = field(default_factory=set)
     warnings: List[str] = field(default_factory=list)
     frag_cache: Dict[str, str] = field(default_factory=dict)
+    #: collection_types name -> (raw declaration, file, line)
+    collection_types: Dict[str, Tuple[Any, str, int]] = field(default_factory=dict)
 
     def err(self, file: str, line: int, msg: str) -> FrontendError:
         return FrontendError(f"{file}:{line}: {msg}" if line else f"{file}: {msg}")
@@ -473,6 +499,23 @@ def _absorb(ctx: _Ctx, doc: Dict[str, Any], file: str) -> None:
             entry = {"text": raw["text"], "why": raw.get("why"), "deliver": deliver_v,
                      "effect": effect}
             _merge_named(ctx, ctx.rules, ctx.rule_src, str(rid), entry, _where(file, rline), "rule")
+
+    ctypes = doc.get("collection_types")
+    if ctypes is not None:
+        ctypes = _need_map(ctx, file, ctypes, "collection_types", _key_line(doc, "collection_types"))
+        for tname, raw in ctypes.items():
+            tline = _key_line(ctypes, tname)
+            prior = ctx.collection_types.get(str(tname))
+            if prior is not None and (prior[1], prior[2]) != (file, tline):
+                raise ctx.err(file, tline, f"collection type {tname!r} is already defined at "
+                                           f"{_where(prior[1], prior[2])}")
+            raw = _plain(_need_map(ctx, file, raw, f"collection type {tname!r}", tline))
+            try:
+                _collections.normalize(str(tname), raw, None, allow_unset_env=True)
+            except _collections.CollectionError as exc:
+                raise ctx.err(file, tline, f"collection type {tname!r}: "
+                                           f"{_collections._strip(str(tname), exc)}") from None
+            ctx.collection_types[str(tname)] = (raw, file, tline)
 
     tasks = _file_tasks(ctx, doc, file)
     procs = doc.get("procedures")
@@ -714,6 +757,7 @@ def _compile_task(ctx: _Ctx, sc: _Scope, name: str, parent: Optional[str], line:
             "strict_budget": strict,
         },
     )
+    _effects_and_triggers(ctx, tfile, raw, node, tline)
     _add(ctx, node)
     return nid
 
@@ -923,6 +967,7 @@ def _compile_mapping(ctx: _Ctx, sc: _Scope, m: Dict[str, Any], parent: Optional[
 
     builder = _BUILDERS[head]
     builder(ctx, sc, node, m[head], m, hline)
+    _effects_and_triggers(ctx, sc.file, m, node, line)
 
     on = m.get("on")
     if on is not None:
@@ -1202,10 +1247,20 @@ def _b_call(ctx, sc, node, value, m, line):
 def _b_wait(ctx, sc, node, value, m, line):
     node.type = ir.T_WAIT
     spec = _need_map(ctx, sc.file, value, "wait", line)
-    _check_keys(ctx, sc.file, spec, ("probe", "poll", "seconds", "describe", "undecided_max"),
-                "wait")
-    if spec.get("probe") is None and spec.get("seconds") is None:
-        raise ctx.err(sc.file, line, "wait needs probe or seconds")
+    _check_keys(ctx, sc.file, spec, ("probe", "poll", "seconds", "describe", "undecided_max",
+                                     "until", "consume"), "wait")
+    until = spec.get("until")
+    if spec.get("probe") is None and spec.get("seconds") is None and until is None:
+        raise ctx.err(sc.file, line, "wait needs probe, until or seconds")
+    if until is not None:
+        if spec.get("probe") is not None:
+            raise ctx.err(sc.file, line, "wait.until cannot be used with probe (until is "
+                                         "decided by the engine, probe by a command)")
+        for k in ("poll", "undecided_max"):
+            if spec.get(k) is not None:
+                raise ctx.err(sc.file, _key_line(spec, k, line), f"wait.{k} applies to a probe")
+    elif spec.get("consume") is not None:
+        raise ctx.err(sc.file, _key_line(spec, "consume", line), "wait.consume applies to until")
     probe = spec.get("probe")
     if probe is not None:
         probe = _command(ctx, sc.file, _key_line(spec, "probe", line), probe, "wait.probe")
@@ -1221,6 +1276,14 @@ def _b_wait(ctx, sc, node, value, m, line):
         if spec.get("seconds") is not None else None,
         "describe": spec.get("describe"),
     }
+    if until is not None:
+        uline = _key_line(spec, "until", line)
+        node.props["until"] = _expr_text(ctx, sc.file, until, "wait.until", uline)
+        cline = _key_line(spec, "consume", line)
+        node.props["consume"] = [
+            _address(ctx, sc.file, a, "wait.consume", cline)
+            for a in _str_list(ctx, sc.file, spec.get("consume"), "wait.consume", cline)
+        ]
 
 
 def _b_group(ctx, sc, node, value, m, line):
@@ -1252,6 +1315,163 @@ _BUILDERS: Dict[str, Callable[..., None]] = {
     "timeout": _b_timeout, "try": _b_try, "call": _b_call, "wait": _b_wait,
     "group": _b_group,
 }
+
+
+# ---------------------------------------------------------------------------
+# collections: declarations, do: effects, triggers (docs/cflow-v2.md 2.7, 2.8)
+
+
+def _collection_decls(ctx: _Ctx, file: str, doc: Dict[str, Any]) -> Dict[str, Any]:
+    raw = doc.get("collections")
+    if raw is None:
+        return {}
+    cline = _key_line(doc, "collections", 1)
+    raw = _need_map(ctx, file, raw, "collections", cline)
+    types = {name: entry[0] for name, entry in ctx.collection_types.items()}
+    out: Dict[str, Any] = {}
+    for name, decl in raw.items():
+        dline = _key_line(raw, name, cline)
+        decl = _need_map(ctx, file, decl, f"collection {name!r}", dline)
+        try:
+            out[str(name)] = _collections.normalize(str(name), _plain(decl), types)
+        except _collections.CollectionError as exc:
+            raise ctx.err(file, dline, str(exc)) from None
+    return out
+
+
+def _address(ctx: _Ctx, file: str, value: Any, what: str, line: int) -> str:
+    """A collection address, syntax-checked (which collection exists and
+    which targets are allowed where is ``check``'s job)."""
+    try:
+        _collections.parse_address(value)
+    except _collections.CollectionError as exc:
+        raise ctx.err(file, line, f"{what}: {exc}") from None
+    return str(value).strip()
+
+
+def _expr_map(ctx: _Ctx, file: str, value: Any, what: str, line: int) -> Dict[str, str]:
+    mapping = _need_map(ctx, file, value, what, line)
+    out: Dict[str, str] = {}
+    for fname, fval in mapping.items():
+        if not isinstance(fname, str) or not fname:
+            raise ctx.err(file, line, f"{what}: bad field name {fname!r}")
+        out[fname] = _expr_text(ctx, file, fval, f"{what}.{fname}", _key_line(mapping, fname, line))
+    return out
+
+
+def _moment(ctx: _Ctx, file: str, entry: Dict[str, Any], default: str, what: str, line: int) -> str:
+    at = entry.get("at", default)
+    if at not in MOMENTS:
+        raise ctx.err(file, _key_line(entry, "at", line),
+                      f"{what}: at must be {' or '.join(MOMENTS)}, got {at!r}")
+    return at
+
+
+def _bool_key(ctx: _Ctx, file: str, entry: Dict[str, Any], what: str, line: int) -> None:
+    if True in entry or False in entry:
+        raise ctx.err(file, line, f"{what} has a boolean key -- a YAML 1.1 reader turns "
+                                  f"'on:'/'off:' into booleans; spell the moment 'at:'")
+
+
+def _do_list(ctx: _Ctx, file: str, value: Any, line: int) -> List[Dict[str, Any]]:
+    """``do:`` -> ``[{op, addr, at, when, ...}]``.
+
+    ``push``: ``item`` ({field: expr}); ``set``: ``key`` (expr), ``fields``
+    ({field: expr}); ``remove``: ``key``; ``consume``: no more. ``at`` is
+    ``enter`` or ``leave`` (default), ``when`` an expression or None.
+    """
+    entries = _need_list(ctx, file, value, "do", line)
+    lines = getattr(entries, "item_lines", None) or []
+    out: List[Dict[str, Any]] = []
+    for i, entry in enumerate(entries):
+        eline = lines[i] if i < len(lines) else line
+        entry = _need_map(ctx, file, entry, "a do: entry", eline)
+        _bool_key(ctx, file, entry, "a do: entry", eline)
+        ops = [k for k in entry if k in DO_OPS]
+        if len(ops) != 1:
+            raise ctx.err(file, eline, f"a do: entry needs exactly one of {', '.join(DO_OPS)}")
+        op = ops[0]
+        _check_keys(ctx, file, entry, (op, "at", "when"), f"do: {op}")
+        body = entry[op]
+        what = f"do: {op}"
+        rec: Dict[str, Any] = {"op": op}
+        if op == "consume":
+            rec["addr"] = _address(ctx, file, body, what, eline)
+        else:
+            body = _need_map(ctx, file, body, what, eline)
+            addr_key = "to" if op == "push" else "in"
+            allowed = {"push": ("to", "item"), "set": ("in", "key", "fields"),
+                       "remove": ("in", "key")}[op]
+            _check_keys(ctx, file, body, allowed, what)
+            for k in allowed:
+                if body.get(k) is None:
+                    raise ctx.err(file, eline, f"{what} needs {k}")
+            rec["addr"] = _address(ctx, file, body[addr_key], what, eline)
+            if op == "push":
+                rec["item"] = _expr_map(ctx, file, body["item"], f"{what}.item", eline)
+            else:
+                rec["key"] = _expr_text(ctx, file, body["key"], f"{what}.key", eline)
+                if op == "set":
+                    rec["fields"] = _expr_map(ctx, file, body["fields"], f"{what}.fields", eline)
+                    if not rec["fields"]:
+                        raise ctx.err(file, eline, f"{what}.fields must not be empty")
+        rec["at"] = _moment(ctx, file, entry, MOMENT_LEAVE, what, eline)
+        rec["when"] = (_expr_text(ctx, file, entry["when"], f"{what}.when", eline)
+                       if entry.get("when") is not None else None)
+        out.append(rec)
+    return out
+
+
+def _triggers(ctx: _Ctx, file: str, value: Any, line: int) -> List[Dict[str, Any]]:
+    """``triggers:`` -> ``[{do, at}]``, plus ``push: {to, each, item}`` when
+    ``do`` is ``push``. A bare name means ``{do: <name>, at: enter}`` (v1)."""
+    entries = _need_list(ctx, file, value, "triggers", line)
+    lines = getattr(entries, "item_lines", None) or []
+    out: List[Dict[str, Any]] = []
+    seen: Set[Tuple[str, str]] = set()
+    for i, entry in enumerate(entries):
+        eline = lines[i] if i < len(lines) else line
+        if isinstance(entry, str):
+            entry = {"do": entry}
+        entry = _need_map(ctx, file, entry, "a triggers entry", eline)
+        _bool_key(ctx, file, entry, "a triggers entry", eline)
+        if "push" in entry:
+            _check_keys(ctx, file, entry, ("push", "at"), "a push trigger")
+            body = _need_map(ctx, file, entry["push"], "trigger push", eline)
+            _check_keys(ctx, file, body, ("to", "each", "item"), "trigger push")
+            for k in ("to", "item"):
+                if body.get(k) is None:
+                    raise ctx.err(file, eline, f"trigger push needs {k}")
+            rec: Dict[str, Any] = {
+                "do": TRIGGER_PUSH,
+                "at": _moment(ctx, file, entry, MOMENT_ENTER, "trigger push", eline),
+                "push": {
+                    "to": _address(ctx, file, body["to"], "trigger push.to", eline),
+                    "each": (_expr_text(ctx, file, body["each"], "trigger push.each", eline)
+                             if body.get("each") is not None else None),
+                    "item": _expr_map(ctx, file, body["item"], "trigger push.item", eline),
+                },
+            }
+            out.append(rec)
+            continue
+        _check_keys(ctx, file, entry, ("do", "at"), "a triggers entry")
+        do = entry.get("do")
+        if do not in TRIGGER_ACTIONS:
+            raise ctx.err(file, eline, f"unknown trigger {do!r} (use {', '.join(TRIGGER_ACTIONS)}, "
+                                       f"or a push: {{to, each, item}} entry)")
+        at = _moment(ctx, file, entry, MOMENT_ENTER, f"trigger {do}", eline)
+        if (do, at) in seen:
+            raise ctx.err(file, eline, f"trigger {do!r} is declared twice for at: {at}")
+        seen.add((do, at))
+        out.append({"do": do, "at": at})
+    return out
+
+
+def _effects_and_triggers(ctx: _Ctx, file: str, m: Dict[str, Any], node: ir.Node, line: int) -> None:
+    if m.get("do") is not None:
+        node.props["do"] = _do_list(ctx, file, m["do"], _key_line(m, "do", line))
+    if m.get("triggers") is not None:
+        node.props["triggers"] = _triggers(ctx, file, m["triggers"], _key_line(m, "triggers", line))
 
 
 # ---------------------------------------------------------------------------
@@ -1373,6 +1593,17 @@ def compile_text(text: str, *, source: str = "",
     except _inputs.InputsError as exc:
         raise ctx.err(file, _key_line(doc, "inputs", 1), str(exc)) from None
 
+    collections = _collection_decls(ctx, file, doc)
+    sides = doc.get("sides")
+    if sides is not None:
+        sline = _key_line(doc, "sides", 1)
+        sides = _need_map(ctx, file, sides, "sides", sline)
+        for sname, sdef in sides.items():
+            if not isinstance(sname, str) or not sname:
+                raise ctx.err(file, sline, f"sides: bad side name {sname!r}")
+            _definition_name(ctx, sdef, file, _key_line(sides, sname, sline), f"side {sname!r}")
+        sides = _plain(sides)
+
     if "body" not in doc:
         raise ctx.err(file, 1, "a definition needs a body")
     tasks = _file_tasks(ctx, doc, file)
@@ -1395,6 +1626,9 @@ def compile_text(text: str, *, source: str = "",
             # typed start inputs (cflow2/inputs.py); folded into the chart
             # at start by inputs.apply
             "inputs": input_schema,
+            # normalized collection declarations (cflow2/collections.py)
+            "collections": collections,
+            **({"sides": sides} if sides is not None else {}),
         },
         params=_params(ctx, file, doc.get("params"), _key_line(doc, "params")),
         returns=_returns(ctx, file, doc["returns"], _key_line(doc, "returns"))

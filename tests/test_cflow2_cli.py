@@ -91,3 +91,52 @@ def test_start_status_journal_abort(project, capsys):
     assert capsys.readouterr().out.strip()
     assert run("abort", "--scope", "s1", "--reason", "test") == 0
     assert "aborted" in capsys.readouterr().out
+
+
+COLDEF = textwrap.dedent("""
+    cflow: 2
+    name: demo-col
+    collections:
+      todo:
+        kind: queue
+        key: id
+        item: {id: int, what: str}
+        status: {values: [open, done], initial: open, settled: [done]}
+        access: {push: [person, driver], set: [person], remove: [person]}
+    nodes:
+      work: {prompt: "todo ${col.todo}"}
+    body: [work]
+""")
+
+
+def test_collection_commands_as_person(project, capsys, monkeypatch):
+    (project / ".claunch" / "workflows" / "v2" / "demo-col.yaml").write_text(
+        COLDEF, encoding="utf-8")
+    assert run("start", "demo-col", "--scope", "c1") == 0
+    capsys.readouterr()
+    assert run("collection", "push", "todo", '{"id": 7, "what": "x"}', "--scope", "c1") == 0
+    assert run("collection", "set", "todo", "7", "status=done", "--scope", "c1") == 0
+    assert run("collection", "ls", "todo", "--scope", "c1", "--json") == 0
+    out = capsys.readouterr().out
+    view = json.loads(out[out.index("{\n"):])
+    assert view["collections"]["todo"]["items"][0]["status"] == "done"
+    assert run("collection", "remove", "todo", "7", "--scope", "c1") == 0
+    assert run("collection", "push", "todo", '{"id": "no"}', "--scope", "c1") == 1
+    assert "todo" in capsys.readouterr().err
+    # the run's own session (an unmanaged run is driven by its scope name
+    # here: started without $CLAUNCH_SESSION, the driver is '')
+    monkeypatch.setenv("CLAUNCH_SESSION", "s9")
+    assert run("start", "demo-col", "--scope", "c2") == 0
+    assert run("collection", "push", "todo", '{"id": 1, "what": "y"}', "--scope", "c2") == 1
+    assert "person's answer" in capsys.readouterr().err
+    assert run("collection", "ls", "--scope", "c2") == 0
+
+
+def test_collection_writes_are_denied_to_the_agent():
+    from claude_launcher import install
+
+    rules = set(install.GATE_DENY_RULES)
+    for cmd in ("push", "set", "remove"):
+        assert f"Bash(claunch cflow2 collection {cmd}:*)" in rules
+        assert f"Bash(*claunch* cflow2 collection {cmd}*)" in rules
+    assert not any("collection ls" in r for r in rules)

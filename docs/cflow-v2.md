@@ -458,12 +458,12 @@ collections:
 |---|---|
 | `key` | `queue`에서 필수. `item`의 필드 이름 |
 | `item` | 필드 이름 → 형식(`str`, `int`, `bool`, `list`, `map`, `any`). 끝에 `?`가 붙은 형식은 생략할 수 있다. 선언에 없는 필드는 거절한다 |
-| `status` | 선택. 두면 레코드마다 `status` 필드가 생긴다. `settled`는 `values`의 부분집합이다 |
+| `status` | 선택, `queue`만. 두면 레코드마다 `status` 필드가 생긴다. `initial`은 `values`의 원소, `settled`는 `values`의 부분집합이다 |
 | `access` | 연산별로 쓸 수 있는 주체 목록. `set.<상태값>`은 그 상태로 바꾸는 `set`에만 적용되고 `set`보다 우선한다. 생략한 연산은 `[driver]`다. 읽기는 같은 세션 트리 안의 주체 모두에게 열려 있다 |
 | `env` | `watch` probe에 `CFLOW_<NAME>`으로 전달되는 값. 값 안의 `{session}`은 런의 드라이버 세션 이름으로 바뀐다 |
 | `watch` | 데몬이 정해진 간격으로 레코드마다 확인하는 명령. 아래 「watch」 |
 | `lifecycle` | 비우는 시점과 다음 런으로 넘기는 규칙. 아래 「lifecycle」 |
-| `type` | 포함한 파일의 `collection_types` 이름. 그 선언을 복사한 뒤 이 매핑의 다른 키(보통 `env`)로 덮어쓴다 |
+| `type` | 포함한 파일(또는 같은 파일)의 `collection_types` 이름. 그 선언을 복사한 뒤 이 매핑의 다른 키로 덮어쓴다. `env`만은 이름별로 합치고, 타입에서 값이 `null`인 `env` 이름은 사용하는 쪽이 채워야 한다(빠지면 컴파일 오류) |
 
 **주체(principal)**
 
@@ -473,7 +473,7 @@ collections:
 | `daemon` | 데몬의 clock(watch, trigger 실행) |
 | `child` | 부모가 이 런의 드라이버인 세션. trigger의 `push`로만 쓴다 |
 | `peer` | 같은 세션의 다른 런(메인 런과 side 런, 2.9) |
-| `person` | 사람의 CLI(`claunch cflow2 collection …`)와 웹 UI |
+| `person` | 사람의 CLI(`claunch cflow2 collection …`)와 웹 UI(`set`, `remove`만) |
 
 **주소**
 
@@ -588,8 +588,11 @@ nodes:
   `trigger_done` 또는 `trigger_skipped`(사유)를 남긴다. 데몬이 실행 중에 멈추면 그
   요청은 다시 실행되지 않고, 저널에 `trigger_queued`만 남는다.
 - trigger는 런을 멈추지 않는다. 실패는 사유를 남기고 끝난다.
-- `$facts`는 trigger의 `push` 식에서만 읽는다. 데몬이 실행 시점에 잰다:
-  `head`(드라이버 세션 checkout의 HEAD), `branch`, `in_review`(드라이버 세션이
+- `push`는 `each`의 레코드를 모두 시도한다. 하나라도 거절되면 `trigger_skipped`(거절 수와 사유)이고,
+  이미 들어간 레코드는 남는다.
+- `$facts`는 trigger의 `push` 식에서만 읽는다(다른 식에서 `$facts`·`$each`를 읽으면 검사 오류
+  `facts-outside-trigger`, push 식에서 컬렉션 함수를 쓰면 `trigger-collection-read`). 데몬이 실행 시점에 잰다:
+  `head`(드라이버 세션 checkout의 HEAD. 런의 cwd에서 잰다), `branch`, `in_review`(드라이버 세션이
   assignee인 in_review 이슈 id 목록), `session`. `$each`는 `each` 목록의 항목이다.
 - 위임된 하위 트리 안의 노드에는 `push`와 `enqueue-landing`을 쓸 수 없다(검사 오류
   `trigger-in-delegation`). `briefing`과 `checks`는 쓸 수 있고 런의 드라이버 세션을
@@ -644,13 +647,14 @@ wait 노드에는 `undecided_max`가 붙는다.
 | `par` | 병렬 영역 | `branches: {name: child}`, `settle` |
 | `timeout` | 시간 전이를 가진 복합 상태 | `child`, `seconds`, `else` |
 | `try` | 복합 상태 + 결과 전이 | `child`, `catch: {outcome: child}`, `finally` |
-| `wait` | 외부 이벤트 대기 원자 상태 | `probe`, `poll`, `seconds`, `undecided_max`, `describe` |
+| `wait` | 외부 이벤트 대기 원자 상태 | `probe`, `poll`, `seconds`, `undecided_max`, `describe`; `wait until`이면 `until`, `consume` |
 | `group` | 동적 병렬 영역 | `child`, `member`(펼친 프로시저의 루트), `limit`, `settle`, `name` |
 | `control` | 전이 | `op`(continue/break/raise/return/end), `target`, `outcome`, `value` |
 | `scope` | `call`을 펼친 복합 상태 | `proc`, `child`, `with`, `bind` |
 
 모든 노드에 공통: `id`, `type`, `parent`, `src`(원본 파일:줄), `executor`(위임
-지점이면), `bind`, `on`.
+지점이면), `bind`, `on`. 선언한 노드에만: `do`(효과 목록 `[{op, at, when, …}]`),
+`triggers`(`[{do, at, push?}]`, 2.8).
 
 노드 id는 작성자가 준 `id`·작업 이름에서 만들고, 없으면 부모 id와 위치에서
 만든다. 같은 정의를 다시 컴파일하면 같은 id가 나온다.
@@ -762,6 +766,15 @@ wait 노드에는 `undecided_max`가 붙는다.
 `lifecycle.reset_at`의 정리 → 부모로 진행. 런이 끝날 때: `reset_at: [finish]` 정리.
 `do` 효과가 실패하면(접근 거절, 형식 오류, 식 오류) 그 노드의 결과를 `fail`로
 바꾸고 값의 `reason`에 사유를 적는다.
+- at leave `do`는 결과가 정해진 직후, 그 노드의 `on` 처리기보다 먼저 실행한다. 그래서
+  `do` 실패로 바뀐 `fail`은 노드 자신의 `on`과 감싸는 `try`의 `catch`가 일반 `fail`처럼 처리한다.
+- 중첩 위임 런은 컬렉션을 갖지 않는다. 위임된 하위 트리 안의 노드는 컬렉션을 읽을 수도
+  없다(검사 오류 `collection-read-in-delegation`). 하위 트리 루트의 `do`와 trigger는 위임하는
+  런이 한 번만 실행한다.
+- at enter `do`가 실패해 본문 없이 `fail`로 끝난 노드도 떠나는 단계(at leave `do`,
+  trigger, `reset_at`)를 거친다. 실패한 노드에서 건너뛰려면 `when: "$outcome == 'ok'"`를 쓴다.
+- trigger는 생략하면 `at: enter`다. 문자열 축약형(`briefing`)과 매핑 모두 같다.
+- `reset_at`은 노드 id와 라벨을 모두 받는다.
 
 **저널.** `collection_pushed`, `collection_set`, `collection_removed`,
 `collection_reset`, `collection_inherited`, `collection_watch`(코드, 바꾼 필드),

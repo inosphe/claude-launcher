@@ -616,3 +616,61 @@ def test_extend_with_visits_answers_a_visit_limit(proj, monkeypatch):
 
     assert _http(go) == 200
     assert seen == {"node": "x@3", "by": 2, "stop": False, "scope": "v1s"}
+
+
+# --------------------------------------------------------------------------- #
+# collections and trigger lines on the run page (docs/cflow-v2.md 2.7, 2.8)
+# --------------------------------------------------------------------------- #
+COLLECTED = """\
+cflow: 2
+name: collected
+collections:
+  landing:
+    kind: queue
+    key: issue
+    item: {issue: str, tip: str}
+    status: {values: [requested, landed], initial: requested, settled: [landed]}
+    access: {push: [daemon], set: [driver, person], remove: [driver]}
+nodes:
+  a: {title: A, prompt: do a, triggers: [{do: checks, at: leave}]}
+  b: {title: B, prompt: do b}
+body: {seq: [a, b]}
+"""
+
+
+def test_the_run_page_carries_collections_and_trigger_lines(proj):
+    cwd = str(proj)
+    (proj / ".claunch" / "workflows" / "v2" / "collected.yaml").write_text(
+        COLLECTED, encoding="utf-8")
+    runtime.start(layers.load("collected", cwd), cwd=cwd, scope="c1", caps={}, driver="c1")
+    runtime.collection_op("push", "landing", cwd=cwd, scope="c1", principal="daemon",
+                          item={"issue": "x-1", "tip": "abc"})
+    runtime.report("a", cwd=cwd, scope="c1")
+    [trig] = runtime.claim_triggers(cwd, "c1")
+    runtime.complete_trigger(cwd, "c1", trig["id"], False, "no enabled status checks")
+
+    async def go(client, bearer):
+        q = f"cwd={cwd}&scope=c1"
+        out = {"detail": await (await client.get(f"/api/cflow2/run?{q}", headers=bearer)).json()}
+        resp = await client.post("/api/cflow2/collection", headers=bearer, json={
+            "cwd": cwd, "scope": "c1", "op": "set", "collection": "landing", "key": "x-1",
+            "fields": {"status": "landed"}})
+        out["set"] = (resp.status, await resp.json())
+        resp = await client.post("/api/cflow2/collection", headers=bearer, json={
+            "cwd": cwd, "scope": "c1", "op": "remove", "collection": "landing", "key": "x-1"})
+        out["remove"] = resp.status
+        resp = await client.post("/api/cflow2/collection", headers=bearer, json={
+            "cwd": cwd, "scope": "c1", "op": "push", "collection": "landing", "key": "x-1"})
+        out["push"] = resp.status
+        return out
+
+    out = _http(go)
+    col = out["detail"]["collections"]["landing"]
+    assert col["kind"] == "queue" and col["status_values"] == ["requested", "landed"]
+    assert [i["issue"] for i in col["items"]] == ["x-1"]
+    events = [(e["event"], e.get("trigger")) for e in out["detail"]["trigger_events"]]
+    assert events == [("trigger_queued", trig["id"]), ("trigger_skipped", trig["id"])]
+    assert out["set"][0] == 200
+    assert out["set"][1]["collections"]["landing"]["items"][0]["status"] == "landed"
+    assert out["remove"] == 400   # remove is the driver's (access), not the person's
+    assert out["push"] == 400

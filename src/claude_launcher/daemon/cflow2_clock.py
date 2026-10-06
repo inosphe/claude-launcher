@@ -28,7 +28,17 @@ session name, as for v1 -- that does what no agent call does:
   owning session once;
 * **children**: a ``session`` delegation whose child exited without
   submitting fails; one whose child wrote the receipt file (no MCP route) is
-  submitted from it.
+  submitted from it;
+* **triggers**: every slot's recorded ``triggers:`` are claimed once
+  (:func:`..cflow2.runtime.claim_triggers`) during the pass and performed
+  after it on the event loop, one at a time and each bounded
+  (:func:`.cflow2_triggers.perform_bounded`), then journalled
+  (:func:`..cflow2.runtime.complete_trigger`). A claim lost to a restart or
+  a stop is not repeated and not journalled beyond its ``trigger_queued``;
+* **watch**: collection ``watch:`` probes that are due
+  (:func:`..cflow2.runtime.watch_due`) run like a wait probe, with
+  :data:`WATCH_TIMEOUT`; the exit code is applied by
+  :func:`..cflow2.runtime.watch_apply` (a timed-out probe skips that round).
 
 Every tick also writes the dispatch heartbeat
 (:func:`..cflow2.executors.write_heartbeat`) listing the directories it
@@ -59,7 +69,7 @@ from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 from .. import store
 from ..cflow2 import asks, executors, ir, runtime
 from ..cflow2 import store as cstore
-from . import cflow2_exec
+from . import cflow2_exec, cflow2_triggers
 
 log = logging.getLogger("claunch.daemon.cflow2")
 
@@ -92,6 +102,13 @@ LOST_WATCH = 900.0
 RECEIPT_SETTLE = 30.0
 #: Probe wall clock.
 PROBE_TIMEOUT = 60.0
+#: A collection watch probe's wall clock (docs 2.7, watch).
+WATCH_TIMEOUT = 30.0
+#: The exit code :func:`run_probe` gives a probe it killed on timeout.
+PROBE_TIMED_OUT = 124
+#: The output :func:`run_probe` gives with :data:`PROBE_TIMED_OUT`: a probe
+#: that itself exits 124 is told apart from one that was killed.
+PROBE_TIMED_OUT_TEXT = "probe timed out"
 
 
 def run_probe(probe: Any, cwd: str, timeout: float = PROBE_TIMEOUT,
@@ -132,7 +149,7 @@ def run_probe(probe: Any, cwd: str, timeout: float = PROBE_TIMEOUT,
                 proc.kill()
         with contextlib.suppress(Exception):
             proc.communicate(timeout=5)
-        return 124, "probe timed out"
+        return PROBE_TIMED_OUT, PROBE_TIMED_OUT_TEXT
     return proc.returncode, out or ""
 
 
@@ -153,6 +170,7 @@ class Cflow2Clock:
         ask_deliver: Optional[Callable[..., Any]] = None,
         find_child: Optional[cflow2_exec.FindChild] = None,
         kill_child: Optional[Callable[[str, str], Any]] = None,
+        facts_fn: Optional[Callable[[str, str], Dict[str, Any]]] = None,
     ) -> None:
         self.manager = manager
         self.poll = float(poll if poll is not None else DEFAULT_POLL)
@@ -173,6 +191,9 @@ class Cflow2Clock:
         self.find_child = find_child or self._find_child
         #: ``(parent, child)``: end a child through the daemon's kill path.
         self.kill_child = kill_child or default_kill_child
+        #: ``(cwd, session) -> $facts`` for trigger pushes (tests stub it;
+        #: None measures git and the board, :func:`.cflow2_triggers.measure_facts`).
+        self.facts_fn = facts_fn
         #: Identifies this daemon process on a claimed delegation; a running
         #: headless record carrying another boot was orphaned by a restart.
         self.boot = f"{os.getpid()}-{uuid.uuid4().hex[:8]}"
@@ -193,6 +214,10 @@ class Cflow2Clock:
         self._scanning = False
         self._progress = 0.0
         self._last_beat = 0.0
+        #: Triggers claimed during a pass, performed after it:
+        #: ``(cwd, scope, trigger record, driver)``; driver None is looked
+        #: up when the trigger is performed.
+        self.claimed: List[Tuple[str, str, Dict[str, Any], Optional[str]]] = []
 
     # -- lifecycle -------------------------------------------------------
     def start(self) -> None:
@@ -245,6 +270,7 @@ class Cflow2Clock:
                 self._wake.clear()
                 for cwd, name, text in await asyncio.to_thread(self.scan):
                     self._deliver(cwd, name, text)
+                await self.run_triggers()
             except asyncio.CancelledError:
                 raise
             except Exception:
@@ -446,7 +472,12 @@ class Cflow2Clock:
     def tick_slot(self, cwd: str, scope: str, now: Optional[float],
                   notices: List[Notice]) -> None:
         st = cstore.RunStore(cwd, scope)
-        if st.load_state().get("status") not in runtime.LIVE_STATUSES:
+        first = st.load_state()
+        if first.get("triggers"):
+            # Before the liveness check: a trigger recorded as the run
+            # finished (a leave of the last node) is still performed.
+            self._claim(cwd, scope, first)
+        if first.get("status") not in runtime.LIVE_STATUSES:
             return
         probe = self._probe if self.probe_runner is not None else None
         runtime.wait_tick(now, probe, cwd=cwd, scope=scope)
@@ -456,6 +487,7 @@ class Cflow2Clock:
         for v in runtime.monitors_tick(now, probe, cwd=cwd, scope=scope):
             if v["action"] in (runtime.MON_NOTIFY, runtime.MON_HALT):
                 notices.append((cwd, scope, monitor_block(scope, v)))
+        self._watch_collections(cwd, scope, now)
         self._watch_lost(cwd, scope)
         state = st.load_state()
         if state.get("status") not in runtime.LIVE_STATUSES:
@@ -475,6 +507,72 @@ class Cflow2Clock:
                 self._session(cwd, scope, did, rec, clock_now, notices, halted)
             elif ex == ir.EXEC_SUBAGENT:
                 self._budget(cwd, scope, did, rec, clock_now, notices)
+
+    # -- triggers and collection watch ---------------------------------------
+    def _claim(self, cwd: str, scope: str, state: Dict[str, Any]) -> None:
+        """Take the slot's recorded triggers (single use: the runtime deletes
+        what it hands back) for :meth:`run_triggers`."""
+        if self.stop.is_set():
+            return
+        try:
+            claimed = runtime.claim_triggers(cwd, scope)
+        except (runtime.FlowError, cstore.StoreError) as exc:
+            log.debug("cflow2 trigger claim skipped %s/%s: %s", cwd, scope, exc)
+            return
+        with self._lock:
+            for trig in claimed or []:
+                # The acting session is read when the trigger is performed
+                # (runtime.acting_session): a session delegation's child may
+                # be spawned after its nested run opened.
+                self.claimed.append((cwd, scope, dict(trig), None))
+
+    async def run_triggers(self) -> List[Tuple[str, str, str, bool, str]]:
+        """Perform what the last pass claimed, in order, one at a time (a
+        slow briefing endpoint delays the next pass; the heartbeat has its
+        own task). Returns ``(cwd, scope, trigger id, performed, detail)``."""
+        with self._lock:
+            todo, self.claimed = self.claimed, []
+        done: List[Tuple[str, str, str, bool, str]] = []
+        cwds = list(self._cwds) or await asyncio.to_thread(self.cwds)
+        for cwd, scope, trig, driver in todo:
+            if self.stop.is_set():
+                # Not performed and not journalled: a stop leaves only the
+                # trigger_queued event, as a crash does (docs 2.8).
+                break
+            tid = str(trig.get("id") or "")
+            self._mark()
+            performed, detail = await cflow2_triggers.perform_bounded(
+                self.manager, cwd, scope, trig, cwds=cwds, driver=driver,
+                facts_fn=self.facts_fn)
+            try:
+                await asyncio.to_thread(runtime.complete_trigger, cwd, scope, tid,
+                                        performed, detail)
+            except Exception:  # noqa: BLE001 - the slot may be gone
+                log.exception("cflow2 trigger completion %s/%s/%s failed", cwd, scope, tid)
+            done.append((cwd, scope, tid, performed, detail))
+        return done
+
+    def _watch_collections(self, cwd: str, scope: str, now: Optional[float]) -> None:
+        """Run the due collection watch probes and apply their exit codes."""
+        if self.probe_runner is None:
+            return
+        clock_now = time.time() if now is None else float(now)
+        try:
+            due = runtime.watch_due(cwd, scope, clock_now)
+        except (runtime.FlowError, cstore.StoreError) as exc:
+            log.debug("cflow2 watch skipped %s/%s: %s", cwd, scope, exc)
+            return
+        for entry in due or []:
+            if self.stop.is_set():
+                return
+            name, key, probe, env, timeout, where = _due_fields(entry)
+            code, out = self._probe(probe, where or cwd, timeout, env=env)
+            if code == PROBE_TIMED_OUT and out == PROBE_TIMED_OUT_TEXT:
+                continue  # over the time limit: skip this round (docs 2.7)
+            try:
+                runtime.watch_apply(cwd, scope, name, key, code, clock_now)
+            except (runtime.FlowError, cstore.StoreError) as exc:
+                log.debug("cflow2 watch apply %s/%s %s[%s]: %s", cwd, scope, name, key, exc)
 
     # -- executors ---------------------------------------------------------
     def _requeue_orphan(self, cwd: str, scope: str, did: str, cause: str) -> bool:
@@ -769,6 +867,21 @@ class Cflow2Clock:
                 "was ended as 'timeout' in your parent's run. Stop working on it; do not "
                 "submit a result.")))
         return True
+
+
+def _due_fields(entry: Any) -> Tuple[str, Any, Any, Dict[str, str], float, Optional[str]]:
+    """``(collection, key, probe, env, timeout, cwd)`` of one
+    :func:`runtime.watch_due` row (``{collection, key, probe, env, on,
+    timeout, cwd}``, or a ``(collection, key, probe, env, on)`` tuple)."""
+    if isinstance(entry, dict):
+        try:
+            timeout = float(entry.get("timeout") or WATCH_TIMEOUT)
+        except (TypeError, ValueError):
+            timeout = WATCH_TIMEOUT
+        return (str(entry.get("collection")), entry.get("key"), entry.get("probe"),
+                dict(entry.get("env") or {}), timeout, entry.get("cwd") or None)
+    name, key, probe, env = entry[0], entry[1], entry[2], entry[3]
+    return str(name), key, probe, dict(env or {}), WATCH_TIMEOUT, None
 
 
 def _halted(state: Dict[str, Any]) -> bool:

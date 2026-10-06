@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import textwrap
 from pathlib import Path
 
@@ -70,7 +71,7 @@ def test_meta_and_top_level_fields():
     assert chart.meta == {"default_role": "worker",
                           "filter_roles": {"type": "whitelist", "roles": ["worker"]},
                           "default_child_cflow": None, "priority": 5, "max_visits": 200,
-                          "inputs": {}}
+                          "inputs": {}, "collections": {}}
     assert chart.params == {"goal": {"type": "str", "required": True}}
     assert chart.returns == {"ok": {"summary": "str"}}
     assert chart.data == {"count": 0}
@@ -297,7 +298,7 @@ body:
     w = chart.node("body.2")
     assert w.type == ir.T_WAIT and w.get("probe") == "git rev-parse master" and w.get("poll") == 30
     assert chart.node("body.3").get("seconds") == 5
-    assert "wait needs probe or seconds" in err("body:\n  wait: {describe: x}\n")
+    assert "wait needs probe, until or seconds" in err("body:\n  wait: {describe: x}\n")
 
 
 def test_common_keys_and_on():
@@ -684,3 +685,188 @@ def test_max_visits():
     for bad in ("0", "-1", "true", "'many'"):
         with pytest.raises(FrontendError, match="max_visits must be an integer >= 1"):
             mk(f"max_visits: {bad}\n")
+
+
+# -- collections, do:, triggers, wait until (docs/cflow-v2.md 2.7, 2.8) --------
+
+QUEUE = """
+collections:
+  todo:
+    kind: queue
+    key: id
+    item: {id: str, text: "str?"}
+    status: {values: [open, done], initial: open, settled: [done]}
+  sig:
+    kind: log
+    item: {name: str}
+"""
+
+
+def test_collections_land_normalized_in_meta():
+    chart = C("body: a\n", QUEUE)
+    cols = chart.meta["collections"]
+    assert set(cols) == {"todo", "sig"}
+    assert cols["todo"]["key"] == "id" and cols["todo"]["status"]["initial"] == "open"
+    assert cols["sig"]["kind"] == "log"
+    assert ir.Chart.from_json(chart.to_json()) == chart
+
+
+def test_collection_error_has_file_and_line():
+    msg = err("body: a\n", "collections:\n  q: {kind: queue, item: {a: str}}\n")
+    assert msg.startswith("t.yaml:4:") and "needs key" in msg
+
+
+def test_watch_probe_template_is_a_compile_error():
+    msg = err("body: a\n", """
+collections:
+  q:
+    kind: queue
+    key: a
+    item: {a: str}
+    watch: {probe: "git log ${data.x}", on: {0: {remove: true}}}
+""")
+    assert "watch.probe" in msg and "${...}" in msg
+
+
+def test_collection_types_from_include_and_required_env(tmp_path):
+    common = tmp_path / "common.yaml"
+    common.write_text(textwrap.dedent("""\
+        cflow: 2
+        name: common
+        kind: procedure
+        collection_types:
+          lq:
+            kind: queue
+            key: issue
+            item: {issue: str}
+            env: {TARGET: null}
+        body: end
+    """), encoding="utf-8")
+    resolve = {"common": common}.get
+    chart = C("body: a\n", "include: [common]\ncollections:\n  landing: {type: lq, env: {TARGET: master}}\n",
+              resolve=resolve)
+    assert chart.meta["collections"]["landing"]["env"] == {"TARGET": "master"}
+    msg = err("body: a\n", "include: [common]\ncollections:\n  landing: {type: lq}\n", resolve=resolve)
+    assert "env.TARGET is required" in msg
+    assert "unknown collection type 'lq'" in err(
+        "body: a\n", "collections:\n  landing: {type: lq, env: {TARGET: m}}\n")
+
+
+def test_own_file_collection_types_and_duplicate_type(tmp_path):
+    chart = C("body: a\n", "collection_types:\n  s: {kind: log, item: {name: str}}\n"
+                           "collections:\n  sig: {type: s}\n")
+    assert chart.meta["collections"]["sig"]["kind"] == "log"
+    assert "collection type 'bad'" in err(
+        "body: a\n", "collection_types:\n  bad: {kind: nope, item: {a: str}}\n")
+
+
+def test_task_do_and_triggers_are_stored():
+    chart = C("body: a\n", QUEUE + """
+nodes:
+  a:
+    prompt: a
+    do:
+      - push: {to: todo, item: {id: "$params.x", text: "'hi'"}}
+      - {set: {in: todo, key: "'k'", fields: {status: "'done'"}}, at: enter, when: "$outcome == 'ok'"}
+      - remove: {in: todo, key: "'k'"}
+      - consume: sig
+    triggers:
+      - briefing
+      - {do: checks, at: leave}
+      - {do: enqueue-landing, at: leave}
+      - at: leave
+        push: {to: "parent:landing", each: "$facts.in_review", item: {issue: "$each"}}
+""")
+    a = chart.node("a")
+    assert a.get("do") == [
+        {"op": "push", "addr": "todo", "item": {"id": "$params.x", "text": "'hi'"},
+         "at": "leave", "when": None},
+        {"op": "set", "addr": "todo", "key": "'k'", "fields": {"status": "'done'"},
+         "at": "enter", "when": "$outcome == 'ok'"},
+        {"op": "remove", "addr": "todo", "key": "'k'", "at": "leave", "when": None},
+        {"op": "consume", "addr": "sig", "at": "leave", "when": None},
+    ]
+    assert a.get("triggers") == [
+        {"do": "briefing", "at": "enter"},
+        {"do": "checks", "at": "leave"},
+        {"do": "enqueue-landing", "at": "leave"},
+        {"do": "push", "at": "leave",
+         "push": {"to": "parent:landing", "each": "$facts.in_review", "item": {"issue": "$each"}}},
+    ]
+    assert chart.node("a").to_dict()["do"] == a.get("do")
+
+
+def test_scalar_values_in_do_become_expression_text():
+    chart = C("body: a\n", QUEUE + "nodes:\n  a:\n    prompt: a\n"
+                                   "    do: [{push: {to: todo, item: {id: 3, text: true}}}]\n")
+    assert chart.node("a").get("do")[0]["item"] == {"id": "3", "text": "true"}
+
+
+def test_do_and_triggers_on_a_combinator_mapping():
+    chart = C("body:\n  id: s\n  seq: [a]\n  do: [{consume: sig}]\n  triggers: [checks]\n", QUEUE)
+    s = chart.node("s")
+    assert s.get("do")[0]["op"] == "consume" and s.get("triggers") == [{"do": "checks", "at": "enter"}]
+
+
+def test_nodes_without_do_or_triggers_have_no_such_props():
+    chart = C("body: a\n")
+    assert "do" not in chart.node("a").props and "triggers" not in chart.node("a").props
+
+
+@pytest.mark.parametrize("entry,match", [
+    ("[{push: {to: todo}}]", "needs item"),
+    ("[{push: {to: todo, item: {id: 'x'}}, set: {in: todo}}]", "exactly one of"),
+    ("[{pop: todo}]", "exactly one of"),
+    ("[{push: {to: todo, item: {id: \"'x'\"}}, at: middle}]", "at must be"),
+    ("[{push: {to: 'a:b', item: {id: \"'x'\"}}}]", "collection address"),
+    ("[{push: {to: todo, item: {id: '$$'}}}]", "bad expression"),
+    ("[{push: {to: todo, item: {id: \"'x'\"}, extra: 1}}]", "unknown key 'extra'"),
+    ("[{set: {in: todo, key: \"'k'\", fields: {}}}]", "must not be empty"),
+    ("[{consume: sig, on: leave}]", "unknown key"),
+])
+def test_do_errors(entry, match):
+    assert re.search(match, err("body: a\n", QUEUE + f"nodes:\n  a:\n    prompt: a\n    do: {entry}\n"))
+
+
+@pytest.mark.parametrize("entry,match", [
+    ("[nudge]", "unknown trigger 'nudge'"),
+    ("[briefing, {do: briefing}]", "declared twice"),
+    ("[{do: checks, at: soon}]", "at must be"),
+    ("[{push: {to: 'parent:x'}}]", "needs item"),
+    ("[{do: checks, when: x}]", "unknown key 'when'"),
+])
+def test_trigger_errors(entry, match):
+    assert re.search(match, err("body: a\n", f"nodes:\n  a:\n    prompt: a\n    triggers: {entry}\n"))
+
+
+def test_trigger_boolean_key_is_explained():
+    # a YAML 1.1 loader would turn on: into True; the frontend loader keeps it a
+    # string, so an `on:` key is simply unknown
+    assert "unknown key 'on'" in err("body: a\n", "nodes:\n  a:\n    prompt: a\n    triggers: [{do: checks, on: leave}]\n")
+
+
+def test_wait_until():
+    chart = C("body:\n  wait: {until: \"fresh('sig')\", seconds: 30, consume: [sig]}\n", QUEUE)
+    w = chart.node("body")
+    assert w.type == ir.T_WAIT and w.get("until") == "fresh('sig')"
+    assert w.get("consume") == ["sig"] and w.get("seconds") == 30 and w.get("probe") is None
+    plain = C("body:\n  wait: {seconds: 5}\n")
+    assert "until" not in plain.node("body").props
+
+
+@pytest.mark.parametrize("wait,match", [
+    ("{until: 'true', probe: 'true'}", "cannot be used with probe"),
+    ("{until: 'true', poll: 3}", "applies to a probe"),
+    ("{seconds: 3, consume: [sig]}", "consume applies to until"),
+    ("{until: '(('}", "bad expression"),
+    ("{until: 'true', consume: ['x:y']}", "collection address"),
+])
+def test_wait_until_errors(wait, match):
+    assert re.search(match, err(f"body:\n  wait: {wait}\n", QUEUE))
+
+
+def test_sides_are_kept_in_meta():
+    chart = C("body: a\n", "sides: {stack: stack-v2}\n")
+    assert chart.meta["sides"] == {"stack": "stack-v2"}
+    assert "sides" not in C("body: a\n").meta
+    assert "not a path" in err("body: a\n", "sides: {stack: ../x.yaml}\n")
