@@ -2,10 +2,13 @@
 
 The engine records a trigger in ``state.triggers`` when a node instance is
 entered or left and moves on; :class:`.cflow2_clock.Cflow2Clock` claims the
-records (:func:`..cflow2.runtime.claim_triggers`, single use) and hands each
-one to :func:`perform`, then writes ``trigger_done``/``trigger_skipped``
-(:func:`..cflow2.runtime.complete_trigger`). Nothing here can hold a run:
-every "could not" is a reason string.
+records (:func:`..cflow2.runtime.claim_triggers`, at least once: a claim
+left by an earlier boot is performed again) and hands each one to
+:func:`perform`, then writes ``trigger_done``/``trigger_skipped``
+(:func:`..cflow2.runtime.complete_trigger`). A push carries ``_tid`` per
+record (:func:`trigger_tid`), so a second run of the same trigger changes
+nothing in a v2 collection. Nothing here can hold a run: every "could not"
+is a reason string.
 
 * ``briefing`` / ``checks``: the v1 implementation
   (:func:`.cflow_clock.recompose_briefing`, :func:`.cflow_clock.request_checks`)
@@ -234,25 +237,34 @@ def split_addr(to: Any) -> Tuple[str, str]:
 
 
 def push_v2(holder: Tuple[str, str], name: str, items: Iterable[Dict[str, Any]],
-            session: str) -> Result:
+            session: str, tid: Optional[str] = None) -> Result:
     """Push ``items`` into a v2 run's collection as ``child``. Every record
     is tried; one refusal makes the trigger a skip whose reason counts what
-    went in (those records stay: each push is its own operation)."""
+    went in (those records stay: each push is its own operation). ``tid``
+    names the trigger: record ``i`` carries ``<tid>:<i>`` so a second run of
+    the same trigger (at least once, doc 2.8) is recognised."""
     hcwd, hscope = holder
     items = list(items)
     pushed: List[str] = []
+    replayed: List[str] = []
     refused: List[str] = []
-    for item in items:
+    for i, item in enumerate(items):
         try:
-            runtime.collection_op("push", name, cwd=hcwd, scope=hscope,
-                                  principal=PRINCIPAL_CHILD, session=session, item=item)
+            out = runtime.collection_op("push", name, cwd=hcwd, scope=hscope,
+                                        principal=PRINCIPAL_CHILD, session=session, item=item,
+                                        tid=f"{tid}:{i}" if tid else None)
         except runtime.FlowError as exc:
             refused.append(f"{_label(item)}: {exc}")
             continue
-        pushed.append(_label(item))
+        if (out.get("applied") or {}).get("replay"):
+            replayed.append(_label(item))
+        else:
+            pushed.append(_label(item))
     if refused:
-        return False, _partial(f"{hscope}'s {name!r}", len(items), pushed, refused)
-    return True, f"pushed {', '.join(pushed)} to {hscope}'s {name!r} (v2)"
+        return False, _partial(f"{hscope}'s {name!r}", len(items), pushed + replayed, refused)
+    parts = [f"pushed {', '.join(pushed)}"] * bool(pushed) + \
+        [f"replay: already there {', '.join(replayed)}"] * bool(replayed)
+    return True, f"{'; '.join(parts)} to {hscope}'s {name!r} (v2)"
 
 
 def _partial(where: str, total: int, pushed: List[str], refused: List[str]) -> str:
@@ -308,7 +320,8 @@ def push_v1(holder: Tuple[str, Optional[str]], parent: str,
 
 
 def push_to_parent(manager: Any, *, session: str, name: str,
-                   items: Sequence[Dict[str, Any]], cwds: Sequence[str]) -> Result:
+                   items: Sequence[Dict[str, Any]], cwds: Sequence[str],
+                   tid: Optional[str] = None) -> Result:
     """Push into the one run of ``session``'s parent that holds ``name``."""
     parent = parent_of(manager, session)
     if not parent:
@@ -327,7 +340,7 @@ def push_to_parent(manager: Any, *, session: str, name: str,
         return False, (f"parent {parent!r} has {len(where)} runs declaring {name!r} "
                        f"({'; '.join(where)}); the target is ambiguous")
     if v2:
-        return push_v2(v2[0], name, items, session)
+        return push_v2(v2[0], name, items, session, tid=tid)
     return push_v1(v1[0], parent, items, session)
 
 
@@ -374,12 +387,18 @@ async def perform(manager: Any, cwd: str, scope: str, trig: Dict[str, Any], *,
         push = ENQUEUE_LANDING_PUSH if do == DO_ENQUEUE_LANDING else (trig.get("push") or {})
         return await asyncio.to_thread(
             _push, manager, cwd, driver, push, do == DO_ENQUEUE_LANDING, list(cwds),
-            facts_fn or measure_facts)
+            facts_fn or measure_facts, trigger_tid(cwd, scope, trig))
     return False, f"this daemon has no trigger action named {do!r}"
 
 
+def trigger_tid(cwd: str, scope: str, trig: Dict[str, Any]) -> str:
+    """A trigger's name across runs: its run id (or slot) and its id."""
+    return f"{trig.get('run') or f'{cwd}|{scope}'}/{trig.get('id') or ''}"
+
+
 def _push(manager: Any, cwd: str, session: str, push: Dict[str, Any], landing: bool,
-          cwds: List[str], facts_fn: Callable[[str, str], Dict[str, Any]]) -> Result:
+          cwds: List[str], facts_fn: Callable[[str, str], Dict[str, Any]],
+          tid: Optional[str] = None) -> Result:
     target, name = split_addr(push.get("to"))
     if target != "parent" or not name:
         return False, f"a trigger pushes to 'parent:<collection>', not {push.get('to')!r}"
@@ -396,7 +415,7 @@ def _push(manager: Any, cwd: str, session: str, push: Dict[str, Any], landing: b
         items = expand_push(push, facts)
     except PushError as exc:
         return False, str(exc)
-    return push_to_parent(manager, session=session, name=name, items=items, cwds=cwds)
+    return push_to_parent(manager, session=session, name=name, items=items, cwds=cwds, tid=tid)
 
 
 async def perform_bounded(manager: Any, cwd: str, scope: str, trig: Dict[str, Any],

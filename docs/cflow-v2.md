@@ -584,9 +584,16 @@ nodes:
 - 실행 시점: 엔진은 노드 인스턴스에 들어가거나 떠나는 변경 안에서 요청을
   `state.triggers`에 기록하고(`trigger_queued`) 바로 다음으로 진행한다. 반복으로 같은
   노드를 여러 번 지나면 지날 때마다 기록한다.
-- 실행: cflow2 clock이 기록을 한 번만 가져가(가져간 기록은 지운다) 실행하고
-  `trigger_done` 또는 `trigger_skipped`(사유)를 남긴다. 데몬이 실행 중에 멈추면 그
-  요청은 다시 실행되지 않고, 저널에 `trigger_queued`만 남는다.
+- 실행: 최소 1회. cflow2 clock이 기록을 가져갈 때 기록을 지우지 않고 `claimed_at`과
+  `claim_boot`(데몬 부팅 id)를 표시한다. 실행이 끝나면 `trigger_done` 또는
+  `trigger_skipped`(사유)를 남기고 기록을 지운다. 다른 부팅이 표시한 기록(완료 전에
+  데몬이 재기동되거나 멈춘 경우)과 `claimed_at`이 실행 제한 시간(120초)의 2배를 넘은
+  기록은 표시를 풀고 `trigger_requeued`(사유)를 남긴 뒤 다시 실행한다.
+- 중복 실행 처리: `push`의 레코드마다 `_tid`(`<런 id>/<trigger id>:<each 순번>`)를 싣는다.
+  넣을 자리의 레코드(`queue`는 같은 key의 레코드, `log`는 모든 레코드)가 같은 `_tid`를
+  가지면 아무것도 바꾸지 않고 `trigger_done`(detail에 `replay`)으로 끝난다. 그래서 리더가
+  이미 옮긴 상태가 되돌아가지 않는다. `_tid`가 다른 push는 2.7대로 `initial`로 되돌린다.
+  `briefing`과 `checks`는 두 번 실행될 수 있다.
 - trigger는 런을 멈추지 않는다. 실패는 사유를 남기고 끝난다.
 - `push`는 `each`의 레코드를 모두 시도한다. 하나라도 거절되면 `trigger_skipped`(거절 수와 사유)이고,
   이미 들어간 레코드는 남는다.
@@ -757,7 +764,7 @@ wait 노드에는 `undecided_max`가 붙는다.
 ### 4.5 컬렉션과 trigger의 실행
 
 **상태.** `state.json`에 `collections: {이름: {kind, items: [...], seq}}`,
-`cursors: {주소: seq}`, `triggers: [{id, node, instance, at, do, push?, queued_at}]`를
+`cursors: {주소: seq}`, `triggers: [{id, run, node, instance, at, do, push?, queued_at, claimed_at?, claim_boot?}]`를
 둔다. 컬렉션 선언은 `chart.json`의 `meta.collections`, trigger와 `do:` 효과는 노드의
 `triggers`, `do` 필드다.
 
@@ -778,7 +785,7 @@ wait 노드에는 `undecided_max`가 붙는다.
 
 **저널.** `collection_pushed`, `collection_set`, `collection_removed`,
 `collection_reset`, `collection_inherited`, `collection_watch`(코드, 바꾼 필드),
-`cursor_moved`, `trigger_queued`, `trigger_done`, `trigger_skipped`(사유).
+`cursor_moved`, `trigger_queued`, `trigger_requeued`(사유), `trigger_done`, `trigger_skipped`(사유).
 
 **구현 계약** (모듈 사이의 경계. 이름이 바뀌면 이 표도 바꾼다)
 
@@ -787,10 +794,10 @@ wait 노드에는 `undecided_max`가 붙는다.
 | `collections.normalize(spec, types) -> dict` | `cflow2/collections.py` | 선언 검사와 `type:` 펼치기. 프런트엔드가 부른다 |
 | `collections.apply_push/apply_set/apply_remove(col_state, spec, ..., principal)` | 같은 곳 | 순수 함수. 접근·형식 검사 후 상태를 바꾸고 이벤트 dict를 돌려준다 |
 | `collections.reset(col_state, spec) -> summary` | 같은 곳 | lifecycle 정리 |
-| `runtime.collection_op(op, name, *, cwd, scope, principal, session, key=None, item=None, fields=None)` | `cflow2/runtime.py` | 외부(데몬, MCP, CLI)의 연산. 런 잠금 안에서 적용하고 status를 돌려준다 |
+| `runtime.collection_op(op, name, *, cwd, scope, principal, session, key=None, item=None, fields=None, tid=None)` | `cflow2/runtime.py` | 외부(데몬, MCP, CLI)의 연산. 런 잠금 안에서 적용하고 status를 돌려준다. `tid`는 trigger push의 `_tid` |
 | `runtime.collection_view(cwd, scope) -> dict` | 같은 곳 | 컬렉션 요약(웹, MCP, status) |
-| `runtime.claim_triggers(cwd, scope) -> list` | 같은 곳 | 기록된 trigger를 가져가고 지운다 |
-| `runtime.complete_trigger(cwd, scope, tid, performed, detail)` | 같은 곳 | `trigger_done`/`trigger_skipped` 기록 |
+| `runtime.claim_triggers(cwd, scope, *, boot, now, held=()) -> list` | 같은 곳 | 표시되지 않은 trigger와 풀린 trigger에 표시하고 돌려준다(기록은 남는다). `held`는 호출자가 아직 들고 있는 id |
+| `runtime.complete_trigger(cwd, scope, tid, performed, detail)` | 같은 곳 | 기록을 지우고 `trigger_done`/`trigger_skipped` 기록 |
 | `runtime.watch_due(cwd, scope, now) -> list` | 같은 곳 | 지금 확인할 (컬렉션, key, probe, env, on) 목록 |
 | `runtime.watch_apply(cwd, scope, name, key, code, now)` | 같은 곳 | probe 결과를 `on`대로 적용(주체 daemon) |
 | `runtime.holders(name, session, cwds) -> list` | 같은 곳 | 드라이버가 `session`이고 컬렉션 `name`을 선언한 살아 있는 v2 런의 (cwd, scope) |

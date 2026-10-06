@@ -100,6 +100,12 @@ def _items(cwd, scope, name="landing"):
     return {i["issue"]: i for i in view["collections"][name]["items"]}
 
 
+def _state(cwd, scope):
+    from claude_launcher.cflow2 import store as cstore
+
+    return cstore.RunStore(str(cwd), scope).load_state()
+
+
 def _events(cwd, scope, name):
     return [e for e in runtime.journal(cwd=str(cwd), scope=scope) if e["event"] == name]
 
@@ -240,7 +246,7 @@ def test_enqueue_landing_pushes_into_the_v2_parents_collection_once(tmp_path):
     assert len(_events(work, "w1", "trigger_done")) == 1
 
 
-def test_a_stop_after_the_claim_leaves_only_trigger_queued(tmp_path):
+def test_a_stop_after_the_claim_is_performed_by_the_next_boot(tmp_path):
     lead, work = _dirs(tmp_path)
     _start(lead, LEAD, "lead")
     _start(work, WORKER, "w1")
@@ -251,10 +257,67 @@ def test_a_stop_after_the_claim_leaves_only_trigger_queued(tmp_path):
     assert clock.claimed
     clock.stop.set()
     assert asyncio.run(clock.run_triggers()) == []
-    assert len(_events(work, "w1", "trigger_queued")) == 1
     assert not _events(work, "w1", "trigger_done") and not _events(work, "w1", "trigger_skipped")
-    assert runtime.claim_triggers(str(work), "w1") == []  # not repeated
     assert _items(lead, "lead") == {}
+    # the record stays, claimed by the stopped boot; the same boot does not
+    # take it again before it goes stale
+    [rec] = _state(work, "w1")["triggers"]
+    assert rec["claim_boot"] == clock.boot and rec["claimed_at"] is not None
+    assert runtime.claim_triggers(str(work), "w1", boot=clock.boot, now=T0 + 3) == []
+    # the next boot releases and performs it (at least once, doc 2.8)
+    clock2 = _clock(mgr)
+    clock2.scan(now=T0 + 4)
+    [(_, _, _, ok, detail)] = asyncio.run(clock2.run_triggers())
+    assert ok, detail
+    assert [e["reason"] for e in _events(work, "w1", "trigger_requeued")] == [
+        "the daemon restarted before this trigger completed"]
+    assert set(_items(lead, "lead")) == {"c-1", "c-2"}
+    assert _state(work, "w1")["triggers"] == []
+    assert len(_events(work, "w1", "trigger_done")) == 1
+
+
+def test_a_stale_claim_is_released(tmp_path):
+    lead, work = _dirs(tmp_path)
+    _start(lead, LEAD, "lead")
+    _start(work, WORKER, "w1")
+    runtime.report("req", cwd=str(work), scope="w1", now=T0 + 1)
+    [t] = runtime.claim_triggers(str(work), "w1", boot="b1", now=T0 + 2)
+    assert runtime.claim_triggers(str(work), "w1", boot="b1", now=T0 + 100) == []
+    late = T0 + 3 + runtime.TRIGGER_CLAIM_STALE
+    # a trigger the caller still holds is not released
+    assert runtime.claim_triggers(str(work), "w1", boot="b1", now=late, held=[t["id"]]) == []
+    [again] = runtime.claim_triggers(str(work), "w1", boot="b1", now=late)
+    assert again["id"] == t["id"]
+    assert "older than" in _events(work, "w1", "trigger_requeued")[0]["reason"]
+    assert runtime.complete_trigger(str(work), "w1", t["id"], True, "ok")
+    assert _state(work, "w1")["triggers"] == []
+
+
+def test_a_replayed_landing_push_leaves_the_record_as_the_leader_moved_it(tmp_path):
+    lead, work = _dirs(tmp_path)
+    _start(lead, LEAD, "lead")
+    _start(work, WORKER, "w1")
+    mgr = Manager(Session("lead", lead), Session("w1", work, parent="lead"))
+    runtime.report("req", cwd=str(work), scope="w1", now=T0 + 1)
+    clock = _clock(mgr)
+    clock.scan(now=T0 + 2)
+    [(cwd, scope, trig, _)] = list(clock.claimed)
+    ok, _ = asyncio.run(cflow2_triggers.perform(mgr, cwd, scope, trig, cwds=[str(lead)],
+                                                facts_fn=clock.facts_fn))
+    assert ok
+    runtime.collection_op("set", "landing", cwd=str(lead), scope="lead", principal="driver",
+                          key="c-1", fields={"status": "deferred"})
+    # the daemon stopped before completing: the same trigger runs again
+    ok, detail = asyncio.run(cflow2_triggers.perform(mgr, cwd, scope, trig, cwds=[str(lead)],
+                                                     facts_fn=clock.facts_fn))
+    assert ok and "replay" in detail, detail
+    items = _items(lead, "lead")
+    assert items["c-1"]["status"] == "deferred" and items["c-2"]["status"] == "requested"
+    # a different push of the same key (a new request) resets it as before
+    runtime.collection_op("push", "landing", cwd=str(lead), scope="lead", principal="child",
+                          session="w1", item={"issue": "c-1", "tip": "t2", "branch": "b",
+                                              "requested_by": "w1"})
+    assert _items(lead, "lead")["c-1"]["status"] == "requested"
 
 
 def test_a_push_trigger_evaluates_each_and_item(tmp_path):

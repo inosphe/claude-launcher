@@ -33,8 +33,11 @@ session name, as for v1 -- that does what no agent call does:
   (:func:`..cflow2.runtime.claim_triggers`) during the pass and performed
   after it on the event loop, one at a time and each bounded
   (:func:`.cflow2_triggers.perform_bounded`), then journalled
-  (:func:`..cflow2.runtime.complete_trigger`). A claim lost to a restart or
-  a stop is not repeated and not journalled beyond its ``trigger_queued``;
+  (:func:`..cflow2.runtime.complete_trigger`, which removes the record).
+  Delivery is at least once: a claim is marked with this clock's boot, and
+  one left by an earlier boot (a restart or a stop between claim and
+  completion) or older than :data:`..cflow2.runtime.TRIGGER_CLAIM_STALE` is
+  released (``trigger_requeued``) and performed again;
 * **watch**: collection ``watch:`` probes that are due
   (:func:`..cflow2.runtime.watch_due`) run like a wait probe, with
   :data:`WATCH_TIMEOUT`; the exit code is applied by
@@ -218,6 +221,9 @@ class Cflow2Clock:
         #: ``(cwd, scope, trigger record, driver)``; driver None is looked
         #: up when the trigger is performed.
         self.claimed: List[Tuple[str, str, Dict[str, Any], Optional[str]]] = []
+        #: ``(cwd, scope, trigger id)`` claimed and not completed yet, so a
+        #: stale re-claim of one still waiting here is not performed twice.
+        self._pending_triggers: Set[Tuple[str, str, str]] = set()
 
     # -- lifecycle -------------------------------------------------------
     def start(self) -> None:
@@ -510,17 +516,23 @@ class Cflow2Clock:
 
     # -- triggers and collection watch ---------------------------------------
     def _claim(self, cwd: str, scope: str, state: Dict[str, Any]) -> None:
-        """Take the slot's recorded triggers (single use: the runtime deletes
-        what it hands back) for :meth:`run_triggers`."""
+        """Claim the slot's unclaimed (or released) triggers for
+        :meth:`run_triggers`; the records stay in the run until completed."""
         if self.stop.is_set():
             return
         try:
-            claimed = runtime.claim_triggers(cwd, scope)
+            with self._lock:
+                held = [t for c, sc, t in self._pending_triggers if c == cwd and sc == scope]
+            claimed = runtime.claim_triggers(cwd, scope, boot=self.boot, held=held)
         except (runtime.FlowError, cstore.StoreError) as exc:
             log.debug("cflow2 trigger claim skipped %s/%s: %s", cwd, scope, exc)
             return
         with self._lock:
             for trig in claimed or []:
+                key = (cwd, scope, str(trig.get("id") or ""))
+                if key in self._pending_triggers:
+                    continue
+                self._pending_triggers.add(key)
                 # The acting session is read when the trigger is performed
                 # (runtime.acting_session): a session delegation's child may
                 # be spawned after its nested run opened.
@@ -536,8 +548,8 @@ class Cflow2Clock:
         cwds = list(self._cwds) or await asyncio.to_thread(self.cwds)
         for cwd, scope, trig, driver in todo:
             if self.stop.is_set():
-                # Not performed and not journalled: a stop leaves only the
-                # trigger_queued event, as a crash does (docs 2.8).
+                # Not performed: the record stays claimed by this boot and
+                # the next boot performs it again (docs 2.8, at least once).
                 break
             tid = str(trig.get("id") or "")
             self._mark()
@@ -549,6 +561,8 @@ class Cflow2Clock:
                                         performed, detail)
             except Exception:  # noqa: BLE001 - the slot may be gone
                 log.exception("cflow2 trigger completion %s/%s/%s failed", cwd, scope, tid)
+            with self._lock:
+                self._pending_triggers.discard((cwd, scope, tid))
             done.append((cwd, scope, tid, performed, detail))
         return done
 

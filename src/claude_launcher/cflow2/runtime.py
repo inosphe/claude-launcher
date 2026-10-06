@@ -4496,13 +4496,13 @@ def _init_collections(r: "Run", previous: Optional[Dict[str, Any]]) -> None:
 
 
 def _col_apply(r: "Run", op: str, name: str, *, principal: str, by: str, key: Any = None,
-               item: Any = None, fields: Any = None) -> Dict[str, Any]:
+               item: Any = None, fields: Any = None, tid: Optional[str] = None) -> Dict[str, Any]:
     """One push/set/remove on this run's collection ``name`` (journaled);
     :class:`.collections.CollectionError` when refused."""
     cs = _col_state(r, name)
     spec = _col_specs(r)[name]
     if op == "push":
-        ev = col_mod.apply_push(cs, spec, item, principal=principal, by=by, now=r.now)
+        ev = col_mod.apply_push(cs, spec, item, principal=principal, by=by, now=r.now, tid=tid)
     elif op == "set":
         ev = col_mod.apply_set(cs, spec, key, fields, principal=principal, by=by, now=r.now)
     elif op == "remove":
@@ -4652,7 +4652,8 @@ def _queue_triggers(r: "Run", iid: str, node: ir.Node, at: str) -> None:
             continue
         r.state["trigger_seq"] = int(r.state.get("trigger_seq") or 0) + 1
         tid = f"t{r.state['trigger_seq']}"
-        rec: Dict[str, Any] = {"id": tid, "node": node.id, "label": node.label or None,
+        rec: Dict[str, Any] = {"id": tid, "run": str(r.state.get("run_id") or ""),
+                               "node": node.id, "label": node.label or None,
                                "instance": iid, "at": at, "do": do,
                                "queued_at": store_mod.utcnow()}
         if push is not None:
@@ -4662,30 +4663,68 @@ def _queue_triggers(r: "Run", iid: str, node: ir.Node, at: str) -> None:
                instance=iid, at=at, do=do)
 
 
-def claim_triggers(cwd: Optional[str] = None, scope: Optional[str] = None) -> List[Dict[str, Any]]:
-    """Take the recorded triggers (single use: they are removed under the
-    lock, so a second claim gets none). A run in any status is claimable --
-    the last node's leave triggers are recorded as the run finishes."""
+#: A claim older than this many seconds is released and handed out again
+#: (2x the daemon's per-trigger limit, ``cflow2_triggers.ACTION_TIMEOUT``).
+TRIGGER_CLAIM_STALE = 240.0
+
+
+def claim_triggers(cwd: Optional[str] = None, scope: Optional[str] = None, *,
+                   boot: str = "", now: Optional[float] = None,
+                   stale_after: float = TRIGGER_CLAIM_STALE,
+                   held: Any = ()) -> List[Dict[str, Any]]:
+    """Hand out the recorded triggers that are not claimed yet, marking each
+    in ``state.triggers`` with ``claimed_at`` and ``claim_boot`` (the record
+    stays until :func:`complete_trigger`: at least once, doc 2.8). A claim
+    made by another daemon boot, or older than ``stale_after`` seconds, is
+    released first (``trigger_requeued``) and handed out again -- unless its
+    id is in ``held`` (the caller still has it in hand). A run in
+    any status is claimable -- the last node's leave triggers are recorded
+    as the run finishes."""
     st = RunStore(cwd, scope)
     if not st.exists():
         return []
+    clock_now = time.time() if now is None else float(now)
+    boot = str(boot or "")
+    held = {str(h) for h in held or ()}
     with st.lock():
         try:
             state = st.load_state()
         except StoreError:
             return []
-        taken = list(state.get("triggers") or [])
+        recs = state.get("triggers") or []
+        if not recs:
+            return []
+        events: List[Dict[str, Any]] = []
+        taken: List[Dict[str, Any]] = []
+        for rec in recs:
+            if rec.get("claimed_at") is not None:
+                if str(rec.get("id") or "") in held:
+                    continue
+                why = None
+                if str(rec.get("claim_boot") or "") != boot:
+                    why = "the daemon restarted before this trigger completed"
+                elif clock_now - float(rec.get("claimed_at") or 0) > stale_after:
+                    why = f"the claim is older than {stale_after:g}s"
+                if why is None:
+                    continue
+                events.append({"ts": store_mod.utcnow(), "event": "trigger_requeued",
+                               "trigger": rec.get("id"), "reason": why})
+            rec["claimed_at"] = clock_now
+            rec["claim_boot"] = boot
+            taken.append(copy.deepcopy(rec))
         if not taken:
             return []
-        state["triggers"] = []
         st.save_state(state)
+        if events:
+            st.append(events)
     return taken
 
 
 def complete_trigger(cwd: Optional[str], scope: Optional[str], tid: str, performed: bool,
                      detail: Any = None) -> bool:
-    """Journal a claimed trigger's end: ``trigger_done`` (``detail``) or
-    ``trigger_skipped`` (``reason``). False when the slot holds no run."""
+    """End a claimed trigger: remove its record from ``state.triggers`` and
+    journal ``trigger_done`` (``detail``) or ``trigger_skipped``
+    (``reason``). False when the slot holds no run."""
     st = RunStore(cwd, scope)
     if not st.exists():
         return False
@@ -4695,6 +4734,16 @@ def complete_trigger(cwd: Optional[str], scope: Optional[str], tid: str, perform
     if detail is not None:
         ev["detail" if performed else "reason"] = detail
     with st.lock():
+        try:
+            state = st.load_state()
+        except StoreError:
+            state = None
+        if state is not None:
+            recs = state.get("triggers") or []
+            kept = [rec for rec in recs if str(rec.get("id") or "") != str(tid)]
+            if len(kept) != len(recs):
+                state["triggers"] = kept
+                st.save_state(state)
         st.append([ev])
     return True
 
@@ -4820,12 +4869,13 @@ def collection_view(cwd: Optional[str] = None, scope: Optional[str] = None) -> D
 def collection_op(op: str, name: str, *, cwd: Optional[str] = None,
                   scope: Optional[str] = None, principal: str, session: str = "",
                   key: Any = None, item: Any = None, fields: Any = None,
-                  now: Optional[float] = None) -> Dict[str, Any]:
+                  now: Optional[float] = None, tid: Optional[str] = None) -> Dict[str, Any]:
     """push/set/remove on the run's collection ``name`` from outside the run
     (the daemon, an agent's MCP call, a person's CLI): under the run lock,
     after the time tick, with ``access`` enforced for ``principal``. A
     ``wait: until`` the change satisfies finishes in the same call. Returns
-    :func:`status` with ``applied`` (the journaled event)."""
+    :func:`status` with ``applied`` (the journaled event). ``tid`` marks a
+    daemon trigger push (:func:`.collections.apply_push`)."""
     if op not in COLLECTION_OPS:
         raise FlowError(f"unknown collection operation {op!r} ({', '.join(COLLECTION_OPS)})")
     by = str(session or "").strip() or principal
@@ -4834,7 +4884,8 @@ def collection_op(op: str, name: str, *, cwd: Optional[str] = None,
         _require_live(r)
         try:
             return _col_apply(r, op, name, principal=principal, by=by,
-                              key=_typed_key(r, name, key), item=item, fields=fields)
+                              key=_typed_key(r, name, key), item=item, fields=fields,
+                              tid=tid if op == "push" else None)
         except col_mod.CollectionError as exc:
             raise FlowError(str(exc)) from None
 

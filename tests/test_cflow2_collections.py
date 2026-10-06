@@ -221,6 +221,29 @@ def test_log_push_appends():
     assert [r["seq"] for r in st["items"]] == [1, 2]
 
 
+def test_a_trigger_push_with_the_same_tid_is_a_replay():
+    spec = landing()
+    st = C.empty(spec)
+    C.apply_push(st, spec, item("a"), principal="child", by="w1", now=1, tid="r/t1:0")
+    assert st["items"][0]["_tid"] == "r/t1:0"
+    C.apply_set(st, spec, "a", {"status": "deferred"}, principal="driver", by="lead", now=2)
+    before = [dict(r) for r in st["items"]]
+    ev = C.apply_push(st, spec, item("a", tip="t2"), principal="child", by="w1", now=3,
+                      tid="r/t1:0")
+    assert ev["replay"] is True and st["items"] == before and st["seq"] == 1
+    # another trigger (or no trigger) pushing the same key is a new request
+    C.apply_push(st, spec, item("a", tip="t2"), principal="child", by="w1", now=4, tid="r/t2:0")
+    assert st["items"][0]["status"] == "requested" and st["items"][0]["_tid"] == "r/t2:0"
+
+    log = C.normalize("signals", SIGNALS)
+    ls = C.empty(log)
+    C.apply_push(ls, log, {"name": "cut"}, principal="driver", by="s", now=1, tid="r/t1:0")
+    ev = C.apply_push(ls, log, {"name": "cut"}, principal="driver", by="s", now=2, tid="r/t1:0")
+    assert ev["replay"] is True and len(ls["items"]) == 1
+    C.apply_push(ls, log, {"name": "cut"}, principal="driver", by="s", now=3, tid="r/t1:1")
+    assert len(ls["items"]) == 2
+
+
 @pytest.mark.parametrize("it,principal,match", [
     (item(), "driver", "access denied"),
     (item(), "alien", "unknown principal"),

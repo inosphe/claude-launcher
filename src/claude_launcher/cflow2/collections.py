@@ -452,10 +452,20 @@ def _need_queue(spec: Dict[str, Any], op: str) -> None:
         raise _fail(spec["name"], f"{op} is only for a queue (this is a {spec['kind']})")
 
 
+#: The record field that names the trigger push that wrote it (doc 2.8).
+TID = "_tid"
+
+
 def apply_push(col_state: Dict[str, Any], spec: Dict[str, Any], item: Any, *,
-               principal: str, by: str, now: Any) -> Dict[str, Any]:
+               principal: str, by: str, now: Any, tid: Optional[str] = None) -> Dict[str, Any]:
     """Add a record. A queue replaces the record with the same key (in place)
-    and resets its status to ``initial``. Returns a ``collection_pushed`` event."""
+    and resets its status to ``initial``. Returns a ``collection_pushed`` event.
+
+    ``tid`` marks a daemon trigger push, which may run more than once (doc
+    2.8): the record carries it as ``_tid``. When the record that push would
+    write already carries the same ``_tid`` (a log: any record; a queue: the
+    record with the same key) nothing changes and the event says
+    ``replay``."""
     name = spec["name"]
     _check_access(spec, "push", principal)
     if not isinstance(item, dict):
@@ -464,9 +474,23 @@ def apply_push(col_state: Dict[str, Any], spec: Dict[str, Any], item: Any, *,
     missing = [f for f, d in spec["item"].items() if not d["optional"] and item.get(f) is None]
     if missing:
         raise _fail(name, f"push is missing required field(s) {', '.join(missing)}")
+    tid = str(tid) if tid else None
+    if tid:
+        if spec["kind"] == "queue":
+            idx = _find(col_state, spec, item.get(spec["key"]))
+            same = [col_state["items"][idx]] if idx >= 0 else []
+        else:
+            same = list(col_state.get("items", []))
+        for rec in same:
+            if rec.get(TID) == tid:
+                return {"event": "collection_pushed", "collection": name,
+                        "principal": principal, "by": by, "seq": rec.get("seq"),
+                        "replay": True, "item": copy.deepcopy(rec)}
     seq = int(col_state.get("seq", 0)) + 1
     record = {f: copy.deepcopy(v) for f, v in item.items() if v is not None}
     record.update({"seq": seq, "at": now, "by": by})
+    if tid:
+        record[TID] = tid
     if spec.get("status") is not None:
         record["status"] = spec["status"]["initial"]
     event: Dict[str, Any] = {"event": "collection_pushed", "collection": name,
