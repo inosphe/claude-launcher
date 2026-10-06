@@ -328,8 +328,8 @@ TOOLS = [
                         "further roles the child also answers for besides "
                         "'role' — a workflow's delegated decision, a "
                         "filter_roles check and the policy engine find it "
-                        "under any of them. Its stance is still the primary "
-                        "role's"
+                        "under any of them, and each subrole's stance is "
+                        "briefed after the primary's"
                     ),
                 },
                 "connect": {
