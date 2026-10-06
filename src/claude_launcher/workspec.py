@@ -138,9 +138,68 @@ def _ids(errs: List[str], items: list, key: str, what: str, pattern) -> set:
     return seen
 
 
+#: Fields whose value must be a mapping / a list of strings. Checked before
+#: anything else reads them, so a generator's malformed output is reported
+#: as an error line instead of crashing the validator (or, for a string where
+#: a list belongs, being iterated letter by letter).
+_TOP_MAPS = ("source", "mesh", "leader", "roles", "subroles")
+_TOP_LISTS = ("agents", "references", "contracts", "issues", "decisions",
+              "human_steps")
+_STR_LISTS = {
+    "agents": ("subroles", "connect"),
+    "contracts": ("parties", "refs"),
+    "issues": ("blocked_by", "refs", "contracts", "labels", "rule_ids"),
+    "decisions": ("gates",),
+}
+
+
+def _shape(doc: dict) -> List[str]:
+    errs: List[str] = []
+    for key in _TOP_MAPS:
+        if doc.get(key) is not None and not isinstance(doc[key], dict):
+            errs.append(f"{key}: must be a mapping")
+    for key in _TOP_LISTS:
+        if doc.get(key) is not None and not isinstance(doc[key], list):
+            errs.append(f"{key}: must be a list")
+    leader = doc.get("leader")
+    if isinstance(leader, dict):
+        for key in ("own", "shared"):
+            if leader.get(key) is not None and not isinstance(leader[key], dict):
+                errs.append(f"leader.{key}: must be a mapping")
+        shared = leader.get("shared")
+        if isinstance(shared, dict):
+            cands = shared.get("candidates")
+            if cands is not None and not (
+                isinstance(cands, list) and all(isinstance(c, str) for c in cands)
+            ):
+                errs.append("leader.shared.candidates: must be a list of strings")
+    for block, fields in _STR_LISTS.items():
+        items = doc.get(block)
+        if not isinstance(items, list):
+            continue
+        for i, item in enumerate(items):
+            if not isinstance(item, dict):
+                continue  # reported by _ids with the block's own wording
+            for f in fields:
+                v = item.get(f)
+                if v is not None and not (
+                    isinstance(v, list) and all(isinstance(x, str) for x in v)
+                ):
+                    errs.append(f"{block}[{i}].{f}: must be a list of strings")
+    for i, it in enumerate(doc.get("issues") if isinstance(doc.get("issues"), list) else []):
+        if isinstance(it, dict) and it.get("contract") is not None \
+                and not isinstance(it["contract"], dict):
+            errs.append(f"issues[{i}].contract: must be a mapping")
+    return errs
+
+
 def validate(doc: dict) -> List[str]:
     """Every problem in ``doc``; an empty list means it can be planned."""
-    errs: List[str] = []
+    if not isinstance(doc, dict):
+        return ["spec: must be a mapping"]
+    errs: List[str] = _shape(doc)
+    if errs:
+        return errs
     _unknown(errs, "spec", doc, _TOP)
     if doc.get("spec") != SPEC_VERSION:
         errs.append(f"spec: version must be {SPEC_VERSION}")
@@ -321,10 +380,7 @@ def validate(doc: dict) -> List[str]:
                 errs.append(f"{where}.contracts: unknown contract {c!r}")
         wc = it.get("contract")
         if wc is not None:
-            if not isinstance(wc, dict):
-                errs.append(f"{where}.contract: must be a mapping")
-            else:
-                _unknown(errs, f"{where}.contract", wc, set(WORK_CONTRACT_KEYS))
+            _unknown(errs, f"{where}.contract", wc, set(WORK_CONTRACT_KEYS))
     for it in issues:
         if isinstance(it, dict) and it.get("parent") is not None:
             parent = str(it["parent"])
@@ -348,6 +404,9 @@ def validate(doc: dict) -> List[str]:
 def resolve_leader(doc: dict, choice: str = "") -> dict:
     """The import-time leader decision: ``own`` or ``shared:<session>``.
 
+    On ``mesh.mode: attach`` the answer is always ``existing``: the mesh's
+    current leader, optionally asserted by ``shared:<session>``.
+
     ``choice`` is what the person importing said; empty falls back to the
     spec's ``leader.mode``. ``ask`` with no choice refuses — the decision is
     the importer's to make, and guessing it would either start a second
@@ -355,6 +414,18 @@ def resolve_leader(doc: dict, choice: str = "") -> dict:
     """
     leader = doc.get("leader") or {}
     raw = (choice or leader.get("mode") or "ask").strip()
+    if (doc.get("mesh") or {}).get("mode") == "attach":
+        # An existing mesh already has its leader, and joining anyone else
+        # as leader is refused by the mesh's exclusive check — so on attach
+        # the leader is not a choice. A named session is an assertion the
+        # executor checks against the mesh's live leader before anything is
+        # spawned; no name adopts whoever leads it.
+        if raw == "own":
+            raise SpecError("own is impossible when attaching to a mesh")
+        if raw not in ("ask", "shared") and not raw.startswith("shared:"):
+            raise SpecError(f"unknown leader choice {raw!r}")
+        return {"mode": "existing",
+                "session": raw.partition(":")[2].strip() or None}
     if raw == "ask":
         raise SpecError(
             "this spec leaves the leader to the import: pass own or "
@@ -423,6 +494,10 @@ def plan(doc: dict, leader_choice: str = "") -> List[dict]:
     mesh = mesh_name(doc)
     tag = f"spec:{name}"
     acts: List[dict] = []
+    if lead["mode"] == "existing":
+        # First of all: a failed check must leave the board untouched.
+        acts.append({"do": "leader-check", "agent": LEADER_ID, "mesh": mesh,
+                     "session": lead["session"]})
 
     for r in _list(doc, "references"):
         acts.append({"do": "reference", "id": r["id"], "kind": r["kind"]})
@@ -457,7 +532,7 @@ def plan(doc: dict, leader_choice: str = "") -> List[dict]:
         acts.append({"do": "spawn", "agent": LEADER_ID, "role": "leader",
                      "mesh": mesh, "workflow": lead.get("workflow") or
                      "improv-leader", "parent": None})
-    else:
+    elif lead["mode"] == "shared":
         acts.append({"do": "mesh-join", "agent": LEADER_ID,
                      "session": lead["session"], "mesh": mesh,
                      "handle": lead["handle"], "role": "leader"})

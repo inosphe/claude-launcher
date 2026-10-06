@@ -67,6 +67,9 @@ human_steps: [...]
 ```
 
 알 수 없는 키는 검증에서 거절된다(최상위·agents·issues·issues[].contract).
+값의 형태(매핑이어야 할 자리, 문자열 목록이어야 할 자리)는 다른 검사보다 먼저 확인되고,
+틀리면 그 오류만 돌려준다. 생성기가 만든 입력에 형식 오류가 있어도 검증기는 예외로 끝나지
+않고 오류 목록을 돌려준다.
 
 ## 3. 블록별 의미
 
@@ -75,7 +78,7 @@ human_steps: [...]
 | 키 | 값 | 의미 |
 |---|---|---|
 | `mode` | `new`(기본) | 이 명세 전용 메시를 만든다 |
-| | `attach` | 기존 메시에 붙인다. 그 메시에는 이미 리더가 있으므로 `leader` 는 `shared` 만 가능하다 |
+| | `attach` | 기존 메시에 붙인다. 리더는 그 메시의 현 리더로 고정된다(5절 「attach」) |
 | `name` | 문자열 | 생략하면 `spec-<name>` 이다. `attach` 에서는 필수다 |
 
 ### leader
@@ -182,7 +185,10 @@ exclusive 역할이고 살아 있는 보유자는 한 명뿐이다(`daemon/mesh.
 돌린다(`workflows/stack.yaml`, 스킬 `mesh-delegate`). 자식의 착지 요청은 sub-lead 가 받아
 스택 브랜치로 모은다. 리더는 sub-lead 의 브랜치 하나만 통합한다.
 
-깊이 한도는 `spawn.max_depth`(기본 3, 리더가 0)이고, 검증기가 같은 값으로 거절한다. 부모마다
+깊이 한도는 `spawn.max_depth`(기본 3, 리더가 0)이고, 검증기가 같은 값으로 거절한다.
+이 계산은 리더가 spawn 트리의 뿌리(깊이 0)라고 가정한다. own 은 항상 그렇다. shared 나
+attach 의 리더가 이미 깊이 d 인 세션이면 실제 한도는 3-d 이고, 그 차이는 실행 시점의
+spawn 정책이 거절한다. 부모마다
 자식 수의 소프트 한도(`max_children` 4)는 거절하지 않는다. 그 값은 import 실행 시점의 spawn
 정책이 판정한다.
 
@@ -195,8 +201,8 @@ import 하는 사람이 `--leader own` 또는 `--leader shared:<세션>` 을 준
 
 `leader` 의 exclusive 판정은 메시 하나의 멤버만 본다. 그래서 한 세션이 여러 메시에 동시에
 리더로 속할 수 있다(`daemon/mesh.py:1511` `meshes_for_session`). shared 는 기존 리더 세션을
-새 메시에 `mesh join --role leader` 로 합류시킨다. 새 메시에는 리더가 없으므로 exclusive
-충돌은 생기지 않는다.
+새 메시에 `mesh join --role leader` 로 합류시킨다. `mesh.mode: new` 의 메시에는 리더가
+없으므로 exclusive 충돌은 생기지 않는다. 이 성질은 new 에서만 성립한다(아래 attach).
 
 shared 를 고를 때 감수하는 충돌은 다음과 같다.
 
@@ -218,6 +224,21 @@ shared 를 고를 때 감수하는 충돌은 다음과 같다.
 (`mergecheck`, 통합 프리뷰 스윕)가 머지 시점에 처리하고, 명세 import 는 처리하지 않는다.
 `mesh.mode: attach` 에서는 own 을 고를 수 없다.
 
+### attach — 기존 메시의 리더
+
+기존 메시에는 이미 리더가 있다. 다른 세션을 리더로 합류시키면 exclusive 검사
+(`daemon/mesh.py:4275-4299`)가 거절하고, 현 리더를 합류시키면 이미 멤버이므로 중복이다.
+그래서 attach 에서 리더는 선택 대상이 아니고 그 메시의 현 리더로 고정된다
+(`resolve_leader` 가 `mode: existing` 을 돌려준다).
+
+| import 선택 | 결과 |
+|---|---|
+| 없음 / `ask` / `shared` | `leader-check` (session 없음) — 실행기가 메시의 현 리더를 읽어 그 세션을 부모로 쓴다. 현 리더가 없으면 중단한다 |
+| `shared:<세션>` | `leader-check` (session 지정) — 실행기가 그 세션이 메시의 살아 있는 리더인지 확인하고, 아니면 아무것도 만들지 않고 중단한다 |
+| `own` | 거절 |
+
+`leader-check` 는 확인만 하는 action 이고, `mesh-join` 은 attach 에서 생성되지 않는다.
+
 ## 6. import 절차
 
 `workspec.plan(doc, leader_choice)` 가 실행 순서를 action 목록으로 돌려준다. 실행기는 이
@@ -232,7 +253,9 @@ shared 를 고를 때 감수하는 충돌은 다음과 같다.
    `claunch beads dep add` 로 실행한다.
 6. **메시** — `mode: new` 면 `POST /api/mesh`. 이어서 `roles` 와 서브롤 역할을
    `PUT /api/mesh/{m}/roles` 로 업로드한다.
-7. **리더** — own: spawn(`role: leader`, `workflow: improv-leader`) / shared: `mesh join`.
+7. **리더** — own: spawn(`role: leader`, `workflow: improv-leader`) / shared: `mesh join` /
+   attach: 이 자리에는 아무것도 없다. attach 의 `leader-check` 는 plan 의 맨 앞(1단계 직후)에
+   오고, 실패하면 보드 쓰기를 포함한 뒤의 action 을 하나도 실행하지 않는다.
 8. **에이전트** — 부모가 먼저 생성된다. 각 spawn 은 `mesh` 를 명시하고, 큐의 첫 이슈
    (priority 오름차순)를 `issue` 로 받는다. 이슈가 이미 있으므로 데몬은 새 이슈를 만들지
    않고 take 한다(`daemon/beads.py:839-881`). 큐의 나머지는 `update --assignee` 로 배정한다.

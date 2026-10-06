@@ -93,6 +93,22 @@ def test_own_impossible_on_attach(doc):
     assert not any(a["do"] == "mesh-create" for a in acts)
 
 
+def test_attach_never_joins_a_leader(doc):
+    """On attach the mesh already has its leader: no mesh-join, a check."""
+    doc["mesh"] = {"mode": "attach", "name": "claunch"}
+    named = ws.plan(doc, "shared:s29")
+    lead = [a for a in named if a.get("agent") == "leader"]
+    assert lead == [{"do": "leader-check", "agent": "leader",
+                     "mesh": "claunch", "session": "s29"}]
+    # ask on attach is not a refusal: there is nothing left to choose
+    assert ws.validate(doc) == []
+    anyone = [a for a in ws.plan(doc) if a.get("agent") == "leader"]
+    assert anyone == [{"do": "leader-check", "agent": "leader",
+                       "mesh": "claunch", "session": None}]
+    assert not any(a["do"] == "mesh-join" for a in ws.plan(doc))
+    assert ws.plan(doc)[0]["do"] == "leader-check"  # before any board write
+
+
 # C ------------------------------------------------------------------------
 
 def test_second_leader_role_refused(doc):
@@ -242,3 +258,39 @@ def test_plan_labels_and_decision_blocks(doc):
     assert human["labels"] == ["spec:night-sense", "human"]
     assert {"do": "comment", "issue": "W2",
             "text": "BLOCKED: decision impl.night-source"} in acts
+
+
+# G: malformed input is reported, never raised --------------------------------
+
+@pytest.mark.parametrize("key, value, expect", [
+    ("mesh", "foo", "mesh: must be a mapping"),
+    ("leader", "own", "leader: must be a mapping"),
+    ("subroles", ["unreal"], "subroles: must be a mapping"),
+    ("issues", {"W1": {}}, "issues: must be a list"),
+])
+def test_top_level_type_errors(doc, key, value, expect):
+    doc[key] = value
+    assert ws.validate(doc) == [expect]
+
+
+def test_string_where_a_list_belongs(doc):
+    doc["agents"][1]["subroles"] = "unreal"
+    doc["issues"][2]["blocked_by"] = "W1"
+    doc["decisions"][0]["gates"] = "W2"
+    out = ws.validate(doc)
+    assert "agents[1].subroles: must be a list of strings" in out
+    assert "issues[2].blocked_by: must be a list of strings" in out
+    assert "decisions[0].gates: must be a list of strings" in out
+    assert not any("'u'" in e for e in out)  # never iterated per letter
+
+
+def test_nested_mapping_type_errors(doc):
+    doc["leader"]["shared"] = "s29"
+    doc["issues"][1]["contract"] = ["accept"]
+    out = ws.validate(doc)
+    assert "leader.shared: must be a mapping" in out
+    assert "issues[1].contract: must be a mapping" in out
+
+
+def test_non_mapping_document():
+    assert ws.validate(["x"]) == ["spec: must be a mapping"]
