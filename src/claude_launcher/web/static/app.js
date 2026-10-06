@@ -10601,6 +10601,44 @@ function setCreatePending(f, pending, parent) {
   status.classList.toggle("hidden", !pending);
 }
 
+/* What a create/spawn answer says failed beside the session it made.
+
+   The daemon reports each onboarding leg separately so a partial success
+   stays legible, and the CLI has printed the failing one since it grew them
+   ("mesh join failed: handle 's59' is already taken in mesh ..."). The
+   browser never looked: it checked the HTTP status, and a refused mesh join
+   is a 200 with the session in it. So a Create that asked for a mesh and got
+   none closed the box and opened a terminal showing no team and no reason —
+   which reads as the picker being broken rather than as the answer it is.
+
+   The session exists either way, so this blocks nothing: it is the sentence
+   the operator would otherwise have had to infer. Callers show each entry
+   sticky, because the page navigates to the new session on the next line and
+   a card that times out while the reader watches a terminal open is a card
+   nobody read. */
+function onboardFailureNotices(info) {
+  const out = [];
+  const mesh = (info || {}).mesh;
+  if (mesh && mesh.ok === false) {
+    const pending = mesh.pending || null;
+    out.push({
+      title: "mesh join failed",
+      sub: mesh.error
+        || (pending
+              ? `waiting for ${pending.primary || "the mesh owner"} to approve`
+              : "no reason given"),
+    });
+  }
+  const flow = (info || {}).workflow;
+  if (flow && flow.ok === false) {
+    out.push({
+      title: "workflow did not start",
+      sub: flow.error || "no reason given",
+    });
+  }
+  return out;
+}
+
 let createBusy = false;
 $("new-session").addEventListener("submit", async (e) => {
   e.preventDefault();
@@ -10838,6 +10876,12 @@ $("new-session").addEventListener("submit", async (e) => {
     // The spawn endpoint wraps the child (it also reports the parent and what
     // the onboarding did); the create one answers with the session itself.
     const made = info.session || info;
+    // A leg that failed beside the session (a refused mesh join is the usual
+    // one) is said now, as a card: the box that would have shown it is closed
+    // on the next line and the page leaves for the new terminal.
+    for (const bad of onboardFailureNotices(info)) {
+      notify(bad.title, bad.sub, { kind: "warn", sticky: true });
+    }
     // The form is in the modal when it was opened as one, and the page it was
     // opened over is not where the operator is going: the new session is.
     createBusy = false;
