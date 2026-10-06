@@ -189,6 +189,11 @@ def _scalars(doc: dict) -> List[str]:
         for f in fields:
             if node.get(f) is not None and not isinstance(node[f], str):
                 errs.append(f"{path}.{f}: must be a string")
+    subroles = doc.get("subroles")
+    for name, body in (subroles.items() if isinstance(subroles, dict) else ()):
+        if isinstance(body, dict) and body.get("prompt") is not None \
+                and not isinstance(body["prompt"], str):
+            errs.append(f"subroles.{name}.prompt: must be a string")
     for block, fields in _STR_ITEMS.items():
         items = doc.get(block)
         if not isinstance(items, list):
