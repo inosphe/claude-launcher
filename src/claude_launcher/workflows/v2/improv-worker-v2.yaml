@@ -59,7 +59,7 @@ sides:
 #   stack-cut             -> stack-cut              (cond side('stack').live)
 #   stack-merge           -> cut-wait(wait), stack-merge
 #   landing               -> landing                (choose, when $params.allow)
-#   landing-review        -> landing-review         (ask: 상위 세션)
+#   landing-review        -> landing-review, landing-review-leader (ask: 착지 요청을 받을 세션)
 #   rebase                -> merge-ready(위임), rebase   (loop align)
 #   reviewer-ensure       -> reviewer-ensure
 #   peer-review           -> peer-review            (ask: 리뷰어)
@@ -1523,7 +1523,7 @@ nodes:
     # 전에도 언제든 같은 결정을 내릴 수 있고, 그 답이 이긴다. hold는 rebase와
     # 증거 묶음을 건너뛰므로 워커(agent)가 고를 수 없다.
     ask:
-      prompt: |
+      prompt: &landing_review_ask |
         너에게 딸린 워커 하나가 이번 목표를 자기 브랜치에 커밋했고 표적
         테스트가 green이다. 지금 그 브랜치를 네 통합 대기 표에 올리게
         하는가(워커는 먼저 통합 대상 위로 rebase한 뒤 증거 묶음을 만들어
@@ -1558,15 +1558,36 @@ nodes:
         - {role: leader, scope: sibling}
       otherwise: human
       timeout: 1800
-      options:
+      options: &landing_review_options
         request: {outcome: ok, description: 지금 상위 세션에 통합 요청 — 먼저 통합 대상 브랜치로 rebase해 최신화한 뒤 증거 묶음을 만들어 올린다(머지 실행은 상위 세션)}
         hold: {outcome: hold, description: 브랜치 동결(추가 커밋 없음) — 통합은 나중에}
-    prompt: |
+    prompt: &landing_review_prompt |
       착지 여부를 상위 세션에 물었다(아래 질문). 워커는 이 결정을 사용자에게
       올려 세워 두고 기다리지 않는다 — 질문이 상위에게 나가 있다는 사실과,
       사용자가 원하면 `claunch cflow2 select`로 직접 답할 수 있다는 한 줄만
       보고에 남긴다. 결과는 상위(또는 사용자)의 답 그대로다: request면 ok,
       hold면 hold.
+    returns:
+      ok: {}
+      hold: {reason: "str?"}
+    effects: [mesh.send]
+
+  landing-review-leader:
+    title: 착지 결정 (리더에게 묻는다 — independent)
+    # landing-review와 같은 질문이다(문구·선택지는 앵커로 공유). 다른 것은
+    # 응답자뿐이다: relation이 independent인 회차의 착지 요청은 부모 워커가
+    # 아니라 리더의 착지 큐로 가므로(integration-request의 leader:landing),
+    # 그 요청을 올릴지 묻는 질문도 부모 워커를 건너뛰고 리더에게 간다
+    # (claunch-yq80p.12). 리더가 없거나 30분 안에 답이 없으면 사람 앞에 선다.
+    ask:
+      prompt: *landing_review_ask
+      from:
+        - {role: leader, scope: ancestor}
+        - {role: leader, scope: sibling}
+      otherwise: human
+      timeout: 1800
+      options: *landing_review_options
+    prompt: *landing_review_prompt
     returns:
       ok: {}
       hold: {reason: "str?"}
@@ -3053,12 +3074,24 @@ procedures:
             escalate:
               description: 확인이 하나라도 깨졌다 — 착지 여부를 상위 세션에 묻는다
               when: "'escalate' in $params.allow"
+              # 묻는 상대는 착지 요청을 받을 세션이다(relation, claunch-yq80p.12):
+              # stacked는 부모 워커부터, independent는 리더부터.
               then:
-                seq: [landing-review]
-                on:
-                  hold:
-                    return: held
-                    value: {reason: "$result['landing-review'].value.reason", rework: false}
+                id: landing-review-route
+                cond:
+                  - if: "$data.inputs.relation == 'independent'"
+                    then:
+                      seq: [landing-review-leader]
+                      on:
+                        hold:
+                          return: held
+                          value: {reason: "$result['landing-review-leader'].value.reason", rework: false}
+                  - else:
+                      seq: [landing-review]
+                      on:
+                        hold:
+                          return: held
+                          value: {reason: "$result['landing-review'].value.reason", rework: false}
       - id: submit
         loop:
           while: "true"

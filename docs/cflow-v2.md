@@ -2167,6 +2167,11 @@ v2 워커의 착지 요청은 기본으로 pull request를 거친다. 로컬 착
   관계와 근거는 자식 이슈의 `RELATION: <관계> — <근거>` 코멘트로 남긴다.
 - 착지 요청: `integration-request`의 leave push trigger 둘이 `when`으로 갈린다(2.8).
   independent 자식은 리더에게 nudge하고 부모 워커에게는 fyi만 보낸다.
+- 착지 여부 질문: 워커의 기계 확인이 깨져 `landing`이 escalate하면, 묻는 상대는 착지
+  요청을 받을 세션이다(claunch-yq80p.12). stacked는 `landing-review`(응답자: 조상 워커,
+  조상 리더, 형제 리더 순), independent는 `landing-review-leader`(조상 리더, 형제 리더
+  순)다. 두 노드는 질문 문구·선택지·작업 프롬프트를 YAML 앵커로 공유하고 `from`만
+  다르다. 30분 안에 답이 없으면 둘 다 사람 앞에 선다.
 - stack 런(stack-v2)은 stacked 자식만 다룬다. 표에 올리기 전에 자식 런의 입력
   (`claunch cflow2 status -t <자식> --json`의 `inputs.relation`)을 읽는다. independent
   자식만 두면 stack 런을 세우지 않는다.
