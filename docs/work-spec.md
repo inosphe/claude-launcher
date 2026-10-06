@@ -278,6 +278,11 @@ claunch spec plan   <file> --leader shared:s29     # action 목록(쓰기 없음
 claunch spec import <file> --leader own --profile <p>
 ```
 
+대시보드의 Spec 페이지(`#/spec`)는 같은 세 동작을 `POST /api/spec/check`·`plan`·`import` 로
+부른다. 바디는 `{"yaml": <명세 본문>, "leader": "own|shared:<세션>", "profile": "<p>"}` 이다.
+검증 오류는 400 과 `errors` 목록으로, 리더 선택 오류는 400 과 `leader_error: true` 로 답한다.
+import 가 중간에 멈추면 409 에 그때까지의 `log` 와 `resumable: true` 를 싣는다.
+
 | 항목 | 동작 |
 |---|---|
 | 보드 위치 | 명세의 `workspace`(등록 워크스페이스 이름)가 가리키는 디렉터리. 없으면 현재 디렉터리. `file` 참고 자료도 이 디렉터리 기준이다 |
@@ -294,7 +299,7 @@ claunch spec import <file> --leader own --profile <p>
 |---|---|
 | 형식, 검증(`validate`), 리더 결정(`resolve_leader`), 실행 순서(`plan`) | 구현됨, `tests/test_workspec.py` |
 | 실행기(보드 쓰기, 메시 생성, spawn, 연결)와 `claunch spec check/plan/import` CLI | 구현됨, `src/claude_launcher/workspec_import.py`, `tests/test_workspec_import.py` |
-| 웹 UI 에서 명세 검증·plan·import | 후속 작업(`claunch-q12q6`) |
+| 웹 UI 에서 명세 검증·plan·import | 구현됨. 대시보드 `#/spec`(`web/static/spec-page.js`), API `POST /api/spec/check·plan·import`(`daemon/spec_api.py`), `tests/test_spec_api.py`, `tests/web/specpage_check.js` |
 | 서브롤 stance 를 브리핑에 싣기(현재는 태스크 앞 prompt 로 대신함) | 후속 작업. 관련: `claunch-a6azt` |
 | gds6 issue-gen 이 이 명세를 직접 내보내는 출력기 | gds6 브랜치 `s90-gds6-workspec-export` 에 있음, gds6 master 미머지(`claunch-j8hhs`) |
 | 참고 자료 파일을 세션 워크트리에 복사하는 방식 | 미정 |

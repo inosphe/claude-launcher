@@ -5283,6 +5283,14 @@ a.window-owner:hover { color: #79c0ff; text-decoration: underline; }
 /* ---- Worktrees page (worktrees-page.js) ---- */
 #worktrees-view { flex: 1; overflow-y: auto; padding: 18px 26px; min-height: 0; }
 #glossary-view { flex: 1; overflow-y: auto; padding: 18px 26px; min-height: 0; }
+#spec-view { flex: 1; overflow-y: auto; padding: 18px 26px; min-height: 0; }
+.spec-row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin: 8px 0; }
+.spec-text { width: 100%; box-sizing: border-box; font-family: ui-monospace, Consolas, monospace; font-size: 12px; }
+.spec-errors { color: #ff7b72; font-size: 13px; }
+.spec-summary { font-size: 13px; }
+.spec-table { border-collapse: collapse; font-size: 12px; width: 100%; }
+.spec-table th, .spec-table td { border: 1px solid #30363d; padding: 4px 6px; text-align: left; vertical-align: top; overflow-wrap: anywhere; }
+#spec-view .wf-btn:disabled { opacity: .5; cursor: default; }
 .glossary-controls { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 12px; }
 .glossary-columns { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 20px; }
 .glossary-card { border: 1px solid var(--border); border-radius: 6px; padding: 12px; margin: 12px 0; overflow-wrap: anywhere; }
