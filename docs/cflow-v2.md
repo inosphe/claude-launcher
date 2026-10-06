@@ -1670,8 +1670,18 @@ v2 워커의 착지 요청은 기본으로 pull request를 거친다. 로컬 착
 | 충돌하는 PR | 직후 `mergeable` UNKNOWN, 수 초 뒤 CONFLICTING. 머지 거절(`not mergeable`) |
 | 새 fetch 뒤 head가 base의 조상인가 | 참 |
 | gh 상태별 종료 코드 | 정상 0, 미로그인(`auth status`) 1, 미설치 127 |
+| 이미 올린 브랜치를 rewrite한 뒤 일반 push | 거절(exit 1, `non-fast-forward`) |
+| `--force-with-lease`(기대값 없음), 추적 ref == 원격 | 강제 갱신됨(exit 0). 명시 refspec push도 `refs/remotes/<remote>/<브랜치>`를 갱신하므로 재요청 경로가 이것이다 |
+| `--force-with-lease`, 다른 곳에서 원격이 움직여 추적 ref가 낡음 | 거절(exit 1, `stale info`) |
+| 강제 push 직후 `gh pr view --json headRefOid` | 이전 SHA가 남아 있었다. 재조회 필요 |
+| `gh pr create`에 없는 base | 거절(exit 1, `Base ref must be a branch`) |
+| 같은 head·base로 `gh pr create` 두 번째 | 거절(exit 1, `already exists:` 다음 줄에 기존 PR url) |
+| `gh pr list --head <브랜치> --state open` | 기존 PR 번호와 headRefOid를 낸다 |
 
-`mergeable`이 UNKNOWN이면 판정하지 않고 다시 조회한다.
+실패 경로 측정은 PR #3(base `cflow2-pr-measure`, head `s83-prm-3`)에서 했고, 측정 뒤
+PR은 닫고 브랜치는 지웠다.
+
+`mergeable`이 UNKNOWN이거나 push 직후 `headRefOid`가 HEAD와 다르면 판정하지 않고 수 초 뒤 다시 조회한다.
 
 ## 11. 단계
 
