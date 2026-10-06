@@ -1,20 +1,31 @@
 // OSC 52 from a session program reaches the clipboard of the computer the
 // browser runs on (claunch-yr3yu). Slices the real block out of app.js and
-// drives it against a stub xterm: the parser handler, the input gate, the
-// query/clear/oversize refusals, UTF-8 decoding, and the notice on refusal.
+// drives it against a stub xterm: the parser handler, the input gate (DOM
+// user events only -- never xterm's own onData), the query/clear/oversize
+// refusals, UTF-8 decoding, and the notice on refusal.
 const fs = require('fs');
 const path = require('path');
 const vm = require('vm');
 const assert = require('assert');
 const source = fs.readFileSync(path.join(__dirname, '../../src/claude_launcher/web/static/app.js'), 'utf8');
 
+function fakeElement() {
+  const e = { listeners: {} };
+  e.addEventListener = (type, fn) => { (e.listeners[type] ||= []).push(fn); };
+  e.fire = (type) => (e.listeners[type] || []).forEach((fn) => fn({ type }));
+  return e;
+}
+// onData here is what xterm emits on its own -- query answers, focus and
+// mouse-motion reports -- as well as keystrokes; the gate must not listen.
 function fakeTerm() {
-  const t = { dataHandlers: [], osc: {} };
+  const t = { dataHandlers: [], osc: {}, element: fakeElement() };
   t.onData = (fn) => { t.dataHandlers.push(fn); };
   t.parser = { registerOscHandler(code, fn) { t.osc[code] = fn; } };
-  t.type = (s) => t.dataHandlers.forEach((fn) => fn(s));
+  t.emit = (s) => t.dataHandlers.forEach((fn) => fn(s));
+  t.type = (s) => { t.element.fire('keydown'); t.emit(s); };
   return t;
 }
+const sessionLine = fakeElement();
 const b64 = (s) => Buffer.from(s, 'utf8').toString('base64');
 
 const written = [];
@@ -27,6 +38,8 @@ const ctx = vm.createContext({
   navigator: { clipboard: { writeText: async (text) => { written.push(text); } } },
   notify: (title, sub, opts) => { notices.push([title, opts && opts.key]); },
   document: { body: {}, activeElement: null },
+  $: (id) => (id === 'term-input' ? sessionLine : null),
+  term: null,
 });
 vm.runInContext(source.slice(source.indexOf('async function copyToBrowserClipboard('), source.indexOf('async function deleteHostClipboard(')), ctx);
 
@@ -42,6 +55,34 @@ const flush = () => new Promise((r) => setImmediate(r));
   assert.equal(osc('c;' + b64('replayed')), true, 'the sequence is consumed either way');
   await flush();
   assert.deepEqual(written, [], 'no copy without input from this terminal');
+
+  // xterm answering a query (DA1, DSR) or reporting focus/motion right before
+  // the OSC 52 -- a replay or a watching viewer -- is not the person's input.
+  for (const report of ['\x1b[?1;2c', '\x1b[1;1R', '\x1b[I', '\x1b[<35;1;1M']) term.emit(report);
+  osc('c;' + b64('replayed after a query'));
+  await flush();
+  assert.deepEqual(written, [], 'terminal-generated onData does not open the gate');
+  assert.deepEqual(notices, [], 'and raises no notice either');
+
+  // The session line counts for the terminal on screen, and only for it.
+  sessionLine.fire('keydown');
+  osc('c;' + b64('from the session line, parked'));
+  await flush();
+  assert.deepEqual(written, [], 'a parked terminal is not opened by the session line');
+  ctx.term = term;
+  osc('c;' + b64('/copy via the session line'));
+  await flush();
+  assert.deepEqual(written, ['/copy via the session line']);
+  ctx.term = null;
+  now += vm.runInContext('OSC52_INPUT_MS', ctx) + 1;
+  written.length = 0;
+
+  // A press on the terminal (mouse selection copy) opens it.
+  term.element.fire('pointerdown');
+  osc('c;' + b64('selected'));
+  await flush();
+  assert.deepEqual(written, ['selected']);
+  written.length = 0;
 
   // A keystroke, then the program's copy: UTF-8 text lands as written.
   term.type('\r');
