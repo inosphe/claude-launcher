@@ -147,7 +147,9 @@ def test_shared_import_builds_board_mesh_and_agents():
     assert "stack 서브 런" in sp["worker-lead2"][1]["task"]
     ue1 = sp["worker-ue1"][1]
     assert ue1["subroles"] == ["shader"] and ue1["issue"] == w1["id"]
-    assert ue1["task"].startswith("너는 셰이더")  # prompt before the assignment
+    # The prompt is the subrole's stance, handed over by the join briefing
+    # (claunch-bwukr) — not repeated in the opening task.
+    assert "너는 셰이더" not in ue1["task"]
     assert ue1["worktree"] == "spec-night-sense-ue1"
     assert ue1["workspace"] == "shelter-zero"
     rv = sp["reviewer-1"][1]

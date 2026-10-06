@@ -500,11 +500,12 @@ class Importer:
         return body
 
     def task(self, act: dict) -> str:
-        """The opening task: subrole prompts first, then the assignment."""
+        """The opening task: the assignment. A subrole's prompt is not
+        repeated here: it is that role's stance, which the join briefing
+        hands over with its text id (``MeshManager._stance_lines``,
+        claunch-bwukr)."""
         doc, mesh = self.doc, act["mesh"]
         parts: List[str] = []
-        for sr in act.get("subroles") or []:
-            parts.append(str(doc["subroles"][sr]["prompt"]).strip())
         head = (f"work spec {doc['name']}"
                 + (f" — {doc['title']}" if doc.get("title") else "")
                 + f". 메시 {mesh}.")
