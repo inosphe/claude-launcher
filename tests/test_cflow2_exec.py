@@ -415,8 +415,11 @@ def test_shutdown_kill_requeues_without_retry(tmp_path):
     out = {}
     t = threading.Thread(target=lambda: out.update(f.run(procs=procs, key=key)))
     t.start()
+    # Kill only once the first attempt is running its script: registered in
+    # ``procs`` is not enough -- under load the interpreter may not have
+    # written ``n`` yet, and "no second attempt" needs a first one to count.
     deadline = time.monotonic() + 10
-    while not procs.keys() and time.monotonic() < deadline:
+    while not (procs.keys() and (f.dir / "n").is_file()) and time.monotonic() < deadline:
         time.sleep(0.05)
     procs.kill_all()
     t.join(15)
