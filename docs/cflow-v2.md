@@ -949,8 +949,8 @@ nodes:
   trigger에서만 쓴다(다른 자리는 검사 오류 `parent-outside-trigger`).
 - `when`(push trigger, claunch-yq80p.9): 엔진이 trigger를 기록하는 순간 런의 환경으로
   평가하는 식이다(at leave면 `$outcome`도 읽는다. `$facts`·`$each`는 없다). 거짓이면
-  기록하지 않는다. 평가가 오류면 기록하지 않고 `trigger_skipped`(사유 `when (…): …`)를
-  저널에 남긴다. 입력에 따라 대상을 가르는 데 쓴다:
+  기록하지 않고 `trigger_not_queued`(사유 `when (…) is false`)를 저널에 남긴다. 평가가
+  오류면 기록하지 않고 `trigger_skipped`(사유 `when (…): …`)를 남긴다. 입력에 따라 대상을 가르는 데 쓴다:
 
   ```yaml
   triggers:
@@ -2162,11 +2162,18 @@ v2 워커의 착지 요청은 기본으로 pull request를 거친다. 로컬 착
 - 기준 이동 통지: 메인 런의 `rebase`가 회차 브랜치를 다시 썼으면 보고의 `old_tip`에
   옛 tip을 싣고, 엔진이 `signals`에 `rebased`(tip = 새 tip, from = 옛 tip)를 쓴다
   (`old_tip`이 없거나 tip과 같으면 쓰지 않는다). stack 런의 standby는 그 신호로
-  `rebase-notice`를 고를 수 있다. 그 작업이 스택 브랜치를 마지막 컷 tip(없으면 옛 회차
-  tip) 뒤부터 `--rebase-merges --onto <새 회차 tip>`으로 옮기고, stacked 자식에게
-  `git rebase --onto <부모>-stack <옛 스택 tip>`을 한 번의 batch로 알린다. 그 신호가
-  새 것인 동안 `cut`은 막힌다. 착지 뒤 `restack`은 스택을 master 위로 옮기므로 그 전의
-  `rebased`도 소비한다. 충돌·원격 거절은 `restack-conflict`(ask-user)로 간다.
+  `rebase-notice`를 고를 수 있다. 그 작업이 스택 브랜치를 「스택 기준점」 뒤부터
+  `--rebase-merges --onto <새 회차 tip>`으로 옮기고, stacked 자식에게
+  `git rebase --onto <부모>-stack <옛 스택 tip>`을 한 번의 batch로 알린다(앞선 통지를
+  적용하지 않은 자식은 가장 오래된 통지의 옛 tip을 쓴다). 그 신호가 새 것인 동안
+  `cut`은 막힌다. 착지 뒤 `restack`은 스택을 master 위로 옮기므로 그 전의 `rebased`도
+  소비한다. 충돌·원격 거절은 `restack-conflict`(ask-user)로 가고, resolved면 사람이
+  옮긴 기준을 `stack-based`가 기록한 뒤 같은 신호들을 소비한다.
+- 스택 기준점: stack 런 자기 `signals`에서 이름이 `cut` 또는 `based`인 마지막 레코드의
+  tip이다. `open`(입력 base), `cut`(컷 tip), `rebase-notice`·`restack`(옮긴 대상 tip,
+  보고의 `onto`), `stack-based`가 쓴다. `restack`과 `rebase-notice`의 upstream이 이
+  값이다. 마지막 컷 tip을 그대로 쓰면 스택을 한 번 옮긴 뒤 그 컷 tip이 스택 브랜치의
+  조상이 아니어서 옮긴 커밋을 다시 적용한다(claunch-yq80p.9 리뷰 B1·B2).
 
 ### stacked PR (stack-v2, claunch-yq80p.2)
 

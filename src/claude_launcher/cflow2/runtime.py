@@ -5665,7 +5665,8 @@ def _queue_triggers(r: "Run", iid: str, node: ir.Node, at: str,
                     outcome: Optional[str] = None) -> None:
     """Record the node's triggers for ``at`` (``trigger_queued``); the daemon
     clock claims and performs them (doc 2.8). Every pass records again. A
-    trigger whose ``when`` is false now is not recorded; one whose ``when``
+    trigger whose ``when`` is false now is not recorded (``trigger_not_queued``
+    says so); one whose ``when``
     cannot be evaluated is not recorded either (``trigger_skipped`` says why
     -- a trigger never holds the run)."""
     for raw in node.get("triggers") or []:
@@ -5682,6 +5683,8 @@ def _queue_triggers(r: "Run", iid: str, node: ir.Node, at: str,
                        instance=iid, at=at, do=do, reason=f"when ({when}): {exc}")
                 continue
             if not ok:
+                r.emit("trigger_not_queued", node=node.id, label=node.label or None,
+                       instance=iid, at=at, do=do, reason=f"when ({when}) is false")
                 continue
         r.state["trigger_seq"] = int(r.state.get("trigger_seq") or 0) + 1
         tid = f"t{r.state['trigger_seq']}"

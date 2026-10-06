@@ -170,8 +170,8 @@ def v1_landing_holders(parent: str) -> List[Tuple[str, Optional[str]]]:
     return out
 
 
-def both_warning(parent: str, name: str) -> str:
-    return (f"parent {parent!r} holds {name!r} twice: a v1 run declaring "
+def both_warning(parent: str, name: str, role: str = "parent") -> str:
+    return (f"{role} {parent!r} holds {name!r} twice: a v1 run declaring "
             f"'landing_queue:' and a v2 run declaring the '{name}' collection; "
             "the target is ambiguous, nothing was pushed")
 
@@ -401,7 +401,7 @@ def _push_one(owner: str, role: str, v2: List[Tuple[str, str]],
     two holders, or a v1 and a v2 one, is a skip."""
     v2 = sorted(set(v2))
     if v2 and v1:
-        msg = both_warning(owner, name)
+        msg = both_warning(owner, name, role)
         log.warning("cflow2 trigger push from %s: %s", session, msg)
         return False, msg
     if len(v2) + len(v1) > 1:

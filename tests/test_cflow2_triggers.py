@@ -741,3 +741,6 @@ body: {seq: [req, after]}
         # a when that cannot be evaluated is not recorded and says why
         [skip] = _events(cwd, "w1", "trigger_skipped")
         assert "when" in skip["reason"]
+        # the false one is in the journal too (review N5)
+        [dropped] = _events(cwd, "w1", "trigger_not_queued")
+        assert "is false" in dropped["reason"]

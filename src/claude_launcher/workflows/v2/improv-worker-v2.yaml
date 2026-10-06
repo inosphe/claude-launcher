@@ -1973,8 +1973,9 @@ nodes:
   landing-nudge:
     title: 착지 재촉
     prompt: |
-      상위 세션의 답이 아직 없다. 재촉 한 줄을 보낸다. 이 스텝에서
-      하지 않는 것부터 적는다.
+      상위 세션의 답이 아직 없다. 재촉 한 줄을 보낸다(받는 쪽은 착지 요청을
+      받은 세션이다 — relation=${data.inputs.relation}: stacked면 부모, independent면
+      리더). 이 스텝에서 하지 않는 것부터 적는다.
 
       · 브랜치를 건드리지 않는다. 동결은 그대로다 — 커밋도, rebase도,
         force push도 없다. 재촉은 상태를 바꾸는 행동이 아니다.
@@ -2897,7 +2898,9 @@ procedures:
             런(slot `<세션>+stack`)이 없거나 끝났다는 뜻이다 — 그 상태에서는 기다려도
             컷이 오지 않는다(flow_status의 sides.stack). timeout은 stack 런이 서 있지만
             4시간 동안 컷이 없었다는 뜻이다(stack 런의 standby가 cut을 고르지 못하는
-            이유 — 착지를 요청한 자식이 남았는가 — 를 본다). 스택 브랜치(`<세션>-stack`)의
+            이유 — 착지를 요청한 자식이 남았는가, 기준 이동(rebased)이 처리되지 않아
+            cut이 막혀 있는가(stack 런이 rebase-notice를 멈췄거나 skip했다) — 를 본다).
+            스택 브랜치(`<세션>-stack`)의
             tip과 자식 브랜치들의 머지 여부를 git에서 보고 선택지별 위험과 결과를 채운다.
             confirmed 뒤에 stack 런의 컷이 늦게 오면 그 컷은 이번 요청의 답이고, 다음
             회차의 stack-cut이 새 요청 전에 그것을 소비한다(다음 회차의 cut-wait를
@@ -3024,7 +3027,8 @@ procedures:
             3. 통합 대상 위로 미리 병합이 깨끗하다 —
                `git merge-tree $(git merge-base <대상> HEAD) <대상> HEAD` 에
                충돌 표시 0행(대상은 intake에서 정한 통합 대상: master, 또는
-               부모가 스택을 둔 워커면 그 스택 브랜치)
+               relation이 stacked이고 부모가 스택을 둔 워커면 그 스택 브랜치.
+               independent면 언제나 master)
             4. 내 이슈에 열린 제동 마커가 없다 — `claunch beads comments <id>`
                에 CHANGES REQUESTED / HOLD / BLOCKED 중 해소되지 않은 것이 없다
                (배치 회차면 실린 이슈마다 본다 — 하나라도 있으면 escalate)

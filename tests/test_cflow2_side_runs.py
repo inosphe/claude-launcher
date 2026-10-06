@@ -138,10 +138,10 @@ def _avail(tmp_path, scope):
     return out
 
 
-def _select(tmp_path, scope, option):
+def _select(tmp_path, scope, option, reason=None):
     st = _status(tmp_path, scope)
     node = st["choices"][0]["instance"]
-    return runtime.select(node, option, cwd=_cwd(tmp_path), scope=scope, now=T0)
+    return runtime.select(node, option, reason, cwd=_cwd(tmp_path), scope=scope, now=T0)
 
 
 # -- scopes -------------------------------------------------------------------
@@ -717,4 +717,88 @@ def test_relation_wiring():
                                        "not fresh('main:signals', 'landed')")
     assert "not fresh('main:signals', 'rebased')" in guards["cut"]
     restack = next(n for n in stack.nodes.values() if n.label == "restack" and n.get("prompt"))
-    assert [d.get("name") for d in restack.get("do")] == ["landed", "rebased"]
+    assert [d.get("name") for d in restack.get("do") if d.get("op") == "consume"] == \
+        ["landed", "rebased"]
+
+
+STACK_MAIN = """
+cflow: 2
+name: m
+sides: {stack: stack-v2}
+collections:
+  signals: {kind: log, item: {name: str, tip: "str?", from: "str?"}, lifecycle: {inherit: true}}
+nodes:
+  begin: {prompt: B}
+  rb:
+    prompt: R
+    returns: {ok: {tip: str, old_tip: "str?"}}
+    do:
+      - push: {to: signals, item: {name: "'rebased'", tip: "$result.rb.value.tip",
+                                   from: "$result.rb.value.old_tip"}}
+        when: "$outcome == 'ok' and side('stack').live and $result.rb.value.old_tip != null"
+  ld:
+    prompt: L
+    do:
+      - push: {to: signals, item: {name: "'landed'"}}
+  cw:
+    prompt: C
+    do:
+      - push: {to: signals, item: {name: "'cut-wanted'"}}
+  fin: {prompt: F}
+body: [begin, rb, ld, cw, fin]
+"""
+
+
+def _stack_rep(tmp_path, label, outcome="ok", value=None, scope="w1+stack"):
+    st = _status(tmp_path, scope)
+    return runtime.report(_task(st, label), outcome, value, cwd=_cwd(tmp_path),
+                          scope=scope, now=T0)
+
+
+def _based(tmp_path):
+    items = RunStore(_cwd(tmp_path), "w1+stack").load_state()["collections"]["signals"]["items"]
+    return [(i["name"], i.get("tip")) for i in items]
+
+
+def test_stack_base_point_and_a_resolved_restack_conflict(tmp_path):
+    # claunch-yq80p.9 review B1-B3, on the packaged stack-v2: every move
+    # records the stack's base point; a person's 'resolved' records it too
+    # and clears the pre-landing rebased signal, so cut is not blocked
+    _start_main(tmp_path, STACK_MAIN)
+    runtime.start_side("stack", cwd=_cwd(tmp_path), main="w1", caps={}, now=T0,
+                       inputs={"issue": "x-1", "base": "b0"})
+    _report(tmp_path, "w1", "begin")
+    _stack_rep(tmp_path, "open", value={"branch": "w1-stack", "worktree": "/w", "tip": "b0",
+                                       "children": []})
+    assert _based(tmp_path) == [("based", "b0")]
+    # the round branch was rewritten: the stack moves onto the new round tip
+    _report(tmp_path, "w1", "rb", {"tip": "t1", "old_tip": "t0"})
+    assert _avail(tmp_path, "w1+stack")["rebase-notice"] is True
+    _select(tmp_path, "w1+stack", "rebase-notice", "r")
+    _stack_rep(tmp_path, "rebase-notice", value={"old_tip": "s0", "tip": "s1", "told": [],
+                                                "onto": "t1"})
+    assert _based(tmp_path)[-1] == ("based", "t1")
+    # rewritten again before landing (left fresh), then the round lands
+    _report(tmp_path, "w1", "ld")
+    st = _status(tmp_path, "w1")
+    assert [t["label"] for t in st["tasks"]] == ["cw"]
+    # a second rebased that the side has not handled
+    runtime.collection_op("push", "signals", cwd=_cwd(tmp_path), scope="w1",
+                          principal="driver", session="w1",
+                          item={"name": "rebased", "tip": "t2", "from": "t1"})
+    avail = _avail(tmp_path, "w1+stack")
+    assert avail["restack"] is True and avail["rebase-notice"] is False
+    _select(tmp_path, "w1+stack", "restack", "r")
+    _stack_rep(tmp_path, "restack", "conflict", {"at": "remote moved: abc"})
+    _stack_rep(tmp_path, "ask-frame", value={"brief": {"problem": "p", "options": [
+        {"name": "resolved", "summary": "s", "risk": "r", "outcome": "o",
+         "reversibility": "reversible"},
+        {"name": "skip", "summary": "s", "risk": "r", "outcome": "o",
+         "reversibility": "reversible"}], "recommendation": "resolved", "why": "w"}})
+    runtime.approve(None, decision="resolved", reason="fixed by hand",
+                    cwd=_cwd(tmp_path), scope="w1+stack", now=T0)
+    _stack_rep(tmp_path, "stack-based", value={"onto": "m9"})
+    assert _based(tmp_path)[-1] == ("based", "m9")
+    _report(tmp_path, "w1", "cw")
+    avail = _avail(tmp_path, "w1+stack")
+    assert avail["cut"] is True and avail["rebase-notice"] is False
