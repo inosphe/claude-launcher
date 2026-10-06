@@ -143,7 +143,9 @@ TOOLS = [
             "'value', or with 'receipt_path' (a JSON file {outcome, value} the "
             "sub-agent wrote). The engine validates it against 'returns': the "
             "first invalid result is refused with the problems (re-run once with "
-            "them), the second fails the node."
+            "them), the second fails the node. A child session spawned for a "
+            "'session' delegation calls this with the 'scope' and 'cwd' of its "
+            "parent's run."
         ),
         "inputSchema": {
             "type": "object",
@@ -152,7 +154,18 @@ TOOLS = [
                 "outcome": {"type": "string"},
                 "value": {"type": "object"},
                 "receipt_path": {"type": "string"},
-                "scope": _SCOPE,
+                "scope": {
+                    "type": "string",
+                    "description": "run slot (session name). Omit for this session's run; "
+                    "a child session running a 'session' delegation passes its parent's "
+                    "name, as its opening task says",
+                },
+                "cwd": {
+                    "type": "string",
+                    "description": "directory the run lives in. Omit for this session's "
+                    "directory; a 'session' delegation's child passes the one its opening "
+                    "task names",
+                },
             },
         },
     },
@@ -224,6 +237,10 @@ def call_tool(name: str, args: dict) -> Dict[str, Any]:
         return runtime.fork(str(args.get("group") or "").strip() or None,
                             args.get("with"), cwd=cwd, scope=scope)
     if name == "flow_delegate":
+        # A 'session' delegation is submitted by a child session that stands
+        # in its own directory (often its own worktree) under its own name:
+        # it names the run's slot explicitly.
+        cwd = str(args.get("cwd") or "").strip() or cwd
         did = str(args.get("delegation") or "").strip() or None
         submitting = any(args.get(k) is not None for k in ("outcome", "value", "receipt_path"))
         if not submitting:

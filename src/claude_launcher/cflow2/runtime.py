@@ -1061,10 +1061,11 @@ def _delegate(r: Run, iid: str) -> bool:
                    cause=part.capability or "; ".join(part.degraded),
                    route=part.route, decision=part_name, detail=list(part.degraded))
     executor = plan.route
-    if executor in executors.DISPATCHED and not executors.registered():
+    if executor in executors.DISPATCHED and not executors.available(str(r.store.cwd)):
         nxt = executors.InlineFallback.next_executor(node, executor, caps)
         r.emit("fallback", node=node.id, instance=iid,
-               cause=f"no {executor} dispatcher registered (daemon not attached)",
+               cause=f"no {executor} dispatcher available (no daemon clock watching "
+                     f"this directory)",
                route=f"{executor} -> {nxt}", decision="executor")
         executor = nxt
         if executor != plan.route:
@@ -1078,7 +1079,7 @@ def _delegate(r: Run, iid: str) -> bool:
         "id": did, "instance": iid, "node": node.id, "label": node.label or None,
         "executor": executor, "status": "pending" if executor == ir.EXEC_SUBAGENT else "queued",
         "route": plan.to_dict(), "receipt": None, "started": store_mod.utcnow(),
-        "finished": None, "attempts": 0, "errors": [],
+        "started_at": r.now, "finished": None, "attempts": 0, "errors": [],
         "returns": returns_of(node),
     }
     dels[did] = rec
@@ -1392,21 +1393,12 @@ def delegate_submit(delegation: str, outcome: Optional[str] = None, value: Any =
         errors = validate_result(rec.get("returns") or {ir.OUTCOME_OK: {}}, res_outcome, res_value)
         iid = rec["instance"]
         if errors:
-            rec["errors"].append(errors)
-            if rec["attempts"] < 2:
-                r.emit("delegate_failed", delegation=delegation, node=rec["node"],
-                       errors=errors, retry=True)
+            if _reject(r, rec, errors):
                 r.deferred_error = (
                     f"delegation {delegation} result refused: {'; '.join(errors)}. Re-run the "
                     f"delegate once with these problems and submit again; a second invalid "
                     f"result fails the node. Declared returns: {json.dumps(rec.get('returns'))}"
                 )
-                return
-            rec["status"] = "failed"
-            rec["finished"] = store_mod.utcnow()
-            r.emit("delegate_failed", delegation=delegation, node=rec["node"], errors=errors)
-            _complete(r, iid, ir.OUTCOME_FAIL, {"reason": "delegate result invalid twice",
-                                                "errors": errors})
             return
         receipt = r.store.write_receipt(delegation, {
             "delegation": delegation, "node": rec["node"], "outcome": res_outcome,
@@ -1419,6 +1411,157 @@ def delegate_submit(delegation: str, outcome: Optional[str] = None, value: Any =
         _complete(r, iid, res_outcome, res_value)
     _mutate(cwd, scope, now, op)
     return status(cwd=cwd, scope=scope, now=now, tick=False)
+
+
+OPEN_DELEGATION = ("pending", "queued", "running")
+
+
+def _reject(r: Run, rec: Dict[str, Any], errors: List[str]) -> bool:
+    """Record an invalid attempt (``rec['attempts']`` already counts it).
+
+    The first one is refused for a re-run (True); the second fails the
+    delegation and the node finishes ``fail`` (False)."""
+    did = rec["id"]
+    rec.setdefault("errors", []).append(errors)
+    if int(rec.get("attempts") or 0) < 2:
+        r.emit("delegate_failed", delegation=did, node=rec["node"], errors=errors, retry=True)
+        return True
+    rec["status"] = "failed"
+    rec["finished"] = store_mod.utcnow()
+    r.emit("delegate_failed", delegation=did, node=rec["node"], errors=errors)
+    _complete(r, rec["instance"], ir.OUTCOME_FAIL, {"reason": "delegate result invalid twice",
+                                                    "errors": errors})
+    return False
+
+
+def _open_delegation(r: Run, delegation: str) -> Dict[str, Any]:
+    dels = r.state.get("delegations", {})
+    rec = dels.get(delegation)
+    if rec is None:
+        raise FlowError(f"no delegation {delegation!r} (known: {', '.join(dels) or 'none'})")
+    if rec["status"] not in OPEN_DELEGATION:
+        raise FlowError(f"delegation {delegation} is {rec['status']}; nothing to do")
+    return rec
+
+
+def delegate_reject(delegation: str, errors: List[str], *, cwd: Optional[str] = None,
+                    scope: Optional[str] = None, now: Optional[float] = None) -> bool:
+    """An executor's attempt produced no valid result (nothing extractable, or
+    a value that fails ``returns``). Counted exactly like an invalid
+    :func:`delegate_submit`: True means "re-run once with these errors",
+    False means the delegation failed and the node finished ``fail``."""
+    out: Dict[str, bool] = {}
+
+    def op(r: Run) -> None:
+        _require_live(r)
+        rec = _open_delegation(r, delegation)
+        rec["attempts"] = int(rec.get("attempts") or 0) + 1
+        out["retry"] = _reject(r, rec, list(errors) or ["no result"])
+    _mutate(cwd, scope, now, op)
+    return out.get("retry", False)
+
+
+def delegate_fail(delegation: str, reason: str, *, outcome: str = ir.OUTCOME_FAIL,
+                  detail: Optional[Dict[str, Any]] = None, cwd: Optional[str] = None,
+                  scope: Optional[str] = None, now: Optional[float] = None) -> Dict[str, Any]:
+    """End an open delegation without a result: ``timeout`` (budget.seconds
+    ran out) or ``fail`` (the executor is gone). Journaled as
+    ``delegate_failed`` with the reason; the node finishes with ``outcome``."""
+    def op(r: Run) -> None:
+        _require_live(r)
+        rec = _open_delegation(r, delegation)
+        rec["status"] = "timeout" if outcome == ir.OUTCOME_TIMEOUT else "failed"
+        rec["finished"] = store_mod.utcnow()
+        rec.setdefault("errors", []).append([reason])
+        r.emit("delegate_failed", delegation=delegation, node=rec["node"], reason=reason,
+               outcome=outcome)
+        value = {"reason": reason}
+        value.update(detail or {})
+        _complete(r, rec["instance"], outcome, value)
+    _mutate(cwd, scope, now, op)
+    return status(cwd=cwd, scope=scope, now=now, tick=False)
+
+
+def delegate_update(delegation: str, *, expect: Optional[Tuple[str, ...]] = None,
+                    event: Optional[Dict[str, Any]] = None, cwd: Optional[str] = None,
+                    scope: Optional[str] = None, now: Optional[float] = None,
+                    **fields: Any) -> bool:
+    """Set fields on an open delegation record (an executor claiming it,
+    the child session it runs in). With ``expect`` this is a compare-and-set
+    on the status: False (nothing written) when the record moved on."""
+    out = {"ok": False}
+
+    def op(r: Run) -> None:
+        if r.status not in LIVE_STATUSES:
+            return
+        rec = r.state.get("delegations", {}).get(delegation)
+        if rec is None or rec["status"] not in OPEN_DELEGATION:
+            return
+        if expect is not None and rec["status"] not in expect:
+            return
+        rec.update(fields)
+        if event:
+            ev = dict(event)
+            r.emit(ev.pop("event"), delegation=delegation, node=rec["node"], **ev)
+        out["ok"] = True
+    _mutate(cwd, scope, now, op)
+    return out["ok"]
+
+
+def delegate_reroute(delegation: str, cause: str, *, cwd: Optional[str] = None,
+                     scope: Optional[str] = None, now: Optional[float] = None) -> str:
+    """The executor a delegation got cannot run it after all (spawn policy
+    refused a session, no owning session to take a profile from): move it to
+    the next executor of the node's preference list whose capabilities hold,
+    journaled as ``fallback``. ``inline`` expands the subtree in place.
+    Returns the new executor."""
+    out = {"executor": ir.EXEC_INLINE}
+
+    def op(r: Run) -> None:
+        _require_live(r)
+        rec = _open_delegation(r, delegation)
+        node = r.chart.node(rec["node"])
+        prefs = list(node.executor or [])
+        old = rec["executor"]
+        rest = prefs[prefs.index(old) + 1:] if old in prefs else []
+        nxt = ir.EXEC_INLINE
+        if caps_mod is not None:
+            nxt = caps_mod.choose_executor(rest, r.caps, needs=node.needs or []).executor
+        if nxt in executors.DISPATCHED and not executors.available(str(r.store.cwd)):
+            nxt = executors.InlineFallback.next_executor(node, nxt, r.caps)
+        out["executor"] = nxt
+        iid = rec["instance"]
+        r.emit("fallback", node=node.id, instance=iid, delegation=delegation, cause=cause,
+               route=f"{old} -> {nxt}", decision="executor")
+        if nxt == ir.EXEC_INLINE:
+            rec["status"] = "rerouted"
+            rec["finished"] = store_mod.utcnow()
+            r.inst[iid]["await"] = None
+            r.inst[iid]["frame"].pop("delegation", None)
+            _ENTER[node.type](r, iid, node)
+            return
+        plan = caps_mod.plan_node(_with_executor(node, nxt), r.caps)
+        rec.update({"executor": nxt, "route": plan.to_dict(), "started_at": r.now,
+                    "status": "pending" if nxt == ir.EXEC_SUBAGENT else "queued",
+                    "child": None, "runner": None})
+        r.emit("delegate_started", node=node.id, instance=iid, delegation=delegation,
+               executor=nxt, route=nxt, rerouted_from=old)
+        if nxt in executors.DISPATCHED:
+            executors.dispatch(rec, r)
+    _mutate(cwd, scope, now, op)
+    return out["executor"]
+
+
+def note(event: str, *, cwd: Optional[str] = None, scope: Optional[str] = None,
+         **fields: Any) -> None:
+    """Append one journal event to a run (an executor's own observation:
+    a ``fallback`` taken while extracting a result, a ``monitor_violation``
+    found by a porcelain check). Taken under the run lock like any write."""
+    st = RunStore(cwd, scope)
+    rec = {"ts": store_mod.utcnow(), "event": event}
+    rec.update({k: v for k, v in fields.items() if v is not None})
+    with st.lock():
+        st.append([rec])
 
 
 def delegate_brief(delegation: Optional[str] = None, *, cwd: Optional[str] = None,
@@ -1451,6 +1594,8 @@ def extend_loop(node: Optional[str] = None, by: int = 1, *, stop: bool = False,
         if not r.state["approvals"] and r.state["status"] == ST_WAITING:
             r.state["status"] = ST_RUNNING
             r.state["reason"] = None
+        elif r.state["approvals"] and r.state["status"] == ST_WAITING:
+            r.state["reason"] = r.state["approvals"][0].get("kind")
         if stop:
             r.emit("selected", node=n.id, instance=iid, option="stop", kind="loop_limit")
             _complete(r, iid, ir.OUTCOME_FAIL, {"reason": "loop_limit", "iterations": frame["iter"]})
@@ -1521,8 +1666,30 @@ def _probe_ok(result: Any) -> Tuple[bool, Any]:
     return bool(result), None
 
 
-def _tick_time(r: Run, probe_runner: Optional[ProbeRunner] = None) -> int:
-    """Fire everything due at ``r.now``; returns how many things moved."""
+def _probe_due(r: Run, iid: str) -> bool:
+    inst = r.inst[iid]
+    node = r.chart.node(inst["node"])
+    if inst.get("await") != AW_WAIT or not node.get("probe"):
+        return False
+    poll = float(node.get("poll") or DEFAULT_POLL)
+    last = inst["frame"].get("last_poll")
+    return last is None or r.now - last >= poll
+
+
+def _due_probes(r: Run) -> Dict[str, Any]:
+    """``{instance: probe}`` for every wait whose probe is due at ``r.now``."""
+    if r.status not in LIVE_STATUSES:
+        return {}
+    return {iid: r.node_of(iid).get("probe") for iid in r.inst if _probe_due(r, iid)}
+
+
+def _tick_time(r: Run, probe_runner: Optional[ProbeRunner] = None,
+               probe_results: Optional[Dict[str, Any]] = None) -> int:
+    """Fire everything due at ``r.now``; returns how many things moved.
+
+    Probes come either from ``probe_results`` (``{instance: result}``, run
+    by the caller before it took the lock -- :func:`wait_tick`) or, when only
+    ``probe_runner`` is given, are run here."""
     moved = 0
     for _ in range(1000):
         fired = False
@@ -1548,12 +1715,14 @@ def _tick_time(r: Run, probe_runner: Optional[ProbeRunner] = None) -> int:
                     _complete(r, iid, ir.OUTCOME_OK, {"waited": node.get("seconds")})
                     fired = True
                     break
-                if node.get("probe") and probe_runner is not None:
-                    poll = float(node.get("poll") or DEFAULT_POLL)
-                    last = frame.get("last_poll")
-                    if last is None or r.now - last >= poll:
+                have = probe_results is not None and iid in probe_results
+                if node.get("probe") and (have or (probe_runner is not None
+                                                   and probe_results is None)):
+                    if _probe_due(r, iid):
                         frame["last_poll"] = r.now
-                        ok, output = _probe_ok(probe_runner(node.get("probe"), str(r.store.cwd)))
+                        result = probe_results.pop(iid) if have else \
+                            probe_runner(node.get("probe"), str(r.store.cwd))
+                        ok, output = _probe_ok(result)
                         frame["polls"] = int(frame.get("polls") or 0) + 1
                         if ok:
                             _complete(r, iid, ir.OUTCOME_OK, {"output": output})
@@ -1576,16 +1745,224 @@ def wait_tick(now: Optional[float] = None, probe_runner: Optional[ProbeRunner] =
 
     ``probe_runner(probe, cwd)`` runs a wait's probe (``(exit, output)``,
     bool, or ``{ok, output}``); without one only time-based waits fire.
+
+    Probes are commands that can take a while, so they never run under the
+    run lock (the agent's next report would wait on them): the due ones are
+    read off an unlocked snapshot and run first, then the lock is taken and
+    their results applied to waits that are still there and still due. A
+    wait the tick itself enters gets its probe on a following round (at most
+    three per call).
     """
-    def op(r: Run) -> int:
-        if r.status not in LIVE_STATUSES:
-            return 0
-        return _tick_time(r, probe_runner)
-    moved = _mutate(cwd, scope, now, op)
+    st = RunStore(cwd, scope)
+    moved = 0
+    for _round in range(3):
+        results: Optional[Dict[str, Any]] = None
+        if probe_runner is not None:
+            snap = Run.load(st, now)
+            due = _due_probes(snap)
+            results = {iid: probe_runner(probe, str(snap.store.cwd))
+                       for iid, probe in due.items()}
+
+        def op(r: Run) -> int:
+            if r.status not in LIVE_STATUSES:
+                return 0
+            return _tick_time(r, None, results if results is not None else {})
+        moved += _mutate(cwd, scope, now, op)
+        if probe_runner is None:
+            break
+        if not _due_probes(Run.load(st, now)):
+            break
     payload = status(cwd=cwd, scope=scope, now=now, tick=False)
     payload["ticked"] = moved
     return payload
 
+
+# -- spec.monitors -------------------------------------------------------------
+
+#: How often an ``always`` monitor without ``every`` is evaluated.
+DEFAULT_MONITOR_EVERY = 300.0
+MON_HALT = "halt"
+MON_NOTIFY = "notify"
+MON_RECORD = "record"
+
+
+def _monitors(r: Run) -> Dict[str, Dict[str, Any]]:
+    mons = (r.chart.spec or {}).get("monitors") or {}
+    return {str(k): dict(v or {}) for k, v in mons.items()}
+
+
+def _monitor_probes(body: Dict[str, Any], name: str) -> Dict[str, Any]:
+    probe = body.get("probe")
+    if probe is None:
+        return {}
+    if isinstance(probe, dict):
+        return {str(k): v for k, v in probe.items()}
+    return {name: probe}
+
+
+def _always_due(r: Run, name: str, body: Dict[str, Any]) -> bool:
+    if "always" not in body:
+        return False
+    last = ((r.state.get("monitors") or {}).get(name) or {}).get("last")
+    every = float(body.get("every") or DEFAULT_MONITOR_EVERY)
+    return last is None or r.now - float(last) >= every
+
+
+def _ts_epoch(ts: Any) -> Optional[float]:
+    from datetime import datetime
+
+    if isinstance(ts, (int, float)):
+        return float(ts)
+    try:
+        return datetime.fromisoformat(str(ts)).timestamp()
+    except (TypeError, ValueError):
+        return None
+
+
+def _ev_matches(r: Run, ev: Dict[str, Any], spec: Dict[str, Any]) -> bool:
+    """``spec`` is ``{event: target | [targets]}``; a target is a node id or
+    label (``*`` any node)."""
+    for kind, targets in (spec or {}).items():
+        if ev.get("event") != kind:
+            continue
+        if targets is None:
+            return True
+        targets = targets if isinstance(targets, list) else [targets]
+        names = {ev.get("node"), ev.get("label"), ev.get("instance")}
+        node_id = ev.get("node")
+        if node_id and node_id in r.chart.nodes:
+            names.add(r.chart.node(node_id).label)
+        if "*" in targets or names & {str(t) for t in targets}:
+            return True
+    return False
+
+
+def _violate(r: Run, name: str, body: Dict[str, Any], kind: str,
+             found: List[Dict[str, Any]], **detail: Any) -> None:
+    action = str(body.get("on_violation") or MON_RECORD)
+    r.emit("monitor_violation", kind=kind, monitor=name, action=action, **detail)
+    if action == MON_HALT and r.status == ST_RUNNING:
+        r.state["status"] = ST_WAITING
+        r.state["reason"] = "monitor_violation"
+    if action == MON_HALT:
+        approvals = r.state.setdefault("approvals", [])
+        if not any(a.get("monitor") == name for a in approvals):
+            approvals.append({"kind": "monitor_violation", "monitor": name, "instance": None})
+    found.append({"monitor": name, "kind": kind, "action": action, **detail})
+
+
+def monitors_tick(now: Optional[float] = None, probe_runner: Optional[ProbeRunner] = None, *,
+                  cwd: Optional[str] = None, scope: Optional[str] = None,
+                  journal_now: Optional[float] = None) -> List[Dict[str, Any]]:
+    """Evaluate ``spec.monitors`` once (doc 8); returns the violations found
+    now, each with its ``action`` (``halt`` already applied: the run is
+    ``waiting_approval`` with reason ``monitor_violation``; ``notify`` is for
+    the caller to deliver; ``record`` is the journal entry alone).
+
+    ``always``: every ``every`` seconds the monitor's probes run (outside the
+    lock; stdout stripped, ``None`` when the command fails) into ``$probe``
+    and the expression is evaluated. Reported once per violation spell: it
+    is reported again only after it held in between.
+
+    ``within``: each journal event matching ``when`` must be followed within
+    ``within`` seconds by one matching ``expect``; an expired one is a
+    violation, reported once. Journal times are wall-clock, so the deadline
+    is compared against ``journal_now`` (default: the real clock).
+    """
+    st = RunStore(cwd, scope)
+    snap = Run.load(st, now)
+    if snap.status not in LIVE_STATUSES:
+        return []
+    mons = _monitors(snap)
+    if not mons:
+        return []
+    values: Dict[str, Dict[str, Any]] = {}
+    for name, body in mons.items():
+        if not _always_due(snap, name, body):
+            continue
+        vals: Dict[str, Any] = {}
+        for pname, cmd in _monitor_probes(body, name).items():
+            if probe_runner is None:
+                continue
+            ok, output = _probe_ok(probe_runner(cmd, str(st.cwd)))
+            vals[pname] = (str(output).strip() if output is not None else "") if ok else None
+        values[name] = vals
+    wall = time.time() if journal_now is None else float(journal_now)
+    journal_events = st.journal() if any("within" in b for b in mons.values()) else []
+    found: List[Dict[str, Any]] = []
+
+    def op(r: Run) -> None:
+        if r.status not in LIVE_STATUSES:
+            return
+        mstate = r.state.setdefault("monitors", {})
+        for name, body in mons.items():
+            ms = mstate.setdefault(name, {})
+            if "always" in body:
+                if name not in values or not _always_due(r, name, body):
+                    continue
+                r.state.setdefault("probe", {}).update(values[name])
+                ms["last"] = r.now
+                error = None
+                try:
+                    held = expr_mod.truthy(_eval(r, None, body["always"]))
+                except expr_mod.ExprError as exc:
+                    held, error = False, str(exc)
+                was = bool(ms.get("violated"))
+                ms["violated"] = not held
+                if not held and not was:
+                    _violate(r, name, body, "always", found, expr=body["always"],
+                             probe=values[name] or None, error=error)
+                continue
+            within = float(body.get("within") or 0)
+            done = set(ms.get("checked") or [])
+            for i, ev in enumerate(journal_events):
+                if i in done or not _ev_matches(r, ev, body.get("when") or {}):
+                    continue
+                t0 = _ts_epoch(ev.get("ts"))
+                if t0 is None:
+                    done.add(i)
+                    continue
+                answered = any(
+                    _ev_matches(r, later, body.get("expect") or {})
+                    and (_ts_epoch(later.get("ts")) or 0) <= t0 + within
+                    for later in journal_events[i + 1:]
+                )
+                if answered:
+                    done.add(i)
+                elif wall > t0 + within:
+                    done.add(i)
+                    _violate(r, name, body, "within", found, when=body.get("when"),
+                             expect=body.get("expect"), within=within, since=ev.get("ts"))
+            ms["checked"] = sorted(done)
+    _mutate(cwd, scope, now, op)
+    return found
+
+
+def release_halt(monitor: Optional[str] = None, *, cwd: Optional[str] = None,
+                 scope: Optional[str] = None, now: Optional[float] = None) -> Dict[str, Any]:
+    """A person resumes a run a ``halt`` monitor stopped (all of them, or one
+    by name). The monitor keeps watching; a new violation halts again."""
+    def op(r: Run) -> None:
+        _require_live(r)
+        before = list(r.state.get("approvals", []))
+        r.state["approvals"] = [
+            a for a in before if not (a.get("kind") == "monitor_violation"
+                                      and (monitor is None or a.get("monitor") == monitor))
+        ]
+        if len(r.state["approvals"]) == len(before):
+            raise FlowError("no monitor holds this run" if monitor is None
+                            else f"monitor {monitor!r} does not hold this run")
+        r.emit("selected", option="resume", kind="monitor_violation", monitor=monitor)
+        rest = r.state["approvals"]
+        if r.state["status"] == ST_WAITING and r.state.get("reason") == "monitor_violation" \
+                and not any(a.get("kind") == "monitor_violation" for a in rest):
+            if rest:
+                r.state["reason"] = rest[0].get("kind")
+            else:
+                r.state["status"] = ST_RUNNING
+                r.state["reason"] = None
+    _mutate(cwd, scope, now, op)
+    return status(cwd=cwd, scope=scope, now=now, tick=False)
 
 # -- reading -----------------------------------------------------------------
 
@@ -1712,6 +2089,10 @@ def describe(r: Run) -> Dict[str, Any]:
     if any(d.get("status") == "pending" for d in dels):
         hints.append("run each pending delegation's brief in a sub-agent, then "
                      "flow_delegate(delegation, outcome, value)")
+    if any(d.get("status") in ("queued", "running") and d.get("executor") in executors.DISPATCHED
+           for d in dels):
+        hints.append("headless/session delegations are run by the daemon and come back on "
+                     "their own; call flow_status again later")
     if waits:
         hints.append("waits fire on their own; call flow_status again later")
     if limits:

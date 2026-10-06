@@ -18,6 +18,7 @@ from typing import Optional
 from aiohttp import web
 
 from .. import daemon_client, providers, store
+from . import cflow2_clock as cflow2_clock_mod
 from . import cflow_clock, paths, restart_notice, resume, runtime_state, window as window_mod
 from . import instance_manifest, session_reminder
 from .api import build_app, notify_shutdown
@@ -230,6 +231,16 @@ async def _serve(host: str, port: int, cfg: dict, bound: Optional[dict] = None) 
     # -- never re-read off state, which re-sent every dead run at each boot.
     manager.exit_hooks.append(event_clock.session_exited)
     event_clock.start()
+    # cflow v2: waits, monitors, delegation budgets and the headless/session
+    # executors (daemon/cflow2_clock.py). Off by config -> v2 delegations
+    # fall back to the next executor and nothing types into a v2 driver.
+    cflow2_clock = None
+    if cflow2_clock_mod.enabled():
+        cflow2_clock = cflow2_clock_mod.Cflow2Clock(
+            manager, poll=cflow2_clock_mod.poll_from()
+        )
+        cflow2_clock.start()
+    app["cflow2_clock"] = cflow2_clock
     # Published so the dashboard can report what these two are holding. Only
     # the two that type into a driving session on a timer: those are the ones
     # a person watching a terminal has no way to see coming, and the ones
@@ -306,6 +317,8 @@ async def _serve(host: str, port: int, cfg: dict, bound: Optional[dict] = None) 
         await restart_clock.shutdown()
         await trigger_clock.shutdown()
         await event_clock.shutdown()
+        if cflow2_clock is not None:
+            await cflow2_clock.shutdown()
         await ping_clock.shutdown()
         await window_reminder_clock.shutdown()
         await reminder_clock.shutdown()

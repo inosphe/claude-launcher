@@ -324,6 +324,14 @@ def _cmd_extend(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_resume(args: argparse.Namespace) -> int:
+    from .cflow2 import runtime
+
+    payload = runtime.release_halt(args.monitor, cwd=os.getcwd(), scope=args.scope)
+    _print_status(payload, False)
+    return 0
+
+
 def register(sub) -> None:
     p = sub.add_parser(
         "cflow2",
@@ -393,3 +401,8 @@ def register(sub) -> None:
     q.add_argument("--by", type=int, default=1)
     q.add_argument("--stop", action="store_true", help="end the loop with outcome fail")
     q.set_defaults(func=_guarded(_cmd_extend))
+
+    q = scoped(csub.add_parser("resume", help="resume a run a 'halt' monitor stopped "
+                               "(waiting_approval, reason monitor_violation)"))
+    q.add_argument("monitor", nargs="?", help="only this monitor's hold (default: all)")
+    q.set_defaults(func=_guarded(_cmd_resume))
