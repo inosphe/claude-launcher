@@ -475,6 +475,17 @@ TOOLS = [
                         "never wakes up in a conflicted checkout"
                     ),
                 },
+                "branch_from": {
+                    "type": "string",
+                    "description": (
+                        "start a NEW 'worktree' at this branch, commit or "
+                        "other worktree's name (that worktree's checked-out "
+                        "branch, committed work only) instead of the trunk. "
+                        "Refused when the named worktree already exists and "
+                        "together with rebase_onto, which is the field that "
+                        "updates a REUSED one"
+                    ),
+                },
             },
             "required": [],
         },
@@ -1039,7 +1050,7 @@ def _my_handle(members: list) -> str:
 _SPAWN_KEYS = (
     "name", "mesh", "handle", "role", "subroles", "connect", "workflow", "context",
     "task", "issue", "issue_text", "harness", "workspace", "worktree",
-    "rebase_onto", "profile", "borrow", "null_token", "cwd", "args", "env",
+    "rebase_onto", "branch_from", "profile", "borrow", "null_token", "cwd", "args", "env",
     "fork", "tools", "project",
 )
 

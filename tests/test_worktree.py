@@ -949,6 +949,62 @@ def test_a_fresh_worktree_is_cut_from_the_branch_it_is_put_on_and_never_rebased(
     assert old.created is True and not (old.path / "parent-only.txt").exists()
 
 
+def test_branch_from_starts_a_new_worktree_on_another_worktree_or_branch(repo, capsys):
+    """``branch_from`` is the one-meaning spelling of a new checkout's start:
+    another worktree's name starts it on that worktree's branch (committed
+    work only), and a branch or commit is taken as it is."""
+    parent = worktree.resolve(str(repo), "parent")
+    commit(parent.path, "parent-only.txt")
+    (parent.path / "draft.txt").write_text("uncommitted\n", encoding="utf-8")
+    # the worktree is named "parent-wt" but stands on branch "feature", so a
+    # name read as a branch would miss it
+    other = worktree.create(repo, "parent-wt", start="parent")
+    git("switch", "-qc", "feature", cwd=other.path)
+    commit(other.path, "feature-only.txt")
+
+    child = worktree.resolve(str(repo), "child", branch_from="parent-wt")
+    assert child.created is True and child.rebased == ""
+    assert child.branched_from == "parent-wt" and child.branch == "child"
+    assert (child.path / "feature-only.txt").exists()
+    assert (child.path / "parent-only.txt").exists()
+    assert not (child.path / "draft.txt").exists()
+    worktree.announce(child)
+    assert "branched from parent-wt" in capsys.readouterr().err
+
+    by_branch = worktree.resolve(str(repo), "by-branch", branch_from="parent")
+    assert (by_branch.path / "parent-only.txt").exists()
+    assert not (by_branch.path / "feature-only.txt").exists()
+
+    info = worktree.info(str(repo))
+    assert info["worktree_branches"]["parent-wt"] == "feature"
+    assert info["worktree_branches"]["child"] == "child"
+
+
+def test_branch_from_and_rebase_onto_answer_different_questions(repo):
+    """The two fields never overlap: branch_from is refused for a checkout
+    that already exists (it would be ignored), and refused beside
+    rebase_onto (one of the two would be dropped without a word). Nothing
+    is created by a refused request."""
+    worktree.resolve(str(repo), "review")
+    with pytest.raises(worktree.WorktreeError) as exc:
+        worktree.resolve(str(repo), "review", branch_from=base_branch(repo))
+    assert "already exists" in str(exc.value)
+    git("branch", "loose", cwd=repo)
+    with pytest.raises(worktree.WorktreeError) as exc:
+        worktree.resolve(str(repo), "loose", branch_from=base_branch(repo))
+    assert "already exists" in str(exc.value)
+
+    with pytest.raises(worktree.WorktreeError) as exc:
+        worktree.resolve(
+            str(repo), "fresh", branch_from="review", rebase_onto=base_branch(repo))
+    assert "both given" in str(exc.value)
+    with pytest.raises(worktree.WorktreeError) as exc:
+        worktree.resolve(str(repo), "fresh", branch_from="nosuch")
+    assert "nothing named 'nosuch'" in str(exc.value)
+    assert not (worktree.worktrees_dir(repo) / "fresh").exists()
+    assert "fresh" not in worktree.branches(str(repo))
+
+
 def test_a_catch_up_that_cannot_run_is_refused_before_touching_anything(repo):
     """There is no safe automatic answer to somebody's uncommitted work, so
     it is refused rather than stashed, moved or committed for them; a base

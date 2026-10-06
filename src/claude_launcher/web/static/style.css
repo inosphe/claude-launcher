@@ -1342,7 +1342,11 @@ a.cflow-scope:hover { background: #1d3559; text-decoration: underline; }
 #new-worktree legend {
   padding: 0 6px; font-size: 11px; text-transform: uppercase; color: #7d8590;
 }
-#new-worktree-existing-row, #new-worktree-rebase-row { margin-left: 22px; }
+/* Each mode's rows sit under its radio: Name and Branch from under "new",
+   Reuse, From session and Rebase onto under "existing". */
+#new-worktree-name-row, #new-worktree-from-row,
+#new-worktree-existing-row, #new-worktree-session-row,
+#new-worktree-rebase-row { margin-left: 22px; }
 /* The rebase row carries a control of its own beside the branch box, so it
    is a flex line rather than a block: the label takes the room, the trunk
    button keeps its own width at the end. */

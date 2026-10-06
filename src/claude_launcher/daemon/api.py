@@ -6028,7 +6028,9 @@ async def _create_session(request: web.Request, body: dict) -> Tuple[int, dict]:
         try:
             base = cflow_state.resolve_cwd(body.get("cwd") or None)
             tree = worktree_mod.resolve(
-                base, str(choice), rebase_onto=str(body.pop("rebase_onto", "") or "")
+                base, str(choice),
+                rebase_onto=str(body.pop("rebase_onto", "") or ""),
+                branch_from=str(body.pop("branch_from", "") or ""),
             )
         except worktree_mod.WorktreeError as exc:
             return 400, {"error": str(exc)}

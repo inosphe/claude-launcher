@@ -723,6 +723,9 @@ def make_worktree(
     :func:`claude_launcher.worktree.rebase`), a fresh one is cut from it
     instead of from the trunk -- which is how a nested worker's branch is
     made to begin on its parent's branch (a stacked pull request).
+    ``branch_from`` names that start for a *new* checkout only -- a branch,
+    a commit or another worktree -- and refuses a name that already exists
+    (see :func:`claude_launcher.worktree.resolve`).
 
     **This is the one place a child gets a directory that is nobody's
     workspace**, and it is allowed for the same reason ``allow_workspace`` is:
@@ -745,6 +748,7 @@ def make_worktree(
         child.get("cwd") or "",
         wanted,
         rebase_onto=str(request.get("rebase_onto") or ""),
+        branch_from=str(request.get("branch_from") or ""),
     )
     if tree is not None:
         child["cwd"] = str(tree.path)

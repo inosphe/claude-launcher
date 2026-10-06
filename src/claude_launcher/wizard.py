@@ -838,6 +838,13 @@ def worktree_fields(auto_detail: str, section: str = "") -> List[Field]:
             hint="also the branch name; an existing one is returned to, not rebuilt",
         ),
         ChoiceField(
+            key="branch_from", label="Branch from",
+            hint="where the NEW branch starts: another worktree (its branch, "
+                 "committed work only) or a branch; an existing checkout "
+                 "keeps its own branch and is offered Update instead",
+            options=[],
+        ),
+        ChoiceField(
             key="update", label="Update",
             hint="a checkout you come back to is as far behind as the day you "
                  "left it",
@@ -897,6 +904,26 @@ def sync_worktree(form: "Form", cwd: str, *, allowed: bool = True, note: str = "
         ) + [Option(b, b) for b in (info.get("branches") or []) if b != here]
         base.index = 0
 
+        # Where a NEW checkout starts. The default is the main checkout's
+        # HEAD (what the daemon cuts from when nothing is named), named here
+        # because it is not always the trunk. A branch row is spelled
+        # refs/heads/<name> so it is never read as a worktree of that name.
+        start = form.field("branch_from")
+        head = info.get("root_branch") or ""
+        on_wt = info.get("worktree_branches") or {}
+        start.options = [
+            Option("(HEAD)", "", f"the main checkout, on {head}" if head
+                   else "the main checkout's HEAD"),
+        ] + [
+            Option(n, n, f"worktree, on {on_wt[n]}" if on_wt.get(n) else "worktree")
+            for n in (info.get("worktrees") or [])
+        ] + [
+            Option(b, f"refs/heads/{b}", "branch")
+            for b in (info.get("branches") or [])
+            if b not in set(on_wt.values())
+        ]
+        start.index = 0
+
     # Re-read every pass, not only when the list is rebuilt: a child's
     # auto-name is made of answers given further down the form, and a picker
     # showing the name it *would* have had is worse than showing none.
@@ -906,6 +933,12 @@ def sync_worktree(form: "Form", cwd: str, *, allowed: bool = True, note: str = "
 
     reusing = isinstance(wt.value, str) and wt.value not in ("", NAME_IT)
     form.field("worktree_name").hidden = not wt.selectable or wt.value != NAME_IT
+    # One question per kind of checkout: a new one is asked where it starts,
+    # a reused one whether to catch up (Update / Rebase onto) -- never both,
+    # which the daemon refuses anyway (worktree._checkout).
+    form.field("branch_from").hidden = (
+        not wt.selectable or wt.value not in ("", NAME_IT)
+    )
     # Only a *reused* checkout can be behind: a new one is cut from the
     # repository as it stands, so there is nothing for it to catch up on.
     form.field("update").hidden = not wt.selectable or not reusing
@@ -935,6 +968,12 @@ def check_worktree(form: "Form") -> List[tuple]:
             "pick 'no' under Update",
         ))
     return out
+
+
+def branch_from_answer(form: "Form") -> str:
+    """Where a new checkout starts, or "" for the daemon's default."""
+    field = form.field("branch_from")
+    return "" if field.hidden or not field.selectable else str(field.value or "")
 
 
 def worktree_answer(form: "Form") -> tuple:
@@ -2420,6 +2459,7 @@ class Wizard(Form):
         args.cwd = self.value("cwd") or self.cwd
 
         args.worktree, args.rebase_onto = worktree_answer(self)
+        args.branch_from = branch_from_answer(self) or None
 
         args.role = self.value("role") or None
         resume = self.value("resume")
@@ -2503,6 +2543,8 @@ class Wizard(Form):
             parts.append("worktree " + (wt or "(auto)"))
             if base:
                 parts.append("rebased onto " + base)
+            if branch_from_answer(self):
+                parts.append("branched from " + branch_from_answer(self))
         for label, key in (("mesh", "mesh"), ("workflow", "workflow"),
                            ("role", "role")):
             if self.value(key):
@@ -3705,6 +3747,7 @@ class SpawnWizard(Form):
             else (choice or self.auto_worktree_name())
         )
         args.rebase_onto = base or None
+        args.branch_from = branch_from_answer(self) or None
         mesh = self.value("mesh") or ""
         args.mesh = mesh or None
         args.handle = (self.value("handle") or None) if mesh != self.NO_MESH else None
@@ -3757,6 +3800,8 @@ class SpawnWizard(Form):
             parts.append("worktree " + (choice or self.auto_worktree_name()))
             if base:
                 parts.append("rebased onto " + base)
+            if branch_from_answer(self):
+                parts.append("branched from " + branch_from_answer(self))
         mesh = self.value("mesh") or ""
         parts.append(
             "no mesh" if mesh == self.NO_MESH

@@ -1774,6 +1774,61 @@ def test_a_reused_child_worktree_is_brought_up_to_date_or_the_spawn_is_refused(
     asyncio.run(run())
 
 
+def test_a_child_worktree_can_branch_from_another_worktree(
+    home, tmp_path, repo_template
+):
+    """``branch_from`` starts a NEW child checkout on another worktree's
+    branch; it is refused for a checkout that already exists and beside
+    ``rebase_onto``, and a refusal creates no session."""
+    _register_py_harness()
+    repo = _repo(repo_template, tmp_path / "repo")
+
+    async def run():
+        mgr = _manager()
+        mm = MeshManager(mgr, root=tmp_path / "mesh")
+        client = await _serve(mgr, mm)
+        try:
+            mgr.create(SessionDef(name="lead", harness="py", cwd=str(repo)))
+            first = await client.post(
+                "/api/sessions/lead/children",
+                json={"name": "w1", "worktree": "helper"},
+                headers=BEARER,
+            )
+            assert first.status == 201
+            tree = repo / ".claude" / "worktrees" / "helper"
+            (tree / "helper-only.txt").write_text("x\n", encoding="utf-8")
+            _git("add", "-A", cwd=tree)
+            _git("commit", "-qm", "helper", cwd=tree)
+
+            second = await client.post(
+                "/api/sessions/lead/children",
+                json={"name": "w2", "worktree": "next", "branch_from": "helper"},
+                headers=BEARER,
+            )
+            assert second.status == 201, await second.text()
+            cwd = Path((await second.json())["session"]["cwd"])
+            assert (cwd / "helper-only.txt").exists()
+            assert _git("rev-parse", "--abbrev-ref", "HEAD", cwd=cwd).stdout.strip() == "next"
+
+            for body, words in (
+                ({"name": "w3", "worktree": "helper", "branch_from": "next"},
+                 "already exists"),
+                ({"name": "w3", "worktree": "fresh", "branch_from": "helper",
+                  "rebase_onto": "helper"}, "both given"),
+            ):
+                resp = await client.post(
+                    "/api/sessions/lead/children", json=body, headers=BEARER)
+                assert resp.status == 400
+                assert words in (await resp.json())["error"]
+            assert "w3" not in [s.sdef.name for s in mgr.list()]
+            assert not (repo / ".claude" / "worktrees" / "fresh").exists()
+            await mgr.shutdown_all()
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
 def test_a_worktree_of_a_directory_that_is_no_repository_is_refused(home, tmp_path):
     _register_py_harness()
 

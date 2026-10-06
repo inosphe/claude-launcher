@@ -213,6 +213,7 @@ def _cmd_new_session(args: argparse.Namespace) -> int:
             and (args.resume is not None or harness_def.steers_conversation(extra))
         ),
         rebase_onto=getattr(args, "rebase_onto", "") or "",
+        branch_from=getattr(args, "branch_from", "") or "",
     )
     worktree.announce(tree)
     if tree is not None:
@@ -615,6 +616,7 @@ def _cmd_spawn(args: argparse.Namespace) -> int:
             # shut. See spawn.make_worktree.
             ("worktree", args.worktree),
             ("rebase_onto", args.rebase_onto),
+            ("branch_from", getattr(args, "branch_from", None)),
         )
         if v
     }
@@ -2573,7 +2575,16 @@ def register(sub) -> None:
         help="with a REUSED --worktree, rebase it onto BRANCH before the "
         "agent is let in -- a checkout you come back to is as far behind as "
         "the day you left it. Local only (no fetch); a rebase that cannot be "
-        "done cleanly refuses the launch rather than half-doing it",
+        "done cleanly refuses the launch rather than half-doing it. (With a "
+        "NEW --worktree it is still read as --branch-from, for older scripts)",
+    )
+    p_new.add_argument(
+        "--branch-from", dest="branch_from", metavar="REF",
+        help="with a NEW --worktree, start its branch at REF instead of the "
+        "repository's HEAD: a branch, a commit, or another worktree's name "
+        "(its checked-out branch; committed work only). Refused for a "
+        "worktree or branch that already exists, and together with "
+        "--rebase-onto",
     )
     p_new.add_argument("--cols", type=int, default=120)
     p_new.add_argument("--rows", type=int, default=30)
@@ -2794,6 +2805,13 @@ def register(sub) -> None:
         help="with a REUSED --worktree, rebase it onto BRANCH first (usually "
         "the parent's own branch); a rebase that cannot be done cleanly "
         "refuses the spawn",
+    )
+    p_spawn.add_argument(
+        "--branch-from", dest="branch_from", metavar="REF",
+        help="with a NEW --worktree, start the child's branch at REF: a "
+        "branch, a commit, or another worktree's name (its checked-out "
+        "branch). Refused for a worktree that already exists, and together "
+        "with --rebase-onto",
     )
     p_spawn.add_argument(
         "--workspace", "-w", metavar="NAME",
