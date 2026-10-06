@@ -505,6 +505,7 @@ CHECKS = [
         "observerpin_check.js",
         "operator_check.js",
         "worktreespage_check.js",
+        "glossarypage_check.js",
         "shadowcard_check.js",
         "railshadowmix_check.js",
 ]

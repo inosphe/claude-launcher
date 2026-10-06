@@ -15173,6 +15173,7 @@ function mobileTitle() {
     case "beads": return beadsSection === "reports" ? "reports"
       : beadsSection === "queues" ? "queues" : "beads";
     case "worktrees": return "worktrees";
+    case "glossary": return "용어집";
     case "mesh": return `mesh · ${meshName}`;
     case "flow": return `flows · ${flowMesh}`;
     // The session first, for the reason the head carries it (wfOwnerChip):
@@ -15327,6 +15328,7 @@ const VIEWS = {
   cli: "cli-view",
   beads: "beads-view",
   worktrees: "worktrees-view",
+  glossary: "glossary-view",
   wf: "wf-view",
   // The session's conversation — the fourth reading of it, beside the
   // terminal (what it is doing), the run page (where it has got to) and the
@@ -15912,6 +15914,7 @@ function parseHash(h) {
     : { page: "beads", id: parts[1] || "" };
   if (parts[0] === "reports") return { page: "beads", section: "reports" };
   if (parts[0] === "worktrees") return { page: "worktrees" };
+  if (parts[0] === "glossary") return { page: "glossary" };
   // #/settings is the machine's own settings; #/settings/profiles the profile
   // manager beside it. One shell, one section deep — the same spelling
   // #/beads/<section> already uses, so a section is linkable and the Back
@@ -15969,6 +15972,7 @@ function route() {
   if (r.page !== "stats") stopStatsPoll();
   if (r.page !== "beads") { stopBeadsPoll(); stopReportsPoll(); }
   if (r.page !== "worktrees") globalThis.WorktreesPage?.stop();
+  if (r.page !== "glossary") globalThis.GlossaryPage?.stop();
   if (r.page !== "log") closeTranscript();
   // Guarded like syncRouteProject: reduced harnesses slice route() alone.
   if (r.page !== "shadow" && typeof closeShadow === "function") closeShadow();
@@ -16010,6 +16014,7 @@ function route() {
     case "settings": openSettings(r.section); break;
     case "beads": openBeads(r.id, r.section); break;
     case "worktrees": showView("worktrees"); globalThis.WorktreesPage.open(); break;
+    case "glossary": showView("glossary"); globalThis.GlossaryPage.open(); break;
     default: openHome();
   }
   // The rail is the address's `?detail=`, and nothing else opens or closes
