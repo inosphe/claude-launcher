@@ -672,10 +672,35 @@ def test_settle_check_ends_only_on_every_issue_closed_or_a_leader_hold():
     chart = _chart()
     prompt = next(n for n in chart.nodes.values() if n.label == "settle-check").props["prompt"]
     words = _words(prompt)
-    # every non-closed status, created by or assigned to this session
-    for status in ("open", "in_ready", "in_progress", "in_review", "blocked", "deferred"):
-        assert f"--status {status}" in words, status
+    # every status but closed/tombstone, created by or assigned to this session
+    assert "claunch beads list --all --limit 0 --json" in words
+    assert "not in ('closed', 'tombstone')" in words
     assert "i.get('assignee')" in words and "i.get('created_by')" in words
     assert "목록이 비어야 완료다" in words
-    assert "살아 있는 다른 세션이 assignee라는 것은 정산이 아니다" in words
-    assert "`HOLD:`" in words
+    assert "살아 있는 다른 세션이 assignee라는 것도 정산이 아니다" in words
+    # H1 (s88): only a HOLD another session wrote counts; a self HOLD asks up
+    assert "`author`가 이 세션이 아닌" in words
+    assert "이 세션이 스스로 쓴 `HOLD:`(landing-declined-hold, wrapup의 hold 동결)는 예외가 아니다" in words
+    assert "HOLD CONFIRM REQUESTED:" in words
+    assert "in_progress인 항목에는 queue-recheck의 done 규칙(unqueue)을 적용하지 않는다" in words
+
+
+def test_a_held_round_issue_is_not_taken_for_a_next_round():
+    """s88 H3: with no round cap, queue-recheck is the gate that keeps a
+    held in_progress issue from being worked again round after round."""
+    # the procedure's choose node carries no label; find it by its queue read
+    chart = _chart()
+    prompts = [_words(str(n.props.get("prompt") or "")) for n in chart.nodes.values()
+               if n.type == "choose"]
+    recheck = [p for p in prompts if "회차가 마감됐다(이슈 닫힘 또는 HOLD" in p]
+    assert recheck
+    for p in recheck:
+        assert "해소되지 않은 `HOLD:` 코멘트가 붙은 in_progress 이슈는 착수할 수 없다" in p
+
+
+def test_wrapup_and_settle_wait_say_the_new_settlement():
+    """s88 H2: no prose left claiming the old 'someone holds it' settlement."""
+    text = _words(V2.read_text(encoding="utf-8"))
+    assert "두 자리가 같은 것을 읽어야 정산의" not in text
+    assert "생성 이슈 정산 대기" not in text
+    assert "일감 완료 대기" in text
