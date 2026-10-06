@@ -514,3 +514,109 @@ def test_stacked_pr_wiring():
     assert "--base <기준 브랜치>" in wtasks["remote-setup"].get("prompt")
     assert "remote: <원격>, repo: <저장소>" in wtasks["work"].get("prompt")
     assert "Stacked on <부모 세션>-stack" in wtasks["pr-open"].get("prompt")
+
+
+ROUNDS = """
+cflow: 2
+name: m
+sides: {s: side-def}
+collections:
+  signals: {kind: log, item: {name: str, tip: "str?"}, lifecycle: {inherit: true}}
+nodes:
+  ask-cut:
+    prompt: A
+    do:
+      # a cut that arrived after the last round stopped waiting answers that
+      # round's request: drop it before asking again (claunch-yq80p.2 X1)
+      - {consume: {from: "side:s:signals", name: cut}, when: "$outcome == 'ok' and side('s').live"}
+      - push: {to: signals, item: {name: "'cut-wanted'"}}
+        when: "$outcome == 'ok'"
+  merge: {prompt: M}
+  begin: {prompt: B}
+body:
+  - begin
+  - id: rounds
+    loop:
+      while: "true"
+      max: 5
+      do:
+        - ask-cut
+        - id: cut-wait
+          wait:
+            until: "fresh('side:s:signals', 'cut')"
+            consume: [{from: "side:s:signals", name: cut}]
+            seconds: 60
+          on:
+            timeout: []
+        - merge
+"""
+
+
+def test_a_late_cut_does_not_answer_the_next_rounds_request(tmp_path):
+    # review X1: round 1 stops waiting (timeout -> a person confirmed), the
+    # side's cut for round 1 lands afterwards; round 2 must wait for its own
+    _start_main(tmp_path, ROUNDS)
+    _start_side(tmp_path)
+    _report(tmp_path, "w1", "begin")
+    _report(tmp_path, "w1+s", "open")
+    _report(tmp_path, "w1", "ask-cut")
+    st = runtime.status(cwd=_cwd(tmp_path), scope="w1", now=T0 + 120, tick=True)
+    assert [t["label"] for t in st["tasks"]] == ["merge"]
+    # the late cut for round 1
+    _select(tmp_path, "w1+s", "cut")
+    _report(tmp_path, "w1+s", "cut", {"tip": "r1"})
+    _report(tmp_path, "w1", "merge")
+    _report(tmp_path, "w1", "ask-cut")
+    # round 2 is waiting; the round-1 cut did not satisfy it
+    main = _status(tmp_path, "w1")
+    assert main["tasks"] == [] and "cut-wait" in str(main.get("waits") or main)
+    assert _avail(tmp_path, "w1+s")["cut"] is True
+    _select(tmp_path, "w1+s", "cut")
+    _report(tmp_path, "w1+s", "cut", {"tip": "r2"})
+    assert [t["label"] for t in _status(tmp_path, "w1")["tasks"]] == ["merge"]
+
+
+def test_clock_reads_a_side_slot_as_its_main_session():
+    # review Y6: notices and session lookups for ``w1+s`` (and a nested run
+    # under it) go to the session w1 that drives the slot
+    from claude_launcher.daemon import cflow2_clock
+
+    got = []
+    w1 = types.SimpleNamespace(exited=False, queue_delivery=got.append)
+
+    class Mgr:
+        def get(self, name):
+            if name != "w1":
+                raise KeyError(name)
+            return w1
+
+        def list(self):
+            return [w1]
+
+    clock = cflow2_clock.Cflow2Clock(Mgr(), heartbeat=False, threaded=False,
+                                     probe_runner=None)
+    assert clock._live("w1+s") is w1 and clock._live("w1+s~d2") is w1
+    assert clock._live("w2+s") is None
+    clock._deliver("/x", "w1+s", "an ask for the side run")
+    assert got == ["an ask for the side run"]
+
+
+def test_poke_does_not_wait_for_a_busy_peer(tmp_path):
+    # review Y7: a peer whose lock is held is left to the clock
+    import time
+
+    main_text = MAIN.replace("{if: \"side('s').live\", then: [ask-cut]}",
+                             "{if: \"true\", then: [ask-cut]}")
+    _start_main(tmp_path, main_text)
+    _start_side(tmp_path)
+    _report(tmp_path, "w1", "begin")
+    _report(tmp_path, "w1+s", "open")
+    _report(tmp_path, "w1", "ask-cut")
+    _select(tmp_path, "w1+s", "cut")
+    with RunStore(_cwd(tmp_path), "w1").lock():
+        t = time.monotonic()
+        _report(tmp_path, "w1+s", "cut", {"tip": "abc"})
+        assert time.monotonic() - t < 2.0
+    # the main still waits; its next tick sees the cut
+    st = runtime.status(cwd=_cwd(tmp_path), scope="w1", now=T0, tick=True)
+    assert [t["label"] for t in st["tasks"]] == ["merge"]

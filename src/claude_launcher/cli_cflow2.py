@@ -564,16 +564,23 @@ def _cmd_pr_preflight(args: argparse.Namespace) -> int:
     base_sha = None
     if args.base:
         doc["base"] = args.base
-        if doc.get("remote"):
+        if not doc.get("remote"):
+            doc["blockers"].append(f"no remote to look for the base {args.base!r} on")
+        else:
+            # never wait on a credential prompt: an unreachable remote is a fact
+            env = dict(os.environ, GIT_TERMINAL_PROMPT="0")
             code, line, err = prflow._git(cwd, "ls-remote", "--exit-code", doc["remote"],
-                                          f"refs/heads/{args.base}")
+                                          f"refs/heads/{args.base}", env=env)
             if code == 0 and line:
                 base_sha = line.split()[0]
-            else:
+            elif code == 2:
                 doc["blockers"].append(
                     f"the base {doc['remote']}/{args.base} is not on the remote"
-                    + (f" ({err})" if code not in (0, 2) and err else "")
-                    + " -- a stack child's base is pushed by its parent")
+                    " -- a stack child's base is pushed by its parent")
+            else:
+                doc["blockers"].append(
+                    f"cannot read the remote {doc['remote']!r} to find the base "
+                    f"{args.base!r} (git ls-remote exit {code}: {err or 'no output'})")
     out = {
         "ready": not doc["blockers"],
         "remote": doc.get("remote") or None,

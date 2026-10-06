@@ -207,6 +207,19 @@ def test_pr_preflight_base_must_be_on_the_remote(tmp_path, capsys, monkeypatch):
     doc = json.loads(capsys.readouterr().out)
     assert doc["base"] == "s1-stack" and doc["base_sha"] == head and doc["blockers"] == []
 
+    # an unreachable remote is said as such, not as a missing branch (review Y5)
+    git("remote", "set-url", "origin", str(tmp_path / "gone.git"))
+    assert run("pr-preflight", "--cwd", wd, "--base", "s1-stack") == cli_cflow2.PR_BLOCKED
+    doc = json.loads(capsys.readouterr().out)
+    assert doc["blockers"][0].startswith("cannot read the remote 'origin'")
+    git("remote", "set-url", "origin", str(tmp_path / "r.git"))
+    # no remote at all: --base cannot be checked, which is a blocker too
+    monkeypatch.setattr(prflow, "preview", lambda cwd, session="": json.loads(json.dumps(
+        dict(ready, remote=""))))
+    assert run("pr-preflight", "--cwd", wd, "--base", "s1-stack") == cli_cflow2.PR_BLOCKED
+    assert "no remote to look for the base" in json.loads(capsys.readouterr().out)["blockers"][0]
+    monkeypatch.setattr(prflow, "preview", lambda cwd, session="": json.loads(json.dumps(ready)))
+
     # without --base nothing is asked of the remote
     assert run("pr-preflight", "--cwd", wd) == cli_cflow2.PR_READY
     doc = json.loads(capsys.readouterr().out)

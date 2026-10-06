@@ -350,8 +350,10 @@ class Cflow2Clock:
         return self.probe_runner(probe, cwd, *args, **kwargs)
 
     def _deliver(self, cwd: str, name: str, text: str) -> None:
+        # a side run's slot (``s1+stack``) or a nested run's is driven by the
+        # session of its main slot (doc 2.9)
         try:
-            session = self.manager.get(name)
+            session = self.manager.get(cstore.main_scope(name))
         except Exception:
             return
         if getattr(session, "exited", True):
@@ -408,7 +410,8 @@ class Cflow2Clock:
         if not name:
             return None
         try:
-            session = self.manager.get(name)
+            # a slot name reads as the session that drives it (doc 2.9)
+            session = self.manager.get(cstore.main_scope(name))
         except Exception:
             return None
         return None if getattr(session, "exited", True) else session
@@ -854,7 +857,7 @@ class Cflow2Clock:
             found = None
             if marker:
                 with contextlib.suppress(Exception):
-                    found = self.find_child(scope, marker)
+                    found = self.find_child(cstore.main_scope(scope), marker)
             if found:
                 cflow2_exec._record_child(cwd, scope, did, found,
                                           dict(runner, boot=self.boot), marker,
@@ -966,7 +969,7 @@ class Cflow2Clock:
             child = None
             if marker:
                 with contextlib.suppress(Exception):
-                    child = self.find_child(scope, marker)
+                    child = self.find_child(cstore.main_scope(scope), marker)
             rec = dels.get(did) or {}
             if child and child == rec.get("child"):
                 with contextlib.suppress(OSError):

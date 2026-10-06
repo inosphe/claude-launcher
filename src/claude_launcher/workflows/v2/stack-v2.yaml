@@ -111,16 +111,23 @@ nodes:
         올린다.
       - 원격의 스택 브랜치(stacked PR): 입력 remote=${data.inputs.remote},
         repo=${data.inputs.repo}. remote가 있으면 스택 브랜치를 만든 직후
-        원격에 둔다 — `git push <remote> <세션>-stack:refs/heads/<세션>-stack`
-        (명시 refspec, bare push 금지) 뒤 `git ls-remote <remote>
-        refs/heads/<세션>-stack`의 SHA가 로컬 tip과 같은지 확인한다. 원격에 같은
-        이름의 브랜치가 이미 있고 tip이 다르면 덮지 않는다: 이전 세션의 스택일
-        수 있으니 그 SHA를 보고와 STACK 코멘트에 적고, 원격 스택 없이(remote가
-        빈 것과 같이) 진행한다. 이 원격 브랜치가 자식 PR의
-        base다 — 자식의 착지 매체 판정(`claunch cflow2 pr-preflight --base
-        <세션>-stack`)은 이 브랜치가 원격에 있어야 PR을 고른다. 기준 브랜치
-        줄은 `<세션>-stack @ <전체 SHA> @ <remote>/<세션>-stack`으로 적는다.
-        remote가 비었으면 이 push를 하지 않고, 자식은 로컬 착지로 간다.
+        원격에 둔다. 순서가 중요하다 — push보다 확인이 먼저다:
+        (1) `git ls-remote <remote> refs/heads/<세션>-stack`. 출력이 비었으면
+        (2)로 간다. 로컬 tip과 같은 SHA면 이미 이 런이 둔 것이다(재시작) —
+        push하지 않는다. 다른 SHA면 이전 세션의 스택이다: 덮지 않는다(fast-
+        forward로 이어지는 경우도 덮는 것이다). 그 SHA를 보고와 STACK 코멘트에
+        적고 원격 스택 없이(remote가 빈 것과 같이) 진행한다.
+        (2) `git push --force-with-lease=<세션>-stack: <remote>
+        <세션>-stack:refs/heads/<세션>-stack` — 기대값이 빈 lease는 「원격에 그
+        브랜치가 없어야 한다」는 조건이다. 그 사이 누가 만들었으면 git이
+        거절한다(stale info); 그때도 덮지 않고 (1)의 「다른 SHA」와 같이 한다.
+        `--force`나 lease 없는 push로 다시 시도하지 않는다.
+        (3) `git ls-remote`의 SHA가 로컬 tip과 같은지 확인한다.
+        원격 스택을 두었을 때만 자식의 기준 줄에 원격 ref를 붙인다:
+        `<세션>-stack @ <전체 SHA> @ <remote>/<세션>-stack`. 자식은 이 꼬리가
+        있을 때만 스택 브랜치로 PR을 연다(원격에 같은 이름의 남의 브랜치가
+        있어도 꼬리가 없으면 쓰지 않는다). 꼬리가 없는 기준 줄을 받은 자식은
+        로컬 착지다.
       - 다른 머신의 자식(remote 편성: `claunch mesh members`의 machine이 나와
         다르다): 그 자식은 이 머신의 브랜치를 볼 수 없고 원격의 스택 브랜치만
         본다 — remote가 비었으면 그 자식을 둘 수 없다(보고에 적고 메인 런에
@@ -161,15 +168,24 @@ nodes:
         스택이 트리로 남는다. 입력 remote가 있으면 머지 뒤 `git push <remote>
         <세션>-stack:refs/heads/<세션>-stack`(fast-forward, --force 금지)로 원격
         스택 브랜치를 로컬과 같게 둔다 — 다음 자식 PR의 diff가 이 머지 이후의
-        것이 된다.
+        것이 된다. 이 push가 거절되면(non-fast-forward — 원격에 이 런이 모르는
+        커밋이 있다) 덮지 않는다. `--force`로 다시 시도하지 않고, 원격과 로컬의
+        두 SHA를 보고와 STACK 코멘트에 적는다. 로컬 머지는 그대로 두고, 원격이
+        맞춰질 때까지 PR 후보는 아래 (1)에서 멈춘다.
       - PR 후보(레코드에 pr_url·pr_number가 있다 — 자식 PR의 base는
-        `<세션>-stack`이어야 한다; 레코드의 base가 다르면 머지하지 않고 되돌린다):
+        `<세션>-stack`이어야 한다. 레코드의 base와 아래 (2)에서 받은
+        baseRefName 둘 다 `<세션>-stack`이 아니면 머지하지 않고 되돌린다 —
+        재사용된 PR의 실제 base가 master일 수 있다):
         리더의 PR 후보와 같은 절차를 스택 브랜치에 적용한다(docs/cflow-v2.md 10a).
         (1) 원격 스택 브랜치가 로컬 tip과 같은지 `git ls-remote`로 확인한다 —
         다르면 원격에 이 런이 모르는 커밋이 있다는 뜻이니 머지하지 않고 사유를
         적는다(skipped). (2) `gh pr view <번호> -R <repo> --json
-        state,mergeable,headRefOid,baseRefName` — mergeable이 UNKNOWN이면 수 초 뒤
-        다시 조회한다(실측: 계산이 늦다). CONFLICTING이면 restack 요청으로 간다.
+        state,mergeable,headRefOid,baseRefName` — mergeable이 UNKNOWN이거나
+        headRefOid가 레코드 tip과 다르면 수 초 뒤 다시 조회한다(실측: mergeable
+        계산이 늦고, push 직후 headRefOid에 이전 SHA가 남는다). 다시 조회는 다섯
+        번까지다. 그래도 UNKNOWN이면 머지하지 않고 사유를 적는다(skipped). 그래도
+        headRefOid가 다르면 자식이 레코드 뒤에 push한 것이니 재요청을 요구한다.
+        CONFLICTING이면 restack 요청으로 간다.
         (3) `gh pr merge <번호> -R <repo> --merge --match-head-commit <레코드 tip>`
         — `--merge`가 merge commit이다(squash·rebase는 tip을 잃는다). 다른 tip이
         올라가 있으면 gh가 거절한다; 그때는 머지하지 않고 그 자식에게 재요청을
@@ -222,7 +238,9 @@ nodes:
       컷 tip은 지금 스택 브랜치의 tip이다. 입력 remote가 있으면 원격 스택
       브랜치가 같은 tip인지 `git ls-remote`로 확인하고 코멘트에 `<컷 tip> @
       <remote>/<세션>-stack`으로 적는다(다르면 push로 맞춘 뒤 적는다 —
-      fast-forward만). 실린 것이 없으면 컷 tip은
+      fast-forward만). 그 push가 거절되면 덮지 않는다: 컷은 로컬 tip으로 내고,
+      코멘트에 원격 ref 꼬리 대신 「원격 불일치: <원격 SHA>」를 적는다. 메인 런의
+      stack-merge는 로컬 tip을 머지하므로 컷은 그대로 쓸 수 있다. 실린 것이 없으면 컷 tip은
       마지막 컷 tip과 같고, 그것도 컷이다 — 메인 런은 머지할 것이 없다는
       것을 그 해시로 안다.
       메인 런의 회차 이슈에 `CUT <n> @ <컷 tip>` 코멘트를 남긴다: 실림
@@ -279,12 +297,17 @@ nodes:
       으로 다시 push하고, 공지의 tip을 `<전체 SHA> @ <remote>/<세션>-stack`으로
       적는다(이 push만 재작성이다 — 옮긴 것이므로). 열린 자식 PR은 base가 같은
       이름이라 그대로 남고, 자식의 rebase 뒤 push가 PR diff를 새 기준 위로 맞춘다.
+      lease가 거절되면(stale info — 그 사이 원격 스택이 <옛 tip>에서 움직였다)
+      덮지 않는다. `--force`나 기대값 없는 lease로 다시 시도하지 않고, 결과를
+      conflict로 낸다: `at`에 「remote <remote>/<세션>-stack moved: <원격 SHA>」를
+      적는다. 로컬 이전은 이미 끝났으므로 사람이 원격을 보고 고른다
+      (restack-conflict).
       표를 `STACK @ <새 tip>` 코멘트로 갱신한다(다음 회차 이슈가 아직 없으면
       방금 착지한 회차 이슈에).
     done_when: |
       옛 스택 tip과 새 스택 tip, 옮긴 머지 수(0일 수 있다), 공지한 자식,
       `STACK @ <새 tip>` 코멘트가 보고에 있다. 충돌로 멈췄으면 그 사실과
-      충돌 지점이 있다.
+      충돌 지점이 있다. 원격 push가 거절됐으면 conflict이고 그 원격 SHA가 있다.
     returns:
       ok: {old_tip: str, tip: str, moved: int}
       conflict: {at: str}
@@ -387,25 +410,30 @@ body:
 procedures:
   restack-conflict:
     description: >-
-      스택 이전(restack)이 충돌로 멈췄다. 스택 브랜치는 옛 기준 위에 그대로 있다.
-      사람이 충돌을 풀고 이전을 마쳤는지, 아니면 이 신호를 넘기는지 고른다.
+      스택 이전(restack)이 충돌로 멈췄거나, 로컬 이전 뒤 원격 스택 브랜치의 push가
+      거절됐다. 사람이 풀고 이전을 마쳤는지, 아니면 이 신호를 넘기는지 고른다.
     body:
-      id: restack-conflict-choice
-      choose:
-        chooser: user
-        require_reason: true
-        prompt: |
-          스택 이전이 충돌로 멈췄다(restack 보고의 충돌 지점). 사람이 스택 워크트리에서
-          충돌을 풀고 이전을 마쳤으면 resolved를, 이번 landed 신호를 처리하지 않고 넘기려면
-          skip을 고른다. 무엇을 보고 골랐는지 reason에 적는다.
-        options:
-          resolved:
-            description: 사람이 충돌을 풀고 스택 이전을 마쳤다 — landed 신호를 소비하고 관제로 돌아간다
+      # 사용자에게 묻는 지점은 ask-user(ask-common, docs/cflow-v2.md 2.10)로 묻는다.
+      - id: restack-conflict-choice
+        call: ask-user
+        bind: restack_conflict
+        with:
+          context: "$result.restack.value.at"
+          require_reason: true
+          choices: [resolved, skip]
+          topic: |
+            스택 이전이 멈췄다(근거 칸이 restack 보고의 지점이다). 충돌이면 스택 브랜치는
+            옛 기준 위에 그대로 있다. 원격 push 거절(「remote ... moved」)이면 로컬 이전은
+            끝났고 원격 스택 브랜치만 이 런이 모르는 커밋으로 움직였다 — 원격의 그
+            커밋이 무엇인지(git fetch 뒤 git log)를 보고 선택지별 위험과 결과를 채운다.
+            선택지: resolved — 사람이 스택 워크트리(와 원격)에서 풀고 이전을 마쳤다,
+            landed 신호를 소비하고 관제로 돌아간다. skip — 이전하지 않고 관제로
+            돌아간다, landed 신호가 남아 restack만 고를 수 있다.
+      - cond:
+          - if: "$data.restack_conflict.decision == 'resolved'"
             then:
               id: restack-resolved
               seq: []
               do:
                 - {consume: {from: "main:signals", name: landed}}
-          skip:
-            description: 이전하지 않고 관제로 돌아간다 — landed 신호는 남아 restack만 고를 수 있다
-            then: []
+          - else: []
