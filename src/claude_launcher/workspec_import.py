@@ -45,10 +45,6 @@ class SpecImportError(Exception):
 class Backend:
     """The writes an import performs. :class:`DaemonBackend` is the real one."""
 
-    #: The directory the board lives in and ``file`` references resolve
-    #: against ("" = the current directory).
-    board_cwd: str = ""
-
     # board
     def find_issues(self, label: str) -> Dict[str, dict]:
         """external_ref -> issue (``id``, ``assignee``) for every issue with

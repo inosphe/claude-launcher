@@ -1,7 +1,10 @@
 /* The Work spec page (#/spec): paste or load a work spec YAML, check it,
    choose the leader, preview the plan and run the import. The three verbs
    are POST /api/spec/check · plan · import (daemon/spec_api.py) — the same
-   code `claunch spec` runs. The format is docs/work-spec.md. */
+   code `claunch spec` runs. The format is docs/work-spec.md.
+   The board an import writes to is the spec's registered workspace; a spec
+   without one gets it from the choice here (the daemon's own directory is
+   not the user's checkout, so the API refuses an import with neither). */
 globalThis.SpecPage = (() => {
   const node = (tag, cls, text) => {
     const n = document.createElement(tag);
@@ -18,7 +21,7 @@ globalThis.SpecPage = (() => {
   // text: the spec; spec: /check's summary of it (null until it passes);
   // errors: the validator's lines; plan/log: the last answers.
   let text = "", spec = null, errors = [], plan = null, log = null;
-  let leaderKind = "", leaderSession = "", profile = "";
+  let leaderKind = "", leaderSession = "", profile = "", workspace = "";
   let notice = "", error = "", leaderError = "", busy = false;
   let sequence = 0;
 
@@ -36,7 +39,7 @@ globalThis.SpecPage = (() => {
   async function post(verb, extra = {}) {
     const response = await api(`/api/spec/${verb}`, {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ yaml: text, ...extra }),
+      body: JSON.stringify({ yaml: text, ...(workspace ? { workspace } : {}), ...extra }),
     });
     let body = {};
     try { body = await response.json(); } catch { body = {}; }
@@ -64,6 +67,7 @@ globalThis.SpecPage = (() => {
       errors = body.errors || [];
       spec = ok ? body.spec : null;
       if (!ok && !errors.length) error = body.error || "검증 실패";
+      if (!ok && body.workspace_error) workspace = "";
       if (spec) {
         // The spec's own leader.mode is the default choice; ask leaves it open.
         if (!leaderKind && ["own", "shared"].includes(spec.leader_mode)) leaderKind = spec.leader_mode;
@@ -83,12 +87,13 @@ globalThis.SpecPage = (() => {
 
   function runImport() {
     const choice = leaderChoice();
-    const what = `${spec.name} → 메시 ${spec.mesh}, 리더 ${choice || "(메시의 현 리더)"}`;
+    const what = `${spec.name} → 메시 ${spec.mesh}, 리더 ${choice || "(메시의 현 리더)"}, 보드 ${spec.board_dir}`;
     if (!confirm(`import 를 실행한다: ${what}\n이슈를 만들고 세션을 띄운다.`)) return;
     return run("import", { leader: choice, profile: profile.trim() }, ({ ok, status, body }) => {
       log = body.log || [];
       if (ok) { notice = `import 완료 — ${log.length}개 action`; return; }
       if (body.leader_error) { leaderError = body.error; return; }
+      if (body.workspace_error) { error = body.error; return; }
       error = body.error || `HTTP ${status}`;
       if (body.resumable) notice = "그 전에 실행된 action은 남아 있다. 원인을 고친 뒤 같은 버튼으로 다시 실행하면 이어서 진행된다.";
     });
@@ -96,8 +101,9 @@ globalThis.SpecPage = (() => {
 
   function onText(value) {
     text = value;
-    // A changed spec is an unchecked spec: nothing below it describes it any more.
-    spec = null; errors = []; plan = null; log = null; notice = ""; error = "";
+    // A changed spec is an unchecked spec: nothing below it describes it any
+    // more, the workspace chosen for the old text included.
+    workspace = ""; spec = null; errors = []; plan = null; log = null; notice = ""; error = "";
     render();
   }
 
@@ -138,6 +144,30 @@ globalThis.SpecPage = (() => {
     }
     box.appendChild(row);
     if (leaderError) box.appendChild(node("p", "wt-error", leaderError));
+    return box;
+  }
+
+  /* Where the import writes: the board directory, and the choice of
+     workspace when the spec names none. Choosing re-checks, so the
+     directory shown is the one the daemon resolved. */
+  function boardBlock() {
+    const box = node("div", "spec-leader");
+    box.appendChild(node("h3", null, "보드"));
+    if (!spec.workspace || workspace) {
+      const row = node("div", "spec-row");
+      const pick = node("select");
+      pick.setAttribute("aria-label", "워크스페이스");
+      for (const name of ["", ...spec.workspaces]) {
+        const o = node("option", null, name || "워크스페이스 선택…"); o.value = name;
+        pick.appendChild(o);
+      }
+      pick.value = workspace;
+      pick.onchange = () => { workspace = pick.value; plan = null; check(); };
+      row.appendChild(pick);
+      box.appendChild(row);
+    }
+    if (spec.board_dir) box.appendChild(node("p", "spec-summary", `import가 쓰는 보드: ${spec.board_dir}`));
+    if (spec.board_error) box.appendChild(node("p", "wt-error", spec.board_error));
     return box;
   }
 
@@ -197,10 +227,11 @@ globalThis.SpecPage = (() => {
         `${spec.name}${spec.title ? ` — ${spec.title}` : ""} · 메시 ${spec.mesh} (${spec.mesh_mode})` +
         ` · 에이전트 ${spec.agents} · 이슈 ${spec.issues}` +
         (spec.workspace ? ` · workspace ${spec.workspace}` : "")));
+      parts.push(boardBlock());
       parts.push(leaderBlock());
       const next = node("div", "spec-row");
       next.appendChild(button("plan 미리보기", preview, busy));
-      next.appendChild(button("import 실행", runImport, busy || !plan));
+      next.appendChild(button("import 실행", runImport, busy || !plan || !!spec.board_error));
       parts.push(next);
     }
     if (plan) {

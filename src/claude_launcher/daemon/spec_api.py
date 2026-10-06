@@ -6,6 +6,15 @@ over the same code: :mod:`claude_launcher.workspec` validates and plans,
 as YAML text (``{"yaml": "..."}``) because the page holds what was pasted or
 read from a file, not a path on the daemon's disk.
 
+The board an import writes to is the spec's registered ``workspace``. The
+CLI falls back to the current directory, which is the user's checkout; the
+daemon's current directory is wherever the shell that started it stood and
+it serves every project, so here a spec without a workspace takes one from
+the body (``{"workspace": "<registered name>"}``, which the page asks for)
+and an import with neither is refused before anything is written. check and
+plan answer the directory the name resolves to, so the page can show where
+the import will land before it is pressed.
+
 An import runs off the event loop: its board writes are ``claunch beads``
 subprocesses and its mesh/session writes go back through this daemon's own
 API (the executor's :class:`~claude_launcher.workspec_import.DaemonBackend`),
@@ -21,8 +30,30 @@ from aiohttp import web
 from .. import workspec, workspec_import
 
 
+def _board(doc: dict) -> dict:
+    """Where an import of ``doc`` writes: the resolved directory of its
+    workspace, or why there is none (no name, or a name that does not
+    resolve)."""
+    if not doc.get("workspace"):
+        return {"board_dir": "", "board_error":
+                "this spec names no workspace: choose the registered "
+                "workspace whose board the import writes to"}
+    try:
+        return {"board_dir": workspec_import.board_dir(doc), "board_error": ""}
+    except workspec.SpecError as exc:
+        return {"board_dir": "", "board_error": str(exc)}
+
+
+def _registered() -> list:
+    from .. import workspaces
+    try:
+        return [w.name for w in workspaces.list_all()]
+    except Exception:  # an unreadable registry is an empty choice, not a 500
+        return []
+
+
 def _summary(doc: dict) -> dict:
-    """What the page needs to offer the leader choice for this spec."""
+    """What the page needs to offer the leader and workspace choices."""
     leader = doc.get("leader") or {}
     mesh = doc.get("mesh") or {}
     return {
@@ -36,19 +67,21 @@ def _summary(doc: dict) -> dict:
         "workspace": doc.get("workspace") or "",
         "agents": len(workspec._list(doc, "agents")),
         "issues": len(workspec._list(doc, "issues")),
+        **_board(doc),
+        "workspaces": _registered(),
     }
 
 
-def _default_backend(doc: dict) -> workspec_import.Backend:
+def _default_backend(doc: dict, board: str) -> workspec_import.Backend:
     from ..daemon_client import ensure_running
-    return workspec_import.DaemonBackend(
-        ensure_running(auto_start=False), workspec_import.board_dir(doc))
+    return workspec_import.DaemonBackend(ensure_running(auto_start=False), board)
 
 
-def install(app, backend: Optional[Callable[[dict], workspec_import.Backend]] = None):
-    """Add the routes. ``backend`` builds the executor's backend for a spec
-    (tests pass a fake; the default writes through ``claunch beads`` and
-    this daemon's API)."""
+def install(app, backend: Optional[
+        Callable[[dict, str], workspec_import.Backend]] = None):
+    """Add the routes. ``backend(doc, board_dir)`` builds the executor's
+    backend for a spec (tests pass a fake; the default writes through
+    ``claunch beads`` in ``board_dir`` and this daemon's API)."""
     make_backend = backend or _default_backend
 
     async def body_of(request) -> dict:
@@ -77,6 +110,19 @@ def install(app, backend: Optional[Callable[[dict], workspec_import.Backend]] = 
         if errs:
             return None, fail(400, f"{len(errs)} problem(s) in the spec",
                               errors=errs)
+        chosen = body.get("workspace") or ""
+        if not isinstance(chosen, str):
+            return None, fail(400, "'workspace' must be a registered "
+                                   "workspace name", workspace_error=True)
+        if chosen:
+            named = str(doc.get("workspace") or "")
+            if named and named != chosen:
+                return None, fail(
+                    400, f"the spec names workspace {named!r}; the body's "
+                         f"{chosen!r} would contradict it", workspace_error=True)
+            # Every action takes it from here: the board, `file`
+            # references and the spawned sessions' workspace.
+            doc = {**doc, "workspace": chosen}
         return doc, None
 
     async def check(request):
@@ -120,12 +166,15 @@ def install(app, backend: Optional[Callable[[dict], workspec_import.Backend]] = 
         profile = body.get("profile") or ""
         if not isinstance(profile, str):
             return fail(400, "'profile' must be a profile name")
+        board = _board(doc)
+        if board["board_error"]:
+            return fail(400, board["board_error"], workspace_error=True)
 
         def work():
-            backend_ = make_backend(doc)
             return workspec_import.execute(
-                doc, backend_, leader_choice=body.get("leader") or "",
-                profile=profile, base_dir=backend_.board_cwd)
+                doc, make_backend(doc, board["board_dir"]),
+                leader_choice=body.get("leader") or "",
+                profile=profile, base_dir=board["board_dir"])
 
         try:
             log = await asyncio.to_thread(work)
