@@ -84,7 +84,8 @@ MCP_NAME = "claunch"
 LEGACY_MCP_NAMES = ("cflow", "mesh")
 
 #: Harness permission rules that keep the AGENT's hands off the human gate
-#: commands (``claunch cflow approve|select|goto|abort``).
+#: commands (``claunch cflow approve|select|goto|abort``, ``claunch cflow2
+#: approve|select|extend|resume``).
 #:
 #: The cflow split is channels: the MCP tools are the agent's and carry no
 #: approve, the CLI is the human's — but an agent with a shell tool holds
@@ -107,8 +108,14 @@ LEGACY_MCP_NAMES = ("cflow", "mesh")
 #: tools this harness may expose; a rule naming a tool a setup lacks is
 #: inert.
 GATE_DENY_RULES = tuple(
-    f"{tool}(claunch cflow {cmd}{suffix})"
-    for cmd in ("approve", "select", "goto", "abort", "set")
+    f"{tool}(claunch {cmd}{suffix})"
+    for cmd in (
+        *(f"cflow {c}" for c in ("approve", "select", "goto", "abort", "set")),
+        # cflow v2's human doors: a task's ask, a user choice, a loop limit,
+        # a halting monitor. The driver's own door for an ask that fell to
+        # 'otherwise: self' is the flow_approve MCP tool.
+        *(f"cflow2 {c}" for c in ("approve", "select", "extend", "resume")),
+    )
     for tool in ("Bash", "PowerShell")
     for suffix in ("", ":*")
 )

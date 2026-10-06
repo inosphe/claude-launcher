@@ -25516,6 +25516,35 @@ function renderCflow2Into(box, data, ui) {
     box.appendChild(card);
   }
 
+  for (const a of run.asks || []) {
+    const card = el("div", "cf2-choice");
+    card.appendChild(el("h4", null,
+      `approval ${a.label || a.node}${a.title ? " — " + a.title : ""}`));
+    if (a.prompt) card.appendChild(mdInto(el("div", "md"), a.prompt));
+    if ((a.asked || []).length) {
+      card.appendChild(el("p", "wf-note", `asked: ${a.asked.join(", ")}` +
+        (a.deadline ? ` (until ${String(a.deadline).replace("T", " ")})` : "")));
+    }
+    const btns = el("div", "wf-actions");
+    const answer = async (b, decision, label) => {
+      const reason = prompt(`Reason for '${label}' (optional)`, "");
+      if (reason === null) return;
+      b.disabled = true;
+      await post("/api/cflow2/approve", { node: a.instance, decision, reason });
+    };
+    const opts = (a.options || []).length ? a.options
+      : [{ name: "approve", description: "enter the task" },
+         { name: "decline", description: "the task finishes declined" }];
+    for (const o of opts) {
+      const b = el("button", "wf-btn " + (o.name === "decline" ? "" : "approve"), o.name);
+      b.title = o.description || "";
+      b.addEventListener("click", () => answer(b, o.name, o.name));
+      btns.appendChild(b);
+    }
+    card.appendChild(btns);
+    box.appendChild(card);
+  }
+
   for (const lim of run.loop_limits || []) {
     const card = el("div", "cf2-choice");
     card.appendChild(el("h4", null,

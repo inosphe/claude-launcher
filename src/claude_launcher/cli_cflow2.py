@@ -2,8 +2,11 @@
 
 ``ls``/``show``/``compile``/``validate``/``caps`` read definitions;
 ``start``/``status``/``journal``/``abort`` operate the run in this directory;
-``select`` and ``extend`` are the person's side of a run (a ``chooser: user``
-choice, a loop that reached its ``max``), which the agent's tools refuse.
+``select``, ``extend`` and ``approve`` are the person's side of a run (a
+``chooser: user`` choice, a loop that reached its ``max``, a task's ``ask``),
+which the agent's tools refuse. Like v1's ``claunch cflow approve``, the CLI
+cannot tell a person from an agent's shell tool; the harness deny rules
+``install.GATE_DENY_RULES`` keep the agent's hands off these commands.
 """
 
 from __future__ import annotations
@@ -254,6 +257,10 @@ def _print_status(payload: Dict[str, Any], as_json: bool) -> None:
         print(f"  {w['kind']} {w['instance']}: {w.get('describe') or w.get('probe') or ''}")
     for d in payload.get("delegations") or []:
         print(f"  delegation {d['id']} {d['node']}: {d['executor']} {d['status']}")
+    for a in payload.get("asks") or []:
+        print(f"  ask {a['instance']} [{a['ask']}] {a.get('resolution')}: "
+              f"{(a.get('prompt') or '').strip().splitlines()[0] if a.get('prompt') else ''}")
+        print(f"    {a.get('how')}")
     for lim in payload.get("loop_limits") or []:
         print(f"  loop limit {lim['instance']}: {lim['iterations']}/{lim['max']} "
               f"(claunch cflow2 extend {lim['instance']} [--by N | --stop])")
@@ -320,6 +327,18 @@ def _cmd_extend(args: argparse.Namespace) -> int:
 
     payload = runtime.extend_loop(args.node, args.by, stop=args.stop, cwd=os.getcwd(),
                                   scope=args.scope)
+    _print_status(payload, False)
+    return 0
+
+
+def _cmd_approve(args: argparse.Namespace) -> int:
+    from .cflow2 import asks
+
+    payload = asks.human_approve(args.node, decision=args.option, decline=args.decline,
+                                 reason=args.reason, cwd=os.getcwd(), scope=args.scope)
+    ans = payload.get("answered") or {}
+    print(f"answered {ans.get('ask')} on {ans.get('label') or ans.get('node')}: "
+          f"{ans.get('decision')}")
     _print_status(payload, False)
     return 0
 
@@ -401,6 +420,17 @@ def register(sub) -> None:
     q.add_argument("--by", type=int, default=1)
     q.add_argument("--stop", action="store_true", help="end the loop with outcome fail")
     q.set_defaults(func=_guarded(_cmd_extend))
+
+    q = scoped(csub.add_parser("approve", help="answer a task's ask as a person: approve "
+                               "(enter the task), --decline, or --option for an ask with options"))
+    q.add_argument("node", nargs="?", help="the waiting task's instance id or name "
+                   "(default: the only open ask)")
+    g = q.add_mutually_exclusive_group()
+    g.add_argument("--decline", action="store_true", help="refuse: the task finishes with its "
+                   "on_decline outcome (default 'declined')")
+    g.add_argument("--option", help="the answer of an ask that declares options")
+    q.add_argument("--reason")
+    q.set_defaults(func=_guarded(_cmd_approve))
 
     q = scoped(csub.add_parser("resume", help="resume a run a 'halt' monitor stopped "
                                "(waiting_approval, reason monitor_violation)"))

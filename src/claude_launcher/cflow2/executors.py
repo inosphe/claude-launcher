@@ -247,7 +247,9 @@ def build_prompt(brief: Mapping[str, Any], *, errors: Optional[List[str]] = None
         if task.get("done_when"):
             lines.append(f"Done when: {task['done_when']}")
         if task.get("verify"):
-            lines.append(f"Verify: {task['verify']}")
+            v = task["verify"]
+            run = v.get("run", v.get("command")) if isinstance(v, dict) else v
+            lines.append(f"Verify: {' '.join(run) if isinstance(run, list) else run}")
     rules = [r for r in brief.get("rules") or [] if r.get("text")]
     if rules:
         lines.append("\n## Rules")

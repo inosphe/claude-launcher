@@ -20,7 +20,10 @@ AUTHORITY = (
     "run in this directory: call them within the task without extra human "
     "confirmation. The engine enforces the workflow's structure, guards and "
     "who may choose; a choice whose chooser is 'user' is refused here and taken "
-    "by a person with 'claunch cflow2 select'."
+    "by a person with 'claunch cflow2 select'. A task's ask is answered by the "
+    "responders it was routed to (flow_answer) or a person ('claunch cflow2 "
+    "approve'); flow_approve is accepted only for an ask that fell through to "
+    "'otherwise: self'."
 )
 
 _SCOPE = {
@@ -170,6 +173,58 @@ TOOLS = [
         },
     },
     {
+        "name": "flow_approve",
+        "description": (
+            "Answer an ask of your own run (flow_status 'asks') that fell through to "
+            "'otherwise: self' -- every candidate group was tried and nobody could "
+            "answer, and the workflow leaves the decision to you. Refused for any other "
+            "ask: those are answered by the responders they were routed to or by a "
+            "person ('claunch cflow2 approve'). For an approval give nothing (enter "
+            "the task) or decline=true (the task finishes with its on_decline "
+            "outcome); for an ask with options give 'option'. Say why in 'reason'."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "node": {"type": "string", "description": "ask's task instance id or name"},
+                "option": {"type": "string", "description": "the option (asks with options)"},
+                "decline": {"type": "boolean"},
+                "reason": {"type": "string"},
+                "scope": _SCOPE,
+            },
+        },
+    },
+    {
+        "name": "flow_answer",
+        "description": (
+            "Answer a cflow2 question another session routed to you (a mesh 'decide' "
+            "message naming an ask2-... id; flow_asks lists them). 'decision' is one of "
+            "the options the question lists (approve/decline for an approval), or "
+            "'abstain' when you have no basis to decide -- it then goes to the next "
+            "candidate group. Judge it yourself; 'reason' is journaled in the asking "
+            "run. Your identity is your session, not an argument; the asking session "
+            "cannot answer its own question."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "ask_id": {"type": "string"},
+                "decision": {"type": "string"},
+                "reason": {"type": "string"},
+            },
+            "required": ["ask_id", "decision"],
+        },
+    },
+    {
+        "name": "flow_asks",
+        "description": (
+            "cflow2 questions waiting on this session's answer (from other sessions' "
+            "runs): ask id, prompt, options, deadline, the asking session. Answer each "
+            "with flow_answer."
+        ),
+        "inputSchema": {"type": "object", "properties": {}},
+    },
+    {
         "name": "flow_rule",
         "description": (
             "Read one of the run's rules: its text, and 'why' (the incident or "
@@ -201,7 +256,30 @@ def _scope(args: dict) -> Any:
     return str(args.get("scope") or "").strip() or None
 
 
+def _route(cwd: str, scope: Any, payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Put a new ask's question to its responders now rather than on the
+    daemon clock's next tick; re-read the status if anything moved."""
+    from . import asks
+
+    try:
+        if asks.needs_routing(cwd, scope):
+            asks.route(cwd=cwd, scope=scope)
+            return runtime.status(cwd=cwd, scope=scope, tick=False)
+    except (runtime.FlowError, store.StoreError):
+        pass
+    return payload
+
+
 def call_tool(name: str, args: dict) -> Dict[str, Any]:
+    out = _call(name, args)
+    if name in ("flow_start", "flow_status", "flow_report", "flow_select", "flow_fork",
+                "flow_approve", "flow_delegate") and isinstance(out, dict) and "run" in out:
+        cwd = str(args.get("cwd") or "").strip() if name == "flow_delegate" else ""
+        out = _route(cwd or os.getcwd(), _scope(args), out)
+    return out
+
+
+def _call(name: str, args: dict) -> Dict[str, Any]:
     cwd = os.getcwd()
     scope = _scope(args)
     if name == "flow_start":
@@ -249,6 +327,24 @@ def call_tool(name: str, args: dict) -> Dict[str, Any]:
             raise runtime.FlowError("submitting needs 'delegation'")
         return runtime.delegate_submit(did, args.get("outcome"), args.get("value"),
                                        args.get("receipt_path"), cwd=cwd, scope=scope)
+    if name == "flow_approve":
+        option = str(args.get("option") or "").strip() or None
+        return runtime.approve(
+            str(args.get("node") or "").strip() or None, decision=option,
+            decline=bool(args.get("decline")), reason=args.get("reason"),
+            caller=runtime.CALLER_AGENT, cwd=cwd, scope=scope)
+    if name == "flow_answer":
+        from . import asks
+
+        session = os.environ.get(store.SESSION_ENV, "").strip()
+        return asks.answer_by_id(str(args.get("ask_id") or "").strip(),
+                                 str(args.get("decision") or ""), args.get("reason"),
+                                 by_session=session)
+    if name == "flow_asks":
+        from . import asks
+
+        session = os.environ.get(store.SESSION_ENV, "").strip()
+        return {"session": session or None, "asks": asks.pending_for(session)}
     if name == "flow_rule":
         return runtime.rule(str(args.get("name") or ""), cwd=cwd, scope=scope)
     if name == "flow_abort":

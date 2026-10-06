@@ -88,6 +88,96 @@ nodes:
   계산하므로 값 참조가 text id를 바꾸지 않는다.
 - `returns`가 없으면 결과는 `{outcome: ok}` 하나다.
 
+#### verify
+
+- 표기: 명령 문자열, argv 목록, 또는 `{run, timeout}`(`run` 대신 v1 키 `command`도
+  받는다). 컴파일러는 `{run, timeout}`으로 정규화해 IR에 싣는다. `timeout`을
+  생략하면 런타임이 v1 기본값 900초를 쓴다. 문자열 명령의 `${...}` 값 참조는 실행
+  직전에 렌더한다.
+- 실행 시점: 작업이 `ok`로 보고될 때. 다른 결과(`fail` 등)는 verify를 거치지 않는다.
+- 실행 위치: 런의 cwd. 환경은 프로세스 환경에 `CFLOW2_RUN`, `CFLOW2_NODE`,
+  `CFLOW2_INSTANCE`, `CFLOW2_SCOPE`와 param마다 `CFLOW_IN_<NAME>`(런의 params 위에
+  작업이 속한 프로시저의 params를 덮은 값)을 더한 것이다.
+- 런 잠금 밖에서 실행한다. 잠금 없이 읽은 스냅샷에서 인스턴스를 찾고, 명령을
+  실행하고, 잠금을 잡은 뒤 같은 인스턴스가 아직 활성 작업일 때만 결과를 적용한다.
+  그사이 인스턴스가 바뀌었으면 아무것도 적용하지 않고 보고를 거절한다.
+- 종료 코드 0: `verify_passed`를 남기고 보고를 진행한다. 0이 아니거나 시간 초과
+  (프로세스 그룹 종료, 코드 124): `verify_failed`(출력의 마지막 40줄 포함)를 남기고
+  보고를 거절한다. 오류 메시지에 출력의 끝부분이 실린다. 작업은 활성 상태로 남는다.
+- 위임 실행 단위(`flow_delegate`)로 들어온 결과에는 verify를 적용하지 않는다.
+
+#### ask
+
+`ask`는 작업에 들어가기 위한 승인이며 방문마다 다시 요구된다(v1과 같은 의미).
+`from`·`otherwise`·`timeout`은 v1 파서(`cflow.model._parse_delegate`)로 검증하므로
+후보 표기(`role`, `scope`, `connect`)와 오류 문구가 v1과 같다.
+
+```yaml
+ask:
+  prompt: 진행할까요?
+  from: [{role: reviewer, scope: sibling}, {role: leader, scope: ancestor}]
+  otherwise: human        # human(기본) | self | self:<option>(options가 있을 때)
+  timeout: 900            # 그룹마다의 응답 기한(초). 없으면 기한 없음
+  on_decline: declined    # 거절 시 작업의 결과 이름(기본 declined)
+  # options: {pass: {outcome: ok, description: …}, changes: {description: …}}
+```
+
+- 형태 두 가지:
+
+  | 형태 | 답 | 결과 |
+  |---|---|---|
+  | 승인(`options` 없음) | `approve`, `decline` | `approve`면 작업이 활성화된다. `decline`이면 작업이 `on_decline` 결과(기본 `declined`)로 끝난다 |
+  | 결정(`options` 있음) | 옵션 이름 | 작업이 그 옵션의 `outcome`(기본은 옵션 이름)으로 끝난다. 값은 `{decision, reason, by, ask}` |
+
+- `on_decline`의 대응: v2에는 goto가 없으므로 `on_decline`은 노드 라벨 대신 결과
+  이름을 받는다. 작업 이름은 조합자 매핑이 아니어서 `on`을 붙일 수 없으므로, 거절된
+  작업은 그 결과로 끝나고 감싸는 `try`의 `catch`(또는 감싸는 조합자의 `on`)가 그
+  결과를 처리한다. 처리하는 곳이 없으면 비-ok 결과의 일반 규칙대로 런이 `failed`로
+  끝난다(차트의 `returns`가 그 결과를 선언하면 `done`).
+- 작업에 들어가면 인스턴스가 `await: approval`이 되고 ask 레코드
+  (`state.json`의 `asks`, id `ask2-<hex>`)가 열린다. 드라이버는 그 작업을 보고할 수
+  없다. `flow_status`의 `asks` 항목이 질문, 작업 프롬프트(`task_prompt`), 답 목록,
+  현재 해소 단계(`resolution`), 다음 행동(`how`)을 싣는다.
+- 해소 단계:
+
+  | resolution | 의미 | 답하는 쪽 |
+  |---|---|---|
+  | `routing` | 다음 `from` 그룹을 메시 명단에 대해 해석해야 함 | 데몬 클럭 또는 드라이버의 다음 MCP 호출이 라우팅 |
+  | `asked` | 응답자 세션에게 질문이 나감(`deadline`까지) | 그 응답자(`flow_answer`) |
+  | `human` | 모든 그룹이 소진되고 `otherwise: human` | 사람(`claunch cflow2 approve`, 웹 UI). 런은 `waiting_approval`(reason `ask`) |
+  | `self` | 모든 그룹이 소진되고 `otherwise: self` | 드라이버(`flow_approve`) |
+
+  `otherwise: self:<option>`이면 그룹 소진 시점에 그 옵션을 응답자 없이 택한다
+  (`ask_answered`의 `by`가 `unanswered`). 사람의 답은 해소 단계와 관계없이 적용되고,
+  질문을 받고 있던 응답자에게는 질문이 닫혔다는 `fyi` 메시지가 간다.
+- 라우팅(`cflow2/asks.py`): 런 잠금 밖에서 v1의 `responders.pool`로 명단을 한 번
+  읽고 `Pool.match`로 그룹을 앞에서부터 해석한다. 후보 규칙(질문한 세션과 그
+  하위 세션 제외, `scope`, `connect: true`의 연결 생성, 원격·종료 세션 제외)은 v1과
+  같다. 명단을 읽지 못한 경우(데몬 무응답)는 그룹을 소비하지 않고 30초 뒤 다시
+  시도하며 최대 4회까지 미룬다(`ask_deferred`). 질문은 v1과 같은 경로
+  (`POST /api/mesh/<mesh>/messages`, type `decide`)로 전달되고, ask id → 런 위치
+  색인이 `<런처 홈>/cflow2/asks/`에 기록된다. 응답자는 id만으로 답한다.
+- 응답 권한: `flow_answer`의 세션 신원은 MCP 서버 환경의 `CLAUNCH_SESSION`에서
+  읽는다. 라우팅 시점에 기록된 그룹의 세션만 답할 수 있고, 런 자신의 세션은 답할
+  수 없다. `abstain`은 다음 그룹으로 넘긴다.
+- 기한: 데몬 클럭이 매 틱 `asks.tick`을 호출한다. `asked` 그룹이 `deadline`을
+  넘기면 `ask_timeout`을 남기고 다음 그룹으로 간다. 그룹이 남지 않으면 `otherwise`로
+  간다. `human`·`self`로 넘어간 ask는 런의 세션에 한 번 통지된다.
+- CLI 보호: `claunch cflow2 approve`는 사람의 경로다. v1의 `claunch cflow approve`와
+  같이 CLI는 사람과 에이전트의 셸 호출을 구별하지 못하므로, 하네스 거부 규칙
+  (`install.GATE_DENY_RULES`)에 `claunch cflow2 approve|select|extend|resume`을
+  넣어 에이전트의 셸 호출을 막는다. 드라이버가 직접 답할 수 있는 경로는
+  `self` 해소 단계의 `flow_approve` 하나다.
+- 위임 실행 단위 아래의 작업에 `ask`가 있으면 정적 검사 오류(`delegated-ask`)다.
+
+#### 프로시저 params 기본값
+
+`call`이 펼친 `scope` 노드는 프로시저의 `params` 선언을 IR에 싣는다. 런타임은
+scope에 들어갈 때 `with`에 없는 param에 `default`를 채우고, 기본값도 없으면
+`null`을 넣는다. 호출 지점의 필수 param 누락은 컴파일 오류다. `group` 멤버는
+`flow_fork`의 `with`가 param이 되며, 선언에 없는 키나 기본값 없는 필수 param이
+빠진 fork는 거절된다.
+
 ### 2.3 조합자
 
 조합자 트리의 항목은 셋 중 하나다: 작업 이름(문자열), 조합자 매핑, 제어 매핑.
@@ -231,7 +321,15 @@ IR은 JSON으로 직렬화되는 statechart다. 버전은 `ir_version`(현재 1)
 
 `started`, `entered`, `left`(outcome 포함), `selected`, `reported`, `bound`,
 `delegate_started`, `delegate_returned`, `delegate_failed`, `fallback`(원인과 경로),
-`group_fork`, `group_settled`, `monitor_violation`, `waiting`, `done`, `aborted`.
+`group_fork`, `group_settled`, `monitor_violation`, `waiting`, `done`, `aborted`,
+`verify_passed`, `verify_failed`(종료 코드, 출력 끝부분), `ask_routed`(그룹, 응답자),
+`ask_answered`(결정, 답한 쪽, 경로), `ask_timeout`, `ask_deferred`,
+`ask_undelivered`. ask가 그룹을 건너뛰거나 `otherwise`로 넘어갈 때는
+`fallback`(`decision: ask`)을 남긴다.
+
+- 런의 `waiting_approval`은 열린 승인 항목에서 계산한다: `loop_limit`,
+  `monitor_violation`, `human` 단계의 ask가 하나라도 있으면 `waiting_approval`,
+  없으면 `running`.
 
 ## 5. 에이전트 인터페이스(MCP)
 
@@ -247,6 +345,9 @@ v1 툴과 이름이 겹치지 않도록 `flow_` 접두어를 쓴다.
 | `flow_delegate` | 위임 노드의 브리프 조회와 결과 제출(`subagent` 실행 주체에서 사용) |
 | `flow_rule` | 규칙의 `text`·`why` 조회 |
 | `flow_abort` | 런 중단 |
+| `flow_approve` | `self` 단계로 넘어간 자기 런의 ask에 답함(`node`, `option`, `decline`, `reason`). 다른 단계에서는 거절 |
+| `flow_answer` | 다른 세션의 런이 라우팅한 ask에 응답자로서 답함(`ask_id`, `decision`, `reason`) |
+| `flow_asks` | 이 세션의 답을 기다리는 ask 목록 |
 
 ## 6. capability와 provider 기술
 
@@ -446,9 +547,24 @@ spec:
 
 ## 9. 화면과 CLI
 
-- CLI: `claunch cflow2 ls | show | validate | compile | caps | start | status | journal | abort`.
+- CLI: `claunch cflow2 ls | show | validate | compile | caps | start | status | journal | abort`,
+  사람의 경로 `select | extend | resume | approve [NODE] [--decline | --option O] [--reason R]`.
+- ask 응답 API: `POST /api/cflow2/approve`(본문 `{cwd, scope, node?, decision?, reason?}`,
+  처리 함수 `daemon/cflow2_approve.approve`, 이벤트 루프 밖에서 호출).
 - API: `GET /api/cflow/workflows`가 v1·v2 항목을 함께 싣고 `version`(1 또는 2)과
   `deprecated`(v1이면 true)를 붙인다. v2 런 상세는 `GET /api/cflow2/run?cwd&scope`.
+  - 같은 이름이 두 형식에 다 있으면 v1이 시작된다. v2를 시작하려면 요청에
+    `workflow_version: 2`를 싣거나 이름을 `v2:<name>`으로 쓴다. v2에만 있는
+    이름과 `.cflow2/generated/*.yaml` 경로(또는 `cflow: 2`로 시작하는
+    `.cflow/generated/` 파일)는 그대로 v2다. 판정은 `daemon/cflow2_web.choose`.
+  - v2 런의 params는 요청의 `workflow_params`로 넘긴다. 차트가 `context`
+    param을 선언하면 `context`가 그 값이 된다.
+  - 그 밖의 API: `GET /api/cflow2/runs`(v2 런 목록), `GET /api/cflow2/definition?name`
+    (컴파일 트리와 검사 결과, 읽기 전용), `POST /api/cflow2/select`(사용자 선택,
+    `caller=user`), `POST /api/cflow2/extend`(`loop_limit` 응답). v2 런만 있는
+    슬롯에서 `GET /api/cflow/run`은 `v2: true`를 싣는다.
+  - v2 부모 세션의 자식은 부모 런의 `chart.json`의 `meta.default_child_cflow`를
+    물려받는다.
 - 새 세션 폼과 spawn 모달(같은 폼, `index.html`의 `#new-session`): 워크플로 선택
   목록에 버전 표시를 붙이고, v1 항목에는 deprecated 표시를 붙인다. v2를 고르면
   데몬이 v2 런으로 시작한다.

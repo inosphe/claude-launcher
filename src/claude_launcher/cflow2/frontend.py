@@ -29,6 +29,12 @@ Decisions this module makes where the spec leaves room:
   ``nodes:``. A separate file with ``kind: procedure`` is a procedure named
   after the file, found through ``resolve_include``.
 - ``par`` / ``group`` settle default to ``all`` / ``allSettled``.
+- ``verify`` is stored as ``{run, timeout}`` (a string or argv list is the
+  ``run``; ``command`` is accepted for ``run``); ``ask`` as ``{prompt, from,
+  otherwise, default_option, timeout, on_decline, options}`` (see
+  :func:`_ask`).
+- A ``scope`` node carries its procedure's ``params`` declarations; the
+  runtime applies their defaults when the scope starts.
 """
 
 from __future__ import annotations
@@ -641,13 +647,8 @@ def _compile_task(ctx: _Ctx, sc: _Scope, name: str, parent: Optional[str], line:
 
     ask = raw.get("ask")
     if ask is not None:
-        ask = _need_map(ctx, tfile, ask, f"task {name!r} ask", tline)
-        if "prompt" not in ask:
-            raise ctx.err(tfile, _line(ask, tline), f"task {name!r}: ask needs a prompt")
-        ask = _plain(ask)
-    verify = raw.get("verify")
-    if verify is not None and not isinstance(verify, (str, list)):
-        raise ctx.err(tfile, tline, f"task {name!r}: verify must be a command string or list")
+        ask = _ask(ctx, tfile, name, ask, tline)
+    verify = _verify(ctx, tfile, name, raw.get("verify"), _key_line(raw, "verify", tline))
     strict = raw.get("strict_budget", False)
     if not isinstance(strict, bool):
         raise ctx.err(tfile, tline, f"task {name!r}: strict_budget must be true or false")
@@ -665,7 +666,7 @@ def _compile_task(ctx: _Ctx, sc: _Scope, name: str, parent: Optional[str], line:
             "prompt": prompt,
             "text_id": ir.text_id(title, prompt, done_when or ""),
             "done_when": done_when,
-            "verify": _plain(verify),
+            "verify": verify,
             "ask": ask,
             "returns": _plain(returns),
             "effects": _str_list(ctx, tfile, raw.get("effects"), "effects", tline),
@@ -676,6 +677,137 @@ def _compile_task(ctx: _Ctx, sc: _Scope, name: str, parent: Optional[str], line:
     )
     _add(ctx, node)
     return nid
+
+
+VERIFY_KEYS = ("run", "command", "timeout")
+ASK_KEYS = ("prompt", "from", "otherwise", "timeout", "on_decline", "options")
+ASK_OPTION_KEYS = ("outcome", "description")
+#: The outcome a declined approval finishes its task with, unless
+#: ``on_decline`` names another.
+ASK_DECLINED = "declined"
+_OUTCOME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_.-]*$")
+#: The answer every ask accepts besides its options (a responder passing it on).
+ASK_ABSTAIN = "abstain"
+ASK_APPROVE = "approve"
+ASK_DECLINE = "decline"
+
+
+def _verify(ctx: _Ctx, file: str, name: str, value: Any, line: int) -> Optional[Dict[str, Any]]:
+    """``verify`` as ``{run: str | [argv], timeout: float | None}``.
+
+    Spellings: a command string, an argv list, or a mapping ``{run, timeout}``
+    (``command`` is accepted for ``run``, the v1 key). ``timeout`` left out is
+    ``None``; the runtime applies the v1 default (900 s)."""
+    if value is None:
+        return None
+    timeout: Optional[float] = None
+    if isinstance(value, dict):
+        _check_keys(ctx, file, value, VERIFY_KEYS, f"task {name!r} verify")
+        if "run" in value and "command" in value:
+            raise ctx.err(file, line, f"task {name!r}: verify takes 'run' or 'command', not both")
+        run = value.get("run", value.get("command"))
+        if value.get("timeout") is not None:
+            timeout = _number(ctx, file, value["timeout"], "verify.timeout", line)
+            if timeout <= 0:
+                raise ctx.err(file, line, f"task {name!r}: verify.timeout must be greater than 0")
+    else:
+        run = value
+    if isinstance(run, list):
+        if not run or not all(isinstance(x, (str, int, float)) for x in run):
+            raise ctx.err(file, line, f"task {name!r}: a verify argv list needs string items")
+        run = [str(x) for x in run]
+    elif not isinstance(run, str) or not run.strip():
+        raise ctx.err(file, line, f"task {name!r}: verify must be a command string, an argv "
+                      f"list, or {{run, timeout}}")
+    return {"run": _plain(run), "timeout": timeout}
+
+
+def _outcome_name(ctx: _Ctx, file: str, line: int, value: Any, what: str) -> str:
+    if not isinstance(value, str) or not _OUTCOME_RE.match(value):
+        raise ctx.err(file, line, f"{what} must be an outcome name, got {value!r}")
+    return value
+
+
+def _ask(ctx: _Ctx, file: str, name: str, value: Any, line: int) -> Dict[str, Any]:
+    """``ask`` normalised: ``{prompt, from: [{role, scope, connect}], otherwise,
+    default_option, timeout, on_decline, options}``.
+
+    The ``from``/``otherwise``/``timeout`` trio is read by the v1 parser
+    (``cflow.model._parse_delegate``) so both formats accept and refuse the same
+    declarations. Two shapes:
+
+    - an approval (no ``options``): answered ``approve`` (the task is entered)
+      or ``decline`` (the task finishes with outcome ``on_decline``, default
+      ``declined``);
+    - a decision (``options: {name: {outcome, description}}``): the answer is
+      an option name and the task finishes with that option's ``outcome``
+      (default: the option's name). ``otherwise: self:<option>`` takes that
+      option when every candidate group ran out.
+    """
+    from ..cflow import model as v1
+
+    ask = _need_map(ctx, file, value, f"task {name!r} ask", line)
+    aline = _line(ask, line)
+    if "prompt" not in ask:
+        raise ctx.err(file, aline, f"task {name!r}: ask needs a prompt")
+    _check_keys(ctx, file, ask, ASK_KEYS, f"task {name!r} ask")
+    prompt = ask.get("prompt")
+    if not isinstance(prompt, str) or not prompt.strip():
+        raise ctx.err(file, aline, f"task {name!r}: ask.prompt must be a non-empty string")
+    raw = _plain(ask)
+    try:
+        delegate = v1._parse_delegate(raw, f"task {name!r}: ask")
+    except v1.WorkflowError as exc:
+        raise ctx.err(file, aline, str(exc)) from None
+    options: Optional[List[Dict[str, Any]]] = None
+    if ask.get("options") is not None:
+        oline0 = _key_line(ask, "options", aline)
+        omap = _need_map(ctx, file, ask["options"], f"task {name!r} ask.options", oline0)
+        if not omap:
+            raise ctx.err(file, oline0, f"task {name!r}: ask.options is empty")
+        options = []
+        for oname, body in omap.items():
+            oline = _key_line(omap, oname, oline0)
+            oname = str(oname)
+            if not _OUTCOME_RE.match(oname) or oname == ASK_ABSTAIN:
+                raise ctx.err(file, oline, f"task {name!r}: bad ask option name {oname!r}")
+            if body is None:
+                body = {}
+            if isinstance(body, str):
+                body = {"description": body}
+            body = _need_map(ctx, file, body, f"ask option {oname!r}", oline)
+            _check_keys(ctx, file, body, ASK_OPTION_KEYS, f"ask option {oname!r}")
+            outcome = _outcome_name(ctx, file, oline, body.get("outcome", oname),
+                                    f"task {name!r}: ask option {oname!r} outcome")
+            options.append({"name": oname, "outcome": outcome,
+                            "description": str(body.get("description") or "")})
+        if ask.get("on_decline") is not None:
+            raise ctx.err(file, aline, f"task {name!r}: ask.on_decline applies to an approval; "
+                          f"an ask with options routes each option to its outcome")
+    default = delegate.default_option
+    if default is not None:
+        if options is None:
+            raise ctx.err(file, aline, f"task {name!r}: ask 'otherwise: self:{default}' names "
+                          f"an option, and an approval has none -- use 'self' or 'human'")
+        if default not in [o["name"] for o in options]:
+            raise ctx.err(file, aline, f"task {name!r}: ask 'otherwise: self:{default}' names "
+                          f"no option (options: {', '.join(o['name'] for o in options)})")
+    on_decline = None
+    if options is None:
+        on_decline = _outcome_name(ctx, file, aline, raw.get("on_decline", ASK_DECLINED),
+                                   f"task {name!r}: ask.on_decline")
+        if on_decline == ir.OUTCOME_OK:
+            raise ctx.err(file, aline, f"task {name!r}: ask.on_decline cannot be 'ok'")
+    return {
+        "prompt": prompt,
+        "from": [{"role": c.role, "scope": c.scope, "connect": c.connect}
+                 for c in delegate.candidates],
+        "otherwise": delegate.otherwise,
+        "default_option": default,
+        "timeout": delegate.timeout,
+        "on_decline": on_decline,
+        "options": options,
+    }
 
 
 def _compile_mapping(ctx: _Ctx, sc: _Scope, m: Dict[str, Any], parent: Optional[str],
@@ -982,7 +1114,8 @@ def _inline(ctx: _Ctx, sc: _Scope, scope_node: ir.Node, pname: str, with_raw: An
         if check_required and decl.get("required") and pn not in with_ and "default" not in decl:
             raise ctx.err(sc.file, line, f"call {pname!r}: missing required parameter {pn!r}")
     scope_node.type = ir.T_SCOPE
-    scope_node.props = {"proc": pname, "child": None, "with_": with_, "returns": proc.returns}
+    scope_node.props = {"proc": pname, "child": None, "with_": with_, "returns": proc.returns,
+                        "params": proc.params}
     inner = _Scope(file=proc.file, tasks=proc.tasks, prefix=scope_node.id + "/",
                    loops=(), trys=sc.trys, procs=sc.procs + (pname,), in_proc=True)
     scope_node.props["child"] = _compile_tree(ctx, inner, proc.body, scope_node.id,

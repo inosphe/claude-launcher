@@ -21,6 +21,11 @@ session name, as for v1 -- that does what no agent call does:
 * **budgets**: ``budget.seconds`` of ``subagent``/``session`` delegations
   (headless enforces its own by killing the process): the delegation ends
   ``timeout`` and the driver (and a child session) is told to stop;
+* **asks**: :func:`..cflow2.asks.tick` -- a task's ``ask`` whose group
+  timed out moves to the next ``from`` group, and every ask waiting for a
+  group is routed (roster read, question delivered as a mesh ``decide``
+  message); an ask that fell to a person or to the driver is typed into the
+  owning session once;
 * **children**: a ``session`` delegation whose child exited without
   submitting fails; one whose child wrote the receipt file (no MCP route) is
   submitted from it.
@@ -50,7 +55,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 from .. import store
-from ..cflow2 import executors, ir, runtime
+from ..cflow2 import asks, executors, ir, runtime
 from ..cflow2 import store as cstore
 from . import cflow2_exec
 
@@ -82,6 +87,8 @@ class Cflow2Clock:
         heartbeat: bool = True,
         threaded: bool = True,
         default_seconds: float = cflow2_exec.DEFAULT_SECONDS,
+        ask_pool: Optional[Callable[..., Any]] = None,
+        ask_deliver: Optional[Callable[..., Any]] = None,
     ) -> None:
         self.manager = manager
         self.poll = float(poll if poll is not None else DEFAULT_POLL)
@@ -92,6 +99,11 @@ class Cflow2Clock:
         self.heartbeat = heartbeat
         self.threaded = threaded
         self.default_seconds = default_seconds
+        #: Roster reader and question delivery for asks (tests stub them;
+        #: ``None`` is the mesh through this daemon's API -- :meth:`scan`
+        #: runs in a worker thread, so the HTTP call does not block the loop).
+        self.ask_pool = ask_pool
+        self.ask_deliver = ask_deliver
         #: Identifies this daemon process on a claimed delegation; a running
         #: headless record carrying another boot was orphaned by a restart.
         self.boot = f"{os.getpid()}-{uuid.uuid4().hex[:8]}"
@@ -258,6 +270,9 @@ class Cflow2Clock:
         if st.load_state().get("status") not in runtime.LIVE_STATUSES:
             return
         runtime.wait_tick(now, self.probe_runner, cwd=cwd, scope=scope)
+        for text in asks.tick(cwd=cwd, scope=scope, now=now, pool_fn=self.ask_pool,
+                              deliver_fn=self.ask_deliver):
+            notices.append((cwd, scope, text))
         for v in runtime.monitors_tick(now, self.probe_runner, cwd=cwd, scope=scope):
             if v["action"] in (runtime.MON_NOTIFY, runtime.MON_HALT):
                 notices.append((cwd, scope, monitor_block(scope, v)))

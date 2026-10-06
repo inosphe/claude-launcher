@@ -63,6 +63,8 @@ from __future__ import annotations
 import json
 import os
 import re
+import secrets
+import signal
 import subprocess
 import time
 import uuid
@@ -93,6 +95,32 @@ AW_WAIT = "wait"
 AW_DELEGATION = "delegation"
 AW_PAUSE = "pause"
 AW_LIMIT = "limit"
+#: A task whose ``ask`` has not been answered yet: entering it needs an
+#: approval (or, for an ask with ``options``, the decision is its result).
+AW_APPROVAL = "approval"
+
+#: v1's default for a verify command (``cflow.model.DEFAULT_VERIFY_TIMEOUT``).
+DEFAULT_VERIFY_TIMEOUT = 900.0
+#: How much of a failed verify's output a refusal carries.
+VERIFY_TAIL_LINES = 40
+VERIFY_TAIL_CHARS = 4000
+
+ASK_APPROVE = "approve"
+ASK_DECLINE = "decline"
+ASK_ABSTAIN = "abstain"
+ASK_DECLINED = "declined"
+ASK_OTHERWISE_HUMAN = "human"
+ASK_OTHERWISE_SELF = "self"
+#: Where an open ask's resolution stands.
+RES_ROUTING = "routing"   # a candidate group has to be resolved (asks.route)
+RES_ASKED = "asked"       # with responder sessions, until ``deadline``
+RES_HUMAN = "human"       # every group ran out; a person answers
+RES_SELF = "self"         # every group ran out; the driver may decide
+#: v1's patience with an unreadable roster (``cflow.engine.ROSTER_RETRY`` and
+#: ``MAX_ROSTER_DEFERRALS``): a silent daemon defers routing instead of
+#: spending the candidate groups.
+ROSTER_RETRY = 30.0
+MAX_ROSTER_DEFERRALS = 4
 
 CALLER_AGENT = "agent"
 CALLER_USER = "user"
@@ -130,6 +158,7 @@ class Run:
         return cls(st, st.load_chart(), st.load_state(), now)
 
     def save(self) -> None:
+        _sync_waiting(self)
         self.state["active"] = sorted(
             iid for iid, inst in self.state["inst"].items() if inst.get("await")
         )
@@ -187,6 +216,24 @@ class Run:
             "probe": self.state.get("probe", {}),
         })
         return out
+
+
+def _sync_waiting(r: "Run") -> None:
+    """``status``/``reason`` from the open approvals: the run is
+    ``waiting_approval`` while something only a person can release holds it
+    (a loop limit, a halting monitor, an ask that fell to ``human``)."""
+    if r.state.get("status") not in LIVE_STATUSES:
+        return
+    holds = [a for a in r.state.get("approvals") or []
+             if a.get("kind") != "ask" or a.get("resolution") == RES_HUMAN]
+    if holds:
+        kinds = [a.get("kind") for a in holds]
+        r.state["status"] = ST_WAITING
+        if r.state.get("reason") not in kinds:
+            r.state["reason"] = kinds[0]
+    else:
+        r.state["status"] = ST_RUNNING
+        r.state["reason"] = None
 
 
 def _cap_on(value: Any) -> bool:
@@ -382,6 +429,9 @@ def _enter_child(r: Run, parent: str, node_id: Optional[str], role: str,
 
 
 def _en_task(r: Run, iid: str, node: ir.Node) -> None:
+    if node.get("ask"):
+        _open_ask(r, iid, node)
+        return
     r.inst[iid]["await"] = AW_TASK
 
 
@@ -465,6 +515,13 @@ def _scope_params(r: Run, iid: str, node: ir.Node) -> bool:
     except expr_mod.ExprError as exc:
         _complete(r, iid, ir.OUTCOME_FAIL, {"reason": f"call arguments: {exc}"})
         return False
+    for name, decl in (node.get("params") or {}).items():
+        if name in params:
+            continue
+        decl = decl or {}
+        # A required param without a value never gets here: a call site is
+        # checked by the compiler, a group member by :func:`fork`.
+        params[name] = json.loads(json.dumps(decl["default"])) if "default" in decl else None
     inst["env"]["params"] = params
     return True
 
@@ -1007,6 +1064,10 @@ def _forget(r: Run, iid: str) -> None:
             d["status"] = "cancelled"
             d["finished"] = store_mod.utcnow()
     r.state["approvals"] = [a for a in r.state.get("approvals", []) if a.get("instance") != iid]
+    for rec in (r.state.get("asks") or {}).values():
+        if rec.get("instance") == iid and rec.get("status") == "open":
+            rec["status"] = "cancelled"
+            rec["closed"] = store_mod.utcnow()
 
 
 def _drop(r: Run, iid: str, why: str) -> None:
@@ -1256,18 +1317,185 @@ def _find(r: Run, ref: Optional[str], kinds: Tuple[str, ...], what: str) -> str:
     raise FlowError(f"several {what}s are active ({', '.join(sorted(cands))}); name one")
 
 
+# -- verify ------------------------------------------------------------------
+
+#: ``(command, cwd, env, timeout) -> (exit code, output[, timed_out])``
+VerifyRunner = Callable[[Any, str, Dict[str, str], float], Tuple[Any, ...]]
+
+
+def verify_spec(node: ir.Node) -> Optional[Dict[str, Any]]:
+    """A task's ``verify`` as ``{run, timeout}`` (older charts stored the
+    command string or argv list as written)."""
+    raw = node.get("verify")
+    if raw is None or raw == "" or raw == []:
+        return None
+    if isinstance(raw, dict):
+        run = raw.get("run", raw.get("command"))
+        timeout = raw.get("timeout")
+    else:
+        run, timeout = raw, None
+    if not run:
+        return None
+    return {"run": run, "timeout": float(timeout) if timeout else DEFAULT_VERIFY_TIMEOUT}
+
+
+def _env_name(name: str) -> str:
+    return "CFLOW_IN_" + re.sub(r"[^A-Za-z0-9]", "_", str(name)).upper()
+
+
+def verify_env(r: Run, iid: str) -> Dict[str, str]:
+    """The environment a verify command runs with: the process environment
+    plus ``CFLOW2_RUN``, ``CFLOW2_NODE``, ``CFLOW2_INSTANCE``, ``CFLOW2_SCOPE``
+    and every param as ``CFLOW_IN_<NAME>`` (the run's params, overlaid by the
+    params of the procedure the task runs in)."""
+    node = r.node_of(iid)
+    env = dict(os.environ)
+    env.update({
+        "CFLOW2_RUN": str(r.state.get("run_id") or ""),
+        "CFLOW2_NODE": node.label or node.id,
+        "CFLOW2_INSTANCE": iid,
+        "CFLOW2_SCOPE": str(r.state.get("scope") or ""),
+    })
+    params: Dict[str, Any] = dict(r.state.get("params") or {})
+    params.update(r.env(iid).get("params") or {})
+    for name, value in params.items():
+        if value is None:
+            text = ""
+        elif isinstance(value, str):
+            text = value
+        else:
+            text = json.dumps(value, ensure_ascii=False)
+        env[_env_name(name)] = text
+    return env
+
+
+def default_verify_runner(command: Any, cwd: str, env: Dict[str, str],
+                          timeout: float) -> Tuple[int, str, bool]:
+    """Run a verify command: ``(exit code, output, timed_out)``. A command
+    past ``timeout`` is killed with its process group (exit 124)."""
+    shell = not isinstance(command, list)
+    kwargs: Dict[str, Any] = {}
+    if os.name == "posix":
+        kwargs["start_new_session"] = True
+    try:
+        proc = subprocess.Popen(command, shell=shell, cwd=cwd, env=env,
+                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                text=True, errors="replace", **kwargs)
+    except OSError as exc:
+        return 127, f"verify could not start: {exc}", False
+    try:
+        out, _ = proc.communicate(timeout=timeout)
+        return proc.returncode, out or "", False
+    except subprocess.TimeoutExpired:
+        if os.name == "posix":
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except OSError:
+                proc.kill()
+        else:
+            proc.kill()
+        try:
+            out, _ = proc.communicate(timeout=10)
+        except subprocess.TimeoutExpired:
+            out = ""
+        return 124, (out or "") + f"\nverify timed out after {timeout:g}s", True
+
+
+def _tail(text: str) -> str:
+    lines = (text or "").rstrip().splitlines()[-VERIFY_TAIL_LINES:]
+    out = "\n".join(lines)
+    return out[-VERIFY_TAIL_CHARS:]
+
+
+def _verify_command(r: Run, iid: str, spec: Dict[str, Any]) -> Any:
+    run = spec["run"]
+    if isinstance(run, str):
+        return render(run, r.env(iid))
+    return [render(str(x), r.env(iid)) for x in run]
+
+
+def _task_for_report(r: Run, node: Optional[str]) -> str:
+    """The task instance a report names; an instance still waiting for its
+    ``ask`` is refused with who decides it."""
+    try:
+        return _find(r, node, (AW_TASK,), "task")
+    except FlowError:
+        held = [iid for iid, inst in r.inst.items() if inst.get("await") == AW_APPROVAL
+                and (node in (None, "", iid, inst["node"], r.node_of(iid).label))]
+        if len(held) == 1:
+            rec = (r.state.get("asks") or {}).get(r.inst[held[0]]["frame"].get("ask") or "")
+            how = _ask_how(held[0], rec) if rec else ""
+            raise FlowError(f"task {r.node_of(held[0]).label or held[0]} is not entered yet: "
+                            f"it waits for its ask ({how})") from None
+        raise
+
+
 def report(node: Optional[str], outcome: str = ir.OUTCOME_OK, value: Any = None,
            text: Optional[str] = None, *, cwd: Optional[str] = None,
-           scope: Optional[str] = None, now: Optional[float] = None) -> Dict[str, Any]:
-    """Report an active task's result and advance."""
+           scope: Optional[str] = None, now: Optional[float] = None,
+           verify_runner: Optional[VerifyRunner] = None) -> Dict[str, Any]:
+    """Report an active task's result and advance.
+
+    An ``ok`` report of a task with ``verify`` runs the command first, outside
+    the run lock (a verify can take minutes; nothing else may wait on it): the
+    instance is read off an unlocked snapshot, the command runs, then the lock
+    is taken and the report applies only if that same instance is still the
+    active task. A non-zero exit refuses the report (``verify_failed``, the
+    output's tail in the error) and the task stays active."""
+    st = RunStore(cwd, scope)
+    measured: Optional[Dict[str, Any]] = None
+    if outcome == ir.OUTCOME_OK and st.exists():
+        snap = Run.load(st, now)
+        iid0: Optional[str] = None
+        if snap.status in LIVE_STATUSES:
+            try:
+                iid0 = _task_for_report(snap, node)
+            except FlowError:
+                iid0 = None  # the locked pass below raises the real error
+        spec = verify_spec(snap.node_of(iid0)) if iid0 else None
+        if iid0 and spec:
+            n0 = snap.node_of(iid0)
+            errors = validate_result(returns_of(n0), outcome, value)
+            if errors:
+                raise FlowError(f"report for {n0.label or n0.id} refused: " + "; ".join(errors)
+                                + f". Declared returns: {json.dumps(returns_of(n0))}")
+            command = _verify_command(snap, iid0, spec)
+            runner = verify_runner or default_verify_runner
+            started = time.monotonic()
+            res = tuple(runner(command, str(st.cwd), verify_env(snap, iid0), spec["timeout"]))
+            measured = {
+                "instance": iid0, "code": res[0], "output": res[1] if len(res) > 1 else "",
+                "timed_out": bool(res[2]) if len(res) > 2 else False,
+                "seconds": round(time.monotonic() - started, 3), "command": command,
+                "timeout": spec["timeout"],
+            }
+
     def op(r: Run) -> None:
         _require_live(r)
-        iid = _find(r, node, (AW_TASK,), "task")
+        iid = _task_for_report(r, node)
         n = r.node_of(iid)
         errors = validate_result(returns_of(n), outcome, value)
         if errors:
             raise FlowError(f"report for {n.label or n.id} refused: " + "; ".join(errors)
                             + f". Declared returns: {json.dumps(returns_of(n))}")
+        if outcome == ir.OUTCOME_OK and verify_spec(n):
+            if measured is None or measured["instance"] != iid:
+                raise FlowError(f"task {n.label or n.id} changed while its verify ran; "
+                                f"nothing was applied -- call flow_status and report again")
+            tail = _tail(measured["output"])
+            fields = dict(node=n.id, instance=iid, command=measured["command"],
+                          exit=measured["code"], seconds=measured["seconds"])
+            if measured["code"] != 0:
+                r.emit("verify_failed", tail=tail, timed_out=measured["timed_out"] or None,
+                       **fields)
+                why = (f"timed out after {measured['timeout']:g}s" if measured["timed_out"]
+                       else f"exit {measured['code']}")
+                r.deferred_error = (
+                    f"report for {n.label or n.id} refused: verify failed ({why}): "
+                    f"{measured['command']}\n{tail}\nThe task stays active; fix what the "
+                    f"output says and report again.")
+                return
+            r.emit("verify_passed", **fields)
         r.emit("reported", node=n.id, instance=iid, outcome=outcome, value=value, text=text)
         _complete(r, iid, outcome, value)
     _mutate(cwd, scope, now, op)
@@ -1342,6 +1570,18 @@ def fork(group: Optional[str], with_: Optional[Dict[str, Any]] = None, *,
         if with_ is not None and not isinstance(with_, dict):
             raise FlowError("'with' must be an object of parameter -> value")
         args = dict(with_ or {})
+        decls = r.chart.node(n.get("member")).get("params") or {}
+        if decls:
+            unknown = sorted(set(args) - set(decls))
+            if unknown:
+                raise FlowError(f"group {n.get('name')}: fork refused -- unknown param(s) "
+                                f"{', '.join(unknown)} (declared: {', '.join(decls)})")
+            missing = [k for k, d in decls.items()
+                       if (d or {}).get("required") and k not in args and "default" not in (d or {})]
+            if missing:
+                raise FlowError(f"group {n.get('name')}: fork refused -- missing required "
+                                f"param(s) {', '.join(missing)} of procedure "
+                                f"{r.chart.node(n.get('member')).get('proc')}; pass them in 'with'")
         # registered before entering: a member may finish synchronously
         member = f"{n.get('member')}@{int(r.state.get('seq') or 0) + 1}"
         frame["members"].append({"instance": member, "with": args})
@@ -1733,6 +1973,8 @@ def _tick_time(r: Run, probe_runner: Optional[ProbeRunner] = None,
                 _loop_iterate(r, iid)
                 fired = True
                 break
+        if not fired and _expire_asks(r):
+            fired = True
         if not fired:
             break
         moved += 1
@@ -2009,7 +2251,7 @@ def describe(r: Run) -> Dict[str, Any]:
         out["value"] = s.get("value")
         out["note"] = f"the run is {s.get('status')}"
         return out
-    tasks, choices, waits, groups, limits = [], [], [], [], []
+    tasks, choices, waits, groups, limits, asks = [], [], [], [], [], []
     for iid in sorted(r.inst, key=lambda k: int(k.rsplit("@", 1)[1])):
         inst = r.inst[iid]
         node = r.chart.node(inst["node"])
@@ -2052,6 +2294,10 @@ def describe(r: Run) -> Dict[str, Any]:
         elif aw == AW_PAUSE:
             waits.append({"instance": iid, "node": node.id, "kind": "pause",
                           "resume_at": inst["frame"].get("resume_at")})
+        elif aw == AW_APPROVAL:
+            rec = (s.get("asks") or {}).get(inst["frame"].get("ask") or "")
+            if rec:
+                asks.append(_describe_ask(r, iid, node, rec, env))
         elif aw == AW_LIMIT:
             limits.append({"instance": iid, "node": node.id, "label": node.label or None,
                            "iterations": inst["frame"].get("iter"), "max": _loop_max(r, iid)})
@@ -2080,6 +2326,8 @@ def describe(r: Run) -> Dict[str, Any]:
         out["delegations"] = dels
     if limits:
         out["loop_limits"] = limits
+    if asks:
+        out["asks"] = asks
     out["data"] = s.get("data")
     hints = []
     if tasks:
@@ -2097,6 +2345,8 @@ def describe(r: Run) -> Dict[str, Any]:
         hints.append("waits fire on their own; call flow_status again later")
     if limits:
         hints.append("a loop hit its max: the user decides with 'claunch cflow2 extend'")
+    for a in asks:
+        hints.append(f"{a['instance']}: {a['how']}")
     out["next"] = "; ".join(hints) or None
     return out
 
@@ -2140,6 +2390,395 @@ def resolve_caps(profile: Optional[str] = None, harness: Optional[str] = None) -
                                 if profile else None)
     except Exception:  # noqa: BLE001 - capability layering must not block a run
         return None
+
+
+# ---------------------------------------------------------------------------
+# ask: approval to enter a task / a delegated decision (docs/cflow-v2.md 2.2)
+#
+# Entering a task with ``ask`` opens an ask record (``state["asks"][id]``,
+# ids ``ask2-<hex>``) and parks the instance (``await: approval``); the driver
+# cannot report on it. The record's ``resolution`` says who decides now:
+#
+#   routing -> the next ``from`` group has to be resolved against the mesh
+#              (:mod:`.asks` does that outside the lock and applies it with
+#              :func:`ask_apply_route`)
+#   asked   -> responder sessions were asked; they answer with flow_answer
+#              (:func:`answer`); past ``deadline`` the next group is tried
+#   human   -> every group ran out under ``otherwise: human``: a person
+#              answers (``claunch cflow2 approve``, the web UI)
+#   self    -> every group ran out under bare ``otherwise: self``: the driver
+#              decides with flow_approve
+#
+# A person's answer (:func:`approve` with caller user) lands whatever the
+# resolution, like v1. Every new visit of the task asks again.
+
+
+def _ask_spec(node: ir.Node) -> Dict[str, Any]:
+    """The task's ``ask`` with every key present (charts compiled before the
+    frontend normalised it stored the mapping as written)."""
+    raw = dict(node.get("ask") or {})
+    cands = []
+    for c in raw.get("from") or []:
+        c = dict(c or {})
+        cands.append({"role": str(c.get("role") or "").lower(),
+                      "scope": str(c.get("scope") or "any").lower(),
+                      "connect": bool(c.get("connect"))})
+    otherwise = str(raw.get("otherwise") or ASK_OTHERWISE_HUMAN)
+    base, _, default = otherwise.partition(":")
+    options = raw.get("options")
+    if isinstance(options, dict):  # an un-normalised chart
+        options = [{"name": k, "outcome": (v or {}).get("outcome", k) if isinstance(v, dict) else k,
+                    "description": (v or {}).get("description", "") if isinstance(v, dict)
+                    else str(v or "")} for k, v in options.items()]
+    return {
+        "prompt": str(raw.get("prompt") or ""),
+        "from": cands,
+        "otherwise": base or ASK_OTHERWISE_HUMAN,
+        "default_option": raw.get("default_option") or (default or None),
+        "timeout": float(raw["timeout"]) if raw.get("timeout") else None,
+        "on_decline": raw.get("on_decline") or ASK_DECLINED,
+        "options": list(options) if options else None,
+    }
+
+
+def _ask_choices(rec: Dict[str, Any]) -> List[Dict[str, Any]]:
+    if rec.get("options"):
+        return list(rec["options"])
+    return [{"name": ASK_APPROVE, "outcome": None, "description": "enter the task"},
+            {"name": ASK_DECLINE, "outcome": rec.get("on_decline") or ASK_DECLINED,
+             "description": f"do not enter it; the task finishes "
+                            f"'{rec.get('on_decline') or ASK_DECLINED}'"}]
+
+
+def _open_ask(r: Run, iid: str, node: ir.Node) -> None:
+    spec = _ask_spec(node)
+    aid = f"ask2-{secrets.token_hex(4)}"
+    rec: Dict[str, Any] = {
+        "id": aid, "instance": iid, "node": node.id, "label": node.label or None,
+        "kind": "decision" if spec["options"] else "approval",
+        "prompt": render(spec["prompt"], r.env(iid)),
+        "from": spec["from"], "otherwise": spec["otherwise"],
+        "default_option": spec["default_option"], "timeout": spec["timeout"],
+        "on_decline": None if spec["options"] else spec["on_decline"],
+        "options": spec["options"], "status": "open",
+        "resolution": RES_ROUTING if spec["from"] else None,
+        "group": 0, "asked": [], "skipped": [], "deadline": None, "deferrals": 0,
+        "retry_at": None, "opened": store_mod.utcnow(), "opened_at": r.now,
+        "visit": int((r.state.get("visits") or {}).get(node_key(node)) or 0),
+    }
+    r.state.setdefault("asks", {})[aid] = rec
+    r.inst[iid]["await"] = AW_APPROVAL
+    r.inst[iid]["frame"]["ask"] = aid
+    r.state.setdefault("approvals", []).append({
+        "kind": "ask", "instance": iid, "node": node.id, "label": node.label or None,
+        "ask": aid, "resolution": rec["resolution"],
+    })
+    r.emit("waiting", node=node.id, instance=iid, kind="ask", ask=aid, ask_kind=rec["kind"],
+           candidates=[_cand_text(c) for c in spec["from"]] or None,
+           otherwise=spec["otherwise"])
+    if not spec["from"]:
+        _ask_fall(r, rec, "the ask declares no 'from' candidates")
+
+
+def _cand_text(c: Dict[str, Any]) -> str:
+    notes = [x for x in ("" if c.get("scope") in (None, "", "any") else c["scope"],
+                         "connect" if c.get("connect") else "") if x]
+    return f"{c.get('role')} ({', '.join(notes)})" if notes else str(c.get("role"))
+
+
+def _ask_sync_approval(r: Run, rec: Dict[str, Any]) -> None:
+    for a in r.state.get("approvals") or []:
+        if a.get("kind") == "ask" and a.get("ask") == rec["id"]:
+            a["resolution"] = rec.get("resolution")
+
+
+def _ask_fall(r: Run, rec: Dict[str, Any], cause: str) -> None:
+    """Every candidate group is spent: ``otherwise`` decides who answers."""
+    rec["asked"], rec["deadline"], rec["retry_at"] = [], None, None
+    rec["group"] = len(rec.get("from") or [])
+    otherwise = rec.get("otherwise") or ASK_OTHERWISE_HUMAN
+    default = rec.get("default_option") if otherwise == ASK_OTHERWISE_SELF else None
+    r.emit("fallback", decision="ask", ask=rec["id"], node=rec["node"],
+           instance=rec["instance"], cause=cause,
+           route=f"ask -> {otherwise}" + (f":{default}" if default else ""))
+    rec["resolution"] = RES_SELF if otherwise == ASK_OTHERWISE_SELF else RES_HUMAN
+    _ask_sync_approval(r, rec)
+    if default:
+        _ask_resolve(r, rec, default, by="unanswered",
+                     reason="declared default, taken unanswered", channel="default")
+
+
+def _ask_escalate(r: Run, rec: Dict[str, Any], why: str) -> None:
+    """The group that had the question produced no answer: the next one."""
+    who = ", ".join(e.get("handle") or e.get("session") or "?" for e in rec.get("asked") or [])
+    rec.setdefault("skipped", []).append(
+        {"group": rec.get("group"), "candidate": who or "nobody", "reason": why})
+    rec["group"] = int(rec.get("group") or 0) + 1
+    rec["asked"], rec["deadline"], rec["retry_at"] = [], None, None
+    if rec["group"] >= len(rec.get("from") or []):
+        _ask_fall(r, rec, f"{why}; no candidate group left")
+        return
+    rec["resolution"] = RES_ROUTING
+    _ask_sync_approval(r, rec)
+
+
+def _ask_decision(rec: Dict[str, Any], decision: Optional[str], *,
+                  allow_abstain: bool = False) -> str:
+    choice = str(decision or "").strip().lower()
+    names = [o["name"] for o in _ask_choices(rec)]
+    if choice in names or (allow_abstain and choice == ASK_ABSTAIN):
+        return choice
+    extra = f", or {ASK_ABSTAIN!r} if you have no basis to decide" if allow_abstain else ""
+    raise FlowError(f"unknown decision {decision!r} for {rec['id']} -- answer with one of: "
+                    f"{', '.join(names)}{extra}")
+
+
+def _ask_resolve(r: Run, rec: Dict[str, Any], decision: str, *, by: str,
+                 reason: Optional[str], channel: str) -> None:
+    iid = rec["instance"]
+    rec["status"] = "answered"
+    rec["closed"] = store_mod.utcnow()
+    rec["answer"] = {"decision": decision, "by": by, "reason": reason, "channel": channel}
+    r.state["approvals"] = [a for a in r.state.get("approvals") or []
+                            if not (a.get("kind") == "ask" and a.get("ask") == rec["id"])]
+    r.emit("ask_answered", ask=rec["id"], node=rec["node"], instance=iid, decision=decision,
+           by=by, reason=reason, channel=channel)
+    if iid not in r.inst:
+        return
+    value = {"decision": decision, "reason": reason, "by": by, "ask": rec["id"]}
+    if rec.get("kind") == "decision":
+        opt = next(o for o in rec["options"] if o["name"] == decision)
+        _complete(r, iid, opt.get("outcome") or decision, value)
+        return
+    if decision == ASK_APPROVE:
+        r.inst[iid]["await"] = AW_TASK
+        return
+    _complete(r, iid, rec.get("on_decline") or ASK_DECLINED, value)
+
+
+def _expire_asks(r: Run) -> bool:
+    """Asked groups past their deadline move on (``ask_timeout``)."""
+    moved = False
+    for rec in list((r.state.get("asks") or {}).values()):
+        if rec.get("status") != "open" or rec.get("resolution") != RES_ASKED:
+            continue
+        if rec.get("deadline") is None or r.now < float(rec["deadline"]):
+            continue
+        who = [e.get("handle") or e.get("session") for e in rec.get("asked") or []]
+        r.emit("ask_timeout", ask=rec["id"], node=rec["node"], instance=rec["instance"],
+               group=rec.get("group"), asked=who, timeout=rec.get("timeout"))
+        _ask_escalate(r, rec, f"no answer from {', '.join(map(str, who))} within "
+                              f"{float(rec.get('timeout') or 0):g}s")
+        moved = True
+    return moved
+
+
+def asks_to_route(r: Run) -> List[Dict[str, Any]]:
+    """Open asks whose next candidate group has to be resolved now."""
+    out = []
+    for rec in (r.state.get("asks") or {}).values():
+        if rec.get("status") == "open" and rec.get("resolution") == RES_ROUTING \
+                and (rec.get("retry_at") is None or r.now >= float(rec["retry_at"])):
+            out.append(rec)
+    return out
+
+
+def ask_apply_route(plans: List[Dict[str, Any]], *, cwd: Optional[str] = None,
+                    scope: Optional[str] = None,
+                    now: Optional[float] = None) -> List[Dict[str, Any]]:
+    """Apply routing plans computed off a snapshot (:func:`.asks.route`).
+
+    A plan is ``{ask, from_group, group, asked, skipped, defer?, wired?}``; it
+    applies only to an ask that is still open, still routing and still at
+    ``from_group`` (anything else moved it meanwhile). Returns the applied
+    plans whose ask now has responders (the caller delivers the question)."""
+    routed: List[Dict[str, Any]] = []
+
+    def op(r: Run) -> None:
+        if r.status not in LIVE_STATUSES:
+            return
+        for plan in plans:
+            rec = (r.state.get("asks") or {}).get(plan["ask"])
+            if not rec or rec.get("status") != "open" or rec.get("resolution") != RES_ROUTING \
+                    or int(rec.get("group") or 0) != int(plan["from_group"]):
+                continue
+            if plan.get("defer"):
+                rec["deferrals"] = int(rec.get("deferrals") or 0) + 1
+                rec["retry_at"] = r.now + ROSTER_RETRY
+                r.emit("ask_deferred", ask=rec["id"], node=rec["node"], group=rec["group"],
+                       reason=plan["defer"], count=rec["deferrals"])
+                continue
+            rec.setdefault("skipped", []).extend(plan.get("skipped") or [])
+            for s in plan.get("skipped") or []:
+                r.emit("fallback", decision="ask", ask=rec["id"], node=rec["node"],
+                       instance=rec["instance"], cause=s.get("reason"),
+                       route=f"group {s.get('group')} -> next group")
+            if plan.get("wired"):
+                rec["wired"] = list(plan["wired"])
+            if plan.get("asked"):
+                rec["group"] = int(plan["group"])
+                rec["asked"] = list(plan["asked"])
+                rec["mesh"] = plan.get("mesh") or rec.get("mesh")
+                rec["resolution"] = RES_ASKED
+                rec["deadline"] = r.now + float(rec["timeout"]) if rec.get("timeout") else None
+                rec["retry_at"] = None
+                _ask_sync_approval(r, rec)
+                r.emit("ask_routed", ask=rec["id"], node=rec["node"], instance=rec["instance"],
+                       group=rec["group"], mesh=rec.get("mesh"),
+                       to=[e.get("handle") for e in rec["asked"]], deadline=rec["deadline"])
+                routed.append({**plan, "record": json.loads(json.dumps(rec)),
+                               "workflow": r.state.get("workflow"),
+                               "run": r.state.get("run_id")})
+            else:
+                rec["group"] = int(plan["group"])
+                reasons = [s.get("reason") for s in rec.get("skipped") or []]
+                _ask_fall(r, rec, "no candidate could be asked: "
+                          + ("; ".join(str(x) for x in reasons) or "none declared"))
+    _mutate(cwd, scope, now, op)
+    return routed
+
+
+def _ask_how(iid: str, rec: Dict[str, Any]) -> str:
+    res = rec.get("resolution")
+    names = [o["name"] for o in _ask_choices(rec)]
+    if rec.get("kind") == "decision":
+        cli = f"'claunch cflow2 approve {iid} --option <{'|'.join(names)}>'"
+        tool = f"flow_approve(node='{iid}', option=<{'|'.join(names)}>, reason)"
+    else:
+        cli = f"'claunch cflow2 approve {iid}' (or --decline --reason R)"
+        tool = f"flow_approve(node='{iid}', reason) or with decline=true"
+    if res == RES_ROUTING:
+        return ("the question is being routed to "
+                + " -> ".join(_cand_text(c) for c in rec.get("from") or [])
+                + "; it moves on its own")
+    if res == RES_ASKED:
+        who = ", ".join(e.get("handle") or "?" for e in rec.get("asked") or [])
+        return (f"asked {who} ({rec['id']}); their answer comes back on its own. A person "
+                f"may answer first with {cli}")
+    if res == RES_SELF:
+        return f"nobody could be asked and the workflow leaves it to you: {tool}"
+    return (f"a person decides: {cli} (inside a chat session: '! claunch cflow2 approve ...') "
+            f"or the web UI. Do not work around it; tell the user what is waiting")
+
+
+def _describe_ask(r: Run, iid: str, node: ir.Node, rec: Dict[str, Any],
+                  env: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "instance": iid, "node": node.id, "label": node.label or None,
+        "title": node.get("title"), "ask": rec["id"], "kind": rec.get("kind"),
+        "prompt": rec.get("prompt"), "task_prompt": render(node.get("prompt"), env),
+        "options": [{"name": o["name"], "description": o.get("description") or ""}
+                    for o in _ask_choices(rec)],
+        "resolution": rec.get("resolution"),
+        "asked": [e.get("handle") for e in rec.get("asked") or []],
+        "deadline": rec.get("deadline"),
+        "skipped": [s.get("reason") for s in rec.get("skipped") or []],
+        "how": _ask_how(iid, rec),
+    }
+
+
+def approve(node: Optional[str] = None, *, decision: Optional[str] = None,
+            decline: bool = False, reason: Optional[str] = None,
+            caller: str = CALLER_USER, by: Optional[str] = None,
+            cwd: Optional[str] = None, scope: Optional[str] = None,
+            now: Optional[float] = None) -> Dict[str, Any]:
+    """Answer an open ask as a person (``caller`` user: the CLI, the web UI)
+    or as the driver (``caller`` agent: flow_approve, only once the ask fell
+    through to ``otherwise: self``).
+
+    ``decision`` is an option name (an ask with ``options``) or approve /
+    decline; ``decline`` is shorthand for the latter. The payload's
+    ``answered`` names the responders that still had the question, so the
+    caller can tell them it is closed (:func:`.asks.withdraw`)."""
+    answered: Dict[str, Any] = {}
+
+    def op(r: Run) -> None:
+        _require_live(r)
+        iid = _find(r, node, (AW_APPROVAL,), "ask")
+        rec = r.state["asks"][r.inst[iid]["frame"]["ask"]]
+        if caller != CALLER_USER and rec.get("resolution") != RES_SELF:
+            raise FlowError(
+                f"{rec['id']} on task {rec.get('label') or rec['node']} is not yours to "
+                f"answer -- {_ask_how(iid, rec)}. A run cannot approve its own ask; only "
+                f"an ask whose candidates all fell through to 'otherwise: self' is the "
+                f"driver's")
+        if decline and decision not in (None, ASK_DECLINE):
+            raise FlowError("give --decline or a decision, not both")
+        choice = decision if decision is not None else (
+            ASK_DECLINE if decline else (ASK_APPROVE if rec.get("kind") == "approval" else None))
+        if choice is None:
+            raise FlowError(f"{rec['id']} is a decision: name an option "
+                            f"({', '.join(o['name'] for o in _ask_choices(rec))})")
+        choice = _ask_decision(rec, choice)
+        answered.update({
+            "ask": rec["id"], "instance": iid, "node": rec["node"], "label": rec.get("label"),
+            "decision": choice, "workflow": r.state.get("workflow"),
+            "mesh": rec.get("mesh"), "prompt": rec.get("prompt"),
+            "pending": [dict(e) for e in rec.get("asked") or []]
+            if rec.get("resolution") == RES_ASKED else [],
+        })
+        who = by or (CALLER_USER if caller == CALLER_USER else "driver")
+        _ask_resolve(r, rec, choice, by=who, reason=reason,
+                     channel="human" if caller == CALLER_USER else "self")
+    _mutate(cwd, scope, now, op)
+    payload = status(cwd=cwd, scope=scope, now=now, tick=False)
+    payload["answered"] = answered
+    return payload
+
+
+def answer(ask_id: str, decision: str, reason: Optional[str] = None, *,
+           by_session: str, cwd: Optional[str] = None, scope: Optional[str] = None,
+           now: Optional[float] = None) -> Dict[str, Any]:
+    """A responder session's answer to an ask it was asked (flow_answer).
+
+    ``by_session`` is the answering session's name, read by the MCP layer from
+    the environment the daemon exported (``CLAUNCH_SESSION``), never from the
+    call's arguments. Authority is membership in the group recorded when the
+    question was routed; the run's own session can never answer it.
+    ``abstain`` passes the question to the next group."""
+    receipt: Dict[str, Any] = {}
+
+    def op(r: Run) -> None:
+        rec = (r.state.get("asks") or {}).get(ask_id)
+        if r.status not in LIVE_STATUSES or not rec or rec.get("status") != "open" \
+                or rec.get("resolution") != RES_ASKED:
+            raise FlowError(
+                f"request {ask_id!r} is not open for an answer any more -- it was answered, "
+                f"it moved on to another group or a person, or the run left the task. "
+                f"Nothing was applied")
+        session = str(by_session or "").strip()
+        if not session:
+            raise FlowError("this call carries no session identity, so it cannot be "
+                            "attributed; answer from a managed session")
+        if session == str(r.state.get("scope") or ""):
+            raise FlowError("this is your own run -- a task cannot approve itself. That is "
+                            "the point of delegating the decision")
+        mine = [e for e in rec.get("asked") or [] if e.get("session") == session]
+        if not mine:
+            who = ", ".join(e.get("handle") or "?" for e in rec.get("asked") or []) or "nobody"
+            raise FlowError(f"{session!r} was not asked this -- it is with {who}")
+        handle = str(mine[0].get("handle") or session)
+        choice = _ask_decision(rec, decision, allow_abstain=True)
+        receipt.update({"ask": ask_id, "decision": choice, "reason": reason, "as": handle,
+                        "workflow": r.state.get("workflow"), "task": rec.get("label")
+                        or rec["node"], "prompt": rec.get("prompt")})
+        if choice == ASK_ABSTAIN:
+            r.emit("ask_answered", ask=ask_id, node=rec["node"], instance=rec["instance"],
+                   decision=ASK_ABSTAIN, by=handle, by_session=session, reason=reason,
+                   channel="responder")
+            _ask_escalate(r, rec, f"{handle} abstained" + (f": {reason}" if reason else ""))
+            receipt["note"] = ("recorded as an abstention; the question moved on to the next "
+                               "candidate group (or to its fallback)")
+            return
+        _ask_resolve(r, rec, choice, by=handle, reason=reason, channel="responder")
+        receipt["note"] = "decision recorded; the asking session continues from it"
+    _mutate(cwd, scope, now, op)
+    return receipt
+
+
+def open_asks(r: Run) -> List[Dict[str, Any]]:
+    return [dict(rec) for rec in (r.state.get("asks") or {}).values()
+            if rec.get("status") == "open"]
 
 
 _ENTER: Dict[str, Callable[[Run, str, ir.Node], None]] = {

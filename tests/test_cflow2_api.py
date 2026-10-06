@@ -438,3 +438,42 @@ def test_the_wizard_marks_versions_and_keeps_v1_as_the_auto_pick():
     assert got.index(("improv-worker [v1, deprecated]", "improv-worker")) < \
         got.index(("improv-worker [v2]", "v2:improv-worker"))
     assert wizard._workflow_default(entries, "worker") == "improv-worker"
+
+
+# --------------------------------------------------------------------------- #
+# approvals: a task's ask answered from the dashboard
+# --------------------------------------------------------------------------- #
+GATED = """\
+cflow: 2
+name: gated
+nodes:
+  ship:
+    title: ship it
+    prompt: ship
+    ask: {prompt: "ship now?"}
+body: [ship]
+"""
+
+
+def test_the_user_answers_an_ask_from_the_dashboard(proj):
+    cwd = str(proj)
+    (proj / ".claunch" / "workflows" / "v2" / "gated.yaml").write_text(GATED, encoding="utf-8")
+    runtime.start(layers.load("gated", cwd), cwd=cwd, scope="g1", caps={})
+
+    async def go(client, bearer):
+        q = f"cwd={cwd}&scope=g1"
+        out = {"asks": await (await client.get(f"/api/cflow2/asks?{q}", headers=bearer)).json()}
+        body = {"cwd": cwd, "scope": "g1", "decision": "approve"}
+        out["unauth"] = (await client.post("/api/cflow2/approve", json=body)).status
+        resp = await client.post("/api/cflow2/approve", json=body, headers=bearer)
+        out["approve"] = (resp.status, await resp.json())
+        resp = await client.post("/api/cflow2/approve", json=body, headers=bearer)
+        out["again"] = resp.status
+        return out
+
+    out = _http(go)
+    assert out["unauth"] == 401
+    assert out["approve"][0] == 200
+    st = runtime.status(cwd=cwd, scope="g1")
+    assert not st.get("asks") and st["tasks"][0]["label"] == "ship"
+    assert out["again"] == 400   # nothing left to approve

@@ -57,7 +57,7 @@ from . import notice as notice_mod
 from . import rag as rag_mod
 from . import worktree_inventory
 from . import vscode as vscode_mod
-from . import cflow2_web
+from . import cflow2_approve, cflow2_web
 from ..cflow2 import expr as cflow2_expr, frontend as cflow2_frontend
 from ..cflow2 import ir as cflow2_ir, runtime as cflow2_runtime, store as cflow2_store
 from . import (
@@ -627,6 +627,8 @@ def build_app(
     r.add_get("/api/cflow2/definition", h_cflow2_definition)
     r.add_post("/api/cflow2/select", h_cflow2_select)
     r.add_post("/api/cflow2/extend", h_cflow2_extend)
+    r.add_post("/api/cflow2/approve", h_cflow2_approve)
+    r.add_get("/api/cflow2/asks", h_cflow2_asks)
     r.add_get("/api/mesh", h_mesh_list)
     r.add_post("/api/mesh", h_mesh_create)
     r.add_delete("/api/mesh/outgoing/{rid}", h_mesh_outgoing_cancel)
@@ -4440,6 +4442,30 @@ async def h_cflow2_extend(request: web.Request) -> web.Response:
         request.app["manager"], cwd, scope, NUDGE_CFLOW2_ANSWERED
     )
     return json_response(payload)
+
+
+async def h_cflow2_approve(request: web.Request) -> web.Response:
+    """Answer a v2 task's ``ask`` from the dashboard, as the user. Body:
+    cwd, scope, node (optional with one open ask), decision (``approve``,
+    ``decline`` or a decision ask's option name), reason. The handler takes
+    the run lock and calls back into this API to withdraw and nudge, so it
+    runs off the event loop."""
+    resolved, err = await _cflow_action_cwd(request)
+    if err:
+        return err
+    cwd, scope, body = resolved
+    payload = await asyncio.to_thread(cflow2_approve.approve, cwd, scope, body)
+    payload["nudge_scheduled_sessions"] = await _nudge_sessions(
+        request.app["manager"], cwd, scope, NUDGE_CFLOW2_ANSWERED
+    )
+    return json_response(payload)
+
+
+async def h_cflow2_asks(request: web.Request) -> web.Response:
+    """Open asks of one v2 run (``cflow2_approve.pending``)."""
+    cwd, scope = _cflow2_slot(request)
+    data = await asyncio.to_thread(cflow2_approve.pending, cwd, scope)
+    return json_response(data)
 
 
 async def h_cflow_skip(request: web.Request) -> web.Response:
