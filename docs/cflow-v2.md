@@ -742,6 +742,7 @@ ask:
   format: decision                # 형식 이름 또는 ${params.format}
   # prompt: 생략 가능. 쓰면 brief 앞에 붙는 머리말이 된다
   # choices: [proceed, hold]      # 선택. 선택지 이름 집합을 고정한다(아래)
+  # require_reason: true          # 선택. 모든 답에 이유를 요구한다
   from: [...]
   otherwise: human
   timeout: 900
@@ -758,6 +759,12 @@ ask:
   같아야 한다(대소문자 무시). 정의가 답에 따라 분기해야 하는 지점에서 쓴다 — 선택지
   이름이 정의에 고정되어야 `cond`가 그 이름으로 갈라질 수 있다. 없으면 brief가
   선택지 이름을 정한다.
+- `require_reason`(선택, 기본 false): 참이면 선택지 답에도 reason이 필요하다(없으면
+  답을 거절한다). `choose`의 `require_reason`과 같은 역할이다. brief가 없는 ask에는
+  쓸 수 없다(컴파일 오류).
+- `format`·`choices`·`require_reason`·`from`은 리터럴 대신 `${params.<p>}` 참조
+  하나를 받을 수 있고, 런타임이 ask를 열 때 프로시저 params로 해석한다(아래
+  `ask-user`).
 - `otherwise: self:<option>`은 `choices`가 있을 때만 쓸 수 있고 `<option>`은 그 안에
   있어야 한다.
 - ask가 열릴 때(`_open_ask`): 참조를 평가하고 형식으로 검증한다. 참조가 null이거나
@@ -831,6 +838,7 @@ procedures:
       format:  {type: str, default: decision}
       choices: {type: list, default: null}   # 선택지 이름을 고정할 때
       from:    {type: list, default: null}   # ask.from과 같은 후보 목록. null이면 사람만
+      require_reason: {type: bool, default: false}
     returns:
       ok:      {decision: str, reason: "str?", by: str, brief: dict}
       reframe: {reason: str, brief: dict}    # 세 번째 답도 reframe인 경우
@@ -864,10 +872,10 @@ procedures:
   회차의 `ask-frame` 프롬프트에 넣고 다시 탐색한다. 3번째 `reframe`이면 프로시저가
   결과 `reframe`으로 끝나고, 처리는 부르는 쪽의 `on`·`catch`가 한다(없으면 비-ok
   결과의 일반 규칙). 프롬프트 문구의 정본은 `ask-common.yaml`이다.
-- `ask-pose`의 `choices`·`from`이 params 참조인 것은 이 절이 더하는 규칙이다:
-  `ask`의 `format`·`choices`·`from`은 `${params.<p>}` 참조 하나를 받을 수 있고,
-  런타임은 ask를 열 때 프로시저 params로 해석한다(`from`은 v1 파서로 그때 검증한다).
-  리터럴이면 컴파일 시점에 검증한다.
+- `ask-pose`는 `format`·`choices`·`from`·`require_reason`을 params 참조로 받는다.
+  `from`은 ask를 열 때 v1 파서로 검증한다. 리터럴이면 컴파일 시점에 검증한다.
+- `ask-frame`·`ask-reframe`은 `effects: [fs.read]`, `ask-pose`는 `effects: []`(답을
+  기다리기만 한다)를 선언한다.
 
 부르는 쪽:
 
@@ -904,8 +912,11 @@ Finding이다.
   파일의 것 포함). 작업의 `ask`에 `brief`, `format`, `choices`가 실린다.
 - ask 레코드(`state.json`의 `asks`): `format`, `brief`, `options`. `kind`는
   `decision`.
-- `flow_status`·`flow_asks`의 ask 항목: `format`, `brief`, `question_text`
-  (`render_text`). `GET /api/cflow2/run`: `question`(`to_json`).
+- `flow_status`의 ask 항목(`GET /api/cflow2/run`의 `run.asks`도 같다): `format`,
+  `brief`, `question_text`(`render_text`), `question`(`to_json`), `intro`(ask의
+  `prompt`, 없으면 빈 문자열), `require_reason`. 레코드의 `prompt`는 `intro`와
+  `question_text`를 이은 것이라 `question`을 모르는 화면도 질문 전체를 보인다.
+- CLI `claunch cflow2 status`는 `question_text` 전체와 답 목록을 출력한다.
 - 메시 decide 메시지(`asks.question_text`): brief가 있으면 질문 본문 자리에
   `render_text`를 넣고 답 목록에 선택지와 `reframe`을 싣는다.
 - `flow_answer`·`flow_approve`·`POST /api/cflow2/approve`·`claunch cflow2 approve
@@ -913,10 +924,16 @@ Finding이다.
 
 #### 적용 범위
 
-`improv-worker-v2`에서 사용자에게 결정을 묻는 지점(`chooser: user` 선택과 사람에게
-가는 `ask`)을 `call: ask-user`로 바꾸는 작업은 이 이슈의 마지막 단계다. 선택지에
-따라 하위 트리가 갈라지는 `choose`는 `choices`를 고정한 `ask-user` 호출과 `cond`로
-바꾼다.
+`improv-worker-v2`의 `chooser: user` 선택 여섯 개(`issue-decision`,
+`cut-unreachable-choice`, `landed-unclear-choice`, `rework-decision`, `settle-stall`,
+`end-decision`)는 같은 id의 `call: ask-user`(`choices`로 원래 옵션 이름을 고정,
+`require_reason: true`, `from` 없음)와 `$data.<bind>.decision`으로 갈라지는 `cond`로
+바뀌었다. 원래 옵션의 설명은 `topic`에 「선택지:」 줄로 옮겼다.
+`workspace-gate`는 바꾸지 않았다: 답이 승인 하나이고 보류는 답하지 않는 것이므로
+선택지가 둘 이상인 `decision` 형식에 맞지 않는 승인(ask, `options` 없음)이다.
+`landing-review`·`peer-review`의 ask는 사용자가 아니라 다른 세션에 묻는 것이라
+대상이 아니다. `improv-leader-v2`(claunch-yq80p.6)는 이 이슈가 머지된 뒤 같은
+방식으로 바꾼다.
 
 ## 3. IR
 

@@ -3974,6 +3974,7 @@ def _ask_spec(node: ir.Node) -> Dict[str, Any]:
         "prompt": str(raw.get("prompt") or ""),
         "brief": raw.get("brief"), "format": raw.get("format"),
         "choices": raw.get("choices"), "from_param": raw.get("from_param"),
+        "require_reason": raw.get("require_reason") or False,
         "from": cands,
         "otherwise": base or ASK_OTHERWISE_HUMAN,
         "default_option": raw.get("default_option") or (default or None),
@@ -4058,7 +4059,8 @@ def _brief_ask(r: Run, iid: str, node: ir.Node, spec: Dict[str, Any]) -> Optiona
                    "errors": errors})
         return None
     return {"format": fmt, "brief": norm, "options": q_mod.ask_options(norm, decl),
-            "from": cands, "question_text": q_mod.render_text(norm, decl)}
+            "from": cands, "question_text": q_mod.render_text(norm, decl),
+            "require_reason": bool(param(spec.get("require_reason")))}
 
 
 def _open_ask(r: Run, iid: str, node: ir.Node) -> None:
@@ -4085,7 +4087,8 @@ def _open_ask(r: Run, iid: str, node: ir.Node) -> None:
     }
     if brief is not None:
         rec.update(format=brief["format"], brief=brief["brief"],
-                   question_text=brief["question_text"], intro=rec["prompt"])
+                   question_text=brief["question_text"], intro=rec["prompt"],
+                   require_reason=brief["require_reason"])
         if not rec["prompt"]:
             rec["prompt"] = brief["question_text"]
         else:
@@ -4205,9 +4208,14 @@ def _ask_decision(rec: Dict[str, Any], decision: Optional[str], *,
 
 
 def _ask_need_reason(rec: Dict[str, Any], choice: str, reason: Optional[str]) -> None:
-    if choice == q_mod.REFRAME and rec.get("brief") is not None and not str(reason or "").strip():
+    if rec.get("brief") is None or str(reason or "").strip() or choice == ASK_ABSTAIN:
+        return
+    if choice == q_mod.REFRAME:
         raise FlowError(f"'{q_mod.REFRAME}' needs a reason: say what the options miss, so the "
                         f"question can be framed again")
+    if rec.get("require_reason"):
+        raise FlowError(f"{rec['id']} needs a reason with the answer: say what you looked at "
+                        f"to choose {choice!r}")
 
 
 def _ask_resolve(r: Run, rec: Dict[str, Any], decision: str, *, by: str,
@@ -4366,7 +4374,8 @@ def _ask_question(r: Run, rec: Dict[str, Any]) -> Dict[str, Any]:
     """A brief ask's question for status payloads (docs 2.10): the text the
     CLI and the mesh show, and ``question`` (``question.to_json``) for the web UI."""
     out = {"format": rec.get("format"), "brief": rec.get("brief"),
-           "question_text": rec.get("question_text"), "intro": rec.get("intro") or ""}
+           "question_text": rec.get("question_text"), "intro": rec.get("intro") or "",
+           "require_reason": bool(rec.get("require_reason"))}
     decl = ((r.chart.meta or {}).get("question_types") or {}).get(str(rec.get("format")))
     if decl is not None:
         out["question"] = q_mod.to_json(rec["brief"], decl)

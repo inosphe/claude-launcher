@@ -798,7 +798,7 @@ def _compile_task(ctx: _Ctx, sc: _Scope, name: str, parent: Optional[str], line:
 
 VERIFY_KEYS = ("run", "command", "timeout")
 ASK_KEYS = ("prompt", "from", "otherwise", "timeout", "on_decline", "options",
-            "brief", "format", "choices")
+            "brief", "format", "choices", "require_reason")
 #: ``${params.NAME}`` -- the one reference ask.format/choices/from may hold.
 _PARAM_REF = re.compile(r"^\$\{\s*\$?params\.([A-Za-z_][A-Za-z0-9_]*)\s*\}$")
 _PARAM_REF_BARE = re.compile(r"^\$params\.([A-Za-z_][A-Za-z0-9_]*)$")
@@ -898,6 +898,9 @@ def _ask(ctx: _Ctx, file: str, name: str, value: Any, line: int) -> Dict[str, An
     _check_keys(ctx, file, ask, ASK_KEYS, f"task {name!r} ask")
     if "brief" in ask or "format" in ask:
         return _ask_brief(ctx, file, name, ask, aline)
+    if "require_reason" in ask:
+        raise ctx.err(file, aline, f"task {name!r}: ask.require_reason applies to an ask "
+                      f"with a brief")
     if "choices" in ask:
         raise ctx.err(file, aline, f"task {name!r}: ask.choices fixes the option names of a "
                       f"brief ask (ask-choices-mismatch); this ask has no brief")
@@ -1416,11 +1419,18 @@ def _ask_brief(ctx: _Ctx, file: str, name: str, ask: Dict[str, Any], aline: int)
                     raise ctx.err(file, aline, f"{what}: ask.choices repeats {c!r}")
                 folded.add(c.lower())
             choices_v = list(choices)
+    req = ask.get("require_reason", False)
+    req_v: Any = param_or(req, "require_reason")
+    if req_v is None:
+        if not isinstance(req, bool):
+            raise ctx.err(file, aline, f"{what}: ask.require_reason must be true, false or "
+                          f"${{params.<name>}}")
+        req_v = req
     raw = _plain(ask)
     from_param = param_or(raw.get("from"), "from")
     if from_param is not None:
         raw.pop("from")
-    for key in ("brief", "format", "choices", "prompt"):
+    for key in ("brief", "format", "choices", "prompt", "require_reason"):
         raw.pop(key, None)
     try:
         delegate = v1._parse_delegate(raw, f"{what}: ask")
@@ -1439,6 +1449,7 @@ def _ask_brief(ctx: _Ctx, file: str, name: str, ask: Dict[str, Any], aline: int)
         "brief": brief_expr,
         "format": fmt_v,
         "choices": choices_v,
+        "require_reason": req_v,
         "from": [{"role": c.role, "scope": c.scope, "connect": c.connect}
                  for c in delegate.candidates],
         "from_param": from_param,

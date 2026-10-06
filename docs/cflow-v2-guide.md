@@ -180,8 +180,25 @@ v2에서는 호출하는 쪽이 프로시저의 내용을 바꿀 문법이 없�
 probe의 종료 코드는 0 = 성립, 1 = 아직, 그 밖 = 판정 불가다(규격 2.3 「wait」).
 판정 불가가 `undecided_max`(기본 3)번 이어지면 wait는 `undecidable`로, `seconds`
 상한을 넘기면 `timeout`으로 끝난다. 둘 다 처리하는 곳이 없으면 런이 실패하므로
-`on`으로 받는다. 기계가 답할 수 없는 상황이므로 보통 `chooser: user` 선택으로
-보낸다.
+`on`으로 받는다. 기계가 답할 수 없는 상황이므로 보통 사용자에게 묻는다.
+
+사용자에게 결정을 묻는 지점은 `chooser: user` 선택 대신 공용 프로시저
+`ask-user`(`ask-common`, `improv-common`이 포함한다)로 쓴다(규격 2.10). 드라이버가
+문제를 단순화하고 선택지별 위험·결과·가역성과 권장안을 탐색해 공통 형식으로 묻고,
+답에 따라 `cond`로 갈라진다. 갈라지는 지점이면 `choices`로 선택지 이름을 고정한다.
+
+```yaml
+- id: scope-decision
+  call: ask-user
+  bind: scope_decision
+  with: {topic: 이 회차의 범위, choices: [narrow, full], require_reason: true}
+- cond:
+    - {if: "$data.scope_decision.decision == 'narrow'", then: work-narrow}
+    - {else: work-full}
+```
+
+`with`의 문자열에 `$`가 들어가면 식으로 읽히므로 `topic`은 `$` 없는 문장으로 쓰고,
+런의 값은 `context: "$params.why"`처럼 식 하나로 넘긴다.
 
 ```yaml
 - id: wait-for-a

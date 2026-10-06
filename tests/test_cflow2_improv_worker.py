@@ -199,7 +199,41 @@ def test_delegation_points():
 def test_every_task_declares_effects():
     for n in _chart().nodes.values():
         if n.type == "task":
+            # ask-user's ask-pose (ask-common) only waits for the answer; it
+            # declares that with an explicit ``effects: []``
+            if (n.props.get("ask") or {}).get("brief") and n.props.get("effects_declared"):
+                continue
             assert n.props.get("effects"), n.label
+
+
+# -- user questions go through ask-user (docs/cflow-v2.md 2.10) -------------
+
+USER_QUESTIONS = {
+    "issue-decision": ["adopt", "create", "none"],
+    "cut-unreachable-choice": ["confirmed", "held"],
+    "landed-unclear-choice": ["confirmed", "held"],
+    "rework-decision": ["approve", "hold"],
+    "settle-stall": ["proceed", "keep-waiting"],
+    "end-decision": ["approve", "hold"],
+}
+
+
+def test_no_user_choose_is_left():
+    chart = _chart()
+    assert [n.label or n.id for n in chart.nodes.values()
+            if n.type == "choose" and n.get("chooser") == "user"] == []
+
+
+def test_user_questions_call_ask_user_with_fixed_choices_and_reasons():
+    chart = _chart()
+    calls = {n.label: n for n in chart.nodes.values() if n.type == "scope" and n.label}
+    for label, choices in USER_QUESTIONS.items():
+        node = calls[label]
+        assert node.get("proc") == "ask-user", label
+        w = node.get("with_")
+        assert w["choices"] == {"lit": choices}, label
+        assert w["require_reason"] == {"lit": True}, label
+        assert "from" not in w, f"{label}: a user question has no other responder"
 
 
 def test_rules_and_master_merge_invariant():

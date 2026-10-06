@@ -393,3 +393,29 @@ def test_ask_user_rejects_choices_that_do_not_match(tmp_path):
     d.report("ask-frame", value={"brief": bad})
     assert d.status()["status"] == "failed"
     assert "exactly the fixed choices" in d.events("ask_brief_invalid")[0]["errors"][0]
+
+
+def test_require_reason_refuses_a_bare_answer(tmp_path):
+    src = ASKB.replace("format: pick,", "format: pick, require_reason: true,")
+    d = Drv(tmp_path, _compile(src))
+    d.report("frame", value={"brief": BRIEF})
+    (a,) = d.status()["asks"]
+    assert a["require_reason"] is True and a["question"]["recommended"] == "narrow"
+    with pytest.raises(runtime.FlowError, match="needs a reason"):
+        runtime.approve("pose", decision="narrow", **d.kw())
+    runtime.approve("pose", decision="narrow", reason="봤다", **d.kw())
+    assert d.state()["result"]["pose"]["value"]["reason"] == "봤다"
+
+
+def test_require_reason_is_for_brief_asks_only():
+    with pytest.raises(frontend.FrontendError, match="require_reason applies"):
+        _compile(QTYPE + "nodes:\n  a: {prompt: a, ask: {prompt: p, require_reason: true}}\n"
+                 "body: a\n")
+
+
+def test_ask_user_passes_require_reason(tmp_path):
+    src = CALLER.replace("choices: [narrow, full]}", "choices: [narrow, full], require_reason: true}")
+    d = Drv(tmp_path, _compile(src, resolve=layers.resolver(str(tmp_path))))
+    d.report("ask-frame", value={"brief": DECISION})
+    with pytest.raises(runtime.FlowError, match="needs a reason"):
+        runtime.approve(None, decision="full", **d.kw())

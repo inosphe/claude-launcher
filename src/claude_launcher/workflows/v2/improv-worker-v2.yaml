@@ -38,7 +38,7 @@ include: [improv-common]
 #   issue-check           -> issue-check            (choose, resolve-issue)
 #   issue-auto            -> issue-auto
 #   issue-search          -> issue-search
-#   issue-decision        -> issue-decision         (choose user)
+#   issue-decision        -> issue-decision         (ask-user)
 #   issue-adopt           -> issue-adopt
 #   issue-create          -> issue-create
 #   workspace-check       -> workspace-check        (choose, workspace)
@@ -64,7 +64,7 @@ include: [improv-common]
 #   landing-withdraw      -> landing-withdraw
 #   landing-nudge         -> landing-nudge          (loop await의 between)
 #   landing-declined      -> landing-declined
-#   rework-gate           -> rework-decision(choose user), rework-gate
+#   rework-gate           -> rework-decision(ask-user), rework-gate
 #   landing-declined-hold -> landing-declined-hold
 #   landed                -> landed-wait(wait), landed   (confirm-landed)
 #   wrapup                -> wrapup, round-report(위임)
@@ -72,8 +72,8 @@ include: [improv-common]
 #   stack-round           -> stack-round            (choose)
 #   settle-check          -> settle-check           (choose, retry settle-poll)
 #   settle-wait           -> settle-wait            (retry의 between, every 600)
-#   settle-stall          -> settle-stall           (choose user)
-#   end-gate              -> end-decision(choose user), end-gate
+#   settle-stall          -> settle-stall           (ask-user)
+#   end-gate              -> end-decision(ask-user), end-gate
 #   end-hold              -> end-hold
 #
 # ── v1에서 무엇이 문법으로 옮겨 갔는가 ───────────────────────────────────
@@ -2296,40 +2296,41 @@ procedures:
             then:
               - issue-search
               - id: issue-decision
-                choose:
-                  # 셋 중 둘이 사용자의 것이다: 기존 일감을 잡는 것은 남이 세운
-                  # 기록에 이 회차를 귀속시키는 결정이고, 이슈 없이 진행하는 것은
-                  # 일감의 정본에 이 회차가 안 남는 결정이다. none은 사람이 저널에
-                  # 남기는 명시적 동의다 — br 실패로 이슈를 못 세운 상황은 none이
-                  # 아니라 NO-BEAD 경로다.
-                  chooser: user
+                # 셋 중 둘이 사용자의 것이다: 기존 일감을 잡는 것은 남이 세운
+                # 기록에 이 회차를 귀속시키는 결정이고, 이슈 없이 진행하는 것은
+                # 일감의 정본에 이 회차가 안 남는 결정이다. none은 사람이 저널에
+                # 남기는 명시적 동의다 — br 실패로 이슈를 못 세운 상황은 none이
+                # 아니라 NO-BEAD 경로다.
+                call: ask-user
+                bind: issue_decision
+                with:
                   require_reason: true
-                  prompt: |
+                  choices: [adopt, create, none]
+                  topic: |
                     이 세션에는 배정된 beads 이슈가 없고, 직전 단계 보고에 보드에서
                     찾은 연관 일감 후보(또는 「후보 없음」)가 있다. 이 회차를 어디에
-                    귀속할지 확정한다. adopt를 고르면 어느 id인지 reason에 적는다 —
-                    에이전트는 제안 시점에 추천 갈래와 근거(adopt면 후보 id)를
-                    reason에 적어 두고, 확정을 기다린다.
-                    모호하면 create 쪽으로 — 기록이 하나 더 있는 쪽이, 있어야 할
+                    귀속할지 확정한다. adopt를 권하면 어느 id인지 그 선택지의 내용에
+                    적는다. 사용자는 adopt를 고를 때 어느 id인지 reason에 적는다.
+                    모호하면 create를 권한다 — 기록이 하나 더 있는 쪽이, 있어야 할
                     기록이 없는 쪽보다 싸다.
-                  options:
-                    adopt:
-                      description: 보고의 후보 하나를 이 회차의 일감으로 잡는다(id는 reason에)
-                      then:
-                        - issue-adopt
-                        - return: ok
-                          value: {how: adopt, issue: "$result['issue-adopt'].value.issue"}
-                    create:
-                      description: 오프닝 task 설명에서 새 이슈를 민팅한다
-                      then:
-                        - issue-create
-                        - return: ok
-                          value: {how: create, issue: "$result['issue-create'].value.issue"}
-                    none:
-                      description: 이슈 없이 이 회차를 진행한다 — 이 확정이 명시적 동의로 저널에 남고, 회차 기록은 cflow 저널·커밋·회차 보고서에만 남는다
-                      then:
-                        return: ok
-                        value: {how: none}
+                    선택지: adopt — 보고의 후보 하나를 이 회차의 일감으로 잡는다.
+                    create — 오프닝 task 설명에서 새 이슈를 민팅한다. none — 이슈 없이
+                    이 회차를 진행한다(이 확정이 명시적 동의로 저널에 남고, 회차 기록은
+                    cflow 저널·커밋·회차 보고서에만 남는다).
+              - cond:
+                  - if: "$data.issue_decision.decision == 'adopt'"
+                    then:
+                      - issue-adopt
+                      - return: ok
+                        value: {how: adopt, issue: "$result['issue-adopt'].value.issue"}
+                  - if: "$data.issue_decision.decision == 'create'"
+                    then:
+                      - issue-create
+                      - return: ok
+                        value: {how: create, issue: "$result['issue-create'].value.issue"}
+                  - else:
+                      return: ok
+                      value: {how: none}
 
   workspace:
     description: >-
@@ -2468,29 +2469,35 @@ procedures:
     params:
       why: {type: str, default: undecidable}
     body:
-      id: cut-unreachable-choice
-      choose:
-        chooser: user
-        require_reason: true
-        prompt: |
-          스택 컷을 기계로 확인하지 못했다(사유: ${params.why}). undecidable은
-          `claunch cflow published stack cut --step stack-merge`가 세 번 연속 종료
-          코드 2(이 범위에 v1 stack 런이 없다)를 냈다는 뜻이다 — 그 상태에서는 기다려도
-          컷이 오지 않는다. timeout은 stack 런이 서 있지만 4시간 동안 컷이 없었다는
-          뜻이다. 스택 브랜치(`<세션>-stack`)의 tip과 자식 브랜치들의 머지 여부를 git에서
-          보고 고른다. 무엇을 보고 골랐는지 reason에 적는다.
-          주의: v2 런은 컷 소비를 v1 런에 표시하지 못한다. 다음 회차의 프로브가 같은
-          컷을 「새 컷」으로 다시 읽을 수 있으니, confirmed는 이번 착지에 실을 컷을
-          git에서 직접 확인했을 때만 고른다.
-        options:
-          confirmed:
-            description: 스택 브랜치에 이번 착지에 실을 컷이 있음을 git에서 확인했다 — stack-merge로 간다
-            then: []
-          held:
-            description: 컷을 받을 수 없다(stack 런이 없거나 멈췄다) — 이 착지를 held로 마감한다
+      # 사용자에게 묻는 지점은 ask-user(ask-common, docs/cflow-v2.md 2.10)로
+      # 묻는다: 드라이버가 문제·선택지별 위험·결과·가역성·권장안을 탐색해
+      # 공통 형식으로 질문하고, 답(decision)으로 cond가 갈라진다.
+      - id: cut-unreachable-choice
+        call: ask-user
+        bind: cut_unreachable
+        with:
+          context: "$params.why"
+          require_reason: true
+          choices: [confirmed, held]
+          topic: |
+            스택 컷을 기계로 확인하지 못했다(사유는 근거 칸의 값). undecidable은
+            `claunch cflow published stack cut --step stack-merge`가 세 번 연속 종료
+            코드 2(이 범위에 v1 stack 런이 없다)를 냈다는 뜻이다 — 그 상태에서는 기다려도
+            컷이 오지 않는다. timeout은 stack 런이 서 있지만 4시간 동안 컷이 없었다는
+            뜻이다. 스택 브랜치(`<세션>-stack`)의 tip과 자식 브랜치들의 머지 여부를 git에서
+            보고 선택지별 위험과 결과를 채운다.
+            주의: v2 런은 컷 소비를 v1 런에 표시하지 못한다. 다음 회차의 프로브가 같은
+            컷을 「새 컷」으로 다시 읽을 수 있으니, confirmed는 이번 착지에 실을 컷을
+            git에서 직접 확인했을 때만 권한다.
+            선택지: confirmed — 스택 브랜치에 이번 착지에 실을 컷이 있음을 git에서
+            확인했다, stack-merge로 간다. held — 컷을 받을 수 없다(stack 런이 없거나
+            멈췄다), 이 착지를 held로 마감한다.
+      - cond:
+          - if: "$data.cut_unreachable.decision == 'held'"
             then:
               return: held
               value: {reason: "$params.why", rework: false}
+          - else: []
 
   landed-unclear:
     description: >-
@@ -2500,25 +2507,28 @@ procedures:
     params:
       why: {type: str, default: undecidable}
     body:
-      id: landed-unclear-choice
-      choose:
-        chooser: user
-        require_reason: true
-        prompt: |
-          착지 프로브(`tools/landed_check.py` + 깨끗한 트리)가 답을 내지 못했다(사유:
-          ${params.why}). undecidable은 판정 불가(종료 코드 2: 저장소·브랜치를 읽지
-          못했다)가 세 번 이어졌다는 뜻이고, timeout은 하루 동안 「아직」이었다는 뜻이다.
-          `git log --merges --format='%H %P' <대상>`에서 동결된 tip을 부모로 갖는 머지
-          커밋을 직접 찾아 고른다. 무엇을 보고 골랐는지 reason에 적는다.
-        options:
-          confirmed:
-            description: 사람이 git에서 착지(머지 커밋)를 확인했다 — 프로브 대신 이 확인으로 지나간다
-            then: []
-          held:
-            description: 착지를 확인하지 못했다 — 이 착지를 held로 마감하고 회차를 닫는다
+      - id: landed-unclear-choice
+        call: ask-user
+        bind: landed_unclear
+        with:
+          context: "$params.why"
+          require_reason: true
+          choices: [confirmed, held]
+          topic: |
+            착지 프로브(`tools/landed_check.py` + 깨끗한 트리)가 답을 내지 못했다(사유는
+            근거 칸의 값). undecidable은 판정 불가(종료 코드 2: 저장소·브랜치를 읽지
+            못했다)가 세 번 이어졌다는 뜻이고, timeout은 하루 동안 「아직」이었다는 뜻이다.
+            `git log --merges --format='%H %P' <대상>`에서 동결된 tip을 부모로 갖는 머지
+            커밋을 직접 찾아 그 결과로 선택지를 채운다.
+            선택지: confirmed — 사람이 git에서 착지(머지 커밋)를 확인했다, 프로브 대신
+            이 확인으로 지나간다. held — 착지를 확인하지 못했다, 이 착지를 held로
+            마감하고 회차를 닫는다.
+      - cond:
+          - if: "$data.landed_unclear.decision == 'held'"
             then:
               return: held
               value: {reason: "$params.why", rework: false}
+          - else: []
 
   land:
     description: >-
@@ -2761,43 +2771,40 @@ procedures:
                         then:
                           - landing-declined
                           - id: rework-decision
-                            choose:
-                              # 회차가 앞으로 되감기는 유일한 전이라 사람이 연다
-                              # (claunch-693w). 상위는 방금 거절한 당사자라 위임하지
-                              # 않는다. timeout을 두지 않는다.
-                              chooser: user
+                            # 회차가 앞으로 되감기는 유일한 전이라 사람이 연다
+                            # (claunch-693w). 상위는 방금 거절한 당사자라 위임하지
+                            # 않는다(ask-user의 기본 응답자는 사람뿐). timeout을 두지 않는다.
+                            call: ask-user
+                            bind: rework_decision
+                            with:
                               require_reason: true
-                              prompt: |
+                              choices: [approve, hold]
+                              topic: |
                                 상위 세션이 이 회차의 착지를 거절했고, 워커가 그 거절을
                                 정산했다(이슈는 in_progress로 돌아갔고 브랜치 동결은 풀렸다).
+                                이 브랜치 위에서 재작업을 재개할지 정한다.
 
-                                이 브랜치 위에서 재작업을 재개하는 것을 승인하는가?
-
-                                허가하면: 런이 작업 단계로 되감기고, 같은 브랜치 위에서 작업·
+                                approve: 런이 작업 단계로 되감기고, 같은 브랜치 위에서 작업·
                                 테스트·커밋·착지 요청을 한 바퀴 더 돈다. 세션 슬롯과 상위의 심사
                                 턴이 한 번 더 든다.
-                                보류하면: 런은 이 게이트에 서 있고 세션은 살아 있다. 브랜치와
-                                커밋은 그대로 남으므로 잃는 것은 없고, 나중에 승인해도 같은
-                                자리에서 이어진다.
-                                착지 없이 이 회차를 마감하려면(재작업이 이 세션의 일이 아니라고
-                                판단되면) hold를 고른다 — 브랜치를 인수인계 이슈로 넘기고 정리로 간다.
+                                hold: 착지 없이 이 회차를 마감한다(재작업이 이 세션의 일이
+                                아니라고 판단될 때) — 브랜치를 인수인계 이슈로 넘기고 정리로 간다.
+                                답하지 않는 동안 런은 이 질문에 서 있고 세션은 살아 있다. 브랜치와
+                                커밋은 그대로 남으므로 잃는 것은 없다.
 
                                 판단 근거: 거절 사유와 재작업 범위 요지가 앞 스텝의 보고에 있다
                                 (`claunch cflow2 journal`), 거절 마커는
                                 `claunch beads comments <이슈 id>`에 있다.
-                              options:
-                                approve:
-                                  description: 재작업 재개를 승인한다 — 같은 브랜치 위에서 작업·테스트·커밋·착지 요청을 한 바퀴 더 돈다
-                                  then:
-                                    - rework-gate
-                                    - return: rework
-                                      value: {reason: "$result['landing-declined'].value.reason", rework: true}
-                                hold:
-                                  description: 착지 없이 이 회차를 마감한다 — 브랜치를 인수인계 이슈로 넘기고 정리로 간다
-                                  then:
-                                    - landing-declined-hold
-                                    - return: held
-                                      value: {reason: declined, rework: false}
+                          - cond:
+                              - if: "$data.rework_decision.decision == 'approve'"
+                                then:
+                                  - rework-gate
+                                  - return: rework
+                                    value: {reason: "$result['landing-declined'].value.reason", rework: true}
+                              - else:
+                                  - landing-declined-hold
+                                  - return: held
+                                    value: {reason: declined, rework: false}
                       reopen:
                         description: 요청을 철회하고 브랜치를 다시 연다(넘어간 자식을 싣거나 더 실을 것이 생겼다) — 철회를 정산한 뒤 작업으로
                         then:
@@ -3078,59 +3085,60 @@ procedures:
                         then: {raise: unsettled}
             catch:
               unsettled:
-                id: settle-stall
-                choose:
-                  # 여섯 번 깨우는 동안 보드가 변하지 않았다 — 기다릴 것인가, 이
-                  # 세션을 끝낼 것인가는 사람의 판단이다.
-                  chooser: user
-                  require_reason: true
-                  prompt: |
-                    이 세션이 만든 이슈가 아직 정산되지 않았다(살아 있는 assignee가 없고
-                    `HOLD:` 마커도 없다). 타이머가 여섯 번 깨우는 동안 보드가 변하지
-                    않았다는 뜻이다 — 리더가 아직 답하지 않았거나, 답할 세션이 없거나,
-                    정산 대상이 아닌 무언가가 남아 있다.
+                # 여섯 번 깨우는 동안 보드가 변하지 않았다 — 기다릴 것인가, 이
+                # 세션을 끝낼 것인가는 사람의 판단이다.
+                - id: settle-stall
+                  call: ask-user
+                  bind: settle_stall
+                  with:
+                    require_reason: true
+                    choices: [proceed, keep-waiting]
+                    topic: |
+                      이 세션이 만든 이슈가 아직 정산되지 않았다(살아 있는 assignee가 없고
+                      `HOLD:` 마커도 없다). 타이머가 여섯 번 깨우는 동안 보드가 변하지
+                      않았다는 뜻이다 — 리더가 아직 답하지 않았거나, 답할 세션이 없거나,
+                      정산 대상이 아닌 무언가가 남아 있다.
 
-                    남은 것이 무엇인지는 `claunch cflow2 journal -t <세션>`의 settle-check
-                    보고와 `claunch beads list --status open --status in_ready --limit 0
-                    --json`(생성자 필터는 settle-check의 프롬프트에 있다)로 확인한다.
-                    정산됐다고 판정한 근거가 아니라 「무엇이 남았는가」를 보러 가는 것이다.
+                      남은 것이 무엇인지는 `claunch cflow2 journal -t <세션>`의 settle-check
+                      보고와 `claunch beads list --status open --status in_ready --limit 0
+                      --json`(생성자 필터는 settle-check의 프롬프트에 있다)로 확인한다.
+                      정산됐다고 판정한 근거가 아니라 「무엇이 남았는가」를 보러 가는 것이다.
 
-                    판단은 사람의 것이다: 이 세션을 지금 끝내도 그 이슈가 유실되지
-                    않는지(열린 채로 남아 다음 adoption이 이어받을 수 있는지)를 보고
-                    고른다. 무엇을 보고 골랐는지 reason에 적는다.
-                  options:
-                    proceed:
-                      description: 정산 없이 이 세션을 끝낸다 — 남은 이슈는 열린 채로 남고, 이어받을 자리는 다음 회차의 adoption이 정한다
+                      판단 기준: 이 세션을 지금 끝내도 그 이슈가 유실되지 않는지(열린 채로
+                      남아 다음 adoption이 이어받을 수 있는지).
+                      선택지: proceed — 정산 없이 이 세션을 끝낸다, 남은 이슈는 열린 채로
+                      남고 이어받을 자리는 다음 회차의 adoption이 정한다. keep-waiting — 더
+                      기다린다, 보드가 바뀔 때까지 정산 확인을 다시 하고 시계를 다시 건다.
+                - cond:
+                    - if: "$data.settle_stall.decision == 'proceed'"
                       then: {break: settle-watch}
-                    keep-waiting:
-                      description: 더 기다린다 — 보드가 바뀔 때까지 정산 확인을 다시 하고 시계를 다시 건다
-                      then: {continue: settle-watch}
+                    - else: {continue: settle-watch}
+      # 종료는 세션과 산출물의 보존 기간에 관한 사용자 결정이다 — 상위 세션이나
+      # 워커가 대신 승인하지 않고(ask-user의 기본 응답자는 사람뿐), timeout도
+      # 없다. 답이 없는 동안 런은 서 있다.
       - id: end-decision
-        choose:
-          # 종료는 세션과 산출물의 보존 기간에 관한 사용자 결정이다 — 상위 세션이나
-          # 워커가 대신 승인하지 않고, timeout도 없다. 답이 없는 동안 런은 서 있다.
-          chooser: user
+        call: ask-user
+        bind: end_decision
+        with:
           require_reason: true
-          prompt: |
+          choices: [approve, hold]
+          topic: |
             이 워커의 회차가 끝났다(정리·최종 보고·HTML 회차 보고서까지).
             이 런이 done이 되면 데몬이 종결 기록을 쓴 뒤 이 세션을 종료한다.
-            세션 종료를 승인하는가?
+            세션 종료를 승인할지 정한다.
 
-            허가하면: pane이 닫히고 슬롯이 반환된다. 브랜치와 beads 이슈는
+            approve: pane이 닫히고 슬롯이 반환된다. 브랜치와 beads 이슈는
             세션과 무관하게 남아 상위 세션이 그대로 통합할 수 있고, 다시 사람
             손이 필요하면 `claunch respawn <세션>`이 있다.
-            고르지 않으면 이 선택은 열린 상태로 유지되고 세션은 살아 있다.
-            세션을 의도적으로 살려 둘 사유가 확정되면 hold로 종료 보류
-            경로(keep-alive)를 선택한다.
+            hold: 종료를 보류한다 — 세션을 의도적으로 살려 둘 사유가 있을 때
+            keep-alive로 세션을 살려 둔다.
+            답하지 않는 동안 이 질문은 열린 상태로 유지되고 세션은 살아 있다.
 
             판단 근거: `claunch cflow2 journal -t <세션>`, `claunch beads show <이슈> --json`.
-          options:
-            approve:
-              description: 세션 종료를 승인한다 — 런이 끝나면 데몬이 종결 기록을 쓴 뒤 세션을 종료한다
-              then: end-gate
-            hold:
-              description: 종료를 보류한다 — keep-alive로 세션을 살려 둔다
-              then: end-hold
+      - cond:
+          - if: "$data.end_decision.decision == 'approve'"
+            then: end-gate
+          - else: end-hold
 
 body:
   try:

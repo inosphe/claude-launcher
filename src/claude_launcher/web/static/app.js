@@ -25740,8 +25740,9 @@ function renderCflow2Into(box, data, ui) {
     }
     const btns = el("div", "wf-actions");
     const answer = async (b, decision, label) => {
-      const reason = prompt(`Reason for '${label}' (optional)`, "");
-      if (reason === null) return;
+      const need = !!a.require_reason;
+      const reason = prompt(`Reason for '${label}'${need ? " (required)" : " (optional)"}`, "");
+      if (reason === null || (need && !reason.trim())) return;
       b.disabled = true;
       await post("/api/cflow2/approve", { node: a.instance, decision, reason });
     };

@@ -65,6 +65,7 @@ procedures:
       format: {type: str, default: decision, description: 질문 형식(question_types의 이름)}
       choices: {type: list, default: null, description: 선택지 이름을 고정할 때 그 목록. 부르는 쪽이 답으로 분기할 때 쓴다}
       from: {type: list, default: null, description: ask.from과 같은 후보 목록. null이면 사람만 답한다}
+      require_reason: {type: bool, default: false, description: true면 모든 답에 이유를 요구한다(reframe은 항상 요구)}
     returns:
       ok: {decision: str, reason: "str?", by: str, brief: dict}
       reframe: {reason: str, brief: dict}
@@ -87,6 +88,7 @@ procedures:
           위 보고 형식의 객체를 결과 값의 brief 필드로 보고한다.
         returns:
           ok: {brief: "question:$params.format"}
+        effects: [fs.read]
       ask-reframe:
         title: 질문 다시 구성
         prompt: |
@@ -108,14 +110,17 @@ procedures:
           위 보고 형식의 객체를 결과 값의 brief 필드로 보고한다.
         returns:
           ok: {brief: "question:$params.format"}
+        effects: [fs.read]
       ask-pose:
         title: 사용자 질문
         prompt: 사용자의 답을 기다린다. 이 작업은 ask가 답을 받으면 끝난다.
+        effects: []
         ask:
           brief: ${prev.brief}
           format: ${params.format}
           choices: ${params.choices}
           from: ${params.from}
+          require_reason: ${params.require_reason}
           otherwise: human
     body:
       - try:
