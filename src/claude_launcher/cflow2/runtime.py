@@ -85,7 +85,7 @@ import threading
 import time
 import uuid
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 from . import executors, ir
 from . import store as store_mod
@@ -199,6 +199,9 @@ class Run:
         return cls(st, st.load_chart(), st.load_state(), now)
 
     def save(self) -> None:
+        if any(ev.get("event") in PEER_VISIBLE for ev in self.events) and _has_peers(self):
+            cwd, scope, now = str(self.store.cwd), self.store.scope, self.now
+            self.after.append(lambda: poke_peers(cwd, scope, now))
         _sync_waiting(self)
         self.state["active"] = sorted(
             iid for iid, inst in self.state["inst"].items() if inst.get("await")
@@ -276,10 +279,11 @@ class Run:
             "probe": self.state.get("probe", {}),
         })
         if _col_specs(self):
-            # ``${col.<name>}`` (prompts) and items()/count()/fresh()/exists()
+            # ``${col.<name>}`` (prompts)
             out["col"] = {name: col_mod.items(cs)
                           for name, cs in (self.state.get("collections") or {}).items()}
-            out[expr_mod.COLLECTIONS_KEY] = _ColResolver(self)
+        # items()/count()/fresh()/exists() and side() (doc 2.7, 2.9)
+        out[expr_mod.COLLECTIONS_KEY] = _ColResolver(self)
         qtypes = (self.chart.meta or {}).get("question_types")
         if qtypes:
             out[expr_mod.QUESTIONS_KEY] = qtypes  # guide(name), docs 2.10
@@ -436,6 +440,23 @@ _TYPES = {
 }
 
 
+def fill_optional(returns: Dict[str, Any], outcome: str, value: Any) -> Any:
+    """A ``return``'s value with the declared optional fields (``str?``…) it
+    left out set to null (docs 2.2, returns): a record need not spell out
+    ``field: null`` for each one. Other values pass through."""
+    fields = (returns or {}).get(outcome)
+    if not isinstance(fields, dict) or not (value is None or isinstance(value, dict)):
+        return value
+    missing = [f for f, t in fields.items()
+               if isinstance(t, str) and t.endswith("?") and f not in (value or {})]
+    if not missing:
+        return value
+    out = dict(value or {})
+    for f in missing:
+        out[f] = None
+    return out
+
+
 def returns_of(node: ir.Node) -> Dict[str, Dict[str, str]]:
     """The schema a node's result is validated against (``{ok: {}}`` default)."""
     schema = node.get("returns")
@@ -517,12 +538,32 @@ def _question_field(name: str, qname: str, v: Any, qtypes: Optional[Dict[str, An
 # entering nodes
 
 
+def _splice_env(r: Run, parent: Optional[str], splice: Dict[str, Any],
+                base: Dict[str, Any]) -> Dict[str, Any]:
+    """A spliced block sees the environment of the call it was written at
+    (``$params``, a foreach item, waterfall ``$prev``), not the procedure's:
+    the env the call's scope instance saved before binding its params. A
+    block written in the workflow body sees the run's params."""
+    call = splice.get("call")
+    cur = parent
+    while cur is not None and cur in r.inst:
+        if r.inst[cur]["node"] == call:
+            saved = r.inst[cur]["frame"].get("caller_env")
+            return dict(saved) if saved is not None else base
+        cur = r.inst[cur].get("parent")
+    return base
+
+
 def _enter(r: Run, node_id: str, parent: Optional[str], role: str,
            env: Optional[Dict[str, Any]] = None) -> str:
     node = r.chart.node(node_id)
     iid = r.new_id(node_id)
     base = dict(r.inst[parent]["env"]) if parent and parent in r.inst else {}
-    if env:
+    if (node.get("splice") or {}).get("call"):
+        # the procedure's own bindings (its foreach item, waterfall prev) are
+        # not the block's: only the call site's environment
+        base = _splice_env(r, parent, node.get("splice") or {}, base)
+    elif env:
         base.update(env)
     r.inst[iid] = {
         "id": iid, "node": node_id, "parent": parent, "role": role,
@@ -533,7 +574,8 @@ def _enter(r: Run, node_id: str, parent: Optional[str], role: str,
     visits = r.state.setdefault("visits", {})
     visits[key] = int(visits.get(key) or 0) + 1
     r.emit("entered", node=node_id, instance=iid, type=node.type, label=node.label or None)
-    if visits[key] > _max_visits(r, key):
+    limit = _max_visits(r, key)
+    if limit is not None and visits[key] > limit:
         _visit_limit(r, iid, node)
         return iid
     _enter_body(r, iid, node)
@@ -557,12 +599,16 @@ def _enter_body(r: Run, iid: str, node: ir.Node) -> None:
 # -- the run-wide visit limit (chart meta ``max_visits``) ----------------------
 
 
-def _max_visits(r: Run, key: str) -> int:
-    base = (r.chart.meta or {}).get("max_visits") or ir.DEFAULT_MAX_VISITS
+def _max_visits(r: Run, key: str) -> Optional[int]:
+    """The visits ``key`` may have; ``None`` when the chart sets
+    ``max_visits: 0`` (no limit, doc 2.1)."""
+    base = (r.chart.meta or {}).get("max_visits")
     try:
-        base = int(base)
+        base = ir.DEFAULT_MAX_VISITS if base is None else int(base)
     except (TypeError, ValueError):
         base = ir.DEFAULT_MAX_VISITS
+    if base == 0:
+        return None
     return base + int((r.state.get("visit_extra") or {}).get(key) or 0)
 
 
@@ -668,6 +714,8 @@ def _scope_params(r: Run, iid: str, node: ir.Node) -> bool:
     """Bind a scope's ``params`` (its ``with_`` evaluated in the caller's
     environment; a group member also gets the fork's ``with``)."""
     inst = r.inst[iid]
+    # the call site's environment: a spliced block runs in it (docs 2.2)
+    inst["frame"]["caller_env"] = dict(inst["env"])
     params: Dict[str, Any] = {}
     if inst["role"] == "member":
         params.update(inst["env"].get("params") or {})
@@ -1217,9 +1265,12 @@ def _propagate(r: Run, start: str, sig: Dict[str, Any]) -> None:
             frame["signal"] = sig
             _enter_child(r, cur, node.get("finally_child"), "finally")
             return
-        if node.type == ir.T_SCOPE and op == ir.CTL_RETURN:
+        if node.type == ir.T_SCOPE and op == ir.CTL_RETURN \
+                and sig.get("target") in (None, node.id):
             _cancel_children(r, cur, "return")
-            _complete(r, cur, sig.get("outcome") or ir.OUTCOME_OK, sig.get("value"))
+            outcome = sig.get("outcome") or ir.OUTCOME_OK
+            _complete(r, cur, outcome,
+                      fill_optional(node.get("returns") or {}, outcome, sig.get("value")))
             return
         below = cur
         cur = r.inst[cur].get("parent")
@@ -1228,7 +1279,9 @@ def _propagate(r: Run, start: str, sig: Dict[str, Any]) -> None:
     if op == ir.CTL_END:
         _finish_run(r, ir.OUTCOME_OK, None, how="end")
     elif op == ir.CTL_RETURN:
-        _finish_run(r, sig.get("outcome") or ir.OUTCOME_OK, sig.get("value"), how="return")
+        outcome = sig.get("outcome") or ir.OUTCOME_OK
+        _finish_run(r, outcome, fill_optional(r.chart.returns or {}, outcome, sig.get("value")),
+                    how="return")
     else:
         _finish_run(r, ir.OUTCOME_FAIL, {"reason": f"{op} found no enclosing loop"})
 
@@ -1301,6 +1354,106 @@ def _finish_final(r: Run, outcome: str, value: Any, how: Optional[str] = None) -
     r.state["finished"] = store_mod.utcnow()
     r.emit("done", outcome=outcome, value=value, how=how, status=r.state["status"])
     _reset_at(r, None)
+    _request_round(r)
+
+
+# -- recur (docs 2.1, recur) -----------------------------------------------------
+
+#: Who filed a next-round request.
+ROUND_BY_RECUR = "recur"
+#: Seconds between a round's end and the auto start of the next (``recur.min_gap``).
+RECUR_MIN_GAP_DEFAULT = ir.RECUR_MIN_GAP_DEFAULT
+
+
+def _request_round(r: Run) -> None:
+    """A recurring run that finished with outcome ``ok`` files its own next
+    round; with ``auto`` the daemon's clock starts it (:func:`start_next_round`).
+    A failed or aborted run files nothing (the loop stops where a person must
+    look), and neither does a run ending with another declared outcome -- that
+    is how a definition ends the loop itself (a leader's wind-down)."""
+    recur = (r.chart.meta or {}).get("recur")
+    if not recur or r.state.get("parent") or r.state.get("status") != ST_DONE \
+            or r.state.get("outcome") != ir.OUTCOME_OK:
+        return
+    nxt = int(r.state.get("round") or 1) + 1
+    gap = float(recur.get("min_gap", RECUR_MIN_GAP_DEFAULT))
+    r.state["next_round"] = {"by": ROUND_BY_RECUR, "auto": bool(recur.get("auto")),
+                             "round": nxt, "requested": store_mod.utcnow(),
+                             "not_before": r.now + gap}
+    r.emit("round_requested", round=nxt, auto=bool(recur.get("auto")), min_gap=gap)
+
+
+def _next_round_chart(st: RunStore, state: Dict[str, Any]) -> Tuple[ir.Chart, bool]:
+    """The definition the next round runs: reloaded by name (or by its
+    generated path), so an updated definition takes effect at a round
+    boundary; the snapshot when it cannot be loaded. ``(chart, reloaded)``."""
+    cwd = str(st.cwd)
+    refs = [str(state.get("workflow") or "")]
+    source = str(state.get("source") or "")
+    if source and source not in refs:
+        refs.append(source)
+    for ref in refs:
+        if not ref:
+            continue
+        try:
+            return load_definition(ref, cwd), True
+        except Exception:  # noqa: BLE001 - try the next form, then the snapshot
+            continue
+    return st.load_chart(), False
+
+
+def start_next_round(cwd: Optional[str] = None, scope: Optional[str] = None,
+                     now: Optional[float] = None) -> Optional[Dict[str, Any]]:
+    """Start the slot's next round when its finished run filed an ``auto``
+    request. Daemon-driven (the cflow2 clock). ``None`` when there is nothing
+    to start: no request, a plain ``recur: true`` request (the driver starts
+    that one), a live run in the slot, ``recur.min_gap`` seconds not yet past
+    since the round ended, or a request cancelled meanwhile -- the start
+    re-checks the request under the slot lock, so a cancel that lands while the
+    next definition loads wins.
+
+    The request is single use: the start archives the finished run, so a
+    second call finds nothing."""
+    st = RunStore(cwd, scope)
+    if not st.exists():
+        return None
+    try:
+        state = st.load_state()
+    except StoreError:
+        return None
+    nxt = state.get("next_round") or {}
+    if state.get("status") not in FINISHED_STATUSES or not nxt.get("auto"):
+        return None
+    t = time.time() if now is None else now
+    if t < float(nxt.get("not_before") or 0):
+        return None
+    chart, reloaded = _next_round_chart(st, state)
+    inputs = (state.get("data") or {}).get("inputs") if reloaded else None
+    try:
+        payload = start(chart, cwd=str(st.cwd), scope=st.scope, params=state.get("params"),
+                        caps=state.get("caps"), now=now, driver=driver_of(state),
+                        caller=CALLER_USER, inputs=inputs,
+                        next_round_of=str(state.get("run_id") or ""))
+    except FlowError:
+        return None  # a start won the race, or the slot changed meanwhile
+    note("round_auto_started", cwd=str(st.cwd), scope=st.scope, round=nxt.get("round"),
+         previous=state.get("run_id"), reloaded=reloaded)
+    return {"workflow": payload.get("workflow"), "run": payload.get("run"),
+            "round": nxt.get("round"), "driver": driver_of(state) or None,
+            "previous": state.get("run_id")}
+
+
+def cancel_next_round(reason: Optional[str] = None, *, cwd: Optional[str] = None,
+                      scope: Optional[str] = None, now: Optional[float] = None) -> Dict[str, Any]:
+    """A person stops a recurring run: the pending next-round request is
+    dropped (``round_cancelled``). The run itself is not touched."""
+    def op(r: Run) -> None:
+        if not r.state.get("next_round"):
+            raise FlowError("no next round is requested in this slot")
+        dropped = r.state.pop("next_round")
+        r.emit("round_cancelled", round=dropped.get("round"), reason=reason, by=CALLER_USER)
+    _mutate(cwd, scope, now, op)
+    return status(cwd=cwd, scope=scope, now=now, tick=False)
 
 
 # -- acceptance (typed start inputs, doc 2.6) ---------------------------------------
@@ -1783,12 +1936,12 @@ def brief(r: Run, did: str) -> Dict[str, Any]:
 
 
 def _mutate(cwd: Optional[str], scope: Optional[str], now: Optional[float],
-            fn: Callable[[Run], Any]) -> Any:
+            fn: Callable[[Run], Any], lock_timeout: Optional[float] = None) -> Any:
     """Load, apply ``fn`` under the run lock, save. Time-based moves that are
     due (an ask's deadline, a timeout, a wait's seconds) apply first, so an
     operation never lands on a state the clock has already moved past."""
     st = RunStore(cwd, scope)
-    with st.lock():
+    with (st.lock() if lock_timeout is None else st.lock(lock_timeout)):
         r = Run.load(st, now)
         if r.status in LIVE_STATUSES:
             _tick_time(r)
@@ -1963,8 +2116,15 @@ def check_shell_refs(chart: ir.Chart) -> List[str]:
             spec = verify_spec(n)
             if spec:
                 problems += shell_ref_problems(spec["run"], f"task {n.label or n.id} verify")
+            for plat in ("windows", "linux"):
+                cmd = (n.get("restart") or {}).get(plat)
+                if cmd:
+                    problems += shell_ref_problems(cmd, f"task {n.label or n.id} restart.{plat}")
         if n.type == ir.T_WAIT:
             problems += shell_ref_problems(n.get("probe"), f"wait {n.label or n.id} probe")
+            for c in n.get("checks") or []:
+                problems += shell_ref_problems(c.get("probe"),
+                                               f"wait {n.label or n.id} check {c.get('id')}")
     for name, body in ((chart.spec or {}).get("monitors") or {}).items():
         for pname, cmd in _monitor_probes(dict(body or {}), str(name)).items():
             problems += shell_ref_problems(cmd, f"monitor {name} probe {pname}")
@@ -1978,7 +2138,8 @@ def _new_run(st: RunStore, chart: ir.Chart, *, params: Dict[str, Any], data: Any
              caps: Any, driver: str, now: Optional[float],
              parent: Optional[Dict[str, Any]] = None,
              inputs: Optional[Dict[str, Any]] = None,
-             previous: Optional[Dict[str, Any]] = None) -> Run:
+             previous: Optional[Dict[str, Any]] = None,
+             side: Optional[Dict[str, Any]] = None) -> Run:
     """A fresh run in ``st`` (lock held, slot empty): snapshot, state, root
     entered. The caller saves."""
     run_id = time.strftime("%Y%m%d-%H%M%S", time.gmtime(now if now is not None else None)) \
@@ -1995,10 +2156,19 @@ def _new_run(st: RunStore, chart: ir.Chart, *, params: Dict[str, Any], data: Any
     }
     if parent:
         state["parent"] = parent
+    else:
+        # rounds and choice windows belong to the slot (docs 2.1 recur, 2.3
+        # interval): ``previous`` is the slot's last run of this definition
+        prev = previous or {}
+        state["round"] = int(prev.get("round") or 1) + 1 if prev.get("next_round") else 1
+        if prev.get("windows"):
+            state["windows"] = dict(prev["windows"])
+    if side:
+        state["side"] = side
     st.write_chart(chart)
     r = Run(st, chart, state, now)
     r.emit("started", run=run_id, workflow=chart.name, source=chart.source or None,
-           params=params, driver=driver or None, parent=parent, inputs=inputs)
+           params=params, driver=driver or None, parent=parent, inputs=inputs, side=side)
     _init_collections(r, previous)
     _enter(r, chart.root, None, "root")
     _tick_time(r)
@@ -2024,7 +2194,8 @@ def _apply_inputs(chart: ir.Chart, raw: Optional[Dict[str, Any]]
         raise FlowError("typed start inputs are not available in this version")
     if raw is not None and not isinstance(raw, dict):
         raise FlowError("inputs must be an object of name -> value")
-    values, errors = inputs_mod.normalize(schema, raw or {})
+    values, errors = inputs_mod.normalize(schema, raw or {},
+                                          (chart.meta or {}).get("input_constraints"))
     if errors:
         raise FlowError("invalid inputs: " + "; ".join(f"{k}: {v}" for k, v in errors.items()))
     try:
@@ -2117,8 +2288,14 @@ def start(chart: ir.Chart, *, cwd: Optional[str] = None, scope: Optional[str] = 
           params: Optional[Dict[str, Any]] = None, caps: Any = None,
           force: bool = False, now: Optional[float] = None,
           driver: Optional[str] = None, caller: str = CALLER_USER,
-          inputs: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+          inputs: Optional[Dict[str, Any]] = None,
+          side: Optional[Dict[str, Any]] = None,
+          next_round_of: Optional[str] = None) -> Dict[str, Any]:
     """Start a run of ``chart`` in the (cwd, scope) slot; returns :func:`status`.
+
+    ``next_round_of`` (:func:`start_next_round`): the run whose auto
+    next-round request this start fulfils; under the lock the slot must still
+    hold that run with the request, or the start is refused.
 
     ``driver`` is the session that drives the run -- its identity for asks
     and for the MCP tools' authority (default :func:`default_driver`). A
@@ -2129,6 +2306,9 @@ def start(chart: ir.Chart, *, cwd: Optional[str] = None, scope: Optional[str] = 
     if chart.kind != ir.KIND_WORKFLOW:
         raise FlowError(f"{chart.name} is a {chart.kind}; only a workflow can be started")
     ir.validate(chart)
+    if store_mod.side_of(store_mod.normalize_scope(scope)) and side is None:
+        raise FlowError(f"scope {scope!r} is a side run's slot; a side run is started "
+                        f"from its session's main run (start_side, flow_start side)")
     if force and caller != CALLER_USER:
         inputs = _carry_checks(chart, inputs, RunStore(cwd, scope))
     chart, input_values = _apply_inputs(chart, inputs)
@@ -2146,6 +2326,10 @@ def start(chart: ir.Chart, *, cwd: Optional[str] = None, scope: Optional[str] = 
             except StoreError:
                 old = {}
             previous = old
+            if next_round_of is not None and (
+                    old.get("run_id") != next_round_of
+                    or not (old.get("next_round") or {}).get("auto")):
+                raise FlowError("the next-round request was withdrawn or the slot changed")
             if old.get("status") in LIVE_STATUSES:
                 if not force:
                     raise FlowError(
@@ -2168,7 +2352,7 @@ def start(chart: ir.Chart, *, cwd: Optional[str] = None, scope: Optional[str] = 
         r = _new_run(st, chart, params=values, data=chart.data, caps=_caps_to_json(caps),
                      driver=who, now=now, inputs=input_values,
                      previous=previous if (previous or {}).get("workflow") == chart.name
-                     else None)
+                     else None, side=side)
         r.save()
     r.run_after()
     return status(cwd=cwd, scope=scope, now=now, tick=False)
@@ -2436,6 +2620,137 @@ def default_verify_runner(command: Any, cwd: str, env: Dict[str, str],
     return proc.returncode, text, False
 
 
+# -- restart (docs 2.2, restart) ---------------------------------------------------
+
+RESTART_PENDING = "pending"
+RESTART_RUNNING = "running"
+RESTART_SUCCEEDED = "succeeded"
+RESTART_FAILED = "failed"
+RESTART_INTERRUPTED = "interrupted"
+RESTART_UNSUPPORTED = "unsupported"
+RESTART_FINAL = (RESTART_SUCCEEDED, RESTART_FAILED, RESTART_INTERRUPTED, RESTART_UNSUPPORTED)
+RESTART_OUTPUT_CHARS = 4000
+
+
+def restart_command(spec: Optional[Dict[str, Any]], system: str) -> Optional[str]:
+    """The command of a task's ``restart`` for host ``system`` (v1's
+    ``Restart.command_for``): ``win*`` -> windows, ``linux``/``wsl`` -> linux."""
+    spec = spec or {}
+    system = (system or "").lower()
+    if system.startswith("win"):
+        return spec.get("windows")
+    if system in ("linux", "wsl"):
+        return spec.get("linux")
+    return None
+
+
+def _restart_view(rec: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    rec = rec or {}
+    return {"status": rec.get("status") or RESTART_PENDING,
+            **{k: rec.get(k) for k in ("requested_at", "completed_at", "exit_code", "output",
+                                       "platform") if rec.get(k) is not None}}
+
+
+def _require_restart_done(r: Run, iid: str, node: ir.Node) -> None:
+    if not node.get("restart"):
+        return
+    rec = r.inst[iid]["frame"].get("restart") or {}
+    st = rec.get("status") or RESTART_PENDING
+    if st not in RESTART_FINAL:
+        raise FlowError(
+            f"task {node.label or node.id}: its restart is {st} -- the daemon runs it (an agent "
+            f"never runs a restart itself) and types its result into this session; report "
+            f"after that. Without a running daemon a person aborts the run")
+
+
+def claim_restarts(*, platform: str, boot: str, cwd: Optional[str] = None,
+                   scope: Optional[str] = None, now: Optional[float] = None
+                   ) -> List[Dict[str, Any]]:
+    """Claim every active task instance's restart that has not run in this
+    visit (each instance is one visit). Daemon-only: the caller runs each
+    ``kind: run`` action outside the lock and records it with
+    :func:`complete_restart`. A ``running`` record of another daemon boot is
+    marked ``interrupted`` and never run again -- the command may have
+    restarted the daemon itself."""
+    def op(r: Run) -> List[Dict[str, Any]]:
+        out: List[Dict[str, Any]] = []
+        if r.status not in LIVE_STATUSES or _halted(r) or r.state.get("parent"):
+            return out
+        base = {"run": r.state.get("run_id"), "workflow": r.state.get("workflow"),
+                "driver": driver_of(r.state) or None}
+        for iid in sorted(r.inst, key=lambda k: int(k.rsplit("@", 1)[1])):
+            inst = r.inst[iid]
+            node = r.node_of(iid)
+            spec = node.get("restart")
+            if inst.get("await") != AW_TASK or not spec:
+                continue
+            frame = inst["frame"]
+            rec = frame.get("restart")
+            item = {**base, "instance": iid, "node": node.id, "label": node.label or node.id}
+            if rec:
+                if rec.get("status") == RESTART_RUNNING and rec.get("boot") != boot:
+                    rec.update(status=RESTART_INTERRUPTED, completed_at=store_mod.utcnow())
+                    r.emit("restart_interrupted", node=node.id, instance=iid,
+                           boot=rec.get("boot"))
+                    out.append({**item, "kind": "interrupted"})
+                continue
+            command = restart_command(spec, platform)
+            refused = ir.restart_refusal(command) if command else None
+            if refused:
+                # a chart compiled before the allowlist, or built by hand: never run it
+                frame["restart"] = {"status": RESTART_FAILED, "platform": platform,
+                                    "requested_at": store_mod.utcnow(),
+                                    "completed_at": store_mod.utcnow(), "boot": boot,
+                                    "output": f"refused: restart command {refused}"}
+                r.emit("restart_refused", node=node.id, instance=iid, platform=platform,
+                       command=command, reason=refused)
+                out.append({**item, "kind": "refused", "platform": platform,
+                            "reason": refused})
+                continue
+            if not command:
+                frame["restart"] = {"status": RESTART_UNSUPPORTED, "platform": platform,
+                                    "requested_at": store_mod.utcnow(), "boot": boot}
+                r.emit("restart_unsupported", node=node.id, instance=iid, platform=platform)
+                out.append({**item, "kind": "unsupported", "platform": platform})
+                continue
+            token = secrets.token_hex(4)
+            frame["restart"] = {"status": RESTART_RUNNING, "command": command,
+                                "platform": platform, "boot": boot, "token": token,
+                                "requested_at": store_mod.utcnow()}
+            r.emit("restart_requested", node=node.id, instance=iid, platform=platform,
+                   command=command)
+            out.append({**item, "kind": "run", "command": command, "token": token,
+                        "timeout": float(spec.get("timeout") or 120.0)})
+        return out
+    st = RunStore(cwd, scope)
+    if not st.exists():
+        return []
+    return _mutate(cwd, scope, now, op)
+
+
+def complete_restart(instance: str, token: str, exit_code: Optional[int], output: str, *,
+                     cwd: Optional[str] = None, scope: Optional[str] = None,
+                     now: Optional[float] = None) -> Optional[Dict[str, Any]]:
+    """Record a claimed restart's result; ``None`` when the instance left or
+    the record is not the claimed one any more (nothing written)."""
+    def op(r: Run) -> Optional[Dict[str, Any]]:
+        inst = r.inst.get(instance)
+        rec = (inst or {}).get("frame", {}).get("restart") or {}
+        if not inst or rec.get("token") != token or rec.get("status") != RESTART_RUNNING:
+            return None
+        tail = (output or "")[-RESTART_OUTPUT_CHARS:]
+        rec.update(status=RESTART_SUCCEEDED if exit_code == 0 else RESTART_FAILED,
+                   exit_code=exit_code, output=tail, completed_at=store_mod.utcnow())
+        node = r.node_of(instance)
+        r.emit("restart_completed", node=node.id, instance=instance, exit_code=exit_code,
+               output=tail)
+        return {"run": r.state.get("run_id"), "workflow": r.state.get("workflow"),
+                "instance": instance, "node": node.id, "label": node.label or node.id,
+                "exit_code": exit_code, "status": rec["status"],
+                "driver": driver_of(r.state) or None}
+    return _mutate(cwd, scope, now, op)
+
+
 def _tail(text: str) -> str:
     lines = (text or "").rstrip().splitlines()[-VERIFY_TAIL_LINES:]
     out = "\n".join(lines)
@@ -2586,6 +2901,7 @@ def report(node: Optional[str], outcome: str = ir.OUTCOME_OK, value: Any = None,
         _require_progress(r)
         iid = _task_for_report(r, node)
         n = r.node_of(iid)
+        _require_restart_done(r, iid, n)
         errors = validate_result(returns_of(n), outcome, value,
                                  qtypes=(r.chart.meta or {}).get("question_types") or {},
                                  params=r.env(iid).get("params"))
@@ -2645,15 +2961,106 @@ def select(node: Optional[str], option: str, reason: Optional[str] = None, *,
             raise FlowError(f"option {option!r} is not available now (when: {opt.get('guard')})")
         if n.get("require_reason") and not (reason or "").strip():
             raise FlowError(f"choice {n.label or n.id} requires a reason")
-        r.inst[iid]["await"] = None
-        r.inst[iid]["frame"]["option"] = option
-        r.emit("selected", node=n.id, instance=iid, option=option, reason=reason, by=caller)
-        if opt.get("child"):
-            _enter_child(r, iid, opt["child"], "option")
-        else:
-            _complete(r, iid, ir.OUTCOME_OK, None)
+        frame = r.inst[iid]["frame"]
+        held = frame.get("held")
+        opens = _window_opens(r, n, opt)
+        if caller != CALLER_USER and opens is not None and r.now < opens:
+            if held and held.get("option") == option:
+                held["reason"] = reason
+                held["updated"] = r.now
+                r.emit("select_held", node=n.id, instance=iid, option=option, reason=reason,
+                       opens_at=opens, updated=True)
+            else:
+                if held:
+                    r.emit("hold_cancelled", node=n.id, instance=iid, option=held.get("option"),
+                           why=f"{caller} chose {option}")
+                frame["held"] = {"option": option, "reason": reason, "opens_at": opens,
+                                 "since": r.now, "by": caller}
+                r.emit("select_held", node=n.id, instance=iid, option=option, reason=reason,
+                       opens_at=opens)
+            out["held"] = dict(frame["held"])
+            return
+        if held:
+            frame.pop("held", None)
+            r.emit("hold_cancelled", node=n.id, instance=iid, option=held.get("option"),
+                   why=f"{caller} chose {option}")
+        override = caller == CALLER_USER and opens is not None and r.now < opens
+        _take_option(r, iid, n, opt, reason, caller, override=override)
+    out: Dict[str, Any] = {}
     _mutate(cwd, scope, now, op)
-    return status(cwd=cwd, scope=scope, now=now, tick=False)
+    payload = status(cwd=cwd, scope=scope, now=now, tick=False)
+    if out.get("held"):
+        h = out["held"]
+        payload["held"] = h
+        payload["note"] = (f"option {h['option']} is paced (interval): held until the window "
+                           f"opens at {_iso(h['opens_at'])}. End your turn -- the daemon applies "
+                           f"it then and wakes you. Choosing it again only updates the reason; "
+                           f"choosing another option cancels the hold")
+    return payload
+
+
+def _iso(ts: Any) -> str:
+    try:
+        return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(float(ts)))
+    except (TypeError, ValueError):
+        return str(ts)
+
+
+def _window_key(node: ir.Node, option: str) -> str:
+    return f"{node_key(node)}:{option}"
+
+
+def _window_opens(r: Run, node: ir.Node, opt: Dict[str, Any]) -> Optional[float]:
+    """When ``opt`` may be taken again (its ``interval`` after the slot's last
+    take), or ``None`` for an unpaced option or one never taken."""
+    interval = opt.get("interval")
+    if not interval:
+        return None
+    last = (r.state.get("windows") or {}).get(_window_key(node, opt["name"]))
+    if last is None:
+        return None
+    return float(last) + float(interval)
+
+
+def _take_option(r: Run, iid: str, n: ir.Node, opt: Dict[str, Any], reason: Optional[str],
+                 by: str, override: bool = False) -> None:
+    option = opt["name"]
+    r.inst[iid]["await"] = None
+    r.inst[iid]["frame"]["option"] = option
+    if opt.get("interval"):
+        r.state.setdefault("windows", {})[_window_key(n, option)] = r.now
+    r.emit("selected", node=n.id, instance=iid, option=option, reason=reason, by=by,
+           override=True if override else None)
+    if opt.get("child"):
+        _enter_child(r, iid, opt["child"], "option")
+    else:
+        _complete(r, iid, ir.OUTCOME_OK, None)
+
+
+def _release_hold(r: Run, iid: str, node: ir.Node) -> bool:
+    """A held choice whose window opened: take it with the latest reason
+    (``by: window``), or drop the hold when its option is no longer
+    available. True when something changed."""
+    frame = r.inst[iid]["frame"]
+    held = frame.get("held") or {}
+    if r.now < float(held.get("opens_at") or 0):
+        return False
+    frame.pop("held", None)
+    opt = next((o for o in node.get("options") or [] if o["name"] == held.get("option")), None)
+    why = None
+    if opt is None:
+        why = "the option no longer exists"
+    else:
+        try:
+            if not _guard(r, iid, opt.get("guard")):
+                why = f"its guard is false now (when: {opt.get('guard')})"
+        except expr_mod.ExprError as exc:
+            why = f"its guard could not be evaluated: {exc}"
+    if why:
+        r.emit("hold_cancelled", node=node.id, instance=iid, option=held.get("option"), why=why)
+        return True
+    _take_option(r, iid, node, opt, held.get("reason"), "window")
+    return True
 
 
 def fork(group: Optional[str], with_: Optional[Dict[str, Any]] = None, *,
@@ -3285,10 +3692,41 @@ def _probe_verdict(result: Any) -> Tuple[str, Any, Any]:
     return PROBE_UNDECIDED, output, code
 
 
+def _probing(node: ir.Node) -> bool:
+    """A wait the clock measures: one ``probe`` or a list of ``checks``."""
+    return bool(node.get("probe") or node.get("checks"))
+
+
+def _run_wait_probe(r: Run, iid: str, runner: ProbeRunner, node: ir.Node) -> Any:
+    """A wait's measurement: its probe's result, or for ``checks`` every
+    item's verdict (``{"checks": [...]}``)."""
+    if not node.get("checks"):
+        return _run_probe(r, iid, runner, node.get("probe"))
+    items = []
+    for c in node.get("checks") or []:
+        verdict, output, code = _probe_verdict(_run_probe(r, iid, runner, c.get("probe")))
+        items.append({"id": c.get("id"), "describe": c.get("describe") or None,
+                      "verdict": verdict, "exit": code,
+                      "output": _tail(output if isinstance(output, str) else ""),
+                      "measured_at": store_mod.utcnow()})
+    return {"checks": items}
+
+
+def _checks_verdict(items: List[Dict[str, Any]]) -> Tuple[str, Any]:
+    """All items hold -> holds; any undecided -> undecided (its exit);
+    otherwise not yet."""
+    if all(i.get("verdict") == PROBE_HOLDS for i in items):
+        return PROBE_HOLDS, None
+    for i in items:
+        if i.get("verdict") == PROBE_UNDECIDED:
+            return PROBE_UNDECIDED, i.get("exit")
+    return PROBE_NOT_YET, None
+
+
 def _probe_due(r: Run, iid: str) -> bool:
     inst = r.inst[iid]
     node = r.chart.node(inst["node"])
-    if inst.get("await") != AW_WAIT or not node.get("probe"):
+    if inst.get("await") != AW_WAIT or not _probing(node):
         return False
     poll = float(node.get("poll") or DEFAULT_POLL)
     last = inst["frame"].get("last_poll")
@@ -3299,7 +3737,7 @@ def _due_probes(r: Run) -> Dict[str, Any]:
     """``{instance: probe}`` for every wait whose probe is due at ``r.now``."""
     if r.status not in LIVE_STATUSES:
         return {}
-    return {iid: r.node_of(iid).get("probe") for iid in r.inst if _probe_due(r, iid)}
+    return {iid: r.node_of(iid) for iid in r.inst if _probe_due(r, iid)}
 
 
 def _tick_time(r: Run, probe_runner: Optional[ProbeRunner] = None,
@@ -3332,6 +3770,11 @@ def _tick_time(r: Run, probe_runner: Optional[ProbeRunner] = None,
                     _complete(r, iid, ir.OUTCOME_TIMEOUT, {"seconds": node.get("seconds")})
                 fired = True
                 break
+            if inst.get("await") == AW_CHOOSE and frame.get("held") \
+                    and r.now >= float(frame["held"].get("opens_at") or 0):
+                if _release_hold(r, iid, node):
+                    fired = True
+                    break
             if inst.get("await") == AW_WAIT and node.get("until") is not None:
                 if _until_step(r, iid, node):
                     fired = True
@@ -3340,27 +3783,43 @@ def _tick_time(r: Run, probe_runner: Optional[ProbeRunner] = None,
             if inst.get("await") == AW_WAIT:
                 due = frame.get("due")
                 if due is not None and r.now >= due:
-                    if node.get("probe"):
+                    if _probing(node):
                         # with a probe, seconds is the upper bound (doc 2.3, wait)
-                        _complete(r, iid, ir.OUTCOME_TIMEOUT,
-                                  {"seconds": node.get("seconds"),
-                                   "polls": int(frame.get("polls") or 0)})
+                        value = {"seconds": node.get("seconds"),
+                                 "polls": int(frame.get("polls") or 0)}
+                        if node.get("checks"):
+                            value["checks"] = frame.get("checks")
+                            r.emit("checks_expired", node=node.id, instance=iid,
+                                   checks=frame.get("checks"))
+                        _complete(r, iid, ir.OUTCOME_TIMEOUT, value)
                     else:
                         _complete(r, iid, ir.OUTCOME_OK, {"waited": node.get("seconds")})
                     fired = True
                     break
                 have = probe_results is not None and iid in probe_results
-                if node.get("probe") and (have or (probe_runner is not None
-                                                   and probe_results is None)):
+                if _probing(node) and (have or (probe_runner is not None
+                                                and probe_results is None)):
                     if _probe_due(r, iid):
                         frame["last_poll"] = r.now
                         result = probe_results.pop(iid) if have else \
-                            _run_probe(r, iid, probe_runner, node.get("probe"))
-                        verdict, output, code = _probe_verdict(result)
+                            _run_wait_probe(r, iid, probe_runner, node)
+                        checks = result.get("checks") if isinstance(result, dict) \
+                            and node.get("checks") else None
+                        if checks is not None:
+                            frame["checks"] = checks
+                            verdict, code = _checks_verdict(checks)
+                            output = None
+                        else:
+                            verdict, output, code = _probe_verdict(result)
                         frame["polls"] = int(frame.get("polls") or 0) + 1
                         if verdict == PROBE_HOLDS:
                             frame["undecided"] = 0
-                            _complete(r, iid, ir.OUTCOME_OK, {"output": output})
+                            if checks is not None:
+                                r.emit("checks_passed", node=node.id, instance=iid,
+                                       checks=checks)
+                                _complete(r, iid, ir.OUTCOME_OK, {"checks": checks})
+                            else:
+                                _complete(r, iid, ir.OUTCOME_OK, {"output": output})
                             fired = True
                             break
                         if verdict == PROBE_UNDECIDED:
@@ -3369,9 +3828,11 @@ def _tick_time(r: Run, probe_runner: Optional[ProbeRunner] = None,
                             r.emit("probe_undecided", node=node.id, instance=iid, exit=code,
                                    count=frame["undecided"], max=limit)
                             if frame["undecided"] >= limit:
-                                _complete(r, iid, OUTCOME_UNDECIDABLE,
-                                          {"exit": code, "output": output,
-                                           "undecided": frame["undecided"]})
+                                value = {"exit": code, "output": output,
+                                         "undecided": frame["undecided"]}
+                                if checks is not None:
+                                    value["checks"] = checks
+                                _complete(r, iid, OUTCOME_UNDECIDABLE, value)
                                 fired = True
                                 break
                         else:
@@ -3447,14 +3908,21 @@ def wait_tick(now: Optional[float] = None, probe_runner: Optional[ProbeRunner] =
         if probe_runner is not None:
             snap = Run.load(st, now)
             due = _due_probes(snap)
-            results = {iid: _run_probe(snap, iid, probe_runner, probe)
-                       for iid, probe in due.items()}
+            results = {iid: _run_wait_probe(snap, iid, probe_runner, wnode)
+                       for iid, wnode in due.items()}
 
-        def op(r: Run) -> int:
-            if r.status not in LIVE_STATUSES:
-                return 0
-            return _tick_time(r, None, results if results is not None else {})
-        moved += _mutate(cwd, scope, now, op)
+        # Not _mutate: its own time tick would apply what this call moves
+        # and the count would miss it (the clock wakes the driver on it).
+        with st.lock():
+            r = Run.load(st, now)
+            if r.status in LIVE_STATUSES:
+                moved += _tick_time(r, None, results if results is not None else {})
+            if r.status in LIVE_STATUSES:
+                moved += _tick_until(r)
+            r.save()
+        r.run_after()
+        if r.deferred_error:
+            raise FlowError(r.deferred_error)
         if probe_runner is None:
             break
         if not _due_probes(Run.load(st, now)):
@@ -3721,17 +4189,43 @@ def describe(r: Run) -> Dict[str, Any]:
         out["collections"] = _col_summary(r)
     if _col_specs(r) or s.get("triggers"):
         out["pending_triggers"] = len(s.get("triggers") or [])
+    if s.get("round"):
+        out["round"] = s["round"]
+    if s.get("side"):
+        out["side"] = s["side"]
+    sides = (r.chart.meta or {}).get("sides") or {}
+    if sides and store_mod.NESTED_SEP not in r.store.scope:
+        main = store_mod.main_scope(r.store.scope)
+        out["sides"] = {}
+        for name, wf in sides.items():
+            try:
+                info = side_info(r.store.cwd, main, name)
+            except StoreError:
+                continue
+            info["declared"] = wf
+            if info["run"] is None:
+                info["how"] = (f"not started: flow_start with side {name!r} (runs {wf}); "
+                               f"its tools take side {name!r}")
+            out["sides"][name] = info
     if s.get("status") in FINISHED_STATUSES:
         out["outcome"] = s.get("outcome")
         out["value"] = s.get("value")
         out["note"] = f"the run is {s.get('status')}"
+        nxt = s.get("next_round")
+        if nxt:
+            out["next_round"] = nxt
+            out["note"] += (
+                f"; round {nxt.get('round')} is requested and the daemon starts it (recur auto)"
+                if nxt.get("auto") else
+                f"; round {nxt.get('round')} is requested: start it with "
+                f"flow_start(workflow={s.get('workflow')!r})")
         return out
     nested_waits = [w for w in _gate_waits(s, None) if "(nested run " in w]
     if nested_waits:
         # The parent itself shows running; what holds it is inside (G2).
         out["waiting_in_nested"] = nested_waits
     tasks, choices, waits, groups, limits, asks = [], [], [], [], [], []
-    verifying, visit_limits = [], []
+    verifying, visit_limits, windows = [], [], []
     for iid in sorted(r.inst, key=lambda k: int(k.rsplit("@", 1)[1])):
         inst = r.inst[iid]
         node = r.chart.node(inst["node"])
@@ -3750,6 +4244,8 @@ def describe(r: Run) -> Dict[str, Any]:
             })
             if inst["frame"].get("last_verify"):
                 tasks[-1]["last_verify"] = inst["frame"]["last_verify"]
+            if node.get("restart"):
+                tasks[-1]["restart"] = _restart_view(inst["frame"].get("restart"))
         elif aw == AW_VERIFY:
             v = inst["frame"].get("verify") or {}
             verifying.append({"instance": iid, "node": node.id, "label": node.label or None,
@@ -3763,6 +4259,11 @@ def describe(r: Run) -> Dict[str, Any]:
                 except expr_mod.ExprError:
                     ok = False
                 entry = {"name": opt["name"], "description": opt.get("description") or ""}
+                if opt.get("interval"):
+                    entry["interval"] = opt["interval"]
+                    opens = _window_opens(r, node, opt)
+                    if opens is not None and r.now < opens:
+                        entry["window_opens_at"] = _iso(opens)
                 (avail if ok else unavail).append(entry if ok else {**entry, "when": opt.get("guard")})
             choices.append({
                 "instance": iid, "node": node.id, "label": node.label or None,
@@ -3771,6 +4272,12 @@ def describe(r: Run) -> Dict[str, Any]:
                 "require_reason": bool(node.get("require_reason")),
                 "options": avail, "unavailable": unavail,
             })
+            held = inst["frame"].get("held")
+            if held:
+                choices[-1]["held"] = {**held, "opens_at": _iso(held.get("opens_at"))}
+                windows.append({"instance": iid, "node": node.id, "label": node.label or None,
+                                "option": held.get("option"),
+                                "opens_at": _iso(held.get("opens_at"))})
         elif aw == AW_WAIT:
             waits.append({
                 "instance": iid, "node": node.id, "kind": "wait",
@@ -3778,6 +4285,13 @@ def describe(r: Run) -> Dict[str, Any]:
                 "poll": node.get("poll"), "seconds": node.get("seconds"),
                 "due": inst["frame"].get("due"), "polls": inst["frame"].get("polls", 0),
             })
+            if node.get("checks"):
+                measured = {c.get("id"): c for c in inst["frame"].get("checks") or []}
+                waits[-1]["checks"] = [
+                    {"id": c["id"], "describe": c.get("describe") or None, "probe": c.get("probe"),
+                     **{k: (measured.get(c["id"]) or {}).get(k)
+                        for k in ("verdict", "exit", "output", "measured_at")}}
+                    for c in node.get("checks") or []]
         elif aw == AW_PAUSE:
             waits.append({"instance": iid, "node": node.id, "kind": "pause",
                           "resume_at": inst["frame"].get("resume_at")})
@@ -3829,6 +4343,8 @@ def describe(r: Run) -> Dict[str, Any]:
         out["visit_limits"] = visit_limits
     if verifying:
         out["verifying"] = verifying
+    if windows:
+        out["waiting_window"] = windows
     if asks:
         out["asks"] = asks
     out["data"] = s.get("data")
@@ -3853,6 +4369,14 @@ def describe(r: Run) -> Dict[str, Any]:
                      "'claunch cflow2 extend --visits'")
     if verifying:
         hints.append("verify commands are running; call flow_status again later")
+    if windows:
+        hints.append("a choice is held until its window opens (waiting_window): end your turn, "
+                     "the daemon applies it then and wakes you; choosing the same option again "
+                     "updates its reason, another option cancels the hold")
+    if any((t.get("restart") or {}).get("status") in (RESTART_PENDING, RESTART_RUNNING)
+           for t in tasks):
+        hints.append("the daemon runs a task's restart command (never run it yourself); its "
+                     "report is accepted once the restart result is in")
     if acc and acc.get("status") == "failed":
         hints.append("the run reached its end but acceptance checks failed: fix what they "
                      "found (flow_status checks again), or a person accepts it anyway with "
@@ -4038,6 +4562,10 @@ def _brief_ask(r: Run, iid: str, node: ir.Node, spec: Dict[str, Any]) -> Optiona
             if got != want:
                 errors.append(f"the brief's options ({', '.join(q_mod.option_names(norm, decl))}) "
                               f"must be exactly the fixed choices ({', '.join(choices)})")
+            else:
+                # the definition branches on these names (cases): the answer
+                # must come back spelled as the definition wrote them
+                norm = _respell_choices(norm, decl, choices)
     cands = spec["from"]
     if spec.get("from_param") and not errors:
         raw_from = param(spec["from_param"])
@@ -4061,6 +4589,22 @@ def _brief_ask(r: Run, iid: str, node: ir.Node, spec: Dict[str, Any]) -> Optiona
     return {"format": fmt, "brief": norm, "options": q_mod.ask_options(norm, decl),
             "from": cands, "question_text": q_mod.render_text(norm, decl),
             "require_reason": bool(param(spec.get("require_reason")))}
+
+
+def _respell_choices(brief: Dict[str, Any], decl: Dict[str, Any],
+                     choices: List[str]) -> Dict[str, Any]:
+    """The brief with its option names (and its recommendation) in the fixed
+    choices' spelling; they already match without case."""
+    spell = {c.casefold(): c for c in choices}
+    out = json.loads(json.dumps(brief))
+    for item in out.get(decl["options"]) or []:
+        name = item.get("name")
+        if isinstance(name, str) and name.casefold() in spell:
+            item["name"] = spell[name.casefold()]
+    rec = decl.get("recommendation")
+    if rec and isinstance(out.get(rec), str) and out[rec].casefold() in spell:
+        out[rec] = spell[out[rec].casefold()]
+    return out
 
 
 def _open_ask(r: Run, iid: str, node: ir.Node) -> None:
@@ -4526,7 +5070,10 @@ def open_asks(r: Run) -> List[Dict[str, Any]]:
 # State (``state.json``):
 #   collections: {name: {kind, items: [...], seq}}   (col_mod owns the shape)
 #   cursors:     {address: seq}   -- a log's read position for this run; the
-#                address is the collection name for this run's own log
+#                address is the collection name for this run's own log and the
+#                full address (``side:stack:signals``) for a peer's;
+#                ``<key>#<record name>`` is a named consume's position
+#   cursor_epochs: {address: epoch} -- the peer log a peer cursor was moved on
 #   triggers:    [{id, node, label, instance, at, do, push?, queued_at}]
 #   trigger_seq: the last trigger id's number
 #   watch_checked: {name: {str(key): epoch}} -- the last watch probe of a record
@@ -4565,91 +5112,350 @@ def _col_state(r: "Run", name: str) -> Dict[str, Any]:
             f"no collection {name!r} in this run (declared: {', '.join(specs) or 'none'})")
     cols = r.state.setdefault("collections", {})
     if not isinstance(cols.get(name), dict):
-        cols[name] = col_mod.empty(specs[name])
+        cols[name] = _new_col(r, specs[name])
     return cols[name]
 
 
+def _new_col(r: "Run", spec: Dict[str, Any]) -> Dict[str, Any]:
+    """An empty collection of this run. ``epoch`` names the run that opened
+    the log: a peer's cursor on it (doc 2.9) counts in that log's ``seq`` and
+    is void on a log another run opened."""
+    cs = col_mod.empty(spec)
+    cs["epoch"] = str(r.state.get("run_id") or "")
+    return cs
+
+
 def _self_name(r: "Run", addr: Any) -> str:
-    """The collection an effect or a function names; only this run's own
-    collections are reachable from inside a run in this version."""
+    """The collection an effect names: a run writes only its own collections
+    (doc 2.9: peers read each other, nobody writes another run's)."""
     target, name = col_mod.parse_address(addr)
-    if target != "self":
+    if _peer_scope(r, target) is not None:
         raise col_mod.CollectionError(
-            f"collection address {addr!r}: only this run's own collections (self) can be "
-            f"used here")
+            f"collection address {addr!r}: a run writes only its own collections; "
+            f"another run's are read (items, fresh, wait until) and consumed")
     _col_state(r, name)
     return name
 
 
+# -- side runs (doc 2.9): the session's other runs -----------------------------
+
+
+def _peer_scope(r: "Run", target: str) -> Optional[str]:
+    """The slot an address target names, ``None`` for this run itself.
+    ``main`` is the session's main run, ``side:<name>`` its side run
+    ``name``; ``parent`` is not readable from inside a run (doc 2.8)."""
+    if target == "self":
+        return None
+    if target == "parent":
+        raise col_mod.CollectionError("parent: addresses are only for triggers")
+    own = r.store.scope
+    main = store_mod.main_scope(own)
+    if target == "main":
+        scope = main
+    elif target.startswith("side:"):
+        try:
+            scope = store_mod.side_scope(main, target.split(":", 1)[1])
+        except StoreError as exc:
+            raise col_mod.CollectionError(str(exc)) from None
+    else:
+        raise col_mod.CollectionError(f"unknown address target {target!r}")
+    return None if scope == own else scope
+
+
+def _load_peer(cwd: Path, scope: str) -> Optional[Dict[str, Any]]:
+    """A peer run read without its lock (state files are replaced whole):
+    ``{scope, state, specs, live}``, or None when the slot holds no run."""
+    st = RunStore(str(cwd), scope)
+    if not st.exists():
+        return None
+    try:
+        state = st.load_state()
+        chart = st.load_chart()
+    except StoreError:
+        return None
+    return {"scope": scope, "state": state, "specs": _chart_col_specs(chart), "chart": chart,
+            "live": state.get("status") in LIVE_STATUSES}
+
+
+#: Joins a log's cursor key to a record name: the cursor a named consume
+#: moves (``{from, name}``, doc 2.7).
+NAME_SEP = "#"
+
+
+def _cursor_key(own: bool, name: str, addr: str, record: Optional[str] = None) -> str:
+    """The ``cursors`` key of a log: the collection name for this run's own
+    log, the address for a peer's; ``#<record name>`` for a named cursor."""
+    key = name if own else str(addr)
+    return f"{key}{NAME_SEP}{record}" if record else key
+
+
+def _cursor(r: "Run", key: str, cs: Optional[Dict[str, Any]], own: bool) -> int:
+    """One cursor (0 when unset). A cursor on a peer's log is void when the
+    log is not the one it was moved on (another epoch: a new run that did not
+    inherit the log)."""
+    cursor = (r.state.get("cursors") or {}).get(key)
+    if cursor is None:
+        return 0
+    if not own and (r.state.get("cursor_epochs") or {}).get(key) != (cs or {}).get("epoch"):
+        return 0
+    return int(cursor)
+
+
+def _log_position(r: "Run", addr: str, cs: Optional[Dict[str, Any]], own: bool,
+                  record: Optional[str]) -> int:
+    """Where this run stands in a log for ``fresh``: its whole-log cursor, or
+    -- asking about one record name -- the later of that and the name's own."""
+    _target, name = col_mod.parse_address(addr)
+    pos = _cursor(r, _cursor_key(own, name, addr), cs, own)
+    if record:
+        pos = max(pos, _cursor(r, _cursor_key(own, name, addr, record), cs, own))
+    return pos
+
+
+def side_info(cwd: Any, main: str, name: str) -> Dict[str, Any]:
+    """What ``side(name)`` reads (doc 2.9): the session's side run ``name``."""
+    scope = store_mod.side_scope(main, name)
+    peer = _load_peer(Path(str(cwd)), scope)
+    if peer is None:
+        return {"name": name, "scope": scope, "live": False, "status": None, "run": None,
+                "workflow": None}
+    st = peer["state"]
+    return {"name": name, "scope": scope, "live": peer["live"], "status": st.get("status"),
+            "run": st.get("run_id"), "workflow": st.get("workflow")}
+
+
+#: Journal events that change what a peer reads off this run.
+PEER_VISIBLE = ("collection_pushed", "collection_set", "collection_removed",
+                "collection_reset", "collection_watch", "done", "aborted")
+
+
+def _has_peers(r: "Run") -> bool:
+    """A main run that declares sides, or a side run."""
+    if store_mod.NESTED_SEP in r.store.scope:
+        return False
+    return bool((r.chart.meta or {}).get("sides")) or bool(store_mod.side_of(r.store.scope))
+
+
+
+def peer_scopes(cwd: Any, scope: str) -> List[str]:
+    """The other top-level slots of ``scope``'s session in ``cwd``: its main
+    run and its side runs."""
+    main = store_mod.main_scope(scope)
+    out = []
+    for other in store_mod.list_scopes(str(cwd)):
+        if other == scope or store_mod.NESTED_SEP in other or store_mod.main_scope(other) != main:
+            continue
+        out.append(other)
+    return out
+
+
+#: how long a poke waits for a peer's lock: a peer that is busy is changing
+#: its own state and re-evaluates its waits when it saves (or on the clock's
+#: next pass), so the run that poked does not wait for it
+POKE_LOCK_TIMEOUT = 0.1
+
+
+def poke_peers(cwd: str, scope: str, now: Optional[float] = None) -> List[str]:
+    """After a run changed what its peers read, re-evaluate the peers'
+    ``wait: until`` now instead of on the clock's next pass. Runs after the
+    changing run's lock is released; a busy peer is left to the clock."""
+    poked = []
+    for other in peer_scopes(cwd, scope):
+        st = RunStore(cwd, other)
+        try:
+            state = st.load_state()
+        except StoreError:
+            continue
+        if state.get("status") not in LIVE_STATUSES:
+            continue
+        if not any((i or {}).get("await") == AW_WAIT for i in (state.get("inst") or {}).values()):
+            continue
+        try:
+            _mutate(cwd, other, now, lambda r: None, lock_timeout=POKE_LOCK_TIMEOUT)
+            poked.append(other)
+        except (FlowError, StoreError):
+            continue
+    return poked
+
+
+def start_side(name: str, *, cwd: Optional[str] = None, main: Optional[str] = None,
+               workflow: Optional[str] = None, params: Optional[Dict[str, Any]] = None,
+               inputs: Optional[Dict[str, Any]] = None, caps: Any = None,
+               force: bool = False, now: Optional[float] = None,
+               driver: Optional[str] = None, caller: str = CALLER_USER) -> Dict[str, Any]:
+    """Start the side run ``name`` of the session whose main run is in slot
+    ``main`` (doc 2.9): the main run must be live and declare it under
+    ``sides:``; the side runs that definition in slot ``<main>+<name>``,
+    driven by the main run's driver."""
+    main = store_mod.normalize_scope(main)
+    if store_mod.side_of(main) or store_mod.NESTED_SEP in main:
+        raise FlowError(f"slot {main!r} is not a session's main run; a side run is started "
+                        f"beside the main run")
+    mst = RunStore(cwd, main)
+    if not mst.exists():
+        raise FlowError(f"no cflow2 run in slot {main!r}: a side run starts beside a live "
+                        f"main run that declares it (sides:)")
+    mstate = mst.load_state()
+    mchart = mst.load_chart()
+    if mstate.get("status") not in LIVE_STATUSES:
+        raise FlowError(f"the main run ({mstate.get('workflow')}) is {mstate.get('status')}; "
+                        f"side runs start only beside a live main run")
+    sides = (mchart.meta or {}).get("sides") or {}
+    if name not in sides:
+        raise FlowError(f"{mchart.name} declares no side run {name!r} "
+                        f"(sides: {', '.join(sides) or 'none'})")
+    if workflow and str(workflow) != str(sides[name]):
+        raise FlowError(f"side run {name!r} runs {sides[name]}, as {mchart.name} declares; "
+                        f"got {workflow!r}")
+    chart = load_definition(str(sides[name]), str(mst.cwd))
+    who = driver_of(mstate) if driver is None else str(driver or "")
+    return start(chart, cwd=str(mst.cwd), scope=store_mod.side_scope(main, name),
+                 params=params, caps=caps, force=force, now=now, driver=who, caller=caller,
+                 inputs=inputs, side={"name": name, "main": main,
+                                      "main_run": mstate.get("run_id")})
+
+
+def abort_sides(session: str, cwd: str, reason: str,
+                now: Optional[float] = None) -> List[str]:
+    """Abort every live side run of ``session`` in ``cwd`` (the daemon, when
+    the session ended: doc 2.9). Returns the slots aborted."""
+    out = []
+    main = store_mod.main_scope(str(session or ""))
+    if not main:
+        return out
+    for scope in peer_scopes(cwd, main):
+        if not store_mod.side_of(scope):
+            continue
+        try:
+            state = RunStore(cwd, scope).load_state()
+        except StoreError:
+            continue
+        if state.get("status") not in LIVE_STATUSES:
+            continue
+        try:
+            abort(reason, cwd=cwd, scope=scope, now=now)
+            out.append(scope)
+        except (FlowError, StoreError):
+            continue
+    return out
+
+
 class _ColResolver:
     """What :mod:`.expr` reads collections through (``items``, ``count``,
-    ``fresh``, ``exists``). ``strict`` (guards, effects): an address of
-    another run is an error. Not strict (``wait: until``): such an address
-    reads as empty and is noted in ``absent`` -- the wait ends ``absent``."""
+    ``fresh``, ``exists``, ``side``). ``strict`` (guards, effects): a
+    collection a live peer does not declare is an error; a missing or
+    finished peer reads as what it holds (nothing when there is no run).
+    Not strict (``wait: until``): every such address is noted in ``absent``
+    -- the wait ends ``absent`` unless the expression holds anyway."""
 
     def __init__(self, r: "Run", strict: bool = True) -> None:
         self.r = r
         self.strict = strict
         self.absent: List[str] = []
+        self._peers: Dict[str, Optional[Dict[str, Any]]] = {}
 
-    def _name(self, addr: str) -> Optional[str]:
-        target, name = col_mod.parse_address(addr)
-        if target != "self":
-            if self.strict:
+    def _miss(self, addr: str) -> None:
+        if addr not in self.absent:
+            self.absent.append(addr)
+
+    def _peer(self, scope: str) -> Optional[Dict[str, Any]]:
+        if scope not in self._peers:
+            self._peers[scope] = _load_peer(self.r.store.cwd, scope)
+        return self._peers[scope]
+
+    def _col(self, addr: str) -> Tuple[Optional[Dict[str, Any]], bool]:
+        """``(col_state, own)`` the address reads; ``(None, False)`` for a peer
+        that holds nothing to read."""
+        try:
+            target, name = col_mod.parse_address(addr)
+            if target == "parent" and not self.strict:
+                self._miss(addr)  # trigger-only (check refuses it); absent here
+                return None, False
+            scope = _peer_scope(self.r, target)
+        except col_mod.CollectionError as exc:
+            raise expr_mod.ExprError(str(exc)) from None
+        if scope is None:
+            specs = _col_specs(self.r)
+            if name not in specs:
                 raise expr_mod.ExprError(
-                    f"collection address {addr!r}: only this run's own collections can be "
-                    f"read here")
-            if addr not in self.absent:
-                self.absent.append(addr)
-            return None
-        specs = _col_specs(self.r)
-        if name not in specs:
-            raise expr_mod.ExprError(
-                f"no collection {name!r} in this run (declared: {', '.join(specs) or 'none'})")
-        return name
+                    f"no collection {name!r} in this run (declared: "
+                    f"{', '.join(specs) or 'none'})")
+            return (self.r.state.get("collections") or {}).get(name), True
+        peer = self._peer(scope)
+        if peer is None:
+            self._miss(addr)
+            return None, False
+        if name not in peer["specs"]:
+            if self.strict and peer["live"]:
+                raise expr_mod.ExprError(
+                    f"{addr!r}: the run in slot {scope!r} ({peer['state'].get('workflow')}) "
+                    f"declares no collection {name!r}")
+            self._miss(addr)
+            return None, False
+        if not peer["live"]:
+            self._miss(addr)
+        return (peer["state"].get("collections") or {}).get(name), False
 
     def items(self, addr: str, status: Optional[str] = None) -> List[Dict[str, Any]]:
-        name = self._name(addr)
-        if name is None:
-            return []
-        return col_mod.items((self.r.state.get("collections") or {}).get(name), status)
+        cs, _own = self._col(addr)
+        return col_mod.items(cs, status)
 
     def fresh(self, addr: str, field: Optional[str] = None) -> bool:
-        name = self._name(addr)
-        if name is None:
-            return False
-        cursor = (self.r.state.get("cursors") or {}).get(name)
-        return col_mod.fresh((self.r.state.get("collections") or {}).get(name), cursor, field)
+        cs, own = self._col(addr)
+        return col_mod.fresh(cs, _log_position(self.r, addr, cs, own, field), field)
 
     def exists(self, addr: str) -> bool:
-        target, name = col_mod.parse_address(addr)
-        # phase 1: other runs (main, side, parent) are not resolvable yet
-        return target == "self" and name in _col_specs(self.r)
+        try:
+            target, name = col_mod.parse_address(addr)
+            scope = _peer_scope(self.r, target)
+        except col_mod.CollectionError:
+            return False
+        if scope is None:
+            return name in _col_specs(self.r)
+        peer = self._peer(scope)
+        return bool(peer and peer["live"] and name in peer["specs"])
+
+    def side(self, name: str) -> Dict[str, Any]:
+        try:
+            return side_info(self.r.store.cwd, store_mod.main_scope(self.r.store.scope), name)
+        except StoreError as exc:
+            raise expr_mod.ExprError(str(exc)) from None
 
 
 def _init_collections(r: "Run", previous: Optional[Dict[str, Any]]) -> None:
     """A new run's collections: empty, or -- ``lifecycle.inherit`` -- the
     previous run's in this slot (same workflow name), cleaned up, with this
-    run's cursors on them."""
+    run's cursors on them. Cursors on peers' logs (doc 2.9) carry over with
+    their epochs: they are this slot's place in another run's log."""
+    old_cursors = (previous or {}).get("cursors") or {}
+    old_epochs = (previous or {}).get("cursor_epochs") or {}
+    for key in [k for k in old_cursors if ":" in str(k) and k in old_epochs]:
+        r.state.setdefault("cursors", {})[key] = old_cursors[key]
+        r.state.setdefault("cursor_epochs", {})[key] = old_epochs[key]
     specs = _col_specs(r)
     if not specs:
         return
     cols = r.state.setdefault("collections", {})
     cursors = r.state.setdefault("cursors", {})
     old_cols = (previous or {}).get("collections") or {}
-    old_cursors = (previous or {}).get("cursors") or {}
     for name, spec in specs.items():
         if previous is not None and spec["lifecycle"].get("inherit"):
             cols[name], summary = col_mod.inherit_report(old_cols.get(name), spec)
-            if summary.get("inherited"):
-                if name in old_cursors:
-                    cursors[name] = old_cursors[name]
+            if not summary.get("inherited"):
+                cols[name] = _new_col(r, spec)
+            else:
+                # an inherited log keeps its epoch: peers' cursors stay valid
+                cols[name]["epoch"] = ((old_cols.get(name) or {}).get("epoch")
+                                       or str(previous.get("run_id") or ""))
+                for key in old_cursors:
+                    if key == name or str(key).startswith(name + NAME_SEP):
+                        cursors[key] = old_cursors[key]
                 ev = dict(summary)
                 ev.pop("event", None)
                 r.emit("collection_inherited", run_from=previous.get("run_id"),
                        cursor=cursors.get(name), **ev)
             continue
-        cols[name] = col_mod.empty(spec)
+        cols[name] = _new_col(r, spec)
     r.state.setdefault("triggers", [])
 
 
@@ -4673,15 +5479,35 @@ def _col_apply(r: "Run", op: str, name: str, *, principal: str, by: str, key: An
     return ev
 
 
-def _consume(r: "Run", addr: Any, by: str) -> None:
-    name = _self_name(r, addr)
-    cs = _col_state(r, name)
+def _consume(r: "Run", addr: Any, by: str, record: Optional[str] = None) -> None:
+    """Move this run's cursor to the end of a log -- its own, or a peer's
+    (the cursor is this run's, so nothing is written to the peer). With
+    ``record``, only the cursor for records of that name moves: the log's
+    other names stay fresh."""
+    if isinstance(addr, dict):
+        addr, record = addr.get("addr"), addr.get("name") or record
+    target, name = col_mod.parse_address(addr)
+    scope = _peer_scope(r, target)
+    key = _cursor_key(scope is None, name, str(addr), record)
+    if scope is None:
+        cs = _col_state(r, name)
+        epoch = None
+    else:
+        peer = _load_peer(r.store.cwd, scope)
+        if peer is None or name not in peer["specs"]:
+            raise col_mod.CollectionError(
+                f"consume {addr!r}: no run in slot {scope!r} declares {name!r}")
+        cs = (peer["state"].get("collections") or {}).get(name) or col_mod.empty(
+            peer["specs"][name])
+        epoch = cs.get("epoch")
     if cs.get("kind") != "log":
         raise col_mod.CollectionError(f"consume {addr!r}: only a log has a cursor")
     cursors = r.state.setdefault("cursors", {})
-    before = cursors.get(name)
-    cursors[name] = col_mod.end_cursor(cs)
-    r.emit("cursor_moved", address=name, before=before, after=cursors[name], by=by)
+    before = cursors.get(key)
+    cursors[key] = col_mod.end_cursor(cs)
+    if scope is not None:
+        r.state.setdefault("cursor_epochs", {})[key] = epoch
+    r.emit("cursor_moved", address=key, before=before, after=cursors[key], by=by)
 
 
 # -- node effects ('do:') ------------------------------------------------------------
@@ -4745,8 +5571,9 @@ def _apply_effects(r: "Run", iid: str, node: ir.Node, at: str,
                 continue
             if op == "consume":
                 addrs = body.get("addr") if isinstance(body, dict) else body
+                record = body.get("name") if isinstance(body, dict) else None
                 for addr in (addrs if isinstance(addrs, list) else [addrs]):
-                    _consume(r, addr, by)
+                    _consume(r, addr, by, record)
                 continue
             if not isinstance(body, dict):
                 raise col_mod.CollectionError(f"{op}: needs a mapping, got {body!r}")
@@ -4801,6 +5628,39 @@ def _trigger_parts(raw: Any) -> Tuple[Optional[str], str, Optional[Dict[str, Any
     return (str(do) if do else None), str(raw.get("at") or AT_ENTER), push
 
 
+def _push_data_keys(push: Dict[str, Any]) -> List[str]:
+    """The top-level ``$data`` keys a trigger push's ``each``/``item``
+    expressions read (doc 2.8), sorted; an expression that does not parse
+    contributes none (the daemon reports it when it evaluates)."""
+    keys: Set[str] = set()
+
+    def walk(node: Any) -> None:
+        if isinstance(node, list):
+            for sub in node:
+                walk(sub)
+            return
+        if not isinstance(node, tuple) or not node:
+            return
+        if node[0] == "ref":
+            if node[1] == "data" and node[2] and node[2][0][0] == "field":
+                keys.add(str(node[2][0][1]))
+            for seg in node[2]:
+                if seg[0] == "index":
+                    walk(seg[1])
+            return
+        for item in node[1:]:
+            walk(item)
+
+    texts = [push.get("each")] + list((push.get("item") or {}).values())
+    for text in texts:
+        if isinstance(text, str):
+            try:
+                walk(expr_mod.parse(text).ast)
+            except expr_mod.ExprError:
+                continue
+    return sorted(keys)
+
+
 def _queue_triggers(r: "Run", iid: str, node: ir.Node, at: str) -> None:
     """Record the node's triggers for ``at`` (``trigger_queued``); the daemon
     clock claims and performs them (doc 2.8). Every pass records again."""
@@ -4816,6 +5676,13 @@ def _queue_triggers(r: "Run", iid: str, node: ir.Node, at: str) -> None:
                                "queued_at": store_mod.utcnow()}
         if push is not None:
             rec["push"] = copy.deepcopy(push)
+            # $data.<key> in a push expression reads the run's data as it is
+            # now, at the node change -- the daemon performs it later, from a
+            # record that must not depend on what the run did meanwhile.
+            keys = _push_data_keys(push)
+            if keys:
+                data = r.state.get("data") or {}
+                rec["data"] = {k: copy.deepcopy(data.get(k)) for k in keys}
         r.state.setdefault("triggers", []).append(rec)
         r.emit("trigger_queued", trigger=tid, node=node.id, label=node.label or None,
                instance=iid, at=at, do=do)
@@ -4942,7 +5809,7 @@ def _until_step(r: "Run", iid: str, node: ir.Node) -> bool:
     except expr_mod.ExprError as exc:
         _complete(r, iid, ir.OUTCOME_FAIL, {"reason": f"until: {exc}"})
         return True
-    if resolver.absent:
+    if not held and resolver.absent:
         _complete(r, iid, OUTCOME_ABSENT, {"absent": resolver.absent})
         return True
     if held:

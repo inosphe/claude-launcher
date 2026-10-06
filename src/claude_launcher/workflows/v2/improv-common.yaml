@@ -216,16 +216,22 @@ collection_types:
   # 자식 워커의 착지 요청을 받는 큐(v1 landing_queue:의 v2 형태). 자식의
   # enqueue-landing trigger가 넣고(주체 child), 드라이버가 상태를 옮기며,
   # landed는 데몬의 watch만 쓴다 — tip이 TARGET에 들어갔는지를 git이 잰다.
+  # 드라이버도 넣는다: 다른 머신의 워커는 부모 데몬에 닿지 않아 요청이 메시
+  # 메시지로 오고, 리더가 그것을 직접 등록한다(claunch-yq80p.6).
   landing-queue:
     kind: queue
     key: issue
-    item: {issue: str, branch: str, tip: str, requested_by: str, note: "str?"}
+    # medium·pr_url·pr_number·base는 PR 착지(claunch-yq80p.5)의 필드다.
+    # pr_url이 있는 행은 PR 후보(gh pr merge --merge --match-head-commit <tip>),
+    # 없으면 로컬 --no-ff 후보다.
+    item: {issue: str, branch: str, tip: str, requested_by: str, note: "str?",
+           medium: "str?", pr_url: "str?", pr_number: "int?", base: "str?"}
     status:
       values: [requested, waiting, deferred, landed, rejected]
       initial: requested
       settled: [landed, rejected]
     access:
-      push: [child, daemon]
+      push: [child, daemon, driver]
       set: [driver]
       set.landed: [daemon]
       remove: [driver]
@@ -239,12 +245,16 @@ collection_types:
       drop: settled
       remap: {deferred: requested}
       inherit: true
-  # 런 사이 신호(v1 publishes/awaits의 v2 형태). 읽는 런은 fresh()로 보고
-  # consume으로 처리 위치를 옮긴다.
+  # 런 사이 신호(v1 publishes/awaits의 v2 형태). 쓰는 런이 자기 log에 쓰고
+  # (do push), 같은 세션의 다른 런(메인·side, docs/cflow-v2.md 2.9)이
+  # fresh('main:signals', NAME)로 보고 consume {from, name}으로 그 이름의 처리
+  # 위치만 옮긴다. 다른 런의 log에 쓰는 연산은 없다. tip은 신호가 가리키는
+  # 커밋(컷 tip 등)이다. inherit: 같은 slot의 다음 런이 log를 넘겨받으므로
+  # 다른 런의 cursor가 계속 맞는다.
   signals:
     kind: log
-    item: {name: str}
-    access: {push: [driver, peer]}
+    item: {name: str, tip: "str?"}
+    access: {push: [driver]}
     lifecycle: {inherit: true}
 
 procedures:

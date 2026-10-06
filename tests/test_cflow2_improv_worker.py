@@ -12,6 +12,7 @@ from __future__ import annotations
 import textwrap
 from pathlib import Path
 
+import pytest
 import yaml
 
 import claude_launcher
@@ -216,6 +217,19 @@ USER_QUESTIONS = {
     "settle-stall": ["proceed", "keep-waiting"],
     "end-decision": ["approve", "hold"],
 }
+#: The two PR-medium questions go through the pr-or-local skeleton
+#: (claunch-yq80p.11): the label is the skeleton's call, the ask-user calls
+#: are inside it.
+PR_QUESTIONS = ("medium-blocked", "publish-blocked")
+
+
+def _asked(chart, wrapper):
+    """A ``call: ask-user`` with ``cases`` is a seq [call, cond]; the choices
+    are the cases keys (docs 2.10, cases)."""
+    assert wrapper.type == "seq" and wrapper.get("cases"), wrapper.id
+    call = chart.node(wrapper.get("children")[0])
+    assert call.type == "scope" and call.get("proc") == "ask-user", wrapper.id
+    return wrapper.get("cases"), call.get("with_")
 
 
 def test_no_user_choose_is_left():
@@ -226,14 +240,30 @@ def test_no_user_choose_is_left():
 
 def test_user_questions_call_ask_user_with_fixed_choices_and_reasons():
     chart = _chart()
-    calls = {n.label: n for n in chart.nodes.values() if n.type == "scope" and n.label}
+    labelled = {n.label: n for n in chart.nodes.values() if n.label}
     for label, choices in USER_QUESTIONS.items():
-        node = calls[label]
-        assert node.get("proc") == "ask-user", label
-        w = node.get("with_")
+        cases, w = _asked(chart, labelled[label])
+        assert cases == choices, label
         assert w["choices"] == {"lit": choices}, label
         assert w["require_reason"] == {"lit": True}, label
         assert "from" not in w, f"{label}: a user question has no other responder"
+    for label in PR_QUESTIONS:
+        skeleton = labelled[label]
+        assert skeleton.type == "scope" and skeleton.get("proc") == "pr-or-local", label
+        inner = [n for n in chart.nodes.values()
+                 if n.get("cases") and skeleton.id in chart.ancestors(n.id)]
+        assert len(inner) == 2, label  # blocked and failed share the handler
+        for wrapper in inner:
+            cases, w = _asked(chart, wrapper)
+            assert cases == ["retry", "local"] and w["require_reason"] == {"lit": True}
+            assert "from" not in w
+
+
+def test_no_ask_user_is_followed_by_a_hand_written_decision_cond():
+    """claunch-yq80p.11: the branch on an answer is cases, so a misspelt
+    choice cannot compile."""
+    text = V2.read_text(encoding="utf-8")
+    assert ".decision ==" not in text
 
 
 def test_rules_and_master_merge_invariant():
@@ -307,7 +337,11 @@ def test_triggers_mirror_v1_at_the_corresponding_tasks():
         if not trig:
             continue
         assert node.label in v1, node.id
-        assert sorted((t["do"], t["at"]) for t in trig) == v1[node.label], node.id
+        # a push to parent:landing is v1's enqueue-landing with more fields
+        # (the PR landing fields, claunch-yq80p.5)
+        got = sorted(("enqueue-landing" if t["do"] == "push" and (t.get("push") or {}).get("to")
+                      == "parent:landing" else t["do"], t["at"]) for t in trig)
+        assert got == v1[node.label], node.id
         seen.add(node.label)
     assert seen == set(v1)
 
@@ -328,3 +362,193 @@ def test_landing_queue_and_signals_types():
     with pytest.raises(FrontendError, match="env.TARGET is required"):
         compile_text(head + "collections:\n  landing: {type: landing-queue}\n",
                      source="t.yaml", resolve_include=resolve)
+
+
+# --------------------------------------------------------------------------- #
+# PR landing (claunch-yq80p.5, docs/cflow-v2.md 10a)
+# --------------------------------------------------------------------------- #
+def _labels(chart):
+    return {n.label for n in chart.nodes.values() if n.label}
+
+
+def test_the_round_decides_its_landing_medium_and_publishes_a_pr():
+    chart = layers.load("improv-worker-v2")
+    labels = _labels(chart)
+    assert {"remote-setup", "pr-open", "medium-blocked", "publish-blocked"} <= labels
+    assert chart.data["landing"]["medium"] == "local"
+    prs = chart.meta["collections"]["prs"]
+    assert prs["key"] == "number" and prs["lifecycle"]["inherit"] is True
+    assert set(prs["item"]) >= {"number", "url", "branch", "base", "issues"}
+    # the landing push carries the medium and the PR
+    req = next(n for n in chart.nodes.values() if n.label == "integration-request")
+    (push,) = [t["push"] for t in req.get("triggers") if isinstance(t, dict) and t.get("push")]
+    assert push["to"] == "parent:landing"
+    assert {"medium", "pr_url", "pr_number", "base"} <= set(push["item"])
+    # the leader's queue type declares them
+    common = yaml.safe_load(COMMON.read_text(encoding="utf-8"))
+    assert {"medium", "pr_url", "pr_number", "base"} <= set(
+        common["collection_types"]["landing-queue"]["item"])
+
+
+def test_remote_setup_reads_the_preflight_and_the_force_inputs():
+    text = V2.read_text(encoding="utf-8")
+    doc = yaml.safe_load(text)
+    prompt = doc["nodes"]["remote-setup"]["prompt"]
+    assert "claunch cflow2 pr-preflight" in prompt
+    assert "${data.inputs.force_pr}" in prompt and "${data.inputs.force_no_pr}" in prompt
+    assert set(doc["nodes"]["remote-setup"]["returns"]) == {"ok", "blocked"}
+    assert set(doc["nodes"]["pr-open"]["returns"]) == {"ok", "failed"}
+
+
+# -- the pr-or-local skeleton at run time (claunch-yq80p.11) --------------------
+
+
+def _medium_flow(tmp_path):
+    """landing-medium and pr-publish as they are in the definition, with their
+    skeleton and the two attempt tasks, in a small workflow."""
+    doc = yaml.safe_load(V2.read_text(encoding="utf-8"))
+    procs = {k: doc["procedures"][k] for k in ("pr-or-local", "landing-medium", "pr-publish")}
+    nodes = {k: {kk: vv for kk, vv in doc["nodes"][k].items() if kk in ("title", "prompt", "returns")}
+             for k in ("remote-setup", "pr-open")}
+    nodes["after"] = {"prompt": "after"}
+    flow = {"cflow": 2, "name": "medium-flow", "include": ["ask-common"],
+            "params": {"force_pr": {"default": False}},
+            "nodes": nodes, "procedures": procs,
+            "body": [{"call": "landing-medium", "bind": "landing"},
+                     {"call": "pr-publish", "bind": "published",
+                      "with": {"landing": "$data.landing", "force_pr": "$params.force_pr"}},
+                     "after"]}
+    from claude_launcher.cflow2 import frontend
+    chart = frontend.compile_text(yaml.safe_dump(flow, allow_unicode=True, sort_keys=False),
+                                  resolve_include=layers.resolver(str(tmp_path)))
+    return chart
+
+
+BRIEF = {"problem": "p", "options": [
+    {"name": "retry", "summary": "s", "risk": "r", "outcome": "o", "reversibility": "reversible"},
+    {"name": "local", "summary": "s", "risk": "r", "outcome": "o", "reversibility": "reversible"}],
+    "recommendation": "local", "why": "w"}
+
+
+def test_pr_or_local_retries_then_falls_back_locally(tmp_path, monkeypatch):
+    from claude_launcher.cflow2 import runtime
+    monkeypatch.delenv("CLAUNCH_SESSION", raising=False)
+    cwd = str(tmp_path)
+    kw = {"cwd": cwd, "scope": "m", "now": 1.0}
+    st = runtime.start(_medium_flow(tmp_path), caps={}, **kw)
+
+    def report(label, outcome="ok", value=None):
+        iid = next(t["instance"] for t in st["tasks"] if t["label"] == label)
+        return runtime.report(iid, outcome, value, **kw)
+
+    st = report("remote-setup", "blocked", {"reason": "gh not logged in"})
+    # landing-medium asks the person: retry re-runs the attempt
+    st = report("ask-frame", "ok", {"brief": BRIEF})
+    runtime.approve(None, decision="retry", reason="logged in", **kw)
+    st = runtime.status(**kw)
+    assert [t["label"] for t in st["tasks"]] == ["remote-setup"]
+    st = report("remote-setup", "ok", {"medium": "pr", "reason": "gh ok", "remote": "origin",
+                                       "repo": "o/r", "base": "master"})
+    landing = runtime.RunStore(cwd, "m").load_state()["data"]["landing"]
+    # the attempt block's return ended landing-medium; optional fields were filled
+    assert landing == {"medium": "pr", "reason": "gh ok", "remote": "origin", "repo": "o/r",
+                       "base": "master", "pr_url": None, "pr_number": None}
+    # pr-publish without force_pr: a failed pr-open falls back to local, no question
+    st = report("pr-open", "failed", {"reason": "push refused: stale info"})
+    published = runtime.RunStore(cwd, "m").load_state()["data"]["published"]
+    assert published["medium"] == "local" and published["reason"] == "push refused: stale info"
+    assert published["pr_url"] is None
+    assert [t["label"] for t in st["tasks"]] == ["after"]
+
+
+def test_pr_or_local_user_local_answer(tmp_path, monkeypatch):
+    from claude_launcher.cflow2 import runtime
+    monkeypatch.delenv("CLAUNCH_SESSION", raising=False)
+    kw = {"cwd": str(tmp_path), "scope": "m", "now": 1.0}
+    st = runtime.start(_medium_flow(tmp_path), caps={}, **kw)
+    iid = next(t["instance"] for t in st["tasks"] if t["label"] == "remote-setup")
+    st = runtime.report(iid, "blocked", {"reason": "no remote"}, **kw)
+    iid = next(t["instance"] for t in st["tasks"] if t["label"] == "ask-frame")
+    assert "no remote" in st["tasks"][0]["prompt"]
+    runtime.report(iid, "ok", {"brief": BRIEF}, **kw)
+    runtime.approve(None, decision="local", reason="this round only", **kw)
+    landing = runtime.RunStore(str(tmp_path), "m").load_state()["data"]["landing"]
+    assert landing["medium"] == "local"
+    assert landing["reason"] == "user chose local while PR was blocked"
+
+
+# The six medium scenarios of REVIEW s88 (claunch-yq80p.11): the pr-or-local
+# skeleton drives the same task order and data as the two loops it replaced
+# (measured old == new at c28cb8a6 / 577b5cce); pinned here as values.
+_SETUP = {"medium": "pr", "reason": "gh ok", "remote": "origin", "repo": "o/r", "base": "master"}
+_PR = {"url": "u", "number": 7, "branch": "b", "base": "master", "tip": "t", "issues": []}
+_LANDED = {**_SETUP, "pr_url": None, "pr_number": None}
+_NONE = {"remote": None, "repo": None, "base": None, "pr_url": None, "pr_number": None}
+MEDIUM_SCENARIOS = {
+    "landing-ok": (False, [("remote-setup", "ok", _SETUP), ("pr-open", "ok", _PR)],
+                   ["remote-setup", "pr-open", "after"],
+                   {"landing": _LANDED, "published": {**_SETUP, "pr_url": "u", "pr_number": 7}}),
+    "landing-retry-ok": (False, [("remote-setup", "blocked", {"reason": "R1"}),
+                                 ("answer", "retry", None), ("remote-setup", "ok", _SETUP),
+                                 ("pr-open", "failed", {"reason": "F1"})],
+                         ["remote-setup", "ask-frame", "remote-setup", "pr-open", "after"],
+                         {"landing": _LANDED,
+                          "published": {"medium": "local", "reason": "F1", **_NONE}}),
+    "landing-local": (False, [("remote-setup", "blocked", {"reason": "R1"}),
+                              ("answer", "local", None)],
+                      ["remote-setup", "ask-frame", "pr-open"],
+                      {"landing": {"medium": "local",
+                                   "reason": "user chose local while PR was blocked", **_NONE}}),
+    "force-retry-local": (True, [("remote-setup", "ok", _SETUP),
+                                 ("pr-open", "failed", {"reason": "F1"}), ("answer", "retry", None),
+                                 ("pr-open", "failed", {"reason": "F2"}), ("answer", "local", None)],
+                          ["remote-setup", "pr-open", "ask-frame", "pr-open", "ask-frame", "after"],
+                          {"landing": _LANDED,
+                           "published": {"medium": "local",
+                                         "reason": "user chose local after pr-open failed",
+                                         **_NONE}}),
+    "force-retry-ok": (True, [("remote-setup", "ok", _SETUP),
+                              ("pr-open", "failed", {"reason": "F1"}), ("answer", "retry", None),
+                              ("pr-open", "ok", _PR)],
+                       ["remote-setup", "pr-open", "ask-frame", "pr-open", "after"],
+                       {"landing": _LANDED,
+                        "published": {**_SETUP, "pr_url": "u", "pr_number": 7}}),
+    # a brief spelling 'Local' answers the definition's 'local' (Z2)
+    "case-Local": (False, [("remote-setup", "blocked", {"reason": "R1"}),
+                           ("answer", "Local", ("retry", "Local"))],
+                   ["remote-setup", "ask-frame", "pr-open"],
+                   {"landing": {"medium": "local",
+                                "reason": "user chose local while PR was blocked", **_NONE}}),
+}
+
+
+def _brief2(n1="retry", n2="local"):
+    def opt(n):
+        return {"name": n, "summary": "s", "risk": "r", "outcome": "o",
+                "reversibility": "reversible"}
+    return {"problem": "p", "options": [opt(n1), opt(n2)], "recommendation": n2, "why": "w"}
+
+
+@pytest.mark.parametrize("scen", list(MEDIUM_SCENARIOS))
+def test_pr_or_local_scenarios(scen, tmp_path, monkeypatch):
+    from claude_launcher.cflow2 import frontend, runtime
+    monkeypatch.delenv("CLAUNCH_SESSION", raising=False)
+    force, steps, order, data = MEDIUM_SCENARIOS[scen]
+    chart = _medium_flow(tmp_path)
+    kw = {"cwd": str(tmp_path), "scope": "m", "now": 1.0}
+    st = runtime.start(chart, caps={}, params={"force_pr": force}, **kw)
+    seen = []
+    for label, outcome, value in steps:
+        seen.append(st["tasks"][0]["label"])
+        if label == "answer":
+            frame = next(t for t in st["tasks"] if t["label"] == "ask-frame")
+            runtime.report(frame["instance"], "ok", {"brief": _brief2(*(value or ()))}, **kw)
+            runtime.approve(None, decision=outcome, reason="why", **kw)
+            st = runtime.status(**kw)
+        else:
+            iid = next(t["instance"] for t in st["tasks"] if t["label"] == label)
+            st = runtime.report(iid, outcome, value, **kw)
+    seen.extend(t["label"] for t in st.get("tasks") or [])
+    assert seen == order
+    state = runtime.RunStore(str(tmp_path), "m").load_state()
+    assert {k: v for k, v in state["data"].items() if k in ("landing", "published")} == data

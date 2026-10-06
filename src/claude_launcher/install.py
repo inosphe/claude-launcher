@@ -85,7 +85,7 @@ LEGACY_MCP_NAMES = ("cflow", "mesh")
 
 #: Harness permission rules that keep the AGENT's hands off the human gate
 #: commands (``claunch cflow approve|select|goto|abort``, ``claunch cflow2
-#: approve|select|extend|resume|abort``, ``claunch cflow2 collection
+#: approve|select|extend|resume|abort|recur``, ``claunch cflow2 collection
 #: push|set|remove``).
 #:
 #: The cflow split is channels: the MCP tools are the agent's and carry no
@@ -122,7 +122,7 @@ LEGACY_MCP_NAMES = ("cflow", "mesh")
 #: ``person`` (an agent's door is the ``flow_collection`` MCP tool, which acts
 #: as ``driver`` under the collection's ``access``); ``collection ls`` reads
 #: and stays open.
-CFLOW2_HUMAN_COMMANDS = ("approve", "select", "extend", "resume", "abort",
+CFLOW2_HUMAN_COMMANDS = ("approve", "select", "extend", "resume", "abort", "recur",
                          "collection push", "collection set", "collection remove")
 
 GATE_DENY_RULES = tuple(

@@ -320,6 +320,11 @@ def test_the_route_is_the_payload_behind_the_token(monkeypatch):
             assert body["token_env"] is True and body["ready"] is False
             assert "ghp_never_shown" not in json.dumps(body)
             assert seen["repositories"] == [("x", "/x")]
+            # ?cwd= narrows it to one directory (the start form's precheck: gh)
+            resp = await client.get("/api/tools/gh?cwd=/work/repo",
+                                    headers={"Authorization": "Bearer sekrit"})
+            assert resp.status == 200
+            assert seen["repositories"] == [("repo", "/work/repo")]
         finally:
             await client.close()
 

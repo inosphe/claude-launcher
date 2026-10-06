@@ -86,8 +86,11 @@ body: {seq: [a, b]}
 def test_state_initialised_from_chart(tmp_path):
     st = _start(tmp_path, TWO)
     s = _state(tmp_path)
-    assert s["collections"] == {"landing": {"kind": "queue", "items": [], "seq": 0},
-                                "signals": {"kind": "log", "items": [], "seq": 0}}
+    # epoch: the run that opened the collection (a peer's cursor, doc 2.9)
+    assert s["collections"] == {"landing": {"kind": "queue", "items": [], "seq": 0,
+                                            "epoch": s["run_id"]},
+                                "signals": {"kind": "log", "items": [], "seq": 0,
+                                            "epoch": s["run_id"]}}
     assert s["cursors"] == {} and s["triggers"] == []
     assert st["collections"]["landing"]["count"] == 0
     assert st["pending_triggers"] == 0
@@ -576,3 +579,62 @@ def test_cli_collection_person_path(tmp_path):
     assert p.returncode == 1 and "person's answer" in p.stderr
     # reading stays open there
     assert _cli(tmp_path, "collection", "ls", "--scope", "t", session="drv").returncode == 0
+
+
+# PR landing (claunch-yq80p.5): a trigger push reads $data as it was when the
+# node changed, and a leave effect reads the node's own result.
+
+
+def test_trigger_push_carries_the_data_it_reads(tmp_path):
+    body = """
+    data: {landing: {medium: pr, pr_url: "https://h/o/r/pull/7"}, other: {big: 1}}
+    nodes:
+      a:
+        prompt: A
+        triggers:
+          - at: leave
+            push: {to: "parent:landing", each: "$facts.in_review",
+                   item: {issue: "$each", tip: "$facts.head",
+                          pr_url: "$data.landing.pr_url"}}
+    body: a
+    """
+    st = _start(tmp_path, body)
+    runtime.report(_inst(st, "a"), **_kw(tmp_path))
+    (trig,) = runtime.claim_triggers(str(tmp_path), "t")
+    # only the keys the expressions read, as they were at the node change
+    assert trig["data"] == {"landing": {"medium": "pr", "pr_url": "https://h/o/r/pull/7"}}
+
+    from claude_launcher.daemon import cflow2_triggers
+    items = cflow2_triggers.expand_push(trig["push"], {"in_review": ["i1"], "head": "abc"},
+                                        trig["data"])
+    assert items == [{"issue": "i1", "tip": "abc", "pr_url": "https://h/o/r/pull/7"}]
+    # a trigger without $data reads records nothing extra
+    assert runtime._push_data_keys({"each": "$facts.in_review", "item": {"x": "$each"}}) == []
+
+
+def test_a_leave_effect_reads_the_nodes_own_result(tmp_path):
+    cols = """
+    collections:
+      prs:
+        kind: queue
+        key: number
+        item: {number: int, url: str}
+        status: {values: [open, merged], initial: open, settled: [merged]}
+    """
+    body = """
+    nodes:
+      o:
+        prompt: O
+        returns: {ok: {number: int, url: str}, failed: {reason: str}}
+        do:
+          - push: {to: prs, item: {number: "$result['o'].value.number",
+                                   url: "$result['o'].value.url"}}
+            when: "$outcome == 'ok'"
+    body: o
+    """
+    st = _start(tmp_path, body, cols)
+    runtime.report(_inst(st, "o"), value={"number": 7, "url": "https://h/o/r/pull/7"},
+                   **_kw(tmp_path))
+    items = _state(tmp_path)["collections"]["prs"]["items"]
+    assert [(i["number"], i["url"], i["status"]) for i in items] == [
+        (7, "https://h/o/r/pull/7", "open")]

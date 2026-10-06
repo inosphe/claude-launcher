@@ -66,11 +66,50 @@ v1(`src/claude_launcher/cflow/`)과 병행한다.
 | `nodes` | 이름 붙은 작업(task) 정의 |
 | `body` | 조합자 트리. 런의 시작점 |
 | `spec` | 명세(8절) |
-| `max_visits` | 한 노드가 런 전체에서 들어갈 수 있는 횟수의 상한. 정수 1 이상, 기본 200. IR의 `meta.max_visits`. 넘으면 그 인스턴스가 `waiting_approval`(reason `visit_limit`)로 멈추고 사람이 `extend --visits`(웹 UI의 「Allow one more visit」, `POST /api/cflow2/extend` 본문 `visits: true`)로 답한다 |
+| `max_visits` | 한 노드가 런 전체에서 들어갈 수 있는 횟수의 상한. 정수 0 이상, 기본 200. IR의 `meta.max_visits`. 넘으면 그 인스턴스가 `waiting_approval`(reason `visit_limit`)로 멈추고 사람이 `extend --visits`(웹 UI의 「Allow one more visit」, `POST /api/cflow2/extend` 본문 `visits: true`)로 답한다. `0`은 상한 없음이다(세션 수명의 side 런처럼 회차 경계가 없는 정의). 검사 경고 `unbounded-visits`가 붙고, 반복의 `max`는 그대로 필요하다 |
 | `inputs` | 시작 입력 선언(2.6). IR의 `meta.inputs` |
 | `collections`, `collection_types` | 컬렉션 선언과 재사용할 선언(2.7). IR의 `meta.collections` |
 | `question_types` | 질문 형식 선언(2.10). IR의 `meta.question_types` |
-| `sides` | side 런 선언(2.9, 2단계) |
+| `sides` | side 런 선언 `{<이름>: <정의 이름>}`(2.9). IR의 `meta.sides` |
+| `recur` | `true` 또는 `{auto: true}`. 끝난 회차 뒤에 다음 회차를 요청한다(아래 「recur」). IR의 `meta.recur`(`{auto: bool}`) |
+
+#### recur
+
+상주 서비스 루프(v1 `recur`, 예: `improv-leader`)를 그래프 안의 반복 없이 쓰는
+방법이다. 회차 하나는 끝까지 가고, 다음 회차는 런의 수명 규칙이 연다.
+
+- 대상: `kind: workflow`만. `procedure`의 `recur`는 컴파일 오류다. 중첩 위임 런은
+  요청을 남기지 않는다.
+- 요청: 런이 결과 `ok`로 끝나면(acceptance 검사 통과 뒤) `state.json`에
+  `next_round: {by: recur, auto, round, requested, not_before}`를 남기고 저널에
+  `round_requested`를 쓴다. `failed`·`aborted`로 끝난 회차는 요청을 남기지
+  않는다. 루프는 사람이 원인을 봐야 하는 자리에서 멈춘다. 차트의 `returns`가
+  선언한 다른 결과로 끝난 회차(`done`)도 요청을 남기지 않는다. 정의가 루프를
+  스스로 끝내는 방법이 이것이다(예: `improv-leader-v2`의 교대 종료는
+  `return: wound_down`).
+- 최소 간격: `recur: {auto: true, min_gap: S}`(초, 기본 60, 0 이상). 요청에
+  `not_before`(회차가 끝난 시각 + `min_gap`)가 실리고, clock은 그 시각이 지나기
+  전에는 다음 회차를 시작하지 않는다. 회차 본문이 곧바로 끝나는 정의(대기 없는
+  본문)가 clock 틱마다 회차를 여는 것을 막는다. `recur: true`도 같은 값을 싣지만
+  시작은 드라이버가 한다.
+- 회차 번호: 슬롯의 상태 `round`. 새 런은 이전 런(같은 슬롯, 같은 정의 이름)에
+  `next_round`가 있으면 그 번호 + 1, 없으면 1이다. `flow_status`가 `round`를 싣는다.
+- `recur: true`: 드라이버가 다음 회차를 시작한다(`flow_start`). 끝난 런의
+  `flow_status`가 `next_round`와 그 안내를 싣는다.
+- `recur: {auto: true}`: 데몬의 cflow2 clock이 끝난 슬롯에서 `next_round.auto`를
+  보면 `runtime.start_next_round`로 다음 회차를 시작하고(저널 `round_auto_started`),
+  드라이버 세션에 「next round started」 블록을 보낸다. 정의는 이름(없으면 기록된
+  생성 파일 경로)으로 다시 읽으므로 고친 정의는 회차 경계에서 적용된다. 읽지
+  못하면 이전 회차의 `chart.json`을 쓴다. 이전 회차의 `params`, 시작 입력
+  (`data.inputs`, 다시 읽은 정의일 때), 드라이버, capability를 그대로 넘긴다.
+  컬렉션은 `lifecycle.inherit` 규칙대로 넘어간다(2.7). 요청은 한 번만 쓰인다:
+  시작이 끝난 런을 보관하므로 다음 틱은 아무것도 시작하지 않는다. 그사이 다른
+  시작이 슬롯을 차지했거나 요청이 취소됐으면 시작하지 않는다 — `start`가 슬롯
+  잠금 안에서 그 런과 `next_round.auto`를 다시 확인한다(`next_round_of`). 정의를
+  다시 읽는 사이에 들어온 `recur --cancel`이 이긴다.
+- 멈춤: 사람이 `claunch cflow2 recur --cancel [--reason R]`로 끝난 런의 요청을
+  지운다(`round_cancelled`). 드라이버 세션 안에서는 거절된다(사람의 명령, 2.2
+  「사람의 명령」). 회차가 진행 중일 때는 그 회차가 끝난 뒤에 취소한다.
 
 ### 2.2 작업(task)
 
@@ -141,6 +180,64 @@ nodes:
   위임 레코드 상태 `verifying`). 실패는 잘못된 결과 1회로 센다(첫 번째는 재실행
   요청, 두 번째는 노드 `fail`). 중첩 위임 런의 작업은 그 런 안에서 보고되므로 보고
   시점에 각자 verify를 거친다.
+
+#### restart
+
+작업에 프로젝트 고유의 재기동 명령을 붙인다. 실행은 데몬이 하고 에이전트는 하지
+않는다(AGENTS.md 「데몬 재기동·정지는 사용자의 명령이다」). v1 스텝의 `restart:`와
+같은 형태다.
+
+```yaml
+nodes:
+  reflect:
+    prompt: …
+    restart:
+      windows: 'powershell -NoProfile -ExecutionPolicy Bypass -File tools/restart_live.ps1'
+      linux: 'bash tools/restart_live.sh'
+      timeout: 900          # 기본 120, 상한 900
+```
+
+- 표기: `windows`, `linux` 중 하나 이상(명령 문자열), `timeout`(초, 0 초과 900
+  이하). 명령은 적힌 그대로 셸에서 실행하며 `${...}`는 컴파일 오류다(「명령 안의 값
+  참조」).
+- 허용 목록: 명령은 `tools/restart_live.sh` 또는 `tools/restart_live.ps1`을
+  실행하는 형태만 받는다(`ir.RESTART_SCRIPTS`, `ir.restart_refusal`). 형태는
+  `[<인터프리터> [플래그 [값]]...] <스크립트> [인자]`이고, 인터프리터는
+  `bash`·`sh`(플래그 없음), `pwsh`·`powershell`(`-NoProfile`, `-NonInteractive`,
+  `-NoLogo`, `-ExecutionPolicy <값>`, `-File`)이다. 셸 연산자(`; & | \` $ < > ( )`)가
+  있으면 거절한다. 컴파일(그래서 `flow_start`)이 그 밖의 명령을 오류로 거절한다.
+  데몬은 이 명령을 자기 권한으로 실행하므로, 에이전트가 쓴 정의(프로젝트 레이어,
+  `.cflow2/generated/`)가 `claunch daemon stop` 같은 명령을 데몬에게 실행시키는 경로를
+  막는다. 허용 목록 이전에 컴파일된 차트 스냅샷에 그 밖의 명령이 있으면 clock은
+  실행하지 않고 기록을 `failed`(출력 `refused: …`, 저널 `restart_refused`)로 남긴다.
+- 실행 시점: 작업 인스턴스가 활성(`await: task`, ask가 있으면 승인 뒤)이 되면 데몬의
+  cflow2 clock이 다음 틱에 한 번 가져간다(`runtime.claim_restarts`). 인스턴스
+  하나가 방문 하나이므로 반복으로 다시 들어온 작업은 다시 실행한다. halt 중인 런과
+  중첩 위임 런의 작업은 가져가지 않는다.
+- 플랫폼: 호스트의 `platform.system()`이 `Windows`(win*)면 `windows`,
+  `Linux`면 `linux`. 해당 명령이 없으면 기록 `unsupported`(`restart_unsupported`).
+- 실행: clock은 기록을 `running`(데몬 boot id, token 포함)으로 저장하고
+  (`restart_requested`) 패스가 끝난 뒤 별도 작업에서 v1
+  `RestartClock._execute`로 명령을 실행한다: 런의 cwd, 출력은 임시 파일,
+  `timeout` 초과 시 종료 코드 없음. 환경의 `CLAUNCH_SESSION`은 런의 드라이버
+  세션이다. 그래서 명령 안의 `claunch daemon restart`는 웹 UI의 승인 게이트로
+  올라간다(`daemon/restart_gate.py`).
+- 결과: `runtime.complete_restart`가 종료 코드 0이면 `succeeded`, 아니면
+  `failed`로 기록하고 출력의 끝 4000자를 남긴다(`restart_completed`). 그사이
+  인스턴스가 사라졌거나 token이 다르면 아무것도 쓰지 않는다. 실행기 자체가
+  예외를 내면(임시 파일·프로세스 생성 실패 등) 종료 코드 없음과 예외 문구로
+  `failed`를 기록한다 — 기록이 `running`에 남아 보고가 데몬 재기동까지 막히지 않게
+  한다.
+- 중단: 다른 boot가 남긴 `running` 기록은 `interrupted`가 되고 다시 실행하지
+  않는다(`restart_interrupted`). 명령이 데몬 자신을 재기동했을 수 있기 때문이다.
+- 통지: 가져갈 때와 결과가 나올 때 드라이버 세션에 블록을 보낸다.
+- 보고: 기록이 끝난 상태(`succeeded`, `failed`, `interrupted`, `unsupported`)가
+  되기 전에는 그 작업의 `flow_report`를 거절한다. 데몬 clock이 꺼져 있으면 기록이
+  `pending`에 머물고, 이 경우 런은 사람이 `abort`한다.
+- `flow_status`의 작업 항목에 `restart`(`status`, `requested_at`, `completed_at`,
+  `exit_code`, `output`, `platform`)가 실린다.
+- 위임 실행 단위 안의 작업에 `restart`가 있으면 정적 검사 오류
+  `delegated-restart`다.
 
 #### ask
 
@@ -242,6 +339,102 @@ scope에 들어갈 때 `with`에 없는 param에 `default`를 채우고, 기본�
 `flow_fork`의 `with`가 param이 되며, 선언에 없는 키나 기본값 없는 필수 param이
 빠진 fork는 거절된다.
 
+#### `with`·`value`의 값 표기
+
+`with`와 `return`의 `value` 항목은 `$`를 담은 문자열이면 식, 그 밖은 리터럴이다.
+`$`를 담은 리터럴 문자열과 `$` 없는 식은 명시 표기로 쓴다: `{lit: V}`(V를 그대로),
+`{expr: E}`(E를 식으로 평가). 키가 `lit` 또는 `expr` 하나뿐인 매핑만 명시 표기로
+읽는다. 기존 `$` 감지가 기본으로 남는다. 그래서 그 모양의 dict 리터럴 자체(`{lit: 3}`라는
+값)는 `{lit: {lit: 3}}`로 쓴다. `{expr: 5}`처럼 문자열이 아닌 값은 그 값의 식(`5`)이 된다.
+
+```yaml
+with:
+  price: {lit: "cost $5"}        # 리터럴
+  label: {expr: "'fixed'"}       # 식
+  who: "$params.me"              # 식($ 감지)
+```
+
+#### 반환 값의 선택 필드
+
+`returns`가 선택 필드(`str?` 등)로 선언한 필드를 `return`의 `value`에서 생략하면
+그 필드는 `null`로 채워진다. 프로시저의 `return`(그 호출의 `returns`)과 런의
+`return`(차트의 `returns`) 모두 같다. 레코드마다 `field: null`을 나열하지 않아도
+된다(claunch-yq80p.11). 채우는 것은 명시적 `return`뿐이다: 작업의 보고와 `return`
+없이 본문이 끝난 프로시저의 값은 받은 그대로다. 식에서 없는 필드는 어차피 `null`로
+읽히므로 `== null` 비교는 두 경우가 같고, 다른 것은 값 전체(프롬프트에 보이는 dict)다.
+
+#### 블록 인자와 splice (claunch-yq80p.11)
+
+프로시저 param에 `type: block`을 선언하면 호출 지점이 그 param에 트리(작업 이름,
+목록, 조합자 매핑)를 넘긴다. 프로시저 본문은 그 트리를 `{splice: <param>}`로 놓는다.
+`call`과 같이 컴파일 시점에 펼친다.
+
+```yaml
+procedures:
+  guarded:
+    params:
+      attempt: {type: block, required: true}
+      note: {type: str, default: ""}
+    nodes:
+      recover: {prompt: …, returns: {again: {}, stop: {}}}
+    body:
+      id: tries
+      loop:
+        max: 3
+        while: "true"
+        do:
+          try: [{splice: attempt}, {return: ok}]
+          catch:
+            fail:
+              seq: [recover]
+              on: {again: {continue: tries}, stop: {return: gave_up}}
+body:
+  call: guarded
+  with:
+    attempt: work          # 호출자의 작업
+    note: n1
+```
+
+- 블록은 **호출 지점의 범위**에서 컴파일한다(hygiene). 규칙:
+  - 작업 이름: 호출 지점 파일의 `nodes`에서 찾는다. 프로시저의 작업은 보이지 않는다.
+  - `continue`·`break`: 호출 지점을 감싸는 반복을 가리킨다. 프로시저의 반복은
+    보이지 않는다(라벨 없는 `continue`도 호출 지점의 가장 안쪽 반복이다).
+  - `return`: 블록이 쓰인 자리의 호출(호출 지점이 프로시저면 그 프로시저, 워크플로
+    본문이면 런)을 끝낸다. 블록을 받은 프로시저를 끝내지 않는다. IR의 `control`
+    노드가 `target`으로 그 scope id(런이면 `$run`)를 갖는다.
+  - `$params`, foreach `item`, waterfall `$prev`: 호출 지점의 환경이다. 런타임이
+    `call`의 scope에 들어갈 때 호출 지점의 환경을 저장하고, splice 노드가 그 환경으로
+    들어간다.
+  - `$result.<작업>`, `$data`: 런 전체의 이름 공간이므로 그대로다.
+  - `raise`: 결과처럼 splice 위치에서 위로 올라가므로, 컴파일 검사도 splice 위치를
+    감싸는 `try`(프로시저의 것과 호출 지점의 것)로 한다.
+  - `par` 분기: 분기는 자기 영역이다(직접 쓴 `continue`가 분기 밖 반복에 닿지 않는
+    규칙). 블록이 프로시저의 `par` 분기 안에 놓이면 블록의 `continue`·`break`도 호출
+    지점의 반복에 닿지 않고 컴파일 오류다.
+  - 오류 위치: 블록 안의 오류는 호출 지점의 파일:줄로 보고된다. 블록 노드의 `src`도
+    호출 지점이다.
+- 결과(outcome)는 lexical하지 않다: 블록 노드의 결과는 splice 위치에서 프로시저의
+  구조를 따라 올라간다. 그래서 프로시저의 `try`·`on`이 블록의 `fail`을 잡는다 —
+  골격 프로시저(시도 → 실패 처리)가 이것으로 만들어진다.
+- 노드 id는 호출의 접두(`<호출 id>/`)를 갖는다. 같은 작업이 여러 호출에 쓰여도 id가
+  겹치지 않는다(결과는 라벨로 모인다).
+- `default`: 블록 param의 기본 트리는 프로시저 자신의 텍스트이므로 splice 위치에서
+  프로시저의 범위로 컴파일하고 실행한다 — 프로시저의 작업, 그 자리를 감싸는
+  프로시저의 반복, 프로시저의 `$params`. splice 노드는 호출 기록(`call`)을 갖지 않는다.
+  기본값이 없는 블록 param을 넘기지 않으면 컴파일 오류다.
+  `group`의 멤버 프로시저는 호출 지점이 없으므로 기본값 없는 블록 param을 가질 수
+  없다.
+- 블록을 다른 호출에 넘길 수 있다: `with: {b: {splice: b}}`. 그 블록은 처음 쓰인
+  호출 지점의 범위를 유지한다.
+- 재귀 금지는 그대로다: 블록 안의 `call`도 지금 펼치는 프로시저 호출 스택으로
+  검사한다(블록이 자신을 받은 프로시저를 다시 부를 수 없다). 펼침이 유한한 경우
+  (`call p, with: {b: {call: p, with: {b: w}}}`)도 거절한다 — 보수적 규칙이다.
+- 워크플로의 `params`에는 `type: block`을 쓸 수 없다(런은 호출되지 않는다).
+- 정적 검사는 펼친 IR을 본다. `return`의 `target`과 splice 노드의 호출 기록을 따라
+  호출 지점의 scope를 찾는다.
+- 하지 않는 것: 컴파일 시점 계산(조건부 펼침, 반복 생성). 정의를 읽는 사람이 결과
+  IR을 계산해야 하므로 넣지 않는다.
+
 ### 2.3 조합자
 
 조합자 트리의 항목은 셋 중 하나다: 작업 이름(문자열), 조합자 매핑, 제어 매핑.
@@ -251,7 +444,7 @@ scope에 들어갈 때 `with`에 없는 param에 `default`를 채우고, 기본�
 | `seq` | `seq: [a, b, c]` | 순서대로 실행 |
 | `waterfall` | `waterfall: [a, b]` | `seq`와 같고, 각 항목의 결과 값을 다음 항목의 `$prev`로 넘긴다 |
 | `cond` | `cond: [{if: EXPR, then: T}, …, {else: T}]` | 식으로 기계가 고르는 분기 |
-| `choose` | `choose: {prompt, chooser, options: {name: {description, then: T}}}` | 에이전트나 사용자가 고르는 분기. 옵션에 `when: EXPR`을 붙이면 거짓일 때 고를 수 없다 |
+| `choose` | `choose: {prompt, chooser, options: {name: {description, then: T}}}` | 에이전트나 사용자가 고르는 분기. 옵션에 `when: EXPR`을 붙이면 거짓일 때 고를 수 없다. `interval: SECONDS`를 붙이면 에이전트의 선택이 그 간격으로 제한된다(아래 「choose interval」) |
 | `foreach` | `foreach: {in: EXPR, as: item, do: T, par: false}` | 목록의 항목마다 실행 |
 | `loop` | `loop: {while: EXPR \| until: EXPR, max: N, do: T}` | 조건 루프. `max` 필수 |
 | `par` | `par: {branches: {a: T, b: T}, settle: all}` | 병렬 실행. `settle`은 `all`, `allSettled`, `race`, `any`, `quorum:K` |
@@ -259,7 +452,7 @@ scope에 들어갈 때 `with`에 없는 param에 `default`를 채우고, 기본�
 | `timeout` | `timeout: {do: T, seconds: N, else: T}` | 기한 초과 시 `else`로 감 |
 | `try` | `try: T, catch: {OUTCOME: T}, finally: T` | 결과 종류로 예외 경로를 처리하고, 마지막에 정리 트리를 실행 |
 | `call` | `call: PROC, with: {…}, bind: VAR` | 프로시저 호출. 컴파일 시 펼친다 |
-| `wait` | `wait: {probe: CMD, poll: S, seconds: N, undecided_max: K, describe: …}` 또는 `wait: {seconds: N}` | 외부 신호 대기(아래 「wait」) |
+| `wait` | `wait: {probe: CMD, poll: S, seconds: N, undecided_max: K, describe: …}`, `wait: {checks: [{id, describe, probe}], …}` 또는 `wait: {seconds: N}` | 외부 신호 대기(아래 「wait」) |
 | `group` | `group: {name, run: PROC, limit, settle, do: T}` | 동적 분기. `do` 실행 중 에이전트가 `fork`로 멤버를 추가하고, `do`를 떠나기 전에 합류 |
 
 모든 조합자 매핑에 붙일 수 있는 공통 키:
@@ -301,6 +494,69 @@ scope에 들어갈 때 `with`에 없는 param에 `default`를 채우고, 기본�
   `landed-unclear`)으로 보내 사람이 확인하거나 `held`로 마감하게 한다.
 - `undecided_max`는 `probe`가 있을 때만 쓸 수 있다(정수 1 이상).
 - `probe`는 명령 문자열이나 argv 목록이다. 아래 「명령 안의 값 참조」를 따른다.
+
+#### wait checks
+
+`checks`는 probe 여러 개를 한 대기에서 함께 판정한다. v1 스텝의 `checklist:`를
+대신한다.
+
+```yaml
+- wait:
+    poll: 30
+    seconds: 600
+    checks:
+      - {id: deployed, describe: 라이브 데몬이 이번 머지 이후에 재기동됐다,
+         probe: 'uv run --no-sync python tools/deploy_check.py --branch master'}
+      - {id: clean, probe: 'git diff --quiet'}
+  on: {timeout: reflect-retry, undecidable: reflect-retry}
+```
+
+- 항목: `id`(이름, 대기 안에서 유일), `describe`(선택), `probe`(명령 문자열이나
+  argv). `probe`·`until`과 함께 쓸 수 없다. `poll`, `seconds`, `undecided_max`는
+  `probe`와 같은 의미다.
+- 판정: poll마다 모든 항목을 실행한다. 모든 항목이 0이면 결과 `ok`(값
+  `{checks: [...]}`, 저널 `checks_passed`). 판정 불가(0, 1이 아닌 코드)인 항목이
+  하나라도 있으면 그 poll은 판정 불가로 세고, 그 밖에는 「아직」이다.
+- `seconds`가 지나면 결과 `timeout`(값에 마지막 항목 상태, 저널 `checks_expired`).
+- 항목마다 마지막 판정(`verdict`, `exit`, 출력 끝, `measured_at`)이
+  `flow_status`의 대기 항목 `checks`에 실린다.
+
+v1 `checklist:`의 대응:
+
+| v1 checklist | v2 |
+|---|---|
+| `items[].check`(종료 코드 0이 참, 그 밖은 거짓, 실행 실패·시간 초과는 unknown) | `checks[].probe`. 1은 「아직」, 그 밖은 판정 불가로 센다 |
+| `then`(모두 참이면 가는 곳) | 대기 뒤의 다음 항목(`seq`) |
+| `otherwise: {after, then}` | `seconds`와 `on: {timeout: …}`(또는 감싸는 `try`의 `catch`) |
+| report가 제출돼야 열림 | 대기 앞에 작업을 둔다(`seq: [작업, wait]`). 작업의 report가 끝나야 대기가 시작된다 |
+| `next:` 거절(에이전트 이탈 없음) | 대기는 에이전트가 보고할 수 없는 노드다. 사람의 우회는 `abort` 뒤 재시작 |
+| `checklist_passed` / `checklist_expired` 저널 | `checks_passed` / `checks_expired` |
+| 같은 방문 안에서 재기동은 한 번 | 작업의 `restart`(2.2)는 인스턴스마다 한 번. 다시 시도하려면 반복으로 작업에 다시 들어간다 |
+| `by:`로 사람이 표시하는 항목(`editable`) | 대응 없음. 사람이 정할 조건은 `chooser: user` 선택이나 `ask`로 쓴다 |
+
+#### choose interval
+
+옵션의 `interval: SECONDS`는 에이전트가 그 옵션을 고를 수 있는 간격이다(v1
+`waiting_window`). 「모인 것을 N분마다 통합한다」를 에이전트 안의 타이머 없이 쓴다.
+
+- `chooser: agent`인 선택에서만 쓴다(그 밖은 컴파일 오류). 값은 0보다 큰 수.
+- 기록: 옵션을 실제로 택한 시각을 `state.json`의 `windows`
+  (`<노드 id>:<옵션>` → 시각)에 남긴다. 슬롯의 기록이라 같은 정의의 다음 런(다음
+  회차 포함)으로 넘어간다. 첫 선택은 비교할 기록이 없으므로 바로 지나간다.
+- 보류: 에이전트가 마지막 선택 뒤 `interval`이 지나기 전에 그 옵션을 고르면 거절하지
+  않고 보류한다. 선택 인스턴스의 `held`(`option`, `reason`, `opens_at`)를 남기고
+  `select_held`를 쓴다. 응답과 `flow_status`의 `waiting_window`가 창이 열리는
+  시각을 싣는다. 런의 `status`는 그대로다(사람을 기다리지 않는다).
+- 보류 중: 같은 옵션을 다시 고르면 `reason`만 바꾼다(`select_held`, `updated`).
+  다른 옵션을 고르면 보류를 취소하고(`hold_cancelled`) 그 옵션을 처리한다.
+- 확정: `opens_at`이 지나면 시간 틱(데몬 clock, 또는 런을 바꾸는 다음 호출)이 마지막
+  `reason`으로 그 옵션을 택한다(`selected`의 `by: window`). 그때 옵션의 `when`이
+  거짓이면 택하지 않고 보류만 지운다(`hold_cancelled`, 사유). 데몬 clock이 옮겼으면
+  드라이버를 깨운다(6.5 「wake-up」).
+- 사람의 선택(`claunch cflow2 select`, 웹)은 간격을 따르지 않는다. 창 안에서 택하면
+  `selected`에 `override: true`가 붙는다. 사람의 선택도 기록을 갱신한다.
+- 고를 수 있는 옵션 목록의 항목에 `interval`과, 창이 닫혀 있으면
+  `window_opens_at`이 실린다.
 
 #### 명령 안의 값 참조
 
@@ -344,6 +600,11 @@ rules:
   페이로드에 싣지 않고 `rule` 조회로 읽는다.
 - 규칙의 `effect`는 정적 명세 검사에 들어간다(8절).
 - `include`는 정의 이름만 받는다(1절).
+- `include`는 포함한 파일의 `collections`와 `sides`도 가져온다. 그 파일의
+  프로시저가 자기 컬렉션에 쓰거나 side 런을 읽기 때문이다(예: `improv-worker-v2`의
+  `land`가 `signals`에 쓴다). 포함하는 파일이 같은 이름을 선언하면 그 선언이
+  쓰인다. 같은 이름을 여러 포함 파일이 선언하면 먼저 포함된 것이 쓰인다(2.7
+  「include로 따라오는 컬렉션」과 같은 규칙).
 
 ### 2.6 시작 입력(inputs)
 
@@ -409,6 +670,46 @@ inputs:
     `claunch spawn`의 `--input NAME=VALUE`(반복 가능, 같은 이름을 두 번 쓰면 목록)와
     `--inputs-file PATH.json`, `--wizard`는 선언된 입력을 한 줄씩 묻는다.
 
+#### 입력 사이의 제약(input_constraints)
+
+입력 하나의 형식으로 표현할 수 없는 규칙(두 입력이 함께 켜질 수 없음, 한 입력이
+있으면 다른 입력도 필요함)은 최상위 `input_constraints:`에 식으로 쓴다
+(claunch-yq80p.5).
+
+```yaml
+input_constraints:
+  - assert: not ($inputs.force_pr and $inputs.force_no_pr)
+    fields: [force_pr, force_no_pr]
+    message: PR 강제와 PR 금지는 함께 켤 수 없다
+  - "$inputs.rounds == null or $inputs.rounds > 0"   # 문자열만 쓰면 assert
+```
+
+- `assert`는 2.4의 식이고 `$inputs.<이름>`만 읽는다. 다른 루트(`$data` 등), 컬렉션
+  함수, 선언되지 않은 입력 이름, 파싱되지 않는 식은 컴파일 오류다.
+- `fields`는 식이 거짓일 때 폼이 표시할 입력이다. 생략하면 식이 읽는 입력이다.
+  `message`를 생략하면 `constraint not met: <assert>`다.
+- 컴파일 결과는 `chart.meta['input_constraints']`에 실린다. `inputs.normalize`가
+  입력별 검사 뒤에 평가하므로 시작(`POST /api/sessions`·spawn·`POST
+  /api/cflow/start`·CLI·MCP)은 모두 같은 값을 같은 문구로 거절한다. 식이 읽는 입력
+  중 하나라도 자체 검사에 실패했으면 그 제약은 평가하지 않는다(그 입력의 오류가
+  먼저다). 거짓인 제약의 문구는 `fields`의 입력마다 오류로 붙고, `fields`가 빈
+  목록이면 `_constraints` 키에 붙는다.
+- 폼은 입력을 바꿀 때마다 `POST /api/cflow2/inputs/check`(본문 `workflow`,
+  `workflow_version`, `cwd`, `cflow_inputs`)를 부른다. 응답은 `{ok, values,
+  errors}`이고 시작과 같은 검사다. 정의 목록 항목과 `GET /api/cflow2/definition`은
+  `input_constraints`(제약 목록)를 싣고, 폼은 입력 칸 아래에 그 문구를 보여 준다.
+
+#### 사전 확인(precheck)
+
+입력 선언의 `precheck: gh`는 그 입력을 켜기 전에 환경을 확인한다는 표시다. 새 세션
+폼은 `GET /api/tools/gh?cwd=<세션 디렉터리>`(설정 화면의 gh 카드와 같은
+`ghcli.status`, 그 디렉터리 하나로 좁힌 것)를 불러 입력 칸 아래에 gh 버전과
+로그인 상태를 보여 준다. gh가 설치되어 있고 그 디렉터리가 push하는 모든 호스트에
+로그인되어 있을 때만 `bool` 입력을 켤 수 있다. 아니면 체크박스를 끄고 비활성화하며
+설치·로그인 명령을 함께 보여 준다. 다시 확인 버튼이 있다. 이 확인은 안내이고, 값을
+쓰는 쪽(워크플로의 작업)이 실행 시점에 다시 확인한다. 현재 `precheck` 값은 `gh`
+하나다.
+
 ### 2.7 컬렉션(collections)
 
 런이 여러 단계와 여러 런에 걸쳐 쌓고 고치는 기록을 형식과 함께 선언한다. v1의
@@ -427,7 +728,7 @@ collections:
       initial: requested
       settled: [landed, rejected]
     access:
-      push: [child, daemon]
+      push: [child, daemon, driver]   # driver: 다른 머신 워커의 요청을 리더가 등록
       set: [driver]
       set.landed: [daemon]
       remove: [driver]
@@ -475,14 +776,16 @@ collections:
 | `driver` | 런의 드라이버 세션. 중첩 위임 런이면 그 위임의 담당 세션 |
 | `daemon` | 데몬의 clock(watch, trigger 실행) |
 | `child` | 부모가 이 런의 드라이버인 세션. trigger의 `push`로만 쓴다 |
-| `peer` | 같은 세션의 다른 런(메인 런과 side 런, 2.9) |
+| `peer` | 예약. 같은 세션의 다른 런(메인 런과 side 런, 2.9)은 서로의 컬렉션을 읽기만 하므로 지금 이 주체로 실행되는 연산은 없다 |
 | `person` | 사람의 CLI(`claunch cflow2 collection …`)와 웹 UI(`set`, `remove`만) |
 
 **주소**
 
 `[대상:]컬렉션`. 대상은 `self`(생략 시), `main`, `side:<이름>`, `parent`다.
-`main`과 `side:<이름>`은 같은 세션의 런을 가리킨다(2.9). `parent`는 부모 세션의
-런 중 그 이름의 컬렉션을 선언한 런이며 trigger(2.8)에서만 쓴다.
+`main`과 `side:<이름>`은 같은 세션의 런을 가리킨다(2.9). 읽기(식 함수, `wait
+until`)와 `consume`에만 쓰고, `push`·`set`·`remove`는 자기 런의 컬렉션에만 한다
+(검사 오류 `peer-write`). `parent`는 부모 세션의 런 중 그 이름의 컬렉션을 선언한
+런이며 trigger(2.8)에서만 쓴다.
 
 **연산**
 
@@ -491,7 +794,7 @@ collections:
 | `push` | `{push: {to: ADDR, item: {필드: EXPR}}}` | 추가. `queue`는 key가 같으면 교체 |
 | `set` | `{set: {in: ADDR, key: EXPR, fields: {필드: EXPR}}}` | 레코드의 필드나 상태 변경. `queue`만 |
 | `remove` | `{remove: {in: ADDR, key: EXPR}}` | 레코드 삭제. `queue`만 |
-| `consume` | `{consume: ADDR}` | 이 런의 cursor를 그 `log`의 끝으로 옮긴다 |
+| `consume` | `{consume: ADDR}` 또는 `{consume: {from: ADDR, name: NAME}}` | 이 런의 cursor를 그 `log`의 끝으로 옮긴다. `name`을 주면 그 이름의 레코드에 대한 cursor만 옮긴다(아래 「이름별 cursor」) |
 
 - 노드의 `do:` 목록에 쓴다. 각 항목에 `at: enter|leave`(기본 `leave`)와
   `when: EXPR`을 붙일 수 있다. `leave`에서는 식에서 `$outcome`을 읽을 수 있다.
@@ -508,19 +811,29 @@ collections:
 | `items(ADDR, STATUS)` | 그 상태의 레코드 목록 |
 | `count(ADDR)`, `count(ADDR, STATUS)` | 개수 |
 | `fresh(ADDR)` | `log`에서 이 런의 cursor 뒤에 레코드가 있으면 참 |
-| `fresh(ADDR, NAME)` | 그 중 `name` 필드가 NAME인 레코드가 있으면 참 |
+| `fresh(ADDR, NAME)` | 그 중 `name` 필드가 NAME인 레코드가 있으면 참. 위치는 log 전체 cursor와 NAME의 cursor 중 뒤의 것 |
 | `exists(ADDR)` | 주소의 런이 살아 있고 그 컬렉션을 선언했으면 참 |
+| `side(NAME)` | 이 세션의 side 런 NAME: `{name, scope, live, status, run, workflow}`. 경로로 읽는다: `side('stack').live` |
 
 `ADDR`은 문자열이다(`items('landing')`, `fresh('side:stack:signals', 'cut')`).
 프롬프트에서는 `${col.<이름>}`이 `self`의 레코드 목록을 JSON으로 렌더한다.
+
+**이름별 cursor.** 한 log에 여러 이름의 신호가 섞이면(`cut-wanted`, `frozen`,
+`landed`) 한 이름을 처리하며 log 전체 cursor를 옮기면 아직 처리하지 않은 다른
+이름이 사라진다. `{consume: {from: ADDR, name: NAME}}`은 NAME의 cursor만 옮긴다.
+`fresh(ADDR, NAME)`은 두 cursor 중 뒤의 것 다음에 NAME 레코드가 있는지 본다.
+`fresh(ADDR)`(이름 없음)은 전체 cursor만 본다. `wait until`의 `consume` 목록도 같은
+두 형태를 받는다.
 
 **wait until**
 
 `wait: {until: EXPR, seconds: N, consume: [ADDR]}`는 셸 명령 없이 엔진이 판정하는
 대기다. 런을 바꾸는 호출과 clock의 시간 틱마다 식을 평가하고, 참이 되면 결과
-`ok`로 끝나며 `consume`에 적은 주소의 cursor를 옮긴다. 식이 읽는 주소의 런이 없거나
-끝났으면 결과 `absent`로 끝난다. `seconds`가 지나면 `timeout`이다. `probe`와 함께
-쓸 수 없다.
+`ok`로 끝나며 `consume`에 적은 주소의 cursor를 옮긴다. 식이 거짓이고 식이 읽은
+다른 런의 주소 중 하나라도 런이 없거나, 끝났거나, 그 컬렉션을 선언하지 않았으면
+결과 `absent`로 끝난다(끝난 런의 log도 레코드는 남아 있으므로 식이 참이면 `ok`다).
+`seconds`가 지나면 `timeout`이다. `probe`와 함께 쓸 수 없다. 같은 세션의 다른 런이
+컬렉션을 바꾸면 그 런의 저장 직후 이 런의 `wait until`을 다시 평가한다(2.9).
 
 **watch**
 
@@ -543,6 +856,14 @@ collections:
 | `inherit` | 같은 slot(cwd, scope)에서 같은 이름의 정의로 새 런이 시작되면 이전 런의 컬렉션을 정리한 뒤 넘겨받는다. `log`의 레코드와 이 런의 cursor도 넘겨받는다 |
 
 정리는 저널 `collection_reset`(버린 것, 남긴 것)으로 남는다.
+
+**include로 따라오는 컬렉션**
+
+`include`한 파일이 최상위 `collections:`를 선언하면 포함하는 정의도 그 컬렉션을
+가진다. 포함된 파일의 프로시저가 그 컬렉션에 연산(`do:`)을 쓰기 때문이다(예:
+`improv-worker-v2`의 `pr-open`이 쓰는 `prs`). 포함하는 정의가 같은 이름을 직접
+선언하면 그 선언이 쓰인다. 같은 이름을 여러 포함 파일이 선언하면 먼저 포함된 것이
+쓰인다.
 
 **재사용**
 
@@ -600,6 +921,11 @@ nodes:
 - trigger는 런을 멈추지 않는다. 실패는 사유를 남기고 끝난다.
 - `push`는 `each`의 레코드를 모두 시도한다. 하나라도 거절되면 `trigger_skipped`(거절 수와 사유)이고,
   이미 들어간 레코드는 남는다.
+- `push` 식은 `$data`도 읽는다. 엔진은 trigger를 기록할 때 식이 읽는 `$data`의
+  최상위 키만 그 순간의 값으로 기록(`triggers[].data`)에 함께 남기고, 데몬은 그
+  값으로 평가한다. 그래서 기록과 실행 사이에 런이 데이터를 바꿔도 push는 노드가
+  바뀐 순간의 값을 쓴다(claunch-yq80p.5, improv-worker-v2의 착지 요청이 PR url을
+  싣는 경로).
 - `$facts`는 trigger의 `push` 식에서만 읽는다(다른 식에서 `$facts`·`$each`를 읽으면 검사 오류
   `facts-outside-trigger`, push 식에서 컬렉션 함수를 쓰면 `trigger-collection-read`). 데몬이 실행 시점에 잰다:
   `head`(드라이버 세션 checkout의 HEAD. 런의 cwd에서 잰다), `branch`, `in_review`(드라이버 세션이
@@ -612,12 +938,124 @@ nodes:
   하위 런) 중 `landing_queue:`를 선언한 런. 정확히 하나여야 한다. v1 런이면 v1 엔진의
   `enqueue_landing(issues, branch, tip, by=…)`로 넣는다(10절 「v1 연결」).
 
-### 2.9 side 런 (2단계, claunch-yq80p.2)
+### 2.9 side 런
 
-세션이 끝날 때까지 메인 런 옆에서 도는 런이다(v1의 하위 런, 예: `stack`). scope는
-`<세션>+<이름>`이고, 메인 정의의 `sides: {<이름>: <정의 이름>}`에 선언한 것만 시작할
-수 있다. 주소 `main:`과 `side:<이름>:`은 이 기능이 들어오기 전까지 검사 오류
-(`side-runs-unavailable`)다. 상세는 2단계에서 이 절에 쓴다.
+세션이 끝날 때까지 메인 런 옆에서 도는 런이다(v1의 하위 런, 예: `stack`). 한
+세션은 메인 런 하나와 이름이 다른 side 런 여럿을 가질 수 있다. 구현은
+`cflow2/runtime.py`(`start_side`, `abort_sides`, `_ColResolver`)와
+`daemon/cflow2_clock.py`(세션 종료)다.
+
+```yaml
+# 메인 정의 (improv-worker-v2)
+sides:
+  stack: stack-v2
+collections:
+  signals: {type: signals}        # 메인 -> stack 신호
+nodes:
+  stack-cut:
+    do:
+      # 지난 요청에 늦게 온 컷을 버린다(아래 「요청과 응답」)
+      - {consume: {from: "side:stack:signals", name: cut}, when: "side('stack').live"}
+      - push: {to: signals, item: {name: "'cut-wanted'"}}
+        when: "$outcome == 'ok'"
+body:
+  - cond:
+      - if: "side('stack').live"
+        then:
+          - stack-cut
+          - wait:
+              until: "fresh('side:stack:signals', 'cut')"
+              consume: [{from: "side:stack:signals", name: cut}]
+              seconds: 14400
+```
+
+**요청과 응답.** 신호에는 요청과 응답을 잇는 번호가 없다. 응답을 기다리던
+`wait`가 응답 없이 끝나면(timeout 뒤 사람이 진행을 고른 경우) 그 뒤에 온 응답은
+다음 요청의 `wait`를 바로 풀 수 있다. 그래서 요청하는 노드는 요청을 쓰기 전에 응답
+이름을 `consume`한다(위 예의 `stack-cut`). 남는 경우는 지난 요청의 응답이 새 요청을
+쓴 뒤에 도착하는 것이다. 응답하는 쪽의 `consume`(이름별)은 cursor를 log 끝으로
+옮기므로 그 응답 하나가 두 요청을 함께 소비하고, 응답의 내용(컷이면 그 시점의 스택
+tip)이 새 요청에 쓰인다.
+
+**선언과 slot.**
+
+- 메인 정의의 `sides: {<이름>: <정의 이름>}`에 적은 것만 시작할 수 있다. 이름은
+  영문자나 `_`로 시작하고 영숫자·`_`·`-`로 이어진다.
+- slot(scope)은 `<세션>+<이름>`이다(`.cflow2/runs/w1+stack/`). 메인 런과 같은
+  디렉터리(cwd)에 놓인다. side 런의 중첩 위임 런은 `<세션>+<이름>~<위임 id>`다.
+- side 런은 일반 `start`로 시작할 수 없다(그 slot을 주면 거절). 정의는 보통의
+  `kind: workflow`다.
+
+**시작.** `runtime.start_side(name, main=<세션>)`, MCP `flow_start`의 `side`
+인자(`workflow`는 생략 가능, 주면 선언과 같아야 한다).
+
+- 메인 런이 살아 있고(`running`, `waiting_approval`) 그 이름을 선언해야 한다.
+  메인 런이 없거나 끝났으면 거절한다.
+- side 런의 드라이버는 메인 런의 드라이버다. `state.json`의 `side`에 `{name, main,
+  main_run}`이 실린다(저널 `started`의 `side`).
+- 같은 slot에 살아 있는 side 런이 있으면 거절한다(`force`는 일반 시작과 같다).
+  끝난 side 런은 보관(archive)되고, 같은 정의면 `lifecycle.inherit` 컬렉션을
+  넘겨받는다.
+
+**도구.** 모든 `flow_*` 툴(`flow_start`, `flow_status`, `flow_report`,
+`flow_select`, `flow_fork`, `flow_approve`, `flow_collection`, `flow_rule`)이
+`side` 인자를 받는다. `side: stack`은 호출 세션의 slot `<세션>+stack`이다. `scope`와
+함께 주면 거절한다. 권한은 일반 런과 같다(드라이버만).
+
+**서로 읽기.** 같은 세션의 런은 주소 `main:<컬렉션>`과 `side:<이름>:<컬렉션>`으로
+서로의 컬렉션을 읽는다(2.7 「읽기」, `wait until`). 메인 런에서 `main:`은 자기
+자신이다.
+
+- 쓰기는 자기 컬렉션에만 한다. 신호를 보내는 런이 자기 log에 쓰고, 받는 런이
+  읽는다. 다른 런의 log를 `consume`하면 바뀌는 것은 읽는 런의 cursor뿐이다.
+- 다른 런의 log에 대한 cursor는 그 log의 `epoch`(log를 연 런의 id)와 함께
+  저장된다. 읽는 시점의 log epoch가 다르면(상대가 log를 넘겨받지 않고 새로 시작한
+  런) cursor는 0으로 본다. 넘겨받은 log는 epoch가 유지되므로 cursor가 계속 맞는다.
+  메인 런이 같은 정의로 새로 시작해도 다른 런의 log에 대한 cursor를 넘겨받는다.
+- 가드·효과의 식(strict)에서: 상대 런이 없으면 빈 log로 읽는다. 살아 있는 상대가
+  그 컬렉션을 선언하지 않았으면 식 오류다. 끝난 상대는 남은 레코드를 읽는다.
+- `wait until`에서는 위 경우가 모두 `absent` 후보다(2.7).
+- 즉시 반영: 컬렉션을 바꾸거나(`collection_pushed`, `collection_set`,
+  `collection_removed`, `collection_reset`, `collection_watch`) 끝난(`done`,
+  `aborted`) 런은 저장 뒤, 잠금을 놓은 다음에 같은 세션의 다른 런 중 `wait`가 있는
+  런의 시간 틱(`wait until` 재평가)을 한 번 돌린다(`poke_peers`). 그 런이 바빠 잠금을
+  0.1초(`POKE_LOCK_TIMEOUT`) 안에 얻지 못하면 기다리지 않는다 — 그 런의 다음 저장이나
+  데몬 clock의 다음 틱이 한다.
+
+**`side(NAME)`.** 식 함수. 이 세션의 side 런 NAME에 대해 `{name, scope, live,
+status, run, workflow}`를 돌려준다. 런이 없으면 `live: false`, 나머지는 `null`이다.
+`side('stack').live`처럼 경로로 읽는다(함수 호출 뒤의 `.필드`와 `[식]`).
+
+**상태 표시.** 메인 런의 `flow_status`에 `sides: {<이름>: {name, scope, live,
+status, run, workflow, declared, how?}}`가 실린다(아직 없으면 `how`가 시작 방법을
+적는다). side 런의 `flow_status`에는 `side`가 실린다.
+
+**세션 종료.** 세션 프로세스가 끝나면(일시정지 제외) 데몬 clock이 그 세션의 살아
+있는 side 런을 `aborted`(reason `session <세션> ended`)로 끝낸다. 종료 훅
+(`Cflow2Clock.session_exited`)은 기록만 하고 다음 패스 시작(`end_sides`)에서
+처리한다. 그때 세션이 다시 살아 있으면(redefine, respawn) 중단하지 않는다. 데몬
+재기동은 종료가 아니다. `daemon.cflow2_clock`이 꺼져 있으면 이 처리도 없다. 메인
+런은 건드리지 않는다. 종료 기록은 데몬 메모리에만 있다: 세션이 끝나고 다음 패스
+전에 데몬이 내려가면 그 side 런은 `running`으로 남는다(부팅 시 정리 없음). 같은 세션
+이름이 다시 쓰이면 `side(NAME).live`가 참으로 읽힌다.
+
+**데몬 통지.** side slot(`<세션>+<이름>`)과 그 아래 중첩 런의 통지(ask, monitor)와
+세션 조회(headless의 실행 환경, session 위임의 부모)는 slot의 세션 이름(`+`·`~` 앞)으로
+간다 — 그 세션이 side 런의 드라이버다.
+
+**검사.**
+
+| 코드 | 내용 |
+|---|---|
+| `unknown-side` | `sides:`를 선언한 차트에서 `side:<이름>:` 주소나 `side('<이름>')`이 선언에 없는 이름을 씀. side 런 정의 쪽의 `main:`·형제 주소는 실행 시점에 해석한다 |
+| `peer-write` | `do:`의 `push`·`set`·`remove`가 `main:`·`side:` 주소를 씀 |
+| `unbounded-visits` (경고) | `max_visits: 0` |
+
+**v1과의 차이.** v1 하위 런(`runs/<세션>/sub/<이름>/`)은 `publishes`/`awaits`의
+게시 횟수로 만났다. v2는 log 컬렉션과 이름별 cursor로 만난다. v1 하위 런 도구의
+`run: stack` 인자는 v2의 `side: stack`이다. v1 `landing_queue:`는 side 런의
+`landing` 컬렉션이다(자식의 `parent:landing` push는 부모 세션의 v2 런 중 그 컬렉션을
+선언한 런, 즉 side 런으로 간다. 2.8).
 
 ### 2.10 질문 형식(question_types)과 공용 프로시저 ask-user (claunch-yq80p.8)
 
@@ -877,19 +1315,50 @@ procedures:
 - `ask-frame`·`ask-reframe`은 `effects: [fs.read]`, `ask-pose`는 `effects: []`(답을
   기다리기만 한다)를 선언한다.
 
-부르는 쪽:
+부르는 쪽 — 답으로 갈라질 때는 `cases`를 쓴다(claunch-yq80p.11):
 
 ```yaml
 - call: ask-user
   with:
     topic: 이 회차의 범위를 어디까지로 할지
     context: "$result['intake'].value.summary"
-    choices: [narrow, full]
-  bind: scope_decision
-- cond:
-    - {if: "$data.scope_decision.decision == 'narrow'", then: work-narrow}
-    - {else: work-full}
+  bind: scope_decision           # 선택: ask-user의 ok 값(decision, reason, by, brief)
+  cases:
+    narrow: work-narrow
+    full: [work-full, report]
+    skip: []                     # 아무것도 하지 않는 선택지도 명시한다
+  on: {reframe: …}               # on은 결과 처리기로만 쓴다
 ```
+
+#### `cases`: 선택지별 분기
+
+`call: P` 옆의 `cases: {<선택지>: <트리>}`는 선택지 이름과 그 분기를 한 자리에
+쓴다. 손으로 쓴 `cond`(`$data.x.decision == '…'`)와 달리 선택지 이름의 오타가
+컴파일을 통과하지 못한다 — 이름이 정의되는 곳이 `cases`의 키 하나뿐이다.
+
+- 펼침: `seq[call P(with.choices = cases의 키), cond(P의 decision마다 그 트리)]`.
+  IR에서 묶음 `seq`가 `cases: [키…]`를 싣는다. 노드의 `id`·`on`은 묶음에 붙고,
+  `bind`는 안쪽 `call`에 붙는다(P의 ok 값이 묶인다).
+- `cases`의 키가 `choices`의 유일한 출처다. 같은 `call`에 `with.choices`가 있으면
+  컴파일 오류다.
+- 표기: 답은 정의의 표기로 돌아온다. brief의 선택지 이름은 고정된 `choices`와 대소문자를
+  무시하고 맞춰 보고, ask가 열릴 때 정의의 표기(`local`)로 바꿔 저장한다(권장안도).
+  그래서 brief가 `Local`이라 써도 결정은 `local`이고 `cases`의 가드(정확 비교)가 맞는다.
+- 예약 이름: `fail`과 P의 `returns`가 선언한 ok 외 결과 이름(`ask-user`의 `reframe`)은
+  선택지로 쓸 수 없다(컴파일 오류, 대소문자 무시). 그 결과는 `on`·`catch`로 다룬다.
+- `else`가 없다: P가 `cases` 밖의 `decision`으로 끝나면 런은 `no cond branch matched`로
+  실패한다. 실제 ask는 답이 `choices`로 제한되어 이 경우가 없고, 선언 모양만 맞춘
+  다른 프로시저에서 생길 수 있다.
+- `cases` 호출에 `id`를 붙이면 `$result.<id>.value`는 고른 분기의 값이다(묶음 `seq`의
+  값). `decision`은 `bind`(안쪽 `call`의 값)로 읽는다. `on: {ok: …}`은 분기 뒤에 돈다.
+- 모든 선택지에 트리가 있어야 한다. 아무것도 하지 않는 선택지는 `[]`로 쓴다
+  (`null`은 오류). 이름 규칙은 결과 이름과 같고 대소문자를 무시한 중복은 오류다.
+- 대상: `choices` param과 `decision` 필드를 담은 `ok` 반환을 선언한 프로시저만
+  (`ask-user`가 그렇다). 선언 기반이며 일반 디스패치는 이 범위 밖이다.
+- 트리는 호출 지점의 텍스트이므로 호출 지점의 범위에서 컴파일한다(작업 이름,
+  `continue`·`break` 대상, `return`). 2.2 「블록 인자와 splice」와 같은 규칙이다.
+- `on`은 그대로 결과 처리기다: P가 `ok`가 아닌 결과(`reframe`, `fail`)로 끝나면
+  `cases`가 아니라 `on`·`catch`로 간다.
 
 #### 검사(`check.py`)
 
@@ -932,8 +1401,8 @@ Finding이다.
 `workspace-gate`는 바꾸지 않았다: 답이 승인 하나이고 보류는 답하지 않는 것이므로
 선택지가 둘 이상인 `decision` 형식에 맞지 않는 승인(ask, `options` 없음)이다.
 `landing-review`·`peer-review`의 ask는 사용자가 아니라 다른 세션에 묻는 것이라
-대상이 아니다. `improv-leader-v2`(claunch-yq80p.6)는 이 이슈가 머지된 뒤 같은
-방식으로 바꾼다.
+대상이 아니다. `improv-leader-v2`(claunch-yq80p.6)의 교대 종료 승인도 같은 방식으로
+바꿨다(`wind-down-decision`: `call: ask-user`, choices `[end-shift, keep]`).
 
 ## 3. IR
 
@@ -976,7 +1445,12 @@ wait 노드에는 `undecided_max`가 붙는다.
 | `wait` | 외부 이벤트 대기 원자 상태 | `probe`, `poll`, `seconds`, `undecided_max`, `describe`; `wait until`이면 `until`, `consume` |
 | `group` | 동적 병렬 영역 | `child`, `member`(펼친 프로시저의 루트), `limit`, `settle`, `name` |
 | `control` | 전이 | `op`(continue/break/raise/return/end), `target`, `outcome`, `value` |
-| `scope` | `call`을 펼친 복합 상태 | `proc`, `child`, `with`, `bind` |
+| `scope` | `call`을 펼친 복합 상태 | `proc`, `child`, `with`, `bind`, `params`(블록 param 제외), `returns` |
+
+`seq`는 두 가지 출처 표시를 더 가질 수 있다: `splice: {block, call}`(블록 인자를
+놓은 자리. `call`은 블록을 받은 호출의 scope id), `cases: [선택지…]`(`call … cases`를
+펼친 `[call, cond]` 묶음, 2.10). `control`의 `return`이 `target`을 가지면 그 scope
+(또는 `$run`)를 끝낸다. 없으면 가장 가까운 scope다.
 
 모든 노드에 공통: `id`, `type`, `parent`, `src`(원본 파일:줄), `executor`(위임
 지점이면), `bind`, `on`. 선언한 노드에만: `do`(효과 목록 `[{op, at, when, …}]`),
@@ -1054,7 +1528,10 @@ wait 노드에는 `undecided_max`가 붙는다.
 `verify_passed`, `verify_failed`(종료 코드, 출력 끝부분, `lost`), `probe_undecided`,
 `ask_routed`(그룹, 응답자), `ask_answered`(결정, 답한 쪽, 경로), `ask_timeout`,
 `ask_deferred`, `ask_undelivered`, `ask_withdrawn`, `acceptance_checking`,
-`acceptance_passed`, `acceptance_failed`, `acceptance_waived`. ask가 그룹을
+`acceptance_passed`, `acceptance_failed`, `acceptance_waived`, `round_requested`,
+`round_auto_started`, `round_cancelled`, `select_held`, `hold_cancelled`,
+`restart_requested`, `restart_completed`, `restart_interrupted`,
+`restart_unsupported`, `checks_passed`, `checks_expired`. ask가 그룹을
 건너뛰거나 `otherwise`로 넘어갈 때는 `fallback`(`decision: ask`)을 남긴다.
 
 - 런의 `waiting_approval`은 열린 대기 항목에서 계산한다: `loop_limit`,
@@ -1082,8 +1559,9 @@ wait 노드에는 `undecided_max`가 붙는다.
 
 ### 4.5 컬렉션과 trigger의 실행
 
-**상태.** `state.json`에 `collections: {이름: {kind, items: [...], seq}}`,
-`cursors: {주소: seq}`, `triggers: [{id, run, node, instance, at, do, push?, queued_at, claimed_at?, claim_boot?}]`를
+**상태.** `state.json`에 `collections: {이름: {kind, items: [...], seq, epoch}}`,
+`cursors: {주소: seq}`(자기 log는 이름, 다른 런의 log는 주소 전체, 이름별 cursor는
+`<키>#<이름>`), `cursor_epochs: {키: epoch}`(다른 런의 log), `triggers: [{id, run, node, instance, at, do, push?, queued_at, claimed_at?, claim_boot?}]`를
 둔다. 컬렉션 선언은 `chart.json`의 `meta.collections`, trigger와 `do:` 효과는 노드의
 `triggers`, `do` 필드다.
 
@@ -1113,6 +1591,10 @@ wait 노드에는 `undecided_max`가 붙는다.
 | `collections.normalize(spec, types) -> dict` | `cflow2/collections.py` | 선언 검사와 `type:` 펼치기. 프런트엔드가 부른다 |
 | `collections.apply_push/apply_set/apply_remove(col_state, spec, ..., principal)` | 같은 곳 | 순수 함수. 접근·형식 검사 후 상태를 바꾸고 이벤트 dict를 돌려준다 |
 | `collections.reset(col_state, spec) -> summary` | 같은 곳 | lifecycle 정리 |
+| `runtime.start_side(name, *, cwd, main, workflow, params, inputs, caps, force, driver, caller)` | `cflow2/runtime.py` | side 런 시작(2.9) |
+| `runtime.abort_sides(session, cwd, reason) -> list` | 같은 곳 | 세션의 살아 있는 side 런 중단(데몬) |
+| `runtime.poke_peers(cwd, scope, now) -> list` | 같은 곳 | 같은 세션의 다른 런의 `wait until` 재평가 |
+| `runtime.side_info(cwd, main, name) -> dict` | 같은 곳 | `side(NAME)`의 값 |
 | `runtime.collection_op(op, name, *, cwd, scope, principal, session, key=None, item=None, fields=None, tid=None)` | `cflow2/runtime.py` | 외부(데몬, MCP, CLI)의 연산. 런 잠금 안에서 적용하고 status를 돌려준다. `tid`는 trigger push의 `_tid` |
 | `runtime.collection_view(cwd, scope) -> dict` | 같은 곳 | 컬렉션 요약(웹, MCP, status) |
 | `runtime.claim_triggers(cwd, scope, *, boot, now, held=()) -> list` | 같은 곳 | 표시되지 않은 trigger와 풀린 trigger에 표시하고 돌려준다(기록은 남는다). `held`는 호출자가 아직 들고 있는 id |
@@ -1396,6 +1878,16 @@ headless 2순위(샌드박스·worktree 없이 실행 디렉터리에서 실행)
 패스가 `PROGRESS_MAX`(600초) 동안 진척이 없으면 쓰기를 멈춰 다른 프로세스가
 fallback하게 한다.
 
+**rounds·restarts·wake-up** (claunch-yq80p.6).
+
+| 상황 | 처리 |
+|---|---|
+| 끝난 런에 `next_round.auto` | `runtime.start_next_round`로 다음 회차 시작, 드라이버에 「next round started」 블록(2.1 「recur」) |
+| 활성 작업에 `restart` | `runtime.claim_restarts`(boot id)로 가져가고 「restart」 블록. 패스 뒤 별도 작업에서 실행, `runtime.complete_restart`로 기록하고 「restart result」 블록(2.2 「restart」). 스레드에서 실행하므로 다음 패스는 기다리지 않는다 |
+| 패스의 시간 틱이 런을 옮김(`wait_tick`의 `ticked` > 0) | 런이 이제 드라이버의 작업이나 에이전트 선택(보류 아님)을 기다리면 드라이버에 「the run moved」 블록. wait 통과·시간 초과, 선택 창 확정이 여기에 든다 |
+
+블록은 런의 드라이버 세션(없으면 scope 이름의 세션)에 `queue_delivery`로 보낸다.
+
 **probe.** wait·monitor probe는 적힌 명령 그대로 자기 프로세스 그룹에서 실행하고,
 타임아웃이면 그룹 전체를 죽인다(종료 코드 124). 런의 값은 명령 문자열에 넣지 않고
 환경 변수로만 전달한다(`CFLOW_IN_<NAME>`/`CFLOW_DATA_<NAME>`, 런타임이 정함).
@@ -1501,7 +1993,8 @@ spec:
 ## 9. 화면과 CLI
 
 - CLI: `claunch cflow2 ls | show | validate | compile | caps | start | status | journal | abort`,
-  사람의 경로 `select | extend | resume | approve [NODE] [--decline | --option O] [--reason R]`.
+  사람의 경로 `select | extend | resume | approve [NODE] [--decline | --option O] [--reason R]`,
+  `recur [--cancel] [--reason R]`(다음 회차 요청 확인·취소, 2.1 「recur」).
 - ask 응답 API: `POST /api/cflow2/approve`(본문 `{cwd, scope, node?, decision?, reason?}`,
   처리 함수 `daemon/cflow2_approve.approve`, 이벤트 루프 밖에서 호출).
 - API: `GET /api/cflow/workflows`가 v1·v2 항목을 함께 싣고 `version`(1 또는 2)과
@@ -1538,6 +2031,9 @@ spec:
 
 ## 10. v1 deprecation
 
+- 정의 교체와 진행 중인 런: v2 정의가 바뀌면(예: claunch-yq80p.11의 `cases`·`pr-or-local`
+  교체) 노드 id가 달라질 수 있어, 이전 정의의 노드(예: 이전 ask 노드)에서 대기 중인 런은
+  새 정의로 이어지지 않을 수 있다. 정의 교체 뒤 진행 중인 런은 재시작한다.
 - `cflow ls`·`cflow show`, 정의 편집기, 목록 API에 v1 정의가 deprecated라는 표시를
   붙인다. 실행은 계속 지원한다.
 - v1 정의 파일 자체의 `Workflow.deprecations`에는 넣지 않는다(번들 파일의
@@ -1558,6 +2054,123 @@ spec:
   `landing` 컬렉션을 가지면 그 컬렉션을 보여 주고 바꾼다(`status` 값은 v1과 같다).
 - 한 세션에서 v1 `landing_queue`와 v2 `landing` 컬렉션을 동시에 가진 런이 있으면
   대상이 둘이므로 push는 건너뛰고(`trigger_skipped`) 경고를 남긴다.
+
+## 10a. PR 착지 (improv-worker-v2, claunch-yq80p.5)
+
+v2 워커의 착지 요청은 기본으로 pull request를 거친다. 로컬 착지(상위가 워커
+브랜치를 `--no-ff`로 머지)도 시작 입력으로 고를 수 있는 경로로 남는다.
+
+| 입력 | 착지 매체 | PR을 만들 수 없을 때 |
+|---|---|---|
+| 둘 다 끔(기본) | PR | 사유를 이슈 코멘트(`LANDING MEDIUM: local (…)`)에 남기고 로컬로 대체 |
+| `force_pr` | PR | 대체하지 않는다. 사람의 선택(`retry` / 이번 회차만 `local`)을 기다린다 |
+| `force_no_pr` | 로컬 | 해당 없음 |
+
+두 입력은 `input_constraints`의 `not ($inputs.force_pr and $inputs.force_no_pr)`로
+함께 켤 수 없고, `force_pr`은 `precheck: gh`다(2.6).
+
+- 판정 시점: 회차의 `branch-setup` 뒤 프로시저 `landing-medium`(작업
+  `remote-setup`). 사실은 `claunch cflow2 pr-preflight`가 낸다 — `prflow.preview`
+  (세션 패널 PR 마법사와 같은 확인: 저장소, 커밋, GitHub 호스트의 원격, gh 설치,
+  그 호스트에 로그인)를 JSON 한 줄(`ready`, `remote`, `repo`, `base`, `blockers` …)로
+  출력하고 종료 코드 0이 ready, 1이 아님이다. 원격은 `git config claunch.pr.remote`,
+  없으면 `origin`이고 base는 `claunch.pr.base`, 없으면 master다. `--base <브랜치>`는
+  base를 바꾸고 그 브랜치가 원격에 있는지 `git ls-remote`로 재어 `base_sha`를
+  싣는다(없으면 blocker) — 스택 자식이 쓴다(아래 「stacked PR」).
+- 원격 편성(상위 세션이 다른 머신)에서는 로컬 착지가 성립하지 않으므로 PR을 만들 수
+  없으면 `force_pr`과 같이 사람의 선택을 기다린다. 머신을 넘는 커밋 참조는
+  `<sha> @ <remote>/<ref>`로 쓰고(docs/remote-commit-protocol.md), rebase 기준은
+  `<remote>/<base>`(브랜치 upstream)다.
+- 결과는 `data.landing`(`medium`, `reason`, `remote`, `repo`, `base`, `pr_url`,
+  `pr_number`)에 묶인다.
+- 게시: 동료 리뷰 통과 뒤 `medium == 'pr'`이면 프로시저 `pr-publish`(작업
+  `pr-open`)가 명시 refspec으로 push하고 `git ls-remote`로 원격 SHA를 확인한 뒤 PR을
+  열거나(이미 같은 브랜치의 OPEN PR이 있으면 갱신만) 결과를 `data.landing`에 다시
+  묶는다. 실패하면 `force_pr`이 꺼져 있을 때는 사유를 남기고 로컬로 바꾸고, 켜져
+  있으면 사람의 선택을 기다린다.
+- PR 모음: 런의 `prs` 컬렉션(queue, key `number`, 상태 open/merged/closed,
+  `inherit`)이 이 세션이 연 PR을 회차를 넘어 기록한다. `pr-open`의 leave `do:`가
+  넣고, watch가 `gh pr view`로 MERGED를 재서 상태를 옮긴다. 재작업·후속 수정은 같은
+  브랜치의 열린 PR에 push로 모이고, 다른 브랜치의 연관 작업은 새 PR 본문 첫 줄의
+  `Follow-up of #N`과 이전 PR의 링크 코멘트로 이어진다.
+- 착지 요청: `integration-request`의 leave push가 착지 큐 레코드에 `medium`,
+  `pr_url`, `pr_number`, `base`를 싣는다(`$data.landing`, 2.8). `improv-common`의
+  `landing-queue` 타입이 이 필드를 선언한다. `pr_url`이 있는 행은 리더의 PR 후보
+  (`gh pr merge --merge --match-head-commit <tip>`, claunch-yq80p.6)이고 없으면 로컬
+  후보다. 마커는 `LANDING REQUEST @ <sha> @ <remote>/<브랜치> pr: <url>`이다.
+- 웹 UI: 런 패널의 컬렉션 표는 값이 http(s) URL인 필드를 텍스트에서 빼고 새 탭
+  링크로 보인다. `url`·`pr_url`이 `/pull/<N>` 형태면 링크 이름은 `PR #N`(번호는
+  같은 행의 `number`·`pr_number`가 우선)이고, 그 밖의 URL은 필드 이름이다. 그래서
+  워커 런의 `prs`와 리더 런의 `landing` 행에서 PR로 바로 이동한다. 상태 열은
+  `prs`의 open/merged/closed를 색으로 구분한다. v1 리더의 `landing_queue:`는 PR
+  필드를 싣지 않으므로 그 경우 PR 주소는 착지 요청 마커에서만 읽힌다.
+
+### stacked PR (stack-v2, claunch-yq80p.2)
+
+자식을 둔 워커(메인 런 + side 런 `stack`, 2.9)에서는 자식의 PR이 master가 아니라
+부모의 스택 브랜치로 향한다.
+
+- 원격의 스택 브랜치: 메인 런은 side 런을 세울 때 착지 매체가 pr이면 `remote`·
+  `repo` 입력을 넘긴다. stack 런의 `open`이 `<세션>-stack`을 그 원격에 명시
+  refspec으로 push하고 `git ls-remote`로 같은 SHA인지 확인한다. 원격에 같은
+  이름이 다른 tip으로 있으면 덮지 않고 원격 스택 없이 진행한다. `remote`가 없으면
+  스택은 로컬에만 있다.
+- 자식의 base: 자식 워커의 `remote-setup`은 intake가 정한 스택 기준을
+  `pr-preflight --base <부모 세션>-stack`으로 준다. 그 브랜치가 원격에 없으면
+  blocker(`… is not on the remote`)이고, 판정 규칙대로 로컬 착지로 간다(부모의
+  stack 런이 자식 브랜치를 `--no-ff`로 머지한다). 있으면 출력의 `base_sha`가 그
+  원격 tip이고, PR의 base와 브랜치 upstream이 `<remote>/<부모 세션>-stack`이 된다.
+- 자식의 착지 요청: 자식의 `integration-request` leave push가 부모 세션에서
+  landing을 선언한 런, 즉 stack 런의 `landing`에 `pr_url`·`pr_number`·`base`를
+  싣는다(2.8). 그 런의 `land`가 PR 후보를 리더와 같은 절차로 머지한다: 원격 스택
+  브랜치가 로컬 tip과 같은지 확인, `gh pr view`(UNKNOWN이면 재조회),
+  `gh pr merge --merge --match-head-commit <tip>`, `git fetch` 뒤 스택 워크트리에서
+  `--ff-only`, 머지 커밋의 둘째 부모가 레코드 tip인지 확인. 레코드의 `base`가 스택
+  브랜치가 아니면 머지하지 않는다. 로컬 후보를 머지했으면 원격 스택 브랜치를
+  fast-forward push로 맞춘다. 어느 경로든 원격 스택 브랜치는 land 뒤 로컬과 같은
+  tip이고, landing 레코드의 landed 표시는 로컬 브랜치를 보는 watch가 한다.
+- 컷과 이전: `cut`은 원격 스택 브랜치가 컷 tip과 같은지 확인하고 코멘트에
+  `<컷 tip> @ <remote>/<세션>-stack`으로 적는다. 메인 런이 master에 착지한 뒤의
+  `restack`만 원격 스택 브랜치를 `--force-with-lease=<세션>-stack:<옛 tip>`으로
+  다시 쓴다. 열린 자식 PR은 base 이름이 같으므로 그대로 남는다.
+- 부모 회차의 PR: 메인 런의 `stack-merge`가 컷 tip을 회차 브랜치에 머지하므로
+  부모의 PR(base master)에는 자식들의 머지 커밋이 들어 있다. 리더는 그 PR 하나를
+  머지한다.
+- 미실측: 이 경로(스택 브랜치로 향하는 PR의 `gh pr merge`, 스택 restack 뒤 열린
+  자식 PR)는 실제 원격에서 아직 재지 않았다. 아래 실측은 base가 master 대신 전용
+  브랜치였다는 점에서 같은 명령을 다루지만, 스택 브랜치 재작성 뒤의 PR 상태는
+  포함하지 않는다.
+
+### 실측 (2026-10-06, 실제 원격 github.ncsoft.com/RnIAgentDev/claunch, base = 전용 브랜치 `cflow2-pr-measure`)
+
+| 항목 | 결과 |
+|---|---|
+| `--match-head-commit`에 틀린 SHA | 거절(exit 1, `Head branch was modified`) |
+| 리뷰 뒤 head에 새 커밋 push, 이전 SHA로 머지 | 거절(같은 문구) |
+| 올바른 SHA | 머지됨. merge commit의 부모 = base tip, PR head |
+| 충돌하는 PR | 직후 `mergeable` UNKNOWN, 수 초 뒤 CONFLICTING. 머지 거절(`not mergeable`) |
+| 새 fetch 뒤 head가 base의 조상인가 | 참 |
+| gh 상태별 종료 코드 | 정상 0, 미로그인(`auth status`) 1, 미설치 127 |
+| 이미 올린 브랜치를 rewrite한 뒤 일반 push | 거절(exit 1, `non-fast-forward`) |
+| `--force-with-lease`(기대값 없음), 추적 ref == 원격 | 강제 갱신됨(exit 0). 명시 refspec push도 `refs/remotes/<remote>/<브랜치>`를 갱신하므로 재요청 경로가 이것이다 |
+| `--force-with-lease`, 다른 곳에서 원격이 움직여 추적 ref가 낡음 | 거절(exit 1, `stale info`) |
+| 강제 push 직후 `gh pr view --json headRefOid` | 이전 SHA가 남아 있었다. 재조회 필요 |
+| `gh pr create`에 없는 base | 거절(exit 1, `Base ref must be a branch`) |
+| 같은 head·base로 `gh pr create` 두 번째 | 거절(exit 1, `already exists:` 다음 줄에 기존 PR url) |
+| `gh pr list --head <브랜치> --state open` | 기존 PR 번호와 headRefOid를 낸다 |
+
+실패 경로 측정은 PR #3(base `cflow2-pr-measure`, head `s83-prm-3`)에서 했고, 측정 뒤
+PR은 닫고 브랜치는 지웠다.
+
+`mergeable`이 UNKNOWN이거나 push 직후 `headRefOid`가 HEAD와 다르면 판정하지 않고 수 초 뒤 다시 조회한다.
+
+리더 쪽 머지(`improv-leader-v2`의 `pr-merge` 절차: `gh pr review`, `gh pr merge
+--merge --match-head-commit`, 머지 뒤 fetch·둘째 부모·포함 확인)는 위 표의 명령으로
+이루어지지만, **leader-v2 경유 미실측**이다. 리더와 워커가 같은 gh 계정일 때
+`gh pr review --approve`·`--request-changes`가 거절되는지(GitHub는 작성자의 approve를
+거절한다)도 이 표에 없다. 절차는 그 거절에서 `gh pr review --comment`로 판정을
+남기고 판정의 정본을 보드 코멘트로 둔다. leader-v2의 실제 첫 사용에서 확인해 이
+표에 행을 더한다.
 
 ## 11. 단계
 

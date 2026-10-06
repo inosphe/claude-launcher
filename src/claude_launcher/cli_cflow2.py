@@ -387,6 +387,21 @@ def _cmd_abort(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_recur(args: argparse.Namespace) -> int:
+    from .cflow2 import runtime
+
+    if not args.cancel:
+        payload = runtime.status(cwd=os.getcwd(), scope=args.scope, tick=False)
+        nxt = payload.get("next_round")
+        print(f"next round: {json.dumps(nxt, ensure_ascii=False)}" if nxt
+              else "no next round is requested here")
+        return 0
+    _refuse_own_session(args.scope, "recur --cancel")
+    _print_status(runtime.cancel_next_round(args.reason, cwd=os.getcwd(), scope=args.scope),
+                  False)
+    return 0
+
+
 def _cmd_select(args: argparse.Namespace) -> int:
     from .cflow2 import runtime
 
@@ -518,6 +533,72 @@ def _cmd_collection(args: argparse.Namespace) -> int:
     return 0
 
 
+#: ``pr-preflight`` exit codes: the facts a v2 worker's landing reads to
+#: choose its medium (docs/cflow-v2.md 4.6, claunch-yq80p.5).
+PR_READY = 0
+PR_BLOCKED = 1
+
+
+def _cmd_pr_preflight(args: argparse.Namespace) -> int:
+    """Can this directory land through a pull request right now? The same
+    facts the session panel's PR wizard checks (prflow.preview): a
+    repository with a commit, a remote on a GitHub host, ``gh`` installed
+    and signed in to that host. Prints one JSON object (``ready``,
+    ``remote``, ``host``, ``slug``, ``repo`` = the ``-R`` value, ``base``,
+    ``head``, ``gh``, ``account``, ``blockers``); exit 0 = ready, 1 = not.
+
+    ``--base`` names the PR's base instead of the configured one: a stack
+    child's base is its parent's ``<parent>-stack`` (claunch-yq80p.2). That
+    branch must already be on the chosen remote -- ``git ls-remote`` says so,
+    and ``base_sha`` carries what it points at -- or it is a blocker: a PR
+    cannot target a branch the remote does not have."""
+    from . import prflow
+
+    cwd = os.path.abspath(args.cwd or os.getcwd())
+    doc = prflow.preview(cwd, session=os.environ.get("CLAUNCH_SESSION", ""))
+    row = next((r for r in doc.get("remotes") or [] if r["remote"] == doc.get("remote")), {})
+    host, slug = row.get("host"), row.get("slug")
+    if doc.get("repo") and doc.get("remote") and not host:
+        doc["blockers"].append(f"the chosen remote {doc['remote']!r} is not on a GitHub host")
+    auth = (doc.get("auth") or {}).get(host or "", {})
+    base_sha = None
+    if args.base:
+        doc["base"] = args.base
+        if not doc.get("remote"):
+            doc["blockers"].append(f"no remote to look for the base {args.base!r} on")
+        else:
+            # never wait on a credential prompt: an unreachable remote is a fact
+            env = dict(os.environ, GIT_TERMINAL_PROMPT="0")
+            code, line, err = prflow._git(cwd, "ls-remote", "--exit-code", doc["remote"],
+                                          f"refs/heads/{args.base}", env=env)
+            if code == 0 and line:
+                base_sha = line.split()[0]
+            elif code == 2:
+                doc["blockers"].append(
+                    f"the base {doc['remote']}/{args.base} is not on the remote"
+                    " -- a stack child's base is pushed by its parent")
+            else:
+                doc["blockers"].append(
+                    f"cannot read the remote {doc['remote']!r} to find the base "
+                    f"{args.base!r} (git ls-remote exit {code}: {err or 'no output'})")
+    out = {
+        "ready": not doc["blockers"],
+        "remote": doc.get("remote") or None,
+        "configured": bool(row.get("configured")),
+        "host": host, "slug": slug,
+        "repo": f"{host}/{slug}" if host and slug else None,
+        "base": doc.get("base") or "master",
+        "base_sha": base_sha,
+        "branch": doc.get("branch") or None,
+        "head": doc.get("head") or None,
+        "gh": (doc.get("gh") or {}).get("version"),
+        "account": auth.get("account"),
+        "blockers": doc["blockers"],
+    }
+    print(json.dumps(out, ensure_ascii=False, indent=None if args.compact else 1))
+    return PR_READY if out["ready"] else PR_BLOCKED
+
+
 def register(sub) -> None:
     p = sub.add_parser(
         "cflow2",
@@ -583,6 +664,12 @@ def register(sub) -> None:
     q.add_argument("--reason", required=True)
     q.set_defaults(func=_guarded(_cmd_abort))
 
+    q = scoped(csub.add_parser("recur", help="a recurring run's next-round request: show it, "
+                               "or --cancel it (stops the loop after the finished round)"))
+    q.add_argument("--cancel", action="store_true", help="drop the pending next-round request")
+    q.add_argument("--reason")
+    q.set_defaults(func=_guarded(_cmd_recur))
+
     q = scoped(csub.add_parser("select", help="answer a choice (including chooser: user)"))
     q.add_argument("node", help="choice instance id or label")
     q.add_argument("option")
@@ -635,6 +722,14 @@ def register(sub) -> None:
     r.add_argument("name")
     r.add_argument("key")
     r.set_defaults(func=_guarded(_cmd_collection))
+
+    q = csub.add_parser("pr-preflight", help="can this directory land through a pull "
+                        "request now (remote, host, gh, sign-in)? JSON; exit 0 ready, 1 not")
+    q.add_argument("--cwd", help="the repository directory (default: here)")
+    q.add_argument("--base", help="the PR's base branch, which must be on the remote "
+                   "(a stack child's <parent>-stack); default: the configured base")
+    q.add_argument("--compact", action="store_true", help="one line of JSON")
+    q.set_defaults(func=_cmd_pr_preflight)
 
     q = scoped(csub.add_parser("resume", help="resume a run a 'halt' monitor stopped "
                                "(waiting_approval, reason monitor_violation)"))

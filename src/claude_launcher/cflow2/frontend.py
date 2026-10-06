@@ -45,14 +45,15 @@ Decisions this module makes where the spec leaves room:
   is looked up only through ``resolve_include`` (the v2 layers).
 - Top-level ``inputs`` (typed start inputs) is checked by
   :func:`inputs.schema` and kept in ``chart.meta['inputs']``.
-- Top-level ``max_visits`` (integer >= 1, default
-  :data:`ir.DEFAULT_MAX_VISITS`) lands in ``chart.meta['max_visits']``.
+- Top-level ``max_visits`` (integer >= 0, default
+  :data:`ir.DEFAULT_MAX_VISITS`; 0 is no limit) lands in
+  ``chart.meta['max_visits']``.
 - Top-level ``collections`` are normalized by :func:`collections.normalize`
   into ``chart.meta['collections']`` (always present, ``{}`` when none).
   ``type:`` names a ``collection_types`` entry of this file or of an
   included file (found by name through the layers, like everything else
-  ``include`` brings in). ``sides`` (phase 2) is kept as declared in
-  ``chart.meta['sides']`` when present.
+  ``include`` brings in). ``sides`` (side run name -> definition name,
+  doc 2.9) is kept in ``chart.meta['sides']`` when present.
 - A task or combinator mapping may carry ``do:`` (collection effects) and
   ``triggers:`` (daemon side requests). They land in the node's ``do`` and
   ``triggers`` props, only when declared (see :func:`_do_list` and
@@ -60,7 +61,8 @@ Decisions this module makes where the spec leaves room:
   strings (2.4), parsed here and evaluated by the runtime; a non-string
   scalar becomes its expression text (``3``, ``true``, ``null``).
 - ``wait: {until, seconds, consume}`` stores ``until`` (expression text) and
-  ``consume`` (address list) on the wait node, only when ``until`` is given.
+  ``consume`` (list of an address or ``{addr, name}``) on the wait node, only
+  when ``until`` is given.
 """
 
 from __future__ import annotations
@@ -75,6 +77,7 @@ import yaml
 from . import collections as _collections
 from . import question as _question
 from . import ir
+from . import store as _store
 
 ResolveInclude = Callable[[str], Optional[Path]]
 
@@ -184,7 +187,8 @@ TOP_KEYS = (
     "cflow", "name", "description", "kind", "default_role", "filter_roles",
     "default_child_cflow", "priority", "params", "returns", "data", "include",
     "fragments", "rules", "procedures", "nodes", "body", "spec", "max_visits",
-    "inputs", "collections", "collection_types", "question_types", "sides",
+    "inputs", "input_constraints", "collections", "collection_types", "question_types",
+    "sides", "recur",
 )
 #: Top-level keys a ``kind: library`` file may carry (docs/cflow-v2.md 2.10).
 LIBRARY_KEYS = ("cflow", "name", "description", "kind", "include", "fragments", "rules",
@@ -192,7 +196,7 @@ LIBRARY_KEYS = ("cflow", "name", "description", "kind", "include", "fragments", 
 TASK_KEYS = (
     "title", "prompt", "done_when", "verify", "ask", "executor", "needs",
     "returns", "effects", "paths", "budget", "rules", "strict_budget",
-    "do", "triggers",
+    "do", "triggers", "restart",
 )
 COMMON_KEYS = ("id", "executor", "needs", "budget", "bind", "on", "do", "triggers")
 #: ``do:`` operations (docs/cflow-v2.md 2.7) and the moments they run at.
@@ -211,12 +215,17 @@ CONTROLS = ("continue", "break", "raise", "return")
 #: Sibling keys a combinator/control takes besides the common ones.
 SIBLINGS = {
     "try": ("catch", "finally"),
-    "call": ("with",),
+    "call": ("with", "cases"),
     "return": ("value",),
 }
 RETURN_TYPES = ("str", "int", "float", "bool", "list", "dict", "any")
 PROC_KEYS = ("description", "params", "returns", "nodes", "body")
 PARAM_KEYS = ("type", "required", "default", "description")
+#: A procedure param of this type takes a tree (``with: {p: <tree>}``) that the
+#: body places with ``splice: p`` (docs 2.2, block params).
+PARAM_BLOCK = "block"
+#: The tree mapping head that places a block param.
+SPLICE = "splice"
 RULE_KEYS = ("text", "why", "deliver", "effect")
 SPEC_KEYS = ("invariants", "paths", "ensures", "monitors")
 MONITOR_KEYS = ("always", "probe", "every", "on_violation", "when", "within", "expect")
@@ -262,6 +271,17 @@ class _Scope:
     trys: Tuple[Tuple[str, Tuple[str, ...]], ...] = ()  # (id, catch outcomes)
     procs: Tuple[str, ...] = ()           # call stack of procedure names
     in_proc: bool = False
+    #: the T_SCOPE node of the call this tree sits in (None: the run itself);
+    #: a ``return`` here ends that call
+    scope_id: Optional[str] = None
+    #: block params of the procedure being compiled -> (raw tree, the call
+    #: site's scope, line): ``splice`` compiles the tree in that scope
+    blocks: Optional[Dict[str, Tuple[Any, Optional["_Scope"], int]]] = None
+    #: inside a spliced block: returns name their target explicitly
+    in_splice: bool = False
+    #: inside a par branch (its own region): a block spliced here does not
+    #: reach the call site's loops either
+    in_region: bool = False
 
 
 @dataclass
@@ -283,6 +303,13 @@ class _Ctx:
     collection_types: Dict[str, Tuple[Any, str, int]] = field(default_factory=dict)
     #: question_types name -> (normalized declaration, file, line)
     question_types: Dict[str, Tuple[Dict[str, Any], str, int]] = field(default_factory=dict)
+    #: collections an included file declares -> (raw declaration, file, line):
+    #: its procedures may operate on them, so the including chart gets them
+    #: unless it declares the same name itself
+    included_collections: Dict[str, Tuple[Any, str, int]] = field(default_factory=dict)
+    #: ``sides`` of included files -> (declaration, file, line); the
+    #: including file's own declaration of a name replaces the included one
+    included_sides: Dict[str, Tuple[Any, str, int]] = field(default_factory=dict)
 
     def err(self, file: str, line: int, msg: str) -> FrontendError:
         return FrontendError(f"{file}:{line}: {msg}" if line else f"{file}: {msg}")
@@ -356,14 +383,23 @@ def _expr_text(ctx: _Ctx, file: str, value: Any, what: str, line: int) -> str:
 
 
 def _values(ctx: _Ctx, file: str, value: Any, what: str, line: int) -> Dict[str, Dict[str, Any]]:
-    """``with:`` / ``value:`` entries -> ``{name: {"expr": t} | {"lit": v}}``."""
+    """``with:`` / ``value:`` entries -> ``{name: {"expr": t} | {"lit": v}}``.
+    A string holding ``$`` is an expression, anything else a literal; the
+    explicit forms ``{lit: V}`` and ``{expr: E}`` say which (a literal string
+    with ``$`` in it, an expression without one)."""
     if value is None:
         return {}
     mapping = _need_map(ctx, file, value, what, line)
     out: Dict[str, Dict[str, Any]] = {}
     for key, raw in mapping.items():
         kline = _key_line(mapping, key, line)
-        if isinstance(raw, str) and "$" in raw:
+        if isinstance(raw, dict) and len(raw) == 1 and next(iter(raw)) in ("lit", "expr"):
+            form = next(iter(raw))
+            if form == "lit":
+                out[str(key)] = {"lit": _plain(raw["lit"])}
+            else:
+                out[str(key)] = {"expr": _expr_text(ctx, file, raw["expr"], f"{what}.{key}", kline)}
+        elif isinstance(raw, str) and "$" in raw:
             out[str(key)] = {"expr": _expr_text(ctx, file, raw, f"{what}.{key}", kline)}
         else:
             out[str(key)] = {"lit": _plain(raw)}
@@ -434,7 +470,21 @@ def _params(ctx: _Ctx, file: str, value: Any, line: int) -> Dict[str, Any]:
             decl = {}
         decl = _need_map(ctx, file, decl, f"params.{name}", pline)
         _check_keys(ctx, file, decl, PARAM_KEYS, f"params.{name}")
+        if decl.get("type") == PARAM_BLOCK:
+            # the default stays a raw tree: it is compiled where it is spliced
+            out[str(name)] = {k: (v if k == "default" else _plain(v)) for k, v in decl.items()}
+            continue
         out[str(name)] = _plain(decl)
+    return out
+
+
+def _workflow_params(ctx: _Ctx, file: str, doc: Dict[str, Any]) -> Dict[str, Any]:
+    out = _params(ctx, file, doc.get("params"), _key_line(doc, "params"))
+    for name, decl in out.items():
+        if decl.get("type") == PARAM_BLOCK:
+            raise ctx.err(file, _key_line(doc, "params"),
+                          f"params.{name}: type block is a procedure param (a run is "
+                          f"started, not called, so nothing passes it a tree)")
     return out
 
 
@@ -647,9 +697,32 @@ def _include(ctx: _Ctx, name: str, file: str, line: int) -> Optional[Dict[str, A
     try:
         doc = _read_doc(ctx, path)
         _absorb(ctx, doc, path.name)
+        cols = doc.get("collections")
+        if cols is not None:
+            cline = _key_line(doc, "collections", 1)
+            cols = _need_map(ctx, path.name, cols, "collections", cline)
+            for cname, raw in cols.items():
+                # the first include that declares a name keeps it
+                ctx.included_collections.setdefault(
+                    str(cname), (raw, path.name, _key_line(cols, cname, cline)))
+        _absorb_sides(ctx, doc, path.name)
     finally:
         ctx.including.pop()
     return doc
+
+
+def _absorb_sides(ctx: _Ctx, doc: Dict[str, Any], file: str) -> None:
+    """Keep an included file's ``sides``: a procedure it exports may read
+    its side runs, so a file that calls that procedure has them too (doc
+    2.5). The first include that declares a name keeps it."""
+    raw = doc.get("sides")
+    if raw is None:
+        return
+    kline = _key_line(doc, "sides", 1)
+    raw = _need_map(ctx, file, raw, "sides", kline)
+    for name, decl in raw.items():
+        ctx.included_sides.setdefault(
+            str(name), (_plain(decl), file, _key_line(raw, name, kline)))
 
 
 def _procedure(ctx: _Ctx, name: str, file: str, line: int) -> _Proc:
@@ -762,6 +835,7 @@ def _compile_task(ctx: _Ctx, sc: _Scope, name: str, parent: Optional[str], line:
     if ask is not None:
         ask = _ask(ctx, tfile, name, ask, tline)
     verify = _verify(ctx, tfile, name, raw.get("verify"), _key_line(raw, "verify", tline))
+    restart = _restart(ctx, tfile, name, raw.get("restart"), _key_line(raw, "restart", tline))
     strict = raw.get("strict_budget", False)
     if not isinstance(strict, bool):
         raise ctx.err(tfile, tline, f"task {name!r}: strict_budget must be true or false")
@@ -781,6 +855,7 @@ def _compile_task(ctx: _Ctx, sc: _Scope, name: str, parent: Optional[str], line:
             "done_when": done_when,
             "verify": verify,
             "ask": ask,
+            "restart": restart,
             "returns": _plain(returns),
             "effects": _str_list(ctx, tfile, raw.get("effects"), "effects", tline),
             # ``effects: []`` (declared: none) and no key (unknown) read the
@@ -867,6 +942,43 @@ def _verify(ctx: _Ctx, file: str, name: str, value: Any, line: int) -> Optional[
                       f"list, or {{run, timeout}}")
     _no_template(ctx, file, line, run, f"task {name!r} verify")
     return {"run": _plain(run), "timeout": timeout}
+
+
+RESTART_KEYS = ("windows", "linux", "timeout")
+#: v1's bounds for a restart command's wall clock (``cflow.model``).
+RESTART_TIMEOUT_DEFAULT = 120.0
+RESTART_TIMEOUT_MAX = 900.0
+
+
+def _restart(ctx: _Ctx, file: str, name: str, value: Any, line: int) -> Optional[Dict[str, Any]]:
+    """``restart: {windows, linux, timeout}`` -- a project-local restart
+    command the daemon's clock runs once per visit of the task (docs 2.2,
+    restart). At least one platform; commands are run as written."""
+    if value is None:
+        return None
+    spec = _need_map(ctx, file, value, f"task {name!r} restart", line)
+    _check_keys(ctx, file, spec, RESTART_KEYS, f"task {name!r} restart")
+    out: Dict[str, Any] = {"windows": None, "linux": None}
+    for plat in ("windows", "linux"):
+        if spec.get(plat) is not None:
+            cmd = spec[plat]
+            if not isinstance(cmd, str) or not cmd.strip():
+                raise ctx.err(file, line, f"task {name!r}: restart.{plat} must be a command string")
+            _no_template(ctx, file, line, cmd, f"task {name!r} restart.{plat}")
+            refused = ir.restart_refusal(cmd)
+            if refused:
+                raise ctx.err(file, line, f"task {name!r}: restart.{plat} {refused}")
+            out[plat] = cmd
+    if out["windows"] is None and out["linux"] is None:
+        raise ctx.err(file, line, f"task {name!r}: restart needs a windows or linux command")
+    timeout = RESTART_TIMEOUT_DEFAULT
+    if spec.get("timeout") is not None:
+        timeout = _number(ctx, file, spec["timeout"], "restart.timeout", line)
+        if timeout <= 0 or timeout > RESTART_TIMEOUT_MAX:
+            raise ctx.err(file, line, f"task {name!r}: restart.timeout must be in "
+                                      f"(0, {RESTART_TIMEOUT_MAX:g}]")
+    out["timeout"] = timeout
+    return out
 
 
 def _outcome_name(ctx: _Ctx, file: str, line: int, value: Any, what: str) -> str:
@@ -978,6 +1090,8 @@ def _ask(ctx: _Ctx, file: str, name: str, value: Any, line: int) -> Dict[str, An
 
 def _compile_mapping(ctx: _Ctx, sc: _Scope, m: Dict[str, Any], parent: Optional[str],
                      path_id: str, line: int) -> str:
+    if SPLICE in m:
+        return _compile_splice(ctx, sc, m, parent, path_id, line)
     heads = [k for k in m if k in COMBINATORS or k in CONTROLS]
     if len(heads) != 1:
         if not heads:
@@ -1063,8 +1177,53 @@ def _compile_control(ctx: _Ctx, sc: _Scope, op: str, m: Dict[str, Any], parent: 
             raise ctx.err(sc.file, line, "return needs an outcome name")
         props["outcome"] = value
         props["value"] = _values(ctx, sc.file, m.get("value"), "return value", line)
+        if sc.in_splice:
+            # a block's return ends the call (or run) it was written in, not
+            # the procedure it was spliced into (docs 2.2, hygiene)
+            props["target"] = sc.scope_id or ir.RETURN_RUN
     nid = _alloc(ctx, path_id)
     _add(ctx, ir.Node(id=nid, type=ir.T_CONTROL, parent=parent, src=_where(sc.file, line), props=props))
+    return nid
+
+
+def _compile_splice(ctx: _Ctx, sc: _Scope, m: Dict[str, Any], parent: Optional[str],
+                    path_id: str, line: int) -> str:
+    """``{splice: <block param>}``: the block the call site passed, compiled in
+    the call site's scope (its tasks, loops, catches, ``$params``, the target
+    of its ``return``) and placed here. Node ids carry this procedure's
+    prefix; nodes keep the call site's file:line."""
+    _check_keys(ctx, sc.file, m, (SPLICE,), "splice")
+    name = m[SPLICE]
+    blocks = sc.blocks or {}
+    if not isinstance(name, str) or name not in blocks:
+        known = ", ".join(sorted(blocks)) or "(none)"
+        where = f"procedure {sc.procs[-1]!r}" if sc.procs else "a workflow body"
+        raise ctx.err(sc.file, line, f"splice {name!r}: not a block param of {where} "
+                                     f"(block params: {known})")
+    raw, site, bline = blocks[name]
+    nid = _alloc(ctx, path_id)
+    if site is None:
+        # a default block is the procedure's own text: compiled right here,
+        # in the procedure's scope (its loops, its $params) -- no call site
+        node = _add(ctx, ir.Node(id=nid, type=ir.T_SEQ, parent=parent,
+                                 src=_where(sc.file, line),
+                                 props={"children": [], "pass_prev": False,
+                                        "splice": {"block": name, "call": None}}))
+        node.props["children"] = [_compile_tree(ctx, sc, raw, nid, f"{nid}.{name}", bline)]
+        return nid
+    node = _add(ctx, ir.Node(id=nid, type=ir.T_SEQ, parent=parent, src=_where(sc.file, line),
+                             props={"children": [], "pass_prev": False,
+                                    "splice": {"block": name, "call": sc.scope_id}}))
+    # names resolve at the call site; a raise travels up from here (like any
+    # outcome), so it is checked against the catches at the splice position,
+    # which include the call site's
+    inner = _Scope(**{**site.__dict__, "prefix": sc.prefix, "procs": sc.procs,
+                      "trys": sc.trys, "in_splice": True})
+    if sc.in_region:
+        # spliced into a par branch: the branch is its own region, so the
+        # call site's loops are out of reach (as for a continue written there)
+        inner = _Scope(**{**inner.__dict__, "loops": (), "in_region": True})
+    node.props["children"] = [_compile_tree(ctx, inner, raw, nid, f"{nid}.{name}", bline)]
     return nid
 
 
@@ -1136,12 +1295,26 @@ def _b_choose(ctx, sc, node, value, m, line):
     for name, opt in opts.items():
         oline = _key_line(opts, name, line)
         opt = _need_map(ctx, sc.file, opt, f"choose option {name!r}", oline)
-        _check_keys(ctx, sc.file, opt, ("description", "then", "when"), f"choose option {name!r}")
+        _check_keys(ctx, sc.file, opt, ("description", "then", "when", "interval"),
+                    f"choose option {name!r}")
         guard = (_expr_text(ctx, sc.file, opt["when"], f"choose.options.{name}.when", oline)
                  if opt.get("when") is not None else None)
+        interval = None
+        if opt.get("interval") is not None:
+            if chooser != ir.CHOOSER_AGENT:
+                raise ctx.err(sc.file, oline, f"choose option {name!r}: interval paces the "
+                                              f"agent's choice; it needs chooser: agent")
+            interval = _number(ctx, sc.file, opt["interval"], f"choose option {name!r} interval",
+                               oline)
+            if interval <= 0:
+                raise ctx.err(sc.file, oline, f"choose option {name!r}: interval must be "
+                                              f"greater than 0")
         then = _require(ctx, sc, opt, "then", f"choose option {name!r}", oline)
-        options.append({"name": str(name), "description": opt.get("description") or "",
-                        "guard": guard, "child": _sub(ctx, sc, node, then, str(name), oline)})
+        entry = {"name": str(name), "description": opt.get("description") or "",
+                 "guard": guard, "child": _sub(ctx, sc, node, then, str(name), oline)}
+        if interval is not None:
+            entry["interval"] = interval
+        options.append(entry)
     if not options:
         raise ctx.err(sc.file, line, "choose needs at least one option")
 
@@ -1230,7 +1403,7 @@ def _b_par(ctx, sc, node, value, m, line):
         raise ctx.err(sc.file, line, "par needs at least one branch")
     node.props = {"branches": {}, "settle": _settle(ctx, sc, spec.get("settle"), ir.SETTLE_ALL, "par", line)}
     # A branch is its own region: loops/trys outside do not reach into it.
-    bsc = _Scope(**{**sc.__dict__, "loops": ()})
+    bsc = _Scope(**{**sc.__dict__, "loops": (), "in_region": True})
     for name, tree in branches.items():
         bline = _key_line(branches, name, line)
         node.props["branches"][str(name)] = _compile_tree(ctx, bsc, tree, node.id, f"{node.id}.{name}", bline)
@@ -1272,37 +1445,168 @@ def _inline(ctx: _Ctx, sc: _Scope, scope_node: ir.Node, pname: str, with_raw: An
         cycle = " -> ".join(sc.procs[sc.procs.index(pname):] + (pname,))
         raise ctx.err(sc.file, line, f"recursive call: {cycle}")
     proc = _procedure(ctx, pname, sc.file, line)
-    with_ = _values(ctx, sc.file, with_raw, "with", line)
+    block_names = {pn for pn, decl in proc.params.items() if decl.get("type") == PARAM_BLOCK}
+    raw_with = _need_map(ctx, sc.file, with_raw, "with", line) if with_raw is not None else {}
+    with_ = _values(ctx, sc.file, {k: v for k, v in raw_with.items() if k not in block_names},
+                    "with", line)
     for k in with_:
         if proc.params and k not in proc.params:
             raise ctx.err(sc.file, line, f"call {pname!r}: unknown parameter {k!r} "
                           f"(declared: {', '.join(proc.params)})")
+    blocks: Dict[str, Tuple[Any, Optional[_Scope], int]] = {}
+    callee_scope = _Scope(file=proc.file, tasks=proc.tasks, prefix=scope_node.id + "/",
+                          loops=(), trys=sc.trys, procs=sc.procs + (pname,), in_proc=True,
+                          scope_id=scope_node.id)
+    for pn in block_names:
+        decl = proc.params[pn]
+        if pn in raw_with:
+            if raw_with[pn] is None:
+                raise ctx.err(sc.file, line, f"call {pname!r}: block parameter {pn!r} needs a "
+                                             f"tree (a task name, a list or a mapping)")
+            blocks[pn] = (raw_with[pn], sc, _key_line(raw_with, pn, line))
+        elif decl.get("default") is not None:
+            # a default block is the procedure's own text: compiled where it
+            # is spliced, in the procedure's own scope (no call site)
+            blocks[pn] = (decl["default"], None, proc.line)
+        elif not check_required:
+            raise ctx.err(sc.file, line, f"procedure {pname!r}: block parameter {pn!r} has no "
+                                         f"default; a group member has no call site to pass it")
+        else:
+            raise ctx.err(sc.file, line, f"call {pname!r}: missing block parameter {pn!r}")
     for pn, decl in proc.params.items():
+        if pn in block_names:
+            continue
         if check_required and decl.get("required") and pn not in with_ and "default" not in decl:
             raise ctx.err(sc.file, line, f"call {pname!r}: missing required parameter {pn!r}")
     scope_node.type = ir.T_SCOPE
     scope_node.props = {"proc": pname, "child": None, "with_": with_, "returns": proc.returns,
-                        "params": proc.params}
-    inner = _Scope(file=proc.file, tasks=proc.tasks, prefix=scope_node.id + "/",
-                   loops=(), trys=sc.trys, procs=sc.procs + (pname,), in_proc=True)
+                        "params": {pn: d for pn, d in proc.params.items()
+                                   if pn not in block_names}}
+    inner = _Scope(**{**callee_scope.__dict__, "blocks": blocks})
     scope_node.props["child"] = _compile_tree(ctx, inner, proc.body, scope_node.id,
                                               f"{scope_node.id}.{key}", proc.line)
+
+
+#: The param a procedure must declare to take ``cases`` (its choice names),
+#: and the field its ``ok`` return must carry (the choice taken).
+CASES_PARAM = "choices"
+CASES_FIELD = "decision"
 
 
 def _b_call(ctx, sc, node, value, m, line):
     if not isinstance(value, str) or not value:
         raise ctx.err(sc.file, line, "call needs a procedure name")
+    if m.get("cases") is not None:
+        _call_cases(ctx, sc, node, value, m, line)
+        return
     _inline(ctx, sc, node, value, m.get("with"), line)
+
+
+def _call_cases(ctx: _Ctx, sc: _Scope, node: ir.Node, pname: str, m: Dict[str, Any],
+                line: int) -> None:
+    """``call: P, cases: {<choice>: <tree>}`` (docs 2.10, cases): the keys are
+    P's ``choices`` and each tree runs when P returns ok with that
+    ``decision``. Compiles to ``seq[call (choices = the keys), cond on the
+    decision]``; the trees are the call site's own text, so they compile in
+    its scope. Only a procedure that declares a ``choices`` param and an ok
+    return with ``decision`` takes cases."""
+    cline = _key_line(m, "cases", line)
+    cases = _need_map(ctx, sc.file, m["cases"], "cases", cline)
+    proc = _procedure(ctx, pname, sc.file, line)
+    if CASES_PARAM not in proc.params \
+            or CASES_FIELD not in ((proc.returns or {}).get(ir.OUTCOME_OK) or {}):
+        raise ctx.err(sc.file, cline, f"call {pname!r}: cases needs a procedure that declares "
+                                      f"a {CASES_PARAM!r} param and an ok return with "
+                                      f"{CASES_FIELD!r}")
+    with_raw = _need_map(ctx, sc.file, m.get("with"), "with", line) \
+        if m.get("with") is not None else {}
+    if CASES_PARAM in with_raw:
+        raise ctx.err(sc.file, cline, f"call {pname!r}: with.{CASES_PARAM} and cases together "
+                                      f"-- the cases keys are the choices")
+    if not cases:
+        raise ctx.err(sc.file, cline, "cases needs at least one choice")
+    # outcomes P can end with besides ok: an answer named like one would be
+    # read as that outcome (ask-user's reframe), so they are not choices
+    reserved = {ir.OUTCOME_FAIL} | {o for o in (proc.returns or {}) if o != ir.OUTCOME_OK}
+    names: List[str] = []
+    for key, tree in cases.items():
+        kline = _key_line(cases, key, cline)
+        if not isinstance(key, str) or not _OUTCOME_RE.match(key):
+            raise ctx.err(sc.file, kline, f"cases: {key!r} is not a choice name")
+        if key.lower() in {r.lower() for r in reserved}:
+            raise ctx.err(sc.file, kline, f"cases: {key!r} is an outcome of {pname!r} "
+                                          f"({', '.join(sorted(reserved))}), not a choice -- "
+                                          f"handle it with on or catch")
+        if any(key.lower() == n.lower() for n in names):
+            raise ctx.err(sc.file, kline, f"cases: duplicate choice {key!r}")
+        if tree is None:
+            raise ctx.err(sc.file, kline, f"cases.{key}: every choice needs a tree "
+                                          f"(write [] for a choice that does nothing)")
+        names.append(key)
+    # the node becomes the wrapper: its id, on and the caller's view stay here
+    node.type = ir.T_SEQ
+    node.props = {"children": [], "pass_prev": False, "cases": names}
+    ask = _add(ctx, ir.Node(id=_alloc(ctx, f"{node.id}.call"), type="", parent=node.id,
+                            src=node.src, bind=node.bind))
+    node.bind = None
+    _inline(ctx, sc, ask, pname, {**with_raw, CASES_PARAM: names}, line)
+    pick = _add(ctx, ir.Node(id=_alloc(ctx, f"{node.id}.cases"), type=ir.T_COND,
+                             parent=node.id, src=_where(sc.file, cline)))
+    # an unlabelled node's result is kept under its id (runtime.node_key)
+    ref = f"$result['{ask.id}'].value.{CASES_FIELD}"
+    branches = []
+    for i, key in enumerate(names):
+        kline = _key_line(cases, key, cline)
+        branches.append({"guard": f"{ref} == '{key}'",
+                         "child": _sub(ctx, sc, pick, cases[key], f"case.{key}", kline)})
+    pick.props = {"branches": branches}
+    node.props["children"] = [ask.id, pick.id]
+
+
+CHECK_ITEM_KEYS = ("id", "describe", "probe")
+
+
+def _wait_checks(ctx: _Ctx, file: str, value: Any, line: int) -> List[Dict[str, Any]]:
+    """``wait.checks``: ``[{id, describe, probe}]`` -- every probe must exit 0
+    in the same poll (docs 2.3, wait checks)."""
+    items = _need_list(ctx, file, value, "wait.checks", line)
+    if not items:
+        raise ctx.err(file, line, "wait.checks needs at least one item")
+    out: List[Dict[str, Any]] = []
+    seen = set()
+    for i, raw in enumerate(items):
+        iline = _line(raw, line)
+        item = _need_map(ctx, file, raw, f"wait.checks[{i}]", iline)
+        _check_keys(ctx, file, item, CHECK_ITEM_KEYS, f"wait.checks[{i}]")
+        cid = item.get("id")
+        if not isinstance(cid, str) or not _OUTCOME_RE.match(cid):
+            raise ctx.err(file, iline, f"wait.checks[{i}].id must be a name")
+        if cid in seen:
+            raise ctx.err(file, iline, f"wait.checks: duplicate id {cid!r}")
+        seen.add(cid)
+        if item.get("probe") is None:
+            raise ctx.err(file, iline, f"wait.checks[{i}] needs a probe")
+        probe = _command(ctx, file, iline, item["probe"], f"wait.checks.{cid}.probe")
+        describe = item.get("describe")
+        if describe is not None and not isinstance(describe, str):
+            raise ctx.err(file, iline, f"wait.checks.{cid}.describe must be a string")
+        out.append({"id": cid, "describe": describe or "", "probe": probe})
+    return out
 
 
 def _b_wait(ctx, sc, node, value, m, line):
     node.type = ir.T_WAIT
     spec = _need_map(ctx, sc.file, value, "wait", line)
     _check_keys(ctx, sc.file, spec, ("probe", "poll", "seconds", "describe", "undecided_max",
-                                     "until", "consume"), "wait")
+                                     "until", "consume", "checks"), "wait")
     until = spec.get("until")
-    if spec.get("probe") is None and spec.get("seconds") is None and until is None:
-        raise ctx.err(sc.file, line, "wait needs probe, until or seconds")
+    if spec.get("probe") is None and spec.get("seconds") is None and until is None \
+            and spec.get("checks") is None:
+        raise ctx.err(sc.file, line, "wait needs probe, checks, until or seconds")
+    if spec.get("checks") is not None and (spec.get("probe") is not None or until is not None):
+        raise ctx.err(sc.file, _key_line(spec, "checks", line),
+                      "wait.checks cannot be used with probe or until (checks is a list of "
+                      "probes)")
     if until is not None:
         if spec.get("probe") is not None:
             raise ctx.err(sc.file, line, "wait.until cannot be used with probe (until is "
@@ -1313,12 +1617,16 @@ def _b_wait(ctx, sc, node, value, m, line):
     elif spec.get("consume") is not None:
         raise ctx.err(sc.file, _key_line(spec, "consume", line), "wait.consume applies to until")
     probe = spec.get("probe")
+    checks = None
     if probe is not None:
         probe = _command(ctx, sc.file, _key_line(spec, "probe", line), probe, "wait.probe")
+    elif spec.get("checks") is not None:
+        checks = _wait_checks(ctx, sc.file, spec["checks"], _key_line(spec, "checks", line))
     elif spec.get("undecided_max") is not None:
         raise ctx.err(sc.file, line, "wait.undecided_max applies to a probe")
+    probing = probe is not None or checks is not None
     undecided = (_int(ctx, sc.file, spec.get("undecided_max", WAIT_UNDECIDED_MAX),
-                      "wait.undecided_max", line, 1) if probe is not None else None)
+                      "wait.undecided_max", line, 1) if probing else None)
     node.props = {
         "probe": probe,
         "undecided_max": undecided,
@@ -1327,14 +1635,34 @@ def _b_wait(ctx, sc, node, value, m, line):
         if spec.get("seconds") is not None else None,
         "describe": spec.get("describe"),
     }
+    if checks is not None:
+        node.props["checks"] = checks
     if until is not None:
         uline = _key_line(spec, "until", line)
         node.props["until"] = _expr_text(ctx, sc.file, until, "wait.until", uline)
         cline = _key_line(spec, "consume", line)
-        node.props["consume"] = [
-            _address(ctx, sc.file, a, "wait.consume", cline)
-            for a in _str_list(ctx, sc.file, spec.get("consume"), "wait.consume", cline)
-        ]
+        raw = spec.get("consume")
+        if raw is None:
+            raw = []
+        elif isinstance(raw, (str, dict)):
+            raw = [raw]
+        raw = _need_list(ctx, sc.file, raw, "wait.consume", cline)
+        node.props["consume"] = [_consume_entry(ctx, sc.file, a, "wait.consume", cline)
+                                 for a in raw]
+
+
+def _consume_entry(ctx: _Ctx, file: str, value: Any, what: str, line: int) -> Any:
+    """A consume target: a log address (the whole log), or ``{from: ADDR,
+    name: NAME}`` -- only the records named NAME (doc 2.7: a cursor per name,
+    so consuming one signal leaves the others fresh). IR: the address string
+    or ``{addr, name}``."""
+    if isinstance(value, dict):
+        _check_keys(ctx, file, value, ("from", "name"), what)
+        if not isinstance(value.get("name"), str) or not value.get("name"):
+            raise ctx.err(file, line, f"{what}: {{from, name}} needs a name string")
+        return {"addr": _address(ctx, file, value.get("from"), what, line),
+                "name": str(value["name"])}
+    return _address(ctx, file, value, what, line)
 
 
 def _b_group(ctx, sc, node, value, m, line):
@@ -1475,12 +1803,25 @@ _BUILDERS: Dict[str, Callable[..., None]] = {
 
 def _collection_decls(ctx: _Ctx, file: str, doc: Dict[str, Any]) -> Dict[str, Any]:
     raw = doc.get("collections")
-    if raw is None:
-        return {}
-    cline = _key_line(doc, "collections", 1)
-    raw = _need_map(ctx, file, raw, "collections", cline)
     types = {name: entry[0] for name, entry in ctx.collection_types.items()}
     out: Dict[str, Any] = {}
+    own = set()
+    if raw is not None:
+        own = {str(n) for n in _need_map(ctx, file, raw, "collections",
+                                          _key_line(doc, "collections", 1))}
+    # an included file's collections come along (its procedures use them);
+    # this file's own declaration of a name replaces the included one
+    for name, (decl, ifile, iline) in ctx.included_collections.items():
+        if name in own:
+            continue
+        try:
+            out[name] = _collections.normalize(name, _plain(decl), types)
+        except _collections.CollectionError as exc:
+            raise ctx.err(ifile, iline, str(exc)) from None
+    if raw is None:
+        return out
+    cline = _key_line(doc, "collections", 1)
+    raw = _need_map(ctx, file, raw, "collections", cline)
     for name, decl in raw.items():
         dline = _key_line(raw, name, cline)
         decl = _need_map(ctx, file, decl, f"collection {name!r}", dline)
@@ -1548,7 +1889,11 @@ def _do_list(ctx: _Ctx, file: str, value: Any, line: int) -> List[Dict[str, Any]
         what = f"do: {op}"
         rec: Dict[str, Any] = {"op": op}
         if op == "consume":
-            rec["addr"] = _address(ctx, file, body, what, eline)
+            target = _consume_entry(ctx, file, body, what, eline)
+            if isinstance(target, dict):
+                rec.update(target)
+            else:
+                rec["addr"] = target
         else:
             body = _need_map(ctx, file, body, what, eline)
             addr_key = "to" if op == "push" else "in"
@@ -1702,6 +2047,33 @@ def _default_resolver(base: Optional[Path]) -> ResolveInclude:
     return layers.resolver(None)
 
 
+def _recur(ctx: _Ctx, file: str, doc: Dict[str, Any], kind: str) -> Optional[Dict[str, Any]]:
+    """``recur: true`` or ``recur: {auto: true, min_gap: S}`` ->
+    ``{"auto": bool, "min_gap": float}``; ``false``/absent -> ``None``. Only a
+    workflow recurs. ``min_gap`` (default 60) is the least number of seconds
+    between a round's end and the auto start of the next."""
+    raw = doc.get("recur")
+    line = _key_line(doc, "recur", 1)
+    if raw is None or raw is False:
+        return None
+    if kind != ir.KIND_WORKFLOW:
+        raise ctx.err(file, line, "only a workflow may declare recur (a procedure has no rounds)")
+    if raw is True:
+        return {"auto": False, "min_gap": ir.RECUR_MIN_GAP_DEFAULT}
+    if isinstance(raw, dict):
+        _check_keys(ctx, file, raw, ("auto", "min_gap"), "recur")
+        auto = raw.get("auto", False)
+        if not isinstance(auto, bool):
+            raise ctx.err(file, line, "recur.auto must be true or false")
+        gap = ir.RECUR_MIN_GAP_DEFAULT
+        if raw.get("min_gap") is not None:
+            gap = _number(ctx, file, raw["min_gap"], "recur.min_gap", line)
+            if gap < 0:
+                raise ctx.err(file, line, "recur.min_gap must be 0 or more seconds")
+        return {"auto": auto, "min_gap": gap}
+    raise ctx.err(file, line, "recur must be true or false, or a mapping {auto, min_gap}")
+
+
 def compile_text(text: str, *, source: str = "",
                  resolve_include: Optional[ResolveInclude] = None) -> ir.Chart:
     """Compile one v2 document. ``source`` is its path (for ``src`` and errors)."""
@@ -1736,23 +2108,33 @@ def compile_text(text: str, *, source: str = "",
     data = doc.get("data")
     if data is not None:
         _need_map(ctx, file, data, "data", _key_line(doc, "data"))
+    # 0: no limit (doc 2.1; check warns unbounded-visits)
     max_visits = _int(ctx, file, doc.get("max_visits", ir.DEFAULT_MAX_VISITS), "max_visits",
-                      _key_line(doc, "max_visits", 1), 1)
+                      _key_line(doc, "max_visits", 1), 0)
     from . import inputs as _inputs
 
     try:
         input_schema = _inputs.schema(_plain(doc.get("inputs")))
     except _inputs.InputsError as exc:
         raise ctx.err(file, _key_line(doc, "inputs", 1), str(exc)) from None
+    try:
+        input_constraints = _inputs.constraints(_plain(doc.get("input_constraints")),
+                                                input_schema)
+    except _inputs.InputsError as exc:
+        raise ctx.err(file, _key_line(doc, "input_constraints", 1), str(exc)) from None
 
     collections = _collection_decls(ctx, file, doc)
+    recur = _recur(ctx, file, doc, kind)
     sides = doc.get("sides")
-    if sides is not None:
+    if sides is not None or ctx.included_sides:
         sline = _key_line(doc, "sides", 1)
-        sides = _need_map(ctx, file, sides, "sides", sline)
+        own = _need_map(ctx, file, sides, "sides", sline) if sides is not None else {}
+        sides = {name: entry[0] for name, entry in ctx.included_sides.items()}
+        sides.update(own)
         for sname, sdef in sides.items():
-            if not isinstance(sname, str) or not sname:
-                raise ctx.err(file, sline, f"sides: bad side name {sname!r}")
+            if not isinstance(sname, str) or not _store.SIDE_NAME_RE.match(sname):
+                raise ctx.err(file, sline, f"sides: bad side name {sname!r} (a letter or '_', "
+                                           f"then letters, digits, '_', '-')")
             _definition_name(ctx, sdef, file, _key_line(sides, sname, sline), f"side {sname!r}")
         sides = _plain(sides)
 
@@ -1784,14 +2166,18 @@ def compile_text(text: str, *, source: str = "",
             # typed start inputs (cflow2/inputs.py); folded into the chart
             # at start by inputs.apply
             "inputs": input_schema,
+            # cross-input asserts, evaluated by inputs.normalize
+            **({"input_constraints": input_constraints} if input_constraints else {}),
             # normalized collection declarations (cflow2/collections.py)
             "collections": collections,
             **({"sides": sides} if sides is not None else {}),
             # question type declarations, own and included (cflow2/question.py)
             **({"question_types": {n: e[0] for n, e in ctx.question_types.items()}}
                if ctx.question_types else {}),
+            # recur: {"auto": bool} when declared (docs 2.1, recur)
+            **({"recur": recur} if recur is not None else {}),
         },
-        params=_params(ctx, file, doc.get("params"), _key_line(doc, "params")),
+        params=_workflow_params(ctx, file, doc),
         returns=_returns(ctx, file, doc["returns"], _key_line(doc, "returns"))
         if doc.get("returns") is not None else {},
         data=_plain(data or {}),

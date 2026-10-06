@@ -197,10 +197,13 @@ def _value(spec: Any, env: Dict[str, Any]) -> Any:
     return spec
 
 
-def expand_push(push: Dict[str, Any], facts: Dict[str, Any]) -> List[Dict[str, Any]]:
+def expand_push(push: Dict[str, Any], facts: Dict[str, Any],
+                data: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
     """The records a push writes: one per ``each`` element (one record when
-    ``each`` is absent). Raises :class:`PushError` with the skip reason."""
-    env: Dict[str, Any] = {"facts": facts}
+    ``each`` is absent). ``data`` is the run data the trigger record carries
+    (the ``$data`` keys its expressions read, as they were when it was
+    queued). Raises :class:`PushError` with the skip reason."""
+    env: Dict[str, Any] = {"facts": facts, "data": data or {}}
     each_spec = push.get("each")
     try:
         if each_spec is None:
@@ -244,7 +247,7 @@ def push_v2(holder: Tuple[str, str], name: str, items: Iterable[Dict[str, Any]],
     names the trigger: record ``i`` carries ``<tid>:<i>`` so a second run of
     the same trigger (at least once, doc 2.8) is recognised."""
     hcwd, hscope = holder
-    items = list(items)
+    items, dropped = _fit_fields(holder, name, list(items))
     pushed: List[str] = []
     replayed: List[str] = []
     refused: List[str] = []
@@ -263,8 +266,34 @@ def push_v2(holder: Tuple[str, str], name: str, items: Iterable[Dict[str, Any]],
     if refused:
         return False, _partial(f"{hscope}'s {name!r}", len(items), pushed + replayed, refused)
     parts = [f"pushed {', '.join(pushed)}"] * bool(pushed) + \
-        [f"replay: already there {', '.join(replayed)}"] * bool(replayed)
+        [f"replay: already there {', '.join(replayed)}"] * bool(replayed) + \
+        [f"fields the target does not declare were left out: {', '.join(dropped)}"] * bool(dropped)
     return True, f"{'; '.join(parts)} to {hscope}'s {name!r} (v2)"
+
+
+def _fit_fields(holder: Tuple[str, str], name: str, items: List[Dict[str, Any]]
+                ) -> Tuple[List[Dict[str, Any]], List[str]]:
+    """``items`` without the fields the target collection does not declare,
+    and the names of the non-null ones left out. A child's push may carry
+    more than an older parent declares (improv-worker-v2's PR fields,
+    claunch-yq80p.5); refusing the whole record for that would lose the
+    landing request, so the extra fields go and the detail says so. A
+    target whose declaration cannot be read gets the items unchanged (the
+    push then reports its own error)."""
+    from ..cflow2 import store as cstore
+
+    try:
+        chart = cstore.RunStore(*holder).load_chart()
+        declared = set(((chart.meta or {}).get("collections") or {})[name]["item"])
+    except Exception:  # noqa: BLE001 - the push reports what is wrong
+        return items, []
+    dropped: List[str] = []
+    out = []
+    for item in items:
+        extra = [k for k in item if k not in declared]
+        dropped += [k for k in extra if item[k] is not None and k not in dropped]
+        out.append({k: v for k, v in item.items() if k in declared})
+    return out, dropped
 
 
 def _partial(where: str, total: int, pushed: List[str], refused: List[str]) -> str:
@@ -387,7 +416,7 @@ async def perform(manager: Any, cwd: str, scope: str, trig: Dict[str, Any], *,
         push = ENQUEUE_LANDING_PUSH if do == DO_ENQUEUE_LANDING else (trig.get("push") or {})
         return await asyncio.to_thread(
             _push, manager, cwd, driver, push, do == DO_ENQUEUE_LANDING, list(cwds),
-            facts_fn or measure_facts, trigger_tid(cwd, scope, trig))
+            facts_fn or measure_facts, trigger_tid(cwd, scope, trig), trig.get("data"))
     return False, f"this daemon has no trigger action named {do!r}"
 
 
@@ -398,7 +427,7 @@ def trigger_tid(cwd: str, scope: str, trig: Dict[str, Any]) -> str:
 
 def _push(manager: Any, cwd: str, session: str, push: Dict[str, Any], landing: bool,
           cwds: List[str], facts_fn: Callable[[str, str], Dict[str, Any]],
-          tid: Optional[str] = None) -> Result:
+          tid: Optional[str] = None, data: Optional[Dict[str, Any]] = None) -> Result:
     target, name = split_addr(push.get("to"))
     if target != "parent" or not name:
         return False, f"a trigger pushes to 'parent:<collection>', not {push.get('to')!r}"
@@ -412,7 +441,7 @@ def _push(manager: Any, cwd: str, session: str, push: Dict[str, Any], landing: b
         if not facts.get("in_review"):
             return False, f"{session} holds no issue in_review (no landing request on the board)"
     try:
-        items = expand_push(push, facts)
+        items = expand_push(push, facts, data)
     except PushError as exc:
         return False, str(exc)
     return push_to_parent(manager, session=session, name=name, items=items, cwds=cwds, tid=tid)

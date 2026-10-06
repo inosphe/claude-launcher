@@ -129,6 +129,7 @@ def _entry(item: "layers.Located2", cwd: str) -> Optional[dict]:
         recur=False,
         # the start form draws its fields from this (docs/cflow-v2.md 2.6)
         inputs=_inputs_view(chart),
+        input_constraints=_constraints_view(chart),
     )
     return entry
 
@@ -313,7 +314,8 @@ def check_inputs(chart: ir.Chart, raw: Any) -> Optional[dict]:
                             {"_": "cflow_inputs must be an object"})
     if not schema and not raw:
         return None
-    values, errors = inputs_mod.normalize(schema, raw or {})
+    values, errors = inputs_mod.normalize(schema, raw or {},
+                                          (chart.meta or {}).get("input_constraints"))
     if errors:
         raise InputsInvalid(
             f"{chart.name}: invalid inputs: " + "; ".join(f"{k}: {v}" for k, v in errors.items()),
@@ -412,6 +414,8 @@ def node_view(node: ir.Node, prompts: bool = False) -> dict:
             out["outcome"] = node.get("outcome")
     elif t == ir.T_WAIT:
         out["describe"] = node.get("describe") or node.get("probe") or (
+            "checks: " + ", ".join(c.get("id") or "" for c in node.get("checks"))
+            if node.get("checks") else None) or (
             f"{node.get('seconds')}s" if node.get("seconds") else None)
     elif t == ir.T_TIMEOUT:
         out["seconds"] = node.get("seconds")
@@ -628,12 +632,32 @@ def definition_view(name: str, cwd: str) -> dict:
         return out
     out["chart"] = chart_view(chart, prompts=False)
     out["inputs"] = _inputs_view(chart)
+    out["input_constraints"] = _constraints_view(chart)
     out["findings"] = [
         {"level": f.level, "code": f.code, "message": f.message, "node": f.node}
         for f in check.check(chart)
     ]
     out["delegations"] = [n.id for n in chart.delegation_points()]
     return out
+
+
+def _constraints_view(chart: ir.Chart) -> List[dict]:
+    """The cross-input asserts (``input_constraints``) a form shows beside
+    the fields; the server evaluates them (:func:`inputs_check`)."""
+    import copy as _copy
+
+    return _copy.deepcopy((chart.meta or {}).get("input_constraints") or [])
+
+
+def inputs_check(chart: ir.Chart, raw: Any) -> dict:
+    """What the start form asks while the user types: ``{ok, values,
+    errors}`` -- the same :func:`check_inputs` a start runs, answered
+    instead of raised."""
+    try:
+        values = check_inputs(chart, raw)
+    except InputsInvalid as exc:
+        return {"ok": False, "values": None, "errors": exc.errors}
+    return {"ok": True, "values": values, "errors": {}}
 
 
 def _inputs_view(chart: ir.Chart) -> List[dict]:

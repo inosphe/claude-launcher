@@ -37,7 +37,8 @@ def test_schema_lands_in_meta():
     sch = chart.meta["inputs"]
     assert list(sch) == ["goal", "issue", "rounds", "dry", "mode", "scope", "invariants", "acceptance"]
     assert sch["goal"] == {"type": "text", "label": "목표", "help": "", "required": True,
-                           "default": None, "choices": None, "placeholder": ""}
+                           "default": None, "choices": None, "placeholder": "",
+                           "precheck": None}
     assert sch["rounds"]["default"] == 3 and sch["mode"]["choices"] == ["full", "quick"]
     assert C("nodes: {a: {prompt: a}}\nbody: a\n").meta["inputs"] == {}
 
@@ -53,6 +54,7 @@ def test_schema_lands_in_meta():
     ("x: {type: string, colour: red}", "unknown key 'colour'"),
     ("x: {type: list, default: a}", "is not a list"),
     ("x: {type: invariants, default: [{probe: true}]}", "non-empty text"),
+    ("x: {type: bool, precheck: docker}", "unknown precheck 'docker'"),
 ])
 def test_schema_errors_are_compile_errors(decl, msg):
     with pytest.raises(FrontendError, match=msg):
@@ -138,3 +140,80 @@ def test_bundled_definitions_declare_inputs():
     assert worker["invariants"]["type"] == "invariants"
     assert worker["acceptance"]["type"] == "acceptance"
     assert layers.load("sample-v2").meta["inputs"]
+
+
+# --------------------------------------------------------------------------- #
+# input_constraints: asserts across inputs (claunch-yq80p.5)
+# --------------------------------------------------------------------------- #
+PAIR = """
+inputs:
+  a: {type: bool, precheck: gh}
+  b: {type: bool}
+  n: {type: int}
+input_constraints:
+  - assert: not ($inputs.a and $inputs.b)
+    fields: [a, b]
+    message: a and b exclude each other
+  - $inputs.n == null or $inputs.n > 0
+nodes: {w: {prompt: w}}
+body: w
+"""
+
+
+def test_constraints_compile_into_meta():
+    chart = C(PAIR)
+    assert chart.meta["inputs"]["a"]["precheck"] == "gh"
+    assert chart.meta["input_constraints"] == [
+        {"assert": "not ($inputs.a and $inputs.b)", "fields": ["a", "b"],
+         "message": "a and b exclude each other"},
+        {"assert": "$inputs.n == null or $inputs.n > 0", "fields": ["n"],
+         "message": "constraint not met: $inputs.n == null or $inputs.n > 0"},
+    ]
+    assert "input_constraints" not in C("nodes: {a: {prompt: a}}\nbody: a\n").meta
+
+
+@pytest.mark.parametrize("item, msg", [
+    ("$data.x", "may read only \\$inputs, not \\$data"),
+    ("$inputs.zz", "\\$inputs.zz is not a declared input"),
+    ("exists('self:q')", "may not call collection functions"),
+    ("not (", "does not parse"),
+    ("{assert: $inputs.a, fields: [zz]}", "field 'zz' is not a declared input"),
+    ("{assert: $inputs.a, colour: red}", "unknown key 'colour'"),
+    ("{fields: [a]}", "assert must be a non-empty expression"),
+])
+def test_constraint_errors_are_compile_errors(item, msg):
+    text = ("inputs: {a: {type: bool}}\ninput_constraints:\n  - " + item
+            + "\nnodes: {w: {prompt: w}}\nbody: w\n")
+    with pytest.raises(FrontendError, match=msg):
+        C(text)
+
+
+def test_normalize_reports_a_violated_constraint_on_its_fields():
+    chart = C(PAIR)
+    sch, cons = chart.meta["inputs"], chart.meta["input_constraints"]
+    values, errors = inputs.normalize(sch, {"a": True, "b": "yes"}, cons)
+    assert errors == {"a": "a and b exclude each other", "b": "a and b exclude each other"}
+    assert inputs.normalize(sch, {"a": True}, cons)[1] == {}
+    assert inputs.normalize(sch, {"n": "0"}, cons)[1] == {
+        "n": "constraint not met: $inputs.n == null or $inputs.n > 0"}
+    # a field that failed its own check keeps that message; the constraint
+    # reading it is not evaluated
+    assert inputs.normalize(sch, {"n": "x"}, cons)[1] == {"n": "n is not an integer"}
+    with pytest.raises(inputs.InputsError, match="exclude each other"):
+        inputs.check(sch, {"a": True, "b": True}, cons)
+
+
+def test_a_constraint_without_fields_reports_under_the_general_key():
+    cons = [{"assert": "1 == 2", "fields": [], "message": "never"}]
+    assert inputs.normalize({}, {}, cons)[1] == {inputs.CONSTRAINT_ERROR_KEY: "never"}
+
+
+def test_worker_v2_refuses_force_pr_with_force_no_pr():
+    chart = layers.load("improv-worker-v2")
+    sch, cons = chart.meta["inputs"], chart.meta["input_constraints"]
+    assert sch["force_pr"]["type"] == "bool" and sch["force_pr"]["precheck"] == "gh"
+    assert sch["force_no_pr"]["type"] == "bool"
+    _, errors = inputs.normalize(sch, {"force_pr": True, "force_no_pr": True}, cons)
+    assert set(errors) == {"force_pr", "force_no_pr"}
+    for ok in ({}, {"force_pr": True}, {"force_no_pr": True}):
+        assert inputs.normalize(sch, ok, cons)[1] == {}

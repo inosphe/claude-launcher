@@ -33,8 +33,8 @@ const queue = {
   ],
 };
 assert.deepStrictEqual(ctx.cflow2CollectionRows(queue), [
-  { key: "c-1", status: "requested", fields: "branch=w1  tip=abc  requested_by=w1" },
-  { key: "c-2", status: "landed", fields: "branch=w2  tip=def  requested_by=w2" },
+  { key: "c-1", status: "requested", fields: "branch=w1  tip=abc  requested_by=w1", links: [] },
+  { key: "c-2", status: "landed", fields: "branch=w2  tip=def  requested_by=w2", links: [] },
 ]);
 assert.deepStrictEqual(ctx.cflow2StatusValues(queue), ["requested", "waiting", "landed"]);
 assert.deepStrictEqual(ctx.cflow2StatusValues({ status_values: ["a"] }), ["a"]);
@@ -43,9 +43,30 @@ assert.deepStrictEqual(ctx.cflow2StatusValues({}), []);
 // A log: keyed by sequence number, the writer shown first.
 const log = { kind: "log", items: [{ seq: 3, at: "t", by: "lead", name: "cut", extra: { a: 1 } }] };
 assert.deepStrictEqual(ctx.cflow2CollectionRows(log), [
-  { key: "#3", status: "", fields: 'by=lead  name=cut  extra={"a":1}' },
+  { key: "#3", status: "", fields: 'by=lead  name=cut  extra={"a":1}', links: [] },
 ]);
 assert.deepStrictEqual(ctx.cflow2CollectionRows(undefined), []);
+
+// URL fields leave the text and become links: a PR reads "PR #N" from its
+// number field or, failing that, from the URL; any other URL keeps its name.
+const prs = {
+  kind: "queue", key: "number",
+  items: [
+    { number: 12, url: "https://github.com/o/r/pull/12", branch: "s1", status: "open" },
+    { issue: "c-3", pr_url: "https://github.com/o/r/pull/7", medium: "pr", status: "requested" },
+    { number: 13, url: "https://example.com/x", status: "open" },
+    { number: 14, url: "not a url", status: "open" },
+  ],
+};
+const prRows = ctx.cflow2CollectionRows(prs);
+assert.deepStrictEqual(prRows[0], { key: "12", status: "open", fields: "branch=s1",
+  links: [{ field: "url", href: "https://github.com/o/r/pull/12", label: "PR #12" }] });
+assert.deepStrictEqual(prRows[1].links,
+  [{ field: "pr_url", href: "https://github.com/o/r/pull/7", label: "PR #7" }]);
+assert.ok(!prRows[1].fields.includes("pr_url="));
+assert.deepStrictEqual(prRows[2].links, [{ field: "url", href: "https://example.com/x", label: "url" }]);
+assert.deepStrictEqual(prRows[3].links, []);
+assert.strictEqual(prRows[3].fields, "url=not a url");
 
 // Trigger lines: only trigger_* events, with what/where/why.
 const lines = ctx.cflow2TriggerLines([

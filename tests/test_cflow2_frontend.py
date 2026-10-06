@@ -298,7 +298,7 @@ body:
     w = chart.node("body.2")
     assert w.type == ir.T_WAIT and w.get("probe") == "git rev-parse master" and w.get("poll") == 30
     assert chart.node("body.3").get("seconds") == 5
-    assert "wait needs probe, until or seconds" in err("body:\n  wait: {describe: x}\n")
+    assert "wait needs probe, checks, until or seconds" in err("body:\n  wait: {describe: x}\n")
 
 
 def test_common_keys_and_on():
@@ -682,8 +682,9 @@ def test_max_visits():
                             source="t.yaml", resolve_include=lambda n: None)
     assert mk("").meta["max_visits"] == ir.DEFAULT_MAX_VISITS == 200
     assert mk("max_visits: 7\n").meta["max_visits"] == 7
-    for bad in ("0", "-1", "true", "'many'"):
-        with pytest.raises(FrontendError, match="max_visits must be an integer >= 1"):
+    assert mk("max_visits: 0\n").meta["max_visits"] == 0  # no limit (doc 2.1)
+    for bad in ("-1", "true", "'many'"):
+        with pytest.raises(FrontendError, match="max_visits must be an integer >= 0"):
             mk(f"max_visits: {bad}\n")
 
 

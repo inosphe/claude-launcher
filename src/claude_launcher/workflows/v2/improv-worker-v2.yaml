@@ -30,6 +30,10 @@ default_child_cflow: improv-worker-v2
 
 include: [improv-common]
 
+# 세션 수명의 side 런(docs/cflow-v2.md 2.9). 첫 자식을 둘 때 work가 세운다.
+sides:
+  stack: stack-v2
+
 # ── v1 스텝 → v2 노드 대응표 ─────────────────────────────────────────────
 # v1 improv-worker.yaml의 41 스텝이 각각 어느 v2 노드(작업 이름, 또는 조합자
 # id)에 실렸는가. tests/test_cflow2_improv_worker.py가 같은 표를 들고 v1
@@ -52,7 +56,7 @@ include: [improv-common]
 #   commit                -> commit
 #   queue-next            -> queue-next             (choose, worker-round)
 #   item-intake           -> item-intake
-#   stack-cut             -> stack-cut              (cond $data.work_report.stack_open)
+#   stack-cut             -> stack-cut              (cond side('stack').live)
 #   stack-merge           -> cut-wait(wait), stack-merge
 #   landing               -> landing                (choose, when $params.allow)
 #   landing-review        -> landing-review         (ask: 상위 세션)
@@ -80,7 +84,11 @@ include: [improv-common]
 # - 스텝 사이의 next/select 간선 61개 -> 조합자 트리. 산문에서 「다음 단계로
 #   간다」류 문장을 지웠다.
 # - stack-cut/stack-merge의 skip: true + editable + 에이전트의 set_state ->
-#   work의 반환값 stack_open을 $data.work_report로 bind하고 land가 cond로 본다.
+#   land의 cond가 side('stack').live(stack side 런이 살아 있는가)를 본다.
+# - stack 서브 런(v1 stack.yaml, sub: stack) -> side 런 stack-v2(sides: 선언,
+#   docs/cflow-v2.md 2.9). 마일스톤 publishes/awaits -> 이 런의 log `signals`
+#   (cut-wanted, frozen, landed)와 stack 런의 `side:stack:signals`(cut). 컷 대기
+#   (cut-wait)는 엔진이 판정하는 wait until fresh(...)다.
 # - found-issue 서브 런(work에서 손으로 start) -> work를 감싼 group `found`.
 # - await-landing <-> landing-nudge 순환(interval: 600) -> loop await의
 #   between + every: 600. 상한 25에 닿으면 런이 사람의 승인(loop_limit)에 선다.
@@ -94,10 +102,6 @@ include: [improv-common]
 # - master 머지 금지 산문 7곳 -> rules.no-master-merge(+ spec.invariants).
 #
 # ── 옮기지 못한 것(후속) ─────────────────────────────────────────────────
-# - stack 서브 런 자체(stack.yaml)는 v1 정의다. v2 런은 v1의 publishes
-#   (cut-wanted, frozen, landed)와 awaits(sub: stack)를 갖지 않으므로, 컷 대기는
-#   v1 명령을 probe로 부르는 wait(cut-wait)로만 적었다. v2 런 안에서 stack 런과
-#   마일스톤을 주고받는 연결은 후속 과제다.
 # - 저장소 특화 verify(workspace_check, changed_tests, report_check 등)는 v1과
 #   같이 정본에 박지 않는다. v2 프로젝트 레이어(.claunch/workflows/v2/)가 아직
 #   없으므로 workspace-ok의 재측정은 산문과 반환값(mismatch)이 진다.
@@ -139,6 +143,48 @@ inputs:
     type: int
     label: 최대 회차 수
     help: 이 런이 도는 회차의 상한(비우면 큐가 빌 때까지, 최대 25)
+  force_pr:
+    type: bool
+    label: PR 강제(force to make PR)
+    precheck: gh
+    help: 착지를 PR로만 한다. PR을 만들 수 없으면(gh 미설치·미로그인·원격 없음) 로컬 착지로 바꾸지 않고 BLOCKED로 멈춘다
+  force_no_pr:
+    type: bool
+    label: PR 금지(force not to make PR)
+    help: PR을 만들지 않고 기존의 로컬 착지(리더의 --no-ff 머지)만 쓴다. 둘 다 끄면 PR을 먼저 시도하고, 만들 수 없으면 사유를 남기고 로컬 착지로 대체한다
+
+collections:
+  # 이 런이 stack side 런에 보내는 신호(cut-wanted, frozen, landed). stack 런은
+  # fresh('main:signals', NAME)로 읽는다. stack이 서 있지 않으면 쓰지 않는다.
+  signals: {type: signals}
+  # 이 세션이 연 PR(claunch-yq80p.5). 회차가 바뀌어도 남아(inherit) 다음
+  # 회차의 pr-open이 「열린 PR에 이어 붙일지, 후속 PR로 링크할지」를 이
+  # 목록으로 정한다. watch가 MERGED를 재서 상태를 옮긴다.
+  prs:
+    kind: queue
+    key: number
+    item: {number: int, url: str, branch: str, base: str, issues: list, round: "str?"}
+    status:
+      values: [open, merged, closed]
+      initial: open
+      settled: [merged, closed]
+    access:
+      push: [driver]
+      set: [driver, daemon]
+      remove: [driver]
+    watch:
+      every: 300
+      probe: 'test "$(gh pr view "$CFLOW_ITEM_URL" --json state -q .state)" = MERGED'
+      on: {0: {set: {status: merged}}}
+    lifecycle:
+      reset_at: [finish]
+      drop: settled
+      inherit: true
+
+input_constraints:
+  - assert: not ($inputs.force_pr and $inputs.force_no_pr)
+    fields: [force_pr, force_no_pr]
+    message: PR 강제와 PR 금지는 함께 켤 수 없다
 
 params:
   verify:
@@ -149,7 +195,12 @@ params:
 data:
   recheck: {next: next-round, mode: full}
   land_out: {}
-  work_report: {stack_open: false}
+  # 이 회차의 착지 매체(landing-medium이 회차 시작에, pr-publish가 PR을 연 뒤
+  # 채운다). integration-request의 push trigger가 pr_url·pr_number를 착지
+  # 큐 레코드에 싣는다(claunch-yq80p.5).
+  landing: {medium: local, reason: "", remote: null, repo: null, base: null,
+            pr_url: null, pr_number: null}
+  work_report: {}
   round: {}
 
 rules:
@@ -538,7 +589,7 @@ nodes:
       같은 세션을 재사용해 이름이 이미 있으면 새로운 순번을 덧붙인다
       (`<세션>-<요지>-2` 등). 기존 브랜치를 선택하거나 덮어쓰지 않는다.
       하위 워커를 스폰할 계획이면 각 자식에도 별도 워크트리와 브랜치를
-      주고, 자식 결과는 stack 서브 런이 스택 브랜치에 `--no-ff`로 모은다
+      주고, 자식 결과는 stack side 런이 스택 브랜치에 `--no-ff`로 모은다
       (work의 「자식을 두면」 절).
 
       브랜치 기준은 상위 통합 대상이다. 부모가 스택을 둔 워커면 부모의
@@ -574,6 +625,140 @@ nodes:
       ok: {branch: str, base: str, base_hash: str, worktree: "str?", shared: bool}
     effects: [fs.write, git.branch]
 
+  # ── 착지 매체 (claunch-yq80p.5) ──────────────────────────────────────
+  remote-setup:
+    title: 착지 매체 결정 (PR · 로컬)
+    prompt: |
+      피처 브랜치가 만들어졌다. 이 회차의 착지 매체를 정한다 — PR(원격 base로
+      pull request, 상위가 `gh pr merge`로 머지) 또는 로컬(상위가 내 브랜치를
+      --no-ff로 머지). 시작 입력: force_pr=${data.inputs.force_pr},
+      force_no_pr=${data.inputs.force_no_pr}(둘이 함께 켜지는 일은 시작 검사가
+      막는다).
+
+      ── 1. 사실 수집 ──
+      `claunch cflow2 pr-preflight --compact`를 실행한다. 출력 JSON의 ready,
+      remote, repo(`-R`에 쓰는 `<host>/<owner>/<repo>`), base, gh, account,
+      blockers를 보고에 그대로 옮긴다. 종료 코드 0이 ready다. 이 명령은 읽기만
+      한다(설치·로그인·설정 쓰기 없음).
+      스택 자식이면(intake의 스택 기준: ${result.intake.value.base}) 그 기준을
+      `--base <기준 브랜치>`로 준다 — 내 PR의 base는 master가 아니라 부모의
+      `<부모 세션>-stack`(또는 부모가 지정한 선행 자식 브랜치)이다(stacked PR).
+      preflight는 그 브랜치가 원격에 있는지 `git ls-remote`로 재고 base_sha를
+      싣는다. 원격에 없으면 blocker다: 부모의 스택이 로컬에만 있다는 뜻이고,
+      아래 판정대로 로컬 착지(부모가 내 브랜치를 스택에 --no-ff로 머지)로 간다.
+      원격에 있어도 그것이 부모가 둔 스택인지는 따로 확인한다 — 같은 이름의
+      이전 세션 브랜치가 남아 있을 수 있다. 부모가 알린 기준 줄에 원격 ref
+      꼬리(`<부모 세션>-stack @ <SHA> @ <remote>/<부모 세션>-stack`)가 없으면
+      preflight 결과와 무관하게 로컬 착지다(reason: "parent stack is local"). 꼬리가
+      있으면 `git fetch <remote>` 뒤 `git merge-base --is-ancestor <꼬리의 SHA>
+      <base_sha>`가 0이어야 한다(스택은 그 뒤로 머지만 쌓인다). 0이 아니면 PR을
+      열지 않고 로컬 착지로 가며, 두 SHA를 부모에게 알린다.
+      상위 세션이 다른 머신인지도 확인한다 — `claunch mesh ls`에서 상위의
+      machine 열이 local이 아니면 원격 편성이다. 원격 편성에서는 로컬 착지가
+      성립하지 않는다(상위가 내 커밋을 가진다는 보장이 없다 — 머신을 넘는
+      커밋 참조는 `<sha> @ <remote>/<ref>`로만 쓴다).
+
+      ── 2. 판정 ──
+      · force_no_pr가 켜져 있고 원격 편성이 아니면 **local**(reason: "force_no_pr").
+        pr-preflight의 결과와 무관하다.
+      · force_no_pr가 켜져 있는데 원격 편성이면 outcome **blocked**(reason: 원격
+        편성에서는 로컬 착지를 할 수 없다).
+      · ready면 **pr**. 아래 3을 마친 뒤 반환한다.
+      · ready가 아니고 force_pr가 꺼져 있고 원격 편성이 아니면 **local**. reason은
+        blockers를 `; `로 이은 것이다. 이 회차 이슈에 `LANDING MEDIUM: local
+        (PR 불가: <reason>)` 코멘트를 남긴다 — PR이 기본인데 이 회차가 로컬로
+        간 이유가 보드에 남아야 한다.
+      · ready가 아니고 force_pr가 켜져 있거나 원격 편성이면 outcome **blocked**.
+        reason은 blockers다. 이슈에 `BLOCKED: remote-setup (<reason>)`을 남긴다.
+        설치·로그인은 사용자가 한다 — 세션은 대화형 로그인을 할 수 없고 토큰을
+        요구하거나 받아 적지 않는다.
+
+      ── 3. pr일 때 원격 준비 (v1 improv-worker-remote remote-setup과 같다) ──
+      · push 안전장치: 이 회차의 push는 언제나 명시 refspec이다(`git push
+        <remote> HEAD:refs/heads/<브랜치>`). `git config --get push.default`가
+        upstream이나 matching이면 bare push가 base로 갈 수 있으므로 blocked로
+        올린다. 값을 보고에 적는다.
+      · `git fetch <remote>` 뒤 `git branch --set-upstream-to=<remote>/<base>`
+        (스택 자식이면 base는 `--base`로 준 기준 브랜치다).
+        정렬 게이트(tools/merge_ready.py)와 착지 게이트(tools/landed_check.py
+        --target @{upstream})가 이 upstream을 통합 대상으로 읽는다. 원격 편성의
+        rebase 기준도 이것이다 — 로컬 master가 아니라 `<remote>/<base>`.
+      · 원격 base가 로컬 통합 브랜치보다 뒤처졌는지 잰다: `git rev-list --count
+        <remote>/<base>..master`(스택 자식이면 master 대신 부모가 알린 스택 tip). 0이 아니면 그 수와 두 tip을 상위에 알리고
+        답을 기다린다(base를 push하는 것은 상위의 통합 단계다 — 워커는 base를
+        움직이지 않는다).
+    done_when: |
+      보고에 pr-preflight 출력(ready·remote·repo·base·blockers)과 원격 편성
+      여부가 있고, 판정(pr/local/blocked)과 그 이유가 그 사실에서 나온다. pr이면
+      push.default 값과 `git rev-parse --abbrev-ref @{upstream}` 출력이 있다.
+      local이면 `LANDING MEDIUM:` 코멘트가, blocked면 `BLOCKED:` 코멘트가 이슈에
+      있다.
+    returns:
+      ok: {medium: str, reason: str, remote: "str?", repo: "str?", base: "str?"}
+      blocked: {reason: str}
+    effects: [fs.read, git.branch, board.write, mesh.send]
+
+  pr-open:
+    title: push · pull request (리뷰 통과 직후, 요청 직전)
+    prompt: |
+      동료 리뷰가 통과했다. 리뷰어가 본 tip을 원격에 올리고 PR이 그 tip을
+      가리키게 한다. 요청 자체(in_review 전이·LANDING REQUEST 코멘트·nudge)는
+      다음 단계(integration-request)가 한다.
+      원격 정보: remote=${data.landing.remote}, repo=${data.landing.repo},
+      base=${data.landing.base}. gh 호출에는 전부 `-R <repo>`를 붙인다.
+
+      ── push ──
+      `git push <remote> HEAD:refs/heads/<브랜치>`. 재요청(rebase·remeasure로
+      돌아와 tip이 바뀐 경우)이면 `git push --force-with-lease <remote>
+      HEAD:refs/heads/<브랜치>`. 이것이 `stale info`로 거절되면 이 세션이
+      모르는 push가 원격에 있다는 뜻이다 — 덮지 말고 failed로 끝낸다.
+      bare `git push`는 쓰지 않는다. 보낸 뒤 원격이
+      그 커밋을 가졌는지 확인한다: `git ls-remote <remote> refs/heads/<브랜치>`의
+      SHA가 HEAD와 같아야 한다(저장소에 tools/commit_check.py가 있으면
+      `--pushed`로 같은 확인을 한다). 다르면 PR로 넘어가지 않는다.
+
+      ── 이 세션이 이미 연 PR ──
+      이 세션의 PR 목록(회차를 넘어 남는다): ${col.prs}
+      · 같은 브랜치의 open PR이 있으면 새로 만들지 않는다 — push가 그 PR을
+        갱신한다. `gh pr view <번호> -R <repo> --json state,headRefOid`로
+        OPEN이고 headRefOid가 HEAD인지 확인한다. push 직후에는 이전 SHA가
+        남아 있을 수 있으므로(실측) 다르면 수 초 뒤 다시 조회하고 판정한다.
+        재작업·후속 수정이 같은 PR에 모이는 경로가 이것이다. 목록에 없어도
+        `gh pr create`가 `already exists:`로 거절하면 그 줄의 url이 이 브랜치의
+        열린 PR이다 — 같은 처리를 한다.
+      · 이번 회차의 이슈가 목록의 다른 PR의 이슈와 연관되면(같은 parent, 그
+        이슈의 후속 수정, 같은 기능의 다음 단계) 새 PR 본문 첫 줄에
+        `Follow-up of #<번호>`를 적고, 그 PR에 `gh pr comment <번호> -R <repo>
+        --body "Follow-up: <새 PR url>"`을 남긴다. 사용자가 PR 목록에서 흐름을
+        따라갈 수 있게 하는 연결이다.
+
+      ── PR ──
+      스택 자식이면 base는 부모의 `<부모 세션>-stack`이고(remote-setup이 정한
+      값), 착지 요청 수신자인 부모의 stack 런이 이 PR을 `gh pr merge`로 스택
+      브랜치에 머지한다. 본문 첫 줄에 `Stacked on <부모 세션>-stack`을 적는다.
+      없으면 만든다: `gh pr create -R <repo> --base <base> --head <브랜치>
+      --title "<이슈 id>: <커밋 관례의 한 줄 요약>" --body-file <파일>`. 본문에는
+      이슈 id(배치면 전부), 목표 한 줄, 증거 묶음이 보드 코멘트에 있다는 안내,
+      연관 PR 링크를 적는다. 증거의 정본은 이슈 코멘트다. 본문 파일은
+      $CLAUNCH_SCRATCH에 쓴다. CLOSED/MERGED인 PR은 되살리지 않는다.
+      PR을 만들 수 없으면(push 거절, gh 오류) outcome **failed**로 끝내고 reason에
+      명령과 출력을 적는다 — 다음 처리는 시작 입력(force_pr)에 따라 런이 정한다.
+    done_when: |
+      `git ls-remote <remote> refs/heads/<브랜치>`의 SHA가 HEAD와 같고, OPEN PR이
+      그 tip(headRefOid == HEAD)을 가리키며, PR url·번호가 반환값에 있다. bare
+      push는 쓰지 않았다. 연관 PR이 있었으면 양쪽 링크가 있다.
+    returns:
+      ok: {url: str, number: int, branch: str, base: str, tip: str, issues: list}
+      failed: {reason: str}
+    do:
+      - push: {to: prs, item: {number: "$result['pr-open'].value.number",
+                               url: "$result['pr-open'].value.url",
+                               branch: "$result['pr-open'].value.branch",
+                               base: "$result['pr-open'].value.base",
+                               issues: "$result['pr-open'].value.issues"}}
+        when: "$outcome == 'ok'"
+    effects: [fs.write, git.push, board.write]
+
   # ── 일감 하나 (item) ─────────────────────────────────────────────────
   work:
     title: 작업 실행
@@ -592,7 +777,7 @@ nodes:
       셋까지다. 세운 멤버가 전부 끝나야 이 작업이 끝난다 — 직접 폴링하지
       않는다. 판정·이슈 id·자식 세션은 멤버의 결과에 남고, 아래 보고에는 그
       id들만 옮겨 적는다 — wrapup의 생성 이슈 정산이 그 판정을 읽는다.
-      (stack 서브 런은 세션 수명이라 이 그룹에 들지 않는다.)
+      (stack side 런은 세션 수명이라 이 그룹에 들지 않는다.)
 
       ── 발견 즉시 가르는 것 하나: 위임(child) ──
       만든 이슈가 다음 넷을 전부 만족하면 지금 자식 세션에 넘긴다 — spawn
@@ -605,24 +790,29 @@ nodes:
       병렬 시간이고, 직접 처리를 늦게 정하는 이유는 그것이 다음 회차의
       일이기 때문이다.
 
-      ── 자식을 두면: stack 서브 런 ──
+      ── 자식을 두면: stack side 런 ──
       자식(하위 워커)의 브랜치는 내 회차 브랜치에 직접 모으지 않고, 세션
-      수명의 스택 브랜치 `<내 세션>-stack`에 모은다. 그 관제는 `stack`
-      정의의 서브 런이 맡는다. **첫 자식을 spawn하거나 넘겨받을 때
-      (reparent — mesh-delegate) 한 번** 세운다: cflow `start` 툴에
-      `workflow: stack`, `sub: stack`,
-      `inputs: {issue: <이 회차 이슈 id>, base: <내 회차 브랜치의 지금
-      tip>}`. 이미 서 있으면(`claunch cflow sub-done stack`이 1) 다시 세우지
-      않는다. stack 서브 런이 서 있는 동안에는 이 작업의 결과에
-      `stack_open: true`를 싣는다 — 착지 절차가 그 값을 보고 컷을 요청하고
-      받는다. 스택이 없으면 false다. 자식 spawn의 세부(기준 브랜치, task의 세 줄,
-      rebase_onto, 넘겨받은 자식의 재정렬)는 stack 런의 open 스텝이 적고,
-      자식의 요청 심사·착지는
-      그 런의 standby·land가 한다 — 그 런의 호출에는 `run: stack`을 준다.
-      두 런이 만나는 자리는 마일스톤이다: 이 런의 stack-cut이 컷을
-      요청하고(cut-wanted), stack-merge가 컷(cut)을 기다려 스택 브랜치를
-      --no-ff로 한 번 머지하며, integration-request와 landed가 제출(frozen)과
-      착지(landed)를 알린다.
+      수명의 스택 브랜치 `<내 세션>-stack`에 모은다. 그 관제는 이 정의가
+      `sides:`로 선언한 side 런 `stack`(정의 stack-v2)이 맡는다. **첫 자식을
+      spawn하거나 넘겨받을 때(reparent — mesh-delegate) 한 번** 세운다:
+      `flow_start`에 `side: stack`, `inputs: {issue: <이 회차 이슈 id>, base:
+      <내 회차 브랜치의 지금 tip(전체 SHA)>, remote: <원격>, repo: <저장소>}`.
+      remote·repo는 이 회차의 착지 매체가 pr일 때 그 값(지금 medium=${data.landing.medium},
+      remote=${data.landing.remote}, repo=${data.landing.repo})이고, local이면
+      뺀다 — 그러면 스택은 로컬에만 있고 자식은 로컬 착지다. remote가 있으면
+      stack 런이 `<내 세션>-stack`을 원격에 두고, 자식 PR의 base가 그 원격
+      브랜치다(stacked PR). 이미 서 있으면(flow_status의
+      `sides.stack.live`가 true) 다시 세우지 않는다. 그 런은 세션이 끝날
+      때까지 돌고, 세션이 끝나면 데몬이 중단한다. 착지 절차는 그 런이 살아
+      있는지(`side('stack').live`)를 엔진이 직접 보고 컷을 요청하고 받는다 —
+      보고에 따로 실을 값은 없다. 자식 spawn의 세부(기준 브랜치, task의 세 줄,
+      rebase_onto, 넘겨받은 자식의 재정렬)는 stack 런의 open이 적고, 자식의
+      요청 심사·착지는 그 런의 standby·land가 한다 — 그 런의 flow_* 호출에는
+      `side: stack`을 준다. 두 런이 만나는 자리는 신호 log다: 이 런의
+      stack-cut이 컷을 요청하고(signals에 cut-wanted), cut-wait가 stack 런의 컷
+      (side:stack:signals의 cut)을 기다려 stack-merge가 스택 브랜치를 --no-ff로
+      한 번 머지하며, integration-request와 착지 확인이 제출(frozen)과
+      착지(landed)를 알린다. 신호는 엔진이 쓴다 — 손으로 쓰지 않는다.
       자식의 태스크에 반드시 적는 세 줄: **기준 브랜치 = `<내 세션>-stack`
       @ <tip>, 통합 대상 = 그 브랜치(master도 내 회차 브랜치도 아님),
       완료 보고·착지 요청 수신자 = 나**. 스폰은 `worktree: <내 세션>-
@@ -631,10 +821,10 @@ nodes:
       워커의 첫 회차) 기능 커밋 0건이 정상이다: 스택을 세우고 자식을
       넘겨받은 것이 이 회차의 작업이고, 착지분은 stack-merge의 컷 머지다.
       보고에는 바꾼 파일과 접근 방식 요지, 발견 이슈 id, 위임한 자식
-      (세션·이슈 id), stack 서브 런이 서 있는지(stack_open)를 남긴다.
+      (세션·이슈 id), stack side 런을 세웠으면 그 사실을 남긴다.
     done_when: |
       intake에서 정한 범위의 구현이 피처 브랜치 커밋으로 존재하고(위임
-      전용 회차면 커밋 대신 stack 서브 런과 넘겨받은 자식 목록이다)(범위 밖
+      전용 회차면 커밋 대신 stack side 런과 넘겨받은 자식 목록이다)(범위 밖
       파일은 건드리지 않았다), 바꾼 파일 목록과 접근 방식 요지, 범위 밖
       발견이 있었다면 그 이슈 id, 위임한 자식이 있으면 그 세션·이슈 id가
       보고에 있다.
@@ -642,7 +832,7 @@ nodes:
     # 세션의 LLM 브리핑을 다시 구성한다(docs/cflow-v2.md 2.8).
     triggers: [briefing]
     returns:
-      ok: {files: list, summary: str, found: "list?", delegated: "list?", stack_open: bool}
+      ok: {files: list, summary: str, found: "list?", delegated: "list?", stack_open: "bool?"}
     effects: [fs.write, git.commit, board.write, session.spawn, mesh.send]
 
   test-skipped:
@@ -1178,7 +1368,7 @@ nodes:
       워크트리에서는 워크트리 브랜치가 여러 목표가 쌓인 곳이 되므로,
       무관한 목표를 한 갈래에 얹지 않는 것이 상한 규칙보다 우선한다.
       하위 워커를 둔 회차면 자식 브랜치를 여기서 모으지 않는다 — 자식은
-      stack 서브 런이 스택 브랜치 `<세션>-stack`에 착지시키고, 이 회차에는
+      stack side 런이 스택 브랜치 `<세션>-stack`에 착지시키고, 이 회차에는
       착지 전에 stack-merge가 컷 하나를 --no-ff로 한 번 싣는다(work의
       「자식을 두면」 절). 자식이 손자 브랜치를 같은 방식으로 모았으면 그
       트리가 통째로 실린다. 아직 작업 중인 자식은 컷에서 다음 착지로
@@ -1200,7 +1390,7 @@ nodes:
       master에 포함된 은퇴 상태면 접기 없이 피처 브랜치가 인계 단위이고
       그 판별과 이유가 보고에 있다)이 만들어졌고(위임 전용 회차면 기능
       커밋 0건과 그 사유가 보고에 있다 — 자식 브랜치는 여기서 모으지 않고
-      stack 서브 런이 스택에 싣는다), 이 회차가 만든
+      stack side 런이 스택에 싣는다), 이 회차가 만든
       기능 커밋이 전부 `Claunch-Session` 트레일러를 달아 `claunch commits`가
       그것들을 내놓고(= 세션 메타데이터에 실렸다), 커밋마다 이슈에
       `COMMIT <해시> — <요약>` 코멘트가 하나씩 남았으며, 목표·브랜치·
@@ -1241,8 +1431,9 @@ nodes:
   stack-cut:
     title: 컷 요청 (자식 스택에서 이번 착지에 실을 것을 받는다)
     prompt: |
-      이번 착지에 자식 스택을 싣는다. stack 런에 컷 요청(cut-wanted)을
-      낸다. 컷 규칙은 stack 런이 지킨다: 착지를 이미
+      이번 착지에 자식 스택을 싣는다. 이 작업을 ok로 떠나면 엔진이 이 런의
+      signals에 cut-wanted를 쓴다 — stack 런에 가는 컷 요청이 그것이다.
+      컷 규칙은 stack 런이 지킨다: 착지를 이미
       요청한 자식은 기다리고, 작업 중인 자식은 다음 컷으로 넘긴다. 작업
       중인 자식을 이번 착지에 싣는 것은 사용자가 지시했을 때만이다 —
       그런 지시가 있으면 그 자식과 지시의 출처를 보고에 적는다(stack 런의
@@ -1254,6 +1445,13 @@ nodes:
     returns:
       ok: {stack_tip: str, children: list}
     effects: [fs.read]
+    do:
+      # 지난 회차가 컷 없이 cut-wait를 떠났으면(timeout → cut-unreachable에서
+      # confirmed) 그 뒤에 온 컷은 지난 요청의 답이다. 새 요청 전에 소비해 이번
+      # cut-wait가 그 컷으로 풀리지 않게 한다(claunch-yq80p.2 리뷰 X1).
+      - {consume: {from: "side:stack:signals", name: cut}, when: "$outcome == 'ok' and side('stack').live"}
+      - push: {to: signals, item: {name: "'cut-wanted'", tip: "$result['stack-cut'].value.stack_tip"}}
+        when: "$outcome == 'ok'"
 
   stack-merge:
     title: 컷 머지 (스택 브랜치 -> 내 회차 브랜치, --no-ff 1회)
@@ -1600,7 +1798,13 @@ nodes:
       첫 행동은 보드다 — 요청의 본체는 코멘트이고 메시지는 그것을 가리키는
       nudge다: `claunch beads update <id> --status in_review` 와, 아래 증거
       묶음을 담은 `claunch beads comments add <id> -f <파일>` (그 코멘트의 첫
-      줄은 `LANDING REQUEST @ <tip>`). 상위의 통합 대기 표는 이 in_review
+      줄은 `LANDING REQUEST @ <tip>`). 이 회차의 착지 매체가 pr이면
+      (medium=${data.landing.medium}, pr=${data.landing.pr_url}) 마커 뒤에
+      ` pr: <url>`을 붙이고, tip은 전체 40자 SHA와 원격 ref로 적는다:
+      `LANDING REQUEST @ <sha> @ <remote>/<브랜치> pr: <url>` — 상위가 다른
+      머신이어도 같은 커밋을 fetch로 확인할 수 있게 한다(docs/remote-commit-
+      protocol.md). medium이 local이고 그 이유가 PR 불가였으면 묶음에 그
+      이유를 한 줄 적는다. 상위의 통합 대기 표는 이 in_review
       목록이고, 이 전이가 없으면 요청은 표에 없다. rebase 재요청을 받아
       재정렬한 뒤에는 같은 전이와 새 마커 코멘트를 다시 낸다(상위가
       in_progress로 되돌려 두었다).
@@ -1665,9 +1869,26 @@ nodes:
     # 컬렉션(v2) 또는 landing_queue(v1)에 넣는다. 재요청으로 다시 지나가면 같은
     # 이슈 항목이 새 tip으로 교체된다. 부모에 큐가 없으면 trigger_skipped로
     # 남고 아무 일도 없다.
+    # enqueue-landing과 같은 push에 착지 매체를 더 싣는다(claunch-yq80p.5):
+    # pr이면 pr_url·pr_number·base가 들어가고, 리더는 그 행을 PR 후보로 읽어
+    # gh pr merge로 머지한다. local이면 그 필드가 null이고 --no-ff 경로다.
+    # $data.landing은 이 노드에 들어온 순간의 값이 trigger 기록에 함께 남는다.
+    # 부모가 v1 런이면 v1 연결 계층이 issue·branch·tip만 쓴다 — v1 리더는
+    # LANDING REQUEST 코멘트의 `pr:` 조각으로 PR을 가른다.
     triggers:
       - briefing
-      - {do: enqueue-landing, at: leave}
+      - at: leave
+        push:
+          to: parent:landing
+          each: "$facts.in_review"
+          item: {issue: "$each", tip: "$facts.head", branch: "$facts.branch",
+                 requested_by: "$facts.session", medium: "$data.landing.medium",
+                 pr_url: "$data.landing.pr_url", pr_number: "$data.landing.pr_number",
+                 base: "$data.landing.base"}
+    # stack이 서 있으면 컷을 실은 이 요청을 stack 런에 알린다(v1: frozen 게시).
+    do:
+      - push: {to: signals, item: {name: "'frozen'", tip: "$result['integration-request'].value.tip"}}
+        when: "$outcome == 'ok' and side('stack').live"
     returns:
       ok: {tip: str, issues: list}
     effects: [board.write, mesh.send]
@@ -2240,6 +2461,117 @@ nodes:
     effects: [board.write, mesh.send]
 
 procedures:
+  pr-or-local:
+    description: >-
+      착지 매체를 PR로 세우는 시도의 공통 골격(claunch-yq80p.11). attempt 블록이
+      시도 작업과 성공 시의 return을 담고(호출자 범위에서 컴파일되므로 그 return은
+      호출한 프로시저를 끝낸다), 시도가 blocked·failed로 끝나면 ask가 참일 때 사용자에게
+      retry/local을 묻고, 거짓이면 사유를 남기고 로컬 착지로 끝난다.
+    params:
+      attempt: {type: block, required: true, description: 시도 작업과 성공 시의 return}
+      ask: {type: bool, default: true, description: 실패 시 사용자에게 묻는가(거짓이면 로컬로 대체)}
+      topic: {type: str, required: true, description: 사용자 질문의 topic}
+      local_reason: {type: str, required: true, description: 사용자가 local을 골랐을 때 남기는 사유}
+    returns:
+      ok: {medium: str, reason: str, remote: "str?", repo: "str?", base: "str?",
+           pr_url: "str?", pr_number: "int?"}
+    body:
+      id: attempts
+      loop:
+        while: "true"
+        max: 10
+        do:
+          try: {splice: attempt}
+          # 시도 작업의 실패 결과(remote-setup의 blocked, pr-open의 failed). catch
+          # 처리기의 $prev가 그 실패 값({reason})이다.
+          catch:
+            blocked: &recover
+              cond:
+                - if: "$params.ask == true"
+                  then:
+                    # 사용자에게 묻는 지점은 ask-user(docs/cflow-v2.md 2.10)로 묻는다.
+                    # (id 없음: 이 처리기는 blocked·failed 두 catch가 공유한다)
+                    call: ask-user
+                    with:
+                      context: "$prev.reason"
+                      require_reason: true
+                      topic: "$params.topic"
+                    cases:
+                      retry: {continue: attempts}
+                      local:
+                        return: ok
+                        value: {medium: local, reason: "$params.local_reason"}
+                - else:
+                    return: ok
+                    value: {medium: local, reason: "$prev.reason"}
+            failed: *recover
+
+  landing-medium:
+    description: >-
+      회차 시작(branch-setup 뒤)에 이 회차의 착지 매체를 정한다(claunch-yq80p.5).
+      기본은 PR이고, PR을 만들 수 없으면 사유를 남기고 로컬 착지로 대체한다.
+      force_pr이면(또는 원격 편성이면) 대체하지 않고 사람의 판단을 기다린다.
+      force_no_pr이면 로컬이다. 반환값은 data.landing에 묶인다.
+    returns:
+      ok: {medium: str, reason: str, remote: "str?", repo: "str?", base: "str?",
+           pr_url: "str?", pr_number: "int?"}
+    body:
+      id: medium-blocked
+      call: pr-or-local
+      with:
+        local_reason: user chose local while PR was blocked
+        topic: |
+          이 회차는 PR로만 착지해야 하는데(force_pr 입력 또는 원격 편성) 지금
+          PR을 만들 수 없다(사유는 근거 칸의 값). `claunch cflow2 pr-preflight`가
+          같은 사실(저장소·원격·gh 설치·로그인, blockers)을 다시 보여 준다 — 그
+          출력으로 선택지별 위험과 결과를 채운다.
+          선택지: retry — gh 설치·로그인·원격 설정을 고친 뒤 착지 매체를 다시
+          판정한다. local — 이번 회차만 로컬 착지(상위의 --no-ff 머지)로 간다.
+          상위가 다른 머신이면 local은 착지를 만들지 못하므로 권하지 않는다.
+        attempt:
+          - remote-setup
+          - return: ok
+            value: {medium: "$result['remote-setup'].value.medium",
+                    reason: "$result['remote-setup'].value.reason",
+                    remote: "$result['remote-setup'].value.remote",
+                    repo: "$result['remote-setup'].value.repo",
+                    base: "$result['remote-setup'].value.base"}
+
+  pr-publish:
+    description: >-
+      동료 리뷰 통과 뒤, 착지 매체가 pr이면 브랜치를 push하고 PR을 열거나
+      갱신한다(claunch-yq80p.5). 실패하면 force_pr이 꺼져 있을 때는 사유를 남기고
+      로컬 착지로 바꾸고, 켜져 있으면 사람의 판단을 기다린다. 반환값은 갱신된
+      data.landing이다.
+    params:
+      landing: {type: map, required: true}
+      force_pr: {type: bool, default: false}
+    returns:
+      ok: {medium: str, reason: str, remote: "str?", repo: "str?", base: "str?",
+           pr_url: "str?", pr_number: "int?"}
+    body:
+      id: publish-blocked
+      call: pr-or-local
+      with:
+        ask: "$params.force_pr"
+        local_reason: user chose local after pr-open failed
+        topic: |
+          force_pr 입력으로 이 회차는 PR로만 착지해야 하는데 push 또는 PR
+          생성이 실패했다(명령과 출력은 근거 칸의 값). `git ls-remote`와
+          `gh pr list --head <브랜치>`로 원격 상태를 보고 선택지를 채운다.
+          push가 `stale info`로 거절됐으면 이 세션이 모르는 push가 원격에
+          있다는 뜻이다.
+          선택지: retry — 원인을 고친 뒤 push·PR을 다시 시도한다. local —
+          이번 회차만 로컬 착지로 간다.
+        attempt:
+          - pr-open
+          - return: ok
+            value: {medium: pr, reason: "$params.landing.reason",
+                    remote: "$params.landing.remote", repo: "$params.landing.repo",
+                    base: "$result['pr-open'].value.base",
+                    pr_url: "$result['pr-open'].value.url",
+                    pr_number: "$result['pr-open'].value.number"}
+
   resolve-issue:
     description: >-
       이 회차가 어느 beads 이슈의 것인지 확정한다(v1 issue-check, issue-auto,
@@ -2305,7 +2637,6 @@ procedures:
                 bind: issue_decision
                 with:
                   require_reason: true
-                  choices: [adopt, create, none]
                   topic: |
                     이 세션에는 배정된 beads 이슈가 없고, 직전 단계 보고에 보드에서
                     찾은 연관 일감 후보(또는 「후보 없음」)가 있다. 이 회차를 어디에
@@ -2317,20 +2648,18 @@ procedures:
                     create — 오프닝 task 설명에서 새 이슈를 민팅한다. none — 이슈 없이
                     이 회차를 진행한다(이 확정이 명시적 동의로 저널에 남고, 회차 기록은
                     cflow 저널·커밋·회차 보고서에만 남는다).
-              - cond:
-                  - if: "$data.issue_decision.decision == 'adopt'"
-                    then:
-                      - issue-adopt
-                      - return: ok
-                        value: {how: adopt, issue: "$result['issue-adopt'].value.issue"}
-                  - if: "$data.issue_decision.decision == 'create'"
-                    then:
-                      - issue-create
-                      - return: ok
-                        value: {how: create, issue: "$result['issue-create'].value.issue"}
-                  - else:
-                      return: ok
-                      value: {how: none}
+                cases:
+                  adopt:
+                  - issue-adopt
+                  - return: ok
+                    value: {how: adopt, issue: "$result['issue-adopt'].value.issue"}
+                  create:
+                  - issue-create
+                  - return: ok
+                    value: {how: create, issue: "$result['issue-create'].value.issue"}
+                  none:
+                    return: ok
+                    value: {how: none}
 
   workspace:
     description: >-
@@ -2397,7 +2726,7 @@ procedures:
       큐의 일감 하나: 작업(발견은 group found) -> 표적 테스트 여부 -> 테스트 작성과
       위임 측정(실패가 0이 될 때까지) 또는 생략 기록 -> 커밋·보고(v1 work,
       test-decision, review, test-skipped, commit). work의 반환값은
-      $data.work_report에 남는다 — land가 stack_open을 본다.
+      $data.work_report에 남는다.
     params:
       verify: {type: str, default: ""}
     body:
@@ -2438,6 +2767,11 @@ procedures:
       프로브(landed-wait)와 에이전트의 기록(landed)이 둘 다 끝나야 지나간다.
     body:
       id: landed-check
+      # 착지가 확인되면(프로브와 기록이 둘 다 끝나면) stack 런에 landed를 알린다
+      # (v1: landed 체크리스트가 열릴 때 게시). stack이 없으면 쓰지 않는다.
+      do:
+        - push: {to: signals, item: {name: "'landed'"}}
+          when: "$outcome == 'ok' and side('stack').live"
       par:
         settle: all
         branches:
@@ -2463,11 +2797,10 @@ procedures:
 
   cut-unreachable:
     description: >-
-      스택 컷 대기(cut-wait)가 기계로 끝나지 못했다: 이 범위에 v1 stack 런이 없어
-      프로브가 판정하지 못했거나(undecidable), 4시간 안에 컷이 오지 않았다(timeout).
-      v2 런은 v1 stack 런과 마일스톤을 주고받지 못하므로(후속 과제) 사람이 고른다.
+      스택 컷 대기(cut-wait)가 기계로 끝나지 못했다: stack side 런이 없거나
+      끝났거나(absent), 4시간 안에 컷이 오지 않았다(timeout). 사람이 고른다.
     params:
-      why: {type: str, default: undecidable}
+      why: {type: str, default: absent}
     body:
       # 사용자에게 묻는 지점은 ask-user(ask-common, docs/cflow-v2.md 2.10)로
       # 묻는다: 드라이버가 문제·선택지별 위험·결과·가역성·권장안을 탐색해
@@ -2478,26 +2811,25 @@ procedures:
         with:
           context: "$params.why"
           require_reason: true
-          choices: [confirmed, held]
           topic: |
-            스택 컷을 기계로 확인하지 못했다(사유는 근거 칸의 값). undecidable은
-            `claunch cflow published stack cut --step stack-merge`가 세 번 연속 종료
-            코드 2(이 범위에 v1 stack 런이 없다)를 냈다는 뜻이다 — 그 상태에서는 기다려도
-            컷이 오지 않는다. timeout은 stack 런이 서 있지만 4시간 동안 컷이 없었다는
-            뜻이다. 스택 브랜치(`<세션>-stack`)의 tip과 자식 브랜치들의 머지 여부를 git에서
-            보고 선택지별 위험과 결과를 채운다.
-            주의: v2 런은 컷 소비를 v1 런에 표시하지 못한다. 다음 회차의 프로브가 같은
-            컷을 「새 컷」으로 다시 읽을 수 있으니, confirmed는 이번 착지에 실을 컷을
-            git에서 직접 확인했을 때만 권한다.
+            스택 컷을 기계로 확인하지 못했다(사유는 근거 칸의 값). absent는 stack side
+            런(slot `<세션>+stack`)이 없거나 끝났다는 뜻이다 — 그 상태에서는 기다려도
+            컷이 오지 않는다(flow_status의 sides.stack). timeout은 stack 런이 서 있지만
+            4시간 동안 컷이 없었다는 뜻이다(stack 런의 standby가 cut을 고르지 못하는
+            이유 — 착지를 요청한 자식이 남았는가 — 를 본다). 스택 브랜치(`<세션>-stack`)의
+            tip과 자식 브랜치들의 머지 여부를 git에서 보고 선택지별 위험과 결과를 채운다.
+            confirmed 뒤에 stack 런의 컷이 늦게 오면 그 컷은 이번 요청의 답이고, 다음
+            회차의 stack-cut이 새 요청 전에 그것을 소비한다(다음 회차의 cut-wait를
+            풀지 않는다). confirmed는 이번 착지에 실을 컷을 git에서 직접 확인했을 때만
+            권한다.
             선택지: confirmed — 스택 브랜치에 이번 착지에 실을 컷이 있음을 git에서
             확인했다, stack-merge로 간다. held — 컷을 받을 수 없다(stack 런이 없거나
             멈췄다), 이 착지를 held로 마감한다.
-      - cond:
-          - if: "$data.cut_unreachable.decision == 'held'"
-            then:
-              return: held
-              value: {reason: "$params.why", rework: false}
-          - else: []
+        cases:
+          confirmed: []
+          held:
+            return: held
+            value: {reason: "$params.why", rework: false}
 
   landed-unclear:
     description: >-
@@ -2513,7 +2845,6 @@ procedures:
         with:
           context: "$params.why"
           require_reason: true
-          choices: [confirmed, held]
           topic: |
             착지 프로브(`tools/landed_check.py` + 깨끗한 트리)가 답을 내지 못했다(사유는
             근거 칸의 값). undecidable은 판정 불가(종료 코드 2: 저장소·브랜치를 읽지
@@ -2523,12 +2854,11 @@ procedures:
             선택지: confirmed — 사람이 git에서 착지(머지 커밋)를 확인했다, 프로브 대신
             이 확인으로 지나간다. held — 착지를 확인하지 못했다, 이 착지를 held로
             마감하고 회차를 닫는다.
-      - cond:
-          - if: "$data.landed_unclear.decision == 'held'"
-            then:
-              return: held
-              value: {reason: "$params.why", rework: false}
-          - else: []
+        cases:
+          confirmed: []
+          held:
+            return: held
+            value: {reason: "$params.why", rework: false}
 
   land:
     description: >-
@@ -2546,26 +2876,23 @@ procedures:
     body:
       - id: stack-landing
         cond:
-          - if: "$params.mode == 'stack-only' or $data.work_report.stack_open == true"
+          - if: "$params.mode == 'stack-only' or side('stack').live"
             then:
               - stack-cut
               - id: cut-wait
                 wait:
                   # v1: stack-merge의 awaits {sub: stack, at: cut} + verify. 컷이 오기
-                  # 전에 떠나면 소비가 한 회차 어긋난다(claunch-u8wjx.2).
-                  # 종료 코드(v1 published): 0 = 소비하지 않은 컷이 있다, 1 = 아직,
-                  # 2 = 이 범위에 v1 stack 런이 없다(판정 불가). v2 런은 v1 stack 런을
-                  # 띄우지도 컷 소비를 표시하지도 못하므로, stack 런이 없는 회차
-                  # (mode stack-only 포함)는 여기서 기계로 진행할 수 없다 — 판정 불가
-                  # 세 번(3분)이면 undecidable로 끝나 사람이 고른다. 컷이 4시간 안에
-                  # 오지 않아도(timeout) 같다. 「아직」과 섞여 조용히 기다리지 않는다.
-                  probe: "claunch cflow published stack cut --step stack-merge"
-                  poll: 60
+                  # 전에 떠나지 않는다(claunch-u8wjx.2): 엔진이 stack 런의 signals에
+                  # 이 런이 소비하지 않은 cut이 있는지를 보고, 있으면 그 이름의 cursor를
+                  # 옮기며 끝난다. stack 런이 없거나 끝났으면 absent, 4시간 안에 컷이
+                  # 없으면 timeout — 둘 다 사람이 고른다.
+                  until: "fresh('side:stack:signals', 'cut')"
+                  consume:
+                    - {from: "side:stack:signals", name: cut}
                   seconds: 14400
-                  undecided_max: 3
                   describe: 자식 스택이 이번 착지의 컷을 냈다
                 on:
-                  undecidable: {call: cut-unreachable, with: {why: undecidable}}
+                  absent: {call: cut-unreachable, with: {why: absent}}
                   timeout: {call: cut-unreachable, with: {why: timeout}}
               - stack-merge
           - else: []
@@ -2676,6 +3003,15 @@ procedures:
                 changes:
                   return: rework
                   value: {reason: "$result['peer-review'].value.what", rework: true}
+            - id: publish
+              cond:
+                - if: "$data.landing.medium == 'pr'"
+                  then:
+                    id: pr
+                    call: pr-publish
+                    bind: landing
+                    with: {landing: "$data.landing", force_pr: "$data.inputs.force_pr"}
+                - else: []
             - integration-request
             - id: await
               loop:
@@ -2778,7 +3114,6 @@ procedures:
                             bind: rework_decision
                             with:
                               require_reason: true
-                              choices: [approve, hold]
                               topic: |
                                 상위 세션이 이 회차의 착지를 거절했고, 워커가 그 거절을
                                 정산했다(이슈는 in_progress로 돌아갔고 브랜치 동결은 풀렸다).
@@ -2795,16 +3130,15 @@ procedures:
                                 판단 근거: 거절 사유와 재작업 범위 요지가 앞 스텝의 보고에 있다
                                 (`claunch cflow2 journal`), 거절 마커는
                                 `claunch beads comments <이슈 id>`에 있다.
-                          - cond:
-                              - if: "$data.rework_decision.decision == 'approve'"
-                                then:
-                                  - rework-gate
-                                  - return: rework
-                                    value: {reason: "$result['landing-declined'].value.reason", rework: true}
-                              - else:
-                                  - landing-declined-hold
-                                  - return: held
-                                    value: {reason: declined, rework: false}
+                            cases:
+                              approve:
+                              - rework-gate
+                              - return: rework
+                                value: {reason: "$result['landing-declined'].value.reason", rework: true}
+                              hold:
+                              - landing-declined-hold
+                              - return: held
+                                value: {reason: declined, rework: false}
                       reopen:
                         description: 요청을 철회하고 브랜치를 다시 연다(넘어간 자식을 싣거나 더 실을 것이 생겼다) — 철회를 정산한 뒤 작업으로
                         then:
@@ -2862,8 +3196,8 @@ procedures:
           backlog에 쌓이는 원래의 결함이 그대로 돌아온다.
           그 밖에 모호하면 done이다 — 세션 하나가 더 뜨는 쪽이, 규격 없는
           일감에 회차 하나가 도는 쪽보다 싸다.
-          · 착수할 일감은 없지만 stack 서브 런이 서 있고 살아 있는 스택
-            자식이 있으면(`claunch cflow sub-done stack`이 1, `children`에
+          · 착수할 일감은 없지만 stack side 런이 서 있고 살아 있는 스택
+            자식이 있으면(flow_status의 `sides.stack.live`가 true, `children`에
             살아 있는 role worker 자식) **stack-round**다 — 컷에서 넘어간
             자식의 작업이 이 세션의
             다음 착지다. done으로 끝내면 그 자식들의 통합 대상이 사라진다.
@@ -2882,6 +3216,7 @@ procedures:
               value: {next: next-round, mode: full}
           stack-round:
             description: 배정 큐는 비었지만 자식 스택에 넘어간 자식이 남았다 — 자기 코드 없이 스택만 싣는 위임 전용 회차
+            when: "side('stack').live"
             then:
               return: ok
               value: {next: stack-round, mode: stack-only}
@@ -2915,7 +3250,7 @@ procedures:
                 chooser: agent
                 require_reason: true
                 prompt: |
-                  이 세션에 배정된 일감은 없고, stack 서브 런에 넘어간 자식(작업 중)이
+                  이 세션에 배정된 일감은 없고, stack side 런에 넘어간 자식(작업 중)이
                   남아 있다. 이 회차는 자기 코드 없이 스택만 착지시킨다. 처음
                   들어왔으면 준비한다(다시 들어온 것이면 이미 있다):
                   (1) 회차 이슈: `claunch beads create "stack round: <자식 이슈
@@ -2942,6 +3277,7 @@ procedures:
                     then: []
                   release:
                     description: 자식도 실을 것도 없다 — stack을 봉인했다
+                    when: "not side('stack').live"
                     then:
                       return: ok
                       value: {release: true}
@@ -2954,6 +3290,9 @@ procedures:
               - id: workspace
                 call: workspace
               - branch-setup
+              - id: medium
+                call: landing-medium
+                bind: landing
       - id: batch
         loop:
           while: "true"
@@ -3065,7 +3404,7 @@ procedures:
                       끝낸다 — 세션의 종료는 자식에게 번지지 않고(자식은 한 단계 위로
                       올라가 살아남는다), 남겨 두면 아래 판정이 그것을 adopt 안 된
                       자식으로 센다. 한 일을 reason에 적는다.
-                      stack 서브 런이 아직 서 있으면(`claunch cflow sub-done stack`이 1)
+                      stack side 런이 아직 서 있으면(flow_status의 `sides.stack.live`가 true)
                       미정산이다 — 살아 있는 스택 자식이 있으면 queue-recheck가 stack-round를
                       냈어야 했고, 없으면 stack 런에서 seal을 먼저 고른다. stack 없이
                       살아 있는 자식(`children`)이 있고 리더의 adopt(reparent)가
@@ -3092,7 +3431,6 @@ procedures:
                   bind: settle_stall
                   with:
                     require_reason: true
-                    choices: [proceed, keep-waiting]
                     topic: |
                       이 세션이 만든 이슈가 아직 정산되지 않았다(살아 있는 assignee가 없고
                       `HOLD:` 마커도 없다). 타이머가 여섯 번 깨우는 동안 보드가 변하지
@@ -3109,10 +3447,9 @@ procedures:
                       선택지: proceed — 정산 없이 이 세션을 끝낸다, 남은 이슈는 열린 채로
                       남고 이어받을 자리는 다음 회차의 adoption이 정한다. keep-waiting — 더
                       기다린다, 보드가 바뀔 때까지 정산 확인을 다시 하고 시계를 다시 건다.
-                - cond:
-                    - if: "$data.settle_stall.decision == 'proceed'"
-                      then: {break: settle-watch}
-                    - else: {continue: settle-watch}
+                  cases:
+                    proceed: {break: settle-watch}
+                    keep-waiting: {continue: settle-watch}
       # 종료는 세션과 산출물의 보존 기간에 관한 사용자 결정이다 — 상위 세션이나
       # 워커가 대신 승인하지 않고(ask-user의 기본 응답자는 사람뿐), timeout도
       # 없다. 답이 없는 동안 런은 서 있다.
@@ -3121,7 +3458,6 @@ procedures:
         bind: end_decision
         with:
           require_reason: true
-          choices: [approve, hold]
           topic: |
             이 워커의 회차가 끝났다(정리·최종 보고·HTML 회차 보고서까지).
             이 런이 done이 되면 데몬이 종결 기록을 쓴 뒤 이 세션을 종료한다.
@@ -3135,10 +3471,7 @@ procedures:
             답하지 않는 동안 이 질문은 열린 상태로 유지되고 세션은 살아 있다.
 
             판단 근거: `claunch cflow2 journal -t <세션>`, `claunch beads show <이슈> --json`.
-      - cond:
-          - if: "$data.end_decision.decision == 'approve'"
-            then: end-gate
-          - else: end-hold
+        cases: {approve: end-gate, hold: end-hold}
 
 body:
   try:

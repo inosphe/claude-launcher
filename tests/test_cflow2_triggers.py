@@ -353,6 +353,21 @@ def _push(mgr, work, facts=None, push=None):
         facts_fn=lambda c, s: dict(facts or FACTS)))
 
 
+def test_fields_the_parent_does_not_declare_are_left_out(tmp_path):
+    # improv-worker-v2's landing push carries PR fields (claunch-yq80p.5); a
+    # parent whose landing queue predates them still gets the request.
+    lead, work = _dirs(tmp_path)
+    _start(lead, LEAD, "lead")
+    mgr = Manager(Session("lead", lead), Session("w1", work, parent="lead"))
+    push = dict(cflow2_triggers.ENQUEUE_LANDING_PUSH)
+    push["item"] = dict(push["item"], pr_url="'https://h/o/r/pull/7'", pr_number="null")
+    ok, detail = _push(mgr, work, push=push)
+    assert ok, detail
+    assert "left out: pr_url" in detail and "pr_number" not in detail
+    assert set(_items(lead, "lead")["c-1"]) >= {"issue", "tip", "branch"}
+    assert "pr_url" not in _items(lead, "lead")["c-1"]
+
+
 def test_no_parent_session_is_a_skip(tmp_path):
     lead, work = _dirs(tmp_path)
     ok, detail = _push(Manager(Session("w1", work)), work)

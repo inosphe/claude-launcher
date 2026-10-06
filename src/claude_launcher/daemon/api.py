@@ -634,6 +634,7 @@ def build_app(
     r.add_post("/api/cflow2/approve", h_cflow2_approve)
     r.add_get("/api/cflow2/asks", h_cflow2_asks)
     r.add_post("/api/cflow2/collection", h_cflow2_collection)
+    r.add_post("/api/cflow2/inputs/check", h_cflow2_inputs_check)
     r.add_get("/api/mesh", h_mesh_list)
     r.add_post("/api/mesh", h_mesh_create)
     r.add_delete("/api/mesh/outgoing/{rid}", h_mesh_outgoing_cancel)
@@ -4474,6 +4475,38 @@ async def h_cflow2_definition(request: web.Request) -> web.Response:
     except cflow2_web.ChoiceError as exc:
         return json_error(404, str(exc))
     return json_response(data)
+
+
+async def h_cflow2_inputs_check(request: web.Request) -> web.Response:
+    """Check start inputs without starting (the new-session form calls it as
+    the user edits): per-field errors, cross-input constraints included
+    (docs/cflow-v2.md 2.6). Body: workflow, workflow_version?, cwd?,
+    cflow_inputs. 200 ``{ok, values, errors}``; 404 when the workflow is not
+    a startable v2 definition."""
+    try:
+        body = await request.json()
+    except Exception:  # noqa: BLE001 - malformed body
+        return json_error(400, "JSON body required")
+    if not isinstance(body, dict):
+        return json_error(400, "JSON body must be an object")
+    workflow = str(body.get("workflow") or "").strip()
+    if not workflow:
+        return json_error(400, "'workflow' required in the JSON body")
+    cwd = cflow_state.resolve_cwd(body.get("cwd"))
+
+    def run() -> Optional[dict]:
+        chosen = cflow2_web.choose(workflow, body.get("workflow_version"), cwd=cwd)
+        if chosen is None:
+            return None
+        return cflow2_web.inputs_check(chosen[1], body.get("cflow_inputs"))
+
+    try:
+        out = await asyncio.to_thread(run)
+    except cflow2_web.ChoiceError as exc:
+        return json_error(404, str(exc))
+    if out is None:
+        return json_error(404, f"{workflow!r} is not a v2 workflow")
+    return json_response(out)
 
 
 async def h_cflow2_select(request: web.Request) -> web.Response:
@@ -10118,9 +10151,20 @@ async def h_gh_status(request: web.Request) -> web.Response:
     ``gh auth status`` per host, and the latter talks to the host. Nothing
     here is cached -- the card has a Re-check button precisely so the user
     can install, log in, and see the answer change.
+
+    ``?cwd=`` narrows it to one directory -- what the new-session form asks
+    for an input declared ``precheck: gh`` (improv-worker-v2's force_pr)
+    before the user may turn it on.
     """
+    cwd = str(request.query.get("cwd") or "").strip()
+    if cwd:
+        path = cflow_state.resolve_cwd(cwd)
+        repos = [(Path(path).name or path, path)]
+    else:
+        repos = None
     return json_response(
-        await asyncio.to_thread(lambda: ghcli.status(ghcli.daemon_repositories()))
+        await asyncio.to_thread(
+            lambda: ghcli.status(repos if repos is not None else ghcli.daemon_repositories()))
     )
 
 

@@ -5526,8 +5526,13 @@ div.shadow-card .shadow-line { white-space: normal; overflow-wrap: anywhere; }
 .cf2-col-table { border-collapse: collapse; font-size: 12px; width: 100%; }
 .cf2-col-table th, .cf2-col-table td { text-align: left; padding: 2px 6px; border-bottom: 1px solid #30363d; vertical-align: top; }
 .cf2-col-fields { overflow-wrap: anywhere; color: #8b949e; }
+.cf2-col-link { margin-left: 8px; color: #58a6ff; white-space: nowrap; }
+.cf2-col-link:hover { text-decoration: underline; }
 .cf2-col-status.landed { color: #3fb950; }
 .cf2-col-status.rejected { color: #f85149; }
+.cf2-col-status.merged { color: #a371f7; }
+.cf2-col-status.open { color: #3fb950; }
+.cf2-col-status.closed { color: #f85149; }
 .cf2-col-actions { white-space: nowrap; }
 .cf2-trigger { font-size: 12px; margin: 0; }
 .cf2-trigger.skipped { color: #d29922; }
@@ -5545,3 +5550,14 @@ div.shadow-card .shadow-line { white-space: normal; overflow-wrap: anywhere; }
 .cf2-run-inputs { margin: 6px 0; }
 .cf2-run-input-value { white-space: pre-wrap; }
 .cf2-undecidable { color: #d29922; }
+
+/* Start inputs: a readiness check beside an input (precheck: gh) and the
+   cross-input rules under the fields (docs/cflow-v2.md 2.6). */
+.cf2-precheck { display: flex; flex-wrap: wrap; gap: 6px; align-items: center;
+  font-size: 12px; margin-top: 4px; color: #8b949e; }
+.cf2-precheck.ok .cf2-precheck-text { color: #3fb950; }
+.cf2-precheck.bad .cf2-precheck-text { color: #f85149; }
+.cf2-precheck-run { font-family: var(--mono, monospace); padding: 0 4px;
+  border: 1px solid var(--border, #ccc); border-radius: 3px; }
+.cf2-constraints { margin-top: 6px; }
+.cf2-constraint { margin: 2px 0; }

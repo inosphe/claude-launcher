@@ -16572,7 +16572,109 @@ function syncCflowInputs() {
   newInputsFor = key;
   box.innerHTML = "";
   box.classList.toggle("hidden", !fields.length);
-  if (fields.length) cflowInputsForm(box, fields);
+  if (fields.length) {
+    cflowInputsForm(box, fields, entry.input_constraints || []);
+    cflowInputsLive(box, f.workflow.value, newSessionCwd);
+  }
+}
+
+/* Cross-input asserts and readiness checks while the user edits the start
+   inputs (docs/cflow-v2.md 2.6). The daemon answers both: POST
+   /api/cflow2/inputs/check runs the same normalize a start runs (so the
+   form and the start refuse the same values with the same message), and an
+   input declared `precheck: gh` asks GET /api/tools/gh?cwd= before its
+   checkbox may be turned on. The start still re-checks; this only says it
+   earlier. */
+let cflowInputsCheckSeq = 0;
+function cflowInputsLive(box, picked, cwdOf) {
+  let timer = null;
+  const run = async () => {
+    const seq = ++cflowInputsCheckSeq;
+    const body = Object.assign(cflowPickBody(picked, workflowsCache), {
+      cwd: cwdOf() || undefined, cflow_inputs: cflowInputsValues(box),
+    });
+    try {
+      const resp = await api("/api/cflow2/inputs/check", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      const doc = await resp.json().catch(() => ({}));
+      if (seq !== cflowInputsCheckSeq || !resp.ok) return;
+      cflowInputsErrors(box, doc.errors || {});
+      const general = box.querySelector(".cf2-constraint-error");
+      if (general) {
+        const msg = (doc.errors || {})._constraints || "";
+        general.textContent = msg;
+        general.classList.toggle("hidden", !msg);
+      }
+    } catch (_) { /* the start re-checks; a missed live check costs nothing */ }
+  };
+  const schedule = () => { clearTimeout(timer); timer = setTimeout(run, 250); };
+  box.addEventListener("input", schedule);
+  box.addEventListener("change", schedule);
+  for (const row of box.querySelectorAll('.cf2-input[data-precheck="gh"]')) {
+    cflowGhPrecheck(row, cwdOf, schedule);
+  }
+}
+
+/* The gh readiness line under an input declared `precheck: gh`: installed,
+   signed in to the repository's host. Until it says ready a bool input
+   stays off and disabled, with the commands to run beside it. */
+async function cflowGhPrecheck(row, cwdOf, changed) {
+  let line = row.querySelector(".cf2-precheck");
+  if (!line) {
+    line = el("div", "cf2-precheck");
+    row.insertBefore(line, row.querySelector(".cf2-input-error"));
+  }
+  const control = row.querySelector(".cf2-input-value");
+  line.textContent = "gh: checking…";
+  line.className = "cf2-precheck";
+  let doc = null;
+  try {
+    const cwd = cwdOf() || "";
+    const resp = await api(`/api/tools/gh${cwd ? `?cwd=${encodeURIComponent(cwd)}` : ""}`);
+    doc = resp.ok ? await resp.json() : null;
+  } catch (_) { doc = null; }
+  line.innerHTML = "";
+  const v = cflowGhVerdict(doc);
+  line.classList.add(v.ok ? "ok" : "bad");
+  line.appendChild(el("span", "cf2-precheck-text", v.text));
+  for (const g of v.guide) {
+    const cmd = el("code", "cf2-precheck-run", g.run);
+    cmd.title = g.why || "";
+    line.appendChild(cmd);
+  }
+  const again = el("button", "wf-btn cf2-precheck-again", "Re-check");
+  again.type = "button";
+  again.addEventListener("click", () => cflowGhPrecheck(row, cwdOf, changed));
+  line.appendChild(again);
+  if (control && control.type === "checkbox") {
+    if (!v.ok && control.checked) { control.checked = false; changed(); }
+    control.disabled = !v.ok;
+    control.title = v.ok ? "" : v.text;
+  }
+}
+
+/* What GET /api/tools/gh says about one directory, for the form: ok when
+   gh is installed and signed in to every host the repository pushes to. An
+   unset claunch.pr.remote is not a blocker here (the worker lands through
+   origin by default); it is listed with the guide. */
+function cflowGhVerdict(doc) {
+  if (!doc) return { ok: false, text: "gh: the daemon did not answer", guide: [] };
+  const cli = doc.client || {};
+  const guide = (doc.guide || []).filter((g) => g && g.run);
+  if (!cli.installed) return { ok: false, text: "gh is not installed on the daemon's PATH", guide };
+  const hosts = doc.hosts || [];
+  if (!hosts.length) {
+    return { ok: false, text: `gh ${cli.version || ""}: this directory has no GitHub remote`, guide };
+  }
+  const bad = hosts.filter((h) => !h.authenticated);
+  if (bad.length) {
+    return { ok: false, guide,
+             text: `gh ${cli.version || ""}: not signed in to ${bad.map((h) => h.host).join(", ")}` };
+  }
+  const who = hosts.map((h) => `${h.host}${h.account ? ` as ${h.account}` : ""}`).join(", ");
+  return { ok: true, text: `gh ${cli.version || ""} ✓ signed in to ${who}`, guide: [] };
 }
 
 const CFLOW_INPUT_CHECK_TYPES = ["invariants", "acceptance"];
@@ -16649,12 +16751,13 @@ function cflowInputControl(field) {
   return wrap;
 }
 
-function cflowInputsForm(box, fields) {
+function cflowInputsForm(box, fields, constraints) {
   box.appendChild(el("p", "wf-note", "Start inputs of this workflow (* = required)"));
   for (const field of fields) {
     const row = el("div", "cf2-input");
     row.dataset.input = field.name;
     row.dataset.type = field.type || "string";
+    if (field.precheck) row.dataset.precheck = field.precheck;
     const label = el("label", "cf2-input-label",
                      (field.label || field.name) + (field.required ? " *" : ""));
     row.appendChild(label);
@@ -16662,6 +16765,17 @@ function cflowInputsForm(box, fields) {
     if (field.help) row.appendChild(el("p", "wf-note cf2-input-help", field.help));
     row.appendChild(el("p", "cf2-input-error hidden"));
     box.appendChild(row);
+  }
+  if ((constraints || []).length) {
+    const list = el("div", "cf2-constraints");
+    list.appendChild(el("p", "wf-note", "Rules across these inputs:"));
+    for (const c of constraints) {
+      const item = el("p", "wf-note cf2-constraint", c.message || c.assert);
+      item.title = c.assert;
+      list.appendChild(item);
+    }
+    list.appendChild(el("p", "cf2-input-error cf2-constraint-error hidden"));
+    box.appendChild(list);
   }
 }
 
@@ -25942,21 +26056,32 @@ function renderCflow2Into(box, data, ui) {
 
 /* One collection of a v2 run (docs/cflow-v2.md 2.7) as rows: key, status
    and the other fields as `name=value`. A queue is keyed by its `key`
-   field, a log by its sequence number. */
+   field, a log by its sequence number. A field whose value is an http(s)
+   URL leaves the text and becomes a link (docs 10a): `url`/`pr_url` next
+   to a `number`/`pr_number` reads "PR #N", any other is named by its field. */
 function cflow2CollectionRows(col) {
   col = col || {};
   const keyField = col.key || null;
   const skip = new Set(["status", "seq", "at", "by"]);
   if (keyField) skip.add(keyField);
+  const isUrl = (v) => typeof v === "string" && /^https?:\/\/\S+$/.test(v);
   return (col.items || []).map((it) => {
     it = it || {};
     const key = keyField ? it[keyField] : (it.seq !== undefined ? `#${it.seq}` : "");
-    const fields = Object.keys(it).filter((k) => !skip.has(k) && it[k] !== null && it[k] !== "")
+    const shown = Object.keys(it).filter((k) => !skip.has(k) && it[k] !== null && it[k] !== "");
+    const fields = shown.filter((k) => !isUrl(it[k]))
       .map((k) => `${k}=${typeof it[k] === "object" ? JSON.stringify(it[k]) : it[k]}`);
     if (!keyField && it.by) fields.unshift(`by=${it.by}`);
+    const links = shown.filter((k) => isUrl(it[k])).map((k) => {
+      const num = k === "url" ? it.number : k === "pr_url" ? it.pr_number : undefined;
+      const pr = (k === "url" || k === "pr_url") && /\/pull\/\d+/.test(it[k]);
+      const n = num !== undefined && num !== null && num !== "" ? num
+        : pr ? it[k].match(/\/pull\/(\d+)/)[1] : null;
+      return { field: k, href: it[k], label: pr && n !== null ? `PR #${n}` : k };
+    });
     return { key: key === undefined || key === null ? "" : String(key),
              status: it.status === undefined || it.status === null ? "" : String(it.status),
-             fields: fields.join("  ") };
+             fields: fields.join("  "), links };
   });
 }
 
@@ -26016,7 +26141,16 @@ function cflow2CollectionTable(name, col, post) {
     const tr = el("tr");
     tr.appendChild(el("td", "mono", r.key));
     tr.appendChild(el("td", "cf2-col-status " + r.status, r.status));
-    tr.appendChild(el("td", "mono cf2-col-fields", r.fields));
+    const ftd = el("td", "mono cf2-col-fields", r.fields);
+    for (const l of r.links || []) {
+      const a = el("a", "cf2-col-link", l.label);
+      a.href = l.href;
+      a.target = "_blank";
+      a.rel = "noopener noreferrer";
+      a.title = l.href;
+      ftd.appendChild(a);
+    }
+    tr.appendChild(ftd);
     if (queue) {
       const td = el("td", "cf2-col-actions");
       if (values.length) {

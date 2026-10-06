@@ -105,6 +105,11 @@ CTL_RAISE = "raise"
 CTL_RETURN = "return"
 CTL_END = "end"
 CONTROL_OPS = (CTL_CONTINUE, CTL_BREAK, CTL_RAISE, CTL_RETURN, CTL_END)
+#: A ``return``'s ``target`` when it ends the run itself: a return written in
+#: a workflow body and spliced into a procedure (docs 2.2, block params).
+#: Other returns name their call's scope node, or carry no target (the
+#: nearest enclosing scope).
+RETURN_RUN = "$run"
 
 EXEC_INLINE = "inline"
 EXEC_SUBAGENT = "subagent"
@@ -120,6 +125,60 @@ CHOOSERS = (CHOOSER_AGENT, CHOOSER_USER)
 #: many times one node may be entered over a whole run before the run holds
 #: for a person (reason ``visit_limit``), whatever loop got it there.
 DEFAULT_MAX_VISITS = 200
+
+#: Seconds between a recurring run's end and the auto start of its next round
+#: when ``recur.min_gap`` is not given (docs 2.1, recur).
+RECUR_MIN_GAP_DEFAULT = 60.0
+
+#: A task's ``restart`` command runs one of these scripts and nothing else
+#: (docs 2.2, restart): the script path, optionally behind an interpreter and
+#: its flags. The daemon runs it with its own rights, so an agent-written
+#: definition must not name an arbitrary command.
+RESTART_SCRIPTS = ("tools/restart_live.sh", "tools/restart_live.ps1")
+#: Interpreters a restart command may name, and the only flags each may take
+#: (a flag mapped to True takes one value). No ``-c``/``-Command``: those run
+#: text that is not the script.
+RESTART_INTERPRETERS: Dict[str, Dict[str, bool]] = {
+    "bash": {}, "sh": {},
+    **{name: {"-noprofile": False, "-noninteractive": False, "-nologo": False,
+              "-executionpolicy": True, "-file": False}
+       for name in ("pwsh", "pwsh.exe", "powershell", "powershell.exe")},
+}
+_RESTART_SHELL_CHARS = set(";&|`$<>()\n\r")
+
+
+def restart_refusal(command: str) -> Optional[str]:
+    """``None`` when ``command`` runs an allowed restart script; otherwise
+    the reason it is refused. Allowed: ``[<interpreter> [flag [value]]...]
+    <script> [args]`` -- the script one of :data:`RESTART_SCRIPTS` (``./``
+    prefix allowed), the flags those :data:`RESTART_INTERPRETERS` lists for
+    the interpreter, and no shell operator anywhere."""
+    text = str(command or "").strip()
+    if not text:
+        return "is empty"
+    if any(c in _RESTART_SHELL_CHARS for c in text):
+        return "may not contain shell operators (; & | ` $ < > ( ))"
+    words = text.split()
+    i = 0
+    flags = RESTART_INTERPRETERS.get(words[0].lower())
+    if flags is not None:
+        i = 1
+        while i < len(words) and words[i].startswith("-"):
+            flag = words[i].lower()
+            if flag not in flags:
+                return f"may not pass {words[i]} to {words[0]} (allowed: {', '.join(flags) or 'none'})"
+            i += 2 if flags[flag] else 1
+    if i < len(words) and _restart_script(words[i]) is not None:
+        return None
+    return ("must run one of " + ", ".join(RESTART_SCRIPTS)
+            + " (optionally behind an interpreter); got " + repr(text))
+
+
+def _restart_script(word: str) -> Optional[str]:
+    w = word[2:] if word.startswith("./") else word
+    w = w.replace("\\", "/")
+    return w if w in RESTART_SCRIPTS else None
+
 
 #: The outcome a node reports when nothing more specific is declared.
 OUTCOME_OK = "ok"
