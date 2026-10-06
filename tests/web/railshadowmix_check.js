@@ -179,7 +179,7 @@ const names = [
   "byLineage", "sessionCategory", "sessionMatchesFilter", "sessionFilterCounts",
   "syncSessionGroupSearch", "syncSessionFilters",
   "sessionSearchText", "sessionMatchesSearch",
-  "recordProject", "sessionInCurrentProject", "meshInCurrentProject", "railSessions",
+  "recordProject", "sessionInCurrentProject", "railSessions",
   "sessMeshes", "sessionMeshGroup", "sessionWorkspaceGroup", "sessionWorkspaceLabel",
   "sessionGroupValue", "shadowMeshGroup", "shadowGroupValue",
   "regroupDepths", "sessionGroupRows", "remoteRailRows", "shadowLineage",
