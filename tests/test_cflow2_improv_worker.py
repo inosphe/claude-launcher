@@ -60,7 +60,7 @@ V1_TO_V2 = {
     "stack-cut": ["stack-cut", "stack-landing"],
     "stack-merge": ["cut-wait", "stack-merge"],
     "landing": ["landing"],
-    "landing-review": ["landing-review"],
+    "landing-review": ["landing-review", "landing-review-leader"],
     "rebase": ["merge-ready", "rebase", "align"],
     "reviewer-ensure": ["reviewer-ensure"],
     "peer-review": ["peer-review"],
@@ -556,3 +556,64 @@ def test_pr_or_local_scenarios(scen, tmp_path, monkeypatch):
     assert seen == order
     state = runtime.RunStore(str(tmp_path), "m").load_state()
     assert {k: v for k, v in state["data"].items() if k in ("landing", "published")} == data
+
+
+# -- landing-review asks whoever takes the landing request (claunch-yq80p.12) -
+
+
+def _review_route(tmp_path, relation):
+    """The escalate branch's route as it is in the definition, with the two
+    question nodes, run for one relation."""
+    import json
+
+    from claude_launcher.cflow2 import frontend, inputs as inputs_mod, runtime
+
+    doc = yaml.load(V2.read_text(encoding="utf-8"), Loader=frontend._Loader)
+
+    def find(o):
+        if isinstance(o, dict):
+            if o.get("id") == "landing-review-route":
+                return o
+            o = list(o.values())
+        if isinstance(o, list):
+            for v in o:
+                hit = find(v)
+                if hit:
+                    return hit
+        return None
+
+    nodes = {k: doc["nodes"][k] for k in ("landing-review", "landing-review-leader")}
+    nodes["after"] = {"prompt": "after"}
+    flow = {"cflow": 2, "name": "review-route",
+            "inputs": {"relation": doc["inputs"]["relation"]},
+            "returns": {"held": {"reason": "str?", "rework": "bool"}},
+            "nodes": nodes, "body": [find(doc["body"]) or find(doc["procedures"]), "after"]}
+    chart = inputs_mod.apply(frontend.compile_text(json.dumps(flow, ensure_ascii=False)),
+                             {"relation": relation} if relation else {})
+    return runtime.start(chart, cwd=str(tmp_path), scope="m", caps={}, now=1.0)
+
+
+@pytest.mark.parametrize("relation,label,first", [
+    (None, "landing-review", "worker"),
+    ("stacked", "landing-review", "worker"),
+    ("independent", "landing-review-leader", "leader"),
+])
+def test_landing_review_asks_by_relation(tmp_path, monkeypatch, relation, label, first):
+    from claude_launcher.cflow2 import runtime
+
+    monkeypatch.delenv("CLAUNCH_SESSION", raising=False)
+    st = _review_route(tmp_path, relation)
+    [ask] = st["asks"]
+    assert ask["label"] == label
+    chart = runtime.load_definition("improv-worker-v2")
+    node = next(n for n in chart.nodes.values() if n.label == label)
+    assert node.get("ask")["from"][0]["role"] == first
+    # the same question either way (shared by anchors)
+    other = next(n for n in chart.nodes.values() if n.label == "landing-review")
+    assert node.get("ask")["prompt"] == other.get("ask")["prompt"]
+    assert node.get("ask")["options"] == other.get("ask")["options"]
+    # a hold answer ends the round as held with the reason, from either node
+    runtime.approve(None, decision="hold", reason="queue is full",
+                    cwd=str(tmp_path), scope="m", now=2.0)
+    st = runtime.status(cwd=str(tmp_path), scope="m", now=2.0, tick=False)
+    assert st["status"] == "done" and st.get("outcome") == "held", st.get("outcome")

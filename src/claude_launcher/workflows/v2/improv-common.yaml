@@ -236,6 +236,7 @@ collection_types:
       set.landed: [daemon]
       remove: [driver]
     env: {TARGET: null}
+    # argv 항목의 $CFLOW_<NAME>은 엔진이 환경에서 채운다(셸 없이, claunch-yq80p.14).
     watch:
       every: 60
       probe: [git, merge-base, --is-ancestor, "$CFLOW_ITEM_TIP", "$CFLOW_TARGET"]

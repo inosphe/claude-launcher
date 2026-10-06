@@ -565,9 +565,19 @@ v1 `checklist:`의 대응:
 하면 환경 변수로 읽는다: param은 `CFLOW_IN_<NAME>`, 최상위 `data`의 스칼라 값은
 `CFLOW_DATA_<NAME>`(이름은 대문자, 영숫자 외 문자는 `_`). wait와 모니터의 `probe`는
 스칼라가 아닌 최상위 `data`도 JSON 텍스트로 받는다(64KB 이하, `runtime._value_env`).
-예: improv-worker-v2의 착지 대기는 `--landing "$CFLOW_DATA_LANDING"`으로 착지 기록 맵을
-넘긴다. 셸이 하는 `$VAR` 전개는
-엔진이 값을 끼워 넣는 것이 아니므로 허용된다. 근거: 렌더한 값을 셸 문자열에
+예: improv-worker-v2의 착지 대기는 값 없는 `--landing`으로 `landed_check`가
+`CFLOW_DATA_LANDING`을 직접 읽게 한다. 셸이 하는 `$VAR` 전개는
+엔진이 값을 끼워 넣는 것이 아니므로 허용된다. 단 문자열 명령은 Windows에서
+cmd.exe가 실행하므로 `$VAR`가 전개되지 않는다 — 이식성이 필요하면 명령이 환경을
+직접 읽거나 argv 형태를 쓴다. argv 명령(작업의 `verify`, wait·모니터의 `probe`,
+컬렉션 `watch.probe`)은 셸 없이 실행되므로 엔진이 각 항목 안의 `$CFLOW_<NAME>`을
+그 명령의 환경 값으로 바꾼다(없으면 빈 문자열, `runtime.expand_argv`). 값은 그
+항목 하나 안에 머물고 명령으로 해석되지 않는다. `CFLOW_`로 시작하지 않는 이름
+(`$HOME` 등)은 그대로 둔다(claunch-yq80p.14). 이름은 `$` 뒤의 영숫자와 `_`가
+이어지는 데까지다(`$CFLOW_A.b`의 이름은 `CFLOW_A`). `${CFLOW_A}` 형태는 바꾸지 않는다
+— 컴파일러가 명령 안의 `${...}`를 거절한다. 값이 `-`로 시작하면 받는 프로그램이
+옵션으로 읽을 수 있다. 값의 형식이 정해져 있지 않으면 프로그램이 받는 경우 `--`
+뒤에 두거나, 그 필드의 형식(커밋 sha 등)을 쓰는 쪽에서 보장한다. 근거: 렌더한 값을 셸 문자열에
 붙이면 값(`x || true` 등)이 명령이 되어 verify를 우회할 수 있다(리뷰 E1).
 
 ### 2.4 식(expression)
@@ -2122,7 +2132,8 @@ v2 워커의 착지 요청은 기본으로 pull request를 거친다. 로컬 착
   `landing-queue` 타입이 이 필드를 선언한다. `pr_url`이 있는 행은 리더의 PR 후보
   (`gh pr merge --merge --match-head-commit <tip>`, claunch-yq80p.6)이고 없으면 로컬
   후보다. 마커는 `LANDING REQUEST @ <sha> @ <remote>/<브랜치> pr: <url>`이다.
-- 착지 판정: 착지 대기 프로브는 `tools/landed_check.py --landing "$CFLOW_DATA_LANDING"`이다.
+- 착지 판정: 착지 대기 프로브는 `tools/landed_check.py --landing`이다(값 없이 주면
+  `CFLOW_DATA_LANDING`을 읽는다).
   기록의 `medium`이 `pr`이면 `--target <remote>/<base> --fetch`와 같은 질문이 된다 —
   리더가 원격 base에서 `gh pr merge`로 만든 머지는 fetch 전에는 이 저장소에 없다.
   `pr`인데 `remote`·`base`가 없으면 판정 불가(2)다. 그 밖의 매체와 기록이 없을 때는
@@ -2156,6 +2167,11 @@ v2 워커의 착지 요청은 기본으로 pull request를 거친다. 로컬 착
   관계와 근거는 자식 이슈의 `RELATION: <관계> — <근거>` 코멘트로 남긴다.
 - 착지 요청: `integration-request`의 leave push trigger 둘이 `when`으로 갈린다(2.8).
   independent 자식은 리더에게 nudge하고 부모 워커에게는 fyi만 보낸다.
+- 착지 여부 질문: 워커의 기계 확인이 깨져 `landing`이 escalate하면, 묻는 상대는 착지
+  요청을 받을 세션이다(claunch-yq80p.12). stacked는 `landing-review`(응답자: 조상 워커,
+  조상 리더, 형제 리더 순), independent는 `landing-review-leader`(조상 리더, 형제 리더
+  순)다. 두 노드는 질문 문구·선택지·작업 프롬프트를 YAML 앵커로 공유하고 `from`만
+  다르다. 30분 안에 답이 없으면 둘 다 사람 앞에 선다.
 - stack 런(stack-v2)은 stacked 자식만 다룬다. 표에 올리기 전에 자식 런의 입력
   (`claunch cflow2 status -t <자식> --json`의 `inputs.relation`)을 읽는다. independent
   자식만 두면 stack 런을 세우지 않는다.

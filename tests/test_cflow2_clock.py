@@ -821,3 +821,45 @@ def test_run_probe_env_and_timeout_kills_group(tmp_path):
     t0 = time.monotonic()
     code, out = cflow2_clock.run_probe("sleep 30 & sleep 30", str(tmp_path), timeout=0.5)
     assert code == 124 and time.monotonic() - t0 < 10
+
+
+def test_an_argv_probe_reads_cflow_variables_without_a_shell(tmp_path):
+    """An argv runs with no shell, so the engine fills each ``$CFLOW_<NAME>``
+    from the probe's env: the value stays one argument (never a command), an
+    unset one is empty, and other names are left alone (claunch-yq80p.14)."""
+    code, out = cflow2_clock.run_probe(
+        [sys.executable, "-c", "import json, sys; print(json.dumps(sys.argv[1:]))",
+         "$CFLOW_ITEM_TIP", "x=$CFLOW_GONE.", "$HOME"],
+        str(tmp_path), env={"CFLOW_ITEM_TIP": "a b; false"})
+    assert code == 0, out
+    assert json.loads(out) == ["a b; false", "x=.", "$HOME"]
+    assert runtime.expand_argv("echo $CFLOW_X", {"CFLOW_X": "1"}) == "echo $CFLOW_X"
+
+
+def test_the_landing_queue_watch_probe_sees_a_landed_tip(tmp_path):
+    """improv-common's landing-queue watch probe is an argv; with the tip
+    and the target filled in it answers 0 once the tip is on the target
+    (claunch-yq80p.14: it used to get the literal text and exit 128)."""
+    import subprocess
+    import yaml
+    from pathlib import Path
+
+    common = Path(runtime.__file__).parent.parent / "workflows" / "v2" / "improv-common.yaml"
+    probe = yaml.safe_load(common.read_text(encoding="utf-8"))[
+        "collection_types"]["landing-queue"]["watch"]["probe"]
+    repo = tmp_path / "r"
+    repo.mkdir()
+
+    def git(*a):
+        return subprocess.run(["git", "-C", str(repo), *a], check=True, capture_output=True,
+                              text=True).stdout.strip()
+    git("init", "-q", "-b", "master")
+    git("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "a")
+    tip = git("rev-parse", "HEAD")
+    git("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "b")
+    env = {"CFLOW_ITEM_TIP": tip, "CFLOW_TARGET": "master"}
+    assert cflow2_clock.run_probe(probe, str(repo), env=env)[0] == 0
+    git("checkout", "-q", "-b", "side", tip)
+    git("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "c")
+    env["CFLOW_ITEM_TIP"] = git("rev-parse", "HEAD")
+    assert cflow2_clock.run_probe(probe, str(repo), env=env)[0] == 1

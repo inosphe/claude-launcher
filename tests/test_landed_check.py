@@ -419,6 +419,19 @@ def test_a_v2_pr_landing_record_asks_the_remote_base_with_a_fetch(tmp_path, caps
     assert "landed: ghe/master" in capsys.readouterr().out
 
 
+def test_a_bare_landing_flag_reads_the_record_from_the_probe_env(tmp_path, capsys, monkeypatch):
+    """The landed-wait probe says ``--landing`` with no value so no shell has
+    to expand ``$CFLOW_DATA_LANDING`` (cmd.exe does not): the record is read
+    from the environment (claunch-yq80p.13)."""
+    worker = _build_pr_landing(tmp_path)
+    monkeypatch.setenv(landed_check.LANDING_ENV, json.dumps(
+        {"medium": "pr", "remote": "ghe", "base": "master"}))
+    assert _run(worker, "--landing") == 0
+    assert "landed: ghe/master" in capsys.readouterr().out
+    monkeypatch.delenv(landed_check.LANDING_ENV)
+    assert _run(worker, "--landing") == 1  # no record: the local question
+
+
 def test_a_local_landing_record_keeps_the_local_question(base):
     # medium local (or no record yet): the merge-parent scan as before
     for rec in ('{"medium": "local", "remote": null, "base": null}', "null", ""):
