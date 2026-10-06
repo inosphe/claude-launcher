@@ -284,6 +284,10 @@ class _Ctx:
     collection_types: Dict[str, Tuple[Any, str, int]] = field(default_factory=dict)
     #: question_types name -> (normalized declaration, file, line)
     question_types: Dict[str, Tuple[Dict[str, Any], str, int]] = field(default_factory=dict)
+    #: collections an included file declares -> (raw declaration, file, line):
+    #: its procedures may operate on them, so the including chart gets them
+    #: unless it declares the same name itself
+    included_collections: Dict[str, Tuple[Any, str, int]] = field(default_factory=dict)
 
     def err(self, file: str, line: int, msg: str) -> FrontendError:
         return FrontendError(f"{file}:{line}: {msg}" if line else f"{file}: {msg}")
@@ -648,6 +652,14 @@ def _include(ctx: _Ctx, name: str, file: str, line: int) -> Optional[Dict[str, A
     try:
         doc = _read_doc(ctx, path)
         _absorb(ctx, doc, path.name)
+        cols = doc.get("collections")
+        if cols is not None:
+            cline = _key_line(doc, "collections", 1)
+            cols = _need_map(ctx, path.name, cols, "collections", cline)
+            for cname, raw in cols.items():
+                # the first include that declares a name keeps it
+                ctx.included_collections.setdefault(
+                    str(cname), (raw, path.name, _key_line(cols, cname, cline)))
     finally:
         ctx.including.pop()
     return doc
@@ -1476,12 +1488,25 @@ _BUILDERS: Dict[str, Callable[..., None]] = {
 
 def _collection_decls(ctx: _Ctx, file: str, doc: Dict[str, Any]) -> Dict[str, Any]:
     raw = doc.get("collections")
-    if raw is None:
-        return {}
-    cline = _key_line(doc, "collections", 1)
-    raw = _need_map(ctx, file, raw, "collections", cline)
     types = {name: entry[0] for name, entry in ctx.collection_types.items()}
     out: Dict[str, Any] = {}
+    own = set()
+    if raw is not None:
+        own = {str(n) for n in _need_map(ctx, file, raw, "collections",
+                                          _key_line(doc, "collections", 1))}
+    # an included file's collections come along (its procedures use them);
+    # this file's own declaration of a name replaces the included one
+    for name, (decl, ifile, iline) in ctx.included_collections.items():
+        if name in own:
+            continue
+        try:
+            out[name] = _collections.normalize(name, _plain(decl), types)
+        except _collections.CollectionError as exc:
+            raise ctx.err(ifile, iline, str(exc)) from None
+    if raw is None:
+        return out
+    cline = _key_line(doc, "collections", 1)
+    raw = _need_map(ctx, file, raw, "collections", cline)
     for name, decl in raw.items():
         dline = _key_line(raw, name, cline)
         decl = _need_map(ctx, file, decl, f"collection {name!r}", dline)

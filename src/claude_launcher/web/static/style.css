@@ -5526,8 +5526,13 @@ div.shadow-card .shadow-line { white-space: normal; overflow-wrap: anywhere; }
 .cf2-col-table { border-collapse: collapse; font-size: 12px; width: 100%; }
 .cf2-col-table th, .cf2-col-table td { text-align: left; padding: 2px 6px; border-bottom: 1px solid #30363d; vertical-align: top; }
 .cf2-col-fields { overflow-wrap: anywhere; color: #8b949e; }
+.cf2-col-link { margin-left: 8px; color: #58a6ff; white-space: nowrap; }
+.cf2-col-link:hover { text-decoration: underline; }
 .cf2-col-status.landed { color: #3fb950; }
 .cf2-col-status.rejected { color: #f85149; }
+.cf2-col-status.merged { color: #a371f7; }
+.cf2-col-status.open { color: #3fb950; }
+.cf2-col-status.closed { color: #f85149; }
 .cf2-col-actions { white-space: nowrap; }
 .cf2-trigger { font-size: 12px; margin: 0; }
 .cf2-trigger.skipped { color: #d29922; }

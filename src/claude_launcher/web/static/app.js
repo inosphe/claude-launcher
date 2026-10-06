@@ -26006,21 +26006,32 @@ function renderCflow2Into(box, data, ui) {
 
 /* One collection of a v2 run (docs/cflow-v2.md 2.7) as rows: key, status
    and the other fields as `name=value`. A queue is keyed by its `key`
-   field, a log by its sequence number. */
+   field, a log by its sequence number. A field whose value is an http(s)
+   URL leaves the text and becomes a link (docs 10a): `url`/`pr_url` next
+   to a `number`/`pr_number` reads "PR #N", any other is named by its field. */
 function cflow2CollectionRows(col) {
   col = col || {};
   const keyField = col.key || null;
   const skip = new Set(["status", "seq", "at", "by"]);
   if (keyField) skip.add(keyField);
+  const isUrl = (v) => typeof v === "string" && /^https?:\/\/\S+$/.test(v);
   return (col.items || []).map((it) => {
     it = it || {};
     const key = keyField ? it[keyField] : (it.seq !== undefined ? `#${it.seq}` : "");
-    const fields = Object.keys(it).filter((k) => !skip.has(k) && it[k] !== null && it[k] !== "")
+    const shown = Object.keys(it).filter((k) => !skip.has(k) && it[k] !== null && it[k] !== "");
+    const fields = shown.filter((k) => !isUrl(it[k]))
       .map((k) => `${k}=${typeof it[k] === "object" ? JSON.stringify(it[k]) : it[k]}`);
     if (!keyField && it.by) fields.unshift(`by=${it.by}`);
+    const links = shown.filter((k) => isUrl(it[k])).map((k) => {
+      const num = k === "url" ? it.number : k === "pr_url" ? it.pr_number : undefined;
+      const pr = (k === "url" || k === "pr_url") && /\/pull\/\d+/.test(it[k]);
+      const n = num !== undefined && num !== null && num !== "" ? num
+        : pr ? it[k].match(/\/pull\/(\d+)/)[1] : null;
+      return { field: k, href: it[k], label: pr && n !== null ? `PR #${n}` : k };
+    });
     return { key: key === undefined || key === null ? "" : String(key),
              status: it.status === undefined || it.status === null ? "" : String(it.status),
-             fields: fields.join("  ") };
+             fields: fields.join("  "), links };
   });
 }
 
@@ -26080,7 +26091,16 @@ function cflow2CollectionTable(name, col, post) {
     const tr = el("tr");
     tr.appendChild(el("td", "mono", r.key));
     tr.appendChild(el("td", "cf2-col-status " + r.status, r.status));
-    tr.appendChild(el("td", "mono cf2-col-fields", r.fields));
+    const ftd = el("td", "mono cf2-col-fields", r.fields);
+    for (const l of r.links || []) {
+      const a = el("a", "cf2-col-link", l.label);
+      a.href = l.href;
+      a.target = "_blank";
+      a.rel = "noopener noreferrer";
+      a.title = l.href;
+      ftd.appendChild(a);
+    }
+    tr.appendChild(ftd);
     if (queue) {
       const td = el("td", "cf2-col-actions");
       if (values.length) {

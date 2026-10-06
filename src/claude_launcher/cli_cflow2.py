@@ -518,6 +518,45 @@ def _cmd_collection(args: argparse.Namespace) -> int:
     return 0
 
 
+#: ``pr-preflight`` exit codes: the facts a v2 worker's landing reads to
+#: choose its medium (docs/cflow-v2.md 4.6, claunch-yq80p.5).
+PR_READY = 0
+PR_BLOCKED = 1
+
+
+def _cmd_pr_preflight(args: argparse.Namespace) -> int:
+    """Can this directory land through a pull request right now? The same
+    facts the session panel's PR wizard checks (prflow.preview): a
+    repository with a commit, a remote on a GitHub host, ``gh`` installed
+    and signed in to that host. Prints one JSON object (``ready``,
+    ``remote``, ``host``, ``slug``, ``repo`` = the ``-R`` value, ``base``,
+    ``head``, ``gh``, ``account``, ``blockers``); exit 0 = ready, 1 = not."""
+    from . import prflow
+
+    cwd = os.path.abspath(args.cwd or os.getcwd())
+    doc = prflow.preview(cwd, session=os.environ.get("CLAUNCH_SESSION", ""))
+    row = next((r for r in doc.get("remotes") or [] if r["remote"] == doc.get("remote")), {})
+    host, slug = row.get("host"), row.get("slug")
+    if doc.get("repo") and doc.get("remote") and not host:
+        doc["blockers"].append(f"the chosen remote {doc['remote']!r} is not on a GitHub host")
+    auth = (doc.get("auth") or {}).get(host or "", {})
+    out = {
+        "ready": not doc["blockers"],
+        "remote": doc.get("remote") or None,
+        "configured": bool(row.get("configured")),
+        "host": host, "slug": slug,
+        "repo": f"{host}/{slug}" if host and slug else None,
+        "base": doc.get("base") or "master",
+        "branch": doc.get("branch") or None,
+        "head": doc.get("head") or None,
+        "gh": (doc.get("gh") or {}).get("version"),
+        "account": auth.get("account"),
+        "blockers": doc["blockers"],
+    }
+    print(json.dumps(out, ensure_ascii=False, indent=None if args.compact else 1))
+    return PR_READY if out["ready"] else PR_BLOCKED
+
+
 def register(sub) -> None:
     p = sub.add_parser(
         "cflow2",
@@ -635,6 +674,12 @@ def register(sub) -> None:
     r.add_argument("name")
     r.add_argument("key")
     r.set_defaults(func=_guarded(_cmd_collection))
+
+    q = csub.add_parser("pr-preflight", help="can this directory land through a pull "
+                        "request now (remote, host, gh, sign-in)? JSON; exit 0 ready, 1 not")
+    q.add_argument("--cwd", help="the repository directory (default: here)")
+    q.add_argument("--compact", action="store_true", help="one line of JSON")
+    q.set_defaults(func=_cmd_pr_preflight)
 
     q = scoped(csub.add_parser("resume", help="resume a run a 'halt' monitor stopped "
                                "(waiting_approval, reason monitor_violation)"))

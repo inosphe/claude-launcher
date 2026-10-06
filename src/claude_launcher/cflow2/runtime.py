@@ -85,7 +85,7 @@ import threading
 import time
 import uuid
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 from . import executors, ir
 from . import store as store_mod
@@ -4802,6 +4802,39 @@ def _trigger_parts(raw: Any) -> Tuple[Optional[str], str, Optional[Dict[str, Any
     return (str(do) if do else None), str(raw.get("at") or AT_ENTER), push
 
 
+def _push_data_keys(push: Dict[str, Any]) -> List[str]:
+    """The top-level ``$data`` keys a trigger push's ``each``/``item``
+    expressions read (doc 2.8), sorted; an expression that does not parse
+    contributes none (the daemon reports it when it evaluates)."""
+    keys: Set[str] = set()
+
+    def walk(node: Any) -> None:
+        if isinstance(node, list):
+            for sub in node:
+                walk(sub)
+            return
+        if not isinstance(node, tuple) or not node:
+            return
+        if node[0] == "ref":
+            if node[1] == "data" and node[2] and node[2][0][0] == "field":
+                keys.add(str(node[2][0][1]))
+            for seg in node[2]:
+                if seg[0] == "index":
+                    walk(seg[1])
+            return
+        for item in node[1:]:
+            walk(item)
+
+    texts = [push.get("each")] + list((push.get("item") or {}).values())
+    for text in texts:
+        if isinstance(text, str):
+            try:
+                walk(expr_mod.parse(text).ast)
+            except expr_mod.ExprError:
+                continue
+    return sorted(keys)
+
+
 def _queue_triggers(r: "Run", iid: str, node: ir.Node, at: str) -> None:
     """Record the node's triggers for ``at`` (``trigger_queued``); the daemon
     clock claims and performs them (doc 2.8). Every pass records again."""
@@ -4817,6 +4850,13 @@ def _queue_triggers(r: "Run", iid: str, node: ir.Node, at: str) -> None:
                                "queued_at": store_mod.utcnow()}
         if push is not None:
             rec["push"] = copy.deepcopy(push)
+            # $data.<key> in a push expression reads the run's data as it is
+            # now, at the node change -- the daemon performs it later, from a
+            # record that must not depend on what the run did meanwhile.
+            keys = _push_data_keys(push)
+            if keys:
+                data = r.state.get("data") or {}
+                rec["data"] = {k: copy.deepcopy(data.get(k)) for k in keys}
         r.state.setdefault("triggers", []).append(rec)
         r.emit("trigger_queued", trigger=tid, node=node.id, label=node.label or None,
                instance=iid, at=at, do=do)

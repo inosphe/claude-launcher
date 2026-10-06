@@ -140,3 +140,32 @@ def test_collection_writes_are_denied_to_the_agent():
         assert f"Bash(claunch cflow2 collection {cmd}:*)" in rules
         assert f"Bash(*claunch* cflow2 collection {cmd}*)" in rules
     assert not any("collection ls" in r for r in rules)
+
+
+def test_pr_preflight_prints_the_facts_and_exits_by_readiness(tmp_path, capsys, monkeypatch):
+    # claunch-yq80p.5: the remote-setup task reads this to choose PR or local
+    from claude_launcher import prflow
+
+    ready = {"repo": True, "remote": "origin", "base": "master", "branch": "w1-x",
+             "head": "a" * 40, "gh": {"installed": True, "version": "2.45.0"},
+             "auth": {"ghe.example": {"authenticated": True, "account": "me"}},
+             "remotes": [{"remote": "origin", "host": "ghe.example", "slug": "o/r",
+                          "configured": False}],
+             "blockers": []}
+    monkeypatch.setattr(prflow, "preview", lambda cwd, session="": json.loads(json.dumps(ready)))
+    assert run("pr-preflight", "--cwd", str(tmp_path), "--compact") == cli_cflow2.PR_READY
+    doc = json.loads(capsys.readouterr().out)
+    assert doc["ready"] is True and doc["repo"] == "ghe.example/o/r"
+    assert doc["account"] == "me" and doc["base"] == "master" and doc["blockers"] == []
+
+    blocked = dict(ready, blockers=["gh is not signed in to ghe.example"])
+    monkeypatch.setattr(prflow, "preview", lambda cwd, session="": json.loads(json.dumps(blocked)))
+    assert run("pr-preflight", "--cwd", str(tmp_path)) == cli_cflow2.PR_BLOCKED
+    assert json.loads(capsys.readouterr().out)["ready"] is False
+
+    # a remote with no GitHub host is a blocker even when preview found none
+    local = dict(ready, remotes=[{"remote": "origin", "host": None, "slug": None,
+                                  "configured": False}])
+    monkeypatch.setattr(prflow, "preview", lambda cwd, session="": json.loads(json.dumps(local)))
+    assert run("pr-preflight", "--cwd", str(tmp_path)) == cli_cflow2.PR_BLOCKED
+    assert "not on a GitHub host" in json.loads(capsys.readouterr().out)["blockers"][0]

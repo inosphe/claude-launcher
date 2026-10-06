@@ -307,7 +307,11 @@ def test_triggers_mirror_v1_at_the_corresponding_tasks():
         if not trig:
             continue
         assert node.label in v1, node.id
-        assert sorted((t["do"], t["at"]) for t in trig) == v1[node.label], node.id
+        # a push to parent:landing is v1's enqueue-landing with more fields
+        # (the PR landing fields, claunch-yq80p.5)
+        got = sorted(("enqueue-landing" if t["do"] == "push" and (t.get("push") or {}).get("to")
+                      == "parent:landing" else t["do"], t["at"]) for t in trig)
+        assert got == v1[node.label], node.id
         seen.add(node.label)
     assert seen == set(v1)
 
@@ -328,3 +332,39 @@ def test_landing_queue_and_signals_types():
     with pytest.raises(FrontendError, match="env.TARGET is required"):
         compile_text(head + "collections:\n  landing: {type: landing-queue}\n",
                      source="t.yaml", resolve_include=resolve)
+
+
+# --------------------------------------------------------------------------- #
+# PR landing (claunch-yq80p.5, docs/cflow-v2.md 10a)
+# --------------------------------------------------------------------------- #
+def _labels(chart):
+    return {n.label for n in chart.nodes.values() if n.label}
+
+
+def test_the_round_decides_its_landing_medium_and_publishes_a_pr():
+    chart = layers.load("improv-worker-v2")
+    labels = _labels(chart)
+    assert {"remote-setup", "pr-open", "medium-blocked", "publish-blocked"} <= labels
+    assert chart.data["landing"]["medium"] == "local"
+    prs = chart.meta["collections"]["prs"]
+    assert prs["key"] == "number" and prs["lifecycle"]["inherit"] is True
+    assert set(prs["item"]) >= {"number", "url", "branch", "base", "issues"}
+    # the landing push carries the medium and the PR
+    req = next(n for n in chart.nodes.values() if n.label == "integration-request")
+    (push,) = [t["push"] for t in req.get("triggers") if isinstance(t, dict) and t.get("push")]
+    assert push["to"] == "parent:landing"
+    assert {"medium", "pr_url", "pr_number", "base"} <= set(push["item"])
+    # the leader's queue type declares them
+    common = yaml.safe_load(COMMON.read_text(encoding="utf-8"))
+    assert {"medium", "pr_url", "pr_number", "base"} <= set(
+        common["collection_types"]["landing-queue"]["item"])
+
+
+def test_remote_setup_reads_the_preflight_and_the_force_inputs():
+    text = V2.read_text(encoding="utf-8")
+    doc = yaml.safe_load(text)
+    prompt = doc["nodes"]["remote-setup"]["prompt"]
+    assert "claunch cflow2 pr-preflight" in prompt
+    assert "${data.inputs.force_pr}" in prompt and "${data.inputs.force_no_pr}" in prompt
+    assert set(doc["nodes"]["remote-setup"]["returns"]) == {"ok", "blocked"}
+    assert set(doc["nodes"]["pr-open"]["returns"]) == {"ok", "failed"}

@@ -409,6 +409,46 @@ inputs:
     `claunch spawn`의 `--input NAME=VALUE`(반복 가능, 같은 이름을 두 번 쓰면 목록)와
     `--inputs-file PATH.json`, `--wizard`는 선언된 입력을 한 줄씩 묻는다.
 
+#### 입력 사이의 제약(input_constraints)
+
+입력 하나의 형식으로 표현할 수 없는 규칙(두 입력이 함께 켜질 수 없음, 한 입력이
+있으면 다른 입력도 필요함)은 최상위 `input_constraints:`에 식으로 쓴다
+(claunch-yq80p.5).
+
+```yaml
+input_constraints:
+  - assert: not ($inputs.force_pr and $inputs.force_no_pr)
+    fields: [force_pr, force_no_pr]
+    message: PR 강제와 PR 금지는 함께 켤 수 없다
+  - "$inputs.rounds == null or $inputs.rounds > 0"   # 문자열만 쓰면 assert
+```
+
+- `assert`는 2.4의 식이고 `$inputs.<이름>`만 읽는다. 다른 루트(`$data` 등), 컬렉션
+  함수, 선언되지 않은 입력 이름, 파싱되지 않는 식은 컴파일 오류다.
+- `fields`는 식이 거짓일 때 폼이 표시할 입력이다. 생략하면 식이 읽는 입력이다.
+  `message`를 생략하면 `constraint not met: <assert>`다.
+- 컴파일 결과는 `chart.meta['input_constraints']`에 실린다. `inputs.normalize`가
+  입력별 검사 뒤에 평가하므로 시작(`POST /api/sessions`·spawn·`POST
+  /api/cflow/start`·CLI·MCP)은 모두 같은 값을 같은 문구로 거절한다. 식이 읽는 입력
+  중 하나라도 자체 검사에 실패했으면 그 제약은 평가하지 않는다(그 입력의 오류가
+  먼저다). 거짓인 제약의 문구는 `fields`의 입력마다 오류로 붙고, `fields`가 빈
+  목록이면 `_constraints` 키에 붙는다.
+- 폼은 입력을 바꿀 때마다 `POST /api/cflow2/inputs/check`(본문 `workflow`,
+  `workflow_version`, `cwd`, `cflow_inputs`)를 부른다. 응답은 `{ok, values,
+  errors}`이고 시작과 같은 검사다. 정의 목록 항목과 `GET /api/cflow2/definition`은
+  `input_constraints`(제약 목록)를 싣고, 폼은 입력 칸 아래에 그 문구를 보여 준다.
+
+#### 사전 확인(precheck)
+
+입력 선언의 `precheck: gh`는 그 입력을 켜기 전에 환경을 확인한다는 표시다. 새 세션
+폼은 `GET /api/tools/gh?cwd=<세션 디렉터리>`(설정 화면의 gh 카드와 같은
+`ghcli.status`, 그 디렉터리 하나로 좁힌 것)를 불러 입력 칸 아래에 gh 버전과
+로그인 상태를 보여 준다. gh가 설치되어 있고 그 디렉터리가 push하는 모든 호스트에
+로그인되어 있을 때만 `bool` 입력을 켤 수 있다. 아니면 체크박스를 끄고 비활성화하며
+설치·로그인 명령을 함께 보여 준다. 다시 확인 버튼이 있다. 이 확인은 안내이고, 값을
+쓰는 쪽(워크플로의 작업)이 실행 시점에 다시 확인한다. 현재 `precheck` 값은 `gh`
+하나다.
+
 ### 2.7 컬렉션(collections)
 
 런이 여러 단계와 여러 런에 걸쳐 쌓고 고치는 기록을 형식과 함께 선언한다. v1의
@@ -544,6 +584,14 @@ collections:
 
 정리는 저널 `collection_reset`(버린 것, 남긴 것)으로 남는다.
 
+**include로 따라오는 컬렉션**
+
+`include`한 파일이 최상위 `collections:`를 선언하면 포함하는 정의도 그 컬렉션을
+가진다. 포함된 파일의 프로시저가 그 컬렉션에 연산(`do:`)을 쓰기 때문이다(예:
+`improv-worker-v2`의 `pr-open`이 쓰는 `prs`). 포함하는 정의가 같은 이름을 직접
+선언하면 그 선언이 쓰인다. 같은 이름을 여러 포함 파일이 선언하면 먼저 포함된 것이
+쓰인다.
+
 **재사용**
 
 `include`한 파일의 최상위 `collection_types:`(이름 → 컬렉션 선언)를 `type:`으로
@@ -600,6 +648,11 @@ nodes:
 - trigger는 런을 멈추지 않는다. 실패는 사유를 남기고 끝난다.
 - `push`는 `each`의 레코드를 모두 시도한다. 하나라도 거절되면 `trigger_skipped`(거절 수와 사유)이고,
   이미 들어간 레코드는 남는다.
+- `push` 식은 `$data`도 읽는다. 엔진은 trigger를 기록할 때 식이 읽는 `$data`의
+  최상위 키만 그 순간의 값으로 기록(`triggers[].data`)에 함께 남기고, 데몬은 그
+  값으로 평가한다. 그래서 기록과 실행 사이에 런이 데이터를 바꿔도 push는 노드가
+  바뀐 순간의 값을 쓴다(claunch-yq80p.5, improv-worker-v2의 착지 요청이 PR url을
+  싣는 경로).
 - `$facts`는 trigger의 `push` 식에서만 읽는다(다른 식에서 `$facts`·`$each`를 읽으면 검사 오류
   `facts-outside-trigger`, push 식에서 컬렉션 함수를 쓰면 `trigger-collection-read`). 데몬이 실행 시점에 잰다:
   `head`(드라이버 세션 checkout의 HEAD. 런의 cwd에서 잰다), `branch`, `in_review`(드라이버 세션이
@@ -1558,6 +1611,67 @@ spec:
   `landing` 컬렉션을 가지면 그 컬렉션을 보여 주고 바꾼다(`status` 값은 v1과 같다).
 - 한 세션에서 v1 `landing_queue`와 v2 `landing` 컬렉션을 동시에 가진 런이 있으면
   대상이 둘이므로 push는 건너뛰고(`trigger_skipped`) 경고를 남긴다.
+
+## 10a. PR 착지 (improv-worker-v2, claunch-yq80p.5)
+
+v2 워커의 착지 요청은 기본으로 pull request를 거친다. 로컬 착지(상위가 워커
+브랜치를 `--no-ff`로 머지)도 시작 입력으로 고를 수 있는 경로로 남는다.
+
+| 입력 | 착지 매체 | PR을 만들 수 없을 때 |
+|---|---|---|
+| 둘 다 끔(기본) | PR | 사유를 이슈 코멘트(`LANDING MEDIUM: local (…)`)에 남기고 로컬로 대체 |
+| `force_pr` | PR | 대체하지 않는다. 사람의 선택(`retry` / 이번 회차만 `local`)을 기다린다 |
+| `force_no_pr` | 로컬 | 해당 없음 |
+
+두 입력은 `input_constraints`의 `not ($inputs.force_pr and $inputs.force_no_pr)`로
+함께 켤 수 없고, `force_pr`은 `precheck: gh`다(2.6).
+
+- 판정 시점: 회차의 `branch-setup` 뒤 프로시저 `landing-medium`(작업
+  `remote-setup`). 사실은 `claunch cflow2 pr-preflight`가 낸다 — `prflow.preview`
+  (세션 패널 PR 마법사와 같은 확인: 저장소, 커밋, GitHub 호스트의 원격, gh 설치,
+  그 호스트에 로그인)를 JSON 한 줄(`ready`, `remote`, `repo`, `base`, `blockers` …)로
+  출력하고 종료 코드 0이 ready, 1이 아님이다. 원격은 `git config claunch.pr.remote`,
+  없으면 `origin`이고 base는 `claunch.pr.base`, 없으면 master다.
+- 원격 편성(상위 세션이 다른 머신)에서는 로컬 착지가 성립하지 않으므로 PR을 만들 수
+  없으면 `force_pr`과 같이 사람의 선택을 기다린다. 머신을 넘는 커밋 참조는
+  `<sha> @ <remote>/<ref>`로 쓰고(docs/remote-commit-protocol.md), rebase 기준은
+  `<remote>/<base>`(브랜치 upstream)다.
+- 결과는 `data.landing`(`medium`, `reason`, `remote`, `repo`, `base`, `pr_url`,
+  `pr_number`)에 묶인다.
+- 게시: 동료 리뷰 통과 뒤 `medium == 'pr'`이면 프로시저 `pr-publish`(작업
+  `pr-open`)가 명시 refspec으로 push하고 `git ls-remote`로 원격 SHA를 확인한 뒤 PR을
+  열거나(이미 같은 브랜치의 OPEN PR이 있으면 갱신만) 결과를 `data.landing`에 다시
+  묶는다. 실패하면 `force_pr`이 꺼져 있을 때는 사유를 남기고 로컬로 바꾸고, 켜져
+  있으면 사람의 선택을 기다린다.
+- PR 모음: 런의 `prs` 컬렉션(queue, key `number`, 상태 open/merged/closed,
+  `inherit`)이 이 세션이 연 PR을 회차를 넘어 기록한다. `pr-open`의 leave `do:`가
+  넣고, watch가 `gh pr view`로 MERGED를 재서 상태를 옮긴다. 재작업·후속 수정은 같은
+  브랜치의 열린 PR에 push로 모이고, 다른 브랜치의 연관 작업은 새 PR 본문 첫 줄의
+  `Follow-up of #N`과 이전 PR의 링크 코멘트로 이어진다.
+- 착지 요청: `integration-request`의 leave push가 착지 큐 레코드에 `medium`,
+  `pr_url`, `pr_number`, `base`를 싣는다(`$data.landing`, 2.8). `improv-common`의
+  `landing-queue` 타입이 이 필드를 선언한다. `pr_url`이 있는 행은 리더의 PR 후보
+  (`gh pr merge --merge --match-head-commit <tip>`, claunch-yq80p.6)이고 없으면 로컬
+  후보다. 마커는 `LANDING REQUEST @ <sha> @ <remote>/<브랜치> pr: <url>`이다.
+- 웹 UI: 런 패널의 컬렉션 표는 값이 http(s) URL인 필드를 텍스트에서 빼고 새 탭
+  링크로 보인다. `url`·`pr_url`이 `/pull/<N>` 형태면 링크 이름은 `PR #N`(번호는
+  같은 행의 `number`·`pr_number`가 우선)이고, 그 밖의 URL은 필드 이름이다. 그래서
+  워커 런의 `prs`와 리더 런의 `landing` 행에서 PR로 바로 이동한다. 상태 열은
+  `prs`의 open/merged/closed를 색으로 구분한다. v1 리더의 `landing_queue:`는 PR
+  필드를 싣지 않으므로 그 경우 PR 주소는 착지 요청 마커에서만 읽힌다.
+
+### 실측 (2026-10-06, 실제 원격 github.ncsoft.com/RnIAgentDev/claunch, base = 전용 브랜치 `cflow2-pr-measure`)
+
+| 항목 | 결과 |
+|---|---|
+| `--match-head-commit`에 틀린 SHA | 거절(exit 1, `Head branch was modified`) |
+| 리뷰 뒤 head에 새 커밋 push, 이전 SHA로 머지 | 거절(같은 문구) |
+| 올바른 SHA | 머지됨. merge commit의 부모 = base tip, PR head |
+| 충돌하는 PR | 직후 `mergeable` UNKNOWN, 수 초 뒤 CONFLICTING. 머지 거절(`not mergeable`) |
+| 새 fetch 뒤 head가 base의 조상인가 | 참 |
+| gh 상태별 종료 코드 | 정상 0, 미로그인(`auth status`) 1, 미설치 127 |
+
+`mergeable`이 UNKNOWN이면 판정하지 않고 다시 조회한다.
 
 ## 11. 단계
 

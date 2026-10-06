@@ -219,7 +219,11 @@ collection_types:
   landing-queue:
     kind: queue
     key: issue
-    item: {issue: str, branch: str, tip: str, requested_by: str, note: "str?"}
+    # medium·pr_url·pr_number·base는 PR 착지(claunch-yq80p.5)의 필드다.
+    # pr_url이 있는 행은 PR 후보(gh pr merge --merge --match-head-commit <tip>),
+    # 없으면 로컬 --no-ff 후보다.
+    item: {issue: str, branch: str, tip: str, requested_by: str, note: "str?",
+           medium: "str?", pr_url: "str?", pr_number: "int?", base: "str?"}
     status:
       values: [requested, waiting, deferred, landed, rejected]
       initial: requested
