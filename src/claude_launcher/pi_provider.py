@@ -179,6 +179,10 @@ def resolve(
             f"providers.{name}.endpoints.openai to the backend's OpenAI-"
             "compatible root)"
         )
+    try:
+        urls = provider_spec.openai_urls(openai_root)
+    except provider_spec.SpecError as exc:
+        raise PiProviderError(str(exc)) from exc
     models = list(spec.model_list())
     if not models:
         raise PiProviderError(
@@ -207,7 +211,7 @@ def resolve(
         if max_tokens > (spec.context_window or 128000):
             raise PiProviderError(f"{ENV_MAX_TOKENS} cannot exceed context_window")
     return Projection(
-        base_url=provider_spec.openai_urls(openai_root).base_url,
+        base_url=urls.base_url,
         api="openai-completions",
         models=tuple(models),
         default_model=spec.model("default") or models[0],

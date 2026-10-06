@@ -626,7 +626,10 @@ version path required by the backend (for Fireworks,
 Observer share this URL interpretation: Pi receives the base, and direct
 calls append `/chat/completions`. A full `/chat/completions` URL is also
 accepted and reduced to its base for Pi. Custom paths such as `/api/v2` are
-preserved. The historical Fireworks `https://api.fireworks.ai/inference`
+preserved. Query parameters and fragments in `endpoints.openai` are rejected
+by Pi, profile-based briefings and Observer before a request is sent; their
+clients append resource paths to the base URL. The historical Fireworks
+`https://api.fireworks.ai/inference`
 value is normalized to `/inference/v1` with a compatibility warning; other
 URLs receive no implicit version suffix. `endpoints.anthropic` keeps its
 own protocol's base URL convention.

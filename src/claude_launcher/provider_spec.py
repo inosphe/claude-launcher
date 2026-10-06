@@ -78,12 +78,19 @@ def openai_urls(endpoint: str) -> OpenAIUrls:
     The value is the backend's API base, including any required version path.
     A full Chat Completions URL is accepted for compatibility. Arbitrary bases
     retain their path; only Fireworks' historical ``/inference`` base gains
-    ``/v1``. Memoization bounds repeated compatibility warnings during polls.
+    ``/v1``. Queries and fragments are rejected because SDKs and the shim
+    append resource paths to the base string. Memoization bounds repeated
+    compatibility warnings during polls.
     """
     endpoint = endpoint.strip()
     if not endpoint:
         return OpenAIUrls("", "")
     parts = urlsplit(endpoint)
+    if parts.query or parts.fragment:
+        raise SpecError(
+            "endpoints.openai must be an API base URL without query parameters "
+            "or a fragment"
+        )
     path = parts.path.rstrip("/")
     suffix = "/chat/completions"
     if path.endswith(suffix):
