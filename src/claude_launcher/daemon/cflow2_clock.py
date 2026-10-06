@@ -638,7 +638,12 @@ class Cflow2Clock:
 
             def runner(c: str, a: Dict[str, Any], sess: str) -> Dict[str, Any]:
                 return RestartClock._execute(c, a, sess)
-        result = runner(cwd, action, session)
+        try:
+            result = runner(cwd, action, session)
+        except Exception as exc:  # noqa: BLE001 - record it, or the task waits on 'running'
+            # until a daemon restart marks it interrupted
+            log.exception("cflow2 restart runner raised %s/%s", cwd, scope)
+            result = {"exit_code": None, "output": f"restart runner raised: {exc!r}"}
         done = runtime.complete_restart(str(action.get("instance")), str(action.get("token")),
                                         result.get("exit_code"), str(result.get("output") or ""),
                                         cwd=cwd, scope=scope)
@@ -1094,6 +1099,9 @@ def restart_block(action: Dict[str, Any]) -> str:
     elif kind == "interrupted":
         event = ("the daemon boot that ran this restart stopped while it was running; it is "
                  "recorded as interrupted and will not run twice in this visit")
+    elif kind == "refused":
+        event = (f"the daemon refused this task's restart command: {action.get('reason')}. "
+                 "It is recorded as failed and was not run")
     else:
         event = f"no restart command is declared for platform {action.get('platform')!r}"
     return "\n".join([

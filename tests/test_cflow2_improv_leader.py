@@ -36,7 +36,7 @@ def test_compiles_with_no_check_findings():
 def test_meta_and_collection():
     chart = _chart()
     meta = chart.meta
-    assert meta["recur"] == {"auto": True}
+    assert meta["recur"] == {"auto": True, "min_gap": 60.0}
     assert meta["filter_roles"] == {"type": "whitelist", "roles": ["leader"]}
     assert meta["default_role"] is None  # v1 improv-leader keeps the default
     assert meta["default_child_cflow"] == "improv-worker-v2"
@@ -165,7 +165,9 @@ def test_a_round_end_to_end(tmp_path):
     ld.report("landed-notice")
     assert ld.st["status"] == "done" and ld.st["next_round"]["auto"] is True
 
-    # recur auto: the daemon starts round 2; the window record carries over
+    # recur auto: the daemon starts round 2 after min_gap; the window record carries over
+    assert runtime.start_next_round(ld.cwd, "lead", ld.now) is None
+    ld.now += 60
     started = runtime.start_next_round(ld.cwd, "lead", ld.now)
     assert started["round"] == 2
     ld.status()
@@ -175,6 +177,89 @@ def test_a_round_end_to_end(tmp_path):
     ld.report("intake")
     ld.select("integrate", "y")  # 300s have passed since the last take
     assert ld.tasks() == ["integrate-preflight"]
+
+
+def _to_sweep(ld):
+    ld.report("intake")
+    ld.select("integrate")
+    ld.report("integrate-preflight", "ok", {"batch": ["x"]})
+
+
+def _deploy_ok(ld):
+    ld.restart(0)
+    ld.report("reflect")
+    ld.now += 1
+    ld.tick(_deploy(0))
+
+
+def test_a_red_sweep_keeps_the_round_and_still_reflects(tmp_path):
+    """X1: a sweep fail after the merge does not end the round failed; the
+    follow-up is requested and the merged items go on to reflect and notice."""
+    ld = Leader(tmp_path)
+    _to_sweep(ld)
+    ld.report("integrate", "ok", {"merges": [["x", "a" * 40, "b" * 40]], "master": "b" * 40})
+    ld.report("sweep", "fail", {"reason": "2 failed: tests/test_x.py"})
+    assert ld.st["status"] == "running" and ld.tasks() == ["batch-failed"]
+    ld.report("batch-failed", "ok", {"failed": "sweep", "cause": "test_x after x",
+                                     "followups": ["s9: x-2"]})
+    assert ld.tasks() == ["reflect"]
+    _deploy_ok(ld)
+    ld.report("landed-notice")
+    assert ld.st["status"] == "done" and ld.st["outcome"] == "ok"
+    assert ld.st["next_round"]["round"] == 2
+
+
+def test_an_integrate_fail_with_nothing_merged_returns_to_standby(tmp_path):
+    ld = Leader(tmp_path)
+    _to_sweep(ld)
+    ld.report("integrate", "fail", {"reason": "ff-only refused", "merges": []})
+    assert ld.tasks() == ["batch-failed"]
+    ld.report("batch-failed", "nothing_merged", {"reason": "no merge before the stop"})
+    assert ld.st["status"] == "running"
+    assert [c["label"] for c in ld.st["choices"]] == ["standby"]
+
+
+def test_an_integrate_fail_after_merges_reflects_them(tmp_path):
+    ld = Leader(tmp_path)
+    _to_sweep(ld)
+    ld.report("integrate", "fail", {"reason": "ff-only refused", "merges": [["x", "a", "b"]]})
+    ld.report("batch-failed", "ok", {"failed": "integrate", "cause": "local master ahead",
+                                     "followups": []})
+    assert ld.tasks() == ["reflect"]
+
+
+def test_all_candidates_dropped_at_merge_time_skip_sweep(tmp_path):
+    """Y11: integrate empty goes back to standby without a sweep or a restart."""
+    ld = Leader(tmp_path)
+    _to_sweep(ld)
+    ld.report("integrate", "empty", {"reason": "both conflicted"})
+    assert ld.st["status"] == "running" and ld.tasks() == []
+    assert [c["label"] for c in ld.st["choices"]] == ["standby"]
+
+
+def test_exhausted_reflect_retries_close_the_round(tmp_path):
+    """Y12: five failed deploy attempts close the round without deploy (ok,
+    so recur continues) instead of failing the run."""
+    ld = Leader(tmp_path)
+    _to_sweep(ld)
+    ld.report("integrate", "ok", {"merges": [], "master": "m"})
+    ld.report("sweep", "ok", {"tip": "m", "passed": 1, "failed": 0, "receipt": "r"},
+              verify=lambda *a: (0, ""))
+    for attempt in range(5):
+        assert ld.tasks() == ["reflect"], attempt
+        ld.restart(1)
+        ld.report("reflect")
+        ld.now += 1
+        ld.tick(_deploy(1))
+        ld.now += 600
+        ld.tick()
+        assert ld.tasks() == ["reflect-pregate"], attempt
+        ld.report("reflect-pregate")
+        ld.select("retry", f"exit 1, attempt {attempt}")
+    assert ld.st["status"] == "running" and ld.tasks() == ["reflect-closed"]
+    ld.report("reflect-closed")
+    ld.report("landed-notice")
+    assert ld.st["status"] == "done" and ld.st["next_round"]["round"] == 2
 
 
 def test_close_ends_the_round_without_deploy(tmp_path):
@@ -269,7 +354,10 @@ def test_pr_candidates_follow_the_measured_merge_procedure():
         prompt = by_label[label].get("prompt")
         for needle in ("headRefOid", "UNKNOWN", "gh pr diff", "gh pr review",
                        "--match-head-commit <tip>", "commit_check.py", "--ff-only",
-                       "다시 조회한다"):
+                       "다시 조회한다",
+                       # Y7 caps, Y9 same-account review, Y10 ff-only refusal
+                       "세 번 조회해도 UNKNOWN", "두 번까지", "gh api user", "--comment",
+                       "PR-REVIEW", "ff-only가 거절되면", "baseRefName이 master가"):
             assert needle in prompt, (label, needle)
     assert "git.push" in by_label["integrate"].get("effects")
 

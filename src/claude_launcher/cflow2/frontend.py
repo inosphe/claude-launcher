@@ -926,6 +926,9 @@ def _restart(ctx: _Ctx, file: str, name: str, value: Any, line: int) -> Optional
             if not isinstance(cmd, str) or not cmd.strip():
                 raise ctx.err(file, line, f"task {name!r}: restart.{plat} must be a command string")
             _no_template(ctx, file, line, cmd, f"task {name!r} restart.{plat}")
+            refused = ir.restart_refusal(cmd)
+            if refused:
+                raise ctx.err(file, line, f"task {name!r}: restart.{plat} {refused}")
             out[plat] = cmd
     if out["windows"] is None and out["linux"] is None:
         raise ctx.err(file, line, f"task {name!r}: restart needs a windows or linux command")
@@ -1864,8 +1867,10 @@ def _default_resolver(base: Optional[Path]) -> ResolveInclude:
 
 
 def _recur(ctx: _Ctx, file: str, doc: Dict[str, Any], kind: str) -> Optional[Dict[str, Any]]:
-    """``recur: true`` or ``recur: {auto: true}`` -> ``{"auto": bool}``;
-    ``false``/absent -> ``None``. Only a workflow recurs."""
+    """``recur: true`` or ``recur: {auto: true, min_gap: S}`` ->
+    ``{"auto": bool, "min_gap": float}``; ``false``/absent -> ``None``. Only a
+    workflow recurs. ``min_gap`` (default 60) is the least number of seconds
+    between a round's end and the auto start of the next."""
     raw = doc.get("recur")
     line = _key_line(doc, "recur", 1)
     if raw is None or raw is False:
@@ -1873,14 +1878,19 @@ def _recur(ctx: _Ctx, file: str, doc: Dict[str, Any], kind: str) -> Optional[Dic
     if kind != ir.KIND_WORKFLOW:
         raise ctx.err(file, line, "only a workflow may declare recur (a procedure has no rounds)")
     if raw is True:
-        return {"auto": False}
+        return {"auto": False, "min_gap": ir.RECUR_MIN_GAP_DEFAULT}
     if isinstance(raw, dict):
-        _check_keys(ctx, file, raw, ("auto",), "recur")
+        _check_keys(ctx, file, raw, ("auto", "min_gap"), "recur")
         auto = raw.get("auto", False)
         if not isinstance(auto, bool):
             raise ctx.err(file, line, "recur.auto must be true or false")
-        return {"auto": auto}
-    raise ctx.err(file, line, "recur must be true or false, or a mapping {auto: true}")
+        gap = ir.RECUR_MIN_GAP_DEFAULT
+        if raw.get("min_gap") is not None:
+            gap = _number(ctx, file, raw["min_gap"], "recur.min_gap", line)
+            if gap < 0:
+                raise ctx.err(file, line, "recur.min_gap must be 0 or more seconds")
+        return {"auto": auto, "min_gap": gap}
+    raise ctx.err(file, line, "recur must be true or false, or a mapping {auto, min_gap}")
 
 
 def compile_text(text: str, *, source: str = "",

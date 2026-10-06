@@ -4,12 +4,13 @@
 
 from __future__ import annotations
 
+import json
 import textwrap
 from types import SimpleNamespace
 
 import pytest
 
-from claude_launcher.cflow2 import check, executors, frontend, inputs, runtime
+from claude_launcher.cflow2 import check, executors, frontend, inputs, ir, runtime
 from claude_launcher.daemon import cflow2_clock
 
 T0 = 1_000_000.0
@@ -86,8 +87,11 @@ def _deliver(mgr, notices):
 
 def test_recur_compiles_to_meta_and_rejects_bad_forms():
     base = "nodes:\n  a: {prompt: A}\nbody: a\n"
-    assert _compile("recur: true\n" + base).meta["recur"] == {"auto": False}
-    assert _compile("recur: {auto: true}\n" + base).meta["recur"] == {"auto": True}
+    assert _compile("recur: true\n" + base).meta["recur"] == {"auto": False, "min_gap": 60.0}
+    assert _compile("recur: {auto: true}\n" + base).meta["recur"] == {"auto": True,
+                                                                     "min_gap": 60.0}
+    assert _compile("recur: {auto: true, min_gap: 0}\n" + base).meta["recur"]["min_gap"] == 0
+    assert "recur.min_gap must be" in _err("recur: {auto: true, min_gap: -1}\n" + base)
     assert "recur" not in _compile("recur: false\n" + base).meta
     assert "recur.auto must be" in _err("recur: {auto: 1}\n" + base)
     assert "unknown key" in _err("recur: {every: 3}\n" + base)
@@ -103,12 +107,12 @@ def test_restart_task_compiles_and_rejects_bad_forms():
     """)
     assert chart.node("r").get("restart") == {
         "windows": None, "linux": "bash tools/restart_live.sh", "timeout": 900.0}
-    assert _compile("nodes:\n  r: {prompt: R, restart: {windows: x}}\nbody: r\n") \
+    assert _compile("nodes:\n  r: {prompt: R, restart: {windows: tools/restart_live.ps1}}\nbody: r\n") \
         .node("r").get("restart")["timeout"] == 120.0
     assert "needs a windows or linux" in _err(
         "nodes:\n  r: {prompt: R, restart: {timeout: 5}}\nbody: r\n")
     assert "restart.timeout must be" in _err(
-        "nodes:\n  r: {prompt: R, restart: {linux: x, timeout: 901}}\nbody: r\n")
+        "nodes:\n  r: {prompt: R, restart: {linux: tools/restart_live.sh, timeout: 901}}\nbody: r\n")
     assert "is not substituted" in _err(
         "nodes:\n  r: {prompt: R, restart: {linux: 'run ${params.x}'}}\nbody: r\n")
 
@@ -116,7 +120,7 @@ def test_restart_task_compiles_and_rejects_bad_forms():
 def test_restart_inside_a_delegation_is_an_error():
     chart = _compile("""
         nodes:
-          r: {prompt: R, restart: {linux: x}}
+          r: {prompt: R, restart: {linux: tools/restart_live.sh}}
         body:
           seq: [r]
           executor: subagent
@@ -338,7 +342,10 @@ def test_auto_recur_round_started_by_the_clock(tmp_path):
     runtime.report(st["tasks"][0]["instance"], **_kw(tmp_path))
     mgr = FakeManager(FakeSession("own", str(tmp_path)))
     clock = _clock(mgr)
+    # recur.min_gap (default 60s): not before the gap has passed
     _deliver(mgr, clock.scan(now=T0 + 5))
+    assert runtime.status(cwd=str(tmp_path), scope="own", tick=False)["round"] == 1
+    _deliver(mgr, clock.scan(now=T0 + 61))
     st = runtime.status(cwd=str(tmp_path), scope="own", tick=False)
     assert st["status"] == "running" and st["round"] == 2
     assert st["tasks"][0]["prompt"] == "A g1" and st["inputs"] == {"goal": "g1"}
@@ -347,7 +354,7 @@ def test_auto_recur_round_started_by_the_clock(tmp_path):
     assert "next round started" in mgr.get("own").delivered[-1]
     assert _events(tmp_path, "round_auto_started")[0]["round"] == 2
     # single use: the next pass starts nothing
-    clock.scan(now=T0 + 6)
+    clock.scan(now=T0 + 200)
     assert runtime.status(cwd=str(tmp_path), scope="own", tick=False)["round"] == 2
 
 
@@ -356,7 +363,7 @@ def test_cancel_stops_the_loop(tmp_path):
     runtime.report(st["tasks"][0]["instance"], **_kw(tmp_path))
     st = runtime.cancel_next_round("enough", **_kw(tmp_path))
     assert "next_round" not in st
-    assert runtime.start_next_round(str(tmp_path), "own") is None
+    assert runtime.start_next_round(str(tmp_path), "own", T0 + 100) is None
     with pytest.raises(runtime.FlowError, match="no next round"):
         runtime.cancel_next_round(None, **_kw(tmp_path))
 
@@ -379,7 +386,7 @@ RESTART = """
     nodes:
       reflect:
         prompt: R
-        restart: {linux: "bash restart.sh", windows: "ps restart.ps1", timeout: 60}
+        restart: {linux: "bash tools/restart_live.sh", windows: "pwsh -File tools/restart_live.ps1", timeout: 60}
         returns: {ok: {}, again: {}}
     body:
       loop:
@@ -399,7 +406,7 @@ def test_restart_runs_once_per_visit_and_gates_the_report(tmp_path):
         runtime.report(iid, **_kw(tmp_path))
     acts = runtime.claim_restarts(platform="Linux", boot="b1", **_kw(tmp_path))
     assert [(a["kind"], a["command"], a["timeout"]) for a in acts] == \
-        [("run", "bash restart.sh", 60.0)]
+        [("run", "bash tools/restart_live.sh", 60.0)]
     assert runtime.claim_restarts(platform="Linux", boot="b1", **_kw(tmp_path)) == []
     with pytest.raises(runtime.FlowError, match="restart is running"):
         runtime.report(iid, **_kw(tmp_path))
@@ -412,7 +419,7 @@ def test_restart_runs_once_per_visit_and_gates_the_report(tmp_path):
     # the loop re-enters reflect: a new visit, a new restart
     assert st["tasks"][0]["restart"]["status"] == "pending"
     acts = runtime.claim_restarts(platform="Windows", boot="b1", **_kw(tmp_path))
-    assert acts[0]["command"] == "ps restart.ps1"
+    assert acts[0]["command"] == "pwsh -File tools/restart_live.ps1"
     names = [e["event"] for e in runtime.journal(cwd=str(tmp_path), scope="own")]
     assert names.count("restart_requested") == 2 and "restart_completed" in names
 
@@ -428,7 +435,7 @@ def test_restart_of_another_boot_is_interrupted_not_rerun(tmp_path):
 
 
 def test_restart_unsupported_platform(tmp_path):
-    st = _start(tmp_path, "nodes:\n  r: {prompt: R, restart: {windows: x}}\nbody: r\n")
+    st = _start(tmp_path, "nodes:\n  r: {prompt: R, restart: {windows: tools/restart_live.ps1}}\nbody: r\n")
     acts = runtime.claim_restarts(platform="Darwin", boot="b", **_kw(tmp_path))
     assert acts[0]["kind"] == "unsupported"
     runtime.report(st["tasks"][0]["instance"], **_kw(tmp_path))
@@ -450,7 +457,7 @@ def test_clock_runs_restart_with_the_driver_session(tmp_path):
     assert len(clock.restarts) == 1 and ran == []
     cwd, scope, action = clock.restarts.pop()
     _deliver(mgr, clock.perform_restart(cwd, scope, action))
-    assert ran == [(str(tmp_path), "bash restart.sh", "own")]
+    assert ran == [(str(tmp_path), "bash tools/restart_live.sh", "own")]
     assert "exit code: 0 (succeeded)" in mgr.get("own").delivered[-1]
     _deliver(mgr, clock.scan(now=T0 + 2))  # claimed once per visit
     assert clock.restarts == []
@@ -550,3 +557,69 @@ def test_declared_non_ok_outcome_ends_the_loop(tmp_path):
     st = runtime.report(st["tasks"][0]["instance"], **_kw(tmp_path))
     assert st["status"] == "done" and st["outcome"] == "wound_down"
     assert "next_round" not in st
+
+
+def test_a_cancel_during_the_reload_wins(tmp_path, monkeypatch):
+    """Y2: start_next_round reads the request, then loads the definition; a
+    cancel landing in between must not be lost (the start re-checks under
+    the slot lock)."""
+    st = _start(tmp_path, "recur: {auto: true}\nnodes:\n  a: {prompt: A}\nbody: a\n")
+    runtime.report(st["tasks"][0]["instance"], **_kw(tmp_path))
+    real = runtime._next_round_chart
+
+    def reload_then_cancel(store, state):
+        out = real(store, state)
+        runtime.cancel_next_round("stop", **_kw(tmp_path, T0 + 70))
+        return out
+    monkeypatch.setattr(runtime, "_next_round_chart", reload_then_cancel)
+    assert runtime.start_next_round(str(tmp_path), "own", T0 + 70) is None
+    st = runtime.status(cwd=str(tmp_path), scope="own", tick=False)
+    assert st["status"] == "done" and st["round"] == 1 and "next_round" not in st
+    assert not _events(tmp_path, "round_auto_started")
+
+
+def test_restart_commands_outside_the_allowlist_are_refused():
+    """Y5: the daemon runs a restart with its own rights, so only the
+    project's restart_live scripts compile."""
+    for cmd in ("claunch daemon stop", "bash -c claunch tools/restart_live.sh",
+                "bash tools/restart_live.sh; claunch daemon stop", "bash restart.sh",
+                "pwsh -Command x tools/restart_live.ps1"):
+        assert "restart.linux" in _err(
+            "nodes:\n  r: {prompt: R, restart: {linux: '%s'}}\nbody: r\n" % cmd), cmd
+    for cmd in ("bash tools/restart_live.sh", "./tools/restart_live.sh",
+                "powershell -NoProfile -ExecutionPolicy Bypass -File tools/restart_live.ps1"):
+        assert ir.restart_refusal(cmd) is None, cmd
+
+
+def test_a_snapshot_with_a_refused_command_is_not_run(tmp_path):
+    st = _start(tmp_path, "nodes:\n  r: {prompt: R, restart: {linux: tools/restart_live.sh}}\n"
+                          "body: r\n")
+    store = runtime.RunStore(str(tmp_path), "own")
+    chart = json.loads(store.chart_path.read_text())
+    node = next(n for n in chart["nodes"].values() if n.get("restart"))
+    node["restart"]["linux"] = "claunch daemon stop"
+    store.chart_path.write_text(json.dumps(chart))
+    acts = runtime.claim_restarts(platform="Linux", boot="b", **_kw(tmp_path))
+    assert [a["kind"] for a in acts] == ["refused"]
+    assert "refused" in cflow2_clock.restart_block(acts[0])
+    st = runtime.status(**_kw(tmp_path))
+    assert st["tasks"][0]["restart"]["status"] == "failed"
+    assert _events(tmp_path, "restart_refused")
+    runtime.report(st["tasks"][0]["instance"], **_kw(tmp_path))  # failed is final
+
+
+def test_a_runner_exception_is_recorded_as_failed(tmp_path):
+    """Y3: a runner that raises must not leave the record 'running'."""
+    st = _start(tmp_path, RESTART)
+
+    def runner(cwd, action, session):
+        raise RuntimeError("no temp dir")
+    mgr = FakeManager(FakeSession("own", str(tmp_path)))
+    clock = _clock(mgr, restart_runner=runner, platform="Linux")
+    _deliver(mgr, clock.scan(now=T0 + 1))
+    cwd, scope, action = clock.restarts.pop()
+    _deliver(mgr, clock.perform_restart(cwd, scope, action))
+    rec = runtime.status(**_kw(tmp_path, T0 + 2))["tasks"][0]["restart"]
+    assert rec["status"] == "failed" and "no temp dir" in rec["output"]
+    assert "exit code: None (failed)" in mgr.get("own").delivered[-1]
+    runtime.report(st["tasks"][0]["instance"], "again", **_kw(tmp_path, T0 + 3))
