@@ -1,4 +1,4 @@
-"""Project a claunch Anthropic-compatible provider into the Pi CLI.
+"""Project a claunch provider into the Pi CLI.
 
 Pi reads API keys from environment variables, while custom endpoints and
 models are registered through ``models.json`` or an extension.  claunch owns
@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, Sequence
 
-from . import providers, routing
+from . import provider_spec, providers, routing
 from .profile import Profile
 
 ADAPTER = "pi"
@@ -207,7 +207,7 @@ def resolve(
         if max_tokens > (spec.context_window or 128000):
             raise PiProviderError(f"{ENV_MAX_TOKENS} cannot exceed context_window")
     return Projection(
-        base_url=_openai_base_url(openai_root),
+        base_url=provider_spec.openai_urls(openai_root).base_url,
         api="openai-completions",
         models=tuple(models),
         default_model=spec.model("default") or models[0],
@@ -272,8 +272,7 @@ def fronted_base_url(base_url: str, provider_name: str) -> str:
 
     The shim's URL comes back without a trailing slash: Pi hands it to the
     OpenAI client as ``baseURL``, which appends ``/chat/completions`` itself,
-    and the shim forwards that path onto the upstream root (which already
-    ends in ``/v1``).
+    and the shim forwards that path onto the backend's declared API base.
     """
     fronted = routing.front(base_url, provider_name)
     return fronted.rstrip("/") if fronted != base_url else base_url
@@ -358,9 +357,3 @@ def _has_explicit_selection(args: Sequence[str]) -> bool:
         if any(arg.startswith(flag + "=") for flag in _SELECTION_FLAGS):
             return True
     return False
-
-
-def _openai_base_url(base_url: str) -> str:
-    """Translate an Anthropic-compatible root into its OpenAI ``/v1`` root."""
-    normalized = base_url.rstrip("/")
-    return normalized if normalized.endswith("/v1") else normalized + "/v1"

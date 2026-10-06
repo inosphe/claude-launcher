@@ -283,7 +283,7 @@ def test_pi_registration_reads_openai_endpoint_models_and_window(home):
     p = _profile_on("work", "ds", harness="pi")
     credentials.save_token(p, "stored")
     env = runner.harness_child_env(p, harnesses.get("pi"), base_env={})
-    assert env[pi_provider.ENV_BASE_URL] == "https://api.example.com/v1"
+    assert env[pi_provider.ENV_BASE_URL] == "https://api.example.com"
     assert json.loads(env[pi_provider.ENV_MODELS]) == ["flash", "pro"]
     assert env[pi_provider.ENV_CONTEXT_WINDOW] == "1000000"
     assert env["ANTHROPIC_API_KEY"] == "stored"

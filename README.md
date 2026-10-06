@@ -620,6 +620,19 @@ A profile overlays `models`, `context_window`, `auto_compact_at`,
 the profile itself last); `api_key`, `endpoints` and
 `openai_reasoning_format` identify the backend and stay on the provider.
 
+`endpoints.openai` is the OpenAI-compatible API base URL, including any
+version path required by the backend (for Fireworks,
+`https://api.fireworks.ai/inference/v1`). Pi, profile-based briefings and
+Observer share this URL interpretation: Pi receives the base, and direct
+calls append `/chat/completions`. A full `/chat/completions` URL is also
+accepted and reduced to its base for Pi. Custom paths such as `/api/v2` are
+preserved. The historical Fireworks `https://api.fireworks.ai/inference`
+value is normalized to `/inference/v1` with a compatibility warning; other
+URLs receive no implicit version suffix. `endpoints.anthropic` keeps its
+own protocol's base URL convention.
+Existing Pi configurations that depended on automatic `/v1` insertion for
+other backends should declare that path explicitly in `endpoints.openai`.
+
 **What each harness receives** (`claunch providers` prints the description;
 `claunch run PROFILE:HARNESS` prints a `note:` for anything the harness
 cannot carry):
@@ -628,7 +641,7 @@ cannot carry):
 |---|---|---|---|
 | `api_key` | `ANTHROPIC_AUTH_TOKEN` (below the profile's `set-token`) | not translated yet | `ANTHROPIC_API_KEY` (below `set-token`) |
 | `endpoints.anthropic` | `ANTHROPIC_BASE_URL` | -- | -- |
-| `endpoints.openai` | -- | not translated yet | the registered provider's base URL (`/v1` appended) |
+| `endpoints.openai` | -- | not translated yet | the registered provider's API base URL (shared URL interpretation above) |
 | `models` | `default` -> `ANTHROPIC_MODEL` + `..._DEFAULT_SONNET_MODEL`, `small` -> `..._DEFAULT_HAIKU_MODEL`, `large` -> `..._DEFAULT_OPUS_MODEL`, `xlarge` -> `..._DEFAULT_FABLE_MODEL`, `subagent` -> `CLAUDE_CODE_SUBAGENT_MODEL` | the session's own `--model` | the registered model list, `default` launched |
 | `context_window` | appends `[1m]` to every model id when >= 1,000,000 | `-c model_context_window=N` | each registered model's `contextWindow` |
 | `auto_compact_at` | `CLAUDE_CODE_AUTO_COMPACT_WINDOW` | `-c model_auto_compact_token_limit=N` | `compaction.reserveTokens = context_window - auto_compact_at` in the profile's `pi/settings.json` |
@@ -820,7 +833,7 @@ header. A provider therefore needs no secret in the file:
 ```yaml
 providers:
   fireworks-glm5p2:
-    endpoints: {anthropic: "https://api.fireworks.ai/inference", openai: "https://api.fireworks.ai/inference"}
+    endpoints: {anthropic: "https://api.fireworks.ai/inference", openai: "https://api.fireworks.ai/inference/v1"}
     models: {default: "accounts/fireworks/models/glm-5p2"}
     # no api_key here — supplied by set-token per machine
 ```
@@ -983,8 +996,8 @@ Metering is observability, so it fails soft: if the shim cannot start, the
 launch prints a one-line warning and uses the upstream URL directly (a
 `routing` spec keeps the hard failure described above).
 
-The `pi` harness goes through the same shim: its OpenAI base URL
-(`endpoints.openai` + `/v1`) is fronted the same way, the packaged extension
+The `pi` harness goes through the same shim: its resolved OpenAI base URL
+from `endpoints.openai` is fronted the same way, the packaged extension
 registers `X-Claunch-Session` as a provider header for daemon-managed
 sessions, and the shim records each `/v1/chat/completions` call. An OpenAI
 stream only carries token counts when the request asks for them, so behind
