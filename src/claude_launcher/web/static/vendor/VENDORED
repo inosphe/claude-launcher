@@ -8,3 +8,15 @@ compositionupdate schedules, so a typist fast enough to commit the next
 syllable before that timer runs loses the syllable in between. Korean commits
 a syllable every two or three keystrokes, so the loss is continuous rather
 than occasional. tests/web/composition_check.js pins it.
+
+Local patch (claunch-xa0j7) — re-apply on upgrade; tests/web/termselect_check.js
+fails until it is:
+  SelectionService.disable(){this.clearSelection(),this._enabled=!1}
+  -> disable(){this._enabled&&this.clearSelection(),this._enabled=!1}
+Every DECSET 9/1000/1002/1003 runs the activeProtocol setter, which fires
+onProtocolChange even when the protocol is unchanged, and the handler calls
+disable(). Claude Code re-sends its mouse modes while it redraws (58 times in
+one session's output), so a Shift/Option+drag selection -- the only selection
+possible while mouse tracking is on -- was cleared mid-drag. Disabling an
+already disabled service now keeps it; turning tracking on still clears an
+ordinary selection, as upstream does.
