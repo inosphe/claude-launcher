@@ -125,7 +125,7 @@ claunch run work:claude                  # explicit Claude selector
 | `set-provider [p] <provider>` | Pin a provider globally or per profile (`--clear` to inherit). |
 | `providers`            | List API providers from the config file and the active one. |
 | `routing [set\|clear\|stop]` | Show or change [request-body routing](#pinning-the-upstream-provider-openrouter-routing) (e.g. pin OpenRouter to CoreWeave). |
-| `set-token <name> [t]` | Store the profile's one launcher token. The harness declaration chooses its destination env; OAuth harnesses ignore it. |
+| `set-token <name> [t]` | Store the profile's one launcher token. The harness declaration chooses its destination env; OAuth harnesses ignore it. `--clear` deletes it. |
 | `get-token <name>`     | Print the profile's OAuth token (resolves inheritance; `--own`). |
 | `list`                 | List profiles and each login's state (alias: `ls`). |
 | `path <name[:harness]>` | Print the profile root, or the explicit harness's namespaced home. |
@@ -550,7 +550,9 @@ no token of its own resolves to the nearest ancestor that has one, so
 `run`/`validate`/`usage` all work on children. (For a shared login, log the
 parent in with `setup-token` — those tokens are long-lived.) Cycles and missing
 parents are rejected. Use `claunch parent <name> <parent>` to re-parent an
-existing profile or `--clear` to detach it.
+existing profile or `--clear` to detach it. `claunch set-token <name> --clear` deletes a child's own
+stored token so it inherits the parent's again (a `/login`-written
+`.credentials.json` is left alone).
 
 **What inheritance covers.** `harness`, `env` and applicable auth are resolved live at
 launch, so changing them on a parent affects children immediately. **Skills and
