@@ -12191,6 +12191,69 @@ async function copyToBrowserClipboard(text, host) {
   }
 }
 
+/* OSC 52 (`ESC ] 52 ; <targets> ; <base64> BEL`): a program in the terminal
+   asking for text to go on the clipboard. Claude Code copies both ways — a
+   native write on the machine it runs on, and this sequence — and xterm.js
+   core implements neither half of OSC 52, so before this handler the sequence
+   was dropped. Reached from the daemon's own machine the native write hid
+   that; reached through the relay from another machine, nothing landed on
+   the clipboard of the computer the browser runs on.
+   Only writes are honoured. A `?` payload asks the terminal to read the
+   clipboard back into the PTY, and the page never hands its clipboard to
+   whatever runs in a session. An empty payload (clear) is ignored too.
+   The write is taken only within OSC52_INPUT_MS of a keystroke or mouse
+   report sent from this same terminal: a copy follows the person's own
+   action, while bytes replayed on attach (the CLI tab's catch-up ring) and
+   a second viewer watching the same session have none — neither should
+   overwrite this computer's clipboard. Browsers draw the same line for the
+   execCommand fallback (it needs recent user activation). */
+const OSC52_MAX_BASE64 = 1 << 20;   // ~768 KiB of text once decoded
+const OSC52_INPUT_MS = 10000;
+
+/* The text an OSC 52 payload carries, or null when it is not a write this
+   page performs: a query, a clear, oversized, or not base64/UTF-8. */
+function decodeOsc52(data) {
+  const sep = data.indexOf(";");
+  if (sep < 0) return null;
+  const payload = data.slice(sep + 1).replace(/\s+/g, "");
+  if (!payload || payload === "?" || payload.length > OSC52_MAX_BASE64) return null;
+  try {
+    const bin = atob(payload);
+    const bytes = Uint8Array.from(bin, (c) => c.charCodeAt(0));
+    return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+  } catch {
+    return null;
+  }
+}
+
+/* Wire OSC 52 into one xterm instance. Its own onData marks the moments of
+   input, so the gate travels with the terminal object (a parked terminal
+   brought back keeps its history; a rebuilt one starts with none). */
+function installOsc52(t) {
+  let lastInput = -Infinity;
+  t.onData(() => { lastInput = Date.now(); });
+  t.parser.registerOscHandler(52, (data) => {
+    if (Date.now() - lastInput > OSC52_INPUT_MS) return true;
+    const sep = data.indexOf(";");
+    if (sep >= 0 && data.slice(sep + 1).replace(/\s+/g, "").length > OSC52_MAX_BASE64) {
+      notify("Copy not taken", "The text is larger than this page copies from a terminal.", { key: "osc52" });
+      return true;
+    }
+    const text = decodeOsc52(data);
+    if (text === null) return true;
+    copyToBrowserClipboard(text, document.body).then((ok) => {
+      if (!ok) {
+        notify(
+          "Copy did not reach this computer's clipboard",
+          "The browser refused it — select the text and copy it by hand.",
+          { key: "osc52" },
+        );
+      }
+    });
+    return true;
+  });
+}
+
 async function deleteHostClipboard(id) {
   const request = ++hostClipboardRequest;
   try {
@@ -13945,6 +14008,7 @@ function buildCliTerm() {
       cliWs.send(new TextEncoder().encode(data));
     }
   });
+  if (typeof installOsc52 === "function") installOsc52(cliTerm);
   // A resize we applied from a server broadcast must not be echoed back, or
   // two viewers ping-pong forever (the session terminal's rule, verbatim).
   cliTerm.onResize(({ cols, rows }) => {
@@ -14199,6 +14263,9 @@ function freshAttach(name) {
   // Wired once, for the life of this terminal object: the link swaps sockets
   // underneath these, and a reconnect must not leave a second pair behind.
   term.onData(sendInput);
+  // Guarded like onTermKeyEvent below, for the harnesses that boot this
+  // function without the clipboard block.
+  if (typeof installOsc52 === "function") installOsc52(term);
   watchComposer(term);
   term.onResize(({ cols, rows }) => {
     // A resize we applied from a server broadcast must not be echoed back, or
