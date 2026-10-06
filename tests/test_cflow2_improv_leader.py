@@ -200,22 +200,67 @@ def test_close_ends_the_round_without_deploy(tmp_path):
     assert ld.st["status"] == "done" and ld.st["next_round"]["round"] == 2
 
 
-def test_wind_down_needs_a_person_and_ends_the_loop(tmp_path):
+WIND_DOWN = {
+    "problem": "리더 교대를 지금 끝낼지 정한다",
+    "options": [
+        {"name": "end-shift", "summary": "유휴 워커를 종료하고 최종 보고", "risk": "남은 요청이 대기",
+         "outcome": "wound_down", "reversibility": "costly", "reverse_how": "새 리더를 띄운다"},
+        {"name": "keep", "summary": "관제 대기로 돌아간다", "risk": "없음",
+         "outcome": "교대 계속", "reversibility": "reversible"},
+    ],
+    "recommendation": "end-shift",
+    "why": "착지 큐가 비었다",
+}
+
+
+def _wind_down(ld, answer, reason="r"):
+    ld.select("wind-down", "user said stop")
+    assert ld.tasks() == ["ask-frame"]
+    ld.report("ask-frame", value={"brief": WIND_DOWN})
+    (a,) = ld.status()["asks"]
+    assert a["resolution"] == "human" and a["format"] == "decision"
+    runtime.approve(None, decision=answer, reason=reason, **ld.kw())
+    return ld.status()
+
+
+def test_wind_down_asks_the_person_and_ends_the_loop(tmp_path):
     ld = Leader(tmp_path)
     ld.report("intake")
-    ld.select("wind-down", "user said stop")
-    assert ld.st["asks"] and ld.st["asks"][0]["resolution"] in ("routing", "human")
-    # declined: back to standby
-    from claude_launcher.cflow2 import asks
-    asks.human_approve(None, decline=True, reason="not yet", cwd=ld.cwd, scope="lead")
-    ld.status()
+    # keep: back to standby
+    _wind_down(ld, "keep", "not yet")
     assert [c["label"] for c in ld.st["choices"]] == ["standby"]
-    ld.select("wind-down", "now")
-    asks.human_approve(None, reason="ok", cwd=ld.cwd, scope="lead")
+    # an answer needs a reason
+    ld.select("wind-down", "again")
+    ld.report("ask-frame", value={"brief": WIND_DOWN})
+    with pytest.raises(runtime.FlowError):
+        runtime.approve(None, decision="end-shift", reason=None, **ld.kw())
+    runtime.approve(None, decision="end-shift", reason="queue empty", **ld.kw())
     ld.status()
+    assert ld.tasks() == ["wrapup"]
     ld.report("wrapup")
     assert ld.st["status"] == "done" and ld.st["outcome"] == "wound_down"
     assert "next_round" not in ld.st
+
+
+def test_a_third_reframe_returns_to_standby(tmp_path):
+    ld = Leader(tmp_path)
+    ld.report("intake")
+    _wind_down(ld, "reframe", "why 0")
+    for n in (1, 2):
+        ld.report("ask-reframe", value={"brief": WIND_DOWN})
+        runtime.approve(None, decision="reframe", reason=f"why {n}", **ld.kw())
+        ld.status()
+    assert ld.st["status"] == "running"
+    assert [c["label"] for c in ld.st["choices"]] == ["standby"]
+
+
+def test_no_user_choose_is_left():
+    from claude_launcher.cflow2 import ir
+    chart = _chart()
+    assert not [n.label or n.id for n in chart.nodes.values()
+                if n.type == ir.T_CHOOSE and n.get("chooser") == ir.CHOOSER_USER]
+    assert not [n.label for n in chart.nodes.values()
+                if n.label == "wrapup" and n.get("ask")]
 
 
 def test_pr_candidates_follow_the_measured_merge_procedure():

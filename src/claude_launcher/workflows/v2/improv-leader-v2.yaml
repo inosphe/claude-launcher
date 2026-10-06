@@ -5,7 +5,7 @@ description: >
   운영 확인 -> 관제 대기(워커 요청 처리·증거 수합) -> 증거가 찬 착지 요청이
   있으면 통합 창(직전 통합에서 300초)에 모아 배치로 심사·머지 -> 머지 결과 트리의
   전체 스윕(subagent) -> 라이브 반영(데몬이 restart 실행, 기계 확인 checks) ->
-  착지 통지로 마감, 또는 (사용자 승인) 교대 종료. 착지 요청은 landing 컬렉션이
+  착지 통지로 마감, 또는 (ask-user로 사용자가 확정한) 교대 종료. 착지 요청은 landing 컬렉션이
   담는다: v1·v2 워커의 enqueue-landing trigger가 넣고, 다른 머신의 워커가 메시로
   보낸 요청은 리더가 직접 넣는다. landed는 데몬이 git으로 잰다. 머지 실행과
   스윕은 리더의 턴에서 일어나지 않는다 — subagent가 실행하고 리더는 돌아온
@@ -248,12 +248,6 @@ nodes:
 
   wrapup:
     title: 교대 종료
-    ask:
-      prompt: |
-        교대 종료를 확정하는가? 확정하면 워커들의 유휴 여부를 확인한 뒤 세션을
-        종료하고 최종 보고를 남긴다. 이 회차는 wound_down으로 끝나 다음 회차가
-        열리지 않는다. 남은 통합 대기는 보드(in_review)와 착지 큐에 남는다.
-      timeout: 900
     prompt: |
       워커마다 진행 중인 작업이 있는지 묻고, `claunch cflow2 status -t <세션>`으로
       교차 확인한다. 양쪽에서 유휴가 확인된 세션만 종료한다. 아직 돌고 있는
@@ -336,11 +330,36 @@ body:
                   on:
                     empty: {continue: null}
               wind-down:
-                description: 사용자가 교대 종료를 지시했다 — 종료 승인 게이트로
+                description: 사용자가 교대 종료를 지시했다 — 사용자에게 종료를 확정받는다
                 then:
                   seq:
-                    - wrapup
-                    - {return: wound_down}
+                    # 교대 종료는 사용자의 결정이다 — ask-user의 기본 응답자는
+                    # 사람뿐이고 timeout이 없다. 답이 없는 동안 런은 서 있다.
+                    - id: wind-down-decision
+                      call: ask-user
+                      bind: wind_down
+                      with:
+                        require_reason: true
+                        choices: [end-shift, keep]
+                        topic: |
+                          사용자가 리더의 교대 종료를 지시했다. 종료를 확정할지 정한다.
+
+                          end-shift: 워커들의 유휴 여부를 확인한 뒤 유휴인 세션을
+                          종료하고 교대 최종 보고를 남긴다. 이 회차는 wound_down으로
+                          끝나 다음 회차가 열리지 않는다. 남은 통합 대기는 보드
+                          (in_review)와 착지 큐(collections.landing)에 남는다.
+                          keep: 종료하지 않고 관제 대기로 돌아간다.
+
+                          판단 근거: 착지 큐의 requested 항목 수, 진행 중인 워커
+                          (`claunch cflow2 status -t <세션>`), 보드의 in_review 잔량.
+                    - cond:
+                        - if: "$data.wind_down.decision == 'end-shift'"
+                          then:
+                            seq:
+                              - wrapup
+                              - {return: wound_down}
+                        - else: {continue: null}
+                  # 세 번째 답도 reframe이면 질문을 접고 관제 대기로 돌아간다
                   on:
-                    declined: {continue: null}
+                    reframe: {continue: null}
 
