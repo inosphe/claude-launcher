@@ -738,7 +738,7 @@ required", …]` 형태로 필드 경로를 단다. 정규화는 `ref`·`name` �
 
 ```yaml
 ask:
-  brief: ${ask-frame.brief}       # 앞 작업 결과의 참조. 한 개의 ${...}만
+  brief: "${result['ask-frame'].value.brief}"   # 앞 작업 결과의 참조. 한 개의 ${...}만
   format: decision                # 형식 이름 또는 ${params.format}
   # prompt: 생략 가능. 쓰면 brief 앞에 붙는 머리말이 된다
   # choices: [proceed, hold]      # 선택. 선택지 이름 집합을 고정한다(아래)
@@ -748,7 +748,9 @@ ask:
 ```
 
 - `brief`는 문자열 하나이며 전체가 `${...}` 값 참조 하나여야 한다(문자열 렌더가
-  아니라 값을 그대로 읽는다). 참조 문법은 프롬프트의 값 참조와 같다.
+  아니라 값을 그대로 읽는다). 안은 식(2.4)이고 `$`는 생략할 수 있다. 작업 결과는
+  `result['<작업>'].value.<필드>`로, `waterfall` 안에서 바로 앞 작업의 값은
+  `prev.<필드>`로 읽는다.
 - `format`이 있으면 `brief`가 있어야 하고, 반대도 같다.
 - `brief`를 쓰면 `prompt`는 선택이다. `options`·`on_decline`은 함께 쓸 수 없다
   (컴파일 오류 — 선택지는 brief에서 온다).
@@ -823,8 +825,6 @@ value}`다. 웹 UI는 이 목록을 순서대로 그리고, 답 버튼은 `optio
 ```yaml
 procedures:
   ask-user:
-    description: 사용자에게 결정을 묻는다. 문제를 단순화하고 선택지별 위험·결과·가역성과
-      권장안을 탐색한 뒤, 그 구조로 질문한다.
     params:
       topic:   {type: str, required: true}   # 무엇을 결정하는가
       context: {type: str, default: ""}      # 탐색에 쓸 근거·위치
@@ -832,43 +832,38 @@ procedures:
       choices: {type: list, default: null}   # 선택지 이름을 고정할 때
       from:    {type: list, default: null}   # ask.from과 같은 후보 목록. null이면 사람만
     returns:
-      ok:      {decision: str, reason: str, by: str, brief: dict}
-      reframe: {reason: str, brief: dict}     # reframe 답이 3번째인 경우
+      ok:      {decision: str, reason: "str?", by: str, brief: dict}
+      reframe: {reason: str, brief: dict}    # 세 번째 답도 reframe인 경우
     nodes:
-      ask-frame:
-        title: 질문 구성
-        prompt: |
-          다음 결정을 사용자에게 묻기 전에 질문을 구성한다.
-          결정할 것: ${params.topic}
-          근거: ${params.context}
-          고정된 선택지 이름: ${params.choices}
-          (2회차부터) 앞 질문에 대한 reframe 답과 그 이유
-          코드·문서·보드에서 확인한 근거로 각 항목을 채운다. 확인하지 못한 항목은
-          그렇다고 적는다.
-          ${guide($params.format)}
-        returns:
-          ok: {brief: "question:$params.format"}
+      ask-frame:   {prompt: …${guide($params.format)}…, returns: {ok: {brief: "question:$params.format"}}}
+      ask-reframe: {prompt: …앞 답의 이유와 앞 질문…, returns: {ok: {brief: "question:$params.format"}}}
       ask-pose:
-        title: 사용자 질문
-        ask:
-          brief: ${ask-frame.brief}
-          format: ${params.format}
-          choices: ${params.choices}
-          from: ${params.from}
-          otherwise: human
-    body: …   # ask-frame → ask-pose 를 최대 3회 반복(아래)
+        ask: {brief: "${prev.brief}", format: "${params.format}", choices: "${params.choices}",
+              from: "${params.from}", otherwise: human}
+    body:
+      - try: {waterfall: [ask-frame, ask-pose]}
+        catch:
+          reframe:
+            try: {waterfall: [ask-reframe, ask-pose]}
+            catch:
+              reframe:
+                try: {waterfall: [ask-reframe, ask-pose]}
+                catch: {reframe: {return: reframe, value: …}}
+      - {return: ok, value: …}   # ask-pose의 decision, reason, by, brief
 ```
 
 - `ask-frame`은 드라이버가 실행한다(inline). 반환한 brief는 returns 형식
   `question:$params.format`으로 검증되므로, 형식에 맞지 않는 brief는 보고 시점에
   거절되고 드라이버가 고친다.
 - `body`는 `ask-frame` → `ask-pose`를 최대 3회(첫 탐색과 reframe 2회) 반복한다.
+  반복 조합자(`loop`) 대신 `try`/`catch`를 세 단으로 쓴 이유: `loop`가 상한에 닿으면
+  `loop_limit`으로 사람을 기다리는데, 여기서는 세 번째 reframe이 결과 `reframe`으로
+  끝나야 한다.
   `ask-pose`가 `ok`로 끝나면 프로시저가 `ok`(value는 `ask-pose`의 value에서
   `decision, reason, by, brief`)로 끝난다. `reframe`으로 끝나면 그 reason을 다음
   회차의 `ask-frame` 프롬프트에 넣고 다시 탐색한다. 3번째 `reframe`이면 프로시저가
   결과 `reframe`으로 끝나고, 처리는 부르는 쪽의 `on`·`catch`가 한다(없으면 비-ok
-  결과의 일반 규칙). 반복 조합자와 식의 구체 형태는 구현 커밋의 `ask-common.yaml`이
-  정본이다.
+  결과의 일반 규칙). 프롬프트 문구의 정본은 `ask-common.yaml`이다.
 - `ask-pose`의 `choices`·`from`이 params 참조인 것은 이 절이 더하는 규칙이다:
   `ask`의 `format`·`choices`·`from`은 `${params.<p>}` 참조 하나를 받을 수 있고,
   런타임은 ask를 열 때 프로시저 params로 해석한다(`from`은 v1 파서로 그때 검증한다).
