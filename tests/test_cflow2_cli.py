@@ -169,3 +169,45 @@ def test_pr_preflight_prints_the_facts_and_exits_by_readiness(tmp_path, capsys, 
     monkeypatch.setattr(prflow, "preview", lambda cwd, session="": json.loads(json.dumps(local)))
     assert run("pr-preflight", "--cwd", str(tmp_path)) == cli_cflow2.PR_BLOCKED
     assert "not on a GitHub host" in json.loads(capsys.readouterr().out)["blockers"][0]
+
+
+def test_pr_preflight_base_must_be_on_the_remote(tmp_path, capsys, monkeypatch):
+    # claunch-yq80p.2 stage B: a stack child's PR base is its parent's
+    # <parent>-stack, which the parent pushes; until then it is a blocker
+    import subprocess
+
+    from claude_launcher import prflow
+
+    def git(*a, cwd=tmp_path / "w"):
+        subprocess.run(["git", "-C", str(cwd), *a], check=True, capture_output=True)
+
+    subprocess.run(["git", "init", "-q", "--bare", str(tmp_path / "r.git")], check=True)
+    (tmp_path / "w").mkdir()
+    git("init", "-q")
+    git("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "c")
+    git("remote", "add", "origin", str(tmp_path / "r.git"))
+    ready = {"repo": True, "remote": "origin", "base": "master", "branch": "w1-x",
+             "head": "a" * 40, "gh": {"installed": True, "version": "2.45.0"},
+             "auth": {"ghe.example": {"authenticated": True, "account": "me"}},
+             "remotes": [{"remote": "origin", "host": "ghe.example", "slug": "o/r",
+                          "configured": False}],
+             "blockers": []}
+    monkeypatch.setattr(prflow, "preview", lambda cwd, session="": json.loads(json.dumps(ready)))
+    wd = str(tmp_path / "w")
+
+    assert run("pr-preflight", "--cwd", wd, "--base", "s1-stack") == cli_cflow2.PR_BLOCKED
+    doc = json.loads(capsys.readouterr().out)
+    assert doc["base"] == "s1-stack" and doc["base_sha"] is None
+    assert "origin/s1-stack is not on the remote" in doc["blockers"][0]
+
+    git("push", "-q", "origin", "HEAD:refs/heads/s1-stack")
+    head = subprocess.run(["git", "-C", wd, "rev-parse", "HEAD"], check=True,
+                          capture_output=True, text=True).stdout.strip()
+    assert run("pr-preflight", "--cwd", wd, "--base", "s1-stack") == cli_cflow2.PR_READY
+    doc = json.loads(capsys.readouterr().out)
+    assert doc["base"] == "s1-stack" and doc["base_sha"] == head and doc["blockers"] == []
+
+    # without --base nothing is asked of the remote
+    assert run("pr-preflight", "--cwd", wd) == cli_cflow2.PR_READY
+    doc = json.loads(capsys.readouterr().out)
+    assert doc["base"] == "master" and doc["base_sha"] is None

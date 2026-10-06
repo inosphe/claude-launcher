@@ -489,3 +489,28 @@ def test_stack_v2_and_worker_wiring():
     assert wait.get("until") == "fresh('side:stack:signals', 'cut')"
     assert wait.get("consume") == [{"addr": "side:stack:signals", "name": "cut"}]
     assert wait.get("probe") is None
+
+
+def test_stacked_pr_wiring():
+    # claunch-yq80p.2 stage B: a child's PR base is the parent's remote
+    # <session>-stack; the stack run keeps that branch and merges PR rows
+    stack = runtime.load_definition("stack-v2")
+    inputs = stack.meta["inputs"]
+    assert {"remote", "repo"} <= set(inputs)
+    assert not inputs["remote"].get("required") and not inputs["repo"].get("required")
+    tasks = {n.label: n for n in stack.nodes.values() if n.get("prompt")}
+    for name in ("open", "land", "cut", "restack"):
+        assert "git.push" in tasks[name].get("effects"), name
+    assert "--match-head-commit" in tasks["land"].get("prompt")
+    assert "--ff-only" in tasks["land"].get("prompt")
+    assert "${data.inputs.remote}" in tasks["open"].get("prompt")
+    assert "--force-with-lease=<세션>-stack:<옛 tip>" in tasks["restack"].get("prompt")
+    # the landing queue carries the PR fields the land task reads
+    item = stack.meta["collections"]["landing"]["item"]
+    assert {"pr_url", "pr_number", "base"} <= set(item)
+
+    worker = runtime.load_definition("improv-worker-v2")
+    wtasks = {n.label: n for n in worker.nodes.values() if n.get("prompt")}
+    assert "--base <기준 브랜치>" in wtasks["remote-setup"].get("prompt")
+    assert "remote: <원격>, repo: <저장소>" in wtasks["work"].get("prompt")
+    assert "Stacked on <부모 세션>-stack" in wtasks["pr-open"].get("prompt")

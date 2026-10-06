@@ -640,6 +640,12 @@ nodes:
       remote, repo(`-R`에 쓰는 `<host>/<owner>/<repo>`), base, gh, account,
       blockers를 보고에 그대로 옮긴다. 종료 코드 0이 ready다. 이 명령은 읽기만
       한다(설치·로그인·설정 쓰기 없음).
+      스택 자식이면(intake의 스택 기준: ${result.intake.value.base}) 그 기준을
+      `--base <기준 브랜치>`로 준다 — 내 PR의 base는 master가 아니라 부모의
+      `<부모 세션>-stack`(또는 부모가 지정한 선행 자식 브랜치)이다(stacked PR).
+      preflight는 그 브랜치가 원격에 있는지 `git ls-remote`로 재고 base_sha를
+      싣는다. 원격에 없으면 blocker다: 부모의 스택이 로컬에만 있다는 뜻이고,
+      아래 판정대로 로컬 착지(부모가 내 브랜치를 스택에 --no-ff로 머지)로 간다.
       상위 세션이 다른 머신인지도 확인한다 — `claunch mesh ls`에서 상위의
       machine 열이 local이 아니면 원격 편성이다. 원격 편성에서는 로컬 착지가
       성립하지 않는다(상위가 내 커밋을 가진다는 보장이 없다 — 머신을 넘는
@@ -665,12 +671,13 @@ nodes:
         <remote> HEAD:refs/heads/<브랜치>`). `git config --get push.default`가
         upstream이나 matching이면 bare push가 base로 갈 수 있으므로 blocked로
         올린다. 값을 보고에 적는다.
-      · `git fetch <remote>` 뒤 `git branch --set-upstream-to=<remote>/<base>`.
+      · `git fetch <remote>` 뒤 `git branch --set-upstream-to=<remote>/<base>`
+        (스택 자식이면 base는 `--base`로 준 기준 브랜치다).
         정렬 게이트(tools/merge_ready.py)와 착지 게이트(tools/landed_check.py
         --target @{upstream})가 이 upstream을 통합 대상으로 읽는다. 원격 편성의
         rebase 기준도 이것이다 — 로컬 master가 아니라 `<remote>/<base>`.
       · 원격 base가 로컬 통합 브랜치보다 뒤처졌는지 잰다: `git rev-list --count
-        <remote>/<base>..master`. 0이 아니면 그 수와 두 tip을 상위에 알리고
+        <remote>/<base>..master`(스택 자식이면 master 대신 부모가 알린 스택 tip). 0이 아니면 그 수와 두 tip을 상위에 알리고
         답을 기다린다(base를 push하는 것은 상위의 통합 단계다 — 워커는 base를
         움직이지 않는다).
     done_when: |
@@ -719,6 +726,9 @@ nodes:
         따라갈 수 있게 하는 연결이다.
 
       ── PR ──
+      스택 자식이면 base는 부모의 `<부모 세션>-stack`이고(remote-setup이 정한
+      값), 착지 요청 수신자인 부모의 stack 런이 이 PR을 `gh pr merge`로 스택
+      브랜치에 머지한다. 본문 첫 줄에 `Stacked on <부모 세션>-stack`을 적는다.
       없으면 만든다: `gh pr create -R <repo> --base <base> --head <브랜치>
       --title "<이슈 id>: <커밋 관례의 한 줄 요약>" --body-file <파일>`. 본문에는
       이슈 id(배치면 전부), 목표 한 줄, 증거 묶음이 보드 코멘트에 있다는 안내,
@@ -779,7 +789,12 @@ nodes:
       `sides:`로 선언한 side 런 `stack`(정의 stack-v2)이 맡는다. **첫 자식을
       spawn하거나 넘겨받을 때(reparent — mesh-delegate) 한 번** 세운다:
       `flow_start`에 `side: stack`, `inputs: {issue: <이 회차 이슈 id>, base:
-      <내 회차 브랜치의 지금 tip(전체 SHA)>}`. 이미 서 있으면(flow_status의
+      <내 회차 브랜치의 지금 tip(전체 SHA)>, remote: <원격>, repo: <저장소>}`.
+      remote·repo는 이 회차의 착지 매체가 pr일 때 그 값(지금 medium=${data.landing.medium},
+      remote=${data.landing.remote}, repo=${data.landing.repo})이고, local이면
+      뺀다 — 그러면 스택은 로컬에만 있고 자식은 로컬 착지다. remote가 있으면
+      stack 런이 `<내 세션>-stack`을 원격에 두고, 자식 PR의 base가 그 원격
+      브랜치다(stacked PR). 이미 서 있으면(flow_status의
       `sides.stack.live`가 true) 다시 세우지 않는다. 그 런은 세션이 끝날
       때까지 돌고, 세션이 끝나면 데몬이 중단한다. 착지 절차는 그 런이 살아
       있는지(`side('stack').live`)를 엔진이 직접 보고 컷을 요청하고 받는다 —

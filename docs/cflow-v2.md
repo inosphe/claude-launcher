@@ -1748,7 +1748,9 @@ v2 워커의 착지 요청은 기본으로 pull request를 거친다. 로컬 착
   (세션 패널 PR 마법사와 같은 확인: 저장소, 커밋, GitHub 호스트의 원격, gh 설치,
   그 호스트에 로그인)를 JSON 한 줄(`ready`, `remote`, `repo`, `base`, `blockers` …)로
   출력하고 종료 코드 0이 ready, 1이 아님이다. 원격은 `git config claunch.pr.remote`,
-  없으면 `origin`이고 base는 `claunch.pr.base`, 없으면 master다.
+  없으면 `origin`이고 base는 `claunch.pr.base`, 없으면 master다. `--base <브랜치>`는
+  base를 바꾸고 그 브랜치가 원격에 있는지 `git ls-remote`로 재어 `base_sha`를
+  싣는다(없으면 blocker) — 스택 자식이 쓴다(아래 「stacked PR」).
 - 원격 편성(상위 세션이 다른 머신)에서는 로컬 착지가 성립하지 않으므로 PR을 만들 수
   없으면 `force_pr`과 같이 사람의 선택을 기다린다. 머신을 넘는 커밋 참조는
   `<sha> @ <remote>/<ref>`로 쓰고(docs/remote-commit-protocol.md), rebase 기준은
@@ -1776,6 +1778,42 @@ v2 워커의 착지 요청은 기본으로 pull request를 거친다. 로컬 착
   워커 런의 `prs`와 리더 런의 `landing` 행에서 PR로 바로 이동한다. 상태 열은
   `prs`의 open/merged/closed를 색으로 구분한다. v1 리더의 `landing_queue:`는 PR
   필드를 싣지 않으므로 그 경우 PR 주소는 착지 요청 마커에서만 읽힌다.
+
+### stacked PR (stack-v2, claunch-yq80p.2)
+
+자식을 둔 워커(메인 런 + side 런 `stack`, 2.9)에서는 자식의 PR이 master가 아니라
+부모의 스택 브랜치로 향한다.
+
+- 원격의 스택 브랜치: 메인 런은 side 런을 세울 때 착지 매체가 pr이면 `remote`·
+  `repo` 입력을 넘긴다. stack 런의 `open`이 `<세션>-stack`을 그 원격에 명시
+  refspec으로 push하고 `git ls-remote`로 같은 SHA인지 확인한다. 원격에 같은
+  이름이 다른 tip으로 있으면 덮지 않고 원격 스택 없이 진행한다. `remote`가 없으면
+  스택은 로컬에만 있다.
+- 자식의 base: 자식 워커의 `remote-setup`은 intake가 정한 스택 기준을
+  `pr-preflight --base <부모 세션>-stack`으로 준다. 그 브랜치가 원격에 없으면
+  blocker(`… is not on the remote`)이고, 판정 규칙대로 로컬 착지로 간다(부모의
+  stack 런이 자식 브랜치를 `--no-ff`로 머지한다). 있으면 출력의 `base_sha`가 그
+  원격 tip이고, PR의 base와 브랜치 upstream이 `<remote>/<부모 세션>-stack`이 된다.
+- 자식의 착지 요청: 자식의 `integration-request` leave push가 부모 세션에서
+  landing을 선언한 런, 즉 stack 런의 `landing`에 `pr_url`·`pr_number`·`base`를
+  싣는다(2.8). 그 런의 `land`가 PR 후보를 리더와 같은 절차로 머지한다: 원격 스택
+  브랜치가 로컬 tip과 같은지 확인, `gh pr view`(UNKNOWN이면 재조회),
+  `gh pr merge --merge --match-head-commit <tip>`, `git fetch` 뒤 스택 워크트리에서
+  `--ff-only`, 머지 커밋의 둘째 부모가 레코드 tip인지 확인. 레코드의 `base`가 스택
+  브랜치가 아니면 머지하지 않는다. 로컬 후보를 머지했으면 원격 스택 브랜치를
+  fast-forward push로 맞춘다. 어느 경로든 원격 스택 브랜치는 land 뒤 로컬과 같은
+  tip이고, landing 레코드의 landed 표시는 로컬 브랜치를 보는 watch가 한다.
+- 컷과 이전: `cut`은 원격 스택 브랜치가 컷 tip과 같은지 확인하고 코멘트에
+  `<컷 tip> @ <remote>/<세션>-stack`으로 적는다. 메인 런이 master에 착지한 뒤의
+  `restack`만 원격 스택 브랜치를 `--force-with-lease=<세션>-stack:<옛 tip>`으로
+  다시 쓴다. 열린 자식 PR은 base 이름이 같으므로 그대로 남는다.
+- 부모 회차의 PR: 메인 런의 `stack-merge`가 컷 tip을 회차 브랜치에 머지하므로
+  부모의 PR(base master)에는 자식들의 머지 커밋이 들어 있다. 리더는 그 PR 하나를
+  머지한다.
+- 미실측: 이 경로(스택 브랜치로 향하는 PR의 `gh pr merge`, 스택 restack 뒤 열린
+  자식 PR)는 실제 원격에서 아직 재지 않았다. 아래 실측은 base가 master 대신 전용
+  브랜치였다는 점에서 같은 명령을 다루지만, 스택 브랜치 재작성 뒤의 PR 상태는
+  포함하지 않는다.
 
 ### 실측 (2026-10-06, 실제 원격 github.ncsoft.com/RnIAgentDev/claunch, base = 전용 브랜치 `cflow2-pr-measure`)
 
