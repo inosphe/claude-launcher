@@ -1111,7 +1111,10 @@ def test_api_session_meta_and_workflow_request(home, tmp_path, monkeypatch):
             assert meta["cflow"]["scope"] == "s1"
             assert meta["cflow"]["status"] == "idle"
             assert meta["cflow"]["sessions"] == ["s1"]
-            assert [w["name"] for w in meta["workflows"]] == ["demo"]
+            # v1 and v2 in one list (docs/cflow-v2.md section 9); the package
+            # layer's v2 definitions ride along, told apart by `version`.
+            assert [w["name"] for w in meta["workflows"] if w["version"] == 1] == ["demo"]
+            assert all(w["deprecated"] for w in meta["workflows"] if w["version"] == 1)
 
             # path 1: ask the session's agent to start it. Nothing is started;
             # the request is recorded and typed into the session.

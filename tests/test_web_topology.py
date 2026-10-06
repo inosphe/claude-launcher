@@ -428,6 +428,7 @@ CHECKS = [
         "spawnform_check.js",
         "worktreepicker_check.js",
         "newflow_check.js",
+        "cflow2inputs_check.js",
         "spawnsize_check.js",
         "selectpopup_check.js",
         "flowtrack_check.js",
@@ -511,6 +512,9 @@ CHECKS = [
         "specpage_check.js",
         "shadowcard_check.js",
         "railshadowmix_check.js",
+        "cflow2view_check.js",
+        "cflow2collections_check.js",
+        "cflow2question_check.js",
 ]
 
 

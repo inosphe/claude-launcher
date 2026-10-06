@@ -111,7 +111,20 @@ def _resolve_run(args: argparse.Namespace, *, required: bool = True):
     return None, None
 
 
+#: Printed by `cflow ls` and `cflow show` (docs/cflow-v2.md section 10). On
+#: stderr: the listing on stdout stays what scripts already read.
+V1_DEPRECATION = (
+    "note: the cflow v1 workflow format is deprecated; v2 runs beside it -- "
+    "see 'claunch cflow2 ls' (docs/cflow-v2.md)"
+)
+
+
+def _deprecation_notice() -> None:
+    print(V1_DEPRECATION, file=sys.stderr)
+
+
 def _cmd_ls(_args: argparse.Namespace) -> int:
+    _deprecation_notice()
     flows = state_mod.resolved_workflows()
     if not flows:
         dirs = ", ".join(str(d) for d in state_mod.search_dirs())
@@ -141,6 +154,7 @@ def _cmd_ls(_args: argparse.Namespace) -> int:
 
 
 def _cmd_show(args: argparse.Namespace) -> int:
+    _deprecation_notice()
     composed = state_mod.load_workflow(args.workflow)
     path = composed.path
     wf = composed.workflow
@@ -1140,6 +1154,10 @@ def register(sub) -> None:
         "confirm selections, run the MCP server",
     )
     csub = p.add_subparsers(dest="cflow_command", required=True)
+    # No option abbreviations: the deny rules match the spelled-out flags
+    # (`--force`), and argparse would otherwise read `--forc` as one (G3).
+    _add_parser = csub.add_parser
+    csub.add_parser = lambda *a, **k: _add_parser(*a, **{"allow_abbrev": False, **k})
 
     q = csub.add_parser("ls", help="list available workflows (project + global)")
     q.set_defaults(func=_cmd_ls)

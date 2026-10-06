@@ -64,11 +64,12 @@ import asyncio
 import logging
 import time
 from dataclasses import dataclass
-from typing import Tuple
+from typing import Dict, Optional, Tuple
 
 from ..cflow import engine as cflow_engine
 from ..cflow import state as cflow_state
 from ..cflow.model import WorkflowError
+from . import cflow2_web
 from . import harness as harness_mod, mesh_roles
 from .harness import CLAUDE_HARNESS
 from .mesh import MeshError
@@ -92,7 +93,21 @@ class OnboardError(Exception):
 
     Mapped to 400. Distinct from the per-leg failures reported in
     :func:`run`'s result: those happened to a session that exists.
+    ``errors`` (when set) maps a v2 start input to why it was refused.
     """
+
+    def __init__(self, message: str = "", errors: Optional[Dict[str, str]] = None) -> None:
+        super().__init__(message)
+        self.errors = dict(errors or {})
+
+
+def error_body(exc: OnboardError) -> dict:
+    """The 400 body for ``exc``: the message, plus per-field ``errors`` for
+    the start form when the v2 inputs were refused."""
+    out: dict = {"error": str(exc)}
+    if getattr(exc, "errors", None):
+        out["errors"] = dict(exc.errors)
+    return out
 
 
 def _subroles(raw) -> Tuple[str, ...]:
@@ -137,6 +152,17 @@ class Plan:
     #: (no mesh and no workflow, a harness with no prompt to append to, or a
     #: remote join whose handle is not settled until the grant arrives).
     identity: str = ""
+    #: Which runtime ``workflow`` belongs to: 1 (``cflow``) or 2 (``cflow2``,
+    #: docs/cflow-v2.md), settled in preflight by :func:`cflow2_web.choose`.
+    workflow_version: int = 1
+    #: A v2 run's params (``workflow_params`` in the request), checked against
+    #: the chart's declarations in preflight.
+    workflow_params: Optional[dict] = None
+    #: A v2 run's start inputs (``cflow_inputs``), normalised against the
+    #: chart's ``inputs`` schema in preflight; ``None`` when it declares none.
+    cflow_inputs: Optional[dict] = None
+    #: The new session's profile: a v2 run resolves its capabilities from it.
+    profile: str = ""
 
     @property
     def wanted(self) -> bool:
@@ -227,9 +253,11 @@ def inherit_workflow(body: dict, *, parent: str, parent_cwd: str, cwd: str) -> N
         return
     if named:
         return
-    paired = paired_child_workflow(parent=parent, parent_cwd=parent_cwd, cwd=cwd)
+    paired, version = _paired(parent=parent, parent_cwd=parent_cwd, cwd=cwd)
     if paired:
         body["workflow"] = paired
+        if version == 2:
+            body["workflow_version"] = 2
 
 
 def paired_child_workflow(*, parent: str, parent_cwd: str, cwd: str) -> str:
@@ -240,7 +268,48 @@ def paired_child_workflow(*, parent: str, parent_cwd: str, cwd: str) -> str:
     preselect this, and a person who then leaves the row alone gets exactly
     what the answer here says. One reading, two surfaces -- a picker that
     computed the pair itself would be a second one, free to drift.
+
+    A parent driving a cflow v2 run pairs through its chart's
+    ``meta.default_child_cflow`` (``.cflow2/runs/<parent>/chart.json``).
     """
+    return _paired(parent=parent, parent_cwd=parent_cwd, cwd=cwd)[0]
+
+
+def _paired(*, parent: str, parent_cwd: str, cwd: str) -> Tuple[str, int]:
+    """``(name, version)`` of the pair: the v1 run's when the parent drives
+    one, else its v2 run's. The version is 2 when the paired name is a v2
+    workflow the v1 layers do not also declare, or when only a v2 parent
+    named it and the v2 layers declare it."""
+    paired = _paired_v1(parent=parent, parent_cwd=parent_cwd, cwd=cwd)
+    from_v2 = False
+    if paired is None:
+        paired = cflow2_web.paired_child(parent_cwd, parent)
+        from_v2 = True
+    if not paired:
+        return "", 1
+    v1 = cflow2_web.v1_names(cwd or None)
+    try:
+        v2 = cflow2_web.v2_names(cwd or "")
+    except Exception as exc:  # noqa: BLE001 - a broken v2 layer must not break the spawn
+        log.debug("could not list v2 workflows in %s: %s", cwd, exc)
+        v2 = []
+    if from_v2 and paired in v2:
+        return paired, 2
+    if paired in v1:
+        return paired, 1
+    if paired in v2:
+        return paired, 2
+    log.info(
+        "%r's run pairs children with %r, which is not declared in %s "
+        "— child of %r starts with no run",
+        parent, paired, cwd or "the daemon cwd", parent,
+    )
+    return "", 1
+
+
+def _paired_v1(*, parent: str, parent_cwd: str, cwd: str) -> Optional[str]:
+    """The v1 run's pair: ``None`` when the parent drives no v1 run (so a v2
+    run is consulted), "" when its v1 run pairs with nothing."""
     # Scoped to the parent's session name, never falling back to the
     # directory's default-scope run: that run belongs to whoever started it,
     # and pairing off a run the parent does not drive would hand the child a
@@ -249,25 +318,14 @@ def paired_child_workflow(*, parent: str, parent_cwd: str, cwd: str) -> str:
         status = cflow_engine.status(parent_cwd, scope=parent)
     except Exception as exc:  # a broken run must not break the spawn
         log.debug("no run to pair a child against for %r: %s", parent, exc)
-        return ""
+        return None
     if not status or status.get("status") == "idle":
-        return ""
+        return None
     try:
-        paired = cflow_state.load_snapshot(parent_cwd, parent).default_child_cflow
+        return cflow_state.load_snapshot(parent_cwd, parent).default_child_cflow or ""
     except Exception as exc:
         log.debug("could not read %r's workflow snapshot: %s", parent, exc)
         return ""
-    if not paired:
-        return ""
-    available = [name for name, _ in cflow_state.list_workflows(cwd or None)]
-    if paired not in available:
-        log.info(
-            "workflow %r pairs children with %r, which is not declared in %s "
-            "— child of %r starts with no run",
-            status.get("workflow"), paired, cwd or "the daemon cwd", parent,
-        )
-        return ""
-    return paired
 
 
 async def _open_mesh_for(parent: str, mesh_mgr, *, project: str = "") -> str:
@@ -315,6 +373,7 @@ def preflight(
     harness: str,
     parent: str = "",
     parent_cwd: str = "",
+    profile: str = "",
 ) -> Plan:
     """Check what can be checked without a session, and build its identity.
 
@@ -406,7 +465,46 @@ def preflight(
             "with a 'mesh' to join"
         )
 
-    if workflow and workflow.endswith((".yaml", ".yml")):
+    # cflow v2 first (docs/cflow-v2.md): a name only the v2 layers declare,
+    # a file in a .cflow2/generated directory (or a v1 generated file whose
+    # text says `cflow: 2`), or any name when the request says
+    # workflow_version 2. Everything else falls through to v1 untouched --
+    # including a name both formats declare, which v1 keeps while they run
+    # side by side.
+    workflow_version = 1
+    workflow_params = None
+    cflow_inputs = None
+    if workflow:
+        try:
+            chosen = cflow2_web.choose(
+                workflow, body.get("workflow_version"), cwd=cwd, roots=(parent_cwd,)
+            )
+            if chosen is not None:
+                workflow, chart = chosen
+                if chart.kind != "workflow":
+                    raise cflow2_web.ChoiceError(
+                        f"{chart.name} is a {chart.kind}; only a workflow can be started"
+                    )
+                workflow_params = cflow2_web.params_for(
+                    chart, body.get("workflow_params"), str(body.get("context") or "")
+                )
+                cflow2_web.check_params(chart, workflow_params)
+                cflow_inputs = cflow2_web.check_inputs(chart, body.get("cflow_inputs"))
+                workflow_version = 2
+        except cflow2_web.InputsInvalid as exc:
+            raise OnboardError(str(exc), exc.errors) from None
+        except cflow2_web.ChoiceError as exc:
+            raise OnboardError(str(exc)) from None
+        except Exception as exc:  # noqa: BLE001 - compile errors of every kind
+            raise OnboardError(f"v2 workflow {workflow!r}: {exc}") from None
+    if workflow_version != 2 and body.get("cflow_inputs"):
+        raise OnboardError(
+            "'cflow_inputs' are the start inputs of a cflow v2 workflow; "
+            f"{workflow or 'no workflow'!r} is not one"
+        )
+    if workflow_version == 2:
+        pass  # resolved, compiled and its params checked above
+    elif workflow and workflow.endswith((".yaml", ".yml")):
         try:
             path = cflow_state.generated_workflow(
                 workflow, cwd=cwd or None, roots=(parent_cwd,)
@@ -453,7 +551,12 @@ def preflight(
             harness=harness,
             parent=parent,
             parent_handle=parent_handle,
+            workflow_version=workflow_version,
         ),
+        workflow_version=workflow_version,
+        workflow_params=workflow_params,
+        cflow_inputs=cflow_inputs,
+        profile=profile,
     )
 
 
@@ -466,6 +569,7 @@ def _identity_block(
     harness: str,
     parent: str = "",
     parent_handle: str = "",
+    workflow_version: int = 1,
 ) -> str:
     """The unchanging half, phrased for a system prompt.
 
@@ -501,7 +605,15 @@ def _identity_block(
                 "— say so in your first turn rather than working on regardless."
             )
         )
-    if workflow:
+    if workflow and workflow_version == 2:
+        lines.append(
+            f"This session drives the cflow v2 run of workflow {workflow!r}"
+            + (f" (scope {scope!r})" if scope else "")
+            + ". It is your run, not another session's: drive it with the flow_* "
+            "tools (flow_status, then flow_report / flow_select / flow_delegate) "
+            "and do not start a second one in this directory."
+        )
+    elif workflow:
         lines.append(
             f"This session drives the cflow run of workflow {workflow!r}"
             + (f" (scope {scope!r})" if scope else "")
@@ -544,7 +656,20 @@ async def arrange(plan: Plan, *, name: str, cwd: str, mesh_mgr) -> Tuple[dict, s
     if plan.workflow:
         started = _start_workflow(plan, name=name, cwd=cwd)
         result["workflow"] = started
-        if started.get("ok"):
+        if started.get("ok") and plan.workflow_version == 2:
+            sections.append(
+                "---\n"
+                "# claunch cflow2: run assigned at creation -- machine-generated\n"
+                f"workflow: {plan.workflow} (cflow v2)\n"
+                f"scope: {started.get('scope')}\n"
+                + (f"context: {plan.context}\n" if plan.context else "")
+                + "protocol: this run is yours to drive. Call the flow_status "
+                "tool to see the active tasks and choices, do each task, and "
+                "report it with flow_report (flow_select for a choice, "
+                "flow_delegate for a delegated node).\n"
+                "---"
+            )
+        elif started.get("ok"):
             sections.append(
                 "---\n"
                 "# claunch cflow: run assigned at creation -- machine-generated\n"
@@ -619,7 +744,15 @@ async def unwind(report: dict, *, name: str, cwd: str, mesh_mgr) -> None:
             await mesh_mgr.leave(joined["mesh"], joined["handle"])
         except Exception as exc:  # noqa: BLE001 — best effort
             log.warning("could not undo mesh join for %r: %s", name, exc)
-    if (report.get("workflow") or {}).get("ok"):
+    started = report.get("workflow") or {}
+    if started.get("ok") and started.get("version") == 2:
+        try:
+            from ..cflow2 import runtime as cflow2_runtime
+
+            cflow2_runtime.abort("the session failed to start", cwd=cwd, scope=name)
+        except Exception as exc:  # noqa: BLE001 — best effort
+            log.warning("could not undo cflow2 run for %r: %s", name, exc)
+    elif started.get("ok"):
         try:
             cflow_engine.abort(by="claunch", cwd=cwd, scope=name)
         except Exception as exc:  # noqa: BLE001 — best effort
@@ -689,7 +822,13 @@ def _start_workflow(plan: Plan, *, name: str, cwd: str) -> dict:
     Runs are keyed by ``(cwd, scope)`` and a session-scoped run uses the
     session name as its scope, so this session's agent picks it up as *its*
     run — not a sibling's, even though both sit in the same directory.
+
+    A v2 plan (``workflow_version`` 2) starts on the cflow2 runtime instead,
+    in ``<cwd>/.cflow2/runs/<name>/``, with capabilities resolved for the
+    session's profile.
     """
+    if plan.workflow_version == 2:
+        return _start_v2(plan, name=name, cwd=cwd)
     try:
         payload = cflow_engine.start(
             plan.workflow, context=plan.context or None, cwd=cwd, scope=name
@@ -701,6 +840,28 @@ def _start_workflow(plan: Plan, *, name: str, cwd: str) -> dict:
         "workflow": plan.workflow,
         "scope": name,
         "step": payload.get("step") or payload.get("id"),
+    }
+
+
+def _start_v2(plan: Plan, *, name: str, cwd: str) -> dict:
+    """The v2 half of :func:`_start_workflow`."""
+    try:
+        from ..cflow2 import runtime as cflow2_runtime
+
+        chart = cflow2_web.load(plan.workflow, cwd)
+        payload = cflow2_web.start_run(
+            chart, inputs=plan.cflow_inputs, cwd=cwd, scope=name, params=plan.workflow_params,
+            caps=cflow2_runtime.resolve_caps(plan.profile or None),
+        )
+    except Exception as exc:  # noqa: BLE001 — compile, params, a live run...
+        return {"ok": False, "error": str(exc), "version": 2}
+    return {
+        "ok": True,
+        "workflow": plan.workflow,
+        "scope": name,
+        "version": 2,
+        "run": payload.get("run"),
+        "active": payload.get("active") or [],
     }
 
 

@@ -351,12 +351,24 @@ TOOLS = [
                         "child_cflow), and on none when your workflow pairs "
                         "with nothing or you are driving no run. Name one to "
                         "override that pairing; '-' gives the child no run "
-                        "where the pair would have given it one"
+                        "where the pair would have given it one. A cflow v2 workflow "
+                        "is named the same way (or as v2:<name> when a v1 one "
+                        "shares the name, or a .cflow2/generated/*.yaml path)"
                     ),
                 },
                 "context": {
                     "type": "string",
                     "description": "context string for that workflow run",
+                },
+                "cflow_inputs": {
+                    "type": "object",
+                    "description": (
+                        "start inputs of a cflow v2 workflow that declares "
+                        "'inputs:' (name -> value; e.g. {\"goal\": \"...\", "
+                        "\"invariants\": [{\"text\": \"...\", \"probe\": \"cmd\"}]}). "
+                        "Read the declaration with 'claunch cflow2 show <name>'. "
+                        "A missing required input or an unknown name refuses the spawn"
+                    ),
                 },
                 "task": {
                     "type": "string",
@@ -1062,7 +1074,8 @@ _SPAWN_KEYS = (
     "name", "mesh", "handle", "role", "subroles", "connect", "workflow", "context",
     "task", "issue", "issue_text", "harness", "workspace", "worktree",
     "rebase_onto", "branch_from", "profile", "borrow", "null_token", "cwd", "args", "env",
-    "fork", "tools", "project", "prompt_packs",
+    "fork", "tools", "project", "prompt_packs", "workflow_version", "workflow_params",
+    "cflow_inputs",
 )
 
 

@@ -5496,3 +5496,52 @@ div.shadow-card .shadow-line { white-space: normal; overflow-wrap: anywhere; }
   .vscode-setting { grid-template-columns: 1fr; }
   .vscode-setting .wf-note { grid-column: 1; }
 }
+/* cflow v2 beside v1 (docs/cflow-v2.md section 9): the version badge, the
+   chart tree of a v2 run, the user's open choices and the delegation rows. */
+.cf2-badge {
+  display: inline-block; padding: 0 5px; margin-right: 6px; border-radius: 3px;
+  font-size: 11px; font-weight: 600; color: #0d1117; background: #a5d6ff;
+}
+.cf2-tree { font-size: 12px; margin: 4px 0 8px; }
+.cf2-row { padding: 1px 0; color: #8b949e; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.cf2-row.active { color: #c9d1d9; }
+.cf2-row.awaiting { color: #f0f6fc; background: rgba(56, 139, 253, 0.18); }
+.cf2-role { color: #6e7681; }
+.cf2-visits { color: #d29922; }
+.cf2-await { color: #58a6ff; }
+.cf2-choice { border: 1px solid #30363d; border-radius: 6px; padding: 6px 8px; margin: 6px 0; }
+.cf2-choice h4 { margin: 0 0 4px; }
+.cf2-question h5 { margin: 6px 0 2px; }
+.cf2-q-table { border-collapse: collapse; margin: 2px 0 6px; font-size: 12px; }
+.cf2-q-table th, .cf2-q-table td { border: 1px solid #30363d; padding: 2px 6px; text-align: left; vertical-align: top; white-space: pre-wrap; }
+.cf2-q-table tr.recommended td { background: rgba(46, 160, 67, 0.15); }
+.cf2-q-rec { margin: 4px 0; }
+.wf-btn.recommended { outline: 2px solid #2ea043; }
+.cf2-deleg { font-size: 12px; padding: 2px 0; }
+.cf2-receipt { color: #6e7681; }
+.cf2-fallback { margin: 0 0 2px 12px; font-size: 12px; }
+.cf2-v1-note { margin-top: 4px; }
+/* cflow v2 collections and trigger lines (run view) */
+.cf2-collection { margin: 6px 0; overflow-x: auto; }
+.cf2-col-table { border-collapse: collapse; font-size: 12px; width: 100%; }
+.cf2-col-table th, .cf2-col-table td { text-align: left; padding: 2px 6px; border-bottom: 1px solid #30363d; vertical-align: top; }
+.cf2-col-fields { overflow-wrap: anywhere; color: #8b949e; }
+.cf2-col-status.landed { color: #3fb950; }
+.cf2-col-status.rejected { color: #f85149; }
+.cf2-col-actions { white-space: nowrap; }
+.cf2-trigger { font-size: 12px; margin: 0; }
+.cf2-trigger.skipped { color: #d29922; }
+/* cflow v2 start inputs (new-session / spawn form) and the run's inputs */
+.cf2-inputs { border: 1px solid #30363d; border-radius: 6px; padding: 6px 8px; margin: 6px 0; }
+.cf2-input { margin: 6px 0; }
+.cf2-input-label { display: block; font-weight: 600; }
+.cf2-input-control textarea, .cf2-input-control input[type=text],
+.cf2-input-control input[type=number], .cf2-input-control select { width: 100%; box-sizing: border-box; }
+.cf2-input-row { display: flex; gap: 4px; margin: 2px 0; }
+.cf2-input-row input { flex: 1 1 0; min-width: 0; }
+.cf2-input-help { margin: 2px 0 0; }
+.cf2-input.invalid .cf2-input-control { outline: 1px solid #f85149; border-radius: 4px; }
+.cf2-input-error { color: #f85149; margin: 2px 0 0; }
+.cf2-run-inputs { margin: 6px 0; }
+.cf2-run-input-value { white-space: pre-wrap; }
+.cf2-undecidable { color: #d29922; }

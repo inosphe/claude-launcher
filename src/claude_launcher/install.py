@@ -84,7 +84,9 @@ MCP_NAME = "claunch"
 LEGACY_MCP_NAMES = ("cflow", "mesh")
 
 #: Harness permission rules that keep the AGENT's hands off the human gate
-#: commands (``claunch cflow approve|select|goto|abort``).
+#: commands (``claunch cflow approve|select|goto|abort``, ``claunch cflow2
+#: approve|select|extend|resume|abort``, ``claunch cflow2 collection
+#: push|set|remove``).
 #:
 #: The cflow split is channels: the MCP tools are the agent's and carry no
 #: approve, the CLI is the human's — but an agent with a shell tool holds
@@ -106,11 +108,43 @@ LEGACY_MCP_NAMES = ("cflow", "mesh")
 #: Both spellings per command (exact and ``:*`` prefix), for both shell
 #: tools this harness may expose; a rule naming a tool a setup lacks is
 #: inert.
+#:
+#: cflow v2 additionally gets glob forms (``*`` at any position), because the
+#: same command is reachable under other spellings: ``uv run claunch ...``,
+#: ``/abs/path/claunch ...``, ``env X=1 claunch ...``, ``claunch.exe ...``
+#: (``*claunch* cflow2 <cmd>*``) and ``python -m claude_launcher cflow2 ...``
+#: (``*claude_launcher* cflow2 <cmd>*``), plus ``start --force`` anywhere in
+#: a start command line. They are still a convenience: the v2 CLI itself
+#: refuses these commands in the shell of the session that drives the run
+#: (``cli_cflow2._refuse_own_session``), which is the check that holds.
+#:
+#: ``collection push|set|remove`` change a run's collection as the principal
+#: ``person`` (an agent's door is the ``flow_collection`` MCP tool, which acts
+#: as ``driver`` under the collection's ``access``); ``collection ls`` reads
+#: and stays open.
+CFLOW2_HUMAN_COMMANDS = ("approve", "select", "extend", "resume", "abort",
+                         "collection push", "collection set", "collection remove")
+
 GATE_DENY_RULES = tuple(
-    f"{tool}(claunch cflow {cmd}{suffix})"
-    for cmd in ("approve", "select", "goto", "abort", "set")
+    f"{tool}(claunch {cmd}{suffix})"
+    for cmd in (
+        *(f"cflow {c}" for c in ("approve", "select", "goto", "abort", "set")),
+        # cflow v2's human doors: a task's ask, a user choice, a loop or
+        # visit limit, a halting monitor, aborting a run. The driver's own
+        # door for an ask that fell to 'otherwise: self' is the flow_approve
+        # MCP tool.
+        *(f"cflow2 {c}" for c in CFLOW2_HUMAN_COMMANDS),
+    )
     for tool in ("Bash", "PowerShell")
     for suffix in ("", ":*")
+) + tuple(
+    f"{tool}({pattern})"
+    for pattern in (
+        *(f"*{prog}* cflow2 {c}*" for prog in ("claunch", "claude_launcher")
+          for c in CFLOW2_HUMAN_COMMANDS),
+        *(f"*{prog}* cflow2 start*--force*" for prog in ("claunch", "claude_launcher")),
+    )
+    for tool in ("Bash", "PowerShell")
 )
 
 #: The board's export file, denied to the agent's file tools.

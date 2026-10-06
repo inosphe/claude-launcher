@@ -1,0 +1,343 @@
+cflow: 2
+name: improv-common
+kind: procedure
+description: >-
+  improv 계열 v2 정의(improv-worker-v2, 이후 improv-leader·improv-pm의 v2
+  포트)가 `include`로 함께 쓰는 조각·규칙·프로시저. beads 공통 규칙 블록
+  (`beads-common`), 범위 규율 규칙(`scope-discipline`), 회차 도중 발견한 범위
+  밖 결함을 이슈로 남기는 프로시저(`found-issue`)를 담는다. 이 파일을 직접
+  부르면 found-issue와 같다.
+
+# ── 이 파일의 자리 ──────────────────────────────────────────────────────
+# v1에서는 beads 공통 블록을 정의 다섯 개가 복사해 들고 있었고, 같은지를
+# tests/test_beads_protocol.py가 문자열로 비교했다. v2에서는 이 파일의
+# fragment 하나를 `${frag:beads-common}`으로 부른다. v1 정의들이 아직 살아
+# 있는 동안에는 v1 사본(improv-worker.yaml)이 정본이고, 이 fragment는 그
+# 블록과 바이트 단위로 같아야 한다 — tests/test_cflow2_improv_worker.py가
+# 그것을 검사한다. 블록을 고칠 때는 v1 정본을 먼저 고치고 여기로 옮긴다.
+#
+# 규칙 중 워커에만 해당하는 것(no-master-merge, no-premature-rebase)은 여기
+# 두지 않는다. include는 규칙의 effect까지 가져오므로, master 머지를 실제로
+# 하는 리더 정의가 이 파일을 include하면 그 금지에 걸린다.
+
+# 사용자에게 묻는 질문의 형식과 ask-user 프로시저(docs/cflow-v2.md 2.10).
+include: [ask-common]
+
+params:
+  parent: {type: str, required: true, description: 발견이 붙을 이 회차의 이슈 id}
+  summary: {type: str, default: "", description: 발견의 한 줄 요지}
+
+fragments:
+  beads-common: |
+      ── beads(br) 규칙 — 공통 ──
+      일감의 정본은 beads다: 세션이 한 회차를 쓸 일, 다른 세션·회차로 넘어갈
+      일은 이슈로 존재해야 한다(존재·제목·범위·완료 기준·assignee·상태·
+      의존·부모). beads에 두지 않는 것: 실행 기록(cflow 저널), 승인·선택
+      (cflow ask/select), 그리고 사건 — 대화·답장·정정, restack 공지, 창
+      순번처럼 지금 이 순간에만 뜻이 있고 되짚어 읽히지 않는 것(mesh).
+      ── 기록은 코멘트에, 신호는 메시지에 ──
+      되짚어 읽힐 것은 전부 코멘트다: 증거 묶음(브랜치·tip·기능/머지 해시,
+      테스트 수치와 그 축·트리·환경, 양방향 diff, 포함 관계, 스택 위치,
+      merge-tree 결과), 심사 한계와 테스트가 세우지 못하는 것, 그리고 판정
+      마커 — `LANDING REQUEST @ <hash>` / `REBASE REQUESTED @ <hash>` /
+      `REMEASURE REQUESTED @ <hash>` /
+      `REVIEWED: pass @ <hash>` / `CHANGES REQUESTED: <무엇을>` /
+      `HOLD: <이유>` / `BLOCKED: <게이트>` / `merged <hash>`. 코멘트는 산문
+      문단이 아니라 (축, 트리, 값)의 줄로 적는다 — 보드는 저장소에 커밋되므로
+      산문은 무게만 늘리고 되짚을 때 읽히지 않는다. 긴 묶음은 파일로 붙인다:
+      `claunch beads comments add <id> -f <파일>`.
+      **같은 것을 메시지 본문에 다시 싣지 않는다.** 메시는 상대 터미널에
+      타이핑되므로 본문은 수신자 수만큼 곱해 남의 컨텍스트에서 나가고, 기록으로
+      보낸 것은 아무에게도 답을 요구하지 않으면서 그 값을 치른다. 메시지는
+      nudge다 — 네 줄 안에 이슈 id와 상태, 코멘트 마커, 판정을 바꾸는 값 한 줄
+      (델타·미해결 한계 유무), 상대가 할 일. 상대는 그 id로 당겨 읽는다
+      (`claunch beads show <id> --json`, `claunch beads comments <id>`; 표
+      전체는 `claunch beads list --status in_review --json` 한 번이다).
+      이 갈래가 서지 않는 자리가 하나 있다: 다른 머신의 멤버는 이 저장소의
+      보드에 닿지 않는다(`claunch mesh members`의 machine이 다르면 그렇다).
+      그 상대에게만은 묶음을 메시지로 보낸다.
+      정본 규칙(파서·직렬화·포맷 같은 공용 규약, 판정식, 기준선)은 이슈가
+      아니지만 되짚어 읽히므로 보드에 산다: `--type doc` 이슈 하나를 세우고
+      (assignee 없음 — `in_ready`로 전이하지 않는다) 갱신을 갈래로 나눠 쌓는다:
+      **규범 내용(규약·정의·판정식)은 본문에 두고, 고칠 때 본문을 고친다.**
+      코멘트에는 그 판정이 어떻게 서고 어떻게 정정됐는지의 이력을 쌓는다.
+      doc에서만 앞 갈래가 뒤집히는 이유는 용도다 — 참조하러 온 사람은 본문
+      하나를 읽고 닫으므로 본문이 지금 값이어야 한다. 규약을 코멘트로만
+      쌓으면 본문이 낡고, 낡았다는 것을 알리는 경고도 exit code도 없다
+      (`claunch-qj03` 실측).
+      전원 브로드캐스트로 규칙을 배포하지 않는다 — 수신자 수만큼 곱해지는 데다
+      나중에 합류한 사람에게는 닿지 않는다. 배포는 doc 이슈 id 한 줄이다.
+      호출은 항상 `claunch beads <br 인자>` — 워크트리에서도 저장소 루트의
+      .beads/beads.db 하나를 쓰고(--db를 대신 붙인다), 쓰기에 --actor
+      $CLAUNCH_SESSION을 붙이며, DB가 없으면 `claunch beads`가 issues.jsonl에서
+      스스로 만든다. 조회는 --json.
+      **`.beads/issues.jsonl`을 직접 고치는 것은 금지다.** 보드의 실체는
+      `.beads/beads.db`이고 jsonl은 그것을 내보낸 산출물이다. 손으로 쓴 줄은
+      DB에 들어가지 않는다. 다음에 어느 세션이든 `claunch beads sync
+      --flush-only`를 돌리면 DB 내용이 그 파일을 덮어쓰고, 손으로 쓴 내용은
+      에러도 경고도 없이 사라진다. 반대로 jsonl에만 있고 DB에 없는 이슈가
+      생기면 export의 stale 가드가 걸려 그 저장소의 flush가 전부 멈춘다
+      (`claunch beads sync --help`). Edit·Write·`sed -i`·리다이렉션 어느
+      것으로도 그 파일에 쓰지 않는다. 이슈를 만들고 고치고 닫는 길은
+      `claunch beads` 하나다. jsonl에서 DB로 되돌리는 것이 정말 필요하면
+      `claunch beads sync --import-only`이고, 그것도 사람의 판단이 있을 때다.
+      이슈가 없을 때 만드는 자 = 그 일을 사람에게서 처음 받은 세션, 또는
+      발견한 세션이다 — 리더가 아니다. 만들기 전에 `claunch beads search
+      "<핵심어>" --json`과 open/in_ready/in_progress/in_review 목록으로 중복을 본다;
+      있으면 create 대신 comments add. 규격: 제목 한 줄「무엇을 어떻게」,
+      --description은 `## 목표 / ## 범위(포함·제외) / ## 완료 증거 기준 /
+      ## 출처(누가·언제·원문)`, --labels에 출처 하나(user | user-direct |
+      leader | handoff | found | review). 우선순위: P1 사용자가 보고한
+      라이브 데몬·UI 고장과 master 빨강 / P2 사용자 지시·리더 배정(기본) /
+      P3 인수인계·발견·후속·후보 / P4 아이디어. type은 task 기본, bug는
+      회귀·결함, epic은 스택 부모, doc은 참조 전용(`in_ready`로 전이하지 않고 배정하지
+      않는다). staged 순서: description이 먼저, --assignee가 마지막.
+      상태 전이의 주인: open→in_ready는 리더(규격·우선순위 검토 완료) /
+      open 또는 in_ready→in_progress는 assignee 워커(intake 끝,
+      --external-ref에 run id; 터미널 사용자 직접 지시는 open에서 시작할 수 있음) /
+      in_ready→open은 리더(규격·우선순위 재검토 필요) /
+      in_progress→in_review는 assignee 워커
+      (landing request) / in_review→in_progress는 리더(rebase·재측정 재요청)
+      또는 요청을 철회하는 assignee 워커(`WITHDRAWN @ <tip>` 코멘트와 함께) /
+      in_review→closed는 assignee 세션이다 — 누가 배정했든 그 이슈를 끝까지
+      관리하는 것은 assignee다. assignee 세션이 종료돼도 in_ready는 검토 결과를 유지하고,
+      다음 adoption이 종료된 assignee를 교체한다. 닫는 자리는 wrapup 하나, 닫을 자격은 landed가
+      git으로 증명한 머지 커밋 해시다(`claunch beads close <id> --reason
+      "merged <머지 해시>"`; 스택을 둔 워커는 자기 스택에 착지시킨 자식
+      이슈를 stack 런의 land에서 그 스택 머지 해시로 닫는다). 리더가 닫는
+      것은 하나뿐이다: assignee가 비었거나 그 세션이 exited인 고아. 그
+      경우에 한해 리더가 닫고, 사유에 스윕 수치를 붙일 수 있으면 붙인다 / 아무
+      상태→blocked는 그 게이트에 걸린 세션(`BLOCKED: <스텝>`), 해소되면
+      같은 세션이 되돌린다 / reopen은 리더만. update --status closed는
+      없다 — close뿐이다.
+      ── open 풀 판정 기준 ──
+      open 이슈 수는 그 자체로 정보가 아니다 — 라벨·배정·코멘트 마커를
+      가르지 않은 원값은 살아 있는 일감 수를 과대 센다. 측정은
+      `claunch beads list --status open --limit 0 --json`으로 우선순위·
+      assignee·첫 라벨·코멘트 마커를 센 뒤 말한다(기본 행 제한 50은 판정
+      근거가 아니다).
+      살아 있는 일감: assignee가 살아 있는 세션이고 intake에서 in_progress
+      전이(external-ref에 run id)를 한 것 / 리더가 배정·보류를 코멘트로
+      남긴 것 / 위 우선순위 절의 P1에 맞는 것.
+      정리 대상은 셋이고 판정은 개별이다 — 여럿을 한 번에 닫는 일괄 변경은
+      없다:
+      (1) merged 해시가 코멘트에 있는데 open인 것 — 닫을 자격은 이미
+          증명됐다. assignee가 살아 있으면 그 wrapup에서, 없거나 소멸했으면
+          리더가 닫는다.
+      (2) 같은 규격(목표·범위·출처·우선순위)의 중복 — 존재 쪽을 남기고
+          중복 쪽을 닫는다(사유에 존재 쪽 id). create 전 search가 생성을
+          막고, 이 갈래는 이미 생긴 중복의 처리다. assignee가 없거나
+          소멸했으면 리더가 닫는다.
+      (3) SESSION ENDED 코멘트가 있고 assignee 없이 3일 지난 open — 리더의
+          정리 대상이며 재배정이 먼저다: 배정 후보·우선순위·최근 갱신
+          가운데 하나라도 있으면 재배정하고, 셋 다 없으면 닫는다(사유에
+          판정 근거, 재발하면 리더만이 reopen한다).
+      ── 큐(queue)·배치(batch) 규칙 ──
+      세션의 큐는 보드에서 assignee가 그 세션인 활성 이슈(open·in_ready·
+      in_progress·in_review)다 — 세션 레코드에 따로 적지 않고 보드 하나가
+      정본이다. 순서는 priority 오름차순, 같으면 created_at 순. 읽는 명령은
+      `claunch beads list --assignee <세션> --status open --status in_ready
+      --status in_progress --limit 0 --json`. 배정(assignee 쓰기)은 리더·
+      운영자의 것이다(예외: 세션이 스스로 만든 이슈 — 아래 「스스로 만든
+      이슈는 만든 세션이 처리한다」 절) — 대시보드 Beads 페이지의 Queues 탭에서 카드를 세션
+      행으로 끌면 데몬이 `update <id> --assignee <세션>` 하나를 대신 치고
+      `QUEUED`/`UNQUEUED` 코멘트를 남긴다; 상태(status)는 손대지 않는다.
+      한 세션의 큐는 브랜치 하나 위에서 배치로 처리된다: 일감마다
+      in_progress 전이 → 작업·테스트·커밋 → 다음 일감, 큐가 비면(또는 배치
+      상한 5개에 닿으면) 배치의 이슈 전부를 in_review로 올려 착지 요청은 한
+      번이다. 마커는 이슈마다 `LANDING REQUEST @ <tip>`이고 주 이슈(오프닝의
+      `issue: <id>`)의 마커 뒤에 `batch: <id,...>`가 붙으며 증거 묶음은 그 주
+      이슈 코멘트 하나에 있다. 리더는 같은 tip의 행들을 후보 하나로 심사해
+      한 번 머지하고, 닫는 것은 assignee가 이슈마다 `merged <해시>`로 한다.
+      착수하지 않은 큐 일감은 회차 마감 뒤 워커의 queue-recheck가 다시
+      읽는다 — 착수할 수 있으면 같은 런 안에서 다음 회차의 주 이슈가 되고
+      (intake로 루프), 착수할 수 없는 것(blocked·다른 저장소 영역)만
+      `update <id> --assignee ""`와 `UNQUEUED: <세션> landed without it`
+      코멘트로 풀에 되돌린다.
+      ── 스스로 만든 이슈는 만든 세션이 처리한다 ──
+      워커가 회차 중 스스로 만든 이슈(work의 `found`, wrapup의 `handoff`)는
+      만든 세션이 같은 런 안에서 처리한다(claunch-034c4, 2026-09-23 사용자
+      지시 — claunch-qac7 Q1의 「워커 자기 배정은 원칙적으로 금지, 좁은
+      self 예외만 제안」을 대체한다). 만들고 assignee 없이 backlog로 두는
+      것이 기본값이던 동안 그 이슈들은 처리되지 않고 쌓였다(s586). 그래서
+      배정은 wrapup의 생성 이슈 정산에서 워커가 직접 친다 — 항목마다:
+      (1) **spawn** — 살아 있는 자식(`children`)이 있고 그 이슈가 그 자식의
+      영역이며 그 자식의 런이 아직 queue-recheck 앞에 있으면(`claunch
+      cflow status -t <자식> --json`의 `step_id`가 queue-recheck·settle-*·
+      end-*가 아니고 런이 done이 아니다 — 지난 자식은 큐를 다시 읽지
+      않는다) 그 자식에게(`update <id> --assignee <자식> --add-label
+      delegated` + `DELEGATED: from <원회차 id> to <자식>` 코멘트 + 자식에게
+      mesh 한 줄 — 자식의 queue-next/queue-recheck가 보드로 읽는다; 자식이
+      착수 전에 종료되면 데몬이 `delegated` 라벨을 보고 풀에 되돌리고
+      `DELEGATION RELEASED` 코멘트를 남긴다), 또는 work의 위임 조건을
+      만족하면 새 자식을 `--issue <id>`로 세운다; (2) **self** — 그 밖에는
+      자기에게(`update <id> --assignee $CLAUNCH_SESSION` + `SELF-QUEUED:
+      from <원회차 id>` 코멘트) — queue-recheck가 그것을 읽어 같은 런
+      안에서 다음 회차로 돈다; (3) **pool** — assignee 없이 남기는 것은 이
+      세션이 착수할 수 없는 것(다른 저장소 영역, blocked, 범위·우선순위를
+      사용자나 리더가 정해야 하는 것)뿐이고, 그 처분은 상위에게 ask로
+      묻는다. self에는 런 단위 상한이 있다: 이 런의 intake 방문 수
+      (`claunch cflow status --json`의 `visits.intake`)가 10 이상이면 self
+      대신 pool로 보낸다 — 엔진의 loop guard(max_visits 25)는 26번째
+      intake에서 런을 사람의 승인(`loop_limit`)으로 세우는데, 그 전에 범위
+      판단을 상위에게 넘기기 위해서다. 리더는 거부권을 가진다(`update <id>
+      --assignee ""` + `UNQUEUED by leader: <이유>`); 거부된 이슈는
+      pool과 같이 상위의 처분을 따른다. 세션이 만든 활성
+      이슈가 전부 누군가의 손(살아 있는 세션의 assignee, 또는 리더의
+      `HOLD:` 코멘트)에 있어야 세션이 끝난다 — 워커의 settle-check가
+      그것을 확인하고, 미충족이면 settle-wait가 시계로 기다린다(사람이나
+      상위에게 묻지 않는다). 타이머가 여섯 번 깨우는 동안에도 안 서면
+      settle-stall로 사람이 처분한다. 그러므로 이 리더가 그 보드 쓰기를
+      하는 자리는 wrapup의 pool ask와 거부권 둘이다 — pool ask에 답하지
+      않으면 워커는 기다리다 사람에게 넘어간다.
+      br가 실패하면(잠금·바이너리 없음) --lock-timeout 5000으로 한 번 더,
+      그래도 안 되면 mesh fyi 첫 줄에 `NO-BEAD:` + 위 규격 그대로 — 리더가
+      다음 관제 대기에서 대신 만들고 id를 답한다. 이슈 없이 착수하는
+      것만은 금지다.
+
+rules:
+  scope-discipline:
+    text: |
+      범위 밖(master, 공용 문서, 다른 세션의 워크트리)은 건드리지 않는다. 범위
+      밖의 결함·회귀를 발견하면 고치지 말고 그 자리에서 이슈로 남기고 자기 일을
+      계속한다 — 발견한 세션이 만드는 자다(절차는 found-issue 프로시저).
+    why: >-
+      범위 밖 수정은 이 회차의 심사 대상이 아닌 변경을 같은 착지에 싣는다.
+      발견을 이슈로 남기지 않으면 그 결함은 이 대화와 함께 사라진다(v1
+      improv-worker work 스텝, found-issue 서브 런 도입 회차).
+    deliver: [work, item-intake]
+
+# ── 컬렉션 형식(docs/cflow-v2.md 2.7 「재사용」) ─────────────────────────
+# 이 파일을 include한 정의가 `collections: {<이름>: {type: <형식>, ...}}`로
+# 가져온다. 형식의 env 값 null은 「쓰는 쪽이 정해야 한다」는 뜻이다 —
+# landing-queue를 TARGET 없이 쓰면 컴파일 오류다. 쓰는 쪽의 env는 이름별로
+# 합쳐진다.
+collection_types:
+  # 자식 워커의 착지 요청을 받는 큐(v1 landing_queue:의 v2 형태). 자식의
+  # enqueue-landing trigger가 넣고(주체 child), 드라이버가 상태를 옮기며,
+  # landed는 데몬의 watch만 쓴다 — tip이 TARGET에 들어갔는지를 git이 잰다.
+  landing-queue:
+    kind: queue
+    key: issue
+    item: {issue: str, branch: str, tip: str, requested_by: str, note: "str?"}
+    status:
+      values: [requested, waiting, deferred, landed, rejected]
+      initial: requested
+      settled: [landed, rejected]
+    access:
+      push: [child, daemon]
+      set: [driver]
+      set.landed: [daemon]
+      remove: [driver]
+    env: {TARGET: null}
+    watch:
+      every: 60
+      probe: [git, merge-base, --is-ancestor, "$CFLOW_ITEM_TIP", "$CFLOW_TARGET"]
+      on: {0: {set: {status: landed}}}
+    lifecycle:
+      reset_at: [finish]
+      drop: settled
+      remap: {deferred: requested}
+      inherit: true
+  # 런 사이 신호(v1 publishes/awaits의 v2 형태). 읽는 런은 fresh()로 보고
+  # consume으로 처리 위치를 옮긴다.
+  signals:
+    kind: log
+    item: {name: str}
+    access: {push: [driver, peer]}
+    lifecycle: {inherit: true}
+
+procedures:
+  found-issue:
+    description: >-
+      회차 도중 발견한 범위 밖 결함 하나를 이슈로 남긴다(v1 found-issue 서브
+      런의 포트). parent = 이 회차의 이슈 id(--parent로 걸린다), summary = 한 줄
+      요지. 범위 안이면 이슈 없이 끝나고, 범위 밖이면 이슈를 만든 뒤 지금
+      자식에게 넘길지(spawn) 풀에 둘지(pool)를 가른다. 워커는 work 중에
+      group `found`에 `flow_fork`로 이 프로시저의 멤버를 하나씩 세운다.
+    params:
+      parent: {type: str, required: true}
+      summary: {type: str, default: ""}
+    returns:
+      ok: {scope: str, issue: "str?", child: "str?"}
+    nodes:
+      found-file:
+        title: 이슈 등록
+        prompt: |
+          이슈를 만든다 — `claunch beads create "<제목>" --type bug --priority 3
+          --labels found --parent ${params.parent} --description "<규격>"` (assignee
+          없음). 규격에는 재현 명령·관찰한 출력·기대한 동작을 적는다. 발견한
+          세션이 만드는 자다.
+          만들어진 이슈 id를 보고에 적는다.
+        done_when: |
+          `claunch beads show <id>`로 읽히는 이슈가 하나 있고, parent가 이 회차의
+          이슈이며, 그 id가 보고에 있다.
+        returns:
+          ok: {issue: str}
+        effects: [board.write]
+      found-handoff:
+        title: 자식에게 넘기기
+        prompt: |
+          spawn `--issue <id>`로 자식을 세운다(데몬이 자식을 assignee로 쓴다).
+          자식의 태스크에 반드시 적는 세 줄: **기준 브랜치 = 내 브랜치 @
+          <tip>, 통합 대상 = 그 브랜치(master 아님), 완료 보고·착지 요청
+          수신자 = 나**. 스폰은 `worktree: <내 세션>-<요지>`와 `rebase_onto:
+          <내 브랜치>`로 내 브랜치 위에 자른다. 자식의 세션 이름과 이슈 id를
+          보고에 적는다 — 메인 런의 work 보고와 착지 묶음이 그것을 옮겨 적는다.
+        done_when: |
+          자식 세션이 떠 있고(`children`이 답한다) 그 세션·이슈 id가 보고에 있다.
+        returns:
+          ok: {child: str, issue: str}
+        effects: [session.spawn]
+    body:
+      choose:
+        chooser: agent
+        require_reason: true
+        prompt: |
+          발견한 것이 이 회차의 범위(intake에서 정한 것) 안인가 밖인가.
+          발견의 한 줄 요지: ${params.summary}
+          범위 안이면 이슈를 만들지 않는다 — 그것은 메인 런에서 고칠 일이다.
+          범위 밖이면 이슈로 남긴다: 고치지 않는다.
+          reason에 무엇을 어디서 보았는지(파일·줄·재현 명령) 적는다.
+        options:
+          out-of-scope:
+            description: 이 회차의 범위 밖이다 — 이슈로 남긴다
+            then:
+              - found-file
+              - choose:
+                  chooser: agent
+                  require_reason: true
+                  prompt: |
+                    만든 이슈를 지금 자식 세션에 넘길지 가른다. 다음 넷을 전부 만족할
+                    때만 spawn이다: (1) 이 회차 브랜치와 파일·영역이 겹치지 않는다,
+                    (2) 규격이 지금 서 있다, (3) 이 세션의 컨텍스트가 필요 없다, (4)
+                    부모 회차의 착지 전에 끝나는 크기다 — 그리고 `children`이 남은
+                    슬롯을 답한다. 하나라도 아니면 pool이다: 지금은 assignee 없이 두고,
+                    wrapup의 생성 이슈 정산이 살아 있는 자식(spawn)이나 이 세션
+                    자신(self)에게 배정해 같은 루프 안에서 처리한다 — backlog로 남는
+                    것은 착수할 수 없는 것뿐이다(claunch-034c4). reason에 넷 각각의
+                    답을 적는다.
+                  options:
+                    spawn:
+                      description: 넷 다 참 — 자식에게 넘긴다
+                      then:
+                        - found-handoff
+                        - return: ok
+                          value:
+                            scope: out
+                            issue: "$result['found-file'].value.issue"
+                            child: "$result['found-handoff'].value.child"
+                    pool:
+                      description: 하나라도 거짓 — 지금은 assignee 없이 둔다, 배정은 wrapup 정산에서(자식 또는 자기)
+                      then:
+                        return: ok
+                        value: {scope: out, issue: "$result['found-file'].value.issue"}
+          in-scope:
+            description: 이 회차의 범위 안이다 — 메인 런에서 고친다, 이슈 없음
+            then:
+              return: ok
+              value: {scope: in}
+
+body:
+  call: found-issue
+  with: {parent: "$params.parent", summary: "$params.summary"}
