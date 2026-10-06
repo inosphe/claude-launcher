@@ -8935,6 +8935,7 @@ function renderWorktreeOptions() {
   const keep = shown.includes(kept) || (!!offer && kept === PARENT_WORKTREE);
   sel.value = keep ? kept : (offer ? PARENT_WORKTREE : "");
   renderWorktreeSessionOptions();
+  renderWorktreeFromOptions();
 }
 
 /* The Reuse picker's value for "the checkout the parent is in". Never a
@@ -9029,6 +9030,58 @@ function renderWorktreeSessionOptions() {
   sel.value = target && target === f.worktree_existing.value ? kept : "";
 }
 
+/* The "Branch from" picker: where a NEW checkout's branch starts. The first
+   row is the daemon's default (the main checkout's HEAD, named, because it is
+   not always the trunk); then the listed worktrees, each read as the branch
+   it has checked out (the parent's own first, for a child); then the
+   branches no listed worktree stands on. A branch row's value is spelled
+   `refs/heads/<name>` so it can never be read as a worktree of the same name
+   (worktree.start_point takes a worktree name first). */
+function renderWorktreeFromOptions() {
+  const f = $("new-session");
+  const sel = f && f.worktree_from;
+  if (!sel) return;
+  const git = newWorktreeGit || {};
+  const onWt = git.worktree_branches || {};
+  const owners = worktreeSessions();
+  const offer = worktreeParentOffer();
+  const kept = sel.value;
+  sel.innerHTML = "";
+  const head = git.root_branch || "";
+  sel.appendChild(new Option(
+    head ? `repository HEAD — ${head}` : "repository HEAD (detached)", ""));
+  const names = (git.worktrees || []).slice();
+  if (offer && offer.name && names.includes(offer.name)) {
+    names.splice(names.indexOf(offer.name), 1);
+    names.unshift(offer.name);
+  }
+  for (const name of names) {
+    const branch = onWt[name] ? ` on ${onWt[name]}` : " (detached)";
+    const who = offer && offer.name === name
+      ? ` — parent's checkout (${offer.parent})`
+      : ((owners[name] || []).length
+          ? ` — ${owners[name].map((s) => s.name).join(", ")}` : "");
+    sel.appendChild(new Option(`worktree ${name}${branch}${who}`, name));
+  }
+  const taken = new Set(Object.values(onWt).filter(Boolean));
+  for (const b of git.branches || []) {
+    if (taken.has(b)) continue;
+    sel.appendChild(new Option(`branch ${b}`, `refs/heads/${b}`));
+  }
+  sel.value = [...sel.options].some((o) => o.value === kept) ? kept : "";
+}
+
+/* The branch a new checkout will start on, for the hint: what the picked
+   Branch from row resolves to. */
+function worktreeFromBranch() {
+  const f = $("new-session");
+  const picked = f && f.worktree_from ? f.worktree_from.value : "";
+  const git = newWorktreeGit || {};
+  if (!picked) return git.root_branch || "";
+  if (picked.startsWith("refs/heads/")) return picked.slice("refs/heads/".length);
+  return (git.worktree_branches || {})[picked] || picked;
+}
+
 /* One pick on the From session row: put that session's checkout on the Reuse
    picker, dropping a narrowing that would hide it. */
 function pickWorktreeSession(session) {
@@ -9092,12 +9145,20 @@ function syncNewWorktree() {
   if (f.worktree_session) {
     f.worktree_session.disabled = !usable || mode !== "existing";
   }
-  f.worktree_rebase.disabled = !usable || mode === "" || inParent;
+  // One question per mode: a NEW checkout is asked where it starts (Branch
+  // from), an EXISTING one whether to catch up (Rebase onto). The daemon
+  // refuses the pair together (worktree._checkout), so the form never shows
+  // both.
+  if (f.worktree_from) f.worktree_from.disabled = !usable || mode !== "new";
+  f.worktree_rebase.disabled = !usable || mode !== "existing" || inParent;
   $("new-worktree-name-row").classList.toggle("hidden", mode !== "new");
+  const fromRow = $("new-worktree-from-row");
+  if (fromRow) fromRow.classList.toggle("hidden", mode !== "new");
   $("new-worktree-existing-row").classList.toggle("hidden", mode !== "existing");
   const sessionRow = $("new-worktree-session-row");
   if (sessionRow) sessionRow.classList.toggle("hidden", mode !== "existing");
-  $("new-worktree-rebase-row").classList.toggle("hidden", mode === "" || inParent);
+  $("new-worktree-rebase-row").classList.toggle(
+    "hidden", mode !== "existing" || inParent);
   // Which directory the list was read from, said out loud. The picker is the
   // daemon's answer about ONE directory and it is not always the one the row
   // above names — a policy report still in flight leaves the row on
@@ -9123,13 +9184,26 @@ function syncNewWorktree() {
       if (who.length) shared = ` — ${picked} is in use by ${who.join(", ")}`;
     }
   }
+  // A new checkout says where its branch starts: the default is the main
+  // checkout's HEAD, which is not always the trunk, and a branch cut from
+  // somebody's unlanded work carries that work with it.
+  let starts = "";
+  if (!locked && mode === "new" && f.worktree_from) {
+    const at = worktreeFromBranch();
+    const trunk = worktreeTrunkBranch();
+    starts = at
+      ? `the new branch starts at ${at} (committed work only)` +
+        (!f.worktree_from.value && trunk && at !== trunk
+          ? ` — the main checkout is not on ${trunk}` : "")
+      : "the new branch starts at the main checkout's detached HEAD";
+  }
   hint.textContent = locked
     ? (parent
         ? "worktree selection is locked by spawn.allow_worktree"
         : "the selected directory is not a git repository")
     : (mode === "existing" && newWorktreeFor
         ? `checkouts of ${cwdShort(newWorktreeFor)}${shared}`
-        : "");
+        : starts);
   hint.classList.toggle("info", !locked);
   hint.classList.toggle("hidden", !hint.textContent);
   syncWorktreeTrunkButton();
@@ -10417,6 +10491,8 @@ $("new-session").addEventListener("submit", async (e) => {
     // stages it (spawn.AUTO_WORKTREE). An empty string sent to a child is
     // refused outright — `validate_name` calls it an empty worktree name.
     body.worktree = typed || (parent ? true : "");
+    if (f.worktree_from && !f.worktree_from.disabled && f.worktree_from.value)
+      body.branch_from = f.worktree_from.value;
   }
   else if (worktreeMode === "existing") {
     const picked = f.worktree_existing.value;
@@ -10432,8 +10508,9 @@ $("new-session").addEventListener("submit", async (e) => {
     }
     if (picked !== PARENT_WORKTREE) body.worktree = picked;
   }
-  // A greyed rebase box is no answer (the parent's checkout greys it).
-  if (worktreeMode !== "" && !f.worktree_rebase.disabled &&
+  // A greyed rebase box is no answer (the parent's checkout greys it), and
+  // a new checkout is never sent one: where it starts is branch_from above.
+  if (worktreeMode === "existing" && !f.worktree_rebase.disabled &&
       f.worktree_rebase.value.trim())
     body.rebase_onto = f.worktree_rebase.value.trim();
   if (f.role.value) body.role = f.role.value;
@@ -16348,6 +16425,10 @@ $("new-session").worktree_existing.addEventListener("change", () => {
   renderWorktreeSessionOptions();
   syncNewWorktree();
 });
+/* The Branch from picker only moves the hint (where the new branch starts).
+   Guarded like the filter box: an older markup without it must still boot. */
+const worktreeFrom = $("new-session").worktree_from;
+if (worktreeFrom) worktreeFrom.addEventListener("change", syncNewWorktree);
 const worktreeBySession = $("new-session").worktree_session;
 if (worktreeBySession) {
   worktreeBySession.addEventListener("change", () => {
@@ -28628,16 +28709,16 @@ function sessionFormConfig(mode) {
     "mesh", "handle", "role", "workflow", "context", "borrow", "null_token",
     "resume", "fork", "skip_permissions", "codex_yolo", "codex_sandbox", "args",
     "worktree_mode", "worktree_name", "worktree_existing", "worktree_session",
-    "worktree_rebase", "task", "score_goal", "beads", "issue_text", "issue_filter", "issue", "pi_tool_*"];
+    "worktree_rebase", "worktree_from", "task", "score_goal", "beads", "issue_text", "issue_filter", "issue", "pi_tool_*"];
   const modes = {
     new: { title: "New session", submit: "Create", sections, editable,
       payload: ["name", "profile", "project", "cwd", "args", "model", "effort", "tools", "worktree",
-        "rebase_onto", "role", "borrow", "null_token", "mesh", "handle", "workflow",
+        "rebase_onto", "branch_from", "role", "borrow", "null_token", "mesh", "handle", "workflow",
         "context", "task", "score_goal", "beads", "issue", "issue_text", "resume", "fork_session"] },
     spawn: { title: "Spawn child", submit: "Spawn child", sections,
       editable: [...editable, "parent", "fork_parent", "over_limit"],
       payload: ["name", "profile", "project", "workspace", "cwd", "args", "model", "effort", "tools", "worktree",
-        "rebase_onto", "role", "borrow", "null_token", "mesh", "handle", "workflow",
+        "rebase_onto", "branch_from", "role", "borrow", "null_token", "mesh", "handle", "workflow",
         "context", "task", "score_goal", "beads", "issue", "issue_text", "fork", "connect", "over_limit"] },
     fork: { title: "Quick fork", submit: "Fork", sections: ["new-quick-fork"],
       editable: ["quick_fork_carry", "quick_fork_task"], payload: ["task", "mesh", "workflow"] },
