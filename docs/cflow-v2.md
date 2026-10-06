@@ -81,12 +81,17 @@ v1(`src/claude_launcher/cflow/`)과 병행한다.
 - 대상: `kind: workflow`만. `procedure`의 `recur`는 컴파일 오류다. 중첩 위임 런은
   요청을 남기지 않는다.
 - 요청: 런이 결과 `ok`로 끝나면(acceptance 검사 통과 뒤) `state.json`에
-  `next_round: {by: recur, auto, round, requested}`를 남기고 저널에
+  `next_round: {by: recur, auto, round, requested, not_before}`를 남기고 저널에
   `round_requested`를 쓴다. `failed`·`aborted`로 끝난 회차는 요청을 남기지
   않는다. 루프는 사람이 원인을 봐야 하는 자리에서 멈춘다. 차트의 `returns`가
   선언한 다른 결과로 끝난 회차(`done`)도 요청을 남기지 않는다. 정의가 루프를
   스스로 끝내는 방법이 이것이다(예: `improv-leader-v2`의 교대 종료는
   `return: wound_down`).
+- 최소 간격: `recur: {auto: true, min_gap: S}`(초, 기본 60, 0 이상). 요청에
+  `not_before`(회차가 끝난 시각 + `min_gap`)가 실리고, clock은 그 시각이 지나기
+  전에는 다음 회차를 시작하지 않는다. 회차 본문이 곧바로 끝나는 정의(대기 없는
+  본문)가 clock 틱마다 회차를 여는 것을 막는다. `recur: true`도 같은 값을 싣지만
+  시작은 드라이버가 한다.
 - 회차 번호: 슬롯의 상태 `round`. 새 런은 이전 런(같은 슬롯, 같은 정의 이름)에
   `next_round`가 있으면 그 번호 + 1, 없으면 1이다. `flow_status`가 `round`를 싣는다.
 - `recur: true`: 드라이버가 다음 회차를 시작한다(`flow_start`). 끝난 런의
@@ -99,7 +104,9 @@ v1(`src/claude_launcher/cflow/`)과 병행한다.
   (`data.inputs`, 다시 읽은 정의일 때), 드라이버, capability를 그대로 넘긴다.
   컬렉션은 `lifecycle.inherit` 규칙대로 넘어간다(2.7). 요청은 한 번만 쓰인다:
   시작이 끝난 런을 보관하므로 다음 틱은 아무것도 시작하지 않는다. 그사이 다른
-  시작이 슬롯을 차지했으면 시작하지 않는다.
+  시작이 슬롯을 차지했거나 요청이 취소됐으면 시작하지 않는다 — `start`가 슬롯
+  잠금 안에서 그 런과 `next_round.auto`를 다시 확인한다(`next_round_of`). 정의를
+  다시 읽는 사이에 들어온 `recur --cancel`이 이긴다.
 - 멈춤: 사람이 `claunch cflow2 recur --cancel [--reason R]`로 끝난 런의 요청을
   지운다(`round_cancelled`). 드라이버 세션 안에서는 거절된다(사람의 명령, 2.2
   「사람의 명령」). 회차가 진행 중일 때는 그 회차가 끝난 뒤에 취소한다.
@@ -193,6 +200,16 @@ nodes:
 - 표기: `windows`, `linux` 중 하나 이상(명령 문자열), `timeout`(초, 0 초과 900
   이하). 명령은 적힌 그대로 셸에서 실행하며 `${...}`는 컴파일 오류다(「명령 안의 값
   참조」).
+- 허용 목록: 명령은 `tools/restart_live.sh` 또는 `tools/restart_live.ps1`을
+  실행하는 형태만 받는다(`ir.RESTART_SCRIPTS`, `ir.restart_refusal`). 형태는
+  `[<인터프리터> [플래그 [값]]...] <스크립트> [인자]`이고, 인터프리터는
+  `bash`·`sh`(플래그 없음), `pwsh`·`powershell`(`-NoProfile`, `-NonInteractive`,
+  `-NoLogo`, `-ExecutionPolicy <값>`, `-File`)이다. 셸 연산자(`; & | \` $ < > ( )`)가
+  있으면 거절한다. 컴파일(그래서 `flow_start`)이 그 밖의 명령을 오류로 거절한다.
+  데몬은 이 명령을 자기 권한으로 실행하므로, 에이전트가 쓴 정의(프로젝트 레이어,
+  `.cflow2/generated/`)가 `claunch daemon stop` 같은 명령을 데몬에게 실행시키는 경로를
+  막는다. 허용 목록 이전에 컴파일된 차트 스냅샷에 그 밖의 명령이 있으면 clock은
+  실행하지 않고 기록을 `failed`(출력 `refused: …`, 저널 `restart_refused`)로 남긴다.
 - 실행 시점: 작업 인스턴스가 활성(`await: task`, ask가 있으면 승인 뒤)이 되면 데몬의
   cflow2 clock이 다음 틱에 한 번 가져간다(`runtime.claim_restarts`). 인스턴스
   하나가 방문 하나이므로 반복으로 다시 들어온 작업은 다시 실행한다. halt 중인 런과
@@ -207,7 +224,10 @@ nodes:
   올라간다(`daemon/restart_gate.py`).
 - 결과: `runtime.complete_restart`가 종료 코드 0이면 `succeeded`, 아니면
   `failed`로 기록하고 출력의 끝 4000자를 남긴다(`restart_completed`). 그사이
-  인스턴스가 사라졌거나 token이 다르면 아무것도 쓰지 않는다.
+  인스턴스가 사라졌거나 token이 다르면 아무것도 쓰지 않는다. 실행기 자체가
+  예외를 내면(임시 파일·프로세스 생성 실패 등) 종료 코드 없음과 예외 문구로
+  `failed`를 기록한다 — 기록이 `running`에 남아 보고가 데몬 재기동까지 막히지 않게
+  한다.
 - 중단: 다른 boot가 남긴 `running` 기록은 `interrupted`가 되고 다시 실행하지
   않는다(`restart_interrupted`). 명령이 데몬 자신을 재기동했을 수 있기 때문이다.
 - 통지: 가져갈 때와 결과가 나올 때 드라이버 세션에 블록을 보낸다.
@@ -1125,8 +1145,8 @@ Finding이다.
 `workspace-gate`는 바꾸지 않았다: 답이 승인 하나이고 보류는 답하지 않는 것이므로
 선택지가 둘 이상인 `decision` 형식에 맞지 않는 승인(ask, `options` 없음)이다.
 `landing-review`·`peer-review`의 ask는 사용자가 아니라 다른 세션에 묻는 것이라
-대상이 아니다. `improv-leader-v2`(claunch-yq80p.6)는 이 이슈가 머지된 뒤 같은
-방식으로 바꾼다.
+대상이 아니다. `improv-leader-v2`(claunch-yq80p.6)의 교대 종료 승인도 같은 방식으로
+바꿨다(`wind-down-decision`: `call: ask-user`, choices `[end-shift, keep]`).
 
 ## 3. IR
 
@@ -1836,6 +1856,14 @@ v2 워커의 착지 요청은 기본으로 pull request를 거친다. 로컬 착
 PR은 닫고 브랜치는 지웠다.
 
 `mergeable`이 UNKNOWN이거나 push 직후 `headRefOid`가 HEAD와 다르면 판정하지 않고 수 초 뒤 다시 조회한다.
+
+리더 쪽 머지(`improv-leader-v2`의 `pr-merge` 절차: `gh pr review`, `gh pr merge
+--merge --match-head-commit`, 머지 뒤 fetch·둘째 부모·포함 확인)는 위 표의 명령으로
+이루어지지만, **leader-v2 경유 미실측**이다. 리더와 워커가 같은 gh 계정일 때
+`gh pr review --approve`·`--request-changes`가 거절되는지(GitHub는 작성자의 approve를
+거절한다)도 이 표에 없다. 절차는 그 거절에서 `gh pr review --comment`로 판정을
+남기고 판정의 정본을 보드 코멘트로 둔다. leader-v2의 실제 첫 사용에서 확인해 이
+표에 행을 더한다.
 
 ## 11. 단계
 

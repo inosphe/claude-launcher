@@ -1308,6 +1308,8 @@ def _finish_final(r: Run, outcome: str, value: Any, how: Optional[str] = None) -
 
 #: Who filed a next-round request.
 ROUND_BY_RECUR = "recur"
+#: Seconds between a round's end and the auto start of the next (``recur.min_gap``).
+RECUR_MIN_GAP_DEFAULT = ir.RECUR_MIN_GAP_DEFAULT
 
 
 def _request_round(r: Run) -> None:
@@ -1321,9 +1323,11 @@ def _request_round(r: Run) -> None:
             or r.state.get("outcome") != ir.OUTCOME_OK:
         return
     nxt = int(r.state.get("round") or 1) + 1
+    gap = float(recur.get("min_gap", RECUR_MIN_GAP_DEFAULT))
     r.state["next_round"] = {"by": ROUND_BY_RECUR, "auto": bool(recur.get("auto")),
-                             "round": nxt, "requested": store_mod.utcnow()}
-    r.emit("round_requested", round=nxt, auto=bool(recur.get("auto")))
+                             "round": nxt, "requested": store_mod.utcnow(),
+                             "not_before": r.now + gap}
+    r.emit("round_requested", round=nxt, auto=bool(recur.get("auto")), min_gap=gap)
 
 
 def _next_round_chart(st: RunStore, state: Dict[str, Any]) -> Tuple[ir.Chart, bool]:
@@ -1350,7 +1354,10 @@ def start_next_round(cwd: Optional[str] = None, scope: Optional[str] = None,
     """Start the slot's next round when its finished run filed an ``auto``
     request. Daemon-driven (the cflow2 clock). ``None`` when there is nothing
     to start: no request, a plain ``recur: true`` request (the driver starts
-    that one), a live run in the slot, or a request cancelled meanwhile.
+    that one), a live run in the slot, ``recur.min_gap`` seconds not yet past
+    since the round ended, or a request cancelled meanwhile -- the start
+    re-checks the request under the slot lock, so a cancel that lands while the
+    next definition loads wins.
 
     The request is single use: the start archives the finished run, so a
     second call finds nothing."""
@@ -1364,12 +1371,16 @@ def start_next_round(cwd: Optional[str] = None, scope: Optional[str] = None,
     nxt = state.get("next_round") or {}
     if state.get("status") not in FINISHED_STATUSES or not nxt.get("auto"):
         return None
+    t = time.time() if now is None else now
+    if t < float(nxt.get("not_before") or 0):
+        return None
     chart, reloaded = _next_round_chart(st, state)
     inputs = (state.get("data") or {}).get("inputs") if reloaded else None
     try:
         payload = start(chart, cwd=str(st.cwd), scope=st.scope, params=state.get("params"),
                         caps=state.get("caps"), now=now, driver=driver_of(state),
-                        caller=CALLER_USER, inputs=inputs)
+                        caller=CALLER_USER, inputs=inputs,
+                        next_round_of=str(state.get("run_id") or ""))
     except FlowError:
         return None  # a start won the race, or the slot changed meanwhile
     note("round_auto_started", cwd=str(st.cwd), scope=st.scope, round=nxt.get("round"),
@@ -2221,8 +2232,13 @@ def start(chart: ir.Chart, *, cwd: Optional[str] = None, scope: Optional[str] = 
           params: Optional[Dict[str, Any]] = None, caps: Any = None,
           force: bool = False, now: Optional[float] = None,
           driver: Optional[str] = None, caller: str = CALLER_USER,
-          inputs: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+          inputs: Optional[Dict[str, Any]] = None,
+          next_round_of: Optional[str] = None) -> Dict[str, Any]:
     """Start a run of ``chart`` in the (cwd, scope) slot; returns :func:`status`.
+
+    ``next_round_of`` (:func:`start_next_round`): the run whose auto
+    next-round request this start fulfils; under the lock the slot must still
+    hold that run with the request, or the start is refused.
 
     ``driver`` is the session that drives the run -- its identity for asks
     and for the MCP tools' authority (default :func:`default_driver`). A
@@ -2250,6 +2266,10 @@ def start(chart: ir.Chart, *, cwd: Optional[str] = None, scope: Optional[str] = 
             except StoreError:
                 old = {}
             previous = old
+            if next_round_of is not None and (
+                    old.get("run_id") != next_round_of
+                    or not (old.get("next_round") or {}).get("auto")):
+                raise FlowError("the next-round request was withdrawn or the slot changed")
             if old.get("status") in LIVE_STATUSES:
                 if not force:
                     raise FlowError(
@@ -2615,6 +2635,18 @@ def claim_restarts(*, platform: str, boot: str, cwd: Optional[str] = None,
                     out.append({**item, "kind": "interrupted"})
                 continue
             command = restart_command(spec, platform)
+            refused = ir.restart_refusal(command) if command else None
+            if refused:
+                # a chart compiled before the allowlist, or built by hand: never run it
+                frame["restart"] = {"status": RESTART_FAILED, "platform": platform,
+                                    "requested_at": store_mod.utcnow(),
+                                    "completed_at": store_mod.utcnow(), "boot": boot,
+                                    "output": f"refused: restart command {refused}"}
+                r.emit("restart_refused", node=node.id, instance=iid, platform=platform,
+                       command=command, reason=refused)
+                out.append({**item, "kind": "refused", "platform": platform,
+                            "reason": refused})
+                continue
             if not command:
                 frame["restart"] = {"status": RESTART_UNSUPPORTED, "platform": platform,
                                     "requested_at": store_mod.utcnow(), "boot": boot}

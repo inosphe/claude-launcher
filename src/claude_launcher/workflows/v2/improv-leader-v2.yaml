@@ -74,7 +74,11 @@ fragments:
     PR마다(-R <host>/<owner>/<repo>는 원격에서 도출한 값):
     1. `gh pr view <pr_number> --json headRefOid,baseRefName,state,mergeable,mergeStateStatus`.
        mergeable이 UNKNOWN이면 판정하지 않고 수 초 뒤 다시 조회한다(실측: 직후
-       UNKNOWN, 수 초 뒤 CONFLICTING). state가 OPEN이 아니면 제외하고 사유를 적는다.
+       UNKNOWN, 수 초 뒤 CONFLICTING). 세 번 조회해도 UNKNOWN이면 이번 배치에서
+       빼고(deferred, note에 「mergeable UNKNOWN 3회」) 다음 창에서 다시 본다.
+       state가 OPEN이 아니면 제외하고 사유를 적는다. baseRefName이 master가
+       아니면 큐 항목의 base와 무관하게 deferred다(note에 baseRefName) — PR의
+       base는 갱신 경로에서 바뀌지 않으므로 GitHub 쪽 값으로 판정한다.
     2. headRefOid가 착지 항목의 tip(40자)과 같아야 한다. 다르면 바로 판정하지
        않고 수 초 뒤 다시 조회한다(실측: force push 직후 headRefOid가 이전 SHA로
        남아 있었다 — UNKNOWN과 같은 처리). 재조회에도 다르면 머지하지 않고
@@ -82,8 +86,19 @@ fragments:
     3. `gh pr diff <pr_number>`로 변경을 읽고 판정을 `gh pr review <pr_number>
        --approve --body <근거>` 또는 `--request-changes --body <사유>`로 남긴다.
        request-changes면 그 항목은 rejected(사유를 워커와 보드에)다.
+       GitHub는 PR 작성자 계정의 approve·request-changes를 거절한다. 그래서 먼저
+       PR 작성자(`gh pr view <pr_number> --json author --jq .author.login`)와 gh
+       로그인 계정(`gh api user --jq .login`)을 비교한다. 같으면(리더와 워커가
+       같은 gh 계정을 쓰는 편성) approve·request-changes 대신
+       `gh pr review <pr_number> --comment --body "APPROVE: <근거>"`(또는
+       "REQUEST CHANGES: <사유>")로 남긴다. 어느 쪽이든 판정의 정본은 보드다 —
+       그 이슈에 `claunch beads comments add <이슈> "PR-REVIEW #<번호> <판정>: <근거>"`
+       를 남기고 보고에 매체(review 또는 comment)를 적는다. 판정 자체(머지 여부)는
+       매체와 무관하다.
     4. `gh pr merge <pr_number> --merge --match-head-commit <tip>`. 다른 tip이면
        gh가 거절한다(실측 `Head branch was modified`) — 그때는 1부터 다시 한다.
+       다시 하는 것은 두 번까지다. 세 번째 거절이면 deferred로 두고 워커에게
+       「PR head가 계속 바뀐다: 마지막 headRefOid <sha>」로 알린다.
        CONFLICTING/DIRTY면 머지하지 않고 워커에게 `<remote>/master @ <sha>` 기준
        rebase를 요청한다(deferred).
     5. `git fetch <remote>` 뒤 머지 커밋을 찾고(`gh pr view --json mergeCommit`)
@@ -92,6 +107,11 @@ fragments:
        --ref master --sha <tip> --contains`로 확인한다.
     6. 로컬 master를 `git merge --ff-only <remote>/master`로 맞춘다. 착지 큐의
        landed는 데몬 watch가 로컬 master 기준으로 잰다 — 손으로 set하지 않는다.
+       ff-only가 거절되면(로컬 master에 원격에 없는 커밋이 있다) 강제로 맞추지
+       않는다. 남은 PR 후보와 로컬 후보를 머지하지 않고 멈춘 뒤, 갈라진 커밋
+       (`git log --oneline <remote>/master..master`)을 보고에 적고 integrate를
+       결과 fail(reason, merges = 여기까지 머지된 것)로 끝낸다. 이미 원격에서
+       머지된 PR 항목은 그 상태로 남고, batch-failed가 처리한다.
     7. 워커에게 `<merge sha> @ <remote>/master`를 통지한다(landed-notice에서
        반영 결과와 함께 한 번 더).
   subagent-runs: |
@@ -165,11 +185,17 @@ nodes:
       확인한다. landed 표시는 데몬의 watch가 한다 — 손으로 set하지 않는다.
       원격이 있으면(PR 후보가 있었거나 원격 편성) 로컬 후보 머지 뒤 원격 base를
       master와 맞춘다(fast-forward push, 원격 메시 규칙).
+      결과: 하나 이상 머지했으면 ok. 배치의 후보가 모두 머지 시점에 빠졌으면
+      (충돌, review 거절, head 불일치) 결과 empty로 스윕·반영 없이 관제 대기로
+      돌아간다. 머지 도중 멈춰야 했으면(ff-only 거절, 복구할 수 없는 git 오류)
+      결과 fail에 사유와 그때까지 머지된 것을 적는다 — master는 되돌리지 않는다.
       ${frag:pr-merge}
       ${frag:subagent-runs}
       ${frag:remote-mesh}
     returns:
       ok: {merges: list, master: str}
+      empty: {reason: str}
+      fail: {reason: str, merges: list}
     done_when: |
       머지 커밋마다 (issue, 매체, tip, merge sha; PR이면 번호와 리뷰 판정)와 머지 후
       master tip(원격이 있으면 `<remote>/master`와 같음)이 보고에 있다
@@ -226,11 +252,42 @@ nodes:
       exit 2(판정 불가) — 판정문의 원인을 고친다. 정리했으면 retry(reflect에
       다시 들어가 restart가 다시 실행된다), 이 턴에 정리할 수 없으면 close.
 
+  batch-failed:
+    title: 머지 뒤 실패 처리
+    prompt: |
+      머지 이후 단계가 실패했다 — integrate의 fail(머지 도중 중단), sweep의
+      fail(스윕 red 또는 실행 실패) 중 하나다. 어느 작업이 어떤 결과로 끝났는지
+      flow_status와 저널(`claunch cflow2 journal`)에서 먼저 읽는다. master는
+      되돌리지 않는다(v1과 같음) — 이미 머지된 커밋은 그대로 두고 후속 브랜치로
+      고친다.
+      1. 실패 원인을 좁힌다. 스윕 red면 실패 테스트와 그 테스트를 바꾼 머지
+         커밋(`git log --oneline <이전 master>..master -- <테스트 경로>`)을 찾는다.
+         실행 실패(subagent 중단, 창 대기 초과)면 그 사실만 적는다 — 다음 회차의
+         sweep이 다시 돈다.
+      2. 원인이 된 머지의 담당 워커에게 후속 브랜치를 요청한다: 실패 테스트,
+         `master @ <sha>`(원격 편성이면 `<sha> @ <remote>/master`), 재현 명령.
+         보드의 그 이슈에 같은 내용을 코멘트로 남긴다.
+      3. 이미 머지된 항목은 그대로 반영(reflect)과 착지 통지로 이어 간다 —
+         회차는 ok로 끝나고 다음 회차가 열린다. 다음 회차의 통합이 후속 브랜치를
+         머지한 뒤 스윕을 다시 한다.
+      결과: 보통은 ok(failed = 실패한 작업, cause, followups = 후속을 요청한
+      워커와 이슈). integrate가 아무것도 머지하지 못한 채 멈췄으면(merges가 빈
+      목록) nothing_merged로 끝낸다 — 반영할 것이 없어 관제 대기로 돌아간다.
+    returns:
+      ok: {failed: str, cause: str, followups: list}
+      nothing_merged: {reason: str}
+    done_when: |
+      실패한 작업과 결과, 좁힌 원인(또는 「원인 미상」), 후속 브랜치를 요청한
+      워커와 보드 코멘트 위치가 보고에 있다
+    effects: [board.write]
+
   reflect-closed:
     title: 반영 없이 마감 기록
     prompt: |
       이번 회차는 반영 없이 마감한다. 마지막 판정(checks의 exit와 출력)과 정리하지
-      못한 이유를 보고에 남긴다. 다음 회차의 reflect가 다시 시도한다.
+      못한 이유를 보고에 남긴다. 재시도 5회를 모두 써서 여기에 온 경우도 같다 —
+      저널의 restart_completed·checks_expired를 횟수와 함께 적는다. 다음 회차의
+      reflect가 다시 시도한다.
     done_when: 마지막 판정과 정리하지 못한 이유가 보고에 있다
     effects: []
 
@@ -239,8 +296,8 @@ nodes:
     prompt: |
       이번 회차에 landed가 된 착지 항목(flow_status의 collections.landing)마다
       요청한 세션에 머지 커밋과 반영 결과를 알린다: `<머지 sha> @ <remote>/<base>`
-      (원격 편성) 또는 `master @ <sha>`, 반영 여부(deployed-wait 통과 또는
-      반영 없이 마감). 워커는 그 커밋이 자기 tip을 부모로 갖는지 스스로
+      (원격 편성) 또는 `master @ <sha>`, 반영 여부(deployed-wait 통과, 반영 없이
+      마감), batch-failed를 거쳤으면 실패 사유와 후속을 요청한 대상. 워커는 그 커밋이 자기 tip을 부모로 갖는지 스스로
       확인한 뒤 착지로 판정한다. 통지는 @in_review 한 건으로 몰지 않고 항목별로
       보낸다.
     done_when: landed 항목마다 통지한 대상과 내용(머지 sha, 반영 여부)이 보고에 있다
@@ -285,46 +342,67 @@ body:
                 then:
                   seq:
                     - integrate-preflight
-                    - integrate
-                    - sweep
-                    - id: reflect-retry
-                      retry:
-                        max: 5
-                        do:
+                    # 머지가 시작된 뒤의 실패(integrate fail, sweep fail)는 회차를
+                    # 끝내지 않는다(v1과 같이 열어 둔 채 처리): batch-failed가
+                    # 원인을 보고하고 담당 워커에게 후속 브랜치를 요청한 뒤, 이미
+                    # 머지된 항목에 대해 반영과 착지 통지를 이어 간다. master는
+                    # 되돌리지 않는다. 처리 없이 두면 런이 failed로 끝나 recur가 멈춘다.
+                    - id: batch
+                      try:
+                        seq: [integrate, sweep]
+                      catch:
+                        # 머지 시점에 후보가 모두 빠졌다 — 스윕·반영 없이 관제 대기로
+                        empty: {continue: null}
+                        fail:
+                          id: batch-failed-handler
                           seq:
-                            - reflect
-                            - id: deployed-wait
-                              wait:
-                                describe: 라이브 데몬이 이번 머지 이후에 재기동됐다
-                                poll: 30
-                                seconds: 600
-                                checks:
-                                  # 0 = 머지 이후 재기동 확인, 1 = 재기동 없음,
-                                  # 2 = 판정 불가, 3 = 체크아웃이 더러움(판정 불가로 센다)
-                                  - id: deployed
-                                    describe: 라이브 데몬이 master의 이번 머지 이후에 재기동됐다
-                                    probe: 'uv run --no-sync python tools/deploy_check.py --branch master'
-                              # 만료(timeout)와 판정 불가(undecidable)는 같은 결정 자리로
-                              # 간다(v1 checklist otherwise -> reflect-pregate).
-                              on:
-                                timeout: &pregate
-                                  seq:
-                                    - reflect-pregate
-                                    - choose:
-                                        require_reason: true
-                                        prompt: |
-                                          원인을 정리했으면 retry로 reflect에 다시 들어가 재기동을
-                                          다시 실행한다. 이 턴에 정리할 수 없으면 close로 반영 없이
-                                          마감한다. reason에 종료 코드와 정리한 내용(또는 못 한
-                                          이유)을 적는다.
-                                        options:
-                                          retry:
-                                            description: 원인을 정리했다 — reflect로 다시 들어간다(새 방문, restart가 다시 실행된다)
-                                            then: {continue: null}   # 감싸는 retry의 다음 시도
-                                          close:
-                                            description: 이 턴에 정리할 수 없다 — 반영 없이 마감하고 착지 통지로
-                                            then: reflect-closed
-                                undecidable: *pregate
+                            - batch-failed
+                          on:
+                            # 머지된 것이 하나도 없다 — 반영할 것이 없으니 관제 대기로
+                            nothing_merged: {continue: null}
+                    # 재시도 5회 소진도 회차를 끝내지 않는다 — 반영 없이 마감
+                    - id: reflect-guard
+                      try:
+                        id: reflect-retry
+                        retry:
+                          max: 5
+                          do:
+                            seq:
+                              - reflect
+                              - id: deployed-wait
+                                wait:
+                                  describe: 라이브 데몬이 이번 머지 이후에 재기동됐다
+                                  poll: 30
+                                  seconds: 600
+                                  checks:
+                                    # 0 = 머지 이후 재기동 확인, 1 = 재기동 없음,
+                                    # 2 = 판정 불가, 3 = 체크아웃이 더러움(판정 불가로 센다)
+                                    - id: deployed
+                                      describe: 라이브 데몬이 master의 이번 머지 이후에 재기동됐다
+                                      probe: 'uv run --no-sync python tools/deploy_check.py --branch master'
+                                # 만료(timeout)와 판정 불가(undecidable)는 같은 결정 자리로
+                                # 간다(v1 checklist otherwise -> reflect-pregate).
+                                on:
+                                  timeout: &pregate
+                                    seq:
+                                      - reflect-pregate
+                                      - choose:
+                                          require_reason: true
+                                          prompt: |
+                                            원인을 정리했으면 retry로 reflect에 다시 들어가 재기동을
+                                            다시 실행한다. 이 턴에 정리할 수 없으면 close로 반영 없이
+                                            마감한다. reason에 종료 코드와 정리한 내용(또는 못 한
+                                            이유)을 적는다.
+                                          options:
+                                            retry:
+                                              description: 원인을 정리했다 — reflect로 다시 들어간다(새 방문, restart가 다시 실행된다)
+                                              then: {continue: null}   # 감싸는 retry의 다음 시도
+                                            close:
+                                              description: 이 턴에 정리할 수 없다 — 반영 없이 마감하고 착지 통지로
+                                              then: reflect-closed
+                                  undecidable: *pregate
+                      catch:
+                        "*": reflect-closed
                     - landed-notice
                     - {break: null}
                   on:
