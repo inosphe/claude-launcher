@@ -184,6 +184,21 @@ def acquire(
         }
         if workers:
             body["workers"] = max(1, int(workers))
+        # Said before the POST, which blocks until the grant or the budget runs
+        # out. Without it a run that queues on the machine's window and is then
+        # killed by its own shell `timeout` leaves no output at all, and
+        # "waiting for the window" is indistinguishable from "hung" — measured
+        # 2026-10-06: a six-module run waited 1187s for its grant under an 800s
+        # timeout, and the session that ran it diagnosed a stalled checkout and
+        # wrote that into a round report. Flushed, so the line survives the
+        # kill. The wait itself is untouched here: the caps, the queue order
+        # and the budget are the daemon's.
+        if wait > 0:
+            print(
+                f"waiting for the {cls} test window (up to {wait:.0f}s)…",
+                file=sys.stderr,
+                flush=True,
+            )
         try:
             result = client.post(
                 "/api/window/acquire",
@@ -214,7 +229,12 @@ def acquire(
         )
         if result.get("reason"):
             detail += f" ({result['reason']})"
-        raise WindowUnavailable(f"test window {cls} {detail}")
+        # The elapsed half is what turns "not granted" into a measurement: a
+        # refusal that came back at once and one that spent the whole budget
+        # queued read the same without it.
+        raise WindowUnavailable(
+            f"test window {cls} {detail} after {time.monotonic() - started:.0f}s"
+        )
 
     return _fallback(cls, owner, started, wait, reason="daemon unavailable")
 
