@@ -1647,10 +1647,10 @@ def test_merged_env_judges_the_merged_repository_not_the_working_directory(
     holds."""
     monkeypatch.chdir(leader)
     assert _run(leader, receipts, "--command", GREEN) == 0  # the wrong tree is green
-    _merged(monkeypatch, json.dumps({"repo": str(repo), "master": "x", "merges": []}))
+    tip = _git(repo, "rev-parse", "master").strip()
+    _merged(monkeypatch, json.dumps({"repo": str(repo), "master": tip, "merges": []}))
     assert _check_merged(receipts) == 1
     captured = capsys.readouterr()
-    tip = _git(repo, "rev-parse", "master").strip()
     assert tip[:12] in captured.err and "no sweep receipt" in captured.err
     assert str(repo.resolve()) in captured.out
     assert _run(repo, receipts, "--command", GREEN) == 0
@@ -1660,6 +1660,7 @@ def test_merged_env_judges_the_merged_repository_not_the_working_directory(
 @pytest.mark.parametrize("value", [
     None, "", "not json", json.dumps({"master": "x"}), json.dumps({"repo": ""}),
     json.dumps({"repo": "relative/path"}), json.dumps(["/abs"]),
+    "LEADER_NO_MASTER", "LEADER_DASH_MASTER",
 ])
 def test_without_a_merge_record_the_gate_cannot_tell_and_never_falls_back(
         leader, receipts, monkeypatch, capsys, value):
@@ -1668,6 +1669,10 @@ def test_without_a_merge_record_the_gate_cannot_tell_and_never_falls_back(
     here holds a green receipt -- so a fallback would show up as 0."""
     monkeypatch.chdir(leader)
     assert _run(leader, receipts, "--command", GREEN) == 0
+    if value == "LEADER_NO_MASTER":  # names the leader's own checkout, no master
+        value = json.dumps({"repo": str(leader)})
+    elif value == "LEADER_DASH_MASTER":
+        value = json.dumps({"repo": str(leader), "master": "--all"})
     _merged(monkeypatch, value)
     assert _check_merged(receipts) == sweep.CANNOT_TELL
     assert "cannot tell" in capsys.readouterr().err
@@ -1676,3 +1681,36 @@ def test_without_a_merge_record_the_gate_cannot_tell_and_never_falls_back(
 def test_merged_env_and_repo_together_are_refused(repo, receipts, monkeypatch):
     _merged(monkeypatch, json.dumps({"repo": str(repo)}))
     assert _check_merged(receipts, "--repo", str(repo)) == sweep.CANNOT_TELL
+
+
+def test_a_record_naming_the_wrong_repository_is_caught_by_its_master(
+        repo, leader, receipts, monkeypatch, capsys):
+    """s88's S1 on claunch-6xg: the leader writes its own checkout into
+    'repo' while 'master' is the tip the merge really left in the merged
+    repository. The leader's checkout has a green receipt, so trusting the
+    path would pass. The master is not a commit there: cannot tell."""
+    _git(repo, "commit", "-q", "--allow-empty", "-m", "the batch")
+    merged_tip = _git(repo, "rev-parse", "master").strip()
+    assert _run(leader, receipts, "--command", GREEN) == 0
+    _merged(monkeypatch, json.dumps({"repo": str(leader), "master": merged_tip}))
+    assert _check_merged(receipts) == sweep.CANNOT_TELL
+    assert "is not a commit of" in capsys.readouterr().err
+
+
+def test_the_gate_follows_master_past_the_merge_but_not_off_it(
+        repo, receipts, monkeypatch, capsys):
+    """Another session may move master after the merge: the record's master
+    stays contained in the tip and the gate judges the tip. A record whose
+    master the branch does not contain names some other line: cannot tell."""
+    merge = _git(repo, "rev-parse", "master").strip()
+    _git(repo, "commit", "-q", "--allow-empty", "-m", "moved on")
+    _merged(monkeypatch, json.dumps({"repo": str(repo), "master": merge}))
+    assert _run(repo, receipts, "--command", GREEN) == 0
+    assert _check_merged(receipts) == 0
+    _git(repo, "checkout", "-q", "-b", "side", merge)
+    _git(repo, "commit", "-q", "--allow-empty", "-m", "off master")
+    side = _git(repo, "rev-parse", "side").strip()
+    _merged(monkeypatch, json.dumps({"repo": str(repo), "master": side[:12]}))
+    capsys.readouterr()
+    assert _check_merged(receipts) == sweep.CANNOT_TELL
+    assert "is not contained in master" in capsys.readouterr().err

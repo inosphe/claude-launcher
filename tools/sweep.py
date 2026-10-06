@@ -886,7 +886,7 @@ def cmd_run(args) -> int:
     return 0 if proc.returncode == 0 else 1
 
 
-def merged_repo(env_name: str, environ=None) -> Path:
+def merged_repo(env_name: str, environ=None) -> "tuple[Path, str]":
     """The repository a leader's integrate step merged into, read from the
     run record the step bound (``bind: merged`` in improv-leader-v2, handed to
     verify as JSON in ``CFLOW_DATA_MERGED``).
@@ -918,7 +918,44 @@ def merged_repo(env_name: str, environ=None) -> Path:
     path = Path(repo)
     if not path.is_absolute():
         raise LookupError(f"${env_name}.repo is not an absolute path: {repo!r}")
-    return path
+    master = record.get("master")
+    if not isinstance(master, str) or not master.strip() or master.strip().startswith("-"):
+        raise LookupError(
+            f"${env_name} carries no 'master': nothing ties its 'repo' to the "
+            f"merge the integrate step made")
+    return path, master.strip()
+
+
+def check_merged_record(repo: Path, master: str, branch: str) -> str:
+    """Hold the record's ``repo`` to its own ``master`` before judging it.
+
+    The path is written by the same agent step that misread the working
+    directory in run-945d034a, so on its own it only moves the wrong answer
+    from a default to a string (s88, review of claunch-6xg: a record naming
+    the leader's checkout passed on that checkout's receipt). The record also
+    carries the master tip the integrate step left behind; it has to be a
+    commit of ``repo`` and be contained in ``branch`` there. Contained rather
+    than equal: another session may move master between the merge and this
+    gate, and the sweep is due on the tip that will be served -- the record is
+    bound once and cannot be rewritten, so equality would leave the step with
+    no way forward. Returns the resolved merge commit; raises LookupError.
+    """
+    try:
+        merge = _git(repo, "rev-parse", "--verify", "--quiet", master + "^{commit}")
+    except LookupError:
+        merge = ""
+    if not merge:
+        raise LookupError(
+            f"the record's master {master!r} is not a commit of {repo} -- the "
+            f"record names a repository the integrate step did not merge into")
+    proc = subprocess.run(
+        ["git", "-C", str(repo), "merge-base", "--is-ancestor", merge, branch],
+        capture_output=True, text=True, encoding="utf-8", errors="replace")
+    if proc.returncode != 0:
+        raise LookupError(
+            f"the record's master {merge[:12]} is not contained in {branch} of "
+            f"{repo}")
+    return merge
 
 
 def cmd_check(args) -> int:
@@ -928,11 +965,14 @@ def cmd_check(args) -> int:
                   "twice; pass one", file=sys.stderr)
             return CANNOT_TELL
         try:
-            repo = merged_repo(args.merged_env).resolve()
+            path, master = merged_repo(args.merged_env)
+            repo = path.resolve()
+            merge = check_merged_record(repo, master, args.branch)
         except LookupError as exc:
             print(f"cannot tell: {exc}", file=sys.stderr)
             return CANNOT_TELL
-        print(f"judging the merged repository {repo} (${args.merged_env})")
+        print(f"judging the merged repository {repo} (${args.merged_env}; "
+              f"its merge {merge[:12]} is in {args.branch})")
     else:
         repo = (args.repo or Path(".")).resolve()
     try:

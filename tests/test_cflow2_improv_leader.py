@@ -430,9 +430,11 @@ def test_the_sweep_gate_judges_the_merged_repository(tmp_path, repo_template, mo
     assert sweep.main(["run", "--repo", str(home), "--receipts", str(receipts),
                        "--command", green]) == 0
 
+    tip = subprocess.run(["git", "rev-parse", "master"], cwd=merged, check=True,
+                         capture_output=True, text=True).stdout.strip()
     ld = Leader(home)
     _to_sweep(ld)
-    ld.report("integrate", "ok", {"merges": [["x", "a" * 40, "b" * 40]], "master": "b" * 40,
+    ld.report("integrate", "ok", {"merges": [["x", "a" * 40, tip]], "master": tip,
                                   "repo": str(merged)})
     assert ld.tasks() == ["sweep"]
     seen = []
