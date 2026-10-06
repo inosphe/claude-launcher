@@ -5496,3 +5496,22 @@ div.shadow-card .shadow-line { white-space: normal; overflow-wrap: anywhere; }
   .vscode-setting { grid-template-columns: 1fr; }
   .vscode-setting .wf-note { grid-column: 1; }
 }
+/* cflow v2 beside v1 (docs/cflow-v2.md section 9): the version badge, the
+   chart tree of a v2 run, the user's open choices and the delegation rows. */
+.cf2-badge {
+  display: inline-block; padding: 0 5px; margin-right: 6px; border-radius: 3px;
+  font-size: 11px; font-weight: 600; color: #0d1117; background: #a5d6ff;
+}
+.cf2-tree { font-size: 12px; margin: 4px 0 8px; }
+.cf2-row { padding: 1px 0; color: #8b949e; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.cf2-row.active { color: #c9d1d9; }
+.cf2-row.awaiting { color: #f0f6fc; background: rgba(56, 139, 253, 0.18); }
+.cf2-role { color: #6e7681; }
+.cf2-visits { color: #d29922; }
+.cf2-await { color: #58a6ff; }
+.cf2-choice { border: 1px solid #30363d; border-radius: 6px; padding: 6px 8px; margin: 6px 0; }
+.cf2-choice h4 { margin: 0 0 4px; }
+.cf2-deleg { font-size: 12px; padding: 2px 0; }
+.cf2-receipt { color: #6e7681; }
+.cf2-fallback { margin: 0 0 2px 12px; font-size: 12px; }
+.cf2-v1-note { margin-top: 4px; }

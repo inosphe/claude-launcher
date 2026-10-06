@@ -1016,10 +1016,15 @@ def _workflow_entry(raw) -> dict:
             "default_role": str(raw.get("default_role") or "").strip().lower(),
             "priority": priority,
             "filter_roles": raw.get("filter_roles"),
+            # cflow v2 runs beside v1 (docs/cflow-v2.md): the daemon tells
+            # the two apart by `version` and marks v1 `deprecated`. An older
+            # daemon says neither, and its entries read as plain v1.
+            "version": 2 if raw.get("version") == 2 else 1,
+            "deprecated": bool(raw.get("deprecated")),
         }
     return {
         "name": str(raw or ""), "description": "", "default_role": "",
-        "priority": 0, "filter_roles": None,
+        "priority": 0, "filter_roles": None, "version": 1, "deprecated": False,
     }
 
 
@@ -1067,7 +1072,7 @@ def _workflow_rank(entry: dict, role: str) -> tuple:
     third, refused band here. The arrow keys walk the same ranking the
     auto-pick used."""
     band = 0 if role and entry["default_role"] == role else 1
-    return (band, -entry["priority"], entry["name"])
+    return (band, -entry["priority"], entry.get("version") == 2, entry["name"])
 
 
 #: How much of a workflow's ``description`` an option row carries, in display
@@ -1090,6 +1095,31 @@ def _one_line(text: str, cols: int = WORKFLOW_DESC_COLS) -> str:
     able to encode a nicer one.
     """
     return fit(" ".join(str(text or "").split()), cols)
+
+
+def workflow_tag(entry: dict) -> str:
+    """The version marker a Workflow row carries: " [v2]" on a cflow v2
+    workflow, " [v1, deprecated]" on a v1 one the daemon marked deprecated,
+    nothing for an entry that says neither (an older daemon). ASCII, like
+    the rest of this form's rows: the console may not encode more.
+    The dashboard's `cflowVersionTag` says the same."""
+    if entry.get("version") == 2:
+        return " [v2]"
+    if entry.get("deprecated"):
+        return " [v1, deprecated]"
+    return ""
+
+
+def workflow_value(entry: dict, entries: List[dict]) -> str:
+    """What picking ``entry`` sends as ``workflow``: its name, or
+    ``v2:<name>`` for a v2 workflow whose name a v1 one also declares --
+    the daemon keeps v1 on a bare shared name, and reads the prefix as
+    ``workflow_version: 2``."""
+    if entry.get("version") == 2 and any(
+        e["name"] == entry["name"] and e.get("version") != 2 for e in entries
+    ):
+        return "v2:" + entry["name"]
+    return entry["name"]
 
 
 def _workflow_options(entries: List[dict], role: str) -> List[Option]:
@@ -1119,7 +1149,7 @@ def _workflow_options(entries: List[dict], role: str) -> List[Option]:
         desc = _one_line(e.get("description") or "")
         if desc:
             line = f"{line} -- {desc}" if line else desc
-        out.append(Option(e["name"], e["name"], line))
+        out.append(Option(e["name"] + workflow_tag(e), workflow_value(e, entries), line))
     return out
 
 
@@ -1132,8 +1162,10 @@ def _workflow_default(entries: List[dict], role: str) -> str:
         e for e in entries
         if e["default_role"] == role and _workflow_admits(e, role)
     ]
-    best.sort(key=lambda e: (-e["priority"], e["name"]))
-    return best[0]["name"] if best else ""
+    # v1 before v2 at equal priority: while the two run side by side a v2
+    # workflow is offered, never volunteered over the v1 one it may replace.
+    best.sort(key=lambda e: (-e["priority"], e.get("version") == 2, e["name"]))
+    return workflow_value(best[0], entries) if best else ""
 
 
 def sync_workflows(

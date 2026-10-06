@@ -7706,9 +7706,50 @@ async function refreshCflow() {
     li.className = "cflow-empty";
     li.textContent = "no cflow runs — start one with /cflow in a session";
     list.appendChild(li);
-    return;
   }
   for (const r of runs) list.appendChild(cflowCard(r));
+  appendCflow2Cards(list);
+}
+
+/* The v2 runs (GET /api/cflow2/runs), under the v1 cards: one line each,
+   linking to the run page, which draws the v2 view for a v2-only slot. The
+   list is rebuilt on every poll, so a reply for a list that has since been
+   rebuilt is dropped. */
+let cflow2CardsToken = 0;
+async function appendCflow2Cards(list) {
+  const token = ++cflow2CardsToken;
+  let runs = [];
+  try {
+    const resp = await api("/api/cflow2/runs");
+    if (!resp.ok) return;
+    runs = (await resp.json()).runs || [];
+  } catch {
+    return;
+  }
+  if (token !== cflow2CardsToken || !runs.length) return;
+  for (const r of runs) list.appendChild(cflow2Card(r));
+}
+
+function cflow2Card(r) {
+  const li = document.createElement("li");
+  li.className = "cflow-card cf2-card";
+  const head = el("div", "cflow-head");
+  head.appendChild(el("span", "cf2-badge", "v2"));
+  head.appendChild(el("span", "cflow-name", r.workflow || "(workflow)"));
+  head.appendChild(el("span", "meta",
+    `${r.status}${r.reason ? ` (${r.reason})` : ""} · ${r.scope} · ${r.cwd}`));
+  li.appendChild(head);
+  if (r.error) li.appendChild(el("p", "wf-warning", r.error));
+  if ((r.current || []).length) {
+    li.appendChild(el("p", "wf-note", `at: ${r.current.join(", ")}`));
+  }
+  if (r.delegations) {
+    li.appendChild(el("p", "wf-note", `${r.delegations} open delegation(s)`));
+  }
+  li.addEventListener("click", () => {
+    location.hash = "#/wf/" + encodeURIComponent(`${r.scope}|${r.cwd}`);
+  });
+  return li;
 }
 
 /* One run, as a list card. Split out of the list's own loop because the
@@ -7978,7 +8019,18 @@ async function loadFlowDefinitions() {
       const option = document.createElement("option");
       option.value = JSON.stringify([row.name, row.layer, row.path]);
       option.textContent = `${row.name} · ${row.layer} · ${row.path.split(/[\\/]/).pop()}` +
-        (row.active ? " · active" : " · shadowed");
+        (row.active ? " · active" : " · shadowed") + " · v1 (deprecated)";
+      choice.appendChild(option);
+    }
+    // The v2 definitions, read-only here: the compiled tree and the static
+    // check's findings (GET /api/cflow2/definition). The 4th element of
+    // the value marks them.
+    for (const row of data.definitions_v2 || []) {
+      const option = document.createElement("option");
+      option.value = JSON.stringify([row.name, row.layer, row.path, 2]);
+      option.textContent = `${row.name} · ${row.layer} · v2` +
+        (row.kind === "procedure" ? " · procedure" : "") +
+        (row.error ? " · invalid" : "") + " · read-only";
       choice.appendChild(option);
     }
     flowDefinitionsFor = cwd;
@@ -7997,11 +8049,16 @@ async function loadFlowDefinition() {
   }
   const choice = $("flow-editor-choice").value;
   if (!choice) return;
-  const [name, layer, path] = JSON.parse(choice);
+  const [name, layer, path, version] = JSON.parse(choice);
   const cwd = $("flow-editor-cwd").value;
   flowDefinition = null;
   $("flow-editor-text").value = "";
   $("flow-editor-effective").textContent = "";
+  flowEditorReadOnly(version === 2);
+  if (version === 2) {
+    await loadFlowDefinitionV2(cwd, name);
+    return;
+  }
   flowEditorMessage("Loading source…");
   try {
     const query = new URLSearchParams({ cwd, name, layer, path });
@@ -8011,6 +8068,44 @@ async function loadFlowDefinition() {
     flowEditorDirty();
     flowEditorMessage("Source loaded. Validate before saving.");
     await checkFlowDefinition(false);
+  } catch (error) {
+    flowEditorMessage(error.message, true);
+  }
+}
+
+/* The editor's v2 mode: the source shown read-only, Validate and Save off. */
+function flowEditorReadOnly(on) {
+  $("flow-editor-text").readOnly = !!on;
+  $("flow-editor-validate").disabled = !!on;
+  $("flow-editor-save").disabled = !!on;
+}
+
+/* One v2 definition: its source, the compiled tree (in the "effective"
+   pane) and the static check's findings. */
+async function loadFlowDefinitionV2(cwd, name) {
+  flowEditorMessage("Loading v2 definition…");
+  try {
+    const query = new URLSearchParams({ cwd, name });
+    const doc = await flowEditorResponse(await api(`/api/cflow2/definition?${query}`));
+    $("flow-editor-text").value = doc.text || "";
+    $("flow-editor-source").textContent = doc.path || "";
+    flowEditorDirty();
+    if (doc.error) {
+      flowEditorMessage(`Does not compile: ${doc.error}`, true);
+      return;
+    }
+    $("flow-editor-effective").textContent = cflow2TreeRows(doc.chart, null)
+      .map((r) => "  ".repeat(r.depth) + (r.role ? `${r.role}: ` : "") + `${r.icon} ${r.text}`)
+      .join("\n");
+    const findings = doc.findings || [];
+    flowEditorMessage([
+      "cflow v2 definition (read-only here; edit the file, then 'claunch cflow2 validate').",
+      `${Object.keys((doc.chart || {}).nodes || {}).length} nodes · ${(doc.delegations || []).length} delegation points`,
+      ...((doc.chart || {}).warnings || []).map((w) => `Warning: ${w}`),
+      ...(findings.length
+        ? findings.map((f) => `${f.level}: ${f.code}${f.node ? ` [${f.node}]` : ""}: ${f.message}`)
+        : ["Checks: no findings"]),
+    ].join("\n"), findings.some((f) => f.level === "error"));
   } catch (error) {
     flowEditorMessage(error.message, true);
   }
@@ -8041,6 +8136,7 @@ async function checkFlowDefinition(save) {
     $("flow-editor-effective").textContent = validation.effective_yaml;
     flowEditorMessage([
       save ? "Saved." : "Valid workflow.",
+      `Deprecated format: ${CFLOW_V1_NOTE}`,
       `${validation.steps} steps · start: ${validation.start}`,
       ...validation.bases.map(base => `Inherited: ${base}`),
       ...validation.warnings.map(value => `Warning: ${value}`),
@@ -10732,7 +10828,9 @@ $("new-session").addEventListener("submit", async (e) => {
     if (f.handle.value.trim()) body.handle = f.handle.value.trim();
   }
   if (f.workflow.value) {
-    body.workflow = f.workflow.value;
+    // A v2 pick says so (workflow_version: 2), so a name both formats
+    // declare starts the one that was picked; see cflowPickBody.
+    Object.assign(body, cflowPickBody(f.workflow.value, workflowsCache));
     if (f.context.value.trim()) body.context = f.context.value.trim();
   } else if (parent && newSpawnReportFor === parent.name &&
              (newSpawnReport || {}).child_cflow) {
@@ -15632,6 +15730,19 @@ async function refreshWf() {
   } catch {
     return;
   }
+  if (data.status === "idle" && data.v2) {
+    const cwd = wfCwd;
+    const v2 = await fetchCflow2Run(cwd, wfScope);
+    if (!v2 || wfCwd !== cwd) return;
+    $("wf-view").innerHTML = "";
+    if (v2.error) {
+      $("wf-view").appendChild(el("p", "wf-warning", v2.error));
+      return;
+    }
+    wfLastData = null;
+    renderCflow2Into($("wf-view"), v2, { after: () => refreshWf() });
+    return;
+  }
   wfLastData = data;
   renderWf(data);
 }
@@ -15754,6 +15865,19 @@ async function refreshSplit() {
     return;
   }
   if (splitFor !== want) return;   // repointed while the reply was in flight
+  // No v1 run, a v2 one: drawn by the v2 renderer (see renderCflow2Into).
+  if (data.status === "idle" && data.v2) {
+    const v2 = await fetchCflow2Run(splitCwd, splitScope);
+    if (!v2 || splitFor !== want) return;
+    if (v2.error) {
+      $("term-wf").innerHTML = "";
+      $("term-wf").appendChild(el("p", "wf-warning", v2.error));
+      return;
+    }
+    splitLastData = null;
+    renderCflow2Into($("term-wf"), v2, { after: () => refreshSplit() });
+    return;
+  }
   splitLastData = data;
   renderSplit(data);
 }
@@ -16357,12 +16481,20 @@ function syncOnboardPickers() {
   wf.innerHTML = "";
   wf.appendChild(new Option("(none)", ""));
   for (const o of options) {
-    wf.appendChild(new Option(o.detail ? `${o.name} — ${o.detail}` : o.name,
-                              o.name));
+    const label = o.name + (o.tag || "");
+    wf.appendChild(new Option(o.detail ? `${label} — ${o.detail}` : label,
+                              o.value || o.name));
   }
   wf.value = [...wf.options].some((o) => o.value === keptWf) ? keptWf : "";
   $("new-context-row").classList.toggle("hidden", !wf.value);
   renderSubroles();
+  // One line under the row when the pick is a v1 workflow: the format is
+  // deprecated, the run still works. Absent in harnesses without the node.
+  const v1Note = $("new-workflow-note");
+  if (v1Note) {
+    const picked = options.find((o) => (o.value || o.name) === wf.value);
+    v1Note.classList.toggle("hidden", !(picked && picked.deprecated));
+  }
 }
 
 /* Workflows are declared per directory, so the list follows the Directory
@@ -25199,16 +25331,282 @@ async function cflowPost(path, body) {
    - "Start directly" writes the run here and nudges the terminal. For a slot
      with no live session (an agent that attaches later, a script), where
      there is nobody to ask. */
+/* ---- cflow v2 beside v1 (docs/cflow-v2.md sections 9-10) ----
+   /api/cflow/workflows lists both formats in one list, told apart by
+   `version`; v1 entries carry `deprecated`. The pickers mark both, and a v2
+   pick is sent with `workflow_version: 2`. Small and pure so the harnesses
+   can slice them. */
+const CFLOW_V1_NOTE =
+  "cflow v1 format is deprecated; v2 runs beside it (docs/cflow-v2.md). " +
+  "The run still starts and works as before.";
+
+/* The marker an option label ends with: " · v2", " · v1 (deprecated)", or
+   nothing for an entry that says neither (an older daemon). */
+function cflowVersionTag(w) {
+  if (!w || typeof w !== "object") return "";
+  if (Number(w.version) === 2) return " · v2";
+  if (w.deprecated) return " · v1 (deprecated)";
+  return "";
+}
+
+/* The option value for one entry: its name, or "v2:<name>" for a v2 entry
+   whose name a v1 entry also declares (the daemon keeps v1 on a bare shared
+   name). */
+function cflowPickValue(w, all) {
+  const name = String((w && w.name) || "");
+  if (Number(w && w.version) !== 2) return name;
+  const shared = (all || []).some((o) => o && o.name === name &&
+                                         Number(o.version) !== 2);
+  return shared ? `v2:${name}` : name;
+}
+
+/* What a picked value sends: {workflow} for v1, {workflow,
+   workflow_version: 2} for a v2 entry (prefixed or not). */
+function cflowPickBody(value, all) {
+  value = String(value || "");
+  if (value.startsWith("v2:")) {
+    return { workflow: value.slice(3), workflow_version: 2 };
+  }
+  const v1 = (all || []).some((o) => o && o.name === value && Number(o.version) !== 2);
+  const v2 = (all || []).some((o) => o && o.name === value && Number(o.version) === 2);
+  return v2 && !v1 ? { workflow: value, workflow_version: 2 } : { workflow: value };
+}
+
+/* The entry a picked value means. */
+function cflowPickEntry(value, all) {
+  const body = cflowPickBody(value, all);
+  const want2 = body.workflow_version === 2;
+  return (all || []).find((o) => o && o.name === body.workflow &&
+                                 (Number(o.version) === 2) === want2) || null;
+}
+
+const CFLOW2_ICONS = {
+  seq: "→", par: "∥", loop: "↻", try: "⚑", choose: "◇", task: "•",
+  wait: "⏳", group: "⧉", scope: "ƒ", cond: "?", timeout: "⏱", control: "↩",
+};
+
+/* One node's line in the tree, without the role prefix. */
+function cflow2NodeText(n) {
+  const t = n.type;
+  let text;
+  if (t === "task") text = n.title && n.title !== n.label
+    ? `${n.label || n.id} — ${n.title}` : (n.label || n.title || n.id);
+  else if (t === "loop") {
+    text = `${n.mode || "loop"} (max ${n.max ?? "?"})`;
+    if (n.guard) text += ` ${n.guard}`;
+    if (n.items) text += ` in ${n.items}${n.parallel ? " par" : ""}`;
+  } else if (t === "choose") text = `choose (${n.chooser || "agent"})`;
+  else if (t === "par") text = `par settle=${n.settle || "all"}`;
+  else if (t === "group") text = `group${n.name ? " " + n.name : ""} settle=${n.settle || "all"}`;
+  else if (t === "scope") text = `call ${n.proc || "?"}`;
+  else if (t === "wait") text = `wait ${n.describe || ""}`.trim();
+  else if (t === "timeout") text = `timeout ${n.seconds}s`;
+  else if (t === "control") text = `${n.op || "control"}${n.outcome ? " " + n.outcome : ""}`;
+  else text = t;
+  if (t !== "task" && n.label) text += ` [${n.label}]`;
+  if ((n.executor || []).length && !(n.executor.length === 1 && n.executor[0] === "inline")) {
+    text += ` ⇢ ${n.executor.join("/")}`;
+  }
+  return text;
+}
+
+/* The chart as indented rows, pre-order from the root: depth, the role the
+   node plays under its parent ("do", "option x", "catch fail"), whether a
+   live instance sits on it (and whether it waits on the outside), and its
+   visit count. Pure: the renderer below only draws these. */
+function cflow2TreeRows(chart, detail) {
+  const nodes = (chart && chart.nodes) || {};
+  const live = {}, waiting = {};
+  for (const i of (detail && detail.instances) || []) {
+    live[i.node] = (live[i.node] || 0) + 1;
+    if (i.await) waiting[i.node] = i.await;
+  }
+  const visits = (detail && detail.visits) || {};
+  const rows = [];
+  const seen = new Set();
+  const walk = (id, depth, role) => {
+    const n = nodes[id];
+    if (!n || seen.has(id)) return;
+    seen.add(id);
+    rows.push({
+      id, depth, role: role || "", type: n.type,
+      icon: CFLOW2_ICONS[n.type] || "·",
+      text: cflow2NodeText(n),
+      active: !!live[id], awaiting: waiting[id] || "",
+      visits: Number(visits[n.label || n.id] || 0),
+    });
+    const kids = n.children || [];
+    const roles = n.roles || [];
+    kids.forEach((c, i) => walk(c, depth + 1, roles[i] || ""));
+  };
+  if (chart && chart.root) walk(chart.root, 0, "");
+  return rows;
+}
+
+function cflow2TreeInto(box, chart, detail) {
+  const tree = el("div", "cf2-tree mono");
+  for (const r of cflow2TreeRows(chart, detail)) {
+    const row = el("div", "cf2-row" + (r.awaiting ? " awaiting" : r.active ? " active" : ""));
+    row.style.paddingLeft = `${r.depth * 14}px`;
+    row.dataset.node = r.id;
+    if (r.role) row.appendChild(el("span", "cf2-role", `${r.role}: `));
+    row.appendChild(el("span", "cf2-icon", r.icon + " "));
+    row.appendChild(el("span", "cf2-text", r.text));
+    if (r.visits > 1) row.appendChild(el("span", "cf2-visits", ` ×${r.visits}`));
+    if (r.awaiting) row.appendChild(el("span", "cf2-await", ` ← ${r.awaiting}`));
+    row.title = `${r.type} ${r.id}`;
+    tree.appendChild(row);
+  }
+  box.appendChild(tree);
+}
+
+/* The v2 run, wherever a run is drawn (run page, session fold). `ui.after`
+   re-fetches the host after an answer. */
+function renderCflow2Into(box, data, ui) {
+  ui = ui || {};
+  box.innerHTML = "";
+  const run = data.run || {};
+  if (!data.run || data.status === "idle") {
+    box.appendChild(el("p", "wf-note", "this slot has no v2 run"));
+    return;
+  }
+  const head = el("div", "wf-meta");
+  head.appendChild(el("span", "cf2-badge", "v2"));
+  head.appendChild(el("span", null, run.workflow || (data.chart || {}).name || "(workflow)"));
+  head.appendChild(el("span", null, `${run.status || data.status}` +
+    (run.reason ? ` (${run.reason})` : "")));
+  head.appendChild(el("span", null, `run ${run.run || "?"}`));
+  if (run.started) head.appendChild(el("span", null,
+    `started ${String(run.started).replace("T", " ")}`));
+  box.appendChild(head);
+  if (run.outcome !== undefined && run.outcome !== null) {
+    box.appendChild(el("p", "wf-note", `outcome: ${run.outcome}`));
+  }
+
+  const post = async (path, body) => {
+    const doc = await cflowPost(path, { cwd: data.cwd, scope: data.scope, ...body });
+    if (doc && ui.after) ui.after();
+    return doc;
+  };
+
+  for (const c of run.choices || []) {
+    const card = el("div", "cf2-choice");
+    card.appendChild(el("h4", null,
+      `choice ${c.label || c.node} — ${c.chooser === "user" ? "yours to pick" : "the agent's"}`));
+    if (c.prompt) card.appendChild(mdInto(el("div", "md"), c.prompt));
+    const btns = el("div", "wf-actions");
+    for (const o of c.options || []) {
+      const b = el("button", "wf-btn option", o.name);
+      b.title = o.description || "";
+      b.addEventListener("click", async () => {
+        let reason = "";
+        if (c.require_reason) {
+          reason = prompt(`Reason for '${o.name}'`, "") || "";
+          if (!reason.trim()) return;
+        } else if (!confirm(`Pick '${o.name}' for ${c.label || c.node}?`)) return;
+        b.disabled = true;
+        await post("/api/cflow2/select", { node: c.instance, option: o.name, reason });
+      });
+      btns.appendChild(b);
+    }
+    card.appendChild(btns);
+    for (const u of c.unavailable || []) {
+      card.appendChild(el("p", "wf-note", `${u.name}: not available now (when ${u.when})`));
+    }
+    box.appendChild(card);
+  }
+
+  for (const lim of run.loop_limits || []) {
+    const card = el("div", "cf2-choice");
+    card.appendChild(el("h4", null,
+      `loop ${lim.label || lim.node} reached its max (${lim.iterations}/${lim.max})`));
+    const btns = el("div", "wf-actions");
+    const more = el("button", "wf-btn approve", "Allow one more");
+    more.addEventListener("click", async () => {
+      more.disabled = true;
+      await post("/api/cflow2/extend", { node: lim.instance, by: 1 });
+    });
+    const stop = el("button", "wf-btn", "Stop the loop");
+    stop.title = "the loop finishes with outcome fail";
+    stop.addEventListener("click", async () => {
+      if (!confirm("Stop the loop? It finishes with outcome fail.")) return;
+      stop.disabled = true;
+      await post("/api/cflow2/extend", { node: lim.instance, stop: true });
+    });
+    btns.append(more, stop);
+    card.appendChild(btns);
+    box.appendChild(card);
+  }
+
+  for (const t of run.tasks || []) {
+    box.appendChild(el("p", "wf-note",
+      `task ${t.label || t.node}: ${t.title || ""} — waiting for the agent's flow_report`));
+  }
+  for (const w of run.waits || []) {
+    box.appendChild(el("p", "wf-note",
+      `${w.kind} ${w.node}${w.describe ? ": " + w.describe : ""}`));
+  }
+
+  if (data.chart) {
+    box.appendChild(el("h4", null, "Chart"));
+    cflow2TreeInto(box, data.chart, data);
+  }
+
+  const dels = data.delegations || [];
+  if (dels.length) {
+    box.appendChild(el("h4", null, `Delegations (${dels.length})`));
+    for (const d of dels) {
+      const row = el("div", "cf2-deleg");
+      row.appendChild(el("span", "mono", d.id));
+      row.appendChild(el("span", null,
+        ` ${d.label || d.node} · ${d.executor || "?"}` +
+        (d.route && d.route !== d.executor ? ` (route ${d.route})` : "") +
+        ` · ${d.status}`));
+      if (d.receipt) row.appendChild(el("span", "mono cf2-receipt", ` receipt ${d.receipt}`));
+      box.appendChild(row);
+      for (const why of [...(d.degraded || []), ...(d.fallbacks || [])]) {
+        box.appendChild(el("p", "wf-note cf2-fallback", `fallback: ${why}`));
+      }
+    }
+  }
+
+  const events = (data.journal || []).slice().reverse();
+  const journal = document.createElement("details");
+  journal.className = "wf-journal";
+  journal.appendChild(el("summary", null, `journal (${events.length} newest events)`));
+  for (const e of events) {
+    const rest = Object.keys(e).filter((k) => !["ts", "event"].includes(k))
+      .map((k) => `${k}=${typeof e[k] === "object" ? JSON.stringify(e[k]) : e[k]}`)
+      .join(" ");
+    journal.appendChild(el("div", "wf-journal-line mono",
+      `${String(e.ts || "").replace("T", " ")}  ${e.event || ""}  ${rest}`));
+  }
+  box.appendChild(journal);
+}
+
+async function fetchCflow2Run(cwd, scope) {
+  try {
+    const resp = await api(`/api/cflow2/run?cwd=${encodeURIComponent(cwd)}` +
+                           `&scope=${encodeURIComponent(scope)}`);
+    const doc = await resp.json().catch(() => ({}));
+    return resp.ok ? doc : { error: doc.error || `HTTP ${resp.status}` };
+  } catch {
+    return null;
+  }
+}
+
 /* One line per workflow in the picker. An option cannot wrap, and the native
    popup sizes itself to the widest option: a paragraph-length description
    drags the whole dropdown past the viewport edge, where the browser pins and
    clips it. So the list gets one clipped line per workflow; the full
    description renders under the select for whichever is picked. */
 function wfOptionLabel(w) {
-  if (!w.description) return w.name;
+  // Guarded: the harness that slices this function alone does not carry it.
+  const tag = typeof cflowVersionTag === "function" ? cflowVersionTag(w) : "";
+  if (!w.description) return w.name + tag;
   const d = w.description.replace(/\s+/g, " ").trim();
   const clipped = d.length > 48 ? d.slice(0, 48).trimEnd() + "…" : d;
-  return `${w.name} — ${clipped}`;
+  return `${w.name}${tag} — ${clipped}`;
 }
 
 async function buildStartPanel(box, { cwd, scope, sessions, stillHere, after }) {
@@ -25235,7 +25633,7 @@ async function buildStartPanel(box, { cwd, scope, sessions, stillHere, after }) 
   sel.className = "wf-start-select";
   for (const w of flows) {
     const opt = document.createElement("option");
-    opt.value = w.name;
+    opt.value = cflowPickValue(w, flows);
     opt.textContent = wfOptionLabel(w);
     opt.title = w.path;
     sel.appendChild(opt);
@@ -25246,10 +25644,12 @@ async function buildStartPanel(box, { cwd, scope, sessions, stillHere, after }) 
      The path goes under the select rather than into the option text — an
      option cannot wrap, and these are absolute paths. */
   const source = el("p", "wf-source mono");
+  const versionNote = el("p", "wf-note cf2-v1-note hidden", CFLOW_V1_NOTE);
   const showSource = () => {
-    const w = flows.find((f) => f.name === sel.value);
+    const w = cflowPickEntry(sel.value, flows);
     source.replaceChildren();
     desc.textContent = w && w.description ? w.description : "";
+    versionNote.classList.toggle("hidden", !(w && w.deprecated));
     if (!w) return;
     source.appendChild(el("span", "wf-source-path", w.path));
     if (w.shadowed && w.shadowed.length) {
@@ -25282,16 +25682,20 @@ async function buildStartPanel(box, { cwd, scope, sessions, stillHere, after }) 
     : "no live session in this slot to ask";
   ask.disabled = !live;
   ask.addEventListener("click", async () => {
-    const workflow = sel.value;
+    const pick = cflowPickBody(sel.value, flows);
+    const workflow = pick.workflow;
     if (!confirm(
       `Ask session '${sessions[0]}' to start '${workflow}'?\n\n` +
-      `The request is recorded and the session is nudged; its agent reads ` +
-      `the request and runs the start itself.`
+      (pick.workflow_version === 2
+        ? "This is a cflow v2 workflow, which has no start request: the run " +
+          "is started now and the session is nudged to pick it up."
+        : `The request is recorded and the session is nudged; its agent reads ` +
+          `the request and runs the start itself.`)
     )) return;
     ask.disabled = true;
     ask.textContent = "Requesting…";
     const doc = await cflowPost("/api/cflow/request", {
-      cwd, scope, workflow, context: ctx.value.trim(),
+      cwd, scope, ...pick, context: ctx.value.trim(),
     });
     const nudged = doc ? [
       ...(doc.nudged_sessions || []),
@@ -25320,7 +25724,8 @@ async function buildStartPanel(box, { cwd, scope, sessions, stillHere, after }) 
   direct.title =
     "write the run now, without waiting for the agent to start it";
   direct.addEventListener("click", async () => {
-    const workflow = sel.value;
+    const pick = cflowPickBody(sel.value, flows);
+    const workflow = pick.workflow;
     if (!confirm(
       `Start '${workflow}' directly?\n\n` +
       (live
@@ -25334,7 +25739,7 @@ async function buildStartPanel(box, { cwd, scope, sessions, stillHere, after }) 
     direct.disabled = true;
     direct.textContent = "Starting…";
     const doc = await cflowPost("/api/cflow/start", {
-      cwd, scope, workflow, context: ctx.value.trim(),
+      cwd, scope, ...pick, context: ctx.value.trim(),
     });
     const nudged = doc ? [
       ...(doc.nudged_sessions || []),
@@ -25363,6 +25768,7 @@ async function buildStartPanel(box, { cwd, scope, sessions, stillHere, after }) 
   row.append(sel, ctx, ask, direct);
   box.appendChild(row);
   box.appendChild(desc);
+  box.appendChild(versionNote);
   box.appendChild(source);
   box.appendChild(el(
     "p", "wf-note",
@@ -28632,7 +29038,12 @@ function sessWorkflow(data) {
   // Only the branch below with a run in it hangs the fold; every other one
   // has to let go of it, or its poll outlives the run it was reading and
   // keeps asking about a slot that has nothing in it.
-  if (!flow || flow.status === "error" || !flow.status || flow.status === "idle") {
+  // A v2 run in an otherwise idle slot hangs the same fold (it draws the v2
+  // view), so it keeps it too.
+  const v2Live = !!(data.cflow2 && data.cflow2.status &&
+    !["idle", "error"].includes(data.cflow2.status));
+  if (!v2Live &&
+      (!flow || flow.status === "error" || !flow.status || flow.status === "idle")) {
     stopSessRun();
     sessRunFold = null;
   }
@@ -28684,6 +29095,14 @@ function sessWorkflow(data) {
     return box;
   }
 
+  const v2 = data.cflow2;
+  if (v2 && v2.status && v2.status !== "idle") {
+    box.appendChild(sessCflow2Line(v2));
+    if (v2.status === "error") return box;
+    if (pending) box.appendChild(pending);
+    box.appendChild(sessRunFoldFor(flow, true));
+    return box;
+  }
   box.appendChild(el("p", "wf-note", `no active cflow run in ${flow.cwd}`));
   if (pending) box.appendChild(pending);
   // Rebuilt only when the slot changes: the poll must not wipe a half-typed
@@ -28701,6 +29120,25 @@ function sessWorkflow(data) {
     after: () => { refreshSession(); refreshCflow(); },
   });
   return box;
+}
+
+/* The session panel's head line for a v2 run: name, a v2 badge, status and
+   the labels of the tasks it is on. */
+function sessCflow2Line(v2) {
+  const wrap = el("div", "sess-wf-v2");
+  if (v2.status === "error") {
+    wrap.appendChild(el("p", "wf-warning", v2.error || "cannot read this v2 run"));
+    return wrap;
+  }
+  const line = el("div", "sess-wf-run");
+  line.appendChild(el("span", "cf2-badge", "v2"));
+  line.appendChild(el("span", "sess-wf-name", v2.workflow || "(workflow)"));
+  line.appendChild(el("span", "meta", v2.status + (v2.reason ? ` (${v2.reason})` : "")));
+  wrap.appendChild(line);
+  if ((v2.current || []).length) {
+    wrap.appendChild(el("p", "wf-note", `at: ${v2.current.join(", ")}`));
+  }
+  return wrap;
 }
 
 /* ---- the run, opened where you already are ----
@@ -28771,6 +29209,17 @@ async function refreshSessRun() {
   // The panel repoints, and the fold is rebuilt with it: a reply that lands
   // after that belongs to a run this fold no longer shows.
   if (sessRunFold !== fold || !fold.open) return;
+  if (data.status === "idle" && data.v2) {
+    const v2 = await fetchCflow2Run(fold.dataset.cwd, fold.dataset.scope);
+    if (!v2 || sessRunFold !== fold || !fold.open) return;
+    if (v2.error) {
+      body.innerHTML = "";
+      body.appendChild(el("p", "wf-warning", v2.error));
+      return;
+    }
+    renderCflow2Into(body, v2, { after: refreshSessRun });
+    return;
+  }
   renderSessRun(body, data);
 }
 
@@ -29195,10 +29644,14 @@ function spawnWorkflowEntry(raw) {
       default_role: String(raw.default_role || "").trim().toLowerCase(),
       priority,
       filter_roles: raw.filter_roles || null,
+      // cflow v2 beside v1: an older daemon says neither, and reads as v1.
+      version: Number(raw.version) === 2 ? 2 : 1,
+      deprecated: !!raw.deprecated,
     };
   }
   return {
     name: String(raw || ""), default_role: "", priority: 0, filter_roles: null,
+    version: 1, deprecated: false,
   };
 }
 
@@ -29241,10 +29694,21 @@ function spawnRankWorkflows(raws, role) {
     const d = [];
     if (e.default_role) d.push(`default for ${e.default_role}`);
     if (e.priority) d.push(`priority ${e.priority}`);
-    return { name: e.name, detail: d.join(", ") };
+    // value: the name, or "v2:<name>" when a v1 workflow shares it (see
+    // cflowPickValue); tag: the version marker the label carries.
+    const shared = e.version === 2 && entries.some((o) => o.name === e.name && o.version !== 2);
+    return {
+      name: e.name, detail: d.join(", "),
+      value: shared ? `v2:${e.name}` : e.name,
+      version: e.version, deprecated: e.deprecated,
+      tag: e.version === 2 ? " · v2" : e.deprecated ? " · v1 (deprecated)" : "",
+    };
   });
-  const auto = entries.find((e) => band(e) === 0);
-  return { options, auto: auto ? auto.name : "" };
+  // v1 before v2 for the auto-pick: a v2 workflow volunteering for the same
+  // role is offered, never chosen over the v1 one while both run.
+  const auto = entries.find((e) => band(e) === 0 && e.version !== 2) ||
+    entries.find((e) => band(e) === 0);
+  return { options, auto: auto ? options[entries.indexOf(auto)].value : "" };
 }
 
 /* ---- rows built in JavaScript ----
@@ -30364,7 +30828,9 @@ function sessQuickJob(data) {
   let defaults = { ...QUICKJOB_FALLBACK };
   let canSave = false;
 
-  const fill = (sel, names, none, want) => {
+  // `labels` (optional) maps a value to the text shown for it -- the
+  // workflow row's version markers.
+  const fill = (sel, names, none, want, labels) => {
     sel.innerHTML = "";
     const empty = document.createElement("option");
     empty.value = "";
@@ -30373,7 +30839,7 @@ function sessQuickJob(data) {
     for (const n of names) {
       const opt = document.createElement("option");
       opt.value = n;
-      opt.textContent = n;
+      opt.textContent = (labels && labels[n]) || n;
       sel.appendChild(opt);
     }
     // The default may name a role/workflow this daemon does not know; offer
@@ -30415,13 +30881,16 @@ function sessQuickJob(data) {
       ((roles && roles.roles) || []).map((r) => r.name).filter(Boolean),
       "(no role)", defaults.role
     );
-    fill(
-      wfSel,
-      ((wfs && wfs.workflows) || [])
-        .map((w) => (typeof w === "string" ? w : w && !w.error && w.name))
-        .filter(Boolean),
-      "(no workflow)", defaults.workflow
-    );
+    const wfList = ((wfs && wfs.workflows) || [])
+      .filter((w) => typeof w === "string" || (w && !w.error && w.name));
+    const wfLabels = {};
+    const wfValues = wfList.map((w) => {
+      if (typeof w === "string") return w;
+      const value = cflowPickValue(w, wfList);
+      wfLabels[value] = w.name + cflowVersionTag(w);
+      return value;
+    });
+    fill(wfSel, wfValues, "(no workflow)", defaults.workflow, wfLabels);
     wtBox.checked = !!defaults.worktree;
     saveBtn.disabled = !canSave;
 

@@ -511,6 +511,7 @@ CHECKS = [
         "specpage_check.js",
         "shadowcard_check.js",
         "railshadowmix_check.js",
+        "cflow2view_check.js",
 ]
 
 

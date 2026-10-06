@@ -1,7 +1,6 @@
 cflow: 2
 name: sample-v2
 description: v2 문법 예시 — 조합자, 프로시저, fragment, 규칙, 명세를 한 파일에 담는다
-default_role: worker
 
 params:
   goal: {type: str, required: true}
