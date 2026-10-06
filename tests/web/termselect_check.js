@@ -57,4 +57,51 @@ const first = run(true);
 assert.equal(first.cleared, 1, 'tracking turning on still clears an ordinary selection, as upstream');
 assert.equal(first._enabled, false);
 
-console.log('termselect: session and CLI terminals force selection on Option (Mac) / Shift (vendored rule), kept across re-sent mouse modes passed');
+// With tracking on, every mouse report is user input and SelectionService
+// clears its selection on user input. Under ?1003 (any-motion, which Claude
+// Code turns on) the first buttonless move after a forced drag was a report,
+// and so was a right-click: the selection was gone before the context menu
+// could copy it. The local patch to bindMouse() (vendor/VENDORED) sends
+// neither report while there is a selection; a left click still reports.
+const moveSrc = vendor.match(/mousemove:(e=>\{e\.buttons\|\|this\._selectionService\.hasSelection\|\|i\(e\)\})/);
+assert.ok(moveSrc, 'vendored bindMouse() does not report a buttonless move over a selection (vendor/VENDORED)');
+const downSrc = vendor.match(/addDisposableListener\)\(t,"mousedown",(\(e=>\{if\(e\.preventDefault\(\),this\.focus\(\),this\.coreMouseService\.areMouseEventsActive&&!this\._selectionService\.shouldForceSelection\(e\)&&!\(2===e\.button&&this\._selectionService\.hasSelection\)\)return i\(e\).{0,200}?this\.cancel\(e\)\}\))/);
+assert.ok(downSrc, 'vendored bindMouse() does not report a right-click over a selection (vendor/VENDORED)');
+const bind = vm.runInNewContext(`(function(i,s){return {mousemove:${moveSrc[1]},mousedown:${downSrc[1]}}})`);
+function tracking(selected) {
+  const state = { selected, reports: 0 };
+  const self = {
+    _selectionService: {
+      get hasSelection() { return state.selected; },
+      shouldForceSelection(e) { return !!e.shiftKey; },
+    },
+    coreMouseService: { areMouseEventsActive: true },
+    _document: { addEventListener() {} },
+    focus() {},
+    cancel() {},
+  };
+  // A report is user input; user input clears the selection.
+  const report = () => { state.reports++; state.selected = false; return true; };
+  const handlers = bind.call(self, report, { mouseup: null, mousedrag: null });
+  const ev = (o) => Object.assign({ buttons: 0, button: 0, shiftKey: false, preventDefault() {} }, o);
+  return { state, handlers, ev };
+}
+{
+  const { state, handlers, ev } = tracking(true);
+  handlers.mousemove(ev({}));
+  assert.equal(state.reports, 0, 'hovering over a forced selection sends no report');
+  handlers.mousedown(ev({ button: 2, buttons: 2 }));
+  assert.equal(state.reports, 0, 'a right-click over a selection goes to the browser, not the program');
+  assert.equal(state.selected, true, 'the selection is still there for the context menu to copy');
+  handlers.mousedown(ev({ button: 0, buttons: 1 }));
+  assert.equal(state.reports, 1, 'a left click still reports, and so clears the selection');
+  assert.equal(state.selected, false);
+}
+{
+  const { state, handlers, ev } = tracking(false);
+  handlers.mousemove(ev({}));
+  handlers.mousedown(ev({ button: 2, buttons: 2 }));
+  assert.equal(state.reports, 2, 'without a selection, moves and right-clicks reach the program as upstream');
+}
+
+console.log('termselect: session and CLI terminals force selection on Option (Mac) / Shift (vendored rule), kept across re-sent mouse modes, hover and right-click passed');
