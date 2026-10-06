@@ -294,3 +294,44 @@ def test_nested_mapping_type_errors(doc):
 
 def test_non_mapping_document():
     assert ws.validate(["x"]) == ["spec: must be a mapping"]
+
+
+# H: scalars of the wrong type are reported, never raised (claunch-ipo2q) ---
+
+@pytest.mark.parametrize("path, value, expect", [
+    (("agents", 1, "kind"), ["worker"], "agents[1].kind: must be a string"),
+    (("agents", 1, "id"), ["ue1"], "agents[1].id: must be a string"),
+    (("agents", 1, "parent"), {"x": 1}, "agents[1].parent: must be a string"),
+    (("agents", 1, "role"), ["worker"], "agents[1].role: must be a string"),
+    (("agents", 1, "handle"), 7, "agents[1].handle: must be a string"),
+    (("agents", 1, "workflow"), ["w"], "agents[1].workflow: must be a string"),
+    (("issues", 1, "assignee"), ["ue1"], "issues[1].assignee: must be a string"),
+    (("issues", 1, "review"), ["rv1"], "issues[1].review: must be a string"),
+    (("issues", 1, "key"), ["W1"], "issues[1].key: must be a string"),
+    (("issues", 1, "type"), ["task"], "issues[1].type: must be a string"),
+    (("issues", 1, "title"), ["t"], "issues[1].title: must be a string"),
+    (("issues", 1, "parent"), ["frame"], "issues[1].parent: must be a string"),
+    (("issues", 1, "priority"), "2", "issues[1].priority: must be an integer"),
+    (("issues", 1, "priority"), True, "issues[1].priority: must be an integer"),
+    (("references", 0, "id"), ["r"], "references[0].id: must be a string"),
+    (("references", 0, "kind"), ["text"], "references[0].kind: must be a string"),
+    (("references", 0, "text"), ["x"], "references[0].text: must be a string"),
+    (("contracts", 0, "id"), ["c"], "contracts[0].id: must be a string"),
+    (("contracts", 0, "kind"), ["store"], "contracts[0].kind: must be a string"),
+    (("contracts", 0, "text"), ["x"], "contracts[0].text: must be a string"),
+    (("decisions", 0, "key"), ["k"], "decisions[0].key: must be a string"),
+    (("decisions", 0, "question"), ["q"], "decisions[0].question: must be a string"),
+    (("mesh", "mode"), ["new"], "mesh.mode: must be a string"),
+    (("mesh", "name"), ["m"], "mesh.name: must be a string"),
+    (("leader", "mode"), ["own"], "leader.mode: must be a string"),
+    (("leader", "own", "name"), ["n"], "leader.own.name: must be a string"),
+    (("leader", "shared", "handle"), ["h"], "leader.shared.handle: must be a string"),
+    (("name",), ["night"], "name: must be a string"),
+    (("spec",), True, "spec: must be an integer"),
+])
+def test_scalar_type_errors(doc, path, value, expect):
+    node = doc
+    for part in path[:-1]:
+        node = node[part]
+    node[path[-1]] = value
+    assert ws.validate(doc) == [expect]

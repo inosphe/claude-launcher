@@ -151,6 +151,60 @@ _STR_LISTS = {
     "issues": ("blocked_by", "refs", "contracts", "labels", "rule_ids"),
     "decisions": ("gates",),
 }
+#: Scalar fields the validator compares, hashes or formats. A list or mapping
+#: there (``kind: [worker]``) is unhashable in a set lookup and crashed with
+#: TypeError; it is reported here instead. ``priority`` alone is an integer
+#: (bool excluded -- ``True`` is an int to Python, not a priority).
+_STR_TOP = {"name": "name", "title": "title", "workspace": "workspace"}
+_STR_NESTED = {
+    "mesh": ("mode", "name"),
+    "leader": ("mode",),
+    "leader.own": ("name", "workflow"),
+    "leader.shared": ("handle",),
+}
+_STR_ITEMS = {
+    "agents": ("id", "kind", "parent", "role", "handle", "workflow"),
+    "references": ("id", "kind", "file", "url", "text", "issue"),
+    "contracts": ("id", "kind", "title", "text"),
+    "issues": ("key", "type", "title", "parent", "assignee", "review",
+               "goal", "size"),
+    "decisions": ("key", "question", "owner", "recommended"),
+}
+
+
+def _scalars(doc: dict) -> List[str]:
+    errs: List[str] = []
+    ver = doc.get("spec")
+    if ver is not None and (isinstance(ver, bool) or not isinstance(ver, int)):
+        errs.append("spec: must be an integer")
+    for key in _STR_TOP:
+        if doc.get(key) is not None and not isinstance(doc[key], str):
+            errs.append(f"{key}: must be a string")
+    for path, fields in _STR_NESTED.items():
+        node = doc
+        for part in path.split("."):
+            node = node.get(part) if isinstance(node, dict) else None
+        if not isinstance(node, dict):
+            continue
+        for f in fields:
+            if node.get(f) is not None and not isinstance(node[f], str):
+                errs.append(f"{path}.{f}: must be a string")
+    for block, fields in _STR_ITEMS.items():
+        items = doc.get(block)
+        if not isinstance(items, list):
+            continue
+        for i, item in enumerate(items):
+            if not isinstance(item, dict):
+                continue
+            for f in fields:
+                if item.get(f) is not None and not isinstance(item[f], str):
+                    errs.append(f"{block}[{i}].{f}: must be a string")
+            if block == "issues":
+                prio = item.get("priority")
+                if prio is not None and (isinstance(prio, bool)
+                                         or not isinstance(prio, int)):
+                    errs.append(f"issues[{i}].priority: must be an integer")
+    return errs
 
 
 def _shape(doc: dict) -> List[str]:
@@ -190,6 +244,7 @@ def _shape(doc: dict) -> List[str]:
         if isinstance(it, dict) and it.get("contract") is not None \
                 and not isinstance(it["contract"], dict):
             errs.append(f"issues[{i}].contract: must be a mapping")
+    errs.extend(_scalars(doc))
     return errs
 
 
