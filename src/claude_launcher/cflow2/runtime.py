@@ -4085,7 +4085,7 @@ def _open_ask(r: Run, iid: str, node: ir.Node) -> None:
     }
     if brief is not None:
         rec.update(format=brief["format"], brief=brief["brief"],
-                   question_text=brief["question_text"])
+                   question_text=brief["question_text"], intro=rec["prompt"])
         if not rec["prompt"]:
             rec["prompt"] = brief["question_text"]
         else:
@@ -4358,9 +4358,19 @@ def _describe_ask(r: Run, iid: str, node: ir.Node, rec: Dict[str, Any],
         "deadline": rec.get("deadline"),
         "skipped": [s.get("reason") for s in rec.get("skipped") or []],
         "how": _ask_how(iid, rec),
-        **({"format": rec.get("format"), "brief": rec.get("brief"),
-            "question_text": rec.get("question_text")} if rec.get("brief") is not None else {}),
+        **(_ask_question(r, rec) if rec.get("brief") is not None else {}),
     }
+
+
+def _ask_question(r: Run, rec: Dict[str, Any]) -> Dict[str, Any]:
+    """A brief ask's question for status payloads (docs 2.10): the text the
+    CLI and the mesh show, and ``question`` (``question.to_json``) for the web UI."""
+    out = {"format": rec.get("format"), "brief": rec.get("brief"),
+           "question_text": rec.get("question_text"), "intro": rec.get("intro") or ""}
+    decl = ((r.chart.meta or {}).get("question_types") or {}).get(str(rec.get("format")))
+    if decl is not None:
+        out["question"] = q_mod.to_json(rec["brief"], decl)
+    return out
 
 
 def approve(node: Optional[str] = None, *, decision: Optional[str] = None,

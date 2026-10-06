@@ -514,6 +514,7 @@ CHECKS = [
         "railshadowmix_check.js",
         "cflow2view_check.js",
         "cflow2collections_check.js",
+        "cflow2question_check.js",
 ]
 
 

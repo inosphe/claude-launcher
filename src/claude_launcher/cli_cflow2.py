@@ -291,6 +291,11 @@ def _print_status(payload: Dict[str, Any], as_json: bool) -> None:
     for a in payload.get("asks") or []:
         print(f"  ask {a['instance']} [{a['ask']}] {a.get('resolution')}: "
               f"{(a.get('prompt') or '').strip().splitlines()[0] if a.get('prompt') else ''}")
+        if a.get("question_text"):
+            # a brief ask (docs 2.10): the whole question, then the answers
+            for line in str(a["question_text"]).splitlines():
+                print(f"    {line}".rstrip())
+            print(f"    answers: {', '.join(o['name'] for o in a.get('options') or [])}")
         print(f"    {a.get('how')}")
     if payload.get("inputs") is not None:
         print(f"  inputs: {json.dumps(payload['inputs'], ensure_ascii=False)}")

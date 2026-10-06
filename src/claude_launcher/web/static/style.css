@@ -5511,6 +5511,12 @@ div.shadow-card .shadow-line { white-space: normal; overflow-wrap: anywhere; }
 .cf2-await { color: #58a6ff; }
 .cf2-choice { border: 1px solid #30363d; border-radius: 6px; padding: 6px 8px; margin: 6px 0; }
 .cf2-choice h4 { margin: 0 0 4px; }
+.cf2-question h5 { margin: 6px 0 2px; }
+.cf2-q-table { border-collapse: collapse; margin: 2px 0 6px; font-size: 12px; }
+.cf2-q-table th, .cf2-q-table td { border: 1px solid #30363d; padding: 2px 6px; text-align: left; vertical-align: top; white-space: pre-wrap; }
+.cf2-q-table tr.recommended td { background: rgba(46, 160, 67, 0.15); }
+.cf2-q-rec { margin: 4px 0; }
+.wf-btn.recommended { outline: 2px solid #2ea043; }
 .cf2-deleg { font-size: 12px; padding: 2px 0; }
 .cf2-receipt { color: #6e7681; }
 .cf2-fallback { margin: 0 0 2px 12px; font-size: 12px; }

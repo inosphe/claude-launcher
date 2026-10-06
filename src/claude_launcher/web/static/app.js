@@ -25625,6 +25625,42 @@ function cflow2TreeInto(box, chart, detail) {
 
 /* The v2 run, wherever a run is drawn (run page, session fold). `ui.after`
    re-fetches the host after an answer. */
+
+// docs/cflow-v2.md 2.10: a question from GET /api/cflow2/run asks[].question
+// (cflow2/question.to_json). text -> label + markdown, table -> one row per
+// option (the recommended row marked), choice -> the recommendation.
+function cf2QuestionView(q) {
+  const wrap = el("div", "cf2-question");
+  for (const sec of q.sections || []) {
+    if (sec.kind === "table") {
+      wrap.appendChild(el("h5", null, sec.label));
+      const t = el("table", "cf2-q-table");
+      const head = el("tr");
+      head.appendChild(el("th", null, "name"));
+      for (const c of sec.value.columns || []) head.appendChild(el("th", null, c.label));
+      t.appendChild(head);
+      for (const r of sec.value.rows || []) {
+        const tr = el("tr", r.recommended ? "recommended" : null);
+        tr.appendChild(el("td", null, r.recommended ? `${r.name} (권장)` : String(r.name)));
+        for (const c of sec.value.columns || []) {
+          const v = (r.cells || {})[c.field];
+          tr.appendChild(el("td", null, v == null ? "" : String(v)));
+        }
+        t.appendChild(tr);
+      }
+      wrap.appendChild(t);
+    } else if (sec.kind === "choice") {
+      const p = el("p", "cf2-q-rec");
+      p.appendChild(el("strong", null, `${sec.label}: ${sec.value == null ? "" : sec.value}`));
+      wrap.appendChild(p);
+    } else {
+      wrap.appendChild(el("h5", null, sec.label));
+      wrap.appendChild(mdInto(el("div", "md"), String(sec.value)));
+    }
+  }
+  return wrap;
+}
+
 function renderCflow2Into(box, data, ui) {
   ui = ui || {};
   box.innerHTML = "";
@@ -25689,9 +25725,15 @@ function renderCflow2Into(box, data, ui) {
 
   for (const a of run.asks || []) {
     const card = el("div", "cf2-choice");
+    const q = a.question || null;
     card.appendChild(el("h4", null,
-      `approval ${a.label || a.node}${a.title ? " — " + a.title : ""}`));
-    if (a.prompt) card.appendChild(mdInto(el("div", "md"), a.prompt));
+      `${q ? "question" : "approval"} ${a.label || a.node}${a.title ? " — " + a.title : ""}`));
+    if (q) {
+      // a brief ask (docs/cflow-v2.md 2.10): the sections come from the
+      // question type, in its order -- no per-type code here
+      if (a.intro) card.appendChild(mdInto(el("div", "md"), a.intro));
+      card.appendChild(cf2QuestionView(q));
+    } else if (a.prompt) card.appendChild(mdInto(el("div", "md"), a.prompt));
     if ((a.asked || []).length) {
       card.appendChild(el("p", "wf-note", `asked: ${a.asked.join(", ")}` +
         (a.deadline ? ` (until ${String(a.deadline).replace("T", " ")})` : "")));
@@ -25707,7 +25749,22 @@ function renderCflow2Into(box, data, ui) {
       : [{ name: "approve", description: "enter the task" },
          { name: "decline", description: "the task finishes declined" }];
     for (const o of opts) {
-      const b = el("button", "wf-btn " + (o.name === "decline" ? "" : "approve"), o.name);
+      if (q && o.name === "reframe") {
+        // reframe needs a reason: what the options miss
+        const b = el("button", "wf-btn cf2-reframe", "reframe");
+        b.title = o.description || "";
+        b.addEventListener("click", async () => {
+          const reason = prompt("What do the options miss? (required)", "");
+          if (reason === null || !reason.trim()) return;
+          b.disabled = true;
+          await post("/api/cflow2/approve", { node: a.instance, decision: "reframe", reason });
+        });
+        btns.appendChild(b);
+        continue;
+      }
+      const rec = q && q.recommended === o.name;
+      const b = el("button", "wf-btn " + (o.name === "decline" ? "" : "approve")
+        + (rec ? " recommended" : ""), rec ? `${o.name} (권장)` : o.name);
       b.title = o.description || "";
       b.addEventListener("click", () => answer(b, o.name, o.name));
       btns.appendChild(b);
