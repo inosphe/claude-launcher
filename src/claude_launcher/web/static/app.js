@@ -14019,6 +14019,9 @@ function buildCliTerm() {
     // the ring the daemon keeps is only catch-up on attach — so this
     // terminal keeps xterm's own scrollback and the wheel browses it.
     scrollback: 5000,
+    // Option+drag selects on a Mac, as Shift+drag does elsewhere: see the
+    // session terminal's note on macOptionClickForcesSelection.
+    macOptionClickForcesSelection: true,
   });
   cliFit = new FitAddon.FitAddon();
   cliTerm.loadAddon(cliFit);
@@ -14276,6 +14279,13 @@ function freshAttach(name) {
     // for the main buffer: a plain shell, a build log, a session after its
     // TUI has exited.
     scrollback: 5000,
+    // A program with mouse tracking on (claude does) takes every drag as a
+    // mouse report, so the browser never gets to select. xterm lets a
+    // modifier force its own selection instead: Shift everywhere but a Mac,
+    // where it is Option — and only with this flag, which defaults to off
+    // (claunch-ekrwr). The selection is xterm's; copying it is left to the
+    // browser's context menu.
+    macOptionClickForcesSelection: true,
   });
   fitAddon = new FitAddon.FitAddon();
   term.loadAddon(fitAddon);
