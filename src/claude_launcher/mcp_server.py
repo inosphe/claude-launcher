@@ -23,7 +23,7 @@ reinstalled yet.
 from __future__ import annotations
 
 from . import (
-    observer_mcp, operator_mcp, mcp_rpc, mesh_mcp, search_mcp, status_checks_mcp, wait_mcp, window_mcp,
+    glossary_mcp, observer_mcp, operator_mcp, mcp_rpc, mesh_mcp, search_mcp, status_checks_mcp, wait_mcp, window_mcp,
 )
 from .cflow import mcp as cflow_mcp
 
@@ -31,6 +31,7 @@ SERVER = mcp_rpc.merge(
     "claunch", [
         cflow_mcp.SERVER, mesh_mcp.SERVER, status_checks_mcp.SERVER,
         window_mcp.SERVER, wait_mcp.SERVER, observer_mcp.SERVER, operator_mcp.SERVER, search_mcp.SERVER,
+        glossary_mcp.SERVER,
     ]
 )
 
