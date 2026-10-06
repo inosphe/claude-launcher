@@ -28,6 +28,24 @@ harnesses:
       history: ephemeral
       tool_access: none
       response_mode: single-response
+    # cflow v2 capabilities (docs/cflow-v2.md 6.1/6.3). Verified against
+    # `claude --help` on 2026-10-06: -p/--print, --json-schema <schema> (the
+    # schema JSON inline, not a file), --output-format json (only with
+    # --print), --allowedTools (comma or space separated), --max-budget-usd
+    # <amount> (only with --print), -r/--resume <session id>. The subagent.*
+    # entries are the Agent tool (isolation: worktree), not CLI flags.
+    capabilities:
+      subagent.spawn: true
+      subagent.parallel: true
+      subagent.tools.restrict: true
+      subagent.worktree: true
+      headless.run: {enabled: true, args: [-p]}
+      headless.output.schema: {enabled: true, args: [--json-schema, "{schema}"]}
+      headless.output.json: {enabled: true, args: [--output-format, json]}
+      headless.tools.restrict: {enabled: true, args: [--allowedTools, "{tools}"]}
+      headless.budget.usd: {enabled: true, args: [--max-budget-usd, "{usd}"]}
+      headless.resume: {enabled: true, args: [--resume, "{session_id}"]}
+      mcp.claunch: true
     description: >-
       Claude Code, run under a claunch profile (isolated config dir, provider
       and token). Needs --profile; the executable is CLAUDE_LAUNCHER_BIN.
@@ -71,6 +89,17 @@ harnesses:
     input_readiness: bracketed-paste
     submit_strategy: screen
     paste_enter_delay: 0.2
+    # cflow v2 capabilities (docs/cflow-v2.md 6.1/6.3). Verified against
+    # `codex exec --help` on 2026-10-06: the `exec` subcommand runs one prompt
+    # and exits, --output-schema <FILE> (a file path), --json (JSONL events),
+    # -s/--sandbox read-only. `codex exec resume <id>` exists but is a
+    # subcommand replacing `exec`, so headless.resume stays undeclared.
+    capabilities:
+      headless.run: {enabled: true, args: [exec]}
+      headless.output.schema: {enabled: true, args: [--output-schema, "{schema_file}"]}
+      headless.output.json: {enabled: true, args: [--json]}
+      headless.sandbox.readonly: {enabled: true, args: [-s, read-only]}
+      mcp.claunch: true
     description: OpenAI's Codex CLI.
 
   pi:
@@ -95,6 +124,14 @@ harnesses:
     # session's `tools` (create/spawn forms, --tools) overrides per session.
     tools: [full_read]
     heartbeat_args: [-p]
+    # cflow v2 capabilities (docs/cflow-v2.md 6.1/6.3). Verified against
+    # `pi --help` on 2026-10-06: --print/-p, --mode json, --tools <comma
+    # separated allowlist> (and --exclude-tools). --session <id> resumes a
+    # stored session but is not wired here, so headless.resume stays off.
+    capabilities:
+      headless.run: {enabled: true, args: [-p]}
+      headless.output.json: {enabled: true, args: [--mode, json]}
+      headless.tools.restrict: {enabled: true, args: [--tools, "{tools}"]}
     description: >-
       The pi CLI agent using the packaged Anthropic API-key route and claunch
       provider projection.
@@ -206,6 +243,12 @@ harnesses:
     # default already has no sandbox.
     opening_transport: pty
     input_readiness: bracketed-paste
+    # cflow v2 capabilities (docs/cflow-v2.md 6.1/6.3). Verified against
+    # `devin --help` on 2026-10-06: -p/--print [<PROMPT>]; no JSON output,
+    # schema, tool-list or budget flag. -r/--resume <id> exists but is not
+    # wired here.
+    capabilities:
+      headless.run: {enabled: true, args: [-p]}
     description: >-
       Devin CLI, signed in with the account's own OAuth session. The config
       home is machine-wide, so profiles do not isolate its credentials.

@@ -250,6 +250,11 @@ class Harness:
     #: rather than receiving a chord that means something else to it. Empty
     #: for every harness whose behaviour here has not been established.
     image_paste_keys: List[str] = field(default_factory=list)
+    #: cflow v2 capability defaults this harness's CLI provides
+    #: (docs/cflow-v2.md 6.3): ``{id: {"enabled": bool, "args": [...]}}``
+    #: (``args`` only when declared). Ids are not checked here; the cflow2
+    #: resolver reports unknown ones.
+    capabilities: Dict[str, dict] = field(default_factory=dict)
 
     @property
     def borrow_mode(self) -> str:
@@ -378,6 +383,13 @@ class Harness:
             "submit_strategy": self.submit_strategy,
             "paste_enter_delay": self.paste_enter_delay,
             "image_paste_keys": list(self.image_paste_keys),
+            "capabilities": {
+                key: {
+                    k: (list(v) if isinstance(v, list) else v)
+                    for k, v in value.items()
+                }
+                for key, value in self.capabilities.items()
+            },
             "borrowable": self.borrowable,
             "borrow_mode": self.borrow_mode,
             # Resolved per call, never stored: installing pi should not need a
@@ -415,6 +427,43 @@ def _bool(value, what: str) -> bool:
     if isinstance(value, bool):
         return value
     raise HarnessConfigError(f"{what} must be true or false, got {value!r}")
+
+
+def _capabilities(name: str, value) -> Dict[str, dict]:
+    """Validate a harness's ``capabilities:`` block (cflow v2, doc 6.2).
+
+    Each value is ``true``/``false`` or ``{enabled: bool, args: [...]}``;
+    the result always uses the mapping form.
+    """
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise HarnessConfigError(
+            f"harness {name!r} capabilities must be a mapping, got {value!r}"
+        )
+    out: Dict[str, dict] = {}
+    for raw_key, item in value.items():
+        key = str(raw_key).strip()
+        what = f"harness {name!r} capabilities.{key}"
+        if not key:
+            raise HarnessConfigError(f"harness {name!r} has an empty capability id")
+        if isinstance(item, bool):
+            out[key] = {"enabled": item}
+            continue
+        if not isinstance(item, dict):
+            raise HarnessConfigError(
+                f"{what} must be true, false or {{enabled, args}}, got {item!r}"
+            )
+        unknown = set(item) - {"enabled", "args"}
+        if unknown:
+            raise HarnessConfigError(
+                f"{what} has unknown keys: {', '.join(sorted(map(str, unknown)))}"
+            )
+        entry: dict = {"enabled": _bool(item.get("enabled", True), f"{what}.enabled")}
+        if "args" in item:
+            entry["args"] = _as_list(item.get("args"), f"{what}.args")
+        out[key] = entry
+    return out
 
 
 def _btw_capability(name: str, value) -> Optional[BtwCapability]:
@@ -636,6 +685,7 @@ def _parse_entry(name: str, body) -> Harness:
             body.get("image_paste_keys"),
             f"harness {name!r} image_paste_keys",
         ),
+        capabilities=_capabilities(name, body.get("capabilities")),
     )
 
 
