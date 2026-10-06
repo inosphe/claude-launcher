@@ -12191,6 +12191,91 @@ async function copyToBrowserClipboard(text, host) {
   }
 }
 
+/* OSC 52 (`ESC ] 52 ; <targets> ; <base64> BEL`): a program in the terminal
+   asking for text to go on the clipboard. Claude Code copies both ways — a
+   native write on the machine it runs on, and this sequence — and xterm.js
+   core implements neither half of OSC 52, so before this handler the sequence
+   was dropped. Reached from the daemon's own machine the native write hid
+   that; reached through the relay from another machine, nothing landed on
+   the clipboard of the computer the browser runs on.
+   Only writes are honoured. A `?` payload asks the terminal to read the
+   clipboard back into the PTY, and the page never hands its clipboard to
+   whatever runs in a session. An empty payload (clear) is ignored too.
+   The write is taken only within OSC52_INPUT_MS of a DOM event the person
+   made — a key, a press of mouse/pen/finger, a paste or a finished IME
+   composition — on this terminal, or, for the session terminal on screen,
+   in the session line below it (typing `/copy` there is a copy too). Not
+   onData: xterm writes there by itself (answers to device queries, focus
+   reports, mouse motion under ?1003), so a replayed or live query ahead of
+   the OSC 52 would open the gate with nobody at the keyboard. With DOM
+   events, catch-up bytes replayed on attach (the CLI tab's ring) and a
+   second viewer who is only watching or hovering copy nothing. Browsers
+   draw the same line for the execCommand fallback (it needs recent user
+   activation). */
+const OSC52_MAX_BASE64 = 1 << 20;   // ~768 KiB of text once decoded
+const OSC52_INPUT_MS = 10000;
+const OSC52_USER_EVENTS = ["keydown", "pointerdown", "paste", "compositionend"];
+
+/* When the session line last had a user event. One listener for the page —
+   the line outlives every session terminal built under it. */
+let osc52SessionLineAt = -Infinity;
+const osc52SessionLine = $("term-input");
+if (osc52SessionLine) {
+  for (const type of OSC52_USER_EVENTS) {
+    osc52SessionLine.addEventListener(type, () => { osc52SessionLineAt = Date.now(); }, true);
+  }
+}
+
+/* The text an OSC 52 payload carries, or null when it is not a write this
+   page performs: a query, a clear, oversized, or not base64/UTF-8. */
+function decodeOsc52(data) {
+  const sep = data.indexOf(";");
+  if (sep < 0) return null;
+  const payload = data.slice(sep + 1).replace(/\s+/g, "");
+  if (!payload || payload === "?" || payload.length > OSC52_MAX_BASE64) return null;
+  try {
+    const bin = atob(payload);
+    const bytes = Uint8Array.from(bin, (c) => c.charCodeAt(0));
+    return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+  } catch {
+    return null;
+  }
+}
+
+/* Wire OSC 52 into one xterm instance, after open() (t.element exists then).
+   The user events on its element mark the moments of input, so the gate
+   travels with the terminal object (a parked terminal brought back keeps its
+   history; a rebuilt one starts with none). The session line counts only
+   for the session terminal on screen — `term` — so a parked session's copy
+   is not taken on the strength of typing meant for another one. */
+function installOsc52(t) {
+  let lastInput = -Infinity;
+  for (const type of OSC52_USER_EVENTS) {
+    t.element?.addEventListener(type, () => { lastInput = Date.now(); }, true);
+  }
+  t.parser.registerOscHandler(52, (data) => {
+    const since = t === term ? Math.max(lastInput, osc52SessionLineAt) : lastInput;
+    if (Date.now() - since > OSC52_INPUT_MS) return true;
+    const sep = data.indexOf(";");
+    if (sep >= 0 && data.slice(sep + 1).replace(/\s+/g, "").length > OSC52_MAX_BASE64) {
+      notify("Copy not taken", "The text is larger than this page copies from a terminal.", { key: "osc52" });
+      return true;
+    }
+    const text = decodeOsc52(data);
+    if (text === null) return true;
+    copyToBrowserClipboard(text, document.body).then((ok) => {
+      if (!ok) {
+        notify(
+          "Copy did not reach this computer's clipboard",
+          "The browser refused it — select the text and copy it by hand.",
+          { key: "osc52" },
+        );
+      }
+    });
+    return true;
+  });
+}
+
 async function deleteHostClipboard(id) {
   const request = ++hostClipboardRequest;
   try {
@@ -13945,6 +14030,7 @@ function buildCliTerm() {
       cliWs.send(new TextEncoder().encode(data));
     }
   });
+  if (typeof installOsc52 === "function") installOsc52(cliTerm);
   // A resize we applied from a server broadcast must not be echoed back, or
   // two viewers ping-pong forever (the session terminal's rule, verbatim).
   cliTerm.onResize(({ cols, rows }) => {
@@ -14199,6 +14285,9 @@ function freshAttach(name) {
   // Wired once, for the life of this terminal object: the link swaps sockets
   // underneath these, and a reconnect must not leave a second pair behind.
   term.onData(sendInput);
+  // Guarded like onTermKeyEvent below, for the harnesses that boot this
+  // function without the clipboard block.
+  if (typeof installOsc52 === "function") installOsc52(term);
   watchComposer(term);
   term.onResize(({ cols, rows }) => {
     // A resize we applied from a server broadcast must not be echoed back, or

@@ -399,6 +399,7 @@ CHECKS = [
         "stats_check.js",
         "sendinput_check.js",
         "clipboard_check.js",
+        "osc52_check.js",
         "promptpresets_check.js",
         "prompter_check.js",
         "holdchip_check.js",
