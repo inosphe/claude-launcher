@@ -267,7 +267,7 @@ shared 를 고를 때 감수하는 충돌은 다음과 같다.
 
 재실행: 이슈의 외부 참조, 메시 이름, 메시 안의 에이전트 handle 이 고정되어 있으므로
 실행기(`workspec_import.execute`)는 이미 존재하는 항목을 재사용하고 새로 만들지 않는다.
-의존과 결정 코멘트는 이번 실행이 만든 이슈에만 쓴다. 그래서 중간에 멈춘 import 는 같은
+의존과 결정 코멘트는 쓰기 전에 보드에서 같은 의존·같은 문구의 코멘트가 있는지 확인한다. 그래서 중간에 멈춘 import 는 같은
 명령을 다시 실행하면 이어서 진행된다.
 
 ### 실행기와 CLI
@@ -284,7 +284,7 @@ claunch spec import <file> --leader own --profile <p>
 | 보드 쓰기 | `claunch beads create/dep add/comments add/update` 를 하위 프로세스로 실행한다 |
 | 이슈 본문 | `## 목표 / ## 범위 / ## 완료 증거 기준` 뒤에 참고 자료(epic 은 전부), 계약 doc 이슈 id, gds6 필드(`rule_ids`·`size`·`changes`·`contract`), 사람 몫, 미결 결정, `## 출처` 를 붙인다 |
 | own 리더 | `POST /api/sessions` 로 만드는 최상위 세션이다. 세션에는 profile 이 필요하므로 `--profile` 이 없으면 거절한다. 리더 세션에는 이슈를 만들지 않는다(`beads: false`) |
-| 에이전트 spawn | `POST /api/sessions/{부모}/children`. reviewer 가 아닌 에이전트는 각자 worktree `spec-<name>-<id>` 를 받는다(`worktree` 로 바꿀 수 있다). 워크플로가 비어 있는 에이전트(reviewer)는 `-` 로 보내 부모 런의 기본 자식 워크플로를 받지 않게 한다. 큐가 빈 에이전트는 `no_issue` 다 |
+| 에이전트 spawn | `POST /api/sessions/{부모}/children`. reviewer 가 아닌 에이전트는 각자 worktree `spec-<name>-<id>` 를 받는다(`worktree` 로 바꿀 수 있다). 워크플로가 비어 있는 에이전트(reviewer)는 `-` 로 보내 부모 런의 기본 자식 워크플로를 받지 않게 한다. 큐가 빈 에이전트는 바디 `beads: false` 로 보내 이슈를 만들지 않는다(MCP spawn 툴의 `no_issue` 는 API 에 닿기 전에 이 값으로 바뀐다, `mesh_mcp._SPAWN_RENAMED`) |
 | 역할 업로드 | 메시의 현재 사용자 정의 역할 문서에 명세의 `roles` 와 서브롤(`stance` = prompt)을 덮어 `PUT /api/mesh/{m}/roles` 로 올린다 |
 | 중단 | `leader-check` 실패, 없는 `file` 참고 자료, 데몬 오류에서 멈춘다. 그 전에 실행된 action 은 남고, 재실행이 이어서 진행한다 |
 

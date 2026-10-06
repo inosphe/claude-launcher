@@ -55,6 +55,12 @@ class FakeBackend(wi.Backend):
         self.issues[issue]["comments"].append(text)
         self._w("comment", issue, text)
 
+    def blockers(self, issue):
+        return set(self.issues[issue]["deps"])
+
+    def comments(self, issue):
+        return list(self.issues[issue]["comments"])
+
     def assign(self, issue, session):
         self.issues[issue]["assignee"] = session
         self._w("assign", issue, session)
@@ -145,7 +151,10 @@ def test_shared_import_builds_board_mesh_and_agents():
     assert ue1["worktree"] == "spec-night-sense-ue1"
     assert ue1["workspace"] == "shelter-zero"
     rv = sp["reviewer-1"][1]
-    assert rv["no_issue"] is True and rv["workflow"] == "-" and "worktree" not in rv
+    # the API's key (no_issue is the MCP tool's and the daemon ignores it)
+    assert rv["beads"] is False and "no_issue" not in rv
+    assert rv["workflow"] == "-" and "worktree" not in rv
+    assert all("beads" not in b for h, (_, b) in sp.items() if h != "reviewer-1")
     assert w1["id"] in rv["task"]
     assert ("spec-night-sense", "worker-sys1", "worker-ue1") in \
         [c[1:] for c in fb.calls if c[0] == "connect"]
@@ -238,3 +247,50 @@ def test_queue_beyond_the_first_issue_is_assigned_once():
     before = len(fb.calls)
     wi.execute(doc, fb, leader_choice="shared:s29", base_dir="/ws")
     assert fb.calls[before:] == []
+
+
+def test_rerun_after_a_stop_mid_board_writes_missing_deps_and_comments_once():
+    class Flaky(FakeBackend):
+        fail_at = 5  # the 5th create: contracts 2 + frame + W1 exist, W2 fails
+
+        def create_issue(self, **kw):
+            if self.n + 1 == self.fail_at:
+                self.fail_at = 0
+                raise wi.SpecImportError("br create failed")
+            return super().create_issue(**kw)
+
+    fb = Flaky()
+    with pytest.raises(wi.SpecImportError, match="br create failed"):
+        wi.execute(example(), fb, leader_choice="shared:s29", base_dir="/ws")
+    assert len(fb.issues) == 4
+    wi.execute(example(), fb, leader_choice="shared:s29", base_dir="/ws")
+    by_ref = {i["external_ref"]: i for i in fb.issues.values()}
+    w1 = by_ref["spec:night-sense:W1"]["id"]
+    assert by_ref["spec:night-sense:W2"]["deps"] == [w1]
+    assert by_ref["spec:night-sense:human"]["deps"] == [w1]
+    assert by_ref["spec:night-sense:W2"]["comments"] == [
+        "BLOCKED: decision impl.night-source"]
+    before = len(fb.calls)
+    wi.execute(example(), fb, leader_choice="shared:s29", base_dir="/ws")
+    assert fb.calls[before:] == []
+
+
+def test_rerun_after_a_stop_mid_deps_completes_them():
+    class Flaky(FakeBackend):
+        armed = True
+
+        def add_dep(self, issue, blocked_by):
+            if self.armed and self.issues[issue]["external_ref"].endswith(":human"):
+                self.armed = False
+                raise wi.SpecImportError("dep failed")
+            super().add_dep(issue, blocked_by)
+
+    fb = Flaky()
+    with pytest.raises(wi.SpecImportError, match="dep failed"):
+        wi.execute(example(), fb, leader_choice="shared:s29", base_dir="/ws")
+    wi.execute(example(), fb, leader_choice="shared:s29", base_dir="/ws")
+    by_ref = {i["external_ref"]: i for i in fb.issues.values()}
+    w1 = by_ref["spec:night-sense:W1"]["id"]
+    assert by_ref["spec:night-sense:W2"]["deps"] == [w1]  # not written twice
+    assert by_ref["spec:night-sense:human"]["deps"] == [w1]
+    assert len(by_ref["spec:night-sense:W2"]["comments"]) == 1

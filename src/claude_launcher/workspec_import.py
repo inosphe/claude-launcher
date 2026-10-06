@@ -13,8 +13,9 @@ dry run and the wording lives in one place.
 Rerunning an import continues it. Every created thing has a fixed identity —
 an issue its external ref ``spec:<name>:<key>``, the mesh its name, an agent
 its handle in that mesh — and what already exists is reused, not recreated.
-Dependencies and decision comments are written only for issues this run
-created, so a rerun adds no duplicate comment.
+Dependencies and decision comments are checked against the board before
+they are written, so a rerun after a stop anywhere in the board phase writes
+the missing ones once and duplicates none.
 """
 
 from __future__ import annotations
@@ -59,6 +60,13 @@ class Backend:
         raise NotImplementedError
 
     def comment(self, issue: str, text: str) -> None:
+        raise NotImplementedError
+
+    def blockers(self, issue: str) -> set:
+        """Ids ``issue`` already depends on with a ``blocks`` edge."""
+        raise NotImplementedError
+
+    def comments(self, issue: str) -> List[str]:
         raise NotImplementedError
 
     def assign(self, issue: str, session: str) -> None:
@@ -145,6 +153,15 @@ class DaemonBackend(Backend):
 
     def comment(self, issue, text):
         self._beads(["comments", "add", issue, text])
+
+    def blockers(self, issue):
+        rows = self._beads(["dep", "list", issue]) or []
+        return {r["depends_on_id"] for r in rows
+                if isinstance(r, dict) and r.get("type") == "blocks"}
+
+    def comments(self, issue):
+        rows = self._beads(["comments", issue]) or []
+        return [str(r.get("text") or "") for r in rows if isinstance(r, dict)]
 
     def assign(self, issue, session):
         self._beads(["update", issue, "--assignee", session])
@@ -270,7 +287,6 @@ class Importer:
         self.base_dir = base_dir or os.getcwd()
         self.tag = f"spec:{doc['name']}"
         self.ids: Dict[str, str] = {}       # spec key -> board id
-        self.fresh: set = set()             # keys created by this run
         self.sessions: Dict[str, str] = {}  # agent id -> session name
         self.log: List[dict] = []
         self.agents = {a["id"]: a for a in workspec._list(doc, "agents")}
@@ -368,21 +384,22 @@ class Importer:
             title=title, type=act["type"], priority=prio, labels=labels,
             description=body, external_ref=act["external_ref"], parent=parent)
         self.ids[act["key"]] = iid
-        self.fresh.add(act["key"])
         self._note(act, CREATED, iid)
 
     def _do_dep(self, act):
-        if act["issue"] not in self.fresh:
-            self._note(act, EXISTS, "issue predates this run")
+        iid, dep = self.ids[act["issue"]], self.ids[act["blocked_by"]]
+        if dep in self.b.blockers(iid):
+            self._note(act, EXISTS)
             return
-        self.b.add_dep(self.ids[act["issue"]], self.ids[act["blocked_by"]])
+        self.b.add_dep(iid, dep)
         self._note(act, DONE)
 
     def _do_comment(self, act):
-        if act["issue"] not in self.fresh:
-            self._note(act, EXISTS, "issue predates this run")
+        iid = self.ids[act["issue"]]
+        if act["text"] in self.b.comments(iid):
+            self._note(act, EXISTS)
             return
-        self.b.comment(self.ids[act["issue"]], act["text"])
+        self.b.comment(iid, act["text"])
         self._note(act, DONE)
 
     def _do_mesh_create(self, act):
@@ -476,7 +493,10 @@ class Importer:
         if act.get("issue"):
             body["issue"] = self.ids[act["issue"]]
         else:
-            body["no_issue"] = True
+            # The API's spelling. ``no_issue`` is the MCP tool's, renamed to
+            # this before it reaches the daemon (mesh_mcp._SPAWN_RENAMED);
+            # sent raw it is ignored and the daemon mints a placeholder.
+            body["beads"] = False
         return body
 
     def task(self, act: dict) -> str:
