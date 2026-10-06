@@ -8,6 +8,7 @@ import subprocess
 import sys
 import textwrap
 import time
+from pathlib import Path
 
 import pytest
 
@@ -469,6 +470,49 @@ def test_process_alive_identifies_by_argv0():
         proc.wait(10)
     assert cflow2_exec.process_alive(proc.pid, sys.executable) is False
     assert cflow2_exec.process_alive(None) is False
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="reads /proc")
+def test_process_alive_reads_an_empty_cmdline_again(monkeypatch):
+    # Popen returns when execve closes the close-on-exec error pipe, before
+    # the new image's arguments exist: /proc/<pid>/cmdline reads empty for
+    # that moment (measured 172/2400). That is "not readable yet", never
+    # "another program" -- False would requeue a live delegation unkilled.
+    proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"],
+                            start_new_session=True)
+    real = Path.read_bytes
+    reads = {"n": 0}
+
+    def flaky(self):
+        if self.name == "cmdline" and reads["n"] < 3:
+            reads["n"] += 1
+            return b""
+        return real(self)
+
+    try:
+        monkeypatch.setattr(Path, "read_bytes", flaky)
+        assert cflow2_exec.process_alive(proc.pid, sys.executable) is True
+        assert reads["n"] == 3
+        # Still empty after the settle time: alive but unidentifiable.
+        reads["n"] = -10**9
+        monkeypatch.setattr(cflow2_exec, "CMDLINE_SETTLE", 0.05)
+        assert cflow2_exec.process_alive(proc.pid, sys.executable) is None
+    finally:
+        cflow2_exec.kill_group(proc.pid)
+        proc.wait(10)
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="reads /proc")
+def test_process_alive_says_a_zombie_is_gone():
+    proc = subprocess.Popen([sys.executable, "-c", "pass"], start_new_session=True)
+    deadline = time.monotonic() + 10
+    while cflow2_exec._proc_state(proc.pid) != "Z" and time.monotonic() < deadline:
+        time.sleep(0.01)
+    try:
+        assert cflow2_exec._proc_state(proc.pid) == "Z"
+        assert cflow2_exec.process_alive(proc.pid, sys.executable) is False
+    finally:
+        proc.wait(10)
 
 
 def test_a_nested_session_delegation_is_told_to_drive_its_run():

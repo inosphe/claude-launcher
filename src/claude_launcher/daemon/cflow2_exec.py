@@ -192,11 +192,35 @@ def _kill(proc: subprocess.Popen) -> None:
             pass
 
 
+#: How long an empty ``/proc/<pid>/cmdline`` is read again before the pid
+#: counts as unidentifiable. It reads empty while ``execve`` is between
+#: closing the close-on-exec descriptors -- which is when ``Popen`` returns,
+#: its error pipe being one of them -- and setting up the new image's
+#: arguments (measured: 172 of 2400 reads right after ``Popen`` under eight
+#: parallel loops), and for a zombie.
+CMDLINE_SETTLE = 0.5
+
+
+def _proc_state(pid: int) -> str:
+    """The state letter of ``/proc/<pid>/stat`` (``Z`` zombie, ``X`` dead),
+    or "" when it cannot be read."""
+    try:
+        stat = Path(f"/proc/{pid}/stat").read_text(errors="replace")
+    except OSError:
+        return ""
+    rest = stat[stat.rfind(")") + 1:].split()
+    return rest[0] if rest else ""
+
+
 def process_alive(pid: Optional[int], argv0: Optional[str] = None) -> Optional[bool]:
     """Whether ``pid`` still runs the process a runner marker recorded:
     True/False, or None when it is alive but cannot be identified (another
     program may have the pid). On Linux ``/proc/<pid>/cmdline`` must name
-    ``argv0``'s basename; elsewhere a live pid is unidentifiable."""
+    ``argv0``'s basename; elsewhere a live pid is unidentifiable. An empty
+    cmdline is a process inside ``execve`` or a zombie: the first is read
+    again for up to :data:`CMDLINE_SETTLE` seconds, the second is not alive.
+    False is never answered for a live process it could not read -- the
+    clock requeues on False without killing (``cflow2_clock._headless``)."""
     from .window import pid_alive
 
     try:
@@ -207,10 +231,19 @@ def process_alive(pid: Optional[int], argv0: Optional[str] = None) -> Optional[b
         return False
     if not argv0:
         return None
-    try:
-        raw = Path(f"/proc/{pid}/cmdline").read_bytes()
-    except OSError:
-        return None
+    deadline = time.monotonic() + CMDLINE_SETTLE
+    while True:
+        try:
+            raw = Path(f"/proc/{pid}/cmdline").read_bytes()
+        except OSError:
+            return None
+        if raw:
+            break
+        if _proc_state(pid) in ("Z", "X") or not pid_alive(pid):
+            return False
+        if time.monotonic() >= deadline:
+            return None
+        time.sleep(0.005)
     parts = [p.decode("utf-8", "replace") for p in raw.split(b"\0") if p]
     base = os.path.basename(str(argv0))
     return any(os.path.basename(p) == base for p in parts)
