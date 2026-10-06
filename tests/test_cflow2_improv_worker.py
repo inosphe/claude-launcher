@@ -215,9 +215,20 @@ USER_QUESTIONS = {
     "rework-decision": ["approve", "hold"],
     "settle-stall": ["proceed", "keep-waiting"],
     "end-decision": ["approve", "hold"],
-    "medium-blocked": ["retry", "local"],
-    "publish-blocked": ["retry", "local"],
 }
+#: The two PR-medium questions go through the pr-or-local skeleton
+#: (claunch-yq80p.11): the label is the skeleton's call, the ask-user calls
+#: are inside it.
+PR_QUESTIONS = ("medium-blocked", "publish-blocked")
+
+
+def _asked(chart, wrapper):
+    """A ``call: ask-user`` with ``cases`` is a seq [call, cond]; the choices
+    are the cases keys (docs 2.10, cases)."""
+    assert wrapper.type == "seq" and wrapper.get("cases"), wrapper.id
+    call = chart.node(wrapper.get("children")[0])
+    assert call.type == "scope" and call.get("proc") == "ask-user", wrapper.id
+    return wrapper.get("cases"), call.get("with_")
 
 
 def test_no_user_choose_is_left():
@@ -228,14 +239,30 @@ def test_no_user_choose_is_left():
 
 def test_user_questions_call_ask_user_with_fixed_choices_and_reasons():
     chart = _chart()
-    calls = {n.label: n for n in chart.nodes.values() if n.type == "scope" and n.label}
+    labelled = {n.label: n for n in chart.nodes.values() if n.label}
     for label, choices in USER_QUESTIONS.items():
-        node = calls[label]
-        assert node.get("proc") == "ask-user", label
-        w = node.get("with_")
+        cases, w = _asked(chart, labelled[label])
+        assert cases == choices, label
         assert w["choices"] == {"lit": choices}, label
         assert w["require_reason"] == {"lit": True}, label
         assert "from" not in w, f"{label}: a user question has no other responder"
+    for label in PR_QUESTIONS:
+        skeleton = labelled[label]
+        assert skeleton.type == "scope" and skeleton.get("proc") == "pr-or-local", label
+        inner = [n for n in chart.nodes.values()
+                 if n.get("cases") and skeleton.id in chart.ancestors(n.id)]
+        assert len(inner) == 2, label  # blocked and failed share the handler
+        for wrapper in inner:
+            cases, w = _asked(chart, wrapper)
+            assert cases == ["retry", "local"] and w["require_reason"] == {"lit": True}
+            assert "from" not in w
+
+
+def test_no_ask_user_is_followed_by_a_hand_written_decision_cond():
+    """claunch-yq80p.11: the branch on an answer is cases, so a misspelt
+    choice cannot compile."""
+    text = V2.read_text(encoding="utf-8")
+    assert ".decision ==" not in text
 
 
 def test_rules_and_master_merge_invariant():

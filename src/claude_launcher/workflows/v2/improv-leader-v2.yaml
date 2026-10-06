@@ -418,7 +418,6 @@ body:
                       bind: wind_down
                       with:
                         require_reason: true
-                        choices: [end-shift, keep]
                         topic: |
                           사용자가 리더의 교대 종료를 지시했다. 종료를 확정할지 정한다.
 
@@ -430,13 +429,12 @@ body:
 
                           판단 근거: 착지 큐의 requested 항목 수, 진행 중인 워커
                           (`claunch cflow2 status -t <세션>`), 보드의 in_review 잔량.
-                    - cond:
-                        - if: "$data.wind_down.decision == 'end-shift'"
-                          then:
-                            seq:
-                              - wrapup
-                              - {return: wound_down}
-                        - else: {continue: null}
+                      cases:
+                        end-shift:
+                          seq:
+                          - wrapup
+                          - {return: wound_down}
+                        keep: {continue: null}
                   # 세 번째 답도 reframe이면 질문을 접고 관제 대기로 돌아간다
                   on:
                     reframe: {continue: null}

@@ -2461,6 +2461,51 @@ nodes:
     effects: [board.write, mesh.send]
 
 procedures:
+  pr-or-local:
+    description: >-
+      착지 매체를 PR로 세우는 시도의 공통 골격(claunch-yq80p.11). attempt 블록이
+      시도 작업과 성공 시의 return을 담고(호출자 범위에서 컴파일되므로 그 return은
+      호출한 프로시저를 끝낸다), 시도가 blocked·failed로 끝나면 ask가 참일 때 사용자에게
+      retry/local을 묻고, 거짓이면 사유를 남기고 로컬 착지로 끝난다.
+    params:
+      attempt: {type: block, required: true, description: 시도 작업과 성공 시의 return}
+      ask: {type: bool, default: true, description: 실패 시 사용자에게 묻는가(거짓이면 로컬로 대체)}
+      topic: {type: str, required: true, description: 사용자 질문의 topic}
+      local_reason: {type: str, required: true, description: 사용자가 local을 골랐을 때 남기는 사유}
+    returns:
+      ok: {medium: str, reason: str, remote: "str?", repo: "str?", base: "str?",
+           pr_url: "str?", pr_number: "int?"}
+    body:
+      id: attempts
+      loop:
+        while: "true"
+        max: 10
+        do:
+          try: {splice: attempt}
+          # 시도 작업의 실패 결과(remote-setup의 blocked, pr-open의 failed). catch
+          # 처리기의 $prev가 그 실패 값({reason})이다.
+          catch:
+            blocked: &recover
+              cond:
+                - if: "$params.ask == true"
+                  then:
+                    # 사용자에게 묻는 지점은 ask-user(docs/cflow-v2.md 2.10)로 묻는다.
+                    # (id 없음: 이 처리기는 blocked·failed 두 catch가 공유한다)
+                    call: ask-user
+                    with:
+                      context: "$prev.reason"
+                      require_reason: true
+                      topic: "$params.topic"
+                    cases:
+                      retry: {continue: attempts}
+                      local:
+                        return: ok
+                        value: {medium: local, reason: "$params.local_reason"}
+                - else:
+                    return: ok
+                    value: {medium: local, reason: "$prev.reason"}
+            failed: *recover
+
   landing-medium:
     description: >-
       회차 시작(branch-setup 뒤)에 이 회차의 착지 매체를 정한다(claunch-yq80p.5).
@@ -2471,45 +2516,26 @@ procedures:
       ok: {medium: str, reason: str, remote: "str?", repo: "str?", base: "str?",
            pr_url: "str?", pr_number: "int?"}
     body:
-      id: medium-loop
-      loop:
-        while: "true"
-        max: 10
-        do:
-          try:
-            - remote-setup
-            - return: ok
-              value: {medium: "$result['remote-setup'].value.medium",
-                      reason: "$result['remote-setup'].value.reason",
-                      remote: "$result['remote-setup'].value.remote",
-                      repo: "$result['remote-setup'].value.repo",
-                      base: "$result['remote-setup'].value.base",
-                      pr_url: null, pr_number: null}
-          catch:
-            blocked:
-              # 사용자에게 묻는 지점은 ask-user(docs/cflow-v2.md 2.10)로 묻는다.
-              - id: medium-blocked
-                call: ask-user
-                bind: medium_blocked
-                with:
-                  context: "$result['remote-setup'].value.reason"
-                  require_reason: true
-                  choices: [retry, local]
-                  topic: |
-                    이 회차는 PR로만 착지해야 하는데(force_pr 입력 또는 원격 편성) 지금
-                    PR을 만들 수 없다(사유는 근거 칸의 값). `claunch cflow2 pr-preflight`가
-                    같은 사실(저장소·원격·gh 설치·로그인, blockers)을 다시 보여 준다 — 그
-                    출력으로 선택지별 위험과 결과를 채운다.
-                    선택지: retry — gh 설치·로그인·원격 설정을 고친 뒤 착지 매체를 다시
-                    판정한다. local — 이번 회차만 로컬 착지(상위의 --no-ff 머지)로 간다.
-                    상위가 다른 머신이면 local은 착지를 만들지 못하므로 권하지 않는다.
-              - cond:
-                  - if: "$data.medium_blocked.decision == 'local'"
-                    then:
-                      return: ok
-                      value: {medium: local, reason: "user chose local while PR was blocked",
-                              remote: null, repo: null, base: null, pr_url: null, pr_number: null}
-                  - else: {continue: medium-loop}
+      id: medium-blocked
+      call: pr-or-local
+      with:
+        local_reason: user chose local while PR was blocked
+        topic: |
+          이 회차는 PR로만 착지해야 하는데(force_pr 입력 또는 원격 편성) 지금
+          PR을 만들 수 없다(사유는 근거 칸의 값). `claunch cflow2 pr-preflight`가
+          같은 사실(저장소·원격·gh 설치·로그인, blockers)을 다시 보여 준다 — 그
+          출력으로 선택지별 위험과 결과를 채운다.
+          선택지: retry — gh 설치·로그인·원격 설정을 고친 뒤 착지 매체를 다시
+          판정한다. local — 이번 회차만 로컬 착지(상위의 --no-ff 머지)로 간다.
+          상위가 다른 머신이면 local은 착지를 만들지 못하므로 권하지 않는다.
+        attempt:
+          - remote-setup
+          - return: ok
+            value: {medium: "$result['remote-setup'].value.medium",
+                    reason: "$result['remote-setup'].value.reason",
+                    remote: "$result['remote-setup'].value.remote",
+                    repo: "$result['remote-setup'].value.repo",
+                    base: "$result['remote-setup'].value.base"}
 
   pr-publish:
     description: >-
@@ -2524,52 +2550,27 @@ procedures:
       ok: {medium: str, reason: str, remote: "str?", repo: "str?", base: "str?",
            pr_url: "str?", pr_number: "int?"}
     body:
-      id: publish-loop
-      loop:
-        while: "true"
-        max: 10
-        do:
-          try:
-            - pr-open
-            - return: ok
-              value: {medium: pr, reason: "$params.landing.reason",
-                      remote: "$params.landing.remote", repo: "$params.landing.repo",
-                      base: "$result['pr-open'].value.base",
-                      pr_url: "$result['pr-open'].value.url",
-                      pr_number: "$result['pr-open'].value.number"}
-          catch:
-            failed:
-              cond:
-                - if: "$params.force_pr == true"
-                  then:
-                    - id: publish-blocked
-                      call: ask-user
-                      bind: publish_blocked
-                      with:
-                        context: "$result['pr-open'].value.reason"
-                        require_reason: true
-                        choices: [retry, local]
-                        topic: |
-                          force_pr 입력으로 이 회차는 PR로만 착지해야 하는데 push 또는 PR
-                          생성이 실패했다(명령과 출력은 근거 칸의 값). `git ls-remote`와
-                          `gh pr list --head <브랜치>`로 원격 상태를 보고 선택지를 채운다.
-                          push가 `stale info`로 거절됐으면 이 세션이 모르는 push가 원격에
-                          있다는 뜻이다.
-                          선택지: retry — 원인을 고친 뒤 push·PR을 다시 시도한다. local —
-                          이번 회차만 로컬 착지로 간다.
-                    - cond:
-                        - if: "$data.publish_blocked.decision == 'local'"
-                          then:
-                            return: ok
-                            value: {medium: local, reason: "user chose local after pr-open failed",
-                                    remote: null, repo: null, base: null, pr_url: null,
-                                    pr_number: null}
-                        - else: {continue: publish-loop}
-                - else:
-                    return: ok
-                    value: {medium: local,
-                            reason: "$result['pr-open'].value.reason",
-                            remote: null, repo: null, base: null, pr_url: null, pr_number: null}
+      id: publish-blocked
+      call: pr-or-local
+      with:
+        ask: "$params.force_pr"
+        local_reason: user chose local after pr-open failed
+        topic: |
+          force_pr 입력으로 이 회차는 PR로만 착지해야 하는데 push 또는 PR
+          생성이 실패했다(명령과 출력은 근거 칸의 값). `git ls-remote`와
+          `gh pr list --head <브랜치>`로 원격 상태를 보고 선택지를 채운다.
+          push가 `stale info`로 거절됐으면 이 세션이 모르는 push가 원격에
+          있다는 뜻이다.
+          선택지: retry — 원인을 고친 뒤 push·PR을 다시 시도한다. local —
+          이번 회차만 로컬 착지로 간다.
+        attempt:
+          - pr-open
+          - return: ok
+            value: {medium: pr, reason: "$params.landing.reason",
+                    remote: "$params.landing.remote", repo: "$params.landing.repo",
+                    base: "$result['pr-open'].value.base",
+                    pr_url: "$result['pr-open'].value.url",
+                    pr_number: "$result['pr-open'].value.number"}
 
   resolve-issue:
     description: >-
@@ -2636,7 +2637,6 @@ procedures:
                 bind: issue_decision
                 with:
                   require_reason: true
-                  choices: [adopt, create, none]
                   topic: |
                     이 세션에는 배정된 beads 이슈가 없고, 직전 단계 보고에 보드에서
                     찾은 연관 일감 후보(또는 「후보 없음」)가 있다. 이 회차를 어디에
@@ -2648,20 +2648,18 @@ procedures:
                     create — 오프닝 task 설명에서 새 이슈를 민팅한다. none — 이슈 없이
                     이 회차를 진행한다(이 확정이 명시적 동의로 저널에 남고, 회차 기록은
                     cflow 저널·커밋·회차 보고서에만 남는다).
-              - cond:
-                  - if: "$data.issue_decision.decision == 'adopt'"
-                    then:
-                      - issue-adopt
-                      - return: ok
-                        value: {how: adopt, issue: "$result['issue-adopt'].value.issue"}
-                  - if: "$data.issue_decision.decision == 'create'"
-                    then:
-                      - issue-create
-                      - return: ok
-                        value: {how: create, issue: "$result['issue-create'].value.issue"}
-                  - else:
-                      return: ok
-                      value: {how: none}
+                cases:
+                  adopt:
+                  - issue-adopt
+                  - return: ok
+                    value: {how: adopt, issue: "$result['issue-adopt'].value.issue"}
+                  create:
+                  - issue-create
+                  - return: ok
+                    value: {how: create, issue: "$result['issue-create'].value.issue"}
+                  none:
+                    return: ok
+                    value: {how: none}
 
   workspace:
     description: >-
@@ -2813,7 +2811,6 @@ procedures:
         with:
           context: "$params.why"
           require_reason: true
-          choices: [confirmed, held]
           topic: |
             스택 컷을 기계로 확인하지 못했다(사유는 근거 칸의 값). absent는 stack side
             런(slot `<세션>+stack`)이 없거나 끝났다는 뜻이다 — 그 상태에서는 기다려도
@@ -2828,12 +2825,11 @@ procedures:
             선택지: confirmed — 스택 브랜치에 이번 착지에 실을 컷이 있음을 git에서
             확인했다, stack-merge로 간다. held — 컷을 받을 수 없다(stack 런이 없거나
             멈췄다), 이 착지를 held로 마감한다.
-      - cond:
-          - if: "$data.cut_unreachable.decision == 'held'"
-            then:
-              return: held
-              value: {reason: "$params.why", rework: false}
-          - else: []
+        cases:
+          confirmed: []
+          held:
+            return: held
+            value: {reason: "$params.why", rework: false}
 
   landed-unclear:
     description: >-
@@ -2849,7 +2845,6 @@ procedures:
         with:
           context: "$params.why"
           require_reason: true
-          choices: [confirmed, held]
           topic: |
             착지 프로브(`tools/landed_check.py` + 깨끗한 트리)가 답을 내지 못했다(사유는
             근거 칸의 값). undecidable은 판정 불가(종료 코드 2: 저장소·브랜치를 읽지
@@ -2859,12 +2854,11 @@ procedures:
             선택지: confirmed — 사람이 git에서 착지(머지 커밋)를 확인했다, 프로브 대신
             이 확인으로 지나간다. held — 착지를 확인하지 못했다, 이 착지를 held로
             마감하고 회차를 닫는다.
-      - cond:
-          - if: "$data.landed_unclear.decision == 'held'"
-            then:
-              return: held
-              value: {reason: "$params.why", rework: false}
-          - else: []
+        cases:
+          confirmed: []
+          held:
+            return: held
+            value: {reason: "$params.why", rework: false}
 
   land:
     description: >-
@@ -3120,7 +3114,6 @@ procedures:
                             bind: rework_decision
                             with:
                               require_reason: true
-                              choices: [approve, hold]
                               topic: |
                                 상위 세션이 이 회차의 착지를 거절했고, 워커가 그 거절을
                                 정산했다(이슈는 in_progress로 돌아갔고 브랜치 동결은 풀렸다).
@@ -3137,16 +3130,15 @@ procedures:
                                 판단 근거: 거절 사유와 재작업 범위 요지가 앞 스텝의 보고에 있다
                                 (`claunch cflow2 journal`), 거절 마커는
                                 `claunch beads comments <이슈 id>`에 있다.
-                          - cond:
-                              - if: "$data.rework_decision.decision == 'approve'"
-                                then:
-                                  - rework-gate
-                                  - return: rework
-                                    value: {reason: "$result['landing-declined'].value.reason", rework: true}
-                              - else:
-                                  - landing-declined-hold
-                                  - return: held
-                                    value: {reason: declined, rework: false}
+                            cases:
+                              approve:
+                              - rework-gate
+                              - return: rework
+                                value: {reason: "$result['landing-declined'].value.reason", rework: true}
+                              hold:
+                              - landing-declined-hold
+                              - return: held
+                                value: {reason: declined, rework: false}
                       reopen:
                         description: 요청을 철회하고 브랜치를 다시 연다(넘어간 자식을 싣거나 더 실을 것이 생겼다) — 철회를 정산한 뒤 작업으로
                         then:
@@ -3439,7 +3431,6 @@ procedures:
                   bind: settle_stall
                   with:
                     require_reason: true
-                    choices: [proceed, keep-waiting]
                     topic: |
                       이 세션이 만든 이슈가 아직 정산되지 않았다(살아 있는 assignee가 없고
                       `HOLD:` 마커도 없다). 타이머가 여섯 번 깨우는 동안 보드가 변하지
@@ -3456,10 +3447,9 @@ procedures:
                       선택지: proceed — 정산 없이 이 세션을 끝낸다, 남은 이슈는 열린 채로
                       남고 이어받을 자리는 다음 회차의 adoption이 정한다. keep-waiting — 더
                       기다린다, 보드가 바뀔 때까지 정산 확인을 다시 하고 시계를 다시 건다.
-                - cond:
-                    - if: "$data.settle_stall.decision == 'proceed'"
-                      then: {break: settle-watch}
-                    - else: {continue: settle-watch}
+                  cases:
+                    proceed: {break: settle-watch}
+                    keep-waiting: {continue: settle-watch}
       # 종료는 세션과 산출물의 보존 기간에 관한 사용자 결정이다 — 상위 세션이나
       # 워커가 대신 승인하지 않고(ask-user의 기본 응답자는 사람뿐), timeout도
       # 없다. 답이 없는 동안 런은 서 있다.
@@ -3468,7 +3458,6 @@ procedures:
         bind: end_decision
         with:
           require_reason: true
-          choices: [approve, hold]
           topic: |
             이 워커의 회차가 끝났다(정리·최종 보고·HTML 회차 보고서까지).
             이 런이 done이 되면 데몬이 종결 기록을 쓴 뒤 이 세션을 종료한다.
@@ -3482,10 +3471,7 @@ procedures:
             답하지 않는 동안 이 질문은 열린 상태로 유지되고 세션은 살아 있다.
 
             판단 근거: `claunch cflow2 journal -t <세션>`, `claunch beads show <이슈> --json`.
-      - cond:
-          - if: "$data.end_decision.decision == 'approve'"
-            then: end-gate
-          - else: end-hold
+        cases: {approve: end-gate, hold: end-hold}
 
 body:
   try:

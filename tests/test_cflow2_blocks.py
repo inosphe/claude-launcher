@@ -405,3 +405,160 @@ def test_lit_and_expr_forms(tmp_path):
     assert scope.get("with_")["b"] == {"expr": "'xy'"}
     d = runtime.start(chart, cwd=str(tmp_path), scope="t", params={"zz": "z"}, caps={}, now=T0)
     assert d["tasks"][0]["prompt"] == "cost $5|xy|z"
+
+
+# -- optional return fields ---------------------------------------------------------
+
+
+def test_a_return_fills_left_out_optional_fields_with_null(tmp_path):
+    d = Drv(tmp_path, """
+        returns: {ok: {how: str, remote: "str?", repo: "str?"}}
+        nodes:
+          w: {prompt: W}
+        procedures:
+          p:
+            returns: {ok: {how: str, base: "str?", pr: "int?"}}
+            body: {return: ok, value: {how: local}}
+        body:
+          - call: p
+            bind: got
+          - w
+          - {return: ok, value: {how: "$data.got.how", repo: r}}
+    """)
+    assert d.tasks() == ["w"]
+    assert runtime.RunStore(d.cwd, "t").load_state()["data"]["got"] == {
+        "how": "local", "base": None, "pr": None}
+    d.report("w")
+    assert d.st["value"] == {"how": "local", "remote": None, "repo": "r"}
+
+
+# -- call cases (docs 2.10) -------------------------------------------------------
+
+PICK = """
+procedures:
+  pick:
+    params:
+      choices: {type: list, required: true}
+      topic: {type: str, default: ""}
+    returns:
+      ok: {decision: str}
+      reframe: {reason: str}
+    nodes:
+      decide: {prompt: "pick one of ${params.choices}", returns: {ok: {decision: str}, reframe: {reason: str}}}
+    body:
+      waterfall:
+        - decide
+        - {return: ok, value: {decision: "$prev.decision"}}
+      on:
+        reframe: {return: reframe, value: {reason: "$result.decide.value.reason"}}
+"""
+
+
+def _cases(body):
+    return textwrap.dedent(body) + "\n" + PICK
+
+
+def test_cases_build_the_choices_and_branch(tmp_path):
+    src = _cases("""
+        nodes:
+          go-local: {prompt: L}
+          go-pr: {prompt: P}
+          after: {prompt: A}
+        body:
+          - call: pick
+            with: {topic: medium}
+            bind: chosen
+            cases:
+              local: go-local
+              pr: [go-pr]
+              none: []
+          - after
+    """)
+    d = Drv(tmp_path, src)
+    assert "['local', 'pr', 'none']" in d.prompt("decide") or '["local", "pr", "none"]' in d.prompt("decide")
+    d.report("decide", "ok", {"decision": "pr"})
+    assert d.tasks() == ["go-pr"]
+    assert runtime.RunStore(d.cwd, "t").load_state()["data"]["chosen"]["decision"] == "pr"
+    d.report("go-pr")
+    assert d.tasks() == ["after"]
+
+
+def test_a_choice_with_an_empty_tree_does_nothing(tmp_path):
+    d = Drv(tmp_path, _cases("""
+        nodes:
+          x: {prompt: X}
+          after: {prompt: A}
+        body:
+          - call: pick
+            cases: {go: x, skip: []}
+          - after
+    """))
+    d.report("decide", "ok", {"decision": "skip"})
+    assert d.tasks() == ["after"]
+
+
+def test_on_stays_the_outcome_handler(tmp_path):
+    d = Drv(tmp_path, _cases("""
+        nodes:
+          x: {prompt: X}
+          again: {prompt: AG}
+        body:
+          call: pick
+          cases: {go: x}
+          on: {reframe: again}
+    """))
+    d.report("decide", "reframe", {"reason": "wrong frame"})
+    assert d.tasks() == ["again"]
+
+
+def test_cases_trees_compile_in_the_call_sites_scope(tmp_path):
+    d = Drv(tmp_path, _cases("""
+        nodes:
+          x: {prompt: X}
+          done: {prompt: D}
+        body:
+          - id: rounds
+            loop:
+              max: 3
+              while: "true"
+              do:
+                call: pick
+                cases:
+                  more: {continue: rounds}
+                  stop: {break: rounds}
+          - done
+    """))
+    d.report("decide", "ok", {"decision": "more"})
+    assert d.tasks() == ["decide"]
+    d.report("decide", "ok", {"decision": "stop"})
+    assert d.tasks() == ["done"]
+
+
+def test_cases_errors():
+    base = """
+        nodes:
+          x: {prompt: X}
+        body:
+          call: pick
+    """
+    assert "with.choices and cases together" in err(_cases(base + """
+          with: {choices: [a]}
+          cases: {a: x}
+    """))
+    assert "every choice needs a tree" in err(_cases(base + """
+          cases: {a: x, b: null}
+    """))
+    assert "duplicate choice" in err(_cases(base + """
+          cases: {a: x, A: x}
+    """))
+    assert "declares a 'choices' param" in err(textwrap.dedent("""
+        nodes:
+          x: {prompt: X}
+        procedures:
+          plain:
+            params: {topic: {type: str}}
+            body: x
+        body:
+          call: plain
+          cases: {a: x}
+    """))

@@ -339,6 +339,92 @@ scope에 들어갈 때 `with`에 없는 param에 `default`를 채우고, 기본�
 `flow_fork`의 `with`가 param이 되며, 선언에 없는 키나 기본값 없는 필수 param이
 빠진 fork는 거절된다.
 
+#### `with`·`value`의 값 표기
+
+`with`와 `return`의 `value` 항목은 `$`를 담은 문자열이면 식, 그 밖은 리터럴이다.
+`$`를 담은 리터럴 문자열과 `$` 없는 식은 명시 표기로 쓴다: `{lit: V}`(V를 그대로),
+`{expr: E}`(E를 식으로 평가). 키가 `lit` 또는 `expr` 하나뿐인 매핑만 명시 표기로
+읽는다. 기존 `$` 감지가 기본으로 남는다.
+
+```yaml
+with:
+  price: {lit: "cost $5"}        # 리터럴
+  label: {expr: "'fixed'"}       # 식
+  who: "$params.me"              # 식($ 감지)
+```
+
+#### 반환 값의 선택 필드
+
+`returns`가 선택 필드(`str?` 등)로 선언한 필드를 `return`의 `value`에서 생략하면
+그 필드는 `null`로 채워진다. 프로시저의 `return`(그 호출의 `returns`)과 런의
+`return`(차트의 `returns`) 모두 같다. 레코드마다 `field: null`을 나열하지 않아도
+된다(claunch-yq80p.11).
+
+#### 블록 인자와 splice (claunch-yq80p.11)
+
+프로시저 param에 `type: block`을 선언하면 호출 지점이 그 param에 트리(작업 이름,
+목록, 조합자 매핑)를 넘긴다. 프로시저 본문은 그 트리를 `{splice: <param>}`로 놓는다.
+`call`과 같이 컴파일 시점에 펼친다.
+
+```yaml
+procedures:
+  guarded:
+    params:
+      attempt: {type: block, required: true}
+      note: {type: str, default: ""}
+    nodes:
+      recover: {prompt: …, returns: {again: {}, stop: {}}}
+    body:
+      id: tries
+      loop:
+        max: 3
+        while: "true"
+        do:
+          try: [{splice: attempt}, {return: ok}]
+          catch:
+            fail:
+              seq: [recover]
+              on: {again: {continue: tries}, stop: {return: gave_up}}
+body:
+  call: guarded
+  with:
+    attempt: work          # 호출자의 작업
+    note: n1
+```
+
+- 블록은 **호출 지점의 범위**에서 컴파일한다(hygiene). 규칙:
+  - 작업 이름: 호출 지점 파일의 `nodes`에서 찾는다. 프로시저의 작업은 보이지 않는다.
+  - `continue`·`break`: 호출 지점을 감싸는 반복을 가리킨다. 프로시저의 반복은
+    보이지 않는다(라벨 없는 `continue`도 호출 지점의 가장 안쪽 반복이다).
+  - `return`: 블록이 쓰인 자리의 호출(호출 지점이 프로시저면 그 프로시저, 워크플로
+    본문이면 런)을 끝낸다. 블록을 받은 프로시저를 끝내지 않는다. IR의 `control`
+    노드가 `target`으로 그 scope id(런이면 `$run`)를 갖는다.
+  - `$params`, foreach `item`, waterfall `$prev`: 호출 지점의 환경이다. 런타임이
+    `call`의 scope에 들어갈 때 호출 지점의 환경을 저장하고, splice 노드가 그 환경으로
+    들어간다.
+  - `$result.<작업>`, `$data`: 런 전체의 이름 공간이므로 그대로다.
+  - `raise`의 컴파일 검사는 호출 지점의 `try`로 한다.
+  - 오류 위치: 블록 안의 오류는 호출 지점의 파일:줄로 보고된다. 블록 노드의 `src`도
+    호출 지점이다.
+- 결과(outcome)는 lexical하지 않다: 블록 노드의 결과는 splice 위치에서 프로시저의
+  구조를 따라 올라간다. 그래서 프로시저의 `try`·`on`이 블록의 `fail`을 잡는다 —
+  골격 프로시저(시도 → 실패 처리)가 이것으로 만들어진다.
+- 노드 id는 호출의 접두(`<호출 id>/`)를 갖는다. 같은 작업이 여러 호출에 쓰여도 id가
+  겹치지 않는다(결과는 라벨로 모인다).
+- `default`: 블록 param의 기본 트리는 프로시저 자신의 텍스트이므로 프로시저의
+  범위에서 컴파일한다. 기본값이 없는 블록 param을 넘기지 않으면 컴파일 오류다.
+  `group`의 멤버 프로시저는 호출 지점이 없으므로 기본값 없는 블록 param을 가질 수
+  없다.
+- 블록을 다른 호출에 넘길 수 있다: `with: {b: {splice: b}}`. 그 블록은 처음 쓰인
+  호출 지점의 범위를 유지한다.
+- 재귀 금지는 그대로다: 블록 안의 `call`도 지금 펼치는 프로시저 호출 스택으로
+  검사한다(블록이 자신을 받은 프로시저를 다시 부를 수 없다).
+- 워크플로의 `params`에는 `type: block`을 쓸 수 없다(런은 호출되지 않는다).
+- 정적 검사는 펼친 IR을 본다. `return`의 `target`과 splice 노드의 호출 기록을 따라
+  호출 지점의 scope를 찾는다.
+- 하지 않는 것: 컴파일 시점 계산(조건부 펼침, 반복 생성). 정의를 읽는 사람이 결과
+  IR을 계산해야 하므로 넣지 않는다.
+
 ### 2.3 조합자
 
 조합자 트리의 항목은 셋 중 하나다: 작업 이름(문자열), 조합자 매핑, 제어 매핑.
@@ -1219,19 +1305,40 @@ procedures:
 - `ask-frame`·`ask-reframe`은 `effects: [fs.read]`, `ask-pose`는 `effects: []`(답을
   기다리기만 한다)를 선언한다.
 
-부르는 쪽:
+부르는 쪽 — 답으로 갈라질 때는 `cases`를 쓴다(claunch-yq80p.11):
 
 ```yaml
 - call: ask-user
   with:
     topic: 이 회차의 범위를 어디까지로 할지
     context: "$result['intake'].value.summary"
-    choices: [narrow, full]
-  bind: scope_decision
-- cond:
-    - {if: "$data.scope_decision.decision == 'narrow'", then: work-narrow}
-    - {else: work-full}
+  bind: scope_decision           # 선택: ask-user의 ok 값(decision, reason, by, brief)
+  cases:
+    narrow: work-narrow
+    full: [work-full, report]
+    skip: []                     # 아무것도 하지 않는 선택지도 명시한다
+  on: {reframe: …}               # on은 결과 처리기로만 쓴다
 ```
+
+#### `cases`: 선택지별 분기
+
+`call: P` 옆의 `cases: {<선택지>: <트리>}`는 선택지 이름과 그 분기를 한 자리에
+쓴다. 손으로 쓴 `cond`(`$data.x.decision == '…'`)와 달리 선택지 이름의 오타가
+컴파일을 통과하지 못한다 — 이름이 정의되는 곳이 `cases`의 키 하나뿐이다.
+
+- 펼침: `seq[call P(with.choices = cases의 키), cond(P의 decision마다 그 트리)]`.
+  IR에서 묶음 `seq`가 `cases: [키…]`를 싣는다. 노드의 `id`·`on`은 묶음에 붙고,
+  `bind`는 안쪽 `call`에 붙는다(P의 ok 값이 묶인다).
+- `cases`의 키가 `choices`의 유일한 출처다. 같은 `call`에 `with.choices`가 있으면
+  컴파일 오류다.
+- 모든 선택지에 트리가 있어야 한다. 아무것도 하지 않는 선택지는 `[]`로 쓴다
+  (`null`은 오류). 이름 규칙은 결과 이름과 같고 대소문자를 무시한 중복은 오류다.
+- 대상: `choices` param과 `decision` 필드를 담은 `ok` 반환을 선언한 프로시저만
+  (`ask-user`가 그렇다). 선언 기반이며 일반 디스패치는 이 범위 밖이다.
+- 트리는 호출 지점의 텍스트이므로 호출 지점의 범위에서 컴파일한다(작업 이름,
+  `continue`·`break` 대상, `return`). 2.2 「블록 인자와 splice」와 같은 규칙이다.
+- `on`은 그대로 결과 처리기다: P가 `ok`가 아닌 결과(`reframe`, `fail`)로 끝나면
+  `cases`가 아니라 `on`·`catch`로 간다.
 
 #### 검사(`check.py`)
 
@@ -1318,7 +1425,12 @@ wait 노드에는 `undecided_max`가 붙는다.
 | `wait` | 외부 이벤트 대기 원자 상태 | `probe`, `poll`, `seconds`, `undecided_max`, `describe`; `wait until`이면 `until`, `consume` |
 | `group` | 동적 병렬 영역 | `child`, `member`(펼친 프로시저의 루트), `limit`, `settle`, `name` |
 | `control` | 전이 | `op`(continue/break/raise/return/end), `target`, `outcome`, `value` |
-| `scope` | `call`을 펼친 복합 상태 | `proc`, `child`, `with`, `bind` |
+| `scope` | `call`을 펼친 복합 상태 | `proc`, `child`, `with`, `bind`, `params`(블록 param 제외), `returns` |
+
+`seq`는 두 가지 출처 표시를 더 가질 수 있다: `splice: {block, call}`(블록 인자를
+놓은 자리. `call`은 블록을 받은 호출의 scope id), `cases: [선택지…]`(`call … cases`를
+펼친 `[call, cond]` 묶음, 2.10). `control`의 `return`이 `target`을 가지면 그 scope
+(또는 `$run`)를 끝낸다. 없으면 가장 가까운 scope다.
 
 모든 노드에 공통: `id`, `type`, `parent`, `src`(원본 파일:줄), `executor`(위임
 지점이면), `bind`, `on`. 선언한 노드에만: `do`(효과 목록 `[{op, at, when, …}]`),

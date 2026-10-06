@@ -215,7 +215,7 @@ CONTROLS = ("continue", "break", "raise", "return")
 #: Sibling keys a combinator/control takes besides the common ones.
 SIBLINGS = {
     "try": ("catch", "finally"),
-    "call": ("with",),
+    "call": ("with", "cases"),
     "return": ("value",),
 }
 RETURN_TYPES = ("str", "int", "float", "bool", "list", "dict", "any")
@@ -1467,10 +1467,73 @@ def _inline(ctx: _Ctx, sc: _Scope, scope_node: ir.Node, pname: str, with_raw: An
                                               f"{scope_node.id}.{key}", proc.line)
 
 
+#: The param a procedure must declare to take ``cases`` (its choice names),
+#: and the field its ``ok`` return must carry (the choice taken).
+CASES_PARAM = "choices"
+CASES_FIELD = "decision"
+
+
 def _b_call(ctx, sc, node, value, m, line):
     if not isinstance(value, str) or not value:
         raise ctx.err(sc.file, line, "call needs a procedure name")
+    if m.get("cases") is not None:
+        _call_cases(ctx, sc, node, value, m, line)
+        return
     _inline(ctx, sc, node, value, m.get("with"), line)
+
+
+def _call_cases(ctx: _Ctx, sc: _Scope, node: ir.Node, pname: str, m: Dict[str, Any],
+                line: int) -> None:
+    """``call: P, cases: {<choice>: <tree>}`` (docs 2.10, cases): the keys are
+    P's ``choices`` and each tree runs when P returns ok with that
+    ``decision``. Compiles to ``seq[call (choices = the keys), cond on the
+    decision]``; the trees are the call site's own text, so they compile in
+    its scope. Only a procedure that declares a ``choices`` param and an ok
+    return with ``decision`` takes cases."""
+    cline = _key_line(m, "cases", line)
+    cases = _need_map(ctx, sc.file, m["cases"], "cases", cline)
+    proc = _procedure(ctx, pname, sc.file, line)
+    if CASES_PARAM not in proc.params \
+            or CASES_FIELD not in ((proc.returns or {}).get(ir.OUTCOME_OK) or {}):
+        raise ctx.err(sc.file, cline, f"call {pname!r}: cases needs a procedure that declares "
+                                      f"a {CASES_PARAM!r} param and an ok return with "
+                                      f"{CASES_FIELD!r}")
+    with_raw = _need_map(ctx, sc.file, m.get("with"), "with", line) \
+        if m.get("with") is not None else {}
+    if CASES_PARAM in with_raw:
+        raise ctx.err(sc.file, cline, f"call {pname!r}: with.{CASES_PARAM} and cases together "
+                                      f"-- the cases keys are the choices")
+    if not cases:
+        raise ctx.err(sc.file, cline, "cases needs at least one choice")
+    names: List[str] = []
+    for key, tree in cases.items():
+        kline = _key_line(cases, key, cline)
+        if not isinstance(key, str) or not _OUTCOME_RE.match(key):
+            raise ctx.err(sc.file, kline, f"cases: {key!r} is not a choice name")
+        if any(key.lower() == n.lower() for n in names):
+            raise ctx.err(sc.file, kline, f"cases: duplicate choice {key!r}")
+        if tree is None:
+            raise ctx.err(sc.file, kline, f"cases.{key}: every choice needs a tree "
+                                          f"(write [] for a choice that does nothing)")
+        names.append(key)
+    # the node becomes the wrapper: its id, on and the caller's view stay here
+    node.type = ir.T_SEQ
+    node.props = {"children": [], "pass_prev": False, "cases": names}
+    ask = _add(ctx, ir.Node(id=_alloc(ctx, f"{node.id}.call"), type="", parent=node.id,
+                            src=node.src, bind=node.bind))
+    node.bind = None
+    _inline(ctx, sc, ask, pname, {**with_raw, CASES_PARAM: names}, line)
+    pick = _add(ctx, ir.Node(id=_alloc(ctx, f"{node.id}.cases"), type=ir.T_COND,
+                             parent=node.id, src=_where(sc.file, cline)))
+    # an unlabelled node's result is kept under its id (runtime.node_key)
+    ref = f"$result['{ask.id}'].value.{CASES_FIELD}"
+    branches = []
+    for i, key in enumerate(names):
+        kline = _key_line(cases, key, cline)
+        branches.append({"guard": f"{ref} == '{key}'",
+                         "child": _sub(ctx, sc, pick, cases[key], f"case.{key}", kline)})
+    pick.props = {"branches": branches}
+    node.props["children"] = [ask.id, pick.id]
 
 
 CHECK_ITEM_KEYS = ("id", "describe", "probe")

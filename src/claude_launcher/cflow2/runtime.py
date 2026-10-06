@@ -440,6 +440,23 @@ _TYPES = {
 }
 
 
+def fill_optional(returns: Dict[str, Any], outcome: str, value: Any) -> Any:
+    """A ``return``'s value with the declared optional fields (``str?``…) it
+    left out set to null (docs 2.2, returns): a record need not spell out
+    ``field: null`` for each one. Other values pass through."""
+    fields = (returns or {}).get(outcome)
+    if not isinstance(fields, dict) or not (value is None or isinstance(value, dict)):
+        return value
+    missing = [f for f, t in fields.items()
+               if isinstance(t, str) and t.endswith("?") and f not in (value or {})]
+    if not missing:
+        return value
+    out = dict(value or {})
+    for f in missing:
+        out[f] = None
+    return out
+
+
 def returns_of(node: ir.Node) -> Dict[str, Dict[str, str]]:
     """The schema a node's result is validated against (``{ok: {}}`` default)."""
     schema = node.get("returns")
@@ -1251,7 +1268,9 @@ def _propagate(r: Run, start: str, sig: Dict[str, Any]) -> None:
         if node.type == ir.T_SCOPE and op == ir.CTL_RETURN \
                 and sig.get("target") in (None, node.id):
             _cancel_children(r, cur, "return")
-            _complete(r, cur, sig.get("outcome") or ir.OUTCOME_OK, sig.get("value"))
+            outcome = sig.get("outcome") or ir.OUTCOME_OK
+            _complete(r, cur, outcome,
+                      fill_optional(node.get("returns") or {}, outcome, sig.get("value")))
             return
         below = cur
         cur = r.inst[cur].get("parent")
@@ -1260,7 +1279,9 @@ def _propagate(r: Run, start: str, sig: Dict[str, Any]) -> None:
     if op == ir.CTL_END:
         _finish_run(r, ir.OUTCOME_OK, None, how="end")
     elif op == ir.CTL_RETURN:
-        _finish_run(r, sig.get("outcome") or ir.OUTCOME_OK, sig.get("value"), how="return")
+        outcome = sig.get("outcome") or ir.OUTCOME_OK
+        _finish_run(r, outcome, fill_optional(r.chart.returns or {}, outcome, sig.get("value")),
+                    how="return")
     else:
         _finish_run(r, ir.OUTCOME_FAIL, {"reason": f"{op} found no enclosing loop"})
 

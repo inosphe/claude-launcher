@@ -420,7 +420,6 @@ procedures:
         with:
           context: "$result.restack.value.at"
           require_reason: true
-          choices: [resolved, skip]
           topic: |
             스택 이전이 멈췄다(근거 칸이 restack 보고의 지점이다). 충돌이면 스택 브랜치는
             옛 기준 위에 그대로 있다. 원격 push 거절(「remote ... moved」)이면 로컬 이전은
@@ -429,11 +428,10 @@ procedures:
             선택지: resolved — 사람이 스택 워크트리(와 원격)에서 풀고 이전을 마쳤다,
             landed 신호를 소비하고 관제로 돌아간다. skip — 이전하지 않고 관제로
             돌아간다, landed 신호가 남아 restack만 고를 수 있다.
-      - cond:
-          - if: "$data.restack_conflict.decision == 'resolved'"
-            then:
-              id: restack-resolved
-              seq: []
-              do:
-                - {consume: {from: "main:signals", name: landed}}
-          - else: []
+        cases:
+          resolved:
+            id: restack-resolved
+            seq: []
+            do:
+            - consume: {from: "main:signals", name: landed}
+          skip: []
