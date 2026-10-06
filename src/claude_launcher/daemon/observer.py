@@ -53,7 +53,7 @@ from datetime import datetime, timezone
 import aiohttp
 from aiohttp import web
 
-from .. import atomic, lineage, profile, providers, store
+from .. import atomic, lineage, profile, provider_spec, providers, store
 from . import briefing, paths, transcript_view, observer_reports, session_events, search_records
 from .observer_filter import communication_only, visible
 
@@ -200,9 +200,12 @@ def configuration():
     name = str(block.get("profile") or "ds4-official")
     p = profile.resolve_selector(name)
     spec = providers.spec_for(p, doc=doc)
-    endpoint = (spec.endpoint("openai") or "").rstrip("/")
-    if endpoint and not endpoint.endswith("/chat/completions"):
-        endpoint += "/chat/completions"
+    try:
+        endpoint = provider_spec.openai_urls(
+            spec.endpoint("openai") or ""
+        ).chat_completions_url
+    except provider_spec.SpecError as exc:
+        raise ValueError(str(exc)) from exc
     key = lineage.stored_auth_token(p) or spec.api_key
     if not endpoint or not key:
         raise ValueError("관찰 프로파일에 OpenAI 호환 endpoint와 API 키가 필요합니다.")

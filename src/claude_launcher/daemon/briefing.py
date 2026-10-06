@@ -177,14 +177,17 @@ def profile_backend(name: str, doc: Optional[dict] = None) -> Backend:
         spec = providers.spec_for(prof, doc=doc)
     except (providers.ProviderError, ProfileError) as exc:
         raise BriefingError(str(exc)) from exc
-    endpoint = (spec.endpoint("openai") or "").rstrip("/")
+    try:
+        endpoint = provider_spec.openai_urls(
+            spec.endpoint("openai") or ""
+        ).chat_completions_url
+    except provider_spec.SpecError as exc:
+        raise BriefingError(str(exc)) from exc
     if not endpoint:
         raise BriefingError(
             f"profile {prof.name!r} has no OpenAI-compatible endpoint "
             f"(set providers.<provider>.endpoints.openai)"
         )
-    if not endpoint.endswith("/chat/completions"):
-        endpoint += "/chat/completions"
     models = tuple(
         value
         for value in (

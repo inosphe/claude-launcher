@@ -55,10 +55,62 @@ receiving the recorded variables verbatim (``legacy_env``) until
 
 from __future__ import annotations
 
+import logging
 import re
 from dataclasses import dataclass, field, replace
+from functools import lru_cache
 from typing import Dict, Iterable, Optional, Tuple
-from urllib.parse import urlsplit
+from urllib.parse import urlsplit, urlunsplit
+
+
+@dataclass(frozen=True)
+class OpenAIUrls:
+    """One endpoint expressed as an SDK base URL and a direct request URL."""
+
+    base_url: str
+    chat_completions_url: str
+
+
+@lru_cache(maxsize=128)
+def openai_urls(endpoint: str) -> OpenAIUrls:
+    """Interpret ``endpoints.openai`` identically for every consumer.
+
+    The value is the backend's API base, including any required version path.
+    A full Chat Completions URL is accepted for compatibility. Arbitrary bases
+    retain their path; only Fireworks' historical ``/inference`` base gains
+    ``/v1``. Queries and fragments are rejected because SDKs and the shim
+    append resource paths to the base string. Memoization bounds repeated
+    compatibility warnings during polls.
+    """
+    endpoint = endpoint.strip()
+    if not endpoint:
+        return OpenAIUrls("", "")
+    parts = urlsplit(endpoint)
+    if parts.query or parts.fragment:
+        raise SpecError(
+            "endpoints.openai must be an API base URL without query parameters "
+            "or a fragment"
+        )
+    path = parts.path.rstrip("/")
+    suffix = "/chat/completions"
+    if path.endswith(suffix):
+        path = path[:-len(suffix)]
+    if (
+        parts.scheme == "https"
+        and parts.netloc.lower() == "api.fireworks.ai"
+        and path == "/inference"
+    ):
+        path += "/v1"
+        # Never include the supplied URL: query parameters may hold secrets.
+        logging.getLogger(__name__).warning(
+            "Fireworks OpenAI endpoint /inference was normalized to /inference/v1; "
+            "set endpoints.openai to https://api.fireworks.ai/inference/v1"
+        )
+    return OpenAIUrls(
+        urlunsplit(parts._replace(path=path)),
+        urlunsplit(parts._replace(path=path + suffix)),
+    )
+
 
 #: Model roles, in the order harnesses that take a flat list receive them.
 #: ``xlarge`` is the tier above ``large`` (Claude's Fable slot over its Opus

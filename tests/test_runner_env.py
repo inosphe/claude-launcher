@@ -740,7 +740,7 @@ def test_pi_projects_custom_provider_models_and_stored_token(home):
 
     assert env["ANTHROPIC_API_KEY"] == "stored-omlx-token"
     assert env[pi_provider.ENV_PROVIDER] == pi_provider.PI_PROVIDER_NAME
-    assert env[pi_provider.ENV_BASE_URL] == "https://omlx.example/v1"
+    assert env[pi_provider.ENV_BASE_URL] == "https://omlx.example"
     assert env[pi_provider.ENV_API] == "openai-completions"
     assert json.loads(env[pi_provider.ENV_MODELS]) == ["solar-main", "hy3-opus"]
     assert env[pi_provider.ENV_TOKEN_NAME] == "ANTHROPIC_API_KEY"
@@ -752,7 +752,9 @@ def test_pi_projects_custom_provider_models_and_stored_token(home):
 
 def test_pi_openai_url_translation_is_idempotent(home):
     p = _omlx_pi_profile()
-    settings.set_env(p, {"ANTHROPIC_BASE_URL": "https://omlx.example/v1/"})
+    store.update(lambda doc: doc["providers"]["omlx"].update(
+        {"endpoints": {"openai": "https://omlx.example/v1/"}}
+    ))
 
     env = runner.harness_child_env(p, harnesses.get("pi"), base_env={})
 

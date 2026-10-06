@@ -436,20 +436,20 @@ def _pi_profile(home, base="https://omlx.example/"):
 
 def test_pi_projection_goes_through_the_metering_shim_and_asks_for_stream_usage(home, monkeypatch, metering_on):
     seen = []
-    shim_url = routing.local_url(routing.candidate_ports(routing.fingerprint("https://omlx.example/v1", {}))[0])
+    shim_url = routing.local_url(routing.candidate_ports(routing.fingerprint("https://omlx.example", {}))[0])
     monkeypatch.setattr(routing, "ensure_shim", lambda upstream, block: seen.append((upstream, block)) or shim_url)
     p = _pi_profile(home)
     env = runner.harness_child_env(p, harnesses.get("pi"), base_env={})
-    # the upstream the shim fronts is the OpenAI root, /v1 included; Pi gets
+    # the upstream the shim fronts is the declared OpenAI root; Pi gets
     # the shim without a trailing slash (its client appends /chat/completions)
-    assert seen == [("https://omlx.example/v1", {})]
+    assert seen == [("https://omlx.example", {})]
     assert env[pi_provider.ENV_BASE_URL] == shim_url.rstrip("/")
     assert env[pi_provider.ENV_STREAM_USAGE] == "1"
     assert pi_provider.ENV_HEADERS not in env  # only the daemon names a session
     # metering off: the direct URL, and no usage request either
     monkeypatch.setenv("CLAUNCH_METERING", "0")
     env = runner.harness_child_env(p, harnesses.get("pi"), base_env={})
-    assert env[pi_provider.ENV_BASE_URL] == "https://omlx.example/v1"
+    assert env[pi_provider.ENV_BASE_URL] == "https://omlx.example"
     assert pi_provider.ENV_STREAM_USAGE not in env
 
 
@@ -747,7 +747,7 @@ def test_daemon_pi_launch_names_the_session_in_the_provider_headers(home, tmp_pa
     # for a declared (non-builtin) harness -- so the line is here to keep the
     # assertion hermetic rather than to repair a live failure.
     monkeypatch.delenv("ANTHROPIC_CUSTOM_HEADERS", raising=False)
-    shim_url = routing.local_url(routing.candidate_ports(routing.fingerprint("https://omlx.example/v1", {}))[0])
+    shim_url = routing.local_url(routing.candidate_ports(routing.fingerprint("https://omlx.example", {}))[0])
     monkeypatch.setattr(routing, "ensure_shim", lambda upstream, block: shim_url)
     # a declared pi-adapter harness pointed at an executable that exists
     store.update(
@@ -781,7 +781,7 @@ def test_daemon_pi_launch_names_the_session_in_the_provider_headers(home, tmp_pa
 
     monkeypatch.setenv("CLAUNCH_METERING", "0")
     _, env, _ = harness.build_command(sdef)
-    assert env[pi_provider.ENV_BASE_URL] == "https://omlx.example/v1"
+    assert env[pi_provider.ENV_BASE_URL] == "https://omlx.example"
     assert pi_provider.ENV_HEADERS not in env and pi_provider.ENV_STREAM_USAGE not in env
 
 
