@@ -101,13 +101,16 @@ globalThis.SearchAnything = (() => {
   // row that arrived without one. The filter chips are built from this same
   // value, so a chip and the badge on the rows it selects always agree.
   const kindLabel = row => row.kind || "기록";
+  const rowKinds = row => new Set([kindLabel(row), ...(row.matches || []).map(kindLabel)]);
   // How many rows of each kind are in hand, most numerous first, ties keeping
   // the order the answer arrived in. The filter chips and the second list's
   // heading are both built from this one count, so the two cannot disagree
   // about which kinds an answer holds.
   function kindCounts(rows) {
     const counts = new Map();
-    for (const row of rows) counts.set(kindLabel(row), (counts.get(kindLabel(row)) || 0) + 1);
+    for (const row of rows) {
+      for (const kind of rowKinds(row)) counts.set(kind, (counts.get(kind) || 0) + 1);
+    }
     return [...counts].sort((a, b) => b[1] - a[1]);
   }
   // What the state of a session is called here. `status` is the fleet's live
@@ -168,6 +171,16 @@ globalThis.SearchAnything = (() => {
       item.append(link);
     }
     item.append(node("p", row.excerpt || ""));
+    if (row.matches?.length) {
+      const matches = document.createElement("details");
+      matches.className = "search-anything-matches";
+      matches.append(node("summary", `관련 구절 ${row.matches.length}개`));
+      for (const match of row.matches) {
+        matches.append(node("span", kindLabel(match), "search-anything-kind"));
+        matches.append(node("p", match.excerpt || ""));
+      }
+      item.append(matches);
+    }
     if (!isSession) {
       const sessions = node("div", "", "search-anything-sessions");
       for (const session of row.sessions || []) sessions.append(sessionChip(session));
@@ -234,7 +247,7 @@ globalThis.SearchAnything = (() => {
   // daemon, so a chip narrows exactly what is already on screen and the
   // answer's own line keeps its meaning.
   function renderResults() {
-    const rows = kindFilter ? lastRows.filter(row => kindLabel(row) === kindFilter) : lastRows;
+    const rows = kindFilter ? lastRows.filter(row => rowKinds(row).has(kindFilter)) : lastRows;
     results.replaceChildren();
     addGroups(rows);
     notice.textContent = lastNotice + rerankNote + (kindFilter ? ` · 표시 ${rows.length}` : "");
@@ -250,7 +263,7 @@ globalThis.SearchAnything = (() => {
     const index = data.index || {};
     const sessions = rows.filter(row => row.kind === SESSION).length;
     lastRows = rows;
-    if (!keepFilter || !rows.some(row => kindLabel(row) === kindFilter)) kindFilter = "";
+    if (!keepFilter || !rows.some(row => rowKinds(row).has(kindFilter))) kindFilter = "";
     lastNotice = `${rows.length}개 결과 · 세션 ${sessions} · 그 외 ${rows.length - sessions} · 색인 ${index.indexed || 0}/${index.total || 0}`
       + (index.pending || index.syncing ? " · 색인 진행 중, 다시 검색하면 추가 결과가 표시됩니다." : "")
       + (index.error ? " · 색인 오류: " + index.error : "");
