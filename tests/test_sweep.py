@@ -1379,7 +1379,11 @@ MAX_USEFUL_WORKERS = 8
 
 
 def _default_command() -> str:
-    return sweep.DEFAULT_COMMAND.format(session=LONGEST_SESSION)
+    """The command as Windows gets it: MAX_PATH below is Windows' ceiling, so
+    the root it is measured against is the Windows one on any host."""
+    return sweep.DEFAULT_COMMAND.format(
+        session=LONGEST_SESSION, root=sweep.pytest_basetemp.WINDOWS_ROOT
+    )
 
 
 def test_the_sweep_runs_bounded_parallel():
@@ -1404,10 +1408,37 @@ def test_the_sweep_runs_bounded_parallel():
     assert 2 <= int(width.group(1)) <= MAX_USEFUL_WORKERS
 
 
-def test_the_sweep_uses_the_window_worker_advice():
+def test_the_sweep_uses_the_window_worker_advice(monkeypatch):
+    monkeypatch.setattr(sweep.pytest_basetemp, "_windows", lambda: True)
     command = sweep.default_command("s9", workers=5)
     assert " -n 5 " in command
-    assert 'C:/t/s9w' in command
+    assert '--basetemp="C:/t/s9w"' in command
+
+
+def test_the_posix_sweep_basetemp_is_absolute(monkeypatch):
+    """claunch-wt12o.5: ``C:/t`` is relative on POSIX, so the sweep's pytest
+    resolved it inside the checkout it was sweeping. Off Windows the root is
+    the launcher home's ``basetemp`` directory."""
+    from claude_launcher import config
+
+    monkeypatch.setattr(sweep.pytest_basetemp, "_windows", lambda: False)
+    command = sweep.default_command("s9")
+    basetemp = command.split('--basetemp="')[1].split('"')[0]
+    assert Path(basetemp).is_absolute(), basetemp
+    assert basetemp == f"{(config.launcher_home() / 'basetemp').as_posix()}/s9w"
+
+
+def test_a_default_sweep_makes_the_root_before_it_runs(
+    repo, receipts, tmp_path, monkeypatch
+):
+    """pytest creates the basetemp but not the directory it sits in, so a
+    host that never had the root lost its first sweep to INTERNALERROR."""
+    root = tmp_path / "never" / "made"
+    monkeypatch.setattr(sweep.pytest_basetemp, "root", lambda: root)
+    monkeypatch.setattr(sweep, "default_command", lambda session, workers=8: GREEN)
+
+    assert _run(repo, receipts) == 0
+    assert root.is_dir()
 
 
 def test_the_sweep_basetemp_leaves_room_for_xdist():

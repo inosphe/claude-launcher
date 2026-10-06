@@ -35,15 +35,16 @@ from __future__ import annotations
 import asyncio
 import json
 import time
+from types import SimpleNamespace
 
 import pytest
 from aiohttp import WSMsgType
 
 from claude_launcher import store
-from claude_launcher.daemon import peer_client, session_input, shadow
+from claude_launcher.daemon import peer_client, session_input, shadow, status_checks
 from claude_launcher.daemon import relay_uplink
 from claude_launcher.daemon.api import build_app
-from claude_launcher.daemon.mesh import MeshError, MeshManager
+from claude_launcher.daemon.mesh import MeshError, MeshManager, PeerUnreachable
 
 from test_mesh_ops import _linked_pair, _manager, _register_py_harness
 
@@ -105,7 +106,7 @@ def test_viewer_recuts_the_card():
     row = {
         "session": "s1", "handle": "s1", "role": "worker", "roles": ["worker", 3],
         "harness": "claude", "status": "idle", "exited": 0, "note": "hi",
-        "cwd": "/secret", "args": ["--x"], "pid": 42,
+        "parent": "s0", "cwd": "/secret", "args": ["--x"], "pid": 42,
         "briefing": {"one_line": "does x", "state": "busy", "evil": "y", "goal": 5},
         "cflow": {"workflow": "w", "step_id": "work", "visit": 2,
                   "journal": ["..."], "instructions": "long", "reason": True},
@@ -113,12 +114,73 @@ def test_viewer_recuts_the_card():
     card = shadow._sanitize_card(row)
     assert card == {
         "session": "s1", "handle": "s1", "role": "worker", "harness": "claude",
-        "status": "idle", "note": "hi", "roles": ["worker"], "exited": False,
+        "status": "idle", "note": "hi", "parent": "s0", "roles": ["worker"],
+        "exited": False,
         "briefing": {"one_line": "does x", "state": "busy"},
         "cflow": {"workflow": "w", "step_id": "work", "visit": 2},
     }
+    # `status_checks` is optional too (claunch-wxp16): kept cut to the
+    # card's fields, an answer other than yes/no dropped, a row with neither
+    # name nor question dropped; absent, empty or not a list -> no key.
+    cut = shadow._sanitize_card({"session": "s1", "status_checks": [
+        {"id": "p1", "name": "C", "question": "q?", "answer": "yes",
+         "reported_at": "2026-09-30T07:00:00+00:00", "source": "agent"},
+        {"name": "M", "question": "m?", "answer": "maybe"},
+        {"answer": "no"}, "junk", 7,
+    ]})
+    assert cut["status_checks"] == [
+        {"name": "C", "question": "q?", "answer": "yes",
+         "reported_at": "2026-09-30T07:00:00+00:00"},
+        {"name": "M", "question": "m?"},
+    ]
+    for bad in (None, [], "C", {"name": "C"}, [{"answer": "yes"}]):
+        assert "status_checks" not in shadow._sanitize_card(
+            {"session": "s1", "status_checks": bad})
+    assert "status_checks" not in shadow._sanitize_card({"session": "s1"})
+    # `parent` is optional: an older host's card without it, or one with a
+    # non-string value, comes out with no `parent` key at all.
+    assert "parent" not in shadow._sanitize_card({"session": "s1"})
+    assert "parent" not in shadow._sanitize_card({"session": "s1", "parent": 7})
     assert shadow._sanitize_card(None) is None
     assert shadow._sanitize_card("x") is None
+
+
+def test_host_card_names_the_spawning_parent(monkeypatch):
+    """The rail nests a shadow under its parent's card (claunch-7u8nm), so
+    the host's card carries the spawning session's name -- and None for a
+    session nobody spawned."""
+    monkeypatch.setattr(shadow.briefing, "digest", lambda name: None)
+    member = SimpleNamespace(handle="h", role="worker", roles=("worker",))
+
+    def session(parent):
+        sdef = SimpleNamespace(name="s2", harness="claude", note=None, parent=parent)
+        return SimpleNamespace(sdef=sdef, status=lambda: "idle", exited=False)
+
+    assert shadow.card(session("s1"), member)["parent"] == "s1"
+    assert shadow.card(session(None), member)["parent"] is None
+    assert shadow._sanitize_card(shadow.card(session("s1"), member))["parent"] == "s1"
+
+
+def test_host_card_carries_the_status_checks(monkeypatch):
+    """The host's enabled status checks with this session's answers ride on
+    its card (claunch-wxp16), cut to name/question/answer/reported_at; a host
+    with none configured sends None, which the viewer drops."""
+    monkeypatch.setattr(shadow.briefing, "digest", lambda name: None)
+    member = SimpleNamespace(handle="h", role="worker", roles=("worker",))
+    sdef = SimpleNamespace(name="s2", harness="claude", note="n", parent=None)
+    sess = SimpleNamespace(sdef=sdef, status=lambda: "idle", exited=False)
+    digests = [{"id": "p1", "name": "C", "question": "q?", "answer": "no",
+                "reported_at": "2026-09-30T07:00:00+00:00", "source": "agent"},
+               {"id": "p2", "name": "T", "question": "t?"}]
+    got = shadow.card(sess, member, checks=digests)
+    assert got["status_checks"] == [
+        {"name": "C", "question": "q?", "answer": "no",
+         "reported_at": "2026-09-30T07:00:00+00:00"},
+        {"name": "T", "question": "t?"},
+    ]
+    assert got["note"] == "n"
+    assert shadow.card(sess, member)["status_checks"] is None
+    assert "status_checks" not in shadow._sanitize_card(shadow.card(sess, member))
 
 
 def test_cflow_position():
@@ -136,6 +198,22 @@ def test_cflow_position():
     }
 
 
+def test_relay_link():
+    link = shadow.relay_link
+    assert link("wss://relay.example.com/agent", "pcA", "s4") == (
+        "https://relay.example.com/t/pcA/#/s/s4"
+    )
+    # plain ws is plain http; a port carries over, the uplink's path does not
+    assert link("ws://10.0.0.5:8443/x/y", "pcA", "s4") == "http://10.0.0.5:8443/t/pcA/#/s/s4"
+    assert link("wss://[::1]:9/agent", "pcA", "s4") == "https://[::1]:9/t/pcA/#/s/s4"
+    # names are escaped into their path and hash segments
+    assert link("wss://r", "pc b/2", "s#1") == "https://r/t/pc%20b%2F2/#/s/s%231"
+    # nothing to put in front: no link
+    for url in ("", "https://relay.example.com", "wss://", "not a url", "wss://r:99999"):
+        assert link(url, "pcA", "s4") == "", url
+    assert link("wss://r", "", "s4") == "" and link("wss://r", "pcA", "") == ""
+
+
 def test_input_enabled():
     assert shadow.input_enabled(None) is True
     assert shadow.input_enabled({}) is True
@@ -143,6 +221,80 @@ def test_input_enabled():
     assert shadow.input_enabled({"shadow_input": False}) is False
     assert shadow.input_enabled({"shadow_input": "off"}) is False
     assert store.DAEMON_DEFAULTS["shadow_input"] is True
+
+
+def test_transcript_enabled():
+    assert shadow.transcript_enabled(None) is True
+    assert shadow.transcript_enabled({}) is True
+    assert shadow.transcript_enabled({"shadow_transcript": True}) is True
+    assert shadow.transcript_enabled({"shadow_transcript": False}) is False
+    assert shadow.transcript_enabled({"shadow_transcript": "no"}) is False
+    # the two switches are independent
+    assert shadow.transcript_enabled({"shadow_input": False}) is True
+    assert store.DAEMON_DEFAULTS["shadow_transcript"] is True
+
+
+def test_page_args():
+    assert shadow.page_args(None, None) == (None, shadow.transcript_view.PAGE_DEFAULT)
+    assert shadow.page_args("", "") == (None, shadow.transcript_view.PAGE_DEFAULT)
+    assert shadow.page_args("30", "20") == (30, 20)
+    assert shadow.page_args(30, 20) == (30, 20)
+    for before, limit in (("x", None), (None, "many"), ([1], None), (-1, None)):
+        with pytest.raises(shadow.ShadowRefused) as refused:
+            shadow.page_args(before, limit)
+        assert refused.value.status == 400
+
+
+def test_transcript_cut_keeps_the_page_and_drops_the_rest():
+    page = {
+        "records": [
+            {"seq": 3, "role": "assistant", "ts": "2026-09-30T00:00:00Z",
+             "sidechain": False, "cwd": "/home/x", "uuid": "u-1",
+             "blocks": [
+                 {"type": "text", "text": "hi"},
+                 {"type": "thinking", "text": "hmm", "signature": "sig"},
+                 {"type": "tool_use", "name": "Bash", "id": "t1",
+                  "text": "{\"command\": \"ls\"}", "clipped": False, "input": {"x": 1}},
+                 {"type": "tool_result", "id": "t1", "error": 1,
+                  "text": "out", "clipped": True, "full": 9000},
+                 {"type": "image", "data": "..."},
+                 "not a block",
+             ]},
+            {"seq": True, "role": "user", "blocks": [{"type": "text", "text": "x"}]},
+            {"seq": 4, "role": "user", "blocks": [{"type": "image"}]},
+            {"seq": 5, "role": 7, "ts": None, "sidechain": "yes",
+             "blocks": [{"type": "text", "text": "y", "full": True}]},
+            "junk",
+        ],
+        "has_more": True, "cursor": 3, "total": 6,
+        "source": "/home/someone/.claude/projects/-home-someone-x/c.jsonl",
+    }
+    got = shadow.transcript_cut(page, available=True)
+    assert got == {
+        "records": [
+            {"seq": 3, "role": "assistant", "ts": "2026-09-30T00:00:00Z",
+             "sidechain": False,
+             "blocks": [
+                 {"type": "text", "text": "hi"},
+                 {"type": "thinking", "text": "hmm"},
+                 {"type": "tool_use", "name": "Bash", "id": "t1",
+                  "text": "{\"command\": \"ls\"}", "clipped": False},
+                 {"type": "tool_result", "id": "t1", "error": False,
+                  "text": "out", "clipped": True, "full": 9000},
+             ]},
+            {"seq": 5, "role": "?", "ts": "", "sidechain": False,
+             "blocks": [{"type": "text", "text": "y"}]},
+        ],
+        "has_more": True, "cursor": 3, "total": 6, "available": True,
+    }
+    # the host's path to the file never crosses, whatever the page held
+    assert "source" not in got
+    assert shadow.transcript_cut(None, available=False) == {
+        "records": [], "has_more": False, "available": False,
+    }
+    assert shadow.transcript_cut({"has_more": "yes", "cursor": "3"}, available=False) == {
+        "records": [], "has_more": False, "available": False,
+    }
 
 
 def test_host_socket_writes_frames_and_takes_no_input():
@@ -248,6 +400,12 @@ def test_targets_are_the_other_daemons_members(home, tmp_path):
         assert [(t["machine"], t["session"]) for t in b] == [("pcA", "sa")]
         assert a[0]["meshes"][0]["handle"] == "bob"
         assert a[0]["meshes"][0]["linked"] is True
+        # A remote session has no project here; the mesh it sits in does, and
+        # that is what decides which project's rail shows it. The default is
+        # spelled out, as the mesh list spells it.
+        assert a[0]["meshes"][0]["project"] == "default"
+        mm_a.get("m").project = "p1"
+        assert mm_a.shadow_targets()[0]["meshes"][0]["project"] == "p1"
         # the authority's own member on the mirror resolves to the authority
         mesh_b = mm_b.get("m@pcA")
         assert mm_b.host_machine(mesh_b, mesh_b.members["alice"]) == "pcA"
@@ -391,6 +549,10 @@ def test_shadow_list_stream_and_session_line(home, tmp_path):
         mgr = _manager()
         mm_a, mm_b = await _linked_pair(mgr, tmp_path, calls)
         mgr.set_note("sa", "watching the build")
+        # a status check configured on the host, answered by sa
+        status_checks.set_entries([{"id": "p1", "name": "C", "question": "q?",
+                                    "enabled": True}])
+        status_checks.report("sa", [{"id": "p1", "answer": "yes"}])
         client_a, client_b = await _two_apps(mgr, mm_a, mm_b)
         bearer = {"Authorization": "Bearer tokB"}
         try:
@@ -407,9 +569,26 @@ def test_shadow_list_stream_and_session_line(home, tmp_path):
             assert rows[0]["error"] is None
             assert card["session"] == "sa" and card["handle"] == "alice"
             assert card["note"] == "watching the build"
+            # sa was not spawned by anyone: no parent crosses the wire
+            assert "parent" not in card
+            # the host's status check and sa's answer do (claunch-wxp16)
+            assert [(c["name"], c["question"], c["answer"])
+                    for c in card["status_checks"]] == [("C", "q?", "yes")]
+            assert "id" not in card["status_checks"][0]
             assert card["exited"] is False
             assert "cwd" not in card and "args" not in card
             assert rows[0]["meshes"][0]["mesh"] == "m@pcA"
+            # ...with the project that mesh is filed under here, which the
+            # rail narrows by (a mirror joined with no project: the default)
+            assert rows[0]["meshes"][0]["project"] == "default"
+            # no relay in front of pcA here: no link to its own page
+            assert rows[0]["link"] is None
+            # with one, the row links sa on pcA's own dashboard through it
+            mm_b.relay_url_for = (
+                lambda machine: "wss://relay.example.com/agent" if machine == "pcA" else ""
+            )
+            doc = await (await client_b.get("/api/shadows", headers=bearer)).json()
+            assert doc["shadows"][0]["link"] == "https://relay.example.com/t/pcA/#/s/sa"
             # the list is behind the daemon's own auth like everything else
             assert (await client_b.get("/api/shadows")).status == 401
 
@@ -514,7 +693,7 @@ def test_host_refuses_input_when_off_and_bad_tokens(home, tmp_path):
             assert session_input.latest("sa", "off-1") is None
             # straight at the host: a wrong token is 403 on every shadow route
             for path in ("/peer/shadow/cards", "/peer/shadow/stream",
-                         "/peer/shadow/line"):
+                         "/peer/shadow/line", "/peer/shadow/transcript"):
                 resp = await client_a.post(path, json={
                     "mesh": "m", "machine": "pcB", "token": "nope",
                     "session": "sa", "text": "x", "input_id": "t",
@@ -530,7 +709,125 @@ def test_host_refuses_input_when_off_and_bad_tokens(home, tmp_path):
     asyncio.run(run())
 
 
-def test_peer_shadow_routes_are_exactly_three(home):
+def _transcript_lines(n):
+    """``n`` conversation records in claude's jsonl shape, with bookkeeping
+    records between them that a page drops."""
+    out = []
+    for i in range(n):
+        role = "user" if i % 2 == 0 else "assistant"
+        content = f"m{i}" if role == "user" else [{"type": "text", "text": f"m{i}"}]
+        out.append(json.dumps({"type": "mode", "sessionId": "x"}) + "\n")
+        out.append(json.dumps({
+            "type": role, "timestamp": "2026-09-30T00:00:00Z", "cwd": "/host/secret",
+            "message": {"role": role, "content": content},
+        }) + "\n")
+    return "".join(out)
+
+
+def test_shadow_transcript_pages_through_the_host(home, tmp_path, monkeypatch):
+    """C7: another daemon's member's conversation, paged through its host.
+
+    The page the local transcript page reads, walked backwards with
+    ``before``; the host's file path never reaches the viewer; the host can
+    switch it off; a session in no shared mesh is refused; a host too old to
+    have the route is said to be one."""
+    from claude_launcher.daemon import transcript_view
+
+    _register_py_harness()
+    calls = []
+    src = tmp_path / "conv-sa.jsonl"
+    src.write_text(_transcript_lines(50), encoding="utf-8")
+    monkeypatch.setattr(
+        transcript_view, "locate_transcript",
+        lambda sdef, **kw: src if sdef.name == "sa" and src.exists() else None,
+    )
+
+    async def run():
+        mgr = _manager()
+        mm_a, mm_b = await _linked_pair(mgr, tmp_path, calls)
+        client_a, client_b = await _two_apps(mgr, mm_a, mm_b)
+        bearer = {"Authorization": "Bearer tokB"}
+        try:
+            # the tail
+            resp = await client_b.get(
+                "/api/shadows/pcA/sa/transcript?limit=20", headers=bearer)
+            assert resp.status == 200, await resp.text()
+            text = await resp.text()
+            doc = json.loads(text)
+            assert [r["seq"] for r in doc["records"]] == list(range(30, 50))
+            assert doc["records"][-1]["blocks"] == [{"type": "text", "text": "m49"}]
+            assert doc["records"][-1]["role"] == "assistant"
+            assert doc["has_more"] is True and doc["cursor"] == 30
+            assert doc["total"] == 50 and doc["available"] is True
+            # where the file is, and the cwd its records carry, stay on pcA
+            assert "source" not in doc
+            assert str(tmp_path) not in text and "/host/secret" not in text
+            # ...walked backwards with the cursor, as the page scrolls up
+            resp = await client_b.get(
+                "/api/shadows/pcA/sa/transcript?limit=20&before=30", headers=bearer)
+            doc = await resp.json()
+            assert [r["seq"] for r in doc["records"]] == list(range(10, 30))
+            assert doc["has_more"] is True and doc["cursor"] == 10
+            resp = await client_b.get(
+                "/api/shadows/pcA/sa/transcript?limit=20&before=10", headers=bearer)
+            doc = await resp.json()
+            assert [r["seq"] for r in doc["records"]] == list(range(0, 10))
+            assert doc["has_more"] is False
+            # a bad cursor is the viewer's 400, not a trip to the host
+            resp = await client_b.get(
+                "/api/shadows/pcA/sa/transcript?before=x", headers=bearer)
+            assert resp.status == 400
+            # behind the daemon's own auth like the rest of /api
+            assert (await client_b.get("/api/shadows/pcA/sa/transcript")).status == 401
+
+            # a session in no shared mesh is not reachable at all
+            resp = await client_b.get("/api/shadows/pcA/sx/transcript", headers=bearer)
+            assert resp.status == 400
+            assert "not a member" in (await resp.json())["error"]
+
+            # no conversation on file: an empty page that says so
+            src.unlink()
+            resp = await client_b.get("/api/shadows/pcA/sa/transcript", headers=bearer)
+            doc = await resp.json()
+            assert doc["records"] == [] and doc["available"] is False
+            src.write_text(_transcript_lines(2), encoding="utf-8")
+
+            # the host switched it off: refused there, and the reason reaches
+            # the viewer in the host's words
+            store.update(lambda d: d.update({"daemon": {"shadow_transcript": False}}))
+            resp = await client_b.get("/api/shadows/pcA/sa/transcript", headers=bearer)
+            assert resp.status == 400
+            assert "shadow_transcript" in (await resp.json())["error"]
+            store.update(lambda d: d.update({"daemon": {}}))
+            resp = await client_b.get("/api/shadows/pcA/sa/transcript", headers=bearer)
+            assert resp.status == 200
+            assert [r["seq"] for r in (await resp.json())["records"]] == [0, 1]
+
+            # straight at the host: the member scope holds for this route too
+            resp = await client_a.post("/peer/shadow/transcript", json={
+                "mesh": "m", "machine": "pcB", "token": "nope", "session": "sa",
+            })
+            assert resp.status == 403
+
+            # a host that predates the route answers it with a plain 404
+            async def old_host(machine, path, body):
+                raise PeerUnreachable(f"peer {machine!r}: not JSON", status=404)
+
+            mm_b.peer_transport = old_host
+            resp = await client_b.get("/api/shadows/pcA/sa/transcript", headers=bearer)
+            assert resp.status == 502
+            assert "older" in (await resp.json())["error"]
+        finally:
+            await client_a.close()
+            await client_b.close()
+            await mm_a.shutdown()
+            await mm_b.shutdown()
+            await mgr.shutdown_all()
+
+    asyncio.run(run())
+
+
+def test_peer_shadow_routes_are_exactly_four(home):
     async def make():
         mgr = _manager()
         return build_app(mgr, "t", started_at=time.monotonic(), mesh=MeshManager(mgr))
@@ -540,15 +837,20 @@ def test_peer_shadow_routes_are_exactly_three(home):
         {r.resource.canonical for r in app.router.routes()
          if r.resource is not None and r.resource.canonical.startswith("/peer/shadow")}
     )
-    assert paths == ["/peer/shadow/cards", "/peer/shadow/line", "/peer/shadow/stream"]
+    assert paths == [
+        "/peer/shadow/cards", "/peer/shadow/line", "/peer/shadow/stream",
+        "/peer/shadow/transcript",
+    ]
     api = sorted(
         (r.method, r.resource.canonical) for r in app.router.routes()
         if r.resource is not None and r.resource.canonical.startswith("/api/shadows")
     )
     assert api == [
         ("GET", "/api/shadows"),
+        ("GET", "/api/shadows/{machine}/{session}/transcript"),
         ("GET", "/api/shadows/{machine}/{session}/ws"),
         ("HEAD", "/api/shadows"),
+        ("HEAD", "/api/shadows/{machine}/{session}/transcript"),
         ("HEAD", "/api/shadows/{machine}/{session}/ws"),
         ("POST", "/api/shadows/{machine}/{session}/line"),
     ]

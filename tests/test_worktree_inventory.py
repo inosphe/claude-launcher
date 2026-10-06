@@ -103,7 +103,12 @@ def test_repo_roots_come_from_a_worktree_path_without_git(repo, monkeypatch):
     monkeypatch.setattr(worktree, "repo_root",
                         lambda cwd: calls.append(cwd) or real(cwd))
     inv._ROOT_CACHE.clear()
-    roots = inv.repo_roots([str(wt.path), str(wt.path / "deeper"), "", "Z:/nope"])
+    # The missing directory is absolute on every platform. "Z:/nope" was
+    # relative on POSIX: abspath put it under the cwd, and a suite run from a
+    # launcher worktree found the .claude/worktrees marker in that and got
+    # the main checkout back (claunch-ob8sz.1).
+    gone = str(repo.parent / "gone")
+    roots = inv.repo_roots([str(wt.path), str(wt.path / "deeper"), "", gone])
     assert [inv._key(r) for r in roots] == [inv._key(str(repo))]
     assert calls == []  # the worktree marker answered; no git was run
 

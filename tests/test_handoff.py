@@ -48,10 +48,16 @@ def _register_py_harness():
 
 
 async def _serve(mgr, mm):
+    from aiohttp import ClientTimeout
     from aiohttp.test_utils import TestClient, TestServer
 
     app = build_app(mgr, "sekrit", started_at=time.monotonic(), mesh=mm)
-    client = TestClient(TestServer(app))
+    # The server runs on this test's own loop, so a connect to it is late
+    # only when the host has not run that loop. aiohttp's default 30 s
+    # connect bound turned such a pause under a loaded gate run into a
+    # failure of a test about forking (claunch-wt12o.5.1). The total bound
+    # (300 s, the default's own) still ends a request nobody answers.
+    client = TestClient(TestServer(app), timeout=ClientTimeout(total=300))
     await client.start_server()
     return client
 

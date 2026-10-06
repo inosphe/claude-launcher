@@ -157,6 +157,71 @@ def test_a_nested_worker_measures_against_its_parents_branch(base):
     assert _run(repo, "--target", "master") == 1
 
 
+def test_a_fast_forward_landing_is_a_landing_without_a_target(base, capsys):
+    """The leader fast-forwarded master onto the tip: no merge commit exists.
+
+    Measured on run-139a13c1 (master ff'd to 8337cd2e): the no-argument form
+    answered "not yet" for as long as the run stood.
+    """
+    repo = base
+    _git(repo, "checkout", "master")
+    _git(repo, "merge", "--ff-only", "feature")
+    _git(repo, "checkout", "feature")
+    assert _run(repo) == 0
+    assert "fast-forward" in capsys.readouterr().out
+    assert _run(repo, "--target", "master") == 0
+
+
+def test_a_fast_forward_is_read_past_a_child_stacked_on_the_tip(base):
+    repo = base
+    _git(repo, "checkout", "-b", "child")
+    _commit(repo, "child-work")
+    _git(repo, "checkout", "master")
+    _git(repo, "merge", "--ff-only", "feature")
+    _git(repo, "checkout", "feature")
+    assert _run(repo) == 0
+
+
+def test_a_stack_round_lands_as_a_merge_on_the_stack_branch_not_master(base):
+    """Target is not master: the no-argument form must still pass, unpinned."""
+    repo = base
+    _git(repo, "checkout", "-b", "parent-stack", "master")
+    _commit(repo, "stack-work")
+    _git(repo, "merge", "--no-ff", "feature", "-m", "merge feature into stack")
+    _git(repo, "checkout", "feature")
+    assert _run(repo) == 0
+    # master has not taken the tip in, so pinning master would have said no.
+    assert _run(repo, "--target", "master") == 1
+
+
+def test_a_branch_with_no_commit_of_its_own_is_not_a_fast_forward(tmp_path, repo_template, capsys):
+    """Cut from master and never advanced: inside master from the start."""
+
+    def build(repo: Path) -> None:
+        _git(repo, "init", "-b", "master")
+        _commit(repo, "base")
+        _git(repo, "checkout", "-b", "empty")
+
+    repo = repo_template("landed-empty", build, tmp_path / "empty")
+    assert _run(repo) == landed_check.CANNOT_TELL
+    assert "no commit of its own" in capsys.readouterr().err
+
+
+def test_no_local_master_leaves_the_fast_forward_reading_off(tmp_path, repo_template):
+    def build(repo: Path) -> None:
+        _git(repo, "init", "-b", "trunk")
+        _commit(repo, "base")
+        _git(repo, "checkout", "-b", "feature")
+        _commit(repo, "work")
+        _git(repo, "checkout", "trunk")
+        _git(repo, "merge", "--ff-only", "feature")
+        _git(repo, "checkout", "feature")
+
+    repo = repo_template("landed-trunk", build, tmp_path / "trunk")
+    assert _run(repo) == 1
+    assert _run(repo, "--target", "trunk") == 0
+
+
 # --------------------------------------------------------------------------- #
 # cannot tell -- distinct from "not yet" on purpose
 # --------------------------------------------------------------------------- #

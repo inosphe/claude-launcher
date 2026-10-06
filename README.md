@@ -435,13 +435,17 @@ The `template` section of `~/.claunch.yaml` is a profile *layer* that applies
 **under every profile**. It holds the same fields a profile entry may carry
 (`models`, `context_window`, `auto_compact_at`, `reasoning_effort`,
 `harness_options`; see [API providers](#api-providers-third-party-backends))
-plus the common `env`. At launch it is read as the bottom of each profile's
-[parent chain](#inheritance-parent-profiles):
+plus the common `env`. At launch it is read as the lowest layer, under the
+provider and the [parent chain](#inheritance-parent-profiles):
 
-    provider  <  template  <  root ancestor  <  ...  <  the profile itself
+    template  <  provider  <  root ancestor  <  ...  <  the profile itself
 
-A field that no profile in the chain sets takes the template's value, and one
-that a profile or an ancestor sets wins. Maps merge key by key, so a profile's
+The template is the general default, and a provider describes one backend.
+So a field that neither the provider nor any profile in the chain sets takes
+the template's value; one the provider sets (a backend's `models`,
+`context_window`, its own `auto_compact_at`) wins over the template; and one a
+profile or an ancestor sets wins over both. The same order holds for the
+common `env` and a provider's env. Maps merge key by key, so a profile's
 `harness_options.claude.env` adds to the template's instead of replacing it.
 This holds for every profile: existing ones, children created with `--parent`,
 and profiles of any harness.
@@ -495,6 +499,24 @@ template:
 live `template` block in `~/.claunch.yaml` is authoritative (edit it directly, or
 run `claunch template --init` to write the bootstrap seed). `claunch template`
 shows the live block.
+
+**`auto_compact_at` must fit in `context_window`.** The two values can come
+from different layers (a template threshold over a provider's small window),
+so the check runs on the merged result, when both are set:
+
+- `claunch run` refuses to launch and prints the reason.
+- `claunch daemon start` and `claunch daemon restart` print every profile
+  that fails, as `error:` lines, and the daemon starts anyway. The daemon
+  logs the same lines when it boots.
+- The daemon refuses to create or restore a session on such a profile with
+  the same message. The web UI shows it under the profile picker (the profile
+  is marked `(config error)` in the list) and as the Create error.
+
+The message names both values and the layer each came from, for example:
+
+    error: profile 'work': auto_compact_at 400000 (from the template) exceeds
+    context_window 128000 (from provider 'small'); lower auto_compact_at, or
+    write 'auto_compact_at:' with no value on the profile to drop the template's
 
 `claunch migrate-config` converts a `template.env` block only when it holds
 backend keys (model pins, `CLAUDE_CODE_AUTO_COMPACT_WINDOW`,
@@ -744,8 +766,9 @@ when a global or inherited provider is set (the `personal` example above). The
 built-in `default` is plain Anthropic with no overrides — the launcher injects
 the profile's OAuth token as usual. For any other provider the launcher applies its `env` as a
 **low-priority backend default** — above the shell but *below* the profile's own
-`env`, so a per-profile (or template/inherited) value always wins over the
-provider for the same key. The implicit `default` provider and named `claude`
+`env`, so a per-profile (or inherited) value always wins over the provider for
+the same key. The template's `env` sits under the provider's (see
+[Default template](#default-template)). The implicit `default` provider and named `claude`
 provider both use Anthropic OAuth. Other providers carry their own auth, so the launcher
 does **not** inject `CLAUDE_CODE_OAUTH_TOKEN` — supply the backend token with
 `claunch set-token PROFILE` (recommended; see *keeping
@@ -2814,8 +2837,12 @@ claunch install --all-profile      # every existing profile (alias: --all)
 Profile installation follows the selected harness. Claude uses the profile
 root, Codex uses `codex/config.toml`, Kimi Code uses `kimi/mcp.json`, and
 Cursor Agent uses `agent/mcp.json`; skills are written below each harness
-home. Pi receives the skills, but its install reports that MCP is unavailable
-because Pi does not provide an MCP client. A one-off harness selection is also
+home. Codex hands an MCP server only a base environment plus the variables its
+entry lists in `env_vars`, so the Codex entry lists the session and instance
+variables (`CLAUNCH_SESSION`, `CLAUNCH_DAEMON`, …); a Codex profile installed
+by an earlier version needs `claunch install --profile P` again, and its
+running sessions need a restart. Pi receives the skills, but its install
+reports that MCP is unavailable because Pi does not provide an MCP client. A one-off harness selection is also
 supported, for example `claunch install --profile work:kimi`.
 
 | Command | Description |
@@ -4258,6 +4285,13 @@ A profile directory typically holds:
 An [instance manifest](#giving-an-instance-its-own-home-and-config) sets
 `CLAUDE_LAUNCHER_HOME`, `CLAUDE_LAUNCHER_SYNC_FILE` and `CLAUNCH_DAEMON_PORT`
 for everything run under `-L NAME`, over any value already in the environment.
+The instance's sessions inherit these variables and `CLAUNCH_DAEMON`, so a
+`claunch` command run inside one reaches its own instance without `-L`. The
+exception is `CLAUNCH_DAEMON_PORT`: the daemon keeps it and starts its sessions
+without it, so a daemon started from one of those shells (a test daemon,
+another instance) does not try to bind the port the running instance holds.
+The instance's own daemon started from such a shell reads the port from its
+manifest.
 
 ## License
 

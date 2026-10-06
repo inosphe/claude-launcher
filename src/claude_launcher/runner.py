@@ -115,9 +115,10 @@ def _claude_profile_env(profile: Profile) -> dict:
 
     The legacy ``env`` (still the Claude harness's raw override channel) plus
     the schema's ``harness_options.claude.env``, root ancestor first, the
-    profile itself last.
+    profile itself last. The template is not part of it: its env sits under
+    the provider's (see :func:`child_env`).
     """
-    env = dict(lineage.effective_env(profile))
+    env = dict(lineage.chain_env(profile))
     try:
         env.update(providers.profile_overlay(profile).option_env("claude"))
     except providers.ProviderError as exc:
@@ -189,6 +190,11 @@ def child_env(
         for k, v in (os.environ if base_env is None else base_env).items()
         if k not in managed
     }
+    # The template's common env is the lowest layer the launcher adds: under
+    # the provider's translation (which already carries the template's spec
+    # fields beneath the provider's own) and under the profile chain.
+    template_env = lineage.env_layers(profile)[0]
+    env.update(template_env)
     provider_env: dict = {}
     lender_env: dict = {}
     if with_token:
@@ -220,7 +226,7 @@ def child_env(
             # provider's defaults (borrowing a profile should behave like that
             # profile's backend natively) but below the runner's own env
             # (borrowing never surrenders a key the runner sets itself).
-            lender_env = lineage.effective_env(borrow)
+            lender_env = lineage.chain_env(borrow)
             env.update(lender_env)
     # Per-profile env vars (inherited from any parent, then the profile's own)
     # take precedence over the shell, the provider and a borrow's env — that is
@@ -250,7 +256,9 @@ def child_env(
             # A custom backend never uses the Anthropic OAuth var; drop any
             # shell leftover unless the config file set it explicitly (the
             # provider pattern pins it to "").
-            if OAUTH_TOKEN_ENV not in {**provider_env, **lender_env, **profile_env}:
+            if OAUTH_TOKEN_ENV not in {
+                **template_env, **provider_env, **lender_env, **profile_env
+            }:
                 env.pop(OAUTH_TOKEN_ENV, None)
         else:
             # Plain Anthropic: inject the (own/inherited/borrowed) OAuth token.
@@ -322,14 +330,14 @@ def claude_model_env(
     auth_source = borrow if borrow is not None else profile
     provider = provider_override or providers.resolve_name(auth_source, doc)
     pins_apply = _profile_backend_pins_apply(profile, provider)
-    env: dict = {}
+    env: dict = dict(lineage.env_layers(profile, doc)[0])
     env.update(
         providers.claude_env(
             profile, provider, doc, overlay_models=pins_apply
         )
     )
     if borrow is not None:
-        env.update(lineage.effective_env(borrow))
+        env.update(lineage.chain_env(borrow, doc))
     profile_env = _claude_profile_env(profile)
     if not pins_apply:
         profile_env = {
@@ -599,6 +607,20 @@ def _api_key_for(auth_source: Profile) -> Optional[str]:
         raise RunnerError(str(exc)) from exc
 
 
+def require_compact_fits(profile: Profile, provider: str) -> None:
+    """Refuse a launch whose ``auto_compact_at`` exceeds its ``context_window``.
+
+    ``provider`` is the backend this launch talks to (its own, a lender's, or
+    an explicit ``--provider``) -- the one whose ``context_window`` applies.
+    """
+    try:
+        problem = providers.compact_problem(profile, provider)
+    except providers.ProviderError as exc:
+        raise RunnerError(str(exc)) from exc
+    if problem:
+        raise RunnerError(problem)
+
+
 def profile_harness(profile: Profile) -> harnesses.Harness:
     name = lineage.effective_harness(profile)
     entry = harnesses.get(name)
@@ -732,6 +754,9 @@ def run(
     process's, which is what every run that did not ask for a worktree wants.
     """
     harness = profile_harness(profile)
+    require_compact_fits(
+        profile, provider or providers.resolve_name(borrow if borrow is not None else profile)
+    )
     if not harness.builtin:
         if borrow is not None and not harness.borrowable:
             raise RunnerError(borrowing.capability(harness)["message"])

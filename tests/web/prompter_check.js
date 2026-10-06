@@ -69,7 +69,7 @@ const storage = {};
 const ctx = {};
 const harness = new Function(
   "exports", "$", "el", "insertPromptPreset", "localStorage",
-  `let currentName = null, sessionEnded = false;
+  `let currentName = null, sessionEnded = false, currentPage = "terminal";
    let prompterState = { connected: false, prompts: [] };
    let prompterExpanded = false;
    ${slice("renderTermPrompterRow")}
@@ -121,6 +121,12 @@ ctx.render();
 check("hidden without an attached session", row.classList.contains("hidden"));
 
 ctx.set("currentName", "s1");
+ctx.set("currentPage", "shadow");
+ctx.render();
+check("hidden off the terminal page though a session is attached",
+  row.classList.contains("hidden"));
+
+ctx.set("currentPage", "terminal");
 ctx.render();
 check("shown when connected with prompts", !row.classList.contains("hidden"));
 check("one chip per prompt", chips() && chips().children.length === 2);

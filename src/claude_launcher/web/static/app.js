@@ -1745,6 +1745,25 @@ function sessionGroupValue(group, s) {
   return group === "mesh" ? sessionMeshGroup(s) : sessionWorkspaceGroup(s);
 }
 
+/* The same two questions for another daemon's session (a remote-shadow row,
+   daemon/shadow.py), which the rail files among the local ones.
+
+   Its mesh is chosen by the rule a local row follows (`sessMeshes`): the
+   alphabetically first of its meshes -- counting only the meshes the picked
+   project owns (shadowMeshes), so a shadow never opens a heading for a mesh
+   of another project.
+   It has no workspace on this machine -- its checkout is on its own host --
+   so under a workspace grouping it is filed under `@<machine>`. */
+function shadowMeshGroup(row) {
+  const names = shadowMeshes(row).map((m) => m.mesh);
+  if (!names.length) return "(no mesh)";
+  return [...names].sort((a, b) => a.localeCompare(b))[0];
+}
+
+function shadowGroupValue(group, row) {
+  return group === "mesh" ? shadowMeshGroup(row) : `@${row.machine}`;
+}
+
 /* Which groups the reader has folded shut, remembered per browser.
 
    The rail is a poll: it rebuilds its rows whenever the fleet changes, which
@@ -3119,17 +3138,34 @@ function regroupDepths(entries) {
 }
 
 /* Convert lineage-ordered rows into headings and rows. Each selected group
-   occupies one level, so selection order is also nesting priority. */
-function sessionGroupRows(entries, groups, level = 0, meshGroup = null) {
-  if (level >= groups.length) return regroupDepths(entries).map(([session, depth]) =>
-    ({ type: "session", session, depth, meshGroup }));
+   occupies one level, so selection order is also nesting priority.
+
+   `shadows` are other daemons' sessions (remote-shadow rows). They are filed
+   into the same buckets as the local rows -- a mesh heading holds every
+   member of that mesh the rail can show, wherever it runs -- but they stay a
+   kind of their own to the end: a `shadow` item, never a `session` one, so
+   nothing that acts on a local row (keyed by its bare name) is handed one.
+   Inside a bucket they follow the local rows, which keep their lineage
+   order and indent; the shadows take their own lineage order and indent
+   (shadowLineage) among the shadows of that bucket. */
+function sessionGroupRows(entries, groups, level = 0, meshGroup = null, shadows = []) {
+  if (level >= groups.length) return [
+    ...regroupDepths(entries).map(([session, depth]) =>
+      ({ type: "session", session, depth, meshGroup })),
+    // Guarded like the other late-defined helpers: a harness that lifts only
+    // this function gets the shadows flat, in the order they came.
+    ...(typeof shadowLineage === "function"
+      ? shadowLineage(shadows) : shadows.map((row) => [row, 0])).map(([shadow, depth]) =>
+      ({ type: "shadow", shadow, depth, meshGroup })),
+  ];
   const group = groups[level];
   const buckets = new Map();
-  for (const entry of entries) {
-    const value = sessionGroupValue(group, entry[0]);
-    if (!buckets.has(value)) buckets.set(value, []);
-    buckets.get(value).push(entry);
-  }
+  const bucket = (value) => {
+    if (!buckets.has(value)) buckets.set(value, { entries: [], shadows: [] });
+    return buckets.get(value);
+  };
+  for (const entry of entries) bucket(sessionGroupValue(group, entry[0])).entries.push(entry);
+  for (const row of shadows) bucket(shadowGroupValue(group, row)).shadows.push(row);
   const out = [];
   for (const value of [...buckets.keys()].sort((a, b) =>
     a.localeCompare(b, undefined, { sensitivity: "base" }))) {
@@ -3140,10 +3176,31 @@ function sessionGroupRows(entries, groups, level = 0, meshGroup = null) {
     // `(no mesh)` is a bucket of sessions that joined nothing, not a mesh,
     // and nothing is suppressed under it.
     const under = group === "mesh" && value !== "(no mesh)" ? value : meshGroup;
-    out.push(...sessionGroupRows(buckets.get(value), groups, level + 1, under));
+    const { entries: inside, shadows: remote } = buckets.get(value);
+    out.push(...sessionGroupRows(inside, groups, level + 1, under, remote));
   }
   return out;
 }
+
+/* An ungrouped rail has no heading for another daemon's session to sit
+   under, so those rows trail the local ones, one heading per daemon. They
+   are still in the one list: what the reader scrolls, filters and searches
+   is every session this rail can show. */
+function remoteRailRows(shadows) {
+  const out = [];
+  const machines = [...new Set(shadows.map((row) => row.machine))]
+    .sort((a, b) => a.localeCompare(b, undefined, { sensitivity: "base" }));
+  for (const machine of machines) {
+    out.push({ type: "group", group: "remote", value: machine, level: 0 });
+    const own = shadows.filter((row) => row.machine === machine);
+    for (const [shadow, depth] of typeof shadowLineage === "function"
+      ? shadowLineage(own) : own.map((row) => [row, 0])) {
+      out.push({ type: "shadow", shadow, depth, meshGroup: null });
+    }
+  }
+  return out;
+}
+
 
 /* Sticky headings need the height of every outer heading as their offset.
    The heading styles intentionally differ by level, so a fixed multiplier
@@ -3317,7 +3374,8 @@ function syncSessionGroupSearch(list) {
   const active = typeof sessionSearch !== "undefined" && !!String(sessionSearch.q || "").trim();
   let changed = false;
   for (const group of list.querySelectorAll(".session-group")) {
-    const match = active && !!group.querySelector("li[data-name]:not(.session-filtered)");
+    const match = active && !!group.querySelector(
+      "li[data-name]:not(.session-filtered), li.shadow-card:not(.session-filtered)");
     const shut = !match && isSessionGroupCollapsed(group.dataset.group, group.dataset.value);
     changed = changed || group.classList.contains("collapsed") !== shut;
     group.classList.toggle("collapsed", shut);
@@ -3358,6 +3416,16 @@ function syncSessionFilters(sessions) {
     row.classList.toggle("session-filtered", !session
       || !sessionMatchesFilter(session)
       || (searching && !sessionMatchesSearch(session)));
+  }
+  // Other daemons' sessions, drawn in the same list: the same filter and the
+  // same search, asked of their own record (they are not in `sessions`).
+  if (typeof shadowRow === "function") {
+    for (const card of list.querySelectorAll("li.shadow-card")) {
+      const row = shadowRow(card.dataset.machine, card.dataset.session);
+      card.classList.toggle("session-filtered", !row
+        || !shadowMatchesFilter(row)
+        || (searching && !shadowMatchesSearch(row)));
+    }
   }
   // Search can change without rebuilding the rail. Open every ancestor of
   // a visible match while preserving the reader's stored fold preferences.
@@ -3718,6 +3786,10 @@ async function refreshSessions(options) {
   const railList = typeof railSessions !== "function" ? sessionsCache
     : meshGrouped && typeof railSessionsWithMeshPeers === "function"
       ? railSessionsWithMeshPeers(sessionsCache) : railSessions(sessionsCache);
+  // Other daemons' sessions the rail files among these (remote-shadow rows,
+  // refreshShadows). They are drawn in this same list but never enter
+  // sessionsCache: every reader of that cache keys on the bare name.
+  const shadowList = typeof railShadows === "function" ? railShadows() : [];
   // Pins and recent tabs may refer to records outside this poll category.
   if (typeof renderSessionTabs === "function") renderSessionTabs();
   const list = $("session-list");
@@ -3739,7 +3811,7 @@ async function refreshSessions(options) {
     // The project is outside the old tuple so the tuple keeps its shape;
     // a pick changes what the rail draws out of the same cache.
     [[briefingLLM, sessionsCache, groupOrder, meshCache, pins],
-     typeof currentProject === "string" ? currentProject : ""],
+     typeof currentProject === "string" ? currentProject : "", shadowList],
     (key, value) => (
       key === "due_in" || key === "fired_ago" ||
       key === "last_visited_at" || key === "last_input_at" ||
@@ -3783,7 +3855,10 @@ async function refreshSessions(options) {
   // Isolated web harnesses retain the old mesh-only variable. The fallback
   // keeps those consumers compatible while the page uses the ordered setting.
   const rows = !rebuild ? [] : typeof sessionGroupRows !== "undefined"
-    ? sessionGroupRows(entries, groupOrder)
+    ? (groupOrder.length
+      ? sessionGroupRows(entries, groupOrder, 0, null, shadowList)
+      : [...sessionGroupRows(entries, groupOrder),
+         ...(shadowList.length ? remoteRailRows(shadowList) : [])])
     // Older isolated rail harnesses provide the former mesh-only helpers.
     // Keep their equivalent flat grouping here while the shipped page uses
     // the ordered, nested helper above.
@@ -3816,6 +3891,14 @@ async function refreshSessions(options) {
   // The count each open heading shows, one per level, kept alongside the
   // bodies so a row appended at any depth raises every heading above it.
   const groupCounts = [];
+  // A row raises the count of every heading it sits under.
+  const countRow = () => {
+    for (const box of groupCounts) {
+      if (!box) continue;
+      box._sessionCount = (box._sessionCount || 0) + 1;
+      box.textContent = String(box._sessionCount);
+    }
+  };
   for (const row of rows) {
     if (row.type === "ungroup") {
       groupBodies.length = 0;
@@ -3872,7 +3955,7 @@ async function refreshSessions(options) {
       jump.title = `jump to the first session in ${row.group} ${row.value}`;
       jump.addEventListener("click", (e) => {
         e.stopPropagation();   // the heading itself folds; this does not
-        const first = body.querySelector("li[data-name]");
+        const first = body.querySelector("li[data-name], li.shadow-card");
         if (!first) return;
         // A shut group has nothing on screen to scroll to, so opening it is
         // part of the jump rather than a second thing to ask of the reader.
@@ -3936,6 +4019,17 @@ async function refreshSessions(options) {
       groupBodies[row.level] = body;
       groupCounts.length = row.level;
       groupCounts[row.level] = count;
+      continue;
+    }
+    if (row.type === "shadow") {
+      // Another daemon's session: its own card (renderShadowCard), which
+      // carries no data-name and no buttons, so nothing below that acts on a
+      // local row by name -- kill, pin, the keyboard card, the filters'
+      // record lookup -- can be handed it.
+      const parent = nestedGroupContainers
+        ? (groupBodies[groupBodies.length - 1] || list) : list;
+      parent.appendChild(renderShadowCard(row.shadow, { depth: row.depth || 0 }));
+      countRow();
       continue;
     }
     const { session: s, depth } = row;
@@ -4207,12 +4301,9 @@ async function refreshSessions(options) {
     const parent = nestedGroupContainers
       ? (groupBodies[groupBodies.length - 1] || list) : list;
     parent.appendChild(li);
-    for (const box of groupCounts) {
-      if (!box) continue;
-      box._sessionCount = (box._sessionCount || 0) + 1;
-      box.textContent = String(box._sessionCount);
-    }
+    countRow();
   }
+  if (rebuild && typeof syncShadowActive === "function") syncShadowActive();
   if (rebuild && nestedGroupContainers && typeof syncSessionGroupStickyOffsets === "function") {
     syncSessionGroupStickyOffsets(list);
   }
@@ -7818,7 +7909,7 @@ function flowEditorDirty() {
 }
 
 async function flowEditorResponse(response) {
-  const body = await response.json();
+  const body = await response.json().catch(() => ({}));
   if (!response.ok) throw new Error(body.error || `HTTP ${response.status}`);
   return body;
 }
@@ -8051,6 +8142,10 @@ function cflowOrphanActions(r) {
 }
 
 let profileDetails = {};
+/* profile name -> why its auto_compact_at does not fit its context_window
+   (/api/profiles compact_problems). The daemon refuses a session on such a
+   profile; the form says so before Create is pressed. */
+let profileCompactProblems = {};
 let newProfileOptions = [];
 let newHarnessFor = null;
 let newBorrowFor = null;
@@ -8476,6 +8571,7 @@ async function refreshProfiles() {
     for (const item of data.profile_details || []) {
       if (item && item.name) profileDetails[item.name] = item;
     }
+    profileCompactProblems = data.compact_problems || {};
     const optionDefs = data.profile_options ||
       (data.profile_selectors || data.profiles || []).map(
         (name) => ({ value: name, label: name })
@@ -8503,6 +8599,7 @@ async function refreshProfiles() {
       child ? "(inherit the parent's profile)" : null,
       wantedProfile
     );
+    markCompactProblems(select);
     newHarnessFor = null;
     refillNewHarnessOptions(
       f, child && !select.value ? "" : previousHarness, true
@@ -9621,6 +9718,18 @@ function renderRuntimeSummary() {
    nobody reads, and this one has to be legible on the one launch in fifty
    where it matters. On a child, a row the spawn policy locked is the
    parent's and says nothing here — same rule as the summary line's. */
+/* Name the profiles the daemon will refuse, in the list itself: the option
+   stays selectable (the hint below says why), and its tooltip carries the
+   whole sentence. */
+function markCompactProblems(select) {
+  for (const o of select.options) {
+    const problem = profileCompactProblems[o.value];
+    if (!problem) continue;
+    o.textContent = `${o.textContent} (config error)`;
+    o.title = problem;
+  }
+}
+
 function renderProfileHint() {
   const box = $("profile-hint");
   if (!box) return;  // a page that predates the row still runs
@@ -9636,8 +9745,13 @@ function renderProfileHint() {
   const choseOverride = !!f.profile.value || !!(f.harness && f.harness.value);
   const whose = (shown && (!parent || choseOverride))
     ? shown : (parent ? `${parent.name}'s profile` : "this profile");
+  const base = baseProfileName(picked || "") ||
+    (detail && detail.profile) || "";
+  const compact = profileCompactProblems[base];
   let text = "";
-  if (speaks("null_token") && f.null_token && f.null_token.checked) {
+  if (compact) {
+    text = `A session on this profile will be refused: ${compact}`;
+  } else if (speaks("null_token") && f.null_token && f.null_token.checked) {
     text = `--null: it boots with no token at all — ${whose}'s config and ` +
            `skills, but somebody has to run /login inside before it works.`;
   } else if (speaks("borrow") && f.borrow && f.borrow.value &&
@@ -11868,28 +11982,42 @@ function refreshTermInput() {
 
 /* Prompt presets are daemon-local operator shortcuts. They deliberately
    insert at the caret and submit through the footer's normal send path, so a
-   preset delivers the text and its Enter in the same request. */
+   preset delivers the text and its Enter in the same request.
+
+   Two strips, one per page that has a session line: the terminal page's sits
+   above its footer and sends to the attached local session; the shadow
+   page's sits above #shadow-input and sends to the remote session on screen.
+   Each is shown only on its own page -- `currentName` outlives a navigation
+   (the attached terminal survives every page), so a strip gated on it alone
+   showed on every page and sent to a session that was not on screen. */
 function renderTermPresetButtons() {
   if (typeof renderTermPrompterRow === "function") renderTermPrompterRow();
-  const box = $("term-preset-buttons");
-  if (!box) return;
-  box.innerHTML = "";
   const rows = (typeof promptPresetCache === "undefined" ? [] : promptPresetCache)
     .filter((row) => row.enabled !== false);
-  const visible = !!currentName && !sessionEnded && rows.length > 0;
+  const page = typeof currentPage === "undefined" ? "terminal" : currentPage;
+  fillPresetStrip($("term-preset-buttons"), rows,
+    page === "terminal" && !!currentName && !sessionEnded, sendPromptPreset);
+  fillPresetStrip($("shadow-preset-buttons"), rows,
+    page === "shadow", sendShadowPreset);
+}
+
+function fillPresetStrip(box, rows, onPage, send) {
+  if (!box) return;
+  box.innerHTML = "";
+  const visible = onPage && rows.length > 0;
   box.classList.toggle("hidden", !visible);
   if (!visible) return;
   for (const row of rows) {
     const button = el("button", "term-btn term-preset-button", row.name);
     button.type = "button";
     button.title = row.text;
-    button.addEventListener("click", () => sendPromptPreset(row.text));
+    button.addEventListener("click", () => send(row.text));
     box.appendChild(button);
   }
 }
 
-function insertPromptPreset(text) {
-  const field = $("term-input-field");
+function insertPromptPreset(text, fieldId = "term-input-field") {
+  const field = $(fieldId);
   if (!field || field.disabled) return false;
   const start = Number.isInteger(field.selectionStart) ? field.selectionStart : field.value.length;
   const end = Number.isInteger(field.selectionEnd) ? field.selectionEnd : start;
@@ -11908,6 +12036,13 @@ function sendPromptPreset(text) {
   return sendKeyLine(
     $("term-input-field"), $("term-input-send"), $("term-input-note")
   );
+}
+
+/* The shadow page's preset: into the shadow line at its caret, then sent the
+   one way that line reaches the remote session (its host's /line). */
+function sendShadowPreset(text) {
+  if (!insertPromptPreset(text, "shadow-input-field")) return false;
+  return sendShadowLine();
 }
 
 /* Prompt snippets from the prompter server (GET /api/prompter/prompts, which
@@ -11935,7 +12070,10 @@ function renderTermPrompterRow() {
   if (!box) return;
   box.innerHTML = "";
   const rows = (prompterState && prompterState.connected && prompterState.prompts) || [];
-  const visible = !!currentName && !sessionEnded && rows.length > 0;
+  // The terminal page's row only, like its preset strip: its chips insert
+  // into that page's footer field.
+  const onTerminal = typeof currentPage === "undefined" || currentPage === "terminal";
+  const visible = onTerminal && !!currentName && !sessionEnded && rows.length > 0;
   box.classList.toggle("hidden", !visible);
   if (!visible) return;
   box.classList.toggle("expanded", prompterExpanded);
@@ -11996,7 +12134,7 @@ async function loadHostClipboard() {
   status.textContent = "Loading…";
   try {
     const response = await api("/api/clipboard");
-    const doc = await response.json();
+    const doc = await response.json().catch(() => ({}));
     if (request !== hostClipboardRequest) return;
     if (!response.ok) throw new Error(doc.error || "Clipboard could not be loaded");
     const box = $("term-clipboard-items");
@@ -14259,12 +14397,20 @@ document.addEventListener("visibilitychange", () => {
    momentum, a touch drag, PgUp/Home/End, find-in-page and selection across
    the whole conversation all come for free and none of them cost a frame of
    daemon time. Older pages are fetched as the reader nears the top; while
-   they sit at the bottom the poll follows the session forward. */
+   they sit at the bottom the poll follows the session forward.
+
+   The same page reads another daemon's session (#/rlog/<machine>/<name>):
+   a remote shadow's terminal takes no scroll, so this is the only place
+   what it said earlier can be read. Only where the pages come from changes
+   (its host, through /api/shadows/...) and where Back goes; the session
+   info tab is hidden, because what it looks up is a LOCAL session and a
+   remote `s1` is not the local one. */
 const TRANSCRIPT_PAGE = 40;
 const TRANSCRIPT_FOLLOW_MAX = 200;
 const TRANSCRIPT_NEAR_TOP = 400;   // px from the top that triggers an older page
 const TRANSCRIPT_NEAR_END = 40;    // px from the bottom that still counts as "live"
 let transcriptName = null;         // the session whose conversation this page is
+let transcriptMachine = null;      // its daemon when it is a remote shadow, else null
 let transcriptCursor = null;       // oldest seq loaded; the next page ends here
 let transcriptSeen = -1;           // newest seq loaded, for the follow-forward
 let transcriptMore = false;        // is there anything above what is loaded
@@ -14316,19 +14462,32 @@ document.querySelectorAll('input[name="log-format"]').forEach((input) =>
   }));
 setTranscriptFormat(transcriptFormat, false);
 
+/* Where a session's pages are served: this daemon's route for its own
+   sessions, the shadow route (relayed to the host) for another's. */
+function transcriptPath(name, machine) {
+  return machine
+    ? `/api/shadows/${encodeURIComponent(machine)}/${encodeURIComponent(name)}/transcript`
+    : `/api/sessions/${encodeURIComponent(name)}/transcript`;
+}
+
 /* Open the page for a session — the route's entry point. Re-entering the one
    already on screen is a no-op rather than a reload: coming back from the
    terminal is the common case, and re-reading would throw away where the
-   reader had scrolled to. */
-function openTranscript(name) {
+   reader had scrolled to. `machine` names the daemon of a remote shadow;
+   omitted, the session is this daemon's own. */
+function openTranscript(name, machine = null) {
+  machine = machine || null;
   showView("log");
-  $("log-title").textContent = name;
+  $("log-title").textContent = machine ? `${name} @${machine}` : name;
   const back = $("log-back");
-  if (back) back.href = `#/s/${encodeURIComponent(name)}`;
-  if (transcriptName === name) return;
+  if (back) back.href = machine ? shadowHash(machine, name) : `#/s/${encodeURIComponent(name)}`;
+  const info = $("log-info-tab");
+  if (info) info.hidden = !!machine;
+  if (transcriptName === name && transcriptMachine === machine) return;
   transcriptGeneration += 1;
   transcriptBusy = false;
   transcriptName = name;
+  transcriptMachine = machine;
   globalThis.TranscriptTabs?.select("transcript");
   transcriptCursor = null;
   transcriptSeen = -1;
@@ -14355,6 +14514,7 @@ function closeTranscript() {
   stopTranscriptPoll();
   transcriptGeneration += 1;
   transcriptName = null;
+  transcriptMachine = null;
   transcriptBusy = false;
   const pane = $("term-log-pane");
   if (pane) pane.innerHTML = "";
@@ -14388,6 +14548,7 @@ function transcriptAtEnd(pane) {
 async function loadTranscriptPage(opts) {
   const older = !!(opts && opts.older);
   const name = transcriptName;
+  const machine = transcriptMachine;
   const generation = transcriptGeneration;
   if (!name || transcriptBusy) return;
   transcriptBusy = true;
@@ -14398,8 +14559,14 @@ async function loadTranscriptPage(opts) {
   try {
     const q = `limit=${TRANSCRIPT_PAGE}`
       + (older && transcriptCursor !== null ? `&before=${transcriptCursor}` : "");
-    const res = await api(`/api/sessions/${encodeURIComponent(name)}/transcript?${q}`);
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const res = await api(`${transcriptPath(name, machine)}?${q}`);
+    if (!res.ok) {
+      // The daemon's own words when it has them: for a remote shadow the
+      // reason is the host's (transcripts switched off, an older daemon, a
+      // relay that is down), and a bare status explains none of those.
+      const doc = await res.json().catch(() => ({}));
+      throw new Error(doc.error || `HTTP ${res.status}`);
+    }
     const data = await res.json();
     // The reader may have closed it, or walked to another session, while this
     // was in flight; its answer is not theirs any more.
@@ -14444,7 +14611,9 @@ function renderTranscriptPage(data, older) {
 
   if (!records.length) {
     if (!pane.querySelector(".log-rec")) {
-      pane.appendChild(el("div", "log-note", data.source
+      // A shadow's host says `available` where this daemon says `source`:
+      // the path to the file stays on the host (daemon/shadow.py).
+      pane.appendChild(el("div", "log-note", data.source || data.available
         ? "this conversation has nothing to show yet"
         : "no conversation on file for this session"));
     }
@@ -14867,7 +15036,8 @@ function mobileTitle() {
     case "wf": return `workflow · ${
       wfScope && wfScope !== "default" ? wfScope + " · " : ""
     }${shortenPath(wfCwd || "")}`;
-    case "log": return `transcript · ${transcriptName || ""}`;
+    case "log": return `transcript · ${transcriptName || ""}${
+      transcriptMachine ? " @" + transcriptMachine : ""}`;
     case "msg": return `messages · ${traceSession}`;
     case "session": return `session · ${sessName}`;
     case "shadow": return `remote · ${shadowOpen ? shadowKey(shadowOpen.machine, shadowOpen.name) : ""}`;
@@ -15543,6 +15713,10 @@ function parseHash(h) {
   // not need the session to be alive: it comes off claude's jsonl on disk,
   // so an exited record reads exactly like a running one.
   if (parts[0] === "log" && parts[1]) return { page: "log", name: parts[1] };
+  // A remote shadow's transcript: the same page, its pages read from the host.
+  if (parts[0] === "rlog" && parts[1] && parts[2]) {
+    return { page: "log", machine: parts[1], name: parts[2] };
+  }
   // The session's traffic, not the session — a third reading of it, beside
   // the terminal (what it is doing) and the run page (where it has got to).
   // The mesh is in the URL because a session is a different handle in each
@@ -15677,7 +15851,7 @@ function route() {
     case "observer": showView("observer"); globalThis.ObserverPage.open(r.scope, r.name); break;
     case "operator": showView("operator"); globalThis.OperatorPanel.open(); break;
     case "wf": openWorkflow(r.cwd, r.scope); break;
-    case "log": openTranscript(r.name); break;
+    case "log": openTranscript(r.name, r.machine); break;
     case "msg": openTrace(r.name, r.mesh); break;
     case "mesh": openMesh(r.name); break;
     case "flow": openFlowTopology(r.name); break;
@@ -16803,7 +16977,7 @@ let relaySettingsDraft = { id: "", url: "", name: "", token: "", verify_tls: tru
 async function refreshRelaySettings() {
   try {
     const resp = await api("/api/relays");
-    const data = await resp.json();
+    const data = await resp.json().catch(() => ({}));
     if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
     relaySettingsRows = data.relays || [];
     relaySettingsError = "";
@@ -16890,7 +17064,7 @@ function relaySettingsCard() {
     renderWorkspaces();
     try {
       const resp = await api("/api/relays", { method: "POST", body: JSON.stringify(body) });
-      const data = await resp.json();
+      const data = await resp.json().catch(() => ({}));
       if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
       relaySettingsRows = data.relays || [];
       relaySettingsDraft = { id: "", url: "", name: "", token: "", verify_tls: true };
@@ -17326,7 +17500,17 @@ async function refreshBeadsDetail() {
     const data = await resp.json().catch(() => ({}));
     if (beadsFocus === detailWanted) {
       beadsDetail = resp.ok ? data : { error: data.error || `HTTP ${resp.status}` };
-      if (resp.ok && data.root) beadsWorkspace = data.root;
+      // The daemon answers from the board the issue is on, which is not
+      // always the one asked about: a link to an issue carries no board, so
+      // an id not on the loaded page was asked for on the selected one
+      // (claunch-ob8sz). The tabs and lanes follow it to that board. Only a
+      // board the listing has: one it lacks would be reset to the first tab
+      // by the next page read, and that read would come back here again.
+      if (resp.ok && data.root && data.root !== beadsWorkspace
+          && ((beadsCache && beadsCache.boards) || []).some((b) => b.root === data.root)) {
+        beadsWorkspace = data.root;
+        if (beadsOpen && beadsSection === "board") restartBeadsStream();
+      }
     }
   } catch { /* preserve the last detail while the connection is unavailable */ }
 }
@@ -21885,7 +22069,7 @@ async function saveModelChoices(name, reset = false) {
       method: "PUT", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ models }),
     });
-    const data = await resp.json();
+    const data = await resp.json().catch(() => ({}));
     if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
     harnessDetails[name] = data.harness;
     delete modelChoicesDrafts[name];
@@ -34384,10 +34568,11 @@ async function pollTick() {
    local cache and route here is keyed by the bare session name, so a remote
    `s1` let into sessionsCache would be the local `s1` to the kill button,
    the rail keys, the tabs and the grid. So: its own list (`shadowRows`), its
-   own rail section, its own address (#/r/<machine>/<name>), its own
-   terminal, and a card with no buttons. What a shadow can be asked for is
-   exactly what its host daemon serves: the card, an output-only terminal,
-   and the session line. */
+   own kind of rail item (a `shadow` row, drawn in the session list beside
+   the local ones but never keyed by name), its own address
+   (#/r/<machine>/<name>), its own terminal, and a card with no buttons.
+   What a shadow can be asked for is exactly what its host daemon serves:
+   the card, an output-only terminal, and the session line. */
 const SHADOW_POLL_MS = 5000;
 let shadowRows = [];
 let shadowPolledAt = 0;
@@ -34401,8 +34586,132 @@ function shadowHash(machine, name) {
   return `#/r/${encodeURIComponent(machine)}/${encodeURIComponent(name)}`;
 }
 
+/* The shadow's transcript page: the local transcript page, read from the
+   host (openTranscript with a machine). */
+function shadowLogHash(machine, name) {
+  return `#/rlog/${encodeURIComponent(machine)}/${encodeURIComponent(name)}`;
+}
+
 function shadowRow(machine, name) {
   return shadowRows.find((r) => r.machine === machine && r.session === name) || null;
+}
+
+/* The meshes through which the picked project owns this shadow.
+
+   A remote session has no project on this daemon -- the project is a fact
+   of the records kept here -- but every mesh it sits in does: each entry
+   carries the project that mesh is filed under here (daemon/shadow.py). So
+   the shadow belongs to exactly the projects of its meshes, and to no other.
+   "All projects" owns every mesh. */
+function shadowMeshes(row) {
+  return (row && Array.isArray(row.meshes) ? row.meshes : []).filter((m) =>
+    m && m.mesh
+    && (typeof meshInCurrentProject !== "function" || meshInCurrentProject(m)));
+}
+
+/* The shadows the rail draws: those the picked project owns through at
+   least one of their meshes. A shadow whose meshes all belong to other
+   projects is left out, the way a session of another project is. */
+function railShadows(list = shadowRows) {
+  return (list || []).filter((row) => shadowMeshes(row).length > 0);
+}
+
+/* The status filter's word for a shadow. What the host serves is running or
+   exited; paused and archived are states of this daemon's own records, so a
+   shadow is never one. A host that did not answer is not a dead session: its
+   row stays running. */
+function shadowCategory(row) {
+  return row && row.card && row.card.exited ? "killed" : "running";
+}
+
+function shadowMatchesFilter(row, filter = sessionFilter) {
+  const category = shadowCategory(row);
+  if (filter === "running-paused") return category === "running";
+  return filter === "current" ? true : category === filter;
+}
+
+function shadowSearchText(row) {
+  const card = (row && row.card) || {};
+  return [
+    row.session, row.machine, card.handle, card.role, card.note,
+    card.briefing && card.briefing.one_line,
+    ...shadowMeshes(row).flatMap((m) => [m.mesh, m.handle, m.role]),
+  ].filter(Boolean).join(" ").toLowerCase();
+}
+
+/* The rail's search, for a shadow. Substring only: the search by meaning
+   ranks this daemon's sessions, its hits are keyed by bare name, and a
+   remote `s1` must not ride on a hit for the local one -- so while the
+   rail shows meaning hits, no shadow matches. */
+function shadowMatchesSearch(row, search = sessionSearch) {
+  const q = String(search.q || "").trim().toLowerCase();
+  if (!q) return true;
+  if (search.hits) return false;
+  const hay = shadowSearchText(row);
+  return q.split(/\s+/).filter(Boolean).every((t) => hay.includes(t));
+}
+
+/* Other daemons' sessions in lineage order: [row, depth] pairs, a spawned
+   session right under the one that spawned it, the way byLineage lays out
+   the local rows.
+
+   The link is the card's `parent`, the spawning session's name on the host
+   daemon (daemon/shadow.py card). A name is only a name on its own daemon,
+   so a parent is looked for among the shadows of the SAME machine -- never
+   among the local rows, and never on another host, where the same name is
+   somebody else. Only the rows handed in count: the caller passes one rail
+   bucket, and a parent filed under another heading (or not on the rail at
+   all) leaves its child a root there, as regroupDepths does for local rows.
+   A parent the status filter hides does the same, as in byLineage.
+
+   `parent` is optional. A card from a host that does not send it, a host
+   that did not answer (no card), or a parent that is the row itself leaves
+   the row a root. Roots and siblings keep the order they came in. */
+function shadowLineage(shadows) {
+  const rows = shadows || [];
+  const key = (row) => shadowKey(row.machine, row.session);
+  const byKey = new Map(rows.map((row) => [key(row), row]));
+  const visible = (row) => typeof shadowMatchesFilter !== "function"
+    || shadowMatchesFilter(row);
+  const kids = new Map();
+  const roots = [];
+  for (const row of rows) {
+    const parent = row.card && typeof row.card.parent === "string"
+      ? row.card.parent : "";
+    const parentKey = parent ? shadowKey(row.machine, parent) : "";
+    if (parent && parent !== row.session && byKey.has(parentKey) &&
+        visible(row) && visible(byKey.get(parentKey))) {
+      if (!kids.has(parentKey)) kids.set(parentKey, []);
+      kids.get(parentKey).push(row);
+    } else {
+      roots.push(row);
+    }
+  }
+  const out = [];
+  const seen = new Set();
+  const walk = (row, depth) => {
+    const k = key(row);
+    if (seen.has(k)) return;   // cycle guard
+    seen.add(k);
+    out.push([row, depth]);
+    for (const kid of kids.get(k) || []) walk(kid, depth + 1);
+  };
+  for (const root of roots) walk(root, 0);
+  for (const row of rows) if (!seen.has(key(row))) out.push([row, 0]);
+  return out;
+}
+
+/* Which shadow card is the one on screen. Kept off the rail's signature
+   (opening a shadow is not a change to the fleet), so it is painted over
+   whatever rows the last rebuild left. */
+function syncShadowActive() {
+  const list = $("session-list");
+  if (!list) return;
+  for (const card of list.querySelectorAll("li.shadow-card")) {
+    card.classList.toggle("active", currentPage === "shadow" && !!shadowOpen
+      && shadowOpen.machine === card.dataset.machine
+      && shadowOpen.name === card.dataset.session);
+  }
 }
 
 async function refreshShadows(force) {
@@ -34421,7 +34730,9 @@ async function refreshShadows(force) {
   const sig = JSON.stringify(shadowRows);
   if (sig === shadowSig) return;
   shadowSig = sig;
-  renderShadowRail();
+  // Drawn in the session list, among the local rows: a redraw from the
+  // records in hand, no request.
+  refreshSessions({ cached: true });
   if (currentPage === "shadow") renderShadowHead();
 }
 
@@ -34460,6 +34771,16 @@ function renderShadowCard(row, opts) {
   node.dataset.machine = row.machine;
   node.dataset.session = row.session;
   const head = el("div", "shadow-card-head");
+  // A spawned session sits under the one that spawned it (shadowLineage):
+  // the same indent step and └ tick as a local child row. The tick goes in
+  // the head, because the card is a column and a ::before would be a line
+  // of its own.
+  const depth = opts.full ? 0 : Math.max(0, Number(opts.depth) || 0);
+  if (depth) {
+    node.classList.add("shadow-child");
+    node.style.paddingLeft = `${14 + Math.min(depth, 4) * 10}px`;
+    head.appendChild(el("span", "shadow-tick", "└"));
+  }
   const status = shadowStatus(row);
   const dot = el("span", `shadow-dot shadow-dot-${status.replace(/[^a-z_-]/gi, "")}`);
   dot.title = status;
@@ -34481,6 +34802,21 @@ function renderShadowCard(row, opts) {
       }
     }
   }
+  // The host's status checks with this session's answers, as the chips a
+  // local row draws (decorateBriefingRow). Read-only: asking the agent to
+  // report again is a control, and a shadow card carries none.
+  const checks = Array.isArray(card.status_checks) ? card.status_checks : [];
+  if (checks.length) {
+    const line = el("div", "shadow-line shadow-checks");
+    for (const check of checks) {
+      const answer = statusCheckText(check);
+      const chip = el("span", `rail-status-check check-${answer}`,
+        `${statusCheckIcon(check)} ${statusCheckName(check)}`);
+      chip.title = String(check.question || "");
+      line.appendChild(chip);
+    }
+    node.appendChild(line);
+  }
   if (card.cflow) {
     const flow = el("div", "shadow-line shadow-cflow", shadowCflowText(card.cflow));
     if (shadowCflowGated(card.cflow)) flow.classList.add("gated");
@@ -34490,11 +34826,25 @@ function renderShadowCard(row, opts) {
     node.appendChild(el("div", "shadow-line shadow-meshes",
       "mesh: " + meshes.map((m) => `${m.mesh} as ${m.handle}`).join(", ")));
   }
+  // The same session on its own daemon, through the relay that carries it
+  // (daemon/shadow.relay_link). Opening it takes that daemon's token.
+  if (opts.full && typeof row.link === "string" && /^https?:\/\//.test(row.link)) {
+    const line = el("div", "shadow-line shadow-relay");
+    line.appendChild(document.createTextNode("host: "));
+    const a = el("a", "shadow-relay-link", row.link);
+    a.href = row.link;
+    a.target = "_blank";
+    a.rel = "noopener";
+    a.title = `${row.session} on ${row.machine}'s own dashboard, through the relay`;
+    line.appendChild(a);
+    node.appendChild(line);
+  }
   if (row.error) node.appendChild(el("div", "shadow-line shadow-error", row.error));
   if (!opts.full) {
     node.tabIndex = 0;
     node.setAttribute("role", "link");
-    node.title = `${shadowKey(row.machine, row.session)} — another daemon's session, read-only`;
+    node.title = `${shadowKey(row.machine, row.session)} — another daemon's session, read-only`
+      + (depth && card.parent ? ` · spawned by ${card.parent}` : "");
     const open = () => { location.hash = shadowHash(row.machine, row.session); };
     node.addEventListener("click", open);
     node.addEventListener("keydown", (ev) => {
@@ -34508,34 +34858,81 @@ function renderShadowCard(row, opts) {
   return node;
 }
 
-/* The rail's Remote section: one group per daemon, below the local list. */
-function renderShadowRail() {
-  const box = $("shadow-rail");
-  const list = $("shadow-list");
-  if (!box || !list) return;
-  list.replaceChildren();
-  box.classList.toggle("hidden", !shadowRows.length);
-  const count = $("shadow-rail-count");
-  if (count) count.textContent = String(shadowRows.length);
-  const machines = [...new Set(shadowRows.map((r) => r.machine))].sort();
-  for (const machine of machines) {
-    const group = el("li", "shadow-group");
-    group.appendChild(el("div", "shadow-group-head", machine));
-    const inner = el("ul", "shadow-group-list");
-    for (const row of shadowRows.filter((r) => r.machine === machine)) {
-      inner.appendChild(renderShadowCard(row));
-    }
-    group.appendChild(inner);
-    list.appendChild(group);
-  }
-}
-
 /* ---- the shadow view (#/r/<machine>/<name>) ---- */
 let shadowOpen = null;      // {machine, name}
 let shadowTerm = null;
 let shadowSock = null;
 let shadowTicket = 0;
 let shadowRetry = null;
+
+/* How the host's grid is drawn: "scroll" at the normal font, scrolling when
+   the page is smaller than the grid, or "fit", the font changed until the
+   whole grid fits the area. A shadow cannot resize the grid -- that is the
+   host's -- so the font is the only thing there is to fit. Remembered per
+   browser. */
+// Guarded: reduced harnesses evaluate this tail of the file without BASE.
+const SHADOW_FIT_KEY = `claunch_shadow_fit:${typeof BASE === "string" ? BASE : "/"}`;
+const SHADOW_FONT = 15;         // xterm's own default: what "scroll" draws at
+const SHADOW_FONT_MIN = 5;
+const SHADOW_FONT_MAX = 28;
+let shadowFit = (() => {
+  try { return localStorage.getItem(SHADOW_FIT_KEY) === "fit" ? "fit" : "scroll"; } catch {}
+  return "scroll";
+})();
+let shadowFitWatch = null;
+
+function setShadowFit(mode, remember = true) {
+  shadowFit = mode === "fit" ? "fit" : "scroll";
+  if (remember) {
+    try { localStorage.setItem(SHADOW_FIT_KEY, shadowFit); } catch {}
+  }
+  document.querySelectorAll('input[name="shadow-fit"]').forEach((input) => {
+    input.checked = input.value === shadowFit;
+  });
+  fitShadowTerm();
+}
+
+/* Size the font for the mode. In "fit", the grid's drawn size is measured
+   and the font scaled by the ratio the area allows; glyph widths round, so
+   it is measured again after each change (three passes settle it) and the
+   last step only ever shrinks, so the grid never ends a pixel too wide. */
+function fitShadowTerm() {
+  const host = $("shadow-term");
+  if (!host) return;
+  host.classList.toggle("shadow-fit", shadowFit === "fit");
+  if (!shadowTerm) return;
+  if (shadowFit !== "fit") {
+    if (shadowTerm.options.fontSize !== SHADOW_FONT) shadowTerm.options.fontSize = SHADOW_FONT;
+    return;
+  }
+  const screen = host.querySelector(".xterm-screen");
+  const style = getComputedStyle(host);
+  const width = host.clientWidth - parseFloat(style.paddingLeft || 0) - parseFloat(style.paddingRight || 0);
+  const height = host.clientHeight - parseFloat(style.paddingTop || 0) - parseFloat(style.paddingBottom || 0);
+  if (!screen || width <= 0 || height <= 0) return;
+  for (let pass = 0; pass < 3; pass += 1) {
+    const w = screen.offsetWidth, h = screen.offsetHeight;
+    if (!w || !h) return;
+    const size = shadowTerm.options.fontSize;
+    const ratio = Math.min(width / w, height / h);
+    if (ratio >= 1 && ratio < 1.02) return;   // fits, and nothing worth growing into
+    let next = Math.floor(size * ratio * 10) / 10;
+    next = Math.min(SHADOW_FONT_MAX, Math.max(SHADOW_FONT_MIN, next));
+    if (next === size) return;
+    shadowTerm.options.fontSize = next;
+  }
+  if ((screen.offsetWidth > width || screen.offsetHeight > height)
+      && shadowTerm.options.fontSize > SHADOW_FONT_MIN) {
+    shadowTerm.options.fontSize = Math.max(SHADOW_FONT_MIN, shadowTerm.options.fontSize - 0.5);
+  }
+}
+
+if (typeof document !== "undefined" && document.querySelectorAll) {
+  document.querySelectorAll('input[name="shadow-fit"]').forEach((input) =>
+    input.addEventListener("change", () => {
+      if (input.checked) setShadowFit(input.value);
+    }));
+}
 
 function renderShadowHead() {
   const head = $("shadow-head");
@@ -34555,19 +34952,30 @@ function setShadowStatus(text, warn) {
 
 function openShadow(machine, name) {
   showView("shadow");
+  const log = $("shadow-log");
+  if (log) log.href = shadowLogHash(machine, name);
   const same = shadowOpen && shadowOpen.machine === machine && shadowOpen.name === name;
   if (same && shadowSock) { renderShadowHead(); return; }
   closeShadow();
   shadowOpen = { machine, name };
   renderShadowHead();
-  renderShadowRail();
+  syncShadowActive();
   refreshShadows(true);
   const host = $("shadow-term");
   host.replaceChildren();
   // No onData handler is ever attached, and stdin is off: nothing typed at
   // this terminal goes anywhere. The session line below is the one way in.
-  shadowTerm = new Terminal({ scrollback: 2000, disableStdin: true, cursorBlink: false });
+  shadowTerm = new Terminal({
+    scrollback: 2000, disableStdin: true, cursorBlink: false, fontSize: SHADOW_FONT,
+  });
   shadowTerm.open(host);
+  setShadowFit(shadowFit, false);
+  // "fit" follows the area: a window resize, the rail opening, a phone
+  // turning. The host's grid changing is the frames' job (shadowFrame).
+  if (typeof ResizeObserver === "function") {
+    shadowFitWatch = new ResizeObserver(() => fitShadowTerm());
+    shadowFitWatch.observe(host);
+  }
   connectShadow();
 }
 
@@ -34609,10 +35017,12 @@ function shadowFrame(frame) {
     case "init":
       if (frame.cols && frame.rows) shadowTerm.resize(frame.cols, frame.rows);
       shadowTerm.reset();
+      fitShadowTerm();
       setShadowStatus(frame.exited ? "the session has exited — final screen" : "live · read-only");
       return false;
     case "resize":
       if (frame.cols && frame.rows) shadowTerm.resize(frame.cols, frame.rows);
+      fitShadowTerm();
       return false;
     case "exit":
       setShadowStatus("the session exited", true);
@@ -34637,8 +35047,10 @@ function closeShadow() {
   shadowTicket++;
   if (shadowRetry) { clearTimeout(shadowRetry); shadowRetry = null; }
   if (shadowSock) { try { shadowSock.close(); } catch {} shadowSock = null; }
+  if (shadowFitWatch) { shadowFitWatch.disconnect(); shadowFitWatch = null; }
   if (shadowTerm) { try { shadowTerm.dispose(); } catch {} shadowTerm = null; }
   shadowOpen = null;
+  syncShadowActive();
 }
 
 /* The session line, typed into the remote session through its host. Text

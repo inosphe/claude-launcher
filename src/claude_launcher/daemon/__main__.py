@@ -17,7 +17,7 @@ from typing import Optional
 
 from aiohttp import web
 
-from .. import daemon_client, store
+from .. import daemon_client, providers, store
 from . import cflow_clock, paths, restart_notice, resume, runtime_state, window as window_mod
 from . import instance_manifest, session_reminder
 from .api import build_app, notify_shutdown
@@ -32,6 +32,14 @@ log = logging.getLogger("claunch.daemon")
 #: spending its grace window waiting this process out. Never a process exit
 #: code — the restarting daemon itself still exits 0.
 RESTART_CODE = 75
+
+#: The port a restarting named instance hands its successor (see
+#: :func:`_successor_env`). A variable of its own that the successor removes
+#: as it starts: handed over as ``CLAUNCH_DAEMON_PORT`` it stayed in the
+#: successor's environment, reached every session it launched, and a session's
+#: ``claunch -L other`` then auto-started the other instance on this one's
+#: port (claunch-d55af).
+SUCCESSOR_PORT_ENV = "CLAUNCH_SUCCESSOR_PORT"
 
 
 def _setup_logging(foreground: bool) -> None:
@@ -160,6 +168,13 @@ async def _serve(host: str, port: int, cfg: dict, bound: Optional[dict] = None) 
     if bound is not None:
         bound["port"] = actual_port
     log.info("listening on http://%s:%s", host, actual_port)
+    # The same check `claunch daemon start/restart` prints: this daemon keeps
+    # serving, and refuses sessions on these profiles with the same message.
+    try:
+        for problem in providers.compact_problems().values():
+            log.error("%s -- sessions on this profile are refused", problem)
+    except Exception:
+        log.exception("could not check profiles for auto_compact_at")
     # Now that this daemon is announced, settle the account of the boot: read
     # (and clear) whatever asked for it, append this boot to the ledger the
     # next one will compare against, and turn both into debts. Done here
@@ -489,8 +504,8 @@ def _wire_federation(mesh_manager: MeshManager, uplink) -> None:
 
     ``uplink`` is a :class:`~.relay_uplink.RelayPool` in the daemon and a lone
     :class:`~.relay_uplink.RelayUplink` in the tests that drive one directly;
-    both expose ``name``/``connected``/``peer_http``/``peer_list``, which is
-    all this wiring needs.
+    both expose ``name``/``connected``/``peer_http``/``peer_list``/
+    ``carrier_url``, which is all this wiring needs.
 
     The transport is one JSON POST per call, bridged to the peer daemon's
     ``/peer/*`` endpoint through the relay (PEER_OPEN). Transport-level
@@ -531,6 +546,7 @@ def _wire_federation(mesh_manager: MeshManager, uplink) -> None:
     mesh_manager.peer_transport = peer_call
     mesh_manager.peer_streamer = peer_stream
     mesh_manager.relay_connected = lambda: uplink.connected
+    mesh_manager.relay_url_for = uplink.carrier_url
     mesh_manager.peer_lister = uplink.peer_list
 
 
@@ -548,6 +564,8 @@ def main(argv=None) -> int:
         "via the CLAUNCH_DAEMON env var)",
     )
     args = parser.parse_args(argv)
+    # Out of the environment before anything can inherit it.
+    successor_port = os.environ.pop(SUCCESSOR_PORT_ENV, "")
     if args.name:
         # Into the environment (not a variable) so every paths.instance()
         # call — and any child process — sees the same instance.
@@ -555,8 +573,11 @@ def main(argv=None) -> int:
     # A daemon started straight from a shell (``--name``/``CLAUNCH_DAEMON``
     # without the CLI) still gets its instance's home, config and port. One
     # the CLI auto-started inherited them already; apply() leaves that as is.
+    # The port is the exception: a session's shell inherits the rest but not
+    # the port, so the manifest's port is read again for the bind below.
     try:
         instance_manifest.apply()
+        manifest_port = instance_manifest.pinned_port()
     except instance_manifest.InstanceManifestError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
@@ -577,7 +598,9 @@ def main(argv=None) -> int:
         # Named instances share the config file with the default daemon, so
         # its fixed port would collide. They bind an ephemeral port instead
         # (their daemon.json is the discovery channel) unless one is pinned.
-        port = int(os.environ.get("CLAUNCH_DAEMON_PORT") or 0)
+        port = int(
+            os.environ.get("CLAUNCH_DAEMON_PORT") or successor_port or manifest_port or 0
+        )
         log.info("daemon instance %r (state: %s)", paths.instance(), paths.daemon_dir())
     bound: dict = {}
     # asyncio.run() would release nothing until its close() has joined the
@@ -646,13 +669,16 @@ def _successor_env(actual_port: Optional[int]) -> Optional[dict]:
 
     Returned as a copy rather than set on ``os.environ``: a variable poked
     into this process on the way out is still there for everything else
-    sharing it, which in a test run is every later test.
+    sharing it, which in a test run is every later test. And carried in
+    :data:`SUCCESSOR_PORT_ENV`, which the successor removes as it starts,
+    rather than in ``CLAUNCH_DAEMON_PORT``, which would stay in the
+    successor's environment and pass to its sessions.
     """
     if not actual_port or not paths.instance():
         return None
     if os.environ.get("CLAUNCH_DAEMON_PORT"):
         return None
-    return {**os.environ, "CLAUNCH_DAEMON_PORT": str(actual_port)}
+    return {**os.environ, SUCCESSOR_PORT_ENV: str(actual_port)}
 
 
 if __name__ == "__main__":

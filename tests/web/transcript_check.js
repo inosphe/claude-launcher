@@ -128,6 +128,7 @@ function build() {
     "term-log-pane": mkel("div"),
     "log-title": mkel("span"),
     "log-back": mkel("a"),
+    "log-info-tab": mkel("button"),
   };
   const radios = ["raw", "markdown"].map((value) => ({ value, checked: false }));
   const store = {};
@@ -152,7 +153,7 @@ function build() {
 
   const ctx = {};
   const code = [
-    slice("el"), slice("ctxShort"),
+    slice("el"), slice("ctxShort"), slice("shadowHash"), slice("transcriptPath"),
     slice("transcriptIsOpen"), slice("openTranscript"), slice("closeTranscript"),
     slice("onTranscriptScroll"), slice("transcriptAtEnd"),
     slice("loadTranscriptPage"), slice("renderTranscriptPage"),
@@ -178,7 +179,7 @@ ${src.match(/const TRANSCRIPT_FOLLOW_MAX = \d+;/)[0]}
 const TRANSCRIPT_NEAR_TOP = 400;
 const TRANSCRIPT_NEAR_END = 40;
 const TRANSCRIPT_POLL_MS = 4000;
-let transcriptName = null, transcriptCursor = null, transcriptSeen = -1;
+let transcriptName = null, transcriptMachine = null, transcriptCursor = null, transcriptSeen = -1;
 let transcriptMore = false, transcriptBusy = false, transcriptTimer = null;
 let transcriptGeneration = 0;
 ` + code + `
@@ -191,6 +192,7 @@ exports.setFormat = setTranscriptFormat;
 Object.defineProperty(exports, "format", { get: () => transcriptFormat });
 Object.defineProperty(exports, "isOpen", { get: () => transcriptIsOpen() });
 Object.defineProperty(exports, "name", { get: () => transcriptName });
+Object.defineProperty(exports, "machine", { get: () => transcriptMachine });
 Object.defineProperty(exports, "cursor", { get: () => transcriptCursor });
 Object.defineProperty(exports, "more", { get: () => transcriptMore });
 Object.defineProperty(exports, "polling", { get: () => transcriptTimer !== null });
@@ -522,6 +524,87 @@ const texts = (pane) => pane.children
         w.pane.scrollTop === w.pane.scrollHeight, w.pane.scrollTop);
 })();
 
+/* --- a remote shadow's transcript (#/rlog/<machine>/<name>) ---------------
+   The shadow terminal takes no scroll and a claude session keeps nothing in
+   scrollback, so this page is where another daemon's session is read. The
+   same page: only the source of the pages (the host, via /api/shadows) and
+   where Back goes change. And the remote `s8` is never the local `s8` --
+   not to the fetch, not to the "already open" check, not to the info tab,
+   which looks a session up by bare name on THIS daemon. */
+(async () => {
+  const w = build();
+  w.script([{ status: 200, body: {
+    records: recs(60, 100), has_more: true, cursor: 60, total: 100, available: true,
+  } }]);
+  w.api.open("s8", "pcA");
+  await flush();
+  check("a shadow's pages come from its host, through the shadow route",
+        w.calls[0] === "/api/shadows/pcA/s8/transcript?limit=40", w.calls);
+  check("and are drawn like any conversation",
+        texts(w.pane).length === 40 && texts(w.pane)[0] === "60");
+  check("the title names the daemon too",
+        w.nodes["log-title"].textContent === "s8 @pcA", w.nodes["log-title"].textContent);
+  check("Back returns to the shadow view, not the local session of that name",
+        w.nodes["log-back"].href === "#/r/pcA/s8", w.nodes["log-back"].href);
+  check("the info tab is hidden: it would describe the LOCAL s8",
+        w.nodes["log-info-tab"].hidden === true);
+  check("the page knows which daemon it reads", w.api.machine === "pcA");
+
+  w.pane.scrollTop = 0;
+  w.script([{ status: 200, body: { records: recs(20, 60), has_more: true, cursor: 20 } }]);
+  w.api.scroll();
+  await flush();
+  check("scrolling up asks the host for the page above",
+        w.calls.at(-1) === "/api/shadows/pcA/s8/transcript?limit=40&before=60", w.calls);
+  w.pane.scrollTop = w.pane.scrollHeight;
+  w.api.poll();
+  await flush();
+  check("and the follow-forward polls the host too",
+        w.calls.at(-1) === "/api/shadows/pcA/s8/transcript?limit=40", w.calls);
+
+  const before = w.calls.length;
+  w.script([{ status: 200, body: { records: recs(0, 3), has_more: false, cursor: 0,
+                                    source: "/x.jsonl" } }]);
+  w.api.open("s8");
+  await flush();
+  check("the local s8 is another page, not a re-entry of the remote one",
+        w.calls.length === before + 1 && w.calls.at(-1) === "/api/sessions/s8/transcript?limit=40",
+        w.calls.slice(before));
+  check("its records replace the remote ones", texts(w.pane).join(",") === "0,1,2",
+        texts(w.pane));
+  check("and it gets its own title, Back and info tab again",
+        w.nodes["log-title"].textContent === "s8" && w.nodes["log-back"].href === "#/s/s8"
+        && w.nodes["log-info-tab"].hidden === false && w.api.machine === null);
+})();
+
+(async () => {
+  const w = build();
+  w.script([{ status: 400, body: {
+    error: "peer 'pcA' rejected /peer/shadow/transcript: this daemon does not show its " +
+           "sessions' transcripts to peers (daemon.shadow_transcript is off)",
+  } }]);
+  w.api.open("s9", "pcA");
+  await flush();
+  const note = w.pane.children[0] && w.pane.children[0].textContent;
+  check("a refusal reaches the reader in the host's words, not as a bare status",
+        typeof note === "string" && note.includes("daemon.shadow_transcript is off"), note);
+
+  const empty = build();
+  empty.script([{ status: 200, body: { records: [], has_more: false, available: true } }]);
+  empty.api.open("s9", "pcA");
+  await flush();
+  check("a host with a file but nothing in it says the conversation is empty",
+        empty.pane.children[0].textContent === "this conversation has nothing to show yet",
+        empty.pane.children[0].textContent);
+  const none = build();
+  none.script([{ status: 200, body: { records: [], has_more: false, available: false } }]);
+  none.api.open("s9", "pcA");
+  await flush();
+  check("and one with no file says there is none on file",
+        none.pane.children[0].textContent === "no conversation on file for this session",
+        none.pane.children[0].textContent);
+})();
+
 /* --- the markup and wiring the code reaches for -------------------------- */
 {
   const html = fs.readFileSync(
@@ -544,6 +627,14 @@ const texts = (pane) => pane.children
         /log:\s*"log-view"/.test(src));
   check("the hash parser knows it",
         /parts\[0\] === "log" && parts\[1\]/.test(src));
+  check("and a shadow's address, onto the same page with its daemon",
+        /parts\[0\] === "rlog" && parts\[1\] && parts\[2\]\) \{\s*return \{ page: "log", machine: parts\[1\], name: parts\[2\] \}/.test(src));
+  check("which route() hands to the page",
+        /case "log": openTranscript\(r\.name, r\.machine\); break;/.test(src));
+  check("a hidden info tab is never selected, arrow keys included",
+        /const showInfo=value==="info"&&!tabs\[1\]\.hidden;/.test(
+          fs.readFileSync(path.join(__dirname, "..", "..", "src", "claude_launcher", "web",
+                                    "static", "observer.js"), "utf8")));
   check("and route() stops its poll on the way out, like every other page",
         /r\.page !== "log"\) closeTranscript\(\)/.test(src));
   check("the pane is a real scroller — this is the whole feature, so pin it",

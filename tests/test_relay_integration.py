@@ -9,14 +9,14 @@ A request that clears only the outer gate still can't reach a protected daemon
 endpoint. Only after authenticating to the daemon *through the tunnel* does it
 succeed — which is exactly how the SPA behaves.
 
-Skipped unless the psmux-relay binary is available (built in the sibling
-worktree, or pointed to by ``PSMUX_RELAY_EXE``).
+Skipped unless the psmux-relay binary is available (built where
+``_relay_exe.relay_roots`` looks, the relay-tunnel worktree first, or pointed
+to by ``PSMUX_RELAY_EXE``).
 """
 
 from __future__ import annotations
 
 import asyncio
-import os
 import subprocess
 import time
 from pathlib import Path
@@ -28,34 +28,20 @@ from claude_launcher.daemon.api import build_app
 from claude_launcher.daemon.manager import SessionManager
 from claude_launcher.daemon.relay_uplink import RelayUplink
 
+from _relay_exe import find_relay_exe, relay_roots, skip_reason
+
 PASSWORD = "browser-pw-int"
 BACKEND_TOKEN = "backend-token-int-xyz"
 DAEMON_TOKEN = "daemon-sekrit-int"
 NAME = "intpc"
 
 
-def _find_relay_exe() -> Path | None:
-    env = os.environ.get("PSMUX_RELAY_EXE")
-    if env and Path(env).is_file():
-        return Path(env)
-    exe = "psmux-relay.exe" if os.name == "nt" else "psmux-relay"
-    # sibling mux-relay worktree (and its main checkout), both debug and release
-    roots = [
-        Path("F:/works/mux-relay/.claude/worktrees/relay-tunnel/target"),
-        Path("F:/works/mux-relay/target"),
-    ]
-    for root in roots:
-        for prof in ("debug", "release"):
-            p = root / prof / exe
-            if p.is_file():
-                return p
-    return None
-
-
-RELAY_EXE = _find_relay_exe()
-pytestmark = pytest.mark.skipif(
-    RELAY_EXE is None, reason="psmux-relay binary not found (build the relay-tunnel worktree)"
-)
+#: The relay-tunnel worktree before the main checkout -- the reverse of the
+#: other relay modules. This module's own copy of the lookup had that order,
+#: and sharing the lookup did not change which binary it picks.
+RELAY_ROOTS = relay_roots()[::-1]
+RELAY_EXE = find_relay_exe(RELAY_ROOTS)
+pytestmark = pytest.mark.skipif(RELAY_EXE is None, reason=skip_reason(RELAY_ROOTS))
 
 
 def _free_port() -> int:

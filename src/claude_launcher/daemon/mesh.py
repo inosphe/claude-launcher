@@ -1417,6 +1417,10 @@ class MeshManager:
         #: daemon/shadow.py); raises PeerUnreachable like peer_transport.
         self.peer_streamer: Optional[Callable] = None
         self.relay_connected: Callable[[], bool] = lambda: False
+        #: (machine) -> the ws(s) URL of the relay that carries that machine,
+        #: "" when there is none (RelayPool.carrier_url) — the shadow card's
+        #: link to the session on its own daemon (daemon/shadow.py).
+        self.relay_url_for: Callable[[str], str] = lambda machine: ""
         #: async () -> [machine names] — the other backends on our relay
         #: (RelayUplink.peer_list); None when no uplink or an old relay.
         self.peer_lister: Optional[Callable] = None
@@ -7085,9 +7089,13 @@ class MeshManager:
         """Every other daemon's member of every mesh held here, grouped per
         (machine, session) — one session in two meshes is one shadow.
 
-        Each row: ``{machine, session, meshes: [{mesh, wire, handle, role,
-        roles, linked}]}``. ``linked`` says whether this daemon holds a link
-        to that machine in that mesh — without one there is nobody to ask.
+        Each row: ``{machine, session, meshes: [{mesh, wire, project,
+        handle, role, roles, linked}]}``. ``linked`` says whether this daemon
+        holds a link to that machine in that mesh — without one there is
+        nobody to ask. ``project`` is the project the mesh is filed under
+        here (the default spelled out, as the mesh list spells it): a remote
+        session has no project on this daemon, so the meshes it sits in are
+        what decide which project's rail shows it.
         """
         rows: Dict[Tuple[str, str], dict] = {}
         for mesh in self.list():
@@ -7103,6 +7111,7 @@ class MeshManager:
                 row["meshes"].append({
                     "mesh": mesh.name,
                     "wire": mesh.wire_name,
+                    "project": mesh.project or projects.DEFAULT,
                     "handle": member.handle,
                     "role": member.role,
                     "roles": list(member.roles),

@@ -450,6 +450,7 @@ CHECKS = [
         "pollselect_check.js",
         "beads_check.js",
         "beadsstream_check.js",
+        "beadsdetailroot_check.js",
         "ragsearch_check.js",
         "relaysettings_check.js",
         "profilesettings_check.js",
@@ -503,6 +504,7 @@ CHECKS = [
         "operator_check.js",
         "worktreespage_check.js",
         "shadowcard_check.js",
+        "railshadowmix_check.js",
 ]
 
 

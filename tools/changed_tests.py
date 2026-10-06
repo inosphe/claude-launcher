@@ -211,7 +211,7 @@ from typing import List, Optional
 # Pinned by tests/test_gates_run_this_checkout.py.
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from claude_launcher import test_window
+from claude_launcher import pytest_basetemp, test_window
 
 
 def _load_sweep():
@@ -678,12 +678,36 @@ def mentioning(repo: Path, name: str) -> List[str]:
     return [rel for rel, text in test_texts(repo).items() if term in text]
 
 
+def naming_module(repo: Path, stem: str) -> List[str]:
+    """Test modules that name the test module ``stem`` as a whole word.
+
+    :func:`needle` searches a compound stem as a substring, and every test
+    module's stem is compound, so ``test_mesh`` also matched the modules that
+    name ``test_mesh_v2``, ``test_mesh_ops`` and nine more. On the change
+    ``8b57829c`` made to ``tests/test_mesh.py`` 12 of the 15 modules
+    ``tools/related_surfaces.py`` listed had no ``test_mesh`` of their own
+    (``claunch-6w2az``). ``\\b`` treats ``_`` and digits as part of the word,
+    so ``test_mesh.py``, ``from test_mesh import`` and ``test_mesh::`` match
+    and ``test_mesh_v2`` does not.
+
+    The boundary is ASCII (``re.ASCII``). A str pattern's ``\\w`` is Unicode,
+    where Hangul is a word character too, so ``test_mesh를`` -- a module name
+    with a particle attached, as prose in this repository writes it -- had no
+    boundary after the name and was not found, though the substring search it
+    replaced found it (``claunch-nupin``).
+    """
+    word = re.compile(rf"\b{re.escape(stem)}\b", re.ASCII)
+    return [rel for rel, text in test_texts(repo).items() if word.search(text)]
+
+
 def named_by(repo: Path, rel: str) -> List[str]:
     """Rules 2c and 3a for one changed path: the test modules that name it.
 
     Empty for a dunder source file (2c, :func:`_is_dunder` -- its stem names
     nothing). :func:`map_one` selects these for every path except a test
-    module, where rule 1 runs the module itself and stops.
+    module, where rule 1 runs the module itself and stops; for a test module
+    the answer is read only by ``tools/related_surfaces.py``, and the search
+    is :func:`naming_module`, on the module name as a whole word.
 
     One function because two tools ask it. ``tools/related_surfaces.py``
     lists the tests that name a changed file and says of them "the gate runs
@@ -695,6 +719,8 @@ def named_by(repo: Path, rel: str) -> List[str]:
     p = Path(rel)
     if _is_source(p) and _is_dunder(p):
         return []
+    if _is_test_module(p):
+        return naming_module(repo, p.stem)
     return mentioning(repo, p.name)
 
 
@@ -956,13 +982,16 @@ KEEP_BASETEMPS = 8
 
 
 def basetemp_root() -> Path:
-    """Where the per-run scratch trees live. Short on purpose -- see below."""
-    return Path("C:/t")
+    """Where the per-run scratch trees live: ``C:/t`` on Windows, short on
+    purpose (see below), and a directory of the launcher home elsewhere,
+    where ``C:/t`` would resolve inside the checkout under test
+    (``claude_launcher.pytest_basetemp``)."""
+    return pytest_basetemp.root()
 
 
 def session_basetemp(session: str, *, now: Optional[float] = None) -> str:
-    """``C:/t/<session>c<MMDDHHMMSS>`` -- identity in the prefix, generation
-    in the suffix.
+    """``<root>/<session>c<MMDDHHMMSS>`` -- identity in the prefix, generation
+    in the suffix. ``<root>`` is :func:`basetemp_root`, ``C:/t`` on Windows.
 
     The string does three jobs at once and the split is what makes them fit:
 
@@ -988,12 +1017,13 @@ def session_basetemp(session: str, *, now: Optional[float] = None) -> str:
     silently broke the third against consecutive ones. A generation suffix
     settles both, and costs the second nothing.
 
-    Length: measured ceiling is 48 characters (xdist nests ``popen-gwN/`` and
-    the transcript tests fold an absolute cwd back into a filename, so the
-    path is ``2*basetemp+162`` against MAX_PATH). ``C:/t/`` + session + ``c``
-    + ten digits is 21 for a five-character session, against the old fixed
-    name's 11 -- the generation spends ten of the 37 characters that were
-    spare, and pinned tests hold both numbers.
+    Length (Windows): measured ceiling is 48 characters (xdist nests
+    ``popen-gwN/`` and the transcript tests fold an absolute cwd back into a
+    filename, so the path is ``2*basetemp+162`` against MAX_PATH). ``C:/t/``
+    + session + ``c`` + ten digits is 21 for a five-character session,
+    against the old fixed name's 11 -- the generation spends ten of the 37
+    characters that were spare, and pinned tests hold both numbers. POSIX
+    has no such ceiling, which is what lets its root be a long absolute path.
     """
     stamp = time.strftime("%m%d%H%M%S", time.localtime(now))
     return f"{basetemp_root().as_posix()}/{session}c{stamp}"
@@ -1487,7 +1517,8 @@ def main(argv: Optional[list] = None) -> int:
         default=None,
         help=(
             "pytest scratch root for this run (default: a fresh "
-            "C:/t/<session>c<MMDDHHMMSS>). Pass one to pin a run's timeline "
+            "<root>/<session>c<MMDDHHMMSS>, <root> being C:/t on Windows and "
+            "<launcher home>/basetemp elsewhere). Pass one to pin a run's timeline "
             "to a name you chose; it must not be a path another run is using, "
             "because pytest empties it at startup"
         ),
@@ -1673,6 +1704,10 @@ def main(argv: Optional[list] = None) -> int:
     session = os.environ.get("CLAUNCH_SESSION", "worker")
     for gone in prune_basetemps(session):
         print(f"pruned old basetemp: {gone}", file=sys.stderr)
+    # pytest creates the basetemp but not the root it sits in. A pinned
+    # --basetemp names its own parent, so only the default root is made here.
+    if args.basetemp is None:
+        pytest_basetemp.ensure(basetemp_root())
 
     # Before the window, not after: a refusal here starts no run, so it must
     # not hold a slot other sessions are queueing for.

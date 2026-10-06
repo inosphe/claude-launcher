@@ -22,7 +22,7 @@ board record, a session in the main checkout has no worktree to be crowded out
 of -- so "this axis said nothing" must not read as "this axis said no", and
 the exit code must still come from whichever axes did speak.
 
-The daemon and git are both faked. What the tool does with them is read three
+The daemon and git are both faked. What the tool does with them is read four
 routes and two ``rev-parse`` answers; a real daemon would add a process and a
 port, and a real repository would add a checkout, and neither would pin
 anything this does not.
@@ -50,7 +50,7 @@ workspace_check = _load()
 
 
 class _FakeClient:
-    """The three routes the tool reads, and a record of what it asked for."""
+    """The four routes the tool reads, and a record of what it asked for."""
 
     def __init__(self, routes):
         self.routes = routes
@@ -133,6 +133,20 @@ def _session(cwd, issue="claunch-aaaaa"):
 
 def _sessions(*rows):
     return {"sessions": list(rows)}
+
+
+def _roster(*members, mesh="claunch"):
+    """The shape ``GET /api/mesh`` answers with, trimmed to what is read.
+
+    ``members`` are ``(session, role)`` pairs, all hosted on this machine.
+    """
+    return {"meshes": [{
+        "name": mesh,
+        "members": [
+            {"handle": f"{s}-h", "session": s, "role": role, "roles": [role], "local": True}
+            for s, role in members
+        ],
+    }]}
 
 
 def _run(mod, **kw):
@@ -244,6 +258,115 @@ def test_the_main_checkout_is_not_judged_on_occupancy(gate, repos, capsys):
     out = capsys.readouterr().out
     assert "MATCH" in out
     assert "[?   ] occupancy" in out
+
+
+def _occupied_by(gate, repos, row, roster):
+    """A round in the linked worktree with one more live session ``row`` in it."""
+    routes = {
+        "/api/sessions/s1": _session(repos["mine"]),
+        "/api/beads/claunch-aaaaa": _issue(repos["mine"]),
+        "/api/sessions": _sessions(
+            {"name": "s1", "cwd": str(repos["worktree"]), "status": "busy"},
+            {"cwd": str(repos["worktree"]), "status": "idle", **row},
+        ),
+    }
+    if roster is not None:
+        routes["/api/mesh"] = roster
+    return gate(routes)
+
+
+def test_this_sessions_own_reviewer_child_does_not_occupy_the_worktree(gate, repos, capsys):
+    """``reviewer-ensure`` stands its reviewer in the worker's worktree.
+
+    Spawned with no worktree, the child's directory is the parent's, and it
+    lives until the run ends -- so counting it failed every round after the
+    first (claunch-kg3oe.1.1: round 2 of run-8d3410ce needed a person to pass
+    this gate over s38, the run's own reviewer). The pass still names it, so
+    a reader can tell "nobody here" from "only the reviewer here".
+    """
+    _occupied_by(gate, repos, {"name": "s2", "parent": "s1"}, _roster(("s1", "worker"), ("s2", "reviewer")))
+    assert _run(workspace_check, cwd=repos["worktree"]) == 0
+    out = capsys.readouterr().out
+    assert "MATCH" in out
+    assert "[ok  ] occupancy" in out and "reviewer child (s2)" in out
+
+
+def test_a_child_that_is_not_a_reviewer_still_occupies_the_worktree(gate, repos, capsys):
+    """Being this session's child is not the exemption; being its reviewer is.
+
+    A worker child given no worktree of its own is exactly the second writer
+    this axis exists for.
+    """
+    _occupied_by(gate, repos, {"name": "s2", "parent": "s1"}, _roster(("s1", "worker"), ("s2", "worker")))
+    assert _run(workspace_check, cwd=repos["worktree"]) == 1
+    out = capsys.readouterr().out
+    assert "MISMATCH" in out and "[FAIL] occupancy" in out and "s2" in out
+
+
+def test_a_reviewer_subrole_does_not_make_a_writer_a_reviewer(gate, repos, capsys):
+    """The primary role sets a member's stance; a subrole does not change it.
+
+    A worker that also answers review questions (``roles: [worker,
+    reviewer]``) still writes, so it is counted.
+    """
+    roster = _roster(("s1", "worker"), ("s2", "worker"))
+    roster["meshes"][0]["members"][1]["roles"] = ["worker", "reviewer"]
+    _occupied_by(gate, repos, {"name": "s2", "parent": "s1"}, roster)
+    assert _run(workspace_check, cwd=repos["worktree"]) == 1
+    assert "[FAIL] occupancy" in capsys.readouterr().out
+
+
+def test_another_sessions_reviewer_still_occupies_the_worktree(gate, repos, capsys):
+    """The exemption is this session's own reviewer, not any reviewer.
+
+    A reviewer that some other session stood here is not reading this round's
+    branch, and nothing about it was arranged by this run.
+    """
+    _occupied_by(gate, repos, {"name": "s2", "parent": "s9"}, _roster(("s2", "reviewer"), ("s9", "worker")))
+    assert _run(workspace_check, cwd=repos["worktree"]) == 1
+    out = capsys.readouterr().out
+    assert "MISMATCH" in out and "[FAIL] occupancy" in out and "s2" in out
+
+
+def test_a_reviewer_on_another_machine_is_not_taken_for_a_local_child(gate, repos, capsys):
+    """Session names are unique per machine only; a mirrored mesh lists others.
+
+    A remote member that happens to share the child's session name and holds
+    ``reviewer`` says nothing about the session standing here.
+    """
+    roster = _roster(("s1", "worker"), ("s2", "reviewer"))
+    roster["meshes"][0]["members"][1]["local"] = False
+    _occupied_by(gate, repos, {"name": "s2", "parent": "s1"}, roster)
+    assert _run(workspace_check, cwd=repos["worktree"]) == 1
+    assert "[FAIL] occupancy" in capsys.readouterr().out
+
+
+def test_with_no_child_here_the_roster_is_not_read(gate, repos, capsys):
+    """No child in the worktree: the axis reads what it read before, and no more.
+
+    The roster route is left out of the fake on purpose -- asking for it would
+    be recorded, and the answer is decided without it.
+    """
+    client = _occupied_by(gate, repos, {"name": "s2"}, None)
+    assert _run(workspace_check, cwd=repos["worktree"]) == 1
+    out = capsys.readouterr().out
+    assert "[FAIL] occupancy" in out and "s2" in out
+    assert "/api/mesh" not in client.asked
+
+
+def test_an_unreadable_roster_excludes_nobody_and_says_so(gate, repos, capsys):
+    """Without the roster the role cannot be read, so the child is counted.
+
+    That is the answer the axis gave before reviewer children were excluded,
+    and the line says the roster was the reason, so the person at the
+    approval knows a working daemon route would have changed it.
+    """
+    roster = workspace_check.daemon_client.DaemonClientError("mesh roster timed out")
+    _occupied_by(gate, repos, {"name": "s2", "parent": "s1"}, roster)
+    assert _run(workspace_check, cwd=repos["worktree"]) == 1
+    out = capsys.readouterr().out
+    assert "[FAIL] occupancy" in out
+    assert "cannot read the mesh roster" in out
 
 
 def test_an_unreadable_issue_does_not_sink_a_round_the_other_axes_pass(gate, repos, capsys):

@@ -148,8 +148,39 @@ def test_a_named_instance_hands_its_port_to_the_successor(home, monkeypatch):
     monkeypatch.delenv("CLAUNCH_DAEMON_PORT", raising=False)
 
     spawned = _drive_main(monkeypatch, daemon_main.RESTART_CODE, bound_port=45671)
-    assert spawned[0]["CLAUNCH_DAEMON_PORT"] == "45671"
+    assert spawned[0][daemon_main.SUCCESSOR_PORT_ENV] == "45671"
+    assert "CLAUNCH_DAEMON_PORT" not in spawned[0]
     assert "CLAUNCH_DAEMON_PORT" not in os.environ
+
+
+def test_the_successor_binds_the_handed_port_and_keeps_it_from_its_sessions(
+    home, monkeypatch
+):
+    """The other half of the handoff: the successor binds the port it was
+    handed and removes the variable before serving, so a session it launches
+    (whose environment starts from the daemon's own) carries no port.
+
+    A port left in a session's environment reached any daemon that session
+    auto-started with ``claunch -L other``, and that instance then tried to
+    bind this one's port (claunch-d55af).
+    """
+    monkeypatch.setenv(paths.INSTANCE_ENV, "inst")
+    monkeypatch.delenv("CLAUNCH_DAEMON_PORT", raising=False)
+    monkeypatch.setenv(daemon_main.SUCCESSOR_PORT_ENV, "45671")
+    seen = {}
+
+    async def fake_serve(host, port, cfg, bound=None):
+        seen["port"] = port
+        seen["env"] = dict(os.environ)
+        return 0
+
+    monkeypatch.setattr(daemon_main, "_setup_logging", lambda foreground: None)
+    monkeypatch.setattr(daemon_main, "_serve", fake_serve)
+    assert daemon_main.main([]) == 0
+
+    assert seen["port"] == 45671
+    assert daemon_main.SUCCESSOR_PORT_ENV not in seen["env"]
+    assert "CLAUNCH_DAEMON_PORT" not in seen["env"]
 
 
 def test_a_pinned_port_is_left_alone(home, monkeypatch):

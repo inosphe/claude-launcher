@@ -860,7 +860,7 @@ const details = {};
 let hintParent = null;
 const hintCtx = {};
 new Function("exports", "$", "spawnParent", "profileDetails",
-  "let newProfileOptions = [];\n" +
+  "let newProfileOptions = [], profileCompactProblems = {};\n" +
   sliceFrom("function baseProfileName(") +
   sliceFrom("function spawnProfileSelector(") +
   sliceFrom("function newProfileUi(") +
@@ -945,7 +945,7 @@ check("a broken profile reports its own error, not a guess at the harness",
 /* Served against a page that predates the row, like every other rule here. */
 const bareHint = {};
 new Function("exports", "$", "spawnParent", "profileDetails",
-  "let newProfileOptions = [];\n" +
+  "let newProfileOptions = [], profileCompactProblems = {};\n" +
   sliceFrom("function baseProfileName(") +
   sliceFrom("function spawnProfileSelector(") +
   sliceFrom("function newProfileUi(") +

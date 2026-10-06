@@ -661,13 +661,30 @@ def test_basetemp_still_says_whose_run_it_is(monkeypatch):
     assert path.startswith(changed_tests.basetemp_root().as_posix())
 
 
-def test_basetemp_stays_under_the_measured_path_ceiling():
+def test_basetemp_stays_under_the_measured_path_ceiling(monkeypatch):
     """48 characters, measured, not guessed: xdist nests ``popen-gwN/`` under
     it and the transcript tests fold an absolute cwd back into a filename, so
     the path is ``2*basetemp+162`` against MAX_PATH -- 48 passes at 258, 49
-    fails at 260. The generation suffix has to be spent out of that budget."""
+    fails at 260. The generation suffix has to be spent out of that budget.
+    MAX_PATH is Windows', so this is the Windows root, taken on any host."""
+    monkeypatch.setattr(changed_tests.pytest_basetemp, "_windows", lambda: True)
     path = changed_tests.session_basetemp("s1234567890", now=1_000_000)
+    assert path.startswith("C:/t/s1234567890c"), path
     assert len(path) <= 48, path
+
+
+def test_the_posix_basetemp_is_absolute_and_outside_the_checkout(monkeypatch):
+    """claunch-wt12o.5: on POSIX ``C:/t`` is a *relative* path, so pytest
+    resolved it against the cwd -- the checkout under test -- and either made
+    ``C:/t/...`` there or died in INTERNALERROR with no ``C:`` to put it in.
+    Off Windows the root is the launcher home's ``basetemp`` directory."""
+    from claude_launcher import config
+
+    monkeypatch.setattr(changed_tests.pytest_basetemp, "_windows", lambda: False)
+    path = Path(changed_tests.session_basetemp("s99", now=1_000_000))
+    assert path.is_absolute(), path
+    assert path.parent == config.launcher_home() / "basetemp"
+    assert SCRIPT.parents[1] not in path.parents, path
 
 
 def test_a_pinned_basetemp_reaches_the_command():
@@ -723,6 +740,34 @@ def test_pruning_survives_a_locked_directory(tmp_path, monkeypatch):
 
     monkeypatch.setattr(changed_tests.shutil, "rmtree", boom)
     assert changed_tests.prune_basetemps("s99", keep=1) == []
+
+
+def test_the_gate_makes_the_default_root_before_it_runs(
+    repo, gate, tmp_path, monkeypatch
+):
+    """pytest creates the basetemp but not the directory it sits in
+    (``getbasetemp``'s ``mkdir`` has no ``parents``). On a host that never
+    had the root, the first gate died in INTERNALERROR with
+    ``FileNotFoundError`` and ran nothing -- measured on Linux, claunch-wt12o.5."""
+    root = tmp_path / "never" / "made"
+    monkeypatch.setattr(changed_tests, "basetemp_root", lambda: root)
+    _write(repo, "src/pkg/mesh.py", "x = 2\n")
+
+    assert gate() == 0
+    assert root.is_dir()
+
+
+def test_a_pinned_basetemp_leaves_the_default_root_alone(
+    repo, gate, tmp_path, monkeypatch
+):
+    """A pinned ``--basetemp`` names its own parent; the default root is not
+    this run's to make."""
+    root = tmp_path / "never" / "made"
+    monkeypatch.setattr(changed_tests, "basetemp_root", lambda: root)
+    _write(repo, "src/pkg/mesh.py", "x = 2\n")
+
+    assert gate("--basetemp", str(tmp_path / "pinned")) == 0
+    assert not root.exists()
 
 
 def test_the_script_runs_as_a_script_and_its_exit_status_reaches_the_shell():
@@ -950,6 +995,51 @@ def test_map_one_selects_the_naming_tests_named_by_finds_except_for_a_test_modul
     else:
         assert named == {"tests/test_names_all.py"}
         assert named <= picked
+
+
+def test_a_test_module_is_named_as_a_whole_word_and_the_selection_does_not_move(repo):
+    """``test_mesh`` is a substring of ``test_mesh_v2``, and on ``8b57829c``'s
+    change to ``tests/test_mesh.py`` 12 of the 15 modules listed as naming it
+    only named a longer module (``claunch-6w2az``). A test module's name is
+    now searched as a whole word. The gate's selection does not read that
+    answer -- rule 1 runs the module alone -- and a source path is still
+    searched by :func:`changed_tests.needle`, so neither selection moves."""
+    _seed_on_base(
+        repo,
+        {
+            "src/claude_launcher/workflows/flow-x.yaml": "name: flow-x\n",
+            "tests/test_imports_it.py": "from test_mesh import helper\n",
+            "tests/test_node_id.py": 'NODE = "tests/test_mesh.py::test_it"\n',
+            "tests/test_longer_name.py": 'NODE = "tests/test_mesh_v2.py::test_it"\n',
+            "tests/test_other_flow.py": 'load("flow-x-remote.yaml")\n',
+        },
+    )
+    rel = "tests/test_mesh.py"
+    assert set(changed_tests.named_by(repo, rel)) == {
+        "tests/test_imports_it.py",
+        "tests/test_node_id.py",
+    }
+    assert changed_tests.map_one(repo, rel) == [rel]
+    assert changed_tests.select(repo, [rel]) == [rel]
+    flow = "src/claude_launcher/workflows/flow-x.yaml"
+    assert "tests/test_other_flow.py" in changed_tests.named_by(repo, flow)
+    assert "tests/test_other_flow.py" in changed_tests.map_one(repo, flow)
+
+
+def test_a_test_module_name_with_a_hangul_particle_attached_is_still_named(repo):
+    """The whole-word search is ASCII: ``test_mesh를`` names ``test_mesh``
+    (Hangul is not an ASCII word character, so the name ends before it), and
+    ``test_mesh_v2를`` still does not (``claunch-nupin``)."""
+    _seed_on_base(
+        repo,
+        {
+            "tests/test_says_it.py": '"""test_mesh를 고치면 이 테스트도 본다."""\n',
+            "tests/test_says_longer.py": '"""test_mesh_v2를 고치면 이 테스트도 본다."""\n',
+        },
+    )
+    named = set(changed_tests.named_by(repo, "tests/test_mesh.py"))
+    assert "tests/test_says_it.py" in named
+    assert "tests/test_says_longer.py" not in named
 
 
 def test_the_selection_only_grows_as_changed_paths_are_added(repo):
