@@ -19,6 +19,7 @@ uv.lock
 
 # cflow run state (per-directory, machine-local)
 .cflow/
+.cflow2/
 
 # OS
 .DS_Store

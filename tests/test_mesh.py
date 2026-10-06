@@ -1724,6 +1724,7 @@ def test_merged_server_offers_both_toolsets():
         operator_mcp, search_mcp, glossary_mcp,
     )
     from claude_launcher.cflow import mcp as cflow_mcp
+    from claude_launcher.cflow2 import mcp as cflow2_mcp
 
     names = [t["name"] for t in mcp_server.TOOLS]
     assert names == [t["name"] for t in cflow_mcp.TOOLS] + [
@@ -1732,7 +1733,8 @@ def test_merged_server_offers_both_toolsets():
         t["name"] for t in window_mcp.TOOLS
     ] + [t["name"] for t in wait_mcp.TOOLS] + [t["name"] for t in observer_mcp.TOOLS] + [
         t["name"] for t in operator_mcp.TOOLS
-    ] + [t["name"] for t in search_mcp.TOOLS] + [t["name"] for t in glossary_mcp.TOOLS]
+    ] + [t["name"] for t in search_mcp.TOOLS] + [t["name"] for t in glossary_mcp.TOOLS] \
+        + [t["name"] for t in cflow2_mcp.TOOLS]
     assert len(set(names)) == len(names)  # merge() guards this too
     listed = mcp_server.SERVER.handle(
         {"jsonrpc": "2.0", "id": 1, "method": "tools/list"}

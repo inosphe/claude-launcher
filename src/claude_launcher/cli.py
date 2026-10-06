@@ -22,6 +22,7 @@ from . import (
     cli_beads,
     cli_commits,
     cli_cflow,
+    cli_cflow2,
     cli_connections,
     cli_loops,
     cli_mesh,
@@ -1666,6 +1667,7 @@ def build_parser() -> argparse.ArgumentParser:
     cli_sessions.register(sub)
     cli_mesh.register(sub)
     cli_cflow.register(sub)
+    cli_cflow2.register(sub)
     cli_sync.register(sub)
     cli_workspace.register(sub)
     cli_project.register(sub)
