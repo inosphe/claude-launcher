@@ -55,16 +55,25 @@ const onboardFailureNotices =
     "handle 's59' is already taken in mesh 'gds6@shared-daemon-main'");
 }
 
-/* ---- a join that only PENDED names who has to answer ------------------- */
+/* ---- a join that only PENDED is a wait, not a failure ------------------ */
 {
   const said = onboardFailureNotices({
     mesh: { ok: false, pending: { pending: true, primary: "shared-daemon-main" } },
   });
   assert.strictEqual(said.length, 1, JSON.stringify(said));
-  assert.strictEqual(said[0].title, "mesh join failed");
+  assert.strictEqual(said[0].title, "mesh join pending",
+    "a pended join has not failed -- the primary has not answered yet");
   assert.ok(/shared-daemon-main/.test(said[0].sub), said[0].sub);
   assert.ok(/approve/.test(said[0].sub), said[0].sub);
   assert.ok(!/taken|error/.test(said[0].sub), said[0].sub);
+
+  // An error wins over a pend: `_join` returns one or the other, and if both
+  // ever arrive the reader needs the failure, not the wait.
+  const both = onboardFailureNotices({
+    mesh: { ok: false, error: "relay refused", pending: { primary: "m" } },
+  });
+  assert.strictEqual(both[0].title, "mesh join failed", JSON.stringify(both));
+  assert.strictEqual(both[0].sub, "relay refused", JSON.stringify(both));
 }
 
 /* ---- a failure with nothing to say still says something ---------------- */

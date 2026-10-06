@@ -10717,8 +10717,13 @@ function onboardFailureNotices(info) {
   const mesh = (info || {}).mesh;
   if (mesh && mesh.ok === false) {
     const pending = mesh.pending || null;
+    // A remote join that pended is not a failure — the primary has not
+    // answered yet. Titled "failed", the card told the reader the opposite
+    // of what its own sub-line said (claunch-mv4nu). The title follows the
+    // same branch as the sub: an error is a failure, a pend is a wait.
+    const waiting = !mesh.error && !!pending;
     out.push({
-      title: "mesh join failed",
+      title: waiting ? "mesh join pending" : "mesh join failed",
       sub: mesh.error
         || (pending
               ? `waiting for ${pending.primary || "the mesh owner"} to approve`

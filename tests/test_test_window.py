@@ -188,6 +188,49 @@ def test_a_report_that_cannot_reach_the_daemon_costs_nothing(monkeypatch):
     assert not test_window.report_result("g-1", {"outcome": "passed"})
 
 
+def test_the_wait_is_announced_before_the_call_that_blocks(monkeypatch, capsys):
+    """A run killed while it queues must still say what it was waiting for.
+
+    The POST blocks until the grant or the budget runs out, and a caller's
+    shell ``timeout`` can expire while it sits in that queue — in which case
+    nothing after the POST ever runs. So the line has to be out before it.
+    Measured 2026-10-06: a six-module run queued 1187s for its grant under an
+    800s timeout and left no output at all, and the session that ran it read
+    that as a stalled checkout and wrote it into a round report.
+    """
+    class _Killed(_Client):
+        def post(self, path, body, **kwargs):
+            # Where a shell timeout lands: this never returns.
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr(test_window.daemon_client, "connect", lambda: _Killed())
+    with pytest.raises(KeyboardInterrupt):
+        test_window.acquire("targeted", wait=800)
+    assert (
+        "waiting for the targeted test window (up to 800s)"
+        in capsys.readouterr().err
+    )
+
+    # No budget means nothing blocks, so there is nothing to announce.
+    monkeypatch.setattr(test_window.daemon_client, "connect", lambda: _Client())
+    test_window.acquire("targeted", wait=0).release()
+    assert "waiting for the" not in capsys.readouterr().err
+
+
+def test_a_refusal_says_how_long_it_waited(monkeypatch):
+    """A refusal that came back at once and one that spent the budget queued
+    are different events; without the elapsed half they read the same."""
+    class _Refusing(_Client):
+        def post(self, path, body, **kwargs):
+            return {"granted": False, "reason": "the targeted cap (3) is reached"}
+
+    monkeypatch.setattr(test_window.daemon_client, "connect", lambda: _Refusing())
+    with pytest.raises(test_window.WindowUnavailable) as caught:
+        test_window.acquire("targeted", wait=0)
+    assert "targeted cap (3)" in str(caught.value)
+    assert "after 0s" in str(caught.value)
+
+
 def test_a_pytest_session_maps_to_the_result_fields():
     stats = {"passed": [1, 2, 3], "failed": [1], "error": [], "skipped": [1, 2]}
     result = test_window.pytest_result(1, stats, 6, 12.34)
