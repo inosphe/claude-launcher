@@ -276,9 +276,12 @@ class _Scope:
     scope_id: Optional[str] = None
     #: block params of the procedure being compiled -> (raw tree, the call
     #: site's scope, line): ``splice`` compiles the tree in that scope
-    blocks: Optional[Dict[str, Tuple[Any, "_Scope", int]]] = None
+    blocks: Optional[Dict[str, Tuple[Any, Optional["_Scope"], int]]] = None
     #: inside a spliced block: returns name their target explicitly
     in_splice: bool = False
+    #: inside a par branch (its own region): a block spliced here does not
+    #: reach the call site's loops either
+    in_region: bool = False
 
 
 @dataclass
@@ -1199,11 +1202,27 @@ def _compile_splice(ctx: _Ctx, sc: _Scope, m: Dict[str, Any], parent: Optional[s
                                      f"(block params: {known})")
     raw, site, bline = blocks[name]
     nid = _alloc(ctx, path_id)
+    if site is None:
+        # a default block is the procedure's own text: compiled right here,
+        # in the procedure's scope (its loops, its $params) -- no call site
+        node = _add(ctx, ir.Node(id=nid, type=ir.T_SEQ, parent=parent,
+                                 src=_where(sc.file, line),
+                                 props={"children": [], "pass_prev": False,
+                                        "splice": {"block": name, "call": None}}))
+        node.props["children"] = [_compile_tree(ctx, sc, raw, nid, f"{nid}.{name}", bline)]
+        return nid
     node = _add(ctx, ir.Node(id=nid, type=ir.T_SEQ, parent=parent, src=_where(sc.file, line),
                              props={"children": [], "pass_prev": False,
                                     "splice": {"block": name, "call": sc.scope_id}}))
+    # names resolve at the call site; a raise travels up from here (like any
+    # outcome), so it is checked against the catches at the splice position,
+    # which include the call site's
     inner = _Scope(**{**site.__dict__, "prefix": sc.prefix, "procs": sc.procs,
-                      "in_splice": True})
+                      "trys": sc.trys, "in_splice": True})
+    if sc.in_region:
+        # spliced into a par branch: the branch is its own region, so the
+        # call site's loops are out of reach (as for a continue written there)
+        inner = _Scope(**{**inner.__dict__, "loops": (), "in_region": True})
     node.props["children"] = [_compile_tree(ctx, inner, raw, nid, f"{nid}.{name}", bline)]
     return nid
 
@@ -1384,7 +1403,7 @@ def _b_par(ctx, sc, node, value, m, line):
         raise ctx.err(sc.file, line, "par needs at least one branch")
     node.props = {"branches": {}, "settle": _settle(ctx, sc, spec.get("settle"), ir.SETTLE_ALL, "par", line)}
     # A branch is its own region: loops/trys outside do not reach into it.
-    bsc = _Scope(**{**sc.__dict__, "loops": ()})
+    bsc = _Scope(**{**sc.__dict__, "loops": (), "in_region": True})
     for name, tree in branches.items():
         bline = _key_line(branches, name, line)
         node.props["branches"][str(name)] = _compile_tree(ctx, bsc, tree, node.id, f"{node.id}.{name}", bline)
@@ -1434,7 +1453,7 @@ def _inline(ctx: _Ctx, sc: _Scope, scope_node: ir.Node, pname: str, with_raw: An
         if proc.params and k not in proc.params:
             raise ctx.err(sc.file, line, f"call {pname!r}: unknown parameter {k!r} "
                           f"(declared: {', '.join(proc.params)})")
-    blocks: Dict[str, Tuple[Any, _Scope, int]] = {}
+    blocks: Dict[str, Tuple[Any, Optional[_Scope], int]] = {}
     callee_scope = _Scope(file=proc.file, tasks=proc.tasks, prefix=scope_node.id + "/",
                           loops=(), trys=sc.trys, procs=sc.procs + (pname,), in_proc=True,
                           scope_id=scope_node.id)
@@ -1446,8 +1465,9 @@ def _inline(ctx: _Ctx, sc: _Scope, scope_node: ir.Node, pname: str, with_raw: An
                                              f"tree (a task name, a list or a mapping)")
             blocks[pn] = (raw_with[pn], sc, _key_line(raw_with, pn, line))
         elif decl.get("default") is not None:
-            # a default block is the procedure's own text: its own scope
-            blocks[pn] = (decl["default"], callee_scope, proc.line)
+            # a default block is the procedure's own text: compiled where it
+            # is spliced, in the procedure's own scope (no call site)
+            blocks[pn] = (decl["default"], None, proc.line)
         elif not check_required:
             raise ctx.err(sc.file, line, f"procedure {pname!r}: block parameter {pn!r} has no "
                                          f"default; a group member has no call site to pass it")
@@ -1505,11 +1525,18 @@ def _call_cases(ctx: _Ctx, sc: _Scope, node: ir.Node, pname: str, m: Dict[str, A
                                       f"-- the cases keys are the choices")
     if not cases:
         raise ctx.err(sc.file, cline, "cases needs at least one choice")
+    # outcomes P can end with besides ok: an answer named like one would be
+    # read as that outcome (ask-user's reframe), so they are not choices
+    reserved = {ir.OUTCOME_FAIL} | {o for o in (proc.returns or {}) if o != ir.OUTCOME_OK}
     names: List[str] = []
     for key, tree in cases.items():
         kline = _key_line(cases, key, cline)
         if not isinstance(key, str) or not _OUTCOME_RE.match(key):
             raise ctx.err(sc.file, kline, f"cases: {key!r} is not a choice name")
+        if key.lower() in {r.lower() for r in reserved}:
+            raise ctx.err(sc.file, kline, f"cases: {key!r} is an outcome of {pname!r} "
+                                          f"({', '.join(sorted(reserved))}), not a choice -- "
+                                          f"handle it with on or catch")
         if any(key.lower() == n.lower() for n in names):
             raise ctx.err(sc.file, kline, f"cases: duplicate choice {key!r}")
         if tree is None:

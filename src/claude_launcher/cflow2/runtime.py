@@ -559,7 +559,7 @@ def _enter(r: Run, node_id: str, parent: Optional[str], role: str,
     node = r.chart.node(node_id)
     iid = r.new_id(node_id)
     base = dict(r.inst[parent]["env"]) if parent and parent in r.inst else {}
-    if node.get("splice"):
+    if (node.get("splice") or {}).get("call"):
         # the procedure's own bindings (its foreach item, waterfall prev) are
         # not the block's: only the call site's environment
         base = _splice_env(r, parent, node.get("splice") or {}, base)
@@ -4562,6 +4562,10 @@ def _brief_ask(r: Run, iid: str, node: ir.Node, spec: Dict[str, Any]) -> Optiona
             if got != want:
                 errors.append(f"the brief's options ({', '.join(q_mod.option_names(norm, decl))}) "
                               f"must be exactly the fixed choices ({', '.join(choices)})")
+            else:
+                # the definition branches on these names (cases): the answer
+                # must come back spelled as the definition wrote them
+                norm = _respell_choices(norm, decl, choices)
     cands = spec["from"]
     if spec.get("from_param") and not errors:
         raw_from = param(spec["from_param"])
@@ -4585,6 +4589,22 @@ def _brief_ask(r: Run, iid: str, node: ir.Node, spec: Dict[str, Any]) -> Optiona
     return {"format": fmt, "brief": norm, "options": q_mod.ask_options(norm, decl),
             "from": cands, "question_text": q_mod.render_text(norm, decl),
             "require_reason": bool(param(spec.get("require_reason")))}
+
+
+def _respell_choices(brief: Dict[str, Any], decl: Dict[str, Any],
+                     choices: List[str]) -> Dict[str, Any]:
+    """The brief with its option names (and its recommendation) in the fixed
+    choices' spelling; they already match without case."""
+    spell = {c.casefold(): c for c in choices}
+    out = json.loads(json.dumps(brief))
+    for item in out.get(decl["options"]) or []:
+        name = item.get("name")
+        if isinstance(name, str) and name.casefold() in spell:
+            item["name"] = spell[name.casefold()]
+    rec = decl.get("recommendation")
+    if rec and isinstance(out.get(rec), str) and out[rec].casefold() in spell:
+        out[rec] = spell[out[rec].casefold()]
+    return out
 
 
 def _open_ask(r: Run, iid: str, node: ir.Node) -> None:

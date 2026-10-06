@@ -12,6 +12,7 @@ from __future__ import annotations
 import textwrap
 from pathlib import Path
 
+import pytest
 import yaml
 
 import claude_launcher
@@ -418,7 +419,7 @@ def _medium_flow(tmp_path):
                       "with": {"landing": "$data.landing", "force_pr": "$params.force_pr"}},
                      "after"]}
     from claude_launcher.cflow2 import frontend
-    chart = frontend.compile_text(yaml.safe_dump(flow, allow_unicode=True),
+    chart = frontend.compile_text(yaml.safe_dump(flow, allow_unicode=True, sort_keys=False),
                                   resolve_include=layers.resolver(str(tmp_path)))
     return chart
 
@@ -474,3 +475,80 @@ def test_pr_or_local_user_local_answer(tmp_path, monkeypatch):
     landing = runtime.RunStore(str(tmp_path), "m").load_state()["data"]["landing"]
     assert landing["medium"] == "local"
     assert landing["reason"] == "user chose local while PR was blocked"
+
+
+# The six medium scenarios of REVIEW s88 (claunch-yq80p.11): the pr-or-local
+# skeleton drives the same task order and data as the two loops it replaced
+# (measured old == new at c28cb8a6 / 577b5cce); pinned here as values.
+_SETUP = {"medium": "pr", "reason": "gh ok", "remote": "origin", "repo": "o/r", "base": "master"}
+_PR = {"url": "u", "number": 7, "branch": "b", "base": "master", "tip": "t", "issues": []}
+_LANDED = {**_SETUP, "pr_url": None, "pr_number": None}
+_NONE = {"remote": None, "repo": None, "base": None, "pr_url": None, "pr_number": None}
+MEDIUM_SCENARIOS = {
+    "landing-ok": (False, [("remote-setup", "ok", _SETUP), ("pr-open", "ok", _PR)],
+                   ["remote-setup", "pr-open", "after"],
+                   {"landing": _LANDED, "published": {**_SETUP, "pr_url": "u", "pr_number": 7}}),
+    "landing-retry-ok": (False, [("remote-setup", "blocked", {"reason": "R1"}),
+                                 ("answer", "retry", None), ("remote-setup", "ok", _SETUP),
+                                 ("pr-open", "failed", {"reason": "F1"})],
+                         ["remote-setup", "ask-frame", "remote-setup", "pr-open", "after"],
+                         {"landing": _LANDED,
+                          "published": {"medium": "local", "reason": "F1", **_NONE}}),
+    "landing-local": (False, [("remote-setup", "blocked", {"reason": "R1"}),
+                              ("answer", "local", None)],
+                      ["remote-setup", "ask-frame", "pr-open"],
+                      {"landing": {"medium": "local",
+                                   "reason": "user chose local while PR was blocked", **_NONE}}),
+    "force-retry-local": (True, [("remote-setup", "ok", _SETUP),
+                                 ("pr-open", "failed", {"reason": "F1"}), ("answer", "retry", None),
+                                 ("pr-open", "failed", {"reason": "F2"}), ("answer", "local", None)],
+                          ["remote-setup", "pr-open", "ask-frame", "pr-open", "ask-frame", "after"],
+                          {"landing": _LANDED,
+                           "published": {"medium": "local",
+                                         "reason": "user chose local after pr-open failed",
+                                         **_NONE}}),
+    "force-retry-ok": (True, [("remote-setup", "ok", _SETUP),
+                              ("pr-open", "failed", {"reason": "F1"}), ("answer", "retry", None),
+                              ("pr-open", "ok", _PR)],
+                       ["remote-setup", "pr-open", "ask-frame", "pr-open", "after"],
+                       {"landing": _LANDED,
+                        "published": {**_SETUP, "pr_url": "u", "pr_number": 7}}),
+    # a brief spelling 'Local' answers the definition's 'local' (Z2)
+    "case-Local": (False, [("remote-setup", "blocked", {"reason": "R1"}),
+                           ("answer", "Local", ("retry", "Local"))],
+                   ["remote-setup", "ask-frame", "pr-open"],
+                   {"landing": {"medium": "local",
+                                "reason": "user chose local while PR was blocked", **_NONE}}),
+}
+
+
+def _brief2(n1="retry", n2="local"):
+    def opt(n):
+        return {"name": n, "summary": "s", "risk": "r", "outcome": "o",
+                "reversibility": "reversible"}
+    return {"problem": "p", "options": [opt(n1), opt(n2)], "recommendation": n2, "why": "w"}
+
+
+@pytest.mark.parametrize("scen", list(MEDIUM_SCENARIOS))
+def test_pr_or_local_scenarios(scen, tmp_path, monkeypatch):
+    from claude_launcher.cflow2 import frontend, runtime
+    monkeypatch.delenv("CLAUNCH_SESSION", raising=False)
+    force, steps, order, data = MEDIUM_SCENARIOS[scen]
+    chart = _medium_flow(tmp_path)
+    kw = {"cwd": str(tmp_path), "scope": "m", "now": 1.0}
+    st = runtime.start(chart, caps={}, params={"force_pr": force}, **kw)
+    seen = []
+    for label, outcome, value in steps:
+        seen.append(st["tasks"][0]["label"])
+        if label == "answer":
+            frame = next(t for t in st["tasks"] if t["label"] == "ask-frame")
+            runtime.report(frame["instance"], "ok", {"brief": _brief2(*(value or ()))}, **kw)
+            runtime.approve(None, decision=outcome, reason="why", **kw)
+            st = runtime.status(**kw)
+        else:
+            iid = next(t["instance"] for t in st["tasks"] if t["label"] == label)
+            st = runtime.report(iid, outcome, value, **kw)
+    seen.extend(t["label"] for t in st.get("tasks") or [])
+    assert seen == order
+    state = runtime.RunStore(str(tmp_path), "m").load_state()
+    assert {k: v for k, v in state["data"].items() if k in ("landing", "published")} == data

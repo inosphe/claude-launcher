@@ -562,3 +562,234 @@ def test_cases_errors():
           call: plain
           cases: {a: x}
     """))
+
+
+# -- review fixes (REVIEW s88: Z1, Z2, Z5) -----------------------------------------
+
+
+def test_a_default_block_runs_in_the_procedures_scope(tmp_path):
+    """Z1: the default is the procedure's text -- its $params, its loops."""
+    d = Drv(tmp_path, """
+        params: {who: {default: run}}
+        nodes:
+          w: {prompt: W}
+        procedures:
+          p:
+            params:
+              who: {type: str, default: proc}
+              b:
+                type: block
+                default:
+                  seq: [own]
+                  on: {again: {continue: inner}}
+            nodes:
+              own: {prompt: "own ${params.who}", returns: {ok: {}, again: {}}}
+            body:
+              id: inner
+              loop: {max: 3, while: "true", do: [{splice: b}, {break: inner}]}
+        body: {call: p, with: {who: given}}
+    """)
+    assert d.prompt("own") == "own given"
+    d.report("own", "again")  # the procedure's own loop
+    assert d.tasks() == ["own"]
+    d.report("own")
+    assert d.st["status"] == "done"
+
+
+def test_a_block_spliced_into_a_par_branch_cannot_reach_the_call_sites_loop():
+    """Z5: a par branch is its own region, for a spliced block too."""
+    msg = err("""
+        nodes:
+          s: {prompt: S}
+          t: {prompt: T}
+        procedures:
+          fan:
+            params: {b: {type: block}}
+            body:
+              par:
+                branches: {one: {splice: b}, two: t}
+        body:
+          id: outer
+          loop:
+            max: 2
+            while: "true"
+            do:
+              call: fan
+              with: {b: [s, {continue: outer}]}
+    """)
+    assert "not an enclosing loop" in msg or "outside any loop" in msg
+
+
+def test_cases_take_the_definitions_spelling_of_a_choice(tmp_path):
+    """Z2: a brief may spell an option 'Local'; the decision comes back as the
+    definition's 'local' so its case is taken (ask-common, fixed choices)."""
+    from claude_launcher.cflow2 import layers
+    src = """
+        include: [ask-common]
+        nodes:
+          go-retry: {prompt: R}
+          go-local: {prompt: L}
+        body:
+          call: ask-user
+          with: {topic: medium, require_reason: true}
+          cases: {retry: go-retry, local: go-local}
+    """
+    chart = frontend.compile_text("cflow: 2\nname: t\n" + textwrap.dedent(src),
+                                  resolve_include=layers.resolver(str(tmp_path)))
+    st = runtime.start(chart, cwd=str(tmp_path), scope="t", caps={}, now=T0)
+    kw = {"cwd": str(tmp_path), "scope": "t", "now": T0}
+    brief = {"problem": "p", "options": [
+        {"name": "Retry", "summary": "s", "risk": "r", "outcome": "o", "reversibility": "reversible"},
+        {"name": "Local", "summary": "s", "risk": "r", "outcome": "o", "reversibility": "reversible"}],
+        "recommendation": "Local", "why": "w"}
+    iid = next(t["instance"] for t in st["tasks"] if t["label"] == "ask-frame")
+    st = runtime.report(iid, "ok", {"brief": brief}, **kw)
+    (ask,) = st["asks"]
+    # the definition's spelling (reframe is the extra answer every brief ask takes)
+    assert [o["name"] for o in ask["options"]][:2] == ["retry", "local"]
+    assert ask["brief"]["recommendation"] == "local"
+    runtime.approve(None, decision="LOCAL", reason="this round", **kw)
+    st = runtime.status(**kw)
+    assert st["status"] == "running" and [t["label"] for t in st["tasks"]] == ["go-local"]
+
+
+# -- REVIEW s88 reproductions, pinned (R2, R3, R5-R9, R11) --------------------------
+
+
+def test_r2_a_block_spliced_twice_and_a_procedure_called_twice(tmp_path):
+    src = """
+        nodes:
+          w: {prompt: W}
+        procedures:
+          p:
+            params: {b: {type: block}}
+            body: [{splice: b}, {splice: b}]
+        body: [{call: p, with: {b: w}}, {call: p, with: {b: [w]}}]
+    """
+    chart = C(src)
+    ids = [n.id for n in chart.nodes.values() if n.label == "w"]
+    assert len(ids) == 4 and len(set(ids)) == 4
+    assert [str(f) for f in check.check(chart)] == []
+    d = Drv(tmp_path, src)
+    for _ in range(4):
+        assert d.tasks() == ["w"]
+        d.report("w")
+    assert d.st["status"] == "done"
+
+
+def test_r3_continue_across_a_par_branch_is_refused_written_or_spliced():
+    assert "outside any loop" in err("""
+        nodes:
+          w: {prompt: W}
+        body:
+          loop: {max: 2, while: "true", do: {par: {branches: {a: [w, {continue: null}]}}}}
+    """)
+    assert "outside any loop" in err("""
+        nodes:
+          w: {prompt: W}
+          x: {prompt: X}
+        procedures:
+          p:
+            params: {b: {type: block}}
+            body: {par: {branches: {a: {splice: b}, c: x}}}
+        body:
+          id: L
+          loop: {max: 2, while: "true", do: {call: p, with: {b: [w, {continue: L}]}}}
+    """)
+
+
+def test_r5_a_cases_calls_own_result_is_the_branchs_value(tmp_path):
+    """Z4 (documented): with an id on a cases call, $result.<id>.value is the
+    taken branch's value; the decision is reached through bind."""
+    d = Drv(tmp_path, _cases("""
+        nodes:
+          x: {prompt: X}
+          h: {prompt: "h ${result.q.value} ${data.d.decision}"}
+        body:
+          id: q
+          call: pick
+          bind: d
+          cases: {go: x}
+          on: {ok: h}
+    """))
+    d.report("decide", "ok", {"decision": "go"})
+    assert d.tasks() == ["x"]
+    d.report("x", "ok", {"k": 1})
+    assert d.prompt("h") == 'h {"k": 1} go'  # the branch's value; the decision via bind
+
+
+def test_r6_a_decision_outside_the_cases_fails_the_run(tmp_path):
+    """Z3 (documented): no else. A real ask cannot answer outside its choices;
+    a procedure that only has the declared shape can."""
+    d = Drv(tmp_path, _cases("""
+        nodes:
+          x: {prompt: X}
+        body: {call: pick, cases: {go: x}}
+    """))
+    st = d.report("decide", "ok", {"decision": "other"})
+    assert st["status"] == "failed" and "no cond branch" in str(st.get("value"))
+
+
+def test_r7_outcome_names_are_not_choices():
+    """Z8: fail and the procedure's other outcomes (pick's reframe)."""
+    for key in ("reframe", "fail", "Reframe"):
+        assert "is an outcome of 'pick'" in err(_cases("""
+            nodes:
+              x: {prompt: X}
+            body: {call: pick, cases: {%s: x, go: x}}
+        """ % key)), key
+
+
+def test_r8_null_filling_is_for_an_explicit_return_only(tmp_path):
+    """Z6 (documented): a task report and a procedure ending without return
+    keep their values as given."""
+    d = Drv(tmp_path, """
+        nodes:
+          t: {prompt: T, returns: {ok: {a: str, b: "str?"}}}
+          show: {prompt: S}
+        procedures:
+          p:
+            returns: {ok: {a: str, b: "str?"}}
+            nodes:
+              u: {prompt: U, returns: {ok: {a: str, b: "str?"}}}
+            body: u
+        body: [t, {id: p, call: p}, show]
+    """)
+    d.report("t", "ok", {"a": "1"})
+    d.report("u", "ok", {"a": "2"})
+    res = runtime.RunStore(d.cwd, "t").load_state()["result"]
+    assert res["t"]["value"] == {"a": "1"} and res["p"]["value"] == {"a": "2"}
+
+
+def test_r9_a_single_lit_or_expr_key_is_the_explicit_form():
+    """Z7 (documented): a mapping whose only key is lit or expr is the form,
+    so a dict literal of that shape is written {lit: {lit: 3}}."""
+    def given(src):
+        return next(n for n in C(src).nodes.values() if n.type == ir.T_SCOPE).get("with_")
+    base = """
+        nodes:
+          w: {prompt: W}
+        procedures:
+          p:
+            params: {cfg: {type: dict}}
+            body: w
+        body: {call: p, with: {cfg: %s}}
+    """
+    assert given(base % "{lit: 3}")["cfg"] == {"lit": 3}
+    assert given(base % "{lit: {lit: 3}}")["cfg"] == {"lit": {"lit": 3}}
+    assert given(base % "{expr: 5}")["cfg"] == {"expr": "5"}
+
+
+def test_r11_a_blocks_raise_is_caught_by_the_procedures_try(tmp_path):
+    src = """
+        nodes:
+          w: {prompt: W}
+        procedures:
+          p:
+            params: {b: {type: block}}
+            body: {try: {splice: b}, catch: {oops: w}}
+        body: {call: p, with: {b: {raise: oops}}}
+    """
+    assert C(src).warnings == []
+    d = Drv(tmp_path, src)
+    assert d.tasks() == ["w"]
