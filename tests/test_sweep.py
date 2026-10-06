@@ -1710,7 +1710,24 @@ def test_the_gate_follows_master_past_the_merge_but_not_off_it(
     _git(repo, "checkout", "-q", "-b", "side", merge)
     _git(repo, "commit", "-q", "--allow-empty", "-m", "off master")
     side = _git(repo, "rev-parse", "side").strip()
-    _merged(monkeypatch, json.dumps({"repo": str(repo), "master": side[:12]}))
+    _merged(monkeypatch, json.dumps({"repo": str(repo), "master": side}))
     capsys.readouterr()
     assert _check_merged(receipts) == sweep.CANNOT_TELL
     assert "is not contained in master" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("name", ["master", "HEAD", "HEAD~0", "SHORT", "master^{commit}"])
+def test_the_master_must_be_a_full_sha(repo, leader, receipts, monkeypatch, capsys, name):
+    """s88's S1b on claunch-6xg: a ref name or an expression resolves in any
+    repository, so a record naming the leader's checkout with master "HEAD"
+    would pass on that checkout's receipt. Only a full sha ties the record
+    to the merge; a short one is a prefix that may resolve anywhere."""
+    assert _run(leader, receipts, "--command", GREEN) == 0
+    tip = _git(leader, "rev-parse", "master").strip()
+    value = tip[:12] if name == "SHORT" else name
+    _merged(monkeypatch, json.dumps({"repo": str(leader), "master": value}))
+    assert _check_merged(receipts) == sweep.CANNOT_TELL
+    assert "not a full commit sha" in capsys.readouterr().err
+    # and the same record with the full sha does pass: the format is the gate
+    _merged(monkeypatch, json.dumps({"repo": str(leader), "master": tip}))
+    assert _check_merged(receipts) == 0

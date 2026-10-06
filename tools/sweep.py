@@ -886,6 +886,9 @@ def cmd_run(args) -> int:
     return 0 if proc.returncode == 0 else 1
 
 
+_FULL_SHA_RE = re.compile(r"^(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})$")
+
+
 def merged_repo(env_name: str, environ=None) -> "tuple[Path, str]":
     """The repository a leader's integrate step merged into, read from the
     run record the step bound (``bind: merged`` in improv-leader-v2, handed to
@@ -919,11 +922,21 @@ def merged_repo(env_name: str, environ=None) -> "tuple[Path, str]":
     if not path.is_absolute():
         raise LookupError(f"${env_name}.repo is not an absolute path: {repo!r}")
     master = record.get("master")
-    if not isinstance(master, str) or not master.strip() or master.strip().startswith("-"):
+    if not isinstance(master, str) or not master.strip():
         raise LookupError(
             f"${env_name} carries no 'master': nothing ties its 'repo' to the "
             f"merge the integrate step made")
-    return path, master.strip()
+    # A full hexadecimal object name only. A ref name ("master", "HEAD") or an
+    # expression resolves in ANY repository, so it would tie the record to
+    # whatever 'repo' says -- the leader's checkout included (s88, S1b). A
+    # short sha is refused for the same reason in a weaker form: it is a
+    # prefix that may happen to name something in the wrong repository.
+    master = master.strip()
+    if not _FULL_SHA_RE.match(master):
+        raise LookupError(
+            f"${env_name}.master is not a full commit sha (40 or 64 hex "
+            f"digits): {master!r}")
+    return path, master.lower()
 
 
 def check_merged_record(repo: Path, master: str, branch: str) -> str:

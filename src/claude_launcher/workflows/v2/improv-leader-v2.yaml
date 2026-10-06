@@ -196,7 +196,9 @@ nodes:
       master와 맞춘다(fast-forward push, 원격 메시 규칙).
       결과: 하나 이상 머지했으면 ok이고, `repo`에 master를 옮긴 저장소의
       절대경로(`git -C <대상 저장소> rev-parse --show-toplevel`의 출력)를,
-      `master`에 그 저장소에서 되확인한 머지 뒤 tip을 담는다. 게이트는 그
+      `master`에 그 저장소에서 되확인한 머지 뒤 tip의 전체 sha(40자, `git -C
+      <대상 저장소> rev-parse master`의 출력)를 담는다 — 브랜치 이름이나 짧은
+      sha는 판정 불가로 멈춘다. 게이트는 그
       master가 repo의 커밋이고 지금 master에 포함되는지 확인한다 — 둘이 다른
       저장소를 가리키면 판정 불가로 멈춘다. 이 값은 data.merged로 묶여 스윕 단계의 verify가 그
       저장소의 영수증을 찾는 근거가 된다 — 비우거나 이 런의 cwd로 대신 적으면
