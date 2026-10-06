@@ -9,8 +9,11 @@
    2. a row's line draws one pill per queued issue in the worker's order,
       tinted by status, the next one outlined, then one dashed pill per
       created-but-unheld issue, capped together with a "+n" that names the
-      rest; each pill links to the issue and its click does not attach the
-      row;
+      rest; each issue pill links to the issue and its click does not attach
+      the row, and carries NO native `title` -- the hover card below is its
+      only affordance, so the browser's own tooltip cannot land on top of it
+      (claunch-1qa8e). The "+n" is a count rather than an issue: it opens no
+      card, so it keeps the `title` that names what it stands for;
    3. hovering a pill fills the one card with the issue's id, status,
       priority, title, facts (including who created it, when that differs
       from the assignee) and the head of its description (headings dropped,
@@ -193,7 +196,8 @@ check("tinted by status", pills.map((p) => p.classes.has(p.text === "x-1" ? "in_
       [true, true, "rail-bead in_ready", "rail-bead in_review"]);
 check("the next one is outlined", pills.map((p) => p.classes.has("next")), [false, true, false, false]);
 check("a pill links to the issue", pills[0].href, "#/beads/x-1");
-check("and says what it is on hover", pills[0].title, "x-1 [in_progress] now");
+check("and carries no native tooltip -- the hover card is the only one",
+      pills.map((p) => p.title), ["", "", "", ""]);
 const more = line.find("rail-bead-more")[0];
 check("the rest is counted and named", [more.text, more.title], ["+2", "x-5 [blocked]\nx-6 [open]"]);
 let stopped = 0;
@@ -210,8 +214,7 @@ const wcPills = withCreated.find("rail-bead").filter((p) => !p.classes.has("rail
 check("assigned work first, then a follow-up, marked apart",
       wcPills.map((p) => [p.text, p.classes.has("created")]),
       [["m-1", false], ["m-2", true]]);
-check("a follow-up says it is unassigned to the session on hover",
-      wcPills[1].title, "m-2 [open] (created, unassigned to s1) filed");
+check("a follow-up carries no native tooltip either", wcPills[1].title, "");
 check("a lane with only follow-ups still draws pills",
       ctx.line("s1", { issues: [], created: [{ id: "n-1", status: "open" }], summary: {} })
         .find("rail-bead").map((p) => p.text),

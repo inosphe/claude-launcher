@@ -6142,7 +6142,10 @@ function railCwdLine(s) {
    The pill is a label, not the record: hovering opens a small card with the
    issue's title, status, priority and the head of its description, and a
    click goes to the issue on the Beads page. Both read off the queues
-   payload, which carries the listing's rows in full -- no second fetch. */
+   payload, which carries the listing's rows in full -- no second fetch.
+   The card is an issue pill's ONLY hover affordance: a native `title` would
+   draw the browser's own tooltip a second late, on top of the card that is
+   already open (see claunch-1qa8e). */
 let railBeads = new Map();   // session name -> lane (issues, created, summary)
 let railBeadsAt = 0;         // when the queues were last asked for
 let railBeadsBusy = false;
@@ -6229,7 +6232,8 @@ function railBeadsLine(name, lane) {
   for (const { i, created } of shown) {
     const pill = el("a", `rail-bead ${i.status || ""}${created ? " created" : ""}`, i.id || "?");
     pill.href = "#/beads/" + encodeURIComponent(i.id || "");
-    pill.title = `${i.id} [${i.status || "?"}]${created ? " (created, unassigned to " + name + ")" : ""} ${i.title || ""}`.trim();
+    // No `title` here: the hover card already says the id, the status, the
+    // title and the facts, and a native tooltip would land on top of it.
     if (!created && i.id && i.id === next) pill.classList.add("next");
     pill.addEventListener("click", (e) => e.stopPropagation());   // the row attaches; the pill navigates
     pill.addEventListener("mouseenter", () => showBeadPop(pill, i, name));
@@ -6237,6 +6241,8 @@ function railBeadsLine(name, lane) {
     line.appendChild(pill);
   }
   if (all.length > shown.length) {
+    // This one keeps its `title`: it is a count, not an issue, so it opens no
+    // card and the native tooltip is the only way to see what it stands for.
     const more = el("span", "rail-bead rail-bead-more", `+${all.length - shown.length}`);
     more.title = all.slice(shown.length).map(({ i }) => `${i.id} [${i.status}]`).join("\n");
     line.appendChild(more);
