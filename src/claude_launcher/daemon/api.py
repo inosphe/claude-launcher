@@ -594,6 +594,7 @@ def build_app(
     r.add_post("/api/mesh/{mesh}/members", h_mesh_join)
     r.add_delete("/api/mesh/{mesh}/members/{handle}", h_mesh_leave)
     r.add_patch("/api/mesh/{mesh}/members/{handle}/subroles", h_mesh_member_subroles)
+    r.add_patch("/api/mesh/{mesh}/members/{handle}/roles", h_mesh_member_roles)
     r.add_post("/api/mesh/{mesh}/messages", h_mesh_send)
     r.add_post("/api/mesh/{mesh}/urgent", h_mesh_urgent)
     r.add_get("/api/mesh/{mesh}/messages", h_mesh_history)
@@ -4692,14 +4693,16 @@ async def h_mesh_member_subroles(request: web.Request) -> web.Response:
     """Change one live member's subroles.
 
     Body: ``{"add": [...]}`` and/or ``{"remove": [...]}``, or ``{"set":
-    [...]}`` for the whole list. The primary role is not editable here — a
-    member that changes what it is re-joins.
+    [...]}`` for the whole list. The primary role is not edited here:
+    :func:`h_mesh_member_roles` takes it, so a caller that meant only the
+    subroles cannot move the primary by a stray field.
     """
     body = await _json_body(request)
     if "role" in body:
         return json_error(
-            400, "the primary 'role' is settled at join and not edited here — "
-            "send 'add', 'remove' or 'set' for the subroles"
+            400, "the primary 'role' is not edited here — PATCH "
+            ".../members/<handle>/roles changes it; send 'add', 'remove' or "
+            "'set' for the subroles"
         )
     replace = None
     if "set" in body:
@@ -4707,6 +4710,38 @@ async def h_mesh_member_subroles(request: web.Request) -> web.Response:
     member = _mesh_mgr(request).set_subroles(
         request.match_info["mesh"],
         request.match_info["handle"],
+        add=_subroles_in({"subroles": body.get("add")}),
+        remove=_subroles_in({"subroles": body.get("remove")}),
+        replace=replace,
+    )
+    return json_response(member.to_dict())
+
+
+async def h_mesh_member_roles(request: web.Request) -> web.Response:
+    """Change one live member's roles: its primary and/or its subroles.
+
+    Body: ``{"role": "leader"}`` for the primary, and ``add``/``remove`` or
+    ``set`` for the subroles as :func:`h_mesh_member_subroles` takes them;
+    any combination in one call, applied as one change. The member is typed
+    a notice of the change, with the new stance when the primary moved.
+    """
+    body = await _json_body(request)
+    fields = ("role", "add", "remove", "set")
+    if not any(k in body for k in fields):
+        return json_error(
+            400, "send 'role' for the primary and/or 'add', 'remove' or "
+            "'set' for the subroles"
+        )
+    role = body.get("role")
+    if role is not None and not isinstance(role, str):
+        return json_error(400, "'role' is one role name")
+    replace = None
+    if "set" in body:
+        replace = _subroles_in({"subroles": body.get("set")})
+    member = _mesh_mgr(request).set_member_roles(
+        request.match_info["mesh"],
+        request.match_info["handle"],
+        role=role,
         add=_subroles_in({"subroles": body.get("add")}),
         remove=_subroles_in({"subroles": body.get("remove")}),
         replace=replace,

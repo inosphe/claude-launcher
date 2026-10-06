@@ -26,6 +26,7 @@ function slice(from, to) {
 const RULE = "/* ------------------------------------------------------------------ */";
 
 const code = [
+  slice("/* Every role a roster row holds", "/* The meshes a rail row speaks for"),  // memberRoles, memberRoleLabel
   slice("function escXml(", RULE),                            // + wfDiagramSvg
   slice("const RING = {", "/* The send/add forms must survive the 2s poll"),
   slice("function answerFellToUs(", "function shortenPath("),

@@ -2310,6 +2310,17 @@ body.term-split #terminal { flex: var(--split-term, 0.6) 1 0; min-height: 80px; 
 /* put this session into another mesh, from the same section that lists the
    ones it is already in — the mesh page's enrol form with the session answered */
 .sess-mesh-join { margin-top: 10px; }
+.sess-role-edit { margin-top: 8px; }
+.sess-role-edit summary { cursor: pointer; }
+.sess-role-edit-body {
+  display: flex; flex-direction: column; gap: 6px; margin-top: 6px;
+}
+.sess-role-edit-primary { display: flex; gap: 8px; align-items: center; }
+.sess-role-edit-primary select { flex: 1 1 auto; min-width: 0; }
+.sess-role-edit-label { font-size: 0.85em; opacity: 0.75; }
+.sess-role-edit-subs { display: flex; flex-wrap: wrap; gap: 4px 12px; }
+.sess-role-edit-sub { display: inline-flex; gap: 4px; align-items: center; }
+.sess-role-edit .wf-btn { align-self: flex-start; margin-right: 0; }
 .sess-mesh-join-row {
   display: flex; gap: 8px; margin-bottom: 8px; flex-wrap: wrap;
 }
