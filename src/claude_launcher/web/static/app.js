@@ -35208,11 +35208,15 @@ function shadowRow(machine, name) {
    of the records kept here -- but every mesh it sits in does: each entry
    carries the project that mesh is filed under here (daemon/shadow.py). So
    the shadow belongs to exactly the projects of its meshes, and to no other.
-   "All projects" owns every mesh. */
+   "All projects" owns every mesh.
+
+   The test is spelt out here rather than borrowed from the mesh list: that
+   list is no longer narrowed to a project (claunch-6deos), but the session
+   list -- these cards are part of it -- still is. */
 function shadowMeshes(row) {
   return (row && Array.isArray(row.meshes) ? row.meshes : []).filter((m) =>
     m && m.mesh
-    && (typeof meshInCurrentProject !== "function" || meshInCurrentProject(m)));
+    && (!currentProject || recordProject(m) === currentProject));
 }
 
 /* The shadows the rail draws: those the picked project owns through at
