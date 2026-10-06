@@ -20,6 +20,7 @@ description: >-
 #     스택 -> 메인  cut         이 정의의 cut을 떠날 때 (side:stack:signals)
 #     메인 -> 스택  frozen      메인 integration-request를 떠날 때
 #     메인 -> 스택  landed      메인 landed에 들어갈 때
+#     메인 -> 스택  rebased     메인 rebase가 회차 브랜치를 다시 썼을 때(claunch-yq80p.9)
 #   소비는 이름별 cursor다(consume {from, name}): landed를 처리해도
 #   cut-wanted는 그대로 fresh다. v1의 「떠날 때 본 게시 횟수」와 같은 뜻이다.
 # - standby의 select(chooser agent) + 산문 순서 규칙 -> choose의 when 가드.
@@ -96,7 +97,16 @@ nodes:
       - 자식의 기준(base): 기본은 스택 브랜치다(부채꼴 — 서로 독립인
         자식들). 한 자식이 다른 자식의 결과 위에서 작업해야 하면 그
         자식의 브랜치를 기준으로 삼는다(사슬 — 아래가 먼저 착지한다).
+      - 이 런이 다루는 것은 **stacked 자식뿐이다**(claunch-yq80p.9). 관계의 판단
+        기준(아직 master에 없는 코드가 필요한가)과 independent 자식은 메인 런의
+        work가 정한다 — independent 자식은 master에서 잘리고 리더 착지 큐에 직접
+        요청하므로 이 표와 landing에 들어오지 않는다. 표에 올리기 전에 자식 런의
+        입력을 읽는다: `claunch cflow2 status -t <자식 세션> --json`의
+        inputs.relation이 stacked인가(없으면 stacked — 기본값). independent면 표에
+        올리지 않고, 그 자식의 착지 요청이 landing에 들어오면 받지 않고(rejected)
+        사유를 적는다.
       - 자식 spawn(이후에도 같다): role worker, workflow improv-worker-v2,
+        `cflow_inputs: {relation: stacked}`(기본값이지만 명시한다),
         `worktree: <세션>-<요지>`, **`rebase_onto: <세션>-stack`**, `issue:
         <자식 이슈 id>`(`claunch beads create ... --parent <회차 이슈>`로
         먼저 만든다). task에 반드시 세 줄: **기준 브랜치 = <세션>-stack @
@@ -104,7 +114,8 @@ nodes:
         수신자 = 나.** 1회성 심부름 자식은 스택 워커가 아니므로 workflow:
         errand를 댄다.
       - 넘겨받은 자식(reparent — mesh-delegate로 상위가 옮겨 준 워커):
-        그 브랜치는 master에서 잘렸다. 같은 세 줄(기준 브랜치 = <세션>-stack
+        그 런의 relation부터 읽는다(위). independent면 표에 올리지 않는다.
+        stacked면 그 브랜치는 master에서 잘렸다. 같은 세 줄(기준 브랜치 = <세션>-stack
         @ <tip>, 통합 대상, 수신자)을 한 번의 batch send로 알리고, 커밋이
         있으면 `git rebase <세션>-stack`으로 얹은 뒤 요청하라고 적는다 —
         그 자식의 브리핑은 아직 옛 부모를 부모로 말한다. 표에 「작업 중」으로
@@ -144,6 +155,10 @@ nodes:
     returns:
       ok: {branch: str, worktree: str, tip: str, children: list, remote_ref: "str?"}
     effects: [git.branch, git.push, fs.write, session.spawn, board.write, mesh.send]
+    # 스택 기준점(restack·rebase-notice의 upstream)의 첫 값
+    do:
+      - push: {to: signals, item: {name: "'based'", tip: "$data.inputs.base"}}
+        when: "$outcome == 'ok'"
 
   land:
     title: 스택 착지 (자식 브랜치 -> 스택 브랜치, --no-ff)
@@ -283,15 +298,24 @@ nodes:
       메인 런의 회차가 master에 착지했다(landed). 컷에 실렸던 머지들은
       이제 master에 있다 — 다만 메인 런의 rebase(`--rebase-merges`)가
       해시를 새로 찍었을 수 있으므로, 스택 브랜치의 옛 커밋은 master의
-      조상이 아닐 수 있다. 그래서 마지막 컷 뒤의 것만 옮긴다:
-      `git -C <스택 워크트리> rebase --rebase-merges --onto master <마지막 컷
-      tip> <세션>-stack` (컷 뒤에 착지한 것이 없으면 스택 브랜치는 master
-      tip이 된다). 충돌이 나면 멈추고(`git rebase --abort`) 충돌한 자식
+      조상이 아닐 수 있다. 그래서 기준점 뒤의 것만 옮긴다. 스택 브랜치를 옮길 범위의 시작(upstream)은 「스택 기준점」이다 — 이 런의
+      signals에서 이름이 `cut` 또는 `based`인 마지막 레코드의 tip(${col.signals}의
+      마지막 그런 줄). 기준점은 스택 브랜치에서 이 런이 쌓은 머지들 바로 아래의
+      커밋이다: open이 입력 base로, cut이 컷 tip으로, rebase-notice·restack이
+      옮긴 대상 tip으로 갱신한다. 마지막 컷 tip을 그대로 쓰지 않는다 — 스택을
+      한 번 옮긴 뒤에는 그 컷 tip이 스택 브랜치의 조상이 아니어서 이미 옮긴
+      커밋을 다시 적용한다(claunch-yq80p.9 리뷰 B1·B2).
+      `git -C <스택 워크트리> rebase --rebase-merges --onto <master tip> <기준점>
+      <세션>-stack` (기준점 뒤에 착지한 것이 없으면 스택 브랜치는 master
+      tip이 된다). 보고의 onto에 옮긴 대상(그 master tip, 전체 SHA)을 싣는다 —
+      엔진이 그것을 다음 기준점으로 기록한다. 충돌이 나면 멈추고(`git rebase --abort`) 충돌한 자식
       머지를 적어 결과 conflict로 보고한다 — 스스로 푼 트리를 스택에 얹지
       않는다. 사용자가 고른다.
       넘어간 자식(작업 중)에게 ONE batch send: 「스택이 <옛 tip> -> <새
       tip>으로 옮겨졌다. 지금 할 일은 없다. 네 rebase 단계에서 `git rebase
-      --onto <세션>-stack <옛 스택 tip>`으로 네 커밋만 다시 얹어라」.
+      --onto <세션>-stack <옛 스택 tip>`으로 네 커밋만 다시 얹어라. 앞선 이동
+      통지를 아직 적용하지 않았으면 그 가장 오래된 통지의 옛 tip을 쓴다(네 브랜치가
+      실제로 서 있는 스택 tip이다)」.
       입력 remote가 있으면 옮긴 스택 브랜치를 원격에 `git push
       --force-with-lease=<세션>-stack:<옛 tip> <remote> <세션>-stack:refs/heads/<세션>-stack`
       으로 다시 push하고, 공지의 tip을 `<전체 SHA> @ <remote>/<세션>-stack`으로
@@ -309,11 +333,75 @@ nodes:
       `STACK @ <새 tip>` 코멘트가 보고에 있다. 충돌로 멈췄으면 그 사실과
       충돌 지점이 있다. 원격 push가 거절됐으면 conflict이고 그 원격 SHA가 있다.
     returns:
-      ok: {old_tip: str, tip: str, moved: int}
+      ok: {old_tip: str, tip: str, moved: int, onto: str}
       conflict: {at: str}
     effects: ["git.rebase:stack-branch", git.push, mesh.send, board.write]
     do:
+      - push: {to: signals, item: {name: "'based'", tip: "$result.restack.value.onto"}}
+        when: "$outcome == 'ok'"
       - {consume: {from: "main:signals", name: landed}, when: "$outcome == 'ok'"}
+      # 착지 뒤 이전이 스택을 master 위로 옮겼으므로 그 전의 기준 이동 신호는 낡았다
+      - {consume: {from: "main:signals", name: rebased}, when: "$outcome == 'ok'"}
+
+  rebase-notice:
+    title: 기준 이동 (메인 런이 회차 브랜치를 다시 썼다)
+    prompt: |
+      메인 런의 rebase가 회차 브랜치를 다시 썼다(main:signals의 새 rebased:
+      tip = 새 회차 tip, from = 옛 회차 tip). 스택 브랜치는 옛 회차 커밋 위에
+      서 있으므로 옮긴다. 스택 브랜치를 옮길 범위의 시작(upstream)은 「스택 기준점」이다 — 이 런의
+      signals에서 이름이 `cut` 또는 `based`인 마지막 레코드의 tip(${col.signals}의
+      마지막 그런 줄). 기준점은 스택 브랜치에서 이 런이 쌓은 머지들 바로 아래의
+      커밋이다: open이 입력 base로, cut이 컷 tip으로, rebase-notice·restack이
+      옮긴 대상 tip으로 갱신한다. 마지막 컷 tip을 그대로 쓰지 않는다 — 스택을
+      한 번 옮긴 뒤에는 그 컷 tip이 스택 브랜치의 조상이 아니어서 이미 옮긴
+      커밋을 다시 적용한다(claunch-yq80p.9 리뷰 B1·B2).
+      `git -C <스택 워크트리> rebase --rebase-merges --onto <새 회차 tip> <기준점>
+      <세션>-stack`. 보고의 onto에 새 회차 tip(신호의 tip)을 싣는다 — 엔진이 그것을
+      다음 기준점으로 기록한다. 충돌이 나면 `git rebase --abort`하고 결과 conflict로
+      보고한다(스스로 푼 트리를 스택에 얹지 않는다).
+      입력 remote가 있으면 restack과 같이 `--force-with-lease=<세션>-stack:<옛
+      스택 tip>`으로 원격 스택 브랜치를 다시 쓴다. 거절되면 덮지 않고 conflict로
+      낸다(at에 원격 SHA).
+      그다음 **stacked 자식에게만** ONE batch send로 알린다(표의 자식, 그리고
+      `claunch cflow2 status -t <자식> --json`의 inputs.relation이 stacked인 자식):
+      「기준 이동: `<세션>-stack` <옛 스택 tip> -> <새 스택 tip>(원격이면
+      `<새 tip> @ <remote>/<세션>-stack`). 지금 할 일은 없다. 네 rebase 단계에서
+      `git rebase --onto <세션>-stack <옛 스택 tip>`으로 네 커밋만 다시 얹어라.
+      앞선 이동 통지를 아직 적용하지 않았으면 그 가장 오래된 통지의 옛 tip을
+      쓴다(네 브랜치가 실제로 서 있는 스택 tip이다). 착지를 이미 요청했으면 그 명령
+      뒤 표적 테스트를 재확인하고 재요청하라」.
+      independent 자식에게는 보내지 않는다 — 그 기준은 master다.
+      표를 `STACK @ <새 tip>` 코멘트로 갱신한다.
+    done_when: |
+      옛·새 회차 tip, 옮긴 범위의 시작, 옛·새 스택 tip, 통지한 stacked 자식 목록
+      (없으면 없음), `STACK @ <새 tip>` 코멘트가 보고에 있다. 충돌이나 원격 거절로
+      멈췄으면 그 사실과 지점이 있다.
+    returns:
+      ok: {old_tip: str, tip: str, told: list, onto: str}
+      conflict: {at: str}
+    effects: ["git.rebase:stack-branch", git.push, mesh.send, board.write]
+    do:
+      - push: {to: signals, item: {name: "'based'", tip: "$result['rebase-notice'].value.onto"}}
+        when: "$outcome == 'ok'"
+      - {consume: {from: "main:signals", name: rebased}, when: "$outcome == 'ok'"}
+
+  stack-based:
+    title: 스택 기준점 기록 (사람이 이전을 마친 뒤)
+    prompt: |
+      사람이 멈춘 스택 이전을 풀고 마쳤다(restack-conflict에서 resolved). 스택
+      브랜치가 지금 서 있는 기준 — 이 런이 쌓은 머지들 바로 아래의 커밋(착지 뒤
+      이전이면 옮긴 master tip, 기준 이동이면 새 회차 tip) — 을 git에서 확인해 onto에
+      전체 SHA로 싣는다(`git log --first-parent --format=%H <세션>-stack`에서 이 런의
+      머지가 아닌 첫 커밋). 엔진이 그것을 다음 기준점으로 기록한다. 확인할 수
+      없으면 사람에게 묻는다 — 추정하지 않는다.
+    done_when: |
+      onto(스택 브랜치의 기준 커밋, 전체 SHA)와 그것을 확인한 명령이 보고에 있다.
+    returns:
+      ok: {onto: str}
+    effects: [fs.read]
+    do:
+      - push: {to: signals, item: {name: "'based'", tip: "$result['stack-based'].value.onto"}}
+        when: "$outcome == 'ok'"
 
   seal:
     title: 스택 마감
@@ -357,6 +445,9 @@ body:
               다른 무엇보다 먼저다: 스택 브랜치가 옛 기준 위에 서 있는 동안 착지한
               것은 전부 다시 옮겨야 한다. 이 신호가 있는 동안 land·cut·submitted는
               막혀 있다.
+            · **rebase-notice** — 메인 런이 회차 브랜치를 다시 썼다(main:signals의 새
+              rebased). 스택을 새 회차 tip 위로 옮기고 stacked 자식에게 알린다. 이 신호가
+              있는 동안 cut은 막혀 있다(옛 기준 위의 컷을 내지 않는다).
             · **land** — 심사할 자식 요청이 있다(landing의 requested, 또는 메시로 온
               remote 자식의 요청). cut-wanted가 새 것이어도 착지를 요청한 자식이
               남아 있으면 land가 먼저다 — **컷 규칙: 착지를 요청한 자식은
@@ -370,7 +461,8 @@ body:
               않는다(reason에 지시의 출처를 적는다).
             · **submitted** — 메인 런이 컷을 실은 브랜치로 통합을 요청했다(새 frozen).
             · **seal** — 살아 있는 자식이 없고(`children`), 마지막 컷 뒤에 착지한
-              것이 없으며(`git rev-list --count <마지막 컷 tip>..<세션>-stack`이 0),
+              것이 없으며(`git rev-list --count <스택 기준점>..<세션>-stack`이 0 —
+              기준점은 rebase-notice의 정의),
               메인 런이 세션 종료로 가고 있다(queue-recheck의 done 뒤). 스택이 이
               세션과 함께 끝난다.
           options:
@@ -381,7 +473,17 @@ body:
                 id: restack-run
                 seq: [restack]
                 on:
-                  conflict: {call: restack-conflict}
+                  conflict: {call: restack-conflict, with: {at: "$result.restack.value.at", signal: landed}}
+            rebase-notice:
+              description: 메인 런이 회차 브랜치를 다시 썼다(rebased) — 스택을 새 tip 위로 옮기고 stacked 자식에게 알린다
+              when: "fresh('main:signals', 'rebased') and not fresh('main:signals', 'landed')"
+              then:
+                id: rebase-notice-run
+                seq: [rebase-notice]
+                on:
+                  conflict:
+                    call: restack-conflict
+                    with: {at: "$result['rebase-notice'].value.at", signal: rebased}
             land:
               description: 심사할 자식 요청 하나를 스택 브랜치에 --no-ff로 착지(또는 되돌림)
               when: "not fresh('main:signals', 'landed')"
@@ -394,6 +496,7 @@ body:
               description: 메인 런이 컷을 요청했다(cut-wanted) — 지금까지 착지한 것을 끊어 내놓는다
               when: >-
                 fresh('main:signals', 'cut-wanted') and not fresh('main:signals', 'landed')
+                and not fresh('main:signals', 'rebased')
                 and count('landing', 'requested') == 0 and count('landing', 'waiting') == 0
               then: cut
             submitted:
@@ -410,28 +513,51 @@ body:
 procedures:
   restack-conflict:
     description: >-
-      스택 이전(restack)이 충돌로 멈췄거나, 로컬 이전 뒤 원격 스택 브랜치의 push가
-      거절됐다. 사람이 풀고 이전을 마쳤는지, 아니면 이 신호를 넘기는지 고른다.
+      스택 이전(restack, 또는 기준 이동 rebase-notice)이 충돌로 멈췄거나, 로컬 이전 뒤
+      원격 스택 브랜치의 push가 거절됐다. 사람이 풀고 이전을 마쳤는지, 아니면 이
+      신호를 넘기는지 고른다.
+    params:
+      at: {type: str, default: ""}
+      # 이전을 일으킨 신호: landed(restack) 또는 rebased(rebase-notice)
+      signal: {type: str, default: landed}
     body:
       # 사용자에게 묻는 지점은 ask-user(ask-common, docs/cflow-v2.md 2.10)로 묻는다.
       - id: restack-conflict-choice
         call: ask-user
         bind: restack_conflict
         with:
-          context: "$result.restack.value.at"
+          context: "$params.at"
           require_reason: true
           topic: |
-            스택 이전이 멈췄다(근거 칸이 restack 보고의 지점이다). 충돌이면 스택 브랜치는
+            스택 이전이 멈췄다(근거 칸이 이전 보고의 지점이다). 충돌이면 스택 브랜치는
             옛 기준 위에 그대로 있다. 원격 push 거절(「remote ... moved」)이면 로컬 이전은
             끝났고 원격 스택 브랜치만 이 런이 모르는 커밋으로 움직였다 — 원격의 그
             커밋이 무엇인지(git fetch 뒤 git log)를 보고 선택지별 위험과 결과를 채운다.
             선택지: resolved — 사람이 스택 워크트리(와 원격)에서 풀고 이전을 마쳤다,
-            landed 신호를 소비하고 관제로 돌아간다. skip — 이전하지 않고 관제로
-            돌아간다, landed 신호가 남아 restack만 고를 수 있다.
+            스택 기준점을 기록하고(stack-based) 그 신호(landed면 rebased도)를 소비한 뒤
+            관제로 돌아간다. skip — 이전하지 않고 관제로 돌아간다, 신호가 남아 같은
+            이전만 다시 고를 수 있다. rebased가 남아 있는 동안 cut은 막히므로 메인
+            런의 cut-wait는 컷을 받지 못한다(4시간 뒤 cut-unreachable) — skip은 그것을
+            감수할 때만 권한다.
         cases:
           resolved:
+            # 사람이 옮긴 스택의 기준점을 기록한 뒤 신호를 소비한다. 착지 뒤
+            # 이전(landed)은 restack ok와 같이 그 전의 rebased도 소비한다 — 남으면
+            # cut이 막힌다(claunch-yq80p.9 리뷰 B3).
             id: restack-resolved
-            seq: []
-            do:
-            - consume: {from: "main:signals", name: landed}
+            seq:
+              - stack-based
+              - cond:
+                  - if: "$params.signal == 'rebased'"
+                    then:
+                      id: rebased-resolved
+                      seq: []
+                      do:
+                      - consume: {from: "main:signals", name: rebased}
+                  - else:
+                      id: landed-resolved
+                      seq: []
+                      do:
+                      - consume: {from: "main:signals", name: landed}
+                      - consume: {from: "main:signals", name: rebased}
           skip: []

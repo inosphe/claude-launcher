@@ -43,7 +43,9 @@ RESERVED_FIELDS = ("seq", "at", "by", "status")
 DECL_KEYS = ("kind", "key", "item", "status", "access", "env", "watch", "lifecycle", "type")
 WATCH_MIN_EVERY = 15
 WATCH_DEFAULT_EVERY = 60
-ADDRESS_TARGETS = ("self", "main", "side", "parent")
+ADDRESS_TARGETS = ("self", "main", "side", "parent", "leader")
+#: Targets only a trigger push may name (docs 2.8): another session's run.
+TRIGGER_TARGETS = ("parent", "leader")
 
 _NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_-]*$")
 _ENV_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
@@ -355,7 +357,7 @@ def _strip(name: str, exc: Exception) -> str:
 def parse_address(addr: Any) -> Tuple[str, str]:
     """``[target:]name`` -> ``(target, name)``.
 
-    ``target`` is ``self`` (default), ``main``, ``parent`` or
+    ``target`` is ``self`` (default), ``main``, ``parent``, ``leader`` or
     ``side:<run>``. Raises :class:`CollectionError` on a malformed address.
     """
     if not isinstance(addr, str) or not addr.strip():
@@ -363,12 +365,12 @@ def parse_address(addr: Any) -> Tuple[str, str]:
     parts = addr.strip().split(":")
     if len(parts) == 1:
         target, name = "self", parts[0]
-    elif len(parts) == 2 and parts[0] in ("self", "main", "parent"):
+    elif len(parts) == 2 and parts[0] in ("self", "main", "parent", "leader"):
         target, name = parts
     elif len(parts) == 3 and parts[0] == "side" and parts[1]:
         target, name = f"side:{parts[1]}", parts[2]
     else:
-        raise CollectionError(f"collection address {addr!r}: use [self:|main:|parent:|"
+        raise CollectionError(f"collection address {addr!r}: use [self:|main:|parent:|leader:|"
                               "side:<run>:]<name>")
     if not _NAME_RE.match(name):
         raise CollectionError(f"collection address {addr!r}: bad collection name {name!r}")

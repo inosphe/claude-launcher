@@ -631,6 +631,30 @@ def test_wait_probes_get_values_through_env_and_undecided_ends(tmp_path):
     assert len(d.events("probe_undecided")) == 3
 
 
+def test_a_wait_probe_reads_a_map_of_data_as_json(tmp_path):
+    # improv-worker-v2's landed-wait hands data.landing (a map) to
+    # tools/landed_check.py --landing "$CFLOW_DATA_LANDING" (claunch-yq80p.4)
+    d = Drv(tmp_path, """
+        data:
+          landing: {medium: pr, remote: ghe, base: master}
+          note: plain
+        nodes:
+          a: {prompt: A}
+        body:
+          seq: [{wait: {probe: "check", poll: 1}}, a]
+    """)
+    seen = []
+
+    def runner(cmd, cwd, env=None):
+        seen.append(env)
+        return (0, "landed")
+    d.st = runtime.wait_tick(T0 + 10, runner, cwd=d.cwd, scope=d.scope)
+    assert json.loads(seen[0]["CFLOW_DATA_LANDING"]) == {"medium": "pr", "remote": "ghe",
+                                                         "base": "master"}
+    assert seen[0]["CFLOW_DATA_NOTE"] == "plain"
+    assert d.tasks() == ["a"]
+
+
 # ---------------------------------------------------------------------------
 # E2: ask options without case
 

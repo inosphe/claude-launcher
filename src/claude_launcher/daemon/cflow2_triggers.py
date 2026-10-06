@@ -170,8 +170,8 @@ def v1_landing_holders(parent: str) -> List[Tuple[str, Optional[str]]]:
     return out
 
 
-def both_warning(parent: str, name: str) -> str:
-    return (f"parent {parent!r} holds {name!r} twice: a v1 run declaring "
+def both_warning(parent: str, name: str, role: str = "parent") -> str:
+    return (f"{role} {parent!r} holds {name!r} twice: a v1 run declaring "
             f"'landing_queue:' and a v2 run declaring the '{name}' collection; "
             "the target is ambiguous, nothing was pushed")
 
@@ -356,21 +356,61 @@ def push_to_parent(manager: Any, *, session: str, name: str,
     if not parent:
         return False, f"{session or 'this run'} has no parent session"
     v2 = v2_holders(name, parent, list(cwds) + session_cwds(manager, parent))
-    v2 = sorted(set(v2))
     v1 = v1_landing_holders(parent) if name == LANDING else []
-    if v2 and v1:
-        msg = both_warning(parent, name)
-        log.warning("cflow2 trigger push from %s: %s", session, msg)
-        return False, msg
     if not v2 and not v1:
         return False, f"parent {parent!r} has no live run that declares {name!r}"
+    return _push_one(parent, "parent", v2, v1, session=session, name=name, items=items, tid=tid)
+
+
+#: How many ancestors a ``leader:`` push looks through.
+LEADER_HOPS = 8
+
+
+def push_to_leader(manager: Any, *, session: str, name: str,
+                   items: Sequence[Dict[str, Any]], cwds: Sequence[str],
+                   tid: Optional[str] = None) -> Result:
+    """Push into the nearest ancestor of ``session`` (its parent first)
+    whose *main* run holds ``name`` (docs 2.8 ``leader:``). A side run or a
+    nested run of an ancestor does not count: an independent child of a
+    worker skips the worker's stack run and reaches the session above it."""
+    from ..cflow2 import store as cstore
+
+    seen = {session}
+    cur = parent_of(manager, session)
+    if not cur:
+        return False, f"{session or 'this run'} has no parent session"
+    passed: List[str] = []
+    while cur and cur not in seen and len(passed) < LEADER_HOPS:
+        seen.add(cur)
+        v2 = [h for h in v2_holders(name, cur, list(cwds) + session_cwds(manager, cur))
+              if h[1] == cstore.main_scope(h[1])]
+        v1 = [h for h in v1_landing_holders(cur) if h[1] is None] if name == LANDING else []
+        if v2 or v1:
+            return _push_one(cur, "leader", v2, v1, session=session, name=name,
+                             items=items, tid=tid)
+        passed.append(cur)
+        cur = parent_of(manager, cur)
+    return False, (f"no ancestor of {session!r} ({', '.join(passed)}) has a live main run "
+                   f"that declares {name!r}")
+
+
+def _push_one(owner: str, role: str, v2: List[Tuple[str, str]],
+              v1: List[Tuple[str, Optional[str]]], *, session: str, name: str,
+              items: Sequence[Dict[str, Any]], tid: Optional[str]) -> Result:
+    """Push into the one holder of ``owner`` (``role`` names it in reasons);
+    two holders, or a v1 and a v2 one, is a skip."""
+    v2 = sorted(set(v2))
+    if v2 and v1:
+        msg = both_warning(owner, name, role)
+        log.warning("cflow2 trigger push from %s: %s", session, msg)
+        return False, msg
     if len(v2) + len(v1) > 1:
         where = [f"{c} {s}" for c, s in v2] + [f"{c} {r or 'main'} (v1)" for c, r in v1]
-        return False, (f"parent {parent!r} has {len(where)} runs declaring {name!r} "
+        return False, (f"{role} {owner!r} has {len(where)} runs declaring {name!r} "
                        f"({'; '.join(where)}); the target is ambiguous")
     if v2:
         return push_v2(v2[0], name, items, session, tid=tid)
-    return push_v1(v1[0], parent, items, session)
+    return push_v1(v1[0], owner, items, session)
 
 
 # -- one trigger ----------------------------------------------------------------
@@ -429,8 +469,9 @@ def _push(manager: Any, cwd: str, session: str, push: Dict[str, Any], landing: b
           cwds: List[str], facts_fn: Callable[[str, str], Dict[str, Any]],
           tid: Optional[str] = None, data: Optional[Dict[str, Any]] = None) -> Result:
     target, name = split_addr(push.get("to"))
-    if target != "parent" or not name:
-        return False, f"a trigger pushes to 'parent:<collection>', not {push.get('to')!r}"
+    if target not in ("parent", "leader") or not name:
+        return False, ("a trigger pushes to 'parent:<collection>' or 'leader:<collection>', "
+                       f"not {push.get('to')!r}")
     facts = facts_fn(cwd, session)
     if landing:
         # The v1 trigger's reasons, word for word where they apply.
@@ -444,7 +485,8 @@ def _push(manager: Any, cwd: str, session: str, push: Dict[str, Any], landing: b
         items = expand_push(push, facts, data)
     except PushError as exc:
         return False, str(exc)
-    return push_to_parent(manager, session=session, name=name, items=items, cwds=cwds, tid=tid)
+    to = push_to_leader if target == "leader" else push_to_parent
+    return to(manager, session=session, name=name, items=items, cwds=cwds, tid=tid)
 
 
 async def perform_bounded(manager: Any, cwd: str, scope: str, trig: Dict[str, Any],

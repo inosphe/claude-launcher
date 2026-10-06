@@ -1129,7 +1129,7 @@ def _complete(r: Run, iid: str, outcome: str, value: Any, handled: bool = False)
             _enter_child(r, iid, handler, "on")
             return
     # doc 4.5: ... -> triggers (at leave) -> lifecycle.reset_at -> the parent
-    _queue_triggers(r, iid, node, AT_LEAVE)
+    _queue_triggers(r, iid, node, AT_LEAVE, outcome)
     _reset_at(r, node)
     r.emit("left", node=node.id, instance=iid, outcome=outcome)
     parent = inst.get("parent")
@@ -5146,8 +5146,8 @@ def _peer_scope(r: "Run", target: str) -> Optional[str]:
     ``name``; ``parent`` is not readable from inside a run (doc 2.8)."""
     if target == "self":
         return None
-    if target == "parent":
-        raise col_mod.CollectionError("parent: addresses are only for triggers")
+    if target in col_mod.TRIGGER_TARGETS:
+        raise col_mod.CollectionError(f"{target}: addresses are only for triggers")
     own = r.store.scope
     main = store_mod.main_scope(own)
     if target == "main":
@@ -5368,7 +5368,7 @@ class _ColResolver:
         that holds nothing to read."""
         try:
             target, name = col_mod.parse_address(addr)
-            if target == "parent" and not self.strict:
+            if target in col_mod.TRIGGER_TARGETS and not self.strict:
                 self._miss(addr)  # trigger-only (check refuses it); absent here
                 return None, False
             scope = _peer_scope(self.r, target)
@@ -5661,13 +5661,31 @@ def _push_data_keys(push: Dict[str, Any]) -> List[str]:
     return sorted(keys)
 
 
-def _queue_triggers(r: "Run", iid: str, node: ir.Node, at: str) -> None:
+def _queue_triggers(r: "Run", iid: str, node: ir.Node, at: str,
+                    outcome: Optional[str] = None) -> None:
     """Record the node's triggers for ``at`` (``trigger_queued``); the daemon
-    clock claims and performs them (doc 2.8). Every pass records again."""
+    clock claims and performs them (doc 2.8). Every pass records again. A
+    trigger whose ``when`` is false now is not recorded (``trigger_not_queued``
+    says so); one whose ``when``
+    cannot be evaluated is not recorded either (``trigger_skipped`` says why
+    -- a trigger never holds the run)."""
     for raw in node.get("triggers") or []:
         do, when_at, push = _trigger_parts(raw)
         if not do or when_at != at:
             continue
+        when = raw.get("when") if isinstance(raw, dict) else None
+        if when is not None:
+            try:
+                ok = expr_mod.truthy(_effect_value(
+                    r, iid, when, _effect_env(r, iid, outcome if at == AT_LEAVE else None)))
+            except expr_mod.ExprError as exc:
+                r.emit("trigger_skipped", node=node.id, label=node.label or None,
+                       instance=iid, at=at, do=do, reason=f"when ({when}): {exc}")
+                continue
+            if not ok:
+                r.emit("trigger_not_queued", node=node.id, label=node.label or None,
+                       instance=iid, at=at, do=do, reason=f"when ({when}) is false")
+                continue
         r.state["trigger_seq"] = int(r.state.get("trigger_seq") or 0) + 1
         tid = f"t{r.state['trigger_seq']}"
         rec: Dict[str, Any] = {"id": tid, "run": str(r.state.get("run_id") or ""),

@@ -1921,7 +1921,8 @@ def _do_list(ctx: _Ctx, file: str, value: Any, line: int) -> List[Dict[str, Any]
 
 def _triggers(ctx: _Ctx, file: str, value: Any, line: int) -> List[Dict[str, Any]]:
     """``triggers:`` -> ``[{do, at}]``, plus ``push: {to, each, item}`` when
-    ``do`` is ``push``. A bare name means ``{do: <name>, at: enter}`` (v1)."""
+    ``do`` is ``push`` (and ``when``, an expression the engine evaluates as it
+    records the trigger). A bare name means ``{do: <name>, at: enter}`` (v1)."""
     entries = _need_list(ctx, file, value, "triggers", line)
     lines = getattr(entries, "item_lines", None) or []
     out: List[Dict[str, Any]] = []
@@ -1933,7 +1934,7 @@ def _triggers(ctx: _Ctx, file: str, value: Any, line: int) -> List[Dict[str, Any
         entry = _need_map(ctx, file, entry, "a triggers entry", eline)
         _bool_key(ctx, file, entry, "a triggers entry", eline)
         if "push" in entry:
-            _check_keys(ctx, file, entry, ("push", "at"), "a push trigger")
+            _check_keys(ctx, file, entry, ("push", "at", "when"), "a push trigger")
             body = _need_map(ctx, file, entry["push"], "trigger push", eline)
             _check_keys(ctx, file, body, ("to", "each", "item"), "trigger push")
             for k in ("to", "item"):
@@ -1949,6 +1950,8 @@ def _triggers(ctx: _Ctx, file: str, value: Any, line: int) -> List[Dict[str, Any
                     "item": _expr_map(ctx, file, body["item"], "trigger push.item", eline),
                 },
             }
+            if entry.get("when") is not None:
+                rec["when"] = _expr_text(ctx, file, entry["when"], "trigger when", eline)
             out.append(rec)
             continue
         _check_keys(ctx, file, entry, ("do", "at"), "a triggers entry")

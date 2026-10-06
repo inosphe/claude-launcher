@@ -1,3 +1,8 @@
+# 대체됨(claunch-yq80p.4): v2의 improv-worker-v2가 같은 PR 착지를 별도 정의 없이
+# 시작 입력(force_pr / force_no_pr, 기본은 PR이고 불가하면 로컬로 대체)으로 처리한다
+# — docs/cflow-v2.md 10a. 이 v1 변형은 v1 정의 전체와 같이 deprecated로 표시되며
+# 실행은 계속 지원한다.
+#
 # improv-worker 위에 얹는 레이어다 — 정본 워커의 스텝·게이트·산문 전체를
 # `extends`로 물려받고, 착지 경로가 로컬 머지가 아니라 원격 pull request(PR)
 # 라는 점에서 달라지는 자리만 적는다. 정본 스텝의 instructions는 하나도

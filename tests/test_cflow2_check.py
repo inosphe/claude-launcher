@@ -539,6 +539,7 @@ a:
     ("[{push: {to: 'side:stack:sig', item: {name: \"'x'\"}}}]", "peer-write"),
     ("[{remove: {in: 'main:sig', key: '1'}}]", "peer-write"),
     ("[{push: {to: 'parent:sig', item: {name: \"'x'\"}}}]", "parent-outside-trigger"),
+    ("[{push: {to: 'leader:sig', item: {name: \"'x'\"}}}]", "parent-outside-trigger"),
     ("[{set: {in: sig, key: '1', fields: {name: \"'y'\"}}}]", "collection-op-kind"),
     ("[{remove: {in: sig, key: '1'}}]", "collection-op-kind"),
     ("[{consume: todo}]", "collection-op-kind"),
@@ -618,6 +619,19 @@ def test_unpushable_collection_warning():
 def test_trigger_target_must_be_parent():
     chart = CC("a: {prompt: a, triggers: [{push: {to: todo, item: {id: '$each'}}}]}\n")
     assert "trigger-target" in codes(chart)
+    # leader: is a trigger target too (claunch-yq80p.9)
+    chart = CC("a: {prompt: a, triggers: [{push: {to: 'leader:todo', item: {id: \"'x'\"}}}]}\n")
+    assert "trigger-target" not in codes(chart)
+
+
+def test_trigger_when_is_a_run_expression():
+    # evaluated by the engine as it records the trigger: no $facts there
+    bad = CC("a: {prompt: a, triggers: [{when: '$facts.head', "
+             "push: {to: 'parent:todo', item: {id: \"'x'\"}}}]}\n")
+    assert "facts-outside-trigger" in codes(bad, "error")
+    good = CC("a: {prompt: a, triggers: [{when: \"count('todo') == 0\", "
+              "push: {to: 'parent:todo', item: {id: \"'x'\"}}}]}\n")
+    assert codes(good, "error") == []
 
 
 @pytest.mark.parametrize("expr", [

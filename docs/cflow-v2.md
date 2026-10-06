@@ -563,7 +563,10 @@ v1 `checklist:`의 대응:
 엔진이 실행하는 명령(작업의 `verify`, wait의 `probe`, 모니터의 `probe`)은
 템플릿이 아니다. 이 문자열 안의 `${...}`는 컴파일 오류다. 명령이 런의 값을 읽어야
 하면 환경 변수로 읽는다: param은 `CFLOW_IN_<NAME>`, 최상위 `data`의 스칼라 값은
-`CFLOW_DATA_<NAME>`(이름은 대문자, 영숫자 외 문자는 `_`). 셸이 하는 `$VAR` 전개는
+`CFLOW_DATA_<NAME>`(이름은 대문자, 영숫자 외 문자는 `_`). wait와 모니터의 `probe`는
+스칼라가 아닌 최상위 `data`도 JSON 텍스트로 받는다(64KB 이하, `runtime._value_env`).
+예: improv-worker-v2의 착지 대기는 `--landing "$CFLOW_DATA_LANDING"`으로 착지 기록 맵을
+넘긴다. 셸이 하는 `$VAR` 전개는
 엔진이 값을 끼워 넣는 것이 아니므로 허용된다. 근거: 렌더한 값을 셸 문자열에
 붙이면 값(`x || true` 등)이 명령이 되어 verify를 우회할 수 있다(리뷰 E1).
 
@@ -902,7 +905,7 @@ nodes:
 |---|---|---|
 | `briefing` | 드라이버 세션의 LLM 브리핑을 다시 구성 | llm 설정 없음, 엔드포인트 실패, 드라이버 세션 없음 |
 | `checks` | 드라이버 세션에 상태 점검 재보고 요청을 전달 | 켜진 상태 점검 없음, 전달 실패, 드라이버 세션 없음 |
-| `push` | 다른 런의 컬렉션에 레코드 추가(주체 `child`) | 부모 세션 없음, 그 컬렉션을 가진 부모 런이 없음 또는 둘 이상, 접근 거절, `each`가 빈 목록, 형식 오류 |
+| `push` | 다른 세션 런의 컬렉션에 레코드 추가(주체 `child`). 대상은 `parent:<이름>` 또는 `leader:<이름>` | 부모 세션 없음, 그 컬렉션을 가진 부모 런(`leader:`면 조상의 메인 런)이 없음 또는 둘 이상, 접근 거절, `each`가 빈 목록, 형식 오류 |
 | `enqueue-landing` | 아래 `push`의 축약형: `to: parent:landing`, `each: $facts.in_review`, `item: {issue: $each, tip: $facts.head, branch: $facts.branch, requested_by: $facts.session}` | `push`와 같음. in_review 이슈 없음 |
 
 - 실행 시점: 엔진은 노드 인스턴스에 들어가거나 떠나는 변경 안에서 요청을
@@ -937,6 +940,27 @@ nodes:
   그 이름의 컬렉션을 선언한 런, 그리고 이름이 `landing`이면 부모 세션의 v1 런(메인과
   하위 런) 중 `landing_queue:`를 선언한 런. 정확히 하나여야 한다. v1 런이면 v1 엔진의
   `enqueue_landing(issues, branch, tip, by=…)`로 넣는다(10절 「v1 연결」).
+- `leader:<이름>`의 대상 찾기(claunch-yq80p.9): 부모 세션부터 위로 조상을 차례로
+  보며, 그 세션의 **메인 slot** v2 런(side 런과 중첩 런은 세지 않는다)이 그 이름의
+  컬렉션을 선언했거나 이름이 `landing`이고 그 세션의 v1 메인 런이 `landing_queue:`를
+  선언했으면 그 세션이 대상이다. 그 세션 안에서 정확히 하나여야 한다. 8단계 안에서 찾지
+  못하면 `trigger_skipped`(지나간 조상 목록)다. 워커의 independent 자식이 부모 워커의
+  stack 런을 건너뛰고 리더의 `landing`에 착지를 요청하는 경로다. `parent:`와 같이
+  trigger에서만 쓴다(다른 자리는 검사 오류 `parent-outside-trigger`).
+- `when`(push trigger, claunch-yq80p.9): 엔진이 trigger를 기록하는 순간 런의 환경으로
+  평가하는 식이다(at leave면 `$outcome`도 읽는다. `$facts`·`$each`는 없다). 거짓이면
+  기록하지 않고 `trigger_not_queued`(사유 `when (…) is false`)를 저널에 남긴다. 평가가
+  오류면 기록하지 않고 `trigger_skipped`(사유 `when (…): …`)를 남긴다. 입력에 따라 대상을 가르는 데 쓴다:
+
+  ```yaml
+  triggers:
+    - at: leave
+      when: "$data.inputs.relation != 'independent'"
+      push: {to: parent:landing, each: "$facts.in_review", item: {…}}
+    - at: leave
+      when: "$data.inputs.relation == 'independent'"
+      push: {to: leader:landing, each: "$facts.in_review", item: {…}}
+  ```
 
 ### 2.9 side 런
 
@@ -2098,12 +2122,58 @@ v2 워커의 착지 요청은 기본으로 pull request를 거친다. 로컬 착
   `landing-queue` 타입이 이 필드를 선언한다. `pr_url`이 있는 행은 리더의 PR 후보
   (`gh pr merge --merge --match-head-commit <tip>`, claunch-yq80p.6)이고 없으면 로컬
   후보다. 마커는 `LANDING REQUEST @ <sha> @ <remote>/<브랜치> pr: <url>`이다.
+- 착지 판정: 착지 대기 프로브는 `tools/landed_check.py --landing "$CFLOW_DATA_LANDING"`이다.
+  기록의 `medium`이 `pr`이면 `--target <remote>/<base> --fetch`와 같은 질문이 된다 —
+  리더가 원격 base에서 `gh pr merge`로 만든 머지는 fetch 전에는 이 저장소에 없다.
+  `pr`인데 `remote`·`base`가 없으면 판정 불가(2)다. 그 밖의 매체와 기록이 없을 때는
+  로컬 질문(머지 부모 검사) 그대로다(claunch-yq80p.4). v1 `improv-worker-remote`는
+  이 경로로 대체되었다.
 - 웹 UI: 런 패널의 컬렉션 표는 값이 http(s) URL인 필드를 텍스트에서 빼고 새 탭
   링크로 보인다. `url`·`pr_url`이 `/pull/<N>` 형태면 링크 이름은 `PR #N`(번호는
   같은 행의 `number`·`pr_number`가 우선)이고, 그 밖의 URL은 필드 이름이다. 그래서
   워커 런의 `prs`와 리더 런의 `landing` 행에서 PR로 바로 이동한다. 상태 열은
   `prs`의 open/merged/closed를 색으로 구분한다. v1 리더의 `landing_queue:`는 PR
   필드를 싣지 않으므로 그 경우 PR 주소는 착지 요청 마커에서만 읽힌다.
+
+### 자식 작업의 관계: stacked / independent (claunch-yq80p.9)
+
+워커가 자식 워커를 둘 때, 자식 런의 시작 입력 `relation`(improv-worker-v2, enum
+`stacked` | `independent`, 기본 `stacked`)이 그 자식의 기준 브랜치와 착지 경로를
+정한다. 관계는 spawn 필드가 아니다. spawn과 웹 폼이 이미 전달하고 검사하는
+`cflow_inputs`로 준다(`cflow_inputs: {relation: independent}`).
+
+| 항목 | stacked (기본) | independent |
+|---|---|---|
+| 기준 브랜치 | 부모의 스택 브랜치(`<부모>-stack`, 부모가 리더면 master) | 대상 브랜치(master) |
+| 착지 요청 | `parent:landing` — 부모 워커의 stack 런(부모가 리더면 리더 런) | `leader:landing` — 부모를 건너뛴 가장 가까운 조상의 메인 런(2.8) |
+| PR base | 부모의 원격 스택 브랜치(아래 「stacked PR」) | master |
+| 부모의 역할 | 리뷰, 기준 이동 통지, 컷 | 상태 관제(정지·실패·완료 확인) |
+| 부모 기준이 바뀔 때 | stack 런이 새 tip과 `rebase --onto` 명령을 통지(아래) | 영향 없음 |
+| 보드 | 부모 회차 이슈의 자식(`--parent`), 회차 이슈가 자식 이슈에 blocks | `--parent` 없이, related |
+
+- 판단 기준(부모 워커의 work 문구): 자식이 아직 master에 없는 코드(부모의 회차
+  브랜치나 스택 브랜치에만 있는 것)를 필요로 하면 stacked, 아니면 independent. 고른
+  관계와 근거는 자식 이슈의 `RELATION: <관계> — <근거>` 코멘트로 남긴다.
+- 착지 요청: `integration-request`의 leave push trigger 둘이 `when`으로 갈린다(2.8).
+  independent 자식은 리더에게 nudge하고 부모 워커에게는 fyi만 보낸다.
+- stack 런(stack-v2)은 stacked 자식만 다룬다. 표에 올리기 전에 자식 런의 입력
+  (`claunch cflow2 status -t <자식> --json`의 `inputs.relation`)을 읽는다. independent
+  자식만 두면 stack 런을 세우지 않는다.
+- 기준 이동 통지: 메인 런의 `rebase`가 회차 브랜치를 다시 썼으면 보고의 `old_tip`에
+  옛 tip을 싣고, 엔진이 `signals`에 `rebased`(tip = 새 tip, from = 옛 tip)를 쓴다
+  (`old_tip`이 없거나 tip과 같으면 쓰지 않는다). stack 런의 standby는 그 신호로
+  `rebase-notice`를 고를 수 있다. 그 작업이 스택 브랜치를 「스택 기준점」 뒤부터
+  `--rebase-merges --onto <새 회차 tip>`으로 옮기고, stacked 자식에게
+  `git rebase --onto <부모>-stack <옛 스택 tip>`을 한 번의 batch로 알린다(앞선 통지를
+  적용하지 않은 자식은 가장 오래된 통지의 옛 tip을 쓴다). 그 신호가 새 것인 동안
+  `cut`은 막힌다. 착지 뒤 `restack`은 스택을 master 위로 옮기므로 그 전의 `rebased`도
+  소비한다. 충돌·원격 거절은 `restack-conflict`(ask-user)로 가고, resolved면 사람이
+  옮긴 기준을 `stack-based`가 기록한 뒤 같은 신호들을 소비한다.
+- 스택 기준점: stack 런 자기 `signals`에서 이름이 `cut` 또는 `based`인 마지막 레코드의
+  tip이다. `open`(입력 base), `cut`(컷 tip), `rebase-notice`·`restack`(옮긴 대상 tip,
+  보고의 `onto`), `stack-based`가 쓴다. `restack`과 `rebase-notice`의 upstream이 이
+  값이다. 마지막 컷 tip을 그대로 쓰면 스택을 한 번 옮긴 뒤 그 컷 tip이 스택 브랜치의
+  조상이 아니어서 옮긴 커밋을 다시 적용한다(claunch-yq80p.9 리뷰 B1·B2).
 
 ### stacked PR (stack-v2, claunch-yq80p.2)
 

@@ -338,9 +338,12 @@ def test_triggers_mirror_v1_at_the_corresponding_tasks():
             continue
         assert node.label in v1, node.id
         # a push to parent:landing is v1's enqueue-landing with more fields
-        # (the PR landing fields, claunch-yq80p.5)
-        got = sorted(("enqueue-landing" if t["do"] == "push" and (t.get("push") or {}).get("to")
-                      == "parent:landing" else t["do"], t["at"]) for t in trig)
+        # (the PR landing fields, claunch-yq80p.5); relation independent sends
+        # the same request to leader:landing instead (claunch-yq80p.9) -- one
+        # of the two is recorded, so the pair counts as one
+        got = sorted({("enqueue-landing" if t["do"] == "push" and (t.get("push") or {}).get("to")
+                       in ("parent:landing", "leader:landing") else t["do"], t["at"])
+                      for t in trig})
         assert got == v1[node.label], node.id
         seen.add(node.label)
     assert seen == set(v1)
@@ -381,9 +384,10 @@ def test_the_round_decides_its_landing_medium_and_publishes_a_pr():
     assert set(prs["item"]) >= {"number", "url", "branch", "base", "issues"}
     # the landing push carries the medium and the PR
     req = next(n for n in chart.nodes.values() if n.label == "integration-request")
-    (push,) = [t["push"] for t in req.get("triggers") if isinstance(t, dict) and t.get("push")]
-    assert push["to"] == "parent:landing"
-    assert {"medium", "pr_url", "pr_number", "base"} <= set(push["item"])
+    pushes = [t["push"] for t in req.get("triggers") if isinstance(t, dict) and t.get("push")]
+    assert [p["to"] for p in pushes] == ["parent:landing", "leader:landing"]
+    for push in pushes:
+        assert {"medium", "pr_url", "pr_number", "base"} <= set(push["item"])
     # the leader's queue type declares them
     common = yaml.safe_load(COMMON.read_text(encoding="utf-8"))
     assert {"medium", "pr_url", "pr_number", "base"} <= set(

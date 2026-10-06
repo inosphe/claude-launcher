@@ -27,6 +27,8 @@ teaches people to pass it with a trailing "or true".
 
 from __future__ import annotations
 
+import json
+
 import importlib.util
 import subprocess
 
@@ -404,6 +406,37 @@ def test_a_pr_landing_is_seen_only_after_a_fetch(tmp_path, capsys):
     assert _run(worker, "--fetch", "--target", "@{upstream}") == 0
     out = capsys.readouterr().out
     assert "landed" in out
+
+
+def test_a_v2_pr_landing_record_asks_the_remote_base_with_a_fetch(tmp_path, capsys):
+    """improv-worker-v2's landed-wait passes ``--landing "${data.landing}"``:
+    a record with medium 'pr' turns into --target <remote>/<base> --fetch, so
+    the merge made on the remote by ``gh pr merge`` is seen (claunch-yq80p.4)."""
+    worker = _build_pr_landing(tmp_path)
+    rec = json.dumps({"medium": "pr", "remote": "ghe", "base": "master",
+                      "pr_url": "https://example/pull/1", "pr_number": 1})
+    assert _run(worker, "--landing", rec) == 0
+    assert "landed: ghe/master" in capsys.readouterr().out
+
+
+def test_a_local_landing_record_keeps_the_local_question(base):
+    # medium local (or no record yet): the merge-parent scan as before
+    for rec in ('{"medium": "local", "remote": null, "base": null}', "null", ""):
+        assert _run(base, "--landing", rec) == 1
+
+
+def test_a_pr_record_without_remote_or_base_cannot_tell(base, capsys):
+    rec = json.dumps({"medium": "pr", "remote": None, "base": "master"})
+    assert _run(base, "--landing", rec) == landed_check.CANNOT_TELL
+    assert "names no remote/base" in capsys.readouterr().err
+    assert _run(base, "--landing", "{not json") == landed_check.CANNOT_TELL
+
+
+def test_an_explicit_target_wins_over_the_landing_record(tmp_path):
+    worker = _build_pr_landing(tmp_path)
+    rec = json.dumps({"medium": "pr", "remote": "ghe", "base": "master"})
+    # the stale local tracking ref, no fetch: the record did not override --target
+    assert _run(worker, "--landing", rec, "--target", "ghe/master") == 1
 
 
 def test_fetch_of_a_local_only_target_cannot_tell(base, capsys):
