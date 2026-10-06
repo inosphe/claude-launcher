@@ -31,10 +31,10 @@ roles:                               # 메시 역할 어휘 업로드(claunch me
   roles: {}
 
 subroles:                            # 서브롤 = 메시 역할 하나 + 오프닝 태스크 앞에 붙는 프롬프트
-  unreal:
+  shader:
     prompt: |
-      너는 Unreal Engine 5 C++ 전문가다. UCLASS/USTRUCT 리플렉션 매크로,
-      모듈 Build.cs 의존, 엔진 경계(Inbox·엔진 브리지)를 직접 고치기 전에
+      너는 셰이더(HLSL/GLSL) 전문가다. 셰이더 파라미터 바인딩, 머티리얼 입력,
+      렌더 경계(Inbox·엔진 브리지)를 직접 고치기 전에
       contracts 의 seam 을 먼저 읽는다. 허용 파일 밖은 수정하지 않는다.
 
 agents:
@@ -46,7 +46,7 @@ agents:
     kind: worker
     parent: lead2
     handle: worker-ue1
-    subroles: [unreal]
+    subroles: [shader]
   - id: sys1
     kind: worker
     parent: lead2

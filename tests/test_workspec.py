@@ -198,7 +198,7 @@ def test_decision_gate_must_exist(doc):
 # E ------------------------------------------------------------------------
 
 def test_subrole_needs_prompt(doc):
-    doc["subroles"]["unreal"]["prompt"] = " "
+    doc["subroles"]["shader"]["prompt"] = " "
     assert "a prompt is required" in _errs(doc)
 
 
@@ -232,7 +232,7 @@ def test_plan_points_each_agent_at_its_issue(doc):
     acts = ws.plan(doc, "own")
     by_agent = {a["agent"]: a for a in acts if a["do"] == "spawn"}
     assert by_agent["ue1"]["issue"] == "W1"
-    assert by_agent["ue1"]["subroles"] == ["unreal"]
+    assert by_agent["ue1"]["subroles"] == ["shader"]
     assert by_agent["lead2"]["issue"] == "frame"
     assert {"do": "stack", "agent": "lead2"} in acts
 
@@ -265,7 +265,7 @@ def test_plan_labels_and_decision_blocks(doc):
 @pytest.mark.parametrize("key, value, expect", [
     ("mesh", "foo", "mesh: must be a mapping"),
     ("leader", "own", "leader: must be a mapping"),
-    ("subroles", ["unreal"], "subroles: must be a mapping"),
+    ("subroles", ["shader"], "subroles: must be a mapping"),
     ("issues", {"W1": {}}, "issues: must be a list"),
 ])
 def test_top_level_type_errors(doc, key, value, expect):
@@ -274,7 +274,7 @@ def test_top_level_type_errors(doc, key, value, expect):
 
 
 def test_string_where_a_list_belongs(doc):
-    doc["agents"][1]["subroles"] = "unreal"
+    doc["agents"][1]["subroles"] = "shader"
     doc["issues"][2]["blocked_by"] = "W1"
     doc["decisions"][0]["gates"] = "W2"
     out = ws.validate(doc)
@@ -340,5 +340,5 @@ def test_scalar_type_errors(doc, path, value, expect):
 @pytest.mark.parametrize("value", [["a", "b"], {"text": "x"}])
 def test_subrole_prompt_must_be_a_string(doc, value):
     """A list prompt used to pass: str(['a']) is non-empty (claunch-nc6dg)."""
-    doc["subroles"]["unreal"]["prompt"] = value
-    assert ws.validate(doc) == ["subroles.unreal.prompt: must be a string"]
+    doc["subroles"]["shader"]["prompt"] = value
+    assert ws.validate(doc) == ["subroles.shader.prompt: must be a string"]

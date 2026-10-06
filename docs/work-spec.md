@@ -38,7 +38,7 @@ issue-gen 이 내지 않는 항목은 다음과 같다. 명세는 이 항목들�
 
 - 에이전트 역할·계층. issue-gen 에 있는 「역할」은 frame 항목의 역할(target/context/
   excluded)과 결정의 owner(programmer/animation/graphics/sound)뿐이다.
-- 리뷰어 배정, 서브롤 프롬프트(예: unreal)
+- 리뷰어 배정, 서브롤 프롬프트(예: shader)
 - 파일로 붙는 참고 자료
 - 일감 사이의 계약. issue-gen 의 계약은 일감 하나에 속한다.
 

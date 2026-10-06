@@ -136,7 +136,7 @@ def test_shared_import_builds_board_mesh_and_agents():
     assert "## 사람 몫\n- Source/AllComponents.h" in human["description"]
     # mesh: created, subrole uploaded as a role whose stance is its prompt
     mesh = fb.meshes["spec-night-sense"]
-    assert mesh["roles"]["roles"]["unreal"]["stance"].startswith("너는 Unreal")
+    assert mesh["roles"]["roles"]["shader"]["stance"].startswith("너는 셰이더")
     assert mesh["members"]["lead"]["session"] == "s29"
     # agents: parents first, under the right parent session, with the issue
     sp = _spawns(fb)
@@ -146,8 +146,8 @@ def test_shared_import_builds_board_mesh_and_agents():
     assert sp["worker-lead2"][1]["issue"] == frame["id"]
     assert "stack 서브 런" in sp["worker-lead2"][1]["task"]
     ue1 = sp["worker-ue1"][1]
-    assert ue1["subroles"] == ["unreal"] and ue1["issue"] == w1["id"]
-    assert ue1["task"].startswith("너는 Unreal")  # prompt before the assignment
+    assert ue1["subroles"] == ["shader"] and ue1["issue"] == w1["id"]
+    assert ue1["task"].startswith("너는 셰이더")  # prompt before the assignment
     assert ue1["worktree"] == "spec-night-sense-ue1"
     assert ue1["workspace"] == "shelter-zero"
     rv = sp["reviewer-1"][1]
@@ -217,7 +217,7 @@ def test_roles_merge_into_an_existing_custom_set():
     fb._add("team", "s29", "boss", "leader")
     fb.meshes["team"]["roles"] = {"version": 1, "roles": {"qa": {"stance": "x"}}}
     wi.execute(doc, fb, base_dir="/ws")
-    assert set(fb.meshes["team"]["roles"]["roles"]) == {"qa", "unreal"}
+    assert set(fb.meshes["team"]["roles"]["roles"]) == {"qa", "shader"}
 
 
 def test_cli_check_and_plan(capsys):
