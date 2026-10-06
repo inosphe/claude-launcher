@@ -14,7 +14,8 @@ description: >
   번 머지된다. 전체 스윕 테스트는 워커 몫이 아니다 — 워커는 바꾼 영역의
   테스트만 표적으로 돌리고, 전체는 리더가 통합 시점에 모아 한 번 돌린다. 착지
   하나 = 회차 하나이고, 배정 큐가 남아 있으면 같은 런 안에서 다음 회차를
-  돈다. 세션이 회차 중 만든 이슈는 전부 누군가의 손에 있어야 세션이 끝난다.
+  돈다(회차 수 상한 없음). 세션이 만들었거나 배정받은 일감이 전부 closed여야
+  세션이 끝난다(예외는 리더의 HOLD).
   회차 구간은 procedures(resolve-issue, workspace, item, land, settle,
   worker-round)로 내보내므로 PM의 생성 파일이 include + call로 쓸 수 있다.
 
@@ -29,6 +30,12 @@ filter_roles:
 default_child_cflow: improv-worker-v2
 
 include: [improv-common]
+
+# 회차 수에 상한을 두지 않는다(claunch-0b8dx, 2026-10-07 사용자 결정): 런은
+# 배정 큐가 빌 때까지 돌고, 끝나는 조건은 settle-check의 「모든 일감 closed」다.
+# 회차마다 같은 노드를 다시 지나므로 방문 수가 회차 수에 비례해 쌓인다 ->
+# max_visits: 0(방문 상한 없음, check 경고 unbounded-visits).
+max_visits: 0
 
 # 세션 수명의 side 런(docs/cflow-v2.md 2.9). 첫 자식을 둘 때 work가 세운다.
 sides:
@@ -142,7 +149,7 @@ inputs:
   max_rounds:
     type: int
     label: 최대 회차 수
-    help: 이 런이 도는 회차의 상한(비우면 큐가 빌 때까지, 최대 25)
+    help: 이 런이 도는 회차의 상한(비우면 큐가 빌 때까지)
   force_pr:
     type: bool
     label: PR 강제(force to make PR)
@@ -2266,8 +2273,10 @@ nodes:
         json.load(sys.stdin)['issues']; print(json.dumps([i for i in d if
         i.get('created_by') == os.environ['CLAUNCH_SESSION']],
         ensure_ascii=False))"`
-        (settle-check가 세션 종료 전에 같은 명령으로 다시 읽는다 — 두
-        자리가 같은 것을 읽어야 정산의 「됐다」가 갈리지 않는다.)
+        (이 명령은 배정을 정할 대상, 곧 이 세션이 만든 열린 이슈만 읽는다.
+        세션 종료 전의 settle-check는 더 넓게 읽는다 — 이 세션이 만들었거나
+        배정받은 일감 중 closed가 아닌 전부(claunch-0b8dx). 여기서 배정한
+        것도 닫힐 때까지 거기서 남는다.)
         항목마다 배정을 정하고 **이 자리에서 직접 친다** — 후속 구현 이슈를
         만들었을 때만이 아니라 위 명령이 하나라도 돌려주면 이 절을 밟는다
         (공통 블록 「스스로 만든 이슈는 만든 세션이 처리한다」, claunch-034c4):
@@ -2292,14 +2301,10 @@ nodes:
           from <원회차 id>"`. 규격이 모자라면 배정 전에 description을
           채운다(staged 순서: description이 먼저, --assignee가 마지막).
           queue-recheck가 이것을 읽어 같은 런 안에서 다음 회차로 돈다.
-          런 단위 상한: `claunch cflow2 status --json`의 `visits.intake`가
-          10 이상이면 self를 치지 않고 pool로 보낸다(근거 「self 상한
-          도달: intake <n>회」). 회차 루프의 상한(max 25)에 닿으면 런이
-          사람의 승인으로 선다 — 그 전에 남은 일의 범위를
-          상위가 정하게 한다.
-        - **pool** — 이 세션이 착수할 수 없는 것, 그리고 self 상한에 닿은
-          것이다: 다른 저장소 영역, blocked, 범위·우선순위를 사용자나
-          리더가 정해야 하는 것. assignee 없이 두고 상위의 처분을 묻는다.
+          회차 수에는 상한이 없다(claunch-0b8dx) — 착수할 수 있는 것은
+          몇 회차째든 self로 둔다.
+        - **pool** — 이 세션이 착수할 수 없는 것이다: 다른 저장소 영역,
+          blocked, 범위·우선순위를 사용자나 리더가 정해야 하는 것. assignee 없이 두고 상위의 처분을 묻는다.
         마감 알림은 한 통이다 — 항목마다 (id, 갈래, 한 줄 근거)를 싣는다.
         pool 항목이 없으면 fyi다(배정은 이미 보드에 있다; 상위는 거부권
         `update <id> --assignee ""` + `UNQUEUED by leader: <이유>`를
@@ -2493,18 +2498,20 @@ nodes:
 
   # ── 세션 정산 (settle) ───────────────────────────────────────────────
   settle-wait:
-    title: 생성 이슈 정산 대기 (시계가 깨운다)
+    title: 일감 완료 대기 (시계가 깨운다)
     prompt: |
-      이 세션이 만든 이슈가 정산되기를 기다린다. 아무에게도 묻지 않는다 —
-      깨우는 것도 데몬의 시계가 한다.
+      이 세션이 만들었거나 배정받은 일감이 전부 닫히기를(또는 상위의 HOLD를)
+      기다린다(claunch-0b8dx). 남은 것은 자식·다른 세션이 착지시켜 닫을 일감,
+      상위의 처분(pool ask, HOLD 확인 ask)을 기다리는 일감이다. 아무에게도
+      묻지 않는다 — 깨우는 것도 데몬의 시계가 한다.
 
       하지 않는 것부터 적는다:
       · 상위에게 재촉을 보내지 않는다. 상위는 wrapup의 정산 알림(pool
         항목이 있으면 ask)으로 이미 요청받았고, 그 답이 이 자리의 조건을
         만든다. 여기서 한 번 더 밀면 같은 요청이 두 번 간다.
       · 보드에 코멘트를 쓰지 않는다. 이 세션이 칠 배정(spawn·self)은
-        wrapup에서 이미 쳤고, 여기 남은 것(pool, 리더가 거부한 것)의
-        정산은 리더·운영자의 쓰기다.
+        wrapup에서 이미 쳤고, 여기 남은 것의 완료는 그 일감을 쥔 세션의
+        닫기이거나 리더·운영자의 쓰기(HOLD, 재배정)다.
       · 브랜치·워크트리를 건드리지 않는다.
 
       이 스텝은 settle-poll 재시도 사이의 대기다. 대기 한 줄을 보고하고 턴을
@@ -3293,7 +3300,12 @@ procedures:
           무엇이 나왔는지(id 목록과 각각의 판정)를 reason에 적는다.
           · 착수할 수 있는 일감이 하나라도 있으면 **next-round**다 — 이 저장소
             영역의 일이고, blocked가 아니고, 규격이 있거나 intake에서 채울 수
-            있는 것. 나머지 일감은 상태·assignee를 손대지 않고 둔다 — 다음
+            있는 것. **해소되지 않은 `HOLD:` 코멘트가 붙은 in_progress 이슈는
+            착수할 수 없다**(누가 썼든 — 이 세션이 hold로 동결한 회차 이슈가 이
+            목록에 다시 나온다). 그것만 남았으면 next-round가 아니고, 그 이슈는
+            done의 되돌리기 대상도 아니다 — 처분은 settle-check가 상위에게
+            묻는다(claunch-0b8dx: 회차 수 상한이 없으므로 이 판정이 같은 이슈로
+            회차를 되풀이하지 않게 막는 자리다). 나머지 일감은 상태·assignee를 손대지 않고 둔다 — 다음
             회차의 intake가 같은 명령으로 큐 전체를 다시 읽는다.
           · 남은 일감이 없으면 **done**이다. 남았더라도 전부 착수할 수 없는
             것(blocked, 다른 저장소 영역, 이 세션이 할 수 없는 것)이면
@@ -3477,7 +3489,8 @@ procedures:
   settle:
     description: >-
       세션 종료 전 정산(v1 settle-check, settle-wait, settle-stall, end-gate,
-      end-hold). 이 세션이 만든 이슈가 전부 누군가의 손에 있는지 보드로 확인하고,
+      end-hold). 이 세션이 만들었거나 배정받은 일감이 전부 closed(예외는 리더의
+      HOLD)인지 보드로 확인하고(claunch-0b8dx),
       아니면 10분 간격으로 여섯 번 다시 본 뒤 사람이 처분한다. 마지막에 사용자가
       세션 종료를 승인하거나 보류한다.
     body:
@@ -3498,25 +3511,41 @@ procedures:
                     chooser: agent
                     require_reason: true
                     prompt: |
-                      이 세션이 만든 활성 후속 이슈가 전부 정산됐는지 보드로 확인한다 —
-                      wrapup의 정산 절과 같은 명령(`br`에 생성자 필터가 없어 못박은
-                      것): `claunch beads list --status open --status in_ready --limit 0
-                      --json | uv run --no-sync python -c "import json,os,sys; d =
-                      json.load(sys.stdin)['issues']; print(json.dumps([i for i in d if
-                      i.get('created_by') == os.environ['CLAUNCH_SESSION']],
-                      ensure_ascii=False))"`. 항목마다 판정한다 —
-                      정산됨: (a) assignee가 있고 그 세션이 살아 있다(`claunch sessions`
-                      또는 `claunch cflow2 status -t <세션>`으로 exited가 아님을 확인),
-                      또는 (b) `claunch beads comments <id>`에 해소되지 않은 `HOLD:`
-                      마커가 있다. 그 외(assignee 없음, assignee가 종료된 세션, 마커
-                      없음)는 미정산이다. assignee가 **이 세션 자신**인 것도 미정산이다
-                      — 이 세션은 곧 끝나므로 그 배정은 누구의 손도 아니다; 착수할 수
-                      있었으면 queue-recheck가 next-round를 냈어야 했다
-                      (claunch-034c4). 그런 항목이 보이면 unsettled를 고르기 전에
-                      queue-recheck의 done 규칙을 그 항목에 적용한다(풀에 되돌리고
-                      `UNQUEUED:` 코멘트, 이 세션이 만든 것이면 pool ask 한 통) — 그러지
-                      않으면 settle-wait는 재요청을 하지 않으므로 아무도 처분을 요청받지
-                      못한 채 settle-stall까지 간다. 한 일을 reason에 적는다.
+                      이 세션이 만들었거나 이 세션에 배정된 일감이 전부 완료됐는지 보드로
+                      확인한다(claunch-0b8dx: 세션은 모든 일감이 완료 처리돼야 끝난다).
+                      closed·tombstone이 아닌 것을 모두 읽는다(`br`에 생성자 필터가 없어
+                      못박은 명령): `claunch beads list --all --limit 0 --json | uv run
+                      --no-sync python -c "import json,os,sys; d =
+                      json.load(sys.stdin)['issues']; me = os.environ['CLAUNCH_SESSION'];
+                      print(json.dumps([i for i in d if i.get('status') not in ('closed',
+                      'tombstone') and me in (i.get('created_by'), i.get('assignee'))],
+                      ensure_ascii=False))"`. 목록이 비어야 완료다.
+                      남은 항목은 하나뿐인 예외를 빼고 전부 미정산이다 — 예외는 **상위의
+                      HOLD**다: `claunch beads comments <id> --json`에서 `author`가 이
+                      세션이 아닌(상위·리더가 쓴) `HOLD:` 코멘트가 있고 그 뒤에 해소
+                      코멘트가 없다. 이 세션이 스스로 쓴 `HOLD:`(landing-declined-hold,
+                      wrapup의 hold 동결)는 예외가 아니다. 살아 있는 다른 세션이
+                      assignee라는 것도 정산이 아니다: 그 세션이 닫을 때까지 기다린다
+                      (자식에게 넘긴 일감도 같다). 항목마다 할 일:
+                      · **이 세션이 HOLD로 동결한 회차 이슈**(in_progress, assignee가 이
+                        세션, 이 세션이 쓴 `HOLD:`): 상태·assignee를 그대로 둔다. 상위의
+                        HOLD가 아직 없고 확인 요청을 보낸 적이 없으면(`HOLD CONFIRM
+                        REQUESTED:` 코멘트가 없으면) 상위에게 ask 한 통을 보낸다 — id,
+                        동결 이유, 브랜치 @ tip, 「HOLD로 확인(그 이슈에 `HOLD:` 코멘트)
+                        하거나 다른 세션에 배정해 달라」 — 그리고 `claunch beads comments
+                        add <id> "HOLD CONFIRM REQUESTED: <상위>"`를 남긴다(한 번만).
+                      · **in_progress인 항목에는 queue-recheck의 done 규칙(unqueue)을
+                        적용하지 않는다** — assignee를 비우면 데몬의 종료 처리
+                        (assignee가 이 세션인 in_progress → open)가 닿지 않고, 고아로
+                        읽혀 머지 없이 닫힐 수 있다.
+                      · assignee가 **이 세션 자신**인 open·in_ready 항목은 착수할 수
+                        있었으면 queue-recheck가 next-round를 냈어야 했다
+                        (claunch-034c4) — unsettled를 고르기 전에 queue-recheck의 done
+                        규칙을 적용한다(풀에 되돌리고 `UNQUEUED:` 코멘트, 상위에게 pool
+                        ask 한 통 — 상위는 HOLD를 남기거나 다른 세션에 배정한다).
+                      위 두 ask를 보내지 않으면 settle-wait는 재요청을 하지 않으므로
+                      아무도 처분을 요청받지 못한 채 settle-stall까지 간다. 한 일을
+                      reason에 적는다.
                       판정 전에 reviewer-ensure가 이 런에서 세운 자식 리뷰어부터
                       정리한다: 이 자리는 queue-recheck가 done을 낸 뒤라 이 런에 남은
                       리뷰가 없다. 그 리뷰어가 답하지 않은 질문을 들고 있지 않은지
@@ -3537,7 +3566,7 @@ procedures:
                       세션이 사라지는 쪽보다 싸다.
                     options:
                       settled:
-                        description: 생성 이슈 전부 정산됐고 stack은 봉인됐으며 살아 있는 자식도 없다(또는 adopt 완료) — 세션 종료 승인으로
+                        description: 만든·배정된 일감이 전부 closed(또는 리더 HOLD)이고 stack은 봉인됐으며 살아 있는 자식도 없다(또는 adopt 완료) — 세션 종료 승인으로
                         then: {break: settle-watch}
                       unsettled:
                         description: 미정산 항목이 있다 — 상위(리더)의 정산을 기다린다
@@ -3552,8 +3581,8 @@ procedures:
                   with:
                     require_reason: true
                     topic: |
-                      이 세션이 만든 이슈가 아직 정산되지 않았다(살아 있는 assignee가 없고
-                      `HOLD:` 마커도 없다). 타이머가 여섯 번 깨우는 동안 보드가 변하지
+                      이 세션이 만들었거나 배정받은 일감이 아직 완료되지 않았다(closed가
+                      아니고 상위가 쓴 `HOLD:` 마커도 없다). 타이머가 여섯 번 깨우는 동안 보드가 변하지
                       않았다는 뜻이다 — 리더가 아직 답하지 않았거나, 답할 세션이 없거나,
                       정산 대상이 아닌 무언가가 남아 있다.
 
@@ -3598,9 +3627,10 @@ body:
     id: rounds
     loop:
       # max_rounds 입력이 있으면 그 수만큼만 돈다($visits.round = 끝난 회차 수).
-      # 25를 넘는 값은 25에서 사람의 승인(loop_limit)에 선다.
+      # 회차 수에는 상한을 두지 않는다(claunch-0b8dx). 엔진은 반복마다 양의
+      # max를 요구하므로 실제로 닿지 않을 값을 둔다 — 닿으면 사람의 승인(loop_limit).
       while: "$data.recheck.next != 'done' and ($data.inputs.max_rounds == null or $visits.round == null or $visits.round < $data.inputs.max_rounds)"
-      max: 25
+      max: 10000
       do:
         - id: round
           call: worker-round

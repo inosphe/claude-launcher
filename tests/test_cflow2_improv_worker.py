@@ -35,7 +35,9 @@ BLOCK_END = "것만은 금지다."
 #   through `claunch beads` (one DB, its own lock) and spawn sessions; they do
 #   not write the worktree, so there is no path to declare and no overlap
 #   with `work`'s fs.write. The checker cannot see that from undeclared paths.
-ACCEPTED_WARNINGS = {("par-write-overlap", "round/item/work-group")}
+ACCEPTED_WARNINGS = {("par-write-overlap", "round/item/work-group"),
+                     # claunch-0b8dx: no cap on the number of rounds
+                     ("unbounded-visits", None)}
 
 # Every v1 step id -> the v2 labels that carry it.
 V1_TO_V2 = {
@@ -94,6 +96,37 @@ def _block(text: str) -> str:
     end = text.find(BLOCK_END, start)
     assert end >= 0
     return text[start:end + len(BLOCK_END)]
+
+
+#: claunch-0b8dx (user decision 2026-10-07, v2 only): the v2 copy of the
+#: beads block drops v1's self cap and settles on "every issue closed, or a
+#: leader HOLD". Everything else stays the v1 block word for word.
+V1_ONLY = """묻는다. self에는 런 단위 상한이 있다: 이 런의 intake 방문 수
+(`claunch cflow status --json`의 `visits.intake`)가 10 이상이면 self
+대신 pool로 보낸다 — 엔진의 loop guard(max_visits 25)는 26번째
+intake에서 런을 사람의 승인(`loop_limit`)으로 세우는데, 그 전에 범위
+판단을 상위에게 넘기기 위해서다. 리더는 거부권을 가진다(`update <id>
+--assignee ""` + `UNQUEUED by leader: <이유>`); 거부된 이슈는
+pool과 같이 상위의 처분을 따른다. 세션이 만든 활성
+이슈가 전부 누군가의 손(살아 있는 세션의 assignee, 또는 리더의
+`HOLD:` 코멘트)에 있어야 세션이 끝난다 — 워커의 settle-check가"""
+V2_INSTEAD = """묻는다. self에는 회차 수 상한이 없다(claunch-0b8dx). 리더는
+거부권을 가진다(`update <id> --assignee ""` + `UNQUEUED by leader:
+<이유>`); 거부된 이슈는 pool과 같이 상위의 처분을 따른다. 세션이
+만들었거나 배정받은 일감이 전부 closed여야 세션이 끝난다 — 예외는
+리더의 `HOLD:` 코멘트뿐이고, 살아 있는 다른 세션에 배정된 것은 그
+세션이 닫을 때까지 기다린다(claunch-0b8dx) — 워커의 settle-check가"""
+
+
+def _words(text: str) -> str:
+    return " ".join(text.split())
+
+
+def _as_v2(v1_block: str) -> str:
+    """The v1 block with the one claunch-0b8dx divergence applied, in words."""
+    words = _words(v1_block)
+    assert words.count(_words(V1_ONLY)) == 1
+    return words.replace(_words(V1_ONLY), _words(V2_INSTEAD))
 
 
 def _chart():
@@ -296,17 +329,18 @@ def test_moved_rule_prose_is_not_repeated_in_prompts():
 
 
 def test_beads_common_raw_text_is_the_v1_block():
-    assert _block(COMMON.read_text(encoding="utf-8")) == _block(V1.read_text(encoding="utf-8"))
+    assert _words(_block(COMMON.read_text(encoding="utf-8"))) == \
+        _as_v2(_block(V1.read_text(encoding="utf-8")))
 
 
 def test_beads_common_loaded_value_is_the_v1_block():
     v1 = yaml.safe_load(V1.read_text(encoding="utf-8"))
     v1_block = _block(v1["steps"]["intake"]["instructions"])
     common = yaml.safe_load(COMMON.read_text(encoding="utf-8"))
-    assert _block(common["fragments"]["beads-common"]) == v1_block
+    assert _words(_block(common["fragments"]["beads-common"])) == _as_v2(v1_block)
     chart = _chart()
     intake_issue = next(n for n in chart.nodes.values() if n.label == "intake-issue")
-    assert _block(intake_issue.props["prompt"]) == v1_block
+    assert _words(_block(intake_issue.props["prompt"])) == _as_v2(v1_block)
     assert "${frag:beads-common}" in V2.read_text(encoding="utf-8")
 
 
@@ -617,3 +651,56 @@ def test_landing_review_asks_by_relation(tmp_path, monkeypatch, relation, label,
                     cwd=str(tmp_path), scope="m", now=2.0)
     st = runtime.status(cwd=str(tmp_path), scope="m", now=2.0, tick=False)
     assert st["status"] == "done" and st.get("outcome") == "held", st.get("outcome")
+
+
+# -- claunch-0b8dx: no round cap, end on every issue closed ------------------
+
+
+def test_the_round_count_is_not_capped():
+    """User decision 2026-10-07: a run keeps taking rounds while the queue
+    has work. The engine wants a positive loop max, so it is set out of
+    reach, and node visits (which grow with rounds) are not capped."""
+    chart = _chart()
+    assert chart.meta["max_visits"] == 0
+    rounds = next(n for n in chart.nodes.values() if n.label == "rounds")
+    assert rounds.props["max"] >= 10000
+    assert "visits.intake" not in V2.read_text(encoding="utf-8").split("self에는")[-1][:400]
+    assert "self 상한" not in V2.read_text(encoding="utf-8")
+
+
+def test_settle_check_ends_only_on_every_issue_closed_or_a_leader_hold():
+    chart = _chart()
+    prompt = next(n for n in chart.nodes.values() if n.label == "settle-check").props["prompt"]
+    words = _words(prompt)
+    # every status but closed/tombstone, created by or assigned to this session
+    assert "claunch beads list --all --limit 0 --json" in words
+    assert "not in ('closed', 'tombstone')" in words
+    assert "i.get('assignee')" in words and "i.get('created_by')" in words
+    assert "목록이 비어야 완료다" in words
+    assert "살아 있는 다른 세션이 assignee라는 것도 정산이 아니다" in words
+    # H1 (s88): only a HOLD another session wrote counts; a self HOLD asks up
+    assert "`author`가 이 세션이 아닌" in words
+    assert "이 세션이 스스로 쓴 `HOLD:`(landing-declined-hold, wrapup의 hold 동결)는 예외가 아니다" in words
+    assert "HOLD CONFIRM REQUESTED:" in words
+    assert "in_progress인 항목에는 queue-recheck의 done 규칙(unqueue)을 적용하지 않는다" in words
+
+
+def test_a_held_round_issue_is_not_taken_for_a_next_round():
+    """s88 H3: with no round cap, queue-recheck is the gate that keeps a
+    held in_progress issue from being worked again round after round."""
+    # the procedure's choose node carries no label; find it by its queue read
+    chart = _chart()
+    prompts = [_words(str(n.props.get("prompt") or "")) for n in chart.nodes.values()
+               if n.type == "choose"]
+    recheck = [p for p in prompts if "회차가 마감됐다(이슈 닫힘 또는 HOLD" in p]
+    assert recheck
+    for p in recheck:
+        assert "해소되지 않은 `HOLD:` 코멘트가 붙은 in_progress 이슈는 착수할 수 없다" in p
+
+
+def test_wrapup_and_settle_wait_say_the_new_settlement():
+    """s88 H2: no prose left claiming the old 'someone holds it' settlement."""
+    text = _words(V2.read_text(encoding="utf-8"))
+    assert "두 자리가 같은 것을 읽어야 정산의" not in text
+    assert "생성 이슈 정산 대기" not in text
+    assert "일감 완료 대기" in text
