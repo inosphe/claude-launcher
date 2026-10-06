@@ -646,6 +646,13 @@ nodes:
       preflight는 그 브랜치가 원격에 있는지 `git ls-remote`로 재고 base_sha를
       싣는다. 원격에 없으면 blocker다: 부모의 스택이 로컬에만 있다는 뜻이고,
       아래 판정대로 로컬 착지(부모가 내 브랜치를 스택에 --no-ff로 머지)로 간다.
+      원격에 있어도 그것이 부모가 둔 스택인지는 따로 확인한다 — 같은 이름의
+      이전 세션 브랜치가 남아 있을 수 있다. 부모가 알린 기준 줄에 원격 ref
+      꼬리(`<부모 세션>-stack @ <SHA> @ <remote>/<부모 세션>-stack`)가 없으면
+      preflight 결과와 무관하게 로컬 착지다(reason: "parent stack is local"). 꼬리가
+      있으면 `git fetch <remote>` 뒤 `git merge-base --is-ancestor <꼬리의 SHA>
+      <base_sha>`가 0이어야 한다(스택은 그 뒤로 머지만 쌓인다). 0이 아니면 PR을
+      열지 않고 로컬 착지로 가며, 두 SHA를 부모에게 알린다.
       상위 세션이 다른 머신인지도 확인한다 — `claunch mesh ls`에서 상위의
       machine 열이 local이 아니면 원격 편성이다. 원격 편성에서는 로컬 착지가
       성립하지 않는다(상위가 내 커밋을 가진다는 보장이 없다 — 머신을 넘는
@@ -1439,6 +1446,10 @@ nodes:
       ok: {stack_tip: str, children: list}
     effects: [fs.read]
     do:
+      # 지난 회차가 컷 없이 cut-wait를 떠났으면(timeout → cut-unreachable에서
+      # confirmed) 그 뒤에 온 컷은 지난 요청의 답이다. 새 요청 전에 소비해 이번
+      # cut-wait가 그 컷으로 풀리지 않게 한다(claunch-yq80p.2 리뷰 X1).
+      - {consume: {from: "side:stack:signals", name: cut}, when: "$outcome == 'ok' and side('stack').live"}
       - push: {to: signals, item: {name: "'cut-wanted'", tip: "$result['stack-cut'].value.stack_tip"}}
         when: "$outcome == 'ok'"
 
@@ -2810,8 +2821,10 @@ procedures:
             4시간 동안 컷이 없었다는 뜻이다(stack 런의 standby가 cut을 고르지 못하는
             이유 — 착지를 요청한 자식이 남았는가 — 를 본다). 스택 브랜치(`<세션>-stack`)의
             tip과 자식 브랜치들의 머지 여부를 git에서 보고 선택지별 위험과 결과를 채운다.
-            confirmed는 컷 신호를 소비하지 않는다: 이번 착지에 실을 컷을 git에서 직접
-            확인했을 때만 권한다.
+            confirmed 뒤에 stack 런의 컷이 늦게 오면 그 컷은 이번 요청의 답이고, 다음
+            회차의 stack-cut이 새 요청 전에 그것을 소비한다(다음 회차의 cut-wait를
+            풀지 않는다). confirmed는 이번 착지에 실을 컷을 git에서 직접 확인했을 때만
+            권한다.
             선택지: confirmed — 스택 브랜치에 이번 착지에 실을 컷이 있음을 git에서
             확인했다, stack-merge로 간다. held — 컷을 받을 수 없다(stack 런이 없거나
             멈췄다), 이 착지를 held로 마감한다.

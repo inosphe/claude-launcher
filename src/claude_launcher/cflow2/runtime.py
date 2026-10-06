@@ -1792,12 +1792,12 @@ def brief(r: Run, did: str) -> Dict[str, Any]:
 
 
 def _mutate(cwd: Optional[str], scope: Optional[str], now: Optional[float],
-            fn: Callable[[Run], Any]) -> Any:
+            fn: Callable[[Run], Any], lock_timeout: Optional[float] = None) -> Any:
     """Load, apply ``fn`` under the run lock, save. Time-based moves that are
     due (an ask's deadline, a timeout, a wait's seconds) apply first, so an
     operation never lands on a state the clock has already moved past."""
     st = RunStore(cwd, scope)
-    with st.lock():
+    with (st.lock() if lock_timeout is None else st.lock(lock_timeout)):
         r = Run.load(st, now)
         if r.status in LIVE_STATUSES:
             _tick_time(r)
@@ -4738,6 +4738,12 @@ def peer_scopes(cwd: Any, scope: str) -> List[str]:
     return out
 
 
+#: how long a poke waits for a peer's lock: a peer that is busy is changing
+#: its own state and re-evaluates its waits when it saves (or on the clock's
+#: next pass), so the run that poked does not wait for it
+POKE_LOCK_TIMEOUT = 0.1
+
+
 def poke_peers(cwd: str, scope: str, now: Optional[float] = None) -> List[str]:
     """After a run changed what its peers read, re-evaluate the peers'
     ``wait: until`` now instead of on the clock's next pass. Runs after the
@@ -4754,7 +4760,7 @@ def poke_peers(cwd: str, scope: str, now: Optional[float] = None) -> List[str]:
         if not any((i or {}).get("await") == AW_WAIT for i in (state.get("inst") or {}).values()):
             continue
         try:
-            _mutate(cwd, other, now, lambda r: None)
+            _mutate(cwd, other, now, lambda r: None, lock_timeout=POKE_LOCK_TIMEOUT)
             poked.append(other)
         except (FlowError, StoreError):
             continue

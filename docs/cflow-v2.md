@@ -698,6 +698,8 @@ collections:
 nodes:
   stack-cut:
     do:
+      # 지난 요청에 늦게 온 컷을 버린다(아래 「요청과 응답」)
+      - {consume: {from: "side:stack:signals", name: cut}, when: "side('stack').live"}
       - push: {to: signals, item: {name: "'cut-wanted'"}}
         when: "$outcome == 'ok'"
 body:
@@ -710,6 +712,14 @@ body:
               consume: [{from: "side:stack:signals", name: cut}]
               seconds: 14400
 ```
+
+**요청과 응답.** 신호에는 요청과 응답을 잇는 번호가 없다. 응답을 기다리던
+`wait`가 응답 없이 끝나면(timeout 뒤 사람이 진행을 고른 경우) 그 뒤에 온 응답은
+다음 요청의 `wait`를 바로 풀 수 있다. 그래서 요청하는 노드는 요청을 쓰기 전에 응답
+이름을 `consume`한다(위 예의 `stack-cut`). 남는 경우는 지난 요청의 응답이 새 요청을
+쓴 뒤에 도착하는 것이다. 응답하는 쪽의 `consume`(이름별)은 cursor를 log 끝으로
+옮기므로 그 응답 하나가 두 요청을 함께 소비하고, 응답의 내용(컷이면 그 시점의 스택
+tip)이 새 요청에 쓰인다.
 
 **선언과 slot.**
 
@@ -753,7 +763,8 @@ body:
   `collection_removed`, `collection_reset`, `collection_watch`) 끝난(`done`,
   `aborted`) 런은 저장 뒤, 잠금을 놓은 다음에 같은 세션의 다른 런 중 `wait`가 있는
   런의 시간 틱(`wait until` 재평가)을 한 번 돌린다(`poke_peers`). 그 런이 바빠 잠금을
-  얻지 못하면 데몬 clock의 다음 틱이 한다.
+  0.1초(`POKE_LOCK_TIMEOUT`) 안에 얻지 못하면 기다리지 않는다 — 그 런의 다음 저장이나
+  데몬 clock의 다음 틱이 한다.
 
 **`side(NAME)`.** 식 함수. 이 세션의 side 런 NAME에 대해 `{name, scope, live,
 status, run, workflow}`를 돌려준다. 런이 없으면 `live: false`, 나머지는 `null`이다.
@@ -768,7 +779,13 @@ status, run, workflow, declared, how?}}`가 실린다(아직 없으면 `how`가 
 (`Cflow2Clock.session_exited`)은 기록만 하고 다음 패스 시작(`end_sides`)에서
 처리한다. 그때 세션이 다시 살아 있으면(redefine, respawn) 중단하지 않는다. 데몬
 재기동은 종료가 아니다. `daemon.cflow2_clock`이 꺼져 있으면 이 처리도 없다. 메인
-런은 건드리지 않는다.
+런은 건드리지 않는다. 종료 기록은 데몬 메모리에만 있다: 세션이 끝나고 다음 패스
+전에 데몬이 내려가면 그 side 런은 `running`으로 남는다(부팅 시 정리 없음). 같은 세션
+이름이 다시 쓰이면 `side(NAME).live`가 참으로 읽힌다.
+
+**데몬 통지.** side slot(`<세션>+<이름>`)과 그 아래 중첩 런의 통지(ask, monitor)와
+세션 조회(headless의 실행 환경, session 위임의 부모)는 slot의 세션 이름(`+`·`~` 앞)으로
+간다 — 그 세션이 side 런의 드라이버다.
 
 **검사.**
 
