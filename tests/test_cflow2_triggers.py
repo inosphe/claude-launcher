@@ -654,3 +654,90 @@ def test_landing_queue_tool_lists_and_marks_a_v2_collection(tmp_path, monkeypatc
         v1_mcp.call_tool("landing_queue", {"issue": "c-1", "status": "landed"})
     assert _items(lead, "lead")["c-1"]["status"] == "waiting"
     assert v1_mcp._seen_run is None  # the v2 payload does not arm the v1 fence
+
+
+# -- leader: (claunch-yq80p.9) ---------------------------------------------------------
+
+MID = """cflow: 2
+name: mid
+sides: {stack: lead}
+nodes:
+  a: {prompt: A}
+body: a
+"""
+
+
+def _leader_tree(tmp_path):
+    """lead (main run holds landing) -> m1 (worker; its stack side run holds
+    landing, its main run does not) -> w1."""
+    lead, work = _dirs(tmp_path)
+    mid = tmp_path / "mid"
+    v2 = mid / ".claunch" / "workflows" / "v2"
+    v2.mkdir(parents=True)
+    (v2 / "lead.yaml").write_text(LEAD, encoding="utf-8")
+    _start(lead, LEAD, "lead")
+    _start(mid, MID, "m1")
+    runtime.start_side("stack", cwd=str(mid), main="m1", caps={}, now=T0)
+    mgr = Manager(Session("lead", lead), Session("m1", mid, parent="lead"),
+                  Session("w1", work, parent="m1"))
+    return lead, mid, work, mgr
+
+
+def test_leader_push_skips_the_parents_side_run(tmp_path):
+    lead, mid, work, mgr = _leader_tree(tmp_path)
+    push = dict(cflow2_triggers.ENQUEUE_LANDING_PUSH, to="leader:landing")
+    ok, detail = _push(mgr, work, push=push)
+    assert ok, detail
+    assert set(_items(lead, "lead")) == {"c-1", "c-2"}
+    assert _items(mid, "m1+stack") == {}
+    # parent: still reaches the parent's stack run
+    ok, detail = _push(mgr, work)
+    assert ok and "m1+stack" in detail
+    assert set(_items(mid, "m1+stack")) == {"c-1", "c-2"}
+
+
+def test_leader_push_with_no_holding_ancestor_is_a_skip(tmp_path):
+    lead, work = _dirs(tmp_path)
+    mgr = Manager(Session("lead", lead), Session("w1", work, parent="lead"))
+    push = dict(cflow2_triggers.ENQUEUE_LANDING_PUSH, to="leader:landing")
+    ok, detail = _push(mgr, work, push=push)
+    assert not ok and "no ancestor of 'w1' (lead)" in detail
+    ok, detail = _push(Manager(Session("w1", work)), work, push=push)
+    assert not ok and "has no parent session" in detail
+
+
+def test_trigger_when_decides_whether_it_is_recorded(tmp_path):
+    text = """cflow: 2
+name: w
+inputs:
+  relation: {type: enum, choices: [stacked, independent], default: stacked}
+nodes:
+  req:
+    prompt: R
+    triggers:
+      - at: leave
+        when: "$data.inputs.relation != 'independent'"
+        push: {to: "parent:landing", item: {issue: "'a'"}}
+      - at: leave
+        when: "$data.inputs.relation == 'independent'"
+        push: {to: "leader:landing", item: {issue: "'a'"}}
+      - at: leave
+        when: "len(3) > 0"
+        push: {to: "parent:landing", item: {issue: "'b'"}}
+  after: {prompt: B}
+body: {seq: [req, after]}
+"""
+    from claude_launcher.cflow2 import inputs as inputs_mod
+
+    chart = frontend.compile_text(text)
+    for relation, target in (("stacked", "parent:landing"), ("independent", "leader:landing")):
+        cwd = tmp_path / relation
+        cwd.mkdir()
+        c = inputs_mod.apply(chart, {"relation": relation})
+        runtime.start(c, cwd=str(cwd), scope="w1", caps={}, driver="w1", now=T0)
+        runtime.report("req", cwd=str(cwd), scope="w1", now=T0 + 1)
+        recs = _state(cwd, "w1").get("triggers") or []
+        assert [r["push"]["to"] for r in recs] == [target], relation
+        # a when that cannot be evaluated is not recorded and says why
+        [skip] = _events(cwd, "w1", "trigger_skipped")
+        assert "when" in skip["reason"]

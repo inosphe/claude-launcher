@@ -39,8 +39,8 @@ Collections and triggers (docs/cflow-v2.md 2.7, 2.8; :func:`_collection_checks`)
                         collections (doc 2.9); peers read and consume them
 - ``unbounded-visits`` (warning) ``max_visits: 0`` -- no node is ever held for
                         a person by the visit limit
-- ``parent-outside-trigger`` a ``parent:`` address anywhere but a trigger
-- ``trigger-target``    a trigger ``push`` whose ``to`` is not ``parent:``
+- ``parent-outside-trigger`` a ``parent:``/``leader:`` address anywhere but a trigger
+- ``trigger-target``    a trigger ``push`` whose ``to`` is not ``parent:``/``leader:``
 - ``facts-outside-trigger`` ``$facts`` or ``$each`` in an expression that is
                         not a trigger ``push`` (a foreach ``as: each`` binding
                         in scope excepted)
@@ -924,6 +924,9 @@ def _node_exprs(chart: ir.Chart, node: ir.Node) -> List[Tuple[str, str, bool]]:
             add(f"{what} fields.{f}", t)
     for i, trig in enumerate(node.get("triggers") or []):
         push = trig.get("push") or {}
+        # 'when' is evaluated by the engine as it records the trigger: the
+        # run's environment, without $facts/$each
+        add(f"trigger[{i}] when", trig.get("when"))
         add(f"trigger[{i}] push each", push.get("each"), True)
         for f, t in (push.get("item") or {}).items():
             add(f"trigger[{i}] push item.{f}", t, True)
@@ -962,9 +965,9 @@ def _collection_checks(chart: ir.Chart, nodes: List[ir.Node]) -> List[Finding]:
                                    f"{where}: address {addr!r} is another run's collection; a "
                                    f"run writes only its own (peers read and consume it)", nid))
             return None
-        if target == "parent":
+        if target in _collections.TRIGGER_TARGETS:
             out.append(Finding(ERROR, "parent-outside-trigger",
-                               f"{where}: address {addr!r}: parent: is only for triggers", nid))
+                               f"{where}: address {addr!r}: {target}: is only for triggers", nid))
             return None
         spec = cols.get(name)
         if spec is None:
@@ -1069,10 +1072,11 @@ def _collection_checks(chart: ir.Chart, nodes: List[ir.Node]) -> List[Finding]:
                 except _collections.CollectionError as exc:
                     out.append(Finding(ERROR, "trigger-target", f"{where}: {exc}", n.id))
                     continue
-                if target != "parent":
+                if target not in _collections.TRIGGER_TARGETS:
                     out.append(Finding(ERROR, "trigger-target",
-                                       f"{where}: a trigger push goes to another run's collection; "
-                                       f"to must be parent:<name>, got {to!r}", n.id))
+                                       f"{where}: a trigger push goes to another session's "
+                                       f"collection; to must be parent:<name> or leader:<name>, "
+                                       f"got {to!r}", n.id))
 
         def read_in_delegation(what: str) -> None:
             # a nested delegated run's chart carries no collections, so a

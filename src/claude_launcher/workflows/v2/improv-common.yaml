@@ -253,7 +253,8 @@ collection_types:
   # 다른 런의 cursor가 계속 맞는다.
   signals:
     kind: log
-    item: {name: str, tip: "str?"}
+    # from: rebased의 옛 tip(claunch-yq80p.9)
+    item: {name: str, tip: "str?", from: "str?"}
     access: {push: [driver]}
     lifecycle: {inherit: true}
 

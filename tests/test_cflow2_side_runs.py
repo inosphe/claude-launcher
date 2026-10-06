@@ -620,3 +620,101 @@ def test_poke_does_not_wait_for_a_busy_peer(tmp_path):
     # the main still waits; its next tick sees the cut
     st = runtime.status(cwd=_cwd(tmp_path), scope="w1", now=T0, tick=True)
     assert [t["label"] for t in st["tasks"]] == ["merge"]
+
+
+REBASE_MAIN = """
+cflow: 2
+name: m
+sides: {s: side-rb}
+collections:
+  signals: {kind: log, item: {name: str, tip: "str?", from: "str?"}, lifecycle: {inherit: true}}
+nodes:
+  begin: {prompt: B}
+  rebase:
+    prompt: R
+    returns: {ok: {tip: str, old_tip: "str?"}}
+    do:
+      - push: {to: signals, item: {name: "'rebased'", tip: "$result.rebase.value.tip",
+                                   from: "$result.rebase.value.old_tip"}}
+        when: >-
+          $outcome == 'ok' and side('s').live and $result.rebase.value.old_tip != null
+          and $result.rebase.value.old_tip != $result.rebase.value.tip
+body:
+  - begin
+  - id: rounds
+    loop:
+      while: "true"
+      max: 5
+      do: [rebase]
+"""
+
+REBASE_SIDE = """
+cflow: 2
+name: side-rb
+max_visits: 0
+nodes:
+  open: {prompt: O}
+  rebase-notice:
+    prompt: N
+    do:
+      - {consume: {from: "main:signals", name: rebased}}
+body:
+  - open
+  - id: loop
+    loop:
+      while: "true"
+      max: 50
+      do:
+        id: standby
+        choose:
+          options:
+            rebase-notice:
+              when: "fresh('main:signals', 'rebased')"
+              then: rebase-notice
+            seal:
+              then: {break: loop}
+"""
+
+
+def test_a_rewritten_round_branch_reaches_the_stack_run(tmp_path):
+    # claunch-yq80p.9: the main's rebase reports old_tip; the engine signals
+    # 'rebased' only when it differs from the new tip
+    v2 = tmp_path / "proj" / ".claunch" / "workflows" / "v2"
+    (v2 / "side-rb.yaml").write_text(textwrap.dedent(REBASE_SIDE), encoding="utf-8")
+    _start_main(tmp_path, REBASE_MAIN)
+    _start_side(tmp_path)
+    _report(tmp_path, "w1", "begin")
+    _report(tmp_path, "w1+s", "open")
+    # no rewrite (old_tip left out, then equal): nothing for the stack run
+    _report(tmp_path, "w1", "rebase", {"tip": "a1"})
+    _report(tmp_path, "w1", "rebase", {"tip": "a1", "old_tip": "a1"})
+    assert _avail(tmp_path, "w1+s")["rebase-notice"] is False
+    _report(tmp_path, "w1", "rebase", {"tip": "b2", "old_tip": "a1"})
+    assert _avail(tmp_path, "w1+s")["rebase-notice"] is True
+    sig = RunStore(_cwd(tmp_path), "w1").load_state()["collections"]["signals"]["items"]
+    assert [(i["name"], i["tip"], i["from"]) for i in sig] == [("rebased", "b2", "a1")]
+    _select(tmp_path, "w1+s", "rebase-notice")
+    _report(tmp_path, "w1+s", "rebase-notice")
+    assert _avail(tmp_path, "w1+s")["rebase-notice"] is False
+
+
+def test_relation_wiring():
+    # claunch-yq80p.9: the worker declares relation (default stacked); its
+    # landing request goes to parent: or leader: by that input
+    worker = runtime.load_definition("improv-worker-v2")
+    rel = worker.meta["inputs"]["relation"]
+    assert rel["choices"] == ["stacked", "independent"] and rel["default"] == "stacked"
+    req = next(n for n in worker.nodes.values() if n.label == "integration-request")
+    pushes = [(t.get("when"), t["push"]["to"]) for t in req.get("triggers") if t.get("push")]
+    assert pushes == [("$data.inputs.relation != 'independent'", "parent:landing"),
+                      ("$data.inputs.relation == 'independent'", "leader:landing")]
+    rebase = next(n for n in worker.nodes.values() if n.label == "rebase" and n.get("prompt"))
+    assert [d.get("item", {}).get("name") for d in rebase.get("do")] == ["'rebased'"]
+    stack = runtime.load_definition("stack-v2")
+    choose = next(n for n in stack.nodes.values() if n.id.endswith("standby"))
+    guards = {o["name"]: o.get("guard") for o in choose.get("options")}
+    assert guards["rebase-notice"] == ("fresh('main:signals', 'rebased') and "
+                                       "not fresh('main:signals', 'landed')")
+    assert "not fresh('main:signals', 'rebased')" in guards["cut"]
+    restack = next(n for n in stack.nodes.values() if n.label == "restack" and n.get("prompt"))
+    assert [d.get("name") for d in restack.get("do")] == ["landed", "rebased"]
