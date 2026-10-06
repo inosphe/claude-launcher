@@ -215,6 +215,8 @@ USER_QUESTIONS = {
     "rework-decision": ["approve", "hold"],
     "settle-stall": ["proceed", "keep-waiting"],
     "end-decision": ["approve", "hold"],
+    "medium-blocked": ["retry", "local"],
+    "publish-blocked": ["retry", "local"],
 }
 
 

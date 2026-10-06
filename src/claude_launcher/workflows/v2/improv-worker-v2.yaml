@@ -2446,28 +2446,29 @@ procedures:
                       pr_url: null, pr_number: null}
           catch:
             blocked:
-              id: medium-blocked
-              choose:
-                chooser: user
-                require_reason: true
-                prompt: |
-                  이 회차는 PR로만 착지해야 하는데(force_pr 입력 또는 원격 편성)
-                  지금 PR을 만들 수 없다. 이유: ${result['remote-setup'].value.reason}
-                  (`claunch cflow2 pr-preflight`가 같은 사실을 다시 보여 준다.)
-
-                  · retry — gh 설치·로그인·원격 설정을 고친 뒤 다시 판정한다.
-                  · local — 이번 회차만 로컬 착지(상위의 --no-ff 머지)로 간다.
-                    상위가 다른 머신이면 이 선택은 착지를 만들지 못한다.
-                options:
-                  retry:
-                    description: 원인을 고쳤다 — 착지 매체를 다시 판정한다
-                    then: {continue: medium-loop}
-                  local:
-                    description: 이번 회차는 로컬 착지로 간다
+              # 사용자에게 묻는 지점은 ask-user(docs/cflow-v2.md 2.10)로 묻는다.
+              - id: medium-blocked
+                call: ask-user
+                bind: medium_blocked
+                with:
+                  context: "$result['remote-setup'].value.reason"
+                  require_reason: true
+                  choices: [retry, local]
+                  topic: |
+                    이 회차는 PR로만 착지해야 하는데(force_pr 입력 또는 원격 편성) 지금
+                    PR을 만들 수 없다(사유는 근거 칸의 값). `claunch cflow2 pr-preflight`가
+                    같은 사실(저장소·원격·gh 설치·로그인, blockers)을 다시 보여 준다 — 그
+                    출력으로 선택지별 위험과 결과를 채운다.
+                    선택지: retry — gh 설치·로그인·원격 설정을 고친 뒤 착지 매체를 다시
+                    판정한다. local — 이번 회차만 로컬 착지(상위의 --no-ff 머지)로 간다.
+                    상위가 다른 머신이면 local은 착지를 만들지 못하므로 권하지 않는다.
+              - cond:
+                  - if: "$data.medium_blocked.decision == 'local'"
                     then:
                       return: ok
                       value: {medium: local, reason: "user chose local while PR was blocked",
                               remote: null, repo: null, base: null, pr_url: null, pr_number: null}
+                  - else: {continue: medium-loop}
 
   pr-publish:
     description: >-
@@ -2500,26 +2501,29 @@ procedures:
               cond:
                 - if: "$params.force_pr == true"
                   then:
-                    id: publish-blocked
-                    choose:
-                      chooser: user
-                      require_reason: true
-                      prompt: |
-                        force_pr 입력으로 이 회차는 PR로만 착지해야 하는데 PR을 열지
-                        못했다. 이유: ${result['pr-open'].value.reason}
-                        · retry — 원인을 고친 뒤 push·PR을 다시 시도한다.
-                        · local — 이번 회차만 로컬 착지로 간다.
-                      options:
-                        retry:
-                          description: 원인을 고쳤다 — push·PR을 다시 시도한다
-                          then: {continue: publish-loop}
-                        local:
-                          description: 이번 회차는 로컬 착지로 간다
+                    - id: publish-blocked
+                      call: ask-user
+                      bind: publish_blocked
+                      with:
+                        context: "$result['pr-open'].value.reason"
+                        require_reason: true
+                        choices: [retry, local]
+                        topic: |
+                          force_pr 입력으로 이 회차는 PR로만 착지해야 하는데 push 또는 PR
+                          생성이 실패했다(명령과 출력은 근거 칸의 값). `git ls-remote`와
+                          `gh pr list --head <브랜치>`로 원격 상태를 보고 선택지를 채운다.
+                          push가 `stale info`로 거절됐으면 이 세션이 모르는 push가 원격에
+                          있다는 뜻이다.
+                          선택지: retry — 원인을 고친 뒤 push·PR을 다시 시도한다. local —
+                          이번 회차만 로컬 착지로 간다.
+                    - cond:
+                        - if: "$data.publish_blocked.decision == 'local'"
                           then:
                             return: ok
                             value: {medium: local, reason: "user chose local after pr-open failed",
                                     remote: null, repo: null, base: null, pr_url: null,
                                     pr_number: null}
+                        - else: {continue: publish-loop}
                 - else:
                     return: ok
                     value: {medium: local,
