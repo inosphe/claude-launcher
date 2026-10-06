@@ -176,7 +176,7 @@ def _possible_outcomes(node: ir.Node) -> Set[str]:
                 outs.add(ask.get("on_decline") or "declined")
     else:
         outs.add(ir.OUTCOME_OK)
-        if node.type == ir.T_WAIT and node.get("probe"):
+        if node.type == ir.T_WAIT and (node.get("probe") or node.get("checks")):
             outs.add(ir.OUTCOME_UNDECIDABLE)
         if node.type == ir.T_WAIT and node.get("until"):
             outs.add(OUTCOME_ABSENT)
@@ -697,6 +697,14 @@ def check(chart: ir.Chart) -> List[Finding]:
                 out.append(Finding(ERROR, "delegated-ask",
                                    f"task {t.id} asks for approval but may run under executor "
                                    f"{', '.join(remote)}; approvals cannot run inside a delegate", t.id))
+        if t.get("restart"):
+            remote = _delegated_by(chart, t)
+            if remote:
+                out.append(Finding(ERROR, "delegated-restart",
+                                   f"task {t.id} declares a restart but may run under executor "
+                                   f"{', '.join(remote)}; the daemon runs a restart only for the "
+                                   f"main run's own tasks -- move it out of the delegated subtree",
+                                   t.id))
     out.extend(_question_checks(chart, tasks))
     for n in nodes:
         if n.type == ir.T_CHOOSE and n.get("chooser") == ir.CHOOSER_USER:

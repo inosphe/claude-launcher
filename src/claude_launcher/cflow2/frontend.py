@@ -185,7 +185,7 @@ TOP_KEYS = (
     "default_child_cflow", "priority", "params", "returns", "data", "include",
     "fragments", "rules", "procedures", "nodes", "body", "spec", "max_visits",
     "inputs", "input_constraints", "collections", "collection_types", "question_types",
-    "sides",
+    "sides", "recur",
 )
 #: Top-level keys a ``kind: library`` file may carry (docs/cflow-v2.md 2.10).
 LIBRARY_KEYS = ("cflow", "name", "description", "kind", "include", "fragments", "rules",
@@ -193,7 +193,7 @@ LIBRARY_KEYS = ("cflow", "name", "description", "kind", "include", "fragments", 
 TASK_KEYS = (
     "title", "prompt", "done_when", "verify", "ask", "executor", "needs",
     "returns", "effects", "paths", "budget", "rules", "strict_budget",
-    "do", "triggers",
+    "do", "triggers", "restart",
 )
 COMMON_KEYS = ("id", "executor", "needs", "budget", "bind", "on", "do", "triggers")
 #: ``do:`` operations (docs/cflow-v2.md 2.7) and the moments they run at.
@@ -775,6 +775,7 @@ def _compile_task(ctx: _Ctx, sc: _Scope, name: str, parent: Optional[str], line:
     if ask is not None:
         ask = _ask(ctx, tfile, name, ask, tline)
     verify = _verify(ctx, tfile, name, raw.get("verify"), _key_line(raw, "verify", tline))
+    restart = _restart(ctx, tfile, name, raw.get("restart"), _key_line(raw, "restart", tline))
     strict = raw.get("strict_budget", False)
     if not isinstance(strict, bool):
         raise ctx.err(tfile, tline, f"task {name!r}: strict_budget must be true or false")
@@ -794,6 +795,7 @@ def _compile_task(ctx: _Ctx, sc: _Scope, name: str, parent: Optional[str], line:
             "done_when": done_when,
             "verify": verify,
             "ask": ask,
+            "restart": restart,
             "returns": _plain(returns),
             "effects": _str_list(ctx, tfile, raw.get("effects"), "effects", tline),
             # ``effects: []`` (declared: none) and no key (unknown) read the
@@ -880,6 +882,40 @@ def _verify(ctx: _Ctx, file: str, name: str, value: Any, line: int) -> Optional[
                       f"list, or {{run, timeout}}")
     _no_template(ctx, file, line, run, f"task {name!r} verify")
     return {"run": _plain(run), "timeout": timeout}
+
+
+RESTART_KEYS = ("windows", "linux", "timeout")
+#: v1's bounds for a restart command's wall clock (``cflow.model``).
+RESTART_TIMEOUT_DEFAULT = 120.0
+RESTART_TIMEOUT_MAX = 900.0
+
+
+def _restart(ctx: _Ctx, file: str, name: str, value: Any, line: int) -> Optional[Dict[str, Any]]:
+    """``restart: {windows, linux, timeout}`` -- a project-local restart
+    command the daemon's clock runs once per visit of the task (docs 2.2,
+    restart). At least one platform; commands are run as written."""
+    if value is None:
+        return None
+    spec = _need_map(ctx, file, value, f"task {name!r} restart", line)
+    _check_keys(ctx, file, spec, RESTART_KEYS, f"task {name!r} restart")
+    out: Dict[str, Any] = {"windows": None, "linux": None}
+    for plat in ("windows", "linux"):
+        if spec.get(plat) is not None:
+            cmd = spec[plat]
+            if not isinstance(cmd, str) or not cmd.strip():
+                raise ctx.err(file, line, f"task {name!r}: restart.{plat} must be a command string")
+            _no_template(ctx, file, line, cmd, f"task {name!r} restart.{plat}")
+            out[plat] = cmd
+    if out["windows"] is None and out["linux"] is None:
+        raise ctx.err(file, line, f"task {name!r}: restart needs a windows or linux command")
+    timeout = RESTART_TIMEOUT_DEFAULT
+    if spec.get("timeout") is not None:
+        timeout = _number(ctx, file, spec["timeout"], "restart.timeout", line)
+        if timeout <= 0 or timeout > RESTART_TIMEOUT_MAX:
+            raise ctx.err(file, line, f"task {name!r}: restart.timeout must be in "
+                                      f"(0, {RESTART_TIMEOUT_MAX:g}]")
+    out["timeout"] = timeout
+    return out
 
 
 def _outcome_name(ctx: _Ctx, file: str, line: int, value: Any, what: str) -> str:
@@ -1149,12 +1185,26 @@ def _b_choose(ctx, sc, node, value, m, line):
     for name, opt in opts.items():
         oline = _key_line(opts, name, line)
         opt = _need_map(ctx, sc.file, opt, f"choose option {name!r}", oline)
-        _check_keys(ctx, sc.file, opt, ("description", "then", "when"), f"choose option {name!r}")
+        _check_keys(ctx, sc.file, opt, ("description", "then", "when", "interval"),
+                    f"choose option {name!r}")
         guard = (_expr_text(ctx, sc.file, opt["when"], f"choose.options.{name}.when", oline)
                  if opt.get("when") is not None else None)
+        interval = None
+        if opt.get("interval") is not None:
+            if chooser != ir.CHOOSER_AGENT:
+                raise ctx.err(sc.file, oline, f"choose option {name!r}: interval paces the "
+                                              f"agent's choice; it needs chooser: agent")
+            interval = _number(ctx, sc.file, opt["interval"], f"choose option {name!r} interval",
+                               oline)
+            if interval <= 0:
+                raise ctx.err(sc.file, oline, f"choose option {name!r}: interval must be "
+                                              f"greater than 0")
         then = _require(ctx, sc, opt, "then", f"choose option {name!r}", oline)
-        options.append({"name": str(name), "description": opt.get("description") or "",
-                        "guard": guard, "child": _sub(ctx, sc, node, then, str(name), oline)})
+        entry = {"name": str(name), "description": opt.get("description") or "",
+                 "guard": guard, "child": _sub(ctx, sc, node, then, str(name), oline)}
+        if interval is not None:
+            entry["interval"] = interval
+        options.append(entry)
     if not options:
         raise ctx.err(sc.file, line, "choose needs at least one option")
 
@@ -1308,14 +1358,50 @@ def _b_call(ctx, sc, node, value, m, line):
     _inline(ctx, sc, node, value, m.get("with"), line)
 
 
+CHECK_ITEM_KEYS = ("id", "describe", "probe")
+
+
+def _wait_checks(ctx: _Ctx, file: str, value: Any, line: int) -> List[Dict[str, Any]]:
+    """``wait.checks``: ``[{id, describe, probe}]`` -- every probe must exit 0
+    in the same poll (docs 2.3, wait checks)."""
+    items = _need_list(ctx, file, value, "wait.checks", line)
+    if not items:
+        raise ctx.err(file, line, "wait.checks needs at least one item")
+    out: List[Dict[str, Any]] = []
+    seen = set()
+    for i, raw in enumerate(items):
+        iline = _line(raw, line)
+        item = _need_map(ctx, file, raw, f"wait.checks[{i}]", iline)
+        _check_keys(ctx, file, item, CHECK_ITEM_KEYS, f"wait.checks[{i}]")
+        cid = item.get("id")
+        if not isinstance(cid, str) or not _OUTCOME_RE.match(cid):
+            raise ctx.err(file, iline, f"wait.checks[{i}].id must be a name")
+        if cid in seen:
+            raise ctx.err(file, iline, f"wait.checks: duplicate id {cid!r}")
+        seen.add(cid)
+        if item.get("probe") is None:
+            raise ctx.err(file, iline, f"wait.checks[{i}] needs a probe")
+        probe = _command(ctx, file, iline, item["probe"], f"wait.checks.{cid}.probe")
+        describe = item.get("describe")
+        if describe is not None and not isinstance(describe, str):
+            raise ctx.err(file, iline, f"wait.checks.{cid}.describe must be a string")
+        out.append({"id": cid, "describe": describe or "", "probe": probe})
+    return out
+
+
 def _b_wait(ctx, sc, node, value, m, line):
     node.type = ir.T_WAIT
     spec = _need_map(ctx, sc.file, value, "wait", line)
     _check_keys(ctx, sc.file, spec, ("probe", "poll", "seconds", "describe", "undecided_max",
-                                     "until", "consume"), "wait")
+                                     "until", "consume", "checks"), "wait")
     until = spec.get("until")
-    if spec.get("probe") is None and spec.get("seconds") is None and until is None:
-        raise ctx.err(sc.file, line, "wait needs probe, until or seconds")
+    if spec.get("probe") is None and spec.get("seconds") is None and until is None \
+            and spec.get("checks") is None:
+        raise ctx.err(sc.file, line, "wait needs probe, checks, until or seconds")
+    if spec.get("checks") is not None and (spec.get("probe") is not None or until is not None):
+        raise ctx.err(sc.file, _key_line(spec, "checks", line),
+                      "wait.checks cannot be used with probe or until (checks is a list of "
+                      "probes)")
     if until is not None:
         if spec.get("probe") is not None:
             raise ctx.err(sc.file, line, "wait.until cannot be used with probe (until is "
@@ -1326,12 +1412,16 @@ def _b_wait(ctx, sc, node, value, m, line):
     elif spec.get("consume") is not None:
         raise ctx.err(sc.file, _key_line(spec, "consume", line), "wait.consume applies to until")
     probe = spec.get("probe")
+    checks = None
     if probe is not None:
         probe = _command(ctx, sc.file, _key_line(spec, "probe", line), probe, "wait.probe")
+    elif spec.get("checks") is not None:
+        checks = _wait_checks(ctx, sc.file, spec["checks"], _key_line(spec, "checks", line))
     elif spec.get("undecided_max") is not None:
         raise ctx.err(sc.file, line, "wait.undecided_max applies to a probe")
+    probing = probe is not None or checks is not None
     undecided = (_int(ctx, sc.file, spec.get("undecided_max", WAIT_UNDECIDED_MAX),
-                      "wait.undecided_max", line, 1) if probe is not None else None)
+                      "wait.undecided_max", line, 1) if probing else None)
     node.props = {
         "probe": probe,
         "undecided_max": undecided,
@@ -1340,6 +1430,8 @@ def _b_wait(ctx, sc, node, value, m, line):
         if spec.get("seconds") is not None else None,
         "describe": spec.get("describe"),
     }
+    if checks is not None:
+        node.props["checks"] = checks
     if until is not None:
         uline = _key_line(spec, "until", line)
         node.props["until"] = _expr_text(ctx, sc.file, until, "wait.until", uline)
@@ -1728,6 +1820,26 @@ def _default_resolver(base: Optional[Path]) -> ResolveInclude:
     return layers.resolver(None)
 
 
+def _recur(ctx: _Ctx, file: str, doc: Dict[str, Any], kind: str) -> Optional[Dict[str, Any]]:
+    """``recur: true`` or ``recur: {auto: true}`` -> ``{"auto": bool}``;
+    ``false``/absent -> ``None``. Only a workflow recurs."""
+    raw = doc.get("recur")
+    line = _key_line(doc, "recur", 1)
+    if raw is None or raw is False:
+        return None
+    if kind != ir.KIND_WORKFLOW:
+        raise ctx.err(file, line, "only a workflow may declare recur (a procedure has no rounds)")
+    if raw is True:
+        return {"auto": False}
+    if isinstance(raw, dict):
+        _check_keys(ctx, file, raw, ("auto",), "recur")
+        auto = raw.get("auto", False)
+        if not isinstance(auto, bool):
+            raise ctx.err(file, line, "recur.auto must be true or false")
+        return {"auto": auto}
+    raise ctx.err(file, line, "recur must be true or false, or a mapping {auto: true}")
+
+
 def compile_text(text: str, *, source: str = "",
                  resolve_include: Optional[ResolveInclude] = None) -> ir.Chart:
     """Compile one v2 document. ``source`` is its path (for ``src`` and errors)."""
@@ -1777,6 +1889,7 @@ def compile_text(text: str, *, source: str = "",
         raise ctx.err(file, _key_line(doc, "input_constraints", 1), str(exc)) from None
 
     collections = _collection_decls(ctx, file, doc)
+    recur = _recur(ctx, file, doc, kind)
     sides = doc.get("sides")
     if sides is not None:
         sline = _key_line(doc, "sides", 1)
@@ -1823,6 +1936,8 @@ def compile_text(text: str, *, source: str = "",
             # question type declarations, own and included (cflow2/question.py)
             **({"question_types": {n: e[0] for n, e in ctx.question_types.items()}}
                if ctx.question_types else {}),
+            # recur: {"auto": bool} when declared (docs 2.1, recur)
+            **({"recur": recur} if recur is not None else {}),
         },
         params=_params(ctx, file, doc.get("params"), _key_line(doc, "params")),
         returns=_returns(ctx, file, doc["returns"], _key_line(doc, "returns"))

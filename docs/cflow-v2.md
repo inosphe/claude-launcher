@@ -71,6 +71,38 @@ v1(`src/claude_launcher/cflow/`)과 병행한다.
 | `collections`, `collection_types` | 컬렉션 선언과 재사용할 선언(2.7). IR의 `meta.collections` |
 | `question_types` | 질문 형식 선언(2.10). IR의 `meta.question_types` |
 | `sides` | side 런 선언(2.9, 2단계) |
+| `recur` | `true` 또는 `{auto: true}`. 끝난 회차 뒤에 다음 회차를 요청한다(아래 「recur」). IR의 `meta.recur`(`{auto: bool}`) |
+
+#### recur
+
+상주 서비스 루프(v1 `recur`, 예: `improv-leader`)를 그래프 안의 반복 없이 쓰는
+방법이다. 회차 하나는 끝까지 가고, 다음 회차는 런의 수명 규칙이 연다.
+
+- 대상: `kind: workflow`만. `procedure`의 `recur`는 컴파일 오류다. 중첩 위임 런은
+  요청을 남기지 않는다.
+- 요청: 런이 결과 `ok`로 끝나면(acceptance 검사 통과 뒤) `state.json`에
+  `next_round: {by: recur, auto, round, requested}`를 남기고 저널에
+  `round_requested`를 쓴다. `failed`·`aborted`로 끝난 회차는 요청을 남기지
+  않는다. 루프는 사람이 원인을 봐야 하는 자리에서 멈춘다. 차트의 `returns`가
+  선언한 다른 결과로 끝난 회차(`done`)도 요청을 남기지 않는다. 정의가 루프를
+  스스로 끝내는 방법이 이것이다(예: `improv-leader-v2`의 교대 종료는
+  `return: wound_down`).
+- 회차 번호: 슬롯의 상태 `round`. 새 런은 이전 런(같은 슬롯, 같은 정의 이름)에
+  `next_round`가 있으면 그 번호 + 1, 없으면 1이다. `flow_status`가 `round`를 싣는다.
+- `recur: true`: 드라이버가 다음 회차를 시작한다(`flow_start`). 끝난 런의
+  `flow_status`가 `next_round`와 그 안내를 싣는다.
+- `recur: {auto: true}`: 데몬의 cflow2 clock이 끝난 슬롯에서 `next_round.auto`를
+  보면 `runtime.start_next_round`로 다음 회차를 시작하고(저널 `round_auto_started`),
+  드라이버 세션에 「next round started」 블록을 보낸다. 정의는 이름(없으면 기록된
+  생성 파일 경로)으로 다시 읽으므로 고친 정의는 회차 경계에서 적용된다. 읽지
+  못하면 이전 회차의 `chart.json`을 쓴다. 이전 회차의 `params`, 시작 입력
+  (`data.inputs`, 다시 읽은 정의일 때), 드라이버, capability를 그대로 넘긴다.
+  컬렉션은 `lifecycle.inherit` 규칙대로 넘어간다(2.7). 요청은 한 번만 쓰인다:
+  시작이 끝난 런을 보관하므로 다음 틱은 아무것도 시작하지 않는다. 그사이 다른
+  시작이 슬롯을 차지했으면 시작하지 않는다.
+- 멈춤: 사람이 `claunch cflow2 recur --cancel [--reason R]`로 끝난 런의 요청을
+  지운다(`round_cancelled`). 드라이버 세션 안에서는 거절된다(사람의 명령, 2.2
+  「사람의 명령」). 회차가 진행 중일 때는 그 회차가 끝난 뒤에 취소한다.
 
 ### 2.2 작업(task)
 
@@ -141,6 +173,51 @@ nodes:
   위임 레코드 상태 `verifying`). 실패는 잘못된 결과 1회로 센다(첫 번째는 재실행
   요청, 두 번째는 노드 `fail`). 중첩 위임 런의 작업은 그 런 안에서 보고되므로 보고
   시점에 각자 verify를 거친다.
+
+#### restart
+
+작업에 프로젝트 고유의 재기동 명령을 붙인다. 실행은 데몬이 하고 에이전트는 하지
+않는다(AGENTS.md 「데몬 재기동·정지는 사용자의 명령이다」). v1 스텝의 `restart:`와
+같은 형태다.
+
+```yaml
+nodes:
+  reflect:
+    prompt: …
+    restart:
+      windows: 'powershell -NoProfile -ExecutionPolicy Bypass -File tools/restart_live.ps1'
+      linux: 'bash tools/restart_live.sh'
+      timeout: 900          # 기본 120, 상한 900
+```
+
+- 표기: `windows`, `linux` 중 하나 이상(명령 문자열), `timeout`(초, 0 초과 900
+  이하). 명령은 적힌 그대로 셸에서 실행하며 `${...}`는 컴파일 오류다(「명령 안의 값
+  참조」).
+- 실행 시점: 작업 인스턴스가 활성(`await: task`, ask가 있으면 승인 뒤)이 되면 데몬의
+  cflow2 clock이 다음 틱에 한 번 가져간다(`runtime.claim_restarts`). 인스턴스
+  하나가 방문 하나이므로 반복으로 다시 들어온 작업은 다시 실행한다. halt 중인 런과
+  중첩 위임 런의 작업은 가져가지 않는다.
+- 플랫폼: 호스트의 `platform.system()`이 `Windows`(win*)면 `windows`,
+  `Linux`면 `linux`. 해당 명령이 없으면 기록 `unsupported`(`restart_unsupported`).
+- 실행: clock은 기록을 `running`(데몬 boot id, token 포함)으로 저장하고
+  (`restart_requested`) 패스가 끝난 뒤 별도 작업에서 v1
+  `RestartClock._execute`로 명령을 실행한다: 런의 cwd, 출력은 임시 파일,
+  `timeout` 초과 시 종료 코드 없음. 환경의 `CLAUNCH_SESSION`은 런의 드라이버
+  세션이다. 그래서 명령 안의 `claunch daemon restart`는 웹 UI의 승인 게이트로
+  올라간다(`daemon/restart_gate.py`).
+- 결과: `runtime.complete_restart`가 종료 코드 0이면 `succeeded`, 아니면
+  `failed`로 기록하고 출력의 끝 4000자를 남긴다(`restart_completed`). 그사이
+  인스턴스가 사라졌거나 token이 다르면 아무것도 쓰지 않는다.
+- 중단: 다른 boot가 남긴 `running` 기록은 `interrupted`가 되고 다시 실행하지
+  않는다(`restart_interrupted`). 명령이 데몬 자신을 재기동했을 수 있기 때문이다.
+- 통지: 가져갈 때와 결과가 나올 때 드라이버 세션에 블록을 보낸다.
+- 보고: 기록이 끝난 상태(`succeeded`, `failed`, `interrupted`, `unsupported`)가
+  되기 전에는 그 작업의 `flow_report`를 거절한다. 데몬 clock이 꺼져 있으면 기록이
+  `pending`에 머물고, 이 경우 런은 사람이 `abort`한다.
+- `flow_status`의 작업 항목에 `restart`(`status`, `requested_at`, `completed_at`,
+  `exit_code`, `output`, `platform`)가 실린다.
+- 위임 실행 단위 안의 작업에 `restart`가 있으면 정적 검사 오류
+  `delegated-restart`다.
 
 #### ask
 
@@ -251,7 +328,7 @@ scope에 들어갈 때 `with`에 없는 param에 `default`를 채우고, 기본�
 | `seq` | `seq: [a, b, c]` | 순서대로 실행 |
 | `waterfall` | `waterfall: [a, b]` | `seq`와 같고, 각 항목의 결과 값을 다음 항목의 `$prev`로 넘긴다 |
 | `cond` | `cond: [{if: EXPR, then: T}, …, {else: T}]` | 식으로 기계가 고르는 분기 |
-| `choose` | `choose: {prompt, chooser, options: {name: {description, then: T}}}` | 에이전트나 사용자가 고르는 분기. 옵션에 `when: EXPR`을 붙이면 거짓일 때 고를 수 없다 |
+| `choose` | `choose: {prompt, chooser, options: {name: {description, then: T}}}` | 에이전트나 사용자가 고르는 분기. 옵션에 `when: EXPR`을 붙이면 거짓일 때 고를 수 없다. `interval: SECONDS`를 붙이면 에이전트의 선택이 그 간격으로 제한된다(아래 「choose interval」) |
 | `foreach` | `foreach: {in: EXPR, as: item, do: T, par: false}` | 목록의 항목마다 실행 |
 | `loop` | `loop: {while: EXPR \| until: EXPR, max: N, do: T}` | 조건 루프. `max` 필수 |
 | `par` | `par: {branches: {a: T, b: T}, settle: all}` | 병렬 실행. `settle`은 `all`, `allSettled`, `race`, `any`, `quorum:K` |
@@ -259,7 +336,7 @@ scope에 들어갈 때 `with`에 없는 param에 `default`를 채우고, 기본�
 | `timeout` | `timeout: {do: T, seconds: N, else: T}` | 기한 초과 시 `else`로 감 |
 | `try` | `try: T, catch: {OUTCOME: T}, finally: T` | 결과 종류로 예외 경로를 처리하고, 마지막에 정리 트리를 실행 |
 | `call` | `call: PROC, with: {…}, bind: VAR` | 프로시저 호출. 컴파일 시 펼친다 |
-| `wait` | `wait: {probe: CMD, poll: S, seconds: N, undecided_max: K, describe: …}` 또는 `wait: {seconds: N}` | 외부 신호 대기(아래 「wait」) |
+| `wait` | `wait: {probe: CMD, poll: S, seconds: N, undecided_max: K, describe: …}`, `wait: {checks: [{id, describe, probe}], …}` 또는 `wait: {seconds: N}` | 외부 신호 대기(아래 「wait」) |
 | `group` | `group: {name, run: PROC, limit, settle, do: T}` | 동적 분기. `do` 실행 중 에이전트가 `fork`로 멤버를 추가하고, `do`를 떠나기 전에 합류 |
 
 모든 조합자 매핑에 붙일 수 있는 공통 키:
@@ -301,6 +378,69 @@ scope에 들어갈 때 `with`에 없는 param에 `default`를 채우고, 기본�
   `landed-unclear`)으로 보내 사람이 확인하거나 `held`로 마감하게 한다.
 - `undecided_max`는 `probe`가 있을 때만 쓸 수 있다(정수 1 이상).
 - `probe`는 명령 문자열이나 argv 목록이다. 아래 「명령 안의 값 참조」를 따른다.
+
+#### wait checks
+
+`checks`는 probe 여러 개를 한 대기에서 함께 판정한다. v1 스텝의 `checklist:`를
+대신한다.
+
+```yaml
+- wait:
+    poll: 30
+    seconds: 600
+    checks:
+      - {id: deployed, describe: 라이브 데몬이 이번 머지 이후에 재기동됐다,
+         probe: 'uv run --no-sync python tools/deploy_check.py --branch master'}
+      - {id: clean, probe: 'git diff --quiet'}
+  on: {timeout: reflect-retry, undecidable: reflect-retry}
+```
+
+- 항목: `id`(이름, 대기 안에서 유일), `describe`(선택), `probe`(명령 문자열이나
+  argv). `probe`·`until`과 함께 쓸 수 없다. `poll`, `seconds`, `undecided_max`는
+  `probe`와 같은 의미다.
+- 판정: poll마다 모든 항목을 실행한다. 모든 항목이 0이면 결과 `ok`(값
+  `{checks: [...]}`, 저널 `checks_passed`). 판정 불가(0, 1이 아닌 코드)인 항목이
+  하나라도 있으면 그 poll은 판정 불가로 세고, 그 밖에는 「아직」이다.
+- `seconds`가 지나면 결과 `timeout`(값에 마지막 항목 상태, 저널 `checks_expired`).
+- 항목마다 마지막 판정(`verdict`, `exit`, 출력 끝, `measured_at`)이
+  `flow_status`의 대기 항목 `checks`에 실린다.
+
+v1 `checklist:`의 대응:
+
+| v1 checklist | v2 |
+|---|---|
+| `items[].check`(종료 코드 0이 참, 그 밖은 거짓, 실행 실패·시간 초과는 unknown) | `checks[].probe`. 1은 「아직」, 그 밖은 판정 불가로 센다 |
+| `then`(모두 참이면 가는 곳) | 대기 뒤의 다음 항목(`seq`) |
+| `otherwise: {after, then}` | `seconds`와 `on: {timeout: …}`(또는 감싸는 `try`의 `catch`) |
+| report가 제출돼야 열림 | 대기 앞에 작업을 둔다(`seq: [작업, wait]`). 작업의 report가 끝나야 대기가 시작된다 |
+| `next:` 거절(에이전트 이탈 없음) | 대기는 에이전트가 보고할 수 없는 노드다. 사람의 우회는 `abort` 뒤 재시작 |
+| `checklist_passed` / `checklist_expired` 저널 | `checks_passed` / `checks_expired` |
+| 같은 방문 안에서 재기동은 한 번 | 작업의 `restart`(2.2)는 인스턴스마다 한 번. 다시 시도하려면 반복으로 작업에 다시 들어간다 |
+| `by:`로 사람이 표시하는 항목(`editable`) | 대응 없음. 사람이 정할 조건은 `chooser: user` 선택이나 `ask`로 쓴다 |
+
+#### choose interval
+
+옵션의 `interval: SECONDS`는 에이전트가 그 옵션을 고를 수 있는 간격이다(v1
+`waiting_window`). 「모인 것을 N분마다 통합한다」를 에이전트 안의 타이머 없이 쓴다.
+
+- `chooser: agent`인 선택에서만 쓴다(그 밖은 컴파일 오류). 값은 0보다 큰 수.
+- 기록: 옵션을 실제로 택한 시각을 `state.json`의 `windows`
+  (`<노드 id>:<옵션>` → 시각)에 남긴다. 슬롯의 기록이라 같은 정의의 다음 런(다음
+  회차 포함)으로 넘어간다. 첫 선택은 비교할 기록이 없으므로 바로 지나간다.
+- 보류: 에이전트가 마지막 선택 뒤 `interval`이 지나기 전에 그 옵션을 고르면 거절하지
+  않고 보류한다. 선택 인스턴스의 `held`(`option`, `reason`, `opens_at`)를 남기고
+  `select_held`를 쓴다. 응답과 `flow_status`의 `waiting_window`가 창이 열리는
+  시각을 싣는다. 런의 `status`는 그대로다(사람을 기다리지 않는다).
+- 보류 중: 같은 옵션을 다시 고르면 `reason`만 바꾼다(`select_held`, `updated`).
+  다른 옵션을 고르면 보류를 취소하고(`hold_cancelled`) 그 옵션을 처리한다.
+- 확정: `opens_at`이 지나면 시간 틱(데몬 clock, 또는 런을 바꾸는 다음 호출)이 마지막
+  `reason`으로 그 옵션을 택한다(`selected`의 `by: window`). 그때 옵션의 `when`이
+  거짓이면 택하지 않고 보류만 지운다(`hold_cancelled`, 사유). 데몬 clock이 옮겼으면
+  드라이버를 깨운다(6.5 「wake-up」).
+- 사람의 선택(`claunch cflow2 select`, 웹)은 간격을 따르지 않는다. 창 안에서 택하면
+  `selected`에 `override: true`가 붙는다. 사람의 선택도 기록을 갱신한다.
+- 고를 수 있는 옵션 목록의 항목에 `interval`과, 창이 닫혀 있으면
+  `window_opens_at`이 실린다.
 
 #### 명령 안의 값 참조
 
@@ -467,7 +607,7 @@ collections:
       initial: requested
       settled: [landed, rejected]
     access:
-      push: [child, daemon]
+      push: [child, daemon, driver]   # driver: 다른 머신 워커의 요청을 리더가 등록
       set: [driver]
       set.landed: [daemon]
       remove: [driver]
@@ -1107,7 +1247,10 @@ wait 노드에는 `undecided_max`가 붙는다.
 `verify_passed`, `verify_failed`(종료 코드, 출력 끝부분, `lost`), `probe_undecided`,
 `ask_routed`(그룹, 응답자), `ask_answered`(결정, 답한 쪽, 경로), `ask_timeout`,
 `ask_deferred`, `ask_undelivered`, `ask_withdrawn`, `acceptance_checking`,
-`acceptance_passed`, `acceptance_failed`, `acceptance_waived`. ask가 그룹을
+`acceptance_passed`, `acceptance_failed`, `acceptance_waived`, `round_requested`,
+`round_auto_started`, `round_cancelled`, `select_held`, `hold_cancelled`,
+`restart_requested`, `restart_completed`, `restart_interrupted`,
+`restart_unsupported`, `checks_passed`, `checks_expired`. ask가 그룹을
 건너뛰거나 `otherwise`로 넘어갈 때는 `fallback`(`decision: ask`)을 남긴다.
 
 - 런의 `waiting_approval`은 열린 대기 항목에서 계산한다: `loop_limit`,
@@ -1449,6 +1592,16 @@ headless 2순위(샌드박스·worktree 없이 실행 디렉터리에서 실행)
 패스가 `PROGRESS_MAX`(600초) 동안 진척이 없으면 쓰기를 멈춰 다른 프로세스가
 fallback하게 한다.
 
+**rounds·restarts·wake-up** (claunch-yq80p.6).
+
+| 상황 | 처리 |
+|---|---|
+| 끝난 런에 `next_round.auto` | `runtime.start_next_round`로 다음 회차 시작, 드라이버에 「next round started」 블록(2.1 「recur」) |
+| 활성 작업에 `restart` | `runtime.claim_restarts`(boot id)로 가져가고 「restart」 블록. 패스 뒤 별도 작업에서 실행, `runtime.complete_restart`로 기록하고 「restart result」 블록(2.2 「restart」). 스레드에서 실행하므로 다음 패스는 기다리지 않는다 |
+| 패스의 시간 틱이 런을 옮김(`wait_tick`의 `ticked` > 0) | 런이 이제 드라이버의 작업이나 에이전트 선택(보류 아님)을 기다리면 드라이버에 「the run moved」 블록. wait 통과·시간 초과, 선택 창 확정이 여기에 든다 |
+
+블록은 런의 드라이버 세션(없으면 scope 이름의 세션)에 `queue_delivery`로 보낸다.
+
 **probe.** wait·monitor probe는 적힌 명령 그대로 자기 프로세스 그룹에서 실행하고,
 타임아웃이면 그룹 전체를 죽인다(종료 코드 124). 런의 값은 명령 문자열에 넣지 않고
 환경 변수로만 전달한다(`CFLOW_IN_<NAME>`/`CFLOW_DATA_<NAME>`, 런타임이 정함).
@@ -1554,7 +1707,8 @@ spec:
 ## 9. 화면과 CLI
 
 - CLI: `claunch cflow2 ls | show | validate | compile | caps | start | status | journal | abort`,
-  사람의 경로 `select | extend | resume | approve [NODE] [--decline | --option O] [--reason R]`.
+  사람의 경로 `select | extend | resume | approve [NODE] [--decline | --option O] [--reason R]`,
+  `recur [--cancel] [--reason R]`(다음 회차 요청 확인·취소, 2.1 「recur」).
 - ask 응답 API: `POST /api/cflow2/approve`(본문 `{cwd, scope, node?, decision?, reason?}`,
   처리 함수 `daemon/cflow2_approve.approve`, 이벤트 루프 밖에서 호출).
 - API: `GET /api/cflow/workflows`가 v1·v2 항목을 함께 싣고 `version`(1 또는 2)과

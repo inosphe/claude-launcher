@@ -1301,6 +1301,95 @@ def _finish_final(r: Run, outcome: str, value: Any, how: Optional[str] = None) -
     r.state["finished"] = store_mod.utcnow()
     r.emit("done", outcome=outcome, value=value, how=how, status=r.state["status"])
     _reset_at(r, None)
+    _request_round(r)
+
+
+# -- recur (docs 2.1, recur) -----------------------------------------------------
+
+#: Who filed a next-round request.
+ROUND_BY_RECUR = "recur"
+
+
+def _request_round(r: Run) -> None:
+    """A recurring run that finished with outcome ``ok`` files its own next
+    round; with ``auto`` the daemon's clock starts it (:func:`start_next_round`).
+    A failed or aborted run files nothing (the loop stops where a person must
+    look), and neither does a run ending with another declared outcome -- that
+    is how a definition ends the loop itself (a leader's wind-down)."""
+    recur = (r.chart.meta or {}).get("recur")
+    if not recur or r.state.get("parent") or r.state.get("status") != ST_DONE \
+            or r.state.get("outcome") != ir.OUTCOME_OK:
+        return
+    nxt = int(r.state.get("round") or 1) + 1
+    r.state["next_round"] = {"by": ROUND_BY_RECUR, "auto": bool(recur.get("auto")),
+                             "round": nxt, "requested": store_mod.utcnow()}
+    r.emit("round_requested", round=nxt, auto=bool(recur.get("auto")))
+
+
+def _next_round_chart(st: RunStore, state: Dict[str, Any]) -> Tuple[ir.Chart, bool]:
+    """The definition the next round runs: reloaded by name (or by its
+    generated path), so an updated definition takes effect at a round
+    boundary; the snapshot when it cannot be loaded. ``(chart, reloaded)``."""
+    cwd = str(st.cwd)
+    refs = [str(state.get("workflow") or "")]
+    source = str(state.get("source") or "")
+    if source and source not in refs:
+        refs.append(source)
+    for ref in refs:
+        if not ref:
+            continue
+        try:
+            return load_definition(ref, cwd), True
+        except Exception:  # noqa: BLE001 - try the next form, then the snapshot
+            continue
+    return st.load_chart(), False
+
+
+def start_next_round(cwd: Optional[str] = None, scope: Optional[str] = None,
+                     now: Optional[float] = None) -> Optional[Dict[str, Any]]:
+    """Start the slot's next round when its finished run filed an ``auto``
+    request. Daemon-driven (the cflow2 clock). ``None`` when there is nothing
+    to start: no request, a plain ``recur: true`` request (the driver starts
+    that one), a live run in the slot, or a request cancelled meanwhile.
+
+    The request is single use: the start archives the finished run, so a
+    second call finds nothing."""
+    st = RunStore(cwd, scope)
+    if not st.exists():
+        return None
+    try:
+        state = st.load_state()
+    except StoreError:
+        return None
+    nxt = state.get("next_round") or {}
+    if state.get("status") not in FINISHED_STATUSES or not nxt.get("auto"):
+        return None
+    chart, reloaded = _next_round_chart(st, state)
+    inputs = (state.get("data") or {}).get("inputs") if reloaded else None
+    try:
+        payload = start(chart, cwd=str(st.cwd), scope=st.scope, params=state.get("params"),
+                        caps=state.get("caps"), now=now, driver=driver_of(state),
+                        caller=CALLER_USER, inputs=inputs)
+    except FlowError:
+        return None  # a start won the race, or the slot changed meanwhile
+    note("round_auto_started", cwd=str(st.cwd), scope=st.scope, round=nxt.get("round"),
+         previous=state.get("run_id"), reloaded=reloaded)
+    return {"workflow": payload.get("workflow"), "run": payload.get("run"),
+            "round": nxt.get("round"), "driver": driver_of(state) or None,
+            "previous": state.get("run_id")}
+
+
+def cancel_next_round(reason: Optional[str] = None, *, cwd: Optional[str] = None,
+                      scope: Optional[str] = None, now: Optional[float] = None) -> Dict[str, Any]:
+    """A person stops a recurring run: the pending next-round request is
+    dropped (``round_cancelled``). The run itself is not touched."""
+    def op(r: Run) -> None:
+        if not r.state.get("next_round"):
+            raise FlowError("no next round is requested in this slot")
+        dropped = r.state.pop("next_round")
+        r.emit("round_cancelled", round=dropped.get("round"), reason=reason, by=CALLER_USER)
+    _mutate(cwd, scope, now, op)
+    return status(cwd=cwd, scope=scope, now=now, tick=False)
 
 
 # -- acceptance (typed start inputs, doc 2.6) ---------------------------------------
@@ -1963,8 +2052,15 @@ def check_shell_refs(chart: ir.Chart) -> List[str]:
             spec = verify_spec(n)
             if spec:
                 problems += shell_ref_problems(spec["run"], f"task {n.label or n.id} verify")
+            for plat in ("windows", "linux"):
+                cmd = (n.get("restart") or {}).get(plat)
+                if cmd:
+                    problems += shell_ref_problems(cmd, f"task {n.label or n.id} restart.{plat}")
         if n.type == ir.T_WAIT:
             problems += shell_ref_problems(n.get("probe"), f"wait {n.label or n.id} probe")
+            for c in n.get("checks") or []:
+                problems += shell_ref_problems(c.get("probe"),
+                                               f"wait {n.label or n.id} check {c.get('id')}")
     for name, body in ((chart.spec or {}).get("monitors") or {}).items():
         for pname, cmd in _monitor_probes(dict(body or {}), str(name)).items():
             problems += shell_ref_problems(cmd, f"monitor {name} probe {pname}")
@@ -1995,6 +2091,13 @@ def _new_run(st: RunStore, chart: ir.Chart, *, params: Dict[str, Any], data: Any
     }
     if parent:
         state["parent"] = parent
+    else:
+        # rounds and choice windows belong to the slot (docs 2.1 recur, 2.3
+        # interval): ``previous`` is the slot's last run of this definition
+        prev = previous or {}
+        state["round"] = int(prev.get("round") or 1) + 1 if prev.get("next_round") else 1
+        if prev.get("windows"):
+            state["windows"] = dict(prev["windows"])
     st.write_chart(chart)
     r = Run(st, chart, state, now)
     r.emit("started", run=run_id, workflow=chart.name, source=chart.source or None,
@@ -2437,6 +2540,125 @@ def default_verify_runner(command: Any, cwd: str, env: Dict[str, str],
     return proc.returncode, text, False
 
 
+# -- restart (docs 2.2, restart) ---------------------------------------------------
+
+RESTART_PENDING = "pending"
+RESTART_RUNNING = "running"
+RESTART_SUCCEEDED = "succeeded"
+RESTART_FAILED = "failed"
+RESTART_INTERRUPTED = "interrupted"
+RESTART_UNSUPPORTED = "unsupported"
+RESTART_FINAL = (RESTART_SUCCEEDED, RESTART_FAILED, RESTART_INTERRUPTED, RESTART_UNSUPPORTED)
+RESTART_OUTPUT_CHARS = 4000
+
+
+def restart_command(spec: Optional[Dict[str, Any]], system: str) -> Optional[str]:
+    """The command of a task's ``restart`` for host ``system`` (v1's
+    ``Restart.command_for``): ``win*`` -> windows, ``linux``/``wsl`` -> linux."""
+    spec = spec or {}
+    system = (system or "").lower()
+    if system.startswith("win"):
+        return spec.get("windows")
+    if system in ("linux", "wsl"):
+        return spec.get("linux")
+    return None
+
+
+def _restart_view(rec: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    rec = rec or {}
+    return {"status": rec.get("status") or RESTART_PENDING,
+            **{k: rec.get(k) for k in ("requested_at", "completed_at", "exit_code", "output",
+                                       "platform") if rec.get(k) is not None}}
+
+
+def _require_restart_done(r: Run, iid: str, node: ir.Node) -> None:
+    if not node.get("restart"):
+        return
+    rec = r.inst[iid]["frame"].get("restart") or {}
+    st = rec.get("status") or RESTART_PENDING
+    if st not in RESTART_FINAL:
+        raise FlowError(
+            f"task {node.label or node.id}: its restart is {st} -- the daemon runs it (an agent "
+            f"never runs a restart itself) and types its result into this session; report "
+            f"after that. Without a running daemon a person aborts the run")
+
+
+def claim_restarts(*, platform: str, boot: str, cwd: Optional[str] = None,
+                   scope: Optional[str] = None, now: Optional[float] = None
+                   ) -> List[Dict[str, Any]]:
+    """Claim every active task instance's restart that has not run in this
+    visit (each instance is one visit). Daemon-only: the caller runs each
+    ``kind: run`` action outside the lock and records it with
+    :func:`complete_restart`. A ``running`` record of another daemon boot is
+    marked ``interrupted`` and never run again -- the command may have
+    restarted the daemon itself."""
+    def op(r: Run) -> List[Dict[str, Any]]:
+        out: List[Dict[str, Any]] = []
+        if r.status not in LIVE_STATUSES or _halted(r) or r.state.get("parent"):
+            return out
+        base = {"run": r.state.get("run_id"), "workflow": r.state.get("workflow"),
+                "driver": driver_of(r.state) or None}
+        for iid in sorted(r.inst, key=lambda k: int(k.rsplit("@", 1)[1])):
+            inst = r.inst[iid]
+            node = r.node_of(iid)
+            spec = node.get("restart")
+            if inst.get("await") != AW_TASK or not spec:
+                continue
+            frame = inst["frame"]
+            rec = frame.get("restart")
+            item = {**base, "instance": iid, "node": node.id, "label": node.label or node.id}
+            if rec:
+                if rec.get("status") == RESTART_RUNNING and rec.get("boot") != boot:
+                    rec.update(status=RESTART_INTERRUPTED, completed_at=store_mod.utcnow())
+                    r.emit("restart_interrupted", node=node.id, instance=iid,
+                           boot=rec.get("boot"))
+                    out.append({**item, "kind": "interrupted"})
+                continue
+            command = restart_command(spec, platform)
+            if not command:
+                frame["restart"] = {"status": RESTART_UNSUPPORTED, "platform": platform,
+                                    "requested_at": store_mod.utcnow(), "boot": boot}
+                r.emit("restart_unsupported", node=node.id, instance=iid, platform=platform)
+                out.append({**item, "kind": "unsupported", "platform": platform})
+                continue
+            token = secrets.token_hex(4)
+            frame["restart"] = {"status": RESTART_RUNNING, "command": command,
+                                "platform": platform, "boot": boot, "token": token,
+                                "requested_at": store_mod.utcnow()}
+            r.emit("restart_requested", node=node.id, instance=iid, platform=platform,
+                   command=command)
+            out.append({**item, "kind": "run", "command": command, "token": token,
+                        "timeout": float(spec.get("timeout") or 120.0)})
+        return out
+    st = RunStore(cwd, scope)
+    if not st.exists():
+        return []
+    return _mutate(cwd, scope, now, op)
+
+
+def complete_restart(instance: str, token: str, exit_code: Optional[int], output: str, *,
+                     cwd: Optional[str] = None, scope: Optional[str] = None,
+                     now: Optional[float] = None) -> Optional[Dict[str, Any]]:
+    """Record a claimed restart's result; ``None`` when the instance left or
+    the record is not the claimed one any more (nothing written)."""
+    def op(r: Run) -> Optional[Dict[str, Any]]:
+        inst = r.inst.get(instance)
+        rec = (inst or {}).get("frame", {}).get("restart") or {}
+        if not inst or rec.get("token") != token or rec.get("status") != RESTART_RUNNING:
+            return None
+        tail = (output or "")[-RESTART_OUTPUT_CHARS:]
+        rec.update(status=RESTART_SUCCEEDED if exit_code == 0 else RESTART_FAILED,
+                   exit_code=exit_code, output=tail, completed_at=store_mod.utcnow())
+        node = r.node_of(instance)
+        r.emit("restart_completed", node=node.id, instance=instance, exit_code=exit_code,
+               output=tail)
+        return {"run": r.state.get("run_id"), "workflow": r.state.get("workflow"),
+                "instance": instance, "node": node.id, "label": node.label or node.id,
+                "exit_code": exit_code, "status": rec["status"],
+                "driver": driver_of(r.state) or None}
+    return _mutate(cwd, scope, now, op)
+
+
 def _tail(text: str) -> str:
     lines = (text or "").rstrip().splitlines()[-VERIFY_TAIL_LINES:]
     out = "\n".join(lines)
@@ -2587,6 +2809,7 @@ def report(node: Optional[str], outcome: str = ir.OUTCOME_OK, value: Any = None,
         _require_progress(r)
         iid = _task_for_report(r, node)
         n = r.node_of(iid)
+        _require_restart_done(r, iid, n)
         errors = validate_result(returns_of(n), outcome, value,
                                  qtypes=(r.chart.meta or {}).get("question_types") or {},
                                  params=r.env(iid).get("params"))
@@ -2646,15 +2869,106 @@ def select(node: Optional[str], option: str, reason: Optional[str] = None, *,
             raise FlowError(f"option {option!r} is not available now (when: {opt.get('guard')})")
         if n.get("require_reason") and not (reason or "").strip():
             raise FlowError(f"choice {n.label or n.id} requires a reason")
-        r.inst[iid]["await"] = None
-        r.inst[iid]["frame"]["option"] = option
-        r.emit("selected", node=n.id, instance=iid, option=option, reason=reason, by=caller)
-        if opt.get("child"):
-            _enter_child(r, iid, opt["child"], "option")
-        else:
-            _complete(r, iid, ir.OUTCOME_OK, None)
+        frame = r.inst[iid]["frame"]
+        held = frame.get("held")
+        opens = _window_opens(r, n, opt)
+        if caller != CALLER_USER and opens is not None and r.now < opens:
+            if held and held.get("option") == option:
+                held["reason"] = reason
+                held["updated"] = r.now
+                r.emit("select_held", node=n.id, instance=iid, option=option, reason=reason,
+                       opens_at=opens, updated=True)
+            else:
+                if held:
+                    r.emit("hold_cancelled", node=n.id, instance=iid, option=held.get("option"),
+                           why=f"{caller} chose {option}")
+                frame["held"] = {"option": option, "reason": reason, "opens_at": opens,
+                                 "since": r.now, "by": caller}
+                r.emit("select_held", node=n.id, instance=iid, option=option, reason=reason,
+                       opens_at=opens)
+            out["held"] = dict(frame["held"])
+            return
+        if held:
+            frame.pop("held", None)
+            r.emit("hold_cancelled", node=n.id, instance=iid, option=held.get("option"),
+                   why=f"{caller} chose {option}")
+        override = caller == CALLER_USER and opens is not None and r.now < opens
+        _take_option(r, iid, n, opt, reason, caller, override=override)
+    out: Dict[str, Any] = {}
     _mutate(cwd, scope, now, op)
-    return status(cwd=cwd, scope=scope, now=now, tick=False)
+    payload = status(cwd=cwd, scope=scope, now=now, tick=False)
+    if out.get("held"):
+        h = out["held"]
+        payload["held"] = h
+        payload["note"] = (f"option {h['option']} is paced (interval): held until the window "
+                           f"opens at {_iso(h['opens_at'])}. End your turn -- the daemon applies "
+                           f"it then and wakes you. Choosing it again only updates the reason; "
+                           f"choosing another option cancels the hold")
+    return payload
+
+
+def _iso(ts: Any) -> str:
+    try:
+        return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(float(ts)))
+    except (TypeError, ValueError):
+        return str(ts)
+
+
+def _window_key(node: ir.Node, option: str) -> str:
+    return f"{node_key(node)}:{option}"
+
+
+def _window_opens(r: Run, node: ir.Node, opt: Dict[str, Any]) -> Optional[float]:
+    """When ``opt`` may be taken again (its ``interval`` after the slot's last
+    take), or ``None`` for an unpaced option or one never taken."""
+    interval = opt.get("interval")
+    if not interval:
+        return None
+    last = (r.state.get("windows") or {}).get(_window_key(node, opt["name"]))
+    if last is None:
+        return None
+    return float(last) + float(interval)
+
+
+def _take_option(r: Run, iid: str, n: ir.Node, opt: Dict[str, Any], reason: Optional[str],
+                 by: str, override: bool = False) -> None:
+    option = opt["name"]
+    r.inst[iid]["await"] = None
+    r.inst[iid]["frame"]["option"] = option
+    if opt.get("interval"):
+        r.state.setdefault("windows", {})[_window_key(n, option)] = r.now
+    r.emit("selected", node=n.id, instance=iid, option=option, reason=reason, by=by,
+           override=True if override else None)
+    if opt.get("child"):
+        _enter_child(r, iid, opt["child"], "option")
+    else:
+        _complete(r, iid, ir.OUTCOME_OK, None)
+
+
+def _release_hold(r: Run, iid: str, node: ir.Node) -> bool:
+    """A held choice whose window opened: take it with the latest reason
+    (``by: window``), or drop the hold when its option is no longer
+    available. True when something changed."""
+    frame = r.inst[iid]["frame"]
+    held = frame.get("held") or {}
+    if r.now < float(held.get("opens_at") or 0):
+        return False
+    frame.pop("held", None)
+    opt = next((o for o in node.get("options") or [] if o["name"] == held.get("option")), None)
+    why = None
+    if opt is None:
+        why = "the option no longer exists"
+    else:
+        try:
+            if not _guard(r, iid, opt.get("guard")):
+                why = f"its guard is false now (when: {opt.get('guard')})"
+        except expr_mod.ExprError as exc:
+            why = f"its guard could not be evaluated: {exc}"
+    if why:
+        r.emit("hold_cancelled", node=node.id, instance=iid, option=held.get("option"), why=why)
+        return True
+    _take_option(r, iid, node, opt, held.get("reason"), "window")
+    return True
 
 
 def fork(group: Optional[str], with_: Optional[Dict[str, Any]] = None, *,
@@ -3286,10 +3600,41 @@ def _probe_verdict(result: Any) -> Tuple[str, Any, Any]:
     return PROBE_UNDECIDED, output, code
 
 
+def _probing(node: ir.Node) -> bool:
+    """A wait the clock measures: one ``probe`` or a list of ``checks``."""
+    return bool(node.get("probe") or node.get("checks"))
+
+
+def _run_wait_probe(r: Run, iid: str, runner: ProbeRunner, node: ir.Node) -> Any:
+    """A wait's measurement: its probe's result, or for ``checks`` every
+    item's verdict (``{"checks": [...]}``)."""
+    if not node.get("checks"):
+        return _run_probe(r, iid, runner, node.get("probe"))
+    items = []
+    for c in node.get("checks") or []:
+        verdict, output, code = _probe_verdict(_run_probe(r, iid, runner, c.get("probe")))
+        items.append({"id": c.get("id"), "describe": c.get("describe") or None,
+                      "verdict": verdict, "exit": code,
+                      "output": _tail(output if isinstance(output, str) else ""),
+                      "measured_at": store_mod.utcnow()})
+    return {"checks": items}
+
+
+def _checks_verdict(items: List[Dict[str, Any]]) -> Tuple[str, Any]:
+    """All items hold -> holds; any undecided -> undecided (its exit);
+    otherwise not yet."""
+    if all(i.get("verdict") == PROBE_HOLDS for i in items):
+        return PROBE_HOLDS, None
+    for i in items:
+        if i.get("verdict") == PROBE_UNDECIDED:
+            return PROBE_UNDECIDED, i.get("exit")
+    return PROBE_NOT_YET, None
+
+
 def _probe_due(r: Run, iid: str) -> bool:
     inst = r.inst[iid]
     node = r.chart.node(inst["node"])
-    if inst.get("await") != AW_WAIT or not node.get("probe"):
+    if inst.get("await") != AW_WAIT or not _probing(node):
         return False
     poll = float(node.get("poll") or DEFAULT_POLL)
     last = inst["frame"].get("last_poll")
@@ -3300,7 +3645,7 @@ def _due_probes(r: Run) -> Dict[str, Any]:
     """``{instance: probe}`` for every wait whose probe is due at ``r.now``."""
     if r.status not in LIVE_STATUSES:
         return {}
-    return {iid: r.node_of(iid).get("probe") for iid in r.inst if _probe_due(r, iid)}
+    return {iid: r.node_of(iid) for iid in r.inst if _probe_due(r, iid)}
 
 
 def _tick_time(r: Run, probe_runner: Optional[ProbeRunner] = None,
@@ -3333,6 +3678,11 @@ def _tick_time(r: Run, probe_runner: Optional[ProbeRunner] = None,
                     _complete(r, iid, ir.OUTCOME_TIMEOUT, {"seconds": node.get("seconds")})
                 fired = True
                 break
+            if inst.get("await") == AW_CHOOSE and frame.get("held") \
+                    and r.now >= float(frame["held"].get("opens_at") or 0):
+                if _release_hold(r, iid, node):
+                    fired = True
+                    break
             if inst.get("await") == AW_WAIT and node.get("until") is not None:
                 if _until_step(r, iid, node):
                     fired = True
@@ -3341,27 +3691,43 @@ def _tick_time(r: Run, probe_runner: Optional[ProbeRunner] = None,
             if inst.get("await") == AW_WAIT:
                 due = frame.get("due")
                 if due is not None and r.now >= due:
-                    if node.get("probe"):
+                    if _probing(node):
                         # with a probe, seconds is the upper bound (doc 2.3, wait)
-                        _complete(r, iid, ir.OUTCOME_TIMEOUT,
-                                  {"seconds": node.get("seconds"),
-                                   "polls": int(frame.get("polls") or 0)})
+                        value = {"seconds": node.get("seconds"),
+                                 "polls": int(frame.get("polls") or 0)}
+                        if node.get("checks"):
+                            value["checks"] = frame.get("checks")
+                            r.emit("checks_expired", node=node.id, instance=iid,
+                                   checks=frame.get("checks"))
+                        _complete(r, iid, ir.OUTCOME_TIMEOUT, value)
                     else:
                         _complete(r, iid, ir.OUTCOME_OK, {"waited": node.get("seconds")})
                     fired = True
                     break
                 have = probe_results is not None and iid in probe_results
-                if node.get("probe") and (have or (probe_runner is not None
-                                                   and probe_results is None)):
+                if _probing(node) and (have or (probe_runner is not None
+                                                and probe_results is None)):
                     if _probe_due(r, iid):
                         frame["last_poll"] = r.now
                         result = probe_results.pop(iid) if have else \
-                            _run_probe(r, iid, probe_runner, node.get("probe"))
-                        verdict, output, code = _probe_verdict(result)
+                            _run_wait_probe(r, iid, probe_runner, node)
+                        checks = result.get("checks") if isinstance(result, dict) \
+                            and node.get("checks") else None
+                        if checks is not None:
+                            frame["checks"] = checks
+                            verdict, code = _checks_verdict(checks)
+                            output = None
+                        else:
+                            verdict, output, code = _probe_verdict(result)
                         frame["polls"] = int(frame.get("polls") or 0) + 1
                         if verdict == PROBE_HOLDS:
                             frame["undecided"] = 0
-                            _complete(r, iid, ir.OUTCOME_OK, {"output": output})
+                            if checks is not None:
+                                r.emit("checks_passed", node=node.id, instance=iid,
+                                       checks=checks)
+                                _complete(r, iid, ir.OUTCOME_OK, {"checks": checks})
+                            else:
+                                _complete(r, iid, ir.OUTCOME_OK, {"output": output})
                             fired = True
                             break
                         if verdict == PROBE_UNDECIDED:
@@ -3370,9 +3736,11 @@ def _tick_time(r: Run, probe_runner: Optional[ProbeRunner] = None,
                             r.emit("probe_undecided", node=node.id, instance=iid, exit=code,
                                    count=frame["undecided"], max=limit)
                             if frame["undecided"] >= limit:
-                                _complete(r, iid, OUTCOME_UNDECIDABLE,
-                                          {"exit": code, "output": output,
-                                           "undecided": frame["undecided"]})
+                                value = {"exit": code, "output": output,
+                                         "undecided": frame["undecided"]}
+                                if checks is not None:
+                                    value["checks"] = checks
+                                _complete(r, iid, OUTCOME_UNDECIDABLE, value)
                                 fired = True
                                 break
                         else:
@@ -3448,14 +3816,21 @@ def wait_tick(now: Optional[float] = None, probe_runner: Optional[ProbeRunner] =
         if probe_runner is not None:
             snap = Run.load(st, now)
             due = _due_probes(snap)
-            results = {iid: _run_probe(snap, iid, probe_runner, probe)
-                       for iid, probe in due.items()}
+            results = {iid: _run_wait_probe(snap, iid, probe_runner, wnode)
+                       for iid, wnode in due.items()}
 
-        def op(r: Run) -> int:
-            if r.status not in LIVE_STATUSES:
-                return 0
-            return _tick_time(r, None, results if results is not None else {})
-        moved += _mutate(cwd, scope, now, op)
+        # Not _mutate: its own time tick would apply what this call moves
+        # and the count would miss it (the clock wakes the driver on it).
+        with st.lock():
+            r = Run.load(st, now)
+            if r.status in LIVE_STATUSES:
+                moved += _tick_time(r, None, results if results is not None else {})
+            if r.status in LIVE_STATUSES:
+                moved += _tick_until(r)
+            r.save()
+        r.run_after()
+        if r.deferred_error:
+            raise FlowError(r.deferred_error)
         if probe_runner is None:
             break
         if not _due_probes(Run.load(st, now)):
@@ -3722,17 +4097,27 @@ def describe(r: Run) -> Dict[str, Any]:
         out["collections"] = _col_summary(r)
     if _col_specs(r) or s.get("triggers"):
         out["pending_triggers"] = len(s.get("triggers") or [])
+    if s.get("round"):
+        out["round"] = s["round"]
     if s.get("status") in FINISHED_STATUSES:
         out["outcome"] = s.get("outcome")
         out["value"] = s.get("value")
         out["note"] = f"the run is {s.get('status')}"
+        nxt = s.get("next_round")
+        if nxt:
+            out["next_round"] = nxt
+            out["note"] += (
+                f"; round {nxt.get('round')} is requested and the daemon starts it (recur auto)"
+                if nxt.get("auto") else
+                f"; round {nxt.get('round')} is requested: start it with "
+                f"flow_start(workflow={s.get('workflow')!r})")
         return out
     nested_waits = [w for w in _gate_waits(s, None) if "(nested run " in w]
     if nested_waits:
         # The parent itself shows running; what holds it is inside (G2).
         out["waiting_in_nested"] = nested_waits
     tasks, choices, waits, groups, limits, asks = [], [], [], [], [], []
-    verifying, visit_limits = [], []
+    verifying, visit_limits, windows = [], [], []
     for iid in sorted(r.inst, key=lambda k: int(k.rsplit("@", 1)[1])):
         inst = r.inst[iid]
         node = r.chart.node(inst["node"])
@@ -3751,6 +4136,8 @@ def describe(r: Run) -> Dict[str, Any]:
             })
             if inst["frame"].get("last_verify"):
                 tasks[-1]["last_verify"] = inst["frame"]["last_verify"]
+            if node.get("restart"):
+                tasks[-1]["restart"] = _restart_view(inst["frame"].get("restart"))
         elif aw == AW_VERIFY:
             v = inst["frame"].get("verify") or {}
             verifying.append({"instance": iid, "node": node.id, "label": node.label or None,
@@ -3764,6 +4151,11 @@ def describe(r: Run) -> Dict[str, Any]:
                 except expr_mod.ExprError:
                     ok = False
                 entry = {"name": opt["name"], "description": opt.get("description") or ""}
+                if opt.get("interval"):
+                    entry["interval"] = opt["interval"]
+                    opens = _window_opens(r, node, opt)
+                    if opens is not None and r.now < opens:
+                        entry["window_opens_at"] = _iso(opens)
                 (avail if ok else unavail).append(entry if ok else {**entry, "when": opt.get("guard")})
             choices.append({
                 "instance": iid, "node": node.id, "label": node.label or None,
@@ -3772,6 +4164,12 @@ def describe(r: Run) -> Dict[str, Any]:
                 "require_reason": bool(node.get("require_reason")),
                 "options": avail, "unavailable": unavail,
             })
+            held = inst["frame"].get("held")
+            if held:
+                choices[-1]["held"] = {**held, "opens_at": _iso(held.get("opens_at"))}
+                windows.append({"instance": iid, "node": node.id, "label": node.label or None,
+                                "option": held.get("option"),
+                                "opens_at": _iso(held.get("opens_at"))})
         elif aw == AW_WAIT:
             waits.append({
                 "instance": iid, "node": node.id, "kind": "wait",
@@ -3779,6 +4177,13 @@ def describe(r: Run) -> Dict[str, Any]:
                 "poll": node.get("poll"), "seconds": node.get("seconds"),
                 "due": inst["frame"].get("due"), "polls": inst["frame"].get("polls", 0),
             })
+            if node.get("checks"):
+                measured = {c.get("id"): c for c in inst["frame"].get("checks") or []}
+                waits[-1]["checks"] = [
+                    {"id": c["id"], "describe": c.get("describe") or None, "probe": c.get("probe"),
+                     **{k: (measured.get(c["id"]) or {}).get(k)
+                        for k in ("verdict", "exit", "output", "measured_at")}}
+                    for c in node.get("checks") or []]
         elif aw == AW_PAUSE:
             waits.append({"instance": iid, "node": node.id, "kind": "pause",
                           "resume_at": inst["frame"].get("resume_at")})
@@ -3830,6 +4235,8 @@ def describe(r: Run) -> Dict[str, Any]:
         out["visit_limits"] = visit_limits
     if verifying:
         out["verifying"] = verifying
+    if windows:
+        out["waiting_window"] = windows
     if asks:
         out["asks"] = asks
     out["data"] = s.get("data")
@@ -3854,6 +4261,14 @@ def describe(r: Run) -> Dict[str, Any]:
                      "'claunch cflow2 extend --visits'")
     if verifying:
         hints.append("verify commands are running; call flow_status again later")
+    if windows:
+        hints.append("a choice is held until its window opens (waiting_window): end your turn, "
+                     "the daemon applies it then and wakes you; choosing the same option again "
+                     "updates its reason, another option cancels the hold")
+    if any((t.get("restart") or {}).get("status") in (RESTART_PENDING, RESTART_RUNNING)
+           for t in tasks):
+        hints.append("the daemon runs a task's restart command (never run it yourself); its "
+                     "report is accepted once the restart result is in")
     if acc and acc.get("status") == "failed":
         hints.append("the run reached its end but acceptance checks failed: fix what they "
                      "found (flow_status checks again), or a person accepts it anyway with "

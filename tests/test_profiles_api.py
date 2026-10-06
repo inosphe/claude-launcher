@@ -331,11 +331,11 @@ def test_a_profile_with_no_rules_reports_both_halves_missing(home):
     # a second copy is a second thing to forget when a gate verb gains a shell.
     assert row["allow"]["expected"] == list(install.GATE_ALLOW_RULES)
     assert row["deny"]["expected"] == list(install.GATE_DENY_RULES)
-    # thirteen gate verbs (cflow approve, select, goto, abort, set; cflow2
-    # approve, select, extend, resume, abort, collection push|set|remove) x two
-    # shells x two spellings, plus the cflow2 glob spellings: (eight verbs +
-    # start --force) x two program names (claunch, claude_launcher) x two shells
-    assert len(row["deny"]["expected"]) == 52 + 36
+    # fourteen gate verbs (cflow approve, select, goto, abort, set; cflow2
+    # approve, select, extend, resume, abort, recur, collection push|set|remove)
+    # x two shells x two spellings, plus the cflow2 glob spellings: (nine verbs
+    # + start --force) x two program names (claunch, claude_launcher) x two shells
+    assert len(row["deny"]["expected"]) == 56 + 40
     assert row["allow"]["value"] == []
     assert row["allow"]["missing"] == ["mcp__claunch"]
     assert row["deny"]["missing"] == list(install.GATE_DENY_RULES)
