@@ -73,6 +73,7 @@ from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 import yaml
 
 from . import collections as _collections
+from . import question as _question
 from . import ir
 
 ResolveInclude = Callable[[str], Optional[Path]]
@@ -183,8 +184,11 @@ TOP_KEYS = (
     "cflow", "name", "description", "kind", "default_role", "filter_roles",
     "default_child_cflow", "priority", "params", "returns", "data", "include",
     "fragments", "rules", "procedures", "nodes", "body", "spec", "max_visits",
-    "inputs", "collections", "collection_types", "sides",
+    "inputs", "collections", "collection_types", "question_types", "sides",
 )
+#: Top-level keys a ``kind: library`` file may carry (docs/cflow-v2.md 2.10).
+LIBRARY_KEYS = ("cflow", "name", "description", "kind", "include", "fragments", "rules",
+                "procedures", "collection_types", "question_types")
 TASK_KEYS = (
     "title", "prompt", "done_when", "verify", "ask", "executor", "needs",
     "returns", "effects", "paths", "budget", "rules", "strict_budget",
@@ -277,6 +281,8 @@ class _Ctx:
     frag_cache: Dict[str, str] = field(default_factory=dict)
     #: collection_types name -> (raw declaration, file, line)
     collection_types: Dict[str, Tuple[Any, str, int]] = field(default_factory=dict)
+    #: question_types name -> (normalized declaration, file, line)
+    question_types: Dict[str, Tuple[Dict[str, Any], str, int]] = field(default_factory=dict)
 
     def err(self, file: str, line: int, msg: str) -> FrontendError:
         return FrontendError(f"{file}:{line}: {msg}" if line else f"{file}: {msg}")
@@ -397,6 +403,16 @@ def _returns(ctx: _Ctx, file: str, value: Any, line: int) -> Dict[str, Dict[str,
         out[str(outcome)] = {}
         for fname, ftype in fmap.items():
             base = ftype[:-1] if isinstance(ftype, str) and ftype.endswith("?") else ftype
+            qname = _question.return_type(ftype) if isinstance(ftype, str) else None
+            if qname is not None:
+                # question:<type> or question:$params.<p>; which types exist
+                # is check's job (unknown-question-type)
+                if not (_NAME_RE.match(qname) or _PARAM_REF_BARE.match(qname)):
+                    raise ctx.err(file, _key_line(fmap, fname, oline),
+                                  f"returns.{outcome}.{fname}: {ftype!r} must name a question "
+                                  f"type or $params.<name>")
+                out[str(outcome)][str(fname)] = ftype
+                continue
             if base not in RETURN_TYPES:
                 raise ctx.err(
                     file, _key_line(fmap, fname, oline),
@@ -517,6 +533,21 @@ def _absorb(ctx: _Ctx, doc: Dict[str, Any], file: str) -> None:
                                            f"{_collections._strip(str(tname), exc)}") from None
             ctx.collection_types[str(tname)] = (raw, file, tline)
 
+    qtypes = doc.get("question_types")
+    if qtypes is not None:
+        qtypes = _need_map(ctx, file, qtypes, "question_types", _key_line(doc, "question_types"))
+        for tname, raw in qtypes.items():
+            tline = _key_line(qtypes, tname)
+            prior = ctx.question_types.get(str(tname))
+            if prior is not None and (prior[1], prior[2]) != (file, tline):
+                raise ctx.err(file, tline, f"question type {tname!r} is already defined at "
+                                           f"{_where(prior[1], prior[2])}")
+            try:
+                decl = _question.normalize(str(tname), _plain(raw))
+            except _question.QuestionError as exc:
+                raise ctx.err(file, tline, str(exc)) from None
+            ctx.question_types[str(tname)] = (decl, file, tline)
+
     tasks = _file_tasks(ctx, doc, file)
     procs = doc.get("procedures")
     if procs is not None:
@@ -578,6 +609,8 @@ def _check_header(ctx: _Ctx, doc: Any, file: str) -> Dict[str, Any]:
     kind = doc.get("kind", ir.KIND_WORKFLOW)
     if kind not in ir.KINDS:
         raise ctx.err(file, _key_line(doc, "kind"), f"kind must be one of {', '.join(ir.KINDS)}")
+    if kind == ir.KIND_LIBRARY:
+        _check_keys(ctx, file, doc, LIBRARY_KEYS, "a library (kind: library)")
     return doc
 
 
@@ -630,7 +663,8 @@ def _procedure(ctx: _Ctx, name: str, file: str, line: int) -> _Proc:
     path = Path(path)
     doc = _read_doc(ctx, path)
     if doc.get("kind") != ir.KIND_PROCEDURE:
-        raise ctx.err(file, line, f"{path.name} is not a procedure (kind: procedure)")
+        hint = " -- a library is included, not called" if doc.get("kind") == ir.KIND_LIBRARY else ""
+        raise ctx.err(file, line, f"{path.name} is not a procedure (kind: procedure){hint}")
     if "body" not in doc:
         raise FrontendError(f"{path.name}: a procedure file needs a body")
     key = str(path.resolve())
@@ -763,7 +797,13 @@ def _compile_task(ctx: _Ctx, sc: _Scope, name: str, parent: Optional[str], line:
 
 
 VERIFY_KEYS = ("run", "command", "timeout")
-ASK_KEYS = ("prompt", "from", "otherwise", "timeout", "on_decline", "options")
+ASK_KEYS = ("prompt", "from", "otherwise", "timeout", "on_decline", "options",
+            "brief", "format", "choices")
+#: ``${params.NAME}`` -- the one reference ask.format/choices/from may hold.
+_PARAM_REF = re.compile(r"^\$\{\s*\$?params\.([A-Za-z_][A-Za-z0-9_]*)\s*\}$")
+_PARAM_REF_BARE = re.compile(r"^\$params\.([A-Za-z_][A-Za-z0-9_]*)$")
+#: A whole-string value reference (``ask.brief``).
+_WHOLE_REF = re.compile(r"^\$\{([^{}]+)\}$")
 ASK_OPTION_KEYS = ("outcome", "description")
 #: The outcome a declined approval finishes its task with, unless
 #: ``on_decline`` names another.
@@ -855,13 +895,21 @@ def _ask(ctx: _Ctx, file: str, name: str, value: Any, line: int) -> Dict[str, An
 
     ask = _need_map(ctx, file, value, f"task {name!r} ask", line)
     aline = _line(ask, line)
+    _check_keys(ctx, file, ask, ASK_KEYS, f"task {name!r} ask")
+    if "brief" in ask or "format" in ask:
+        return _ask_brief(ctx, file, name, ask, aline)
+    if "choices" in ask:
+        raise ctx.err(file, aline, f"task {name!r}: ask.choices fixes the option names of a "
+                      f"brief ask (ask-choices-mismatch); this ask has no brief")
     if "prompt" not in ask:
         raise ctx.err(file, aline, f"task {name!r}: ask needs a prompt")
-    _check_keys(ctx, file, ask, ASK_KEYS, f"task {name!r} ask")
     prompt = ask.get("prompt")
     if not isinstance(prompt, str) or not prompt.strip():
         raise ctx.err(file, aline, f"task {name!r}: ask.prompt must be a non-empty string")
     raw = _plain(ask)
+    if _PARAM_REF.match(str(raw.get("from") or "")) if isinstance(raw.get("from"), str) else False:
+        raise ctx.err(file, aline, f"task {name!r}: ask.from may be ${{params.<name>}} only on "
+                      f"an ask with a brief")
     try:
         delegate = v1._parse_delegate(raw, f"task {name!r}: ask")
     except v1.WorkflowError as exc:
@@ -1309,6 +1357,99 @@ def _b_group(ctx, sc, node, value, m, line):
     node.props["member"] = mid
 
 
+def _ask_brief(ctx: _Ctx, file: str, name: str, ask: Dict[str, Any], aline: int) -> Dict[str, Any]:
+    """An ask whose question and options come from an earlier result
+    (docs/cflow-v2.md 2.10): ``{brief, format, choices, prompt, from,
+    from_param, ...}``. ``brief`` is stored as an expression; ``format``,
+    ``choices`` and ``from`` may each be one ``${params.<p>}`` reference,
+    stored as ``"$params.<p>"`` and resolved when the ask opens."""
+    from ..cflow import model as v1
+
+    what = f"task {name!r}"
+    if "brief" not in ask or "format" not in ask:
+        raise ctx.err(file, aline, f"{what}: ask.brief and ask.format go together "
+                      f"(ask-format-without-brief)")
+    for key in ("options", "on_decline"):
+        if key in ask:
+            raise ctx.err(file, aline, f"{what}: ask.{key} cannot go with ask.brief -- the "
+                          f"options come from the brief (ask-brief-with-options)")
+    brief = ask.get("brief")
+    m = _WHOLE_REF.match(brief.strip()) if isinstance(brief, str) else None
+    if not m:
+        raise ctx.err(file, aline, f"{what}: ask.brief must be one value reference "
+                      f"${{...}} and nothing else (ask-brief-ref)")
+    inner = m.group(1).strip()
+    brief_expr = _expr_text(ctx, file, inner if inner.startswith("$") else "$" + inner,
+                            f"{what} ask.brief", aline)
+    prompt = ask.get("prompt")
+    if prompt is not None and not isinstance(prompt, str):
+        raise ctx.err(file, aline, f"{what}: ask.prompt must be a string")
+
+    def param_or(value: Any, key: str) -> Optional[str]:
+        if isinstance(value, str):
+            pm = _PARAM_REF.match(value.strip())
+            if pm:
+                return f"$params.{pm.group(1)}"
+        return None
+
+    fmt = ask.get("format")
+    fmt_v = param_or(fmt, "format")
+    if fmt_v is None:
+        if not isinstance(fmt, str) or not _NAME_RE.match(fmt):
+            raise ctx.err(file, aline, f"{what}: ask.format must be a question type name or "
+                          f"${{params.<name>}}")
+        fmt_v = fmt
+    choices = ask.get("choices")
+    choices_v: Any = None
+    if choices is not None:
+        choices_v = param_or(choices, "choices")
+        if choices_v is None:
+            if not isinstance(choices, list) or not choices:
+                raise ctx.err(file, aline, f"{what}: ask.choices must be a list of option names "
+                              f"or ${{params.<name>}}")
+            folded: Set[str] = set()
+            for c in choices:
+                if not isinstance(c, str) or not _OUTCOME_RE.match(c) or \
+                        c.lower() in _question.RESERVED_NAMES:
+                    raise ctx.err(file, aline, f"{what}: bad ask.choices name {c!r}")
+                if c.lower() in folded:
+                    raise ctx.err(file, aline, f"{what}: ask.choices repeats {c!r}")
+                folded.add(c.lower())
+            choices_v = list(choices)
+    raw = _plain(ask)
+    from_param = param_or(raw.get("from"), "from")
+    if from_param is not None:
+        raw.pop("from")
+    for key in ("brief", "format", "choices", "prompt"):
+        raw.pop(key, None)
+    try:
+        delegate = v1._parse_delegate(raw, f"{what}: ask")
+    except v1.WorkflowError as exc:
+        raise ctx.err(file, aline, str(exc)) from None
+    default = delegate.default_option
+    if default is not None:
+        if not isinstance(choices_v, list):
+            raise ctx.err(file, aline, f"{what}: ask 'otherwise: self:{default}' needs literal "
+                          f"ask.choices naming that option (ask-choices-mismatch)")
+        if default.lower() not in [c.lower() for c in choices_v]:
+            raise ctx.err(file, aline, f"{what}: ask 'otherwise: self:{default}' names no "
+                          f"choice ({', '.join(choices_v)}) (ask-choices-mismatch)")
+    return {
+        "prompt": prompt or "",
+        "brief": brief_expr,
+        "format": fmt_v,
+        "choices": choices_v,
+        "from": [{"role": c.role, "scope": c.scope, "connect": c.connect}
+                 for c in delegate.candidates],
+        "from_param": from_param,
+        "otherwise": delegate.otherwise,
+        "default_option": default,
+        "timeout": delegate.timeout,
+        "on_decline": None,
+        "options": None,
+    }
+
+
 _BUILDERS: Dict[str, Callable[..., None]] = {
     "seq": _b_seq, "waterfall": _b_waterfall, "cond": _b_cond, "choose": _b_choose,
     "foreach": _b_foreach, "loop": _b_loop, "par": _b_par, "retry": _b_retry,
@@ -1604,12 +1745,18 @@ def compile_text(text: str, *, source: str = "",
             _definition_name(ctx, sdef, file, _key_line(sides, sname, sline), f"side {sname!r}")
         sides = _plain(sides)
 
-    if "body" not in doc:
-        raise ctx.err(file, 1, "a definition needs a body")
-    tasks = _file_tasks(ctx, doc, file)
-    sc = _Scope(file=file, tasks=tasks, in_proc=kind == ir.KIND_PROCEDURE,
-                procs=(name,) if kind == ir.KIND_PROCEDURE else ())
-    root = _compile_tree(ctx, sc, doc["body"], None, "body", _key_line(doc, "body", 1))
+    if kind == ir.KIND_LIBRARY:
+        # nothing to run: the chart is one ``end`` so validate/list still work
+        root = _alloc(ctx, "body")
+        _add(ctx, ir.Node(id=root, type=ir.T_CONTROL, parent=None, src=_where(file, 1),
+                          props={"op": ir.CTL_END}))
+    else:
+        if "body" not in doc:
+            raise ctx.err(file, 1, "a definition needs a body")
+        tasks = _file_tasks(ctx, doc, file)
+        sc = _Scope(file=file, tasks=tasks, in_proc=kind == ir.KIND_PROCEDURE,
+                    procs=(name,) if kind == ir.KIND_PROCEDURE else ())
+        root = _compile_tree(ctx, sc, doc["body"], None, "body", _key_line(doc, "body", 1))
 
     chart = ir.Chart(
         name=name,
@@ -1629,6 +1776,9 @@ def compile_text(text: str, *, source: str = "",
             # normalized collection declarations (cflow2/collections.py)
             "collections": collections,
             **({"sides": sides} if sides is not None else {}),
+            # question type declarations, own and included (cflow2/question.py)
+            **({"question_types": {n: e[0] for n, e in ctx.question_types.items()}}
+               if ctx.question_types else {}),
         },
         params=_params(ctx, file, doc.get("params"), _key_line(doc, "params")),
         returns=_returns(ctx, file, doc["returns"], _key_line(doc, "returns"))

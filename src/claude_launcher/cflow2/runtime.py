@@ -97,6 +97,7 @@ except ImportError:  # pragma: no cover
     caps_mod = None  # type: ignore
 from . import expr as expr_mod
 from . import collections as col_mod
+from . import question as q_mod
 
 ST_RUNNING = "running"
 ST_WAITING = "waiting_approval"
@@ -279,6 +280,9 @@ class Run:
             out["col"] = {name: col_mod.items(cs)
                           for name, cs in (self.state.get("collections") or {}).items()}
             out[expr_mod.COLLECTIONS_KEY] = _ColResolver(self)
+        qtypes = (self.chart.meta or {}).get("question_types")
+        if qtypes:
+            out[expr_mod.QUESTIONS_KEY] = qtypes  # guide(name), docs 2.10
         return out
 
 
@@ -390,6 +394,7 @@ def _values(r: Run, iid: Optional[str], spec: Any) -> Dict[str, Any]:
 
 
 _REF = re.compile(r"\$\{([^}]*)\}")
+_CALL_START = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*\s*\(")
 
 
 def render(text: Optional[str], env: Dict[str, Any]) -> str:
@@ -403,7 +408,8 @@ def render(text: Optional[str], env: Dict[str, Any]) -> str:
         inner = m.group(1).strip()
         if not inner or inner.startswith("frag:"):
             return m.group(0)
-        src = inner if inner.startswith("$") else "$" + inner
+        # ``${guide($params.format)}``: a function call keeps its spelling
+        src = inner if inner.startswith("$") or _CALL_START.match(inner) else "$" + inner
         try:
             value = expr_mod.evaluate(src, env)
             if value is None:
@@ -438,12 +444,17 @@ def returns_of(node: ir.Node) -> Dict[str, Dict[str, str]]:
     return {ir.OUTCOME_OK: {}}
 
 
-def validate_result(schema: Dict[str, Any], outcome: str, value: Any) -> List[str]:
+def validate_result(schema: Dict[str, Any], outcome: str, value: Any, *,
+                    qtypes: Optional[Dict[str, Any]] = None,
+                    params: Optional[Dict[str, Any]] = None) -> List[str]:
     """Problems with ``(outcome, value)`` against ``schema``; empty when fine.
 
     ``fail`` is always accepted (the engine's own failure outcome); a declared
     ``fail`` still has its fields checked. Fields are required unless the type
-    ends in ``?``; extra fields are allowed.
+    ends in ``?``; extra fields are allowed. A ``question:<type>`` field
+    (docs 2.10) is checked against that question type from ``qtypes``;
+    ``question:$params.<p>`` names the type through ``params``. Without
+    ``qtypes`` such a field only has to be an object.
     """
     if not isinstance(outcome, str) or not outcome:
         return ["outcome must be a non-empty string"]
@@ -468,12 +479,38 @@ def validate_result(schema: Dict[str, Any], outcome: str, value: Any) -> List[st
             if not optional:
                 errors.append(f"missing field {name!r} ({ftype})")
             continue
+        qname = q_mod.return_type(ftype)
+        if qname is not None:
+            errors.extend(_question_field(name, qname, value[name], qtypes, params))
+            continue
         check = _TYPES.get(base)
         if check is not None and not check(value[name]):
             errors.append(
                 f"field {name!r} must be {base}, got {type(value[name]).__name__}"
             )
     return errors
+
+
+def question_type(qname: str, qtypes: Optional[Dict[str, Any]],
+                  params: Optional[Dict[str, Any]]) -> Tuple[Optional[Dict[str, Any]], str]:
+    """``(declaration, name)`` for a question type named literally or as
+    ``$params.<p>``; the declaration is None when it cannot be found."""
+    if qname.startswith("$params."):
+        qname = str((params or {}).get(qname[len("$params."):]) or "")
+    return (qtypes or {}).get(qname), qname
+
+
+def _question_field(name: str, qname: str, v: Any, qtypes: Optional[Dict[str, Any]],
+                    params: Optional[Dict[str, Any]]) -> List[str]:
+    if not isinstance(v, dict):
+        return [f"field {name!r} must be an object (question {qname}), got {type(v).__name__}"]
+    if qtypes is None:
+        return []
+    decl, resolved = question_type(qname, qtypes, params)
+    if decl is None:
+        return [f"field {name!r}: no question type {resolved or qname!r}"]
+    _norm, errs = q_mod.validate(v, decl)
+    return [f"field {name!r} ({resolved}): {e}" for e in errs]
 
 
 # ---------------------------------------------------------------------------
@@ -2549,7 +2586,9 @@ def report(node: Optional[str], outcome: str = ir.OUTCOME_OK, value: Any = None,
         _require_progress(r)
         iid = _task_for_report(r, node)
         n = r.node_of(iid)
-        errors = validate_result(returns_of(n), outcome, value)
+        errors = validate_result(returns_of(n), outcome, value,
+                                 qtypes=(r.chart.meta or {}).get("question_types") or {},
+                                 params=r.env(iid).get("params"))
         if errors:
             raise FlowError(f"report for {n.label or n.id} refused: " + "; ".join(errors)
                             + f". Declared returns: {json.dumps(returns_of(n))}")
@@ -3933,6 +3972,8 @@ def _ask_spec(node: ir.Node) -> Dict[str, Any]:
                     else str(v or "")} for k, v in options.items()]
     return {
         "prompt": str(raw.get("prompt") or ""),
+        "brief": raw.get("brief"), "format": raw.get("format"),
+        "choices": raw.get("choices"), "from_param": raw.get("from_param"),
         "from": cands,
         "otherwise": base or ASK_OTHERWISE_HUMAN,
         "default_option": raw.get("default_option") or (default or None),
@@ -3943,6 +3984,11 @@ def _ask_spec(node: ir.Node) -> Dict[str, Any]:
 
 
 def _ask_choices(rec: Dict[str, Any]) -> List[Dict[str, Any]]:
+    if rec.get("brief") is not None:
+        return list(rec.get("options") or []) + [{
+            "name": q_mod.REFRAME, "outcome": q_mod.REFRAME,
+            "description": "the options do not fit the problem -- say why in the reason; "
+                           "the question is framed again"}]
     if rec.get("options"):
         return list(rec["options"])
     return [{"name": ASK_APPROVE, "outcome": None, "description": "enter the task"},
@@ -3951,8 +3997,78 @@ def _ask_choices(rec: Dict[str, Any]) -> List[Dict[str, Any]]:
                             f"'{rec.get('on_decline') or ASK_DECLINED}'"}]
 
 
+def _brief_ask(r: Run, iid: str, node: ir.Node, spec: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Resolve a brief ask (docs 2.10) when it opens: the brief, its question
+    type, the fixed choices and a ``from`` given as a param. Returns the
+    record fields, or None after finishing the task ``fail`` (the reasons are
+    in the value and the journal's ``ask_brief_invalid``)."""
+    env = r.env(iid)
+    params = env.get("params") or {}
+    errors: List[str] = []
+
+    def param(v: Any) -> Any:
+        if isinstance(v, str) and v.startswith("$params."):
+            return params.get(v[len("$params."):])
+        return v
+
+    decl, fmt = question_type(str(spec.get("format") or ""),
+                              (r.chart.meta or {}).get("question_types") or {}, params)
+    brief: Any = None
+    try:
+        brief = expr_mod.evaluate(spec["brief"], env)
+    except expr_mod.ExprError as exc:
+        errors.append(f"brief {spec['brief']}: {exc}")
+    if decl is None:
+        errors.append(f"no question type {fmt or spec.get('format')!r}")
+    elif brief is None and not errors:
+        errors.append(f"brief {spec['brief']} is empty -- the task that frames the question "
+                      f"has not reported it")
+    norm: Dict[str, Any] = {}
+    if decl is not None and brief is not None:
+        norm, errs = q_mod.validate(brief, decl)
+        errors.extend(errs)
+    choices = param(spec.get("choices"))
+    if choices is not None and not errors:
+        if not isinstance(choices, list) or not all(isinstance(c, str) for c in choices):
+            errors.append(f"choices must be a list of option names, got {choices!r}")
+        else:
+            got = sorted(n.lower() for n in q_mod.option_names(norm, decl))
+            want = sorted(c.lower() for c in choices)
+            if got != want:
+                errors.append(f"the brief's options ({', '.join(q_mod.option_names(norm, decl))}) "
+                              f"must be exactly the fixed choices ({', '.join(choices)})")
+    cands = spec["from"]
+    if spec.get("from_param") and not errors:
+        raw_from = param(spec["from_param"])
+        if raw_from:
+            from ..cflow import model as v1
+
+            try:
+                d = v1._parse_delegate({"from": raw_from}, f"task {node.label}: ask")
+                cands = [{"role": c.role, "scope": c.scope, "connect": c.connect}
+                         for c in d.candidates]
+            except v1.WorkflowError as exc:
+                errors.append(f"from: {exc}")
+        else:
+            cands = []
+    if errors:
+        r.emit("ask_brief_invalid", node=node.id, instance=iid, format=fmt, errors=errors)
+        _complete(r, iid, ir.OUTCOME_FAIL,
+                  {"reason": "the question brief is not usable: " + "; ".join(errors),
+                   "errors": errors})
+        return None
+    return {"format": fmt, "brief": norm, "options": q_mod.ask_options(norm, decl),
+            "from": cands, "question_text": q_mod.render_text(norm, decl)}
+
+
 def _open_ask(r: Run, iid: str, node: ir.Node) -> None:
     spec = _ask_spec(node)
+    brief = None
+    if spec.get("brief"):
+        brief = _brief_ask(r, iid, node, spec)
+        if brief is None:
+            return
+        spec["options"], spec["from"] = brief["options"], brief["from"]
     aid = f"ask2-{secrets.token_hex(4)}"
     rec: Dict[str, Any] = {
         "id": aid, "instance": iid, "node": node.id, "label": node.label or None,
@@ -3967,6 +4083,13 @@ def _open_ask(r: Run, iid: str, node: ir.Node) -> None:
         "retry_at": None, "opened": store_mod.utcnow(), "opened_at": r.now,
         "visit": int((r.state.get("visits") or {}).get(node_key(node)) or 0),
     }
+    if brief is not None:
+        rec.update(format=brief["format"], brief=brief["brief"],
+                   question_text=brief["question_text"])
+        if not rec["prompt"]:
+            rec["prompt"] = brief["question_text"]
+        else:
+            rec["prompt"] = rec["prompt"].rstrip() + "\n\n" + brief["question_text"]
     r.state.setdefault("asks", {})[aid] = rec
     r.inst[iid]["await"] = AW_APPROVAL
     r.inst[iid]["frame"]["ask"] = aid
@@ -4081,6 +4204,12 @@ def _ask_decision(rec: Dict[str, Any], decision: Optional[str], *,
                     f"{', '.join(names)}{extra}")
 
 
+def _ask_need_reason(rec: Dict[str, Any], choice: str, reason: Optional[str]) -> None:
+    if choice == q_mod.REFRAME and rec.get("brief") is not None and not str(reason or "").strip():
+        raise FlowError(f"'{q_mod.REFRAME}' needs a reason: say what the options miss, so the "
+                        f"question can be framed again")
+
+
 def _ask_resolve(r: Run, rec: Dict[str, Any], decision: str, *, by: str,
                  reason: Optional[str], channel: str) -> None:
     iid = rec["instance"]
@@ -4094,6 +4223,12 @@ def _ask_resolve(r: Run, rec: Dict[str, Any], decision: str, *, by: str,
     if iid not in r.inst:
         return
     value = {"decision": decision, "reason": reason, "by": by, "ask": rec["id"]}
+    if rec.get("brief") is not None:
+        value["brief"] = rec["brief"]
+        if decision == q_mod.REFRAME:
+            value.pop("decision")
+            _complete(r, iid, q_mod.REFRAME, value)
+            return
     if rec.get("kind") == "decision":
         opt = next(o for o in rec["options"] if o["name"] == decision)
         _complete(r, iid, opt.get("outcome") or decision, value)
@@ -4223,6 +4358,8 @@ def _describe_ask(r: Run, iid: str, node: ir.Node, rec: Dict[str, Any],
         "deadline": rec.get("deadline"),
         "skipped": [s.get("reason") for s in rec.get("skipped") or []],
         "how": _ask_how(iid, rec),
+        **({"format": rec.get("format"), "brief": rec.get("brief"),
+            "question_text": rec.get("question_text")} if rec.get("brief") is not None else {}),
     }
 
 
@@ -4273,6 +4410,7 @@ def approve(node: Optional[str] = None, *, decision: Optional[str] = None,
             raise FlowError(f"{rec['id']} is a decision: name an option "
                             f"({', '.join(o['name'] for o in _ask_choices(rec))})")
         choice = _ask_decision(rec, choice)
+        _ask_need_reason(rec, choice, reason)
         answered.update({
             "ask": rec["id"], "instance": iid, "node": rec["node"], "label": rec.get("label"),
             "decision": choice, "workflow": r.state.get("workflow"),
@@ -4326,6 +4464,7 @@ def answer(ask_id: str, decision: str, reason: Optional[str] = None, *,
                             f"answer")
         handle = str(mine[0].get("handle") or session)
         choice = _ask_decision(rec, decision, allow_abstain=True)
+        _ask_need_reason(rec, choice, reason)
         receipt.update({"ask": ask_id, "decision": choice, "reason": reason, "as": handle,
                         "workflow": r.state.get("workflow"), "task": rec.get("label")
                         or rec["node"], "prompt": rec.get("prompt")})

@@ -62,7 +62,9 @@ FORMAT_VERSION = 2
 
 KIND_WORKFLOW = "workflow"
 KIND_PROCEDURE = "procedure"
-KINDS = (KIND_WORKFLOW, KIND_PROCEDURE)
+#: Included only: fragments, rules, procedures and type declarations, no body.
+KIND_LIBRARY = "library"
+KINDS = (KIND_WORKFLOW, KIND_PROCEDURE, KIND_LIBRARY)
 
 T_TASK = "task"
 T_SEQ = "seq"

@@ -109,8 +109,8 @@ def _entry(item: "layers.Located2", cwd: str) -> Optional[dict]:
     if item.error:
         entry["error"] = item.error
         return entry
-    if item.kind == ir.KIND_PROCEDURE:
-        return None  # called by other definitions, never started on its own
+    if item.kind in (ir.KIND_PROCEDURE, ir.KIND_LIBRARY):
+        return None  # called or included by other definitions, never started on its own
     try:
         chart = layers.load_file(item.path, cwd)
     except Exception as exc:  # noqa: BLE001 - a listing must survive any file

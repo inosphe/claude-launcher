@@ -1,0 +1,142 @@
+cflow: 2
+name: ask-common
+kind: library
+description: >-
+  사용자에게 결정을 묻는 질문의 공통 형식(question_types)과 그 질문을 구성해
+  묻는 프로시저 ask-user. improv-common이 include하므로 improv 계열 정의는
+  따로 포함하지 않아도 된다(docs/cflow-v2.md 2.10).
+
+# ── 이 파일의 자리 ──────────────────────────────────────────────────────
+# 질문의 구조는 아래 형식 선언 하나가 정한다. 검증(cflow2/question.validate),
+# 텍스트 렌더(메시 decide 메시지, flow_status, CLI), 웹 UI의 질문 패널,
+# ask-user의 작성 지침(guide())이 모두 이 선언을 읽는다. 질문에 항목을 더할
+# 때는 fields(또는 options.item)에 한 줄을 더하는 것으로 끝난다.
+
+question_types:
+  decision:
+    description: 여러 선택지 중 하나를 고르는 결정
+    options: options
+    recommendation: recommendation
+    fields:
+      problem:
+        type: text
+        required: true
+        label: 문제
+        help: 결정할 문제를 한두 문장으로 단순화해 쓴다. 배경 설명은 넣지 않는다
+      options:
+        type: list
+        required: true
+        min: 2
+        label: 선택지
+        help: 실제로 고를 수 있는 선택지를 모두 쓴다
+        item:
+          name: {type: name, required: true, label: 이름, help: 답으로 쓰는 짧은 식별자(영문·숫자·_ . -)}
+          summary: {type: str, required: true, label: 내용, help: 이 선택지가 하는 일}
+          risk: {type: text, required: true, label: 위험, help: 이 선택으로 생길 수 있는 문제와 그 가능성}
+          outcome: {type: text, required: true, label: 결과, help: 이 선택으로 얻는 상태}
+          reversibility:
+            type: enum
+            choices: [reversible, costly, irreversible]
+            required: true
+            label: 가역성
+            help: 되돌릴 수 있는가. costly는 되돌릴 수 있으나 비용이 드는 경우
+          reverse_how: {type: text, label: 되돌리는 방법, help: reversible·costly일 때 되돌리는 절차}
+      recommendation:
+        type: ref
+        of: options
+        required: true
+        label: 권장안
+        help: options의 name 중 하나
+      why:
+        type: text
+        required: true
+        label: 권장 이유
+        help: 권장안을 고른 근거. 다른 선택지보다 나은 점을 위험·가역성 기준으로 쓴다
+
+procedures:
+  ask-user:
+    description: >-
+      사용자에게 결정을 묻는다. 문제를 단순화하고 선택지별 위험·결과·가역성과
+      권장안을 탐색한 뒤 그 구조로 질문한다. 답이 reframe(선택지가 문제에 맞지
+      않음)이면 그 이유로 다시 탐색해 묻는다 — 첫 질문을 포함해 최대 3회.
+    params:
+      topic: {type: str, required: true, description: 무엇을 결정하는가}
+      context: {type: str, default: "", description: 탐색에 쓸 근거와 위치}
+      format: {type: str, default: decision, description: 질문 형식(question_types의 이름)}
+      choices: {type: list, default: null, description: 선택지 이름을 고정할 때 그 목록. 부르는 쪽이 답으로 분기할 때 쓴다}
+      from: {type: list, default: null, description: ask.from과 같은 후보 목록. null이면 사람만 답한다}
+    returns:
+      ok: {decision: str, reason: "str?", by: str, brief: dict}
+      reframe: {reason: str, brief: dict}
+    nodes:
+      ask-frame:
+        title: 질문 구성
+        prompt: |
+          다음 결정을 사용자에게 묻기 전에 질문을 구성한다.
+
+          결정할 것: ${params.topic}
+          근거: ${params.context}
+          고정된 선택지 이름(있으면 options의 name을 정확히 이 목록으로 쓴다): ${params.choices}
+
+          코드·문서·보드에서 확인한 근거로 각 항목을 채운다. 확인하지 못한
+          항목은 확인하지 못했다고 적는다. 권장안은 위험과 가역성을 기준으로
+          고른다.
+
+          ${guide($params.format)}
+
+          위 보고 형식의 객체를 결과 값의 brief 필드로 보고한다.
+        returns:
+          ok: {brief: "question:$params.format"}
+      ask-reframe:
+        title: 질문 다시 구성
+        prompt: |
+          앞 질문에 대한 답이 reframe이었다 — 제시한 선택지가 문제에 맞지
+          않는다는 답이다.
+
+          답한 쪽: ${result['ask-pose'].value.by}
+          이유: ${result['ask-pose'].value.reason}
+          앞 질문: ${result['ask-pose'].value.brief}
+
+          결정할 것: ${params.topic}
+          근거: ${params.context}
+          고정된 선택지 이름(있으면 options의 name을 정확히 이 목록으로 쓴다): ${params.choices}
+
+          이유가 지적한 점을 반영해 문제 정의와 선택지를 다시 탐색한다.
+
+          ${guide($params.format)}
+
+          위 보고 형식의 객체를 결과 값의 brief 필드로 보고한다.
+        returns:
+          ok: {brief: "question:$params.format"}
+      ask-pose:
+        title: 사용자 질문
+        prompt: 사용자의 답을 기다린다. 이 작업은 ask가 답을 받으면 끝난다.
+        ask:
+          brief: ${prev.brief}
+          format: ${params.format}
+          choices: ${params.choices}
+          from: ${params.from}
+          otherwise: human
+    body:
+      - try:
+          waterfall: [ask-frame, ask-pose]
+        catch:
+          reframe:
+            try:
+              waterfall: [ask-reframe, ask-pose]
+            catch:
+              reframe:
+                try:
+                  waterfall: [ask-reframe, ask-pose]
+                catch:
+                  reframe:
+                    return: reframe
+                    value:
+                      reason: "$result['ask-pose'].value.reason"
+                      brief: "$result['ask-pose'].value.brief"
+      - return: ok
+        value:
+          decision: "$result['ask-pose'].value.decision"
+          reason: "$result['ask-pose'].value.reason"
+          by: "$result['ask-pose'].value.by"
+          brief: "$result['ask-pose'].value.brief"

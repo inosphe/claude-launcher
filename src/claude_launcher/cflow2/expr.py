@@ -17,7 +17,7 @@ Grammar (lowest precedence first)::
     literal  := 'str' | "str" | int | float | true | false | null
     list     := "[" (expr ("," expr)*)? ","? "]"
     ref      := "$" name ("." field | "[" expr "]")*
-    call     := ("len" | "empty") "(" expr ")"
+    call     := ("len" | "empty" | "guide") "(" expr ")"
               | ("items" | "count" | "fresh") "(" expr ("," expr)? ")"
               | "exists" "(" expr ")"
 
@@ -25,7 +25,8 @@ The collection functions (``docs/cflow-v2.md`` 2.7, 「읽기」) read records
 through a resolver the runtime puts in the environment under
 :data:`COLLECTIONS_KEY` (an object with ``items(addr, status)``,
 ``fresh(addr, name)`` and ``exists(addr)``); this module stays free of run
-state. Without a resolver they raise :class:`ExprError`. Root names that
+state. Without a resolver they raise :class:`ExprError`. ``guide(name)``
+(2.10) reads the question type declarations under :data:`QUESTIONS_KEY`. Root names that
 start with ``__`` are never readable as references.
 
 A reference whose root or path does not exist evaluates to ``null``. Ordering
@@ -47,11 +48,13 @@ from functools import lru_cache
 from typing import Any, Dict, List, Optional, Set, Tuple, Union
 
 __all__ = ["ExprError", "Expr", "parse", "evaluate", "references", "truthy",
-           "COLLECTIONS_KEY", "COLLECTION_FUNCTIONS", "collection_calls"]
+           "COLLECTIONS_KEY", "COLLECTION_FUNCTIONS", "collection_calls", "QUESTIONS_KEY"]
 
 #: Where the runtime puts its collection resolver in an evaluation
 #: environment. A ``$__...`` reference never reads it.
 COLLECTIONS_KEY = "__collections__"
+#: Where the runtime puts the chart's question types (name -> declaration).
+QUESTIONS_KEY = "__questions__"
 
 
 class ExprError(Exception):
@@ -92,7 +95,7 @@ MAX_LENGTH = 20000
 _INTERNAL = (TypeError, ValueError, RecursionError, OverflowError, MemoryError)
 
 _KEYWORDS = {"and", "or", "not", "in", "true", "false", "null"}
-_FUNCTIONS = {"len", "empty", "items", "count", "fresh", "exists"}
+_FUNCTIONS = {"len", "empty", "guide", "items", "count", "fresh", "exists"}
 #: Functions over a collection address; name -> (min args, max args).
 COLLECTION_FUNCTIONS = {"items": (1, 2), "count": (1, 2), "fresh": (1, 2), "exists": (1, 1)}
 _CMP_OPS = ("==", "!=", "<=", ">=", "<", ">")
@@ -555,6 +558,13 @@ class _Eval:
             raise self.fail(f"len() of {_type_name(value)}", col)
         if name == "empty":
             return value is None or (isinstance(value, (str, list, tuple, dict)) and len(value) == 0)
+        if name == "guide":
+            types = self.env.get(QUESTIONS_KEY) if isinstance(self.env, dict) else None
+            if not isinstance(value, str) or not isinstance(types, dict) or value not in types:
+                raise self.fail(f"guide(): no question type {value!r}", col)
+            from . import question
+
+            return question.guide(types[value])
         raise self.fail(f"unknown function {name!r}", col)
 
     def collection_call(self, name: str, args: List[Any], col: int) -> Any:

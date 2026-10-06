@@ -86,7 +86,7 @@ import fnmatch
 import re
 from collections import deque
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from . import collections as _collections
 from . import expr as _expr
@@ -168,7 +168,9 @@ def _possible_outcomes(node: ir.Node) -> Set[str]:
         outs |= set((node.get("returns") or {ir.OUTCOME_OK: {}}).keys())
         ask = node.get("ask") or {}
         if ask:
-            if ask.get("options"):
+            if ask.get("brief"):
+                outs |= {ir.OUTCOME_OK, "reframe"}  # docs 2.10
+            elif ask.get("options"):
                 outs |= {o.get("outcome") or o.get("name") for o in ask["options"]}
             else:
                 outs.add(ask.get("on_decline") or "declined")
@@ -695,6 +697,7 @@ def check(chart: ir.Chart) -> List[Finding]:
                 out.append(Finding(ERROR, "delegated-ask",
                                    f"task {t.id} asks for approval but may run under executor "
                                    f"{', '.join(remote)}; approvals cannot run inside a delegate", t.id))
+    out.extend(_question_checks(chart, tasks))
     for n in nodes:
         if n.type == ir.T_CHOOSE and n.get("chooser") == ir.CHOOSER_USER:
             remote = _delegated_by(chart, n)
@@ -771,6 +774,58 @@ def check(chart: ir.Chart) -> List[Finding]:
 
 
 _COL_PROMPT_RE = re.compile(r"\$\{col\.([A-Za-z_][A-Za-z0-9_-]*)")
+
+
+def _param_literal(chart: ir.Chart, node: ir.Node, pname: str) -> Tuple[bool, Any]:
+    """``(known, value)`` of a procedure param at ``node`` when the nearest
+    enclosing call passes it as a literal or leaves it to a literal default."""
+    cur = node.parent
+    while cur:
+        sc = chart.node(cur)
+        if sc.type == ir.T_SCOPE:
+            given = (sc.get("with_") or {}).get(pname)
+            if isinstance(given, dict) and "lit" in given:
+                return True, given["lit"]
+            if given is None:
+                decl = (sc.get("params") or {}).get(pname) or {}
+                if "default" in decl:
+                    return True, decl["default"]
+            return False, None
+        cur = sc.parent
+    return False, None
+
+
+def _question_checks(chart: ir.Chart, tasks: List[ir.Node]) -> List[Finding]:
+    """docs 2.10: every question type an ask or a ``question:`` return field
+    names exists -- literal names, and params whose value is known here."""
+    from . import question as q
+
+    types = (chart.meta or {}).get("question_types") or {}
+    out: List[Finding] = []
+
+    def name_of(t: ir.Node, ref: str) -> Optional[str]:
+        if ref.startswith("$params."):
+            known, v = _param_literal(chart, t, ref[len("$params."):])
+            return str(v) if known and v is not None else None
+        return ref
+
+    for t in tasks:
+        refs: List[Tuple[str, str]] = []
+        ask = t.get("ask") or {}
+        if ask.get("brief") and ask.get("format"):
+            refs.append(("ask.format", str(ask["format"])))
+        for outcome, fields in (t.get("returns") or {}).items():
+            for fname, ftype in (fields or {}).items():
+                qn = q.return_type(str(ftype))
+                if qn is not None:
+                    refs.append((f"returns.{outcome}.{fname}", qn))
+        for where, ref in refs:
+            name = name_of(t, ref)
+            if name is not None and name not in types:
+                out.append(Finding(ERROR, "unknown-question-type",
+                                   f"task {t.id} {where}: no question type {name!r} "
+                                   f"(known: {', '.join(sorted(types)) or 'none'})", t.id))
+    return out
 
 
 def _delegated_above(chart: ir.Chart, node: ir.Node) -> List[str]:

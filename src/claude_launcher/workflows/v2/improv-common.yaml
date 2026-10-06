@@ -20,6 +20,9 @@ description: >-
 # 두지 않는다. include는 규칙의 effect까지 가져오므로, master 머지를 실제로
 # 하는 리더 정의가 이 파일을 include하면 그 금지에 걸린다.
 
+# 사용자에게 묻는 질문의 형식과 ask-user 프로시저(docs/cflow-v2.md 2.10).
+include: [ask-common]
+
 params:
   parent: {type: str, required: true, description: 발견이 붙을 이 회차의 이슈 id}
   summary: {type: str, default: "", description: 발견의 한 줄 요지}
