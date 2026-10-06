@@ -463,6 +463,15 @@ def _credential_profile(value: str, command: str) -> profile.Profile:
 
 def _cmd_set_token(args: argparse.Namespace) -> int:
     p = _credential_profile(args.name, "set-token")
+    if args.clear:
+        if args.token:
+            raise CredentialsError("give a token or --clear, not both")
+        removed = credentials.clear_token(p)
+        if removed:
+            print(f"cleared stored token for profile {p.name!r} ({', '.join(removed)})")
+        else:
+            print(f"profile {p.name!r} has no stored token")
+        return 0
     token = args.token
     if not token:
         token = stdio.read_stdin_line()
@@ -1354,6 +1363,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_set.add_argument("name")
     p_set.add_argument("token", nargs="?", help="token value; read from stdin if omitted")
+    p_set.add_argument(
+        "--clear",
+        action="store_true",
+        help="delete the stored token (a parent's token is inherited again)",
+    )
     p_set.set_defaults(func=_cmd_set_token)
 
     p_tools = sub.add_parser(
