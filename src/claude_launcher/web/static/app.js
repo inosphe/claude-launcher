@@ -4265,6 +4265,10 @@ async function refreshSessions(options) {
     // bar beside the short count, so twenty rows can be compared at a
     // glance. The line is a flex line-breaker like the cflow badge below
     // it, and nothing at all where a harness keeps no transcript.
+    // The titles as they stand before the context note: the note carries the
+    // reading's age, so refreshRailSeen writes it again onto these.
+    li._railTitleBase = li.title;
+    label._railTitleBase = label.title;
     ctxNoteOnRow(li, label, s);
     const railCtx = ctxRailLine(s);
     // And how fast its backend answered last time, for a session that goes
@@ -6724,6 +6728,30 @@ function refreshRailSeen(list) {
     // that is just as time-based as the seen line above, so it needs the same
     // tick even though the report itself did not change.
     decorateBriefingRow(li, s);
+    // So do the tps line ("N ago", and its stale class past max_age_s) and the
+    // context reading's age in the gauge's and the row's tooltips. A row the
+    // in-place redraw keeps would otherwise show the ages it was built with
+    // for as long as its session's record stays the same (claunch-v87).
+    // Neither line carries a listener, so the swap loses nothing.
+    const tps = li.querySelector(".rail-tps-line");
+    if (tps && typeof tpsRailLine === "function") {
+      const fresh = tpsRailLine(s);
+      if (fresh) tps.replaceWith(fresh);
+      else tps.remove();
+    }
+    const ctx = li.querySelector(".rail-ctx-line");
+    if (ctx && typeof ctxRailLine === "function") {
+      const fresh = ctxRailLine(s);
+      if (fresh) ctx.replaceWith(fresh);
+      else ctx.remove();
+    }
+    const name = li.querySelector(".rail-name");
+    if (typeof li._railTitleBase === "string" && name &&
+        typeof name._railTitleBase === "string" && typeof ctxNoteOnRow === "function") {
+      li.title = li._railTitleBase;
+      name.title = name._railTitleBase;
+      ctxNoteOnRow(li, name, s);
+    }
   }
 }
 

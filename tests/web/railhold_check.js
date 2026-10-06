@@ -77,10 +77,35 @@ function node(tag) {
       return c;
     },
     remove() { if (n.parentNode) n.parentNode.removeChild(n); },
+    replaceWith(m) {
+      const p = n.parentNode;
+      if (!p) return;
+      p.insertBefore(m, n);
+      p.removeChild(n);
+    },
+    get firstElementChild() { return n.kids[0] || null; },
     append(...cs) { cs.forEach((c) => n.appendChild(c)); },
     addEventListener() {},
-    querySelector() { return null; },
-    querySelectorAll() { return []; },
+    /* Only the two shapes refreshRailSeen asks: ".class" for the first
+       descendant wearing it, "li[data-name]" for every row. */
+    querySelector(sel) {
+      const cls = sel.startsWith(".") ? sel.slice(1) : null;
+      for (const k of n.kids) {
+        if (cls && k.classes && k.classes.has(cls)) return k;
+        const deep = k.querySelector ? k.querySelector(sel) : null;
+        if (deep) return deep;
+      }
+      return null;
+    },
+    querySelectorAll(sel) {
+      if (sel !== "li[data-name]") return [];
+      const out = [];
+      for (const k of n.kids) {
+        if (k.dataset && k.dataset.name) out.push(k);
+        if (k.querySelectorAll) out.push(...k.querySelectorAll(sel));
+      }
+      return out;
+    },
     get textContent() { return n.text; },
     set textContent(v) { n.text = String(v); },
     get className() { return [...n.classes].join(" "); },
@@ -233,6 +258,29 @@ Object.assign(exports, { refresh: refreshSessions });`)(
   /* meshOf is also the meshCache the page signature reads, as the mesh poll's
      answer is on the real page: a membership change is a change to draw. */
   setTimeout, meshOf, true, meshOf);
+
+/* The fourth is the in-place page with the real tps line and the real
+   refreshRailSeen: a row kept across polls must still show how old its tps
+   reading is (s88's T1 on claunch-v87). Date.now is the clock it reads. */
+const tpsList = node("ul");
+const tpsCtx = {};
+let tpsServed = { sessions: [], llm_configured: true };
+new Function(
+  "exports", "document", "el", "api", "list", "setTimeout", "meshCache", "sessionGroupByMesh",
+  stubs + "function railSeenLine(s) { return el('span', 'rail-seen'); }\n"
+  + holdMs[0] + "\n" + heldUntil[0] + "\n" + pending[0] + "\n"
+  + slice("railHeld") + slice("holdRail") + slice("releaseRail")
+  + slice("byLineage") + slice("sessionMeshGroup") + slice("profileHarnessLabel")
+  + slice("railMetaText") + slice("fmtAge")
+  + slice("tpsFmt") + slice("ttftFmt") + slice("tpsLatencyText") + slice("tpsAgeSecs")
+  + slice("tpsText") + slice("tpsTooltip") + slice("tpsStaleClass") + slice("tpsRailLine")
+  + slice("refreshRailSeen")
+  + slice("refreshSessions")
+  + `
+Object.assign(exports, { refresh: refreshSessions });`)(
+  tpsCtx, { createElement: node, createDocumentFragment: () => node("#fragment") },
+  el, async () => ({ ok: true, json: async () => tpsServed }), tpsList,
+  setTimeout, [], false);
 
 let failures = 0;
 function check(what, got, want) {
@@ -387,6 +435,37 @@ const TWO = [
   check("grouped: a group left empty is removed",
         groups().map((g) => g.dataset.value), ["b"]);
   check("...and its container is detached", ga.parentNode === null, true);
+
+  /* ---- a kept row's tps age moves on (claunch-v87, s88 T1) ------------ */
+  const realNow = Date.now;
+  const T = Date.parse("2026-10-07T00:00:00Z");
+  const tpsRec = { ts: new Date(T).toISOString(), tps: 42.5, max_age_s: 600 };
+  const tpsRow = () => tpsList.kids.find((li) => li.dataset.name === "s1");
+  const tpsLine = () => tpsRow().querySelector(".rail-tps-line");
+  try {
+    Date.now = () => T + 5000;
+    tpsServed = { sessions: [{ ...TWO[0], tps: tpsRec }, TWO[1]], llm_configured: true };
+    await tpsCtx.refresh({ state: "current" });
+    const kept = tpsRow();
+    check("tps: the first poll draws a fresh reading",
+          [tpsLine().className, tpsLine().querySelector(".rail-tps-age").text],
+          ["rail-tps-line", "5s ago"]);
+    Date.now = () => T + 15 * 60 * 1000;
+    tpsServed = { sessions: [{ ...TWO[0], tps: tpsRec },
+                             { ...TWO[1], status: "idle", exit_code: null }],
+                  llm_configured: true };
+    await tpsCtx.refresh({ state: "current" });
+    check("tps: another session's change keeps s1's row", tpsRow() === kept, true);
+    check("...and its tps line shows the reading's age now, stale past max_age_s",
+          [tpsLine().className, tpsLine().querySelector(".rail-tps-age").text],
+          ["rail-tps-line stale", "15m ago"]);
+    Date.now = () => T + 30 * 60 * 1000;
+    await tpsCtx.refresh({ state: "current" });
+    check("...and on a poll that changes nothing",
+          tpsLine().querySelector(".rail-tps-age").text, "30m ago");
+  } finally {
+    Date.now = realNow;
+  }
 
   process.exit(failures ? 1 : 0);
 })();
