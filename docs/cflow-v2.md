@@ -54,7 +54,7 @@ v1(`src/claude_launcher/cflow/`)과 병행한다.
 |---|---|
 | `cflow` | 형식 버전. 값은 `2` |
 | `name`, `description` | 정의 이름과 설명 |
-| `kind` | `workflow`(기본) 또는 `procedure`(다른 정의가 `call`로 부르는 정의) |
+| `kind` | `workflow`(기본), `procedure`(다른 정의가 `call`로 부르는 정의), `library`(`include`로만 쓰는 정의, 2.10) |
 | `default_role`, `filter_roles`, `default_child_cflow`, `priority` | v1과 같은 의미 |
 | `params` | 입력 선언. `{name: {type, required, default}}` |
 | `returns` | 결과 선언. `{outcome: {field: type}}` |
@@ -69,6 +69,7 @@ v1(`src/claude_launcher/cflow/`)과 병행한다.
 | `max_visits` | 한 노드가 런 전체에서 들어갈 수 있는 횟수의 상한. 정수 1 이상, 기본 200. IR의 `meta.max_visits`. 넘으면 그 인스턴스가 `waiting_approval`(reason `visit_limit`)로 멈추고 사람이 `extend --visits`(웹 UI의 「Allow one more visit」, `POST /api/cflow2/extend` 본문 `visits: true`)로 답한다 |
 | `inputs` | 시작 입력 선언(2.6). IR의 `meta.inputs` |
 | `collections`, `collection_types` | 컬렉션 선언과 재사용할 선언(2.7). IR의 `meta.collections` |
+| `question_types` | 질문 형식 선언(2.10). IR의 `meta.question_types` |
 | `sides` | side 런 선언(2.9, 2단계) |
 
 ### 2.2 작업(task)
@@ -227,6 +228,8 @@ ask:
 - 드라이버가 MCP로 ask에 답할 수 있는 경로는 `self` 해소 단계의 `flow_approve`
   하나다. 위의 셸 경로는 CLI 검사와 거부 규칙이 막지만, 런타임 직접 호출은 막지
   못한다.
+- 질문과 선택지를 앞 작업의 결과에서 만드는 형태(`brief`, `format`, `choices`)와
+  답 `reframe`은 2.10에 있다.
 - 위임 실행 단위 아래의 작업에 `ask`가 있거나 `chooser: user` 선택이 있으면 정적
   검사 오류다. 런타임은 그런 위임 지점을 위임하지 않고 그 자리에서(inline) 실행하며
   `fallback`을 남긴다.
@@ -318,7 +321,7 @@ scope에 들어갈 때 `with`에 없는 param에 `default`를 채우고, 기본�
   `$visits.<node>`, `$caps.<capability>`. 시작 입력은 `$data.inputs.<name>`
   (프롬프트에서는 `${data.inputs.<name>}`)
 - 연산: `== != < <= > >=`, `in`, `not in`, `and`, `or`, `not`, 괄호
-- 함수: `len(x)`, `empty(x)`
+- 함수: `len(x)`, `empty(x)`, `guide(name)`(질문 형식의 작성 지침, 2.10)
 
 ### 2.5 fragments, rules, include
 
@@ -615,6 +618,310 @@ nodes:
 `<세션>+<이름>`이고, 메인 정의의 `sides: {<이름>: <정의 이름>}`에 선언한 것만 시작할
 수 있다. 주소 `main:`과 `side:<이름>:`은 이 기능이 들어오기 전까지 검사 오류
 (`side-runs-unavailable`)다. 상세는 2단계에서 이 절에 쓴다.
+
+### 2.10 질문 형식(question_types)과 공용 프로시저 ask-user (claunch-yq80p.8)
+
+사용자(또는 `from` 응답자)에게 결정을 묻는 질문을 정해진 구조로 쓰게 하는 기능이다.
+질문의 구조는 형식(question type) 선언 하나에서 정해지고, 검증·텍스트 렌더링·웹 UI
+렌더링·작성 지침이 모두 그 선언을 읽어 동작한다. 형식에 항목을 더하는 작업은 선언
+한 곳만 고친다. 구현은 `src/claude_launcher/cflow2/question.py`, 공용 정의는
+`src/claude_launcher/workflows/v2/ask-common.yaml`이다.
+
+이 절이 더하는 것은 네 가지다: (a) 앞 작업이 만든 값으로 ask의 질문과 선택지를
+만드는 경로(`ask.brief`), (b) 질문 구조의 선언과 검증(`question_types`), (c) CLI·메시
+decide 메시지·`flow_status`·웹 UI가 같은 구조를 그리는 공용 렌더러, (d) 그 구조를
+탐색해 채우는 공용 프로시저 `ask-user`.
+
+#### 형식 선언
+
+최상위 키 `question_types:`(이름 → 선언). 재사용 방식은 `collection_types`(2.7
+「재사용」)와 같다: 이 파일과 `include`한 파일(포함의 포함까지)의 선언을 이름으로
+찾고, 같은 이름이 두 파일에 있으면 컴파일 오류다.
+
+```yaml
+question_types:
+  decision:
+    description: 여러 선택지 중 하나를 고르는 결정
+    options: options              # 답이 되는 선택지 목록 필드
+    recommendation: recommendation  # 권장안 필드(선택)
+    fields:
+      problem:
+        type: text
+        required: true
+        label: 문제
+        help: 결정할 문제를 한두 문장으로 단순화해 쓴다. 배경 설명은 넣지 않는다
+      options:
+        type: list
+        required: true
+        min: 2
+        label: 선택지
+        help: 실제로 고를 수 있는 선택지를 모두 쓴다
+        item:
+          name:    {type: name, required: true, label: 이름, help: 답으로 쓰는 짧은 식별자}
+          summary: {type: str, required: true, label: 내용, help: 이 선택지가 하는 일}
+          risk:    {type: text, required: true, label: 위험, help: 이 선택으로 생길 수 있는 문제와 그 가능성}
+          outcome: {type: text, required: true, label: 결과, help: 이 선택으로 얻는 상태}
+          reversibility:
+            type: enum
+            choices: [reversible, costly, irreversible]
+            required: true
+            label: 가역성
+            help: 되돌릴 수 있는가. costly는 되돌릴 수 있으나 비용이 드는 경우
+          reverse_how: {type: text, label: 되돌리는 방법, help: reversible·costly일 때 되돌리는 절차}
+      recommendation:
+        type: ref
+        of: options
+        required: true
+        label: 권장안
+        help: options의 name 중 하나
+      why:
+        type: text
+        required: true
+        label: 권장 이유
+        help: 권장안을 고른 근거. 다른 선택지보다 나은 점을 위험·가역성 기준으로 쓴다
+```
+
+형식 선언의 키:
+
+| 키 | 의미 |
+|---|---|
+| `description` | 형식 설명. 작성 지침의 첫 줄이 된다 |
+| `fields` | 필드 이름 → 필드 선언. 순서가 렌더링 순서다 |
+| `options` | 필수. `fields` 안의 `list` 필드 이름. 그 항목 목록이 답의 선택지가 된다. 그 필드의 `item`에는 `type: name`인 `name` 필드가 있어야 한다 |
+| `recommendation` | 선택. `fields` 안의 `ref` 필드 이름. 렌더러가 그 선택지를 권장안으로 표시한다 |
+
+필드 선언의 키: `type`(필수), `required`(기본 false), `label`, `help`, `choices`
+(`enum`만), `item`(`list`만, 항목의 필드 선언 매핑), `min`·`max`(`list`의 항목 수),
+`of`(`ref`만, 같은 형식의 `list` 필드 이름).
+
+| type | 값 |
+|---|---|
+| `str` | 한 줄 문자열 |
+| `text` | 여러 줄 문자열 |
+| `name` | 옵션 이름 규칙(ask 옵션과 같은 정규식, `abstain`·`approve`·`decline` 금지)을 따르는 문자열. 같은 목록 안에서 대소문자를 무시하고 중복 금지 |
+| `int`, `bool` | 정수, 참/거짓 |
+| `enum` | `choices` 중 하나 |
+| `list` | `item` 선언을 따르는 매핑의 목록. 항목 안에 다시 `list`를 둘 수 없다(한 단계) |
+| `ref` | `of`가 가리키는 목록의 항목 `name` 중 하나(대소문자 무시 비교, 정의된 철자로 정규화) |
+
+컴파일 오류: 모르는 type, `enum`에 `choices` 없음, `list`에 `item` 없음,
+`ref`의 `of`가 같은 형식의 `list` 필드가 아님, `options`·`recommendation`이 가리키는
+필드가 없거나 type이 맞지 않음, `options` 필드의 `item`에 `name` 필드 없음, 형식
+이름이 returns 기본 형식 이름(`str`, `int`, …)과 같음.
+
+항목을 더하는 방법: `fields`(또는 `options` 필드의 `item`)에 필드 선언 한 줄을
+더한다. 검증, 렌더러, 웹 UI, `ask-user`의 작성 지침이 모두 따라간다. 선언에 없는
+필드가 들어온 brief는 거절한다(오타가 조용히 버려지는 것을 막는다).
+
+#### 검증과 정규화(`question.validate`)
+
+`validate(brief, qtype) -> (normalized, errors)`. `errors`는 `["options[1].risk:
+required", …]` 형태로 필드 경로를 단다. 정규화는 `ref`·`name` 철자 맞춤과 문자열
+앞뒤 공백 제거다. 검증은 두 곳에서 같은 함수를 쓴다:
+
+- returns 형식 `question:<형식>`(아래)으로 보고된 값 — `flow_report` 시점.
+- `ask.brief`의 값 — ask가 열릴 때.
+
+렌더러는 열린 ask 레코드에 저장된 정규화된 값을 그리며 다시 검증하지 않는다.
+
+#### returns 형식 `question:<형식>`
+
+작업의 `returns` 필드 형식으로 `question:NAME`을 쓸 수 있다. NAME은 형식 이름이거나
+`$params.<p>`다. 보고된 값의 그 필드는 해당 형식으로 검증되고, 실패하면 보고가
+거절된다(다른 형식 오류와 같은 경로, 드라이버가 고쳐서 다시 보고한다).
+`$params.<p>`는 보고 시점에 작업이 속한 프로시저의 params(2.2 「프로시저 params
+기본값」)로 해석한다. 리터럴 이름은 컴파일 시점에 존재를 검사하고, params 참조는
+호출 지점의 `with` 값이나 기본값이 리터럴이면 컴파일 시점에, 그렇지 않으면 보고
+시점에 검사한다. 끝에 `?`를 붙이면 생략할 수 있다.
+
+#### ask.brief와 ask.format
+
+```yaml
+ask:
+  brief: ${ask-frame.brief}       # 앞 작업 결과의 참조. 한 개의 ${...}만
+  format: decision                # 형식 이름 또는 ${params.format}
+  # prompt: 생략 가능. 쓰면 brief 앞에 붙는 머리말이 된다
+  # choices: [proceed, hold]      # 선택. 선택지 이름 집합을 고정한다(아래)
+  from: [...]
+  otherwise: human
+  timeout: 900
+```
+
+- `brief`는 문자열 하나이며 전체가 `${...}` 값 참조 하나여야 한다(문자열 렌더가
+  아니라 값을 그대로 읽는다). 참조 문법은 프롬프트의 값 참조와 같다.
+- `format`이 있으면 `brief`가 있어야 하고, 반대도 같다.
+- `brief`를 쓰면 `prompt`는 선택이다. `options`·`on_decline`은 함께 쓸 수 없다
+  (컴파일 오류 — 선택지는 brief에서 온다).
+- `choices`(선택): 선택지 이름 목록. 두면 brief의 선택지 이름 집합이 이 목록과
+  같아야 한다(대소문자 무시). 정의가 답에 따라 분기해야 하는 지점에서 쓴다 — 선택지
+  이름이 정의에 고정되어야 `cond`가 그 이름으로 갈라질 수 있다. 없으면 brief가
+  선택지 이름을 정한다.
+- `otherwise: self:<option>`은 `choices`가 있을 때만 쓸 수 있고 `<option>`은 그 안에
+  있어야 한다.
+- ask가 열릴 때(`_open_ask`): 참조를 평가하고 형식으로 검증한다. 참조가 null이거나
+  검증에 실패하면 ask를 열지 않고 작업이 `fail`로 끝난다(value `{reason, errors}`,
+  저널 `ask_brief_invalid`). 성공하면 레코드에 `format`, `brief`(정규화된 값),
+  `options`(brief의 선택지에서 만든 `[{name, outcome: ok, description: summary}]`)를
+  저장한다. 레코드의 `kind`는 `decision`이다.
+- 답: 선택지 이름. 작업은 결과 `ok`로 끝나고(옵션별 결과로 갈라지지 않는다 — 이름이
+  정의에 고정되지 않으므로) value는 `{decision, reason, by, ask, brief}`다. 분기는
+  다음 노드가 `$result.<작업>.value.decision`으로 한다.
+- 답 `reframe`: brief가 있는 ask는 선택지 외에 `reframe`을 하나 더 받는다(사람과
+  `from` 응답자 모두). 「제시된 선택지가 문제에 맞지 않는다」는 답이며 reason이
+  필수다. 작업은 결과 `reframe`(value `{reason, by, ask, brief}`)으로 끝난다.
+  `ask-user`는 이 결과를 받아 탐색을 다시 한다(아래). 그래서 형식의 선택지 이름으로
+  `reframe`은 쓸 수 없다(`name` 형식의 금지 목록에 포함).
+
+#### 공용 렌더러(`cflow2/question.py`)
+
+| 함수 | 쓰는 곳 | 내용 |
+|---|---|---|
+| `render_text(brief, qtype, *, width=None)` | `asks.question_text`(메시 decide 메시지), `claunch cflow2 status`·`approve`의 질문 출력, `flow_status`의 `asks[].question_text` | 아래 순서의 평문 |
+| `to_json(brief, qtype)` | `GET /api/cflow2/run`의 `asks[].question`, 웹 UI | `{format, sections: [...], options: [...], recommended}` |
+| `guide(qtype)` | 식 함수(2.4), `ask-user`의 탐색 프롬프트 | 형식 선언에서 만든 작성 지침 |
+
+렌더링 순서는 선언 순서를 따르고, 필드의 역할로 표현이 정해진다:
+
+1. `options` 필드보다 앞의 필드: `label` 머리말과 값.
+2. `options` 필드: 선택지마다 한 행. 열은 `item`의 필드 순서(`name` 제외). 텍스트
+   렌더는 선택지마다 블록(`- <name>: <summary>` 뒤에 `  <label>: <값>` 줄들)이고,
+   JSON은 `{kind: "table", columns: [{field, label}], rows: [...]}`다.
+3. `recommendation` 필드: 권장안. 텍스트는 `권장: <name>`, JSON은
+   `recommended: <name>`이고 해당 선택지 행에 `recommended: true`.
+4. 나머지 필드: 1과 같은 머리말과 값.
+
+`to_json`의 `sections` 항목은 `{field, label, kind: "text" | "table" | "choice",
+value}`다. 웹 UI는 이 목록을 순서대로 그리고, 답 버튼은 `options` 순서로 놓으며
+권장안 버튼에 표시(`recommended` 클래스와 「권장」 라벨)를 단다. `reframe` 버튼은 맨
+끝에 두고 reason 입력을 요구한다. 웹 UI는 형식 이름별 코드를 두지 않는다.
+
+`guide(qtype)`의 출력: `description` 한 줄, 그 아래 필드마다
+`- <label>(<field>, <type>, 필수|선택): <help>`, `list`는 항목 필드를 들여 쓰고
+`min`·`max`·`choices`를 덧붙인다. 마지막 줄은 보고 형식(`{<field>: …}` JSON 뼈대)이다.
+
+#### 식 함수 `guide`
+
+`guide(NAME)`은 형식의 작성 지침 문자열이다(2.4의 함수 목록에 추가). 프롬프트에서
+`${guide($params.format)}`처럼 쓴다. 프롬프트의 값 참조 렌더는 `${...}` 안이 함수
+호출로 시작하면 `$`를 앞에 붙이지 않는다. 형식 선언은 차트에 실려 있으므로(IR
+`meta.question_types`) 런타임이 형식 이름으로 찾는다. 모르는 이름이면 렌더하지 않고
+참조를 그대로 둔다(2.2 렌더 규칙).
+
+#### `kind: library`
+
+정의 종류에 `library`를 더한다. `fragments`, `rules`, `procedures`,
+`collection_types`, `question_types`만 가질 수 있고 `body`·`nodes`가 없다. 시작할 수
+없고 `call`의 대상이 될 수 없으며, `include`의 대상으로만 쓴다. 목록 API와 새 세션
+폼의 워크플로 목록에 나오지 않는다.
+
+#### `ask-common.yaml`
+
+`kind: library`. `question_types.decision`(위 선언)과 프로시저 `ask-user`를 둔다.
+`improv-common`이 `include: [ask-common]`으로 가져오므로 `improv-common`을 포함하는
+정의는 따로 포함하지 않아도 된다.
+
+```yaml
+procedures:
+  ask-user:
+    description: 사용자에게 결정을 묻는다. 문제를 단순화하고 선택지별 위험·결과·가역성과
+      권장안을 탐색한 뒤, 그 구조로 질문한다.
+    params:
+      topic:   {type: str, required: true}   # 무엇을 결정하는가
+      context: {type: str, default: ""}      # 탐색에 쓸 근거·위치
+      format:  {type: str, default: decision}
+      choices: {type: list, default: null}   # 선택지 이름을 고정할 때
+      from:    {type: list, default: null}   # ask.from과 같은 후보 목록. null이면 사람만
+    returns:
+      ok:      {decision: str, reason: str, by: str, brief: dict}
+      reframe: {reason: str, brief: dict}     # reframe 답이 3번째인 경우
+    nodes:
+      ask-frame:
+        title: 질문 구성
+        prompt: |
+          다음 결정을 사용자에게 묻기 전에 질문을 구성한다.
+          결정할 것: ${params.topic}
+          근거: ${params.context}
+          고정된 선택지 이름: ${params.choices}
+          (2회차부터) 앞 질문에 대한 reframe 답과 그 이유
+          코드·문서·보드에서 확인한 근거로 각 항목을 채운다. 확인하지 못한 항목은
+          그렇다고 적는다.
+          ${guide($params.format)}
+        returns:
+          ok: {brief: "question:$params.format"}
+      ask-pose:
+        title: 사용자 질문
+        ask:
+          brief: ${ask-frame.brief}
+          format: ${params.format}
+          choices: ${params.choices}
+          from: ${params.from}
+          otherwise: human
+    body: …   # ask-frame → ask-pose 를 최대 3회 반복(아래)
+```
+
+- `ask-frame`은 드라이버가 실행한다(inline). 반환한 brief는 returns 형식
+  `question:$params.format`으로 검증되므로, 형식에 맞지 않는 brief는 보고 시점에
+  거절되고 드라이버가 고친다.
+- `body`는 `ask-frame` → `ask-pose`를 최대 3회(첫 탐색과 reframe 2회) 반복한다.
+  `ask-pose`가 `ok`로 끝나면 프로시저가 `ok`(value는 `ask-pose`의 value에서
+  `decision, reason, by, brief`)로 끝난다. `reframe`으로 끝나면 그 reason을 다음
+  회차의 `ask-frame` 프롬프트에 넣고 다시 탐색한다. 3번째 `reframe`이면 프로시저가
+  결과 `reframe`으로 끝나고, 처리는 부르는 쪽의 `on`·`catch`가 한다(없으면 비-ok
+  결과의 일반 규칙). 반복 조합자와 식의 구체 형태는 구현 커밋의 `ask-common.yaml`이
+  정본이다.
+- `ask-pose`의 `choices`·`from`이 params 참조인 것은 이 절이 더하는 규칙이다:
+  `ask`의 `format`·`choices`·`from`은 `${params.<p>}` 참조 하나를 받을 수 있고,
+  런타임은 ask를 열 때 프로시저 params로 해석한다(`from`은 v1 파서로 그때 검증한다).
+  리터럴이면 컴파일 시점에 검증한다.
+
+부르는 쪽:
+
+```yaml
+- call: ask-user
+  with:
+    topic: 이 회차의 범위를 어디까지로 할지
+    context: "$result['intake'].value.summary"
+    choices: [narrow, full]
+  bind: scope_decision
+- cond:
+    - {if: "$data.scope_decision.decision == 'narrow'", then: work-narrow}
+    - {else: work-full}
+```
+
+#### 검사(`check.py`)
+
+| 코드 | 수준 | 조건 |
+|---|---|---|
+| `unknown-question-type` | 오류 | `ask.format` 또는 returns `question:NAME`의 리터럴 이름(또는 컴파일 시점에 리터럴로 해석된 params 값)이 차트의 `question_types`에 없음 |
+| `ask-format-without-brief` | 오류 | `format`만 있거나 `brief`만 있음 |
+| `ask-brief-with-options` | 오류 | `brief`와 `options`(또는 `on_decline`)를 함께 씀 |
+| `ask-brief-ref` | 오류 | `brief`가 `${...}` 참조 하나가 아님 |
+| `ask-choices-mismatch` | 오류 | `otherwise: self:<option>`의 옵션이 `choices`에 없음, 또는 `choices` 없이 `self:<option>` |
+| `delegated-ask` | 오류(기존) | 위임 단위 아래의 ask. `ask-user` 호출도 ask를 포함하므로 같은 규칙에 걸린다 |
+
+오류 중 컴파일 단계에서 판정하는 것(형식 선언 자체의 오류, `brief`/`options` 동시
+사용)은 `FrontendError`이고, 차트 전체를 봐야 하는 것(형식 이름 해석)은 `check`의
+Finding이다.
+
+#### 저장과 전달
+
+- IR: `meta.question_types`에 컴파일러가 해석한 형식 선언 전체를 싣는다(포함한
+  파일의 것 포함). 작업의 `ask`에 `brief`, `format`, `choices`가 실린다.
+- ask 레코드(`state.json`의 `asks`): `format`, `brief`, `options`. `kind`는
+  `decision`.
+- `flow_status`·`flow_asks`의 ask 항목: `format`, `brief`, `question_text`
+  (`render_text`). `GET /api/cflow2/run`: `question`(`to_json`).
+- 메시 decide 메시지(`asks.question_text`): brief가 있으면 질문 본문 자리에
+  `render_text`를 넣고 답 목록에 선택지와 `reframe`을 싣는다.
+- `flow_answer`·`flow_approve`·`POST /api/cflow2/approve`·`claunch cflow2 approve
+  --option`이 선택지 이름과 `reframe`을 받는다. `reframe`에 reason이 없으면 거절한다.
+
+#### 적용 범위
+
+`improv-worker-v2`에서 사용자에게 결정을 묻는 지점(`chooser: user` 선택과 사람에게
+가는 `ask`)을 `call: ask-user`로 바꾸는 작업은 이 이슈의 마지막 단계다. 선택지에
+따라 하위 트리가 갈라지는 `choose`는 `choices`를 고정한 `ask-user` 호출과 `cond`로
+바꾼다.
 
 ## 3. IR
 
