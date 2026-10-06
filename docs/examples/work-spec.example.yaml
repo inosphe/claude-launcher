@@ -1,0 +1,156 @@
+# 일감 명세(work spec) 예시 — docs/work-spec.md 가 각 필드를 설명한다.
+# 일감 내용은 gds6 issue-gen 의 테스트 픽스처(issue-gen/tests/impact-design.test.ts
+# 의 W1·W2)를 옮긴 것이다. 실제 생성 출력은 아직 없다(data/ 의 issue.db 0행).
+spec: 1
+name: night-sense
+title: 야간 감각 보정 — 감각 시스템이 야간 계수를 읽는다
+
+source:                              # 출처 기록. import 는 읽지만 동작은 바꾸지 않는다
+  generator: gds6/issue-gen
+  workspace: shelter-zero
+  frame: {id: frame.night-sense, revision: 3}
+  scan: scan-2026-10-01
+  origin_board: data/workspaces/shelter-zero/.beads
+
+workspace: shelter-zero              # 세션 cwd·보드가 사는 등록 워크스페이스
+
+mesh:
+  mode: new                          # new: 이 명세 전용 메시 / attach: 기존 메시에 붙인다
+  name: spec-night-sense             # 생략하면 spec-<name>
+
+leader:
+  mode: ask                          # ask | own | shared — import 시 --leader 로 정한다
+  own:                               # own 을 고르면 새로 띄울 리더
+    name: lead-night-sense
+    workflow: improv-leader
+  shared:                            # shared 를 고르면 이 메시에 합류시킬 기존 리더
+    candidates: [s29]
+    handle: lead
+
+roles:                               # 메시 역할 어휘 업로드(claunch mesh roles --file 와 같은 문서)
+  roles: {}
+
+subroles:                            # 서브롤 = 메시 역할 하나 + 오프닝 태스크 앞에 붙는 프롬프트
+  unreal:
+    prompt: |
+      너는 Unreal Engine 5 C++ 전문가다. UCLASS/USTRUCT 리플렉션 매크로,
+      모듈 Build.cs 의존, 엔진 경계(Inbox·엔진 브리지)를 직접 고치기 전에
+      contracts 의 seam 을 먼저 읽는다. 허용 파일 밖은 수정하지 않는다.
+
+agents:
+  - id: lead2                        # 2nd leader — 메시 안에서는 worker + stack 서브 런
+    kind: sub-lead
+    parent: leader
+    handle: worker-lead2
+  - id: ue1
+    kind: worker
+    parent: lead2
+    handle: worker-ue1
+    subroles: [unreal]
+  - id: sys1
+    kind: worker
+    parent: lead2
+    handle: worker-sys1
+    connect: [ue1]                   # 부모·자식 외 직접 대화 경로
+  - id: rv1
+    kind: reviewer
+    parent: leader
+    handle: reviewer-1
+
+references:
+  - id: ref.rules
+    kind: text
+    text: |
+      R1 야간(22:00–05:00)에는 시각 감지 반경에 야간 계수를 곱한다.
+      R2 야간 계수는 장비로 바뀐다(기본 0.6).
+  - id: ref.sense-header
+    kind: file
+    file: Source/Game/Systems/Sense.h
+  - id: ref.frame
+    kind: url
+    url: http://localhost:4610/frames/frame.night-sense
+
+contracts:
+  - id: C.store.night-multiplier
+    kind: store
+    title: 야간 계수의 저장 위치
+    text: FNightSenseComponent.Multiplier 가 유일한 저장 위치다. 시스템은 읽기만 한다.
+    parties: [ue1, sys1]
+    refs: [ref.rules]
+  - id: C.seam.sense-update
+    kind: seam
+    title: 감각 시스템 갱신 경계
+    text: FSenseSystem::Update 는 FNightSenseComponent 를 읽고 FSenseComponent 만 쓴다.
+    parties: [sys1]
+    refs: [ref.sense-header]
+
+issues:
+  - key: frame
+    type: epic
+    priority: 1
+    title: 야간 감각 보정
+    assignee: lead2                  # sub-lead 가 epic 을 쥐고 자식 결과를 stack 으로 모은다
+    goal: 야간에 시각 감지 반경이 장비별 계수만큼 줄어든다.
+    refs: [ref.rules, ref.frame]
+  - key: W1
+    type: task
+    parent: frame
+    priority: 2
+    size: S
+    title: 야간 계수 컴포넌트
+    assignee: ue1
+    review: rv1
+    rule_ids: [R1]
+    refs: [ref.rules]
+    contracts: [C.store.night-multiplier]
+    changes:
+      - {kind: components, name: FNightSenseComponent, action: add,
+         file: Components/NightSense.h, fields: [Multiplier], note: 계수 저장}
+    contract:                        # gds6 WorkContract 그대로
+      accept: [S-night-1]
+      stores: [{value: night multiplier, component: FNightSenseComponent, field: Multiplier}]
+      seams: []
+      events: {publish: [], consume: []}
+      gates: []
+      allowlist: [Components/NightSense.h]
+      done_when: [rescan 에 FNightSenseComponent 가 보인다]
+  - key: W2
+    type: task
+    parent: frame
+    priority: 2
+    size: M
+    title: 감각 시스템 야간 보정
+    assignee: sys1
+    review: rv1
+    blocked_by: [W1]
+    rule_ids: [R1, R2]
+    refs: [ref.sense-header]
+    contracts: [C.store.night-multiplier, C.seam.sense-update]
+    contract:
+      accept: [S-night-1, S-night-2]
+      stores: []
+      seams: [system-system FSenseSystem]
+      events: {publish: [], consume: []}
+      gates: [impl.night-source]
+      allowlist: [Systems/Sense.h, Systems/Sense.cpp]
+      done_when: [S-night-1·S-night-2 시나리오 테스트 통과]
+  - key: human
+    type: task
+    parent: frame
+    priority: 3
+    title: "[사람 몫] FNightSenseComponent — 등록·스케줄"
+    assignee: human
+    blocked_by: [W1]
+
+decisions:
+  - key: impl.night-source
+    owner: programmer
+    question: 야간 여부를 어디서 읽는가
+    options:
+      - {id: a, label: 월드 시계 서브시스템, consequence: 엔진 경계 하나 추가}
+      - {id: b, label: 게임 상태 컴포넌트, consequence: ECS 안에서 닫힌다}
+    recommended: b
+    gates: [W2]
+
+human_steps:
+  - {file: Source/AllComponents.h, what: FNightSenseComponent 등록, why: 사람 몫 파일}
