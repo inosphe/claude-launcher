@@ -218,7 +218,10 @@ ask:
   (`install.GATE_DENY_RULES`)은 같은 명령을 다른 철자로 쓰는 경우(`uv run claunch`,
   절대 경로, `env X=… claunch`, `python -m claude_launcher`, `start … --force`)까지
   에이전트의 셸 호출을 막는 보조 장치다. 두 장치 모두 런타임을 직접 import하는 코드
-  (`python -c`)는 막지 못한다. 보안 경계로 설계된 것은 없다.
+  (`python -c`)는 막지 못한다. 보안 경계로 설계된 것은 없다. `claunch cflow`와
+  `claunch cflow2`의 하위 명령은 옵션 약어를 받지 않는다(`allow_abbrev=False`).
+  거부 규칙은 `--force` 같은 전체 철자에 맞춰져 있어, 약어(`--forc`)가 같은 옵션으로
+  해석되면 규칙에 걸리지 않기 때문이다.
 - 드라이버가 MCP로 ask에 답할 수 있는 경로는 `self` 해소 단계의 `flow_approve`
   하나다. 위의 셸 경로는 CLI 검사와 거부 규칙이 막지만, 런타임 직접 호출은 막지
   못한다.
@@ -573,11 +576,18 @@ v1 툴과 이름이 겹치지 않도록 `flow_` 접두어를 쓴다.
   지정해 쓸 수 있다.
 - `flow_start`는 다른 scope나 `cwd`를 받지 않는다. `force`는 기존 런의 드라이버만
   쓸 수 있고, 기존 런이 사람을 기다리는 동안(`chooser: user` 선택, 열린 ask, halt,
-  `loop_limit`, `visit_limit`, `acceptance`) 거절된다.
+  `loop_limit`, `visit_limit`, `acceptance`) 거절된다. 열린 중첩 위임 런이 사람을
+  기다리는 경우도 같다. 부모를 교체하면 그 중첩 런이 중단되기 때문이다. 이때 부모
+  런의 상태는 `running`이고, `flow_status`의 `waiting_in_nested`가 중첩 런 안의 대기를
+  보여 준다.
+- 에이전트의 `force` 시작은 교체되는 런의 `invariants`·`acceptance` 형식 입력 항목을
+  새 입력 앞에 합쳐 유지한다. 에이전트는 자기 run에 검사를 더할 수 있고, 사람이 준
+  검사를 뺄 수는 없다. 사람의 CLI `start --force`는 주어진 입력만 쓴다.
 - `flow_delegate` 제출: `subagent` 위임은 런의 드라이버만, `session` 위임은 배정된
   자식 세션(`assignee`, 없으면 `child`)만 제출한다. `headless` 결과와 데몬이 가져온
   영수증은 데몬 내부 함수(`runtime.executor_submit`)로만 들어온다. 중첩 위임 런으로
-  실행되는 위임은 제출을 받지 않는다. 브리프 조회는 드라이버와 담당 세션이 할 수
+  실행되는 위임은 어느 경로로도 제출을 받지 않는다(데몬 내부 함수 포함). 결과는
+  중첩 런이 끝날 때만 돌아온다. 브리프 조회는 드라이버와 담당 세션이 할 수
   있다.
 - `receipt_path`는 실제 경로(심볼릭 링크 해석 후)가 런의 `receipts/` 또는 호출
   세션의 `CLAUNCH_SCRATCH` 아래일 때만 읽는다.
@@ -793,7 +803,15 @@ headless 2순위(샌드박스·worktree 없이 실행 디렉터리에서 실행)
   이벤트를 남긴다. 같은 브리프로 두 곳에서 작업이 진행되는 것을 막는 쪽을 택했다.
 - 부팅 시 자식 기록이 없는 `running` 위임: 표식을 가진 자식이 있으면 채택하고,
   없으면 `queued`로 한 번 되돌린다(`respawns`). 두 번째에는 다음 실행 주체로 넘긴다.
-- 영수증 파일(`receipts/<did>.child.json`): 자식은 `.tmp`에 쓴 뒤 이름을 바꾼다.
+- 영수증 파일(`receipts/<did>.child.json`): MCP 없이 실행되는 평탄한 `session`
+  위임에만 쓴다. spawn 직전에 위임마다 키를 만들어 자식의 오프닝 태스크에만 적고,
+  위임 기록에는 그 SHA-256 해시(`runner.receipt_key`)만 남긴다. 영수증은 `key`
+  필드가 그 해시와 맞을 때만 제출된다. 키가 없거나 다른 파일, 그리고 키를 받지 않는
+  위임(중첩 런, MCP로 제출하는 자식)의 파일은 읽지 않고 `<did>.refused.<ms>.json`으로
+  옮긴 뒤 `receipt_refused` 이벤트와 자식 통지를 남긴다. 부모 드라이버도
+  `receipts/`에 쓸 수 있으므로 이 키가 자식의 결과임을 구분한다. 부모가 자식의
+  오프닝 태스크 원문을 읽을 수 있는 경로가 남아 있으면 이 구분은 성립하지 않는다.
+  자식은 `.tmp`에 쓴 뒤 이름을 바꾼다.
   clock은 `outcome`을 가진 완전한 JSON일 때, 또는 `RECEIPT_SETTLE`(30초) 동안
   바뀌지 않았을 때만 읽는다. 읽기 전에 다른 이름으로 옮기고, 옮기기에 실패하면
   제출하지 않고 다음 tick에 다시 본다.

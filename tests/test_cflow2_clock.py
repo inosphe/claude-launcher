@@ -413,22 +413,28 @@ def test_child_exit_without_result_fails_delegation(tmp_path):
 
 
 def test_child_receipt_file_is_submitted(tmp_path):
-    mgr = FakeManager(FakeSession("own", str(tmp_path)))
-
-    def spawn(parent_name, body):
-        mgr.sessions["kid"] = FakeSession("kid", str(tmp_path))
-        return "kid"
-
-    clock = _clock(mgr, spawn=spawn)
-    clock.scan()
-    st = _start(tmp_path, SESSION, caps={"session.spawn": True})  # no mcp.claunch
-    did = st["delegations"][0]["id"]
-    clock.scan()
-    receipt = RunStore(str(tmp_path), "own").receipt_path(did, ".child.json")
-    receipt.write_text(json.dumps({"outcome": "ok", "value": {"verdict": "v"}}))
+    keys = []
+    clock, did, receipt = _receipt_setup(tmp_path, keys)  # no mcp.claunch
+    assert keys and keys[0]
+    receipt.write_text(_keyed(keys, {"outcome": "ok", "value": {"verdict": "v"}}))
     clock.scan()
     st = runtime.status(cwd=str(tmp_path), scope="own", tick=False)
     assert [t["label"] for t in st["tasks"]] == ["after"]
+
+
+def test_a_receipt_without_the_childs_key_is_set_aside(tmp_path):
+    """G1: the parent driver can write into receipts/, but not with the key
+    that only the child's task text carries."""
+    keys = []
+    clock, did, receipt = _receipt_setup(tmp_path, keys)
+    for doc in ({"outcome": "ok", "value": {"verdict": "forged"}},
+                {"outcome": "ok", "value": {"verdict": "forged"}, "key": "0" * 32}):
+        receipt.write_text(json.dumps(doc))
+        notices = clock.scan()
+        assert not receipt.exists()
+        assert _rec(tmp_path, did)["status"] == "running"
+        assert any(n[1] == "kid" and "refused" in n[2] for n in notices)
+    assert len(_events(tmp_path, "receipt_refused")) == 2
 
 
 def test_session_budget_timeout_tells_child(tmp_path):
@@ -697,10 +703,19 @@ def test_boot_adopts_child_of_interrupted_spawn(tmp_path):
 # -- D: child receipt and heartbeat --------------------------------------------------
 
 
-def _receipt_setup(tmp_path):
+def _key_of(body):
+    import re
+
+    m = re.search(r'"key": "([0-9a-f]{32})"', body["task"])
+    return m.group(1) if m else None
+
+
+def _receipt_setup(tmp_path, keys=None):
     mgr = FakeManager(FakeSession("own", str(tmp_path)))
+    keys = [] if keys is None else keys
 
     def spawn(parent_name, body):
+        keys.append(_key_of(body))
         mgr.sessions["kid"] = FakeSession("kid", str(tmp_path))
         return "kid"
 
@@ -712,12 +727,17 @@ def _receipt_setup(tmp_path):
     return clock, did, RunStore(str(tmp_path), "own").receipt_path(did, ".child.json")
 
 
+def _keyed(keys, doc):
+    return json.dumps(dict(doc, key=keys[0]))
+
+
 def test_partial_child_receipt_waits(tmp_path):
-    clock, did, receipt = _receipt_setup(tmp_path)
+    keys = []
+    clock, did, receipt = _receipt_setup(tmp_path, keys)
     receipt.write_text('{"outcome": "ok", "val')
     clock.scan()
     assert receipt.exists() and _rec(tmp_path, did)["status"] == "running"
-    receipt.write_text(json.dumps({"outcome": "ok", "value": {"verdict": "v"}}))
+    receipt.write_text(_keyed(keys, {"outcome": "ok", "value": {"verdict": "v"}}))
     clock.scan()
     assert _rec(tmp_path, did)["status"] == "returned"
 
@@ -732,8 +752,9 @@ def test_stale_partial_receipt_is_submitted_and_refused(tmp_path):
 
 
 def test_receipt_rename_failure_submits_nothing(tmp_path, monkeypatch):
-    clock, did, receipt = _receipt_setup(tmp_path)
-    receipt.write_text(json.dumps({"outcome": "ok", "value": {"verdict": "v"}}))
+    keys = []
+    clock, did, receipt = _receipt_setup(tmp_path, keys)
+    receipt.write_text(_keyed(keys, {"outcome": "ok", "value": {"verdict": "v"}}))
     submitted = []
     monkeypatch.setattr(runtime, "delegate_submit", lambda *a, **k: submitted.append(k))
     from pathlib import Path

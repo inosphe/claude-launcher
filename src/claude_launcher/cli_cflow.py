@@ -1154,6 +1154,10 @@ def register(sub) -> None:
         "confirm selections, run the MCP server",
     )
     csub = p.add_subparsers(dest="cflow_command", required=True)
+    # No option abbreviations: the deny rules match the spelled-out flags
+    # (`--force`), and argparse would otherwise read `--forc` as one (G3).
+    _add_parser = csub.add_parser
+    csub.add_parser = lambda *a, **k: _add_parser(*a, **{"allow_abbrev": False, **k})
 
     q = csub.add_parser("ls", help="list available workflows (project + global)")
     q.set_defaults(func=_cmd_ls)

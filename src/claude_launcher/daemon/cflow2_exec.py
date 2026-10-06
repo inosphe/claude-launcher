@@ -28,9 +28,11 @@ with ``flow_delegate(scope=<parent>, cwd=<run dir>)``.
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import json
 import logging
 import os
+import secrets
 import signal
 import subprocess
 import sys
@@ -554,9 +556,11 @@ def delegation_marker(st: RunStore, run_id: Optional[str], did: str) -> str:
 
 
 def spawn_body(brief: Dict[str, Any], *, cwd: str, scope: str, receipt_path: str,
-               mcp: bool = True, marker: Optional[str] = None) -> Dict[str, Any]:
+               mcp: bool = True, marker: Optional[str] = None,
+               receipt_token: Optional[str] = None) -> Dict[str, Any]:
     task = executors.session_task(brief, cwd=cwd, scope=scope,
-                                  receipt_path=receipt_path, mcp=mcp)
+                                  receipt_path=receipt_path, mcp=mcp,
+                                  receipt_token=receipt_token)
     if marker:
         task = f"{task}\n\n{marker}"
     return {
@@ -566,6 +570,10 @@ def spawn_body(brief: Dict[str, Any], *, cwd: str, scope: str, receipt_path: str
         "workflow": "-",
         "beads": False,
     }
+
+
+def receipt_key_hash(token: str) -> str:
+    return hashlib.sha256(str(token).encode("utf-8")).hexdigest()
 
 
 #: ``runner.phase`` of a session delegation between the claim and the
@@ -599,9 +607,19 @@ def spawn_session(cwd: str, scope: str, did: str, *,
     marker = (runner or {}).get("marker") or delegation_marker(st, r.state.get("run_id"), did)
     mcp = ((rec.get("route") or {}).get("returns") or {}).get("route") != "receipt-file"
     st.receipts_dir.mkdir(parents=True, exist_ok=True)  # the child writes there
+    # A child without MCP returns its result as a file. The file must carry
+    # a key only the child's task text holds; the record keeps its hash, so
+    # a receipt written by anyone else (the parent driver) is refused (G1).
+    token = None
+    if not mcp and not brief.get("nested"):
+        token = secrets.token_hex(16)
+        runner = dict(runner or {}, receipt_key=receipt_key_hash(token))
+        # Persisted before the spawn, like the claim: a child adopted after
+        # a restart still has a key to be checked against.
+        runtime.delegate_update(did, cwd=cwd, scope=scope, runner=runner)
     body = spawn_body(brief, cwd=str(st.cwd), scope=st.scope,
                       receipt_path=str(st.receipt_path(did, ".child.json")), mcp=mcp,
-                      marker=marker)
+                      marker=marker, receipt_token=token)
     try:
         child = spawn(scope, body)
     except Exception as exc:  # noqa: BLE001 - every refusal reroutes

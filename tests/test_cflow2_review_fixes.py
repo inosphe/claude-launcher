@@ -912,3 +912,75 @@ def test_argv_commands_carry_no_value_references(tmp_path):
     task.props["verify"] = {"run": ["check", "${params.who}"], "timeout": 5}
     with pytest.raises(runtime.FlowError, match="argv item"):
         runtime.start(chart, cwd=str(tmp_path), scope=SCOPE, caps={}, now=T0)
+
+
+# -- G1 / G2 (review of ba2921be) --------------------------------------------
+
+NESTED_LOOP = """
+    nodes:
+      a: {prompt: A}
+      after: {prompt: after}
+    body:
+      seq:
+        - id: unit
+          executor: [subagent, inline]
+          loop: {while: "true", max: 1, do: a}
+        - after
+"""
+
+
+def test_no_door_submits_for_a_nested_delegation(tmp_path):
+    """G1: the daemon's own door (a child receipt picked up by the clock)
+    cannot settle a nested delegation either; only the nested run can."""
+    d = Drv(tmp_path, NESTED, caps=SUBAGENT_CAPS, driver="drv")
+    (dl,) = d.st["delegations"]
+    receipt = RunStore(d.cwd, SCOPE).receipt_path(dl["id"], ".child.json")
+    receipt.parent.mkdir(parents=True, exist_ok=True)
+    receipt.write_text(json.dumps({"outcome": "ok", "value": {}}))
+    with pytest.raises(runtime.FlowError, match="nested run"):
+        runtime.executor_submit(dl["id"], receipt_path=str(receipt), **d.kw())
+    assert d.state()["delegations"][dl["id"]]["status"] not in ("returned", "failed")
+
+
+def test_force_start_is_refused_while_a_nested_run_waits_on_a_person(tmp_path):
+    """G2: the hold sits in the nested run; replacing the parent would
+    abort it, so an agent's forced start is refused and status shows it."""
+    d = Drv(tmp_path, NESTED_LOOP, caps=SUBAGENT_CAPS, driver="drv")
+    (dl,) = d.st["delegations"]
+    nested = dl["nested"]
+    kw = {"cwd": nested["cwd"], "scope": nested["scope"], "now": T0}
+    runtime.report("a", **kw)
+    assert RunStore(nested["cwd"], nested["scope"]).load_state()["reason"] == "loop_limit"
+    d.status()
+    assert any("nested run" in w for w in d.st.get("waiting_in_nested") or [])
+    with pytest.raises(runtime.FlowError, match="waits on a person.*nested run"):
+        runtime.start(_compile(NESTED_LOOP), cwd=d.cwd, scope=SCOPE, force=True, now=T0,
+                      caps=SUBAGENT_CAPS, caller=runtime.CALLER_AGENT)
+    assert RunStore(nested["cwd"], nested["scope"]).load_state()["status"] in \
+        runtime.LIVE_STATUSES
+
+
+@pytest.mark.parametrize("argv", [
+    ["cflow2", "start", "sample-v2", "--forc"],
+    ["cflow", "add", "x", "--forc"],
+])
+def test_option_abbreviations_are_refused(argv, capsys):
+    """G3: `--forc` must not pass for `--force` past the deny rules."""
+    from claude_launcher import cli
+
+    with pytest.raises(SystemExit) as exc:
+        cli.main(argv)
+    assert exc.value.code == 2
+    assert "--forc" in capsys.readouterr().err
+
+
+def test_an_agents_forced_start_keeps_the_persons_acceptance(tmp_path):
+    """H1: an agent may add checks on itself; a forced restart cannot drop
+    the acceptance items the person started the run with."""
+    person = {"text": "tests pass", "probe": "true"}
+    d = Drv(tmp_path, INPUTS, inputs={"goal": "ship", "done": [person]})
+    st = runtime.start(_compile(INPUTS), cwd=d.cwd, scope=SCOPE, force=True, now=T0,
+                       caps={}, caller=runtime.CALLER_AGENT,
+                       inputs={"goal": "ship", "done": [{"text": "mine", "probe": None}]})
+    texts = [i["text"] for i in st["inputs"]["done"]]
+    assert texts == ["tests pass", "mine"]

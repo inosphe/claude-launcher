@@ -46,6 +46,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hmac
 import json
 import logging
 import os
@@ -651,6 +652,29 @@ class Cflow2Clock:
             complete = False
         if not complete and age < RECEIPT_SETTLE:
             return False
+        # G1: the file is the child's only when it carries the key from the
+        # child's task (hash kept on the record). A nested delegation, or a
+        # child that submits over MCP, has no key: any file is refused.
+        want = (rec.get("runner") or {}).get("receipt_key")
+        got = doc.get("key") if complete else None
+        if not want or not isinstance(got, str) \
+                or not hmac.compare_digest(cflow2_exec.receipt_key_hash(got), want):
+            refused = receipt.with_name(f"{did}.refused.{int(time.time() * 1000)}.json")
+            with contextlib.suppress(OSError):
+                receipt.rename(refused)
+            with contextlib.suppress(Exception):
+                runtime.note("receipt_refused", cwd=cwd, scope=scope, delegation=did,
+                             path=str(refused),
+                             detail="a child receipt without this delegation's key was "
+                                    "set aside unread" if want else
+                                    "this delegation takes no receipt file")
+            child = rec.get("child")
+            if child:
+                notices.append((cwd, child, (
+                    f"[cflow2] the receipt file for delegation {did} was refused: "
+                    + ("it must be complete JSON with the \"key\" from your task"
+                       if want else "submit with the flow_delegate MCP tool instead"))))
+            return True
         taken = receipt.with_name(f"{did}.child.{int(time.time() * 1000)}.json")
         try:
             receipt.rename(taken)

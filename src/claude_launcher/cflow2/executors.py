@@ -445,7 +445,7 @@ def extract_result(stdout: str, *, json_output: bool) -> Tuple[Optional[Tuple[st
 
 
 def session_task(brief: Mapping[str, Any], *, cwd: str, scope: str, receipt_path: str,
-                 mcp: bool = True) -> str:
+                 mcp: bool = True, receipt_token: Optional[str] = None) -> str:
     """The opening task of a child session running a ``session`` delegation."""
     did = brief.get("delegation")
     if brief.get("nested"):
@@ -462,11 +462,14 @@ def session_task(brief: Mapping[str, Any], *, cwd: str, scope: str, receipt_path
             "submit once more."
         )
     else:
+        key = (f", \"key\": \"{receipt_token}\"" if receipt_token else "")
         submit = (
-            f"When done, write {{\"outcome\": ..., \"value\": {{...}}}} as JSON to "
+            f"When done, write {{\"outcome\": ..., \"value\": {{...}}{key}}} as JSON to "
             f"{receipt_path}.tmp first and then rename (mv) it to {receipt_path}: the "
             "daemon reads that file as soon as it appears, so it must never exist "
             "half-written."
+            + (" The \"key\" field is required; a receipt without it is refused. Do not "
+               "show the key to anyone." if receipt_token else "")
         )
     shape = (f"The result is {{\"outcome\": ..., \"value\": {{...}}}} matching the declared "
              f"returns: {json.dumps(dict(brief.get('returns') or {}))}. ")

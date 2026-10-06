@@ -1966,7 +1966,8 @@ def _apply_inputs(chart: ir.Chart, raw: Optional[Dict[str, Any]]
         raise FlowError(str(exc))
 
 
-def _gate_waits(state: Dict[str, Any], chart: Optional[ir.Chart]) -> List[str]:
+def _gate_waits(state: Dict[str, Any], chart: Optional[ir.Chart],
+                _depth: int = 0) -> List[str]:
     """What only a person may release in a run: a user choice, an open ask,
     a halt, a loop or visit limit."""
     out = []
@@ -1984,6 +1985,21 @@ def _gate_waits(state: Dict[str, Any], chart: Optional[ir.Chart]) -> List[str]:
                 continue
             if (node.get("chooser") or ir.CHOOSER_AGENT) == ir.CHOOSER_USER:
                 out.append(f"user choice {node.label or iid}")
+    # A nested delegation run that waits on a person is the parent's wait
+    # too: replacing the parent would abort it (G2).
+    if _depth < 4:
+        for rec in (state.get("delegations") or {}).values():
+            nested = rec.get("nested")
+            if not nested or rec.get("status") not in OPEN_DELEGATION:
+                continue
+            try:
+                child = Run.load(RunStore(nested["cwd"], nested["scope"]))
+            except (StoreError, KeyError, ir.IRError):
+                continue
+            if child.state.get("status") not in LIVE_STATUSES:
+                continue
+            out.extend(f"{w} (nested run {nested['scope']})"
+                       for w in _gate_waits(child.state, child.chart, _depth + 1))
     return out
 
 
@@ -1995,6 +2011,39 @@ def default_driver(scope: Optional[str] = None) -> str:
         return env
     scope = (scope or "").strip()
     return "" if scope in ("", store_mod.DEFAULT_SCOPE) else scope
+
+
+def _carry_checks(chart: ir.Chart, raw: Optional[Dict[str, Any]], st: RunStore
+                  ) -> Optional[Dict[str, Any]]:
+    """An agent's forced start keeps the invariants and acceptance items of
+    the live run it replaces (H1): an agent may add checks on itself, never
+    drop the ones a person gave. Items are merged per input name, the old
+    ones first, duplicates once."""
+    try:
+        from .inputs import CHECK_TYPES
+    except ImportError:  # pragma: no cover
+        return raw
+    try:
+        old = st.load_state() if st.exists() else {}
+    except StoreError:
+        return raw
+    if old.get("status") not in LIVE_STATUSES:
+        return raw
+    before = ((old.get("data") or {}).get("inputs") or {})
+    schema = (chart.meta or {}).get("inputs") or {}
+    out = dict(raw or {})
+    for name, spec in schema.items():
+        if (spec or {}).get("type") not in CHECK_TYPES:
+            continue
+        kept = [i for i in before.get(name) or [] if isinstance(i, dict)]
+        if not kept:
+            continue
+        merged: List[Any] = []
+        for item in kept + list(out.get(name) or []):
+            if item not in merged:
+                merged.append(item)
+        out[name] = merged
+    return out
 
 
 def start(chart: ir.Chart, *, cwd: Optional[str] = None, scope: Optional[str] = None,
@@ -2013,6 +2062,8 @@ def start(chart: ir.Chart, *, cwd: Optional[str] = None, scope: Optional[str] = 
     if chart.kind != ir.KIND_WORKFLOW:
         raise FlowError(f"{chart.name} is a {chart.kind}; only a workflow can be started")
     ir.validate(chart)
+    if force and caller != CALLER_USER:
+        inputs = _carry_checks(chart, inputs, RunStore(cwd, scope))
     chart, input_values = _apply_inputs(chart, inputs)
     problems = check_shell_refs(chart)
     if problems:
@@ -2605,6 +2656,12 @@ def delegate_submit(delegation: str, outcome: Optional[str] = None, value: Any =
         rec = dels.get(delegation)
         if rec is None:
             raise FlowError(f"no delegation {delegation!r} (known: {', '.join(dels) or 'none'})")
+        if rec.get("nested"):
+            # Only the nested run's own finish (deliver_nested) settles it;
+            # a receipt on any door would skip its gates and verify (G1).
+            raise FlowError(
+                f"delegation {delegation} runs as the nested run {rec['nested']['scope']!r}; "
+                f"its result comes only from that run finishing")
         if via == VIA_MCP:
             _check_delegation_authority(r, rec, session or "", "submit")
         if rec["status"] not in OPEN_DELEGATION:
@@ -3566,6 +3623,10 @@ def describe(r: Run) -> Dict[str, Any]:
         out["value"] = s.get("value")
         out["note"] = f"the run is {s.get('status')}"
         return out
+    nested_waits = [w for w in _gate_waits(s, None) if "(nested run " in w]
+    if nested_waits:
+        # The parent itself shows running; what holds it is inside (G2).
+        out["waiting_in_nested"] = nested_waits
     tasks, choices, waits, groups, limits, asks = [], [], [], [], [], []
     verifying, visit_limits = [], []
     for iid in sorted(r.inst, key=lambda k: int(k.rsplit("@", 1)[1])):
