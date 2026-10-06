@@ -3103,10 +3103,19 @@ class MeshManager:
         read, so the stance an agent is handed, the id it is reminded of and
         the text the rebrief tool serves for that id cannot drift apart.
         """
-        primary = mesh.roleset.get(member.role)
+        return self._subrole_stances_for(mesh, member.role, member.subroles)
+
+    @staticmethod
+    def _subrole_stances_for(
+        mesh: Mesh, role_name: str, subroles: Sequence[str]
+    ) -> List[Tuple[str, str]]:
+        """:meth:`subrole_stances` for a primary and subroles given by name —
+        what a role-change notice uses to rebuild the list as it stood before
+        the change."""
+        primary = mesh.roleset.get(role_name)
         seen = {primary.stance.strip()} if primary and primary.stance.strip() else set()
         out: List[Tuple[str, str]] = []
-        for name in member.subroles:
+        for name in subroles:
             role = mesh.roleset.get(name)
             text = role.stance.strip() if role else ""
             if not text or text in seen:
@@ -4590,11 +4599,18 @@ class MeshManager:
             )
         text = "\n".join(lines) + "\n"
         # The stances that are new to the member, and only those: a changed
-        # primary's, and each added subrole's. The session reminder that
-        # follows names their ids, so the text has to be here beside them.
+        # primary's, and each subrole stance that was not already on the
+        # subrole list before. That is more than the added subroles — a
+        # subrole left off the list for repeating the old primary's stance
+        # word for word comes back once the primary moves, and the notice
+        # says the old primary's stance is replaced, so the member must be
+        # told that text still binds under the subrole. The session reminder
+        # that follows names their ids, so the text has to be here beside them.
+        briefed = set(self._subrole_stances_for(mesh, before_role, before_subs))
         text += self._stance_lines(
             mesh, member, primary=member.role != before_role,
-            subroles=[r for r in added if r != before_role],
+            subroles=[name for name, stance in self.subrole_stances(mesh, member)
+                      if (name, stance) not in briefed],
         )
         return text + "---"
 

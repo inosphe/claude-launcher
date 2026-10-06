@@ -13,6 +13,9 @@ A. The briefing
 B. The role-change notice
    B1 an added subrole's stance rides the notice with its id; the primary's
       does not, because the member already holds it
+   B2 a primary change hands over a subrole stance the briefing had left out
+      for repeating the old primary's (claunch-th770)
+   B3 a primary change does not repeat a subrole stance already briefed
 
 C. Recovery and reminders
    C1 rebrief serves a subrole stance by its id
@@ -120,6 +123,49 @@ def test_an_added_subrole_hands_over_its_stance_and_only_its_own(home, tmp_path)
         # Removing it hands over nothing.
         mm.set_subroles("m", "w1", remove=["reviewer"])
         assert "stance (" not in sent[-1]
+
+        await mgr.shutdown_all()
+
+    asyncio.run(run())
+
+
+def test_a_primary_change_hands_over_a_subrole_stance_it_unmasks(home, tmp_path):
+    async def run():
+        mgr, mm, mesh = await _setup(tmp_path)
+        # B2: reviewer repeats worker's stance, so the join briefing left it out.
+        _restance(mesh, reviewer=_stance(mesh, "worker"))
+        member = await mm.join("m", "s1", handle="w1", role="worker",
+                               subroles=["reviewer"])
+        assert mm.subrole_stances(mesh, member) == []
+        sent = _capture(mgr, "s1")
+
+        mm.set_member_roles("m", "w1", role="analyst", add=["reviewer"])
+        notice = sent[-1]
+        reviewer = _stance(mesh, "reviewer")
+        assert "primary role: worker -> analyst" in notice
+        assert "subroles added" not in notice
+        # The member held that text as worker's, under worker's id; it now
+        # binds as reviewer's, beside the id the reminder will name.
+        assert (f"stance (subrole reviewer), binding [text id: "
+                f"{digests.text_digest(reviewer)}]") in notice
+        assert f"stance (analyst), binding" in notice
+
+        await mgr.shutdown_all()
+
+    asyncio.run(run())
+
+
+def test_a_primary_change_does_not_repeat_a_subrole_stance_already_held(home, tmp_path):
+    async def run():
+        mgr, mm, mesh = await _setup(tmp_path)
+        await mm.join("m", "s1", handle="w1", role="worker", subroles=["reviewer"])
+        sent = _capture(mgr, "s1")
+
+        # B3: reviewer's stance was briefed at the join; only analyst's is new.
+        mm.set_member_roles("m", "w1", role="analyst", add=["reviewer"])
+        notice = sent[-1]
+        assert "stance (analyst), binding" in notice
+        assert "stance (subrole reviewer)" not in notice
 
         await mgr.shutdown_all()
 

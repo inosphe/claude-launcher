@@ -1284,8 +1284,11 @@ the old primary is kept only when named among them. Lookups read
 `Member.roles` at call time, so they follow at once; three things would not
 on their own, and the edit does them (`MeshManager.set_member_roles`):
 a local member is queued a `role change` notice — carrying the new stance
-and its text id when the primary moved, and each added subrole's stance and
-id, so every stance id the session reminder names has its text beside it in
+and its text id when the primary moved, and each subrole stance that was
+not on the member's subrole list before, with its id — an added subrole's,
+and also one the list had left out for repeating the old primary's stance,
+which the notice declares replaced — so every stance id the session reminder
+names has its text beside it in
 the conversation; the reminder's Role entry lists
 the subroles and its position key includes them, so a subrole-only edit is
 delivered as a new position; and the `auto_link` edges the new roles earn
