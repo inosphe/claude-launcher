@@ -335,3 +335,10 @@ def test_scalar_type_errors(doc, path, value, expect):
         node = node[part]
     node[path[-1]] = value
     assert ws.validate(doc) == [expect]
+
+
+@pytest.mark.parametrize("value", [["a", "b"], {"text": "x"}])
+def test_subrole_prompt_must_be_a_string(doc, value):
+    """A list prompt used to pass: str(['a']) is non-empty (claunch-nc6dg)."""
+    doc["subroles"]["unreal"]["prompt"] = value
+    assert ws.validate(doc) == ["subroles.unreal.prompt: must be a string"]
