@@ -1,0 +1,304 @@
+cflow: 2
+name: improv-leader-v2
+description: >
+  자유 진행 관제 리더(v1 improv-leader의 v2 포트, claunch-yq80p.6) — 한 회차 =
+  운영 확인 -> 관제 대기(워커 요청 처리·증거 수합) -> 증거가 찬 착지 요청이
+  있으면 통합 창(직전 통합에서 300초)에 모아 배치로 심사·머지 -> 머지 결과 트리의
+  전체 스윕(subagent) -> 라이브 반영(데몬이 restart 실행, 기계 확인 checks) ->
+  착지 통지로 마감, 또는 (사용자 승인) 교대 종료. 착지 요청은 landing 컬렉션이
+  담는다: v1·v2 워커의 enqueue-landing trigger가 넣고, 다른 머신의 워커가 메시로
+  보낸 요청은 리더가 직접 넣는다. landed는 데몬이 git으로 잰다. 머지 실행과
+  스윕은 리더의 턴에서 일어나지 않는다 — subagent가 실행하고 리더는 돌아온
+  값을 값싼 읽기로 되확인한다. 회차가 ok로 끝나면 데몬이 다음 회차를 시작한다
+  (recur auto). 교대 종료는 결과 wound_down으로 끝나 루프도 함께 끝난다.
+  골격 단계: 로컬 후보(--no-ff)만 정의한다. PR 후보 리뷰·머지는 단계 B에서
+  improv-worker-v2의 착지 항목 PR 필드(pr_url, pr_number, base, head_sha=tip)가
+  확정된 뒤 integrate-preflight·integrate에 들어간다.
+
+# 회차마다 다음 회차를 요청하고 데몬이 시작한다(docs/cflow-v2.md 2.1 recur).
+# 마지막 단계가 라이브 재기동이라 회차를 닫는 턴이 재기동과 함께 사라질 수
+# 있으므로 시작을 드라이버에게 맡기지 않는다(v1 improv-leader와 같은 이유).
+recur: {auto: true}
+
+# 관제 런은 leader 역할 세션만 몬다.
+filter_roles:
+  type: whitelist
+  roles: [leader]
+default_role: leader
+# 이 런을 모는 리더가 spawn한 자식은 v2 워커 런을 돈다.
+default_child_cflow: improv-worker-v2
+
+include: [improv-common]
+
+returns:
+  # 교대 종료: done이지만 ok가 아니므로 다음 회차가 요청되지 않는다.
+  wound_down: {}
+
+collections:
+  # 착지 큐(v1 landing_queue: {target: master}). 끝난 회차는 landed·rejected를
+  # 버리고 나머지를 다음 회차로 넘긴다(deferred -> requested).
+  landing: {type: landing-queue, env: {TARGET: master}}
+
+fragments:
+  remote-mesh: |
+    ── 원격 메시(다른 머신의 워커) ──
+    판별: `claunch mesh members`의 machine이 리더와 다른 멤버가 있으면 그
+    워커와의 git 동작은 공통 원격(`<remote>`, 보통 origin)만 거친다. 상대
+    머신의 경로·로컬 브랜치를 기준으로 쓰지 않는다.
+    · 후보 브랜치는 `git fetch <remote>` 뒤 `<remote>/<브랜치>`로 심사한다
+      (`tools/merge_ready.py --branch <remote>/<브랜치>`).
+    · 로컬 후보를 머지한 뒤에도 `git push <remote> master:refs/heads/<base>`로
+      원격 base를 master와 같게 둔다(fast-forward인지 먼저 확인, --force 금지).
+      배치가 끝날 때마다 한 번 더 확인한다. 원격 워커의 rebase와 착지 확인이
+      이 base를 읽는다.
+    · REBASE/REMEASURE 요청과 머지 통지에는 커밋을 `<40자 sha> @ <remote>/<ref>`
+      형식으로 적는다(docs/remote-commit-protocol.md). 받은 참조는 판정 전에
+      `tools/commit_check.py`로 확인하고, 없으면 작업하지 않고
+      「NOT FOUND <sha> @ <remote>/<ref>」로 답한다.
+    · 원격 워커의 착지 요청은 메시 메시지로 온다(부모 데몬에 닿지 않아
+      enqueue-landing은 skipped다). 리더가 `flow_collection`(action push,
+      collection landing)으로 직접 넣는다: issue, branch(`<remote>/<브랜치>`),
+      tip(40자 sha), requested_by.
+    · rebase 기준은 언제나 `<remote>/<base>`로 지시한다.
+  subagent-runs: |
+    ── 실행은 subagent, 심사는 리더 ──
+    머지와 전체 스윕은 리더의 턴에서 돌리지 않는다. 한 subagent = 한 일(스윕
+    하나, 머지 하나). subagent가 가져온 해시·수치를 리더가 값싼 읽기 명령
+    (`git rev-parse`, `git log -1`, 영수증 읽기)으로 되확인한 뒤 심사에만 쓴다.
+    subagent가 실패를 가져오면 그 자리에서 고치지 않는다 — 실패 요약을 실어
+    새 subagent를 띄우거나, 그 후보를 이번 배치에서 뺀다.
+
+nodes:
+  intake:
+    title: 운영 확인
+    prompt: |
+      새 회차다(회차 번호는 flow_status의 round). 첫 회차면 운영 조건을 사용자와
+      합의하고, 이후 회차면 바뀐 것이 없는지 한 줄로 확인하고 넘어간다.
+      - 워커 편성: spawn에 workflow를 대지 않으면 짝인 improv-worker-v2가 붙는다
+        (default_child_cflow). v1 워커(improv-worker)를 쓰는 자식은 spawn에
+        workflow를 명시한다 — v1 워커의 착지 요청도 같은 landing 컬렉션에
+        들어온다(docs/cflow-v2.md 10절 「v1 연결」).
+      - 테스트 분업: 워커는 바꾼 영역만 표적으로 돌리고, 전체 스윕은 리더가
+        배치당 한 번 subagent에 맡긴다.
+      - 원격 편성: 다른 머신의 워커가 있으면 아래 원격 메시 규칙을 이 회차에
+        적용한다고 확인한다(원격 이름, base, `gh auth status --hostname <host>`).
+      - 착지 큐: flow_status의 collections.landing에서 지난 회차에서 넘어온
+        항목을 읽어 둔다.
+      ${frag:remote-mesh}
+      ${frag:beads-common}
+    done_when: 이 회차의 운영 조건(편성, 원격 여부, 넘어온 착지 요청)이 보고에 있다
+    effects: [board.write]
+
+  integrate-preflight:
+    title: 통합 심사
+    prompt: |
+      통합 창이 열렸다. 이번 배치의 후보를 정한다.
+      1. 목록: flow_status의 collections.landing에서 status가 requested인 항목,
+         그리고 `claunch beads list --status in_review --json`. 둘이 어긋나면
+         (보드에는 있는데 큐에 없음 등) 이유를 적는다. 원격 워커의 요청은
+         직접 넣었는지 확인한다.
+      2. 각 후보를 `uv run --no-sync python tools/merge_ready.py --branch <브랜치>`
+         (원격이면 `<remote>/<브랜치>`)로 심사한다. 큐의 tip과 브랜치 tip이
+         다르면 그 후보는 이번 배치에서 빼고 워커에게 tip 불일치를 알린다.
+      3. 통과한 후보는 flow_collection set으로 status waiting, 이번에 넣지 않는
+         후보는 deferred(사유 note), 거절은 rejected(사유를 워커와 보드에).
+      4. PR 후보(착지 항목에 pr_url이 있음)는 단계 B 전까지 이 런에서 머지하지
+         않는다 — deferred로 두고 note에 「PR 경로 미구현(.6 단계 B)」을 적는다.
+      ${frag:subagent-runs}
+      ${frag:remote-mesh}
+    returns:
+      ok: {batch: list}
+      empty: {reason: str}
+    done_when: |
+      배치에 넣은 후보(issue, branch, tip)와 각각의 merge_ready 결과, 뺀 후보의
+      사유가 보고에 있다. 넣을 후보가 없으면 결과 empty로 관제 대기로 돌아간다.
+    effects: [board.write]
+
+  integrate:
+    title: 로컬 후보 머지(--no-ff)
+    prompt: |
+      배치의 로컬 후보를 master에 `git merge --no-ff <브랜치>`로 차례로 머지한다.
+      실행은 subagent 하나가 한다(머지 하나 = subagent 하나, 또는 배치 전체를
+      한 subagent에 차례로 — 리더가 정한 순서대로). 충돌이 나면 그 후보는
+      머지하지 않고 deferred로 돌리고 워커에게 `master @ <sha>` 기준 rebase를
+      요청한다.
+      머지 뒤: master tip을 리더가 `git rev-parse master`로 되확인하고, 각 머지
+      커밋의 둘째 부모가 큐의 tip과 같은지 `git log -1 --format=%P <merge>`로
+      확인한다. landed 표시는 데몬의 watch가 한다 — 손으로 set하지 않는다.
+      원격 편성이면 원격 base를 master와 맞춘다(원격 메시 규칙).
+      ${frag:subagent-runs}
+      ${frag:remote-mesh}
+    returns:
+      ok: {merges: list, master: str}
+    done_when: 머지 커밋마다 (issue, tip, merge sha)와 머지 후 master tip이 보고에 있다
+    effects: [git.merge, board.write]
+
+  sweep:
+    title: 머지 결과 트리의 전체 스윕
+    prompt: |
+      master tip의 전체 스윕을 `tools/sweep.py run --branch master`로 돌리고
+      영수증을 남긴다. 테스트 창은 pytest가 스스로 잡는다(손으로 acquire하지
+      않는다). 통합 심사에서 같은 트리를 이미 쓸었으면 그 영수증을 재사용한다
+      (머지 커밋의 트리 해시가 같은지 확인). 결과는 tip, 통과·실패 수,
+      영수증 경로로 돌려준다.
+    returns:
+      ok: {tip: str, passed: int, failed: int, receipt: str}
+      fail: {reason: str}
+    # verify는 스윕이 아니다: subagent가 남긴 영수증이 지금 master tip에 대한
+    # green인지 보는 값싼 검사다.
+    verify: 'uv run --no-sync python tools/sweep.py check --branch master'
+    executor: [subagent, inline]
+    effects: [test.run, fs.write]
+    done_when: 지금 master tip에 대한 green 스윕 영수증이 있다
+
+  reflect:
+    title: 라이브 서버 반영
+    prompt: |
+      이 작업에 들어오면 데몬의 cflow2 clock이 아래 restart 명령
+      (tools/restart_live.*)을 실행한다. 리더는 그 명령도 `claunch daemon
+      restart`도 직접 실행하지 않는다(AGENTS.md). 명령은 이 런의 드라이버 세션
+      이름을 달고 나가므로 웹 UI 승인 게이트로 올라가고, 무응답이면 300초 뒤
+      승인으로 나간다(daemon/restart_gate.py).
+      restart 결과 블록이 오기 전에는 보고가 거절된다. 결과가 오면 새 데몬이
+      섰는지 재기동 통지 블록이나 재기동 전후 pid로 판정하고(응답이 있다는
+      사실은 판정이 아니다), 새 머지 커밋의 기능이 실제로 서빙되는지 하나
+      이상 확인한다. 반영 판정 자체는 다음 대기(deployed-wait)의 checks가 한다.
+    restart:
+      windows: 'powershell -NoProfile -ExecutionPolicy Bypass -File tools/restart_live.ps1'
+      linux: 'bash tools/restart_live.sh'
+      # 승인 게이트가 요청을 붙들 수 있는 최대치(870초)를 감싼다(v1과 같음).
+      timeout: 900
+    done_when: |
+      새 데몬을 무엇으로 판정했는지(통지 블록 또는 pid)와, 새 머지 커밋의
+      기능이 서빙됨을 확인한 방법과 결과가 보고에 있다.
+    effects: []
+
+  reflect-pregate:
+    title: 반영 재시도 판단
+    prompt: |
+      deployed-wait의 checks가 600초 안에 모두 통과하지 못했다. flow_status의
+      대기 값(checks: 항목별 exit와 출력)과 저널의 restart_completed /
+      restart_interrupted를 먼저 읽는다. deploy_check의 종료 코드로 갈린다:
+      exit 1(옛 코드 서빙) — 재기동이 실행되지 않았거나 실패했다. exit 3(체크아웃이
+      더러움) — 판정문의 미커밋 경로를 정리(다른 세션 것이면 요청)한다.
+      exit 2(판정 불가) — 판정문의 원인을 고친다. 정리했으면 retry(reflect에
+      다시 들어가 restart가 다시 실행된다), 이 턴에 정리할 수 없으면 close.
+
+  reflect-closed:
+    title: 반영 없이 마감 기록
+    prompt: |
+      이번 회차는 반영 없이 마감한다. 마지막 판정(checks의 exit와 출력)과 정리하지
+      못한 이유를 보고에 남긴다. 다음 회차의 reflect가 다시 시도한다.
+    done_when: 마지막 판정과 정리하지 못한 이유가 보고에 있다
+    effects: []
+
+  landed-notice:
+    title: 착지 통지
+    prompt: |
+      이번 회차에 landed가 된 착지 항목(flow_status의 collections.landing)마다
+      요청한 세션에 머지 커밋과 반영 결과를 알린다: `<머지 sha> @ <remote>/<base>`
+      (원격 편성) 또는 `master @ <sha>`, 반영 여부(deployed-wait 통과 또는
+      반영 없이 마감). 워커는 그 커밋이 자기 tip을 부모로 갖는지 스스로
+      확인한 뒤 착지로 판정한다. 통지는 @in_review 한 건으로 몰지 않고 항목별로
+      보낸다.
+    done_when: landed 항목마다 통지한 대상과 내용(머지 sha, 반영 여부)이 보고에 있다
+    effects: []
+
+  wrapup:
+    title: 교대 종료
+    ask:
+      prompt: |
+        교대 종료를 확정하는가? 확정하면 워커들의 유휴 여부를 확인한 뒤 세션을
+        종료하고 최종 보고를 남긴다. 이 회차는 wound_down으로 끝나 다음 회차가
+        열리지 않는다. 남은 통합 대기는 보드(in_review)와 착지 큐에 남는다.
+      timeout: 900
+    prompt: |
+      워커마다 진행 중인 작업이 있는지 묻고, `claunch cflow2 status -t <세션>`으로
+      교차 확인한다. 양쪽에서 유휴가 확인된 세션만 종료한다. 아직 돌고 있는
+      subagent가 있으면 그 결과를 받은 뒤 최종 보고를 쓴다. 최종 보고: 교대 동안의
+      회차 요약(처리한 요청, 머지 커밋, 반영 여부, 남은 통합 대기)과 보드 잔량.
+    done_when: 유휴가 확인된 워커 세션이 종료되었고 교대 최종 보고가 있다
+    effects: [board.write]
+
+body:
+  seq:
+    - intake
+    - id: standby-loop
+      loop:
+        max: 200
+        while: "true"
+        do:
+          id: standby
+          choose:
+            prompt: |
+              관제 대기. 워커의 요청을 처리하고 증거를 수합한다. 착지 큐
+              (collections.landing)에 requested 항목이 있고 그 증거(브랜치, tip,
+              표적 테스트 수치)가 찼으면 지체 없이 integrate를 고른다 — 사람의
+              지시를 기다리지 않는다. 직전 통합에서 300초가 안 됐으면 엔진이
+              선택을 보류하고(waiting_window) 창이 열리면 데몬이 확정해 이
+              터미널을 깨운다 — 턴을 끝내고 기다린다. 그사이 후보가 늘면 같은
+              옵션을 다시 골라 reason을 갱신한다. 교대 종료 지시가 오면 wind-down.
+              둘 다 아니면 고르지 않고 관제를 계속한다. master가 움직였다는
+              통지는 「그 해시로 잰 수치는 낡았다」만 뜻하게 하고, 착지 요청을
+              올리지 않은 세션에 재정렬을 요구하지 않는다.
+              ${frag:remote-mesh}
+            options:
+              integrate:
+                description: 증거가 찬 착지 요청이 있다 — 통합 심사로(직전 통합에서 300초가 지나야 열린다)
+                interval: 300
+                then:
+                  seq:
+                    - integrate-preflight
+                    - integrate
+                    - sweep
+                    - id: reflect-retry
+                      retry:
+                        max: 5
+                        do:
+                          seq:
+                            - reflect
+                            - id: deployed-wait
+                              wait:
+                                describe: 라이브 데몬이 이번 머지 이후에 재기동됐다
+                                poll: 30
+                                seconds: 600
+                                checks:
+                                  # 0 = 머지 이후 재기동 확인, 1 = 재기동 없음,
+                                  # 2 = 판정 불가, 3 = 체크아웃이 더러움(판정 불가로 센다)
+                                  - id: deployed
+                                    describe: 라이브 데몬이 master의 이번 머지 이후에 재기동됐다
+                                    probe: 'uv run --no-sync python tools/deploy_check.py --branch master'
+                              # 만료(timeout)와 판정 불가(undecidable)는 같은 결정 자리로
+                              # 간다(v1 checklist otherwise -> reflect-pregate).
+                              on:
+                                timeout: &pregate
+                                  seq:
+                                    - reflect-pregate
+                                    - choose:
+                                        require_reason: true
+                                        prompt: |
+                                          원인을 정리했으면 retry로 reflect에 다시 들어가 재기동을
+                                          다시 실행한다. 이 턴에 정리할 수 없으면 close로 반영 없이
+                                          마감한다. reason에 종료 코드와 정리한 내용(또는 못 한
+                                          이유)을 적는다.
+                                        options:
+                                          retry:
+                                            description: 원인을 정리했다 — reflect로 다시 들어간다(새 방문, restart가 다시 실행된다)
+                                            then: {continue: null}   # 감싸는 retry의 다음 시도
+                                          close:
+                                            description: 이 턴에 정리할 수 없다 — 반영 없이 마감하고 착지 통지로
+                                            then: reflect-closed
+                                undecidable: *pregate
+                    - landed-notice
+                    - {break: null}
+                  on:
+                    empty: {continue: null}
+              wind-down:
+                description: 사용자가 교대 종료를 지시했다 — 종료 승인 게이트로
+                then:
+                  seq:
+                    - wrapup
+                    - {return: wound_down}
+                  on:
+                    declined: {continue: null}
+

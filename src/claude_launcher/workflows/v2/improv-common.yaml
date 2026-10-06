@@ -216,6 +216,8 @@ collection_types:
   # 자식 워커의 착지 요청을 받는 큐(v1 landing_queue:의 v2 형태). 자식의
   # enqueue-landing trigger가 넣고(주체 child), 드라이버가 상태를 옮기며,
   # landed는 데몬의 watch만 쓴다 — tip이 TARGET에 들어갔는지를 git이 잰다.
+  # 드라이버도 넣는다: 다른 머신의 워커는 부모 데몬에 닿지 않아 요청이 메시
+  # 메시지로 오고, 리더가 그것을 직접 등록한다(claunch-yq80p.6).
   landing-queue:
     kind: queue
     key: issue
@@ -229,7 +231,7 @@ collection_types:
       initial: requested
       settled: [landed, rejected]
     access:
-      push: [child, daemon]
+      push: [child, daemon, driver]
       set: [driver]
       set.landed: [daemon]
       remove: [driver]
