@@ -62,6 +62,25 @@ events. Long records are split into independently searchable passages
 without the older eight-chunk cap. Embedding and optional reranking use the
 existing oMLX-compatible client. `/api/search?kind=all&q=...` exposes the
 same search to API clients.
+Unified search combines BM25 keyword retrieval over passage titles and bodies
+with vector retrieval using reciprocal rank fusion. Query terms may match
+independently; IDs and filenames keep their punctuation, and an adjacent Korean
+particle does not become part of an ASCII filename. A complete title/ID match
+still precedes the fused candidates. The board-only and session-only search
+endpoints keep their existing ranking.
+
+The candidate budget and displayed limit count sources rather than repeated
+passages. An issue's description and comments form one result within its board;
+the same issue ID on a different board remains separate. Other long records
+are grouped by their source. Each group contributes at most one rank per
+retrieval method and consumes one rerank slot. Vector lookup widens when
+comments occupy its window, up to sixteen times the candidate count. The best
+keyword passage represents the group when available. Up to two additional
+matching passages appear under **관련 구절**, and **원문 보기** still opens
+the complete source. Kind filters count a grouped row once for each kind of
+passage it displays, so a comment filter also finds comments within an issue
+group. Reranking reads a combined excerpt within the existing
+character budget and preserves these groups.
 If reranking fails, unified search still returns embedding/exact-match results
 and explicitly displays that reranking was unavailable.
 The response reports indexed/total passages and indexing errors. Initial
